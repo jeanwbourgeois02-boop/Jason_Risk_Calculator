@@ -1,3 +1,4 @@
-- [Build environment](build-environment.md) — use `py -3` (no `python` on PATH), pytest installed, pytest cache warning is harmless
-- [BNP file facts](bnp-file-facts.md) — row counts, netting groups, blank Fx cells, ESU6 Position=0, NM Strategy column; decisions taken
+- [Build environment](build-environment.md) — use `py -3` (no `python` on PATH), pytest installed, blpapi absent (Bloomberg on a separate machine), cache warning harmless
+- [BNP file facts](bnp-file-facts.md) — row counts, netting groups, blank Fx cells, Fx=1.0 on XXXUSD rows, ESU6 Position=0, NM Strategy column
 - [Spawn process](feedback-spawn-process.md) — foreground, sequential specialist/reviewer rounds; never re-spawn a background agent that may still be running
+- [Brief premises](feedback-brief-premises.md) — verify data-derivation claims from a brief on the real file before coding them (Fx=1.0 incident)

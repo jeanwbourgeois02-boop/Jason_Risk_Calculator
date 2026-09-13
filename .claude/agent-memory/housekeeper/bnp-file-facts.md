@@ -15,6 +15,7 @@ Quirks not in CLAUDE.md:
 - Every DTD bucket other than Trading is exactly 0.
 - Every FORWARD leg settles 2026-09-08..2026-09-21: nothing settles on or before as_of (2026-08-17), so real-file tests of the `settle_date >= as_of` boundary are vacuous; boundary coverage must be synthetic.
 - CASH-USD appears in 6 accounts (6 positions rows for one ccy/date); the ladder sums them per ccy and filters `source = 'BNP'`.
+- `Fx` is quote-ccy->USD, so it is exactly 1.0 on every XXXUSD row (AUDUSD, EURUSD, GBPUSD, XAUUSD): a pair spot is derivable from BNP only for USDXXX pairs (1/Fx). 18 pairs, 19 distinct (pair, value_date) keys, no crosses in the 08/18 file. The task brief's "spot = Fx for XXXUSD" was wrong and the reviewer caught it (open question 32).
 - marks_official is empty after a BNP-only load; every SPOT/DELTA path is synthetic-only until bbg-data lands marks.
 
 **Why:** these drove decisions logged in docs/open-questions.md items 17-22 and the "assumptions in force" list; PB FUTURES rows create no trades (fills come from the xlsx).

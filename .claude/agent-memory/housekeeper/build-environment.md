@@ -5,7 +5,7 @@ metadata:
   type: project
 ---
 
-Run Python as `py -3` (3.14.7). `python` is NOT on PATH in Git Bash. pandas 3.0.5 preinstalled; pytest 9.1.1 was pip-installed on 2026-09-13. No requirements file exists yet. Tests: `py -3 -m pytest c:\Users\jeanw\risk-monitor\tests\test_ingest.py -v`. Package imports (`from data.ingest import ...`) resolve under pytest via the `__init__.py` tree; standalone scripts need `PYTHONPATH=c:\Users\jeanw\risk-monitor`.
+Run Python as `py -3` (3.14.7). `python` is NOT on PATH in Git Bash. pandas 3.0.5 preinstalled; pytest 9.1.1 was pip-installed on 2026-09-13. No requirements file exists yet. blpapi is NOT installed and cannot be installed here: Bloomberg lives on a separate machine with no Claude Code and no repo access, so `data/bloomberg/pull_marks.py` must stay a single repo-import-free file (copied over, run there, marks come back as the canonical marks CSV loaded by `marks_csv.load_marks_csv`). Tests fake blpapi via `sys.modules`. Tests: `py -3 -m pytest c:\Users\jeanw\risk-monitor\tests\test_ingest.py -v`. Package imports (`from data.ingest import ...`) resolve under pytest via the `__init__.py` tree; standalone scripts need `PYTHONPATH=c:\Users\jeanw\risk-monitor`.
 
 **Why:** every specialist prompt must include the interpreter name or the agent wastes a turn discovering it.
 

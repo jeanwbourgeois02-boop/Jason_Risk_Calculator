@@ -58,7 +58,9 @@ marks (
   settle_date     TEXT NOT NULL,      -- outright date; = as_of_date for SPOT; expiry for futures
   mark_type       TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | PAR_RATE | PV_USD | DV01_USD | PREMIUM | DELTA
   value           REAL NOT NULL,      -- DELTA = base-ccy delta per 1 unit of trades.quantity (may exceed 1 for digitals)
-  source          TEXT NOT NULL,      -- BNP_BVAL | BBG_BFXFORWARD | BBG_BDH | BBG_BDP | MANUAL
+  source          TEXT NOT NULL,      -- BNP_BVAL | BBG_BFXFORWARD | BBG_BDH | BBG_BDP | BBG_INTERP | MANUAL
+                                      -- BBG_INTERP = linear interpolation in forward points between standard
+                                      -- tenors (fallback for broken dates); never official
   snapped_at      TEXT NOT NULL,      -- ISO timestamp, offset resolved from America/New_York for that row
   PRIMARY KEY (as_of_date, instrument_id, settle_date, mark_type, source)
 );
@@ -105,6 +107,7 @@ Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4
 | PAR_RATE, PV_USD, DV01_USD | BBG_BDH |
 | DELTA, PREMIUM | MANUAL |
 | any | BNP_BVAL is reconciliation only, never official |
+| any | BBG_INTERP (linear interpolation in forward points between standard tenors, written by the pull script when a broken-date outright cannot be requested directly) is reconciliation / fallback only, never official |
 
 The mapping is held in a `marks_official` view (`marks` filtered to the official source per `mark_type`, so `(as_of_date, instrument_id, settle_date, mark_type)` is unique). Every P&L or delta query reads from `marks_official`, never from `marks` directly.
 
