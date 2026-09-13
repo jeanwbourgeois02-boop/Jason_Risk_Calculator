@@ -3,6 +3,7 @@ name: reviewer
 description: Read-only review of code against CLAUDE.md conventions and the must-not-replicate list; use after every code change.
 tools: Read, Grep, Glob, Bash
 model: inherit
+effort: medium
 memory: project
 ---
 

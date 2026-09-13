@@ -2,7 +2,7 @@
 name: ui-shell
 description: Builds the Dash application, one module per tab, on top of the engine and data layers.
 tools: Read, Edit, Write, Bash, Grep, Glob
-model: inherit
+model: sonnet
 memory: project
 ---
 

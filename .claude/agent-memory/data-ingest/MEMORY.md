@@ -1,0 +1,1 @@
+- [BNP file quirks](bnp-file-quirks.md) — blank Fx on zero cash, ES Position=0, positions PK netting (239 rows -> 31 keys), observed tolerance maxima

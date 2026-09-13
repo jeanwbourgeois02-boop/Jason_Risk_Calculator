@@ -1,0 +1,3 @@
+- [BNP file facts](bnp-file-facts.md) — verified counts, netting groups, blank Fx cells, DTD buckets in HA_PNL_20260818.csv
+- [Ingest review findings](review-findings-ingest.md) — first-pass findings all closed on 2026-09-13 re-review; 4 residual items listed
+- [Windows bash paths](windows-bash-paths.md) — use forward slashes when passing paths to pytest via the Bash tool

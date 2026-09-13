@@ -4,7 +4,10 @@ Unresolved items from the data-contract review of `data/raw/HA_PNL_20260818.csv`
 
 ## Assumptions in force, unconfirmed
 
-- **NDF list.** BRL, TWD, KRW, IDR treated as non-deliverable (`instruments.is_ndf = 1`); TRY and MXN treated as deliverable. To be verified with the PB. Affects the cash ladder only (NDF legs carry `settles_cash = 0`).
+- **NDF list.** BRL, TWD, KRW, IDR treated as non-deliverable (`instruments.is_ndf = 1`); TRY and MXN treated as deliverable. To be verified with the PB. Affects the cash ladder only (NDF legs carry `settles_cash = 0`). `data/ingest/bnp.py` hard-codes this list (`NDF_CCYS`) as provisional.
+- **`as_of_date` from the BNP filename.** `HA_PNL_YYYYMMDD.csv` dated T → `as_of_date` = previous weekday (Mon–Fri); no holiday calendar yet. On a day after a US holiday the caller must pass `as_of_date` explicitly. To be replaced by the trading calendar when it exists.
+- **PB FUTURES rows create no `trades`.** The BNP FUTURES row is one netted position with no fill dates; the ingest writes a `positions` row (and the instrument) only. Futures fills come from the xlsx `All FX trades` sheet (`C = contracts × 50 × fill`).
+- **P&L identity tolerance in ingest.** The contract states `DTD Total = MV Base − Start Date Dirty MV`, `MTD Total = MV Base − Prev ME MV Base`, `DTD Total = DTD Trading` as identities; `bnp.py` checks them with its own float tolerance `PNL_TOL = 0.01 USD` (observed max deviation 6e-5 on the 08/18 file). Not a contract tolerance.
 
 ## Questions
 
@@ -24,3 +27,9 @@ Unresolved items from the data-contract review of `data/raw/HA_PNL_20260818.csv`
 14. **Crosses.** USD notional of EURSEK = EUR amount × EURUSD spot (sheet uses the live rate). Default: spot of `as_of_date`.
 15. **Book parameters.** `pnl time series` holds capital 35m, vol allocation 4.5m, stop 5m, first stop 3.5m, daily vol = annual / 16. Config for the overall-book tab? Default: yes, in a config file, not in the data tables.
 16. **Same-day trades in the PB file.** 22 forwards on 08/17 are in the 08/18 file, none from 08/18 itself. Is the PB cut-off end of day New York or London? Affects which trades the reconciliation expects.
+17. **`positions` grain vs PK.** CLAUDE.md says "one row per PB position per day (BNP grain)", but BNP's FORWARD grain is one row per trade and the PK `(as_of_date, source, account, instrument_id, settle_date)` cannot hold that: the 08/18 file has e.g. three USDTRY 09/16/26 rows in BNPP-IPB-NMMF. The ingest nets rows sharing the key (sums quantity, cost, MV, P&L; asserts `Price` and `Fx` are identical within the group — true for all 31 groups in the reference file), giving 31 position rows for 239 PB rows. Per-trade granularity survives in `trades`. Options: keep netting (default), or add `trade_id` to the PK and store PB grain.
+18. **Blank `Fx` / `Trade Factor` on zero-balance CURRENCY rows.** EUR, XAU, HKD and one UBSI USD cash row have zero balance and blank `Fx` and `Trade Factor`. `positions.fx_to_usd` is NOT NULL, so the ingest writes `0.0` (1.0 for USD) as a sentinel. Not in the contract. Default: keep 0.0 and have the engine take spot from `marks_official`; alternatively document the sentinel in CLAUDE.md.
+19. **ESU6 `Position = 0` while `Quantity = 27`.** Forwards show `Position = Quantity`; the FUTURES row does not. Ingest uses `Quantity` as contracts (consistent with `MV = Quantity × Trade Factor × Price − Cost`, verified). Confirm with BNP what `Position` means for futures.
+20. **Gold cash line.** `XAU.C-…` (zero balance today) is ingested as `CASH-XAU`, `asset_class = CASH`, `bbg_ticker = 'XAU Curncy'`. Should a non-zero gold balance be a cash row or an XAUUSD position? Default: cash row (related to 13).
+21. **`bbg_ticker` for cash instruments** is not specified in the contract; ingest uses `'<CCY> Curncy'`. Confirm or set a sentinel.
+22. **BUY-first FORWARD descriptions.** Only `SELL … VS .BUY …` occurs in the 08/18 file; the `BUY … VS .SELL …` branch of the regex is covered by synthetic tests only. Confirm with a file containing one.
