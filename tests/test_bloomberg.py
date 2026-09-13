@@ -6,6 +6,7 @@ Real-file tests skip if the raw BNP CSV is absent. The pull_marks tests inject a
 from __future__ import annotations
 
 import csv
+import inspect
 import math
 import sqlite3
 import sys
@@ -427,8 +428,21 @@ def test_bnp_marks_conflicting_rows_are_rejected(tmp_path, monkeypatch):
 
 
 # =========================================================================== pull_marks
+class MultiEvent:
+    """Wrap a list of event specs (each a plain data list, a (data, event_type) tuple, or
+    a (data, event_type, correlation_id) triple) so a single sendRequest() can queue up
+    several nextEvent() results -- used to script a late/stale response arriving before
+    the real one (see W-1 correlation-id tests). Not needed for ordinary single-event
+    responders, which may keep returning a plain data list or a (data, event_type) tuple
+    as before."""
+
+    def __init__(self, specs):
+        self.specs = specs
+
+
 def _install_fake_blpapi(monkeypatch, responder):
     fake = types.ModuleType("blpapi")
+    responder_takes_cid = len(inspect.signature(responder).parameters) >= 2
 
     class SessionOptions:
         def setServerHost(self, host):
@@ -505,15 +519,35 @@ def _install_fake_blpapi(monkeypatch, responder):
         def getValue(self):
             return self._value
 
+    class CorrelationId:
+        """Minimal stand-in for blpapi.CorrelationId: equality/hash by wrapped value, like
+        the real one, so `correlation_id not in msg.correlationIds()` works."""
+
+        def __init__(self, value):
+            self.value = value
+
+        def __eq__(self, other):
+            return isinstance(other, CorrelationId) and self.value == other.value
+
+        def __hash__(self):
+            return hash(self.value)
+
+        def __repr__(self):
+            return f"CorrelationId({self.value!r})"
+
     class FakeMsg:
-        def __init__(self, data):
+        def __init__(self, data, correlation_id=None):
             self._data = data
+            self._correlation_id = correlation_id
 
         def hasElement(self, name):
             return name in self._data
 
         def getElement(self, name):
             return FakeStructElement(self._data[name])
+
+        def correlationIds(self):
+            return [self._correlation_id] if self._correlation_id is not None else []
 
     class Event:
         RESPONSE = "RESPONSE"
@@ -530,10 +564,24 @@ def _install_fake_blpapi(monkeypatch, responder):
         def eventType(self):
             return self._event_type
 
+    def _normalize_spec(spec, default_corr):
+        # A spec is either a plain data list (-> RESPONSE, default correlation id), a
+        # (data, event_type) tuple, or a (data, event_type, correlation_id) triple.
+        if isinstance(spec, tuple):
+            if len(spec) == 3:
+                data, event_type, corr = spec
+            else:
+                data, event_type = spec
+                corr = default_corr
+        else:
+            data, event_type, corr = spec, Event.RESPONSE, default_corr
+        return data, event_type, corr
+
     class Session:
         def __init__(self, opts):
             self.opts = opts
             self._last_request = None
+            self._event_queue = []
 
         def start(self):
             return True
@@ -547,12 +595,27 @@ def _install_fake_blpapi(monkeypatch, responder):
         def createRequest(self, req_type):
             return FakeRequest(req_type)
 
-        def sendRequest(self, request):
+        def sendRequest(self, request, correlationId=None):
             self._last_request = request
+            self._last_correlation_id = correlationId
+            if responder_takes_cid:
+                result = responder(request, correlationId)
+            else:
+                result = responder(request)
+            # Extended (not replaced): a responder may return a plain list of message
+            # dicts (-> one RESPONSE event, original behaviour), a (data, event_type)
+            # tuple (-> one event of that type, e.g. TIMEOUT), or a MultiEvent(specs) to
+            # queue up several nextEvent() results in order -- used to script a late/stale
+            # response (tagged with an old correlation id) arriving before the real one.
+            specs = result.specs if isinstance(result, MultiEvent) else [result]
+            for spec in specs:
+                self._event_queue.append(_normalize_spec(spec, correlationId))
 
         def nextEvent(self, timeout=None):
-            data = responder(self._last_request)
-            return FakeEvent([FakeMsg(d) for d in data], Event.RESPONSE)
+            if not self._event_queue:
+                return FakeEvent([], Event.TIMEOUT)
+            data, event_type, corr = self._event_queue.pop(0)
+            return FakeEvent([FakeMsg(d, corr) for d in data], event_type)
 
         def stop(self):
             pass
@@ -560,6 +623,8 @@ def _install_fake_blpapi(monkeypatch, responder):
     fake.SessionOptions = SessionOptions
     fake.Session = Session
     fake.Event = Event
+    fake.CorrelationId = CorrelationId
+    fake.MultiEvent = MultiEvent
     monkeypatch.setitem(sys.modules, "blpapi", fake)
     return fake
 
@@ -602,11 +667,16 @@ def test_pull_marks_end_to_end_with_fake_blpapi(monkeypatch, tmp_path):
 
     def responder(request):
         if request.req_type == "HistoricalDataRequest":
-            ticker = request.securities[0]
+            # S-4: answer every requested security, not just securities[0] -- a batched
+            # HistoricalDataRequest for several tickers must not be misread as answered
+            # when only the first one got a response.
             field = request.fields[0]
-            value = hist_data.get(ticker)
-            field_data = [{field: value}] if value is not None else []
-            return [{"securityData": {"security": ticker, "fieldData": field_data}}]
+            out = []
+            for ticker in request.securities:
+                value = hist_data.get(ticker)
+                field_data = [{field: value}] if value is not None else []
+                out.append({"securityData": {"security": ticker, "fieldData": field_data}})
+            return out
         elif request.req_type == "ReferenceDataRequest":
             sec_list = []
             for t in request.securities:
@@ -631,7 +701,7 @@ def test_pull_marks_end_to_end_with_fake_blpapi(monkeypatch, tmp_path):
     ]
 
     session, service = pull_marks.open_session("localhost", 8194)
-    rows, warnings = pull_marks.run(session, service, request_rows, date(2026, 8, 17))
+    rows, warnings, failures = pull_marks.run(session, service, request_rows, date(2026, 8, 17))
 
     by_key = {(r["instrument_id"], r["mark_type"], r["settle_date"]): r for r in rows}
 
@@ -671,11 +741,14 @@ def test_pull_marks_end_to_end_with_fake_blpapi(monkeypatch, tmp_path):
 def _responder_ref_and_hist(ref_data, hist_data):
     def responder(request):
         if request.req_type == "HistoricalDataRequest":
-            ticker = request.securities[0]
+            # S-4: answer every requested security (see the analogous comment above).
             field = request.fields[0]
-            value = hist_data.get(ticker)
-            field_data = [{field: value}] if value is not None else []
-            return [{"securityData": {"security": ticker, "fieldData": field_data}}]
+            out = []
+            for ticker in request.securities:
+                value = hist_data.get(ticker)
+                field_data = [{field: value}] if value is not None else []
+                out.append({"securityData": {"security": ticker, "fieldData": field_data}})
+            return out
         elif request.req_type == "ReferenceDataRequest":
             sec_list = []
             for t in request.securities:
@@ -708,7 +781,7 @@ def test_pull_marks_rejects_settle_date_outside_tenor_range(monkeypatch):
         pull_marks.RequestRow("EURUSD", "EURUSD Curncy", "2026-12-01", "FWD_OUTRIGHT"),  # past 1W tenor
     ]
     session, service = pull_marks.open_session()
-    rows, warnings = pull_marks.run(session, service, request_rows, date(2026, 8, 17))
+    rows, warnings, failures = pull_marks.run(session, service, request_rows, date(2026, 8, 17))
     fwd_rows = [r for r in rows if r["mark_type"] == "FWD_OUTRIGHT"]
     assert fwd_rows == []
     assert any("outside standard tenor range" in w for w in warnings)
@@ -741,7 +814,7 @@ def test_pull_marks_rejects_settle_date_before_spot(monkeypatch):
         pull_marks.RequestRow("EURUSD", "EURUSD Curncy", "2026-08-18", "FWD_OUTRIGHT"),
     ]
     session, service = pull_marks.open_session()
-    rows, warnings = pull_marks.run(session, service, request_rows, date(2026, 8, 17))
+    rows, warnings, failures = pull_marks.run(session, service, request_rows, date(2026, 8, 17))
     fwd_rows = [r for r in rows if r["mark_type"] == "FWD_OUTRIGHT"]
     assert fwd_rows == []
     assert any("before spot" in w for w in warnings)
@@ -777,7 +850,7 @@ def test_pull_marks_fwd_curve_bulk_value_falls_back_to_tenor(monkeypatch):
 
     spot_by_instrument = {"USDJPY": 149.85}
     session, service = pull_marks.open_session()
-    rows, warnings = pull_marks.build_fwd_outright_rows(
+    rows, warnings, failures = pull_marks.build_fwd_outright_rows(
         session, service,
         [pull_marks.RequestRow("USDJPY", "USDJPY Curncy", "2026-08-20", "FWD_OUTRIGHT")],
         date(2026, 8, 17), spot_by_instrument,
@@ -806,3 +879,640 @@ def test_check_not_stale_refuses_and_allows_override():
     # no FWD_OUTRIGHT rows: never refused, regardless of the flag.
     spot_only = [RequestRow("EURUSD", "EURUSD Curncy", "2026-08-17", "SPOT")]
     check_not_stale(as_of, spot_only, allow_stale=False, today=today)
+
+
+# =========================================================================== diagnostics
+def _full_probe_responder(ref_data, hist_data):
+    def responder(request):
+        if request.req_type == "HistoricalDataRequest":
+            # S-4: answer every requested security (see the analogous comment above).
+            field = request.fields[0]
+            out = []
+            for ticker in request.securities:
+                value = hist_data.get(ticker)
+                field_data = [{field: value}] if value is not None else []
+                out.append({"securityData": {"security": ticker, "fieldData": field_data}})
+            return out
+        elif request.req_type == "ReferenceDataRequest":
+            sec_list = []
+            for t in request.securities:
+                row = {}
+                for f in request.fields:
+                    val = ref_data.get((t, f))
+                    if val is not None:
+                        row[f] = val
+                sec_list.append({"security": t, "fieldData": row})
+            return [{"securityData": sec_list}]
+        raise AssertionError(f"unexpected request type {request.req_type}")
+    return responder
+
+
+def test_pull_marks_probe_writes_diag_and_diagnose_reads_it(monkeypatch, tmp_path):
+    ref_data = {
+        ("EURUSD Curncy", "PX_LAST"): 1.1000,
+        ("EURUSD Curncy", "FWD_CURVE"): 1.1050,  # primary candidate "succeeds"
+        ("EURUSD Curncy", "FWD_POINTS_SCALE"): 10000.0,
+        ("EURUSD1M Curncy", "PX_LAST"): 30.0,
+        ("EURUSD1M Curncy", "SETTLE_DT"): "2026-09-19",
+        ("EURUSD3M Curncy", "PX_LAST"): 90.0,
+        ("EURUSD3M Curncy", "SETTLE_DT"): "2026-11-19",
+    }
+    hist_data = {
+        "EURUSD Curncy": 1.1000,
+        "ESU6 Index": 4500.25,
+    }
+    _install_fake_blpapi(monkeypatch, _full_probe_responder(ref_data, hist_data))
+    from data.bloomberg import diagnose, pull_marks
+
+    out = tmp_path / "probe"
+    exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
+    assert exit_code == 0
+
+    diag_path = Path(str(out) + ".diag.json")
+    assert diag_path.exists()
+    diag = diagnose.load_diag(diag_path)
+
+    assert diag["summary"]["mode"] == "probe"
+    probe_names = {r["probe_name"] for r in diag["requests"] if r.get("probe_name")}
+    assert "session_start" in probe_names
+    assert "fwd_outright_direct_primary" in probe_names
+    assert "fwd_outright_direct_alt_reference_date" in probe_names
+    assert "fwd_outright_direct_alt_fwd_outright_field" in probe_names
+    assert "tenor_1m" in probe_names
+    assert "es_settle_px_settle" in probe_names
+
+    report = diagnose.render_report(diag)
+    assert "probe results" in report
+    assert "open questions 27-31" in report
+    assert "27." in report
+    assert "fwd_outright_direct_primary" in report
+    # the primary candidate returned a value -> should show up as OK evidence for Q27.
+    assert "no evidence" not in report.split("27.")[1].split("28.")[0]
+
+
+def test_pull_marks_normal_run_diag_and_diagnose(monkeypatch, tmp_path):
+    ref_data = {
+        ("EURUSD Curncy", "PX_LAST"): 1.1000,
+        ("EURUSD Curncy", "FWD_POINTS_SCALE"): 10000.0,
+        ("EURUSDSP Curncy", "PX_LAST"): 0.0,
+        ("EURUSDSP Curncy", "SETTLE_DT"): "2026-08-19",
+        ("EURUSD1W Curncy", "PX_LAST"): 50.0,
+        ("EURUSD1W Curncy", "SETTLE_DT"): "2026-08-24",
+        ("USDJPY Curncy", "FWD_CURVE"): 149.85,
+    }
+    hist_data = {
+        "ESU6 Index": 4500.25,
+        "EURUSD Curncy": 1.1000,
+    }
+    _install_fake_blpapi(monkeypatch, _responder_ref_and_hist(ref_data, hist_data))
+    from data.bloomberg import diagnose, pull_marks
+
+    request_path = tmp_path / "request.csv"
+    with request_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pull_marks.REQUEST_COLUMNS)
+        w.writerow(["EURUSD", "EURUSD Curncy", AS_OF, "SPOT"])
+        w.writerow(["EURUSD", "EURUSD Curncy", "2026-08-20", "FWD_OUTRIGHT"])
+        w.writerow(["USDJPY", "USDJPY Curncy", "2026-09-01", "FWD_OUTRIGHT"])
+        w.writerow(["ESU6 Index", "ESU6 Index", "2026-09-18", "FUTURE_PX"])
+
+    out_path = tmp_path / "marks.csv"
+    exit_code = pull_marks.main(
+        ["--request", str(request_path), "--as-of", AS_OF, "--out", str(out_path), "--allow-stale-as-of"]
+    )
+    assert exit_code == 0
+    assert out_path.exists()
+
+    diag_path = Path(str(out_path) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+    assert diag["summary"]["mode"] == "pull"
+    assert diag["summary"]["outcome"] == "OK"
+    assert diag["summary"]["marks_csv_partial"] is False
+    assert not diagnose.has_failure(diag)
+
+    outcomes = {(r["instrument_id"], r["settle_date"]): r["outcome"] for r in diag["fwd_outright_results"]}
+    assert outcomes[("EURUSD", "2026-08-20")] == "interp"
+    assert outcomes[("USDJPY", "2026-09-01")] == "direct"
+    assert diag["interpolations"]  # the EURUSD fallback recorded tenor points/scale/result
+
+    report = diagnose.render_report(diag)
+    assert "EURUSD 2026-08-20: interp" in report
+    assert "USDJPY 2026-09-01: direct" in report
+
+
+def test_pull_marks_timeout_is_nonzero_exit_and_partial_csv(monkeypatch, tmp_path):
+    ref_data = {
+        ("EURUSD Curncy", "PX_LAST"): 1.1000,
+    }
+
+    def responder(request):
+        if request.req_type == "HistoricalDataRequest":
+            if "ESU6 Index" in request.securities:
+                # Simulate a stalled FUTURE_PX request: nextEvent times out, no data.
+                return [], "TIMEOUT"
+            # S-4: answer every requested security (see the analogous comment above).
+            field = request.fields[0]
+            out = []
+            for ticker in request.securities:
+                value = ref_data.get((ticker, field))
+                field_data = [{field: value}] if value is not None else []
+                out.append({"securityData": {"security": ticker, "fieldData": field_data}})
+            return out
+        raise AssertionError(f"unexpected request type {request.req_type}")
+
+    _install_fake_blpapi(monkeypatch, responder)
+    from data.bloomberg import diagnose, pull_marks
+
+    request_path = tmp_path / "request.csv"
+    with request_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pull_marks.REQUEST_COLUMNS)
+        w.writerow(["EURUSD", "EURUSD Curncy", AS_OF, "SPOT"])
+        w.writerow(["ESU6 Index", "ESU6 Index", "2026-09-18", "FUTURE_PX"])
+
+    out_path = tmp_path / "marks.csv"
+    exit_code = pull_marks.main(["--request", str(request_path), "--as-of", AS_OF, "--out", str(out_path)])
+    assert exit_code != 0
+
+    # A partial CSV is still written (SPOT succeeded) but the run must never claim success.
+    assert out_path.exists()
+    with out_path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["mark_type"] == "SPOT"
+
+    diag_path = Path(str(out_path) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+    assert diag["summary"]["outcome"] == "FAILED"
+    assert diag["summary"]["marks_csv_partial"] is True
+    assert diag["summary"]["exit_code"] != 0
+    assert any(f["stage"] == "FUTURE_PX" for f in diag["summary"]["failures"])
+    assert diagnose.has_failure(diag)
+
+    timeout_reqs = [r for r in diag["requests"] if r["classification"] == "TIMEOUT"]
+    assert timeout_reqs
+    assert timeout_reqs[0]["request_type"] == "HistoricalDataRequest"
+
+    report = diagnose.render_report(diag)
+    assert "TIMEOUT" in report
+    assert "marks_csv_partial: True" in report
+
+
+def test_pull_marks_field_exception_classified_and_reported(monkeypatch, tmp_path):
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        assert request.fields == ["FWD_CURVE"]
+        sec_list = [{
+            "security": request.securities[0],
+            "fieldData": {},
+            "fieldExceptions": [
+                {"fieldId": "FWD_CURVE", "errorInfo": {"message": "NOT_APPLICABLE_TO_REF_DATA"}}
+            ],
+        }]
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    from data.bloomberg import diagnose, pull_marks
+
+    diag = pull_marks.Diagnostics()
+    session, service = pull_marks.open_session()
+    val = pull_marks.fetch_fwd_outright_direct(
+        session, service, "USDJPY Curncy", "2026-09-01", warnings=[], diag=diag,
+        tag={"purpose": "fwd_outright_direct", "instrument_id": "USDJPY", "settle_date": "2026-09-01"},
+    )
+    assert val is None  # no usable value -> caller falls back to tenor interpolation
+
+    rec = next(r for r in diag.requests if r["request_type"] == "ReferenceDataRequest")
+    assert rec["classification"] == "FIELD_EXCEPTION"
+    assert "NOT_APPLICABLE_TO_REF_DATA" not in rec["detail"]  # detail only lists tickers, not messages
+    assert rec["raw_response"][0]["fieldExceptions"][0]["message"] == "NOT_APPLICABLE_TO_REF_DATA"
+
+    diag_path = tmp_path / "manual.diag.json"
+    pull_marks.write_diagnostics(diag, diag_path)
+    loaded = diagnose.load_diag(diag_path)
+    report = diagnose.render_report(loaded)
+    assert "FIELD_EXCEPTION" in report
+    assert "NOT_APPLICABLE_TO_REF_DATA" in report
+
+
+def test_pull_marks_unhandled_exception_still_writes_diag_with_traceback(monkeypatch, tmp_path):
+    _install_fake_blpapi(monkeypatch, lambda request: [])
+    from data.bloomberg import diagnose, pull_marks
+
+    out_path = tmp_path / "marks.csv"
+    missing_request = tmp_path / "does-not-exist.csv"
+    exit_code = pull_marks.main(
+        ["--request", str(missing_request), "--as-of", AS_OF, "--out", str(out_path)]
+    )
+    assert exit_code == 3
+    assert not out_path.exists()  # never reached the point of writing a marks CSV
+
+    diag_path = Path(str(out_path) + ".diag.json")
+    assert diag_path.exists()
+    diag = diagnose.load_diag(diag_path)
+    assert diag["exception"] is not None
+    assert diag["exception"]["type"] in ("FileNotFoundError", "OSError")
+    assert "Traceback" in diag["exception"]["traceback"]
+    assert diagnose.has_failure(diag)
+
+    report = diagnose.render_report(diag)
+    assert "unhandled exception" in report
+
+
+# =============================================================== C-A / C-B / W-* fixes
+def test_pull_marks_security_error_on_spot_is_partial_nonzero_exit_and_in_failures(monkeypatch, tmp_path):
+    def responder(request):
+        assert request.req_type == "HistoricalDataRequest"
+        # S-4: answer every requested security (see the analogous comment above).
+        return [{"securityData": {"security": ticker, "fieldData": [],
+                                   "securityError": {"message": "UNKNOWN_SECURITY"}}}
+                for ticker in request.securities]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    from data.bloomberg import diagnose, pull_marks
+
+    request_path = tmp_path / "request.csv"
+    with request_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pull_marks.REQUEST_COLUMNS)
+        w.writerow(["EURUSD", "EURUSD Curncy", AS_OF, "SPOT"])
+
+    out_path = tmp_path / "marks.csv"
+    exit_code = pull_marks.main(["--request", str(request_path), "--as-of", AS_OF, "--out", str(out_path)])
+    assert exit_code != 0
+
+    with out_path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows == []  # SECURITY_ERROR -> no SPOT row written
+
+    diag_path = Path(str(out_path) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+    assert diag["summary"]["marks_csv_partial"] is True
+    assert diag["summary"]["exit_code"] != 0
+    fkeys = {(f.get("instrument_id"), f.get("settle_date"), f.get("mark_type")) for f in diag["summary"]["failures"]}
+    assert ("EURUSD", AS_OF, "SPOT") in fkeys
+    assert diagnose.has_failure(diag)
+
+
+def test_pull_marks_probe_continues_after_non_candidate_step_failure(monkeypatch, tmp_path):
+    def responder(request):
+        if request.req_type == "ReferenceDataRequest" and request.fields == ["PX_LAST"]:
+            # spot_reference (non-candidate, answers_question=29): force a FIELD_EXCEPTION.
+            sec = {"security": request.securities[0], "fieldData": {},
+                   "fieldExceptions": [{"fieldId": "PX_LAST", "errorInfo": {"message": "BAD_FLD"}}]}
+            return [{"securityData": [sec]}]
+        if request.req_type == "HistoricalDataRequest":
+            # S-4: answer every requested security (see the analogous comment above).
+            field = request.fields[0]
+            return [
+                {"securityData": {"security": ticker,
+                                   "fieldData": [{field: 1.1 if ticker == "EURUSD Curncy" else 4500.25}]}}
+                for ticker in request.securities
+            ]
+        # every other ReferenceDataRequest (candidates, tenor, scale): empty -> NO_VALUE,
+        # not a failure classification.
+        sec_list = [{"security": t, "fieldData": {}} for t in request.securities]
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    from data.bloomberg import diagnose, pull_marks
+
+    out = tmp_path / "probe"
+    exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
+    assert exit_code == 0  # probe mode always exits 0 once the session/service open
+
+    diag_path = Path(str(out) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+
+    # Every fixed probe step must still have run, despite the early (non-candidate)
+    # failure -- one failing step must never abort the rest of the exploratory sequence.
+    probe_names = {r["probe_name"] for r in diag["requests"] if r.get("probe_name")}
+    assert probe_names == {
+        "session_start", "spot_reference", "spot_historical", "fwd_outright_direct_primary",
+        "fwd_outright_direct_alt_reference_date", "fwd_outright_direct_alt_fwd_outright_field",
+        "tenor_1m", "tenor_3m", "fwd_points_scale", "es_settle_px_settle", "es_settle_px_last",
+    }
+    assert diag["summary"]["outcome"] == "PROBE_COMPLETE_WITH_FAILURES"
+    assert diag["summary"]["outcome"] != "OK"
+    assert diagnose.has_failure(diag)
+
+
+def test_pull_marks_probe_flags_non_scalar_fwd_curve_candidate(monkeypatch, tmp_path):
+    ref_data = {
+        ("EURUSD Curncy", "PX_LAST"): 1.1000,
+        ("EURUSD Curncy", "FWD_CURVE"): [{"row": 1}, {"row": 2}],  # bulk field, non-scalar
+    }
+    hist_data = {"EURUSD Curncy": 1.1000, "ESU6 Index": 4500.25}
+    _install_fake_blpapi(monkeypatch, _full_probe_responder(ref_data, hist_data))
+    from data.bloomberg import diagnose, pull_marks
+
+    out = tmp_path / "probe"
+    exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
+    assert exit_code == 0
+
+    diag_path = Path(str(out) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+    primary = next(r for r in diag["requests"] if r.get("probe_name") == "fwd_outright_direct_primary")
+    assert primary["classification"] == "OK"
+    assert primary.get("scalar") is False
+    assert "non-scalar" in primary["detail"]
+
+    report = diagnose.render_report(diag)
+    assert "scalar=False" in report
+
+
+def test_pull_marks_late_response_after_timeout_is_discarded_and_recorded(monkeypatch, tmp_path):
+    from data.bloomberg import pull_marks
+
+    captured = {}
+
+    def responder(request, correlation_id):
+        if request.req_type == "HistoricalDataRequest":
+            ticker = request.securities[0]
+            if ticker == "EURUSD Curncy":
+                # SPOT request stalls: capture its correlation id, then time out.
+                captured["spot_cid"] = correlation_id
+                return [], "TIMEOUT"
+            if ticker == "ESU6 Index":
+                # FUTURE_PX request: a late, stale response for the (already timed-out)
+                # SPOT request arrives first, tagged with the OLD correlation id, followed
+                # by the real FUTURE_PX response tagged with the current one.
+                stale = [{"securityData": {"security": "EURUSD Curncy", "fieldData": [{"PX_LAST": 1.1}]}}]
+                real = [{"securityData": {"security": "ESU6 Index", "fieldData": [{"PX_SETTLE": 4500.25}]}}]
+                MultiEventCls = sys.modules["blpapi"].MultiEvent
+                return MultiEventCls([
+                    (stale, "RESPONSE", captured["spot_cid"]),
+                    (real, "RESPONSE", correlation_id),
+                ])
+        raise AssertionError(f"unexpected request {request.req_type} {request.securities}")
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    request_rows = [
+        pull_marks.RequestRow("EURUSD", "EURUSD Curncy", AS_OF, "SPOT"),
+        pull_marks.RequestRow("ESU6 Index", "ESU6 Index", "2026-09-18", "FUTURE_PX"),
+    ]
+    diag = pull_marks.Diagnostics()
+    session, service = pull_marks.open_session()
+    rows, warnings, failures = pull_marks.run(session, service, request_rows, date(2026, 8, 17), diag)
+
+    # FUTURE_PX must resolve correctly -- the stale EURUSD message must neither be
+    # mistaken for FUTURE_PX's own response nor stop the loop before the real event.
+    future_rows = [r for r in rows if r["mark_type"] == "FUTURE_PX"]
+    assert len(future_rows) == 1
+    assert future_rows[0]["instrument_id"] == "ESU6 Index"
+    assert math.isclose(future_rows[0]["value"], 4500.25)
+
+    # SPOT failed with TIMEOUT, unrelated to (and not polluted by) the late response.
+    assert any(f.get("mark_type") == "SPOT" and f.get("classification") == "TIMEOUT" for f in failures)
+
+    future_req = next(r for r in diag.requests if r.get("tickers") == ["ESU6 Index"])
+    assert future_req["late_responses"], "the stale EURUSD message must be recorded, not silently dropped"
+
+
+def test_pull_marks_exit_zero_implies_all_requested_rows_written(monkeypatch, tmp_path):
+    ref_data = {}
+    hist_data = {"EURUSD Curncy": 1.1000}
+    _install_fake_blpapi(monkeypatch, _responder_ref_and_hist(ref_data, hist_data))
+    from data.bloomberg import diagnose, pull_marks
+
+    request_path = tmp_path / "request.csv"
+    with request_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pull_marks.REQUEST_COLUMNS)
+        w.writerow(["EURUSD", "EURUSD Curncy", AS_OF, "SPOT"])
+
+    out_path = tmp_path / "marks.csv"
+    exit_code = pull_marks.main(["--request", str(request_path), "--as-of", AS_OF, "--out", str(out_path)])
+    assert exit_code == 0
+
+    diag_path = Path(str(out_path) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+    assert diag["summary"]["exit_code"] == 0
+    assert diag["summary"]["written_rows"] == diag["summary"]["requested_rows"]
+    assert diag["summary"]["marks_csv_partial"] is False
+    assert diag["summary"]["failures"] == []
+
+
+def test_pull_marks_environment_block_present_on_stale_refusal_exit(monkeypatch, tmp_path):
+    _install_fake_blpapi(monkeypatch, lambda request: [])
+    from data.bloomberg import diagnose, pull_marks
+
+    request_path = tmp_path / "request.csv"
+    with request_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pull_marks.REQUEST_COLUMNS)
+        w.writerow(["EURUSD", "EURUSD Curncy", "2026-09-16", "FWD_OUTRIGHT"])
+
+    out_path = tmp_path / "marks.csv"
+    exit_code = pull_marks.main(
+        ["--request", str(request_path), "--as-of", "2020-01-01", "--out", str(out_path)]
+    )
+    assert exit_code == 2
+
+    diag_path = Path(str(out_path) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+    assert diag["environment"]
+    assert diag["environment"].get("host") == "localhost"
+    assert diag["environment"].get("port") == 8194
+
+    report = diagnose.render_report(diag)
+    assert "environment" in report
+
+
+def test_write_diagnostics_creates_missing_output_directory(tmp_path):
+    from data.bloomberg import pull_marks
+
+    diag = pull_marks.Diagnostics()
+    diag.record_environment("localhost", 8194, True, True)
+    nested = tmp_path / "does" / "not" / "exist" / "out.diag.json"
+    pull_marks.write_diagnostics(diag, nested)
+    assert nested.exists()
+
+
+def test_write_diagnostics_sanitizes_nan_and_inf():
+    import json
+
+    from data.bloomberg import pull_marks
+
+    diag = pull_marks.Diagnostics()
+    diag.record_interpolation("EURUSD", "2026-09-16", [], float("nan"), float("inf"), float("-inf"), 1.1)
+    d = pull_marks._sanitize_for_json(diag.to_dict())
+    text = json.dumps(d)  # must not raise and must contain no bare NaN/Infinity tokens
+    assert "NaN" not in text.replace('"NaN"', "")  # only the quoted string form is allowed
+    assert "Infinity" not in text
+
+
+# =============================================================== round-2 review (W-*/S-*)
+def test_write_marks_csv_creates_missing_output_directory(tmp_path):
+    """S-1: a missing parent directory must not discard rows already pulled -- write_marks_csv
+    now mkdir(parents=True, exist_ok=True)s the output directory first."""
+    from data.bloomberg import pull_marks
+
+    nested = tmp_path / "does" / "not" / "exist" / "marks.csv"
+    rows = [{
+        "as_of_date": AS_OF, "instrument_id": "EURUSD", "settle_date": AS_OF, "mark_type": "SPOT",
+        "value": 1.1, "source": "BBG_BFXFORWARD", "snapped_at": "2026-08-17T15:00:00-04:00",
+    }]
+    pull_marks.write_marks_csv(rows, nested)
+    assert nested.exists()
+    with nested.open(newline="", encoding="utf-8") as f:
+        assert list(csv.DictReader(f))[0]["instrument_id"] == "EURUSD"
+
+
+def test_pull_marks_bad_as_of_is_argument_error_exit_2(monkeypatch, tmp_path):
+    """S-2: a malformed --as-of is an argument error (exit 2, validated with
+    date.fromisoformat before run_pull()/run_probe()), not the generic unhandled-exception
+    path (exit 3) -- and a diag JSON documenting the rejection is still written."""
+    _install_fake_blpapi(monkeypatch, lambda request: [])
+    from data.bloomberg import diagnose, pull_marks
+
+    request_path = tmp_path / "request.csv"
+    with request_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pull_marks.REQUEST_COLUMNS)
+        w.writerow(["EURUSD", "EURUSD Curncy", AS_OF, "SPOT"])
+
+    out_path = tmp_path / "marks.csv"
+    exit_code = pull_marks.main(
+        ["--request", str(request_path), "--as-of", "not-a-date", "--out", str(out_path)]
+    )
+    assert exit_code == 2
+    assert not out_path.exists()  # never reached the point of pulling/writing marks
+
+    diag_path = Path(str(out_path) + ".diag.json")
+    assert diag_path.exists()
+    diag = diagnose.load_diag(diag_path)
+    assert diag["summary"]["exit_code"] == 2
+    assert diag["summary"]["outcome"] != "OK"
+    assert diagnose.has_failure(diag)
+    assert any(f.get("stage") == "as_of_validation" for f in diag["summary"]["failures"])
+
+
+def test_pull_marks_partial_batch_field_exception_with_all_keys_written_is_not_a_failure(monkeypatch, tmp_path):
+    """W-1: one tenor ticker (of eight) in the fallback interpolation batch comes back with
+    a fieldException, but the target settle_date only needs the bracketing SP/1W tenors, so
+    interpolation still succeeds and every requested key is written. This must exit 0 with
+    outcome OK, and diagnose.has_failure() must be False in pull mode -- a request-level
+    classification alone (FIELD_EXCEPTION on the unrelated 1Y ticker) must not flip the
+    exit code when nothing was actually lost. The fieldException message must still show up
+    in the report (counts/detail section) so it stays visible."""
+    ref_data = {
+        ("EURUSD Curncy", "FWD_POINTS_SCALE"): 10000.0,
+        ("EURUSDSP Curncy", "PX_LAST"): 0.0,
+        ("EURUSDSP Curncy", "SETTLE_DT"): "2026-08-19",
+        ("EURUSD1W Curncy", "PX_LAST"): 50.0,
+        ("EURUSD1W Curncy", "SETTLE_DT"): "2026-08-24",
+        # 2W/1M/2M/3M/6M simply have no data (ordinary NO_VALUE, not requested by name below).
+    }
+    hist_data = {"EURUSD Curncy": 1.1000}
+
+    def responder(request):
+        if request.req_type == "HistoricalDataRequest":
+            field = request.fields[0]
+            out = []
+            for ticker in request.securities:
+                value = hist_data.get(ticker)
+                field_data = [{field: value}] if value is not None else []
+                out.append({"securityData": {"security": ticker, "fieldData": field_data}})
+            return out
+        elif request.req_type == "ReferenceDataRequest":
+            sec_list = []
+            for t in request.securities:
+                if t == "EURUSD1Y Curncy":
+                    # The one ticker of eight that comes back with a fieldException --
+                    # irrelevant to interpolating a settle_date that only needs SP/1W.
+                    sec_list.append({
+                        "security": t, "fieldData": {},
+                        "fieldExceptions": [{"fieldId": "PX_LAST", "errorInfo": {"message": "BAD_FLD"}}],
+                    })
+                    continue
+                row = {}
+                for f in request.fields:
+                    val = ref_data.get((t, f))
+                    if val is not None:
+                        row[f] = val
+                sec_list.append({"security": t, "fieldData": row})
+            return [{"securityData": sec_list}]
+        raise AssertionError(f"unexpected request type {request.req_type}")
+
+    _install_fake_blpapi(monkeypatch, responder)
+    from data.bloomberg import diagnose, pull_marks
+
+    request_path = tmp_path / "request.csv"
+    with request_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pull_marks.REQUEST_COLUMNS)
+        w.writerow(["EURUSD", "EURUSD Curncy", AS_OF, "SPOT"])
+        w.writerow(["EURUSD", "EURUSD Curncy", "2026-08-20", "FWD_OUTRIGHT"])  # -> SP/1W interp only
+
+    out_path = tmp_path / "marks.csv"
+    exit_code = pull_marks.main(
+        ["--request", str(request_path), "--as-of", AS_OF, "--out", str(out_path), "--allow-stale-as-of"]
+    )
+    assert exit_code == 0
+
+    with out_path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2  # both SPOT and the interpolated FWD_OUTRIGHT were written
+
+    diag_path = Path(str(out_path) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+    assert diag["summary"]["outcome"] == "OK"
+    assert diag["summary"]["marks_csv_partial"] is False
+    assert diag["summary"]["failures"] == []
+    # The batched tenor request is still classified FIELD_EXCEPTION at the request level --
+    # visible in counts/detail -- even though it didn't cause a partial CSV.
+    assert any(r.get("classification") == "FIELD_EXCEPTION" for r in diag["requests"])
+    assert not diagnose.has_failure(diag)  # <- the point of W-1
+
+    report = diagnose.render_report(diag)
+    assert "FIELD_EXCEPTION" in report
+    assert "BAD_FLD" in report
+
+
+def test_diagnose_probe_mode_still_flags_non_candidate_hard_failure(monkeypatch, tmp_path):
+    """W-1: probe mode keeps the request-level check (unlike pull mode) -- a non-candidate
+    probe step classified as a hard failure still makes has_failure() True even if outcome
+    somehow ended up "OK" (defensive; run_probe() itself already sets a non-OK outcome in
+    this situation, see test_pull_marks_probe_continues_after_non_candidate_step_failure)."""
+    from data.bloomberg import diagnose
+
+    diag = {
+        "summary": {"mode": "probe", "outcome": "OK", "marks_csv_partial": False, "failures": []},
+        "requests": [
+            {"probe_name": "spot_reference", "classification": "FIELD_EXCEPTION", "candidate": False},
+        ],
+    }
+    assert diagnose.has_failure(diag)
+
+    diag["requests"][0]["candidate"] = True
+    assert not diagnose.has_failure(diag)
+
+
+def test_probe_scalar_check_flags_fwd_outright_price_candidate(monkeypatch, tmp_path):
+    """S-3: the probe's non-scalar detection previously only inspected fields named
+    FWD_CURVE -- the FWD_OUTRIGHT_PRICE candidate (fwd_outright_direct_alt_fwd_outright_field)
+    must get the same protection when Bloomberg returns it as a bulk value."""
+    ref_data = {
+        ("EURUSD Curncy", "PX_LAST"): 1.1000,
+        ("EURUSD Curncy", "FWD_CURVE"): 1.1050,  # primary candidate: scalar, OK
+        ("EURUSD Curncy", "FWD_OUTRIGHT_PRICE"): [{"row": 1}, {"row": 2}],  # bulk, non-scalar
+    }
+    hist_data = {"EURUSD Curncy": 1.1000, "ESU6 Index": 4500.25}
+    _install_fake_blpapi(monkeypatch, _full_probe_responder(ref_data, hist_data))
+    from data.bloomberg import diagnose, pull_marks
+
+    out = tmp_path / "probe"
+    exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
+    assert exit_code == 0
+
+    diag_path = Path(str(out) + ".diag.json")
+    diag = diagnose.load_diag(diag_path)
+    alt = next(r for r in diag["requests"] if r.get("probe_name") == "fwd_outright_direct_alt_fwd_outright_field")
+    assert alt["classification"] == "OK"
+    assert alt.get("scalar") is False
+    assert "non-scalar" in alt["detail"]
+
+    report = diagnose.render_report(diag)
+    assert "scalar=False" in report

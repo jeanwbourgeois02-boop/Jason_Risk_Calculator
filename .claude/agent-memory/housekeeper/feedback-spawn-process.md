@@ -1,12 +1,12 @@
 ---
 name: feedback-spawn-process
-description: Run specialist fix rounds in the foreground and never re-spawn a background agent that is still working; the coordinator expects one reviewer pass after all specialists, re-run only on critical findings
+description: Independent specialists run in parallel as background agents, dependent ones sequentially; an empty output file means still running, never re-spawn; reviewer on git diff only, at most twice, warnings reported not fixed
 metadata:
   type: feedback
 ---
 
-Run specialist and reviewer rounds with `run_in_background: false`, one at a time. Do not re-spawn an agent for the same task while a background copy may still be running.
+Specialists whose owned directories do not overlap and whose tasks do not depend on each other run in parallel as background agents; wait for all of them to finish before running the reviewer. A specialist that depends on another's output runs after it. An empty output file means the agent is still running, not dead; never re-spawn on that basis. The reviewer runs after all specialists have finished.
 
-**Why:** on 2026-09-13 a background data-ingest fix looked dead (0-byte output file, code unchanged) and was re-spawned; both ran, the second hit a "file changed since read" conflict and had to reconcile the first's edits. The coordinator explicitly asked for foreground runs afterwards. Background subagent output files stay 0 bytes until the agent finishes, so an empty file is not evidence it failed.
+**Why:** on 2026-09-13 a background data-ingest fix looked dead (0-byte output file, code unchanged) and was re-spawned; both ran, the second hit a "file changed since read" conflict and had to reconcile the first's edits. Background subagent output files stay 0 bytes until the agent finishes, so an empty file is not evidence it failed. The user set the parallel-background rule in .claude/agents/housekeeper.md step 2 on 2026-09-13.
 
-**How to apply:** ingest/fix/review chains are strictly sequential; only truly independent work (docs, memory) runs alongside. Reviewer runs once after all specialists in a request finish, then again only on critical findings, until none remain (this wording is now in .claude/agents/housekeeper.md).
+**How to apply:** independent specialists in one request are spawned together with `run_in_background: true`; a specialist that needs another's output is spawned after that one completes; fix rounds wait for the original agent to finish. Reviewer runs once, on git diff only, after all specialists in a request finish. If it reports criticals, send those to the specialist and run the reviewer a second time on the fix diff only. Never a third pass. Warnings are listed in the report for the user, not fixed and not re-reviewed, unless the user's request says otherwise (this wording is in .claude/agents/housekeeper.md step 3, set by the user on 2026-09-13).

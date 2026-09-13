@@ -1,4 +1,5 @@
 - [Build environment](build-environment.md) — use `py -3` (no `python` on PATH), pytest installed, blpapi absent (Bloomberg on a separate machine), cache warning harmless
 - [BNP file facts](bnp-file-facts.md) — row counts, netting groups, blank Fx cells, Fx=1.0 on XXXUSD rows, ESU6 Position=0, NM Strategy column
-- [Spawn process](feedback-spawn-process.md) — foreground, sequential specialist/reviewer rounds; never re-spawn a background agent that may still be running
+- [Spawn process](feedback-spawn-process.md) — independent specialists parallel in background, dependent ones sequential; empty output file = still running, never re-spawn; reviewer on git diff only, max two passes, warnings reported not fixed
 - [Brief premises](feedback-brief-premises.md) — verify data-derivation claims from a brief on the real file before coding them (Fx=1.0 incident)
+- [BBG diagnostics lessons](bbg-diagnostics-lessons.md) — phrase exit-code rules as requested-vs-written keys; reviewer executes the blpapi fake; tzdata risk on the terminal machine

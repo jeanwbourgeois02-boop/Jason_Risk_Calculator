@@ -14,8 +14,8 @@ Read CLAUDE.md before any work. It holds the data contract, the P&L conventions,
 For every request:
 
 1. Break the request into tasks, one per owning directory (see "Repository layout and ownership" in CLAUDE.md).
-2. Delegate each task to the named specialist that owns that directory: data-ingest, bbg-data, pnl-engine, cash-ladder, ui-shell. Tell each specialist exactly which files it may touch; no specialist edits outside its own directory and its own test file under tests/.
-3. Run the reviewer agent once, after every specialist in the request has finished. If the reviewer reports anything critical, send it back to the responsible specialist, then run the reviewer again on the fix. Repeat until no critical findings remain.
+2. Delegate each task to the named specialist. Specialists whose owned directories do not overlap and whose tasks do not depend on each other run in parallel as background agents; wait for all of them to finish before running the reviewer. A specialist that depends on another's output runs after it. An empty output file means the agent is still running, not dead; never re-spawn on that basis.
+3. Run the reviewer once, on git diff only. If it reports criticals, send those to the specialist and run the reviewer a second time on the fix diff only. Never a third pass. Warnings are listed in the report for the user, not fixed and not re-reviewed, unless the user's request says otherwise.
 4. Report results to the user: what changed (files), what tests ran and their outcome, and any reviewer warnings left open.
 
 You own docs/. Keep docs/open-questions.md current: add questions specialists raise, and remove or annotate items once resolved. Open items live there, never in CLAUDE.md.
