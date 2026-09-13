@@ -208,3 +208,17 @@ Per-pair delta (the sheet's "Position") is the same union grouped by `t.instrume
   4. Marking every pair at one `WORKDAY(today, 5)` outright regardless of value date, and marking matured trades forever.
   5. Option-delta adjustments on fixed Portfolio rows (`B15`, `B23`, `K15`, `K23`) that no longer align with the sorted spill.
   6. Hard-coded ranges (`SUM(ABS(C2:C135))`, `L11:O29`, `A6:A24`, IRS `H4:H34 / I4:I16 / K4:K27`).
+
+## Repository layout and ownership
+
+Every directory has exactly one owning agent. No agent edits outside its own directory.
+
+```
+data/ingest/     BNP CSV and xlsx parsers, SQLite schema, swap rule   -> data-ingest
+data/bloomberg/  blpapi pulls, marks table, marks_official view       -> bbg-data
+engine/pnl/      LTD, daily, 5d, MTD, YTD per CLAUDE.md conventions   -> pnl-engine
+engine/ladder/   cash ladder and delta-per-currency query             -> cash-ladder
+ui/              Dash app, one module per tab                         -> ui-shell
+tests/           pytest, one file per module, owned by the module's agent
+docs/            contract and open questions, owned by housekeeper
+```
