@@ -1,0 +1,26 @@
+# Open questions
+
+Unresolved items from the data-contract review of `data/raw/HA_PNL_20260818.csv` and `data/raw/HA-portfolio vJean.xlsx` (2026-09-13). Each has a proposed default; the default is what the app assumes until the question is closed. Settled decisions live in `CLAUDE.md`.
+
+## Assumptions in force, unconfirmed
+
+- **NDF list.** BRL, TWD, KRW, IDR treated as non-deliverable (`instruments.is_ndf = 1`); TRY and MXN treated as deliverable. To be verified with the PB. Affects the cash ladder only (NDF legs carry `settles_cash = 0`).
+
+## Questions
+
+1. **Quantity display / residuals.** Storage keeps exact legs; display uses USD notional per pair. Should residual base-currency exposure be surfaced (e.g. −24,310 AUD left by two offsetting 2,000,000-USD AUDUSD trades at different fills)? Default: show it in the delta tab, hide it in the FX tab.
+2. **Portfolio hand edits.** `B15 (USDIDR) += N42` (USDJPY option delta −70.5m) and `B23 (USDTWD) += N37` (USDZAR delta +9.95m) look misaligned after the sorted spill gained USDIDR. `B9 (EURSEK) += B10` adds the EURUSD position to EURSEK — intentional net-EUR view? Default: deltas belong to USDJPY and USDZAR; the EURSEK + EURUSD add is dropped.
+3. **Net / Gross USD scope.** In the sheet XAUUSD sits outside the summed range and ESU6 enters Net USD with −1 sign while ESZ6 is netted out via `+B8`. Should gold and equity futures be in Net/Gross USD? Default: FX pairs only; gold and futures shown as separate lines.
+4. **Option deltas.** Today hand-typed (USDJPY −8.5m, −17m, −45m; EURSEK 12,373,791 EUR; USDZAR 9,951,608). Source for the app: manual table, Bloomberg OVML, or PB? Units assumed = base-currency delta-equivalent notional (digitals can exceed the notional). Default: `marks.DELTA` with `source = MANUAL` until a feed exists.
+5. **FX swaps — representation at BNP.** The 08/18 file contains no opposite-sign pair with different value dates, so it cannot show how BNP books a swap. A swap's near leg settles T+2 and drops out of the PB snapshot, so in any file older than two days a swap is indistinguishable from an outright; swaps can only be identified from the blotter or by diffing the daily archive. Does BNP deliver a separate trade/blotter file?
+6. **FX swap candidates in the xlsx** (same pair, same trade date, opposite equal quantities). Different-tenor pairs matched by the rule and grouped as swaps: rows 303/304 USDCAD (2026-08-24, 08-25 → 09-16), 316/317 USDCAD (08-27, 08-28 → 09-16), 321/322 USDJPY (08-28, 08-31 → 09-16), 326/327 EURUSD (08-31, 09-02 → 09-16), 330/331 EURUSD (09-01, 09-03 → 09-16), 336/337 USDJPY (09-01, 09-16 → 2027-03-01), 341/342 USDCHF (09-01, 09-16 → 2027-09-03), 354/355 USDZAR (09-09, 09-11 → 10-13); 318/319 vs 320 USDJPY (2 × 7.5m near vs −15m far) needs manual grouping. **Same-tenor** opposite pairs, not grouped, to confirm as round trips or mis-keyed swap legs: 302/303 USDCAD ±25m both 08-25; 335/336 USDJPY ±23m both 2027-03-01 (fills 157.53 / 157.7071); 315/316 USDCAD ±25m both 08-28; 297/298 EURSEK 1.5m / −1,499,499 both 08-25; 305/306 and 307/308 EURSEK; 324/326 EURUSD ±13.5m both 09-02; 333/338 USDJPY ±16m both 09-03; plus 07-24 USDSGD, 07-30 EURUSD, 08-04 USDTRY, 08-06 USDKRW, 08-07 USDJPY, 08-14 USDBRL, 08-18 EURUSD, 08-20 USDCHF / USDZAR (all same tenor 09-16, present in the BNP file as separate round trips).
+7. **IRS direction and units.** BNP description has no pay/receive flag; xlsx `Direction < 0 = receive fixed`. Confirm, and confirm BNP `Quantity` = notional in millions and `Price` = PV per 1m. The 1,216,900,000 swap dated 2026-08-18 is absent from the 08/18 file (consistent with T−1 close) — confirm it appears on 08/19.
+8. **IRS pricing.** Consume PV / DV01 as marks (current), or rebuild the Bloomberg-curve pricer (hidden `Curve / Proj / Cashflows` sheets) on the `curves` table? Default: marks now, pricer later.
+9. **Matured trades.** The xlsx keeps marking them at the T+5 outright; BNP drops settled forwards. Default: freeze P&L at the fixing/settlement date and carry it as realised.
+10. **Sources of truth per account.** The BNP file already carries GSCO-DRV, GSIL-FUT, JPML-IPB, NTXS-ISD, UBSI-ISD and HOLD-BOX rows. Is it the consolidated fund-level file for all positions, or must other PB files be ingested? Default: BNP file is consolidated.
+11. **Strategy filter.** `HAHY7` (241 rows) vs `HACA` "Cash Adj" (1 row). Default: include both, tag by strategy.
+12. **Mark time.** Official EOD: 15:00 New York (xlsx t−1 convention) or BVAL close (BNP)? Default: 15:00 New York.
+13. **Gold.** XAUUSD treated as an FX pair (USD notional in xlsx; ounces at BNP). Keep as FX, or as a commodity line? Default: FX pair, excluded from Net/Gross USD (see 3).
+14. **Crosses.** USD notional of EURSEK = EUR amount × EURUSD spot (sheet uses the live rate). Default: spot of `as_of_date`.
+15. **Book parameters.** `pnl time series` holds capital 35m, vol allocation 4.5m, stop 5m, first stop 3.5m, daily vol = annual / 16. Config for the overall-book tab? Default: yes, in a config file, not in the data tables.
+16. **Same-day trades in the PB file.** 22 forwards on 08/17 are in the 08/18 file, none from 08/18 itself. Is the PB cut-off end of day New York or London? Affects which trades the reconciliation expects.
