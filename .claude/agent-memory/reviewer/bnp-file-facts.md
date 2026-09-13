@@ -15,6 +15,9 @@ Verified on 2026-09-13 against `data/raw/HA_PNL_20260818.csv` (as_of 2026-08-17)
 - CURRENCY rows with zero balance have blank `Fx` (EUR, XAU, HKD, one USD row). Non-zero forward numeric cells have no blanks.
 - All DTD buckets other than `DTD Total P&L` / `DTD Trading P&L` are exactly 0 (confirms "DTD Total = DTD Trading").
 - Column `Previous Year End Market Value Base` exists; CLAUDE.md lists no YTD check but one could be added.
+- After ingest with as_of 2026-08-17, every `trade_legs.settle_date` lies in 2026-09-08..2026-09-21: there are NO legs with `settle_date <= as_of`, so any real-file test of "matured legs excluded" or "same-day leg included" is vacuous and needs a synthetic case.
+- `positions` holds 6 `CASH-USD` rows (one per account) plus CASH-EUR/XAU/HKD at 0.0, all `settle_date = as_of`; consumers that do not GROUP BY ccy will show 6 USD cash rows.
+- `marks_official` is empty on the real file (ingest loads no marks), so SPOT/DELTA/option branches of any query are only testable synthetically until bbg-data lands.
 
 **Why:** these facts decide whether netting / sentinel choices in ingest code are defects or forced by the data.
 **How to apply:** when reviewing ingest or positions-consuming code, treat forward netting as forced by the PK, and check that blank cash `Fx` is handled with a documented sentinel. See [[review-findings-ingest]].

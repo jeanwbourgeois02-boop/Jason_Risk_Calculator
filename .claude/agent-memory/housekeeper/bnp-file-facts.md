@@ -13,6 +13,9 @@ Quirks not in CLAUDE.md:
 - ESU6 row has `Position = 0.0` but `Quantity = 27`; Quantity is the contract count.
 - Multiple forwards share (account, pair, value date), e.g. 3 x USDTRY 09/16/26, so the `positions` PK forces netting (31 position rows from 239 PB rows). Price and Fx are identical within every group.
 - Every DTD bucket other than Trading is exactly 0.
+- Every FORWARD leg settles 2026-09-08..2026-09-21: nothing settles on or before as_of (2026-08-17), so real-file tests of the `settle_date >= as_of` boundary are vacuous; boundary coverage must be synthetic.
+- CASH-USD appears in 6 accounts (6 positions rows for one ccy/date); the ladder sums them per ccy and filters `source = 'BNP'`.
+- marks_official is empty after a BNP-only load; every SPOT/DELTA path is synthetic-only until bbg-data lands marks.
 
 **Why:** these drove decisions logged in docs/open-questions.md items 17-22 and the "assumptions in force" list; PB FUTURES rows create no trades (fills come from the xlsx).
 

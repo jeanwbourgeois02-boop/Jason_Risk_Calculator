@@ -155,7 +155,7 @@ Two forward rows form one `FX_SWAP` package when all hold: same account, same pa
 
 | Tab | View |
 |---|---|
-| Cash ladder | `trade_legs` where `settles_cash = 1 AND settle_date ≥ as_of`, grouped by `ccy, settle_date`, plus `CASH` rows from `positions` |
+| Cash ladder | `trade_legs` where `settles_cash = 1 AND settle_date ≥ as_of`, grouped by `ccy, settle_date`, plus `CASH` rows from `positions` where `source = 'BNP'` (BNP is the source for ladder cash balances, summed per currency across accounts). The `≥` here versus `>` in the delta query is intentional: a leg settling on `as_of` is cash that moves today but carries no delta by close, matching BNP dropping settled forwards. |
 | FX | FX trades × `marks_official` (`FWD_OUTRIGHT` at the leg's own `settle_date`, `SPOT` for USD conversion); per-pair USD notional = Σ sign(base leg) × \|USD leg\| |
 | Rates | IRS trades × `marks_official` (`PV_USD`, `DV01_USD`, `PAR_RATE`); `curves` when the pricer is rebuilt |
 | Options | FX_OPTION trades × `marks_official` (`PREMIUM`, `DELTA`) |
@@ -178,11 +178,13 @@ WITH d AS (
   SELECT i.quote_ccy, -t.quantity * m.value * s.value
   FROM trades t JOIN instruments i USING (instrument_id)
   JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
-  JOIN marks_official s ON s.instrument_id = t.instrument_id AND s.mark_type = 'SPOT'  AND s.as_of_date = :as_of
+  LEFT JOIN marks_official s ON s.instrument_id = t.instrument_id AND s.mark_type = 'SPOT'  AND s.as_of_date = :as_of
   WHERE t.product = 'FX_OPTION'
 )
 SELECT ccy, SUM(delta) AS delta FROM d GROUP BY ccy;
 ```
+
+The `SPOT` join in the option quote-currency branch is a `LEFT JOIN` so that a missing spot mark surfaces as a `NULL` delta; the engine must raise if any resulting delta is `NULL`, never drop the leg silently. `engine/ladder/ladder.py` currently embeds the earlier inner-join form of this query and must be changed to match when options are built.
 
 Per-pair delta (the sheet's "Position") is the same union grouped by `t.instrument_id` in USD-notional terms.
 
