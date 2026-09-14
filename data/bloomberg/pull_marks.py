@@ -30,7 +30,8 @@ run never exits 0 unless every requested key was written; `summary.marks_csv_par
 this unambiguous downstream. Exit code table: 0 OK (all requested keys written), 2 bad
 `--as-of` (either not a valid ISO date, or stale/refused -- see check_not_stale), 3
 unhandled exception, 4 session/service open failure, 5 marks CSV partial (one or more
-requested keys missing, for any reason).
+requested keys missing, for any reason), 6 tz prerequisite missing (America/New_York
+zoneinfo not resolvable, e.g. no `tzdata` package on stock Windows Python -- see _ny()).
 
 Request CSV columns: instrument_id, bbg_ticker, settle_date, mark_type
   (mark_type in {SPOT, FWD_OUTRIGHT, FUTURE_PX}; produced by
@@ -138,9 +139,11 @@ def _ny() -> ZoneInfo:
     ZoneInfoNotFoundError immediately wherever the IANA tz database isn't available --
     notably stock Windows Python without the `tzdata` pip package -- and a module-level
     constant would raise that before argparse even runs, so no diag JSON would ever be
-    written for the failure. main() resolves this explicitly, after Diagnostics() is
-    created, and turns a missing zone into a diag entry + stderr hint + exit 6 instead
-    (see module docstring "Prerequisites" and exit-code table)."""
+    written for the failure. main() resolves this explicitly, immediately after
+    Diagnostics() is created and before the first record_environment() call, and turns a
+    missing zone (ZoneInfoNotFoundError) into a diag entry (failure with
+    stage "tz_prerequisite" and a "py -3 -m pip install tzdata" hint), a diag JSON write,
+    a matching stderr hint, and exit 6 -- see module docstring exit-code table."""
     global _NY_ZONE
     if _NY_ZONE is None:
         _NY_ZONE = ZoneInfo("America/New_York")
@@ -1316,13 +1319,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--request is required unless --probe is given")
 
     diag = Diagnostics()
+    dpath = diag_path_for(args.out)
+
+    # tz prerequisite check: resolve _ny() here, immediately after Diagnostics() is
+    # created and before the first record_environment() call (which itself calls _ny()
+    # for machine_time_america_new_york), so a machine missing the `tzdata` pip package
+    # (stock Windows Python has no IANA tz database) gets a diag JSON + stderr hint +
+    # exit 6 instead of crashing with nothing written (docs/open-questions.md item 39).
+    try:
+        _ny()
+    except ZoneInfoNotFoundError as e:
+        diag.run_info = {"as_of": args.as_of, "out": args.out, "mode": "probe" if args.probe else "pull"}
+        diag.finalize_summary(
+            exit_code=6, failures=[{"stage": "tz_prerequisite",
+                                     "error": f"America/New_York zoneinfo not available: {e}",
+                                     "hint": "py -3 -m pip install tzdata"}],
+            marks_csv_partial=False, mode="probe" if args.probe else "pull",
+        )
+        write_diagnostics(diag, dpath)
+        print("ERROR: America/New_York zoneinfo not available (tzdata missing); "
+              "hint: py -3 -m pip install tzdata", file=sys.stderr)
+        return 6
+
     # W-2: record a baseline environment block immediately, before anything that could
     # fail (read_request_csv, check_not_stale, open_session) -- so a diag written on a
     # stale-as-of refusal, a missing request CSV, or any other early failure still has a
     # non-empty environment block. open_session() (called from run_pull/run_probe) later
     # overwrites this with session_started/service_opened once it knows them.
     diag.record_environment(args.host, args.port)
-    dpath = diag_path_for(args.out)
 
     # S-2: validate --as-of is a real ISO date here, before run_pull()/run_probe() (both
     # of which call date.fromisoformat(args.as_of) themselves). A malformed date is an

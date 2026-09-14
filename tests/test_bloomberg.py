@@ -1516,3 +1516,30 @@ def test_probe_scalar_check_flags_fwd_outright_price_candidate(monkeypatch, tmp_
 
     report = diagnose.render_report(diag)
     assert "scalar=False" in report
+
+
+def test_pull_marks_missing_tzdata_writes_diag_and_exits_6(monkeypatch, tmp_path):
+    """Item 39: main() must resolve _ny() immediately after Diagnostics() is created,
+    before the first record_environment() call, so a machine missing the `tzdata`
+    package (ZoneInfoNotFoundError constructing America/New_York) still gets a diag
+    JSON + stderr hint + exit 6, instead of crashing with no .diag.json written."""
+    from data.bloomberg import diagnose, pull_marks
+
+    monkeypatch.setattr(pull_marks, "_NY_ZONE", None)  # clear _ny()'s cache
+
+    def _raise(*args, **kwargs):
+        raise pull_marks.ZoneInfoNotFoundError("no time zone found with key 'America/New_York'")
+
+    monkeypatch.setattr(pull_marks, "ZoneInfo", _raise)  # simulate tzdata not installed
+
+    out = tmp_path / "probe"
+    exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
+    assert exit_code == 6
+
+    diag_path = Path(str(out) + ".diag.json")
+    assert diag_path.exists()
+    diag = diagnose.load_diag(diag_path)
+    assert diag["summary"]["exit_code"] == 6
+    failures = diag["summary"]["failures"]
+    tz_failure = next(f for f in failures if f.get("stage") == "tz_prerequisite")
+    assert tz_failure["hint"] == "py -3 -m pip install tzdata"

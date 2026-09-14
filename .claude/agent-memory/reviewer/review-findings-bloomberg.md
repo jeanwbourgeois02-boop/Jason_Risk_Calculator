@@ -1,11 +1,11 @@
 ---
 name: review-findings-bloomberg
-description: Status of findings from the 2026-09-13 reviews (five passes, rounds 1-3 of the diagnostics/--probe drop) of data/bloomberg (marks_csv.py, bnp_marks.py, pull_marks.py, diagnose.py, tests/test_bloomberg.py); what is closed, what is still open, what to re-check on the next bbg-data drop
+description: Status of findings from the 2026-09-13/14 reviews (five passes, rounds 1-3 of the diagnostics/--probe drop, plus item 39 tzdata exit-6 path) of data/bloomberg (marks_csv.py, bnp_marks.py, pull_marks.py, diagnose.py, tests/test_bloomberg.py); what is closed, what is still open, what to re-check on the next bbg-data drop
 metadata:
   type: project
 ---
 
-Five review passes on 2026-09-13, plus a 2026-09-14 one-line diff check (NY -> _ny()). Fifth pass = round 3 of the diagnostics/--probe drop
+Five review passes on 2026-09-13, plus two 2026-09-14 diff checks (NY -> _ny(); item 39 exit-6 tz path). Fifth pass = round 3 of the diagnostics/--probe drop
 (still uncommitted vs 1ddaf6a): 97/97 tests pass; imports stdlib+blpapi only (socket/blpapi
 lazy); ownership clean; schema.py/marks_csv.py untouched so BBG_INTERP still never official;
 snapped_at still 15:00 America/New_York. No P&L code in this drop.
@@ -44,18 +44,16 @@ snapped_at still 15:00 America/New_York. No P&L code in this drop.
   ignore failures with candidate=True (or have run_probe put only non-candidate failures in
   summary.failures). Add a test that runs pull_marks.main(--probe) with candidate-only
   fieldExceptions and asserts diagnose.main == 0.
-- W (2026-09-14 re-check, uncommitted diff): tzdata prerequisite is HALF done. `_ny()` lazy
-  loader exists (L135) and all 4 call sites use it (L185/222/237/277; L277 was an undefined `NY`
-  NameError in HEAD 70a1a25, fixed in the diff -> 115 passed). BUT `_ny()`'s docstring claims
-  main() catches ZoneInfoNotFoundError -> exit 6; grep of main() shows NO such handler, no
-  "6" in the exit-code table, and the very first `diag.record_environment()` (L1324) is
-  before the try/finally that writes the diag. Reproduced with tzdata hidden: probe run raises
-  ZoneInfoNotFoundError out of main(), no diag JSON. Net effect: crash moved from import time
-  to main() time -- still loud, still no diag. Fix: wrap L1324 (or resolve `_ny()` right after
-  Diagnostics()) in try/except ZoneInfoNotFoundError -> failure stage "tz_prerequisite",
-  "pip install tzdata" hint, exit 6, write diag; add exit 6 to the docstring table; add a
-  test that hides tzdata (meta_path finder blocking `tzdata` + `zoneinfo.reset_tzpath(to=[])`)
-  and asserts exit 6 + diag written. Never fall back to fixed -04:00.
+- CLOSED 2026-09-14 (item 39, second diff): main() now resolves `_ny()` in try/except right
+  after Diagnostics(), before record_environment(); ZoneInfoNotFoundError -> failure stage
+  "tz_prerequisite", hint "py -3 -m pip install tzdata", diag written, exit 6, 6 in docstring
+  table. Verified by real repro (meta_path finder blocking tzdata + reset_tzpath(to=[]) +
+  ZoneInfo.clear_cache() + pull_marks._NY_ZONE=None): exit 6, stale diag overwritten, single
+  write, diagnose.load_diag/render_report/has_failure fine. 116 passed; new test fails on HEAD
+  (raises from main). Residual: exit-6 diag has environment == {} (no python_version/hostname/
+  machine_timezone -- the very fields useful for a tz bug); test monkeypatches ZoneInfo rather
+  than blocking tzdata, and asserts neither stderr nor pull mode. Also note the `_ny()` cache:
+  any test that hits the tz path must reset `_NY_ZONE` first or the branch is skipped.
 - W: no tests for W-2 propagation paths (SPOT SECURITY_ERROR -> FWD SECURITY_ERROR; scale
   FIELD_EXCEPTION -> FWD FIELD_EXCEPTION).
 - Still open from second pass: bnp_marks NaN Price/Fx; 15:00 snapped_at label vs 17:00 close.

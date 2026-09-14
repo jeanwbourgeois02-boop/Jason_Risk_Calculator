@@ -1,6 +1,6 @@
 ---
 name: bbg-diagnostics-lessons
-description: Lessons from the pull_marks.py diagnostics round (2026-09-13) - state "exit code follows requested-vs-written keys" explicitly, reviewer verifies by executing the blpapi fake, tzdata/zoneinfo risk on the Bloomberg machine
+description: Lessons from the pull_marks.py diagnostics rounds (2026-09-13/14) - state "exit code follows requested-vs-written keys" explicitly, reviewer verifies by executing the blpapi fake, _NY_ZONE cache trap in tz tests, tzdata exit-6 path now exists (item 39 closed, residual item 40)
 metadata:
   type: project
 ---
@@ -9,4 +9,8 @@ When a specialist prompt says "any request failure must exit non-zero", spell ou
 
 **Why:** bbg-data reasoned "Bloomberg legitimately returns fieldExceptions" and treated them as warnings; the operator would have taken an exit-0 partial CSV as complete.
 
-**How to apply:** for scripts that run unattended on the Bloomberg machine, phrase requirements as observable outcomes (exit code, files, summary fields), not as failure categories. The reviewer for `data/bloomberg/` verifies claims by executing scenarios against the fake blpapi in `tests/test_bloomberg.py` (not by reading docstrings) — ask it to do that every time; it caught late-response pollution and empty environment blocks that way. Operational risk to keep in mind: `pull_marks.py` resolves `ZoneInfo("America/New_York")` lazily via `_ny()`, but `main()` calls it (through `record_environment`) before the try/finally that writes diagnostics, so a Windows terminal machine without `tzdata` still crashes with no `.diag.json` and the documented exit 6 never happens (open questions 33 and 39). When bbg-data's docstrings promise a handler, have the reviewer confirm the handler exists rather than trusting the docstring; that is how the 2026-09-14 review caught this. Operator steps live in `docs/bloomberg-run.md`; probe first, then pull, bring back the marks CSV and both `.diag.json` files.
+**How to apply:** for scripts that run unattended on the Bloomberg machine, phrase requirements as observable outcomes (exit code, files, summary fields), not as failure categories. The reviewer for `data/bloomberg/` verifies claims by executing scenarios against the fake blpapi in `tests/test_bloomberg.py` (not by reading docstrings) — ask it to do that every time; it caught late-response pollution, empty environment blocks, and (2026-09-14) a docstring-promised exit-6 handler that did not exist. When bbg-data's docstrings promise a handler, have the reviewer confirm the handler exists.
+
+Status 2026-09-14: the missing-tzdata path is implemented (item 39 closed, suite 116 passed): `main()` resolves `_ny()` right after `Diagnostics()`, writes a `tz_prerequisite` diag failure, prints the pip hint, returns 6. Residual (item 40, open warning): that diag has an empty `environment` block because `record_environment` itself needs `_ny()`. Test trap: `_ny()` caches in `pull_marks._NY_ZONE`; any test of the tz branch must reset it to `None` or it passes vacuously. A tightly specified brief (exact stage name, hint string, placement, test assertion, expected pass count) got this done in one specialist round with zero criticals — keep briefs at that level of precision for bbg-data.
+
+Operator steps live in `docs/bloomberg-run.md`; probe first, then pull, bring back the marks CSV and both `.diag.json` files.
