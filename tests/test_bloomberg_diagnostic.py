@@ -55,6 +55,30 @@ def test_no_bloomberg_gives_clean_unavailable_report(tmp_path, monkeypatch, caps
     assert "RESULT: BLOOMBERG UNAVAILABLE" in txt and "Read-only run" in txt
 
 
+def test_ledger_and_feed_sections_are_informational_and_read_only(tmp_path, monkeypatch, capsys):
+    tool = _load_tool()
+    db = tmp_path / "risk.db"
+    _seed_db(db)                                             # schema.connect creates the ledger tables too
+    import json as _json
+    (tmp_path / "risk.db.bloomberg_status.json").write_text(_json.dumps(
+        {"time": "t", "connected": True, "written": 3, "failed": 0, "skipped": 1,
+         "ledger": {"as_of_date": "2026-09-14", "complete": False, "realised_trades": 0}}), encoding="utf-8")
+    monkeypatch.setattr(tool, "check_blpapi", lambda rep: (rep.check("blpapi", False, "simulated"), None)[1])
+    monkeypatch.setattr(tool, "check_tcp", lambda rep, host, port: (rep.check("tcp", False, "simulated"), False)[1])
+    code = tool.main(["--once", "--db", str(db), "--out", str(tmp_path / "reports"), "--port", "1"])
+    assert code == 1                                          # required checks still decide the exit code
+    data = json.loads(next((tmp_path / "reports").glob("*.json")).read_text(encoding="utf-8"))
+    led = data["checks"]["ledger"]
+    assert led["required"] is False and led["ok"] is False and led["snapshots"] == 0
+    assert "no snapshot yet" in led["detail"] and "0 realised trade(s)" in led["detail"]
+    feed = data["checks"]["feed"]
+    assert feed["required"] is False and feed["ok"] is True and "skipped=1" in feed["detail"] and "ledger:" in feed["detail"]
+    txt = next((tmp_path / "reports").glob("*.txt")).read_text(encoding="utf-8")
+    assert "Informational (not required for exit 0)" in txt and "[CHECK ] ledger" in txt
+    assert "[CHECK ] ledger" in capsys.readouterr().out
+    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM pnl_snapshots").fetchone()[0] == 0   # read-only
+
+
 def test_missing_database_is_reported_not_raised(tmp_path, capsys):
     tool = _load_tool()
     code = tool.main(["--once", "--db", str(tmp_path / "nope.db"), "--out", str(tmp_path / "r"), "--port", "1"])

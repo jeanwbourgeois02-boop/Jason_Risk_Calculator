@@ -55,7 +55,8 @@ class Report:
 
     def check(self, name: str, ok: bool, detail: str = "", **extra):
         self.checks[name] = {"ok": bool(ok), "detail": detail, **extra}
-        print(f"[{'OK    ' if ok else 'FAILED'}] {name:9s} {detail}")
+        label = "OK    " if ok else ("FAILED" if extra.get("required", True) else "CHECK ")
+        print(f"[{label}] {name:9s} {detail}")
 
     def ticker(self, **row):
         self.tickers.append(row)
@@ -77,6 +78,13 @@ class Report:
         for n in REQUIRED:
             c = self.checks.get(n, {"ok": False, "detail": "not run"})
             lines.append(f"[{'OK' if c['ok'] else 'FAILED':6s}] {n:9s} {c.get('detail', '')}")
+        info = [n for n in self.checks if n not in REQUIRED]
+        if info:
+            lines.append("")
+            lines.append("Informational (not required for exit 0):")
+            for n in info:
+                c = self.checks[n]
+                lines.append(f"[{'OK' if c['ok'] else 'CHECK':6s}] {n:9s} {c.get('detail', '')}")
         if self.tickers:
             lines += ["", f"{'status':7s} {'pair':8s} {'mark':12s} {'ticker':22s} {'settle':10s} {'value':>16s}  "
                           f"{'request':22s} {'source':16s} {'snapped_at':25s} detail"]
@@ -435,6 +443,68 @@ def fwd_curve_request(blpapi, session, service, tickers, timeout_ms=15000):
     return out
 
 
+# --------------------------------------------------------------------------- ledger + feed (informational, read-only)
+def check_ledger(rep: Report, db_path: Path) -> None:
+    """P&L ledger state: tables present, snapshot history, realised trades, settled trades
+    that are not realisable (no spot on/before settle date). Informational: not required
+    for exit 0, but explains 'Unavailable' period cards in the app."""
+    if not db_path.exists():
+        rep.check("ledger", False, "database missing", required=False)
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"realised_pnl", "pnl_snapshots"} <= tables:
+                rep.check("ledger", False, "ledger tables not created yet: launch the app once (it adds them), "
+                                           "then run the feed", required=False)
+                return
+            snaps = conn.execute("SELECT as_of_date, complete, missing FROM pnl_snapshots ORDER BY as_of_date").fetchall()
+            realised = conn.execute("SELECT COUNT(*), COALESCE(SUM(pnl_usd),0) FROM realised_pnl").fetchone()
+            today = date.today().isoformat()
+            settled_unrealised = conn.execute(
+                "SELECT DISTINCT t.trade_id, t.instrument_id, l.settle_date FROM trades t JOIN trade_legs l USING(trade_id) "
+                "WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND l.settle_date < ? "
+                "AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl) ORDER BY l.settle_date", (today,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        rep.check("ledger", False, f"sqlite error: {exc}", required=False)
+        return
+    last = snaps[-1] if snaps else None
+    complete_days = sum(1 for s in snaps if s[1])
+    detail = (f"{len(snaps)} snapshot day(s), {complete_days} complete; "
+              + (f"last {last[0]} ({'complete' if last[1] else 'incomplete: ' + (last[2] or '?')}); " if last else "no snapshot yet; ")
+              + f"{realised[0]} realised trade(s) = {realised[1]:,.0f} USD; "
+              + f"{len(settled_unrealised)} settled-but-unrealised trade(s)")
+    ok = bool(snaps) and (last is not None and bool(last[1])) and not settled_unrealised
+    rep.check("ledger", ok, detail, required=False, snapshots=len(snaps), complete_snapshots=complete_days,
+              last_snapshot=last[0] if last else None, realised_trades=realised[0], realised_usd=realised[1],
+              settled_unrealised=[{"trade_id": t, "pair": p, "settle_date": s} for t, p, s in settled_unrealised])
+    for t, p, s in settled_unrealised[:10]:
+        rep.notes.append(f"settled, not realised: {t} {p} settled {s} (needs an official SPOT on/before that date)")
+
+
+def check_feed_status(rep: Report, db_path: Path) -> None:
+    """Last live-feed status file written by the app (data/bloomberg/live.py)."""
+    p = db_path.with_name(db_path.name + ".bloomberg_status.json")
+    if not p.exists():
+        rep.check("feed", False, "no feed status file: the app has not run its Bloomberg feed on this database yet",
+                  required=False)
+        return
+    try:
+        st = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        rep.check("feed", False, f"status file unreadable: {exc}", required=False)
+        return
+    detail = (f"time {st.get('time')} connected={st.get('connected')} written={st.get('written', 0)} "
+              f"failed={st.get('failed', 0)} skipped={st.get('skipped', 0)} {st.get('reason', '')}")
+    led = st.get("ledger")
+    if led:
+        detail += f" | ledger: {led}"
+    rep.check("feed", bool(st.get("connected")) and not st.get("failed"), detail, required=False)
+
+
 # --------------------------------------------------------------------------- main
 def default_db() -> Path:
     env = os.environ.get("RISK_DB")
@@ -485,6 +555,8 @@ def main(argv=None) -> int:
             session.stop()
         except Exception:
             pass
+    check_ledger(rep, db_path)
+    check_feed_status(rep, db_path)
 
     rep.notes.append("Read-only run: no database, marks, UI or valuation changes were made.")
     out_dir.mkdir(parents=True, exist_ok=True)
