@@ -19,10 +19,10 @@ Checks (all required for exit code 0):
     5  service       //blp/refdata open
     6  database      FX instruments with open legs + their settle dates
     7  spot          PX_LAST for every open pair (ReferenceDataRequest)
-    8  forward       one representative forward per pair: direct broken-date outright
-                     (FWD_CURVE + SETTLE_DT override); if that field is absent, the
-                     standard 1M tenor ticker '<PAIR>1M Curncy' PX_LAST is requested and
-                     reported as such (never mixed up with the outright)
+    8  forward       outright per pair at its first open settle date, from the bulk
+                     FWD_CURVE table (FWD_CURVE_QUOTE_FORMAT=OUTRIGHTS): exact tenor row,
+                     or linear interpolation between tenors / from live spot (labelled
+                     BBG_INTERP). Never extrapolated beyond the last tenor.
 Reports: reports/bloomberg_diagnostic_<timestamp>.json and .txt (next to this file's
 parent directory unless --out is given).
 """
@@ -250,42 +250,178 @@ def check_prices(rep: Report, blpapi, session, service, reqs: list) -> None:
                    detail="" if ok else errors.get(r["ticker"], "no PX_LAST in response"))
     if "spot" not in rep.checks:
         rep.check("spot", spot_ok == len(reqs), f"{spot_ok}/{len(reqs)} pairs returned PX_LAST")
-    # ---- forward: direct broken-date outright per pair, fallback report on 1M tenor ticker
+    # ---- forward: bulk FWD_CURVE table (OUTRIGHTS) per pair, outright at the pair's first open settle date
     fwd_ok = 0
+    spot_by_pair = {r["instrument_id"]: data.get(r["ticker"], {}).get("PX_LAST") for r in reqs}
+    try:
+        curves = fwd_curve_request(blpapi, session, service, tickers)
+    except Exception as exc:
+        curves = {t: {"points": [], "columns": [], "error": f"request raised: {exc!r}"} for t in tickers}
+        rep.notes.append(traceback.format_exc())
+    columns_seen = next((c["columns"] for c in curves.values() if c.get("columns")), [])
+    if columns_seen:
+        rep.notes.append(f"FWD_CURVE table columns on this terminal: {columns_seen}")
     for r in reqs:
         settle = r["settle_date"]
-        yyyymmdd = settle.replace("-", "")
-        try:
-            data, errors = reference_request(blpapi, session, service, [r["ticker"]], ["FWD_CURVE"],
-                                             {"FWD_CURVE_QUOTE_FORMAT": "OUTRIGHTS", "SETTLE_DT": yyyymmdd})
-            v = data.get(r["ticker"], {}).get("FWD_CURVE")
-            if isinstance(v, float):
-                fwd_ok += 1
-                rep.ticker(status="OK", instrument_id=r["instrument_id"], mark_type="FWD_OUTRIGHT", ticker=r["ticker"],
-                           settle_date=settle, value=v, request_type="ReferenceDataRequest FWD_CURVE/SETTLE_DT",
-                           source="BBG_BFXFORWARD", snapped_at=snapped, detail="direct broken-date outright")
+        curve = curves.get(r["ticker"], {"points": [], "error": "no curve returned"})
+        if not curve["points"]:
+            rep.ticker(status="FAILED", instrument_id=r["instrument_id"], mark_type="FWD_OUTRIGHT", ticker=r["ticker"],
+                       settle_date=settle, value=None, request_type="ReferenceDataRequest FWD_CURVE (OUTRIGHTS, bulk)",
+                       source="", snapped_at="", detail=curve.get("error", "no points"))
+            continue
+        spot = spot_by_pair.get(r["instrument_id"])
+        value, how = outright_for_date(curve["points"], date.fromisoformat(settle),
+                                       spot if isinstance(spot, float) else None, date.today())
+        if value is None:
+            rep.ticker(status="FAILED", instrument_id=r["instrument_id"], mark_type="FWD_OUTRIGHT", ticker=r["ticker"],
+                       settle_date=settle, value=None, request_type="ReferenceDataRequest FWD_CURVE (OUTRIGHTS, bulk)",
+                       source="", snapped_at="",
+                       detail=f"{settle} outside curve {curve['points'][0][0]}..{curve['points'][-1][0]} "
+                              f"({len(curve['points'])} tenors)")
+            continue
+        fwd_ok += 1
+        rep.ticker(status="OK", instrument_id=r["instrument_id"], mark_type="FWD_OUTRIGHT", ticker=r["ticker"],
+                   settle_date=settle, value=round(value, 8), request_type="ReferenceDataRequest FWD_CURVE (OUTRIGHTS, bulk)",
+                   source="BBG_BFXFORWARD" if how == "EXACT" else "BBG_INTERP", snapped_at=snapped,
+                   detail=f"{how.lower()} from {len(curve['points'])} tenor rows "
+                          f"({curve['points'][0][0]}..{curve['points'][-1][0]})")
+    rep.check("forward", fwd_ok == len(reqs), f"{fwd_ok}/{len(reqs)} pairs returned a forward outright")
+
+
+# --------------------------------------------------------------------------- FWD_CURVE bulk parsing
+# Standalone copy of data/bloomberg/fwd_curve.py (this file must not import the repo).
+_MID_KEYS = ("MID", "OUTRIGHT", "RATE", "PX_MID", "VALUE")
+_DATE_KEYS = ("SETTLE", "DATE", "MATURITY")
+
+
+def _to_date(v):
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str):
+        for fmt in ("%Y-%m-%d", "%Y%m%d", "%m/%d/%Y"):
+            try:
+                return datetime.strptime(v[:10], fmt).date()
+            except ValueError:
                 continue
-            direct_err = errors.get(r["ticker"], f"FWD_CURVE not a scalar: {type(v).__name__}")
-        except Exception as exc:
-            direct_err = f"request raised: {exc!r}"
-        tenor = f"{r['instrument_id']}1M Curncy"
-        try:
-            data, errors = reference_request(blpapi, session, service, [tenor], ["PX_LAST", "SETTLE_DT"])
-            v = data.get(tenor, {}).get("PX_LAST")
-            if isinstance(v, float):
-                fwd_ok += 1
-                rep.ticker(status="OK", instrument_id=r["instrument_id"], mark_type="FWD_POINTS_1M", ticker=tenor,
-                           settle_date=str(data[tenor].get("SETTLE_DT", "")), value=v,
-                           request_type="ReferenceDataRequest PX_LAST (1M tenor)", source="BBG_BDP", snapped_at=snapped,
-                           detail=f"direct outright unavailable ({direct_err}); 1M forward points returned instead")
+    return None
+
+
+def points_from_rows(rows):
+    points, columns = [], []
+    for row in rows:
+        if not columns:
+            columns = list(row.keys())
+        settle = None
+        for k, v in row.items():
+            if any(t in k.upper() for t in _DATE_KEYS):
+                settle = _to_date(v)
+                if settle:
+                    break
+        if settle is None:
+            for v in row.values():
+                settle = _to_date(v)
+                if settle:
+                    break
+        numeric = {k: float(v) for k, v in row.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        value = None
+        for k, v in numeric.items():
+            if any(t in k.upper() for t in _MID_KEYS):
+                value = v
+                break
+        if value is None:
+            bid = next((v for k, v in numeric.items() if "BID" in k.upper()), None)
+            ask = next((v for k, v in numeric.items() if "ASK" in k.upper()), None)
+            if bid is not None and ask is not None:
+                value = (bid + ask) / 2.0
+        if value is None and len(numeric) == 1:
+            value = next(iter(numeric.values()))
+        if settle is not None and value is not None and value > 0:
+            points.append((settle, value))
+    points.sort()
+    return points, columns
+
+
+def outright_for_date(points, target, spot=None, spot_date=None):
+    for d, v in points:
+        if d == target:
+            return v, "EXACT"
+    before = [(d, v) for d, v in points if d < target]
+    after = [(d, v) for d, v in points if d > target]
+    if before and after:
+        (d0, v0), (d1, v1) = before[-1], after[0]
+        return v0 + (target - d0).days / (d1 - d0).days * (v1 - v0), "INTERP"
+    if not before and after and spot is not None and spot_date is not None and spot_date < target:
+        d1, v1 = after[0]
+        return spot + (target - spot_date).days / (d1 - spot_date).days * (v1 - spot), "INTERP_FROM_SPOT"
+    return None, ""
+
+
+def _element_rows(bulk):
+    rows = []
+    for i in range(bulk.numValues()):
+        row_el = bulk.getValueAsElement(i)
+        row = {}
+        for j in range(row_el.numElements()):
+            sub = row_el.getElement(j)
+            try:
+                row[str(sub.name())] = sub.getValue() if sub.numValues() == 1 else str(sub)
+            except Exception:
+                row[str(sub.name())] = str(sub)
+        rows.append(row)
+    return rows
+
+
+def fwd_curve_request(blpapi, session, service, tickers, timeout_ms=15000):
+    """{ticker: {points, columns, error}} from FWD_CURVE with FWD_CURVE_QUOTE_FORMAT=OUTRIGHTS."""
+    req = service.createRequest("ReferenceDataRequest")
+    for t in tickers:
+        req.getElement("securities").appendValue(t)
+    req.getElement("fields").appendValue("FWD_CURVE")
+    ov = req.getElement("overrides").appendElement()
+    ov.setElement("fieldId", "FWD_CURVE_QUOTE_FORMAT")
+    ov.setElement("value", "OUTRIGHTS")
+    session.sendRequest(req)
+    out = {t: {"points": [], "columns": [], "error": "no response for ticker"} for t in tickers}
+    while True:
+        ev = session.nextEvent(timeout_ms)
+        if ev.eventType() == blpapi.Event.TIMEOUT:
+            for t in tickers:
+                if out[t]["error"] == "no response for ticker":
+                    out[t]["error"] = "TIMEOUT"
+            break
+        for msg in ev:
+            if not msg.hasElement("securityData"):
+                if msg.hasElement("responseError"):
+                    for t in tickers:
+                        out[t]["error"] = f"responseError: {msg.getElement('responseError')}"
                 continue
-            tenor_err = errors.get(tenor, "no PX_LAST in response")
-        except Exception as exc:
-            tenor_err = f"request raised: {exc!r}"
-        rep.ticker(status="FAILED", instrument_id=r["instrument_id"], mark_type="FWD_OUTRIGHT", ticker=r["ticker"],
-                   settle_date=settle, value=None, request_type="ReferenceDataRequest FWD_CURVE / 1M tenor",
-                   source="", snapped_at="", detail=f"direct: {direct_err} | tenor {tenor}: {tenor_err}")
-    rep.check("forward", fwd_ok == len(reqs), f"{fwd_ok}/{len(reqs)} pairs returned a forward price")
+            sec = msg.getElement("securityData")
+            for i in range(sec.numValues()):
+                sd = sec.getValueAsElement(i)
+                t = sd.getElementAsString("security")
+                if sd.hasElement("securityError"):
+                    out[t] = {"points": [], "columns": [],
+                              "error": "securityError: " + sd.getElement("securityError").getElementAsString("message")}
+                    continue
+                fe = []
+                if sd.hasElement("fieldExceptions"):
+                    fx = sd.getElement("fieldExceptions")
+                    for k in range(fx.numValues()):
+                        x = fx.getValueAsElement(k)
+                        fe.append(f"{x.getElementAsString('fieldId')}: {x.getElement('errorInfo').getElementAsString('message')}")
+                fd = sd.getElement("fieldData")
+                if not fd.hasElement("FWD_CURVE"):
+                    out[t] = {"points": [], "columns": [], "error": ("fieldExceptions: " + "; ".join(fe)) if fe else "FWD_CURVE absent"}
+                    continue
+                rows = _element_rows(fd.getElement("FWD_CURVE"))
+                points, columns = points_from_rows(rows)
+                out[t] = {"points": points, "columns": columns,
+                          "error": "" if points else f"FWD_CURVE table not parseable; columns={columns}; first row={rows[0] if rows else None}"}
+        if ev.eventType() == blpapi.Event.RESPONSE:
+            break
+    return out
 
 
 # --------------------------------------------------------------------------- main

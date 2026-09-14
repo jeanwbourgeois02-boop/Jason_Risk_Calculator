@@ -136,6 +136,45 @@ def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str)
     return rows, failures
 
 
+def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Dict[str, float],
+                       snapped: str) -> Tuple[List[dict], List[str], List[dict]]:
+    """FWD_OUTRIGHT per (pair, settle date) from the bulk FWD_CURVE table (one request
+    per cycle for all pairs). EXACT tenor -> BBG_BFXFORWARD; interpolated -> BBG_INTERP
+    (never official). Returns (rows, warnings, failures)."""
+    from data.bloomberg.fwd_curve import outright_for_date, request_fwd_curves
+    from data.bloomberg.pull_marks import _get_blpapi
+    if not fwd_reqs:
+        return [], [], []
+    blpapi = _get_blpapi()
+    tickers = sorted({r.bbg_ticker for r in fwd_reqs})
+    try:
+        curves = request_fwd_curves(blpapi, session, service, tickers)
+    except Exception as exc:  # network layer raised: every forward fails with that reason
+        return [], [], [{"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT", "settle_date": r.settle_date,
+                         "detail": f"FWD_CURVE request raised: {exc!r}"} for r in fwd_reqs]
+    rows, warnings, failures = [], [], []
+    for r in fwd_reqs:
+        curve = curves.get(r.bbg_ticker, {"points": [], "error": "no curve"})
+        if not curve["points"]:
+            failures.append({"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT", "settle_date": r.settle_date,
+                             "detail": f"FWD_CURVE: {curve.get('error', 'no points')}"})
+            continue
+        target = date.fromisoformat(r.settle_date)
+        value, how = outright_for_date(curve["points"], target, spot_by_pair.get(r.instrument_id), as_of)
+        if value is None:
+            failures.append({"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT", "settle_date": r.settle_date,
+                             "detail": f"{r.settle_date} outside curve {curve['points'][0][0]}..{curve['points'][-1][0]}"
+                                       + (" and no live spot for near-date interpolation" if how == "" and
+                                          spot_by_pair.get(r.instrument_id) is None else "")})
+            continue
+        source = SRC_SPOT_FWD if how == "EXACT" else SRC_INTERP
+        if how != "EXACT":
+            warnings.append(f"{r.instrument_id} {r.settle_date}: {how.lower()} from FWD_CURVE tenors (source {SRC_INTERP})")
+        rows.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id, "settle_date": r.settle_date,
+                     "mark_type": "FWD_OUTRIGHT", "value": float(value), "source": source, "snapped_at": snapped})
+    return rows, warnings, failures
+
+
 def write_marks(conn: sqlite3.Connection, rows: List[dict]) -> int:
     """INSERT OR REPLACE so each 2-minute cycle refreshes the same key with a new
     snapped_at. Only known instruments; anything else is skipped and reported."""
@@ -153,9 +192,10 @@ def write_marks(conn: sqlite3.Connection, rows: List[dict]) -> int:
 
 
 def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost", port: int = 8194,
-              session_factory: Optional[Callable] = None) -> dict:
+              session_factory: Optional[Callable] = None, today: Optional[date] = None) -> dict:
     """One full cycle. Returns and writes the status dict. Never raises: any exception
-    becomes connected=False with the traceback in `reason`."""
+    becomes connected=False with the traceback in `reason`. `today` (live mark date)
+    defaults to the wall-clock date; injectable for tests."""
     from data.ingest.schema import connect
     started = _now_iso()
     status = {"time": started, "connected": False, "reason": "", "host": f"{host}:{port}",
@@ -185,15 +225,11 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             else:
                 session, service = session_factory()
             snapped = _now_iso()  # live pull: real wall-clock time, not the 15:00 NY convention
-            today = date.today()
+            today = today or date.today()
             spot_rows, spot_fail = _live_spot_rows(session, service, requests, today, diag, snapped)
             spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows}
             fwd_reqs = [r for r in requests if r.mark_type == "FWD_OUTRIGHT"]
-            fwd_rows, warnings, fwd_fail = pm.build_fwd_outright_rows(session, service, fwd_reqs, today,
-                                                                     spot_by_pair, diag)
-            for r in fwd_rows:
-                r["snapped_at"] = snapped
-                r["as_of_date"] = today.isoformat()
+            fwd_rows, warnings, fwd_fail = _fwd_outright_rows(session, service, fwd_reqs, today, spot_by_pair, snapped)
             rows = spot_rows + fwd_rows
             written = write_marks(conn, rows)
             status.update(connected=True, written=written, warnings=list(warnings)[:50],
@@ -245,7 +281,13 @@ class LiveFeed:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            self.last_status = pull_once(self.db_path, host=self.host, port=self.port)
+            try:
+                self.last_status = pull_once(self.db_path, host=self.host, port=self.port)
+            except Exception:  # pull_once already catches; this guards the thread itself
+                write_status(self.db_path, {"time": _now_iso(), "connected": False,
+                                            "reason": "feed thread error: " + traceback.format_exc().strip().splitlines()[-1],
+                                            "traceback": traceback.format_exc(), "requested": 0, "written": 0,
+                                            "failed": 0, "items": [], "warnings": []})
             self._stop.wait(self.interval)
 
 
@@ -259,6 +301,11 @@ def start_feed_if_available(db_path, host: str = "localhost", port: int = 8194,
                                "host": f"{host}:{port}", "requested": 0, "written": 0, "failed": 0,
                                "items": [], "warnings": []})
         return None, why
+    # Record immediately that the feed thread exists, so the UI never says "no pull recorded"
+    # while the first pull is in flight.
+    write_status(db_path, {"time": _now_iso(), "connected": False,
+                           "reason": "feed started; first Bloomberg pull in progress", "host": f"{host}:{port}",
+                           "requested": 0, "written": 0, "failed": 0, "items": [], "warnings": []})
     return LiveFeed(Path(db_path), interval, host, port).start(), ""
 
 

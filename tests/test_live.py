@@ -81,38 +81,40 @@ def test_pull_once_with_fake_session_writes_marks_and_itemised_status(tmp_path, 
     def fake_fetch_reference(session, service, tickers, fields, overrides=None, diag=None, tag=None):
         return {"AUDUSD Curncy": {"PX_LAST": 0.6612}}          # USDJPY missing -> FAILED
 
-    def fake_fwd(session, service, requests, as_of, spot_by_pair, diag, **kw):
-        rows, failures = [], []
-        for r in requests:
-            if r.instrument_id in spot_by_pair:
-                rows.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
-                             "settle_date": r.settle_date, "mark_type": "FWD_OUTRIGHT",
-                             "value": spot_by_pair[r.instrument_id] + 0.001, "source": "BBG_BFXFORWARD",
-                             "snapped_at": "x"})
-            else:
-                failures.append({"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT",
-                                 "settle_date": r.settle_date, "detail": "no SPOT to interpolate from"})
-        return rows, ["tenor fallback used for AUDUSD"], failures
+    from datetime import date as _date
+    from data.bloomberg import fwd_curve
+
+    def fake_curves(blpapi, session, service, tickers, timeout_ms=15000):
+        # AUDUSD: exact tenor on 2026-09-16 plus a later one; USDJPY: securityError
+        return {"AUDUSD Curncy": {"points": [(_date(2026, 9, 16), 0.6620), (_date(2026, 10, 16), 0.6630)],
+                                  "columns": ["Tenor", "Settlement Date", "Bid", "Ask"], "error": ""},
+                "USDJPY Curncy": {"points": [], "columns": [], "error": "securityError: not authorised"}}
 
     monkeypatch.setattr(pm, "fetch_reference", fake_fetch_reference)
-    monkeypatch.setattr(pm, "build_fwd_outright_rows", fake_fwd)
-    status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()))
-    assert status["connected"] is True and status["requested"] == 6
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", fake_curves)
+    live_day = _date(2026, 8, 20)   # injected "today": the 2026-08-24 workbook maturity lies between spot and 1st tenor
+    status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=live_day)
+    assert status["connected"] is True and status["requested"] == 6 and status["as_of_marks"] == "2026-08-20"
     by = {(i["instrument_id"], i["mark_type"], i["settle_date"]): i for i in status["items"]}
     assert by[("AUDUSD", "SPOT", status["as_of_marks"])]["status"] == "OK"
     assert by[("AUDUSD", "SPOT", status["as_of_marks"])]["value"] == 0.6612
     assert by[("USDJPY", "SPOT", status["as_of_marks"])] == {**by[("USDJPY", "SPOT", status["as_of_marks"])],
                                                              "status": "FAILED", "detail": "no PX_LAST returned"}
-    assert by[("USDJPY", "FWD_OUTRIGHT", "2026-09-18")]["status"] == "FAILED"
-    assert by[("AUDUSD", "FWD_OUTRIGHT", "2026-09-16")]["status"] == "OK"
-    assert status["failed"] == 3 and status["written"] == 3 and status["warnings"] == ["tenor fallback used for AUDUSD"]
+    jpy_fwd = by[("USDJPY", "FWD_OUTRIGHT", "2026-09-18")]
+    assert jpy_fwd["status"] == "FAILED" and "not authorised" in jpy_fwd["detail"]
+    aud_exact = by[("AUDUSD", "FWD_OUTRIGHT", "2026-09-16")]
+    assert aud_exact["status"] == "OK" and aud_exact["value"] == 0.6620 and aud_exact["source"] == "BBG_BFXFORWARD"
+    aud_interp = by[("AUDUSD", "FWD_OUTRIGHT", "2026-08-24")]        # workbook maturity: before first tenor
+    assert aud_interp["status"] == "OK" and aud_interp["source"] == "BBG_INTERP" and 0.6612 < aud_interp["value"] < 0.6620
+    assert status["failed"] == 3 and status["written"] == 3 and any("interp_from_spot" in w for w in status["warnings"])
     marks = conn.execute("SELECT instrument_id, mark_type, value, source FROM marks ORDER BY mark_type, settle_date").fetchall()
     assert ("AUDUSD", "SPOT", 0.6612, "BBG_BFXFORWARD") in marks and len(marks) == 3
     # the ladder now sees the live spot, and USDJPY is simply missing (never invented)
     rates = live.rates_from_marks(conn)
     assert rates["AUD"]["rate"] == 0.6612 and "JPY" not in rates
     # second cycle replaces rather than duplicates (same primary key, new snapped_at)
-    live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()))
+    live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=live_day)
     assert conn.execute("SELECT COUNT(*) FROM marks WHERE mark_type='SPOT'").fetchone()[0] == 1
 
 

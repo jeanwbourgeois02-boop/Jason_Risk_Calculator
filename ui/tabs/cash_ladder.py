@@ -62,6 +62,9 @@ TOOLBAR_ID = "cash-ladder-toolbar"
 SORT_ID = "cash-ladder-summary-sort"   # value: 'top' | 'all' (summary scope)
 STATUS_ID = "cash-ladder-status"
 REFRESH_ID = "cash-ladder-refresh"
+PULL_NOW_ID = "cash-ladder-pull-now"
+PULL_NOW_STATUS_ID = "cash-ladder-pull-now-status"
+PULL_REVISION_ID = "cash-ladder-pull-revision"
 REFRESH_MS = 120_000  # matches data.bloomberg.live.INTERVAL_SECONDS
 WORKBOOK_SECTION_ID = "cash-ladder-workbook-section"
 
@@ -215,6 +218,12 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
                 html.Div(id=STATUS_ID, className="toolbar-static",
                          children="Bloomberg: waiting for first refresh"),
             ]),
+            html.Div(className="toolbar-group", children=[
+                html.Label("Manual refresh"),
+                html.Div([html.Button("Pull from Bloomberg now", id=PULL_NOW_ID, n_clicks=0, className="btn"),
+                          html.Span(id=PULL_NOW_STATUS_ID, className="status-line", style={"marginLeft": "8px"})]),
+                dcc.Store(id=PULL_REVISION_ID),
+            ]),
             html.Div(className="toolbar-group toolbar-group--workbook", children=[
                 html.Label("Workbook MTM valuation: Workbook rates"),
                 build_source_dropdown(SOURCE_DROPDOWN_ID),
@@ -243,8 +252,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Input("rates-revision", "data"),
         Input(SORT_ID, "value"),
         Input(REFRESH_ID, "n_intervals"),
+        Input(PULL_REVISION_ID, "data"),
     )
-    def _update_table(source_value, as_of_date, _rates_revision=None, sort="usd", _n_intervals=0):
+    def _update_table(source_value, as_of_date, _rates_revision=None, sort="usd", _n_intervals=0, _pull_rev=None):
         """Returns (tab body, toolbar status text). Re-runs every REFRESH_MS so the ladder
         follows the 2-minute Bloomberg feed (data.bloomberg.live)."""
         body, toolbar_status = _render(source_value, as_of_date, sort or "usd")
@@ -332,3 +342,21 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             table_from_ladder(transposed, label_col=TRANSPOSED_LABEL_COL),
             ]),
         ]), toolbar_status
+
+    @app.callback(
+        Output(PULL_NOW_STATUS_ID, "children"),
+        Output(PULL_REVISION_ID, "data"),
+        Input(PULL_NOW_ID, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _pull_now(n_clicks):
+        """Synchronous single Bloomberg pull (data.bloomberg.live.pull_once); the returned
+        revision re-triggers the ladder so new marks show immediately."""
+        import time
+        from data.bloomberg.live import pull_once
+        status = pull_once(get_db_path())
+        if status.get("connected"):
+            text = f"Pulled {status.get('time', '')}: {status.get('written', 0)} marks written, {status.get('failed', 0)} failed"
+        else:
+            text = f"Not pulled: {status.get('reason', 'unknown')}"
+        return text, str(time.time())

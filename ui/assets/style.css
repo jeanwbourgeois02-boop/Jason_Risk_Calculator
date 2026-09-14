@@ -55,6 +55,9 @@ p { margin: 6px 0; }
 .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
 .badge--ndf { background: var(--ndf-bg); color: var(--ndf); }
 .badge--mock { background: var(--warn-bg); color: var(--warn); }
+.btn { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px;
+  font-weight: 600; cursor: pointer; }
+.btn:hover { background: #17499a; }
 .badge--live { background: #e3f5ea; color: var(--pos); }
 .badge--down { background: #fdecea; color: var(--neg); }
 .status-panel--down { background: #fdecea; border-color: #f3b9b3; }
