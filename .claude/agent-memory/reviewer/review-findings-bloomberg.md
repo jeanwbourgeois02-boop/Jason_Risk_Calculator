@@ -5,7 +5,7 @@ metadata:
   type: project
 ---
 
-Five review passes on 2026-09-13. Fifth pass = round 3 of the diagnostics/--probe drop
+Five review passes on 2026-09-13, plus a 2026-09-14 one-line diff check (NY -> _ny()). Fifth pass = round 3 of the diagnostics/--probe drop
 (still uncommitted vs 1ddaf6a): 97/97 tests pass; imports stdlib+blpapi only (socket/blpapi
 lazy); ownership clean; schema.py/marks_csv.py untouched so BBG_INTERP still never official;
 snapped_at still 15:00 America/New_York. No P&L code in this drop.
@@ -44,14 +44,18 @@ snapped_at still 15:00 America/New_York. No P&L code in this drop.
   ignore failures with candidate=True (or have run_probe put only non-candidate failures in
   summary.failures). Add a test that runs pull_marks.main(--probe) with candidate-only
   fieldExceptions and asserts diagnose.main == 0.
-- W: `NY = ZoneInfo("America/New_York")` at pull_marks.py L132 module scope. zoneinfo.TZPATH is
-  () on Windows, so it resolves only via the tzdata pip package; without it the script dies at
-  import with ZoneInfoNotFoundError, before argparse, no diag JSON (reproduced by hiding tzdata).
-  Recommended as warning/operator prerequisite, not critical (fails loud, cannot mis-mark), but
-  the module's "ALWAYS writes a diag" contract is violated: make NY lazy (`_ny()`), catch
-  ZoneInfoNotFoundError in main() after argparse -> diag failure stage "tz_prerequisite" + clear
-  "pip install tzdata" message. Never fall back to a fixed -04:00 (CLAUDE.md requires the
-  offset resolved from the zone per date).
+- W (2026-09-14 re-check, uncommitted diff): tzdata prerequisite is HALF done. `_ny()` lazy
+  loader exists (L135) and all 4 call sites use it (L185/222/237/277; L277 was an undefined `NY`
+  NameError in HEAD 70a1a25, fixed in the diff -> 115 passed). BUT `_ny()`'s docstring claims
+  main() catches ZoneInfoNotFoundError -> exit 6; grep of main() shows NO such handler, no
+  "6" in the exit-code table, and the very first `diag.record_environment()` (L1324) is
+  before the try/finally that writes the diag. Reproduced with tzdata hidden: probe run raises
+  ZoneInfoNotFoundError out of main(), no diag JSON. Net effect: crash moved from import time
+  to main() time -- still loud, still no diag. Fix: wrap L1324 (or resolve `_ny()` right after
+  Diagnostics()) in try/except ZoneInfoNotFoundError -> failure stage "tz_prerequisite",
+  "pip install tzdata" hint, exit 6, write diag; add exit 6 to the docstring table; add a
+  test that hides tzdata (meta_path finder blocking `tzdata` + `zoneinfo.reset_tzpath(to=[])`)
+  and asserts exit 6 + diag written. Never fall back to fixed -04:00.
 - W: no tests for W-2 propagation paths (SPOT SECURITY_ERROR -> FWD SECURITY_ERROR; scale
   FIELD_EXCEPTION -> FWD FIELD_EXCEPTION).
 - Still open from second pass: bnp_marks NaN Price/Fx; 15:00 snapped_at label vs 17:00 close.

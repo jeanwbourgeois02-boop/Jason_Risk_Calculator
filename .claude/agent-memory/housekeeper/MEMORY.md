@@ -1,5 +1,5 @@
-- [Build environment](build-environment.md) — use `py -3`, pytest/pandas/dash installed, blpapi absent, 13 pre-existing test_bloomberg failures (NY NameError), untracked files invisible to `git diff`
+- [Build environment](build-environment.md) — use `py -3`, pytest/pandas/dash installed, blpapi absent, suite baseline 115 passed (NY NameError fixed 2026-09-14), untracked files invisible to `git diff`
 - [BNP file facts](bnp-file-facts.md) — row counts, netting groups, blank Fx cells, Fx=1.0 on XXXUSD rows, ESU6 Position=0, NM Strategy column
 - [Spawn process](feedback-spawn-process.md) — independent specialists parallel in background, dependent ones sequential; empty output file = still running, never re-spawn; reviewer on git diff only, max two passes, warnings reported not fixed
 - [Brief premises](feedback-brief-premises.md) — verify data-derivation claims from a brief on the real file before coding them (Fx=1.0 incident)
-- [BBG diagnostics lessons](bbg-diagnostics-lessons.md) — phrase exit-code rules as requested-vs-written keys; reviewer executes the blpapi fake; tzdata risk on the terminal machine
+- [BBG diagnostics lessons](bbg-diagnostics-lessons.md) — phrase exit-code rules as requested-vs-written keys; reviewer executes the blpapi fake; tzdata crash still bypasses diag write (item 39); verify docstring-promised handlers exist

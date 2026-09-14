@@ -274,7 +274,7 @@ class Diagnostics:
             "session_started": session_started,
             "service_opened": service_opened,
             "machine_time_local": datetime.now().isoformat(),
-            "machine_time_america_new_york": datetime.now(NY).isoformat(),
+            "machine_time_america_new_york": datetime.now(_ny()).isoformat(),
             "machine_timezone": str(datetime.now().astimezone().tzinfo),
         }
 
