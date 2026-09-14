@@ -21,6 +21,7 @@ import dash
 from dash import dcc, html
 
 from ui.tabs import cash_ladder, pnl
+from ui import uploads, workbook_rates
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
@@ -122,22 +123,43 @@ def build_layout(data: dict) -> html.Div:
             children = [pnl.build_layout(default_date=default_date)]
         else:
             children = [build_tab_placeholder(label, data)]
-        tabs.append(dcc.Tab(label=label, children=children))
+        tabs.append(dcc.Tab(label=label, children=children,
+                            className="tab", selected_className="tab--selected"))
     return html.Div([
         html.H1("Risk monitor"),
-        dcc.Tabs(children=tabs),
+        dcc.Tabs(children=tabs, parent_className="tabs-bar", className="tabs-strip"),
+        uploads.layout(),
+        workbook_rates.layout(default_date),
     ])
 
 
-def create_app(db_path: Union[str, Path, None] = None) -> dash.Dash:
-    """Build the Dash app. db_path defaults to RISK_DB / data/raw/risk.db."""
+def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False) -> dash.Dash:
+    """Build the Dash app. db_path defaults to RISK_DB / data/raw/risk.db.
+    start_feed=True (the launcher) starts the Bloomberg live feed thread when available."""
     resolved = Path(db_path) if db_path is not None else get_db_path()
     data = load_summary(resolved)
     app = dash.Dash(__name__)
     app.layout = build_layout(data)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
     pnl.register_callbacks(app, get_db_path=lambda: resolved)
+    uploads.register(app, get_db_path=lambda: resolved)
+    workbook_rates.register(app, get_db_path=lambda: resolved)
+    app.bloomberg_feed = start_bloomberg_feed(resolved) if start_feed else None
     return app
+
+
+def start_bloomberg_feed(db_path: Path):
+    """Start the 2-minute Bloomberg feed when blpapi and a Bloomberg API service are
+    present on this computer (data.bloomberg.live). Otherwise record why in the status
+    file and run without live rates; no prices are invented. RISK_LIVE=0 disables."""
+    if os.environ.get("RISK_LIVE", "1") == "0":
+        return None
+    from data.bloomberg.live import start_feed_if_available
+    host = os.environ.get("BLP_HOST", "localhost")
+    port = int(os.environ.get("BLP_PORT", "8194"))
+    feed, why = start_feed_if_available(db_path, host=host, port=port)
+    print(f"Bloomberg feed: {'started (every 2 min)' if feed else 'not started: ' + why}", flush=True)
+    return feed
 
 
 if __name__ == "__main__":

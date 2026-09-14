@@ -50,7 +50,7 @@ def test_marks_columns_and_sets():
     assert marks_csv.MARK_TYPES == {
         "SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "PAR_RATE", "PV_USD", "DV01_USD", "PREMIUM", "DELTA"}
     assert marks_csv.SOURCES == {
-        "BNP_BVAL", "BBG_BFXFORWARD", "BBG_BDH", "BBG_BDP", "MANUAL", "BBG_INTERP"}
+        "BNP_BVAL", "BBG_BFXFORWARD", "BBG_BDH", "BBG_BDP", "MANUAL", "BBG_INTERP", "WORKBOOK_REFERENCE"}
     # BBG_INTERP is never official.
     assert "BBG_INTERP" not in schema.OFFICIAL_MARK_SOURCE.values()
 
@@ -249,7 +249,7 @@ def test_export_request(tmp_path):
     assert n == len(rows)
     kinds = {(r["instrument_id"], r["mark_type"], r["settle_date"]) for r in rows}
     assert ("EURUSD", "SPOT", AS_OF) in kinds
-    assert ("EURUSD", "FWD_OUTRIGHT", "2026-09-16") in kinds
+    assert ("EURUSD", "FWD_OUTRIGHT", "2026-08-24") in kinds
     assert ("ESU6 Index", "FUTURE_PX", "2026-09-18") in kinds
 
 

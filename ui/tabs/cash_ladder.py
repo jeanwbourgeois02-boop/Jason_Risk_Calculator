@@ -58,6 +58,12 @@ from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
 SOURCE_DROPDOWN_ID = "cash-ladder-source"
 DATE_PICKER_ID = "cash-ladder-date"
 TABLE_CONTAINER_ID = "cash-ladder-table-container"
+TOOLBAR_ID = "cash-ladder-toolbar"
+SORT_ID = "cash-ladder-summary-sort"   # value: 'top' | 'all' (summary scope)
+STATUS_ID = "cash-ladder-status"
+REFRESH_ID = "cash-ladder-refresh"
+REFRESH_MS = 120_000  # matches data.bloomberg.live.INTERVAL_SECONDS
+WORKBOOK_SECTION_ID = "cash-ladder-workbook-section"
 
 TRANSPOSED_LABEL_COL = "settle_date"
 USD_EQUIVALENT_COL = "usd_equivalent"
@@ -160,13 +166,61 @@ def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
 
 
+def valuation_table(df: pd.DataFrame, table_id: str) -> dash_table.DataTable:
+    """Preserve rate precision and text labels while formatting dollar amounts."""
+    rates = {"fill", "mark", "spot_usd_per_local", "denominator"}
+    labels = {
+        "ccy": "Local currency", "settle_date": "Settlement date",
+        "local_amount": "Signed local amount", "fill": "Entry FX",
+        "mark": "Workbook valuation FX", "valuation_date": "Workbook pricing date",
+        "usd_entry": "Signed USD entry", "usd_valuation": "Workbook USD valuation",
+        "pnl_usd": "USD P&L", "spot_usd_per_local": "General spot (USD/local; reference)",
+        "physical_usd_valuation": "Actual local leg at valuation FX (USD)",
+        "valuation_residual": "Workbook less actual leg value (USD)",
+        "denominator": "Workbook divisor", "workbook_quantity": "Workbook quantity C",
+    }
+    formatted = df.copy()
+    for col in formatted:
+        if col in rates:
+            formatted[col] = formatted[col].map(lambda value: "" if pd.isna(value) else f"{value:,.8f}")
+        elif pd.api.types.is_numeric_dtype(formatted[col]):
+            formatted[col] = formatted[col].map(format_cell)
+    return dash_table.DataTable(
+        id=table_id,
+        columns=[{"name": labels.get(col, col.replace("_", " ").title()), "id": col}
+                 for col in formatted],
+        data=formatted.to_dict("records"),
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "right", "fontFamily": "monospace", "minWidth": "110px"},
+        style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
+        page_size=25,
+    )
+
+
 def build_layout(default_date: Optional[str] = None) -> html.Div:
     """Controls + an (initially empty) table container for the Cash ladder tab. The
     table itself is filled in by the callback registered in register_callbacks."""
-    return html.Div([
-        html.H3("Cash ladder"),
-        build_source_dropdown(SOURCE_DROPDOWN_ID),
-        build_date_picker(DATE_PICKER_ID, default_date=default_date),
+    return html.Div(className="cash-ladder", children=[
+        html.H3("FX Risk and Settlement Ladder"),
+        html.Div(id=TOOLBAR_ID, className="toolbar", children=[
+            build_date_picker(DATE_PICKER_ID, default_date=default_date),
+            html.Div(className="toolbar-group", children=[
+                html.Label("Currency order"),
+                dcc.RadioItems(id=SORT_ID, value="usd", inline=True,
+                               options=[{"label": "|USD delta|", "value": "usd"},
+                                        {"label": "A-Z", "value": "alpha"}]),
+            ]),
+            html.Div(className="toolbar-group toolbar-group--exposure", children=[
+                html.Label("Book / Bloomberg feed"),
+                html.Div(id=STATUS_ID, className="toolbar-static",
+                         children="Bloomberg: waiting for first refresh"),
+            ]),
+            html.Div(className="toolbar-group toolbar-group--workbook", children=[
+                html.Label("Workbook MTM valuation: Workbook rates"),
+                build_source_dropdown(SOURCE_DROPDOWN_ID),
+            ]),
+        ]),
+        dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
         html.Div(id=TABLE_CONTAINER_ID),
     ])
 
@@ -183,17 +237,28 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     @app.callback(
         Output(TABLE_CONTAINER_ID, "children"),
+        Output(STATUS_ID, "children"),
         Input(SOURCE_DROPDOWN_ID, "value"),
         Input(DATE_PICKER_ID, "date"),
+        Input("rates-revision", "data"),
+        Input(SORT_ID, "value"),
+        Input(REFRESH_ID, "n_intervals"),
     )
-    def _update_table(source_value, as_of_date):
+    def _update_table(source_value, as_of_date, _rates_revision=None, sort="usd", _n_intervals=0):
+        """Returns (tab body, toolbar status text). Re-runs every REFRESH_MS so the ladder
+        follows the 2-minute Bloomberg feed (data.bloomberg.live)."""
+        body, toolbar_status = _render(source_value, as_of_date, sort or "usd")
+        return body, toolbar_status
+
+    def _render(source_value, as_of_date, sort):
+        toolbar_status = "Bloomberg: status unknown"
         if not as_of_date:
-            return message_box("No as-of date available.")
+            return message_box("No as-of date available."), toolbar_status
 
         try:
             from engine.ladder.views import ladder_table
         except ImportError as exc:
-            return message_box(f"Cash ladder view not available yet ({exc}).")
+            return message_box(f"Cash ladder view not available yet ({exc}).", ), toolbar_status
 
         # Local import: keeps this module importable even if ui.app changes shape.
         from ui.app import connect_readonly
@@ -202,10 +267,68 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         try:
             conn = connect_readonly(db_path)
         except sqlite3.OperationalError as exc:
-            return message_box(f"Database not available ({exc}).")
+            return message_box(f"Database not available ({exc})."), toolbar_status
         try:
             df = ladder_table(conn, as_of_date, source_value_to_param(source_value))
+            from engine.ladder.valuation import ladder_trade_valuation, ladder_valuation_summary
+            detail = ladder_trade_valuation(conn, as_of_date, source_value_to_param(source_value))
+            summary = ladder_valuation_summary(detail)
+            # Exposure ladder (spec): additional, separately labelled section built from
+            # engine.ladder.exposure via records_from_db; mock rates, never Bloomberg.
+            try:
+                from engine.ladder.exposure import build_exposure
+                from engine.ladder.exposure_adapter import records_from_db
+                from data.bloomberg.live import rates_from_marks, read_status
+                from ui.tabs.exposure import BOOK_DISPLAY, exposure_section, rate_status_text
+                from ui.tabs.market_data import diagnostics_panel, feed_headline
+                records, unresolved = records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
+                # Rates: latest official SPOT marks written by the Bloomberg feed. Never mock.
+                rates = rates_from_marks(conn)
+                feed_status = read_status(db_path)
+                # Workbook MTM period figures for the compact status line: existing engine
+                # function, never recomputed here; None -> 'Workbook MTM unavailable'.
+                try:
+                    from engine.pnl.aggregate import period_pnl
+                    period = period_pnl(conn, as_of_date, source=source_value_to_param(source_value))
+                except Exception:  # pricing not loaded / engine unavailable
+                    period = None
+                exposure = html.Div([
+                    exposure_section(records, unresolved, as_of_date, rates=rates, period=period,
+                                     sort=sort, feed_status=feed_status),
+                    diagnostics_panel(feed_status, rates),
+                ])
+                books = ", ".join(sorted({r["book"] for r in records})) or "none"
+                result = build_exposure(records, rates)
+                toolbar_status = f"Book {books} · {rate_status_text(result)} · {feed_headline(feed_status)}"
+            except ImportError as exc:
+                exposure = message_box(f"Exposure ladder not available ({exc}).")
         finally:
             conn.close()
         transposed = transpose_ladder(df)
-        return table_from_ladder(transposed, label_col=TRANSPOSED_LABEL_COL)
+        missing = int(detail["pnl_usd"].isna().sum())
+        status = (f"USD P&L incomplete: {missing} of {len(detail)} open forwards lack workbook pricing."
+                  if missing else f"{len(detail)} open forwards priced using workbook formulas.")
+        return html.Div([
+            exposure,
+            html.Details(id=WORKBOOK_SECTION_ID, className="section section--secondary details", open=False, children=[
+            html.Summary("Workbook mark-to-market — separate calculation"),
+            html.P("Broker/workbook P&L methodology from HA-portfolio vJean.xlsx (shared valuation date, "
+                   "workbook divisor). This is not the screenshot-style Exposure P&L shown above.",
+                   className="section-kicker"),
+            html.H4("Currency and settlement date: workbook P&L"),
+            html.P(status),
+            html.P("Signed USD entry + workbook USD valuation = USD P&L. "
+                   "Rates are shown separately for each trade below. Cash balances are excluded from P&L. "
+                   "NDF rows show notionals, not gross cash settlement amounts."),
+            valuation_table(summary, "cash-ladder-valuation-summary"),
+            html.H4("Trade calculation detail"),
+            html.P("The workbook divisor determines P&L conversion. General spot is displayed for reference. "
+                   "Any difference between workbook value and the actual broker local leg is shown explicitly; "
+                   "blank pricing cells indicate unavailable inputs."),
+            valuation_table(detail, "cash-ladder-valuation-detail"),
+            html.H4("Cash settlement amounts and current balances"),
+            html.P("This overview includes balances and deliverable cash flows. Its USD equivalent uses spot "
+                   "and is a cash value, not P&L."),
+            table_from_ladder(transposed, label_col=TRANSPOSED_LABEL_COL),
+            ]),
+        ]), toolbar_status

@@ -138,8 +138,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(CONTENT_CONTAINER_ID, "children"),
         Input(SOURCE_DROPDOWN_ID, "value"),
         Input(DATE_PICKER_ID, "date"),
+        Input('rates-revision', 'data'),
     )
-    def _update_content(source_value, as_of_date):
+    def _update_content(source_value, as_of_date, rates_revision=None):
         if not as_of_date:
             return message_box("No as-of date available.")
 
@@ -168,10 +169,15 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             conn.close()
 
         return html.Div([
+            html.P('HA-portfolio vJean formulas, applied to recorded trades. Missing inputs are blank, not zero. '
+                   'This is the All FX trades calculation; the Portfolio sheet has additional product inputs and manual adjustments.'),
+            html.P(f"Shared FX valuation date: {period.get('valuation_date', '')}"),
             html.H4("P&L by pair"),
             pairs_table_from_by_pair(by_pair),
             html.H4("Book totals"),
+            message_box(totals.get('status', '')),
             totals_table_from_book_totals(totals),
             html.H4("Period P&L"),
+            html.P('Daily follows All FX trades M4. 5d, MTD and YTD remain unavailable because this workbook does not define those calculations.'),
             period_table_from_period_pnl(period),
         ])

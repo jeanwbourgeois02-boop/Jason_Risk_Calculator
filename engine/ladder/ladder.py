@@ -12,10 +12,10 @@ import pandas as pd
 
 # ------------------------------------------------------------------------- cash ladder
 _LEG_SQL = """
-SELECT ccy, settle_date, SUM(amount) AS amount
-FROM trade_legs
-WHERE settles_cash = 1 AND settle_date >= :as_of
-GROUP BY ccy, settle_date
+SELECT l.ccy, l.settle_date, SUM(l.amount) AS amount
+FROM trade_legs l JOIN trades t USING (trade_id)
+WHERE l.settles_cash = 1 AND l.settle_date >= :as_of AND t.trade_date <= :as_of
+GROUP BY l.ccy, l.settle_date
 """
 
 _CASH_POSITION_SQL = """

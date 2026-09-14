@@ -32,7 +32,7 @@ MARK_TYPES = {
 # points between standard tenors (see pull_marks.py). It is never official: the
 # marks_official view (data/ingest/schema.py OFFICIAL_MARK_SOURCE) is unchanged, so
 # BBG_INTERP rows never win over BBG_BFXFORWARD.
-SOURCES = {"BNP_BVAL", "BBG_BFXFORWARD", "BBG_BDH", "BBG_BDP", "MANUAL", "BBG_INTERP"}
+SOURCES = {"BNP_BVAL", "BBG_BFXFORWARD", "BBG_BDH", "BBG_BDP", "MANUAL", "BBG_INTERP", "WORKBOOK_REFERENCE"}
 
 
 @dataclass(frozen=True)
@@ -337,8 +337,8 @@ def export_request(conn: sqlite3.Connection, as_of_date: str, path: Union[str, P
     Rows:
     - SPOT for every FX instrument (asset_class = 'FX') that has at least one open leg
       (trade_legs.settle_date > as_of_date via trades), settle_date = as_of_date.
-    - FWD_OUTRIGHT for each distinct (instrument_id, settle_date) of open legs
-      (settle_date > as_of_date) of those instruments.
+    - FWD_OUTRIGHT for each recorded FX instrument traded through as_of_date,
+      all at WORKDAY(as_of_date,5), matching the reference workbook.
     - FUTURE_PX for every FUTURE instrument that is not yet expired (expiry_date > as_of)
       and has an open position: either a trade_legs row with settle_date > as_of, or a
       positions row for as_of (mirrors the FX branch's "open leg" test). An expired
@@ -358,11 +358,15 @@ def export_request(conn: sqlite3.Connection, as_of_date: str, path: Union[str, P
             "settle_date": as_of_date, "mark_type": "SPOT",
         })
 
-    fwd = conn.execute(_OPEN_FX_LEGS_SQL, {"as_of": as_of_date}).fetchall()
-    for instrument_id, bbg_ticker, settle_date in fwd:
+    from engine.pnl.pnl import workbook_valuation_date
+    fwd = conn.execute(
+        "SELECT DISTINCT i.instrument_id,i.bbg_ticker FROM instruments i "
+        "JOIN trades t USING(instrument_id) WHERE i.asset_class='FX' "
+        "AND t.trade_date<=? ORDER BY i.instrument_id", (as_of_date,)).fetchall()
+    for instrument_id, bbg_ticker in fwd:
         rows.append({
             "instrument_id": instrument_id, "bbg_ticker": bbg_ticker,
-            "settle_date": settle_date, "mark_type": "FWD_OUTRIGHT",
+            "settle_date": workbook_valuation_date(as_of_date), "mark_type": "FWD_OUTRIGHT",
         })
 
     fut = conn.execute(_FUTURE_INSTRUMENTS_SQL, {"as_of": as_of_date}).fetchall()

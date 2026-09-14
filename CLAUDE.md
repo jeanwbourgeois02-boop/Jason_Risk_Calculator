@@ -1,5 +1,13 @@
 # risk-monitor
 
+## User-authorised correction ? 2026-09-14
+
+`data/raw/HA-portfolio vJean.xlsx` is the calculation specification. `HA_PNL_*.csv` supplies trades/positions. The user explicitly requires literal workbook arithmetic, including shared WORKDAY(today,5) valuation, fill/mark denominator branches, T?2 using T?1 denominator, and BRL N17=O17. This supersedes EVERY conflicting instruction below and in `.claude/agents/`, including the former "Must not replicate" list. Do not substitute financially preferred conventions. See `docs/excel-parity-audit.md` for the exact formula evidence and saved-value limitations.
+
+Current application calculates the All FX trades formulas for recorded forwards/futures; reference workbook uploads do not add trades. Cash ladder provides local amounts, entry/valuation/general FX, signed USD entry, workbook valuation and P&L. WORKBOOK_REFERENCE marks are explicit inputs (not automatically official Bloomberg marks). Missing values stay missing. Portfolio Net/Gross requires manual adjustments not loaded; 5d/MTD/YTD have no workbook formula. These must be unavailable rather than replaced with generic calculations.
+
+The remaining contract text is historical wherever it conflicts with this correction.
+
 FX and futures risk monitor: cash ladder, delta per currency, daily / 5d / MTD / YTD P&L. Python; Dash front end later. Fund NMMF, base currency USD, prime broker BNP. Reference inputs: `data/raw/HA_PNL_20260818.csv` (BNP position and P&L snapshot, 242 rows × 137 cols) and `data/raw/HA-portfolio vJean.xlsx` (the Excel calculator this app replaces). Open items live in `docs/open-questions.md`, not here.
 
 ## Working mode

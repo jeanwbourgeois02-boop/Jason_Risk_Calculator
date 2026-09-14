@@ -15,6 +15,7 @@ from dash import dcc, html
 
 SOURCE_OFFICIAL = "OFFICIAL"
 SOURCE_OPTIONS = [
+    {"label": "Workbook rates", "value": "WORKBOOK_REFERENCE"},
     {"label": "Official", "value": SOURCE_OFFICIAL},
     {"label": "BNP_BVAL", "value": "BNP_BVAL"},
 ]
@@ -36,7 +37,7 @@ def build_source_dropdown(dropdown_id: str) -> html.Div:
             dcc.Dropdown(
                 id=dropdown_id,
                 options=SOURCE_OPTIONS,
-                value=SOURCE_OFFICIAL,
+                value="WORKBOOK_REFERENCE",
                 clearable=False,
             ),
         ],

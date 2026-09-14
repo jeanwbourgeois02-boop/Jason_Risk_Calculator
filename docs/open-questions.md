@@ -1,5 +1,7 @@
 # Open questions
 
+**2026-09-14 user decision:** HA-portfolio vJean is authoritative. Prior proposed defaults that alter its arithmetic are superseded. See `excel-parity-audit.md` and the correction at the top of CLAUDE.md. Full live FX numerical parity awaits valid rates; the supplied workbook caches have Bloomberg/Excel errors.
+
 Unresolved items from the data-contract review of `data/raw/HA_PNL_20260818.csv` and `data/raw/HA-portfolio vJean.xlsx` (2026-09-13). Each has a proposed default; the default is what the app assumes until the question is closed. Settled decisions live in `CLAUDE.md`.
 
 ## Assumptions in force, unconfirmed
