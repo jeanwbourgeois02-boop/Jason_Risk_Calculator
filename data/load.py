@@ -39,13 +39,13 @@ DEFAULT_DB = Path("data/raw/risk.db")
 
 
 def _values_close(a, b) -> bool:
-    """Small abs/relative float tolerance so re-parsing an identical file never flags a
-    conflict; see data/ingest/bnp.py's _values_match for the trades/legs/positions twin."""
+    """1e-9 absolute float tolerance, no relative term (a relative band would let a small
+    amendment on a large value pass as a skip); see data/ingest/bnp.py's _values_match."""
     try:
         af, bf = float(a), float(b)
     except (TypeError, ValueError):
         return a == b
-    return abs(af - bf) <= max(1e-6, 1e-6 * max(abs(af), abs(bf)))
+    return abs(af - bf) <= 1e-9
 
 
 def _load_bnp_marks_idempotent(csv_path, conn, as_of_date=None):
@@ -185,10 +185,10 @@ def run(argv: Optional[List[str]] = None) -> int:
     conflict_details += bnp_res.conflict_details
     n_trades_loaded = len(bnp_res.trades) - bnp_res.skipped["trades"] - bnp_res.conflicts["trades"]
     n_trades_skipped = bnp_res.skipped["trades"]
-    # Mirrors n_trades_skipped: the printed total counts trades-table conflicts (one per
-    # amended trade_id); leg/position conflicts for the same trade_id are still detailed
-    # on stderr via conflict_details but are not double-counted in the headline total.
-    n_trades_conflicts = bnp_res.conflicts["trades"]
+    # Every table feeds the headline count and the exit code: an amended Local Cost
+    # changes only trade_legs / positions, and CURRENCY / FUTURES rows have no trades row,
+    # so counting trades-table conflicts alone would report conflicts=0 for those.
+    n_trades_conflicts = sum(bnp_res.conflicts.values())
 
     n_marks_loaded, n_marks_skipped, n_marks_conflicts, marks_rejects, marks_conflict_details = (
         _load_bnp_marks_idempotent(args.csv_path, conn, as_of_date=args.as_of_date))

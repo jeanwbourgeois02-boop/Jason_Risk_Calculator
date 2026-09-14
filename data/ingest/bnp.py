@@ -587,14 +587,13 @@ def _rows(objs: Iterable) -> List[tuple]:
 
 
 # ---------------------------------------------------- duplicate-key content comparison
-_CONFLICT_TOL_ABS = 1e-6
-_CONFLICT_TOL_REL = 1e-6
+_CONFLICT_TOL_ABS = 1e-9  # absolute only: CSV -> SQLite REAL round-trips exactly, so no relative band
 
 
 def _values_match(a, b) -> bool:
-    """True if ``a`` (parsed) and ``b`` (existing DB value) are the same, allowing a
-    small absolute/relative tolerance for floats so re-parsing an identical file never
-    flags a conflict (e.g. float round-tripping through the DB)."""
+    """True if ``a`` (parsed) and ``b`` (existing DB value) are the same. Floats compare
+    with a 1e-9 absolute tolerance only (no relative term: a relative band would let a
+    1-unit amendment on a large leg pass as a skip)."""
     if isinstance(a, float) or isinstance(b, float):
         try:
             af, bf = float(a), float(b)
@@ -602,7 +601,7 @@ def _values_match(a, b) -> bool:
             return a == b
         if math.isnan(af) or math.isnan(bf):
             return math.isnan(af) and math.isnan(bf)
-        return abs(af - bf) <= max(_CONFLICT_TOL_ABS, _CONFLICT_TOL_REL * max(abs(af), abs(bf)))
+        return abs(af - bf) <= _CONFLICT_TOL_ABS
     return a == b
 
 

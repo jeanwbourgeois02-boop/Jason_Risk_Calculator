@@ -2,6 +2,10 @@
 
 FX and futures risk monitor: cash ladder, delta per currency, daily / 5d / MTD / YTD P&L. Python; Dash front end later. Fund NMMF, base currency USD, prime broker BNP. Reference inputs: `data/raw/HA_PNL_20260818.csv` (BNP position and P&L snapshot, 242 rows × 137 cols) and `data/raw/HA-portfolio vJean.xlsx` (the Excel calculator this app replaces). Open items live in `docs/open-questions.md`, not here.
 
+## Working mode
+
+Default: lean. Work directly in this session on the model set by `/model`. Do not spawn the housekeeper, specialists or reviewer unless the user's message explicitly names them. Keep each task to one module and one test file. End every task with `py -3 -m pytest tests/ -q` and report the pass count. Full agent pipeline is reserved for changes to P&L arithmetic in `engine/` and is invoked only by the user.
+
 ## Data contract
 
 ### Tables

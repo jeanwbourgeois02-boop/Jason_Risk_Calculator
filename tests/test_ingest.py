@@ -628,7 +628,7 @@ def test_load_cli_regex_failing_row_exits_nonzero_and_zero_with_allow_rejects(tm
 
 def test_load_cli_amended_trade_is_a_conflict_not_a_silent_skip(tmp_path, capsys):
     """Same trade_id re-appears in a later file with a different fill rate: this must
-    surface as conflicts=1 with a non-zero exit, and the original DB row must survive
+    surface as conflicts=3 (trades, legs, positions) with a non-zero exit, and the original DB row must survive
     untouched; --allow-conflicts exits 0 without altering the DB."""
     from data import load as load_mod
 
@@ -651,7 +651,7 @@ def test_load_cli_amended_trade_is_a_conflict_not_a_silent_skip(tmp_path, capsys
     rc2 = load_mod.run([str(p2), "--db", str(db_path)])
     out2 = capsys.readouterr().out
     assert rc2 != 0
-    assert "conflicts=1" in out2
+    assert "conflicts=3" in out2
     assert "rejects=0" in out2
 
     conn = schema.connect(db_path)
@@ -665,7 +665,7 @@ def test_load_cli_amended_trade_is_a_conflict_not_a_silent_skip(tmp_path, capsys
     rc3b = load_mod.run([str(p2), "--db", str(db_path3), "--allow-conflicts"])
     out3b = capsys.readouterr().out
     assert rc3b == 0
-    assert "conflicts=1" in out3b
+    assert "conflicts=3" in out3b
     conn = schema.connect(db_path3)
     assert conn.execute("SELECT price FROM trades WHERE trade_id='111'").fetchone()[0] == orig_price
     conn.close()
@@ -698,11 +698,79 @@ def test_load_cli_amended_mark_value_is_a_conflict(tmp_path, capsys):
     out2 = capsys.readouterr().out
     assert rc2 != 0
     assert "rejects=0" in out2
-    assert "conflicts=1" in out2
+    assert "conflicts=2"  # marks value + positions.mark in out2
 
     conn = schema.connect(db_path)
     kept = conn.execute(
         "SELECT value FROM marks WHERE instrument_id='USDJPY' AND mark_type='FWD_OUTRIGHT'"
     ).fetchone()[0]
     assert kept == orig_value
+    conn.close()
+
+
+def test_load_cli_local_cost_only_amendment_is_a_conflict(tmp_path, capsys):
+    """Amended Local Cost on an existing trade changes only trade_legs.amount and
+    positions.cost_local (trades.price is the fill rate, unchanged). The headline
+    conflicts count must include those tables and the exit must be non-zero; DB unchanged.
+    |Q x rate - Local Cost| = 0.5 keeps the recon check (<= 1) passing."""
+    from data import load as load_mod
+
+    p1 = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
+    db_path = tmp_path / "risk.db"
+    assert load_mod.run([str(p1), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+
+    conn = schema.connect(db_path)
+    orig_leg = conn.execute(
+        "SELECT amount FROM trade_legs WHERE trade_id='111' AND ccy='JPY'").fetchone()[0]
+    orig_cost = conn.execute(
+        "SELECT cost_local FROM positions WHERE instrument_id='USDJPY'").fetchone()[0]
+    conn.close()
+    assert orig_leg == -147000000.0 and orig_cost == 147000000.0
+
+    p2 = _write_csv(tmp_path / "HA_PNL_20260819.csv",
+                    [_fwd_row(**{"Local Cost": 147000000.5})])
+    rc2 = load_mod.run([str(p2), "--db", str(db_path), "--as-of", "2026-08-17"])
+    out2 = capsys.readouterr().out
+    assert rc2 != 0
+    assert "rejects=0" in out2
+    assert "conflicts=2" in out2  # trade_legs.amount (JPY leg) + positions.cost_local
+
+    conn = schema.connect(db_path)
+    assert conn.execute(
+        "SELECT amount FROM trade_legs WHERE trade_id='111' AND ccy='JPY'").fetchone()[0] == orig_leg
+    assert conn.execute(
+        "SELECT cost_local FROM positions WHERE instrument_id='USDJPY'").fetchone()[0] == orig_cost
+    conn.close()
+
+
+def test_load_cli_currency_balance_amendment_is_a_conflict(tmp_path, capsys):
+    """A CURRENCY row creates no trades row, only a positions row. An amended cash
+    balance must still surface as conflicts=1 with a non-zero exit; DB unchanged."""
+    from data import load as load_mod
+
+    p1 = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_cash_row()])
+    db_path = tmp_path / "risk.db"
+    assert load_mod.run([str(p1), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+
+    conn = schema.connect(db_path)
+    orig_qty = conn.execute(
+        "SELECT quantity FROM positions WHERE instrument_id='CASH-TRY'").fetchone()[0]
+    conn.close()
+    assert orig_qty == 1000.0
+
+    p2 = _write_csv(tmp_path / "HA_PNL_20260819.csv", [
+        _cash_row(Quantity=2000.0, Position=2000.0,
+                  **{"Market Value Local": 2000.0, "Market Value Base": 40.0})
+    ])
+    rc2 = load_mod.run([str(p2), "--db", str(db_path), "--as-of", "2026-08-17"])
+    out2 = capsys.readouterr().out
+    assert rc2 != 0
+    assert "rejects=0" in out2
+    assert "conflicts=1" in out2
+
+    conn = schema.connect(db_path)
+    assert conn.execute(
+        "SELECT quantity FROM positions WHERE instrument_id='CASH-TRY'").fetchone()[0] == orig_qty
     conn.close()
