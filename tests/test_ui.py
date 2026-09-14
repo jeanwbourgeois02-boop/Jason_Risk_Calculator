@@ -739,6 +739,15 @@ def test_cash_ladder_callback_renders_exposure_from_db(monkeypatch):
     rates_rows = _find(diag, market_data.RATES_TABLE_ID).data
     assert rates_rows == [{"currency": "JPY", "pair": "USDJPY", "rate": "147.12000000", "inverted": "1/rate",
                            "source": "BBG_BFXFORWARD", "timestamp": "2026-08-17T15:00:00-04:00", "stale": "STALE"}]
+    # P&L ledger block sits between the exposure section and the diagnostics panel
+    from ui.tabs import ledger as ledger_ui
+    block = _find(out, ledger_ui.LEDGER_ID)
+    assert block is not None
+    ids = [getattr(c, "id", None) for c in out.children[0].children]
+    assert ids.index(ledger_ui.LEDGER_ID) < ids.index(market_data.DIAG_ID)
+    labels = [c.children[0].children for c in _find(block, ledger_ui.LEDGER_CARDS_ID).children]
+    assert labels == ["Realised LTD", "Unrealised (open)", "Total LTD", "Trading today",
+                      "Daily P&L", "5-day P&L", "MTD P&L", "YTD P&L"]
     cards = _cards(out)
     assert cards["Open FX trades"] == ("1", "Exposure")
     assert "Workbook MTM" in _texts(_find(out, exposure.WORKBOOK_STATUS_ID))   # from period_pnl, never mock
@@ -753,3 +762,36 @@ def test_cash_ladder_callback_renders_exposure_from_db(monkeypatch):
     assert _find(workbook, "cash-ladder-valuation-summary") is not None
     assert _find(workbook, "cash-ladder-valuation-detail") is not None
     assert _find(workbook, "cash-ladder-datatable") is not None
+
+
+# --------------------------------------------------------------------------- P&L ledger block
+def test_ledger_block_renders_values_and_unavailable_reasons():
+    from ui.tabs import ledger as ledger_ui
+    summary = {
+        "realised_ltd_usd": 30000.0, "unrealised_usd": 20000.0, "total_ltd_usd": 50000.0, "trading_usd": 0.0,
+        "open_trades": 2, "realised_trades": 1, "missing": [], "unrealisable": [{"trade_id": "j1", "reason": "no spot"}],
+        "periods": {"daily": {"value": 40000.0, "ref_date": "2026-09-11", "snapshot_date": "2026-09-11", "available": True, "reason": ""},
+                    "d5": {"value": float("nan"), "ref_date": "2026-09-07", "snapshot_date": "", "available": False, "reason": "no snapshot on or before 2026-09-07"},
+                    "mtd": {"value": 55000.0, "ref_date": "2026-08-31", "snapshot_date": "2026-08-28", "available": True,
+                            "reason": "reference snapshot dated 2026-08-28 (last on or before 2026-08-31)"},
+                    "ytd": {"value": float("nan"), "ref_date": "2025-12-31", "snapshot_date": "", "available": False, "reason": "no snapshot on or before 2025-12-31"}},
+        "last_snapshot": {"as_of_date": "2026-09-14", "snapped_at": "2026-09-14T15:00:00", "complete": False},
+        "snapshot_count": 3, "realised_table": pd.DataFrame(), "snapshot_table": pd.DataFrame(),
+    }
+    block = ledger_ui.ledger_block(summary, "2026-09-14")
+    cards = {c.children[0].children: (c.children[1].children, c.children[2].children)
+             for c in _find(block, ledger_ui.LEDGER_CARDS_ID).children}
+    assert cards["Realised LTD"] == ("30,000", "1 settled trades frozen")
+    assert cards["Unrealised (open)"][0] == "20,000" and cards["Total LTD"][0] == "50,000"
+    assert cards["Trading today"] == (ledger_ui.EM_DASH if hasattr(ledger_ui, "EM_DASH") else "—", "trades dated 2026-09-14")
+    assert cards["Daily P&L"] == ("40,000", "vs 11 Sep 2026")
+    assert cards["5-day P&L"] == ("Unavailable", "no snapshot on or before 2026-09-07")
+    assert cards["MTD P&L"][0] == "55,000" and "28 Aug 2026" in cards["MTD P&L"][1]
+    assert cards["YTD P&L"][0] == "Unavailable"
+    note = _texts(_find(block, ledger_ui.LEDGER_NOTE_ID))
+    assert "last snapshot 2026-09-14" in note and "(incomplete)" in note and "j1 (no spot)" in note
+    # missing rate -> unrealised / total / trading unavailable with the reason, realised still shown
+    summary["missing"] = ["BRL"]; summary["unrealised_usd"] = float("nan"); summary["total_ltd_usd"] = float("nan")
+    cards = {c.children[0].children: (c.children[1].children, c.children[2].children)
+             for c in _find(ledger_ui.ledger_block(summary, "2026-09-14"), ledger_ui.LEDGER_CARDS_ID).children}
+    assert cards["Total LTD"] == ("Unavailable", "missing rate: BRL") and cards["Realised LTD"][0] == "30,000"

@@ -302,9 +302,17 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                     period = period_pnl(conn, as_of_date, source=source_value_to_param(source_value))
                 except Exception:  # pricing not loaded / engine unavailable
                     period = None
+                # P&L ledger (engine/pnl/ledger.py): read-only summary for the picked as-of date.
+                try:
+                    from engine.pnl.ledger import ledger_summary
+                    from ui.tabs.ledger import ledger_block
+                    ledger_ui = ledger_block(ledger_summary(conn, as_of_date, rates), as_of_date)
+                except Exception as exc:  # never let the ledger take the ladder down
+                    ledger_ui = message_box(f"P&L ledger unavailable ({exc!r}).")
                 exposure = html.Div([
                     exposure_section(records, unresolved, as_of_date, rates=rates, period=period,
                                      sort=sort, feed_status=feed_status),
+                    ledger_ui,
                     diagnostics_panel(feed_status, rates),
                 ])
                 books = ", ".join(sorted({r["book"] for r in records})) or "none"

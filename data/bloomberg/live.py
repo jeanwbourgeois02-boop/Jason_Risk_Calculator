@@ -236,6 +236,17 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             fwd_rows, warnings, fwd_fail = _fwd_outright_rows(session, service, fwd_reqs, today, spot_by_pair, snapped)
             rows = spot_rows + fwd_rows
             written = write_marks(conn, rows)
+            # P&L ledger: realise trades settled before today and store today's snapshot
+            # (engine/pnl/ledger.py). Additive; failures are reported, never hide the marks.
+            try:
+                from engine.pnl.ledger import take_snapshot
+                led = take_snapshot(conn, today.isoformat(), rates_from_marks(conn))
+                status["ledger"] = {"as_of_date": today.isoformat(), "complete": led["complete"],
+                                    "realised_trades": led["realised_trades"], "open_trades": led["open_trades"],
+                                    "missing": led["missing"], "unrealisable": led["unrealisable"]}
+            except Exception as exc:
+                status["ledger"] = {"error": f"{exc!r}"}
+                status.setdefault("warnings", []).append(f"ledger snapshot failed: {exc!r}")
             status.update(connected=True, written=written, warnings=list(warnings)[:50],
                           as_of_marks=today.isoformat())
             ok_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]): r for r in rows}

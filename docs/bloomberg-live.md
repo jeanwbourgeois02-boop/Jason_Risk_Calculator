@@ -56,6 +56,24 @@ py -3 -m data.bloomberg.live --once     # run one pull now and print the result
 - Status file: `<db>.bloomberg_status.json` next to the database (git-ignored under
   `data/raw/`), rewritten every cycle, includes a traceback if a pull raised.
 
+## P&L ledger (realised / unrealised / periods)
+
+`engine/pnl/ledger.py`, run by every feed cycle and by "Pull from Bloomberg now":
+
+- **Realised**: when a trade's settle date is before today it is frozen once in
+  `realised_pnl` at the official SPOT dated its settle date (or the last spot before it,
+  noted). No spot on or before the settle date -> listed as not realisable, never guessed.
+- **Unrealised**: open trades at the latest spot (the exposure P&L on the ladder).
+- **Snapshot**: one `pnl_snapshots` row per day (realised LTD, unrealised, total LTD, net,
+  gross, trading), marked complete only when every currency was priced and every settled
+  trade realised.
+- **Daily / 5d / MTD / YTD**: today's total LTD minus the complete snapshot on the
+  reference business day (Mon-Fri calendar). Missing or incomplete reference -> Unavailable
+  with the reason. History starts the day the feed first runs.
+
+Realised trades and the snapshot history are visible under the ledger block on the Cash
+ladder tab. Tables are additive; the app creates them on an existing database at startup.
+
 ## Untouched by the feed
 
 Exposure formulas, the BNP parser, the schema, and the workbook mark-to-market logic.

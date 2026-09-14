@@ -38,6 +38,24 @@ def get_db_path() -> Path:
     return DEFAULT_DB_PATH
 
 
+def ensure_schema(path: Union[str, Path]) -> None:
+    """Apply the idempotent DDL (CREATE ... IF NOT EXISTS) to an EXISTING database so
+    additive tables (e.g. the P&L ledger) exist on databases created before them.
+    Never creates a database and never alters existing tables or rows."""
+    p = Path(path)
+    if not p.exists():
+        return
+    try:
+        from data.ingest import schema
+        conn = sqlite3.connect(p)
+        try:
+            schema.create_schema(conn)
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        print(f"schema check skipped ({exc})", flush=True)
+
+
 def connect_readonly(path: Union[str, Path]) -> sqlite3.Connection:
     """Open the database read-only. Missing file -> caller handles via summary()."""
     uri = f"file:{Path(path).as_posix()}?mode=ro"
@@ -137,6 +155,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     """Build the Dash app. db_path defaults to RISK_DB / data/raw/risk.db.
     start_feed=True (the launcher) starts the Bloomberg live feed thread when available."""
     resolved = Path(db_path) if db_path is not None else get_db_path()
+    ensure_schema(resolved)
     data = load_summary(resolved)
     app = dash.Dash(__name__)
     app.layout = build_layout(data)

@@ -120,10 +120,46 @@ WHERE source = CASE mark_type
 """
 
 
+# --------------------------------------------------------------------------- P&L ledger
+# Additive tables for engine/pnl/ledger.py (realised P&L on settlement + daily snapshot
+# series for Daily / 5d / MTD / YTD). They never feed the exposure or workbook formulas.
+LEDGER_TABLES = ("realised_pnl", "pnl_snapshots")
+_LEDGER_DDL = """
+CREATE TABLE IF NOT EXISTS realised_pnl (
+  trade_id            TEXT PRIMARY KEY REFERENCES trades,
+  instrument_id       TEXT NOT NULL,
+  currency            TEXT NOT NULL,
+  settle_date         TEXT NOT NULL,
+  local_amount        REAL NOT NULL,
+  usd_entry_amount    REAL NOT NULL,
+  spot_usd_per_local  REAL NOT NULL,
+  spot_as_of_date     TEXT NOT NULL,      -- date of the SPOT mark used to freeze (settle date, or last prior)
+  spot_source         TEXT NOT NULL,
+  pnl_usd             REAL NOT NULL,
+  frozen_at           TEXT NOT NULL,
+  note                TEXT NOT NULL       -- '' or 'spot dated <d> (last before settlement)'
+);
+CREATE TABLE IF NOT EXISTS pnl_snapshots (
+  as_of_date          TEXT PRIMARY KEY,
+  snapped_at          TEXT NOT NULL,
+  realised_ltd_usd    REAL NOT NULL,
+  unrealised_usd      REAL NOT NULL,      -- NaN stored as NULL is not allowed: incomplete -> complete = 0 and 0.0
+  total_ltd_usd       REAL NOT NULL,
+  net_usd             REAL NOT NULL,
+  gross_usd           REAL NOT NULL,
+  trading_usd         REAL NOT NULL,
+  open_trades         INTEGER NOT NULL,
+  realised_trades     INTEGER NOT NULL,
+  complete            INTEGER NOT NULL,   -- 1 = every open currency priced and every settled trade realised
+  missing             TEXT NOT NULL       -- comma list of unpriced currencies / unrealisable trade ids
+);
+"""
+
+
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create all tables and the marks_official view if absent; enable foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(_DDL + _marks_official_ddl())
+    conn.executescript(_DDL + _marks_official_ddl() + _LEDGER_DDL)
     conn.commit()
 
 
