@@ -214,6 +214,13 @@ class ParseResult:
     n_skipped_irs: int = 0
     n_skipped_other: int = 0
     n_skipped_fund: int = 0
+    # Populated only by load() when on_duplicate='skip': counts of rows whose primary
+    # key already existed in the DB AND whose values matched the existing row (so were
+    # correctly left alone) vs rows whose key existed but whose values differed (the
+    # existing DB row is kept; the amended row is NOT applied -- see conflict_details).
+    skipped: Dict[str, int] = field(default_factory=lambda: {"trades": 0, "legs": 0, "positions": 0})
+    conflicts: Dict[str, int] = field(default_factory=lambda: {"trades": 0, "legs": 0, "positions": 0})
+    conflict_details: List[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -579,16 +586,60 @@ def _rows(objs: Iterable) -> List[tuple]:
     return [tuple(vars(o).values()) for o in objs]
 
 
+# ---------------------------------------------------- duplicate-key content comparison
+_CONFLICT_TOL_ABS = 1e-6
+_CONFLICT_TOL_REL = 1e-6
+
+
+def _values_match(a, b) -> bool:
+    """True if ``a`` (parsed) and ``b`` (existing DB value) are the same, allowing a
+    small absolute/relative tolerance for floats so re-parsing an identical file never
+    flags a conflict (e.g. float round-tripping through the DB)."""
+    if isinstance(a, float) or isinstance(b, float):
+        try:
+            af, bf = float(a), float(b)
+        except (TypeError, ValueError):
+            return a == b
+        if math.isnan(af) or math.isnan(bf):
+            return math.isnan(af) and math.isnan(bf)
+        return abs(af - bf) <= max(_CONFLICT_TOL_ABS, _CONFLICT_TOL_REL * max(abs(af), abs(bf)))
+    return a == b
+
+
+def _row_diff(fields: List[str], new_obj, old_row: tuple) -> List[str]:
+    """Field names whose value differs (beyond tolerance) between a freshly parsed
+    dataclass instance and the existing DB row (same column order as ``fields``)."""
+    new_vals = tuple(vars(new_obj).values())
+    return [name for name, nv, ov in zip(fields, new_vals, old_row) if not _values_match(nv, ov)]
+
+
 def load(csv_path: Union[str, Path], conn: sqlite3.Connection,
-         as_of_date: Optional[Union[str, date]] = None, strict: bool = True) -> ParseResult:
+         as_of_date: Optional[Union[str, date]] = None, strict: bool = True,
+         on_duplicate: str = "error") -> ParseResult:
     """Parse and insert. Instruments are upserted; trades / legs / positions error on duplicates.
 
     Every reject and every recon failure is logged as a warning. With ``strict=True``
     (default) any reject or recon failure raises ValueError before anything is written;
     with ``strict=False`` the parsed rows are inserted anyway (rejected rows are never
     inserted in either mode).
+
+    ``on_duplicate`` controls what happens when a parsed trade / leg / position's primary
+    key already exists in the DB:
+      - 'error' (default, unchanged behaviour): plain INSERT, duplicates raise
+        sqlite3.IntegrityError.
+      - 'skip': rows whose primary key already exists in the DB are filtered out before
+        insert (so re-running load on the same file is idempotent). A key match whose
+        values are identical (within a small float tolerance) is counted in
+        ``res.skipped``; a key match whose values differ (e.g. an amended Local Cost /
+        Price for a trade_id BNP re-issued) is a CONFLICT: it is counted in
+        ``res.conflicts`` and described in ``res.conflict_details``, and the existing DB
+        row is left unchanged (the amended row is never applied by 'skip' -- callers who
+        want to overwrite must delete/update explicitly).
     """
     from data.ingest.schema import create_schema
+
+    if on_duplicate not in ("error", "skip"):
+        raise ValueError(f"on_duplicate must be 'error' or 'skip', got {on_duplicate!r}")
 
     create_schema(conn)
     res = parse(csv_path, as_of_date)
@@ -606,10 +657,72 @@ def load(csv_path: Union[str, Path], conn: sqlite3.Connection,
         raise ValueError(
             f"{name}: {len(res.rejects)} reject(s), {len(failures)} recon failure(s); "
             f"nothing loaded (strict=True). First: " + " | ".join(head))
+
+    trades, legs, positions = res.trades, res.legs, res.positions
+    if on_duplicate == "skip":
+        trade_fields = list(Trade.__dataclass_fields__)
+        leg_fields = list(TradeLeg.__dataclass_fields__)
+        pos_fields = list(Position.__dataclass_fields__)
+
+        existing_trades = {
+            r[0]: r for r in conn.execute(f"SELECT {', '.join(trade_fields)} FROM trades")
+        }
+        existing_legs = {
+            (r[0], r[1]): r for r in conn.execute(f"SELECT {', '.join(leg_fields)} FROM trade_legs")
+        }
+        existing_positions = {
+            (r[0], r[1], r[2], r[3], r[4]): r
+            for r in conn.execute(f"SELECT {', '.join(pos_fields)} FROM positions")
+        }
+
+        new_trades = []
+        for t in trades:
+            old = existing_trades.get(t.trade_id)
+            if old is None:
+                new_trades.append(t)
+                continue
+            diffs = _row_diff(trade_fields, t, old)
+            if diffs:
+                res.conflicts["trades"] += 1
+                res.conflict_details.append(f"trade {t.trade_id}: {', '.join(diffs)} differ from DB")
+            else:
+                res.skipped["trades"] += 1
+        trades = new_trades
+
+        new_legs = []
+        for l in legs:
+            key = (l.trade_id, l.leg_no)
+            old = existing_legs.get(key)
+            if old is None:
+                new_legs.append(l)
+                continue
+            diffs = _row_diff(leg_fields, l, old)
+            if diffs:
+                res.conflicts["legs"] += 1
+                res.conflict_details.append(f"leg {key}: {', '.join(diffs)} differ from DB")
+            else:
+                res.skipped["legs"] += 1
+        legs = new_legs
+
+        new_positions = []
+        for p in positions:
+            key = (p.as_of_date, p.source, p.account, p.instrument_id, p.settle_date)
+            old = existing_positions.get(key)
+            if old is None:
+                new_positions.append(p)
+                continue
+            diffs = _row_diff(pos_fields, p, old)
+            if diffs:
+                res.conflicts["positions"] += 1
+                res.conflict_details.append(f"position {key}: {', '.join(diffs)} differ from DB")
+            else:
+                res.skipped["positions"] += 1
+        positions = new_positions
+
     with conn:
         conn.executemany("INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                          _rows(res.instruments.values()))
-        conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(res.trades))
-        conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", _rows(res.legs))
-        conn.executemany("INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(res.positions))
+        conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(trades))
+        conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", _rows(legs))
+        conn.executemany("INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(positions))
     return res

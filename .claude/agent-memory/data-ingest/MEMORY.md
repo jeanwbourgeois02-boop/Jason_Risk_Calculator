@@ -1,1 +1,2 @@
 - [BNP file quirks](bnp-file-quirks.md) — blank Fx on zero cash, ES Position=0, positions PK netting (239 rows -> 31 keys), observed tolerance maxima
+- [Idempotent CLI loader](idempotent-loader.md) — data/load.py skip-vs-reject-vs-conflict accounting, on_duplicate='skip', content-diff on key match, --allow-conflicts

@@ -1,6 +1,7 @@
-- [Build environment](build-environment.md) — use `py -3`, pytest/pandas/dash installed, blpapi absent, suite baseline 136 passed (2026-09-14), untracked files invisible to `git diff`
+- [Build environment](build-environment.md) — use `py -3`, pytest/pandas/dash installed, blpapi absent, suite baseline 155 passed (2026-09-14, after loader CLI + P&L tab), untracked files invisible to `git diff`
 - [BNP file facts](bnp-file-facts.md) — row counts, netting groups, blank Fx cells, Fx=1.0 on XXXUSD rows, ESU6 Position=0, NM Strategy column
 - [Spawn process](feedback-spawn-process.md) — independent specialists parallel in background, dependent ones sequential; empty output file = still running, never re-spawn; reviewer on git diff only, max two passes, warnings reported not fixed
 - [Brief premises](feedback-brief-premises.md) — verify data-derivation claims from a brief on the real file before coding them (Fx=1.0 incident)
 - [BBG diagnostics lessons](bbg-diagnostics-lessons.md) — phrase exit-code rules as requested-vs-written keys; reviewer executes the blpapi fake; tzdata exit-6 path done (item 39), _NY_ZONE cache trap in tests; verify docstring-promised handlers exist
 - [Fix-diff snapshot](fix-diff-snapshot.md) — copy touched files to scratchpad before a fix spawn so reviewer pass 2 gets fix-only diff; earlier-date LTD briefs must state trade_date <= as_of
+- [Fix briefs](feedback-fix-briefs.md) — enumerate tables, counters and exact tolerance in critical-fix briefs; vague brief left C-1 open on 2026-09-14 (item 50)

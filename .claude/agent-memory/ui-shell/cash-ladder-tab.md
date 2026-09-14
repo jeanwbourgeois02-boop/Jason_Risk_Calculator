@@ -37,3 +37,30 @@ metadata:
   triggering it.
 - `dash_table.DataTable` emits a `DeprecationWarning` on every construction in dash 4.4.1
   (recommends dash-ag-grid) -- harmless, expected, don't try to silence it.
+
+Update 2026-09-14 (second session): the tab display is now a TRANSPOSE of
+`ladder_table`'s frame -- rows = settle dates ascending + a `Total` row, columns =
+currencies (ordered by |usd| descending, then usd=NaN alphabetically -- same rule
+`ladder_table` already uses for its own row order) + a `usd_equivalent` column. Pure
+transform lives in `cash_ladder.transpose_ladder(df) -> df`, applied in the callback
+before `table_from_ladder`. `ladder_table` itself is untouched (not owned by ui-shell).
+
+`usd_equivalent` blank rule (a judgement call documented in the module docstring, not
+in CLAUDE.md): per date, sum over currencies of `amount x implied_spot` where
+`implied_spot = usd / total` (recovered from ladder_table's own `usd = total x spot`);
+blank if (a) any currency with a non-zero amount that date has `usd` NaN (no official
+SPOT), (b) any such currency has `total == 0` (0/0 not recoverable even if `usd`
+happens to be 0), or (c) the amount cell itself is NaN (unknown flow, distinct from
+ladder_table's explicit-zero "no flow" convention). Currencies with zero/NaN amount on
+a date that don't trip these conditions are simply skipped, not blocking.
+
+`ui/tabs/formatting.py` (format_cell, format_frame) and `ui/tabs/controls.py`
+(SOURCE_OFFICIAL, SOURCE_OPTIONS, source_value_to_param, build_source_dropdown,
+build_date_picker) were factored out of this module once `ui/tabs/pnl.py` needed the
+identical source-dropdown/date-picker pair and number formatting. `cash_ladder.py`
+still re-exports `format_cell`, `format_ladder_frame` (= `formatting.format_frame`),
+`source_value_to_param`, `SOURCE_OFFICIAL`, `SOURCE_OPTIONS` by importing them into its
+own namespace, so existing tests referencing `cash_ladder.<name>` keep working
+unchanged -- didn't rename call sites in tests/test_ui.py for those.
+
+[[pnl-tab]] is the sibling module built on the same controls/formatting helpers.

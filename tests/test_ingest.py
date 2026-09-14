@@ -502,3 +502,207 @@ def test_real_positions_mv_sum_matches_file(parsed, raw_df):
     assert db_q == pytest.approx(nm["Quantity"].sum(), abs=0.01)
     db_dtd = conn.execute("SELECT SUM(pnl_dtd_usd) FROM positions WHERE source='BNP'").fetchone()[0]
     assert db_dtd == pytest.approx(nm["DTD Total P&L"].sum(), abs=0.01)
+
+
+# --------------------------------------------------------------------------- bnp.load(on_duplicate='skip')
+def test_load_on_duplicate_skip_is_idempotent(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row(), _fut_row(), _cash_row()])
+    conn = schema.connect()
+    r1 = bnp.load(p, conn, on_duplicate="skip")
+    assert r1.skipped == {"trades": 0, "legs": 0, "positions": 0}
+    assert r1.conflicts == {"trades": 0, "legs": 0, "positions": 0}
+    n_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    n_legs = conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0]
+    n_pos = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+    assert n_trades == 1 and n_legs == 2 and n_pos == 3
+
+    r2 = bnp.load(p, conn, on_duplicate="skip")
+    assert r2.skipped == {"trades": 1, "legs": 2, "positions": 3}
+    assert r2.conflicts == {"trades": 0, "legs": 0, "positions": 0}
+    assert r2.conflict_details == []
+    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == n_trades
+    assert conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0] == n_legs
+    assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == n_pos
+
+
+def test_load_on_duplicate_skip_detects_conflict_and_keeps_existing_row(tmp_path):
+    """Same trade_id, second file has an amended Local Cost / rate -> conflict, not a
+    silent skip; the original DB row is kept."""
+    p1 = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
+    conn = schema.connect()
+    r1 = bnp.load(p1, conn, on_duplicate="skip")
+    assert r1.conflicts == {"trades": 0, "legs": 0, "positions": 0}
+    orig_price = conn.execute("SELECT price FROM trades WHERE trade_id='111'").fetchone()[0]
+
+    p2 = _write_csv(tmp_path / "HA_PNL_20260819.csv", [
+        _fwd_row(**{"Symbol Description": "TD 08/03/2026 VD 09/16/2026 BUY USD VS .SELL JPY @ 148.00000000",
+                    "Local Cost": 148000000.0, "Market Value Local": -500000.0,
+                    "Market Value Base": -3401.35, "DTD Total P&L": -6401.35, "DTD Trading P&L": -6401.35,
+                    "MTD Total P&L": -3401.35})
+    ])
+    r2 = bnp.load(p2, conn, on_duplicate="skip")
+    assert r2.conflicts["trades"] == 1
+    assert any("111" in d and "price" in d for d in r2.conflict_details)
+    # existing row untouched
+    assert conn.execute("SELECT price FROM trades WHERE trade_id='111'").fetchone()[0] == orig_price
+
+
+def test_load_on_duplicate_default_still_raises(tmp_path):
+    """Default behaviour (on_duplicate='error') is unchanged for existing callers."""
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
+    conn = schema.connect()
+    bnp.load(p, conn)
+    with pytest.raises(sqlite3.IntegrityError):
+        bnp.load(p, conn)
+
+
+def test_load_on_duplicate_rejects_bad_value(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
+    conn = schema.connect()
+    with pytest.raises(ValueError, match="on_duplicate"):
+        bnp.load(p, conn, on_duplicate="bogus")
+
+
+# --------------------------------------------------------------------------- data/load.py CLI
+@needs_raw
+def test_load_cli_real_file_twice_is_idempotent(tmp_path, capsys):
+    from data import load as load_mod
+
+    db_path = tmp_path / "risk.db"
+    rc1 = load_mod.run([str(RAW), "--db", str(db_path)])
+    out1 = capsys.readouterr().out
+    assert rc1 == 0
+    assert "as_of_date=2026-08-17" in out1
+    assert "trades_loaded=229" in out1
+    assert "rejects=0" in out1
+    assert "skipped=0" in out1
+    assert "conflicts=0" in out1
+
+    conn = schema.connect(db_path)
+    n_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    n_legs = conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0]
+    n_pos = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+    n_marks = conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0]
+    assert n_trades == 229 and n_marks > 0
+    conn.close()
+
+    rc2 = load_mod.run([str(RAW), "--db", str(db_path)])
+    out2 = capsys.readouterr().out
+    assert rc2 == 0
+    assert "trades_loaded=0" in out2
+    assert "rejects=0" in out2
+    assert "conflicts=0" in out2
+    assert f"skipped={229 + n_marks}" in out2  # skipped includes trades + marks
+    assert "skipped=262" in out2
+
+    conn = schema.connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == n_trades
+    assert conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0] == n_legs
+    assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == n_pos
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == n_marks
+    conn.close()
+
+
+def test_load_cli_regex_failing_row_exits_nonzero_and_zero_with_allow_rejects(tmp_path, capsys):
+    from data import load as load_mod
+
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [
+        _fwd_row(),
+        _fwd_row(Symbol="USDJPY091626-112",
+                 **{"Symbol Description": "TD 08/03/2026 VD 09/16/2026 BUY USD VS SELL JPY @ 147.00000000"}),
+    ])
+    db_path = tmp_path / "risk.db"
+    rc = load_mod.run([str(p), "--db", str(db_path)])
+    out = capsys.readouterr().out
+    assert rc != 0
+    # the bad row is rejected both by the trade parser and by the BNP_BVAL mark extractor
+    assert "rejects=2" in out
+    assert "trades_loaded=1" in out
+
+    db_path2 = tmp_path / "risk2.db"
+    rc_allowed = load_mod.run([str(p), "--db", str(db_path2), "--allow-rejects"])
+    out2 = capsys.readouterr().out
+    assert rc_allowed == 0
+    assert "rejects=2" in out2
+
+
+def test_load_cli_amended_trade_is_a_conflict_not_a_silent_skip(tmp_path, capsys):
+    """Same trade_id re-appears in a later file with a different fill rate: this must
+    surface as conflicts=1 with a non-zero exit, and the original DB row must survive
+    untouched; --allow-conflicts exits 0 without altering the DB."""
+    from data import load as load_mod
+
+    p1 = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
+    db_path = tmp_path / "risk.db"
+    rc1 = load_mod.run([str(p1), "--db", str(db_path)])
+    capsys.readouterr()
+    assert rc1 == 0
+
+    conn = schema.connect(db_path)
+    orig_price = conn.execute("SELECT price FROM trades WHERE trade_id='111'").fetchone()[0]
+    conn.close()
+
+    p2 = _write_csv(tmp_path / "HA_PNL_20260819.csv", [
+        _fwd_row(**{"Symbol Description": "TD 08/03/2026 VD 09/16/2026 BUY USD VS .SELL JPY @ 148.00000000",
+                    "Local Cost": 148000000.0, "Market Value Local": -500000.0,
+                    "Market Value Base": -3401.35, "DTD Total P&L": -6401.35, "DTD Trading P&L": -6401.35,
+                    "MTD Total P&L": -3401.35})
+    ])
+    rc2 = load_mod.run([str(p2), "--db", str(db_path)])
+    out2 = capsys.readouterr().out
+    assert rc2 != 0
+    assert "conflicts=1" in out2
+    assert "rejects=0" in out2
+
+    conn = schema.connect(db_path)
+    assert conn.execute("SELECT price FROM trades WHERE trade_id='111'").fetchone()[0] == orig_price
+    conn.close()
+
+    db_path3 = tmp_path / "risk3.db"
+    rc3a = load_mod.run([str(p1), "--db", str(db_path3)])
+    capsys.readouterr()
+    assert rc3a == 0
+    rc3b = load_mod.run([str(p2), "--db", str(db_path3), "--allow-conflicts"])
+    out3b = capsys.readouterr().out
+    assert rc3b == 0
+    assert "conflicts=1" in out3b
+    conn = schema.connect(db_path3)
+    assert conn.execute("SELECT price FROM trades WHERE trade_id='111'").fetchone()[0] == orig_price
+    conn.close()
+
+
+def test_load_cli_amended_mark_value_is_a_conflict(tmp_path, capsys):
+    """Same key, different mark value (BNP re-issues a corrected forward-outright Price
+    for an existing trade_id): conflict, not a silent skip; existing mark row kept."""
+    from data import load as load_mod
+
+    p1 = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
+    db_path = tmp_path / "risk.db"
+    assert load_mod.run([str(p1), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+
+    conn = schema.connect(db_path)
+    orig_value = conn.execute(
+        "SELECT value FROM marks WHERE instrument_id='USDJPY' AND mark_type='FWD_OUTRIGHT'"
+    ).fetchone()[0]
+    conn.close()
+
+    # Re-issued file for the SAME as_of_date (BNP corrects a prior day's snapshot), so
+    # the mark's primary key collides rather than landing on a new as_of_date.
+    p2 = _write_csv(tmp_path / "HA_PNL_20260819.csv", [
+        _fwd_row(Price=149.0, **{"Market Value Local": 2000000.0, "Market Value Base": 13605.40,
+                                  "DTD Total P&L": 10605.40, "DTD Trading P&L": 10605.40,
+                                  "MTD Total P&L": 13605.40})
+    ])
+    rc2 = load_mod.run([str(p2), "--db", str(db_path), "--as-of", "2026-08-17"])
+    out2 = capsys.readouterr().out
+    assert rc2 != 0
+    assert "rejects=0" in out2
+    assert "conflicts=1" in out2
+
+    conn = schema.connect(db_path)
+    kept = conn.execute(
+        "SELECT value FROM marks WHERE instrument_id='USDJPY' AND mark_type='FWD_OUTRIGHT'"
+    ).fetchone()[0]
+    assert kept == orig_value
+    conn.close()

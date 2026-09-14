@@ -4,3 +4,4 @@
 - [Ladder review findings](review-findings-ladder.md) — 2026-09-14 second pass: items 1-3 closed, no criticals; open 4-6 (trade_date filter, official-path test, empty ladder)
 - [P&L review findings](review-findings-pnl.md) — 2026-09-14 engine/pnl + ui: C-1 trade_date filter closed (3rd pass); warnings 2-7 open
 - [Windows bash paths](windows-bash-paths.md) — use forward slashes when passing paths to pytest via the Bash tool
+- [Load CLI + UI review findings](review-findings-load-cli-ui.md) — 2026-09-14: C-1 conflict fix pass 2 still has headline-count + tolerance gaps; probe recipe; 7 open warnings

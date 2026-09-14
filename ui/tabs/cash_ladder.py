@@ -1,4 +1,4 @@
-"""Cash ladder tab: source/date controls + a DataTable rendering
+"""Cash ladder tab: source/date controls + a DataTable rendering a transposed view of
 `engine.ladder.views.ladder_table`.
 
 `engine/ladder/views.py` (owned by cash-ladder) is expected to expose
@@ -9,11 +9,34 @@ the callback (never at module import time) and wrapped in try/except ImportError
 `import ui.app` and `import ui.tabs.cash_ladder` always succeed regardless of whether
 engine/ladder/views.py is present.
 
-Number formatting (`format_cell` / `format_ladder_frame`): every non-`ccy` cell is
-rounded to whole units and rendered with thousands separators, negatives in parentheses
-(e.g. -1234567.8 -> "(1,234,568)"), NaN/None -> "" (blank). This is a display-only
-transform; storage/precision live entirely in engine/ and data/, per CLAUDE.md ("ui/ ...
-never recomputes P&L or delta itself").
+Display is a TRANSPOSE of `ladder_table`'s shape (`ladder_table` itself is untouched --
+we do not own it and its contract, "one row per currency", is unchanged):
+  - Rows: settle dates ascending, plus a `Total` row at the bottom (from `ladder_table`'s
+    `total` / `usd` columns).
+  - Columns: one per currency, ordered by |usd| descending first (currencies with a
+    defined `usd`), then currencies with `usd` = NaN afterwards sorted alphabetically --
+    the same order `ladder_table` already returns its rows in; `transpose_ladder`
+    recomputes this order itself so it stays correct even when fed a hand-built frame
+    that is not pre-sorted. Plus a `usd_equivalent` column on the right.
+  - `usd_equivalent` per date row = sum over currencies of (amount on that date x that
+    currency's implied spot), where implied spot for a currency = `usd / total` from the
+    ladder frame (this is exact, since `ladder_table` computes `usd` as `total x spot`).
+    BLANK RULE (documented here since it is a judgement call, not in the CLAUDE.md
+    contract): the `usd_equivalent` cell for a date is blank if either (a) any currency
+    with a non-zero, non-NaN amount on that date has no defined spot (its `usd` is NaN),
+    or (b) any currency with a non-zero, non-NaN amount on that date has `total == 0`
+    (spot cannot be recovered from 0/0 even though `usd` may itself be defined as 0 in
+    that degenerate case), or (c) the amount itself is NaN (unknown flow, not "no flow" --
+    distinct from the explicit-zero convention `ladder_table` otherwise guarantees).
+    Currencies with a zero or NaN amount on that date never block the sum. The `Total`
+    row's `usd_equivalent` uses the same rule against the `total` / `usd` columns and
+    equals the sum of the `usd` column when defined.
+
+Number formatting (`ui.tabs.formatting.format_cell` / `format_frame`): every non-label
+cell is rounded to whole units and rendered with thousands separators, negatives in
+parentheses (e.g. -1234567.8 -> "(1,234,568)"), NaN/None -> "" (blank). This is a
+display-only transform; storage/precision live entirely in engine/ and data/, per
+CLAUDE.md ("ui/ ... never recomputes P&L or delta itself").
 """
 from __future__ import annotations
 
@@ -23,62 +46,107 @@ from typing import Callable, Optional
 import pandas as pd
 from dash import Input, Output, dash_table, dcc, html
 
-SOURCE_OFFICIAL = "OFFICIAL"
-SOURCE_OPTIONS = [
-    {"label": "Official", "value": SOURCE_OFFICIAL},
-    {"label": "BNP_BVAL", "value": "BNP_BVAL"},
-]
+from ui.tabs.controls import (
+    SOURCE_OFFICIAL,
+    SOURCE_OPTIONS,
+    build_date_picker,
+    build_source_dropdown,
+    source_value_to_param,
+)
+from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
 
 SOURCE_DROPDOWN_ID = "cash-ladder-source"
 DATE_PICKER_ID = "cash-ladder-date"
 TABLE_CONTAINER_ID = "cash-ladder-table-container"
 
-
-def source_value_to_param(value: Optional[str]) -> Optional[str]:
-    """Map the dropdown's sentinel 'OFFICIAL' (or an unset value) to source=None, the
-    ladder_table convention for "use marks_official". Any other value (e.g. 'BNP_BVAL')
-    passes through unchanged."""
-    if value in (None, SOURCE_OFFICIAL):
-        return None
-    return value
+TRANSPOSED_LABEL_COL = "settle_date"
+USD_EQUIVALENT_COL = "usd_equivalent"
 
 
-def format_cell(value) -> str:
-    """Format a single numeric cell: round to whole units, thousands separators,
-    negatives in parentheses, blank ("") for NaN/None."""
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except TypeError:
-        pass
-    rounded = round(float(value))
-    if rounded < 0:
-        return f"({abs(rounded):,})"
-    return f"{rounded:,}"
+def _ccy_order(df: pd.DataFrame) -> list:
+    """Currency order: |usd| descending first (usd defined), then alphabetical (usd
+    NaN) -- same rule as `ladder_table`'s own row order, recomputed here so this
+    function is correct even for a hand-built frame that is not pre-sorted."""
+    has_usd = df["usd"].notna()
+    with_usd = (
+        df[has_usd]
+        .assign(_abs_usd=lambda d: d["usd"].abs())
+        .sort_values("_abs_usd", ascending=False, kind="mergesort")
+        .drop(columns="_abs_usd")
+    )
+    without_usd = df[~has_usd].sort_values("ccy", kind="mergesort")
+    return pd.concat([with_usd, without_usd], ignore_index=True)["ccy"].tolist()
 
 
-def format_ladder_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Pure helper: apply `format_cell` to every column except `ccy` (which passes
-    through unchanged as it is not numeric). Returns a new DataFrame of strings so it
-    can be unit-tested without Dash."""
-    out = df.copy()
-    for col in out.columns:
-        if col == "ccy":
-            continue
-        out[col] = out[col].map(format_cell)
-    return out
+def _implied_spot(total: float, usd: float) -> float:
+    """usd / total, i.e. the per-unit rate implied by `ladder_table`'s own `usd = total
+    x spot` computation. NaN if usd is undefined or total is 0 (0/0 is not recoverable
+    even where usd happens to be defined as 0 in that degenerate case)."""
+    if pd.isna(usd):
+        return float("nan")
+    if total == 0:
+        return float("nan")
+    return usd / total
 
 
-def table_from_ladder(df: pd.DataFrame) -> dash_table.DataTable:
-    """Build the DataTable component from an already-fetched ladder DataFrame (ccy, one
-    column per ISO settle-date string ascending, total, usd). Pure function of the
-    frame -- does not touch the DB -- so it is unit-testable with a hand-built frame."""
-    formatted = format_ladder_frame(df)
+def transpose_ladder(df: pd.DataFrame) -> pd.DataFrame:
+    """Pure transform: `ladder_table`'s (ccy, dates..., total, usd) frame ->
+    (settle_date, currencies..., usd_equivalent), rows = dates ascending + a `Total`
+    row. See module docstring for the exact column order and the `usd_equivalent`
+    blank rule."""
+    if df.empty or "ccy" not in df.columns:
+        return pd.DataFrame(columns=[TRANSPOSED_LABEL_COL, USD_EQUIVALENT_COL])
+
+    date_cols = sorted(c for c in df.columns if c not in ("ccy", "total", "usd"))
+    ccy_order = _ccy_order(df)
+
+    by_ccy = df.set_index("ccy")
+    spot = {
+        ccy: _implied_spot(by_ccy.loc[ccy, "total"], by_ccy.loc[ccy, "usd"])
+        for ccy in ccy_order
+    }
+
+    def usd_equivalent(amounts: dict) -> float:
+        total = 0.0
+        for ccy, amount in amounts.items():
+            if amount is None or pd.isna(amount):
+                return float("nan")
+            if amount == 0:
+                continue
+            s = spot[ccy]
+            if pd.isna(s):
+                return float("nan")
+            total += amount * s
+        return total
+
+    rows = []
+    for d in date_cols:
+        amounts = {ccy: by_ccy.loc[ccy, d] for ccy in ccy_order}
+        row = {TRANSPOSED_LABEL_COL: d, **amounts}
+        row[USD_EQUIVALENT_COL] = usd_equivalent(amounts)
+        rows.append(row)
+
+    totals = {ccy: by_ccy.loc[ccy, "total"] for ccy in ccy_order}
+    total_row = {TRANSPOSED_LABEL_COL: "Total", **totals}
+    total_row[USD_EQUIVALENT_COL] = usd_equivalent(totals)
+    rows.append(total_row)
+
+    columns = [TRANSPOSED_LABEL_COL] + ccy_order + [USD_EQUIVALENT_COL]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def table_from_ladder(
+    df: pd.DataFrame,
+    label_col: str = "ccy",
+    table_id: str = "cash-ladder-datatable",
+) -> dash_table.DataTable:
+    """Build the DataTable component from an already-fetched (or already-transposed)
+    ladder DataFrame. Pure function of the frame -- does not touch the DB -- so it is
+    unit-testable with a hand-built frame."""
+    formatted = format_ladder_frame(df, label_col=label_col)
     columns = [{"name": col, "id": col} for col in formatted.columns]
     return dash_table.DataTable(
-        id="cash-ladder-datatable",
+        id=table_id,
         columns=columns,
         data=formatted.to_dict("records"),
         style_cell={"textAlign": "right", "fontFamily": "monospace"},
@@ -97,25 +165,8 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     table itself is filled in by the callback registered in register_callbacks."""
     return html.Div([
         html.H3("Cash ladder"),
-        html.Div(
-            [
-                html.Label("Source"),
-                dcc.Dropdown(
-                    id=SOURCE_DROPDOWN_ID,
-                    options=SOURCE_OPTIONS,
-                    value=SOURCE_OFFICIAL,
-                    clearable=False,
-                ),
-            ],
-            style={"width": "200px", "display": "inline-block", "marginRight": "20px"},
-        ),
-        html.Div(
-            [
-                html.Label("As of"),
-                dcc.DatePickerSingle(id=DATE_PICKER_ID, date=default_date),
-            ],
-            style={"display": "inline-block"},
-        ),
+        build_source_dropdown(SOURCE_DROPDOWN_ID),
+        build_date_picker(DATE_PICKER_ID, default_date=default_date),
         html.Div(id=TABLE_CONTAINER_ID),
     ])
 
@@ -156,4 +207,5 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             df = ladder_table(conn, as_of_date, source_value_to_param(source_value))
         finally:
             conn.close()
-        return table_from_ladder(df)
+        transposed = transpose_ladder(df)
+        return table_from_ladder(transposed, label_col=TRANSPOSED_LABEL_COL)

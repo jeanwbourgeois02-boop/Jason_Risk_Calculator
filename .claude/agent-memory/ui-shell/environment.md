@@ -11,8 +11,13 @@ metadata:
   the suite degrades gracefully in environments where install isn't possible/allowed.
 - Run ui tests: `py -3 -m pytest C:\Users\jeanw\risk-monitor\tests\test_ui.py -v`.
 - Run full suite: `py -3 -m pytest C:\Users\jeanw\risk-monitor\tests\ -v`.
-- As of 2026-09-14, `tests/test_bloomberg.py` has 13 pre-existing failures unrelated to ui/
-  (`NameError: name 'NY' is not defined` in `data/bloomberg/pull_marks.py`, owned by bbg-data).
-  This is NOT caused by ui/ changes -- verified via `git status` showing no edits outside ui/ and
-  tests/test_ui.py before running. Don't be alarmed by these; report to housekeeper, don't fix
-  (outside ui-shell's owned directories).
+- As of 2026-09-14 (first ui/ session), `tests/test_bloomberg.py` had 13 pre-existing failures
+  unrelated to ui/ (`NameError: name 'NY' is not defined` in `data/bloomberg/pull_marks.py`, owned
+  by bbg-data). By the second session (same day, cash-ladder-tab + pnl-tab work), bbg-data had
+  fixed it -- full suite (155 tests: bloomberg/ingest/ladder/pnl/ui) passed clean. Don't assume the
+  bloomberg failures are still there; re-run the full suite to check current state rather than
+  trusting this note.
+- Dash 4.4.1 callback_map entries are decorated; to call the raw callback function directly in a
+  test (bypassing dash's `_initialize_context`/`outputs_list` machinery, which only works via the
+  dispatcher) use `app.callback_map["<id>.<prop>"]["callback"].__wrapped__(*args)`. Calling the
+  entry directly raises `KeyError: 'outputs_list'`.

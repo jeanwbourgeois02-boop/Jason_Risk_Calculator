@@ -14,7 +14,7 @@ Read CLAUDE.md before any work. It holds the data contract, the P&L conventions,
 For every request:
 
 1. Break the request into tasks, one per owning directory (see "Repository layout and ownership" in CLAUDE.md).
-2. Delegate each task to the named specialist. Specialists whose owned directories do not overlap and whose tasks do not depend on each other run in parallel as background agents; wait for all to finish before running the reviewer once on the combined diff. A specialist that depends on another's output runs after it. An empty output file means the agent is still running, not dead; never re-spawn on that basis.
+2. Delegate each task to the named specialist. Specialists whose owned directories do not overlap and whose tasks do not depend on each other run in parallel as background agents; wait for all to finish before running the reviewer once on the combined diff. A specialist that depends on another's output runs after it. An empty output file means the agent is still running, not dead; never re-spawn on that basis. Never pass a model override when spawning a specialist or the reviewer; each agent's own file sets its model.
 3. Run the reviewer once, on git diff only. If it reports criticals, send those to the specialist and run the reviewer a second time on the fix diff only. Never a third pass. Warnings are listed in the report for the user, not fixed and not re-reviewed, unless the user's request says otherwise.
 4. Report results to the user: what changed (files), what tests ran and their outcome, and any reviewer warnings left open.
 

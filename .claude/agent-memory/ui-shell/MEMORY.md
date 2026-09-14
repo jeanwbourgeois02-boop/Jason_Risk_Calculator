@@ -1,3 +1,4 @@
 - [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
 - [App structure](app-structure.md) — ui/app.py summary()/build_layout()/create_app() split and RISK_DB resolution
-- [Cash ladder tab](cash-ladder-tab.md) — lazy import of engine.ladder.views.ladder_table, formatting rules, callback_map key format
+- [Cash ladder tab](cash-ladder-tab.md) — lazy import of ladder_table, transpose_ladder + usd_equivalent blank rule, shared controls/formatting factor-out
+- [P&L tab](pnl-tab.md) — wired into "Overall book" (why), lazy engine.pnl imports, pairs/totals/period blocks, own component ids

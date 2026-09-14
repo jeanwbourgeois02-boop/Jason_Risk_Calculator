@@ -20,7 +20,7 @@ from typing import Union
 import dash
 from dash import dcc, html
 
-from ui.tabs import cash_ladder
+from ui.tabs import cash_ladder, pnl
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
@@ -110,14 +110,16 @@ def build_tab_placeholder(label: str, data: dict) -> html.Div:
 
 
 def build_layout(data: dict) -> html.Div:
-    """Top-level layout: a dcc.Tabs bar with the six tabs. Cash ladder renders its real
-    controls + table (ui/tabs/cash_ladder.py); the other five stay placeholders until
-    their engine/ views land."""
+    """Top-level layout: a dcc.Tabs bar with the six tabs. Cash ladder and Overall book
+    render their real controls + tables (ui/tabs/cash_ladder.py, ui/tabs/pnl.py); the
+    other four stay placeholders until their engine/ views land."""
     default_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     tabs = []
     for label in TAB_LABELS:
         if label == "Cash ladder":
             children = [cash_ladder.build_layout(default_date=default_date)]
+        elif label == "Overall book":
+            children = [pnl.build_layout(default_date=default_date)]
         else:
             children = [build_tab_placeholder(label, data)]
         tabs.append(dcc.Tab(label=label, children=children))
@@ -134,6 +136,7 @@ def create_app(db_path: Union[str, Path, None] = None) -> dash.Dash:
     app = dash.Dash(__name__)
     app.layout = build_layout(data)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
+    pnl.register_callbacks(app, get_db_path=lambda: resolved)
     return app
 
 
