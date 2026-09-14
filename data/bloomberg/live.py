@@ -228,7 +228,11 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             today = today or date.today()
             spot_rows, spot_fail = _live_spot_rows(session, service, requests, today, diag, snapped)
             spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows}
-            fwd_reqs = [r for r in requests if r.mark_type == "FWD_OUTRIGHT"]
+            # A forward whose settle date is already past (trade settled since the snapshot)
+            # has nothing to price: reported SKIPPED, never FAILED, never counted as missing.
+            past = {(r.instrument_id, r.settle_date) for r in requests
+                    if r.mark_type == "FWD_OUTRIGHT" and date.fromisoformat(r.settle_date) < today}
+            fwd_reqs = [r for r in requests if r.mark_type == "FWD_OUTRIGHT" and (r.instrument_id, r.settle_date) not in past]
             fwd_rows, warnings, fwd_fail = _fwd_outright_rows(session, service, fwd_reqs, today, spot_by_pair, snapped)
             rows = spot_rows + fwd_rows
             written = write_marks(conn, rows)
@@ -238,6 +242,11 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             items = []
             for r in requests:
                 settle = today.isoformat() if r.mark_type == "SPOT" else r.settle_date
+                if (r.instrument_id, r.settle_date) in past and r.mark_type == "FWD_OUTRIGHT":
+                    items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
+                                  "status": "SKIPPED", "value": None, "source": "",
+                                  "detail": f"settle date already past on {today}: settled, nothing to price"})
+                    continue
                 hit = ok_keys.get((r.instrument_id, r.mark_type, settle))
                 if hit:
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
@@ -249,7 +258,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
                                   "status": "FAILED", "value": None, "source": "", "detail": detail})
             status["items"] = items
-            status["failed"] = sum(1 for i in items if i["status"] != "OK")
+            status["failed"] = sum(1 for i in items if i["status"] == "FAILED")
+            status["skipped"] = sum(1 for i in items if i["status"] == "SKIPPED")
         finally:
             conn.close()
     except Exception:

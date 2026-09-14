@@ -261,8 +261,16 @@ def check_prices(rep: Report, blpapi, session, service, reqs: list) -> None:
     columns_seen = next((c["columns"] for c in curves.values() if c.get("columns")), [])
     if columns_seen:
         rep.notes.append(f"FWD_CURVE table columns on this terminal: {columns_seen}")
+    skipped = 0
     for r in reqs:
         settle = r["settle_date"]
+        if date.fromisoformat(settle) < date.today():
+            skipped += 1
+            rep.ticker(status="SKIP", instrument_id=r["instrument_id"], mark_type="FWD_OUTRIGHT", ticker=r["ticker"],
+                       settle_date=settle, value=None, request_type="none",
+                       source="", snapped_at="",
+                       detail=f"settle date already past on {date.today()}: trade has settled, no forward to price")
+            continue
         curve = curves.get(r["ticker"], {"points": [], "error": "no curve returned"})
         if not curve["points"]:
             rep.ticker(status="FAILED", instrument_id=r["instrument_id"], mark_type="FWD_OUTRIGHT", ticker=r["ticker"],
@@ -285,7 +293,10 @@ def check_prices(rep: Report, blpapi, session, service, reqs: list) -> None:
                    source="BBG_BFXFORWARD" if how == "EXACT" else "BBG_INTERP", snapped_at=snapped,
                    detail=f"{how.lower()} from {len(curve['points'])} tenor rows "
                           f"({curve['points'][0][0]}..{curve['points'][-1][0]})")
-    rep.check("forward", fwd_ok == len(reqs), f"{fwd_ok}/{len(reqs)} pairs returned a forward outright")
+    needed = len(reqs) - skipped
+    rep.check("forward", fwd_ok == needed,
+              f"{fwd_ok}/{needed} pairs returned a forward outright"
+              + (f" ({skipped} skipped: settle date already past, nothing to price)" if skipped else ""))
 
 
 # --------------------------------------------------------------------------- FWD_CURVE bulk parsing

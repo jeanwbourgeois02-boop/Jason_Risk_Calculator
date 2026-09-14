@@ -32,7 +32,7 @@ def feed_headline(status: Optional[dict]) -> str:
 
 def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_default: bool = False) -> html.Details:
     items: List[dict] = list((status or {}).get("items", []))
-    failed = [i for i in items if i.get("status") != "OK"]
+    failed = [i for i in items if i.get("status") == "FAILED"]
     rows = [{"status": i.get("status", ""), "instrument_id": i.get("instrument_id", ""),
              "mark_type": i.get("mark_type", ""), "settle_date": i.get("settle_date", ""),
              "value": "" if i.get("value") is None else f"{float(i['value']):.8f}",
@@ -64,8 +64,9 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
             style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
             style_data_conditional=[
                 {"if": {"filter_query": "{status} = 'OK'", "column_id": "status"}, "color": "#1a7f4b", "fontWeight": "600"},
-                {"if": {"filter_query": "{status} != 'OK'", "column_id": "status"}, "color": "#b42318", "fontWeight": "600"},
-                {"if": {"filter_query": "{status} != 'OK'"}, "backgroundColor": "#fff4f2"},
+                {"if": {"filter_query": "{status} = 'FAILED'", "column_id": "status"}, "color": "#b42318", "fontWeight": "600"},
+                {"if": {"filter_query": "{status} = 'FAILED'"}, "backgroundColor": "#fff4f2"},
+                {"if": {"filter_query": "{status} = 'SKIPPED'"}, "color": "#616e7c"},
             ]),
         html.H4("Spot rates the ladder is using (latest official SPOT mark per currency)"),
         dash_table.DataTable(
