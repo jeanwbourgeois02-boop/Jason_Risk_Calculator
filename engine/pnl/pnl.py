@@ -36,7 +36,7 @@ SELECT t.trade_id, t.instrument_id, l.settle_date, t.quantity, t.price AS fill,
 FROM trades t
 JOIN instruments i ON i.instrument_id = t.instrument_id
 JOIN trade_legs l ON l.trade_id = t.trade_id AND l.leg_no = 1
-WHERE t.product = 'FX_FWD' AND l.settle_date > :as_of
+WHERE t.product = 'FX_FWD' AND l.settle_date > :as_of AND t.trade_date <= :as_of
 """
 
 _MARKS_OFFICIAL_SQL = """

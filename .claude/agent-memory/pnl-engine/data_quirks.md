@@ -46,3 +46,29 @@ metadata:
   defined` in `data/bloomberg/pull_marks.py:277`, `record_environment`), unrelated to
   engine/pnl. Confirmed via `git stash` that they fail identically on a clean checkout
   before any pnl-engine changes -- this is bbg-data's bug to fix, not pnl-engine's.
+  UPDATE (2026-09-14, suite 135 passed): bbg-data has since fixed this upstream --
+  test_bloomberg.py is now fully green on a clean checkout. Don't assume this failure
+  still exists; re-check before citing it.
+
+- `_TRADE_SQL` in `engine/pnl/pnl.py` must filter both `l.settle_date > :as_of` AND
+  `t.trade_date <= :as_of`. Filtering only on settle_date lets `ltd_per_trade(conn,
+  ref_date, strict=False)` (used by `aggregate.period_pnl` for daily/5d/mtd/ytd reference
+  dates) pick up trades dated *after* ref_date whenever a mark happens to exist for that
+  ref_date -- turning "daily P&L" into `m_t - m_ref` instead of `m_t - f` for same-day
+  trades (reviewer-caught, C-1, 2026-09-14: a same-day USDJPY trade produced daily =
+  13,652.04 vs ltd = 6,802.72 because LTD(t-1bd) wrongly included it). CLAUDE.md: "Trading
+  P&L = LTD of trades with trade_date = t" implies LTD(ref) must exclude any trade dated
+  after ref by construction, not rely on missing marks to accidentally NaN it out. Covered
+  by `test_daily_pnl_excludes_trades_dated_after_reference_date` in tests/test_pnl.py --
+  that test's pattern (an old, flat-marked trade to keep both LTD sums non-NaN, so
+  `result["daily"] == result["ltd"]` can be asserted directly) is reusable for similar
+  reference-date regressions.
+
+- For `trade_legs`, "the USD leg" of an FX trade is whichever of the two legs has
+  `ccy = 'USD'` -- for a USDXXX pair that's **leg 1** (the base leg, `amount = quantity`
+  itself, e.g. USDJPY's leg1 ccy is USD with amount = trades.quantity), not leg 2 (the
+  quote leg, `amount = -quantity * price`, which is JPY for USDJPY). For an XXXUSD pair
+  (e.g. AUDUSD) it's the reverse: leg 2 is the USD leg (`amount = -quantity * price`).
+  When computing a display USD notional as `sign(quantity) * |USD-leg amount|` (the xlsx
+  convention, CLAUDE.md "Display notional"), don't assume the USD leg is always leg 2 --
+  query `trade_legs WHERE ccy = 'USD'` rather than hard-coding leg_no per pair type.

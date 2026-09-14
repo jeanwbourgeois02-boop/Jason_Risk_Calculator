@@ -9,8 +9,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from data.bloomberg.bnp_marks import load_bnp_marks
 from data.ingest import bnp, schema
-from engine.ladder import cash_ladder, delta_per_ccy, spot_table, convert_to_usd
+from engine.ladder import cash_ladder, delta_per_ccy, spot_table, convert_to_usd, ladder_table
 
 REPO = Path(__file__).resolve().parents[1]
 RAW = REPO / "data" / "raw" / "HA_PNL_20260818.csv"
@@ -27,6 +28,23 @@ def real_conn():
     bnp.load(RAW, conn, as_of_date=AS_OF)
     yield conn
     conn.close()
+
+
+@pytest.fixture(scope="module")
+def real_conn_with_marks():
+    conn = schema.connect(":memory:")
+    bnp.load(RAW, conn, as_of_date=AS_OF)
+    load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=False)
+    yield conn
+    conn.close()
+
+
+# Currencies whose only forwards in the real file are XXXUSD pairs (AUD, EUR, GBP) or
+# the metal (XAU): BNP_BVAL's Fx column is quote_ccy->USD, which is always 1.0 on an
+# XXXUSD row, so no SPOT is derivable for these ccys from the BNP file at all (see
+# data/bloomberg/bnp_marks.py::extract_bnp_marks SPOT-derivation docstring). Verified
+# empirically against the real file, not assumed.
+NO_BNP_SPOT_CCYS = {"AUD", "EUR", "GBP", "XAU"}
 
 
 # --------------------------------------------------------------------------- real file
@@ -323,3 +341,99 @@ def test_delta_per_ccy_fx_option():
     assert math.isclose(usd_row["delta"].iloc[0], -1_000_000.0 * 0.5 * 0.65)
     assert math.isclose(aud_row["delta_usd"].iloc[0], 1_000_000.0 * 0.5 * 0.65)
     assert math.isclose(usd_row["delta_usd"].iloc[0], -1_000_000.0 * 0.5 * 0.65)
+
+
+# --------------------------------------------------------------------------- ladder_table
+@needs_raw
+def test_ladder_table_each_ccy_appears_once(real_conn_with_marks):
+    ladder = cash_ladder(real_conn_with_marks, AS_OF, source="BNP")
+    table = ladder_table(real_conn_with_marks, AS_OF, source="BNP_BVAL")
+    assert set(table["ccy"]) == set(ladder["ccy"])
+    assert table["ccy"].is_unique
+
+
+@needs_raw
+def test_ladder_table_total_matches_ladder_sum_per_ccy(real_conn_with_marks):
+    ladder = cash_ladder(real_conn_with_marks, AS_OF, source="BNP")
+    table = ladder_table(real_conn_with_marks, AS_OF, source="BNP_BVAL")
+    expected_totals = ladder.groupby("ccy")["amount"].sum()
+    for _, row in table.iterrows():
+        assert math.isclose(row["total"], expected_totals[row["ccy"]], abs_tol=1e-6), row["ccy"]
+
+
+@needs_raw
+def test_ladder_table_usd_nan_exactly_for_ccys_without_bnp_spot(real_conn_with_marks):
+    table = ladder_table(real_conn_with_marks, AS_OF, source="BNP_BVAL")
+    nan_ccys = set(table.loc[table["usd"].isna(), "ccy"])
+    # USD itself always converts at 1.0, never NaN.
+    assert "USD" not in nan_ccys
+    usd_row = table[table["ccy"] == "USD"]
+    assert math.isclose(usd_row["usd"].iloc[0], usd_row["total"].iloc[0])
+    # The exact set with no derivable BNP_BVAL spot, determined empirically above.
+    assert nan_ccys == (NO_BNP_SPOT_CCYS & set(table["ccy"]))
+
+
+@needs_raw
+def test_ladder_table_rows_with_usd_come_first_sorted_by_abs_usd_desc(real_conn_with_marks):
+    table = ladder_table(real_conn_with_marks, AS_OF, source="BNP_BVAL")
+    has_usd = table["usd"].notna()
+    n_with = has_usd.sum()
+    # all "with usd" rows precede all "without usd" rows
+    assert has_usd.iloc[:n_with].all()
+    assert not has_usd.iloc[n_with:].any()
+    with_usd_abs = table.loc[has_usd, "usd"].abs().tolist()
+    assert with_usd_abs == sorted(with_usd_abs, reverse=True)
+
+
+# --------------------------------------------------------------------------- synthetic (spot source)
+def test_spot_table_source_param_filters_to_one_source():
+    conn = _mk_conn()
+    _insert_instrument(conn, "USDJPY", "USD", "JPY")
+    _insert_mark(conn, AS_OF, "USDJPY", AS_OF, "SPOT", 150.0, "BNP_BVAL")
+    _insert_mark(conn, AS_OF, "USDJPY", AS_OF, "SPOT", 999.0, "MANUAL")
+    conn.commit()
+
+    bnp_spot = spot_table(conn, AS_OF, source="BNP_BVAL")
+    jpy_row = bnp_spot[bnp_spot["ccy"] == "JPY"]
+    assert len(jpy_row) == 1
+    assert math.isclose(jpy_row["spot"].iloc[0], 1.0 / 150.0)
+
+    other_spot = spot_table(conn, AS_OF, source="MANUAL")
+    jpy_row2 = other_spot[other_spot["ccy"] == "JPY"]
+    assert len(jpy_row2) == 1
+    assert math.isclose(jpy_row2["spot"].iloc[0], 1.0 / 999.0)
+
+    # source=None still reads marks_official (empty here: neither BNP_BVAL nor MANUAL is
+    # the official source for SPOT, which is BBG_BFXFORWARD).
+    official_spot = spot_table(conn, AS_OF)
+    assert official_spot.empty
+
+
+def test_ladder_table_columns_and_synthetic_pivot():
+    conn = _mk_conn()
+    _insert_instrument(conn, "USDJPY", "USD", "JPY")
+    _insert_instrument(conn, "AUDUSD", "AUD", "USD")
+    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", 100.0)
+    _insert_trade(conn, "t2", "AUDUSD", "FX_FWD", 50.0)
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "JPY", -15000.0, "2026-08-20")
+    _insert_leg(conn, "t2", 1, "FX_NEAR", "AUD", 50.0, "2026-08-25")
+    _insert_mark(conn, AS_OF, "USDJPY", AS_OF, "SPOT", 150.0, "BBG_BFXFORWARD")
+    conn.commit()
+
+    table = ladder_table(conn, AS_OF)
+    assert list(table.columns) == ["ccy", "2026-08-20", "2026-08-25", "total", "usd"]
+    assert set(table["ccy"]) == {"JPY", "AUD"}
+
+    jpy_row = table[table["ccy"] == "JPY"].iloc[0]
+    assert math.isclose(jpy_row["2026-08-20"], -15000.0)
+    assert math.isclose(jpy_row["2026-08-25"], 0.0)
+    assert math.isclose(jpy_row["total"], -15000.0)
+    assert math.isclose(jpy_row["usd"], -15000.0 / 150.0)
+
+    aud_row = table[table["ccy"] == "AUD"].iloc[0]
+    assert math.isclose(aud_row["2026-08-25"], 50.0)
+    assert math.isclose(aud_row["2026-08-20"], 0.0)
+    assert math.isnan(aud_row["usd"])  # no SPOT mark for AUD
+
+    # JPY has a defined usd and must come before AUD (no usd).
+    assert list(table["ccy"]) == ["JPY", "AUD"]

@@ -1,6 +1,6 @@
 - [BNP file facts](bnp-file-facts.md) — verified counts, netting groups, blank Fx cells, DTD buckets in HA_PNL_20260818.csv
 - [Ingest review findings](review-findings-ingest.md) — first-pass findings all closed on 2026-09-13 re-review; 4 residual items listed
 - [Bloomberg review findings](review-findings-bloomberg.md) — 2026-09-13/14; tzdata exit-6 (item 39) closed; open: candidate-only probe -> diagnose exit 1, W-2 test gaps, env {} on exit 6
-- [Ladder review findings](review-findings-ladder.md) — 2026-09-13 first pass of engine/ladder: no criticals, 4 open warnings (source filter, SPOT settle_date, zero spot, test gaps)
-- [P&L review findings](review-findings-pnl.md) — 2026-09-14 engine/pnl + ui/app: maths correct; C-1 matured-trade test closed on 2nd pass, items 2-6 open
+- [Ladder review findings](review-findings-ladder.md) — 2026-09-14 second pass: items 1-3 closed, no criticals; open 4-6 (trade_date filter, official-path test, empty ladder)
+- [P&L review findings](review-findings-pnl.md) — 2026-09-14 engine/pnl + ui: C-1 trade_date filter closed (3rd pass); warnings 2-7 open
 - [Windows bash paths](windows-bash-paths.md) — use forward slashes when passing paths to pytest via the Bash tool

@@ -106,17 +106,28 @@ def delta_per_ccy(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------------- spot table
-_SPOT_SQL = """
+_SPOT_OFFICIAL_SQL = """
 SELECT instrument_id, value
 FROM marks_official
 WHERE mark_type = 'SPOT' AND as_of_date = :as_of AND settle_date = :as_of
 """
 
+_SPOT_SOURCE_SQL = """
+SELECT instrument_id, value
+FROM marks
+WHERE mark_type = 'SPOT' AND as_of_date = :as_of AND settle_date = :as_of AND source = :source
+"""
 
-def spot_table(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
+
+def spot_table(conn: sqlite3.Connection, as_of_date: str, source: "str | None" = None) -> pd.DataFrame:
     """ccy -> USD spot rate, derived from official SPOT marks (marks_official, mark_type =
     'SPOT', settle_date = as_of_date per the contract: "settle_date = as_of_date for
     SPOT") as of as_of_date.
+
+    ``source``: None (default, unchanged behaviour) reads from `marks_official`. An
+    explicit source (e.g. 'BNP_BVAL') reads the raw `marks` table filtered to that one
+    source instead -- reconciliation only, mirroring engine/pnl/pnl.py's `_marks_df`
+    pattern, since BNP_BVAL is never official per CLAUDE.md "Official marks".
 
     Instrument ids are 6-letter pairs (e.g. 'USDJPY', 'AUDUSD', 'XAUUSD'). For a pair
     whose base is USD ('USDJPY'), the non-USD ccy is the quote and ccy->USD = 1/value.
@@ -131,7 +142,12 @@ def spot_table(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
     (ccy, direct desc) with a stable sort before dropping duplicates, never relying on
     unstable/quicksort ordering.
     """
-    marks = pd.read_sql_query(_SPOT_SQL, conn, params={"as_of": as_of_date})
+    if source is None:
+        marks = pd.read_sql_query(_SPOT_OFFICIAL_SQL, conn, params={"as_of": as_of_date})
+    else:
+        marks = pd.read_sql_query(
+            _SPOT_SOURCE_SQL, conn, params={"as_of": as_of_date, "source": source}
+        )
     rows = []
     for _, r in marks.iterrows():
         pair = r["instrument_id"]

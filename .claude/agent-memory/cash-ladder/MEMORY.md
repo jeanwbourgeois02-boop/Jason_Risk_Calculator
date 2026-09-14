@@ -1,1 +1,1 @@
-- [Data facts](data_facts.md) — BNP CSV/marks quirks: empty marks_official on real file, NDF ccys excluded from ladder, ladder `>=` vs delta SQL `>` threshold, never use positions.fx_to_usd.
+- [Data facts](data_facts.md) — BNP CSV/marks quirks: empty marks_official on real file, NDF ccys excluded from ladder, ladder `>=` vs delta SQL `>` threshold, never use positions.fx_to_usd, BNP_BVAL SPOT undefined for XXXUSD pairs (AUD/EUR/GBP/XAU).

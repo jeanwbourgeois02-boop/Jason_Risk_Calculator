@@ -14,6 +14,7 @@ from data.bloomberg.bnp_marks import load_bnp_marks
 from data.bloomberg.marks_csv import MarkRow
 from data.ingest import bnp, schema
 from engine.pnl.pnl import ltd_per_trade
+from engine.pnl.aggregate import aggregate_by_pair, book_totals, period_pnl
 
 REPO = Path(__file__).resolve().parents[1]
 RAW = REPO / "data" / "raw" / "HA_PNL_20260818.csv"
@@ -245,3 +246,165 @@ def test_no_division_by_mark_m_or_spot_variable():
             if pattern.search(code):
                 offenders.append(f"{path.name}:{i}: {line}")
     assert not offenders, "division by mark/m/spot found:\n" + "\n".join(offenders)
+
+
+# ============================================================== engine.pnl.aggregate
+
+# ------------------------------------------------------------- aggregate_by_pair
+def test_aggregate_by_pair_usd_notional_ltd_and_count():
+    conn = _make_conn()
+    _insert_trade(conn, "T1", "USDJPY", 1_000_000, 147.00, "2026-09-01")
+    _insert_trade(conn, "T2", "USDJPY", -500_000, 147.00, "2026-09-01")
+    _insert_trade(conn, "T3", "AUDUSD", 2_000_000, 0.6500, "2026-09-01")
+    _insert_trade(conn, "T4", "AUDUSD", -1_000_000, 0.6500, "2026-09-01")
+    _insert_mark(conn, "USDJPY", "2026-09-01", "FWD_OUTRIGHT", 148.00)
+    _insert_mark(conn, "USDJPY", AS_OF, "SPOT", 147.50)
+    _insert_mark(conn, "AUDUSD", "2026-09-01", "FWD_OUTRIGHT", 0.6600)
+
+    per_trade = ltd_per_trade(conn, AS_OF)
+    by_pair = aggregate_by_pair(per_trade, conn).set_index("instrument_id")
+
+    # usd_notional: per trade sign(quantity) x |USD leg amount|, summed by pair.
+    # USDJPY's base_ccy IS USD, so the "USD leg" is leg 1 itself: amount = quantity.
+    #   T1: |USD leg| = |1,000,000| = 1,000,000, sign(+1,000,000) = +1 -> +1,000,000
+    #   T2: |USD leg| = |-500,000| = 500,000, sign(-500,000) = -1 -> -500,000
+    expected_usdjpy_notional = 1 * abs(1_000_000) + (-1) * abs(-500_000)
+    assert math.isclose(by_pair.loc["USDJPY", "usd_notional"], expected_usdjpy_notional)
+    assert by_pair.loc["USDJPY", "n_trades"] == 2
+
+    # AUDUSD: T3 leg USD amount = -2,000,000 x 0.65 = -1,300,000, sign(+2,000,000)=+1 -> +1,300,000
+    #         T4 leg USD amount = -(-1,000,000) x 0.65 = 650,000, sign(-1,000,000)=-1 -> -650,000
+    expected_audusd_notional = 1 * abs(2_000_000 * 0.6500) + (-1) * abs(1_000_000 * 0.6500)
+    assert math.isclose(by_pair.loc["AUDUSD", "usd_notional"], expected_audusd_notional)
+    assert by_pair.loc["AUDUSD", "n_trades"] == 2
+
+    pt = per_trade.set_index("trade_id")
+    expected_usdjpy_ltd = pt.loc["T1", "pnl_usd"] + pt.loc["T2", "pnl_usd"]
+    expected_audusd_ltd = pt.loc["T3", "pnl_usd"] + pt.loc["T4", "pnl_usd"]
+    assert math.isclose(by_pair.loc["USDJPY", "ltd_usd"], expected_usdjpy_ltd)
+    assert math.isclose(by_pair.loc["AUDUSD", "ltd_usd"], expected_audusd_ltd)
+
+
+def test_aggregate_by_pair_empty_input():
+    conn = _make_conn()
+    empty = ltd_per_trade(conn, AS_OF)  # no trades inserted -> empty per_trade
+    out = aggregate_by_pair(empty, conn)
+    assert list(out.columns) == ["instrument_id", "usd_notional", "ltd_usd", "n_trades"]
+    assert len(out) == 0
+
+
+# ------------------------------------------------------------------ book_totals
+def test_book_totals_net_and_gross_exclude_gold_and_futures():
+    conn = schema.connect(":memory:")
+    conn.executemany(
+        "INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        [
+            ("USDJPY", "FX", "USD", "JPY", 1.0, 0, "USDJPY Curncy", "9999-12-31"),
+            ("AUDUSD", "FX", "AUD", "USD", 1.0, 0, "AUDUSD Curncy", "9999-12-31"),
+            ("XAUUSD", "FX", "XAU", "USD", 1.0, 0, "XAUUSD Curncy", "9999-12-31"),
+            ("ESU6 Index", "FUTURE", "ES", "USD", 50.0, 0, "ESU6 Index", "2026-09-18"),
+        ],
+    )
+    conn.commit()
+    by_pair = pd.DataFrame(
+        {
+            "instrument_id": ["USDJPY", "AUDUSD", "XAUUSD", "ESU6 Index"],
+            "usd_notional": [1_000_000.0, -2_000_000.0, 500_000.0, 250_000.0],
+            "ltd_usd": [0.0, 0.0, 0.0, 0.0],
+            "n_trades": [1, 1, 1, 1],
+        }
+    )
+
+    totals = book_totals(by_pair, conn)
+
+    # net: USDJPY sign +1 (base_ccy USD) -> +1,000,000; AUDUSD sign -1 (base_ccy AUD) -> +2,000,000
+    expected_net = 1.0 * 1_000_000.0 + (-1.0) * (-2_000_000.0)
+    expected_gross = abs(1_000_000.0) + abs(-2_000_000.0)
+    assert math.isclose(totals["net_usd"], expected_net)
+    assert math.isclose(totals["gross_usd"], expected_gross)
+    assert math.isclose(totals["gold_usd"], 500_000.0)
+    assert math.isclose(totals["futures_usd"], 250_000.0)
+
+
+def test_book_totals_empty_input():
+    conn = _make_conn()
+    by_pair = pd.DataFrame(columns=["instrument_id", "usd_notional", "ltd_usd", "n_trades"])
+    totals = book_totals(by_pair, conn)
+    assert totals == {"net_usd": 0.0, "gross_usd": 0.0, "gold_usd": 0.0, "futures_usd": 0.0}
+
+
+# ------------------------------------------------------------------- period_pnl
+def test_period_pnl_daily_crosses_weekend_others_nan():
+    # AS_OF_MON = Monday 2026-08-17; previous business day = Friday 2026-08-14 (weekend crossed).
+    # Marks exist only on those two dates, so d5 / mtd / ytd reference dates have no marks
+    # at all -> NaN, per the "no marks at all -> NaN" rule.
+    AS_OF_MON = "2026-08-17"
+    PREV_FRI = "2026-08-14"
+    conn = _make_conn()
+    _insert_trade(conn, "P1", "USDJPY", 1_000_000, 147.00, "2026-09-01")
+    _insert_mark(conn, "USDJPY", "2026-09-01", "FWD_OUTRIGHT", 148.00, as_of=AS_OF_MON)
+    _insert_mark(conn, "USDJPY", AS_OF_MON, "SPOT", 147.00, as_of=AS_OF_MON)
+    _insert_mark(conn, "USDJPY", "2026-09-01", "FWD_OUTRIGHT", 147.50, as_of=PREV_FRI)
+    _insert_mark(conn, "USDJPY", PREV_FRI, "SPOT", 146.50, as_of=PREV_FRI)
+
+    result = period_pnl(conn, AS_OF_MON)
+
+    expected_ltd_mon = 1_000_000 * (148.00 - 147.00) * (1.0 / 147.00)
+    expected_ltd_fri = 1_000_000 * (147.50 - 147.00) * (1.0 / 146.50)
+    assert math.isclose(result["ltd"], expected_ltd_mon)
+    assert result["daily_ref_date"] == PREV_FRI
+    assert math.isclose(result["daily"], expected_ltd_mon - expected_ltd_fri)
+
+    assert math.isnan(result["d5"])
+    assert math.isnan(result["mtd"])
+    assert math.isnan(result["ytd"])
+    # reference dates never land back on the two dates that do have marks
+    assert result["d5_ref_date"] not in (AS_OF_MON, PREV_FRI)
+    assert result["mtd_ref_date"] not in (AS_OF_MON, PREV_FRI)
+    assert result["ytd_ref_date"] not in (AS_OF_MON, PREV_FRI)
+
+
+def test_daily_pnl_excludes_trades_dated_after_reference_date():
+    """C-1 regression: a trade dated as_of must never be valued (via marks that happen
+    to exist) inside LTD(ref_date) for a ref_date before its trade_date -- _TRADE_SQL
+    must filter t.trade_date <= :as_of, not just l.settle_date > :as_of. An OLD trade
+    (trade_date well before both dates, marked flat so its LTD is 0 on both dates) is
+    included purely to keep both reference-date LTD sums non-empty/non-NaN so daily can
+    be compared directly to ltd."""
+    AS_OF_MON = "2026-08-17"
+    PREV_FRI = "2026-08-14"
+    OLD_SETTLE = "2026-09-01"
+    NEW_SETTLE = "2026-10-01"
+    conn = _make_conn()
+
+    _insert_trade(conn, "OLD", "USDJPY", 1_000_000, 147.00, OLD_SETTLE, trade_date="2026-08-01")
+    _insert_mark(conn, "USDJPY", OLD_SETTLE, "FWD_OUTRIGHT", 147.00, as_of=AS_OF_MON)  # = fill -> 0 pnl
+    _insert_mark(conn, "USDJPY", OLD_SETTLE, "FWD_OUTRIGHT", 147.00, as_of=PREV_FRI)   # = fill -> 0 pnl
+    _insert_mark(conn, "USDJPY", AS_OF_MON, "SPOT", 147.50, as_of=AS_OF_MON)
+    _insert_mark(conn, "USDJPY", PREV_FRI, "SPOT", 146.50, as_of=PREV_FRI)
+
+    # NEW trade dated exactly as_of; marks present even on the earlier date so the old,
+    # unfiltered SQL would have wrongly picked it up there too.
+    _insert_trade(conn, "NEW", "USDJPY", 1_000_000, 147.00, NEW_SETTLE, trade_date=AS_OF_MON)
+    _insert_mark(conn, "USDJPY", NEW_SETTLE, "FWD_OUTRIGHT", 148.00, as_of=AS_OF_MON)
+    _insert_mark(conn, "USDJPY", NEW_SETTLE, "FWD_OUTRIGHT", 999.00, as_of=PREV_FRI)
+
+    ref_out = ltd_per_trade(conn, PREV_FRI, strict=False)
+    assert "NEW" not in ref_out["trade_id"].tolist()
+    assert "OLD" in ref_out["trade_id"].tolist()
+
+    result = period_pnl(conn, AS_OF_MON)
+    assert result["daily_ref_date"] == PREV_FRI
+    assert not math.isnan(result["ltd"])
+    assert not math.isnan(result["daily"])
+    assert math.isclose(result["daily"], result["ltd"])
+
+
+def test_period_pnl_no_open_trades_all_nan():
+    conn = _make_conn()  # no trades at all -> ltd_per_trade empty on every date
+    result = period_pnl(conn, "2026-08-17")
+    assert math.isnan(result["ltd"])
+    assert math.isnan(result["daily"])
+    assert math.isnan(result["d5"])
+    assert math.isnan(result["mtd"])
+    assert math.isnan(result["ytd"])
