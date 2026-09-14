@@ -24,16 +24,20 @@ holds the latest value. The ladder re-renders every 2 minutes (`dcc.Interval`) a
 the latest official SPOT per currency (`rates_from_marks`); a mark older than 10 minutes
 is flagged stale.
 
-## Setting up the Bloomberg computer
+## Setting up the Bloomberg computer (no command line needed)
 
-```powershell
-git clone <repo>; cd risk-monitor
-py -3 -m pip install -r requirements.txt
-py -3 -m pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
-py -3 -m ui.launch
-```
+1. Clone or open the project (e.g. in PyCharm).
+2. Copy `data\raw\risk.db` from the other computer into the project's `data\raw\` folder
+   (`data/raw/` is git-ignored, so it does not come with the repository).
+3. Double-click `setup_bloomberg.bat` once: installs `requirements.txt` and `blpapi` from
+   Bloomberg's official index, verifies the imports, and reports success or the exact failure.
+4. Log in to the Bloomberg Terminal, then double-click `launch.bat`. The console prints
+   `Bloomberg feed: started (every 2 min)` or the reason it did not start.
+5. Double-click `run_bloomberg_diagnostic.bat` to see every spot/forward request as OK or
+   FAILED with Bloomberg's error text (reports saved under `reports\`).
 
-The launcher prints `Bloomberg feed: started (every 2 min)` or the reason it did not start.
+All three batch files use the same interpreter, `py -3` (the Python launcher), so the
+packages installed by setup are the ones the app and the diagnostic run with.
 Environment overrides: `BLP_HOST`, `BLP_PORT`, `RISK_LIVE=0` (disable the feed).
 
 ## Diagnostics
