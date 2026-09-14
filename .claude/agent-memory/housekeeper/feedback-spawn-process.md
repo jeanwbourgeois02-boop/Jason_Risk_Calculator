@@ -5,7 +5,7 @@ metadata:
   type: feedback
 ---
 
-Specialists whose owned directories do not overlap and whose tasks do not depend on each other run in parallel as background agents; wait for all of them to finish before running the reviewer. A specialist that depends on another's output runs after it. An empty output file means the agent is still running, not dead; never re-spawn on that basis. The reviewer runs after all specialists have finished.
+Specialists whose owned directories do not overlap and whose tasks do not depend on each other run in parallel as background agents; wait for all to finish before running the reviewer once on the combined diff. A specialist that depends on another's output runs after it. An empty output file means the agent is still running, not dead; never re-spawn on that basis. The reviewer runs after all specialists have finished.
 
 **Why:** on 2026-09-13 a background data-ingest fix looked dead (0-byte output file, code unchanged) and was re-spawned; both ran, the second hit a "file changed since read" conflict and had to reconcile the first's edits. Background subagent output files stay 0 bytes until the agent finishes, so an empty file is not evidence it failed. The user set the parallel-background rule in .claude/agents/housekeeper.md step 2 on 2026-09-13.
 

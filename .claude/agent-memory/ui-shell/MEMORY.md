@@ -1,0 +1,2 @@
+- [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
+- [App structure](app-structure.md) — ui/app.py summary()/build_layout()/create_app() split and RISK_DB resolution

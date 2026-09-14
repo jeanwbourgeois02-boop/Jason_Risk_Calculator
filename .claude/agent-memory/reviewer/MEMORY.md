@@ -2,4 +2,5 @@
 - [Ingest review findings](review-findings-ingest.md) — first-pass findings all closed on 2026-09-13 re-review; 4 residual items listed
 - [Bloomberg review findings](review-findings-bloomberg.md) — 2026-09-13 five passes; round 3 closed W-1 pull/W-2/S-1..S-4; open: candidate-only probe -> diagnose exit 1 (regression), tzdata import crash, W-2 test gaps
 - [Ladder review findings](review-findings-ladder.md) — 2026-09-13 first pass of engine/ladder: no criticals, 4 open warnings (source filter, SPOT settle_date, zero spot, test gaps)
+- [P&L review findings](review-findings-pnl.md) — 2026-09-14 engine/pnl + ui/app: maths correct; C-1 matured-trade test closed on 2nd pass, items 2-6 open
 - [Windows bash paths](windows-bash-paths.md) — use forward slashes when passing paths to pytest via the Bash tool

@@ -1,0 +1,1 @@
+- [Data quirks](data_quirks.md) — spot derivation rule (USD+quote lookup), real-file has no crosses (0 no-spot trades), grep-test/docstring gotcha, pre-existing bloomberg test failures
