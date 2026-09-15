@@ -56,17 +56,30 @@ def test_matching_identity_reuses_running_instance(monkeypatch):
     assert made == []
 
 
-def test_stale_identity_is_not_reused_and_next_port_used(monkeypatch, capsys):
+def test_stale_instance_is_stopped_and_port_reused(monkeypatch, capsys):
     monkeypatch.setattr(launch, 'probe', _probe_by_port({8050: launch.identity('0000deadbeef0000')}))
+    stopped = []
+    monkeypatch.setattr(launch, 'stop_instance', lambda url, wait_s=5.0: stopped.append(url) or True)
     opened = []
     monkeypatch.setattr(launch.webbrowser, 'open', opened.append)
     made = _run_server_capture(monkeypatch)
     assert launch.main([]) == 0
-    assert made == [8051] and opened == ['http://127.0.0.1:8051']
+    assert stopped == ['http://127.0.0.1:8050']
+    assert made == [8050] and opened == ['http://127.0.0.1:8050']
     out = capsys.readouterr().out
-    assert 'STALE code, not reused' in out and 'left running' in out
-    for label in ('Interpreter:', 'Working dir:', 'Database:', 'App version:', 'Risk monitor: http://127.0.0.1:8051'):
+    assert 'stopped risk-monitor instance' in out and 'STALE code' in out
+    for label in ('Interpreter:', 'Working dir:', 'Database:', 'App version:', 'Risk monitor: http://127.0.0.1:8050'):
         assert label in out
+
+
+def test_stale_instance_that_will_not_stop_is_skipped(monkeypatch, capsys):
+    monkeypatch.setattr(launch, 'probe', _probe_by_port({8050: launch.identity('0000deadbeef0000')}))
+    monkeypatch.setattr(launch, 'stop_instance', lambda url, wait_s=5.0: False)
+    monkeypatch.setattr(launch.webbrowser, 'open', lambda u: None)
+    made = _run_server_capture(monkeypatch)
+    assert launch.main([]) == 0
+    assert made == [8051]
+    assert 'did not stop' in capsys.readouterr().out
 
 
 def test_force_new_skips_matching_instance(monkeypatch, capsys):
@@ -74,8 +87,9 @@ def test_force_new_skips_matching_instance(monkeypatch, capsys):
     opened = []
     monkeypatch.setattr(launch.webbrowser, 'open', opened.append)
     made = _run_server_capture(monkeypatch)
+    monkeypatch.setattr(launch, 'stop_instance', lambda url, wait_s=5.0: True)
     assert launch.main(['--force-new']) == 0
-    assert made == [8051] and opened == ['http://127.0.0.1:8051']
+    assert made == [8050] and opened == ['http://127.0.0.1:8050']
     assert 'forced new instance' in capsys.readouterr().out
 
 

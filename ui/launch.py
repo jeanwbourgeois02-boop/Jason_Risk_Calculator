@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = ("ui", "engine", "data/ingest", "data/bloomberg")
 IDENTITY_ROUTE = '/_risk_monitor_identity'
 IDENTITY_PREFIX = 'risk-monitor:'
+SHUTDOWN_ROUTE = '/_risk_monitor_shutdown'
 PORTS = range(8050, 8061)
 
 
@@ -44,6 +45,31 @@ def probe(url: str):
         return None
 
 
+def stop_instance(url: str, wait_s: float = 5.0) -> bool:
+    """Ask a risk-monitor instance at url to exit, then wait until the port is free.
+    Instances started from code older than this route ignore the request; the caller
+    then reports them and moves to the next port."""
+    import time
+    from urllib.request import Request
+    try:
+        with urlopen(Request(url + SHUTDOWN_ROUTE, method='POST'), timeout=1.0):
+            pass
+    except Exception:
+        return False
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        if probe(url) is None:
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _shutdown_view():
+    """Exit this process shortly after answering, so a newer launcher can take the port."""
+    threading.Timer(0.3, os._exit, (0,)).start()
+    return 'stopping'
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description='Launch the risk monitor.')
     parser.add_argument('--force-new', action='store_true',
@@ -65,6 +91,7 @@ def main(argv=None):
     me = identity(fingerprint)
     app = create_app(start_feed=True)  # Bloomberg live feed when this computer has it
     app.server.add_url_rule(IDENTITY_ROUTE, view_func=lambda: me)
+    app.server.add_url_rule(SHUTDOWN_ROUTE, view_func=_shutdown_view, methods=['POST'])
     server = url = None
     for port in PORTS:
         url = f'http://127.0.0.1:{port}'
@@ -75,11 +102,16 @@ def main(argv=None):
                 print(f'Risk monitor is already running with the current code: {url}')
                 return 0
             if seen.startswith(IDENTITY_PREFIX):
-                why = 'forced new instance' if args.force_new else 'STALE code, not reused'
-                print(f'Port {port}: risk-monitor instance {seen} ({why}); it was left running.')
+                why = 'forced new instance' if args.force_new else 'STALE code'
+                if stop_instance(url):
+                    print(f'Port {port}: stopped risk-monitor instance {seen} ({why}).')
+                else:
+                    print(f'Port {port}: risk-monitor instance {seen} ({why}) did not stop; '
+                          f'close its terminal. Trying the next port.')
+                    continue
             else:
                 print(f'Port {port}: occupied by another application.')
-            continue
+                continue
         try:
             server = make_server('127.0.0.1', port, app.server, threaded=True)
             break
