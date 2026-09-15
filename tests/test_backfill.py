@@ -54,9 +54,9 @@ def test_backfill_writes_marks_and_realises_in_order(tmp_path):
     assert [r["day"] for r in results] == ["2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11"]
     assert [r["status"] for r in results] == ["DONE", "DONE", "DONE", "DONE", "NO_CLOSES"]
 
-    # official SPOT marks stamped 15:00 New York with the date's offset (EDT in September)
+    # official SPOT marks stamped 17:00 New York with the date's offset (EDT in September)
     marks = conn.execute("SELECT as_of_date, instrument_id, value, source, snapped_at FROM marks ORDER BY 1,2").fetchall()
-    assert ("2026-09-07", "AUDUSD", 0.60, "BBG_BFXFORWARD", "2026-09-07T15:00:00-04:00") in marks
+    assert ("2026-09-07", "AUDUSD", 0.60, "BBG_BFXFORWARD", "2026-09-07T17:00:00-04:00") in marks
     assert not any(m[1] == "EURSEK" for m in marks)
     assert len([m for m in marks if m[0] == "2026-09-10"]) == 1          # AUD close missing that day
 
@@ -112,8 +112,8 @@ def test_backfill_without_realise_settled_still_writes_marks(tmp_path, monkeypat
 
 def test_helpers():
     assert backfill.business_days(date(2026, 9, 4), date(2026, 9, 8)) == [date(2026, 9, 4), date(2026, 9, 7), date(2026, 9, 8)]
-    assert backfill.close_stamp(date(2026, 1, 15)) == "2026-01-15T15:00:00-05:00"      # EST
-    assert backfill.close_stamp(date(2026, 7, 15)) == "2026-07-15T15:00:00-04:00"      # EDT
+    assert backfill.close_stamp(date(2026, 1, 15)) == "2026-01-15T17:00:00-05:00"      # EST
+    assert backfill.close_stamp(date(2026, 7, 15)) == "2026-07-15T17:00:00-04:00"      # EDT
 
 
 def test_main_without_bloomberg_writes_nothing(tmp_path, monkeypatch):

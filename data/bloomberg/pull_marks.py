@@ -184,8 +184,8 @@ _CORRELATION_COUNTER = itertools.count(1)
 
 
 def snapped_at(as_of: date) -> str:
-    """15:00 America/New_York on as_of, ISO with the resolved offset for that date."""
-    return datetime(as_of.year, as_of.month, as_of.day, 15, 0, 0, tzinfo=_ny()).isoformat()
+    """17:00 America/New_York on as_of, ISO with the resolved offset for that date."""
+    return datetime(as_of.year, as_of.month, as_of.day, 17, 0, 0, tzinfo=_ny()).isoformat()
 
 
 class StaleAsOfError(RuntimeError):

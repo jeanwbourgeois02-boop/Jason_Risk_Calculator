@@ -17,7 +17,7 @@ Limits, stated plainly:
     uploads are absent, so the history is only as complete as the BNP file archive.
   - Closes are Bloomberg's daily PX_LAST, not the live-feed's intraday mid. Both are
     stored under the same official source; the snapped_at timestamp tells them apart
-    (backfill rows are stamped 15:00 America/New_York on their date).
+    (backfill rows are stamped 17:00 America/New_York on their date).
   - NDFs still realise at spot on the value date, not the fixing.
   - Days that already hold official SPOT marks for every traded pair are skipped unless
     overwrite=True. Realised rows already frozen by an earlier run are never re-priced.
@@ -75,8 +75,8 @@ def traded_pairs(conn: sqlite3.Connection) -> List[tuple]:
 
 
 def close_stamp(day: date) -> str:
-    """15:00 New York on `day`, with that date's UTC offset resolved (CLAUDE.md mark time)."""
-    return datetime(day.year, day.month, day.day, 15, 0, tzinfo=NY).isoformat(timespec="seconds")
+    """17:00 New York on `day`, with that date's UTC offset resolved (CLAUDE.md mark time)."""
+    return datetime(day.year, day.month, day.day, 17, 0, tzinfo=NY).isoformat(timespec="seconds")
 
 
 def rates_on_date(conn: sqlite3.Connection, day: str) -> Dict[str, dict]:

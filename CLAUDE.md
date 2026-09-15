@@ -216,7 +216,7 @@ Per-pair delta (the sheet's "Position") is the same union grouped by `t.instrume
   - IRS: `PnL_USD = PV_USD(t) − PV_USD(trade date)`; PV, DV01 consumed as marks until the pricer is rebuilt on `curves`.
   - FX option: `PnL_USD = (premium_mark − premium_fill) × Size`, converted at spot if the premium currency is not USD.
 - **Daily P&L** = `LTD(t) − LTD(t−1bd)`. **Trading P&L** = LTD of trades with `trade_date = t`. **5d P&L** = `LTD(t) − LTD(t−5bd)`. **MTD** = `LTD(t) − LTD(last bd of previous month)`. **YTD** = `LTD(t) − LTD(last bd of previous year)`. All from our own recomputed daily series; `t−n bd` uses the trading calendar.
-- **Mark time**: t−1 marks at 15:00 `America/New_York` (the xlsx hard-codes `"PricingTime","15:00:00-04:00"`; the app resolves the offset from the zone per date); intraday = live. Every mark row carries `snapped_at` with the resolved offset for that row.
+- **Mark time**: official close is 17:00 `America/New_York` (user decision 2026-09-15; Bloomberg's daily FX close, so historical `PX_LAST` spot and the `snapped_at` stamp agree). The xlsx hard-codes `"PricingTime","15:00:00-04:00"`; that 15:00 snapshot is a Reconciliation-tab input only. The app resolves the offset from the zone per date; intraday = live. Every mark row carries `snapped_at` with the resolved offset for that row.
 - **Net USD** (FX only) = Σ over pairs of sign × USD notional, sign +1 for USDXXX pairs (long base = long USD), −1 otherwise. **Gross USD** = Σ over pairs of |net USD notional per pair|. Gold and equity futures are reported separately (see open questions).
 - **Must not replicate** from the xlsx:
   1. Futures P&L computed as `Q × (m − f) / m` (the `RIGHT(pair,3)="USD"` branch): understates by `f/m`.

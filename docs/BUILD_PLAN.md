@@ -90,7 +90,7 @@ only.
 
 ## 3. Close series and periods (layer 2)
 
-- A **close** is the `marks` rows with `as_of_date = d` and `snapped_at` at 15:00
+- A **close** is the `marks` rows with `as_of_date = d` and `snapped_at` at 17:00
   America/New_York. Marks are appended, never overwritten; a re-pull the same day adds
   rows with a later `snapped_at` and the latest wins within a source.
 - `ltd(d) = sum(value_book(d).pnl_usd)`; NaN if any row is NaN. Stored nowhere;
@@ -113,7 +113,7 @@ only.
 
 ### 3a. Decisions of 2026-09-15 (evening review)
 
-- Close is 15:00 America/New_York, unchanged. Reconciliation against BNP is same-date,
+- Close is 17:00 America/New_York (changed from 15:00 on 2026-09-15). Reconciliation against BNP is same-date,
   same-close.
 - The market value break (our open LTD at the BNP file date minus BNP `mv_usd`, per
   instrument) is the primary comparison and is always shown. BNP day P&L versus our
@@ -221,7 +221,7 @@ bbg-data:
 > Retire `data/bloomberg/backfill.py`'s snapshot writing; backfill now only writes
 > marks for past closes (interpolated tenor history is `BBG_INTERP`, never official)
 > and calls `engine.pnl.ledger.realise_settled` if importable, else skips with a note.
-> Every mark row keeps `source` and `snapped_at` resolved from 15:00
+> Every mark row keeps `source` and `snapped_at` resolved from 17:00
 > America/New_York for its date.
 >
 > Add `data/bloomberg/inventory.py::mark_inventory(conn, as_of)` returning one row per
@@ -335,7 +335,7 @@ The original single-agent Task C prompt below is kept for reference only.
 
 ### Task D: live check (user, on the Bloomberg machine)
 
-Run the pull at 15:00 New York, upload the next BNP file, and compare on the
+Run the pull after 17:00 New York, upload the next BNP file, and compare on the
 Reconciliation tab: ours vs BNP per instrument, and ours vs the recalculated workbook
 per trade. Record breaks in `docs/open-questions.md`. Only after this does the
 workbook get retired.

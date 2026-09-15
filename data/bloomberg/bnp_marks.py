@@ -61,9 +61,9 @@ class BnpMarksResult:
 
 
 def _snapped_at(as_of: date) -> str:
-    """15:00 America/New_York on as_of_date, ISO with the resolved UTC offset for that
-    date (e.g. '2026-08-17T15:00:00-04:00'). CLAUDE.md "P&L conventions -> Mark time"."""
-    dt = datetime(as_of.year, as_of.month, as_of.day, 15, 0, 0, tzinfo=NY)
+    """17:00 America/New_York on as_of_date, ISO with the resolved UTC offset for that
+    date (e.g. '2026-08-17T17:00:00-04:00'). CLAUDE.md "P&L conventions -> Mark time"."""
+    dt = datetime(as_of.year, as_of.month, as_of.day, 17, 0, 0, tzinfo=NY)
     return dt.isoformat()
 
 

@@ -20,4 +20,4 @@ CLAUDE.md sections most relevant to you:
 
 - Data contract → Tables (marks and curves tables)
 - Data contract → Official marks (one official source per mark_type; marks_official view; BNP_BVAL is reconciliation only)
-- P&L conventions → Mark date, Mark time (15:00 America/New_York, snapped_at with resolved offset), Source of truth
+- P&L conventions → Mark date, Mark time (17:00 America/New_York, snapped_at with resolved offset), Source of truth

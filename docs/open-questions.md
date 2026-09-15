@@ -24,7 +24,7 @@ Unresolved items from the data-contract review of `data/raw/HA_PNL_20260818.csv`
 9. **Matured trades.** The xlsx keeps marking them at the T+5 outright; BNP drops settled forwards. Default: freeze P&L at the fixing/settlement date and carry it as realised.
 10. **Sources of truth per account.** The BNP file already carries GSCO-DRV, GSIL-FUT, JPML-IPB, NTXS-ISD, UBSI-ISD and HOLD-BOX rows. Is it the consolidated fund-level file for all positions, or must other PB files be ingested? Default: BNP file is consolidated.
 11. **Strategy filter.** `HAHY7` (241 rows) vs `HACA` "Cash Adj" (1 row). Default: include both, tag by strategy.
-12. **Mark time.** Official EOD: 15:00 New York (xlsx t−1 convention) or BVAL close (BNP)? Default: 15:00 New York.
+12. **Mark time.** Decided 2026-09-15: official EOD is 17:00 New York (Bloomberg daily FX close). The xlsx 15:00 snapshot is reconciliation only.
 13. **Gold.** XAUUSD treated as an FX pair (USD notional in xlsx; ounces at BNP). Keep as FX, or as a commodity line? Default: FX pair, excluded from Net/Gross USD (see 3).
 14. **Crosses.** USD notional of EURSEK = EUR amount × EURUSD spot (sheet uses the live rate). Default: spot of `as_of_date`.
 15. **Book parameters.** `pnl time series` holds capital 35m, vol allocation 4.5m, stop 5m, first stop 3.5m, daily vol = annual / 16. Config for the overall-book tab? Default: yes, in a config file, not in the data tables.
