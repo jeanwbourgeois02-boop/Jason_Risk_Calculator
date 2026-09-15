@@ -1,12 +1,12 @@
 # risk-monitor
 
-## User-authorised correction ? 2026-09-14
+## User-authorised direction, 2026-09-15 (supersedes the 2026-09-14 correction)
 
-`data/raw/HA-portfolio vJean.xlsx` is the calculation specification. `HA_PNL_*.csv` supplies trades/positions. The user explicitly requires literal workbook arithmetic, including shared WORKDAY(today,5) valuation, fill/mark denominator branches, T?2 using T?1 denominator, and BRL N17=O17. This supersedes EVERY conflicting instruction below and in `.claude/agents/`, including the former "Must not replicate" list. Do not substitute financially preferred conventions. See `docs/excel-parity-audit.md` for the exact formula evidence and saved-value limitations.
+`docs/BUILD_PLAN.md` is the build specification. The app's headline P&L is the per-trade valuation in its section 2 (each FX leg marked at the outright for its own value date, quote P&L converted at spot, futures as contracts × multiplier × price change, settled trades frozen), the close series and periods in section 3, and the four tabs in section 5. The "P&L conventions" section below is in force again and the "Must not replicate" list applies to the headline.
 
-Current application calculates the All FX trades formulas for recorded forwards/futures; reference workbook uploads do not add trades. Cash ladder provides local amounts, entry/valuation/general FX, signed USD entry, workbook valuation and P&L. WORKBOOK_REFERENCE marks are explicit inputs (not automatically official Bloomberg marks). Missing values stay missing. Portfolio Net/Gross requires manual adjustments not loaded; 5d/MTD/YTD have no workbook formula. These must be unavailable rather than replaced with generic calculations.
+The literal workbook arithmetic (`engine/pnl/pnl.py`, `docs/excel-parity-audit.md`) is retained unchanged as the Reconciliation tab only. It never feeds the header, the blotter or the ladder. `HA_PNL_*.csv` remains the trade source; workbook uploads add only futures fills per the plan. Missing values stay missing everywhere.
 
-The remaining contract text is historical wherever it conflicts with this correction.
+The cash ladder is a pure delta table: leg by leg, crosses included, spot for delta, no P&L on it (engine change landed 2026-09-15).
 
 FX and futures risk monitor: cash ladder, delta per currency, daily / 5d / MTD / YTD P&L. Python; Dash front end later. Fund NMMF, base currency USD, prime broker BNP. Reference inputs: `data/raw/HA_PNL_20260818.csv` (BNP position and P&L snapshot, 242 rows × 137 cols) and `data/raw/HA-portfolio vJean.xlsx` (the Excel calculator this app replaces). Open items live in `docs/open-questions.md`, not here.
 

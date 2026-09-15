@@ -1,14 +1,30 @@
 """Screenshot-style FX exposure ladder (docs/CASH_LADDER_SPEC.md).
 
-Pure Python/pandas: no SQL, no schema, no market-data calls. This is an ADDITIONAL,
-separately labelled "Exposure P&L" (Local delta x live spot - trade-level USD entry).
-It does not replace the workbook forward mark-to-market P&L in engine/ladder/valuation.py.
+Pure Python/pandas: no SQL, no schema, no market-data calls. This is the DELTA engine
+for the cash ladder: a pure exposure table (currency x settlement date), never P&L.
+It intentionally has no relationship to the workbook forward mark-to-market P&L in
+engine/ladder/valuation.py or to any realised/unrealised ledger -- those are engine/pnl
+concerns. `entry_rate`, where an adapter supplies it, is carried through to
+`contributions` for drill-down display only; it plays no part in any computation here.
 
-Formulas (per currency):
-    Local delta      = sum of signed local amounts
-    USD delta        = Local delta x USD-per-local rate
-    USD delta entry  = sum of trade-level usd_entry_amount (no averaging, no FIFO)
-    Exposure P&L     = USD delta - USD delta entry
+One record per trade LEG, not one per trade: a USD leg is priced like any other leg
+(spot = 1.0 identity), so a cross such as EURSEK -- which has no USD leg at all -- is
+not excluded. `trade_id` may repeat across a trade's own legs; the natural key is
+(trade_id, currency, settlement_date).
+
+The mark for delta is always SPOT, by design -- this ladder answers "how much of each
+currency will move on which date", not "what did that move earn". Marking at a forward
+outright, or netting against an entry rate, would turn this back into a P&L view; that
+is deliberately out of scope here (see engine/pnl/ for LTD / daily / MTD / YTD P&L).
+
+Formulas (per currency, summed over that currency's legs):
+    Local delta  = sum of signed leg amounts in that currency
+    USD delta    = Local delta x USD-per-local spot rate (USD identity = 1.0)
+
+Net USD / Gross USD (portfolio_totals) exclude the USD currency row: Net = sum of
+non-USD usd_delta, Gross = sum of |non-USD usd_delta|. A USD leg still contributes its
+own row to the ladder and summary, it is just not double-counted as an "FX exposure"
+against itself.
 
 Rounding tolerance: USD figures are exact floats; callers compare to whole-USD
 reference values with ROUNDING_TOLERANCE_USD. A larger difference is material.
@@ -20,13 +36,13 @@ from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
-REQUIRED_FIELDS = ("trade_id", "settlement_date", "book", "currency", "local_amount", "usd_entry_amount")
+REQUIRED_FIELDS = ("trade_id", "settlement_date", "book", "currency", "local_amount")
 RATE_FIELDS = ("rate", "inverted", "source", "timestamp", "stale")
 ROUNDING_TOLERANCE_USD = 1.0
 
-SUMMARY_COLUMNS = ["currency", "fx_rate", "local_delta", "usd_delta", "usd_delta_entry",
-                   "exposure_pnl", "rate_source", "rate_timestamp", "status"]
-CONTRIBUTION_COLUMNS = ["settlement_date", "currency", "trade_id", "book", "local_amount", "usd_entry_amount"]
+SUMMARY_COLUMNS = ["currency", "fx_rate", "local_delta", "usd_delta",
+                   "rate_source", "rate_timestamp", "status"]
+CONTRIBUTION_COLUMNS = ["settlement_date", "currency", "trade_id", "book", "local_amount"]
 STATUS_COLUMNS = ["currency", "status", "message"]
 
 
@@ -34,7 +50,7 @@ STATUS_COLUMNS = ["currency", "status", "message"]
 class ExposureResult:
     ladder: pd.DataFrame         # index settlement_date, columns currency, signed local amounts
     summary: pd.DataFrame        # SUMMARY_COLUMNS, one row per currency
-    contributions: pd.DataFrame  # CONTRIBUTION_COLUMNS, one row per trade
+    contributions: pd.DataFrame  # CONTRIBUTION_COLUMNS, one row per leg
     status: pd.DataFrame         # STATUS_COLUMNS: OK | STALE | MISSING_RATE per currency
 
     def cell_trades(self, settlement_date: str, currency: str) -> pd.DataFrame:
@@ -44,28 +60,29 @@ class ExposureResult:
 
 
 def portfolio_totals(result: "ExposureResult") -> dict:
-    """Portfolio-level aggregates of the per-currency summary (spec: Net = sum of USD
-    deltas, Gross = sum of |USD delta|, Exposure P&L = sum of currency P&L). If any
-    currency lacks a rate the USD totals are NaN and `missing` names it; nothing is
-    substituted."""
+    """Portfolio-level aggregates of the per-currency summary. Net = sum of non-USD
+    usd_delta, Gross = sum of |non-USD usd_delta| (the USD currency row is excluded so
+    a USD leg is not double-counted as its own "FX exposure"). If any currency lacks a
+    rate the USD totals are NaN and `missing` names it; nothing is substituted. No P&L
+    field here -- this is a delta table, not a ledger."""
     s = result.summary
     missing = sorted(s.loc[s["usd_delta"].isna(), "currency"]) if not s.empty else []
     if s.empty:
-        return {"net_usd": float("nan"), "gross_usd": float("nan"), "exposure_pnl": float("nan"),
-                "currencies": 0, "missing": []}
+        return {"net_usd": float("nan"), "gross_usd": float("nan"), "currencies": 0, "missing": []}
+    fx_only = s.loc[s["currency"] != "USD"]
     return {
-        "net_usd": float(s["usd_delta"].sum(skipna=False)),
-        "gross_usd": float(s["usd_delta"].abs().sum(skipna=False)),
-        "exposure_pnl": float(s["exposure_pnl"].sum(skipna=False)),
+        "net_usd": float(fx_only["usd_delta"].sum(skipna=False)),
+        "gross_usd": float(fx_only["usd_delta"].abs().sum(skipna=False)),
         "currencies": int(len(s)),
         "missing": missing,
     }
 
 
 def ladder_usd_equivalent(result: "ExposureResult") -> pd.Series:
-    """USD equivalent per settlement date: sum over currencies of local amount x that
-    currency's fx_rate from the summary. NaN for a date where any non-zero amount has
-    no rate. Index = settlement_date."""
+    """Spot USD value per settlement date: sum over currencies of local amount x that
+    currency's spot rate from the summary. This is a funding/exposure view (how much
+    USD each date's flows are worth today), NOT a P&L figure. NaN for a date where any
+    non-zero amount has no rate. Index = settlement_date."""
     if result.ladder.empty:
         return pd.Series(dtype=float, name="usd_equivalent")
     fx = result.summary.set_index("currency")["fx_rate"]
@@ -102,14 +119,16 @@ def _records_frame(records) -> pd.DataFrame:
         raise ValueError(f"records missing fields: {missing}")
     if df.empty:
         return df
-    dup = df["trade_id"].duplicated()
+    # Legs, not trades: trade_id repeats across a trade's own legs. The natural key
+    # (trade_id, currency, settlement_date) catches accidental duplicate legs instead.
+    dup = df.duplicated(subset=["trade_id", "currency", "settlement_date"])
     if dup.any():
-        raise ValueError(f"duplicate trade_id: {sorted(df.loc[dup, 'trade_id'])}")
-    if df[["settlement_date", "currency", "local_amount", "usd_entry_amount"]].isna().any().any():
-        raise ValueError("settlement_date, currency, local_amount and usd_entry_amount must not be null")
+        raise ValueError(f"duplicate (trade_id, currency, settlement_date): "
+                         f"{sorted(map(tuple, df.loc[dup, ['trade_id', 'currency', 'settlement_date']].values))}")
+    if df[["settlement_date", "currency", "local_amount"]].isna().any().any():
+        raise ValueError("settlement_date, currency and local_amount must not be null")
     df["settlement_date"] = df["settlement_date"].astype(str)
     df["local_amount"] = df["local_amount"].astype(float)
-    df["usd_entry_amount"] = df["usd_entry_amount"].astype(float)
     return df
 
 
@@ -128,8 +147,8 @@ def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,
     """Build ladder, summary, contributions and rate status from normalized records.
 
     `rates`: currency -> {rate, inverted, source, timestamp, stale}. USD is implicitly 1.0.
-    A missing rate leaves usd_delta / exposure_pnl NaN and status MISSING_RATE; zero is
-    never substituted. A stale rate is used but flagged STALE.
+    A missing rate leaves usd_delta NaN and status MISSING_RATE; zero is never
+    substituted. A stale rate is used but flagged STALE.
     """
     _validate_rates(rates)
     df = _records_frame(records)
@@ -148,7 +167,6 @@ def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,
     summary_rows, status_rows = [], []
     for ccy, grp in df.groupby("currency", sort=True):
         local_delta = float(grp["local_amount"].sum())
-        usd_entry = float(grp["usd_entry_amount"].sum())
         entry = _USD_IDENTITY if ccy == "USD" else rates.get(ccy)
         fx = float("nan")
         source = timestamp = ""
@@ -161,8 +179,7 @@ def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,
             msg = f"stale rate from {source} at {timestamp}" if entry["stale"] else ""
         usd_delta = local_delta * fx
         summary_rows.append({"currency": ccy, "fx_rate": fx, "local_delta": local_delta,
-                             "usd_delta": usd_delta, "usd_delta_entry": usd_entry,
-                             "exposure_pnl": usd_delta - usd_entry, "rate_source": source,
+                             "usd_delta": usd_delta, "rate_source": source,
                              "rate_timestamp": timestamp, "status": status})
         status_rows.append({"currency": ccy, "status": status, "message": msg})
 

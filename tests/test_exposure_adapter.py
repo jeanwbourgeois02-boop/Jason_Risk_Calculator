@@ -1,5 +1,10 @@
 """BNP parser -> exposure adapter. Fixture rows are sanitised copies of real
-HA_PNL_20260818.csv rows (AUDUSD id 196606908, USDJPY id 196243174)."""
+HA_PNL_20260818.csv rows (AUDUSD id 196606908, USDJPY id 196243174).
+
+One record per LEG: every FX trade yields two records (its two legs, including the
+USD leg where present). engine.ladder.exposure is a pure delta table (no P&L), so
+there is no usd_entry_amount any more; `entry_rate` is carried through for drill-down
+display only."""
 from pathlib import Path
 
 import pytest
@@ -43,18 +48,24 @@ def _brl_ndf_row():  # SELL USD VS .BUY BRL: real row (id 196354929), non-delive
     })
 
 
+def _leg(records, trade_id, ccy):
+    return next(r for r in records if r["trade_id"] == trade_id and r["currency"] == ccy)
+
+
 def test_ndf_included_in_ladder_and_flagged_non_cash(tmp_path):
     res = bnp.parse(_write_csv(tmp_path / "HA_PNL_20260818.csv", [_brl_ndf_row(), _aud_sell_row()]))
     records, unresolved = records_from_parse(res)
     assert unresolved == []
-    brl = next(r for r in records if r["currency"] == "BRL")
+    brl = _leg(records, "196354929", "BRL")
     assert brl["is_ndf"] == 1 and brl["settles_cash"] == 0
-    assert next(r for r in records if r["currency"] == "AUD")["settles_cash"] == 1
-    assert brl["local_amount"] == pytest.approx(30841044.0) and brl["usd_entry_amount"] == pytest.approx(6000000.0)
+    assert _leg(records, "196606908", "AUD")["settles_cash"] == 1
+    assert brl["local_amount"] == pytest.approx(30841044.0)
     exp = build_exposure(records, {"BRL": {"rate": 5.23129, "inverted": True, "source": "FIXTURE", "timestamp": "t", "stale": False},
                                    "AUD": {"rate": 0.70988, "inverted": False, "source": "FIXTURE", "timestamp": "t", "stale": False}})
     assert "BRL" in exp.ladder.columns and exp.ladder.loc["2026-09-16", "BRL"] == pytest.approx(30841044.0)
-    assert exp.summary.set_index("currency").loc["BRL", "exposure_pnl"] == pytest.approx(30841044.0 / 5.23129 - 6000000.0, abs=0.01)
+    assert exp.summary.set_index("currency").loc["BRL", "usd_delta"] == pytest.approx(30841044.0 / 5.23129, abs=0.01)
+    # both trades have a USD leg too, so "USD" is now a column/summary row as well
+    assert "USD" in exp.ladder.columns
 
 
 def test_book_mapping_explicit_not_silent(parsed):
@@ -62,7 +73,8 @@ def test_book_mapping_explicit_not_silent(parsed):
     assert {r["book_source"] for r in records} == {"HAHY7"} and {r["book"] for r in records} == {"HAHY7"}
     mapped, _ = records_from_parse(parsed, book_mapping={"HAHY7": "HA"})
     assert {r["book"] for r in mapped} == {"HA"} and {r["book_source"] for r in mapped} == {"HAHY7"}
-    assert build_exposure(mapped, {}, books=["HA"]).contributions.shape[0] == 3
+    # 3 FX trades x 2 legs each
+    assert build_exposure(mapped, {}, books=["HA"]).contributions.shape[0] == 6
     assert build_exposure(records, {}, books=["HA"]).contributions.empty
 
 
@@ -74,35 +86,41 @@ def parsed(tmp_path):
 
 def test_field_mapping_and_sign_convention(parsed):
     records, unresolved = records_from_parse(parsed)
-    by_id = {r["trade_id"]: r for r in records}
-    aud = by_id["196606908"]
-    assert aud["settlement_date"] == "2026-09-16" and aud["trade_date"] == "2026-07-30"
-    assert aud["currency"] == "AUD" and aud["local_amount"] == pytest.approx(-2878977.848)
-    assert aud["usd_entry_amount"] == pytest.approx(-2000000.0)     # sold AUD: local and USD entry both negative
-    assert aud["entry_rate"] == 0.694691 and aud["product_type"] == "FX_FWD"
-    assert aud["book"] == "HAHY7" and aud["fund"] == "NMMF" and aud["account"] == "BNPP-IPBFX-NMMF"
-    jpy = by_id["196243174"]
-    assert jpy["currency"] == "JPY" and jpy["local_amount"] == pytest.approx(567946050.0)
-    assert jpy["usd_entry_amount"] == pytest.approx(3500000.02)     # bought JPY: both positive
-    usd_buy = by_id["111"]                                          # helper row: BUY USD / SELL JPY
-    assert usd_buy["local_amount"] == pytest.approx(-147000000.0) and usd_buy["usd_entry_amount"] == pytest.approx(-1000000.0)
+    aud_local = _leg(records, "196606908", "AUD")
+    aud_usd = _leg(records, "196606908", "USD")
+    assert aud_local["settlement_date"] == "2026-09-16" and aud_local["trade_date"] == "2026-07-30"
+    assert aud_local["local_amount"] == pytest.approx(-2878977.848)
+    assert aud_usd["local_amount"] == pytest.approx(2000000.0)
+    assert aud_local["entry_rate"] == 0.694691 and aud_local["product_type"] == "FX_FWD"
+    assert aud_local["book"] == "HAHY7" and aud_local["fund"] == "NMMF" and aud_local["account"] == "BNPP-IPBFX-NMMF"
+
+    jpy_local = _leg(records, "196243174", "JPY")
+    jpy_usd = _leg(records, "196243174", "USD")
+    assert jpy_local["local_amount"] == pytest.approx(567946050.0)
+    assert jpy_usd["local_amount"] == pytest.approx(-3500000.02)
+
+    usd_buy_local = _leg(records, "111", "JPY")                         # helper row: BUY USD / SELL JPY
+    usd_buy_usd = _leg(records, "111", "USD")
+    assert usd_buy_local["local_amount"] == pytest.approx(-147000000.0)
+    assert usd_buy_usd["local_amount"] == pytest.approx(1000000.0)
 
 
 def test_currency_and_futures_rows_excluded_and_reported(parsed):
     records, unresolved = records_from_parse(parsed)
-    assert len(records) == 3 and unresolved == []
+    # 3 FX trades (AUD, JPY, JPY-helper) x 2 legs each
+    assert len(records) == 6 and unresolved == []
     # The parser records CURRENCY balances and FUTURES as positions only (never trades),
     # so neither reaches the ladder; the counts prove both rows were seen.
     assert parsed.n_currency == 1 and parsed.n_futures == 1
     assert {t.product for t in parsed.trades} == {"FX_FWD"}
-    assert {r["currency"] for r in records} == {"AUD", "JPY"}
+    assert {r["currency"] for r in records} == {"AUD", "JPY", "USD"}
 
 
 def test_non_fx_trade_is_reported_not_dropped(parsed):
     from dataclasses import replace
     parsed.trades.append(replace(parsed.trades[0], trade_id="FUT-1", instrument_id="ESU6 Index", product="FUTURE"))
     records, unresolved = records_from_parse(parsed)
-    assert len(records) == 3 and [u.reason for u in unresolved] == ["non-FX product FUTURE excluded"]
+    assert len(records) == 6 and [u.reason for u in unresolved] == ["non-FX product FUTURE excluded"]
 
 
 def test_parser_rejects_surface_as_unresolved(tmp_path):
@@ -119,10 +137,10 @@ def test_records_flow_into_build_exposure(parsed):
     res = build_exposure(records, rates)
     assert list(res.ladder.index) == ["2026-09-16"]
     assert res.ladder.loc["2026-09-16", "JPY"] == pytest.approx(567946050.0 - 147000000.0)
+    # USD column is now populated too, from the USD legs of all three trades
+    assert res.ladder.loc["2026-09-16", "USD"] == pytest.approx(2000000.0 - 3500000.02 + 1000000.0)
     s = res.summary.set_index("currency")
-    # AUD: -2,878,977.848 x 0.70988 - (-2,000,000) = -43,728.79 (= Quantity x (Price - rate) in USD)
-    assert s.loc["AUD", "exposure_pnl"] == pytest.approx(-2878977.848 * 0.70988 + 2000000.0, abs=0.01)
-    assert s.loc["AUD", "exposure_pnl"] == pytest.approx(-2878977.848 * (0.70988 - 0.694691), abs=0.01)
+    assert s.loc["AUD", "usd_delta"] == pytest.approx(-2878977.848 * 0.70988, abs=0.01)
     assert sorted(res.cell_trades("2026-09-16", "JPY")["trade_id"]) == ["111", "196243174"]
     assert res.status["status"].eq("OK").all()
 
@@ -130,7 +148,7 @@ def test_records_flow_into_build_exposure(parsed):
 def test_aud_screenshot_result_preserved():
     from tests.test_exposure import AUD_FIXTURE, rate
     s = build_exposure(AUD_FIXTURE, {"AUD": rate(0.600)}).summary.iloc[0]
-    assert round(s["usd_delta"]) == -12576974 and round(s["exposure_pnl"]) == 2423026
+    assert round(s["usd_delta"]) == -12576974
 
 
 RAW = Path(__file__).resolve().parents[1] / "data" / "raw" / "HA_PNL_20260818.csv"
@@ -139,6 +157,7 @@ MOCK_RATES = {  # deterministic USD-per-local shape: non-USD-base pairs quoted d
     "HKD": (7.8, True), "JPY": (150.0, True), "MXN": (18.0, True), "NOK": (10.5, True), "SEK": (10.0, True),
     "SGD": (1.3, True), "TRY": (40.0, True), "XAU": (3300.0, False), "ZAR": (18.0, True),
     "BRL": (5.2, True), "TWD": (30.0, True), "KRW": (1380.0, True), "IDR": (16000.0, True),
+    "USD": (1.0, False),
 }
 
 
@@ -154,19 +173,22 @@ def test_end_to_end_real_file_diagnostic():
     dates = sorted({r["settlement_date"] for r in records})
     ndf = [r for r in records if r["is_ndf"]]
     report = {
-        "parsed_fx_records": len(records), "unresolved": len(unresolved), "ndf_records": len(ndf),
+        "parsed_fx_legs": len(records), "unresolved": len(unresolved), "ndf_legs": len(ndf),
         "currencies": ccys, "settlement_range": (dates[0], dates[-1]), "books": sorted({r["book"] for r in records}),
         "ladder_rows": exp.ladder.shape[0], "ladder_ccy_columns": exp.ladder.shape[1], "summary_rows": len(exp.summary),
         "rate_status": exp.status["status"].value_counts().to_dict(),
     }
     print("\nE2E:", report)
 
-    assert len(records) == 229 and len(unresolved) == 0 and len(ndf) == 45
+    # Every FX trade yields 2 legs (the old 229 one-record-per-trade rows, plus one
+    # USD leg per trade -- all 229 have exactly one USD leg since none are crosses).
+    # is_ndf is per-instrument, so it is set on BOTH legs of an NDF trade -> 45*2.
+    assert len(records) == 229 * 2 and len(unresolved) == 0 and len(ndf) == 45 * 2
     assert set(ccys) == set(MOCK_RATES)
     brl = [r for r in ndf if r["currency"] == "BRL"]
     assert brl and all(r["settles_cash"] == 0 for r in brl) and "BRL" in exp.ladder.columns
-    assert len(exp.contributions) == 229 and len(exp.summary) == len(ccys)
-    assert exp.status["status"].eq("OK").all() and exp.summary["exposure_pnl"].notna().all()
+    assert len(exp.contributions) == len(records) and len(exp.summary) == len(ccys)
+    assert exp.status["status"].eq("OK").all() and exp.summary["usd_delta"].notna().all()
     assert exp.ladder.values.sum() == pytest.approx(sum(r["local_amount"] for r in records))
 
 
@@ -180,7 +202,7 @@ def test_records_from_db_matches_records_from_parse(parsed):
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [tuple(vars(l).values()) for l in parsed.legs])
     from_parse, _ = records_from_parse(parsed)
     from_db, unresolved = records_from_db(conn, "2026-08-17")
-    key = lambda r: r["trade_id"]
+    key = lambda r: (r["trade_id"], r["currency"])
     assert unresolved == [] and sorted(from_db, key=key) == sorted(from_parse, key=key)
     assert records_from_db(conn, "2026-09-17")[0] == []  # settled trades drop out after the value date
     assert {r["book"] for r in records_from_db(conn, "2026-08-17", book_mapping={"HAHY7": "HA"})[0]} == {"HA"}

@@ -16,3 +16,29 @@ Observed on the reference file `data/raw/HA_PNL_20260818.csv` loaded with `as_of
 - `marks_official.settle_date` must equal `as_of_date` for `mark_type = 'SPOT'` per the contract ("settle_date = as_of_date for SPOT"); the spot-table query filters on this explicitly. A zero or negative SPOT value must never be inverted/used (would raise `ZeroDivisionError` or produce a bogus negative rate) — drop that row so the ccy falls back to NaN downstream, never estimate or raise.
 - `data/bloomberg/bnp_marks.py::extract_bnp_marks` only derives a BNP_BVAL SPOT for a pair when the pair is `USDXXX` (base = USD): SPOT = 1/Fx. For an `XXXUSD` pair (e.g. `AUDUSD`, `EURUSD`, `GBPUSD`, `XAUUSD`) `Fx` is quote(USD)->USD which is always exactly 1.0 by construction and carries no information about the base currency's USD rate; the row's `Price` is a forward outright, not a spot. So no SPOT is derivable from an XXXUSD row at all — its FWD_OUTRIGHT is still emitted but SPOT is skipped (logged as a warning, `strict=False`). On the real file (`HA_PNL_20260818.csv`, as_of 2026-08-17) this means `spot_table(conn, as_of, source='BNP_BVAL')` has NO row for AUD, EUR, GBP, XAU even though all four appear in `cash_ladder` — verified empirically, not assumed. `engine/ladder/views.py::ladder_table` surfaces this as `usd = NaN` for exactly those four currencies when driven off BNP_BVAL marks.
 - `spot_table(conn, as_of_date, source=...)` (added for ladder_table): `source=None` (default) reads `marks_official` unchanged; an explicit source (e.g. `'BNP_BVAL'`) reads the raw `marks` table filtered to that one source only, mirroring `engine/pnl/pnl.py::_marks_df`'s `source=None` vs explicit-source pattern. Useful for exercising the ladder end-to-end before Bloomberg marks (and hence `marks_official`) are populated.
+
+- 2026-09-15 scope change: `engine/ladder/exposure.py` is now leg-by-leg (one record per
+  trade LEG, not per trade) AND pure delta / no P&L. Records need only `trade_id`,
+  `settlement_date`, `book`, `currency`, `local_amount` (REQUIRED_FIELDS); the natural
+  dedup key is `(trade_id, currency, settlement_date)` since `trade_id` legitimately
+  repeats across a trade's own legs. `usd_entry_amount`, `usd_delta_entry` and
+  `exposure_pnl` were removed entirely (first added as a P&L-lite formula, then
+  scrapped mid-task when the user decided the cash ladder should be pure exposure).
+  `SUMMARY_COLUMNS` is now `currency, fx_rate, local_delta, usd_delta, rate_source,
+  rate_timestamp, status`; `portfolio_totals` returns only `net_usd, gross_usd,
+  currencies, missing`. A USD leg is priced at identity (fx_rate=1.0) and appears as
+  its own row/ladder column, but is excluded from Net/Gross (which are non-USD only)
+  to avoid self-referential "USD exposure vs USD". `entry_rate` is kept on adapter
+  records for drill-down display only, never consumed by exposure.py math.
+- Downstream breakage from that change (owned by other agents, not fixed here):
+  `ui/tabs/exposure.py` (lines ~146, 222, 245, 247, 306, 340-341, 370) and
+  `engine/pnl/ledger.py` (lines ~6, 104, 106) still read `exposure_pnl` /
+  `usd_delta_entry` / `usd_entry_amount` from `build_exposure`/`portfolio_totals`
+  output or from adapter records, and will KeyError until updated. `ui/tabs/ledger.py`
+  also references `usd_entry_amount` (lines 79/82/95) but on its own realised-trade
+  DataFrame, not exposure.py records -- check whether that's actually independent
+  before assuming it's the same breakage.
+- Test fixture gotcha: when doubling one-record-per-trade fixtures into one-per-leg,
+  counts double (e.g. 229 trades -> 458 leg records), and any per-instrument flag
+  (like `is_ndf`) that used to be counted once per trade now appears on both legs, so
+  multiply expected counts by 2, not just append a USD leg conditionally.

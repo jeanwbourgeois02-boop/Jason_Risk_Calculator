@@ -8,9 +8,9 @@ Field mapping (verified against data/raw/HA_PNL_20260818.csv):
     currency_pair     Trade.instrument_id      = first 6 chars of Symbol
     local currency    the non-USD leg's ccy
     local_amount      that leg's signed amount  (base leg = Quantity, quote leg = -Local Cost)
-    usd_entry_amount  -(USD leg amount)        = USD notional carrying the local leg's sign
-                      (broker_reference convention: sold AUD -> AUD < 0 and USD entry < 0,
-                      matching the screenshot fixture). Every trade keeps its own rate.
+    entry_rate        TradeLeg.rate            = the fill/outright rate, carried for drill-down
+                      display only -- it plays no part in any exposure.py computation (delta is
+                      always marked at spot, never at the entry rate).
     book_source       Trade.strategy           = 'NM Strategy' (HAHY7 on every forward). The BNP
                       file has no 'HA' book field; Business Unit and Fund are both 'NMMF'.
     book              book_mapping.get(book_source, book_source). Default mapping is identity,
@@ -23,15 +23,23 @@ Field mapping (verified against data/raw/HA_PNL_20260818.csv):
                       as NDFs in the source); settles_cash=0 is exposed so a cash-only view can
                       filter them, never dropped here.
 
+One record per trade LEG, not per trade: a trade with no USD leg (a cross such as
+EURSEK) used to have no way to carry a usd_entry_amount and was dropped whole into
+`unresolved`; it now contributes one record per leg like every other trade, so the USD
+leg is no longer required. engine/ladder/exposure.py is a pure delta table (no P&L),
+so there is no usd_entry_amount to carry any more -- every leg, USD or not, is simply
+priced at spot. Nothing is invented for crosses -- their legs are just priced at spot
+like any other currency in engine/ladder/exposure.py.
+
 Spot and swaps (audited on HA_PNL_20260818.csv, 2026-09-14): no row has TD == VD and no
 row pair satisfies the CLAUDE.md swap package rule, so the source contains neither spot
 trades nor linkable swap legs. The parser labels every FORWARD row FX_FWD and sets
 package_id = trade_id. Nothing is invented here: each row is one independent forward.
 
 Excluded: CURRENCY balance rows (they are positions, not trades, and never reach
-ParseResult.trades), FUTURES (product != FX_*), parser rejects, and any FX trade
-without exactly one USD leg (crosses such as EURSEK have no USD entry leg). Each
-exclusion is reported in `unresolved`, never dropped silently.
+ParseResult.trades), FUTURES (product != FX_*), parser rejects, non-FX products, and
+any leg whose trade has no instrument record. Each exclusion is reported in
+`unresolved`, never dropped silently.
 """
 from __future__ import annotations
 
@@ -56,7 +64,7 @@ DEFAULT_BOOK_MAPPING: Dict[str, str] = {}  # identity: book == NM Strategy sourc
 
 def records_from_parse(res: ParseResult,
                        book_mapping: Dict[str, str] | None = None) -> Tuple[List[dict], List[Unresolved]]:
-    """Return (normalized records, unresolved rows). One record per FX trade.
+    """Return (normalized records, unresolved rows). One record per trade LEG.
 
     ``book_mapping`` maps the source 'NM Strategy' value to a display book; unmapped
     values pass through unchanged."""
@@ -74,37 +82,35 @@ def records_from_parse(res: ParseResult,
         if t.product not in FX_PRODUCTS:
             unresolved.append(Unresolved(t.trade_id, t.instrument_id, f"non-FX product {t.product} excluded"))
             continue
+        instrument = res.instruments.get(t.instrument_id)
+        if instrument is None:
+            unresolved.append(Unresolved(t.trade_id, t.instrument_id, "no instrument for leg currency"))
+            continue
         legs = legs_by_trade.get(t.trade_id, [])
-        usd = [l for l in legs if l.ccy == "USD"]
-        local = [l for l in legs if l.ccy != "USD"]
-        if len(legs) != 2 or len(usd) != 1 or len(local) != 1:
-            unresolved.append(Unresolved(t.trade_id, t.instrument_id,
-                                         f"expected one USD leg and one local leg, got {[l.ccy for l in legs]}"))
+        if not legs:
+            unresolved.append(Unresolved(t.trade_id, t.instrument_id, "no legs found for trade"))
             continue
-        if usd[0].settle_date != local[0].settle_date:
-            unresolved.append(Unresolved(t.trade_id, t.instrument_id, "legs settle on different dates"))
-            continue
-        records.append({
-            "trade_id": t.trade_id,
-            "source_row_id": t.trade_id,
-            "product_type": t.product,
-            "symbol": f"{t.instrument_id}-{t.trade_id}",
-            "symbol_description": t.description,
-            "trade_date": t.trade_date,
-            "settlement_date": local[0].settle_date,
-            "currency_pair": t.instrument_id,
-            "currency": local[0].ccy,
-            "local_amount": float(local[0].amount),
-            "usd_entry_amount": -float(usd[0].amount),
-            "entry_rate": float(t.price),
-            "book_source": t.strategy,
-            "book": mapping.get(t.strategy, t.strategy),
-            "account": t.account,
-            "fund": FUND,
-            "strategy": t.strategy,
-            "is_ndf": int(res.instruments[t.instrument_id].is_ndf),
-            "settles_cash": int(local[0].settles_cash),
-        })
+        for leg in legs:
+            records.append({
+                "trade_id": t.trade_id,
+                "source_row_id": t.trade_id,
+                "product_type": t.product,
+                "symbol": f"{t.instrument_id}-{t.trade_id}",
+                "symbol_description": t.description,
+                "trade_date": t.trade_date,
+                "settlement_date": leg.settle_date,
+                "currency_pair": t.instrument_id,
+                "currency": leg.ccy,
+                "local_amount": float(leg.amount),
+                "entry_rate": float(leg.rate),
+                "book_source": t.strategy,
+                "book": mapping.get(t.strategy, t.strategy),
+                "account": t.account,
+                "fund": FUND,
+                "strategy": t.strategy,
+                "is_ndf": int(instrument.is_ndf),
+                "settles_cash": int(leg.settles_cash),
+            })
     return records, unresolved
 
 
@@ -123,7 +129,8 @@ def records_from_db(conn, as_of_date: str,
     """Same records as records_from_parse, read back from the SQLite tables the upload
     flow populates (trades / trade_legs / instruments). Read-only; no schema change.
     Open trades only: trade_date <= as_of and settle_date >= as_of (matches the cash
-    ladder's `>=` rule). Field derivations are identical to records_from_parse."""
+    ladder's `>=` rule). Field derivations are identical to records_from_parse: one
+    record per leg, priced at spot only (no P&L, no usd_entry_amount)."""
     mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
     by_trade: Dict[str, list] = {}
     for r in conn.execute(_DB_SQL, {"as_of": as_of_date}).fetchall():
@@ -135,23 +142,15 @@ def records_from_db(conn, as_of_date: str,
         if product not in FX_PRODUCTS:
             unresolved.append(Unresolved(trade_id, pair, f"non-FX product {product} excluded"))
             continue
-        usd = [l for l in legs if l[9] == "USD"]
-        local = [l for l in legs if l[9] != "USD"]
-        if len(legs) != 2 or len(usd) != 1 or len(local) != 1:
-            unresolved.append(Unresolved(trade_id, pair,
-                                         f"expected one USD leg and one local leg, got {[l[9] for l in legs]}"))
-            continue
-        if usd[0][11] != local[0][11]:
-            unresolved.append(Unresolved(trade_id, pair, "legs settle on different dates"))
-            continue
-        records.append({
-            "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
-            "symbol": f"{pair}-{trade_id}", "symbol_description": desc,
-            "trade_date": trade_date, "settlement_date": local[0][11], "currency_pair": pair,
-            "currency": local[0][9], "local_amount": float(local[0][10]),
-            "usd_entry_amount": -float(usd[0][10]), "entry_rate": float(price),
-            "book_source": strategy, "book": mapping.get(strategy, strategy),
-            "account": account, "fund": FUND, "strategy": strategy,
-            "is_ndf": int(is_ndf), "settles_cash": int(local[0][12]),
-        })
+        for leg in legs:
+            ccy, amount, settle_date, settles_cash = leg[9], leg[10], leg[11], leg[12]
+            records.append({
+                "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
+                "symbol": f"{pair}-{trade_id}", "symbol_description": desc,
+                "trade_date": trade_date, "settlement_date": settle_date, "currency_pair": pair,
+                "currency": ccy, "local_amount": float(amount), "entry_rate": float(price),
+                "book_source": strategy, "book": mapping.get(strategy, strategy),
+                "account": account, "fund": FUND, "strategy": strategy,
+                "is_ndf": int(is_ndf), "settles_cash": int(settles_cash),
+            })
     return records, unresolved
