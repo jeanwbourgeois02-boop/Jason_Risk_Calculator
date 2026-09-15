@@ -175,20 +175,21 @@ RECORDS = [
 
 
 def test_headline_numbers_present_in_order():
+    """Merged 2026-09-15 (user decision -- Henry doesn't need the forward/non-forward
+    split, one Delta card): was three cards, now one."""
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, RATES)
     headline = exposure.headline_numbers(result)
     labels = [c.children[0].children for c in headline.children]
-    assert labels == ["Delta combined", "Delta non-forward", "Delta forward"]
+    assert labels == ["Delta"]
 
 
 def test_headline_numbers_unavailable_without_rate():
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, {})
     headline = exposure.headline_numbers(result)
-    forward_card = headline.children[2]
-    value = forward_card.children[1].children
-    assert value == "Unavailable"
+    card = headline.children[0]
+    assert card.children[1].children == "Unavailable"
 
 
 def test_headline_futures_unavailable_with_reason():
@@ -197,8 +198,9 @@ def test_headline_futures_unavailable_with_reason():
     futures = {"value": float("nan"), "by_instrument": {}, "missing": ["ESU6 Index"],
                "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
     headline = exposure.headline_numbers(result, futures)
-    nonfwd_card = headline.children[1]
-    assert nonfwd_card.children[1].children == "Unavailable"
+    card = headline.children[0]
+    assert card.children[1].children == "Unavailable"
+    assert "no FUTURE_PX" in card.children[2].children
 
 
 def test_exposure_section_has_headline_and_three_tables_only():
@@ -341,18 +343,21 @@ def test_headline_card_shows_net_under_gross():
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, RATES)
     headline = exposure.headline_numbers(result)
-    forward_card = headline.children[2]
-    net_span = forward_card.children[2]
+    card = headline.children[0]
+    net_span = card.children[2]
     assert net_span.children[0].children == "net "
 
 
-def test_headline_non_forward_shows_no_open_futures_note():
-    from engine.ladder.exposure import build_exposure
+def test_headline_merges_currencies_and_futures_with_no_open_futures():
+    """No open futures (0.0, per DEFAULT_FUTURES/no_open_futures) still merges cleanly
+    into the one Delta card: gross/net equal the currency-only totals, no separate
+    "no open futures" card is shown any more (merged 2026-09-15)."""
+    from engine.ladder.exposure import build_exposure, portfolio_totals
     result = build_exposure(RECORDS, RATES)
     headline = exposure.headline_numbers(result)
-    nonfwd_card = headline.children[1]
-    assert nonfwd_card.children[1].children == "0"
-    assert nonfwd_card.children[2].children == "no open futures"
+    totals = portfolio_totals(result)
+    card = headline.children[0]
+    assert card.children[1].children == exposure.format_amount(totals["gross_usd"])
 
 
 def test_stress_yaml_covers_every_book_currency():
