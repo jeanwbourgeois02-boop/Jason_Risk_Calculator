@@ -25,10 +25,12 @@ Design choices (no one to ask, so noted here):
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sqlite3
+from functools import lru_cache
 from typing import Callable, Optional
 
-from dash import Input, Output, dcc, html
+from dash import Input, Output, State, dcc, html
 
 HEADER_ID = "header-block"
 CHART_CONTAINER_ID = "header-ltd-chart-container"
@@ -75,12 +77,18 @@ def layout() -> html.Div:
 
 
 def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
-    from engine.pnl.ledger import ltd, period_pnl
+    # Same pricing path as the Blotter: official marks first, BNP file rates as a
+    # labelled fallback, so the header shows numbers on a PC without Bloomberg.
+    from ui.tabs.blotter_pricing import priced_value_book, scoped_period_pnl
 
-    ltd_value = ltd(conn, as_of)
-    cards = [_figure_card("LTD", _fmt_usd(ltd_value),
-                           "" if ltd_value == ltd_value else "a trade has a missing mark; see value_book reason")]
-    periods = period_pnl(conn, as_of)
+    periods = scoped_period_pnl(conn, as_of)
+    ltd_entry = periods.get("ltd", {})
+    _, n_fallback, n_total = priced_value_book(conn, as_of)
+    caption = f"{n_fallback} of {n_total} rows on BNP file rates, not Bloomberg" if n_fallback else ""
+    if ltd_entry.get("available"):
+        cards = [_figure_card("LTD", _fmt_usd(ltd_entry["value"]), caption)]
+    else:
+        cards = [_figure_card("LTD", "Unavailable", ltd_entry.get("reason", ""))]
     for key in _PERIODS:
         entry = periods.get(key, {})
         if entry.get("available"):
@@ -90,15 +98,69 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     return cards
 
 
-def _build_chart(conn: sqlite3.Connection, as_of: str):
+@lru_cache(maxsize=1024)
+def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> float:
+    """`engine.pnl.ledger.ltd` memoised on (db path, db mtime, as_of): a header-chart
+    render used to re-run 20 full `value_book` evaluations (~4s) on every as-of change.
+    `_mtime` is part of the key purely to invalidate the cache when the file changes
+    (a new upload / Bloomberg write) -- callers pass `os.path.getmtime(db_path)`, never
+    a value this function computes itself, so a stale cache never outlives the file it
+    was read from. Opens and closes its own read-only connection (the cache key is a
+    path, not a connection object, which is unhashable and reopened per request)."""
+    from ui.tabs.blotter_pricing import priced_value_book
+    from ui.app import connect_readonly
+    conn = connect_readonly(db_path)
+    try:
+        df, _, _ = priced_value_book(conn, as_of)  # same fallback path as the figures
+        if df.empty:
+            return 0.0
+        return float("nan") if df["pnl_usd"].isna().any() else float(df["pnl_usd"].sum())
+    finally:
+        conn.close()
+
+
+def _business_days_back(conn: sqlite3.Connection, as_of: str, n: int):
+    """Up to `n` business days ending at `as_of` (inclusive), oldest first, skipping
+    weekends/holidays (engine.pnl.aggregate's own calendar) and never going earlier than
+    the earliest trade_date on record (there is nothing to chart before the book
+    existed, and it wastes an evaluation)."""
+    from engine.pnl.aggregate import _is_business_day, load_holidays
+
+    holidays = load_holidays()
+    end = dt.date.fromisoformat(as_of)
+    earliest_row = conn.execute("SELECT MIN(trade_date) FROM trades").fetchone()
+    earliest = dt.date.fromisoformat(earliest_row[0]) if earliest_row and earliest_row[0] else None
+
+    days = []
+    d = end
+    while len(days) < n:
+        if earliest is not None and d < earliest:
+            break
+        if _is_business_day(d, holidays):
+            days.append(d)
+        d -= dt.timedelta(days=1)
+    days.reverse()
+    return days
+
+
+def _build_chart(conn: sqlite3.Connection, as_of: str, db_path=None):
+    """`db_path` (optional) enables the `_cached_ltd` memoisation; omitted (e.g. direct
+    unit tests against an in-memory/temp connection with no path handy) falls back to
+    one `ltd(conn, ...)` call per day, same as before -- correctness is identical
+    either way, only the cost of repeated renders differs."""
     from engine.pnl.ledger import ltd
 
-    end = dt.date.fromisoformat(as_of)
-    days = [end - dt.timedelta(days=i) for i in range(_CHART_LOOKBACK_DAYS - 1, -1, -1)]
+    days = _business_days_back(conn, as_of, _CHART_LOOKBACK_DAYS)
     xs, ys = [], []
+    mtime = os.path.getmtime(db_path) if db_path is not None else None
     for d in days:
         xs.append(d.isoformat())
-        ys.append(ltd(conn, d.isoformat()))
+        if db_path is not None:
+            ys.append(_cached_ltd(str(db_path), mtime, d.isoformat()))
+        else:
+            from ui.tabs.blotter_pricing import priced_value_book as _pvb
+            _df, _, _ = _pvb(conn, d.isoformat())
+            ys.append(0.0 if _df.empty else (float("nan") if _df["pnl_usd"].isna().any() else float(_df["pnl_usd"].sum())))
     figure = {
         "data": [{"x": xs, "y": ys, "type": "scatter", "mode": "lines+markers", "name": "LTD"}],
         "layout": {"margin": {"l": 50, "r": 20, "t": 10, "b": 30}, "height": 260,
@@ -108,31 +170,61 @@ def _build_chart(conn: sqlite3.Connection, as_of: str):
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Registers a callback keyed on a shared `AS_OF_STORE_ID` dcc.Store; the module
+    """Registers two callbacks keyed on a shared `AS_OF_STORE_ID` dcc.Store; the module
     that owns the date picker (e.g. cash_ladder's date picker, or C5's shared control)
     is expected to write the chosen ISO date into that store's `data` field. Until C5
-    wires a store, this callback simply does nothing (Dash raises no error for an
+    wires a store, these callbacks simply do nothing (Dash raises no error for an
     unused Output if the Store never appears in the layout -- but the app must include
-    an `AS_OF_STORE_ID` dcc.Store somewhere for this to fire)."""
+    an `AS_OF_STORE_ID` dcc.Store somewhere for this to fire).
+
+    Split 2026-09-15 (coordinator perf finding): the figure cards used to share one
+    callback with the LTD chart, so every as-of change paid for ~20 `value_book`
+    evaluations (~4s) before anything painted. Figures now update immediately on
+    `AS_OF_STORE_ID` alone; the chart is a second callback gated on the collapsible's
+    own `open` state, so it only runs when the user actually expands it (and again
+    whenever as_of changes while it is already open). `_cached_ltd` further memoises
+    each day's value on (db path, db mtime) so re-expanding after a figures-only render
+    is instant."""
 
     @app.callback(
         Output(f"{HEADER_ID}-figures", "children"),
-        Output(CHART_CONTAINER_ID, "children"),
         Input(AS_OF_STORE_ID, "data"),
     )
-    def _update_header(as_of: Optional[str]):
+    def _update_figures(as_of: Optional[str]):
         if not as_of:
-            return [_figure_card("LTD", "No as-of date available.")], None
+            return [_figure_card("LTD", "No as-of date available.")]
 
         from ui.app import connect_readonly
         db_path = get_db_path()
         try:
             conn = connect_readonly(db_path)
         except sqlite3.OperationalError as exc:
-            return [_figure_card("LTD", f"Database not available ({exc}).")], None
+            return [_figure_card("LTD", f"Database not available ({exc}).")]
         try:
-            figures = _build_figures(conn, as_of)
-            chart = _build_chart(conn, as_of)
+            return _build_figures(conn, as_of)
         finally:
             conn.close()
-        return figures, chart
+
+    @app.callback(
+        Output(CHART_CONTAINER_ID, "children"),
+        Input(DETAILS_ID, "open"),
+        Input(AS_OF_STORE_ID, "data"),
+    )
+    def _update_chart(is_open: bool, as_of: Optional[str]):
+        if not is_open or not as_of:
+            # Collapsed, or no date yet: nothing to compute. Dash keeps whatever was
+            # last rendered hidden inside the closed <details>, so this is not a
+            # regression versus always rendering -- it is strictly less work.
+            from dash import no_update
+            return no_update
+
+        from ui.app import connect_readonly
+        db_path = get_db_path()
+        try:
+            conn = connect_readonly(db_path)
+        except sqlite3.OperationalError as exc:
+            return html.P(f"Database not available ({exc}).")
+        try:
+            return _build_chart(conn, as_of, db_path=db_path)
+        finally:
+            conn.close()
