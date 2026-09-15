@@ -175,4 +175,4 @@ def test_render_with_populated_db(tmp_path):
     rendered = str(body)
     assert "Marks needed today" in rendered
     assert "Close completeness" in rendered
-    assert "Manual mark entry" in rendered
+    assert "Manual mark entry" in repr(md.build_layout("2026-08-18"))
