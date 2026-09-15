@@ -231,3 +231,7 @@ p { margin: 8px 0; }
 .top-bar .source-row--stage { flex-direction: row; align-items: center; justify-content: flex-start; border-top: none; }
 .header-block { padding: 6px 24px 4px; }
 .header-figures { min-height: 52px; padding-right: 400px; }
+.tabs-bar { margin-right: 400px; }
+.header-figures { padding-right: 360px; gap: 10px; }
+.header-figure { min-width: 72px; }
+.header-figure-value { font-size: 16px; }
