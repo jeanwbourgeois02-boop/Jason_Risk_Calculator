@@ -179,6 +179,8 @@ Net USD exposure therefore excludes futures, options, rates and cash.
 - **No machine this app has run on has had Bloomberg.** The database holds zero official marks. Every P&L card on the development PC reads Unavailable. The app has not yet produced a live number.
 - The database is `data/raw/risk.db`. It is **not in git**. Back it up: it holds the trades, marks and the snapshot history behind Daily / MTD / YTD.
 - **A fresh computer needs nothing copied across.** On launch the app creates an empty database and the Bloomberg status file if they are missing. Upload a BNP report to fill it. Copy `risk.db` from another PC only if you want that PC's history. `init_data.bat` does the same creation by hand.
+- **Sample data is in git.** `load_sample_data.bat` imports `data/sample/HA_PNL_20260818.csv` (the reference BNP report) so the screens have data before the first real upload.
+- **Sample data is in git.** `load_sample_data.bat` imports `data/sample/HA_PNL_SAMPLE_20260818.csv`: the real BNP layout with 35 forwards over 18 pairs, cash rows and the futures row, amounts scaled and ids replaced. Rates are real, positions are not. Use it to see the screens working before the first real file.
 
 ---
 
@@ -243,6 +245,9 @@ run_bloomberg_diagnostic.bat   read-only Bloomberg check, writes reports/
 backfill_history.bat           rebuild Daily/5d/MTD/YTD history from Bloomberg closes
 check_git_push.bat             is this folder in sync with GitHub
 init_data.bat                  create an empty database + status file (launch does this too)
+load_sample_data.bat           import data/sample/HA_PNL_20260818.csv into the database
+load_sample_data.bat           import the synthetic sample report (data/sample/)
+tools/make_sample_data.py      rebuild the sample from the real file (real file never in git)
 data/raw/risk.db               the database (not in git; back it up)
 data/ingest/bnp.py             BNP parser and reconciliation checks
 data/bloomberg/live.py         2-minute feed, status file
