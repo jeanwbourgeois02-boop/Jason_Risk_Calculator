@@ -1,7 +1,10 @@
 # Named stress scenarios: scenario -> {currency: pct move against USD}. A currency
 # strengthening against USD is a positive pct. Loaded by engine/pnl/stress.py::load_scenarios.
 # docs/BUILD_PLAN.md section 4.
+# EQUITY is the move applied to every open equity future (ES): -0.10 = index down 10 %.
+# Scenarios without EQUITY leave the futures cells blank. Placeholders; edit freely.
 USD +5% all:
+  EQUITY: -0.10
   AUD: -0.05
   EUR: -0.05
   GBP: -0.05
@@ -21,6 +24,7 @@ USD +5% all:
   INR: -0.05
 
 USD -5% all:
+  EQUITY: 0.0
   AUD: 0.05
   EUR: 0.05
   GBP: 0.05
@@ -40,6 +44,7 @@ USD -5% all:
   INR: 0.05
 
 EM -10%:
+  EQUITY: -0.10
   BRL: -0.10
   MXN: -0.10
   TRY: -0.10
@@ -48,3 +53,6 @@ EM -10%:
   KRW: -0.10
   TWD: -0.10
   INR: -0.10
+
+Equities -10%:
+  EQUITY: -0.10

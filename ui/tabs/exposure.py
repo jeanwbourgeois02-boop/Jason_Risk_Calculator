@@ -564,7 +564,7 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     DEFAULT_FUTURES if not yet queried). Bloomberg feed status and the workbook
     mark-to-market panel are NOT rendered here any more -- see module docstring."""
     from engine.ladder.exposure import build_exposure
-    from engine.pnl.stress import load_scenarios
+    from engine.pnl.stress import load_scenarios, futures_pct_by_scenario
     rates = rates or {}
     futures = futures or DEFAULT_FUTURES
     result = build_exposure(records, rates)
@@ -574,7 +574,7 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
             else html.P("No open FX trades for this as-of date.", style={"color": "#616e7c"}))
     order_note = "currencies by |USD delta|" if sort != SORT_ALPHA else "currencies A-Z"
     return html.Div(className="section", children=[
-        combined_risk_table(result, futures, scenarios),
+        combined_risk_table(result, futures, scenarios, futures_pct_by_scenario(scenarios)),
         risk_snapshot(result, records),
         metadata_line(result, records, unresolved, as_of_date, rates),
         html.H4(f"Cash ladder by settlement date ({order_note})"),
