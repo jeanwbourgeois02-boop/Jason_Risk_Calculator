@@ -255,6 +255,30 @@ data-ingest:
 > grouped, ambiguous -> review), futures fill recovery from both formula and value,
 > theme inheritance. Finish with `py -3 -m pytest tests/ -q`; report verbatim.
 
+### Task C split (2026-09-15, user request): five narrow UI agents
+
+C1 to C4 run in parallel and own disjoint files; C5 wires them and runs last.
+Shared rules for all five: no calculation in `ui/`, only calls into engine and data
+functions; every number appears once; Unavailable shows its reason in place; each
+agent writes its own test file and does not touch `ui/app.py` or `tests/test_ui.py`
+(C5 only). Engine signatures: `engine.pnl.valuation.value_book(conn, as_of,
+marks_source=None)`, `engine.pnl.ledger.{ltd, period_pnl, period_pnl_by,
+realise_settled, realised_rows}`, `engine.pnl.stress.{move_1pct, load_scenarios,
+run_scenarios}`, `engine.ladder.exposure.{build_exposure, portfolio_totals,
+ladder_usd_equivalent}`, `engine.ladder.exposure_adapter.records_from_db`,
+`data.bloomberg.inventory.{mark_inventory, close_completeness}`,
+`data.bloomberg.manual.write_manual_mark`, `data.ingest.themes.set_theme`.
+
+| Agent | Owns | Builds | Tests |
+|---|---|---|---|
+| C1 Ladder | `ui/tabs/cash_ladder.py`, `ui/tabs/exposure.py`; delete `ui/tabs/ledger.py` | strip workbook panel, ledger cards, P&L card, diagnostics and rates grid from the tab; fix removed-field callers; cash balances row at as_of; futures USD delta line; stress block from `engine.pnl.stress`; keep `build_layout(default_date)` and `register_callbacks(app, get_db_path)` signatures | `tests/test_ui_ladder.py` |
+| C2 Header + Blotter | new `ui/tabs/header.py`, new `ui/tabs/blotter.py` | header block `header.layout()` + `header.register_callbacks(app, get_db_path)` showing LTD, Daily, 5d, MTD, YTD, trading from `period_pnl`, as-of, mark time, collapsible LTD line chart from `ltd` over recent business days; blotter tab with `value_book` rows, filters (open/settled, product, pair, strategy, theme, date range), group-by with per-group LTD/Daily/MTD/YTD from `period_pnl_by`, spot/carry columns, row expand with legs and marks used, inline theme edit via `set_theme`, swap packages as one expandable row | `tests/test_ui_blotter.py` |
+| C3 Market data | `ui/tabs/market_data.py` (rewrite) | `mark_inventory` table with status colours, pull button and feed status (move from ladder toolbar; reuse `data.bloomberg.live`), `close_completeness` strip, manual entry form via `write_manual_mark`, Bloomberg diagnostics panel moved here | `tests/test_ui_market_data.py` |
+| C4 Reconciliation | new `ui/tabs/reconciliation.py`; `ui/tabs/pnl.py` content absorbed then file deleted; `ui/workbook_rates.py` stays | ours vs BNP per instrument (`positions` source BNP vs `value_book` grouped by instrument, break column); the workbook panel (`engine.pnl.pnl.ltd_per_trade`, `engine.pnl.aggregate.{aggregate_by_pair, period_pnl}`, `engine.ladder.valuation`) with the manual rates grid; neither feeds the header | `tests/test_ui_reconciliation.py` |
+| C5 Wiring | `ui/app.py`, `tests/test_ui.py`, `docs/HOW_IT_WORKS.md` §3-4 | `VISIBLE_TABS = Ladder, Blotter, Market data, Reconciliation`; header above tabs; register all modules; remove Overall book and placeholders; fix `ensure_schema` test; rewrite `tests/test_ui.py` as smoke tests of the assembled app; full suite green | `tests/test_ui.py` |
+
+The original single-agent Task C prompt below is kept for reference only.
+
 ### Task C: UI (ui-shell, after A and B)
 
 > Read CLAUDE.md, docs/BUILD_PLAN.md section 5 in full, then the public signatures in

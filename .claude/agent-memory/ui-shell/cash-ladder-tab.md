@@ -64,3 +64,34 @@ own namespace, so existing tests referencing `cash_ladder.<name>` keep working
 unchanged -- didn't rename call sites in tests/test_ui.py for those.
 
 [[pnl-tab]] is the sibling module built on the same controls/formatting helpers.
+
+Update 2026-09-15 (docs/BUILD_PLAN.md Task C split, agent C1 Ladder): this tab and
+`ui/tabs/exposure.py` were stripped down to a pure delta view (no P&L). Removed: the
+workbook mark-to-market panel (`ladder_trade_valuation`/`ladder_valuation_summary`/
+`valuation_table`), `ui/tabs/ledger.py` (deleted, moves to Blotter), the source
+dropdown / `SOURCE_DROPDOWN_ID` / "Pull now" button / diagnostics panel (moved to
+Market data tab, owned by C3) and `ui/tabs/exposure.py`'s `exposure_pnl` card + column
+(engine's `portfolio_totals`/`SUMMARY_COLUMNS` no longer carry it -- `exposure.py` was
+already broken against the current engine before this pass and had to be fixed to
+match). `exposure_section(...)` signature changed: dropped `period`/`feed_status`
+params, added `futures_usd_delta: Optional[float] = None`. Added
+`exposure.stress_block(delta_by_ccy, futures_usd_delta)` using
+`engine.pnl.stress.{move_1pct, load_scenarios, run_scenarios}`.
+
+Gap found, reported to C5/cash-ladder: no engine query exists yet for open-futures USD
+delta, so the stress block's futures line always renders "Unavailable" (never a
+fabricated zero) via `exposure.futures_delta_line(None, reason=...)`. Whoever builds
+that query should wire it into `cash_ladder.py`'s `_render` (`futures_usd_delta=None`
+literal there today) instead of inventing the number in `ui/`.
+
+Test gotcha: to invoke a Dash callback body directly in a test, use
+`app.callback_map[key]["callback"].__wrapped__(*args)` -- the raw entry under
+`"callback"` requires internal kwargs (`outputs_list` etc.) set up by Dash's dispatch
+machinery and raises `KeyError` if called directly; `.__wrapped__` is the original
+undecorated function and takes plain positional args matching the `Input`s in
+declaration order.
+
+`ui/app.py` was mid-rewrite by another agent during this session (imports a
+`ui.tabs.pnl` module being retired) -- tests that exercise `cash_ladder.py`'s lazy
+`from ui.app import connect_readonly` should stub `sys.modules["ui.app"]` rather than
+depend on `ui/app.py`'s current state, since C1 does not own that file.

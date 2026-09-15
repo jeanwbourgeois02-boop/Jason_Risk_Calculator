@@ -46,27 +46,16 @@ from typing import Callable, Optional
 import pandas as pd
 from dash import Input, Output, dash_table, dcc, html
 
-from ui.tabs.controls import (
-    SOURCE_OFFICIAL,
-    SOURCE_OPTIONS,
-    build_date_picker,
-    build_source_dropdown,
-    source_value_to_param,
-)
+from ui.tabs.controls import build_date_picker
 from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
 
-SOURCE_DROPDOWN_ID = "cash-ladder-source"
 DATE_PICKER_ID = "cash-ladder-date"
 TABLE_CONTAINER_ID = "cash-ladder-table-container"
 TOOLBAR_ID = "cash-ladder-toolbar"
 SORT_ID = "cash-ladder-summary-sort"   # value: 'top' | 'all' (summary scope)
 STATUS_ID = "cash-ladder-status"
 REFRESH_ID = "cash-ladder-refresh"
-PULL_NOW_ID = "cash-ladder-pull-now"
-PULL_NOW_STATUS_ID = "cash-ladder-pull-now-status"
-PULL_REVISION_ID = "cash-ladder-pull-revision"
 REFRESH_MS = 120_000  # matches data.bloomberg.live.INTERVAL_SECONDS
-WORKBOOK_SECTION_ID = "cash-ladder-workbook-section"
 
 TRANSPOSED_LABEL_COL = "settle_date"
 USD_EQUIVALENT_COL = "usd_equivalent"
@@ -169,42 +158,12 @@ def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
 
 
-def valuation_table(df: pd.DataFrame, table_id: str) -> dash_table.DataTable:
-    """Preserve rate precision and text labels while formatting dollar amounts."""
-    rates = {"fill", "mark", "spot_usd_per_local", "denominator"}
-    labels = {
-        "ccy": "Local currency", "settle_date": "Settlement date",
-        "local_amount": "Signed local amount", "fill": "Entry FX",
-        "mark": "Workbook valuation FX", "valuation_date": "Workbook pricing date",
-        "usd_entry": "Signed USD entry", "usd_valuation": "Workbook USD valuation",
-        "pnl_usd": "USD P&L", "spot_usd_per_local": "General spot (USD/local; reference)",
-        "physical_usd_valuation": "Actual local leg at valuation FX (USD)",
-        "valuation_residual": "Workbook less actual leg value (USD)",
-        "denominator": "Workbook divisor", "workbook_quantity": "Workbook quantity C",
-    }
-    formatted = df.copy()
-    for col in formatted:
-        if col in rates:
-            formatted[col] = formatted[col].map(lambda value: "" if pd.isna(value) else f"{value:,.8f}")
-        elif pd.api.types.is_numeric_dtype(formatted[col]):
-            formatted[col] = formatted[col].map(format_cell)
-    return dash_table.DataTable(
-        id=table_id,
-        columns=[{"name": labels.get(col, col.replace("_", " ").title()), "id": col}
-                 for col in formatted],
-        data=formatted.to_dict("records"),
-        style_table={"overflowX": "auto"},
-        style_cell={"textAlign": "right", "fontFamily": "monospace", "minWidth": "110px"},
-        style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
-        page_size=25,
-    )
-
-
 def build_layout(default_date: Optional[str] = None) -> html.Div:
     """Controls + an (initially empty) table container for the Cash ladder tab. The
     table itself is filled in by the callback registered in register_callbacks."""
     return html.Div(className="cash-ladder", children=[
-        html.H3("FX Risk and Settlement Ladder"),
+        html.H3("Ladder"),
+        html.P("What am I long/short and when is it cash?", className="section-kicker"),
         html.Div(id=TOOLBAR_ID, className="toolbar", children=[
             build_date_picker(DATE_PICKER_ID, default_date=default_date),
             html.Div(className="toolbar-group", children=[
@@ -216,16 +175,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
             html.Div(className="toolbar-group toolbar-group--exposure", children=[
                 html.Label("Status"),
                 html.Div(id=STATUS_ID, className="toolbar-static",
-                         children="Bloomberg: waiting for first refresh"),
-            ]),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Bloomberg"),
-                html.Div([html.Button("Pull now", id=PULL_NOW_ID, n_clicks=0, className="btn"),
-                          html.Span(id=PULL_NOW_STATUS_ID, className="status-line", style={"marginLeft": "8px"})]),
-                dcc.Store(id=PULL_REVISION_ID),
-            ]),
-            html.Div(className="toolbar-group toolbar-group--workbook", children=[
-                build_source_dropdown(SOURCE_DROPDOWN_ID, label="Workbook MTM rates"),
+                         children="Loading..."),
             ]),
         ]),
         dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
@@ -234,33 +184,35 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Register the callback that re-queries `ladder_table` whenever the source dropdown
-    or date picker changes.
+    """Register the callback that re-queries `ladder_table` / the exposure delta view
+    whenever the date picker or sort control changes.
 
     `get_db_path` is a zero-arg callable returning the resolved DB path (typically
     `ui.app.get_db_path`, or a closure over the path `create_app` resolved for an
     explicit `db_path` override) -- passed in rather than imported at module scope so
     tests can supply a stub without touching the real DB / env / RISK_DB.
+
+    2026-09-15 (docs/BUILD_PLAN.md Task C split): the workbook mark-to-market panel,
+    ledger cards, Exposure P&L card, the workbook FX rates grid and the Bloomberg
+    diagnostics/pull-now controls are REMOVED from this tab (they move to the
+    Reconciliation and Market data tabs). This callback no longer takes
+    `SOURCE_DROPDOWN_ID` / `rates-revision` / a pull-now revision as inputs.
     """
 
     @app.callback(
         Output(TABLE_CONTAINER_ID, "children"),
         Output(STATUS_ID, "children"),
-        Input(SOURCE_DROPDOWN_ID, "value"),
         Input(DATE_PICKER_ID, "date"),
-        Input("rates-revision", "data"),
         Input(SORT_ID, "value"),
         Input(REFRESH_ID, "n_intervals"),
-        Input(PULL_REVISION_ID, "data"),
     )
-    def _update_table(source_value, as_of_date, _rates_revision=None, sort="usd", _n_intervals=0, _pull_rev=None):
+    def _update_table(as_of_date, sort="usd", _n_intervals=0):
         """Returns (tab body, toolbar status text). Re-runs every REFRESH_MS so the ladder
         follows the 2-minute Bloomberg feed (data.bloomberg.live)."""
-        body, toolbar_status = _render(source_value, as_of_date, sort or "usd")
-        return body, toolbar_status
+        return _render(as_of_date, sort or "usd")
 
-    def _render(source_value, as_of_date, sort):
-        toolbar_status = "Bloomberg: status unknown"
+    def _render(as_of_date, sort):
+        toolbar_status = "Status unknown"
         if not as_of_date:
             return message_box("No as-of date available."), toolbar_status
 
@@ -278,91 +230,38 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         except sqlite3.OperationalError as exc:
             return message_box(f"Database not available ({exc})."), toolbar_status
         try:
-            df = ladder_table(conn, as_of_date, source_value_to_param(source_value))
-            from engine.ladder.valuation import ladder_trade_valuation, ladder_valuation_summary
-            detail = ladder_trade_valuation(conn, as_of_date, source_value_to_param(source_value))
-            summary = ladder_valuation_summary(detail)
-            # Exposure ladder (spec): additional, separately labelled section built from
-            # engine.ladder.exposure via records_from_db; mock rates, never Bloomberg.
+            df = ladder_table(conn, as_of_date, None)
+            # Delta view (docs/BUILD_PLAN.md section 5, "Ladder"): local delta, spot, USD
+            # delta rows, Net/Gross, futures delta line, stress block -- from
+            # engine.ladder.exposure via records_from_db. Never P&L.
             try:
-                from engine.ladder.exposure import build_exposure
                 from engine.ladder.exposure_adapter import records_from_db
-                from data.bloomberg.live import rates_from_marks, read_status
+                from data.bloomberg.live import rates_from_marks
                 from ui.tabs.exposure import BOOK_DISPLAY, exposure_section, rate_status_text
-                from ui.tabs.market_data import diagnostics_panel, feed_headline
+                from engine.ladder.exposure import build_exposure
                 records, unresolved = records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
                 # Rates: latest official SPOT marks written by the Bloomberg feed. Never mock.
                 rates = rates_from_marks(conn)
-                feed_status = read_status(db_path)
-                # Workbook MTM period figures for the compact status line: existing engine
-                # function, never recomputed here; None -> 'Workbook MTM unavailable'.
-                try:
-                    from engine.pnl.aggregate import period_pnl
-                    period = period_pnl(conn, as_of_date, source=source_value_to_param(source_value))
-                except Exception:  # pricing not loaded / engine unavailable
-                    period = None
-                # P&L ledger (engine/pnl/ledger.py): read-only summary for the picked as-of date.
-                try:
-                    from engine.pnl.ledger import ledger_summary
-                    from ui.tabs.ledger import ledger_block
-                    ledger_ui = ledger_block(ledger_summary(conn, as_of_date, rates), as_of_date)
-                except Exception as exc:  # never let the ledger take the ladder down
-                    ledger_ui = message_box(f"P&L ledger unavailable ({exc!r}).")
-                exposure = html.Div([
-                    exposure_section(records, unresolved, as_of_date, rates=rates, period=period,
-                                     sort=sort, feed_status=feed_status),
-                    ledger_ui,
-                    diagnostics_panel(feed_status, rates),
-                ])
+                # Futures USD delta: no engine query exists yet for open-futures USD
+                # delta (docs/BUILD_PLAN.md section 4 names it as a stress input without
+                # specifying the source); pass None through so it renders Unavailable
+                # rather than a fabricated zero. See report to C5 / cash-ladder.
+                exposure = exposure_section(records, unresolved, as_of_date, rates=rates,
+                                            sort=sort, futures_usd_delta=None)
                 books = ", ".join(sorted({r["book"] for r in records})) or "none"
                 result = build_exposure(records, rates)
-                toolbar_status = f"Book {books} · {rate_status_text(result)} · {feed_headline(feed_status)}"
+                toolbar_status = f"Book {books} · {rate_status_text(result)}"
             except ImportError as exc:
                 exposure = message_box(f"Exposure ladder not available ({exc}).")
         finally:
             conn.close()
         transposed = transpose_ladder(df)
-        missing = int(detail["pnl_usd"].isna().sum())
-        status = (f"USD P&L incomplete: {missing} of {len(detail)} open forwards lack workbook pricing."
-                  if missing else f"{len(detail)} open forwards priced using workbook formulas.")
         return html.Div([
             exposure,
-            html.Details(id=WORKBOOK_SECTION_ID, className="section section--secondary details", open=False, children=[
-            html.Summary("Workbook mark-to-market (Excel method)"),
-            html.P("The HA-portfolio workbook's own formulas: one shared valuation date and the workbook divisor. "
-                   "A different number from the exposure P&L above, on purpose.", className="section-kicker"),
-            html.H4("Currency and settlement date: workbook P&L"),
-            html.P(status),
-            html.P("Signed USD entry + workbook USD valuation = USD P&L. "
-                   "Rates are shown separately for each trade below. Cash balances are excluded from P&L. "
-                   "NDF rows show notionals, not gross cash settlement amounts."),
-            valuation_table(summary, "cash-ladder-valuation-summary"),
-            html.H4("Trade calculation detail"),
-            html.P("The workbook divisor determines P&L conversion. General spot is displayed for reference. "
-                   "Any difference between workbook value and the actual broker local leg is shown explicitly; "
-                   "blank pricing cells indicate unavailable inputs."),
-            valuation_table(detail, "cash-ladder-valuation-detail"),
-            html.H4("Cash settlement amounts and current balances"),
-            html.P("This overview includes balances and deliverable cash flows. Its USD equivalent uses spot "
-                   "and is a cash value, not P&L."),
-            table_from_ladder(transposed, label_col=TRANSPOSED_LABEL_COL),
+            html.Details(className="section section--secondary details", open=False, children=[
+                html.Summary("Cash settlement amounts and current balances"),
+                html.P("Settled-cash legs and BNP cash balances at this as-of date, transposed date x "
+                       "currency. USD equivalent uses spot and is a cash value, not P&L."),
+                table_from_ladder(transposed, label_col=TRANSPOSED_LABEL_COL),
             ]),
         ]), toolbar_status
-
-    @app.callback(
-        Output(PULL_NOW_STATUS_ID, "children"),
-        Output(PULL_REVISION_ID, "data"),
-        Input(PULL_NOW_ID, "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def _pull_now(n_clicks):
-        """Synchronous single Bloomberg pull (data.bloomberg.live.pull_once); the returned
-        revision re-triggers the ladder so new marks show immediately."""
-        import time
-        from data.bloomberg.live import pull_once
-        status = pull_once(get_db_path())
-        if status.get("connected"):
-            text = f"Pulled {status.get('time', '')}: {status.get('written', 0)} marks written, {status.get('failed', 0)} failed"
-        else:
-            text = f"Not pulled: {status.get('reason', 'unknown')}"
-        return text, str(time.time())

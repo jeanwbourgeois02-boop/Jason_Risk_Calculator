@@ -1,18 +1,27 @@
-"""Exposure dashboard section of the Cash ladder tab (docs/CASH_LADDER_SPEC.md).
-
-Renders engine.ladder.exposure output (build_exposure, portfolio_totals,
-ladder_usd_equivalent). Formulas live in engine/; this module only formats and orders:
-    1. four snapshot cards       2. compact metadata + mock-rate line + workbook MTM status
-    3. currency summary (top / all)   4. expandable settlement ladder   5. legend
+"""Exposure dashboard section of the Cash ladder tab (docs/BUILD_PLAN.md section 5,
+"Ladder" row). Pure delta table, no P&L: renders engine.ladder.exposure output
+(build_exposure, portfolio_totals, ladder_usd_equivalent) and engine.pnl.stress
+(move_1pct, load_scenarios, run_scenarios). Formulas live in engine/; this module only
+formats and orders:
+    1. snapshot cards (Net USD, Gross USD, open trades)
+    2. compact metadata line
+    3. currency summary (top / all)
+    4. expandable settlement ladder
+    5. stress block (1% move + named scenarios)
+    6. legend
 
 Rates are passed in by the caller from data.bloomberg.live.rates_from_marks (latest
 official SPOT marks written by the 2-minute Bloomberg feed). A currency without a mark
 is reported MISSING_RATE and shown blank, never given a made-up value. `mock_rates`
 below exists ONLY for the unit tests (AUD screenshot fixture); the app never calls it.
 
-Workbook MTM figures (Daily / LTD / Trading P&L) are passed in from
-engine.pnl.aggregate.period_pnl by the caller; when absent or NaN a single compact
-'Workbook MTM unavailable' status is shown -- mock exposure P&L is never substituted.
+2026-09-15 (Task C split, docs/BUILD_PLAN.md): the workbook mark-to-market panel, the
+P&L ledger block and the Bloomberg diagnostics/feed panel are REMOVED from this module
+(they move to the Reconciliation and Market data tabs respectively -- see
+`engine.ladder.exposure.portfolio_totals`, which no longer returns an `exposure_pnl`
+key, and `engine.ladder.exposure.SUMMARY_COLUMNS`, which no longer carries
+`usd_delta_entry` / `exposure_pnl`). This is a pure exposure/delta view; P&L belongs to
+`engine.pnl` and is rendered on the Blotter/Header tabs, not here.
 
 Book display: records carry `book_source` (BNP 'NM Strategy', e.g. HAHY7). BOOK_DISPLAY
 is the explicit, optional display mapping; empty by default so HAHY7 shows as HAHY7.
@@ -139,17 +148,16 @@ def risk_snapshot(result, records: List[dict]) -> html.Div:
         currencies = {r["currency"] for r in records}
         note = ("no Bloomberg rates" if currencies and set(totals["missing"]) >= currencies
                 else "no rate: " + ", ".join(totals["missing"]))
-        net = gross = pnl = "Unavailable"
+        net = gross = "Unavailable"
         tag = "Unavailable"
-        notes = (note, note, note)
+        notes = (note, note)
     else:
-        net, gross, pnl = (format_amount(totals[k]) for k in ("net_usd", "gross_usd", "exposure_pnl"))
+        net, gross = (format_amount(totals[k]) for k in ("net_usd", "gross_usd"))
         tag = "Exposure"
-        notes = ("sum of currency USD deltas", "sum of |USD delta|", "USD delta minus USD delta entry")
-    return html.Div(id=SNAPSHOT_ID, className="cards cards--four", children=[
+        notes = ("sum of currency USD deltas", "sum of |USD delta|")
+    return html.Div(id=SNAPSHOT_ID, className="cards cards--three", children=[
         _card("Net USD exposure", net, tag, notes[0]),
         _card("Gross USD exposure", gross, tag, notes[1]),
-        _card("Exposure P&L", pnl, tag, notes[2]),
         _card("Open FX trades", str(len(records)), "Exposure", f"{len({r['currency'] for r in records})} currencies"),
     ])
 
@@ -175,51 +183,14 @@ def metadata_line(result, records: List[dict], unresolved: list, as_of_date: str
     return html.Div(id=META_ID, className="meta-line", children=spans)
 
 
-def market_data_panel(result, feed_status: Optional[dict] = None) -> html.Div:
-    """Bloomberg feed state in one line, plus per-currency missing/stale warnings.
-    No rate is ever invented: a currency without a mark shows blank and is listed here."""
-    from ui.tabs.market_data import feed_headline
-    bad = [row for row in result.status.to_dict("records") if row["status"] != "OK"]
-    connected = bool(feed_status and feed_status.get("connected"))
-    nothing_priced = (not connected and bad and len(bad) == len(result.status)
-                      and all(row["status"] == "MISSING_RATE" for row in bad))
-    if nothing_priced:
-        lines = [html.Li(f"No rates for any of the {len(bad)} currencies, so every USD figure is blank until "
-                         "Bloomberg is connected.", className="status-line status-line--bad")]
-    else:
-        lines = [html.Li(f"{row['currency']}: {row['message']}", className="status-line status-line--bad") for row in bad]
-    badge = html.Span("BLOOMBERG LIVE" if connected else "NO BLOOMBERG FEED",
-                      className="badge " + ("badge--live" if connected else "badge--down"))
-    children = [badge, " ", html.Span(feed_headline(feed_status))]
-    if lines:
-        children.append(html.Ul(id=WARNINGS_ID, children=lines))
-    else:
-        children.append(html.Ul(id=WARNINGS_ID, children=[], hidden=True))
-    return html.Div(id=MARKET_DATA_ID,
-                    className="status-panel status-panel--compact" + ("" if connected else " status-panel--down"),
-                    children=children)
-
-
-def workbook_status(period: Optional[dict]) -> html.Div:
-    """One compact line for Daily / LTD / Trading workbook MTM P&L, or a single
-    'unavailable' status. Values come from engine.pnl.aggregate.period_pnl."""
-    keys = [("Daily P&L", "daily"), ("LTD P&L", "ltd"), ("Trading P&L", "trading")]
-    have = {k: period.get(k) for _, k in keys} if period else {}
-    if not period or all(v is None or pd.isna(v) for v in have.values()):
-        return html.Div(id=WORKBOOK_STATUS_ID, className="wb-status wb-status--unavailable", children=[
-            html.Span("Workbook MTM", className="tag tag--workbook"), " ",
-            html.Span("not priced for this date: enter workbook rates or pick another source in the toolbar.")])
-    parts = []
-    for label, key in keys:
-        v = have.get(key)
-        parts.append(html.Span(f"{label} {format_amount(v) if v is not None and not pd.isna(v) else 'unavailable'}",
-                               className="meta-item"))
-    return html.Div(id=WORKBOOK_STATUS_ID, className="wb-status", children=[
-        html.Span("Workbook MTM", className="tag tag--workbook"), *parts])
+# market_data_panel / workbook_status removed 2026-09-15 (docs/BUILD_PLAN.md Task C
+# split): Bloomberg feed status and diagnostics moved to ui/tabs/market_data.py
+# (owned by C3); the workbook mark-to-market panel moved to ui/tabs/reconciliation.py
+# (owned by C4). This module is a pure exposure/delta view.
 
 
 # ------------------------------------------------------------------ 3. currency summary
-SUMMARY_COLUMNS = ["currency", "local_delta", "usd_delta", "usd_delta_entry", "exposure_pnl", "settlement"]
+SUMMARY_COLUMNS = ["currency", "local_delta", "usd_delta", "settlement"]
 
 
 def summary_frame(result, records: List[dict], sort: str = SORT_USD, scope: str = SCOPE_ALL) -> pd.DataFrame:
@@ -242,9 +213,9 @@ def summary_frame(result, records: List[dict], sort: str = SORT_USD, scope: str 
 
 def summary_table(frame: pd.DataFrame) -> dash_table.DataTable:
     labels = {"currency": "Currency", "settlement": "Settlement type", "local_delta": "Local delta",
-              "usd_delta": "USD delta", "usd_delta_entry": "USD delta entry", "exposure_pnl": "Exposure P&L (USD)"}
+              "usd_delta": "USD delta"}
     f = frame.reindex(columns=SUMMARY_COLUMNS).copy()
-    amounts = ["local_delta", "usd_delta", "usd_delta_entry", "exposure_pnl"]
+    amounts = ["local_delta", "usd_delta"]
     for col in amounts:
         f[col] = f[col].map(format_amount)
     return dash_table.DataTable(
@@ -303,7 +274,7 @@ def ladder_table(result) -> dash_table.DataTable:
 COMBINED_TABLE_ID = "exposure-combined-table"
 ROW_LABEL_COL = "row"
 SUMMARY_ROWS = [("FX rate (USD per local)", "fx_rate"), ("Local delta", "local_delta"), ("USD delta", "usd_delta"),
-                ("USD delta entry", "usd_delta_entry"), ("Exposure P&L", "exposure_pnl"), ("Settlement type", "settlement")]
+                ("Settlement type", "settlement")]
 
 
 def combined_frame(result, records: List[dict], sort: str = SORT_USD) -> pd.DataFrame:
@@ -336,9 +307,7 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD) -> pd.Data
                 row[c] = by_ccy.loc[c, "settlement"]
             else:
                 row[c] = format_amount(by_ccy.loc[c, key])
-        row[USD_EQUIVALENT_COL] = {"usd_delta": format_amount(totals["net_usd"]),
-                                   "usd_delta_entry": format_amount(sum(r["usd_entry_amount"] for r in records)) if records else "",
-                                   "exposure_pnl": format_amount(totals["exposure_pnl"])}.get(key, "")
+        row[USD_EQUIVALENT_COL] = format_amount(totals["net_usd"]) if key == "usd_delta" else ""
         rows.append(row)
     return pd.DataFrame(rows), ccys
 
@@ -383,9 +352,8 @@ def by_ccy_label(frame: pd.DataFrame, ccy: str) -> str:
 def legend() -> html.Dl:
     items = [
         ("Local delta", "sum of signed local-currency amounts across all settlement dates."),
-        ("USD delta", "local delta x USD-per-local rate."),
-        ("USD delta entry", "sum of each trade's own entry USD amount; no averaging."),
-        ("Exposure P&L", "USD delta minus USD delta entry (screenshot-style). Not the workbook mark-to-market."),
+        ("USD delta", "local delta x USD-per-local rate. This is a delta table, not P&L "
+                      "-- see the Blotter tab for LTD/Daily/MTD/YTD."),
         (NDF_BADGE, NDF_EXPLANATION),
         ("Bloomberg rates", "latest official SPOT mark per currency, pulled from the Bloomberg terminal on this "
                             "computer every 2 minutes; blank when no mark exists. Nothing is substituted."),
@@ -395,14 +363,68 @@ def legend() -> html.Dl:
                    children=[html.Div([html.Dt(k), html.Dd(v)]) for k, v in items])
 
 
+# ------------------------------------------------------------------ 5b. stress block
+STRESS_ID = "exposure-stress"
+STRESS_TABLE_ID = "exposure-stress-table"
+FUTURES_DELTA_ID = "exposure-futures-delta"
+
+
+def futures_delta_line(futures_usd_delta: Optional[float], reason: str = "") -> html.Div:
+    """One line for the futures (e.g. ES) USD delta feeding the stress block's
+    non-FX line. `futures_usd_delta=None` renders Unavailable with `reason` shown in
+    place -- no engine query for open-futures USD delta exists yet
+    (docs/BUILD_PLAN.md section 4 names 'a futures USD delta' as a stress input but does
+    not specify the source query); this stays Unavailable, never zero, until
+    cash-ladder/pnl-engine adds one."""
+    if futures_usd_delta is None:
+        text = "Unavailable" + (f" ({reason})" if reason else "")
+    else:
+        text = format_amount(futures_usd_delta)
+    return html.Div(id=FUTURES_DELTA_ID, className="meta-line",
+                    children=[html.Span("Futures USD delta", className="meta-item"),
+                              html.Span(text, className="meta-item")])
+
+
+def stress_block(delta_by_ccy: Dict[str, float], futures_usd_delta: Optional[float] = None) -> html.Div:
+    """1% move per currency plus named scenarios from config/stress.yaml, both from
+    `engine.pnl.stress`. `futures_usd_delta=None` (no engine source yet) is passed
+    through as 0.0 to `run_scenarios`/`move_1pct` for the FX-only figures, but is shown
+    Unavailable on its own line rather than silently included as zero."""
+    from engine.pnl.stress import load_scenarios, move_1pct, run_scenarios
+    moves = move_1pct(delta_by_ccy)
+    scenarios = load_scenarios()
+    results = run_scenarios(delta_by_ccy, scenarios, futures_usd_delta=futures_usd_delta or 0.0)
+    move_rows = [{"currency": ccy, "move_1pct_usd": format_amount(v)} for ccy, v in sorted(moves.items())]
+    move_table = dash_table.DataTable(
+        columns=[{"name": "Currency", "id": "currency"}, {"name": "1% move (USD)", "id": "move_1pct_usd"}],
+        data=move_rows, style_cell={**_MONO, "minWidth": "110px"}, style_header=_HEAD,
+    ) if move_rows else html.P("No FX delta to stress.", style={"color": "#616e7c"})
+    scenario_rows = [{"scenario": name, "fx_total": format_amount(r["fx_total"]),
+                      "futures_pnl": format_amount(r["futures_pnl"]), "total": format_amount(r["total"])}
+                     for name, r in sorted(results.items())]
+    scenario_table = dash_table.DataTable(
+        id=STRESS_TABLE_ID,
+        columns=[{"name": "Scenario", "id": "scenario"}, {"name": "FX P&L (USD)", "id": "fx_total"},
+                 {"name": "Futures P&L (USD)", "id": "futures_pnl"}, {"name": "Total (USD)", "id": "total"}],
+        data=scenario_rows, style_cell={**_MONO, "minWidth": "120px"}, style_header=_HEAD,
+    ) if scenario_rows else html.P("No named scenarios in config/stress.yaml.", style={"color": "#616e7c"})
+    return html.Div(id=STRESS_ID, className="section section--secondary", children=[
+        html.H4("Stress"),
+        futures_delta_line(futures_usd_delta, reason="no engine query for open-futures USD delta yet"),
+        html.H5("1% move per currency"), move_table,
+        html.H5("Named scenarios"), scenario_table,
+    ])
+
+
 # ------------------------------------------------------------------ section
 def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
-                     rates: Dict[str, dict] | None = None, period: Optional[dict] = None,
+                     rates: Dict[str, dict] | None = None,
                      sort: str = SORT_USD, scope: str = SCOPE_ALL,
-                     feed_status: Optional[dict] = None) -> html.Div:
-    """Cards, metadata, Bloomberg feed line, workbook status, combined cash ladder,
-    alternative views, legend. `rates` is whatever the marks table holds (see
-    data.bloomberg.live.rates_from_marks); None/empty means every currency is MISSING."""
+                     futures_usd_delta: Optional[float] = None) -> html.Div:
+    """Cards, metadata, combined cash ladder, alternative views, stress block, legend.
+    `rates` is whatever the marks table holds (see data.bloomberg.live.rates_from_marks);
+    None/empty means every currency is MISSING. Bloomberg feed status and the workbook
+    mark-to-market panel are NOT rendered here any more -- see module docstring."""
     from engine.ladder.exposure import build_exposure
     rates = rates or {}
     result = build_exposure(records, rates)
@@ -410,11 +432,10 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     main = (combined_table(result, records, sort) if not empty
             else html.P("No open FX trades for this as-of date.", style={"color": "#616e7c"}))
     order_note = "currencies by |USD delta|" if sort != SORT_ALPHA else "currencies A-Z"
+    delta_by_ccy = dict(zip(result.summary["currency"], result.summary["usd_delta"])) if not result.summary.empty else {}
     return html.Div(className="section", children=[
         risk_snapshot(result, records),
         metadata_line(result, records, unresolved, as_of_date, rates),
-        market_data_panel(result, feed_status),
-        workbook_status(period),
         html.H4(f"Cash ladder by settlement date ({order_note})"),
         main,
         html.Details(id=LADDER_DETAILS_ID, className="details", open=False, children=[
@@ -424,5 +445,6 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
             html.H4("Settlement ladder (dates only)"),
             ladder_table(result) if not empty else html.Div(),
         ]),
+        stress_block(delta_by_ccy, futures_usd_delta),
         html.Details(className="details details--compact", children=[html.Summary("What the rows mean"), legend()]),
     ])
