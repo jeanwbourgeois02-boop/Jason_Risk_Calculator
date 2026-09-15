@@ -39,21 +39,33 @@ def get_db_path() -> Path:
 
 
 def ensure_schema(path: Union[str, Path]) -> None:
-    """Apply the idempotent DDL (CREATE ... IF NOT EXISTS) to an EXISTING database so
-    additive tables (e.g. the P&L ledger) exist on databases created before them.
-    Never creates a database and never alters existing tables or rows."""
+    """Make sure the database and the Bloomberg status file exist so a fresh computer
+    can launch with nothing copied across. Creates an EMPTY database with the schema
+    when the file is absent (no trades, no marks: upload a BNP report to fill it);
+    on an existing database applies the idempotent DDL so additive tables (e.g. the
+    P&L ledger) exist. Never alters existing tables or rows. Writes an initial status
+    file ("no pull has run yet") only when none exists."""
     p = Path(path)
-    if not p.exists():
-        return
     try:
         from data.ingest import schema
+        created = not p.exists()
+        p.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(p)
         try:
             schema.create_schema(conn)
         finally:
             conn.close()
-    except sqlite3.Error as exc:
+        if created:
+            print(f"created empty database {p} (upload a BNP report to fill it)", flush=True)
+    except (sqlite3.Error, OSError) as exc:
         print(f"schema check skipped ({exc})", flush=True)
+    try:
+        from data.bloomberg.live import read_status, write_status, _now_iso
+        if read_status(p) is None:
+            write_status(p, {"time": _now_iso(), "connected": False, "reason": "no pull has run yet",
+                             "requested": 0, "written": 0, "failed": 0, "items": [], "warnings": []})
+    except OSError as exc:
+        print(f"status file not written ({exc})", flush=True)
 
 
 def connect_readonly(path: Union[str, Path]) -> sqlite3.Connection:

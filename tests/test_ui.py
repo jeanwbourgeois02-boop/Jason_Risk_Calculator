@@ -43,8 +43,8 @@ def _seed(conn):
 
 
 # --------------------------------------------------------------------------- app / layout
-def test_create_app_returns_dash_app():
-    app = uiapp.create_app(db_path="does-not-exist.db")
+def test_create_app_returns_dash_app(tmp_path):
+    app = uiapp.create_app(db_path=str(tmp_path / "empty.db"))
     assert isinstance(app, dash.Dash)
 
 
@@ -212,8 +212,8 @@ def _cash_ladder_callback(app):
     return app.callback_map[keys[0]]["callback"]
 
 
-def test_create_app_registers_cash_ladder_callback():
-    app = uiapp.create_app(db_path="does-not-exist.db")
+def test_create_app_registers_cash_ladder_callback(tmp_path):
+    app = uiapp.create_app(db_path=str(tmp_path / "empty.db"))
     assert _cash_ladder_callback(app) is not None
 
 
@@ -293,7 +293,7 @@ def test_table_from_transposed_ladder_via_settle_date_label():
     assert total_row["USD"] == "(984,568)"
 
 
-def test_cash_ladder_callback_pipeline_transposes(monkeypatch):
+def test_cash_ladder_callback_pipeline_transposes(monkeypatch, tmp_path):
     """register_callbacks' inner function should call transpose_ladder on the fetched
     ladder frame before rendering -- checked by monkeypatching transpose_ladder and
     verifying it was called with the raw ladder_table output."""
@@ -331,7 +331,7 @@ def test_cash_ladder_callback_pipeline_transposes(monkeypatch):
         "ui.app.connect_readonly", lambda path: schema.connect()
     )
 
-    app = uiapp.create_app(db_path="does-not-exist.db")
+    app = uiapp.create_app(db_path=str(tmp_path / "empty.db"))
     callback = _cash_ladder_callback(app)
     callback.__wrapped__(cash_ladder.SOURCE_OFFICIAL, "2026-08-18")
     assert len(calls) == 1
@@ -437,8 +437,8 @@ def test_pnl_wired_into_overall_book_tab():
     )
 
 
-def test_create_app_registers_pnl_callback():
-    app = uiapp.create_app(db_path="does-not-exist.db")
+def test_create_app_registers_pnl_callback(tmp_path):
+    app = uiapp.create_app(db_path=str(tmp_path / "empty.db"))
     assert f"{pnl.CONTENT_CONTAINER_ID}.children" in app.callback_map
 
 
@@ -711,13 +711,13 @@ def test_stylesheet_asset_exists_with_key_classes():
         assert cls in css
 
 
-def test_cash_ladder_callback_renders_exposure_from_db(monkeypatch):
+def test_cash_ladder_callback_renders_exposure_from_db(monkeypatch, tmp_path):
     """End to end through the real callback: seeded DB -> records_from_db -> exposure section."""
     from ui.tabs import exposure
     conn = schema.connect()
     _seed(conn)
-    monkeypatch.setattr("ui.app.connect_readonly", lambda path: conn)
-    app = uiapp.create_app(db_path="does-not-exist.db")
+    app = uiapp.create_app(db_path=str(tmp_path / "empty.db"))   # creates an empty db; not the seeded one
+    monkeypatch.setattr("ui.app.connect_readonly", lambda path: conn)  # after create_app: load_summary closes what it opens
     callback = _cash_ladder_callback(app)
     out, toolbar_status = callback.__wrapped__(cash_ladder.SOURCE_OFFICIAL, "2026-08-17")
     # seeded DB has one official SPOT mark for USDJPY (147.12, snapped 2026-08-17 -> stale); no mock anywhere
@@ -796,3 +796,19 @@ def test_ledger_block_renders_values_and_unavailable_reasons():
     cards = {c.children[0].children: (c.children[1].children, c.children[2].children)
              for c in _find(ledger_ui.ledger_block(summary, "2026-09-14"), ledger_ui.LEDGER_CARDS_ID).children}
     assert cards["Total LTD"] == ("Unavailable", "missing rate: BRL") and cards["Realised LTD"][0] == "30,000"
+
+
+def test_ensure_schema_creates_empty_db_and_status_file(tmp_path):
+    p = tmp_path / "sub" / "risk.db"
+    uiapp.ensure_schema(p)
+    assert p.exists() and (tmp_path / "sub" / "risk.db.bloomberg_status.json").exists()
+    conn = uiapp.connect_readonly(p)
+    try:
+        assert uiapp.summary(conn)["trades"] == 0
+        assert conn.execute("SELECT COUNT(*) FROM pnl_snapshots").fetchone()[0] == 0
+    finally:
+        conn.close()
+    from data.bloomberg.live import read_status
+    assert read_status(p)["reason"] == "no pull has run yet"
+    uiapp.ensure_schema(p)   # idempotent
+    assert uiapp.load_summary(p)["as_of_date"] == "none"

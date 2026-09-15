@@ -1,7 +1,7 @@
 # Risk monitor: how it works
 
 A plain-language guide for the person who will rely on the numbers.
-Written 2026-09-15 against the committed code (243 tests passing).
+Written 2026-09-15 against the committed code (244 tests passing).
 Every statement here is taken from the code; file names are listed at the end so it can be checked.
 
 **Read in order.** Sections 1 to 3 are the essentials. Sections 4 onwards are detail you can dip into.
@@ -178,6 +178,7 @@ Net USD exposure therefore excludes futures, options, rates and cash.
 - The database holds one snapshot date, 2026-08-17, with 229 forwards across 18 pairs. **The book is a month stale** until a newer BNP file is uploaded. Trades that have settled since are treated as settled.
 - **No machine this app has run on has had Bloomberg.** The database holds zero official marks. Every P&L card on the development PC reads Unavailable. The app has not yet produced a live number.
 - The database is `data/raw/risk.db`. It is **not in git**. Back it up: it holds the trades, marks and the snapshot history behind Daily / MTD / YTD.
+- **A fresh computer needs nothing copied across.** On launch the app creates an empty database and the Bloomberg status file if they are missing. Upload a BNP report to fill it. Copy `risk.db` from another PC only if you want that PC's history. `init_data.bat` does the same creation by hand.
 
 ---
 
@@ -241,6 +242,7 @@ setup_bloomberg.bat            one-time install on the Bloomberg PC
 run_bloomberg_diagnostic.bat   read-only Bloomberg check, writes reports/
 backfill_history.bat           rebuild Daily/5d/MTD/YTD history from Bloomberg closes
 check_git_push.bat             is this folder in sync with GitHub
+init_data.bat                  create an empty database + status file (launch does this too)
 data/raw/risk.db               the database (not in git; back it up)
 data/ingest/bnp.py             BNP parser and reconciliation checks
 data/bloomberg/live.py         2-minute feed, status file
@@ -254,5 +256,5 @@ ui/tabs/cash_ladder.py         Cash ladder tab
 ui/tabs/pnl.py                 Overall book tab
 docs/excel-parity-audit.md     cell-by-cell audit of the workbook
 docs/open-questions.md         every unresolved assumption
-tests/                         243 tests: arithmetic and fixtures, not live-data parity
+tests/                         244 tests: arithmetic and fixtures, not live-data parity
 ```
