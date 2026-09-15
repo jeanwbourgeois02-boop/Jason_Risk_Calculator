@@ -362,7 +362,7 @@ def ladder_table(result) -> dash_table.DataTable:
         columns=columns,
         data=frame.to_dict("records"),  # includes ISO settlement_date, not displayed
         fixed_rows={},
-        fixed_columns={"headers": True, "data": 1},
+        fixed_columns={},
         style_table={"overflowX": "auto", "minWidth": "100%"},
         style_cell={**_MONO, "minWidth": "120px", "width": "120px", "maxWidth": "160px"},
         style_cell_conditional=[
@@ -428,9 +428,9 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
 def combined_table(result, records: List[dict], sort: str = SORT_USD,
                    fallback_ccys: Optional[set] = None) -> dash_table.DataTable:
     frame, ccys = combined_frame(result, records, sort, fallback_ccys)
-    columns = ([{"name": ["", "Settlement date"], "id": ROW_LABEL_COL}]
-               + [{"name": ["", c], "id": c} for c in ccys]
-               + [{"name": ["", "USD equivalent"], "id": USD_EQUIVALENT_COL}])
+    columns = ([{"name": "Settlement date", "id": ROW_LABEL_COL}]
+               + [{"name": c, "id": c} for c in ccys]
+               + [{"name": "USD equivalent", "id": USD_EQUIVALENT_COL}])
     first_summary = len(result.ladder.index)
     return dash_table.DataTable(
         id=COMBINED_TABLE_ID,
@@ -438,7 +438,7 @@ def combined_table(result, records: List[dict], sort: str = SORT_USD,
         data=frame.to_dict("records"),
         merge_duplicate_headers=True,
         fixed_rows={},
-        fixed_columns={"headers": True, "data": 1},
+        fixed_columns={},
         style_table=_TABLE_STYLE,
         style_cell={**_MONO, "minWidth": "125px", "width": "125px", "maxWidth": "170px"},
         style_cell_conditional=[
