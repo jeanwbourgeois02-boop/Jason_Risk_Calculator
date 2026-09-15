@@ -29,7 +29,7 @@ COLUMNS = [
     "trade_id", "instrument_id", "product", "strategy", "theme", "trade_date",
     "settle_date", "status", "quantity", "fill", "mark", "mark_date", "mark_source",
     "spot", "spot_source", "pnl_local", "pnl_usd", "pnl_spot_usd", "pnl_carry_usd",
-    "reason",
+    "reason", "note",
 ]
 
 FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")
@@ -141,7 +141,7 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
 
 def _open_fx_row(conn, r, as_of, marks_source) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
-               pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="")
+               pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="", note="")
     m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of, marks_source)
     if m_hit is None:
         out["reason"] = f"no FWD_OUTRIGHT mark for {r.instrument_id} settle {r.settle_date} on {as_of}"
@@ -160,7 +160,7 @@ def _open_fx_row(conn, r, as_of, marks_source) -> dict:
     spot_hit = _mark_at(conn, r.instrument_id, as_of, "SPOT", as_of, marks_source)
     if spot_hit is None:
         out["pnl_spot_usd"], out["pnl_carry_usd"] = pnl_usd, 0.0
-        out["reason"] = f"no SPOT for {r.instrument_id} on {as_of}; carry split unavailable"
+        out["note"] = f"no SPOT for {r.instrument_id} on {as_of}; carry split unavailable"
         return out
     m_spot = float(spot_hit[0])
     pnl_carry = r.quantity * (m - m_spot) * s
@@ -178,12 +178,12 @@ def _settled_fx_row(conn, trade_id) -> dict:
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=row["spot_usd_per_local"], spot_source=row["spot_source"],
                 pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]), pnl_spot_usd=float(row["pnl_usd"]),
-                pnl_carry_usd=0.0, reason=row["note"])
+                pnl_carry_usd=0.0, reason="", note=row["note"])
 
 
 def _open_future_row(conn, r, as_of, marks_source) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=1.0, spot_source="identity",
-               pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="")
+               pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
     m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FUTURE_PX", as_of, marks_source)
     if m_hit is None:
         out["reason"] = f"no FUTURE_PX mark for {r.instrument_id} expiry {r.settle_date} on {as_of}"
@@ -203,4 +203,4 @@ def _settled_future_row(conn, trade_id) -> dict:
                     reason=f"settled trade {trade_id} not yet realised (run realise_settled)")
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]),
-                pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason=row["note"])
+                pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason="", note=row["note"])
