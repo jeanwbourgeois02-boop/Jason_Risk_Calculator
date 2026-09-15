@@ -6,19 +6,18 @@ HA-portfolio reference-workbook recognition/preview that used to live in this co
 has been removed entirely (moved to nothing -- the workbook stays a read-only file on
 the Reconciliation tab's manual-rates grid, `ui/workbook_rates.py`).
 
-Flow: choose file -> file name + snapshot date shown -> "Confirm insert" -> dcc.Loading
-("Importing...") -> one small status line under the button. Nothing is written to the
-database before Confirm is pressed (`import_report` is only called from the Confirm
-callback, never from the file-picked callback).
+Flow: choose file -> "Confirm insert" -> dcc.Loading ("Importing...") -> one small status
+line under the button. Nothing is written to the database before Confirm is pressed
+(`import_report` is only called from the Confirm callback, never from the file-picked
+callback).
 
-Snapshot date, no picker: `data.ingest.upload.suggested_date` already derives the date
+Snapshot date, no picker, not shown: `data.ingest.upload.suggested_date` derives the date
 from the filename (`HA_PNL_YYYYMMDD...` -> that date minus one business day, per
-CLAUDE.md "File dated T is the T-1 close snapshot") -- there is nothing for a user to
-pick correctly that the filename doesn't already say, so a `dcc.DatePickerSingle` was
-one more control than the flow needed. The date now shows as read-only text next to the
-file name ("HA_PNL_20260818.csv - snapshot 2026-08-17"); a one-line `dcc.Input`
-(`type="date"`) only appears in its place when the filename carries no recognisable
-date, so a user is never asked to enter a date the filename already answers.
+CLAUDE.md "File dated T is the T-1 close snapshot") and resolves it silently -- the user
+never sees or confirms it (2026-09-15 follow-up: the visible "snapshot <date>" text was
+one more thing to read for a value the user never needed to check or correct). A one-line
+`dcc.Input` (`type="date"`) only appears when the filename carries no recognisable date at
+all, since then there is genuinely nothing to resolve silently.
 
 Both date sources are read as State by the Confirm callback (`report-date` store first,
 the manual `dcc.Input` as fallback). There is deliberately NO callback with the manual
@@ -116,6 +115,9 @@ def layout(data: dict = None, db_path=None):
         html.Div(id=STAGE_ID, className="source-row source-row--stage", style={"display": "none"}, children=[
             html.Span(id=FILENAME_ID, className="source-file"),
             html.Span(id=SNAPSHOT_TEXT_ID, className="source-snapshot", style={"display": "none"}),
+            # SNAPSHOT_TEXT_ID stays permanently hidden by the callback below (2026-09-15
+            # follow-up); the element itself is kept, not removed, so its Output binding
+            # doesn't need touching every time the resolved date changes.
             html.Div(id=f"{MANUAL_DATE_ID}-wrap", style={"display": "none"}, children=[
                 html.Label("Snapshot date"),
                 dcc.Input(id=MANUAL_DATE_ID, type="date"),
@@ -151,7 +153,10 @@ def register(app, get_db_path):
                 html.Span(str(exc), className="source-result--error")
         date = suggested_date(filename)
         if date:
-            return {}, filename, f"snapshot {date}", {}, hidden, None, date, ""
+            # Resolved silently: date goes straight into the store, the snapshot text
+            # stays hidden (see the comment on SNAPSHOT_TEXT_ID above) -- nothing for the
+            # user to read or confirm here.
+            return {}, filename, "", hidden, hidden, None, date, ""
         note = "This file name carries no recognisable date; enter the snapshot date, then press Confirm insert."
         return {}, filename, "", hidden, {}, None, None, note
 
