@@ -599,7 +599,10 @@ def combined_risk_table(result, futures: Optional[dict] = None,
             out["move_1pct"] = format_amount(row["move_1pct"])
             for name in scenario_names:
                 v = row[name]
-                out[name] = format_amount(v) if v is not None else ""
+                # A currency the scenario does not move is a zero, shown as the same em
+                # dash as any other zero, so a blank never reads as "not computed"
+                # (user decision 2026-09-15).
+                out[name] = format_amount(v) if v is not None else EM_DASH
         display_rows.append(out)
 
     totals = portfolio_totals(result)

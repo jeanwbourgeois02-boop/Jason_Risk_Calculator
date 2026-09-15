@@ -111,6 +111,8 @@ Risk-off (JPY/CHF up, EM/equities down):
   KRW: -0.08
   TWD: -0.08
   INR: -0.08
+  SGD: -0.04   # Asia, but managed against a basket: roughly half the EM move (added 2026-09-15)
+  HKD: -0.01   # pegged; a token move at the weak side of the band (added 2026-09-15)
 
 Risk-on (EM/AUD/NZD up, JPY down, equities up):
   EQUITY: 0.05
@@ -125,6 +127,8 @@ Risk-on (EM/AUD/NZD up, JPY down, equities up):
   AUD: 0.03
   NZD: 0.03
   JPY: -0.03
+  SGD: 0.03    # added 2026-09-15, see Risk-off
+  HKD: 0.01    # added 2026-09-15, see Risk-off
 
 EM -10%:
   BRL: -0.10
