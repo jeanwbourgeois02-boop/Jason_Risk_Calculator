@@ -111,6 +111,19 @@ only.
   applied to the group's rows.
 - `pnl_snapshots` is retired. `realised_pnl` stays, extended for crosses and futures.
 
+### 3a. Decisions of 2026-09-15 (evening review)
+
+- Close is 15:00 America/New_York, unchanged. Reconciliation against BNP is same-date,
+  same-close.
+- The market value break (our open LTD at the BNP file date minus BNP `mv_usd`, per
+  instrument) is the primary comparison and is always shown. BNP day P&L versus our
+  daily is informational until two closes exist, then becomes a second break.
+- Daily P&L reference `ltd(T-1)` is valued at historical Bloomberg marks pulled on
+  demand (one outright per pair per value date at the T-1 pricing date, the Excel's
+  PricingDate request generalised), not read from a stored snapshot. The marks table
+  is the cache of those pulls. 5d / MTD / YTD follow the same rule as far back as
+  history can be pulled; where it cannot, they are Unavailable with the reason.
+
 ## 4. Stress (layer 2, ladder side)
 
 From the per-currency USD delta `D_ccy` at spot:
