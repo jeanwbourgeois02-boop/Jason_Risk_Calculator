@@ -42,19 +42,32 @@ p { margin: 8px 0; }
 .subtab:hover { color: var(--navy) !important; }
 .subtab--selected { color: var(--navy) !important; border-bottom: 3px solid var(--gold) !important; background: #fff !important; }
 
-/* ---------------------------------------------------------------- header strip */
-.header-block { background: var(--navy); color: #fff; padding: 16px 24px; }
-.header-figures { display: flex; flex-wrap: wrap; gap: 16px; }
-.header-figure { min-width: 120px; }
-.header-figure-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: rgba(255,255,255,.65); }
-.header-figure-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
-.header-figure-caption { font-size: 11px; color: rgba(255,255,255,.55); margin-top: 2px; }
+/* ---------------------------------------------------------------- header strip
+   Compressed to one dense row (user decision 2026-09-15): ~64px cards, 8px vertical
+   padding, no empty band above/below the figure row. */
+.header-block { background: var(--navy); color: #fff; padding: 8px 24px; }
+.header-figures { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; min-height: 64px; }
+.header-figure { min-width: 84px; }
+.header-figure-title { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: rgba(255,255,255,.65); }
+.header-figure-value { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 1px; }
+.header-figure-caption { font-size: 10px; color: rgba(255,255,255,.55); margin-top: 1px; }
+/* Sign colouring for P&L-shaped header figures (Net signed/coloured, Gross neutral,
+   n/a muted with its reason as a title tooltip -- coordinator addition 2026-09-15). */
+.header-figure-value--pos { color: #4ade80; }
+.header-figure-value--neg { color: #f87171; }
+.header-figure-value--zero { color: #fff; }
+.header-figure-value--neutral { color: #fff; }
+.header-figure-value--muted { color: rgba(255,255,255,.5); font-style: italic; font-weight: 500; cursor: help; }
+.header-divider { align-self: stretch; width: 1px; background: rgba(255,255,255,.22); margin: 4px 2px; }
 /* The LTD chart's collapsible re-uses `.section` (white card, dark text) -- fine on the
    light page, but it sits inside the navy header here, so it needs its own dark-on-
    light override rather than inheriting the header's white-on-navy palette; the
    opposite (navy text on navy) is exactly the pairing the user's contrast rule bans. */
 .header-block .details { background: var(--card); border-radius: 6px; padding: 4px 12px 8px; margin-top: 8px; color: var(--text); }
+.header-block .details:not([open]) { margin-top: 4px; padding: 0; background: transparent; border: none; }
+.header-block .details:not([open]) > summary { padding: 2px 0; font-size: 11px; }
 .header-block .details > summary { color: var(--navy); }
+.header-block .details:not([open]) > summary { color: rgba(255,255,255,.65); }
 .header-block .details > summary:hover { color: #6b5311; }
 
 /* ---------------------------------------------------------------- generic layout */
@@ -63,6 +76,16 @@ p { margin: 8px 0; }
 .toolbar label { color: var(--muted); font-size: 12px; }
 .ladder-heading { align-items: center; gap: 16px; }
 .ladder-heading .section-title { margin: 0; flex: 1 1 auto; min-width: 220px; }
+
+/* Ladder tab title row (user decision 2026-09-15): one row, no card, title left,
+   date heading + picker + Today button right, tight spacing to the cards below. */
+.ladder-title-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 16px; margin: 0 0 16px; }
+.ladder-title-row-heading { margin: 0; }
+.ladder-title-row-right { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.ladder-title-row-right .section-title { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
+.cash-ladder .section { margin-bottom: 16px; }
+.cash-ladder .cards { margin-bottom: 16px; }
 .meta { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 16px; }
 .metric { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; min-width: 110px; }
 .metric-label { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -79,6 +102,14 @@ p { margin: 8px 0; }
 .card-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .card-value--muted { color: var(--muted); font-weight: 500; font-size: 14px; font-style: italic; }
 .card-note { color: var(--muted); font-size: 11px; }
+/* Gross/net headline layout (user decision 2026-09-15, item 1): net sits directly under
+   gross, equally bold, with a small-caps "net" label; coloured by sign, gross neutral. */
+.card-net { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 1px; }
+.cards--three .card-net { font-size: 22px; }
+.card-net-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted); margin-right: 4px; }
+.card-net-value.pos { color: var(--pos); }
+.card-net-value.neg { color: var(--neg); }
 .tag { align-self: flex-start; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
   padding: 1px 7px; border-radius: 4px; margin-top: 2px; }
 .tag--exposure { background: #eaf0fb; color: var(--navy); }

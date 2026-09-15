@@ -40,8 +40,10 @@ CLAUDE.md ("ui/ ... never recomputes P&L or delta itself").
 """
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 from typing import Callable, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from dash import Input, Output, dash_table, dcc, html
@@ -52,8 +54,14 @@ from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
 DATE_PICKER_ID = "cash-ladder-date"
 TABLE_CONTAINER_ID = "cash-ladder-table-container"
 TOOLBAR_ID = "cash-ladder-toolbar"
+TITLE_ID = "cash-ladder-title"
+TODAY_BUTTON_ID = "cash-ladder-today"
 REFRESH_ID = "cash-ladder-refresh"
 REFRESH_MS = 120_000  # matches data.bloomberg.live.INTERVAL_SECONDS
+
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August",
+                "September", "October", "November", "December")
 
 BNP_BVAL_SOURCE_LABEL = "BNP file rate (not Bloomberg)"
 
@@ -180,6 +188,110 @@ def bnp_bval_rates(conn: sqlite3.Connection, as_of_date: str) -> dict:
     return out
 
 
+FORWARD_PROXY_SOURCE_LABEL = "BNP forward proxy"
+
+
+def bnp_forward_proxy_rates(conn: sqlite3.Connection, as_of_date: str, needed: set) -> dict:
+    """currency -> {rate, inverted, source, timestamp, stale} from the BNP file's own
+    BVAL FORWARD outright, used as a spot proxy (coordinator addition 2026-09-15, item
+    5): BNP's file carries no SPOT for AUD/EUR/GBP/XAU (its Fx is 1 on those rows), so
+    `bnp_bval_rates` alone leaves every XXXUSD currency MISSING. For each currency still
+    in `needed` after the SPOT fallback, take the EARLIEST settle_date FWD_OUTRIGHT mark
+    (source BNP_BVAL) from the most recent snapshot on or before `as_of_date` -- the
+    nearest-dated forward is the closest available proxy for spot. Labelled distinctly
+    (`FORWARD_PROXY_SOURCE_LABEL`) so the caller can report it separately from the
+    plain BNP_BVAL SPOT fallback, never silently blended into "Bloomberg" or even into
+    the SPOT-fallback count."""
+    if not needed:
+        return {}
+    sql = (
+        "SELECT m.instrument_id, i.base_ccy, i.quote_ccy, m.value, m.settle_date, m.as_of_date "
+        "FROM marks m JOIN instruments i USING (instrument_id) "
+        "WHERE m.mark_type = 'FWD_OUTRIGHT' AND m.source = 'BNP_BVAL' AND i.asset_class = 'FX' "
+        "AND m.as_of_date <= ? "
+        "ORDER BY m.instrument_id, m.as_of_date DESC, m.settle_date ASC"
+    )
+    best: dict = {}  # pair -> (base, quote, value, settle_date, snapshot_date); first row per pair wins (best order)
+    for pair, base, quote, value, settle_date, snapshot_date in conn.execute(sql, [as_of_date]):
+        if pair in best:
+            continue
+        if "USD" not in (base, quote):
+            continue
+        ccy = quote if base == "USD" else base
+        if ccy not in needed:
+            continue
+        best[pair] = (base, quote, value, settle_date, snapshot_date)
+    out = {}
+    for base, quote, value, settle_date, snapshot_date in best.values():
+        ccy = quote if base == "USD" else base
+        out[ccy] = {"rate": float(value), "inverted": base == "USD",
+                    "source": FORWARD_PROXY_SOURCE_LABEL, "timestamp": snapshot_date, "stale": False}
+    return out
+
+
+def net_gross_usd(conn: sqlite3.Connection, as_of_date: str) -> dict:
+    """FX-only Net USD / Gross USD (CLAUDE.md "Net USD (FX only)" / "Gross USD"), via the
+    exact same records/rates path `_render` uses for the Ladder tab (`records_from_db`
+    + `rates_from_marks`, with the BNP_BVAL SPOT fallback then the forward-outright
+    proxy) -- so a header figure for a given as_of always matches what the Ladder tab
+    would show. Coordinator addition 2026-09-15 (header compaction) so `ui.tabs.header`
+    does not need its own copy of this fallback chain. Returns
+    `{available, net, gross, reason, fallback_ccys, forward_proxy_ccys}`; `net`/`gross`
+    are only present when `available`."""
+    from engine.ladder.exposure_adapter import records_from_db
+    from engine.ladder.exposure import build_exposure, portfolio_totals
+    from data.bloomberg.live import rates_from_marks
+
+    records, _unresolved = records_from_db(conn, as_of_date)
+    rates = rates_from_marks(conn)
+    needed = {r["currency"] for r in records}
+    missing = needed - set(rates)
+    fallback_ccys = set()
+    if missing:
+        fb = bnp_bval_rates(conn, as_of_date)
+        for ccy in missing:
+            if ccy in fb:
+                rates[ccy] = fb[ccy]
+                fallback_ccys.add(ccy)
+    still_missing = needed - set(rates)
+    forward_proxy_ccys = set()
+    if still_missing:
+        proxy = bnp_forward_proxy_rates(conn, as_of_date, still_missing)
+        for ccy in still_missing:
+            if ccy in proxy:
+                rates[ccy] = proxy[ccy]
+                forward_proxy_ccys.add(ccy)
+    result = build_exposure(records, rates)
+    totals = portfolio_totals(result)
+    if totals["missing"]:
+        return {"available": False, "reason": "no rate: " + ", ".join(sorted(totals["missing"])),
+                "fallback_ccys": fallback_ccys, "forward_proxy_ccys": forward_proxy_ccys}
+    return {"available": True, "net": totals["net_usd"], "gross": totals["gross_usd"],
+            "reason": "", "fallback_ccys": fallback_ccys, "forward_proxy_ccys": forward_proxy_ccys}
+
+
+def today_ny() -> str:
+    """Today's date (ISO) in America/New_York -- the ladder's as-of default (2026-09-15
+    coordinator addition): open trades are trade_date <= today <= settle_date, evaluated
+    against "now" rather than the last BNP snapshot, so the ladder shows what is still
+    outstanding today even between uploads."""
+    return dt.datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+
+def heading_date_text(iso: Optional[str]) -> str:
+    """'2026-09-15' -> 'Monday 15 September 2026' (coordinator addition 2026-09-15,
+    item 2 of the Ladder-tab title row); an unparseable/missing date falls back to a
+    plain placeholder rather than raising, since this also runs before any date is
+    picked."""
+    if not iso:
+        return "As of - no date selected"
+    try:
+        d = dt.date.fromisoformat(iso)
+    except ValueError:
+        return f"As of {iso}"
+    return f"{_WEEKDAY_NAMES[d.weekday()]} {d.day} {_MONTH_NAMES[d.month - 1]} {d.year}"
+
+
 def message_box(message: str) -> html.P:
     """Grey status text shown in the table container instead of a DataTable (missing
     view module, missing DB, no as_of date, etc)."""
@@ -187,15 +299,22 @@ def message_box(message: str) -> html.P:
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
-    """Ladder tab shell (user decision 2026-09-15, items A/C): only the as-of date
-    picker plus an (initially empty) table container. No other controls, no dropdowns
-    -- sort/scope toolbars, snapshot cards, metadata, legend and alternative views are
-    removed outright by `ui.tabs.exposure.exposure_section`, not moved here."""
+    """Ladder tab shell (user decision 2026-09-15, items A/C; title row added by the
+    coordinator's same-day follow-up, item 2): a heading naming the as-of date in full
+    ("Monday 15 September 2026"), the date picker beside it, and a "Today" button that
+    resets the picker (and so the header store, which mirrors this picker) to today's
+    America/New_York date -- plus an (initially empty) table container. No other
+    controls, no dropdowns -- sort/scope toolbars, snapshot cards, metadata, legend and
+    alternative views are removed outright by `ui.tabs.exposure.exposure_section`, not
+    moved here."""
     return html.Div(className="cash-ladder", children=[
-        html.H3("Ladder"),
-        html.P("What am I long/short and when is it cash?", className="section-kicker"),
-        html.Div(id=TOOLBAR_ID, className="toolbar", children=[
-            build_date_picker(DATE_PICKER_ID, default_date=default_date),
+        html.Div(id=TOOLBAR_ID, className="ladder-title-row", children=[
+            html.H3("Cash ladder", className="ladder-title-row-heading"),
+            html.Div(className="ladder-title-row-right", children=[
+                html.H4(heading_date_text(default_date), id=TITLE_ID, className="section-title"),
+                build_date_picker(DATE_PICKER_ID, default_date=default_date),
+                html.Button("Today", id=TODAY_BUTTON_ID, n_clicks=0, className="btn"),
+            ]),
         ]),
         dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
         html.Div(id=TABLE_CONTAINER_ID),
@@ -229,6 +348,18 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         """Re-runs every REFRESH_MS so the ladder follows the 2-minute Bloomberg feed
         (data.bloomberg.live)."""
         return _render(as_of_date)
+
+    @app.callback(Output(TITLE_ID, "children"), Input(DATE_PICKER_ID, "date"))
+    def _update_title(as_of_date):
+        return heading_date_text(as_of_date)
+
+    @app.callback(
+        Output(DATE_PICKER_ID, "date", allow_duplicate=True),
+        Input(TODAY_BUTTON_ID, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _jump_to_today(_n_clicks):
+        return today_ny()
 
     def _render(as_of_date):
         if not as_of_date:
@@ -265,6 +396,19 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                         if ccy in fallback:
                             rates[ccy] = fallback[ccy]
                             fallback_ccys.add(ccy)
+                # Still-missing currencies (item 5, coordinator addition): BNP carries no
+                # SPOT for AUD/EUR/GBP/XAU (Fx = 1 on those rows), so fall back further to
+                # the earliest-settle_date BNP_BVAL forward outright as a spot proxy.
+                # Tracked in its own set so the caller can report it distinctly from the
+                # plain SPOT fallback, never blended into one count.
+                still_missing = needed - set(rates)
+                forward_proxy_ccys = set()
+                if still_missing:
+                    proxy = bnp_forward_proxy_rates(conn, as_of_date, still_missing)
+                    for ccy in still_missing:
+                        if ccy in proxy:
+                            rates[ccy] = proxy[ccy]
+                            forward_proxy_ccys.add(ccy)
                 # Futures USD delta: engine.ladder.futures_delta.futures_usd_delta (C5
                 # wiring). The full dict (value/by_instrument/missing/reason) is passed
                 # through so exposure_section's combined risk table and futures block can
@@ -274,7 +418,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 _fut = _futures_usd_delta(conn, as_of_date)
                 exposure = exposure_section(records, unresolved, as_of_date, rates=rates,
                                             futures=_fut, futures_details=(_fut or {}).get("details"),
-                                            fallback_ccys=fallback_ccys)
+                                            fallback_ccys=fallback_ccys,
+                                            forward_proxy_ccys=forward_proxy_ccys)
             except ImportError as exc:
                 exposure = message_box(f"Exposure ladder not available ({exc}).")
         finally:

@@ -216,11 +216,15 @@ def test_exposure_section_has_headline_and_three_tables_only():
     assert exposure.LADDER_DETAILS_ID not in ids
 
 
-def test_combined_risk_table_first_in_layout():
-    section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES)
+def test_table_order_ladder_then_futures_then_risk():
+    """User decision 2026-09-15 ("Reorder the Ladder tab", item 2): headline cards, then
+    the currency ladder grid, then open futures, then the risk/scenario table."""
+    futures = {"value": 1.0, "by_instrument": {"ESU6 Index": 1.0}, "missing": [], "reason": ""}
+    section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES, futures=futures)
     ids = _all_ids(section)
-    assert ids.index(exposure.HEADLINE_ID) < ids.index(exposure.RISK_TABLE_ID)
-    assert ids.index(exposure.RISK_TABLE_ID) < ids.index(exposure.COMBINED_TABLE_ID)
+    assert ids.index(exposure.HEADLINE_ID) < ids.index(exposure.COMBINED_TABLE_ID)
+    assert ids.index(exposure.COMBINED_TABLE_ID) < ids.index(exposure.FUTURES_TABLE_ID)
+    assert ids.index(exposure.FUTURES_TABLE_ID) < ids.index(exposure.RISK_TABLE_ID)
 
 
 def test_combined_risk_frame_futures_row_present_with_mark():
@@ -317,8 +321,50 @@ def _render_text(node):
 def test_exposure_section_builds_without_market_data_panel():
     section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES)
     text = _render_text(section)
-    assert "Risk (currencies + open futures)" in text
+    assert "Risk and scenarios" in text
     assert "Open futures" in text
+    assert "Cash ladder: spot, forwards, swaps and cash balances" in text
+
+
+def test_scenario_columns_follow_config_order_not_alphabetical():
+    """Scenario columns must render in config/stress.yaml's own order (user decision
+    2026-09-15, item 3), not alphabetically."""
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, RATES)
+    scenarios = {"Zeta scenario": {"JPY": 0.01}, "Alpha scenario": {"JPY": -0.01}}
+    frame = exposure.combined_risk_frame(result, scenarios=scenarios)
+    cols = list(frame.columns)
+    assert cols.index("Zeta scenario") < cols.index("Alpha scenario")
+
+
+def test_headline_card_shows_net_under_gross():
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, RATES)
+    headline = exposure.headline_numbers(result)
+    forward_card = headline.children[2]
+    net_span = forward_card.children[2]
+    assert net_span.children[0].children == "net "
+
+
+def test_headline_non_forward_shows_no_open_futures_note():
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, RATES)
+    headline = exposure.headline_numbers(result)
+    nonfwd_card = headline.children[1]
+    assert nonfwd_card.children[1].children == "0"
+    assert nonfwd_card.children[2].children == "no open futures"
+
+
+def test_stress_yaml_covers_every_book_currency():
+    from engine.pnl.stress import load_scenarios
+    scenarios = load_scenarios()
+    covered = set()
+    for moves in scenarios.values():
+        covered.update(ccy for ccy in moves if ccy != "EQUITY")
+    book_currencies = {"AUD", "CAD", "CHF", "EUR", "GBP", "HKD", "IDR", "INR", "JPY",
+                       "KRW", "MXN", "NOK", "NZD", "SEK", "SGD", "TRY", "TWD", "XAU", "ZAR"}
+    missing = book_currencies - covered
+    assert not missing, f"currencies with no scenario coverage: {missing}"
 
 
 def test_ledger_tab_module_removed():

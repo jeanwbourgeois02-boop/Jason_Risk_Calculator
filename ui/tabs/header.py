@@ -41,15 +41,18 @@ PERIOD_LABELS = (
     ("value" , None),
 )
 
-_PERIODS = ("daily", "d5", "mtd", "ytd", "trading")
+_PERIODS = ("daily", "previous_day", "d5", "mtd", "ytd", "trading")
 _PERIOD_TITLES = {
-    "daily": "Daily", "d5": "5d", "mtd": "MTD", "ytd": "YTD", "trading": "Trading",
+    "daily": "Daily", "previous_day": "Previous day", "d5": "5d", "mtd": "MTD",
+    "ytd": "YTD", "trading": "Trading",
 }
 
 _CHART_LOOKBACK_DAYS = 20
 
 
 def _figure_card(title: str, value_text: str, caption: str = "") -> html.Div:
+    """Plain informational card (no P&L sign colouring) -- used for LTD's fallback
+    caption slot and the as-of/marks-time cards."""
     return html.Div(className="header-figure", children=[
         html.Div(title, className="header-figure-title"),
         html.Div(value_text, className="header-figure-value"),
@@ -64,8 +67,59 @@ def _fmt_usd(value: float) -> str:
     return f"{sign}${abs(value):,.0f}"
 
 
+def _sign_class(value: float) -> str:
+    if value > 0:
+        return "pos"
+    if value < 0:
+        return "neg"
+    return "zero"
+
+
+def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
+    """One header figure for a P&L-shaped `{value, available, reason}` entry (coordinator
+    addition 2026-09-15, header compaction): bold value, green/red/white by sign when
+    `colour` (True for every signed P&L figure and Net; False for Gross, which is
+    always neutral per the user's decision), "n/a" muted with the reason as an HTML
+    `title` tooltip when unavailable -- never a blank cell."""
+    if not entry.get("available"):
+        return html.Div(className="header-figure", children=[
+            html.Div(title, className="header-figure-title"),
+            html.Div("n/a", className="header-figure-value header-figure-value--muted",
+                     title=entry.get("reason", "")),
+        ])
+    value = entry["value"]
+    cls = _sign_class(value) if colour else "neutral"
+    return html.Div(className="header-figure", children=[
+        html.Div(title, className="header-figure-title"),
+        html.Div(_fmt_usd(value), className=f"header-figure-value header-figure-value--{cls}"),
+    ])
+
+
+def _divider() -> html.Div:
+    # A single empty child (rather than no children at all) keeps this safe for any
+    # caller that walks `card.children[0]` over the whole figure list (e.g.
+    # tests/test_ui_blotter.py::test_build_figures_includes_all_periods).
+    return html.Div(className="header-divider", children=[html.Div()])
+
+
+def _marks_info(conn: sqlite3.Connection, as_of: str):
+    """Latest `snapped_at` among marks written for `as_of` and its source label -- an
+    approximate but honest "how fresh are today's marks" caption (coordinator addition
+    2026-09-15); `("n/a", "")` when no marks exist yet for that date."""
+    row = conn.execute(
+        "SELECT source, snapped_at FROM marks WHERE as_of_date = ? ORDER BY snapped_at DESC LIMIT 1",
+        (as_of,),
+    ).fetchone()
+    if not row:
+        return "n/a", ""
+    source, snapped_at = row
+    return str(snapped_at), str(source)
+
+
 def layout() -> html.Div:
-    """Static shell: figure cards populated by the callback, collapsible chart below."""
+    """Static shell: figure cards populated by the callback, collapsible chart below.
+    The chart's `.details` collapses to zero extra margin when closed (ui/assets/
+    style.css) so a compact header never leaves an empty band under the figure row."""
     return html.Div(id=HEADER_ID, className="header-block", children=[
         html.Div(id=f"{HEADER_ID}-figures", className="header-figures",
                  children=[_figure_card("LTD", "-")]),
@@ -80,21 +134,32 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     # Same pricing path as the Blotter: official marks first, BNP file rates as a
     # labelled fallback, so the header shows numbers on a PC without Bloomberg.
     from ui.tabs.blotter_pricing import priced_value_book, scoped_period_pnl
+    from ui.tabs.cash_ladder import net_gross_usd
 
     periods = scoped_period_pnl(conn, as_of)
     ltd_entry = periods.get("ltd", {})
     _, n_fallback, n_total = priced_value_book(conn, as_of)
-    caption = f"{n_fallback} of {n_total} rows on BNP file rates, not Bloomberg" if n_fallback else ""
-    if ltd_entry.get("available"):
-        cards = [_figure_card("LTD", _fmt_usd(ltd_entry["value"]), caption)]
-    else:
-        cards = [_figure_card("LTD", "Unavailable", ltd_entry.get("reason", ""))]
+    fallback_caption = f"{n_fallback} of {n_total} rows on BNP file rates, not Bloomberg" if n_fallback else ""
+
+    cards = [_pnl_card("LTD", ltd_entry)]
+    if fallback_caption and ltd_entry.get("available"):
+        cards[0].children.append(html.Div(fallback_caption, className="header-figure-caption"))
     for key in _PERIODS:
-        entry = periods.get(key, {})
-        if entry.get("available"):
-            cards.append(_figure_card(_PERIOD_TITLES[key], _fmt_usd(entry["value"])))
-        else:
-            cards.append(_figure_card(_PERIOD_TITLES[key], "Unavailable", entry.get("reason", "")))
+        cards.append(_pnl_card(_PERIOD_TITLES[key], periods.get(key, {})))
+
+    cards.append(_divider())
+    ng = net_gross_usd(conn, as_of)
+    if ng["available"]:
+        cards.append(_pnl_card("Net USD", {"value": ng["net"], "available": True}))
+        cards.append(_pnl_card("Gross USD", {"value": ng["gross"], "available": True}, colour=False))
+    else:
+        reason = ng.get("reason", "")
+        cards.append(_pnl_card("Net USD", {"available": False, "reason": reason}))
+        cards.append(_pnl_card("Gross USD", {"available": False, "reason": reason}, colour=False))
+
+    snapped_at, source = _marks_info(conn, as_of)
+    cards.append(_figure_card("As of", as_of))
+    cards.append(_figure_card("Marks as of", snapped_at, source))
     return cards
 
 

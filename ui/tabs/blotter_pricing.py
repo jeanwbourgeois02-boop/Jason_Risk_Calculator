@@ -98,8 +98,9 @@ def scoped_period_pnl(conn: sqlite3.Connection, as_of: str, products: Optional[t
     a BNP_BVAL-only book still prices) and optionally filtered to `products`."""
     holidays = load_holidays()
     d = dt.date.fromisoformat(as_of)
+    t1 = _prev_business_day(d, holidays)
     refs = {
-        "daily": _prev_business_day(d, holidays),
+        "daily": t1,
         "d5": _n_business_days_back(d, 5, holidays),
         "mtd": _last_business_day_of_prev_month(d, holidays),
         "ytd": _last_business_day_of_prev_year(d, holidays),
@@ -120,6 +121,22 @@ def scoped_period_pnl(conn: sqlite3.Connection, as_of: str, products: Optional[t
             else:
                 entry.update(value=ltd_today - ltd_ref, available=True)
         out[key] = entry
+
+    # "Previous day" (coordinator addition 2026-09-15, header compaction): LTD at T-1
+    # close minus LTD at T-2 close -- the prior day's own daily move, distinct from
+    # "daily" above (today vs T-1). Reuses the same `_priced_ltd` fallback chain.
+    t2 = _prev_business_day(t1, holidays)
+    prev_entry = {"value": float("nan"), "ref_date": t2.isoformat(), "available": False, "reason": ""}
+    ltd_t1 = _priced_ltd(conn, t1.isoformat(), products)
+    if _isnan(ltd_t1):
+        prev_entry["reason"] = f"LTD on {t1.isoformat()} unavailable"
+    else:
+        ltd_t2 = _priced_ltd(conn, t2.isoformat(), products)
+        if _isnan(ltd_t2):
+            prev_entry["reason"] = f"LTD on {t2.isoformat()} unavailable"
+        else:
+            prev_entry.update(value=ltd_t1 - ltd_t2, available=True)
+    out["previous_day"] = prev_entry
 
     df, _, _ = priced_value_book(conn, as_of)
     if products is not None and not df.empty:

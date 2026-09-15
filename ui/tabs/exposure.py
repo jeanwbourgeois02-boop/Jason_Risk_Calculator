@@ -140,14 +140,35 @@ def _sign_styles(columns: Iterable[str]) -> list:
 HEADLINE_ID = "exposure-headline"
 
 
+def _gross_net_card(title: str, gross_text: str, net_value: Optional[float] = None,
+                    note: Optional[str] = None, unavailable: bool = False) -> html.Div:
+    """One headline card (user decision 2026-09-15, item 1): small-caps title, GROSS
+    bold, then directly under it NET equally bold with a small-caps "net" label,
+    coloured green/red by sign (gross itself stays neutral). `note` replaces the net
+    line entirely -- used for the Unavailable reason and for "no open futures" -- so a
+    card never shows both a note and a net figure at once."""
+    children = [html.Span(title, className="card-label"),
+                html.Span(gross_text, className="card-value" + (" card-value--muted" if unavailable else ""))]
+    if note is not None:
+        children.append(html.Span(note, className="card-note"))
+    elif net_value is not None:
+        sign_class = "pos" if net_value > 0 else ("neg" if net_value < 0 else "")
+        children.append(html.Span([
+            html.Span("net ", className="card-net-label"),
+            html.Span(format_amount(net_value), className=f"card-net-value {sign_class}".strip()),
+        ], className="card-net"))
+    return html.Div(children, className="card")
+
+
 def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Optional[set] = None,
                      forward_proxy_ccys: Optional[set] = None) -> html.Div:
-    """The three headline numbers (user decision 2026-09-15, item C.1; redefined by the
-    coordinator's same-day follow-up, item 3), in this order:
+    """The three headline cards (user decision 2026-09-15, item C.1; redefined by the
+    coordinator's same-day follow-up, item 3; card internals redefined again by the
+    user's 2026-09-15 "Reorder the Ladder tab" decision, item 1), in this order:
       - Delta combined = gross (sum of |USD delta| over currencies + |futures|), net
-        shown as small text underneath.
-      - Delta non-forward = futures USD delta (0, captioned "no open futures", when
-        there are none -- a real zero, not Unavailable).
+        directly underneath, equally bold, labelled "net".
+      - Delta non-forward = futures USD delta: gross = |value|, net = signed value;
+        "0" with "no open futures" underneath (not a net line) when there are none.
       - Delta forward = currency gross (sum of |USD delta| over currencies), net
         underneath.
     Each is Unavailable with the engine's own reason only when a rate or a futures mark
@@ -169,30 +190,32 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
     fut_ok = not pd.isna(fut_value)
 
     if rate_ok:
-        forward_card = _card("Delta forward", format_amount(totals["gross_usd"]), "Exposure",
-                             f"net {format_amount(totals['net_usd'])}")
+        forward_card = _gross_net_card("Delta forward", format_amount(totals["gross_usd"]),
+                                       net_value=totals["net_usd"])
     else:
-        forward_card = _card("Delta forward", "Unavailable", "Unavailable",
-                             "no rate: " + ", ".join(totals["missing"]))
+        forward_card = _gross_net_card("Delta forward", "Unavailable",
+                                       note="no rate: " + ", ".join(totals["missing"]), unavailable=True)
 
-    if fut_ok:
-        nonfwd_card = _card("Delta non-forward", format_amount(fut_value), "Exposure",
-                            "no open futures" if no_open_futures else "open futures (options later)")
+    if not fut_ok:
+        nonfwd_card = _gross_net_card("Delta non-forward", "Unavailable",
+                                      note=futures.get("reason") or "futures delta unavailable",
+                                      unavailable=True)
+    elif no_open_futures:
+        nonfwd_card = _gross_net_card("Delta non-forward", "0", note="no open futures")
     else:
-        nonfwd_card = _card("Delta non-forward", "Unavailable", "Unavailable",
-                            futures.get("reason") or "futures delta unavailable")
+        nonfwd_card = _gross_net_card("Delta non-forward", format_amount(abs(fut_value)), net_value=fut_value)
 
     if rate_ok and fut_ok:
         gross = totals["gross_usd"] + abs(fut_value)
         net = totals["net_usd"] + fut_value
-        combined_card = _card("Delta combined", format_amount(gross), "Exposure", f"net {format_amount(net)}")
+        combined_card = _gross_net_card("Delta combined", format_amount(gross), net_value=net)
     else:
         reasons = []
         if not rate_ok:
             reasons.append("no rate: " + ", ".join(totals["missing"]))
         if not fut_ok:
             reasons.append(futures.get("reason") or "futures delta unavailable")
-        combined_card = _card("Delta combined", "Unavailable", "Unavailable", "; ".join(reasons))
+        combined_card = _gross_net_card("Delta combined", "Unavailable", note="; ".join(reasons), unavailable=True)
 
     cards = html.Div(id=HEADLINE_ID, className="cards cards--three", children=[
         combined_card, nonfwd_card, forward_card,
@@ -355,8 +378,9 @@ def ladder_table(result) -> dash_table.DataTable:
 # ------------------------------------------------------------------ 4b. combined workbook-style ladder
 COMBINED_TABLE_ID = "exposure-combined-table"
 ROW_LABEL_COL = "row"
-SUMMARY_ROWS = [("FX rate (USD per local)", "fx_rate"), ("Local delta", "local_delta"), ("USD delta", "usd_delta"),
-                ("Settlement type", "settlement")]
+SUMMARY_ROWS = [("FX rate (USD per local)", "fx_rate"), ("Local delta", "local_delta"), ("USD delta", "usd_delta")]
+# "Settlement type" (NDF / Deliverable) summary row and its NDF super-header removed
+# 2026-09-15 per the user's decision -- NDF currencies stay in the grid unmarked.
 
 
 def combined_frame(result, records: List[dict], sort: str = SORT_USD,
@@ -392,8 +416,6 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
             if key == "fx_rate":
                 v = fx.get(c, float("nan"))
                 row[c] = "" if pd.isna(v) else f"{v:.6f}"
-            elif key == "settlement":
-                row[c] = by_ccy.loc[c, "settlement"]
             elif key == "rate_source":
                 row[c] = "BNP file (not Bloomberg)" if c in fallback_ccys else "Bloomberg"
             else:
@@ -407,7 +429,7 @@ def combined_table(result, records: List[dict], sort: str = SORT_USD,
                    fallback_ccys: Optional[set] = None) -> dash_table.DataTable:
     frame, ccys = combined_frame(result, records, sort, fallback_ccys)
     columns = ([{"name": ["", "Settlement date"], "id": ROW_LABEL_COL}]
-               + [{"name": [by_ccy_label(frame, c), c], "id": c} for c in ccys]
+               + [{"name": ["", c], "id": c} for c in ccys]
                + [{"name": ["", "USD equivalent"], "id": USD_EQUIVALENT_COL}])
     first_summary = len(result.ladder.index)
     return dash_table.DataTable(
@@ -432,12 +454,6 @@ def combined_table(result, records: List[dict], sort: str = SORT_USD,
             {"if": {"filter_query": "{kind} = 'settlement'"}, "color": "#3538cd", "fontWeight": "600", "fontSize": "11px"},
         ],
     )
-
-
-def by_ccy_label(frame: pd.DataFrame, ccy: str) -> str:
-    """Header group: 'NDF' above non-deliverable currencies, blank otherwise."""
-    st = frame.loc[frame["kind"] == "settlement", ccy]
-    return NDF_BADGE if not st.empty and st.iloc[0] == NDF_BADGE else ""
 
 
 # ------------------------------------------------------------------ 5. legend
@@ -488,7 +504,10 @@ def combined_risk_frame(result, futures: Optional[dict] = None,
     scenarios = scenarios or {}
     futures_pct_by_scenario = futures_pct_by_scenario or {}
     fallback_ccys = fallback_ccys or set()
-    scenario_names = sorted(scenarios)
+    # Column order = config/stress.yaml's own order (user decision 2026-09-15, item 3),
+    # not alphabetical: `scenarios` is an ordinary dict from `load_scenarios`, which
+    # preserves the YAML's insertion order.
+    scenario_names = list(scenarios)
     status_msg = (dict(zip(result.status["currency"], result.status["message"]))
                   if not result.status.empty else {})
     rows = []
@@ -546,7 +565,7 @@ def combined_risk_table(result, futures: Optional[dict] = None,
     futures = futures or DEFAULT_FUTURES
     scenarios = scenarios if scenarios is not None else {}
     frame = combined_risk_frame(result, futures, scenarios, futures_pct_by_scenario, fallback_ccys)
-    scenario_names = sorted(scenarios)
+    scenario_names = list(scenarios)
 
     display_rows = []
     for _, row in frame.iterrows():
@@ -585,6 +604,10 @@ def combined_risk_table(result, futures: Optional[dict] = None,
     display_rows.append({RISK_LABEL_COL: "Gross USD (currencies + |futures|)", "usd_delta": gross_text,
                          "move_1pct": "", **{name: "" for name in scenario_names}})
 
+    # Scenario headers wrap on two lines when long (user decision 2026-09-15, item 3);
+    # a plain string name lets Dash wrap it itself once whiteSpace is 'normal' below --
+    # no manual line-break needed since dash_table headers already wrap on word
+    # boundaries when the header cell allows it.
     columns = ([{"name": "Name", "id": RISK_LABEL_COL}, {"name": "USD delta", "id": "usd_delta"},
                {"name": "1% P&L (USD)", "id": "move_1pct"}]
               + [{"name": name, "id": name} for name in scenario_names])
@@ -599,13 +622,17 @@ def combined_risk_table(result, futures: Optional[dict] = None,
             {"if": {"column_id": RISK_LABEL_COL}, "textAlign": "left", "fontWeight": "600",
              "minWidth": "170px", "width": "170px"},
         ],
-        style_header=_HEAD,
+        style_header={**_HEAD, "whiteSpace": "normal", "height": "auto", "lineHeight": "14px",
+                     "textAlign": "center", "verticalAlign": "bottom"},
+        style_header_conditional=[
+            {"if": {"column_id": RISK_LABEL_COL}, "textAlign": "left"},
+        ],
         style_data_conditional=_sign_styles(["usd_delta", "move_1pct"] + scenario_names) + [
             {"if": {"filter_query": "{" + RISK_LABEL_COL + "} contains 'Net USD' || {" + RISK_LABEL_COL + "} contains 'Gross USD'"},
              "fontWeight": "700", "borderTop": "2px solid #1f2933"},
         ],
     )
-    return html.Div(className="section", children=[html.H4("Risk (currencies + open futures)"), table])
+    return html.Div(className="section", children=[html.H4("Risk and scenarios"), table])
 
 
 # ------------------------------------------------------------------ 5c. open futures block
@@ -669,12 +696,13 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
                      futures_details: Optional[Dict[str, dict]] = None,
                      fallback_ccys: Optional[set] = None,
                      forward_proxy_ccys: Optional[set] = None) -> html.Div:
-    """Ladder tab body per the user's 2026-09-15 layout decision (item C, tightened by
-    the same-day follow-up: no collapsed 'Details', no dropdowns): three headline
-    numbers, then three tables in order -- combined risk table (currencies + open
-    futures + stress), the currency ladder grid with its summary rows, the open-futures
-    block. Nothing else is rendered on this tab (snapshot cards, metadata line, legend,
-    alternative views and the settlement-only ladder are retired, not moved).
+    """Ladder tab body per the user's 2026-09-15 "Reorder the Ladder tab" decision
+    (items 1-2, superseding the same-day C-split layout below): three headline cards,
+    then three tables in this order -- (a) the currency ladder grid with its summary
+    rows ("Cash ladder: spot, forwards, swaps and cash balances"), (b) the open-futures
+    block ("Open futures"), (c) the combined risk table ("Risk and scenarios"). Nothing
+    else is rendered on this tab (snapshot cards, metadata line, legend, alternative
+    views and the settlement-only ladder are retired, not moved).
 
     `rates` is whatever the marks table holds (see data.bloomberg.live.rates_from_marks
     plus `ui.tabs.cash_ladder.bnp_bval_rates` / `bnp_forward_proxy_rates` merged in by
@@ -699,8 +727,9 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
             else html.P("No open FX trades for this as-of date.", className="section-kicker"))
     return html.Div(className="section", children=[
         headline_numbers(result, futures, fallback_ccys, forward_proxy_ccys),
-        combined_risk_table(result, futures, scenarios, futures_pct_by_scenario(scenarios), all_fallback),
+        html.H4("Cash ladder: spot, forwards, swaps and cash balances"),
         main,
         html.H4("Open futures"),
         futures_table(futures, futures_details),
+        combined_risk_table(result, futures, scenarios, futures_pct_by_scenario(scenarios), all_fallback),
     ])

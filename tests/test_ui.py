@@ -150,6 +150,14 @@ def _tab_labels(layout):
     return [tab.label for tab in tabs_bar.children]
 
 
+def _find_tab_bodies(layout):
+    """The always-present `html.Div(id="tab-bodies")` sibling of the top-bar/header."""
+    for child in layout.children:
+        if getattr(child, "id", None) == "tab-bodies":
+            return child
+    return None
+
+
 def test_four_tabs_present_in_order(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
@@ -212,6 +220,127 @@ def test_header_present_above_tabs(tmp_path):
     ids = _all_ids(layout)
     assert header.HEADER_ID in ids
     assert header.AS_OF_STORE_ID in ids
+
+
+def test_tab_bodies_always_present_and_tabs_have_no_children(tmp_path):
+    """2026-09-15 structure fix: dcc.Tab objects carry no `children` of their own (that
+    nesting pushed the navy top-bar around the whole page); all four bodies live in one
+    always-present `html.Div(id="tab-bodies")` sibling of the top-bar/header."""
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    layout = uiapp.build_layout(uiapp.load_summary(db_path))
+    tabs_bar = _find_tabs(layout)
+    for tab in tabs_bar.children:
+        assert not getattr(tab, "children", None)
+    bodies = _find_tab_bodies(layout)
+    assert bodies is not None
+    slugs = {getattr(b, "id", None) for b in bodies.children}
+    assert slugs == {"tab-body-ladder", "tab-body-blotter", "tab-body-market-data", "tab-body-reconciliation"}
+
+
+def test_tab_show_hide_callback_toggles_bodies(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    key = [k for k in app.callback_map if k.startswith("..tab-body-ladder.style")]
+    assert key, "expected a callback outputting tab-body-*.style keyed on main-tabs value"
+    cb = app.callback_map[key[0]]
+    assert any(d["id"] == uiapp.MAIN_TABS_ID and d["property"] == "value" for d in cb["inputs"])
+
+
+def test_ladder_date_picker_defaults_to_today_ny(tmp_path):
+    """Coordinator addition 2026-09-15: the Ladder tab (and the header store it feeds)
+    default to today in America/New_York, not the last BNP snapshot date."""
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)  # snapshot date 2026-08-17, deliberately in the past
+    layout = uiapp.build_layout(uiapp.load_summary(db_path))
+    today = cash_ladder.today_ny()
+
+    def find(node, comp_id):
+        if getattr(node, "id", None) == comp_id:
+            return node
+        children = getattr(node, "children", None)
+        if children is None:
+            return None
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                if hasattr(child, "id") or hasattr(child, "children"):
+                    found = find(child, comp_id)
+                    if found is not None:
+                        return found
+        elif hasattr(children, "id") or hasattr(children, "children"):
+            return find(children, comp_id)
+        return None
+
+    picker = find(layout, cash_ladder.DATE_PICKER_ID)
+    assert picker is not None and picker.date == today
+
+    store = find(layout, header.AS_OF_STORE_ID)
+    assert store is not None and store.data == today
+
+
+def test_ladder_heading_text_and_today_button(tmp_path):
+    """Coordinator addition 2026-09-15: the bare date-picker card is replaced by a
+    heading naming the as-of date, the picker, and a Today button."""
+    assert cash_ladder.heading_date_text("2026-09-15") == "Tuesday 15 September 2026"
+    assert cash_ladder.heading_date_text(None) == "As of - no date selected"
+
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    ids = _all_ids(app.layout)
+    assert cash_ladder.TITLE_ID in ids
+    assert cash_ladder.TODAY_BUTTON_ID in ids
+    # Today button writes to the same date-picker property as the upload confirm
+    # callback, so both Outputs must declare allow_duplicate.
+    today_key = [k for k in app.callback_map if cash_ladder.TODAY_BUTTON_ID in k or "today" in k.lower()]
+    assert any(cash_ladder.DATE_PICKER_ID in k for k in app.callback_map)
+
+
+def test_header_figures_and_chart_are_separate_callbacks(tmp_path):
+    """Coordinator perf finding 2026-09-15: figures must update without waiting on the
+    LTD chart, which now only computes when the collapsible is open."""
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    figure_keys = [k for k in app.callback_map if k.startswith(f"{header.HEADER_ID}-figures")]
+    chart_keys = [k for k in app.callback_map if header.CHART_CONTAINER_ID in k]
+    assert figure_keys and chart_keys
+    assert figure_keys[0] != chart_keys[0]
+    chart_cb = app.callback_map[chart_keys[0]]
+    assert any(d["id"] == header.DETAILS_ID and d["property"] == "open" for d in chart_cb["inputs"])
+
+
+def test_bnp_forward_proxy_rates_uses_earliest_settle_date(tmp_path):
+    """Coordinator addition 2026-09-15, item 5: BNP carries no SPOT for AUD/EUR/GBP/XAU
+    (Fx = 1 on those rows); when even bnp_bval_rates finds nothing, the earliest-
+    settle_date BNP_BVAL forward outright from the latest snapshot on or before as_of
+    is used as a spot proxy, labelled distinctly."""
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    conn.execute(
+        "INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')"
+    )
+    # Two forward outrights on the same snapshot: the earlier settle_date must win.
+    conn.executemany(
+        "INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+        [
+            ("2026-08-17", "EURUSD", "2026-09-01", "FWD_OUTRIGHT", 1.1050, "BNP_BVAL", "2026-08-17T15:00:00-04:00"),
+            ("2026-08-17", "EURUSD", "2026-10-01", "FWD_OUTRIGHT", 1.1100, "BNP_BVAL", "2026-08-17T15:00:00-04:00"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    conn = uiapp.connect_readonly(db_path)
+    try:
+        out = cash_ladder.bnp_forward_proxy_rates(conn, "2026-08-18", {"EUR"})
+    finally:
+        conn.close()
+    assert out["EUR"]["rate"] == 1.1050
+    assert out["EUR"]["source"] == cash_ladder.FORWARD_PROXY_SOURCE_LABEL
+    assert out["EUR"]["inverted"] is False
 
 
 def test_no_duplicate_component_ids(tmp_path):
@@ -304,7 +433,8 @@ def test_every_static_callback_id_exists_in_layout():
             walk(ch)
     walk(app.layout)
     dynamic_ok = {"blotter-datatable", "blotter-subtotal"}  # rendered inside blotter-table-container
-    dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-")  # per-sub-tab, rendered by callback
+    dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
+                        "blotter-row-detail-")  # per-sub-tab, rendered by callback
     missing = []
     for key, cb in app.callback_map.items():
         for kind in ("inputs", "state"):
@@ -316,3 +446,67 @@ def test_every_static_callback_id_exists_in_layout():
             if oid and oid not in ids and oid not in dynamic_ok and not oid.startswith(dynamic_prefixes):
                 missing.append(("output", oid))
     assert not missing, missing
+
+
+# ---------------------------------------------------------------- header compaction (2026-09-15)
+def test_header_figures_include_previous_day_and_net_gross(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        cards = header._build_figures(conn, "2026-08-17")
+    finally:
+        conn.close()
+    titles = [c.children[0].children for c in cards if getattr(c, "className", "") != "header-divider"]
+    assert "Previous day" in titles
+    assert "Net USD" in titles
+    assert "Gross USD" in titles
+    assert "As of" in titles
+    assert "Marks as of" in titles
+
+
+def test_header_pnl_card_colours_by_sign():
+    pos = header._pnl_card("X", {"value": 100.0, "available": True})
+    neg = header._pnl_card("X", {"value": -100.0, "available": True})
+    zero = header._pnl_card("X", {"value": 0.0, "available": True})
+    assert "header-figure-value--pos" in pos.children[1].className
+    assert "header-figure-value--neg" in neg.children[1].className
+    assert "header-figure-value--zero" in zero.children[1].className
+
+
+def test_header_pnl_card_unavailable_shows_reason_as_tooltip():
+    card = header._pnl_card("X", {"available": False, "reason": "no mark"})
+    value_span = card.children[1]
+    assert value_span.children == "n/a"
+    assert value_span.title == "no mark"
+
+
+def test_header_gross_card_is_never_colour_coded():
+    card = header._pnl_card("Gross USD", {"value": -5.0, "available": True}, colour=False)
+    assert "header-figure-value--neutral" in card.children[1].className
+
+
+def test_net_gross_usd_matches_ladder_portfolio_totals(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        result = cash_ladder.net_gross_usd(conn, "2026-08-17")
+    finally:
+        conn.close()
+    assert result["available"] is True
+    assert abs(result["net"]) == pytest.approx(result["gross"])  # single currency, single pair
+
+
+def test_scoped_period_pnl_previous_day_is_ltd_t1_minus_ltd_t2(tmp_path):
+    from ui.tabs.blotter_pricing import scoped_period_pnl
+
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        periods = scoped_period_pnl(conn, "2026-08-17")
+    finally:
+        conn.close()
+    assert "previous_day" in periods
+    assert set(periods["previous_day"]) >= {"value", "ref_date", "available", "reason"}
