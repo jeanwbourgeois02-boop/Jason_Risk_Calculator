@@ -304,14 +304,15 @@ def test_every_static_callback_id_exists_in_layout():
             walk(ch)
     walk(app.layout)
     dynamic_ok = {"blotter-datatable", "blotter-subtotal"}  # rendered inside blotter-table-container
+    dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-")  # per-sub-tab, rendered by callback
     missing = []
     for key, cb in app.callback_map.items():
         for kind in ("inputs", "state"):
             for d in cb.get(kind, []):
-                if d["id"] not in ids and d["id"] not in dynamic_ok:
+                if d["id"] not in ids and d["id"] not in dynamic_ok and not d["id"].startswith(dynamic_prefixes):
                     missing.append((kind, d["id"]))
         for out in key.strip(".").split("..."):
             oid = out.split(".")[0]
-            if oid and oid not in ids and oid not in dynamic_ok:
+            if oid and oid not in ids and oid not in dynamic_ok and not oid.startswith(dynamic_prefixes):
                 missing.append(("output", oid))
     assert not missing, missing
