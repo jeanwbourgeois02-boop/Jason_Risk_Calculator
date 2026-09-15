@@ -177,6 +177,139 @@ def _entry(value: float, ref_date: str, bad: list) -> dict:
     return {"value": value, "ref_date": ref_date, "available": True, "reason": ""}
 
 
+def _trading_entry(rows: pd.DataFrame, ref_date: str) -> dict:
+    if rows.empty:
+        return {"value": 0.0, "ref_date": ref_date, "available": True, "reason": ""}
+    if rows["pnl_usd"].isna().any():
+        return {"value": float("nan"), "ref_date": ref_date, "available": False,
+                "reason": "a trade dated this date has no mark from any source"}
+    return {"value": float(rows["pnl_usd"].sum()), "ref_date": ref_date, "available": True, "reason": ""}
+
+
+def _diff_entry(a: float, ref_a: str, bad_a: list, b: float, bad_b: list) -> dict:
+    if _isnan(a) or _isnan(b):
+        bad = sorted(set(bad_a) | set(bad_b))
+        return {"value": float("nan"), "ref_date": ref_a, "available": False,
+                "reason": f"no mark (any source) for {', '.join(bad)}" if bad
+                          else "a reference close is unavailable"}
+    return {"value": a - b, "ref_date": ref_a, "available": True, "reason": ""}
+
+
+# --------------------------------------------------------------------------- headline strip
+# 2026-09-15 coordinator addition: the Excel Portfolio header's exact card order, all
+# row-scoped to the trade list's currently visible rows (post header-filter).
+HEADLINE_ORDER = ("ltd", "daily", "trades", "trading", "ltd1_daily", "ltd1", "ltd2",
+                   "trading_t1", "d5", "mtd", "ytd")
+HEADLINE_TITLES = {
+    "ltd": "LTD P&L", "daily": "Daily P&L", "trades": "Trades", "trading": "Trading P&L",
+    "ltd1_daily": "LTD-1 daily", "ltd1": "LTD-1 P&L", "ltd2": "LTD-2 P&L",
+    "trading_t1": "Trading P&L T-1", "d5": "5d", "mtd": "MTD", "ytd": "YTD",
+}
+
+
+def row_scoped_headline(conn: sqlite3.Connection, as_of: str, trade_ids) -> Dict[str, dict]:
+    """The Excel Portfolio header's card set (LTD, Daily, Trades, Trading, LTD-1 daily,
+    LTD-1, LTD-2, Trading T-1, 5d, MTD, YTD), row-scoped to `trade_ids`. T-1/T-2 are
+    `period_reference_dates`'s `daily`/`previous_day`; `trades` is a plain count, never
+    unavailable."""
+    from engine.pnl.ledger import period_reference_dates
+
+    trade_ids = list(trade_ids)
+    refs = period_reference_dates(as_of)
+    t1, t2 = refs["daily"], refs["previous_day"]
+
+    ltd_today, bad_today = _priced_sum_for_ids(conn, as_of, trade_ids)
+    ltd_t1, bad_t1 = _priced_sum_for_ids(conn, t1, trade_ids)
+    ltd_t2, bad_t2 = _priced_sum_for_ids(conn, t2, trade_ids)
+    ltd_d5, bad_d5 = _priced_sum_for_ids(conn, refs["d5"], trade_ids)
+    ltd_mtd, bad_mtd = _priced_sum_for_ids(conn, refs["mtd"], trade_ids)
+    ltd_ytd, bad_ytd = _priced_sum_for_ids(conn, refs["ytd"], trade_ids)
+
+    out: Dict[str, dict] = {
+        "ltd": _entry(ltd_today, as_of, bad_today),
+        "daily": _diff_entry(ltd_today, as_of, bad_today, ltd_t1, bad_t1),
+        "trades": {"value": float(len(trade_ids)), "ref_date": as_of, "available": True,
+                   "reason": "", "is_count": True},
+        "ltd1_daily": _diff_entry(ltd_t1, t1, bad_t1, ltd_t2, bad_t2),
+        "ltd1": _entry(ltd_t1, t1, bad_t1),
+        "ltd2": _entry(ltd_t2, t2, bad_t2),
+        "d5": _diff_entry(ltd_today, as_of, bad_today, ltd_d5, bad_d5),
+        "mtd": _diff_entry(ltd_today, as_of, bad_today, ltd_mtd, bad_mtd),
+        "ytd": _diff_entry(ltd_today, as_of, bad_today, ltd_ytd, bad_ytd),
+    }
+
+    df, _, _ = priced_value_book(conn, as_of)
+    sel = df[df["trade_id"].isin(trade_ids)] if not df.empty else df
+    trading_rows = sel[sel["trade_date"] == as_of] if not sel.empty else sel
+    out["trading"] = _trading_entry(trading_rows, as_of)
+
+    df_t1, _, _ = priced_value_book(conn, t1)
+    sel_t1 = df_t1[df_t1["trade_id"].isin(trade_ids)] if not df_t1.empty else df_t1
+    trading_t1_rows = sel_t1[sel_t1["trade_date"] == t1] if not sel_t1.empty else sel_t1
+    out["trading_t1"] = _trading_entry(trading_t1_rows, t1)
+    return out
+
+
+def _official_mark(conn: sqlite3.Connection, instrument_id: str, settle_date: str,
+                    mark_type: str, as_of: str) -> Optional[float]:
+    row = conn.execute(
+        "SELECT value FROM marks_official WHERE instrument_id = :i AND settle_date = :s "
+        "AND mark_type = :m AND as_of_date = :d",
+        {"i": instrument_id, "s": settle_date, "m": mark_type, "d": as_of},
+    ).fetchone()
+    return None if row is None else float(row[0])
+
+
+def add_row_display_fields(conn: sqlite3.Connection, df: pd.DataFrame, as_of: str) -> pd.DataFrame:
+    """Add the Excel header row's per-pair columns to a `priced_value_book` frame:
+    `side` (Buy/Sell of the base currency), `notional_usd` (signed USD notional, base
+    direction -- CLAUDE.md "Display notional"), `t1_rate` (FWD_OUTRIGHT for the row's
+    settle date on the T-1 close, NaN if absent or not an FX product)."""
+    from engine.pnl.ledger import period_reference_dates
+    from engine.pnl.valuation import usd_per_quote
+
+    if df.empty:
+        df = df.copy()
+        for col in ("side", "notional_usd", "t1_rate"):
+            df[col] = pd.Series(dtype=object)
+        return df
+
+    df = df.copy()
+    df["side"] = df["quantity"].map(lambda q: "Buy" if q >= 0 else "Sell")
+
+    base_ccy = {}
+    for instrument_id in df["instrument_id"].unique():
+        row = conn.execute("SELECT base_ccy FROM instruments WHERE instrument_id = ?",
+                            (instrument_id,)).fetchone()
+        base_ccy[instrument_id] = row[0] if row else None
+
+    notional = []
+    for r in df.itertuples(index=False):
+        ccy = base_ccy.get(r.instrument_id)
+        if not ccy:
+            notional.append(float("nan"))
+        elif ccy == "USD":
+            notional.append(float(r.quantity))
+        else:
+            s, pair, _src = usd_per_quote(conn, ccy, as_of)
+            notional.append(float(r.quantity) * s if s == s else float("nan"))
+    df["notional_usd"] = notional
+
+    t1 = period_reference_dates(as_of)["daily"]
+    t1_rates = []
+    for r in df.itertuples(index=False):
+        if r.product not in FX_PRODUCTS_FOR_T1_RATE:
+            t1_rates.append(float("nan"))
+            continue
+        val = _official_mark(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", t1)
+        t1_rates.append(val if val is not None else float("nan"))
+    df["t1_rate"] = t1_rates
+    return df
+
+
+FX_PRODUCTS_FOR_T1_RATE = ("FX_SPOT", "FX_FWD", "FX_SWAP")
+
+
 def row_scoped_period_pnl(conn: sqlite3.Connection, as_of: str, trade_ids) -> Dict[str, dict]:
     """LTD/Daily/Previous day/5d/MTD/YTD/Trading over exactly `trade_ids`, each
     `{value, ref_date, available, reason}`, using the same business-day reference

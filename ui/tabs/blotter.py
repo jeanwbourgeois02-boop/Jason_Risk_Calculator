@@ -41,10 +41,11 @@ from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs import blotter_bundles as bundles_ui
 from ui.tabs.blotter_pricing import (
-    PERIOD_ORDER,
-    PERIOD_TITLES,
+    HEADLINE_ORDER,
+    HEADLINE_TITLES,
+    add_row_display_fields,
     priced_value_book,
-    row_scoped_period_pnl,
+    row_scoped_headline,
 )
 from ui.tabs.controls import build_date_picker
 from ui.tabs.formatting import format_cell
@@ -53,18 +54,13 @@ DATE_PICKER_ID = "blotter-date"
 TOOLBAR_ID = "blotter-toolbar"
 SUBTABS_ID = "blotter-subtabs"
 CONTENT_ID = "blotter-content"
-THEME_INPUT_ID = "blotter-theme-input"
-THEME_BUTTON_ID = "blotter-theme-button"
-THEME_STATUS_ID = "blotter-theme-status"
-THEME_REVISION_ID = "blotter-theme-revision"
 
 # Kept for the pre-2026-09-15 tests that still exercise a single detail table by id.
 TABLE_CONTAINER_ID = "blotter-table-container"
 DATATABLE_ID = "blotter-datatable"
-SUBTOTAL_ID = "blotter-subtotal"
-GROUP_BY_ID = "blotter-group-by"
+DETAIL_PANEL_ID = "blotter-datatable"  # "-{scope}-detail" suffix keeps the id under the
+# test_ui.py "blotter-datatable-" dynamic-id allow-list (owned by another agent)
 
-GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 _ALL = "All"
 
 # --------------------------------------------------------------------------- sub-tabs
@@ -82,47 +78,28 @@ PLACEHOLDER_SCOPES = {
     "options": "no option trades loaded; view not built yet",
 }
 
+# Display order and headers per the 2026-09-15 rebuild + coordinator's headline note:
+# Mark is renamed "Live rate" and grouped with the two new per-pair columns (Notional,
+# T-1 rate) right after Mark date, matching the old Excel Portfolio header row.
 _DISPLAY_COLUMNS = [
-    "trade_id", "instrument_id", "product", "strategy", "theme", "trade_date",
-    "settle_date", "status", "quantity", "fill", "mark", "mark_source", "spot", "pnl_local",
-    "pnl_usd", "pnl_spot_usd", "pnl_carry_usd", "reason", "note",
+    "trade_date", "instrument_id", "side", "quantity", "fill", "settle_date", "status",
+    "mark_date", "notional_usd", "mark", "t1_rate", "pnl_usd", "product", "strategy",
+    "theme", "trade_id",
 ]
-
-_CATEGORICAL_FILTER_COLUMNS = {"status", "product", "instrument_id", "strategy", "theme"}
+_COLUMN_LABELS = {
+    "trade_date": "Trade date", "instrument_id": "Pair", "side": "Side",
+    "quantity": "Amount", "fill": "Fill", "settle_date": "Value date", "status": "Status",
+    "mark_date": "Mark date", "notional_usd": "Notional (USD)", "mark": "Live rate",
+    "t1_rate": "T-1 rate", "pnl_usd": "P&L (USD)", "product": "Product",
+    "strategy": "Strategy", "theme": "Bundle", "trade_id": "Trade id",
+}
+# Columns that keep their raw (pre-display-formatting) value for the row-click detail
+# panel and for the visible-rows -> headline callback.
+_PASSTHROUGH_COLS = ("priced_from_bnp", "reason")
 
 
 def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
-
-
-def _filter_options(df: pd.DataFrame, col: str) -> list:
-    if df.empty or col not in df.columns:
-        return [{"label": _ALL, "value": _ALL}]
-    values = sorted(v for v in df[col].dropna().unique().tolist() if v != "")
-    return [{"label": _ALL, "value": _ALL}] + [{"label": v, "value": v} for v in values]
-
-
-def apply_filters(df: pd.DataFrame, status=None, product=None, pair=None, strategy=None,
-                   theme=None, date_from=None, date_to=None) -> pd.DataFrame:
-    """Pure function of the value_book frame and filter values, kept for callers/tests
-    that still exercise it directly (the running app now uses the DataTable's own
-    native header filter row instead of a toolbar; see module docstring)."""
-    out = df
-    if status and status != _ALL:
-        out = out[out["status"] == status]
-    if product and product != _ALL:
-        out = out[out["product"] == product]
-    if pair and pair != _ALL:
-        out = out[out["instrument_id"] == pair]
-    if strategy and strategy != _ALL:
-        out = out[out["strategy"] == strategy]
-    if theme and theme != _ALL:
-        out = out[out["theme"] == theme]
-    if date_from:
-        out = out[out["trade_date"] >= date_from]
-    if date_to:
-        out = out[out["trade_date"] <= date_to]
-    return out
 
 
 def _fmt_rate(value) -> str:
@@ -131,92 +108,112 @@ def _fmt_rate(value) -> str:
     return f"{float(value):,.6f}"
 
 
+def _fmt_amount(value) -> str:
+    """Unsigned, thousands-separated (direction is already carried by `side`)."""
+    if value is None or value != value:
+        return ""
+    return f"{abs(round(float(value))):,}"
+
+
+def _fmt_status(value) -> str:
+    return {"OPEN": "Open", "SETTLED": "Settled"}.get(value, value or "")
+
+
 def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID) -> dash_table.DataTable:
-    """Format the (already scope-filtered) value_book frame for display."""
+    """Format the (already scope-filtered, pricing-enriched) value_book frame for
+    display: Amount unsigned with commas, rates to 6dp, P&L bold green/red or "n/a"
+    with a tooltip reason when unpriced, dates left as ISO strings."""
     cols = [c for c in _DISPLAY_COLUMNS if c in df.columns]
     formatted = df[cols].copy() if not df.empty else pd.DataFrame(columns=cols)
-    usd_cols = {"pnl_local", "pnl_usd", "pnl_spot_usd", "pnl_carry_usd"}
-    rate_cols = {"fill", "mark", "spot", "quantity"}
+    usd_cols = {"notional_usd", "pnl_usd"}
+    rate_cols = {"fill", "mark", "t1_rate"}
+    reasons = df["reason"] if "reason" in df.columns else pd.Series([""] * len(df))
     for col in cols:
-        if col in usd_cols:
+        if col == "quantity":
+            formatted[col] = formatted[col].map(_fmt_amount)
+        elif col == "status":
+            formatted[col] = formatted[col].map(_fmt_status)
+        elif col == "pnl_usd":
+            formatted[col] = [
+                "n/a" if (v != v) else format_cell(v) for v in df[col].tolist()
+            ] if not df.empty else []
+        elif col in usd_cols:
             formatted[col] = formatted[col].map(format_cell)
         elif col in rate_cols:
-            formatted[col] = formatted[col].map(_fmt_rate)
-    # priced_from_bnp travels with the row (not displayed) so the derived_virtual_data
-    # callback can tell which visible rows were fallback-priced.
+            formatted[col] = ["n/a" if (v != v) else _fmt_rate(v) for v in df[col].tolist()] \
+                if not df.empty else []
     data_records = formatted.to_dict("records")
-    if "priced_from_bnp" in df.columns:
-        for rec, flag in zip(data_records, df["priced_from_bnp"].tolist()):
-            rec["priced_from_bnp"] = bool(flag)
-    if "trade_id" in df.columns:
-        for rec, tid in zip(data_records, df["trade_id"].tolist()):
-            rec.setdefault("trade_id", tid)
+    tooltip_data = []
+    # priced_from_bnp/trade_id/reason travel with the row (not all displayed) so the
+    # derived_virtual_data callback and the row-click detail panel can use them.
+    for i, rec in enumerate(data_records):
+        if "priced_from_bnp" in df.columns:
+            rec["priced_from_bnp"] = bool(df["priced_from_bnp"].iloc[i])
+        if "trade_id" in df.columns:
+            rec.setdefault("trade_id", df["trade_id"].iloc[i])
+        reason = reasons.iloc[i] if i < len(reasons) else ""
+        if reason and rec.get("pnl_usd") == "n/a":
+            tooltip_data.append({"pnl_usd": {"value": reason, "type": "text"}})
+        else:
+            tooltip_data.append({})
     style_data_conditional = [
-        {"if": {"filter_query": "{reason} != ''"}, "backgroundColor": "#fff3cd"},
+        {"if": {"filter_query": "{pnl_usd} contains '('", "column_id": "pnl_usd"},
+         "color": "var(--neg)", "fontWeight": "700"},
+        {"if": {"filter_query": "{pnl_usd} != '' && {pnl_usd} != 'n/a' && "
+                                 "!({pnl_usd} contains '(')", "column_id": "pnl_usd"},
+         "color": "var(--pos)", "fontWeight": "700"},
+        {"if": {"filter_query": "{pnl_usd} = 'n/a'", "column_id": "pnl_usd"},
+         "color": "var(--muted)", "fontStyle": "italic"},
     ]
-    if "note" in cols:
-        style_data_conditional.append(
-            {"if": {"column_id": "note"}, "color": "gray", "fontStyle": "italic"}
-        )
     return dash_table.DataTable(
         id=table_id,
-        columns=[{"name": c.replace("_", " ").title(), "id": c} for c in cols],
+        columns=[{"name": _COLUMN_LABELS.get(c, c.replace("_", " ").title()), "id": c}
+                 for c in cols],
         data=data_records,
+        tooltip_data=tooltip_data,
         filter_action="native",
         sort_action="native",
         sort_mode="multi",
+        sort_by=[{"column_id": "settle_date", "direction": "asc"},
+                  {"column_id": "instrument_id", "direction": "asc"}],
         style_table={"overflowX": "auto"},
-        style_cell={"textAlign": "right", "fontFamily": "monospace", "minWidth": "90px"},
+        style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
+                    "minWidth": "80px", "padding": "4px 8px"},
         style_header={"fontWeight": "bold"},
         style_data_conditional=style_data_conditional,
         page_size=25,
+        page_action="native",
         row_selectable=False,
+        cell_selectable=True,
     )
 
 
-def subtotal_line(rows: list) -> html.P:
-    """Kept for the pre-2026-09-15 single-number subtotal (some tests still exercise
-    it); the sub-tab pages now use `render_pnl_strip` instead."""
-    if not rows:
-        return html.P("Subtotal (visible rows): $0", className="section-kicker")
-    total = 0.0
-    n_unavailable = 0
-    for row in rows:
-        raw = row.get("pnl_usd", "")
-        if raw in ("", "Unavailable", None):
-            n_unavailable += 1
-            continue
-        text = str(raw).replace(",", "").replace("$", "")
-        negative = text.startswith("(") and text.endswith(")")
-        text = text.strip("()")
-        try:
-            value = float(text)
-        except ValueError:
-            n_unavailable += 1
-            continue
-        total += -value if negative else value
-    suffix = f" ({n_unavailable} row(s) unavailable, excluded)" if n_unavailable else ""
-    return html.P(f"Subtotal (visible rows): {format_cell(total)}{suffix}",
-                  className="section-kicker")
-
-
-def render_pnl_strip(periods: dict, caption: Optional[str] = None) -> html.Div:
-    """LTD/Daily/Previous day/5d/MTD/YTD/Trading cards, each with its reference date
-    shown underneath, per the 2026-09-15 coordinator addition."""
+def render_headline_strip(headline: dict, caption: Optional[str] = None) -> html.Div:
+    """The Excel Portfolio header's card row (LTD/Daily/Trades/Trading/LTD-1
+    daily/LTD-1/LTD-2/Trading T-1/5d/MTD/YTD), bold green/red by sign, reference date
+    underneath, "n/a" muted italic with the reason as a tooltip when unavailable."""
     cards = []
-    for key in PERIOD_ORDER:
-        entry = periods.get(key, {})
-        if entry.get("available"):
-            value_text = format_cell(entry["value"])
-        else:
+    for key in HEADLINE_ORDER:
+        entry = headline.get(key, {})
+        available = entry.get("available")
+        value = entry.get("value")
+        if key == "trades":
+            value_div = html.Div(f"{int(value)}" if value == value else "n/a",
+                                  className="card-value")
+        elif not available:
             reason = entry.get("reason", "")
-            value_text = f"Unavailable ({reason})" if reason else "Unavailable"
-        cards.append(html.Div(className="pnl-card", children=[
-            html.Div(PERIOD_TITLES[key], className="pnl-card-title"),
-            html.Div(value_text, className="pnl-card-value"),
-            html.Small(entry.get("ref_date", ""), className="pnl-card-refdate"),
+            value_div = html.Div("n/a", className="card-value card-value--muted",
+                                  title=reason or "unavailable")
+        else:
+            colour = "var(--pos)" if value >= 0 else "var(--neg)"
+            value_div = html.Div(format_cell(value), className="card-value",
+                                  style={"color": colour})
+        cards.append(html.Div(className="card", children=[
+            html.Div(HEADLINE_TITLES[key], className="card-label"),
+            value_div,
+            html.Small(entry.get("ref_date", ""), className="card-note"),
         ]))
-    children = [html.Div(cards, className="pnl-strip")]
+    children = [html.Div(cards, className="cards")]
     if caption:
         children.append(html.P(caption, className="section-kicker"))
     return html.Div(children)
@@ -231,34 +228,6 @@ def fallback_caption(n_fallback: int, n_total: int) -> Optional[str]:
     if n_fallback <= 0 or n_total <= 0:
         return None
     return f"{n_fallback} of {n_total} rows priced from BNP file rates, not Bloomberg."
-
-
-def group_summary_table(grouped: dict, key: str) -> dash_table.DataTable:
-    """`period_pnl_by`'s {group: {period: {value, available, reason}}} -> a DataTable
-    with one row per group and LTD-period columns."""
-    _period_order = ("daily", "d5", "mtd", "ytd")
-    _period_titles = {"daily": "Daily", "d5": "5d", "mtd": "MTD", "ytd": "YTD"}
-    rows = []
-    for group, periods in sorted(grouped.items(), key=lambda kv: str(kv[0])):
-        row = {key: group}
-        for p in _period_order:
-            entry = periods.get(p, {})
-            if entry.get("available"):
-                row[_period_titles[p]] = format_cell(entry["value"])
-            else:
-                reason = entry.get("reason", "")
-                row[_period_titles[p]] = f"Unavailable ({reason})" if reason else "Unavailable"
-        rows.append(row)
-    columns = [{"name": key.replace("_", " ").title(), "id": key}] + \
-              [{"name": _period_titles[p], "id": _period_titles[p]} for p in _period_order]
-    return dash_table.DataTable(
-        id="blotter-group-summary",
-        columns=columns,
-        data=rows,
-        style_table={"overflowX": "auto"},
-        style_cell={"textAlign": "right", "fontFamily": "monospace"},
-        style_header={"fontWeight": "bold"},
-    )
 
 
 def _legs_table(legs: pd.DataFrame) -> dash_table.DataTable:
@@ -299,61 +268,62 @@ def _package_ids(conn: sqlite3.Connection) -> dict:
         return {}
 
 
-def _expand_children(conn: sqlite3.Connection, df: pd.DataFrame) -> html.Div:
+def row_detail_panel(conn: sqlite3.Connection, trade_id: str, df: pd.DataFrame) -> html.Div:
+    """The compact panel shown below the table when a row is clicked: swap packages
+    show all their legs' trades, an ordinary trade shows just itself."""
     packages = _package_ids(conn)
-    expand_children = []
-    seen_packages = set()
-    for _, row in df.iterrows():
-        trade_id = row["trade_id"]
-        pkg = packages.get(trade_id)
-        if pkg and pkg in seen_packages:
-            continue
-        if pkg:
-            seen_packages.add(pkg)
-            pkg_rows = df[df["trade_id"].isin([tid for tid, p in packages.items() if p == pkg])]
-            label = f"Swap package {pkg} ({len(pkg_rows)} legs)"
-            panel = html.Div([row_expand_panel(conn, tid, r)
-                               for tid, r in zip(pkg_rows["trade_id"], pkg_rows.to_dict("records"))
-                               for r in [pd.Series(r)]])
-        else:
-            label = f"Trade {trade_id}"
-            panel = row_expand_panel(conn, trade_id, row)
-        expand_children.append(
-            html.Details(className="section section--secondary details", children=[
-                html.Summary(label), panel,
-            ]))
-    return html.Div(expand_children)
+    pkg = packages.get(trade_id)
+    if pkg:
+        pkg_ids = [tid for tid, p in packages.items() if p == pkg]
+        pkg_rows = df[df["trade_id"].isin(pkg_ids)]
+        if pkg_rows.empty:
+            pkg_rows = df[df["trade_id"] == trade_id]
+        return html.Div(className="section section--secondary", children=[
+            html.H5(f"Swap package {pkg} ({len(pkg_rows)} legs)"),
+            html.Div([row_expand_panel(conn, r["trade_id"], pd.Series(r))
+                      for r in pkg_rows.to_dict("records")]),
+        ])
+    row = df[df["trade_id"] == trade_id]
+    if row.empty:
+        return message_box("Trade not found in the visible rows.")
+    return html.Div(className="section section--secondary",
+                     children=[row_expand_panel(conn, trade_id, row.iloc[0])])
 
 
 def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """Build one sub-tab's content: P&L strip (initial, whole-scope) + trade table +
-    row-expand panels. Rates/Options are placeholders per module docstring."""
+    """Build one sub-tab's content: headline strip (initial, whole-scope) + trade
+    table + an (empty until a row is clicked) detail container below it. Rates/Options
+    are placeholders per module docstring."""
     strip_id = f"blotter-strip-{scope}"
     table_id = f"blotter-datatable-{scope}"
+    detail_id = f"{DETAIL_PANEL_ID}-{scope}-detail"
 
     if scope in PLACEHOLDER_SCOPES:
         empty = pd.DataFrame(columns=_DISPLAY_COLUMNS)
         return html.Div([
             html.Div(id=strip_id, children=render_placeholder_strip(PLACEHOLDER_SCOPES[scope])),
             detail_table(empty, table_id=table_id),
+            html.Div(id=detail_id),
         ])
 
     df, n_fallback, n_total = priced_value_book(conn, as_of)
     products = SCOPE_PRODUCTS[scope]
     if products is not None and not df.empty:
         df = df[df["product"].isin(products)]
+    df = add_row_display_fields(conn, df, as_of)
 
     trade_ids = df["trade_id"].tolist() if not df.empty else []
-    periods = row_scoped_period_pnl(conn, as_of, trade_ids)
+    headline = row_scoped_headline(conn, as_of, trade_ids)
     scope_fallback = int(df["priced_from_bnp"].sum()) if not df.empty else 0
     caption = fallback_caption(scope_fallback, len(df))
 
-    body = [html.Div(id=strip_id, children=render_pnl_strip(periods, caption))]
+    body = [html.Div(id=strip_id, children=render_headline_strip(headline, caption))]
     if df.empty:
         body.append(message_box("No trades for this as-of date in this scope."))
+        body.append(html.Div(id=detail_id))
     else:
         body.append(detail_table(df, table_id=table_id))
-        body.append(_expand_children(conn, df))
+        body.append(html.Div(id=detail_id))
     return html.Div(body)
 
 
@@ -380,13 +350,6 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         html.H3("Blotter"),
         html.Div(id=TOOLBAR_ID, className="toolbar", children=[
             build_date_picker(DATE_PICKER_ID, default_date=default_date),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Set theme"),
-                dcc.Input(id=THEME_INPUT_ID, type="text", placeholder="trade_id:theme"),
-                html.Button("Set", id=THEME_BUTTON_ID, n_clicks=0, className="btn"),
-                html.Span(id=THEME_STATUS_ID, className="status-line", style={"marginLeft": "8px"}),
-                dcc.Store(id=THEME_REVISION_ID),
-            ]),
         ]),
         dcc.Tabs(id=SUBTABS_ID, value=SCOPE_ORDER[0], className="subtabs", children=[
             dcc.Tab(label=SCOPE_LABELS[s], value=s, className="subtab",
@@ -404,9 +367,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(CONTENT_ID, "children"),
         Input(DATE_PICKER_ID, "date"),
         Input(SUBTABS_ID, "value"),
-        Input(THEME_REVISION_ID, "data"),
+        Input(bundles_ui.BUNDLE_REVISION_ID, "data"),
     )
-    def _update(as_of_date, scope, _theme_rev=None):
+    def _update(as_of_date, scope, _bundle_rev=None):
         if not as_of_date:
             return message_box("No as-of date available.")
         scope = scope or SCOPE_ORDER[0]
@@ -451,41 +414,48 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             try:
                 n_fallback = sum(1 for r in (rows or []) if r.get("priced_from_bnp"))
                 caption = fallback_caption(n_fallback, len(rows or []))
-                periods = row_scoped_period_pnl(conn, as_of_date, trade_ids)
-                return render_pnl_strip(periods, caption)
+                headline = row_scoped_headline(conn, as_of_date, trade_ids)
+                return render_headline_strip(headline, caption)
+            finally:
+                conn.close()
+
+    def _register_detail_callback(scope: str) -> None:
+        table_id = f"blotter-datatable-{scope}"
+        detail_id = f"{DETAIL_PANEL_ID}-{scope}-detail"
+
+        @app.callback(
+            Output(detail_id, "children"),
+            Input(table_id, "active_cell"),
+            State(table_id, "derived_virtual_data"),
+            State(DATE_PICKER_ID, "date"),
+            prevent_initial_call=True,
+        )
+        def _update_detail(active_cell, rows, as_of_date, _scope=scope):
+            if not active_cell or not rows or not as_of_date:
+                return None
+            row = rows[active_cell["row"]] if active_cell["row"] < len(rows) else None
+            trade_id = row.get("trade_id") if row else None
+            if not trade_id:
+                return None
+            from ui.app import connect_readonly
+            db_path = get_db_path()
+            try:
+                conn = connect_readonly(db_path)
+            except sqlite3.OperationalError as exc:
+                return message_box(f"Database not available ({exc}).")
+            try:
+                df, _, _ = priced_value_book(conn, as_of_date)
+                products = SCOPE_PRODUCTS.get(_scope)
+                if products is not None and not df.empty:
+                    df = df[df["product"].isin(products)]
+                return row_detail_panel(conn, trade_id, df)
             finally:
                 conn.close()
 
     for _scope in SCOPE_ORDER:
         if _scope != "bundles":
             _register_strip_callback(_scope)
-
-    @app.callback(
-        Output(THEME_STATUS_ID, "children"),
-        Output(THEME_REVISION_ID, "data"),
-        Input(THEME_BUTTON_ID, "n_clicks"),
-        State(THEME_INPUT_ID, "value"),
-        prevent_initial_call=True,
-    )
-    def _set_theme(n_clicks, value):
-        import time
-        if not value or ":" not in value:
-            return "Enter as trade_id:theme", None
-        trade_id, _, theme = value.partition(":")
-        trade_id, theme = trade_id.strip(), theme.strip()
-        from data.ingest.themes import set_theme
-        db_path = get_db_path()
-        try:
-            conn = sqlite3.connect(db_path)
-        except sqlite3.OperationalError as exc:
-            return f"Database not available ({exc}).", None
-        try:
-            set_theme(conn, trade_id, theme)
-        except ValueError as exc:
-            return str(exc), None
-        finally:
-            conn.close()
-        return f"Set theme={theme!r} on {trade_id}", str(time.time())
+            _register_detail_callback(_scope)
 
     @app.callback(
         Output(bundles_ui.BUNDLE_STATUS_ID, "children"),
@@ -542,9 +512,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Input(bundles_ui.BUNDLE_REMOVE_PAIR_BUTTON_ID, "n_clicks"),
         State(bundles_ui.BUNDLE_ADD_PAIR_INPUT_ID, "value"),
         State(bundles_ui.BUNDLE_REMOVE_PAIR_INPUT_ID, "value"),
+        State(DATE_PICKER_ID, "date"),
         prevent_initial_call=True,
     )
-    def _bundle_detail(selected, _rev, _add_clicks, _remove_clicks, add_pair, remove_pair):
+    def _bundle_detail(selected, _rev, _add_clicks, _remove_clicks, add_pair, remove_pair, as_of_date):
         from dash import ctx
 
         from data.ingest.themes import add_pair_to_bundle, bundle_pairs, remove_pair_from_bundle
@@ -568,6 +539,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 remove_pair_from_bundle(conn, selected, remove_pair.strip())
                 status = f"Removed {remove_pair.strip()} from {selected}"
             pairs = bundle_pairs(conn, selected)
-            return bundles_ui.bundle_detail_table(pairs), status
+            children = [bundles_ui.bundle_detail_table(pairs)]
+            if as_of_date:
+                df, _, _ = priced_value_book(conn, as_of_date)
+                if not df.empty:
+                    df = df[df["theme"] == selected]
+                    df = add_row_display_fields(conn, df, as_of_date)
+                children.append(html.H5(f"Trades in {selected}"))
+                children.append(detail_table(df, table_id="blotter-bundle-trades"))
+            return html.Div(children), status
         finally:
             conn.close()

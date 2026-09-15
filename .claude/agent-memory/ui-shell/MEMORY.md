@@ -7,3 +7,4 @@
 - [Blotter native filters](blotter-native-filters.md) — 2026-09-15: header filter/sort replaces toolbar dropdowns, no DataTable dropdown-filter widget exists, subtotal via derived_virtual_data
 - [Ladder simplification 2026-09-15](ladder-simplification-2026-09-15.md) — 3 headlines + 3 tables only, BNP_BVAL rate fallback, navy/gold CSS, working copy is risk-monitor not OneDrive
 - [Blotter sub-tabs 2026-09-15](blotter-subtabs-2026-09-15.md) — Total book/FX/Rates/Options/Bundles, BNP_BVAL fallback pricing, row-scoped strip, bundles table, test_ui.py collateral needed
+- [Top-bar restructure 2026-09-15](top-bar-restructure-2026-09-15.md) — no-children dcc.Tab + always-present tab-bodies, header perf split, Ladder today/title/forward-proxy rate, upload date-picker removal

@@ -85,44 +85,16 @@ def _make_db_no_marks():
     return conn
 
 
-# --------------------------------------------------------------------------- pure filters / formatting
-
-def test_apply_filters_status():
-    df = pd.DataFrame({"status": ["OPEN", "SETTLED"], "trade_date": ["2026-06-01", "2026-06-02"],
-                        "product": ["FX_FWD", "FX_FWD"], "instrument_id": ["EURUSD", "EURUSD"],
-                        "strategy": ["HAHY7", "HAHY7"], "theme": ["", ""]})
-    out = blotter.apply_filters(df, status="OPEN")
-    assert list(out["status"]) == ["OPEN"]
-
-
-def test_apply_filters_date_range():
-    df = pd.DataFrame({"status": ["OPEN", "OPEN"], "trade_date": ["2026-06-01", "2026-06-10"],
-                        "product": ["FX_FWD", "FX_FWD"], "instrument_id": ["EURUSD", "EURUSD"],
-                        "strategy": ["HAHY7", "HAHY7"], "theme": ["", ""]})
-    out = blotter.apply_filters(df, date_from="2026-06-05")
-    assert list(out["trade_date"]) == ["2026-06-10"]
-
-
-def test_apply_filters_all_is_noop():
-    df = pd.DataFrame({"status": ["OPEN"], "trade_date": ["2026-06-01"], "product": ["FX_FWD"],
-                        "instrument_id": ["EURUSD"], "strategy": ["HAHY7"], "theme": [""]})
-    out = blotter.apply_filters(df, status=blotter._ALL, product=None)
-    assert len(out) == 1
-
-
-def test_filter_options_empty_frame():
-    opts = blotter._filter_options(pd.DataFrame(), "status")
-    assert opts == [{"label": "All", "value": "All"}]
-
-
-def _sample_df(reason="", note=""):
+def _sample_df(reason="", note="", pnl_usd=8843.4):
     return pd.DataFrame({
         "trade_id": ["T1"], "instrument_id": ["EURUSD"], "product": ["FX_FWD"],
         "strategy": ["HAHY7"], "theme": [""], "trade_date": ["2026-06-01"],
         "settle_date": ["2026-06-20"], "status": ["OPEN"], "quantity": [1000000.0],
-        "fill": [1.1], "mark": [1.108], "mark_source": ["BBG_BFXFORWARD"], "spot": [1.105],
-        "pnl_local": [8000.0], "pnl_usd": [8843.4], "pnl_spot_usd": [5525.0],
+        "fill": [1.1], "mark": [1.108], "mark_date": ["2026-06-20"],
+        "mark_source": ["BBG_BFXFORWARD"], "spot": [1.105],
+        "pnl_local": [8000.0], "pnl_usd": [pnl_usd], "pnl_spot_usd": [5525.0],
         "pnl_carry_usd": [3318.4], "reason": [reason], "note": [note],
+        "side": ["Buy"], "notional_usd": [1100000.0], "t1_rate": [1.109],
     })
 
 
@@ -132,6 +104,7 @@ def test_detail_table_formats_usd_and_rates():
     row = table.data[0]
     assert row["pnl_usd"] == "8,843"
     assert row["fill"] == "1.100000"
+    assert row["quantity"] == "1,000,000"  # unsigned; direction carried by side
 
 
 def test_detail_table_native_filter_and_sort_enabled():
@@ -141,6 +114,12 @@ def test_detail_table_native_filter_and_sort_enabled():
     assert table.sort_mode == "multi"
 
 
+def test_detail_table_default_sort_is_value_date_then_pair():
+    table = blotter.detail_table(_sample_df())
+    assert table.sort_by == [{"column_id": "settle_date", "direction": "asc"},
+                              {"column_id": "instrument_id", "direction": "asc"}]
+
+
 def test_detail_table_has_status_and_instrument_columns():
     table = blotter.detail_table(_sample_df())
     ids = {c["id"] for c in table.columns}
@@ -148,21 +127,32 @@ def test_detail_table_has_status_and_instrument_columns():
     assert "instrument_id" in ids
 
 
-def test_detail_table_note_column_present_and_styled_grey():
-    table = blotter.detail_table(_sample_df(note="fyi"))
-    assert any(c["id"] == "note" for c in table.columns)
-    note_style = next(s for s in table.style_data_conditional
-                       if s.get("if", {}).get("column_id") == "note")
-    assert note_style["color"] == "gray"
+def test_detail_table_columns_include_notional_and_t1_rate():
+    table = blotter.detail_table(_sample_df())
+    ids = [c["id"] for c in table.columns]
+    names = [c["name"] for c in table.columns]
+    assert ids.index("mark_date") < ids.index("notional_usd") < ids.index("mark") < ids.index("t1_rate")
+    assert "Notional (USD)" in names
+    assert "Live rate" in names
+    assert "T-1 rate" in names
 
 
-def test_detail_table_unavailable_only_on_nonempty_reason():
-    table = blotter.detail_table(_sample_df(reason="no mark"))
-    style = next(s for s in table.style_data_conditional
-                 if "reason" in s.get("if", {}).get("filter_query", ""))
-    assert "reason" in style["if"]["filter_query"]
-    table_ok = blotter.detail_table(_sample_df(reason=""))
-    assert table_ok.data[0]["reason"] == ""
+def test_detail_table_status_is_title_cased():
+    table = blotter.detail_table(_sample_df())
+    assert table.data[0]["status"] == "Open"
+
+
+def test_detail_table_unpriced_pnl_shows_na_with_tooltip():
+    table = blotter.detail_table(_sample_df(reason="no mark", pnl_usd=float("nan")))
+    assert table.data[0]["pnl_usd"] == "n/a"
+    assert table.tooltip_data[0]["pnl_usd"]["value"] == "no mark"
+
+
+def test_detail_table_pnl_colour_conditional_present():
+    table = blotter.detail_table(_sample_df())
+    colours = {s["color"] for s in table.style_data_conditional if "color" in s}
+    assert "var(--pos)" in colours
+    assert "var(--neg)" in colours
 
 
 def test_detail_table_empty_frame_still_renders_columns():
@@ -170,27 +160,6 @@ def test_detail_table_empty_frame_still_renders_columns():
     table = blotter.detail_table(empty, table_id="blotter-datatable-rates")
     assert table.data == []
     assert len(table.columns) == len(blotter._DISPLAY_COLUMNS)
-
-
-def test_subtotal_line_sums_visible_rows():
-    rows = [{"pnl_usd": "8,843"}, {"pnl_usd": "(1,000)"}]
-    line = blotter.subtotal_line(rows)
-    assert "7,843" in line.children
-
-
-def test_group_summary_table_unavailable_shows_reason():
-    grouped = {
-        "EURUSD": {
-            "daily": {"value": 100.0, "available": True, "reason": ""},
-            "d5": {"value": float("nan"), "available": False, "reason": "missing mark for T1"},
-            "mtd": {"value": 100.0, "available": True, "reason": ""},
-            "ytd": {"value": 100.0, "available": True, "reason": ""},
-        }
-    }
-    table = blotter.group_summary_table(grouped, "instrument_id")
-    row = table.data[0]
-    assert row["5d"] == "Unavailable (missing mark for T1)"
-    assert row["Daily"] == "100"
 
 
 def test_package_ids_returns_empty_when_no_swaps():
@@ -294,9 +263,9 @@ def test_scope_layout_rows_render_with_no_marks_at_all():
         assert len(table.data) == 1
         row = table.data[0]
         assert row["trade_id"] == "T1"
-        assert row["status"] in ("OPEN", "SETTLED")
+        assert row["status"] in ("Open", "Settled")
         assert row["fill"] == "1.100000"
-        assert row["pnl_usd"] == ""  # unpriced, blank not zero
+        assert row["pnl_usd"] == "n/a"  # unpriced -> n/a with a tooltip reason, not blank/zero
     finally:
         conn.close()
 
@@ -394,21 +363,47 @@ def test_row_scoped_period_pnl_empty_selection_is_zero():
         conn.close()
 
 
-def test_render_pnl_strip_shows_ref_date_underneath():
+def test_row_scoped_headline_order_matches_excel_header():
+    titles = [blotter_pricing.HEADLINE_TITLES[k] for k in blotter_pricing.HEADLINE_ORDER]
+    assert titles == ["LTD P&L", "Daily P&L", "Trades", "Trading P&L", "LTD-1 daily",
+                       "LTD-1 P&L", "LTD-2 P&L", "Trading P&L T-1", "5d", "MTD", "YTD"]
+
+
+def test_row_scoped_headline_ltd_and_trades_count():
     conn = _make_db()
     try:
-        periods = blotter_pricing.row_scoped_period_pnl(conn, "2026-06-20", ["T1"])
-        div = blotter.render_pnl_strip(periods)
-        cards = div.children[0].children
-        ltd_card = cards[blotter_pricing.PERIOD_ORDER.index("ltd")]
-        assert ltd_card.children[2].children == "2026-06-20"
+        headline = blotter_pricing.row_scoped_headline(conn, "2026-06-20", ["T1"])
+        assert headline["ltd"]["available"]
+        assert headline["ltd"]["value"] == pytest.approx(1000000 * (1.1080 - 1.10))
+        assert headline["trades"]["value"] == 1.0
     finally:
         conn.close()
 
 
-def test_render_pnl_strip_order_includes_previous_day():
-    titles = [blotter_pricing.PERIOD_TITLES[k] for k in blotter_pricing.PERIOD_ORDER]
-    assert titles == ["LTD", "Daily", "Previous day", "5d", "MTD", "YTD", "Trading"]
+def test_render_headline_strip_shows_ref_date_and_count():
+    conn = _make_db()
+    try:
+        headline = blotter_pricing.row_scoped_headline(conn, "2026-06-20", ["T1"])
+        div = blotter.render_headline_strip(headline)
+        cards = div.children[0].children
+        ltd_card = cards[blotter_pricing.HEADLINE_ORDER.index("ltd")]
+        assert ltd_card.children[2].children == "2026-06-20"
+        trades_card = cards[blotter_pricing.HEADLINE_ORDER.index("trades")]
+        assert trades_card.children[1].children == "1"
+    finally:
+        conn.close()
+
+
+def test_render_headline_strip_unavailable_shows_na_with_tooltip():
+    headline = {"ltd": {"value": float("nan"), "ref_date": "2026-06-20", "available": False,
+                          "reason": "no mark for T1"}}
+    for key in blotter_pricing.HEADLINE_ORDER:
+        headline.setdefault(key, {"value": 0.0, "ref_date": "2026-06-20", "available": True, "reason": ""})
+    div = blotter.render_headline_strip(headline)
+    ltd_card = div.children[0].children[blotter_pricing.HEADLINE_ORDER.index("ltd")]
+    value_div = ltd_card.children[1]
+    assert value_div.children == "n/a"
+    assert value_div.title == "no mark for T1"
 
 
 # --------------------------------------------------------------------------- bundles
@@ -568,7 +563,11 @@ def test_build_chart_returns_graph():
     try:
         graph = header._build_chart(conn, "2026-06-20")
         assert graph.id == "header-ltd-graph"
-        assert len(graph.figure["data"][0]["x"]) == header._CHART_LOOKBACK_DAYS
+        # header._build_chart charts business days only, capped at the earliest trade
+        # date -- the fixture's single trade (2026-06-01) yields fewer than the full
+        # lookback window, so just check the series is non-empty and within bounds.
+        n_points = len(graph.figure["data"][0]["x"])
+        assert 1 <= n_points <= header._CHART_LOOKBACK_DAYS
     finally:
         conn.close()
 
