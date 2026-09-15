@@ -84,7 +84,24 @@ p { margin: 8px 0; }
   gap: 16px; margin: 0 0 16px; }
 .ladder-title-row-heading { margin: 0; }
 .ladder-title-row-right { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.ladder-title-row-right .section-title { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
+.ladder-title-row-right .section-title { margin: 0 4px 0 0; font-size: 14px; color: var(--navy); font-weight: 600; }
+.ladder-title-row-right .btn { padding: 0 14px; height: 32px; line-height: 32px; }
+
+/* As-of date picker (ui/tabs/controls.py): inline small-caps label + the react-dates
+   input restyled to the site font, 32px height, hairline border and 6px radius so it
+   sits level with the Today button. */
+.date-picker { display: flex; align-items: center; gap: 8px; }
+.date-picker label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.date-picker .SingleDatePickerInput { border: 1px solid var(--line); border-radius: 6px; background: #fff; overflow: hidden; }
+.date-picker .SingleDatePickerInput__withBorder { border-color: var(--line); }
+.date-picker .DateInput { width: 118px; background: transparent; }
+.date-picker .DateInput_input { font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--navy);
+  padding: 0 10px; height: 30px; line-height: 30px; border-bottom: 2px solid transparent; background: transparent; }
+.date-picker .DateInput_input__focused { border-bottom: 2px solid var(--gold); }
+.date-picker .DateInput_fang { display: none; }
+.date-picker .CalendarDay__selected, .date-picker .CalendarDay__selected:hover { background: var(--navy); border-color: var(--navy); }
+.date-picker .CalendarDay__hovered_span, .date-picker .CalendarDay:hover { background: #eef1f7; }
+.date-picker .DayPickerKeyboardShortcuts_show { display: none; }
 .cash-ladder .section { margin-bottom: 16px; }
 .cash-ladder .cards { margin-bottom: 16px; }
 .meta { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 16px; }

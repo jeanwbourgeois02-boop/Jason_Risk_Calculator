@@ -46,10 +46,15 @@ def build_source_dropdown(dropdown_id: str, label: str = "Source") -> html.Div:
 
 
 def build_date_picker(picker_id: str, default_date: Optional[str] = None) -> html.Div:
+    # Inline "AS OF" label + picker styled in ui/assets/style.css (.date-picker and the
+    # react-dates overrides) to match the site's font, radius and button height
+    # (user decision 2026-09-15: the stock picker's own font and stacked label looked
+    # foreign on the title row).
     return html.Div(
         [
             html.Label("As of"),
-            dcc.DatePickerSingle(id=picker_id, date=default_date),
+            dcc.DatePickerSingle(id=picker_id, date=default_date, display_format="D MMM YYYY",
+                                 first_day_of_week=1, number_of_months_shown=1),
         ],
-        style={"display": "inline-block"},
+        className="date-picker",
     )
