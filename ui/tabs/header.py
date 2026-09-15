@@ -128,8 +128,6 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     fallback_caption = f"{n_fallback} of {n_total} rows on BNP file rates, not Bloomberg" if n_fallback else ""
 
     cards = [_pnl_card("LTD", ltd_entry)]
-    if fallback_caption and ltd_entry.get("available"):
-        cards[0].children.append(html.Div(fallback_caption, className="header-figure-caption"))
     for key in _PERIODS:
         cards.append(_pnl_card(_PERIOD_TITLES[key], periods.get(key, {})))
 
@@ -152,8 +150,10 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         cards.append(_pnl_card("Gross USD delta", {"available": False, "reason": reason}, colour=False))
 
     # No "As of" / "Last updated" cards: the as-of date is already in the tab's own
-    # title row, and the LTD caption states when rows are on BNP file rates (user
-    # decision 2026-09-15).
+    # title row (user decision 2026-09-15). The BNP-rates note sits at the right end
+    # of the same row (CSS margin-left:auto) so no card grows taller than the others.
+    if fallback_caption and ltd_entry.get("available"):
+        cards.append(html.Div(fallback_caption, className="header-note"))
     return cards
 
 

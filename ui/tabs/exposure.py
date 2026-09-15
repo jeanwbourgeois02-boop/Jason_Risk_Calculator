@@ -141,7 +141,8 @@ HEADLINE_ID = "exposure-headline"
 
 
 def _gross_net_card(title: str, gross_text: str, net_value: Optional[float] = None,
-                    note: Optional[str] = None, unavailable: bool = False) -> html.Div:
+                    note: Optional[str] = None, unavailable: bool = False,
+                    direction: bool = False) -> html.Div:
     """One headline card (user decision 2026-09-15, item 1): small-caps title, GROSS
     bold, then directly under it NET equally bold with a small-caps "net" label,
     coloured green/red by sign (gross itself stays neutral). `note` replaces the net
@@ -153,10 +154,15 @@ def _gross_net_card(title: str, gross_text: str, net_value: Optional[float] = No
         children.append(html.Span(note, className="card-note"))
     elif net_value is not None:
         sign_class = "pos" if net_value > 0 else ("neg" if net_value < 0 else "")
-        children.append(html.Span([
+        parts = [
             html.Span("net ", className="card-net-label"),
             html.Span(format_amount(net_value), className=f"card-net-value {sign_class}".strip()),
-        ], className="card-net"))
+        ]
+        if direction and net_value != 0:
+            # Same words as the header's Net USD delta card (user decision 2026-09-15): a
+            # positive net non-USD delta is long foreign currency, i.e. short USD.
+            parts.append(html.Span("short USD" if net_value > 0 else "long USD", className="card-net-direction"))
+        children.append(html.Span(parts, className="card-net"))
     return html.Div(children, className="card")
 
 
@@ -191,7 +197,7 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
 
     if rate_ok:
         forward_card = _gross_net_card("Delta forward", format_amount(totals["gross_usd"]),
-                                       net_value=totals["net_usd"])
+                                       net_value=totals["net_usd"], direction=True)
     else:
         forward_card = _gross_net_card("Delta forward", "Unavailable",
                                        note="no rate: " + ", ".join(totals["missing"]), unavailable=True)
