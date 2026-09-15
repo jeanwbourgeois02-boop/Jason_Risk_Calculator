@@ -159,9 +159,9 @@ def _gross_net_card(title: str, gross_text: str, net_value: Optional[float] = No
             html.Span(format_amount(net_value), className=f"card-net-value {sign_class}".strip()),
         ]
         if direction and net_value != 0:
-            # Same words as the header's Net USD delta card (user decision 2026-09-15): a
-            # positive net non-USD delta is long foreign currency, i.e. short USD.
-            parts.append(html.Span("short USD" if net_value > 0 else "long USD", className="card-net-direction"))
+            # Same words as the header's Net USD delta card (user decision 2026-09-15):
+            # `net_value` is already the USD position here, + = long USD.
+            parts.append(html.Span("long USD" if net_value > 0 else "short USD", className="card-net-direction"))
         children.append(html.Span(parts, className="card-net"))
     return html.Div(children, className="card")
 
@@ -196,8 +196,11 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
     fut_ok = not pd.isna(fut_value)
 
     if rate_ok:
+        # Net shown as the USD *position* (CLAUDE.md sign, + = long USD), exactly as the
+        # app header's Net USD delta card: the engine's net non-USD delta is negated and
+        # the direction spelled out (user decision 2026-09-15).
         forward_card = _gross_net_card("Delta forward", format_amount(totals["gross_usd"]),
-                                       net_value=totals["net_usd"], direction=True)
+                                       net_value=-totals["net_usd"], direction=True)
     else:
         forward_card = _gross_net_card("Delta forward", "Unavailable",
                                        note="no rate: " + ", ".join(totals["missing"]), unavailable=True)
@@ -213,8 +216,8 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
 
     if rate_ok and fut_ok:
         gross = totals["gross_usd"] + abs(fut_value)
-        net = totals["net_usd"] + fut_value
-        combined_card = _gross_net_card("Delta combined", format_amount(gross), net_value=net)
+        net = -(totals["net_usd"] + fut_value)  # USD position, same sign as the header
+        combined_card = _gross_net_card("Delta combined", format_amount(gross), net_value=net, direction=True)
     else:
         reasons = []
         if not rate_ok:
