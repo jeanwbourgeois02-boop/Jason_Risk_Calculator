@@ -20,6 +20,14 @@ file name ("HA_PNL_20260818.csv - snapshot 2026-08-17"); a one-line `dcc.Input`
 (`type="date"`) only appears in its place when the filename carries no recognisable
 date, so a user is never asked to enter a date the filename already answers.
 
+Both date sources are read as State by the Confirm callback (`report-date` store first,
+the manual `dcc.Input` as fallback). There is deliberately NO callback with the manual
+input's `value` as an Input: the file-picked callback resets that value to None on every
+selection, and Dash fires downstream callbacks on every callback-written prop whether or
+not the value changed, so a "manual value -> store" callback ran right after the file
+callback and wiped the filename-derived date out of the store (bug seen 2026-09-15 as
+"Choose the snapshot date before confirming" on a correctly named HA_PNL file).
+
 The status line on success is a single sentence:
     "Loaded <filename> - snapshot <as_of> - <N> trades, <M> positions"
 `trades` = total rows currently in the `trades` table (trades have no as_of_date column
@@ -148,25 +156,18 @@ def register(app, get_db_path):
         return {}, filename, "", hidden, {}, None, None, note
 
     @app.callback(
-        Output(DATE_PICKER_ID, "data", allow_duplicate=True),
-        Input(MANUAL_DATE_ID, "value"), prevent_initial_call=True,
-    )
-    def _manual_date_typed(value):
-        # Only rendered/visible when the filename carried no date (see _selected); the
-        # store is the single source of truth _confirm reads, whichever path set it.
-        return value
-
-    @app.callback(
         Output(RESULT_ID, "children"), Output(SOURCE_LINE_ID, "children"),
         Output("report-history-wrap", "children"),
         Output("cash-ladder-date", "date", allow_duplicate=True),
         Input(CONFIRM_ID, "n_clicks"),
         State(FILE_UPLOAD_ID, "contents"), State(FILE_UPLOAD_ID, "filename"),
-        State(DATE_PICKER_ID, "data"), prevent_initial_call=True,
+        State(DATE_PICKER_ID, "data"), State(MANUAL_DATE_ID, "value"), prevent_initial_call=True,
     )
-    def _confirm(clicks, contents, filename, as_of):
+    def _confirm(clicks, contents, filename, as_of, manual_date):
         if not contents:
             return no_update, no_update, no_update, no_update
+        # Filename-derived date wins; the manual box is only shown when there is none.
+        as_of = as_of or manual_date
         if not as_of:
             return html.Span("Choose the snapshot date before confirming.", className="source-result--error"), \
                 no_update, no_update, no_update
