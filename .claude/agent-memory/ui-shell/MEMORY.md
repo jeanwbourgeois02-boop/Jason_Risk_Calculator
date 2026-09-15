@@ -1,3 +1,4 @@
+- [Blotter headline rebuild](blotter-headline-rebuild-2026-09-15.md) — headline strip matches Excel header order, row-click detail panel, Dash load-time Input gotcha
 - [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
 - [App structure](app-structure.md) — retired 2026-09-15; see [wiring-c5](wiring-c5.md) for the current four-tab layout
 - [Wiring C5](wiring-c5.md) — current ui/app.py assembly (Ladder/Blotter/Market data/Reconciliation + header), stray broken test file outside scope
