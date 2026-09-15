@@ -129,7 +129,7 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
             "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
         }
         if status == "SETTLED":
-            rows.append({**base, **_settled_fx_row(conn, r.trade_id)})
+            rows.append({**base, **_settled_fx_row(conn, r, as_of, marks_source)})
             continue
         rows.append({**base, **_open_fx_row(conn, r, as_of, marks_source)})
 
@@ -141,7 +141,7 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
             "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
         }
         if status == "SETTLED":
-            rows.append({**base, **_settled_future_row(conn, r.trade_id)})
+            rows.append({**base, **_settled_future_row(conn, r, as_of, marks_source)})
             continue
         rows.append({**base, **_open_future_row(conn, r, as_of, marks_source)})
 
@@ -180,12 +180,29 @@ def _open_fx_row(conn, r, as_of, marks_source) -> dict:
     return out
 
 
-def _settled_fx_row(conn, trade_id) -> dict:
-    row = _realised_row(conn, trade_id)
-    if row is None:
+def _provisional(conn, r, as_of, marks_source, open_row_fn) -> dict:
+    """A settled trade with no frozen result yet. With official marks only, it is
+    unavailable (realisation needs the settlement-day mark). With an explicit fallback
+    source it is valued like an open row at that source's latest mark for its settle
+    date and flagged provisional, so a PC without Bloomberg still shows a total. The
+    realised table is never written here; realise_settled does that properly later."""
+    trade_id = r.trade_id
+    if marks_source is None:
         return dict(mark=_NAN, mark_date="", mark_source="", spot=_NAN, spot_source="",
                     pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN,
                     reason=f"settled trade {trade_id} not yet realised (run realise_settled)")
+    out = open_row_fn(conn, r, as_of, marks_source)
+    if not out.get("reason"):
+        out["note"] = (f"settled {r.settle_date}, not yet realised; provisional value from "
+                       f"{marks_source} marks, not the settlement-day rate")
+    return out
+
+
+def _settled_fx_row(conn, r, as_of, marks_source) -> dict:
+    trade_id = r.trade_id
+    row = _realised_row(conn, trade_id)
+    if row is None:
+        return _provisional(conn, r, as_of, marks_source, _open_fx_row)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=row["spot_usd_per_local"], spot_source=row["spot_source"],
                 pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]), pnl_spot_usd=float(row["pnl_usd"]),
@@ -206,12 +223,11 @@ def _open_future_row(conn, r, as_of, marks_source) -> dict:
     return out
 
 
-def _settled_future_row(conn, trade_id) -> dict:
+def _settled_future_row(conn, r, as_of, marks_source) -> dict:
+    trade_id = r.trade_id
     row = _realised_row(conn, trade_id)
     if row is None:
-        return dict(mark=_NAN, mark_date="", mark_source="", spot=1.0, spot_source="identity",
-                    pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN,
-                    reason=f"settled trade {trade_id} not yet realised (run realise_settled)")
+        return _provisional(conn, r, as_of, marks_source, _open_future_row)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]),
                 pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason="", note=row["note"])

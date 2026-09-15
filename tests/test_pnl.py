@@ -348,6 +348,17 @@ def test_value_book_fallback_source_uses_latest_mark_on_or_before():
     assert abs(row["pnl_usd"] - (-2_000_000 / 149.0)) < 1e-6
 
 
+def test_value_book_settled_unrealised_is_provisional_only_with_fallback_source():
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T6b", "EURUSD", "EUR", "USD", 1_000_000, 1.1000, settle="2026-05-15")
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", ("2026-05-14", "EURUSD", "2026-05-15", "FWD_OUTRIGHT", 1.1150, "BNP_BVAL", "t"))
+    official = value_book(conn, VB_AS_OF).iloc[0]
+    assert official["status"] == "SETTLED" and math.isnan(official["pnl_usd"]) and "not yet realised" in official["reason"]
+    prov = value_book(conn, VB_AS_OF, marks_source="BNP_BVAL").iloc[0]
+    assert prov["pnl_usd"] == pytest.approx(1_000_000 * 0.0150) and prov["reason"] == ""
+    assert "provisional" in prov["note"]
+
+
 def test_value_book_settled_row_frozen_from_realised_pnl():
     from engine.pnl import ledger
     conn = _vb_conn()
