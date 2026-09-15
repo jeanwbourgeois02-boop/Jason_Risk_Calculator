@@ -250,7 +250,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 from engine.ladder.futures_delta import futures_usd_delta as _futures_usd_delta
                 _fut = _futures_usd_delta(conn, as_of_date)
                 exposure = exposure_section(records, unresolved, as_of_date, rates=rates,
-                                            sort=sort, futures=_fut)
+                                            sort=sort, futures=_fut, futures_details=(_fut or {}).get("details"))
                 books = ", ".join(sorted({r["book"] for r in records})) or "none"
                 result = build_exposure(records, rates)
                 toolbar_status = f"Book {books} · {rate_status_text(result)}"

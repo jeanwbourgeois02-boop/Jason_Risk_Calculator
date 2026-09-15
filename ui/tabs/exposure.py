@@ -524,8 +524,10 @@ def futures_table_frame(futures: Optional[dict] = None, details: Optional[Dict[s
                      "multiplier": d.get("multiplier", "n/a"), "settlement_price": d.get("price", "n/a"),
                      "usd_delta": usd, "_unavailable": ""})
     for instrument_id in futures.get("missing") or []:
-        rows.append({"instrument": instrument_id, "contracts": "n/a", "multiplier": "n/a",
-                     "settlement_price": "n/a", "usd_delta": None, "_unavailable": reason})
+        d = details.get(instrument_id, {})
+        rows.append({"instrument": instrument_id, "contracts": d.get("contracts", "n/a"),
+                     "multiplier": d.get("multiplier", "n/a"), "settlement_price": "n/a",
+                     "usd_delta": None, "_unavailable": reason})
     return pd.DataFrame(rows, columns=FUTURES_COLUMNS + ["_unavailable"])
 
 

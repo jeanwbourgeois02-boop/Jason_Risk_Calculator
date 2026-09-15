@@ -30,6 +30,8 @@ def test_futures_delta_sums_contracts_times_multiplier_times_settlement():
     out = futures_usd_delta(conn, AS_OF)
     assert out["value"] == 4 * 50 * 7600.0
     assert out["reason"] == ""
+    assert out["details"]["ESU6 Index"] == {"contracts": 4.0, "multiplier": 50.0, "price": 7600.0,
+                                            "expiry": "2026-09-18", "source": "BBG_BDH"}
 
 
 def test_missing_mark_is_nan_and_named():

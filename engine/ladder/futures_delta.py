@@ -23,17 +23,21 @@ GROUP BY t.instrument_id, i.multiplier, l.settle_date
 
 def futures_usd_delta(conn: sqlite3.Connection, as_of: str,
                       marks_source: Optional[str] = None) -> dict:
-    """{'value': float or NaN, 'by_instrument': {id: usd_delta}, 'missing': [ids], 'reason': str}."""
+    """{'value': float or NaN, 'by_instrument': {id: usd_delta}, 'missing': [ids], 'reason': str,
+    'details': {id: {'contracts', 'multiplier', 'price', 'expiry', 'source'}}} (price None when missing)."""
     rows = conn.execute(_OPEN_FUTURES_SQL, {"as_of": as_of}).fetchall()
-    by_instrument, missing = {}, []
+    by_instrument, missing, details = {}, [], {}
     for instrument_id, contracts, multiplier, expiry in rows:
         hit = _mark_at(conn, instrument_id, expiry, "FUTURE_PX", as_of, marks_source)
+        details[instrument_id] = {"contracts": float(contracts), "multiplier": float(multiplier),
+                                  "price": None if hit is None else float(hit[0]), "expiry": expiry,
+                                  "source": "" if hit is None else hit[1]}
         if hit is None:
             missing.append(instrument_id)
             continue
         by_instrument[instrument_id] = float(contracts) * float(multiplier) * float(hit[0])
     if missing:
         return {"value": float("nan"), "by_instrument": by_instrument, "missing": missing,
-                "reason": f"no FUTURE_PX on {as_of} for {', '.join(sorted(missing))}"}
+                "reason": f"no FUTURE_PX on {as_of} for {', '.join(sorted(missing))}", "details": details}
     return {"value": float(sum(by_instrument.values())), "by_instrument": by_instrument,
-            "missing": [], "reason": ""}
+            "missing": [], "reason": "", "details": details}
