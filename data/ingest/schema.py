@@ -9,17 +9,22 @@ import sqlite3
 from pathlib import Path
 from typing import Union
 
-TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "positions", "instrument_theme")
+TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "positions", "instrument_theme",
+          "curve_quotes")
 VIEWS = ("marks_official",)
 
 # Official source per mark_type (CLAUDE.md "Official marks"). BNP_BVAL is never official.
+# PAR_RATE / PV_USD / DV01_USD: changed from BBG_BDH to QL_PRICER per housekeeper
+# authorization 2026-09-15 (rates-pricer's own bootstrap becomes official for these three
+# mark_types; BBG_BDH becomes reconciliation-only for IRS, mirroring how BNP_BVAL is
+# reconciliation-only for FX). No other mark_type mapping changed.
 OFFICIAL_MARK_SOURCE = {
     "SPOT": "BBG_BFXFORWARD",
     "FWD_OUTRIGHT": "BBG_BFXFORWARD",
     "FUTURE_PX": "BBG_BDH",
-    "PAR_RATE": "BBG_BDH",
-    "PV_USD": "BBG_BDH",
-    "DV01_USD": "BBG_BDH",
+    "PAR_RATE": "QL_PRICER",
+    "PV_USD": "QL_PRICER",
+    "DV01_USD": "QL_PRICER",
     "DELTA": "MANUAL",
     "PREMIUM": "MANUAL",
 }
@@ -90,6 +95,23 @@ CREATE TABLE IF NOT EXISTS curves (
   par_rate        REAL NOT NULL,
   source          TEXT NOT NULL,
   PRIMARY KEY (curve_id, as_of_date, node_date, source)
+);
+
+-- Raw curve-quote staging table, written by data/bloomberg (bbg-data), consumed by the
+-- IRS pricer bootstrap (rates-pricer) to build `curves`. This is NOT `curves` itself:
+-- `curves` holds bootstrapped discount factors / par rates per node; this table holds the
+-- unprocessed Bloomberg quotes (deposit / swap ticks) the bootstrap reads to build them.
+CREATE TABLE IF NOT EXISTS curve_quotes (
+  as_of_date      TEXT NOT NULL,
+  ccy             TEXT NOT NULL,
+  "index"         TEXT NOT NULL,
+  tenor           TEXT NOT NULL,
+  ticker          TEXT NOT NULL,
+  value           REAL NOT NULL,
+  quote_type      TEXT NOT NULL,
+  field           TEXT NOT NULL,
+  source          TEXT NOT NULL,
+  PRIMARY KEY (as_of_date, ccy, "index", tenor, source)
 );
 
 CREATE TABLE IF NOT EXISTS positions (

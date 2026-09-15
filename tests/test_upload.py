@@ -19,14 +19,14 @@ def test_daily_upload_repeat_and_history(tmp_path):
     db = tmp_path / 'risk.db'
     payload = RAW.read_bytes()
     message = import_report(payload, RAW.name, '2026-08-17', db)
-    assert '229 new trades' in message
+    assert '232 new trades' in message
     before = snapshot(db)
     assert '0 new trades' in import_report(payload, RAW.name, '2026-08-17', db)
     assert snapshot(db) == before
     import_report(payload, 'HA_PNL_20260819.csv', '2026-08-18', db)
     with sqlite3.connect(db) as conn:
         assert conn.execute('select count(distinct as_of_date) from positions').fetchone()[0] == 2
-        assert conn.execute('select count(*) from trades').fetchone()[0] == 229
+        assert conn.execute('select count(*) from trades').fetchone()[0] == 232
 
 
 @pytest.mark.parametrize('failure', ['reject', 'conflict', 'mark_failure'])

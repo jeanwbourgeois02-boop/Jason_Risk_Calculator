@@ -11,3 +11,4 @@
 - [Top-bar restructure 2026-09-15](top-bar-restructure-2026-09-15.md) — no-children dcc.Tab + always-present tab-bodies, header perf split, Ladder today/title/forward-proxy rate, upload date-picker removal
 - [Ladder reorder + headline 2026-09-15](ladder-reorder-headline-2026-09-15.md) — gross/net card layout, table order, scenario-order (not alpha), NDF marker removed, compact header strip w/ Net-Gross-Previous day
 - [Blotter Futures sub-tab 2026-09-15](blotter-futures-subtab-2026-09-15.md) — Total/FX/Futures/Rates/Options/Bundles order, near-dated FX_FWD reported as FX_SPOT, title row matches Ladder, headless-Edge hang fix
+- [Rates tab 2026-09-15](rates-tab-2026-09-15.md) — real IRS blotter (ui/tabs/rates.py) off QL_PRICER marks_official, bypasses value_book, own recon-status tolerance, excluded from generic scope callback loop

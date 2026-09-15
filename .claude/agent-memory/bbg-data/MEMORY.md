@@ -4,3 +4,4 @@
 - [pull_marks.py open questions](pull_marks_open_questions.md) — unverified Bloomberg field/override names to confirm on the real terminal (SPOT, FUTURE_PX, FWD_OUTRIGHT direct + tenor fallback, BBG_INTERP)
 - [pull_marks.py diagnostics/probe layer](pull_marks_diagnostics.md) — diag JSON structure, --probe mode, exit codes, "partial" = requested-vs-written key sets (not just TIMEOUT), correlation ids, probe outcome
 - [BUILD_PLAN.md Task B (2026-09-15)](build_plan_2026_09_15_task_b.md) — live.py/backfill.py rewrite, new inventory.py/manual.py, cross-team `theme` column pitfall in test fixtures
+- [rates_marketdata.py OIS curve layer](rates_marketdata_ois.md) — ported from Rates Swap Calculator ref project; fake-blpapi needs by-name element access, not generic isArray()/numElements() walk; curve_quotes table written defensively

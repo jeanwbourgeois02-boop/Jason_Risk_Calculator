@@ -183,7 +183,12 @@ def test_end_to_end_real_file_diagnostic():
     # Every FX trade yields 2 legs (the old 229 one-record-per-trade rows, plus one
     # USD leg per trade -- all 229 have exactly one USD leg since none are crosses).
     # is_ndf is per-instrument, so it is set on BOTH legs of an NDF trade -> 45*2.
-    assert len(records) == 229 * 2 and len(unresolved) == 0 and len(ndf) == 45 * 2
+    # 3 IRS ("INTEREST_RATE_SWAP") rows are wired into trades/trade_legs by data-ingest but are
+    # correctly excluded here: IRS is not an FX product, so it never contributes to exposure.
+    assert len(unresolved) == 3
+    assert all(u.reason == "non-FX product IRS excluded" for u in unresolved)
+    assert all(u.symbol.startswith("IRSOIS-USD-") for u in unresolved)
+    assert len(records) == 229 * 2 and len(ndf) == 45 * 2
     assert set(ccys) == set(MOCK_RATES)
     brl = [r for r in ndf if r["currency"] == "BRL"]
     assert brl and all(r["settles_cash"] == 0 for r in brl) and "BRL" in exp.ladder.columns

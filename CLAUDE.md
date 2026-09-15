@@ -83,8 +83,21 @@ curves (                               -- curve nodes so the IRS pricer can be r
   node_date       TEXT NOT NULL,
   discount_factor REAL NOT NULL,
   par_rate        REAL NOT NULL,      -- 0 where the node carries no par rate
-  source          TEXT NOT NULL,      -- BBG_BDP | BBG_BDH | MANUAL
+  source          TEXT NOT NULL,      -- BBG_BDP | BBG_BDH | MANUAL | QL_PRICER (bootstrap output, engine/rates)
   PRIMARY KEY (curve_id, as_of_date, node_date, source)
+);
+
+curve_quotes (                         -- raw OIS quote staging (data-ingest DDL, bbg-data writer, engine/rates reader)
+  as_of_date      TEXT NOT NULL,
+  ccy             TEXT NOT NULL,
+  index           TEXT NOT NULL,      -- 'SOFR', 'ESTR', 'SONIA', 'TONA', 'SARON', 'CORRA', 'AONIA' (Phase 1: OIS only)
+  tenor           TEXT NOT NULL,
+  ticker          TEXT NOT NULL,
+  value           REAL NOT NULL,
+  quote_type      TEXT NOT NULL,
+  field           TEXT NOT NULL,
+  source          TEXT NOT NULL,
+  PRIMARY KEY (as_of_date, ccy, index, tenor, source)
 );
 
 positions (                            -- one row per PB position per day (BNP grain) or per computed net (CALC)
@@ -116,10 +129,11 @@ Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4
 |---|---|
 | SPOT, FWD_OUTRIGHT | BBG_BFXFORWARD |
 | FUTURE_PX | BBG_BDH |
-| PAR_RATE, PV_USD, DV01_USD | BBG_BDH |
+| PAR_RATE, PV_USD, DV01_USD | QL_PRICER |
 | DELTA, PREMIUM | MANUAL |
 | any | BNP_BVAL is reconciliation only, never official |
 | any | BBG_INTERP (linear interpolation in forward points between standard tenors, written by the pull script when a broken-date outright cannot be requested directly) is reconciliation / fallback only, never official |
+| PAR_RATE, PV_USD, DV01_USD | BBG_BDH (Bloomberg SWPM) is reconciliation only, never official, mirroring BNP_BVAL for FX (decided 2026-09-15 with the `engine/rates` QuantLib OIS pricer landing) |
 
 The mapping is held in a `marks_official` view (`marks` filtered to the official source per `mark_type`, so `(as_of_date, instrument_id, settle_date, mark_type)` is unique). Every P&L or delta query reads from `marks_official`, never from `marks` directly.
 
@@ -172,7 +186,7 @@ Two forward rows form one `FX_SWAP` package when all hold: same account, same pa
 |---|---|
 | Cash ladder | `trade_legs` where `settles_cash = 1 AND settle_date ≥ as_of`, grouped by `ccy, settle_date`, plus `CASH` rows from `positions` where `source = 'BNP'` (BNP is the source for ladder cash balances, summed per currency across accounts). The `≥` here versus `>` in the delta query is intentional: a leg settling on `as_of` is cash that moves today but carries no delta by close, matching BNP dropping settled forwards. |
 | FX | FX trades × `marks_official` (`FWD_OUTRIGHT` at the leg's own `settle_date`, `SPOT` for USD conversion); per-pair USD notional = Σ sign(base leg) × \|USD leg\| |
-| Rates | IRS trades × `marks_official` (`PV_USD`, `DV01_USD`, `PAR_RATE`); `curves` when the pricer is rebuilt |
+| Rates | IRS trades × `marks_official` (`PV_USD`, `DV01_USD`, `PAR_RATE`, official source `QL_PRICER`); `curves` is live via `engine/rates` (`bootstrap_and_store` / `price_and_store`), single-currency OIS only (Phase 1: USD SOFR, EUR ESTR, GBP SONIA, JPY TONA, CHF SARON, CAD CORRA, AUD AONIA) — term-rate, basis and XCCY swaps are Phase 2 |
 | Options | FX_OPTION trades × `marks_official` (`PREMIUM`, `DELTA`) |
 | Delta | query below |
 | Overall book | `positions` (BNP vs CALC), P&L rollups by strategy / account, LTD series |
@@ -235,6 +249,7 @@ data/ingest/     BNP CSV and xlsx parsers, SQLite schema, swap rule   -> data-in
 data/bloomberg/  blpapi pulls, marks table, marks_official view       -> bbg-data
 engine/pnl/      LTD, daily, 5d, MTD, YTD per CLAUDE.md conventions   -> pnl-engine
 engine/ladder/   cash ladder and delta-per-currency query             -> cash-ladder
+engine/rates/    OIS curve bootstrap + swap valuation (QuantLib)      -> rates-pricer
 ui/              Dash app, one module per tab                         -> ui-shell
 tests/           pytest, one file per module, owned by the module's agent
 docs/            contract and open questions, owned by housekeeper

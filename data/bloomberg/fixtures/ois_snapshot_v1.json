@@ -1,0 +1,48 @@
+{
+  "as_of": "2026-08-17",
+  "source": "test-fixture",
+  "curves": {
+    "USD": {
+      "currency": "USD",
+      "index": "SOFR",
+      "as_of": "2026-08-17",
+      "quotes": [
+        {"tenor": "1W", "ticker": "USOSFR1Z Curncy", "value": "0.0530", "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "ticker": "USOSFRA Curncy", "value": "0.0528", "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "ticker": "USOSFRC Curncy", "value": "0.0521", "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "ticker": "USOSFR1 Curncy", "value": "0.0475", "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "5Y", "ticker": "USOSFR5 Curncy", "value": "0.0390", "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "10Y", "ticker": "USOSFR10 Curncy", "value": "0.0398", "field": "PX_LAST", "source": "BBG"}
+      ]
+    },
+    "EUR": {
+      "currency": "EUR",
+      "index": "ESTR",
+      "as_of": "2026-08-17",
+      "quotes": [
+        {"tenor": "1W", "ticker": "EESWE1Z Curncy", "value": "0.0315", "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "ticker": "EESWEA Curncy", "value": "0.0313", "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "ticker": "EESWE1 Curncy", "value": "0.0290", "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "5Y", "ticker": "EESWE5 Curncy", "value": "0.0255", "field": "PX_LAST", "source": "BBG"}
+      ]
+    }
+  },
+  "fixings": {
+    "USD": [
+      {"date": "2026-08-14", "value": "0.0531"},
+      {"date": "2026-08-17", "value": "0.0530"}
+    ]
+  },
+  "bbg_curves": {
+    "USD": {
+      "currency": "USD",
+      "index": "SOFR",
+      "as_of": "2026-08-17",
+      "curve_id": "YCSW0490 Index",
+      "points": [
+        {"tenor": "1Y", "rate": "0.0474"},
+        {"tenor": "5Y", "rate": "0.0391"}
+      ]
+    }
+  }
+}

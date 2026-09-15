@@ -82,9 +82,12 @@ def import_report(payload, filename, as_of, db_path, sheet=None):
                 if errors:
                     raise ValueError('Nothing imported. ' + ' | '.join(errors[:10]))
                 for table in schema.TABLES:
+                    # Column names are double-quoted throughout: curve_quotes.index is a
+                    # reserved word in bare SQL and would otherwise break this generic copy.
                     columns = [r[1] for r in staged.execute(f'PRAGMA table_info({table})')]
-                    names = ','.join(columns)
-                    updates = ','.join(f'{c}=excluded.{c}' for c in columns)
+                    quoted = [f'"{c}"' for c in columns]
+                    names = ','.join(quoted)
+                    updates = ','.join(f'{q}=excluded.{q}' for q in quoted)
                     placeholders = ','.join('?' for _ in columns)
                     live.executemany(
                         f'INSERT INTO {table} ({names}) VALUES ({placeholders}) ON CONFLICT DO UPDATE SET {updates}',
@@ -105,5 +108,5 @@ def import_report(payload, filename, as_of, db_path, sheet=None):
     return (f"Imported {as_of}: {counts['trades']} new trades, {counts['positions']} new positions, "
             f"{counts['marks']} new BNP marks. "
             f"{sum(result.skipped.values()) + skipped} identical records already present. "
-            f"Excluded: {result.n_skipped_irs} IRS rows, {result.n_skipped_other} other unsupported rows, "
+            f"Excluded: {result.n_skipped_irs} malformed IRS rows, {result.n_skipped_other} other unsupported rows, "
             f"{result.n_skipped_fund} rows from other funds. Futures are positions only.")

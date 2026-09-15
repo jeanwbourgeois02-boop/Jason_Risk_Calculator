@@ -290,17 +290,6 @@ def test_scope_layout_fx_filters_out_nonfx_products():
         conn.close()
 
 
-def test_placeholder_scope_shows_reason_text():
-    conn = _make_db()
-    try:
-        layout = blotter.scope_layout("rates", conn, "2026-06-20")
-        strip_div = layout.children[0]
-        text = strip_div.children.children.children
-        assert "no IRS trades loaded; view not built yet" in text
-    finally:
-        conn.close()
-
-
 def test_placeholder_scope_options_wording():
     conn = _make_db()
     try:
@@ -315,10 +304,30 @@ def test_placeholder_scope_options_wording():
 def test_placeholder_scope_table_has_same_columns_and_is_empty():
     conn = _make_db()
     try:
-        layout = blotter.scope_layout("rates", conn, "2026-06-20")
+        layout = blotter.scope_layout("options", conn, "2026-06-20")
         table = layout.children[1]
         assert table.data == []
         assert len(table.columns) == len(blotter._DISPLAY_COLUMNS)
+    finally:
+        conn.close()
+
+
+def test_scope_layout_rates_delegates_to_rates_module():
+    """The "rates" scope is a real view (ui.tabs.rates), not the placeholder path --
+    verifies the wiring in blotter.scope_layout, not ui.tabs.rates' own logic (that's
+    tests/test_ui_rates.py)."""
+    conn = _make_db()
+    try:
+        conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','9999-12-31')")
+        conn.execute(
+            "INSERT INTO trades VALUES ('T2','BNP','IRSOIS-USD-1','IRS','T2','2026-06-01',1000000,0.04,"
+            "'ACC','CPTY','HAHY7','TR','irs','')"
+        )
+        conn.commit()
+        layout = blotter.scope_layout("rates", conn, "2026-06-20")
+        table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+        assert table.id == "rates-datatable"
+        assert table.data[0]["trade_id"] == "T2"
     finally:
         conn.close()
 

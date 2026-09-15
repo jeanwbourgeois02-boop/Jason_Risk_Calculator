@@ -168,20 +168,20 @@ def _gross_net_card(title: str, gross_text: str, net_value: Optional[float] = No
 
 def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Optional[set] = None,
                      forward_proxy_ccys: Optional[set] = None) -> html.Div:
-    """The three headline cards (user decision 2026-09-15, item C.1; redefined by the
-    coordinator's same-day follow-up, item 3; card internals redefined again by the
-    user's 2026-09-15 "Reorder the Ladder tab" decision, item 1), in this order:
-      - Delta combined = gross (sum of |USD delta| over currencies + |futures|), net
-        directly underneath, equally bold, labelled "net".
-      - Delta non-forward = futures USD delta: gross = |value|, net = signed value;
-        "0" with "no open futures" underneath (not a net line) when there are none.
-      - Delta forward = currency gross (sum of |USD delta| over currencies), net
-        underneath.
-    Each is Unavailable with the engine's own reason only when a rate or a futures mark
-    is genuinely missing -- with the BNP_BVAL fallback (ui.tabs.cash_ladder.bnp_bval_rates)
+    """One merged headline card (user decision 2026-09-15, "Henry doesn't care about the
+    split, put it all together"): was three cards -- Delta combined / Delta non-forward
+    (futures) / Delta forward (FX) -- now just "Delta", currencies and futures already
+    summed together: gross = sum of |USD delta| over currencies + |futures|, net
+    (the USD position, CLAUDE.md sign: + = long USD) directly underneath with its
+    LONG USD / SHORT USD direction, same convention as the app header's Net USD delta
+    card. The FX-only and futures-only splits still exist -- per-currency in the risk
+    table below, futures alone in its own "Delta non-forward" total row there -- this
+    top card just no longer repeats them.
+    Unavailable with the engine's own reason only when a rate or a futures mark is
+    genuinely missing -- with the BNP_BVAL fallback (ui.tabs.cash_ladder.bnp_bval_rates)
     filling in every currency on this PC, that should not happen in practice, but the
     Unavailable path is kept for the day a currency has neither an official nor a
-    fallback rate. A note under the cards names how many currencies are on fallback,
+    fallback rate. A note under the card names how many currencies are on fallback,
     once, so callers don't need to derive it from the risk table's '*' marks again."""
     from engine.ladder.exposure import portfolio_totals
     futures = futures or DEFAULT_FUTURES
@@ -195,40 +195,19 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
     rate_ok = not totals["missing"]
     fut_ok = not pd.isna(fut_value)
 
-    if rate_ok:
-        # Net shown as the USD *position* (CLAUDE.md sign, + = long USD), exactly as the
-        # app header's Net USD delta card: the engine's net non-USD delta is negated and
-        # the direction spelled out (user decision 2026-09-15).
-        forward_card = _gross_net_card("Delta forward", format_amount(totals["gross_usd"]),
-                                       net_value=-totals["net_usd"], direction=True)
-    else:
-        forward_card = _gross_net_card("Delta forward", "Unavailable",
-                                       note="no rate: " + ", ".join(totals["missing"]), unavailable=True)
-
-    if not fut_ok:
-        nonfwd_card = _gross_net_card("Delta non-forward", "Unavailable",
-                                      note=futures.get("reason") or "futures delta unavailable",
-                                      unavailable=True)
-    elif no_open_futures:
-        nonfwd_card = _gross_net_card("Delta non-forward", "0", note="no open futures")
-    else:
-        nonfwd_card = _gross_net_card("Delta non-forward", format_amount(abs(fut_value)), net_value=fut_value)
-
     if rate_ok and fut_ok:
         gross = totals["gross_usd"] + abs(fut_value)
         net = -(totals["net_usd"] + fut_value)  # USD position, same sign as the header
-        combined_card = _gross_net_card("Delta combined", format_amount(gross), net_value=net, direction=True)
+        combined_card = _gross_net_card("Delta", format_amount(gross), net_value=net, direction=True)
     else:
         reasons = []
         if not rate_ok:
             reasons.append("no rate: " + ", ".join(totals["missing"]))
         if not fut_ok:
             reasons.append(futures.get("reason") or "futures delta unavailable")
-        combined_card = _gross_net_card("Delta combined", "Unavailable", note="; ".join(reasons), unavailable=True)
+        combined_card = _gross_net_card("Delta", "Unavailable", note="; ".join(reasons), unavailable=True)
 
-    cards = html.Div(id=HEADLINE_ID, className="cards cards--three", children=[
-        combined_card, nonfwd_card, forward_card,
-    ])
+    cards = html.Div(id=HEADLINE_ID, className="cards cards--one", children=[combined_card])
     if not fallback_ccys and not forward_proxy_ccys:
         return cards
     parts = []

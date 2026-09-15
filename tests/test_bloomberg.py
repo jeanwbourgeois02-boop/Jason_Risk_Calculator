@@ -1619,3 +1619,312 @@ def test_write_manual_mark_is_visible_but_not_official(tmp_path):
     official_delta = conn.execute(
         "SELECT value FROM marks_official WHERE instrument_id='AUDUSD' AND mark_type='DELTA'").fetchone()
     assert official_delta == (0.5,)                             # MANUAL is official for DELTA
+
+
+# =========================================================================== rates_marketdata.py
+RATES_FIXTURE = REPO / "data" / "bloomberg" / "fixtures" / "ois_snapshot_v1.json"
+
+
+def test_ois_index_and_ticker_map_cover_scope_currencies():
+    from data.bloomberg import rates_marketdata as rmd
+
+    expected = {"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD"}
+    assert set(rmd.OIS_INDEX) == expected
+    assert set(rmd.OIS_CURVES) == expected
+    assert rmd.OIS_INDEX["USD"] == "SOFR"
+    for ccy in expected:
+        specs = rmd.ois_curve(ccy)
+        assert len(specs) >= 4
+        assert all(isinstance(s.tenor, str) and s.ticker for s in specs)
+        assert rmd.ois_fixing_ticker(ccy)
+    assert rmd.ois_bbg_curve_id("USD") == "YCSW0490 Index"
+    assert rmd.ois_bbg_curve_id("USD") == rmd.OIS_CURVES["USD"]["bbg_curve_id"]
+
+
+def test_ois_curve_unknown_currency_raises():
+    from data.bloomberg import rates_marketdata as rmd
+
+    with pytest.raises(rmd.TickerMapError):
+        rmd.ois_curve("XXX")
+    with pytest.raises(rmd.TickerMapError):
+        rmd.ois_fixing_ticker("XXX")
+    assert rmd.ois_bbg_curve_id("XXX") is None
+
+
+def test_tenor_to_days_sorting_and_scale_quote():
+    from data.bloomberg import rates_marketdata as rmd
+    import decimal
+
+    assert rmd.tenor_to_days("1W") == 7
+    assert rmd.tenor_to_days("2Z") == 14  # Bloomberg weekly-ticker convention
+    assert rmd.tenor_to_days("1M") == 30
+    assert rmd.tenor_to_days("1Y") == 365
+    assert rmd.tenor_to_days("1w") == rmd.tenor_to_days("1W")  # normalised
+
+    with pytest.raises(ValueError):
+        rmd.tenor_to_days("bogus")
+
+    assert rmd.scale_quote(decimal.Decimal("3.98")) == decimal.Decimal("3.98") / 100
+
+
+def test_build_refdata_and_histdata_specs_are_pure():
+    from data.bloomberg import rates_marketdata as rmd
+    from datetime import date as d
+
+    specs = rmd.build_refdata_spec(["A", "B", "C"], ["PX_LAST"], chunk=2)
+    assert len(specs) == 2
+    assert specs[0]["securities"] == ["A", "B"]
+    assert specs[1]["securities"] == ["C"]
+    assert specs[0]["request_type"] == "ReferenceDataRequest"
+
+    hspec = rmd.build_histdata_spec(["A"], ["PX_LAST"], d(2026, 8, 17), d(2026, 8, 17), non_trading_day_fill=True)
+    assert hspec["startDate"] == "20260817"
+    assert hspec["endDate"] == "20260817"
+    assert hspec["nonTradingDayFillOption"] == "NON_TRADING_WEEKDAYS"
+
+
+# -- RatesFileSource: never touches blpapi -------------------------------------------------
+
+def test_rates_file_source_get_curve_quotes():
+    from data.bloomberg import rates_marketdata as rmd
+
+    src = rmd.RatesFileSource(RATES_FIXTURE)
+    assert src.name() == "RatesFileSource(test-fixture)"
+    snap = src.get_curve_quotes("USD", date(2026, 8, 17))
+    assert snap.currency == "USD"
+    assert snap.index == "SOFR"
+    tenors = [q.tenor for q in snap.quotes]
+    assert tenors == ["1W", "1M", "3M", "1Y", "5Y", "10Y"]
+    one_week = next(q for q in snap.quotes if q.tenor == "1W")
+    assert math.isclose(float(one_week.value), 0.0530)
+
+    # case-insensitive currency lookup
+    snap_lower = src.get_curve_quotes("usd", date(2026, 8, 17))
+    assert snap_lower.currency == "USD"
+
+
+def test_rates_file_source_wrong_as_of_raises():
+    from data.bloomberg import rates_marketdata as rmd
+
+    src = rmd.RatesFileSource(RATES_FIXTURE)
+    with pytest.raises(rmd.MarketDataUnavailable):
+        src.get_curve_quotes("USD", date(2026, 8, 18))
+
+
+def test_rates_file_source_unknown_currency_raises():
+    from data.bloomberg import rates_marketdata as rmd
+
+    src = rmd.RatesFileSource(RATES_FIXTURE)
+    with pytest.raises(rmd.MarketDataUnavailable):
+        src.get_curve_quotes("GBP", date(2026, 8, 17))  # not in the fixture
+
+
+def test_rates_file_source_get_fixings_filters_range():
+    from data.bloomberg import rates_marketdata as rmd
+
+    src = rmd.RatesFileSource(RATES_FIXTURE)
+    fixings = src.get_fixings("USD", date(2026, 8, 15), date(2026, 8, 17))
+    assert [f.date.isoformat() for f in fixings] == ["2026-08-17"]
+
+    with pytest.raises(rmd.MarketDataUnavailable):
+        src.get_fixings("EUR", date(2026, 8, 1), date(2026, 8, 17))  # no fixings in fixture
+
+
+def test_rates_file_source_get_bbg_curve_reconciliation_only():
+    from data.bloomberg import rates_marketdata as rmd
+
+    src = rmd.RatesFileSource(RATES_FIXTURE)
+    curve = src.get_bbg_curve("USD", date(2026, 8, 17))
+    assert curve is not None
+    assert curve.curve_id == "YCSW0490 Index"
+    assert [p.tenor for p in curve.points] == ["1Y", "5Y"]
+
+    # never raises, just returns None when unavailable
+    assert src.get_bbg_curve("EUR", date(2026, 8, 17)) is None
+
+
+def test_ois_snapshot_round_trip(tmp_path):
+    from data.bloomberg import rates_marketdata as rmd
+
+    snap = rmd.load_ois_snapshot(RATES_FIXTURE)
+    out_path = tmp_path / "roundtrip.json"
+    rmd.save_ois_snapshot(snap, out_path)
+    reloaded = rmd.load_ois_snapshot(out_path)
+    assert reloaded.as_of == snap.as_of
+    assert set(reloaded.curves) == set(snap.curves)
+    assert reloaded.curves["USD"].quotes[0].ticker == snap.curves["USD"].quotes[0].ticker
+
+
+# -- curve_quotes staging table -------------------------------------------------------------
+
+def test_write_curve_quotes_creates_table_and_inserts(tmp_path):
+    from data.bloomberg import rates_marketdata as rmd
+
+    conn = sqlite3.connect(":memory:")
+    # table does not exist yet -- write_curve_quotes must create it defensively
+    tables_before = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "curve_quotes" not in tables_before
+
+    src = rmd.RatesFileSource(RATES_FIXTURE)
+    snap = src.get_curve_quotes("USD", date(2026, 8, 17))
+    n = rmd.write_curve_quotes(conn, snap, as_of_date="2026-08-17", source="BBG_BDP")
+    assert n == len(snap.quotes)
+
+    rows = conn.execute(
+        "SELECT as_of_date, ccy, \"index\", tenor, ticker, value, quote_type, field, source "
+        "FROM curve_quotes ORDER BY tenor"
+    ).fetchall()
+    assert len(rows) == len(snap.quotes)
+    one_week = [r for r in rows if r[3] == "1W"][0]
+    assert one_week[1] == "USD"
+    assert one_week[2] == "SOFR"
+    assert one_week[6] == "OIS"
+    assert one_week[7] == "PX_LAST"
+    assert one_week[8] == "BBG_BDP"
+    assert math.isclose(one_week[5], 0.0530)
+
+
+def test_write_curve_quotes_is_idempotent_via_insert_or_replace(tmp_path):
+    from data.bloomberg import rates_marketdata as rmd
+
+    conn = sqlite3.connect(":memory:")
+    src = rmd.RatesFileSource(RATES_FIXTURE)
+    snap = src.get_curve_quotes("USD", date(2026, 8, 17))
+    rmd.write_curve_quotes(conn, snap, as_of_date="2026-08-17", source="BBG_BDP")
+    n_again = rmd.write_curve_quotes(conn, snap, as_of_date="2026-08-17", source="BBG_BDP")
+    assert n_again == len(snap.quotes)
+    count = conn.execute("SELECT COUNT(*) FROM curve_quotes").fetchone()[0]
+    assert count == len(snap.quotes)  # no duplicate rows on re-run
+
+
+def test_ensure_curve_quotes_table_noop_if_already_created_elsewhere():
+    from data.bloomberg import rates_marketdata as rmd
+
+    conn = sqlite3.connect(":memory:")
+    rmd.ensure_curve_quotes_table(conn)  # simulate data-ingest's schema.py having created it
+    rmd.ensure_curve_quotes_table(conn)  # this module's defensive call must not error
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "curve_quotes" in tables
+
+
+# -- RatesBloombergSource: fake blpapi, never the real SDK -----------------------------------
+
+def test_rates_bloomberg_source_requires_blpapi_installed():
+    from data.bloomberg import rates_marketdata as rmd
+
+    # blpapi genuinely is not installed in this environment (by design -- see module docstring).
+    with pytest.raises(rmd.MarketDataError):
+        rmd.RatesBloombergSource()
+
+
+def test_rates_bloomberg_source_get_curve_quotes_with_fake_blpapi(monkeypatch):
+    from data.bloomberg import rates_marketdata as rmd
+
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        sec_list = []
+        px_by_ticker = {
+            "USOSFR1Z Curncy": 5.30, "USOSFR2Z Curncy": 5.29, "USOSFR3Z Curncy": 5.28,
+            "USOSFRA Curncy": 5.28, "USOSFRB Curncy": 5.26, "USOSFRC Curncy": 5.21,
+            "USOSFRF Curncy": 5.10, "USOSFRI Curncy": 4.95, "USOSFR1 Curncy": 4.75,
+        }
+        for t in request.securities:
+            row = {}
+            if t in px_by_ticker:
+                row["PX_LAST"] = px_by_ticker[t]
+            sec_list.append({"security": t, "fieldData": row})
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = rmd.RatesBloombergSource("localhost", 8194)
+    assert src.name() == "RatesBloombergSource(localhost:8194)"
+    snap = src.get_curve_quotes("USD", date.today())
+    assert snap.currency == "USD"
+    assert snap.index == "SOFR"
+    assert len(snap.quotes) == 9  # only tickers with a PX_LAST in the fake response
+    one_week = next(q for q in snap.quotes if q.tenor == "1W")
+    assert math.isclose(float(one_week.value), 0.0530)
+    # sorted by tenor
+    assert [q.tenor for q in snap.quotes][:3] == ["1W", "2W", "3W"]
+    src.close()
+
+
+def test_rates_bloomberg_source_get_curve_quotes_too_few_raises(monkeypatch):
+    from data.bloomberg import rates_marketdata as rmd
+
+    def responder(request):
+        # Only ever answer one ticker -- fewer than _MIN_QUOTES.
+        sec_list = [{"security": request.securities[0], "fieldData": {"PX_LAST": 5.30}}]
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = rmd.RatesBloombergSource("localhost", 8194)
+    with pytest.raises(rmd.MarketDataUnavailable):
+        src.get_curve_quotes("USD", date.today())
+
+
+def test_rates_bloomberg_source_get_fixings_with_fake_blpapi(monkeypatch):
+    from data.bloomberg import rates_marketdata as rmd
+
+    def responder(request):
+        assert request.req_type == "HistoricalDataRequest"
+        ticker = request.securities[0]
+        field_data = [
+            {"date": "2026-08-14", "PX_LAST": 5.31},
+            {"date": "2026-08-15", "PX_LAST": 5.31},
+            {"date": "2026-08-17", "PX_LAST": 5.30},
+        ]
+        return [{"securityData": {"security": ticker, "fieldData": field_data}}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = rmd.RatesBloombergSource("localhost", 8194)
+    fixings = src.get_fixings("USD", date(2026, 8, 14), date(2026, 8, 17))
+    assert [f.date.isoformat() for f in fixings] == ["2026-08-14", "2026-08-15", "2026-08-17"]
+    assert math.isclose(float(fixings[-1].value), 0.0530)
+
+
+def test_rates_bloomberg_source_get_bbg_curve_reconciliation_with_fake_blpapi(monkeypatch):
+    from data.bloomberg import rates_marketdata as rmd
+
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        assert request.securities == ["YCSW0490 Index"]
+        rows = [{"tenor": "1Y", "rate": 4.74}, {"tenor": "5Y", "rate": 3.91}]
+        return [{"securityData": [{"security": "YCSW0490 Index", "fieldData": {"CURVE_TENOR_RATES": rows}}]}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = rmd.RatesBloombergSource("localhost", 8194)
+    curve = src.get_bbg_curve("USD", date(2026, 8, 17))
+    assert curve is not None
+    assert curve.curve_id == "YCSW0490 Index"
+    assert [p.tenor for p in curve.points] == ["1Y", "5Y"]
+    assert math.isclose(float(curve.points[0].rate), 0.0474)
+
+
+def test_rates_bloomberg_source_get_bbg_curve_returns_none_when_unavailable(monkeypatch):
+    from data.bloomberg import rates_marketdata as rmd
+
+    def responder(request):
+        return [{"securityData": [{"security": request.securities[0], "fieldData": {}}]}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = rmd.RatesBloombergSource("localhost", 8194)
+    assert src.get_bbg_curve("USD", date(2026, 8, 17)) is None
+
+
+def test_rates_bloomberg_source_no_curve_id_returns_none_without_request(monkeypatch):
+    from data.bloomberg import rates_marketdata as rmd
+
+    def responder(request):
+        raise AssertionError("should not be called: currency has no bbg_curve_id path exercised")
+
+    _install_fake_blpapi(monkeypatch, responder)
+    src = rmd.RatesBloombergSource("localhost", 8194)
+    # Monkeypatch the ticker map lookup to simulate a currency with no curve id configured.
+    monkeypatch.setattr(rmd, "ois_bbg_curve_id", lambda ccy: None)
+    assert src.get_bbg_curve("USD", date(2026, 8, 17)) is None

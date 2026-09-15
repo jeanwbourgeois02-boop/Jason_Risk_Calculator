@@ -1,3 +1,4 @@
 - [BNP file quirks](bnp-file-quirks.md) — blank Fx on zero cash, ES Position=0, positions PK netting (239 rows -> 31 keys), observed tolerance maxima
 - [Idempotent CLI loader](idempotent-loader.md) — data/load.py skip-vs-reject-vs-conflict accounting, on_duplicate='skip', content-diff on key match, --allow-conflicts
 - [BUILD_PLAN task B schema break](build-plan-task-b-schema-break.md) — trades.theme + pnl_snapshots removal breaks 13-col INSERTs/reads outside data/ingest; do not fix outside ownership
+- [IRS marks official-source change](irs-marks-official-source-change.md) — PAR_RATE/PV_USD/DV01_USD now QL_PRICER not BBG_BDH; new curve_quotes table; quote column names in generic table loops

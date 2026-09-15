@@ -1,12 +1,16 @@
 """BNP position / P&L CSV -> instruments, trades, trade_legs, positions.
 
-Scope: FORWARD, CURRENCY and FUTURES rows of fund NMMF. INTEREST_RATE_SWAP rows are
-logged and skipped; any other Financial Type is filtered out silently.
+Scope: FORWARD, CURRENCY, FUTURES and INTEREST_RATE_SWAP rows of fund NMMF; any other
+Financial Type is filtered out silently.
 
-FORWARD rows produce instruments, trades, trade_legs and positions. CURRENCY and FUTURES
-rows produce instruments and positions only: the PB snapshot carries no fill date or
-per-fill price for futures (one netted row per contract), so futures fills come from the
-xlsx blotter, never from this file.
+FORWARD and INTEREST_RATE_SWAP rows produce instruments, trades and trade_legs (IRS rows
+via ``data/ingest/irs.py``; IRS produces no positions row -- see that module). FORWARD
+additionally produces a positions row. CURRENCY and FUTURES rows produce instruments and
+positions only: the PB snapshot carries no fill date or per-fill price for futures (one
+netted row per contract), so futures fills come from the xlsx blotter, never from this
+file. A row whose Financial Type is INTEREST_RATE_SWAP but that fails to parse (regex
+mismatch, zero Position, etc.) still counts in ``n_skipped_irs``, mirroring how a
+malformed FORWARD row is rejected rather than coerced.
 
 The file dated T (``HA_PNL_YYYYMMDD.csv``) is the T-1 close snapshot: ``as_of_date`` is
 the previous weekday of T unless overridden (see ``_previous_weekday``).
@@ -33,8 +37,11 @@ log = logging.getLogger(__name__)
 PERPETUAL = "9999-12-31"
 SOURCE = "BNP"
 FUND = "NMMF"
-IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURES")
-SKIPPED_TYPES = ("INTEREST_RATE_SWAP",)
+IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURES", "INTEREST_RATE_SWAP")
+# Kept as a named constant for callers/tests that still refer to it; no longer means
+# "always skipped" -- INTEREST_RATE_SWAP rows are now parsed via data/ingest/irs.py, and
+# only rows that fail to parse land in n_skipped_irs.
+SKIPPED_TYPES = ()
 
 # PROVISIONAL: taken from docs/open-questions.md "NDF list" (BRL, TWD, KRW, IDR
 # non-deliverable; TRY, MXN deliverable). Not yet verified with the prime broker.
@@ -365,9 +372,14 @@ def parse(csv_path: Union[str, Path], as_of_date: Optional[Union[str, date]] = N
         elif ftype == "FUTURES":
             res.n_futures += 1
             _parse_future(res, raw_positions, row, row_no, as_of, as_of_iso)
-        elif ftype in SKIPPED_TYPES:
-            res.n_skipped_irs += 1
-            log.info("row %d: skipping %s %s (%s)", row_no, ftype, symbol, _s(row["Symbol Description"]))
+        elif ftype == "INTEREST_RATE_SWAP":
+            from data.ingest.irs import parse_row as _parse_irs_row  # lazy: see irs.py
+
+            n_rejects_before = len(res.rejects)
+            _parse_irs_row(res, row, row_no, as_of_iso)
+            if len(res.rejects) > n_rejects_before:
+                res.n_skipped_irs += 1
+                log.info("row %d: skipping %s %s (%s)", row_no, ftype, symbol, res.rejects[-1].reason)
         else:
             res.n_skipped_other += 1
 

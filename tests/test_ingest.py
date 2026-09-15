@@ -55,6 +55,48 @@ def test_schema_columns_match_contract():
             assert r[3] == 1 or r[5] == 1, f"{t}.{r[1]} is nullable"
 
 
+def test_schema_has_curve_quotes_table():
+    conn = schema.connect()
+    assert "curve_quotes" in schema.TABLES
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "curve_quotes" in names
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(curve_quotes)")]
+    assert cols == ["as_of_date", "ccy", "index", "tenor", "ticker", "value", "quote_type", "field", "source"]
+    for r in conn.execute("PRAGMA table_info(curve_quotes)"):
+        assert r[3] == 1, f"curve_quotes.{r[1]} is nullable"
+    # (as_of_date, ccy, index, tenor, source) is the PK -> distinct tickers/fields collide
+    conn.execute(
+        "INSERT INTO curve_quotes VALUES ('2026-08-17','USD','SOFR','1Y','USSO1 Curncy',3.5,'PAR','PX_LAST','BBG_BDP')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO curve_quotes VALUES ('2026-08-17','USD','SOFR','1Y','USSO1 Curncy',3.6,'PAR','PX_LAST','BBG_BDP')")
+
+
+def test_official_mark_source_uses_ql_pricer_for_irs_marks():
+    assert schema.OFFICIAL_MARK_SOURCE["PAR_RATE"] == "QL_PRICER"
+    assert schema.OFFICIAL_MARK_SOURCE["PV_USD"] == "QL_PRICER"
+    assert schema.OFFICIAL_MARK_SOURCE["DV01_USD"] == "QL_PRICER"
+    # unrelated mark_types are unchanged
+    assert schema.OFFICIAL_MARK_SOURCE["SPOT"] == "BBG_BFXFORWARD"
+    assert schema.OFFICIAL_MARK_SOURCE["FWD_OUTRIGHT"] == "BBG_BFXFORWARD"
+    assert schema.OFFICIAL_MARK_SOURCE["FUTURE_PX"] == "BBG_BDH"
+    assert schema.OFFICIAL_MARK_SOURCE["DELTA"] == "MANUAL"
+    assert schema.OFFICIAL_MARK_SOURCE["PREMIUM"] == "MANUAL"
+
+
+def test_marks_official_prefers_ql_pricer_over_bbg_bdh_for_pv_usd():
+    conn = schema.connect()
+    conn.execute("INSERT INTO instruments VALUES "
+                 "('IRSOIS-USD-1','IRS','USD','USD',1,0,'IRSOIS-USD-1','2027-02-11')")
+    rows = [
+        ("2026-08-17", "IRSOIS-USD-1", "2027-02-11", "PV_USD", 100.0, "BBG_BDH", "2026-08-17T17:00:00-04:00"),
+        ("2026-08-17", "IRSOIS-USD-1", "2027-02-11", "PV_USD", 101.0, "QL_PRICER", "2026-08-17T17:00:00-04:00"),
+    ]
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", rows)
+    got = conn.execute("SELECT value, source FROM marks_official WHERE mark_type='PV_USD'").fetchall()
+    assert got == [(101.0, "QL_PRICER")]
+
+
 def test_schema_foreign_keys_enforced():
     conn = schema.connect()
     with pytest.raises(sqlite3.IntegrityError):
@@ -196,6 +238,20 @@ def _cash_row(**over):
     return base
 
 
+def _irs_row(**over):
+    base = dict(
+        Account="GSCO-DRV-NMMF", CounterParty="GSCOUS", Currency="DOL.C-USAA", Fund="NMMF",
+        **{"Financial Type": "INTEREST_RATE_SWAP", "NM Strategy": "HAHY7", "Trader Name": "Henry Chan",
+           "Trade Factor": 1.0, "Local Cost": 0.0, "Market Value Local": 134345.3788,
+           "Market Value Base": 134345.3788, "Symbol Description":
+           "IRS NA 11/11/2026 02/11/2027 3.98000000 USD"},
+        Cost=0.0, Fx=1.0, Position=625000000.0, Price=214.952606, Quantity=625.0,
+        Symbol="IRSOIS-USD-22860996",
+    )
+    base.update(over)
+    return base
+
+
 def test_synthetic_reject_reports_row_number(tmp_path):
     p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [
         _fwd_row(),
@@ -209,8 +265,12 @@ def test_synthetic_reject_reports_row_number(tmp_path):
     r = bnp.parse(p)
     assert r.as_of_date == "2026-08-17"
     assert [t.trade_id for t in r.trades] == ["111"]
+    # The IRSOIS row keeps the FORWARD-style Symbol Description from _fwd_row(), which
+    # does not match the IRS description regex, so it is genuinely malformed and rejected
+    # (row 7) rather than parsed -- it still counts in n_skipped_irs below.
     assert sorted((x.row_no, x.symbol) for x in r.rejects) == [
-        (3, "USDJPY091626-112"), (4, "USDJPY091726-113"), (5, "USDCHF091626-114")]
+        (3, "USDJPY091626-112"), (4, "USDJPY091726-113"), (5, "USDCHF091626-114"),
+        (7, "IRSOIS-USD-1")]
     assert "regex" in next(x.reason for x in r.rejects if x.row_no == 3)
     assert r.n_skipped_fund == 1 and r.n_skipped_irs == 1
 
@@ -257,6 +317,100 @@ def test_synthetic_futures_row_writes_position_only(tmp_path):
     bnp.load(p, conn)
     assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
+
+
+# --------------------------------------------------------------------------- IRS (irs.py)
+def test_synthetic_irs_row_produces_instrument_trade_and_legs(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_irs_row()])
+    r = bnp.parse(p)
+    assert r.rejects == [] and r.n_skipped_irs == 0
+    assert r.positions == []  # IRS produces no positions row
+
+    (t,) = r.trades
+    assert t.trade_id == "22860996" and t.instrument_id == "IRSOIS-USD-22860996"
+    assert t.product == "IRS" and t.package_id == "22860996"
+    assert t.trade_date == "2026-11-11"  # placeholder = effective_date, see irs.py docstring
+    assert t.quantity == pytest.approx(625_000_000.0)  # Position > 0 -> pay fixed -> quantity > 0
+    assert t.price == pytest.approx(0.0398)  # 3.98% -> decimal
+
+    inst = r.instruments["IRSOIS-USD-22860996"]
+    assert (inst.asset_class, inst.base_ccy, inst.quote_ccy, inst.multiplier, inst.is_ndf, inst.expiry_date) == \
+        ("IRS", "USD", "USD", 1.0, 0, "2027-02-11")
+
+    legs = {l.leg_type: l for l in r.legs}
+    assert set(legs) == {"FIXED", "FLOAT"}
+    fixed, float_leg = legs["FIXED"], legs["FLOAT"]
+    assert fixed.amount == pytest.approx(-625_000_000.0) and fixed.rate == pytest.approx(0.0398)
+    assert float_leg.amount == pytest.approx(625_000_000.0) and float_leg.rate == 0.0
+    for leg in (fixed, float_leg):
+        assert leg.start_date == "2026-11-11" and leg.settle_date == "2027-02-11"
+        assert leg.settles_cash == 0  # IRS notional never exchanges: never enters the cash ladder
+
+
+def test_synthetic_irs_pay_receive_direction_follows_position_sign(tmp_path):
+    """Position < 0 -> receive fixed -> quantity < 0 (opposite of the reference-file sample)."""
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [
+        _irs_row(Position=-625000000.0, Quantity=-625.0),
+    ])
+    r = bnp.parse(p)
+    assert r.rejects == []
+    (t,) = r.trades
+    assert t.quantity == pytest.approx(-625_000_000.0)
+    legs = {l.leg_type: l for l in r.legs}
+    assert legs["FIXED"].amount == pytest.approx(625_000_000.0)
+    assert legs["FLOAT"].amount == pytest.approx(-625_000_000.0)
+
+
+def test_synthetic_irs_zero_position_is_rejected(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_irs_row(Position=0.0)])
+    r = bnp.parse(p)
+    assert r.trades == [] and r.legs == []
+    assert r.n_skipped_irs == 1
+    assert "direction" in r.rejects[0].reason
+
+
+def test_synthetic_irs_malformed_symbol_is_rejected(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_irs_row(Symbol="IRS-USD-1")])  # not IRSOIS-
+    r = bnp.parse(p)
+    assert r.trades == [] and r.n_skipped_irs == 1
+    assert "Symbol" in r.rejects[0].reason
+
+
+def test_synthetic_irs_malformed_description_is_rejected(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [
+        _irs_row(**{"Symbol Description": "IRS NA 11/11/2026 3.98000000 USD"}),  # 5 tokens, missing maturity
+    ])
+    r = bnp.parse(p)
+    assert r.trades == [] and r.n_skipped_irs == 1
+    assert "regex" in r.rejects[0].reason
+
+
+def test_synthetic_irs_symbol_ccy_disagrees_with_description_ccy_is_rejected(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [
+        _irs_row(**{"Symbol Description": "IRS NA 11/11/2026 02/11/2027 3.98000000 EUR"}),
+    ])
+    r = bnp.parse(p)
+    assert r.trades == [] and r.n_skipped_irs == 1
+    assert "ccy" in r.rejects[0].reason
+
+
+def test_synthetic_irs_maturity_before_effective_is_rejected(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [
+        _irs_row(**{"Symbol Description": "IRS NA 02/11/2027 11/11/2026 3.98000000 USD"}),
+    ])
+    r = bnp.parse(p)
+    assert r.trades == [] and r.n_skipped_irs == 1
+    assert "maturity" in r.rejects[0].reason
+
+
+def test_synthetic_irs_load_into_db(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_irs_row()])
+    conn = schema.connect()
+    bnp.load(p, conn)
+    assert conn.execute("SELECT COUNT(*) FROM trades WHERE product='IRS'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM trade_legs WHERE trade_id='22860996'").fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM trade_legs WHERE trade_id='22860996' AND settles_cash=1").fetchone()[0] == 0
 
 
 # ---- W7: each recon check / reject path can actually fail
@@ -415,14 +569,32 @@ def test_real_counts(parsed):
     assert parsed.as_of_date == "2026-08-17"
     assert parsed.n_forward == 229
     assert parsed.rejects == []
-    assert parsed.n_skipped_irs == 3
+    # All 3 real INTEREST_RATE_SWAP rows are well-formed IRSOIS rows: they now parse
+    # (instruments/trades/trade_legs), so none land in n_skipped_irs.
+    assert parsed.n_skipped_irs == 0
     assert parsed.n_currency == 9 and parsed.n_futures == 1
-    assert len(parsed.trades) == 229
-    assert all(t.product == "FX_FWD" for t in parsed.trades)
-    assert len(parsed.legs) == 229 * 2
-    assert all(l.leg_type == "FX_NEAR" for l in parsed.legs)
+    irs_trades = [t for t in parsed.trades if t.product == "IRS"]
+    fx_trades = [t for t in parsed.trades if t.product == "FX_FWD"]
+    assert len(irs_trades) == 3
+    assert len(fx_trades) == 229
+    assert len(parsed.trades) == 232
+    assert len(parsed.legs) == 229 * 2 + 3 * 2
+    fx_legs = [l for l in parsed.legs if l.trade_id in {t.trade_id for t in fx_trades}]
+    irs_legs = [l for l in parsed.legs if l.trade_id in {t.trade_id for t in irs_trades}]
+    assert all(l.leg_type == "FX_NEAR" for l in fx_legs)
+    assert {l.leg_type for l in irs_legs} == {"FIXED", "FLOAT"}
+    assert all(l.settles_cash == 0 for l in irs_legs)
     assert all(t.source == "BNP" and t.package_id == t.trade_id for t in parsed.trades)
     assert {t.strategy for t in parsed.trades} <= {"HAHY7", "HACA"}
+    # All 3 real IRS rows have Position > 0 -> pay fixed per the (UNVERIFIED) convention,
+    # so trades.quantity > 0 and the FIXED leg (amount = -quantity) is negative.
+    assert all(t.quantity > 0 for t in irs_trades)
+    assert all(t.instrument_id.startswith("IRSOIS-USD-") for t in irs_trades)
+    for t in irs_trades:
+        legs = {l.leg_type: l for l in irs_legs if l.trade_id == t.trade_id}
+        assert legs["FIXED"].amount == -t.quantity
+        assert legs["FLOAT"].amount == t.quantity
+        assert legs["FLOAT"].rate == 0.0
 
 
 @needs_raw
@@ -481,8 +653,9 @@ def test_real_load_counts(parsed, raw_df):
     conn = schema.connect()
     bnp.load(RAW, conn)  # strict: the reference file must load clean
     assert conn.execute("SELECT COUNT(*) FROM trades WHERE product='FX_FWD'").fetchone()[0] == 229
-    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 229
-    assert conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0] == 458
+    assert conn.execute("SELECT COUNT(*) FROM trades WHERE product='IRS'").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 232
+    assert conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0] == 458 + 6
     nm = raw_df[(raw_df["Fund"] == "NMMF") & raw_df["Financial Type"].isin(["FORWARD", "CURRENCY", "FUTURES"])]
     assert len(nm) == 239
     # positions grain is the PK (account, instrument, settle_date): forwards on the same
@@ -575,7 +748,7 @@ def test_load_cli_real_file_twice_is_idempotent(tmp_path, capsys):
     out1 = capsys.readouterr().out
     assert rc1 == 0
     assert "as_of_date=2026-08-17" in out1
-    assert "trades_loaded=229" in out1
+    assert "trades_loaded=232" in out1
     assert "rejects=0" in out1
     assert "skipped=0" in out1
     assert "conflicts=0" in out1
@@ -585,7 +758,7 @@ def test_load_cli_real_file_twice_is_idempotent(tmp_path, capsys):
     n_legs = conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0]
     n_pos = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
     n_marks = conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0]
-    assert n_trades == 229 and n_marks > 0
+    assert n_trades == 232 and n_marks > 0
     conn.close()
 
     rc2 = load_mod.run([str(RAW), "--db", str(db_path)])
@@ -594,8 +767,8 @@ def test_load_cli_real_file_twice_is_idempotent(tmp_path, capsys):
     assert "trades_loaded=0" in out2
     assert "rejects=0" in out2
     assert "conflicts=0" in out2
-    assert f"skipped={229 + n_marks}" in out2  # skipped includes trades + marks
-    assert "skipped=262" in out2
+    assert f"skipped={232 + n_marks}" in out2  # skipped includes trades + marks
+    assert "skipped=265" in out2  # 232 trades + 33 marks
 
     conn = schema.connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == n_trades

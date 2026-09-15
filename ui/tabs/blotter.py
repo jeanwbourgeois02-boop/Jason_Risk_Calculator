@@ -29,11 +29,21 @@ Sub-tab layout, each (Total book / FX / Rates / Options):
       filterable columns; row expand (an `html.Details` per trade) shows legs and the
       marks used, exactly as before.
 
-Rates and Options are placeholders (item 3 of the 2026-09-15 decision): no IRS/option
-trades exist in `value_book` yet (it only builds FX and FUTURE rows), so their strip
-always reads "Unavailable (no IRS/option trades loaded; view not built yet)" and their
-table is empty with the same columns as the other sub-tabs -- never hidden, per the
-"rows must always render" rule; there just are none to show.
+Options is still a placeholder (item 3 of the 2026-09-15 decision): no option trades
+exist in `value_book` yet (it only builds FX and FUTURE rows), so its strip always
+reads "Unavailable (no option trades loaded; view not built yet)" and its table is
+empty with the same columns as the other sub-tabs -- never hidden, per the "rows must
+always render" rule; there just are none to show.
+
+Rates (added 2026-09-15, once `engine/rates` started writing QL_PRICER marks) is a
+real view but does NOT go through `value_book`/`priced_value_book` at all -- that
+pipeline still only builds FX/FUTURE rows. It is `ui.tabs.rates.build_layout`, an IRS
+blotter read straight off `trades`/`instruments`/`marks_official` (see that module's
+docstring for the recon-status column and tolerance). It has no P&L strip, filter bar
+or row-click detail panel -- those all assume `value_book`'s row shape (trade_id/mark/
+pnl_usd/...), which IRS rows don't have; it is a single always-current table, rebuilt
+whenever the as-of date or sub-tab selection changes via the same top-level `_update`
+callback as every other sub-tab.
 
 Bundles sub-tab (item 4): `ui.tabs.blotter_bundles` renders a list of bundles (from
 `data.ingest.themes.list_bundles`) with LTD/Daily/MTD/YTD via
@@ -50,6 +60,7 @@ import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs import blotter_bundles as bundles_ui
+from ui.tabs import rates as rates_ui
 from ui.tabs.blotter_pricing import (
     HEADLINE_ORDER,
     HEADLINE_TITLES,
@@ -88,8 +99,9 @@ SCOPE_PRODUCTS = {
     "rates": ("IRS",),
     "options": ("FX_OPTION",),
 }
+# "rates" is a real view now (ui.tabs.rates, 2026-09-15) -- see scope_layout. Options
+# stays a placeholder: no option trades/marks exist yet.
 PLACEHOLDER_SCOPES = {
-    "rates": "no IRS trades loaded; view not built yet",
     "options": "no option trades loaded; view not built yet",
 }
 # Futures is a real view (not a "not built yet" placeholder like Rates/Options), but on
@@ -433,6 +445,9 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     detail_id = f"{DETAIL_PANEL_ID}-{scope}-detail"
     display_columns, column_labels = scope_columns(scope)
 
+    if scope == "rates":
+        return rates_ui.build_layout(conn, as_of)
+
     if scope in PLACEHOLDER_SCOPES:
         empty = pd.DataFrame(columns=_DISPLAY_COLUMNS)
         return html.Div([
@@ -679,8 +694,11 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             prevent_initial_call=True,
         )(_clear_filters)
 
+    # "rates" (ui.tabs.rates) has no strip/detail/filter of its own (module docstring
+    # above / ui.tabs.rates docstring) -- its table isn't priced_value_book-shaped, so
+    # the generic callbacks below (which assume trade_id/mark/pnl_usd rows) don't apply.
     for _scope in SCOPE_ORDER:
-        if _scope != "bundles":
+        if _scope not in ("bundles", "rates"):
             _register_strip_callback(_scope)
             _register_detail_callback(_scope)
             _register_filter_callback(_scope)

@@ -1,0 +1,3 @@
+- [QuantLib install status](quantlib-install-status.md) — QuantLib 1.43 already installed, no pip install needed; tests still skip-guarded
+- [pricing_conventions.md doesn't exist here](pricing-conventions-doc-does-not-exist.md) — reference-project-only file; conventions live in engine/rates/__init__.py instead
+- [Sign & scope conventions](sign-and-scope-conventions.md) — IRS pay/receive sign, DV01 definition, OIS-only Phase 1 scope, curve_id/source precedence
