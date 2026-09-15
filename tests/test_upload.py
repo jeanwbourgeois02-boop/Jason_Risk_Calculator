@@ -72,3 +72,34 @@ def test_filename_dates():
     assert suggested_date('HA_PNL_20260818.xlsx') == '2026-08-17'
     assert suggested_date('report.xlsx') is None
     assert suggested_date('HA_PNL_20269999.csv') is None
+    # browser re-download suffixes keep the date; a ninth digit does not
+    assert suggested_date('HA_PNL_20260915[22].csv') == '2026-09-14'
+    assert suggested_date('HA_PNL_20260915 (1).csv') == '2026-09-14'
+    assert suggested_date('HA_PNL_202609151.csv') is None
+
+
+RAW_0915 = RAW.with_name('HA_PNL_20260915[22].csv')
+
+
+@pytest.mark.skipif(not RAW_0915.exists(), reason='2026-09-15 BNP file not present in data/raw')
+def test_second_daily_file_with_closed_lines_imports_after_first(tmp_path):
+    """The 2026-09-15 file has 49 zero-quantity lines (NDFs fixed 09-14, settled HKD)
+    and 5-dp Price rounding on multi-million legs; it must load on top of 08-18."""
+    db = tmp_path / 'risk.db'
+    import_report(RAW.read_bytes(), RAW.name, '2026-08-17', db)
+    message = import_report(RAW_0915.read_bytes(), RAW_0915.name, '2026-09-14', db)
+    assert '49 closed FORWARD lines' in message and '15 other unsupported rows' in message
+    with sqlite3.connect(db) as conn:
+        dates = [r[0] for r in conn.execute('SELECT DISTINCT as_of_date FROM positions ORDER BY 1')]
+        closed = conn.execute(
+            "SELECT p.instrument_id, p.settle_date, p.pnl_dtd_usd FROM positions p JOIN instruments i USING (instrument_id) "
+            "WHERE p.as_of_date='2026-09-14' AND p.quantity=0 AND i.asset_class='FX' ORDER BY 1").fetchall()
+        n_trades = conn.execute('SELECT COUNT(*) FROM trades').fetchone()[0]
+        zero_qty_trades = conn.execute('SELECT COUNT(*) FROM trades WHERE quantity=0').fetchone()[0]
+    assert dates == ['2026-08-17', '2026-09-14']
+    # one netted zero-quantity row per fixed NDF value date (plus the settled HKD line), P&L kept
+    assert [(i, d) for i, d, _ in closed] == [('USDBRL', '2026-09-16'), ('USDHKD', '2026-09-08'),
+                                              ('USDIDR', '2026-09-16'), ('USDKRW', '2026-09-16'),
+                                              ('USDTWD', '2026-09-16')]
+    assert sum(pnl for _, _, pnl in closed) == pytest.approx(39.539287 - 5.122639 - 4.843978 + 18.316588, abs=0.01)
+    assert n_trades > 229 and zero_qty_trades == 0

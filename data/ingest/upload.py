@@ -20,7 +20,10 @@ REQUIRED = set('Fund|Financial Type|Symbol|Symbol Description|Currency|Quantity|
 
 
 def suggested_date(filename):
-    match = re.search(r'HA_PNL_(\d{8})\.(csv|xlsx|xlsm|xls)$', filename or '', re.I)
+    """Snapshot date from an HA_PNL_YYYYMMDD file name (that date minus one weekday).
+    A browser-download suffix after the date ('HA_PNL_20260915[22].csv',
+    'HA_PNL_20260915 (1).csv') is accepted; a ninth digit is not."""
+    match = re.search(r'HA_PNL_(\d{8})(?!\d).*\.(csv|xlsx|xlsm|xls)$', filename or '', re.I)
     if not match:
         return None
     try:
@@ -105,8 +108,10 @@ def import_report(payload, filename, as_of, db_path, sheet=None):
         'positions': len(result.positions) - result.skipped['positions'],
         'marks': loaded,
     }
+    closed = (f"{result.n_forward_closed} closed FORWARD lines (quantity 0: NDF fixed or settled) kept as "
+              f"positions with their P&L, no trades. " if result.n_forward_closed else "")
     return (f"Imported {as_of}: {counts['trades']} new trades, {counts['positions']} new positions, "
-            f"{counts['marks']} new BNP marks. "
+            f"{counts['marks']} new BNP marks. {closed}"
             f"{sum(result.skipped.values()) + skipped} identical records already present. "
             f"Excluded: {result.n_skipped_irs} malformed IRS rows, {result.n_skipped_other} other unsupported rows, "
             f"{result.n_skipped_fund} rows from other funds. Futures are positions only.")

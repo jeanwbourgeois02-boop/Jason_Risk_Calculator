@@ -427,6 +427,53 @@ def test_bnp_marks_conflicting_rows_are_rejected(tmp_path, monkeypatch):
     assert any("conflicting FWD_OUTRIGHT" in r.reason for r in result.rejects)
 
 
+def test_bnp_marks_skip_closed_lines(tmp_path):
+    """Quantity = 0 lines (NDF fixed / settled, 2026-09-15 file) carry a fixing or a
+    stale Price and possibly a blank Fx: no FWD_OUTRIGHT or SPOT from them, no reject,
+    and they must not seed the quote-ccy -> USD map used for cross spots."""
+    import math
+
+    import pandas as pd
+
+    cols = [
+        "Fund", "Financial Type", "Symbol", "Symbol Description", "Currency", "Quantity",
+        "Local Cost", "Price", "Fx", "Market Value Local", "Market Value Base", "Account",
+        "CounterParty", "NM Strategy", "Trader Name", "DTD Total P&L", "DTD Trading P&L",
+        "MTD Total P&L", "Start Date Dirty MV", "Previous Month End Market Value Base",
+        "Position", "Trade Factor",
+    ]
+    base = {c: 0 for c in cols}
+    base.update({"Fund": "NMMF", "Financial Type": "FORWARD", "Account": "ACC", "CounterParty": "CPTY",
+                 "NM Strategy": "HAHY7", "Trader Name": "T", "Trade Factor": 1})
+    # settled USDHKD line first in file order: Price 0, Fx blank (NaN)
+    settled = dict(base, Symbol="USDHKD090826-1", Currency="HKD.C-HKAA", Quantity=0.0, Price=0.0, Fx=float("nan"),
+                   **{"Symbol Description": "TD 08/05/2026 VD 09/08/2026 SELL USD VS .BUY HKD @ 7.83444000"})
+    # fixed USDBRL NDF lines with two different "Price" values on one value date
+    fixed1 = dict(base, Symbol="USDBRL091626-2", Currency="BRL.C-BRAA", Quantity=0.0, Price=5.14965, Fx=0.194189,
+                  **{"Symbol Description": "TD 07/23/2026 VD 09/16/2026 SELL USD VS .BUY BRL @ 5.14017400"})
+    fixed2 = dict(fixed1, Symbol="USDBRL091626-3", Price=5.13257)
+    # live lines: a USDHKD forward (its Fx must be the one that seeds HKD) and a USDBRL later date
+    live_hkd = dict(base, Symbol="USDHKD101526-4", Currency="HKD.C-HKAA", Quantity=1000000.0,
+                    **{"Local Cost": 7800000.0, "Price": 7.79, "Fx": 0.128205, "Position": 1000000.0,
+                       "Symbol Description": "TD 09/01/2026 VD 10/15/2026 BUY USD VS .SELL HKD @ 7.80000000"})
+    live_brl = dict(base, Symbol="USDBRL092426-5", Currency="BRL.C-BRAA", Quantity=-1000000.0,
+                    **{"Local Cost": -5225640.0, "Price": 5.15904, "Fx": 0.194189, "Position": -1000000.0,
+                       "Symbol Description": "TD 08/20/2026 VD 09/24/2026 SELL USD VS .BUY BRL @ 5.22564000"})
+    path = tmp_path / "HA_PNL_20260915.csv"
+    pd.DataFrame([settled, fixed1, fixed2, live_hkd, live_brl]).to_csv(path, index=False)
+
+    result = bnp_marks.extract_bnp_marks(path, as_of_date="2026-09-14")
+    assert result.rejects == [] and result.n_skipped_closed == 3
+    marks = {(r.instrument_id, r.settle_date, r.mark_type): r.value for r in result.rows}
+    assert marks == {
+        ("USDHKD", "2026-10-15", "FWD_OUTRIGHT"): 7.79,
+        ("USDHKD", "2026-09-14", "SPOT"): pytest.approx(1 / 0.128205),
+        ("USDBRL", "2026-09-24", "FWD_OUTRIGHT"): 5.15904,
+        ("USDBRL", "2026-09-14", "SPOT"): pytest.approx(1 / 0.194189),
+    }
+    assert not any(math.isnan(r.value) for r in result.rows)
+
+
 # =========================================================================== pull_marks
 class MultiEvent:
     """Wrap a list of event specs (each a plain data list, a (data, event_type) tuple, or

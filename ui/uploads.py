@@ -27,7 +27,8 @@ not the value changed, so a "manual value -> store" callback ran right after the
 callback and wiped the filename-derived date out of the store (bug seen 2026-09-15 as
 "Choose the snapshot date before confirming" on a correctly named HA_PNL file).
 
-The status line on success is a single sentence:
+The status line on success is one sentence, with the loader's own summary (new / identical
+/ excluded / closed-line counts from `import_report`) underneath it in muted text:
     "Loaded <filename> - snapshot <as_of> - <N> trades, <M> positions"
 `trades` = total rows currently in the `trades` table (trades have no as_of_date column
 of their own -- CLAUDE.md's `trades` table -- so a per-file count is not recoverable
@@ -185,4 +186,5 @@ def register(app, get_db_path):
         from ui.app import load_summary
         data = load_summary(db_path)
         short = (f"Loaded {filename} - snapshot {as_of} - {data['trades']} trades, {data['positions']} positions")
-        return short, describe_source(data), history_layout(db_path), as_of
+        return [short, html.Div(message, className="section-kicker")], describe_source(data), \
+            history_layout(db_path), as_of
