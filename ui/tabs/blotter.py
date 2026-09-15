@@ -148,6 +148,14 @@ def _fmt_status(value) -> str:
     return {"OPEN": "Open", "SETTLED": "Settled"}.get(value, value or "")
 
 
+_PRODUCT_LABELS = {"FX_SPOT": "Spot", "FX_FWD": "Forward", "FX_SWAP": "Swap", "FUTURE": "Future",
+                   "IRS": "Swap (IRS)", "FX_OPTION": "Option"}
+
+
+def _fmt_product(value) -> str:
+    return _PRODUCT_LABELS.get(value, value or "")
+
+
 def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
                   display_columns: Optional[list] = None,
                   column_labels: Optional[dict] = None) -> dash_table.DataTable:
@@ -168,6 +176,8 @@ def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
             formatted[col] = formatted[col].map(_fmt_amount)
         elif col == "status":
             formatted[col] = formatted[col].map(_fmt_status)
+        elif col == "product":
+            formatted[col] = formatted[col].map(_fmt_product)
         elif col == "pnl_usd":
             formatted[col] = [
                 "n/a" if (v != v) else format_cell(v) for v in df[col].tolist()
