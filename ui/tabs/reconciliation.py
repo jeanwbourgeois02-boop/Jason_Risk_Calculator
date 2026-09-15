@@ -41,7 +41,7 @@ import sqlite3
 from typing import Callable, Optional
 
 import pandas as pd
-from dash import Input, Output, dash_table, html
+from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs.controls import build_date_picker, build_source_dropdown, source_value_to_param
 from ui.tabs.formatting import format_cell
@@ -49,6 +49,16 @@ from ui.tabs.formatting import format_cell
 SOURCE_DROPDOWN_ID = "reconciliation-source"
 DATE_PICKER_ID = "reconciliation-date"
 CONTENT_CONTAINER_ID = "reconciliation-content-container"
+
+# Workbook futures-fill import (user decision 2026-09-15, item B): its own small
+# choose/confirm/status control, separate from the BNP report upload strip above the
+# tabs. data.ingest.xlsx_futures.load_futures_fills(xlsx_path, conn) takes a file PATH,
+# not bytes, so the uploaded contents are written to a temp file before calling it.
+FUTURES_UPLOAD_ID = "reconciliation-futures-file"
+FUTURES_STAGE_ID = "reconciliation-futures-stage"
+FUTURES_FILENAME_ID = "reconciliation-futures-filename"
+FUTURES_CONFIRM_ID = "reconciliation-futures-confirm"
+FUTURES_RESULT_ID = "reconciliation-futures-result"
 
 BREAK_TABLE_ID = "reconciliation-break-datatable"
 PAIR_TABLE_ID = "reconciliation-pnl-pair-datatable"
@@ -220,10 +230,28 @@ def valuation_table(df: pd.DataFrame, table_id: str) -> dash_table.DataTable:
     )
 
 
+def futures_import_control() -> html.Div:
+    """Choose/confirm/status control for the workbook futures-fill import (item B).
+    Nothing is written until Confirm is pressed, same pattern as the BNP upload strip."""
+    return html.Div(className="source-strip", children=[
+        html.Div(className="source-row", children=[
+            dcc.Upload(id=FUTURES_UPLOAD_ID, className="source-upload",
+                       children=html.Button("Import futures fills from workbook", className="btn"),
+                       accept=".xlsx,.xlsm", multiple=False, max_size=25 * 1024 * 1024),
+            html.Div(id=FUTURES_FILENAME_ID, className="source-line"),
+        ]),
+        html.Div(id=FUTURES_STAGE_ID, className="source-row source-row--stage", style={"display": "none"}, children=[
+            html.Button("Confirm import", id=FUTURES_CONFIRM_ID, n_clicks=0, className="btn"),
+        ]),
+        dcc.Loading(type="dot", color="#1f5fbf", children=html.Div(id=FUTURES_RESULT_ID, role="status", className="source-result")),
+    ])
+
+
 def build_layout(default_date: Optional[str] = None) -> html.Div:
     """Controls + an (initially empty) content container. Tables are filled in by the
     callback registered in register_callbacks. Includes the workbook manual-rates grid
-    (`ui/workbook_rates.py`), moved here per docs/BUILD_PLAN.md Task C4."""
+    (`ui/workbook_rates.py`), moved here per docs/BUILD_PLAN.md Task C4, and the
+    workbook futures-fill import control (item B)."""
     from ui import workbook_rates
 
     return html.Div([
@@ -232,6 +260,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         build_source_dropdown(SOURCE_DROPDOWN_ID, label="Workbook MTM rates"),
         build_date_picker(DATE_PICKER_ID, default_date=default_date),
         workbook_rates.layout(default_date),
+        futures_import_control(),
         html.Div(id=CONTENT_CONTAINER_ID),
     ])
 
@@ -243,6 +272,46 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     from ui import workbook_rates
 
     workbook_rates.register(app, get_db_path)
+
+    @app.callback(
+        Output(FUTURES_STAGE_ID, "style"), Output(FUTURES_FILENAME_ID, "children"),
+        Output(FUTURES_RESULT_ID, "children", allow_duplicate=True),
+        Input(FUTURES_UPLOAD_ID, "contents"), Input(FUTURES_UPLOAD_ID, "filename"),
+        prevent_initial_call=True,
+    )
+    def _futures_selected(contents, filename):
+        if not contents:
+            return {"display": "none"}, "", ""
+        return {}, filename, ""
+
+    @app.callback(
+        Output(FUTURES_RESULT_ID, "children"),
+        Input(FUTURES_CONFIRM_ID, "n_clicks"),
+        State(FUTURES_UPLOAD_ID, "contents"), State(FUTURES_UPLOAD_ID, "filename"),
+        prevent_initial_call=True,
+    )
+    def _futures_confirm(clicks, contents, filename):
+        if not contents:
+            return html.Span("Choose a workbook first.", className="source-result--error")
+        try:
+            from data.ingest.upload import decode
+            from data.ingest.xlsx_futures import load_futures_fills
+            from data.ingest import schema
+            import tempfile
+            from pathlib import Path
+
+            payload = decode(contents)
+            with tempfile.TemporaryDirectory() as tmp:
+                xlsx_path = Path(tmp) / (filename or "workbook.xlsx")
+                xlsx_path.write_bytes(payload)
+                conn = schema.connect(get_db_path())
+                try:
+                    inserted = load_futures_fills(xlsx_path, conn)
+                finally:
+                    conn.close()
+            return f"Imported {inserted} new futures fill(s) from {filename}."
+        except Exception as exc:
+            return html.Span(f"Import failed; no futures fills saved. {exc}", className="source-result--error")
 
     @app.callback(
         Output(CONTENT_CONTAINER_ID, "children"),

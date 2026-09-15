@@ -127,8 +127,26 @@ def test_build_layout_with_database(tmp_path):
     assert isinstance(layout, dash.html.Div)
 
 
+def _find_tabs(node):
+    """Recursively find the first dcc.Tabs in the tree (it now lives inside the
+    top-bar Div alongside the upload control, per user decision 2026-09-15 item A)."""
+    if isinstance(node, dash.dcc.Tabs):
+        return node
+    for child in getattr(node, "children", None) or []:
+        if isinstance(child, (list, tuple)):
+            for c in child:
+                found = _find_tabs(c)
+                if found is not None:
+                    return found
+        elif hasattr(child, "children") or isinstance(child, dash.dcc.Tabs):
+            found = _find_tabs(child)
+            if found is not None:
+                return found
+    return None
+
+
 def _tab_labels(layout):
-    tabs_bar = next(c for c in layout.children if isinstance(c, dash.dcc.Tabs))
+    tabs_bar = _find_tabs(layout)
     return [tab.label for tab in tabs_bar.children]
 
 
@@ -150,6 +168,41 @@ def test_no_overall_book_or_placeholder_tabs(tmp_path):
     assert "Rates" not in labels
     assert "Options" not in labels
     assert "Delta" not in labels
+
+
+def test_no_page_title_and_top_bar_has_tabs_and_upload(tmp_path):
+    """User decision 2026-09-15, item A: no H1 'Risk monitor' or other strip above the
+    tabs; the tab bar and the upload control share one top-bar row."""
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    layout = uiapp.build_layout(uiapp.load_summary(db_path))
+    text = []
+
+    def walk(node):
+        if isinstance(node, str):
+            text.append(node)
+            return
+        for child in getattr(node, "children", None) or []:
+            if isinstance(child, (list, tuple)):
+                for c in child:
+                    walk(c)
+            else:
+                walk(child)
+    walk(layout)
+    assert not any(isinstance(c, dash.html.H1) for c in layout.children)
+    top_bar = layout.children[0]
+    assert isinstance(top_bar, dash.html.Div)
+    kinds = [type(c).__name__ for c in top_bar.children]
+    assert "Tabs" in kinds
+    assert "Div" in kinds  # the upload strip
+
+
+def test_header_directly_under_top_bar(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    layout = uiapp.build_layout(uiapp.load_summary(db_path))
+    # top_bar is children[0]; the header block is the very next sibling.
+    assert getattr(layout.children[1], "id", None) == header.HEADER_ID
 
 
 def test_header_present_above_tabs(tmp_path):

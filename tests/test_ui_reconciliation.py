@@ -114,6 +114,48 @@ def test_message_box_is_grey_paragraph():
     assert box.style.get("color") == "gray"
 
 
+def test_futures_import_control_present_and_confirm_hidden_until_file_chosen():
+    layout = reconciliation.build_layout(default_date="2026-08-18")
+    ids = set()
+
+    def walk(node):
+        cid = getattr(node, "id", None)
+        if cid:
+            ids.add(cid)
+        for child in getattr(node, "children", []) or []:
+            if isinstance(child, list):
+                for c in child:
+                    walk(c)
+            else:
+                walk(child)
+
+    walk(layout)
+    assert reconciliation.FUTURES_UPLOAD_ID in ids
+    assert reconciliation.FUTURES_CONFIRM_ID in ids
+
+
+def test_futures_import_writes_nothing_until_confirm(tmp_path):
+    from data.ingest import schema
+
+    db_path = str(tmp_path / "empty.db")
+    schema.connect(db_path).close()
+
+    app = dash.Dash(__name__)
+    app.layout = reconciliation.build_layout(default_date="2026-08-18")
+    reconciliation.register_callbacks(app, get_db_path=lambda: db_path)
+
+    matches = [v for k, v in app.callback_map.items() if reconciliation.FUTURES_STAGE_ID in k]
+    assert matches
+    selected = matches[0]["callback"].__wrapped__
+    style, filename, result = selected("data:application/octet-stream;base64,AAAA", "workbook.xlsx")
+    assert style == {}
+    assert filename == "workbook.xlsx"
+
+    import sqlite3
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+
+
 def test_component_ids_are_reconciliation_prefixed():
     # Own-module id check only: ui/tabs/cash_ladder.py is owned and concurrently edited
     # by another agent (C1), so this test does not import it to avoid a cross-agent

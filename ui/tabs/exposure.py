@@ -79,9 +79,9 @@ DATE_LABEL_COL = "settlement_date_label"
 
 _MONO = {"fontFamily": "Consolas, 'Courier New', monospace", "fontSize": "12.5px", "padding": "4px 10px",
          "textAlign": "right", "whiteSpace": "nowrap"}
-_HEAD = {"fontWeight": "600", "backgroundColor": "#f0f2f5", "color": "#1f2933", "borderBottom": "1px solid #d9dee3"}
-_NEG = "#b42318"
-_POS = "#1a7f4b"
+_HEAD = {"fontWeight": "700", "backgroundColor": "#0f1f3d", "color": "#ffffff", "borderBottom": "1px solid #0f1f3d"}
+_NEG = "#c0392b"  # matches ui/assets/style.css --neg
+_POS = "#1a7f4b"  # matches ui/assets/style.css --pos
 
 
 def mock_rates(currencies: Iterable[str]) -> Dict[str, dict]:
@@ -127,6 +127,52 @@ def _sign_styles(columns: Iterable[str]) -> list:
         styles.append({"if": {"column_id": c, "filter_query": f"{{{c}}} contains ',' && !({{{c}}} contains '(')"},
                        "color": _POS})
     return styles
+
+
+HEADLINE_ID = "exposure-headline"
+
+
+def headline_numbers(result, futures: Optional[dict] = None) -> html.Div:
+    """The three headline numbers (user decision 2026-09-15, item C.1), in this order:
+    Delta combined (currencies + futures; gross-style sum of |usd_delta|, net shown as
+    small text underneath), Delta non-forward (futures now, options later), Delta
+    forward (currency legs only). Each is Unavailable with the engine's own reason
+    when a rate or a futures mark is missing -- never a fabricated number."""
+    from engine.ladder.exposure import portfolio_totals
+    futures = futures or DEFAULT_FUTURES
+    totals = portfolio_totals(result)
+    fut_value = futures.get("value", float("nan"))
+    rate_ok = not totals["missing"]
+    fut_ok = not pd.isna(fut_value)
+
+    if rate_ok:
+        forward_card = _card("Delta forward", format_amount(totals["net_usd"]), "Exposure", "currency legs (net)")
+    else:
+        forward_card = _card("Delta forward", "Unavailable", "Unavailable",
+                             "no rate: " + ", ".join(totals["missing"]))
+
+    if fut_ok:
+        nonfwd_card = _card("Delta non-forward", format_amount(fut_value), "Exposure",
+                            "open futures (options later)")
+    else:
+        nonfwd_card = _card("Delta non-forward", "Unavailable", "Unavailable",
+                            futures.get("reason") or "futures delta unavailable")
+
+    if rate_ok and fut_ok:
+        gross = totals["gross_usd"] + abs(fut_value)
+        net = totals["net_usd"] + fut_value
+        combined_card = _card("Delta combined", format_amount(gross), "Exposure", f"net {format_amount(net)}")
+    else:
+        reasons = []
+        if not rate_ok:
+            reasons.append("no rate: " + ", ".join(totals["missing"]))
+        if not fut_ok:
+            reasons.append(futures.get("reason") or "futures delta unavailable")
+        combined_card = _card("Delta combined", "Unavailable", "Unavailable", "; ".join(reasons))
+
+    return html.Div(id=HEADLINE_ID, className="cards cards--three", children=[
+        combined_card, nonfwd_card, forward_card,
+    ])
 
 
 # ------------------------------------------------------------------ 1. four snapshot cards
@@ -277,12 +323,19 @@ SUMMARY_ROWS = [("FX rate (USD per local)", "fx_rate"), ("Local delta", "local_d
                 ("Settlement type", "settlement")]
 
 
-def combined_frame(result, records: List[dict], sort: str = SORT_USD) -> pd.DataFrame:
+def combined_frame(result, records: List[dict], sort: str = SORT_USD,
+                   fallback_ccys: Optional[set] = None) -> pd.DataFrame:
     """Screenshot layout: settlement-date rows (signed local amounts) followed by the
     per-currency summary rows, all in the same currency columns. Currency columns
     ordered by |USD delta| desc (default) or A-Z. A `USD equivalent` column carries the
     engine's per-date USD equivalent and, on the summary rows, the portfolio totals.
-    Every value comes from build_exposure / portfolio_totals / ladder_usd_equivalent."""
+    Every value comes from build_exposure / portfolio_totals / ladder_usd_equivalent.
+
+    `fallback_ccys` (user decision 2026-09-15, item D): currencies priced from the BNP
+    file's own BNP_BVAL SPOT (see `ui.tabs.cash_ladder.bnp_bval_rates`) because no
+    official Bloomberg SPOT exists for `as_of`. Adds a 'Rate source' summary row so the
+    fallback is visible in place, never silent."""
+    fallback_ccys = fallback_ccys or set()
     from engine.ladder.exposure import ladder_usd_equivalent, portfolio_totals
     summary = summary_frame(result, records, sort=sort, scope=SCOPE_ALL)
     ccys = list(summary["currency"])
@@ -297,7 +350,7 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD) -> pd.Data
         rows.append(row)
     totals = portfolio_totals(result)
     by_ccy = summary.set_index("currency")
-    for label, key in SUMMARY_ROWS:
+    for label, key in SUMMARY_ROWS + [("Rate source", "rate_source")]:
         row = {ROW_LABEL_COL: label, "settlement_date": "", "kind": key}
         for c in ccys:
             if key == "fx_rate":
@@ -305,6 +358,8 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD) -> pd.Data
                 row[c] = "" if pd.isna(v) else f"{v:.6f}"
             elif key == "settlement":
                 row[c] = by_ccy.loc[c, "settlement"]
+            elif key == "rate_source":
+                row[c] = "BNP file (not Bloomberg)" if c in fallback_ccys else "Bloomberg"
             else:
                 row[c] = format_amount(by_ccy.loc[c, key])
         row[USD_EQUIVALENT_COL] = format_amount(totals["net_usd"]) if key == "usd_delta" else ""
@@ -312,8 +367,9 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD) -> pd.Data
     return pd.DataFrame(rows), ccys
 
 
-def combined_table(result, records: List[dict], sort: str = SORT_USD) -> dash_table.DataTable:
-    frame, ccys = combined_frame(result, records, sort)
+def combined_table(result, records: List[dict], sort: str = SORT_USD,
+                   fallback_ccys: Optional[set] = None) -> dash_table.DataTable:
+    frame, ccys = combined_frame(result, records, sort, fallback_ccys)
     columns = ([{"name": ["", "Settlement date"], "id": ROW_LABEL_COL}]
                + [{"name": [by_ccy_label(frame, c), c], "id": c} for c in ccys]
                + [{"name": ["", "USD equivalent"], "id": USD_EQUIVALENT_COL}])
@@ -381,7 +437,8 @@ DEFAULT_FUTURES: dict = {"value": float("nan"), "by_instrument": {}, "missing": 
 
 def combined_risk_frame(result, futures: Optional[dict] = None,
                         scenarios: Optional[Dict[str, Dict[str, float]]] = None,
-                        futures_pct_by_scenario: Optional[Dict[str, float]] = None) -> pd.DataFrame:
+                        futures_pct_by_scenario: Optional[Dict[str, float]] = None,
+                        fallback_ccys: Optional[set] = None) -> pd.DataFrame:
     """One row per currency (from `result.summary`) plus one row per open future (from
     `futures['by_instrument']`, and one Unavailable row per name in `futures['missing']`).
     Columns: name, usd_delta, move_1pct (=usd_delta x 0.01), then one column per scenario
@@ -394,13 +451,15 @@ def combined_risk_frame(result, futures: Optional[dict] = None,
     futures = futures or DEFAULT_FUTURES
     scenarios = scenarios or {}
     futures_pct_by_scenario = futures_pct_by_scenario or {}
+    fallback_ccys = fallback_ccys or set()
     scenario_names = sorted(scenarios)
     status_msg = (dict(zip(result.status["currency"], result.status["message"]))
                   if not result.status.empty else {})
     rows = []
     for _, r in result.summary.iterrows():
         ccy, usd = r["currency"], r["usd_delta"]
-        row = {RISK_LABEL_COL: ccy, "kind": "currency"}
+        label = ccy + " *" if ccy in fallback_ccys else ccy
+        row = {RISK_LABEL_COL: label, "kind": "currency"}
         if pd.isna(usd):
             row["usd_delta"], row["move_1pct"] = None, None
             row["_unavailable"] = status_msg.get(ccy, "no rate")
@@ -439,15 +498,18 @@ def _unavailable_label(reason: str) -> str:
 
 def combined_risk_table(result, futures: Optional[dict] = None,
                         scenarios: Optional[Dict[str, Dict[str, float]]] = None,
-                        futures_pct_by_scenario: Optional[Dict[str, float]] = None) -> html.Div:
+                        futures_pct_by_scenario: Optional[Dict[str, float]] = None,
+                        fallback_ccys: Optional[set] = None) -> html.Div:
     """The combined risk table plus its Net USD / Gross USD totals (docs/BUILD_PLAN.md
     "Reorder the Ladder tab", item 1). Net excludes futures; Gross adds |futures value|.
     Either total is Unavailable (never a fabricated number) if any currency lacks a rate
-    or the futures total is NaN."""
+    or the futures total is NaN. Currencies priced from the BNP_BVAL fallback (item D)
+    are marked with a trailing '*' in the name column; see the caption this function's
+    caller adds and the 'Rate source' row in the currency ladder grid below it."""
     from engine.ladder.exposure import portfolio_totals
     futures = futures or DEFAULT_FUTURES
     scenarios = scenarios if scenarios is not None else {}
-    frame = combined_risk_frame(result, futures, scenarios, futures_pct_by_scenario)
+    frame = combined_risk_frame(result, futures, scenarios, futures_pct_by_scenario, fallback_ccys)
     scenario_names = sorted(scenarios)
 
     display_rows = []
@@ -556,37 +618,41 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
                      rates: Dict[str, dict] | None = None,
                      sort: str = SORT_USD, scope: str = SCOPE_ALL,
                      futures: Optional[dict] = None,
-                     futures_details: Optional[Dict[str, dict]] = None) -> html.Div:
-    """Combined risk table (top), cards, metadata, combined cash ladder, alternative
-    views, open-futures block, legend. `rates` is whatever the marks table holds (see
-    data.bloomberg.live.rates_from_marks); None/empty means every currency is MISSING.
-    `futures` is the dict from `engine.ladder.futures_delta.futures_usd_delta` (or
-    DEFAULT_FUTURES if not yet queried). Bloomberg feed status and the workbook
-    mark-to-market panel are NOT rendered here any more -- see module docstring."""
+                     futures_details: Optional[Dict[str, dict]] = None,
+                     fallback_ccys: Optional[set] = None) -> html.Div:
+    """Ladder tab body per the user's 2026-09-15 layout decision (item C, tightened by
+    the same-day follow-up: no collapsed 'Details', no dropdowns): three headline
+    numbers, then three tables in order -- combined risk table (currencies + open
+    futures + stress), the currency ladder grid with its summary rows, the open-futures
+    block. Nothing else is rendered on this tab (snapshot cards, metadata line, legend,
+    alternative views and the settlement-only ladder are retired, not moved).
+
+    `rates` is whatever the marks table holds (see data.bloomberg.live.rates_from_marks
+    plus `ui.tabs.cash_ladder.bnp_bval_rates` merged in by the caller for currencies on
+    fallback); None/empty means every currency is MISSING. `futures` is the dict from
+    `engine.ladder.futures_delta.futures_usd_delta` (or DEFAULT_FUTURES). `fallback_ccys`
+    is the set of currencies priced from the BNP_BVAL fallback (item D) -- shown with a
+    '*' in the risk table and a 'Rate source' row in the ladder grid, never silently."""
     from engine.ladder.exposure import build_exposure
     from engine.pnl.stress import load_scenarios, futures_pct_by_scenario
     rates = rates or {}
     futures = futures or DEFAULT_FUTURES
+    fallback_ccys = fallback_ccys or set()
     result = build_exposure(records, rates)
     empty = result.ladder.empty
     scenarios = load_scenarios()
-    main = (combined_table(result, records, sort) if not empty
+    main = (combined_table(result, records, sort, fallback_ccys) if not empty
             else html.P("No open FX trades for this as-of date.", style={"color": "#616e7c"}))
-    order_note = "currencies by |USD delta|" if sort != SORT_ALPHA else "currencies A-Z"
+    fallback_note = (
+        html.P(f"{len(fallback_ccys)} currencies on BNP file rate, not Bloomberg: "
+               + ", ".join(sorted(fallback_ccys)) + " (marked *)", className="section-kicker")
+        if fallback_ccys else None
+    )
     return html.Div(className="section", children=[
-        combined_risk_table(result, futures, scenarios, futures_pct_by_scenario(scenarios)),
-        risk_snapshot(result, records),
-        metadata_line(result, records, unresolved, as_of_date, rates),
-        html.H4(f"Cash ladder by settlement date ({order_note})"),
+        headline_numbers(result, futures),
+        fallback_note,
+        combined_risk_table(result, futures, scenarios, futures_pct_by_scenario(scenarios), fallback_ccys),
         main,
-        html.Details(id=LADDER_DETAILS_ID, className="details", open=False, children=[
-            html.Summary("Other views"),
-            html.H4("Currency summary (list)"),
-            summary_table(summary_frame(result, records, sort, SCOPE_ALL)),
-            html.H4("Settlement ladder (dates only)"),
-            ladder_table(result) if not empty else html.Div(),
-        ]),
         html.H4("Open futures"),
         futures_table(futures, futures_details),
-        html.Details(className="details details--compact", children=[html.Summary("What the rows mean"), legend()]),
     ])

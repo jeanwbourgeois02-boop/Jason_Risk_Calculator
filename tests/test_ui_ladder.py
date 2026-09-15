@@ -1,5 +1,6 @@
 """Tests for ui/tabs/cash_ladder.py and ui/tabs/exposure.py (docs/BUILD_PLAN.md
-Task C split, agent C1 Ladder).
+Task C split, agent C1 Ladder; tightened by the 2026-09-15 same-day follow-up: no
+dropdowns, no collapsed 'Details' on the Ladder tab).
 
 All tests skip if dash is not importable, per environment constraints.
 """
@@ -48,7 +49,20 @@ def conn():
     return c
 
 
+def _all_ids(node, out=None):
+    out = out if out is not None else []
+    ident = getattr(node, "id", None)
+    if ident is not None:
+        out.append(ident)
+    for child in getattr(node, "children", None) or []:
+        if hasattr(child, "children") or hasattr(child, "id"):
+            _all_ids(child, out)
+    return out
+
+
 # --------------------------------------------------------------------------- transpose_ladder
+# transpose_ladder / table_from_ladder are no longer rendered on the Ladder tab (removed
+# outright, user decision 2026-09-15) but stay in the module with their own tests.
 def test_transpose_ladder_basic():
     df = pd.DataFrame({
         "ccy": ["USD", "JPY"],
@@ -79,32 +93,47 @@ def test_transpose_ladder_empty_frame():
     assert out.empty
 
 
+# --------------------------------------------------------------------------- bnp_bval_rates
+def test_bnp_bval_rates_used_only_as_fallback(conn):
+    conn.execute(
+        "INSERT INTO marks VALUES "
+        "('2026-08-17','USDJPY','2026-08-17','SPOT',148.00,'BNP_BVAL','2026-08-17T00:00:00-04:00')"
+    )
+    conn.commit()
+    out = cash_ladder.bnp_bval_rates(conn, "2026-08-17")
+    assert out["JPY"]["rate"] == 148.0
+    assert out["JPY"]["inverted"] is True
+    assert out["JPY"]["source"] == cash_ladder.BNP_BVAL_SOURCE_LABEL
+
+
+def test_bnp_bval_rates_falls_back_to_latest_on_or_before(conn):
+    conn.execute(
+        "INSERT INTO marks VALUES "
+        "('2026-08-10','USDJPY','2026-08-10','SPOT',146.00,'BNP_BVAL','2026-08-10T00:00:00-04:00')"
+    )
+    conn.commit()
+    out = cash_ladder.bnp_bval_rates(conn, "2026-08-17")
+    assert out["JPY"]["rate"] == 146.0
+
+
+def test_bnp_bval_rates_empty_when_no_bnp_bval_mark(conn):
+    assert cash_ladder.bnp_bval_rates(conn, "2026-08-17") == {}
+
+
 # --------------------------------------------------------------------------- layout / callbacks
-def test_build_layout_has_no_source_dropdown_or_pull_now():
+def test_build_layout_has_only_date_picker_no_dropdowns():
     layout = cash_ladder.build_layout(default_date="2026-08-17")
     ids = _all_ids(layout)
     assert cash_ladder.DATE_PICKER_ID in ids
-    assert cash_ladder.SORT_ID in ids
+    assert "cash-ladder-summary-sort" not in ids  # sort dropdown removed outright
+    assert "cash-ladder-status" not in ids
     assert "cash-ladder-source" not in ids  # workbook rates dropdown removed
     assert "cash-ladder-pull-now" not in ids  # moved to Market data tab
 
 
-def _all_ids(node, out=None):
-    out = out if out is not None else []
-    ident = getattr(node, "id", None)
-    if ident is not None:
-        out.append(ident)
-    for child in getattr(node, "children", None) or []:
-        if hasattr(child, "children") or hasattr(child, "id"):
-            _all_ids(child, out)
-    return out
-
-
 def test_render_with_seeded_db(tmp_path, conn, monkeypatch):
-    # ui.app itself is C5's file, mid-rewrite in this task split (it currently imports
-    # a `ui.tabs.pnl` module another agent is retiring) -- stub it out here so this test
-    # only exercises cash_ladder.py's own logic, per `connect_readonly`'s documented
-    # signature, without depending on ui/app.py's current state.
+    # ui.app itself is C5's file; stub it here so this test only exercises
+    # cash_ladder.py's own logic, per `connect_readonly`'s documented signature.
     import sys
     import types
     stub = types.ModuleType("ui.app")
@@ -118,14 +147,11 @@ def test_render_with_seeded_db(tmp_path, conn, monkeypatch):
 
     app = dash.Dash(__name__)
     cash_ladder.register_callbacks(app, get_db_path=lambda: str(db_path))
-    # register_callbacks wires the inner _update_table closure into the Output callback;
-    # `.__wrapped__` is the undecorated function, callable directly with positional args.
     matches = [v for k, v in app.callback_map.items() if "cash-ladder-table-container" in k]
     assert matches
     callback = matches[0]["callback"].__wrapped__
-    body, status = callback("2026-08-17", "usd", 0)
+    body = callback("2026-08-17", 0)
     assert body is not None
-    assert isinstance(status, str)
 
 
 def test_render_no_as_of_date_message():
@@ -133,7 +159,7 @@ def test_render_no_as_of_date_message():
     cash_ladder.register_callbacks(app, get_db_path=lambda: ":memory:")
     matches = [v for k, v in app.callback_map.items() if "cash-ladder-table-container" in k]
     callback = matches[0]["callback"].__wrapped__
-    body, status = callback(None, "usd", 0)
+    body = callback(None, 0)
     assert "No as-of date" in body.children
 
 
@@ -148,32 +174,53 @@ RECORDS = [
 ]
 
 
-def test_risk_snapshot_has_no_exposure_pnl_card():
+def test_headline_numbers_present_in_order():
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, RATES)
-    card = exposure.risk_snapshot(result, RECORDS)
-    labels = [c.children[0].children for c in card.children]
-    assert "Exposure P&L" not in labels
-    assert "Net USD exposure" in labels
-    assert "Gross USD exposure" in labels
+    headline = exposure.headline_numbers(result)
+    labels = [c.children[0].children for c in headline.children]
+    assert labels == ["Delta combined", "Delta non-forward", "Delta forward"]
 
 
-def test_summary_frame_has_no_removed_columns():
+def test_headline_numbers_unavailable_without_rate():
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, {})
+    headline = exposure.headline_numbers(result)
+    forward_card = headline.children[2]
+    value = forward_card.children[1].children
+    assert value == "Unavailable"
+
+
+def test_headline_futures_unavailable_with_reason():
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, RATES)
-    frame = exposure.summary_frame(result, RECORDS)
-    assert "usd_delta_entry" not in frame.columns
-    assert "exposure_pnl" not in frame.columns
-    assert list(frame.columns) == exposure.SUMMARY_COLUMNS
+    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["ESU6 Index"],
+               "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
+    headline = exposure.headline_numbers(result, futures)
+    nonfwd_card = headline.children[1]
+    assert nonfwd_card.children[1].children == "Unavailable"
+
+
+def test_exposure_section_has_headline_and_three_tables_only():
+    futures = {"value": 1.0, "by_instrument": {"ESU6 Index": 1.0}, "missing": [], "reason": ""}
+    section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES, futures=futures)
+    ids = _all_ids(section)
+    assert exposure.HEADLINE_ID in ids
+    assert exposure.RISK_TABLE_ID in ids
+    assert exposure.COMBINED_TABLE_ID in ids
+    assert exposure.FUTURES_TABLE_ID in ids
+    # Retired components must not appear.
+    assert exposure.SNAPSHOT_ID not in ids
+    assert exposure.META_ID not in ids
+    assert exposure.LEGEND_ID not in ids
+    assert exposure.LADDER_DETAILS_ID not in ids
 
 
 def test_combined_risk_table_first_in_layout():
-    from engine.ladder.exposure import build_exposure
-    result = build_exposure(RECORDS, RATES)
     section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES)
     ids = _all_ids(section)
-    assert exposure.RISK_TABLE_ID in ids
-    assert ids.index(exposure.RISK_TABLE_ID) < ids.index(exposure.SNAPSHOT_ID)
+    assert ids.index(exposure.HEADLINE_ID) < ids.index(exposure.RISK_TABLE_ID)
+    assert ids.index(exposure.RISK_TABLE_ID) < ids.index(exposure.COMBINED_TABLE_ID)
 
 
 def test_combined_risk_frame_futures_row_present_with_mark():
@@ -208,13 +255,29 @@ def test_combined_risk_table_net_excludes_futures_gross_includes():
     totals = portfolio_totals(result)
     futures = {"value": 100_000.0, "by_instrument": {"ESU6 Index": 100_000.0}, "missing": [], "reason": ""}
     table = exposure.combined_risk_table(result, futures, scenarios={})
-    inner = table.children[1]  # H4 title, then the DataTable
+    inner = table.children[1]
     rows = {r[exposure.RISK_LABEL_COL]: r for r in inner.data}
-    # Net (currencies only) matches portfolio_totals; Gross (currencies + |futures|) adds 100,000
     net_formatted = exposure.format_amount(totals["net_usd"])
     gross_formatted = exposure.format_amount(totals["gross_usd"] + 100_000.0)
     assert rows["Net USD (currencies only)"]["usd_delta"] == net_formatted
     assert rows["Gross USD (currencies + |futures|)"]["usd_delta"] == gross_formatted
+
+
+def test_combined_risk_table_marks_fallback_currency():
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, RATES)
+    table = exposure.combined_risk_table(result, fallback_ccys={"JPY"})
+    inner = table.children[1]
+    names = [r[exposure.RISK_LABEL_COL] for r in inner.data]
+    assert "JPY *" in names
+
+
+def test_combined_table_has_rate_source_row():
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, RATES)
+    table = exposure.combined_table(result, RECORDS, fallback_ccys={"JPY"})
+    rows = {r[exposure.ROW_LABEL_COL]: r for r in table.data}
+    assert rows["Rate source"]["JPY"] == "BNP file (not Bloomberg)"
 
 
 def test_futures_table_present_with_mark():
@@ -229,6 +292,13 @@ def test_futures_table_unavailable_with_reason_when_no_mark():
                "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
     table = exposure.futures_table(futures)
     assert "no FUTURE_PX" in table.data[0]["usd_delta"]
+
+
+def test_exposure_section_shows_fallback_note():
+    section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES, fallback_ccys={"JPY"})
+    text = _render_text(section)
+    assert "BNP file rate" in text
+    assert "JPY" in text
 
 
 def _render_text(node):
@@ -247,7 +317,6 @@ def _render_text(node):
 def test_exposure_section_builds_without_market_data_panel():
     section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES)
     text = _render_text(section)
-    assert "Net USD exposure" in text
     assert "Risk (currencies + open futures)" in text
     assert "Open futures" in text
 

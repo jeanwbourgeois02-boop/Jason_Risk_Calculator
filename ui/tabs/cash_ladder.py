@@ -52,10 +52,10 @@ from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
 DATE_PICKER_ID = "cash-ladder-date"
 TABLE_CONTAINER_ID = "cash-ladder-table-container"
 TOOLBAR_ID = "cash-ladder-toolbar"
-SORT_ID = "cash-ladder-summary-sort"   # value: 'top' | 'all' (summary scope)
-STATUS_ID = "cash-ladder-status"
 REFRESH_ID = "cash-ladder-refresh"
 REFRESH_MS = 120_000  # matches data.bloomberg.live.INTERVAL_SECONDS
+
+BNP_BVAL_SOURCE_LABEL = "BNP file rate (not Bloomberg)"
 
 TRANSPOSED_LABEL_COL = "settle_date"
 USD_EQUIVALENT_COL = "usd_equivalent"
@@ -152,6 +152,34 @@ def table_from_ladder(
     )
 
 
+def bnp_bval_rates(conn: sqlite3.Connection, as_of_date: str) -> dict:
+    """currency -> {rate, inverted, source, timestamp, stale} from the BNP file's own
+    BVAL SPOT marks (user decision 2026-09-15, item D). Read from `marks` directly with
+    `source = 'BNP_BVAL'` (never `marks_official`: BNP_BVAL is reconciliation-only per
+    CLAUDE.md "Official marks") for `as_of_date`, falling back to the LATEST such mark
+    on or before it. This exists only to fill the delta/ladder display when Bloomberg
+    has not written an official SPOT for a currency; it must never be used for P&L
+    (this tab has none) and never overrides an official rate -- the caller only
+    consults this for currencies missing from `rates_from_marks`."""
+    sql = (
+        "SELECT m.instrument_id, i.base_ccy, i.quote_ccy, m.value, m.as_of_date "
+        "FROM marks m JOIN instruments i USING (instrument_id) "
+        "WHERE m.mark_type = 'SPOT' AND m.source = 'BNP_BVAL' AND i.asset_class = 'FX' "
+        "AND m.as_of_date <= ? ORDER BY m.instrument_id, m.as_of_date"
+    )
+    latest: dict = {}
+    for pair, base, quote, value, snapshot_date in conn.execute(sql, [as_of_date]):
+        if "USD" not in (base, quote):
+            continue
+        latest[pair] = (base, quote, value, snapshot_date)  # ascending as_of_date: last wins
+    out = {}
+    for pair, (base, quote, value, snapshot_date) in latest.items():
+        ccy = quote if base == "USD" else base
+        out[ccy] = {"rate": float(value), "inverted": base == "USD",
+                    "source": BNP_BVAL_SOURCE_LABEL, "timestamp": snapshot_date, "stale": False}
+    return out
+
+
 def message_box(message: str) -> html.P:
     """Grey status text shown in the table container instead of a DataTable (missing
     view module, missing DB, no as_of date, etc)."""
@@ -159,24 +187,15 @@ def message_box(message: str) -> html.P:
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
-    """Controls + an (initially empty) table container for the Cash ladder tab. The
-    table itself is filled in by the callback registered in register_callbacks."""
+    """Ladder tab shell (user decision 2026-09-15, items A/C): only the as-of date
+    picker plus an (initially empty) table container. No other controls, no dropdowns
+    -- sort/scope toolbars, snapshot cards, metadata, legend and alternative views are
+    removed outright by `ui.tabs.exposure.exposure_section`, not moved here."""
     return html.Div(className="cash-ladder", children=[
         html.H3("Ladder"),
         html.P("What am I long/short and when is it cash?", className="section-kicker"),
         html.Div(id=TOOLBAR_ID, className="toolbar", children=[
             build_date_picker(DATE_PICKER_ID, default_date=default_date),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Currency order"),
-                dcc.RadioItems(id=SORT_ID, value="usd", inline=True,
-                               options=[{"label": "|USD delta|", "value": "usd"},
-                                        {"label": "A-Z", "value": "alpha"}]),
-            ]),
-            html.Div(className="toolbar-group toolbar-group--exposure", children=[
-                html.Label("Status"),
-                html.Div(id=STATUS_ID, className="toolbar-static",
-                         children="Loading..."),
-            ]),
         ]),
         dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
         html.Div(id=TABLE_CONTAINER_ID),
@@ -184,42 +203,36 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Register the callback that re-queries `ladder_table` / the exposure delta view
-    whenever the date picker or sort control changes.
+    """Register the callback that re-renders the Ladder tab body whenever the date
+    picker changes (this tab has no other controls -- user decision 2026-09-15, item C).
 
     `get_db_path` is a zero-arg callable returning the resolved DB path (typically
     `ui.app.get_db_path`, or a closure over the path `create_app` resolved for an
     explicit `db_path` override) -- passed in rather than imported at module scope so
     tests can supply a stub without touching the real DB / env / RISK_DB.
 
-    2026-09-15 (docs/BUILD_PLAN.md Task C split): the workbook mark-to-market panel,
-    ledger cards, Exposure P&L card, the workbook FX rates grid and the Bloomberg
-    diagnostics/pull-now controls are REMOVED from this tab (they move to the
-    Reconciliation and Market data tabs). This callback no longer takes
-    `SOURCE_DROPDOWN_ID` / `rates-revision` / a pull-now revision as inputs.
+    2026-09-15 (docs/BUILD_PLAN.md Task C split, tightened same day): the workbook
+    mark-to-market panel, ledger cards, Exposure P&L card, the workbook FX rates grid,
+    the Bloomberg diagnostics/pull-now controls, the sort/scope toolbar and the
+    settlement-cash transpose table are all REMOVED from this tab outright (not moved
+    into a collapsed section). The body is exactly `exposure_section`'s three headline
+    numbers and three tables. `engine.ladder.views.ladder_table` /
+    `transpose_ladder` are kept in this module only for their own unit tests.
     """
 
     @app.callback(
         Output(TABLE_CONTAINER_ID, "children"),
-        Output(STATUS_ID, "children"),
         Input(DATE_PICKER_ID, "date"),
-        Input(SORT_ID, "value"),
         Input(REFRESH_ID, "n_intervals"),
     )
-    def _update_table(as_of_date, sort="usd", _n_intervals=0):
-        """Returns (tab body, toolbar status text). Re-runs every REFRESH_MS so the ladder
-        follows the 2-minute Bloomberg feed (data.bloomberg.live)."""
-        return _render(as_of_date, sort or "usd")
+    def _update_table(as_of_date, _n_intervals=0):
+        """Re-runs every REFRESH_MS so the ladder follows the 2-minute Bloomberg feed
+        (data.bloomberg.live)."""
+        return _render(as_of_date)
 
-    def _render(as_of_date, sort):
-        toolbar_status = "Status unknown"
+    def _render(as_of_date):
         if not as_of_date:
-            return message_box("No as-of date available."), toolbar_status
-
-        try:
-            from engine.ladder.views import ladder_table
-        except ImportError as exc:
-            return message_box(f"Cash ladder view not available yet ({exc}).", ), toolbar_status
+            return message_box("No as-of date available.")
 
         # Local import: keeps this module importable even if ui.app changes shape.
         from ui.app import connect_readonly
@@ -228,20 +241,30 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         try:
             conn = connect_readonly(db_path)
         except sqlite3.OperationalError as exc:
-            return message_box(f"Database not available ({exc})."), toolbar_status
+            return message_box(f"Database not available ({exc}).")
         try:
-            df = ladder_table(conn, as_of_date, None)
             # Delta view (docs/BUILD_PLAN.md section 5, "Ladder"): local delta, spot, USD
             # delta rows, Net/Gross, futures delta line, stress block -- from
             # engine.ladder.exposure via records_from_db. Never P&L.
             try:
                 from engine.ladder.exposure_adapter import records_from_db
                 from data.bloomberg.live import rates_from_marks
-                from ui.tabs.exposure import BOOK_DISPLAY, exposure_section, rate_status_text
-                from engine.ladder.exposure import build_exposure
+                from ui.tabs.exposure import BOOK_DISPLAY, exposure_section
                 records, unresolved = records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
-                # Rates: latest official SPOT marks written by the Bloomberg feed. Never mock.
+                # Rates: latest official SPOT marks written by the Bloomberg feed, first
+                # choice. Currencies still missing a rate fall back to the BNP file's own
+                # BVAL SPOT (user decision 2026-09-15, item D) -- never silently, and
+                # never for P&L (this tab has none).
                 rates = rates_from_marks(conn)
+                needed = {r["currency"] for r in records}
+                missing = needed - set(rates)
+                fallback_ccys = set()
+                if missing:
+                    fallback = bnp_bval_rates(conn, as_of_date)
+                    for ccy in missing:
+                        if ccy in fallback:
+                            rates[ccy] = fallback[ccy]
+                            fallback_ccys.add(ccy)
                 # Futures USD delta: engine.ladder.futures_delta.futures_usd_delta (C5
                 # wiring). The full dict (value/by_instrument/missing/reason) is passed
                 # through so exposure_section's combined risk table and futures block can
@@ -250,21 +273,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 from engine.ladder.futures_delta import futures_usd_delta as _futures_usd_delta
                 _fut = _futures_usd_delta(conn, as_of_date)
                 exposure = exposure_section(records, unresolved, as_of_date, rates=rates,
-                                            sort=sort, futures=_fut, futures_details=(_fut or {}).get("details"))
-                books = ", ".join(sorted({r["book"] for r in records})) or "none"
-                result = build_exposure(records, rates)
-                toolbar_status = f"Book {books} · {rate_status_text(result)}"
+                                            futures=_fut, futures_details=(_fut or {}).get("details"),
+                                            fallback_ccys=fallback_ccys)
             except ImportError as exc:
                 exposure = message_box(f"Exposure ladder not available ({exc}).")
         finally:
             conn.close()
-        transposed = transpose_ladder(df)
-        return html.Div([
-            exposure,
-            html.Details(className="section section--secondary details", open=False, children=[
-                html.Summary("Cash settlement amounts and current balances"),
-                html.P("Settled-cash legs and BNP cash balances at this as-of date, transposed date x "
-                       "currency. USD equivalent uses spot and is a cash value, not P&L."),
-                table_from_ladder(transposed, label_col=TRANSPOSED_LABEL_COL),
-            ]),
-        ]), toolbar_status
+        return html.Div([exposure])

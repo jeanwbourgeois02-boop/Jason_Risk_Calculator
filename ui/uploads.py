@@ -1,167 +1,151 @@
-"""Data-source strip: which BNP snapshot is loaded, plus the upload / import controls.
+"""BNP report upload control (docs: user decisions 2026-09-15, item B).
 
-Sits above the tabs. One visible upload button, one Import button. The file's purpose
-(BNP report vs HA-portfolio reference workbook) is detected from its contents, not
-chosen from a radio. The worksheet picker appears only for Excel files. The raw
-preview stays in a collapsed section.
+One button, "Upload BNP report" (.xlsx/.xls/.csv). This is the ONLY data input: the
+HA-portfolio reference-workbook recognition/preview that used to live in this control
+has been removed entirely (moved to nothing -- the workbook stays a read-only file on
+the Reconciliation tab's manual-rates grid, `ui/workbook_rates.py`).
+
+Flow: choose file -> file name + detected snapshot date shown -> "Confirm insert" ->
+dcc.Loading ("Importing...") -> one small status line under the button. Nothing is
+written to the database before Confirm is pressed (`import_report` is only called from
+the Confirm callback, never from the file-picked callback).
+
+The status line on success is a single sentence:
+    "Loaded <filename> - snapshot <as_of> - <N> trades, <M> positions"
+`trades` = total rows currently in the `trades` table (trades have no as_of_date column
+of their own -- CLAUDE.md's `trades` table -- so a per-file count is not recoverable
+without added schema); `positions` = rows in `positions` for THIS as_of_date, which is
+per-file. Documented here since it is a asymmetry a reader might otherwise assume is a
+bug. Errors show in the same line, in red (`.source-result--error`).
+
+History (expandable, read from the DB, no schema added): one row per distinct
+`positions.as_of_date`, its position count. Trade counts are not stored per snapshot
+(see above) so only the running total is shown once, above the list.
 """
-from io import BytesIO
+from __future__ import annotations
 
-import pandas as pd
-from dash import Input, Output, State, dcc, html, dash_table, no_update
+from dash import Input, Output, State, dcc, html, no_update
 
 from data.ingest.upload import decode, suggested_date, import_report
 
-SOURCE_LINE_ID = 'data-source-line'
-
-
-def sheet_names(payload: bytes, filename: str) -> list:
-    """Worksheet names. For xlsx/xlsm read the zip index directly (milliseconds) instead
-    of parsing the whole workbook; other Excel formats fall back to pandas."""
-    name = (filename or '').lower()
-    if name.endswith('.csv'):
-        return []
-    if name.endswith(('.xlsx', '.xlsm')):
-        import re
-        import zipfile
-        with zipfile.ZipFile(BytesIO(payload)) as z:
-            xml = z.read('xl/workbook.xml').decode('utf-8', 'replace')
-        names = re.findall(r'<sheet\s[^>]*?\bname="([^"]*)"', xml)
-        import html as _html
-        return [_html.unescape(n) for n in names]
-    with pd.ExcelFile(BytesIO(payload)) as book:
-        return book.sheet_names
+SOURCE_LINE_ID = "data-source-line"
+FILE_UPLOAD_ID = "report-file"
+STAGE_ID = "report-stage"
+FILENAME_ID = "report-filename"
+DATE_PICKER_ID = "report-date"
+CONFIRM_ID = "report-import"
+RESULT_ID = "report-result"
+HISTORY_ID = "report-history"
+HISTORY_DETAILS_ID = "report-history-details"
 
 
 def describe_source(data: dict) -> str:
     """One line naming the loaded BNP snapshot, from ui.app.summary()."""
-    if data.get('as_of_date') in (None, 'none'):
-        return 'No BNP report loaded yet. Upload one to start.'
-    return (f"Loaded: BNP report as of {data['as_of_date']} "
-            f"({data['trades']} trades, {data['positions']} positions). "
-            f"All tabs use this snapshot unless you change the As-of date.")
+    if data.get("as_of_date") in (None, "none"):
+        return "No BNP report loaded yet."
+    return f"Loaded: BNP report as of {data['as_of_date']} ({data['trades']} trades, {data['positions']} positions)."
 
 
-def layout(data: dict = None):
+def upload_history(db_path) -> list:
+    """[(as_of_date, position_count)] descending by date, read straight from
+    `positions` (no upload-log table exists, per the user's instruction not to add
+    schema). Empty list if the DB is missing or has no positions yet."""
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT as_of_date, COUNT(*) FROM positions GROUP BY as_of_date ORDER BY as_of_date DESC"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        conn.close()
+    return rows
+
+
+def history_layout(db_path) -> html.Details:
+    rows = upload_history(db_path)
+    if not rows:
+        body = html.P("No previous uploads.", className="section-kicker")
+    else:
+        body = html.Ul([html.Li(f"{as_of} - {count} positions") for as_of, count in rows])
+    return html.Details(id=HISTORY_DETAILS_ID, className="details details--compact", children=[
+        html.Summary("Upload history"),
+        html.Div(id=HISTORY_ID, children=body),
+    ])
+
+
+def layout(data: dict = None, db_path=None):
     data = data or {}
-    return html.Div(className='source-strip', children=[
-        html.Div(className='source-row', children=[
-            html.Div(id=SOURCE_LINE_ID, className='source-line', children=describe_source(data)),
-            dcc.Upload(id='report-file', className='source-upload',
-                       children=html.Button('Upload BNP report', className='btn btn--big'),
-                       accept='.csv,.xlsx,.xlsm,.xls', multiple=False, max_size=25 * 1024 * 1024),
+    initial_history = history_layout(db_path) if db_path is not None else html.Div()
+    return html.Div(className="source-strip", children=[
+        html.Div(className="source-row", children=[
+            dcc.Upload(id=FILE_UPLOAD_ID, className="source-upload",
+                       children=html.Button("Upload BNP report", className="btn"),
+                       accept=".csv,.xlsx,.xls", multiple=False, max_size=25 * 1024 * 1024),
+            html.Div(id=SOURCE_LINE_ID, className="source-line", children=describe_source(data)),
         ]),
-        html.Div(id='report-busy', className='source-busy'),
-        dcc.Loading(type='dot', color='#1f5fbf', children=html.Div(id='report-stage', className='source-row source-row--stage', style={'display': 'none'}, children=[
-            html.Span(id='report-description', className='source-file'),
-            html.Div(id='report-sheet-wrap', hidden=True, children=[
-                html.Label('Worksheet'),
-                dcc.Dropdown(id='report-sheet', placeholder='Excel worksheet', clearable=False,
-                             style={'width': '220px'}),
-            ]),
+        html.Div(id=STAGE_ID, className="source-row source-row--stage", style={"display": "none"}, children=[
+            html.Span(id=FILENAME_ID, className="source-file"),
             html.Div([
-                html.Label('Snapshot date (T-1 of the file name; correct it after a holiday)'),
-                dcc.DatePickerSingle(id='report-date'),
+                html.Label("Snapshot date"),
+                dcc.DatePickerSingle(id=DATE_PICKER_ID),
             ]),
-            html.Button('Import', id='report-import', n_clicks=0, className='btn btn--big'),
-            dcc.Store(id='report-purpose', data='bnp'),
-        ])),
-        dcc.Loading(type='dot', color='#1f5fbf', children=html.Div(id='report-result', role='status', className='source-result')),
-        html.Details(id='report-preview-details', className='details details--compact', children=[
-            html.Summary('Preview file'),
-            dcc.Loading(type='dot', color='#1f5fbf', children=html.Div(id='report-preview')),
+            html.Button("Confirm insert", id=CONFIRM_ID, n_clicks=0, className="btn"),
         ]),
+        dcc.Loading(type="dot", color="#1f5fbf", children=html.Div(id=RESULT_ID, role="status", className="source-result")),
+        html.Div(id="report-history-wrap", children=initial_history),
     ])
 
 
 def register(app, get_db_path):
-    # Runs in the browser the instant a file is picked, before the upload round-trip.
-    app.clientside_callback(
-        "function(contents, filename){ if(!contents){return '';} "
-        "var mb = Math.round(contents.length * 0.75 / 1048576 * 10) / 10; "
-        "return 'Reading ' + filename + ' (' + mb + ' MB) ...'; }",
-        Output('report-busy', 'children'), Input('report-file', 'contents'), State('report-file', 'filename'))
-
-    @app.callback(Output('report-sheet', 'options'), Output('report-sheet', 'value'),
-                  Output('report-sheet-wrap', 'hidden'),
-                  Output('report-date', 'date'), Output('report-description', 'children'),
-                  Output('report-purpose', 'data'), Output('report-stage', 'style'),
-                  Output('report-result', 'children', allow_duplicate=True),
-                  Output('report-busy', 'children', allow_duplicate=True),
-                  Input('report-file', 'contents'),
-                  State('report-file', 'filename'), prevent_initial_call=True)
-    def selected(contents, filename):
-        try:
-            payload = decode(contents)
-            sheets = sheet_names(payload, filename)
-            reference = 'Portfolio' in sheets and 'All FX trades' in sheets
-            date = suggested_date(filename)
-            if reference:
-                note = 'This is the HA-portfolio workbook. It is a formula reference only: nothing is imported. Open "Preview file" to inspect it.'
-            elif date:
-                note = f'Ready. Check the snapshot date ({date}) then press Import.'
-            else:
-                note = 'File name does not look like HA_PNL_YYYYMMDD. Set the snapshot date, then press Import.'
-            return (sheets, sheets[0] if sheets else None, not sheets, date, filename,
-                    'reference' if reference else 'bnp', {}, note, '')
-        except Exception as exc:
-            return [], None, True, None, '', 'bnp', {'display': 'none'}, f'Cannot read file: {exc}', ''
-
-    @app.callback(Output('report-import', 'disabled'), Input('report-purpose', 'data'))
-    def purpose(value):
-        return value != 'bnp'
-
-    @app.callback(Output('report-preview', 'children'), Input('report-preview-details', 'open'),
-                  Input('report-sheet', 'value'), State('report-file', 'contents'),
-                  State('report-file', 'filename'), prevent_initial_call=True)
-    def preview(is_open, sheet, contents, filename):
-        if not is_open:
-            return no_update
+    @app.callback(
+        Output(STAGE_ID, "style"), Output(FILENAME_ID, "children"), Output(DATE_PICKER_ID, "date"),
+        Output(RESULT_ID, "children", allow_duplicate=True),
+        Input(FILE_UPLOAD_ID, "contents"),
+        State(FILE_UPLOAD_ID, "filename"), prevent_initial_call=True,
+    )
+    def _selected(contents, filename):
+        # Nothing is written here -- this only decodes enough to show the file name
+        # and a suggested date. import_report() is called exclusively from _confirm().
         if not contents:
-            return 'Choose a file to preview it.'
+            return {"display": "none"}, "", None, ""
         try:
-            payload = decode(contents)
-            if filename.lower().endswith('.csv'):
-                frame = pd.read_csv(BytesIO(payload), nrows=50).fillna('')
-            elif not sheet:
-                return 'Select a worksheet.'
-            elif filename.lower().endswith(('.xlsx', '.xlsm')):
-                import openpyxl
-                book = openpyxl.load_workbook(BytesIO(payload), read_only=True, data_only=False)
-                try:
-                    rows = list(book[sheet].iter_rows(max_row=50, max_col=40, values_only=True))
-                    frame = pd.DataFrame(rows).fillna('')
-                    frame.columns = [openpyxl.utils.get_column_letter(i + 1) for i in range(len(frame.columns))]
-                finally:
-                    book.close()
-            else:
-                frame = pd.read_excel(BytesIO(payload), sheet_name=sheet, nrows=50).fillna('')
-            frame.columns = [str(c) for c in frame.columns]
-            frame = frame.astype(str)
-            return html.Div([
-                html.P('First 50 rows. XLSX/XLSM formulas are shown as written; they are not recalculated. Reference preview does not change app data.'),
-                dash_table.DataTable(data=frame.to_dict('records'),
-                    columns=[{'name': c, 'id': c} for c in frame.columns], page_size=10,
-                    style_table={'overflowX': 'auto'},
-                    style_cell={'textAlign': 'left', 'maxWidth': '360px', 'overflow': 'hidden', 'textOverflow': 'ellipsis'}),
-            ])
+            decode(contents)  # validates size/shape before showing Confirm
         except Exception as exc:
-            return f'Cannot preview file: {exc}'
+            return {"display": "none"}, "", None, html.Span(str(exc), className="source-result--error")
+        date = suggested_date(filename)
+        note = "" if date else "Set the snapshot date, then press Confirm insert."
+        return {}, filename, date, note
 
-    @app.callback(Output('report-result', 'children'), Output(SOURCE_LINE_ID, 'children'),
-                  Output('cash-ladder-date', 'date'),
-                  Input('report-import', 'n_clicks'),
-                  State('report-file', 'contents'), State('report-file', 'filename'),
-                  State('report-date', 'date'), State('report-sheet', 'value'),
-                  State('report-purpose', 'data'), prevent_initial_call=True)
-    def submit(clicks, contents, filename, as_of, sheet, purpose):
-        if purpose != 'bnp':
-            return 'Reference workbook only; no trades imported.', no_update, no_update
+    @app.callback(
+        Output(RESULT_ID, "children"), Output(SOURCE_LINE_ID, "children"),
+        Output("report-history-wrap", "children"), Output("cash-ladder-date", "date"),
+        Input(CONFIRM_ID, "n_clicks"),
+        State(FILE_UPLOAD_ID, "contents"), State(FILE_UPLOAD_ID, "filename"),
+        State(DATE_PICKER_ID, "date"), prevent_initial_call=True,
+    )
+    def _confirm(clicks, contents, filename, as_of):
+        if not contents:
+            return no_update, no_update, no_update, no_update
         if not as_of:
-            return 'Choose the report snapshot date before importing.', no_update, no_update
+            return html.Span("Choose the snapshot date before confirming.", className="source-result--error"), \
+                no_update, no_update, no_update
+        db_path = get_db_path()
         try:
-            message = import_report(decode(contents), filename, as_of, get_db_path(), sheet)
+            message = import_report(decode(contents), filename, as_of, db_path)
         except Exception as exc:
-            return f'Import failed; no report data saved. {exc}', no_update, no_update
+            return html.Span(f"Import failed; no data saved. {exc}", className="source-result--error"), \
+                no_update, no_update, no_update
         from ui.app import load_summary
-        return message, describe_source(load_summary(get_db_path())), as_of
+        data = load_summary(db_path)
+        short = (f"Loaded {filename} - snapshot {as_of} - {data['trades']} trades, {data['positions']} positions")
+        return short, describe_source(data), history_layout(db_path), as_of
