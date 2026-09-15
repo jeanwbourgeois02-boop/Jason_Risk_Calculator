@@ -263,7 +263,7 @@ def test_combined_risk_table_net_excludes_futures_gross_includes():
     rows = {r[exposure.RISK_LABEL_COL]: r for r in inner.data}
     net_formatted = exposure.format_amount(totals["net_usd"])
     gross_formatted = exposure.format_amount(totals["gross_usd"] + 100_000.0)
-    assert rows["Net USD (currencies only)"]["usd_delta"] == net_formatted
+    assert rows["Net foreign-ccy delta (+ = long foreign = short USD)"]["usd_delta"] == net_formatted
     assert rows["Gross USD (currencies + |futures|)"]["usd_delta"] == gross_formatted
 
 

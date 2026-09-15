@@ -599,7 +599,7 @@ def combined_risk_table(result, futures: Optional[dict] = None,
         gross_text = _unavailable_label("; ".join(reasons))
     else:
         gross_text = format_amount(totals["gross_usd"] + abs(fut_value))
-    display_rows.append({RISK_LABEL_COL: "Net USD (currencies only)", "usd_delta": net_text,
+    display_rows.append({RISK_LABEL_COL: "Net foreign-ccy delta (+ = long foreign = short USD)", "usd_delta": net_text,
                          "move_1pct": "", **{name: "" for name in scenario_names}})
     display_rows.append({RISK_LABEL_COL: "Gross USD (currencies + |futures|)", "usd_delta": gross_text,
                          "move_1pct": "", **{name: "" for name in scenario_names}})

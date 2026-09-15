@@ -150,7 +150,15 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     cards.append(_divider())
     ng = net_gross_usd(conn, as_of)
     if ng["available"]:
-        cards.append(_pnl_card("Net USD", {"value": ng["net"], "available": True}))
+        # `ng["net"]` is the engine's net non-USD delta (+ = long foreign currency).
+        # The header shows the USD *position* instead (CLAUDE.md sign: + = long USD),
+        # so the sign is flipped here and the direction is spelled out in words
+        # underneath -- user decision 2026-09-15: a short-USD book must be unmistakable.
+        usd_position = -ng["net"]
+        direction = "short USD" if usd_position < 0 else ("long USD" if usd_position > 0 else "flat USD")
+        net_card = _pnl_card("Net USD", {"value": usd_position, "available": True})
+        net_card.children.append(html.Div(direction, className="header-figure-caption header-figure-caption--direction"))
+        cards.append(net_card)
         cards.append(_pnl_card("Gross USD", {"value": ng["gross"], "available": True}, colour=False))
     else:
         reason = ng.get("reason", "")

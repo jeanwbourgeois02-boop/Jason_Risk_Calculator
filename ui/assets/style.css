@@ -238,3 +238,7 @@ p { margin: 8px 0; }
 .header-figures { padding-right: 300px; gap: 8px; }
 .header-figure { min-width: 64px; }
 .header-figure-caption { max-width: 190px; }
+
+/* Net USD direction word ("short USD" / "long USD"): must be unmistakable, so it is
+   bold, full-contrast and larger than the ordinary muted caption. */
+.header-figure-caption--direction { font-size: 12px; font-weight: 700; color: #fff; text-transform: uppercase; letter-spacing: .04em; }
