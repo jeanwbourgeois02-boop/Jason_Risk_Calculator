@@ -6,7 +6,7 @@ and the page says so.
 
 ## What runs
 
-`data/bloomberg/live.py` starts with the app (`py -3 -m ui.launch`) when both hold:
+`data/bloomberg/live.py` starts with the app (`py risk.py start`) when both hold:
 
 1. the `blpapi` Python package imports;
 2. a Bloomberg API service accepts a TCP connection (default `localhost:8194`, i.e. a
@@ -24,21 +24,20 @@ holds the latest value. The ladder re-renders every 2 minutes (`dcc.Interval`) a
 the latest official SPOT per currency (`rates_from_marks`); a mark older than 10 minutes
 is flagged stale.
 
-## Setting up the Bloomberg computer (no command line needed)
+## Setting up the Bloomberg computer
 
-1. Clone or open the project (e.g. in PyCharm).
-2. Copy `data\raw\risk.db` from the other computer into the project's `data\raw\` folder
-   (`data/raw/` is git-ignored, so it does not come with the repository).
-3. Double-click `setup_bloomberg.bat` once: installs `requirements.txt` and `blpapi` from
-   Bloomberg's official index, verifies the imports, and reports success or the exact failure.
-4. Log in to the Bloomberg Terminal, then double-click `launch.bat`. The console prints
+1. Clone or open the project (e.g. in PyCharm) and open a terminal in its folder.
+2. Optionally copy `data\raw\risk.db` from the other computer into `data\raw\` (git-ignored)
+   if you want that computer's history. Otherwise the app starts with an empty database.
+3. `py risk.py setup` once. It detects the Terminal, installs `requirements.txt` and `blpapi`
+   from Bloomberg's official index into `.venv`, verifies the imports and runs the tests.
+4. Log in to the Bloomberg Terminal, then `py risk.py start`. The console prints
    `Bloomberg feed: started (every 2 min)` or the reason it did not start.
-5. Double-click `run_bloomberg_diagnostic.bat` to see every spot/forward request as OK or
-   FAILED with Bloomberg's error text (reports saved under `reports\`).
+5. `py risk.py doctor --bloomberg` shows every spot/forward request as OK or FAILED with
+   Bloomberg's error text (reports saved under `reports\`).
 
-All three batch files use the same interpreter, `py -3` (the Python launcher), so the
-packages installed by setup are the ones the app and the diagnostic run with.
-Environment overrides: `BLP_HOST`, `BLP_PORT`, `RISK_LIVE=0` (disable the feed).
+Every command runs inside `.venv`, so the packages installed by setup are the ones the app
+and the diagnostic use. Environment overrides: `BLP_HOST`, `BLP_PORT`, `RISK_LIVE=0`.
 
 ## Diagnostics
 
@@ -49,8 +48,8 @@ Environment overrides: `BLP_HOST`, `BLP_PORT`, `RISK_LIVE=0` (disable the feed).
 - Command line:
 
 ```powershell
-py -3 -m data.bloomberg.live --status   # last cycle, itemised; exit 0 only if connected and nothing failed
-py -3 -m data.bloomberg.live --once     # run one pull now and print the result
+.venvScriptspython -m data.bloomberg.live --status   # last cycle, itemised; exit 0 only if connected and nothing failed
+.venvScriptspython -m data.bloomberg.live --once     # run one pull now and print the result
 ```
 
 - Status file: `<db>.bloomberg_status.json` next to the database (git-ignored under

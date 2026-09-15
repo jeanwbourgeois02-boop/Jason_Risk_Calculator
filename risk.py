@@ -125,7 +125,8 @@ def cmd_setup(args) -> int:
     # 3. packages
     say("[3/6] Application packages")
     run([VENV_PY, "-m", "pip", "install", "--upgrade", "pip", "--quiet"], check=False)
-    run([VENV_PY, "-m", "pip", "install", "-r", str(REQUIREMENTS)])
+    run([VENV_PY, "-m", "pip", "install", "-r", str(REQUIREMENTS), "--quiet"])
+    say("  OK: requirements.txt installed")
 
     # 4. blpapi (Bloomberg PC only)
     say("[4/6] Bloomberg API package")
@@ -150,12 +151,7 @@ def cmd_setup(args) -> int:
     )
     run([VENV_PY, "-c", check])
     if args.sample:
-        load = (
-            "from pathlib import Path; from ui.app import get_db_path; from data.ingest.upload import import_report;"
-            f"p = Path(r'{SAMPLE}');"
-            f"print('  sample:', import_report(p.read_bytes(), p.name, '{SAMPLE_AS_OF}', get_db_path()))"
-        )
-        run([VENV_PY, "-c", load])
+        run([VENV_PY, str(ROOT / "risk.py"), "_load_sample"])
 
     # 6. tests
     say("[6/6] Tests")
@@ -171,6 +167,21 @@ def cmd_setup(args) -> int:
     if want_blp:
         say("                   Log in to the Bloomberg Terminal before starting.")
     say("=" * 70)
+    return 0
+
+
+def cmd_load_sample(args) -> int:
+    """Import the sample BNP report (runs inside .venv; identical rows are skipped)."""
+    from ui.app import get_db_path
+    from data.ingest.upload import import_report
+    try:
+        say("  sample: " + str(import_report(SAMPLE.read_bytes(), SAMPLE.name, SAMPLE_AS_OF, get_db_path())))
+    except ValueError as exc:
+        if "differ from DB" in str(exc):
+            say(f"  sample: NOT loaded. The database already holds a different report dated {SAMPLE_AS_OF}")
+            say("          (real data, most likely). That is fine; the sample is only for empty databases.")
+        else:
+            raise
     return 0
 
 
@@ -316,16 +327,19 @@ def doctor_checks(d: Doctor, bloomberg: bool, git: bool = True) -> None:
     if git and (ROOT / ".git").exists():
         def g(*a):
             r = subprocess.run(["git", *a], cwd=str(ROOT), capture_output=True, text=True)
-            return r.returncode, r.stdout.strip()
-        code, branch = g("branch", "--show-current")
+            return r.returncode, r.stdout.strip(), r.stderr.strip()
+        code, branch, _ = g("branch", "--show-current")
         if code == 0:
-            fcode, _ = g("fetch", "origin", "--quiet")
-            if fcode != 0:
-                d.add("git", None, "cannot reach GitHub (offline?); skipped sync check")
+            fcode, _, err = g("fetch", "origin", "--quiet")
+            if fcode != 0 or "error" in err.lower():
+                lines = err.splitlines() or ["no detail"]
+                last = next((ln for ln in lines if ln.startswith("fatal")), lines[-1])
+                d.add("git", False, f"fetch failed: {last}",
+                      "offline -> ignore. 'bad object refs/...' -> delete that stale ref:  git update-ref -d <ref>")
             else:
-                _, ahead = g("rev-list", "--count", f"origin/{branch}..HEAD")
-                _, behind = g("rev-list", "--count", f"HEAD..origin/{branch}")
-                _, dirty = g("status", "--porcelain")
+                _, ahead, _ = g("rev-list", "--count", f"origin/{branch}..HEAD")
+                _, behind, _ = g("rev-list", "--count", f"HEAD..origin/{branch}")
+                _, dirty, _ = g("status", "--porcelain")
                 msg = f"branch {branch}: {ahead} to push, {behind} to pull" + (", uncommitted changes" if dirty else "")
                 d.add("git", ahead == "0" and behind == "0", msg,
                       "git pull" if behind != "0" else "git push")
@@ -396,6 +410,8 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("end", nargs="?", help="last day YYYY-MM-DD (default: yesterday)")
     b.add_argument("--overwrite", action="store_true")
     b.set_defaults(func=cmd_backfill)
+
+    sub.add_parser("_load_sample", help=argparse.SUPPRESS).set_defaults(func=cmd_load_sample)
     return parser
 
 

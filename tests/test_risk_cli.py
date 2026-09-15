@@ -15,7 +15,7 @@ _VersionInfo = namedtuple("_VersionInfo", "major minor micro")
 def test_parser_has_exactly_the_documented_commands():
     parser = risk.build_parser()
     sub = next(a for a in parser._actions if a.dest == "command")
-    assert set(sub.choices) == {"setup", "start", "doctor", "backfill"}
+    assert set(sub.choices) == {"setup", "start", "doctor", "backfill", "_load_sample"}
 
 
 def test_setup_refuses_old_python(monkeypatch, capsys):

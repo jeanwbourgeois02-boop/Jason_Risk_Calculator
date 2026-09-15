@@ -3,5 +3,6 @@ pandas>=3,<4
 openpyxl>=3.1,<4
 xlrd>=2,<3
 tzdata
-# Bloomberg (only on the Bloomberg computer; see docs/bloomberg-live.md):
-# py -3 -m pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
+pytest>=8
+# blpapi is NOT listed here: `py risk.py setup` installs it from Bloomberg's own index
+# (https://blpapi.bloomberg.com/repository/releases/python/simple/) on the Bloomberg PC.

@@ -1,10 +1,7 @@
-Start the app by typing `pnl` in a terminal, or double-click `launch.bat` in
-the project folder. The browser opens automatically. Keep the terminal open;
-Ctrl+C stops the app. Running `pnl` again opens the existing instance.
-
-On this computer, the existing WindowsApps `pnl.cmd` now points to this
-project. Its previous contents are saved beside it as
-`pnl.cmd.risk-monitor-backup`.
+Start the app with `py risk.py start` in a terminal opened in the project
+folder (set up first with `py risk.py setup`; see README). The browser opens
+automatically. Keep the terminal open; Ctrl+C stops the app. Running `start`
+again opens the existing instance.
 
 Use **Upload a file** below the app tabs:
 
@@ -31,8 +28,7 @@ previewed in reference mode; only BNP-format worksheets can update report data.
 
 Files are limited to 25 MB. Uploading does not modify the original file.
 
-Dependencies are listed in `requirements.txt`. For a new Python installation:
-`py -3 -m pip install -r requirements.txt`.
+Dependencies are listed in `requirements.txt` and installed by `py risk.py setup`.
 
 
 Calculation correction (2026-09-14): the cash ladder now includes currency/date
