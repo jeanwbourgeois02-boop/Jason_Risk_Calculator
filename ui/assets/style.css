@@ -88,3 +88,5 @@ p { margin: 6px 0; }
 .btn--big { font-size: 14px; padding: 9px 18px; }
 .details--compact { margin-top: 6px; }
 .details--compact > summary { font-size: 12px; font-weight: 500; color: var(--muted); }
+.source-busy { color: var(--accent); font-weight: 600; font-size: 13px; margin-top: 6px; min-height: 0; }
+.source-busy:empty { display: none; }

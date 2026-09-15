@@ -812,3 +812,16 @@ def test_ensure_schema_creates_empty_db_and_status_file(tmp_path):
     assert read_status(p)["reason"] == "no pull has run yet"
     uiapp.ensure_schema(p)   # idempotent
     assert uiapp.load_summary(p)["as_of_date"] == "none"
+
+
+def test_upload_sheet_names_read_from_xlsx_zip_index(tmp_path):
+    import openpyxl
+    from ui.uploads import sheet_names
+    wb = openpyxl.Workbook()
+    wb.active.title = "Portfolio"
+    wb.create_sheet("All FX trades")
+    wb.create_sheet("A & B")
+    path = tmp_path / "book.xlsx"
+    wb.save(path)
+    assert sheet_names(path.read_bytes(), "book.xlsx") == ["Portfolio", "All FX trades", "A & B"]
+    assert sheet_names(b"", "report.csv") == []
