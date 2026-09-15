@@ -345,11 +345,21 @@ def bundles_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
     ])
 
 
+def _today_default(default_date: Optional[str]) -> Optional[str]:
+    """As-of defaults to today (New York), like the Ladder tab, so the strip and the
+    list show the book as it stands now rather than at the last upload."""
+    try:
+        from ui.tabs.cash_ladder import today_ny
+        return today_ny()
+    except Exception:
+        return default_date
+
+
 def build_layout(default_date: Optional[str] = None) -> html.Div:
     return html.Div(className="blotter", children=[
         html.H3("Blotter"),
         html.Div(id=TOOLBAR_ID, className="toolbar", children=[
-            build_date_picker(DATE_PICKER_ID, default_date=default_date),
+            build_date_picker(DATE_PICKER_ID, default_date=_today_default(default_date)),
         ]),
         dcc.Tabs(id=SUBTABS_ID, value=SCOPE_ORDER[0], className="subtabs", children=[
             dcc.Tab(label=SCOPE_LABELS[s], value=s, className="subtab",

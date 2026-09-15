@@ -26,21 +26,21 @@ h5 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacin
 p { margin: 8px 0; }
 
 /* ---------------------------------------------------------------- top bar (tabs + upload) */
-.top-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-  gap: 16px; background: var(--navy); padding: 0 24px; }
+.top-bar { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between;
+  gap: 16px; background: var(--navy); padding: 0 24px; position: relative; z-index: 2; }
 .tabs-bar { border-bottom: none; margin: 0; flex: 1 1 auto; }
 .tab { padding: 12px 18px !important; border: none !important; border-bottom: 3px solid transparent !important;
   background: transparent !important; color: rgba(255,255,255,.72) !important; font-weight: 600; font-size: 13px; }
 .tab:hover { color: #fff !important; background: var(--navy-2) !important; }
 .tab--selected { color: #fff !important; border-bottom: 3px solid var(--gold) !important; background: var(--navy-2) !important; }
-.tab-body, .cash-ladder { padding: 16px 24px 32px; }
+.tab-body, .cash-ladder { padding: 16px 24px 32px; background: var(--page); }
 
 /* Sub-tab bar (owned by the Blotter agent, styled here for consistency) */
 .subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 0 0 16px; }
-.subtab { padding: 8px 14px; border: none; border-bottom: 3px solid transparent; background: transparent;
-  color: var(--muted); font-weight: 600; font-size: 12.5px; cursor: pointer; }
-.subtab:hover { color: var(--navy); }
-.subtab--selected { color: var(--navy); border-bottom: 3px solid var(--gold); }
+.subtab { padding: 8px 14px !important; border: none !important; border-bottom: 3px solid transparent !important;
+  background: transparent !important; color: var(--muted) !important; font-weight: 600; font-size: 12.5px; cursor: pointer; }
+.subtab:hover { color: var(--navy) !important; }
+.subtab--selected { color: var(--navy) !important; border-bottom: 3px solid var(--gold) !important; background: #fff !important; }
 
 /* ---------------------------------------------------------------- header strip */
 .header-block { background: var(--navy); color: #fff; padding: 16px 24px; }
@@ -49,13 +49,20 @@ p { margin: 8px 0; }
 .header-figure-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: rgba(255,255,255,.65); }
 .header-figure-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
 .header-figure-caption { font-size: 11px; color: rgba(255,255,255,.55); margin-top: 2px; }
-.header-block .details > summary { color: rgba(255,255,255,.8); }
-.header-block .details > summary:hover { color: var(--gold); }
+/* The LTD chart's collapsible re-uses `.section` (white card, dark text) -- fine on the
+   light page, but it sits inside the navy header here, so it needs its own dark-on-
+   light override rather than inheriting the header's white-on-navy palette; the
+   opposite (navy text on navy) is exactly the pairing the user's contrast rule bans. */
+.header-block .details { background: var(--card); border-radius: 6px; padding: 4px 12px 8px; margin-top: 8px; color: var(--text); }
+.header-block .details > summary { color: var(--navy); }
+.header-block .details > summary:hover { color: #6b5311; }
 
 /* ---------------------------------------------------------------- generic layout */
 .toolbar { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-end; background: var(--card);
   border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
 .toolbar label { color: var(--muted); font-size: 12px; }
+.ladder-heading { align-items: center; gap: 16px; }
+.ladder-heading .section-title { margin: 0; flex: 1 1 auto; min-width: 220px; }
 .meta { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 16px; }
 .metric { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; min-width: 110px; }
 .metric-label { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -126,7 +133,10 @@ p { margin: 8px 0; }
 /* ---------------------------------------------------------------- dash_table look: sticky navy
    header, hairline outline, 8px radius, zebra rows, tabular numbers, positive/negative colours. */
 .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td,
-.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th,
+.dash-spreadsheet-container .dash-spreadsheet-inner table,
+.dash-spreadsheet-container .dash-spreadsheet-inner input {
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
   font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: var(--line) !important;
 }
 .dash-table-container { border-radius: 8px; overflow: hidden; border: 1px solid var(--line); }
@@ -150,12 +160,24 @@ p { margin: 8px 0; }
 .source-row--stage { justify-content: flex-start; align-items: flex-end; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
 .source-row--stage label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
 .source-line { font-size: 13px; font-weight: 600; color: rgba(255,255,255,.9); }
-.top-bar .source-strip { background: transparent; border: none; padding: 8px 0; margin: 0; }
-.top-bar .source-line { color: rgba(255,255,255,.85); }
+/* Pinned to the right end of the navy top-bar, on every tab, at all times (the upload
+   control lives in `build_layout`'s top-bar row, a sibling of the tab bodies, so it
+   never moves when the selected tab changes). A compact right-aligned panel, not a
+   full-width strip, so it overlays nothing important underneath. */
+.top-bar .source-strip { background: transparent; border: none; padding: 8px 0;
+  margin: 0; flex: 0 0 auto; max-width: 420px; display: flex; flex-direction: column;
+  align-items: flex-end; }
+.top-bar .source-row { justify-content: flex-end; width: 100%; }
+.top-bar .source-row--stage { justify-content: flex-end; }
+.top-bar .source-line { color: rgba(255,255,255,.85); text-align: right; }
 .source-file { font-family: Consolas, "Courier New", monospace; font-size: 12px; align-self: center; color: var(--text); }
+.top-bar .source-file { color: rgba(255,255,255,.85); }
+.source-snapshot { font-size: 12px; align-self: center; color: var(--muted); }
+.top-bar .source-snapshot { color: rgba(255,255,255,.7); }
 .source-result { margin-top: 8px; font-size: 13px; }
 .source-result--error { color: var(--neg); font-weight: 600; }
 .details--compact { margin-top: 6px; }
 .details--compact > summary { font-size: 12px; font-weight: 600; color: var(--muted); }
+.top-bar .details--compact > summary { color: rgba(255,255,255,.75); }
 .source-busy { color: var(--gold); font-weight: 700; font-size: 13px; margin-top: 6px; min-height: 0; }
 .source-busy:empty { display: none; }
