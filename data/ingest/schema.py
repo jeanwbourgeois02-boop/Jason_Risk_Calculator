@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 from typing import Union
 
-TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "positions")
+TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "positions", "instrument_theme")
 VIEWS = ("marks_official",)
 
 # Official source per mark_type (CLAUDE.md "Official marks"). BNP_BVAL is never official.
@@ -49,7 +49,13 @@ CREATE TABLE IF NOT EXISTS trades (
   counterparty    TEXT NOT NULL,
   strategy        TEXT NOT NULL,
   trader          TEXT NOT NULL,
-  description     TEXT NOT NULL
+  description     TEXT NOT NULL,
+  theme           TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS instrument_theme (
+  instrument_id   TEXT PRIMARY KEY REFERENCES instruments,
+  theme           TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS trade_legs (
@@ -121,45 +127,68 @@ WHERE source = CASE mark_type
 
 
 # --------------------------------------------------------------------------- P&L ledger
-# Additive tables for engine/pnl/ledger.py (realised P&L on settlement + daily snapshot
-# series for Daily / 5d / MTD / YTD). They never feed the exposure or workbook formulas.
-LEDGER_TABLES = ("realised_pnl", "pnl_snapshots")
+# Additive table for engine/pnl/ledger.py (realised P&L on settlement, consumed for
+# Daily / 5d / MTD / YTD via ltd() recomputation). Never feeds the exposure or workbook
+# formulas. `pnl_snapshots` is retired per docs/BUILD_PLAN.md section 3 ("pnl_snapshots
+# is retired") -- its DDL is intentionally no longer created here. Existing databases
+# that still have the table are left alone (not dropped) since engine/pnl/ledger.py and
+# data/bloomberg/backfill.py are migrated separately by their own owning agents.
+LEDGER_TABLES = ("realised_pnl",)
 _LEDGER_DDL = """
 CREATE TABLE IF NOT EXISTS realised_pnl (
   trade_id            TEXT PRIMARY KEY REFERENCES trades,
   instrument_id       TEXT NOT NULL,
+  product             TEXT NOT NULL DEFAULT 'FX_FWD',   -- FX_FWD | FX_SWAP | FUTURE | FX_OPTION | IRS
   currency            TEXT NOT NULL,
   settle_date         TEXT NOT NULL,
   local_amount        REAL NOT NULL,
-  usd_entry_amount    REAL NOT NULL,
+  usd_entry_amount    REAL NOT NULL,      -- nullable-by-sentinel 0.0: crosses/futures have no single USD
+                                          -- entry leg, so 0.0 here means "not applicable", not "zero P&L"
+  mark_type           TEXT NOT NULL DEFAULT 'SPOT',      -- SPOT | FUTURE_PX: which mark_type froze this row
   spot_usd_per_local  REAL NOT NULL,
-  spot_as_of_date     TEXT NOT NULL,      -- date of the SPOT mark used to freeze (settle date, or last prior)
+  spot_as_of_date     TEXT NOT NULL,      -- date of the mark used to freeze (settle date, or last prior)
   spot_source         TEXT NOT NULL,
   pnl_usd             REAL NOT NULL,
   frozen_at           TEXT NOT NULL,
   note                TEXT NOT NULL       -- '' or 'spot dated <d> (last before settlement)'
 );
-CREATE TABLE IF NOT EXISTS pnl_snapshots (
-  as_of_date          TEXT PRIMARY KEY,
-  snapped_at          TEXT NOT NULL,
-  realised_ltd_usd    REAL NOT NULL,
-  unrealised_usd      REAL NOT NULL,      -- NaN stored as NULL is not allowed: incomplete -> complete = 0 and 0.0
-  total_ltd_usd       REAL NOT NULL,
-  net_usd             REAL NOT NULL,
-  gross_usd           REAL NOT NULL,
-  trading_usd         REAL NOT NULL,
-  open_trades         INTEGER NOT NULL,
-  realised_trades     INTEGER NOT NULL,
-  complete            INTEGER NOT NULL,   -- 1 = every open currency priced and every settled trade realised
-  missing             TEXT NOT NULL       -- comma list of unpriced currencies / unrealisable trade ids
+"""
+
+# Ambiguous FX-swap package candidates (CLAUDE.md "package_id rule"): groups with more
+# than one candidate on a side are never auto-grouped and land here for manual review
+# instead. Populated by data/ingest/swaps.py::package_swaps.
+_SWAP_REVIEW_DDL = """
+CREATE TABLE IF NOT EXISTS swap_review (
+  candidate_group     TEXT NOT NULL,      -- 'account|instrument_id|trade_date'
+  trade_id            TEXT NOT NULL REFERENCES trades,
+  reason              TEXT NOT NULL,
+  PRIMARY KEY (candidate_group, trade_id)
 );
 """
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a table's initial CREATE, for databases created by
+    an older version of this module. CREATE TABLE IF NOT EXISTS above only helps brand
+    new databases; existing ones need an explicit ALTER TABLE ADD COLUMN."""
+    additions = [
+        ("trades", "theme", "TEXT NOT NULL DEFAULT ''"),
+        ("realised_pnl", "product", "TEXT NOT NULL DEFAULT 'FX_FWD'"),
+        ("realised_pnl", "mark_type", "TEXT NOT NULL DEFAULT 'SPOT'"),
+    ]
+    for table, column, coldef in additions:
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table itself doesn't exist yet; the CREATE above will make it right
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create all tables and the marks_official view if absent; enable foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(_DDL + _marks_official_ddl() + _LEDGER_DDL)
+    conn.executescript(_DDL + _marks_official_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL)
+    _migrate_columns(conn)
     conn.commit()
 
 

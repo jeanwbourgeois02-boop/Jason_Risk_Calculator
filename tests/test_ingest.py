@@ -38,7 +38,9 @@ def test_schema_columns_match_contract():
     assert cols("instruments") == ["instrument_id", "asset_class", "base_ccy", "quote_ccy", "multiplier",
                                    "is_ndf", "bbg_ticker", "expiry_date"]
     assert cols("trades") == ["trade_id", "source", "instrument_id", "product", "package_id", "trade_date",
-                              "quantity", "price", "account", "counterparty", "strategy", "trader", "description"]
+                              "quantity", "price", "account", "counterparty", "strategy", "trader", "description",
+                              "theme"]
+    assert cols("instrument_theme") == ["instrument_id", "theme"]
     assert cols("trade_legs") == ["trade_id", "leg_no", "leg_type", "ccy", "amount", "start_date", "settle_date",
                                   "rate", "settles_cash"]
     assert cols("marks") == ["as_of_date", "instrument_id", "settle_date", "mark_type", "value", "source",
@@ -56,7 +58,7 @@ def test_schema_columns_match_contract():
 def test_schema_foreign_keys_enforced():
     conn = schema.connect()
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO trades VALUES ('t1','BNP','NOPE','FX_FWD','t1','2026-08-17',1,1,'a','c','s','tr','d')")
+        conn.execute("INSERT INTO trades VALUES ('t1','BNP','NOPE','FX_FWD','t1','2026-08-17',1,1,'a','c','s','tr','d','')")
 
 
 def test_marks_official_filters_to_official_source():
@@ -774,3 +776,213 @@ def test_load_cli_currency_balance_amendment_is_a_conflict(tmp_path, capsys):
     assert conn.execute(
         "SELECT quantity FROM positions WHERE instrument_id='CASH-TRY'").fetchone()[0] == orig_qty
     conn.close()
+
+
+# --------------------------------------------------------------------------- BUILD_PLAN task B
+def test_migration_adds_theme_and_realised_pnl_columns_to_an_existing_db(tmp_path):
+    """A database created before this change (no theme / instrument_theme / product /
+    mark_type) is upgraded in place by connect(), never dropped or recreated."""
+    db_path = tmp_path / "old.db"
+    old = sqlite3.connect(str(db_path))
+    old.executescript("""
+        CREATE TABLE instruments (instrument_id TEXT PRIMARY KEY, asset_class TEXT NOT NULL,
+          base_ccy TEXT NOT NULL, quote_ccy TEXT NOT NULL, multiplier REAL NOT NULL,
+          is_ndf INTEGER NOT NULL, bbg_ticker TEXT NOT NULL, expiry_date TEXT NOT NULL);
+        CREATE TABLE trades (trade_id TEXT PRIMARY KEY, source TEXT NOT NULL,
+          instrument_id TEXT NOT NULL, product TEXT NOT NULL, package_id TEXT NOT NULL,
+          trade_date TEXT NOT NULL, quantity REAL NOT NULL, price REAL NOT NULL,
+          account TEXT NOT NULL, counterparty TEXT NOT NULL, strategy TEXT NOT NULL,
+          trader TEXT NOT NULL, description TEXT NOT NULL);
+        CREATE TABLE realised_pnl (trade_id TEXT PRIMARY KEY, instrument_id TEXT NOT NULL,
+          currency TEXT NOT NULL, settle_date TEXT NOT NULL, local_amount REAL NOT NULL,
+          usd_entry_amount REAL NOT NULL, spot_usd_per_local REAL NOT NULL,
+          spot_as_of_date TEXT NOT NULL, spot_source TEXT NOT NULL, pnl_usd REAL NOT NULL,
+          frozen_at TEXT NOT NULL, note TEXT NOT NULL);
+        INSERT INTO trades VALUES ('t1','BNP','X','FX_FWD','t1','2026-08-17',1,1,'a','c','s','tr','d');
+    """)
+    old.commit()
+    old.close()
+
+    conn = schema.connect(db_path)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
+    assert cols[-1] == "theme"
+    assert conn.execute("SELECT theme FROM trades WHERE trade_id='t1'").fetchone()[0] == ""
+    assert "instrument_theme" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    rp_cols = [r[1] for r in conn.execute("PRAGMA table_info(realised_pnl)")]
+    assert "product" in rp_cols and "mark_type" in rp_cols
+    # idempotent: migrating twice does not error
+    schema.create_schema(conn)
+    conn.close()
+
+
+def test_ledger_tables_no_longer_include_pnl_snapshots():
+    assert schema.LEDGER_TABLES == ("realised_pnl",)
+    conn = schema.connect()
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "pnl_snapshots" not in tables
+
+
+# ---- swap packaging
+def _fwd_pair_rows(**diffs):
+    near = _fwd_row(Symbol="USDJPY091626-201")
+    far = _fwd_row(Symbol="USDJPY092626-202", Quantity=-1000000.0, Position=-1000000.0,
+                   **{"Local Cost": -147000000.0, "Symbol Description":
+                      "TD 08/03/2026 VD 09/26/2026 SELL USD VS .BUY JPY @ 147.00000000",
+                      "Market Value Local": -500000.0, "Market Value Base": -3401.36,
+                      "Start Date Dirty MV": -3000.0, "DTD Total P&L": -401.36,
+                      "DTD Trading P&L": -401.36, "MTD Total P&L": -3401.36})
+    near.update(diffs.get("near", {}))
+    far.update(diffs.get("far", {}))
+    return [near, far]
+
+
+def test_swap_grouped_when_opposite_signed_and_different_value_dates(tmp_path):
+    from data.ingest import swaps
+
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", _fwd_pair_rows())
+    conn = schema.connect()
+    bnp.load(p, conn)
+    packaged = swaps.package_swaps(conn)
+    assert packaged == 2
+    rows = conn.execute("SELECT trade_id, product, package_id FROM trades ORDER BY trade_id").fetchall()
+    assert rows[0][1] == rows[1][1] == "FX_SWAP"
+    assert rows[0][2] == rows[1][2] == "SWAP-201"
+    assert conn.execute("SELECT COUNT(*) FROM swap_review").fetchone()[0] == 0
+
+
+def test_swap_round_trip_same_value_date_not_grouped(tmp_path):
+    """Opposite-signed rows with the SAME value date are an intraday round trip: they
+    stay separate outrights, and are not flagged for review either."""
+    from data.ingest import swaps
+
+    rows = _fwd_pair_rows(far={
+        "Symbol": "USDJPY091626-202",
+        "Symbol Description": "TD 08/03/2026 VD 09/16/2026 SELL USD VS .BUY JPY @ 147.00000000",
+    })
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", rows)
+    conn = schema.connect()
+    bnp.load(p, conn)
+    packaged = swaps.package_swaps(conn)
+    assert packaged == 0
+    products = {r[0] for r in conn.execute("SELECT product FROM trades")}
+    assert products == {"FX_FWD"}
+    assert conn.execute("SELECT COUNT(*) FROM swap_review").fetchone()[0] == 0
+
+
+def test_swap_ambiguous_multiple_candidates_go_to_review(tmp_path):
+    """A third row on the negative side with the same account/pair/trade date and a
+    matching USD amount, at yet another value date, makes the positive leg's
+    counterparty ambiguous: no auto-grouping, both plausible negatives go to review."""
+    from data.ingest import swaps
+
+    near, far = _fwd_pair_rows()
+    far2 = dict(far)
+    far2["Symbol"] = "USDJPY100626-203"
+    far2["Symbol Description"] = "TD 08/03/2026 VD 10/06/2026 SELL USD VS .BUY JPY @ 147.00000000"
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [near, far, far2])
+    conn = schema.connect()
+    bnp.load(p, conn)
+    packaged = swaps.package_swaps(conn)
+    assert packaged == 0
+    products = {r[0] for r in conn.execute("SELECT product FROM trades")}
+    assert products == {"FX_FWD"}
+    reviewed = {r[0] for r in conn.execute("SELECT trade_id FROM swap_review")}
+    assert reviewed == {"201", "202", "203"}
+
+
+def test_swap_packaging_is_idempotent(tmp_path):
+    from data.ingest import swaps
+
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", _fwd_pair_rows())
+    conn = schema.connect()
+    bnp.load(p, conn)
+    swaps.package_swaps(conn)
+    assert swaps.package_swaps(conn) == 0  # already packaged: nothing left to group
+
+
+# ---- theme inheritance
+def test_theme_inheritance_on_load(tmp_path):
+    from data.ingest.themes import set_theme
+
+    p1 = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
+    conn = schema.connect()
+    bnp.load(p1, conn)
+    assert conn.execute("SELECT theme FROM trades WHERE trade_id='111'").fetchone()[0] == ""
+
+    set_theme(conn, "USDJPY", "carry", is_instrument=True)
+    p2 = _write_csv(tmp_path / "HA_PNL_20260819.csv", [_fwd_row(Symbol="USDJPY091626-333")])
+    bnp.load(p2, conn, as_of_date="2026-08-18")
+    assert conn.execute("SELECT theme FROM trades WHERE trade_id='333'").fetchone()[0] == "carry"
+    # the existing trade is not retroactively changed
+    assert conn.execute("SELECT theme FROM trades WHERE trade_id='111'").fetchone()[0] == ""
+
+    set_theme(conn, "111", "override")
+    assert conn.execute("SELECT theme FROM trades WHERE trade_id='111'").fetchone()[0] == "override"
+
+    with pytest.raises(ValueError):
+        set_theme(conn, "nope", "x")
+    with pytest.raises(ValueError):
+        set_theme(conn, "NOPE", "x", is_instrument=True)
+
+
+# ---- xlsx futures fills
+def test_xlsx_futures_formula_recovery_both_orders(tmp_path):
+    import openpyxl
+    from data.ingest import xlsx_futures
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "All FX trades"
+    ws.append(["Date", None, "Quantity", "tenor", "fill"])
+    ws.append([date(2026, 7, 22), "ESU6 Index", "=6*E2*50", date(2026, 9, 18), 7528.25])
+    ws.append([date(2026, 9, 11), "ESZ6 Index", "=-13*50*E3", date(2026, 12, 18), 7671.75])
+    ws.append([date(2026, 7, 22), "USDJPY", -3500000, date(2026, 9, 16), 162.27])  # FX row: ignored
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    fills = xlsx_futures.read_futures_fills(path)
+    assert len(fills) == 2
+    assert (fills[0].contracts, fills[0].root, fills[0].settle_date) == (6.0, "ES", "2026-09-18")
+    assert (fills[1].contracts, fills[1].root, fills[1].settle_date) == (-13.0, "ES", "2026-12-18")
+
+
+def test_xlsx_futures_value_only_fallback(tmp_path):
+    import openpyxl
+    from data.ingest import xlsx_futures
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "All FX trades"
+    ws.append(["Date", None, "Quantity", "tenor", "fill"])
+    ws.append([date(2026, 7, 22), "ESU6 Index", 6 * 7528.25 * 50, date(2026, 9, 18), 7528.25])
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    (fill,) = xlsx_futures.read_futures_fills(path)
+    assert fill.contracts == pytest.approx(6.0)
+
+
+def test_xlsx_futures_load_is_idempotent_and_writes_notional_leg(tmp_path):
+    import openpyxl
+    from data.ingest import xlsx_futures
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "All FX trades"
+    ws.append(["Date", None, "Quantity", "tenor", "fill"])
+    ws.append([date(2026, 7, 22), "ESU6 Index", "=6*E2*50", date(2026, 9, 18), 7528.25])
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    conn = schema.connect()
+    n = xlsx_futures.load_futures_fills(path, conn)
+    assert n == 1
+    trade = conn.execute(
+        "SELECT source, instrument_id, product, quantity, price FROM trades WHERE trade_id='XL-2'").fetchone()
+    assert trade == ("XLSX", "ESU6 Index", "FUTURE", 6.0, 7528.25)
+    leg = conn.execute(
+        "SELECT leg_type, ccy, amount, settle_date, settles_cash FROM trade_legs WHERE trade_id='XL-2'").fetchone()
+    assert leg == ("NOTIONAL", "USD", 6.0 * 50 * 7528.25, "2026-09-18", 0)
+
+    assert xlsx_futures.load_futures_fills(path, conn) == 0
+    assert conn.execute("SELECT COUNT(*) FROM trades WHERE trade_id='XL-2'").fetchone()[0] == 1

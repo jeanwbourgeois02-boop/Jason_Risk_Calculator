@@ -455,11 +455,10 @@ def check_ledger(rep: Report, db_path: Path) -> None:
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if not {"realised_pnl", "pnl_snapshots"} <= tables:
+            if "realised_pnl" not in tables:
                 rep.check("ledger", False, "ledger tables not created yet: launch the app once (it adds them), "
                                            "then run the feed", required=False)
                 return
-            snaps = conn.execute("SELECT as_of_date, complete, missing FROM pnl_snapshots ORDER BY as_of_date").fetchall()
             realised = conn.execute("SELECT COUNT(*), COALESCE(SUM(pnl_usd),0) FROM realised_pnl").fetchone()
             today = date.today().isoformat()
             settled_unrealised = conn.execute(
@@ -471,15 +470,10 @@ def check_ledger(rep: Report, db_path: Path) -> None:
     except sqlite3.Error as exc:
         rep.check("ledger", False, f"sqlite error: {exc}", required=False)
         return
-    last = snaps[-1] if snaps else None
-    complete_days = sum(1 for s in snaps if s[1])
-    detail = (f"{len(snaps)} snapshot day(s), {complete_days} complete; "
-              + (f"last {last[0]} ({'complete' if last[1] else 'incomplete: ' + (last[2] or '?')}); " if last else "no snapshot yet; ")
-              + f"{realised[0]} realised trade(s) = {realised[1]:,.0f} USD; "
+    detail = (f"{realised[0]} realised trade(s) = {realised[1]:,.0f} USD; "
               + f"{len(settled_unrealised)} settled-but-unrealised trade(s)")
-    ok = bool(snaps) and (last is not None and bool(last[1])) and not settled_unrealised
-    rep.check("ledger", ok, detail, required=False, snapshots=len(snaps), complete_snapshots=complete_days,
-              last_snapshot=last[0] if last else None, realised_trades=realised[0], realised_usd=realised[1],
+    ok = not settled_unrealised
+    rep.check("ledger", ok, detail, required=False, realised_trades=realised[0], realised_usd=realised[1],
               settled_unrealised=[{"trade_id": t, "pair": p, "settle_date": s} for t, p, s in settled_unrealised])
     for t, p, s in settled_unrealised[:10]:
         rep.notes.append(f"settled, not realised: {t} {p} settled {s} (needs an official SPOT on/before that date)")

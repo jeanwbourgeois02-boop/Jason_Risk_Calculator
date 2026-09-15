@@ -198,7 +198,7 @@ def test_records_from_db_matches_records_from_parse(parsed):
     conn = schema.connect()
     conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                      [tuple(vars(i).values()) for i in parsed.instruments.values()])
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [tuple(vars(t).values()) for t in parsed.trades])
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [tuple(vars(t).values()) for t in parsed.trades])
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [tuple(vars(l).values()) for l in parsed.legs])
     from_parse, _ = records_from_parse(parsed)
     from_db, unresolved = records_from_db(conn, "2026-08-17")

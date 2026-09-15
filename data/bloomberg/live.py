@@ -3,9 +3,15 @@
 If `blpapi` is importable and a Bloomberg API service answers (Terminal / B-PIPE on
 localhost:8194 by default), `LiveFeed` pulls every INTERVAL_SECONDS:
   * SPOT (PX_LAST, live ReferenceDataRequest) for every FX pair with an open leg;
-  * FWD_OUTRIGHT for every open leg's own settle date and for the workbook maturity
-    (direct broken-date request first, standard-tenor interpolation as fallback, exactly
-    as data/bloomberg/pull_marks.py does).
+  * FWD_OUTRIGHT for every open leg's own settle date (direct broken-date request first,
+    standard-tenor interpolation as fallback, exactly as data/bloomberg/pull_marks.py
+    does). There is no shared WORKDAY(as_of,5) maturity request any more: BUILD_PLAN.md
+    section 2 marks each leg at the outright for its own settle_date only; the
+    reconciliation view's single-maturity marks are entered manually on the Market data
+    tab (see data/bloomberg/marks_csv.py::export_request, which still emits that request
+    for the workbook comparison and is unchanged);
+  * FUTURE_PX for every FUTURE instrument with an open leg, at the contract's own expiry
+    (settle_date).
 Rows are written to `marks` with INSERT OR REPLACE (same primary key each cycle, new
 `snapped_at`), sources BBG_BFXFORWARD (official) / BBG_INTERP (fallback, never official).
 
@@ -83,23 +89,33 @@ WHERE i.asset_class = 'FX' AND t.trade_date <= :as_of AND l.settle_date >= :as_o
 ORDER BY i.instrument_id, l.settle_date
 """
 
+_OPEN_FUTURE_SQL = """
+SELECT DISTINCT i.instrument_id, i.bbg_ticker, l.settle_date
+FROM trade_legs l JOIN trades t USING (trade_id) JOIN instruments i USING (instrument_id)
+WHERE i.asset_class = 'FUTURE' AND t.trade_date <= :as_of AND l.settle_date >= :as_of
+ORDER BY i.instrument_id, l.settle_date
+"""
+
 
 def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
-    """RequestRows: one SPOT per open pair, one FWD_OUTRIGHT per (pair, open settle
-    date) and per pair at the workbook maturity WORKDAY(as_of,5)."""
+    """RequestRows per BUILD_PLAN.md section 2: one SPOT per open FX pair, one
+    FWD_OUTRIGHT per (pair, open leg's own settle_date) -- no shared workbook maturity --
+    and one FUTURE_PX per open future at its own settle_date (expiry)."""
     from data.bloomberg.pull_marks import RequestRow
-    from engine.pnl.pnl import workbook_valuation_date
-    rows = conn.execute(_OPEN_FX_SQL, {"as_of": as_of_date}).fetchall()
+    fx_rows = conn.execute(_OPEN_FX_SQL, {"as_of": as_of_date}).fetchall()
     out, seen = [], set()
-    maturity = workbook_valuation_date(as_of_date)
-    for instrument_id, ticker, settle in rows:
+    for instrument_id, ticker, settle in fx_rows:
         if (instrument_id, "SPOT") not in seen:
             seen.add((instrument_id, "SPOT"))
             out.append(RequestRow(instrument_id, ticker, as_of_date, "SPOT"))
-        for day in (settle, maturity):
-            if (instrument_id, "FWD_OUTRIGHT", day) not in seen:
-                seen.add((instrument_id, "FWD_OUTRIGHT", day))
-                out.append(RequestRow(instrument_id, ticker, day, "FWD_OUTRIGHT"))
+        if (instrument_id, "FWD_OUTRIGHT", settle) not in seen:
+            seen.add((instrument_id, "FWD_OUTRIGHT", settle))
+            out.append(RequestRow(instrument_id, ticker, settle, "FWD_OUTRIGHT"))
+    fut_rows = conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of_date}).fetchall()
+    for instrument_id, ticker, settle in fut_rows:
+        if (instrument_id, "FUTURE_PX", settle) not in seen:
+            seen.add((instrument_id, "FUTURE_PX", settle))
+            out.append(RequestRow(instrument_id, ticker, settle, "FUTURE_PX"))
     return out
 
 
@@ -216,7 +232,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             requests = build_requests(conn, as_of_date)
             status["requested"] = len(requests)
             if not requests:
-                status.update(connected=True, reason="no open FX legs to price")
+                status.update(connected=True, reason="no open FX legs or futures to price")
                 write_status(db_path, status)
                 return status
             diag = pm.Diagnostics()
@@ -233,20 +249,27 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             past = {(r.instrument_id, r.settle_date) for r in requests
                     if r.mark_type == "FWD_OUTRIGHT" and date.fromisoformat(r.settle_date) < today}
             fwd_reqs = [r for r in requests if r.mark_type == "FWD_OUTRIGHT" and (r.instrument_id, r.settle_date) not in past]
-            fwd_rows, warnings, fwd_fail = _fwd_outright_rows(session, service, fwd_reqs, today, spot_by_pair, snapped)
-            rows = spot_rows + fwd_rows
+            fwd_rows, fwd_warnings, fwd_fail = _fwd_outright_rows(session, service, fwd_reqs, today, spot_by_pair, snapped)
+            fut_reqs = [r for r in requests if r.mark_type == "FUTURE_PX"]
+            fut_rows, fut_warnings, fut_fail = pm.build_future_rows(session, service, fut_reqs, today, diag) \
+                if fut_reqs else ([], [], [])
+            warnings = fwd_warnings + fut_warnings
+            rows = spot_rows + fwd_rows + fut_rows
             written = write_marks(conn, rows)
-            # P&L ledger: realise trades settled before today and store today's snapshot
-            # (engine/pnl/ledger.py). Additive; failures are reported, never hide the marks.
+            # Realisation only (BUILD_PLAN.md section 6, Task B): freeze FX trades whose
+            # settle date is before `today` and are not yet in realised_pnl. The daily LTD
+            # snapshot itself is engine/pnl/ledger.py's job (task A); this module only
+            # calls the one guarded function it needs and never writes pnl_snapshots.
             try:
-                from engine.pnl.ledger import take_snapshot
-                led = take_snapshot(conn, today.isoformat(), rates_from_marks(conn))
-                status["ledger"] = {"as_of_date": today.isoformat(), "complete": led["complete"],
-                                    "realised_trades": led["realised_trades"], "open_trades": led["open_trades"],
-                                    "missing": led["missing"], "unrealisable": led["unrealisable"]}
+                from engine.pnl.ledger import realise_settled
+                led = realise_settled(conn, today.isoformat())
+                status["ledger"] = {"as_of_date": today.isoformat(), "realised": led.get("realised"),
+                                    "unrealisable": led.get("unrealisable")}
+            except ImportError as exc:
+                status["ledger"] = {"skipped": f"engine.pnl.ledger.realise_settled not importable: {exc!r}"}
             except Exception as exc:
                 status["ledger"] = {"error": f"{exc!r}"}
-                status.setdefault("warnings", []).append(f"ledger snapshot failed: {exc!r}")
+                status.setdefault("warnings", []).append(f"realise_settled failed: {exc!r}")
             status.update(connected=True, written=written, warnings=list(warnings)[:50],
                           as_of_marks=today.isoformat())
             ok_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]): r for r in rows}
@@ -263,7 +286,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
                                   "status": "OK", "value": hit["value"], "source": hit["source"], "detail": ""})
                 else:
-                    detail = next((f.get("detail", "") for f in spot_fail + fwd_fail
+                    detail = next((f.get("detail", "") for f in spot_fail + fwd_fail + fut_fail
                                    if f.get("instrument_id") == r.instrument_id and f.get("mark_type") == r.mark_type
                                    and (r.mark_type == "SPOT" or f.get("settle_date") == r.settle_date)), "not returned")
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,

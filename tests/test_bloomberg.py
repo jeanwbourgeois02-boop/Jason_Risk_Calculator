@@ -228,14 +228,14 @@ def test_export_request(tmp_path):
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
     conn.execute(
         "INSERT INTO trades VALUES ('t1','MANUAL','EURUSD','FX_FWD','t1','2026-08-17',100.0,1.1,"
-        "'ACC','CPTY','STRAT','TRADER','synthetic')"
+        "'ACC','CPTY','STRAT','TRADER','synthetic','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t1',1,'FX_NEAR','EUR',100.0,'2026-08-17','2026-09-16',1.1,1)"
     )
     conn.execute(
         "INSERT INTO trades VALUES ('t2','MANUAL','ESU6 Index','FUTURE','t2','2026-08-17',10.0,4500.0,"
-        "'ACC','CPTY','STRAT','TRADER','synthetic')"
+        "'ACC','CPTY','STRAT','TRADER','synthetic','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t2',1,'NOTIONAL','USD',225000.0,'2026-08-17','2026-09-18',0,0)"
@@ -259,7 +259,7 @@ def test_export_request_excludes_expired_future(tmp_path):
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-08-10')")
     conn.execute(
         "INSERT INTO trades VALUES ('t1','MANUAL','ESU6 Index','FUTURE','t1','2026-07-01',10.0,4500.0,"
-        "'ACC','CPTY','STRAT','TRADER','synthetic')"
+        "'ACC','CPTY','STRAT','TRADER','synthetic','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t1',1,'NOTIONAL','USD',225000.0,'2026-07-01','2026-08-10',0,0)"
@@ -1543,3 +1543,79 @@ def test_pull_marks_missing_tzdata_writes_diag_and_exits_6(monkeypatch, tmp_path
     failures = diag["summary"]["failures"]
     tz_failure = next(f for f in failures if f.get("stage") == "tz_prerequisite")
     assert tz_failure["hint"] == "py -3 -m pip install tzdata"
+
+
+# --------------------------------------------------------------------------- inventory.py
+def _inventory_db():
+    conn = schema.connect(":memory:")
+    conn.execute("INSERT INTO instruments VALUES ('AUDUSD','FX','AUD','USD',1,0,'AUDUSD Curncy','9999-12-31')")
+    conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
+    conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
+    conn.execute("INSERT INTO trades VALUES ('a1','BNP','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trades VALUES ('j1','BNP','USDJPY','FX_FWD','j1','2026-08-10',1e6,150.0,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trades VALUES ('f1','BNP','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-16", 0.65, 1),
+        ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-09-16", 0.65, 1),
+        ("j1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", "2026-09-18", 150.0, 1),
+        ("j1", 2, "FX_NEAR", "JPY", -150e6, "2026-08-10", "2026-09-18", 150.0, 1),
+        ("f1", 1, "NOTIONAL", "USD", 6 * 50 * 7528.25, "2026-08-10", "2026-09-18", 0, 0),
+    ])
+    conn.commit()
+    return conn
+
+
+def test_mark_inventory_statuses(tmp_path):
+    from data.bloomberg import inventory
+    conn = _inventory_db()
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        ("2026-08-17", "AUDUSD", "2026-08-17", "SPOT", 0.66, "BBG_BFXFORWARD", "2026-08-17T15:00:00-04:00"),
+        ("2026-08-17", "AUDUSD", "2026-09-16", "FWD_OUTRIGHT", 0.665, "BBG_INTERP", "2026-08-17T15:00:00-04:00"),
+        ("2026-08-17", "USDJPY", "2026-09-18", "FWD_OUTRIGHT", 149.0, "MANUAL", "2026-08-17T15:00:00-04:00"),
+    ])
+    conn.commit()
+    df = inventory.mark_inventory(conn, "2026-08-17")
+    by = {(r.instrument_id, r.mark_type, r.settle_date): r.status for r in df.itertuples()}
+    assert by[("AUDUSD", "SPOT", "2026-08-17")] == "OFFICIAL"
+    assert by[("AUDUSD", "FWD_OUTRIGHT", "2026-09-16")] == "INTERP"
+    assert by[("USDJPY", "FWD_OUTRIGHT", "2026-09-18")] == "MANUAL"
+    assert by[("USDJPY", "SPOT", "2026-08-17")] == "MISSING"
+    assert by[("ESU6 Index", "FUTURE_PX", "2026-09-18")] == "MISSING"
+    assert set(df["mark_type"]) == {"SPOT", "FWD_OUTRIGHT", "FUTURE_PX"}
+
+
+def test_close_completeness(tmp_path):
+    from data.bloomberg import inventory
+    conn = _inventory_db()
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        ("2026-08-17", "AUDUSD", "2026-08-17", "SPOT", 0.66, "BBG_BFXFORWARD", "2026-08-17T15:00:00-04:00"),
+        ("2026-08-18", "AUDUSD", "2026-08-18", "SPOT", 0.67, "BBG_BFXFORWARD", "2026-08-18T15:00:00-04:00"),
+        ("2026-08-18", "USDJPY", "2026-08-18", "SPOT", 150.5, "BBG_BFXFORWARD", "2026-08-18T15:00:00-04:00"),
+    ])
+    conn.commit()
+    df = inventory.close_completeness(conn, "2026-08-17", "2026-08-18")
+    rows = {r.as_of_date: r for r in df.itertuples()}
+    assert rows["2026-08-17"].needed == 2 and rows["2026-08-17"].present == 1 and not rows["2026-08-17"].complete
+    assert rows["2026-08-18"].present == 2 and rows["2026-08-18"].complete
+
+
+# --------------------------------------------------------------------------- manual.py
+def test_write_manual_mark_is_visible_but_not_official(tmp_path):
+    from data.bloomberg import manual, inventory
+    conn = _inventory_db()
+    manual.write_manual_mark(conn, "2026-08-17", "AUDUSD", "2026-09-16", "FWD_OUTRIGHT", 0.67)
+    row = conn.execute("SELECT value, source FROM marks WHERE instrument_id='AUDUSD' AND mark_type='FWD_OUTRIGHT'").fetchone()
+    assert row == (0.67, "MANUAL")
+    official = conn.execute("SELECT * FROM marks_official WHERE instrument_id='AUDUSD' AND mark_type='FWD_OUTRIGHT'").fetchone()
+    assert official is None                                     # MANUAL never wins FWD_OUTRIGHT
+    df = inventory.mark_inventory(conn, "2026-08-17")
+    row = df[(df.instrument_id == "AUDUSD") & (df.mark_type == "FWD_OUTRIGHT")].iloc[0]
+    assert row["status"] == "MANUAL" and row["value"] == 0.67
+
+    manual.write_manual_mark(conn, "2026-08-17", "AUDUSD", "2026-08-17", "DELTA", 0.5)
+    official_delta = conn.execute(
+        "SELECT value FROM marks_official WHERE instrument_id='AUDUSD' AND mark_type='DELTA'").fetchone()
+    assert official_delta == (0.5,)                             # MANUAL is official for DELTA

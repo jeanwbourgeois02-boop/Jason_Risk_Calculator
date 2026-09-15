@@ -1,12 +1,16 @@
-"""Backfill the P&L ledger history from Bloomberg daily closes.
+"""Backfill past-close Bloomberg marks history (BUILD_PLAN.md section 3/6, Task B).
 
-The ledger (engine/pnl/ledger.py) needs one snapshot per business day to show Daily /
-5d / MTD / YTD. The live feed only writes a snapshot on the days it runs. This module
-rebuilds the missing days: for every business day in [start, end] it pulls the PX_LAST
-close of every USD FX pair the book has ever traded (HistoricalDataRequest, one call
-per day), stores the closes as official SPOT marks dated that day, realises trades that
-settled before that day, and writes the day's snapshot. Days are processed in order so
-realisation always sees the spot on or before each settle date.
+`engine/pnl/ledger.py::ltd` recomputes LTD from `marks` on demand; it needs one official
+SPOT mark per business day per traded USD FX pair to do that. This module rebuilds the
+missing days: for every business day in [start, end] it pulls the PX_LAST close of every
+USD FX pair the book has ever traded (HistoricalDataRequest, one call per day), stores
+the closes as official SPOT marks dated that day (source BBG_BFXFORWARD; interpolated
+tenor history, if ever added, would be BBG_INTERP and is never official), and -- only if
+`engine.pnl.ledger.realise_settled` is importable -- freezes trades that settled on or
+before that day. Days are processed in order so realisation always sees the spot on or
+before each settle date. This module no longer writes a `pnl_snapshots` row; that table
+and its "one snapshot per day" model are retired by the pnl-engine task, which recomputes
+`ltd(conn, date)` straight from `marks` instead.
 
 Limits, stated plainly:
   - Trades are only those in the database. Trades opened and settled between two BNP
@@ -15,9 +19,12 @@ Limits, stated plainly:
     stored under the same official source; the snapped_at timestamp tells them apart
     (backfill rows are stamped 15:00 America/New_York on their date).
   - NDFs still realise at spot on the value date, not the fixing.
-  - Days that already hold a complete snapshot are skipped unless overwrite=True.
-    Realised rows already frozen by an earlier run are never re-priced.
+  - Days that already hold official SPOT marks for every traded pair are skipped unless
+    overwrite=True. Realised rows already frozen by an earlier run are never re-priced.
   - Calendar is Monday-Friday only; holidays simply return no close and are reported.
+  - If `engine.pnl.ledger.realise_settled` cannot be imported (e.g. mid-rewrite by the
+    pnl-engine task), marks are still written and the day is reported with
+    `realised: None` and a note; nothing is invented and nothing raises.
 
 Usage (Bloomberg PC):  py -3 -m data.bloomberg.backfill [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 Default start is the last business day of the previous year (the YTD reference date).
@@ -85,22 +92,35 @@ def rates_on_date(conn: sqlite3.Connection, day: str) -> Dict[str, dict]:
     return out
 
 
-def _has_complete_snapshot(conn: sqlite3.Connection, day: str) -> bool:
-    row = conn.execute("SELECT complete FROM pnl_snapshots WHERE as_of_date = ?", (day,)).fetchone()
-    return bool(row and row[0])
+def _import_realise_settled():
+    """engine.pnl.ledger.realise_settled if importable right now, else None. Guarded per
+    BUILD_PLAN.md Task B: this module must not depend on the rest of engine.pnl."""
+    try:
+        from engine.pnl.ledger import realise_settled
+        return realise_settled
+    except ImportError:
+        return None
+
+
+def _has_all_closes(conn: sqlite3.Connection, day: str, pairs: List[tuple]) -> bool:
+    have = {r[0] for r in conn.execute(
+        "SELECT instrument_id FROM marks_official WHERE mark_type='SPOT' AND as_of_date=?", (day,))}
+    return all(p in have for p, _ in pairs)
 
 
 def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
              session_factory: Optional[Callable] = None, host: str = "localhost", port: int = 8194,
              overwrite: bool = False, log: Callable[[str], None] = print) -> List[dict]:
     """Run the backfill. Returns one dict per business day:
-    {day, status: DONE|SKIPPED|NO_CLOSES, closes, missing_pairs, complete, missing}.
+    {day, status: DONE|SKIPPED|NO_CLOSES, closes, missing_pairs, realised, unrealisable}.
+    `realised`/`unrealisable` are None on a day where realise_settled could not be
+    imported (marks are still written).
 
     `fetch(session, service, tickers, field, day) -> {ticker: value|None}` defaults to
     pull_marks.fetch_historical; `session_factory` defaults to pull_marks.open_session.
     Both are injectable so the loop is testable without blpapi."""
     from data.ingest.schema import connect
-    from engine.pnl.ledger import take_snapshot
+    realise_settled = _import_realise_settled()
     conn = connect(Path(db_path))
     try:
         pairs = traded_pairs(conn)
@@ -110,11 +130,13 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         tickers = [t for _, t in pairs]
         by_ticker = {t: p for p, t in pairs}
         days = business_days(start, end)
-        todo = [d for d in days if overwrite or not _has_complete_snapshot(conn, d.isoformat())]
+        todo = [d for d in days if overwrite or not _has_all_closes(conn, d.isoformat(), pairs)]
         log(f"Backfill {start} .. {end}: {len(days)} business days, {len(todo)} to compute, {len(pairs)} pairs.")
+        if realise_settled is None:
+            log("  note: engine.pnl.ledger.realise_settled not importable; marks only, no realisation this run.")
         if not todo:
             return [{"day": d.isoformat(), "status": "SKIPPED", "closes": 0, "missing_pairs": [],
-                     "complete": True, "missing": ""} for d in days]
+                     "realised": 0, "unrealisable": []} for d in days]
         session = service = None
         if fetch is None:
             from data.bloomberg import pull_marks as pm
@@ -127,7 +149,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             day = d.isoformat()
             if d not in todo:
                 results.append({"day": day, "status": "SKIPPED", "closes": 0, "missing_pairs": [],
-                                "complete": True, "missing": ""})
+                                "realised": 0, "unrealisable": []})
                 continue
             closes = fetch(session, service, tickers, "PX_LAST", d) or {}
             rows, missing_pairs = [], []
@@ -142,19 +164,27 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                              "mark_type": "SPOT", "value": fvalue, "source": SRC_SPOT_FWD,
                              "snapped_at": close_stamp(d)})
             if not rows:
-                log(f"  {day}  NO_CLOSES  (holiday or Bloomberg returned nothing; no snapshot written)")
+                log(f"  {day}  NO_CLOSES  (holiday or Bloomberg returned nothing; nothing written)")
                 results.append({"day": day, "status": "NO_CLOSES", "closes": 0, "missing_pairs": missing_pairs,
-                                "complete": False, "missing": ""})
+                                "realised": None, "unrealisable": []})
                 continue
             write_marks(conn, rows)
-            led = take_snapshot(conn, day, rates_on_date(conn, day))
-            missing = ",".join(led["missing"] + [u["trade_id"] for u in led["unrealisable"]])
-            flag = "complete" if led["complete"] else f"INCOMPLETE missing={missing}"
-            log(f"  {day}  DONE  closes={len(rows)}  open={led['open_trades']}  realised={led['realised_trades']}  {flag}")
+            if realise_settled is not None:
+                try:
+                    led = realise_settled(conn, day)
+                    realised, unrealisable = led["realised"], led["unrealisable"]
+                    flag = "complete" if not unrealisable else f"unrealisable={[u['trade_id'] for u in unrealisable]}"
+                except Exception as exc:  # engine/pnl/ledger.py is owned by another task; never let its
+                    # in-progress state stop marks from being written -- report and move on.
+                    realised, unrealisable = None, []
+                    flag = f"realise_settled raised: {exc!r}"
+            else:
+                realised, unrealisable, flag = None, [], "no realisation (realise_settled unavailable)"
+            log(f"  {day}  DONE  closes={len(rows)}  realised={realised}  {flag}")
             results.append({"day": day, "status": "DONE", "closes": len(rows), "missing_pairs": missing_pairs,
-                            "complete": led["complete"], "missing": missing})
+                            "realised": realised, "unrealisable": unrealisable})
         done = [r for r in results if r["status"] == "DONE"]
-        log(f"Finished: {len(done)} days written, {sum(1 for r in done if r['complete'])} complete, "
+        log(f"Finished: {len(done)} days written, "
             f"{sum(1 for r in results if r['status'] == 'NO_CLOSES')} with no closes, "
             f"{sum(1 for r in results if r['status'] == 'SKIPPED')} skipped.")
         return results

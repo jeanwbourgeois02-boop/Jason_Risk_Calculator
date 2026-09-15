@@ -10,7 +10,7 @@ from data.ingest.workbook_rates import rate_grid, save_rates, read_cached_rates,
 def seed(path):
     conn = connect(path)
     conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('t','BNP','USDJPY','FX_FWD','t','2026-08-17',100,150,'a','b','s','t','d')")
+    conn.execute("INSERT INTO trades VALUES ('t','BNP','USDJPY','FX_FWD','t','2026-08-17',100,150,'a','b','s','t','d','')")
     conn.commit()
     conn.close()
 

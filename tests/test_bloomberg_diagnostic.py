@@ -20,7 +20,7 @@ def _seed_db(path: Path) -> None:
     from data.ingest import schema
     conn = schema.connect(path)
     conn.execute("INSERT INTO instruments VALUES ('AUDUSD','FX','AUD','USD',1,0,'AUDUSD Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('a1','BNP','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,'acc','cp','HAHY7','t','d')")
+    conn.execute("INSERT INTO trades VALUES ('a1','BNP','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,'acc','cp','HAHY7','t','d','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-16", 0.65, 1),
         ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-09-16", 0.65, 1)])
@@ -69,14 +69,14 @@ def test_ledger_and_feed_sections_are_informational_and_read_only(tmp_path, monk
     assert code == 1                                          # required checks still decide the exit code
     data = json.loads(next((tmp_path / "reports").glob("*.json")).read_text(encoding="utf-8"))
     led = data["checks"]["ledger"]
-    assert led["required"] is False and led["ok"] is False and led["snapshots"] == 0
-    assert "no snapshot yet" in led["detail"] and "0 realised trade(s)" in led["detail"]
+    assert led["required"] is False and led["ok"] is True and led["realised_trades"] == 0
+    assert "0 realised trade(s)" in led["detail"]
     feed = data["checks"]["feed"]
     assert feed["required"] is False and feed["ok"] is True and "skipped=1" in feed["detail"] and "ledger:" in feed["detail"]
     txt = next((tmp_path / "reports").glob("*.txt")).read_text(encoding="utf-8")
     assert "Informational (not required for exit 0)" in txt and "[CHECK ] ledger" in txt
     assert "[CHECK ] ledger" in capsys.readouterr().out
-    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM pnl_snapshots").fetchone()[0] == 0   # read-only
+    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM realised_pnl").fetchone()[0] == 0   # read-only
 
 
 def test_missing_database_is_reported_not_raised(tmp_path, capsys):

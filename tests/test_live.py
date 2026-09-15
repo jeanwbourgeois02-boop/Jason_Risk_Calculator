@@ -16,9 +16,9 @@ def _db(tmp_path):
         ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31"),
         ("EURSEK", "FX", "EUR", "SEK", 1, 0, "EURSEK Curncy", "9999-12-31"),
     ])
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-        ("a1", "BNP", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "HAHY7", "t", "d"),
-        ("j1", "BNP", "USDJPY", "FX_FWD", "j1", "2026-08-10", 1e6, 150.0, "acc", "cp", "HAHY7", "t", "d"),
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        ("a1", "BNP", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "HAHY7", "t", "d", ""),
+        ("j1", "BNP", "USDJPY", "FX_FWD", "j1", "2026-08-10", 1e6, 150.0, "acc", "cp", "HAHY7", "t", "d", ""),
     ])
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-16", 0.65, 1),
@@ -59,8 +59,25 @@ def test_build_requests_spot_per_pair_and_forward_per_open_date(tmp_path):
     keys = {(r.instrument_id, r.mark_type, r.settle_date) for r in reqs}
     assert ("AUDUSD", "SPOT", "2026-08-17") in keys and ("USDJPY", "SPOT", "2026-08-17") in keys
     assert ("AUDUSD", "FWD_OUTRIGHT", "2026-09-16") in keys and ("USDJPY", "FWD_OUTRIGHT", "2026-09-18") in keys
-    assert ("AUDUSD", "FWD_OUTRIGHT", "2026-08-24") in keys        # workbook maturity WORKDAY(+5)
+    # no shared workbook maturity request any more (BUILD_PLAN.md section 2): each leg is
+    # only requested at its own settle_date
+    assert ("AUDUSD", "FWD_OUTRIGHT", "2026-08-24") not in keys
+    assert all(r.settle_date in ("2026-08-17", "2026-09-16", "2026-09-18") for r in reqs)
     assert live.build_requests(conn, "2026-10-01") == []           # everything settled
+
+
+def test_build_requests_includes_open_futures(tmp_path):
+    p, conn = _db(tmp_path)
+    conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
+    conn.execute("INSERT INTO trades VALUES ('f1','BNP','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*50*7528.25,'2026-08-10','2026-09-18',0,0)")
+    conn.commit()
+    reqs = live.build_requests(conn, "2026-08-17")
+    keys = {(r.instrument_id, r.mark_type, r.settle_date) for r in reqs}
+    assert ("ESU6 Index", "FUTURE_PX", "2026-09-18") in keys
+    later_keys = {(r.instrument_id, r.mark_type) for r in live.build_requests(conn, "2026-09-19")}
+    assert ("ESU6 Index", "FUTURE_PX") not in later_keys       # expired future drops out
 
 
 def test_pull_once_without_bloomberg_writes_status_and_no_marks(tmp_path, monkeypatch):
@@ -93,9 +110,11 @@ def test_pull_once_with_fake_session_writes_marks_and_itemised_status(tmp_path, 
     monkeypatch.setattr(pm, "fetch_reference", fake_fetch_reference)
     monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
     monkeypatch.setattr(fwd_curve, "request_fwd_curves", fake_curves)
-    live_day = _date(2026, 8, 20)   # injected "today": the 2026-08-24 workbook maturity lies between spot and 1st tenor
+    live_day = _date(2026, 8, 20)   # injected "today"
     status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=live_day)
-    assert status["connected"] is True and status["requested"] == 6 and status["as_of_marks"] == "2026-08-20"
+    # no shared workbook maturity request any more: only one FWD_OUTRIGHT per pair,
+    # at its own open settle date (BUILD_PLAN.md section 2)
+    assert status["connected"] is True and status["requested"] == 4 and status["as_of_marks"] == "2026-08-20"
     by = {(i["instrument_id"], i["mark_type"], i["settle_date"]): i for i in status["items"]}
     assert by[("AUDUSD", "SPOT", status["as_of_marks"])]["status"] == "OK"
     assert by[("AUDUSD", "SPOT", status["as_of_marks"])]["value"] == 0.6612
@@ -105,17 +124,41 @@ def test_pull_once_with_fake_session_writes_marks_and_itemised_status(tmp_path, 
     assert jpy_fwd["status"] == "FAILED" and "not authorised" in jpy_fwd["detail"]
     aud_exact = by[("AUDUSD", "FWD_OUTRIGHT", "2026-09-16")]
     assert aud_exact["status"] == "OK" and aud_exact["value"] == 0.6620 and aud_exact["source"] == "BBG_BFXFORWARD"
-    aud_interp = by[("AUDUSD", "FWD_OUTRIGHT", "2026-08-24")]        # workbook maturity: before first tenor
-    assert aud_interp["status"] == "OK" and aud_interp["source"] == "BBG_INTERP" and 0.6612 < aud_interp["value"] < 0.6620
-    assert status["failed"] == 3 and status["written"] == 3 and any("interp_from_spot" in w for w in status["warnings"])
+    assert status["failed"] == 2 and status["written"] == 2
     marks = conn.execute("SELECT instrument_id, mark_type, value, source FROM marks ORDER BY mark_type, settle_date").fetchall()
-    assert ("AUDUSD", "SPOT", 0.6612, "BBG_BFXFORWARD") in marks and len(marks) == 3
+    assert ("AUDUSD", "SPOT", 0.6612, "BBG_BFXFORWARD") in marks and len(marks) == 2
     # the ladder now sees the live spot, and USDJPY is simply missing (never invented)
     rates = live.rates_from_marks(conn)
     assert rates["AUD"]["rate"] == 0.6612 and "JPY" not in rates
+    # realisation ran through the guarded engine.pnl.ledger.realise_settled call, not a snapshot write
+    assert "ledger" in status and "error" not in status["ledger"]
     # second cycle replaces rather than duplicates (same primary key, new snapped_at)
     live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=live_day)
     assert conn.execute("SELECT COUNT(*) FROM marks WHERE mark_type='SPOT'").fetchone()[0] == 1
+
+
+def test_pull_once_includes_future_px(tmp_path, monkeypatch):
+    p, conn = _db(tmp_path)
+    conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
+    conn.execute("INSERT INTO trades VALUES ('f1','BNP','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*50*7528.25,'2026-08-10','2026-09-18',0,0)")
+    conn.commit()
+    from data.bloomberg import pull_marks as pm
+    from datetime import date as _date
+
+    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: {})
+    monkeypatch.setattr(pm, "fetch_historical",
+                        lambda session, service, tickers, field, as_of, diag=None, tag=None: {"ESU6 Index": 7598.5})
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    from data.bloomberg import fwd_curve
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
+    status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=_date(2026, 8, 20))
+    by = {(i["instrument_id"], i["mark_type"], i["settle_date"]): i for i in status["items"]}
+    fut = by[("ESU6 Index", "FUTURE_PX", "2026-09-18")]
+    assert fut["status"] == "OK" and fut["value"] == 7598.5 and fut["source"] == "BBG_BDH"
+    row = conn.execute("SELECT value, source FROM marks WHERE instrument_id='ESU6 Index'").fetchone()
+    assert row == (7598.5, "BBG_BDH")
 
 
 def test_pull_once_exception_is_reported_not_raised(tmp_path, monkeypatch):

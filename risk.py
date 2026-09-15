@@ -32,7 +32,7 @@ SAMPLE_AS_OF = "2026-08-17"
 BLPAPI_INDEX = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
 MIN_PYTHON = (3, 11)
 PORTS = range(8050, 8061)
-TABLES = ("instruments", "trades", "trade_legs", "marks", "positions", "realised_pnl", "pnl_snapshots")
+TABLES = ("instruments", "trades", "trade_legs", "marks", "positions", "realised_pnl")
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -266,7 +266,7 @@ def doctor_checks(d: Doctor, bloomberg: bool, git: bool = True) -> None:
             else:
                 asof = counts.get("positions", 0)
                 d.add("database", True, f"{p}: {counts.get('trades', 0)} trades, {asof} positions, "
-                                        f"{counts.get('marks', 0)} marks, {counts.get('pnl_snapshots', 0)} snapshots")
+                                        f"{counts.get('marks', 0)} marks")
                 if counts.get("trades", 0) == 0:
                     d.add("data", None, "database is empty: upload a BNP report in the app, or  py risk.py setup --sample")
         except sqlite3.Error as exc:

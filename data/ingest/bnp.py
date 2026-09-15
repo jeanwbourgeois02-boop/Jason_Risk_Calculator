@@ -104,6 +104,7 @@ class Trade:
     strategy: str
     trader: str
     description: str
+    theme: str = ""
 
 
 @dataclass(frozen=True)
@@ -718,10 +719,16 @@ def load(csv_path: Union[str, Path], conn: sqlite3.Connection,
                 res.skipped["positions"] += 1
         positions = new_positions
 
+    # Theme inheritance (BUILD_PLAN task B point 4): a new trade with no theme of its own
+    # inherits the theme set for its pair in instrument_theme, else stays ''.
+    inherited = dict(conn.execute("SELECT instrument_id, theme FROM instrument_theme"))
+    trades = [t if t.theme else Trade(**{**vars(t), "theme": inherited.get(t.instrument_id, "")})
+              for t in trades]
+
     with conn:
         conn.executemany("INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                          _rows(res.instruments.values()))
-        conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(trades))
+        conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(trades))
         conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", _rows(legs))
         conn.executemany("INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(positions))
     return res

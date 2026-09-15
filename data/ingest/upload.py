@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from data.ingest import bnp, schema
+from data.ingest import bnp, schema, swaps
 from data.load import _load_bnp_marks_idempotent
 
 MAX_BYTES = 25 * 1024 * 1024
@@ -90,6 +90,10 @@ def import_report(payload, filename, as_of, db_path, sheet=None):
                         f'INSERT INTO {table} ({names}) VALUES ({placeholders}) ON CONFLICT DO UPDATE SET {updates}',
                         staged.execute(f'SELECT {names} FROM {table}'))
                 live.commit()
+                # Swap packaging runs at the end of every BNP upload (CLAUDE.md package_id
+                # rule); it only touches trades still at product='FX_FWD', so it is safe to
+                # run against the whole live table, not just the rows just imported.
+                swaps.package_swaps(live)
         except Exception:
             live.rollback()
             raise

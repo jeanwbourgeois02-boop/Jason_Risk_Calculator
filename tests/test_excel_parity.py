@@ -34,8 +34,8 @@ def test_database_pipeline_matches_saved_historical_futures():
                      (name,'FUTURE','ES','USD',50,0,name,expiry))
         trade_id = str(r)
         quantity = c/(50*fill)
-        conn.execute('INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                     (trade_id,'XLSX',name,'FUTURE',trade_id,td.date().isoformat(),quantity,fill,'a','b','s','t','cached parity fixture'))
+        conn.execute('INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                     (trade_id,'XLSX',name,'FUTURE',trade_id,td.date().isoformat(),quantity,fill,'a','b','s','t','cached parity fixture',''))
         conn.execute('INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)',
                      (trade_id,1,'NOTIONAL','USD',c,td.date().isoformat(),expiry,fill,0))
         for day,column in [(previous,6),(previous2,10)]:

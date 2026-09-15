@@ -19,9 +19,9 @@ def add_trade(conn, trade_id, pair, quantity, fill, *, ndf=False,
     base, quote = pair[:3], pair[3:]
     conn.execute("INSERT OR IGNORE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  (pair, "FX", base, quote, 1, int(ndf), pair + " Curncy", "9999-12-31"))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (trade_id, "BNP", pair, "FX_FWD", trade_id, trade_date, quantity, fill,
-                  "A", "C", "S", "T", "test"))
+                  "A", "C", "S", "T", "test", ""))
     for no, ccy, amount in [(1, base, quantity), (2, quote, -quantity * fill + usd_rounding)]:
         conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
                      (trade_id, no, "FX_NEAR", ccy, amount, trade_date, MATURITY, fill, int(not ndf)))
