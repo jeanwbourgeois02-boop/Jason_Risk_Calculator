@@ -1,4 +1,4 @@
-"""engine/pnl/ledger.py: realise on settlement, snapshots, period P&L. Pure sqlite."""
+"""engine/pnl/ledger.py: realise on settlement, ltd, period P&L. Pure sqlite."""
 import math
 
 import pytest
@@ -7,31 +7,51 @@ from data.ingest import schema
 from engine.pnl import ledger
 
 
-def rate(v, inverted=False):
-    return {"rate": v, "inverted": inverted, "source": "T", "timestamp": "t", "stale": False}
+def _insert_instruments(conn, rows):
+    conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)", rows)
+
+
+def _insert_trade(conn, trade_id, instrument_id, product, trade_date, quantity, price,
+                  strategy="HAHY7", theme=""):
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, "BNP", instrument_id, product, trade_id, trade_date, quantity, price,
+         "acc", "cp", strategy, "t", "d", theme),
+    )
+
+
+def _insert_legs(conn, rows):
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", rows)
+
+
+def _insert_marks(conn, rows):
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", rows)
 
 
 def _db():
     conn = schema.connect()
-    conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)", [
+    _insert_instruments(conn, [
         ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"),
-        ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31")])
+        ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31"),
+    ])
     # a1: sold 1m AUD @0.65 settling 09-10 (settles before as_of 09-14); a2: open, settles 09-30
-    # j1: bought 150m JPY for 1m USD settling 09-12 (settled); no spot for JPY on/before -> unrealisable
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-        ("a1", "BNP", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "HAHY7", "t", "d"),
-        ("a2", "BNP", "AUDUSD", "FX_FWD", "a2", "2026-09-14", 2e6, 0.70, "acc", "cp", "HAHY7", "t", "d"),
-        ("j1", "BNP", "USDJPY", "FX_FWD", "j1", "2026-08-10", -1e6, 150.0, "acc", "cp", "HAHY7", "t", "d")])
-    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+    # j1: bought 150m JPY for 1m USD settling 09-12 (settled); no spot for JPY pair on/before -> unrealisable
+    _insert_trade(conn, "a1", "AUDUSD", "FX_FWD", "2026-08-10", -1e6, 0.65)
+    _insert_trade(conn, "a2", "AUDUSD", "FX_FWD", "2026-09-14", 2e6, 0.70)
+    _insert_trade(conn, "j1", "USDJPY", "FX_FWD", "2026-08-10", -1e6, 150.0)
+    _insert_legs(conn, [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-10", 0.65, 1),
         ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-09-10", 0.65, 1),
         ("a2", 1, "FX_NEAR", "AUD", 2e6, "2026-09-14", "2026-09-30", 0.70, 1),
         ("a2", 2, "FX_NEAR", "USD", -1400000, "2026-09-14", "2026-09-30", 0.70, 1),
         ("j1", 1, "FX_NEAR", "USD", -1e6, "2026-08-10", "2026-09-12", 150.0, 1),
-        ("j1", 2, "FX_NEAR", "JPY", 150e6, "2026-08-10", "2026-09-12", 150.0, 1)])
-    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        ("j1", 2, "FX_NEAR", "JPY", 150e6, "2026-08-10", "2026-09-12", 150.0, 1),
+    ])
+    _insert_marks(conn, [
         ("2026-09-09", "AUDUSD", "2026-09-09", "SPOT", 0.62, "BBG_BFXFORWARD", "2026-09-09T15:00:00+00:00"),  # last before 09-10
-        ("2026-09-14", "AUDUSD", "2026-09-14", "SPOT", 0.71, "BBG_BFXFORWARD", "2026-09-14T15:00:00+00:00")])
+        ("2026-09-14", "AUDUSD", "2026-09-30", "FWD_OUTRIGHT", 0.71, "BBG_BFXFORWARD", "2026-09-14T15:00:00+00:00"),
+        ("2026-09-14", "AUDUSD", "2026-09-14", "SPOT", 0.71, "BBG_BFXFORWARD", "2026-09-14T15:00:00+00:00"),
+    ])
     conn.commit()
     return conn
 
@@ -42,45 +62,79 @@ def test_realise_settled_freezes_once_with_prior_spot_and_reports_unrealisable()
     assert res["realised"] == 1 and [u["trade_id"] for u in res["unrealisable"]] == ["j1"]
     rows = ledger.realised_rows(conn, "2026-09-14")
     a1 = rows.iloc[0]
-    assert a1["trade_id"] == "a1" and a1["spot_usd_per_local"] == 0.62 and a1["spot_as_of_date"] == "2026-09-09"
-    assert a1["pnl_usd"] == pytest.approx(-1e6 * 0.62 - (-650000)) == pytest.approx(30000)   # sold AUD, AUD fell
+    assert a1["trade_id"] == "a1" and a1["spot_as_of_date"] == "2026-09-09"
+    assert a1["pnl_usd"] == pytest.approx(-1e6 * 0.62 - (-650000)) == pytest.approx(30000)  # sold AUD, AUD fell
     assert "last before settlement" in a1["note"]
     # idempotent: second call realises nothing new and never re-prices a1 at the newer 0.71 spot
     assert ledger.realise_settled(conn, "2026-09-14")["realised"] == 0
-    assert ledger.realised_rows(conn, "2026-09-14").iloc[0]["spot_usd_per_local"] == 0.62
-    assert ledger.realised_rows(conn, "2026-09-10").empty                                   # earlier as_of excludes it
+    assert ledger.realised_rows(conn, "2026-09-14").iloc[0]["pnl_usd"] == pytest.approx(30000)
+    assert ledger.realised_rows(conn, "2026-09-10").empty  # earlier as_of excludes it
 
 
-def test_snapshot_and_ledger_summary_with_periods():
+def test_ltd_and_periods_with_a_settled_and_an_open_trade():
     conn = _db()
-    rates = {"AUD": rate(0.71)}
-    # seed a complete snapshot for the previous business day (Fri 2026-09-11) and month-end (Mon 2026-08-31)
-    conn.executemany("INSERT INTO pnl_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [
-        ("2026-09-11", "x", 0.0, 10000.0, 10000.0, 1.0, 1.0, 0.0, 2, 0, 1, ""),
-        ("2026-08-31", "x", 0.0, -5000.0, -5000.0, 1.0, 1.0, 0.0, 2, 0, 1, ""),
-        ("2026-09-04", "x", 0.0, 1000.0, 1000.0, 1.0, 1.0, 0.0, 2, 0, 0, "JPY")])   # incomplete 5d reference
+    ledger.realise_settled(conn, "2026-09-14")
+    # j1 unrealisable -> ltd is NaN today
+    assert math.isnan(ledger.ltd(conn, "2026-09-14"))
+    periods = ledger.period_pnl(conn, "2026-09-14")
+    assert not periods["daily"]["available"]
+    assert "missing mark" in periods["daily"]["reason"]
+
+
+def test_ltd_available_when_every_open_and_settled_trade_prices():
+    conn = schema.connect()
+    _insert_instruments(conn, [("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31")])
+    _insert_trade(conn, "a1", "AUDUSD", "FX_FWD", "2026-08-10", -1e6, 0.65)
+    _insert_trade(conn, "a2", "AUDUSD", "FX_FWD", "2026-09-14", 2e6, 0.70)
+    _insert_legs(conn, [
+        ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-10", 0.65, 1),
+        ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-09-10", 0.65, 1),
+        ("a2", 1, "FX_NEAR", "AUD", 2e6, "2026-09-14", "2026-09-30", 0.70, 1),
+        ("a2", 2, "FX_NEAR", "USD", -1400000, "2026-09-14", "2026-09-30", 0.70, 1),
+    ])
+    _insert_marks(conn, [
+        ("2026-09-09", "AUDUSD", "2026-09-09", "SPOT", 0.62, "BBG_BFXFORWARD", "t"),
+        ("2026-09-14", "AUDUSD", "2026-09-30", "FWD_OUTRIGHT", 0.71, "BBG_BFXFORWARD", "t"),
+        ("2026-09-14", "AUDUSD", "2026-09-14", "SPOT", 0.71, "BBG_BFXFORWARD", "t"),
+    ])
     conn.commit()
-    led = ledger.take_snapshot(conn, "2026-09-14", rates)
-    # j1 is settled but unrealisable -> snapshot stored but incomplete
-    assert led["complete"] is False and [u["trade_id"] for u in led["unrealisable"]] == ["j1"]
-    assert led["realised_ltd_usd"] == pytest.approx(30000)
-    assert led["unrealised_usd"] == pytest.approx(2e6 * 0.71 - 1400000) == pytest.approx(20000)   # a2 open
-    assert led["trading_usd"] == pytest.approx(20000)                                              # a2 dated today
-    snap = ledger.snapshots(conn).set_index("as_of_date").loc["2026-09-14"]
-    assert snap["complete"] == 0 and snap["missing"] == "j1" and snap["total_ltd_usd"] == pytest.approx(50000)
-    summary = ledger.ledger_summary(conn, "2026-09-14", rates)
-    p = summary["periods"]
-    assert p["daily"]["available"] and p["daily"]["value"] == pytest.approx(50000 - 10000)
-    assert p["mtd"]["available"] and p["mtd"]["value"] == pytest.approx(50000 + 5000)
-    assert not p["d5"]["available"] and "incomplete" in p["d5"]["reason"]
-    assert not p["ytd"]["available"] and "no snapshot" in p["ytd"]["reason"]
-    assert summary["last_snapshot"]["as_of_date"] == "2026-09-14" and summary["snapshot_count"] == 4
+    ledger.realise_settled(conn, "2026-09-14")
+    ltd_today = ledger.ltd(conn, "2026-09-14")
+    realised = -1e6 * 0.62 - (-650000)          # 30000
+    unrealised = 2e6 * 0.71 - 1400000            # 20000
+    assert ltd_today == pytest.approx(realised + unrealised)
+    periods = ledger.period_pnl(conn, "2026-09-14")
+    assert periods["trading"]["available"] and periods["trading"]["value"] == pytest.approx(unrealised)
+    # reference day 09-11 only sees a1 (already settled and realised by then); a2 trades
+    # in on 09-14 so it drops out of the 09-11 book -> daily isolates a2's unrealised P&L
+    assert periods["daily"]["available"] and periods["daily"]["value"] == pytest.approx(unrealised)
 
 
-def test_missing_rate_makes_totals_and_periods_unavailable():
+def test_first_trading_day_ltd_is_zero_not_unavailable():
+    conn = schema.connect()
+    assert ledger.ltd(conn, "2026-09-14") == 0.0
+    periods = ledger.period_pnl(conn, "2026-09-14")
+    for key in ("daily", "d5", "mtd", "ytd"):
+        assert periods[key]["available"] and periods[key]["value"] == 0.0
+    assert periods["trading"]["available"] and periods["trading"]["value"] == 0.0
+
+
+def test_holiday_shifts_prev_business_day(tmp_path, monkeypatch):
+    holidays_file = tmp_path / "holidays.txt"
+    holidays_file.write_text("2026-09-11\n")  # Friday before as_of Monday 09-14
+    monkeypatch.setattr("engine.pnl.aggregate._DEFAULT_HOLIDAYS_PATH", holidays_file)
+    conn = schema.connect()
+    periods = ledger.period_pnl(conn, "2026-09-14")
+    assert periods["daily"]["ref_date"] == "2026-09-10"  # skips the holiday Friday
+
+
+def test_period_pnl_by_groups_rows():
     conn = _db()
-    led = ledger.take_snapshot(conn, "2026-09-14", {})          # no AUD rate
-    assert led["missing"] == ["AUD"] and math.isnan(led["unrealised_usd"]) and math.isnan(led["total_ltd_usd"])
-    summary = ledger.ledger_summary(conn, "2026-09-14", {})
-    assert all(not v["available"] and "unavailable" in v["reason"] for v in summary["periods"].values())
-    assert ledger.snapshots(conn).iloc[0]["complete"] == 0
+    ledger.realise_settled(conn, "2026-09-14")
+    by_pair = ledger.period_pnl_by(conn, "2026-09-14", "instrument_id")
+    assert "AUDUSD" in by_pair and "USDJPY" in by_pair
+    # AUDUSD side is fully priced (a1 realised, a2 priced) -> available; USDJPY (j1) is not
+    assert by_pair["AUDUSD"]["daily"]["available"]
+    assert not by_pair["USDJPY"]["daily"]["available"]
+    with pytest.raises(ValueError):
+        ledger.period_pnl_by(conn, "2026-09-14", "not_a_key")

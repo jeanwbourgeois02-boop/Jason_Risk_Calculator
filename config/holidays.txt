@@ -1,0 +1,13 @@
+# US market holidays, 2026. One ISO date per line; '#' comments and blank lines ignored.
+# Loaded by engine/pnl/aggregate.py::load_holidays for the business-day calendar used
+# by engine/pnl/ledger.py period_pnl / period_pnl_by (daily / 5d / mtd / ytd references).
+2026-01-01
+2026-01-19
+2026-02-16
+2026-04-03
+2026-05-25
+2026-06-19
+2026-07-03
+2026-09-07
+2026-11-26
+2026-12-25

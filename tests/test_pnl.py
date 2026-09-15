@@ -40,9 +40,9 @@ def _make_conn():
 
 def _insert_trade(conn, trade_id, instrument_id, quantity, price, settle_date, trade_date="2026-08-01"):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "MANUAL", instrument_id, "FX_FWD", trade_id, trade_date, quantity, price,
-         "ACC", "CPTY", "STRAT", "TRADER", "test trade"),
+         "ACC", "CPTY", "STRAT", "TRADER", "test trade", ""),
     )
     base_ccy = instrument_id[:3]
     quote_ccy = instrument_id[3:]
@@ -234,3 +234,137 @@ def test_book_totals_empty_input():
     totals = book_totals(pd.DataFrame(), _make_conn())
     assert math.isnan(totals["net_usd"])
     assert "unavailable" in totals["status"]
+
+
+# =========================================================================================
+# engine/pnl/valuation.py -- docs/BUILD_PLAN.md section 2 worked examples
+# =========================================================================================
+from engine.pnl import stress
+from engine.pnl.valuation import value_book
+
+VB_AS_OF = "2026-06-01"
+VB_SETTLE = "2026-06-20"
+
+
+def _vb_conn():
+    conn = schema.connect(":memory:")
+    conn.executemany(
+        "INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        [
+            ("EURUSD", "FX", "EUR", "USD", 1.0, 0, "EURUSD Curncy", "9999-12-31"),
+            ("USDJPY", "FX", "USD", "JPY", 1.0, 0, "USDJPY Curncy", "9999-12-31"),
+            ("EURSEK", "FX", "EUR", "SEK", 1.0, 0, "EURSEK Curncy", "9999-12-31"),
+            ("USDSEK", "FX", "USD", "SEK", 1.0, 0, "USDSEK Curncy", "9999-12-31"),
+            ("ESU6 Index", "FUTURE", "ES", "USD", 50.0, 0, "ESU6 Index", "2026-09-18"),
+        ],
+    )
+    conn.commit()
+    return conn
+
+
+def _vb_fx_trade(conn, trade_id, instrument_id, base_ccy, quote_ccy, quantity, fill, settle=VB_SETTLE):
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, "MANUAL", instrument_id, "FX_FWD", trade_id, "2026-05-01", quantity, fill,
+         "ACC", "CPTY", "STRAT", "TRADER", "test", ""),
+    )
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 (trade_id, 1, "FX_NEAR", base_ccy, quantity, "2026-05-01", settle, fill, 1))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 (trade_id, 2, "FX_NEAR", quote_ccy, -quantity * fill, "2026-05-01", settle, fill, 1))
+    conn.commit()
+
+
+def _vb_mark(conn, instrument_id, settle_date, mark_type, value, as_of=VB_AS_OF):
+    source = "BBG_BDH" if mark_type == "FUTURE_PX" else "BBG_BFXFORWARD"
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                 (as_of, instrument_id, settle_date, mark_type, value, source, f"{as_of}T15:00:00-04:00"))
+    conn.commit()
+
+
+def test_value_book_eur_usd_forward():
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T1", "EURUSD", "EUR", "USD", 1_000_000, 1.1000)
+    _vb_mark(conn, "EURUSD", VB_SETTLE, "FWD_OUTRIGHT", 1.1080)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["pnl_usd"] == pytest.approx(8_000)
+
+
+def test_value_book_usd_jpy_forward():
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T2", "USDJPY", "USD", "JPY", 1_000_000, 150.00)
+    _vb_mark(conn, "USDJPY", VB_SETTLE, "FWD_OUTRIGHT", 148.00)
+    _vb_mark(conn, "USDJPY", VB_AS_OF, "SPOT", 149.00)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["pnl_local"] == pytest.approx(-2_000_000)
+    assert row["pnl_usd"] == pytest.approx(-2_000_000 / 149, rel=1e-6)
+
+
+def test_value_book_eur_sek_cross_no_invented_usd_leg():
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T3", "EURSEK", "EUR", "SEK", 1_000_000, 11.00)
+    _vb_mark(conn, "EURSEK", VB_SETTLE, "FWD_OUTRIGHT", 11.20)
+    _vb_mark(conn, "USDSEK", VB_AS_OF, "SPOT", 10.50)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["pnl_local"] == pytest.approx(200_000)
+    assert row["pnl_usd"] == pytest.approx(200_000 / 10.5, rel=1e-6)
+    assert row["spot_source"] != ""
+
+
+def test_value_book_future():
+    conn = _vb_conn()
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("T4", "MANUAL", "ESU6 Index", "FUTURE", "T4", "2026-05-01", 6, 7528.25,
+         "ACC", "CPTY", "STRAT", "TRADER", "test", ""),
+    )
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("T4", 1, "NOTIONAL", "USD", 6 * 50 * 7528.25, "2026-05-01", "2026-09-18", 7528.25, 0))
+    conn.commit()
+    _vb_mark(conn, "ESU6 Index", "2026-09-18", "FUTURE_PX", 7598.50, as_of=VB_AS_OF)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["pnl_usd"] == pytest.approx(21_075)
+
+
+def test_value_book_missing_mark_is_nan_with_reason():
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T5", "EURUSD", "EUR", "USD", 1_000_000, 1.1000)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert math.isnan(row["pnl_usd"])
+    assert "FWD_OUTRIGHT" in row["reason"]
+
+
+def test_value_book_settled_row_frozen_from_realised_pnl():
+    from engine.pnl import ledger
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T6", "EURUSD", "EUR", "USD", 1_000_000, 1.1000, settle="2026-05-15")
+    _vb_mark(conn, "EURUSD", "2026-05-15", "SPOT", 1.1200, as_of="2026-05-15")
+    ledger.realise_settled(conn, VB_AS_OF)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["status"] == "SETTLED"
+    assert row["pnl_usd"] == pytest.approx(1_000_000 * (1.1200 - 1.1000))
+
+
+def test_value_book_settled_but_not_yet_realised_is_unavailable():
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T7", "EURUSD", "EUR", "USD", 1_000_000, 1.1000, settle="2026-05-15")
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["status"] == "SETTLED"
+    assert math.isnan(row["pnl_usd"])
+    assert "T7" in row["reason"]
+
+
+# --------------------------------------------------------------------------- stress
+def test_stress_move_1pct_and_scenario_arithmetic():
+    delta = {"BRL": -1_000_000.0, "EUR": 2_000_000.0}
+    moves = stress.move_1pct(delta)
+    assert moves["BRL"] == pytest.approx(-10_000.0)
+    result = stress.apply_scenario(delta, {"BRL": -0.10}, futures_usd_delta=500_000.0, futures_pct=0.02)
+    assert result["fx_total"] == pytest.approx(100_000.0)
+    assert result["futures_pnl"] == pytest.approx(10_000.0)
+    assert result["total"] == pytest.approx(110_000.0)
+
+
+def test_stress_scenario_missing_currency_contributes_zero():
+    result = stress.apply_scenario({"EUR": 1_000_000.0}, {"TRY": -0.10})
+    assert result["fx_pnl"]["TRY"] == 0.0

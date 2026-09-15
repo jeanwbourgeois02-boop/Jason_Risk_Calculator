@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
-from typing import Optional
+from pathlib import Path
+from typing import FrozenSet, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,20 @@ import pandas as pd
 from engine.pnl.pnl import ltd_per_trade, workbook_valuation_date
 
 BY_PAIR_COLUMNS = ["instrument_id", "usd_notional", "ltd_usd", "n_trades"]
+
+_DEFAULT_HOLIDAYS_PATH = Path(__file__).resolve().parents[2] / "config" / "holidays.txt"
+
+
+def load_holidays(path: Optional[Union[str, Path]] = None) -> FrozenSet[str]:
+    """ISO dates (one per line, '#' comments and blank lines ignored) from
+    config/holidays.txt. Missing file -> empty set (Mon-Fri only), never an error.
+    `path=None` re-reads the module-level default each call, so tests can monkeypatch
+    `_DEFAULT_HOLIDAYS_PATH` instead of a bound default argument."""
+    p = Path(path) if path is not None else _DEFAULT_HOLIDAYS_PATH
+    if not p.exists():
+        return frozenset()
+    lines = (line.strip() for line in p.read_text().splitlines())
+    return frozenset(line for line in lines if line and not line.startswith("#"))
 
 
 def aggregate_by_pair(per_trade: pd.DataFrame, conn: sqlite3.Connection) -> pd.DataFrame:
@@ -64,29 +79,36 @@ def book_totals(by_pair: pd.DataFrame, conn: sqlite3.Connection) -> dict:
 # Plain Monday-Friday weekday calendar. No holiday calendar is wired up yet (open item);
 # reference dates below will be wrong around holidays until one lands.
 
-def _prev_business_day(d: dt.date) -> dt.date:
+_NO_HOLIDAYS: FrozenSet[str] = frozenset()
+
+
+def _is_business_day(d: dt.date, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> bool:
+    return d.weekday() < 5 and d.isoformat() not in holidays
+
+
+def _prev_business_day(d: dt.date, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dt.date:
     d -= dt.timedelta(days=1)
-    while d.weekday() >= 5:
+    while not _is_business_day(d, holidays):
         d -= dt.timedelta(days=1)
     return d
 
 
-def _n_business_days_back(d: dt.date, n: int) -> dt.date:
+def _n_business_days_back(d: dt.date, n: int, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dt.date:
     for _ in range(n):
-        d = _prev_business_day(d)
+        d = _prev_business_day(d, holidays)
     return d
 
 
-def _last_business_day_of_prev_month(d: dt.date) -> dt.date:
+def _last_business_day_of_prev_month(d: dt.date, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dt.date:
     last_day_prev_month = d.replace(day=1) - dt.timedelta(days=1)
-    while last_day_prev_month.weekday() >= 5:
+    while not _is_business_day(last_day_prev_month, holidays):
         last_day_prev_month -= dt.timedelta(days=1)
     return last_day_prev_month
 
 
-def _last_business_day_of_prev_year(d: dt.date) -> dt.date:
+def _last_business_day_of_prev_year(d: dt.date, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dt.date:
     last_day = dt.date(d.year - 1, 12, 31)
-    while last_day.weekday() >= 5:
+    while not _is_business_day(last_day, holidays):
         last_day -= dt.timedelta(days=1)
     return last_day
 
