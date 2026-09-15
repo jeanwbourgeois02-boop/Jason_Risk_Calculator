@@ -103,17 +103,25 @@ def _divider() -> html.Div:
 
 
 def _marks_info(conn: sqlite3.Connection, as_of: str):
-    """Latest `snapped_at` among marks written for `as_of` and its source label -- an
-    approximate but honest "how fresh are today's marks" caption (coordinator addition
-    2026-09-15); `("n/a", "")` when no marks exist yet for that date."""
+    """"Last updated": the date and source of the marks the figures were actually priced
+    from (user decision 2026-09-15). Official (Bloomberg) marks must be dated exactly
+    `as_of`; failing that, the latest BNP file marks on or before `as_of` -- the same
+    fallback order as `priced_value_book`. Returns `(value_text, caption)`; `("n/a",
+    "no marks on or before this date")` when there is nothing at all."""
     row = conn.execute(
-        "SELECT source, snapped_at FROM marks WHERE as_of_date = ? ORDER BY snapped_at DESC LIMIT 1",
-        (as_of,),
-    ).fetchone()
+        "SELECT as_of_date, source FROM marks_official WHERE as_of_date = ? "
+        "ORDER BY snapped_at DESC LIMIT 1", (as_of,)).fetchone()
+    if row:
+        return str(row[0]), f"Bloomberg ({row[1]})"
+    row = conn.execute(
+        "SELECT as_of_date, source FROM marks WHERE as_of_date <= ? AND source = 'BNP_BVAL' "
+        "ORDER BY as_of_date DESC, snapped_at DESC LIMIT 1", (as_of,)).fetchone()
     if not row:
-        return "n/a", ""
-    source, snapped_at = row
-    return str(snapped_at), str(source)
+        return "n/a", "no marks on or before this date"
+    mark_date = str(row[0])
+    age = (dt.date.fromisoformat(as_of) - dt.date.fromisoformat(mark_date)).days
+    age_text = "today" if age == 0 else f"{age} day{'s' if age != 1 else ''} old"
+    return mark_date, f"BNP file, {age_text}"
 
 
 def layout() -> html.Div:
@@ -165,9 +173,9 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         cards.append(_pnl_card("Net USD", {"available": False, "reason": reason}))
         cards.append(_pnl_card("Gross USD", {"available": False, "reason": reason}, colour=False))
 
-    snapped_at, source = _marks_info(conn, as_of)
+    mark_date, caption = _marks_info(conn, as_of)
     cards.append(_figure_card("As of", as_of))
-    cards.append(_figure_card("Marks as of", snapped_at, source))
+    cards.append(_figure_card("Last updated", mark_date, caption))
     return cards
 
 

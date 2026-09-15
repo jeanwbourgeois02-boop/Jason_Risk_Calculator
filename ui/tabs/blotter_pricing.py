@@ -16,7 +16,9 @@ arithmetic stays inside `engine/pnl/`.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sqlite3
+from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
@@ -37,7 +39,46 @@ _MERGE_COLS = ["mark", "mark_date", "mark_source", "spot", "spot_source", "pnl_l
                "pnl_usd", "pnl_spot_usd", "pnl_carry_usd", "reason", "note"]
 
 
+def _db_cache_key(conn: sqlite3.Connection):
+    """(file path, mtime) of the connection's main database, or None for an in-memory /
+    unreadable one (then nothing is cached). The mtime invalidates the cache whenever an
+    upload or a Bloomberg write touches the file."""
+    try:
+        for _seq, name, path in conn.execute("PRAGMA database_list"):
+            if name == "main":
+                if not path:
+                    return None
+                return (path, os.path.getmtime(path))
+    except (sqlite3.Error, OSError):
+        return None
+    return None
+
+
+@lru_cache(maxsize=256)
+def _priced_value_book_cached(path: str, _mtime: float, as_of: str) -> Tuple[pd.DataFrame, int, int]:
+    from ui.app import connect_readonly
+    conn = connect_readonly(path)
+    try:
+        return _priced_value_book_uncached(conn, as_of)
+    finally:
+        conn.close()
+
+
 def priced_value_book(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, int, int]:
+    """Memoised front for `_priced_value_book_uncached` (perf, 2026-09-15): the header,
+    the blotter and its strips together revalue the same book at the same handful of
+    dates a dozen times per page load. Keyed on (db path, db mtime, as_of) so a new
+    upload or mark write invalidates it; the cached frame is returned as a copy so a
+    caller's in-place edits never leak into another caller. Connections with no file
+    (tests on ':memory:') bypass the cache."""
+    key = _db_cache_key(conn)
+    if key is None:
+        return _priced_value_book_uncached(conn, as_of)
+    df, n_fallback, n_total = _priced_value_book_cached(key[0], key[1], as_of)
+    return df.copy(), n_fallback, n_total
+
+
+def _priced_value_book_uncached(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, int, int]:
     """`value_book(as_of)`, with any row still unpriced (non-empty `reason`) retried at
     `marks_source='BNP_BVAL'`. Returns `(df, n_fallback, n_total)`; `df` gets an extra
     boolean column `priced_from_bnp` and, for fallback rows, `mark_source` is relabelled

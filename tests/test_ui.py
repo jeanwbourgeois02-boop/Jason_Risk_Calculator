@@ -462,7 +462,7 @@ def test_header_figures_include_previous_day_and_net_gross(tmp_path):
     assert "Net USD" in titles
     assert "Gross USD" in titles
     assert "As of" in titles
-    assert "Marks as of" in titles
+    assert "Last updated" in titles
 
 
 def test_header_pnl_card_colours_by_sign():
