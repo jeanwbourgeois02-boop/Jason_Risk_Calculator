@@ -459,10 +459,8 @@ def test_header_figures_include_previous_day_and_net_gross(tmp_path):
         conn.close()
     titles = [c.children[0].children for c in cards if getattr(c, "className", "") != "header-divider"]
     assert "Previous day" in titles
-    assert "Net USD" in titles
-    assert "Gross USD" in titles
-    assert "As of" in titles
-    assert "Last updated" in titles
+    assert "Net USD delta" in titles
+    assert "Gross USD delta" in titles
 
 
 def test_header_pnl_card_colours_by_sign():

@@ -214,29 +214,30 @@ p { margin: 8px 0; }
 .source-busy:empty { display: none; }
 
 /* ---------------------------------------------------------------- 2026-09-15: upload strip lives in the
-   tab bar's right corner; its status text sits small on the header row so no empty band appears. */
+   tab bar's right corner on ONE line (button, status text, upload-history link), so
+   nothing hangs down into the header row and the header needs no right-hand reserve.
+   Anything that expands (history open, staged upload, result) drops as an overlay
+   panel below the tab bar rather than pushing the layout. */
 .top-bar { min-height: 44px; }
-.top-bar .source-strip { position: absolute; right: 24px; top: 6px; width: 380px; padding: 0; margin: 0;
-  text-align: right; z-index: 3; }
-.top-bar .source-row { flex-direction: column; align-items: flex-end; gap: 2px; }
-.top-bar .source-line { font-size: 11px; font-weight: 500; color: rgba(255,255,255,.72); margin-top: 6px; }
+.top-bar .source-strip { position: absolute; right: 24px; top: 0; height: 44px; width: auto; max-width: 620px;
+  padding: 0; margin: 0; z-index: 3; display: flex; flex-direction: row-reverse; align-items: center; gap: 12px; }
+.top-bar .source-row { flex-direction: row-reverse; align-items: center; gap: 10px; width: auto; flex-wrap: nowrap; }
+.top-bar .source-line { font-size: 11px; font-weight: 500; color: rgba(255,255,255,.72); margin-top: 0;
+  white-space: nowrap; text-align: right; }
 .top-bar .details--compact { margin: 0; }
-.top-bar .details--compact > summary { font-size: 11px; color: rgba(255,255,255,.6); }
-.top-bar .details--compact[open] { background: var(--card); color: var(--text); border-radius: 8px;
-  padding: 8px 12px; margin-top: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+.top-bar .details--compact > summary { font-size: 11px; color: rgba(255,255,255,.6); white-space: nowrap; }
+.top-bar .details--compact[open] { position: absolute; right: 0; top: 40px; width: 380px; background: var(--card);
+  color: var(--text); border-radius: 8px; padding: 8px 12px; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
 .top-bar .details--compact[open] > summary { color: var(--navy); }
 .top-bar .source-row--stage, .top-bar .source-result:not(:empty), .top-bar .source-busy:not(:empty) {
-  background: var(--card); color: var(--text); border-radius: 8px; padding: 10px 12px; margin-top: 6px;
-  box-shadow: 0 2px 8px rgba(0,0,0,.25); text-align: left; }
+  position: absolute; right: 0; top: 40px; min-width: 380px; background: var(--card); color: var(--text);
+  border-radius: 8px; padding: 10px 12px; margin: 0; box-shadow: 0 2px 8px rgba(0,0,0,.25); text-align: left; }
 .top-bar .source-row--stage { flex-direction: row; align-items: center; justify-content: flex-start; border-top: none; }
 .header-block { padding: 6px 24px 4px; }
-.header-figures { min-height: 52px; padding-right: 400px; }
-.tabs-bar { margin-right: 400px; }
-.header-figures { padding-right: 360px; gap: 10px; }
+.header-figures { min-height: 52px; padding-right: 0; gap: 10px; }
+.tabs-bar { margin-right: 620px; }
 .header-figure { min-width: 72px; }
 .header-figure-value { font-size: 16px; }
-.header-figures { padding-right: 300px; gap: 8px; }
-.header-figure { min-width: 64px; }
 .header-figure-caption { max-width: 190px; }
 
 /* Net USD direction word ("short USD" / "long USD"): must be unmistakable, so it is

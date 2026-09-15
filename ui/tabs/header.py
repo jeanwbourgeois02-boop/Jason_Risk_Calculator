@@ -102,28 +102,6 @@ def _divider() -> html.Div:
     return html.Div(className="header-divider", children=[html.Div()])
 
 
-def _marks_info(conn: sqlite3.Connection, as_of: str):
-    """"Last updated": the date and source of the marks the figures were actually priced
-    from (user decision 2026-09-15). Official (Bloomberg) marks must be dated exactly
-    `as_of`; failing that, the latest BNP file marks on or before `as_of` -- the same
-    fallback order as `priced_value_book`. Returns `(value_text, caption)`; `("n/a",
-    "no marks on or before this date")` when there is nothing at all."""
-    row = conn.execute(
-        "SELECT as_of_date, source FROM marks_official WHERE as_of_date = ? "
-        "ORDER BY snapped_at DESC LIMIT 1", (as_of,)).fetchone()
-    if row:
-        return str(row[0]), f"Bloomberg ({row[1]})"
-    row = conn.execute(
-        "SELECT as_of_date, source FROM marks WHERE as_of_date <= ? AND source = 'BNP_BVAL' "
-        "ORDER BY as_of_date DESC, snapped_at DESC LIMIT 1", (as_of,)).fetchone()
-    if not row:
-        return "n/a", "no marks on or before this date"
-    mark_date = str(row[0])
-    age = (dt.date.fromisoformat(as_of) - dt.date.fromisoformat(mark_date)).days
-    age_text = "today" if age == 0 else f"{age} day{'s' if age != 1 else ''} old"
-    return mark_date, f"BNP file, {age_text}"
-
-
 def layout() -> html.Div:
     """Static shell: figure cards populated by the callback, collapsible chart below.
     The chart's `.details` collapses to zero extra margin when closed (ui/assets/
@@ -164,18 +142,18 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         # underneath -- user decision 2026-09-15: a short-USD book must be unmistakable.
         usd_position = -ng["net"]
         direction = "short USD" if usd_position < 0 else ("long USD" if usd_position > 0 else "flat USD")
-        net_card = _pnl_card("Net USD", {"value": usd_position, "available": True})
+        net_card = _pnl_card("Net USD delta", {"value": usd_position, "available": True})
         net_card.children.append(html.Div(direction, className="header-figure-caption header-figure-caption--direction"))
         cards.append(net_card)
-        cards.append(_pnl_card("Gross USD", {"value": ng["gross"], "available": True}, colour=False))
+        cards.append(_pnl_card("Gross USD delta", {"value": ng["gross"], "available": True}, colour=False))
     else:
         reason = ng.get("reason", "")
-        cards.append(_pnl_card("Net USD", {"available": False, "reason": reason}))
-        cards.append(_pnl_card("Gross USD", {"available": False, "reason": reason}, colour=False))
+        cards.append(_pnl_card("Net USD delta", {"available": False, "reason": reason}))
+        cards.append(_pnl_card("Gross USD delta", {"available": False, "reason": reason}, colour=False))
 
-    mark_date, caption = _marks_info(conn, as_of)
-    cards.append(_figure_card("As of", as_of))
-    cards.append(_figure_card("Last updated", mark_date, caption))
+    # No "As of" / "Last updated" cards: the as-of date is already in the tab's own
+    # title row, and the LTD caption states when rows are on BNP file rates (user
+    # decision 2026-09-15).
     return cards
 
 
