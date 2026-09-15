@@ -256,12 +256,20 @@ def _diff_entry(a: float, ref_a: str, bad_a: list, b: float, bad_b: list) -> dic
 # --------------------------------------------------------------------------- headline strip
 # 2026-09-15 coordinator addition: the Excel Portfolio header's exact card order, all
 # row-scoped to the trade list's currently visible rows (post header-filter).
-HEADLINE_ORDER = ("ltd", "daily", "trades", "trading", "ltd1_daily", "ltd1", "ltd2",
-                   "trading_t1", "d5", "mtd", "ytd")
+# Order regrouped 2026-09-15 (user decision): the continuous LTD/period series stays
+# together (LTD, Daily, Previous day, 5d, MTD, YTD -- same grouping and "Previous day"
+# name as the app header), then the activity group (Trades, Trading, Trading T-1) sits
+# together, then the two raw LTD levels the Excel-parity "LTD-1 daily" figure is built
+# from (LTD-1, LTD-2) close the row. Was: trading and trading_t1 separated by three
+# other cards; "LTD-1 daily" named differently from the header's "Previous day" for the
+# same LTD(t-1)-LTD(t-2) figure.
+HEADLINE_ORDER = ("ltd", "daily", "ltd1_daily", "d5", "mtd", "ytd",
+                   "trades", "trading", "trading_t1", "ltd1", "ltd2")
 HEADLINE_TITLES = {
-    "ltd": "LTD P&L", "daily": "Daily P&L", "trades": "Trades", "trading": "Trading P&L",
-    "ltd1_daily": "LTD-1 daily", "ltd1": "LTD-1 P&L", "ltd2": "LTD-2 P&L",
-    "trading_t1": "Trading P&L T-1", "d5": "5d", "mtd": "MTD", "ytd": "YTD",
+    "ltd": "LTD P&L", "daily": "Daily P&L", "ltd1_daily": "Previous day P&L",
+    "d5": "5d", "mtd": "MTD", "ytd": "YTD",
+    "trades": "Trades", "trading": "Trading P&L", "trading_t1": "Trading P&L T-1",
+    "ltd1": "LTD-1 P&L", "ltd2": "LTD-2 P&L",
 }
 
 

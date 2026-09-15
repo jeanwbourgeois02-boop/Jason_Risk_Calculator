@@ -407,9 +407,10 @@ def test_row_scoped_period_pnl_empty_selection_is_zero():
 
 
 def test_row_scoped_headline_order_matches_excel_header():
+    """Regrouped 2026-09-15: period series, then activity group, then raw LTD levels."""
     titles = [blotter_pricing.HEADLINE_TITLES[k] for k in blotter_pricing.HEADLINE_ORDER]
-    assert titles == ["LTD P&L", "Daily P&L", "Trades", "Trading P&L", "LTD-1 daily",
-                       "LTD-1 P&L", "LTD-2 P&L", "Trading P&L T-1", "5d", "MTD", "YTD"]
+    assert titles == ["LTD P&L", "Daily P&L", "Previous day P&L", "5d", "MTD", "YTD",
+                       "Trades", "Trading P&L", "Trading P&L T-1", "LTD-1 P&L", "LTD-2 P&L"]
 
 
 def test_row_scoped_headline_ltd_and_trades_count():
