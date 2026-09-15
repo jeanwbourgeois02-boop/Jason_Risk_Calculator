@@ -260,7 +260,7 @@ def test_scope_layout_fx_filters_out_nonfx_products():
         conn.commit()
         layout = blotter.scope_layout("fx", conn, "2026-06-20")
         table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
-        assert all(r["product"] == "FX_FWD" for r in table.data)
+        assert all(r["product"] == "Forward" for r in table.data)
     finally:
         conn.close()
 
