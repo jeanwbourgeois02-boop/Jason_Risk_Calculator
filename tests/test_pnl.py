@@ -334,6 +334,20 @@ def test_value_book_missing_mark_is_nan_with_reason():
     assert "FWD_OUTRIGHT" in row["reason"]
 
 
+def test_value_book_fallback_source_uses_latest_mark_on_or_before():
+    """Official marks must be dated as_of; an explicit fallback source (BNP file) may be
+    stale: the latest on or before as_of is used, labelled with that source."""
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T5b", "USDJPY", "USD", "JPY", 1_000_000, 150.0)
+    stale = "2026-05-29"
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (stale, "USDJPY", VB_SETTLE, "FWD_OUTRIGHT", 148.0, "BNP_BVAL", "t"))
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (stale, "USDJPY", stale, "SPOT", 149.0, "BNP_BVAL", "t"))
+    assert math.isnan(value_book(conn, VB_AS_OF).iloc[0]["pnl_usd"])
+    row = value_book(conn, VB_AS_OF, marks_source="BNP_BVAL").iloc[0]
+    assert row["mark_source"] == "BNP_BVAL"
+    assert abs(row["pnl_usd"] - (-2_000_000 / 149.0)) < 1e-6
+
+
 def test_value_book_settled_row_frozen_from_realised_pnl():
     from engine.pnl import ledger
     conn = _vb_conn()

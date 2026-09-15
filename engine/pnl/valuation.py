@@ -69,12 +69,23 @@ def _mark_table(source: Optional[str]) -> str:
 
 def _mark_at(conn: sqlite3.Connection, instrument_id: str, settle_date: str, mark_type: str,
              as_of: str, source: Optional[str]) -> Optional[tuple]:
-    """(value, source) of the mark dated exactly `as_of` for `settle_date`, or None."""
+    """(value, source) of the mark for `settle_date`, or None.
+
+    Official marks (source None) must be dated exactly `as_of`. An explicit non-official
+    source (the BNP file fallback) uses the latest mark dated on or before `as_of`: the
+    BNP file is a T-1 snapshot and is the only price on a PC without Bloomberg, so a
+    stale-but-labelled value beats a blank (user decision 2026-09-15)."""
     table = _mark_table(source)
-    extra = "" if source is None else " AND source = :source"
+    if source is None:
+        where, order = "as_of_date = :d", "snapped_at DESC"
+    else:
+        where, order = "as_of_date <= :d AND source = :source", "as_of_date DESC, snapped_at DESC"
+    # A SPOT mark's settle_date is its own as_of_date, so a stale fallback SPOT is
+    # matched on that identity rather than on the requested date.
+    settle_clause = "settle_date = as_of_date" if (source is not None and mark_type == "SPOT") else "settle_date = :s"
     row = conn.execute(
-        f"SELECT value, source, snapped_at FROM {table} WHERE instrument_id = :i AND settle_date = :s "
-        f"AND mark_type = :m AND as_of_date = :d{extra} ORDER BY snapped_at DESC LIMIT 1",
+        f"SELECT value, source, snapped_at FROM {table} WHERE instrument_id = :i AND {settle_clause} "
+        f"AND mark_type = :m AND {where} ORDER BY {order} LIMIT 1",
         {"i": instrument_id, "s": settle_date, "m": mark_type, "d": as_of, "source": source},
     ).fetchone()
     return None if row is None else (row[0], row[1])
