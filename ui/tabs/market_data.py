@@ -236,6 +236,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         ]),
         dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
         html.Div(id=BODY_ID),
+        manual_entry_form(),  # static: its ids are callback inputs and must exist on first render
     ])
 
 
@@ -296,7 +297,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             inventory_table(inv) if not inv.empty else message_box("No open legs or futures need a mark on this date."),
             html.H4(f"Close completeness (trailing {COMPLETENESS_DAYS} business days)"),
             completeness_table(completeness) if not completeness.empty else message_box("No completeness data."),
-            manual_entry_form(),
             diagnostics_panel(feed_status, rates),
         ])
         return body, toolbar_status

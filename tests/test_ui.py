@@ -228,3 +228,37 @@ def test_get_db_path_env_override(monkeypatch, tmp_path):
     custom = tmp_path / "custom.db"
     monkeypatch.setenv("RISK_DB", str(custom))
     assert uiapp.get_db_path() == custom
+
+
+def test_every_static_callback_id_exists_in_layout():
+    """A callback Input/State/Output whose component is not in the initial layout
+    fires with a missing argument ('Inputs do not match callback definition', HTTP 500)
+    or never fires. Components created inside another callback's output are exempt
+    only if listed here with a reason."""
+    import ui.app as a
+    app = a.create_app()
+    ids = set()
+
+    def walk(c):
+        i = getattr(c, "id", None)
+        if isinstance(i, str):
+            ids.add(i)
+        ch = getattr(c, "children", None)
+        if isinstance(ch, list):
+            for x in ch:
+                walk(x)
+        elif ch is not None and (hasattr(ch, "children") or hasattr(ch, "id")):
+            walk(ch)
+    walk(app.layout)
+    dynamic_ok = {"blotter-datatable", "blotter-subtotal"}  # rendered inside blotter-table-container
+    missing = []
+    for key, cb in app.callback_map.items():
+        for kind in ("inputs", "state"):
+            for d in cb.get(kind, []):
+                if d["id"] not in ids and d["id"] not in dynamic_ok:
+                    missing.append((kind, d["id"]))
+        for out in key.strip(".").split("..."):
+            oid = out.split(".")[0]
+            if oid and oid not in ids and oid not in dynamic_ok:
+                missing.append(("output", oid))
+    assert not missing, missing

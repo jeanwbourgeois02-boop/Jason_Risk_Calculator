@@ -149,19 +149,19 @@ def register(app, get_db_path):
             return f'Cannot preview file: {exc}'
 
     @app.callback(Output('report-result', 'children'), Output(SOURCE_LINE_ID, 'children'),
-                  Output('cash-ladder-date', 'date'), Output('pnl-date', 'date'),
+                  Output('cash-ladder-date', 'date'),
                   Input('report-import', 'n_clicks'),
                   State('report-file', 'contents'), State('report-file', 'filename'),
                   State('report-date', 'date'), State('report-sheet', 'value'),
                   State('report-purpose', 'data'), prevent_initial_call=True)
     def submit(clicks, contents, filename, as_of, sheet, purpose):
         if purpose != 'bnp':
-            return 'Reference workbook only; no trades imported.', no_update, no_update, no_update
+            return 'Reference workbook only; no trades imported.', no_update, no_update
         if not as_of:
-            return 'Choose the report snapshot date before importing.', no_update, no_update, no_update
+            return 'Choose the report snapshot date before importing.', no_update, no_update
         try:
             message = import_report(decode(contents), filename, as_of, get_db_path(), sheet)
         except Exception as exc:
-            return f'Import failed; no report data saved. {exc}', no_update, no_update, no_update
+            return f'Import failed; no report data saved. {exc}', no_update, no_update
         from ui.app import load_summary
-        return message, describe_source(load_summary(get_db_path())), as_of, as_of
+        return message, describe_source(load_summary(get_db_path())), as_of
