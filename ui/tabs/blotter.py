@@ -9,11 +9,26 @@ Follows `ui.tabs.cash_ladder`'s `build_layout(default_date)` /
 `register_callbacks(app, get_db_path)` convention so C5 wires it the same way.
 
 Design choices (nobody to ask, so noted here):
-  - Filters are plain Dash controls above the table: open/settled (`status` column),
-    product, pair (`instrument_id`), strategy, theme, and a trade-date range. All are
-    optional (blank/"All" = no filter). Options for the dropdowns are populated from
-    the *current* `value_book(as_of)` frame's distinct values, not a separate query,
-    so the list always matches what's actually shown for that as_of.
+  - User decision 2026-09-15: filtering and sorting happen in the DataTable's own
+    column headers, not a toolbar of dropdowns. The main trade table uses
+    `filter_action="native"` (adds a filter row under the headers),
+    `sort_action="native"` with `sort_mode="multi"`. `dash_table.DataTable` has no
+    built-in dropdown *filter* widget (the `dropdown` prop only affects cell
+    *editing*, not the filter row), so every column -- including the categorical
+    ones named in the task (status, product, instrument_id, strategy, theme) --
+    uses the native text filter row. That row accepts bare values (substring/equality
+    depending on dtype) as well as explicit operators (`>=`, `<=`, `=`, `contains`,
+    ...), which is also how the trade-date range is done now: type e.g. `>= 2026-06-05`
+    into the `Trade Date` filter cell instead of the old from/to text inputs. This
+    is noted here per the task's "note which" instruction.
+  - The toolbar dropdowns for status/product/pair/strategy/theme and the trade-date
+    from/to text inputs are removed. `apply_filters` is kept as a pure, unit-tested
+    helper (some callers/tests still exercise it directly) but the running app no
+    longer wires it to toolbar inputs.
+  - The subtotal line above the table reflects only the *currently visible* rows
+    (after native filtering) via `derived_virtual_data` in a dedicated callback
+    (`Input(DATATABLE_ID, "derived_virtual_data")`); the group-by summary table
+    stays whole-book as before (see below), with a one-line caption saying so.
   - Group-by is a dropdown over `engine.pnl.ledger.GROUP_KEYS`
     (`instrument_id, product, strategy, theme`) plus a "None" option. When set, a
     summary table appears above the detail table showing LTD/Daily/5d/MTD/YTD per
@@ -52,18 +67,13 @@ from ui.tabs.formatting import format_cell
 DATE_PICKER_ID = "blotter-date"
 TABLE_CONTAINER_ID = "blotter-table-container"
 TOOLBAR_ID = "blotter-toolbar"
-STATUS_FILTER_ID = "blotter-filter-status"
-PRODUCT_FILTER_ID = "blotter-filter-product"
-PAIR_FILTER_ID = "blotter-filter-pair"
-STRATEGY_FILTER_ID = "blotter-filter-strategy"
-THEME_FILTER_ID = "blotter-filter-theme"
-DATE_FROM_ID = "blotter-filter-date-from"
-DATE_TO_ID = "blotter-filter-date-to"
 GROUP_BY_ID = "blotter-group-by"
 THEME_INPUT_ID = "blotter-theme-input"
 THEME_BUTTON_ID = "blotter-theme-button"
 THEME_STATUS_ID = "blotter-theme-status"
 THEME_REVISION_ID = "blotter-theme-revision"
+DATATABLE_ID = "blotter-datatable"
+SUBTOTAL_ID = "blotter-subtotal"
 
 GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 _ALL = "All"
@@ -71,8 +81,12 @@ _ALL = "All"
 _DISPLAY_COLUMNS = [
     "trade_id", "instrument_id", "product", "strategy", "theme", "trade_date",
     "settle_date", "status", "quantity", "fill", "mark", "spot", "pnl_local",
-    "pnl_usd", "pnl_spot_usd", "pnl_carry_usd", "reason",
+    "pnl_usd", "pnl_spot_usd", "pnl_carry_usd", "reason", "note",
 ]
+
+# Columns filtered/sorted with the DataTable's native header row rather than a
+# toolbar dropdown; see module docstring for why there is no true dropdown filter.
+_CATEGORICAL_FILTER_COLUMNS = {"status", "product", "instrument_id", "strategy", "theme"}
 
 _PERIOD_ORDER = ("daily", "d5", "mtd", "ytd")
 _PERIOD_TITLES = {"daily": "Daily", "d5": "5d", "mtd": "MTD", "ytd": "YTD"}
@@ -119,7 +133,13 @@ def _fmt_rate(value) -> str:
 
 def detail_table(df: pd.DataFrame) -> dash_table.DataTable:
     """Format the (already filtered) value_book frame for display: whole-unit USD
-    columns via `format_cell`, rate-precision columns (fill/mark/spot) kept at 6dp."""
+    columns via `format_cell`, rate-precision columns (fill/mark/spot) kept at 6dp.
+
+    Native filter/sort: `filter_action="native"` adds the header filter row,
+    `sort_action="native"` + `sort_mode="multi"` lets multiple columns be sorted at
+    once (shift-click headers). A row counts as Unavailable only when its `reason`
+    is non-empty (not merely because a pnl column is NaN); `note` is rendered as a
+    plain grey informational column, never a driver of Unavailable status."""
     cols = [c for c in _DISPLAY_COLUMNS if c in df.columns]
     formatted = df[cols].copy()
     usd_cols = {"pnl_local", "pnl_usd", "pnl_spot_usd", "pnl_carry_usd"}
@@ -129,16 +149,55 @@ def detail_table(df: pd.DataFrame) -> dash_table.DataTable:
             formatted[col] = formatted[col].map(format_cell)
         elif col in rate_cols:
             formatted[col] = formatted[col].map(_fmt_rate)
+    style_data_conditional = [
+        {"if": {"filter_query": "{reason} != ''"}, "backgroundColor": "#fff3cd"},
+    ]
+    if "note" in cols:
+        style_data_conditional.append(
+            {"if": {"column_id": "note"}, "color": "gray", "fontStyle": "italic"}
+        )
     return dash_table.DataTable(
-        id="blotter-datatable",
+        id=DATATABLE_ID,
         columns=[{"name": c.replace("_", " ").title(), "id": c} for c in cols],
         data=formatted.to_dict("records"),
+        filter_action="native",
+        sort_action="native",
+        sort_mode="multi",
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "minWidth": "90px"},
         style_header={"fontWeight": "bold"},
+        style_data_conditional=style_data_conditional,
         page_size=25,
         row_selectable=False,
     )
+
+
+def subtotal_line(rows: list) -> html.P:
+    """Sum `pnl_usd` over the rows currently visible in the DataTable after native
+    filtering (`derived_virtual_data`), not the whole `value_book` frame. `rows` are
+    the table's already-formatted (string) records, so `pnl_usd` is parsed back from
+    its `format_cell` display string ("1,234" / "(1,234)" / "" / "Unavailable")."""
+    if not rows:
+        return html.P("Subtotal (visible rows): $0", className="section-kicker")
+    total = 0.0
+    n_unavailable = 0
+    for row in rows:
+        raw = row.get("pnl_usd", "")
+        if raw in ("", "Unavailable", None):
+            n_unavailable += 1
+            continue
+        text = str(raw).replace(",", "").replace("$", "")
+        negative = text.startswith("(") and text.endswith(")")
+        text = text.strip("()")
+        try:
+            value = float(text)
+        except ValueError:
+            n_unavailable += 1
+            continue
+        total += -value if negative else value
+    suffix = f" ({n_unavailable} row(s) unavailable, excluded)" if n_unavailable else ""
+    return html.P(f"Subtotal (visible rows): {format_cell(total)}{suffix}",
+                  className="section-kicker")
 
 
 def group_summary_table(grouped: dict, key: str) -> dash_table.DataTable:
@@ -212,43 +271,14 @@ def _package_ids(conn: sqlite3.Connection) -> dict:
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
+    """Only the as-of date picker, the group-by selector (it reshapes the table, so
+    it stays a control) and the theme-edit input remain in the toolbar; per-column
+    filtering/sorting moved into the DataTable's own header row (see module
+    docstring)."""
     return html.Div(className="blotter", children=[
         html.H3("Blotter"),
         html.Div(id=TOOLBAR_ID, className="toolbar", children=[
             build_date_picker(DATE_PICKER_ID, default_date=default_date),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Status"),
-                dcc.Dropdown(id=STATUS_FILTER_ID, options=[{"label": _ALL, "value": _ALL}],
-                             value=_ALL, clearable=False, style={"width": "140px"}),
-            ]),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Product"),
-                dcc.Dropdown(id=PRODUCT_FILTER_ID, options=[{"label": _ALL, "value": _ALL}],
-                             value=_ALL, clearable=False, style={"width": "140px"}),
-            ]),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Pair"),
-                dcc.Dropdown(id=PAIR_FILTER_ID, options=[{"label": _ALL, "value": _ALL}],
-                             value=_ALL, clearable=False, style={"width": "140px"}),
-            ]),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Strategy"),
-                dcc.Dropdown(id=STRATEGY_FILTER_ID, options=[{"label": _ALL, "value": _ALL}],
-                             value=_ALL, clearable=False, style={"width": "140px"}),
-            ]),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Theme"),
-                dcc.Dropdown(id=THEME_FILTER_ID, options=[{"label": _ALL, "value": _ALL}],
-                             value=_ALL, clearable=False, style={"width": "140px"}),
-            ]),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Trade date from"),
-                dcc.Input(id=DATE_FROM_ID, type="text", placeholder="YYYY-MM-DD"),
-            ]),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Trade date to"),
-                dcc.Input(id=DATE_TO_ID, type="text", placeholder="YYYY-MM-DD"),
-            ]),
             html.Div(className="toolbar-group", children=[
                 html.Label("Group by"),
                 dcc.Dropdown(
@@ -274,77 +304,56 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     @app.callback(
         Output(TABLE_CONTAINER_ID, "children"),
-        Output(STATUS_FILTER_ID, "options"),
-        Output(PRODUCT_FILTER_ID, "options"),
-        Output(PAIR_FILTER_ID, "options"),
-        Output(STRATEGY_FILTER_ID, "options"),
-        Output(THEME_FILTER_ID, "options"),
         Input(DATE_PICKER_ID, "date"),
-        Input(STATUS_FILTER_ID, "value"),
-        Input(PRODUCT_FILTER_ID, "value"),
-        Input(PAIR_FILTER_ID, "value"),
-        Input(STRATEGY_FILTER_ID, "value"),
-        Input(THEME_FILTER_ID, "value"),
-        Input(DATE_FROM_ID, "value"),
-        Input(DATE_TO_ID, "value"),
         Input(GROUP_BY_ID, "value"),
         Input(THEME_REVISION_ID, "data"),
     )
-    def _update(as_of_date, status, product, pair, strategy, theme, date_from, date_to,
-                group_by, _theme_rev=None):
+    def _update(as_of_date, group_by, _theme_rev=None):
         if not as_of_date:
-            empty_opts = [{"label": _ALL, "value": _ALL}]
-            return message_box("No as-of date available."), empty_opts, empty_opts, empty_opts, empty_opts, empty_opts
+            return message_box("No as-of date available.")
 
         try:
             from engine.pnl.valuation import value_book
         except ImportError as exc:
-            empty_opts = [{"label": _ALL, "value": _ALL}]
-            return (message_box(f"Blotter view not available yet ({exc})."),
-                    empty_opts, empty_opts, empty_opts, empty_opts, empty_opts)
+            return message_box(f"Blotter view not available yet ({exc}).")
 
         from ui.app import connect_readonly
         db_path = get_db_path()
         try:
             conn = connect_readonly(db_path)
         except sqlite3.OperationalError as exc:
-            empty_opts = [{"label": _ALL, "value": _ALL}]
-            return (message_box(f"Database not available ({exc})."),
-                    empty_opts, empty_opts, empty_opts, empty_opts, empty_opts)
+            return message_box(f"Database not available ({exc}).")
         try:
             df = value_book(conn, as_of_date)
-            status_opts = _filter_options(df, "status")
-            product_opts = _filter_options(df, "product")
-            pair_opts = _filter_options(df, "instrument_id")
-            strategy_opts = _filter_options(df, "strategy")
-            theme_opts = _filter_options(df, "theme")
-
-            filtered = apply_filters(df, status, product, pair, strategy, theme, date_from, date_to)
 
             body_children = []
             if group_by and group_by != "none" and not df.empty:
                 try:
                     from engine.pnl.ledger import period_pnl_by
                     grouped = period_pnl_by(conn, as_of_date, group_by)
+                    body_children.append(
+                        html.P("Group-by summary is whole-book, unaffected by the "
+                               "detail table's column filters.", className="section-kicker"))
                     body_children.append(group_summary_table(grouped, group_by))
                 except Exception as exc:  # never let group-by take the detail table down
                     body_children.append(message_box(f"Group summary unavailable ({exc!r})."))
 
-            if filtered.empty:
-                body_children.append(message_box("No trades match the current filters."))
+            if df.empty:
+                body_children.append(message_box("No trades for this as-of date."))
             else:
-                body_children.append(detail_table(filtered))
+                body_children.append(html.Div(id=SUBTOTAL_ID))
+                body_children.append(detail_table(df))
                 packages = _package_ids(conn)
                 expand_children = []
                 seen_packages = set()
-                for _, row in filtered.iterrows():
+                for _, row in df.iterrows():
                     trade_id = row["trade_id"]
                     pkg = packages.get(trade_id)
                     if pkg and pkg in seen_packages:
                         continue
                     if pkg:
                         seen_packages.add(pkg)
-                        pkg_rows = filtered[filtered["trade_id"].isin(
+                        pkg_rows = df[df["trade_id"].isin(
                             [tid for tid, p in packages.items() if p == pkg])]
                         label = f"Swap package {pkg} ({len(pkg_rows)} legs)"
                         panel = html.Div([row_expand_panel(conn, tid, r)
@@ -360,7 +369,17 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 body_children.append(html.Div(expand_children))
         finally:
             conn.close()
-        return html.Div(body_children), status_opts, product_opts, pair_opts, strategy_opts, theme_opts
+        return html.Div(body_children)
+
+    @app.callback(
+        Output(SUBTOTAL_ID, "children"),
+        Input(DATATABLE_ID, "derived_virtual_data"),
+    )
+    def _update_subtotal(rows):
+        """Recomputed from the DataTable's own post-filter view (`derived_virtual_data`)
+        so it always matches what native column filtering currently shows, per the
+        2026-09-15 decision. `rows` is `None` before the table has rendered once."""
+        return subtotal_line(rows or [])
 
     @app.callback(
         Output(THEME_STATUS_ID, "children"),

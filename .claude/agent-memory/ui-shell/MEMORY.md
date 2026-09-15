@@ -4,3 +4,4 @@
 - [Cash ladder tab](cash-ladder-tab.md) — lazy import of ladder_table, transpose_ladder + usd_equivalent blank rule, shared controls/formatting factor-out
 - [P&L tab](pnl-tab.md) — wired into "Overall book" (why), lazy engine.pnl imports, pairs/totals/period blocks, own component ids
 - [Market data tab](market-data-tab.md) — C3 rewrite: inventory/completeness/manual-entry/pull button, avoid importing ui.app (broken mid-refactor), trades table has 14 cols now
+- [Blotter native filters](blotter-native-filters.md) — 2026-09-15: header filter/sort replaces toolbar dropdowns, no DataTable dropdown-filter widget exists, subtotal via derived_virtual_data

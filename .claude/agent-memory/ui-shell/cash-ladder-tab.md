@@ -84,6 +84,41 @@ fabricated zero) via `exposure.futures_delta_line(None, reason=...)`. Whoever bu
 that query should wire it into `cash_ladder.py`'s `_render` (`futures_usd_delta=None`
 literal there today) instead of inventing the number in `ui/`.
 
+Update 2026-09-15 (user decision "Reorder the Ladder tab"): `engine.ladder.futures_delta
+.futures_usd_delta` now exists (cash-ladder landed it), so the gap above is closed --
+`cash_ladder.py`'s `_render` now passes the *whole* dict (`value`/`by_instrument`/
+`missing`/`reason`) to `exposure_section(..., futures=_fut)`, not just the float. The
+old `stress_block` / `futures_delta_line` functions in exposure.py were retired: named
+scenarios (`engine.pnl.stress.load_scenarios`) are now columns of one combined table
+(`exposure.combined_risk_table`, id `RISK_TABLE_ID`) at the TOP of the Ladder tab -- one
+row per currency (from `build_exposure(...).summary`) plus one row per open future (from
+`futures['by_instrument']`, with an Unavailable row per name in `futures['missing']`
+showing the engine's own `reason` string). Below that table: Net USD (currencies only,
+`portfolio_totals(result)['net_usd']`) and Gross USD (`gross_usd + abs(futures['value'])`
+-- Unavailable if either half is unavailable). A separate `exposure.futures_table`
+(id `FUTURES_TABLE_ID`) renders instrument/contracts/multiplier/settlement_price/
+usd_delta -- but `futures_usd_delta` only returns USD delta per instrument, not
+contracts/multiplier/price, so those three columns show "n/a" unless a caller supplies
+an optional `details: {instrument_id: {contracts, multiplier, price}}` dict. **Gap
+reported to cash-ladder**: extend `futures_usd_delta`'s `by_instrument` (or add a
+sibling query) to carry contracts/multiplier/settlement price per instrument so this
+table can drop the "n/a" placeholders.
+
+`config/stress.yaml` scenarios currently define no per-scenario futures pct, so
+`combined_risk_table`'s futures rows render blank (not zero) in every scenario column
+today -- this is `run_scenarios`'s existing `futures_pct_by_scenario` param, just never
+populated; wire it once a scenario needs a futures leg.
+
+Test gotcha: `dash_table.DataTable`'s `data`/`children` split means `_render_text`
+(walks `.children` recursively) never sees a `DataTable`'s cell values -- assert against
+`table.children[<index>].data` (list of row dicts) directly instead, as
+`tests/test_ui_ladder.py`'s combined-risk-table tests do.
+
+Also learned: assigning a formatted string into a float64 `DataFrame` column via
+`.at[idx, col] = "1,234"` raises `TypeError` (`np_can_hold_element`) on this pandas
+version -- build the display via `frame.to_dict("records")` first, then mutate the
+plain dicts, never `.at`/`.loc` on a numeric column to inject strings.
+
 Test gotcha: to invoke a Dash callback body directly in a test, use
 `app.callback_map[key]["callback"].__wrapped__(*args)` -- the raw entry under
 `"callback"` requires internal kwargs (`outputs_list` etc.) set up by Dash's dispatch

@@ -167,16 +167,68 @@ def test_summary_frame_has_no_removed_columns():
     assert list(frame.columns) == exposure.SUMMARY_COLUMNS
 
 
-def test_stress_block_renders_futures_unavailable():
-    block = exposure.stress_block({"JPY": -1000.0}, futures_usd_delta=None)
-    text = _render_text(block)
-    assert "Unavailable" in text
+def test_combined_risk_table_first_in_layout():
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, RATES)
+    section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES)
+    ids = _all_ids(section)
+    assert exposure.RISK_TABLE_ID in ids
+    assert ids.index(exposure.RISK_TABLE_ID) < ids.index(exposure.SNAPSHOT_ID)
 
 
-def test_stress_block_with_futures_delta():
-    block = exposure.stress_block({"JPY": -1000.0}, futures_usd_delta=50000.0)
-    text = _render_text(block)
-    assert "50,000" in text or "Unavailable" not in text.split("Futures USD delta")[1][:50]
+def test_combined_risk_frame_futures_row_present_with_mark():
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, RATES)
+    futures = {"value": 100_000.0, "by_instrument": {"ESU6 Index": 100_000.0}, "missing": [], "reason": ""}
+    frame = exposure.combined_risk_frame(result, futures, scenarios={})
+    row = frame[frame[exposure.RISK_LABEL_COL] == "ESU6 Index"].iloc[0]
+    assert row["usd_delta"] == 100_000.0
+    assert row["_unavailable"] == ""
+
+
+def test_combined_risk_frame_futures_row_unavailable_with_reason():
+    from engine.ladder.exposure import build_exposure
+    result = build_exposure(RECORDS, RATES)
+    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["ESU6 Index"],
+               "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
+    frame = exposure.combined_risk_frame(result, futures, scenarios={})
+    row = frame[frame[exposure.RISK_LABEL_COL] == "ESU6 Index"].iloc[0]
+    assert pd.isna(row["usd_delta"])
+    assert "no FUTURE_PX" in row["_unavailable"]
+    table = exposure.combined_risk_table(result, futures, scenarios={})
+    inner = table.children[1]
+    row = next(r for r in inner.data if r[exposure.RISK_LABEL_COL] == "ESU6 Index")
+    assert "Unavailable" in row["usd_delta"]
+    assert "no FUTURE_PX" in row["usd_delta"]
+
+
+def test_combined_risk_table_net_excludes_futures_gross_includes():
+    from engine.ladder.exposure import build_exposure, portfolio_totals
+    result = build_exposure(RECORDS, RATES)
+    totals = portfolio_totals(result)
+    futures = {"value": 100_000.0, "by_instrument": {"ESU6 Index": 100_000.0}, "missing": [], "reason": ""}
+    table = exposure.combined_risk_table(result, futures, scenarios={})
+    inner = table.children[1]  # H4 title, then the DataTable
+    rows = {r[exposure.RISK_LABEL_COL]: r for r in inner.data}
+    # Net (currencies only) matches portfolio_totals; Gross (currencies + |futures|) adds 100,000
+    net_formatted = exposure.format_amount(totals["net_usd"])
+    gross_formatted = exposure.format_amount(totals["gross_usd"] + 100_000.0)
+    assert rows["Net USD (currencies only)"]["usd_delta"] == net_formatted
+    assert rows["Gross USD (currencies + |futures|)"]["usd_delta"] == gross_formatted
+
+
+def test_futures_table_present_with_mark():
+    futures = {"value": 100_000.0, "by_instrument": {"ESU6 Index": 100_000.0}, "missing": [], "reason": ""}
+    table = exposure.futures_table(futures)
+    assert table.id == exposure.FUTURES_TABLE_ID
+    assert table.data[0]["instrument"] == "ESU6 Index"
+
+
+def test_futures_table_unavailable_with_reason_when_no_mark():
+    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["ESU6 Index"],
+               "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
+    table = exposure.futures_table(futures)
+    assert "no FUTURE_PX" in table.data[0]["usd_delta"]
 
 
 def _render_text(node):
@@ -196,7 +248,8 @@ def test_exposure_section_builds_without_market_data_panel():
     section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES)
     text = _render_text(section)
     assert "Net USD exposure" in text
-    assert "Stress" in text
+    assert "Risk (currencies + open futures)" in text
+    assert "Open futures" in text
 
 
 def test_ledger_tab_module_removed():

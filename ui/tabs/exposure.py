@@ -363,77 +363,216 @@ def legend() -> html.Dl:
                    children=[html.Div([html.Dt(k), html.Dd(v)]) for k, v in items])
 
 
-# ------------------------------------------------------------------ 5b. stress block
-STRESS_ID = "exposure-stress"
-STRESS_TABLE_ID = "exposure-stress-table"
-FUTURES_DELTA_ID = "exposure-futures-delta"
+# ------------------------------------------------------------------ 5b. combined risk table (currencies + futures + stress)
+RISK_TABLE_ID = "exposure-risk-table"
+RISK_LABEL_COL = "name"
+RISK_BASE_COLUMNS = [RISK_LABEL_COL, "usd_delta", "move_1pct"]
+
+DEFAULT_FUTURES: dict = {"value": float("nan"), "by_instrument": {}, "missing": [], "reason": "no futures data supplied"}
+
+# 2026-09-15 (docs/BUILD_PLAN.md section 4/5, user decision "Reorder the Ladder tab"):
+# the old stand-alone `stress_block` / `futures_delta_line` are retired -- named
+# scenarios now live as columns of this one combined table (currency rows + one row per
+# open future), so a number never appears in two places. `futures` is the full dict
+# returned by `engine.ladder.futures_delta.futures_usd_delta` (not just its `value`),
+# so a per-instrument row can show Unavailable with the engine's own `reason` string
+# instead of a bare futures total.
 
 
-def futures_delta_line(futures_usd_delta: Optional[float], reason: str = "") -> html.Div:
-    """One line for the futures (e.g. ES) USD delta feeding the stress block's
-    non-FX line. `futures_usd_delta=None` renders Unavailable with `reason` shown in
-    place -- no engine query for open-futures USD delta exists yet
-    (docs/BUILD_PLAN.md section 4 names 'a futures USD delta' as a stress input but does
-    not specify the source query); this stays Unavailable, never zero, until
-    cash-ladder/pnl-engine adds one."""
-    if futures_usd_delta is None:
-        text = "Unavailable" + (f" ({reason})" if reason else "")
+def combined_risk_frame(result, futures: Optional[dict] = None,
+                        scenarios: Optional[Dict[str, Dict[str, float]]] = None,
+                        futures_pct_by_scenario: Optional[Dict[str, float]] = None) -> pd.DataFrame:
+    """One row per currency (from `result.summary`) plus one row per open future (from
+    `futures['by_instrument']`, and one Unavailable row per name in `futures['missing']`).
+    Columns: name, usd_delta, move_1pct (=usd_delta x 0.01), then one column per scenario
+    name. A currency not named in a scenario's move dict, or a future when
+    `futures_pct_by_scenario` has no entry for that scenario (config/stress.yaml defines
+    none today -- see module docstring), gets `None` (rendered blank, distinct from an
+    explicit zero) for that scenario cell. `_unavailable` carries the reason string when
+    non-empty; `usd_delta`/`move_1pct`/every scenario cell are then meaningless and the
+    renderer replaces them with a single Unavailable label."""
+    futures = futures or DEFAULT_FUTURES
+    scenarios = scenarios or {}
+    futures_pct_by_scenario = futures_pct_by_scenario or {}
+    scenario_names = sorted(scenarios)
+    status_msg = (dict(zip(result.status["currency"], result.status["message"]))
+                  if not result.status.empty else {})
+    rows = []
+    for _, r in result.summary.iterrows():
+        ccy, usd = r["currency"], r["usd_delta"]
+        row = {RISK_LABEL_COL: ccy, "kind": "currency"}
+        if pd.isna(usd):
+            row["usd_delta"], row["move_1pct"] = None, None
+            row["_unavailable"] = status_msg.get(ccy, "no rate")
+            for name in scenario_names:
+                row[name] = None
+        else:
+            row["usd_delta"], row["move_1pct"] = usd, usd * 0.01
+            row["_unavailable"] = ""
+            for name in scenario_names:
+                pct = scenarios[name].get(ccy)
+                row[name] = usd * pct if pct is not None else None
+        rows.append(row)
+
+    reason = futures.get("reason", "")
+    for instrument_id, usd in (futures.get("by_instrument") or {}).items():
+        row = {RISK_LABEL_COL: instrument_id, "kind": "future", "usd_delta": usd,
+              "move_1pct": usd * 0.01, "_unavailable": ""}
+        for name in scenario_names:
+            pct = futures_pct_by_scenario.get(name)
+            row[name] = usd * pct if pct is not None else None
+        rows.append(row)
+    for instrument_id in futures.get("missing") or []:
+        row = {RISK_LABEL_COL: instrument_id, "kind": "future", "usd_delta": None,
+              "move_1pct": None, "_unavailable": reason}
+        for name in scenario_names:
+            row[name] = None
+        rows.append(row)
+
+    columns = RISK_BASE_COLUMNS[:1] + ["kind"] + RISK_BASE_COLUMNS[1:] + scenario_names + ["_unavailable"]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _unavailable_label(reason: str) -> str:
+    return f"Unavailable ({reason})" if reason else "Unavailable"
+
+
+def combined_risk_table(result, futures: Optional[dict] = None,
+                        scenarios: Optional[Dict[str, Dict[str, float]]] = None,
+                        futures_pct_by_scenario: Optional[Dict[str, float]] = None) -> html.Div:
+    """The combined risk table plus its Net USD / Gross USD totals (docs/BUILD_PLAN.md
+    "Reorder the Ladder tab", item 1). Net excludes futures; Gross adds |futures value|.
+    Either total is Unavailable (never a fabricated number) if any currency lacks a rate
+    or the futures total is NaN."""
+    from engine.ladder.exposure import portfolio_totals
+    futures = futures or DEFAULT_FUTURES
+    scenarios = scenarios if scenarios is not None else {}
+    frame = combined_risk_frame(result, futures, scenarios, futures_pct_by_scenario)
+    scenario_names = sorted(scenarios)
+
+    display_rows = []
+    for _, row in frame.iterrows():
+        out = {RISK_LABEL_COL: row[RISK_LABEL_COL]}
+        if row["_unavailable"]:
+            label = _unavailable_label(row["_unavailable"])
+            out["usd_delta"] = label
+            out["move_1pct"] = label
+            for name in scenario_names:
+                out[name] = label
+        else:
+            out["usd_delta"] = format_amount(row["usd_delta"])
+            out["move_1pct"] = format_amount(row["move_1pct"])
+            for name in scenario_names:
+                v = row[name]
+                out[name] = format_amount(v) if v is not None else ""
+        display_rows.append(out)
+
+    totals = portfolio_totals(result)
+    fut_value = futures.get("value", float("nan"))
+    if totals["missing"]:
+        net_text = _unavailable_label("no rate: " + ", ".join(totals["missing"]))
     else:
-        text = format_amount(futures_usd_delta)
-    return html.Div(id=FUTURES_DELTA_ID, className="meta-line",
-                    children=[html.Span("Futures USD delta", className="meta-item"),
-                              html.Span(text, className="meta-item")])
+        net_text = format_amount(totals["net_usd"])
+    if totals["missing"] or pd.isna(fut_value):
+        reasons = []
+        if totals["missing"]:
+            reasons.append("no rate: " + ", ".join(totals["missing"]))
+        if pd.isna(fut_value):
+            reasons.append(futures.get("reason") or "futures delta unavailable")
+        gross_text = _unavailable_label("; ".join(reasons))
+    else:
+        gross_text = format_amount(totals["gross_usd"] + abs(fut_value))
+    display_rows.append({RISK_LABEL_COL: "Net USD (currencies only)", "usd_delta": net_text,
+                         "move_1pct": "", **{name: "" for name in scenario_names}})
+    display_rows.append({RISK_LABEL_COL: "Gross USD (currencies + |futures|)", "usd_delta": gross_text,
+                         "move_1pct": "", **{name: "" for name in scenario_names}})
+
+    columns = ([{"name": "Name", "id": RISK_LABEL_COL}, {"name": "USD delta", "id": "usd_delta"},
+               {"name": "1% P&L (USD)", "id": "move_1pct"}]
+              + [{"name": name, "id": name} for name in scenario_names])
+    table = dash_table.DataTable(
+        id=RISK_TABLE_ID,
+        columns=columns,
+        data=display_rows,
+        style_cell={**_MONO, "minWidth": "120px"},
+        style_header=_HEAD,
+        style_data_conditional=_sign_styles(["usd_delta", "move_1pct"] + scenario_names) + [
+            {"if": {"filter_query": "{name} contains 'Net USD' || {name} contains 'Gross USD'"},
+             "fontWeight": "700", "borderTop": "2px solid #1f2933"},
+        ] if not display_rows else [],
+    )
+    return html.Div(className="section", children=[html.H4("Risk (currencies + open futures)"), table])
 
 
-def stress_block(delta_by_ccy: Dict[str, float], futures_usd_delta: Optional[float] = None) -> html.Div:
-    """1% move per currency plus named scenarios from config/stress.yaml, both from
-    `engine.pnl.stress`. `futures_usd_delta=None` (no engine source yet) is passed
-    through as 0.0 to `run_scenarios`/`move_1pct` for the FX-only figures, but is shown
-    Unavailable on its own line rather than silently included as zero."""
-    from engine.pnl.stress import load_scenarios, move_1pct, run_scenarios
-    moves = move_1pct(delta_by_ccy)
-    scenarios = load_scenarios()
-    results = run_scenarios(delta_by_ccy, scenarios, futures_usd_delta=futures_usd_delta or 0.0)
-    move_rows = [{"currency": ccy, "move_1pct_usd": format_amount(v)} for ccy, v in sorted(moves.items())]
-    move_table = dash_table.DataTable(
-        columns=[{"name": "Currency", "id": "currency"}, {"name": "1% move (USD)", "id": "move_1pct_usd"}],
-        data=move_rows, style_cell={**_MONO, "minWidth": "110px"}, style_header=_HEAD,
-    ) if move_rows else html.P("No FX delta to stress.", style={"color": "#616e7c"})
-    scenario_rows = [{"scenario": name, "fx_total": format_amount(r["fx_total"]),
-                      "futures_pnl": format_amount(r["futures_pnl"]), "total": format_amount(r["total"])}
-                     for name, r in sorted(results.items())]
-    scenario_table = dash_table.DataTable(
-        id=STRESS_TABLE_ID,
-        columns=[{"name": "Scenario", "id": "scenario"}, {"name": "FX P&L (USD)", "id": "fx_total"},
-                 {"name": "Futures P&L (USD)", "id": "futures_pnl"}, {"name": "Total (USD)", "id": "total"}],
-        data=scenario_rows, style_cell={**_MONO, "minWidth": "120px"}, style_header=_HEAD,
-    ) if scenario_rows else html.P("No named scenarios in config/stress.yaml.", style={"color": "#616e7c"})
-    return html.Div(id=STRESS_ID, className="section section--secondary", children=[
-        html.H4("Stress"),
-        futures_delta_line(futures_usd_delta, reason="no engine query for open-futures USD delta yet"),
-        html.H5("1% move per currency"), move_table,
-        html.H5("Named scenarios"), scenario_table,
-    ])
+# ------------------------------------------------------------------ 5c. open futures block
+FUTURES_TABLE_ID = "exposure-futures-table"
+FUTURES_COLUMNS = ["instrument", "contracts", "multiplier", "settlement_price", "usd_delta"]
+
+# Gap noted for cash-ladder: engine.ladder.futures_delta.futures_usd_delta only returns
+# usd_delta per instrument (by_instrument), not contracts/multiplier/settlement price.
+# `details` lets a future caller supply those for display; until then they render "n/a".
+
+
+def futures_table_frame(futures: Optional[dict] = None, details: Optional[Dict[str, dict]] = None) -> pd.DataFrame:
+    futures = futures or DEFAULT_FUTURES
+    details = details or {}
+    reason = futures.get("reason", "")
+    rows = []
+    for instrument_id, usd in (futures.get("by_instrument") or {}).items():
+        d = details.get(instrument_id, {})
+        rows.append({"instrument": instrument_id, "contracts": d.get("contracts", "n/a"),
+                     "multiplier": d.get("multiplier", "n/a"), "settlement_price": d.get("price", "n/a"),
+                     "usd_delta": usd, "_unavailable": ""})
+    for instrument_id in futures.get("missing") or []:
+        rows.append({"instrument": instrument_id, "contracts": "n/a", "multiplier": "n/a",
+                     "settlement_price": "n/a", "usd_delta": None, "_unavailable": reason})
+    return pd.DataFrame(rows, columns=FUTURES_COLUMNS + ["_unavailable"])
+
+
+def futures_table(futures: Optional[dict] = None, details: Optional[Dict[str, dict]] = None):
+    frame = futures_table_frame(futures, details)
+    if frame.empty:
+        return html.P("No open futures for this as-of date.", style={"color": "#616e7c"})
+    records = frame.to_dict("records")
+    for row in records:
+        row["usd_delta"] = (_unavailable_label(row["_unavailable"]) if row["_unavailable"]
+                            else format_amount(row["usd_delta"]))
+        row.pop("_unavailable")
+    labels = {"instrument": "Instrument", "contracts": "Contracts", "multiplier": "Multiplier",
+              "settlement_price": "Settlement price", "usd_delta": "USD delta"}
+    return dash_table.DataTable(
+        id=FUTURES_TABLE_ID,
+        columns=[{"name": labels[c], "id": c} for c in FUTURES_COLUMNS],
+        data=records,
+        style_cell={**_MONO, "minWidth": "110px"},
+        style_header=_HEAD,
+    )
 
 
 # ------------------------------------------------------------------ section
 def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
                      rates: Dict[str, dict] | None = None,
                      sort: str = SORT_USD, scope: str = SCOPE_ALL,
-                     futures_usd_delta: Optional[float] = None) -> html.Div:
-    """Cards, metadata, combined cash ladder, alternative views, stress block, legend.
-    `rates` is whatever the marks table holds (see data.bloomberg.live.rates_from_marks);
-    None/empty means every currency is MISSING. Bloomberg feed status and the workbook
+                     futures: Optional[dict] = None,
+                     futures_details: Optional[Dict[str, dict]] = None) -> html.Div:
+    """Combined risk table (top), cards, metadata, combined cash ladder, alternative
+    views, open-futures block, legend. `rates` is whatever the marks table holds (see
+    data.bloomberg.live.rates_from_marks); None/empty means every currency is MISSING.
+    `futures` is the dict from `engine.ladder.futures_delta.futures_usd_delta` (or
+    DEFAULT_FUTURES if not yet queried). Bloomberg feed status and the workbook
     mark-to-market panel are NOT rendered here any more -- see module docstring."""
     from engine.ladder.exposure import build_exposure
+    from engine.pnl.stress import load_scenarios
     rates = rates or {}
+    futures = futures or DEFAULT_FUTURES
     result = build_exposure(records, rates)
     empty = result.ladder.empty
+    scenarios = load_scenarios()
     main = (combined_table(result, records, sort) if not empty
             else html.P("No open FX trades for this as-of date.", style={"color": "#616e7c"}))
     order_note = "currencies by |USD delta|" if sort != SORT_ALPHA else "currencies A-Z"
-    delta_by_ccy = dict(zip(result.summary["currency"], result.summary["usd_delta"])) if not result.summary.empty else {}
     return html.Div(className="section", children=[
+        combined_risk_table(result, futures, scenarios),
         risk_snapshot(result, records),
         metadata_line(result, records, unresolved, as_of_date, rates),
         html.H4(f"Cash ladder by settlement date ({order_note})"),
@@ -445,6 +584,7 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
             html.H4("Settlement ladder (dates only)"),
             ladder_table(result) if not empty else html.Div(),
         ]),
-        stress_block(delta_by_ccy, futures_usd_delta),
+        html.H4("Open futures"),
+        futures_table(futures, futures_details),
         html.Details(className="details details--compact", children=[html.Summary("What the rows mean"), legend()]),
     ])

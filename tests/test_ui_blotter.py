@@ -70,18 +70,65 @@ def test_filter_options_empty_frame():
     assert opts == [{"label": "All", "value": "All"}]
 
 
-def test_detail_table_formats_usd_and_rates():
-    df = pd.DataFrame({
+def _sample_df(reason="", note=""):
+    return pd.DataFrame({
         "trade_id": ["T1"], "instrument_id": ["EURUSD"], "product": ["FX_FWD"],
         "strategy": ["HAHY7"], "theme": [""], "trade_date": ["2026-06-01"],
         "settle_date": ["2026-06-20"], "status": ["OPEN"], "quantity": [1000000.0],
         "fill": [1.1], "mark": [1.108], "spot": [1.105], "pnl_local": [8000.0],
-        "pnl_usd": [8843.4], "pnl_spot_usd": [5525.0], "pnl_carry_usd": [3318.4], "reason": [""],
+        "pnl_usd": [8843.4], "pnl_spot_usd": [5525.0], "pnl_carry_usd": [3318.4],
+        "reason": [reason], "note": [note],
     })
+
+
+def test_detail_table_formats_usd_and_rates():
+    df = _sample_df()
     table = blotter.detail_table(df)
     row = table.data[0]
     assert row["pnl_usd"] == "8,843"
     assert row["fill"] == "1.100000"
+
+
+def test_detail_table_native_filter_and_sort_enabled():
+    table = blotter.detail_table(_sample_df())
+    assert table.filter_action == "native"
+    assert table.sort_action == "native"
+    assert table.sort_mode == "multi"
+
+
+def test_detail_table_note_column_present_and_styled_grey():
+    table = blotter.detail_table(_sample_df(note="fyi"))
+    assert any(c["id"] == "note" for c in table.columns)
+    note_style = next(s for s in table.style_data_conditional
+                       if s.get("if", {}).get("column_id") == "note")
+    assert note_style["color"] == "gray"
+
+
+def test_detail_table_unavailable_only_on_nonempty_reason():
+    table = blotter.detail_table(_sample_df(reason="no mark"))
+    style = next(s for s in table.style_data_conditional
+                 if "reason" in s.get("if", {}).get("filter_query", ""))
+    assert "reason" in style["if"]["filter_query"]
+    # a row with an empty reason is not flagged
+    table_ok = blotter.detail_table(_sample_df(reason=""))
+    assert table_ok.data[0]["reason"] == ""
+
+
+def test_subtotal_line_sums_visible_rows():
+    rows = [{"pnl_usd": "8,843"}, {"pnl_usd": "(1,000)"}]
+    line = blotter.subtotal_line(rows)
+    assert "7,843" in line.children
+
+
+def test_subtotal_line_excludes_unavailable_rows():
+    rows = [{"pnl_usd": "8,843"}, {"pnl_usd": ""}, {"pnl_usd": "Unavailable"}]
+    line = blotter.subtotal_line(rows)
+    assert "2 row(s) unavailable" in line.children
+
+
+def test_subtotal_line_empty():
+    line = blotter.subtotal_line([])
+    assert "$0" in line.children
 
 
 def test_group_summary_table_unavailable_shows_reason():
@@ -151,7 +198,36 @@ def test_register_callbacks_and_render_via_app():
     blotter.register_callbacks(app, get_db_path=lambda: path)
     callback_map = app.callback_map
     assert any("blotter-table-container" in k for k in callback_map)
+    assert any("blotter-subtotal" in k for k in callback_map)
     os.remove(path)
+
+
+def test_build_layout_has_no_toolbar_filter_dropdowns():
+    """User decision 2026-09-15: filtering/sorting moved into the DataTable header,
+    so the toolbar keeps only the date picker, group-by and theme-edit controls."""
+    layout = blotter.build_layout(default_date="2026-06-20")
+    toolbar = next(c for c in layout.children if getattr(c, "id", None) == blotter.TOOLBAR_ID)
+
+    def _ids(node):
+        found = []
+        node_id = getattr(node, "id", None)
+        if node_id:
+            found.append(node_id)
+        for child in getattr(node, "children", []) or []:
+            if isinstance(child, list):
+                for c in child:
+                    found.extend(_ids(c))
+            elif hasattr(child, "children") or hasattr(child, "id"):
+                found.extend(_ids(child))
+        return found
+
+    all_ids = _ids(toolbar)
+    for removed in ("blotter-filter-status", "blotter-filter-product", "blotter-filter-pair",
+                    "blotter-filter-strategy", "blotter-filter-theme",
+                    "blotter-filter-date-from", "blotter-filter-date-to"):
+        assert removed not in all_ids
+    assert blotter.GROUP_BY_ID in all_ids
+    assert blotter.DATE_PICKER_ID in all_ids
 
 
 def test_message_box():
