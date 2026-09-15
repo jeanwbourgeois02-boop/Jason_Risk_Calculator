@@ -44,18 +44,19 @@ def ledger_block(summary: Optional[dict], as_of_date: str) -> html.Div:
         return html.Div(id=LEDGER_ID, className="section", children=[
             html.H4("P&L ledger"),
             html.P("Ledger unavailable: engine not reachable.", className="status-line")])
-    missing = ", ".join(summary["missing"])
+    missing = ("no Bloomberg rates" if len(summary["missing"]) >= 6
+               else f"missing rate: {', '.join(summary['missing'])}" if summary["missing"] else "")
     unreal = summary["unrealisable"]
     p = summary["periods"]
     cards = [
         _card("Realised LTD", summary["realised_ltd_usd"], f"{summary['realised_trades']} settled trades frozen"),
         _card("Unrealised (open)", summary["unrealised_usd"], f"{summary['open_trades']} open trades at latest spot",
-              f"missing rate: {missing}" if missing else ""),
+              missing),
         _card("Total LTD", summary["total_ltd_usd"],
               "realised + unrealised" + (f" · excludes {len(unreal)} settled trade(s) not realisable" if unreal else ""),
-              f"missing rate: {missing}" if missing else ""),
+              missing),
         _card("Trading today", summary["trading_usd"], f"trades dated {as_of_date}",
-              f"missing rate: {missing}" if missing else ""),
+              missing),
     ]
     for key, label in (("daily", "Daily P&L"), ("d5", "5-day P&L"), ("mtd", "MTD P&L"), ("ytd", "YTD P&L")):
         e = p[key]
@@ -66,7 +67,7 @@ def ledger_block(summary: Optional[dict], as_of_date: str) -> html.Div:
     last = summary.get("last_snapshot")
     note_bits = [f"As-of {as_of_date}"]
     note_bits.append(f"last snapshot {last['as_of_date']} at {last['snapped_at']}" + ("" if last["complete"] else " (incomplete)")
-                     if last else "no snapshot stored yet: Daily/5d/MTD/YTD need a stored history")
+                     if last else "no daily history yet (Daily / 5d / MTD / YTD need it)")
     note_bits.append(f"{summary.get('snapshot_count', 0)} snapshot days")
     if unreal:
         note_bits.append("not realisable: " + ", ".join(f"{u['trade_id']} ({u['reason']})" for u in unreal[:5])
@@ -81,7 +82,7 @@ def ledger_block(summary: Optional[dict], as_of_date: str) -> html.Div:
         realised_rows = f[["trade_id", "instrument_id", "currency", "settle_date", "local_amount", "usd_entry_amount",
                            "spot_usd_per_local", "spot_as_of_date", "spot_source", "pnl_usd", "note"]].to_dict("records")
     return html.Div(id=LEDGER_ID, className="section", children=[
-        html.H4("P&L ledger · realised on settlement, unrealised at spot, periods from stored daily snapshots"),
+        html.H4("P&L ledger"),
         html.Div(id=LEDGER_CARDS_ID, className="cards", children=cards),
         html.Div(id=LEDGER_NOTE_ID, className="meta-line", children=[html.Span(b, className="meta-item") for b in note_bits]),
         html.Details(className="details", open=False, children=[

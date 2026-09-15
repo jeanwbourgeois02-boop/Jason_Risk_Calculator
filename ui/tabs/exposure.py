@@ -136,7 +136,9 @@ def risk_snapshot(result, records: List[dict]) -> html.Div:
     from engine.ladder.exposure import portfolio_totals
     totals = portfolio_totals(result)
     if totals["missing"]:
-        note = "missing rate: " + ", ".join(totals["missing"])
+        currencies = {r["currency"] for r in records}
+        note = ("no Bloomberg rates" if currencies and set(totals["missing"]) >= currencies
+                else "no rate: " + ", ".join(totals["missing"]))
         net = gross = pnl = "Unavailable"
         tag = "Unavailable"
         notes = (note, note, note)
@@ -165,8 +167,9 @@ def metadata_line(result, records: List[dict], unresolved: list, as_of_date: str
     rate_sources = ", ".join(sorted({str(v["source"]) for v in rates.values()})) or "none loaded"
     latest = max((str(v["timestamp"]) for v in rates.values()), default="n/a")
     items = [f"As-of {as_of_date}", f"Book {book_text}", f"NDF trades {ndf_trades}",
-             f"Unresolved trades {len(unresolved)}", f"Sign convention {SIGN_CONVENTION}",
-             f"Rate source {rate_sources}", f"Latest rate snap {latest}"]
+             f"Rates {rate_sources}", f"Last rate {latest}"]
+    if unresolved:
+        items.append(f"Unresolved trades {len(unresolved)}")
     spans = [html.Span(item, className="meta-item") for item in items]
     spans[1] = html.Span(items[1], id=HEADER_ID, className="meta-item")  # book, addressable for tests
     return html.Div(id=META_ID, className="meta-line", children=spans)
@@ -176,14 +179,18 @@ def market_data_panel(result, feed_status: Optional[dict] = None) -> html.Div:
     """Bloomberg feed state in one line, plus per-currency missing/stale warnings.
     No rate is ever invented: a currency without a mark shows blank and is listed here."""
     from ui.tabs.market_data import feed_headline
-    lines = [html.Li(f"{row['currency']}: {row['message']}", className="status-line status-line--bad")
-             for row in result.status.to_dict("records") if row["status"] != "OK"]
+    bad = [row for row in result.status.to_dict("records") if row["status"] != "OK"]
     connected = bool(feed_status and feed_status.get("connected"))
+    nothing_priced = (not connected and bad and len(bad) == len(result.status)
+                      and all(row["status"] == "MISSING_RATE" for row in bad))
+    if nothing_priced:
+        lines = [html.Li(f"No rates for any of the {len(bad)} currencies, so every USD figure is blank until "
+                         "Bloomberg is connected.", className="status-line status-line--bad")]
+    else:
+        lines = [html.Li(f"{row['currency']}: {row['message']}", className="status-line status-line--bad") for row in bad]
     badge = html.Span("BLOOMBERG LIVE" if connected else "NO BLOOMBERG FEED",
                       className="badge " + ("badge--live" if connected else "badge--down"))
     children = [badge, " ", html.Span(feed_headline(feed_status))]
-    if not connected:
-        children.append(html.Span(" Blank cells mean no rate; nothing is substituted.", className="status-line"))
     if lines:
         children.append(html.Ul(id=WARNINGS_ID, children=lines))
     else:
@@ -199,10 +206,9 @@ def workbook_status(period: Optional[dict]) -> html.Div:
     keys = [("Daily P&L", "daily"), ("LTD P&L", "ltd"), ("Trading P&L", "trading")]
     have = {k: period.get(k) for _, k in keys} if period else {}
     if not period or all(v is None or pd.isna(v) for v in have.values()):
-        why = "workbook pricing not loaded for this date" if period else "workbook valuation not computed"
         return html.Div(id=WORKBOOK_STATUS_ID, className="wb-status wb-status--unavailable", children=[
             html.Span("Workbook MTM", className="tag tag--workbook"), " ",
-            html.Span(f"Workbook MTM unavailable: {why}. Not substituted by mock exposure P&L.")])
+            html.Span("not priced for this date: enter workbook rates or pick another source in the toolbar.")])
     parts = []
     for label, key in keys:
         v = have.get(key)
@@ -409,14 +415,14 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
         metadata_line(result, records, unresolved, as_of_date, rates),
         market_data_panel(result, feed_status),
         workbook_status(period),
-        html.H4(f"Cash ladder · settlement dates by currency, then FX rate / delta / entry / P&L · {order_note}"),
+        html.H4(f"Cash ladder by settlement date ({order_note})"),
         main,
         html.Details(id=LADDER_DETAILS_ID, className="details", open=False, children=[
-            html.Summary("Alternative views: currency list and dates-only ladder"),
+            html.Summary("Other views"),
             html.H4("Currency summary (list)"),
             summary_table(summary_frame(result, records, sort, SCOPE_ALL)),
             html.H4("Settlement ladder (dates only)"),
             ladder_table(result) if not empty else html.Div(),
         ]),
-        legend(),
+        html.Details(className="details details--compact", children=[html.Summary("What the rows mean"), legend()]),
     ])

@@ -55,14 +55,15 @@ def test_layout_has_six_tabs_in_order():
     tabs_component = layout.children[2]  # [1] is the data-source strip above the tabs
     assert isinstance(tabs_component, dash.dcc.Tabs)
     labels = [child.label for child in tabs_component.children]
-    assert labels == [
+    assert labels == list(uiapp.VISIBLE_TABS) == ["Cash ladder", "Overall book"]   # four placeholder tabs are not shown
+    assert uiapp.TAB_LABELS == (
         "Cash ladder",
         "FX",
         "Rates",
         "Options",
         "Delta",
         "Overall book",
-    ]
+    )
     for child in tabs_component.children:
         assert isinstance(child, dash.dcc.Tab)
 
@@ -427,7 +428,7 @@ def test_pnl_wired_into_overall_book_tab():
     data = uiapp.empty_summary()
     layout = uiapp.build_layout(data)
     tabs_component = layout.children[2]  # [1] is the data-source strip above the tabs
-    overall_book_tab = tabs_component.children[5]
+    overall_book_tab = tabs_component.children[1]
     assert overall_book_tab.label == "Overall book"
     inner = overall_book_tab.children[0]
     assert isinstance(inner.children[0], dash.html.H3)
@@ -509,13 +510,15 @@ def test_dashboard_order_cards_meta_summary_then_collapsed_ladder():
     from ui.tabs import exposure
     section = _aud_section()
     ids = [getattr(c, "id", None) for c in section.children]
+    legend_pos = [i for i, c in enumerate(section.children) if _find(c, exposure.LEGEND_ID) is not None][0]
     order = [ids.index(exposure.SNAPSHOT_ID), ids.index(exposure.META_ID), ids.index(exposure.MARKET_DATA_ID),
              ids.index(exposure.WORKBOOK_STATUS_ID), ids.index(exposure.COMBINED_TABLE_ID),
-             ids.index(exposure.LADDER_DETAILS_ID), ids.index(exposure.LEGEND_ID)]
-    assert order == sorted(order)                       # cards < meta < mock line < wb status < combined < details < legend
+             ids.index(exposure.LADDER_DETAILS_ID), legend_pos]
+    assert order == sorted(order)                       # cards < meta < feed line < wb status < combined < details < legend
+    assert isinstance(section.children[legend_pos], dash.html.Details)   # legend is collapsed by default
     details = _find(section, exposure.LADDER_DETAILS_ID)
     assert isinstance(details, dash.html.Details) and details.open is False
-    assert details.children[0].children.startswith("Alternative views")
+    assert details.children[0].children == "Other views"
     assert _find(details, exposure.SUMMARY_TABLE_ID) is not None
     assert _find(details, exposure.LADDER_TABLE_ID) is not None
 
@@ -538,11 +541,11 @@ def test_metadata_line_and_compact_workbook_status():
     from ui.tabs import exposure
     section = _aud_section()
     meta = _texts(_find(section, exposure.META_ID))
-    for item in ("As-of 2026-09-14", "Book HAHY7", "NDF trades 1", "Unresolved trades 0",
-                 "Sign convention broker_reference", exposure.MOCK_SOURCE, exposure.MOCK_TIMESTAMP):
+    for item in ("As-of 2026-09-14", "Book HAHY7", "NDF trades 1", exposure.MOCK_SOURCE, exposure.MOCK_TIMESTAMP):
         assert item in meta
+    assert "Unresolved" not in meta and "Sign convention" not in meta      # jargon only when it matters
     wb = _find(section, exposure.WORKBOOK_STATUS_ID)
-    assert "Workbook MTM unavailable" in _texts(wb) and "wb-status--unavailable" in wb.className
+    assert "not priced for this date" in _texts(wb) and "wb-status--unavailable" in wb.className
     assert _texts(wb.children[0]) == "Workbook MTM"
     period = {"daily": -1234.6, "ltd": 98765.4, "trading": float("nan"), "daily_ref_date": "2026-09-11"}
     with_wb = exposure.exposure_section(_exposure_records(), [], "2026-09-14",
@@ -638,7 +641,7 @@ def test_market_data_panel_and_legend_mock_labels():
     section = _aud_section()
     panel = _find(section, exposure.MARKET_DATA_ID)
     text = _texts(panel)
-    assert "NO BLOOMBERG FEED" in text and "no pull recorded yet" in text and "nothing is substituted" in text.lower()
+    assert "NO BLOOMBERG FEED" in text and "no pull recorded yet" in text
     assert "status-panel--down" in panel.className and _find(panel, exposure.WARNINGS_ID).hidden is True
     live_panel = exposure.market_data_panel(
         __import__("engine.ladder.exposure", fromlist=["build_exposure"]).build_exposure([], {}),
@@ -697,9 +700,9 @@ def test_cash_ladder_layout_title_toolbar_and_tab_styling():
     assert order.value == "usd" and [o["value"] for o in order.options] == ["usd", "alpha"]
     assert [o["label"] for o in order.options] == ["|USD delta|", "A-Z"]
     text = _texts(toolbar)
-    assert "Book / Bloomberg feed" in text and "Bloomberg: waiting for first refresh" in text and "MOCK" not in text
+    assert "Status" in text and "Bloomberg: waiting for first refresh" in text and "MOCK" not in text
     assert _find(toolbar, cash_ladder.STATUS_ID) is not None
-    assert "Workbook MTM valuation: Workbook rates" in text
+    assert "Workbook MTM rates" in text and "Manual refresh" not in text
     # the workbook-source dropdown sits under the workbook label, not under a generic 'Source' for both
     workbook_group = [c for c in toolbar.children if getattr(c, "className", "") and "toolbar-group--workbook" in c.className][0]
     assert _find(workbook_group, cash_ladder.SOURCE_DROPDOWN_ID) is not None
@@ -732,7 +735,7 @@ def test_cash_ladder_callback_renders_exposure_from_db(monkeypatch, tmp_path):
     assert summary["currency"] == "JPY" and summary["usd_delta_entry"] == "(1,000,000)"
     combined = {r[exposure.ROW_LABEL_COL]: r for r in _find(out, exposure.COMBINED_TABLE_ID).data}
     assert combined["FX rate (USD per local)"]["JPY"] == f"{1 / 147.12:.6f}"      # from marks, inverted USDJPY
-    assert "Rate source BBG_BFXFORWARD" in _texts(_find(out, exposure.META_ID))
+    assert "Rates BBG_BFXFORWARD" in _texts(_find(out, exposure.META_ID))
     assert "HAHY7" in _texts(_find(out, exposure.HEADER_ID))
     from ui.tabs import market_data
     diag = _find(out, market_data.DIAG_ID)
@@ -758,8 +761,8 @@ def test_cash_ladder_callback_renders_exposure_from_db(monkeypatch, tmp_path):
     assert isinstance(workbook, dash.html.Details) and workbook.open is False
     assert "section--secondary" in workbook.className
     text = _texts(workbook)
-    assert "Workbook mark-to-market — separate calculation" in text
-    assert "not the screenshot-style Exposure P&L" in text
+    assert "Workbook mark-to-market (Excel method)" in text
+    assert "A different number from the exposure P&L above, on purpose" in text
     assert _find(workbook, "cash-ladder-valuation-summary") is not None
     assert _find(workbook, "cash-ladder-valuation-detail") is not None
     assert _find(workbook, "cash-ladder-datatable") is not None

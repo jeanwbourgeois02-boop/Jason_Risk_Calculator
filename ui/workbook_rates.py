@@ -8,10 +8,10 @@ from data.ingest.upload import decode
 
 
 def layout(default_date):
-    return html.Details([
-        html.Summary('Workbook FX rates — enter or load saved Excel rates'),
-        html.P('Use the same outright rates as the workbook: current, T−1 and T−2, all for its shared valuation date. '
-               'Saving replaces the displayed workbook rates only. Blank cells remain missing; no PB rate is substituted.'),
+    return html.Details(className='details rates-panel', children=[
+        html.Summary('Workbook FX rates (inputs for the workbook mark-to-market)'),
+        html.P('Type the outrights the workbook uses: current, T−1 and T−2, all for its shared valuation date. '
+               'Blank cells stay blank; nothing is substituted.'),
         dcc.DatePickerSingle(id='rates-date', date=default_date),
         html.Div(id='rates-date-description'),
         dcc.Upload(id='rates-workbook', children=html.Button('Read saved rates from HA-portfolio Excel'), accept='.xlsx,.xlsm', multiple=False),
@@ -23,11 +23,11 @@ def layout(default_date):
             {'name': 'T−1 outright', 'id': 'previous', 'type': 'numeric'},
             {'name': 'T−2 outright', 'id': 'previous2', 'type': 'numeric'},
         ], data=[], editable=True, style_cell={'textAlign': 'right'}, page_size=20),
-        html.Button('Save workbook rates', id='rates-save'),
+        html.Button('Save workbook rates', id='rates-save', className='btn'),
         html.Div(id='rates-status', role='status'),
         dcc.Store(id='rates-revision'),
         dcc.Store(id='rates-cache'),
-    ], style={'margin': '20px 0', 'maxWidth': '1100px'})
+    ], style={'margin': '0 20px 30px', 'maxWidth': '1100px'})
 
 
 def register(app, get_db_path):

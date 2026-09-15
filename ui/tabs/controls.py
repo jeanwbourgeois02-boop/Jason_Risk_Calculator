@@ -30,10 +30,10 @@ def source_value_to_param(value: Optional[str]) -> Optional[str]:
     return value
 
 
-def build_source_dropdown(dropdown_id: str) -> html.Div:
+def build_source_dropdown(dropdown_id: str, label: str = "Source") -> html.Div:
     return html.Div(
         [
-            html.Label("Source"),
+            html.Label(label),
             dcc.Dropdown(
                 id=dropdown_id,
                 options=SOURCE_OPTIONS,

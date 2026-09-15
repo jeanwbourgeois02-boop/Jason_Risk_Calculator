@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
 
 TAB_LABELS = ("Cash ladder", "FX", "Rates", "Options", "Delta", "Overall book")
+VISIBLE_TABS = ("Cash ladder", "Overall book")   # the other four have no engine view yet and are not shown
 
 
 def get_db_path() -> Path:
@@ -146,9 +147,10 @@ def build_layout(data: dict) -> html.Div:
     other four stay placeholders until their engine/ views land."""
     default_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     tabs = []
-    for label in TAB_LABELS:
+    for label in VISIBLE_TABS:
         if label == "Cash ladder":
-            children = [cash_ladder.build_layout(default_date=default_date)]
+            children = [cash_ladder.build_layout(default_date=default_date),
+                        workbook_rates.layout(default_date)]
         elif label == "Overall book":
             children = [pnl.build_layout(default_date=default_date)]
         else:
@@ -159,7 +161,6 @@ def build_layout(data: dict) -> html.Div:
         html.H1("Risk monitor"),
         uploads.layout(data),
         dcc.Tabs(children=tabs, parent_className="tabs-bar", className="tabs-strip"),
-        workbook_rates.layout(default_date),
     ])
 
 

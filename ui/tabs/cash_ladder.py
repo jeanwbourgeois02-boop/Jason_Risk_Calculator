@@ -214,19 +214,18 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
                                         {"label": "A-Z", "value": "alpha"}]),
             ]),
             html.Div(className="toolbar-group toolbar-group--exposure", children=[
-                html.Label("Book / Bloomberg feed"),
+                html.Label("Status"),
                 html.Div(id=STATUS_ID, className="toolbar-static",
                          children="Bloomberg: waiting for first refresh"),
             ]),
             html.Div(className="toolbar-group", children=[
-                html.Label("Manual refresh"),
-                html.Div([html.Button("Pull from Bloomberg now", id=PULL_NOW_ID, n_clicks=0, className="btn"),
+                html.Label("Bloomberg"),
+                html.Div([html.Button("Pull now", id=PULL_NOW_ID, n_clicks=0, className="btn"),
                           html.Span(id=PULL_NOW_STATUS_ID, className="status-line", style={"marginLeft": "8px"})]),
                 dcc.Store(id=PULL_REVISION_ID),
             ]),
             html.Div(className="toolbar-group toolbar-group--workbook", children=[
-                html.Label("Workbook MTM valuation: Workbook rates"),
-                build_source_dropdown(SOURCE_DROPDOWN_ID),
+                build_source_dropdown(SOURCE_DROPDOWN_ID, label="Workbook MTM rates"),
             ]),
         ]),
         dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
@@ -329,10 +328,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         return html.Div([
             exposure,
             html.Details(id=WORKBOOK_SECTION_ID, className="section section--secondary details", open=False, children=[
-            html.Summary("Workbook mark-to-market — separate calculation"),
-            html.P("Broker/workbook P&L methodology from HA-portfolio vJean.xlsx (shared valuation date, "
-                   "workbook divisor). This is not the screenshot-style Exposure P&L shown above.",
-                   className="section-kicker"),
+            html.Summary("Workbook mark-to-market (Excel method)"),
+            html.P("The HA-portfolio workbook's own formulas: one shared valuation date and the workbook divisor. "
+                   "A different number from the exposure P&L above, on purpose.", className="section-kicker"),
             html.H4("Currency and settlement date: workbook P&L"),
             html.P(status),
             html.P("Signed USD entry + workbook USD valuation = USD P&L. "

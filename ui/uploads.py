@@ -52,7 +52,7 @@ def layout(data: dict = None):
                        accept='.csv,.xlsx,.xlsm,.xls', multiple=False, max_size=25 * 1024 * 1024),
         ]),
         html.Div(id='report-busy', className='source-busy'),
-        dcc.Loading(type='dot', color='#1f5fbf', children=html.Div(id='report-stage', className='source-row source-row--stage', hidden=True, children=[
+        dcc.Loading(type='dot', color='#1f5fbf', children=html.Div(id='report-stage', className='source-row source-row--stage', style={'display': 'none'}, children=[
             html.Span(id='report-description', className='source-file'),
             html.Div(id='report-sheet-wrap', hidden=True, children=[
                 html.Label('Worksheet'),
@@ -68,7 +68,7 @@ def layout(data: dict = None):
         ])),
         dcc.Loading(type='dot', color='#1f5fbf', children=html.Div(id='report-result', role='status', className='source-result')),
         html.Details(id='report-preview-details', className='details details--compact', children=[
-            html.Summary('Preview file (loads when opened)'),
+            html.Summary('Preview file'),
             dcc.Loading(type='dot', color='#1f5fbf', children=html.Div(id='report-preview')),
         ]),
     ])
@@ -85,7 +85,7 @@ def register(app, get_db_path):
     @app.callback(Output('report-sheet', 'options'), Output('report-sheet', 'value'),
                   Output('report-sheet-wrap', 'hidden'),
                   Output('report-date', 'date'), Output('report-description', 'children'),
-                  Output('report-purpose', 'data'), Output('report-stage', 'hidden'),
+                  Output('report-purpose', 'data'), Output('report-stage', 'style'),
                   Output('report-result', 'children', allow_duplicate=True),
                   Output('report-busy', 'children', allow_duplicate=True),
                   Input('report-file', 'contents'),
@@ -103,9 +103,9 @@ def register(app, get_db_path):
             else:
                 note = 'File name does not look like HA_PNL_YYYYMMDD. Set the snapshot date, then press Import.'
             return (sheets, sheets[0] if sheets else None, not sheets, date, filename,
-                    'reference' if reference else 'bnp', False, note, '')
+                    'reference' if reference else 'bnp', {}, note, '')
         except Exception as exc:
-            return [], None, True, None, '', 'bnp', True, f'Cannot read file: {exc}', ''
+            return [], None, True, None, '', 'bnp', {'display': 'none'}, f'Cannot read file: {exc}', ''
 
     @app.callback(Output('report-import', 'disabled'), Input('report-purpose', 'data'))
     def purpose(value):

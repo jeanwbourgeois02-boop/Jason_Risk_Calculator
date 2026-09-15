@@ -10,7 +10,7 @@ Every statement here is taken from the code; file names are listed at the end so
 
 ## 1. The one-minute version
 
-The app is a local web page (Python + Dash) that replaces the `HA-portfolio vJean.xlsx` calculator for the NMMF fund's FX forward book at BNP. Start it with `launch.bat`; it opens at `http://127.0.0.1:8050`. One PC, no server, no login.
+The app is a local web page (Python + Dash) that replaces the `HA-portfolio vJean.xlsx` calculator for the NMMF fund's FX forward book at BNP. Start it with `py risk.py start`; it opens at `http://127.0.0.1:8050`. One PC, no server, no login.
 
 It does three things:
 
@@ -100,7 +100,7 @@ Built on the exposure method, plus settlement and history:
 - **Realised**: once a trade's value date passes, it is frozen at the official spot dated its value date. If no spot exists on or before that date the trade is listed as "not realisable" and left out, never guessed. NDFs are realised at spot on the value date, **not the official fixing**, so this will differ from BNP.
 - **Total LTD** = realised + unrealised, flagged *complete* only when every currency had a rate and every settled trade could be realised.
 - **Daily / 5d / MTD / YTD** = today's total minus the *complete* snapshot on the reference day. One snapshot is stored per day each time the feed runs. If the reference snapshot is missing or incomplete the card says so.
-- History can be **backfilled**. Run `backfill_history.bat` on the Bloomberg PC: it pulls the daily close of every pair the book has traded, from the last business day of the previous year to yesterday, and writes one snapshot per day. Days already complete are skipped. Trades opened and settled between two BNP uploads are missing from that history, so it is only as complete as the file archive. Without a backfill, history begins the first day the feed runs.
+- History can be **backfilled**. Run `py risk.py backfill` on the Bloomberg PC: it pulls the daily close of every pair the book has traded, from the last business day of the previous year to yesterday, and writes one snapshot per day. Days already complete are skipped. Trades opened and settled between two BNP uploads are missing from that history, so it is only as complete as the file archive. Without a backfill, history begins the first day the feed runs.
 - The calendar is Monday to Friday only. Around a US or UK holiday the reference day is off by one, and the note says so.
 
 ### 3.4 What none of them do
@@ -113,7 +113,7 @@ No discounting, no carry or roll-down attribution, no FIFO lot matching, no fees
 
 **Above the tabs** is the data-source strip. It names the BNP snapshot every tab is using (date, trade count, position count) and holds the **Upload BNP report** button. Choosing a file shows its name, the suggested snapshot date and an **Import** button. The app recognises the HA-portfolio workbook by its sheets and treats it as preview-only; there is nothing to select. After a successful import the strip and both as-of pickers move to the new date.
 
-Two of the six tabs have content: **Cash ladder** and **Overall book**. FX, Rates, Options and Delta are placeholders that show row counts only.
+Two tabs are shown: **Cash ladder** and **Overall book**. The FX, Rates, Options and Delta tabs are hidden until their views are built.
 
 ### Cash ladder tab (refreshes every 2 minutes)
 
@@ -137,7 +137,7 @@ The workbook method (3.2) aggregated by pair, with book totals and the period ta
 
 ## 5. The Bloomberg feed
 
-Starts automatically with `launch.bat` when `blpapi` is installed and a Terminal answers on port 8194. Set up once with `setup_bloomberg.bat`; check with `run_bloomberg_diagnostic.bat`.
+Starts automatically with `py risk.py start` when `blpapi` is installed and a Terminal answers on port 8194. Set up once with `py risk.py setup` (installs `blpapi` when it detects a Terminal); check with `py risk.py doctor --bloomberg`.
 
 Every 2 minutes, for every pair with an open leg:
 
@@ -178,9 +178,8 @@ Net USD exposure therefore excludes futures, options, rates and cash.
 - The database holds one snapshot date, 2026-08-17, with 229 forwards across 18 pairs. **The book is a month stale** until a newer BNP file is uploaded. Trades that have settled since are treated as settled.
 - **No machine this app has run on has had Bloomberg.** The database holds zero official marks. Every P&L card on the development PC reads Unavailable. The app has not yet produced a live number.
 - The database is `data/raw/risk.db`. It is **not in git**. Back it up: it holds the trades, marks and the snapshot history behind Daily / MTD / YTD.
-- **A fresh computer needs nothing copied across.** On launch the app creates an empty database and the Bloomberg status file if they are missing. Upload a BNP report to fill it. Copy `risk.db` from another PC only if you want that PC's history. `init_data.bat` does the same creation by hand.
-- **Sample data is in git.** `load_sample_data.bat` imports `data/sample/HA_PNL_20260818.csv` (the reference BNP report) so the screens have data before the first real upload.
-- **Sample data is in git.** `load_sample_data.bat` imports `data/sample/HA_PNL_SAMPLE_20260818.csv`: the real BNP layout with 35 forwards over 18 pairs, cash rows and the futures row, amounts scaled and ids replaced. Rates are real, positions are not. Use it to see the screens working before the first real file.
+- **A fresh computer needs nothing copied across.** On launch the app creates an empty database and the Bloomberg status file if they are missing. Upload a BNP report to fill it. Copy `risk.db` from another PC only if you want that PC's history. `py risk.py setup` does the same creation by hand.
+- **Sample data is in git.** `py risk.py setup --sample` imports `data/sample/HA_PNL_SAMPLE_20260818.csv`: the real BNP layout with 35 forwards over 18 pairs, cash rows and the futures row, amounts scaled and ids replaced. Rates are real, positions are not. Use it to see the screens working before the first real file.
 
 ---
 
@@ -190,7 +189,7 @@ Net USD exposure therefore excludes futures, options, rates and cash.
 2. On the Bloomberg PC, check the ladder shows `BLOOMBERG LIVE`. Open the diagnostics panel once to see which forwards are exact, interpolated or failed.
 3. **Set the as-of date to today.** The feed stamps marks with today's date, so a ladder left on an old date finds no official marks.
 4. For the workbook method, either type the outrights into the Workbook FX rates panel, or switch the source to Official and accept blanks on broken dates.
-5. **Once, after the first successful live run**, run `backfill_history.bat` so Daily / 5d / MTD / YTD have a history to compare against.
+5. **Once, after the first successful live run**, run `py risk.py backfill` so Daily / 5d / MTD / YTD have a history to compare against.
 
 ---
 
@@ -218,7 +217,7 @@ Only if today's snapshot was stored complete and the feed runs again tomorrow. T
 The rule is that a missing input shows blank, never zero. The remaining risks are: the unconfirmed NDF list; the weekday-only calendar; the untested `FWD_CURVE` parsing; an old as-of date left on the picker; and the workbook method's own arithmetic, wrong by design and labelled.
 
 **How do I know which version is running?**
-The console prints a fingerprint at launch. `check_git_push.bat` says whether the folder matches GitHub. The launcher refuses to reuse a running instance with different code.
+The console prints a fingerprint at launch. `py risk.py doctor` says whether the folder matches GitHub and whether a running copy is on older code. The launcher refuses to reuse a running instance with different code.
 
 ---
 
@@ -239,20 +238,15 @@ Full list in `docs/open-questions.md`. The ones that matter most:
 ## 11. Where the code is
 
 ```
-launch.bat                     start the app
-setup_bloomberg.bat            one-time install on the Bloomberg PC
-run_bloomberg_diagnostic.bat   read-only Bloomberg check, writes reports/
-backfill_history.bat           rebuild Daily/5d/MTD/YTD history from Bloomberg closes
-check_git_push.bat             is this folder in sync with GitHub
-init_data.bat                  create an empty database + status file (launch does this too)
-load_sample_data.bat           import data/sample/HA_PNL_20260818.csv into the database
-load_sample_data.bat           import the synthetic sample report (data/sample/)
+risk.py                        the only entry point: setup / start / doctor / backfill (see README)
+ui/launch.py                   what `start` runs: port choice, stale-instance check, browser
+tools/bloomberg_diagnostic.py  what `doctor --bloomberg` runs: every request OK/FAILED, writes reports/
 tools/make_sample_data.py      rebuild the sample from the real file (real file never in git)
 data/raw/risk.db               the database (not in git; back it up)
 data/ingest/bnp.py             BNP parser and reconciliation checks
 data/bloomberg/live.py         2-minute feed, status file
 data/bloomberg/fwd_curve.py    FWD_CURVE parsing and interpolation
-data/bloomberg/backfill.py     ledger history from daily closes (backfill_history.bat)
+data/bloomberg/backfill.py     ledger history from daily closes (`py risk.py backfill`)
 engine/ladder/exposure.py      exposure P&L (3.1)
 engine/pnl/pnl.py              workbook formulas (3.2)
 engine/pnl/aggregate.py        workbook daily / trading, weekday calendar

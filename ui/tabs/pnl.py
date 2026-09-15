@@ -118,7 +118,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     """Controls + an (initially empty) content container for the P&L tab. The tables
     themselves are filled in by the callback registered in register_callbacks."""
     return html.Div([
-        html.H3("P&L"),
+        html.H3("Overall book (workbook method)"),
         build_source_dropdown(SOURCE_DROPDOWN_ID),
         build_date_picker(DATE_PICKER_ID, default_date=default_date),
         html.Div(id=CONTENT_CONTAINER_ID),
