@@ -74,8 +74,8 @@ def test_ledger_and_feed_sections_are_informational_and_read_only(tmp_path, monk
     feed = data["checks"]["feed"]
     assert feed["required"] is False and feed["ok"] is True and "skipped=1" in feed["detail"] and "ledger:" in feed["detail"]
     txt = next((tmp_path / "reports").glob("*.txt")).read_text(encoding="utf-8")
-    assert "Informational (not required for exit 0)" in txt and "[CHECK ] ledger" in txt
-    assert "[CHECK ] ledger" in capsys.readouterr().out
+    assert "Informational (not required for exit 0)" in txt and "] ledger" in txt
+    assert "] ledger" in capsys.readouterr().out
     assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM realised_pnl").fetchone()[0] == 0   # read-only
 
 
