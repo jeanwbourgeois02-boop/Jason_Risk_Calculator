@@ -192,6 +192,102 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         conn.close()
 
 
+# --------------------------------------------------------------------------- automatic backfill (2026-09-15)
+# risk.py no longer has a `backfill` subcommand: this runs by itself, on `start` and at
+# the end of every live feed cycle, so nobody has to remember to run it. A module-level
+# lock keeps two triggers (start + a feed cycle finishing moments later) from overlapping.
+_auto_lock = __import__("threading").Lock()
+
+
+def _earliest_trade_date(conn: sqlite3.Connection) -> Optional[date]:
+    row = conn.execute("SELECT MIN(trade_date) FROM trades").fetchone()
+    return date.fromisoformat(row[0]) if row and row[0] else None
+
+
+def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
+                   fetch: Optional[Callable] = None, session_factory: Optional[Callable] = None,
+                   log: Callable[[str], None] = print,
+                   on_progress: Optional[Callable[[int], None]] = None) -> List[dict]:
+    """Fill every business day from the earliest trade date to yesterday that lacks a
+    complete official close (per `data.bloomberg.inventory.close_completeness`), one day
+    at a time, calling `on_progress(days_remaining)` after each so a caller can publish
+    it. Days that are already complete are skipped by `backfill()` itself; here we also
+    skip requesting them at all when the whole range is already complete."""
+    from data.ingest.schema import connect
+    from data.bloomberg.inventory import close_completeness
+    conn = connect(Path(db_path))
+    try:
+        earliest = _earliest_trade_date(conn)
+        if earliest is None:
+            log("Auto-backfill: no trades in the database; nothing to do.")
+            return []
+        yesterday = date.today() - timedelta(days=1)
+        if earliest > yesterday:
+            return []
+        completeness = close_completeness(conn, earliest.isoformat(), yesterday.isoformat())
+    finally:
+        conn.close()
+    todo = [date.fromisoformat(d) for d in completeness.loc[~completeness["complete"], "as_of_date"]]
+    if not todo:
+        log("Auto-backfill: history already complete.")
+        if on_progress:
+            on_progress(0)
+        return []
+    log(f"Auto-backfill: {len(todo)} incomplete day(s) between {earliest} and {yesterday}.")
+    results = []
+    remaining = len(todo)
+    if on_progress:
+        on_progress(remaining)
+    for d in todo:
+        results.extend(backfill(db_path, d, d, fetch=fetch, session_factory=session_factory,
+                                host=host, port=port, log=log))
+        remaining -= 1
+        if on_progress:
+            on_progress(remaining)
+    return results
+
+
+def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
+                        fetch: Optional[Callable] = None, session_factory: Optional[Callable] = None):
+    """Run `auto_backfill` in a background daemon thread when a Terminal is available,
+    writing progress into the existing Bloomberg status file under key "backfill" so the
+    Market data tab can show "Backfill: n days remaining". Without a Terminal, writes
+    `{"running": False, "reason": ...}` and does nothing else. Never blocks the caller.
+    A second call while one is already running is a no-op (the lock is held for the
+    whole run), which is how a feed cycle avoids overlapping with `start`'s own trigger."""
+    import threading
+    from data.bloomberg.live import availability, read_status, write_status
+
+    def _publish(patch: dict) -> None:
+        current = read_status(db_path) or {}
+        current["backfill"] = {**current.get("backfill", {}), **patch}
+        write_status(db_path, current)
+
+    if session_factory is None and fetch is None:
+        ok, why = availability(host, port)
+        if not ok:
+            _publish({"running": False, "reason": why})
+            return None
+
+    if not _auto_lock.acquire(blocking=False):
+        return None  # a run is already in flight; this trigger is redundant
+
+    def _run():
+        try:
+            _publish({"running": True, "reason": ""})
+            auto_backfill(db_path, host=host, port=port, fetch=fetch, session_factory=session_factory,
+                          on_progress=lambda remaining: _publish({"running": remaining > 0, "remaining": remaining}))
+        except Exception as exc:  # never let a background thread take the process down
+            _publish({"running": False, "reason": f"auto-backfill failed: {exc!r}"})
+        finally:
+            _publish({"running": False, "remaining": 0})
+            _auto_lock.release()
+
+    t = threading.Thread(target=_run, name="bloomberg-auto-backfill", daemon=True)
+    t.start()
+    return t
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Backfill P&L ledger snapshots from Bloomberg daily closes.")
     parser.add_argument("--db", default=None, help="SQLite path (default: ui.app.get_db_path())")

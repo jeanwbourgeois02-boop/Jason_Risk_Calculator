@@ -327,6 +327,8 @@ class LiveFeed:
         while not self._stop.is_set():
             try:
                 self.last_status = pull_once(self.db_path, host=self.host, port=self.port)
+                from data.bloomberg.backfill import start_auto_backfill
+                start_auto_backfill(self.db_path, host=self.host, port=self.port)
             except Exception:  # pull_once already catches; this guards the thread itself
                 write_status(self.db_path, {"time": _now_iso(), "connected": False,
                                             "reason": "feed thread error: " + traceback.format_exc().strip().splitlines()[-1],

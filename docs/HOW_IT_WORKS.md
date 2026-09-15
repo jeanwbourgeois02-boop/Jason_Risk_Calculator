@@ -168,7 +168,7 @@ Net USD exposure therefore excludes futures, options, rates and cash.
 2. On the Bloomberg PC, check the ladder shows `BLOOMBERG LIVE`. Open the diagnostics panel once to see which forwards are exact, interpolated or failed.
 3. **Set the as-of date to today.** The feed stamps marks with today's date, so a ladder left on an old date finds no official marks.
 4. For the workbook method, either type the outrights into the Workbook FX rates panel, or switch the source to Official and accept blanks on broken dates.
-5. **Once, after the first successful live run**, run `py risk.py backfill` so Daily / 5d / MTD / YTD have a history to compare against.
+5. Daily / 5d / MTD / YTD history is backfilled automatically in the background whenever a Terminal is available (on `pnl` / `start`, and again after every live feed cycle); nothing to run by hand.
 
 ---
 
@@ -217,7 +217,7 @@ Full list in `docs/open-questions.md`. The ones that matter most:
 ## 11. Where the code is
 
 ```
-risk.py                        the only entry point: setup / start / doctor / backfill (see README)
+risk.py                        the only script; setup / start / doctor (see README, and SETUP.cmd / pnl)
 ui/launch.py                   what `start` runs: port choice, stale-instance check, browser
 tools/bloomberg_diagnostic.py  what `doctor --bloomberg` runs: every request OK/FAILED, writes reports/
 tools/make_sample_data.py      rebuild the sample from the real file (real file never in git)
@@ -225,7 +225,7 @@ data/raw/risk.db               the database (not in git; back it up)
 data/ingest/bnp.py             BNP parser and reconciliation checks
 data/bloomberg/live.py         2-minute feed, status file
 data/bloomberg/fwd_curve.py    FWD_CURVE parsing and interpolation
-data/bloomberg/backfill.py     ledger history from daily closes (`py risk.py backfill`)
+data/bloomberg/backfill.py     ledger history from daily closes (run automatically; see start_auto_backfill)
 engine/ladder/exposure.py      exposure P&L (3.1)
 engine/pnl/pnl.py              workbook formulas (3.2)
 engine/pnl/aggregate.py        workbook daily / trading, weekday calendar

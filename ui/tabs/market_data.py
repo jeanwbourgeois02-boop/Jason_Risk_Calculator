@@ -62,6 +62,23 @@ MANUAL_MARK_TYPE_OPTIONS = [
 
 
 # --------------------------------------------------------------------------- diagnostics panel (unchanged, moved here)
+def backfill_headline(status: Optional[dict]) -> Optional[str]:
+    """'Backfill: n days remaining' from the "backfill" key data.bloomberg.backfill's
+    start_auto_backfill writes into the status file; None when there is nothing to say
+    (no Terminal ever seen, or history already complete and no run has happened yet)."""
+    backfill = (status or {}).get("backfill")
+    if not backfill:
+        return None
+    if backfill.get("running"):
+        remaining = backfill.get("remaining")
+        return f"Backfill: {remaining} day(s) remaining" if remaining is not None else "Backfill: running"
+    if backfill.get("reason"):
+        return f"Backfill: not running — {backfill['reason']}"
+    if backfill.get("remaining") == 0:
+        return "Backfill: history complete"
+    return None
+
+
 def feed_headline(status: Optional[dict]) -> str:
     """One line for the toolbar / summary: connection, last pull, counts."""
     if not status:
@@ -84,6 +101,9 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
                   "timestamp": v["timestamp"], "stale": "STALE" if v["stale"] else "fresh"}
                  for c, v in sorted(rates.items())]
     summary_bits = [feed_headline(status)]
+    bf_line = backfill_headline(status)
+    if bf_line:
+        summary_bits.append(bf_line)
     if status and status.get("as_of_date"):
         summary_bits.append(f"requests built for as-of {status['as_of_date']}; live marks stamped {status.get('as_of_marks', '')}")
     if status and status.get("warnings"):

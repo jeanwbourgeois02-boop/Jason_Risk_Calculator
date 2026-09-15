@@ -125,12 +125,16 @@ def load_summary(db_path: Union[str, Path]) -> dict:
         conn.close()
 
 
-def build_layout(data: dict) -> html.Div:
-    """Top-level layout: the header block, then a dcc.Tabs bar with the four tabs
-    (docs/BUILD_PLAN.md section 5). Each tab module owns its own controls/table via
-    `build_layout(default_date)`; this module only assembles them and wires the as-of
-    date picker (owned by the Ladder tab) into `header.AS_OF_STORE_ID` so the header
-    reflects whichever date the user has picked."""
+def build_layout(data: dict, db_path=None) -> html.Div:
+    """Top-level layout (user decision 2026-09-15, item A): the tab bar sits at the
+    very top of the page with the upload control at its right end; the P&L header sits
+    directly under the tab bar, on every tab (it is one static element outside the
+    dcc.Tabs' per-tab children, so it never re-renders on tab switch). No page title.
+
+    Each tab module owns its own controls/table via `build_layout(default_date)`; this
+    module only assembles them and wires the as-of date picker (owned by the Ladder
+    tab) into `header.AS_OF_STORE_ID` so the header reflects whichever date the user
+    has picked."""
     default_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     tab_builders = {
         "Ladder": cash_ladder.build_layout,
@@ -144,11 +148,12 @@ def build_layout(data: dict) -> html.Div:
         tabs.append(dcc.Tab(label=label, children=children,
                             className="tab", selected_className="tab--selected"))
     return html.Div([
-        html.H1("Risk monitor"),
-        uploads.layout(data),
+        html.Div(className="top-bar", children=[
+            dcc.Tabs(children=tabs, parent_className="tabs-bar", className="tabs-strip"),
+            uploads.layout(data, db_path=db_path),
+        ]),
         header.layout(),
         dcc.Store(id=header.AS_OF_STORE_ID, data=default_date),
-        dcc.Tabs(children=tabs, parent_className="tabs-bar", className="tabs-strip"),
     ])
 
 
@@ -159,7 +164,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     ensure_schema(resolved)
     data = load_summary(resolved)
     app = dash.Dash(__name__)
-    app.layout = build_layout(data)
+    app.layout = build_layout(data, db_path=resolved)
 
     header.register_callbacks(app, get_db_path=lambda: resolved)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
@@ -190,6 +195,8 @@ def start_bloomberg_feed(db_path: Path):
     port = int(os.environ.get("BLP_PORT", "8194"))
     feed, why = start_feed_if_available(db_path, host=host, port=port)
     print(f"Bloomberg feed: {'started (every 2 min)' if feed else 'not started: ' + why}", flush=True)
+    from data.bloomberg.backfill import start_auto_backfill
+    start_auto_backfill(db_path, host=host, port=port)
     return feed
 
 

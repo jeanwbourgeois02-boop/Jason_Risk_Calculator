@@ -4,8 +4,9 @@
     py risk.py start      start the app (opens the browser)
     py risk.py doctor     check every prerequisite and say exactly what to fix
 
-Also:
-    py risk.py backfill [START END]   rebuild the P&L ledger history (Bloomberg PC)
+Backfilling P&L history from Bloomberg daily closes is automatic: `start` and every
+Bloomberg feed cycle in data/bloomberg/live.py trigger it in the background (see
+data/bloomberg/backfill.py). There is no separate command for it.
 
 `setup` runs with whatever Python launched it and creates `.venv` beside this file.
 Every other command re-runs itself inside `.venv` so the packages installed by
@@ -59,10 +60,67 @@ def in_venv() -> bool:
 def reexec_in_venv(argv: list) -> int:
     """Run this script again under .venv. Returns its exit code."""
     if not VENV_PY.exists():
-        say("No .venv yet. Run:  py risk.py setup")
+        say("No .venv yet. Double-click SETUP.cmd (or run:  py risk.py setup), then try again.")
         return 2
     env = dict(os.environ, RISK_MONITOR_VENV="1")
     return subprocess.call([str(VENV_PY), str(ROOT / "risk.py"), *argv], cwd=str(ROOT), env=env)
+
+
+PNL_MARKER = "# --- risk-monitor pnl function (installed by risk.py setup) ---"
+PNL_END_MARKER = "# --- end risk-monitor pnl function ---"
+
+
+def pnl_function_block() -> str:
+    """The `pnl` PowerShell function, pinned to this clone's actual path."""
+    return (
+        f"{PNL_MARKER}\n"
+        "function pnl {\n"
+        f"    Set-Location '{ROOT}'\n"
+        "    if (-not (git status --porcelain)) { git pull --ff-only origin main }\n"
+        "    else { Write-Host 'Local edits present: not pulling from GitHub. Commit or stash them to update.' "
+        "-ForegroundColor Yellow }\n"
+        "    py -3 risk.py start\n"
+        "}\n"
+        f"{PNL_END_MARKER}\n"
+    )
+
+
+def _profile_paths() -> list:
+    """Windows PowerShell 5.1 and PowerShell 7+ profile paths, respecting Documents
+    redirection (OneDrive etc.)."""
+    try:
+        import ctypes.wintypes
+        CSIDL_PERSONAL = 5
+        buf = ctypes.create_unicode_buffer(1024)
+        ctypes.windll.shell32.SHGetFolderPathW(None, CSIDL_PERSONAL, None, 0, buf)
+        docs = Path(buf.value) if buf.value else Path.home() / "Documents"
+    except Exception:
+        docs = Path.home() / "Documents"
+    return [docs / "WindowsPowerShell" / "profile.ps1", docs / "PowerShell" / "profile.ps1"]
+
+
+def install_pnl_function() -> list:
+    """Add the `pnl` function to every PowerShell profile, replacing a previous copy of
+    the block if present so repeat runs never duplicate it. Returns the profile paths
+    written. Standard library only (ctypes), so this also runs before `setup` installs
+    anything into .venv."""
+    block = pnl_function_block()
+    written = []
+    for profile in _profile_paths():
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        text = profile.read_text(encoding="utf-8") if profile.exists() else ""
+        if PNL_MARKER in text:
+            start = text.index(PNL_MARKER)
+            end = text.index(PNL_END_MARKER) + len(PNL_END_MARKER)
+            # consume one trailing newline so re-writes don't grow blank lines
+            after = end + 1 if text[end:end + 1] == "\n" else end
+            text = text[:start] + block + text[after:]
+        else:
+            sep = "\n" if text and not text.endswith("\n") else ""
+            text = text + sep + block
+        profile.write_text(text, encoding="utf-8")
+        written.append(str(profile))
+    return written
 
 
 def tcp_open(host: str, port: int, timeout: float = 0.5) -> bool:
@@ -101,7 +159,7 @@ def cmd_setup(args) -> int:
     # 1. interpreter
     v = sys.version_info
     bits = platform.architecture()[0]
-    say(f"[1/6] Python {v.major}.{v.minor}.{v.micro} {bits} at {sys.executable}")
+    say(f"[1/7] Python {v.major}.{v.minor}.{v.micro} {bits} at {sys.executable}")
     if v < MIN_PYTHON:
         say(f"FAILED: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ is required. Install 64-bit Python from python.org,")
         say("        tick 'py launcher', then run:  py risk.py setup")
@@ -111,7 +169,7 @@ def cmd_setup(args) -> int:
         return 1
 
     # 2. venv
-    say("[2/6] Virtual environment")
+    say("[2/7] Virtual environment")
     if args.recreate and VENV.exists():
         import shutil
         shutil.rmtree(VENV)
@@ -123,13 +181,13 @@ def cmd_setup(args) -> int:
         say(f"  OK: created {VENV}")
 
     # 3. packages
-    say("[3/6] Application packages")
+    say("[3/7] Application packages")
     run([VENV_PY, "-m", "pip", "install", "--upgrade", "pip", "--quiet"], check=False)
     run([VENV_PY, "-m", "pip", "install", "-r", str(REQUIREMENTS), "--quiet"])
     say("  OK: requirements.txt installed")
 
     # 4. blpapi (Bloomberg PC only)
-    say("[4/6] Bloomberg API package")
+    say("[4/7] Bloomberg API package")
     want_blp = args.bloomberg or (not args.no_bloomberg and bloomberg_pc())
     if want_blp:
         code = run([VENV_PY, "-m", "pip", "install", "--index-url", BLPAPI_INDEX, "blpapi"], check=False)
@@ -142,7 +200,7 @@ def cmd_setup(args) -> int:
         say("  skipped: no Bloomberg Terminal detected (use --bloomberg to force)")
 
     # 5. verify + database
-    say("[5/6] Verify imports, create database and status file")
+    say("[5/7] Verify imports, create database and status file")
     check = (
         "import dash, pandas, openpyxl, xlrd, werkzeug, zoneinfo;"
         "print('  OK: dash', dash.__version__, '| pandas', pandas.__version__);"
@@ -153,8 +211,17 @@ def cmd_setup(args) -> int:
     if args.sample:
         run([VENV_PY, str(ROOT / "risk.py"), "_load_sample"])
 
-    # 6. tests
-    say("[6/6] Tests")
+    # 6. pnl PowerShell function
+    say("[6/7] 'pnl' PowerShell command")
+    try:
+        for profile in install_pnl_function():
+            say(f"  OK: {profile}")
+    except OSError as exc:
+        say(f"FAILED: could not write PowerShell profile: {exc}")
+        return 1
+
+    # 7. tests
+    say("[7/7] Tests")
     if args.skip_tests:
         say("  skipped (--skip-tests)")
     else:
@@ -192,22 +259,6 @@ def cmd_start(args) -> int:
         return reexec_in_venv(sys.argv[1:])
     from ui.launch import main
     return main(["--force-new"] if args.force_new else [])
-
-
-# ----------------------------------------------------------------------------- backfill
-
-def cmd_backfill(args) -> int:
-    if not in_venv():
-        return reexec_in_venv(sys.argv[1:])
-    from data.bloomberg.backfill import main
-    argv = []
-    if args.start:
-        argv += ["--start", args.start]
-    if args.end:
-        argv += ["--end", args.end]
-    if args.overwrite:
-        argv.append("--overwrite")
-    return main(argv)
 
 
 # ----------------------------------------------------------------------------- doctor
@@ -404,12 +455,6 @@ def build_parser() -> argparse.ArgumentParser:
     dcm.add_argument("--tests", action="store_true", help="also run the test suite")
     dcm.add_argument("--no-git", action="store_true", help="skip the GitHub sync check")
     dcm.set_defaults(func=cmd_doctor)
-
-    b = sub.add_parser("backfill", help="rebuild P&L ledger history from Bloomberg daily closes")
-    b.add_argument("start", nargs="?", help="first day YYYY-MM-DD (default: last business day of previous year)")
-    b.add_argument("end", nargs="?", help="last day YYYY-MM-DD (default: yesterday)")
-    b.add_argument("--overwrite", action="store_true")
-    b.set_defaults(func=cmd_backfill)
 
     sub.add_parser("_load_sample", help=argparse.SUPPRESS).set_defaults(func=cmd_load_sample)
     return parser
