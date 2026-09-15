@@ -64,6 +64,8 @@ The console prints the interpreter, the database path, an **App version** finger
 - On the Bloomberg PC, log in to the Terminal first, then `start`. The console says `Bloomberg feed: started (every 2 min)` or the reason it did not start.
 - `py risk.py start --force-new` always starts a fresh instance.
 
+**Working copy**: the repository lives in `C:\Users\jeanw\risk-monitor`, a plain local folder. GitHub is the backup: commit and `git push` at the end of every session. Do not keep a clone inside OneDrive: OneDrive syncs git's internal files while git writes them, which can corrupt the repository, and a second clone means two versions of the app.
+
 **Daily routine**: upload the morning BNP file with the **Upload BNP report** button, set the as-of date to today, read the ladder. Details in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) section 8.
 
 **Once, after the first live Bloomberg run**: `py risk.py backfill` builds the Daily / 5d / MTD / YTD history from daily closes (optional `START END` dates, `--overwrite` to redo complete days).
