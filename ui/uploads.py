@@ -1,14 +1,24 @@
-"""BNP report upload control (docs: user decisions 2026-09-15, item B).
+"""BNP report upload control (docs: user decisions 2026-09-15, item B; date-picker
+removed by the coordinator's same-day follow-up).
 
 One button, "Upload BNP report" (.xlsx/.xls/.csv). This is the ONLY data input: the
 HA-portfolio reference-workbook recognition/preview that used to live in this control
 has been removed entirely (moved to nothing -- the workbook stays a read-only file on
 the Reconciliation tab's manual-rates grid, `ui/workbook_rates.py`).
 
-Flow: choose file -> file name + detected snapshot date shown -> "Confirm insert" ->
-dcc.Loading ("Importing...") -> one small status line under the button. Nothing is
-written to the database before Confirm is pressed (`import_report` is only called from
-the Confirm callback, never from the file-picked callback).
+Flow: choose file -> file name + snapshot date shown -> "Confirm insert" -> dcc.Loading
+("Importing...") -> one small status line under the button. Nothing is written to the
+database before Confirm is pressed (`import_report` is only called from the Confirm
+callback, never from the file-picked callback).
+
+Snapshot date, no picker: `data.ingest.upload.suggested_date` already derives the date
+from the filename (`HA_PNL_YYYYMMDD...` -> that date minus one business day, per
+CLAUDE.md "File dated T is the T-1 close snapshot") -- there is nothing for a user to
+pick correctly that the filename doesn't already say, so a `dcc.DatePickerSingle` was
+one more control than the flow needed. The date now shows as read-only text next to the
+file name ("HA_PNL_20260818.csv - snapshot 2026-08-17"); a one-line `dcc.Input`
+(`type="date"`) only appears in its place when the filename carries no recognisable
+date, so a user is never asked to enter a date the filename already answers.
 
 The status line on success is a single sentence:
     "Loaded <filename> - snapshot <as_of> - <N> trades, <M> positions"
@@ -32,7 +42,9 @@ SOURCE_LINE_ID = "data-source-line"
 FILE_UPLOAD_ID = "report-file"
 STAGE_ID = "report-stage"
 FILENAME_ID = "report-filename"
-DATE_PICKER_ID = "report-date"
+SNAPSHOT_TEXT_ID = "report-snapshot-text"
+MANUAL_DATE_ID = "report-manual-date"
+DATE_PICKER_ID = "report-date"  # dcc.Store now (was DatePickerSingle) -- holds the resolved ISO date
 CONFIRM_ID = "report-import"
 RESULT_ID = "report-result"
 HISTORY_ID = "report-history"
@@ -95,10 +107,12 @@ def layout(data: dict = None, db_path=None):
         ]),
         html.Div(id=STAGE_ID, className="source-row source-row--stage", style={"display": "none"}, children=[
             html.Span(id=FILENAME_ID, className="source-file"),
-            html.Div([
+            html.Span(id=SNAPSHOT_TEXT_ID, className="source-snapshot", style={"display": "none"}),
+            html.Div(id=f"{MANUAL_DATE_ID}-wrap", style={"display": "none"}, children=[
                 html.Label("Snapshot date"),
-                dcc.DatePickerSingle(id=DATE_PICKER_ID),
+                dcc.Input(id=MANUAL_DATE_ID, type="date"),
             ]),
+            dcc.Store(id=DATE_PICKER_ID, data=None),
             html.Button("Confirm insert", id=CONFIRM_ID, n_clicks=0, className="btn"),
         ]),
         dcc.Loading(type="dot", color="#1f5fbf", children=html.Div(id=RESULT_ID, role="status", className="source-result")),
@@ -108,7 +122,10 @@ def layout(data: dict = None, db_path=None):
 
 def register(app, get_db_path):
     @app.callback(
-        Output(STAGE_ID, "style"), Output(FILENAME_ID, "children"), Output(DATE_PICKER_ID, "date"),
+        Output(STAGE_ID, "style"), Output(FILENAME_ID, "children"),
+        Output(SNAPSHOT_TEXT_ID, "children"), Output(SNAPSHOT_TEXT_ID, "style"),
+        Output(f"{MANUAL_DATE_ID}-wrap", "style"), Output(MANUAL_DATE_ID, "value"),
+        Output(DATE_PICKER_ID, "data"),
         Output(RESULT_ID, "children", allow_duplicate=True),
         Input(FILE_UPLOAD_ID, "contents"),
         State(FILE_UPLOAD_ID, "filename"), prevent_initial_call=True,
@@ -116,22 +133,36 @@ def register(app, get_db_path):
     def _selected(contents, filename):
         # Nothing is written here -- this only decodes enough to show the file name
         # and a suggested date. import_report() is called exclusively from _confirm().
+        hidden = {"display": "none"}
         if not contents:
-            return {"display": "none"}, "", None, ""
+            return hidden, "", "", hidden, hidden, None, None, ""
         try:
             decode(contents)  # validates size/shape before showing Confirm
         except Exception as exc:
-            return {"display": "none"}, "", None, html.Span(str(exc), className="source-result--error")
+            return hidden, "", "", hidden, hidden, None, None, \
+                html.Span(str(exc), className="source-result--error")
         date = suggested_date(filename)
-        note = "" if date else "Set the snapshot date, then press Confirm insert."
-        return {}, filename, date, note
+        if date:
+            return {}, filename, f"snapshot {date}", {}, hidden, None, date, ""
+        note = "This file name carries no recognisable date; enter the snapshot date, then press Confirm insert."
+        return {}, filename, "", hidden, {}, None, None, note
+
+    @app.callback(
+        Output(DATE_PICKER_ID, "data", allow_duplicate=True),
+        Input(MANUAL_DATE_ID, "value"), prevent_initial_call=True,
+    )
+    def _manual_date_typed(value):
+        # Only rendered/visible when the filename carried no date (see _selected); the
+        # store is the single source of truth _confirm reads, whichever path set it.
+        return value
 
     @app.callback(
         Output(RESULT_ID, "children"), Output(SOURCE_LINE_ID, "children"),
-        Output("report-history-wrap", "children"), Output("cash-ladder-date", "date"),
+        Output("report-history-wrap", "children"),
+        Output("cash-ladder-date", "date", allow_duplicate=True),
         Input(CONFIRM_ID, "n_clicks"),
         State(FILE_UPLOAD_ID, "contents"), State(FILE_UPLOAD_ID, "filename"),
-        State(DATE_PICKER_ID, "date"), prevent_initial_call=True,
+        State(DATE_PICKER_ID, "data"), prevent_initial_call=True,
     )
     def _confirm(clicks, contents, filename, as_of):
         if not contents:

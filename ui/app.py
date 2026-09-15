@@ -125,35 +125,68 @@ def load_summary(db_path: Union[str, Path]) -> dict:
         conn.close()
 
 
+MAIN_TABS_ID = "main-tabs"
+
+
+def _slug(label: str) -> str:
+    return label.lower().replace(" ", "-")
+
+
 def build_layout(data: dict, db_path=None) -> html.Div:
-    """Top-level layout (user decision 2026-09-15, item A): the tab bar sits at the
-    very top of the page with the upload control at its right end; the P&L header sits
-    directly under the tab bar, on every tab (it is one static element outside the
-    dcc.Tabs' per-tab children, so it never re-renders on tab switch). No page title.
+    """Top-level layout (user decision 2026-09-15, item A, revised 2026-09-15): the tab
+    bar (`dcc.Tabs`, holding plain `dcc.Tab(label=..., value=...)` objects with NO
+    children of their own -- Dash nests a Tab's children inside its own styled wrapper,
+    which was pushing the navy `.top-bar` around the whole page) sits at the very top
+    with the upload control pinned to its right; the P&L header sits directly under the
+    tab bar, on every tab. Below that, all four tab bodies live in one always-present
+    `html.Div(id="tab-bodies")`, each wrapped in its own `html.Div(id=f"tab-body-{slug}")`
+    -- bodies never leave the layout, so every tab's own callbacks (registered against
+    ids inside their body) keep firing regardless of which tab is selected. One
+    show/hide callback (registered in `create_app`) toggles the four bodies' `style` on
+    `main-tabs`' `value`.
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
     module only assembles them and wires the as-of date picker (owned by the Ladder
     tab) into `header.AS_OF_STORE_ID` so the header reflects whichever date the user
-    has picked."""
-    default_date = data["as_of_date"] if data["as_of_date"] != "none" else None
+    has picked.
+
+    Coordinator addition, 2026-09-15: the Ladder tab's date picker (and the header,
+    which mirrors it) default to TODAY in America/New_York, not the last BNP snapshot
+    date -- the ladder is a "what's open today" view, not a snapshot replay, and
+    `engine.ladder.exposure_adapter.records_from_db` already selects trades open on
+    whatever as_of it is given (trade_date <= as_of <= settle_date). Other tabs
+    (Blotter/Market data/Reconciliation) keep defaulting to the last uploaded
+    snapshot date, since they render the BNP file itself."""
+    snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
+    ladder_default_date = cash_ladder.today_ny()
     tab_builders = {
         "Ladder": cash_ladder.build_layout,
         "Blotter": blotter.build_layout,
         "Market data": market_data.build_layout,
         "Reconciliation": reconciliation.build_layout,
     }
-    tabs = []
-    for label in VISIBLE_TABS:
-        children = [tab_builders[label](default_date=default_date)]
-        tabs.append(dcc.Tab(label=label, children=children,
-                            className="tab", selected_className="tab--selected"))
+    tab_defaults = {
+        "Ladder": ladder_default_date,
+        "Blotter": snapshot_date,
+        "Market data": snapshot_date,
+        "Reconciliation": snapshot_date,
+    }
+    tabs = [dcc.Tab(label=label, value=label, className="tab", selected_className="tab--selected")
+            for label in VISIBLE_TABS]
+    bodies = [
+        html.Div(tab_builders[label](default_date=tab_defaults[label]),
+                 id=f"tab-body-{_slug(label)}", className="tab-body")
+        for label in VISIBLE_TABS
+    ]
     return html.Div([
         html.Div(className="top-bar", children=[
-            dcc.Tabs(children=tabs, parent_className="tabs-bar", className="tabs-strip"),
+            dcc.Tabs(id=MAIN_TABS_ID, value=VISIBLE_TABS[0], children=tabs,
+                     parent_className="tabs-bar", className="tabs-strip"),
             uploads.layout(data, db_path=db_path),
         ]),
         header.layout(),
-        dcc.Store(id=header.AS_OF_STORE_ID, data=default_date),
+        html.Div(id="tab-bodies", children=bodies),
+        dcc.Store(id=header.AS_OF_STORE_ID, data=ladder_default_date),
     ])
 
 
@@ -179,6 +212,13 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     # date picker only scopes that tab's inventory/completeness view).
     app.callback(Output(header.AS_OF_STORE_ID, "data"),
                  Input(cash_ladder.DATE_PICKER_ID, "date"))(lambda date_value: date_value)
+
+    # Show/hide the always-present tab bodies (see build_layout docstring) on the
+    # dcc.Tabs' own `value`, rather than nesting bodies inside dcc.Tab.children.
+    body_outputs = [Output(f"tab-body-{_slug(label)}", "style") for label in VISIBLE_TABS]
+    app.callback(*body_outputs, Input(MAIN_TABS_ID, "value"))(
+        lambda selected: [{} if label == selected else {"display": "none"} for label in VISIBLE_TABS]
+    )
 
     app.bloomberg_feed = start_bloomberg_feed(resolved) if start_feed else None
     return app
