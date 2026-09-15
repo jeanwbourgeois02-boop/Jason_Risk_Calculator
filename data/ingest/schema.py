@@ -166,6 +166,21 @@ CREATE TABLE IF NOT EXISTS swap_review (
 );
 """
 
+# --------------------------------------------------------------------------- bundles
+# A bundle (Blotter "Bundles" sub-tab, user decision 2026-09-15) is a named view whose
+# membership is the existing `instrument_theme` mechanism (theme = bundle name); this
+# table only holds the bundle's own metadata, never membership (that stays in
+# `instrument_theme` / `trades.theme` so `period_pnl_by(..., 'theme')` already groups
+# a bundle's trades with no join needed).
+BUNDLE_TABLES = ("bundles",)
+_BUNDLES_DDL = """
+CREATE TABLE IF NOT EXISTS bundles (
+  name            TEXT PRIMARY KEY,
+  description     TEXT NOT NULL,
+  created_at      TEXT NOT NULL
+);
+"""
+
 
 def _migrate_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after a table's initial CREATE, for databases created by
@@ -187,7 +202,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create all tables and the marks_official view if absent; enable foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(_DDL + _marks_official_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL)
+    conn.executescript(_DDL + _marks_official_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
     _migrate_columns(conn)
     conn.commit()
 

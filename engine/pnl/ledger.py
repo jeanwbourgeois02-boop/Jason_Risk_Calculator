@@ -144,6 +144,23 @@ def _period_refs(as_of: str, holidays) -> Dict[str, dt.date]:
     }
 
 
+def period_reference_dates(as_of: str) -> Dict[str, str]:
+    """Public wrapper over the business-day reference dates this module's periods use
+    (`config/holidays.txt` calendar via `engine.pnl.aggregate`), for callers outside
+    `engine/pnl/` that need the same dates without duplicating the calendar logic --
+    e.g. `ui.tabs.blotter_pricing`'s row-scoped P&L strip (2026-09-15 addition,
+    authorised for this single function; every other signature in this module is
+    unchanged). Returns ISO date strings: `daily` (T-1), `previous_day` (T-2, so a
+    caller can build a "previous day" period as ltd(daily) - ltd(previous_day)),
+    `d5`, `mtd`, `ytd`."""
+    holidays = load_holidays()
+    refs = _period_refs(as_of, holidays)
+    previous_day = _prev_business_day(refs["daily"], holidays)
+    out = {k: v.isoformat() for k, v in refs.items()}
+    out["previous_day"] = previous_day.isoformat()
+    return out
+
+
 def period_pnl(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str] = None) -> Dict[str, dict]:
     """Daily / d5 / mtd / ytd = ltd(as_of) - ltd(reference business day); plus `trading`
     = sum of pnl_usd for rows with trade_date = as_of. Each period:
