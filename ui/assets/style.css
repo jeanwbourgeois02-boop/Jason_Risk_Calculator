@@ -264,3 +264,32 @@ p { margin: 8px 0; }
 
 /* Direction word beside the ladder's "net" line, matching the header's SHORT USD / LONG USD. */
 .card-net-direction { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text); margin-left: 8px; }
+
+/* ---------------------------------------------------------------- Blotter filter bar
+   (ui/tabs/blotter.py, 2026-09-15): click-to-filter dropdowns replacing dash_table's
+   native filter row, which does not work in the installed Dash version -- verified
+   with a bare reproduction outside this app before building a replacement. One
+   dropdown per categorical column, restyled react-select to match the site (same
+   approach as the as-of date picker's .date-picker block above). */
+.blotter-filter-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px;
+  margin: 0 0 10px; padding: 10px 12px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; }
+.blotter-filter { display: flex; flex-direction: column; gap: 3px; min-width: 150px; }
+.blotter-filter label { font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--muted); }
+.blotter-filter-dropdown .Select-control, .blotter-filter-dropdown .dash-dropdown-control,
+.blotter-filter-dropdown > div > div { font-family: inherit; font-size: 12.5px; }
+.blotter-filter-dropdown .Select-control { border: 1px solid var(--line); border-radius: 6px;
+  min-height: 32px; }
+.blotter-filter-dropdown .Select-placeholder, .blotter-filter-dropdown .Select--single > .Select-control .Select-value {
+  line-height: 32px; color: var(--muted); }
+.blotter-filter-dropdown .Select-menu-outer { font-size: 12.5px; z-index: 5; }
+.blotter-filter-dropdown .VirtualizedSelectOption { padding: 6px 10px; }
+.blotter-filter-dropdown .VirtualizedSelectFocusedOption { background: #eef1f7; }
+.blotter-filter-dropdown .Select--multi .Select-value { background: var(--navy); color: #fff;
+  border: none; border-radius: 4px; font-size: 11px; font-weight: 600; padding: 1px 4px; }
+.blotter-filter-dropdown .Select--multi .Select-value-icon { border: none; color: rgba(255,255,255,.7); }
+.blotter-filter-dropdown .Select--multi .Select-value-icon:hover { background: var(--navy-2); color: #fff; }
+.btn--ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
+  align-self: flex-end; height: 32px; padding: 0 12px; }
+.btn--ghost:hover { color: var(--navy); border-color: var(--navy); }

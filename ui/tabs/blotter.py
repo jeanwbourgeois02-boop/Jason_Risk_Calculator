@@ -3,9 +3,19 @@ sub-tabs (user decision): Total book, FX, Rates, Options, Bundles. Rows come fro
 `engine.pnl.valuation.value_book(as_of)` (via `ui.tabs.blotter_pricing.priced_value_book`,
 which retries a missing official mark with `marks_source='BNP_BVAL'` so a
 Bloomberg-less DB still prices -- see that module's docstring), filtered per sub-tab by
-`product`. Native header filter/sort on the trade table (2026-09-15, unchanged from the
-prior single-table Blotter): `dash_table.DataTable` has no dropdown *filter* widget, so
-every column uses the native text filter row (`>=`, `contains`, bare value, ...).
+`product`.
+
+Filtering (rebuilt 2026-09-15, user decision -- the prior native text filter row on
+`dash_table.DataTable` did not work in this Dash version: verified with a bare
+three-row reproduction table outside this app, so the fix is our own filter bar, not a
+config tweak): one multi-select `dcc.Dropdown` per categorical column (Pair/Contract,
+Side, Status, Product, Strategy, Bundle), listing only the values present in that
+sub-tab's own trades. Picking values there re-queries the same priced book, keeps only
+the matching rows, and replaces the table's `data` -- which is also what drives the
+P&L strip below (`Input(table_id, "derived_virtual_data")`), so picking USDJPY narrows
+both the rows and every LTD/Daily/.../Trading figure to just those trades. Native
+`sort_action` is dropped for the same reason (also silently inert in this Dash
+version); the table keeps a fixed settle-date/pair order instead.
 
 Sub-tab layout, each (Total book / FX / Rates / Options):
   (a) a P&L strip: LTD, Daily, Previous day, 5d, MTD, YTD, Trading -- recomputed for
@@ -90,6 +100,14 @@ PLACEHOLDER_SCOPES = {
 FUTURES_NO_TRADES_REASON = ("no futures trades loaded (BNP gives a netted position, "
                              "fills come from the workbook import on the Reconciliation tab)")
 
+# Columns offered as click-to-filter dropdowns (user decision 2026-09-15, replacing the
+# broken native filter row): every categorical column that exists in a scope's own
+# display columns. Date/amount/rate columns are not offered -- multi-select-from-values
+# only makes sense for the categorical ones; "pick USDJPY" is the request, not a range
+# filter.
+FILTERABLE_COLS = ["instrument_id", "side", "status", "product", "strategy", "theme"]
+
+
 # Futures columns per the 2026-09-15 decision: Trade date | Contract | Side | Contracts |
 # Fill | Expiry | Status | Settlement | P&L (USD) | Strategy | Bundle | Trade id.
 # "Settlement" has no dedicated field in value_book's output yet (no futures trade exists
@@ -156,16 +174,22 @@ def _fmt_product(value) -> str:
     return _PRODUCT_LABELS.get(value, value or "")
 
 
-def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
-                  display_columns: Optional[list] = None,
-                  column_labels: Optional[dict] = None) -> dash_table.DataTable:
-    """Format the (already scope-filtered, pricing-enriched) value_book frame for
-    display: Amount unsigned with commas, rates to 6dp, P&L bold green/red or "n/a"
-    with a tooltip reason when unpriced, dates left as ISO strings. `display_columns`/
-    `column_labels` default to the FX/Total layout; the Futures sub-tab passes its own
-    (Contract/Contracts/Expiry/Settlement instead of Pair/Amount/Value date/Live rate)."""
-    display_columns = display_columns if display_columns is not None else _DISPLAY_COLUMNS
-    column_labels = column_labels if column_labels is not None else _COLUMN_LABELS
+def _sorted_scope_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Fixed display order (settle date, then pair) -- replaces the broken interactive
+    `sort_action="native"` (verified inert in this Dash version, same as the filter
+    row; see module docstring). No-op on an empty frame."""
+    if df.empty or "settle_date" not in df.columns:
+        return df
+    return df.sort_values(["settle_date", "instrument_id"], kind="stable")
+
+
+def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
+    """Format the (already scope/dropdown-filtered, pricing-enriched) value_book frame
+    for display: Amount unsigned with commas, rates to 6dp, P&L bold green/red or "n/a"
+    with a tooltip reason when unpriced, dates left as ISO strings. Returns
+    `(data_records, tooltip_data, style_data_conditional)` -- split out from
+    `detail_table` (2026-09-15) so the filter-dropdown callback can refresh a table's
+    `data`/`tooltip_data` props without rebuilding the whole DataTable component."""
     cols = [c for c in display_columns if c in df.columns]
     formatted = df[cols].copy() if not df.empty else pd.DataFrame(columns=cols)
     usd_cols = {"notional_usd", "pnl_usd"}
@@ -210,17 +234,27 @@ def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
         {"if": {"filter_query": "{pnl_usd} = 'n/a'", "column_id": "pnl_usd"},
          "color": "var(--muted)", "fontStyle": "italic"},
     ]
+    return data_records, tooltip_data, style_data_conditional
+
+
+def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
+                  display_columns: Optional[list] = None,
+                  column_labels: Optional[dict] = None) -> dash_table.DataTable:
+    """Build the trade table. `display_columns`/`column_labels` default to the FX/Total
+    layout; the Futures sub-tab passes its own (Contract/Contracts/Expiry/Settlement
+    instead of Pair/Amount/Value date/Live rate). No native filter/sort -- see module
+    docstring; filtering is the dropdown bar built by `_filter_bar`, sorting is fixed
+    (`_sorted_scope_df`, applied by the caller before this is built)."""
+    display_columns = display_columns if display_columns is not None else _DISPLAY_COLUMNS
+    column_labels = column_labels if column_labels is not None else _COLUMN_LABELS
+    cols = [c for c in display_columns if c in df.columns]
+    data_records, tooltip_data, style_data_conditional = _format_rows(df, display_columns, column_labels)
     return dash_table.DataTable(
         id=table_id,
         columns=[{"name": column_labels.get(c, c.replace("_", " ").title()), "id": c}
                  for c in cols],
         data=data_records,
         tooltip_data=tooltip_data,
-        filter_action="native",
-        sort_action="native",
-        sort_mode="multi",
-        sort_by=[{"column_id": "settle_date", "direction": "asc"},
-                  {"column_id": "instrument_id", "direction": "asc"}],
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
                     "minWidth": "80px", "padding": "4px 8px"},
@@ -231,6 +265,36 @@ def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
         row_selectable=False,
         cell_selectable=True,
     )
+
+
+def _filter_options(df: pd.DataFrame, col: str, column_labels: dict) -> list:
+    """Sorted distinct raw values of `col` across the WHOLE scope (before any dropdown
+    selection), as dropdown options. Formatted labels for the columns that get one
+    (Status/Product) so the dropdown reads the same words as the table."""
+    if df.empty or col not in df.columns:
+        return []
+    label_fn = {"status": _fmt_status, "product": _fmt_product}.get(col, lambda v: v)
+    values = sorted({v for v in df[col].tolist() if v not in (None, "")})
+    return [{"label": label_fn(v) or "(blank)", "value": v} for v in values]
+
+
+def _filter_bar(df: pd.DataFrame, table_id: str, display_columns: list, column_labels: dict) -> html.Div:
+    """One multi-select dropdown per categorical column present in this scope, e.g.
+    click Pair, pick USDJPY, see only USDJPY rows -- and the P&L strip above narrows to
+    match (it listens on the same table's `derived_virtual_data`). Replaces the native
+    filter row (module docstring). Built from the FULL scope df so every dropdown lists
+    every value that scope ever has, not just what a prior selection left visible."""
+    cols = [c for c in FILTERABLE_COLS if c in display_columns and c in df.columns]
+    if not cols:
+        return html.Div()
+    children = [html.Div(className="blotter-filter", children=[
+        html.Label(column_labels.get(c, c.replace("_", " ").title())),
+        dcc.Dropdown(id=f"{table_id}-filter-{c}", options=_filter_options(df, c, column_labels),
+                     value=[], multi=True, placeholder="All", className="blotter-filter-dropdown"),
+    ]) for c in cols]
+    children.append(html.Button("Clear filters", id=f"{table_id}-filter-clear", n_clicks=0,
+                                className="btn btn--ghost"))
+    return html.Div(className="blotter-filter-bar", children=children)
 
 
 def render_headline_strip(headline: dict, caption: Optional[str] = None) -> html.Div:
@@ -335,13 +399,39 @@ def row_detail_panel(conn: sqlite3.Connection, trade_id: str, df: pd.DataFrame) 
                      children=[row_expand_panel(conn, trade_id, row.iloc[0])])
 
 
+def scope_columns(scope: str) -> tuple:
+    """(display_columns, column_labels) for a sub-tab -- Futures has its own layout,
+    every other scope shares the FX/Total one. Factored out so both `scope_layout` and
+    the filter-dropdown callback build the identical column set."""
+    if scope == "futures":
+        return _FUTURES_DISPLAY_COLUMNS, _FUTURES_COLUMN_LABELS
+    return _DISPLAY_COLUMNS, _COLUMN_LABELS
+
+
+def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
+    """The full (unfiltered-by-dropdown) priced, display-enriched, sorted frame for one
+    sub-tab: `priced_value_book` -> scope's product filter -> `add_row_display_fields`
+    -> fixed settle-date/pair order. Shared by `scope_layout` (initial render) and the
+    filter-dropdown callback (re-run on every selection change), so the two can never
+    drift apart."""
+    df, _n_fallback, _n_total = priced_value_book(conn, as_of)
+    products = SCOPE_PRODUCTS[scope]
+    if products is not None and not df.empty:
+        df = df[df["product"].isin(products)]
+    if df.empty:
+        return df
+    df = add_row_display_fields(conn, df, as_of)
+    return _sorted_scope_df(df)
+
+
 def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """Build one sub-tab's content: headline strip (initial, whole-scope) + trade
-    table + an (empty until a row is clicked) detail container below it. Rates/Options
-    are placeholders per module docstring."""
+    """Build one sub-tab's content: headline strip (initial, whole-scope) + filter
+    dropdown bar + trade table + an (empty until a row is clicked) detail container
+    below it. Rates/Options are placeholders per module docstring."""
     strip_id = f"blotter-strip-{scope}"
     table_id = f"blotter-datatable-{scope}"
     detail_id = f"{DETAIL_PANEL_ID}-{scope}-detail"
+    display_columns, column_labels = scope_columns(scope)
 
     if scope in PLACEHOLDER_SCOPES:
         empty = pd.DataFrame(columns=_DISPLAY_COLUMNS)
@@ -351,13 +441,7 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
             html.Div(id=detail_id),
         ])
 
-    display_columns = _FUTURES_DISPLAY_COLUMNS if scope == "futures" else _DISPLAY_COLUMNS
-    column_labels = _FUTURES_COLUMN_LABELS if scope == "futures" else _COLUMN_LABELS
-
-    df, n_fallback, n_total = priced_value_book(conn, as_of)
-    products = SCOPE_PRODUCTS[scope]
-    if products is not None and not df.empty:
-        df = df[df["product"].isin(products)]
+    df = scope_df(conn, scope, as_of)
 
     if scope == "futures" and df.empty:
         empty = pd.DataFrame(columns=display_columns)
@@ -367,8 +451,6 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
                          column_labels=column_labels),
             html.Div(id=detail_id),
         ])
-
-    df = add_row_display_fields(conn, df, as_of)
 
     trade_ids = df["trade_id"].tolist() if not df.empty else []
     headline = row_scoped_headline(conn, as_of, trade_ids)
@@ -380,6 +462,7 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
         body.append(message_box("No trades for this as-of date in this scope."))
         body.append(html.Div(id=detail_id))
     else:
+        body.append(_filter_bar(df, table_id, display_columns, column_labels))
         body.append(detail_table(df, table_id=table_id, display_columns=display_columns,
                                   column_labels=column_labels))
         body.append(html.Div(id=detail_id))
@@ -550,10 +633,57 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             finally:
                 conn.close()
 
+    def _register_filter_callback(scope: str) -> None:
+        table_id = f"blotter-datatable-{scope}"
+        display_columns, column_labels = scope_columns(scope)
+        filter_cols = [c for c in FILTERABLE_COLS if c in display_columns]
+        if not filter_cols:
+            return
+        filter_ids = [f"{table_id}-filter-{c}" for c in filter_cols]
+
+        def _apply_filters(*args, _scope=scope, _filter_cols=filter_cols,
+                            _display_columns=display_columns, _column_labels=column_labels):
+            *values, as_of_date = args
+            if not as_of_date:
+                return [], []
+            from ui.app import connect_readonly
+            db_path = get_db_path()
+            try:
+                conn = connect_readonly(db_path)
+            except sqlite3.OperationalError:
+                return [], []
+            try:
+                df = scope_df(conn, _scope, as_of_date)
+            finally:
+                conn.close()
+            for col, picked in zip(_filter_cols, values):
+                if picked:
+                    df = df[df[col].isin(picked)]
+            data_records, tooltip_data, _ = _format_rows(df, _display_columns, _column_labels)
+            return data_records, tooltip_data
+
+        app.callback(
+            Output(table_id, "data"),
+            Output(table_id, "tooltip_data"),
+            *[Input(fid, "value") for fid in filter_ids],
+            State(DATE_PICKER_ID, "date"),
+            prevent_initial_call=True,
+        )(_apply_filters)
+
+        def _clear_filters(_n_clicks):
+            return [[] for _ in filter_ids]
+
+        app.callback(
+            *[Output(fid, "value") for fid in filter_ids],
+            Input(f"{table_id}-filter-clear", "n_clicks"),
+            prevent_initial_call=True,
+        )(_clear_filters)
+
     for _scope in SCOPE_ORDER:
         if _scope != "bundles":
             _register_strip_callback(_scope)
             _register_detail_callback(_scope)
+            _register_filter_callback(_scope)
 
     @app.callback(
         Output(bundles_ui.BUNDLE_STATUS_ID, "children"),

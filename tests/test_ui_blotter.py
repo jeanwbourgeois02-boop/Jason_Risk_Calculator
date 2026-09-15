@@ -107,17 +107,42 @@ def test_detail_table_formats_usd_and_rates():
     assert row["quantity"] == "1,000,000"  # unsigned; direction carried by side
 
 
-def test_detail_table_native_filter_and_sort_enabled():
+def test_detail_table_has_no_native_filter_or_sort():
+    """Replaced 2026-09-15 by the dropdown filter bar (`_filter_bar`) and a fixed sort
+    order (`_sorted_scope_df`): native filter_action/sort_action were verified inert in
+    the installed Dash version (a bare reproduction outside this app never filtered or
+    sorted either), so the table no longer advertises controls that do nothing."""
     table = blotter.detail_table(_sample_df())
-    assert table.filter_action == "native"
-    assert table.sort_action == "native"
-    assert table.sort_mode == "multi"
+    assert not hasattr(table, "filter_action")
+    assert not hasattr(table, "sort_action")
 
 
-def test_detail_table_default_sort_is_value_date_then_pair():
-    table = blotter.detail_table(_sample_df())
-    assert table.sort_by == [{"column_id": "settle_date", "direction": "asc"},
-                              {"column_id": "instrument_id", "direction": "asc"}]
+def test_sorted_scope_df_orders_by_settle_date_then_pair():
+    df = pd.DataFrame({
+        "settle_date": ["2026-06-21", "2026-06-20", "2026-06-20"],
+        "instrument_id": ["EURUSD", "USDJPY", "AUDUSD"],
+    })
+    out = blotter._sorted_scope_df(df)
+    assert out["instrument_id"].tolist() == ["AUDUSD", "USDJPY", "EURUSD"]
+
+
+def test_filter_bar_lists_distinct_values_and_clear_button():
+    df = pd.concat([_sample_df(), _sample_df()], ignore_index=True)
+    df.loc[1, "instrument_id"] = "USDJPY"
+    df.loc[1, "trade_id"] = "T2"
+    bar = blotter._filter_bar(df, "blotter-datatable-total", blotter._DISPLAY_COLUMNS, blotter._COLUMN_LABELS)
+    dropdowns = {c.id: c for c in bar.children if getattr(c, "id", None) is None for c in []}
+    # dropdowns live one level down, inside each .blotter-filter wrapper
+    pair_dropdown = next(
+        wrap.children[1] for wrap in bar.children
+        if getattr(wrap, "className", "") == "blotter-filter"
+        and wrap.children[1].id == "blotter-datatable-total-filter-instrument_id"
+    )
+    values = {opt["value"] for opt in pair_dropdown.options}
+    assert values == {"EURUSD", "USDJPY"}
+    assert pair_dropdown.multi is True
+    clear_buttons = [c for c in bar.children if getattr(c, "id", "") == "blotter-datatable-total-filter-clear"]
+    assert len(clear_buttons) == 1
 
 
 def test_detail_table_has_status_and_instrument_columns():
