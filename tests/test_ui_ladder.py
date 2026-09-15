@@ -263,8 +263,8 @@ def test_combined_risk_table_net_excludes_futures_gross_includes():
     rows = {r[exposure.RISK_LABEL_COL]: r for r in inner.data}
     net_formatted = exposure.format_amount(totals["net_usd"])
     gross_formatted = exposure.format_amount(totals["gross_usd"] + 100_000.0)
-    assert rows["Net foreign-ccy delta (+ = long foreign = short USD)"]["usd_delta"] == net_formatted
-    assert rows["Gross USD (currencies + |futures|)"]["usd_delta"] == gross_formatted
+    assert rows["Net delta (+ = short USD)"]["usd_delta"] == net_formatted
+    assert rows["Gross delta (incl. |futures|)"]["usd_delta"] == gross_formatted
 
 
 def test_combined_risk_table_marks_fallback_currency():
@@ -281,7 +281,7 @@ def test_combined_table_has_rate_source_row():
     result = build_exposure(RECORDS, RATES)
     table = exposure.combined_table(result, RECORDS, fallback_ccys={"JPY"})
     rows = {r[exposure.ROW_LABEL_COL]: r for r in table.data}
-    assert rows["Rate source"]["JPY"] == "BNP file (not Bloomberg)"
+    assert rows["Rate source"]["JPY"] == "BNP file"
 
 
 def test_futures_table_present_with_mark():

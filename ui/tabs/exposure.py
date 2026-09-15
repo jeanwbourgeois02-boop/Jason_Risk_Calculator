@@ -423,7 +423,7 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
                 v = fx.get(c, float("nan"))
                 row[c] = "" if pd.isna(v) else f"{v:.6f}"
             elif key == "rate_source":
-                row[c] = "BNP file (not Bloomberg)" if c in fallback_ccys else "Bloomberg"
+                row[c] = "BNP file" if c in fallback_ccys else "Bloomberg"
             else:
                 row[c] = format_amount(by_ccy.loc[c, key])
         row[USD_EQUIVALENT_COL] = format_amount(totals["net_usd"]) if key == "usd_delta" else ""
@@ -453,9 +453,18 @@ def combined_table(result, records: List[dict], sort: str = SORT_USD,
         ],
         style_header=_HEAD,
         style_data_conditional=_sign_styles(ccys + [USD_EQUIVALENT_COL]) + [
+            # Visual hierarchy of the summary block (user decision 2026-09-15): date rows
+            # regular; FX rate bold (the bridge between local and USD); local delta
+            # medium; USD delta the single heaviest row with a navy tint (the answer the
+            # table exists to give); rate source small and muted -- it is provenance,
+            # not an error, so it is never red.
             {"if": {"row_index": first_summary}, "borderTop": "2px solid #1f2933"},
-            {"if": {"filter_query": "{kind} != 'date'"}, "backgroundColor": "#f7f8fa", "fontWeight": "600"},
-            {"if": {"filter_query": "{kind} = 'fx_rate'"}, "color": "#616e7c", "fontWeight": "400"},
+            {"if": {"filter_query": "{kind} != 'date'"}, "backgroundColor": "#f7f8fa", "fontWeight": "400"},
+            {"if": {"filter_query": "{kind} = 'fx_rate'"}, "color": "#1b2333", "fontWeight": "700"},
+            {"if": {"filter_query": "{kind} = 'local_delta'"}, "fontWeight": "500"},
+            {"if": {"filter_query": "{kind} = 'usd_delta'"}, "fontWeight": "700", "backgroundColor": "#e8edf7",
+             "borderTop": "1px solid #c8d0e0", "borderBottom": "1px solid #c8d0e0"},
+            {"if": {"filter_query": "{kind} = 'rate_source'"}, "color": "#6b7280", "fontWeight": "400", "fontSize": "11px"},
             {"if": {"filter_query": "{kind} = 'exposure_pnl'"}, "backgroundColor": "#eef4fb"},
             {"if": {"filter_query": "{kind} = 'settlement'"}, "color": "#3538cd", "fontWeight": "600", "fontSize": "11px"},
         ],
@@ -605,9 +614,9 @@ def combined_risk_table(result, futures: Optional[dict] = None,
         gross_text = _unavailable_label("; ".join(reasons))
     else:
         gross_text = format_amount(totals["gross_usd"] + abs(fut_value))
-    display_rows.append({RISK_LABEL_COL: "Net foreign-ccy delta (+ = long foreign = short USD)", "usd_delta": net_text,
+    display_rows.append({RISK_LABEL_COL: "Net delta (+ = short USD)", "usd_delta": net_text,
                          "move_1pct": "", **{name: "" for name in scenario_names}})
-    display_rows.append({RISK_LABEL_COL: "Gross USD (currencies + |futures|)", "usd_delta": gross_text,
+    display_rows.append({RISK_LABEL_COL: "Gross delta (incl. |futures|)", "usd_delta": gross_text,
                          "move_1pct": "", **{name: "" for name in scenario_names}})
 
     # Scenario headers wrap on two lines when long (user decision 2026-09-15, item 3);
