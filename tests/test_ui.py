@@ -51,7 +51,8 @@ def test_create_app_returns_dash_app():
 def test_layout_has_six_tabs_in_order():
     data = uiapp.empty_summary()
     layout = uiapp.build_layout(data)
-    tabs_component = layout.children[1]
+    assert layout.children[1].className == "source-strip"  # upload strip sits above the tabs
+    tabs_component = layout.children[2]  # [1] is the data-source strip above the tabs
     assert isinstance(tabs_component, dash.dcc.Tabs)
     labels = [child.label for child in tabs_component.children]
     assert labels == [
@@ -193,7 +194,7 @@ def test_format_ladder_frame_blank_for_nan_and_ccy_passthrough():
 def test_cash_ladder_wired_into_cash_ladder_tab():
     data = uiapp.empty_summary()
     layout = uiapp.build_layout(data)
-    tabs_component = layout.children[1]
+    tabs_component = layout.children[2]  # [1] is the data-source strip above the tabs
     cash_ladder_tab = tabs_component.children[0]
     assert cash_ladder_tab.label == "Cash ladder"
     inner = cash_ladder_tab.children[0]
@@ -425,7 +426,7 @@ def test_pnl_source_dropdown_and_date_picker():
 def test_pnl_wired_into_overall_book_tab():
     data = uiapp.empty_summary()
     layout = uiapp.build_layout(data)
-    tabs_component = layout.children[1]
+    tabs_component = layout.children[2]  # [1] is the data-source strip above the tabs
     overall_book_tab = tabs_component.children[5]
     assert overall_book_tab.label == "Overall book"
     inner = overall_book_tab.children[0]
@@ -683,7 +684,7 @@ def test_format_amount_em_dash_only_for_zero():
 
 def test_cash_ladder_layout_title_toolbar_and_tab_styling():
     layout = uiapp.build_layout(uiapp.empty_summary())
-    tabs_component = layout.children[1]
+    tabs_component = layout.children[2]  # [1] is the data-source strip above the tabs
     assert tabs_component.parent_className == "tabs-bar"
     assert all(t.className == "tab" and t.selected_className == "tab--selected" for t in tabs_component.children)
     inner = tabs_component.children[0].children[0]

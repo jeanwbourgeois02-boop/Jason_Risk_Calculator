@@ -76,3 +76,15 @@ p { margin: 6px 0; }
 .section-kicker { color: var(--muted); font-size: 12px; margin: 0 0 6px; }
 .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td,
 .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th { font-size: 12.5px; }
+
+/* Data-source strip above the tabs: what is loaded, one upload button, one import button. */
+.source-strip { margin: 0 20px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px; }
+.source-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; justify-content: space-between; }
+.source-row--stage { justify-content: flex-start; align-items: flex-end; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.source-row--stage label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+.source-line { font-size: 14px; font-weight: 600; }
+.source-file { font-family: Consolas, "Courier New", monospace; font-size: 12px; align-self: center; }
+.source-result { margin-top: 8px; font-size: 13px; }
+.btn--big { font-size: 14px; padding: 9px 18px; }
+.details--compact { margin-top: 6px; }
+.details--compact > summary { font-size: 12px; font-weight: 500; color: var(--muted); }

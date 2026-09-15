@@ -145,8 +145,8 @@ def build_layout(data: dict) -> html.Div:
                             className="tab", selected_className="tab--selected"))
     return html.Div([
         html.H1("Risk monitor"),
+        uploads.layout(data),
         dcc.Tabs(children=tabs, parent_className="tabs-bar", className="tabs-strip"),
-        uploads.layout(),
         workbook_rates.layout(default_date),
     ])
 

@@ -1,4 +1,10 @@
-"""Report import and Excel reference preview controls."""
+"""Data-source strip: which BNP snapshot is loaded, plus the upload / import controls.
+
+Sits above the tabs. One visible upload button, one Import button. The file's purpose
+(BNP report vs HA-portfolio reference workbook) is detected from its contents, not
+chosen from a radio. The worksheet picker appears only for Excel files. The raw
+preview stays in a collapsed section.
+"""
 from io import BytesIO
 
 import pandas as pd
@@ -6,32 +12,56 @@ from dash import Input, Output, State, dcc, html, dash_table, no_update
 
 from data.ingest.upload import decode, suggested_date, import_report
 
+SOURCE_LINE_ID = 'data-source-line'
 
-def layout():
-    return html.Div([
-        html.H3('Upload a file'),
-        html.P('Import trades and positions from a BNP report, or inspect an Excel calculation workbook.'),
-        dcc.Upload(id='report-file', children=html.Button('Choose file or drop it here'),
-                   accept='.csv,.xlsx,.xlsm,.xls', multiple=False, max_size=25 * 1024 * 1024,
-                   style={'border': '1px dashed #888', 'padding': '16px'}),
-        html.Div(id='report-description'),
-        dcc.Dropdown(id='report-sheet', placeholder='Excel worksheet'),
-        dcc.RadioItems(id='report-purpose', options=[
-            {'label': 'BNP report — import trades and positions', 'value': 'bnp'},
-            {'label': 'Excel calculation reference — preview only', 'value': 'reference'},
-        ], value='bnp'),
-        html.Label('Snapshot date (check this before importing; holidays are not inferred)'),
-        dcc.DatePickerSingle(id='report-date'),
-        html.Button('Import BNP report', id='report-import', n_clicks=0),
-        html.Div(id='report-result', role='status'),
-        html.Details([html.Summary('Preview worksheet / formulas'), html.Div(id='report-preview')]),
-    ], style={'margin': '20px 0', 'maxWidth': '1100px'})
+
+def describe_source(data: dict) -> str:
+    """One line naming the loaded BNP snapshot, from ui.app.summary()."""
+    if data.get('as_of_date') in (None, 'none'):
+        return 'No BNP report loaded yet. Upload one to start.'
+    return (f"Loaded: BNP report as of {data['as_of_date']} "
+            f"({data['trades']} trades, {data['positions']} positions). "
+            f"All tabs use this snapshot unless you change the As-of date.")
+
+
+def layout(data: dict = None):
+    data = data or {}
+    return html.Div(className='source-strip', children=[
+        html.Div(className='source-row', children=[
+            html.Div(id=SOURCE_LINE_ID, className='source-line', children=describe_source(data)),
+            dcc.Upload(id='report-file', className='source-upload',
+                       children=html.Button('Upload BNP report', className='btn btn--big'),
+                       accept='.csv,.xlsx,.xlsm,.xls', multiple=False, max_size=25 * 1024 * 1024),
+        ]),
+        html.Div(id='report-stage', className='source-row source-row--stage', hidden=True, children=[
+            html.Span(id='report-description', className='source-file'),
+            html.Div(id='report-sheet-wrap', hidden=True, children=[
+                html.Label('Worksheet'),
+                dcc.Dropdown(id='report-sheet', placeholder='Excel worksheet', clearable=False,
+                             style={'width': '220px'}),
+            ]),
+            html.Div([
+                html.Label('Snapshot date (T-1 of the file name; correct it after a holiday)'),
+                dcc.DatePickerSingle(id='report-date'),
+            ]),
+            html.Button('Import', id='report-import', n_clicks=0, className='btn btn--big'),
+            dcc.Store(id='report-purpose', data='bnp'),
+        ]),
+        html.Div(id='report-result', role='status', className='source-result'),
+        html.Details(className='details details--compact', children=[
+            html.Summary('Preview file'),
+            html.Div(id='report-preview'),
+        ]),
+    ])
 
 
 def register(app, get_db_path):
     @app.callback(Output('report-sheet', 'options'), Output('report-sheet', 'value'),
+                  Output('report-sheet-wrap', 'hidden'),
                   Output('report-date', 'date'), Output('report-description', 'children'),
-                  Output('report-purpose', 'value'), Input('report-file', 'contents'),
+                  Output('report-purpose', 'data'), Output('report-stage', 'hidden'),
+                  Output('report-result', 'children', allow_duplicate=True),
+                  Input('report-file', 'contents'),
                   State('report-file', 'filename'), prevent_initial_call=True)
     def selected(contents, filename):
         try:
@@ -41,11 +71,19 @@ def register(app, get_db_path):
                 with pd.ExcelFile(BytesIO(payload)) as book:
                     sheets = book.sheet_names
             reference = 'Portfolio' in sheets and 'All FX trades' in sheets
-            return sheets, sheets[0] if sheets else None, suggested_date(filename), filename, 'reference' if reference else 'bnp'
+            date = suggested_date(filename)
+            if reference:
+                note = 'This is the HA-portfolio workbook. It is a formula reference only: nothing is imported. Open "Preview file" to inspect it.'
+            elif date:
+                note = f'Ready. Check the snapshot date ({date}) then press Import.'
+            else:
+                note = 'File name does not look like HA_PNL_YYYYMMDD. Set the snapshot date, then press Import.'
+            return (sheets, sheets[0] if sheets else None, not sheets, date, filename,
+                    'reference' if reference else 'bnp', False, note)
         except Exception as exc:
-            return [], None, None, f'Cannot read file: {exc}', 'bnp'
+            return [], None, True, None, '', 'bnp', True, f'Cannot read file: {exc}'
 
-    @app.callback(Output('report-import', 'disabled'), Input('report-purpose', 'value'))
+    @app.callback(Output('report-import', 'disabled'), Input('report-purpose', 'data'))
     def purpose(value):
         return value != 'bnp'
 
@@ -83,18 +121,20 @@ def register(app, get_db_path):
         except Exception as exc:
             return f'Cannot preview file: {exc}'
 
-    @app.callback(Output('report-result', 'children'), Output('cash-ladder-date', 'date'),
-                  Output('pnl-date', 'date'), Input('report-import', 'n_clicks'),
+    @app.callback(Output('report-result', 'children'), Output(SOURCE_LINE_ID, 'children'),
+                  Output('cash-ladder-date', 'date'), Output('pnl-date', 'date'),
+                  Input('report-import', 'n_clicks'),
                   State('report-file', 'contents'), State('report-file', 'filename'),
                   State('report-date', 'date'), State('report-sheet', 'value'),
-                  State('report-purpose', 'value'), prevent_initial_call=True)
+                  State('report-purpose', 'data'), prevent_initial_call=True)
     def submit(clicks, contents, filename, as_of, sheet, purpose):
         if purpose != 'bnp':
-            return 'Reference workbook only; no trades imported.', no_update, no_update
+            return 'Reference workbook only; no trades imported.', no_update, no_update, no_update
         if not as_of:
-            return 'Choose the report snapshot date before importing.', no_update, no_update
+            return 'Choose the report snapshot date before importing.', no_update, no_update, no_update
         try:
             message = import_report(decode(contents), filename, as_of, get_db_path(), sheet)
-            return message, as_of, as_of
         except Exception as exc:
-            return f'Import failed; no report data saved. {exc}', no_update, no_update
+            return f'Import failed; no report data saved. {exc}', no_update, no_update, no_update
+        from ui.app import load_summary
+        return message, describe_source(load_summary(get_db_path())), as_of, as_of
