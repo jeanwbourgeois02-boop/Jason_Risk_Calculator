@@ -6,3 +6,4 @@ tzdata
 pytest>=8
 # blpapi is NOT listed here: `py risk.py setup` installs it from Bloomberg's own index
 # (https://blpapi.bloomberg.com/repository/releases/python/simple/) on the Bloomberg PC.
+pyyaml>=6.0
