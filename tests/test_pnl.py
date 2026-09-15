@@ -300,6 +300,18 @@ def test_value_book_usd_jpy_forward():
     assert row["pnl_usd"] == pytest.approx(-2_000_000 / 149, rel=1e-6)
 
 
+def test_value_book_near_dated_forward_reported_as_spot():
+    """User decision 2026-09-15 item 2: an FX_FWD whose settle_date is at most 2
+    business days after trade_date is reported as FX_SPOT in value_book's `product`
+    column, even though `trades.product` on file is still FX_FWD."""
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T3s", "EURUSD", "EUR", "USD", 1_000_000, 1.1000, settle="2026-05-04")
+    _vb_mark(conn, "EURUSD", "2026-05-04", "FWD_OUTRIGHT", 1.1080)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["product"] == "FX_SPOT"
+    assert conn.execute("SELECT product FROM trades WHERE trade_id='T3s'").fetchone()[0] == "FX_FWD"
+
+
 def test_value_book_eur_sek_cross_no_invented_usd_leg():
     conn = _vb_conn()
     _vb_fx_trade(conn, "T3", "EURSEK", "EUR", "SEK", 1_000_000, 11.00)

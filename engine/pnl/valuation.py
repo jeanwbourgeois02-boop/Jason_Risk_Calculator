@@ -25,6 +25,8 @@ from typing import Optional
 
 import pandas as pd
 
+from engine.pnl.aggregate import _is_business_day, load_holidays
+
 COLUMNS = [
     "trade_id", "instrument_id", "product", "strategy", "theme", "trade_date",
     "settle_date", "status", "quantity", "fill", "mark", "mark_date", "mark_source",
@@ -35,6 +37,35 @@ COLUMNS = [
 FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")
 
 _NAN = float("nan")
+
+
+def _business_days_between(start: dt.date, end: dt.date, holidays) -> int:
+    """Count business days strictly after `start` up to and including `end` (0 if
+    `end <= start`). Used only to relabel a near-dated FX_FWD as "FX_SPOT" for display
+    (user decision 2026-09-15, item 2); storage/product in `trades` is unchanged."""
+    if end <= start:
+        return 0
+    count = 0
+    d = start
+    while d < end:
+        d += dt.timedelta(days=1)
+        if _is_business_day(d, holidays):
+            count += 1
+    return count
+
+
+def _reported_product(product: str, trade_date: str, settle_date: str, holidays) -> str:
+    """user decision 2026-09-15, item 2: an FX_FWD trade whose settle_date is at most 2
+    business days after trade_date is reported as "FX_SPOT" (a same/next/T+2 day forward
+    is economically a spot trade). Only the reported `product` column changes; the
+    stored `trades.product` value is never touched."""
+    if product != "FX_FWD":
+        return product
+    d0 = dt.date.fromisoformat(trade_date)
+    d1 = dt.date.fromisoformat(settle_date)
+    if _business_days_between(d0, d1, holidays) <= 2:
+        return "FX_SPOT"
+    return product
 
 
 def _has_theme_column(conn: sqlite3.Connection) -> bool:
@@ -117,14 +148,16 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
     """One row per trade at `as_of`'s marks. See module docstring and BUILD_PLAN section 2."""
     rows = []
     theme = _has_theme_column(conn)
+    holidays = load_holidays()
     # sqlite3 params: positional IN(...) placeholders followed by :as_of.
     fx = pd.read_sql_query(_fx_sql(theme), conn, params=(*FX_PRODUCTS, as_of))
     fut = pd.read_sql_query(_fut_sql(theme), conn, params={"as_of": as_of})
 
     for r in fx.itertuples(index=False):
         status = "SETTLED" if r.settle_date < as_of else "OPEN"
+        reported_product = _reported_product(r.product, r.trade_date, r.settle_date, holidays)
         base = {
-            "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": r.product,
+            "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": reported_product,
             "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
             "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
         }

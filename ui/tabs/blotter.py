@@ -54,6 +54,8 @@ DATE_PICKER_ID = "blotter-date"
 TOOLBAR_ID = "blotter-toolbar"
 SUBTABS_ID = "blotter-subtabs"
 CONTENT_ID = "blotter-content"
+TITLE_ID = "blotter-title"
+TODAY_BUTTON_ID = "blotter-today-button"
 
 # Kept for the pre-2026-09-15 tests that still exercise a single detail table by id.
 TABLE_CONTAINER_ID = "blotter-table-container"
@@ -64,18 +66,45 @@ DETAIL_PANEL_ID = "blotter-datatable"  # "-{scope}-detail" suffix keeps the id u
 _ALL = "All"
 
 # --------------------------------------------------------------------------- sub-tabs
-SCOPE_ORDER = ("total", "fx", "rates", "options", "bundles")
-SCOPE_LABELS = {"total": "Total book", "fx": "FX", "rates": "Rates", "options": "Options",
-                "bundles": "Bundles"}
+# Order per user decision 2026-09-15: Total book | FX | Futures | Rates | Options |
+# Bundles. "FX" scope is FX_SPOT/FX_FWD/FX_SWAP only (FUTURE moved to its own sub-tab).
+SCOPE_ORDER = ("total", "fx", "futures", "rates", "options", "bundles")
+SCOPE_LABELS = {"total": "Total book", "fx": "FX", "futures": "Futures", "rates": "Rates",
+                "options": "Options", "bundles": "Bundles"}
 SCOPE_PRODUCTS = {
     "total": None,
-    "fx": ("FX_SPOT", "FX_FWD", "FX_SWAP", "FUTURE"),
+    "fx": ("FX_SPOT", "FX_FWD", "FX_SWAP"),
+    "futures": ("FUTURE",),
     "rates": ("IRS",),
     "options": ("FX_OPTION",),
 }
 PLACEHOLDER_SCOPES = {
     "rates": "no IRS trades loaded; view not built yet",
     "options": "no option trades loaded; view not built yet",
+}
+# Futures is a real view (not a "not built yet" placeholder like Rates/Options), but on
+# this PC no futures trades are loaded -- BNP gives one netted position row per contract
+# with no fill/trade_date, and fills only arrive via the workbook import on the
+# Reconciliation tab (user decision 2026-09-15, item 1). When its scope is genuinely
+# empty the strip must read "n/a" with this reason rather than a hollow zero.
+FUTURES_NO_TRADES_REASON = ("no futures trades loaded (BNP gives a netted position, "
+                             "fills come from the workbook import on the Reconciliation tab)")
+
+# Futures columns per the 2026-09-15 decision: Trade date | Contract | Side | Contracts |
+# Fill | Expiry | Status | Settlement | P&L (USD) | Strategy | Bundle | Trade id.
+# "Settlement" has no dedicated field in value_book's output yet (no futures trade exists
+# to observe one on this PC); mapped to `mark_date` (the date the price used for P&L was
+# struck) as the closest existing column -- a default pick, noted here since nobody was
+# available to confirm it.
+_FUTURES_DISPLAY_COLUMNS = [
+    "trade_date", "instrument_id", "side", "quantity", "fill", "settle_date", "status",
+    "mark_date", "pnl_usd", "strategy", "theme", "trade_id",
+]
+_FUTURES_COLUMN_LABELS = {
+    "trade_date": "Trade date", "instrument_id": "Contract", "side": "Side",
+    "quantity": "Contracts", "fill": "Fill", "settle_date": "Expiry", "status": "Status",
+    "mark_date": "Settlement", "pnl_usd": "P&L (USD)", "strategy": "Strategy",
+    "theme": "Bundle", "trade_id": "Trade id",
 }
 
 # Display order and headers per the 2026-09-15 rebuild + coordinator's headline note:
@@ -119,11 +148,17 @@ def _fmt_status(value) -> str:
     return {"OPEN": "Open", "SETTLED": "Settled"}.get(value, value or "")
 
 
-def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID) -> dash_table.DataTable:
+def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
+                  display_columns: Optional[list] = None,
+                  column_labels: Optional[dict] = None) -> dash_table.DataTable:
     """Format the (already scope-filtered, pricing-enriched) value_book frame for
     display: Amount unsigned with commas, rates to 6dp, P&L bold green/red or "n/a"
-    with a tooltip reason when unpriced, dates left as ISO strings."""
-    cols = [c for c in _DISPLAY_COLUMNS if c in df.columns]
+    with a tooltip reason when unpriced, dates left as ISO strings. `display_columns`/
+    `column_labels` default to the FX/Total layout; the Futures sub-tab passes its own
+    (Contract/Contracts/Expiry/Settlement instead of Pair/Amount/Value date/Live rate)."""
+    display_columns = display_columns if display_columns is not None else _DISPLAY_COLUMNS
+    column_labels = column_labels if column_labels is not None else _COLUMN_LABELS
+    cols = [c for c in display_columns if c in df.columns]
     formatted = df[cols].copy() if not df.empty else pd.DataFrame(columns=cols)
     usd_cols = {"notional_usd", "pnl_usd"}
     rate_cols = {"fill", "mark", "t1_rate"}
@@ -167,7 +202,7 @@ def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID) -> dash_table.D
     ]
     return dash_table.DataTable(
         id=table_id,
-        columns=[{"name": _COLUMN_LABELS.get(c, c.replace("_", " ").title()), "id": c}
+        columns=[{"name": column_labels.get(c, c.replace("_", " ").title()), "id": c}
                  for c in cols],
         data=data_records,
         tooltip_data=tooltip_data,
@@ -306,10 +341,23 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
             html.Div(id=detail_id),
         ])
 
+    display_columns = _FUTURES_DISPLAY_COLUMNS if scope == "futures" else _DISPLAY_COLUMNS
+    column_labels = _FUTURES_COLUMN_LABELS if scope == "futures" else _COLUMN_LABELS
+
     df, n_fallback, n_total = priced_value_book(conn, as_of)
     products = SCOPE_PRODUCTS[scope]
     if products is not None and not df.empty:
         df = df[df["product"].isin(products)]
+
+    if scope == "futures" and df.empty:
+        empty = pd.DataFrame(columns=display_columns)
+        return html.Div([
+            html.Div(id=strip_id, children=render_placeholder_strip(FUTURES_NO_TRADES_REASON)),
+            detail_table(empty, table_id=table_id, display_columns=display_columns,
+                         column_labels=column_labels),
+            html.Div(id=detail_id),
+        ])
+
     df = add_row_display_fields(conn, df, as_of)
 
     trade_ids = df["trade_id"].tolist() if not df.empty else []
@@ -322,7 +370,8 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
         body.append(message_box("No trades for this as-of date in this scope."))
         body.append(html.Div(id=detail_id))
     else:
-        body.append(detail_table(df, table_id=table_id))
+        body.append(detail_table(df, table_id=table_id, display_columns=display_columns,
+                                  column_labels=column_labels))
         body.append(html.Div(id=detail_id))
     return html.Div(body)
 
@@ -356,10 +405,22 @@ def _today_default(default_date: Optional[str]) -> Optional[str]:
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
+    """Title row matches the Ladder tab's (coordinator instruction 2026-09-15): a single
+    row, "Blotter" on the left, the full-text date heading + date picker + "Today"
+    button on the right, no card, no kicker -- same class names
+    (`ladder-title-row(-heading|-right)`) as `ui.tabs.cash_ladder.build_layout` so one
+    stylesheet rule styles both tabs' title rows."""
+    from ui.tabs.cash_ladder import heading_date_text
+
+    resolved_date = _today_default(default_date)
     return html.Div(className="blotter", children=[
-        html.H3("Blotter"),
-        html.Div(id=TOOLBAR_ID, className="toolbar", children=[
-            build_date_picker(DATE_PICKER_ID, default_date=_today_default(default_date)),
+        html.Div(id=TOOLBAR_ID, className="ladder-title-row", children=[
+            html.H3("Blotter", className="ladder-title-row-heading"),
+            html.Div(className="ladder-title-row-right", children=[
+                html.H4(heading_date_text(resolved_date), id=TITLE_ID, className="section-title"),
+                build_date_picker(DATE_PICKER_ID, default_date=resolved_date),
+                html.Button("Today", id=TODAY_BUTTON_ID, n_clicks=0, className="btn"),
+            ]),
         ]),
         dcc.Tabs(id=SUBTABS_ID, value=SCOPE_ORDER[0], className="subtabs", children=[
             dcc.Tab(label=SCOPE_LABELS[s], value=s, className="subtab",
@@ -372,6 +433,20 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     """Same convention as `ui.tabs.cash_ladder.register_callbacks`."""
+
+    @app.callback(Output(TITLE_ID, "children"), Input(DATE_PICKER_ID, "date"))
+    def _update_title(as_of_date):
+        from ui.tabs.cash_ladder import heading_date_text
+        return heading_date_text(as_of_date)
+
+    @app.callback(
+        Output(DATE_PICKER_ID, "date", allow_duplicate=True),
+        Input(TODAY_BUTTON_ID, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _jump_to_today(_n_clicks):
+        from ui.tabs.cash_ladder import today_ny
+        return today_ny()
 
     @app.callback(
         Output(CONTENT_ID, "children"),
@@ -421,6 +496,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             except sqlite3.OperationalError as exc:
                 return message_box(f"Database not available ({exc}).")
             try:
+                if _scope == "futures" and not trade_ids:
+                    df, _, _ = priced_value_book(conn, as_of_date)
+                    if df.empty or df[df["product"] == "FUTURE"].empty:
+                        return render_placeholder_strip(FUTURES_NO_TRADES_REASON)
                 n_fallback = sum(1 for r in (rows or []) if r.get("priced_from_bnp"))
                 caption = fallback_caption(n_fallback, len(rows or []))
                 headline = row_scoped_headline(conn, as_of_date, trade_ids)

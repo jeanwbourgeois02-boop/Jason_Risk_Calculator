@@ -189,11 +189,33 @@ def test_message_box():
 
 # --------------------------------------------------------------------------- sub-tabs
 
+def test_title_row_matches_ladder_class_names():
+    """Coordinator instruction 2026-09-15: single title row, "Blotter" left, date
+    heading + picker + Today button right, no card, sharing the Ladder's class names
+    so one stylesheet rule styles both tabs."""
+    # As-of defaults to today (ui.tabs.cash_ladder.today_ny) regardless of the
+    # `default_date` argument, matching the Ladder's own "today" default -- so assert
+    # against heading_date_text(today_ny()) rather than a fixed date.
+    from ui.tabs.cash_ladder import heading_date_text, today_ny
+    layout = blotter.build_layout(default_date="2026-06-20")
+    toolbar = next(c for c in layout.children if getattr(c, "id", None) == blotter.TOOLBAR_ID)
+    assert toolbar.className == "ladder-title-row"
+    heading = toolbar.children[0]
+    assert heading.children == "Blotter"
+    assert heading.className == "ladder-title-row-heading"
+    right = toolbar.children[1]
+    assert right.className == "ladder-title-row-right"
+    title = next(c for c in right.children if getattr(c, "id", None) == blotter.TITLE_ID)
+    assert heading_date_text(today_ny()) == title.children
+    today_button = next(c for c in right.children if getattr(c, "id", None) == blotter.TODAY_BUTTON_ID)
+    assert today_button.children == "Today"
+
+
 def test_subtab_presence_and_order():
     layout = blotter.build_layout(default_date="2026-06-20")
     tabs = next(c for c in layout.children if getattr(c, "id", None) == blotter.SUBTABS_ID)
     labels = [t.label for t in tabs.children]
-    assert labels == ["Total book", "FX", "Rates", "Options", "Bundles"]
+    assert labels == ["Total book", "FX", "Futures", "Rates", "Options", "Bundles"]
     assert tabs.className == "subtabs"
     assert all(t.className == "subtab" for t in tabs.children)
     assert all(t.selected_className == "subtab--selected" for t in tabs.children)
@@ -201,9 +223,30 @@ def test_subtab_presence_and_order():
 
 def test_scope_products_covers_task_products():
     assert blotter.SCOPE_PRODUCTS["total"] is None
-    assert set(blotter.SCOPE_PRODUCTS["fx"]) == {"FX_SPOT", "FX_FWD", "FX_SWAP", "FUTURE"}
+    assert set(blotter.SCOPE_PRODUCTS["fx"]) == {"FX_SPOT", "FX_FWD", "FX_SWAP"}
+    assert blotter.SCOPE_PRODUCTS["futures"] == ("FUTURE",)
     assert blotter.SCOPE_PRODUCTS["rates"] == ("IRS",)
     assert blotter.SCOPE_PRODUCTS["options"] == ("FX_OPTION",)
+
+
+def test_futures_scope_no_trades_shows_reason_and_empty_table():
+    """User decision 2026-09-15 item 1: no futures trades on this PC (only a BNP netted
+    position), so the strip reads n/a with the documented reason and the table (with
+    futures-specific columns) is empty, never hidden."""
+    conn = _make_db()
+    try:
+        layout = blotter.scope_layout("futures", conn, "2026-06-20")
+        strip_div = layout.children[0]
+        text = strip_div.children.children.children
+        assert blotter.FUTURES_NO_TRADES_REASON in text
+        table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+        assert table.data == []
+        ids = [c["id"] for c in table.columns]
+        assert ids == blotter._FUTURES_DISPLAY_COLUMNS
+        names = [c["name"] for c in table.columns]
+        assert "Contract" in names and "Contracts" in names and "Expiry" in names
+    finally:
+        conn.close()
 
 
 def test_scope_layout_fx_filters_out_nonfx_products():

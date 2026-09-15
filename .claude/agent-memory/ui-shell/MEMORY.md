@@ -9,3 +9,5 @@
 - [Ladder simplification 2026-09-15](ladder-simplification-2026-09-15.md) — 3 headlines + 3 tables only, BNP_BVAL rate fallback, navy/gold CSS, working copy is risk-monitor not OneDrive
 - [Blotter sub-tabs 2026-09-15](blotter-subtabs-2026-09-15.md) — Total book/FX/Rates/Options/Bundles, BNP_BVAL fallback pricing, row-scoped strip, bundles table, test_ui.py collateral needed
 - [Top-bar restructure 2026-09-15](top-bar-restructure-2026-09-15.md) — no-children dcc.Tab + always-present tab-bodies, header perf split, Ladder today/title/forward-proxy rate, upload date-picker removal
+- [Ladder reorder + headline 2026-09-15](ladder-reorder-headline-2026-09-15.md) — gross/net card layout, table order, scenario-order (not alpha), NDF marker removed, compact header strip w/ Net-Gross-Previous day
+- [Blotter Futures sub-tab 2026-09-15](blotter-futures-subtab-2026-09-15.md) — Total/FX/Futures/Rates/Options/Bundles order, near-dated FX_FWD reported as FX_SPOT, title row matches Ladder, headless-Edge hang fix
