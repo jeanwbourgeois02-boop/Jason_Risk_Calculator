@@ -3,5 +3,7 @@
 - [Wiring C5](wiring-c5.md) — current ui/app.py assembly (Ladder/Blotter/Market data/Reconciliation + header), stray broken test file outside scope
 - [Cash ladder tab](cash-ladder-tab.md) — lazy import of ladder_table, transpose_ladder + usd_equivalent blank rule, shared controls/formatting factor-out
 - [P&L tab](pnl-tab.md) — wired into "Overall book" (why), lazy engine.pnl imports, pairs/totals/period blocks, own component ids
-- [Market data tab](market-data-tab.md) — C3 rewrite: inventory/completeness/manual-entry/pull button, avoid importing ui.app (broken mid-refactor), trades table has 14 cols now
+- [Market data tab](market-data-tab.md) — 2026-09-15 rewrite: per-pair layout (pair dropdown, spot+curve+chart, completeness strip, manual form); diagnostics panel removed from body but kept defined for cash_ladder's import; BNP_BVAL-only DB renders "BNP file"/"reconciliation only"
 - [Blotter native filters](blotter-native-filters.md) — 2026-09-15: header filter/sort replaces toolbar dropdowns, no DataTable dropdown-filter widget exists, subtotal via derived_virtual_data
+- [Ladder simplification 2026-09-15](ladder-simplification-2026-09-15.md) — 3 headlines + 3 tables only, BNP_BVAL rate fallback, navy/gold CSS, working copy is risk-monitor not OneDrive
+- [Blotter sub-tabs 2026-09-15](blotter-subtabs-2026-09-15.md) — Total book/FX/Rates/Options/Bundles, BNP_BVAL fallback pricing, row-scoped strip, bundles table, test_ui.py collateral needed
