@@ -3,12 +3,14 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Six tabs mirror CLAUDE.md "Data contract -> Six tabs as views":
-Cash ladder, FX, Rates, Options, Delta, Overall book.
+Four tabs per docs/BUILD_PLAN.md section 5 ("Tabs (layer 3)"): Ladder, Blotter,
+Market data, Reconciliation. A header (ui/tabs/header.py) sits above the tabs on
+every view, showing LTD / Daily / 5d / MTD / YTD / trading from engine.pnl.ledger.
 
-For now each tab renders a placeholder built from `summary()`. As engine/ modules
-land, each tab should move to its own ui/<tab>.py module that queries the
-documented tables/views for that tab.
+The "Overall book" tab and the six-tab CLAUDE.md layout are retired by
+docs/BUILD_PLAN.md (2026-09-15): that plan supersedes CLAUDE.md's "Six tabs as
+views" table as the app's headline structure. The workbook reconciliation view
+(formerly the Overall book / P&L tab) now lives inside the Reconciliation tab.
 """
 from __future__ import annotations
 
@@ -18,16 +20,15 @@ from pathlib import Path
 from typing import Union
 
 import dash
-from dash import dcc, html
+from dash import Input, Output, dcc, html
 
-from ui.tabs import cash_ladder, pnl
-from ui import uploads, workbook_rates
+from ui.tabs import blotter, cash_ladder, header, market_data, reconciliation
+from ui import uploads
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
 
-TAB_LABELS = ("Cash ladder", "FX", "Rates", "Options", "Delta", "Overall book")
-VISIBLE_TABS = ("Cash ladder", "Overall book")   # the other four have no engine view yet and are not shown
+VISIBLE_TABS = ["Ladder", "Blotter", "Market data", "Reconciliation"]
 
 
 def get_db_path() -> Path:
@@ -43,9 +44,10 @@ def ensure_schema(path: Union[str, Path]) -> None:
     """Make sure the database and the Bloomberg status file exist so a fresh computer
     can launch with nothing copied across. Creates an EMPTY database with the schema
     when the file is absent (no trades, no marks: upload a BNP report to fill it);
-    on an existing database applies the idempotent DDL so additive tables (e.g. the
-    P&L ledger) exist. Never alters existing tables or rows. Writes an initial status
-    file ("no pull has run yet") only when none exists."""
+    on an existing database applies the idempotent DDL so additive tables exist.
+    Never alters existing tables or rows. `pnl_snapshots` is retired (docs/BUILD_PLAN.md
+    section 3): the schema no longer creates it, and this function does not check for
+    it. Writes an initial status file ("no pull has run yet") only when none exists."""
     p = Path(path)
     try:
         from data.ingest import schema
@@ -76,10 +78,10 @@ def connect_readonly(path: Union[str, Path]) -> sqlite3.Connection:
 
 
 def summary(conn: sqlite3.Connection) -> dict:
-    """Row counts and as_of_date for the placeholder tabs.
+    """Row counts and as_of_date for the upload strip.
 
     as_of_date = max(positions.as_of_date), or 'none' if positions is empty.
-    No P&L / ladder logic here -- just counts, so it is safe before engine/ exists.
+    No P&L / ladder logic here -- just counts.
     """
     def count(table: str) -> int:
         return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -123,43 +125,29 @@ def load_summary(db_path: Union[str, Path]) -> dict:
         conn.close()
 
 
-def build_tab_placeholder(label: str, data: dict) -> html.Div:
-    """Placeholder content for a single tab: as_of_date and the four row counts."""
-    message = data.get("message")
-    children = [
-        html.H3(label),
-        html.P(f"as_of_date: {data['as_of_date']}"),
-        html.Ul([
-            html.Li(f"trades: {data['trades']}"),
-            html.Li(f"trade_legs: {data['trade_legs']}"),
-            html.Li(f"marks: {data['marks']}"),
-            html.Li(f"positions: {data['positions']}"),
-        ]),
-    ]
-    if message:
-        children.append(html.P(message, style={"color": "gray"}))
-    return html.Div(children)
-
-
 def build_layout(data: dict) -> html.Div:
-    """Top-level layout: a dcc.Tabs bar with the six tabs. Cash ladder and Overall book
-    render their real controls + tables (ui/tabs/cash_ladder.py, ui/tabs/pnl.py); the
-    other four stay placeholders until their engine/ views land."""
+    """Top-level layout: the header block, then a dcc.Tabs bar with the four tabs
+    (docs/BUILD_PLAN.md section 5). Each tab module owns its own controls/table via
+    `build_layout(default_date)`; this module only assembles them and wires the as-of
+    date picker (owned by the Ladder tab) into `header.AS_OF_STORE_ID` so the header
+    reflects whichever date the user has picked."""
     default_date = data["as_of_date"] if data["as_of_date"] != "none" else None
+    tab_builders = {
+        "Ladder": cash_ladder.build_layout,
+        "Blotter": blotter.build_layout,
+        "Market data": market_data.build_layout,
+        "Reconciliation": reconciliation.build_layout,
+    }
     tabs = []
     for label in VISIBLE_TABS:
-        if label == "Cash ladder":
-            children = [cash_ladder.build_layout(default_date=default_date),
-                        workbook_rates.layout(default_date)]
-        elif label == "Overall book":
-            children = [pnl.build_layout(default_date=default_date)]
-        else:
-            children = [build_tab_placeholder(label, data)]
+        children = [tab_builders[label](default_date=default_date)]
         tabs.append(dcc.Tab(label=label, children=children,
                             className="tab", selected_className="tab--selected"))
     return html.Div([
         html.H1("Risk monitor"),
         uploads.layout(data),
+        header.layout(),
+        dcc.Store(id=header.AS_OF_STORE_ID, data=default_date),
         dcc.Tabs(children=tabs, parent_className="tabs-bar", className="tabs-strip"),
     ])
 
@@ -172,10 +160,21 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     data = load_summary(resolved)
     app = dash.Dash(__name__)
     app.layout = build_layout(data)
+
+    header.register_callbacks(app, get_db_path=lambda: resolved)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
-    pnl.register_callbacks(app, get_db_path=lambda: resolved)
+    blotter.register_callbacks(app, get_db_path=lambda: resolved)
+    market_data.register_callbacks(app, get_db_path=lambda: resolved)
+    reconciliation.register_callbacks(app, get_db_path=lambda: resolved)
     uploads.register(app, get_db_path=lambda: resolved)
-    workbook_rates.register(app, get_db_path=lambda: resolved)
+
+    # Mirror the Ladder tab's date picker into the header's as-of store so the header
+    # figures track whichever date the user has selected there. The Ladder tab is the
+    # only date-picker on any tab that changes the book-wide as-of (Market data's own
+    # date picker only scopes that tab's inventory/completeness view).
+    app.callback(Output(header.AS_OF_STORE_ID, "data"),
+                 Input(cash_ladder.DATE_PICKER_ID, "date"))(lambda date_value: date_value)
+
     app.bloomberg_feed = start_bloomberg_feed(resolved) if start_feed else None
     return app
 

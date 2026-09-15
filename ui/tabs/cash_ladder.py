@@ -242,12 +242,16 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 records, unresolved = records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
                 # Rates: latest official SPOT marks written by the Bloomberg feed. Never mock.
                 rates = rates_from_marks(conn)
-                # Futures USD delta: no engine query exists yet for open-futures USD
-                # delta (docs/BUILD_PLAN.md section 4 names it as a stress input without
-                # specifying the source); pass None through so it renders Unavailable
-                # rather than a fabricated zero. See report to C5 / cash-ladder.
+                # Futures USD delta: engine.ladder.futures_delta.futures_usd_delta (C5
+                # wiring). NaN -> None so exposure_section/stress_block render
+                # Unavailable rather than a fabricated zero.
+                from engine.ladder.futures_delta import futures_usd_delta as _futures_usd_delta
+                _fut = _futures_usd_delta(conn, as_of_date)
+                _fut_value = _fut["value"]
+                if _fut_value != _fut_value:  # NaN
+                    _fut_value = None
                 exposure = exposure_section(records, unresolved, as_of_date, rates=rates,
-                                            sort=sort, futures_usd_delta=None)
+                                            sort=sort, futures_usd_delta=_fut_value)
                 books = ", ".join(sorted({r["book"] for r in records})) or "none"
                 result = build_exposure(records, rates)
                 toolbar_status = f"Book {books} · {rate_status_text(result)}"

@@ -7,7 +7,7 @@ import pytest
 from data.ingest import schema
 from engine.ladder.valuation import ladder_trade_valuation, ladder_valuation_summary
 from engine.ladder.ladder import cash_ladder
-from ui.tabs.cash_ladder import valuation_table
+from ui.tabs.reconciliation import valuation_table
 
 AS_OF = "2026-08-17"
 MATURITY = "2026-09-08"

@@ -54,84 +54,63 @@ Section 5 covers the Bloomberg feed in detail.
 
 ---
 
-## 3. The three P&L figures
+## 3. One P&L figure, not three
 
-This is the section to understand. The app shows three P&L calculations side by side. Each is labelled on screen. They use different arithmetic and give different numbers.
+As of 2026-09-15 (`docs/BUILD_PLAN.md`) the app moved to a single headline valuation. The old "three P&L figures" (exposure cards, workbook mark-to-market, P&L ledger) are gone from the main flow; the workbook method is kept only as a side-by-side reconciliation check, described in 3.4.
 
-### 3.1 Exposure P&L (the headline cards and the ladder)
+### 3.1 The blotter is the one list
 
-Each open forward is valued at **today's spot**, ignoring forward points.
+Every trade ever done, open or settled, is one row (`engine.pnl.valuation.value_book`). Each row is valued at:
 
-```
-P&L = local amount × spot (USD per unit of local) − USD amount at entry
-```
+- **FX spot/forward**: the outright for that trade's own value date, not one shared maturity for every trade. `pnl_local = quantity × (outright − fill)`, converted to USD at **today's spot** (never at the outright).
+- **Futures**: `contracts × multiplier × (settlement price − fill)`.
+- A missing mark makes that row's P&L "Unavailable" with a reason attached to the row — never zero, never guessed.
+- Once a leg's value date has passed, the trade is frozen (realised) at the spot observed on its value date and never recalculated again.
 
-- Simple, transparent, matches the reference screenshot exactly.
-- Not a fair-value mark: a six-month forward in a high-carry currency (TRY, BRL, MXN) shows P&L that is partly just unaccrued forward points.
-- Sign follows BNP: sold AUD shows as negative AUD.
+### 3.2 LTD and the four periods
 
-### 3.2 Workbook mark-to-market (collapsed panel on the ladder, and the Overall book tab)
+- **LTD** (life-to-date) = the sum of every row's P&L, today. It only moves when a mark moves or a trade is added — settling a trade does not move it, because the settled row is frozen at the value it already had.
+- **Daily / 5d / MTD / YTD** = LTD today minus LTD on a reference day (previous business day, 5 business days back, last business day of the previous month/year). Nothing is added up day by day; each period is one subtraction using the trading calendar (`config/holidays.txt`).
+- **Trading** = P&L of only the trades booked today.
+- Any of these can say "Unavailable" — with a reason — if a mark needed for that day's LTD is missing.
 
-Reproduces the Excel's `All FX trades` formulas **literally**, on your explicit instruction. It is known to be financially wrong in several ways, and the app copies those on purpose so it matches the Excel.
+### 3.3 Delta and stress (the ladder side)
 
-```
-if pair ends in USD:   P&L = C × (G − E) / E
-otherwise:             P&L = C × (G − E) / G
-```
+Delta is currency exposure, not P&L: open legs summed by currency at spot, plus open futures' USD delta. From that, a 1 % move per currency and named stress scenarios (`config/stress.yaml`, e.g. "EM −10 %") are computed — simple multiplication, no correlation, no volatility.
 
-where `C` is the signed USD amount of the trade, `E` the fill and `G` the outright.
+### 3.4 The workbook reconciliation (Reconciliation tab only)
 
-The deliberate quirks it copies from the Excel:
+The Excel's `All FX trades` formulas, reproduced literally, kept only so today's numbers can be checked against BNP and the spreadsheet side by side. It is known to be financially wrong in the ways documented in `docs/excel-parity-audit.md` (one shared `WORKDAY(today,5)` outright for every trade regardless of real value date, dividing by the mark instead of converting at spot, T−2 dividing by the T−1 mark, and so on) and none of it feeds the header or the blotter.
 
-- One outright at `WORKDAY(today, 5)` is used for **every** trade, whatever its real value date.
-- P&L is converted by dividing by the mark, not at spot. About 2.3 % error on TRY.
-- T−2 P&L divides by the T−1 mark.
-- USDBRL yesterday's rate is set equal to today's.
-- Settled trades are never dropped; they keep being marked.
-- 5-day, MTD, YTD, Net and Gross show "Unavailable": the Excel has no formula for them, or depends on hand-typed cells that are not loaded.
+### 3.5 What none of this does
 
-Parity with the Excel has only been proven on the 26 futures cells the Excel saved (all match to 0.0). The Excel saved no FX P&L values, so FX parity cannot be shown until the workbook is recalculated on a Bloomberg PC. Details in `docs/excel-parity-audit.md`.
-
-### 3.3 The P&L ledger (Realised / Unrealised / Daily / 5d / MTD / YTD cards)
-
-Built on the exposure method, plus settlement and history:
-
-- **Unrealised** = exposure P&L on open trades (3.1).
-- **Realised**: once a trade's value date passes, it is frozen at the official spot dated its value date. If no spot exists on or before that date the trade is listed as "not realisable" and left out, never guessed. NDFs are realised at spot on the value date, **not the official fixing**, so this will differ from BNP.
-- **Total LTD** = realised + unrealised, flagged *complete* only when every currency had a rate and every settled trade could be realised.
-- **Daily / 5d / MTD / YTD** = today's total minus the *complete* snapshot on the reference day. One snapshot is stored per day each time the feed runs. If the reference snapshot is missing or incomplete the card says so.
-- History can be **backfilled**. Run `py risk.py backfill` on the Bloomberg PC: it pulls the daily close of every pair the book has traded, from the last business day of the previous year to yesterday, and writes one snapshot per day. Days already complete are skipped. Trades opened and settled between two BNP uploads are missing from that history, so it is only as complete as the file archive. Without a backfill, history begins the first day the feed runs.
-- The calendar is Monday to Friday only. Around a US or UK holiday the reference day is off by one, and the note says so.
-
-### 3.4 What none of them do
-
-No discounting, no carry or roll-down attribution, no FIFO lot matching, no fees or cash interest, no VaR or stress, no P&L by trader or strategy (only one strategy exists in the data).
+No discounting, no carry or roll-down attribution, no FIFO lot matching, no fees or cash interest, no VaR, no P&L by trader (only one strategy exists in the data). IRS and options are not yet in the blotter (`docs/BUILD_PLAN.md` section 7).
 
 ---
 
 ## 4. The screens
 
-**Above the tabs** is the data-source strip. It names the BNP snapshot every tab is using (date, trade count, position count) and holds the **Upload BNP report** button. Choosing a file shows its name, the suggested snapshot date and an **Import** button. The app recognises the HA-portfolio workbook by its sheets and treats it as preview-only; there is nothing to select. After a successful import the strip and both as-of pickers move to the new date.
+**Above the tabs** is the data-source strip (unchanged): it names the BNP snapshot every tab is using and holds the **Upload BNP report** button; after a successful import the strip and every tab's as-of date move to the new date.
 
-Two tabs are shown: **Cash ladder** and **Overall book**. The FX, Rates, Options and Delta tabs are hidden until their views are built.
+**The header**, shown above the tabs on every screen, is the one place the headline numbers live: LTD, Daily, 5d, MTD, YTD and Trading (3.2), the as-of date, the last mark time and feed status, and a collapsible LTD line chart. Picking a date on the Ladder tab's date picker moves the header to that date too.
 
-### Cash ladder tab (refreshes every 2 minutes)
+Four tabs are shown, in this order:
 
-From top to bottom:
+### Ladder — "What am I long/short and when is it cash?"
 
-1. **Toolbar**: as-of date (defaults to the latest BNP date), currency order, feed status, "Pull from Bloomberg now", and the valuation source for the workbook panel.
-2. **Four cards**: Net USD exposure, Gross USD exposure, Exposure P&L, plus a status card. Net = sum of USD deltas; Gross = sum of their absolute values. If any currency lacks a spot, all three say Unavailable and name the currency.
-3. **The ladder**: rows are settlement dates, columns are currencies, cells are the signed local amount settling that day. Six summary rows underneath: FX rate, local delta, USD delta, USD delta at entry, exposure P&L, settlement type. The right-hand column is each date's USD value at spot, undiscounted.
-   - NDF currencies (BRL, TWD, KRW, IDR) stay in the ladder flagged NDF. They are exposure notionals, not cash flows. **This NDF list has not been confirmed with BNP.**
-   - Trades are "open" when trade date ≤ as-of ≤ value date. A leg settling on the as-of date is in the ladder but carries no delta.
-4. **Workbook mark-to-market** (collapsed): the method in 3.2, trade by trade, with the workbook rate, divisor, and the difference from the actual broker leg.
-5. **P&L ledger cards** (3.3), with collapsed tables of realised trades and snapshot history.
-6. **Bloomberg diagnostics** (collapsed, opens itself on failure): every requested mark as OK / FAILED / SKIPPED with Bloomberg's error text.
-7. **Workbook FX rates** (below the tabs). The grid takes General spot, Current, T−1 and T−2 outright per pair, all at the shared `WORKDAY(date, 5)` maturity, and saves them as `WORKBOOK_REFERENCE` marks.
+A date-by-currency grid of local delta, spot and USD delta at the as-of date, including cash balances and NDF notionals; Net and Gross USD; an open-futures USD delta line; the stress block (3.3) below it. No P&L appears on this tab.
 
-### Overall book tab
+### Blotter — "Where did the P&L come from?"
 
-The workbook method (3.2) aggregated by pair, with book totals and the period table. Defaults to the "Workbook rates" source, so it is blank until rates are typed in or the source is switched to Official.
+Every row of `value_book` at the as-of date, with filters (open/settled, product, pair, strategy, theme, date range), an optional group-by summary showing LTD/Daily/MTD/YTD per group, spot/carry columns, and a row expand showing the legs and marks used to price that trade. FX swaps show as one expandable row for the pair.
+
+### Market data — "Can I trust the numbers?"
+
+Every mark the book needs today, with its value, source and time, and a status of official / interpolated / manual / missing; the close-completeness strip over past days; the manual-entry form; the pull button, feed status and Bloomberg diagnostics (moved here from the old ladder toolbar).
+
+### Reconciliation — "Do I agree with BNP and the Excel?"
+
+Two independent checks, side by side, neither feeding the header: our numbers against BNP's per instrument (with a break column), and the literal workbook method (3.4) with its manual rates grid.
 
 ---
 

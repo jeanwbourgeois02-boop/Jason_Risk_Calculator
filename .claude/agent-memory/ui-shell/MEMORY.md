@@ -1,5 +1,6 @@
 - [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
-- [App structure](app-structure.md) — ui/app.py summary()/build_layout()/create_app() split and RISK_DB resolution
+- [App structure](app-structure.md) — retired 2026-09-15; see [wiring-c5](wiring-c5.md) for the current four-tab layout
+- [Wiring C5](wiring-c5.md) — current ui/app.py assembly (Ladder/Blotter/Market data/Reconciliation + header), stray broken test file outside scope
 - [Cash ladder tab](cash-ladder-tab.md) — lazy import of ladder_table, transpose_ladder + usd_equivalent blank rule, shared controls/formatting factor-out
 - [P&L tab](pnl-tab.md) — wired into "Overall book" (why), lazy engine.pnl imports, pairs/totals/period blocks, own component ids
 - [Market data tab](market-data-tab.md) — C3 rewrite: inventory/completeness/manual-entry/pull button, avoid importing ui.app (broken mid-refactor), trades table has 14 cols now
