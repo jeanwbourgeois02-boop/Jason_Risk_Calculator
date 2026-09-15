@@ -367,9 +367,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(CONTENT_ID, "children"),
         Input(DATE_PICKER_ID, "date"),
         Input(SUBTABS_ID, "value"),
-        Input(bundles_ui.BUNDLE_REVISION_ID, "data"),
     )
-    def _update(as_of_date, scope, _bundle_rev=None):
+    def _update(as_of_date, scope):
         if not as_of_date:
             return message_box("No as-of date available.")
         scope = scope or SCOPE_ORDER[0]
