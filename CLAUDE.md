@@ -152,6 +152,7 @@ FORWARD rows (one row per trade):
 - Legs: (`base_ccy`, `Quantity`) and (`quote_ccy`, `−Local Cost`), both `settle_date = value_date`, `rate = rate`, `settles_cash = NOT is_ndf`.
 - `Price` = forward outright to the value date (BloombergBVAL); `Fx` = quote→USD **spot**, rounded to 6 dp; `Position = Quantity`.
 - `Cost` = `Local Cost × Fx` (USD); `Trade Factor = 1`.
+- `Quantity = 0` with zero `Local Cost` / `MV Local` / `MV Base` is a **closed line**: an NDF past its fixing (BNP zeroes the position at fixing and books the realised amount to cash; the line stays until value date carrying the realised DTD / MTD) or a settled forward lingering with a rounding residual (2026-09-15 file: 49 rows). No trade or legs (the row has no notional; the fill comes from an earlier daily file or is lost); a `positions` row with quantity 0 and the reported P&L is written; the open-position identities (DTD, MTD, direction sign, `Trade Factor`) are not checked; blank `Fx` → `0.0` sentinel; its `Price` (a fixing, or stale) is excluded from the netting mark check and produces no BNP_BVAL mark. Any other `Quantity = 0` row is rejected.
 
 CURRENCY rows: cash balances; `Symbol` = `<CCY>.C-xxAA`; `Quantity = MV Local = MV Base` (small residuals only in the reference file). `instrument_id` = `CASH-<CCY>`.
 
@@ -175,7 +176,7 @@ Two forward rows form one `FX_SWAP` package when all hold: same account, same pa
 
 - Parse: every FORWARD row matches the regex; pair and value date in `Symbol` agree with the description.
 - `|Quantity × rate − Local Cost| ≤ 1` quote unit (Local Cost is rounded to whole units).
-- `|Quantity × (Price − rate) − MV Local| ≤ 0.05` quote units.
+- `|Quantity × (Price − rate) − MV Local| ≤ max(0.05, |Quantity| × 0.5e-5)` quote units — BNP prints `Price` to 5 dp but computes MV Local from the unrounded mark (0.07 MXN on an 18m USD leg and 0.11 SEK on a 26.7m EUR leg in the 2026-09-15 file; the flat 0.05 was exact on 2026-08-18).
 - `|MV Local × Fx − MV Base| ≤ max(0.01 USD, |MV Local| × 0.5e-6)` — `Fx` is rounded to 6 dp, so this is a tolerance, not an identity (observed max 14.4 USD on a 71m KRW leg; 0.16 % relative on IDR where `Fx = 0.000056`).
 - `DTD Total P&L = MV Base − Start Date Dirty MV`; `MTD Total P&L = MV Base − Previous Month End Market Value Base`; `DTD Total = DTD Trading` (no other buckets populated).
 - Netting xlsx `Quantity` by pair for trades dated ≤ T−1 must equal the BNP file dated T converted to USD notional (verified exact for 2026-08-18 on every pair).

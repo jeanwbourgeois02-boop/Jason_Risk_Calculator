@@ -136,6 +136,14 @@ def test_file_date_from_name():
         bnp.file_date_from_name("other.csv")
 
 
+def test_file_date_from_name_accepts_download_suffix():
+    """A re-downloaded file arrives as 'HA_PNL_20260915[22].csv' or '... (1).csv'."""
+    assert bnp.file_date_from_name("HA_PNL_20260915[22].csv") == date(2026, 9, 15)
+    assert bnp.file_date_from_name("HA_PNL_20260915 (1).csv") == date(2026, 9, 15)
+    with pytest.raises(ValueError):
+        bnp.file_date_from_name("HA_PNL_202609151.csv")
+
+
 def test_cash_ccy_mapping():
     assert bnp.cash_ccy("DOL.C-USAA") == "USD"
     assert bnp.cash_ccy("TRY.C-TIAA") == "TRY"
@@ -722,6 +730,28 @@ def test_load_on_duplicate_skip_detects_conflict_and_keeps_existing_row(tmp_path
     assert conn.execute("SELECT price FROM trades WHERE trade_id='111'").fetchone()[0] == orig_price
 
 
+def test_load_on_duplicate_skip_treats_print_precision_noise_as_identical(tmp_path):
+    """The next day's file prints the same trade's Quantity / Local Cost with float noise
+    ('3500000' -> '3499999.999979'): a skip, never a conflict. A mark that moves by 1e-6
+    on the same as_of (positions.mark is a rate, not an amount) is still a conflict."""
+    p1 = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
+    conn = schema.connect()
+    bnp.load(p1, conn, on_duplicate="skip")
+
+    p2 = _write_csv(tmp_path / "HA_PNL_20260819.csv",
+                    [_fwd_row(Quantity=999999.999979, Position=999999.999979, **{"Local Cost": 146999999.999983})])
+    r2 = bnp.load(p2, conn, as_of_date="2026-08-17", on_duplicate="skip")
+    assert r2.conflicts == {"trades": 0, "legs": 0, "positions": 0} and r2.conflict_details == []
+    assert r2.skipped == {"trades": 1, "legs": 2, "positions": 1}
+    assert conn.execute("SELECT quantity FROM trades WHERE trade_id='111'").fetchone()[0] == 1000000.0
+
+    p3 = _write_csv(tmp_path / "HA_PNL_20260819.csv", [_fwd_row(Price=147.500001,
+                                                                  **{"Market Value Local": 500001.0})])
+    r3 = bnp.load(p3, conn, as_of_date="2026-08-17", on_duplicate="skip")
+    assert r3.conflicts == {"trades": 0, "legs": 0, "positions": 1}
+    assert any("mark" in d for d in r3.conflict_details)
+
+
 def test_load_on_duplicate_default_still_raises(tmp_path):
     """Default behaviour (on_duplicate='error') is unchanged for existing callers."""
     p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fwd_row()])
@@ -1214,3 +1244,110 @@ def test_xlsx_futures_bad_row_is_skipped_with_diagnostic_and_others_still_load(t
     assert result == 1  # still behaves like the plain inserted count
     assert result.issues == fills.issues
     assert conn.execute("SELECT COUNT(*) FROM trades WHERE source='XLSX'").fetchone()[0] == 1
+
+
+# ---- closed FORWARD lines (Quantity = 0): NDF fixed / forward settled, 2026-09-15 file
+def _closed_row(**over):
+    """A FORWARD line BNP has zeroed: quantity, cost and MV are 0 while the realised
+    DTD / MTD P&L stays on the line. Same pair / value date as _fwd_row()."""
+    base = _fwd_row(Symbol="USDJPY091626-555", Quantity=0.0, Position=0.0, Cost=0.0, Price=146.9,
+                    **{"Local Cost": 0.0, "Market Value Local": 0.0, "Market Value Base": 0.0,
+                       "Start Date Dirty MV": 8891.764165, "Previous Month End Market Value Base": -67987.25,
+                       "DTD Total P&L": -43044.503676, "DTD Trading P&L": -43044.503676,
+                       "MTD Total P&L": 33834.51, "YTD Total P&L": 1.0,
+                       "Symbol Description": "TD 07/23/2026 VD 09/16/2026 SELL USD VS .BUY JPY @ 147.20000000"})
+    base.update(over)
+    return base
+
+
+def test_synthetic_closed_ndf_line_keeps_pnl_without_trade(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260915.csv", [_closed_row(
+        Symbol="USDBRL091626-555", Currency="BRL.C-BRAA", Price=5.13257, Fx=0.194189,
+        **{"Symbol Description": "TD 07/23/2026 VD 09/16/2026 SELL USD VS .BUY BRL @ 5.14017400"})])
+    r = bnp.parse(p)
+    assert not r.rejects and r.recon.passed
+    assert r.trades == [] and r.legs == []
+    assert r.n_forward_closed == 1 and r.n_forward == 1
+    [pos] = r.positions
+    assert (pos.instrument_id, pos.settle_date, pos.as_of_date) == ("USDBRL", "2026-09-16", "2026-09-14")
+    assert pos.quantity == 0.0 and pos.cost_local == 0.0 and pos.mv_local == 0.0 and pos.mv_usd == 0.0
+    assert pos.pnl_dtd_usd == pytest.approx(-43044.503676) and pos.pnl_mtd_usd == pytest.approx(33834.51)
+    assert pos.mark == 5.13257 and pos.fx_to_usd == 0.194189
+    assert r.instruments["USDBRL"].is_ndf == 1
+    checked = {c.check for c in r.recon.results}
+    assert {"dtd_total_pnl", "mtd_total_pnl", "direction_sign", "trade_factor_one"}.isdisjoint(checked)
+    assert {"dtd_total_eq_trading", "position_eq_quantity", "symbol_desc_pair"} <= checked
+
+
+def test_synthetic_settled_line_blank_fx_and_trade_factor(tmp_path, caplog):
+    """Settled deliverable forward lingering past value date: Price 0, Fx and Trade Factor blank."""
+    p = _write_csv(tmp_path / "HA_PNL_20260915.csv", [_closed_row(
+        Symbol="USDHKD090826-556", Currency="HKD.C-HKAA", Price=0.0, Fx="",
+        **{"Trade Factor": "", "DTD Total P&L": 0.0, "DTD Trading P&L": 0.0, "MTD Total P&L": -0.00477,
+           "Start Date Dirty MV": 0.0, "Previous Month End Market Value Base": -0.0038, "YTD Total P&L": 0.0,
+           "Symbol Description": "TD 08/05/2026 VD 09/08/2026 SELL USD VS .BUY HKD @ 7.83444000"})])
+    with caplog.at_level(logging.INFO, logger="data.ingest.bnp"):
+        r = bnp.parse(p)
+    assert not r.rejects and r.recon.passed and r.trades == []
+    [pos] = r.positions
+    assert pos.settle_date == "2026-09-08" and pos.mark == 0.0 and pos.fx_to_usd == 0.0
+    assert pos.pnl_mtd_usd == pytest.approx(-0.00477)
+    assert any("blank Fx" in m for m in caplog.messages)
+
+
+def test_synthetic_closed_line_pnl_bucket_mismatch_still_fails(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260915.csv", [_closed_row(**{"DTD Trading P&L": -43000.0})])
+    r = bnp.parse(p)
+    assert not r.rejects and [f.check for f in r.recon.failures] == ["dtd_total_eq_trading"]
+
+
+def test_synthetic_zero_quantity_with_market_value_is_rejected(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260915.csv", [_closed_row(**{"Market Value Local": 12.0})])
+    r = bnp.parse(p)
+    assert [(x.row_no, x.symbol) for x in r.rejects] == [(2, "USDJPY091626-555")]
+    assert "Quantity is 0" in r.rejects[0].reason
+    assert r.positions == [] and r.trades == []
+
+
+def test_synthetic_netting_ignores_closed_line_mark(tmp_path):
+    """A closed line's Price is a fixing, not the mark: it neither fails the netting
+    mark-consistency check nor becomes the netted position's mark, whichever comes first."""
+    for order in (["closed", "live"], ["live", "closed"]):
+        rows = {"closed": _closed_row(), "live": _fwd_row()}
+        p = _write_csv(tmp_path / "HA_PNL_20260915.csv", [rows[k] for k in order])
+        r = bnp.parse(p)
+        assert not r.rejects and r.recon.passed, order
+        [pos] = r.positions
+        assert pos.mark == 147.5 and pos.fx_to_usd == 0.0068027 and pos.quantity == 1000000.0, order
+        assert pos.pnl_dtd_usd == pytest.approx(401.36 - 43044.503676), order
+        assert len(r.trades) == 1 and r.trades[0].trade_id == "111" and r.n_forward_closed == 1, order
+
+
+def test_synthetic_netting_still_flags_two_live_rows_after_a_closed_one(tmp_path):
+    p = _write_csv(tmp_path / "HA_PNL_20260915.csv", [
+        _closed_row(), _fwd_row(),
+        _fwd_row(Symbol="USDJPY091626-333", Price=148.0,
+                 **{"Market Value Local": 1000000.0, "Market Value Base": 6802.7, "Start Date Dirty MV": 6401.34,
+                    "DTD Total P&L": 401.36, "DTD Trading P&L": 401.36, "MTD Total P&L": 6802.7}),
+    ])
+    r = bnp.parse(p)
+    fails = r.recon.failures
+    assert [f.check for f in fails] == ["positions_net_mark_consistent"]
+    assert fails[0].row_no == 3 and "rows [2, 3, 4]" in fails[0].detail and fails[0].deviation == pytest.approx(0.5)
+
+
+def test_synthetic_mv_local_tolerance_scales_with_quantity(tmp_path):
+    """BNP prints Price to 5 dp but computes MV Local from the unrounded mark: allow
+    |Quantity| x 0.5e-5 quote units, floor 0.05."""
+    big = _fwd_row(Quantity=18000000.0, Position=18000000.0, Cost=-18000000.0,
+                   **{"Local Cost": 2646000000.0, "Market Value Local": 9000000.07, "Market Value Base": 61224.3,
+                      "Start Date Dirty MV": 60000.0, "DTD Total P&L": 1224.3, "DTD Trading P&L": 1224.3,
+                      "MTD Total P&L": 61224.3, "YTD Total P&L": 61224.3})
+    r = bnp.parse(_write_csv(tmp_path / "HA_PNL_20260915.csv", [big]))
+    assert not r.rejects and r.recon.passed
+    mv = [c for c in r.recon.results if c.check == "mv_local"][0]
+    assert mv.deviation == pytest.approx(0.07, abs=1e-6) and mv.tolerance == pytest.approx(90.0)
+    # 1m USD: bound is 5 JPY, so a 6 JPY gap is still a failure
+    r = bnp.parse(_write_csv(tmp_path / "HA_PNL_20260915.csv", [_fwd_row(**{"Market Value Local": 500006.0})]))
+    fails = {f.check: f for f in r.recon.failures}
+    assert set(fails) == {"mv_local"} and fails["mv_local"].tolerance == pytest.approx(5.0)

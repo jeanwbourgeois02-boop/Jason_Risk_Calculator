@@ -15,6 +15,20 @@ malformed FORWARD row is rejected rather than coerced.
 The file dated T (``HA_PNL_YYYYMMDD.csv``) is the T-1 close snapshot: ``as_of_date`` is
 the previous weekday of T unless overridden (see ``_previous_weekday``).
 
+FORWARD rows with ``Quantity = 0`` (and zero Local Cost / MV Local / MV Base) are
+**closed lines**: an NDF past its fixing (BNP zeroes the position at fixing and books the
+realised amount to cash; the trade line stays until value date carrying the realised DTD /
+MTD P&L), or a deliverable forward that has settled and lingers with a rounding residual.
+They carry no notional, so no trade / legs are written for them (the fill was captured
+from an earlier daily snapshot, or is lost -- counted in ``n_forward_closed``); a
+``positions`` row with quantity 0 and the reported P&L IS written so the BNP-side daily
+P&L stays complete for the Reconciliation tab. The open-position identities (DTD = MV Base
+- Start Date Dirty MV, MTD, direction sign, Trade Factor = 1) do not hold for them and are
+not checked; blank Fx takes the 0.0 sentinel as for zero cash balances; their Price (a
+fixing, or stale) never takes part in the position-netting mark check. First seen in the
+2026-09-15 file: 49 rows (BRL / TWD / KRW / IDR NDFs fixed 2026-09-14 for value 2026-09-16,
+and two settled USDHKD 2026-09-08 lines).
+
 See CLAUDE.md "Data contract -> BNP file -> tables" and "Reconciliation checks and
 tolerances" for the specification this module implements.
 """
@@ -68,6 +82,11 @@ TOL_MV_BASE_REL = 0.5e-6
 # 0.01 USD absorbs 2-dp rounding. Already logged as an in-force assumption in
 # docs/open-questions.md. Observed maxima on the reference file are ~1e-4 USD.
 PNL_TOL = 0.01
+# BNP prints `Price` to 5 dp but computes its own MV Local from the unrounded mark, so
+# the mv_local identity can be off by up to |Quantity| x half a unit in the 5th decimal
+# (0.07 MXN on an 18m USD leg, 0.11 SEK on a 26.7m EUR leg in the 2026-09-15 file).
+# TOL_MV_LOCAL stays the floor for small quantities.
+PRICE_HALF_ULP = 0.5e-5
 
 # Checks whose name appears in the contract's "Reconciliation checks and tolerances" list.
 CONTRACT_CHECKS = frozenset({
@@ -219,6 +238,7 @@ class ParseResult:
     n_forward: int = 0
     n_currency: int = 0
     n_futures: int = 0
+    n_forward_closed: int = 0  # FORWARD rows with Quantity = 0: positions row only, no trade
     n_skipped_irs: int = 0
     n_skipped_other: int = 0
     n_skipped_fund: int = 0
@@ -233,7 +253,10 @@ class ParseResult:
 
 # --------------------------------------------------------------------------- helpers
 def file_date_from_name(path: Union[str, Path]) -> date:
-    m = re.search(r"HA_PNL_(\d{8})\.csv$", Path(path).name)
+    """'HA_PNL_20260915.csv' -> 2026-09-15. A browser-download suffix after the date
+    ('HA_PNL_20260915[22].csv', 'HA_PNL_20260915 (1).csv') is accepted; a ninth digit
+    is not."""
+    m = re.search(r"HA_PNL_(\d{8})(?!\d).*\.csv$", Path(path).name)
     if not m:
         raise ValueError(f"cannot derive file date from name {Path(path).name!r}")
     return datetime.strptime(m.group(1), "%Y%m%d").date()
@@ -450,10 +473,37 @@ def _parse_forward(res: ParseResult, positions: RawPositions, row: pd.Series,
     start_dirty = _f(row["Start Date Dirty MV"])
     prev_me = _f(row["Previous Month End Market Value Base"])
 
+    # ---- instrument
+    is_ndf = 1 if (quote_ccy in NDF_CCYS or base_ccy in NDF_CCYS) else 0
+    res.instruments.setdefault(pair, Instrument(
+        instrument_id=pair, asset_class="FX", base_ccy=base_ccy, quote_ccy=quote_ccy,
+        multiplier=1.0, is_ndf=is_ndf, bbg_ticker=f"{pair} Curncy", expiry_date=PERPETUAL,
+    ))
+
+    # ---- closed line (Quantity = 0): NDF fixed or forward settled, see module docstring.
+    # No notional in the row, so no trade / legs; the positions row keeps BNP's realised
+    # P&L. Only the identities that still hold for a zeroed line are checked.
+    if quantity == 0.0:
+        if local_cost != 0.0 or mv_local != 0.0 or mv_base != 0.0:
+            res.rejects.append(Reject(row_no, symbol,
+                                      f"Quantity is 0 but Local Cost {local_cost} / MV Local {mv_local} / "
+                                      f"MV Base {mv_base} are not"))
+            return
+        res.recon.add("dtd_total_eq_trading", row_no, symbol, abs(dtd_total - dtd_trading), PNL_TOL,
+                      f"DTD Total={dtd_total} DTD Trading={dtd_trading}")
+        res.recon.add("position_eq_quantity", row_no, symbol, abs(_f(row["Position"]) - quantity), 0.0)
+        if math.isnan(fx):
+            fx = 0.0
+            log.info("row %d: closed FORWARD %s has blank Fx; fx_to_usd set to 0.0", row_no, symbol)
+        res.n_forward_closed += 1
+        positions.append((row_no, _position(as_of, row, pair, value_date, 0.0, fx)))
+        return
+
     # ---- contract checks (CLAUDE.md "Reconciliation checks and tolerances")
     res.recon.add("local_cost", row_no, symbol, abs(quantity * rate - local_cost), TOL_LOCAL_COST,
                   f"Q*rate={quantity * rate:.4f} LocalCost={local_cost}")
-    res.recon.add("mv_local", row_no, symbol, abs(quantity * (price - rate) - mv_local), TOL_MV_LOCAL,
+    res.recon.add("mv_local", row_no, symbol, abs(quantity * (price - rate) - mv_local),
+                  max(TOL_MV_LOCAL, abs(quantity) * PRICE_HALF_ULP),
                   f"Q*(Price-rate)={quantity * (price - rate):.4f} MVLocal={mv_local}")
     res.recon.add("mv_base", row_no, symbol, abs(mv_local * fx - mv_base),
                   max(TOL_MV_BASE_ABS, abs(mv_local) * TOL_MV_BASE_REL),
@@ -470,13 +520,6 @@ def _parse_forward(res: ParseResult, positions: RawPositions, row: pd.Series,
                   f"Quantity {quantity} vs sold {sold_ccy}")
     res.recon.add("position_eq_quantity", row_no, symbol, abs(_f(row["Position"]) - quantity), 0.0)
     res.recon.add("trade_factor_one", row_no, symbol, abs(_f(row["Trade Factor"]) - 1.0), 0.0)
-
-    # ---- instrument
-    is_ndf = 1 if (quote_ccy in NDF_CCYS or base_ccy in NDF_CCYS) else 0
-    res.instruments.setdefault(pair, Instrument(
-        instrument_id=pair, asset_class="FX", base_ccy=base_ccy, quote_ccy=quote_ccy,
-        multiplier=1.0, is_ndf=is_ndf, bbg_ticker=f"{pair} Curncy", expiry_date=PERPETUAL,
-    ))
 
     # ---- trade + legs
     res.trades.append(Trade(
@@ -567,23 +610,36 @@ def _net_positions(res: ParseResult, raw: RawPositions) -> List[Position]:
     (docs/open-questions.md). Until it is resolved, rows in a group are netted: mark and
     fx_to_usd must agree within the group (recon failure otherwise, citing the row
     numbers), the other columns are summed.
+
+    Closed lines (quantity 0, see module docstring) take no part in the mark / fx
+    agreement check: their Price is a fixing or stale. The group's mark and fx come from
+    its first live row; a group made only of closed lines keeps the first row's values,
+    which nothing converts (quantity and MV are zero).
     """
     out: Dict[tuple, Position] = {}
     rows_in_group: Dict[tuple, List[int]] = {}
+    live_row: Dict[tuple, Optional[int]] = {}  # row whose mark / fx the group carries
     for row_no, p in raw:
         key = (p.as_of_date, p.source, p.account, p.instrument_id, p.settle_date)
         if key not in out:
             out[key] = Position(**vars(p))
             rows_in_group[key] = [row_no]
+            live_row[key] = row_no if p.quantity != 0.0 else None
             continue
         q = out[key]
-        first_row = rows_in_group[key][0]
         rows_in_group[key].append(row_no)
-        detail = f"rows {rows_in_group[key]} key={key}"
-        res.recon.add("positions_net_mark_consistent", first_row, p.instrument_id, abs(q.mark - p.mark), 0.0,
-                      f"{detail} mark {q.mark} vs row {row_no} mark {p.mark}")
-        res.recon.add("positions_net_fx_consistent", first_row, p.instrument_id, abs(q.fx_to_usd - p.fx_to_usd),
-                      0.0, f"{detail} fx {q.fx_to_usd} vs row {row_no} fx {p.fx_to_usd}")
+        if p.quantity != 0.0:
+            if live_row[key] is None:
+                q.mark, q.fx_to_usd = p.mark, p.fx_to_usd
+                live_row[key] = row_no
+            else:
+                first_row = live_row[key]
+                detail = f"rows {rows_in_group[key]} key={key}"
+                res.recon.add("positions_net_mark_consistent", first_row, p.instrument_id, abs(q.mark - p.mark),
+                              0.0, f"{detail} mark {q.mark} vs row {row_no} mark {p.mark}")
+                res.recon.add("positions_net_fx_consistent", first_row, p.instrument_id,
+                              abs(q.fx_to_usd - p.fx_to_usd), 0.0,
+                              f"{detail} fx {q.fx_to_usd} vs row {row_no} fx {p.fx_to_usd}")
         q.quantity += p.quantity
         q.cost_local += p.cost_local
         q.mv_local += p.mv_local
@@ -600,13 +656,22 @@ def _rows(objs: Iterable) -> List[tuple]:
 
 
 # ---------------------------------------------------- duplicate-key content comparison
-_CONFLICT_TOL_ABS = 1e-9  # absolute only: CSV -> SQLite REAL round-trips exactly, so no relative band
+_CONFLICT_TOL_ABS = 1e-9  # rates / marks: CSV -> SQLite REAL round-trips exactly, so no relative band
+# Currency amounts: BNP prints the same trade's Quantity / Local Cost with a different
+# precision on different days (2026-08-18 '3500000' vs 2026-09-15 '3499999.999979';
+# '1157208.997' vs '1157208.99749'; '-1999999.99' vs '-1999999.990446'), so anything under
+# a hundredth of a unit is print noise, not an amendment. A one-unit (or half-unit)
+# amendment on any leg is still a conflict; no relative term, for the reason above.
+_CONFLICT_TOL_AMOUNT = 0.01
+_AMOUNT_FIELDS = frozenset({"quantity", "amount", "cost_local", "mv_local", "mv_usd",
+                            "pnl_dtd_usd", "pnl_mtd_usd", "pnl_ytd_usd"})
 
 
-def _values_match(a, b) -> bool:
+def _values_match(a, b, tol: float = _CONFLICT_TOL_ABS) -> bool:
     """True if ``a`` (parsed) and ``b`` (existing DB value) are the same. Floats compare
-    with a 1e-9 absolute tolerance only (no relative term: a relative band would let a
-    1-unit amendment on a large leg pass as a skip)."""
+    with an absolute tolerance only (no relative term: a relative band would let a
+    1-unit amendment on a large leg pass as a skip): ``_CONFLICT_TOL_ABS`` for rates and
+    marks, ``_CONFLICT_TOL_AMOUNT`` for currency amounts (see ``_row_diff``)."""
     if isinstance(a, float) or isinstance(b, float):
         try:
             af, bf = float(a), float(b)
@@ -614,15 +679,18 @@ def _values_match(a, b) -> bool:
             return a == b
         if math.isnan(af) or math.isnan(bf):
             return math.isnan(af) and math.isnan(bf)
-        return abs(af - bf) <= _CONFLICT_TOL_ABS
+        return abs(af - bf) <= tol
     return a == b
 
 
 def _row_diff(fields: List[str], new_obj, old_row: tuple) -> List[str]:
     """Field names whose value differs (beyond tolerance) between a freshly parsed
-    dataclass instance and the existing DB row (same column order as ``fields``)."""
+    dataclass instance and the existing DB row (same column order as ``fields``).
+    Amount fields (``_AMOUNT_FIELDS``) use the print-noise tolerance; everything else
+    (fill rate, mark, fx_to_usd, text) must match exactly."""
     new_vals = tuple(vars(new_obj).values())
-    return [name for name, nv, ov in zip(fields, new_vals, old_row) if not _values_match(nv, ov)]
+    return [name for name, nv, ov in zip(fields, new_vals, old_row)
+            if not _values_match(nv, ov, _CONFLICT_TOL_AMOUNT if name in _AMOUNT_FIELDS else _CONFLICT_TOL_ABS)]
 
 
 def load(csv_path: Union[str, Path], conn: sqlite3.Connection,

@@ -9,7 +9,10 @@ FWD_OUTRIGHT are official under BBG_BFXFORWARD). These marks exist so that:
     marks are loaded (marks_official never selects BNP_BVAL).
 
 Only the FORWARD rows of the BNP file carry a fill/outright (`Price`) and a spot
-(`Fx`); CURRENCY and FUTURES rows are not turned into marks here.
+(`Fx`); CURRENCY and FUTURES rows are not turned into marks here. Closed FORWARD lines
+(`Quantity = 0`: an NDF past its fixing, or a settled forward -- see data.ingest.bnp)
+are skipped too: their `Price` is a fixing or a stale value, not the outright for that
+value date, and their `Fx` may be blank. Counted in ``n_skipped_closed``.
 
 Reuses data.ingest.bnp's row-scope helpers (FUND filter, FORWARD_SYMBOL_RE,
 DESCRIPTION_RE, _iso, _previous_weekday, file_date_from_name, cash_ccy) rather than
@@ -32,6 +35,7 @@ from data.ingest.bnp import (
     DESCRIPTION_RE,
     FORWARD_SYMBOL_RE,
     FUND,
+    _f,
     _iso,
     _previous_weekday,
     _s,
@@ -58,6 +62,7 @@ class BnpMarksResult:
     rows: List[MarkRow] = field(default_factory=list)
     rejects: List[BnpMarkReject] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    n_skipped_closed: int = 0  # FORWARD rows with Quantity = 0 (NDF fixed / settled)
 
 
 def _snapped_at(as_of: date) -> str:
@@ -166,6 +171,17 @@ def extract_bnp_marks(csv_path: Union[str, Path], as_of_date: Optional[Union[str
             continue
 
         try:
+            quantity = float(row["Quantity"])
+        except (TypeError, ValueError):
+            quantity = float("nan")
+        if quantity == 0.0:
+            # Closed line (NDF fixed / settled): Price is a fixing or stale, Fx may be
+            # blank; neither is a mark for this value date. A blank Quantity is NaN here
+            # and falls through so it still surfaces downstream, never silently skipped.
+            result.n_skipped_closed += 1
+            continue
+
+        try:
             price = float(row["Price"])
             fx = float(row["Fx"])
         except (TypeError, ValueError):
@@ -234,6 +250,9 @@ def extract_bnp_marks(csv_path: Union[str, Path], as_of_date: Optional[Union[str
 
     for w in result.warnings:
         log.warning(w)
+    if result.n_skipped_closed:
+        log.info("%s: %d closed FORWARD lines (Quantity = 0) produced no marks",
+                 csv_path.name, result.n_skipped_closed)
 
     return result
 
