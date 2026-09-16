@@ -238,11 +238,11 @@ def net_gross_usd(conn: sqlite3.Connection, as_of_date: str) -> dict:
     does not need its own copy of this fallback chain. Returns
     `{available, net, gross, reason, fallback_ccys, forward_proxy_ccys}`; `net`/`gross`
     are only present when `available`."""
-    from engine.ladder.exposure_adapter import records_from_db
+    from engine.ladder.exposure_adapter import exposure_records_from_db
     from engine.ladder.exposure import build_exposure, portfolio_totals
     from data.bloomberg.live import rates_from_marks
 
-    records, _unresolved = records_from_db(conn, as_of_date)
+    records, _unresolved = exposure_records_from_db(conn, as_of_date)
     rates = rates_from_marks(conn)
     needed = {r["currency"] for r in records}
     missing = needed - set(rates)
@@ -296,6 +296,59 @@ def message_box(message: str) -> html.P:
     """Grey status text shown in the table container instead of a DataTable (missing
     view module, missing DB, no as_of date, etc)."""
     return html.P(message, style={"color": "gray"})
+
+
+def reconciliation_panel(conn: sqlite3.Connection, as_of_date: str) -> html.Details:
+    """EOD blotter-vs-BNP cross-check (user decision 2026-09-16: the blotter is the
+    real-time primary trade source, BNP is the once-daily EOD-Hong-Kong snapshot of
+    the same book -- they should agree by end of day). New, purpose-built check, not
+    a resurrection of the retired workbook-parity Reconciliation tab -- see
+    `engine.pnl.reconcile`'s module docstring for the distinction.
+
+    Collapsed by default (`html.Details` with no `open`), since a clean book (the
+    common case) needs nothing more than the one-line summary in its `<summary>`; a
+    mismatch is still one click away, not buried.
+
+    Always compares through `engine.pnl.reconcile.bnp_snapshot_date`, not `as_of_date`
+    directly -- BNP lags the real-time blotter by at least a day, so the summary names
+    the actual date compared (which can be earlier than the Ladder tab's selected
+    date) rather than implying today's blotter trades were checked and found clean
+    when they simply were not in scope yet."""
+    from engine.pnl.reconcile import bnp_snapshot_date, reconcile_blotter_vs_bnp
+
+    snapshot_date = bnp_snapshot_date(conn, as_of_date)
+    if snapshot_date is None:
+        return html.Details(className="details details--compact", children=[
+            html.Summary("EOD reconciliation: blotter vs BNP -- no BNP snapshot loaded yet."),
+        ])
+    lag_note = "" if snapshot_date == as_of_date else f" (as of BNP's {snapshot_date} snapshot)"
+    df = reconcile_blotter_vs_bnp(conn, as_of_date)
+    if df.empty:
+        return html.Details(className="details details--compact", children=[
+            html.Summary(f"EOD reconciliation: blotter vs BNP -- no trades on either side yet{lag_note}."),
+        ])
+    mismatches = df[~df["within_tolerance"]]
+    n_ok, n_total = len(df) - len(mismatches), len(df)
+    if mismatches.empty:
+        return html.Details(className="details details--compact", children=[
+            html.Summary(f"EOD reconciliation: blotter vs BNP -- {n_ok}/{n_total} instruments agree{lag_note}."),
+        ])
+    display_cols = ["instrument_id", "blotter_usd_notional", "bnp_usd_notional", "diff_usd",
+                     "n_blotter_trades", "n_bnp_trades"]
+    table = format_ladder_frame(mismatches[display_cols], label_col="instrument_id")
+    return html.Details(className="details details--compact", open=True, children=[
+        html.Summary(
+            f"EOD reconciliation: blotter vs BNP -- {n_ok}/{n_total} agree, "
+            f"{len(mismatches)} outside tolerance{lag_note}."
+        ),
+        dash_table.DataTable(
+            id="cash-ladder-reconciliation-table",
+            columns=[{"name": c.replace("_", " ").title(), "id": c} for c in table.columns],
+            data=table.to_dict("records"),
+            style_cell={"textAlign": "right", "fontFamily": "monospace"},
+            style_header={"fontWeight": "bold"},
+        ),
+    ])
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
@@ -378,10 +431,28 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             # delta rows, Net/Gross, futures delta line, stress block -- from
             # engine.ladder.exposure via records_from_db. Never P&L.
             try:
-                from engine.ladder.exposure_adapter import records_from_db
+                from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
                 from data.bloomberg.live import rates_from_marks
                 from ui.tabs.exposure import BOOK_DISPLAY, exposure_section
                 records, unresolved = records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
+                # Delta/exposure math (Net/Gross headline, risk-and-scenarios table) must
+                # use settle_date > as_of, not >= -- a leg settling today carries no delta
+                # by close (CLAUDE.md "Six tabs as views"). The grid above stays on
+                # records (>=): today's settling leg is still cash that moves today.
+                exposure_records, exposure_unresolved = exposure_records_from_db(
+                    conn, as_of_date, book_mapping=BOOK_DISPLAY)
+                # 2026-09-16 fix: exposure_unresolved was previously discarded here. A
+                # trade unresolved only under the exposure calc's settle_date > as_of
+                # rule (not the grid's >= rule) -- e.g. a trade whose sole leg settles
+                # exactly on as_of -- could silently affect Net/Gross USD with no
+                # "Unresolved trades" caption at all, since that caption only ever read
+                # the grid's own `unresolved`. Merge both, deduped by trade_id (the
+                # grid's own entry for a trade wins if it appears in both, since the
+                # two lists usually share the same reason for the same trade_id).
+                seen_trade_ids = {u.trade_id for u in unresolved}
+                unresolved = list(unresolved) + [
+                    u for u in exposure_unresolved if u.trade_id not in seen_trade_ids
+                ]
                 # Rates: latest official SPOT marks written by the Bloomberg feed, first
                 # choice. Currencies still missing a rate fall back to the BNP file's own
                 # BVAL SPOT (user decision 2026-09-15, item D) -- never silently, and
@@ -419,9 +490,16 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 exposure = exposure_section(records, unresolved, as_of_date, rates=rates,
                                             futures=_fut, futures_details=(_fut or {}).get("details"),
                                             fallback_ccys=fallback_ccys,
-                                            forward_proxy_ccys=forward_proxy_ccys)
+                                            forward_proxy_ccys=forward_proxy_ccys,
+                                            exposure_records=exposure_records)
             except ImportError as exc:
                 exposure = message_box(f"Exposure ladder not available ({exc}).")
+            try:
+                reconciliation = reconciliation_panel(conn, as_of_date)
+            except Exception as exc:
+                # Never let the reconciliation panel take down the whole ladder render --
+                # it is a diagnostic add-on to the ladder, not load-bearing for it.
+                reconciliation = message_box(f"EOD reconciliation not available ({exc}).")
         finally:
             conn.close()
-        return html.Div([exposure])
+        return html.Div([exposure, reconciliation])

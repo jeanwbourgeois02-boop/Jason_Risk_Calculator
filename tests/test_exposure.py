@@ -117,7 +117,8 @@ def test_portfolio_totals_and_usd_equivalent():
     usd2 = ladder_usd_equivalent(res2)
     assert math.isnan(usd2["2026-09-16"]) and usd2["2026-09-11"] == pytest.approx(-20_763_351 * 0.6)
     empty = portfolio_totals(build_exposure([], {}))
-    assert math.isnan(empty["net_usd"]) and empty["currencies"] == 0
+    assert empty["net_usd"] == 0.0 and empty["gross_usd"] == 0.0
+    assert empty["currencies"] == 0 and empty["missing"] == []
 
 
 def test_usd_leg_priced_at_identity_and_excluded_from_net_gross():

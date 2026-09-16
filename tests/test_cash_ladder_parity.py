@@ -7,7 +7,7 @@ import pytest
 from data.ingest import schema
 from engine.ladder.valuation import ladder_trade_valuation, ladder_valuation_summary
 from engine.ladder.ladder import cash_ladder
-from ui.tabs.reconciliation import valuation_table
+from ui.tabs.formatting import valuation_table
 
 AS_OF = "2026-08-17"
 MATURITY = "2026-09-08"
@@ -19,8 +19,13 @@ def add_trade(conn, trade_id, pair, quantity, fill, *, ndf=False,
     base, quote = pair[:3], pair[3:]
     conn.execute("INSERT OR IGNORE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  (pair, "FX", base, quote, 1, int(ndf), pair + " Curncy", "9999-12-31"))
+    # 'XLSX' (2026-09-16, trades_official double-count fix): the ladder-valuation
+    # functions under test now read trades_official, which excludes source='BNP' by
+    # design (BNP is no longer authoritative for live trade exposure). This helper is
+    # a generic test-trade builder, not testing source filtering, so it must use a
+    # source trades_official actually includes.
     conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (trade_id, "BNP", pair, "FX_FWD", trade_id, trade_date, quantity, fill,
+                 (trade_id, "XLSX", pair, "FX_FWD", trade_id, trade_date, quantity, fill,
                   "A", "C", "S", "T", "test", ""))
     for no, ccy, amount in [(1, base, quantity), (2, quote, -quantity * fill + usd_rounding)]:
         conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",

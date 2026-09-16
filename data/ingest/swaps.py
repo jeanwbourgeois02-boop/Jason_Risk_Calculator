@@ -46,16 +46,32 @@ def _matches(candidate: dict, other: dict) -> bool:
 
 def package_swaps(conn: sqlite3.Connection) -> int:
     """Group unpackaged FORWARD trades into FX_SWAP packages. Returns the count of trades
-    (always even) newly packaged. Ambiguous candidates are written to `swap_review`."""
+    (always even) newly packaged. Ambiguous candidates are written to `swap_review`.
+
+    Grouping key includes `source` (2026-09-16, trades_official double-count fix):
+    without this, a genuine BNP-sourced outright and an unrelated genuine
+    blotter-sourced outright on the same account/pair/trade_date, opposite sign, with
+    USD notional within REL_TOL of each other -- entirely plausible once both sources
+    can carry the same book's trades (docs/open-questions.md item 55) -- would satisfy
+    `_matches` and get fabricated into one FX_SWAP package that was never actually a
+    swap ticket. A swap's two legs are always booked together on the same ticket, i.e.
+    always from the same source file; pairing across sources can only ever be a
+    coincidence, never a real swap. This reads raw `trades`, not `trades_official`:
+    unlike the live exposure/P&L queries, BNP-internal swap pairing is still a real,
+    legitimate need (both `import_report` and `import_blotter` call this at the end of
+    every upload, per this module's own docstring) -- excluding BNP entirely here
+    would silently stop packaging BNP's own genuine swaps, which is a different bug,
+    not a fix.
+    """
     schema.create_schema(conn)
     candidates = conn.execute(
-        "SELECT trade_id, account, instrument_id, trade_date, quantity FROM trades "
+        "SELECT trade_id, source, account, instrument_id, trade_date, quantity FROM trades "
         "WHERE product = 'FX_FWD' AND package_id = trade_id"
     ).fetchall()
 
-    groups: Dict[Tuple[str, str, str], List[dict]] = {}
-    for trade_id, account, instrument_id, trade_date, quantity in candidates:
-        groups.setdefault((account, instrument_id, trade_date), []).append(
+    groups: Dict[Tuple[str, str, str, str], List[dict]] = {}
+    for trade_id, source, account, instrument_id, trade_date, quantity in candidates:
+        groups.setdefault((source, account, instrument_id, trade_date), []).append(
             {"trade_id": trade_id, "quantity": quantity})
 
     packaged = 0
@@ -70,7 +86,7 @@ def package_swaps(conn: sqlite3.Connection) -> int:
         eligible = [t for t in trades if t["value_date"] is not None and t["usd"] is not None]
         pos = [t for t in eligible if t["quantity"] > 0]
         neg = [t for t in eligible if t["quantity"] < 0]
-        candidate_group = f"{key[0]}|{key[1]}|{key[2]}"
+        candidate_group = f"{key[0]}|{key[1]}|{key[2]}|{key[3]}"
 
         for p in pos:
             matches = [n for n in neg if _matches(p, n)]

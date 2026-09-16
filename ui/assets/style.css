@@ -223,6 +223,11 @@ p { margin: 8px 0; }
 .dash-spreadsheet-container .dash-spreadsheet-inner tr:nth-child(even) td {
   background: rgba(15, 31, 61, 0.03);
 }
+.dash-spreadsheet-container .dash-spreadsheet-inner tr:hover td {
+  background: #eef1f7;
+}
+.dash-spreadsheet-container .dash-spreadsheet-inner td { padding: 6px 10px; cursor: default; }
+.dash-spreadsheet-container .dash-spreadsheet-inner th { padding: 8px 10px; }
 
 /* Unavailable: grey italic, wherever it appears (cards and table cells alike). */
 .card-value--muted, .cell--unavailable { color: var(--muted) !important; font-style: italic; }
@@ -303,30 +308,50 @@ p { margin: 8px 0; }
 .card-net-direction { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text); margin-left: 8px; }
 
 /* ---------------------------------------------------------------- Blotter filter bar
-   (ui/tabs/blotter.py, 2026-09-15): click-to-filter dropdowns replacing dash_table's
-   native filter row, which does not work in the installed Dash version -- verified
-   with a bare reproduction outside this app before building a replacement. One
-   dropdown per categorical column, restyled react-select to match the site (same
-   approach as the as-of date picker's .date-picker block above). */
-.blotter-filter-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px;
-  margin: 0 0 10px; padding: 10px 12px; background: var(--card); border: 1px solid var(--line);
-  border-radius: 8px; }
-.blotter-filter { display: flex; flex-direction: column; gap: 3px; min-width: 150px; }
+   (ui/tabs/blotter.py, 2026-09-15, restyled 2026-09-16): click-to-filter dropdowns
+   replacing dash_table's native filter row, which does not work in the installed Dash
+   version -- verified with a bare reproduction outside this app before building a
+   replacement. One dropdown per categorical column.
+   2026-09-16 fix: the installed Dash (4.4.1) ships a rewritten dcc.Dropdown that no
+   longer uses react-select -- its DOM classes are `.dash-dropdown-*`
+   (`dash-dropdown-wrapper` / `-trigger` / `-content` / `-search` / `-options` /
+   `-option` / `-value` / `-value-item` / `-clear`), confirmed by inspecting the
+   installed `dash/dcc/async-dropdown.js` bundle. The rules below (targeting the old
+   `.Select-*` classes) never matched anything, so every filter dropdown rendered with
+   *zero* custom styling -- the raw unstyled browser widget -- which is also why the
+   filter bar looked broken/ugly even once the filter logic itself worked. */
+.blotter-filter-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px;
+  margin: 0 0 14px; padding: 12px 16px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: 0 1px 2px rgba(15,31,61,.04); }
+.blotter-filter { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
 .blotter-filter label { font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: .05em; color: var(--muted); }
-.blotter-filter-dropdown .Select-control, .blotter-filter-dropdown .dash-dropdown-control,
-.blotter-filter-dropdown > div > div { font-family: inherit; font-size: 12.5px; }
-.blotter-filter-dropdown .Select-control { border: 1px solid var(--line); border-radius: 6px;
-  min-height: 32px; }
-.blotter-filter-dropdown .Select-placeholder, .blotter-filter-dropdown .Select--single > .Select-control .Select-value {
-  line-height: 32px; color: var(--muted); }
-.blotter-filter-dropdown .Select-menu-outer { font-size: 12.5px; z-index: 5; }
-.blotter-filter-dropdown .VirtualizedSelectOption { padding: 6px 10px; }
-.blotter-filter-dropdown .VirtualizedSelectFocusedOption { background: #eef1f7; }
-.blotter-filter-dropdown .Select--multi .Select-value { background: var(--navy); color: #fff;
-  border: none; border-radius: 4px; font-size: 11px; font-weight: 600; padding: 1px 4px; }
-.blotter-filter-dropdown .Select--multi .Select-value-icon { border: none; color: rgba(255,255,255,.7); }
-.blotter-filter-dropdown .Select--multi .Select-value-icon:hover { background: var(--navy-2); color: #fff; }
+.blotter-filter-dropdown, .blotter-filter-dropdown .dash-dropdown {
+  font-family: inherit; font-size: 12.5px; }
+.blotter-filter-dropdown .dash-dropdown-trigger { border: 1px solid var(--line); border-radius: 6px;
+  min-height: 32px; padding: 3px 8px; background: #fff; display: flex; align-items: center;
+  flex-wrap: wrap; gap: 3px; cursor: pointer; transition: border-color .1s ease; }
+.blotter-filter-dropdown .dash-dropdown-trigger:hover { border-color: var(--navy); }
+.blotter-filter-dropdown .dash-dropdown-value.dash-dropdown-placeholder { color: var(--muted); }
+.blotter-filter-dropdown .dash-dropdown-value-item { display: inline-flex; }
+.blotter-filter-dropdown .dash-dropdown-content { border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(15,31,61,.15); font-size: 12.5px; z-index: 5; background: #fff;
+  overflow: hidden; }
+.blotter-filter-dropdown .dash-dropdown-search { border: none; border-bottom: 1px solid var(--line);
+  font-family: inherit; font-size: 12.5px; padding: 8px 10px; }
+.blotter-filter-dropdown .dash-dropdown-options { padding: 4px 0; }
+.blotter-filter-dropdown .dash-dropdown-option { padding: 6px 12px; }
+.blotter-filter-dropdown .dash-dropdown-option:hover,
+.blotter-filter-dropdown .dash-options-list-option:hover { background: #eef1f7; }
+.blotter-filter-dropdown .dash-options-list-option.selected { background: #eaf0fb; }
+.blotter-filter-dropdown .dash-dropdown-clear { color: var(--muted); cursor: pointer; }
+.blotter-filter-dropdown .dash-dropdown-clear:hover { color: var(--navy); }
+/* Selected multi-select pills, styled by the multi-value count badge (this Dropdown
+   shows an "N selected" chip rather than one pill per value once >1 is chosen; single
+   selections still render via dash-dropdown-value-item). */
+.blotter-filter-dropdown .dash-dropdown-value-count { background: var(--navy); color: #fff;
+  border-radius: 10px; font-size: 11px; font-weight: 700; padding: 1px 8px; line-height: 18px; }
 .btn--ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
-  align-self: flex-end; height: 32px; padding: 0 12px; }
+  align-self: flex-end; height: 32px; padding: 0 14px; border-radius: 6px; font-weight: 600;
+  font-size: 12px; transition: color .1s ease, border-color .1s ease; }
 .btn--ghost:hover { color: var(--navy); border-color: var(--navy); }

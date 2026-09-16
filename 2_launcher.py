@@ -56,7 +56,7 @@ PACKAGES = [
     "dash>=4.4,<5",       # ui/ -- the app itself
     "pandas>=3,<4",       # data/ingest, data/bloomberg, engine/ -- BNP CSV/xlsx parsing, series math
     "numpy>=2,<3",        # engine/ -- pnl/ladder/rates numeric work
-    "openpyxl>=3.1,<4",   # data/ingest/xlsx_futures.py, workbook_rates.py -- .xlsx read
+    "openpyxl>=3.1,<4",   # data/ingest/workbook_rates.py -- .xlsx read
     "xlrd>=2,<3",         # data/ingest -- legacy .xls read
     "plotly",             # ui/tabs/market_data.py imports plotly.graph_objects directly
     "werkzeug>=3,<4",     # ui/launch.py imports werkzeug.serving.make_server directly

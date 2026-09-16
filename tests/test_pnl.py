@@ -191,6 +191,12 @@ def test_actual_pb_rates_are_not_workbook_shared_rates():
     conn = schema.connect(":memory:")
     bnp.load(RAW, conn, as_of_date=AS_OF)
     load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=False)
+    # 'XLSX' (2026-09-16, trades_official double-count fix): ltd_per_trade now reads
+    # trades_official, which excludes trades.source='BNP' by design. This test is
+    # about mark source (the 'source' arg below is a *marks* source, BNP_BVAL vs
+    # marks_official -- unrelated to trades.source), not trade-source filtering, so
+    # relabel rather than let every trade vanish from trades_official.
+    conn.execute("UPDATE trades SET source = 'XLSX'")
     out = ltd_per_trade(conn, AS_OF, source="BNP_BVAL", strict=False)
     assert len(out) == 229
     assert out.pnl_usd.isna().all()

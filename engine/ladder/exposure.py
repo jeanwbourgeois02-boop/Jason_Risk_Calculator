@@ -68,7 +68,7 @@ def portfolio_totals(result: "ExposureResult") -> dict:
     s = result.summary
     missing = sorted(s.loc[s["usd_delta"].isna(), "currency"]) if not s.empty else []
     if s.empty:
-        return {"net_usd": float("nan"), "gross_usd": float("nan"), "currencies": 0, "missing": []}
+        return {"net_usd": 0.0, "gross_usd": 0.0, "currencies": 0, "missing": []}
     fx_only = s.loc[s["currency"] != "USD"]
     return {
         "net_usd": float(fx_only["usd_delta"].sum(skipna=False)),

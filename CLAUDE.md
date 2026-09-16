@@ -4,11 +4,13 @@
 
 `docs/BUILD_PLAN.md` is the build specification. The app's headline P&L is the per-trade valuation in its section 2 (each FX leg marked at the outright for its own value date, quote P&L converted at spot, futures as contracts × multiplier × price change, settled trades frozen), the close series and periods in section 3, and the four tabs in section 5. The "P&L conventions" section below is in force again and the "Must not replicate" list applies to the headline.
 
-The literal workbook arithmetic (`engine/pnl/pnl.py`, `docs/excel-parity-audit.md`) is retained unchanged as the Reconciliation tab only. It never feeds the header, the blotter or the ladder. `HA_PNL_*.csv` remains the trade source; workbook uploads add only futures fills per the plan. Missing values stay missing everywhere.
+The literal workbook arithmetic (`engine/pnl/pnl.py`, `docs/excel-parity-audit.md`) is retained unchanged as the Reconciliation tab only. It never feeds the header, the blotter or the ladder. Missing values stay missing everywhere.
 
 The cash ladder is a pure delta table: leg by leg, crosses included, spot for delta, no P&L on it (engine change landed 2026-09-15).
 
-FX and futures risk monitor: cash ladder, delta per currency, daily / 5d / MTD / YTD P&L. Python; Dash front end later. Fund NMMF, base currency USD, prime broker BNP. Reference inputs: `data/raw/HA_PNL_20260818.csv` (BNP position and P&L snapshot, 242 rows × 137 cols) and `data/raw/HA-portfolio vJean.xlsx` (the Excel calculator this app replaces). Open items live in `docs/open-questions.md`, not here.
+FX and futures risk monitor: cash ladder, delta per currency, daily / 5d / MTD / YTD P&L. Python; Dash front end later. Fund NMMF, base currency USD, prime broker BNP. Reference inputs: `data/raw/new_sample_trades.csv` (transaction-level blotter export — see "Blotter → tables"; the current trade fill source, parsed by `data/ingest/blotter.py`), `data/raw/HA_PNL_20260818.csv` (BNP position/P&L snapshot, 242 rows × 137 cols — retained for `positions`, cash balances and `BNP_BVAL` reconciliation marks, see "BNP file → tables") and `data/raw/HA-portfolio vJean.xlsx` (the Excel calculator this app replaces, kept for the Reconciliation tab's literal-workbook panel only). Open items live in `docs/open-questions.md`, not here.
+
+**Trade-source history (2026-09-16):** until this date `HA_PNL_*.csv` was described as "the trade source" and futures fills as coming from the xlsx workbook's `All FX trades` sheet. Both are superseded: the blotter (`data/ingest/blotter.py`, reading `data/raw/new_sample_trades.csv`-shaped files) is now the source of FX forward/spot, futures, option and IRS trade fills, because it carries a genuine per-trade fill price and trade ID for every product including futures, which the BNP snapshot never did. The BNP CSV and the xlsx workbook keep their existing, narrower jobs below; see `docs/open-questions.md` for the trade-identity clash this leaves open between `bnp.py`/`irs.py` and `blotter.py`.
 
 ## Working mode
 
@@ -35,8 +37,11 @@ instruments (
 );
 
 trades (
-  trade_id        TEXT PRIMARY KEY,   -- BNP id ('196789440'), 'XL-<row>' from the xlsx, or app-generated
-  source          TEXT NOT NULL,      -- BNP | XLSX | MANUAL
+  trade_id        TEXT PRIMARY KEY,   -- BNP file's Symbol-derived id ('196789440'), blotter 'Trade Id' column
+                                      -- (different numbering scheme from the BNP one, see "BNP file -> tables"),
+                                      -- 'XL-<row>' from the xlsx workbook, or app-generated
+  source          TEXT NOT NULL,      -- BNP | XLSX (both the blotter and the xlsx-workbook futures loader use
+                                      -- this literal value; see "Blotter -> tables") | MANUAL
   instrument_id   TEXT NOT NULL REFERENCES instruments,
   product         TEXT NOT NULL,      -- FX_SPOT | FX_FWD | FX_SWAP | FUTURE | IRS | FX_OPTION
   package_id      TEXT NOT NULL,      -- = trade_id unless grouped by the swap rule below
@@ -137,7 +142,25 @@ Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4
 
 The mapping is held in a `marks_official` view (`marks` filtered to the official source per `mark_type`, so `(as_of_date, instrument_id, settle_date, mark_type)` is unique). Every P&L or delta query reads from `marks_official`, never from `marks` directly.
 
+### Blotter → tables
+
+`data/ingest/blotter.py` parses the transaction-level blotter export (`data/raw/new_sample_trades.csv`-shaped files) — one row per fill, unlike the BNP snapshot's one netted row per open position per day. This is the current source of `trades` / `trade_legs` for FX forward/spot, futures, options and IRS: it carries a genuine per-fill `Price` and `Trade Id` for every row, including futures, which the BNP file never does (see "BNP file → tables" below).
+
+Scope: `Status = 'Completed' AND Fund = 'NMMF'`. Row kind is decided by `Fin Type` (not `Product`, which is not authoritative): `FORWARD | CURRENCY | FUTURE | OPTION | INTEREST_RATE_SWAP`; any other value, or a non-matching Status/Fund, is filtered out and counted, never coerced.
+
+- FORWARD: same `Symbol` (`<PAIR><VD mmddyy>-<id>`) and `Description` regexes as the BNP file (byte-identical on the reference sample); the trailing id in `Symbol` here is `Instrument Id`, not `Trade Id` — `trades.trade_id` comes from the `Trade Id` column, a different numbering scheme from BNP's Symbol-derived id (see the trade-identity note above). Base/quote leg amounts come from the structured `Buy Currency` / `Sell Currency` / `BuyCurrency Amount` / `SellCurrency Amount` columns, cross-checked against the description's sold/bought currencies.
+- CURRENCY: settlement-level cash movements, not an EOD balance snapshot; only the `CASH-<ccy>` instrument is written (no trade/legs/positions row) — cash-balance bookkeeping for the ladder stays the BNP file's job.
+- FUTURE: unlike the BNP FUTURES row (netted position, no fill date/price), this file gives `Trade Id` and a real per-contract fill `Price`, so a trade + 1 `NOTIONAL` leg is written (`Quantity` = contracts signed by `Side`, `multiplier` = 50 for ES).
+- OPTION: product `FX_OPTION`, 1 `NOTIONAL` leg in the pair's base currency (`Currency Pair` column), quantity signed by `Side` (Buy = long = +), price = premium fill.
+- INTEREST_RATE_SWAP: direction is the sign of `Notional` itself (+ = pay fixed, − = receive fixed), not `Side` (always `'Buy'` in the reference sample, carries no direction here). `Notional` is already full-unit (not millions-scaled like this file's own `Quantity` column) — same scale as `trades.quantity` elsewhere. Leg shape mirrors `data/ingest/irs.py`'s BNP path (FIXED = `−quantity`, FLOAT = `+quantity`).
+
+`trades.source = 'XLSX'` for every blotter-sourced trade (the schema's `source` column is free text, not a checked enum; the blotter reuses the same literal `'XLSX'` value the xlsx-workbook futures loader below uses for `trade_id='XL-<row>'` rows — a naming overlap between two different files, tracked in `docs/open-questions.md` rather than resolved here). `trades.strategy` is `''` (no equivalent column in this file).
+
 ### BNP file → tables
+
+The BNP file is retained for the `positions` snapshot (the cash ladder's `CASH` balances — the BNP-vs-CALC Reconciliation panel no longer exists, see below), and for `BNP_BVAL` reconciliation marks (`data/bloomberg/bnp_marks.py`) — not as the primary trade source (see "Blotter → tables" above). `data/ingest/bnp.py` (FORWARD, IRS via `data/ingest/irs.py`) and `data/ingest/blotter.py` currently both still write `trades`/`trade_legs` for the same underlying FORWARD and IRS fills under different `trade_id` schemes when both files are loaded for overlapping trades; nothing in the pipeline de-duplicates them yet (open question, not silently resolved here — `docs/open-questions.md` item 55).
+
+The app's one upload control (`ui/uploads.py`) accepts **both** formats, auto-detected by column shape (`data/ingest/upload.py::detect_format`, never filename — the two column signatures are disjoint): the blotter is the real-time primary trade source, the BNP file is a once-daily EOD-Hong-Kong snapshot of the same book, kept because it is the only source of today's actual cash balance and because the two should agree at end of day (user decision 2026-09-16). `engine/pnl/reconcile.py::reconcile_blotter_vs_bnp`, surfaced as a collapsible panel on the Ladder tab, nets each source's trades per instrument and flags pairs outside tolerance — a new, small, purpose-built check, not a revival of the deleted Reconciliation tab or of `engine/pnl/pnl.py` (see `docs/open-questions.md` item 60).
 
 File dated `T` is the **T−1 close** snapshot (`HA_PNL_20260818.csv` contains trades through 2026-08-17). Filter `Fund = NMMF`; `Financial Type ∈ {FORWARD, CURRENCY, FUTURES, INTEREST_RATE_SWAP}`. `Base Currency` is always USD. Column `Unnamed: 136` and `Column 2` are empty.
 
@@ -161,6 +184,8 @@ FUTURES rows: one netted row per contract. `Quantity` = contracts, `Trade Factor
 INTEREST_RATE_SWAP rows: `Symbol` = `IRSOIS-USD-<id>` (one instrument per swap); description `IRS NA <start mm/dd/yyyy> <end mm/dd/yyyy> <fixed rate> <ccy>` — **no pay/receive flag**. `Quantity` = notional in millions, `Position` = notional, `Price` = PV per 1m notional, `MV Base = Quantity × Price`. Priced by Markit.
 
 ### xlsx → tables
+
+This section documents `data/raw/HA-portfolio vJean.xlsx`, the Excel calculator itself (not the blotter — see "Blotter → tables" above). Its workbook futures-fill loader, `data/ingest/xlsx_futures.py`, was removed 2026-09-16: its only caller, `ui/tabs/reconciliation.py`, was deleted the same day, and the blotter (`data/ingest/blotter.py`, wired into the app's one upload control via `data/ingest/upload.py::import_blotter`) now carries futures fills directly per-trade, superseding the workbook path entirely (see "Blotter → tables" above). The xlsx workbook now feeds only the literal workbook arithmetic in `engine/pnl/pnl.py`, which per the "User-authorised direction" note at the top of this file is retained for the Reconciliation-tab arithmetic only — note the Reconciliation tab itself no longer exists in the UI (removed 2026-09-16); this arithmetic is currently unreachable from the app and its status is unresolved (see `docs/open-questions.md`).
 
 `All FX trades` (A `Date`, B pair, C `Quantity`, D `tenor`, E `fill`): `Quantity` is **signed USD notional for every pair** (AUDUSD +2,000,000 = buy AUD against 2,000,000 USD; BNP shows the same trade as +2,854,667 AUD). Futures rows: `C = contracts × 50 × fill` (contracts recoverable from the cell formula). `trade_id = 'XL-<row>'`. Legs are derived: USDXXX → (USD, `C`) and (XXX, `−C × fill`); XXXUSD → (XXX, `C / fill`) and (USD, `−C`); crosses (EURSEK) → (EUR, `C / EURUSD_spot`) and (SEK, `−EUR amount × fill`). `settle_date = tenor`.
 

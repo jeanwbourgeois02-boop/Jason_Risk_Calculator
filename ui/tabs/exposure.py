@@ -695,7 +695,8 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
                      futures: Optional[dict] = None,
                      futures_details: Optional[Dict[str, dict]] = None,
                      fallback_ccys: Optional[set] = None,
-                     forward_proxy_ccys: Optional[set] = None) -> html.Div:
+                     forward_proxy_ccys: Optional[set] = None,
+                     exposure_records: Optional[List[dict]] = None) -> html.Div:
     """Ladder tab body per the user's 2026-09-15 "Reorder the Ladder tab" decision
     (items 1-2, superseding the same-day C-split layout below): three headline cards,
     then three tables in this order -- (a) the currency ladder grid with its summary
@@ -712,7 +713,15 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     (item D); `forward_proxy_ccys` (coordinator addition, item 5) is the set priced from
     the earliest-settle_date BNP_BVAL forward outright when even that SPOT is missing
     (AUD/EUR/GBP/XAU on this file). Both are marked '*' in the risk table -- a caller
-    only needs to distinguish them in the headline caption's counts, never silently."""
+    only needs to distinguish them in the headline caption's counts, never silently.
+
+    `exposure_records` (optional): a second record set built with `settle_date > as_of`
+    (engine.ladder.exposure_adapter.exposure_records_from_db), used only for the
+    delta/exposure math (headline Net/Gross card and the risk-and-scenarios table).
+    `records` (`settle_date >= as_of`) still drives the grid display (`combined_table`)
+    unchanged -- a leg settling exactly on `as_of` is cash that moves today (still shown
+    in the grid) but carries no delta by close (excluded from Net/Gross and the risk
+    table). Defaults to `records` when not supplied, for backward compatibility."""
     from engine.ladder.exposure import build_exposure
     from engine.pnl.stress import load_scenarios, futures_pct_by_scenario
     rates = rates or {}
@@ -721,15 +730,17 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     forward_proxy_ccys = forward_proxy_ccys or set()
     all_fallback = fallback_ccys | forward_proxy_ccys
     result = build_exposure(records, rates)
+    exposure_result = (build_exposure(exposure_records, rates)
+                       if exposure_records is not None else result)
     empty = result.ladder.empty
     scenarios = load_scenarios()
     main = (combined_table(result, records, sort, all_fallback) if not empty
             else html.P("No open FX trades for this as-of date.", className="section-kicker"))
     return html.Div(className="section", children=[
-        headline_numbers(result, futures, fallback_ccys, forward_proxy_ccys),
+        headline_numbers(exposure_result, futures, fallback_ccys, forward_proxy_ccys),
         html.H4("Cash ladder: spot, forwards, swaps and cash balances"),
         main,
         html.H4("Open futures"),
         futures_table(futures, futures_details),
-        combined_risk_table(result, futures, scenarios, futures_pct_by_scenario(scenarios), all_fallback),
+        combined_risk_table(exposure_result, futures, scenarios, futures_pct_by_scenario(scenarios), all_fallback),
     ])

@@ -3,14 +3,15 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Four tabs per docs/BUILD_PLAN.md section 5 ("Tabs (layer 3)"): Ladder, Blotter,
-Market data, Reconciliation. A header (ui/tabs/header.py) sits above the tabs on
-every view, showing LTD / Daily / 5d / MTD / YTD / trading from engine.pnl.ledger.
+Three tabs per docs/BUILD_PLAN.md section 5 ("Tabs (layer 3)"), Reconciliation
+removed 2026-09-16 (the old Excel workbook it existed to cross-check is no longer
+in use): Ladder, Blotter, Market data. A header (ui/tabs/header.py) sits above the
+tabs on every view, showing LTD / Daily / 5d / MTD / YTD / trading from
+engine.pnl.ledger.
 
 The "Overall book" tab and the six-tab CLAUDE.md layout are retired by
 docs/BUILD_PLAN.md (2026-09-15): that plan supersedes CLAUDE.md's "Six tabs as
-views" table as the app's headline structure. The workbook reconciliation view
-(formerly the Overall book / P&L tab) now lives inside the Reconciliation tab.
+views" table as the app's headline structure.
 """
 from __future__ import annotations
 
@@ -22,13 +23,13 @@ from typing import Union
 import dash
 from dash import Input, Output, dcc, html
 
-from ui.tabs import blotter, cash_ladder, header, market_data, reconciliation
+from ui.tabs import blotter, cash_ladder, header, market_data
 from ui import uploads
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
 
-VISIBLE_TABS = ["Ladder", "Blotter", "Market data", "Reconciliation"]
+VISIBLE_TABS = ["Ladder", "Blotter", "Market data"]
 
 
 def get_db_path() -> Path:
@@ -155,21 +156,19 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     date -- the ladder is a "what's open today" view, not a snapshot replay, and
     `engine.ladder.exposure_adapter.records_from_db` already selects trades open on
     whatever as_of it is given (trade_date <= as_of <= settle_date). Other tabs
-    (Blotter/Market data/Reconciliation) keep defaulting to the last uploaded
-    snapshot date, since they render the BNP file itself."""
+    (Blotter/Market data) keep defaulting to the last uploaded snapshot date, since
+    they render the loaded trade file itself."""
     snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     ladder_default_date = cash_ladder.today_ny()
     tab_builders = {
         "Ladder": cash_ladder.build_layout,
         "Blotter": blotter.build_layout,
         "Market data": market_data.build_layout,
-        "Reconciliation": reconciliation.build_layout,
     }
     tab_defaults = {
         "Ladder": ladder_default_date,
         "Blotter": snapshot_date,
         "Market data": snapshot_date,
-        "Reconciliation": snapshot_date,
     }
     tabs = [dcc.Tab(label=label, value=label, className="tab", selected_className="tab--selected")
             for label in VISIBLE_TABS]
@@ -196,14 +195,31 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     resolved = Path(db_path) if db_path is not None else get_db_path()
     ensure_schema(resolved)
     data = load_summary(resolved)
-    app = dash.Dash(__name__)
+    # suppress_callback_exceptions: the Blotter sub-tabs render their tables, filter
+    # dropdowns and row-detail panels dynamically inside the `_update` callback's own
+    # Output (blotter.CONTENT_ID children), not in the static app.layout tree -- Dash's
+    # default id validation rejects callbacks whose Input/Output/State ids aren't present
+    # in the initial layout, which silently no-ops every filter dropdown, the row-click
+    # detail panel and the P&L strip on every Blotter sub-tab (found 2026-09-16: the
+    # filter callback logic itself was correct when called directly in Python, but never
+    # fired in the browser because of this). See CLAUDE.md ownership: this is app-wide
+    # config, not a per-tab fix.
+    # suppress_callback_exceptions: the Blotter sub-tabs render their tables, filter
+    # dropdowns and row-detail panels dynamically inside the `_update` callback's own
+    # Output (blotter.CONTENT_ID children), not in the static app.layout tree -- Dash's
+    # default id validation rejects callbacks whose Input/Output/State ids aren't present
+    # in the initial layout, which silently no-ops every filter dropdown, the row-click
+    # detail panel and the P&L strip on every Blotter sub-tab (found 2026-09-16: the
+    # filter callback logic itself was correct when called directly in Python, but never
+    # fired in the browser because of this). See CLAUDE.md ownership: this is app-wide
+    # config, not a per-tab fix.
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
     app.layout = build_layout(data, db_path=resolved)
 
     header.register_callbacks(app, get_db_path=lambda: resolved)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
     blotter.register_callbacks(app, get_db_path=lambda: resolved)
     market_data.register_callbacks(app, get_db_path=lambda: resolved)
-    reconciliation.register_callbacks(app, get_db_path=lambda: resolved)
     uploads.register(app, get_db_path=lambda: resolved)
 
     # Mirror the Ladder tab's date picker into the header's as-of store so the header

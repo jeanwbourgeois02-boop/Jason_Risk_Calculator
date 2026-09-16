@@ -205,6 +205,13 @@ def test_records_from_db_matches_records_from_parse(parsed):
                      [tuple(vars(i).values()) for i in parsed.instruments.values()])
     conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [tuple(vars(t).values()) for t in parsed.trades])
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [tuple(vars(l).values()) for l in parsed.legs])
+    # 2026-09-16 (trades_official double-count fix): records_from_db reads
+    # trades_official, which excludes source='BNP' by design (BNP is no longer
+    # authoritative for live exposure). This test validates the DB round-trip
+    # reproduces records_from_parse's values faithfully -- it is not testing source
+    # filtering (that's engine/pnl/reconcile.py's job) -- so relabel to 'XLSX' rather
+    # than let every row vanish from trades_official and the comparison go vacuous.
+    conn.execute("UPDATE trades SET source = 'XLSX'")
     from_parse, _ = records_from_parse(parsed)
     from_db, unresolved = records_from_db(conn, "2026-08-17")
     key = lambda r: (r["trade_id"], r["currency"])

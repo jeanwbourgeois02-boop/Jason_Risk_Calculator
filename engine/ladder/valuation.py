@@ -25,7 +25,7 @@ def ladder_trade_valuation(conn: sqlite3.Connection, as_of_date: str,
     NDF amounts are notionals here and remain excluded from cash settlement flows.
     """
     priced = ltd_per_trade(conn, as_of_date, source=source, strict=False)
-    forward_ids = {row[0] for row in conn.execute("SELECT trade_id FROM trades WHERE product='FX_FWD'")}
+    forward_ids = {row[0] for row in conn.execute("SELECT trade_id FROM trades_official WHERE product='FX_FWD'")}
     priced = priced[priced["trade_id"].isin(forward_ids) & (priced["settle_date"] >= as_of_date)]
     if priced.empty:
         return pd.DataFrame(columns=DETAIL_COLUMNS)

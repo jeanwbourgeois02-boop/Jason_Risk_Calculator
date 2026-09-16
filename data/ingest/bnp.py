@@ -7,8 +7,10 @@ FORWARD and INTEREST_RATE_SWAP rows produce instruments, trades and trade_legs (
 via ``data/ingest/irs.py``; IRS produces no positions row -- see that module). FORWARD
 additionally produces a positions row. CURRENCY and FUTURES rows produce instruments and
 positions only: the PB snapshot carries no fill date or per-fill price for futures (one
-netted row per contract), so futures fills come from the xlsx blotter, never from this
-file. A row whose Financial Type is INTEREST_RATE_SWAP but that fails to parse (regex
+netted row per contract), so futures fills come from the blotter (``data/ingest/blotter.py``,
+parsing ``data/raw/new_sample_trades.csv``-shaped files), never from this file. The older
+xlsx-workbook futures-fill loader is retired in favor of the blotter. A row whose Financial Type is
+INTEREST_RATE_SWAP but that fails to parse (regex
 mismatch, zero Position, etc.) still counts in ``n_skipped_irs``, mirroring how a
 malformed FORWARD row is rejected rather than coerced.
 

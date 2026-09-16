@@ -11,7 +11,7 @@ from typing import Union
 
 TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "positions", "instrument_theme",
           "curve_quotes")
-VIEWS = ("marks_official",)
+VIEWS = ("marks_official", "trades_official")
 
 # Official source per mark_type (CLAUDE.md "Official marks"). BNP_BVAL is never official.
 # PAR_RATE / PV_USD / DV01_USD: changed from BBG_BDH to QL_PRICER per housekeeper
@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS positions (
 """
 
 
-def _marks_official_ddl() -> str:
+def _views_ddl() -> str:
     cases = "\n".join(
         f"      WHEN '{mt}' THEN '{src}'" for mt, src in OFFICIAL_MARK_SOURCE.items()
     )
@@ -145,6 +145,20 @@ FROM marks
 WHERE source = CASE mark_type
 {cases}
     END;
+
+-- trades_official (user decision 2026-09-16): the app now has two trade sources for the
+-- same book -- the real-time blotter ('XLSX') and the once-daily BNP EOD-Hong-Kong
+-- snapshot ('BNP'). BNP is kept for its `positions` cash-balance snapshot and for
+-- BNP_BVAL reconciliation marks, but is NOT authoritative for trade-level exposure/P&L
+-- any more: the blotter is the primary trade source and is expected to carry every live
+-- trade BNP also carries, under a different trade_id scheme (docs/open-questions.md item
+-- 55 -- not yet deduplicated). Without this view, a trade loaded from both sources would
+-- be summed twice into the ladder/delta/P&L. Every engine query that computes real
+-- exposure or P&L must read `trades_official`, never `trades` directly, with the sole
+-- exception of engine/pnl/reconcile.py, which explicitly needs both sources to compare
+-- them against each other.
+CREATE VIEW IF NOT EXISTS trades_official AS
+SELECT * FROM trades WHERE source != 'BNP';
 """
 
 
@@ -224,7 +238,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create all tables and the marks_official view if absent; enable foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(_DDL + _marks_official_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
+    conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
     _migrate_columns(conn)
     conn.commit()
 

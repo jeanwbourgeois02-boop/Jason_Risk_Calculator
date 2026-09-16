@@ -2,11 +2,11 @@
 ("Tabs (layer 3)") and the Task C5 wiring prompt.
 
 These are smoke tests only: each tab module (ui/tabs/cash_ladder.py, blotter.py,
-market_data.py, reconciliation.py, header.py) owns its own detailed tests
-(tests/test_ui_ladder.py etc.). This file only checks that ui/app.py assembles them
-correctly -- layout builds with and without a database, the four tabs are present in
-the right order, the header is present, no component id collides across modules, and
-each module's register_callbacks is invoked exactly once by create_app().
+market_data.py, header.py) owns its own detailed tests (tests/test_ui_ladder.py
+etc.). This file only checks that ui/app.py assembles them correctly -- layout
+builds with and without a database, the three tabs are present in the right order,
+the header is present, no component id collides across modules, and each module's
+register_callbacks is invoked exactly once by create_app().
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ dash = pytest.importorskip("dash", reason="dash is not installed in this environ
 
 from data.ingest import schema  # noqa: E402
 from ui import app as uiapp  # noqa: E402
-from ui.tabs import blotter, cash_ladder, header, market_data, reconciliation  # noqa: E402
+from ui.tabs import blotter, cash_ladder, header, market_data  # noqa: E402
 from ui import uploads  # noqa: E402
 
 
@@ -163,8 +163,8 @@ def test_four_tabs_present_in_order(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     layout = uiapp.build_layout(uiapp.load_summary(db_path))
-    assert _tab_labels(layout) == ["Ladder", "Blotter", "Market data", "Reconciliation"]
-    assert uiapp.VISIBLE_TABS == ["Ladder", "Blotter", "Market data", "Reconciliation"]
+    assert _tab_labels(layout) == ["Ladder", "Blotter", "Market data"]
+    assert uiapp.VISIBLE_TABS == ["Ladder", "Blotter", "Market data"]
 
 
 def test_no_overall_book_or_placeholder_tabs(tmp_path):
@@ -236,7 +236,7 @@ def test_tab_bodies_always_present_and_tabs_have_no_children(tmp_path):
     bodies = _find_tab_bodies(layout)
     assert bodies is not None
     slugs = {getattr(b, "id", None) for b in bodies.children}
-    assert slugs == {"tab-body-ladder", "tab-body-blotter", "tab-body-market-data", "tab-body-reconciliation"}
+    assert slugs == {"tab-body-ladder", "tab-body-blotter", "tab-body-market-data"}
 
 
 def test_tab_show_hide_callback_toggles_bodies(tmp_path):
@@ -369,7 +369,7 @@ def test_create_app_registers_each_module_once(tmp_path, monkeypatch):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
 
-    calls = {"header": 0, "cash_ladder": 0, "blotter": 0, "market_data": 0, "reconciliation": 0}
+    calls = {"header": 0, "cash_ladder": 0, "blotter": 0, "market_data": 0}
 
     def _counted(name, original):
         def wrapper(app, get_db_path):
@@ -381,11 +381,10 @@ def test_create_app_registers_each_module_once(tmp_path, monkeypatch):
     monkeypatch.setattr(cash_ladder, "register_callbacks", _counted("cash_ladder", cash_ladder.register_callbacks))
     monkeypatch.setattr(blotter, "register_callbacks", _counted("blotter", blotter.register_callbacks))
     monkeypatch.setattr(market_data, "register_callbacks", _counted("market_data", market_data.register_callbacks))
-    monkeypatch.setattr(reconciliation, "register_callbacks", _counted("reconciliation", reconciliation.register_callbacks))
 
     uiapp.create_app(db_path=db_path, start_feed=False)
 
-    assert calls == {"header": 1, "cash_ladder": 1, "blotter": 1, "market_data": 1, "reconciliation": 1}
+    assert calls == {"header": 1, "cash_ladder": 1, "blotter": 1, "market_data": 1}
 
 
 def test_create_app_builds_with_missing_database(tmp_path):
@@ -405,6 +404,89 @@ def test_create_app_no_feed_by_default(tmp_path):
 def test_get_db_path_default(monkeypatch):
     monkeypatch.delenv("RISK_DB", raising=False)
     assert uiapp.get_db_path() == uiapp.DEFAULT_DB_PATH
+
+
+# ---------------------------------------------------------------- callback exception config
+# 2026-09-16: the Blotter sub-tabs' table/filter-dropdown/detail-panel ids only ever
+# exist inside a callback's own Output (ui.tabs.blotter.CONTENT_ID's children), never in
+# the static app.layout tree. Without suppress_callback_exceptions=True, Dash silently
+# rejects every callback wired to those ids client-side -- the filter dropdowns looked
+# present but did nothing. This is a config regression test, not a logic test: it
+# guards the one-line fix directly rather than re-deriving it from browser behaviour.
+
+
+def test_create_app_suppresses_callback_exceptions(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    assert app.config.suppress_callback_exceptions is True
+
+
+def test_blotter_filter_dropdown_end_to_end_narrows_table(tmp_path):
+    """Full HTTP round trip through the Flask test client (not just calling the Python
+    callback function directly) -- this is the level at which the bug actually showed
+    up: Dash's callback-id validation runs at this layer, so a plain function-level
+    call of the filter callback would have looked fine even while it 500'd in the
+    browser."""
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    _seed(conn)
+    conn.execute(
+        "INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')"
+    )
+    conn.execute(
+        "INSERT INTO trades VALUES "
+        "('t2','BNP','EURUSD','FX_SPOT','t2','2026-08-17',500000,1.10,"
+        "'BNPP-IPBFX-NMMF','BNP','HAHY7','trader','desc','')"
+    )
+    conn.executemany(
+        "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            ("t2", 1, "FX_NEAR", "EUR", 500000, "2026-08-17", "2026-08-17", 1.10, 1),
+            ("t2", 2, "FX_NEAR", "USD", -550000, "2026-08-17", "2026-08-17", 1.10, 1),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO marks VALUES "
+        "('2026-08-17','EURUSD','2026-08-17','SPOT',1.11,'BBG_BFXFORWARD','2026-08-17T15:00:00-04:00')"
+    )
+    # 'XLSX' (2026-09-16, trades_official double-count fix): the Blotter tab's priced
+    # value book now reads trades_official, which excludes source='BNP' by design.
+    # This test is about the filter dropdown UI mechanics, not source filtering.
+    conn.execute("UPDATE trades SET source = 'XLSX'")
+    conn.commit()
+    conn.close()
+
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    client = app.server.test_client()
+    assert client.get("/").status_code == 200
+
+    import json as _json
+
+    payload = {
+        "output": "..blotter-datatable-total.data...blotter-datatable-total.tooltip_data..",
+        "outputs": [
+            {"id": "blotter-datatable-total", "property": "data"},
+            {"id": "blotter-datatable-total", "property": "tooltip_data"},
+        ],
+        "inputs": [
+            {"id": "blotter-datatable-total-filter-instrument_id", "property": "value", "value": ["USDJPY"]},
+            {"id": "blotter-datatable-total-filter-side", "property": "value", "value": []},
+            {"id": "blotter-datatable-total-filter-status", "property": "value", "value": []},
+            {"id": "blotter-datatable-total-filter-product", "property": "value", "value": []},
+            {"id": "blotter-datatable-total-filter-strategy", "property": "value", "value": []},
+            {"id": "blotter-datatable-total-filter-theme", "property": "value", "value": []},
+        ],
+        "state": [{"id": "blotter-date", "property": "date", "value": "2026-08-17"}],
+        "changedPropIds": ["blotter-datatable-total-filter-instrument_id.value"],
+    }
+    resp = client.post("/_dash-update-component", data=_json.dumps(payload), content_type="application/json")
+    assert resp.status_code == 200
+    body = _json.loads(resp.get_data(as_text=True))
+    rows = body["response"]["blotter-datatable-total"]["data"]
+    assert rows, "filter returned no rows"
+    assert {r["instrument_id"] for r in rows} == {"USDJPY"}
 
 
 def test_get_db_path_env_override(monkeypatch, tmp_path):
@@ -490,11 +572,78 @@ def test_net_gross_usd_matches_ladder_portfolio_totals(tmp_path):
     _seeded_db(db_path)
     conn = sqlite3.connect(db_path)
     try:
+        # net_gross_usd is exposure/delta math (settle_date > as_of): the seeded trade
+        # (settle_date == trade_date == as_of) settles on as_of itself, so it must NOT
+        # contribute -- add a second trade settling after as_of so the pair still has
+        # open delta to assert on (see
+        # test_leg_settling_on_as_of_excluded_from_net_gross_but_still_in_grid for the
+        # same-day exclusion itself).
+        conn.execute(
+            "INSERT INTO trades VALUES "
+            "('t2','BNP','USDJPY','FX_SPOT','t2','2026-08-17',2000000,147.10,"
+            "'BNPP-IPBFX-NMMF','BNP','HAHY7','trader','desc','')"
+        )
+        conn.executemany(
+            "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                ("t2", 1, "FX_NEAR", "USD", 2000000, "2026-08-17", "2026-08-20", 147.10, 1),
+                ("t2", 2, "FX_NEAR", "JPY", -294200000, "2026-08-17", "2026-08-20", 147.10, 1),
+            ],
+        )
+        conn.commit()
         result = cash_ladder.net_gross_usd(conn, "2026-08-17")
     finally:
         conn.close()
     assert result["available"] is True
     assert abs(result["net"]) == pytest.approx(result["gross"])  # single currency, single pair
+
+
+def test_leg_settling_on_as_of_excluded_from_net_gross_but_still_in_grid(tmp_path):
+    """CLAUDE.md 'Six tabs as views': the ladder grid uses settle_date >= as_of (a leg
+    settling today is still cash that moves today) but Net/Gross USD and per-currency
+    delta must use settle_date > as_of (no delta by close on the settlement day) --
+    engine/ladder/exposure_adapter.exposure_records_from_db vs records_from_db. t1
+    (seeded, settles 2026-08-17 = as_of) must appear in the grid record set but drop out
+    of the exposure record set and out of net_gross_usd; t2 (settles 2026-08-20, still
+    open) must appear in both and drive net_gross_usd's non-zero total."""
+    from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
+
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        # 'XLSX' (2026-09-16, trades_official double-count fix): records_from_db /
+        # exposure_records_from_db now read trades_official, which excludes
+        # source='BNP' by design. This test is about the settle_date >= vs > boundary,
+        # not source filtering, so relabel the seeded t1 too.
+        conn.execute("UPDATE trades SET source = 'XLSX'")
+        conn.execute(
+            "INSERT INTO trades VALUES "
+            "('t2','XLSX','USDJPY','FX_SPOT','t2','2026-08-17',2000000,147.10,"
+            "'BNPP-IPBFX-NMMF','BNP','HAHY7','trader','desc','')"
+        )
+        conn.executemany(
+            "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                ("t2", 1, "FX_NEAR", "USD", 2000000, "2026-08-17", "2026-08-20", 147.10, 1),
+                ("t2", 2, "FX_NEAR", "JPY", -294200000, "2026-08-17", "2026-08-20", 147.10, 1),
+            ],
+        )
+        conn.commit()
+
+        grid_records, _ = records_from_db(conn, "2026-08-17")
+        exposure_records, _ = exposure_records_from_db(conn, "2026-08-17")
+
+        assert {r["trade_id"] for r in grid_records} == {"t1", "t2"}
+        assert {r["trade_id"] for r in exposure_records} == {"t2"}
+
+        result = cash_ladder.net_gross_usd(conn, "2026-08-17")
+    finally:
+        conn.close()
+    assert result["available"] is True
+    # Only t2's 2,000,000 USD notional drives Net/Gross -- t1 (settling on as_of) is
+    # excluded from the delta math even though it is still present in the grid above.
+    assert result["gross"] == pytest.approx(2_000_000, rel=1e-3)
 
 
 def test_scoped_period_pnl_previous_day_is_ltd_t1_minus_ltd_t2(tmp_path):
@@ -609,125 +758,6 @@ def test_bbg_diagnostics_entry_point_prefers_real_module_now_that_it_exists():
     assert fn is not market_data._run_bloomberg_diagnostics_placeholder
 
 
-def _futures_confirm_callback(app):
-    cb = app.callback_map["reconciliation-futures-result.children"]["callback"]
-    return getattr(cb, "__wrapped__", cb)
-
-
-class _FakeImportResult(int):
-    """Mimics data.ingest.xlsx_futures.ImportResult (int subclass + .issues/.messages)."""
-
-    def __new__(cls, inserted, messages):
-        obj = int.__new__(cls, inserted)
-        obj._messages = list(messages)
-        return obj
-
-    @property
-    def messages(self):
-        return list(self._messages)
-
-
-def test_futures_confirm_clean_upload_shows_plain_success_message(tmp_path, monkeypatch):
-    """No skipped rows -> the existing simple success string, no warning panel."""
-    db_path = tmp_path / "risk.db"
-    app = uiapp.create_app(db_path=db_path, start_feed=False)
-    fn = _futures_confirm_callback(app)
-
-    monkeypatch.setattr(
-        "data.ingest.xlsx_futures.load_futures_fills",
-        lambda path, conn: _FakeImportResult(4, []),
-    )
-    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    out = fn(1, contents, "workbook.xlsx")
-    assert out == "Imported 4 new futures fill(s) from workbook.xlsx."
-
-
-# ---------------------------------------------------------------- reconciliation layout
-# (2026-09-16 user decision: the as-of date picker confusingly sat directly above the
-# futures-import button, though it only ever drives the reconciliation tables below --
-# data.ingest.xlsx_futures.load_futures_fills() reads trade dates from the workbook
-# rows and never touches this UI field. The date picker moves into its own toolbar;
-# the import card stands alone with just choose-file + Confirm.)
-
-
-def test_futures_import_control_has_no_date_picker_and_only_upload_plus_confirm():
-    card = reconciliation.futures_import_control()
-    ids = _all_ids(card)
-    assert reconciliation.DATE_PICKER_ID not in ids
-    assert reconciliation.FUTURES_UPLOAD_ID in ids
-    assert reconciliation.FUTURES_CONFIRM_ID in ids
-
-
-def test_reconciliation_layout_keeps_date_picker_separate_from_upload_card():
-    layout = reconciliation.build_layout(default_date="2026-08-18")
-    ids = _all_ids(layout)
-    # The date picker still exists and still drives the tables (same component id
-    # the content callback listens on), just no longer bundled into the upload card.
-    assert reconciliation.DATE_PICKER_ID in ids
-    assert reconciliation.FUTURES_UPLOAD_ID in ids
-    assert reconciliation.FUTURES_CONFIRM_ID in ids
-
-
-def test_reconciliation_content_callback_still_driven_by_date_picker(tmp_path):
-    """Moving the date picker must not break the reconciliation tables' data source:
-    the content callback is still wired to DATE_PICKER_ID as an Input."""
-    db_path = tmp_path / "risk.db"
-    _seeded_db(db_path)
-    app = uiapp.create_app(db_path=db_path, start_feed=False)
-    key = f"{reconciliation.CONTENT_CONTAINER_ID}.children"
-    assert key in app.callback_map
-    input_ids = [dep["id"] for dep in app.callback_map[key]["inputs"]]
-    assert reconciliation.DATE_PICKER_ID in input_ids
-
-
-def test_futures_confirm_with_skipped_rows_shows_warning_panel(tmp_path, monkeypatch):
-    """Rows skipped -> a non-blocking summary panel listing the plain-English messages,
-    not styled as an error (valid rows still loaded)."""
-    db_path = tmp_path / "risk.db"
-    app = uiapp.create_app(db_path=db_path, start_feed=False)
-    fn = _futures_confirm_callback(app)
-
-    messages = [
-        "Row 3, column 'fill': expected a number, found 'TBD' — this row was skipped.",
-        "Row 9, column 'Date': could not parse date — this row was skipped.",
-    ]
-    monkeypatch.setattr(
-        "data.ingest.xlsx_futures.load_futures_fills",
-        lambda path, conn: _FakeImportResult(12, messages),
-    )
-    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    out = fn(1, contents, "workbook.xlsx")
-
-    assert isinstance(out, dash.html.Div)
-    assert out.className == "source-result--warning"
-    assert "error" not in (out.className or "")
-    rendered = str(out)
-    assert "12" in rendered and "2" in rendered
-    for msg in messages:
-        assert msg in rendered
-
-
-def test_futures_confirm_hard_failure_shows_plain_message_no_traceback(tmp_path, monkeypatch):
-    """A hard failure (e.g. missing sheet/columns) must never surface a raw exception
-    string or traceback -- only a plain-English message."""
-    db_path = tmp_path / "risk.db"
-    app = uiapp.create_app(db_path=db_path, start_feed=False)
-    fn = _futures_confirm_callback(app)
-
-    def _boom(path, conn):
-        raise KeyError("'All FX trades' sheet not found -- some very internal detail")
-
-    monkeypatch.setattr("data.ingest.xlsx_futures.load_futures_fills", _boom)
-    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    out = fn(1, contents, "workbook.xlsx")
-
-    assert isinstance(out, dash.html.Span)
-    rendered = str(out)
-    assert "Traceback" not in rendered
-    assert "'All FX trades' sheet not found" not in rendered
-    assert "Import failed" in rendered
-
-
 # ---------------------------------------------------------------- BNP upload summary
 # (2026-09-16 fix: a collaborator's change routed import_report()'s new/identical/
 # excluded/closed-line summary to log.info only -- the app has no logging handler
@@ -743,27 +773,144 @@ def _report_confirm_callback(app):
     return getattr(cb, "__wrapped__", cb)
 
 
-def test_bnp_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
+def test_blotter_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
     db_path = tmp_path / "risk.db"
     app = uiapp.create_app(db_path=db_path, start_feed=False)
     fn = _report_confirm_callback(app)
 
-    summary = ("Imported 2026-08-17: 3 new trades, 2 new positions, 1 new BNP marks. "
-               "0 identical records already present. Excluded: 0 malformed IRS rows, "
-               "0 other unsupported rows, 0 rows from other funds. Futures are positions only.")
-    monkeypatch.setattr("ui.uploads.import_report", lambda *a, **k: summary)
+    summary = ("Imported blotter.csv: 2 trades (1 forwards, 1 futures, 0 options, 0 rate swaps), "
+               "4 legs. 0 currency rows seen (no position snapshot -- this file has no EOD balance "
+               "grain). Excluded: 0 rows from other funds/status, 0 malformed IRS rows, "
+               "0 other unsupported rows.")
+    monkeypatch.setattr("ui.uploads.sniff_format", lambda payload, filename: ("blotter", None))
+    monkeypatch.setattr("ui.uploads.import_blotter", lambda *a, **k: summary)
     monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
-    monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "2026-08-17", "trades": 3, "positions": 2})
+    monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "none", "trades": 2, "positions": 0})
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    result, source_line, history, as_of, stage_style = fn(1, contents, "HA_PNL_20260818.csv", "2026-08-17", None)
+    result, source_line, history, ladder_date, stage_style = fn(1, contents, "blotter.csv", None, None)
 
     # The loader's summary must actually be visible in the rendered result -- not "",
     # not only passed to a logger.
     assert isinstance(result, dash.html.Div)
     assert result.className == "source-result--info"
     assert summary in str(result)
-    assert as_of == "2026-08-17"
+    assert source_line == "Loaded: 2 trades in database (no BNP position snapshot)."
+    assert ladder_date is dash.no_update
+
+
+def test_blotter_confirm_surfaces_clean_rejection(tmp_path, monkeypatch):
+    # import_blotter raises a plain ValueError when the file isn't blotter-shaped; the
+    # UI must show that message, not a raw traceback, and must not gate on any date.
+    db_path = tmp_path / "risk.db"
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    fn = _report_confirm_callback(app)
+
+    def _reject(*a, **k):
+        raise ValueError("This file is not a trade blotter. Missing columns: Fin Type, Status, Trade Id")
+
+    monkeypatch.setattr("ui.uploads.sniff_format", lambda payload, filename: ("blotter", None))
+    monkeypatch.setattr("ui.uploads.import_blotter", _reject)
+    monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
+
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    result, source_line, history, ladder_date, stage_style = fn(1, contents, "not-a-blotter.csv", None, None)
+
+    assert "not a trade blotter" in str(result)
+    assert source_line is dash.no_update
+
+
+def test_selected_shows_filename_with_no_date_ui_for_blotter(monkeypatch):
+    app = uiapp.create_app(db_path=None, start_feed=False)
+    key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
+    cb = app.callback_map[key]["callback"]
+    fn = getattr(cb, "__wrapped__", cb)
+
+    monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
+    monkeypatch.setattr(uploads, "sniff_format", lambda payload, filename: ("blotter", None))
+
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    stage_style, fname, date_wrap_style, manual_value, date_store, result = fn(contents, "blotter.csv")
+
+    assert stage_style == {}
+    assert fname == "blotter.csv"
+    assert date_wrap_style == {"display": "none"}  # no date picker for a blotter file
+    assert date_store is None
+    assert result == ""
+
+
+def test_selected_shows_date_picker_for_bnp_with_recognisable_filename(monkeypatch):
+    app = uiapp.create_app(db_path=None, start_feed=False)
+    key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
+    cb = app.callback_map[key]["callback"]
+    fn = getattr(cb, "__wrapped__", cb)
+
+    monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
+    monkeypatch.setattr(uploads, "sniff_format", lambda payload, filename: ("bnp", None))
+    monkeypatch.setattr(uploads, "suggested_date", lambda filename: "2026-08-17")
+
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    stage_style, fname, date_wrap_style, manual_value, date_store, result = fn(contents, "HA_PNL_20260818.csv")
+
+    assert stage_style == {}
+    assert date_wrap_style == {"display": "none"}  # date resolved silently from the filename
+    assert date_store == "2026-08-17"
+
+
+def test_selected_shows_manual_date_input_for_bnp_unrecognisable_filename(monkeypatch):
+    app = uiapp.create_app(db_path=None, start_feed=False)
+    key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
+    cb = app.callback_map[key]["callback"]
+    fn = getattr(cb, "__wrapped__", cb)
+
+    monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
+    monkeypatch.setattr(uploads, "sniff_format", lambda payload, filename: ("bnp", None))
+    monkeypatch.setattr(uploads, "suggested_date", lambda filename: None)
+
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    stage_style, fname, date_wrap_style, manual_value, date_store, result = fn(contents, "report.csv")
+
+    assert date_wrap_style == {}  # manual date input shown
+    assert date_store is None
+    assert "no recognisable date" in result
+
+
+def test_selected_shows_error_for_unrecognized_format(monkeypatch):
+    app = uiapp.create_app(db_path=None, start_feed=False)
+    key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
+    cb = app.callback_map[key]["callback"]
+    fn = getattr(cb, "__wrapped__", cb)
+
+    monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
+    monkeypatch.setattr(uploads, "sniff_format", lambda payload, filename: (None, None))
+
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    stage_style, fname, date_wrap_style, manual_value, date_store, result = fn(contents, "mystery.csv")
+
+    assert stage_style == {"display": "none"}
+    assert "doesn't match either recognized format" in str(result)
+
+
+def test_describe_source_positions_present():
+    assert uploads.describe_source({"as_of_date": "2026-08-17", "trades": 5, "positions": 3}) == \
+        "Loaded: BNP report as of 2026-08-17 (5 trades, 3 positions)."
+
+
+def test_describe_source_trades_only_no_positions():
+    assert uploads.describe_source({"as_of_date": "none", "trades": 5, "positions": 0}) == \
+        "Loaded: 5 trades in database (no BNP position snapshot)."
+
+
+def test_describe_source_nothing_loaded():
+    assert uploads.describe_source({"as_of_date": "none", "trades": 0, "positions": 0}) == \
+        "No data loaded yet."
+
+
+def test_upload_button_label_is_format_neutral():
+    layout = uploads.layout({}, db_path=None)
+    text = str(layout)
+    assert "Upload trade file" in text
+    assert "Upload BNP report" not in text
 
 
 def test_launch_configures_root_logging_handler():

@@ -26,7 +26,7 @@ def _make_db_with_irs(pay_fixed=True, with_bbg=True, bbg_value=1_050_000.0):
     )
     quantity = 10_000_000.0 if pay_fixed else -10_000_000.0
     conn.execute(
-        "INSERT INTO trades VALUES ('T1','BNP','IRSOIS-USD-1','IRS','T1','2026-06-01',"
+        "INSERT INTO trades VALUES ('T1','XLSX','IRSOIS-USD-1','IRS','T1','2026-06-01',"
         f"{quantity},0.04,'ACC','CPTY','HAHY7','TR','irs swap','')"
     )
     conn.execute(
@@ -117,7 +117,7 @@ def test_irs_rows_missing_marks_does_not_crash():
         "INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','9999-12-31')"
     )
     conn.execute(
-        "INSERT INTO trades VALUES ('T1','BNP','IRSOIS-USD-1','IRS','T1','2026-06-01',"
+        "INSERT INTO trades VALUES ('T1','XLSX','IRSOIS-USD-1','IRS','T1','2026-06-01',"
         "10000000,0.04,'ACC','CPTY','HAHY7','TR','irs swap','')"
     )
     conn.commit()
@@ -262,7 +262,7 @@ def test_build_layout_missing_mark_does_not_crash():
         "INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','9999-12-31')"
     )
     conn.execute(
-        "INSERT INTO trades VALUES ('T1','BNP','IRSOIS-USD-1','IRS','T1','2026-06-01',"
+        "INSERT INTO trades VALUES ('T1','XLSX','IRSOIS-USD-1','IRS','T1','2026-06-01',"
         "10000000,0.04,'ACC','CPTY','HAHY7','TR','irs swap','')"
     )
     conn.commit()

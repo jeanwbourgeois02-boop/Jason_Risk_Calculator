@@ -1,0 +1,2 @@
+- [Live DB state 2026-09-16](live-db-state-2026-09-16.md) — marks table has only BNP_BVAL rows; marks_official is empty; curves/curve_quotes empty; 0 IRS trades
+- [Diagnostics tool already built](diagnostics-tool-already-built.md) — tools/bbg_diagnostics.py + data/bloomberg/bbg_diagnostics.py wired live to the UI "Check Bloomberg connection" button, don't rebuild

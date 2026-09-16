@@ -114,26 +114,55 @@ def records_from_parse(res: ParseResult,
     return records, unresolved
 
 
-_DB_SQL = """
+_DB_SQL_GRID = """
 SELECT t.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
        t.strategy, t.account, i.is_ndf,
        l.ccy, l.amount, l.settle_date, l.settles_cash
-FROM trades t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.trade_date <= :as_of AND l.settle_date >= :as_of
 ORDER BY t.trade_id, l.leg_no
 """
 
+# CLAUDE.md "Six tabs as views": the grid uses settle_date >= as_of (a leg settling
+# today is cash that moves today), but delta/exposure aggregation (Net USD, Gross USD,
+# per-currency delta -> anything that feeds build_exposure/summary/portfolio_totals)
+# must use settle_date > as_of (a leg settling on as_of carries no delta by close,
+# matching BNP dropping settled forwards -- mirrors engine/ladder/futures_delta.py).
+_DB_SQL_EXPOSURE = """
+SELECT t.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
+       t.strategy, t.account, i.is_ndf,
+       l.ccy, l.amount, l.settle_date, l.settles_cash
+FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+WHERE t.trade_date <= :as_of AND l.settle_date > :as_of
+ORDER BY t.trade_id, l.leg_no
+"""
+
+# Backward-compatible alias: historically the only query this module ran.
+_DB_SQL = _DB_SQL_GRID
+
 
 def records_from_db(conn, as_of_date: str,
-                    book_mapping: Dict[str, str] | None = None) -> Tuple[List[dict], List[Unresolved]]:
+                    book_mapping: Dict[str, str] | None = None, *,
+                    for_exposure: bool = False) -> Tuple[List[dict], List[Unresolved]]:
     """Same records as records_from_parse, read back from the SQLite tables the upload
     flow populates (trades / trade_legs / instruments). Read-only; no schema change.
-    Open trades only: trade_date <= as_of and settle_date >= as_of (matches the cash
-    ladder's `>=` rule). Field derivations are identical to records_from_parse: one
-    record per leg, priced at spot only (no P&L, no usd_entry_amount)."""
+
+    ``for_exposure=False`` (default): grid rule, trade_date <= as_of and
+    settle_date >= as_of (matches the cash ladder grid's `>=` rule) -- use this for the
+    Cash ladder tab display.
+
+    ``for_exposure=True``: delta rule, trade_date <= as_of and settle_date > as_of. Use
+    this for anything that feeds engine.ladder.exposure.build_exposure /
+    portfolio_totals / summary (Net USD, Gross USD, per-currency delta): a leg settling
+    exactly on as_of carries no delta by close of that day (CLAUDE.md "Six tabs as
+    views"; the `≥` vs `>` distinction is intentional).
+
+    Field derivations are identical to records_from_parse either way: one record per
+    leg, priced at spot only (no P&L, no usd_entry_amount)."""
     mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
+    sql = _DB_SQL_EXPOSURE if for_exposure else _DB_SQL_GRID
     by_trade: Dict[str, list] = {}
-    for r in conn.execute(_DB_SQL, {"as_of": as_of_date}).fetchall():
+    for r in conn.execute(sql, {"as_of": as_of_date}).fetchall():
         by_trade.setdefault(r[0], []).append(r)
     records: List[dict] = []
     unresolved: List[Unresolved] = []
@@ -154,3 +183,13 @@ def records_from_db(conn, as_of_date: str,
                 "is_ndf": int(is_ndf), "settles_cash": int(settles_cash),
             })
     return records, unresolved
+
+
+def exposure_records_from_db(conn, as_of_date: str,
+                             book_mapping: Dict[str, str] | None = None) -> Tuple[List[dict], List[Unresolved]]:
+    """records_from_db(..., for_exposure=True) under an explicit name, so callers that
+    only want delta/exposure aggregation (Net USD, Gross USD, per-currency delta -- i.e.
+    anything feeding engine.ladder.exposure.build_exposure / portfolio_totals /
+    summary) cannot accidentally pick up the grid's `>=` rule. The Cash ladder grid
+    itself must keep calling records_from_db(..., for_exposure=False) (the default)."""
+    return records_from_db(conn, as_of_date, book_mapping, for_exposure=True)

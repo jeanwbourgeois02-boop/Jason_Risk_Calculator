@@ -13,9 +13,11 @@ def _insert_instruments(conn, rows):
 
 def _insert_trade(conn, trade_id, instrument_id, product, trade_date, quantity, price,
                   strategy="HAHY7", theme=""):
+    # 'XLSX' (2026-09-16, trades_official double-count fix): ledger's open-trade
+    # queries now read trades_official, which excludes source='BNP' by design.
     conn.execute(
         "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (trade_id, "BNP", instrument_id, product, trade_id, trade_date, quantity, price,
+        (trade_id, "XLSX", instrument_id, product, trade_id, trade_date, quantity, price,
          "acc", "cp", strategy, "t", "d", theme),
     )
 

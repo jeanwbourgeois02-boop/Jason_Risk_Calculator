@@ -2,7 +2,7 @@
 
 A theme can be set on one trade (overrides that row only) or on an instrument (used as
 the default new trades in that pair inherit at load time -- see
-data/ingest/bnp.py::load and data/ingest/xlsx_futures.py::load_futures_fills).
+data/ingest/bnp.py::load and data/ingest/blotter.py::load).
 """
 from __future__ import annotations
 

@@ -88,8 +88,12 @@ def irs_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     empty_cols = ["trade_id", "instrument_id", "ccy", "quantity", "notional", "direction",
                   "par_rate", "pv_usd", "dv01_usd", "bbg_pv_usd", "recon_status"]
     trades = pd.read_sql_query(
+        # trades_official (2026-09-16): excludes source='BNP' so an IRS swap loaded
+        # from both the once-daily BNP snapshot and the real-time blotter under two
+        # different trade_ids (docs/open-questions.md item 55) is not listed, and its
+        # PV/DV01 not double-counted, twice.
         "SELECT t.trade_id, t.instrument_id, i.base_ccy AS ccy, t.quantity "
-        "FROM trades t JOIN instruments i ON i.instrument_id = t.instrument_id "
+        "FROM trades_official t JOIN instruments i ON i.instrument_id = t.instrument_id "
         "WHERE t.product = 'IRS' ORDER BY t.trade_id",
         conn,
     )

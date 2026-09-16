@@ -79,7 +79,7 @@ def ltd_per_trade(conn: sqlite3.Connection, as_of_date: str,
                t.price AS fill,t.product,i.base_ccy,i.quote_ccy,i.multiplier,
                (SELECT SUM(u.amount) FROM trade_legs u
                 WHERE u.trade_id=t.trade_id AND u.ccy='USD') AS usd_entry
-        FROM trades t JOIN instruments i ON i.instrument_id=t.instrument_id
+        FROM trades_official t JOIN instruments i ON i.instrument_id=t.instrument_id
         JOIN trade_legs l ON l.trade_id=t.trade_id AND l.leg_no=1
         WHERE t.product IN ('FX_FWD','FUTURE') AND t.trade_date<=:as_of
         """, conn, params={"as_of": as_of_date})

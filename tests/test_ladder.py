@@ -26,6 +26,16 @@ NDF_CCYS = {"BRL", "TWD", "KRW", "IDR"}
 def real_conn():
     conn = schema.connect(":memory:")
     bnp.load(RAW, conn, as_of_date=AS_OF)
+    # Relabelled to 'XLSX' (2026-09-16, trades_official double-count fix): these tests
+    # validate cash_ladder/delta_per_ccy's aggregation math against a real, complex
+    # dataset -- they are not testing which trade *source* counts (that has its own
+    # tests, e.g. test_pnl_reconcile.py). trades_official excludes source='BNP' by
+    # design now (BNP is no longer authoritative for live trade exposure -- see
+    # data/ingest/schema.py's trades_official view), so loading the real file as
+    # 'BNP' unmodified would make every trades_official-backed query in this module
+    # see zero rows and these tests would no longer exercise the real math at all.
+    conn.execute("UPDATE trades SET source = 'XLSX'")
+    conn.commit()
     yield conn
     conn.close()
 
@@ -232,6 +242,68 @@ def test_cash_rows_grouped_by_ccy_settle_date_and_filtered_by_source():
     calc_usd = calc_ladder[(calc_ladder["kind"] == "CASH") & (calc_ladder["ccy"] == "USD")]
     assert len(calc_usd) == 1
     assert math.isclose(calc_usd["amount"].iloc[0], 999_999.0)
+
+
+def test_records_from_db_settle_on_as_of_grid_vs_exposure_boundary():
+    """CLAUDE.md 'Six tabs as views': the grid keeps settle_date >= as_of (a leg
+    settling today is cash that moves today) but delta/exposure aggregation
+    (build_exposure / summary / portfolio_totals: Net USD, Gross USD, per-currency
+    delta) must use settle_date > as_of (a leg settling on as_of carries no delta by
+    close). A leg settling exactly on as_of should appear in the grid path but be
+    excluded from the exposure path -- and that exclusion must actually reach
+    portfolio_totals, not just the raw record list."""
+    from engine.ladder.exposure import build_exposure, portfolio_totals
+    from engine.ladder.exposure_adapter import exposure_records_from_db, records_from_db
+
+    conn = _mk_conn()
+    _insert_instrument(conn, "AUDUSD", "AUD", "USD")
+    _insert_trade(conn, "t1", "AUDUSD", "FX_FWD", 100.0)
+    # settles exactly on as_of
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "AUD", 100.0, AS_OF)
+    _insert_leg(conn, "t1", 2, "FX_NEAR", "USD", -70.0, AS_OF)
+    conn.commit()
+
+    grid_records, _ = records_from_db(conn, AS_OF)
+    assert any(r["currency"] == "AUD" and r["settlement_date"] == AS_OF for r in grid_records)
+
+    exposure_records, _ = records_from_db(conn, AS_OF, for_exposure=True)
+    assert exposure_records == []
+    assert exposure_records_from_db(conn, AS_OF)[0] == []
+
+    rate = {"AUD": {"rate": 0.6, "inverted": False, "source": "TEST", "timestamp": "", "stale": False}}
+    result = build_exposure(exposure_records, rate)
+    assert result.summary.empty
+    totals = portfolio_totals(result)
+    # Zero exposure is a real zero, not a missing value: must be 0.0, never NaN.
+    assert totals["net_usd"] == 0.0
+    assert totals["gross_usd"] == 0.0
+    assert totals["missing"] == []
+    assert totals["currencies"] == 0
+
+    # A leg settling one day later than as_of must still be included on both paths.
+    _insert_trade(conn, "t2", "AUDUSD", "FX_FWD", 50.0)
+    _insert_leg(conn, "t2", 1, "FX_NEAR", "AUD", 50.0, "2026-08-18")
+    conn.commit()
+    exposure_records2, _ = records_from_db(conn, AS_OF, for_exposure=True)
+    assert any(r["currency"] == "AUD" and r["settlement_date"] == "2026-08-18" for r in exposure_records2)
+    result2 = build_exposure(exposure_records2, rate)
+    totals2 = portfolio_totals(result2)
+    assert math.isclose(totals2["net_usd"], 50.0 * 0.6)
+
+
+def test_portfolio_totals_empty_record_set_returns_zero_not_nan():
+    """Empty record set (e.g. every leg settles exactly on as_of and is filtered out
+    by the exposure '>' rule) means genuinely zero exposure, not missing data --
+    portfolio_totals must return 0.0, not NaN, so the UI never shows "NaN" on the
+    Net/Gross USD cards."""
+    from engine.ladder.exposure import build_exposure, portfolio_totals
+
+    result = build_exposure([], {})
+    totals = portfolio_totals(result)
+    assert totals["net_usd"] == 0.0
+    assert totals["gross_usd"] == 0.0
+    assert totals["currencies"] == 0
+    assert totals["missing"] == []
 
 
 def test_settles_cash_zero_excluded():

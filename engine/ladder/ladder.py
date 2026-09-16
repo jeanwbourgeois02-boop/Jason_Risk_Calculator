@@ -13,7 +13,7 @@ import pandas as pd
 # ------------------------------------------------------------------------- cash ladder
 _LEG_SQL = """
 SELECT l.ccy, l.settle_date, SUM(l.amount) AS amount
-FROM trade_legs l JOIN trades t USING (trade_id)
+FROM trade_legs l JOIN trades_official t USING (trade_id)
 WHERE l.settles_cash = 1 AND l.settle_date >= :as_of AND t.trade_date <= :as_of
 GROUP BY l.ccy, l.settle_date
 """
@@ -61,21 +61,24 @@ def cash_ladder(conn: sqlite3.Connection, as_of_date: str, source: str = "BNP") 
 
 
 # ------------------------------------------------------------------------- delta per ccy
-# Copied verbatim from CLAUDE.md "Six tabs as views" -> "Aggregate delta per currency"
-# (the CLAUDE.md SQL already names the parameter :as_of; kept identical here).
+# Adapted from CLAUDE.md "Six tabs as views" -> "Aggregate delta per currency" (the
+# CLAUDE.md SQL already names the parameter :as_of; kept identical here) except every
+# `trades` reference reads `trades_official` instead (user decision 2026-09-16: BNP is
+# no longer an authoritative trade source, only the blotter and MANUAL are -- see
+# data/ingest/schema.py's trades_official view and docs/open-questions.md item 55).
 _DELTA_SQL = """
 WITH d AS (
   SELECT l.ccy, l.amount AS delta
-  FROM trade_legs l JOIN trades t USING (trade_id)
+  FROM trade_legs l JOIN trades_official t USING (trade_id)
   WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP','FUTURE') AND l.settle_date > :as_of
   UNION ALL
   SELECT i.base_ccy, t.quantity * m.value
-  FROM trades t JOIN instruments i USING (instrument_id)
+  FROM trades_official t JOIN instruments i USING (instrument_id)
   JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
   WHERE t.product = 'FX_OPTION'
   UNION ALL
   SELECT i.quote_ccy, -t.quantity * m.value * s.value
-  FROM trades t JOIN instruments i USING (instrument_id)
+  FROM trades_official t JOIN instruments i USING (instrument_id)
   JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
   JOIN marks_official s ON s.instrument_id = t.instrument_id AND s.mark_type = 'SPOT'  AND s.as_of_date = :as_of
   WHERE t.product = 'FX_OPTION'

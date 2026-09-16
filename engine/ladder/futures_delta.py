@@ -14,7 +14,7 @@ from engine.pnl.valuation import _mark_at
 
 _OPEN_FUTURES_SQL = """
 SELECT t.instrument_id, SUM(t.quantity) AS contracts, i.multiplier, l.settle_date
-FROM trades t JOIN instruments i USING (instrument_id)
+FROM trades_official t JOIN instruments i USING (instrument_id)
 JOIN trade_legs l ON l.trade_id = t.trade_id AND l.leg_no = 1
 WHERE t.product = 'FUTURE' AND t.trade_date <= :as_of AND l.settle_date > :as_of
 GROUP BY t.instrument_id, i.multiplier, l.settle_date

@@ -43,14 +43,14 @@ GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 
 _OPEN_FX_SQL = """
 SELECT t.trade_id, t.instrument_id, t.product, i.quote_ccy, t.quantity, t.price, l.settle_date
-FROM trades t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND l.leg_no = 1 AND l.settle_date < :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
 """
 
 _OPEN_FUTURE_SQL = """
 SELECT t.trade_id, t.instrument_id, t.product, i.multiplier, t.quantity, t.price, l.settle_date
-FROM trades t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product = 'FUTURE' AND l.leg_no = 1 AND l.settle_date < :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
 """

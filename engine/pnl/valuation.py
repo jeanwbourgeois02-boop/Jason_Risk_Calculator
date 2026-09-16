@@ -78,7 +78,7 @@ def _fx_sql(theme: bool) -> str:
         SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
                t.trade_date, t.quantity, t.price AS fill,
                i.base_ccy, i.quote_ccy, l.settle_date
-        FROM trades t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+        FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
         WHERE t.product IN ({",".join("?" * len(FX_PRODUCTS))}) AND t.trade_date <= ?
           AND l.leg_no = 1
     """
@@ -89,7 +89,7 @@ def _fut_sql(theme: bool) -> str:
     return f"""
         SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
                t.trade_date, t.quantity, t.price AS fill, i.multiplier, l.settle_date
-        FROM trades t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+        FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
         WHERE t.product = 'FUTURE' AND t.trade_date <= :as_of AND l.leg_no = 1
     """
 

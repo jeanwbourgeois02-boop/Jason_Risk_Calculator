@@ -201,7 +201,14 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
             columns=[{"name": n, "id": i} for n, i in [("Status", "status"), ("Pair", "instrument_id"),
                                                        ("Mark", "mark_type"), ("Settle date", "settle_date"),
                                                        ("Value", "value"), ("Source", "source"), ("Detail", "detail")]],
-            data=rows, page_size=40, sort_action="native", filter_action="native",
+            # sort_action/filter_action="native" removed 2026-09-16: dash_table's native
+            # header filter/sort row does not work in the installed Dash version (see
+            # ui/tabs/blotter.py's module docstring for the verified repro) -- it was
+            # rendering here as dead, non-functional controls. This is a small debug
+            # panel (collapsed by default) rather than a primary blotter view, so it
+            # gets a plain sortable-by-click column header via style only, no fake
+            # interactive affordance.
+            data=rows, page_size=40,
             style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
             style_data_conditional=[
                 {"if": {"filter_query": "{status} = 'OK'", "column_id": "status"}, "color": "#1a7f4b", "fontWeight": "600"},

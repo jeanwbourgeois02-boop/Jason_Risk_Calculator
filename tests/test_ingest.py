@@ -1093,6 +1093,49 @@ def test_swap_ambiguous_multiple_candidates_go_to_review(tmp_path):
     assert reviewed == {"201", "202", "203"}
 
 
+def test_swap_never_pairs_trades_from_different_sources(tmp_path):
+    """2026-09-16 (trades_official double-count fix): a genuine BNP outright and an
+    unrelated genuine blotter outright on the same account/pair/trade_date, opposite
+    sign, matching USD notional -- exactly what _matches() checks for -- must never be
+    packaged together, since a real swap's two legs are always booked on the same
+    ticket (same source). Only same-source pairing is legitimate."""
+    from data.ingest import swaps
+
+    schema_conn = schema.connect()
+    schema_conn.execute(
+        "INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')"
+    )
+    common = dict(account="BNPP-IPBFX-NMMF", instrument_id="USDJPY", product="FX_FWD",
+                  strategy="HAHY7", trader="t", description="d", theme="")
+    schema_conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("bnp-1", "BNP", "USDJPY", "FX_FWD", "bnp-1", "2026-08-03", 1_000_000, 147.0,
+         common["account"], "cp", common["strategy"], "t", "d", ""),
+    )
+    schema_conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("xlsx-1", "XLSX", "USDJPY", "FX_FWD", "xlsx-1", "2026-08-03", -1_000_000, 147.0,
+         common["account"], "cp", common["strategy"], "t", "d", ""),
+    )
+    schema_conn.executemany(
+        "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            ("bnp-1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-03", "2026-09-16", 147.0, 1),
+            ("bnp-1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-08-03", "2026-09-16", 147.0, 1),
+            ("xlsx-1", 1, "FX_NEAR", "USD", -1_000_000, "2026-08-03", "2026-10-16", 147.0, 1),
+            ("xlsx-1", 2, "FX_NEAR", "JPY", 147_000_000, "2026-08-03", "2026-10-16", 147.0, 1),
+        ],
+    )
+    schema_conn.commit()
+
+    packaged = swaps.package_swaps(schema_conn)
+
+    assert packaged == 0
+    products = {r[0] for r in schema_conn.execute("SELECT product FROM trades")}
+    assert products == {"FX_FWD"}  # neither trade was fabricated into an FX_SWAP
+    assert schema_conn.execute("SELECT COUNT(*) FROM swap_review").fetchone()[0] == 0
+
+
 def test_swap_packaging_is_idempotent(tmp_path):
     from data.ingest import swaps
 
@@ -1126,124 +1169,6 @@ def test_theme_inheritance_on_load(tmp_path):
         set_theme(conn, "nope", "x")
     with pytest.raises(ValueError):
         set_theme(conn, "NOPE", "x", is_instrument=True)
-
-
-# ---- xlsx futures fills
-def test_xlsx_futures_formula_recovery_both_orders(tmp_path):
-    import openpyxl
-    from data.ingest import xlsx_futures
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "All FX trades"
-    ws.append(["Date", None, "Quantity", "tenor", "fill"])
-    ws.append([date(2026, 7, 22), "ESU6 Index", "=6*E2*50", date(2026, 9, 18), 7528.25])
-    ws.append([date(2026, 9, 11), "ESZ6 Index", "=-13*50*E3", date(2026, 12, 18), 7671.75])
-    ws.append([date(2026, 7, 22), "USDJPY", -3500000, date(2026, 9, 16), 162.27])  # FX row: ignored
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
-
-    fills = xlsx_futures.read_futures_fills(path)
-    assert len(fills) == 2
-    assert (fills[0].contracts, fills[0].root, fills[0].settle_date) == (6.0, "ES", "2026-09-18")
-    assert (fills[1].contracts, fills[1].root, fills[1].settle_date) == (-13.0, "ES", "2026-12-18")
-
-
-def test_xlsx_futures_value_only_fallback(tmp_path):
-    import openpyxl
-    from data.ingest import xlsx_futures
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "All FX trades"
-    ws.append(["Date", None, "Quantity", "tenor", "fill"])
-    ws.append([date(2026, 7, 22), "ESU6 Index", 6 * 7528.25 * 50, date(2026, 9, 18), 7528.25])
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
-
-    (fill,) = xlsx_futures.read_futures_fills(path)
-    assert fill.contracts == pytest.approx(6.0)
-
-
-def test_xlsx_futures_load_is_idempotent_and_writes_notional_leg(tmp_path):
-    import openpyxl
-    from data.ingest import xlsx_futures
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "All FX trades"
-    ws.append(["Date", None, "Quantity", "tenor", "fill"])
-    ws.append([date(2026, 7, 22), "ESU6 Index", "=6*E2*50", date(2026, 9, 18), 7528.25])
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
-
-    conn = schema.connect()
-    n = xlsx_futures.load_futures_fills(path, conn)
-    assert n == 1
-    trade = conn.execute(
-        "SELECT source, instrument_id, product, quantity, price FROM trades WHERE trade_id='XL-2'").fetchone()
-    assert trade == ("XLSX", "ESU6 Index", "FUTURE", 6.0, 7528.25)
-    leg = conn.execute(
-        "SELECT leg_type, ccy, amount, settle_date, settles_cash FROM trade_legs WHERE trade_id='XL-2'").fetchone()
-    assert leg == ("NOTIONAL", "USD", 6.0 * 50 * 7528.25, "2026-09-18", 0)
-
-    assert xlsx_futures.load_futures_fills(path, conn) == 0
-    assert conn.execute("SELECT COUNT(*) FROM trades WHERE trade_id='XL-2'").fetchone()[0] == 1
-
-
-def test_xlsx_futures_tolerates_sheet_case_header_reorder_and_blank_rows(tmp_path):
-    """Cosmetic variation: sheet name case, reordered/whitespace-varied headers with
-    an explicit 'Symbol' header for the pair column, a leading blank row, and a US-style
-    date string all succeed unchanged."""
-    import openpyxl
-    from data.ingest import xlsx_futures
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "all fx trades"  # case-different sheet name
-    ws.append([None, None, None, None, None])  # blank padding row before the header
-    ws.append(["  Fill  ", "Symbol", " Date ", "Quantity", "Tenor"])  # reordered + whitespace
-    ws.append([7528.25, "ESU6 Index", "07/22/2026", 6 * 7528.25 * 50, date(2026, 9, 18)])
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
-
-    fills = xlsx_futures.read_futures_fills(path)
-    assert fills.issues == []
-    assert len(fills) == 1
-    assert (fills[0].contracts, fills[0].root, fills[0].trade_date, fills[0].settle_date) == (
-        6.0, "ES", "2026-07-22", "2026-09-18")
-
-
-def test_xlsx_futures_bad_row_is_skipped_with_diagnostic_and_others_still_load(tmp_path):
-    import openpyxl
-    from data.ingest import xlsx_futures
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "All FX trades"
-    ws.append(["Date", None, "Quantity", "tenor", "fill"])
-    ws.append([date(2026, 7, 22), "ESU6 Index", "=6*E2*50", date(2026, 9, 18), 7528.25])
-    ws.append([date(2026, 9, 11), "ESZ6 Index", "=-13*50*E3", date(2026, 12, 18), "TBD"])
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
-
-    fills = xlsx_futures.read_futures_fills(path)
-    assert len(fills) == 1
-    assert fills[0].pair == "ESU6 Index"
-    assert len(fills.issues) == 1
-    issue = fills.issues[0]
-    assert issue.row == 3
-    assert issue.column == "fill"
-    assert issue.raw_value == "TBD"
-    assert "Row 3, column 'fill'" in issue.message
-    assert "TBD" in issue.message
-    assert "skipped" in issue.message
-
-    conn = schema.connect()
-    result = xlsx_futures.load_futures_fills(path, conn)
-    assert result == 1  # still behaves like the plain inserted count
-    assert result.issues == fills.issues
-    assert conn.execute("SELECT COUNT(*) FROM trades WHERE source='XLSX'").fetchone()[0] == 1
 
 
 # ---- closed FORWARD lines (Quantity = 0): NDF fixed / forward settled, 2026-09-15 file

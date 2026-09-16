@@ -319,8 +319,10 @@ def test_scope_layout_rates_delegates_to_rates_module():
     conn = _make_db()
     try:
         conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','9999-12-31')")
+        # 'XLSX' (2026-09-16, trades_official double-count fix): ui/tabs/rates.py now
+        # reads trades_official, which excludes source='BNP' by design.
         conn.execute(
-            "INSERT INTO trades VALUES ('T2','BNP','IRSOIS-USD-1','IRS','T2','2026-06-01',1000000,0.04,"
+            "INSERT INTO trades VALUES ('T2','XLSX','IRSOIS-USD-1','IRS','T2','2026-06-01',1000000,0.04,"
             "'ACC','CPTY','HAHY7','TR','irs','')"
         )
         conn.commit()
