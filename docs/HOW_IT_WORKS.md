@@ -10,7 +10,7 @@ Every statement here is taken from the code; file names are listed at the end so
 
 ## 1. The one-minute version
 
-The app is a local web page (Python + Dash) that replaces the `HA-portfolio vJean.xlsx` calculator for the NMMF fund's FX forward book at BNP. Start it with `py risk.py start`; it opens at `http://127.0.0.1:8050`. One PC, no server, no login.
+The app is a local web page (Python + Dash) that replaces the `HA-portfolio vJean.xlsx` calculator for the NMMF fund's FX forward book at BNP. Start it with `py 2_launcher.py start`; it opens at `http://127.0.0.1:8050`. One PC, no server, no login.
 
 It does three things:
 
@@ -116,7 +116,7 @@ Two independent checks, side by side, neither feeding the header: our numbers ag
 
 ## 5. The Bloomberg feed
 
-Starts automatically with `py risk.py start` when `blpapi` is installed and a Terminal answers on port 8194. Set up once with `py risk.py setup` (installs `blpapi` when it detects a Terminal); check with `py risk.py doctor --bloomberg`.
+Starts automatically with `py 2_launcher.py start` when `blpapi` is installed and a Terminal answers on port 8194. Set up once with `py 2_launcher.py setup` (installs `blpapi` when it detects a Terminal); check with `py 2_launcher.py doctor --bloomberg`.
 
 Every 2 minutes, for every pair with an open leg:
 
@@ -157,8 +157,8 @@ Net USD exposure therefore excludes futures, options, rates and cash.
 - The database holds one snapshot date, 2026-08-17, with 229 forwards across 18 pairs. **The book is a month stale** until a newer BNP file is uploaded. Trades that have settled since are treated as settled.
 - **No machine this app has run on has had Bloomberg.** The database holds zero official marks. Every P&L card on the development PC reads Unavailable. The app has not yet produced a live number.
 - The database is `data/raw/risk.db`. It is **not in git**. Back it up: it holds the trades, marks and the snapshot history behind Daily / MTD / YTD.
-- **A fresh computer needs nothing copied across.** On launch the app creates an empty database and the Bloomberg status file if they are missing. Upload a BNP report to fill it. Copy `risk.db` from another PC only if you want that PC's history. `py risk.py setup` does the same creation by hand.
-- **Sample data is in git.** `py risk.py setup --sample` imports `data/sample/HA_PNL_SAMPLE_20260818.csv`: the real BNP layout with 35 forwards over 18 pairs, cash rows and the futures row, amounts scaled and ids replaced. Rates are real, positions are not. Use it to see the screens working before the first real file.
+- **A fresh computer needs nothing copied across.** On launch the app creates an empty database and the Bloomberg status file if they are missing. Upload a BNP report to fill it. Copy `risk.db` from another PC only if you want that PC's history. `py 2_launcher.py setup` does the same creation by hand.
+- **Sample data is in git.** `py 2_launcher.py setup --sample` imports `data/sample/HA_PNL_SAMPLE_20260818.csv`: the real BNP layout with 35 forwards over 18 pairs, cash rows and the futures row, amounts scaled and ids replaced. Rates are real, positions are not. Use it to see the screens working before the first real file.
 
 ---
 
@@ -196,7 +196,7 @@ Only if today's snapshot was stored complete and the feed runs again tomorrow. T
 The rule is that a missing input shows blank, never zero. The remaining risks are: the unconfirmed NDF list; the weekday-only calendar; the untested `FWD_CURVE` parsing; an old as-of date left on the picker; and the workbook method's own arithmetic, wrong by design and labelled.
 
 **How do I know which version is running?**
-The console prints a fingerprint at launch. `py risk.py doctor` says whether the folder matches GitHub and whether a running copy is on older code. The launcher refuses to reuse a running instance with different code.
+The console prints a fingerprint at launch. `py 2_launcher.py doctor` says whether the folder matches GitHub and whether a running copy is on older code. The launcher refuses to reuse a running instance with different code.
 
 ---
 
@@ -217,9 +217,11 @@ Full list in `docs/open-questions.md`. The ones that matter most:
 ## 11. Where the code is
 
 ```
-risk.py                        the only script; setup / start / doctor (see README, and SETUP.cmd / pnl)
+2_launcher.py                  setup / start / doctor (see README, and 1_setup.cmd / pnl)
+3_diagnostic.py                root entry point for the in-app Bloomberg diagnostics (thin wrapper)
 ui/launch.py                   what `start` runs: port choice, stale-instance check, browser
-tools/bloomberg_diagnostic.py  what `doctor --bloomberg` runs: every request OK/FAILED, writes reports/
+tools/bbg_diagnostics.py       canonical diagnostics implementation (session, marks coverage, curves...)
+tools/bloomberg_terminal_probe.py  standalone probe; what `doctor --bloomberg` runs: every request OK/FAILED, writes reports/
 tools/make_sample_data.py      rebuild the sample from the real file (real file never in git)
 data/raw/risk.db               the database (not in git; back it up)
 data/ingest/bnp.py             BNP parser and reconciliation checks

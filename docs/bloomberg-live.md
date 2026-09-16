@@ -6,7 +6,7 @@ and the page says so.
 
 ## What runs
 
-`data/bloomberg/live.py` starts with the app (`py risk.py start`) when both hold:
+`data/bloomberg/live.py` starts with the app (`py 2_launcher.py start`) when both hold:
 
 1. the `blpapi` Python package imports;
 2. a Bloomberg API service accepts a TCP connection (default `localhost:8194`, i.e. a
@@ -29,11 +29,12 @@ is flagged stale.
 1. Clone or open the project (e.g. in PyCharm) and open a terminal in its folder.
 2. Optionally copy `data\raw\risk.db` from the other computer into `data\raw\` (git-ignored)
    if you want that computer's history. Otherwise the app starts with an empty database.
-3. `py risk.py setup` once. It detects the Terminal, installs `requirements.txt` and `blpapi`
-   from Bloomberg's official index into `.venv`, verifies the imports and runs the tests.
-4. Log in to the Bloomberg Terminal, then `py risk.py start`. The console prints
+3. `py 2_launcher.py setup` once. It detects the Terminal, installs the packages listed in
+   `PACKAGES` in `2_launcher.py` plus `blpapi` from Bloomberg's official index into `.venv`,
+   verifies the imports and runs the tests.
+4. Log in to the Bloomberg Terminal, then `py 2_launcher.py start`. The console prints
    `Bloomberg feed: started (every 2 min)` or the reason it did not start.
-5. `py risk.py doctor --bloomberg` shows every spot/forward request as OK or FAILED with
+5. `py 2_launcher.py doctor --bloomberg` shows every spot/forward request as OK or FAILED with
    Bloomberg's error text (reports saved under `reports\`).
 
 Every command runs inside `.venv`, so the packages installed by setup are the ones the app

@@ -193,7 +193,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
 
 
 # --------------------------------------------------------------------------- automatic backfill (2026-09-15)
-# risk.py no longer has a `backfill` subcommand: this runs by itself, on `start` and at
+# 2_launcher.py no longer has a `backfill` subcommand: this runs by itself, on `start` and at
 # the end of every live feed cycle, so nobody has to remember to run it. A module-level
 # lock keeps two triggers (start + a feed cycle finishing moments later) from overlapping.
 _auto_lock = __import__("threading").Lock()

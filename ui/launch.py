@@ -84,7 +84,7 @@ def main(argv=None):
         import openpyxl
         import xlrd
     except ImportError as exc:
-        print(f'Missing dependency: {exc.name}. Run: py -3 -m pip install -r requirements.txt')
+        print(f'Missing dependency: {exc.name}. Run: py -3 2_launcher.py setup')
         return 1
     from werkzeug.serving import make_server
     fingerprint = source_fingerprint()

@@ -1,4 +1,9 @@
-"""Tests for risk.py, the single setup / start / doctor entry point."""
+"""Tests for 2_launcher.py, the single setup / start / doctor entry point.
+
+The module filename starts with a digit, so it cannot be `import`ed by name (not a valid
+identifier); it is loaded by file path instead, under the local name `risk` so the rest of
+this file reads exactly as it would for a normally-named module."""
+import importlib.util
 import sqlite3
 import sys
 from pathlib import Path
@@ -7,7 +12,17 @@ from unittest.mock import Mock
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import risk  # noqa: E402
+
+
+def _load_launcher():
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("risk", root / "2_launcher.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+risk = _load_launcher()
 from collections import namedtuple
 _VersionInfo = namedtuple("_VersionInfo", "major minor micro")
 
@@ -15,7 +30,30 @@ _VersionInfo = namedtuple("_VersionInfo", "major minor micro")
 def test_parser_has_exactly_the_documented_commands():
     parser = risk.build_parser()
     sub = next(a for a in parser._actions if a.dest == "command")
-    assert set(sub.choices) == {"setup", "start", "doctor", "_load_sample"}
+    assert set(sub.choices) == {"setup", "start", "doctor", "_load_sample", "freeze"}
+
+
+def test_import_checks_are_a_subset_of_installed_packages():
+    """Every module doctor/setup import-check must actually come from something PACKAGES
+    installs (or be stdlib), so the two lists in 2_launcher.py can't drift apart silently."""
+    pip_names = {spec.split(">")[0].split("=")[0].split("<")[0].strip().lower() for spec in risk.PACKAGES}
+    # import name -> pip distribution name, for the handful that differ
+    import_to_dist = {"yaml": "pyyaml", "zoneinfo": None}  # zoneinfo is stdlib, not pip-installed
+    for mod in risk.IMPORT_CHECKS:
+        dist = import_to_dist.get(mod, mod)
+        if dist is None:
+            continue
+        assert dist.lower() in pip_names, f"{mod} is import-checked but not in PACKAGES"
+
+
+def test_freeze_writes_requirements_from_packages(tmp_path, monkeypatch):
+    target = tmp_path / "requirements.txt"
+    monkeypatch.setattr(risk, "REQUIREMENTS", target)
+    assert risk.cmd_freeze(risk.build_parser().parse_args(["freeze"])) == 0
+    text = target.read_text(encoding="utf-8")
+    for spec in risk.PACKAGES + risk.DEV_PACKAGES:
+        assert spec in text
+    assert "GENERATED" in text
 
 
 def test_setup_refuses_old_python(monkeypatch, capsys):
@@ -30,7 +68,7 @@ def test_start_reexecs_in_venv_when_outside(monkeypatch):
     monkeypatch.setattr(risk.VENV_PY.__class__, "exists", lambda self: True)
     calls = []
     monkeypatch.setattr(risk.subprocess, "call", lambda cmd, **kw: calls.append(cmd) or 7)
-    monkeypatch.setattr(risk.sys, "argv", ["risk.py", "start", "--force-new"])
+    monkeypatch.setattr(risk.sys, "argv", ["2_launcher.py", "start", "--force-new"])
     assert risk.cmd_start(risk.build_parser().parse_args(["start", "--force-new"])) == 7
     assert calls[0][0] == str(risk.VENV_PY) and calls[0][-2:] == ["start", "--force-new"]
 
@@ -39,7 +77,7 @@ def test_start_without_venv_tells_user_to_setup(monkeypatch, capsys):
     monkeypatch.setattr(risk, "in_venv", lambda: False)
     monkeypatch.setattr(risk.VENV_PY.__class__, "exists", lambda self: False)
     assert risk.cmd_start(risk.build_parser().parse_args(["start"])) == 2
-    assert "py risk.py setup" in capsys.readouterr().out
+    assert "py 2_launcher.py setup" in capsys.readouterr().out
 
 
 def test_start_inside_venv_calls_launcher(monkeypatch):
@@ -101,3 +139,23 @@ def test_doctor_bloomberg_mode_requires_terminal(monkeypatch, tmp_path):
     risk.doctor_checks(d, bloomberg=True, git=False)
     names = {name for name, ok, _, _ in d.rows if ok is False}
     assert "terminal" in names
+
+
+def test_root_bloomberg_diagnostics_is_a_thin_wrapper(monkeypatch):
+    """3_diagnostic.py is the third root-level file: it must exist at repo root,
+    do nothing but dispatch to tools.bbg_diagnostics.main (the one real implementation
+    also used by ui/tabs/header.py via the data/bloomberg shim), and never re-implement
+    any check itself."""
+    root = Path(risk.__file__).resolve().parent
+    entry = root / "3_diagnostic.py"
+    assert entry.exists()
+    source = entry.read_text(encoding="utf-8")
+    assert "from tools.bbg_diagnostics import main" in source
+
+    called = Mock(return_value=0)
+    monkeypatch.setattr("tools.bbg_diagnostics.main", called)
+    spec = __import__("importlib.util", fromlist=["util"]).spec_from_file_location(
+        "root_bloomberg_diagnostics", entry)
+    mod = __import__("importlib.util", fromlist=["util"]).module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main is called

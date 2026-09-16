@@ -8,8 +8,13 @@ No mock, random or fallback prices: a ticker either returns a Bloomberg value or
 reported FAILED with the exact error text.
 
 Usage:
-    py -3 tools\\bloomberg_diagnostic.py --once
-    py -3 tools\\bloomberg_diagnostic.py --once --db C:\\path\\risk.db --host localhost --port 8194
+    py -3 tools\\bloomberg_terminal_probe.py --once
+    py -3 tools\\bloomberg_terminal_probe.py --once --db C:\\path\\risk.db --host localhost --port 8194
+
+Distinct from tools/bbg_diagnostics.py (the in-app diagnostics module, which imports the
+repo and needs the app's own DB/session wiring): this file is the zero-repo-imports
+version meant to run standalone on the Bloomberg terminal machine with only this file
+and the SQLite database copied over.
 
 Checks (all required for exit code 0):
     1  python        version / executable

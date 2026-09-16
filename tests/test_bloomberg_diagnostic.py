@@ -1,4 +1,4 @@
-"""tools/bloomberg_diagnostic.py runs standalone; without Bloomberg it must report
+"""tools/bloomberg_terminal_probe.py runs standalone; without Bloomberg it must report
 unavailability cleanly (exit 1, both reports written, no fake prices, DB untouched)."""
 import importlib.util
 import json
@@ -10,7 +10,7 @@ RAW = REPO / "data" / "raw" / "HA_PNL_20260818.csv"
 
 
 def _load_tool():
-    spec = importlib.util.spec_from_file_location("bbg_diag", REPO / "tools" / "bloomberg_diagnostic.py")
+    spec = importlib.util.spec_from_file_location("bbg_diag", REPO / "tools" / "bloomberg_terminal_probe.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

@@ -508,3 +508,220 @@ def test_scoped_period_pnl_previous_day_is_ltd_t1_minus_ltd_t2(tmp_path):
         conn.close()
     assert "previous_day" in periods
     assert set(periods["previous_day"]) >= {"value", "ref_date", "available", "reason"}
+
+
+# ---------------------------------------------------------------- Bloomberg diagnostics button
+# Moved 2026-09-16 from ui/tabs/header.py (shown above every tab) to
+# ui/tabs/market_data.py (Market Data tab only) per user decision -- see
+# ui.tabs.market_data.BBG_CHECK_BUTTON_ID / BBG_RESULTS_ID.
+def _find_id(node, target_id):
+    if getattr(node, "id", None) == target_id:
+        return node
+    for child in getattr(node, "children", None) or []:
+        if not hasattr(child, "id") and not hasattr(child, "children"):
+            continue
+        found = _find_id(child, target_id)
+        if found is not None:
+            return found
+    return None
+
+
+def test_header_layout_no_longer_includes_bbg_check_button_or_results():
+    layout = header.layout()
+    assert not hasattr(header, "BBG_CHECK_BUTTON_ID")
+    assert not hasattr(header, "BBG_RESULTS_ID")
+    assert _find_id(layout, "market-data-bbg-check-button") is None
+    assert _find_id(layout, "header-bbg-check-button") is None
+
+
+def test_market_data_layout_includes_bbg_check_button_and_results_container():
+    layout = market_data.build_layout(default_date="2026-08-17")
+
+    assert _find_id(layout, market_data.BBG_CHECK_BUTTON_ID) is not None
+    assert _find_id(layout, market_data.BBG_RESULTS_ID) is not None
+
+
+def test_render_bbg_results_shows_status_name_and_message():
+    checks = [
+        {"name": "Session connectivity", "status": "pass", "message": "Connected fine."},
+        {"name": "Marks coverage", "status": "fail", "message": "Some marks missing."},
+        {"name": "Fallback usage", "status": "warning", "message": "Using BNP_BVAL reconciliation rates."},
+    ]
+    panel = market_data._render_bbg_results(checks)
+    rows = panel.children
+    assert len(rows) == 3
+    statuses = [row.children[0].children for row in rows]
+    names = [row.children[1].children for row in rows]
+    messages = [row.children[2].children for row in rows]
+    assert statuses == ["PASS", "FAIL", "WARNING"]
+    assert names == ["Session connectivity", "Marks coverage", "Fallback usage"]
+    assert messages == ["Connected fine.", "Some marks missing.", "Using BNP_BVAL reconciliation rates."]
+
+
+def test_render_bbg_results_handles_empty_list():
+    panel = market_data._render_bbg_results([])
+    assert "No diagnostic checks" in panel.children
+
+
+def test_run_bloomberg_diagnostics_safe_never_raises_and_returns_list(monkeypatch):
+    def _boom():
+        raise RuntimeError("blpapi not installed")
+
+    monkeypatch.setattr(market_data, "_bbg_diagnostics_entry_point", lambda: _boom)
+    result = market_data.run_bloomberg_diagnostics_safe()
+    assert isinstance(result, list)
+    assert result[0]["status"] == "fail"
+    assert "Could not reach Bloomberg" in result[0]["message"]
+    # No raw exception text/traceback leaks into the message shown to the user.
+    assert "RuntimeError" not in result[0]["message"]
+    assert "Traceback" not in result[0]["message"]
+
+
+def test_run_bloomberg_diagnostics_safe_rejects_non_list_result(monkeypatch):
+    monkeypatch.setattr(market_data, "_bbg_diagnostics_entry_point", lambda: (lambda: {"not": "a list"}))
+    result = market_data.run_bloomberg_diagnostics_safe()
+    assert isinstance(result, list)
+    assert result[0]["status"] == "fail"
+
+
+def test_placeholder_diagnostics_returns_plain_english_checks_without_blpapi():
+    # On a dev machine with no Bloomberg terminal/blpapi, the placeholder must not
+    # raise and must describe the failure in plain English (no traceback).
+    checks = market_data._run_bloomberg_diagnostics_placeholder()
+    assert isinstance(checks, list)
+    assert len(checks) >= 1
+    for c in checks:
+        assert c["status"] in {"pass", "fail", "warning"}
+        assert isinstance(c["name"], str) and c["name"]
+        assert isinstance(c["message"], str) and c["message"]
+        assert "Traceback" not in c["message"]
+
+
+def test_bbg_diagnostics_entry_point_prefers_real_module_now_that_it_exists():
+    # data.bloomberg.bbg_diagnostics (bbg-data, 2026-09-16) now re-exports
+    # tools.bbg_diagnostics.run_bloomberg_diagnostics; the entry point must prefer it
+    # over the local placeholder.
+    from data.bloomberg.bbg_diagnostics import run_bloomberg_diagnostics as real_fn
+
+    fn = market_data._bbg_diagnostics_entry_point()
+    assert fn is real_fn
+    assert fn is not market_data._run_bloomberg_diagnostics_placeholder
+
+
+def _futures_confirm_callback(app):
+    cb = app.callback_map["reconciliation-futures-result.children"]["callback"]
+    return getattr(cb, "__wrapped__", cb)
+
+
+class _FakeImportResult(int):
+    """Mimics data.ingest.xlsx_futures.ImportResult (int subclass + .issues/.messages)."""
+
+    def __new__(cls, inserted, messages):
+        obj = int.__new__(cls, inserted)
+        obj._messages = list(messages)
+        return obj
+
+    @property
+    def messages(self):
+        return list(self._messages)
+
+
+def test_futures_confirm_clean_upload_shows_plain_success_message(tmp_path, monkeypatch):
+    """No skipped rows -> the existing simple success string, no warning panel."""
+    db_path = tmp_path / "risk.db"
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    fn = _futures_confirm_callback(app)
+
+    monkeypatch.setattr(
+        "data.ingest.xlsx_futures.load_futures_fills",
+        lambda path, conn: _FakeImportResult(4, []),
+    )
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    out = fn(1, contents, "workbook.xlsx")
+    assert out == "Imported 4 new futures fill(s) from workbook.xlsx."
+
+
+# ---------------------------------------------------------------- reconciliation layout
+# (2026-09-16 user decision: the as-of date picker confusingly sat directly above the
+# futures-import button, though it only ever drives the reconciliation tables below --
+# data.ingest.xlsx_futures.load_futures_fills() reads trade dates from the workbook
+# rows and never touches this UI field. The date picker moves into its own toolbar;
+# the import card stands alone with just choose-file + Confirm.)
+
+
+def test_futures_import_control_has_no_date_picker_and_only_upload_plus_confirm():
+    card = reconciliation.futures_import_control()
+    ids = _all_ids(card)
+    assert reconciliation.DATE_PICKER_ID not in ids
+    assert reconciliation.FUTURES_UPLOAD_ID in ids
+    assert reconciliation.FUTURES_CONFIRM_ID in ids
+
+
+def test_reconciliation_layout_keeps_date_picker_separate_from_upload_card():
+    layout = reconciliation.build_layout(default_date="2026-08-18")
+    ids = _all_ids(layout)
+    # The date picker still exists and still drives the tables (same component id
+    # the content callback listens on), just no longer bundled into the upload card.
+    assert reconciliation.DATE_PICKER_ID in ids
+    assert reconciliation.FUTURES_UPLOAD_ID in ids
+    assert reconciliation.FUTURES_CONFIRM_ID in ids
+
+
+def test_reconciliation_content_callback_still_driven_by_date_picker(tmp_path):
+    """Moving the date picker must not break the reconciliation tables' data source:
+    the content callback is still wired to DATE_PICKER_ID as an Input."""
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    key = f"{reconciliation.CONTENT_CONTAINER_ID}.children"
+    assert key in app.callback_map
+    input_ids = [dep["id"] for dep in app.callback_map[key]["inputs"]]
+    assert reconciliation.DATE_PICKER_ID in input_ids
+
+
+def test_futures_confirm_with_skipped_rows_shows_warning_panel(tmp_path, monkeypatch):
+    """Rows skipped -> a non-blocking summary panel listing the plain-English messages,
+    not styled as an error (valid rows still loaded)."""
+    db_path = tmp_path / "risk.db"
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    fn = _futures_confirm_callback(app)
+
+    messages = [
+        "Row 3, column 'fill': expected a number, found 'TBD' — this row was skipped.",
+        "Row 9, column 'Date': could not parse date — this row was skipped.",
+    ]
+    monkeypatch.setattr(
+        "data.ingest.xlsx_futures.load_futures_fills",
+        lambda path, conn: _FakeImportResult(12, messages),
+    )
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    out = fn(1, contents, "workbook.xlsx")
+
+    assert isinstance(out, dash.html.Div)
+    assert out.className == "source-result--warning"
+    assert "error" not in (out.className or "")
+    rendered = str(out)
+    assert "12" in rendered and "2" in rendered
+    for msg in messages:
+        assert msg in rendered
+
+
+def test_futures_confirm_hard_failure_shows_plain_message_no_traceback(tmp_path, monkeypatch):
+    """A hard failure (e.g. missing sheet/columns) must never surface a raw exception
+    string or traceback -- only a plain-English message."""
+    db_path = tmp_path / "risk.db"
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    fn = _futures_confirm_callback(app)
+
+    def _boom(path, conn):
+        raise KeyError("'All FX trades' sheet not found -- some very internal detail")
+
+    monkeypatch.setattr("data.ingest.xlsx_futures.load_futures_fills", _boom)
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    out = fn(1, contents, "workbook.xlsx")
+
+    assert isinstance(out, dash.html.Span)
+    rendered = str(out)
+    assert "Traceback" not in rendered
+    assert "'All FX trades' sheet not found" not in rendered
+    assert "Import failed" in rendered

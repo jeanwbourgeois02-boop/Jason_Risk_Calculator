@@ -95,7 +95,7 @@ Diagnostics:
   recording whether it was resolved directly, via BBG_INTERP, or failed. The JSON top-
   level structure is: environment, requests, interpolations, fwd_outright_results, run,
   summary, exception (null unless an unhandled exception occurred). Read it with
-  data/bloomberg/diagnose.py, which prints a plain-text report and exits non-zero if any
+  data/bloomberg/pull_report.py, which prints a plain-text report and exits non-zero if any
   failure is present.
 
 --probe mode: runs a fixed sequence of exploratory requests (session start; open
@@ -168,7 +168,7 @@ CLASS_SESSION_ERROR = "SESSION_ERROR"
 CLASS_EXCEPTION = "EXCEPTION"
 # A row rejected by our own logic (settle_date outside the standard-tenor range, before
 # spot, etc) rather than by anything Bloomberg reported -- distinct from CLASS_NO_VALUE
-# (Bloomberg had nothing) so diagnose.py can tell "we didn't ask for something sane" from
+# (Bloomberg had nothing) so pull_report.py can tell "we didn't ask for something sane" from
 # "Bloomberg came back empty".
 CLASS_REJECTED = "REJECTED"
 

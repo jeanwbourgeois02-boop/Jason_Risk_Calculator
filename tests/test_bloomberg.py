@@ -922,7 +922,7 @@ def test_pull_marks_probe_writes_diag_and_diagnose_reads_it(monkeypatch, tmp_pat
         "ESU6 Index": 4500.25,
     }
     _install_fake_blpapi(monkeypatch, _full_probe_responder(ref_data, hist_data))
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     out = tmp_path / "probe"
     exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
@@ -965,7 +965,7 @@ def test_pull_marks_normal_run_diag_and_diagnose(monkeypatch, tmp_path):
         "EURUSD Curncy": 1.1000,
     }
     _install_fake_blpapi(monkeypatch, _responder_ref_and_hist(ref_data, hist_data))
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     request_path = tmp_path / "request.csv"
     with request_path.open("w", newline="", encoding="utf-8") as f:
@@ -1021,7 +1021,7 @@ def test_pull_marks_timeout_is_nonzero_exit_and_partial_csv(monkeypatch, tmp_pat
         raise AssertionError(f"unexpected request type {request.req_type}")
 
     _install_fake_blpapi(monkeypatch, responder)
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     request_path = tmp_path / "request.csv"
     with request_path.open("w", newline="", encoding="utf-8") as f:
@@ -1072,7 +1072,7 @@ def test_pull_marks_field_exception_classified_and_reported(monkeypatch, tmp_pat
         return [{"securityData": sec_list}]
 
     _install_fake_blpapi(monkeypatch, responder)
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     diag = pull_marks.Diagnostics()
     session, service = pull_marks.open_session()
@@ -1097,7 +1097,7 @@ def test_pull_marks_field_exception_classified_and_reported(monkeypatch, tmp_pat
 
 def test_pull_marks_unhandled_exception_still_writes_diag_with_traceback(monkeypatch, tmp_path):
     _install_fake_blpapi(monkeypatch, lambda request: [])
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     out_path = tmp_path / "marks.csv"
     missing_request = tmp_path / "does-not-exist.csv"
@@ -1129,7 +1129,7 @@ def test_pull_marks_security_error_on_spot_is_partial_nonzero_exit_and_in_failur
                 for ticker in request.securities]
 
     _install_fake_blpapi(monkeypatch, responder)
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     request_path = tmp_path / "request.csv"
     with request_path.open("w", newline="", encoding="utf-8") as f:
@@ -1175,7 +1175,7 @@ def test_pull_marks_probe_continues_after_non_candidate_step_failure(monkeypatch
         return [{"securityData": sec_list}]
 
     _install_fake_blpapi(monkeypatch, responder)
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     out = tmp_path / "probe"
     exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
@@ -1204,7 +1204,7 @@ def test_pull_marks_probe_flags_non_scalar_fwd_curve_candidate(monkeypatch, tmp_
     }
     hist_data = {"EURUSD Curncy": 1.1000, "ESU6 Index": 4500.25}
     _install_fake_blpapi(monkeypatch, _full_probe_responder(ref_data, hist_data))
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     out = tmp_path / "probe"
     exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
@@ -1274,7 +1274,7 @@ def test_pull_marks_exit_zero_implies_all_requested_rows_written(monkeypatch, tm
     ref_data = {}
     hist_data = {"EURUSD Curncy": 1.1000}
     _install_fake_blpapi(monkeypatch, _responder_ref_and_hist(ref_data, hist_data))
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     request_path = tmp_path / "request.csv"
     with request_path.open("w", newline="", encoding="utf-8") as f:
@@ -1296,7 +1296,7 @@ def test_pull_marks_exit_zero_implies_all_requested_rows_written(monkeypatch, tm
 
 def test_pull_marks_environment_block_present_on_stale_refusal_exit(monkeypatch, tmp_path):
     _install_fake_blpapi(monkeypatch, lambda request: [])
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     request_path = tmp_path / "request.csv"
     with request_path.open("w", newline="", encoding="utf-8") as f:
@@ -1365,7 +1365,7 @@ def test_pull_marks_bad_as_of_is_argument_error_exit_2(monkeypatch, tmp_path):
     date.fromisoformat before run_pull()/run_probe()), not the generic unhandled-exception
     path (exit 3) -- and a diag JSON documenting the rejection is still written."""
     _install_fake_blpapi(monkeypatch, lambda request: [])
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     request_path = tmp_path / "request.csv"
     with request_path.open("w", newline="", encoding="utf-8") as f:
@@ -1437,7 +1437,7 @@ def test_pull_marks_partial_batch_field_exception_with_all_keys_written_is_not_a
         raise AssertionError(f"unexpected request type {request.req_type}")
 
     _install_fake_blpapi(monkeypatch, responder)
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     request_path = tmp_path / "request.csv"
     with request_path.open("w", newline="", encoding="utf-8") as f:
@@ -1476,7 +1476,7 @@ def test_diagnose_probe_mode_still_flags_non_candidate_hard_failure(monkeypatch,
     probe step classified as a hard failure still makes has_failure() True even if outcome
     somehow ended up "OK" (defensive; run_probe() itself already sets a non-OK outcome in
     this situation, see test_pull_marks_probe_continues_after_non_candidate_step_failure)."""
-    from data.bloomberg import diagnose
+    from data.bloomberg import pull_report as diagnose
 
     diag = {
         "summary": {"mode": "probe", "outcome": "OK", "marks_csv_partial": False, "failures": []},
@@ -1501,7 +1501,7 @@ def test_probe_scalar_check_flags_fwd_outright_price_candidate(monkeypatch, tmp_
     }
     hist_data = {"EURUSD Curncy": 1.1000, "ESU6 Index": 4500.25}
     _install_fake_blpapi(monkeypatch, _full_probe_responder(ref_data, hist_data))
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     out = tmp_path / "probe"
     exit_code = pull_marks.main(["--probe", "--as-of", AS_OF, "--out", str(out)])
@@ -1523,7 +1523,7 @@ def test_pull_marks_missing_tzdata_writes_diag_and_exits_6(monkeypatch, tmp_path
     before the first record_environment() call, so a machine missing the `tzdata`
     package (ZoneInfoNotFoundError constructing America/New_York) still gets a diag
     JSON + stderr hint + exit 6, instead of crashing with no .diag.json written."""
-    from data.bloomberg import diagnose, pull_marks
+    from data.bloomberg import pull_report as diagnose, pull_marks
 
     monkeypatch.setattr(pull_marks, "_NY_ZONE", None)  # clear _ny()'s cache
 
@@ -1928,3 +1928,11 @@ def test_rates_bloomberg_source_no_curve_id_returns_none_without_request(monkeyp
     # Monkeypatch the ticker map lookup to simulate a currency with no curve id configured.
     monkeypatch.setattr(rmd, "ois_bbg_curve_id", lambda ccy: None)
     assert src.get_bbg_curve("USD", date(2026, 8, 17)) is None
+
+
+def test_bbg_diagnostics_shim_reexports_run_bloomberg_diagnostics():
+    from data.bloomberg.bbg_diagnostics import run_bloomberg_diagnostics
+
+    assert callable(run_bloomberg_diagnostics)
+    result = run_bloomberg_diagnostics(db_path=":memory:")
+    assert isinstance(result, list)

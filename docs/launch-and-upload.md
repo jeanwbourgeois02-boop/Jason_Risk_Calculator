@@ -1,5 +1,5 @@
-Start the app with `py risk.py start` in a terminal opened in the project
-folder (set up first with `py risk.py setup`; see README). The browser opens
+Start the app with `py 2_launcher.py start` in a terminal opened in the project
+folder (set up first with `py 2_launcher.py setup`; see README). The browser opens
 automatically. Keep the terminal open; Ctrl+C stops the app. Running `start`
 again opens the existing instance.
 
@@ -28,7 +28,8 @@ previewed in reference mode; only BNP-format worksheets can update report data.
 
 Files are limited to 25 MB. Uploading does not modify the original file.
 
-Dependencies are listed in `requirements.txt` and installed by `py risk.py setup`.
+Dependencies are listed in `PACKAGES` in `2_launcher.py` and installed by `py 2_launcher.py setup`.
+Need a `requirements.txt` on disk for some other tool? Run `py 2_launcher.py freeze`.
 
 
 Calculation correction (2026-09-14): the cash ladder now includes currency/date

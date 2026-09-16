@@ -1159,3 +1159,58 @@ def test_xlsx_futures_load_is_idempotent_and_writes_notional_leg(tmp_path):
 
     assert xlsx_futures.load_futures_fills(path, conn) == 0
     assert conn.execute("SELECT COUNT(*) FROM trades WHERE trade_id='XL-2'").fetchone()[0] == 1
+
+
+def test_xlsx_futures_tolerates_sheet_case_header_reorder_and_blank_rows(tmp_path):
+    """Cosmetic variation: sheet name case, reordered/whitespace-varied headers with
+    an explicit 'Symbol' header for the pair column, a leading blank row, and a US-style
+    date string all succeed unchanged."""
+    import openpyxl
+    from data.ingest import xlsx_futures
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "all fx trades"  # case-different sheet name
+    ws.append([None, None, None, None, None])  # blank padding row before the header
+    ws.append(["  Fill  ", "Symbol", " Date ", "Quantity", "Tenor"])  # reordered + whitespace
+    ws.append([7528.25, "ESU6 Index", "07/22/2026", 6 * 7528.25 * 50, date(2026, 9, 18)])
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    fills = xlsx_futures.read_futures_fills(path)
+    assert fills.issues == []
+    assert len(fills) == 1
+    assert (fills[0].contracts, fills[0].root, fills[0].trade_date, fills[0].settle_date) == (
+        6.0, "ES", "2026-07-22", "2026-09-18")
+
+
+def test_xlsx_futures_bad_row_is_skipped_with_diagnostic_and_others_still_load(tmp_path):
+    import openpyxl
+    from data.ingest import xlsx_futures
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "All FX trades"
+    ws.append(["Date", None, "Quantity", "tenor", "fill"])
+    ws.append([date(2026, 7, 22), "ESU6 Index", "=6*E2*50", date(2026, 9, 18), 7528.25])
+    ws.append([date(2026, 9, 11), "ESZ6 Index", "=-13*50*E3", date(2026, 12, 18), "TBD"])
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    fills = xlsx_futures.read_futures_fills(path)
+    assert len(fills) == 1
+    assert fills[0].pair == "ESU6 Index"
+    assert len(fills.issues) == 1
+    issue = fills.issues[0]
+    assert issue.row == 3
+    assert issue.column == "fill"
+    assert issue.raw_value == "TBD"
+    assert "Row 3, column 'fill'" in issue.message
+    assert "TBD" in issue.message
+    assert "skipped" in issue.message
+
+    conn = schema.connect()
+    result = xlsx_futures.load_futures_fills(path, conn)
+    assert result == 1  # still behaves like the plain inserted count
+    assert result.issues == fills.issues
+    assert conn.execute("SELECT COUNT(*) FROM trades WHERE source='XLSX'").fetchone()[0] == 1

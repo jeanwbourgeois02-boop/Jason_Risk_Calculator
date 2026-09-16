@@ -232,15 +232,28 @@ def valuation_table(df: pd.DataFrame, table_id: str) -> dash_table.DataTable:
 
 def futures_import_control() -> html.Div:
     """Choose/confirm/status control for the workbook futures-fill import (item B).
-    Nothing is written until Confirm is pressed, same pattern as the BNP upload strip."""
-    return html.Div(className="source-strip", children=[
-        html.Div(className="source-row", children=[
+    Nothing is written until Confirm is pressed, same pattern as the BNP upload strip.
+
+    Restyled 2026-09-16 (user decision) into a plain, minimal card: a heading, one
+    line explaining what it does, the file-select button, and Confirm -- nothing else
+    in between. The as-of date picker used to sit directly above this control and was
+    confused for a required part of the upload step; it never fed the parser
+    (`data.ingest.xlsx_futures.load_futures_fills` reads trade dates from the workbook
+    rows themselves) and has been moved out to its own "reconciliation table date"
+    control below (see `build_layout`), visually separated from this card."""
+    return html.Div(className="upload-card", children=[
+        html.H5("Import futures fills from workbook", className="upload-card-title"),
+        html.P(
+            "Select a workbook, then confirm. Nothing is saved until you press Confirm.",
+            className="upload-card-hint",
+        ),
+        html.Div(className="upload-card-row", children=[
             dcc.Upload(id=FUTURES_UPLOAD_ID, className="source-upload",
-                       children=html.Button("Import futures fills from workbook", className="btn"),
+                       children=html.Button("Choose workbook…", className="btn"),
                        accept=".xlsx,.xlsm", multiple=False, max_size=25 * 1024 * 1024),
-            html.Div(id=FUTURES_FILENAME_ID, className="source-line"),
+            html.Div(id=FUTURES_FILENAME_ID, className="source-line source-file"),
         ]),
-        html.Div(id=FUTURES_STAGE_ID, className="source-row source-row--stage", style={"display": "none"}, children=[
+        html.Div(id=FUTURES_STAGE_ID, className="upload-card-row", style={"display": "none"}, children=[
             html.Button("Confirm import", id=FUTURES_CONFIRM_ID, n_clicks=0, className="btn"),
         ]),
         dcc.Loading(type="dot", color="#1f5fbf", children=html.Div(id=FUTURES_RESULT_ID, role="status", className="source-result")),
@@ -251,14 +264,27 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     """Controls + an (initially empty) content container. Tables are filled in by the
     callback registered in register_callbacks. Includes the workbook manual-rates grid
     (`ui/workbook_rates.py`), moved here per docs/BUILD_PLAN.md Task C4, and the
-    workbook futures-fill import control (item B)."""
+    workbook futures-fill import control (item B).
+
+    Layout regrouped 2026-09-16 (user decision): the as-of date picker only ever drove
+    which day the reconciliation tables below show -- `load_futures_fills()` never
+    reads it -- but it used to sit immediately above the futures-import button and was
+    read as part of that upload flow. It now lives in its own labelled "Reconciliation
+    tables" toolbar together with the workbook-source dropdown, both still feeding
+    `_update_content` exactly as before via `DATE_PICKER_ID` / `SOURCE_DROPDOWN_ID`; the
+    futures-import card (`futures_import_control`) stands alone with no date field."""
     from ui import workbook_rates
 
     return html.Div([
         html.H3("Reconciliation"),
         html.P("Ours vs BNP, and ours vs the Excel workbook. Neither feeds the header figures."),
-        build_source_dropdown(SOURCE_DROPDOWN_ID, label="Workbook MTM rates"),
-        build_date_picker(DATE_PICKER_ID, default_date=default_date),
+        html.Div(className="toolbar", children=[
+            html.Div(className="toolbar-group", children=[
+                html.Label("Reconciliation tables show"),
+                build_date_picker(DATE_PICKER_ID, default_date=default_date),
+            ]),
+            build_source_dropdown(SOURCE_DROPDOWN_ID, label="Workbook MTM rates"),
+        ]),
         workbook_rates.layout(default_date),
         futures_import_control(),
         html.Div(id=CONTENT_CONTAINER_ID),
@@ -306,12 +332,23 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 xlsx_path.write_bytes(payload)
                 conn = schema.connect(get_db_path())
                 try:
-                    inserted = load_futures_fills(xlsx_path, conn)
+                    result = load_futures_fills(xlsx_path, conn)
                 finally:
                     conn.close()
-            return f"Imported {inserted} new futures fill(s) from {filename}."
-        except Exception as exc:
-            return html.Span(f"Import failed; no futures fills saved. {exc}", className="source-result--error")
+            messages = list(getattr(result, "messages", []))
+            if not messages:
+                return f"Imported {int(result)} new futures fill(s) from {filename}."
+            return html.Div(className="source-result--warning", children=[
+                html.P(f"{int(result)} fill(s) loaded from {filename}, "
+                       f"{len(messages)} row(s) skipped:"),
+                html.Ul([html.Li(msg) for msg in messages]),
+            ])
+        except Exception:
+            return html.Span(
+                "Import failed; no futures fills saved. The workbook could not be read "
+                "(a required sheet or column may be missing). Check the file and try again.",
+                className="source-result--error",
+            )
 
     @app.callback(
         Output(CONTENT_CONTAINER_ID, "children"),

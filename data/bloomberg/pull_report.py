@@ -4,8 +4,14 @@ Unlike pull_marks.py (which must stay a single dependency-light file for the Blo
 machine), this module runs on a normal dev machine and may import from the repository.
 
 CLI:
-    py -3 data/bloomberg/diagnose.py path/to/marks.csv.diag.json
-    py -3 data/bloomberg/diagnose.py path/to/probe.diag.json --open-questions docs/open-questions.md
+    py -3 data/bloomberg/pull_report.py path/to/marks.csv.diag.json
+    py -3 data/bloomberg/pull_report.py path/to/probe.diag.json --open-questions docs/open-questions.md
+
+Note: this is a report *renderer* for a completed pull_marks.py run, not a live
+connectivity/correctness checker. For "is Bloomberg reachable and are official marks
+correct right now", see tools/bbg_diagnostics.py (run_bloomberg_diagnostics, re-exported
+at data/bloomberg/bbg_diagnostics.py for the UI). For a fully standalone terminal probe
+with zero repo imports, see tools/bloomberg_terminal_probe.py.
 
 Report sections: environment, probe results (if the diag JSON has any probe_name-tagged
 requests), per-request-type counts of each outcome, every failure with its message, and

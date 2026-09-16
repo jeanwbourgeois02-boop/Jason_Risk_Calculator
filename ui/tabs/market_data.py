@@ -14,7 +14,11 @@ inventory table. Layout:
      days, and the manual mark-entry form pre-filled with the selected pair.
 
 Removed from the previous version of this tab: the whole-book inventory table and the
-Bloomberg diagnostics panel (still reachable via `risk.py doctor`). `feed_headline`
+old detailed Bloomberg diagnostics panel (still reachable via `2_launcher.py doctor`). The
+"Check Bloomberg connection" button (click-only pass/fail/warning check) moved here
+from `ui/tabs/header.py` on 2026-09-16 (user decision: it belongs on this tab only,
+not shown above every tab) -- see `BBG_CHECK_BUTTON_ID` / `BBG_RESULTS_ID` below.
+`feed_headline`
 and `backfill_headline` are kept -- and now folded into the single top-bar status
 line -- because `ui/tabs/cash_ladder.py` still imports `diagnostics_panel` /
 `feed_headline` from this module; both stay defined for that caller even though this
@@ -35,6 +39,7 @@ expected, not a bug, until a live Bloomberg pull lands BBG_BFXFORWARD rows.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import date, timedelta
 from typing import Callable, Dict, List, Optional, Tuple
@@ -43,6 +48,9 @@ import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs.controls import build_date_picker
+
+BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"
+BBG_RESULTS_ID = "market-data-bbg-check-results"
 
 DATE_PICKER_ID = "market-data-date"
 PAIR_DROPDOWN_ID = "market-data-pair"
@@ -215,6 +223,148 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
         children += [html.H4("Pull warnings"), html.Ul([html.Li(w, className="status-line") for w in status["warnings"]])]
     return html.Details(id="market-data-diag", className="details details--diag",
                         open=open_by_default or bool(failed), children=children)
+
+
+# ---------------------------------------------------------------------------
+# Bloomberg diagnostics button + panel
+# ---------------------------------------------------------------------------
+#
+# Moved here from ui/tabs/header.py on 2026-09-16 (user decision: the "Check Bloomberg
+# connection" button belongs on the Market Data tab only, not shown above every tab).
+#
+# EXPECTED INTERFACE (for the housekeeper to wire up once bbg-diagnostics lands):
+#
+#     data.bloomberg.bbg_diagnostics.run_bloomberg_diagnostics() -> list[dict]
+#
+# where each dict is:
+#     {"name": str, "status": "pass" | "fail" | "warning", "message": str}
+#
+# "name" is a short check label (e.g. "Session connectivity", "SPOT marks official
+# source"), "message" is a one-sentence plain-English explanation (no raw exceptions
+# or tracebacks -- those must be caught and summarised by the diagnostics module
+# itself). This module never surfaces a traceback to the page; see
+# `run_bloomberg_diagnostics_safe` below for the failure path.
+#
+# Until that module exists, `_run_bloomberg_diagnostics_placeholder` below is used
+# instead: a minimal, best-effort check built only from what data/bloomberg already
+# exposes today (`live.availability` for a live session probe, `live.read_status` for
+# the last completed pull). It intentionally does NOT attempt to classify
+# marks_official correctness -- that enumeration is bbg-diagnostics' job.
+
+
+def _bbg_diagnostics_entry_point():
+    """Returns the best diagnostics function available: the real bbg-diagnostics
+    output if that module has landed, otherwise the local placeholder. Import is
+    lazy and wrapped so a partially-built module on someone else's branch can never
+    break this tab."""
+    try:
+        from data.bloomberg.bbg_diagnostics import run_bloomberg_diagnostics as real_fn
+        return real_fn
+    except ImportError:
+        return _run_bloomberg_diagnostics_placeholder
+
+
+def _run_bloomberg_diagnostics_placeholder() -> list:
+    """Placeholder standing in for the future `data.bloomberg.bbg_diagnostics.
+    run_bloomberg_diagnostics()`. Reports what today's data/bloomberg module can
+    already tell us: whether a live session can be opened, and what the last
+    completed pull (`data.bloomberg.live` status file) recorded. Never raises --
+    any failure to even check becomes a single "fail" row with a plain-English
+    message."""
+    checks = []
+    try:
+        from data.bloomberg.live import availability
+        host = os.environ.get("BLP_HOST", "localhost")
+        port = int(os.environ.get("BLP_PORT", "8194"))
+        ok, reason = availability(host=host, port=port)
+        checks.append({
+            "name": "Bloomberg session connectivity",
+            "status": "pass" if ok else "fail",
+            "message": ("Connected to the Bloomberg API session." if ok
+                        else f"Could not reach Bloomberg: {reason}."),
+        })
+    except Exception:
+        checks.append({
+            "name": "Bloomberg session connectivity",
+            "status": "fail",
+            "message": "Could not reach Bloomberg (connection check itself failed to run).",
+        })
+
+    try:
+        from data.bloomberg.live import read_status
+        from ui.app import get_db_path
+        status = read_status(get_db_path())
+        if status is None:
+            checks.append({
+                "name": "Last marks pull",
+                "status": "warning",
+                "message": "No Bloomberg pull has run yet on this database.",
+            })
+        elif status.get("connected"):
+            checks.append({
+                "name": "Last marks pull",
+                "status": "pass",
+                "message": f"Last pull at {status.get('time', 'an unknown time')} wrote "
+                           f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks.",
+            })
+        else:
+            checks.append({
+                "name": "Last marks pull",
+                "status": "fail" if status.get("failed") else "warning",
+                "message": f"Last pull did not connect: {status.get('reason', 'unknown reason')}.",
+            })
+    except Exception:
+        checks.append({
+            "name": "Last marks pull",
+            "status": "warning",
+            "message": "Could not read the last pull status.",
+        })
+
+    checks.append({
+        "name": "marks_official coverage",
+        "status": "warning",
+        "message": "Detailed checks of official vs reconciliation-only marks sources "
+                   "(BNP_BVAL, BBG_INTERP) are not available yet; this placeholder does "
+                   "not enumerate them.",
+    })
+    return checks
+
+
+_STATUS_LABELS = {"pass": "PASS", "fail": "FAIL", "warning": "WARNING"}
+
+
+def _render_bbg_results(checks: list) -> html.Div:
+    if not checks:
+        return html.Div("No diagnostic checks were returned.", className="bbg-check-empty")
+    rows = []
+    for c in checks:
+        status = c.get("status", "warning")
+        label = _STATUS_LABELS.get(status, status.upper())
+        rows.append(html.Div(className="bbg-check-row", children=[
+            html.Span(label, className=f"bbg-check-status bbg-check-status--{status}"),
+            html.Span(c.get("name", ""), className="bbg-check-name"),
+            html.Span(c.get("message", ""), className="bbg-check-message"),
+        ]))
+    return html.Div(rows, className="bbg-check-list")
+
+
+def run_bloomberg_diagnostics_safe() -> list:
+    """Runs whichever diagnostics function is available (real or placeholder) with a
+    hard safety net: any exception is caught here and turned into a single plain
+    "could not reach Bloomberg" row rather than a crash or a traceback on the page.
+    This never blocks app startup or other tabs -- it only runs on button click."""
+    try:
+        fn = _bbg_diagnostics_entry_point()
+        result = fn()
+        if not isinstance(result, list):
+            raise TypeError("diagnostics function did not return a list")
+        return result
+    except Exception:
+        return [{
+            "name": "Bloomberg diagnostics",
+            "status": "fail",
+            "message": "Could not reach Bloomberg or run diagnostics.",
+        }]
 
 
 # --------------------------------------------------------------------------- pair selection
@@ -453,6 +603,11 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         html.H4("Close completeness"),
         html.Div(id="market-data-completeness-container"),
         manual_entry_form(),  # static: its ids are callback inputs and must exist on first render
+        html.Div(className="bbg-check-block", children=[
+            html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
+                        n_clicks=0, className="bbg-check-button"),
+            html.Div(id=BBG_RESULTS_ID, className="bbg-check-results"),
+        ]),
     ])
 
 
@@ -572,3 +727,15 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         finally:
             conn.close()
         return f"Saved MANUAL {mark_type} {instrument_id} {settle_date} = {float(value)!r}."
+
+    @app.callback(
+        Output(BBG_RESULTS_ID, "children"),
+        Input(BBG_CHECK_BUTTON_ID, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _on_bbg_check_click(n_clicks):
+        # Runs on click only (prevent_initial_call): a Bloomberg-unreachable machine
+        # never pays this cost just to load the page, and no other tab or callback
+        # depends on this Output.
+        checks = run_bloomberg_diagnostics_safe()
+        return _render_bbg_results(checks)

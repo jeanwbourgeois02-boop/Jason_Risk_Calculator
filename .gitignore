@@ -2,6 +2,8 @@ data/raw/
 __pycache__/
 .pytest_cache/
 *.db
+*.bloomberg_status.json
 reports/
 .venv/
 .claude/settings.local.json
+/requirements.txt

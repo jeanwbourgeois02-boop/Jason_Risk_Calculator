@@ -39,7 +39,7 @@ p { margin: 8px 0; }
 .subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 0 0 16px; }
 .subtab { padding: 8px 14px !important; border: none !important; border-bottom: 3px solid transparent !important;
   background: transparent !important; color: var(--muted) !important; font-weight: 600; font-size: 12.5px; cursor: pointer; }
-.subtab:hover { color: var(--navy) !important; }
+.subtab:hover { color: #fff !important; }
 .subtab--selected { color: var(--navy) !important; border-bottom: 3px solid var(--gold) !important; background: #fff !important; }
 
 /* ---------------------------------------------------------------- header strip
@@ -59,6 +59,24 @@ p { margin: 8px 0; }
 .header-figure-value--zero { color: #fff; }
 .header-figure-value--neutral { color: #fff; }
 .header-figure-value--muted { color: rgba(255,255,255,.5); font-style: italic; font-weight: 500; cursor: help; }
+
+/* Bloomberg connection check: moved from the (dark) header strip to the (light) Market
+   Data tab body on 2026-09-16, so this block now sits on --page/--card, not --navy --
+   colours below are the light-theme equivalents of the old white-on-navy palette. */
+.bbg-check-block { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.bbg-check-button { background: var(--navy); color: #fff; border: 1px solid var(--navy);
+  border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
+.bbg-check-button:hover { background: var(--navy-2); }
+.bbg-check-results { margin-top: 6px; }
+.bbg-check-empty { font-size: 11px; color: var(--muted); }
+.bbg-check-list { display: flex; flex-direction: column; gap: 4px; }
+.bbg-check-row { display: flex; align-items: baseline; gap: 8px; font-size: 11px; color: var(--text); }
+.bbg-check-status { font-weight: 700; letter-spacing: .04em; min-width: 62px; }
+.bbg-check-status--pass { color: var(--pos); }
+.bbg-check-status--fail { color: var(--neg); }
+.bbg-check-status--warning { color: var(--warn); }
+.bbg-check-name { font-weight: 600; min-width: 160px; }
+.bbg-check-message { color: var(--muted); }
 .header-divider { align-self: stretch; width: 1px; background: rgba(255,255,255,.22); margin: 4px 2px; }
 /* The LTD chart's collapsible re-uses `.section` (white card, dark text) -- fine on the
    light page, but it sits inside the navy header here, so it needs its own dark-on-
@@ -209,6 +227,17 @@ p { margin: 8px 0; }
 /* Unavailable: grey italic, wherever it appears (cards and table cells alike). */
 .card-value--muted, .cell--unavailable { color: var(--muted) !important; font-style: italic; }
 
+/* ---------------------------------------------------------------- futures-fill upload card
+   (ui/tabs/reconciliation.py, 2026-09-16): plain minimal card, deliberately separate
+   from the as-of date picker (which only drives the tables below, not this import),
+   so the choose/confirm flow reads as one self-contained step. */
+.upload-card { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px; margin: 0 0 20px; max-width: 480px; }
+.upload-card-title { margin: 0 0 4px; }
+.upload-card-hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+.upload-card-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.upload-card-row + .upload-card-row { margin-top: 10px; }
+
 /* ---------------------------------------------------------------- data-source strip (uploads) */
 .source-strip { margin: 0 0 16px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; }
 .source-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: flex-start; }
@@ -231,6 +260,7 @@ p { margin: 8px 0; }
 .top-bar .source-snapshot { color: rgba(255,255,255,.7); }
 .source-result { margin-top: 8px; font-size: 13px; }
 .source-result--error { color: var(--neg); font-weight: 600; }
+.source-result--warning { color: #8a6d00; font-weight: 600; }
 .details--compact { margin-top: 6px; }
 .details--compact > summary { font-size: 12px; font-weight: 600; color: var(--muted); }
 .top-bar .details--compact > summary { color: rgba(255,255,255,.75); }

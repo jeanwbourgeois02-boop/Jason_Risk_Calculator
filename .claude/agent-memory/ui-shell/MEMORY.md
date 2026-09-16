@@ -12,3 +12,7 @@
 - [Ladder reorder + headline 2026-09-15](ladder-reorder-headline-2026-09-15.md) — gross/net card layout, table order, scenario-order (not alpha), NDF marker removed, compact header strip w/ Net-Gross-Previous day
 - [Blotter Futures sub-tab 2026-09-15](blotter-futures-subtab-2026-09-15.md) — Total/FX/Futures/Rates/Options/Bundles order, near-dated FX_FWD reported as FX_SPOT, title row matches Ladder, headless-Edge hang fix
 - [Rates tab 2026-09-15](rates-tab-2026-09-15.md) — real IRS blotter (ui/tabs/rates.py) off QL_PRICER marks_official, bypasses value_book, own recon-status tolerance, excluded from generic scope callback loop
+- [Bloomberg diagnostics button 2026-09-16](bloomberg-diagnostics-button-2026-09-16.md) — header "Check Bloomberg connection" button, placeholder vs expected data.bloomberg.bbg_diagnostics interface
+- [Futures upload diagnostics 2026-09-16](futures-upload-diagnostics-2026-09-16.md) — ImportResult.messages warning panel, never show raw exceptions, __wrapped__ trick to unit-test Dash callbacks
+- [Reconciliation upload declutter 2026-09-16](reconciliation-upload-declutter-2026-09-16.md) — date picker moved off the futures-import card into its own toolbar; upload card is standalone .upload-card
+- [Bloomberg check button moved to Market Data 2026-09-16](bloomberg-check-button-moved-to-market-data-2026-09-16.md) — button/panel/diagnostics fns relocated header.py -> market_data.py, new ids, CSS retheme

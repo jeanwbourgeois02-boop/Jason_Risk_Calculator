@@ -116,6 +116,14 @@ def layout() -> html.Div:
     ])
 
 
+# The "Check Bloomberg connection" button, its results panel, and the diagnostics
+# entry point/placeholder/renderer moved to ui/tabs/market_data.py on 2026-09-16
+# (user decision: the check belongs on the Market Data tab only, not on every tab).
+# See that module for `BBG_CHECK_BUTTON_ID`, `BBG_RESULTS_ID`,
+# `_bbg_diagnostics_entry_point`, `_run_bloomberg_diagnostics_placeholder`,
+# `_render_bbg_results`, and `run_bloomberg_diagnostics_safe`.
+
+
 def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     # Same pricing path as the Blotter: official marks first, BNP file rates as a
     # labelled fallback, so the header shows numbers on a PC without Bloomberg.
