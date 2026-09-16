@@ -27,14 +27,17 @@ not the value changed, so a "manual value -> store" callback ran right after the
 callback and wiped the filename-derived date out of the store (bug seen 2026-09-15 as
 "Choose the snapshot date before confirming" on a correctly named HA_PNL file).
 
-The status line on success is one sentence, with the loader's own summary (new / identical
-/ excluded / closed-line counts from `import_report`) underneath it in muted text:
-    "Loaded <filename> - snapshot <as_of> - <N> trades, <M> positions"
+On success nothing stays on the page (user direction 2026-09-15: the status box under the
+button "needs to disappear"): the result line is emptied (the CSS only shows it when
+non-empty), the file-name / Confirm row is hidden again, and the top-bar source line
+becomes the record -- "Loaded: BNP report as of <as_of> (<N> trades, <M> positions)".
 `trades` = total rows currently in the `trades` table (trades have no as_of_date column
 of their own -- CLAUDE.md's `trades` table -- so a per-file count is not recoverable
 without added schema); `positions` = rows in `positions` for THIS as_of_date, which is
 per-file. Documented here since it is a asymmetry a reader might otherwise assume is a
-bug. Errors show in the same line, in red (`.source-result--error`).
+bug. The loader's own summary (new / identical / excluded / closed-line counts from
+`import_report`) goes to the app log, not the page. Errors show in the result line, in
+red (`.source-result--error`), with the Confirm row left in place so the user can retry.
 
 History (expandable, read from the DB, no schema added): one row per distinct
 `positions.as_of_date`, its position count. Trade counts are not stored per snapshot
@@ -42,9 +45,13 @@ History (expandable, read from the DB, no schema added): one row per distinct
 """
 from __future__ import annotations
 
+import logging
+
 from dash import Input, Output, State, dcc, html, no_update
 
 from data.ingest.upload import decode, suggested_date, import_report
+
+log = logging.getLogger(__name__)
 
 SOURCE_LINE_ID = "data-source-line"
 FILE_UPLOAD_ID = "report-file"
@@ -165,26 +172,25 @@ def register(app, get_db_path):
         Output(RESULT_ID, "children"), Output(SOURCE_LINE_ID, "children"),
         Output("report-history-wrap", "children"),
         Output("cash-ladder-date", "date", allow_duplicate=True),
+        Output(STAGE_ID, "style", allow_duplicate=True),
         Input(CONFIRM_ID, "n_clicks"),
         State(FILE_UPLOAD_ID, "contents"), State(FILE_UPLOAD_ID, "filename"),
         State(DATE_PICKER_ID, "data"), State(MANUAL_DATE_ID, "value"), prevent_initial_call=True,
     )
     def _confirm(clicks, contents, filename, as_of, manual_date):
+        keep = (no_update, no_update, no_update, no_update)  # source line, history, ladder date, stage
         if not contents:
-            return no_update, no_update, no_update, no_update
+            return (no_update, *keep)
         # Filename-derived date wins; the manual box is only shown when there is none.
         as_of = as_of or manual_date
         if not as_of:
-            return html.Span("Choose the snapshot date before confirming.", className="source-result--error"), \
-                no_update, no_update, no_update
+            return (html.Span("Choose the snapshot date before confirming.", className="source-result--error"), *keep)
         db_path = get_db_path()
         try:
             message = import_report(decode(contents), filename, as_of, db_path)
         except Exception as exc:
-            return html.Span(f"Import failed; no data saved. {exc}", className="source-result--error"), \
-                no_update, no_update, no_update
+            return (html.Span(f"Import failed; no data saved. {exc}", className="source-result--error"), *keep)
+        log.info("%s (snapshot %s): %s", filename, as_of, message)
         from ui.app import load_summary
         data = load_summary(db_path)
-        short = (f"Loaded {filename} - snapshot {as_of} - {data['trades']} trades, {data['positions']} positions")
-        return [short, html.Div(message, className="section-kicker")], describe_source(data), \
-            history_layout(db_path), as_of
+        return "", describe_source(data), history_layout(db_path), as_of, {"display": "none"}
