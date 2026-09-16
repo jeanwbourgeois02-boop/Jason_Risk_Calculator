@@ -16,3 +16,4 @@
 - [Futures upload diagnostics 2026-09-16](futures-upload-diagnostics-2026-09-16.md) — ImportResult.messages warning panel, never show raw exceptions, __wrapped__ trick to unit-test Dash callbacks
 - [Reconciliation upload declutter 2026-09-16](reconciliation-upload-declutter-2026-09-16.md) — date picker moved off the futures-import card into its own toolbar; upload card is standalone .upload-card
 - [Bloomberg check button moved to Market Data 2026-09-16](bloomberg-check-button-moved-to-market-data-2026-09-16.md) — button/panel/diagnostics fns relocated header.py -> market_data.py, new ids, CSS retheme
+- [BNP upload summary visible 2026-09-16](bnp-upload-summary-visible-2026-09-16.md) — restored on-page summary (app had zero logging config anywhere), added basicConfig in ui/launch.py, multi-output callback_map key gotcha

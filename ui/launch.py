@@ -7,6 +7,7 @@ starts on the next free port. `--force-new` skips reuse detection entirely.
 """
 import argparse
 import hashlib
+import logging
 import os
 import sys
 import threading
@@ -78,6 +79,12 @@ def parse_args(argv):
 
 
 def main(argv=None):
+    # Root logger has no handler anywhere else in this app (checked 2026-09-16): without
+    # this, every log.info/log.warning call in data/ingest/bnp.py and ui/uploads.py is
+    # silently dropped (root defaults to WARNING with no handler -> nothing is printed).
+    # One handler at the single entry point, stdout, so the terminal that ran
+    # `2_launcher.py start` is a persistent record of anything logged app-wide.
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     args = parse_args([] if argv is None else argv)
     try:
         from ui.app import create_app, get_db_path

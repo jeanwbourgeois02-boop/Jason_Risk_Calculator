@@ -19,6 +19,7 @@ dash = pytest.importorskip("dash", reason="dash is not installed in this environ
 from data.ingest import schema  # noqa: E402
 from ui import app as uiapp  # noqa: E402
 from ui.tabs import blotter, cash_ladder, header, market_data, reconciliation  # noqa: E402
+from ui import uploads  # noqa: E402
 
 
 def _seed(conn):
@@ -725,3 +726,51 @@ def test_futures_confirm_hard_failure_shows_plain_message_no_traceback(tmp_path,
     assert "Traceback" not in rendered
     assert "'All FX trades' sheet not found" not in rendered
     assert "Import failed" in rendered
+
+
+# ---------------------------------------------------------------- BNP upload summary
+# (2026-09-16 fix: a collaborator's change routed import_report()'s new/identical/
+# excluded/closed-line summary to log.info only -- the app has no logging handler
+# configured anywhere, so it was silently dropped and never seen. The summary must be
+# rendered on the page, not just logged.)
+
+
+def _report_confirm_callback(app):
+    # Multi-output callbacks are keyed by all their outputs joined with '..', with a
+    # hash suffix; match by prefix instead of the exact key.
+    key = next(k for k in app.callback_map if k.startswith("..report-result.children...data-source-line"))
+    cb = app.callback_map[key]["callback"]
+    return getattr(cb, "__wrapped__", cb)
+
+
+def test_bnp_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
+    db_path = tmp_path / "risk.db"
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    fn = _report_confirm_callback(app)
+
+    summary = ("Imported 2026-08-17: 3 new trades, 2 new positions, 1 new BNP marks. "
+               "0 identical records already present. Excluded: 0 malformed IRS rows, "
+               "0 other unsupported rows, 0 rows from other funds. Futures are positions only.")
+    monkeypatch.setattr("ui.uploads.import_report", lambda *a, **k: summary)
+    monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
+    monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "2026-08-17", "trades": 3, "positions": 2})
+
+    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
+    result, source_line, history, as_of, stage_style = fn(1, contents, "HA_PNL_20260818.csv", "2026-08-17", None)
+
+    # The loader's summary must actually be visible in the rendered result -- not "",
+    # not only passed to a logger.
+    assert isinstance(result, dash.html.Div)
+    assert result.className == "source-result--info"
+    assert summary in str(result)
+    assert as_of == "2026-08-17"
+
+
+def test_launch_configures_root_logging_handler():
+    """The app's single entry point must attach a logging handler so log.info/log.warning
+    calls anywhere in the app (data/ingest/bnp.py, ui/uploads.py) actually go somewhere,
+    instead of being dropped by the default unconfigured root logger."""
+    import inspect
+    from ui import launch
+
+    assert "logging.basicConfig" in inspect.getsource(launch.main)

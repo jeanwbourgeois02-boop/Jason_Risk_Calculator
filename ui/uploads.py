@@ -27,17 +27,26 @@ not the value changed, so a "manual value -> store" callback ran right after the
 callback and wiped the filename-derived date out of the store (bug seen 2026-09-15 as
 "Choose the snapshot date before confirming" on a correctly named HA_PNL file).
 
-On success nothing stays on the page (user direction 2026-09-15: the status box under the
-button "needs to disappear"): the result line is emptied (the CSS only shows it when
-non-empty), the file-name / Confirm row is hidden again, and the top-bar source line
-becomes the record -- "Loaded: BNP report as of <as_of> (<N> trades, <M> positions)".
-`trades` = total rows currently in the `trades` table (trades have no as_of_date column
-of their own -- CLAUDE.md's `trades` table -- so a per-file count is not recoverable
-without added schema); `positions` = rows in `positions` for THIS as_of_date, which is
-per-file. Documented here since it is a asymmetry a reader might otherwise assume is a
-bug. The loader's own summary (new / identical / excluded / closed-line counts from
-`import_report`) goes to the app log, not the page. Errors show in the result line, in
-red (`.source-result--error`), with the Confirm row left in place so the user can retry.
+On success the file-name / Confirm row is hidden again (user direction 2026-09-15: no
+need to keep that around) and the top-bar source line becomes the permanent record --
+"Loaded: BNP report as of <as_of> (<N> trades, <M> positions)". `trades` = total rows
+currently in the `trades` table (trades have no as_of_date column of their own --
+CLAUDE.md's `trades` table -- so a per-file count is not recoverable without added
+schema); `positions` = rows in `positions` for THIS as_of_date, which is per-file.
+Documented here since it is a asymmetry a reader might otherwise assume is a bug.
+
+The loader's own summary (new / identical / excluded / closed-line counts from
+`import_report`) is real information about what happened to the user's data -- rows
+silently skipped as malformed, excluded, or already present -- and must be seen, not just
+logged (2026-09-16 fix: a collaborator had routed it to `log.info` only, on an app with no
+logging configured anywhere, so it went nowhere; see `ui/launch.py`'s `main()` for the
+now-added `logging.basicConfig`, which makes it a persistent record too, but the page is
+still the primary place the user sees it). It renders once, right after Confirm, in the
+same one-line style as the futures-upload diagnostics in `ui/tabs/reconciliation.py`: a
+single `.source-result--info` line holding the loader's sentence verbatim (it is already
+compact -- one paragraph, not a per-row dump) rather than a wall of text. Errors show in
+the result line, in red (`.source-result--error`), with the Confirm row left in place so
+the user can retry.
 
 History (expandable, read from the DB, no schema added): one row per distinct
 `positions.as_of_date`, its position count. Trade counts are not stored per snapshot
@@ -193,4 +202,5 @@ def register(app, get_db_path):
         log.info("%s (snapshot %s): %s", filename, as_of, message)
         from ui.app import load_summary
         data = load_summary(db_path)
-        return "", describe_source(data), history_layout(db_path), as_of, {"display": "none"}
+        result = html.Div(message, className="source-result--info")
+        return result, describe_source(data), history_layout(db_path), as_of, {"display": "none"}

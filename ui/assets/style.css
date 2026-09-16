@@ -261,6 +261,7 @@ p { margin: 8px 0; }
 .source-result { margin-top: 8px; font-size: 13px; }
 .source-result--error { color: var(--neg); font-weight: 600; }
 .source-result--warning { color: #8a6d00; font-weight: 600; }
+.source-result--info { color: var(--muted); }
 .details--compact { margin-top: 6px; }
 .details--compact > summary { font-size: 12px; font-weight: 600; color: var(--muted); }
 .top-bar .details--compact > summary { color: rgba(255,255,255,.75); }
