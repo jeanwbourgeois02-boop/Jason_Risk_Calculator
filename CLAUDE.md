@@ -8,9 +8,9 @@ The literal workbook arithmetic (`engine/pnl/pnl.py`, `docs/excel-parity-audit.m
 
 The cash ladder is a pure delta table: leg by leg, crosses included, spot for delta, no P&L on it (engine change landed 2026-09-15).
 
-FX and futures risk monitor: cash ladder, delta per currency, daily / 5d / MTD / YTD P&L. Python; Dash front end later. Fund NMMF, base currency USD, prime broker BNP. Reference inputs: `data/raw/new_sample_trades.csv` (transaction-level blotter export — see "Blotter → tables"; the current trade fill source, parsed by `data/ingest/blotter.py`), `data/raw/HA_PNL_20260818.csv` (BNP position/P&L snapshot, 242 rows × 137 cols — retained for `positions`, cash balances and `BNP_BVAL` reconciliation marks, see "BNP file → tables") and `data/raw/HA-portfolio vJean.xlsx` (the Excel calculator this app replaces, kept for the Reconciliation tab's literal-workbook panel only). Open items live in `docs/open-questions.md`, not here.
+FX and futures risk monitor: cash ladder (delta exposure + cashflow timing + scenario analysis — not a cash-balance ledger, see below), blotter (all trades, P&L, Greeks), delta per currency. Python; Dash front end later. Fund NMMF, base currency USD. Reference input: `data/raw/new_sample_trades.csv` (transaction-level blotter export — see "Blotter → tables"; the app's **only** trade source, parsed by `data/ingest/blotter.py`). `data/raw/HA_PNL_20260818.csv` (BNP position/P&L snapshot) and `data/raw/HA-portfolio vJean.xlsx` (the Excel calculator this app replaced) are historical inputs only — see "Trade-source history" below. Open items live in `docs/open-questions.md`, not here.
 
-**Trade-source history (2026-09-16):** until this date `HA_PNL_*.csv` was described as "the trade source" and futures fills as coming from the xlsx workbook's `All FX trades` sheet. Both are superseded: the blotter (`data/ingest/blotter.py`, reading `data/raw/new_sample_trades.csv`-shaped files) is now the source of FX forward/spot, futures, option and IRS trade fills, because it carries a genuine per-trade fill price and trade ID for every product including futures, which the BNP snapshot never did. The BNP CSV and the xlsx workbook keep their existing, narrower jobs below; see `docs/open-questions.md` for the trade-identity clash this leaves open between `bnp.py`/`irs.py` and `blotter.py`.
+**Trade-source history:** three stages. (1) Until 2026-09-16, `HA_PNL_*.csv` was "the trade source" and futures fills came from the xlsx workbook's `All FX trades` sheet. (2) 2026-09-16: both superseded by the blotter (`data/ingest/blotter.py`), which carries a genuine per-trade fill price and trade ID for every product including futures, unlike the BNP snapshot; BNP was kept alongside it for its `positions` cash-balance snapshot and `BNP_BVAL` reconciliation marks, with a new EOD blotter-vs-BNP check (`engine/pnl/reconcile.py`) added the same day. (3) **2026-09-17 (current, user decision) — BNP removed entirely.** The user confirmed directly that the cash ladder he actually wants is delta exposure and cashflow timing (already fully derivable from the blotter's trade legs alone, no balance needed) plus scenario analysis, not a literal bank-balance figure — so BNP's one remaining job (the `positions` cash balance) is no longer needed by anything in the app. `data/ingest/upload.py`/`ui/uploads.py` no longer contain BNP-upload code at all (not just unreachable — removed); `data/ingest/bnp.py` itself is untouched and still used as a library by `data/load.py`'s CLI, just unreachable from the app. The blotter parser and upload path were also made deliberately tolerant of format variation (BOM-prefixed files, mixed-case/whitespace-varied headers, one malformed row no longer blocking a whole file) per the same instruction ("make it as flexible as possible"). This resolves `docs/open-questions.md`'s item 55 trade-identity clash by removing one side of it entirely — see that file for what's now genuinely dead code (the cash-balance column, the reconciliation panel) versus what's still live.
 
 ## Working mode
 
@@ -74,6 +74,7 @@ marks (
   instrument_id   TEXT NOT NULL REFERENCES instruments,
   settle_date     TEXT NOT NULL,      -- outright date; = as_of_date for SPOT; expiry for futures
   mark_type       TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | PAR_RATE | PV_USD | DV01_USD | PREMIUM | DELTA
+                                      -- | GAMMA | THETA | VEGA | RHO (option Greeks, engine/options, 2026-09-17)
   value           REAL NOT NULL,      -- DELTA = base-ccy delta per 1 unit of trades.quantity (may exceed 1 for digitals)
   source          TEXT NOT NULL,      -- BNP_BVAL | BBG_BFXFORWARD | BBG_BDH | BBG_BDP | BBG_INTERP | MANUAL
                                       -- BBG_INTERP = linear interpolation in forward points between standard
@@ -135,7 +136,7 @@ Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4
 | SPOT, FWD_OUTRIGHT | BBG_BFXFORWARD |
 | FUTURE_PX | BBG_BDH |
 | PAR_RATE, PV_USD, DV01_USD | QL_PRICER |
-| DELTA, PREMIUM | MANUAL |
+| DELTA, PREMIUM, GAMMA, THETA, VEGA, RHO | QL_OPTIONS_PRICER (`engine/options`, vendored options_calc; since 2026-09-17 — MANUAL is reconciliation-only for these) |
 | any | BNP_BVAL is reconciliation only, never official |
 | any | BBG_INTERP (linear interpolation in forward points between standard tenors, written by the pull script when a broken-date outright cannot be requested directly) is reconciliation / fallback only, never official |
 | PAR_RATE, PV_USD, DV01_USD | BBG_BDH (Bloomberg SWPM) is reconciliation only, never official, mirroring BNP_BVAL for FX (decided 2026-09-15 with the `engine/rates` QuantLib OIS pricer landing) |
@@ -156,11 +157,11 @@ Scope: `Status = 'Completed' AND Fund = 'NMMF'`. Row kind is decided by `Fin Typ
 
 `trades.source = 'XLSX'` for every blotter-sourced trade (the schema's `source` column is free text, not a checked enum; the blotter reuses the same literal `'XLSX'` value the xlsx-workbook futures loader below uses for `trade_id='XL-<row>'` rows — a naming overlap between two different files, tracked in `docs/open-questions.md` rather than resolved here). `trades.strategy` is `''` (no equivalent column in this file).
 
-### BNP file → tables
+### BNP file → tables (historical — no longer a live input)
 
-The BNP file is retained for the `positions` snapshot (the cash ladder's `CASH` balances — the BNP-vs-CALC Reconciliation panel no longer exists, see below), and for `BNP_BVAL` reconciliation marks (`data/bloomberg/bnp_marks.py`) — not as the primary trade source (see "Blotter → tables" above). `data/ingest/bnp.py` (FORWARD, IRS via `data/ingest/irs.py`) and `data/ingest/blotter.py` currently both still write `trades`/`trade_legs` for the same underlying FORWARD and IRS fills under different `trade_id` schemes when both files are loaded for overlapping trades; nothing in the pipeline de-duplicates them yet (open question, not silently resolved here — `docs/open-questions.md` item 55).
+**As of 2026-09-17, the app's upload control accepts only the blotter.** The BNP file described in this section is no longer uploadable anywhere in the app at all — `data/ingest/upload.py` no longer contains BNP-upload code, and `data/ingest/bnp.py` (the parser this section describes) is untouched but only reachable as a library from `data/load.py`'s CLI. This section is kept as historical documentation of that CLI path and of the format itself, not as a description of live app behaviour. Two features built around BNP being a second live source no longer have any data to act on and are effectively dead code, left in place rather than deleted pending a decision (`docs/open-questions.md` item 59, reopened): the cash ladder's `CASH`-balance column (`positions` where `source='BNP'`, always empty now) and the EOD reconciliation panel (`engine/pnl/reconcile.py`, `ui/tabs/cash_ladder.py::reconciliation_panel`, always shows "no BNP snapshot loaded yet" now, since nothing writes BNP-sourced `positions`/`trades` any more). Both degrade gracefully (no crash, no stale data shown) rather than erroring.
 
-The app's one upload control (`ui/uploads.py`) accepts **both** formats, auto-detected by column shape (`data/ingest/upload.py::detect_format`, never filename — the two column signatures are disjoint): the blotter is the real-time primary trade source, the BNP file is a once-daily EOD-Hong-Kong snapshot of the same book, kept because it is the only source of today's actual cash balance and because the two should agree at end of day (user decision 2026-09-16). `engine/pnl/reconcile.py::reconcile_blotter_vs_bnp`, surfaced as a collapsible panel on the Ladder tab, nets each source's trades per instrument and flags pairs outside tolerance — a new, small, purpose-built check, not a revival of the deleted Reconciliation tab or of `engine/pnl/pnl.py` (see `docs/open-questions.md` item 60).
+`data/ingest/bnp.py` (FORWARD, IRS via `data/ingest/irs.py`) and `data/ingest/blotter.py` no longer both write live `trades`/`trade_legs` for the same book in normal use (only the blotter does, via the app), so the `trade_id`-scheme clash between them (`docs/open-questions.md` item 55) is now moot for anything the app itself does — it would only resurface if someone manually ran both loaders against the same live database outside the app, which nothing currently does.
 
 File dated `T` is the **T−1 close** snapshot (`HA_PNL_20260818.csv` contains trades through 2026-08-17). Filter `Fund = NMMF`; `Financial Type ∈ {FORWARD, CURRENCY, FUTURES, INTEREST_RATE_SWAP}`. `Base Currency` is always USD. Column `Unnamed: 136` and `Column 2` are empty.
 
@@ -217,6 +218,8 @@ Two forward rows form one `FX_SWAP` package when all hold: same account, same pa
 | Delta | query below |
 | Overall book | `positions` (BNP vs CALC), P&L rollups by strategy / account, LTD series |
 
+**Options tab placement, decided 2026-09-17 (resolves the standing conflict with `ui/app.py`'s docstring, which claimed BUILD_PLAN's 3/4-tab structure superseded this table — both now agree):** Options is not a standalone top-level tab. It lives inside the Blotter, as a grouped, collapsible trade summary — Portfolio Totals roll-up, then grouped by asset class, then by structure/`package_id` (a multi-leg `combine()`-built package collapses to one summary row with its legs nested underneath), columns Position / Notional / MktVal / MktPx / Delta / Theta / Gamma / Vega / Expiry / Underlying / Strike / UndFwdPx / Rho — per the user's Bloomberg MARS-style reference layout. The row above ("Options | FX_OPTION trades × marks_official") still describes the correct *data* view; only its placement in the UI is corrected here. See `engine/options/__init__.py`'s scope ledger and `docs/open-questions.md` item 61 for the phased build-out (options-pricer, ui-shell Phase 8).
+
 Aggregate delta per currency across forwards, futures and option deltas in one query:
 
 ```sql
@@ -233,13 +236,13 @@ WITH d AS (
   SELECT i.quote_ccy, -t.quantity * m.value * s.value
   FROM trades t JOIN instruments i USING (instrument_id)
   JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
-  LEFT JOIN marks_official s ON s.instrument_id = t.instrument_id AND s.mark_type = 'SPOT'  AND s.as_of_date = :as_of
+  LEFT JOIN marks_official s ON s.instrument_id = i.base_ccy || i.quote_ccy AND s.mark_type = 'SPOT'  AND s.as_of_date = :as_of
   WHERE t.product = 'FX_OPTION'
 )
 SELECT ccy, SUM(delta) AS delta FROM d GROUP BY ccy;
 ```
 
-The `SPOT` join in the option quote-currency branch is a `LEFT JOIN` so that a missing spot mark surfaces as a `NULL` delta; the engine must raise if any resulting delta is `NULL`, never drop the leg silently. `engine/ladder/ladder.py` currently embeds the earlier inner-join form of this query and must be changed to match when options are built.
+The `SPOT` join in the option quote-currency branch is a `LEFT JOIN` so that a missing spot mark surfaces as a `NULL` delta; the engine must raise if any resulting delta is `NULL`, never drop the leg silently. The join key is the **pair** (`i.base_ccy || i.quote_ccy`, e.g. `USDJPY`), not the option's own `instrument_id` (the blotter Symbol, e.g. `USDJPY111926P-197571137`), which can never match a SPOT row — corrected 2026-09-17 (options merge Phase 3) when `engine/ladder/ladder.py` was brought in line with this query. Because SQL `SUM()` drops individual NULL rows inside a `GROUP BY` group, the engine checks for options with a DELTA mark but no pair SPOT *before* aggregating (`_OPTION_MISSING_SPOT_SQL`) rather than inspecting the summed output.
 
 Per-pair delta (the sheet's "Position") is the same union grouped by `t.instrument_id` in USD-notional terms.
 
@@ -276,7 +279,12 @@ data/bloomberg/  blpapi pulls, marks table, marks_official view       -> bbg-dat
 engine/pnl/      LTD, daily, 5d, MTD, YTD per CLAUDE.md conventions   -> pnl-engine
 engine/ladder/   cash ladder and delta-per-currency query             -> cash-ladder
 engine/rates/    OIS curve bootstrap + swap valuation (QuantLib)      -> rates-pricer
+engine/options/  FX/equity/commodity option pricing, vendored          -> options-pricer
+                 options_calc (QuantLib); phase status in
+                 engine/options/__init__.py's scope ledger
 ui/              Dash app, one module per tab                         -> ui-shell
 tests/           pytest, one file per module, owned by the module's agent
 docs/            contract and open questions, owned by housekeeper
 ```
+
+**Planned, not yet created (2026-09-17):** `engine/rates_vol/` (exact name to be confirmed in that phase) will hold swaptions/caps/SABR/Bermudan pricing (vendored `options_calc.rates`, a separate Black-76/Hull-White model family from `engine/rates/`'s OIS-NPV pricer), owned by a new agent **rates-exotics**. Not created yet — Phase 6 of the options_calc merge, see `engine/options/__init__.py`.

@@ -398,11 +398,16 @@ def test_spot_table_ignores_marks_not_dated_as_of_settle():
 
 
 def test_delta_per_ccy_fx_option():
+    # DELTA's official source is schema.OFFICIAL_MARK_SOURCE['DELTA'] (QL_OPTIONS_PRICER
+    # as of 2026-09-17, not MANUAL -- read from the mapping rather than hard-coded so this
+    # test tracks any future re-mapping automatically).
+    delta_source = schema.OFFICIAL_MARK_SOURCE["DELTA"]
+    spot_source = schema.OFFICIAL_MARK_SOURCE["SPOT"]
     conn = _mk_conn()
     _insert_instrument(conn, "AUDUSD", "AUD", "USD", asset_class="FX_OPTION")
     _insert_trade(conn, "o1", "AUDUSD", "FX_OPTION", 1_000_000.0)
-    _insert_mark(conn, AS_OF, "AUDUSD", AS_OF, "DELTA", 0.5, "MANUAL")
-    _insert_mark(conn, AS_OF, "AUDUSD", AS_OF, "SPOT", 0.65, "BBG_BFXFORWARD")
+    _insert_mark(conn, AS_OF, "AUDUSD", AS_OF, "DELTA", 0.5, delta_source)
+    _insert_mark(conn, AS_OF, "AUDUSD", AS_OF, "SPOT", 0.65, spot_source)
     conn.commit()
 
     delta = delta_per_ccy(conn, AS_OF)
@@ -413,6 +418,64 @@ def test_delta_per_ccy_fx_option():
     assert math.isclose(usd_row["delta"].iloc[0], -1_000_000.0 * 0.5 * 0.65)
     assert math.isclose(aud_row["delta_usd"].iloc[0], 1_000_000.0 * 0.5 * 0.65)
     assert math.isclose(usd_row["delta_usd"].iloc[0], -1_000_000.0 * 0.5 * 0.65)
+
+
+def test_delta_per_ccy_fx_option_instrument_id_differs_from_pair():
+    # Real options carry their own contract instrument_id (e.g. a digital/vanilla name),
+    # not the bare 6-letter pair -- the SPOT mark is always keyed on the pair. The join
+    # must resolve the pair via instruments.base_ccy || instruments.quote_ccy, not via
+    # the option's own instrument_id (which can never match a SPOT row).
+    delta_source = schema.OFFICIAL_MARK_SOURCE["DELTA"]
+    spot_source = schema.OFFICIAL_MARK_SOURCE["SPOT"]
+    conn = _mk_conn()
+    option_id = "USDJPY111926P-1"
+    _insert_instrument(conn, option_id, "USD", "JPY", asset_class="FX_OPTION")
+    _insert_instrument(conn, "USDJPY", "USD", "JPY")
+    _insert_trade(conn, "o1", option_id, "FX_OPTION", 1_000_000.0)
+    _insert_mark(conn, AS_OF, option_id, AS_OF, "DELTA", 0.4, delta_source)
+    # SPOT mark keyed on the pair, not on the option's own instrument_id.
+    _insert_mark(conn, AS_OF, "USDJPY", AS_OF, "SPOT", 150.0, spot_source)
+    conn.commit()
+
+    delta = delta_per_ccy(conn, AS_OF)
+    usd_row = delta[delta["ccy"] == "USD"]
+    jpy_row = delta[delta["ccy"] == "JPY"]
+    assert math.isclose(usd_row["delta"].iloc[0], 1_000_000.0 * 0.4)
+    assert math.isclose(jpy_row["delta"].iloc[0], -1_000_000.0 * 0.4 * 150.0)
+
+
+def test_delta_per_ccy_fx_option_missing_spot_raises():
+    # Per CLAUDE.md: a missing SPOT mark for an FX_OPTION's quote-ccy delta must raise,
+    # never silently drop the leg out of the per-currency table.
+    delta_source = schema.OFFICIAL_MARK_SOURCE["DELTA"]
+    conn = _mk_conn()
+    option_id = "USDJPY111926P-1"
+    _insert_instrument(conn, option_id, "USD", "JPY", asset_class="FX_OPTION")
+    _insert_trade(conn, "o1", option_id, "FX_OPTION", 1_000_000.0)
+    _insert_mark(conn, AS_OF, option_id, AS_OF, "DELTA", 0.4, delta_source)
+    # No SPOT mark for USDJPY at all.
+    conn.commit()
+
+    with pytest.raises(ValueError, match=option_id):
+        delta_per_ccy(conn, AS_OF)
+
+
+def test_delta_per_ccy_fx_option_non_official_delta_mark_ignored():
+    # A DELTA mark whose source is MANUAL only (not QL_OPTIONS_PRICER, the official
+    # source) is not official: marks_official excludes it, the option contributes
+    # nothing, and this must not raise (there is no official DELTA row to trigger the
+    # missing-SPOT check in the first place).
+    conn = _mk_conn()
+    option_id = "USDJPY111926P-1"
+    _insert_instrument(conn, option_id, "USD", "JPY", asset_class="FX_OPTION")
+    _insert_trade(conn, "o1", option_id, "FX_OPTION", 1_000_000.0)
+    _insert_mark(conn, AS_OF, option_id, AS_OF, "DELTA", 0.4, "MANUAL")
+    # No SPOT mark either -- must still not raise, since the DELTA mark isn't official.
+    conn.commit()
+
+    delta = delta_per_ccy(conn, AS_OF)
+    assert "USD" not in set(delta["ccy"])
+    assert "JPY" not in set(delta["ccy"])
 
 
 # --------------------------------------------------------------------------- ladder_table

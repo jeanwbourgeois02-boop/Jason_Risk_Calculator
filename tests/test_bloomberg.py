@@ -1665,7 +1665,9 @@ def test_write_manual_mark_is_visible_but_not_official(tmp_path):
     manual.write_manual_mark(conn, "2026-08-17", "AUDUSD", "2026-08-17", "DELTA", 0.5)
     official_delta = conn.execute(
         "SELECT value FROM marks_official WHERE instrument_id='AUDUSD' AND mark_type='DELTA'").fetchone()
-    assert official_delta == (0.5,)                             # MANUAL is official for DELTA
+    # Since 2026-09-17 DELTA is official from QL_OPTIONS_PRICER (engine/options); a
+    # MANUAL delta is visible in `marks` but reconciliation-only, never official.
+    assert official_delta is None
 
 
 # =========================================================================== rates_marketdata.py

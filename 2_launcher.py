@@ -42,8 +42,7 @@ ROOT = Path(__file__).resolve().parent
 VENV = ROOT / ".venv"
 VENV_PY = VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 REQUIREMENTS = ROOT / "requirements.txt"
-SAMPLE = ROOT / "data" / "sample" / "HA_PNL_SAMPLE_20260818.csv"
-SAMPLE_AS_OF = "2026-08-17"
+SAMPLE = ROOT / "data" / "sample" / "blotter_sample.csv"
 BLPAPI_INDEX = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
 MIN_PYTHON = (3, 11)
 PORTS = range(8050, 8061)
@@ -62,7 +61,8 @@ PACKAGES = [
     "werkzeug>=3,<4",     # ui/launch.py imports werkzeug.serving.make_server directly
     "tzdata",             # zoneinfo has no system tz database on Windows; needed at runtime, no import statement
     "pyyaml>=6.0",        # engine/pnl/stress.py imports this as `yaml`
-    "QuantLib==1.43",     # engine/rates -- OIS curve bootstrap and swap pricing
+    "QuantLib==1.43",     # engine/rates, engine/options -- curve bootstrap and option pricing
+    "scipy>=1.11",        # engine/options/vendor/options_calc -- implied-vol solvers (scipy.optimize.brentq)
 ]
 DEV_PACKAGES = [
     "pytest>=8",          # tests/
@@ -71,7 +71,7 @@ DEV_PACKAGES = [
 # module doesn't actually import" (wrong wheel, ABI mismatch, etc). zoneinfo is stdlib
 # (3.9+) but still checked since tzdata above depends on it existing.
 IMPORT_CHECKS = ("dash", "pandas", "numpy", "openpyxl", "xlrd", "plotly", "werkzeug",
-                  "yaml", "QuantLib", "zoneinfo")
+                  "yaml", "QuantLib", "zoneinfo", "scipy")
 
 
 def requirements_text() -> str:
@@ -306,15 +306,19 @@ def cmd_setup(args) -> int:
 
 
 def cmd_load_sample(args) -> int:
-    """Import the sample BNP report (runs inside .venv; identical rows are skipped)."""
+    """Import the sample trade blotter (runs inside .venv). Blotter uploads have no
+    idempotent re-upload mode (data/ingest/blotter.py's own docstring): re-running this
+    against a DB that already has the sample loaded raises a clean 'Duplicate key'
+    error, which is the expected, harmless outcome -- the sample is only for an empty
+    database, not something to keep re-importing."""
     from ui.app import get_db_path
-    from data.ingest.upload import import_report
+    from data.ingest.upload import import_blotter
     try:
-        say("  sample: " + str(import_report(SAMPLE.read_bytes(), SAMPLE.name, SAMPLE_AS_OF, get_db_path())))
+        say("  sample: " + str(import_blotter(SAMPLE.read_bytes(), SAMPLE.name, get_db_path())))
     except ValueError as exc:
-        if "differ from DB" in str(exc):
-            say(f"  sample: NOT loaded. The database already holds a different report dated {SAMPLE_AS_OF}")
-            say("          (real data, most likely). That is fine; the sample is only for empty databases.")
+        if "Duplicate key" in str(exc):
+            say("  sample: NOT loaded. The database already holds this sample (or real data).")
+            say("          That is fine; the sample is only for empty databases.")
         else:
             raise
     return 0

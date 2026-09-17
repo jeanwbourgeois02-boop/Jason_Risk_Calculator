@@ -42,3 +42,24 @@ Observed on the reference file `data/raw/HA_PNL_20260818.csv` loaded with `as_of
   counts double (e.g. 229 trades -> 458 leg records), and any per-instrument flag
   (like `is_ndf`) that used to be counted once per trade now appears on both legs, so
   multiply expected counts by 2, not just append a USD leg conditionally.
+- 2026-09-17 fix (open-questions item 25): `_DELTA_SQL`'s FX_OPTION quote-ccy branch
+  joins its SPOT mark via `s.instrument_id = i.base_ccy || i.quote_ccy` (the pair), NOT
+  `s.instrument_id = t.instrument_id` (the option's own id, e.g.
+  `USDJPY111926P-1`) — CLAUDE.md's literal "Aggregate delta per currency" SQL still has
+  the latter, which can never match any real option instrument and would make the LEFT
+  JOIN permanently return NULL spot for every option. Flagged to housekeeper: CLAUDE.md's
+  SQL should be corrected to the base_ccy||quote_ccy join. Also: SQL `SUM()` silently
+  ignores individual NULL rows within a `GROUP BY` group, so checking the final
+  `delta_per_ccy` output for NaN is NOT sufficient to catch a missing SPOT mark when that
+  ccy's group also has other non-NULL contributors (e.g. a forward leg in the same
+  quote ccy) — the NULL row is dropped from the SUM and no NaN surfaces at all. Must
+  check at the row level (query FX_OPTION trades with an official DELTA mark LEFT
+  JOINed to SPOT, filter `s.value IS NULL`) before aggregation, and raise ValueError
+  there, not just `.isna()` on the aggregated frame.
+- `schema.OFFICIAL_MARK_SOURCE['DELTA']` and `['PREMIUM']` changed 2026-09-17 from
+  `MANUAL` to `QL_OPTIONS_PRICER` (options_calc merge). Any test inserting a DELTA/
+  PREMIUM mark and expecting it to appear in `marks_official` must read the source from
+  `schema.OFFICIAL_MARK_SOURCE` rather than hard-coding `'MANUAL'`, or it will silently
+  test against a non-official source and get an empty/NaN result. `instruments` also
+  gained a sibling table `instrument_options` (option-specific attrs) the same day;
+  `instruments` itself is unchanged (still the original 8-column INSERT shape).

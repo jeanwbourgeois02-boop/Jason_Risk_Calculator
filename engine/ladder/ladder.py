@@ -65,7 +65,17 @@ def cash_ladder(conn: sqlite3.Connection, as_of_date: str, source: str = "BNP") 
 # CLAUDE.md SQL already names the parameter :as_of; kept identical here) except every
 # `trades` reference reads `trades_official` instead (user decision 2026-09-16: BNP is
 # no longer an authoritative trade source, only the blotter and MANUAL are -- see
-# data/ingest/schema.py's trades_official view and docs/open-questions.md item 55).
+# data/ingest/schema.py's trades_official view and docs/open-questions.md item 55) and
+# the FX_OPTION quote-ccy branch's SPOT join is a LEFT JOIN (docs/open-questions.md item
+# 25, fixed 2026-09-17): CLAUDE.md's own SQL joins `s.instrument_id = t.instrument_id`,
+# which can never match, because an option's instrument_id is its own contract id (e.g.
+# 'USDJPY111926P-1'), not the 6-letter pair the SPOT mark is keyed on ('USDJPY'). Joining
+# on the option's own id would make the LEFT JOIN permanently miss (spot always NULL) for
+# every real option, silently zeroing every option's quote-ccy delta -- worse than the
+# inner-join bug this item fixes. Instead this joins on the pair derived from
+# instruments.base_ccy || instruments.quote_ccy (CLAUDE.md's own suggested alternative),
+# which is well-defined for every FX_OPTION instrument regardless of its own instrument_id
+# shape. CLAUDE.md's literal SQL should be corrected the same way (flagged to housekeeper).
 _DELTA_SQL = """
 WITH d AS (
   SELECT l.ccy, l.amount AS delta
@@ -80,10 +90,25 @@ WITH d AS (
   SELECT i.quote_ccy, -t.quantity * m.value * s.value
   FROM trades_official t JOIN instruments i USING (instrument_id)
   JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
-  JOIN marks_official s ON s.instrument_id = t.instrument_id AND s.mark_type = 'SPOT'  AND s.as_of_date = :as_of
+  LEFT JOIN marks_official s ON s.instrument_id = i.base_ccy || i.quote_ccy AND s.mark_type = 'SPOT' AND s.as_of_date = :as_of
   WHERE t.product = 'FX_OPTION'
 )
 SELECT ccy, SUM(delta) AS delta FROM d GROUP BY ccy
+"""
+
+# Diagnostic, pre-aggregation check for the same FX_OPTION quote-ccy branch: SQL SUM
+# ignores individual NULL values within a GROUP BY group, so a missing SPOT mark on one
+# option would be silently dropped out of that ccy's total whenever the group also
+# contains other, unrelated non-NULL contributions (e.g. a forward leg also settling in
+# that quote ccy) -- the exact "drop the leg silently" failure CLAUDE.md forbids. This
+# query finds any FX_OPTION with an official DELTA mark but no official SPOT mark for its
+# pair, at the row level, before that silent aggregation can happen.
+_OPTION_MISSING_SPOT_SQL = """
+SELECT DISTINCT t.instrument_id
+FROM trades_official t JOIN instruments i USING (instrument_id)
+JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
+LEFT JOIN marks_official s ON s.instrument_id = i.base_ccy || i.quote_ccy AND s.mark_type = 'SPOT' AND s.as_of_date = :as_of
+WHERE t.product = 'FX_OPTION' AND s.value IS NULL
 """
 
 
@@ -91,11 +116,30 @@ def delta_per_ccy(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
     """Aggregate delta per currency (forwards/futures legs + FX option deltas), exactly the
     CLAUDE.md "Aggregate delta per currency" SQL, reading only from marks_official.
 
+    Raises ValueError (naming the offending instrument_id(s) and as_of_date) if any
+    FX_OPTION with an official DELTA mark is missing an official SPOT mark for its pair:
+    per CLAUDE.md, "the engine must raise if any resulting delta is NULL, never drop the
+    leg silently". Checked at the row level (see _OPTION_MISSING_SPOT_SQL) rather than by
+    inspecting the aggregated output, because SQL SUM can silently absorb a single NULL
+    contribution into an otherwise non-NULL ccy group.
+
     Adds `delta_usd` = delta x official SPOT (quote->USD) for that ccy on as_of_date; 1.0
     for USD; NaN when no SPOT mark exists for that ccy (never estimated, never taken from
     positions.fx_to_usd).
     """
+    missing = pd.read_sql_query(_OPTION_MISSING_SPOT_SQL, conn, params={"as_of": as_of_date})
+    if not missing.empty:
+        ids = ", ".join(sorted(missing["instrument_id"]))
+        raise ValueError(
+            f"delta_per_ccy({as_of_date}): missing official SPOT mark for FX_OPTION "
+            f"quote-ccy delta, instrument(s): {ids}"
+        )
+
     delta = pd.read_sql_query(_DELTA_SQL, conn, params={"as_of": as_of_date})
+    if delta["delta"].isna().any():
+        bad = ", ".join(sorted(delta.loc[delta["delta"].isna(), "ccy"]))
+        raise ValueError(f"delta_per_ccy({as_of_date}): NULL delta for ccy(s): {bad}")
+
     spot = spot_table(conn, as_of_date)
     spot_map = dict(zip(spot["ccy"], spot["spot"]))
 

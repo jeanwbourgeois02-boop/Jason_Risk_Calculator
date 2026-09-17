@@ -12,6 +12,13 @@ engine.pnl.ledger.
 The "Overall book" tab and the six-tab CLAUDE.md layout are retired by
 docs/BUILD_PLAN.md (2026-09-15): that plan supersedes CLAUDE.md's "Six tabs as
 views" table as the app's headline structure.
+
+Options placement, decided 2026-09-17 (this note and CLAUDE.md's "Six tabs as
+views" section now agree, resolving the earlier conflict between the two):
+Options is not a fourth top-level tab here either. It lands inside the Blotter
+tab as a grouped, collapsible trade summary once engine/options/ (vendored
+options_calc, see that package's scope ledger) has real PREMIUM/DELTA marks to
+show -- see docs/open-questions.md item 61.
 """
 from __future__ import annotations
 

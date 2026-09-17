@@ -1,0 +1,3 @@
+- [Vendored options_calc API quirks](vendor-api-quirks.md) — submodule-name shadowing in fx/__init__.py, evaluationDate ignores as_of, lazy-import requirement
+- [Premium and delta unit conventions](premium-delta-conventions.md) — blotter premium is base-ccy fraction; DELTA mark is unsigned per-unit, sign applied downstream
+- [Phase 2 + 4 landed 2026-09-17](phase-2-4-landed-2026-09-17.md) — what shipped, follow-ups owed to data-ingest/housekeeper/ui-shell/cash-ladder
