@@ -185,12 +185,23 @@ def sync_with_github() -> tuple:
         import datetime as _dt
         stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         code, _, err = _git("stash", "push", "--include-untracked", "-m", f"launcher auto-stash {stamp}")
-        if code != 0:
-            return False, f"could not set local edits aside ({err.splitlines()[-1] if err else 'no detail'}); running {local[:7]}"
-        note = " -- local edits were set aside with git stash (git stash pop restores them)"
+        if code == 0:
+            note = " -- local edits were set aside with git stash (git stash pop restores them)"
+        else:
+            # Whatever is in the way, old code must not run: hard reset to GitHub's main.
+            # Only reached with no local commits (checked above); ignored files such as the
+            # database are untouched by reset/clean.
+            _git("reset", "--hard", "origin/main")
+            _git("clean", "-fd")
+            note = " -- local edits could not be set aside and were discarded (hard reset)"
     code, _, err = _git("merge", "--ff-only", "origin/main")
     if code != 0:
-        return False, f"update failed ({err.splitlines()[-1] if err else 'no detail'}); running {local[:7]}"
+        _git("reset", "--hard", "origin/main")
+        _git("clean", "-fd")
+        note = " -- fast-forward failed; folder hard-reset to GitHub's main"
+    _, now, _ = _git("rev-parse", "HEAD")
+    if now != remote:
+        return False, f"update failed ({err.splitlines()[-1] if err else 'no detail'}); running {now[:7]}"
     return True, f"UPDATED {local[:7]} -> {remote[:7]}{note}"
 
 
