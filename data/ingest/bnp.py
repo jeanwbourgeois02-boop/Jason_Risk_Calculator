@@ -118,6 +118,18 @@ class Instrument:
 
 
 @dataclass(frozen=True)
+class InstrumentOption:
+    """Option-specific attributes for an `instruments` row, written to the sibling
+    `instrument_options` table (see schema.py). Only produced for FX_OPTION rows."""
+    instrument_id: str
+    strike: float = 0.0
+    option_type: str = ""
+    barrier_level: float = 0.0
+    avg_start_date: str = "9999-12-31"
+    payoff: str = "VANILLA"
+
+
+@dataclass(frozen=True)
 class Trade:
     trade_id: str
     source: str

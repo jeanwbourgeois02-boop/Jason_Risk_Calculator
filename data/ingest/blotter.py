@@ -77,6 +77,7 @@ from data.ingest.bnp import (
     FORWARD_SYMBOL_RE,
     FUTURE_SYMBOL_RE,
     Instrument,
+    InstrumentOption,
     NDF_CCYS,
     PERPETUAL,
     Reject,
@@ -100,6 +101,8 @@ IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION", "INTEREST_RATE_SWAP
 
 # 'EURSEK092326C-197727826' -> ('EURSEK', '092326', 'C', '197727826').
 OPTION_SYMBOL_RE = re.compile(r"^([A-Z]{6})(\d{6})([CP])-(\d+)$")
+# '11.058400 STRIKE' in the free-text Description column -- see _parse_option.
+STRIKE_RE = re.compile(r"(\d+\.\d+)\s+STRIKE")
 
 
 @dataclass
@@ -107,6 +110,7 @@ class ParseResult:
     trades: List[Trade] = field(default_factory=list)
     legs: List[TradeLeg] = field(default_factory=list)
     instruments: Dict[str, Instrument] = field(default_factory=dict)
+    instrument_options: Dict[str, InstrumentOption] = field(default_factory=dict)
     rejects: List[Reject] = field(default_factory=list)
     n_forward: int = 0
     n_currency: int = 0
@@ -150,17 +154,28 @@ def _ddmy_iso(v: str) -> str:
 
 
 def parse(csv_path: Union[str, Path]) -> ParseResult:
-    """Pure parse of a blotter CSV. Never writes; never coerces malformed rows."""
+    """Pure parse of a blotter CSV. Never writes; never coerces malformed rows.
+
+    ``encoding='utf-8-sig'`` (matching ``data/ingest/upload.py::_parse_frame``): tolerates
+    a leading UTF-8 byte-order-mark (common in an Excel-exported CSV) without corrupting
+    the first column name, which would otherwise make every row look unrecognized.
+    """
     csv_path = Path(csv_path)
-    df = pd.read_csv(csv_path, dtype=str)
+    df = pd.read_csv(csv_path, dtype=str, encoding='utf-8-sig')
     res = ParseResult()
 
     for idx, row in df.iterrows():
         row_no = int(idx) + 2  # header is line 1
-        if _s(row.get("Status")) != STATUS_OK or _s(row.get("Fund")) != FUND:
+        # Case-insensitive on purpose (flexibility, not a contract requirement): an
+        # export with 'completed'/'COMPLETED' or 'nmmf'/'Nmmf' should still be
+        # recognized rather than silently skipped over a trivial case difference.
+        if _s(row.get("Status")).casefold() != STATUS_OK.casefold() or \
+           _s(row.get("Fund")).casefold() != FUND.casefold():
             res.n_skipped_status_or_fund += 1
             continue
-        ftype = _s(row.get("Fin Type"))
+        # Upper-cased for the same reason as Status/Fund above: 'Forward'/'forward'
+        # should not silently fall into "unsupported row" just because of case.
+        ftype = _s(row.get("Fin Type")).upper()
         if ftype == "FORWARD":
             res.n_forward += 1
             _parse_forward(res, row, row_no)
@@ -344,8 +359,16 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     if not om:
         res.rejects.append(Reject(row_no, symbol, f"Symbol does not match <PAIR><mmddyy>[CP]-<id>: {symbol!r}"))
         return
-    pair, exp_s, _cp, _sym_id = om.groups()
+    pair, exp_s, cp, _sym_id = om.groups()
     # _sym_id is 'Instrument Id', not 'Trade Id' -- see the same note in _parse_forward.
+    option_type = "CALL" if cp == "C" else "PUT"
+    # Strike is not a dedicated column in this file; when present it's embedded in the
+    # free-text Description as '<N.NNNNNN> STRIKE' (e.g. 'EURSEK-XXAA 11.058400 STRIKE
+    # EUR Call ...'). Several real rows in the reference sample omit it entirely (e.g.
+    # 'USDJPY-XXAA EUR Put 11/19/2026 MLILUK') -- those get the 0.0 sentinel per
+    # CLAUDE.md, never a fabricated value.
+    strike_m = STRIKE_RE.search(_s(row.get("Description")))
+    strike = float(strike_m.group(1)) if strike_m else 0.0
     try:
         expiry = datetime.strptime(exp_s, "%m%d%y").date()
     except ValueError:
@@ -385,6 +408,9 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     res.instruments.setdefault(symbol, Instrument(
         instrument_id=symbol, asset_class="FX_OPTION", base_ccy=base_ccy, quote_ccy=pair[3:],
         multiplier=1.0, is_ndf=0, bbg_ticker=symbol, expiry_date=expiry_iso,
+    ))
+    res.instrument_options.setdefault(symbol, InstrumentOption(
+        instrument_id=symbol, strike=strike, option_type=option_type,
     ))
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=symbol, product="FX_OPTION",
@@ -503,4 +529,6 @@ def load(csv_path: Union[str, Path], conn: sqlite3.Connection, strict: bool = Tr
                          _rows(res.instruments.values()))
         conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(res.trades))
         conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", _rows(res.legs))
+        conn.executemany("INSERT OR REPLACE INTO instrument_options VALUES (?,?,?,?,?,?)",
+                         _rows(res.instrument_options.values()))
     return res

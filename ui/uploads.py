@@ -1,37 +1,51 @@
 """Trade file upload control (docs: user decisions 2026-09-15, item B; date-picker
-removed by the coordinator's same-day follow-up; blotter-only pivot 2026-09-16, then
-restored to dual-format 2026-09-16 same day -- user's own words: "both valid - both
-formats taken - the new thing as the primary source as its real time and the bnp for
-things the new one lacks - and then check they reconcile". The blotter (real-time
-trade blotter, `data/ingest/blotter.py`) is the primary trade source; the BNP PB
-report (`data/ingest/bnp.py`) is a once-daily EOD-Hong-Kong snapshot, still needed for
-the cash-ladder balance column (`positions` rows) that the blotter format has no grain
-for. Both are accepted through this one control, auto-detected by column shape
-(`data.ingest.upload.sniff_format`/`detect_format`) -- never by filename, since neither
-format is reliably named.
+removed by the coordinator's same-day follow-up; blotter-only pivot 2026-09-16, briefly
+restored to dual-format the same day, then reverted to blotter-only for good 2026-09-17
+-- user's own words: "fix the excel import - new file and only new file - make it as
+flexible as possible", after confirming directly that he doesn't need the BNP-sourced
+cash-balance data (he wants delta exposure and cashflow timing on the Ladder tab, which
+the blotter alone already provides in full). ``data/ingest/upload.py`` no longer even
+contains BNP-upload code (not just unreachable -- removed); `data/ingest/bnp.py` itself
+is untouched and still used as a library by `data/load.py`'s CLI, just no longer
+reachable from this control.
 
-Flow: choose file -> the file-picked callback decodes + sniffs its format (no DB write
-yet) -> shows Confirm, plus a date picker ONLY if the sniffed format is BNP (a blotter
-file has no single EOD snapshot date -- each row carries its own `TradeDate` / settle
-date, so there is nothing to pick for that format). An unrecognized file (neither
-shape matches) shows an error and no Confirm button.
+One button, "Upload trade file" (.xlsx/.xls/.csv), accepting only the trade blotter
+shape (`data/ingest/blotter.py` / `data.ingest.upload.import_blotter`, which is now
+deliberately tolerant -- see that module's own docstring -- of BOM-prefixed files,
+mixed-case headers, extra/reordered/unknown columns, and individual malformed rows
+that would otherwise block an entire good file).
 
-Nothing is written to the database before Confirm is pressed (`import_report`/
-`import_blotter` are only called from the Confirm callback). The Confirm callback
-re-sniffs the format itself rather than trusting a stored value from the file-picked
-callback, since re-parsing here is cheap and it keeps the two callbacks independently
-correct (no dcc.Store to keep in sync, no risk of a stale format after a file is
-swapped without re-triggering the picker callback).
+There is no date picker anywhere in this control. A blotter file has no single EOD
+snapshot date -- each row carries its own `TradeDate` / settle date, so there is
+nothing to pick, resolve, or gate the Confirm button on.
 
-On success the file-name / Confirm row is hidden again and the top-bar source line
-becomes the permanent record; see `describe_source`, which stays honest about what's
-actually in the database (not "which control last wrote to it") since either format,
-or a dev DB seeded outside this control entirely, can be the current state.
+Flow: choose file -> "Confirm insert" -> dcc.Loading ("Importing...") -> one small status
+line under the button. Nothing is written to the database before Confirm is pressed
+(`import_blotter` is only called from the Confirm callback, never from the file-picked
+callback). The file-picked callback only decodes enough to validate size/shape
+(`decode()`, `data.ingest.upload.validate_blotter_shape`) and show the file name and
+Confirm button; an unrecognized file shows a clean error and no Confirm button.
+
+On success the file-name / Confirm row is hidden again (user direction 2026-09-15: no
+need to keep that around) and the top-bar source line becomes the permanent record. See
+`describe_source` for its wording, which stays honest about what's actually in the
+database (from `ui.app.load_summary`), not which control last wrote to it, since a dev
+database seeded outside this control (e.g. via `data/load.py`'s CLI) can still hold BNP
+`positions` rows.
+
+The loader's own summary (new-trade / leg / excluded / rejected-row counts from
+`import_blotter`) is real information about what happened to the user's data and must
+be seen, not just logged. It renders once, right after Confirm, as a single
+`.source-result--info` line holding the loader's sentence verbatim. Errors show in the
+result line, in red (`.source-result--error`), with the Confirm row left in place so
+the user can retry.
 
 History (expandable, read from the DB, no schema added): one row per distinct
-`positions.as_of_date`, its position count -- BNP-sourced only, since a blotter
-upload never writes `positions` (CURRENCY rows there are settlement-level cash
-movements, not an EOD balance; see `import_blotter`'s docstring).
+`positions.as_of_date`, its position count. A blotter upload never writes `positions`
+(CURRENCY rows there are settlement-level cash movements, not an EOD balance; see
+`import_blotter`'s docstring), so on a database that has only ever received blotter
+uploads this list stays empty -- expected, not a bug, since the whole point of this
+change is that BNP-sourced `positions` are no longer part of the app's own data flow.
 """
 from __future__ import annotations
 
@@ -39,7 +53,7 @@ import logging
 
 from dash import Input, Output, State, dcc, html, no_update
 
-from data.ingest.upload import decode, import_blotter, import_report, sniff_format, suggested_date
+from data.ingest.upload import decode, import_blotter, preview_frame, validate_blotter_shape
 
 log = logging.getLogger(__name__)
 
@@ -47,8 +61,6 @@ SOURCE_LINE_ID = "data-source-line"
 FILE_UPLOAD_ID = "report-file"
 STAGE_ID = "report-stage"
 FILENAME_ID = "report-filename"
-MANUAL_DATE_ID = "report-manual-date"
-DATE_PICKER_ID = "report-date"  # dcc.Store -- holds the resolved ISO date for a BNP upload
 CONFIRM_ID = "report-import"
 RESULT_ID = "report-result"
 HISTORY_ID = "report-history"
@@ -59,10 +71,12 @@ def describe_source(data: dict) -> str:
     """One line describing what's actually in the database, from ui.app.summary().
 
     Not "what was last uploaded" -- the summary dict is whole-database totals, so this
-    stays honest about the *state* of the DB. Three cases:
-      - positions > 0: a BNP snapshot exists -- keep the original "as of <date>" framing.
-      - positions == 0 but trades > 0: only blotter-style trades are loaded, there is no
-        EOD snapshot to name a date for.
+    stays honest about the *state* of the DB:
+      - positions > 0: a BNP snapshot exists (from outside this control, e.g. a dev DB
+        seeded via `data/load.py`'s CLI) -- keep the "as of <date>" framing since it's
+        genuinely informative.
+      - positions == 0 but trades > 0: only blotter-style trades are loaded, the normal
+        case for a database that only ever went through this control.
       - trades == 0 too: nothing loaded yet.
     """
     trades = data.get("trades", 0)
@@ -77,7 +91,8 @@ def describe_source(data: dict) -> str:
 def upload_history(db_path) -> list:
     """[(as_of_date, position_count)] descending by date, read straight from
     `positions` (no upload-log table exists, per the user's instruction not to add
-    schema). Empty list if the DB is missing or has no positions yet."""
+    schema). Empty list if the DB is missing or has no positions yet -- the normal
+    case now, since this control never writes `positions` itself."""
     import sqlite3
     from pathlib import Path
 
@@ -123,11 +138,6 @@ def layout(data: dict = None, db_path=None):
         ]),
         html.Div(id=STAGE_ID, className="source-row source-row--stage", style={"display": "none"}, children=[
             html.Span(id=FILENAME_ID, className="source-file"),
-            html.Div(id=f"{MANUAL_DATE_ID}-wrap", style={"display": "none"}, children=[
-                html.Label("Snapshot date"),
-                dcc.Input(id=MANUAL_DATE_ID, type="date"),
-            ]),
-            dcc.Store(id=DATE_PICKER_ID, data=None),
             html.Button("Confirm insert", id=CONFIRM_ID, n_clicks=0, className="btn"),
         ]),
         dcc.Loading(type="dot", color="#1f5fbf", children=html.Div(id=RESULT_ID, role="status", className="source-result")),
@@ -138,79 +148,43 @@ def layout(data: dict = None, db_path=None):
 def register(app, get_db_path):
     @app.callback(
         Output(STAGE_ID, "style"), Output(FILENAME_ID, "children"),
-        Output(f"{MANUAL_DATE_ID}-wrap", "style"), Output(MANUAL_DATE_ID, "value"),
-        Output(DATE_PICKER_ID, "data"),
         Output(RESULT_ID, "children", allow_duplicate=True),
         Input(FILE_UPLOAD_ID, "contents"),
         State(FILE_UPLOAD_ID, "filename"), prevent_initial_call=True,
     )
     def _selected(contents, filename):
-        # Nothing is written here -- this only decodes/sniffs enough to show the file
-        # name, the date picker (BNP only), and validate shape. import_report()/
-        # import_blotter() are called exclusively from _confirm().
+        # Nothing is written here -- this only decodes/validates shape enough to show
+        # the file name and Confirm. import_blotter() is called exclusively from
+        # _confirm().
         hidden = {"display": "none"}
         if not contents:
-            return hidden, "", hidden, None, None, ""
+            return hidden, "", ""
         try:
             payload = decode(contents)
-            fmt, _frame = sniff_format(payload, filename)
+            validate_blotter_shape(preview_frame(payload, filename))
         except Exception as exc:
-            return hidden, "", hidden, None, None, html.Span(str(exc), className="source-result--error")
-        if fmt is None:
-            msg = ("This file doesn't match either recognized format (BNP position "
-                   "report or trade blotter).")
-            return hidden, "", hidden, None, None, html.Span(msg, className="source-result--error")
-        if fmt == "blotter":
-            return {}, filename, hidden, None, None, ""
-        # fmt == "bnp": resolve a snapshot date, same silent-when-possible behaviour
-        # as before (2026-09-15 follow-up) -- only surface the manual date input when
-        # the filename carries no recognisable date at all.
-        date = suggested_date(filename)
-        if date:
-            return {}, filename, hidden, None, date, ""
-        note = "This file name carries no recognisable date; enter the snapshot date, then press Confirm insert."
-        return {}, filename, {}, None, None, note
+            return hidden, "", html.Span(str(exc), className="source-result--error")
+        return {}, filename, ""
 
     @app.callback(
         Output(RESULT_ID, "children"), Output(SOURCE_LINE_ID, "children"),
         Output("report-history-wrap", "children"),
-        Output("cash-ladder-date", "date", allow_duplicate=True),
         Output(STAGE_ID, "style", allow_duplicate=True),
         Input(CONFIRM_ID, "n_clicks"),
         State(FILE_UPLOAD_ID, "contents"), State(FILE_UPLOAD_ID, "filename"),
-        State(DATE_PICKER_ID, "data"), State(MANUAL_DATE_ID, "value"), prevent_initial_call=True,
+        prevent_initial_call=True,
     )
-    def _confirm(clicks, contents, filename, as_of, manual_date):
-        keep = (no_update, no_update, no_update, no_update)  # source line, history, ladder date, stage
+    def _confirm(clicks, contents, filename):
+        keep = (no_update, no_update, no_update)  # source line, history, stage
         if not contents:
             return (no_update, *keep)
         db_path = get_db_path()
         try:
-            payload = decode(contents)
-            fmt, _frame = sniff_format(payload, filename)
+            message = import_blotter(decode(contents), filename, db_path)
         except Exception as exc:
             return (html.Span(f"Import failed; no data saved. {exc}", className="source-result--error"), *keep)
-        if fmt == "blotter":
-            try:
-                message = import_blotter(payload, filename, db_path)
-            except Exception as exc:
-                return (html.Span(f"Import failed; no data saved. {exc}", className="source-result--error"), *keep)
-            log.info("%s (blotter): %s", filename, message)
-            from ui.app import load_summary
-            data = load_summary(db_path)
-            result = html.Div(message, className="source-result--info")
-            return result, describe_source(data), history_layout(db_path), no_update, {"display": "none"}
-        if fmt == "bnp":
-            as_of = as_of or manual_date
-            if not as_of:
-                return (html.Span("Choose the snapshot date before confirming.", className="source-result--error"), *keep)
-            try:
-                message = import_report(payload, filename, as_of, db_path)
-            except Exception as exc:
-                return (html.Span(f"Import failed; no data saved. {exc}", className="source-result--error"), *keep)
-            log.info("%s (BNP, snapshot %s): %s", filename, as_of, message)
-            from ui.app import load_summary
-            data = load_summary(db_path)
-            result = html.Div(message, className="source-result--info")
-            return result, describe_source(data), history_layout(db_path), as_of, {"display": "none"}
-        return (html.Span("This file doesn't match either recognized format.", className="source-result--error"), *keep)
+        log.info("%s (blotter): %s", filename, message)
+        from ui.app import load_summary
+        data = load_summary(db_path)
+        result = html.Div(message, className="source-result--info")
+        return result, describe_source(data), history_layout(db_path), {"display": "none"}

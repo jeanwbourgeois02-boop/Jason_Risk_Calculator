@@ -10,15 +10,17 @@ register_callbacks is invoked exactly once by create_app().
 """
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 
+import pandas as pd
 import pytest
 
 dash = pytest.importorskip("dash", reason="dash is not installed in this environment")
 
 from data.ingest import schema  # noqa: E402
 from ui import app as uiapp  # noqa: E402
-from ui.tabs import blotter, cash_ladder, header, market_data  # noqa: E402
+from ui.tabs import blotter, blotter_fx, cash_ladder, header, market_data  # noqa: E402
 from ui import uploads  # noqa: E402
 
 
@@ -947,15 +949,16 @@ def test_blotter_fx_scope_renders_xlsx_replica_columns(tmp_path):
     assert len(table.data) == 1
     row = table.data[0]
     assert row["instrument_id"] == "EURUSD"
-    # Only mark_eod was seeded -- mark_t1/mark_t2 and their dependent P&L columns must
-    # render blank, never "0.00" or "n/a" (nothing was computed, see
-    # ui.tabs.blotter_fx's docstring).
-    assert row["mark_t1"] == ""
-    assert row["mark_t2"] == ""
-    assert row["pnl_t1"] == ""
-    assert row["pnl_t2"] == ""
-    assert row["mark_eod"] != ""
-    assert row["pnl_eod"] != ""
+    # Only mark_eod was seeded for real -- mark_t1/mark_t2 and their dependent P&L
+    # columns are genuinely missing, so (2026-09-17 user decision) they are illustrative
+    # SAMPLE values, clearly suffixed, never blank/"0.00"/"n/a" (ui.tabs.blotter_fx
+    # docstring). mark_eod/pnl_eod are the real computed values and carry no suffix.
+    assert row["mark_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert row["mark_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert row["pnl_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert row["pnl_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert row["mark_eod"] != "" and not row["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert row["pnl_eod"] != "" and not row["pnl_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
 
 
 def test_blotter_fx_scope_empty_still_renders_table(tmp_path):
@@ -973,11 +976,213 @@ def test_blotter_fx_scope_empty_still_renders_table(tmp_path):
     assert "pnl_eod" in ids
 
 
-def test_blotter_fx_scope_has_no_pnl_strip_or_filter_bar(tmp_path):
+def test_blotter_fx_scope_has_no_reactive_strip_filter_or_detail_callback(tmp_path):
     """FX (like Rates) is excluded from the generic strip/filter/detail callback loop --
-    its rows aren't value_book-shaped (module docstrings)."""
+    its rows aren't value_book-shaped (module docstrings). It still shows a P&L strip
+    (2026-09-17), but that strip is built statically inside `blotter_fx.build_layout`
+    on every render of the sub-tab, not re-scoped by any reactive callback of its own."""
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     app = uiapp.create_app(str(db_path))
     assert not any("blotter-strip-fx" in k for k in app.callback_map)
     assert not any("blotter-fx-replica-datatable" in k for k in app.callback_map)
+
+
+# --------------------------------------------------------- blotter FX P&L strip (2026-09-17)
+
+
+def _seed_fx_strip_trade(conn, trade_id="T1", instrument_id="EURUSD",
+                          trade_date="2026-06-18", settle_date="2026-06-20"):
+    """Like `_seed_fx_replica_trade`, but the official FWD_OUTRIGHT mark is planted at
+    the trade's OWN `settle_date` (what `value_book`/`priced_value_book` -- the strip's
+    official pricing -- looks up), not at `fx_replica`'s shared workbook-valuation-date
+    node. So the strip prices this trade for real while the replica table below still
+    shows it as unpriced (sample-filled) -- deliberately exercising the fact that the
+    two numbers are computed differently and are expected to diverge."""
+    conn.execute(
+        "INSERT INTO instruments VALUES (?,'FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')",
+        (instrument_id,),
+    )
+    conn.execute(
+        "INSERT INTO trades VALUES (?,'XLSX',?,'FX_FWD',?,?,1000000,1.10,"
+        "'ACC','CPTY','HAHY7','TR','buy eur','')",
+        (trade_id, instrument_id, trade_id, trade_date),
+    )
+    conn.executemany(
+        "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (trade_id, 1, "FX_NEAR", "EUR", 1000000, trade_date, settle_date, 1.10, 1),
+            (trade_id, 2, "FX_NEAR", "USD", -1100000, trade_date, settle_date, 1.10, 1),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO marks VALUES (?,?,?,'FWD_OUTRIGHT',1.1200,'BBG_BFXFORWARD',?)",
+        (settle_date, instrument_id, settle_date, settle_date + "T15:00:00-04:00"),
+    )
+
+
+def test_blotter_fx_scoped_trade_ids_includes_future_excludes_irs_and_options():
+    df = pd.DataFrame({
+        "trade_id": ["A", "B", "C", "D", "E"],
+        "product": ["FX_FWD", "FUTURE", "IRS", "FX_OPTION", "FX_SWAP"],
+    })
+    assert blotter_fx._scoped_trade_ids(df) == ["A", "B", "E"]
+    assert blotter_fx._scoped_trade_ids(pd.DataFrame(columns=["trade_id", "product"])) == []
+
+
+def test_blotter_fx_strip_uses_official_valuation_not_replica_number(tmp_path):
+    """The strip's LTD (real per-trade valuation, quantity * (mark - fill) = 1,000,000 *
+    (1.1200 - 1.10) = 20,000 USD) must render, and the caption distinguishing it from
+    the replica table below must be present."""
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    _seed_fx_strip_trade(conn)
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        layout = blotter.scope_layout("fx", conn, "2026-06-20")
+    finally:
+        conn.close()
+
+    text = str(layout)
+    assert "LTD P&L" in text
+    assert "20,000" in text
+    assert blotter_fx.STRIP_CAPTION in text
+
+    # And the replica table itself still shows this trade's mark_eod as missing (hence
+    # sample-filled) -- the shared workbook-valuation-date node was never given a mark.
+    table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+    assert len(table.data) == 1
+    assert table.data[0]["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
+
+
+def test_blotter_fx_strip_renders_placeholder_when_no_fx_or_future_trades(tmp_path):
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    conn.commit()
+    try:
+        layout = blotter.scope_layout("fx", conn, "2026-06-20")
+    finally:
+        conn.close()
+    text = str(layout)
+    assert "LTD P&L" in text  # strip still renders (with a 0/n.a. figure), never omitted
+
+
+# --------------------------------------------------------- blotter FX sample values (2026-09-17)
+
+
+def _sample_fixture_df() -> pd.DataFrame:
+    return pd.DataFrame([{
+        "trade_id": "T1", "instrument_id": "EURUSD", "quantity_usd_notional": 1_000_000.0,
+        "fill": 1.10, "mark_eod": 1.12, "mark_t1": None, "mark_t2": None,
+        "pnl_eod": 20_000.0, "pnl_t1": None, "pnl_t2": None,
+    }])
+
+
+def test_blotter_fx_sample_values_fill_only_missing_cells():
+    df = _sample_fixture_df()
+    out, mask = blotter_fx._fill_sample_values(df)
+
+    # Real cells are untouched.
+    assert out.loc[0, "mark_eod"] == 1.12
+    assert out.loc[0, "pnl_eod"] == 20_000.0
+    assert mask["mark_eod"][0] is False
+    assert mask["pnl_eod"][0] is False
+
+    # Genuinely missing cells get a deterministic sample, derived from fill.
+    expected_t1 = 1.10 * (1 + blotter_fx._MARK_SAMPLE_OFFSETS["mark_t1"])
+    assert out.loc[0, "mark_t1"] == pytest.approx(expected_t1)
+    assert mask["mark_t1"][0] is True
+    assert out.loc[0, "pnl_t1"] is not None and out.loc[0, "pnl_t1"] == out.loc[0, "pnl_t1"]
+    assert mask["pnl_t1"][0] is True
+
+    # Re-running on the same input is deterministic (not random).
+    out2, mask2 = blotter_fx._fill_sample_values(df)
+    assert out2.loc[0, "mark_t1"] == out.loc[0, "mark_t1"]
+
+
+def test_blotter_fx_sample_cells_are_visually_flagged():
+    df = _sample_fixture_df()
+    out, mask = blotter_fx._fill_sample_values(df)
+
+    records = blotter_fx.format_rows(out, sample_mask=mask)
+    assert records[0]["mark_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert not records[0]["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
+
+    # One rule per column with any sample cell, keyed on the "(sample)" suffix -- not
+    # one rule per cell, which would be thousands of rules on a full book.
+    table = blotter_fx.fx_replica_table(out, sample_mask=mask)
+    sample_rules = [r for r in table.style_data_conditional
+                     if r["if"].get("column_id") == "mark_t1"]
+    assert len(sample_rules) == 1, "expected exactly one style rule for the mark_t1 column"
+    assert sample_rules[0].get("fontStyle") == "italic"
+    assert "(sample)" in sample_rules[0]["if"]["filter_query"]
+    no_rules_for_real_cell = [r for r in table.style_data_conditional
+                                if r["if"].get("column_id") == "mark_eod"]
+    assert no_rules_for_real_cell == []
+    assert len(table.style_data_conditional) <= len(blotter_fx._SAMPLE_MARK_COLS) + len(blotter_fx._SAMPLE_PNL_COLS)
+
+
+def test_blotter_fx_sample_caption_present_only_when_samples_used(tmp_path):
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    _seed_fx_replica_trade(conn)  # only mark_eod seeded -> mark_t1/mark_t2 sample-filled
+    from engine.pnl.pnl import workbook_valuation_date
+    valuation_date = workbook_valuation_date("2026-06-20")
+    conn.execute(
+        "INSERT INTO marks VALUES "
+        "('2026-06-20','EURUSD',?,'FWD_OUTRIGHT',1.1080,'BBG_BFXFORWARD','2026-06-20T15:00:00-04:00')",
+        (valuation_date,),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        layout = blotter.scope_layout("fx", conn, "2026-06-20")
+    finally:
+        conn.close()
+    assert blotter_fx.SAMPLE_CAPTION in str(layout)
+
+
+def test_blotter_fx_sample_caption_absent_when_every_mark_is_real(tmp_path):
+    from engine.pnl.aggregate import _n_business_days_back
+    from engine.pnl.pnl import workbook_valuation_date
+
+    as_of = "2026-06-20"
+    valuation_date = workbook_valuation_date(as_of)
+    t1_date = _n_business_days_back(dt.date.fromisoformat(as_of), 1).isoformat()
+    t2_date = _n_business_days_back(dt.date.fromisoformat(as_of), 2).isoformat()
+
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    _seed_fx_replica_trade(conn)
+    conn.executemany(
+        "INSERT INTO marks VALUES (?,?,?,'FWD_OUTRIGHT',?,'BBG_BFXFORWARD',?)",
+        [
+            (as_of, "EURUSD", valuation_date, 1.1080, as_of + "T15:00:00-04:00"),
+            (t1_date, "EURUSD", valuation_date, 1.1075, t1_date + "T15:00:00-04:00"),
+            (t2_date, "EURUSD", valuation_date, 1.1070, t2_date + "T15:00:00-04:00"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        layout = blotter.scope_layout("fx", conn, as_of)
+    finally:
+        conn.close()
+
+    table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+    row = table.data[0]
+    assert not row["mark_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert not row["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert not row["mark_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert blotter_fx.SAMPLE_CAPTION not in str(layout)

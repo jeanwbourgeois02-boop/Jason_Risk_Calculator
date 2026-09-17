@@ -80,8 +80,10 @@ def test_official_mark_source_uses_ql_pricer_for_irs_marks():
     assert schema.OFFICIAL_MARK_SOURCE["SPOT"] == "BBG_BFXFORWARD"
     assert schema.OFFICIAL_MARK_SOURCE["FWD_OUTRIGHT"] == "BBG_BFXFORWARD"
     assert schema.OFFICIAL_MARK_SOURCE["FUTURE_PX"] == "BBG_BDH"
-    assert schema.OFFICIAL_MARK_SOURCE["DELTA"] == "MANUAL"
-    assert schema.OFFICIAL_MARK_SOURCE["PREMIUM"] == "MANUAL"
+    # DELTA / PREMIUM moved to the engine/options pricer 2026-09-17; MANUAL is
+    # reconciliation-only for them now.
+    assert schema.OFFICIAL_MARK_SOURCE["DELTA"] == "QL_OPTIONS_PRICER"
+    assert schema.OFFICIAL_MARK_SOURCE["PREMIUM"] == "QL_OPTIONS_PRICER"
 
 
 def test_marks_official_prefers_ql_pricer_over_bbg_bdh_for_pv_usd():
@@ -111,13 +113,14 @@ def test_marks_official_filters_to_official_source():
         ("2026-08-17", "USDJPY", "2026-08-17", "SPOT", 147.12, "BBG_BFXFORWARD", "2026-08-17T15:00:00-04:00"),
         ("2026-08-17", "USDJPY", "2026-08-17", "DELTA", 0.5, "BBG_BFXFORWARD", "2026-08-17T15:00:00-04:00"),
         ("2026-08-17", "USDJPY", "2026-08-17", "DELTA", 0.6, "MANUAL", "2026-08-17T15:00:00-04:00"),
+        ("2026-08-17", "USDJPY", "2026-08-17", "DELTA", 0.55, "QL_OPTIONS_PRICER", "2026-08-17T15:00:00-04:00"),
         ("2026-08-17", "USDJPY", "2026-08-17", "PV_USD", 1.0, "BNP_BVAL", "2026-08-17T15:00:00-04:00"),
     ]
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", rows)
-    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 5
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 6
     got = conn.execute(
         "SELECT mark_type, value, source FROM marks_official ORDER BY mark_type").fetchall()
-    assert got == [("DELTA", 0.6, "MANUAL"), ("SPOT", 147.12, "BBG_BFXFORWARD")]
+    assert got == [("DELTA", 0.55, "QL_OPTIONS_PRICER"), ("SPOT", 147.12, "BBG_BFXFORWARD")]
 
 
 # --------------------------------------------------------------------------- helpers

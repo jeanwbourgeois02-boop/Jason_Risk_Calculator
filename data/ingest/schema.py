@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Union
 
 TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "positions", "instrument_theme",
-          "curve_quotes")
+          "curve_quotes", "instrument_options")
 VIEWS = ("marks_official", "trades_official")
 
 # Official source per mark_type (CLAUDE.md "Official marks"). BNP_BVAL is never official.
@@ -25,8 +25,12 @@ OFFICIAL_MARK_SOURCE = {
     "PAR_RATE": "QL_PRICER",
     "PV_USD": "QL_PRICER",
     "DV01_USD": "QL_PRICER",
-    "DELTA": "MANUAL",
-    "PREMIUM": "MANUAL",
+    # DELTA / PREMIUM: changed from MANUAL to QL_OPTIONS_PRICER 2026-09-17 (options_calc
+    # merge Phase 2, housekeeper authorization) -- engine/options writes these from the
+    # vendored QuantLib pricers; hand-typed MANUAL marks become reconciliation-only,
+    # mirroring how QL_PRICER demoted BBG_BDH for IRS.
+    "DELTA": "QL_OPTIONS_PRICER",
+    "PREMIUM": "QL_OPTIONS_PRICER",
 }
 
 _DDL = """
@@ -39,6 +43,21 @@ CREATE TABLE IF NOT EXISTS instruments (
   is_ndf          INTEGER NOT NULL,
   bbg_ticker      TEXT NOT NULL,
   expiry_date     TEXT NOT NULL
+);
+
+-- Option-specific attributes, kept out of `instruments` itself so every non-option row
+-- (FX/FUTURE/IRS -- the overwhelming majority) doesn't carry sentinel columns it never
+-- uses, and so the ~70 existing test fixtures that INSERT INTO instruments with the
+-- original 8-column shape keep working unchanged (housekeeper decision, 2026-09-17,
+-- options_calc merge Phase 1).
+CREATE TABLE IF NOT EXISTS instrument_options (
+  instrument_id   TEXT PRIMARY KEY REFERENCES instruments,
+  strike          REAL NOT NULL DEFAULT 0,          -- 0 = not known (never fabricated)
+  option_type     TEXT NOT NULL DEFAULT '',         -- CALL | PUT | ''
+  barrier_level   REAL NOT NULL DEFAULT 0,          -- barrier / touch level; 0 = n/a
+  avg_start_date  TEXT NOT NULL DEFAULT '9999-12-31', -- Asian averaging start; sentinel = n/a
+  payoff          TEXT NOT NULL DEFAULT 'VANILLA'   -- VANILLA | DIGITAL | BARRIER_KI | BARRIER_KO
+                                                    -- | ASIAN | ONE_TOUCH | NO_TOUCH | AMERICAN
 );
 
 CREATE TABLE IF NOT EXISTS trades (

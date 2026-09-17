@@ -36,17 +36,23 @@ empty with the same columns as the other sub-tabs -- never hidden, per the "rows
 always render" rule; there just are none to show.
 
 FX (rebuilt 2026-09-17, user decision) no longer goes through `value_book`/
-`priced_value_book` either: it is `ui.tabs.blotter_fx.build_layout`, a literal replica
-of the old xlsx workbook's "All FX trades" sheet (see that module's docstring for the
-row shape and the deliberately-preserved quirks -- futures P&L divided by mark instead
-of fill, the LTD-2 column's t-1-mark divisor bug, one shared per-pair valuation date --
-all intentional display fidelity to the historical sheet per this user instruction, a
-one-off, named override of CLAUDE.md's "must not replicate" list for this table only).
-Like Rates below, it has no P&L strip, filter bar or row-click detail panel -- its rows
+`priced_value_book` for its TABLE either: it is `ui.tabs.blotter_fx.build_layout`, a
+literal replica of the old xlsx workbook's "All FX trades" sheet (see that module's
+docstring for the row shape and the deliberately-preserved quirks -- futures P&L
+divided by mark instead of fill, the LTD-2 column's t-1-mark divisor bug, one shared
+per-pair valuation date -- all intentional display fidelity to the historical sheet per
+this user instruction, a one-off, named override of CLAUDE.md's "must not replicate"
+list for this table only). It has no filter bar or row-click detail panel -- its rows
 (trade_id/instrument_id/quantity_usd_notional/tenor/fill/mark_*/pnl_*) don't have
-`value_book`'s shape (trade_id/mark/pnl_usd/...) that scaffolding assumes; it is a
-single always-current table, rebuilt on the same top-level `_update` callback as every
-other sub-tab.
+`value_book`'s shape (trade_id/mark/pnl_usd/...) that scaffolding assumes. It DOES have
+a P&L strip (added 2026-09-17, user decision), built statically inside
+`blotter_fx.build_layout` itself rather than through the generic
+`_register_strip_callback` loop below: `blotter_fx._fx_strip` calls this same module's
+`render_headline_strip`/`priced_value_book`/`row_scoped_headline` scoped to the
+FX+FUTURE trade universe -- the app's official per-trade valuation, a deliberately
+DIFFERENT number from the replica table beneath it (captioned in the UI so this reads as
+intentional, not a bug). The whole sub-tab is a single always-current block, rebuilt on
+the same top-level `_update` callback as every other sub-tab.
 
 Rates (added 2026-09-15, once `engine/rates` started writing QL_PRICER marks) is a
 real view but does NOT go through `value_book`/`priced_value_book` at all -- that
