@@ -30,6 +30,14 @@ full detail):**
     no strike embedded in their free-text Description land here as strike
     0.0, and this module treats that exactly as "not known", not as a
     genuine zero strike.
+  - Vol provenance (Phase 5b, 2026-09-17): ``resolve_market_inputs``
+    (inputs.py) resolves each priced trade's vol via SMILE / ATM_INTERP /
+    MANUAL, in that priority. ``PricingOutcome.vol_source_kind`` /
+    ``.vol_detail`` record which one actually fed the marks written for
+    that trade, so a reader never has to re-derive it. One `surface_cache`
+    dict is shared across every trade in a single ``price_all_and_store``
+    run so trades sharing a pair don't each rebuild that pair's
+    FXDeltaVolSurface (see inputs.py::_cached_surface).
 """
 from __future__ import annotations
 
@@ -66,6 +74,13 @@ class PricingOutcome:
     # 'price'), kept so engine/options/structures.py can combine legs
     # without re-pricing them.
     raw: Optional[Dict[str, float]] = None
+    # Provenance of the vol that fed this outcome's marks -- SMILE |
+    # ATM_INTERP | MANUAL (inputs.py::VolInput.source_kind), or None for a
+    # skipped trade (no vol was resolved at all). See inputs.py's "Vol"
+    # docstring section for the full priority. `vol_detail` is the paired
+    # human-readable detail string, "" when vol_source_kind is None.
+    vol_source_kind: Optional[str] = None
+    vol_detail: str = ""
 
 
 def _read_option_trade(conn: sqlite3.Connection, trade_id: str) -> Optional[dict]:
@@ -144,7 +159,7 @@ def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, input
     raise ValueError(f"unreachable payoff {payoff!r}")  # pragma: no cover
 
 
-def _price_row(conn: sqlite3.Connection, as_of: str, row: dict) -> PricingOutcome:
+def _price_row(conn: sqlite3.Connection, as_of: str, row: dict, surface_cache: Optional[dict] = None) -> PricingOutcome:
     if row["product"] != "FX_OPTION":
         return _skip(row, f"product {row['product']!r} is not FX_OPTION")
     if row["payoff"] is None:
@@ -169,7 +184,9 @@ def _price_row(conn: sqlite3.Connection, as_of: str, row: dict) -> PricingOutcom
         return _skip(row, f"expiry {row['expiry_date']} is not after as_of {as_of}")
 
     pair = row["base_ccy"] + row["quote_ccy"]
-    inputs_result = resolve_market_inputs(conn, as_of, pair, row["expiry_date"])
+    inputs_result = resolve_market_inputs(
+        conn, as_of, pair, row["expiry_date"], strike=row["strike"], surface_cache=surface_cache,
+    )
     if inputs_result.inputs is None:
         return _skip(row, inputs_result.reason)
     inputs = inputs_result.inputs
@@ -206,9 +223,12 @@ def _price_row(conn: sqlite3.Connection, as_of: str, row: dict) -> PricingOutcom
         "vega": result.vega,
         "rho": result.rho,
     }
+    vol_source = inputs.vol_source
     return PricingOutcome(
         trade_id=row["trade_id"], instrument_id=row["instrument_id"], package_id=row["package_id"],
         quantity=row["quantity"], priced=True, result=result, raw=raw,
+        vol_source_kind=vol_source.source_kind if vol_source is not None else None,
+        vol_detail=vol_source.detail if vol_source is not None else "",
     )
 
 
@@ -220,18 +240,24 @@ def price_and_store(conn: sqlite3.Connection, as_of: str, trade_id: str) -> Pric
     row = _read_option_trade(conn, trade_id)
     if row is None:
         raise ValueError(f"No trade {trade_id!r} in trades_official")
-    return _price_row(conn, as_of, row)
+    # Fresh, single-trade surface cache -- no reuse across calls, but keeps
+    # the same code path as price_all_and_store below.
+    return _price_row(conn, as_of, row, surface_cache={})
 
 
 def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[PricingOutcome]:
-    """Price every FX_OPTION trade in ``trades_official`` as of ``as_of``."""
+    """Price every FX_OPTION trade in ``trades_official`` as of ``as_of``.
+    One `surface_cache` dict is shared across the whole run (see
+    inputs.py::_cached_surface) so that N trades on the same pair build
+    that pair's FXDeltaVolSurface once, not N times."""
     trade_ids = [
         r[0] for r in conn.execute(
             "SELECT trade_id FROM trades_official WHERE product = 'FX_OPTION' ORDER BY trade_id"
         ).fetchall()
     ]
+    surface_cache: dict = {}
     outcomes = []
     for trade_id in trade_ids:
         row = _read_option_trade(conn, trade_id)
-        outcomes.append(_price_row(conn, as_of, row))
+        outcomes.append(_price_row(conn, as_of, row, surface_cache=surface_cache))
     return outcomes

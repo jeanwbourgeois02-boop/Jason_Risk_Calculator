@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -118,6 +119,22 @@ def _seed_vol(conn, pair=EURSEK, expiry=EXPIRY, vol=VOL, as_of=AS_OF):
     from engine.options.inputs import set_manual_vol
 
     set_manual_vol(conn, as_of, pair, expiry, vol)
+
+
+# --------------------------------------------------------------------------- Phase 5b: vol_quotes / smile fixtures
+
+FIXTURE_PATH = Path(__file__).resolve().parent.parent / "data" / "bloomberg" / "fixtures" / "fx_vol_snapshot_v1.json"
+SMILE_AS_OF = "2026-09-17"  # matches the fixture's own as_of
+
+
+def _seed_vol_quotes(conn, pairs=("EURSEK", "EURUSD", "USDJPY"), as_of=SMILE_AS_OF):
+    """Seed vol_quotes from the checked-in fixture via VolFileSource +
+    write_vol_quotes -- the same path a real --file pull would take."""
+    from data.bloomberg.vol_marketdata import VolFileSource, write_vol_quotes
+
+    source = VolFileSource(str(FIXTURE_PATH))
+    result = source.get_vol_quotes(list(pairs), as_of=datetime.date.fromisoformat(as_of))
+    write_vol_quotes(conn, result, as_of_date=as_of, source="BBG_BDP")
 
 
 def _full_setup(conn, **trade_kwargs):
@@ -420,3 +437,112 @@ def test_combine_package_sums_two_legs_of_a_synthetic_straddle():
     call_outcome, put_outcome = summary.outcomes
     expected_price = call_outcome.raw["price"] * call_outcome.quantity + put_outcome.raw["price"] * put_outcome.quantity
     assert summary.combined["price"] == pytest.approx(expected_price)
+
+
+# --------------------------------------------------------------------------- Phase 5b: smile vol resolution
+
+@needs_quantlib
+def test_smile_vol_used_and_within_atm_bf_rr_band_for_eursek_1m():
+    """(i) EURSEK vanilla priced with the smile reports SMILE and the vol
+    used lies within the fixture's 1M tenor's ATM +/- (BF + |RR|/2) band."""
+    from engine.options.inputs import resolve_market_inputs, SMILE
+    from engine.options.store import price_and_store
+
+    conn = _new_db()
+    smile_spot = 11.20
+    expiry = "2026-10-17"  # exactly 30 days after SMILE_AS_OF -> the fixture's own '1M' node, no cross-tenor blend
+    _seed_pair_spot(conn, as_of=SMILE_AS_OF, spot=smile_spot)
+    _seed_vol_quotes(conn)
+    _seed_option_trade(conn, expiry=expiry)
+
+    result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, expiry, strike=STRIKE)
+    assert result.inputs is not None, result.reason
+    assert result.inputs.vol_source.source_kind == SMILE
+
+    # Fixture EURSEK 1M: ATM 8.00, RR25 0.25, BF25 0.28 (vol points).
+    atm, rr, bf = 8.00 / 100.0, 0.25 / 100.0, 0.28 / 100.0
+    band = bf + abs(rr) / 2
+    assert atm - band <= result.inputs.vol <= atm + band
+
+    outcome = price_and_store(conn, SMILE_AS_OF, "T1")
+    assert outcome.priced, outcome.reason
+    assert outcome.vol_source_kind == SMILE
+
+
+@needs_quantlib
+def test_otm_call_and_put_get_different_smile_vols_when_rr_nonzero():
+    """(ii) An OTM put and OTM call on the same expiry get different vols
+    when RR != 0 -- proof the smile (not just ATM) is actually being used."""
+    from engine.options.inputs import resolve_market_inputs
+
+    conn = _new_db()
+    smile_spot = 11.20
+    expiry = "2026-10-17"
+    _seed_pair_spot(conn, as_of=SMILE_AS_OF, spot=smile_spot)
+    _seed_vol_quotes(conn)
+
+    call_strike = smile_spot * 1.05  # OTM call, above spot
+    put_strike = smile_spot * 0.95   # OTM put, below spot
+
+    call_result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, expiry, strike=call_strike)
+    put_result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, expiry, strike=put_strike)
+
+    assert call_result.inputs is not None, call_result.reason
+    assert put_result.inputs is not None, put_result.reason
+    assert call_result.inputs.vol != pytest.approx(put_result.inputs.vol)
+    # Fixture EURSEK RR25 is positive at every tenor (calls richer than
+    # puts) -> the higher-strike (call-side) vol should be the larger one.
+    assert call_result.inputs.vol > put_result.inputs.vol
+
+
+@needs_quantlib
+def test_missing_strike_skips_smile_falls_back_to_atm_interp():
+    """(iii) case 1/2: no usable strike -> SMILE is never attempted (its
+    priority-(a) precondition), expiry is inside the quoted tenor range, so
+    ATM_INTERP is the resolved source."""
+    from engine.options.inputs import resolve_market_inputs, ATM_INTERP
+
+    conn = _new_db()
+    _seed_pair_spot(conn, as_of=SMILE_AS_OF, spot=11.20)
+    _seed_vol_quotes(conn)
+    expiry = "2026-10-17"  # inside the quoted tenor range
+
+    result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, expiry, strike=0.0)
+    assert result.inputs is not None, result.reason
+    assert result.inputs.vol_source.source_kind == ATM_INTERP
+
+
+@needs_quantlib
+def test_expiry_beyond_longest_quoted_tenor_falls_back_to_manual():
+    """(iii) case 2/2: expiry beyond the fixture's longest tenor (1Y) puts
+    it out of range for BOTH the smile and atm_vol_for_expiry (same
+    ATM-bearing-tenor day range underlies both, per inputs.py's docstring),
+    so priority falls all the way through to MANUAL."""
+    from engine.options.inputs import resolve_market_inputs, set_manual_vol, MANUAL
+
+    conn = _new_db()
+    _seed_pair_spot(conn, as_of=SMILE_AS_OF, spot=11.20)
+    _seed_vol_quotes(conn)
+    far_expiry = "2029-01-01"
+    set_manual_vol(conn, SMILE_AS_OF, EURSEK, far_expiry, 0.09)
+
+    result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, far_expiry, strike=STRIKE)
+    assert result.inputs is not None, result.reason
+    assert result.inputs.vol_source.source_kind == MANUAL
+    assert result.inputs.vol == pytest.approx(0.09)
+
+
+@needs_quantlib
+def test_no_quotes_and_no_manual_vol_skips_with_no_vol_reason():
+    """(iv) With no vol_quotes staged and no manual entry, resolution
+    returns None and the reason is exactly "no vol" -- same skip path as
+    before smile vol existed."""
+    from engine.options.inputs import resolve_market_inputs
+
+    conn = _new_db()
+    _seed_pair_spot(conn, as_of=SMILE_AS_OF, spot=11.20)
+    # No _seed_vol_quotes call, no set_manual_vol call.
+
+    result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, "2026-10-17", strike=STRIKE)
+    assert result.inputs is None
+    assert result.reason == "no vol"

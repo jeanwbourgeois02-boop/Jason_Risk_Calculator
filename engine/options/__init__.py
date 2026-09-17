@@ -51,9 +51,20 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   groups `FX_OPTION` legs by `trades.package_id` and combines their Greeks via
   `options_calc.structures.combine()` -- does NOT invent the option-structure
   package_id grouping rule itself (data-ingest follow-up, see final report).
-- Phase 5 (bbg-data): live FX vol feed (`data/bloomberg/vol_marketdata.py`, new
-  `vol_quotes` staging table) replacing Phase 2/4's flat manual vol; unlocks
-  `options_calc.fx.delta_vol_surface.FXDeltaVolSurface`.
+- Phase 5a (bbg-data, landed 2026-09-17): live FX vol feed
+  (`data/bloomberg/vol_marketdata.py`, new `vol_quotes` staging table,
+  `vol_smile`/`atm_vol_for_expiry` read helpers).
+- Phase 5b (options-pricer, landed 2026-09-17): `inputs.py::resolve_vol`
+  now prices off `vol_quotes` via `FXDeltaVolSurface` first (SMILE), falls
+  back to `atm_vol_for_expiry` (ATM_INTERP), then the Phase 2 flat
+  `option_vols` table (MANUAL, now last resort not first), else the trade
+  is skipped "no vol" as before; `store.py`'s `PricingOutcome` records
+  which of the three fed each priced trade. Bloomberg-verification caveat
+  carries forward unchanged: every `vol_quotes` ticker/field guess in
+  `data/bloomberg/vol_marketdata.py`'s module docstring is UNVERIFIED
+  until the user runs `--probe` on a live terminal -- nothing computed
+  from a SMILE/ATM_INTERP vol should be read as production-accurate until
+  then.
 - Phase 6 (rates-exotics): swaptions / cap-floor / SABR / Bermudan
   (`options_calc.rates`) as an extension alongside `engine/rates/`'s existing OIS-NPV
   scope -- a genuinely separate Black-76 / Hull-White model family, not folded into

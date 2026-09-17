@@ -1,0 +1,183 @@
+{
+  "as_of": "2026-09-17",
+  "source": "test-fixture-synthetic",
+  "pairs": {
+    "EURUSD": {
+      "pair": "EURUSD",
+      "as_of": "2026-09-17",
+      "quotes": [
+        {"tenor": "ON", "quote_type": "ATM", "ticker": "EURUSDVON BGN Curncy", "value": 6.20, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "RR25", "ticker": "EURUSD25RON BGN Curncy", "value": -0.10, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "BF25", "ticker": "EURUSD25BON BGN Curncy", "value": 0.15, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "RR10", "ticker": "EURUSD10RON BGN Curncy", "value": -0.18, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "BF10", "ticker": "EURUSD10BON BGN Curncy", "value": 0.28, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1W", "quote_type": "ATM", "ticker": "EURUSDV1W BGN Curncy", "value": 6.35, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "RR25", "ticker": "EURUSD25R1W BGN Curncy", "value": -0.12, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "BF25", "ticker": "EURUSD25B1W BGN Curncy", "value": 0.16, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "RR10", "ticker": "EURUSD10R1W BGN Curncy", "value": -0.20, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "BF10", "ticker": "EURUSD10B1W BGN Curncy", "value": 0.30, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "2W", "quote_type": "ATM", "ticker": "EURUSDV2W BGN Curncy", "value": 6.45, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "RR25", "ticker": "EURUSD25R2W BGN Curncy", "value": -0.13, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "BF25", "ticker": "EURUSD25B2W BGN Curncy", "value": 0.17, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "RR10", "ticker": "EURUSD10R2W BGN Curncy", "value": -0.22, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "BF10", "ticker": "EURUSD10B2W BGN Curncy", "value": 0.31, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1M", "quote_type": "ATM", "ticker": "EURUSDV1M BGN Curncy", "value": 6.60, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "RR25", "ticker": "EURUSD25R1M BGN Curncy", "value": -0.15, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "BF25", "ticker": "EURUSD25B1M BGN Curncy", "value": 0.18, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "RR10", "ticker": "EURUSD10R1M BGN Curncy", "value": -0.24, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "BF10", "ticker": "EURUSD10B1M BGN Curncy", "value": 0.33, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "2M", "quote_type": "ATM", "ticker": "EURUSDV2M BGN Curncy", "value": 6.80, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "RR25", "ticker": "EURUSD25R2M BGN Curncy", "value": -0.17, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "BF25", "ticker": "EURUSD25B2M BGN Curncy", "value": 0.19, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "RR10", "ticker": "EURUSD10R2M BGN Curncy", "value": -0.26, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "BF10", "ticker": "EURUSD10B2M BGN Curncy", "value": 0.35, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "3M", "quote_type": "ATM", "ticker": "EURUSDV3M BGN Curncy", "value": 7.00, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "RR25", "ticker": "EURUSD25R3M BGN Curncy", "value": -0.18, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "BF25", "ticker": "EURUSD25B3M BGN Curncy", "value": 0.20, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "RR10", "ticker": "EURUSD10R3M BGN Curncy", "value": -0.28, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "BF10", "ticker": "EURUSD10B3M BGN Curncy", "value": 0.36, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "6M", "quote_type": "ATM", "ticker": "EURUSDV6M BGN Curncy", "value": 7.40, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "RR25", "ticker": "EURUSD25R6M BGN Curncy", "value": -0.20, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "BF25", "ticker": "EURUSD25B6M BGN Curncy", "value": 0.22, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "RR10", "ticker": "EURUSD10R6M BGN Curncy", "value": -0.30, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "BF10", "ticker": "EURUSD10B6M BGN Curncy", "value": 0.38, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "9M", "quote_type": "ATM", "ticker": "EURUSDV9M BGN Curncy", "value": 7.70, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "RR25", "ticker": "EURUSD25R9M BGN Curncy", "value": -0.22, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "BF25", "ticker": "EURUSD25B9M BGN Curncy", "value": 0.24, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "RR10", "ticker": "EURUSD10R9M BGN Curncy", "value": -0.32, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "BF10", "ticker": "EURUSD10B9M BGN Curncy", "value": 0.40, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1Y", "quote_type": "ATM", "ticker": "EURUSDV1Y BGN Curncy", "value": 8.00, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "RR25", "ticker": "EURUSD25R1Y BGN Curncy", "value": -0.24, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "BF25", "ticker": "EURUSD25B1Y BGN Curncy", "value": 0.25, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "RR10", "ticker": "EURUSD10R1Y BGN Curncy", "value": -0.34, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "BF10", "ticker": "EURUSD10B1Y BGN Curncy", "value": 0.42, "field": "PX_LAST", "source": "BBG"}
+      ]
+    },
+    "EURSEK": {
+      "pair": "EURSEK",
+      "as_of": "2026-09-17",
+      "quotes": [
+        {"tenor": "ON", "quote_type": "ATM", "ticker": "EURSEKVON BGN Curncy", "value": 7.50, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "RR25", "ticker": "EURSEK25RON BGN Curncy", "value": 0.20, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "BF25", "ticker": "EURSEK25BON BGN Curncy", "value": 0.25, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "RR10", "ticker": "EURSEK10RON BGN Curncy", "value": 0.30, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "BF10", "ticker": "EURSEK10BON BGN Curncy", "value": 0.42, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1W", "quote_type": "ATM", "ticker": "EURSEKV1W BGN Curncy", "value": 7.65, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "RR25", "ticker": "EURSEK25R1W BGN Curncy", "value": 0.22, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "BF25", "ticker": "EURSEK25B1W BGN Curncy", "value": 0.26, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "RR10", "ticker": "EURSEK10R1W BGN Curncy", "value": 0.32, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "BF10", "ticker": "EURSEK10B1W BGN Curncy", "value": 0.44, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "2W", "quote_type": "ATM", "ticker": "EURSEKV2W BGN Curncy", "value": 7.80, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "RR25", "ticker": "EURSEK25R2W BGN Curncy", "value": 0.23, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "BF25", "ticker": "EURSEK25B2W BGN Curncy", "value": 0.27, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "RR10", "ticker": "EURSEK10R2W BGN Curncy", "value": 0.34, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "BF10", "ticker": "EURSEK10B2W BGN Curncy", "value": 0.46, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1M", "quote_type": "ATM", "ticker": "EURSEKV1M BGN Curncy", "value": 8.00, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "RR25", "ticker": "EURSEK25R1M BGN Curncy", "value": 0.25, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "BF25", "ticker": "EURSEK25B1M BGN Curncy", "value": 0.28, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "RR10", "ticker": "EURSEK10R1M BGN Curncy", "value": 0.36, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "BF10", "ticker": "EURSEK10B1M BGN Curncy", "value": 0.48, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "2M", "quote_type": "ATM", "ticker": "EURSEKV2M BGN Curncy", "value": 8.30, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "RR25", "ticker": "EURSEK25R2M BGN Curncy", "value": 0.27, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "BF25", "ticker": "EURSEK25B2M BGN Curncy", "value": 0.30, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "RR10", "ticker": "EURSEK10R2M BGN Curncy", "value": 0.38, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "BF10", "ticker": "EURSEK10B2M BGN Curncy", "value": 0.50, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "3M", "quote_type": "ATM", "ticker": "EURSEKV3M BGN Curncy", "value": 8.60, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "RR25", "ticker": "EURSEK25R3M BGN Curncy", "value": 0.29, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "BF25", "ticker": "EURSEK25B3M BGN Curncy", "value": 0.32, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "RR10", "ticker": "EURSEK10R3M BGN Curncy", "value": 0.40, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "BF10", "ticker": "EURSEK10B3M BGN Curncy", "value": 0.52, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "6M", "quote_type": "ATM", "ticker": "EURSEKV6M BGN Curncy", "value": 9.00, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "RR25", "ticker": "EURSEK25R6M BGN Curncy", "value": 0.32, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "BF25", "ticker": "EURSEK25B6M BGN Curncy", "value": 0.34, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "RR10", "ticker": "EURSEK10R6M BGN Curncy", "value": 0.44, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "BF10", "ticker": "EURSEK10B6M BGN Curncy", "value": 0.55, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "9M", "quote_type": "ATM", "ticker": "EURSEKV9M BGN Curncy", "value": 9.30, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "RR25", "ticker": "EURSEK25R9M BGN Curncy", "value": 0.34, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "BF25", "ticker": "EURSEK25B9M BGN Curncy", "value": 0.36, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "RR10", "ticker": "EURSEK10R9M BGN Curncy", "value": 0.46, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "BF10", "ticker": "EURSEK10B9M BGN Curncy", "value": 0.58, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1Y", "quote_type": "ATM", "ticker": "EURSEKV1Y BGN Curncy", "value": 9.60, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "RR25", "ticker": "EURSEK25R1Y BGN Curncy", "value": 0.36, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "BF25", "ticker": "EURSEK25B1Y BGN Curncy", "value": 0.38, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "RR10", "ticker": "EURSEK10R1Y BGN Curncy", "value": 0.48, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "BF10", "ticker": "EURSEK10B1Y BGN Curncy", "value": 0.60, "field": "PX_LAST", "source": "BBG"}
+      ]
+    },
+    "USDJPY": {
+      "pair": "USDJPY",
+      "as_of": "2026-09-17",
+      "quotes": [
+        {"tenor": "ON", "quote_type": "ATM", "ticker": "USDJPYVON BGN Curncy", "value": 7.00, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "RR25", "ticker": "USDJPY25RON BGN Curncy", "value": 0.30, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "BF25", "ticker": "USDJPY25BON BGN Curncy", "value": 0.20, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "RR10", "ticker": "USDJPY10RON BGN Curncy", "value": 0.45, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "ON", "quote_type": "BF10", "ticker": "USDJPY10BON BGN Curncy", "value": 0.35, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1W", "quote_type": "ATM", "ticker": "USDJPYV1W BGN Curncy", "value": 7.20, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "RR25", "ticker": "USDJPY25R1W BGN Curncy", "value": 0.32, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "BF25", "ticker": "USDJPY25B1W BGN Curncy", "value": 0.21, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "RR10", "ticker": "USDJPY10R1W BGN Curncy", "value": 0.47, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1W", "quote_type": "BF10", "ticker": "USDJPY10B1W BGN Curncy", "value": 0.36, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "2W", "quote_type": "ATM", "ticker": "USDJPYV2W BGN Curncy", "value": 7.35, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "RR25", "ticker": "USDJPY25R2W BGN Curncy", "value": 0.33, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "BF25", "ticker": "USDJPY25B2W BGN Curncy", "value": 0.22, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "RR10", "ticker": "USDJPY10R2W BGN Curncy", "value": 0.49, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2W", "quote_type": "BF10", "ticker": "USDJPY10B2W BGN Curncy", "value": 0.37, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1M", "quote_type": "ATM", "ticker": "USDJPYV1M BGN Curncy", "value": 7.60, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "RR25", "ticker": "USDJPY25R1M BGN Curncy", "value": 0.35, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "BF25", "ticker": "USDJPY25B1M BGN Curncy", "value": 0.23, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "RR10", "ticker": "USDJPY10R1M BGN Curncy", "value": 0.52, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1M", "quote_type": "BF10", "ticker": "USDJPY10B1M BGN Curncy", "value": 0.39, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "2M", "quote_type": "ATM", "ticker": "USDJPYV2M BGN Curncy", "value": 7.90, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "RR25", "ticker": "USDJPY25R2M BGN Curncy", "value": 0.37, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "BF25", "ticker": "USDJPY25B2M BGN Curncy", "value": 0.24, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "RR10", "ticker": "USDJPY10R2M BGN Curncy", "value": 0.55, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "2M", "quote_type": "BF10", "ticker": "USDJPY10B2M BGN Curncy", "value": 0.41, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "3M", "quote_type": "ATM", "ticker": "USDJPYV3M BGN Curncy", "value": 8.20, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "RR25", "ticker": "USDJPY25R3M BGN Curncy", "value": 0.39, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "BF25", "ticker": "USDJPY25B3M BGN Curncy", "value": 0.26, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "RR10", "ticker": "USDJPY10R3M BGN Curncy", "value": 0.58, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "3M", "quote_type": "BF10", "ticker": "USDJPY10B3M BGN Curncy", "value": 0.43, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "6M", "quote_type": "ATM", "ticker": "USDJPYV6M BGN Curncy", "value": 8.70, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "RR25", "ticker": "USDJPY25R6M BGN Curncy", "value": 0.42, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "BF25", "ticker": "USDJPY25B6M BGN Curncy", "value": 0.28, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "RR10", "ticker": "USDJPY10R6M BGN Curncy", "value": 0.62, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "6M", "quote_type": "BF10", "ticker": "USDJPY10B6M BGN Curncy", "value": 0.46, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "9M", "quote_type": "ATM", "ticker": "USDJPYV9M BGN Curncy", "value": 9.10, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "RR25", "ticker": "USDJPY25R9M BGN Curncy", "value": 0.44, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "BF25", "ticker": "USDJPY25B9M BGN Curncy", "value": 0.30, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "RR10", "ticker": "USDJPY10R9M BGN Curncy", "value": 0.65, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "9M", "quote_type": "BF10", "ticker": "USDJPY10B9M BGN Curncy", "value": 0.48, "field": "PX_LAST", "source": "BBG"},
+
+        {"tenor": "1Y", "quote_type": "ATM", "ticker": "USDJPYV1Y BGN Curncy", "value": 9.50, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "RR25", "ticker": "USDJPY25R1Y BGN Curncy", "value": 0.46, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "BF25", "ticker": "USDJPY25B1Y BGN Curncy", "value": 0.32, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "RR10", "ticker": "USDJPY10R1Y BGN Curncy", "value": 0.68, "field": "PX_LAST", "source": "BBG"},
+        {"tenor": "1Y", "quote_type": "BF10", "ticker": "USDJPY10B1Y BGN Curncy", "value": 0.50, "field": "PX_LAST", "source": "BBG"}
+      ]
+    }
+  }
+}

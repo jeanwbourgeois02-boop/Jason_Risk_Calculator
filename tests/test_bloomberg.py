@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import inspect
+import json
 import math
 import sqlite3
 import sys
@@ -1985,3 +1986,374 @@ def test_bbg_diagnostics_shim_reexports_run_bloomberg_diagnostics():
     assert callable(run_bloomberg_diagnostics)
     result = run_bloomberg_diagnostics(db_path=":memory:")
     assert isinstance(result, list)
+
+
+# =========================================================================== vol_marketdata.py
+VOL_FIXTURE = REPO / "data" / "bloomberg" / "fixtures" / "fx_vol_snapshot_v1.json"
+
+
+def test_vol_ticker_construction():
+    from data.bloomberg import vol_marketdata as vmd
+
+    assert vmd.vol_ticker("EURUSD", "1M", "ATM") == "EURUSDV1M BGN Curncy"
+    assert vmd.vol_ticker("EURUSD", "1M", "RR25") == "EURUSD25R1M BGN Curncy"
+    assert vmd.vol_ticker("EURUSD", "1M", "BF25") == "EURUSD25B1M BGN Curncy"
+    assert vmd.vol_ticker("EURUSD", "1M", "RR10") == "EURUSD10R1M BGN Curncy"
+    assert vmd.vol_ticker("EURUSD", "1M", "BF10") == "EURUSD10B1M BGN Curncy"
+
+    # normalises pair/tenor case
+    assert vmd.vol_ticker("eurusd", "1m", "ATM") == "EURUSDV1M BGN Curncy"
+
+    # a new pair works purely by name -- no per-pair table to extend
+    assert vmd.vol_ticker("GBPUSD", "3M", "ATM") == "GBPUSDV3M BGN Curncy"
+
+    with pytest.raises(vmd.TickerMapError):
+        vmd.vol_ticker("EURUSD", "1M", "RR35")
+
+
+def test_tenor_to_days_handles_on_and_units():
+    from data.bloomberg import vol_marketdata as vmd
+
+    assert vmd.tenor_to_days("ON") == 1
+    assert vmd.tenor_to_days("on") == 1
+    assert vmd.tenor_to_days("1W") == 7
+    assert vmd.tenor_to_days("1M") == 30
+    assert vmd.tenor_to_days("1Y") == 365
+    with pytest.raises(ValueError):
+        vmd.tenor_to_days("bogus")
+
+
+def test_ensure_vol_quotes_table_idempotent():
+    from data.bloomberg import vol_marketdata as vmd
+
+    conn = sqlite3.connect(":memory:")
+    vmd.ensure_vol_quotes_table(conn)
+    vmd.ensure_vol_quotes_table(conn)  # must not raise the second time
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "vol_quotes" in tables
+
+
+def test_vol_file_source_get_vol_quotes_and_round_trip_write():
+    from data.bloomberg import vol_marketdata as vmd
+
+    src = vmd.VolFileSource(VOL_FIXTURE)
+    assert src.name() == "VolFileSource(test-fixture-synthetic)"
+
+    result = src.get_vol_quotes(["EURUSD", "USDJPY"], as_of=date(2026, 9, 17))
+    assert not result.diagnostics
+    assert set(result.pairs) == {"EURUSD", "USDJPY"}
+    eurusd_1m = [q for q in result.pairs["EURUSD"].quotes if q.tenor == "1M"]
+    assert {q.quote_type for q in eurusd_1m} == set(vmd.VOL_QUOTE_TYPES)
+    atm_1m = next(q for q in eurusd_1m if q.quote_type == "ATM")
+    assert math.isclose(atm_1m.value, 6.60)
+    assert atm_1m.ticker == "EURUSDV1M BGN Curncy"
+
+    conn = sqlite3.connect(":memory:")
+    n = vmd.write_vol_quotes(conn, result, as_of_date="2026-09-17", source="BBG_BDP")
+    assert n == sum(len(pv.quotes) for pv in result.pairs.values())
+
+    rows = conn.execute(
+        "SELECT as_of_date, pair, tenor, quote_type, value, ticker, field, source, snapped_at "
+        "FROM vol_quotes WHERE pair = 'EURUSD' AND tenor = '1M' AND quote_type = 'ATM'"
+    ).fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row[0] == "2026-09-17"
+    assert row[1] == "EURUSD"
+    assert math.isclose(row[4], 6.60)
+    assert row[5] == "EURUSDV1M BGN Curncy"
+    assert row[6] == "PX_LAST"
+    assert row[7] == "BBG_BDP"
+    assert row[8].startswith("2026-09-17T17:00:00")  # snapped_at: 17:00 America/New_York
+
+
+def test_write_vol_quotes_is_idempotent_via_insert_or_replace():
+    from data.bloomberg import vol_marketdata as vmd
+
+    conn = sqlite3.connect(":memory:")
+    src = vmd.VolFileSource(VOL_FIXTURE)
+    result = src.get_vol_quotes(["EURUSD"], as_of=date(2026, 9, 17))
+    n1 = vmd.write_vol_quotes(conn, result, as_of_date="2026-09-17", source="BBG_BDP")
+    n2 = vmd.write_vol_quotes(conn, result, as_of_date="2026-09-17", source="BBG_BDP")
+    assert n1 == n2
+    count = conn.execute("SELECT COUNT(*) FROM vol_quotes").fetchone()[0]
+    assert count == n1  # no duplicate rows on re-run
+
+
+def test_vol_file_source_wrong_as_of_raises():
+    from data.bloomberg import vol_marketdata as vmd
+
+    src = vmd.VolFileSource(VOL_FIXTURE)
+    with pytest.raises(vmd.MarketDataUnavailable):
+        src.get_vol_quotes(["EURUSD"], as_of=date(2026, 9, 18))
+
+
+def test_vol_file_source_unknown_pair_recorded_as_diagnostic_not_raised():
+    from data.bloomberg import vol_marketdata as vmd
+
+    src = vmd.VolFileSource(VOL_FIXTURE)
+    result = src.get_vol_quotes(["EURUSD", "AUDNZD"], as_of=date(2026, 9, 17))
+    assert "EURUSD" in result.pairs
+    assert "AUDNZD" not in result.pairs
+    assert any(d["pair"] == "AUDNZD" and d["status"] == "MISSING" for d in result.diagnostics)
+
+
+def test_vol_smile_source_preference_rule():
+    from data.bloomberg import vol_marketdata as vmd
+
+    conn = sqlite3.connect(":memory:")
+    vmd.ensure_vol_quotes_table(conn)
+    # Two sources for the same (as_of, pair, tenor, quote_type): BBG_BDP must win.
+    conn.execute(
+        "INSERT INTO vol_quotes VALUES ('2026-09-17','EURUSD','1M','ATM',6.60,'EURUSDV1M BGN Curncy','PX_LAST','BBG_BDP','2026-09-17T17:00:00-04:00')"
+    )
+    conn.execute(
+        "INSERT INTO vol_quotes VALUES ('2026-09-17','EURUSD','1M','ATM',6.99,'EURUSDV1M BGN Curncy','PX_LAST','BBG_BDH','2026-09-17T17:00:00-04:00')"
+    )
+    smile = vmd.vol_smile(conn, "2026-09-17", "EURUSD")
+    assert math.isclose(smile["1M"]["ATM"], 6.60)
+
+    # Only BBG_BDH and MANUAL present (no BBG_BDP): BBG_BDH must win over MANUAL.
+    conn2 = sqlite3.connect(":memory:")
+    vmd.ensure_vol_quotes_table(conn2)
+    conn2.execute(
+        "INSERT INTO vol_quotes VALUES ('2026-09-17','EURUSD','3M','ATM',7.10,'EURUSDV3M BGN Curncy','PX_LAST','MANUAL','2026-09-17T17:00:00-04:00')"
+    )
+    conn2.execute(
+        "INSERT INTO vol_quotes VALUES ('2026-09-17','EURUSD','3M','ATM',7.00,'EURUSDV3M BGN Curncy','PX_LAST','BBG_BDH','2026-09-17T17:00:00-04:00')"
+    )
+    smile2 = vmd.vol_smile(conn2, "2026-09-17", "EURUSD")
+    assert math.isclose(smile2["3M"]["ATM"], 7.00)
+
+    # Neither BBG_BDP nor BBG_BDH: alphabetically-first source wins, deterministically.
+    conn3 = sqlite3.connect(":memory:")
+    vmd.ensure_vol_quotes_table(conn3)
+    conn3.execute(
+        "INSERT INTO vol_quotes VALUES ('2026-09-17','EURUSD','6M','ATM',7.50,'EURUSDV6M BGN Curncy','PX_LAST','ZZZ_SRC','2026-09-17T17:00:00-04:00')"
+    )
+    conn3.execute(
+        "INSERT INTO vol_quotes VALUES ('2026-09-17','EURUSD','6M','ATM',7.40,'EURUSDV6M BGN Curncy','PX_LAST','AAA_SRC','2026-09-17T17:00:00-04:00')"
+    )
+    smile3 = vmd.vol_smile(conn3, "2026-09-17", "EURUSD")
+    assert math.isclose(smile3["6M"]["ATM"], 7.40)
+
+    # Nothing staged at all -> empty dict, not an error.
+    assert vmd.vol_smile(conn, "2026-09-17", "GBPUSD") == {}
+
+
+def test_atm_vol_for_expiry_interpolation_and_bounds():
+    from data.bloomberg import vol_marketdata as vmd
+
+    conn = sqlite3.connect(":memory:")
+    src = vmd.VolFileSource(VOL_FIXTURE)
+    result = src.get_vol_quotes(["EURUSD"], as_of=date(2026, 9, 17))
+    vmd.write_vol_quotes(conn, result, as_of_date="2026-09-17", source="BBG_BDP")
+
+    # Exact tenor hit: 1M = 30 days from 2026-09-17 -> 2026-10-17.
+    exact = vmd.atm_vol_for_expiry(conn, "2026-09-17", "EURUSD", "2026-10-17")
+    assert math.isclose(exact, 6.60)
+
+    # Interior date: strictly between 1M (30d, 6.60) and 2M (60d, 6.80) tenor nodes.
+    interior = vmd.atm_vol_for_expiry(conn, "2026-09-17", "EURUSD", "2026-11-01")
+    assert interior is not None
+    assert 6.60 < interior < 6.80
+
+    # Outside the tenor range (beyond 1Y = 365 days): never extrapolates.
+    outside = vmd.atm_vol_for_expiry(conn, "2026-09-17", "EURUSD", "2029-09-17")
+    assert outside is None
+
+    # Before the first node (ON = 1 day, i.e. before 2026-09-18): never extrapolates.
+    before = vmd.atm_vol_for_expiry(conn, "2026-09-17", "EURUSD", "2026-09-17")
+    assert before is None
+
+    # No data staged for the pair at all.
+    assert vmd.atm_vol_for_expiry(conn, "2026-09-17", "GBPUSD", "2026-10-17") is None
+
+
+def test_vol_pairs_needed_seeded_db():
+    from data.bloomberg import vol_marketdata as vmd
+    from data.ingest import schema
+
+    conn = schema.connect(":memory:")
+    conn.execute(
+        "INSERT INTO instruments VALUES "
+        "('EURUSD090126C-1','FX_OPTION','EUR','USD',1,0,'EURUSD Curncy','2026-09-01')"
+    )
+    conn.execute(
+        "INSERT INTO instruments VALUES "
+        "('USDJPY100126P-2','FX_OPTION','USD','JPY',1,0,'USDJPY Curncy','2026-10-01')"
+    )
+    conn.execute(
+        "INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')"
+    )
+    conn.commit()
+    pairs = vmd.vol_pairs_needed(conn)
+    assert pairs == ["EURUSD", "USDJPY"]
+
+
+def test_vol_pairs_needed_defaults_when_empty():
+    from data.bloomberg import vol_marketdata as vmd
+    from data.ingest import schema
+
+    conn = schema.connect(":memory:")
+    assert vmd.vol_pairs_needed(conn) == list(vmd.DEFAULT_PAIRS)
+
+    # also defaults gracefully when the instruments table doesn't exist at all
+    bare = sqlite3.connect(":memory:")
+    assert vmd.vol_pairs_needed(bare) == list(vmd.DEFAULT_PAIRS)
+
+
+def test_vol_snapshot_round_trip(tmp_path):
+    from data.bloomberg import vol_marketdata as vmd
+
+    snap = vmd.load_vol_snapshot(VOL_FIXTURE)
+    out_path = tmp_path / "roundtrip.json"
+    vmd.save_vol_snapshot(snap, out_path)
+    reloaded = vmd.load_vol_snapshot(out_path)
+    assert reloaded.as_of == snap.as_of
+    assert set(reloaded.pairs) == set(snap.pairs)
+    assert reloaded.pairs["EURUSD"].quotes[0].ticker == snap.pairs["EURUSD"].quotes[0].ticker
+
+
+# -- CLI ---------------------------------------------------------------------------------
+
+def test_cli_file_mode_writes_vol_quotes(tmp_path):
+    from data.bloomberg import vol_marketdata as vmd
+
+    db_path = tmp_path / "risk.db"
+    exit_code = vmd.main([
+        "--db", str(db_path), "--as-of", "2026-09-17", "--file", str(VOL_FIXTURE),
+    ])
+    assert exit_code == 0
+
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM vol_quotes").fetchone()[0]
+    # empty DB -> vol_pairs_needed defaults to EURUSD/EURSEK/USDJPY, all three fully
+    # covered by the fixture across 9 tenors x 5 quote_types each.
+    assert count == 3 * 9 * 5
+
+    diag_path = Path(str(db_path) + ".diag.json")
+    assert diag_path.exists()
+    diag = json.loads(diag_path.read_text())
+    assert diag["summary"]["outcome"] == "OK"
+    assert diag["summary"]["exit_code"] == 0
+
+
+def test_cli_file_mode_bad_as_of_exits_2(tmp_path):
+    from data.bloomberg import vol_marketdata as vmd
+
+    db_path = tmp_path / "risk.db"
+    exit_code = vmd.main(["--db", str(db_path), "--as-of", "not-a-date", "--file", str(VOL_FIXTURE)])
+    assert exit_code == 2
+    diag = json.loads(Path(str(db_path) + ".diag.json").read_text())
+    assert diag["summary"]["exit_code"] == 2
+
+
+def test_cli_file_mode_missing_as_of_exits_2(tmp_path):
+    from data.bloomberg import vol_marketdata as vmd
+
+    db_path = tmp_path / "risk.db"
+    exit_code = vmd.main(["--db", str(db_path), "--file", str(VOL_FIXTURE)])
+    assert exit_code == 2
+
+
+def test_cli_probe_mode_file_source_writes_diag(tmp_path):
+    from data.bloomberg import vol_marketdata as vmd
+
+    db_path = tmp_path / "risk.db"
+    exit_code = vmd.main([
+        "--db", str(db_path), "--as-of", "2026-09-17", "--file", str(VOL_FIXTURE), "--probe",
+    ])
+    assert exit_code == 0
+    diag = json.loads(Path(str(db_path) + ".diag.json").read_text())
+    assert diag["mode"] == "probe"
+    assert len(diag["probe"]["steps"]) == 5
+    assert all(s["outcome"] == "OK" for s in diag["probe"]["steps"])
+    # no vol_quotes rows in probe mode
+    conn = sqlite3.connect(db_path)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "vol_quotes" not in tables
+
+
+def test_cli_file_mode_bad_path_exits_4(tmp_path):
+    from data.bloomberg import vol_marketdata as vmd
+
+    db_path = tmp_path / "risk.db"
+    exit_code = vmd.main([
+        "--db", str(db_path), "--as-of", "2026-09-17", "--file", str(tmp_path / "does_not_exist.json"),
+    ])
+    assert exit_code in (3, 4)  # a bad file path surfaces as either, never a crash without a diag
+    assert Path(str(db_path) + ".diag.json").exists()
+
+
+# -- VolBloombergSource: fake blpapi, never the real SDK ---------------------------------
+
+def test_vol_bloomberg_source_requires_blpapi_when_absent():
+    from data.bloomberg import vol_marketdata as vmd
+
+    try:
+        import blpapi  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        pytest.skip("blpapi is installed in this environment; nothing to test for the absent-package path")
+
+    with pytest.raises(vmd.MarketDataError):
+        vmd.VolBloombergSource()
+
+
+def test_vol_bloomberg_source_get_vol_quotes_with_fake_blpapi(monkeypatch):
+    from data.bloomberg import vol_marketdata as vmd
+
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        sec_list = []
+        for t in request.securities:
+            row = {}
+            # Only answer ATM 1M for EURUSD -- everything else in the batch comes back
+            # with no fieldData, exercising the per-ticker MISSING diagnostics path.
+            if t == "EURUSDV1M BGN Curncy":
+                row["PX_LAST"] = 6.60
+            sec_list.append({"security": t, "fieldData": row})
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = vmd.VolBloombergSource("localhost", 8194)
+    assert src.name() == "VolBloombergSource(localhost:8194)"
+    result = src.get_vol_quotes(["EURUSD"], as_of=None, tenors=["1M"])
+    assert result.source == "BBG_BDP"
+    atm = next(q for q in result.pairs["EURUSD"].quotes if q.quote_type == "ATM")
+    assert math.isclose(atm.value, 6.60)
+    # the other 4 quote_types for 1M never got a value -> recorded as diagnostics, not raised
+    missing_quote_types = {d["quote_type"] for d in result.diagnostics}
+    assert missing_quote_types == {"RR25", "BF25", "RR10", "BF10"}
+    src.close()
+
+
+def test_vol_bloomberg_source_historical_request_for_explicit_as_of(monkeypatch):
+    from data.bloomberg import vol_marketdata as vmd
+
+    def responder(request):
+        assert request.req_type == "HistoricalDataRequest"
+        # HistoricalDataRequest returns one securityData message per requested security
+        # (see rates_marketdata.py's _fetch_historical_single) -- echo all of them back.
+        return [{"securityData": {"security": t, "fieldData": [{"PX_LAST": 6.60}]}} for t in request.securities]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = vmd.VolBloombergSource("localhost", 8194)
+    result = src.get_vol_quotes(["EURUSD"], as_of=date(2026, 9, 17), tenors=["1M"])
+    assert result.source == "BBG_BDH"
+    atm = next(q for q in result.pairs["EURUSD"].quotes if q.quote_type == "ATM")
+    assert math.isclose(atm.value, 6.60)
+
+
+def test_vol_marketdata_module_imports_without_blpapi():
+    # Importing the module must never require blpapi to be installed -- only
+    # instantiating VolBloombergSource does.
+    import importlib
+
+    import data.bloomberg.vol_marketdata as vmd
+    importlib.reload(vmd)
+    assert callable(vmd.vol_ticker)
