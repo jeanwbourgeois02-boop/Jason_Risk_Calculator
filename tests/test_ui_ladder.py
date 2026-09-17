@@ -93,34 +93,6 @@ def test_transpose_ladder_empty_frame():
     assert out.empty
 
 
-# --------------------------------------------------------------------------- bnp_bval_rates
-def test_bnp_bval_rates_used_only_as_fallback(conn):
-    conn.execute(
-        "INSERT INTO marks VALUES "
-        "('2026-08-17','USDJPY','2026-08-17','SPOT',148.00,'BNP_BVAL','2026-08-17T00:00:00-04:00')"
-    )
-    conn.commit()
-    out = cash_ladder.bnp_bval_rates(conn, "2026-08-17")
-    assert out["JPY"]["rate"] == 148.0
-    assert out["JPY"]["inverted"] is True
-    assert out["JPY"]["source"] == cash_ladder.BNP_BVAL_SOURCE_LABEL
-
-
-def test_bnp_bval_rates_falls_back_to_latest_on_or_before(conn):
-    conn.execute(
-        "INSERT INTO marks VALUES "
-        "('2026-08-10','USDJPY','2026-08-10','SPOT',146.00,'BNP_BVAL','2026-08-10T00:00:00-04:00')"
-    )
-    conn.commit()
-    out = cash_ladder.bnp_bval_rates(conn, "2026-08-17")
-    assert out["JPY"]["rate"] == 146.0
-
-
-def test_bnp_bval_rates_empty_when_no_bnp_bval_mark(conn):
-    assert cash_ladder.bnp_bval_rates(conn, "2026-08-17") == {}
-
-
-# --------------------------------------------------------------------------- layout / callbacks
 def test_build_layout_has_only_date_picker_no_dropdowns():
     layout = cash_ladder.build_layout(default_date="2026-08-17")
     ids = _all_ids(layout)
@@ -448,53 +420,3 @@ def _add_blotter_trade(conn, trade_id, instrument_id, quantity, usd_amount, trad
     conn.commit()
 
 
-def test_reconciliation_panel_shows_no_snapshot_message_when_bnp_never_reported():
-    # A totally empty DB: BNP has no positions and no trades at all, so
-    # bnp_snapshot_date resolves to None -- the panel must say so plainly, not claim
-    # "no trades on either side" (which would misleadingly imply BNP was checked and
-    # found to have nothing, rather than never having reported at all).
-    conn = schema.connect(":memory:")
-    panel = cash_ladder.reconciliation_panel(conn, "2026-08-17")
-    assert isinstance(panel, dash.html.Details)
-    assert "no BNP snapshot loaded yet" in panel.children[0].children
-
-
-def test_reconciliation_panel_shows_no_trades_message_when_bnp_reported_but_empty():
-    # BNP has reported (a positions row exists), but neither side has any trades for
-    # this instrument/date -- this is the genuine "nothing to reconcile" case, distinct
-    # from "BNP never reported" above.
-    conn = schema.connect(":memory:")
-    conn.execute(
-        "INSERT INTO instruments VALUES ('CASH-USD','CASH','USD','USD',1,0,'','9999-12-31')"
-    )
-    conn.execute(
-        "INSERT INTO positions VALUES ('2026-08-17','BNP','ACC','CASH-USD','2026-08-17',"
-        "1000,1000,1,1,1000,1000,0,0,0)"
-    )
-    panel = cash_ladder.reconciliation_panel(conn, "2026-08-17")
-    assert isinstance(panel, dash.html.Details)
-    assert "no trades on either side" in panel.children[0].children
-
-
-def test_reconciliation_panel_reports_clean_agreement(conn):
-    # conn fixture already has one BNP trade (t1, USDJPY, USD leg +1,000,000). Add a
-    # matching blotter trade with the same USD notional -- should agree.
-    _add_blotter_trade(conn, "b1", "USDJPY", 1000000, 1000000)
-    panel = cash_ladder.reconciliation_panel(conn, "2026-08-17")
-    assert isinstance(panel, dash.html.Details)
-    assert "agree" in panel.children[0].children
-    assert len(panel.children) == 1  # no mismatch table appended
-
-
-def test_reconciliation_panel_flags_mismatch_with_table(conn):
-    # A blotter trade with a clearly different USD notional than the BNP side (t1's
-    # USD leg is +1,000,000) must show up as a mismatch, open by default, with a table.
-    _add_blotter_trade(conn, "b1", "USDJPY", 5000000, 5000000)
-    panel = cash_ladder.reconciliation_panel(conn, "2026-08-17")
-    assert isinstance(panel, dash.html.Details)
-    assert panel.open is True
-    assert "outside tolerance" in panel.children[0].children
-    table = panel.children[1]
-    assert isinstance(table, dash.dash_table.DataTable)
-    ids = {row["instrument_id"] for row in table.data}
-    assert ids == {"USDJPY"}

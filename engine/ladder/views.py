@@ -17,12 +17,10 @@ def ladder_table(conn: sqlite3.Connection, as_of_date: str, source: Optional[str
     """Cash ladder pivoted: one row per currency, one column per settle_date, plus
     `total` and `usd`.
 
-    Ladder rows (LEG + CASH from `cash_ladder(conn, as_of_date, source='BNP')`, i.e. the
-    'BNP' positions source -- this is a different `source` from the one this function's
-    own `source` parameter forwards to `spot_table`, see below) are summed by
-    (ccy, settle_date) across LEG and CASH kinds -- the pivot merges kinds, since the
-    display is "how much of this currency moves on this date", not a breakdown by kind
-    (use `cash_ladder` directly for the kind-level detail).
+    Ladder rows come from `cash_ladder(conn, as_of_date)` (leg-level cashflow timing
+    only -- the CASH/`positions` row was removed 2026-09-17, "no bnp fall back": it was
+    fed exclusively by the retired BNP snapshot and always empty once that stopped
+    being ingested; see `cash_ladder`'s own docstring), summed by (ccy, settle_date).
 
     Cells: local-currency amount for that (ccy, settle_date); 0.0 where a currency has
     no flow on a given date (an explicit zero, not blank/NaN -- distinguishes "no flow"
@@ -41,19 +39,19 @@ def ladder_table(conn: sqlite3.Connection, as_of_date: str, source: Optional[str
       - USD rows convert at 1.0. Currencies with no official SPOT mark (see
         engine.ladder.ladder.spot_table) get `usd = NaN` -- never an estimated rate.
 
-    ``source``: forwarded to `spot_table` (None = marks_official, the correct display
-    path; an explicit source such as 'BNP_BVAL' restricts the SPOT lookup to that one
-    raw-marks source, reconciliation only -- see CLAUDE.md "Official marks": BNP_BVAL is
-    never official). Does not affect which ladder rows are pulled: those always come
-    from `cash_ladder(conn, as_of_date, source='BNP')` (the raw PB snapshot), since
-    `cash_ladder`'s own `source` parameter selects a `positions` source (BNP vs CALC),
-    an unrelated axis.
+    ``source``: forwarded to `spot_table` (None = marks_official, the correct, official
+    display path; an explicit source such as 'BNP_BVAL' restricts the SPOT lookup to
+    that one raw-marks source, reconciliation only -- see CLAUDE.md "Official marks":
+    BNP_BVAL is never official, and this parameter is for reconciliation callers
+    exercising the real historical BNP CSV directly, never for the live app's own rate
+    path -- see `ui/tabs/cash_ladder.py`, which always calls `rates_from_marks`
+    (official SPOT only) and no longer has any BNP fallback at all).
 
     Row order: currencies with a defined `usd` sorted by |usd| descending first, then
     currencies with `usd` = NaN afterwards sorted alphabetically by `ccy` (stable order
     within each group).
     """
-    ladder = cash_ladder(conn, as_of_date, source="BNP")
+    ladder = cash_ladder(conn, as_of_date)
 
     grouped = ladder.groupby(["ccy", "settle_date"], as_index=False)["amount"].sum()
 

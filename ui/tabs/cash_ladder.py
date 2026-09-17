@@ -63,8 +63,6 @@ _WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Satur
 _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December")
 
-BNP_BVAL_SOURCE_LABEL = "BNP file rate (not Bloomberg)"
-
 TRANSPOSED_LABEL_COL = "settle_date"
 USD_EQUIVALENT_COL = "usd_equivalent"
 
@@ -160,114 +158,55 @@ def table_from_ladder(
     )
 
 
-def bnp_bval_rates(conn: sqlite3.Connection, as_of_date: str) -> dict:
-    """currency -> {rate, inverted, source, timestamp, stale} from the BNP file's own
-    BVAL SPOT marks (user decision 2026-09-15, item D). Read from `marks` directly with
-    `source = 'BNP_BVAL'` (never `marks_official`: BNP_BVAL is reconciliation-only per
-    CLAUDE.md "Official marks") for `as_of_date`, falling back to the LATEST such mark
-    on or before it. This exists only to fill the delta/ladder display when Bloomberg
-    has not written an official SPOT for a currency; it must never be used for P&L
-    (this tab has none) and never overrides an official rate -- the caller only
-    consults this for currencies missing from `rates_from_marks`."""
-    sql = (
-        "SELECT m.instrument_id, i.base_ccy, i.quote_ccy, m.value, m.as_of_date "
-        "FROM marks m JOIN instruments i USING (instrument_id) "
-        "WHERE m.mark_type = 'SPOT' AND m.source = 'BNP_BVAL' AND i.asset_class = 'FX' "
-        "AND m.as_of_date <= ? ORDER BY m.instrument_id, m.as_of_date"
-    )
-    latest: dict = {}
-    for pair, base, quote, value, snapshot_date in conn.execute(sql, [as_of_date]):
-        if "USD" not in (base, quote):
-            continue
-        latest[pair] = (base, quote, value, snapshot_date)  # ascending as_of_date: last wins
-    out = {}
-    for pair, (base, quote, value, snapshot_date) in latest.items():
-        ccy = quote if base == "USD" else base
-        out[ccy] = {"rate": float(value), "inverted": base == "USD",
-                    "source": BNP_BVAL_SOURCE_LABEL, "timestamp": snapshot_date, "stale": False}
-    return out
-
-
-FORWARD_PROXY_SOURCE_LABEL = "BNP forward proxy"
-
-
-def bnp_forward_proxy_rates(conn: sqlite3.Connection, as_of_date: str, needed: set) -> dict:
-    """currency -> {rate, inverted, source, timestamp, stale} from the BNP file's own
-    BVAL FORWARD outright, used as a spot proxy (coordinator addition 2026-09-15, item
-    5): BNP's file carries no SPOT for AUD/EUR/GBP/XAU (its Fx is 1 on those rows), so
-    `bnp_bval_rates` alone leaves every XXXUSD currency MISSING. For each currency still
-    in `needed` after the SPOT fallback, take the EARLIEST settle_date FWD_OUTRIGHT mark
-    (source BNP_BVAL) from the most recent snapshot on or before `as_of_date` -- the
-    nearest-dated forward is the closest available proxy for spot. Labelled distinctly
-    (`FORWARD_PROXY_SOURCE_LABEL`) so the caller can report it separately from the
-    plain BNP_BVAL SPOT fallback, never silently blended into "Bloomberg" or even into
-    the SPOT-fallback count."""
-    if not needed:
-        return {}
-    sql = (
-        "SELECT m.instrument_id, i.base_ccy, i.quote_ccy, m.value, m.settle_date, m.as_of_date "
-        "FROM marks m JOIN instruments i USING (instrument_id) "
-        "WHERE m.mark_type = 'FWD_OUTRIGHT' AND m.source = 'BNP_BVAL' AND i.asset_class = 'FX' "
-        "AND m.as_of_date <= ? "
-        "ORDER BY m.instrument_id, m.as_of_date DESC, m.settle_date ASC"
-    )
-    best: dict = {}  # pair -> (base, quote, value, settle_date, snapshot_date); first row per pair wins (best order)
-    for pair, base, quote, value, settle_date, snapshot_date in conn.execute(sql, [as_of_date]):
-        if pair in best:
-            continue
-        if "USD" not in (base, quote):
-            continue
-        ccy = quote if base == "USD" else base
-        if ccy not in needed:
-            continue
-        best[pair] = (base, quote, value, settle_date, snapshot_date)
-    out = {}
-    for base, quote, value, settle_date, snapshot_date in best.values():
-        ccy = quote if base == "USD" else base
-        out[ccy] = {"rate": float(value), "inverted": base == "USD",
-                    "source": FORWARD_PROXY_SOURCE_LABEL, "timestamp": snapshot_date, "stale": False}
-    return out
-
-
 def net_gross_usd(conn: sqlite3.Connection, as_of_date: str) -> dict:
     """FX-only Net USD / Gross USD (CLAUDE.md "Net USD (FX only)" / "Gross USD"), via the
-    exact same records/rates path `_render` uses for the Ladder tab (`records_from_db`
-    + `rates_from_marks`, with the BNP_BVAL SPOT fallback then the forward-outright
-    proxy) -- so a header figure for a given as_of always matches what the Ladder tab
-    would show. Coordinator addition 2026-09-15 (header compaction) so `ui.tabs.header`
-    does not need its own copy of this fallback chain. Returns
-    `{available, net, gross, reason, fallback_ccys, forward_proxy_ccys}`; `net`/`gross`
-    are only present when `available`."""
+    exact same records/rates path `_render` uses for the Ladder tab
+    (`exposure_records_from_db` + `rates_from_marks`, OFFICIAL SPOT marks only) -- so a
+    header figure for a given as_of always matches what the Ladder tab would show.
+    Coordinator addition 2026-09-15 (header compaction) so `ui.tabs.header` does not need
+    its own copy of this rates path. Returns
+    `{available, net, gross, reason, fallback_ccys, forward_proxy_ccys, commodities}`;
+    `net`/`gross` are only present when `available`.
+
+    2026-09-17 ("no bnp fall back" -- user decision, `docs/bnp-excel-removal.md`): the
+    BNP_BVAL SPOT fallback and the BNP forward-outright proxy (`bnp_bval_rates` /
+    `bnp_forward_proxy_rates`, formerly here) are REMOVED outright, not merely unused --
+    rates come from `rates_from_marks` (official SPOT, `marks_official`) only. A
+    currency with no official SPOT stays missing; `reason` names it as
+    "no official SPOT for <as_of_date>: <ccy, ...>", never substituted from any other
+    source. `fallback_ccys`/`forward_proxy_ccys` are kept in the return shape as always-
+    empty sets purely so a caller still destructuring those keys doesn't KeyError.
+
+    Sign convention (unchanged 2026-09-17 audit -- verified correct, not touched): `net`
+    is `engine.ladder.exposure.portfolio_totals`'s own `net_usd`, i.e. the net NON-USD
+    delta (+ = long foreign currency), NOT the USD position. Every caller of this
+    function (`ui/tabs/header.py::_build_figures`, `ui/tabs/exposure.py::
+    headline_numbers` / `combined_risk_table`) negates it themselves before display as
+    "Net USD, + = long USD" -- do not negate it here too, or every caller's own negation
+    would silently cancel out back to the wrong (non-USD) sign.
+
+    `commodities` (2026-09-17, "the XAU does not work well"): passed straight through
+    from `portfolio_totals` -- gold/metals (XAU etc.) are already excluded from `net`/
+    `gross` by `portfolio_totals` itself (CLAUDE.md: FX Net/Gross excludes gold), this
+    is just so a future header card can show "+ $X gold" alongside "Net USD" without
+    re-deriving it. Present (possibly empty) in both the available and unavailable
+    branches."""
     from engine.ladder.exposure_adapter import exposure_records_from_db
     from engine.ladder.exposure import build_exposure, portfolio_totals
     from data.bloomberg.live import rates_from_marks
 
     records, _unresolved = exposure_records_from_db(conn, as_of_date)
     rates = rates_from_marks(conn)
-    needed = {r["currency"] for r in records}
-    missing = needed - set(rates)
-    fallback_ccys = set()
-    if missing:
-        fb = bnp_bval_rates(conn, as_of_date)
-        for ccy in missing:
-            if ccy in fb:
-                rates[ccy] = fb[ccy]
-                fallback_ccys.add(ccy)
-    still_missing = needed - set(rates)
-    forward_proxy_ccys = set()
-    if still_missing:
-        proxy = bnp_forward_proxy_rates(conn, as_of_date, still_missing)
-        for ccy in still_missing:
-            if ccy in proxy:
-                rates[ccy] = proxy[ccy]
-                forward_proxy_ccys.add(ccy)
     result = build_exposure(records, rates)
     totals = portfolio_totals(result)
+    commodities = totals.get("commodities", [])
     if totals["missing"]:
-        return {"available": False, "reason": "no rate: " + ", ".join(sorted(totals["missing"])),
-                "fallback_ccys": fallback_ccys, "forward_proxy_ccys": forward_proxy_ccys}
+        reason = f"no official SPOT for {as_of_date}: " + ", ".join(sorted(totals["missing"]))
+        return {"available": False, "reason": reason,
+                "fallback_ccys": set(), "forward_proxy_ccys": set(), "commodities": commodities}
     return {"available": True, "net": totals["net_usd"], "gross": totals["gross_usd"],
-            "reason": "", "fallback_ccys": fallback_ccys, "forward_proxy_ccys": forward_proxy_ccys}
+            "reason": "", "fallback_ccys": set(), "forward_proxy_ccys": set(),
+            "commodities": commodities}
 
 
 def today_ny() -> str:
@@ -296,59 +235,6 @@ def message_box(message: str) -> html.P:
     """Grey status text shown in the table container instead of a DataTable (missing
     view module, missing DB, no as_of date, etc)."""
     return html.P(message, style={"color": "gray"})
-
-
-def reconciliation_panel(conn: sqlite3.Connection, as_of_date: str) -> html.Details:
-    """EOD blotter-vs-BNP cross-check (user decision 2026-09-16: the blotter is the
-    real-time primary trade source, BNP is the once-daily EOD-Hong-Kong snapshot of
-    the same book -- they should agree by end of day). New, purpose-built check, not
-    a resurrection of the retired workbook-parity Reconciliation tab -- see
-    `engine.pnl.reconcile`'s module docstring for the distinction.
-
-    Collapsed by default (`html.Details` with no `open`), since a clean book (the
-    common case) needs nothing more than the one-line summary in its `<summary>`; a
-    mismatch is still one click away, not buried.
-
-    Always compares through `engine.pnl.reconcile.bnp_snapshot_date`, not `as_of_date`
-    directly -- BNP lags the real-time blotter by at least a day, so the summary names
-    the actual date compared (which can be earlier than the Ladder tab's selected
-    date) rather than implying today's blotter trades were checked and found clean
-    when they simply were not in scope yet."""
-    from engine.pnl.reconcile import bnp_snapshot_date, reconcile_blotter_vs_bnp
-
-    snapshot_date = bnp_snapshot_date(conn, as_of_date)
-    if snapshot_date is None:
-        return html.Details(className="details details--compact", children=[
-            html.Summary("EOD reconciliation: blotter vs BNP -- no BNP snapshot loaded yet."),
-        ])
-    lag_note = "" if snapshot_date == as_of_date else f" (as of BNP's {snapshot_date} snapshot)"
-    df = reconcile_blotter_vs_bnp(conn, as_of_date)
-    if df.empty:
-        return html.Details(className="details details--compact", children=[
-            html.Summary(f"EOD reconciliation: blotter vs BNP -- no trades on either side yet{lag_note}."),
-        ])
-    mismatches = df[~df["within_tolerance"]]
-    n_ok, n_total = len(df) - len(mismatches), len(df)
-    if mismatches.empty:
-        return html.Details(className="details details--compact", children=[
-            html.Summary(f"EOD reconciliation: blotter vs BNP -- {n_ok}/{n_total} instruments agree{lag_note}."),
-        ])
-    display_cols = ["instrument_id", "blotter_usd_notional", "bnp_usd_notional", "diff_usd",
-                     "n_blotter_trades", "n_bnp_trades"]
-    table = format_ladder_frame(mismatches[display_cols], label_col="instrument_id")
-    return html.Details(className="details details--compact", open=True, children=[
-        html.Summary(
-            f"EOD reconciliation: blotter vs BNP -- {n_ok}/{n_total} agree, "
-            f"{len(mismatches)} outside tolerance{lag_note}."
-        ),
-        dash_table.DataTable(
-            id="cash-ladder-reconciliation-table",
-            columns=[{"name": c.replace("_", " ").title(), "id": c} for c in table.columns],
-            data=table.to_dict("records"),
-            style_cell={"textAlign": "right", "fontFamily": "monospace"},
-            style_header={"fontWeight": "bold"},
-        ),
-    ])
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
@@ -453,33 +339,12 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 unresolved = list(unresolved) + [
                     u for u in exposure_unresolved if u.trade_id not in seen_trade_ids
                 ]
-                # Rates: latest official SPOT marks written by the Bloomberg feed, first
-                # choice. Currencies still missing a rate fall back to the BNP file's own
-                # BVAL SPOT (user decision 2026-09-15, item D) -- never silently, and
-                # never for P&L (this tab has none).
+                # Rates: latest official SPOT marks written by the Bloomberg feed --
+                # ONLY source (2026-09-17, "no bnp fall back": the BNP_BVAL SPOT and
+                # forward-outright fallback chain formerly here is removed outright, not
+                # merely unused). A currency missing an official SPOT simply stays
+                # missing -- never substituted, never for P&L (this tab has none).
                 rates = rates_from_marks(conn)
-                needed = {r["currency"] for r in records}
-                missing = needed - set(rates)
-                fallback_ccys = set()
-                if missing:
-                    fallback = bnp_bval_rates(conn, as_of_date)
-                    for ccy in missing:
-                        if ccy in fallback:
-                            rates[ccy] = fallback[ccy]
-                            fallback_ccys.add(ccy)
-                # Still-missing currencies (item 5, coordinator addition): BNP carries no
-                # SPOT for AUD/EUR/GBP/XAU (Fx = 1 on those rows), so fall back further to
-                # the earliest-settle_date BNP_BVAL forward outright as a spot proxy.
-                # Tracked in its own set so the caller can report it distinctly from the
-                # plain SPOT fallback, never blended into one count.
-                still_missing = needed - set(rates)
-                forward_proxy_ccys = set()
-                if still_missing:
-                    proxy = bnp_forward_proxy_rates(conn, as_of_date, still_missing)
-                    for ccy in still_missing:
-                        if ccy in proxy:
-                            rates[ccy] = proxy[ccy]
-                            forward_proxy_ccys.add(ccy)
                 # Futures USD delta: engine.ladder.futures_delta.futures_usd_delta (C5
                 # wiring). The full dict (value/by_instrument/missing/reason) is passed
                 # through so exposure_section's combined risk table and futures block can
@@ -487,16 +352,22 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 # rather than a single fabricated zero.
                 from engine.ladder.futures_delta import futures_usd_delta as _futures_usd_delta
                 _fut = _futures_usd_delta(conn, as_of_date)
+                # Per-pair Position table (2026-09-17 "dollar convention" decision):
+                # engine.ladder.ladder.per_pair_delta needs the DB connection, which
+                # ui/tabs/exposure.py deliberately never touches -- fetched here and
+                # passed through as a plain DataFrame, same pattern as `_fut` above.
+                from engine.ladder.ladder import per_pair_delta as _per_pair_delta
+                _pairs = _per_pair_delta(conn, as_of_date)
                 exposure = exposure_section(records, unresolved, as_of_date, rates=rates,
                                             futures=_fut, futures_details=(_fut or {}).get("details"),
-                                            fallback_ccys=fallback_ccys,
-                                            forward_proxy_ccys=forward_proxy_ccys,
-                                            exposure_records=exposure_records)
+                                            exposure_records=exposure_records,
+                                            pair_positions=_pairs)
             except ImportError as exc:
                 exposure = message_box(f"Exposure ladder not available ({exc}).")
         finally:
             conn.close()
-        # `reconciliation_panel` (blotter vs BNP EOD check) is no longer rendered: BNP was
-        # removed as an input on 2026-09-17, so the panel could only ever say "no BNP
-        # snapshot loaded yet". The function is kept (tests, and a future second source).
+        # `reconciliation_panel` (blotter vs BNP EOD check) was deleted outright
+        # 2026-09-17 ("no bnp fall back" -- user decision, docs/bnp-excel-removal.md):
+        # it existed purely to call engine.pnl.reconcile, which compares the blotter
+        # against a BNP snapshot that no longer exists to compare against.
         return html.Div([exposure])

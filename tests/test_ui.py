@@ -32,8 +32,8 @@ def _seed(conn):
     )
     conn.execute(
         "INSERT INTO trades VALUES "
-        "('t1','BNP','USDJPY','FX_SPOT','t1','2026-08-17',1000000,147.10,"
-        "'BNPP-IPBFX-NMMF','BNP','HAHY7','trader','desc','')"
+        "('t1','XLSX','USDJPY','FX_SPOT','t1','2026-08-17',1000000,147.10,"
+        "'BNPP-IPBFX-NMMF','CPTY','HAHY7','trader','desc','')"
     )
     conn.executemany(
         "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
@@ -45,11 +45,6 @@ def _seed(conn):
     conn.execute(
         "INSERT INTO marks VALUES "
         "('2026-08-17','USDJPY','2026-08-17','SPOT',147.12,'BBG_BFXFORWARD','2026-08-17T15:00:00-04:00')"
-    )
-    conn.execute(
-        "INSERT INTO positions VALUES "
-        "('2026-08-17','BNP','BNPP-IPBFX-NMMF','USDJPY','2026-08-17',1000000,147100000,147.12,"
-        "0.0068,147120000,1000000,1000,1000,1000)"
     )
     conn.commit()
 
@@ -109,6 +104,37 @@ def test_ensure_schema_idempotent_on_existing_db(tmp_path):
     conn = sqlite3.connect(db_path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_ensure_schema_purges_legacy_bnp_data(tmp_path, capsys):
+    """2026-09-17 ("no bnp fall back"): ensure_schema also calls
+    data.ingest.schema.purge_retired_sources once per startup -- a legacy source='BNP'
+    trade and a BNP_BVAL mark left over from before this change must be gone after the
+    app's normal startup path runs, with no separate manual step."""
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO trades VALUES ('bnp-1','BNP','USDJPY','FX_FWD','bnp-1','2026-08-01',"
+        "1000000,147.0,'acc','cp','HAHY7','t','d','')"
+    )
+    conn.execute(
+        "INSERT INTO marks VALUES ('2026-08-17','USDJPY','2026-08-17','SPOT',147.10,'BNP_BVAL','t')"
+    )
+    conn.commit()
+    conn.close()
+
+    uiapp.ensure_schema(db_path)
+    out = capsys.readouterr().out
+    assert "purged retired BNP/workbook data" in out
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM trades WHERE source='BNP'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM marks WHERE source='BNP_BVAL'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1  # the seeded 'XLSX' trade survives
     finally:
         conn.close()
 
@@ -314,38 +340,6 @@ def test_header_figures_and_chart_are_separate_callbacks(tmp_path):
     assert figure_keys[0] != chart_keys[0]
     chart_cb = app.callback_map[chart_keys[0]]
     assert any(d["id"] == header.DETAILS_ID and d["property"] == "open" for d in chart_cb["inputs"])
-
-
-def test_bnp_forward_proxy_rates_uses_earliest_settle_date(tmp_path):
-    """Coordinator addition 2026-09-15, item 5: BNP carries no SPOT for AUD/EUR/GBP/XAU
-    (Fx = 1 on those rows); when even bnp_bval_rates finds nothing, the earliest-
-    settle_date BNP_BVAL forward outright from the latest snapshot on or before as_of
-    is used as a spot proxy, labelled distinctly."""
-    db_path = tmp_path / "risk.db"
-    conn = sqlite3.connect(db_path)
-    schema.create_schema(conn)
-    conn.execute(
-        "INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')"
-    )
-    # Two forward outrights on the same snapshot: the earlier settle_date must win.
-    conn.executemany(
-        "INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-        [
-            ("2026-08-17", "EURUSD", "2026-09-01", "FWD_OUTRIGHT", 1.1050, "BNP_BVAL", "2026-08-17T15:00:00-04:00"),
-            ("2026-08-17", "EURUSD", "2026-10-01", "FWD_OUTRIGHT", 1.1100, "BNP_BVAL", "2026-08-17T15:00:00-04:00"),
-        ],
-    )
-    conn.commit()
-    conn.close()
-
-    conn = uiapp.connect_readonly(db_path)
-    try:
-        out = cash_ladder.bnp_forward_proxy_rates(conn, "2026-08-18", {"EUR"})
-    finally:
-        conn.close()
-    assert out["EUR"]["rate"] == 1.1050
-    assert out["EUR"]["source"] == cash_ladder.FORWARD_PROXY_SOURCE_LABEL
-    assert out["EUR"]["inverted"] is False
 
 
 def test_no_duplicate_component_ids(tmp_path):
@@ -792,7 +786,7 @@ def test_blotter_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
                "0 other unsupported rows.")
     monkeypatch.setattr("ui.uploads.import_blotter", lambda *a, **k: summary)
     monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
-    monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "none", "trades": 2, "positions": 0})
+    monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "none", "trades": 2})
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
     result, source_line, stage_style = fn(1, contents,"blotter.csv")
@@ -865,12 +859,12 @@ def test_selected_shows_error_for_unrecognized_file(monkeypatch):
 
 
 def test_describe_source_trades_loaded():
-    assert uploads.describe_source({"as_of_date": "none", "trades": 5, "positions": 0}) == \
+    assert uploads.describe_source({"as_of_date": "none", "trades": 5}) == \
         "Loaded: 5 trades in database."
 
 
 def test_describe_source_nothing_loaded():
-    assert uploads.describe_source({"as_of_date": "none", "trades": 0, "positions": 0}) == \
+    assert uploads.describe_source({"as_of_date": "none", "trades": 0}) == \
         "No data loaded yet."
 
 

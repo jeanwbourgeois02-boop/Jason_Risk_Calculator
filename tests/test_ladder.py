@@ -1,5 +1,5 @@
 """Tests for engine/ladder (cash ladder + delta-per-currency). Real-file tests skip if
-the raw BNP CSV is absent."""
+the raw blotter CSV is absent."""
 from __future__ import annotations
 
 import math
@@ -9,63 +9,72 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from data.bloomberg.bnp_marks import load_bnp_marks
-from data.ingest import bnp, schema
-from engine.ladder import cash_ladder, delta_per_ccy, spot_table, convert_to_usd, ladder_table
+from data.ingest import blotter, schema
+from engine.ladder import (
+    cash_ladder, delta_per_ccy, spot_table, convert_to_usd, ladder_table,
+    per_pair_delta, pair_delta_totals,
+)
 
 REPO = Path(__file__).resolve().parents[1]
-RAW = REPO / "data" / "raw" / "HA_PNL_20260818.csv"
+# 2026-09-17 ("no bnp fall back", docs/bnp-excel-removal.md): the real-file fixtures
+# below used to load data/raw/HA_PNL_20260818.csv via the retired data/ingest/bnp.py.
+# BNP is no longer a trade source at all, so they now load the blotter's own reference
+# sample (the app's only trade source) via data/ingest/blotter.py instead.
+RAW = REPO / "data" / "raw" / "new_sample_trades.csv"
 AS_OF = "2026-08-17"
 
 needs_raw = pytest.mark.skipif(not RAW.exists(), reason=f"raw file absent: {RAW}")
 
 NDF_CCYS = {"BRL", "TWD", "KRW", "IDR"}
 
+# A handful of the real file's pairs, marked with synthetic non-official SPOT values so
+# `ladder_table(..., source=...)`'s reconciliation-only spot-source filter (still live,
+# generic functionality -- see `spot_table`'s docstring) has some priced and some
+# unpriced currencies to exercise, without depending on the retired BNP_BVAL extractor.
+MARKED_PAIRS = {"USDJPY": 150.0, "USDCAD": 1.35, "USDCHF": 0.88, "USDMXN": 18.5,
+                "USDTRY": 34.0, "USDSEK": 10.5}
+MARKED_CCYS = {"JPY", "CAD", "CHF", "MXN", "TRY", "SEK"}
+RECON_SOURCE = "MANUAL"
+
 
 @pytest.fixture(scope="module")
 def real_conn():
     conn = schema.connect(":memory:")
-    bnp.load(RAW, conn, as_of_date=AS_OF)
-    # Relabelled to 'XLSX' (2026-09-16, trades_official double-count fix): these tests
-    # validate cash_ladder/delta_per_ccy's aggregation math against a real, complex
-    # dataset -- they are not testing which trade *source* counts (that has its own
-    # tests, e.g. test_pnl_reconcile.py). trades_official excludes source='BNP' by
-    # design now (BNP is no longer authoritative for live trade exposure -- see
-    # data/ingest/schema.py's trades_official view), so loading the real file as
-    # 'BNP' unmodified would make every trades_official-backed query in this module
-    # see zero rows and these tests would no longer exercise the real math at all.
-    conn.execute("UPDATE trades SET source = 'XLSX'")
+    blotter.load(RAW, conn, strict=False)
     conn.commit()
     yield conn
     conn.close()
 
 
 @pytest.fixture(scope="module")
-def real_conn_with_marks():
+def real_conn_marks():
+    """Real blotter file (source already 'XLSX', trades_official-visible with no
+    relabelling needed) plus a small set of synthetic reconciliation-only SPOT marks
+    (source='MANUAL') for `ladder_table(..., source='MANUAL')`'s spot-source filter
+    (never `marks_official`). Replaces the pre-2026-09-17 fixture that loaded the
+    retired BNP file's own BNP_BVAL marks via data/bloomberg/bnp_marks.py."""
     conn = schema.connect(":memory:")
-    bnp.load(RAW, conn, as_of_date=AS_OF)
-    load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=False)
+    blotter.load(RAW, conn, strict=False)
+    for pair, value in MARKED_PAIRS.items():
+        conn.execute(
+            "INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+            (AS_OF, pair, AS_OF, "SPOT", value, RECON_SOURCE, AS_OF + "T17:00:00-04:00"),
+        )
+    conn.commit()
     yield conn
     conn.close()
 
 
-# Currencies whose only forwards in the real file are XXXUSD pairs (AUD, EUR, GBP) or
-# the metal (XAU): BNP_BVAL's Fx column is quote_ccy->USD, which is always 1.0 on an
-# XXXUSD row, so no SPOT is derivable for these ccys from the BNP file at all (see
-# data/bloomberg/bnp_marks.py::extract_bnp_marks SPOT-derivation docstring). Verified
-# empirically against the real file, not assumed.
-NO_BNP_SPOT_CCYS = {"AUD", "EUR", "GBP", "XAU"}
-
 
 # --------------------------------------------------------------------------- real file
 @needs_raw
-def test_ladder_ccys_come_from_legs_or_cash_positions(real_conn):
+def test_ladder_ccys_come_from_legs(real_conn):
+    # 2026-09-17: the ladder's CASH/`positions` column is gone (see
+    # test_cash_ladder_never_reads_positions_table below); every ccy in the ladder must
+    # be traceable to a trade_legs row.
     ladder = cash_ladder(real_conn, AS_OF)
     leg_ccys = {r[0] for r in real_conn.execute("SELECT DISTINCT ccy FROM trade_legs")}
-    cash_ccys = {r[0][len("CASH-"):] for r in
-                 real_conn.execute("SELECT DISTINCT instrument_id FROM positions WHERE instrument_id LIKE 'CASH-%'")}
-    allowed = leg_ccys | cash_ccys
-    assert set(ladder["ccy"]) <= allowed
+    assert set(ladder["ccy"]) <= leg_ccys
 
 
 @needs_raw
@@ -73,7 +82,8 @@ def test_ladder_usd_leg_amount_matches_trade_legs(real_conn):
     ladder = cash_ladder(real_conn, AS_OF)
     ladder_usd_legs = ladder[(ladder["ccy"] == "USD") & (ladder["kind"] == "LEG")]["amount"].sum()
     expected = real_conn.execute(
-        "SELECT SUM(amount) FROM trade_legs WHERE ccy = 'USD' AND settles_cash = 1 AND settle_date >= :as_of",
+        "SELECT SUM(l.amount) FROM trade_legs l JOIN trades_official t USING (trade_id) "
+        "WHERE l.ccy = 'USD' AND l.settles_cash = 1 AND l.settle_date >= :as_of AND t.trade_date <= :as_of",
         {"as_of": AS_OF},
     ).fetchone()[0]
     assert math.isclose(ladder_usd_legs, expected, abs_tol=1e-6)
@@ -207,41 +217,35 @@ def test_ladder_settle_date_boundary_is_inclusive():
     assert math.isclose(rows["amount"].iloc[0], 200.0)
 
 
-def test_cash_rows_grouped_by_ccy_settle_date_and_filtered_by_source():
+# 2026-09-17 ("no bnp fall back" -- user decision, docs/bnp-excel-removal.md): the
+# ladder's CASH-balance column (a `positions` row with instrument_id LIKE 'CASH-%',
+# source='BNP'/'CALC') was fed exclusively by the retired BNP daily snapshot -- always
+# empty once BNP stopped being ingested, so removed outright rather than left inert,
+# and the `positions` table itself is dropped from the schema. `cash_ladder` no longer
+# reads any such table and no longer takes a `source` parameter.
+def test_cash_ladder_never_reads_positions_table():
     conn = _mk_conn()
     _insert_instrument(conn, "CASH-USD", "USD", "USD", asset_class="CASH")
-    _insert_instrument(conn, "CASH-EUR", "EUR", "EUR", asset_class="CASH")
-
-    def _insert_position(as_of, source, account, instrument_id, settle_date, quantity):
-        conn.execute(
-            "INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (as_of, source, account, instrument_id, settle_date, quantity,
-             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-        )
-
-    # Multiple BNP accounts for USD on as_of: should sum to one row.
-    _insert_position(AS_OF, "BNP", "ACC1", "CASH-USD", AS_OF, 1_000_000.0)
-    _insert_position(AS_OF, "BNP", "ACC2", "CASH-USD", AS_OF, 500_000.0)
-    _insert_position(AS_OF, "BNP", "ACC3", "CASH-USD", AS_OF, -200_000.0)
-    # A CALC row for USD: must be excluded by the default source='BNP' filter.
-    _insert_position(AS_OF, "CALC", "ACC1", "CASH-USD", AS_OF, 999_999.0)
-    # A different as_of_date for EUR: must be excluded.
-    _insert_position("2026-08-16", "BNP", "ACC1", "CASH-EUR", "2026-08-16", 123.0)
     conn.commit()
 
     ladder = cash_ladder(conn, AS_OF)
-    cash_rows = ladder[ladder["kind"] == "CASH"]
-    usd_rows = cash_rows[cash_rows["ccy"] == "USD"]
-    assert len(usd_rows) == 1
-    assert usd_rows["settle_date"].iloc[0] == AS_OF
-    assert math.isclose(usd_rows["amount"].iloc[0], 1_000_000.0 + 500_000.0 - 200_000.0)
-    assert "EUR" not in set(cash_rows["ccy"])
+    assert "USD" not in set(ladder["ccy"])
+    assert ladder.empty
 
-    # source='CALC' surfaces the CALC row instead.
-    calc_ladder = cash_ladder(conn, AS_OF, source="CALC")
-    calc_usd = calc_ladder[(calc_ladder["kind"] == "CASH") & (calc_ladder["ccy"] == "USD")]
-    assert len(calc_usd) == 1
-    assert math.isclose(calc_usd["amount"].iloc[0], 999_999.0)
+    with pytest.raises(TypeError):
+        cash_ladder(conn, AS_OF, source="BNP")
+
+
+def test_cash_ladder_columns_are_leg_only():
+    conn = _mk_conn()
+    _insert_instrument(conn, "AUDUSD", "AUD", "USD")
+    _insert_trade(conn, "t1", "AUDUSD", "FX_FWD", 100.0)
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "AUD", 100.0, "2026-08-20")
+    conn.commit()
+
+    ladder = cash_ladder(conn, AS_OF)
+    assert list(ladder.columns) == ["ccy", "settle_date", "kind", "amount"]
+    assert set(ladder["kind"]) == {"LEG"}
 
 
 def test_records_from_db_settle_on_as_of_grid_vs_exposure_boundary():
@@ -479,38 +483,47 @@ def test_delta_per_ccy_fx_option_non_official_delta_mark_ignored():
 
 
 # --------------------------------------------------------------------------- ladder_table
+# 2026-09-17 ("no bnp fall back"): these four tests run against `real_conn_marks`, which
+# loads the live blotter parser's real sample data plus a small synthetic set of
+# reconciliation-only SPOT marks (`MARKED_PAIRS`/`MARKED_CCYS` above) -- `ladder_table`'s
+# own `source=` parameter is untouched (still a valid, generic reconciliation lookup
+# into the raw `marks` table, unrelated to the live app's rate path -- see
+# `ladder_table`'s docstring); only the fixture that feeds it changed, since it used to
+# derive real BNP_BVAL marks from the retired BNP CSV via data/bloomberg/bnp_marks.py.
+
+
 @needs_raw
-def test_ladder_table_each_ccy_appears_once(real_conn_with_marks):
-    ladder = cash_ladder(real_conn_with_marks, AS_OF, source="BNP")
-    table = ladder_table(real_conn_with_marks, AS_OF, source="BNP_BVAL")
+def test_ladder_table_each_ccy_appears_once(real_conn_marks):
+    ladder = cash_ladder(real_conn_marks, AS_OF)
+    table = ladder_table(real_conn_marks, AS_OF, source=RECON_SOURCE)
     assert set(table["ccy"]) == set(ladder["ccy"])
     assert table["ccy"].is_unique
 
 
 @needs_raw
-def test_ladder_table_total_matches_ladder_sum_per_ccy(real_conn_with_marks):
-    ladder = cash_ladder(real_conn_with_marks, AS_OF, source="BNP")
-    table = ladder_table(real_conn_with_marks, AS_OF, source="BNP_BVAL")
+def test_ladder_table_total_matches_ladder_sum_per_ccy(real_conn_marks):
+    ladder = cash_ladder(real_conn_marks, AS_OF)
+    table = ladder_table(real_conn_marks, AS_OF, source=RECON_SOURCE)
     expected_totals = ladder.groupby("ccy")["amount"].sum()
     for _, row in table.iterrows():
         assert math.isclose(row["total"], expected_totals[row["ccy"]], abs_tol=1e-6), row["ccy"]
 
 
 @needs_raw
-def test_ladder_table_usd_nan_exactly_for_ccys_without_bnp_spot(real_conn_with_marks):
-    table = ladder_table(real_conn_with_marks, AS_OF, source="BNP_BVAL")
+def test_ladder_table_usd_nan_exactly_for_ccys_without_bnp_spot(real_conn_marks):
+    table = ladder_table(real_conn_marks, AS_OF, source=RECON_SOURCE)
     nan_ccys = set(table.loc[table["usd"].isna(), "ccy"])
     # USD itself always converts at 1.0, never NaN.
     assert "USD" not in nan_ccys
     usd_row = table[table["ccy"] == "USD"]
     assert math.isclose(usd_row["usd"].iloc[0], usd_row["total"].iloc[0])
-    # The exact set with no derivable BNP_BVAL spot, determined empirically above.
-    assert nan_ccys == (NO_BNP_SPOT_CCYS & set(table["ccy"]))
+    # Exactly the currencies with no synthetic mark inserted by the fixture.
+    assert nan_ccys == (set(table["ccy"]) - MARKED_CCYS - {"USD"})
 
 
 @needs_raw
-def test_ladder_table_rows_with_usd_come_first_sorted_by_abs_usd_desc(real_conn_with_marks):
-    table = ladder_table(real_conn_with_marks, AS_OF, source="BNP_BVAL")
+def test_ladder_table_rows_with_usd_come_first_sorted_by_abs_usd_desc(real_conn_marks):
+    table = ladder_table(real_conn_marks, AS_OF, source=RECON_SOURCE)
     has_usd = table["usd"].notna()
     n_with = has_usd.sum()
     # all "with usd" rows precede all "without usd" rows
@@ -518,6 +531,20 @@ def test_ladder_table_rows_with_usd_come_first_sorted_by_abs_usd_desc(real_conn_
     assert not has_usd.iloc[n_with:].any()
     with_usd_abs = table.loc[has_usd, "usd"].abs().tolist()
     assert with_usd_abs == sorted(with_usd_abs, reverse=True)
+
+
+@needs_raw
+def test_ladder_table_has_no_cash_only_currency(real_conn_marks):
+    """No currency should appear in `ladder_table` solely because of a `positions` CASH
+    row any more -- every ccy present must be traceable to at least one `trade_legs`
+    row (the removed CASH column had no such backing)."""
+    ladder = cash_ladder(real_conn_marks, AS_OF)
+    leg_ccys = {r[0] for r in real_conn_marks.execute(
+        "SELECT DISTINCT l.ccy FROM trade_legs l JOIN trades_official t USING (trade_id) "
+        "WHERE l.settles_cash = 1 AND l.settle_date >= :as_of AND t.trade_date <= :as_of",
+        {"as_of": AS_OF},
+    )}
+    assert set(ladder["ccy"]) == leg_ccys
 
 
 # --------------------------------------------------------------------------- synthetic (spot source)
@@ -572,3 +599,387 @@ def test_ladder_table_columns_and_synthetic_pivot():
 
     # JPY has a defined usd and must come before AUD (no usd).
     assert list(table["ccy"]) == ["JPY", "AUD"]
+
+
+# --------------------------------------------------------------------------- item 1: dollar convention (per_pair_delta)
+# User complaint 2026-09-17: "for aud, eur and gbp - convention adjusted for dollar
+# convention - it needs to be done." Interpretation implemented (engine/ladder/ladder.py
+# per_pair_delta docstring has the full formulas): AUDUSD/EURUSD/GBPUSD/XAUUSD
+# (quote_ccy == 'USD') are quoted the opposite way round from USDJPY-style pairs
+# (base_ccy == 'USD'). `notional_base` is CLAUDE.md's own "Display notional" (sign =
+# base currency's own direction); `notional_usd` is the "dollar convention" (sign = USD
+# direction itself, i.e. the trade's own USD leg amount unchanged) -- the two sign-flip
+# relative to each other for quote_ccy == 'USD' pairs and agree for base_ccy == 'USD'
+# pairs. `move_1pct_usd` always follows `notional_base`'s sign (a 1% rise in the pair's
+# own quote benefits a positive notional_base position for every pair, by construction).
+
+def test_per_pair_delta_usdxxx_pair_no_sign_flip():
+    # USDJPY: long USD (base_ccy == 'USD') -- notional_base and notional_usd must agree.
+    conn = _mk_conn()
+    _insert_instrument(conn, "USDJPY", "USD", "JPY")
+    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", 1_000_000.0)
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "USD", 1_000_000.0, "2026-08-20")
+    _insert_leg(conn, "t1", 2, "FX_NEAR", "JPY", -150_000_000.0, "2026-08-20")
+    _insert_mark(conn, AS_OF, "USDJPY", AS_OF, "SPOT", 150.0, "BBG_BFXFORWARD")
+    conn.commit()
+
+    df = per_pair_delta(conn, AS_OF)
+    row = df[df["instrument_id"] == "USDJPY"].iloc[0]
+    assert bool(row["cross"]) is False and bool(row["commodity"]) is False
+    assert math.isclose(row["spot"], 150.0)
+    assert math.isclose(row["notional_base"], 1_000_000.0)
+    assert math.isclose(row["notional_usd"], 1_000_000.0)  # no flip: base_ccy == USD
+    assert math.isclose(row["move_1pct_usd"], 10_000.0)
+
+
+def test_per_pair_delta_xxxusd_pair_sign_flips():
+    # AUDUSD: long AUD (quote_ccy == 'USD') -- notional_base (+, bought AUD) must be the
+    # MIRROR sign of notional_usd (-, sold USD to buy that AUD): the "dollar convention"
+    # flip the user asked for.
+    conn = _mk_conn()
+    _insert_instrument(conn, "AUDUSD", "AUD", "USD")
+    _insert_trade(conn, "t1", "AUDUSD", "FX_FWD", 1_000_000.0)
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "AUD", 1_000_000.0, "2026-08-20")
+    _insert_leg(conn, "t1", 2, "FX_NEAR", "USD", -660_000.0, "2026-08-20")
+    _insert_mark(conn, AS_OF, "AUDUSD", AS_OF, "SPOT", 0.66, "BBG_BFXFORWARD")
+    conn.commit()
+
+    df = per_pair_delta(conn, AS_OF)
+    row = df[df["instrument_id"] == "AUDUSD"].iloc[0]
+    assert bool(row["cross"]) is False and bool(row["commodity"]) is False
+    assert math.isclose(row["spot"], 0.66)  # market quote, never inverted
+    assert math.isclose(row["notional_base"], 660_000.0)    # + = bought AUD (Display notional)
+    assert math.isclose(row["notional_usd"], -660_000.0)    # - = sold USD (dollar convention)
+    # 1% rise in AUDUSD benefits a long-AUD position: must use notional_base's sign, not
+    # notional_usd's (which would invert the P&L sign for this pair).
+    assert math.isclose(row["move_1pct_usd"], 6_600.0)
+
+
+def test_per_pair_delta_gbp_and_eur_also_flip_like_aud():
+    # Same check for EUR and GBP explicitly, since the user named all three by pair.
+    conn = _mk_conn()
+    for pair, base, ccy_amt, usd_amt, spot in [
+        ("EURUSD", "EUR", 2_000_000.0, -2_200_000.0, 1.10),
+        ("GBPUSD", "GBP", 500_000.0, -650_000.0, 1.30),
+    ]:
+        _insert_instrument(conn, pair, base, "USD")
+        _insert_trade(conn, f"t_{pair}", pair, "FX_FWD", ccy_amt)
+        _insert_leg(conn, f"t_{pair}", 1, "FX_NEAR", base, ccy_amt, "2026-08-20")
+        _insert_leg(conn, f"t_{pair}", 2, "FX_NEAR", "USD", usd_amt, "2026-08-20")
+        _insert_mark(conn, AS_OF, pair, AS_OF, "SPOT", spot, "BBG_BFXFORWARD")
+    conn.commit()
+
+    df = per_pair_delta(conn, AS_OF).set_index("instrument_id")
+    assert math.isclose(df.loc["EURUSD", "notional_base"], 2_200_000.0)
+    assert math.isclose(df.loc["EURUSD", "notional_usd"], -2_200_000.0)
+    assert math.isclose(df.loc["GBPUSD", "notional_base"], 650_000.0)
+    assert math.isclose(df.loc["GBPUSD", "notional_usd"], -650_000.0)
+
+
+def test_pair_delta_totals_sums_notional_usd_excluding_commodities():
+    conn = _mk_conn()
+    _insert_instrument(conn, "AUDUSD", "AUD", "USD")
+    _insert_instrument(conn, "USDJPY", "USD", "JPY")
+    _insert_instrument(conn, "XAUUSD", "XAU", "USD")
+    _insert_trade(conn, "t1", "AUDUSD", "FX_FWD", 1_000_000.0)
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "AUD", 1_000_000.0, "2026-08-20")
+    _insert_leg(conn, "t1", 2, "FX_NEAR", "USD", -660_000.0, "2026-08-20")
+    _insert_trade(conn, "t2", "USDJPY", "FX_FWD", 1_000_000.0)
+    _insert_leg(conn, "t2", 1, "FX_NEAR", "USD", 1_000_000.0, "2026-08-20")
+    _insert_leg(conn, "t2", 2, "FX_NEAR", "JPY", -150_000_000.0, "2026-08-20")
+    _insert_trade(conn, "t3", "XAUUSD", "FX_FWD", 500.0)
+    _insert_leg(conn, "t3", 1, "FX_NEAR", "XAU", 500.0, "2026-08-20")
+    _insert_leg(conn, "t3", 2, "FX_NEAR", "USD", -1_750_000.0, "2026-08-20")
+    conn.commit()
+
+    df = per_pair_delta(conn, AS_OF)
+    totals = pair_delta_totals(df)
+    # AUD -660,000 + USDJPY +1,000,000 = 340,000; XAU's -1,750,000 must be excluded.
+    assert totals["pairs"] == 2
+    assert math.isclose(totals["net_usd"], -660_000.0 + 1_000_000.0)
+    assert math.isclose(totals["gross_usd"], 660_000.0 + 1_000_000.0)
+
+
+def test_per_pair_delta_empty_when_no_open_pairs():
+    conn = _mk_conn()
+    df = per_pair_delta(conn, AS_OF)
+    assert df.empty
+    assert list(df.columns) == ["instrument_id", "base_ccy", "quote_ccy", "cross",
+                                "commodity", "spot", "notional_base", "notional_usd",
+                                "move_1pct_usd"]
+    totals = pair_delta_totals(df)
+    assert totals == {"net_usd": 0.0, "gross_usd": 0.0, "pairs": 0}
+
+
+# --------------------------------------------------------------------------- item 2: XAU (gold)
+# User complaint 2026-09-17: "the XAU does not work well." XAUUSD (base_ccy='XAU',
+# quote_ccy='USD') must show its own line (ounces, USD notional at spot) but must be
+# EXCLUDED from FX Net USD / Gross USD (CLAUDE.md: "Gold and equity futures are reported
+# separately"), which previously summed it in like any other currency.
+
+def test_portfolio_totals_excludes_xau_from_fx_net_gross():
+    from engine.ladder.exposure import build_exposure, portfolio_totals
+
+    def rec(tid, date, ccy, local):
+        return {"trade_id": tid, "settlement_date": date, "book": "HA", "currency": ccy, "local_amount": local}
+
+    def rate(value):
+        return {"rate": value, "inverted": False, "source": "TEST", "timestamp": "t", "stale": False}
+
+    recs = [rec("G1", "2026-10-01", "XAU", 500.0), rec("G1", "2026-10-01", "USD", -1_750_000.0),
+            rec("A1", "2026-10-01", "AUD", 1_000_000.0)]
+    res = build_exposure(recs, {"XAU": rate(3500.0), "AUD": rate(0.66)})
+
+    xau_row = res.summary.set_index("currency").loc["XAU"]
+    assert math.isclose(xau_row["local_delta"], 500.0)          # ounces, not USD
+    assert math.isclose(xau_row["usd_delta"], 1_750_000.0)      # USD notional at spot
+
+    totals = portfolio_totals(res)
+    # AUD only (660,000): XAU's +1,750,000 must not be in net/gross.
+    assert math.isclose(totals["net_usd"], 660_000.0)
+    assert math.isclose(totals["gross_usd"], 660_000.0)
+    assert totals["missing"] == []
+    assert len(totals["commodities"]) == 1
+    assert totals["commodities"][0]["currency"] == "XAU"
+    assert math.isclose(totals["commodities"][0]["usd_delta"], 1_750_000.0)
+    assert totals["commodities"][0]["status"] == "OK"
+
+
+def test_portfolio_totals_missing_xau_rate_does_not_block_fx_totals():
+    from engine.ladder.exposure import build_exposure, portfolio_totals
+
+    def rec(tid, date, ccy, local):
+        return {"trade_id": tid, "settlement_date": date, "book": "HA", "currency": ccy, "local_amount": local}
+
+    def rate(value):
+        return {"rate": value, "inverted": False, "source": "TEST", "timestamp": "t", "stale": False}
+
+    recs = [rec("G1", "2026-10-01", "XAU", 500.0), rec("A1", "2026-10-01", "AUD", 1_000_000.0)]
+    res = build_exposure(recs, {"AUD": rate(0.66)})  # no XAU rate at all
+    totals = portfolio_totals(res)
+    assert math.isclose(totals["net_usd"], 660_000.0)
+    assert totals["missing"] == []  # a missing gold rate never blocks the FX-only totals
+    assert len(totals["commodities"]) == 1
+    assert math.isnan(totals["commodities"][0]["usd_delta"])
+    assert totals["commodities"][0]["status"] == "MISSING_RATE"
+
+
+def test_per_pair_delta_xauusd_flagged_commodity_not_cross():
+    conn = _mk_conn()
+    _insert_instrument(conn, "XAUUSD", "XAU", "USD")
+    _insert_trade(conn, "t1", "XAUUSD", "FX_FWD", 500.0)
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "XAU", 500.0, "2026-08-20")
+    _insert_leg(conn, "t1", 2, "FX_NEAR", "USD", -1_750_000.0, "2026-08-20")
+    _insert_mark(conn, AS_OF, "XAUUSD", AS_OF, "SPOT", 3500.0, "BBG_BFXFORWARD")
+    conn.commit()
+
+    df = per_pair_delta(conn, AS_OF)
+    row = df[df["instrument_id"] == "XAUUSD"].iloc[0]
+    assert bool(row["commodity"]) is True
+    assert bool(row["cross"]) is False  # XAUUSD has a USD leg like any other XXXUSD pair
+    assert math.isclose(row["notional_base"], 1_750_000.0)
+    assert math.isclose(row["notional_usd"], -1_750_000.0)
+
+
+def test_ui_exposure_combined_risk_frame_tags_xau_as_commodity_kind():
+    from engine.ladder.exposure import build_exposure
+    from ui.tabs.exposure import combined_risk_frame
+
+    def rec(tid, date, ccy, local):
+        return {"trade_id": tid, "settlement_date": date, "book": "HA", "currency": ccy, "local_amount": local}
+
+    def rate(value):
+        return {"rate": value, "inverted": False, "source": "TEST", "timestamp": "t", "stale": False}
+
+    recs = [rec("G1", "2026-10-01", "XAU", 500.0), rec("A1", "2026-10-01", "AUD", 1_000_000.0)]
+    res = build_exposure(recs, {"XAU": rate(3500.0), "AUD": rate(0.66)})
+    frame = combined_risk_frame(res, scenarios={})
+    xau_row = frame[frame["name"] == "XAU"].iloc[0]
+    aud_row = frame[frame["name"] == "AUD"].iloc[0]
+    assert xau_row["kind"] == "commodity"
+    assert aud_row["kind"] == "currency"
+
+
+# --------------------------------------------------------------------------- item 3: EURSEK split
+# User complaint 2026-09-17: "the eursek has not been split well - needs to be broken
+# down into sek and eur." Audited engine/ladder/ladder.py (_DELTA_SQL, cash_ladder),
+# engine/ladder/exposure_adapter.py (records_from_db) and engine/ladder/exposure.py
+# (build_exposure): all three already key off trade_legs.ccy directly, so a EURSEK
+# forward's two legs were already landing as independent 'EUR' and 'SEK' rows -- these
+# tests pin that behaviour end-to-end (DB -> delta_per_ccy / exposure_adapter) so it
+# cannot silently regress, and confirm the two currencies convert to USD off their OWN
+# pair spots (EURUSD, USDSEK), never a EURSEK spot (which converts EUR<->SEK, not to
+# USD, and must never be required for either currency to appear).
+
+def test_eursek_splits_into_eur_and_sek_never_one_pair_line():
+    from engine.ladder.exposure_adapter import exposure_records_from_db
+
+    conn = _mk_conn()
+    _insert_instrument(conn, "EURSEK", "EUR", "SEK")
+    _insert_trade(conn, "t1", "EURSEK", "FX_FWD", 1_000_000.0)
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "EUR", 1_000_000.0, "2026-09-25")
+    _insert_leg(conn, "t1", 2, "FX_NEAR", "SEK", -11_000_000.0, "2026-09-25")
+    conn.commit()
+
+    # 1. The per-currency delta table: never a single 'EURSEK' line, never dropped for
+    #    lack of a EURSEK->USD conversion (delta itself needs no spot at all).
+    delta = delta_per_ccy(conn, AS_OF)
+    assert "EURSEK" not in set(delta["ccy"])
+    eur_row = delta[delta["ccy"] == "EUR"]
+    sek_row = delta[delta["ccy"] == "SEK"]
+    assert len(eur_row) == 1 and len(sek_row) == 1
+    assert math.isclose(eur_row["delta"].iloc[0], 1_000_000.0)
+    assert math.isclose(sek_row["delta"].iloc[0], -11_000_000.0)
+    # No EURUSD/USDSEK marks yet: both delta_usd are NaN (never estimated from a EURSEK
+    # cross rate), not silently dropped rows.
+    assert math.isnan(eur_row["delta_usd"].iloc[0])
+    assert math.isnan(sek_row["delta_usd"].iloc[0])
+
+    # 2. The exposure_adapter record set (feeds the UI grid and build_exposure): two
+    #    leg records, currencies EUR and SEK, never attributed only to EUR.
+    records, unresolved = exposure_records_from_db(conn, AS_OF)
+    assert unresolved == []
+    t1_ccys = {r["currency"] for r in records if r["trade_id"] == "t1"}
+    assert t1_ccys == {"EUR", "SEK"}
+
+    # 3. Each currency's OWN pair spot (EURUSD, USDSEK) -- not a EURSEK spot -- lets
+    #    delta_per_ccy convert them independently and correctly.
+    _insert_instrument(conn, "EURUSD", "EUR", "USD")
+    _insert_instrument(conn, "USDSEK", "USD", "SEK")
+    _insert_mark(conn, AS_OF, "EURUSD", AS_OF, "SPOT", 1.10, "BBG_BFXFORWARD")
+    _insert_mark(conn, AS_OF, "USDSEK", AS_OF, "SPOT", 10.50, "BBG_BFXFORWARD")
+    conn.commit()
+    delta2 = delta_per_ccy(conn, AS_OF)
+    eur_row2 = delta2[delta2["ccy"] == "EUR"]
+    sek_row2 = delta2[delta2["ccy"] == "SEK"]
+    assert math.isclose(eur_row2["delta_usd"].iloc[0], 1_000_000.0 * 1.10)
+    assert math.isclose(sek_row2["delta_usd"].iloc[0], -11_000_000.0 / 10.50)
+
+
+def test_eursek_cash_ladder_rows_are_per_currency_not_per_pair():
+    conn = _mk_conn()
+    _insert_instrument(conn, "EURSEK", "EUR", "SEK")
+    _insert_trade(conn, "t1", "EURSEK", "FX_FWD", 1_000_000.0)
+    _insert_leg(conn, "t1", 1, "FX_NEAR", "EUR", 1_000_000.0, "2026-09-25")
+    _insert_leg(conn, "t1", 2, "FX_NEAR", "SEK", -11_000_000.0, "2026-09-25")
+    conn.commit()
+
+    ladder = cash_ladder(conn, AS_OF)
+    assert "EURSEK" not in set(ladder["ccy"])
+    assert {"EUR", "SEK"} <= set(ladder["ccy"])
+    eur_leg = ladder[(ladder["ccy"] == "EUR") & (ladder["kind"] == "LEG")]
+    sek_leg = ladder[(ladder["ccy"] == "SEK") & (ladder["kind"] == "LEG")]
+    assert math.isclose(eur_leg["amount"].iloc[0], 1_000_000.0)
+    assert math.isclose(sek_leg["amount"].iloc[0], -11_000_000.0)
+
+
+def test_eursek_build_exposure_both_legs_priced_independently():
+    """engine.ladder.exposure.build_exposure level (already covered for EURSEK in
+    tests/test_exposure.py::test_cross_currency_trade_no_usd_leg_priced_at_spot); pinned
+    here too since it is the function ui/tabs/exposure.py actually renders from."""
+    from engine.ladder.exposure import build_exposure
+
+    recs = [
+        {"trade_id": "X1", "settlement_date": "2026-09-25", "book": "HA", "currency": "EUR", "local_amount": 1_000_000.0},
+        {"trade_id": "X1", "settlement_date": "2026-09-25", "book": "HA", "currency": "SEK", "local_amount": -11_000_000.0},
+    ]
+    rates = {
+        "EUR": {"rate": 1.10, "inverted": False, "source": "TEST", "timestamp": "t", "stale": False},
+        "SEK": {"rate": 10.50, "inverted": True, "source": "TEST", "timestamp": "t", "stale": False},
+    }
+    res = build_exposure(recs, rates)
+    assert set(res.summary["currency"]) == {"EUR", "SEK"}
+    assert "EURSEK" not in set(res.summary["currency"])
+    eur = res.summary.set_index("currency").loc["EUR"]
+    sek = res.summary.set_index("currency").loc["SEK"]
+    assert math.isclose(eur["usd_delta"], 1_100_000.0)
+    assert math.isclose(sek["usd_delta"], -11_000_000.0 / 10.50)
+
+
+# --------------------------------------------------------------------------- ui/tabs/exposure.py: Position table
+def test_pair_position_frame_labels_cross_and_commodity_and_keeps_spot_precision():
+    from ui.tabs.exposure import pair_position_frame
+
+    df = pd.DataFrame([
+        {"instrument_id": "AUDUSD", "base_ccy": "AUD", "quote_ccy": "USD", "cross": False,
+         "commodity": False, "spot": 0.66, "notional_base": 660_000.0, "notional_usd": -660_000.0,
+         "move_1pct_usd": 6_600.0},
+        {"instrument_id": "EURSEK", "base_ccy": "EUR", "quote_ccy": "SEK", "cross": True,
+         "commodity": False, "spot": 11.05, "notional_base": 1_100_000.0, "notional_usd": 1_100_000.0,
+         "move_1pct_usd": 11_000.0},
+        {"instrument_id": "XAUUSD", "base_ccy": "XAU", "quote_ccy": "USD", "cross": False,
+         "commodity": True, "spot": float("nan"), "notional_base": 1_750_000.0,
+         "notional_usd": -1_750_000.0, "move_1pct_usd": 17_500.0},
+    ])
+    frame = pair_position_frame(df)
+    labels = dict(zip(df["instrument_id"], frame["pair"]))
+    assert labels["AUDUSD"] == "AUDUSD"
+    assert labels["EURSEK"] == "EURSEK (cross)"
+    assert labels["XAUUSD"] == "XAUUSD (metal)"
+    # spot kept at 6 dp, never thousands-rounded to an integer (0.66 -> "0" would lose
+    # all information for a sub-1.0 quote).
+    aud_spot = frame.loc[frame["pair"] == "AUDUSD", "spot"].iloc[0]
+    assert aud_spot == "0.660000"
+    xau_spot = frame.loc[frame["pair"] == "XAUUSD (metal)", "spot"].iloc[0]
+    assert xau_spot == ""  # NaN spot renders blank, never a fabricated rate
+
+
+def test_pair_position_frame_empty_and_none_render_placeholder_not_crash():
+    from ui.tabs.exposure import pair_position_frame, pair_position_table
+
+    assert pair_position_frame(pd.DataFrame()).empty
+    div_none = pair_position_table(None)
+    div_empty = pair_position_table(pd.DataFrame())
+    assert "Position (per pair, dollar convention)" in str(div_none)
+    assert "No open FX forward/spot/swap pairs" in str(div_none)
+    assert "No open FX forward/spot/swap pairs" in str(div_empty)
+
+
+def test_pair_position_table_renders_both_notional_columns_labelled():
+    from ui.tabs.exposure import pair_position_table
+
+    df = pd.DataFrame([
+        {"instrument_id": "AUDUSD", "base_ccy": "AUD", "quote_ccy": "USD", "cross": False,
+         "commodity": False, "spot": 0.66, "notional_base": 660_000.0, "notional_usd": -660_000.0,
+         "move_1pct_usd": 6_600.0},
+    ])
+    section = pair_position_table(df)
+    names = [c["name"] for c in section.children[1].columns]
+    assert "Notional (base ccy)" in names
+    assert "USD notional (USD sign: + long USD)" in names
+    row = section.children[1].data[0]
+    assert row["notional_base"] == "660,000"
+    assert row["notional_usd"] == "(660,000)"
+
+
+def test_net_gross_usd_passes_through_commodities(tmp_path):
+    from data.ingest import schema as ingest_schema
+    from ui.tabs.cash_ladder import net_gross_usd
+
+    conn = ingest_schema.connect(str(tmp_path / "risk.db"))
+    _insert_instrument(conn, "AUDUSD", "AUD", "USD")
+    _insert_instrument(conn, "XAUUSD", "XAU", "USD")
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("g1", "XLSX", "XAUUSD", "FX_FWD", "g1", AS_OF, 500.0, 3500.0,
+         "A", "C", "S", "T", "synthetic", ""),
+    )
+    _insert_leg(conn, "g1", 1, "FX_NEAR", "XAU", 500.0, "2026-08-20")
+    _insert_leg(conn, "g1", 2, "FX_NEAR", "USD", -1_750_000.0, "2026-08-20")
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", AS_OF, 1_000_000.0, 0.66,
+         "A", "C", "S", "T", "synthetic", ""),
+    )
+    _insert_leg(conn, "a1", 1, "FX_NEAR", "AUD", 1_000_000.0, "2026-08-20")
+    _insert_leg(conn, "a1", 2, "FX_NEAR", "USD", -660_000.0, "2026-08-20")
+    _insert_mark(conn, AS_OF, "AUDUSD", AS_OF, "SPOT", 0.66, "BBG_BFXFORWARD")
+    _insert_mark(conn, AS_OF, "XAUUSD", AS_OF, "SPOT", 3500.0, "BBG_BFXFORWARD")
+    conn.commit()
+
+    result = net_gross_usd(conn, AS_OF)
+    assert result["available"] is True
+    assert math.isclose(result["net"], 660_000.0)  # AUD only; XAU excluded
+    assert len(result["commodities"]) == 1
+    assert result["commodities"][0]["currency"] == "XAU"
+    assert math.isclose(result["commodities"][0]["usd_delta"], 1_750_000.0)

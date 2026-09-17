@@ -178,11 +178,15 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
     table below, futures alone in its own "Delta non-forward" total row there -- this
     top card just no longer repeats them.
     Unavailable with the engine's own reason only when a rate or a futures mark is
-    genuinely missing -- with the BNP_BVAL fallback (ui.tabs.cash_ladder.bnp_bval_rates)
-    filling in every currency on this PC, that should not happen in practice, but the
-    Unavailable path is kept for the day a currency has neither an official nor a
-    fallback rate. A note under the card names how many currencies are on fallback,
-    once, so callers don't need to derive it from the risk table's '*' marks again."""
+    genuinely missing. `fallback_ccys`/`forward_proxy_ccys` are always empty in the live
+    app since 2026-09-17 ("no bnp fall back" -- `ui.tabs.cash_ladder`'s BNP_BVAL SPOT/
+    forward-outright fallback was removed outright, not just left unused, so a caller
+    there never populates these sets any more); the parameters and the '*'/caption
+    machinery below are kept only as a generic, currently-unused labelling mechanism
+    (still exercised directly by tests/test_ui_ladder.py) for a future non-official
+    fallback source, should one ever exist again. A note under the card names how many
+    currencies are on fallback, once, so callers don't need to derive it from the risk
+    table's '*' marks again."""
     from engine.ladder.exposure import portfolio_totals
     futures = futures or DEFAULT_FUTURES
     fallback_ccys = fallback_ccys or set()
@@ -379,10 +383,12 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
     engine's per-date USD equivalent and, on the summary rows, the portfolio totals.
     Every value comes from build_exposure / portfolio_totals / ladder_usd_equivalent.
 
-    `fallback_ccys` (user decision 2026-09-15, item D): currencies priced from the BNP
-    file's own BNP_BVAL SPOT (see `ui.tabs.cash_ladder.bnp_bval_rates`) because no
-    official Bloomberg SPOT exists for `as_of`. Adds a 'Rate source' summary row so the
-    fallback is visible in place, never silent."""
+    `fallback_ccys` (user decision 2026-09-15, item D; the BNP_BVAL source it originally
+    labelled was removed outright 2026-09-17, "no bnp fall back" -- the live app never
+    populates this set any more, see `headline_numbers`'s docstring): currencies priced
+    from a non-official fallback rate, were one ever supplied. Adds a 'Rate source'
+    summary row so a fallback would be visible in place, never silent, if this is ever
+    wired to a source again."""
     fallback_ccys = fallback_ccys or set()
     from engine.ladder.exposure import ladder_usd_equivalent, portfolio_totals
     summary = summary_frame(result, records, sort=sort, scope=SCOPE_ALL)
@@ -496,7 +502,16 @@ def combined_risk_frame(result, futures: Optional[dict] = None,
     none today -- see module docstring), gets `None` (rendered blank, distinct from an
     explicit zero) for that scenario cell. `_unavailable` carries the reason string when
     non-empty; `usd_delta`/`move_1pct`/every scenario cell are then meaningless and the
-    renderer replaces them with a single Unavailable label."""
+    renderer replaces them with a single Unavailable label.
+
+    A commodity currency (XAU etc., `engine.ladder.exposure.COMMODITY_CCYS`) still gets
+    its own row here -- oz `usd_delta` shown exactly like any other currency -- but is
+    tagged `kind="commodity"` instead of `"currency"` (2026-09-17, "the XAU does not
+    work well"): CLAUDE.md reports gold separately from FX Net/Gross, and
+    `portfolio_totals` (which computes this frame's own totals row) already excludes it
+    from the sums; the distinct `kind` is only so the renderer can style/caption it as
+    "shown but not counted" rather than have it look like an ordinary FX row."""
+    from engine.ladder.exposure import COMMODITY_CCYS
     futures = futures or DEFAULT_FUTURES
     scenarios = scenarios or {}
     futures_pct_by_scenario = futures_pct_by_scenario or {}
@@ -511,7 +526,8 @@ def combined_risk_frame(result, futures: Optional[dict] = None,
     for _, r in result.summary.iterrows():
         ccy, usd = r["currency"], r["usd_delta"]
         label = ccy + " *" if ccy in fallback_ccys else ccy
-        row = {RISK_LABEL_COL: label, "kind": "currency"}
+        kind = "commodity" if ccy in COMMODITY_CCYS else "currency"
+        row = {RISK_LABEL_COL: label, "kind": kind}
         if pd.isna(usd):
             row["usd_delta"], row["move_1pct"] = None, None
             row["_unavailable"] = status_msg.get(ccy, "no rate")
@@ -555,9 +571,11 @@ def combined_risk_table(result, futures: Optional[dict] = None,
     """The combined risk table plus its Net USD / Gross USD totals (docs/BUILD_PLAN.md
     "Reorder the Ladder tab", item 1). Net excludes futures; Gross adds |futures value|.
     Either total is Unavailable (never a fabricated number) if any currency lacks a rate
-    or the futures total is NaN. Currencies priced from the BNP_BVAL fallback (item D)
-    are marked with a trailing '*' in the name column; see the caption this function's
-    caller adds and the 'Rate source' row in the currency ladder grid below it."""
+    or the futures total is NaN. Currencies priced from a non-official fallback rate
+    (`fallback_ccys`, item D -- always empty from the live app since 2026-09-17, "no
+    bnp fall back"; see `exposure_section`'s docstring) would be marked with a trailing
+    '*' in the name column; see the caption this function's caller adds and the 'Rate
+    source' row in the currency ladder grid below it."""
     from engine.ladder.exposure import portfolio_totals
     futures = futures or DEFAULT_FUTURES
     scenarios = scenarios if scenarios is not None else {}
@@ -566,7 +584,7 @@ def combined_risk_table(result, futures: Optional[dict] = None,
 
     display_rows = []
     for _, row in frame.iterrows():
-        out = {RISK_LABEL_COL: row[RISK_LABEL_COL]}
+        out = {RISK_LABEL_COL: row[RISK_LABEL_COL], "kind": row["kind"]}
         if row["_unavailable"]:
             label = _unavailable_label(row["_unavailable"])
             out["usd_delta"] = label
@@ -603,9 +621,24 @@ def combined_risk_table(result, futures: Optional[dict] = None,
     else:
         gross_text = format_amount(totals["gross_usd"] + abs(fut_value))
     display_rows.append({RISK_LABEL_COL: "Net USD delta, FX only (+ = long USD)", "usd_delta": net_text,
-                         "move_1pct": "", **{name: "" for name in scenario_names}})
+                         "move_1pct": "", "kind": "total", **{name: "" for name in scenario_names}})
     display_rows.append({RISK_LABEL_COL: "Gross delta (incl. |futures|)", "usd_delta": gross_text,
-                         "move_1pct": "", **{name: "" for name in scenario_names}})
+                         "move_1pct": "", "kind": "total", **{name: "" for name in scenario_names}})
+
+    commodities = totals.get("commodities") or []
+    commodity_caption = None
+    if commodities:
+        parts = []
+        for c in commodities:
+            oz = format_amount(c["local_delta"])
+            usd = (_unavailable_label(c["status"]) if pd.isna(c["usd_delta"])
+                  else format_amount(c["usd_delta"]))
+            parts.append(f"{c['currency']} {oz} oz, {usd} USD notional at spot")
+        commodity_caption = html.P(
+            "Gold/metals (excluded from FX Net/Gross USD above, shown on their own "
+            "row in the table): " + "; ".join(parts),
+            className="section-kicker",
+        )
 
     # Scenario headers wrap on two lines when long (user decision 2026-09-15, item 3);
     # a plain string name lets Dash wrap it itself once whiteSpace is 'normal' below --
@@ -633,9 +666,17 @@ def combined_risk_table(result, futures: Optional[dict] = None,
         style_data_conditional=_sign_styles(["usd_delta", "move_1pct"] + scenario_names) + [
             {"if": {"filter_query": "{" + RISK_LABEL_COL + "} contains 'Net USD' || {" + RISK_LABEL_COL + "} contains 'Gross USD'"},
              "fontWeight": "700", "borderTop": "2px solid #1f2933"},
+            # Gold/metals (XAU etc.): shown on their own row like any currency, but
+            # excluded from the Net/Gross totals above (2026-09-17, "the XAU does not
+            # work well" -- CLAUDE.md reports gold separately from FX Net/Gross USD).
+            # Distinct, muted styling so it reads as "informational, not counted".
+            {"if": {"filter_query": "{kind} = 'commodity'"}, "backgroundColor": "#fbf3e0", "fontStyle": "italic"},
         ],
     )
-    return html.Div(className="section", children=[html.H4("Risk and scenarios"), table])
+    children = [html.H4("Risk and scenarios"), table]
+    if commodity_caption is not None:
+        children.append(commodity_caption)
+    return html.Div(className="section", children=children)
 
 
 # ------------------------------------------------------------------ 5c. open futures block
@@ -691,6 +732,96 @@ def futures_table(futures: Optional[dict] = None, details: Optional[Dict[str, di
     )
 
 
+# ------------------------------------------------------------------ 5d. per-pair Position (dollar convention)
+PAIR_TABLE_ID = "exposure-pair-table"
+PAIR_LABEL_COL = "pair"
+PAIR_DISPLAY_COLUMNS = ["spot", "notional_base", "notional_usd", "move_1pct_usd"]
+
+# 2026-09-17 user decision ("for aud, eur and gbp - convention adjusted for dollar
+# convention - it needs to be done"): renders engine.ladder.ladder.per_pair_delta, one
+# row per open FX pair, with BOTH notional sign conventions shown side by side and
+# explicitly labelled -- see that function's module-level docstring in engine/ladder/
+# ladder.py for the exact formulas and the reasoning for each. Data comes from the
+# caller (ui/tabs/cash_ladder.py, which has the DB connection); this module only formats.
+
+
+def pair_position_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Format `engine.ladder.ladder.per_pair_delta` output for display. `spot` keeps
+    6 dp (a thousands-rounded USD-style format would destroy a sub-1.0 quote like
+    AUDUSD 0.66); the two notional columns and the 1%-move use the shared `format_amount`
+    like every other USD figure on this tab. A cross pair is suffixed "(cross)", a
+    commodity pair (XAUUSD) "(metal)", so the two special cases documented in
+    per_pair_delta's docstring are visible in the table itself, not just in a caption."""
+    if df.empty:
+        return pd.DataFrame(columns=[PAIR_LABEL_COL] + PAIR_DISPLAY_COLUMNS)
+
+    def _label(r) -> str:
+        if r["commodity"]:
+            return r["instrument_id"] + " (metal)"
+        if r["cross"]:
+            return r["instrument_id"] + " (cross)"
+        return r["instrument_id"]
+
+    out = pd.DataFrame({
+        PAIR_LABEL_COL: df.apply(_label, axis=1),
+        "spot": df["spot"].map(lambda v: "" if pd.isna(v) else f"{v:.6f}"),
+        "notional_base": df["notional_base"].map(format_amount),
+        "notional_usd": df["notional_usd"].map(format_amount),
+        "move_1pct_usd": df["move_1pct_usd"].map(format_amount),
+    })
+    return out
+
+
+def pair_position_table(df: Optional[pd.DataFrame]) -> html.Div:
+    """"Position" table (CLAUDE.md: "the sheet's Position", per-pair delta grouped by
+    instrument_id), FX_SPOT/FX_FWD/FX_SWAP only (see per_pair_delta's scope note).
+    `df` is `engine.ladder.ladder.per_pair_delta`'s own output, or None/empty when the
+    caller has no DB access yet (e.g. an import error) -- rendered as a plain message,
+    never a missing table."""
+    if df is None or df.empty:
+        return html.Div(className="section", children=[
+            html.H4("Position (per pair, dollar convention)"),
+            html.P("No open FX forward/spot/swap pairs for this as-of date.", className="section-kicker"),
+        ])
+    frame = pair_position_frame(df)
+    columns = ([{"name": "Pair", "id": PAIR_LABEL_COL}, {"name": "Spot (market quote)", "id": "spot"},
+               {"name": "Notional (base ccy)", "id": "notional_base"},
+               {"name": "USD notional (USD sign: + long USD)", "id": "notional_usd"},
+               {"name": "1% P&L (USD)", "id": "move_1pct_usd"}])
+    table = dash_table.DataTable(
+        id=PAIR_TABLE_ID,
+        columns=columns,
+        data=frame.to_dict("records"),
+        fixed_rows={},
+        style_table=_TABLE_STYLE,
+        style_cell={**_MONO, "minWidth": "150px", "width": "150px", "maxWidth": "220px"},
+        style_cell_conditional=[
+            {"if": {"column_id": PAIR_LABEL_COL}, "textAlign": "left", "fontWeight": "600",
+             "minWidth": "150px", "width": "150px"},
+        ],
+        style_header={**_HEAD, "whiteSpace": "normal", "height": "auto", "lineHeight": "14px",
+                     "textAlign": "center", "verticalAlign": "bottom"},
+        style_header_conditional=[{"if": {"column_id": PAIR_LABEL_COL}, "textAlign": "left"}],
+        style_data_conditional=_sign_styles(["notional_base", "notional_usd", "move_1pct_usd"]),
+    )
+    note = html.P(
+        "“Notional (base ccy)” is signed by the base currency's own direction "
+        "(the xlsx / CLAUDE.md “Display notional” convention: + = bought the "
+        "base currency). “USD notional” is signed by the USD direction itself "
+        "(+ = long USD, the “dollar convention”): identical to the base-ccy "
+        "column for USDJPY-style pairs (base_ccy = USD), sign-flipped for AUDUSD/EURUSD/"
+        "GBPUSD/XAUUSD-style pairs (quote_ccy = USD) -- buying the base currency there "
+        "means selling USD. “1% P&L” always follows the base-ccy sign, so long "
+        "AUDUSD gains when AUDUSD rises. A cross pair (cross, no USD leg, e.g. EURSEK) "
+        "prices both notional columns off the base currency's own USD spot alone -- the "
+        "quote currency's own exposure (e.g. SEK) stays fully visible, independently "
+        "converted, in the currency table above; it is never merged into one EURSEK "
+        "line here or there.",
+        className="section-kicker",
+    )
+    return html.Div(className="section", children=[html.H4("Position (per pair, dollar convention)"), table, note])
+
+
 # ------------------------------------------------------------------ section
 def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
                      rates: Dict[str, dict] | None = None,
@@ -699,7 +830,8 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
                      futures_details: Optional[Dict[str, dict]] = None,
                      fallback_ccys: Optional[set] = None,
                      forward_proxy_ccys: Optional[set] = None,
-                     exposure_records: Optional[List[dict]] = None) -> html.Div:
+                     exposure_records: Optional[List[dict]] = None,
+                     pair_positions: Optional[pd.DataFrame] = None) -> html.Div:
     """Ladder tab body per the user's 2026-09-15 "Reorder the Ladder tab" decision
     (items 1-2, superseding the same-day C-split layout below): three headline cards,
     then three tables in this order -- (a) the currency ladder grid with its summary
@@ -710,15 +842,16 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     else is rendered on this tab (snapshot cards, metadata line, legend, alternative
     views and the settlement-only ladder are retired, not moved).
 
-    `rates` is whatever the marks table holds (see data.bloomberg.live.rates_from_marks
-    plus `ui.tabs.cash_ladder.bnp_bval_rates` / `bnp_forward_proxy_rates` merged in by
-    the caller for currencies on fallback); None/empty means every currency is MISSING.
-    `futures` is the dict from `engine.ladder.futures_delta.futures_usd_delta` (or
-    DEFAULT_FUTURES). `fallback_ccys` is the set priced from the BNP_BVAL SPOT fallback
-    (item D); `forward_proxy_ccys` (coordinator addition, item 5) is the set priced from
-    the earliest-settle_date BNP_BVAL forward outright when even that SPOT is missing
-    (AUD/EUR/GBP/XAU on this file). Both are marked '*' in the risk table -- a caller
-    only needs to distinguish them in the headline caption's counts, never silently.
+    `rates` is whatever the marks table holds -- `data.bloomberg.live.rates_from_marks`
+    (official SPOT, `marks_official`) only; None/empty means every currency is MISSING.
+    2026-09-17 ("no bnp fall back" -- user decision): the caller (`ui/tabs/
+    cash_ladder.py`) no longer merges in any BNP-sourced fallback rate at all, so
+    `fallback_ccys`/`forward_proxy_ccys` are always empty in practice now -- the
+    parameters and the '*'-in-the-risk-table / "Rate source" row machinery below are
+    kept as a generic, currently-dormant labelling mechanism (still directly exercised
+    by tests/test_ui_ladder.py) rather than removed, in case a non-official fallback
+    source is ever wired back in. `futures` is the dict from
+    `engine.ladder.futures_delta.futures_usd_delta` (or DEFAULT_FUTURES).
 
     `exposure_records` (optional): a second record set built with `settle_date > as_of`
     (engine.ladder.exposure_adapter.exposure_records_from_db), used only for the
@@ -726,7 +859,15 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     `records` (`settle_date >= as_of`) still drives the grid display (`combined_table`)
     unchanged -- a leg settling exactly on `as_of` is cash that moves today (still shown
     in the grid) but carries no delta by close (excluded from Net/Gross and the risk
-    table). Defaults to `records` when not supplied, for backward compatibility."""
+    table). Defaults to `records` when not supplied, for backward compatibility.
+
+    `pair_positions` (optional, 2026-09-17 "dollar convention" decision): the DataFrame
+    from `engine.ladder.ladder.per_pair_delta(conn, as_of_date)`, supplied by the caller
+    (which owns the DB connection -- this module never touches the DB itself). Renders a
+    fourth table, "Position (per pair, dollar convention)", after the risk table. None
+    (the default) renders that table's own "no open pairs" message rather than omitting
+    the section, so its presence in the layout never depends on whether the caller
+    remembered to pass it."""
     from engine.ladder.exposure import build_exposure
     from engine.pnl.stress import load_scenarios, futures_pct_by_scenario
     rates = rates or {}
@@ -748,4 +889,5 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
         html.H4("Open futures"),
         futures_table(futures, futures_details),
         combined_risk_table(exposure_result, futures, scenarios, futures_pct_by_scenario(scenarios), all_fallback),
+        pair_position_table(pair_positions),
     ])

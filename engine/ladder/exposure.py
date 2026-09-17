@@ -45,6 +45,18 @@ SUMMARY_COLUMNS = ["currency", "fx_rate", "local_delta", "usd_delta",
 CONTRIBUTION_COLUMNS = ["settlement_date", "currency", "trade_id", "book", "local_amount"]
 STATUS_COLUMNS = ["currency", "status", "message"]
 
+# Troy-ounce metals that travel through this module as an ordinary "currency" (an
+# XAUUSD leg's ccy is 'XAU', instruments.base_ccy = 'XAU' per CLAUDE.md) but are not FX:
+# CLAUDE.md "Net USD (FX only) ... Gross USD ... Gold and equity futures are reported
+# separately" (user complaint 2026-09-17, "the XAU does not work well" -- gold was being
+# summed into FX Net/Gross like any other currency). `result.summary` / `result.ladder`
+# still carry XAU as its own row/column (oz local_delta, USD notional at spot as
+# usd_delta) -- nothing here drops it -- only `portfolio_totals`'s FX-only totals
+# exclude it, same treatment as the USD row itself, just for a different reason (USD is
+# excluded because it would be self-referential; a commodity is excluded because
+# CLAUDE.md explicitly reports it apart from FX).
+COMMODITY_CCYS = frozenset({"XAU", "XAG", "XPT", "XPD"})
+
 
 @dataclass(frozen=True)
 class ExposureResult:
@@ -59,22 +71,38 @@ class ExposureResult:
         return c[mask].reset_index(drop=True)
 
 
-def portfolio_totals(result: "ExposureResult") -> dict:
-    """Portfolio-level aggregates of the per-currency summary. Net = sum of non-USD
-    usd_delta, Gross = sum of |non-USD usd_delta| (the USD currency row is excluded so
-    a USD leg is not double-counted as its own "FX exposure"). If any currency lacks a
-    rate the USD totals are NaN and `missing` names it; nothing is substituted. No P&L
-    field here -- this is a delta table, not a ledger."""
+def portfolio_totals(result: "ExposureResult", *, commodity_ccys: frozenset = COMMODITY_CCYS) -> dict:
+    """Portfolio-level aggregates of the per-currency summary. Net = sum of non-USD,
+    non-commodity usd_delta, Gross = sum of |non-USD, non-commodity usd_delta| (the USD
+    currency row is excluded so a USD leg is not double-counted as its own "FX
+    exposure"; `commodity_ccys`, default `COMMODITY_CCYS` = {XAU, XAG, XPT, XPD}, are
+    excluded because CLAUDE.md reports gold/metals separately from FX Net/Gross -- see
+    `commodities` below, not because they are self-referential). If any (non-commodity)
+    currency lacks a rate the FX totals are NaN and `missing` names it; nothing is
+    substituted. A commodity missing a rate never blocks the FX totals -- it is surfaced
+    only in `commodities`. No P&L field here -- this is a delta table, not a ledger.
+
+    `commodities`: one dict per commodity currency actually present in the summary,
+    `{"currency", "local_delta" (e.g. troy ounces), "usd_delta" (NaN if no rate),
+    "status"}` -- so a caller can render "XAU: 482 oz, $1,688,659" on its own line
+    without it ever entering the FX totals above."""
     s = result.summary
-    missing = sorted(s.loc[s["usd_delta"].isna(), "currency"]) if not s.empty else []
     if s.empty:
-        return {"net_usd": 0.0, "gross_usd": 0.0, "currencies": 0, "missing": []}
-    fx_only = s.loc[s["currency"] != "USD"]
+        return {"net_usd": 0.0, "gross_usd": 0.0, "currencies": 0, "missing": [], "commodities": []}
+    is_commodity = s["currency"].isin(commodity_ccys)
+    fx_only = s.loc[(s["currency"] != "USD") & ~is_commodity]
+    missing = sorted(fx_only.loc[fx_only["usd_delta"].isna(), "currency"])
+    commodities = [
+        {"currency": row["currency"], "local_delta": row["local_delta"],
+         "usd_delta": row["usd_delta"], "status": row["status"]}
+        for _, row in s.loc[is_commodity].iterrows()
+    ]
     return {
         "net_usd": float(fx_only["usd_delta"].sum(skipna=False)),
         "gross_usd": float(fx_only["usd_delta"].abs().sum(skipna=False)),
-        "currencies": int(len(s)),
+        "currencies": int(len(s)),  # unchanged meaning: total currencies with any exposure (incl. USD/commodities)
         "missing": missing,
+        "commodities": commodities,
     }
 
 
@@ -171,7 +199,14 @@ def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,
         fx = float("nan")
         source = timestamp = ""
         if entry is None:
-            status, msg = "MISSING_RATE", f"no market-data rate for {ccy}; USD delta not computed"
+            # 2026-09-17 ("no bnp fall back" -- user decision): reworded from "no
+            # market-data rate" -- this module only ever receives official SPOT rates
+            # (rates_from_marks, marks_official) from its callers now, never a BNP
+            # fallback, so "no official SPOT" is the accurate reason. This function is
+            # date-agnostic (records/rates only), so the caller (which does know
+            # as_of_date) may append it, e.g. ui/tabs/cash_ladder.py::net_gross_usd's
+            # "no official SPOT for {as_of_date}: {ccys}".
+            status, msg = "MISSING_RATE", f"no official SPOT for {ccy}; USD delta not computed"
         else:
             fx = usd_per_local(entry)
             source, timestamp = str(entry["source"]), str(entry["timestamp"])

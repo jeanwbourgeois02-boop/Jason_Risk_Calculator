@@ -8,7 +8,6 @@ expiry date, as value_book does. A future without a mark makes the total unavail
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
 
 from engine.pnl.valuation import _mark_at
 
@@ -21,14 +20,13 @@ GROUP BY t.instrument_id, i.multiplier, l.settle_date
 """
 
 
-def futures_usd_delta(conn: sqlite3.Connection, as_of: str,
-                      marks_source: Optional[str] = None) -> dict:
+def futures_usd_delta(conn: sqlite3.Connection, as_of: str) -> dict:
     """{'value': float or NaN, 'by_instrument': {id: usd_delta}, 'missing': [ids], 'reason': str,
     'details': {id: {'contracts', 'multiplier', 'price', 'expiry', 'source'}}} (price None when missing)."""
     rows = conn.execute(_OPEN_FUTURES_SQL, {"as_of": as_of}).fetchall()
     by_instrument, missing, details = {}, [], {}
     for instrument_id, contracts, multiplier, expiry in rows:
-        hit = _mark_at(conn, instrument_id, expiry, "FUTURE_PX", as_of, marks_source)
+        hit = _mark_at(conn, instrument_id, expiry, "FUTURE_PX", as_of)
         details[instrument_id] = {"contracts": float(contracts), "multiplier": float(multiplier),
                                   "price": None if hit is None else float(hit[0]), "expiry": expiry,
                                   "source": "" if hit is None else hit[1]}

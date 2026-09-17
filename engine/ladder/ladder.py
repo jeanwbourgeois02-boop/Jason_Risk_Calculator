@@ -2,13 +2,24 @@
 ladder row) and "Aggregate delta per currency" SQL.
 
 All queries are parameterised (no f-string interpolation of dates) and read only from
-`trade_legs`, `positions` and `marks_official`. Dependency-light: sqlite3 + pandas.
+`trade_legs` and `marks_official`. Dependency-light: sqlite3 + pandas.
+
+2026-09-17 ("no bnp fall back" -- user decision, `docs/bnp-excel-removal.md`): the
+ladder's CASH-balance column (a `positions` row with `instrument_id LIKE 'CASH-%'`)
+was fed exclusively by the BNP daily snapshot; BNP is no longer ingested by the app at
+all, so that column was always empty (inert dead weight), never a real cash balance.
+Dropped outright rather than left inert -- see `cash_ladder`'s docstring. The cash
+ladder is now, and only ever needs to be, the pure `trade_legs` cashflow-timing view
+CLAUDE.md's "Six tabs as views" describes: "cashflow timing and delta exposure only;
+no cash-balance rows".
 """
 from __future__ import annotations
 
 import sqlite3
 
 import pandas as pd
+
+from engine.ladder.exposure import COMMODITY_CCYS
 
 # ------------------------------------------------------------------------- cash ladder
 _LEG_SQL = """
@@ -18,46 +29,28 @@ WHERE l.settles_cash = 1 AND l.settle_date >= :as_of AND t.trade_date <= :as_of
 GROUP BY l.ccy, l.settle_date
 """
 
-_CASH_POSITION_SQL = """
-SELECT instrument_id, settle_date, SUM(quantity) AS quantity
-FROM positions
-WHERE instrument_id LIKE 'CASH-%' AND as_of_date = :as_of AND source = :source
-GROUP BY instrument_id, settle_date
-"""
 
+def cash_ladder(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
+    """One row per (ccy, settle_date): SUM(trade_legs.amount) where settles_cash = 1
+    AND settle_date >= as_of_date AND trade_date <= as_of_date (CLAUDE.md "Six tabs as
+    views" -> Cash ladder). Columns: ccy, settle_date, kind, amount. Sorted by ccy,
+    settle_date.
 
-def cash_ladder(conn: sqlite3.Connection, as_of_date: str, source: str = "BNP") -> pd.DataFrame:
-    """One row per (ccy, settle_date, kind).
-
-    LEG rows: SUM(trade_legs.amount) grouped by (ccy, settle_date) where
-    settles_cash = 1 AND settle_date >= as_of_date (CLAUDE.md "Six tabs as views" ->
-    Cash ladder). CASH rows: `positions` rows with instrument_id LIKE 'CASH-%',
-    as_of_date = :as_of and source = :source (default 'BNP'), SUMmed and GROUPed BY
-    (instrument_id, settle_date) so the real file's multiple per-account CASH-<CCY> rows
-    (e.g. 6 separate CASH-USD rows, one per account, on 2026-08-17) collapse to one row
-    per (ccy, settle_date). The `source` filter defaults to 'BNP' so CALC rows the P&L
-    engine writes to `positions` later (recomputed net positions) are never
-    double-counted alongside the raw PB snapshot; pass source='CALC' explicitly to see
-    those instead. ccy = the instrument_id's '<CCY>' suffix, settle_date = as_of_date,
-    amount = quantity. CASH and LEG rows for the same (ccy, settle_date) are kept as
-    separate rows (never merged) via the `kind` column, since a CASH position row and a
-    forward's cash-settling leg are conceptually different things even when they land on
-    the same date. Columns: ccy, settle_date, kind, amount. Sorted by ccy, settle_date.
+    No CASH/`positions` row any more (removed 2026-09-17, "no bnp fall back" -- see
+    module docstring): the only thing that ever wrote a `positions` row with
+    `instrument_id LIKE 'CASH-%'` was the retired BNP daily snapshot, so that branch
+    always returned zero rows once BNP stopped being ingested. The `source` parameter
+    (which used to pick 'BNP' vs 'CALC' `positions` rows) is gone entirely -- this is
+    now purely the leg-level cashflow-timing view. `kind` is kept as a column, always
+    'LEG', only because `tests/test_trades_official.py` (data-ingest's lane, off-limits
+    here) still filters on it; safe for a future pass to drop once that test is updated
+    -- flagged, not done here to avoid breaking a lane this agent cannot edit.
     """
     legs = pd.read_sql_query(_LEG_SQL, conn, params={"as_of": as_of_date})
     legs["kind"] = "LEG"
-
-    pos = pd.read_sql_query(
-        _CASH_POSITION_SQL, conn, params={"as_of": as_of_date, "source": source}
-    )
-    pos["ccy"] = pos["instrument_id"].str.replace("^CASH-", "", regex=True)
-    pos["amount"] = pos["quantity"]
-    pos["kind"] = "CASH"
-    pos = pos[["ccy", "settle_date", "kind", "amount"]]
-
-    out = pd.concat([legs[["ccy", "settle_date", "kind", "amount"]], pos], ignore_index=True)
-    out = out.sort_values(["ccy", "settle_date", "kind"]).reset_index(drop=True)
-    return out
+    return legs[["ccy", "settle_date", "kind", "amount"]].sort_values(
+        ["ccy", "settle_date"]
+    ).reset_index(drop=True)
 
 
 # ------------------------------------------------------------------------- delta per ccy
@@ -240,3 +233,159 @@ def convert_to_usd(ladder: pd.DataFrame, spot: pd.DataFrame) -> pd.DataFrame:
     out = ladder.copy()
     out["amount_usd"] = out.apply(lambda r: r["amount"] * _rate(r["ccy"]), axis=1)
     return out
+
+
+# ------------------------------------------------------------------- per-pair Position
+# CLAUDE.md "Aggregate delta per currency": "Per-pair delta (the sheet's "Position") is
+# the same union grouped by t.instrument_id in USD-notional terms." This implements
+# that, extended per the user's 2026-09-17 "dollar convention" instruction ("for aud,
+# eur and gbp - convention adjusted for dollar convention - it needs to be done"):
+# AUDUSD/EURUSD/GBPUSD/NZDUSD/XAUUSD (quote_ccy == 'USD') are quoted the OPPOSITE way
+# round from USDJPY-style pairs (base_ccy == 'USD'), so a single "USD notional" number
+# is ambiguous unless the sign convention is named. This function returns BOTH:
+#
+#   - `notional_base`: CLAUDE.md's own "Display notional" (the xlsx convention) -- USD
+#     notional signed by the BASE currency's own direction (+ = bought base), i.e.
+#     sign(base leg) x |USD leg| exactly as CLAUDE.md states. Equal to the USD leg
+#     itself when base_ccy == 'USD' (no sign flip: the base leg IS the USD leg); the
+#     mirror-image sign of the USD leg when quote_ccy == 'USD' (long AUD, i.e. base
+#     leg > 0, is short USD, i.e. USD/quote leg < 0 -- notional_base takes the base
+#     leg's sign, +, over the USD leg's own sign, -).
+#   - `notional_usd`: the "dollar convention" -- USD notional signed by the USD
+#     direction itself (+ = long USD). This is simply the trade's own USD leg amount,
+#     unchanged (trade_legs.amount is already "+ = receive/long" in that leg's own
+#     currency, so the USD leg's amount IS already USD-direction-signed with no
+#     transformation needed). Identical to `notional_base` when base_ccy == 'USD';
+#     sign-flipped relative to `notional_base` when quote_ccy == 'USD' -- this is the
+#     "dollar convention" adjustment the user asked for.
+#   - `spot`: the pair's own official SPOT mark exactly as quoted (never inverted), e.g.
+#     AUDUSD 0.66, USDJPY 150, EURSEK ~11.05 -- read directly off marks_official keyed
+#     on the pair's own instrument_id. This is independent of, and never derived from,
+#     the ccy->USD conversion `spot_table` performs for crosses below.
+#   - `move_1pct_usd` = `notional_base` x 0.01, NOT `notional_usd` x 0.01: a 1% RISE in
+#     the pair's own quoted price benefits a position with positive `notional_base` by
+#     construction for every pair (long AUDUSD gains when AUDUSD rises; long USDJPY
+#     gains when USDJPY rises) -- using the USD-direction-signed `notional_usd` here
+#     would invert the sign of the P&L for every quote_ccy == 'USD' pair.
+#   - `cross` (bool): neither leg is USD (e.g. EURSEK). There is then no USD leg and no
+#     distinct "USD direction" to speak of, so both `notional_base` and `notional_usd`
+#     fall back to the SAME number -- the base currency's own leg converted at ITS OWN
+#     ccy->USD spot (e.g. EUR's own EURUSD rate from `spot_table`, never a EURSEK rate,
+#     which converts EUR/SEK to each other, not to USD). NaN if that spot is missing
+#     (never estimated). This single per-pair number intentionally does NOT capture the
+#     quote currency's own exposure (e.g. SEK) -- that remains fully visible, as its own
+#     independent, correctly-converted row, only in the per-CURRENCY delta table
+#     (`delta_per_ccy` above / `cash_ladder`); a EURSEK forward must never be reduced to
+#     one currency line there (user's separate 2026-09-17 complaint, "the eursek has not
+#     been split well") -- this per-pair table is an addition, not a replacement.
+#
+# Scope: FX_SPOT / FX_FWD / FX_SWAP only (matches the xlsx workbook's "All FX trades"
+# sheet). FUTURE is excluded (see futures_delta.py, its own module, its own Position
+# concept -- contracts x multiplier x price, not a currency pair). FX_OPTION is excluded
+# (CLAUDE.md "Options tab placement": options live in the Blotter's own grouped
+# trade summary, not this Position table). Delta convention throughout: settle_date >
+# as_of (mirrors `_DELTA_SQL` / `futures_delta.py`), not the cash ladder grid's `>=`.
+_PAIR_LEG_SQL = """
+SELECT t.instrument_id, i.base_ccy, i.quote_ccy, l.ccy, SUM(l.amount) AS amount
+FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
+WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND l.settle_date > :as_of
+GROUP BY t.instrument_id, i.base_ccy, i.quote_ccy, l.ccy
+"""
+
+_PAIR_SPOT_SQL = """
+SELECT instrument_id, value
+FROM marks_official
+WHERE mark_type = 'SPOT' AND as_of_date = :as_of AND settle_date = :as_of
+"""
+
+PAIR_COLUMNS = ["instrument_id", "base_ccy", "quote_ccy", "cross", "commodity", "spot",
+                "notional_base", "notional_usd", "move_1pct_usd"]
+
+
+def _signed_magnitude(magnitude: float, sign_of: float) -> float:
+    """abs(magnitude) with the sign of `sign_of`; 0.0 if `sign_of` is exactly 0 (a
+    fully-netted base leg carries no directional sign to borrow)."""
+    if sign_of > 0:
+        return abs(magnitude)
+    if sign_of < 0:
+        return -abs(magnitude)
+    return 0.0
+
+
+def per_pair_delta(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
+    """One row per open FX pair (instrument_id): `PAIR_COLUMNS` above. Open = any
+    FX_SPOT/FX_FWD/FX_SWAP trade with a leg settling after as_of_date (delta
+    convention). Sorted by |notional_base| descending. Empty DataFrame (right columns,
+    zero rows) when there are no open FX pairs.
+    """
+    legs = pd.read_sql_query(_PAIR_LEG_SQL, conn, params={"as_of": as_of_date})
+    if legs.empty:
+        return pd.DataFrame(columns=PAIR_COLUMNS)
+
+    pair_spot_raw = pd.read_sql_query(_PAIR_SPOT_SQL, conn, params={"as_of": as_of_date})
+    pair_spot = dict(zip(pair_spot_raw["instrument_id"], pair_spot_raw["value"]))
+
+    ccy_spot = spot_table(conn, as_of_date)
+    ccy_spot_map = dict(zip(ccy_spot["ccy"], ccy_spot["spot"]))
+
+    rows = []
+    for (instrument_id, base_ccy, quote_ccy), grp in legs.groupby(
+        ["instrument_id", "base_ccy", "quote_ccy"], sort=False
+    ):
+        amounts = dict(zip(grp["ccy"], grp["amount"]))
+        base_amt = float(amounts.get(base_ccy, 0.0))
+        quote_amt = float(amounts.get(quote_ccy, 0.0))
+        cross = "USD" not in (base_ccy, quote_ccy)
+
+        if quote_ccy == "USD":
+            usd_leg = quote_amt
+            notional_base = _signed_magnitude(usd_leg, base_amt)
+            notional_usd = usd_leg
+        elif base_ccy == "USD":
+            usd_leg = base_amt
+            notional_base = usd_leg
+            notional_usd = usd_leg
+        else:
+            rate = ccy_spot_map.get(base_ccy, float("nan"))
+            notional_base = base_amt * rate
+            notional_usd = notional_base
+
+        commodity = base_ccy in COMMODITY_CCYS or quote_ccy in COMMODITY_CCYS
+        rows.append({
+            "instrument_id": instrument_id, "base_ccy": base_ccy, "quote_ccy": quote_ccy,
+            "cross": cross, "commodity": commodity, "spot": pair_spot.get(instrument_id, float("nan")),
+            "notional_base": notional_base, "notional_usd": notional_usd,
+            "move_1pct_usd": notional_base * 0.01 if pd.notna(notional_base) else float("nan"),
+        })
+
+    df = pd.DataFrame(rows, columns=PAIR_COLUMNS)
+    df = df.assign(_abs=df["notional_base"].abs()).sort_values(
+        "_abs", ascending=False, kind="mergesort", na_position="last"
+    ).drop(columns="_abs").reset_index(drop=True)
+    return df
+
+
+def pair_delta_totals(df: pd.DataFrame) -> dict:
+    """Net/Gross USD summed over `per_pair_delta`'s own `notional_usd` column (the
+    "dollar convention" total, +1 for USDXXX pairs / -1 for XXXUSD pairs, matching
+    CLAUDE.md's "Net USD (FX only)" sign rule applied per pair instead of per currency).
+    Commodity pairs (XAUUSD etc., `commodity` column) are excluded from this total for
+    the same reason `engine.ladder.exposure.portfolio_totals` excludes them from FX
+    Net/Gross -- CLAUDE.md reports gold separately -- but still returned in `df` itself
+    for their own row in the table.
+
+    This is a genuinely DIFFERENT number from `engine.ladder.exposure.portfolio_totals`
+    net_usd/gross_usd (negated) whenever a cross is open: a cross contributes only its
+    base currency's own USD-converted view here (see per_pair_delta's docstring), while
+    portfolio_totals independently captures BOTH legs of a cross (e.g. EUR and SEK) via
+    the per-currency delta table. Prefer portfolio_totals for the headline Net/Gross USD
+    cards; this is the per-pair table's own total row only. NaN if any (non-commodity)
+    pair's notional_usd is NaN (never estimated, never silently dropped)."""
+    if df.empty:
+        return {"net_usd": 0.0, "gross_usd": 0.0, "pairs": 0}
+    fx_only = df.loc[~df["commodity"]] if "commodity" in df.columns else df
+    return {
+        "net_usd": float(fx_only["notional_usd"].sum(skipna=False)),
+        "gross_usd": float(fx_only["notional_usd"].abs().sum(skipna=False)),
+        "pairs": int(len(fx_only)),
+    }
