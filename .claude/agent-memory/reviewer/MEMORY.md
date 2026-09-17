@@ -8,3 +8,4 @@
 - [Rates-pricer port review](review-findings-rates-pricer.md) — 2026-09-15 IRS/QuantLib port: no criticals, ownership clean, sign chain verified, 1 minor DDL-duplication warning
 - [Broad repo review 2026-09-16](review-findings-broad-2026-09-16.md) — post-BUILD_PLAN.md pass: CRITICAL delta >= vs > conflation in exposure_adapter.py; ladder.py now dead code for UI
 - [Upload review 2026-09-16, 2 passes](review-findings-upload-blotter-2026-09-16.md) — pass1 dual-format then pass2 blotter-only pivot; no criticals either pass; item 59 gap confirmed real
+- [Rates-vol review](review-findings-rates-vol.md) — 2026-09-17 swaption/cap/SABR/Bermudan HW pricer (Phase 6 options_calc merge): no criticals, sign/DV01/marks_official all clean

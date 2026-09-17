@@ -2357,3 +2357,470 @@ def test_vol_marketdata_module_imports_without_blpapi():
     import data.bloomberg.vol_marketdata as vmd
     importlib.reload(vmd)
     assert callable(vmd.vol_ticker)
+
+
+# =========================================================================== rates_vol_marketdata.py
+RATE_VOL_FIXTURE = REPO / "data" / "bloomberg" / "fixtures" / "rate_vol_snapshot_v1.json"
+
+
+def _only_vol_type(currencies, vol_type, instrument=None):
+    """Filter a {ccy: CcyRateVolSnapshot} mapping down to one vol_type (and optionally
+    one instrument) before writing -- rate_vol_quotes' primary key does not include
+    vol_type (see module "Known schema quirk"), so writing both LOGNORMAL and NORMAL
+    quotes for the same (ccy, instrument, expiry, underlying_tenor, source) in one call
+    means only the last-written vol_type survives; tests that need a specific vol_type's
+    grid intact stage that vol_type alone (optionally scoped to one instrument, so a
+    second filtered write can patch just that instrument's rows without disturbing rows
+    already staged for the other instrument -- instrument IS part of the primary key,
+    so the two never collide with each other)."""
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    return {
+        ccy: rvm.CcyRateVolSnapshot(
+            ccy=snap.ccy, index=snap.index, as_of=snap.as_of,
+            quotes=[
+                q for q in snap.quotes
+                if q.vol_type == vol_type and (instrument is None or q.instrument == instrument)
+            ],
+        )
+        for ccy, snap in currencies.items()
+    }
+
+
+def test_rate_vol_ticker_construction():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    # Task's own worked example: 1Y expiry x 10Y underlying tenor.
+    assert rvm.rate_vol_ticker("USD", "SWAPTION", "1Y", "10Y", "LOGNORMAL") == "USSV0110 Curncy"
+    assert rvm.rate_vol_ticker("USD", "SWAPTION", "1Y", "10Y", "NORMAL") == "USSN0110 Curncy"
+    assert rvm.rate_vol_ticker("EUR", "SWAPTION", "1Y", "10Y", "LOGNORMAL") == "EUSV0110 Curncy"
+    assert rvm.rate_vol_ticker("GBP", "SWAPTION", "1Y", "10Y", "LOGNORMAL") == "BPSV0110 Curncy"
+
+    # sub-year expiry uses the letter code, normalises case
+    assert rvm.rate_vol_ticker("usd", "swaption", "1m", "10y", "lognormal") == "USSVA10 Curncy"
+    assert rvm.rate_vol_ticker("USD", "SWAPTION", "3M", "30Y", "LOGNORMAL") == "USSVC30 Curncy"
+    assert rvm.rate_vol_ticker("USD", "SWAPTION", "6M", "2Y", "NORMAL") == "USSNF02 Curncy"
+
+    # cap ticker: expiry code only, no underlying-tenor axis
+    assert rvm.rate_vol_ticker("USD", "CAP", "1Y", "", "LOGNORMAL") == "USCV01 Curncy"
+    assert rvm.rate_vol_ticker("USD", "CAP", "1M", "", "NORMAL") == "USCNA Curncy"
+
+    with pytest.raises(rvm.TickerMapError):
+        rvm.rate_vol_ticker("XXX", "SWAPTION", "1Y", "10Y", "LOGNORMAL")
+    with pytest.raises(rvm.TickerMapError):
+        rvm.rate_vol_ticker("USD", "SWAPTION", "1Y", "10Y", "BOGUS")
+    with pytest.raises(rvm.TickerMapError):
+        rvm.rate_vol_ticker("USD", "SWAPTION", "1Y", "", "LOGNORMAL")  # underlying_tenor required
+    with pytest.raises(rvm.TickerMapError):
+        rvm.rate_vol_ticker("USD", "BOND", "1Y", "10Y", "LOGNORMAL")
+
+
+def test_tenor_to_years():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    assert math.isclose(rvm.tenor_to_years("1M"), 1 / 12)
+    assert math.isclose(rvm.tenor_to_years("3M"), 0.25)
+    assert math.isclose(rvm.tenor_to_years("1Y"), 1.0)
+    assert math.isclose(rvm.tenor_to_years("30Y"), 30.0)
+    with pytest.raises(ValueError):
+        rvm.tenor_to_years("bogus")
+
+
+def test_ensure_rate_vol_quotes_table_idempotent():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    conn = sqlite3.connect(":memory:")
+    rvm.ensure_rate_vol_quotes_table(conn)
+    rvm.ensure_rate_vol_quotes_table(conn)  # must not raise the second time
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "rate_vol_quotes" in tables
+
+
+def test_rate_vol_file_source_get_quotes_and_round_trip_write():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    src = rvm.RateVolFileSource(RATE_VOL_FIXTURE)
+    assert src.name() == "RateVolFileSource(test-fixture-synthetic)"
+
+    result = src.get_rate_vol_quotes(["USD", "EUR"], as_of=date(2026, 9, 17))
+    assert not result.diagnostics
+    assert set(result.currencies) == {"USD", "EUR"}
+
+    usd = result.currencies["USD"]
+    assert usd.index == "SOFR"
+    node = [q for q in usd.quotes if q.instrument == "SWAPTION" and q.expiry_tenor == "1Y"
+            and q.underlying_tenor == "10Y" and q.vol_type == "LOGNORMAL"]
+    assert len(node) == 1
+    assert node[0].ticker == "USSV0110 Curncy"
+
+    conn = sqlite3.connect(":memory:")
+    # Stage LOGNORMAL only for this round trip -- see _only_vol_type docstring: writing
+    # both vol_types for the same node/source collides on rate_vol_quotes' primary key.
+    lognormal_only = _only_vol_type(result.currencies, "LOGNORMAL")
+    n = rvm.write_rate_vol_quotes(conn, lognormal_only, as_of_date="2026-09-17", source="BBG_BDP")
+    assert n == sum(len(s.quotes) for s in lognormal_only.values())
+
+    rows = conn.execute(
+        "SELECT as_of_date, ccy, \"index\", instrument, expiry_tenor, underlying_tenor, "
+        "quote_type, strike_offset_bp, value, vol_type, ticker, field, source, snapped_at "
+        "FROM rate_vol_quotes WHERE ccy = 'USD' AND instrument = 'SWAPTION' "
+        "AND expiry_tenor = '1Y' AND underlying_tenor = '10Y' AND vol_type = 'LOGNORMAL'"
+    ).fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row[0] == "2026-09-17"
+    assert row[1] == "USD"
+    assert row[2] == "SOFR"
+    assert row[6] == "ATM"
+    assert row[7] == 0.0
+    assert row[10] == "USSV0110 Curncy"
+    assert row[11] == "PX_LAST"
+    assert row[12] == "BBG_BDP"
+    assert row[13].startswith("2026-09-17T17:00:00")  # snapped_at: 17:00 America/New_York
+
+
+def test_write_rate_vol_quotes_is_idempotent_via_insert_or_replace():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    conn = sqlite3.connect(":memory:")
+    src = rvm.RateVolFileSource(RATE_VOL_FIXTURE)
+    result = src.get_rate_vol_quotes(["USD"], as_of=date(2026, 9, 17))
+    n1 = rvm.write_rate_vol_quotes(conn, result, as_of_date="2026-09-17", source="BBG_BDP")
+    n2 = rvm.write_rate_vol_quotes(conn, result, as_of_date="2026-09-17", source="BBG_BDP")
+    assert n1 == n2
+    count = conn.execute("SELECT COUNT(*) FROM rate_vol_quotes").fetchone()[0]
+    # NOTE: rate_vol_quotes' primary key does not include vol_type (see module
+    # docstring "Known schema quirk"), so LOGNORMAL/NORMAL pairs for the same node
+    # collide -- the persisted row count is HALF the number of quotes fetched (35
+    # SWAPTION nodes + 7 CAP nodes, each with 2 vol_types = 84 quotes -> 42 rows).
+    fetched = sum(len(s.quotes) for s in result.currencies.values())
+    assert fetched == 84
+    assert count == 42
+    assert count < fetched
+
+
+def test_rate_vol_file_source_wrong_as_of_raises():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    src = rvm.RateVolFileSource(RATE_VOL_FIXTURE)
+    with pytest.raises(rvm.MarketDataUnavailable):
+        src.get_rate_vol_quotes(["USD"], as_of=date(2026, 9, 18))
+
+
+def test_rate_vol_file_source_unknown_ccy_recorded_as_diagnostic_not_raised():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    src = rvm.RateVolFileSource(RATE_VOL_FIXTURE)
+    result = src.get_rate_vol_quotes(["USD", "NZD"], as_of=date(2026, 9, 17))
+    assert "USD" in result.currencies
+    assert "NZD" not in result.currencies
+    assert any(d["ccy"] == "NZD" and d["status"] == "MISSING" for d in result.diagnostics)
+
+
+def test_rate_vol_grid_source_preference_rule():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    conn = sqlite3.connect(":memory:")
+    rvm.ensure_rate_vol_quotes_table(conn)
+    # Two sources for the same node: BBG_BDP must win.
+    conn.execute(
+        "INSERT INTO rate_vol_quotes VALUES "
+        "('2026-09-17','USD','SOFR','SWAPTION','1Y','10Y','ATM',0.0,20.0,'LOGNORMAL',"
+        "'USSV0110 Curncy','PX_LAST','BBG_BDP','2026-09-17T17:00:00-04:00')"
+    )
+    conn.execute(
+        "INSERT INTO rate_vol_quotes VALUES "
+        "('2026-09-17','USD','SOFR','SWAPTION','1Y','10Y','ATM',0.0,25.0,'LOGNORMAL',"
+        "'USSV0110 Curncy','PX_LAST','BBG_BDH','2026-09-17T17:00:00-04:00')"
+    )
+    grid = rvm.rate_vol_grid(conn, "2026-09-17", "USD", "SWAPTION", "LOGNORMAL")
+    assert math.isclose(grid[("1Y", "10Y")], 20.0)
+
+    # Neither BBG_BDP nor BBG_BDH: alphabetically-first source wins, deterministically.
+    conn2 = sqlite3.connect(":memory:")
+    rvm.ensure_rate_vol_quotes_table(conn2)
+    conn2.execute(
+        "INSERT INTO rate_vol_quotes VALUES "
+        "('2026-09-17','USD','SOFR','SWAPTION','2Y','10Y','ATM',0.0,19.0,'LOGNORMAL',"
+        "'USSV0210 Curncy','PX_LAST','ZZZ_SRC','2026-09-17T17:00:00-04:00')"
+    )
+    conn2.execute(
+        "INSERT INTO rate_vol_quotes VALUES "
+        "('2026-09-17','USD','SOFR','SWAPTION','2Y','10Y','ATM',0.0,18.0,'LOGNORMAL',"
+        "'USSV0210 Curncy','PX_LAST','AAA_SRC','2026-09-17T17:00:00-04:00')"
+    )
+    grid2 = rvm.rate_vol_grid(conn2, "2026-09-17", "USD", "SWAPTION", "LOGNORMAL")
+    assert math.isclose(grid2[("2Y", "10Y")], 18.0)
+
+    # Nothing staged at all -> empty dict, not an error.
+    assert rvm.rate_vol_grid(conn, "2026-09-17", "GBP", "SWAPTION", "LOGNORMAL") == {}
+
+
+def test_atm_swaption_vol_interpolation_grid_hit_and_bounds():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    conn = sqlite3.connect(":memory:")
+    src = rvm.RateVolFileSource(RATE_VOL_FIXTURE)
+    result = src.get_rate_vol_quotes(["USD"], as_of=date(2026, 9, 17))
+    # LOGNORMAL only -- see _only_vol_type docstring (NORMAL would otherwise overwrite it).
+    lognormal_only = _only_vol_type(result.currencies, "LOGNORMAL")
+    rvm.write_rate_vol_quotes(conn, lognormal_only, as_of_date="2026-09-17", source="BBG_BDP")
+
+    grid = rvm.rate_vol_grid(conn, "2026-09-17", "USD", "SWAPTION", "LOGNORMAL")
+
+    # Exact grid hit: 1Y expiry (365d from as_of) x 10Y underlying tenor.
+    exact = rvm.atm_swaption_vol(
+        conn, "2026-09-17", "USD", "2027-09-17", 10.0, "LOGNORMAL", "2026-09-17",
+    )
+    assert exact is not None
+    assert math.isclose(exact, grid[("1Y", "10Y")])
+
+    # Interior point on the expiry axis only (underlying_tenor_years=10.0 hits the 10Y
+    # tenor node exactly, so tenor interpolation is a no-op and this isolates the
+    # variance-time expiry interpolation -- same style as vol_marketdata.py's
+    # atm_vol_for_expiry test): 2028-03-17 is strictly between the 1Y node (2027-09-17)
+    # and the 2Y node (2028-09-17), at the 10Y-tenor nodes.
+    interior = rvm.atm_swaption_vol(
+        conn, "2026-09-17", "USD", "2028-03-17", 10.0, "LOGNORMAL", "2026-09-17",
+    )
+    assert interior is not None
+    lo = min(grid[("1Y", "10Y")], grid[("2Y", "10Y")])
+    hi = max(grid[("1Y", "10Y")], grid[("2Y", "10Y")])
+    assert lo <= interior <= hi
+
+    # Interior point requiring interpolation on BOTH axes: sanity-bounded by the whole
+    # staged LOGNORMAL SWAPTION grid (bilinear variance-time-on-expiry interpolation is
+    # not guaranteed to sit strictly inside the 4 surrounding corners' raw values -- see
+    # module docstring -- so this is a loose sanity check, not a tight bracket).
+    both_axes = rvm.atm_swaption_vol(
+        conn, "2026-09-17", "USD", "2028-03-17", 7.0, "LOGNORMAL", "2026-09-17",
+    )
+    assert both_axes is not None
+    all_values = list(grid.values())
+    assert min(all_values) - 1.0 <= both_axes <= max(all_values) + 1.0
+
+    # Outside the expiry range (beyond 10Y expiry): never extrapolates.
+    outside_expiry = rvm.atm_swaption_vol(
+        conn, "2026-09-17", "USD", "2040-09-17", 10.0, "LOGNORMAL", "2026-09-17",
+    )
+    assert outside_expiry is None
+
+    # Outside the tenor range (beyond 30Y underlying): never extrapolates.
+    outside_tenor = rvm.atm_swaption_vol(
+        conn, "2026-09-17", "USD", "2027-09-17", 40.0, "LOGNORMAL", "2026-09-17",
+    )
+    assert outside_tenor is None
+
+    # No data staged at all for this ccy/vol_type.
+    assert rvm.atm_swaption_vol(conn, "2026-09-17", "GBP", "2027-09-17", 10.0, "LOGNORMAL", "2026-09-17") is None
+
+
+def test_to_rate_vols_rows_mapping():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    conn = sqlite3.connect(":memory:")
+    src = rvm.RateVolFileSource(RATE_VOL_FIXTURE)
+    result = src.get_rate_vol_quotes(["USD"], as_of=date(2026, 9, 17))
+    # Stage NORMAL for everything first, then patch SWAPTION rows to LOGNORMAL -- see
+    # _only_vol_type docstring: instrument is part of the primary key so this leaves
+    # the CAP NORMAL rows (written first) untouched while SWAPTION ends up LOGNORMAL.
+    rvm.write_rate_vol_quotes(conn, _only_vol_type(result.currencies, "NORMAL"), as_of_date="2026-09-17", source="BBG_BDP")
+    rvm.write_rate_vol_quotes(
+        conn, _only_vol_type(result.currencies, "LOGNORMAL", instrument="SWAPTION"),
+        as_of_date="2026-09-17", source="BBG_BDP",
+    )
+
+    rows = rvm.to_rate_vols_rows(conn, "2026-09-17", "USD", "SWAPTION", "LOGNORMAL")
+    assert len(rows) == len(rvm.EXPIRY_TENORS) * len(rvm.UNDERLYING_TENORS)
+    row = next(r for r in rows if r["expiry_tenor_or_date"] == "1Y" and r["underlying_tenor"] == "10Y")
+    assert row["as_of_date"] == "2026-09-17"
+    assert row["ccy"] == "USD"
+    assert row["index"] == "SOFR"
+    assert row["strike_or_ATM"] == "ATM"
+    assert row["vol_type"] == "LOGNORMAL"
+    assert row["source"] == "BBG_BDP"
+    assert math.isclose(row["vol"], rvm.rate_vol_grid(conn, "2026-09-17", "USD", "SWAPTION", "LOGNORMAL")[("1Y", "10Y")])
+
+    cap_rows = rvm.to_rate_vols_rows(conn, "2026-09-17", "USD", "CAP", "NORMAL")
+    assert len(cap_rows) == len(rvm.EXPIRY_TENORS)
+    assert all(r["underlying_tenor"] == "" for r in cap_rows)
+
+    # Nothing staged for this combination -> empty list, not an error.
+    assert rvm.to_rate_vols_rows(conn, "2026-09-17", "GBP", "SWAPTION", "LOGNORMAL") == []
+
+
+def test_rate_vol_snapshot_round_trip(tmp_path):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    snap = rvm.load_rate_vol_snapshot(RATE_VOL_FIXTURE)
+    out_path = tmp_path / "roundtrip.json"
+    rvm.save_rate_vol_snapshot(snap, out_path)
+    reloaded = rvm.load_rate_vol_snapshot(out_path)
+    assert reloaded.as_of == snap.as_of
+    assert set(reloaded.currencies) == set(snap.currencies)
+    assert reloaded.currencies["USD"].quotes[0].ticker == snap.currencies["USD"].quotes[0].ticker
+
+
+# -- CLI ---------------------------------------------------------------------------------
+
+def test_rate_vol_cli_file_mode_writes_rate_vol_quotes(tmp_path):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    db_path = tmp_path / "risk.db"
+    exit_code = rvm.main([
+        "--db", str(db_path), "--as-of", "2026-09-17", "--file", str(RATE_VOL_FIXTURE),
+    ])
+    assert exit_code == 5  # fixture only has USD/EUR; the CLI requests all 7 conventions ccys
+
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM rate_vol_quotes").fetchone()[0]
+    assert count > 0
+
+    diag_path = Path(str(db_path) + ".diag.json")
+    assert diag_path.exists()
+    diag = json.loads(diag_path.read_text())
+    assert diag["summary"]["outcome"] == "PARTIAL"
+    assert diag["summary"]["exit_code"] == 5
+
+
+def test_rate_vol_cli_file_mode_bad_as_of_exits_2(tmp_path):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    db_path = tmp_path / "risk.db"
+    exit_code = rvm.main(["--db", str(db_path), "--as-of", "not-a-date", "--file", str(RATE_VOL_FIXTURE)])
+    assert exit_code == 2
+    diag = json.loads(Path(str(db_path) + ".diag.json").read_text())
+    assert diag["summary"]["exit_code"] == 2
+
+
+def test_rate_vol_cli_file_mode_missing_as_of_exits_2(tmp_path):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    db_path = tmp_path / "risk.db"
+    exit_code = rvm.main(["--db", str(db_path), "--file", str(RATE_VOL_FIXTURE)])
+    assert exit_code == 2
+
+
+def test_rate_vol_cli_probe_mode_file_source_writes_diag(tmp_path):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    db_path = tmp_path / "risk.db"
+    exit_code = rvm.main([
+        "--db", str(db_path), "--as-of", "2026-09-17", "--file", str(RATE_VOL_FIXTURE), "--probe",
+    ])
+    assert exit_code == 0
+    diag = json.loads(Path(str(db_path) + ".diag.json").read_text())
+    assert diag["mode"] == "probe"
+    assert len(diag["probe"]["steps"]) == 3
+    assert all(s["outcome"] == "OK" for s in diag["probe"]["steps"])
+    # no rate_vol_quotes rows in probe mode
+    conn = sqlite3.connect(db_path)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "rate_vol_quotes" not in tables
+
+
+def test_rate_vol_cli_file_mode_bad_path_exits_4(tmp_path):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    db_path = tmp_path / "risk.db"
+    exit_code = rvm.main([
+        "--db", str(db_path), "--as-of", "2026-09-17", "--file", str(tmp_path / "does_not_exist.json"),
+    ])
+    assert exit_code in (3, 4)  # a bad file path surfaces as either, never a crash without a diag
+    assert Path(str(db_path) + ".diag.json").exists()
+
+
+# -- RateVolBloombergSource: fake blpapi, never the real SDK -----------------------------
+
+def test_rate_vol_bloomberg_source_requires_blpapi_when_absent():
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    try:
+        import blpapi  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        pytest.skip("blpapi is installed in this environment; nothing to test for the absent-package path")
+
+    with pytest.raises(rvm.MarketDataError):
+        rvm.RateVolBloombergSource()
+
+
+def test_rate_vol_bloomberg_source_get_quotes_with_fake_blpapi(monkeypatch):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        sec_list = []
+        for t in request.securities:
+            row = {}
+            # Only answer the LOGNORMAL swaption ticker -- everything else in the batch
+            # comes back with no fieldData, exercising the per-ticker MISSING diagnostics path.
+            if t == "USSV0110 Curncy":
+                row["PX_LAST"] = 19.5
+            sec_list.append({"security": t, "fieldData": row})
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = rvm.RateVolBloombergSource("localhost", 8194)
+    assert src.name() == "RateVolBloombergSource(localhost:8194)"
+    result = src.get_rate_vol_quotes(
+        ["USD"], as_of=None, instruments=["SWAPTION"], vol_types=["LOGNORMAL"],
+        expiries=["1Y"], underlying_tenors=["10Y"],
+    )
+    assert result.source == "BBG_BDP"
+    quote = result.currencies["USD"].quotes[0]
+    assert quote.ticker == "USSV0110 Curncy"
+    assert math.isclose(quote.value, 19.5)
+    assert not result.diagnostics
+    src.close()
+
+
+def test_rate_vol_bloomberg_source_historical_request_for_explicit_as_of(monkeypatch):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    def responder(request):
+        assert request.req_type == "HistoricalDataRequest"
+        return [{"securityData": {"security": t, "fieldData": [{"PX_LAST": 19.5}]}} for t in request.securities]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = rvm.RateVolBloombergSource("localhost", 8194)
+    result = src.get_rate_vol_quotes(
+        ["USD"], as_of=date(2026, 9, 17), instruments=["SWAPTION"], vol_types=["LOGNORMAL"],
+        expiries=["1Y"], underlying_tenors=["10Y"],
+    )
+    assert result.source == "BBG_BDH"
+    quote = result.currencies["USD"].quotes[0]
+    assert math.isclose(quote.value, 19.5)
+
+
+def test_rate_vol_bloomberg_source_missing_ticker_recorded_as_diagnostic(monkeypatch):
+    from data.bloomberg import rates_vol_marketdata as rvm
+
+    def responder(request):
+        # Answer nothing -- every requested ticker comes back with no fieldData.
+        return [{"securityData": [{"security": t, "fieldData": {}} for t in request.securities]}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+
+    src = rvm.RateVolBloombergSource("localhost", 8194)
+    result = src.get_rate_vol_quotes(
+        ["USD"], as_of=None, instruments=["CAP"], vol_types=["LOGNORMAL"], expiries=["1Y"],
+    )
+    assert result.currencies == {}
+    assert len(result.diagnostics) == 1
+    d = result.diagnostics[0]
+    assert d["ccy"] == "USD" and d["instrument"] == "CAP" and d["status"] == "MISSING"
+    assert d["ticker"] == "USCV01 Curncy"
+
+
+def test_rate_vol_marketdata_module_imports_without_blpapi():
+    # Importing the module must never require blpapi to be installed -- only
+    # instantiating RateVolBloombergSource does.
+    import importlib
+
+    import data.bloomberg.rates_vol_marketdata as rvm
+    importlib.reload(rvm)
+    assert callable(rvm.rate_vol_ticker)

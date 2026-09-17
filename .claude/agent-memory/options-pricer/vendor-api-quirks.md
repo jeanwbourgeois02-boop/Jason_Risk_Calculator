@@ -62,14 +62,28 @@ Found while building engine/options/pricer.py (Phase 2/4, 2026-09-17):
    `engine.options.*` itself must stay safe without QuantLib installed;
    only calling into a pricing function should require it.
 
-5. **`marks_official` view has no CASE branch for GAMMA/THETA/VEGA/RHO.**
-   `data/ingest/schema.py::OFFICIAL_MARK_SOURCE` only maps
-   SPOT/FWD_OUTRIGHT/FUTURE_PX/PAR_RATE/PV_USD/DV01_USD/DELTA/PREMIUM.
-   `store.py` writes GAMMA/THETA/VEGA/RHO marks too (task requirement), but
-   they land in `marks` only -- `marks_official` silently excludes them
-   (the view's `CASE mark_type ... END` has no ELSE, so an unmapped
-   mark_type never matches any `source` and the row is filtered out). This
-   is correct/expected per the task instructions, not a bug -- CLAUDE.md's
-   mark_type list needs those four added by the housekeeper before any
-   downstream reader can rely on `marks_official` for them. See
-   [[phase-2-4-landed-2026-09-17]] for the full follow-up list.
+5. **(RESOLVED by housekeeper before Phase 7)** `marks_official` view's CASE
+   branch was missing GAMMA/THETA/VEGA/RHO when Phase 2 landed -- fixed
+   upstream since; `data/ingest/schema.py::OFFICIAL_MARK_SOURCE` now maps
+   all six PREMIUM/DELTA/GAMMA/THETA/VEGA/RHO to QL_OPTIONS_PRICER. Don't
+   trust this file's own age on schema.py facts -- re-check schema.py
+   directly before relying on an OFFICIAL_MARK_SOURCE claim here. The SAME
+   gap now exists for the NEW `DELTA_PA` mark_type Phase 7 introduces (see
+   [[phase-7-landed-2026-09-17]]) -- flagged to housekeeper, not fixed here
+   (schema.py is data-ingest's file, out of this agent's directory).
+
+6. **`equity/__init__.py` has the exact same `one_touch`/`no_touch`
+   submodule-name-shadowing gotcha as `fx/__init__.py`** (item 1 above) --
+   `from .one_touch import one_touch, no_touch` rebinds the package
+   attribute from submodule to function. `pricer.py::price_equity_option`'s
+   ONE_TOUCH/NO_TOUCH branch imports them directly
+   (`from .vendor.options_calc.equity import one_touch as _one_touch_fn,
+   no_touch as _no_touch_fn`), same fix as the FX side.
+
+7. **`commodity/` has NO barrier/digital/one_touch modules at all** -- only
+   `european.py`/`american.py`/`asian.py` exist under
+   `options_calc/commodity/` (confirmed via `Glob`, not an oversight in
+   this package's wiring). `pricer.py::price_commodity_option` and
+   `equity_commodity.py`'s `_COMMODITY_PAYOFFS` set are deliberately
+   restricted to `{VANILLA, AMERICAN, ASIAN}`; any other payoff raises/
+   skips rather than silently falling through to a vanilla price.

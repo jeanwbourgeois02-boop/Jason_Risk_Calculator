@@ -98,7 +98,7 @@ tests/rates/test_bermudan_swaption.py.
 
 import QuantLib as ql
 
-from ._engine import build_forward_swap, CALENDAR
+from ._engine import build_forward_swap, evaluation_date_scope, CALENDAR
 
 _DEFAULT_NOTIONAL = 1_000_000.0
 _DEFAULT_HW_MEAN_REVERSION = 0.03
@@ -125,6 +125,45 @@ def _generate_exercise_dates(start_date, end_date, exercise_frequency_years):
     return dates
 
 
+def _to_ql_date(d):
+    """datetime.date -> ql.Date. Accepts a ql.Date unchanged (so a caller
+    mixing ql.Date and datetime.date in the same exercise_dates list is
+    not silently mishandled -- ql.Date has no .year/.month/.day trio the
+    same way, so it is detected via isinstance and passed through)."""
+    if isinstance(d, ql.Date):
+        return d
+    return ql.Date(d.day, d.month, d.year)
+
+
+def _validate_explicit_exercise_dates(exercise_dates, evaluation_date, maturity_date):
+    """Validate and convert a caller-supplied list of Bermudan exercise
+    dates (see price_bermudan_swaption's `exercise_dates` parameter):
+    non-empty, strictly increasing, all strictly before the underlying
+    swap's maturity, and the first on or after the evaluation date (a
+    caller cannot stage an exercise opportunity that has already passed).
+    Returns the list converted to ql.Date, in the given order (NOT
+    re-sorted -- an out-of-order input is a caller error, not silently
+    fixed)."""
+    if not exercise_dates:
+        raise ValueError("exercise_dates must be a non-empty list of dates")
+    ql_dates = [_to_ql_date(d) for d in exercise_dates]
+    for a, b in zip(ql_dates, ql_dates[1:]):
+        if not (b > a):
+            raise ValueError(
+                f"exercise_dates must be strictly increasing; found {a} followed by {b}"
+            )
+    if ql_dates[0] < evaluation_date:
+        raise ValueError(
+            f"first exercise date {ql_dates[0]} is before the evaluation date {evaluation_date}"
+        )
+    if ql_dates[-1] >= maturity_date:
+        raise ValueError(
+            f"exercise date {ql_dates[-1]} must be strictly before the underlying "
+            f"swap's maturity {maturity_date}"
+        )
+    return ql_dates
+
+
 _HW_VOLATILITY_PLAUSIBLE_MAX = 0.05  # real-world HW short-rate vol calibrations are ~0.5%-2%/yr
 
 
@@ -148,6 +187,9 @@ def _hull_white_tree_engine(discount_curve, hw_mean_reversion, hw_volatility, tr
 def price_bermudan_swaption(fixed_rate, first_exercise, swap_tenor, exercise_frequency, r,
                              notional=_DEFAULT_NOTIONAL, option_type="payer",
                              discount_rate=None, forecast_rate=None,
+                             discount_curve=None, forecast_curve=None,
+                             evaluation_date=None,
+                             exercise_dates=None,
                              hw_mean_reversion=_DEFAULT_HW_MEAN_REVERSION,
                              hw_volatility=_DEFAULT_HW_VOLATILITY,
                              tree_steps=_DEFAULT_TREE_STEPS):
@@ -158,18 +200,43 @@ def price_bermudan_swaption(fixed_rate, first_exercise, swap_tenor, exercise_fre
     fixed_rate: the swaption's strike (annual, decimal) -- same underlying
         swap's fixed rate as swaption.py.
     first_exercise: time (years from today) of the FIRST exercise
-        opportunity -- also when the underlying swap starts.
+        opportunity -- also when the underlying swap starts. Ignored for
+        purposes of building the exercise schedule when `exercise_dates`
+        is given (see below); still used to build the underlying forward
+        swap itself (its start date).
     swap_tenor: length of the underlying swap in years, starting at
         `first_exercise`.
     exercise_frequency: spacing (years) between exercise opportunities,
         e.g. 1.0 for annual Bermudan exercise. The last generated date is
         strictly before the swap's maturity (see _generate_exercise_dates).
-    r: flat rate used for both discounting and forecasting when
-        discount_rate/forecast_rate are not given (same convention as
-        swaption.py/cap_floor.py).
+        Ignored when `exercise_dates` is given.
+    r: flat rate used for both discounting and forecasting when none of
+        discount_rate/forecast_rate/discount_curve/forecast_curve are
+        given (same convention as swaption.py/cap_floor.py).
     notional, option_type: same meaning as swaption.py.
     discount_rate, forecast_rate: optional multi-curve overrides, same
-        semantics as swaption.py/_engine.py's MULTI-CURVE SUPPORT.
+        semantics as swaption.py/_engine.py's MULTI-CURVE SUPPORT. Each is
+        mutually exclusive with its curve counterpart below.
+    discount_curve, forecast_curve: optional `ql.YieldTermStructureHandle`
+        overrides -- used directly instead of a flat FlatForward, exactly
+        as swaption.py/cap_floor.py (see _engine.py's CURVE-INPUT SUPPORT
+        docstring section). The Hull-White model itself is built directly
+        off whichever discount curve results (flat or genuine).
+    evaluation_date: optional ql.Date; None reproduces "evaluate as of
+        today". Always restored to its prior value on exit -- see
+        _engine.py's evaluation_date_scope.
+    exercise_dates: optional explicit list of exercise opportunities
+        (datetime.date, or ql.Date), bypassing the mechanically-generated,
+        evenly-spaced schedule entirely -- use this to match a real deal's
+        actual coupon/exercise dates instead of the
+        `exercise_frequency`-generated approximation (see module
+        docstring's "What's simplified" note, and
+        `_validate_explicit_exercise_dates`). Validated: non-empty,
+        strictly increasing, all strictly before the underlying swap's
+        maturity, first on or after the evaluation date -- ValueError
+        otherwise. When given, `exercise_frequency` is ignored for
+        schedule generation (still a required positional argument, for
+        backward compatibility with the mechanically-generated path).
     hw_mean_reversion, hw_volatility: Hull-White model parameters (`a`,
         `sigma`) -- NOT calibrated to market data, supplied directly (see
         module docstring).
@@ -182,23 +249,31 @@ def price_bermudan_swaption(fixed_rate, first_exercise, swap_tenor, exercise_fre
     this package, and this module does not attempt them; a caller wanting
     Greeks here can bump inputs and call this function again).
     """
-    today, start_date, swap, discount_curve = build_forward_swap(
-        fixed_rate, first_exercise, swap_tenor, r, notional, option_type,
-        discount_rate=discount_rate, forecast_rate=forecast_rate,
-    )
-    end_date = swap.fixedSchedule().endDate()
-    exercise_dates = _generate_exercise_dates(start_date, end_date, exercise_frequency)
+    with evaluation_date_scope(evaluation_date) as today:
+        _, start_date, swap, discount_curve_handle = build_forward_swap(
+            fixed_rate, first_exercise, swap_tenor, r, notional, option_type,
+            discount_rate=discount_rate, forecast_rate=forecast_rate,
+            discount_curve=discount_curve, forecast_curve=forecast_curve,
+            evaluation_date=today,
+        )
+        end_date = swap.fixedSchedule().endDate()
+        if exercise_dates is not None:
+            ql_exercise_dates = _validate_explicit_exercise_dates(exercise_dates, today, end_date)
+        else:
+            ql_exercise_dates = _generate_exercise_dates(start_date, end_date, exercise_frequency)
 
-    swaption = ql.Swaption(swap, ql.BermudanExercise(exercise_dates))
-    swaption.setPricingEngine(
-        _hull_white_tree_engine(discount_curve, hw_mean_reversion, hw_volatility, tree_steps)
-    )
-    return swaption.NPV()
+        swaption = ql.Swaption(swap, ql.BermudanExercise(ql_exercise_dates))
+        swaption.setPricingEngine(
+            _hull_white_tree_engine(discount_curve_handle, hw_mean_reversion, hw_volatility, tree_steps)
+        )
+        return swaption.NPV()
 
 
 def price_european_swaption_hw(fixed_rate, expiry, swap_tenor, r,
                                 notional=_DEFAULT_NOTIONAL, option_type="payer",
                                 discount_rate=None, forecast_rate=None,
+                                discount_curve=None, forecast_curve=None,
+                                evaluation_date=None,
                                 hw_mean_reversion=_DEFAULT_HW_MEAN_REVERSION,
                                 hw_volatility=_DEFAULT_HW_VOLATILITY,
                                 tree_steps=_DEFAULT_TREE_STEPS):
@@ -212,15 +287,19 @@ def price_european_swaption_hw(fixed_rate, expiry, swap_tenor, r,
     model-inconsistent check. See tests/rates/test_bermudan_swaption.py.
 
     All arguments have the same meaning as price_bermudan_swaption's,
-    minus exercise_frequency (a European swaption has only one exercise
-    date, at `expiry`).
+    minus exercise_frequency/exercise_dates (a European swaption has only
+    one exercise date, at `expiry`, so there is no schedule to generate or
+    override).
     """
-    today, start_date, swap, discount_curve = build_forward_swap(
-        fixed_rate, expiry, swap_tenor, r, notional, option_type,
-        discount_rate=discount_rate, forecast_rate=forecast_rate,
-    )
-    swaption = ql.Swaption(swap, ql.EuropeanExercise(start_date))
-    swaption.setPricingEngine(
-        _hull_white_tree_engine(discount_curve, hw_mean_reversion, hw_volatility, tree_steps)
-    )
-    return swaption.NPV()
+    with evaluation_date_scope(evaluation_date) as today:
+        _, start_date, swap, discount_curve_handle = build_forward_swap(
+            fixed_rate, expiry, swap_tenor, r, notional, option_type,
+            discount_rate=discount_rate, forecast_rate=forecast_rate,
+            discount_curve=discount_curve, forecast_curve=forecast_curve,
+            evaluation_date=today,
+        )
+        swaption = ql.Swaption(swap, ql.EuropeanExercise(start_date))
+        swaption.setPricingEngine(
+            _hull_white_tree_engine(discount_curve_handle, hw_mean_reversion, hw_volatility, tree_steps)
+        )
+        return swaption.NPV()

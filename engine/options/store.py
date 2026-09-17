@@ -116,10 +116,13 @@ def _skip(row: dict, reason: str) -> PricingOutcome:
     )
 
 
-def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, inputs) -> pricer.OptionPriceResult:
+def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, inputs, pair: str) -> pricer.OptionPriceResult:
     """Call the payoff-appropriate pricer.py wrapper. Raises only for
     programmer error (unreachable payoff values are filtered by callers
-    before this is invoked)."""
+    before this is invoked). `pair` is passed through to every pricer.py
+    call so T uses the calendar-aware year fraction and delta_convention/
+    delta_premium_adjusted are populated -- see pricer.py / calendars.py
+    (Phase 7)."""
     S = inputs.spot
     K = row["strike"]
     option_type = row["option_type"]
@@ -127,16 +130,16 @@ def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, input
     payoff = row["payoff"]
 
     if payoff == "VANILLA":
-        return pricer.price_fx_vanilla(S, K, expiry, as_of_date, dr, fr, vol, option_type)
+        return pricer.price_fx_vanilla(S, K, expiry, as_of_date, dr, fr, vol, option_type, pair=pair)
     if payoff == "DIGITAL":
-        return pricer.price_fx_digital(S, K, expiry, as_of_date, dr, fr, vol, option_type)
+        return pricer.price_fx_digital(S, K, expiry, as_of_date, dr, fr, vol, option_type, pair=pair)
     if payoff == "AMERICAN":
-        return pricer.price_fx_american(S, K, expiry, as_of_date, dr, fr, vol, option_type)
+        return pricer.price_fx_american(S, K, expiry, as_of_date, dr, fr, vol, option_type, pair=pair)
     if payoff == "ASIAN":
         # avg_start_date read into `row` above but not passed through -- see
         # pricer.py::price_fx_asian's docstring for why (vendored engine has
         # no such parameter).
-        return pricer.price_fx_asian(S, K, expiry, as_of_date, dr, fr, vol, option_type)
+        return pricer.price_fx_asian(S, K, expiry, as_of_date, dr, fr, vol, option_type, pair=pair)
     if payoff in ("BARRIER_KI", "BARRIER_KO"):
         barrier_level = row["barrier_level"]
         # Derivation rule (task instruction: "derive from barrier vs spot"):
@@ -149,17 +152,25 @@ def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, input
         direction = "up" if barrier_level > S else "down"
         suffix = "-and-in" if payoff == "BARRIER_KI" else "-and-out"
         barrier_type = f"{direction}{suffix}"
-        return pricer.price_fx_barrier(S, K, barrier_level, expiry, as_of_date, dr, fr, vol, option_type, barrier_type)
+        return pricer.price_fx_barrier(
+            S, K, barrier_level, expiry, as_of_date, dr, fr, vol, option_type, barrier_type, pair=pair,
+        )
     if payoff in ("ONE_TOUCH", "NO_TOUCH"):
         barrier_level = row["barrier_level"]
         # Same up/down derivation as the barrier branch above.
         direction = "up" if barrier_level > S else "down"
         fn = pricer.price_fx_one_touch if payoff == "ONE_TOUCH" else pricer.price_fx_no_touch
-        return fn(S, barrier_level, expiry, as_of_date, dr, fr, vol, direction)
+        return fn(S, barrier_level, expiry, as_of_date, dr, fr, vol, direction, pair=pair)
     raise ValueError(f"unreachable payoff {payoff!r}")  # pragma: no cover
 
 
-def _price_row(conn: sqlite3.Connection, as_of: str, row: dict, surface_cache: Optional[dict] = None) -> PricingOutcome:
+def _price_row(
+    conn: sqlite3.Connection,
+    as_of: str,
+    row: dict,
+    surface_cache: Optional[dict] = None,
+    curve_cache: Optional[dict] = None,
+) -> PricingOutcome:
     if row["product"] != "FX_OPTION":
         return _skip(row, f"product {row['product']!r} is not FX_OPTION")
     if row["payoff"] is None:
@@ -185,13 +196,14 @@ def _price_row(conn: sqlite3.Connection, as_of: str, row: dict, surface_cache: O
 
     pair = row["base_ccy"] + row["quote_ccy"]
     inputs_result = resolve_market_inputs(
-        conn, as_of, pair, row["expiry_date"], strike=row["strike"], surface_cache=surface_cache,
+        conn, as_of, pair, row["expiry_date"], strike=row["strike"],
+        surface_cache=surface_cache, curve_cache=curve_cache,
     )
     if inputs_result.inputs is None:
         return _skip(row, inputs_result.reason)
     inputs = inputs_result.inputs
 
-    result = _dispatch(row, as_of_date, expiry, inputs)
+    result = _dispatch(row, as_of_date, expiry, inputs, pair)
 
     snapped = snapped_at(as_of_date)
     settle_date = row["expiry_date"]
@@ -207,6 +219,20 @@ def _price_row(conn: sqlite3.Connection, as_of: str, row: dict, surface_cache: O
         (as_of, row["instrument_id"], settle_date, mark_type, values[mark_type], "QL_OPTIONS_PRICER", snapped)
         for mark_type in _MARK_FIELDS
     ]
+    # DELTA_PA (Phase 7): only for a pair whose market convention is
+    # premium-adjusted delta (pricer.py::_delta_convention /
+    # options_calc.fx.g10.recommended_delta) -- for a RAW-convention or
+    # UNKNOWN (non-G10) pair, no DELTA_PA row is written; DELTA (raw spot
+    # delta) is unconditionally written above regardless, unchanged from
+    # Phase 2. NOTE: 'DELTA_PA' is not yet in data/ingest/schema.py's
+    # OFFICIAL_MARK_SOURCE mapping (out of this package's ownership), so
+    # it is written to `marks` but does not appear in `marks_official`
+    # until that mapping is extended -- reported to housekeeper.
+    if result.delta_convention == "PREMIUM_ADJUSTED":
+        mark_rows.append(
+            (as_of, row["instrument_id"], settle_date, "DELTA_PA", result.delta_premium_adjusted,
+             "QL_OPTIONS_PRICER", snapped)
+        )
     with conn:
         conn.executemany(
             "INSERT OR REPLACE INTO marks "
@@ -240,24 +266,27 @@ def price_and_store(conn: sqlite3.Connection, as_of: str, trade_id: str) -> Pric
     row = _read_option_trade(conn, trade_id)
     if row is None:
         raise ValueError(f"No trade {trade_id!r} in trades_official")
-    # Fresh, single-trade surface cache -- no reuse across calls, but keeps
-    # the same code path as price_all_and_store below.
-    return _price_row(conn, as_of, row, surface_cache={})
+    # Fresh, single-trade surface/curve cache -- no reuse across calls, but
+    # keeps the same code path as price_all_and_store below.
+    return _price_row(conn, as_of, row, surface_cache={}, curve_cache={})
 
 
 def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[PricingOutcome]:
     """Price every FX_OPTION trade in ``trades_official`` as of ``as_of``.
     One `surface_cache` dict is shared across the whole run (see
     inputs.py::_cached_surface) so that N trades on the same pair build
-    that pair's FXDeltaVolSurface once, not N times."""
+    that pair's FXDeltaVolSurface once, not N times; likewise one
+    `curve_cache` dict (see engine/options/rates.py) so N trades sharing a
+    currency build that currency's OIS bootstrap once, not N times."""
     trade_ids = [
         r[0] for r in conn.execute(
             "SELECT trade_id FROM trades_official WHERE product = 'FX_OPTION' ORDER BY trade_id"
         ).fetchall()
     ]
     surface_cache: dict = {}
+    curve_cache: dict = {}
     outcomes = []
     for trade_id in trade_ids:
         row = _read_option_trade(conn, trade_id)
-        outcomes.append(_price_row(conn, as_of, row, surface_cache=surface_cache))
+        outcomes.append(_price_row(conn, as_of, row, surface_cache=surface_cache, curve_cache=curve_cache))
     return outcomes

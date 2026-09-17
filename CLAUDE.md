@@ -26,7 +26,7 @@ All dates ISO `YYYY-MM-DD`, all amounts signed (`+` = receive / long). No column
 instruments (
   instrument_id   TEXT PRIMARY KEY,   -- 'USDJPY', 'EURSEK', 'XAUUSD', 'ESU6 Index', 'IRSOIS-USD-22860996',
                                       -- 'USDJPY digi p 152 2026-08-26'
-  asset_class     TEXT NOT NULL,      -- FX | FUTURE | IRS | FX_OPTION | IRS_OPTION | CASH
+  asset_class     TEXT NOT NULL,      -- FX | FUTURE | IRS | FX_OPTION | IRS_OPTION | EQ_OPTION | CMDTY_OPTION | CASH
   base_ccy        TEXT NOT NULL,      -- unit of trades.quantity: 'USD' for USDJPY, 'AUD' for AUDUSD, 'XAU',
                                       -- 'ES' (index units), notional ccy for IRS, base of pair for options
   quote_ccy       TEXT NOT NULL,      -- currency of trades.price and of local P&L
@@ -45,6 +45,7 @@ trades (
   instrument_id   TEXT NOT NULL REFERENCES instruments,
   product         TEXT NOT NULL,      -- FX_SPOT | FX_FWD | FX_SWAP | FUTURE | IRS | FX_OPTION
                                       -- | SWAPTION | CAP_FLOOR (engine/rates_vol; no ingest path yet, 2026-09-17)
+                                      -- | EQ_OPTION | CMDTY_OPTION (engine/options; no ingest path yet, 2026-09-17)
   package_id      TEXT NOT NULL,      -- = trade_id unless grouped by the swap rule below
   trade_date      TEXT NOT NULL,
   quantity        REAL NOT NULL,      -- signed, in base_ccy units: base amount (FX), contracts (FUTURE),
@@ -76,6 +77,8 @@ marks (
   settle_date     TEXT NOT NULL,      -- outright date; = as_of_date for SPOT; expiry for futures
   mark_type       TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | PAR_RATE | PV_USD | DV01_USD | CASHFLOW_USD | PREMIUM | DELTA
                                       -- | GAMMA | THETA | VEGA | RHO (option Greeks, engine/options, 2026-09-17)
+                                      -- | DELTA_PA (premium-adjusted delta, written only for G10 pairs quoted that way;
+                                      --   the ladder reads DELTA, never DELTA_PA)
   value           REAL NOT NULL,      -- DELTA = base-ccy delta per 1 unit of trades.quantity (may exceed 1 for digitals)
   source          TEXT NOT NULL,      -- BNP_BVAL | BBG_BFXFORWARD | BBG_BDH | BBG_BDP | BBG_INTERP | MANUAL
                                       -- BBG_INTERP = linear interpolation in forward points between standard
@@ -146,7 +149,7 @@ Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4
 | SPOT, FWD_OUTRIGHT | BBG_BFXFORWARD |
 | FUTURE_PX | BBG_BDH |
 | PAR_RATE, PV_USD, DV01_USD, CASHFLOW_USD | QL_PRICER |
-| DELTA, PREMIUM, GAMMA, THETA, VEGA, RHO | QL_OPTIONS_PRICER (`engine/options`, vendored options_calc; since 2026-09-17 — MANUAL is reconciliation-only for these) |
+| DELTA, DELTA_PA, PREMIUM, GAMMA, THETA, VEGA, RHO | QL_OPTIONS_PRICER (`engine/options`, vendored options_calc; since 2026-09-17 — MANUAL is reconciliation-only for these) |
 | any | BNP_BVAL is reconciliation only, never official |
 | any | BBG_INTERP (linear interpolation in forward points between standard tenors, written by the pull script when a broken-date outright cannot be requested directly) is reconciliation / fallback only, never official |
 | PAR_RATE, PV_USD, DV01_USD | BBG_BDH (Bloomberg SWPM) is reconciliation only, never official, mirroring BNP_BVAL for FX (decided 2026-09-15 with the `engine/rates` QuantLib OIS pricer landing) |

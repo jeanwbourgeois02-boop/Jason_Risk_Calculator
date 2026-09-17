@@ -23,3 +23,4 @@
 - [Blotter-only upload 2026-09-16](blotter-only-upload-2026-09-16.md) — BNP path removed from ui/uploads.py entirely, no date picker; fresh DB has zero positions rows so cash-ladder balance panel is empty
 - [Blotter FX strip + samples 2026-09-17](blotter-fx-strip-and-samples-2026-09-17.md) — SUPERSEDED same day, see next entry; kept for history only
 - [Blotter FX standard convention 2026-09-17](blotter-fx-standard-convention-2026-09-17.md) — xlsx-replica table reversed onto engine/pnl/fx_blotter.py+value_book; table/strip now share one pricing path, sample formula rewritten locally
+- [Options tab Phase 8 2026-09-17](options-tab-phase8-2026-09-17.md) — ui/tabs/options.py grouped MARS-style table, two conversions by design, _agg/_single aggregation, collapse via dcc.Store+server callback, live HTTP-verified

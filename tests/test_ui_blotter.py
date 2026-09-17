@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from data.ingest import schema, themes
-from ui.tabs import blotter, blotter_bundles, blotter_pricing, header
+from ui.tabs import blotter, blotter_bundles, blotter_pricing, header, options
 
 
 def _make_db():
@@ -343,12 +343,20 @@ def _add_irs(conn, trade_id="S1", pv=250_000.0, cashflow=0.0, as_of="2026-06-20"
 
 
 def test_options_scope_is_a_real_view_with_no_trades_message():
-    """2026-09-17: Options is no longer a placeholder -- with no option trades it shows
-    the same strip + "No trades" message as any other empty scope."""
+    """2026-09-17 Phase 8: Options is the grouped MARS-style table (`ui.tabs.options`),
+    not the generic priced_value_book path any more -- with no option trades it still
+    renders Portfolio Totals plus FX/Equity/Commodity asset-class rows (rows must
+    always render), not a "no trades" placeholder."""
     conn = _make_db()
     try:
         layout = blotter.scope_layout("options", conn, "2026-06-20")
-        assert "No trades for this as-of date in this scope." in layout.children[1].children
+        assert layout.children[0].id == "blotter-strip-options"
+        table = next(t for t in _find_tables(layout) if t.id == options.TABLE_ID)
+        labels = [r["label"] for r in table.data]
+        assert any("Portfolio Totals" in label for label in labels)
+        assert any(label == "FX" for label in labels)
+        assert any(label == "Equity" for label in labels)
+        assert any(label == "Commodity" for label in labels)
         assert blotter.PLACEHOLDER_SCOPES == {}
     finally:
         conn.close()
@@ -358,11 +366,25 @@ def test_options_scope_prices_an_option_row():
     conn = _make_db()
     try:
         _add_option(conn)
+        conn.execute(
+            "INSERT INTO instrument_options VALUES ('EURUSD092226C-1',1.11,'CALL',0,'9999-12-31','VANILLA')"
+        )
+        conn.execute(
+            "INSERT INTO marks VALUES ('2026-06-20','EURUSD092226C-1','2026-09-22','DELTA',0.55,"
+            "'QL_OPTIONS_PRICER','2026-06-20T17:00:00-04:00')"
+        )
+        conn.commit()
         layout = blotter.scope_layout("options", conn, "2026-06-20")
-        table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-options")
-        assert len(table.data) == 1 and table.data[0]["trade_id"] == "O1"
-        # 1m * (0.0062 - 0.0050) EUR = 1,200 EUR * 1.1050 = 1,326 USD
-        assert table.data[0]["pnl_usd"] == "1,326"
+        assert layout.children[0].id == "blotter-strip-options"
+        table = next(t for t in _find_tables(layout) if t.id == options.TABLE_ID)
+        row = next(r for r in table.data if r["label"] == "EURUSD092226C-1")
+        # MktPx is the raw premium mark, shown as the blotter quotes it (base-notional fraction).
+        assert row["mktpx"] == "0.006200"
+        # MktVal = premium(0.0062) * quantity(1,000,000) * EUR->USD spot(1.1050) = 6,851
+        assert row["mktval"] == "6,851"
+        # Delta USD-equivalent = 0.55 * (1,000,000 * multiplier 1) * USD spot(1.0) = 550,000
+        assert row["delta"] == "550,000"
+        assert row["strike"] == "1.110000"
     finally:
         conn.close()
 

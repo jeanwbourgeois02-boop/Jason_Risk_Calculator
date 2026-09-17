@@ -519,7 +519,11 @@ def test_every_static_callback_id_exists_in_layout():
         elif ch is not None and (hasattr(ch, "children") or hasattr(ch, "id")):
             walk(ch)
     walk(app.layout)
-    dynamic_ok = {"blotter-datatable", "blotter-subtotal"}  # rendered inside blotter-table-container
+    # rendered inside blotter-table-container; options-datatable/-collapsed-packages
+    # (ui.tabs.options, Phase 8 options_calc merge) only exist once the "options"
+    # sub-tab is selected, same as the other blotter-* dynamic ids below.
+    dynamic_ok = {"blotter-datatable", "blotter-subtotal",
+                  "options-datatable", "options-collapsed-packages"}
     dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
                         "blotter-row-detail-")  # per-sub-tab, rendered by callback
     missing = []

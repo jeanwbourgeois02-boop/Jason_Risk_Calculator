@@ -125,7 +125,8 @@ def sabr_swaption_vol(strike, forward, expiry, alpha, beta, rho, nu):
 
 
 def price_swaption_sabr(fixed_rate, forward_rate, expiry, swap_tenor, r, notional, option_type,
-                         alpha, beta, rho, nu, discount_rate=None, forecast_rate=None):
+                         alpha, beta, rho, nu, discount_rate=None, forecast_rate=None,
+                         discount_curve=None, forecast_curve=None, evaluation_date=None):
     """Price a European swaption using a SABR-implied vol at the given
     strike (`fixed_rate`) instead of a directly-supplied flat sigma.
 
@@ -140,8 +141,12 @@ def price_swaption_sabr(fixed_rate, forward_rate, expiry, swap_tenor, r, notiona
         rate the smile is centered on," which are conceptually different
         even though they are often close in practice.
     expiry, swap_tenor, r, notional, option_type, discount_rate,
-        forecast_rate: same meaning as options_calc.rates.swaption.price
-        / options_calc.rates._engine.price_swaption_only.
+        forecast_rate, discount_curve, forecast_curve, evaluation_date:
+        same meaning as options_calc.rates.swaption.price /
+        options_calc.rates._engine.price_swaption_only -- including the
+        discount_curve/forecast_curve mutual-exclusivity-with-their-flat-
+        rate-counterpart validation and the evaluation_date restore-on-
+        exit behavior.
     alpha, beta, rho, nu: SABR parameters for THIS swaption's own
         expiry/tenor bucket -- see module docstring. No calibration is
         performed; these are used as given.
@@ -160,4 +165,6 @@ def price_swaption_sabr(fixed_rate, forward_rate, expiry, swap_tenor, r, notiona
     return price_swaption_only(
         fixed_rate, expiry, swap_tenor, r, sigma, notional, option_type,
         discount_rate=discount_rate, forecast_rate=forecast_rate,
+        discount_curve=discount_curve, forecast_curve=forecast_curve,
+        evaluation_date=evaluation_date,
     )

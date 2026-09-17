@@ -63,27 +63,68 @@ package:
   engine's own ``ql.Actual365Fixed()`` day counter) and passes only ``T``
   through, so a historical ``as_of`` prices identically regardless of the
   machine's real clock date.
+
+- **Calendar-aware year fraction (Phase 7, 2026-09-17).** Every FX pricer
+  function below now takes an optional ``pair`` argument. When given, T is
+  computed via ``engine/options/calendars.py::calendar_year_fraction``
+  (business-day count on the pair's joint settlement calendar) instead of
+  the plain Act/365 calendar-day count, falling back to the plain count
+  for a non-G10 pair or when ``calendar_aware=False`` is passed explicitly
+  -- see calendars.py's own module docstring for the full rationale.
+  ``pair=None`` (every call site predating this phase, and every test that
+  doesn't pass it) keeps the exact old plain-days behavior, so nothing
+  above this phase changes silently.
+
+- **delta_convention / DELTA_PA (Phase 7).** ``options_calc.fx.g10.
+  recommended_delta`` picks, per pair, whether the market-standard delta
+  is raw spot delta or premium-adjusted delta (``fx/_conventions.py``'s
+  ``delta_premium_adjusted = delta - price/S``, always computed by every
+  vendored fx/*.py pricer regardless of pair). ``OptionPriceResult`` now
+  carries both the always-computed ``delta_premium_adjusted`` field and a
+  ``delta_convention`` string (``'RAW'`` | ``'PREMIUM_ADJUSTED'`` for a
+  recognized G10 pair, ``'UNKNOWN'`` when ``pair`` is ``None`` or not a
+  recognized G10 pair). This does NOT change what the ``DELTA`` mark
+  means -- ``store.py`` still writes ``result.delta`` (raw) there
+  unconditionally, per CLAUDE.md's DELTA convention and this module's own
+  rule above. ``store.py`` additionally writes a ``DELTA_PA`` mark from
+  ``result.delta_premium_adjusted`` only when ``delta_convention ==
+  'PREMIUM_ADJUSTED'`` -- see that module.
 """
 from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 
 @dataclass
 class OptionPriceResult:
     """One pricer call's output, already converted to this app's units.
 
-    premium: base-ccy fraction of notional (see module docstring) -- the
-        number directly comparable to ``trades.price`` / marks_official's
-        PREMIUM value.
+    premium: for FX (price_fx_*), base-ccy fraction of notional (see
+        module docstring) -- the number directly comparable to
+        ``trades.price`` / marks_official's PREMIUM value. For equity/
+        commodity (price_equity_option / price_commodity_option), this is
+        instead the UNSCALED quote-ccy price per 1 unit of underlying (no
+        base-fraction conversion -- there is no "base notional" concept
+        for a single-underlying equity/commodity option the way there is
+        for an FX pair) -- store.py multiplies by ``instruments.
+        multiplier`` when writing the PREMIUM mark for those asset
+        classes. See store.py's equity/commodity section for the full
+        unit contrast with FX.
     delta, gamma, theta, vega, rho: the vendored pricer's own fields,
         passed through unmodified (see module docstring on sign / units).
     quote_price: the vendored pricer's raw ``price`` field (quote ccy per
-        1 unit of base notional) before the premium conversion above --
-        kept for callers (e.g. engine/options/structures.py) that need the
-        pre-conversion quote-ccy value.
+        1 unit of base notional/underlying) before the premium conversion
+        above -- kept for callers (e.g. engine/options/structures.py) that
+        need the pre-conversion quote-ccy value. Equal to `premium` for
+        equity/commodity results (no conversion applied there).
+    delta_premium_adjusted: FX only -- ``delta - price/S`` (always present
+        on an FX result; 0.0 for equity/commodity, which have no such
+        concept). See module docstring's "delta_convention / DELTA_PA"
+        section.
+    delta_convention: FX only -- 'RAW' | 'PREMIUM_ADJUSTED' | 'UNKNOWN'.
+        'N/A' for equity/commodity results.
     """
 
     premium: float
@@ -93,6 +134,8 @@ class OptionPriceResult:
     vega: float
     rho: float
     quote_price: float
+    delta_premium_adjusted: float = 0.0
+    delta_convention: str = "UNKNOWN"
 
 
 def year_fraction(as_of: datetime.date, expiry: datetime.date) -> float:
@@ -108,7 +151,23 @@ def year_fraction(as_of: datetime.date, expiry: datetime.date) -> float:
     return days / 365.0
 
 
-def _to_result(raw: Dict[str, float], spot: float) -> OptionPriceResult:
+def _delta_convention(pair: Optional[str]) -> str:
+    """'RAW' | 'PREMIUM_ADJUSTED' for a recognized G10 pair (via
+    options_calc.fx.g10.pair_convention's premium_currency), else
+    'UNKNOWN' -- see module docstring's "delta_convention / DELTA_PA"
+    section."""
+    if pair is None:
+        return "UNKNOWN"
+    from .vendor.options_calc.fx.g10 import pair_convention
+
+    try:
+        convention = pair_convention(pair)
+    except ValueError:
+        return "UNKNOWN"
+    return "PREMIUM_ADJUSTED" if convention["premium_currency"] == "base" else "RAW"
+
+
+def _to_result(raw: Dict[str, float], spot: float, pair: Optional[str] = None) -> OptionPriceResult:
     return OptionPriceResult(
         premium=raw["price"] / spot,
         delta=raw["delta"],
@@ -117,7 +176,43 @@ def _to_result(raw: Dict[str, float], spot: float) -> OptionPriceResult:
         vega=raw["vega"],
         rho=raw["rho"],
         quote_price=raw["price"],
+        delta_premium_adjusted=raw.get("delta_premium_adjusted", 0.0),
+        delta_convention=_delta_convention(pair),
     )
+
+
+def _to_result_plain(raw: Dict[str, float]) -> OptionPriceResult:
+    """Equity/commodity result builder -- no spot-fraction premium
+    conversion, no delta convention (FX-only concept). See
+    OptionPriceResult's own docstring for the unit contrast."""
+    return OptionPriceResult(
+        premium=raw["price"],
+        delta=raw["delta"],
+        gamma=raw["gamma"],
+        theta=raw["theta"],
+        vega=raw["vega"],
+        rho=raw["rho"],
+        quote_price=raw["price"],
+        delta_premium_adjusted=0.0,
+        delta_convention="N/A",
+    )
+
+
+def _resolve_T(pair: Optional[str], as_of: datetime.date, expiry: datetime.date, calendar_aware: bool) -> float:
+    """T for a price_fx_* call -- calendar-aware (engine/options/
+    calendars.py::calendar_year_fraction) when `pair` is given and
+    `calendar_aware` is True, else the plain Act/365 day count below (see
+    module docstring's "Calendar-aware year fraction" section)."""
+    if pair is not None and calendar_aware:
+        from .calendars import calendar_year_fraction
+
+        try:
+            return calendar_year_fraction(pair, as_of, expiry)
+        except ValueError as exc:
+            if "is not after" in str(exc):
+                raise  # a genuine bad-date error, not a non-G10-pair fallback case
+            # non-G10 pair -- fall back to plain days below.
+    return year_fraction(as_of, expiry)
 
 
 def price_fx_vanilla(
@@ -129,13 +224,16 @@ def price_fx_vanilla(
     foreign_rate: float,
     vol: float,
     option_type: str,
+    pair: Optional[str] = None,
+    calendar_aware: bool = True,
 ) -> OptionPriceResult:
-    """European vanilla FX call/put (Garman-Kohlhagen, closed-form)."""
+    """European vanilla FX call/put (Garman-Kohlhagen, closed-form). See
+    module docstring for `pair` / `calendar_aware`."""
     from .vendor.options_calc.fx import european
 
-    T = year_fraction(as_of, expiry)
+    T = _resolve_T(pair, as_of, expiry, calendar_aware)
     raw = european.price(spot, strike, T, domestic_rate, foreign_rate, vol, option_type.lower())
-    return _to_result(raw, spot)
+    return _to_result(raw, spot, pair)
 
 
 def price_fx_digital(
@@ -148,15 +246,18 @@ def price_fx_digital(
     vol: float,
     option_type: str,
     cash_payout: float = 1.0,
+    pair: Optional[str] = None,
+    calendar_aware: bool = True,
 ) -> OptionPriceResult:
     """European cash-or-nothing digital FX option. cash_payout is in quote
     ccy, same units as the vanilla pricer's raw price -- divided by spot the
-    same way to land in the base-notional-fraction premium convention."""
+    same way to land in the base-notional-fraction premium convention.
+    See module docstring for `pair` / `calendar_aware`."""
     from .vendor.options_calc.fx import digital
 
-    T = year_fraction(as_of, expiry)
+    T = _resolve_T(pair, as_of, expiry, calendar_aware)
     raw = digital.price(spot, strike, T, domestic_rate, foreign_rate, vol, option_type.lower(), cash_payout)
-    return _to_result(raw, spot)
+    return _to_result(raw, spot, pair)
 
 
 def price_fx_american(
@@ -168,15 +269,18 @@ def price_fx_american(
     foreign_rate: float,
     vol: float,
     option_type: str,
+    pair: Optional[str] = None,
+    calendar_aware: bool = True,
 ) -> OptionPriceResult:
     """American-exercise FX vanilla (800-step Cox-Ross-Rubinstein binomial
     tree, bump-and-reprice Greeks -- noticeably slower than the closed-form
-    European pricer; expect this call to take on the order of a second)."""
+    European pricer; expect this call to take on the order of a second).
+    See module docstring for `pair` / `calendar_aware`."""
     from .vendor.options_calc.fx import american
 
-    T = year_fraction(as_of, expiry)
+    T = _resolve_T(pair, as_of, expiry, calendar_aware)
     raw = american.price(spot, strike, T, domestic_rate, foreign_rate, vol, option_type.lower())
-    return _to_result(raw, spot)
+    return _to_result(raw, spot, pair)
 
 
 def price_fx_asian(
@@ -189,6 +293,8 @@ def price_fx_asian(
     vol: float,
     option_type: str,
     n_fixings: int = 12,
+    pair: Optional[str] = None,
+    calendar_aware: bool = True,
 ) -> OptionPriceResult:
     """Arithmetic-average Asian FX option (Monte Carlo, 20,000 paths, fixed
     seed -- keep the vendored default path count, per task instruction; this
@@ -205,9 +311,9 @@ def price_fx_asian(
     rather than approximated."""
     from .vendor.options_calc.fx import asian
 
-    T = year_fraction(as_of, expiry)
+    T = _resolve_T(pair, as_of, expiry, calendar_aware)
     raw = asian.price(spot, strike, T, domestic_rate, foreign_rate, vol, option_type.lower(), n_fixings=n_fixings)
-    return _to_result(raw, spot)
+    return _to_result(raw, spot, pair)
 
 
 def price_fx_barrier(
@@ -222,6 +328,8 @@ def price_fx_barrier(
     option_type: str,
     barrier_type: str,
     rebate: float = 0.0,
+    pair: Optional[str] = None,
+    calendar_aware: bool = True,
 ) -> OptionPriceResult:
     """European barrier FX option (KIKO structure). ``barrier_type`` must be
     one of 'up-and-out', 'down-and-out', 'up-and-in', 'down-and-in' -- the
@@ -233,12 +341,12 @@ def price_fx_barrier(
     # import -- alias to keep the two unambiguous.
     from .vendor.options_calc.fx import barrier as _barrier_mod
 
-    T = year_fraction(as_of, expiry)
+    T = _resolve_T(pair, as_of, expiry, calendar_aware)
     raw = _barrier_mod.price(
         spot, strike, barrier, T, domestic_rate, foreign_rate, vol,
         option_type=option_type.lower(), barrier_type=barrier_type, rebate=rebate,
     )
-    return _to_result(raw, spot)
+    return _to_result(raw, spot, pair)
 
 
 def price_fx_one_touch(
@@ -251,6 +359,8 @@ def price_fx_one_touch(
     vol: float,
     direction: str,
     cash_payout: float = 1.0,
+    pair: Optional[str] = None,
+    calendar_aware: bool = True,
 ) -> OptionPriceResult:
     """One-touch FX option: pays cash_payout (quote ccy) if barrier is ever
     touched before expiry. ``direction`` is 'up' or 'down' -- store.py's
@@ -265,9 +375,9 @@ def price_fx_one_touch(
     # into it.
     from .vendor.options_calc.fx import one_touch as _one_touch_fn
 
-    T = year_fraction(as_of, expiry)
+    T = _resolve_T(pair, as_of, expiry, calendar_aware)
     raw = _one_touch_fn(spot, barrier, T, domestic_rate, foreign_rate, vol, cash_payout=cash_payout, direction=direction)
-    return _to_result(raw, spot)
+    return _to_result(raw, spot, pair)
 
 
 def price_fx_no_touch(
@@ -280,6 +390,8 @@ def price_fx_no_touch(
     vol: float,
     direction: str,
     cash_payout: float = 1.0,
+    pair: Optional[str] = None,
+    calendar_aware: bool = True,
 ) -> OptionPriceResult:
     """No-touch FX option: pays cash_payout (quote ccy) if barrier is NEVER
     touched before expiry. Arguments: same as price_fx_one_touch."""
@@ -287,6 +399,104 @@ def price_fx_no_touch(
     # the FUNCTION, not a submodule.
     from .vendor.options_calc.fx import no_touch as _no_touch_fn
 
-    T = year_fraction(as_of, expiry)
+    T = _resolve_T(pair, as_of, expiry, calendar_aware)
     raw = _no_touch_fn(spot, barrier, T, domestic_rate, foreign_rate, vol, cash_payout=cash_payout, direction=direction)
-    return _to_result(raw, spot)
+    return _to_result(raw, spot, pair)
+
+
+# --------------------------------------------------------------------------- equity (Phase 7)
+
+_EQUITY_STRIKE_PAYOFFS = {"VANILLA", "DIGITAL", "AMERICAN", "ASIAN", "BARRIER_KI", "BARRIER_KO"}
+_EQUITY_BARRIER_PAYOFFS = {"BARRIER_KI", "BARRIER_KO", "ONE_TOUCH", "NO_TOUCH"}
+
+
+def price_equity_option(
+    payoff: str,
+    spot: float,
+    strike: Optional[float],
+    expiry: datetime.date,
+    as_of: datetime.date,
+    r: float,
+    vol: float,
+    option_type: Optional[str] = None,
+    dividend_yield: float = 0.0,
+    barrier: Optional[float] = None,
+    barrier_type: Optional[str] = None,
+    rebate: float = 0.0,
+    cash_payout: float = 1.0,
+    direction: Optional[str] = None,
+    n_fixings: int = 12,
+) -> OptionPriceResult:
+    """Dispatch to the vendored equity/*.py pricer matching `payoff`
+    (same payoff vocabulary as store.py's FX dispatch: VANILLA, DIGITAL,
+    AMERICAN, ASIAN, BARRIER_KI, BARRIER_KO, ONE_TOUCH, NO_TOUCH).
+    `premium` on the returned result is UNSCALED quote-ccy price per 1
+    unit of the underlying (see OptionPriceResult's own docstring) --
+    store.py multiplies by `instruments.multiplier` when writing the
+    PREMIUM mark."""
+    from .vendor.options_calc import equity
+
+    T = year_fraction(as_of, expiry)
+
+    if payoff == "VANILLA":
+        raw = equity.price_european(spot, strike, T, r, vol, option_type.lower(), dividend_yield)
+    elif payoff == "AMERICAN":
+        raw = equity.price_american(spot, strike, T, r, vol, option_type.lower(), dividend_yield)
+    elif payoff == "ASIAN":
+        raw = equity.price_asian(spot, strike, T, r, vol, option_type.lower(), dividend_yield, n_fixings)
+    elif payoff in ("BARRIER_KI", "BARRIER_KO"):
+        raw = equity.price_barrier(
+            spot, strike, barrier, T, r, vol, option_type.lower(), barrier_type, rebate, dividend_yield,
+        )
+    elif payoff == "DIGITAL":
+        raw = equity.price_digital(spot, strike, T, r, vol, option_type.lower(), cash_payout, dividend_yield)
+    elif payoff in ("ONE_TOUCH", "NO_TOUCH"):
+        # Same fx/__init__.py-style submodule/function name shadow as
+        # price_fx_one_touch/price_fx_no_touch above -- equity/__init__.py
+        # also does `from .one_touch import one_touch, no_touch`.
+        from .vendor.options_calc.equity import one_touch as _one_touch_fn, no_touch as _no_touch_fn
+
+        fn = _one_touch_fn if payoff == "ONE_TOUCH" else _no_touch_fn
+        raw = fn(spot, barrier, T, r, vol, cash_payout=cash_payout, direction=direction, dividend_yield=dividend_yield)
+    else:
+        raise ValueError(f"unsupported equity payoff {payoff!r}")
+
+    return _to_result_plain(raw)
+
+
+# --------------------------------------------------------------------------- commodity (Phase 7)
+
+def price_commodity_option(
+    payoff: str,
+    future_price: float,
+    strike: float,
+    expiry: datetime.date,
+    as_of: datetime.date,
+    r: float,
+    vol: float,
+    option_type: str,
+    n_fixings: int = 12,
+) -> OptionPriceResult:
+    """Dispatch to the vendored commodity/*.py pricer (Black-76: the
+    underlying is a futures/forward price, `dividend_rate` is fixed equal
+    to `r` inside the vendored pricers -- see MODELS.md's commodity
+    section). Only VANILLA / AMERICAN / ASIAN are implemented upstream --
+    no barrier/digital/one-touch commodity pricer exists in
+    options_calc/commodity/ (MODELS.md's "Planned" section notes this as
+    a known gap, not something skipped here). `premium` is UNSCALED
+    quote-ccy price per 1 unit of underlying, same as price_equity_option
+    -- see OptionPriceResult's docstring."""
+    from .vendor.options_calc import commodity
+
+    T = year_fraction(as_of, expiry)
+
+    if payoff == "VANILLA":
+        raw = commodity.price_european(future_price, strike, T, r, vol, option_type.lower())
+    elif payoff == "AMERICAN":
+        raw = commodity.price_american(future_price, strike, T, r, vol, option_type.lower())
+    elif payoff == "ASIAN":
+        raw = commodity.price_asian(future_price, strike, T, r, vol, option_type.lower(), n_fixings)
+    else:
+        raise ValueError(f"unsupported commodity payoff {payoff!r} (only VANILLA/AMERICAN/ASIAN exist upstream)")
+
+    return _to_result_plain(raw)

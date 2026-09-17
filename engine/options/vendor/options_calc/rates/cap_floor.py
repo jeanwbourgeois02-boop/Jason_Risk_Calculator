@@ -29,26 +29,55 @@ instead of one flat sigma. Flagged as a roadmap item, not attempted here
 (see MODELS.md).
 """
 
-from ._engine import price_cap_floor_only, finite_difference_multi_curve_greeks, _resolve_curve_rates
+from ._engine import (
+    build_curve,
+    price_cap_floor_only,
+    finite_difference_multi_curve_greeks,
+    finite_difference_curve_greeks,
+    evaluation_date_scope,
+    _resolve_curve_rates,
+    _validate_curve_and_rate,
+)
 
 _DEFAULT_NOTIONAL = 1_000_000.0
 _DEFAULT_FREQ_MONTHS = 6
 
 
-def _price(notional, strike, start, tenor, r, sigma, freq_months, cap, discount_rate=None, forecast_rate=None):
+def _price(notional, strike, start, tenor, r, sigma, freq_months, cap,
+           discount_rate=None, forecast_rate=None, discount_curve=None, forecast_curve=None,
+           evaluation_date=None):
+    _validate_curve_and_rate(discount_rate, discount_curve, "discount")
+    _validate_curve_and_rate(forecast_rate, forecast_curve, "forecast")
+
+    if discount_curve is not None or forecast_curve is not None:
+        with evaluation_date_scope(evaluation_date) as today:
+            d_curve0 = discount_curve if discount_curve is not None else build_curve(
+                today, r if discount_rate is None else discount_rate)
+            f_curve0 = forecast_curve if forecast_curve is not None else build_curve(
+                today, r if forecast_rate is None else forecast_rate)
+
+            def price_only(T_, d_, f_, sigma_):
+                return price_cap_floor_only(
+                    notional, strike, T_, tenor, r, sigma_, freq_months, cap,
+                    discount_curve=d_, forecast_curve=f_, evaluation_date=today,
+                )
+
+            return finite_difference_curve_greeks(price_only, start, d_curve0, f_curve0, sigma)
+
     d_rate, f_rate = _resolve_curve_rates(r, discount_rate, forecast_rate)
 
     def price_only(T_, d_, f_, sigma_):
         return price_cap_floor_only(
             notional, strike, T_, tenor, d_, sigma_, freq_months, cap,
-            discount_rate=d_, forecast_rate=f_,
+            discount_rate=d_, forecast_rate=f_, evaluation_date=evaluation_date,
         )
 
     return finite_difference_multi_curve_greeks(price_only, start, d_rate, f_rate, sigma)
 
 
 def price_cap(strike, start, tenor, r, sigma, notional=_DEFAULT_NOTIONAL, freq_months=_DEFAULT_FREQ_MONTHS,
-              discount_rate=None, forecast_rate=None):
+              discount_rate=None, forecast_rate=None, discount_curve=None, forecast_curve=None,
+              evaluation_date=None):
     """Price an interest rate cap.
 
     strike: the cap rate (annual, decimal, e.g. 0.04 = 4%).
@@ -61,7 +90,8 @@ def price_cap(strike, start, tenor, r, sigma, notional=_DEFAULT_NOTIONAL, freq_m
         6-month periods, e.g. tenor=5 with the default freq gives 10
         caplets).
     r: flat rate (annual, decimal) used for both discounting and
-        forecasting when discount_rate/forecast_rate are not given.
+        forecasting when none of discount_rate/forecast_rate/
+        discount_curve/forecast_curve are given.
     sigma: flat LOGNORMAL vol applied to every caplet (see module
         docstring's "FLAT VOL ACROSS THE STRIP" caveat).
     notional: total notional (same for every period -- amortizing/
@@ -69,17 +99,28 @@ def price_cap(strike, start, tenor, r, sigma, notional=_DEFAULT_NOTIONAL, freq_m
     freq_months: caplet reset frequency, in months (6 = semiannual, the
         default; 3 = quarterly, etc).
     discount_rate: optional override for the discounting rate (e.g. an
-        OIS/SOFR-style rate). Defaults to `r`.
+        OIS/SOFR-style rate). Defaults to `r`. Mutually exclusive with
+        discount_curve.
     forecast_rate: optional override for the rate used to forecast the
         floating index each caplet resets against (e.g. a term-SOFR/
         LIBOR-style rate). Defaults to `r`. See _engine.py's MULTI-CURVE
         SUPPORT docstring section for what this does and doesn't model.
+        Mutually exclusive with forecast_curve.
+    discount_curve, forecast_curve: optional `ql.YieldTermStructureHandle`
+        overrides, used directly instead of a flat FlatForward -- see
+        _engine.py's CURVE-INPUT SUPPORT docstring section. Passing a
+        curve together with its flat-rate counterpart raises ValueError.
+    evaluation_date: optional ql.Date; None reproduces "evaluate as of
+        today". Always restored to its prior value on exit -- see
+        _engine.py's evaluation_date_scope.
 
     Returns {price, delta, gamma, theta, vega, rho}, all bump-and-reprice
-    (see _engine.py's finite_difference_multi_curve_greeks docstring).
-    'delta' is sensitivity to forecast_rate, 'rho' to discount_rate, each
-    holding the other fixed -- genuinely separable risks whenever the two
-    rates differ.
+    (see _engine.py's finite_difference_multi_curve_greeks docstring for
+    the flat-rate path, finite_difference_curve_greeks for the curve-input
+    path used whenever either discount_curve or forecast_curve is given).
+    'delta' is sensitivity to forecast_rate/forecast_curve, 'rho' to
+    discount_rate/discount_curve, each holding the other fixed --
+    genuinely separable risks whenever the two differ.
 
     KNOWN QUIRK: theta will come back as exactly 0.0 for `start` values
     very close to 0 (an "immediately starting" cap). That is because
@@ -93,14 +134,19 @@ def price_cap(strike, start, tenor, r, sigma, notional=_DEFAULT_NOTIONAL, freq_m
     realistic ones).
     """
     return _price(notional, strike, start, tenor, r, sigma, freq_months, cap=True,
-                  discount_rate=discount_rate, forecast_rate=forecast_rate)
+                  discount_rate=discount_rate, forecast_rate=forecast_rate,
+                  discount_curve=discount_curve, forecast_curve=forecast_curve,
+                  evaluation_date=evaluation_date)
 
 
 def price_floor(strike, start, tenor, r, sigma, notional=_DEFAULT_NOTIONAL, freq_months=_DEFAULT_FREQ_MONTHS,
-                 discount_rate=None, forecast_rate=None):
+                 discount_rate=None, forecast_rate=None, discount_curve=None, forecast_curve=None,
+                 evaluation_date=None):
     """Price an interest rate floor. Same inputs/outputs as price_cap --
     see its docstring. A floor pays off when the forward rate falls below
     `strike`, a cap when it rises above -- the strip-of-options structure
     and every simplification/caveat are otherwise identical."""
     return _price(notional, strike, start, tenor, r, sigma, freq_months, cap=False,
-                  discount_rate=discount_rate, forecast_rate=forecast_rate)
+                  discount_rate=discount_rate, forecast_rate=forecast_rate,
+                  discount_curve=discount_curve, forecast_curve=forecast_curve,
+                  evaluation_date=evaluation_date)

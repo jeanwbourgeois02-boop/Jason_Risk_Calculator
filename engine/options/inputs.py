@@ -13,16 +13,29 @@ a guessed number.
   e.g. 'EURSEK092326C-197727826', and has no SPOT mark of its own).
   Missing -> ``get_spot`` returns ``None``.
 
-- **Rates**: ``options_calc.fx.rate_curves.get_domestic_and_foreign_rates``.
-  LOUDLY NOT LIVE DATA -- see that module's own docstring: these are
-  plausible-looking illustrative placeholders for each G10 currency's
-  short-term rate, not a snapshot of any real date. A future phase
-  (Phase 5/7 of the options_calc merge plan, ``docs/open-questions.md``
-  item 61) replaces this with a real curve/rate feed; nothing computed with
-  today's rates should be read as production-accurate P&L. Only the 45
-  recognized G10 pairs (``options_calc.fx.g10``) are supported; any other
-  pair currency raises inside the vendored lookup, caught here and turned
-  into a skip.
+- **Rates (Phase 7, 2026-09-17; manual fallback added Phase 7.1,
+  2026-09-17)**: ``engine/options/rates.py::resolve_fx_rates`` -- REAL
+  continuously-compounded zero rates to the option's own expiry, read off
+  the bootstrapped OIS discount curve of each currency (``curve_quotes`` ->
+  ``engine.rates.curves.build_curve_set``, same source-preference rule as
+  ``engine/rates/store.py::_read_curve_quotes``). domestic = quote ccy,
+  foreign = base ccy -- see rates.py's own docstring for why this is exact
+  for Garman-Kohlhagen discounting. The vendored
+  ``options_calc.fx.rate_curves`` illustrative placeholder is NO LONGER
+  used anywhere in this input-resolution path -- deleted from here, not
+  patched in the vendored copy (vendor/ is never edited). A currency with
+  no OIS convention (``engine/rates/conventions.py::CCY_RFR`` -- seven
+  currencies: USD/EUR/GBP/JPY/CHF/CAD/AUD, NOT the full 45-pair G10 set
+  ``options_calc.fx.g10`` covers), such as SEK/NOK/TWD/ZAR, or a supported
+  currency simply missing ``curve_quotes`` rows on ``as_of``, falls back to
+  a manual rate (``rates.py::manual_rates``, ``set_manual_rate``) -- exact
+  expiry first, then a ccy-wide flat ``'*'`` entry -- before giving up with
+  reason ``"no curve/rate <CCY>"``. Never a fabricated rate: an unresolved
+  currency with no manual entry still skips the trade. Each resolved rate's
+  provenance (``rates.py::RateInput.source_kind`` in
+  ``{OIS_CURVE, MANUAL_EXPIRY, MANUAL_FLAT}``) is carried onto
+  ``MarketInputs.domestic_rate_source`` / ``.foreign_rate_source`` the same
+  way ``VolInput`` is carried onto ``MarketInputs.vol_source`` below.
 
 - **Vol**: resolved by ``resolve_vol`` with a documented priority, never
   blending sources for one trade (Phase 5b, 2026-09-17):
@@ -292,6 +305,11 @@ class MarketInputs:
     foreign_rate: float
     vol: float
     vol_source: Optional[VolInput] = None
+    # Rate provenance (Phase 7.1, 2026-09-17) -- see rates.py::RateInput /
+    # module docstring's "Rates" section. None only when resolve_fx_rates
+    # was bypassed (no current caller does this).
+    domestic_rate_source: "Optional[RateInput]" = None
+    foreign_rate_source: "Optional[RateInput]" = None
 
 
 @dataclass
@@ -307,23 +325,25 @@ def resolve_market_inputs(
     expiry_iso: str,
     strike: Optional[float] = None,
     surface_cache: Optional[dict] = None,
+    curve_cache: Optional[dict] = None,
 ) -> InputsResult:
     """Resolve spot/rates/vol for one (as_of, pair, expiry[, strike]).
     Returns InputsResult(None, reason) on the first missing input --
     callers (store.py) turn that straight into a skipped PricingOutcome.
     `strike` and `surface_cache` feed the vol resolver's SMILE path (see
-    `resolve_vol`); both are optional so existing callers that only need
-    ATM/MANUAL vol keep working unchanged."""
+    `resolve_vol`); `curve_cache` feeds the rates resolver's per-(as_of,
+    ccy) OIS curve cache (see engine/options/rates.py) -- all optional so
+    existing callers keep working unchanged."""
     spot = get_spot(conn, as_of, pair)
     if spot is None:
         return InputsResult(None, "no SPOT mark")
 
-    from .vendor.options_calc.fx.rate_curves import get_domestic_and_foreign_rates
+    from .rates import resolve_fx_rates
 
-    try:
-        domestic_rate, foreign_rate = get_domestic_and_foreign_rates(pair)
-    except ValueError:
-        return InputsResult(None, f"no rate data for pair {pair!r} (not a recognized G10 pair)")
+    fx_rates, reason = resolve_fx_rates(conn, as_of, pair, expiry_iso, curve_cache)
+    if fx_rates is None:
+        return InputsResult(None, reason)
+    domestic_rate, foreign_rate = fx_rates.domestic_rate, fx_rates.foreign_rate
 
     vol_input = resolve_vol(conn, as_of, pair, expiry_iso, strike, spot, domestic_rate, foreign_rate, surface_cache)
     if vol_input is None:
@@ -332,4 +352,6 @@ def resolve_market_inputs(
     return InputsResult(MarketInputs(
         spot=spot, domestic_rate=domestic_rate, foreign_rate=foreign_rate,
         vol=vol_input.vol, vol_source=vol_input,
+        domestic_rate_source=fx_rates.domestic_rate_source,
+        foreign_rate_source=fx_rates.foreign_rate_source,
     ))

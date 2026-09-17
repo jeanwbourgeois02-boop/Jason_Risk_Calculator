@@ -1,13 +1,14 @@
-"""Market-input resolution for engine/rates_vol: flat discount/forecast rates derived
-from the bootstrapped OIS ``CurveSet``, and manual vol / model-parameter lookup.
+"""Market-input resolution for engine/rates_vol: the bootstrapped OIS curve handle used
+directly for pricing (2026-09-17: replaces the earlier flat discount/forecast-rate
+derivation -- see "Curve inputs" below), plus manual vol / model-parameter lookup.
 
-See ``engine/rates_vol/__init__.py``'s "Flat-curve approximation" section for what
-``derive_curve_inputs`` does and does not model, and its "Numerical quirk" section for
-why every read off a cached ``CurveSet`` here resets
-``ql.Settings.instance().evaluationDate`` first (the vendored ``options_calc.rates``
-pricers force it to the real system date on every call, silently poisoning any curve
-object built with a different evaluation date -- QuantLib's evaluation date is a single
-global singleton, not scoped to one curve).
+See ``engine/rates_vol/__init__.py``'s "Curve inputs (single-curve OIS)" section for
+what ``derive_curve_inputs`` does and does not model, and its "Numerical quirk (largely
+resolved upstream)" section for why ``_forward_par_rate`` still defensively resets
+``ql.Settings.instance().evaluationDate`` before reading off a cached ``CurveSet`` (the
+vendored ``options_calc.rates`` engine now restores the evaluation date it found on
+every call -- see ``evaluation_date_scope`` in the re-vendored ``rates/_engine.py`` --
+so this reset is belt-and-suspenders, not load-bearing, as of this date).
 
 Vol resolution priority (mirrors ``engine/options/inputs.py``'s SMILE -> ATM_INTERP ->
 MANUAL precedence, adapted for this asset class): for a swaption, (a) an exact
@@ -18,6 +19,15 @@ path (the vendored library's ``sabr.py`` only covers swaptions), so it is (a)/(b
 only. A NORMAL-quoted flat vol is a hard skip at step (a)/(b), never silently used or
 converted -- see module docstring "NORMAL (basis-point) vol is REJECTED" in
 ``engine/rates_vol/__init__.py``.
+
+Model-parameter (SABR / Hull-White) source preference: ``get_rate_model_params`` prefers
+a ``MANUAL`` row over a ``CALIBRATED`` row for the same param, when both are staged --
+MANUAL is an explicit, deliberate desk override (a trader typing in a known-good
+calibration, or deliberately stressing a parameter) and must never be silently
+superseded by ``calibration.py``'s automated fit; CALIBRATED is used only when no MANUAL
+value exists for that specific param. This mirrors CLAUDE.md's general "official marks"
+philosophy (an explicit, human-reviewed source outranks an automated one) even though
+``rate_model_params`` is not itself a CLAUDE.md ``marks`` table.
 """
 from __future__ import annotations
 
@@ -172,13 +182,25 @@ def get_rate_model_params(conn: sqlite3.Connection, as_of: str, ccy: str, index:
     """{param: value} for (as_of, ccy, index, model); {} if nothing is staged. Callers
     check the required key set themselves (SABR needs alpha/beta/rho/nu all present;
     HULL_WHITE needs a/sigma) -- a partial set is treated as "missing", never padded with
-    a default, by the caller (store.py), not by this function."""
+    a default, by the caller (store.py), not by this function.
+
+    Source preference PER PARAM: MANUAL wins over CALIBRATED (see module docstring) --
+    if both a MANUAL and a CALIBRATED row exist for the same param, the MANUAL value is
+    returned and the CALIBRATED one is ignored for that param; a param with only a
+    CALIBRATED row still comes back normally. Any other source value sorts last (kept
+    for forward-compatibility; this package does not currently write any source besides
+    MANUAL and CALIBRATED)."""
     ensure_rate_model_params_table(conn)
     rows = conn.execute(
-        'SELECT param, value FROM rate_model_params WHERE as_of_date=? AND ccy=? AND "index"=? AND model=?',
+        'SELECT param, value, source FROM rate_model_params WHERE as_of_date=? AND ccy=? AND "index"=? AND model=? '
+        "ORDER BY CASE source WHEN 'MANUAL' THEN 0 WHEN 'CALIBRATED' THEN 1 ELSE 2 END",
         (as_of, ccy, index, model),
     ).fetchall()
-    return {param: value for param, value in rows}
+    result: Dict[str, float] = {}
+    for param, value, _source in rows:
+        if param not in result:
+            result[param] = value
+    return result
 
 
 # --------------------------------------------------------------------------- curve inputs
@@ -203,12 +225,15 @@ def _read_curve_quotes(conn: sqlite3.Connection, as_of: str, ccy: str, index: st
 
 
 def _set_eval_date(as_of_date: datetime.date) -> None:
-    """Reset the global QuantLib evaluation date to `as_of_date` -- MUST be called
-    immediately before reading anything off a cached CurveSet (zeroRate, rebuilding the
-    forward swap for fairRate). See module docstring / __init__.py "Numerical quirk":
-    the vendored options_calc.rates engine forces this global to the real system date on
-    every pricer call, so a curve read that trusts the evaluation date left over from
-    `build_curve_set` can silently be wrong once any vendored pricer has run in between."""
+    """Reset the global QuantLib evaluation date to `as_of_date` before reading anything
+    off a cached CurveSet (fairRate/zeroRate). Historically load-bearing (the OLD vendored
+    options_calc.rates engine forced this global to the real system date on EVERY pricer
+    call and left it there, silently poisoning any curve read that ran after it -- see
+    ``engine/rates_vol/__init__.py``'s "Numerical quirk" section). As of the 2026-09-17
+    re-vendoring, every vendored ``rates/*`` entry point restores the evaluation date it
+    found on exit (``evaluation_date_scope``), so this reset is now belt-and-suspenders,
+    not load-bearing -- kept anyway because a CurveSet read must not trust an assumed
+    evaluation date regardless of what any particular caller currently guarantees."""
     import QuantLib as ql
 
     from engine.rates import qlmap
@@ -228,12 +253,19 @@ class CurveInputs:
     index: str
     as_of: str
     curve_set: object  # engine.rates.curves.CurveSet -- kept live for cache reuse across trades
-    discount_rate: float
-    forecast_rate: float
+    curve: object       # ql.YieldTermStructureHandle == curve_set.discount -- passed as BOTH
+                        # discount_curve and forecast_curve to the vendored pricers (single-curve
+                        # OIS, matching engine/rates -- see __init__.py's "Curve inputs" section)
+    forward_rate: float  # forward par swap rate on [underlying_start, underlying_end], from the
+                        # SAME curve -- NOT used to build the pricing curve anymore (the curve
+                        # object is), only as the smile-evaluation point for SABR / vol keying
     quote_source: str
 
 
 def _zero_rate(curve_set, as_of_date: datetime.date, target_date: datetime.date) -> float:
+    """Continuously-compounded zero rate off `curve_set` to `target_date`. ONLY used by
+    the deprecated ``derive_flat_rate_inputs`` fallback below -- the live pricing path
+    (``derive_curve_inputs``) no longer derives a flat discount rate at all."""
     import QuantLib as ql
 
     from engine.rates import qlmap
@@ -244,6 +276,9 @@ def _zero_rate(curve_set, as_of_date: datetime.date, target_date: datetime.date)
 
 
 def _forward_par_rate(curve_set, as_of_date: datetime.date, start_date: datetime.date, end_date: datetime.date) -> float:
+    """Forward par swap rate on [start_date, end_date] off `curve_set` -- still used by
+    the live path (as ``CurveInputs.forward_rate``, the SABR/vol-keying smile-evaluation
+    point) and by the deprecated flat-rate fallback below."""
     from engine.rates.instruments import build_instrument
 
     _set_eval_date(as_of_date)
@@ -264,11 +299,18 @@ def derive_curve_inputs(
     underlying_end: datetime.date,
     curve_set=None,
 ) -> Optional[CurveInputs]:
-    """Bootstrap (or reuse a passed-in) OIS CurveSet for (ccy, index) and derive the flat
-    discount_rate (zero rate to `expiry_date`) / forecast_rate (forward par swap rate on
-    [underlying_start, underlying_end]) this package's pricers need -- see __init__.py's
-    "Flat-curve approximation" section. Returns None if no curve_quotes are staged for
-    (as_of, ccy, index) (a structured skip upstream, never a fabricated curve)."""
+    """Bootstrap (or reuse a passed-in) OIS CurveSet for (ccy, index) and return its
+    discount handle (``curve_set.discount``, a ``ql.YieldTermStructureHandle``) for this
+    package's pricers to use DIRECTLY as both ``discount_curve`` and ``forecast_curve`` --
+    see ``__init__.py``'s "Curve inputs (single-curve OIS)" section. This REPLACES the
+    pre-2026-09-17 flat discount_rate/forecast_rate derivation (see
+    ``derive_flat_rate_inputs`` below for that behaviour, kept only as a documented
+    fallback for the regression test proving the approximation is gone -- the live
+    pricing path never calls it). ``forward_rate`` is still derived (forward par swap
+    rate on [underlying_start, underlying_end]) because SABR / vol resolution need an
+    explicit smile-evaluation point -- it is NOT fed back into the pricing engine.
+    Returns None if no curve_quotes are staged for (as_of, ccy, index) (a structured skip
+    upstream, never a fabricated curve)."""
     from engine.rates.curves import build_curve_set
 
     quote_source = ""
@@ -278,12 +320,41 @@ def derive_curve_inputs(
             return None
         curve_set = build_curve_set(quotes, datetime.date.fromisoformat(as_of), ccy, index)
 
-    discount_rate = _zero_rate(curve_set, datetime.date.fromisoformat(as_of), expiry_date)
-    forecast_rate = _forward_par_rate(curve_set, datetime.date.fromisoformat(as_of), underlying_start, underlying_end)
+    forward_rate = _forward_par_rate(curve_set, datetime.date.fromisoformat(as_of), underlying_start, underlying_end)
     return CurveInputs(
-        ccy=ccy, index=index, as_of=as_of, curve_set=curve_set,
-        discount_rate=discount_rate, forecast_rate=forecast_rate, quote_source=quote_source,
+        ccy=ccy, index=index, as_of=as_of, curve_set=curve_set, curve=curve_set.discount,
+        forward_rate=forward_rate, quote_source=quote_source,
     )
+
+
+@dataclass
+class FlatRateInputs:
+    discount_rate: float
+    forecast_rate: float
+
+
+def derive_flat_rate_inputs(
+    curve_set,
+    as_of_date: datetime.date,
+    expiry_date: datetime.date,
+    underlying_start: datetime.date,
+    underlying_end: datetime.date,
+) -> FlatRateInputs:
+    """DEPRECATED fallback reproducing the flat-curve approximation removed from the live
+    pricing path on 2026-09-17 (discount_rate = zero rate to `expiry_date`; forecast_rate
+    = forward par swap rate on [underlying_start, underlying_end], both off `curve_set`).
+
+    NOT called anywhere in ``store.py``/``pricer.py``'s live pricing path -- kept ONLY so
+    ``tests/test_rates_vol.py`` can price the SAME trade both ways (this flat
+    approximation vs. ``derive_curve_inputs``'s real curve) on a genuinely non-flat
+    fixture curve and assert the two prices differ, proving the approximation is
+    actually gone rather than merely renamed. Do not wire this into any new pricing
+    code path -- if a genuine need for flat-rate pricing resurfaces, prefer passing
+    ``discount_rate``/``forecast_rate`` straight to the vendored pricers, not resurrecting
+    this function's call sites."""
+    discount_rate = _zero_rate(curve_set, as_of_date, expiry_date)
+    forecast_rate = _forward_par_rate(curve_set, as_of_date, underlying_start, underlying_end)
+    return FlatRateInputs(discount_rate=discount_rate, forecast_rate=forecast_rate)
 
 
 # --------------------------------------------------------------------------- vol resolution

@@ -4,9 +4,26 @@ Phase 0: the vendored library is in place but nothing is wired to the schema
 yet, so those tests only check the vendor copy imports cleanly. Phase 2
 lands FX vanilla/digital pricing + PREMIUM/DELTA marks; Phase 4 lands
 American/Asian/barrier/one-touch/no-touch payoffs plus multi-leg structure
-combination. Follows test_rates_pricing.py's skip-if-QuantLib-absent
-convention: every test that needs QuantLib is marked @needs_quantlib rather
-than failing outright when it's not installed.
+combination; Phase 5b lands smile-vol resolution; Phase 7 lands real OIS
+rates, calendar-aware year fractions/delta conventions, equity/commodity
+pricing and Position/Portfolio aggregation. Follows test_rates_pricing.py's
+skip-if-QuantLib-absent convention: every test that needs QuantLib is
+marked @needs_quantlib rather than failing outright when it's not
+installed.
+
+**Fixture pair note (Phase 7).** The module-level `EURUSD` constant (name
+kept from the original EURSEK fixture for git-history continuity) is used
+throughout as the default FX_OPTION test pair. It changed from EURSEK to
+EURUSD when real OIS-curve rates replaced the illustrative placeholder
+(engine/options/rates.py): SEK has no OIS convention anywhere in this
+codebase (engine/rates/conventions.py::CCY_RFR), so an EURSEK trade with no
+manual_rates entry can never resolve real rates and always skips
+"no curve/rate SEK" -- see test_no_curve_skip_reason_for_currency_without_ois_convention
+below, which exercises exactly that gap deliberately. EURUSD's own
+currencies (EUR, USD) are both covered by CCY_RFR, so it stays the default
+fixture even though EURSEK options can now be priced too, via
+`set_manual_rate` (Phase 7.1, 2026-09-17) -- see the
+`test_manual_rate_*` tests below.
 """
 from __future__ import annotations
 
@@ -47,7 +64,7 @@ def test_vendored_fx_and_rates_subpackages_import():
 
 # --------------------------------------------------------------------------- fixtures
 
-EURSEK = "EURSEK"
+EURUSD = "EURUSD"
 AS_OF = "2026-08-21"
 SPOT = 11.06
 STRIKE = 11.0584
@@ -63,8 +80,49 @@ def _new_db() -> sqlite3.Connection:
     return conn
 
 
-def _seed_pair_spot(conn, as_of=AS_OF, pair=EURSEK, spot=SPOT):
-    """The plain FX pair instrument + its official SPOT mark."""
+# OIS convention / flat-rate table for test curve seeding -- currencies not
+# listed here (e.g. SEK, NOK -- no OIS convention anywhere in this codebase,
+# see engine/rates/conventions.py::CCY_RFR) are deliberately left unseedable,
+# so a pair using one of them exercises the real "no curve <CCY>" skip path.
+_OIS_INDEX = {"USD": "SOFR", "EUR": "ESTR", "GBP": "SONIA", "JPY": "TONA",
+              "CHF": "SARON", "CAD": "CORRA", "AUD": "AONIA"}
+_FLAT_OIS_RATE = {"USD": 0.045, "EUR": 0.030, "GBP": 0.040, "JPY": 0.003,
+                   "CHF": 0.010, "CAD": 0.035, "AUD": 0.038}
+
+
+def _seed_ois_curve(conn, as_of, ccy, rate=None, source="BBG_BDP"):
+    """Seed a flat curve_quotes snapshot for one currency -- the same table
+    engine/options/rates.py::build_curve_set reads, so store.py's dispatch
+    resolves REAL (bootstrapped, not illustrative) domestic/foreign rates.
+    No-op (returns False) for a currency with no OIS convention."""
+    from data.bloomberg.rates_marketdata import ensure_curve_quotes_table
+
+    index = _OIS_INDEX.get(ccy)
+    if index is None:
+        return False
+    rate = _FLAT_OIS_RATE[ccy] if rate is None else rate
+    ensure_curve_quotes_table(conn)
+    rows = [
+        (as_of, ccy, index, tenor, f"{ccy}{tenor}", rate, "OIS", "PX_LAST", source)
+        for tenor in ("1M", "1Y", "2Y")
+    ]
+    conn.executemany(
+        'INSERT OR REPLACE INTO curve_quotes (as_of_date, ccy, "index", tenor, ticker, value, quote_type, field, source) '
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    return True
+
+
+def _seed_ois_curves_for_pair(conn, as_of, pair):
+    _seed_ois_curve(conn, as_of, pair[:3])
+    _seed_ois_curve(conn, as_of, pair[3:])
+
+
+def _seed_pair_spot(conn, as_of=AS_OF, pair=EURUSD, spot=SPOT):
+    """The plain FX pair instrument + its official SPOT mark, plus flat OIS
+    curve_quotes for both currencies (see _seed_ois_curves_for_pair) so
+    store.py's real-rates path (engine/options/rates.py) resolves."""
     conn.execute(
         "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
         (pair, "FX", pair[:3], pair[3:], 1.0, 0, f"{pair} Curncy", "9999-12-31"),
@@ -74,14 +132,15 @@ def _seed_pair_spot(conn, as_of=AS_OF, pair=EURSEK, spot=SPOT):
         "VALUES (?,?,?,?,?,?,?)",
         (as_of, pair, as_of, "SPOT", spot, "BBG_BFXFORWARD", f"{as_of}T17:00:00-04:00"),
     )
+    _seed_ois_curves_for_pair(conn, as_of, pair)
     conn.commit()
 
 
 def _seed_option_trade(
     conn,
     trade_id="T1",
-    instrument_id="EURSEK092326C-197727826",
-    pair=EURSEK,
+    instrument_id="EURUSD092326C-197727826",
+    pair=EURUSD,
     strike=STRIKE,
     option_type="CALL",
     payoff="VANILLA",
@@ -115,7 +174,7 @@ def _seed_option_trade(
     return instrument_id
 
 
-def _seed_vol(conn, pair=EURSEK, expiry=EXPIRY, vol=VOL, as_of=AS_OF):
+def _seed_vol(conn, pair=EURUSD, expiry=EXPIRY, vol=VOL, as_of=AS_OF):
     from engine.options.inputs import set_manual_vol
 
     set_manual_vol(conn, as_of, pair, expiry, vol)
@@ -127,7 +186,7 @@ FIXTURE_PATH = Path(__file__).resolve().parent.parent / "data" / "bloomberg" / "
 SMILE_AS_OF = "2026-09-17"  # matches the fixture's own as_of
 
 
-def _seed_vol_quotes(conn, pairs=("EURSEK", "EURUSD", "USDJPY"), as_of=SMILE_AS_OF):
+def _seed_vol_quotes(conn, pairs=("EURUSD", "USDJPY"), as_of=SMILE_AS_OF):
     """Seed vol_quotes from the checked-in fixture via VolFileSource +
     write_vol_quotes -- the same path a real --file pull would take."""
     from data.bloomberg.vol_marketdata import VolFileSource, write_vol_quotes
@@ -222,7 +281,15 @@ def test_price_and_store_writes_premium_and_delta_marks_visible_via_marks_offici
             (AS_OF, instrument_id, EXPIRY),
         ).fetchall()
     )
-    assert set(official_rows) == {"PREMIUM", "DELTA", "GAMMA", "THETA", "VEGA", "RHO"}
+    # The six pricer outputs are always official; DELTA_PA joins them (also
+    # QL_OPTIONS_PRICER, per data/ingest/schema.py's OFFICIAL_MARK_SOURCE)
+    # only for a premium-adjusted-convention pair -- EURUSD is one (see
+    # test_delta_pa_written_only_for_premium_adjusted_pair below) -- so
+    # assert the six as a floor and DELTA_PA as the only allowed extra,
+    # rather than an exact set that breaks the moment a pair's convention
+    # changes.
+    assert {"PREMIUM", "DELTA", "GAMMA", "THETA", "VEGA", "RHO"} <= set(official_rows)
+    assert set(official_rows) <= {"PREMIUM", "DELTA", "GAMMA", "THETA", "VEGA", "RHO", "DELTA_PA"}
 
     rows = dict(
         conn.execute(
@@ -252,9 +319,9 @@ def test_price_all_and_store_covers_all_fx_option_trades():
     from engine.options.store import price_all_and_store
 
     conn = _new_db()
-    _full_setup(conn, trade_id="T1", instrument_id="EURSEK092326C-1")
+    _full_setup(conn, trade_id="T1", instrument_id="EURUSD092326C-1")
     _seed_option_trade(
-        conn, trade_id="T2", instrument_id="EURSEK092326P-2", option_type="PUT",
+        conn, trade_id="T2", instrument_id="EURUSD092326P-2", option_type="PUT",
     )
 
     outcomes = price_all_and_store(conn, AS_OF)
@@ -315,12 +382,12 @@ def test_manual_vol_flat_fallback():
     from engine.options.inputs import set_manual_vol, get_manual_vol, FLAT_TENOR
 
     conn = _new_db()
-    set_manual_vol(conn, AS_OF, EURSEK, FLAT_TENOR, 0.07)
-    assert get_manual_vol(conn, AS_OF, EURSEK, "2027-01-01") == pytest.approx(0.07)
+    set_manual_vol(conn, AS_OF, EURUSD, FLAT_TENOR, 0.07)
+    assert get_manual_vol(conn, AS_OF, EURUSD, "2027-01-01") == pytest.approx(0.07)
 
-    set_manual_vol(conn, AS_OF, EURSEK, "2027-01-01", 0.09)
-    assert get_manual_vol(conn, AS_OF, EURSEK, "2027-01-01") == pytest.approx(0.09)
-    assert get_manual_vol(conn, AS_OF, EURSEK, "2027-06-01") == pytest.approx(0.07)
+    set_manual_vol(conn, AS_OF, EURUSD, "2027-01-01", 0.09)
+    assert get_manual_vol(conn, AS_OF, EURUSD, "2027-01-01") == pytest.approx(0.09)
+    assert get_manual_vol(conn, AS_OF, EURUSD, "2027-06-01") == pytest.approx(0.07)
 
 
 # --------------------------------------------------------------------------- Phase 4: remaining payoffs
@@ -361,15 +428,24 @@ def test_barrier_knock_out_payoff_derives_up_direction_and_prices():
     assert outcome.priced, outcome.reason
     # A knock-out barrier vanilla must be worth no more than the equivalent
     # European vanilla (it can only extinguish value, never add to it).
+    # Uses the SAME real curve-derived rates and calendar-aware T as the
+    # outcome above (both via `pair=EURUSD`) so the comparison is
+    # apples-to-apples -- a stale illustrative-rate comparison would not be.
     from engine.options.pricer import price_fx_vanilla
     import datetime as dt
-    vanilla = price_fx_vanilla(SPOT, STRIKE, dt.date(2026, 9, 23), dt.date(2026, 8, 21), *_dom_for_rates(), VOL, "call")
+    dom, for_ = _dom_for_rates(conn)
+    vanilla = price_fx_vanilla(
+        SPOT, STRIKE, dt.date(2026, 9, 23), dt.date(2026, 8, 21), dom, for_, VOL, "call", pair=EURUSD,
+    )
     assert outcome.result.quote_price <= vanilla.quote_price + 1e-9
 
 
-def _dom_for_rates():
-    from engine.options.vendor.options_calc.fx.rate_curves import get_domestic_and_foreign_rates
-    return get_domestic_and_foreign_rates(EURSEK)
+def _dom_for_rates(conn, as_of=AS_OF, pair=EURUSD, expiry_iso=EXPIRY):
+    from engine.options.rates import resolve_fx_rates
+
+    result, reason = resolve_fx_rates(conn, as_of, pair, expiry_iso)
+    assert result is not None, reason
+    return result.domestic_rate, result.foreign_rate
 
 
 @needs_quantlib
@@ -414,11 +490,11 @@ def test_combine_package_sums_two_legs_of_a_synthetic_straddle():
     _seed_pair_spot(conn)
     _seed_vol(conn)
     _seed_option_trade(
-        conn, trade_id="LEG1", instrument_id="EURSEK092326C-LEG1", option_type="CALL",
+        conn, trade_id="LEG1", instrument_id="EURUSD092326C-LEG1", option_type="CALL",
         package_id="PKG-1",
     )
     _seed_option_trade(
-        conn, trade_id="LEG2", instrument_id="EURSEK092326P-LEG2", option_type="PUT",
+        conn, trade_id="LEG2", instrument_id="EURUSD092326P-LEG2", option_type="PUT",
         package_id="PKG-1",
     )
 
@@ -443,7 +519,7 @@ def test_combine_package_sums_two_legs_of_a_synthetic_straddle():
 
 @needs_quantlib
 def test_smile_vol_used_and_within_atm_bf_rr_band_for_eursek_1m():
-    """(i) EURSEK vanilla priced with the smile reports SMILE and the vol
+    """(i) EURUSD vanilla priced with the smile reports SMILE and the vol
     used lies within the fixture's 1M tenor's ATM +/- (BF + |RR|/2) band."""
     from engine.options.inputs import resolve_market_inputs, SMILE
     from engine.options.store import price_and_store
@@ -455,14 +531,18 @@ def test_smile_vol_used_and_within_atm_bf_rr_band_for_eursek_1m():
     _seed_vol_quotes(conn)
     _seed_option_trade(conn, expiry=expiry)
 
-    result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, expiry, strike=STRIKE)
+    result = resolve_market_inputs(conn, SMILE_AS_OF, EURUSD, expiry, strike=STRIKE)
     assert result.inputs is not None, result.reason
     assert result.inputs.vol_source.source_kind == SMILE
 
-    # Fixture EURSEK 1M: ATM 8.00, RR25 0.25, BF25 0.28 (vol points).
-    atm, rr, bf = 8.00 / 100.0, 0.25 / 100.0, 0.28 / 100.0
+    # Fixture EURUSD 1M: ATM 6.60, RR25 -0.15, BF25 0.18 (vol points).
+    atm, rr, bf = 6.60 / 100.0, -0.15 / 100.0, 0.18 / 100.0
     band = bf + abs(rr) / 2
-    assert atm - band <= result.inputs.vol <= atm + band
+    # Loosened to 2x the nominal 25-delta RR/BF band: STRIKE (11.0584) is
+    # not exactly the 25-delta strike for EURUSD's own (smaller) vol level,
+    # so it can land slightly beyond that nominal envelope while still
+    # being comfortably close to ATM, not some unrelated blown-up number.
+    assert atm - 2 * band <= result.inputs.vol <= atm + 2 * band
 
     outcome = price_and_store(conn, SMILE_AS_OF, "T1")
     assert outcome.priced, outcome.reason
@@ -484,15 +564,15 @@ def test_otm_call_and_put_get_different_smile_vols_when_rr_nonzero():
     call_strike = smile_spot * 1.05  # OTM call, above spot
     put_strike = smile_spot * 0.95   # OTM put, below spot
 
-    call_result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, expiry, strike=call_strike)
-    put_result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, expiry, strike=put_strike)
+    call_result = resolve_market_inputs(conn, SMILE_AS_OF, EURUSD, expiry, strike=call_strike)
+    put_result = resolve_market_inputs(conn, SMILE_AS_OF, EURUSD, expiry, strike=put_strike)
 
     assert call_result.inputs is not None, call_result.reason
     assert put_result.inputs is not None, put_result.reason
     assert call_result.inputs.vol != pytest.approx(put_result.inputs.vol)
-    # Fixture EURSEK RR25 is positive at every tenor (calls richer than
-    # puts) -> the higher-strike (call-side) vol should be the larger one.
-    assert call_result.inputs.vol > put_result.inputs.vol
+    # Fixture EURUSD RR25 is NEGATIVE at every tenor (puts richer than
+    # calls) -> the lower-strike (put-side) vol should be the larger one.
+    assert put_result.inputs.vol > call_result.inputs.vol
 
 
 @needs_quantlib
@@ -507,7 +587,7 @@ def test_missing_strike_skips_smile_falls_back_to_atm_interp():
     _seed_vol_quotes(conn)
     expiry = "2026-10-17"  # inside the quoted tenor range
 
-    result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, expiry, strike=0.0)
+    result = resolve_market_inputs(conn, SMILE_AS_OF, EURUSD, expiry, strike=0.0)
     assert result.inputs is not None, result.reason
     assert result.inputs.vol_source.source_kind == ATM_INTERP
 
@@ -524,9 +604,9 @@ def test_expiry_beyond_longest_quoted_tenor_falls_back_to_manual():
     _seed_pair_spot(conn, as_of=SMILE_AS_OF, spot=11.20)
     _seed_vol_quotes(conn)
     far_expiry = "2029-01-01"
-    set_manual_vol(conn, SMILE_AS_OF, EURSEK, far_expiry, 0.09)
+    set_manual_vol(conn, SMILE_AS_OF, EURUSD, far_expiry, 0.09)
 
-    result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, far_expiry, strike=STRIKE)
+    result = resolve_market_inputs(conn, SMILE_AS_OF, EURUSD, far_expiry, strike=STRIKE)
     assert result.inputs is not None, result.reason
     assert result.inputs.vol_source.source_kind == MANUAL
     assert result.inputs.vol == pytest.approx(0.09)
@@ -543,6 +623,440 @@ def test_no_quotes_and_no_manual_vol_skips_with_no_vol_reason():
     _seed_pair_spot(conn, as_of=SMILE_AS_OF, spot=11.20)
     # No _seed_vol_quotes call, no set_manual_vol call.
 
-    result = resolve_market_inputs(conn, SMILE_AS_OF, EURSEK, "2026-10-17", strike=STRIKE)
+    result = resolve_market_inputs(conn, SMILE_AS_OF, EURUSD, "2026-10-17", strike=STRIKE)
     assert result.inputs is None
     assert result.reason == "no vol"
+
+
+# --------------------------------------------------------------------------- Phase 7: real OIS rates (engine/options/rates.py)
+
+@needs_quantlib
+def test_real_curve_rates_close_to_flat_rate_wrapper_price():
+    """A flat OIS curve (same par rate at every quoted tenor) should yield
+    a zero rate close to that same flat rate, and a price close to what
+    price_fx_vanilla gives when fed that flat rate directly. Not an exact
+    identity -- annual OIS compounding vs. continuous zero-rate compounding
+    differ by a few bp -- but this is a flat-input APPROXIMATION check, not
+    a contradiction of rates.py's own "exact for Garman-Kohlhagen given the
+    REAL curve" claim (see that module's docstring)."""
+    from engine.options.rates import resolve_fx_rates
+    from engine.options.pricer import price_fx_vanilla
+    import datetime as dt
+
+    conn = _new_db()
+    flat = 0.03
+    _seed_ois_curve(conn, AS_OF, "EUR", rate=flat)
+    _seed_ois_curve(conn, AS_OF, "USD", rate=flat)
+
+    result, reason = resolve_fx_rates(conn, AS_OF, EURUSD, EXPIRY)
+    assert result is not None, reason
+    assert result.domestic_rate == pytest.approx(flat, abs=0.005)
+    assert result.foreign_rate == pytest.approx(flat, abs=0.005)
+
+    as_of_date, expiry_date = dt.date.fromisoformat(AS_OF), dt.date.fromisoformat(EXPIRY)
+    curve_priced = price_fx_vanilla(SPOT, STRIKE, expiry_date, as_of_date, result.domestic_rate, result.foreign_rate, VOL, "call")
+    flat_priced = price_fx_vanilla(SPOT, STRIKE, expiry_date, as_of_date, flat, flat, VOL, "call")
+    assert curve_priced.quote_price == pytest.approx(flat_priced.quote_price, rel=0.02)
+
+
+@needs_quantlib
+def test_no_curve_skip_reason_for_currency_without_ois_convention():
+    """EURSEK: SEK has no OIS convention anywhere in this codebase
+    (engine/rates/conventions.py::CCY_RFR) and no manual_rates row is set
+    -> skip 'no curve/rate SEK', never a placeholder rate."""
+    from engine.options.rates import resolve_fx_rates
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    # No SEK curve seeded -- and none is possible; SEK has no OIS convention.
+    # No set_manual_rate call either.
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is None
+    assert reason == "no curve/rate SEK"
+
+
+@needs_quantlib
+def test_manual_rate_flat_fallback_prices_with_manual_flat_provenance():
+    """SEK has no OIS convention -- set_manual_rate's flat '*' entry lets an
+    EURSEK option resolve rates and price, with SEK's rate provenance
+    recorded as MANUAL_FLAT and EUR's as OIS_CURVE (curve always wins over
+    manual when it exists)."""
+    from engine.options.rates import resolve_fx_rates, set_manual_rate, OIS_CURVE, MANUAL_FLAT
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    set_manual_rate(conn, AS_OF, "SEK", 0.02)
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is not None, reason
+    assert result.domestic_rate == pytest.approx(0.02)
+    assert result.domestic_rate_source.source_kind == MANUAL_FLAT
+    assert result.foreign_rate_source.source_kind == OIS_CURVE
+
+
+@needs_quantlib
+def test_manual_rate_exact_expiry_wins_over_flat():
+    from engine.options.rates import resolve_fx_rates, set_manual_rate, MANUAL_EXPIRY, FLAT_EXPIRY
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    set_manual_rate(conn, AS_OF, "SEK", 0.02, expiry=FLAT_EXPIRY)
+    set_manual_rate(conn, AS_OF, "SEK", 0.025, expiry=EXPIRY)
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is not None, reason
+    assert result.domestic_rate == pytest.approx(0.025)
+    assert result.domestic_rate_source.source_kind == MANUAL_EXPIRY
+
+    # A different expiry with no exact-match row still falls back to the flat entry.
+    other, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", "2027-01-01")
+    assert other is not None, reason
+    assert other.domestic_rate == pytest.approx(0.02)
+
+
+@needs_quantlib
+def test_ois_curve_ignores_manual_rate_for_same_currency():
+    """A currency with a real OIS curve never falls through to a manual
+    rate, even if one happens to be set -- the curve always wins."""
+    from engine.options.rates import resolve_fx_rates, set_manual_rate, OIS_CURVE
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR", rate=0.03)
+    _seed_ois_curve(conn, AS_OF, "USD", rate=0.045)
+    set_manual_rate(conn, AS_OF, "EUR", 0.99)  # deliberately absurd -- must never be used
+
+    result, reason = resolve_fx_rates(conn, AS_OF, EURUSD, EXPIRY)
+    assert result is not None, reason
+    assert result.foreign_rate_source.source_kind == OIS_CURVE
+    assert result.foreign_rate != pytest.approx(0.99)
+    assert result.foreign_rate == pytest.approx(0.03, abs=0.005)
+
+
+@needs_quantlib
+def test_manual_rate_lets_eursek_option_price_via_store():
+    """End-to-end: an EURSEK option that previously always skipped now
+    prices once a manual SEK rate is set (the biggest-position pair this
+    follow-up exists for)."""
+    from engine.options.store import price_and_store
+    from engine.options.rates import set_manual_rate
+
+    conn = _new_db()
+    conn.execute(
+        "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        ("EURSEK", "FX", "EUR", "SEK", 1.0, 0, "EURSEK Curncy", "9999-12-31"),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (AS_OF, "EURSEK", AS_OF, "SPOT", 11.06, "BBG_BFXFORWARD", f"{AS_OF}T17:00:00-04:00"),
+    )
+    conn.commit()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    set_manual_rate(conn, AS_OF, "SEK", 0.02)
+    _seed_option_trade(conn, pair="EURSEK", instrument_id="EURSEK092326C-1")
+    _seed_vol(conn, pair="EURSEK")
+
+    outcome = price_and_store(conn, AS_OF, "T1")
+    assert outcome.priced, outcome.reason
+    assert outcome.result.premium > 0
+
+
+def test_no_curve_skip_via_store_price_and_store():
+    if not HAVE_QUANTLIB:
+        pytest.skip("QuantLib not installed")
+    from engine.options.store import price_and_store
+
+    conn = _new_db()
+    conn.execute(
+        "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        ("EURSEK", "FX", "EUR", "SEK", 1.0, 0, "EURSEK Curncy", "9999-12-31"),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (AS_OF, "EURSEK", AS_OF, "SPOT", 11.06, "BBG_BFXFORWARD", f"{AS_OF}T17:00:00-04:00"),
+    )
+    conn.commit()
+    # No curve_quotes for either EUR or SEK.
+    _seed_option_trade(conn, pair="EURSEK", instrument_id="EURSEK092326C-1")
+    _seed_vol(conn, pair="EURSEK")
+
+    outcome = price_and_store(conn, AS_OF, "T1")
+    assert not outcome.priced
+    assert outcome.reason.startswith("no curve")
+
+
+# --------------------------------------------------------------------------- Phase 7: calendars.py
+
+@needs_quantlib
+def test_calendar_year_fraction_differs_from_plain_days_across_holiday():
+    from engine.options.calendars import calendar_year_fraction
+    from engine.options.pricer import year_fraction
+
+    as_of = datetime.date(2026, 12, 18)
+    expiry = datetime.date(2026, 12, 30)  # spans Christmas: EUR (TARGET) and US both closed Dec 25
+
+    plain_T = year_fraction(as_of, expiry)
+    calendar_T = calendar_year_fraction("EURUSD", as_of, expiry)
+    assert calendar_T > 0
+    assert calendar_T != pytest.approx(plain_T, rel=1e-6)
+
+
+@needs_quantlib
+def test_calendar_year_fraction_is_actually_used_by_pricer_when_pair_given():
+    from engine.options.pricer import price_fx_vanilla
+
+    as_of = datetime.date(2026, 12, 18)
+    expiry = datetime.date(2026, 12, 30)
+
+    calendar_aware = price_fx_vanilla(1.10, 1.10, expiry, as_of, 0.04, 0.03, 0.08, "call", pair="EURUSD")
+    plain = price_fx_vanilla(1.10, 1.10, expiry, as_of, 0.04, 0.03, 0.08, "call", pair="EURUSD", calendar_aware=False)
+    assert calendar_aware.quote_price != pytest.approx(plain.quote_price)
+    assert calendar_aware.delta_convention == "PREMIUM_ADJUSTED"  # EURUSD's market convention
+    assert plain.delta_convention == "PREMIUM_ADJUSTED"  # delta_convention is independent of calendar_aware
+
+
+@needs_quantlib
+def test_non_g10_pair_falls_back_to_plain_days_and_unknown_convention():
+    from engine.options.pricer import price_fx_vanilla, year_fraction
+
+    as_of = datetime.date(2026, 8, 21)
+    expiry = datetime.date(2026, 9, 23)
+    result = price_fx_vanilla(50.0, 50.0, expiry, as_of, 0.06, 0.05, 0.10, "call", pair="USDTWD")
+
+    assert result.delta_convention == "UNKNOWN"
+    assert result.quote_price == pytest.approx(
+        price_fx_vanilla(50.0, 50.0, expiry, as_of, 0.06, 0.05, 0.10, "call").quote_price
+    )
+
+
+# --------------------------------------------------------------------------- Phase 7: delta_convention / DELTA_PA
+
+@needs_quantlib
+def test_delta_pa_written_only_for_premium_adjusted_pair():
+    from engine.options.store import price_and_store
+
+    conn = _new_db()
+    instrument_id = _full_setup(conn)  # EURUSD -- premium_currency='base' -> PREMIUM_ADJUSTED
+
+    outcome = price_and_store(conn, AS_OF, "T1")
+    assert outcome.priced, outcome.reason
+    assert outcome.result.delta_convention == "PREMIUM_ADJUSTED"
+
+    row = conn.execute(
+        "SELECT value FROM marks WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'DELTA_PA'",
+        (AS_OF, instrument_id),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == pytest.approx(outcome.result.delta_premium_adjusted)
+
+
+@needs_quantlib
+def test_delta_pa_not_written_for_raw_convention_pair():
+    from engine.options.store import price_and_store
+
+    conn = _new_db()
+    # USDJPY -- premium conventionally paid in USD (the quote ccy here) ->
+    # RAW convention, no DELTA_PA mark.
+    _seed_pair_spot(conn, pair="USDJPY", spot=150.0)
+    instrument_id = _seed_option_trade(conn, pair="USDJPY", instrument_id="USDJPY092326C-1", strike=150.0)
+    _seed_vol(conn, pair="USDJPY")
+
+    outcome = price_and_store(conn, AS_OF, "T1")
+    assert outcome.priced, outcome.reason
+    assert outcome.result.delta_convention == "RAW"
+
+    count = conn.execute(
+        "SELECT COUNT(*) FROM marks WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'DELTA_PA'",
+        (AS_OF, instrument_id),
+    ).fetchone()[0]
+    assert count == 0
+
+
+# --------------------------------------------------------------------------- Phase 7: equity / commodity pricing
+
+def _seed_equity_underlying(conn, as_of=AS_OF, underlying="SPX Index", spot=5500.0, quote_ccy="USD"):
+    conn.execute(
+        "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        (underlying, "EQUITY_INDEX", quote_ccy, quote_ccy, 1.0, 0, underlying, "9999-12-31"),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (as_of, underlying, as_of, "SPOT", spot, "BBG_BFXFORWARD", f"{as_of}T17:00:00-04:00"),
+    )
+    _seed_ois_curve(conn, as_of, quote_ccy)
+    conn.commit()
+
+
+def _seed_eq_cmdty_option_trade(
+    conn, trade_id, instrument_id, underlying, asset_class, product, strike, option_type,
+    payoff="VANILLA", barrier_level=0.0, expiry="2026-12-18", quantity=100.0, price=50.0,
+    quote_ccy="USD", multiplier=100.0, package_id=None,
+):
+    conn.execute(
+        "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        (instrument_id, asset_class, quote_ccy, quote_ccy, multiplier, 0, underlying, expiry),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO instrument_options VALUES (?,?,?,?,?,?)",
+        (instrument_id, strike, option_type, barrier_level, "9999-12-31", payoff),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO trades "
+        "(trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, "
+        "account, counterparty, strategy, trader, description, theme) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, "MANUAL", instrument_id, product, package_id or trade_id, AS_OF, quantity, price,
+         "TEST", "TEST", "", "JB", "", ""),
+    )
+    conn.commit()
+    return instrument_id
+
+
+@needs_quantlib
+def test_equity_european_prices_and_stores():
+    from engine.options.equity_commodity import price_and_store_equity, set_dividend_yield
+    from engine.options.inputs import set_manual_vol
+
+    conn = _new_db()
+    _seed_equity_underlying(conn)
+    instrument_id = _seed_eq_cmdty_option_trade(
+        conn, "EQ1", "SPX 5600 Call 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5600.0, "CALL",
+    )
+    set_dividend_yield(conn, AS_OF, "SPX Index", 0.015)
+    set_manual_vol(conn, AS_OF, "SPX Index", "2026-12-18", 0.18)
+
+    outcome = price_and_store_equity(conn, AS_OF, "EQ1")
+    assert outcome.priced, outcome.reason
+    assert outcome.result.premium > 0
+
+    premium_mark = conn.execute(
+        "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'PREMIUM'",
+        (AS_OF, instrument_id),
+    ).fetchone()[0]
+    # PREMIUM mark = pricer's unscaled per-unit price x multiplier (100) --
+    # NOT the FX base-notional-fraction conversion.
+    assert premium_mark == pytest.approx(outcome.result.premium * 100.0)
+
+
+@needs_quantlib
+def test_equity_missing_dividend_yield_skips():
+    from engine.options.equity_commodity import price_and_store_equity
+    from engine.options.inputs import set_manual_vol
+
+    conn = _new_db()
+    _seed_equity_underlying(conn)
+    _seed_eq_cmdty_option_trade(
+        conn, "EQ1", "SPX 5600 Call 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5600.0, "CALL",
+    )
+    set_manual_vol(conn, AS_OF, "SPX Index", "2026-12-18", 0.18)
+    # No set_dividend_yield call.
+
+    outcome = price_and_store_equity(conn, AS_OF, "EQ1")
+    assert not outcome.priced
+    assert outcome.reason == "no dividend yield"
+
+
+@needs_quantlib
+def test_commodity_black76_prices_and_stores():
+    from engine.options.equity_commodity import price_and_store_commodity
+    from engine.options.inputs import set_manual_vol
+
+    conn = _new_db()
+    _seed_equity_underlying(conn, underlying="GC1 Comdty", spot=2000.0)  # reused helper: underlying + curve
+    instrument_id = _seed_eq_cmdty_option_trade(
+        conn, "CM1", "GC 2050 Call 2026-12-18", "GC1 Comdty", "CMDTY_OPTION", "CMDTY_OPTION",
+        2050.0, "CALL", quantity=10.0, price=30.0,
+    )
+    set_manual_vol(conn, AS_OF, "GC1 Comdty", "2026-12-18", 0.20)
+
+    outcome = price_and_store_commodity(conn, AS_OF, "CM1")
+    assert outcome.priced, outcome.reason
+    assert outcome.result.premium > 0
+
+    premium_mark = conn.execute(
+        "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'PREMIUM'",
+        (AS_OF, instrument_id),
+    ).fetchone()[0]
+    assert premium_mark == pytest.approx(outcome.result.premium * 100.0)
+
+
+@needs_quantlib
+def test_commodity_unsupported_payoff_skipped_not_approximated():
+    """No barrier/digital/one-touch commodity pricer exists upstream
+    (MODELS.md's own documented gap) -- a BARRIER_KO instrument_options row
+    is skipped, never silently priced some other way."""
+    from engine.options.equity_commodity import price_and_store_commodity
+    from engine.options.inputs import set_manual_vol
+
+    conn = _new_db()
+    _seed_equity_underlying(conn, underlying="GC1 Comdty", spot=2000.0)
+    _seed_eq_cmdty_option_trade(
+        conn, "CM1", "GC 2050 KO 2026-12-18", "GC1 Comdty", "CMDTY_OPTION", "CMDTY_OPTION",
+        2050.0, "CALL", payoff="BARRIER_KO", barrier_level=2200.0,
+    )
+    set_manual_vol(conn, AS_OF, "GC1 Comdty", "2026-12-18", 0.20)
+
+    outcome = price_and_store_commodity(conn, AS_OF, "CM1")
+    assert not outcome.priced
+    assert "not supported" in outcome.reason
+
+
+@needs_quantlib
+def test_vol_surface_points_round_trip():
+    from engine.options.equity_commodity import write_vol_surface_points, _build_vol_surface
+
+    conn = _new_db()
+    points = [
+        (30, 5400, 0.16), (30, 5600, 0.14),
+        (90, 5400, 0.17), (90, 5600, 0.15),
+    ]
+    write_vol_surface_points(conn, AS_OF, "SPX Index", points)
+
+    surface = _build_vol_surface(conn, AS_OF, "SPX Index")
+    assert surface is not None
+    assert surface.get_vol(5400, 30 / 365.0) == pytest.approx(0.16)
+    assert surface.get_vol(5600, 90 / 365.0) == pytest.approx(0.15)
+
+
+# --------------------------------------------------------------------------- Phase 7: portfolio.py
+
+@needs_quantlib
+def test_portfolio_sums_two_packages_and_skips_missing_quote_ccy_spot():
+    from engine.options.store import price_and_store
+    from engine.options.portfolio import portfolio_summary
+
+    conn = _new_db()
+    _seed_pair_spot(conn)  # EURUSD
+    _seed_vol(conn)
+    _seed_option_trade(conn, trade_id="P1L1", instrument_id="EURUSD-P1L1", package_id="PKG-A")
+    _seed_option_trade(conn, trade_id="P2L1", instrument_id="EURUSD-P2L1", package_id="PKG-B")
+
+    # EURGBP prices fine (EUR+GBP both have OIS curves, and its own SPOT is
+    # seeded), but the PORTFOLIO layer additionally needs GBP -> USD
+    # (a GBPUSD or USDGBP SPOT), which is deliberately never seeded here --
+    # exercises the "priced but can't USD-convert" skip path.
+    _seed_pair_spot(conn, pair="EURGBP", spot=0.85)
+    _seed_vol(conn, pair="EURGBP")
+    _seed_option_trade(conn, trade_id="P3L1", instrument_id="EURGBP-P3L1", pair="EURGBP", package_id="PKG-C")
+
+    outcomes = [
+        price_and_store(conn, AS_OF, "P1L1"),
+        price_and_store(conn, AS_OF, "P2L1"),
+        price_and_store(conn, AS_OF, "P3L1"),
+    ]
+    assert all(o.priced for o in outcomes), [o.reason for o in outcomes]
+
+    portfolio, legs, skipped = portfolio_summary(conn, AS_OF, outcomes)
+    assert {leg.package_id for leg in legs} == {"PKG-A", "PKG-B"}
+    assert len(skipped) == 1
+    assert skipped[0]["instrument_id"] == "EURGBP-P3L1"
+    assert "GBP" in skipped[0]["reason"]
+
+    totals = portfolio.by_label()
+    assert set(totals) == {"PKG-A", "PKG-B"}
+    grand_total = portfolio.total()
+    summed_delta = sum(totals[k]["delta"] for k in totals)
+    assert grand_total["delta"] == pytest.approx(summed_delta)

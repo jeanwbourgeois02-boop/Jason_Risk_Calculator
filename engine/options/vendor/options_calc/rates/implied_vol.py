@@ -22,31 +22,41 @@ _DEFAULT_FREQ_MONTHS = 6
 
 
 def implied_volatility_swaption(market_price, fixed_rate, expiry, swap_tenor, r,
-                                 notional=_DEFAULT_NOTIONAL, option_type="payer"):
+                                 notional=_DEFAULT_NOTIONAL, option_type="payer",
+                                 evaluation_date=None):
     """Back out the lognormal vol implied by a swaption's market price.
 
     market_price: the swaption's actual observed price.
     fixed_rate, expiry, swap_tenor, r, notional, option_type: same meaning
         as rates/swaption.py's price().
+    evaluation_date: optional ql.Date; None reproduces "evaluate as of
+        today". Always restored to its prior value on exit -- see
+        _engine.py's evaluation_date_scope.
     """
-    return _iv_swaption(market_price, fixed_rate, expiry, swap_tenor, r, notional, option_type)
+    return _iv_swaption(market_price, fixed_rate, expiry, swap_tenor, r, notional, option_type,
+                         evaluation_date=evaluation_date)
 
 
 def implied_volatility_cap(market_price, strike, start, tenor, r,
-                            notional=_DEFAULT_NOTIONAL, freq_months=_DEFAULT_FREQ_MONTHS):
+                            notional=_DEFAULT_NOTIONAL, freq_months=_DEFAULT_FREQ_MONTHS,
+                            evaluation_date=None):
     """Back out the flat lognormal vol implied by a cap's market price
     (the single vol that, applied to every caplet, reproduces the given
     price -- see rates/cap_floor.py's "FLAT VOL ACROSS THE STRIP" caveat).
 
     market_price: the cap's actual observed price.
     strike, start, tenor, r, notional, freq_months: same meaning as
-        rates/cap_floor.py's price_cap().
+        rates/cap_floor.py's price_cap(). evaluation_date: see
+        implied_volatility_swaption.
     """
-    return _iv_cap_floor(market_price, notional, strike, start, tenor, r, freq_months, cap=True)
+    return _iv_cap_floor(market_price, notional, strike, start, tenor, r, freq_months, cap=True,
+                          evaluation_date=evaluation_date)
 
 
 def implied_volatility_floor(market_price, strike, start, tenor, r,
-                              notional=_DEFAULT_NOTIONAL, freq_months=_DEFAULT_FREQ_MONTHS):
+                              notional=_DEFAULT_NOTIONAL, freq_months=_DEFAULT_FREQ_MONTHS,
+                              evaluation_date=None):
     """Back out the flat lognormal vol implied by a floor's market price.
     Same mechanics/caveats as implied_volatility_cap -- see rates/cap_floor.py."""
-    return _iv_cap_floor(market_price, notional, strike, start, tenor, r, freq_months, cap=False)
+    return _iv_cap_floor(market_price, notional, strike, start, tenor, r, freq_months, cap=False,
+                          evaluation_date=evaluation_date)

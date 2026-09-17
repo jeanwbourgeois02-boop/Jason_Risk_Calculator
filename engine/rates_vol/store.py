@@ -8,17 +8,25 @@ OWN ``instrument_rate_options`` table (created defensively, NOT in
 
 Dispatch is entirely by ``instrument_rate_options.payoff``:
   - ``SWAPTION``          -> ``pricer.price_swaption`` (vol resolved flat-first, SABR
-                              fallback -- see ``inputs.py::resolve_swaption_vol``).
+                              fallback -- see ``inputs.py::resolve_swaption_vol``), priced
+                              off the bootstrapped OIS curve directly (see ``inputs.py``'s
+                              "Curve inputs" section -- no more flat-rate derivation).
   - ``BERMUDAN_SWAPTION``  -> ``pricer.price_bermudan_swaption`` (needs Hull-White
-                              ``a``/``sigma`` staged in ``rate_model_params``).
+                              ``a``/``sigma`` staged in ``rate_model_params`` -- MANUAL
+                              preferred over CALIBRATED, see ``inputs.py::get_rate_model_
+                              params`` -- AND a non-empty ``exercise_dates`` staged on the
+                              trade's own ``instrument_rate_options`` row, passed straight
+                              through to the vendored engine; empty -> skip "no exercise
+                              dates", NEVER mechanically generated -- see
+                              ``_parse_exercise_dates``).
   - ``CAP`` / ``FLOOR``    -> ``pricer.price_cap_floor`` (flat vol only).
 
 A trade that cannot be priced (no ``instrument_rate_options`` row, unsupported product/
-payoff, zero quantity, expiry not in the future, no curve_quotes, no vol, no Hull-White
-params, an out-of-range Hull-White sigma, or no SPOT to convert a non-USD notional)
-writes NO marks and comes back as a ``PricingOutcome`` with ``priced=False`` and a
-``reason`` -- never a fabricated number, matching every other pricer/store module in
-this app.
+payoff, zero quantity, expiry not in the future, no curve_quotes, no vol, no exercise
+dates (Bermudan only), no Hull-White params, an out-of-range Hull-White sigma, or no
+SPOT to convert a non-USD notional) writes NO marks and comes back as a
+``PricingOutcome`` with ``priced=False`` and a ``reason`` -- never a fabricated number,
+matching every other pricer/store module in this app.
 
 Non-USD notional: converted via ``engine.pnl.valuation.usd_per_quote`` -- the SAME
 function ``engine/rates/store.py`` uses for IRS (as of its 2026-09-17 fix), which raises
@@ -127,22 +135,18 @@ def _freq_to_months(freq: str) -> int:
     raise ValueError(f"Cannot parse frequency {freq!r} (expected e.g. '3M', '6M', '1Y')")
 
 
-def _infer_exercise_frequency_years(exercise_dates: str, default: float = 1.0) -> float:
-    """Average spacing (years) between staged Bermudan exercise dates, or `default` (1.0,
-    annual -- matching the vendored library's own _DEFAULT choice of "reasonable, not
-    fit") if fewer than 2 dates are staged. The vendored `price_bermudan_swaption` takes
-    an `exercise_frequency` (years) and GENERATES its own evenly-spaced dates from it
-    (see bermudan_swaption.py's `_generate_exercise_dates`) -- it does not accept an
-    explicit date list, so this is the best approximation of a real deal's exercise
-    schedule this module can feed it."""
+def _parse_exercise_dates(exercise_dates: str) -> List[datetime.date]:
+    """';'-joined ISO dates (``instrument_rate_options.exercise_dates``) -> a sorted list
+    of ``datetime.date``, passed straight through to the vendored engine's
+    ``exercise_dates=`` parameter (see ``pricer.py::price_bermudan_swaption``). Replaces
+    the pre-2026-09-17 ``_infer_exercise_frequency_years`` average-spacing approximation
+    -- a Bermudan trade's OWN staged dates are used exactly, never mechanically
+    regenerated. Empty string -> empty list (the caller, ``_price_row``, skips with
+    reason "no exercise dates" before this is ever called on an empty string -- see
+    that function)."""
     if not exercise_dates:
-        return default
-    dates = sorted(datetime.date.fromisoformat(d) for d in exercise_dates.split(";") if d)
-    if len(dates) < 2:
-        return default
-    gaps = [(b - a).days for a, b in zip(dates, dates[1:])]
-    avg_days = sum(gaps) / len(gaps)
-    return max(avg_days / 365.0, 1.0 / 365.0)
+        return []
+    return sorted(datetime.date.fromisoformat(d) for d in exercise_dates.split(";") if d)
 
 
 def _usd_per_ccy(conn: sqlite3.Connection, ccy: str, as_of: str):
@@ -252,7 +256,7 @@ def _price_row(conn: sqlite3.Connection, as_of: str, row: dict, curve_cache: Opt
 
         vol_res = resolve_swaption_vol(
             conn, as_of, row["ccy"], row["index"], row["expiry_date"], underlying_tenor, strike,
-            expiry_years, curve_inputs.forecast_rate,
+            expiry_years, curve_inputs.forward_rate,
         )
         if vol_res.vol is None:
             return _skip(row, vol_res.reason)
@@ -260,24 +264,26 @@ def _price_row(conn: sqlite3.Connection, as_of: str, row: dict, curve_cache: Opt
 
         result = pricer.price_swaption(
             quantity, strike, row["option_type"], expiry_years, swap_tenor_years,
-            curve_inputs.discount_rate, curve_inputs.forecast_rate, vol_res.vol,
+            curve_inputs.curve, vol_res.vol, as_of_date,
         )
     elif payoff == "BERMUDAN_SWAPTION":
         # No Black-76 vol lookup here at all -- a Bermudan is priced under Hull-White,
         # which takes its own (a, sigma) model parameters, not a market lognormal vol.
         if row["option_type"] not in ("PAYER", "RECEIVER"):
             return _skip(row, f"unrecognized option_type {row['option_type']!r}")
+        exercise_dates = _parse_exercise_dates(row["exercise_dates"])
+        if not exercise_dates:
+            return _skip(row, "no exercise dates")
         expiry_years = year_fraction(as_of_date, expiry_date)
         swap_tenor_years = year_fraction(underlying_start, underlying_end)
 
         hw = get_rate_model_params(conn, as_of, row["ccy"], row["index"], "HULL_WHITE")
         if not {"a", "sigma"}.issubset(hw):
             return _skip(row, "no Hull-White (a, sigma) params staged in rate_model_params")
-        exercise_frequency = _infer_exercise_frequency_years(row["exercise_dates"])
         try:
             result = pricer.price_bermudan_swaption(
-                quantity, strike, row["option_type"], expiry_years, swap_tenor_years, exercise_frequency,
-                curve_inputs.discount_rate, curve_inputs.forecast_rate, hw["a"], hw["sigma"],
+                quantity, strike, row["option_type"], expiry_years, swap_tenor_years, exercise_dates,
+                curve_inputs.curve, hw["a"], hw["sigma"], as_of_date,
             )
         except ValueError as exc:
             return _skip(row, f"Hull-White pricing failed: {exc}")
@@ -291,7 +297,7 @@ def _price_row(conn: sqlite3.Connection, as_of: str, row: dict, curve_cache: Opt
         freq_months = _freq_to_months(row["float_freq"])
         result = pricer.price_cap_floor(
             quantity, payoff, strike, start_years, tenor_years,
-            curve_inputs.discount_rate, curve_inputs.forecast_rate, vol_res.vol, freq_months,
+            curve_inputs.curve, vol_res.vol, as_of_date, freq_months,
         )
 
     fx, fx_reason = _usd_per_ccy(conn, row["ccy"], as_of)

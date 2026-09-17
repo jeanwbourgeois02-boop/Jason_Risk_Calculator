@@ -85,6 +85,7 @@ from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs import blotter_bundles as bundles_ui
 from ui.tabs import blotter_fx as blotter_fx_ui
+from ui.tabs import options as options_ui
 from ui.tabs import rates as rates_ui
 from ui.tabs.blotter_pricing import (
     HEADLINE_ORDER,
@@ -551,6 +552,15 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
             rates_ui.build_layout(conn, as_of),
         ])
 
+    if scope == "options":
+        df = scope_df(conn, scope, as_of)
+        trade_ids = df["trade_id"].tolist() if not df.empty else []
+        headline = row_scoped_headline(conn, as_of, trade_ids)
+        return html.Div([
+            html.Div(id=strip_id, children=render_headline_strip(headline)),
+            options_ui.build_layout(conn, as_of),
+        ])
+
     if scope == "fx":
         return blotter_fx_ui.build_layout(conn, as_of)
 
@@ -802,12 +812,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             prevent_initial_call=True,
         )(_clear_filters)
 
-    # "rates" (ui.tabs.rates) and "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17) have no
-    # strip/detail/filter of their own (module docstring above) -- neither table is
-    # priced_value_book-shaped, so the generic callbacks below (which assume
-    # trade_id/mark/pnl_usd rows) don't apply.
+    options_ui.register_callbacks(app, get_db_path)
+
+    # "rates" (ui.tabs.rates), "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17) and
+    # "options" (ui.tabs.options, Phase 8) have no strip/detail/filter of their own
+    # (module docstring above) -- neither table is priced_value_book-shaped, so the
+    # generic callbacks below (which assume trade_id/mark/pnl_usd rows) don't apply.
     for _scope in SCOPE_ORDER:
-        if _scope not in ("bundles", "rates", "fx"):
+        if _scope not in ("bundles", "rates", "fx", "options"):
             _register_strip_callback(_scope)
             _register_detail_callback(_scope)
             _register_filter_callback(_scope)
