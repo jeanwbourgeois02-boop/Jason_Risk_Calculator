@@ -309,32 +309,29 @@ def test_price_and_store_rejects_non_irs_product():
 
 @needs_quantlib
 def test_price_and_store_on_a_real_irs_trade_from_the_reference_csv():
-    """Loads a real IRS trade produced by data-ingest's irs.py from
-    data/raw/HA_PNL_20260818.csv via the full ingest pipeline, then prices it against a
+    """Loads a real IRS trade produced by data-ingest's blotter.py from
+    data/raw/new_sample_trades.csv via the full ingest pipeline, then prices it against a
     mock/synthetic curve_quotes snapshot (no live Bloomberg data exists in this
     environment) and confirms price_and_store writes plausible marks without crashing.
     """
     import os
 
-    from data.ingest.bnp import load as bnp_load
+    from data.ingest.blotter import load as blotter_load
 
-    csv_path = os.path.join("data", "raw", "HA_PNL_20260818.csv")
+    csv_path = os.path.join("data", "raw", "new_sample_trades.csv")
     if not os.path.exists(csv_path):
         pytest.skip("reference CSV not present in this checkout")
 
     conn = sqlite3.connect(":memory:")
     create_schema(conn)
-    res = bnp_load(csv_path, conn, strict=False)
+    blotter_load(csv_path, conn, strict=False)
 
     irs_trades = conn.execute(
-        "SELECT trade_id, instrument_id, quantity FROM trades WHERE product = 'IRS'"
+        "SELECT trade_id, instrument_id, quantity, trade_date FROM trades WHERE product = 'IRS'"
     ).fetchall()
     assert irs_trades, "expected at least one IRS trade parsed from the reference CSV"
 
-    trade_id, instrument_id, quantity = irs_trades[0]
-    as_of = res.as_of_date if hasattr(res, "as_of_date") else conn.execute(
-        "SELECT trade_date FROM trades WHERE trade_id = ?", (trade_id,)
-    ).fetchone()[0]
+    trade_id, instrument_id, quantity, as_of = irs_trades[0]
 
     # Mock USD SOFR snapshot dated the same as_of used for pricing (curve_quotes has no
     # real data in this environment -- see module docstring).

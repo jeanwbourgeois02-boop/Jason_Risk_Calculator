@@ -1,14 +1,19 @@
-"""trades_official view (2026-09-16): BNP is no longer an authoritative trade source
-for live exposure/P&L, only the blotter ('XLSX') and 'MANUAL' are -- BNP is kept only
-for its `positions` cash-balance snapshot and for engine/pnl/reconcile.py's explicit
-BNP-vs-blotter comparison. Without this view, the same economic trade loaded from both
-sources (docs/open-questions.md item 55 -- their trade_id schemes differ, so they don't
-collide on the primary key) would be summed twice into the ladder, delta and P&L.
+"""trades_official view.
 
-This file tests the view and the actual double-count scenario directly. Individual
-engine modules (engine/ladder/ladder.py, engine/pnl/pnl.py, etc.) have their own tests
-covering their specific query correctness; this file is about the cross-cutting
-guarantee that BNP trades never leak into those calculations.
+2026-09-16: BNP was, at the time, kept alongside the live blotter as a second trade
+source (for its `positions` cash-balance snapshot and for a BNP-vs-blotter
+reconciliation check), so this view filtered `source != 'BNP'` to stop the same
+economic trade loaded from both sources (docs/open-questions.md item 55) being summed
+twice into the ladder, delta and P&L.
+
+2026-09-17 ("no bnp fall back", docs/bnp-excel-removal.md): BNP is no longer a trade
+source at all -- nothing writes `trades.source = 'BNP'` any more -- so the view's filter
+is now a no-op and has been simplified to a plain passthrough (`SELECT * FROM trades`).
+The double-count *scenario* this view used to guard against can no longer arise (there
+is only one live trade source), so the tests that exercised it directly were removed
+along with `engine/pnl/reconcile.py` (the module that explicitly needed to see both
+sources to compare them). What remains here: the view exists, is a passthrough, and has
+the same columns as `trades`.
 """
 from __future__ import annotations
 
@@ -56,7 +61,10 @@ def test_trades_official_view_exists():
     assert "trades_official" in views
 
 
-def test_trades_official_excludes_bnp_includes_xlsx_and_manual():
+def test_trades_official_is_a_passthrough_of_every_source():
+    """The view no longer filters by source (see module docstring): every row in
+    `trades`, including a legacy source='BNP' row that might still exist in an old
+    database nothing writes to any more, surfaces through trades_official unchanged."""
     conn = _conn()
     _seed_instrument(conn)
     _insert_trade(conn, "bnp-1", "BNP", "USDJPY", 1_000_000, 147.0)
@@ -64,7 +72,7 @@ def test_trades_official_excludes_bnp_includes_xlsx_and_manual():
     _insert_trade(conn, "manual-1", "MANUAL", "USDJPY", 1_000_000, 147.0)
 
     ids = {r[0] for r in conn.execute("SELECT trade_id FROM trades_official")}
-    assert ids == {"xlsx-1", "manual-1"}
+    assert ids == {"bnp-1", "xlsx-1", "manual-1"}
 
 
 def test_trades_official_has_same_columns_as_trades():
@@ -74,62 +82,27 @@ def test_trades_official_has_same_columns_as_trades():
     assert view_cols == trades_cols
 
 
-# --------------------------------------------------------------------------- the actual bug
+# --------------------------------------------------------------------------- passthrough sanity
+# 2026-09-17: the double-count scenario these tests used to guard (the same economic
+# trade loaded once from BNP and once from the blotter under different trade_id
+# schemes, docs/open-questions.md item 55) can no longer arise -- nothing writes
+# trades.source='BNP' any more, so there is only ever one live trade source. What
+# remains worth pinning is that ladder/delta queries simply see every trade in
+# `trades_official` (now a plain passthrough), with no special-casing by source.
 
-def test_same_pair_from_both_sources_is_not_double_counted_in_delta():
-    """The scenario item 55 warns about: the same economic USDJPY trade loaded once
-    from BNP and once from the blotter under different trade_ids. delta_per_ccy must
-    count it once (the blotter side), not twice."""
-    from engine.ladder.ladder import delta_per_ccy
+def test_ladder_and_delta_see_every_source_now_the_view_is_a_passthrough():
+    from engine.ladder.ladder import cash_ladder, delta_per_ccy
 
     conn = _conn()
     _seed_instrument(conn)
-    _insert_trade(conn, "bnp-1", "BNP", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
-    _insert_trade(conn, "xlsx-1", "XLSX", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
+    _insert_trade(conn, "a-1", "MANUAL", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
+    _insert_trade(conn, "b-1", "XLSX", "USDJPY", 500_000, 147.0, settle_date="2026-08-20")
 
     delta = delta_per_ccy(conn, "2026-08-17")
     usd_row = delta[delta["ccy"] == "USD"]
     assert len(usd_row) == 1
-    # If both sources were counted, this would be 2,000,000, not 1,000,000.
-    assert usd_row["delta"].iloc[0] == pytest.approx(1_000_000)
-
-
-def test_same_pair_from_both_sources_is_not_double_counted_in_cash_ladder_legs():
-    from engine.ladder.ladder import cash_ladder
-
-    conn = _conn()
-    _seed_instrument(conn)
-    _insert_trade(conn, "bnp-1", "BNP", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
-    _insert_trade(conn, "xlsx-1", "XLSX", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
+    assert usd_row["delta"].iloc[0] == pytest.approx(1_500_000)
 
     ladder = cash_ladder(conn, "2026-08-17")
     leg_rows = ladder[(ladder["kind"] == "LEG") & (ladder["ccy"] == "USD")]
-    assert leg_rows["amount"].sum() == pytest.approx(1_000_000)
-
-
-def test_same_pair_from_both_sources_is_not_double_counted_in_ltd_per_trade():
-    from engine.pnl.pnl import ltd_per_trade
-
-    conn = _conn()
-    _seed_instrument(conn)
-    _insert_trade(conn, "bnp-1", "BNP", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
-    _insert_trade(conn, "xlsx-1", "XLSX", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
-
-    out = ltd_per_trade(conn, "2026-08-17", strict=False)
-    assert list(out["trade_id"]) == ["xlsx-1"]
-
-
-def test_engine_pnl_reconcile_is_the_one_module_that_still_sees_both_sources():
-    """engine/pnl/reconcile.py is the sole exception -- it explicitly needs both
-    sources to compare them, so it must read raw `trades`, not `trades_official`."""
-    from engine.pnl.reconcile import reconcile_blotter_vs_bnp
-
-    conn = _conn()
-    _seed_instrument(conn)
-    _insert_trade(conn, "bnp-1", "BNP", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
-    _insert_trade(conn, "xlsx-1", "XLSX", "USDJPY", 1_000_000, 147.0, settle_date="2026-08-20")
-
-    out = reconcile_blotter_vs_bnp(conn, "2026-08-17")
-    row = out[out["instrument_id"] == "USDJPY"].iloc[0]
-    assert row["n_blotter_trades"] == 1
-    assert row["n_bnp_trades"] == 1
+    assert leg_rows["amount"].sum() == pytest.approx(1_500_000)
