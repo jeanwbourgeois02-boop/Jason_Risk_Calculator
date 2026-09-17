@@ -791,14 +791,14 @@ def test_blotter_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
     monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "none", "trades": 2, "positions": 0})
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    result, source_line, history, stage_style = fn(1, contents, "blotter.csv")
+    result, source_line, stage_style = fn(1, contents,"blotter.csv")
 
     # The loader's summary must actually be visible in the rendered result -- not "",
     # not only passed to a logger.
     assert isinstance(result, dash.html.Div)
     assert result.className == "source-result--info"
     assert summary in str(result)
-    assert source_line == "Loaded: 2 trades in database (no BNP position snapshot)."
+    assert source_line == "Loaded: 2 trades in database."
 
 
 def test_blotter_confirm_surfaces_clean_rejection(tmp_path, monkeypatch):
@@ -815,7 +815,7 @@ def test_blotter_confirm_surfaces_clean_rejection(tmp_path, monkeypatch):
     monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    result, source_line, history, stage_style = fn(1, contents, "not-a-blotter.csv")
+    result, source_line, stage_style = fn(1, contents,"not-a-blotter.csv")
 
     assert "not a trade blotter" in str(result)
     assert source_line is dash.no_update
@@ -860,14 +860,9 @@ def test_selected_shows_error_for_unrecognized_file(monkeypatch):
     assert "not a trade blotter" in str(result)
 
 
-def test_describe_source_positions_present():
-    assert uploads.describe_source({"as_of_date": "2026-08-17", "trades": 5, "positions": 3}) == \
-        "Loaded: BNP report as of 2026-08-17 (5 trades, 3 positions)."
-
-
-def test_describe_source_trades_only_no_positions():
+def test_describe_source_trades_loaded():
     assert uploads.describe_source({"as_of_date": "none", "trades": 5, "positions": 0}) == \
-        "Loaded: 5 trades in database (no BNP position snapshot)."
+        "Loaded: 5 trades in database."
 
 
 def test_describe_source_nothing_loaded():
@@ -876,7 +871,7 @@ def test_describe_source_nothing_loaded():
 
 
 def test_upload_button_label_is_format_neutral():
-    layout = uploads.layout({}, db_path=None)
+    layout = uploads.layout({})
     text = str(layout)
     assert "Upload trade file" in text
     assert "Upload BNP report" not in text

@@ -51,7 +51,7 @@ def get_db_path() -> Path:
 def ensure_schema(path: Union[str, Path]) -> None:
     """Make sure the database and the Bloomberg status file exist so a fresh computer
     can launch with nothing copied across. Creates an EMPTY database with the schema
-    when the file is absent (no trades, no marks: upload a BNP report to fill it);
+    when the file is absent (no trades, no marks: upload a trade file to fill it);
     on an existing database applies the idempotent DDL so additive tables exist.
     Never alters existing tables or rows. `pnl_snapshots` is retired (docs/BUILD_PLAN.md
     section 3): the schema no longer creates it, and this function does not check for
@@ -67,7 +67,7 @@ def ensure_schema(path: Union[str, Path]) -> None:
         finally:
             conn.close()
         if created:
-            print(f"created empty database {p} (upload a BNP report to fill it)", flush=True)
+            print(f"created empty database {p} (upload a trade file to fill it)", flush=True)
     except (sqlite3.Error, OSError) as exc:
         print(f"schema check skipped ({exc})", flush=True)
     try:
@@ -188,7 +188,7 @@ def build_layout(data: dict, db_path=None) -> html.Div:
         html.Div(className="top-bar", children=[
             dcc.Tabs(id=MAIN_TABS_ID, value=VISIBLE_TABS[0], children=tabs,
                      parent_className="tabs-bar", className="tabs-strip"),
-            uploads.layout(data, db_path=db_path),
+            uploads.layout(data),
         ]),
         header.layout(),
         html.Div(id="tab-bodies", children=bodies),
