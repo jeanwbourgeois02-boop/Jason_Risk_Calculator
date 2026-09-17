@@ -347,7 +347,16 @@ def render_headline_strip(headline: dict) -> html.Div:
     fall back"): its only use was the "n of m rows priced from BNP file rates, not
     Bloomberg" fallback badge, which no longer applies now that a row with no official
     mark simply shows "n/a" with its `reason` as a tooltip -- there is no second,
-    non-Bloomberg source to badge any more."""
+    non-Bloomberg source to badge any more.
+
+    An AVAILABLE entry may also carry `excluded_summary`/`excluded_detail`
+    (2026-09-17, live-Bloomberg-PC partial-pricing follow-up, matching
+    `ui/tabs/header.py::_pnl_card`'s same-day equivalent -- see
+    `ui.tabs.blotter_pricing`'s module docstring): a short, always-visible caption
+    ("excludes N of M trades unpriced") under the value, with the per-product/reason
+    breakdown as its tooltip -- the value itself is a real sum over the row-scoped
+    set's PRICED rows, not a placeholder, so it keeps its normal sign colouring; only
+    the caption differs from a fully-priced card."""
     cards = []
     for key in HEADLINE_ORDER:
         entry = headline.get(key, {})
@@ -364,11 +373,18 @@ def render_headline_strip(headline: dict) -> html.Div:
             colour = "var(--pos)" if value >= 0 else "var(--neg)"
             value_div = html.Div(format_cell(value), className="card-value",
                                   style={"color": colour})
-        cards.append(html.Div(className="card", children=[
+        card_children = [
             html.Div(HEADLINE_TITLES[key], className="card-label"),
             value_div,
             html.Small(entry.get("ref_date", ""), className="card-note"),
-        ]))
+        ]
+        excluded_summary = entry.get("excluded_summary")
+        if excluded_summary:
+            card_children.append(html.Div(
+                excluded_summary, className="card-note",
+                style={"fontStyle": "italic", "color": "var(--muted)"},
+                title=entry.get("excluded_detail", "")))
+        cards.append(html.Div(className="card", children=card_children))
     return html.Div([html.Div(cards, className="cards")])
 
 
@@ -397,7 +413,11 @@ _ASSET_LABELS = {"asset_class": "Asset class", "trades": "Trades", "ltd": "LTD",
 
 
 def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame) -> html.Div:
-    """The Total book's P&L-by-asset-class block (module docstring)."""
+    """The Total book's P&L-by-asset-class block (module docstring). A class figure
+    computed over a mix of priced/unpriced rows (2026-09-17 partial-pricing follow-up,
+    `row_scoped_period_pnl`) still shows its real value with the `excluded_summary`/
+    `excluded_detail` text as the cell's tooltip -- only a class with NOTHING priced
+    at all shows "n/a"."""
     rows = asset_class_pnl_rows(conn, as_of, df)
     records, tooltips = [], []
     for r in rows:
@@ -407,6 +427,10 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
             entry = r.get(key, {})
             if entry.get("available"):
                 rec[key] = format_cell(entry["value"])
+                summary = entry.get("excluded_summary")
+                if summary:
+                    detail = entry.get("excluded_detail", "")
+                    tip[key] = {"value": f"{summary}. {detail}" if detail else summary, "type": "text"}
             else:
                 rec[key] = "n/a"
                 tip[key] = {"value": entry.get("reason", "") or "unavailable", "type": "text"}

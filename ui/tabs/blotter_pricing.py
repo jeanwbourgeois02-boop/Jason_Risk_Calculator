@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import sqlite3
 from functools import lru_cache
 from typing import Dict, Optional, Tuple
@@ -180,54 +181,184 @@ def _isnan(value: float) -> bool:
 # currently visible after the DataTable's own header filtering (`derived_virtual_data`),
 # not just the sub-tab's product scope -- recomputed for exactly that set of trade_ids,
 # at `as_of` and at each reference date from `engine.pnl.ledger.period_reference_dates`.
+#
+# 2026-09-17 (live-Bloomberg-PC follow-up, matches ui/tabs/header.py's own same-day fix
+# to its headline cards -- see that module's docstring, "Partial pricing"): spots/most
+# forwards/swaps now price on the live PC, but a handful of visible rows never will (an
+# option with no strike typed in yet, one same-day forward, one future) -- and the old
+# `_priced_sum_for_ids`/`_entry`/`_diff_entry`/`_trading_entry` chain below "poisoned" a
+# whole period to NaN the instant ANY ONE visible row was unpriced, so a strip with even
+# one bad row went blank even though every other row priced fine. Replaced with
+# `_priced_single_scoped`/`_priced_diff_scoped` (this module's own version of
+# `header.py`'s `_priced_single`/`_priced_diff` -- duplicated rather than imported,
+# since `header.py` is a different lane's file and explicitly says so): a period figure
+# now sums PRICED rows only within the CURRENT ROW-SCOPED set (`trade_ids`, i.e. this
+# sub-tab's visible rows after filtering -- not the whole book, unlike header.py's
+# whole-book cards) and carries a visible `excluded_summary` ("excludes N of M trades
+# unpriced") plus a `excluded_detail` breakdown tooltip; a card only goes fully
+# unavailable ("n/a") when EVERY row in the set is unpriced. A period DIFFERENCE
+# additionally excludes a trade priced on one date but not the other (never credits it
+# with a fake one-sided jump); a trade new since the reference date still contributes
+# normally. Per-trade arithmetic (`engine/pnl/valuation.py`) is untouched -- this is
+# aggregation-only, exactly like header.py's equivalent change.
 
 PERIOD_ORDER = ("ltd", "daily", "previous_day", "d5", "mtd", "ytd", "trading")
 PERIOD_TITLES = {"ltd": "LTD", "daily": "Daily", "previous_day": "Previous day",
                   "d5": "5d", "mtd": "MTD", "ytd": "YTD", "trading": "Trading"}
 
+_MISSING_TAG_RE = re.compile(r"no (\S+) mark")
 
-def _priced_sum_for_ids(conn: sqlite3.Connection, date: str, trade_ids) -> Tuple[float, list]:
-    """Sum `pnl_usd` over `trade_ids` present in `date`'s book (a trade_id not yet on
-    the book on `date`, e.g. traded later, is simply excluded, not an error). Returns
-    `(value, bad_trade_ids)`; `value` is NaN iff at least one present row has no
-    official mark, and `bad_trade_ids` names them."""
+_PRODUCT_LABELS = {
+    "FX_SPOT": "spot", "FX_FWD": "forward", "FX_SWAP": "swap",
+    "FUTURE": "future", "IRS": "swap (IRS)", "FX_OPTION": "option",
+}
+
+
+def _reason_tag(reason: str) -> str:
+    """Short tag extracted from one of `value_book`'s own `reason` strings, for the
+    unpriced-trade breakdown tooltip -- e.g. "no PREMIUM" from "no PREMIUM mark for ...
+    expiry ... on ...". Never invents a reason, only summarises the one
+    `engine.pnl.valuation` already gave. Mirrors `ui/tabs/header.py::_reason_tag`
+    exactly (duplicated, not imported -- see the section comment above)."""
+    if not reason:
+        return "unpriced"
+    if "cannot be frozen" in reason:
+        return "no historical mark at settlement"
+    if "SPOT for USD conversion" in reason:
+        return "no SPOT (USD conversion)"
+    m = _MISSING_TAG_RE.search(reason)
+    if m:
+        return f"no {m.group(1)}"
+    return "unpriced"
+
+
+def _product_label(product: str, count: int) -> str:
+    label = _PRODUCT_LABELS.get(product, str(product).lower() or "trade")
+    return label if count == 1 else f"{label}s"
+
+
+def _unpriced_breakdown(unpriced: pd.DataFrame) -> str:
+    """"5 options: no PREMIUM; 1 forward: no FWD_OUTRIGHT" -- grouped by (product, a
+    short reason tag), most-affected group first. "" for no unpriced rows. Mirrors
+    `ui/tabs/header.py::_unpriced_breakdown` exactly."""
+    if unpriced.empty:
+        return ""
+    tags = unpriced["reason"].map(_reason_tag)
+    groups = unpriced.groupby([unpriced["product"], tags]).size().sort_values(ascending=False)
+    return "; ".join(f"{count} {_product_label(product, count)}: {tag}"
+                      for (product, tag), count in groups.items())
+
+
+def _scoped_frame(conn: sqlite3.Connection, date: str, trade_ids) -> pd.DataFrame:
+    """`priced_value_book(conn, date)` filtered to `trade_ids` present on that date's
+    book (a trade_id not yet on the book on `date`, e.g. traded later, is simply
+    excluded, not an error)."""
     if not trade_ids:
-        return 0.0, []
+        df, _, _ = priced_value_book(conn, date)
+        return df.iloc[0:0]
     df, _, _ = priced_value_book(conn, date)
     if df.empty:
-        return 0.0, []
-    sel = df[df["trade_id"].isin(trade_ids)]
-    if sel.empty:
-        return 0.0, []
-    bad = sel[sel["pnl_usd"].isna()]["trade_id"].tolist()
-    if bad:
-        return float("nan"), bad
-    return float(sel["pnl_usd"].sum()), []
+        return df
+    return df[df["trade_id"].isin(trade_ids)]
 
 
-def _entry(value: float, ref_date: str, bad: list) -> dict:
-    if _isnan(value):
-        return {"value": value, "ref_date": ref_date, "available": False,
-                "reason": f"no mark (any source) for {', '.join(sorted(set(bad)))}"}
-    return {"value": value, "ref_date": ref_date, "available": True, "reason": ""}
-
-
-def _trading_entry(rows: pd.DataFrame, ref_date: str) -> dict:
-    if rows.empty:
-        return {"value": 0.0, "ref_date": ref_date, "available": True, "reason": ""}
-    if rows["pnl_usd"].isna().any():
+def _priced_single_from_df(df: pd.DataFrame, ref_date: str) -> dict:
+    """{value, ref_date, available, reason, excluded_summary, excluded_detail} for ONE
+    already-scoped date's rows: the sum over PRICED rows only -- CLAUDE.md "Missing
+    values stay missing": an unpriced row contributes nothing, it is never zeroed or
+    invented. All rows unpriced (non-empty set) is a single "n/a" + reason card; an
+    empty set is 0.0/available (a book with nothing due yet is 0, not Unavailable).
+    Mirrors `ui/tabs/header.py::_priced_single`'s logic, row-scoped instead of
+    whole-book."""
+    total = len(df)
+    if total == 0:
+        return {"value": 0.0, "ref_date": ref_date, "available": True, "reason": "",
+                "excluded_summary": "", "excluded_detail": ""}
+    priced = df[df["reason"] == ""]
+    unpriced = df[df["reason"] != ""]
+    if priced.empty:
+        bad = sorted(set(unpriced["trade_id"]))
         return {"value": float("nan"), "ref_date": ref_date, "available": False,
-                "reason": "a trade dated this date has no mark from any source"}
-    return {"value": float(rows["pnl_usd"].sum()), "ref_date": ref_date, "available": True, "reason": ""}
+                "reason": f"no mark (any source) for {', '.join(bad)}",
+                "excluded_summary": "", "excluded_detail": ""}
+    value = float(priced["pnl_usd"].sum())
+    if unpriced.empty:
+        return {"value": value, "ref_date": ref_date, "available": True, "reason": "",
+                "excluded_summary": "", "excluded_detail": ""}
+    n = len(unpriced)
+    return {"value": value, "ref_date": ref_date, "available": True, "reason": "",
+            "excluded_summary": f"excludes {n} of {total} trades unpriced",
+            "excluded_detail": _unpriced_breakdown(unpriced)}
 
 
-def _diff_entry(a: float, ref_a: str, bad_a: list, b: float, bad_b: list) -> dict:
-    if _isnan(a) or _isnan(b):
-        bad = sorted(set(bad_a) | set(bad_b))
-        return {"value": float("nan"), "ref_date": ref_a, "available": False,
-                "reason": f"no mark (any source) for {', '.join(bad)}" if bad
-                          else "a reference close is unavailable"}
-    return {"value": a - b, "ref_date": ref_a, "available": True, "reason": ""}
+def _priced_single_scoped(conn: sqlite3.Connection, date: str, trade_ids, ref_date: str) -> dict:
+    return _priced_single_from_df(_scoped_frame(conn, date, trade_ids), ref_date)
+
+
+def _priced_diff_scoped(conn: sqlite3.Connection, date_a: str, date_b: str, trade_ids,
+                         ref_date: str, note_label: str) -> dict:
+    """{value, ref_date, available, reason, excluded_summary, excluded_detail} for
+    LTD(date_a) - LTD(date_b), both row-scoped to `trade_ids`. Mirrors
+    `ui/tabs/header.py::_priced_diff`'s "nothing invented, nothing faked" rule exactly:
+      - a trade only present in `date_a`'s scoped book (traded after `date_b`)
+        contributes its full value when priced -- a new trade entering the set, not a
+        pricing artefact, so it is not "excluded".
+      - a trade present in both scoped books contributes normally only when priced in
+        BOTH.
+      - a trade present in both but priced in only one of the two is EXCLUDED from the
+        diff outright (contributes nothing) rather than credited with its full
+        one-sided value, which would fake a jump the size of its whole LTD on whichever
+        single day a mark happened to appear or vanish.
+    `ref_date` is this entry's own displayed reference date (callers use two different
+    conventions -- see `row_scoped_headline`/`row_scoped_period_pnl`'s own docstrings);
+    `note_label` names `date_b` only inside the "N priced now but unpriced on
+    <note_label>" detail note."""
+    df_a = _scoped_frame(conn, date_a, trade_ids)
+    df_b = _scoped_frame(conn, date_b, trade_ids)
+    total = len(df_a)
+    if total == 0:
+        return {"value": 0.0, "ref_date": ref_date, "available": True, "reason": "",
+                "excluded_summary": "", "excluded_detail": ""}
+
+    a_priced = df_a[df_a["reason"] == ""]
+    a_unpriced = df_a[df_a["reason"] != ""]
+    a_priced_ids = set(a_priced["trade_id"])
+
+    if df_b.empty:
+        b_priced_ids, b_unpriced_ids, b_pnl = set(), set(), {}
+    else:
+        b_priced = df_b[df_b["reason"] == ""]
+        b_priced_ids = set(b_priced["trade_id"])
+        b_unpriced_ids = set(df_b[df_b["reason"] != ""]["trade_id"])
+        b_pnl = dict(zip(b_priced["trade_id"], b_priced["pnl_usd"]))
+
+    blocked_ids = a_priced_ids & b_unpriced_ids  # priced now, unpriced back then -- excluded
+    contributing_a_ids = a_priced_ids - blocked_ids
+    contributing_b_ids = a_priced_ids & b_priced_ids  # priced at both ends
+
+    if not contributing_a_ids:
+        bad = sorted(set(a_unpriced["trade_id"]) | blocked_ids)
+        reason = (f"no mark (any source) for {', '.join(bad)}" if bad
+                  else "a reference close is unavailable")
+        return {"value": float("nan"), "ref_date": ref_date, "available": False, "reason": reason,
+                "excluded_summary": "", "excluded_detail": ""}
+
+    a_sum = float(a_priced[a_priced["trade_id"].isin(contributing_a_ids)]["pnl_usd"].sum())
+    b_sum = sum(b_pnl[t] for t in contributing_b_ids)
+    value = a_sum - b_sum
+
+    a_unpriced_ids = set(a_unpriced["trade_id"])
+    n_excluded = len(a_unpriced_ids) + len(blocked_ids)
+    if n_excluded == 0:
+        return {"value": value, "ref_date": ref_date, "available": True, "reason": "",
+                "excluded_summary": "", "excluded_detail": ""}
+
+    detail = _unpriced_breakdown(a_unpriced)
+    if blocked_ids:
+        note = f"{len(blocked_ids)} priced now but unpriced on {note_label}"
+        detail = f"{detail}; {note}" if detail else note
+    return {"value": value, "ref_date": ref_date, "available": True, "reason": "",
+            "excluded_summary": f"excludes {n_excluded} of {total} trades unpriced", "excluded_detail": detail}
 
 
 # --------------------------------------------------------------------------- headline strip
@@ -254,42 +385,37 @@ def row_scoped_headline(conn: sqlite3.Connection, as_of: str, trade_ids) -> Dict
     """The Excel Portfolio header's card set (LTD, Daily, Trades, Trading, LTD-1 daily,
     LTD-1, LTD-2, Trading T-1, 5d, MTD, YTD), row-scoped to `trade_ids`. T-1/T-2 are
     `period_reference_dates`'s `daily`/`previous_day`; `trades` is a plain count, never
-    unavailable."""
+    unavailable. `ref_date` convention (unchanged from before the 2026-09-17 partial-
+    pricing fix, preserved exactly): every "as of today" card (ltd/daily/d5/mtd/ytd/
+    trading) shows `as_of`; only the two raw levels (ltd1/ltd2/ltd1_daily/trading_t1)
+    show their own T-1/T-2 date -- this mirrors the Excel header layout, not
+    `row_scoped_period_pnl`'s different convention below."""
     from engine.pnl.ledger import period_reference_dates
 
     trade_ids = list(trade_ids)
     refs = period_reference_dates(as_of)
     t1, t2 = refs["daily"], refs["previous_day"]
 
-    ltd_today, bad_today = _priced_sum_for_ids(conn, as_of, trade_ids)
-    ltd_t1, bad_t1 = _priced_sum_for_ids(conn, t1, trade_ids)
-    ltd_t2, bad_t2 = _priced_sum_for_ids(conn, t2, trade_ids)
-    ltd_d5, bad_d5 = _priced_sum_for_ids(conn, refs["d5"], trade_ids)
-    ltd_mtd, bad_mtd = _priced_sum_for_ids(conn, refs["mtd"], trade_ids)
-    ltd_ytd, bad_ytd = _priced_sum_for_ids(conn, refs["ytd"], trade_ids)
-
     out: Dict[str, dict] = {
-        "ltd": _entry(ltd_today, as_of, bad_today),
-        "daily": _diff_entry(ltd_today, as_of, bad_today, ltd_t1, bad_t1),
+        "ltd": _priced_single_scoped(conn, as_of, trade_ids, as_of),
+        "daily": _priced_diff_scoped(conn, as_of, t1, trade_ids, as_of, t1),
         "trades": {"value": float(len(trade_ids)), "ref_date": as_of, "available": True,
                    "reason": "", "is_count": True},
-        "ltd1_daily": _diff_entry(ltd_t1, t1, bad_t1, ltd_t2, bad_t2),
-        "ltd1": _entry(ltd_t1, t1, bad_t1),
-        "ltd2": _entry(ltd_t2, t2, bad_t2),
-        "d5": _diff_entry(ltd_today, as_of, bad_today, ltd_d5, bad_d5),
-        "mtd": _diff_entry(ltd_today, as_of, bad_today, ltd_mtd, bad_mtd),
-        "ytd": _diff_entry(ltd_today, as_of, bad_today, ltd_ytd, bad_ytd),
+        "ltd1_daily": _priced_diff_scoped(conn, t1, t2, trade_ids, t1, t2),
+        "ltd1": _priced_single_scoped(conn, t1, trade_ids, t1),
+        "ltd2": _priced_single_scoped(conn, t2, trade_ids, t2),
+        "d5": _priced_diff_scoped(conn, as_of, refs["d5"], trade_ids, as_of, refs["d5"]),
+        "mtd": _priced_diff_scoped(conn, as_of, refs["mtd"], trade_ids, as_of, refs["mtd"]),
+        "ytd": _priced_diff_scoped(conn, as_of, refs["ytd"], trade_ids, as_of, refs["ytd"]),
     }
 
-    df, _, _ = priced_value_book(conn, as_of)
-    sel = df[df["trade_id"].isin(trade_ids)] if not df.empty else df
-    trading_rows = sel[sel["trade_date"] == as_of] if not sel.empty else sel
-    out["trading"] = _trading_entry(trading_rows, as_of)
+    today_rows = _scoped_frame(conn, as_of, trade_ids)
+    today_rows = today_rows[today_rows["trade_date"] == as_of] if not today_rows.empty else today_rows
+    out["trading"] = _priced_single_from_df(today_rows, as_of)
 
-    df_t1, _, _ = priced_value_book(conn, t1)
-    sel_t1 = df_t1[df_t1["trade_id"].isin(trade_ids)] if not df_t1.empty else df_t1
-    trading_t1_rows = sel_t1[sel_t1["trade_date"] == t1] if not sel_t1.empty else sel_t1
-    out["trading_t1"] = _trading_entry(trading_t1_rows, t1)
+    t1_rows = _scoped_frame(conn, t1, trade_ids)
+    t1_rows = t1_rows[t1_rows["trade_date"] == t1] if not t1_rows.empty else t1_rows
+    out["trading_t1"] = _priced_single_from_df(t1_rows, t1)
     return out
 
 
@@ -355,45 +481,26 @@ FX_PRODUCTS_FOR_T1_RATE = ("FX_SPOT", "FX_FWD", "FX_SWAP")
 
 def row_scoped_period_pnl(conn: sqlite3.Connection, as_of: str, trade_ids) -> Dict[str, dict]:
     """LTD/Daily/Previous day/5d/MTD/YTD/Trading over exactly `trade_ids`, each
-    `{value, ref_date, available, reason}`, using the same business-day reference
-    dates as `engine.pnl.ledger.period_pnl` (via `period_reference_dates`)."""
+    `{value, ref_date, available, reason, excluded_summary, excluded_detail}`, using
+    the same business-day reference dates as `engine.pnl.ledger.period_pnl` (via
+    `period_reference_dates`). `ref_date` convention (own, different from
+    `row_scoped_headline`'s -- preserved exactly): a period DIFFERENCE card
+    (daily/d5/mtd/ytd/previous_day) shows its own COMPARISON date underneath, not
+    `as_of`; only `ltd`/`trading` show `as_of`."""
     from engine.pnl.ledger import period_reference_dates
 
     trade_ids = list(trade_ids)
     refs = period_reference_dates(as_of)
-    ltd_today, bad_today = _priced_sum_for_ids(conn, as_of, trade_ids)
-    out: Dict[str, dict] = {"ltd": _entry(ltd_today, as_of, bad_today)}
+    out: Dict[str, dict] = {"ltd": _priced_single_scoped(conn, as_of, trade_ids, as_of)}
 
     for key in ("daily", "d5", "mtd", "ytd"):
         ref_date = refs[key]
-        if _isnan(ltd_today):
-            out[key] = {"value": float("nan"), "ref_date": ref_date, "available": False,
-                        "reason": f"no mark (any source) for {', '.join(sorted(set(bad_today)))}"}
-            continue
-        v_ref, bad_ref = _priced_sum_for_ids(conn, ref_date, trade_ids)
-        if _isnan(v_ref):
-            out[key] = {"value": float("nan"), "ref_date": ref_date, "available": False,
-                        "reason": f"no mark (any source) for {', '.join(sorted(set(bad_ref)))}"}
-        else:
-            out[key] = {"value": ltd_today - v_ref, "ref_date": ref_date, "available": True, "reason": ""}
+        out[key] = _priced_diff_scoped(conn, as_of, ref_date, trade_ids, ref_date, ref_date)
 
-    v1, bad1 = _priced_sum_for_ids(conn, refs["daily"], trade_ids)
-    v2, bad2 = _priced_sum_for_ids(conn, refs["previous_day"], trade_ids)
-    if _isnan(v1) or _isnan(v2):
-        out["previous_day"] = {"value": float("nan"), "ref_date": refs["previous_day"], "available": False,
-                                "reason": f"no mark (any source) for {', '.join(sorted(set(bad1) | set(bad2)))}"}
-    else:
-        out["previous_day"] = {"value": v1 - v2, "ref_date": refs["previous_day"], "available": True, "reason": ""}
+    out["previous_day"] = _priced_diff_scoped(
+        conn, refs["daily"], refs["previous_day"], trade_ids, refs["previous_day"], refs["previous_day"])
 
-    df, _, _ = priced_value_book(conn, as_of)
-    sel = df[df["trade_id"].isin(trade_ids)] if not df.empty else df
-    trading_rows = sel[sel["trade_date"] == as_of] if not sel.empty else sel
-    if trading_rows.empty:
-        out["trading"] = {"value": 0.0, "ref_date": as_of, "available": True, "reason": ""}
-    elif trading_rows["pnl_usd"].isna().any():
-        out["trading"] = {"value": float("nan"), "ref_date": as_of, "available": False,
-                           "reason": "a selected trade dated today has no mark from any source"}
-    else:
-        out["trading"] = {"value": float(trading_rows["pnl_usd"].sum()), "ref_date": as_of,
-                           "available": True, "reason": ""}
+    today_rows = _scoped_frame(conn, as_of, trade_ids)
+    today_rows = today_rows[today_rows["trade_date"] == as_of] if not today_rows.empty else today_rows
+    out["trading"] = _priced_single_from_df(today_rows, as_of)
     return out

@@ -1,9 +1,32 @@
 ---
 name: value-book-marks-source-kept-for-compat-2026-09-17
-description: value_book's marks_source parameter was gutted (no fallback lookup ever happens) but NOT removed from the signature -- ledger.py's own default call path would break app-wide otherwise; engine/pnl/calendar.py split also landed same day
+description: value_book's marks_source parameter was gutted then (later same day, by someone else) fully removed from the signature everywhere once every caller was audited -- see the update at the bottom for the final state
 metadata:
   type: project
 ---
+
+**UPDATE, later the same day:** the parameter was subsequently removed outright from
+`value_book`/`usd_per_quote`/`_mark_at` (this file's own reasoning below correctly
+anticipated exactly this as the next safe step once `engine/pnl/ledger.py` and
+`engine/ladder/futures_delta.py` were also updated) -- someone else made that edit to
+`engine/pnl/valuation.py` and `tests/test_valuation.py` while this agent was mid-task on
+the unrelated partial-pricing header follow-up; discovered via an unfamiliar test name
+appearing in a routine `pytest --collect-only`. Confirmed coherent and fully passing
+(`ledger.py`'s `ltd`/`period_pnl`/`period_pnl_by` and `futures_delta.py`'s `_mark_at`
+call sites no longer mention `marks_source` either). Did not need to redo anything --
+this agent's own header.py code never called `value_book`/`_mark_at` with a
+`marks_source` argument to begin with (it goes through `ui.tabs.blotter_pricing.
+priced_value_book`, which stopped passing one earlier the same day). **How to apply:**
+this confirms the file-ownership grant for a single task can still be touched by another
+concurrent process in this repo's live multi-session setup even mid-task; a routine
+`pytest --collect-only` diff (or just noticing an unrecognised test name in the output)
+is a cheap way to catch it early. See [[coordinator-relay-verification]].
+
+---
+
+**Original note (now historical -- the decision below was deliberately conservative and
+was correctly superseded once conditions changed; kept for the reasoning, which held
+until the full audit above completed):**
 
 2026-09-17, "no bnp fall back" user decision (verbatim, via coordinator relay -- see
 [[coordinator-relay-verification]]; also see `docs/bnp-excel-removal.md`).

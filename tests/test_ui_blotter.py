@@ -592,6 +592,11 @@ def test_total_book_asset_class_rows_sum_to_total():
 
 
 def test_total_book_asset_class_missing_mark_is_unavailable_with_reason():
+    """2026-09-17 partial-pricing follow-up: a class or the Total row with a MIX of
+    priced and unpriced trades now shows its real (priced-only) sum with an
+    `excluded_summary` caption, not "n/a" -- only a class where EVERYTHING is unpriced
+    (here, Rates, whose one IRS trade has no CASHFLOW_USD mark) stays fully
+    unavailable, matching `ui/tabs/header.py`'s same-day equivalent fix."""
     conn = _make_db()
     try:
         _add_irs(conn, pv=250_000.0, cashflow=None)   # PV but no CASHFLOW_USD mark
@@ -599,10 +604,15 @@ def test_total_book_asset_class_missing_mark_is_unavailable_with_reason():
         rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, "2026-06-20", df)}
         assert rows["FX"]["ltd"]["available"] is True
         assert rows["Rates"]["ltd"]["available"] is False and "S1" in rows["Rates"]["ltd"]["reason"]
-        assert rows["Total"]["ltd"]["available"] is False
+        assert rows["Total"]["ltd"]["available"] is True
+        assert rows["Total"]["ltd"]["value"] == pytest.approx(8_000.0)  # FX only; IRS excluded
+        assert rows["Total"]["ltd"]["excluded_summary"] == "excludes 1 of 2 trades unpriced"
+        assert "S1" in rows["Total"]["ltd"]["excluded_detail"] or "swap" in rows["Total"]["ltd"]["excluded_detail"]
         layout = blotter.scope_layout("total", conn, "2026-06-20")
         table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
         assert table.data[1]["ltd"] == "n/a" and "S1" in table.tooltip_data[1]["ltd"]["value"]
+        assert table.data[-1]["ltd"] != "n/a"  # Total row: a real value, not blanked
+        assert "excludes 1 of 2" in table.tooltip_data[-1]["ltd"]["value"]
     finally:
         conn.close()
 
@@ -755,6 +765,129 @@ def test_row_scoped_headline_ltd_and_trades_count():
         conn.close()
 
 
+# ------------------------------------------------------ partial pricing (2026-09-17)
+# Live-Bloomberg-PC follow-up: a strip with even ONE unpriced visible row (one forward
+# settling today, one future, five options, in the reported case) used to poison the
+# WHOLE figure to NaN. Matches ui/tabs/header.py's same-day fix to its own headline
+# cards -- see ui.tabs.blotter_pricing's module docstring ("row-scoped strip" section).
+
+def _frame(rows):
+    """A minimal `priced_value_book`-shaped frame: rows are
+    (trade_id, product, reason, pnl_usd) tuples."""
+    return pd.DataFrame({
+        "trade_id": [r[0] for r in rows], "product": [r[1] for r in rows],
+        "reason": [r[2] for r in rows], "pnl_usd": [r[3] for r in rows],
+        "trade_date": ["2026-06-01"] * len(rows),
+    })
+
+
+def test_priced_single_scoped_fully_priced_has_no_excluded_summary(monkeypatch):
+    df = _frame([("T1", "FX_FWD", "", 100.0), ("T2", "FUTURE", "", 50.0)])
+    monkeypatch.setattr(blotter_pricing, "priced_value_book", lambda conn, date: (df, 0, len(df)))
+    entry = blotter_pricing._priced_single_scoped(None, "2026-06-20", ["T1", "T2"], "2026-06-20")
+    assert entry["available"] and entry["value"] == pytest.approx(150.0)
+    assert entry["excluded_summary"] == "" and entry["excluded_detail"] == ""
+
+
+def test_priced_single_scoped_mixed_sums_priced_rows_with_caption(monkeypatch):
+    """The exact bug reported: "one forward settling today, one future, five options"
+    unpriced among an otherwise-priced book used to poison the whole strip to NaN --
+    now it sums the priced rows and shows a visible caption instead."""
+    df = _frame([
+        ("T1", "FX_FWD", "", 100.0), ("T2", "FUTURE", "", 50.0),
+        ("T3", "FX_FWD", "no FWD_OUTRIGHT mark for T3", float("nan")),
+        ("O1", "FX_OPTION", "no PREMIUM mark for O1", float("nan")),
+    ])
+    monkeypatch.setattr(blotter_pricing, "priced_value_book", lambda conn, date: (df, 0, len(df)))
+    entry = blotter_pricing._priced_single_scoped(None, "2026-06-20", ["T1", "T2", "T3", "O1"], "2026-06-20")
+    assert entry["available"] is True
+    assert entry["value"] == pytest.approx(150.0)
+    assert entry["reason"] == ""
+    assert entry["excluded_summary"] == "excludes 2 of 4 trades unpriced"
+    assert "forward" in entry["excluded_detail"] and "option" in entry["excluded_detail"]
+
+
+def test_priced_single_scoped_all_unpriced_is_unavailable(monkeypatch):
+    df = _frame([("T1", "FX_FWD", "no FWD_OUTRIGHT mark for T1", float("nan"))])
+    monkeypatch.setattr(blotter_pricing, "priced_value_book", lambda conn, date: (df, 0, len(df)))
+    entry = blotter_pricing._priced_single_scoped(None, "2026-06-20", ["T1"], "2026-06-20")
+    assert entry["available"] is False
+    assert entry["value"] != entry["value"]  # NaN
+    assert "T1" in entry["reason"]
+    assert entry["excluded_summary"] == ""
+
+
+def test_priced_single_scoped_empty_scope_is_zero_available(monkeypatch):
+    df = _frame([])
+    monkeypatch.setattr(blotter_pricing, "priced_value_book", lambda conn, date: (df, 0, 0))
+    entry = blotter_pricing._priced_single_scoped(None, "2026-06-20", [], "2026-06-20")
+    assert entry == {"value": 0.0, "ref_date": "2026-06-20", "available": True, "reason": "",
+                      "excluded_summary": "", "excluded_detail": ""}
+
+
+def test_priced_diff_scoped_excludes_trade_priced_now_unpriced_before(monkeypatch):
+    """`ui/tabs/header.py::_priced_diff`'s rule, replicated: a trade priced today but
+    unpriced on the reference date is excluded from the diff outright (never credited
+    with a fake one-sided jump the size of its whole LTD)."""
+    df_a = _frame([("T1", "FX_FWD", "", 120.0), ("T2", "FX_FWD", "", 40.0)])
+    df_b = _frame([("T1", "FX_FWD", "", 100.0), ("T2", "FX_FWD", "no mark for T2 on b", float("nan"))])
+    frames = {"2026-06-20": df_a, "2026-06-19": df_b}
+    monkeypatch.setattr(blotter_pricing, "priced_value_book",
+                         lambda conn, date: (frames[date], 0, len(frames[date])))
+    entry = blotter_pricing._priced_diff_scoped(None, "2026-06-20", "2026-06-19", ["T1", "T2"],
+                                                 "2026-06-19", "2026-06-19")
+    assert entry["available"] is True
+    assert entry["value"] == pytest.approx(20.0)  # T1 only: 120 - 100; T2 excluded both ways
+    assert entry["excluded_summary"] == "excludes 1 of 2 trades unpriced"
+    assert "priced now but unpriced on 2026-06-19" in entry["excluded_detail"]
+
+
+def test_priced_diff_scoped_new_trade_since_reference_contributes_fully(monkeypatch):
+    """A trade with no row at all on the reference date (traded after it) is NOT
+    "excluded" -- its full current value flows through normally, same as ordinary
+    trading P&L."""
+    df_a = _frame([("T1", "FX_FWD", "", 120.0), ("T2", "FX_FWD", "", 40.0)])
+    df_b = _frame([("T1", "FX_FWD", "", 100.0)])  # T2 did not exist yet on the reference date
+    frames = {"2026-06-20": df_a, "2026-06-19": df_b}
+    monkeypatch.setattr(blotter_pricing, "priced_value_book",
+                         lambda conn, date: (frames[date], 0, len(frames[date])))
+    entry = blotter_pricing._priced_diff_scoped(None, "2026-06-20", "2026-06-19", ["T1", "T2"],
+                                                 "2026-06-19", "2026-06-19")
+    assert entry["available"] is True
+    assert entry["value"] == pytest.approx(60.0)  # (120-100) + 40 (T2 new, full value)
+    assert entry["excluded_summary"] == ""
+
+
+def test_priced_diff_scoped_all_unpriced_is_unavailable(monkeypatch):
+    df_a = _frame([("T1", "FX_FWD", "no mark for T1", float("nan"))])
+    df_b = _frame([("T1", "FX_FWD", "", 100.0)])
+    frames = {"2026-06-20": df_a, "2026-06-19": df_b}
+    monkeypatch.setattr(blotter_pricing, "priced_value_book",
+                         lambda conn, date: (frames[date], 0, len(frames[date])))
+    entry = blotter_pricing._priced_diff_scoped(None, "2026-06-20", "2026-06-19", ["T1"],
+                                                 "2026-06-19", "2026-06-19")
+    assert entry["available"] is False
+    assert entry["value"] != entry["value"]
+    assert "T1" in entry["reason"]
+
+
+def test_row_scoped_headline_partial_pricing_shows_excluded_summary():
+    """End-to-end through the real DB/engine (not a monkeypatched frame): an FX trade
+    (priced) plus an IRS trade with no CASHFLOW_USD mark (unpriced) in the same
+    row-scoped set -- LTD sums the FX trade only and carries the caption, matching
+    `asset_class_pnl_rows`'s own coverage of this same fixture for the Total row."""
+    conn = _make_db()
+    try:
+        _add_irs(conn, pv=250_000.0, cashflow=None)
+        df = blotter.scope_df(conn, "total", "2026-06-20")
+        headline = blotter_pricing.row_scoped_headline(conn, "2026-06-20", df["trade_id"].tolist())
+        assert headline["ltd"]["available"] is True
+        assert headline["ltd"]["value"] == pytest.approx(8_000.0)
+        assert headline["ltd"]["excluded_summary"] == "excludes 1 of 2 trades unpriced"
+    finally:
+        conn.close()
+
+
 def test_render_headline_strip_shows_ref_date_and_count():
     conn = _make_db()
     try:
@@ -779,6 +912,34 @@ def test_render_headline_strip_unavailable_shows_na_with_tooltip():
     value_div = ltd_card.children[1]
     assert value_div.children == "n/a"
     assert value_div.title == "no mark for T1"
+
+
+def test_render_headline_strip_shows_excluded_summary_caption():
+    """2026-09-17 partial-pricing follow-up: an AVAILABLE card with `excluded_summary`
+    shows it as a visible caption line, with `excluded_detail` as the caption's
+    tooltip -- the value itself stays a real number (not "n/a")."""
+    headline = {"ltd": {"value": 150.0, "ref_date": "2026-06-20", "available": True, "reason": "",
+                          "excluded_summary": "excludes 2 of 4 trades unpriced",
+                          "excluded_detail": "1 forward: no FWD_OUTRIGHT; 1 option: no PREMIUM"}}
+    for key in blotter_pricing.HEADLINE_ORDER:
+        headline.setdefault(key, {"value": 0.0, "ref_date": "2026-06-20", "available": True, "reason": "",
+                                   "excluded_summary": "", "excluded_detail": ""})
+    div = blotter.render_headline_strip(headline)
+    ltd_card = div.children[0].children[blotter_pricing.HEADLINE_ORDER.index("ltd")]
+    value_div = ltd_card.children[1]
+    assert value_div.children == "150"
+    caption = ltd_card.children[-1]
+    assert caption.children == "excludes 2 of 4 trades unpriced"
+    assert caption.title == "1 forward: no FWD_OUTRIGHT; 1 option: no PREMIUM"
+
+
+def test_render_headline_strip_no_caption_when_fully_priced():
+    headline = {key: {"value": 0.0, "ref_date": "2026-06-20", "available": True, "reason": "",
+                       "excluded_summary": "", "excluded_detail": ""}
+                for key in blotter_pricing.HEADLINE_ORDER}
+    div = blotter.render_headline_strip(headline)
+    ltd_card = div.children[0].children[blotter_pricing.HEADLINE_ORDER.index("ltd")]
+    assert len(ltd_card.children) == 3  # label, value, ref_date -- no caption row
 
 
 # --------------------------------------------------------------------------- bundles

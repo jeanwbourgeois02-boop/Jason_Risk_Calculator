@@ -350,9 +350,18 @@ def create_schema(conn: sqlite3.Connection) -> None:
     """Create every table if absent (idempotent); drop and recreate every view
     unconditionally (see `_views_ddl`'s docstring for why); enable foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
-    _migrate_columns(conn)
-    conn.commit()
+    try:
+        conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
+        _migrate_columns(conn)
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        # A read-only connection (ui.app.connect_readonly, used by every tab callback)
+        # cannot DROP/CREATE the views. The writable startup path (ui.app.ensure_schema)
+        # has already brought the schema up to date, so a read-only caller simply
+        # proceeds with what is there instead of failing (found 2026-09-17: the
+        # Bundles sub-tab called this through a read-only handle).
+        if "readonly" not in str(exc).lower() and "read-only" not in str(exc).lower():
+            raise
 
 
 def connect(path: Union[str, Path] = ":memory:") -> sqlite3.Connection:
