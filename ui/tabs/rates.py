@@ -46,16 +46,20 @@ DATATABLE_ID = "rates-datatable"
 RECON_ABS_TOLERANCE_USD = 1000.0
 RECON_REL_TOLERANCE = 0.005
 
-_MARK_TYPES = ("PAR_RATE", "PV_USD", "DV01_USD")
+_MARK_TYPES = ("PAR_RATE", "PV_USD", "DV01_USD", "CASHFLOW_USD")
 
+# pnl_usd (2026-09-17) = PV_USD + CASHFLOW_USD, the same figure engine/pnl/valuation
+# puts on the swap's value_book row (CLAUDE.md "P&L conventions", IRS), so this table,
+# the Rates strip above it and the Total book's Rates row all agree.
 _DISPLAY_COLUMNS = [
     "trade_id", "instrument_id", "ccy", "direction", "notional",
-    "par_rate", "pv_usd", "dv01_usd", "recon_status",
+    "par_rate", "pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd", "recon_status",
 ]
 _COLUMN_LABELS = {
     "trade_id": "Trade id", "instrument_id": "Swap", "ccy": "Ccy",
     "direction": "Direction", "notional": "Notional",
     "par_rate": "Par rate", "pv_usd": "PV (USD)", "dv01_usd": "DV01 (USD)",
+    "cashflow_usd": "Settled cashflows (USD)", "pnl_usd": "P&L (USD)",
     "recon_status": "Recon (QL_PRICER vs BBG SWPM)",
 }
 
@@ -86,7 +90,7 @@ def irs_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     with the official PAR_RATE/PV_USD/DV01_USD marks for `as_of` and a recon_status
     against the reconciliation-only BBG_BDH PV."""
     empty_cols = ["trade_id", "instrument_id", "ccy", "quantity", "notional", "direction",
-                  "par_rate", "pv_usd", "dv01_usd", "bbg_pv_usd", "recon_status"]
+                  "par_rate", "pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd", "bbg_pv_usd", "recon_status"]
     trades = pd.read_sql_query(
         # trades_official (2026-09-16): excludes source='BNP' so an IRS swap loaded
         # from both the once-daily BNP snapshot and the real-time blotter under two
@@ -102,16 +106,20 @@ def irs_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
 
     official = pd.read_sql_query(
         "SELECT instrument_id, mark_type, value FROM marks_official "
-        "WHERE as_of_date = ? AND mark_type IN ('PAR_RATE','PV_USD','DV01_USD')",
+        "WHERE as_of_date = ? AND mark_type IN ('PAR_RATE','PV_USD','DV01_USD','CASHFLOW_USD')",
         conn, params=(as_of,),
     )
     official_pivot = (official.pivot_table(index="instrument_id", columns="mark_type",
                                             values="value", aggfunc="first")
                        if not official.empty else pd.DataFrame())
 
+    # Reconciliation PV: Bloomberg SWPM via BBG_BDH when a pull has written one, else a
+    # MANUAL PV_USD typed in from the terminal on the Market data tab (2026-09-17: blpapi
+    # has no per-trade SWPM valuation, so manual entry is the practical recon path).
     bbg = pd.read_sql_query(
         "SELECT instrument_id, value FROM marks "
-        "WHERE as_of_date = ? AND mark_type = 'PV_USD' AND source = 'BBG_BDH'",
+        "WHERE as_of_date = ? AND mark_type = 'PV_USD' AND source IN ('BBG_BDH','MANUAL') "
+        "ORDER BY CASE source WHEN 'BBG_BDH' THEN 0 ELSE 1 END DESC",
         conn, params=(as_of,),
     )
     bbg_map = dict(zip(bbg["instrument_id"], bbg["value"]))
@@ -125,6 +133,8 @@ def irs_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
             df[col] = df["instrument_id"].map(official_pivot[mark_type])
         else:
             df[col] = float("nan")
+    df["pnl_usd"] = [pv + cf if not (_is_missing(pv) or _is_missing(cf)) else float("nan")
+                     for pv, cf in zip(df["pv_usd"], df["cashflow_usd"])]
     df["bbg_pv_usd"] = df["instrument_id"].map(bbg_map)
     df["recon_status"] = [recon_status(o, b) for o, b in zip(df["pv_usd"], df["bbg_pv_usd"])]
     return df
@@ -156,7 +166,7 @@ def format_rows(df: pd.DataFrame) -> tuple:
             formatted[col] = formatted[col].map(_fmt_notional)
         elif col == "par_rate":
             formatted[col] = formatted[col].map(_fmt_rate)
-        elif col in ("pv_usd", "dv01_usd"):
+        elif col in ("pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd"):
             formatted[col] = formatted[col].map(_fmt_usd)
     data_records = formatted.to_dict("records")
     style_data_conditional = [

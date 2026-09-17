@@ -179,3 +179,58 @@ def test_cli_status_exit_code(tmp_path, capsys):
     assert "OK     AUDUSD" in out and "0.66000000" in out
     live.write_status(p, {"connected": False, "reason": "blpapi is not installed", "items": []})
     assert live.main(["--db", str(p), "--status"]) == 1
+
+
+# --------------------------------------------------------------------------- rates step (2026-09-17)
+def test_pull_once_prices_irs_from_injected_rates_source(tmp_path):
+    """With only an IRS on the book (no FX requests) pull_once still pulls the OIS curve
+    and fixings through the injected source, prices the swap and writes QL_PRICER marks."""
+    from pathlib import Path
+    from data.bloomberg.rates_marketdata import RatesFileSource
+    from datetime import date as _date
+
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'IRSOIS-USD-1','2031-08-19')")
+    conn.execute("INSERT INTO trades VALUES ('s1','XLSX','IRSOIS-USD-1','IRS','s1','2026-08-14',10000000,0.041,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('s1',1,'FIXED','USD',-10000000,'2026-08-14','2031-08-19',0.041,0)")
+    conn.execute("INSERT INTO trade_legs VALUES ('s1',2,'FLOAT','USD',10000000,'2026-08-14','2031-08-19',0.0,0)")
+    conn.commit()
+    fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "ois_snapshot_v1.json"
+    source = RatesFileSource(fixture)
+    status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()),
+                            today=_date(2026, 8, 17), rates_source=source)
+    assert status["connected"] is True
+    rates = status["rates"]
+    assert rates["currencies"]["USD"]["quotes"] >= 4 and rates["currencies"]["USD"]["fixings"] == 2
+    assert rates["priced"] == 1 and rates["failed"] == []
+    assert status["options"]["skipped"] == "no FX_OPTION trades to price"
+    marks = dict(conn.execute("SELECT mark_type, source FROM marks WHERE instrument_id = 'IRSOIS-USD-1'").fetchall())
+    assert marks == {"PV_USD": "QL_PRICER", "DV01_USD": "QL_PRICER", "CASHFLOW_USD": "QL_PRICER", "PAR_RATE": "QL_PRICER"}
+    assert conn.execute('SELECT COUNT(*) FROM index_fixings WHERE "index" = \'SOFR\'').fetchone()[0] == 2
+
+
+def test_pull_once_rates_step_reports_per_currency_failure_not_raise(tmp_path):
+    from datetime import date as _date
+
+    class Broken:
+        def get_curve_quotes(self, ccy, as_of):
+            raise RuntimeError("terminal down")
+
+        def get_fixings(self, ccy, start, end):
+            return []
+
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'IRSOIS-USD-1','2031-08-19')")
+    conn.execute("INSERT INTO trades VALUES ('s1','XLSX','IRSOIS-USD-1','IRS','s1','2026-08-14',10000000,0.041,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('s1',1,'FIXED','USD',-10000000,'2026-08-14','2031-08-19',0.041,0)")
+    conn.commit()
+    status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()),
+                            today=_date(2026, 8, 17), rates_source=Broken())
+    assert status["connected"] is True
+    assert "terminal down" in status["rates"]["currencies"]["USD"]["error"]
+    assert status["rates"]["priced"] == 0 and status["rates"]["failed"][0]["trade_id"] == "s1"
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0

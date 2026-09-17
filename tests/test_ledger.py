@@ -140,3 +140,65 @@ def test_period_pnl_by_groups_rows():
     assert not by_pair["USDJPY"]["daily"]["available"]
     with pytest.raises(ValueError):
         ledger.period_pnl_by(conn, "2026-09-14", "not_a_key")
+
+
+# --------------------------------------------------------------------------- IRS / options (2026-09-17)
+def _irs_db():
+    conn = schema.connect()
+    _insert_instruments(conn, [
+        ("IRSOIS-USD-1", "IRS", "USD", "USD", 1, 0, "IRSOIS-USD-1", "2026-09-10"),
+        ("EURUSD", "FX", "EUR", "USD", 1, 0, "EURUSD Curncy", "9999-12-31"),
+        ("EURUSD091026C", "FX_OPTION", "EUR", "USD", 1, 0, "", "2026-09-10"),
+    ])
+    _insert_trade(conn, "s1", "IRSOIS-USD-1", "IRS", "2026-03-01", 10e6, 0.04)
+    _insert_legs(conn, [
+        ("s1", 1, "FIXED", "USD", -10e6, "2026-03-03", "2026-09-10", 0.04, 0),
+        ("s1", 2, "FLOAT", "USD", 10e6, "2026-03-03", "2026-09-10", 0.0, 0),
+    ])
+    _insert_trade(conn, "o1", "EURUSD091026C", "FX_OPTION", "2026-03-01", 1e6, 0.0050)
+    _insert_legs(conn, [("o1", 1, "NOTIONAL", "EUR", 1e6, "2026-03-01", "2026-09-10", 0.0050, 0)])
+    conn.commit()
+    return conn
+
+
+def test_realise_settled_freezes_matured_swap_at_pv_plus_cashflows():
+    """Item 52: a swap past maturity freezes at the last official PV_USD + CASHFLOW_USD on
+    or before maturity (here PV is 0 on the maturity date, the coupons are the result)."""
+    conn = _irs_db()
+    _insert_marks(conn, [
+        ("2026-09-09", "IRSOIS-USD-1", "2026-09-10", "PV_USD", 2_000.0, "QL_PRICER", "t"),
+        ("2026-09-09", "IRSOIS-USD-1", "2026-09-10", "CASHFLOW_USD", 0.0, "QL_PRICER", "t"),
+        ("2026-09-10", "IRSOIS-USD-1", "2026-09-10", "PV_USD", 0.0, "QL_PRICER", "t"),
+        ("2026-09-10", "IRSOIS-USD-1", "2026-09-10", "CASHFLOW_USD", 2_100.0, "QL_PRICER", "t"),
+    ])
+    out = ledger.realise_settled(conn, "2026-09-14")
+    assert any(u["trade_id"] == "o1" for u in out["unrealisable"])   # no PREMIUM on file
+    row = conn.execute("SELECT product, mark_type, pnl_usd, spot_usd_per_local, note FROM realised_pnl "
+                       "WHERE trade_id = 's1'").fetchone()
+    assert row == ("IRS", "PV_USD", 2_100.0, 1.0, "")
+    vb = ledger.value_book(conn, "2026-09-14")
+    assert vb.loc[vb["trade_id"] == "s1", "pnl_usd"].iloc[0] == 2_100.0
+    # a re-run never re-freezes
+    assert ledger.realise_settled(conn, "2026-09-14")["realised"] == 0
+
+
+def test_realise_settled_swap_without_cashflow_mark_is_unrealisable():
+    conn = _irs_db()
+    _insert_marks(conn, [("2026-09-10", "IRSOIS-USD-1", "2026-09-10", "PV_USD", 0.0, "QL_PRICER", "t")])
+    out = ledger.realise_settled(conn, "2026-09-14")
+    reasons = {u["trade_id"]: u["reason"] for u in out["unrealisable"]}
+    assert "CASHFLOW_USD" in reasons["s1"]
+    assert conn.execute("SELECT COUNT(*) FROM realised_pnl").fetchone()[0] == 0
+
+
+def test_realise_settled_freezes_expired_option_at_last_premium_and_spot():
+    conn = _irs_db()
+    _insert_marks(conn, [
+        ("2026-09-09", "EURUSD091026C", "2026-09-10", "PREMIUM", 0.0080, "QL_OPTIONS_PRICER", "t"),
+        ("2026-09-09", "EURUSD", "2026-09-09", "SPOT", 1.20, "BBG_BFXFORWARD", "t"),
+    ])
+    ledger.realise_settled(conn, "2026-09-14")
+    row = conn.execute("SELECT mark_type, pnl_usd, spot_as_of_date, note FROM realised_pnl WHERE trade_id = 'o1'").fetchone()
+    # 1m EUR * (0.0080 - 0.0050) = 3,000 EUR * 1.20
+    assert row[0] == "PREMIUM" and row[1] == pytest.approx(3_600.0) and row[2] == "2026-09-09"
+    assert "last before expiry" in row[3]

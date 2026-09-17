@@ -2,8 +2,9 @@
 
 `value_book(conn, as_of, marks_source=None)` is the headline calculation: FX (spot,
 forward, swap legs -- all stored as ordinary 2-leg FX trades, see the swap packaging
-note below) and futures, each valued fresh from `marks_official` (or from `marks`
-filtered to `marks_source` when given, e.g. the Reconciliation tab's manual entries).
+note below) and futures, each valued fresh from `marks_official` (or from
+`marks` filtered to `marks_source` when given).
+
 Settled trades are never recomputed: their row is read back from `realised_pnl`
 (engine/pnl/ledger.realise_settled must have populated it first; a settled trade with
 no realised_pnl row is Unavailable, not recomputed from a stale open-trade formula).
@@ -16,6 +17,22 @@ any other FX_FWD row; grouping by package_id for display is a UI concern.
 USD conversion `S` (quote currency -> USD) at spot: identity when quote is USD,
 otherwise the SPOT mark of instrument `USD<quote>` inverted, or of `<quote>USD`
 directly -- whichever is on file. No USD leg is ever invented for a cross.
+
+IRS and FX_OPTION rows (2026-09-17, user decision "the Total book must be the whole
+book"): the same one-row-per-trade shape, so the header, every period figure, the
+Total book strip and the bundles all include them.
+  - IRS: `pnl_usd = PV_USD + CASHFLOW_USD` from `marks_official` at the swap's maturity
+    (`settle_date` of leg 1) on `as_of`, both written by `engine/rates`. A swap dealt at
+    its fixed rate with no upfront is worth zero at the fill by construction, so this
+    is the mark-minus-fill analogue of the FX formula (CLAUDE.md "P&L conventions");
+    CASHFLOW_USD (net coupons already settled) keeps LTD continuous across a payment
+    and at maturity. `mark` = PV_USD, `spot` = 1 (the pricer already converted at spot).
+  - FX_OPTION: `pnl_local = quantity * (PREMIUM_mark - fill)` in the pair's base currency
+    (PREMIUM marks and `trades.price` are both base-ccy fraction of base notional,
+    docs/open-questions.md item 61d), `pnl_usd = pnl_local * S` with `S` = USD per base
+    unit at spot (identity when base is USD).
+  Missing marks give NaN with a reason exactly like FX. Matured swaps and expired
+  options read their frozen row from `realised_pnl` (engine/pnl/ledger.realise_settled).
 """
 from __future__ import annotations
 
@@ -94,6 +111,26 @@ def _fut_sql(theme: bool) -> str:
     """
 
 
+def _irs_sql(theme: bool) -> str:
+    theme_col = "COALESCE(t.theme, '')" if theme else "''"
+    return f"""
+        SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
+               t.trade_date, t.quantity, t.price AS fill, i.base_ccy, l.settle_date
+        FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+        WHERE t.product = 'IRS' AND t.trade_date <= :as_of AND l.leg_no = 1
+    """
+
+
+def _opt_sql(theme: bool) -> str:
+    theme_col = "COALESCE(t.theme, '')" if theme else "''"
+    return f"""
+        SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
+               t.trade_date, t.quantity, t.price AS fill, i.base_ccy, i.quote_ccy, l.settle_date
+        FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+        WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND l.leg_no = 1
+    """
+
+
 def _mark_table(source: Optional[str]) -> str:
     return "marks_official" if source is None else "marks"
 
@@ -152,6 +189,8 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
     # sqlite3 params: positional IN(...) placeholders followed by :as_of.
     fx = pd.read_sql_query(_fx_sql(theme), conn, params=(*FX_PRODUCTS, as_of))
     fut = pd.read_sql_query(_fut_sql(theme), conn, params={"as_of": as_of})
+    irs = pd.read_sql_query(_irs_sql(theme), conn, params={"as_of": as_of})
+    opt = pd.read_sql_query(_opt_sql(theme), conn, params={"as_of": as_of})
 
     for r in fx.itertuples(index=False):
         status = "SETTLED" if r.settle_date < as_of else "OPEN"
@@ -177,6 +216,30 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
             rows.append({**base, **_settled_future_row(conn, r, as_of, marks_source)})
             continue
         rows.append({**base, **_open_future_row(conn, r, as_of, marks_source)})
+
+    for r in irs.itertuples(index=False):
+        status = "SETTLED" if r.settle_date < as_of else "OPEN"
+        base = {
+            "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": r.product,
+            "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
+            "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
+        }
+        if status == "SETTLED":
+            rows.append({**base, **_settled_irs_row(conn, r, as_of, marks_source)})
+            continue
+        rows.append({**base, **_open_irs_row(conn, r, as_of, marks_source)})
+
+    for r in opt.itertuples(index=False):
+        status = "SETTLED" if r.settle_date < as_of else "OPEN"
+        base = {
+            "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": r.product,
+            "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
+            "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
+        }
+        if status == "SETTLED":
+            rows.append({**base, **_settled_option_row(conn, r, as_of, marks_source)})
+            continue
+        rows.append({**base, **_open_option_row(conn, r, as_of, marks_source)})
 
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
@@ -264,3 +327,66 @@ def _settled_future_row(conn, r, as_of, marks_source) -> dict:
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]),
                 pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason="", note=row["note"])
+
+
+# --------------------------------------------------------------------------- IRS
+def _open_irs_row(conn, r, as_of, marks_source) -> dict:
+    """PV_USD + CASHFLOW_USD at the swap's maturity date on `as_of` (module docstring)."""
+    out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=1.0, spot_source="identity",
+               pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
+    pv_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PV_USD", as_of, marks_source)
+    if pv_hit is None:
+        out["reason"] = f"no PV_USD mark for {r.instrument_id} maturity {r.settle_date} on {as_of}"
+        return out
+    cf_hit = _mark_at(conn, r.instrument_id, r.settle_date, "CASHFLOW_USD", as_of, marks_source)
+    if cf_hit is None:
+        out["reason"] = f"no CASHFLOW_USD mark for {r.instrument_id} maturity {r.settle_date} on {as_of}"
+        return out
+    pv, pv_src = float(pv_hit[0]), pv_hit[1]
+    pnl = pv + float(cf_hit[0])
+    out["mark"], out["mark_source"] = pv, pv_src
+    out["pnl_local"], out["pnl_usd"], out["pnl_spot_usd"] = pnl, pnl, pnl
+    if float(cf_hit[0]) != 0.0:
+        out["note"] = f"includes {float(cf_hit[0]):,.2f} USD of settled coupons"
+    return out
+
+
+def _settled_irs_row(conn, r, as_of, marks_source) -> dict:
+    row = _realised_row(conn, r.trade_id)
+    if row is None:
+        return _provisional(conn, r, as_of, marks_source, _open_irs_row)
+    return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
+                spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]),
+                pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason="", note=row["note"])
+
+
+# --------------------------------------------------------------------------- FX options
+def _open_option_row(conn, r, as_of, marks_source) -> dict:
+    """quantity * (PREMIUM - fill) in base currency, converted to USD at spot."""
+    out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
+               pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
+    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PREMIUM", as_of, marks_source)
+    if m_hit is None:
+        out["reason"] = f"no PREMIUM mark for {r.instrument_id} expiry {r.settle_date} on {as_of}"
+        return out
+    m, m_src = float(m_hit[0]), m_hit[1]
+    out["mark"], out["mark_source"] = m, m_src
+    s, s_pair, s_src = usd_per_quote(conn, r.base_ccy, as_of, marks_source)
+    if s != s or s_pair is None:
+        out["reason"] = f"no SPOT for USD conversion of {r.base_ccy} on {as_of}"
+        return out
+    out["spot"], out["spot_source"] = s, s_src
+    pnl_local = r.quantity * (m - r.fill)
+    pnl_usd = pnl_local * s
+    out["pnl_local"], out["pnl_usd"], out["pnl_spot_usd"] = pnl_local, pnl_usd, pnl_usd
+    return out
+
+
+def _settled_option_row(conn, r, as_of, marks_source) -> dict:
+    row = _realised_row(conn, r.trade_id)
+    if row is None:
+        return _provisional(conn, r, as_of, marks_source, _open_option_row)
+    return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
+                spot=row["spot_usd_per_local"], spot_source=row["spot_source"],
+                pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]), pnl_spot_usd=float(row["pnl_usd"]),
+                pnl_carry_usd=0.0, reason="", note=row["note"])

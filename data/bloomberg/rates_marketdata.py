@@ -889,3 +889,31 @@ def write_curve_quotes(
             rows,
         )
     return len(rows)
+
+
+_FIXINGS_DDL = """
+CREATE TABLE IF NOT EXISTS index_fixings (
+  "index"         TEXT NOT NULL,
+  fixing_date     TEXT NOT NULL,
+  value           REAL NOT NULL,
+  source          TEXT NOT NULL,
+  PRIMARY KEY ("index", fixing_date, source)
+)
+"""
+
+
+def write_fixings(conn: sqlite3.Connection, currency: str, fixings: Sequence[Fixing],
+                  source: str = "BBG_BDH") -> int:
+    """Insert one `index_fixings` row per fixing for the currency's OIS index (decimal
+    values, e.g. 0.0405), INSERT OR REPLACE keyed on (index, date, source). Creates the
+    table defensively like `write_curve_quotes` does for `curve_quotes`. engine/rates
+    loads these into QuantLib before pricing a seasoned swap. Returns rows written."""
+    conn.execute(_FIXINGS_DDL)
+    index = OIS_INDEX[currency.upper()]
+    rows = [(index, f.date.isoformat(), float(f.value), source) for f in fixings]
+    with conn:
+        conn.executemany(
+            'INSERT OR REPLACE INTO index_fixings ("index", fixing_date, value, source) VALUES (?,?,?,?)',
+            rows,
+        )
+    return len(rows)

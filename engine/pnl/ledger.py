@@ -22,6 +22,17 @@ This is algebraically identical to `quantity * (mark - fill) * S` and, when the 
 currency is USD (S = 1), identical to the original USD-pair-only formula, so it stays
 compatible with a plain "spot dated / last before settlement" note.
 
+IRS (2026-09-17, closes docs/open-questions.md item 52): a swap whose maturity is before
+`as_of` is frozen at the last official `PV_USD + CASHFLOW_USD` on or before maturity
+(PV_USD is 0 on the maturity date itself once the pricer has run, so the frozen value is
+the swap's settled coupons). Stored with `mark_type='PV_USD'`, `local_amount` = the
+frozen USD P&L, `spot_usd_per_local = 1.0`, `usd_entry_amount = 0.0`, so the generic
+identity above still holds. FX_OPTION: frozen at the last official `PREMIUM` on or before
+expiry, converted at that day's spot, same columns as an FX trade (`local_amount` =
+base notional, `mark_type='PREMIUM'`). An expiry-day intrinsic-value mark would be more
+exact than the last premium; until the options pricer writes one, the note says which
+date's premium was used.
+
 `ltd(conn, d)` = sum of value_book(d).pnl_usd, NaN if any row is NaN, 0.0 for an empty
 book (first trading day, not Unavailable). Periods subtract `ltd` at a reference
 business day from a Mon-Fri + `config/holidays.txt` calendar (engine/pnl/aggregate.py).
@@ -52,6 +63,21 @@ _OPEN_FUTURE_SQL = """
 SELECT t.trade_id, t.instrument_id, t.product, i.multiplier, t.quantity, t.price, l.settle_date
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product = 'FUTURE' AND l.leg_no = 1 AND l.settle_date < :as_of
+  AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
+"""
+
+
+_OPEN_IRS_SQL = """
+SELECT t.trade_id, t.instrument_id, t.product, i.base_ccy, t.quantity, t.price, l.settle_date
+FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+WHERE t.product = 'IRS' AND l.leg_no = 1 AND l.settle_date < :as_of
+  AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
+"""
+
+_OPEN_OPTION_SQL = """
+SELECT t.trade_id, t.instrument_id, t.product, i.base_ccy, t.quantity, t.price, l.settle_date
+FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+WHERE t.product = 'FX_OPTION' AND l.leg_no = 1 AND l.settle_date < :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
 """
 
@@ -102,6 +128,40 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
         pnl = qty * combined - entry
         note = "" if m_day == settle else f"settlement price dated {m_day} (last before expiry)"
         _insert_realised(conn, trade_id, pair, product, "USD", settle, qty, entry, "FUTURE_PX", combined, m_day, m_src, pnl, note)
+        realised += 1
+
+    for trade_id, inst, product, ccy, qty, fill, settle in conn.execute(_OPEN_IRS_SQL, {"as_of": as_of}).fetchall():
+        pv_hit = _last_on_or_before(conn, inst, "PV_USD", settle)
+        if pv_hit is None:
+            unrealisable.append({"trade_id": trade_id, "reason": f"no official PV_USD for {inst} on or before {settle}"})
+            continue
+        pv, m_day, m_src = pv_hit
+        cf_row = conn.execute(
+            "SELECT value FROM marks_official WHERE instrument_id = :i AND mark_type = 'CASHFLOW_USD' "
+            "AND as_of_date = :d ORDER BY snapped_at DESC LIMIT 1", {"i": inst, "d": m_day}).fetchone()
+        if cf_row is None:
+            unrealisable.append({"trade_id": trade_id, "reason": f"no official CASHFLOW_USD for {inst} on {m_day}"})
+            continue
+        pnl = pv + float(cf_row[0])
+        note = "" if m_day == settle else f"PV + cashflows dated {m_day} (last before maturity)"
+        _insert_realised(conn, trade_id, inst, product, ccy, settle, pnl, 0.0, "PV_USD", 1.0, m_day, m_src, pnl, note)
+        realised += 1
+
+    for trade_id, inst, product, base_ccy, qty, fill, settle in conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall():
+        m_hit = _last_on_or_before(conn, inst, "PREMIUM", settle)
+        if m_hit is None:
+            unrealisable.append({"trade_id": trade_id, "reason": f"no official PREMIUM for {inst} on or before {settle}"})
+            continue
+        m, m_day, m_src = m_hit
+        s, s_pair, s_src = usd_per_quote(conn, base_ccy, m_day)
+        if s != s:
+            unrealisable.append({"trade_id": trade_id, "reason": f"no SPOT to convert {base_ccy} to USD on or before {settle}"})
+            continue
+        entry = qty * fill * s
+        combined = m * s
+        pnl = qty * combined - entry
+        note = f"premium dated {m_day}" + ("" if m_day == settle else " (last before expiry)")
+        _insert_realised(conn, trade_id, inst, product, base_ccy, settle, qty, entry, "PREMIUM", combined, m_day, m_src, pnl, note)
         realised += 1
 
     conn.commit()

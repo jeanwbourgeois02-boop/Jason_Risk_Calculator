@@ -251,7 +251,7 @@ def test_price_and_store_writes_pv_dv01_par_rate_marks():
         ("2026-08-17", instrument_id),
     ).fetchall()
     by_type = {r[0]: r for r in rows}
-    assert set(by_type) == {"PV_USD", "DV01_USD", "PAR_RATE"}
+    assert set(by_type) == {"PV_USD", "DV01_USD", "CASHFLOW_USD", "PAR_RATE"}
     for mark_type, value, source, settle_date, snapped_at in rows:
         assert source == "QL_PRICER"
         assert settle_date == "2031-08-19"
@@ -263,7 +263,8 @@ def test_price_and_store_writes_pv_dv01_par_rate_marks():
         "SELECT mark_type, value, source FROM marks_official WHERE as_of_date = ? AND instrument_id = ?",
         ("2026-08-17", instrument_id),
     ).fetchall()
-    assert {r[0]: r[2] for r in official} == {"PV_USD": "QL_PRICER", "DV01_USD": "QL_PRICER", "PAR_RATE": "QL_PRICER"}
+    assert {r[0]: r[2] for r in official} == {"PV_USD": "QL_PRICER", "DV01_USD": "QL_PRICER",
+                                              "CASHFLOW_USD": "QL_PRICER", "PAR_RATE": "QL_PRICER"}
 
 
 @needs_quantlib
@@ -350,8 +351,95 @@ def test_price_and_store_on_a_real_irs_trade_from_the_reference_csv():
         (as_of, instrument_id),
     ).fetchall()
     by_type = dict(rows)
-    assert set(by_type) == {"PV_USD", "DV01_USD", "PAR_RATE"}
+    assert set(by_type) == {"PV_USD", "DV01_USD", "CASHFLOW_USD", "PAR_RATE"}
     # Plausibility: notional is hundreds of millions (see the CSV sample), so DV01 should
     # be a material USD amount, and PV should not be absurdly large relative to notional.
     assert abs(by_type["DV01_USD"]) > 100
     assert abs(by_type["PV_USD"]) < abs(quantity) * 2
+
+
+# --------------------------------------------------------------------------- fixings, cashflows, book-wide pricing (2026-09-17)
+def _seed_fixings(conn, index, start: datetime.date, end: datetime.date, value=0.0530):
+    rows = []
+    d = start
+    while d <= end:
+        if d.weekday() < 5:
+            rows.append((index, d.isoformat(), value, "BBG_BDH"))
+        d += datetime.timedelta(days=1)
+    with conn:
+        conn.executemany('INSERT OR REPLACE INTO index_fixings ("index", fixing_date, value, source) VALUES (?,?,?,?)', rows)
+
+
+@needs_quantlib
+def test_seasoned_swap_fails_without_fixings_and_prices_with_them():
+    from engine.rates.store import price_all_and_store, price_and_store
+
+    conn = sqlite3.connect(":memory:")
+    create_schema(conn)
+    as_of = "2026-09-17"
+    _seed_curve_quotes(conn, as_of, "USD", "SOFR", MOCK_USD_SOFR)
+    _seed_manual_irs_trade(conn, effective="2026-08-12", maturity="2027-02-11")
+    with pytest.raises(RuntimeError, match="fixing"):
+        price_and_store(conn, as_of, "TEST-IRS-1")
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0   # nothing invented
+    # price_all_and_store reports the failure per trade instead of raising
+    out = price_all_and_store(conn, as_of)
+    assert out[0]["ok"] is False and "fixing" in out[0]["error"]
+    _seed_fixings(conn, "SOFR", datetime.date(2026, 8, 10), datetime.date(2026, 9, 17))
+    out = price_all_and_store(conn, as_of)
+    assert out == [{"trade_id": "TEST-IRS-1", "instrument_id": "IRSOIS-USD-TEST-IRS-1", "ccy": "USD", "ok": True, "error": ""}]
+    by_type = dict(conn.execute("SELECT mark_type, value FROM marks_official WHERE as_of_date = ?", (as_of,)).fetchall())
+    assert set(by_type) == {"PV_USD", "DV01_USD", "CASHFLOW_USD", "PAR_RATE"}
+    assert by_type["CASHFLOW_USD"] == 0.0    # single payment at maturity: nothing settled yet
+    assert by_type["PV_USD"] != 0.0
+
+
+@needs_quantlib
+def test_expired_swap_has_zero_pv_and_its_result_in_cashflows():
+    from engine.rates.store import price_all_and_store
+
+    conn = sqlite3.connect(":memory:")
+    create_schema(conn)
+    as_of = "2027-03-01"
+    _seed_curve_quotes(conn, as_of, "USD", "SOFR", MOCK_USD_SOFR)
+    _seed_manual_irs_trade(conn, effective="2026-08-12", maturity="2027-02-11", fixed_rate=0.05)
+    _seed_fixings(conn, "SOFR", datetime.date(2026, 8, 10), datetime.date(2027, 3, 1), value=0.0530)
+    assert price_all_and_store(conn, as_of)[0]["ok"] is True
+    by_type = dict(conn.execute("SELECT mark_type, value FROM marks_official WHERE as_of_date = ?", (as_of,)).fetchall())
+    assert by_type["PV_USD"] == 0.0 and by_type["DV01_USD"] == 0.0
+    # payer at 5% vs ~5.3% compounded SOFR over 183 days on 10mm: received roughly 10mm * 0.3% * 0.51
+    assert 10_000 < by_type["CASHFLOW_USD"] < 25_000
+
+
+@needs_quantlib
+def test_non_usd_swap_is_converted_at_spot_or_refused():
+    from engine.rates.store import price_and_store
+
+    eur_quotes = [("1W", 0.0315), ("1M", 0.0313), ("3M", 0.0310), ("1Y", 0.0290), ("5Y", 0.0255), ("10Y", 0.0260)]
+    conn = sqlite3.connect(":memory:")
+    create_schema(conn)
+    _seed_curve_quotes(conn, "2026-08-17", "EUR", "ESTR", eur_quotes)
+    _seed_manual_irs_trade(conn, ccy="EUR")
+    with pytest.raises(ValueError, match="SPOT"):
+        price_and_store(conn, "2026-08-17", "TEST-IRS-1")
+    conn.execute("INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
+    conn.execute("INSERT INTO marks VALUES ('2026-08-17','EURUSD','2026-08-17','SPOT',1.25,'BBG_BFXFORWARD','t')")
+    conn.commit()
+    result = price_and_store(conn, "2026-08-17", "TEST-IRS-1")
+    pv_usd = conn.execute("SELECT value FROM marks_official WHERE mark_type = 'PV_USD'").fetchone()[0]
+    assert pv_usd == pytest.approx(result.npv * 1.25)
+
+
+def test_price_all_and_store_skips_realised_and_future_dated_swaps():
+    """Glue only (no QuantLib needed): a swap already frozen in realised_pnl, or dealt after
+    as_of, is not priced at all -- the returned list is empty."""
+    conn = sqlite3.connect(":memory:")
+    create_schema(conn)
+    _seed_manual_irs_trade(conn, trade_id="LATER", effective="2026-12-01", maturity="2027-12-01")
+    _seed_manual_irs_trade(conn, trade_id="DONE", effective="2025-01-01", maturity="2026-01-01")
+    conn.execute("INSERT INTO realised_pnl VALUES ('DONE','IRSOIS-USD-DONE','IRS','USD','2026-01-01',1,0,'PV_USD',1,"
+                 "'2026-01-01','QL_PRICER',1,'t','')")
+    conn.commit()
+    from engine.rates.store import price_all_and_store
+
+    assert price_all_and_store(conn, "2026-08-17") == []

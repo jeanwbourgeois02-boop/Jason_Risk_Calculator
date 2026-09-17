@@ -73,7 +73,7 @@ marks (
   as_of_date      TEXT NOT NULL,
   instrument_id   TEXT NOT NULL REFERENCES instruments,
   settle_date     TEXT NOT NULL,      -- outright date; = as_of_date for SPOT; expiry for futures
-  mark_type       TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | PAR_RATE | PV_USD | DV01_USD | PREMIUM | DELTA
+  mark_type       TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | PAR_RATE | PV_USD | DV01_USD | CASHFLOW_USD | PREMIUM | DELTA
                                       -- | GAMMA | THETA | VEGA | RHO (option Greeks, engine/options, 2026-09-17)
   value           REAL NOT NULL,      -- DELTA = base-ccy delta per 1 unit of trades.quantity (may exceed 1 for digitals)
   source          TEXT NOT NULL,      -- BNP_BVAL | BBG_BFXFORWARD | BBG_BDH | BBG_BDP | BBG_INTERP | MANUAL
@@ -106,6 +106,15 @@ curve_quotes (                         -- raw OIS quote staging (data-ingest DDL
   PRIMARY KEY (as_of_date, ccy, index, tenor, source)
 );
 
+index_fixings (                        -- overnight fixings loaded into QuantLib by engine/rates before pricing a
+                                       -- seasoned swap; written by data/bloomberg/rates_marketdata.py::write_fixings
+  index           TEXT NOT NULL,      -- 'SOFR', 'ESTR', ...
+  fixing_date     TEXT NOT NULL,
+  value           REAL NOT NULL,      -- decimal (0.0533 = 5.33 %)
+  source          TEXT NOT NULL,      -- BBG_BDH | MANUAL
+  PRIMARY KEY (index, fixing_date, source)
+);
+
 positions (                            -- one row per PB position per day (BNP grain) or per computed net (CALC)
   as_of_date      TEXT NOT NULL,
   source          TEXT NOT NULL,      -- BNP | CALC
@@ -135,7 +144,7 @@ Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4
 |---|---|
 | SPOT, FWD_OUTRIGHT | BBG_BFXFORWARD |
 | FUTURE_PX | BBG_BDH |
-| PAR_RATE, PV_USD, DV01_USD | QL_PRICER |
+| PAR_RATE, PV_USD, DV01_USD, CASHFLOW_USD | QL_PRICER |
 | DELTA, PREMIUM, GAMMA, THETA, VEGA, RHO | QL_OPTIONS_PRICER (`engine/options`, vendored options_calc; since 2026-09-17 — MANUAL is reconciliation-only for these) |
 | any | BNP_BVAL is reconciliation only, never official |
 | any | BBG_INTERP (linear interpolation in forward points between standard tenors, written by the pull script when a broken-date outright cannot be requested directly) is reconciliation / fallback only, never official |
@@ -256,8 +265,8 @@ Per-pair delta (the sheet's "Position") is the same union grouped by `t.instrume
 - **Per-trade LTD P&L (USD)**, with `Q` = base amount, `f` = fill, `m` = outright mark for the leg's value date, `S` = spot (quote→USD):
   - FX, any pair: `PnL_quote = Q × (m − f)`; `PnL_USD = PnL_quote × S` (`S = 1` when quote is USD).
   - Futures: `PnL_USD = contracts × multiplier × (m − f)`.
-  - IRS: `PnL_USD = PV_USD(t) − PV_USD(trade date)`; PV, DV01 consumed as marks until the pricer is rebuilt on `curves`.
-  - FX option: `PnL_USD = (premium_mark − premium_fill) × Size`, converted at spot if the premium currency is not USD.
+  - IRS: `PnL_USD = PV_USD(t) + CASHFLOW_USD(t)`, both official marks from `engine/rates` at the swap's maturity date. A swap dealt at its fixed rate with no upfront is worth zero at the fill by construction, so this is the mark-minus-fill analogue of the FX formula; `CASHFLOW_USD` is the net of coupons already settled on or before `t` (0 for a forward-starting swap), which keeps LTD continuous across a coupon payment and at maturity, when PV goes to 0. Both are computed in the swap's currency and converted at that day's SPOT by the pricer. Realised at maturity by `engine/pnl/ledger.realise_settled` at the last official PV + cashflows on or before maturity.
+  - FX option: `PnL_USD = quantity × (PREMIUM_mark − premium_fill) × S`, premium in base-ccy fraction, `S` = USD per base unit at spot; realised at expiry at the last official PREMIUM on or before expiry (an expiry-day intrinsic mark would be more exact, not written yet).
 - **Daily P&L** = `LTD(t) − LTD(t−1bd)`. **Trading P&L** = LTD of trades with `trade_date = t`. **5d P&L** = `LTD(t) − LTD(t−5bd)`. **MTD** = `LTD(t) − LTD(last bd of previous month)`. **YTD** = `LTD(t) − LTD(last bd of previous year)`. All from our own recomputed daily series; `t−n bd` uses the trading calendar.
 - **Mark time**: official close is 17:00 `America/New_York` (user decision 2026-09-15; Bloomberg's daily FX close, so historical `PX_LAST` spot and the `snapped_at` stamp agree). The xlsx hard-codes `"PricingTime","15:00:00-04:00"`; that 15:00 snapshot is a Reconciliation-tab input only. The app resolves the offset from the zone per date; intraday = live. Every mark row carries `snapped_at` with the resolved offset for that row.
 - **Net USD** (FX only) = the USD position: Σ over pairs of sign × USD notional, sign +1 for USDXXX pairs (long base = long USD), −1 otherwise. The header shows this sign with the word "short USD" / "long USD" underneath. The engine's `portfolio_totals` returns the opposite quantity, the net non-USD delta (+ = long foreign), which the Delta tab labels as such and combines with futures delta; the header negates it. **Gross USD** = Σ over pairs of |net USD notional per pair|. Gold and equity futures are reported separately (see open questions).

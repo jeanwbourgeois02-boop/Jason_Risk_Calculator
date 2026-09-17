@@ -457,6 +457,83 @@ def test_value_book_future():
     assert row["pnl_usd"] == pytest.approx(21_075)
 
 
+VB_OPT = "EURUSD092226C-1"
+VB_OPT_EXPIRY = "2026-09-22"
+
+
+def _vb_option(conn, trade_id, instrument_id, base_ccy, quote_ccy, quantity, fill, expiry=VB_OPT_EXPIRY):
+    conn.execute("INSERT OR IGNORE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 (instrument_id, "FX_OPTION", base_ccy, quote_ccy, 1.0, 0, instrument_id, expiry))
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, "XLSX", instrument_id, "FX_OPTION", trade_id, "2026-05-01", quantity, fill,
+         "ACC", "CPTY", "", "TRADER", "test", ""),
+    )
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 (trade_id, 1, "NOTIONAL", base_ccy, quantity, "2026-05-01", expiry, fill, 0))
+    conn.commit()
+
+
+def _vb_premium(conn, instrument_id, value, expiry=VB_OPT_EXPIRY, as_of=VB_AS_OF):
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                 (as_of, instrument_id, expiry, "PREMIUM", value, "QL_OPTIONS_PRICER", f"{as_of}T17:00:00-04:00"))
+    conn.commit()
+
+
+def test_value_book_option_premium_pnl_in_base_ccy_converted_at_base_spot():
+    """CLAUDE.md: PnL = (premium_mark - premium_fill) x Size; premium and fill are both a
+    fraction of BASE notional, so the USD conversion is the base currency's spot."""
+    conn = _vb_conn()
+    _vb_option(conn, "O1", VB_OPT, "EUR", "USD", 35_000_000, 0.0050)
+    _vb_premium(conn, VB_OPT, 0.0062)
+    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["product"] == "FX_OPTION" and row["status"] == "OPEN"
+    assert row["pnl_local"] == pytest.approx(35_000_000 * 0.0012)
+    assert row["pnl_usd"] == pytest.approx(35_000_000 * 0.0012 * 1.10)
+    assert row["mark_source"] == "QL_OPTIONS_PRICER"
+
+
+def test_value_book_short_option_loses_when_premium_rises():
+    conn = _vb_conn()
+    _vb_option(conn, "O2", "USDJPY111926P-1", "USD", "JPY", -10_000_000, 0.0100)
+    _vb_premium(conn, "USDJPY111926P-1", 0.0130)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["pnl_usd"] == pytest.approx(-10_000_000 * 0.0030)  # base USD: S = 1, no SPOT needed
+
+
+def test_value_book_option_without_premium_mark_is_unavailable_with_reason():
+    conn = _vb_conn()
+    _vb_option(conn, "O3", VB_OPT, "EUR", "USD", 1_000_000, 0.0050)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert math.isnan(row["pnl_usd"])
+    assert "PREMIUM" in row["reason"]
+
+
+def test_value_book_option_never_reads_delta_or_non_official_premium():
+    conn = _vb_conn()
+    _vb_option(conn, "O4", VB_OPT, "EUR", "USD", 1_000_000, 0.0050)
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                 (VB_AS_OF, VB_OPT, VB_OPT_EXPIRY, "PREMIUM", 0.0099, "MANUAL", "t"))
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                 (VB_AS_OF, VB_OPT, VB_OPT_EXPIRY, "DELTA", 0.5, "QL_OPTIONS_PRICER", "t"))
+    conn.commit()
+    assert math.isnan(value_book(conn, VB_AS_OF).iloc[0]["pnl_usd"])
+
+
+def test_value_book_expired_option_is_unavailable_not_stale():
+    conn = _vb_conn()
+    _vb_option(conn, "O5", "EURUSD051526C-1", "EUR", "USD", 1_000_000, 0.0050, expiry="2026-05-15")
+    _vb_premium(conn, "EURUSD051526C-1", 0.0062, expiry="2026-05-15")
+    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    # 2026-09-17: an expired option is SETTLED like any other trade -- its row must come
+    # from realised_pnl (engine/pnl/ledger.realise_settled), never a stale premium.
+    assert row["status"] == "SETTLED"
+    assert math.isnan(row["pnl_usd"])
+    assert "not yet realised" in row["reason"]
+
+
 def test_value_book_missing_mark_is_nan_with_reason():
     conn = _vb_conn()
     _vb_fx_trade(conn, "T5", "EURUSD", "EUR", "USD", 1_000_000, 1.1000)
@@ -524,3 +601,77 @@ def test_stress_move_1pct_and_scenario_arithmetic():
 def test_stress_scenario_missing_currency_contributes_zero():
     result = stress.apply_scenario({"EUR": 1_000_000.0}, {"TRY": -0.10})
     assert result["fx_pnl"]["TRY"] == 0.0
+
+
+# --------------------------------------------------------------------- value_book: IRS
+VB_IRS = "IRSOIS-USD-77"
+VB_IRS_MATURITY = "2027-06-20"
+
+
+def _vb_irs(conn, trade_id="S1", quantity=10_000_000.0, fixed=0.04, maturity=VB_IRS_MATURITY):
+    conn.execute("INSERT OR IGNORE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 (VB_IRS, "IRS", "USD", "USD", 1.0, 0, VB_IRS, maturity))
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, "MANUAL", VB_IRS, "IRS", trade_id, "2026-05-01", quantity, fixed,
+         "ACC", "CPTY", "STRAT", "TRADER", "irs", ""))
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        (trade_id, 1, "FIXED", "USD", -quantity, "2026-05-05", maturity, fixed, 0),
+        (trade_id, 2, "FLOAT", "USD", quantity, "2026-05-05", maturity, 0.0, 0),
+    ])
+    conn.commit()
+
+
+def _vb_irs_mark(conn, mark_type, value, as_of=VB_AS_OF, maturity=VB_IRS_MATURITY):
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                 (as_of, VB_IRS, maturity, mark_type, value, "QL_PRICER", f"{as_of}T17:00:00-04:00"))
+    conn.commit()
+
+
+def test_value_book_irs_is_pv_plus_settled_cashflows():
+    """CLAUDE.md P&L conventions, IRS (2026-09-17): pnl_usd = PV_USD + CASHFLOW_USD from
+    marks_official at the swap's maturity; spot is identity (already USD)."""
+    conn = _vb_conn()
+    _vb_irs(conn)
+    _vb_irs_mark(conn, "PV_USD", 123_456.0)
+    _vb_irs_mark(conn, "CASHFLOW_USD", 10_000.0)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["product"] == "IRS" and row["status"] == "OPEN"
+    assert row["mark"] == pytest.approx(123_456.0) and row["mark_source"] == "QL_PRICER"
+    assert row["pnl_usd"] == pytest.approx(133_456.0) and row["spot"] == 1.0
+    assert row["reason"] == "" and "10,000.00" in row["note"]
+
+
+def test_value_book_irs_missing_cashflow_mark_is_nan_with_reason():
+    conn = _vb_conn()
+    _vb_irs(conn)
+    _vb_irs_mark(conn, "PV_USD", 123_456.0)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert math.isnan(row["pnl_usd"]) and "CASHFLOW_USD" in row["reason"]
+
+
+def test_value_book_irs_never_reads_reconciliation_only_bbg_pv():
+    """BBG_BDH PV_USD is reconciliation-only (CLAUDE.md official marks): a swap with only
+    a SWPM PV on file is Unavailable, not priced off it."""
+    conn = _vb_conn()
+    _vb_irs(conn)
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                 (VB_AS_OF, VB_IRS, VB_IRS_MATURITY, "PV_USD", 999.0, "BBG_BDH", "t"))
+    conn.commit()
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert math.isnan(row["pnl_usd"]) and "PV_USD" in row["reason"]
+
+
+def test_value_book_matured_swap_reads_realised_row_only():
+    conn = _vb_conn()
+    _vb_irs(conn, maturity="2026-05-20")
+    _vb_irs_mark(conn, "PV_USD", 1.0, maturity="2026-05-20")   # a live mark that must NOT be used
+    _vb_irs_mark(conn, "CASHFLOW_USD", 1.0, maturity="2026-05-20")
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["status"] == "SETTLED" and math.isnan(row["pnl_usd"]) and "not yet realised" in row["reason"]
+    conn.execute("INSERT INTO realised_pnl VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("S1", VB_IRS, "IRS", "USD", "2026-05-20", 7_500.0, 0.0, "PV_USD", 1.0,
+                  "2026-05-20", "QL_PRICER", 7_500.0, "t", ""))
+    conn.commit()
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["status"] == "SETTLED" and row["pnl_usd"] == pytest.approx(7_500.0) and row["reason"] == ""

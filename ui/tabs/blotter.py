@@ -29,11 +29,16 @@ Sub-tab layout, each (Total book / FX / Rates / Options):
       filterable columns; row expand (an `html.Details` per trade) shows legs and the
       marks used, exactly as before.
 
-Options is still a placeholder (item 3 of the 2026-09-15 decision): no option trades
-exist in `value_book` yet (it only builds FX and FUTURE rows), so its strip always
-reads "Unavailable (no option trades loaded; view not built yet)" and its table is
-empty with the same columns as the other sub-tabs -- never hidden, per the "rows must
-always render" rule; there just are none to show.
+Options (2026-09-17): a real view through the generic path -- `value_book` now builds
+FX_OPTION rows (premium mark minus fill, in base currency, converted at spot), so the
+Options sub-tab is the same strip + filter bar + table as Total book, scoped to
+`FX_OPTION`. `PLACEHOLDER_SCOPES` is kept (empty) for the placeholder rendering path.
+
+Total book (2026-09-17, user request "there should be P&L by asset type"): under the
+strip, `asset_class_pnl_table` shows one row per asset class present (FX, Futures,
+Rates, Options) plus Total, each with LTD / Daily / Previous day / 5d / MTD / YTD /
+Trading computed by `row_scoped_period_pnl` over that class's trade ids -- the same
+arithmetic and reference dates as the strip, so the class rows always sum to the strip.
 
 FX is `ui.tabs.blotter_fx.build_layout`: the legacy sheet's "All FX trades" column
 layout (trade / tenor / fill / t-1-EOD-t-2 mark and P&L), but priced by
@@ -54,15 +59,15 @@ the retired replica table, which deliberately differed). The whole sub-tab is a 
 always-current block, rebuilt on the same top-level `_update` callback as every other
 sub-tab.
 
-Rates (added 2026-09-15, once `engine/rates` started writing QL_PRICER marks) is a
-real view but does NOT go through `value_book`/`priced_value_book` at all -- that
-pipeline still only builds FX/FUTURE rows. It is `ui.tabs.rates.build_layout`, an IRS
-blotter read straight off `trades`/`instruments`/`marks_official` (see that module's
-docstring for the recon-status column and tolerance). It has no P&L strip, filter bar
-or row-click detail panel -- those all assume `value_book`'s row shape (trade_id/mark/
-pnl_usd/...), which IRS rows don't have; it is a single always-current table, rebuilt
-whenever the as-of date or sub-tab selection changes via the same top-level `_update`
-callback as every other sub-tab.
+Rates (added 2026-09-15; strip added 2026-09-17) is `ui.tabs.rates.build_layout`, an
+IRS blotter read straight off `trades`/`instruments`/`marks_official` (PV, DV01, settled
+cashflows, P&L, recon status -- see that module's docstring), preceded by the same P&L
+strip as the other sub-tabs, scoped to the IRS trade ids through `row_scoped_headline`
+(so it agrees with the Total book's Rates row). Since 2026-09-17 `value_book` builds
+IRS rows too (`PV_USD + CASHFLOW_USD`), which is what the strip and the Total book
+price; the Rates table itself keeps its swap-specific columns and has no filter bar or
+row-click panel (its rows are not value_book-shaped). Rebuilt whenever the as-of date
+or sub-tab selection changes via the same top-level `_update` callback.
 
 Bundles sub-tab (item 4): `ui.tabs.blotter_bundles` renders a list of bundles (from
 `data.ingest.themes.list_bundles`) with LTD/Daily/MTD/YTD via
@@ -119,11 +124,16 @@ SCOPE_PRODUCTS = {
     "rates": ("IRS",),
     "options": ("FX_OPTION",),
 }
-# "rates" is a real view now (ui.tabs.rates, 2026-09-15) -- see scope_layout. Options
-# stays a placeholder: no option trades/marks exist yet.
-PLACEHOLDER_SCOPES = {
-    "options": "no option trades loaded; view not built yet",
-}
+# "rates" (2026-09-15) and "options" (2026-09-17) are both real views now -- see
+# scope_layout and the module docstring. Kept (empty) so the placeholder path stays
+# available for a future scope.
+PLACEHOLDER_SCOPES: dict = {}
+
+# Asset class per product for the Total book's per-class P&L table.
+ASSET_CLASS_OF = {"FX_SPOT": "FX", "FX_FWD": "FX", "FX_SWAP": "FX", "FUTURE": "Futures",
+                  "IRS": "Rates", "FX_OPTION": "Options"}
+ASSET_CLASS_ORDER = ("FX", "Futures", "Rates", "Options")
+ASSET_TABLE_ID = "blotter-asset-class-table"
 # Futures is a real view (not a "not built yet" placeholder like Rates/Options), but on
 # this PC no futures trades are loaded -- BNP gives one netted position row per contract
 # with no fill/trade_date, and fills only arrive via the workbook import on the
@@ -360,6 +370,73 @@ def render_headline_strip(headline: dict, caption: Optional[str] = None) -> html
     return html.Div(children)
 
 
+def asset_class_pnl_rows(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame) -> list:
+    """One dict per asset class present in `df` (ASSET_CLASS_ORDER) plus 'Total', with
+    `trades` (count) and the seven period figures from
+    `ui.tabs.blotter_pricing.row_scoped_period_pnl` over that class's trade ids --
+    each `{value, available, reason, ref_date}` as the strip uses. Missing marks make
+    that class's figure unavailable with the reason, never zero."""
+    from ui.tabs.blotter_pricing import row_scoped_period_pnl
+    if df.empty:
+        return []
+    classes = df["product"].map(ASSET_CLASS_OF).fillna("Other")
+    rows = []
+    for cls in [c for c in ASSET_CLASS_ORDER if c in set(classes)] + (["Other"] if "Other" in set(classes) else []):
+        ids = df.loc[classes == cls, "trade_id"].tolist()
+        rows.append({"asset_class": cls, "trades": len(ids), **row_scoped_period_pnl(conn, as_of, ids)})
+    all_ids = df["trade_id"].tolist()
+    rows.append({"asset_class": "Total", "trades": len(all_ids), **row_scoped_period_pnl(conn, as_of, all_ids)})
+    return rows
+
+
+_ASSET_PERIODS = ("ltd", "daily", "previous_day", "d5", "mtd", "ytd", "trading")
+_ASSET_LABELS = {"asset_class": "Asset class", "trades": "Trades", "ltd": "LTD", "daily": "Daily",
+                 "previous_day": "Previous day", "d5": "5d", "mtd": "MTD", "ytd": "YTD", "trading": "Trading"}
+
+
+def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame) -> html.Div:
+    """The Total book's P&L-by-asset-class block (module docstring)."""
+    rows = asset_class_pnl_rows(conn, as_of, df)
+    records, tooltips = [], []
+    for r in rows:
+        rec = {"asset_class": r["asset_class"], "trades": str(r["trades"])}
+        tip = {}
+        for key in _ASSET_PERIODS:
+            entry = r.get(key, {})
+            if entry.get("available"):
+                rec[key] = format_cell(entry["value"])
+            else:
+                rec[key] = "n/a"
+                tip[key] = {"value": entry.get("reason", "") or "unavailable", "type": "text"}
+        records.append(rec)
+        tooltips.append(tip)
+    style = []
+    for key in _ASSET_PERIODS:
+        style += [
+            {"if": {"filter_query": f"{{{key}}} contains '('", "column_id": key},
+             "color": "var(--neg)", "fontWeight": "700"},
+            {"if": {"filter_query": f"{{{key}}} != '' && {{{key}}} != 'n/a' && !({{{key}}} contains '(')",
+                    "column_id": key}, "color": "var(--pos)", "fontWeight": "700"},
+            {"if": {"filter_query": f"{{{key}}} = 'n/a'", "column_id": key},
+             "color": "var(--muted)", "fontStyle": "italic"},
+        ]
+    style.append({"if": {"filter_query": "{asset_class} = 'Total'"}, "fontWeight": "700",
+                  "borderTop": "2px solid var(--muted)"})
+    table = dash_table.DataTable(
+        id=ASSET_TABLE_ID,
+        columns=[{"name": _ASSET_LABELS[c], "id": c} for c in ("asset_class", "trades", *_ASSET_PERIODS)],
+        data=records, tooltip_data=tooltips,
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
+                    "minWidth": "80px", "padding": "4px 8px"},
+        style_cell_conditional=[{"if": {"column_id": "asset_class"}, "textAlign": "left"}],
+        style_header={"fontWeight": "bold"},
+        style_data_conditional=style,
+    )
+    return html.Div(className="section section--secondary", children=[
+        html.H4("P&L by asset class"), table])
+
+
 def render_placeholder_strip(message: str) -> html.Div:
     return html.Div(html.P(f"Unavailable ({message})", className="section-kicker",
                             style={"fontStyle": "italic"}))
@@ -466,7 +543,13 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     display_columns, column_labels = scope_columns(scope)
 
     if scope == "rates":
-        return rates_ui.build_layout(conn, as_of)
+        df = scope_df(conn, scope, as_of)
+        trade_ids = df["trade_id"].tolist() if not df.empty else []
+        headline = row_scoped_headline(conn, as_of, trade_ids)
+        return html.Div([
+            html.Div(id=strip_id, children=render_headline_strip(headline)),
+            rates_ui.build_layout(conn, as_of),
+        ])
 
     if scope == "fx":
         return blotter_fx_ui.build_layout(conn, as_of)
@@ -496,6 +579,8 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     caption = fallback_caption(scope_fallback, len(df))
 
     body = [html.Div(id=strip_id, children=render_headline_strip(headline, caption))]
+    if scope == "total" and not df.empty:
+        body.append(asset_class_pnl_table(conn, as_of, df))
     if df.empty:
         body.append(message_box("No trades for this as-of date in this scope."))
         body.append(html.Div(id=detail_id))

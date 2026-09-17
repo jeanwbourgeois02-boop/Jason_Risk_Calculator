@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Union
 
 TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "positions", "instrument_theme",
-          "curve_quotes", "instrument_options")
+          "curve_quotes", "instrument_options", "index_fixings")
 VIEWS = ("marks_official", "trades_official")
 
 # Official source per mark_type (CLAUDE.md "Official marks"). BNP_BVAL is never official.
@@ -25,6 +25,10 @@ OFFICIAL_MARK_SOURCE = {
     "PAR_RATE": "QL_PRICER",
     "PV_USD": "QL_PRICER",
     "DV01_USD": "QL_PRICER",
+    # CASHFLOW_USD (2026-09-17): cumulative net swap cashflows already settled through
+    # as_of_date, USD, written by engine/rates alongside PV_USD so that swap LTD P&L =
+    # PV_USD + CASHFLOW_USD stays continuous across a coupon payment and at maturity.
+    "CASHFLOW_USD": "QL_PRICER",
     # DELTA / PREMIUM: changed from MANUAL to QL_OPTIONS_PRICER 2026-09-17 (options_calc
     # merge Phase 2, housekeeper authorization) -- engine/options writes these from the
     # vendored QuantLib pricers; hand-typed MANUAL marks become reconciliation-only,
@@ -135,6 +139,17 @@ CREATE TABLE IF NOT EXISTS curve_quotes (
   field           TEXT NOT NULL,
   source          TEXT NOT NULL,
   PRIMARY KEY (as_of_date, ccy, "index", tenor, source)
+);
+
+-- Overnight index fixings (2026-09-17): the float leg of a seasoned OIS swap needs every
+-- past fixing of its index to value; engine/rates loads these into QuantLib before
+-- pricing. Written by data/bloomberg/rates_marketdata.py::write_fixings. Decimal (0.0405).
+CREATE TABLE IF NOT EXISTS index_fixings (
+  "index"         TEXT NOT NULL,      -- 'SOFR', 'ESTR', ...
+  fixing_date     TEXT NOT NULL,
+  value           REAL NOT NULL,
+  source          TEXT NOT NULL,      -- BBG_BDH | MANUAL
+  PRIMARY KEY ("index", fixing_date, source)
 );
 
 CREATE TABLE IF NOT EXISTS positions (

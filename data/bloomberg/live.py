@@ -207,8 +207,84 @@ def write_marks(conn: sqlite3.Connection, rows: List[dict]) -> int:
     return n
 
 
+def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rates_source=None) -> dict:
+    """Pull OIS quotes and fixings for every currency with an un-matured IRS trade and
+    price the swaps. `rates_source` (anything with `get_curve_quotes` / `get_fixings`,
+    e.g. `RatesFileSource`) is injectable for tests; default is a live
+    `RatesBloombergSource` on `host:port`. Never raises: per-currency and per-trade
+    failures are reported in the returned dict (`{skipped}` when there is no IRS)."""
+    out: dict = {"currencies": {}, "priced": 0, "failed": [], "as_of_date": today.isoformat()}
+    ccys = [r[0] for r in conn.execute(
+        "SELECT DISTINCT i.base_ccy FROM trades_official t JOIN instruments i USING (instrument_id) "
+        "WHERE t.product = 'IRS' AND t.trade_date <= ? "
+        "AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl) ORDER BY 1", (today.isoformat(),)).fetchall()]
+    if not ccys:
+        out["skipped"] = "no IRS trades to price"
+        return out
+    try:
+        from data.bloomberg import rates_marketdata as rm
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"rates_marketdata not importable: {exc!r}"
+        return out
+    if rates_source is None:
+        try:
+            rates_source = rm.RatesBloombergSource(host=host, port=port)
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = f"RatesBloombergSource unavailable: {exc!r}"
+            return out
+    for ccy in ccys:
+        entry = {"quotes": 0, "fixings": 0, "error": ""}
+        try:
+            snap = rates_source.get_curve_quotes(ccy, today)
+            entry["quotes"] = rm.write_curve_quotes(conn, snap, today.isoformat())
+            first = conn.execute(
+                "SELECT MIN(l.start_date) FROM trade_legs l JOIN trades_official t USING (trade_id) "
+                "JOIN instruments i USING (instrument_id) WHERE t.product = 'IRS' AND i.base_ccy = ?", (ccy,)).fetchone()[0]
+            start = date.fromisoformat(first) if first else today
+            if start <= today:
+                fixings = rates_source.get_fixings(ccy, start, today)
+                entry["fixings"] = rm.write_fixings(conn, ccy, fixings)
+        except Exception as exc:  # noqa: BLE001
+            entry["error"] = f"{type(exc).__name__}: {exc}"
+        out["currencies"][ccy] = entry
+    close = getattr(rates_source, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        from engine.rates.store import price_all_and_store
+        results = price_all_and_store(conn, today.isoformat())
+        out["priced"] = sum(1 for r in results if r["ok"])
+        out["failed"] = [{"trade_id": r["trade_id"], "error": r["error"]} for r in results if not r["ok"]]
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"pricing failed: {exc!r}"
+    return out
+
+
+def _options_step(conn: sqlite3.Connection, today: date) -> dict:
+    """Price every FX option through engine/options (PREMIUM + Greeks). Never raises."""
+    out: dict = {"priced": 0, "skipped": [], "as_of_date": today.isoformat()}
+    n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product = 'FX_OPTION' AND trade_date <= ?",
+                     (today.isoformat(),)).fetchone()[0]
+    if not n:
+        out["skipped"] = "no FX_OPTION trades to price"
+        return out
+    try:
+        from engine.options.store import price_all_and_store
+        outcomes = price_all_and_store(conn, today.isoformat())
+        out["priced"] = sum(1 for o in outcomes if getattr(o, "priced", False))
+        out["skipped"] = [{"trade_id": o.trade_id, "reason": getattr(o, "skip_reason", "") or getattr(o, "reason", "")}
+                          for o in outcomes if not getattr(o, "priced", False)]
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{exc!r}"
+    return out
+
+
 def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost", port: int = 8194,
-              session_factory: Optional[Callable] = None, today: Optional[date] = None) -> dict:
+              session_factory: Optional[Callable] = None, today: Optional[date] = None,
+              rates_source=None) -> dict:
     """One full cycle. Returns and writes the status dict. Never raises: any exception
     becomes connected=False with the traceback in `reason`. `today` (live mark date)
     defaults to the wall-clock date; injectable for tests."""
@@ -232,6 +308,11 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             requests = build_requests(conn, as_of_date)
             status["requested"] = len(requests)
             if not requests:
+                # Nothing FX-shaped to price, but swaps and options may still need a
+                # curve / premium refresh (2026-09-17) before the FX-only early return.
+                today = today or date.today()
+                status["rates"] = _rates_step(conn, today, host, port, rates_source)
+                status["options"] = _options_step(conn, today)
                 status.update(connected=True, reason="no open FX legs or futures to price")
                 write_status(db_path, status)
                 return status
@@ -256,6 +337,13 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             warnings = fwd_warnings + fut_warnings
             rows = spot_rows + fwd_rows + fut_rows
             written = write_marks(conn, rows)
+            # Rates (2026-09-17): OIS curve quotes + fixings per swap currency into
+            # curve_quotes / index_fixings, then every IRS priced (PV_USD / DV01_USD /
+            # CASHFLOW_USD / PAR_RATE, source QL_PRICER). Then every FX option (PREMIUM
+            # and Greeks, source QL_OPTIONS_PRICER). Both before realise_settled so a
+            # swap maturing today or an option expiring today freezes at today's mark.
+            status["rates"] = _rates_step(conn, today, host, port, rates_source)
+            status["options"] = _options_step(conn, today)
             # Realisation only (BUILD_PLAN.md section 6, Task B): freeze FX trades whose
             # settle date is before `today` and are not yet in realised_pnl. The daily LTD
             # snapshot itself is engine/pnl/ledger.py's job (task A); this module only

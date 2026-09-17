@@ -42,6 +42,26 @@ class SwapResult:
     dv01_parallel: float
     dv01_buckets: Dict[str, float] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    # Net cashflows already settled on or before the valuation date, signed from the
+    # fund's side (+ = received), in the swap's own currency. 0.0 for a forward-starting
+    # swap. `npv + realised_cashflows` is the swap's life-to-date P&L for a swap dealt
+    # with no upfront payment (2026-09-17, see store.py / CLAUDE.md "P&L conventions").
+    realised_cashflows: float = 0.0
+
+
+def _realised_cashflows(ql_swap: ql.OvernightIndexedSwap, pay_fixed: bool, today: ql.Date) -> float:
+    """Sum of every cashflow on either leg whose payment date is on or before `today`,
+    signed from the fund's side (fixed leg paid by a payer). Uses the same "on today's
+    date = already occurred" rule as QuantLib's DiscountingSwapEngine (which excludes
+    reference-date flows from NPV by default), so PV + realised never double-counts or
+    drops a coupon. Raises (never substitutes) if a past float coupon lacks fixings."""
+    signs = ((0, -1.0 if pay_fixed else 1.0), (1, 1.0 if pay_fixed else -1.0))
+    total = 0.0
+    for leg_no, sign in signs:
+        for cf in ql_swap.leg(leg_no):
+            if cf.date() <= today:
+                total += sign * cf.amount()
+    return total
 
 
 @contextlib.contextmanager
@@ -68,11 +88,13 @@ def price_swap(
     notional: float,
     pay_fixed: bool,
 ) -> SwapResult:
-    ql.Settings.instance().evaluationDate = qlmap.ql_date(curve_set.valuation_date)
+    today = qlmap.ql_date(curve_set.valuation_date)
+    ql.Settings.instance().evaluationDate = today
     built = build_instrument(curve_set, effective_date, maturity_date, fixed_rate, notional, pay_fixed)
     ql_swap = built.ql_swap
 
-    npv = ql_swap.NPV()
+    npv = ql_swap.NPV()  # 0.0 once the swap has expired (QuantLib's own expired-instrument rule)
+    realised = _realised_cashflows(ql_swap, pay_fixed, today)
 
     try:
         par_rate = ql_swap.fairRate()
@@ -89,4 +111,5 @@ def price_swap(
             bumped = ql_swap.NPV()
         dv01_buckets["{0}/{1}:{2}".format(curve_set.ccy, curve_set.index, tenor)] = bumped - npv
 
-    return SwapResult(npv=npv, par_rate=par_rate, dv01_parallel=dv01_parallel, dv01_buckets=dv01_buckets)
+    return SwapResult(npv=npv, par_rate=par_rate, dv01_parallel=dv01_parallel, dv01_buckets=dv01_buckets,
+                      realised_cashflows=realised)

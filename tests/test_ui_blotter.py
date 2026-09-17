@@ -297,24 +297,125 @@ def test_scope_layout_fx_filters_out_nonfx_products():
         conn.close()
 
 
-def test_placeholder_scope_options_wording():
+def _find_tables(component) -> list:
+    """Every DataTable nested anywhere under `component`."""
+    found = []
+    stack = [component]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dash.dash_table.DataTable):
+            found.append(node)
+        children = getattr(node, "children", None)
+        if isinstance(children, (list, tuple)):
+            stack.extend(children)
+        elif children is not None and not isinstance(children, str):
+            stack.append(children)
+    return found
+
+
+def _add_option(conn, trade_id="O1", premium_mark=0.0062, as_of="2026-06-20"):
+    """A long 1m EURUSD call at 0.0050 (base-ccy fraction), PREMIUM mark on as_of.
+    EURUSD SPOT on 2026-06-20 is already in _make_db (1.1050)."""
+    conn.execute("INSERT OR IGNORE INTO instruments VALUES ('EURUSD092226C-1','FX_OPTION','EUR','USD',1,0,'','2026-09-22')")
+    conn.execute(
+        "INSERT INTO trades VALUES (?,'XLSX','EURUSD092226C-1','FX_OPTION',?,'2026-06-01',1000000,0.0050,"
+        "'ACC','CPTY','HAHY7','TR','call','')", (trade_id, trade_id))
+    conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL','EUR',1000000,'2026-06-01','2026-09-22',0.0050,0)",
+                 (trade_id,))
+    if premium_mark is not None:
+        conn.execute("INSERT INTO marks VALUES (?,'EURUSD092226C-1','2026-09-22','PREMIUM',?,'QL_OPTIONS_PRICER',?)",
+                     (as_of, premium_mark, f"{as_of}T17:00:00-04:00"))
+    conn.commit()
+
+
+def _add_irs(conn, trade_id="S1", pv=250_000.0, cashflow=0.0, as_of="2026-06-20"):
+    conn.execute("INSERT OR IGNORE INTO instruments VALUES ('IRSOIS-USD-9','IRS','USD','USD',1,0,'','2027-06-20')")
+    conn.execute(
+        "INSERT INTO trades VALUES (?,'XLSX','IRSOIS-USD-9','IRS',?,'2026-06-01',10000000,0.04,"
+        "'ACC','CPTY','HAHY7','TR','irs','')", (trade_id, trade_id))
+    conn.execute("INSERT INTO trade_legs VALUES (?,1,'FIXED','USD',-10000000,'2026-06-20','2027-06-20',0.04,0)", (trade_id,))
+    conn.execute("INSERT INTO trade_legs VALUES (?,2,'FLOAT','USD',10000000,'2026-06-20','2027-06-20',0.0,0)", (trade_id,))
+    for mark_type, value in (("PV_USD", pv), ("CASHFLOW_USD", cashflow)):
+        if value is not None:
+            conn.execute("INSERT INTO marks VALUES (?,'IRSOIS-USD-9','2027-06-20',?,?,'QL_PRICER',?)",
+                         (as_of, mark_type, value, f"{as_of}T17:00:00-04:00"))
+    conn.commit()
+
+
+def test_options_scope_is_a_real_view_with_no_trades_message():
+    """2026-09-17: Options is no longer a placeholder -- with no option trades it shows
+    the same strip + "No trades" message as any other empty scope."""
     conn = _make_db()
     try:
         layout = blotter.scope_layout("options", conn, "2026-06-20")
-        strip_div = layout.children[0]
-        text = strip_div.children.children.children
-        assert "no option trades loaded; view not built yet" in text
+        assert "No trades for this as-of date in this scope." in layout.children[1].children
+        assert blotter.PLACEHOLDER_SCOPES == {}
     finally:
         conn.close()
 
 
-def test_placeholder_scope_table_has_same_columns_and_is_empty():
+def test_options_scope_prices_an_option_row():
     conn = _make_db()
     try:
+        _add_option(conn)
         layout = blotter.scope_layout("options", conn, "2026-06-20")
-        table = layout.children[1]
-        assert table.data == []
-        assert len(table.columns) == len(blotter._DISPLAY_COLUMNS)
+        table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-options")
+        assert len(table.data) == 1 and table.data[0]["trade_id"] == "O1"
+        # 1m * (0.0062 - 0.0050) EUR = 1,200 EUR * 1.1050 = 1,326 USD
+        assert table.data[0]["pnl_usd"] == "1,326"
+    finally:
+        conn.close()
+
+
+def test_total_book_asset_class_rows_sum_to_total():
+    """2026-09-17 user request: the Total book shows P&L by asset class (FX / Futures /
+    Rates / Options) plus a Total that equals the strip."""
+    conn = _make_db()
+    try:
+        _add_option(conn)
+        _add_irs(conn, pv=250_000.0, cashflow=1_000.0)
+        df = blotter.scope_df(conn, "total", "2026-06-20")
+        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, "2026-06-20", df)}
+        assert list(rows) == ["FX", "Rates", "Options", "Total"]
+        assert rows["FX"]["ltd"]["value"] == pytest.approx(8_000.0)           # 1m EUR * (1.108 - 1.10)
+        assert rows["Rates"]["ltd"]["value"] == pytest.approx(251_000.0)      # PV + settled cashflows
+        assert rows["Options"]["ltd"]["value"] == pytest.approx(1_326.0)
+        assert rows["Total"]["ltd"]["value"] == pytest.approx(8_000.0 + 251_000.0 + 1_326.0)
+        assert rows["Total"]["trades"] == 3
+        headline = blotter.row_scoped_headline(conn, "2026-06-20", df["trade_id"].tolist())
+        assert headline["ltd"]["value"] == pytest.approx(rows["Total"]["ltd"]["value"])
+        layout = blotter.scope_layout("total", conn, "2026-06-20")
+        table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
+        assert [r["asset_class"] for r in table.data] == ["FX", "Rates", "Options", "Total"]
+        assert table.data[-1]["ltd"] == "260,326"
+    finally:
+        conn.close()
+
+
+def test_total_book_asset_class_missing_mark_is_unavailable_with_reason():
+    conn = _make_db()
+    try:
+        _add_irs(conn, pv=250_000.0, cashflow=None)   # PV but no CASHFLOW_USD mark
+        df = blotter.scope_df(conn, "total", "2026-06-20")
+        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, "2026-06-20", df)}
+        assert rows["FX"]["ltd"]["available"] is True
+        assert rows["Rates"]["ltd"]["available"] is False and "S1" in rows["Rates"]["ltd"]["reason"]
+        assert rows["Total"]["ltd"]["available"] is False
+        layout = blotter.scope_layout("total", conn, "2026-06-20")
+        table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
+        assert table.data[1]["ltd"] == "n/a" and "S1" in table.tooltip_data[1]["ltd"]["value"]
+    finally:
+        conn.close()
+
+
+def test_rates_scope_has_a_strip_scoped_to_irs_trades():
+    conn = _make_db()
+    try:
+        _add_irs(conn, pv=250_000.0, cashflow=1_000.0)
+        layout = blotter.scope_layout("rates", conn, "2026-06-20")
+        assert layout.children[0].id == "blotter-strip-rates"
+        strip_text = str(layout.children[0].children.to_plotly_json())
+        assert "251,000" in strip_text and "8,000" not in strip_text   # IRS only, not the FX trade
     finally:
         conn.close()
 
@@ -334,8 +435,7 @@ def test_scope_layout_rates_delegates_to_rates_module():
         )
         conn.commit()
         layout = blotter.scope_layout("rates", conn, "2026-06-20")
-        table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
-        assert table.id == "rates-datatable"
+        table = next(t for t in _find_tables(layout) if t.id == "rates-datatable")
         assert table.data[0]["trade_id"] == "T2"
     finally:
         conn.close()
