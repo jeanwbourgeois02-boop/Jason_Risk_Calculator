@@ -209,7 +209,7 @@ This section documents `data/raw/HA-portfolio vJean.xlsx`, the Excel calculator 
 
 ### `package_id` rule (FX swaps)
 
-Two forward rows form one `FX_SWAP` package when all hold: same account, same pair, same trade date, opposite-signed quantities, equal |USD-leg amount| within 0.01 %, **different** value dates. `package_id = 'SWAP-' || min(trade_id)`; near leg = earlier value date. Opposite-signed rows with the same value date are intraday round trips and stay separate outrights. Groups with more than one candidate on a side are not auto-grouped; they go to a review list. A swap's near leg settles T+2 and drops out of the PB snapshot, so swaps are identified from the blotter or by diffing the daily PB archive, never from one snapshot.
+Two forward rows form one `FX_SWAP` package when all hold: same source, same account, same pair, same trade date, opposite-signed quantities, equal |USD-leg amount| within 0.01 % (for a cross with no USD leg, equal |base amount| within the same tolerance), **different** value dates. `package_id = 'SWAP-' || min(trade_id)`; near leg = earlier value date. Opposite-signed rows with the same value date are intraday round trips and stay separate outrights. Groups with more than one candidate on a side are not auto-grouped; they go to a review list. A swap's near leg settles T+2 and drops out of the PB snapshot, so swaps are identified from the blotter or by diffing the daily PB archive, never from one snapshot.
 
 ### Reconciliation checks and tolerances
 
