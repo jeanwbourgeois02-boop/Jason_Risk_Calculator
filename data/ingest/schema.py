@@ -39,6 +39,10 @@ OFFICIAL_MARK_SOURCE = {
     "THETA": "QL_OPTIONS_PRICER",
     "VEGA": "QL_OPTIONS_PRICER",
     "RHO": "QL_OPTIONS_PRICER",
+    # DELTA_PA (2026-09-17, options merge Phase 7): premium-adjusted delta for pairs
+    # whose G10 convention is premium-adjusted; DELTA itself is unchanged and stays
+    # what the ladder reads. Same pricer, same official source as the other Greeks.
+    "DELTA_PA": "QL_OPTIONS_PRICER",
 }
 
 _DDL = """
