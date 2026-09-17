@@ -370,6 +370,13 @@ def cmd_load_sample(args) -> int:
 
 # ----------------------------------------------------------------------------- start
 
+def venv_imports_ok() -> bool:
+    """True when every module in IMPORT_CHECKS imports inside .venv."""
+    code = subprocess.call([str(VENV_PY), "-c", "import " + ", ".join(IMPORT_CHECKS)], cwd=str(ROOT),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return code == 0
+
+
 def cmd_start(args) -> int:
     if not in_venv():
         if not args.no_sync:
@@ -380,9 +387,15 @@ def cmd_start(args) -> int:
                 # it (and let it refresh the packages) rather than continue with old code.
                 argv = [a for a in sys.argv[1:] if a != "--no-sync"] + ["--no-sync", "--refresh-packages"]
                 return subprocess.call([sys.executable, str(ROOT / "2_launcher.py"), *argv], cwd=str(ROOT))
-        if args.refresh_packages and VENV_PY.exists():
-            say("Code changed: refreshing packages in .venv")
+        if VENV_PY.exists() and (args.refresh_packages or not venv_imports_ok()):
+            # Either the code just changed, or the venv cannot import something the app
+            # needs (a PC whose .venv predates a new dependency): install before starting,
+            # instead of letting ui/launch.py exit with "Missing dependency".
+            say("Refreshing packages in .venv (code changed or a package is missing)")
             run([VENV_PY, "-m", "pip", "install", *PACKAGES, *DEV_PACKAGES, "--quiet"], check=False)
+            if not venv_imports_ok():
+                say("FAILED: packages still missing after install. Run:  py 2_launcher.py setup")
+                return 1
         return reexec_in_venv([a for a in sys.argv[1:] if a not in ("--no-sync", "--refresh-packages")])
     from ui.launch import main
     return main(["--force-new"] if args.force_new else [])
