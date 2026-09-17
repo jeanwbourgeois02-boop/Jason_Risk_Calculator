@@ -1,2 +1,4 @@
 - [Data facts](data_facts.md) — BNP CSV/marks quirks: empty marks_official on real file, NDF ccys excluded from ladder, ladder `>=` vs delta SQL `>` threshold, never use positions.fx_to_usd, BNP_BVAL SPOT undefined for XXXUSD pairs (AUD/EUR/GBP/XAU).
 - [Grid vs exposure date filter](grid_vs_exposure_date_filter.md) — records_from_db has for_exposure flag now; ui callers still need to switch to exposure_records_from_db.
+- [Dollar convention & gold 2026-09-17](dollar_convention_and_gold_2026_09_17.md) — per_pair_delta added (new), XAU excluded from FX Net/Gross (real bug, fixed), EURSEK split was already correct (verified, not a bug), net_gross_usd's un-negated sign is deliberate.
+- [No BNP fallback 2026-09-17](no_bnp_fallback_2026_09_17.md) — cash_ladder(source=) removed, kind column kept (cross-lane test), BNP rate fallback + reconciliation_panel deleted from ui/tabs/cash_ladder.py, exposure.py's fallback_ccys machinery left dormant (off-limits test depends on it).

@@ -2,5 +2,6 @@
 - [Idempotent CLI loader](idempotent-loader.md) — data/load.py skip-vs-reject-vs-conflict accounting, on_duplicate='skip', content-diff on key match, --allow-conflicts
 - [BUILD_PLAN task B schema break](build-plan-task-b-schema-break.md) — trades.theme + pnl_snapshots removal breaks 13-col INSERTs/reads outside data/ingest; do not fix outside ownership
 - [IRS marks official-source change](irs-marks-official-source-change.md) — PAR_RATE/PV_USD/DV01_USD now QL_PRICER not BBG_BDH; new curve_quotes table; quote column names in generic table loops
-- [Blotter source quirks](blotter-source-quirks.md) — new transaction-level trade source (blotter.py); Symbol id ≠ Trade Id, IRS has no pay/receive field, futures fills now real
-- [Upload dual-format detection](upload-dual-format-detection.md) — detect_format/import_blotter added; xlsx_futures.py deleted (orphaned); blotter.load has no idempotent re-upload yet
+- [Blotter source quirks](blotter-source-quirks.md) — new transaction-level trade source (blotter.py); Symbol id ≠ Trade Id, IRS has no pay/receive field, futures fills now real; 2026-09-17 guess-audit findings + 2 bug fixes appended
+- [Upload full replace](upload-dual-format-detection.md) — SUPERSEDED old content: import_blotter now full-replaces trades/legs/realised_pnl/swap_review on every call (2026-09-17); blotter.load itself stays idempotent-merge
+- [Schema generic migration](schema-generic-migration.md) — _migrate_columns is DDL-parsed now, not a hand list; fixed a live 500 from instrument_options.payoff missing on an old DB
