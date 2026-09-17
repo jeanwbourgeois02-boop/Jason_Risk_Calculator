@@ -301,9 +301,14 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         from data.bloomberg import pull_marks as pm
         conn = connect(Path(db_path))
         try:
+            # The book date defaults to the live mark date (2026-09-17 fix). It used to
+            # default to MAX(positions.as_of_date) -- the last BNP snapshot date, a
+            # source that no longer feeds the app -- so on a database still carrying
+            # the 2026-08-17 BNP positions the feed built its request list as of that
+            # day and never asked for a mark on any trade dated after it.
+            today = today or date.today()
             if as_of_date is None:
-                row = conn.execute("SELECT MAX(as_of_date) FROM positions").fetchone()
-                as_of_date = row[0] if row and row[0] else date.today().isoformat()
+                as_of_date = today.isoformat()
             status["as_of_date"] = as_of_date
             requests = build_requests(conn, as_of_date)
             status["requested"] = len(requests)

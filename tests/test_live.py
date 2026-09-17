@@ -234,3 +234,21 @@ def test_pull_once_rates_step_reports_per_currency_failure_not_raise(tmp_path):
     assert "terminal down" in status["rates"]["currencies"]["USD"]["error"]
     assert status["rates"]["priced"] == 0 and status["rates"]["failed"][0]["trade_id"] == "s1"
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0
+
+
+def test_pull_once_defaults_book_date_to_today_not_last_bnp_snapshot(tmp_path, monkeypatch):
+    """2026-09-17 fix: with no as_of given, the request list is built as of the live
+    mark date, not MAX(positions.as_of_date) (the retired BNP snapshot, 2026-08-17 in
+    this fixture), which silently dropped every trade dated after that snapshot."""
+    p, conn = _db(tmp_path)
+    seen = {}
+
+    def fake_build_requests(conn_, as_of):
+        seen["as_of"] = as_of
+        return []
+
+    monkeypatch.setattr(live, "build_requests", fake_build_requests)
+    from datetime import date as _date
+    status = live.pull_once(p, session_factory=lambda: (object(), object()), today=_date(2026, 9, 17))
+    assert seen["as_of"] == "2026-09-17"
+    assert status["as_of_date"] == "2026-09-17"
