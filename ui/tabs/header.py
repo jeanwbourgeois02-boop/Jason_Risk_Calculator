@@ -23,19 +23,56 @@ Design choices (no one to ask, so noted here):
     Bloomberg-less database (2026-09-17 investigation: every figure was in fact
     computing correctly and showing a reason, but only on hover). Per CLAUDE.md
     ("Unavailable shows its reason in place").
-  - The generic engine-level reasons ("today's LTD unavailable", "LTD on <date>
-    unavailable") name a blocking date but not *why* that date has no LTD. `_resolve_reason`
-    turns that into a concrete, actionable sentence -- which mark_type is missing, how
-    many, and "run the Bloomberg pull" -- built from `data.bloomberg.inventory.
-    mark_inventory` (a cheap, DB-only read: no Bloomberg connection is opened here).
-    When nothing is missing (the gap is something else, e.g. an unrealisable settled
-    trade), the engine's own reason passes through unchanged.
+  - `_root_reason`/`_missing_marks_reason` turn a bare "unavailable" into a concrete,
+    actionable sentence -- which mark_type is missing, how many, and "run the Bloomberg
+    pull" -- built from `data.bloomberg.inventory.mark_inventory` (a cheap, DB-only
+    read: no Bloomberg connection is opened here). When nothing is missing (the gap is
+    something else, e.g. an unrealisable settled trade), a plain fallback sentence is
+    used instead (see "Partial pricing" below for the superseding aggregation logic;
+    the older `scoped_period_pnl`-based "today's LTD unavailable" / "LTD on <date>
+    unavailable" generic reasons this bullet originally described no longer exist).
   - Net/Gross USD delta and the "Trades" count need no marks at all (CLAUDE.md: Net/
     Gross USD notional is computable from trade legs and spot alone), so they are
     always shown, even on a database with zero official marks -- this is the
     "figure that IS computable" half of the same fix.
   - `as_of` with no date picked yet renders "No as-of date available." and skips all
     engine calls.
+
+  Partial pricing (2026-09-17, live-Bloomberg-PC follow-up): spots/most forwards/swaps
+  now price, but a handful of trades never will (options with no strike typed in yet,
+  one same-day forward, one future) -- and `engine.pnl.ledger.period_pnl`/`ltd` (and
+  this module's own earlier `scoped_period_pnl`-based implementation) "poison" an
+  entire period to NaN the moment ANY one trade in the book is unpriced, so the whole
+  headline still showed nothing. `_build_figures` no longer calls
+  `ui.tabs.blotter_pricing.scoped_period_pnl` / `engine.pnl.ledger` at all; it builds
+  each figure itself from `priced_value_book` frames via `_priced_single` (one date,
+  LTD/Trading) and `_priced_diff` (two dates, Daily/5d/MTD/YTD/Previous day):
+    - An unpriced trade contributes nothing -- never zeroed, never invented -- exactly
+      per-trade behaviour is untouched (`engine/pnl/valuation.py` is not touched by
+      this change at all, only how this module aggregates its already-computed
+      `pnl_usd` column).
+    - A period figure sums PRICED trades only and shows a visible caption "excludes N
+      of M trades unpriced" with a tooltip breakdown by product and reason (e.g. "5
+      options: no PREMIUM; 1 forward: no FWD_OUTRIGHT", built from value_book's own
+      `reason` text via `_reason_tag`/`_unpriced_breakdown` -- nothing here invents a
+      reason, it only summarises the ones already given).
+    - A period DIFFERENCE (`_priced_diff`) additionally excludes any trade that exists
+      in both dates' books but is priced on only one of the two -- crediting it with
+      its full one-sided value would fake a one-period jump the size of its whole LTD
+      the moment a mark happens to appear or vanish. A trade that is new since the
+      reference date (traded after it) is not "excluded"; its full current value flows
+      through normally, same as ordinary trading P&L.
+    - Only when EVERY trade that could possibly contribute is unpriced does a card
+      fall back to the old single "n/a" + reason card; an empty book (no trades at
+      all, or none dated on/after the reference date) is 0.0/available, per
+      BUILD_PLAN's "a first-day book has ltd(ref) = 0, not Unavailable".
+  This is aggregation-only, scoped to the headline cards. `ui/tabs/blotter*.py`'s own
+  P&L strips (via `ui.tabs.blotter_pricing`'s `priced_value_book`/`scoped_period_pnl`/
+  `row_scoped_headline`, all still poisoning) are a different lane's files -- not
+  edited here, see this agent's handoff report for the equivalent change they need.
+  The collapsible LTD line chart (`_build_chart`/`_cached_ltd`) also still poisons
+  per-day (a day with any unpriced trade renders as a gap) -- out of scope for this
+  follow-up, which was specifically about "the headline cards".
 """
 from __future__ import annotations
 
@@ -99,7 +136,14 @@ def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
     `title` tooltip when unavailable -- never a blank cell. The reason is also rendered
     as a plain, always-visible caption line underneath (2026-09-17: a hover-only tooltip
     was reported as the headline figures "not working" -- they were computing correctly,
-    the explanation was just invisible until the mouse found it)."""
+    the explanation was just invisible until the mouse found it).
+
+    An AVAILABLE entry may also carry `excluded_summary` (2026-09-17 partial-pricing
+    follow-up, see module docstring): a short, always-visible caption ("excludes N of M
+    trades unpriced") shown the same way as the unavailable reason, with the detailed
+    per-product/reason breakdown (`excluded_detail`) as its `title` tooltip -- the
+    figure itself is a real sum over priced trades, not a placeholder, so it keeps its
+    normal sign colouring; only the caption differs from a fully-priced card."""
     if not entry.get("available"):
         reason = entry.get("reason", "")
         children = [
@@ -112,10 +156,15 @@ def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
         return html.Div(className="header-figure", children=children)
     value = entry["value"]
     cls = _sign_class(value) if colour else "neutral"
-    return html.Div(className="header-figure", children=[
+    children = [
         html.Div(title, className="header-figure-title"),
         html.Div(_fmt_usd(value), className=f"header-figure-value header-figure-value--{cls}"),
-    ])
+    ]
+    summary = entry.get("excluded_summary", "")
+    if summary:
+        children.append(html.Div(summary, className="header-figure-caption header-figure-caption--partial",
+                                  title=entry.get("excluded_detail", "")))
+    return html.Div(className="header-figure", children=children)
 
 
 def _divider() -> html.Div:
@@ -147,9 +196,6 @@ def layout() -> html.Div:
 # `_render_bbg_results`, and `run_bloomberg_diagnostics_safe`.
 
 
-_LTD_ON_RE = re.compile(r"^LTD on (\d{4}-\d{2}-\d{2}) unavailable$")
-
-
 def _missing_marks_reason(conn: sqlite3.Connection, as_of: str) -> str:
     """Plain-English, actionable reason for `as_of` built from `data.bloomberg.
     inventory.mark_inventory` (a DB-only read -- it never opens a Bloomberg session,
@@ -174,52 +220,190 @@ def _missing_marks_reason(conn: sqlite3.Connection, as_of: str) -> str:
             f"({len(not_official)} of {len(df)} needed marks) — run the Bloomberg pull")
 
 
-def _resolve_reason(entry: dict, ltd_reason: str, missing_reason_for) -> str:
-    """Replace a generic cross-period reason ("today's LTD unavailable" / "LTD on
-    <date> unavailable") with the concrete `_missing_marks_reason` for whichever date
-    is actually blocking it, so every unavailable card explains itself without making
-    the user hover over LTD to find out why. `missing_reason_for(date)` is a callable
-    (usually `_missing_marks_reason` bound to `conn`) so this function stays easy to
-    unit test with a stub. Anything this cannot make more specific (e.g. the "a trade
-    dated today has no mark from any source" trading reason) passes through as-is."""
-    reason = entry.get("reason", "")
-    if reason == "today's LTD unavailable":
-        return ltd_reason or reason
-    m = _LTD_ON_RE.match(reason)
+_MISSING_TAG_RE = re.compile(r"no (\S+) mark")
+
+_PRODUCT_LABELS = {
+    "FX_SPOT": "spot", "FX_FWD": "forward", "FX_SWAP": "swap",
+    "FUTURE": "future", "IRS": "swap (IRS)", "FX_OPTION": "option",
+}
+
+
+def _reason_tag(reason: str) -> str:
+    """Short tag extracted from one of `value_book`'s own `reason` strings, for the
+    unpriced-trade breakdown tooltip -- e.g. "no PREMIUM" from "no PREMIUM mark for
+    ... expiry ... on ...". Never invents a reason, only summarises the one
+    `engine.pnl.valuation` already gave; anything this regex does not recognise
+    (e.g. the settled-trade "cannot be frozen" reason) gets a plain fallback tag."""
+    if not reason:
+        return "unpriced"
+    # Checked before the generic regex below: the settled-trade "cannot be frozen"
+    # reason also contains the literal text "no official mark", which would otherwise
+    # match _MISSING_TAG_RE first and produce the much less informative tag "no official".
+    if "cannot be frozen" in reason:
+        return "no historical mark at settlement"
+    if "SPOT for USD conversion" in reason:
+        return "no SPOT (USD conversion)"
+    m = _MISSING_TAG_RE.search(reason)
     if m:
-        return missing_reason_for(m.group(1)) or reason
-    return reason
+        return f"no {m.group(1)}"
+    return "unpriced"
+
+
+def _product_label(product: str, count: int) -> str:
+    label = _PRODUCT_LABELS.get(product, str(product).lower() or "trade")
+    return label if count == 1 else f"{label}s"
+
+
+def _unpriced_breakdown(unpriced) -> str:
+    """"5 options: no PREMIUM; 1 forward: no FWD_OUTRIGHT" -- grouped by (product, a
+    short reason tag), most-affected group first. "" for no unpriced rows."""
+    if unpriced.empty:
+        return ""
+    tags = unpriced["reason"].map(_reason_tag)
+    groups = unpriced.groupby([unpriced["product"], tags]).size().sort_values(ascending=False)
+    return "; ".join(f"{count} {_product_label(product, count)}: {tag}"
+                      for (product, tag), count in groups.items())
+
+
+_EMPTY_PRICED = {"value": 0.0, "available": True, "reason": "", "excluded_summary": "", "excluded_detail": ""}
+
+
+def _priced_single(df, root_reason: str) -> dict:
+    """{value, available, reason, excluded_summary, excluded_detail} for ONE date's
+    book (LTD, Trading): the sum over PRICED trades only -- CLAUDE.md "Missing values
+    stay missing": an unpriced trade contributes nothing, it is never zeroed or
+    invented. All trades unpriced (book non-empty) keeps the old single "n/a" +
+    `root_reason` card; an empty book is 0.0/available (BUILD_PLAN: "a first-day book
+    with no prior trades has ltd(ref) = 0, not Unavailable")."""
+    total = len(df)
+    if total == 0:
+        return dict(_EMPTY_PRICED)
+    priced = df[df["reason"] == ""]
+    unpriced = df[df["reason"] != ""]
+    if priced.empty:
+        return {"value": float("nan"), "available": False, "reason": root_reason,
+                "excluded_summary": "", "excluded_detail": ""}
+    value = float(priced["pnl_usd"].sum())
+    if unpriced.empty:
+        return {"value": value, "available": True, "reason": "", "excluded_summary": "", "excluded_detail": ""}
+    n = len(unpriced)
+    return {"value": value, "available": True, "reason": "",
+            "excluded_summary": f"excludes {n} of {total} trades unpriced",
+            "excluded_detail": _unpriced_breakdown(unpriced)}
+
+
+def _priced_diff(df_a, df_b, root_reason: str, ref_label: str) -> dict:
+    """{value, available, reason, excluded_summary, excluded_detail} for LTD(a) -
+    LTD(b), `b` the earlier reference date's book. "Nothing invented, nothing faked"
+    (2026-09-17 live-Bloomberg-PC follow-up):
+      - a trade only present in `a` (traded after `b`) contributes its full `a` value
+        when priced -- it is a new trade entering the book, not a pricing artefact, so
+        it is not "excluded".
+      - a trade present in both books contributes normally only when priced in BOTH.
+      - a trade present in both but priced in only one of the two is EXCLUDED from the
+        diff outright (contributes nothing) rather than credited with its full
+        one-sided value, which would fake a jump the size of its whole LTD on
+        whichever single day a mark happened to appear or vanish."""
+    total = len(df_a)
+    if total == 0:
+        return dict(_EMPTY_PRICED)
+
+    a_priced = df_a[df_a["reason"] == ""]
+    a_unpriced = df_a[df_a["reason"] != ""]
+    a_priced_ids = set(a_priced["trade_id"])
+
+    if df_b.empty:
+        b_priced_ids, b_unpriced_ids, b_pnl = set(), set(), {}
+    else:
+        b_priced = df_b[df_b["reason"] == ""]
+        b_priced_ids = set(b_priced["trade_id"])
+        b_unpriced_ids = set(df_b[df_b["reason"] != ""]["trade_id"])
+        b_pnl = dict(zip(b_priced["trade_id"], b_priced["pnl_usd"]))
+
+    blocked_ids = a_priced_ids & b_unpriced_ids  # priced now, unpriced back then -- excluded
+    contributing_a_ids = a_priced_ids - blocked_ids
+    contributing_b_ids = a_priced_ids & b_priced_ids  # priced at both ends
+
+    if not contributing_a_ids:
+        return {"value": float("nan"), "available": False, "reason": root_reason,
+                "excluded_summary": "", "excluded_detail": ""}
+
+    a_sum = float(a_priced[a_priced["trade_id"].isin(contributing_a_ids)]["pnl_usd"].sum())
+    b_sum = sum(b_pnl[t] for t in contributing_b_ids)
+    value = a_sum - b_sum
+
+    a_unpriced_ids = set(a_unpriced["trade_id"])
+    n_excluded = len(a_unpriced_ids) + len(blocked_ids)
+    if n_excluded == 0:
+        return {"value": value, "available": True, "reason": "", "excluded_summary": "", "excluded_detail": ""}
+
+    detail = _unpriced_breakdown(a_unpriced)
+    if blocked_ids:
+        note = f"{len(blocked_ids)} priced now but unpriced on {ref_label}"
+        detail = f"{detail}; {note}" if detail else note
+    return {"value": value, "available": True, "reason": "",
+            "excluded_summary": f"excludes {n_excluded} of {total} trades unpriced", "excluded_detail": detail}
+
+
+def _root_reason(conn: sqlite3.Connection, as_of: str) -> str:
+    """`_missing_marks_reason` when that can explain the gap, else a plain fallback --
+    used as the Unavailable-card reason when nothing at all is priced/contributing for
+    a given date."""
+    return _missing_marks_reason(conn, as_of) or f"every trade on {as_of} is missing a mark from any source"
 
 
 def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
-    # Same pricing path as the Blotter: official marks only (2026-09-17 user decision,
-    # "no bnp fall back" -- engine.pnl.valuation.value_book no longer has a BNP_BVAL
-    # retry pass at all, see that module's docstring; ui.tabs.blotter_pricing's second
-    # pass over the book is a no-op pending that module's own cleanup, so `df`/`n_total`
-    # below are still the right numbers to read, just never "fallback-priced" any more).
-    from ui.tabs.blotter_pricing import priced_value_book, scoped_period_pnl
+    # Official marks only (2026-09-17 user decision, "no bnp fall back" --
+    # engine.pnl.valuation.value_book no longer has a BNP_BVAL retry pass at all, see
+    # that module's docstring). Builds every figure itself from priced_value_book
+    # frames (never engine.pnl.ledger / ui.tabs.blotter_pricing.scoped_period_pnl,
+    # both of which poison an entire period to NaN if any one trade is unpriced) --
+    # see this module's docstring, "Partial pricing".
+    from engine.pnl.calendar import (
+        _last_business_day_of_prev_month, _last_business_day_of_prev_year,
+        _n_business_days_back, _prev_business_day, load_holidays,
+    )
+    from ui.tabs.blotter_pricing import priced_value_book
     from ui.tabs.cash_ladder import net_gross_usd
 
-    periods = scoped_period_pnl(conn, as_of)
-    ltd_entry = dict(periods.get("ltd", {}))
-    if not ltd_entry.get("available"):
-        ltd_entry["reason"] = _missing_marks_reason(conn, as_of) or ltd_entry.get("reason", "")
-    df, _n_fallback, n_total = priced_value_book(conn, as_of)
-
+    df_today, _n_fallback, n_total = priced_value_book(conn, as_of)
+    ltd_entry = _priced_single(df_today, _root_reason(conn, as_of))
     cards = [_pnl_card("LTD", ltd_entry)]
-    ltd_reason = ltd_entry.get("reason", "")
+
+    holidays = load_holidays()
+    d = dt.date.fromisoformat(as_of)
+    t1 = _prev_business_day(d, holidays)
+    t2 = _prev_business_day(t1, holidays)
+    t1_iso, t2_iso = t1.isoformat(), t2.isoformat()
+    df_t1, _, _ = priced_value_book(conn, t1_iso)
+    df_t2, _, _ = priced_value_book(conn, t2_iso)
+
+    ref_dates = {
+        "daily": t1_iso,
+        "d5": _n_business_days_back(d, 5, holidays).isoformat(),
+        "mtd": _last_business_day_of_prev_month(d, holidays).isoformat(),
+        "ytd": _last_business_day_of_prev_year(d, holidays).isoformat(),
+    }
+    entries = {}
+    for key in ("daily", "d5", "mtd", "ytd"):
+        ref_iso = ref_dates[key]
+        df_ref = df_t1 if key == "daily" else priced_value_book(conn, ref_iso)[0]
+        entries[key] = _priced_diff(df_today, df_ref, _root_reason(conn, as_of), ref_iso)
+    entries["previous_day"] = _priced_diff(df_t1, df_t2, _root_reason(conn, t1_iso), t2_iso)
+
+    trading_rows = df_today[df_today["trade_date"] == as_of] if not df_today.empty else df_today
+    entries["trading"] = _priced_single(
+        trading_rows, "a trade dated today has no mark from any source")
+
     for key in _PERIODS:
-        entry = dict(periods.get(key, {}))
-        if not entry.get("available"):
-            entry["reason"] = _resolve_reason(entry, ltd_reason, lambda d: _missing_marks_reason(conn, d))
-        cards.append(_pnl_card(_PERIOD_TITLES[key], entry))
+        cards.append(_pnl_card(_PERIOD_TITLES[key], entries[key]))
 
     # Always computable, marks or no marks (CLAUDE.md: trade counts/positions need only
     # the blotter, not a mark) -- so the header still shows *something* concrete on a
     # database with zero official marks, per the 2026-09-17 investigation into "the
     # headline doesn't work" (root cause was missing marks alone, not a callback bug;
     # see module docstring).
-    n_open = int((df["status"] == "OPEN").sum()) if not df.empty else 0
+    n_open = int((df_today["status"] == "OPEN").sum()) if not df_today.empty else 0
     n_settled = n_total - n_open
     cards.append(_figure_card("Trades", f"{n_total:,}", f"{n_open:,} open, {n_settled:,} settled"))
 
