@@ -1,8 +1,8 @@
 # Bloomberg live feed
 
-The cash ladder prices FX spot, forwards and swap legs from Bloomberg only. No sample or
-mock data is used by the application. When Bloomberg is unavailable, rate cells are blank
-and the page says so.
+Every official mark comes from Bloomberg or from the app's own pricers fed by Bloomberg
+quotes. No sample or mock data feeds a figure. When Bloomberg is unavailable, rate cells
+are blank and the page says so.
 
 ## What runs
 
@@ -12,12 +12,17 @@ and the page says so.
 2. a Bloomberg API service accepts a TCP connection (default `localhost:8194`, i.e. a
    logged-in Terminal or B-PIPE on this computer).
 
-Every 2 minutes it pulls, for every FX pair with an open leg:
+Every 2 minutes it runs, for the trades open on today's New York date:
 
-| Mark | Request | Stored as |
+| Step | Request | Stored as |
 |---|---|---|
-| SPOT | `PX_LAST` live ReferenceDataRequest on `<PAIR> Curncy` | `marks`, source `BBG_BFXFORWARD` |
-| FWD_OUTRIGHT per open settle date and at `WORKDAY(as_of,5)` | direct broken-date request, else standard-tenor interpolation | `BBG_BFXFORWARD`, fallback `BBG_INTERP` (never official) |
+| SPOT per FX pair with an open leg | `PX_LAST` live ReferenceDataRequest on `<PAIR> Curncy` | `marks`, source `BBG_BFXFORWARD` |
+| FWD_OUTRIGHT per open settle date | direct broken-date request, else standard-tenor interpolation | `BBG_BFXFORWARD`, fallback `BBG_INTERP` (never official) |
+| FUTURE_PX per open contract | `PX_SETTLE` / `PX_LAST` on `<CODE> Index` | `BBG_BDH` |
+| Rates step | OIS quotes and overnight fixings per swap currency, then the QuantLib bootstrap and swap valuation | `curve_quotes`, `index_fixings`, `curves`; `PV_USD` / `DV01_USD` / `PAR_RATE` / `CASHFLOW_USD` source `QL_PRICER` |
+| Options step | FX vol surface (ATM, risk reversal, butterfly per tenor; tickers UNVERIFIED until the first live run) and OIS rates, then the option pricer | `PREMIUM` / `DELTA` / `GAMMA` / `THETA` / `VEGA` / `RHO` source `QL_OPTIONS_PRICER` |
+| Realise | trades settled before today are frozen at their settlement-day mark | `realised_pnl` |
+| Backfill | business days since the earliest trade that lack a complete close | same tables, in the background |
 
 Rows are upserted on the same primary key with a fresh `snapped_at`, so the table always
 holds the latest value. The ladder re-renders every 2 minutes (`dcc.Interval`) and reads
@@ -42,10 +47,14 @@ and the diagnostic use. Environment overrides: `BLP_HOST`, `BLP_PORT`, `RISK_LIV
 
 ## Diagnostics
 
-- In the app: the Cash ladder tab has a **Bloomberg diagnostics** panel listing every
-  requested `(pair, mark type, settle date)` as OK with its value or FAILED with the
-  Bloomberg detail, plus the spot rates the ladder is using and their freshness. It opens
-  automatically when anything failed.
+- In the app: **Check Bloomberg connection** on the Market data tab runs
+  `tools/bbg_diagnostics.py` and lists each check as PASS / WARNING / FAIL with a plain
+  sentence: session, official-source mapping, spot / forward / futures coverage per open
+  leg, OIS quotes, overnight fixings, option terms and option marks, PC clock versus New
+  York, last pull, unverified vol tickers. The same checks from a terminal:
+  `py 3_diagnostic.py`.
+- `py 2_launcher.py doctor --bloomberg` tests every spot and forward request one by one
+  with Bloomberg's own error text (reports under `reports\`).
 - Command line:
 
 ```powershell

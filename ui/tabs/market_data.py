@@ -600,7 +600,9 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
             html.Div(className="toolbar-group", children=[
                 html.Label("Bloomberg"),
                 html.Div([html.Button("Pull now", id=PULL_NOW_ID, n_clicks=0, className="btn"),
-                          html.Span(id=PULL_NOW_STATUS_ID, className="status-line", style={"marginLeft": "8px"})]),
+                          dcc.Loading(type="dot", color="#1f5fbf", style={"display": "inline-block"},
+                                      children=[html.Span(id=PULL_NOW_STATUS_ID, className="status-line",
+                                                          style={"marginLeft": "8px"})])]),
                 dcc.Store(id=PULL_REVISION_ID),
             ]),
             html.Div(id=STATUS_ID, className="status-line"),
@@ -613,7 +615,8 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         html.Div(className="bbg-check-block", children=[
             html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
                         n_clicks=0, className="bbg-check-button"),
-            html.Div(id=BBG_RESULTS_ID, className="bbg-check-results"),
+            dcc.Loading(type="dot", color="#1f5fbf",
+                        children=[html.Div(id=BBG_RESULTS_ID, className="bbg-check-results")]),
         ]),
     ])
 

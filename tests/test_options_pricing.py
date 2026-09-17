@@ -804,17 +804,24 @@ def test_calendar_year_fraction_differs_from_plain_days_across_holiday():
 
 
 @needs_quantlib
-def test_calendar_year_fraction_is_actually_used_by_pricer_when_pair_given():
+def test_pricer_uses_plain_calendar_days_regardless_of_pair_or_flag():
+    """2026-09-17 audit: the vendored engine quantises T to whole calendar days, so a
+    Business252 T only mis-rounded the count (a one-year option lost six days). T is
+    Act/365 calendar days whatever `pair` / `calendar_aware` say; `pair` still sets the
+    delta convention."""
     from engine.options.pricer import price_fx_vanilla
 
-    as_of = datetime.date(2026, 12, 18)
-    expiry = datetime.date(2026, 12, 30)
+    as_of = datetime.date(2026, 9, 17)
+    expiry = datetime.date(2027, 9, 17)  # 365 calendar days; Business252 would say ~359
 
-    calendar_aware = price_fx_vanilla(1.10, 1.10, expiry, as_of, 0.04, 0.03, 0.08, "call", pair="EURUSD")
-    plain = price_fx_vanilla(1.10, 1.10, expiry, as_of, 0.04, 0.03, 0.08, "call", pair="EURUSD", calendar_aware=False)
-    assert calendar_aware.quote_price != pytest.approx(plain.quote_price)
-    assert calendar_aware.delta_convention == "PREMIUM_ADJUSTED"  # EURUSD's market convention
-    assert plain.delta_convention == "PREMIUM_ADJUSTED"  # delta_convention is independent of calendar_aware
+    with_pair = price_fx_vanilla(1.10, 1.10, expiry, as_of, 0.04, 0.03, 0.08, "call", pair="EURUSD")
+    flag_off = price_fx_vanilla(1.10, 1.10, expiry, as_of, 0.04, 0.03, 0.08, "call", pair="EURUSD", calendar_aware=False)
+    no_pair = price_fx_vanilla(1.10, 1.10, expiry, as_of, 0.04, 0.03, 0.08, "call")
+    assert with_pair.quote_price == pytest.approx(no_pair.quote_price)
+    assert flag_off.quote_price == pytest.approx(no_pair.quote_price)
+    assert with_pair.delta == pytest.approx(no_pair.delta)
+    assert with_pair.delta_convention == "PREMIUM_ADJUSTED"  # EURUSD's market convention
+    assert no_pair.delta_convention == "UNKNOWN"
 
 
 @needs_quantlib

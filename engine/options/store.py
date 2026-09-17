@@ -258,6 +258,41 @@ def _price_row(
     )
 
 
+VALID_PAYOFFS = ("VANILLA", "DIGITAL", "AMERICAN", "ASIAN", "BARRIER_KI", "BARRIER_KO", "ONE_TOUCH", "NO_TOUCH")
+
+
+def set_option_terms(conn: sqlite3.Connection, instrument_id: str, strike: float, option_type: str,
+                     payoff: str = "VANILLA", barrier_level: float = 0.0) -> None:
+    """Record (or correct) an option's terms in `instrument_options`, for options whose
+    blotter export does not carry them (a digital with no STRIKE clause in its
+    Description, a barrier level, a mis-detected payoff). The next pricing run reads them.
+    Validates: instrument must be an option on file; payoff in VALID_PAYOFFS; option_type
+    CALL/PUT; strike > 0 for strike payoffs; barrier_level > 0 for barrier/touch payoffs.
+    Raises ValueError with a plain message otherwise. Commits."""
+    row = conn.execute("SELECT asset_class FROM instruments WHERE instrument_id = ?", (instrument_id,)).fetchone()
+    if row is None or row[0] not in ("FX_OPTION", "EQ_OPTION", "CMDTY_OPTION"):
+        raise ValueError(f"{instrument_id!r} is not an option instrument on file")
+    payoff = (payoff or "VANILLA").upper()
+    if payoff not in VALID_PAYOFFS:
+        raise ValueError(f"payoff must be one of {', '.join(VALID_PAYOFFS)}")
+    option_type = (option_type or "").upper()
+    if option_type not in ("CALL", "PUT"):
+        raise ValueError("option type must be CALL or PUT")
+    strike = float(strike or 0.0)
+    barrier_level = float(barrier_level or 0.0)
+    if payoff in _STRIKE_PAYOFFS and strike <= 0:
+        raise ValueError("strike must be greater than 0 for this payoff")
+    if payoff in ("BARRIER_KI", "BARRIER_KO", "ONE_TOUCH", "NO_TOUCH") and barrier_level <= 0:
+        raise ValueError("barrier / touch level must be greater than 0 for this payoff")
+    with conn:
+        conn.execute(
+            "INSERT INTO instrument_options (instrument_id, strike, option_type, barrier_level, avg_start_date, payoff) "
+            "VALUES (?, ?, ?, ?, '9999-12-31', ?) ON CONFLICT(instrument_id) DO UPDATE SET "
+            "strike = excluded.strike, option_type = excluded.option_type, "
+            "barrier_level = excluded.barrier_level, payoff = excluded.payoff",
+            (instrument_id, strike, option_type, barrier_level, payoff))
+
+
 def price_and_store(conn: sqlite3.Connection, as_of: str, trade_id: str) -> PricingOutcome:
     """Price one FX_OPTION trade (read from ``trades_official``) as of
     ``as_of`` (ISO date string) and write its marks. Raises ValueError if no

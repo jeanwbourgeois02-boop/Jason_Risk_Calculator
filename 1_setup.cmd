@@ -30,6 +30,12 @@ function Have-Command($name) {
     return $?
 }
 
+function Refresh-Path {
+    # winget writes the new PATH to the registry; this already-running process keeps its
+    # start-up snapshot, so re-read Machine + User PATH before calling `py` or `git`.
+    $env:PATH = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+}
+
 Write-Host '======================================================================'
 Write-Host ' risk-monitor SETUP'
 Write-Host '======================================================================'
@@ -47,8 +53,11 @@ if ($havePy) {
     Say '  py -3 not found; installing via winget (this can take a few minutes)...'
     winget install --id Python.Python.3.12 -e --source winget --accept-source-agreements --accept-package-agreements
     if ($LASTEXITCODE -ne 0) { Failed 'python' 'winget install Python.Python.3.12 failed. Install Python 3.12+ from python.org manually, then re-run 1_setup.cmd.' }
+    Refresh-Path
+    if (-not (Have-Command 'py')) {
+        Failed 'python' 'Python installed, but this window cannot see the "py" launcher yet. Close this window and double-click 1_setup.cmd again.'
+    }
     Ok 'python' 'installed via winget'
-    Write-Host '  NOTE: you may need to close and reopen this window (or re-run 1_setup.cmd) for PATH to pick up "py".'
 }
 
 # (b) git
@@ -62,6 +71,10 @@ if (Have-Command 'git') {
     Say '  git not found; installing via winget...'
     winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements
     if ($LASTEXITCODE -ne 0) { Failed 'git' 'winget install Git.Git failed. Install Git from git-scm.com manually, then re-run 1_setup.cmd.' }
+    Refresh-Path
+    if (-not (Have-Command 'git')) {
+        Failed 'git' 'Git installed, but this window cannot see it yet. Close this window and double-click 1_setup.cmd again.'
+    }
     Ok 'git' 'installed via winget'
 }
 

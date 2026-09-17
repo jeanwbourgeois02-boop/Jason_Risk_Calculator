@@ -166,7 +166,7 @@ def test_future_expiry_third_friday():
 
 def test_future_expiry_rejects_unknown_root():
     with pytest.raises(ValueError, match="unknown futures root"):
-        bnp.future_expiry("NQU6-USAA", date(2026, 8, 17))
+        bnp.future_expiry("CLU6-USAA", date(2026, 8, 17))  # crude: not an equity-index root
     with pytest.raises(ValueError, match="unrecognised futures symbol"):
         bnp.future_expiry("ES-USAA", date(2026, 8, 17))
 
@@ -462,7 +462,7 @@ def test_synthetic_futures_blank_trade_factor_is_rejected(tmp_path):
 
 
 def test_synthetic_futures_unknown_root_is_rejected(tmp_path):
-    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fut_row(Symbol="NQU6-USAA")])
+    p = _write_csv(tmp_path / "HA_PNL_20260818.csv", [_fut_row(Symbol="CLU6-USAA")])
     r = bnp.parse(p)
     assert len(r.rejects) == 1 and "unknown futures root" in r.rejects[0].reason
 
@@ -1162,10 +1162,15 @@ def test_theme_inheritance_on_load(tmp_path):
     p2 = _write_csv(tmp_path / "HA_PNL_20260819.csv", [_fwd_row(Symbol="USDJPY091626-333")])
     bnp.load(p2, conn, as_of_date="2026-08-18")
     assert conn.execute("SELECT theme FROM trades WHERE trade_id='333'").fetchone()[0] == "carry"
-    # the existing trade is not retroactively changed
-    assert conn.execute("SELECT theme FROM trades WHERE trade_id='111'").fetchone()[0] == ""
+    # the existing untagged trade in that pair is tagged too (2026-09-17: a bundle must
+    # show the trades already on file, not only later ones)
+    assert conn.execute("SELECT theme FROM trades WHERE trade_id='111'").fetchone()[0] == "carry"
 
     set_theme(conn, "111", "override")
+    assert conn.execute("SELECT theme FROM trades WHERE trade_id='111'").fetchone()[0] == "override"
+    # re-theming the pair moves trades that carried the pair's previous theme, not the override
+    set_theme(conn, "USDJPY", "carry2", is_instrument=True)
+    assert conn.execute("SELECT theme FROM trades WHERE trade_id='333'").fetchone()[0] == "carry2"
     assert conn.execute("SELECT theme FROM trades WHERE trade_id='111'").fetchone()[0] == "override"
 
     with pytest.raises(ValueError):

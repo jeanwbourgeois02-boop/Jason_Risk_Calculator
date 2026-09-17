@@ -238,7 +238,7 @@ def test_headline_numbers_present_in_order():
     result = build_exposure(RECORDS, RATES)
     headline = exposure.headline_numbers(result)
     labels = [c.children[0].children for c in headline.children]
-    assert labels == ["Delta"]
+    assert labels == ["Delta (FX + futures)"]
 
 
 def test_headline_numbers_unavailable_without_rate():
@@ -320,9 +320,9 @@ def test_combined_risk_table_net_excludes_futures_gross_includes():
     table = exposure.combined_risk_table(result, futures, scenarios={})
     inner = table.children[1]
     rows = {r[exposure.RISK_LABEL_COL]: r for r in inner.data}
-    net_formatted = exposure.format_amount(totals["net_usd"])
+    net_formatted = exposure.format_amount(-totals["net_usd"])  # USD position: + = long USD, as the header
     gross_formatted = exposure.format_amount(totals["gross_usd"] + 100_000.0)
-    assert rows["Net delta (+ = short USD)"]["usd_delta"] == net_formatted
+    assert rows["Net USD delta, FX only (+ = long USD)"]["usd_delta"] == net_formatted
     assert rows["Gross delta (incl. |futures|)"]["usd_delta"] == gross_formatted
 
 

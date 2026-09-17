@@ -198,14 +198,14 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
     if rate_ok and fut_ok:
         gross = totals["gross_usd"] + abs(fut_value)
         net = -(totals["net_usd"] + fut_value)  # USD position, same sign as the header
-        combined_card = _gross_net_card("Delta", format_amount(gross), net_value=net, direction=True)
+        combined_card = _gross_net_card("Delta (FX + futures)", format_amount(gross), net_value=net, direction=True)
     else:
         reasons = []
         if not rate_ok:
             reasons.append("no rate: " + ", ".join(totals["missing"]))
         if not fut_ok:
             reasons.append(futures.get("reason") or "futures delta unavailable")
-        combined_card = _gross_net_card("Delta", "Unavailable", note="; ".join(reasons), unavailable=True)
+        combined_card = _gross_net_card("Delta (FX + futures)", "Unavailable", note="; ".join(reasons), unavailable=True)
 
     cards = html.Div(id=HEADLINE_ID, className="cards cards--one", children=[combined_card])
     if not fallback_ccys and not forward_proxy_ccys:
@@ -589,7 +589,10 @@ def combined_risk_table(result, futures: Optional[dict] = None,
     if totals["missing"]:
         net_text = _unavailable_label("no rate: " + ", ".join(totals["missing"]))
     else:
-        net_text = format_amount(totals["net_usd"])
+        # USD position, same sign as the header's "Net USD delta" (CLAUDE.md: + = long USD):
+        # the engine's net_usd is the net non-USD delta, so it is negated here, exactly as
+        # ui/tabs/header.py and headline_numbers above do. One figure, one sign, everywhere.
+        net_text = format_amount(-totals["net_usd"])
     if totals["missing"] or pd.isna(fut_value):
         reasons = []
         if totals["missing"]:
@@ -599,7 +602,7 @@ def combined_risk_table(result, futures: Optional[dict] = None,
         gross_text = _unavailable_label("; ".join(reasons))
     else:
         gross_text = format_amount(totals["gross_usd"] + abs(fut_value))
-    display_rows.append({RISK_LABEL_COL: "Net delta (+ = short USD)", "usd_delta": net_text,
+    display_rows.append({RISK_LABEL_COL: "Net USD delta, FX only (+ = long USD)", "usd_delta": net_text,
                          "move_1pct": "", **{name: "" for name in scenario_names}})
     display_rows.append({RISK_LABEL_COL: "Gross delta (incl. |futures|)", "usd_delta": gross_text,
                          "move_1pct": "", **{name: "" for name in scenario_names}})

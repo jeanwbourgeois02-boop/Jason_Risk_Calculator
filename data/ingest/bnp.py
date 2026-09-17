@@ -70,9 +70,17 @@ FORWARD_SYMBOL_RE = re.compile(r"^([A-Z]{6})(\d{6})-(\d+)$")
 CASH_CCY_RE = re.compile(r"^([A-Z]{3})\.C-[A-Z]{4}$")
 FUTURE_SYMBOL_RE = re.compile(r"^([A-Z0-9]+?)([FGHJKMNQUVXZ])(\d)-[A-Z]{4}$")
 FUTURE_MONTH_CODES = "FGHJKMNQUVXZ"
-# Roots whose expiry rule is known. ES: CME equity index, third Friday of the contract
-# month. Any other root is rejected rather than silently given the third-Friday rule.
-KNOWN_FUTURE_ROOTS = frozenset({"ES"})
+# Roots whose expiry rule and contract multiplier are known: CME/CBOT equity-index
+# futures, all expiring on the third Friday of the contract month, Bloomberg ticker
+# `<root><month><year> Index`. Any other root is rejected rather than silently given
+# the third-Friday rule or a guessed multiplier (a wrong multiplier is a wrong P&L).
+FUTURE_MULTIPLIERS = {
+    "ES": 50.0,    # E-mini S&P 500
+    "NQ": 20.0,    # E-mini Nasdaq-100
+    "RTY": 50.0,   # E-mini Russell 2000
+    "YM": 5.0,     # E-mini Dow
+}
+KNOWN_FUTURE_ROOTS = frozenset(FUTURE_MULTIPLIERS)
 
 # Recon tolerances from CLAUDE.md "Reconciliation checks and tolerances".
 TOL_LOCAL_COST = 1.0

@@ -1,6 +1,6 @@
 # risk-monitor
 
-FX risk monitor for the NMMF book at BNP: BNP report import, settlement-date cash ladder, live Bloomberg rates, P&L.
+FX, futures, rates and options risk monitor for the NMMF book: trade-blotter import, delta ladder by value date, live Bloomberg marks, one P&L. Choices, coverage and gaps for the PM: [PM_BRIEF.md](PM_BRIEF.md).
 
 **What it does and what the numbers mean: [HOW_IT_WORKS.md](HOW_IT_WORKS.md).**
 
@@ -24,8 +24,8 @@ new PC, if something looks broken) — every step is idempotent and never change
 It ends with: `Ready. Open a PowerShell terminal and type: pnl`.
 
 **Moving history between computers**: `data\raw\risk.db` holds trades, marks and the P&L snapshot history. It
-is not in git. Copy it into `data\raw\` on the other PC if you want that history there; otherwise upload a BNP
-report in the app.
+is not in git. Copy it into `data\raw\` on the other PC if you want that history there; otherwise upload the
+trade blotter in the app (**Upload trade file**).
 
 ---
 
@@ -54,8 +54,8 @@ backup: commit and `git push` at the end of every session. Do not keep a clone i
 git's internal files while git writes them, which can corrupt the repository, and a second clone means two
 versions of the app.
 
-**Daily routine**: upload the morning BNP file with the **Upload BNP report** button, set the as-of date to
-today, read the ladder. Details in [HOW_IT_WORKS.md](HOW_IT_WORKS.md) section 8.
+**Daily routine**: upload the latest blotter export with the **Upload trade file** button, leave the Ladder on
+today, read the header and the ladder. Details in [HOW_IT_WORKS.md](HOW_IT_WORKS.md) section 8.
 
 **Bloomberg history backfill**: automatic. Whenever a Terminal is available — on `pnl` / `start`, and again at
 the end of every live feed cycle — the app fills any business day between the earliest trade in the database
@@ -79,7 +79,7 @@ What it checks: Python version and bitness, `.venv` present, packages import, th
 
 | Option | Use when |
 |---|---|
-| `--bloomberg` | On the Bloomberg PC. `blpapi` and a Terminal become required, and every spot and forward request the app makes is tested one by one with Bloomberg's own error text. Reports are saved under `reports\`. |
+| `--bloomberg` | On the Bloomberg PC. `blpapi` and a Terminal become required, and every spot and forward request the app makes is tested one by one with Bloomberg's own error text. Reports are saved under `reports\`. Then run `py 3_diagnostic.py` for the coverage checks (marks, curves, fixings, option terms, clock, unverified vol tickers). |
 | `--tests` | Also run the test suite. |
 | `--no-git` | Skip the GitHub check (offline). |
 
@@ -93,8 +93,8 @@ Quick answers:
 | `Missing dependency` on start | Double-click `1_setup.cmd`. |
 | App opens on 8051, 8052... | An older copy is still running. `doctor` names the port. Close that terminal window. |
 | Every USD figure is blank / "Unavailable" | No official Bloomberg marks. This is by design on a PC without a Terminal. On the Bloomberg PC run `py -3 2_launcher.py doctor --bloomberg`. |
-| Ladder is empty on today's date | The as-of date picker is on an old date, or no BNP file covers today. Upload the latest file and set the date. |
-| Upload refused with "differ from DB" | The file amends rows already stored. The app never overwrites; see HOW_IT_WORKS section 2. |
+| Ladder is empty on today's date | The as-of date picker is on an old date, or no trade on file is open today. Upload the latest blotter and set the date. |
+| Upload says rows were skipped | The result line names each row and the reason (cancelled status, other fund, unreadable field). Everything else loaded. |
 | `git fetch` fails with `bad object refs/...` | A stale ref left by another tool. Run `git update-ref -d <that ref>` and re-run `doctor`. |
 | Tests fail after `git pull` | Double-click `1_setup.cmd` (new packages may be needed). If they still fail, the commit is broken: report the failing test. |
 
@@ -110,7 +110,7 @@ Everything else lives under `2_launcher.py` too, but the raw commands are:
 .venv\Scripts\python -m data.bloomberg.live --once   one Bloomberg pull now
 .venv\Scripts\python -m data.bloomberg.live --status the last pull, itemised
 .venv\Scripts\python -m data.bloomberg.backfill --start ... --end ...   run the backfill manually (normally automatic)
-.venv\Scripts\python -m data.load <BNP csv>       command-line import
+.venv\Scripts\python 3_diagnostic.py              Bloomberg diagnostics (same checks as the Market data button)
 .venv\Scripts\python tools\make_sample_data.py    rebuild the sample from the real file
 ```
 

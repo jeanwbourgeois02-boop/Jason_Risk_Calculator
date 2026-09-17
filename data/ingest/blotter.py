@@ -65,6 +65,7 @@ from data.ingest.bnp import (
     Trade,
     TradeLeg,
     future_expiry,
+    FUTURE_MULTIPLIERS,
 )
 from data.ingest.irs import IRS_DESCRIPTION_RE, IRS_SYMBOL_RE
 
@@ -109,14 +110,36 @@ US_DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{4})\b")
 # Market convention for which currency is the base when only the two currencies of a
 # pair are known (last-resort fallback, logged when used).
 PAIR_PRIORITY = ("XAU", "XAG", "XPT", "XPD", "EUR", "GBP", "AUD", "NZD", "USD", "CAD", "CHF", "JPY")
-DATE_FORMATS = ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M",
-                "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d.%m.%Y", "%d-%b-%Y", "%d-%b-%y",
-                "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y", "%Y%m%d", "%d/%m/%Y %H:%M:%S")
+_UNAMBIGUOUS_DATE_FORMATS = ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M",
+                             "%d-%b-%Y", "%d-%b-%y", "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y",
+                             "%Y%m%d")
+_DAY_FIRST_FORMATS = ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M")
+_MONTH_FIRST_FORMATS = ("%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m.%d.%Y", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M")
+DATE_FORMATS = _UNAMBIGUOUS_DATE_FORMATS + _DAY_FIRST_FORMATS  # the file's own convention
+# Columns whose numeric d/m/y values decide, per file, whether the export is day-first
+# (the reference export: 20/8/2026) or month-first (a US-locale export: 8/20/2026).
+_DATE_ORDER_COLUMNS = ("TradeDate", "Settle Date", "Effective Date", "Termination", "Adj. Expiry Date",
+                       "PaymentDate", "CreateDate", "LastModified", "Close Date")
+_NUMERIC_DMY_RE = re.compile(r"^\s*(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})")
+# Set by parse() for the duration of one file; True = the export writes day before month.
+_DAY_FIRST = True
+# Free-text markers of a non-vanilla payoff, matched as whole words on the Description /
+# FxOption Type / Notes text. Order matters: the first hit wins.
+_PAYOFF_KEYWORDS = (
+    (("NO TOUCH", "NOTOUCH", "DNT", "NT"), "NO_TOUCH"),
+    (("ONE TOUCH", "ONETOUCH", "OT"), "ONE_TOUCH"),
+    (("DIGITAL", "DIGI", "BINARY", "EUROPEAN DIGITAL", "CASH OR NOTHING"), "DIGITAL"),
+    (("KNOCK IN", "KNOCKIN", "KI", "RKI", "UP AND IN", "DOWN AND IN"), "BARRIER_KI"),
+    (("KNOCK OUT", "KNOCKOUT", "KO", "RKO", "UP AND OUT", "DOWN AND OUT"), "BARRIER_KO"),
+    (("ASIAN", "AVERAGE RATE", "AVERAGE"), "ASIAN"),
+    (("AMERICAN",), "AMERICAN"),
+)
 EXCEL_EPOCH = date(1899, 12, 30)
 
 
 @dataclass
 class ParseResult:
+    day_first: bool = True  # date order detect_day_first found for this file
     trades: List[Trade] = field(default_factory=list)
     legs: List[TradeLeg] = field(default_factory=list)
     instruments: Dict[str, Instrument] = field(default_factory=dict)
@@ -167,14 +190,41 @@ def _s(v) -> str:
     return "" if s.lower() in ("nan", "none", "null") else s
 
 
-def _date(v) -> Optional[str]:
-    """Any common date shape -> ISO, or None if blank/unparseable. Day-first for the
-    numeric d/m/y shapes (the file's own convention); an impossible day-first reading
-    such as 8/20/2026 falls back to month-first."""
+def detect_day_first(df: pd.DataFrame) -> bool:
+    """Whether this export writes numeric dates day-first. Looks at every value of the
+    date columns: a first component above 12 proves day-first, a second component above
+    12 proves month-first. Ties and no evidence keep the reference export's convention
+    (day-first). One convention per file: a real export never mixes them."""
+    day_first_votes = month_first_votes = 0
+    for col in _DATE_ORDER_COLUMNS:
+        if col not in df.columns:
+            continue
+        for v in df[col].astype(str):
+            m = _NUMERIC_DMY_RE.match(v)
+            if not m:
+                continue
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > 12 and b <= 12:
+                day_first_votes += 1
+            elif b > 12 and a <= 12:
+                month_first_votes += 1
+    if month_first_votes > day_first_votes:
+        return False
+    return True
+
+
+def _date(v, day_first: Optional[bool] = None) -> Optional[str]:
+    """Any common date shape -> ISO, or None if blank/unparseable. Numeric d/m/y shapes
+    follow the order `detect_day_first` found for the file (`_DAY_FIRST`, set by
+    `parse`); an impossible reading in that order (e.g. 8/20/2026 in a day-first file)
+    falls back to the other order rather than rejecting."""
     s = _s(v)
     if not s:
         return None
-    for fmt in DATE_FORMATS:
+    if day_first is None:
+        day_first = _DAY_FIRST
+    ordered = (_DAY_FIRST_FORMATS + _MONTH_FIRST_FORMATS) if day_first else (_MONTH_FIRST_FORMATS + _DAY_FIRST_FORMATS)
+    for fmt in _UNAMBIGUOUS_DATE_FORMATS + ordered:
         try:
             return datetime.strptime(s, fmt).date().isoformat()
         except ValueError:
@@ -182,10 +232,21 @@ def _date(v) -> Optional[str]:
     if re.fullmatch(r"\d{5}(\.0+)?", s):
         return (EXCEL_EPOCH + timedelta(days=int(float(s)))).isoformat()
     try:
-        ts = pd.to_datetime(s, dayfirst=True)
+        ts = pd.to_datetime(s, dayfirst=day_first)
     except (ValueError, TypeError):
         return None
     return None if pd.isna(ts) else ts.date().isoformat()
+
+
+def detect_payoff(*texts: str) -> str:
+    """Payoff type named in free text (Description / FxOption Type / Notes), else
+    'VANILLA'. Whole-word match after upper-casing so 'KO' never fires inside 'TOKYO'."""
+    words = " ".join(re.sub(r"[^A-Z0-9]+", " ", _s(t).upper()) for t in texts)
+    padded = f" {words} "
+    for keys, payoff in _PAYOFF_KEYWORDS:
+        if any(f" {k} " in padded for k in keys):
+            return payoff
+    return "VANILLA"
 
 
 def _us_date(s: str) -> str:
@@ -369,7 +430,17 @@ def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str]
     df = canonicalize_columns(df).reset_index(drop=True)
     res = ParseResult()
     df, res.n_superseded = _dedupe_versions(df)
+    global _DAY_FIRST
+    previous, _DAY_FIRST = _DAY_FIRST, detect_day_first(df)
+    res.day_first = _DAY_FIRST
+    try:
+        _parse_rows(df, res)
+    finally:
+        _DAY_FIRST = previous
+    return res
 
+
+def _parse_rows(df: pd.DataFrame, res: "ParseResult") -> None:
     for idx, row in df.iterrows():
         row_no = int(idx) + 2  # header is line 1
         if _status_excluded(row.get("Status")) or _fund_excluded(row.get("Fund")):
@@ -396,7 +467,6 @@ def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str]
                 res.n_skipped_irs += 1
         else:
             res.n_skipped_other += 1
-    return res
 
 
 def _common(row: pd.Series) -> dict:
@@ -548,7 +618,7 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
     if math.isnan(price):
         res.rejects.append(Reject(row_no, symbol, "blank Price"))
         return
-    multiplier = 50.0  # ES only (KNOWN_FUTURE_ROOTS in bnp.py); revisit if other roots added.
+    multiplier = FUTURE_MULTIPLIERS[root]  # root already validated by future_expiry
     expiry_iso = expiry.isoformat()
 
     res.instruments.setdefault(instrument_id, Instrument(
@@ -623,6 +693,7 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     ))
     res.instrument_options.setdefault(symbol, InstrumentOption(
         instrument_id=symbol, strike=strike, option_type=option_type,
+        payoff=detect_payoff(desc, row.get("FxOption Type"), row.get("Notes")),
     ))
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=symbol, product="FX_OPTION",
@@ -735,7 +806,15 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
                 f"INSERT INTO trades ({','.join(trade_cols)}) VALUES ({','.join('?' for _ in trade_cols)}) "
                 f"ON CONFLICT(trade_id) DO UPDATE SET {updates}", _rows(res.trades))
         conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", _rows(res.legs))
-        conn.executemany("INSERT OR REPLACE INTO instrument_options VALUES (?,?,?,?,?,?)",
-                         _rows(res.instrument_options.values()))
+        # Option terms: the blotter only ever knows strike (when its Description carries
+        # one), call/put and a payoff keyword. Terms typed in the app for options the
+        # export leaves incomplete (digitals with no strike, barrier levels) must survive
+        # a re-upload, so a field is only overwritten by a populated blotter value.
+        conn.executemany(
+            "INSERT INTO instrument_options VALUES (?,?,?,?,?,?) ON CONFLICT(instrument_id) DO UPDATE SET "
+            "strike = CASE WHEN excluded.strike != 0 THEN excluded.strike ELSE strike END, "
+            "option_type = CASE WHEN excluded.option_type != '' THEN excluded.option_type ELSE option_type END, "
+            "payoff = CASE WHEN excluded.payoff != 'VANILLA' THEN excluded.payoff ELSE payoff END",
+            _rows(res.instrument_options.values()))
         conn.execute("DROP TABLE _incoming")
     return res

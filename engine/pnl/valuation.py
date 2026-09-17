@@ -276,17 +276,94 @@ def _open_fx_row(conn, r, as_of, marks_source) -> dict:
     return out
 
 
+def _last_official_on_or_before(conn, instrument_id: str, mark_type: str, day: str):
+    """(value, as_of_date, source) of the last official mark on or before `day`, or None.
+    Same lookup `engine.pnl.ledger._last_on_or_before` uses to freeze a trade."""
+    row = conn.execute(
+        "SELECT value, as_of_date, source FROM marks_official WHERE instrument_id = :i "
+        "AND mark_type = :m AND as_of_date <= :d ORDER BY as_of_date DESC, snapped_at DESC LIMIT 1",
+        {"i": instrument_id, "m": mark_type, "d": day}).fetchone()
+    return None if row is None else (float(row[0]), row[1], row[2])
+
+
+def _frozen_row(conn, r) -> Optional[dict]:
+    """A settled trade that has no `realised_pnl` row yet, valued exactly as
+    `engine.pnl.ledger.realise_settled` would freeze it -- the last official mark on or
+    before its settlement date -- but without writing anything (value_book is read-only
+    and runs on read-only connections). Returns None when that mark is not on file, so the
+    caller reports Unavailable. Added 2026-09-17: before this, realise_settled was only
+    ever called from the Bloomberg feed, so on any PC without a live session every
+    settled trade stayed Unavailable forever and took the headline LTD with it, even with
+    every official mark loaded. The arithmetic here and in realise_settled must stay
+    identical; realise_settled remains the path that persists the frozen figure."""
+    product, settle = r.product, r.settle_date
+    if product in FX_PRODUCTS:
+        hit = _last_official_on_or_before(conn, r.instrument_id, "SPOT", settle)
+        if hit is None:
+            return None
+        m, m_day, m_src = hit
+        s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, m_day)
+        if s != s or s_pair is None:
+            return None
+        pnl_local = r.quantity * (m - r.fill)
+        pnl_usd = pnl_local * s
+        spot, spot_src, mark_label = s, s_src, "spot"
+    elif product == "FUTURE":
+        hit = _last_official_on_or_before(conn, r.instrument_id, "FUTURE_PX", settle)
+        if hit is None:
+            return None
+        m, m_day, m_src = hit
+        pnl_local = pnl_usd = r.quantity * r.multiplier * (m - r.fill)
+        spot, spot_src, mark_label = 1.0, "identity", "settlement price"
+    elif product == "IRS":
+        hit = _last_official_on_or_before(conn, r.instrument_id, "PV_USD", settle)
+        if hit is None:
+            return None
+        pv, m_day, m_src = hit
+        cf = conn.execute(
+            "SELECT value FROM marks_official WHERE instrument_id = :i AND mark_type = 'CASHFLOW_USD' "
+            "AND as_of_date = :d ORDER BY snapped_at DESC LIMIT 1", {"i": r.instrument_id, "d": m_day}).fetchone()
+        if cf is None:
+            return None
+        m = pv
+        pnl_local = pnl_usd = pv + float(cf[0])
+        spot, spot_src, mark_label = 1.0, "identity", "PV + cashflows"
+    elif product == "FX_OPTION":
+        hit = _last_official_on_or_before(conn, r.instrument_id, "PREMIUM", settle)
+        if hit is None:
+            return None
+        m, m_day, m_src = hit
+        s, s_pair, s_src = usd_per_quote(conn, r.base_ccy, m_day)
+        if s != s or s_pair is None:
+            return None
+        pnl_local = r.quantity * (m - r.fill)
+        pnl_usd = pnl_local * s
+        spot, spot_src, mark_label = s, s_src, "premium"
+    else:
+        return None
+    when = "" if m_day == settle else f" dated {m_day} (last before settlement)"
+    return dict(mark=m, mark_date=m_day, mark_source=m_src, spot=spot, spot_source=spot_src,
+                pnl_local=pnl_local, pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd, pnl_carry_usd=0.0, reason="",
+                note=f"frozen at {mark_label}{when}; not yet recorded in realised_pnl")
+
+
 def _provisional(conn, r, as_of, marks_source, open_row_fn) -> dict:
-    """A settled trade with no frozen result yet. With official marks only, it is
-    unavailable (realisation needs the settlement-day mark). With an explicit fallback
-    source it is valued like an open row at that source's latest mark for its settle
-    date and flagged provisional, so a PC without Bloomberg still shows a total. The
-    realised table is never written here; realise_settled does that properly later."""
+    """A settled trade with no frozen result yet. With official marks only, it is valued
+    at the last official mark on or before settlement (`_frozen_row`, the same figure
+    realise_settled will persist), and Unavailable when that mark is not on file. With
+    an explicit fallback source it is valued like an open row at that source's latest
+    mark for its settle date and flagged provisional, so a PC without Bloomberg still
+    shows a total. The realised table is never written here; realise_settled does that
+    properly later."""
     trade_id = r.trade_id
     if marks_source is None:
+        frozen = _frozen_row(conn, r)
+        if frozen is not None:
+            return frozen
         return dict(mark=_NAN, mark_date="", mark_source="", spot=_NAN, spot_source="",
                     pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN,
-                    reason=f"settled trade {trade_id} not yet realised (run realise_settled)")
+                    reason=f"settled trade {trade_id}: no official mark on or before its settlement "
+                           f"{r.settle_date}, so it cannot be frozen")
     out = open_row_fn(conn, r, as_of, marks_source)
     if not out.get("reason"):
         out["note"] = (f"settled {r.settle_date}, not yet realised; provisional value from "

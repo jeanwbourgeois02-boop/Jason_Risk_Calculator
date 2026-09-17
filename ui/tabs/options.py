@@ -68,24 +68,31 @@ DEFAULT_DATE_PICKER_ID = "blotter-date"
 # Delta, Theta, Gamma, Vega, Expiry, Underlying, Strike, UndFwdPx, Rho. "label" is
 # the row name/tree column, prepended -- not one of the 13 instructed columns.
 DISPLAY_COLUMNS = [
-    "label", "position", "notional", "mktval", "mktpx", "delta", "theta", "gamma",
-    "vega", "expiry", "underlying", "strike", "undfwdpx", "rho",
+    "label", "type", "position", "notional", "mktval", "mktpx", "delta", "theta", "gamma",
+    "vega", "expiry", "underlying", "strike", "undfwdpx", "rho", "instrument",
 ]
 # Carried in every row's data so filter_query / the collapse callback can key off
 # them, but not shown -- `hidden_columns`, not omitted from `columns`, so filter_query
 # can still reference them (Dash evaluates filter_query against defined columns).
 HIDDEN_COLUMNS = ["level", "group_key", "parent_key", "leg_count"]
+# "type" (2026-09-17, user requirement "say which option type it is"): payoff and
+# call/put, e.g. "Vanilla Call", "Digital Put"; a multi-leg package says "2 legs".
+# "instrument" is the blotter instrument id, so a row can be tied back to the trade file.
+PAYOFF_WORDS = {"VANILLA": "Vanilla", "DIGITAL": "Digital", "AMERICAN": "American", "ASIAN": "Asian",
+                "BARRIER_KI": "Knock-in", "BARRIER_KO": "Knock-out", "ONE_TOUCH": "One-touch",
+                "NO_TOUCH": "No-touch"}
+_LEG_WORDS = {2: "Two", 3: "Three", 4: "Four"}
 ALL_COLUMNS = DISPLAY_COLUMNS + HIDDEN_COLUMNS
 
 COLUMN_LABELS = {
-    "label": "Structure / Instrument", "position": "Position", "notional": "Notional",
+    "label": "Structure", "type": "Type", "instrument": "Instrument", "position": "Position", "notional": "Notional",
     "mktval": "MktVal", "mktpx": "MktPx", "delta": "Delta", "theta": "Theta",
     "gamma": "Gamma", "vega": "Vega", "expiry": "Expiry", "underlying": "Underlying",
     "strike": "Strike", "undfwdpx": "UndFwdPx", "rho": "Rho",
 }
 
 NUMERIC_FIELDS = ("position", "notional", "mktval", "delta", "theta", "gamma", "vega", "rho")
-PASSTHROUGH_FIELDS = ("mktpx", "expiry", "underlying", "strike", "undfwdpx")
+PASSTHROUGH_FIELDS = ("mktpx", "expiry", "underlying", "strike", "undfwdpx", "type", "instrument")
 
 # instruments.asset_class / trades.product values (engine/options/equity_commodity.py
 # docstring: "New instruments.asset_class values introduced here: 'EQ_OPTION',
@@ -175,10 +182,16 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict) -> dict:
         undfwdpx = None
 
     strike = rec["strike"] if rec["strike"] else None  # 0 = not known (schema.py sentinel) -> blank
+    payoff_word = PAYOFF_WORDS.get(rec.get("payoff") or "VANILLA", (rec.get("payoff") or "").title())
+    cp = (rec.get("option_type") or "").title()
+    type_text = f"{payoff_word} {cp}".strip()
+    if strike is None and (rec.get("payoff") or "VANILLA") not in ("ONE_TOUCH", "NO_TOUCH"):
+        type_text += " (no strike on file)"
 
     return {
         "trade_id": rec["trade_id"], "package_id": rec["package_id"], "asset_class": asset_class,
-        "label": rec["instrument_id"],
+        "label": f"{underlying} - {payoff_word}" if underlying else payoff_word,
+        "type": type_text, "instrument": rec["instrument_id"], "payoff_word": payoff_word,
         "position": quantity, "notional": abs(quantity), "mktval": mktval, "mktpx": premium,
         "delta": greeks["delta"], "theta": greeks["theta"], "gamma": greeks["gamma"],
         "vega": greeks["vega"], "rho": greeks["rho"],
@@ -191,7 +204,8 @@ def _leg_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     trades = pd.read_sql_query(
         "SELECT t.trade_id, t.package_id, t.instrument_id, t.quantity, t.product, "
         "i.base_ccy, i.quote_ccy, i.multiplier, i.expiry_date, i.bbg_ticker, "
-        "COALESCE(o.strike, 0) AS strike "
+        "COALESCE(o.strike, 0) AS strike, COALESCE(o.option_type, '') AS option_type, "
+        "COALESCE(o.payoff, 'VANILLA') AS payoff "
         "FROM trades_official t JOIN instruments i ON i.instrument_id = t.instrument_id "
         "LEFT JOIN instrument_options o ON o.instrument_id = t.instrument_id "
         "WHERE t.product IN ('FX_OPTION','EQ_OPTION','CMDTY_OPTION') "
@@ -256,14 +270,26 @@ def option_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
                 seen_pkgs.append(l["package_id"])
         for pkg in seen_pkgs:
             pkg_legs = [l for l in cls_legs if l["package_id"] == pkg]
-            pkg_label = pkg_legs[0]["label"] if len(pkg_legs) == 1 else pkg
+            if len(pkg_legs) == 1:
+                pkg_label = pkg_legs[0]["label"]
+                pkg_pass = _passthrough(pkg_legs)
+            else:
+                # MARS-style structure name: "USDCHF - Two Leg" when every leg shares the
+                # underlying, else the package id; the type column counts the legs.
+                unders = {l["underlying"] for l in pkg_legs}
+                n = len(pkg_legs)
+                word = _LEG_WORDS.get(n, str(n))
+                pkg_label = f"{unders.pop()} - {word} Leg" if len(unders) == 1 else pkg
+                pkg_pass = _passthrough(pkg_legs)
+                pkg_pass["type"] = f"{n} legs"
+                pkg_pass["instrument"] = pkg
             rows.append(_row("PACKAGE", pkg, cls, pkg_label, len(pkg_legs),
-                              _numeric(pkg_legs), _passthrough(pkg_legs)))
+                              _numeric(pkg_legs), pkg_pass))
             if len(pkg_legs) > 1:
                 for l in pkg_legs:
                     leg_numeric = {f: l[f] for f in NUMERIC_FIELDS}
                     leg_pass = {f: l[f] for f in PASSTHROUGH_FIELDS}
-                    rows.append(_row("LEG", l["trade_id"], pkg, l["label"], 1,
+                    rows.append(_row("LEG", l["trade_id"], pkg, l["payoff_word"], 1,
                                       leg_numeric, leg_pass))
 
     return pd.DataFrame(rows)
@@ -321,6 +347,8 @@ def format_rows(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None) -> 
             "level": rec["level"], "group_key": rec["group_key"], "parent_key": rec["parent_key"],
             "leg_count": rec["leg_count"],
             "label": _fmt_label(rec, collapsed_set),
+            "type": rec.get("type") or "",
+            "instrument": rec.get("instrument") or "",
             "position": _fmt_usd_or_blank(rec["position"]),
             "notional": _fmt_usd_or_blank(rec["notional"]),
             "mktval": _fmt_usd_or_na(rec["mktval"]),
@@ -370,7 +398,10 @@ def options_table(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None,
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
                     "minWidth": "80px", "padding": "4px 8px"},
-        style_cell_conditional=[{"if": {"column_id": "label"}, "textAlign": "left", "minWidth": "220px"}],
+        style_cell_conditional=[{"if": {"column_id": "label"}, "textAlign": "left", "minWidth": "200px"},
+                                {"if": {"column_id": "type"}, "textAlign": "left", "minWidth": "120px"},
+                                {"if": {"column_id": "instrument"}, "textAlign": "left", "minWidth": "200px",
+                                 "color": "var(--muted)"}],
         style_header={"fontWeight": "bold"},
         style_data_conditional=style_data_conditional,
         page_size=100,
@@ -379,14 +410,86 @@ def options_table(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None,
     )
 
 
+TERMS_INSTRUMENT_ID = "options-terms-instrument"
+TERMS_STRIKE_ID = "options-terms-strike"
+TERMS_TYPE_ID = "options-terms-type"
+TERMS_PAYOFF_ID = "options-terms-payoff"
+TERMS_BARRIER_ID = "options-terms-barrier"
+TERMS_SAVE_ID = "options-terms-save"
+TERMS_STATUS_ID = "options-terms-status"
+
+
+def option_instruments(conn: sqlite3.Connection) -> List[dict]:
+    """Every option instrument with a trade on file, with its current terms; options
+    with no strike first so the ones that block pricing are at the top of the list."""
+    rows = conn.execute(
+        "SELECT DISTINCT i.instrument_id, i.expiry_date, COALESCE(o.strike, 0), COALESCE(o.option_type, ''), "
+        "COALESCE(o.payoff, 'VANILLA'), COALESCE(o.barrier_level, 0) "
+        "FROM trades_official t JOIN instruments i USING (instrument_id) "
+        "LEFT JOIN instrument_options o USING (instrument_id) "
+        "WHERE t.product IN ('FX_OPTION','EQ_OPTION','CMDTY_OPTION') "
+        "ORDER BY (COALESCE(o.strike, 0) = 0) DESC, i.expiry_date, i.instrument_id").fetchall()
+    return [{"instrument_id": r[0], "expiry": r[1], "strike": r[2], "option_type": r[3],
+             "payoff": r[4], "barrier_level": r[5]} for r in rows]
+
+
+def terms_editor(conn: sqlite3.Connection) -> html.Details:
+    """Option terms the blotter export cannot supply (2026-09-17): a digital's strike,
+    a barrier level, or a payoff the free text did not name. Saved into
+    `instrument_options` via `engine.options.store.set_option_terms`; a re-upload of the
+    blotter never overwrites a value typed here. The next pricing run (live feed) uses
+    them. Options with no strike on file are listed first and marked."""
+    insts = option_instruments(conn)
+    missing = [i for i in insts if not i["strike"]]
+    options = [{"label": (f"{i['instrument_id']}  (exp {i['expiry']}" + (", NO STRIKE" if not i["strike"] else "") + ")"),
+                "value": i["instrument_id"]} for i in insts]
+    summary_text = "Option terms" + (f" -- {len(missing)} option(s) cannot be priced until their strike is entered"
+                                      if missing else "")
+    return html.Details(className="section options-terms", open=bool(missing), children=[
+        html.Summary(summary_text),
+        html.P("The blotter export carries no strike, barrier or payoff type for some options "
+               "(typically digitals). Enter them here once; they survive re-uploads and feed the "
+               "next pricing run.", className="section-kicker"),
+        html.Div(className="toolbar", children=[
+            html.Div(className="toolbar-group", children=[
+                html.Label("Option"),
+                dcc.Dropdown(id=TERMS_INSTRUMENT_ID, options=options,
+                             value=(missing[0]["instrument_id"] if missing else (insts[0]["instrument_id"] if insts else None)),
+                             clearable=False, style={"width": "360px"}),
+            ]),
+            html.Div(className="toolbar-group", children=[
+                html.Label("Payoff"),
+                dcc.Dropdown(id=TERMS_PAYOFF_ID, clearable=False, style={"width": "150px"},
+                             options=[{"label": PAYOFF_WORDS[k], "value": k} for k in PAYOFF_WORDS]),
+            ]),
+            html.Div(className="toolbar-group", children=[
+                html.Label("Call / Put"),
+                dcc.Dropdown(id=TERMS_TYPE_ID, clearable=False, style={"width": "110px"},
+                             options=[{"label": "Call", "value": "CALL"}, {"label": "Put", "value": "PUT"}]),
+            ]),
+            html.Div(className="toolbar-group", children=[
+                html.Label("Strike"),
+                dcc.Input(id=TERMS_STRIKE_ID, type="number", step="any", style={"width": "120px"}),
+            ]),
+            html.Div(className="toolbar-group", children=[
+                html.Label("Barrier / touch level"),
+                dcc.Input(id=TERMS_BARRIER_ID, type="number", step="any", style={"width": "120px"}),
+            ]),
+            html.Button("Save terms", id=TERMS_SAVE_ID, n_clicks=0, className="btn"),
+            html.Span(id=TERMS_STATUS_ID, className="status-line", role="status"),
+        ]),
+    ])
+
+
 def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
     """The whole Options sub-tab body: Portfolio Totals -> asset class -> package ->
-    leg, multi-leg packages collapsed by default."""
+    leg, multi-leg packages collapsed by default, then the option-terms editor."""
     df = option_rows(conn, as_of)
     collapsed = default_collapsed_packages(df)
     return html.Div(className="section", children=[
         dcc.Store(id=COLLAPSED_STORE_ID, data=collapsed),
         options_table(df, collapsed),
+        terms_editor(conn),
     ])
 
 
@@ -444,3 +547,61 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         finally:
             conn.close()
         return format_rows(df, collapsed)
+
+    @app.callback(
+        Output(TERMS_PAYOFF_ID, "value"),
+        Output(TERMS_TYPE_ID, "value"),
+        Output(TERMS_STRIKE_ID, "value"),
+        Output(TERMS_BARRIER_ID, "value"),
+        Input(TERMS_INSTRUMENT_ID, "value"),
+    )
+    def _prefill_terms(instrument_id):
+        """Show the terms currently on file for the chosen option."""
+        from dash.exceptions import PreventUpdate
+        if not instrument_id:
+            raise PreventUpdate
+        from ui.app import connect_readonly
+        try:
+            conn = connect_readonly(get_db_path())
+        except sqlite3.OperationalError:
+            raise PreventUpdate
+        try:
+            row = next((i for i in option_instruments(conn) if i["instrument_id"] == instrument_id), None)
+        finally:
+            conn.close()
+        if row is None:
+            raise PreventUpdate
+        return (row["payoff"] or "VANILLA", row["option_type"] or None,
+                row["strike"] or None, row["barrier_level"] or None)
+
+    @app.callback(
+        Output(TERMS_STATUS_ID, "children"),
+        Output(COLLAPSED_STORE_ID, "data", allow_duplicate=True),
+        Input(TERMS_SAVE_ID, "n_clicks"),
+        State(TERMS_INSTRUMENT_ID, "value"),
+        State(TERMS_PAYOFF_ID, "value"),
+        State(TERMS_TYPE_ID, "value"),
+        State(TERMS_STRIKE_ID, "value"),
+        State(TERMS_BARRIER_ID, "value"),
+        State(COLLAPSED_STORE_ID, "data"),
+        prevent_initial_call=True,
+    )
+    def _save_terms(n_clicks, instrument_id, payoff, option_type, strike, barrier, collapsed):
+        """Write the terms and re-render the grid (re-setting the collapse store fires
+        `_refresh_table`, so the Type / Strike columns update at once)."""
+        from dash import no_update
+        if not n_clicks or not instrument_id:
+            return no_update, no_update
+        from data.ingest.schema import connect
+        from engine.options.store import set_option_terms
+        try:
+            conn = connect(get_db_path())
+            try:
+                set_option_terms(conn, instrument_id, strike or 0.0, option_type or "", payoff or "VANILLA", barrier or 0.0)
+            finally:
+                conn.close()
+        except (ValueError, sqlite3.Error) as exc:
+            return html.Span(f"Not saved: {exc}", className="source-result--error"), no_update
+        what = f"{PAYOFF_WORDS.get(payoff, payoff)} {(option_type or '').title()}, strike {strike}"
+        return (html.Span(f"Saved {instrument_id}: {what}. Priced on the next Bloomberg cycle.",
+                          className="source-result--info"), list(collapsed or []))

@@ -1,57 +1,48 @@
-Start the app with `py 2_launcher.py start` in a terminal opened in the project
-folder (set up first with `py 2_launcher.py setup`; see README). The browser opens
-automatically. Keep the terminal open; Ctrl+C stops the app. Running `start`
-again opens the existing instance.
+# Launch and upload
 
-Use **Upload a file** below the app tabs:
+Start the app by typing `pnl` in a PowerShell terminal (installed by `1_setup.cmd`), or
+`py 2_launcher.py start` in the project folder. The browser opens at
+`http://127.0.0.1:8050`. Keep the terminal open; Ctrl+C stops the app. Running `pnl`
+again while the app is running just reopens the browser tab.
 
-1. Choose a BNP CSV or Excel report (.xlsx, .xlsm, .xls). For Excel, select
-   the worksheet containing the BNP report columns, with headers in row 1.
-2. Check the snapshot date. For `HA_PNL_YYYYMMDD` filenames the suggested
-   date is the previous weekday; adjust it for holidays. Other filenames
-   require an explicit date.
-3. Click **Import BNP report**. The cash ladder and P&L date controls update
-   to the imported date. Previous snapshots remain available by date.
+## Upload
 
-Identical records are skipped. Validation errors or conflicting amendments
-reject the entire import; existing records are not overwritten by amendments.
-The result states what was added or excluded. Existing product coverage remains:
-FX forwards and cash, futures positions only, IRS excluded. BNP marks remain
-reconciliation marks; this upload does not supply official Bloomberg prices.
+The only input is the transaction-level trade blotter export (one row per fill; the
+reference file is `data/raw/new_sample_trades.csv`). Use **Upload trade file** at the
+top right of every tab:
 
-The HA-portfolio workbook is automatically recognised as an **Excel calculation
-reference**. Choose a sheet and expand **Preview worksheet / formulas**. The preview
-shows the first 50 rows (up to 40 columns for XLSX/XLSM), with formulas displayed
-as text. It does not recalculate Excel/Bloomberg formulas, persist the reference
-workbook, or import a second copy of its trades. Other Excel layouts can also be
-previewed in reference mode; only BNP-format worksheets can update report data.
+1. Choose the export (`.csv`, `.xlsx` or `.xls`). Comma, semicolon, tab or pipe
+   delimited; UTF-8, BOM or cp1252; header on any row; any header casing; multi-sheet
+   workbooks with real Excel date cells; day-first (`20/8/2026`) or month-first
+   (`8/20/2026`) dates, detected per file.
+2. The file name and a **Confirm insert** button appear once the file looks like a
+   blotter (it has `Symbol`, `Trade Id` and `Fin Type` or `Product` columns). Nothing is
+   written before Confirm.
+3. Click **Confirm insert**. One line reports what was loaded: trades (new / updated),
+   by product (forwards, futures, options, rate swaps), legs, and anything excluded
+   (other funds, cancelled status, earlier versions of a repeated trade id) or skipped
+   because a row could not be read, with the row number and the reason.
 
-Files are limited to 25 MB. Uploading does not modify the original file.
+Re-uploading the same or a newer export is safe: a trade id already on file is
+replaced, everything else is added, and FX swap packaging re-runs. Option terms typed
+in the Blotter's Options view (strike, payoff type, barrier) are never overwritten by a
+re-upload.
 
-Dependencies are listed in `PACKAGES` in `2_launcher.py` and installed by `py 2_launcher.py setup`.
-Need a `requirements.txt` on disk for some other tool? Run `py 2_launcher.py freeze`.
+A row is skipped only when its status is cancelled / rejected / pending / void, when
+its fund is populated and is not NMMF, or when two populated fields contradict each
+other. A blank or oddly formatted field never rejects a row when the value can be
+recovered from another column.
 
+## After the upload
 
-Calculation correction (2026-09-14): the cash ladder now includes currency/date
-P&L totals and expandable trade-level entry/valuation rates, local amounts, general
-spot reference and signed USD entry. Formula arithmetic follows `All FX trades`
-in HA-portfolio vJean. See `excel-parity-audit.md` for exact formulas and caveats.
+- **Ladder** defaults to today (New York). It shows delta by currency and value date,
+  Net / Gross USD, the futures line and the stress block. It needs official Bloomberg
+  spot marks for today; on a PC without a Terminal the rate cells say so.
+- **Blotter** shows every trade with its P&L (Total book, FX, Futures, Rates, Options,
+  Bundles). Options whose export carried no strike are listed at the top of the
+  Options view's **Option terms** editor; enter the strike and payoff type once.
+- **Market data** shows every mark the book needs today, its source and freshness,
+  the **Pull now** button, the manual-entry form, and **Check Bloomberg connection**,
+  which runs the same diagnostics as `py 3_diagnostic.py`.
 
-Expand **Workbook FX rates** to enter current, T-1 and T-2 outright rates, all
-for the displayed shared WORKDAY(date,5) maturity. General spot is a separate,
-optional field for the cash-flow USD equivalent; it does not alter the workbook
-P&L formula. Saving applies to the selected date and updates both views. Rates
-from the BNP report at other maturities are not silently substituted.
-
-You can load saved rates from HA-portfolio for review. The supplied workbook has
-no usable saved FX rates (Bloomberg errors), so it cannot currently populate
-those cells. Its 26 surviving historical futures P&L outputs are covered by
-numerical comparison tests, including database-level reconstruction for eligible
-historical trades. No full current FX/Portfolio total match is claimed.
-
-Portfolio Net/Gross remains unavailable without its manual option adjustments
-and other product inputs. 5d/MTD/YTD have no formula in this workbook and remain
-unavailable. The app retains recorded trades after settlement for the workbook's
-LTD logic; the cash ladder shows flows from its selected date onwards. Earlier
-trades already absent from the first BNP snapshot cannot be reconstructed by
-uploading that snapshot alone.
+Details of what the numbers mean: [HOW_IT_WORKS.md](HOW_IT_WORKS.md).

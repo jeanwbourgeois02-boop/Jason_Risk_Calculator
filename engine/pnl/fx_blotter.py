@@ -23,7 +23,7 @@ from typing import Callable, List, Optional
 import numpy as np
 import pandas as pd
 
-from engine.pnl.aggregate import _n_business_days_back
+from engine.pnl.aggregate import _n_business_days_back, load_holidays
 from engine.pnl.valuation import value_book
 
 OUTPUT_COLUMNS = [
@@ -93,9 +93,14 @@ def _slim(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
     return df[["trade_id", "mark", "pnl_usd"]].rename(columns=cols)
 
 
-def fx_blotter_rows(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value_book) -> pd.DataFrame:
-    """One row per FX_SPOT/FX_FWD/FX_SWAP/FUTURE trade (the universe `value_book` covers),
-    ordered by trade_date, instrument_id, trade_id. Prices the trade book three times --
+FX_AND_FUTURE_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FUTURE")
+
+
+def fx_blotter_rows(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value_book,
+                    products: tuple = FX_AND_FUTURE_PRODUCTS) -> pd.DataFrame:
+    """One row per trade whose product is in `products` (default FX_SPOT/FX_FWD/FX_SWAP/
+    FUTURE; the Blotter's FX sub-tab passes the three FX products so futures appear only
+    on their own sub-tab), ordered by trade_date, instrument_id, trade_id. Prices the trade book three times --
     at `as_of`, one business day back and two business days back -- via `value_fn`
     (default `value_book`; the UI injects a wrapper that retries missing official marks
     against BNP_BVAL so a Bloomberg-less DB still prices) and lays the results out as
@@ -104,12 +109,17 @@ def fx_blotter_rows(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = va
     formula.
     """
     d0 = dt.date.fromisoformat(as_of)
-    t1_date = _n_business_days_back(d0, 1).isoformat()
-    t2_date = _n_business_days_back(d0, 2).isoformat()
+    # Same trading calendar as ledger._period_refs (config/holidays.txt): without it the
+    # t-1 / t-2 columns landed on US holidays and disagreed with the header's Daily.
+    holidays = load_holidays()
+    t1_date = _n_business_days_back(d0, 1, holidays).isoformat()
+    t2_date = _n_business_days_back(d0, 2, holidays).isoformat()
 
     eod = value_fn(conn, as_of)
     t1_df = value_fn(conn, t1_date)
     t2_df = value_fn(conn, t2_date)
+    if not eod.empty:
+        eod = eod[eod["product"].isin(products)]
 
     if eod.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)

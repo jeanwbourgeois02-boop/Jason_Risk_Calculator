@@ -146,7 +146,7 @@ where it sits.
 | Ladder | What am I long/short and when is it cash? | date x currency grid incl. USD and cash balances at as_of; local delta, spot, USD delta rows; Net/Gross; futures delta line; stress block; cell click -> trades |
 | Blotter | Where did the P&L come from? | `value_book(as_of)` rows; filters open/settled, product, pair, strategy, theme, date range; group-by with LTD/Daily/MTD/YTD per group; spot/carry columns; row click -> legs and marks used |
 | Market data | Can I trust the numbers? | every mark needed today with value, source, time, status (official/interp/manual/missing); pull button; close completeness per past date; manual entry |
-| Reconciliation | Do I agree with BNP and the Excel? | ours vs BNP per instrument (MV, DTD, MTD) with breaks; the literal workbook formula per trade (existing `engine/pnl/pnl.py`, unchanged); neither feeds the header |
+| ~~Reconciliation~~ | *(removed 2026-09-16: BNP and the Excel are no longer inputs; Options is a grouped view inside Blotter since 2026-09-17)* | |
 
 Removed from the Cash ladder tab: workbook mark-to-market panel, ledger cards, Exposure
 P&L card, workbook FX rates grid (moves to Market data as manual entry).

@@ -525,7 +525,7 @@ def test_every_static_callback_id_exists_in_layout():
     dynamic_ok = {"blotter-datatable", "blotter-subtotal",
                   "options-datatable", "options-collapsed-packages"}
     dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
-                        "blotter-row-detail-")  # per-sub-tab, rendered by callback
+                        "blotter-row-detail-", "options-terms-")  # per-sub-tab, rendered by callback
     missing = []
     for key, cb in app.callback_map.items():
         for kind in ("inputs", "state"):
@@ -995,12 +995,14 @@ def test_blotter_fx_scope_has_no_reactive_strip_filter_or_detail_callback(tmp_pa
 # --------------------------------------------------------- blotter FX P&L strip (2026-09-17)
 
 
-def test_blotter_fx_scoped_trade_ids_includes_future_excludes_irs_and_options():
+def test_blotter_fx_scoped_trade_ids_is_fx_only():
+    """2026-09-17: futures live on their own sub-tab, so the FX strip must not count
+    them (it disagreed with the Total book's FX row when it did)."""
     df = pd.DataFrame({
         "trade_id": ["A", "B", "C", "D", "E"],
         "product": ["FX_FWD", "FUTURE", "IRS", "FX_OPTION", "FX_SWAP"],
     })
-    assert blotter_fx._scoped_trade_ids(df) == ["A", "B", "E"]
+    assert blotter_fx._scoped_trade_ids(df) == ["A", "E"]
     assert blotter_fx._scoped_trade_ids(pd.DataFrame(columns=["trade_id", "product"])) == []
 
 
@@ -1139,13 +1141,15 @@ def test_blotter_fx_sample_caption_absent_when_every_mark_is_real(tmp_path):
     from engine.pnl.aggregate import _n_business_days_back
 
     as_of = "2026-06-20"
-    t1_date = _n_business_days_back(dt.date.fromisoformat(as_of), 1).isoformat()
-    t2_date = _n_business_days_back(dt.date.fromisoformat(as_of), 2).isoformat()
+    from engine.pnl.aggregate import load_holidays
+    holidays = load_holidays()  # 2026-06-19 (Juneteenth) is a holiday: t-1 must skip it, as the engine does
+    t1_date = _n_business_days_back(dt.date.fromisoformat(as_of), 1, holidays).isoformat()
+    t2_date = _n_business_days_back(dt.date.fromisoformat(as_of), 2, holidays).isoformat()
 
     db_path = tmp_path / "risk.db"
     conn = sqlite3.connect(db_path)
     schema.create_schema(conn)
-    _seed_fx_trade(conn)
+    _seed_fx_trade(conn, trade_date="2026-06-15")  # dealt before t-2 (06-17) so all three days price
     conn.executemany(
         "INSERT INTO marks VALUES (?,?,'2026-06-20','FWD_OUTRIGHT',?,'BBG_BFXFORWARD',?)",
         [

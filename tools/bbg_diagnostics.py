@@ -34,10 +34,17 @@ Checks (each becomes one or more result rows):
                                    scope that a live IRS trade needs, and PAR_RATE/PV_USD/
                                    DV01_USD marks (where present) are QL_PRICER, never
                                    BBG_BDH, as official
+  5b. Overnight index fixings  -- a seasoned swap has its index's fixings on file from
+                                   its effective date to as_of (engine/rates needs them)
+  5c. FX option coverage       -- every open option has a strike on file (else it can
+                                   never be priced) and an official PREMIUM and DELTA
+  5d. Clock                    -- local time vs New York, and whether as_of is today NY
   6. snapped_at offset         -- official marks carry a timezone-resolved snapped_at
                                    (CLAUDE.md: 17:00 America/New_York close), not a naive
                                    timestamp
   7. Last live feed pull       -- data.bloomberg.live's last recorded status
+  8. Unverified assumptions    -- how many FX vol ticker/field guesses in
+                                   data/bloomberg/vol_marketdata.py are still UNVERIFIED
 """
 from __future__ import annotations
 
@@ -72,9 +79,19 @@ def _default_db_path() -> Optional[Path]:
         return Path(env) if env else None
 
 
+def _today_ny() -> str:
+    """The book date the live feed stamps marks with: today in America/New_York.
+    (`positions` is BNP-fed and inert since 2026-09-17, so it is no longer used as the
+    default here -- it would point every coverage check at 2026-08-17 forever.)"""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return date.today().isoformat()
+
+
 def _latest_as_of(conn: sqlite3.Connection) -> str:
-    row = conn.execute("SELECT MAX(as_of_date) FROM positions").fetchone()
-    return row[0] if row and row[0] else date.today().isoformat()
+    return _today_ny()
 
 
 # --------------------------------------------------------------------------- 1. session
@@ -98,14 +115,24 @@ def check_session(host: str, port: int) -> List[Check]:
 
 # --------------------------------------------------------------------------- 2. official-source mapping
 _EXPECTED_OFFICIAL = {
+    # CLAUDE.md "Official marks" table, restated here on purpose (not imported from
+    # data/ingest/schema.py) so that a drift between the schema and the contract is
+    # reported instead of silently agreed with. Updated 2026-09-17: DELTA/PREMIUM and the
+    # Greeks moved from MANUAL to QL_OPTIONS_PRICER; CASHFLOW_USD added under QL_PRICER.
     "SPOT": "BBG_BFXFORWARD",
     "FWD_OUTRIGHT": "BBG_BFXFORWARD",
     "FUTURE_PX": "BBG_BDH",
     "PAR_RATE": "QL_PRICER",
     "PV_USD": "QL_PRICER",
     "DV01_USD": "QL_PRICER",
-    "DELTA": "MANUAL",
-    "PREMIUM": "MANUAL",
+    "CASHFLOW_USD": "QL_PRICER",
+    "DELTA": "QL_OPTIONS_PRICER",
+    "DELTA_PA": "QL_OPTIONS_PRICER",
+    "PREMIUM": "QL_OPTIONS_PRICER",
+    "GAMMA": "QL_OPTIONS_PRICER",
+    "THETA": "QL_OPTIONS_PRICER",
+    "VEGA": "QL_OPTIONS_PRICER",
+    "RHO": "QL_OPTIONS_PRICER",
 }
 _NEVER_OFFICIAL = {"BNP_BVAL", "BBG_INTERP"}
 
@@ -129,7 +156,8 @@ def check_official_source_mapping(conn: Optional[sqlite3.Connection]) -> List[Ch
     else:
         out.append(_row("Official-source mapping matches CLAUDE.md", "pass",
                          "SPOT/FWD_OUTRIGHT->BBG_BFXFORWARD, FUTURE_PX->BBG_BDH, "
-                         "PAR_RATE/PV_USD/DV01_USD->QL_PRICER, DELTA/PREMIUM->MANUAL, as specified."))
+                         "PAR_RATE/PV_USD/DV01_USD/CASHFLOW_USD->QL_PRICER, "
+                         "PREMIUM/DELTA/Greeks->QL_OPTIONS_PRICER, as specified."))
 
     if conn is None:
         out.append(_row("marks_official never resolves to a reconciliation-only source", "warning",
@@ -265,6 +293,129 @@ def check_irs_curve_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check
     return out
 
 
+# --------------------------------------------------------------------------- 5b. FX options
+def check_option_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """Every open FX option (expiry on or after as_of) must have an official PREMIUM and
+    DELTA mark for as_of. An option whose terms are incomplete (strike 0 in
+    instrument_options) can never be priced and is reported separately, because the fix
+    is typing its terms in the Blotter's Options view, not a Bloomberg pull."""
+    out: List[Check] = []
+    try:
+        rows = conn.execute(
+            "SELECT t.trade_id, t.instrument_id, i.expiry_date, COALESCE(o.strike, 0), COALESCE(o.payoff, 'VANILLA') "
+            "FROM trades_official t JOIN instruments i USING (instrument_id) "
+            "LEFT JOIN instrument_options o USING (instrument_id) "
+            "WHERE t.product = 'FX_OPTION' AND i.expiry_date >= ?", (as_of,)).fetchall()
+    except sqlite3.Error as exc:
+        return [_row("FX option marks coverage", "fail", f"Could not read option trades ({exc}).")]
+    if not rows:
+        return [_row("FX option marks coverage", "pass", "No open FX options; no option marks are required today.")]
+
+    no_terms = [inst for _, inst, _, strike, payoff in rows
+                if strike == 0 and payoff in ("VANILLA", "DIGITAL", "AMERICAN", "ASIAN", "BARRIER_KI", "BARRIER_KO")]
+    if no_terms:
+        out.append(_row("FX option terms on file", "warning",
+                         f"{len(no_terms)} open option(s) have no strike on file, so they cannot be priced until "
+                         f"their terms are entered in the Blotter's Options view: {', '.join(sorted(set(no_terms)))}."))
+    else:
+        out.append(_row("FX option terms on file", "pass", f"All {len(rows)} open option(s) carry a strike and payoff type."))
+
+    priceable = sorted({inst for _, inst, _, strike, _ in rows if strike != 0})
+    for mark_type in ("PREMIUM", "DELTA"):
+        if not priceable:
+            continue
+        have = {r[0] for r in conn.execute(
+            "SELECT DISTINCT instrument_id FROM marks_official WHERE mark_type = ? AND as_of_date = ?",
+            (mark_type, as_of))}
+        missing = [inst for inst in priceable if inst not in have]
+        if missing:
+            out.append(_row(f"FX option {mark_type} coverage", "fail",
+                             f"{len(missing)} of {len(priceable)} priceable open option(s) have no official {mark_type} "
+                             f"for {as_of} (e.g. {', '.join(missing[:4])}) -- the options step of the live feed "
+                             "did not price them; check the vol surface and the OIS curves for their currencies."))
+        else:
+            out.append(_row(f"FX option {mark_type} coverage", "pass",
+                             f"All {len(priceable)} priceable open option(s) have an official {mark_type} for {as_of}."))
+    return out
+
+
+# --------------------------------------------------------------------------- 5c. index fixings
+def check_index_fixings(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """A seasoned swap (effective date already passed) needs the overnight fixings of its
+    index from its effective date to as_of to value the current float period. Reports,
+    per index, whether any fixings are on file over that window."""
+    out: List[Check] = []
+    try:
+        rows = conn.execute(
+            "SELECT i.base_ccy, MIN(l.start_date) FROM trades_official t "
+            "JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id) "
+            "WHERE t.product = 'IRS' AND l.leg_type = 'FLOAT' AND l.start_date <= ? AND l.settle_date >= ? "
+            "GROUP BY i.base_ccy", (as_of, as_of)).fetchall()
+    except sqlite3.Error as exc:
+        return [_row("Overnight index fixings", "fail", f"Could not read IRS legs ({exc}).")]
+    if not rows:
+        return [_row("Overnight index fixings", "pass", "No seasoned IRS trades; no fixings are required today.")]
+    for ccy, first_start in rows:
+        idx = _OIS_INDEX.get(ccy)
+        if idx is None:
+            out.append(_row(f"{ccy} overnight fixings", "warning", f"{ccy} has no OIS index in scope; fixings cannot be checked."))
+            continue
+        n, last = conn.execute(
+            'SELECT COUNT(*), MAX(fixing_date) FROM index_fixings WHERE "index" = ? AND fixing_date BETWEEN ? AND ?',
+            (idx, first_start, as_of)).fetchone()
+        if n == 0:
+            out.append(_row(f"{idx} fixings since {first_start}", "fail",
+                             f"No {idx} fixings on file between {first_start} and {as_of}, but a seasoned {ccy} swap "
+                             "needs them to value its current float period -- the rates step of the live feed writes "
+                             "them (data/bloomberg/rates_marketdata.py::write_fixings)."))
+        else:
+            out.append(_row(f"{idx} fixings since {first_start}", "pass", f"{n} {idx} fixing(s) on file, latest {last}."))
+    return out
+
+
+# --------------------------------------------------------------------------- 5d. unverified assumptions
+def check_unverified_assumptions() -> List[Check]:
+    """The FX vol feed (data/bloomberg/vol_marketdata.py) was written without Terminal
+    access and lists every ticker / field / request-shape guess as 'UNVERIFIED' in its
+    docstring. Surface that count here so the person on the Bloomberg PC knows the option
+    Greeks rest on guesses until each is ticked off."""
+    try:
+        import data.bloomberg.vol_marketdata as vm
+        doc = vm.__doc__ or ""
+    except Exception as exc:
+        return [_row("FX vol ticker assumptions", "fail", f"Could not import data.bloomberg.vol_marketdata ({exc.__class__.__name__}).")]
+    items = [ln.strip() for ln in doc.splitlines() if "UNVERIFIED --" in ln]
+    if not items:
+        return [_row("FX vol ticker assumptions", "pass", "No unverified ticker assumptions remain in the vol feed.")]
+    return [_row("FX vol ticker assumptions", "warning",
+                 f"{len(items)} FX vol ticker/field assumptions are still marked UNVERIFIED in "
+                 "data/bloomberg/vol_marketdata.py (ATM/RR/BF ticker shapes, PX_LAST field, 'ON' tenor, "
+                 "request type, vol-point scale). Run  py -3 -m data.bloomberg.vol_marketdata --probe  "
+                 "on the Bloomberg PC and tick each one off; option Greeks are only as good as these.")]
+
+
+# --------------------------------------------------------------------------- 5e. clock
+def check_clock(as_of: str) -> List[Check]:
+    """The feed stamps marks with today's New York date. A PC clock or zone that is off,
+    or an as-of date that is not today, is the usual reason 'everything is missing'."""
+    try:
+        from zoneinfo import ZoneInfo
+        now_ny = datetime.now(ZoneInfo("America/New_York"))
+    except Exception as exc:
+        return [_row("PC clock / New York date", "fail",
+                     f"Cannot resolve America/New_York ({exc.__class__.__name__}); tzdata may be missing -- "
+                     "run  py -3 2_launcher.py setup.")]
+    today_ny = now_ny.date().isoformat()
+    local = datetime.now().astimezone()
+    detail = (f"Local time {local.strftime('%Y-%m-%d %H:%M %Z')} = New York {now_ny.strftime('%Y-%m-%d %H:%M')}; "
+              f"marks pulled now are stamped {today_ny}.")
+    if as_of != today_ny:
+        return [_row("PC clock / New York date", "warning",
+                     detail + f" The checks above ran for as-of {as_of}, which is not today's New York date; "
+                              "a Ladder or Market data date picker left on an old date finds no official marks.")]
+    return [_row("PC clock / New York date", "pass", detail)]
+
+
 # --------------------------------------------------------------------------- 6. snapped_at offset
 def check_snapped_at_offset(conn: sqlite3.Connection, as_of: str) -> List[Check]:
     try:
@@ -358,8 +509,13 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
         resolved_as_of = as_of or _latest_as_of(conn)
         _safe("FX/futures marks coverage", check_fx_and_future_coverage, conn, resolved_as_of)
         _safe("IRS / OIS curve coverage", check_irs_curve_coverage, conn, resolved_as_of)
+        _safe("Overnight index fixings", check_index_fixings, conn, resolved_as_of)
+        _safe("FX option marks coverage", check_option_coverage, conn, resolved_as_of)
         _safe("snapped_at carries a resolved offset", check_snapped_at_offset, conn, resolved_as_of)
         conn.close()
+        _safe("PC clock / New York date", check_clock, resolved_as_of)
+
+    _safe("FX vol ticker assumptions", check_unverified_assumptions)
 
     _safe("Last marks pull", check_last_pull, resolved_db)
 
@@ -370,7 +526,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--db", default=None, help="SQLite database (default: ui.app.get_db_path() or $RISK_DB)")
-    p.add_argument("--as-of", default=None, help="as-of date (default: latest positions date)")
+    p.add_argument("--as-of", default=None, help="as-of date (default: today in New York)")
     p.add_argument("--host", default=None)
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--json", action="store_true", help="print raw JSON instead of a plain-text report")

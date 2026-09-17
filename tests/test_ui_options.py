@@ -137,7 +137,9 @@ def test_option_rows_single_leg_package_is_flat_no_separate_leg_row():
         row = df[df["group_key"] == "O3"].iloc[0]
         assert row["level"] == "PACKAGE"
         assert row["leg_count"] == 1
-        assert row["label"] == "USDJPY091026P-1"
+        assert row["label"] == "USDJPY - Vanilla"  # MARS-style structure name; id in "instrument"
+        assert row["instrument"] == "USDJPY091026P-1"
+        assert row["type"].startswith("Vanilla Put")
         # No LEG row anywhere has O3 as its parent (nothing nested beneath it).
         assert (df["parent_key"] == "O3").sum() == 0
     finally:
@@ -149,7 +151,10 @@ def test_option_rows_multileg_package_has_nested_leg_rows():
     try:
         df = options.option_rows(conn, AS_OF)
         legs = df[(df["level"] == "LEG") & (df["parent_key"] == "PKG1")]
-        assert set(legs["label"]) == {"EURUSD092226C-1", "EURUSD092226P-1"}
+        assert set(legs["instrument"]) == {"EURUSD092226C-1", "EURUSD092226P-1"}
+        assert set(legs["label"]) == {"Vanilla"}
+        pkg = df[(df["level"] == "PACKAGE") & (df["group_key"] == "PKG1")].iloc[0]
+        assert pkg["label"] == "EURUSD - Two Leg" and pkg["type"] == "2 legs"
     finally:
         conn.close()
 
@@ -158,7 +163,7 @@ def test_option_rows_mktval_uses_base_ccy_spot():
     conn = _make_db()
     try:
         df = options.option_rows(conn, AS_OF)
-        leg = df[df["label"] == "EURUSD092226C-1"].iloc[0]
+        leg = df[df["instrument"] == "EURUSD092226C-1"].iloc[0]
         # premium 0.0062 * quantity 1,000,000 * EUR->USD spot 1.1050
         assert leg["mktval"] == pytest.approx(0.0062 * 1_000_000.0 * 1.1050)
     finally:
@@ -169,7 +174,7 @@ def test_option_rows_delta_is_usd_equivalent_via_quote_spot():
     conn = _make_db()
     try:
         df = options.option_rows(conn, AS_OF)
-        leg = df[df["label"] == "EURUSD092226C-1"].iloc[0]
+        leg = df[df["instrument"] == "EURUSD092226C-1"].iloc[0]
         # quote_ccy USD -> spot 1.0, delta = 0.55 * (1,000,000 * multiplier 1) * 1.0
         assert leg["delta"] == pytest.approx(0.55 * 1_000_000.0)
     finally:
@@ -180,7 +185,7 @@ def test_option_rows_missing_rho_is_none_not_zero():
     conn = _make_db()
     try:
         df = options.option_rows(conn, AS_OF)
-        leg = df[df["label"] == "USDJPY091026P-1"].iloc[0]
+        leg = df[df["instrument"] == "USDJPY091026P-1"].iloc[0]
         assert leg["rho"] is None or leg["rho"] != leg["rho"]
     finally:
         conn.close()
@@ -190,7 +195,7 @@ def test_option_rows_zero_strike_is_none():
     conn = _make_db()
     try:
         df = options.option_rows(conn, AS_OF)
-        leg = df[df["label"] == "USDJPY091026P-1"].iloc[0]
+        leg = df[df["instrument"] == "USDJPY091026P-1"].iloc[0]
         assert leg["strike"] is None or math.isnan(leg["strike"])
     finally:
         conn.close()
@@ -246,7 +251,7 @@ def test_format_rows_blank_rendering_for_missing_greek_and_zero_strike():
     try:
         df = options.option_rows(conn, AS_OF)
         records, _style = options.format_rows(df)
-        row = next(r for r in records if r["label"] == "USDJPY091026P-1")
+        row = next(r for r in records if r["instrument"] == "USDJPY091026P-1")
         assert row["rho"] == "n/a"
         assert row["strike"] == ""
     finally:
@@ -262,7 +267,7 @@ def test_format_rows_missing_value_never_renders_as_zero():
     try:
         df = options.option_rows(conn, AS_OF)
         records, _style = options.format_rows(df)
-        missing_row = next(r for r in records if r["label"] == "USDJPY091026P-1")
+        missing_row = next(r for r in records if r["instrument"] == "USDJPY091026P-1")
         assert missing_row["rho"] == "n/a"
         pkg_row = next(r for r in records if r["group_key"] == "PKG1")
         assert pkg_row["rho"] == "0"
@@ -289,8 +294,8 @@ def test_format_rows_expanded_shows_leg_rows():
     try:
         df = options.option_rows(conn, AS_OF)
         records, _style = options.format_rows(df, collapsed=[])
-        leg_labels = {r["label"] for r in records if r["level"] == "LEG"}
-        assert leg_labels == {"EURUSD092226C-1", "EURUSD092226P-1"}
+        leg_ids = {r["instrument"] for r in records if r["level"] == "LEG"}
+        assert leg_ids == {"EURUSD092226C-1", "EURUSD092226P-1"}
         pkg_row = next(r for r in records if r["group_key"] == "PKG1")
         assert pkg_row["label"].startswith("▾")  # expanded arrow
     finally:

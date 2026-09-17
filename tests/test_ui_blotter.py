@@ -377,7 +377,7 @@ def test_options_scope_prices_an_option_row():
         layout = blotter.scope_layout("options", conn, "2026-06-20")
         assert layout.children[0].id == "blotter-strip-options"
         table = next(t for t in _find_tables(layout) if t.id == options.TABLE_ID)
-        row = next(r for r in table.data if r["label"] == "EURUSD092226C-1")
+        row = next(r for r in table.data if r["instrument"] == "EURUSD092226C-1")
         # MktPx is the raw premium mark, shown as the blotter quotes it (base-notional fraction).
         assert row["mktpx"] == "0.006200"
         # MktVal = premium(0.0062) * quantity(1,000,000) * EUR->USD spot(1.1050) = 6,851

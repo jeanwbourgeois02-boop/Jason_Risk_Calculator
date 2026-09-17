@@ -75,9 +75,10 @@ def _priced_value_fn(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------ P&L strip (2026-09-17)
-# The strip's trade universe mirrors fx_blotter_rows's own row scope (FX_SPOT/FX_FWD/
-# FX_SWAP/FUTURE, the only products value_book builds).
-FX_AND_FUTURE_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FUTURE")
+# The strip's trade universe is the FX sub-tab's own row scope: the three FX products
+# only. Futures have their own sub-tab; counting them here too made this strip's LTD
+# disagree with the Total book's "FX" row (2026-09-17 audit).
+FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")
 
 
 def _scoped_trade_ids(df_priced: pd.DataFrame) -> list:
@@ -88,7 +89,7 @@ def _scoped_trade_ids(df_priced: pd.DataFrame) -> list:
     added to `value_book`)."""
     if df_priced.empty:
         return []
-    return df_priced[df_priced["product"].isin(FX_AND_FUTURE_PRODUCTS)]["trade_id"].tolist()
+    return df_priced[df_priced["product"].isin(FX_PRODUCTS)]["trade_id"].tolist()
 
 
 def _fx_strip(conn: sqlite3.Connection, as_of: str) -> html.Div:
@@ -299,11 +300,11 @@ def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
     missing marks/P&L sample-filled (`_fill_sample_values`), plus a short note when
     there are no trades (table still renders, empty, with the full column set -- "rows
     must always render" rule elsewhere in this app)."""
-    df = fx_blotter_rows(conn, as_of, value_fn=_priced_value_fn)
+    df = fx_blotter_rows(conn, as_of, value_fn=_priced_value_fn, products=FX_PRODUCTS)
     children = [_fx_strip(conn, as_of)]
     sample_mask = None
     if df.empty:
-        children.append(html.P("No FX/futures trades on file for this as-of date.",
+        children.append(html.P("No FX trades on file for this as-of date.",
                                 className="section-kicker", style={"fontStyle": "italic"}))
     else:
         df, sample_mask = _fill_sample_values(df)

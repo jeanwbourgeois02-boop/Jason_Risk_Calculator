@@ -152,7 +152,7 @@ Two warnings: most real value dates are broken dates, so many forward marks will
 
 ## 8. Day-to-day routine
 
-1. **Upload trade file**: choose the export, read the result line (rows loaded, skipped, rejected and why).
+1. **Upload trade file**: choose the export, read the result line (rows loaded, skipped, rejected and why). If the Options view lists options with no strike on file (digitals), enter their terms once in its **Option terms** editor.
 2. On the Bloomberg PC, open Market data and check the feed status line reads connected. Press **Pull now** if you do not want to wait two minutes.
 3. Leave the Ladder on today. The feed stamps marks with today's date; a ladder left on an old date finds no official marks.
 4. Read the header. If a figure is Unavailable, the reason names the pair and date; Market data shows which mark is missing.

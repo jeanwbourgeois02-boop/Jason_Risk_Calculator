@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS realised_pnl (
 # instead. Populated by data/ingest/swaps.py::package_swaps.
 _SWAP_REVIEW_DDL = """
 CREATE TABLE IF NOT EXISTS swap_review (
-  candidate_group     TEXT NOT NULL,      -- 'account|instrument_id|trade_date'
+  candidate_group     TEXT NOT NULL,      -- 'source|account|instrument_id|trade_date'
   trade_id            TEXT NOT NULL REFERENCES trades,
   reason              TEXT NOT NULL,
   PRIMARY KEY (candidate_group, trade_id)

@@ -13,14 +13,15 @@ magnitude (252/365 roughly tracks the fraction of calendar days that are
 business days) but are NOT identical, and differ MORE when a holiday
 falls inside the window -- exactly the gap this module exists to close.
 
-**Where this is used.** ``pricer.py``'s ``price_fx_*`` functions take an
-optional ``pair`` argument; when given (and ``calendar_aware=True``, the
-default), they call ``calendar_year_fraction`` instead of the plain
-day count. ``pair=None`` (every existing call site that predates this
-phase) keeps the old plain-days behavior unchanged -- this is the
-"explicit flag for tests" / backward-compatibility path, not a new
-default (see pricer.py's ``_resolve_T``). ``store.py``'s dispatch always
-passes ``pair``, so calendar-aware dating IS the production path.
+**Where this is used (revised 2026-09-17).** NOT by the pricer any more.
+``pricer.py::_resolve_T`` always uses the plain Act/365 calendar-day
+count: the vendored engine rebuilds the maturity as ``today +
+round(T*365)`` calendar days and prices off ``Actual365Fixed``, so a
+Business252 T was re-quantised to a slightly wrong calendar day count
+(a one-year option lost six days). ``calendar_year_fraction`` stays here
+as a tested helper for settlement/date logic that genuinely counts
+business days; ``spot_date`` below is the live consumer of the joint
+calendar.
 
 **Non-G10 pairs.** ``joint_calendar`` (via ``options_calc.fx.g10.
 pair_convention``) only recognizes the 45 G10 pairs. A pair outside that

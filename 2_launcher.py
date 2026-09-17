@@ -53,7 +53,7 @@ TABLES = ("instruments", "trades", "trade_legs", "marks", "positions", "realised
 # remove the right line instead of leaving a dangling dependency.
 PACKAGES = [
     "dash>=4.4,<5",       # ui/ -- the app itself
-    "pandas>=3,<4",       # data/ingest, data/bloomberg, engine/ -- BNP CSV/xlsx parsing, series math
+    "pandas>=3,<4",       # data/ingest, data/bloomberg, engine/ -- blotter CSV/xlsx parsing, series math
     "numpy>=2,<3",        # engine/ -- pnl/ladder/rates numeric work
     "openpyxl>=3.1,<4",   # data/ingest/workbook_rates.py -- .xlsx read
     "xlrd>=2,<3",         # data/ingest -- legacy .xls read
@@ -381,7 +381,7 @@ def doctor_checks(d: Doctor, bloomberg: bool, git: bool = True) -> None:
                 d.add("database", True, f"{p}: {counts.get('trades', 0)} trades, {asof} positions, "
                                         f"{counts.get('marks', 0)} marks")
                 if counts.get("trades", 0) == 0:
-                    d.add("data", None, "database is empty: upload a BNP report in the app, or  py 2_launcher.py setup --sample")
+                    d.add("data", None, "database is empty: press 'Upload trade file' in the app (the trade blotter export), or  py 2_launcher.py setup --sample")
         except sqlite3.Error as exc:
             d.add("database", False, f"{p}: {exc}", "the file is not a valid SQLite database; restore it from backup")
 
@@ -503,7 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("setup", help="install everything into .venv, create the database, run the tests")
     s.add_argument("--bloomberg", action="store_true", help="install blpapi even if no Terminal is detected")
     s.add_argument("--no-bloomberg", action="store_true", help="never install blpapi")
-    s.add_argument("--sample", action="store_true", help="import the sample BNP report so the screens show data")
+    s.add_argument("--sample", action="store_true", help="import the sample trade blotter (data/sample/blotter_sample.csv) so the screens show data")
     s.add_argument("--recreate", action="store_true", help="delete and rebuild .venv")
     s.add_argument("--skip-tests", action="store_true")
     s.set_defaults(func=cmd_setup)

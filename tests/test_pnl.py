@@ -531,7 +531,7 @@ def test_value_book_expired_option_is_unavailable_not_stale():
     # from realised_pnl (engine/pnl/ledger.realise_settled), never a stale premium.
     assert row["status"] == "SETTLED"
     assert math.isnan(row["pnl_usd"])
-    assert "not yet realised" in row["reason"]
+    assert "cannot be frozen" in row["reason"]
 
 
 def test_value_book_missing_mark_is_nan_with_reason():
@@ -561,7 +561,7 @@ def test_value_book_settled_unrealised_is_provisional_only_with_fallback_source(
     _vb_fx_trade(conn, "T6b", "EURUSD", "EUR", "USD", 1_000_000, 1.1000, settle="2026-05-15")
     conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", ("2026-05-14", "EURUSD", "2026-05-15", "FWD_OUTRIGHT", 1.1150, "BNP_BVAL", "t"))
     official = value_book(conn, VB_AS_OF).iloc[0]
-    assert official["status"] == "SETTLED" and math.isnan(official["pnl_usd"]) and "not yet realised" in official["reason"]
+    assert official["status"] == "SETTLED" and math.isnan(official["pnl_usd"]) and "cannot be frozen" in official["reason"]
     prov = value_book(conn, VB_AS_OF, marks_source="BNP_BVAL").iloc[0]
     assert prov["pnl_usd"] == pytest.approx(1_000_000 * 0.0150) and prov["reason"] == ""
     assert "provisional" in prov["note"]
@@ -668,7 +668,7 @@ def test_value_book_matured_swap_reads_realised_row_only():
     _vb_irs_mark(conn, "PV_USD", 1.0, maturity="2026-05-20")   # a live mark that must NOT be used
     _vb_irs_mark(conn, "CASHFLOW_USD", 1.0, maturity="2026-05-20")
     row = value_book(conn, VB_AS_OF).iloc[0]
-    assert row["status"] == "SETTLED" and math.isnan(row["pnl_usd"]) and "not yet realised" in row["reason"]
+    assert row["status"] == "SETTLED" and math.isnan(row["pnl_usd"]) and "cannot be frozen" in row["reason"]
     conn.execute("INSERT INTO realised_pnl VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("S1", VB_IRS, "IRS", "USD", "2026-05-20", 7_500.0, 0.0, "PV_USD", 1.0,
                   "2026-05-20", "QL_PRICER", 7_500.0, "t", ""))

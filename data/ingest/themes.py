@@ -14,19 +14,27 @@ from data.ingest import schema
 
 
 def set_theme(conn: sqlite3.Connection, key: str, theme: str, *, is_instrument: bool = False) -> None:
-    """Set ``theme`` on a single trade (``key`` = trade_id) or on an instrument's default
+    """Set ``theme`` on a single trade (``key`` = trade_id) or on an instrument
     (``key`` = instrument_id, ``is_instrument=True``). Raises ValueError if the key does
-    not exist. Existing trades already loaded for an instrument are NOT retroactively
-    changed by an instrument-level theme -- only trades loaded afterwards inherit it."""
+    not exist. An instrument-level theme applies to the instrument's trades already on
+    file as well as to trades loaded later (2026-09-17: previously only later trades
+    inherited it, so adding a pair to a bundle showed an empty bundle). A trade whose
+    theme was set individually (a value other than '' or the instrument's previous
+    theme) keeps its own."""
     schema.create_schema(conn)
     if is_instrument:
         if not conn.execute("SELECT 1 FROM instruments WHERE instrument_id = ?", (key,)).fetchone():
             raise ValueError(f"unknown instrument_id {key!r}")
+        prev = conn.execute("SELECT theme FROM instrument_theme WHERE instrument_id = ?", (key,)).fetchone()
+        previous_theme = prev[0] if prev else ""
         with conn:
             conn.execute(
                 "INSERT INTO instrument_theme (instrument_id, theme) VALUES (?, ?) "
                 "ON CONFLICT(instrument_id) DO UPDATE SET theme = excluded.theme",
                 (key, theme))
+            conn.execute(
+                "UPDATE trades SET theme = ? WHERE instrument_id = ? AND (theme = '' OR theme = ?)",
+                (theme, key, previous_theme))
     else:
         if not conn.execute("SELECT 1 FROM trades WHERE trade_id = ?", (key,)).fetchone():
             raise ValueError(f"unknown trade_id {key!r}")

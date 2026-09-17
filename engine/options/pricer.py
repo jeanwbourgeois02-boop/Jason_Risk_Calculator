@@ -64,16 +64,15 @@ package:
   through, so a historical ``as_of`` prices identically regardless of the
   machine's real clock date.
 
-- **Calendar-aware year fraction (Phase 7, 2026-09-17).** Every FX pricer
-  function below now takes an optional ``pair`` argument. When given, T is
-  computed via ``engine/options/calendars.py::calendar_year_fraction``
-  (business-day count on the pair's joint settlement calendar) instead of
-  the plain Act/365 calendar-day count, falling back to the plain count
-  for a non-G10 pair or when ``calendar_aware=False`` is passed explicitly
-  -- see calendars.py's own module docstring for the full rationale.
-  ``pair=None`` (every call site predating this phase, and every test that
-  doesn't pass it) keeps the exact old plain-days behavior, so nothing
-  above this phase changes silently.
+- **Year fraction is always Act/365 calendar days (revised 2026-09-17).**
+  Phase 7 briefly routed T through ``engine/options/calendars.py::
+  calendar_year_fraction`` (Business252). The same-day audit showed the
+  vendored engine quantises T back to whole calendar days
+  (``today + round(T*365)``) and prices off ``Actual365Fixed``, so the
+  business-day T only mis-rounded the calendar count (a one-year EURUSD
+  option lost 6 days). ``_resolve_T`` therefore always uses ``year_fraction``;
+  the ``calendar_aware`` argument is kept for signature compatibility and
+  ignored. ``pair`` still drives the delta convention below.
 
 - **delta_convention / DELTA_PA (Phase 7).** ``options_calc.fx.g10.
   recommended_delta`` picks, per pair, whether the market-standard delta
@@ -199,19 +198,16 @@ def _to_result_plain(raw: Dict[str, float]) -> OptionPriceResult:
 
 
 def _resolve_T(pair: Optional[str], as_of: datetime.date, expiry: datetime.date, calendar_aware: bool) -> float:
-    """T for a price_fx_* call -- calendar-aware (engine/options/
-    calendars.py::calendar_year_fraction) when `pair` is given and
-    `calendar_aware` is True, else the plain Act/365 day count below (see
-    module docstring's "Calendar-aware year fraction" section)."""
-    if pair is not None and calendar_aware:
-        from .calendars import calendar_year_fraction
+    """T for a price_fx_* call: always the plain Act/365 calendar-day count.
 
-        try:
-            return calendar_year_fraction(pair, as_of, expiry)
-        except ValueError as exc:
-            if "is not after" in str(exc):
-                raise  # a genuine bad-date error, not a non-G10-pair fallback case
-            # non-G10 pair -- fall back to plain days below.
+    `calendar_aware` is accepted for signature compatibility and ignored (2026-09-17
+    audit). The Business252 fraction from calendars.py::calendar_year_fraction was fed
+    in here for a few hours, but the vendored engine rebuilds the maturity as
+    `today + round(T * 365)` calendar days and reads every Greek off Actual365Fixed, so
+    a business-day T did not change the convention -- it only re-rounded the calendar
+    day count, shortening a one-year option by ~6 days (premium ~0.9 % low). Market
+    practice for FX option expiry time is calendar days / 365, which is what this is.
+    `pair` still selects the delta convention (RAW vs premium-adjusted)."""
     return year_fraction(as_of, expiry)
 
 

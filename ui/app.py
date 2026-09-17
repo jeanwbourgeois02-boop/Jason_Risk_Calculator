@@ -146,11 +146,11 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     children of their own -- Dash nests a Tab's children inside its own styled wrapper,
     which was pushing the navy `.top-bar` around the whole page) sits at the very top
     with the upload control pinned to its right; the P&L header sits directly under the
-    tab bar, on every tab. Below that, all four tab bodies live in one always-present
+    tab bar, on every tab. Below that, all three tab bodies live in one always-present
     `html.Div(id="tab-bodies")`, each wrapped in its own `html.Div(id=f"tab-body-{slug}")`
     -- bodies never leave the layout, so every tab's own callbacks (registered against
     ids inside their body) keep firing regardless of which tab is selected. One
-    show/hide callback (registered in `create_app`) toggles the four bodies' `style` on
+    show/hide callback (registered in `create_app`) toggles the three bodies' `style` on
     `main-tabs`' `value`.
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
@@ -202,15 +202,6 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     resolved = Path(db_path) if db_path is not None else get_db_path()
     ensure_schema(resolved)
     data = load_summary(resolved)
-    # suppress_callback_exceptions: the Blotter sub-tabs render their tables, filter
-    # dropdowns and row-detail panels dynamically inside the `_update` callback's own
-    # Output (blotter.CONTENT_ID children), not in the static app.layout tree -- Dash's
-    # default id validation rejects callbacks whose Input/Output/State ids aren't present
-    # in the initial layout, which silently no-ops every filter dropdown, the row-click
-    # detail panel and the P&L strip on every Blotter sub-tab (found 2026-09-16: the
-    # filter callback logic itself was correct when called directly in Python, but never
-    # fired in the browser because of this). See CLAUDE.md ownership: this is app-wide
-    # config, not a per-tab fix.
     # suppress_callback_exceptions: the Blotter sub-tabs render their tables, filter
     # dropdowns and row-detail panels dynamically inside the `_update` callback's own
     # Output (blotter.CONTENT_ID children), not in the static app.layout tree -- Dash's

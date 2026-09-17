@@ -494,12 +494,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                                             exposure_records=exposure_records)
             except ImportError as exc:
                 exposure = message_box(f"Exposure ladder not available ({exc}).")
-            try:
-                reconciliation = reconciliation_panel(conn, as_of_date)
-            except Exception as exc:
-                # Never let the reconciliation panel take down the whole ladder render --
-                # it is a diagnostic add-on to the ladder, not load-bearing for it.
-                reconciliation = message_box(f"EOD reconciliation not available ({exc}).")
         finally:
             conn.close()
-        return html.Div([exposure, reconciliation])
+        # `reconciliation_panel` (blotter vs BNP EOD check) is no longer rendered: BNP was
+        # removed as an input on 2026-09-17, so the panel could only ever say "no BNP
+        # snapshot loaded yet". The function is kept (tests, and a future second source).
+        return html.Div([exposure])

@@ -90,10 +90,10 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
     (Business252 on the pair's joint settlement calendar,
     `options_calc.fx.calendars.joint_calendar`) and `spot_date` (correct spot lag,
     T+1 for USD/CAD). `pricer.py`'s `price_fx_*` functions take an optional `pair`
-    (used by `store.py`'s dispatch, always) and `calendar_aware` (default True; the
-    plain Act/365 day count is now reached only via `pair=None`, the old signature every
-    pre-Phase-7 call site keeps using unchanged, or `calendar_aware=False` explicitly).
-    Non-G10 pairs fall back to plain days automatically.
+    (used by `store.py`'s dispatch, always) for the delta convention. REVISED
+    2026-09-17: T is always the plain Act/365 calendar-day count again; the
+    `calendar_aware` flag is accepted and ignored, because the vendored engine
+    re-quantises T to whole calendar days (see pricer.py::_resolve_T).
   - `delta_convention` / `DELTA_PA` (Phase 7): `OptionPriceResult` now carries
     `delta_premium_adjusted` (always) and `delta_convention` ('RAW' | 'PREMIUM_ADJUSTED'
     for a recognized G10 pair via `options_calc.fx.g10.recommended_delta`'s underlying
