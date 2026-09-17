@@ -1,166 +1,47 @@
-"""Aggregate Excel row P&L, preserving missing values and its daily formulas."""
+"""Re-exports engine/pnl/calendar.py's business-day helpers under this module's old
+name, for backward compatibility with existing callers.
+
+Until 2026-09-17 this module also held the retired workbook-arithmetic aggregation
+layer (`aggregate_by_pair`, `book_totals`, `_ltd_total`, `period_pnl`), which called
+`engine/pnl/pnl.py` (the retired workbook row arithmetic). Both were deleted the same
+day as `pnl.py` itself ("no bnp fall back", docs/bnp-excel-removal.md) -- this module
+now holds nothing but the calendar re-export. The calendar helpers
+(`load_holidays`, `_is_business_day`, `_prev_business_day`, `_n_business_days_back`,
+`_last_business_day_of_prev_month`, `_last_business_day_of_prev_year`, and the
+`_NO_HOLIDAYS`/`_DEFAULT_HOLIDAYS_PATH`/`_read_holidays_cached` internals) themselves
+moved to `engine/pnl/calendar.py` on 2026-09-17, since they are load-bearing for the
+*live* P&L path (`engine.pnl.valuation.value_book`, `engine.pnl.ledger`,
+`engine.pnl.fx_blotter`, `data.bloomberg.backfill`, `ui.tabs.header`) and must not share
+a file with (or transitively import) workbook-only arithmetic. Re-exported below
+(`from engine.pnl.calendar import *`, spelled out explicitly) so every existing
+`from engine.pnl.aggregate import load_holidays` (or any other calendar name) caller
+keeps working unchanged; new code should import `engine.pnl.calendar` directly."""
 from __future__ import annotations
 
-import datetime as dt
-import sqlite3
 from pathlib import Path
-from typing import FrozenSet, Optional, Union
+from typing import Optional, Union
 
-import numpy as np
-import pandas as pd
+from engine.pnl import calendar as _calendar
+from engine.pnl.calendar import (  # noqa: F401 -- re-exported for existing callers, see module docstring
+    _NO_HOLIDAYS, _is_business_day, _last_business_day_of_prev_month,
+    _last_business_day_of_prev_year, _n_business_days_back, _prev_business_day,
+    _read_holidays_cached,
+)
 
-from engine.pnl.pnl import ltd_per_trade, workbook_valuation_date
-
-BY_PAIR_COLUMNS = ["instrument_id", "usd_notional", "ltd_usd", "n_trades"]
-
-_DEFAULT_HOLIDAYS_PATH = Path(__file__).resolve().parents[2] / "config" / "holidays.txt"
-
-
-def load_holidays(path: Optional[Union[str, Path]] = None) -> FrozenSet[str]:
-    """ISO dates (one per line, '#' comments and blank lines ignored) from
-    config/holidays.txt. Missing file -> empty set (Mon-Fri only), never an error.
-    `path=None` re-reads the module-level default each call, so tests can monkeypatch
-    `_DEFAULT_HOLIDAYS_PATH` instead of a bound default argument."""
-    p = Path(path) if path is not None else _DEFAULT_HOLIDAYS_PATH
-    if not p.exists():
-        return frozenset()
-    lines = (line.strip() for line in p.read_text().splitlines())
-    return frozenset(line for line in lines if line and not line.startswith("#"))
+# Kept as this module's OWN copy, not a re-export of engine.pnl.calendar's:
+# tests/test_ledger.py monkeypatches `engine.pnl.aggregate._DEFAULT_HOLIDAYS_PATH` -- a
+# bare re-export would leave that patch pointing at a name nothing reads any more, since
+# `load_holidays`'s code would still resolve its default from `engine.pnl.calendar`'s
+# own module globals regardless of what `aggregate.py`'s copy of the name was set to.
+# The thin `load_holidays` wrapper below reads THIS copy, so the existing monkeypatch
+# target keeps working unchanged.
+_DEFAULT_HOLIDAYS_PATH = _calendar._DEFAULT_HOLIDAYS_PATH
 
 
-def aggregate_by_pair(per_trade: pd.DataFrame, conn: sqlite3.Connection) -> pd.DataFrame:
-    """Collapse a ``ltd_per_trade`` output to one row per instrument_id.
-
-    usd_notional: signed USD notional in the xlsx display convention -- per trade, sign
-    = sign of trades.quantity (direction of the base currency), magnitude = |USD leg
-    amount| taken from trade_legs (the leg whose ccy = 'USD'), then summed over the
-    trades present in ``per_trade`` for that instrument_id. This is independent of
-    pnl_usd's workbook denominator.
-    ltd_usd: sum of pnl_usd. n_trades: row count. Both per instrument_id.
-    """
-    if per_trade.empty:
-        return pd.DataFrame(columns=BY_PAIR_COLUMNS)
-
-    trade_ids = per_trade["trade_id"].tolist()
-    placeholders = ",".join("?" for _ in trade_ids)
-    legs = pd.read_sql_query(
-        f"SELECT trade_id, amount FROM trade_legs "
-        f"WHERE ccy = 'USD' AND trade_id IN ({placeholders})",
-        conn, params=trade_ids,
-    )
-    usd_leg_abs = legs.groupby("trade_id")["amount"].sum().abs().rename("usd_leg_abs")
-
-    df = per_trade.merge(usd_leg_abs, on="trade_id", how="left")
-    df["signed_usd"] = np.sign(df["quantity"]) * df["usd_leg_abs"]
-
-    out = (
-        df.groupby("instrument_id")
-        .agg(
-            usd_notional=("signed_usd", lambda values: values.sum(skipna=False)),
-            ltd_usd=("pnl_usd", lambda values: values.sum(skipna=False)),
-            n_trades=("trade_id", "count"),
-        )
-        .reset_index()
-    )
-    return out[BY_PAIR_COLUMNS]
-
-
-def book_totals(by_pair: pd.DataFrame, conn: sqlite3.Connection) -> dict:
-    """Portfolio B3/B4 require its manual option adjustments and row-specific inputs.
-
-    Do not substitute generic FX-only sums for the workbook's Net/Gross formulas.
-    """
-    return {"net_usd": float("nan"), "gross_usd": float("nan"),
-            "gold_usd": float("nan"), "futures_usd": float("nan"),
-            "status": "Portfolio totals unavailable: the workbook's manual option-delta adjustments, IRS/options inputs and complete futures fills are not loaded. No generic total is substituted."}
-
-
-# --------------------------------------------------------------------- business calendar
-# Plain Monday-Friday weekday calendar. No holiday calendar is wired up yet (open item);
-# reference dates below will be wrong around holidays until one lands.
-
-_NO_HOLIDAYS: FrozenSet[str] = frozenset()
-
-
-def _is_business_day(d: dt.date, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> bool:
-    return d.weekday() < 5 and d.isoformat() not in holidays
-
-
-def _prev_business_day(d: dt.date, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dt.date:
-    d -= dt.timedelta(days=1)
-    while not _is_business_day(d, holidays):
-        d -= dt.timedelta(days=1)
-    return d
-
-
-def _n_business_days_back(d: dt.date, n: int, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dt.date:
-    for _ in range(n):
-        d = _prev_business_day(d, holidays)
-    return d
-
-
-def _last_business_day_of_prev_month(d: dt.date, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dt.date:
-    last_day_prev_month = d.replace(day=1) - dt.timedelta(days=1)
-    while not _is_business_day(last_day_prev_month, holidays):
-        last_day_prev_month -= dt.timedelta(days=1)
-    return last_day_prev_month
-
-
-def _last_business_day_of_prev_year(d: dt.date, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dt.date:
-    last_day = dt.date(d.year - 1, 12, 31)
-    while not _is_business_day(last_day, holidays):
-        last_day -= dt.timedelta(days=1)
-    return last_day
-
-
-def _ltd_total(conn: sqlite3.Connection, date_str: str, source: Optional[str]) -> float:
-    """Sum of pnl_usd from ltd_per_trade(strict=False) on date_str; NaN if there are no
-    open trades on that date, or if any trade's pnl_usd is NaN (a missing outright or
-    a missing quote-to-USD conversion)."""
-    out = ltd_per_trade(conn, date_str, source=source, strict=False)
-    if out.empty:
-        return float("nan")
-    return float(out["pnl_usd"].sum(skipna=False))
-
-
-def period_pnl(conn: sqlite3.Connection, as_of_date: str, source: Optional[str] = None) -> dict:
-    """All FX trades M2:M8, including the K-column historical denominator.
-
-    5d/MTD/YTD are unavailable: this workbook has no equivalent formulas for them.
-    Every historical mark uses today's shared forward maturity, as the sheet does.
-    """
-    as_of = dt.date.fromisoformat(as_of_date)
-    previous = _prev_business_day(as_of).isoformat()
-    previous2 = _prev_business_day(dt.date.fromisoformat(previous)).isoformat()
-    maturity = workbook_valuation_date(as_of_date)
-    today = ltd_per_trade(conn, as_of_date, source, strict=False, valuation_date=maturity)
-    yesterday = ltd_per_trade(conn, previous, source, strict=False, valuation_date=maturity)
-    before = ltd_per_trade(conn, previous2, source, strict=False, valuation_date=maturity,
-                           denominator_as_of=previous)
-    # N17=O17: the workbook reuses today's BRL rate in yesterday's column.
-    brl_current = today[today["instrument_id"] == "USDBRL"].set_index("trade_id")
-    from engine.pnl.pnl import workbook_fx_pnl
-    for frame, is_before in [(yesterday, False), (before, True)]:
-        for idx, row in frame[frame["instrument_id"] == "USDBRL"].iterrows():
-            rate = brl_current.loc[row["trade_id"], "mark"] if row["trade_id"] in brl_current.index else float("nan")
-            frame.at[idx, "pnl_usd"] = workbook_fx_pnl(row["instrument_id"], row["workbook_quantity"],
-                row["fill"], row["mark"] if is_before else rate, rate)
-
-    def total(frame):
-        return float(frame["pnl_usd"].sum(skipna=False))
-
-    def trading(frame, date):
-        return float(frame.loc[frame["trade_date"] == date, "pnl_usd"].sum(skipna=False))
-
-    ltd, ltd1, ltd2 = total(today), total(yesterday), total(before)
-    if today.empty:
-        ltd = float('nan')
-    return {"as_of_date": as_of_date, "valuation_date": maturity, "ltd": ltd,
-            "daily_ref_date": previous, "daily": ltd - ltd1,
-            "previous_daily": ltd1 - ltd2, "previous2_ref_date": previous2,
-            "trading": trading(today, as_of_date), "trading_previous": trading(yesterday, previous),
-            "trading_previous2": trading(before, previous2),
-            "d5": float("nan"), "mtd": float("nan"), "ytd": float("nan"),
-            "d5_ref_date": _n_business_days_back(as_of, 5).isoformat(),
-            "mtd_ref_date": _last_business_day_of_prev_month(as_of).isoformat(),
-            "ytd_ref_date": _last_business_day_of_prev_year(as_of).isoformat()}
+def load_holidays(path: Optional[Union[str, Path]] = None):
+    """Thin wrapper over `engine.pnl.calendar.load_holidays` that resolves the default
+    path from *this module's* `_DEFAULT_HOLIDAYS_PATH` rather than calendar.py's own,
+    for the backward-compatibility reason in the comment above. New code should import
+    `engine.pnl.calendar.load_holidays` directly (and monkeypatch
+    `engine.pnl.calendar._DEFAULT_HOLIDAYS_PATH` in tests) instead of this module."""
+    return _calendar.load_holidays(path if path is not None else _DEFAULT_HOLIDAYS_PATH)

@@ -1,9 +1,22 @@
 """Layer 2 valuation: one row per trade, at one date's marks. docs/BUILD_PLAN.md section 2.
 
-`value_book(conn, as_of, marks_source=None)` is the headline calculation: FX (spot,
-forward, swap legs -- all stored as ordinary 2-leg FX trades, see the swap packaging
-note below) and futures, each valued fresh from `marks_official` (or from
-`marks` filtered to `marks_source` when given).
+`value_book(conn, as_of)` is the headline calculation: FX (spot, forward, swap legs --
+all stored as ordinary 2-leg FX trades, see the swap packaging note below) and futures,
+each valued fresh from `marks_official`. A missing official mark gives NaN and a
+`reason`; it is never substituted from anywhere else.
+
+2026-09-17 user decision, "no bnp fall back - that excel and everything linked to it
+need to go" (`docs/bnp-excel-removal.md`): this module used to accept a `marks_source`
+parameter (on `value_book`, `usd_per_quote`, `_mark_at`, and threaded through every
+row-builder helper) that could retry a row with no official mark against an explicit
+non-official source (BNP_BVAL, i.e. reading `marks` directly). That fallback mechanism
+was deleted 2026-09-17 morning, leaving `marks_source` accepted-and-ignored everywhere
+so not-yet-updated callers would not crash; now that every caller across the repo has
+been checked (none pass a non-default value -- see git history for the full audit),
+the parameter itself is removed outright from every function in this module,
+`engine/pnl/ledger.py`'s `ltd`/`period_pnl`/`period_pnl_by`, and the `_mark_at` call in
+`engine/ladder/futures_delta.py`. Every lookup goes through `marks_official`,
+unconditionally -- there is no longer even a vestigial parameter suggesting otherwise.
 
 Settled trades are never recomputed: their row is read back from `realised_pnl`
 (engine/pnl/ledger.realise_settled must have populated it first; a settled trade with
@@ -42,7 +55,7 @@ from typing import Optional
 
 import pandas as pd
 
-from engine.pnl.aggregate import _is_business_day, load_holidays
+from engine.pnl.calendar import _is_business_day, load_holidays
 
 COLUMNS = [
     "trade_id", "instrument_id", "product", "strategy", "theme", "trade_date",
@@ -56,10 +69,18 @@ FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")
 _NAN = float("nan")
 
 
-def _business_days_between(start: dt.date, end: dt.date, holidays) -> int:
+def _business_days_between(start: dt.date, end: dt.date, holidays, cap: Optional[int] = None) -> int:
     """Count business days strictly after `start` up to and including `end` (0 if
     `end <= start`). Used only to relabel a near-dated FX_FWD as "FX_SPOT" for display
-    (user decision 2026-09-15, item 2); storage/product in `trades` is unchanged."""
+    (user decision 2026-09-15, item 2); storage/product in `trades` is unchanged.
+
+    `cap` (2026-09-17, complaint B perf): `_reported_product` only ever needs to know
+    "<=2 or not" -- the exact count for a many-month-dated forward was previously
+    walked day by day regardless (profiled at ~150k `_is_business_day` calls / 0.3s for
+    a 772-row book, the single largest cost in `value_book` after the SQL itself), so
+    once the running count exceeds `cap` this returns immediately with whatever count
+    it has reached so far (not the true total -- callers that pass `cap` must only ever
+    compare the result against values `<= cap`, never rely on the exact figure)."""
     if end <= start:
         return 0
     count = 0
@@ -68,6 +89,8 @@ def _business_days_between(start: dt.date, end: dt.date, holidays) -> int:
         d += dt.timedelta(days=1)
         if _is_business_day(d, holidays):
             count += 1
+            if cap is not None and count > cap:
+                return count
     return count
 
 
@@ -80,7 +103,7 @@ def _reported_product(product: str, trade_date: str, settle_date: str, holidays)
         return product
     d0 = dt.date.fromisoformat(trade_date)
     d1 = dt.date.fromisoformat(settle_date)
-    if _business_days_between(d0, d1, holidays) <= 2:
+    if _business_days_between(d0, d1, holidays, cap=2) <= 2:
         return "FX_SPOT"
     return product
 
@@ -131,54 +154,38 @@ def _opt_sql(theme: bool) -> str:
     """
 
 
-def _mark_table(source: Optional[str]) -> str:
-    return "marks_official" if source is None else "marks"
-
-
 def _mark_at(conn: sqlite3.Connection, instrument_id: str, settle_date: str, mark_type: str,
-             as_of: str, source: Optional[str]) -> Optional[tuple]:
-    """(value, source) of the mark for `settle_date`, or None.
-
-    Official marks (source None) must be dated exactly `as_of`. An explicit non-official
-    source (the BNP file fallback) uses the latest mark dated on or before `as_of`: the
-    BNP file is a T-1 snapshot and is the only price on a PC without Bloomberg, so a
-    stale-but-labelled value beats a blank (user decision 2026-09-15)."""
+             as_of: str) -> Optional[tuple]:
+    """(value, source) of the *official* mark for `settle_date`, dated exactly `as_of`,
+    or None. Always reads `marks_official`; there is no non-official fallback (2026-09-17
+    user decision, "no bnp fall back" -- see module docstring)."""
     cache = getattr(conn, "official_marks", None)
-    if source is None and cache is not None and conn.as_of == as_of:
+    if cache is not None and conn.as_of == as_of:
         return cache.get((instrument_id, settle_date, mark_type))
-    table = _mark_table(source)
-    if source is None:
-        where, order = "as_of_date = :d", "snapped_at DESC"
-    else:
-        where, order = "as_of_date <= :d AND source = :source", "as_of_date DESC, snapped_at DESC"
-    # A SPOT mark's settle_date is its own as_of_date, so a stale fallback SPOT is
-    # matched on that identity rather than on the requested date.
-    settle_clause = "settle_date = as_of_date" if (source is not None and mark_type == "SPOT") else "settle_date = :s"
     row = conn.execute(
-        f"SELECT value, source, snapped_at FROM {table} WHERE instrument_id = :i AND {settle_clause} "
-        f"AND mark_type = :m AND {where} ORDER BY {order} LIMIT 1",
-        {"i": instrument_id, "s": settle_date, "m": mark_type, "d": as_of, "source": source},
+        "SELECT value, source, snapped_at FROM marks_official WHERE instrument_id = :i "
+        "AND settle_date = :s AND mark_type = :m AND as_of_date = :d ORDER BY snapped_at DESC LIMIT 1",
+        {"i": instrument_id, "s": settle_date, "m": mark_type, "d": as_of},
     ).fetchone()
     return None if row is None else (row[0], row[1])
 
 
-def usd_per_quote(conn: sqlite3.Connection, quote_ccy: str, as_of: str,
-                   source: Optional[str] = None) -> tuple:
+def usd_per_quote(conn: sqlite3.Connection, quote_ccy: str, as_of: str) -> tuple:
     """(S, pair, mark_source) converting 1 unit of quote_ccy to USD at spot on `as_of`.
     Never invents a USD leg for a cross: tries USD<quote> (inverted) then <quote>USD."""
     if quote_ccy == "USD":
         return 1.0, "USD", "identity"
     memo = getattr(conn, "usd_memo", None)
-    key = (quote_ccy, as_of, source)
+    key = (quote_ccy, as_of)
     if memo is not None and key in memo:
         return memo[key]
     inv_pair = f"USD{quote_ccy}"
-    hit = _mark_at(conn, inv_pair, as_of, "SPOT", as_of, source)
+    hit = _mark_at(conn, inv_pair, as_of, "SPOT", as_of)
     if hit is not None and hit[0]:
         out = (1.0 / float(hit[0]), inv_pair, hit[1])
     else:
         direct_pair = f"{quote_ccy}USD"
-        hit = _mark_at(conn, direct_pair, as_of, "SPOT", as_of, source)
+        hit = _mark_at(conn, direct_pair, as_of, "SPOT", as_of)
         out = (float(hit[0]), direct_pair, hit[1]) if hit is not None else (_NAN, None, None)
     if memo is not None:
         memo[key] = out
@@ -196,15 +203,18 @@ def _realised_row(conn: sqlite3.Connection, trade_id: str) -> Optional[pd.Series
 class _BookConn:
     """The connection value_book hands to its row builders: the real connection plus
     everything they would otherwise fetch with one query per trade, loaded once per
-    call (2026-09-17: 772 trades x 5 header dates took 4 s; now well under 1 s).
+    call (2026-09-17: 772 trades x 5 header dates took 4 s; now well under 1 s -- see
+    also the 2026-09-17 "no bnp fall back" change, which deleted a *second* one-query-
+    per-row path this class used to preload for; see git history / this module's
+    docstring if that preload is ever needed again).
       official_marks -- every marks_official row dated `as_of`, keyed
                         (instrument_id, settle_date, mark_type) -> (value, source),
                         newest snapped_at winning, exactly what _mark_at returns
       realised       -- realised_pnl rows keyed by trade_id
       usd_memo       -- usd_per_quote results for this call
       last_memo      -- _last_official_on_or_before results for this call
-    `execute` delegates, so helpers that need an ad-hoc query (the fallback-source
-    path, _frozen_row's look-back) still work unchanged."""
+    `execute` delegates, so helpers that need an ad-hoc query (_frozen_row's historical
+    look-back) still work unchanged."""
 
     def __init__(self, conn: sqlite3.Connection, as_of: str):
         self.conn, self.as_of = conn, as_of
@@ -214,6 +224,7 @@ class _BookConn:
                 "WHERE as_of_date = ? ORDER BY snapped_at", (as_of,)):
             marks[(inst, settle, mt)] = (value, source)
         self.official_marks = marks
+
         df = pd.read_sql_query("SELECT * FROM realised_pnl", conn)
         self.realised = {row["trade_id"]: row for _, row in df.iterrows()} if not df.empty else {}
         self.usd_memo, self.last_memo = {}, {}
@@ -222,8 +233,9 @@ class _BookConn:
         return self.conn.execute(*args, **kwargs)
 
 
-def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str] = None) -> pd.DataFrame:
-    """One row per trade at `as_of`'s marks. See module docstring and BUILD_PLAN section 2."""
+def value_book(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
+    """One row per trade at `as_of`'s marks. See module docstring and BUILD_PLAN section 2.
+    Every mark this function reads comes from `marks_official`, always."""
     rows = []
     theme = _has_theme_column(conn)
     holidays = load_holidays()
@@ -243,9 +255,9 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
             "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
         }
         if status == "SETTLED":
-            rows.append({**base, **_settled_fx_row(conn, r, as_of, marks_source)})
+            rows.append({**base, **_settled_fx_row(conn, r, as_of)})
             continue
-        rows.append({**base, **_open_fx_row(conn, r, as_of, marks_source)})
+        rows.append({**base, **_open_fx_row(conn, r, as_of)})
 
     for r in fut.itertuples(index=False):
         status = "SETTLED" if r.settle_date < as_of else "OPEN"
@@ -255,9 +267,9 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
             "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
         }
         if status == "SETTLED":
-            rows.append({**base, **_settled_future_row(conn, r, as_of, marks_source)})
+            rows.append({**base, **_settled_future_row(conn, r, as_of)})
             continue
-        rows.append({**base, **_open_future_row(conn, r, as_of, marks_source)})
+        rows.append({**base, **_open_future_row(conn, r, as_of)})
 
     for r in irs.itertuples(index=False):
         status = "SETTLED" if r.settle_date < as_of else "OPEN"
@@ -267,9 +279,9 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
             "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
         }
         if status == "SETTLED":
-            rows.append({**base, **_settled_irs_row(conn, r, as_of, marks_source)})
+            rows.append({**base, **_settled_irs_row(conn, r, as_of)})
             continue
-        rows.append({**base, **_open_irs_row(conn, r, as_of, marks_source)})
+        rows.append({**base, **_open_irs_row(conn, r, as_of)})
 
     for r in opt.itertuples(index=False):
         status = "SETTLED" if r.settle_date < as_of else "OPEN"
@@ -279,25 +291,25 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
             "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
         }
         if status == "SETTLED":
-            rows.append({**base, **_settled_option_row(conn, r, as_of, marks_source)})
+            rows.append({**base, **_settled_option_row(conn, r, as_of)})
             continue
-        rows.append({**base, **_open_option_row(conn, r, as_of, marks_source)})
+        rows.append({**base, **_open_option_row(conn, r, as_of)})
 
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
-def _open_fx_row(conn, r, as_of, marks_source) -> dict:
+def _open_fx_row(conn, r, as_of) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="", note="")
-    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of, marks_source)
+    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
     if m_hit is None:
         out["reason"] = f"no FWD_OUTRIGHT mark for {r.instrument_id} settle {r.settle_date} on {as_of}"
         return out
     m, m_src = float(m_hit[0]), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
-    s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, as_of, marks_source)
+    s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, as_of)
     if s != s or s_pair is None:
         out["spot_source"] = ""
         out["reason"] = f"no SPOT for USD conversion of {r.quote_ccy} on {as_of}"
@@ -306,7 +318,7 @@ def _open_fx_row(conn, r, as_of, marks_source) -> dict:
     pnl_local = r.quantity * (m - r.fill)
     pnl_usd = pnl_local * s
     out["pnl_local"], out["pnl_usd"] = pnl_local, pnl_usd
-    spot_hit = _mark_at(conn, r.instrument_id, as_of, "SPOT", as_of, marks_source)
+    spot_hit = _mark_at(conn, r.instrument_id, as_of, "SPOT", as_of)
     if spot_hit is None:
         out["pnl_spot_usd"], out["pnl_carry_usd"] = pnl_usd, 0.0
         out["note"] = f"no SPOT for {r.instrument_id} on {as_of}; carry split unavailable"
@@ -400,45 +412,39 @@ def _frozen_row(conn, r) -> Optional[dict]:
                 note=f"frozen at {mark_label}{when}; not yet recorded in realised_pnl")
 
 
-def _provisional(conn, r, as_of, marks_source, open_row_fn) -> dict:
-    """A settled trade with no frozen result yet. With official marks only, it is valued
-    at the last official mark on or before settlement (`_frozen_row`, the same figure
-    realise_settled will persist), and Unavailable when that mark is not on file. With
-    an explicit fallback source it is valued like an open row at that source's latest
-    mark for its settle date and flagged provisional, so a PC without Bloomberg still
-    shows a total. The realised table is never written here; realise_settled does that
-    properly later."""
+def _provisional(conn, r, as_of) -> dict:
+    """A settled trade with no frozen result yet: valued at the last official mark on
+    or before settlement (`_frozen_row`, the same figure `realise_settled` will
+    persist), Unavailable when that mark is not on file. The realised table is never
+    written here; `realise_settled` does that properly later. A settled trade with no
+    frozen result and no official mark on or before its settlement is simply
+    Unavailable, never a provisional value from a fallback source (2026-09-17 user
+    decision, "no bnp fall back" -- see module docstring)."""
     trade_id = r.trade_id
-    if marks_source is None:
-        frozen = _frozen_row(conn, r)
-        if frozen is not None:
-            return frozen
-        return dict(mark=_NAN, mark_date="", mark_source="", spot=_NAN, spot_source="",
-                    pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN,
-                    reason=f"settled trade {trade_id}: no official mark on or before its settlement "
-                           f"{r.settle_date}, so it cannot be frozen")
-    out = open_row_fn(conn, r, as_of, marks_source)
-    if not out.get("reason"):
-        out["note"] = (f"settled {r.settle_date}, not yet realised; provisional value from "
-                       f"{marks_source} marks, not the settlement-day rate")
-    return out
+    frozen = _frozen_row(conn, r)
+    if frozen is not None:
+        return frozen
+    return dict(mark=_NAN, mark_date="", mark_source="", spot=_NAN, spot_source="",
+                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN,
+                reason=f"settled trade {trade_id}: no official mark on or before its settlement "
+                       f"{r.settle_date}, so it cannot be frozen")
 
 
-def _settled_fx_row(conn, r, as_of, marks_source) -> dict:
+def _settled_fx_row(conn, r, as_of) -> dict:
     trade_id = r.trade_id
     row = _realised_row(conn, trade_id)
     if row is None:
-        return _provisional(conn, r, as_of, marks_source, _open_fx_row)
+        return _provisional(conn, r, as_of)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=row["spot_usd_per_local"], spot_source=row["spot_source"],
                 pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]), pnl_spot_usd=float(row["pnl_usd"]),
                 pnl_carry_usd=0.0, reason="", note=row["note"])
 
 
-def _open_future_row(conn, r, as_of, marks_source) -> dict:
+def _open_future_row(conn, r, as_of) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=1.0, spot_source="identity",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
-    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FUTURE_PX", as_of, marks_source)
+    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FUTURE_PX", as_of)
     if m_hit is None:
         out["reason"] = f"no FUTURE_PX mark for {r.instrument_id} expiry {r.settle_date} on {as_of}"
         return out
@@ -449,26 +455,26 @@ def _open_future_row(conn, r, as_of, marks_source) -> dict:
     return out
 
 
-def _settled_future_row(conn, r, as_of, marks_source) -> dict:
+def _settled_future_row(conn, r, as_of) -> dict:
     trade_id = r.trade_id
     row = _realised_row(conn, trade_id)
     if row is None:
-        return _provisional(conn, r, as_of, marks_source, _open_future_row)
+        return _provisional(conn, r, as_of)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]),
                 pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason="", note=row["note"])
 
 
 # --------------------------------------------------------------------------- IRS
-def _open_irs_row(conn, r, as_of, marks_source) -> dict:
+def _open_irs_row(conn, r, as_of) -> dict:
     """PV_USD + CASHFLOW_USD at the swap's maturity date on `as_of` (module docstring)."""
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=1.0, spot_source="identity",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
-    pv_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PV_USD", as_of, marks_source)
+    pv_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PV_USD", as_of)
     if pv_hit is None:
         out["reason"] = f"no PV_USD mark for {r.instrument_id} maturity {r.settle_date} on {as_of}"
         return out
-    cf_hit = _mark_at(conn, r.instrument_id, r.settle_date, "CASHFLOW_USD", as_of, marks_source)
+    cf_hit = _mark_at(conn, r.instrument_id, r.settle_date, "CASHFLOW_USD", as_of)
     if cf_hit is None:
         out["reason"] = f"no CASHFLOW_USD mark for {r.instrument_id} maturity {r.settle_date} on {as_of}"
         return out
@@ -481,27 +487,27 @@ def _open_irs_row(conn, r, as_of, marks_source) -> dict:
     return out
 
 
-def _settled_irs_row(conn, r, as_of, marks_source) -> dict:
+def _settled_irs_row(conn, r, as_of) -> dict:
     row = _realised_row(conn, r.trade_id)
     if row is None:
-        return _provisional(conn, r, as_of, marks_source, _open_irs_row)
+        return _provisional(conn, r, as_of)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]),
                 pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason="", note=row["note"])
 
 
 # --------------------------------------------------------------------------- FX options
-def _open_option_row(conn, r, as_of, marks_source) -> dict:
+def _open_option_row(conn, r, as_of) -> dict:
     """quantity * (PREMIUM - fill) in base currency, converted to USD at spot."""
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
-    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PREMIUM", as_of, marks_source)
+    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PREMIUM", as_of)
     if m_hit is None:
         out["reason"] = f"no PREMIUM mark for {r.instrument_id} expiry {r.settle_date} on {as_of}"
         return out
     m, m_src = float(m_hit[0]), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
-    s, s_pair, s_src = usd_per_quote(conn, r.base_ccy, as_of, marks_source)
+    s, s_pair, s_src = usd_per_quote(conn, r.base_ccy, as_of)
     if s != s or s_pair is None:
         out["reason"] = f"no SPOT for USD conversion of {r.base_ccy} on {as_of}"
         return out
@@ -512,10 +518,10 @@ def _open_option_row(conn, r, as_of, marks_source) -> dict:
     return out
 
 
-def _settled_option_row(conn, r, as_of, marks_source) -> dict:
+def _settled_option_row(conn, r, as_of) -> dict:
     row = _realised_row(conn, r.trade_id)
     if row is None:
-        return _provisional(conn, r, as_of, marks_source, _open_option_row)
+        return _provisional(conn, r, as_of)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=row["spot_usd_per_local"], spot_source=row["spot_source"],
                 pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]), pnl_spot_usd=float(row["pnl_usd"]),

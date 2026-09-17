@@ -16,9 +16,24 @@ Design choices (no one to ask, so noted here):
     walk is not reusable as a list, so the chart instead re-derives a simple list of the
     last N calendar days (default 20) ending at `as_of` and calls `ltd` once per day.
     This is O(N) value_book evaluations; fine for a header chart, not for a hot path.
-  - Unavailable periods (NaN) render as the literal string "Unavailable" with the
-    engine's `reason` as a tooltip-less caption underneath the figure, per CLAUDE.md
+  - Unavailable periods (NaN) keep the muted "n/a" value (existing behaviour/tests),
+    but the engine's `reason` is now also a **visible** caption under the figure, not
+    only an HTML `title` tooltip -- a hover-only reason is invisible on first glance,
+    which is exactly what the user reported as "the headline ... doesn't work" for a
+    Bloomberg-less database (2026-09-17 investigation: every figure was in fact
+    computing correctly and showing a reason, but only on hover). Per CLAUDE.md
     ("Unavailable shows its reason in place").
+  - The generic engine-level reasons ("today's LTD unavailable", "LTD on <date>
+    unavailable") name a blocking date but not *why* that date has no LTD. `_resolve_reason`
+    turns that into a concrete, actionable sentence -- which mark_type is missing, how
+    many, and "run the Bloomberg pull" -- built from `data.bloomberg.inventory.
+    mark_inventory` (a cheap, DB-only read: no Bloomberg connection is opened here).
+    When nothing is missing (the gap is something else, e.g. an unrealisable settled
+    trade), the engine's own reason passes through unchanged.
+  - Net/Gross USD delta and the "Trades" count need no marks at all (CLAUDE.md: Net/
+    Gross USD notional is computable from trade legs and spot alone), so they are
+    always shown, even on a database with zero official marks -- this is the
+    "figure that IS computable" half of the same fix.
   - `as_of` with no date picked yet renders "No as-of date available." and skips all
     engine calls.
 """
@@ -26,6 +41,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import sqlite3
 from functools import lru_cache
 from typing import Callable, Optional
@@ -80,13 +96,20 @@ def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
     addition 2026-09-15, header compaction): bold value, green/red/white by sign when
     `colour` (True for every signed P&L figure and Net; False for Gross, which is
     always neutral per the user's decision), "n/a" muted with the reason as an HTML
-    `title` tooltip when unavailable -- never a blank cell."""
+    `title` tooltip when unavailable -- never a blank cell. The reason is also rendered
+    as a plain, always-visible caption line underneath (2026-09-17: a hover-only tooltip
+    was reported as the headline figures "not working" -- they were computing correctly,
+    the explanation was just invisible until the mouse found it)."""
     if not entry.get("available"):
-        return html.Div(className="header-figure", children=[
+        reason = entry.get("reason", "")
+        children = [
             html.Div(title, className="header-figure-title"),
             html.Div("n/a", className="header-figure-value header-figure-value--muted",
-                     title=entry.get("reason", "")),
-        ])
+                     title=reason),
+        ]
+        if reason:
+            children.append(html.Div(reason, className="header-figure-caption header-figure-caption--reason"))
+        return html.Div(className="header-figure", children=children)
     value = entry["value"]
     cls = _sign_class(value) if colour else "neutral"
     return html.Div(className="header-figure", children=[
@@ -124,20 +147,81 @@ def layout() -> html.Div:
 # `_render_bbg_results`, and `run_bloomberg_diagnostics_safe`.
 
 
+_LTD_ON_RE = re.compile(r"^LTD on (\d{4}-\d{2}-\d{2}) unavailable$")
+
+
+def _missing_marks_reason(conn: sqlite3.Connection, as_of: str) -> str:
+    """Plain-English, actionable reason for `as_of` built from `data.bloomberg.
+    inventory.mark_inventory` (a DB-only read -- it never opens a Bloomberg session,
+    so it is safe to call from a UI callback per CLAUDE.md/the perf rule against
+    synchronous Bloomberg probes on the request path): which mark_type(s) the book
+    needs but does not have an official mark for, and how many. Returns "" when the
+    book needs no marks at all, or needs marks and already has every one of them --
+    in either case the caller should keep the engine's own (more specific) reason
+    instead, e.g. "settled trade X: no official mark on or before its settlement"."""
+    try:
+        from data.bloomberg.inventory import mark_inventory, STATUS_OFFICIAL
+        df = mark_inventory(conn, as_of)
+    except Exception:
+        return ""
+    if df.empty:
+        return ""
+    not_official = df[df["status"] != STATUS_OFFICIAL]
+    if not_official.empty:
+        return ""
+    mark_types = "/".join(sorted(not_official["mark_type"].unique()))
+    return (f"no official {mark_types} for {as_of} "
+            f"({len(not_official)} of {len(df)} needed marks) — run the Bloomberg pull")
+
+
+def _resolve_reason(entry: dict, ltd_reason: str, missing_reason_for) -> str:
+    """Replace a generic cross-period reason ("today's LTD unavailable" / "LTD on
+    <date> unavailable") with the concrete `_missing_marks_reason` for whichever date
+    is actually blocking it, so every unavailable card explains itself without making
+    the user hover over LTD to find out why. `missing_reason_for(date)` is a callable
+    (usually `_missing_marks_reason` bound to `conn`) so this function stays easy to
+    unit test with a stub. Anything this cannot make more specific (e.g. the "a trade
+    dated today has no mark from any source" trading reason) passes through as-is."""
+    reason = entry.get("reason", "")
+    if reason == "today's LTD unavailable":
+        return ltd_reason or reason
+    m = _LTD_ON_RE.match(reason)
+    if m:
+        return missing_reason_for(m.group(1)) or reason
+    return reason
+
+
 def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
-    # Same pricing path as the Blotter: official marks first, BNP file rates as a
-    # labelled fallback, so the header shows numbers on a PC without Bloomberg.
+    # Same pricing path as the Blotter: official marks only (2026-09-17 user decision,
+    # "no bnp fall back" -- engine.pnl.valuation.value_book no longer has a BNP_BVAL
+    # retry pass at all, see that module's docstring; ui.tabs.blotter_pricing's second
+    # pass over the book is a no-op pending that module's own cleanup, so `df`/`n_total`
+    # below are still the right numbers to read, just never "fallback-priced" any more).
     from ui.tabs.blotter_pricing import priced_value_book, scoped_period_pnl
     from ui.tabs.cash_ladder import net_gross_usd
 
     periods = scoped_period_pnl(conn, as_of)
-    ltd_entry = periods.get("ltd", {})
-    _, n_fallback, n_total = priced_value_book(conn, as_of)
-    fallback_caption = f"{n_fallback} of {n_total} rows on BNP file rates, not Bloomberg" if n_fallback else ""
+    ltd_entry = dict(periods.get("ltd", {}))
+    if not ltd_entry.get("available"):
+        ltd_entry["reason"] = _missing_marks_reason(conn, as_of) or ltd_entry.get("reason", "")
+    df, _n_fallback, n_total = priced_value_book(conn, as_of)
 
     cards = [_pnl_card("LTD", ltd_entry)]
+    ltd_reason = ltd_entry.get("reason", "")
     for key in _PERIODS:
-        cards.append(_pnl_card(_PERIOD_TITLES[key], periods.get(key, {})))
+        entry = dict(periods.get(key, {}))
+        if not entry.get("available"):
+            entry["reason"] = _resolve_reason(entry, ltd_reason, lambda d: _missing_marks_reason(conn, d))
+        cards.append(_pnl_card(_PERIOD_TITLES[key], entry))
+
+    # Always computable, marks or no marks (CLAUDE.md: trade counts/positions need only
+    # the blotter, not a mark) -- so the header still shows *something* concrete on a
+    # database with zero official marks, per the 2026-09-17 investigation into "the
+    # headline doesn't work" (root cause was missing marks alone, not a callback bug;
+    # see module docstring).
+    n_open = int((df["status"] == "OPEN").sum()) if not df.empty else 0
+    n_settled = n_total - n_open
+    cards.append(_figure_card("Trades", f"{n_total:,}", f"{n_open:,} open, {n_settled:,} settled"))
 
     cards.append(_divider())
     ng = net_gross_usd(conn, as_of)
@@ -158,10 +242,10 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         cards.append(_pnl_card("Gross USD delta", {"available": False, "reason": reason}, colour=False))
 
     # No "As of" / "Last updated" cards: the as-of date is already in the tab's own
-    # title row (user decision 2026-09-15). The BNP-rates note sits at the right end
-    # of the same row (CSS margin-left:auto) so no card grows taller than the others.
-    if fallback_caption and ltd_entry.get("available"):
-        cards.append(html.Div(fallback_caption, className="header-note"))
+    # title row (user decision 2026-09-15). The "N rows on BNP file rates" note that
+    # used to sit here (CSS margin-left:auto) is retired along with the BNP_BVAL
+    # fallback pass itself (2026-09-17, "no bnp fall back") -- there is no other source
+    # a row can be priced from any more, so the note could only ever say "0 of N".
     return cards
 
 
@@ -188,10 +272,10 @@ def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> float:
 
 def _business_days_back(conn: sqlite3.Connection, as_of: str, n: int):
     """Up to `n` business days ending at `as_of` (inclusive), oldest first, skipping
-    weekends/holidays (engine.pnl.aggregate's own calendar) and never going earlier than
+    weekends/holidays (engine.pnl.calendar's own calendar) and never going earlier than
     the earliest trade_date on record (there is nothing to chart before the book
     existed, and it wastes an evaluation)."""
-    from engine.pnl.aggregate import _is_business_day, load_holidays
+    from engine.pnl.calendar import _is_business_day, load_holidays
 
     holidays = load_holidays()
     end = dt.date.fromisoformat(as_of)

@@ -53,9 +53,13 @@ def ensure_schema(path: Union[str, Path]) -> None:
     can launch with nothing copied across. Creates an EMPTY database with the schema
     when the file is absent (no trades, no marks: upload a trade file to fill it);
     on an existing database applies the idempotent DDL so additive tables exist.
-    Never alters existing tables or rows. `pnl_snapshots` is retired (docs/BUILD_PLAN.md
-    section 3): the schema no longer creates it, and this function does not check for
-    it. Writes an initial status file ("no pull has run yet") only when none exists."""
+    Never alters existing tables or rows, except for `data.ingest.schema.
+    purge_retired_sources` (2026-09-17, "no bnp fall back" -- docs/bnp-excel-removal.md),
+    which is itself idempotent and deletes only what the retired BNP parser/workbook
+    wrote (see that function's docstring) -- run once per startup, counts printed only
+    when non-zero. `pnl_snapshots` is retired (docs/BUILD_PLAN.md section 3): the
+    schema no longer creates it, and this function does not check for it. Writes an
+    initial status file ("no pull has run yet") only when none exists."""
     p = Path(path)
     try:
         from data.ingest import schema
@@ -64,6 +68,9 @@ def ensure_schema(path: Union[str, Path]) -> None:
         conn = sqlite3.connect(p)
         try:
             schema.create_schema(conn)
+            purged = schema.purge_retired_sources(conn)
+            if any(purged.values()):
+                print(f"purged retired BNP/workbook data from {p}: {purged}", flush=True)
         finally:
             conn.close()
         if created:
@@ -88,24 +95,28 @@ def connect_readonly(path: Union[str, Path]) -> sqlite3.Connection:
 def summary(conn: sqlite3.Connection) -> dict:
     """Row counts and as_of_date for the upload strip.
 
-    as_of_date = max(positions.as_of_date), or 'none' if positions is empty.
-    No P&L / ladder logic here -- just counts.
+    as_of_date = max(trades.trade_date) -- the last loaded blotter trade date -- or
+    'none' if trades is empty. 2026-09-17 ("no bnp fall back"): this used to be
+    max(positions.as_of_date), the retired BNP snapshot's own date; the `positions`
+    table is gone, and the blotter (trades.trade_date) is the app's only trade source
+    now, so it is the natural replacement -- "the last uploaded snapshot date" that
+    ui/app.py::build_layout's docstring already describes this value as. No P&L /
+    ladder logic here -- just counts.
     """
     def count(table: str) -> int:
         return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
-    positions_count = count("positions")
-    if positions_count:
-        as_of_date = conn.execute("SELECT MAX(as_of_date) FROM positions").fetchone()[0]
+    trades_count = count("trades")
+    if trades_count:
+        as_of_date = conn.execute("SELECT MAX(trade_date) FROM trades").fetchone()[0]
     else:
         as_of_date = "none"
 
     return {
         "as_of_date": as_of_date,
-        "trades": count("trades"),
+        "trades": trades_count,
         "trade_legs": count("trade_legs"),
         "marks": count("marks"),
-        "positions": positions_count,
     }
 
 
@@ -116,7 +127,6 @@ def empty_summary(message: str = "database not found") -> dict:
         "trades": 0,
         "trade_legs": 0,
         "marks": 0,
-        "positions": 0,
         "message": message,
     }
 
@@ -184,16 +194,11 @@ def build_layout(data: dict, db_path=None) -> html.Div:
                  id=f"tab-body-{_slug(label)}", className="tab-body")
         for label in VISIBLE_TABS
     ]
-    from ui.launch import build_label
     return html.Div([
         html.Div(className="top-bar", children=[
             dcc.Tabs(id=MAIN_TABS_ID, value=VISIBLE_TABS[0], children=tabs,
                      parent_className="tabs-bar", className="tabs-strip"),
             uploads.layout(data),
-            # Which code is running, visible on every screen (2026-09-17: a PC was found
-            # showing an old build; the console line alone was not enough).
-            html.Span(f"build {build_label()}", className="build-tag",
-                      title="git commit of the code this app was started from; '+' = local edits"),
         ]),
         header.layout(),
         html.Div(id="tab-bodies", children=bodies),

@@ -23,7 +23,7 @@ from typing import Callable, List, Optional
 import numpy as np
 import pandas as pd
 
-from engine.pnl.aggregate import _n_business_days_back, load_holidays
+from engine.pnl.calendar import _n_business_days_back, load_holidays
 from engine.pnl.valuation import value_book
 
 OUTPUT_COLUMNS = [

@@ -259,8 +259,6 @@ p { margin: 8px 0; }
 .top-bar .source-row { justify-content: flex-end; width: 100%; }
 .top-bar .source-row--stage { justify-content: flex-end; }
 .top-bar .source-line { color: rgba(255,255,255,.85); text-align: right; }
-.top-bar .build-tag { width: 100%; text-align: right; color: rgba(255,255,255,.55); font-size: 11px;
-  font-family: monospace; padding: 0 4px 4px 0; }
 .source-file { font-family: Consolas, "Courier New", monospace; font-size: 12px; align-self: center; color: var(--text); }
 .top-bar .source-file { color: rgba(255,255,255,.85); }
 .source-snapshot { font-size: 12px; align-self: center; color: var(--muted); }

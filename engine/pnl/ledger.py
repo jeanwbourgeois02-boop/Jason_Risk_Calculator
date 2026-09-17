@@ -184,9 +184,9 @@ def realised_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- LTD
-def ltd(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str] = None) -> float:
+def ltd(conn: sqlite3.Connection, as_of: str) -> float:
     """sum(value_book(as_of).pnl_usd); NaN if any row is NaN; 0.0 for an empty book."""
-    vb = value_book(conn, as_of, marks_source=marks_source)
+    vb = value_book(conn, as_of)
     if vb.empty:
         return 0.0
     if vb["pnl_usd"].isna().any():
@@ -221,27 +221,27 @@ def period_reference_dates(as_of: str) -> Dict[str, str]:
     return out
 
 
-def period_pnl(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str] = None) -> Dict[str, dict]:
+def period_pnl(conn: sqlite3.Connection, as_of: str) -> Dict[str, dict]:
     """Daily / d5 / mtd / ytd = ltd(as_of) - ltd(reference business day); plus `trading`
     = sum of pnl_usd for rows with trade_date = as_of. Each period:
     {value, ref_date, available, reason}."""
     holidays = load_holidays()
     refs = _period_refs(as_of, holidays)
-    ltd_today = ltd(conn, as_of, marks_source)
+    ltd_today = ltd(conn, as_of)
     out: Dict[str, dict] = {}
     for key, ref in refs.items():
         entry = {"value": float("nan"), "ref_date": ref.isoformat(), "available": False, "reason": ""}
         if math.isnan(ltd_today):
             entry["reason"] = "today's LTD unavailable (a trade has a missing mark; see value_book reason)"
         else:
-            ltd_ref = ltd(conn, ref.isoformat(), marks_source)
+            ltd_ref = ltd(conn, ref.isoformat())
             if math.isnan(ltd_ref):
                 entry["reason"] = f"LTD on {ref.isoformat()} unavailable (a trade has a missing mark)"
             else:
                 entry.update(value=ltd_today - ltd_ref, available=True)
         out[key] = entry
 
-    vb = value_book(conn, as_of, marks_source=marks_source)
+    vb = value_book(conn, as_of)
     trading_rows = vb[vb["trade_date"] == as_of] if not vb.empty else vb
     if trading_rows.empty:
         trading_value, trading_available, trading_reason = 0.0, True, ""
@@ -254,7 +254,7 @@ def period_pnl(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
     return out
 
 
-def period_pnl_by(conn: sqlite3.Connection, as_of: str, key: str, marks_source: Optional[str] = None) -> Dict[str, dict]:
+def period_pnl_by(conn: sqlite3.Connection, as_of: str, key: str) -> Dict[str, dict]:
     """period_pnl's subtraction applied per group of value_book rows, grouped by `key`
     (one of instrument_id, product, strategy, theme). Returns {group_value: {period: {...}}}."""
     if key not in GROUP_KEYS:
@@ -263,7 +263,7 @@ def period_pnl_by(conn: sqlite3.Connection, as_of: str, key: str, marks_source: 
     refs = _period_refs(as_of, holidays)
 
     def grouped_ltd(day: str) -> Dict[str, float]:
-        vb = value_book(conn, day, marks_source=marks_source)
+        vb = value_book(conn, day)
         if vb.empty:
             return {}
         out = {}
