@@ -137,18 +137,61 @@ LEGACY_PNL_MARKER = "# --- risk-monitor pnl function (installed by risk.py setup
 
 
 def pnl_function_block() -> str:
-    """The `pnl` PowerShell function, pinned to this clone's actual path."""
+    """The `pnl` PowerShell function, pinned to this clone's actual path. It only changes
+    directory and calls `start`: the GitHub sync (fetch, stash local edits, fast-forward,
+    reinstall packages if the code changed) lives in `sync_with_github` below so it runs
+    identically from `pnl`, from `py 2_launcher.py start` and from an old profile."""
     return (
         f"{PNL_MARKER}\n"
         "function pnl {\n"
         f"    Set-Location '{ROOT}'\n"
-        "    if (-not (git status --porcelain)) { git pull --ff-only origin main }\n"
-        "    else { Write-Host 'Local edits present: not pulling from GitHub. Commit or stash them to update.' "
-        "-ForegroundColor Yellow }\n"
         "    py -3 2_launcher.py start\n"
         "}\n"
         f"{PNL_END_MARKER}\n"
     )
+
+
+def _git(*args, timeout: int = 90) -> tuple:
+    r = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def sync_with_github() -> tuple:
+    """Bring this clone to origin/main before the app starts, whatever state it is in.
+    Returns (changed, message). Never raises and never blocks a start: offline, a
+    non-git folder or a clone with unpushed commits (the dev machine) just runs the code
+    on disk and says so. Local edits and untracked files on a user PC are stashed (`git
+    stash list` / `git stash pop` to get them back), so a stray file can no longer pin a
+    PC to old code silently -- the failure mode seen on 2026-09-17."""
+    if not (ROOT / ".git").exists():
+        return False, "not a git clone; running the code on disk"
+    try:
+        code, _, err = _git("fetch", "origin", "main", "--quiet")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"git unavailable ({exc.__class__.__name__}); running the code on disk"
+    if code != 0:
+        last = (err.splitlines() or ["no detail"])[-1]
+        return False, f"GitHub unreachable ({last}); running the code on disk"
+    _, local, _ = _git("rev-parse", "HEAD")
+    _, remote, _ = _git("rev-parse", "origin/main")
+    if local == remote:
+        return False, f"code {local[:7]} is current with GitHub"
+    _, ahead, _ = _git("rev-list", "--count", "origin/main..HEAD")
+    if ahead not in ("", "0"):
+        return False, f"{ahead} local commit(s) not on GitHub; not updating (push them first), running {local[:7]}"
+    _, dirty, _ = _git("status", "--porcelain")
+    note = ""
+    if dirty:
+        import datetime as _dt
+        stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        code, _, err = _git("stash", "push", "--include-untracked", "-m", f"launcher auto-stash {stamp}")
+        if code != 0:
+            return False, f"could not set local edits aside ({err.splitlines()[-1] if err else 'no detail'}); running {local[:7]}"
+        note = " -- local edits were set aside with git stash (git stash pop restores them)"
+    code, _, err = _git("merge", "--ff-only", "origin/main")
+    if code != 0:
+        return False, f"update failed ({err.splitlines()[-1] if err else 'no detail'}); running {local[:7]}"
+    return True, f"UPDATED {local[:7]} -> {remote[:7]}{note}"
 
 
 def _profile_paths() -> list:
@@ -318,7 +361,18 @@ def cmd_load_sample(args) -> int:
 
 def cmd_start(args) -> int:
     if not in_venv():
-        return reexec_in_venv(sys.argv[1:])
+        if not args.no_sync:
+            changed, message = sync_with_github()
+            say(f"GitHub: {message}")
+            if changed:
+                # The file now on disk may be newer than this running copy: hand over to
+                # it (and let it refresh the packages) rather than continue with old code.
+                argv = [a for a in sys.argv[1:] if a != "--no-sync"] + ["--no-sync", "--refresh-packages"]
+                return subprocess.call([sys.executable, str(ROOT / "2_launcher.py"), *argv], cwd=str(ROOT))
+        if args.refresh_packages and VENV_PY.exists():
+            say("Code changed: refreshing packages in .venv")
+            run([VENV_PY, "-m", "pip", "install", *PACKAGES, *DEV_PACKAGES, "--quiet"], check=False)
+        return reexec_in_venv([a for a in sys.argv[1:] if a not in ("--no-sync", "--refresh-packages")])
     from ui.launch import main
     return main(["--force-new"] if args.force_new else [])
 
@@ -510,6 +564,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     t = sub.add_parser("start", help="start the app and open the browser")
     t.add_argument("--force-new", action="store_true", help="never reuse a running instance")
+    t.add_argument("--no-sync", action="store_true", help="do not update from GitHub first")
+    t.add_argument("--refresh-packages", action="store_true", help=argparse.SUPPRESS)
     t.set_defaults(func=cmd_start)
 
     dcm = sub.add_parser("doctor", help="check every prerequisite and say what to fix")

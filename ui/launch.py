@@ -2,8 +2,10 @@
 
 Duplicate-server protection with a source fingerprint: a running risk-monitor instance
 is reused only when it reports the SAME fingerprint of the current source tree. A stale
-instance (different fingerprint) is left running -- never terminated -- and the new app
-starts on the next free port. `--force-new` skips reuse detection entirely.
+instance (different fingerprint) is asked to stop, and force-stopped when it predates the
+shutdown route (2026-09-17), so the new app always takes port 8050 and an old bookmark
+never shows old code. Another application on a port is left alone and the next port is
+used. `--force-new` skips reuse detection entirely.
 """
 import argparse
 import hashlib
@@ -33,6 +35,25 @@ def source_fingerprint(root: Path = REPO_ROOT) -> str:
     return digest.hexdigest()[:16]
 
 
+def build_label(root: Path = REPO_ROOT) -> str:
+    """Short git commit of the code on disk ('d27cdaa', with '+' when the tree has local
+    edits), or the first 7 characters of the source fingerprint outside a git clone.
+    Printed at start and shown in the app's top bar so anyone can see what is running."""
+    import subprocess
+    # stdout pipe only and no timeout: that is subprocess's single-pipe path, which reads
+    # inline instead of spawning reader threads (main() runs with threading.Thread
+    # replaced by a mock in the launcher tests).
+    opts = dict(cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        r = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], **opts)
+        if r.returncode == 0 and r.stdout.strip():
+            d = subprocess.run(['git', 'status', '--porcelain'], **opts)
+            return r.stdout.strip() + ('+' if d.stdout.strip() else '')
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return source_fingerprint(root)[:7]
+
+
 def identity(fingerprint: str) -> str:
     return f'{IDENTITY_PREFIX}{fingerprint}'
 
@@ -60,6 +81,49 @@ def stop_instance(url: str, wait_s: float = 5.0) -> bool:
     deadline = time.time() + wait_s
     while time.time() < deadline:
         if probe(url) is None:
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _port_owner_pid(port: int):
+    """PID of the process listening on 127.0.0.1:port, or None. Windows: netstat; POSIX: lsof."""
+    import subprocess
+    try:
+        if os.name == 'nt':
+            out = subprocess.run(['netstat', '-ano', '-p', 'tcp'], capture_output=True, text=True, timeout=15).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[0].upper() == 'TCP' and parts[1].endswith(f':{port}') and parts[3] == 'LISTENING':
+                    return int(parts[4])
+        else:
+            out = subprocess.run(['lsof', '-t', f'-iTCP:{port}', '-sTCP:LISTEN'], capture_output=True, text=True, timeout=15).stdout
+            return int(out.split()[0]) if out.split() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+def force_stop_instance(port: int, wait_s: float = 5.0) -> bool:
+    """Kill the risk-monitor process holding `port` when it ignored the shutdown route
+    (a copy started from code older than 2026-09-16 has no such route). Only called after
+    `probe` confirmed the listener is a risk-monitor instance, never for another
+    application. Returns True once the port is free."""
+    import subprocess
+    import time
+    pid = _port_owner_pid(port)
+    if pid is None or pid == os.getpid():
+        return False
+    try:
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], capture_output=True, timeout=15)
+        else:
+            os.kill(pid, 9)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        if probe(f'http://127.0.0.1:{port}') is None:
             return True
         time.sleep(0.2)
     return False
@@ -112,6 +176,8 @@ def main(argv=None):
                 why = 'forced new instance' if args.force_new else 'STALE code'
                 if stop_instance(url):
                     print(f'Port {port}: stopped risk-monitor instance {seen} ({why}).')
+                elif force_stop_instance(port):
+                    print(f'Port {port}: force-stopped risk-monitor instance {seen} ({why}; it had no shutdown route).')
                 else:
                     print(f'Port {port}: risk-monitor instance {seen} ({why}) did not stop; '
                           f'close its terminal. Trying the next port.')
@@ -133,7 +199,7 @@ def main(argv=None):
     print(f'Interpreter:  {sys.executable}\n'
           f'Working dir:  {os.getcwd()}\n'
           f'Database:     {get_db_path()}\n'
-          f'App version:  {fingerprint}\n'
+          f'Build:        {build_label()}  (fingerprint {fingerprint})\n'
           f'Risk monitor: {url}\nKeep this terminal open. Press Ctrl+C to stop.', flush=True)
     webbrowser.open(url)
     try:

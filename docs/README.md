@@ -37,13 +37,18 @@ Open a PowerShell terminal and type:
 pnl
 ```
 
-This pulls the latest code from GitHub (unless you have uncommitted local edits, in which case it says so and
-skips the pull) and starts the app. The browser opens at `http://127.0.0.1:8050`. Keep the terminal window
-open; **Ctrl+C** stops the app.
+This always brings the folder to the latest code on GitHub first, then starts the app. The console prints
+one `GitHub:` line: `code d27cdaa is current`, `UPDATED a1b2c3d -> d27cdaa`, or why it could not update
+(offline, or unpushed local commits on a developer PC) and that it is running the code on disk. Local edits
+or stray files on a PC are set aside with `git stash` rather than blocking the update (`git stash pop`
+restores them). If the code changed, packages are refreshed in `.venv` before the app starts. The browser
+opens at `http://127.0.0.1:8050`; the page shows `build <commit>` at the top right and the console prints the
+same. Keep the terminal window open; **Ctrl+C** stops the app.
 
 - Running `pnl` again while the app is running just reopens the browser tab.
-- If a copy with **older code** is still running, it is left alone and the new one starts on the next port
-  (8051 and so on). Close the old terminal window to get back to 8050.
+- If a copy with **older code** is still running on 8050, it is stopped (force-stopped if it is too old to
+  answer the stop request) and the new one takes 8050, so an old bookmark never shows old code.
+- `py -3 2_launcher.py start --no-sync` starts without touching GitHub.
 - On the Bloomberg PC, log in to the Terminal first, then run `pnl`. The console says
   `Bloomberg feed: started (every 2 min)` or the reason it did not start, and Bloomberg history is backfilled
   automatically in the background (see below) — there is nothing to run for that.
@@ -91,7 +96,8 @@ Quick answers:
 | `'pnl' is not recognized` | Open a **new** PowerShell window (profiles load at startup), or re-run `1_setup.cmd`. |
 | `No .venv yet` | Double-click `1_setup.cmd`. |
 | `Missing dependency` on start | Double-click `1_setup.cmd`. |
-| App opens on 8051, 8052... | An older copy is still running. `doctor` names the port. Close that terminal window. |
+| App opens on 8051, 8052... | Port 8050 is held by something that is not this app. `doctor` names it. |
+| Page shows an old `build` tag | The `GitHub:` console line says why it did not update (offline, unpushed commits). Fix that and run `pnl` again. |
 | Every USD figure is blank / "Unavailable" | No official Bloomberg marks. This is by design on a PC without a Terminal. On the Bloomberg PC run `py -3 2_launcher.py doctor --bloomberg`. |
 | Ladder is empty on today's date | The as-of date picker is on an old date, or no trade on file is open today. Upload the latest blotter and set the date. |
 | Upload says rows were skipped | The result line names each row and the reason (cancelled status, other fund, unreadable field). Everything else loaded. |

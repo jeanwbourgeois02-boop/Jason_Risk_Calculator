@@ -184,11 +184,16 @@ def build_layout(data: dict, db_path=None) -> html.Div:
                  id=f"tab-body-{_slug(label)}", className="tab-body")
         for label in VISIBLE_TABS
     ]
+    from ui.launch import build_label
     return html.Div([
         html.Div(className="top-bar", children=[
             dcc.Tabs(id=MAIN_TABS_ID, value=VISIBLE_TABS[0], children=tabs,
                      parent_className="tabs-bar", className="tabs-strip"),
             uploads.layout(data),
+            # Which code is running, visible on every screen (2026-09-17: a PC was found
+            # showing an old build; the console line alone was not enough).
+            html.Span(f"build {build_label()}", className="build-tag",
+                      title="git commit of the code this app was started from; '+' = local edits"),
         ]),
         header.layout(),
         html.Div(id="tab-bodies", children=bodies),

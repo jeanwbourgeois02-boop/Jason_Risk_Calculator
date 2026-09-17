@@ -68,13 +68,14 @@ def test_stale_instance_is_stopped_and_port_reused(monkeypatch, capsys):
     assert made == [8050] and opened == ['http://127.0.0.1:8050']
     out = capsys.readouterr().out
     assert 'stopped risk-monitor instance' in out and 'STALE code' in out
-    for label in ('Interpreter:', 'Working dir:', 'Database:', 'App version:', 'Risk monitor: http://127.0.0.1:8050'):
+    for label in ('Interpreter:', 'Working dir:', 'Database:', 'Build:', 'Risk monitor: http://127.0.0.1:8050'):
         assert label in out
 
 
 def test_stale_instance_that_will_not_stop_is_skipped(monkeypatch, capsys):
     monkeypatch.setattr(launch, 'probe', _probe_by_port({8050: launch.identity('0000deadbeef0000')}))
     monkeypatch.setattr(launch, 'stop_instance', lambda url, wait_s=5.0: False)
+    monkeypatch.setattr(launch, 'force_stop_instance', lambda port, wait_s=5.0: False)
     monkeypatch.setattr(launch.webbrowser, 'open', lambda u: None)
     made = _run_server_capture(monkeypatch)
     assert launch.main([]) == 0

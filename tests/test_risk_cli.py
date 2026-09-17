@@ -65,6 +65,7 @@ def test_setup_refuses_old_python(monkeypatch, capsys):
 
 def test_start_reexecs_in_venv_when_outside(monkeypatch):
     monkeypatch.setattr(risk, "in_venv", lambda: False)
+    monkeypatch.setattr(risk, "sync_with_github", lambda: (False, "code is current with GitHub (test)"))
     monkeypatch.setattr(risk.VENV_PY.__class__, "exists", lambda self: True)
     calls = []
     monkeypatch.setattr(risk.subprocess, "call", lambda cmd, **kw: calls.append(cmd) or 7)
@@ -75,6 +76,7 @@ def test_start_reexecs_in_venv_when_outside(monkeypatch):
 
 def test_start_without_venv_tells_user_to_setup(monkeypatch, capsys):
     monkeypatch.setattr(risk, "in_venv", lambda: False)
+    monkeypatch.setattr(risk, "sync_with_github", lambda: (False, "code is current with GitHub (test)"))
     monkeypatch.setattr(risk.VENV_PY.__class__, "exists", lambda self: False)
     assert risk.cmd_start(risk.build_parser().parse_args(["start"])) == 2
     assert "py 2_launcher.py setup" in capsys.readouterr().out

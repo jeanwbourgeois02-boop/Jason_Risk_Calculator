@@ -83,20 +83,29 @@ Say '[3/7] Repository'
 $here = $null
 if ($MyInvocation.MyCommand.Path) { $here = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $here) { $here = (Get-Location).Path }
+function Update-Clone($path) {
+    # Same rule as 2_launcher.py's sync_with_github: local edits are set aside with
+    # git stash (git stash pop restores them), then fast-forward to origin/main.
+    Push-Location $path
+    if (git status --porcelain) {
+        git stash push --include-untracked -m "setup auto-stash $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+        Write-Host '  local edits were set aside with git stash (git stash pop restores them)' -ForegroundColor Yellow
+    }
+    git fetch origin main --quiet
+    if ($LASTEXITCODE -ne 0) { Pop-Location; Failed 'repository' "git fetch failed in $path. Check your network / GitHub access, then re-run 1_setup.cmd." }
+    git merge --ff-only origin/main
+    if ($LASTEXITCODE -ne 0) { Pop-Location; Failed 'repository' "could not fast-forward $path to origin/main (local commits?). Resolve manually (git status), then re-run 1_setup.cmd." }
+    Pop-Location
+}
+
 if (Test-Path (Join-Path $here '.git')) {
     $RepoRoot = $here
-    Push-Location $RepoRoot
-    git pull --ff-only
-    if ($LASTEXITCODE -ne 0) { Failed 'repository' "git pull --ff-only failed in $RepoRoot. Resolve manually (git status), then re-run 1_setup.cmd." }
-    Pop-Location
+    Update-Clone $RepoRoot
     Ok 'repository' "updated $RepoRoot"
 } else {
     $RepoRoot = $DefaultClonePath
     if (Test-Path (Join-Path $RepoRoot '.git')) {
-        Push-Location $RepoRoot
-        git pull --ff-only
-        if ($LASTEXITCODE -ne 0) { Failed 'repository' "git pull --ff-only failed in $RepoRoot. Resolve manually (git status), then re-run 1_setup.cmd." }
-        Pop-Location
+        Update-Clone $RepoRoot
         Ok 'repository' "updated existing clone at $RepoRoot"
     } else {
         Say "  cloning into $RepoRoot ..."
