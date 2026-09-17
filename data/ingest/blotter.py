@@ -1,8 +1,9 @@
 """Trade blotter CSV/Excel -> instruments, trades, trade_legs.
 
 Source: the transaction-level blotter export (``data/raw/new_sample_trades.csv``-shaped
-files), the app's only trade source. ``data/ingest/bnp.py`` is left untouched and is
-used here only for shared dataclasses/regexes.
+files), the app's only trade source. Shared dataclasses/regexes live in
+``data/ingest/common.py`` (extracted 2026-09-17 when ``data/ingest/bnp.py`` and
+``data/ingest/irs.py`` -- the retired BNP CSV parser -- were deleted).
 
 Row kind is decided by ``Fin Type`` (``Product`` is the fallback when Fin Type is blank
 or unrecognised): FORWARD, CURRENCY, FUTURE, OPTION, INTEREST_RATE_SWAP -- matched by
@@ -21,7 +22,11 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
   - CURRENCY: settlement-level cash movements; the CASH instrument only is written.
   - FUTURE: a trade + 1 NOTIONAL leg (``Quantity`` = contracts signed by ``Side``).
   - OPTION: product FX_OPTION, 1 NOTIONAL leg in the pair's base currency, quantity
-    signed by ``Side``, price = premium fill. Strike from the Description when present.
+    signed by ``Side``, price = premium fill. Strike from the Description when present
+    (genuinely absent from the file for some rows -- 0.0 sentinel, never invented).
+    Expiry / call-put come from ``Symbol`` when it parses, cross-checked against the
+    Description's own date/CALL-PUT word when Description is populated (a disagreement
+    rejects, per the tolerance rule below) rather than trusting the Symbol blindly.
   - INTEREST_RATE_SWAP: direction is the sign of ``Notional`` (+ = pay fixed, - =
     receive fixed; user-confirmed 2026-09-16), in full notional units.
 
@@ -53,12 +58,14 @@ from typing import Dict, List, Optional, Union
 
 import pandas as pd
 
-from data.ingest.bnp import (
+from data.ingest.common import (
     CASH_CCY_RE,
     DESCRIPTION_RE,
     FORWARD_SYMBOL_RE,
     Instrument,
     InstrumentOption,
+    IRS_DESCRIPTION_RE,
+    IRS_SYMBOL_RE,
     NDF_CCYS,
     PERPETUAL,
     Reject,
@@ -67,7 +74,6 @@ from data.ingest.bnp import (
     future_expiry,
     FUTURE_MULTIPLIERS,
 )
-from data.ingest.irs import IRS_DESCRIPTION_RE, IRS_SYMBOL_RE
 
 log = logging.getLogger(__name__)
 
@@ -251,6 +257,33 @@ def detect_payoff(*texts: str) -> str:
 
 def _us_date(s: str) -> str:
     return datetime.strptime(s, "%m/%d/%Y").date().isoformat()
+
+
+def _us_date_or_none(s: str) -> Optional[str]:
+    try:
+        return _us_date(s)
+    except ValueError:
+        return None
+
+
+def _option_terms_from_text(desc: str, fxoption_type) -> tuple:
+    """Expiry / call-put implied by free text (Description, FxOption Type), or None for
+    either that isn't present there. US_DATE_RE dates are always mm/dd/yyyy (the fixed
+    shape of this file's Description text, like the FORWARD 'TD .. VD ..' dates --
+    verified on the reference sample's 8 OPTION rows), so this always parses them with
+    ``_us_date``, never the file's own day-first/month-first convention (``_date``):
+    a day <= 12 mm/dd/yyyy Description date would otherwise silently misread as
+    day-first instead of failing and falling back (undetected on the reference sample,
+    where every embedded day happens to be > 12, but a real bug for any other file).
+    Used both as the fallback source when Symbol doesn't parse, and to cross-check the
+    Symbol-derived terms when it does (a populated Description that disagrees is a
+    contradiction, not silently trusted -- the tolerance rule rejects contradictions
+    between two populated fields, it does not exempt the Symbol)."""
+    dates = US_DATE_RE.findall(desc)
+    expiry = _us_date_or_none(dates[-1]) if dates else None
+    words = set(re.sub(r"[^A-Z]+", " ", (desc + " " + _s(fxoption_type)).upper()).split())
+    option_type = "CALL" if words & {"CALL", "C"} else "PUT" if words & {"PUT", "P"} else None
+    return expiry, option_type
 
 
 def _mmddyy(s: str) -> Optional[str]:
@@ -569,8 +602,23 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
 
 
 def _parse_currency(res: ParseResult, row: pd.Series, row_no: int) -> None:
+    """CURRENCY row's own currency: Symbol first (verified: matches on every row of the
+    reference sample, 85/85). If it's ever blank, ``Currency`` is NOT a safe fallback --
+    on the reference sample ``Currency`` disagrees with ``Symbol`` on all 85 rows and is
+    provably the OTHER leg's currency of the FX deal this cash movement settles (e.g.
+    Symbol=EUR.C-EUAA/Currency=SEK.C-SSAA on a EURSEK trade), never this row's own. The
+    correct fallback is Side-aware, matching how the FORWARD parser tells its two legs
+    apart: Buy Currency on a Buy row, Sell Currency on a Sell row (both verified equal to
+    Symbol whenever Symbol is present); an unrecognised/blank Side leaves it unknown
+    rather than guessing."""
     symbol = _s(row.get("Symbol"))
-    ccy = _ccy(symbol) or _ccy(row.get("Currency")) or _ccy(row.get("Buy Currency"))
+    ccy = _ccy(symbol)
+    if ccy is None:
+        side = _side(row.get("Side"))
+        if side == "Buy":
+            ccy = _ccy(row.get("Buy Currency"))
+        elif side == "Sell":
+            ccy = _ccy(row.get("Sell Currency"))
     if ccy is None:
         res.rejects.append(Reject(row_no, symbol, f"unrecognised currency code {symbol!r}"))
         return
@@ -643,6 +691,7 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
         return
     om = OPTION_SYMBOL_RE.match(symbol)
     col_pair = _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol"))
+    desc_expiry, desc_type = _option_terms_from_text(desc, row.get("FxOption Type"))
     if om:
         pair, exp_s, cp, _sym_id = om.groups()
         if col_pair and col_pair != pair:
@@ -654,17 +703,24 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
             res.rejects.append(Reject(row_no, symbol, f"unparseable expiry {exp_s!r} in Symbol"))
             return
         option_type = "CALL" if cp == "C" else "PUT"
+        # Symbol is the primary source, but a populated Description is a real second
+        # source of the same facts (verified on the reference sample's 8 OPTION rows,
+        # always in agreement) -- cross-checked rather than blindly trusting the Symbol.
+        if desc_expiry and desc_expiry != expiry:
+            res.rejects.append(Reject(row_no, symbol,
+                                      f"Symbol expiry {expiry} disagrees with Description date {desc_expiry}: {desc!r}"))
+            return
+        if desc_type and desc_type != option_type:
+            res.rejects.append(Reject(row_no, symbol,
+                                      f"Symbol call/put {option_type} disagrees with Description {desc_type}: {desc!r}"))
+            return
     else:
         pair = col_pair
         if pair is None:
             res.rejects.append(Reject(row_no, symbol, f"cannot tell the pair: Symbol {symbol!r} and Currency Pair blank"))
             return
-        expiry = _date(row.get("Adj. Expiry Date")) or _date(row.get("Termination"))
-        if expiry is None:
-            dates = US_DATE_RE.findall(desc)
-            expiry = _date(dates[-1]) if dates else None
-        words = set(re.sub(r"[^A-Z]+", " ", (desc + " " + _s(row.get("FxOption Type"))).upper()).split())
-        option_type = "CALL" if words & {"CALL", "C"} else "PUT" if words & {"PUT", "P"} else None
+        expiry = _date(row.get("Adj. Expiry Date")) or _date(row.get("Termination")) or desc_expiry
+        option_type = desc_type
         if expiry is None or option_type is None:
             res.rejects.append(Reject(row_no, symbol, "Symbol not <PAIR><mmddyy>[CP]-<id> and no expiry / call-put "
                                                        "in Adj. Expiry Date, Description or FxOption Type"))

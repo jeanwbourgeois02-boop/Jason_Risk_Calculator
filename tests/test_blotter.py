@@ -164,6 +164,36 @@ def test_currency_row_rejects_bad_symbol(tmp_csv):
     assert len(res.rejects) == 1
 
 
+def test_currency_row_blank_symbol_falls_back_on_side_not_on_currency_column(tmp_csv):
+    # Shape observed on the reference sample: 'Currency' is the OTHER leg's ccy (SEK on
+    # a EUR cash row), never this row's own -- a blank Symbol must fall back to
+    # Buy/Sell Currency (Side-aware), not to the misleading Currency column.
+    row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "CURRENCY"},
+               **{"Trade Id": "300"}, Symbol="", Side="Sell",
+               **{"Currency": "SEK.C-SSAA", "Buy Currency": "SEK.C-SSAA", "Sell Currency": "EUR.C-EUAA"})
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects
+    assert "CASH-EUR" in res.instruments
+    assert "CASH-SEK" not in res.instruments
+
+
+def test_currency_row_blank_symbol_buy_side_uses_buy_currency(tmp_csv):
+    row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "CURRENCY"},
+               **{"Trade Id": "301"}, Symbol="", Side="Buy",
+               **{"Currency": "CAD.C-CNAA", "Buy Currency": "DOL.C-USAA", "Sell Currency": "CAD.C-CNAA"})
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects
+    assert "CASH-USD" in res.instruments
+
+
+def test_currency_row_blank_symbol_and_side_is_rejected_not_guessed(tmp_csv):
+    row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "CURRENCY"},
+               **{"Trade Id": "302"}, Symbol="", Side="",
+               **{"Currency": "SEK.C-SSAA", "Buy Currency": "SEK.C-SSAA", "Sell Currency": "EUR.C-EUAA"})
+    res = blotter.parse(tmp_csv([row]))
+    assert len(res.rejects) == 1
+
+
 # --------------------------------------------------------------------------- FUTURE
 def _future_row(**overrides) -> dict:
     row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "FUTURE"},
@@ -240,6 +270,49 @@ def test_option_row_rejects_currency_pair_mismatch(tmp_csv):
     assert "Currency Pair" in res.rejects[0].reason
 
 
+def test_option_row_rejects_symbol_description_expiry_disagreement(tmp_csv):
+    # Symbol says 09/23/2026 (092326); Description now says a different date.
+    row = _option_row(Description="EURSEK-XXAA 11.058400 STRIKE EUR Call 09/24/2026 UBSLUK")
+    res = blotter.parse(tmp_csv([row]))
+    assert len(res.rejects) == 1
+    assert "expiry" in res.rejects[0].reason
+
+
+def test_option_row_rejects_symbol_description_call_put_disagreement(tmp_csv):
+    row = _option_row(Description="EURSEK-XXAA 11.058400 STRIKE EUR Put 09/23/2026 UBSLUK")
+    res = blotter.parse(tmp_csv([row]))
+    assert len(res.rejects) == 1
+    assert "call/put" in res.rejects[0].reason
+
+
+def test_option_row_blank_description_skips_cross_check(tmp_csv):
+    # No Description text to disagree with: Symbol alone is still enough (tolerance
+    # rule -- a blank field never rejects).
+    res = blotter.parse(tmp_csv([_option_row(Description="")]))
+    assert not res.rejects
+
+
+def test_option_row_no_strike_in_description_keeps_zero_sentinel(tmp_csv):
+    # Reproduces the 3 reference-sample rows with a real Description but no STRIKE
+    # number in it (EURSEK112526C-197906813, USDJPY111926P-197571137/197957397):
+    # genuinely absent from the file, not a parser gap -- 0.0 sentinel, never invented.
+    row = _option_row(Symbol="EURSEK112526C-197906813", Description="EURSEK-XXAA EUR Call 11/25/2026 SBILUK")
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects
+    assert res.instrument_options["EURSEK112526C-197906813"].strike == 0.0
+
+
+def test_option_row_fallback_reads_expiry_and_call_put_from_description(tmp_csv):
+    # Symbol doesn't match <PAIR><mmddyy>[CP]-<id>: falls back to Currency Pair for the
+    # pair and to the Description's own mm/dd/yyyy date + CALL/PUT word for the rest.
+    row = _option_row(Symbol="EURSEK-OTC-1", Description="EURSEK-XXAA 11.058400 STRIKE EUR Put 09/05/2026 UBSLUK")
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects
+    t = res.trades[0]
+    assert res.instruments[t.instrument_id].expiry_date == "2026-09-05"
+    assert res.instrument_options[t.instrument_id].option_type == "PUT"
+
+
 # --------------------------------------------------------------------------- IRS
 def _irs_row(**overrides) -> dict:
     row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "INTEREST_RATE_SWAP"},
@@ -303,6 +376,27 @@ def test_irs_row_with_no_currency_anywhere_is_rejected(tmp_csv):
     assert len(res.rejects) == 1
     assert res.n_skipped_irs == 1
     assert "currency" in res.rejects[0].reason
+
+
+# --------------------------------------------------------------------------- de-dupe
+def test_repeated_trade_id_keeps_highest_version(tmp_csv):
+    # Documented in CLAUDE.md ("a repeated Trade Id within a file keeps the highest
+    # Version"), but unexercised by the reference sample (0/857 rows share a Trade Id) --
+    # covered here directly instead.
+    row_v1 = _future_row(Version="3", Price="7,700.00")
+    row_v2 = _future_row(Version="11", Price="7,750.00")
+    res = blotter.parse(tmp_csv([row_v1, row_v2]))
+    assert res.n_superseded == 1
+    assert len(res.trades) == 1
+    assert res.trades[0].price == pytest.approx(7750.00)
+
+
+def test_repeated_trade_id_keeps_last_row_when_version_column_absent(tmp_csv):
+    # HEADER (the fixture's column set) carries no Version column at all -- the
+    # documented "else the last occurrence" half of the same rule.
+    res = blotter.parse(tmp_csv([_future_row(Price="7,700.00"), _future_row(Price="7,750.00")]))
+    assert len(res.trades) == 1
+    assert res.trades[0].price == pytest.approx(7750.00)
 
 
 # --------------------------------------------------------------------------- filters

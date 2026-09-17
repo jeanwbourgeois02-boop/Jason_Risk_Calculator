@@ -5,11 +5,12 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
-from typing import Union
+from typing import Dict, List, Tuple, Union
 
-TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "positions", "instrument_theme",
+TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "instrument_theme",
           "curve_quotes", "instrument_options", "index_fixings")
 VIEWS = ("marks_official", "trades_official")
 
@@ -156,51 +157,50 @@ CREATE TABLE IF NOT EXISTS index_fixings (
   PRIMARY KEY ("index", fixing_date, source)
 );
 
-CREATE TABLE IF NOT EXISTS positions (
-  as_of_date      TEXT NOT NULL,
-  source          TEXT NOT NULL,
-  account         TEXT NOT NULL,
-  instrument_id   TEXT NOT NULL REFERENCES instruments,
-  settle_date     TEXT NOT NULL,
-  quantity        REAL NOT NULL,
-  cost_local      REAL NOT NULL,
-  mark            REAL NOT NULL,
-  fx_to_usd       REAL NOT NULL,
-  mv_local        REAL NOT NULL,
-  mv_usd          REAL NOT NULL,
-  pnl_dtd_usd     REAL NOT NULL,
-  pnl_mtd_usd     REAL NOT NULL,
-  pnl_ytd_usd     REAL NOT NULL,
-  PRIMARY KEY (as_of_date, source, account, instrument_id, settle_date)
-);
 """
+# `positions` (one row per PB position per day, BNP grain) was dropped from the schema
+# 2026-09-17 ("no bnp fall back", docs/bnp-excel-removal.md): its only writer was the
+# retired BNP CSV parser, and its only readers (engine/pnl/reconcile.py, the ladder's
+# CASH column) were removed the same day. `purge_retired_sources` below drops the table
+# outright on any existing database that still has it from before this change.
 
 
 def _views_ddl() -> str:
+    """Every view is dropped and recreated unconditionally on every `create_schema` call
+    (not `CREATE VIEW IF NOT EXISTS`): a view holds no data, so re-running its
+    definition is always safe, and `IF NOT EXISTS` silently froze a database created
+    before a view-definition change on its old, wrong body forever -- e.g. a pre-
+    2026-09-15 `marks_official` on a live database had no branch for CASHFLOW_USD /
+    GAMMA / THETA / VEGA / RHO / DELTA_PA and the wrong (pre-2026-09-15/17) sources for
+    PV_USD / DELTA / PREMIUM, and `create_schema` never corrected it because the view
+    already existed. Recreating unconditionally re-syncs every view to the current
+    definition on every app startup."""
     cases = "\n".join(
         f"      WHEN '{mt}' THEN '{src}'" for mt, src in OFFICIAL_MARK_SOURCE.items()
     )
     return f"""
-CREATE VIEW IF NOT EXISTS marks_official AS
+DROP VIEW IF EXISTS marks_official;
+CREATE VIEW marks_official AS
 SELECT as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at
 FROM marks
 WHERE source = CASE mark_type
 {cases}
     END;
 
--- trades_official (user decision 2026-09-16): the app now has two trade sources for the
--- same book -- the real-time blotter ('XLSX') and the once-daily BNP EOD-Hong-Kong
--- snapshot ('BNP'). BNP is kept for its `positions` cash-balance snapshot and for
--- BNP_BVAL reconciliation marks, but is NOT authoritative for trade-level exposure/P&L
--- any more: the blotter is the primary trade source and is expected to carry every live
--- trade BNP also carries, under a different trade_id scheme (docs/open-questions.md item
--- 55 -- not yet deduplicated). Without this view, a trade loaded from both sources would
--- be summed twice into the ladder/delta/P&L. Every engine query that computes real
--- exposure or P&L must read `trades_official`, never `trades` directly, with the sole
--- exception of engine/pnl/reconcile.py, which explicitly needs both sources to compare
--- them against each other.
-CREATE VIEW IF NOT EXISTS trades_official AS
-SELECT * FROM trades WHERE source != 'BNP';
+-- trades_official: a plain passthrough of `trades`, kept as a named view so every
+-- engine query can read "the official trades" without caring whether that is ever
+-- filtered again in future. Until 2026-09-17 this filtered out `source = 'BNP'` (the
+-- once-daily BNP EOD snapshot, kept alongside the live blotter as a second trade
+-- source, user decision 2026-09-16) to stop the same economic trade loaded from both
+-- sources being summed twice into the ladder/delta/P&L (docs/open-questions.md item
+-- 55). BNP was removed entirely 2026-09-17 ("no bnp fall back",
+-- docs/bnp-excel-removal.md): nothing writes trades.source = 'BNP' any more, so that
+-- filter became a no-op and was simplified away. A legacy source='BNP' row surviving
+-- in an old database (before `purge_retired_sources` below has run) still surfaces
+-- through this view unchanged -- never silently dropped by a view definition.
+DROP VIEW IF EXISTS trades_official;
+CREATE VIEW trades_official AS
+SELECT * FROM trades;
 """
 
 
@@ -260,25 +260,95 @@ CREATE TABLE IF NOT EXISTS bundles (
 """
 
 
+_CREATE_TABLE_RE = re.compile(r'CREATE TABLE IF NOT EXISTS\s+"?(\w+)"?\s*\((.*?)\n\);', re.DOTALL)
+_CONSTRAINT_KEYWORDS = frozenset({"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"})
+
+
+def _strip_sql_comments(sql: str) -> str:
+    return re.sub(r"--[^\n]*", "", sql)
+
+
+def _split_top_level(body: str) -> List[str]:
+    """Split a CREATE TABLE's column-list body on commas that aren't nested inside
+    parens (e.g. ``PRIMARY KEY (a, b)``) or a single-quoted default string."""
+    parts: List[str] = []
+    depth = 0
+    in_quote = False
+    current: List[str] = []
+    for ch in body:
+        if ch == "'" :
+            in_quote = not in_quote
+        elif not in_quote:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                parts.append("".join(current))
+                current = []
+                continue
+        current.append(ch)
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
+def _parse_ddl_columns(ddl: str) -> Dict[str, List[Tuple[str, str]]]:
+    """table_name -> [(column_name, column_definition_sql), ...] in declaration order,
+    parsed straight out of every ``CREATE TABLE IF NOT EXISTS <name> (...)`` block in
+    `ddl` -- the single source of truth for the schema, so a column added to the DDL
+    here is automatically picked up by `_migrate_columns` with no second place to edit.
+    Table-level constraint lines (``PRIMARY KEY (...)``, ``FOREIGN KEY (...)``, ...) are
+    skipped: they name no column of their own (a column's own ``PRIMARY KEY`` /
+    ``REFERENCES`` -- inline on its own column line, e.g. ``instrument_id TEXT PRIMARY
+    KEY REFERENCES instruments`` -- is kept, since that line does start with a column
+    name)."""
+    out: Dict[str, List[Tuple[str, str]]] = {}
+    for m in _CREATE_TABLE_RE.finditer(_strip_sql_comments(ddl)):
+        table, body = m.group(1), m.group(2)
+        columns: List[Tuple[str, str]] = []
+        for frag in _split_top_level(body):
+            frag = frag.strip()
+            if not frag:
+                continue
+            name_m = re.match(r'^"([^"]+)"|^(\S+)', frag)
+            if name_m is None:
+                continue
+            name = name_m.group(1) or name_m.group(2)
+            if name.upper() in _CONSTRAINT_KEYWORDS:
+                continue
+            columns.append((name, frag[name_m.end():].strip()))
+        out[table] = columns
+    return out
+
+
 def _migrate_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after a table's initial CREATE, for databases created by
-    an older version of this module. CREATE TABLE IF NOT EXISTS above only helps brand
-    new databases; existing ones need an explicit ALTER TABLE ADD COLUMN."""
-    additions = [
-        ("trades", "theme", "TEXT NOT NULL DEFAULT ''"),
-        ("realised_pnl", "product", "TEXT NOT NULL DEFAULT 'FX_FWD'"),
-        ("realised_pnl", "mark_type", "TEXT NOT NULL DEFAULT 'SPOT'"),
-    ]
-    for table, column, coldef in additions:
+    an older version of this module (or an older version of one of the DDL strings
+    below). ``CREATE TABLE IF NOT EXISTS`` only helps brand new databases; an existing
+    table needs an explicit ``ALTER TABLE ADD COLUMN`` per missing column, generically
+    diffed here against ``PRAGMA table_info`` rather than a hand-maintained list that
+    silently goes stale the next time a column is added to the DDL and this function is
+    forgotten (as happened for `instrument_options.payoff`, 2026-09-17: the DDL declared
+    it with a default from the start, but no one added it here, so every DB created
+    before that DDL change was permanently missing it). Every column added via a
+    generic ALTER here that is declared NOT NULL must carry a DEFAULT in its own DDL
+    text -- SQLite refuses to ALTER TABLE ADD a NOT NULL column with no default -- which
+    is already true of every column in this schema that has ever needed migrating onto
+    an existing table (each has a documented sentinel: '' / 0 / 'VANILLA' / ...)."""
+    ddl_tables = _parse_ddl_columns(_DDL + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
+    for table, columns in ddl_tables.items():
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if not existing:
             continue  # table itself doesn't exist yet; the CREATE above will make it right
-        if column not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
+        for name, coldef in columns:
+            if name not in existing:
+                conn.execute(f'ALTER TABLE {table} ADD COLUMN "{name}" {coldef}')
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
-    """Create all tables and the marks_official view if absent; enable foreign keys."""
+    """Create every table if absent (idempotent); drop and recreate every view
+    unconditionally (see `_views_ddl`'s docstring for why); enable foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
     _migrate_columns(conn)
@@ -290,3 +360,37 @@ def connect(path: Union[str, Path] = ":memory:") -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     create_schema(conn)
     return conn
+
+
+# --------------------------------------------------------------------- retired-source cleanup
+def purge_retired_sources(conn: sqlite3.Connection) -> Dict[str, int]:
+    """One-off, idempotent clean-up for a database created before the 2026-09-17 "no bnp
+    fall back" removal (docs/bnp-excel-removal.md): deletes anything the retired BNP
+    parser / workbook wrote, FK-safe (children before parents, since `connect` turns on
+    `PRAGMA foreign_keys`). Safe to call on a database that already has none of this --
+    every step is a no-op then, and the counts returned are all zero.
+
+    Called once per app startup from `ui/app.py::ensure_schema`. Does not touch
+    `instruments` rows that only ever existed for a BNP-only trade (e.g. a stray
+    `CASH-<ccy>` instrument or an IRS symbol with no surviving trade): harmless orphans,
+    and safe deletion would require checking every other table for references first.
+    """
+    counts: Dict[str, int] = {}
+    with conn:
+        cur = conn.execute("DELETE FROM trade_legs WHERE trade_id IN (SELECT trade_id FROM trades WHERE source='BNP')")
+        counts["trade_legs"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        cur = conn.execute("DELETE FROM realised_pnl WHERE trade_id IN (SELECT trade_id FROM trades WHERE source='BNP')")
+        counts["realised_pnl"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        cur = conn.execute("DELETE FROM trades WHERE source='BNP'")
+        counts["trades"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        cur = conn.execute("DELETE FROM marks WHERE source IN ('BNP_BVAL','BBG_INTERP','WORKBOOK_REFERENCE')")
+        counts["marks"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        had_positions = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='positions'"
+        ).fetchone()[0]
+        if had_positions:
+            counts["positions_table_dropped"] = 1
+            conn.execute("DROP TABLE IF EXISTS positions")
+        else:
+            counts["positions_table_dropped"] = 0
+    return counts
