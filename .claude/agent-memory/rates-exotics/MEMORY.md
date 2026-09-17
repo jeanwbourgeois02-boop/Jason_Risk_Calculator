@@ -1,0 +1,1 @@
+- [Phase 6 rates_vol conventions](conventions.md) — sign convention, flat-curve approximation, QuantLib evaluationDate quirk, Bermudan model risk, CLAUDE.md/schema follow-ups

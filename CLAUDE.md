@@ -26,7 +26,7 @@ All dates ISO `YYYY-MM-DD`, all amounts signed (`+` = receive / long). No column
 instruments (
   instrument_id   TEXT PRIMARY KEY,   -- 'USDJPY', 'EURSEK', 'XAUUSD', 'ESU6 Index', 'IRSOIS-USD-22860996',
                                       -- 'USDJPY digi p 152 2026-08-26'
-  asset_class     TEXT NOT NULL,      -- FX | FUTURE | IRS | FX_OPTION | CASH
+  asset_class     TEXT NOT NULL,      -- FX | FUTURE | IRS | FX_OPTION | IRS_OPTION | CASH
   base_ccy        TEXT NOT NULL,      -- unit of trades.quantity: 'USD' for USDJPY, 'AUD' for AUDUSD, 'XAU',
                                       -- 'ES' (index units), notional ccy for IRS, base of pair for options
   quote_ccy       TEXT NOT NULL,      -- currency of trades.price and of local P&L
@@ -44,6 +44,7 @@ trades (
                                       -- this literal value; see "Blotter -> tables") | MANUAL
   instrument_id   TEXT NOT NULL REFERENCES instruments,
   product         TEXT NOT NULL,      -- FX_SPOT | FX_FWD | FX_SWAP | FUTURE | IRS | FX_OPTION
+                                      -- | SWAPTION | CAP_FLOOR (engine/rates_vol; no ingest path yet, 2026-09-17)
   package_id      TEXT NOT NULL,      -- = trade_id unless grouped by the swap rule below
   trade_date      TEXT NOT NULL,
   quantity        REAL NOT NULL,      -- signed, in base_ccy units: base amount (FX), contracts (FUTURE),
@@ -296,4 +297,9 @@ tests/           pytest, one file per module, owned by the module's agent
 docs/            contract and open questions, owned by housekeeper
 ```
 
-**Planned, not yet created (2026-09-17):** `engine/rates_vol/` (exact name to be confirmed in that phase) will hold swaptions/caps/SABR/Bermudan pricing (vendored `options_calc.rates`, a separate Black-76/Hull-White model family from `engine/rates/`'s OIS-NPV pricer), owned by a new agent **rates-exotics**. Not created yet — Phase 6 of the options_calc merge, see `engine/options/__init__.py`.
+```
+engine/rates_vol/ swaptions, caps/floors, SABR, Bermudan (vendored        -> rates-exotics
+                 options_calc.rates; landed 2026-09-17, options merge Phase 6)
+```
+
+`engine/rates_vol/` writes `PV_USD`/`DV01_USD` under `QL_PRICER` and `VEGA`/`GAMMA`/`THETA` under `QL_OPTIONS_PRICER` (both already official for those mark_types); its option attributes, manual vols and SABR/Hull-White parameters live in its own defensively-created tables (`instrument_rate_options`, `rate_vols`, `rate_model_params`). No trade source carries swaptions or caps yet — see `docs/open-questions.md` item 61.
