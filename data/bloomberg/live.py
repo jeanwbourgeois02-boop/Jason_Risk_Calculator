@@ -43,15 +43,29 @@ SRC_INTERP = "BBG_INTERP"
 
 
 # --------------------------------------------------------------------------- availability
-def availability(host: str = "localhost", port: int = 8194) -> Tuple[bool, str]:
-    """(True, '') if blpapi imports and the API port accepts a TCP connection."""
+def availability(host: str = "127.0.0.1", port: int = 8194, timeout: float = 0.5) -> Tuple[bool, str]:
+    """(True, '') if blpapi imports and the API port accepts a TCP connection.
+
+    The literal string "localhost" is resolved to 127.0.0.1 directly rather than left to
+    getaddrinfo: on a PC without a Bloomberg Terminal, "localhost" resolves to both ::1
+    and 127.0.0.1, and when nothing answers on ::1 (IPv6 loopback present but nothing
+    bound there -- the common case) socket.create_connection tries it first and pays the
+    full timeout before ever trying the working IPv4 address. Measured 2.07s for a single
+    call at timeout=1.0 on a non-Bloomberg PC (2026-09-17); doubled again because
+    data.bloomberg.backfill.start_auto_backfill runs its own separate availability() probe
+    of the same host:port moments later inside the same create_app(start_feed=True) call
+    (ui/app.py:246-259), for ~4.18s total before the app's first response. Callers that
+    pass an explicit non-"localhost" host (a remote B-PIPE address, or an explicit
+    "127.0.0.1"/"::1") are left untouched. timeout defaults to 0.5s (was an implicit 1.0s)
+    since a loopback port either answers almost immediately or is not listening at all."""
     try:
         import blpapi  # noqa: F401
     except ImportError:
         return False, "blpapi is not installed on this computer"
     import socket
+    connect_host = "127.0.0.1" if host == "localhost" else host
     try:
-        with socket.create_connection((host, port), timeout=1.0):
+        with socket.create_connection((connect_host, port), timeout=timeout):
             return True, ""
     except OSError as exc:
         return False, f"no Bloomberg API service on {host}:{port} ({exc})"
@@ -108,11 +122,69 @@ WHERE i.asset_class = 'FUTURE' AND t.trade_date <= :as_of AND l.settle_date >= :
 ORDER BY i.instrument_id, l.settle_date
 """
 
+# A cross (neither leg is USD, e.g. EURSEK) needs its own outright, but delta/P&L still
+# convert each leg's currency to USD at SPOT (CLAUDE.md's delta query: "the SPOT join ...
+# is a LEFT JOIN so that a missing spot mark surfaces as a NULL delta; the engine must
+# raise if any resulting delta is NULL, never drop the leg silently"). Found 2026-09-17
+# (ladder agent): a book holding only a cross, with no direct trade in either leg's own
+# USD pair, left both currencies' usd_delta NaN forever because nothing ever requested
+# those USD pairs' SPOT. _cross_usd_legs below is that missing request, shared by
+# build_requests (live pull) and inventory._needed_marks (coverage/diagnostics) so the two
+# can never drift apart.
+_MAJOR_QUOTE_CCYS = {"AUD", "EUR", "GBP", "NZD", "XAU", "XAG"}  # quote as XXXUSD; everything else is USDXXX
+
+_OPEN_CROSS_LEG_CCYS_SQL = """
+SELECT DISTINCT i.base_ccy, i.quote_ccy
+FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
+WHERE i.asset_class = 'FX' AND t.trade_date <= :as_of AND l.settle_date >= :as_of
+  AND i.base_ccy != 'USD' AND i.quote_ccy != 'USD'
+"""
+
+
+def _usd_pair_name(ccy: str) -> str:
+    """Conventional USD-pair spelling for `ccy`: '<ccy>USD' for the majors/metals that
+    quote against the dollar (AUD, EUR, GBP, NZD, XAU, XAG), 'USD<ccy>' for everything
+    else -- the same convention CLAUDE.md's xlsx section and the delta query's pair join
+    (`i.base_ccy || i.quote_ccy`) assume elsewhere."""
+    return f"{ccy}USD" if ccy in _MAJOR_QUOTE_CCYS else f"USD{ccy}"
+
+
+def _cross_usd_legs(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+    """One row per USD-conversion pair an open cross's legs need for their delta/P&L USD
+    conversion: {ccy, pair_name, instrument_id, bbg_ticker, has_instrument}.
+
+    `instrument_id`/`bbg_ticker` come from the `instruments` row when one already exists
+    for the conventional pair name (canonical orientation, e.g. EURUSD, USDSEK); otherwise
+    they are the conventional pair name itself and '<pair> Curncy' -- never written to
+    `instruments` (this module never inserts instrument rows). `has_instrument` tells the
+    caller whether a pulled SPOT for this pair can actually be written: `write_marks`
+    silently drops any row whose instrument_id isn't a known instrument, so a caller that
+    requests a `has_instrument=False` pair must report that gap explicitly (a warning
+    naming the pair) rather than let it vanish silently."""
+    ccys = set()
+    for base, quote in conn.execute(_OPEN_CROSS_LEG_CCYS_SQL, {"as_of": as_of_date}):
+        ccys.add(base)
+        ccys.add(quote)
+    out = []
+    for ccy in sorted(ccys):
+        pair_name = _usd_pair_name(ccy)
+        row = conn.execute("SELECT instrument_id, bbg_ticker FROM instruments WHERE instrument_id = ?",
+                           (pair_name,)).fetchone()
+        if row is not None:
+            out.append({"ccy": ccy, "pair_name": pair_name, "instrument_id": row[0], "bbg_ticker": row[1],
+                       "has_instrument": True})
+        else:
+            out.append({"ccy": ccy, "pair_name": pair_name, "instrument_id": pair_name,
+                       "bbg_ticker": f"{pair_name} Curncy", "has_instrument": False})
+    return out
+
 
 def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     """RequestRows per BUILD_PLAN.md section 2: one SPOT per open FX pair, one
     FWD_OUTRIGHT per (pair, open leg's own settle_date) -- no shared workbook maturity --
-    and one FUTURE_PX per open future at its own settle_date (expiry)."""
+    one FUTURE_PX per open future at its own settle_date (expiry), and (2026-09-17) one
+    extra SPOT per USD-conversion pair an open cross's legs need (see _cross_usd_legs) that
+    isn't already covered by one of the pairs above."""
     from data.bloomberg.pull_marks import RequestRow
     fx_rows = conn.execute(_OPEN_FX_SQL, {"as_of": as_of_date}).fetchall()
     out, seen = [], set()
@@ -123,6 +195,11 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
         if (instrument_id, "FWD_OUTRIGHT", settle) not in seen:
             seen.add((instrument_id, "FWD_OUTRIGHT", settle))
             out.append(RequestRow(instrument_id, ticker, settle, "FWD_OUTRIGHT"))
+    for leg in _cross_usd_legs(conn, as_of_date):
+        key = (leg["instrument_id"], "SPOT")
+        if key not in seen:
+            seen.add(key)
+            out.append(RequestRow(leg["instrument_id"], leg["bbg_ticker"], as_of_date, "SPOT"))
     fut_rows = conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of_date}).fetchall()
     for instrument_id, ticker, settle in fut_rows:
         if (instrument_id, "FUTURE_PX", settle) not in seen:
@@ -351,7 +428,18 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             fut_reqs = [r for r in requests if r.mark_type == "FUTURE_PX"]
             fut_rows, fut_warnings, fut_fail = pm.build_future_rows(session, service, fut_reqs, today, diag) \
                 if fut_reqs else ([], [], [])
-            warnings = fwd_warnings + fut_warnings
+            # A cross's USD-conversion leg with no instrument row on file (see
+            # _cross_usd_legs) is still requested from Bloomberg above, but write_marks
+            # below can never persist it (no instrument to satisfy the FK-like
+            # relationship) -- surface that gap explicitly instead of letting the mark
+            # silently vanish (2026-09-17, ladder agent's usd_delta NaN report).
+            cross_leg_warnings = [
+                f"{leg['pair_name']}: needed to convert {leg['ccy']} to USD for a cross's delta/P&L, but no "
+                f"'{leg['pair_name']}' instrument is on file -- its SPOT cannot be written even when Bloomberg "
+                "returns a price."
+                for leg in _cross_usd_legs(conn, as_of_date) if not leg["has_instrument"]
+            ]
+            warnings = fwd_warnings + fut_warnings + cross_leg_warnings
             rows = spot_rows + fwd_rows + fut_rows
             written = write_marks(conn, rows)
             # Rates (2026-09-17): OIS curve quotes + fixings per swap currency into
@@ -418,6 +506,7 @@ class LiveFeed:
     port: int = 8194
     last_status: Optional[dict] = None
     _stop: threading.Event = field(default_factory=threading.Event)
+    _wake: threading.Event = field(default_factory=threading.Event)
     _thread: Optional[threading.Thread] = None
 
     def start(self) -> "LiveFeed":
@@ -427,6 +516,26 @@ class LiveFeed:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
+
+    def trigger_now(self) -> None:
+        """Wake the feed loop immediately instead of waiting out the rest of the 2-minute
+        interval, and run one extra cycle right away. Call this after any event that could
+        change what needs pricing -- most importantly a blotter import landing new trades
+        (data.ingest.upload.import_blotter / ui/uploads.py) -- so marks for trades a user
+        just uploaded are pulled within seconds rather than up to INTERVAL_SECONDS later.
+
+        Root cause this exists for (found 2026-09-17): the feed's very first pull runs the
+        instant the app starts (LiveFeed._loop below), typically before any trade has been
+        uploaded through the browser, so build_requests() finds nothing to price and the
+        cycle writes {requested: 0, written: 0, connected: True}. Nothing then re-triggers
+        a pull until the next scheduled tick (up to INTERVAL_SECONDS away), so a user who
+        uploads a blotter and immediately checks diagnostics can see that stale empty pull
+        reported as if it were current. ui/uploads.py (owned by ui-shell, not bbg-data)
+        must call `app.bloomberg_feed.trigger_now()` after a successful import_blotter()
+        for this to take effect end to end; see the bbg-data agent's handoff note for the
+        exact call site."""
+        self._wake.set()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -439,7 +548,8 @@ class LiveFeed:
                                             "reason": "feed thread error: " + traceback.format_exc().strip().splitlines()[-1],
                                             "traceback": traceback.format_exc(), "requested": 0, "written": 0,
                                             "failed": 0, "items": [], "warnings": []})
-            self._stop.wait(self.interval)
+            self._wake.wait(self.interval)
+            self._wake.clear()
 
 
 def start_feed_if_available(db_path, host: str = "localhost", port: int = 8194,

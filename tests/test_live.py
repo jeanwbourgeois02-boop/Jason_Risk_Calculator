@@ -1,5 +1,7 @@
 """data/bloomberg/live.py: rates from marks, status file, one pull with a fake session,
 feed not started without Bloomberg. No blpapi needed."""
+import sys
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -26,7 +28,6 @@ def _db(tmp_path):
         ("j1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", "2026-09-18", 150.0, 1),
         ("j1", 2, "FX_NEAR", "JPY", -150e6, "2026-08-10", "2026-09-18", 150.0, 1),
     ])
-    conn.execute("INSERT INTO positions VALUES ('2026-08-17','BNP','acc','AUDUSD','2026-09-16',-1e6,650000,0.66,1,0,0,0,0,0)")
     conn.commit()
     return p, conn
 
@@ -78,6 +79,106 @@ def test_build_requests_includes_open_futures(tmp_path):
     assert ("ESU6 Index", "FUTURE_PX", "2026-09-18") in keys
     later_keys = {(r.instrument_id, r.mark_type) for r in live.build_requests(conn, "2026-09-19")}
     assert ("ESU6 Index", "FUTURE_PX") not in later_keys       # expired future drops out
+
+
+# --------------------------------------------------------------------------- cross USD-leg SPOT requests (2026-09-17)
+def _cross_db(tmp_path, with_usd_leg_instruments=False):
+    """A book with a lone EURSEK cross trade and nothing else -- no direct EURUSD or
+    USDSEK trade, so neither currency's usd_delta has anywhere else to come from."""
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES ('EURSEK','FX','EUR','SEK',1,0,'EURSEK Curncy','9999-12-31')")
+    if with_usd_leg_instruments:
+        conn.execute("INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
+        conn.execute("INSERT INTO instruments VALUES ('USDSEK','FX','USD','SEK',1,0,'USDSEK Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('e1','XLSX','EURSEK','FX_FWD','e1','2026-08-10',1e6,11.20,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("e1", 1, "FX_NEAR", "EUR", 1e6, "2026-08-10", "2026-09-16", 11.20, 1),
+        ("e1", 2, "FX_NEAR", "SEK", -11200000, "2026-08-10", "2026-09-16", 11.20, 1),
+    ])
+    conn.commit()
+    return p, conn
+
+
+def test_build_requests_lone_cross_also_requests_both_usd_legs_conventional_ticker(tmp_path):
+    """No EURUSD/USDSEK instrument on file: build_requests must still ask Bloomberg for
+    them, using the conventional pair spelling and '<pair> Curncy' ticker (EUR is a major
+    -> EURUSD; SEK is not -> USDSEK, not SEKUSD)."""
+    p, conn = _cross_db(tmp_path)
+    reqs = live.build_requests(conn, "2026-08-17")
+    keys = {(r.instrument_id, r.mark_type, r.settle_date) for r in reqs}
+    assert ("EURSEK", "SPOT", "2026-08-17") in keys
+    assert ("EURUSD", "SPOT", "2026-08-17") in keys
+    assert ("USDSEK", "SPOT", "2026-08-17") in keys
+    by_id = {r.instrument_id: r for r in reqs if r.mark_type == "SPOT"}
+    assert by_id["EURUSD"].bbg_ticker == "EURUSD Curncy"
+    assert by_id["USDSEK"].bbg_ticker == "USDSEK Curncy"
+
+
+def test_build_requests_cross_leg_uses_existing_instrument_row_when_present(tmp_path):
+    """When EURUSD/USDSEK already exist as instruments (the normal case for any book that
+    also trades majors), their own instrument_id/bbg_ticker are used rather than a
+    freshly-constructed one."""
+    p, conn = _cross_db(tmp_path, with_usd_leg_instruments=True)
+    conn.execute("UPDATE instruments SET bbg_ticker = 'EURUSD Curncy BGN' WHERE instrument_id = 'EURUSD'")
+    conn.commit()
+    reqs = live.build_requests(conn, "2026-08-17")
+    by_id = {r.instrument_id: r for r in reqs if r.mark_type == "SPOT"}
+    assert by_id["EURUSD"].bbg_ticker == "EURUSD Curncy BGN"       # the instrument's own ticker, not reconstructed
+    assert by_id["USDSEK"].bbg_ticker == "USDSEK Curncy"
+
+
+def test_build_requests_cross_leg_not_duplicated_when_directly_traded(tmp_path):
+    """A leg that's also directly traded (its pair already an open FX position) must not
+    produce a second, duplicate SPOT request."""
+    p, conn = _cross_db(tmp_path, with_usd_leg_instruments=True)
+    conn.execute("INSERT INTO trades VALUES ('u1','XLSX','EURUSD','FX_FWD','u1','2026-08-10',1e6,1.08,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("u1", 1, "FX_NEAR", "EUR", 1e6, "2026-08-10", "2026-09-16", 1.08, 1),
+        ("u1", 2, "FX_NEAR", "USD", -1080000, "2026-08-10", "2026-09-16", 1.08, 1),
+    ])
+    conn.commit()
+    reqs = live.build_requests(conn, "2026-08-17")
+    spot_ids = [r.instrument_id for r in reqs if r.mark_type == "SPOT"]
+    assert spot_ids.count("EURUSD") == 1
+
+
+def test_needed_marks_stays_in_step_with_build_requests_for_cross_legs(tmp_path):
+    from data.bloomberg import inventory
+    p, conn = _cross_db(tmp_path)
+    reqs = live.build_requests(conn, "2026-08-17")
+    needed = inventory._needed_marks(conn, "2026-08-17")
+    req_keys = {(r.instrument_id, r.mark_type, r.settle_date) for r in reqs}
+    needed_keys = {(n["instrument_id"], n["mark_type"], n["settle_date"]) for n in needed}
+    assert req_keys == needed_keys
+
+
+def test_pull_once_warns_when_cross_leg_instrument_missing_and_never_writes_it(tmp_path, monkeypatch):
+    """The gap must be visible (status["warnings"], naming the pair) rather than the mark
+    silently never appearing -- and it truly is never written, even if Bloomberg happily
+    returns a price for the conventional ticker."""
+    p, conn = _cross_db(tmp_path)
+    from data.bloomberg import pull_marks as pm
+    from datetime import date as _date
+
+    def fake_fetch_reference(session, service, tickers, fields, overrides=None, diag=None, tag=None):
+        return {t: {"PX_LAST": 1.2345} for t in tickers}  # every ticker "succeeds"
+
+    monkeypatch.setattr(pm, "fetch_reference", fake_fetch_reference)
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    from data.bloomberg import fwd_curve
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
+    status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=_date(2026, 8, 17))
+    assert status["connected"] is True
+    joined = " ".join(status["warnings"])
+    assert "EURUSD" in joined and "USDSEK" in joined
+    # Bloomberg "returned" a price for both synthetic tickers, but neither has an
+    # instrument row, so neither is ever persisted.
+    written_ids = {r[0] for r in conn.execute("SELECT DISTINCT instrument_id FROM marks")}
+    assert "EURUSD" not in written_ids and "USDSEK" not in written_ids
+    assert "EURSEK" in written_ids       # the actually-traded pair's own SPOT still writes fine
 
 
 def test_pull_once_without_bloomberg_writes_status_and_no_marks(tmp_path, monkeypatch):
@@ -252,3 +353,125 @@ def test_pull_once_defaults_book_date_to_today_not_last_bnp_snapshot(tmp_path, m
     status = live.pull_once(p, session_factory=lambda: (object(), object()), today=_date(2026, 9, 17))
     assert seen["as_of"] == "2026-09-17"
     assert status["as_of_date"] == "2026-09-17"
+
+
+# --------------------------------------------------------------------------- availability() speed (2026-09-17)
+def _with_fake_blpapi(monkeypatch):
+    monkeypatch.setitem(sys.modules, "blpapi", types.ModuleType("blpapi"))
+
+
+def test_availability_resolves_localhost_to_127_0_0_1(monkeypatch):
+    """Dual-stack 'localhost' (::1 + 127.0.0.1) made a single availability() check pay up
+    to ~2s when nothing answers on ::1 -- found on the Bloomberg PC 2026-09-17, and doubled
+    again because start_auto_backfill probes the same host:port a moment later inside the
+    same create_app(start_feed=True) call. availability() must connect to 127.0.0.1
+    directly rather than leave resolution of the literal string 'localhost' to the OS."""
+    _with_fake_blpapi(monkeypatch)
+    seen = []
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_create_connection(addr, timeout=None):
+        seen.append((addr, timeout))
+        return _FakeConn()
+
+    monkeypatch.setattr("socket.create_connection", fake_create_connection)
+    ok, why = live.availability("localhost", 8194)
+    assert ok is True and why == ""
+    assert seen == [(("127.0.0.1", 8194), 0.5)]
+
+
+class _FakeConn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_availability_leaves_explicit_non_localhost_host_untouched(monkeypatch):
+    _with_fake_blpapi(monkeypatch)
+    seen = []
+
+    def fake_create_connection(addr, timeout=None):
+        seen.append((addr, timeout))
+        return _FakeConn()
+
+    monkeypatch.setattr("socket.create_connection", fake_create_connection)
+    live.availability("bpipe.example.com", 8194)
+    assert seen == [(("bpipe.example.com", 8194), 0.5)]
+
+
+def test_availability_default_timeout_is_half_a_second(monkeypatch):
+    _with_fake_blpapi(monkeypatch)
+    seen = []
+
+    def fake_create_connection(addr, timeout=None):
+        seen.append(timeout)
+        return _FakeConn()
+
+    monkeypatch.setattr("socket.create_connection", fake_create_connection)
+    live.availability()
+    assert seen == [0.5]
+
+
+def test_availability_no_blpapi_never_touches_the_socket(monkeypatch):
+    monkeypatch.delitem(sys.modules, "blpapi", raising=False)  # not installed on this dev PC
+
+    def boom(*a, **k):
+        raise AssertionError("socket.create_connection must not be called when blpapi is not installed")
+
+    monkeypatch.setattr("socket.create_connection", boom)
+    ok, why = live.availability()
+    assert ok is False and "blpapi is not installed" in why
+
+
+# --------------------------------------------------------------------------- LiveFeed.trigger_now() (2026-09-17)
+def test_trigger_now_wakes_the_loop_immediately_instead_of_waiting_the_full_interval(tmp_path, monkeypatch):
+    """Root-cause fix: without this, a blotter uploaded moments after the app starts is
+    not priced until the next scheduled pull (up to INTERVAL_SECONDS later). A caller
+    (ui/uploads.py, after import_blotter) is expected to call feed.trigger_now()."""
+    p, conn = _db(tmp_path)
+    calls = []
+
+    def fake_pull_once(db_path, host="localhost", port=8194):
+        calls.append(1)
+        return {"connected": True, "requested": 0, "written": 0, "failed": 0, "items": [], "warnings": []}
+
+    monkeypatch.setattr(live, "pull_once", fake_pull_once)
+    monkeypatch.setattr("data.bloomberg.backfill.start_auto_backfill", lambda *a, **k: None)
+    feed = live.LiveFeed(p, interval=60)
+    feed.start()
+    try:
+        for _ in range(200):  # wait for the first (immediate) cycle
+            if calls:
+                break
+            import time as _t
+            _t.sleep(0.01)
+        assert calls == [1]
+        feed.trigger_now()  # must not require waiting out the 60s interval
+        for _ in range(200):
+            if len(calls) >= 2:
+                break
+            import time as _t
+            _t.sleep(0.01)
+        assert len(calls) >= 2
+    finally:
+        feed.stop()
+
+
+def test_stop_also_wakes_a_waiting_loop(tmp_path, monkeypatch):
+    p, conn = _db(tmp_path)
+    monkeypatch.setattr(live, "pull_once", lambda *a, **k: {"connected": False, "reason": "x", "requested": 0,
+                                                             "written": 0, "failed": 0, "items": [], "warnings": []})
+    monkeypatch.setattr("data.bloomberg.backfill.start_auto_backfill", lambda *a, **k: None)
+    feed = live.LiveFeed(p, interval=120)
+    feed.start()
+    feed.stop()
+    feed._thread.join(timeout=5)
+    assert not feed._thread.is_alive()

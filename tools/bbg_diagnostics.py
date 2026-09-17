@@ -81,8 +81,9 @@ def _default_db_path() -> Optional[Path]:
 
 def _today_ny() -> str:
     """The book date the live feed stamps marks with: today in America/New_York.
-    (`positions` is BNP-fed and inert since 2026-09-17, so it is no longer used as the
-    default here -- it would point every coverage check at 2026-08-17 forever.)"""
+    (The `positions` table -- BNP-fed, and dropped from the schema entirely 2026-09-17 --
+    was never used as the default here for the same reason: it would have pointed every
+    coverage check at a fixed stale snapshot date forever.)"""
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
@@ -445,7 +446,12 @@ def check_snapped_at_offset(conn: sqlite3.Connection, as_of: str) -> List[Check]
 
 
 # --------------------------------------------------------------------------- 7. last live feed pull
-def check_last_pull(db_path: Optional[Path]) -> List[Check]:
+def check_last_pull(db_path: Optional[Path], as_of: Optional[str] = None) -> List[Check]:
+    """PASS only when the last recorded pull is trustworthy *now*. The feed's first pull
+    runs the instant the app starts, usually before any blotter is uploaded, and honestly
+    records `requested: 0`; until the next cycle that stale status must not read as PASS
+    while the book needs marks (Bloomberg PC, 2026-09-17). The freshness test itself is
+    data.bloomberg.inventory.stale_empty_pull_reason, shared with ui/tabs/market_data.py."""
     if db_path is None:
         return [_row("Last marks pull", "warning", "No database path resolved; cannot read the feed status file.")]
     try:
@@ -459,6 +465,20 @@ def check_last_pull(db_path: Optional[Path]) -> List[Check]:
     if status is None:
         return [_row("Last marks pull", "warning", "No Bloomberg pull has run yet on this database.")]
     if status.get("connected") and not status.get("failed"):
+        stale_reason = None
+        try:
+            from data.bloomberg.inventory import stale_empty_pull_reason
+            resolved_as_of = as_of or status.get("as_of_date") or date.today().isoformat()
+            conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
+            try:
+                stale_reason = stale_empty_pull_reason(conn, status, resolved_as_of)
+            finally:
+                conn.close()
+        except Exception:
+            stale_reason = None  # cannot verify freshness right now; report the plain status below
+        if stale_reason:
+            return [_row("Last marks pull", "fail",
+                         f"Last pull at {status.get('time', 'an unknown time')} looks stale: {stale_reason}")]
         return [_row("Last marks pull", "pass",
                      f"Last pull at {status.get('time', 'an unknown time')} wrote "
                      f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks.")]
@@ -494,6 +514,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
     _safe("Bloomberg session connectivity", check_session, host, port)
 
     conn: Optional[sqlite3.Connection] = None
+    resolved_as_of = as_of
     if resolved_db is not None and Path(resolved_db).exists():
         try:
             conn = sqlite3.connect(f"file:{Path(resolved_db).as_posix()}?mode=ro", uri=True)
@@ -517,7 +538,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
 
     _safe("FX vol ticker assumptions", check_unverified_assumptions)
 
-    _safe("Last marks pull", check_last_pull, resolved_db)
+    _safe("Last marks pull", check_last_pull, resolved_db, resolved_as_of)
 
     return results
 

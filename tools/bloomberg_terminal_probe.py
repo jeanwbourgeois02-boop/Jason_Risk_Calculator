@@ -172,9 +172,11 @@ def read_requests(rep: Report, db_path: Path, as_of: str | None) -> list:
     try:
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)  # read-only
         try:
+            # 2026-09-17 ("no bnp fall back"): default to today, not MAX(positions.as_of_date)
+            # -- the retired BNP snapshot date, which could silently drop every trade dated
+            # after it (same fix as data/bloomberg/live.py::pull_once, see its docstring).
             if as_of is None:
-                row = conn.execute("SELECT MAX(as_of_date) FROM positions").fetchone()
-                as_of = row[0] if row and row[0] else date.today().isoformat()
+                as_of = date.today().isoformat()
             rows = conn.execute(_OPEN_FX_SQL, {"as_of": as_of}).fetchall()
         finally:
             conn.close()
@@ -516,7 +518,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Standalone Bloomberg connectivity and pricing diagnostic (read-only).")
     p.add_argument("--once", action="store_true", help="run the diagnostic once (default behaviour)")
     p.add_argument("--db", default=None, help="SQLite database (default: RISK_DB or data/raw/risk.db)")
-    p.add_argument("--as-of", default=None, help="as-of date for open legs (default: latest positions date)")
+    p.add_argument("--as-of", default=None, help="as-of date for open legs (default: today)")
     p.add_argument("--host", default="localhost")
     p.add_argument("--port", type=int, default=8194)
     p.add_argument("--out", default=None, help="report directory (default: <repo>/reports)")

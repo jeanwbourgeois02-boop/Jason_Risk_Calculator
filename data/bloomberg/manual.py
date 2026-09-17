@@ -3,9 +3,11 @@
 MANUAL is official only for DELTA and PREMIUM (CLAUDE.md "Official marks" table). For
 SPOT / FWD_OUTRIGHT / FUTURE_PX / PAR_RATE / PV_USD / DV01_USD a MANUAL row is visible on
 the Market data tab (see data/bloomberg/inventory.py::mark_inventory, STATUS_MANUAL) but is
-never picked up by `marks_official` and never feeds valuation unless the caller explicitly
-passes `marks_source='MANUAL'` into `engine/pnl/valuation.py::value_book`. Do not change
-`marks_official` (data/ingest/schema.py) to make MANUAL win for those mark_types.
+never picked up by `marks_official` and never feeds valuation at all for those mark_types
+-- `engine/pnl/valuation.py::value_book` reads `marks_official` unconditionally (2026-09-17,
+"no bnp fall back" removed the `marks_source` parameter that used to let a caller retry a
+non-official source; docs/bnp-excel-removal.md). Do not change `marks_official`
+(data/ingest/schema.py) to make MANUAL win for those mark_types.
 """
 from __future__ import annotations
 

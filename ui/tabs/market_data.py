@@ -168,6 +168,48 @@ def top_bar_status(status: Optional[dict]) -> str:
     return line
 
 
+def _rates_step_lines(rates_status: Optional[dict]) -> List[str]:
+    """Plain-English line per currency from data.bloomberg.live._rates_step's output
+    (part of the pull_once status dict under "rates"), so a currency that priced nothing
+    this cycle says *why* -- a broken RatesBloombergSource, a curve-quote request that
+    came back empty, a pricing exception -- rather than the diagnostics only being able to
+    say curve_quotes/marks are missing without explaining the live feed's own attempt."""
+    if not rates_status:
+        return []
+    if rates_status.get("skipped"):
+        return [f"Rates: {rates_status['skipped']}."]
+    lines: List[str] = []
+    if rates_status.get("error"):
+        lines.append(f"Rates: {rates_status['error']}")
+    for ccy, entry in sorted(rates_status.get("currencies", {}).items()):
+        if entry.get("error"):
+            lines.append(f"Rates {ccy}: FAILED to pull curve/fixings -- {entry['error']}")
+        else:
+            lines.append(f"Rates {ccy}: {entry.get('quotes', 0)} curve quote(s), "
+                          f"{entry.get('fixings', 0)} fixing(s) written this cycle.")
+    for f in rates_status.get("failed", []):
+        lines.append(f"Rates pricing {f.get('trade_id', '')}: FAILED -- {f.get('error', '')}")
+    return lines
+
+
+def _options_step_lines(options_status: Optional[dict]) -> List[str]:
+    """Same idea for the options step (data.bloomberg.live._options_step / status["options"]):
+    engine/options never raises, it reports a per-trade skip reason instead, so a trade
+    priced to nothing must show that reason here rather than just silently having no
+    PREMIUM/DELTA mark."""
+    if not options_status:
+        return []
+    if options_status.get("error"):
+        return [f"Options: {options_status['error']}"]
+    skipped = options_status.get("skipped")
+    if isinstance(skipped, str):  # "no FX_OPTION trades to price" -- nothing was skipped, nothing to do
+        return [f"Options: {skipped}."]
+    lines = [f"Options: {options_status.get('priced', 0)} option(s) priced this cycle."]
+    for s in skipped or []:
+        lines.append(f"Options {s.get('trade_id', '')}: not priced -- {s.get('reason') or 'no reason given'}.")
+    return lines
+
+
 def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_default: bool = False) -> html.Details:
     items: List[dict] = list((status or {}).get("items", []))
     failed = [i for i in items if i.get("status") == "FAILED"]
@@ -226,6 +268,10 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
             style_data_conditional=[{"if": {"filter_query": "{stale} = 'STALE'"}, "color": "#8a4b00",
                                      "backgroundColor": "#fff4e5"}]),
     ]
+    pricing_lines = _rates_step_lines((status or {}).get("rates")) + _options_step_lines((status or {}).get("options"))
+    if pricing_lines:
+        children += [html.H4("Rates and options pricing (this pull's cycle)"),
+                     html.Ul([html.Li(ln, className="status-line") for ln in pricing_lines])]
     if status and status.get("warnings"):
         children += [html.H4("Pull warnings"), html.Ul([html.Li(w, className="status-line") for w in status["warnings"]])]
     return html.Details(id="market-data-diag", className="details details--diag",
@@ -298,9 +344,10 @@ def _run_bloomberg_diagnostics_placeholder() -> list:
         })
 
     try:
-        from data.bloomberg.live import read_status
+        from data.bloomberg.live import read_status, book_today
         from ui.app import get_db_path
-        status = read_status(get_db_path())
+        db_path = get_db_path()
+        status = read_status(db_path)
         if status is None:
             checks.append({
                 "name": "Last marks pull",
@@ -308,12 +355,35 @@ def _run_bloomberg_diagnostics_placeholder() -> list:
                 "message": "No Bloomberg pull has run yet on this database.",
             })
         elif status.get("connected"):
-            checks.append({
-                "name": "Last marks pull",
-                "status": "pass",
-                "message": f"Last pull at {status.get('time', 'an unknown time')} wrote "
-                           f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks.",
-            })
+            # A pull that reported connected=True with requested=0 is only trustworthy at
+            # the instant it ran: build_requests() found nothing to price then, but trades
+            # uploaded since (before the next scheduled pull) can make marks needed right
+            # now that this stale status never asked for. Found on the Bloomberg PC
+            # 2026-09-17 -- see data.bloomberg.inventory.stale_empty_pull_reason.
+            stale_reason = None
+            try:
+                from data.bloomberg.inventory import stale_empty_pull_reason
+                as_of = status.get("as_of_date") or book_today().isoformat()
+                conn = _connect_readonly(db_path)
+                try:
+                    stale_reason = stale_empty_pull_reason(conn, status, as_of)
+                finally:
+                    conn.close()
+            except Exception:
+                pass  # cannot verify freshness right now; fall back to the plain PASS below
+            if stale_reason:
+                checks.append({
+                    "name": "Last marks pull",
+                    "status": "fail",
+                    "message": f"Last pull at {status.get('time', 'an unknown time')} looks stale: {stale_reason}",
+                })
+            else:
+                checks.append({
+                    "name": "Last marks pull",
+                    "status": "pass",
+                    "message": f"Last pull at {status.get('time', 'an unknown time')} wrote "
+                               f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks.",
+                })
         else:
             checks.append({
                 "name": "Last marks pull",
@@ -558,8 +628,8 @@ def manual_entry_form(default_pair: Optional[str] = None) -> html.Div:
     return html.Div(className="market-data-manual-entry", children=[
         html.H4("Manual mark entry"),
         html.P("MANUAL is official only for DELTA and PREMIUM; for SPOT / FWD_OUTRIGHT / FUTURE_PX / "
-               "PAR_RATE / PV_USD / DV01_USD a manual row is visible here but is never used by valuation "
-               "unless explicitly requested (marks_source='MANUAL')."),
+               "PAR_RATE / PV_USD / DV01_USD a manual row is visible here (see the table below) but is "
+               "never used by valuation -- only an official mark prices a trade."),
         html.Div(className="toolbar", children=[
             html.Div([html.Label("Instrument"), dcc.Input(id=MANUAL_INSTRUMENT_ID, type="text", value=default_pair)]),
             html.Div([html.Label("Settle date"), dcc.Input(id=MANUAL_SETTLE_ID, type="text", placeholder="YYYY-MM-DD")]),

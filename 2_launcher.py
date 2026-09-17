@@ -41,12 +41,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 VENV = ROOT / ".venv"
 VENV_PY = VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+PACKAGES_STAMP = VENV / "packages.stamp"
 REQUIREMENTS = ROOT / "requirements.txt"
 SAMPLE = ROOT / "data" / "sample" / "blotter_sample.csv"
 BLPAPI_INDEX = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
 MIN_PYTHON = (3, 11)
 PORTS = range(8050, 8061)
-TABLES = ("instruments", "trades", "trade_legs", "marks", "positions", "realised_pnl")
+TABLES = ("instruments", "trades", "trade_legs", "marks", "realised_pnl")
 
 # Every third-party package `pip install`s (blpapi is separate: special index, PC-conditional).
 # Comment marks *why* each one is here so a future removal of the corresponding import can
@@ -55,7 +56,7 @@ PACKAGES = [
     "dash>=4.4,<5",       # ui/ -- the app itself
     "pandas>=3,<4",       # data/ingest, data/bloomberg, engine/ -- blotter CSV/xlsx parsing, series math
     "numpy>=2,<3",        # engine/ -- pnl/ladder/rates numeric work
-    "openpyxl>=3.1,<4",   # data/ingest/workbook_rates.py -- .xlsx read
+    "openpyxl>=3.1,<4",   # data/ingest/blotter.py, ui/uploads.py -- .xlsx blotter upload read
     "xlrd>=2,<3",         # data/ingest -- legacy .xls read
     "plotly",             # ui/tabs/market_data.py imports plotly.graph_objects directly
     "werkzeug>=3,<4",     # ui/launch.py imports werkzeug.serving.make_server directly
@@ -166,7 +167,12 @@ def sync_with_github() -> tuple:
     if not (ROOT / ".git").exists():
         return False, "not a git clone; running the code on disk"
     try:
-        code, _, err = _git("fetch", "origin", "main", "--quiet")
+        # 10s, not the default 90s: on a PC where GitHub is slow or blocked (seen from
+        # China, 2026-09-17) a fetch that will fail anyway must not stall every `start`
+        # for up to a minute and a half -- fail fast and run the code already on disk.
+        code, _, err = _git("fetch", "origin", "main", "--quiet", timeout=10)
+    except subprocess.TimeoutExpired:
+        return False, "GitHub slow, running the code on disk"
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"git unavailable ({exc.__class__.__name__}); running the code on disk"
     if code != 0:
@@ -246,8 +252,14 @@ def install_pnl_function() -> list:
 
 
 def tcp_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    # "localhost" resolves to both ::1 and 127.0.0.1; when nothing answers on ::1 (the
+    # common case) socket.create_connection tries it first and pays the full timeout
+    # before ever trying the working IPv4 address (same issue and fix as
+    # data.bloomberg.live.availability(), 2026-09-17). A caller-supplied host other than
+    # the literal "localhost" is left untouched.
+    connect_host = "127.0.0.1" if host == "localhost" else host
     try:
-        with socket.create_connection((host, port), timeout=timeout):
+        with socket.create_connection((connect_host, port), timeout=timeout):
             return True
     except OSError:
         return False
@@ -269,6 +281,24 @@ def db_path() -> Path:
         p = Path(raw)
         return p if p.is_absolute() else ROOT / p
     return ROOT / "data" / "raw" / "risk.db"
+
+
+def _trades_count() -> int:
+    """0 when the database does not exist yet, has no `trades` table, or is genuinely
+    empty -- used to decide whether `setup --sample` may still seed sample data (only an
+    empty database; the blotter upload is the one live trade source and replaces
+    everything on a real PC, so sample data must never clobber it)."""
+    p = db_path()
+    if not p.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
 
 
 # ----------------------------------------------------------------------------- setup
@@ -306,6 +336,7 @@ def cmd_setup(args) -> int:
     say("[3/7] Application packages")
     run([VENV_PY, "-m", "pip", "install", "--upgrade", "pip", "--quiet"], check=False)
     run([VENV_PY, "-m", "pip", "install", *PACKAGES, *DEV_PACKAGES, "--quiet"])
+    _write_packages_stamp()  # so the first `start` after setup trusts this install (fast path)
     say(f"  OK: {len(PACKAGES) + len(DEV_PACKAGES)} packages installed (see PACKAGES in 2_launcher.py)")
 
     # 4. blpapi (Bloomberg PC only)
@@ -331,7 +362,11 @@ def cmd_setup(args) -> int:
     )
     run([VENV_PY, "-c", check])
     if args.sample:
-        run([VENV_PY, str(ROOT / "2_launcher.py"), "_load_sample"])
+        if _trades_count() > 0:
+            say("  skipped: database already has trades (blotter upload replaces everything; "
+                "sample import only ever seeds an empty database)")
+        else:
+            run([VENV_PY, str(ROOT / "2_launcher.py"), "_load_sample"])
 
     # 6. pnl PowerShell function
     say("[6/7] 'pnl' PowerShell command")
@@ -370,11 +405,47 @@ def cmd_load_sample(args) -> int:
 
 # ----------------------------------------------------------------------------- start
 
+def _packages_fingerprint() -> str:
+    """Hash of PACKAGES + DEV_PACKAGES + this interpreter's python version (major.minor):
+    changes exactly when a `pip install` would actually need to do something."""
+    import hashlib
+    v = sys.version_info
+    payload = "\n".join(sorted(PACKAGES + DEV_PACKAGES)) + f"|py{v.major}.{v.minor}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
+def _packages_stamp_matches() -> bool:
+    try:
+        return PACKAGES_STAMP.read_text(encoding="utf-8").strip() == _packages_fingerprint()
+    except OSError:
+        return False
+
+
+def _write_packages_stamp() -> None:
+    try:
+        PACKAGES_STAMP.write_text(_packages_fingerprint(), encoding="utf-8")
+    except OSError:
+        pass  # best-effort cache; a missing/unwritable stamp just costs the slow path again
+
+
 def venv_imports_ok() -> bool:
-    """True when every module in IMPORT_CHECKS imports inside .venv."""
+    """True when every module in IMPORT_CHECKS imports inside .venv.
+
+    A matching packages.stamp (written after a successful install, below) short-circuits
+    this without spawning a subprocess: the real check -- a whole extra interpreter
+    importing dash/pandas/QuantLib/scipy, then `start` importing them AGAIN once it
+    re-execs into .venv -- was measured at 1.5s on every `start` (2026-09-17), even when
+    nothing had changed. Only a missing or stale stamp (PACKAGES/DEV_PACKAGES edited, or a
+    different python) pays for the real subprocess check; a success there re-writes the
+    stamp so the next call is fast again."""
+    if _packages_stamp_matches():
+        return True
     code = subprocess.call([str(VENV_PY), "-c", "import " + ", ".join(IMPORT_CHECKS)], cwd=str(ROOT),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return code == 0
+    ok = code == 0
+    if ok:
+        _write_packages_stamp()
+    return ok
 
 
 def cmd_start(args) -> int:
@@ -395,11 +466,18 @@ def cmd_start(args) -> int:
                 # it (and let it refresh the packages) rather than continue with old code.
                 argv = [a for a in sys.argv[1:] if a != "--no-sync"] + ["--no-sync", "--refresh-packages"]
                 return subprocess.call([sys.executable, str(ROOT / "2_launcher.py"), *argv], cwd=str(ROOT))
-        if VENV_PY.exists() and (args.refresh_packages or not venv_imports_ok()):
-            # Either the code just changed, or the venv cannot import something the app
-            # needs (a PC whose .venv predates a new dependency): install before starting,
-            # instead of letting ui/launch.py exit with "Missing dependency".
-            say("Refreshing packages in .venv (code changed or a package is missing)")
+        # `args.refresh_packages` (set by the GitHub-sync branch above whenever the code on
+        # disk changed) used to force this whole block -- and therefore an unconditional
+        # `pip install` -- on every start after every update, even when PACKAGES itself
+        # hadn't changed: the single biggest cost on a PC with slow PyPI access
+        # (2026-09-17). venv_imports_ok() alone now decides this, and it is itself fast
+        # (packages.stamp) whenever nothing actually needs installing; --refresh-packages
+        # is intentionally no longer read here.
+        if VENV_PY.exists() and not venv_imports_ok():
+            # The venv cannot import something the app needs (PACKAGES changed, or a PC
+            # whose .venv predates a new dependency): install before starting, instead of
+            # letting ui/launch.py exit with "Missing dependency".
+            say("Refreshing packages in .venv (a package is missing or PACKAGES changed)")
             run([VENV_PY, "-m", "pip", "install", *PACKAGES, *DEV_PACKAGES, "--quiet"], check=False)
             if not venv_imports_ok():
                 say("FAILED: packages still missing after install. Run:  py 2_launcher.py setup")
@@ -463,9 +541,8 @@ def doctor_checks(d: Doctor, bloomberg: bool, git: bool = True) -> None:
             if lacking:
                 d.add("database", False, f"{p} lacks tables: {', '.join(lacking)}", "py 2_launcher.py setup   (applies the schema)")
             else:
-                asof = counts.get("positions", 0)
-                d.add("database", True, f"{p}: {counts.get('trades', 0)} trades, {asof} positions, "
-                                        f"{counts.get('marks', 0)} marks")
+                d.add("database", True, f"{p}: {counts.get('trades', 0)} trades, "
+                                        f"{counts.get('trade_legs', 0)} legs, {counts.get('marks', 0)} marks")
                 if counts.get("trades", 0) == 0:
                     d.add("data", None, "database is empty: press 'Upload trade file' in the app (the trade blotter export), or  py 2_launcher.py setup --sample")
         except sqlite3.Error as exc:

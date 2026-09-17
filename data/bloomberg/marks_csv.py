@@ -1,7 +1,6 @@
 """Canonical marks CSV format: read/write helpers and the ``marks`` table loader.
 
 This is the shared format used by:
-- data/bloomberg/bnp_marks.py (BNP_BVAL marks derived from the PB snapshot)
 - data/bloomberg/pull_marks.py (the standalone Bloomberg-machine script; it duplicates
   MARKS_COLUMNS rather than importing this module, since it must be copyable as a
   single file with no repo imports)
@@ -317,15 +316,9 @@ SELECT DISTINCT i.instrument_id, i.bbg_ticker, i.expiry_date
 FROM instruments i
 WHERE i.asset_class = 'FUTURE'
   AND i.expiry_date > :as_of
-  AND (
-    EXISTS (
+  AND EXISTS (
       SELECT 1 FROM trade_legs l JOIN trades t ON t.trade_id = l.trade_id
       WHERE t.instrument_id = i.instrument_id AND l.settle_date > :as_of
-    )
-    OR EXISTS (
-      SELECT 1 FROM positions p
-      WHERE p.instrument_id = i.instrument_id AND p.as_of_date = :as_of
-    )
   )
 ORDER BY i.instrument_id
 """
@@ -337,16 +330,16 @@ def export_request(conn: sqlite3.Connection, as_of_date: str, path: Union[str, P
     Rows:
     - SPOT for every FX instrument (asset_class = 'FX') that has at least one open leg
       (trade_legs.settle_date > as_of_date via trades), settle_date = as_of_date.
-    - FWD_OUTRIGHT for each recorded FX instrument traded through as_of_date,
-      all at WORKDAY(as_of_date,5), matching the reference workbook.
+    - FWD_OUTRIGHT for each open FX leg (trade_legs.settle_date > as_of_date), at that
+      leg's OWN settle_date -- CLAUDE.md "P&L conventions -> Mark date": each leg is
+      marked at its own value date, never one shared WORKDAY(as_of,5) date.
     - FUTURE_PX for every FUTURE instrument that is not yet expired (expiry_date > as_of)
-      and has an open position: either a trade_legs row with settle_date > as_of, or a
-      positions row for as_of (mirrors the FX branch's "open leg" test). An expired
-      future, or one with no open position/leg, is never requested.
+      and has an open trade_legs row (settle_date > as_of). An expired future, or one
+      with no open leg, is never requested.
 
-    Returns the number of rows written. Reads from instruments, trade_legs/trades and
-    positions (no marks): this is a pure "what do we need marks for" export, independent
-    of what has already been pulled.
+    Returns the number of rows written. Reads from instruments and trade_legs/trades
+    (no marks): this is a pure "what do we need marks for" export, independent of what
+    has already been pulled.
     """
     path = Path(path)
     rows: List[dict] = []
@@ -358,15 +351,11 @@ def export_request(conn: sqlite3.Connection, as_of_date: str, path: Union[str, P
             "settle_date": as_of_date, "mark_type": "SPOT",
         })
 
-    from engine.pnl.pnl import workbook_valuation_date
-    fwd = conn.execute(
-        "SELECT DISTINCT i.instrument_id,i.bbg_ticker FROM instruments i "
-        "JOIN trades t USING(instrument_id) WHERE i.asset_class='FX' "
-        "AND t.trade_date<=? ORDER BY i.instrument_id", (as_of_date,)).fetchall()
-    for instrument_id, bbg_ticker in fwd:
+    fwd = conn.execute(_OPEN_FX_LEGS_SQL, {"as_of": as_of_date}).fetchall()
+    for instrument_id, bbg_ticker, settle_date in fwd:
         rows.append({
             "instrument_id": instrument_id, "bbg_ticker": bbg_ticker,
-            "settle_date": workbook_valuation_date(as_of_date), "mark_type": "FWD_OUTRIGHT",
+            "settle_date": settle_date, "mark_type": "FWD_OUTRIGHT",
         })
 
     fut = conn.execute(_FUTURE_INSTRUMENTS_SQL, {"as_of": as_of_date}).fetchall()

@@ -6,6 +6,7 @@ Real-file tests skip if the raw BNP CSV is absent. The pull_marks tests inject a
 from __future__ import annotations
 
 import csv
+import importlib.util
 import inspect
 import json
 import math
@@ -17,14 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from data.bloomberg import bnp_marks, marks_csv
-from data.ingest import bnp, schema
+from data.bloomberg import marks_csv
+from data.ingest import schema
 
 REPO = Path(__file__).resolve().parents[1]
-RAW = REPO / "data" / "raw" / "HA_PNL_20260818.csv"
 AS_OF = "2026-08-17"
-
-needs_raw = pytest.mark.skipif(not RAW.exists(), reason=f"raw file absent: {RAW}")
 
 
 def _mk_conn():
@@ -250,7 +248,9 @@ def test_export_request(tmp_path):
     assert n == len(rows)
     kinds = {(r["instrument_id"], r["mark_type"], r["settle_date"]) for r in rows}
     assert ("EURUSD", "SPOT", AS_OF) in kinds
-    assert ("EURUSD", "FWD_OUTRIGHT", "2026-08-24") in kinds
+    # FWD_OUTRIGHT is requested at the leg's OWN settle_date (CLAUDE.md "Mark date"),
+    # not a shared WORKDAY(as_of,5) date -- the trade_legs row above settles 2026-09-16.
+    assert ("EURUSD", "FWD_OUTRIGHT", "2026-09-16") in kinds
     assert ("ESU6 Index", "FUTURE_PX", "2026-09-18") in kinds
 
 
@@ -265,13 +265,16 @@ def test_export_request_excludes_expired_future(tmp_path):
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t1',1,'NOTIONAL','USD',225000.0,'2026-07-01','2026-08-10',0,0)"
     )
-    # Unexpired future but no open leg and no position row: must NOT be requested either.
+    # Unexpired future but no open leg at all: must NOT be requested either.
     conn.execute("INSERT INTO instruments VALUES ('ESZ6 Index','FUTURE','ES','USD',50,0,'ESZ6 Index','2026-12-18')")
-    # Unexpired future with a positions row (no trade_legs): must be requested.
+    # Unexpired future with an open trade_legs row: must be requested.
     conn.execute("INSERT INTO instruments VALUES ('ESH7 Index','FUTURE','ES','USD',50,0,'ESH7 Index','2027-03-19')")
     conn.execute(
-        "INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (AS_OF, "BNP", "ACC", "ESH7 Index", "2027-03-19", 5.0, 0, 0, 1.0, 0, 0, 0, 0, 0),
+        "INSERT INTO trades VALUES ('t2','MANUAL','ESH7 Index','FUTURE','t2','2026-08-01',5.0,4500.0,"
+        "'ACC','CPTY','STRAT','TRADER','synthetic','')"
+    )
+    conn.execute(
+        "INSERT INTO trade_legs VALUES ('t2',1,'NOTIONAL','USD',22500.0,'2026-08-01','2027-03-19',0,0)"
     )
     conn.commit()
 
@@ -283,196 +286,6 @@ def test_export_request_excludes_expired_future(tmp_path):
     assert "ESU6 Index" not in instruments
     assert "ESZ6 Index" not in instruments
     assert "ESH7 Index" in instruments
-
-
-# =========================================================================== bnp_marks
-@needs_raw
-def test_bnp_marks_every_forward_row_covered_by_distinct_keys():
-    parsed = bnp.parse(RAW, as_of_date=AS_OF)
-    result = bnp_marks.extract_bnp_marks(RAW, as_of_date=AS_OF)
-    assert not result.rejects
-
-    fwd_rows = [r for r in result.rows if r.mark_type == "FWD_OUTRIGHT"]
-    # distinct (pair, value_date) from the parsed trades' near-base legs
-    keys = set()
-    trade_pair = {t.trade_id: t.instrument_id for t in parsed.trades}
-    legs_by_trade = {}
-    for l in parsed.legs:
-        legs_by_trade.setdefault(l.trade_id, []).append(l)
-    for trade_id, pair in trade_pair.items():
-        base = pair[:3]
-        for l in legs_by_trade[trade_id]:
-            if l.ccy == base:
-                keys.add((pair, l.settle_date))
-    assert len(fwd_rows) == len(keys)
-    assert {(r.instrument_id, r.settle_date) for r in fwd_rows} == keys
-
-
-@needs_raw
-def test_bnp_marks_no_conflicting_values():
-    result = bnp_marks.extract_bnp_marks(RAW, as_of_date=AS_OF)
-    assert result.rejects == []
-
-
-@needs_raw
-def test_bnp_marks_usdtry_spot():
-    result = bnp_marks.extract_bnp_marks(RAW, as_of_date=AS_OF)
-    spot = [r for r in result.rows if r.mark_type == "SPOT" and r.instrument_id == "USDTRY"]
-    assert len(spot) == 1
-    assert math.isclose(spot[0].value, 1.0 / 0.020877, rel_tol=1e-3)
-
-
-@needs_raw
-def test_bnp_marks_no_spot_is_1_0_and_xxxusd_pairs_have_no_spot():
-    # BNP's Fx is quote_ccy -> USD, which is exactly 1.0 on every USD-quoted (XXXUSD) row
-    # -- it is not a usable base spot for those pairs, so no SPOT should ever be emitted
-    # with value 1.0, and no XXXUSD pair should get a SPOT at all.
-    result = bnp_marks.extract_bnp_marks(RAW, as_of_date=AS_OF)
-    spots = [r for r in result.rows if r.mark_type == "SPOT"]
-    assert spots
-    assert all(r.value != 1.0 for r in spots)
-
-    xxxusd_pairs = {r.instrument_id for r in result.rows if r.mark_type == "FWD_OUTRIGHT" and r.instrument_id.endswith("USD")}
-    assert xxxusd_pairs  # sanity: the reference file has XXXUSD pairs (AUD/EUR/GBP/XAU)
-    spot_pairs = {r.instrument_id for r in spots}
-    assert xxxusd_pairs.isdisjoint(spot_pairs)
-    assert any(f"XXXUSD pair" in w for w in result.warnings)
-
-
-@needs_raw
-def test_load_bnp_marks_into_bnp_loaded_db():
-    conn = schema.connect(":memory:")
-    bnp.load(RAW, conn, as_of_date=AS_OF)
-    result = bnp_marks.load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=True)
-    assert result.rows
-    n = conn.execute("SELECT COUNT(*) FROM marks WHERE source = 'BNP_BVAL'").fetchone()[0]
-    assert n == len(result.rows)
-
-
-@needs_raw
-def test_load_bnp_marks_twice_nonstrict_all_duplicate_rejects_no_double_insert():
-    conn = schema.connect(":memory:")
-    bnp.load(RAW, conn, as_of_date=AS_OF)
-    first = bnp_marks.load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=True)
-    n_after_first = conn.execute("SELECT COUNT(*) FROM marks WHERE source = 'BNP_BVAL'").fetchone()[0]
-    assert n_after_first == len(first.rows)
-
-    second = bnp_marks.load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=False)
-    assert second.rows == []
-    assert len(second.rejects) == len(first.rows)
-    assert all("duplicate" in r.reason for r in second.rejects)
-    n_after_second = conn.execute("SELECT COUNT(*) FROM marks WHERE source = 'BNP_BVAL'").fetchone()[0]
-    assert n_after_second == n_after_first  # no double insert
-
-
-@needs_raw
-def test_load_bnp_marks_twice_strict_raises():
-    conn = schema.connect(":memory:")
-    bnp.load(RAW, conn, as_of_date=AS_OF)
-    bnp_marks.load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=True)
-    with pytest.raises(ValueError):
-        bnp_marks.load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=True)
-
-
-@needs_raw
-def test_bnp_bval_never_official_in_ladder_convert_to_usd():
-    from engine.ladder.ladder import cash_ladder, convert_to_usd, spot_table
-
-    conn = schema.connect(":memory:")
-    bnp.load(RAW, conn, as_of_date=AS_OF)
-    bnp_marks.load_bnp_marks(RAW, conn, as_of_date=AS_OF, strict=True)
-
-    # marks_official is still empty: BNP_BVAL never qualifies as official for SPOT.
-    n_official = conn.execute("SELECT COUNT(*) FROM marks_official").fetchone()[0]
-    assert n_official == 0
-
-    spot = spot_table(conn, AS_OF)
-    assert spot.empty
-
-    ladder = cash_ladder(conn, AS_OF)
-    out = convert_to_usd(ladder, spot)
-    non_usd = out[out["ccy"] != "USD"]
-    assert non_usd["amount_usd"].isna().all()
-
-
-def test_bnp_marks_conflicting_rows_are_rejected(tmp_path, monkeypatch):
-    # Build a tiny synthetic BNP CSV with two FORWARD rows sharing (pair, value date)
-    # but different Price, to exercise the conflict-reject path directly (the real file
-    # has none).
-    import pandas as pd
-
-    cols = [
-        "Fund", "Financial Type", "Symbol", "Symbol Description", "Currency", "Quantity",
-        "Local Cost", "Price", "Fx", "Market Value Local", "Market Value Base", "Account",
-        "CounterParty", "NM Strategy", "Trader Name", "DTD Total P&L", "DTD Trading P&L",
-        "MTD Total P&L", "Start Date Dirty MV", "Previous Month End Market Value Base",
-        "Position", "Trade Factor",
-    ]
-    desc = "TD 08/15/2026 VD 09/16/2026 SELL USD VS .BUY JPY @ 150.00000000"
-    row1 = {c: 0 for c in cols}
-    row1.update({
-        "Fund": "NMMF", "Financial Type": "FORWARD", "Symbol": "USDJPY091626-1",
-        "Symbol Description": desc, "Currency": "JPY.C-XXAA", "Quantity": -1000000.0,
-        "Local Cost": -150000000.0, "Price": 150.10, "Fx": 0.0067,
-        "Account": "ACC", "CounterParty": "CPTY", "NM Strategy": "HAHY7", "Trader Name": "T",
-        "Position": -1000000.0, "Trade Factor": 1,
-    })
-    row2 = dict(row1)
-    row2.update({"Symbol": "USDJPY091626-2", "Price": 150.20})
-
-    df = pd.DataFrame([row1, row2])
-    path = tmp_path / "HA_PNL_20260818.csv"
-    df.to_csv(path, index=False)
-
-    result = bnp_marks.extract_bnp_marks(path, as_of_date=AS_OF)
-    assert any("conflicting FWD_OUTRIGHT" in r.reason for r in result.rejects)
-
-
-def test_bnp_marks_skip_closed_lines(tmp_path):
-    """Quantity = 0 lines (NDF fixed / settled, 2026-09-15 file) carry a fixing or a
-    stale Price and possibly a blank Fx: no FWD_OUTRIGHT or SPOT from them, no reject,
-    and they must not seed the quote-ccy -> USD map used for cross spots."""
-    import math
-
-    import pandas as pd
-
-    cols = [
-        "Fund", "Financial Type", "Symbol", "Symbol Description", "Currency", "Quantity",
-        "Local Cost", "Price", "Fx", "Market Value Local", "Market Value Base", "Account",
-        "CounterParty", "NM Strategy", "Trader Name", "DTD Total P&L", "DTD Trading P&L",
-        "MTD Total P&L", "Start Date Dirty MV", "Previous Month End Market Value Base",
-        "Position", "Trade Factor",
-    ]
-    base = {c: 0 for c in cols}
-    base.update({"Fund": "NMMF", "Financial Type": "FORWARD", "Account": "ACC", "CounterParty": "CPTY",
-                 "NM Strategy": "HAHY7", "Trader Name": "T", "Trade Factor": 1})
-    # settled USDHKD line first in file order: Price 0, Fx blank (NaN)
-    settled = dict(base, Symbol="USDHKD090826-1", Currency="HKD.C-HKAA", Quantity=0.0, Price=0.0, Fx=float("nan"),
-                   **{"Symbol Description": "TD 08/05/2026 VD 09/08/2026 SELL USD VS .BUY HKD @ 7.83444000"})
-    # fixed USDBRL NDF lines with two different "Price" values on one value date
-    fixed1 = dict(base, Symbol="USDBRL091626-2", Currency="BRL.C-BRAA", Quantity=0.0, Price=5.14965, Fx=0.194189,
-                  **{"Symbol Description": "TD 07/23/2026 VD 09/16/2026 SELL USD VS .BUY BRL @ 5.14017400"})
-    fixed2 = dict(fixed1, Symbol="USDBRL091626-3", Price=5.13257)
-    # live lines: a USDHKD forward (its Fx must be the one that seeds HKD) and a USDBRL later date
-    live_hkd = dict(base, Symbol="USDHKD101526-4", Currency="HKD.C-HKAA", Quantity=1000000.0,
-                    **{"Local Cost": 7800000.0, "Price": 7.79, "Fx": 0.128205, "Position": 1000000.0,
-                       "Symbol Description": "TD 09/01/2026 VD 10/15/2026 BUY USD VS .SELL HKD @ 7.80000000"})
-    live_brl = dict(base, Symbol="USDBRL092426-5", Currency="BRL.C-BRAA", Quantity=-1000000.0,
-                    **{"Local Cost": -5225640.0, "Price": 5.15904, "Fx": 0.194189, "Position": -1000000.0,
-                       "Symbol Description": "TD 08/20/2026 VD 09/24/2026 SELL USD VS .BUY BRL @ 5.22564000"})
-    path = tmp_path / "HA_PNL_20260915.csv"
-    pd.DataFrame([settled, fixed1, fixed2, live_hkd, live_brl]).to_csv(path, index=False)
-
-    result = bnp_marks.extract_bnp_marks(path, as_of_date="2026-09-14")
-    assert result.rejects == [] and result.n_skipped_closed == 3
-    marks = {(r.instrument_id, r.settle_date, r.mark_type): r.value for r in result.rows}
-    assert marks == {
-        ("USDHKD", "2026-10-15", "FWD_OUTRIGHT"): 7.79,
-        ("USDHKD", "2026-09-14", "SPOT"): pytest.approx(1 / 0.128205),
-        ("USDBRL", "2026-09-24", "FWD_OUTRIGHT"): 5.15904,
-        ("USDBRL", "2026-09-14", "SPOT"): pytest.approx(1 / 0.194189),
-    }
-    assert not any(math.isnan(r.value) for r in result.rows)
 
 
 # =========================================================================== pull_marks
@@ -1650,6 +1463,46 @@ def test_close_completeness(tmp_path):
     assert rows["2026-08-18"].present == 2 and rows["2026-08-18"].complete
 
 
+# --------------------------------------------------------------------------- inventory.py: stale_empty_pull_reason
+# (2026-09-17: the Bloomberg PC diagnostics panel reported the last live-feed pull as PASS
+# even though it had asked Bloomberg for 0 marks while the book genuinely needed some --
+# see data.bloomberg.live.LiveFeed.trigger_now's docstring for the root cause.)
+def test_stale_empty_pull_reason_none_when_nothing_needed(tmp_path):
+    from data.bloomberg import inventory
+    conn = schema.connect(":memory:")  # no trades at all -> genuinely nothing to price
+    status = {"connected": True, "requested": 0, "time": "2026-09-17T15:23:23+08:00"}
+    assert inventory.stale_empty_pull_reason(conn, status, "2026-09-17") is None
+
+
+def test_stale_empty_pull_reason_none_when_status_did_not_connect_or_is_missing():
+    from data.bloomberg import inventory
+    conn = _inventory_db()  # has open FX legs -> marks are needed
+    assert inventory.stale_empty_pull_reason(conn, None, "2026-08-17") is None
+    assert inventory.stale_empty_pull_reason(conn, {"connected": False, "reason": "x"}, "2026-08-17") is None
+
+
+def test_stale_empty_pull_reason_none_when_pull_actually_requested_something(tmp_path):
+    from data.bloomberg import inventory
+    conn = _inventory_db()
+    status = {"connected": True, "requested": 26, "time": "t"}
+    assert inventory.stale_empty_pull_reason(conn, status, "2026-08-17") is None
+
+
+def test_stale_empty_pull_reason_fails_when_requested_zero_but_marks_now_needed(tmp_path):
+    """The exact trap found on the Bloomberg PC: connected=True, requested=0 (the very
+    first pull ran before any trade was in the database), but the book now has open FX
+    legs, futures and options needing marks for as_of."""
+    from data.bloomberg import inventory
+    conn = _inventory_db()  # open AUDUSD/USDJPY forwards + an ESU6 future as of 2026-08-17
+    status = {"connected": True, "requested": 0, "written": 0, "time": "2026-09-17T15:23:23+08:00"}
+    reason = inventory.stale_empty_pull_reason(conn, status, "2026-08-17")
+    assert reason is not None
+    assert "2026-09-17T15:23:23+08:00" in reason
+    assert "0 marks" in reason
+    assert "Pull now" in reason
+    assert "next automatic pull" in reason
+
+
 # --------------------------------------------------------------------------- manual.py
 def test_write_manual_mark_is_visible_but_not_official(tmp_path):
     from data.bloomberg import manual, inventory
@@ -2824,3 +2677,145 @@ def test_rate_vol_marketdata_module_imports_without_blpapi():
     import data.bloomberg.rates_vol_marketdata as rvm
     importlib.reload(rvm)
     assert callable(rvm.rate_vol_ticker)
+
+
+# =========================================================================== 2_launcher.py: startup speed (2026-09-17)
+# The launcher is owned by bbg-data alongside data/bloomberg/ for this fix (a cross-cutting
+# startup-speed pass across 2_launcher.py + data/bloomberg/live.py + backfill.py); loaded by
+# file path the same way tests/test_risk_cli.py does (the filename starts with a digit, so
+# it cannot be a normal `import`). importlib.util.module_from_spec + exec_module never
+# registers into sys.modules, so loading it again here under an independent name cannot
+# collide with test_risk_cli.py's own separate load of the same file.
+def _load_launcher_module():
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("risk_launcher_perf", root / "2_launcher.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_packages_stamp_round_trips_and_changes_with_packages_list(tmp_path, monkeypatch):
+    risk = _load_launcher_module()
+    monkeypatch.setattr(risk, "VENV", tmp_path / "venv")
+    monkeypatch.setattr(risk, "PACKAGES_STAMP", tmp_path / "venv" / "packages.stamp")
+    (tmp_path / "venv").mkdir()
+    assert risk._packages_stamp_matches() is False       # no stamp written yet
+    risk._write_packages_stamp()
+    assert risk._packages_stamp_matches() is True
+    # Editing PACKAGES invalidates a previously-written stamp.
+    monkeypatch.setattr(risk, "PACKAGES", risk.PACKAGES + ["a-new-dependency>=1"])
+    assert risk._packages_stamp_matches() is False
+
+
+def test_venv_imports_ok_skips_subprocess_when_stamp_matches(tmp_path, monkeypatch):
+    """The real perf fix: on a matching stamp, venv_imports_ok() must never spawn the
+    VENV_PY subprocess (measured 1.5s/start on a slow PC, 2026-09-17)."""
+    risk = _load_launcher_module()
+    monkeypatch.setattr(risk, "VENV", tmp_path / "venv")
+    monkeypatch.setattr(risk, "PACKAGES_STAMP", tmp_path / "venv" / "packages.stamp")
+    (tmp_path / "venv").mkdir()
+    risk._write_packages_stamp()
+
+    def boom(*a, **k):
+        raise AssertionError("subprocess.call must not run when the stamp matches")
+
+    monkeypatch.setattr(risk.subprocess, "call", boom)
+    assert risk.venv_imports_ok() is True
+
+
+def test_venv_imports_ok_falls_back_to_subprocess_and_writes_stamp_on_success(tmp_path, monkeypatch):
+    risk = _load_launcher_module()
+    monkeypatch.setattr(risk, "VENV", tmp_path / "venv")
+    monkeypatch.setattr(risk, "PACKAGES_STAMP", tmp_path / "venv" / "packages.stamp")
+    (tmp_path / "venv").mkdir()
+    assert not (tmp_path / "venv" / "packages.stamp").exists()
+    monkeypatch.setattr(risk.subprocess, "call", lambda *a, **k: 0)  # simulate a clean import check
+    assert risk.venv_imports_ok() is True
+    assert risk._packages_stamp_matches() is True  # cached for the next call
+
+
+def test_cmd_start_skips_pip_install_when_refresh_packages_flag_set_but_stamp_matches(tmp_path, monkeypatch):
+    """2026-09-17 fix: --refresh-packages (set on every start after a GitHub code update)
+    used to force an unconditional `pip install` even when nothing needed installing --
+    the single biggest cost on a PC with slow PyPI access. Only venv_imports_ok() (stamp-
+    backed) may trigger it now."""
+    risk = _load_launcher_module()
+    monkeypatch.setattr(risk, "in_venv", lambda: False)
+    monkeypatch.setattr(risk, "sync_with_github", lambda: (False, "code is current with GitHub (test)"))
+    monkeypatch.setattr(risk.VENV_PY.__class__, "exists", lambda self: True)
+    monkeypatch.setattr(risk, "venv_imports_ok", lambda: True)  # stamp says: nothing to do
+
+    def boom(cmd, **kw):
+        if "pip" in cmd:
+            raise AssertionError("pip install must not run merely because --refresh-packages was set")
+        return 0
+
+    monkeypatch.setattr(risk.subprocess, "call", boom)
+    monkeypatch.setattr(risk.sys, "argv", ["2_launcher.py", "start", "--refresh-packages"])
+    args = risk.build_parser().parse_args(["start", "--refresh-packages"])
+    risk.cmd_start(args)  # must not raise via the boom() guard above
+
+
+def test_cmd_setup_sample_skipped_when_trades_already_present(tmp_path, monkeypatch):
+    """2026-09-17: `setup --sample` must only ever seed an empty database -- the blotter
+    upload is the one live trade source and replaces everything on a real PC."""
+    risk = _load_launcher_module()
+    db = tmp_path / "risk.db"
+    conn = schema.connect(db)
+    conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('a1','XLSX','USDJPY','FX_FWD','a1','2026-08-10',1e6,150.0,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.commit()
+    monkeypatch.setenv("RISK_DB", str(db))
+    assert risk._trades_count() == 1
+
+    calls = []
+    monkeypatch.setattr(risk, "run", lambda cmd, **kw: calls.append(cmd))
+    args = risk.build_parser().parse_args(["setup", "--sample", "--skip-tests", "--no-bloomberg"])
+    monkeypatch.setattr(risk.sys, "version_info", risk.sys.version_info)  # keep real (>= MIN_PYTHON)
+    monkeypatch.setattr(risk, "install_pnl_function", lambda: [])
+    risk.cmd_setup(args)
+    assert not any("_load_sample" in str(c) for call in calls for c in call)
+
+
+def test_trades_count_zero_when_database_missing(tmp_path, monkeypatch):
+    risk = _load_launcher_module()
+    monkeypatch.setenv("RISK_DB", str(tmp_path / "nope.db"))
+    assert risk._trades_count() == 0
+
+
+def test_sync_with_github_fetch_timeout_reports_slow_github_not_a_generic_git_error(monkeypatch):
+    """A blocked/slow GitHub (seen from China, 2026-09-17) must not stall every `start`
+    for the default 90s subprocess timeout, and must say plainly what happened."""
+    import subprocess as _subprocess
+    risk = _load_launcher_module()
+    monkeypatch.setattr(risk, "ROOT", risk.ROOT)  # ROOT is a real git repo in this checkout
+
+    def fake_git(*args, timeout=90):
+        assert args[:2] == ("fetch", "origin") and timeout == 10  # short-timeout ask
+        raise _subprocess.TimeoutExpired(cmd="git fetch", timeout=timeout)
+
+    monkeypatch.setattr(risk, "_git", fake_git)
+    changed, message = risk.sync_with_github()
+    assert changed is False
+    assert message == "GitHub slow, running the code on disk"
+
+
+def test_tcp_open_resolves_localhost_to_127_0_0_1(monkeypatch):
+    risk = _load_launcher_module()
+    seen = []
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_create_connection(addr, timeout=None):
+        seen.append(addr)
+        return _FakeConn()
+
+    monkeypatch.setattr(risk.socket, "create_connection", fake_create_connection)
+    assert risk.tcp_open("localhost", 8194) is True
+    assert seen == [("127.0.0.1", 8194)]
