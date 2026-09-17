@@ -77,6 +77,16 @@ def read_status(db_path) -> Optional[dict]:
         return None
 
 
+def book_today() -> date:
+    """The book date marks are stamped with: today in America/New_York (CLAUDE.md: the
+    official close is 17:00 New York). Never the PC's local date -- a PC in Asia is a day
+    ahead of New York until early afternoon, and marks stamped with its local date would
+    be a day away from the date every screen looks up (found on the first live run,
+    2026-09-17)."""
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -308,7 +318,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # source that no longer feeds the app -- so on a database still carrying
             # the 2026-08-17 BNP positions the feed built its request list as of that
             # day and never asked for a mark on any trade dated after it.
-            today = today or date.today()
+            today = today or book_today()
             if as_of_date is None:
                 as_of_date = today.isoformat()
             status["as_of_date"] = as_of_date
@@ -317,7 +327,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             if not requests:
                 # Nothing FX-shaped to price, but swaps and options may still need a
                 # curve / premium refresh (2026-09-17) before the FX-only early return.
-                today = today or date.today()
+                today = today or book_today()
                 status["rates"] = _rates_step(conn, today, host, port, rates_source)
                 status["options"] = _options_step(conn, today)
                 status.update(connected=True, reason="no open FX legs or futures to price")
@@ -329,7 +339,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             else:
                 session, service = session_factory()
             snapped = _now_iso()  # live pull: real wall-clock time, not the 15:00 NY convention
-            today = today or date.today()
+            today = today or book_today()
             spot_rows, spot_fail = _live_spot_rows(session, service, requests, today, diag, snapped)
             spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows}
             # A forward whose settle date is already past (trade settled since the snapshot)

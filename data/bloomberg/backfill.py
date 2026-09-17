@@ -221,7 +221,8 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         if earliest is None:
             log("Auto-backfill: no trades in the database; nothing to do.")
             return []
-        yesterday = date.today() - timedelta(days=1)
+        from data.bloomberg.live import book_today
+        yesterday = book_today() - timedelta(days=1)
         if earliest > yesterday:
             return []
         completeness = close_completeness(conn, earliest.isoformat(), yesterday.isoformat())
@@ -300,7 +301,8 @@ def main(argv=None) -> int:
     if args.db is None:
         from ui.app import get_db_path
         args.db = get_db_path()
-    today = date.today()
+    from data.bloomberg.live import book_today
+    today = book_today()
     start = date.fromisoformat(args.start) if args.start else _last_business_day_of_prev_year(today)
     end = date.fromisoformat(args.end) if args.end else today - timedelta(days=1)
     from data.bloomberg.live import availability

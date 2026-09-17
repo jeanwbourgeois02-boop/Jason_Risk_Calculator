@@ -465,7 +465,8 @@ class VolBloombergSource:
         failures are recorded in the result's `diagnostics`, never raised -- see class
         docstring. `tenors` narrows the tenor grid (used by --probe to fetch just one
         tenor); defaults to VOL_TENORS."""
-        effective_as_of = as_of if as_of is not None else date.today()
+        from data.bloomberg.live import book_today
+        effective_as_of = as_of if as_of is not None else book_today()
         tenor_list = list(tenors) if tenors is not None else list(VOL_TENORS)
 
         needed = [

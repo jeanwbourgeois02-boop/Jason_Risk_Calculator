@@ -677,7 +677,8 @@ class RatesBloombergSource:
         # OIS curve quotes here are all PX_LAST (see OIS_CURVES) -- a single field.
         field = "PX_LAST"
 
-        if as_of == datetime.date.today():
+        from data.bloomberg.live import book_today
+        if as_of == book_today():
             values = self._fetch_reference(tickers, [field])
         else:
             raw = self._fetch_historical_single(tickers, field, as_of)

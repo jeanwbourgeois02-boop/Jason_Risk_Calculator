@@ -573,7 +573,8 @@ class RateVolBloombergSource:
         for every (ccy, instrument, expiry, underlying_tenor, vol_type) ticker, batched
         into one request. Per-ticker failures are recorded in the result's
         `diagnostics`, never raised -- see class docstring."""
-        effective_as_of = as_of if as_of is not None else date.today()
+        from data.bloomberg.live import book_today
+        effective_as_of = as_of if as_of is not None else book_today()
         instruments = list(instruments) if instruments is not None else list(INSTRUMENTS)
         vol_types = list(vol_types) if vol_types is not None else list(VOL_TYPES)
         expiries = list(expiries) if expiries is not None else list(EXPIRY_TENORS)
