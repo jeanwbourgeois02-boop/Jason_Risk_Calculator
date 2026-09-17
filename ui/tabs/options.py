@@ -134,6 +134,24 @@ def _spot_to_usd(conn: sqlite3.Connection, as_of: str, ccy: str) -> Optional[flo
     return None
 
 
+def _instrument_options_columns(conn: sqlite3.Connection) -> set:
+    """Columns actually present on this DB's `instrument_options` table (2026-09-17 dev-DB
+    fix): `CREATE TABLE IF NOT EXISTS` in `data/ingest/schema.py` never adds a column to an
+    already-existing table, so a DB created before the `payoff` column landed (this app's
+    dev DB, `data/raw/risk.db`) still has the 4-column version and a bare `SELECT
+    o.payoff` throws `OperationalError: no such column`, which was never caught -- the
+    whole Options sub-tab returned an HTTP 500 and the tab looked like it "did not load"
+    (no partial render, no message, just a dead callback). Queried live (not memoised):
+    this is one cheap PRAGMA per render, and the alternative -- caching across a schema
+    change -- risks silently hiding a real migration gap. Real fix belongs in
+    `data/ingest/schema.py` (an `ALTER TABLE instrument_options ADD COLUMN ...` migration
+    for pre-existing DBs); reported, not made here (outside this agent's owned files)."""
+    try:
+        return {row[1] for row in conn.execute("PRAGMA table_info(instrument_options)").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
 def _official_marks(conn: sqlite3.Connection, as_of: str, instrument_id: str,
                      settle_date: str, mark_types: Iterable[str]) -> dict:
     mark_types = tuple(mark_types)
@@ -201,11 +219,15 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict) -> dict:
 
 
 def _leg_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+    opt_cols = _instrument_options_columns(conn)
+    strike_expr = "COALESCE(o.strike, 0)" if "strike" in opt_cols else "0"
+    option_type_expr = "COALESCE(o.option_type, '')" if "option_type" in opt_cols else "''"
+    payoff_expr = "COALESCE(o.payoff, 'VANILLA')" if "payoff" in opt_cols else "'VANILLA'"
     trades = pd.read_sql_query(
         "SELECT t.trade_id, t.package_id, t.instrument_id, t.quantity, t.product, "
         "i.base_ccy, i.quote_ccy, i.multiplier, i.expiry_date, i.bbg_ticker, "
-        "COALESCE(o.strike, 0) AS strike, COALESCE(o.option_type, '') AS option_type, "
-        "COALESCE(o.payoff, 'VANILLA') AS payoff "
+        f"{strike_expr} AS strike, {option_type_expr} AS option_type, "
+        f"{payoff_expr} AS payoff "
         "FROM trades_official t JOIN instruments i ON i.instrument_id = t.instrument_id "
         "LEFT JOIN instrument_options o ON o.instrument_id = t.instrument_id "
         "WHERE t.product IN ('FX_OPTION','EQ_OPTION','CMDTY_OPTION') "
@@ -421,14 +443,21 @@ TERMS_STATUS_ID = "options-terms-status"
 
 def option_instruments(conn: sqlite3.Connection) -> List[dict]:
     """Every option instrument with a trade on file, with its current terms; options
-    with no strike first so the ones that block pricing are at the top of the list."""
+    with no strike first so the ones that block pricing are at the top of the list.
+    Same missing-column defence as `_leg_rows` (`_instrument_options_columns`) -- this
+    query hits the same pre-`payoff`-column dev DB via `terms_editor`."""
+    opt_cols = _instrument_options_columns(conn)
+    strike_expr = "COALESCE(o.strike, 0)" if "strike" in opt_cols else "0"
+    option_type_expr = "COALESCE(o.option_type, '')" if "option_type" in opt_cols else "''"
+    payoff_expr = "COALESCE(o.payoff, 'VANILLA')" if "payoff" in opt_cols else "'VANILLA'"
+    barrier_expr = "COALESCE(o.barrier_level, 0)" if "barrier_level" in opt_cols else "0"
     rows = conn.execute(
-        "SELECT DISTINCT i.instrument_id, i.expiry_date, COALESCE(o.strike, 0), COALESCE(o.option_type, ''), "
-        "COALESCE(o.payoff, 'VANILLA'), COALESCE(o.barrier_level, 0) "
+        f"SELECT DISTINCT i.instrument_id, i.expiry_date, {strike_expr}, {option_type_expr}, "
+        f"{payoff_expr}, {barrier_expr} "
         "FROM trades_official t JOIN instruments i USING (instrument_id) "
         "LEFT JOIN instrument_options o USING (instrument_id) "
         "WHERE t.product IN ('FX_OPTION','EQ_OPTION','CMDTY_OPTION') "
-        "ORDER BY (COALESCE(o.strike, 0) = 0) DESC, i.expiry_date, i.instrument_id").fetchall()
+        f"ORDER BY ({strike_expr} = 0) DESC, i.expiry_date, i.instrument_id").fetchall()
     return [{"instrument_id": r[0], "expiry": r[1], "strike": r[2], "option_type": r[3],
              "payoff": r[4], "barrier_level": r[5]} for r in rows]
 

@@ -11,6 +11,7 @@ import sqlite3
 import dash
 import pandas as pd
 import pytest
+from dash import html
 
 from data.ingest import schema, themes
 from ui.tabs import blotter, blotter_bundles, blotter_pricing, header, options
@@ -389,6 +390,182 @@ def test_options_scope_prices_an_option_row():
         conn.close()
 
 
+def test_options_scope_survives_stale_dev_db_schema():
+    """Reproduces, at the full `blotter.scope_layout` call `_update` makes, the 2026-09-17
+    bug found live against `data/raw/risk.db`: that DB's `instrument_options` table
+    predates the `payoff` column (`CREATE TABLE IF NOT EXISTS` never adds a column to an
+    existing table), so `ui.tabs.options`'s query raised `OperationalError: no such
+    column: o.payoff`, uncaught -- an HTTP 500 that made the Options sub-tab look like
+    it "did not load" with no on-page message at all. Fixed in `ui.tabs.options`
+    (`_instrument_options_columns` guard); this asserts the sub-tab still renders."""
+    conn = _make_db()
+    try:
+        _add_option(conn)
+        # Rebuild instrument_options with the pre-payoff-column shape observed on the
+        # analyst's dev DB via PRAGMA table_info (5 columns, no `payoff`).
+        conn.execute("DROP TABLE instrument_options")
+        conn.execute(
+            "CREATE TABLE instrument_options (instrument_id TEXT PRIMARY KEY, strike REAL NOT NULL DEFAULT 0, "
+            "option_type TEXT NOT NULL DEFAULT '', barrier_level REAL NOT NULL DEFAULT 0, "
+            "avg_start_date TEXT NOT NULL DEFAULT '9999-12-31')"
+        )
+        conn.execute("INSERT INTO instrument_options VALUES ('EURUSD092226C-1', 1.11, 'CALL', 0, '9999-12-31')")
+        conn.commit()
+        layout = blotter.scope_layout("options", conn, "2026-06-20")
+        assert layout.children[0].id == "blotter-strip-options"
+        table = next(t for t in _find_tables(layout) if t.id == options.TABLE_ID)
+        assert any(r["instrument"] == "EURUSD092226C-1" for r in table.data)
+    finally:
+        conn.close()
+
+
+def test_error_card_shows_label_and_message():
+    card = blotter._error_card("Rates", RuntimeError("boom"))
+    assert "Rates could not be rendered (boom)." in card.children[0].children
+
+
+def test_safe_section_passes_through_on_success():
+    """`_safe_section` must not add any wrapping/nesting on success -- every other test
+    in this file asserting on `scope_layout`'s exact returned structure depends on
+    this being a pure pass-through."""
+    sentinel = html.Div(id="sentinel")
+    assert blotter._safe_section("X", lambda: sentinel) is sentinel
+
+
+def test_safe_section_turns_exception_into_error_card():
+    def boom():
+        raise ValueError("bad data")
+    result = blotter._safe_section("Rates", boom)
+    assert "Rates could not be rendered (bad data)." in result.children[0].children
+
+
+def test_rates_strip_failure_still_renders_rates_table():
+    """2026-09-17 coordinator instruction: a failure in one sub-section of a scope's
+    layout (here, the P&L strip feeding off `row_scoped_headline`) must not blank a
+    sibling section (the delegated Rates table) that doesn't depend on it."""
+    conn = _make_db()
+    try:
+        _add_irs(conn, pv=250_000.0, cashflow=1_000.0)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("strip boom")
+
+        # blotter.py does `from ui.tabs.blotter_pricing import row_scoped_headline`, so
+        # the name to patch is the one bound into blotter's own namespace, not the
+        # attribute on the blotter_pricing module (patching that would have no effect
+        # here -- blotter.py already holds its own reference to the original function).
+        original = blotter.row_scoped_headline
+        blotter.row_scoped_headline = boom
+        try:
+            layout = blotter.scope_layout("rates", conn, "2026-06-20")
+        finally:
+            blotter.row_scoped_headline = original
+
+        strip_section = layout.children[0]
+        assert "P&L strip could not be rendered (strip boom)." in strip_section.children[0].children
+        table = next(t for t in _find_tables(layout) if t.id == "rates-datatable")
+        assert table.data  # Rates table still rendered despite the strip failure
+    finally:
+        conn.close()
+
+
+def test_options_delegated_build_failure_still_renders_strip():
+    """The reverse pairing of the previous test: a failure in the delegated Options
+    table build must not blank the P&L strip above it."""
+    conn = _make_db()
+    try:
+        _add_option(conn)
+        conn.execute(
+            "INSERT INTO instrument_options VALUES ('EURUSD092226C-1',1.11,'CALL',0,'9999-12-31','VANILLA')"
+        )
+        conn.commit()
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("options boom")
+
+        original = options.build_layout
+        options.build_layout = boom
+        try:
+            layout = blotter.scope_layout("options", conn, "2026-06-20")
+        finally:
+            options.build_layout = original
+
+        assert layout.children[0].id == "blotter-strip-options"  # strip unaffected
+        options_section = layout.children[1]
+        assert "Options could not be rendered (options boom)." in options_section.children[0].children
+    finally:
+        conn.close()
+
+
+def test_asset_class_table_failure_still_renders_strip_and_trade_table():
+    """Total book: a failure in the asset-class-by-P&L rollup must not blank the strip
+    above it or the trade table below it."""
+    conn = _make_db()
+    try:
+        def boom(*args, **kwargs):
+            raise RuntimeError("asset class boom")
+
+        original = blotter.asset_class_pnl_table
+        blotter.asset_class_pnl_table = boom
+        try:
+            layout = blotter.scope_layout("total", conn, "2026-06-20")
+        finally:
+            blotter.asset_class_pnl_table = original
+
+        assert layout.children[0].id == "blotter-strip-total"
+        asset_class_section = layout.children[1]
+        assert "P&L by asset class could not be rendered (asset class boom)." in asset_class_section.children[0].children
+        table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total")
+        assert table.data  # trade table still rendered
+    finally:
+        conn.close()
+
+
+def test_pricing_df_failure_shows_single_error_card_not_a_crash():
+    """`scope_df` itself failing (e.g. a broken query) is the one case with nothing
+    partial to preserve -- everything downstream needs `df` -- but it must still
+    degrade to one inline card rather than raising past `scope_layout`."""
+    conn = _make_db()
+    try:
+        def boom(*args, **kwargs):
+            raise RuntimeError("db boom")
+
+        original = blotter.scope_df
+        blotter.scope_df = boom
+        try:
+            layout = blotter.scope_layout("total", conn, "2026-06-20")
+        finally:
+            blotter.scope_df = original
+
+        assert "Pricing could not be rendered (db boom)." in layout.children[0].children[0].children
+    finally:
+        conn.close()
+
+
+def test_bundles_scope_failure_via_update_does_not_crash_whole_callback(tmp_path, monkeypatch):
+    """The "Bundles" section is dispatched from `_update`, not `scope_layout` -- confirm
+    it gets the same `_safe_section` treatment so a bundles-specific bug degrades to an
+    inline card (via `_update`'s own return, since `bundles_layout` has no sibling
+    section to preserve) instead of the whole callback raising."""
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    conn.close()
+
+    app = dash.Dash(__name__)
+    blotter.register_callbacks(app, get_db_path=lambda: str(db_path))
+    update_key = next(k for k in app.callback_map if k.startswith(blotter.CONTENT_ID))
+    update_fn = app.callback_map[update_key]["callback"]
+    update_fn = getattr(update_fn, "__wrapped__", update_fn)
+
+    def boom(conn, as_of):
+        raise RuntimeError("bundles boom")
+
+    monkeypatch.setattr(blotter, "bundles_layout", boom)
+    result = update_fn("2026-06-20", "bundles")
+    assert "Bundles could not be rendered (bundles boom)." in result.children[0].children
+
+
 def test_total_book_asset_class_rows_sum_to_total():
     """2026-09-17 user request: the Total book shows P&L by asset class (FX / Futures /
     Rates / Options) plus a Total that equals the strip."""
@@ -486,21 +663,26 @@ def test_priced_value_book_no_fallback_needed():
         df, n_fallback, n_total = blotter_pricing.priced_value_book(conn, "2026-06-20")
         assert n_fallback == 0
         assert n_total == 1
-        assert not df["priced_from_bnp"].any()
+        assert "priced_from_bnp" not in df.columns
     finally:
         conn.close()
 
 
-def test_priced_value_book_falls_back_to_bnp_bval():
+def test_priced_value_book_never_retries_against_bnp_bval():
+    """2026-09-17 user decision "no bnp fall back": a DB with only a `BNP_BVAL` mark on
+    file (the shape `_make_db_bnp_only` builds) must NOT be priced from it -- CLAUDE.md
+    says BNP_BVAL is reconciliation-only, never official, and this module no longer
+    retries a missing official mark against it at all. The row stays unpriced (`reason`
+    non-empty, `pnl_usd` NaN) exactly like a DB with no marks whatsoever."""
     conn = _make_db_bnp_only()
     try:
         df, n_fallback, n_total = blotter_pricing.priced_value_book(conn, "2026-06-20")
-        assert n_fallback == 1
+        assert n_fallback == 0
         assert n_total == 1
         row = df.iloc[0]
-        assert row["priced_from_bnp"]
-        assert row["mark_source"] == blotter_pricing.FALLBACK_LABEL
-        assert row["pnl_usd"] == pytest.approx(1000000 * (1.1080 - 1.10))
+        assert row["reason"] != ""
+        assert row["pnl_usd"] != row["pnl_usd"]  # NaN
+        assert row["mark_source"] != "BNP_BVAL"  # never adopted as if it were official
     finally:
         conn.close()
 
@@ -514,22 +696,6 @@ def test_priced_value_book_no_marks_stays_unpriced():
         row = df.iloc[0]
         assert row["reason"] != ""
         assert row["pnl_usd"] != row["pnl_usd"]  # NaN
-    finally:
-        conn.close()
-
-
-def test_fallback_caption_wording():
-    assert blotter.fallback_caption(1, 2) == "1 of 2 rows priced from BNP file rates, not Bloomberg."
-    assert blotter.fallback_caption(0, 2) is None
-
-
-def test_scope_layout_shows_fallback_caption():
-    conn = _make_db_bnp_only()
-    try:
-        layout = blotter.scope_layout("total", conn, "2026-06-20")
-        strip_div = layout.children[0]
-        caption_p = strip_div.children.children[1]
-        assert "priced from BNP file rates, not Bloomberg" in caption_p.children
     finally:
         conn.close()
 
@@ -682,6 +848,33 @@ def test_bundles_layout_smoke():
 def test_build_layout_smoke():
     layout = blotter.build_layout(default_date="2026-06-20")
     assert layout.className == "blotter"
+
+
+def test_update_content_degrades_to_message_on_unexpected_exception(tmp_path, monkeypatch):
+    """2026-09-17: only `ImportError` was ever caught around `scope_layout`/
+    `bundles_layout` in `_update` -- any other exception (e.g. the stale-dev-DB
+    `OperationalError` `ui.tabs.options` hit live) propagated past Dash's callback
+    wrapper as an uncaught HTTP 500, so `Output(blotter-content, "children")` never
+    fired and the tab just stayed on its previous/blank content: the user-visible
+    shape of "the blotter sub tabs do not load". Every exception now degrades to a
+    message_box for that one render instead of taking the whole tab down."""
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    conn.close()
+
+    app = dash.Dash(__name__)
+    blotter.register_callbacks(app, get_db_path=lambda: str(db_path))
+    update_key = next(k for k in app.callback_map if k.startswith(blotter.CONTENT_ID))
+    update_fn = app.callback_map[update_key]["callback"]
+    update_fn = getattr(update_fn, "__wrapped__", update_fn)
+
+    def boom(scope, conn, as_of):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(blotter, "scope_layout", boom)
+    result = update_fn("2026-06-20", "total")
+    assert "could not be rendered" in result.children
 
 
 def test_register_callbacks_and_render_via_app():

@@ -1,17 +1,28 @@
-"""Fallback pricing for the Blotter tab (user decision 2026-09-15, item 5).
+"""Pricing helpers for the Blotter tab: a memoised front for
+`engine.pnl.valuation.value_book` (`priced_value_book`) plus the row-scoped P&L
+strip/headline aggregation every sub-tab uses (`row_scoped_headline`,
+`row_scoped_period_pnl`, `asset_class_pnl_rows`'s underlying pieces). This module does
+no valuation math of its own -- all P&L arithmetic stays inside `engine/pnl/`; rows
+with no official mark (`reason` non-empty) always still render (trade, fill, dates,
+status) with blank P&L, per CLAUDE.md's "Missing values stay missing everywhere".
 
-The DB on the analyst's PC has no Bloomberg marks yet, only `BNP_BVAL` marks written
-from the BNP file. `engine.pnl.valuation.value_book` reads `marks_official` by default
-(`BNP_BVAL` is never official per CLAUDE.md), so every row would come back with
-`pnl_usd = NaN` and a `reason` on a Bloomberg-less machine. Per the decision, rows must
-always render (trade, fill, dates, status) and P&L should retry a missing mark with
-`marks_source='BNP_BVAL'` rather than blank the whole tab; any row priced this way is
-labelled so nobody mistakes a BNP file rate for an official Bloomberg mark.
-
-This module does no valuation math of its own -- it only re-runs
-`engine.pnl.valuation.value_book` a second time with `marks_source='BNP_BVAL'` for the
-rows that came back NaN from the official pass, and merges the result in. All P&L
-arithmetic stays inside `engine/pnl/`.
+**No BNP_BVAL fallback pricing (removed 2026-09-17, user decision "no bnp fall back",
+verbatim).** From 2026-09-15 to 2026-09-17 this module retried a row with no official
+mark against `marks_source='BNP_BVAL'` so a Bloomberg-less DB still showed a P&L number,
+labelled as coming from the BNP file rather than Bloomberg. The user reversed that
+decision: CLAUDE.md's "Official marks" table already says `BNP_BVAL` is reconciliation
+-only and never feeds P&L, so the retry was a standing violation of that rule, not a
+sanctioned exception to it -- it is gone, not merely optimised (a same-day earlier
+change in this session had vectorised the fallback merge for performance; that whole
+code path is now deleted rather than kept faster). `priced_value_book` still returns
+its original `(df, n_fallback, n_total)` three-tuple so callers outside this lane (e.g.
+`ui/tabs/header.py`) do not break -- `n_fallback` is now always `0`; the `df` no longer
+carries a `priced_from_bnp` column at all, since nothing reads it any more once the
+Blotter/FX badge text that used to display it was also removed (see
+`ui/tabs/blotter.py` and `ui/tabs/blotter_fx.py`). `engine/pnl/valuation.py`'s own
+`marks_source` parameter on `value_book` has since been removed outright (2026-09-17,
+same pass) -- this module already only ever called it with the default (official-only),
+so nothing here needed to change when that parameter disappeared.
 """
 from __future__ import annotations
 
@@ -31,12 +42,6 @@ from engine.pnl.aggregate import (
     load_holidays,
 )
 from engine.pnl.valuation import value_book
-
-FALLBACK_SOURCE = "BNP_BVAL"
-FALLBACK_LABEL = "BNP file (not Bloomberg)"
-
-_MERGE_COLS = ["mark", "mark_date", "mark_source", "spot", "spot_source", "pnl_local",
-               "pnl_usd", "pnl_spot_usd", "pnl_carry_usd", "reason", "note"]
 
 
 def _db_cache_key(conn: sqlite3.Connection):
@@ -79,43 +84,14 @@ def priced_value_book(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFram
 
 
 def _priced_value_book_uncached(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, int, int]:
-    """`value_book(as_of)`, with any row still unpriced (non-empty `reason`) retried at
-    `marks_source='BNP_BVAL'`. Returns `(df, n_fallback, n_total)`; `df` gets an extra
-    boolean column `priced_from_bnp` and, for fallback rows, `mark_source` is relabelled
-    `FALLBACK_LABEL` for display (the raw source string from `marks` is not lost -- it
-    is folded into `note` instead). Rows are never dropped: a trade with no mark at all
-    (official or BNP_BVAL) still renders with its `reason` intact and `pnl_usd = NaN`."""
+    """`value_book(as_of)` unchanged -- no second pass, no fallback merge (removed
+    2026-09-17, module docstring). Returns `(df, 0, n_total)`: the `0` and the
+    3-tuple shape are kept only so callers outside this lane (`ui/tabs/header.py`)
+    that still unpack `(df, n_fallback, n_total)` do not break. A row with no
+    official mark keeps its `reason` and `pnl_usd = NaN` exactly as `value_book`
+    returns it; this function does not touch it further."""
     df = value_book(conn, as_of)
-    n_total = len(df)
-    if df.empty:
-        df = df.copy()
-        df["priced_from_bnp"] = pd.Series(dtype=bool)
-        return df, 0, 0
-
-    df = df.copy()
-    df["priced_from_bnp"] = False
-    missing = df.index[df["reason"] != ""]
-    n_fallback = 0
-    if len(missing):
-        fb = value_book(conn, as_of, marks_source=FALLBACK_SOURCE)
-        fb_by_id = fb.set_index("trade_id") if not fb.empty else fb
-        for idx in missing:
-            trade_id = df.at[idx, "trade_id"]
-            if fb.empty or trade_id not in fb_by_id.index:
-                continue
-            frow = fb_by_id.loc[trade_id]
-            if isinstance(frow, pd.DataFrame):  # duplicate trade_id, shouldn't happen; take first
-                frow = frow.iloc[0]
-            if frow["reason"] != "":
-                continue  # still unpriced even from the BNP file; leave the original reason
-            for col in _MERGE_COLS:
-                df.at[idx, col] = frow[col]
-            note = str(df.at[idx, "note"] or "")
-            df.at[idx, "note"] = (note + " " if note else "") + f"priced from {FALLBACK_SOURCE} (not Bloomberg)."
-            df.at[idx, "mark_source"] = FALLBACK_LABEL
-            df.at[idx, "priced_from_bnp"] = True
-            n_fallback += 1
-    return df, n_fallback, n_total
+    return df, 0, len(df)
 
 
 def _sum_pnl(df: pd.DataFrame) -> float:
@@ -135,8 +111,9 @@ def _priced_ltd(conn: sqlite3.Connection, as_of: str, products: Optional[tuple])
 
 def scoped_period_pnl(conn: sqlite3.Connection, as_of: str, products: Optional[tuple] = None) -> Dict[str, dict]:
     """`engine.pnl.ledger.period_pnl`'s shape (LTD/Daily/5d/MTD/YTD/trading, each
-    `{value, ref_date, available, reason}`), but computed from `priced_value_book` (so
-    a BNP_BVAL-only book still prices) and optionally filtered to `products`."""
+    `{value, ref_date, available, reason}`), but computed from `priced_value_book`
+    (a thin memoised front for `value_book`, see module docstring) and optionally
+    filtered to `products`."""
     holidays = load_holidays()
     d = dt.date.fromisoformat(as_of)
     t1 = _prev_business_day(d, holidays)
@@ -210,10 +187,10 @@ PERIOD_TITLES = {"ltd": "LTD", "daily": "Daily", "previous_day": "Previous day",
 
 
 def _priced_sum_for_ids(conn: sqlite3.Connection, date: str, trade_ids) -> Tuple[float, list]:
-    """Sum `pnl_usd` (fallback-priced) over `trade_ids` present in `date`'s book
-    (a trade_id not yet on the book on `date`, e.g. traded later, is simply excluded,
-    not an error). Returns `(value, bad_trade_ids)`; `value` is NaN iff at least one
-    present row is still unpriced from every source, and `bad_trade_ids` names them."""
+    """Sum `pnl_usd` over `trade_ids` present in `date`'s book (a trade_id not yet on
+    the book on `date`, e.g. traded later, is simply excluded, not an error). Returns
+    `(value, bad_trade_ids)`; `value` is NaN iff at least one present row has no
+    official mark, and `bad_trade_ids` names them."""
     if not trade_ids:
         return 0.0, []
     df, _, _ = priced_value_book(conn, date)

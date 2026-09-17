@@ -1,9 +1,11 @@
 """Blotter tab: docs/BUILD_PLAN.md section 5 "Blotter", rebuilt 2026-09-15 into five
 sub-tabs (user decision): Total book, FX, Rates, Options, Bundles. Rows come from
 `engine.pnl.valuation.value_book(as_of)` (via `ui.tabs.blotter_pricing.priced_value_book`,
-which retries a missing official mark with `marks_source='BNP_BVAL'` so a
-Bloomberg-less DB still prices -- see that module's docstring), filtered per sub-tab by
-`product`.
+a thin memoisation layer -- see that module's docstring), filtered per sub-tab by
+`product`. A row with no official mark shows its `reason` and blank P&L; it is never
+retried against `BNP_BVAL` (removed 2026-09-17, user decision "no bnp fall back" --
+CLAUDE.md already says BNP_BVAL is reconciliation-only and never feeds P&L, so the
+retry this docstring used to describe was a violation of that rule, not a feature).
 
 Filtering (rebuilt 2026-09-15, user decision -- the prior native text filter row on
 `dash_table.DataTable` did not work in this Dash version: verified with a bare
@@ -22,9 +24,7 @@ Sub-tab layout, each (Total book / FX / Rates / Options):
       exactly the rows currently visible in that sub-tab's table AFTER native header
       filtering (`derived_virtual_data`), per the 2026-09-15 coordinator addition, via
       `ui.tabs.blotter_pricing.row_scoped_period_pnl`. Each figure shows its reference
-      date underneath. A fallback caption ("n of m rows priced from BNP file rates, not
-      Bloomberg") appears whenever any row in the sub-tab's *scope* (not just the
-      visible slice) used the BNP_BVAL retry.
+      date underneath.
   (b) the trade table: `status` (OPEN/SETTLED) and `instrument_id` are ordinary native-
       filterable columns; row expand (an `html.Details` per trade) shows legs and the
       marks used, exactly as before.
@@ -185,7 +185,7 @@ _COLUMN_LABELS = {
 }
 # Columns that keep their raw (pre-display-formatting) value for the row-click detail
 # panel and for the visible-rows -> headline callback.
-_PASSTHROUGH_COLS = ("priced_from_bnp", "reason")
+_PASSTHROUGH_COLS = ("reason",)
 
 
 def message_box(message: str) -> html.P:
@@ -256,11 +256,9 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
                 if not df.empty else []
     data_records = formatted.to_dict("records")
     tooltip_data = []
-    # priced_from_bnp/trade_id/reason travel with the row (not all displayed) so the
+    # trade_id/reason travel with the row (not all displayed) so the
     # derived_virtual_data callback and the row-click detail panel can use them.
     for i, rec in enumerate(data_records):
-        if "priced_from_bnp" in df.columns:
-            rec["priced_from_bnp"] = bool(df["priced_from_bnp"].iloc[i])
         if "trade_id" in df.columns:
             rec.setdefault("trade_id", df["trade_id"].iloc[i])
         reason = reasons.iloc[i] if i < len(reasons) else ""
@@ -340,10 +338,16 @@ def _filter_bar(df: pd.DataFrame, table_id: str, display_columns: list, column_l
     return html.Div(className="blotter-filter-bar", children=children)
 
 
-def render_headline_strip(headline: dict, caption: Optional[str] = None) -> html.Div:
+def render_headline_strip(headline: dict) -> html.Div:
     """The Excel Portfolio header's card row (LTD/Daily/Trades/Trading/LTD-1
     daily/LTD-1/LTD-2/Trading T-1/5d/MTD/YTD), bold green/red by sign, reference date
-    underneath, "n/a" muted italic with the reason as a tooltip when unavailable."""
+    underneath, "n/a" muted italic with the reason as a tooltip when unavailable.
+
+    No longer takes an optional caption (removed 2026-09-17, user decision "no bnp
+    fall back"): its only use was the "n of m rows priced from BNP file rates, not
+    Bloomberg" fallback badge, which no longer applies now that a row with no official
+    mark simply shows "n/a" with its `reason` as a tooltip -- there is no second,
+    non-Bloomberg source to badge any more."""
     cards = []
     for key in HEADLINE_ORDER:
         entry = headline.get(key, {})
@@ -365,10 +369,7 @@ def render_headline_strip(headline: dict, caption: Optional[str] = None) -> html
             value_div,
             html.Small(entry.get("ref_date", ""), className="card-note"),
         ]))
-    children = [html.Div(cards, className="cards")]
-    if caption:
-        children.append(html.P(caption, className="section-kicker"))
-    return html.Div(children)
+    return html.Div([html.Div(cards, className="cards")])
 
 
 def asset_class_pnl_rows(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame) -> list:
@@ -441,12 +442,6 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
 def render_placeholder_strip(message: str) -> html.Div:
     return html.Div(html.P(f"Unavailable ({message})", className="section-kicker",
                             style={"fontStyle": "italic"}))
-
-
-def fallback_caption(n_fallback: int, n_total: int) -> Optional[str]:
-    if n_fallback <= 0 or n_total <= 0:
-        return None
-    return f"{n_fallback} of {n_total} rows priced from BNP file rates, not Bloomberg."
 
 
 def _legs_table(legs: pd.DataFrame) -> dash_table.DataTable:
@@ -534,45 +529,101 @@ def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
     return _sorted_scope_df(df)
 
 
+def _error_card(label: str, exc: Exception) -> html.Div:
+    """Inline failure card for one Blotter sub-section (2026-09-17 coordinator
+    instruction, live incident: `ui.tabs.options`'s stale-dev-DB `payoff` column threw
+    an uncaught `OperationalError` from `_leg_rows`, which propagated all the way past
+    `_update`'s old `except ImportError`-only handler as an HTTP 500 -- Dash's
+    `Output(CONTENT_ID, "children")` never fired, so the tab just stayed on whatever it
+    showed before, which is what "the blotter sub tabs do not load" looked like from
+    the browser). Shows the exception's one-line message so the cause is visible on
+    the page itself, not only in the server log."""
+    return html.Div(className="section section--error", children=[
+        html.P(f"{label} could not be rendered ({exc}).", className="section-kicker",
+               style={"color": "var(--neg)"}),
+    ])
+
+
+def _safe_section(label: str, builder: Callable[[], html.Div]) -> html.Div:
+    """Run one sub-section builder (a P&L strip, a delegated sub-tab's table, the
+    asset-class breakdown, ...) and turn any exception into an inline `_error_card`
+    instead of letting it propagate. A pure pass-through on success -- returns exactly
+    `builder()`'s own component, no extra nesting -- so every existing test asserting on
+    `scope_layout`'s returned structure keeps working unchanged; only the failure path
+    is new. This means one broken piece of a scope's layout (e.g. the asset-class
+    rollup) no longer blanks the rest of that same sub-tab (e.g. its P&L strip and
+    trade table), and one sub-tab's delegated build (FX/Futures/Rates/Options/Bundles)
+    failing no longer prevents switching to a different sub-tab, since `_update`
+    (this module's top-level callback) still returns successfully either way. Logged
+    server-side (`logging.exception`) so the full traceback is still available even
+    though the page only shows the one-line message."""
+    try:
+        return builder()
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
+        import logging
+        logging.getLogger(__name__).exception("Blotter section %r failed to render", label)
+        return _error_card(label, exc)
+
+
 def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     """Build one sub-tab's content: headline strip (initial, whole-scope) + filter
     dropdown bar + trade table + an (empty until a row is clicked) detail container
-    below it. Rates/Options are placeholders per module docstring."""
+    below it. Rates/Options are placeholders per module docstring.
+
+    Every sub-section (P&L strip / delegated FX-Rates-Options table / the Total book's
+    asset-class breakdown / the filter bar + trade table) is wrapped in `_safe_section`
+    so a failure in one doesn't blank the others -- see that helper's docstring."""
     strip_id = f"blotter-strip-{scope}"
     table_id = f"blotter-datatable-{scope}"
     detail_id = f"{DETAIL_PANEL_ID}-{scope}-detail"
     display_columns, column_labels = scope_columns(scope)
 
     if scope == "rates":
-        df = scope_df(conn, scope, as_of)
-        trade_ids = df["trade_id"].tolist() if not df.empty else []
-        headline = row_scoped_headline(conn, as_of, trade_ids)
+        def _strip():
+            df = scope_df(conn, scope, as_of)
+            trade_ids = df["trade_id"].tolist() if not df.empty else []
+            headline = row_scoped_headline(conn, as_of, trade_ids)
+            return html.Div(id=strip_id, children=render_headline_strip(headline))
         return html.Div([
-            html.Div(id=strip_id, children=render_headline_strip(headline)),
-            rates_ui.build_layout(conn, as_of),
+            _safe_section("P&L strip", _strip),
+            _safe_section("Rates", lambda: rates_ui.build_layout(conn, as_of)),
         ])
 
     if scope == "options":
-        df = scope_df(conn, scope, as_of)
-        trade_ids = df["trade_id"].tolist() if not df.empty else []
-        headline = row_scoped_headline(conn, as_of, trade_ids)
+        def _strip():
+            df = scope_df(conn, scope, as_of)
+            trade_ids = df["trade_id"].tolist() if not df.empty else []
+            headline = row_scoped_headline(conn, as_of, trade_ids)
+            return html.Div(id=strip_id, children=render_headline_strip(headline))
         return html.Div([
-            html.Div(id=strip_id, children=render_headline_strip(headline)),
-            options_ui.build_layout(conn, as_of),
+            _safe_section("P&L strip", _strip),
+            _safe_section("Options", lambda: options_ui.build_layout(conn, as_of)),
         ])
 
     if scope == "fx":
-        return blotter_fx_ui.build_layout(conn, as_of)
+        return _safe_section("FX", lambda: blotter_fx_ui.build_layout(conn, as_of))
 
     if scope in PLACEHOLDER_SCOPES:
-        empty = pd.DataFrame(columns=_DISPLAY_COLUMNS)
-        return html.Div([
-            html.Div(id=strip_id, children=render_placeholder_strip(PLACEHOLDER_SCOPES[scope])),
-            detail_table(empty, table_id=table_id),
-            html.Div(id=detail_id),
-        ])
+        def _placeholder():
+            empty = pd.DataFrame(columns=_DISPLAY_COLUMNS)
+            return html.Div([
+                html.Div(id=strip_id, children=render_placeholder_strip(PLACEHOLDER_SCOPES[scope])),
+                detail_table(empty, table_id=table_id),
+                html.Div(id=detail_id),
+            ])
+        return _safe_section(SCOPE_LABELS.get(scope, scope), _placeholder)
 
-    df = scope_df(conn, scope, as_of)
+    # "total"/"futures": the shared priced_value_book pipeline (module docstring calls
+    # this "pricing"). A failure pulling `df` itself blocks everything downstream (the
+    # strip, the asset-class table and the trade table all need it), so that one step
+    # is not wrapped by `_safe_section` -- there is nothing partial to preserve -- but
+    # still degrades to one inline card rather than propagating past `_update`.
+    try:
+        df = scope_df(conn, scope, as_of)
+    except Exception as exc:  # noqa: BLE001 -- see _safe_section's docstring
+        import logging
+        logging.getLogger(__name__).exception("Blotter section %r failed to render", "Pricing")
+        return html.Div([_error_card("Pricing", exc), html.Div(id=detail_id)])
 
     if scope == "futures" and df.empty:
         empty = pd.DataFrame(columns=display_columns)
@@ -583,21 +634,24 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
             html.Div(id=detail_id),
         ])
 
-    trade_ids = df["trade_id"].tolist() if not df.empty else []
-    headline = row_scoped_headline(conn, as_of, trade_ids)
-    scope_fallback = int(df["priced_from_bnp"].sum()) if not df.empty else 0
-    caption = fallback_caption(scope_fallback, len(df))
+    def _strip():
+        trade_ids = df["trade_id"].tolist() if not df.empty else []
+        headline = row_scoped_headline(conn, as_of, trade_ids)
+        return html.Div(id=strip_id, children=render_headline_strip(headline))
 
-    body = [html.Div(id=strip_id, children=render_headline_strip(headline, caption))]
+    body = [_safe_section("P&L strip", _strip)]
     if scope == "total" and not df.empty:
-        body.append(asset_class_pnl_table(conn, as_of, df))
+        body.append(_safe_section("P&L by asset class", lambda: asset_class_pnl_table(conn, as_of, df)))
     if df.empty:
         body.append(message_box("No trades for this as-of date in this scope."))
         body.append(html.Div(id=detail_id))
     else:
-        body.append(_filter_bar(df, table_id, display_columns, column_labels))
-        body.append(detail_table(df, table_id=table_id, display_columns=display_columns,
-                                  column_labels=column_labels))
+        body.append(_safe_section(
+            "Filter bar", lambda: _filter_bar(df, table_id, display_columns, column_labels)))
+        body.append(_safe_section(
+            "Trade table",
+            lambda: detail_table(df, table_id=table_id, display_columns=display_columns,
+                                  column_labels=column_labels)))
         body.append(html.Div(id=detail_id))
     return html.Div(body)
 
@@ -692,10 +746,23 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             return message_box(f"Database not available ({exc}).")
         try:
             if scope == "bundles":
-                return bundles_layout(conn, as_of_date)
+                return _safe_section("Bundles", lambda: bundles_layout(conn, as_of_date))
             return scope_layout(scope, conn, as_of_date)
         except ImportError as exc:
             return message_box(f"Blotter view not available yet ({exc}).")
+        except Exception as exc:  # noqa: BLE001 -- last-resort guard, 2026-09-17
+            # Any other exception here used to propagate past Dash's callback wrapper
+            # as an uncaught HTTP 500: the sub-tab's Output("blotter-content","children")
+            # never fired, so the tab silently stayed on its previous (or blank) content
+            # -- exactly the user complaint "the blotter sub tabs do not load", with no
+            # error visible anywhere in the browser. A DB/query bug (e.g. a stale dev DB
+            # missing a column another sub-tab's query expects) should degrade to a
+            # message for THAT sub-tab, not take the whole tab down. Logged so the real
+            # cause is still visible server-side rather than swallowed silently.
+            import logging
+            logging.getLogger(__name__).exception(
+                "Blotter sub-tab %r failed to render for as_of=%s", scope, as_of_date)
+            return message_box(f"This view could not be rendered ({exc}).")
         finally:
             conn.close()
 
@@ -726,10 +793,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                     df, _, _ = priced_value_book(conn, as_of_date)
                     if df.empty or df[df["product"] == "FUTURE"].empty:
                         return render_placeholder_strip(FUTURES_NO_TRADES_REASON)
-                n_fallback = sum(1 for r in (rows or []) if r.get("priced_from_bnp"))
-                caption = fallback_caption(n_fallback, len(rows or []))
                 headline = row_scoped_headline(conn, as_of_date, trade_ids)
-                return render_headline_strip(headline, caption)
+                return render_headline_strip(headline)
             finally:
                 conn.close()
 

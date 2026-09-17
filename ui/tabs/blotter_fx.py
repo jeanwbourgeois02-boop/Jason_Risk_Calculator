@@ -11,11 +11,13 @@ trade book three times (as_of, t-1bd, t-2bd) via `engine.pnl.valuation.value_boo
 each FX leg at its own settle_date's FWD_OUTRIGHT, quote P&L converted at spot, futures
 contracts x multiplier x (mark - fill), settled trades frozen -- and lays the results out
 as one row per trade. `fx_blotter_rows` is called with `value_fn=priced_value_book` (via
-a thin wrapper dropping the `(n_fallback, n_total)` tuple), the SAME fallback-to-BNP_BVAL
-pricing path `_fx_strip` below uses for the strip, so the table and the strip agree
-exactly on any priced trade -- there is no longer a second, deliberately-different
-number. A missing cell (no official or fallback mark, no spot, an unrealised settled
-trade) stays `None`/blank here too: never zeroed, never defaulted.
+a thin wrapper dropping its `(n_fallback, n_total)` tuple, kept for other callers'
+back-compat only -- see that module's docstring), the SAME pricing path `_fx_strip`
+below uses for the strip, so the table and the strip agree exactly on any priced trade.
+A missing cell (no official mark, no spot, an unrealised settled trade) stays
+`None`/blank here too: never zeroed, never defaulted, and never retried against a
+second source (BNP_BVAL fallback pricing removed 2026-09-17, user decision "no bnp
+fall back" -- see `ui.tabs.blotter_pricing`'s module docstring).
 
 This sub-tab carries a P&L strip (`_fx_strip`, added 2026-09-17), built statically inside
 `build_layout` on every render (like the table) rather than through the generic
@@ -69,8 +71,8 @@ _USD_COLS = {"quantity_usd_notional", "pnl_t1", "pnl_eod", "pnl_t2"}
 
 def _priced_value_fn(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     """`fx_blotter_rows`'s `value_fn`: `priced_value_book` without its `(n_fallback,
-    n_total)` tuple, so a Bloomberg-less DB (BNP_BVAL fallback only) still prices this
-    table -- the same fallback path `_fx_strip` uses for the strip below."""
+    n_total)` tuple -- the same pricing path `_fx_strip` uses for the strip below, so
+    the two always agree."""
     return priced_value_book(conn, as_of)[0]
 
 
@@ -100,15 +102,12 @@ def _fx_strip(conn: sqlite3.Connection, as_of: str) -> html.Div:
     Lazy-imports `ui.tabs.blotter` (not a module-level import) because `blotter.py`
     itself imports this module at load time -- a module-level import here would be
     circular."""
-    from ui.tabs.blotter import fallback_caption, render_headline_strip
+    from ui.tabs.blotter import render_headline_strip
 
     df_priced, _n_fallback, _n_total = priced_value_book(conn, as_of)
     trade_ids = _scoped_trade_ids(df_priced)
     headline = row_scoped_headline(conn, as_of, trade_ids)
-    scoped = df_priced[df_priced["trade_id"].isin(trade_ids)] if not df_priced.empty else df_priced
-    n_fallback = int(scoped["priced_from_bnp"].sum()) if not scoped.empty else 0
-    caption = fallback_caption(n_fallback, len(scoped))
-    return render_headline_strip(headline, caption)
+    return render_headline_strip(headline)
 
 
 # ------------------------------------------------------------------ sample/placeholder marks

@@ -101,6 +101,114 @@ def _make_db_empty():
     return conn
 
 
+def _drop_instrument_options_new_columns(conn):
+    """Rebuild `instrument_options` with the pre-`payoff`-column shape found on the
+    analyst's dev DB (`data/raw/risk.db`, 2026-09-17): `CREATE TABLE IF NOT EXISTS` in
+    `data/ingest/schema.py` never adds a column to an already-existing table, so a DB
+    created before `payoff` (and, in principle, any future column) landed keeps the old
+    shape forever without a migration. Exact column set observed on that file via
+    `PRAGMA table_info`: instrument_id/strike/option_type/barrier_level/avg_start_date --
+    no `payoff`. Used to reproduce the HTTP 500 (`OperationalError: no such column:
+    o.payoff`) this module's `_instrument_options_columns` guard now avoids."""
+    conn.execute("DROP TABLE instrument_options")
+    conn.execute(
+        "CREATE TABLE instrument_options ("
+        "  instrument_id   TEXT PRIMARY KEY,"
+        "  strike          REAL NOT NULL DEFAULT 0,"
+        "  option_type     TEXT NOT NULL DEFAULT '',"
+        "  barrier_level   REAL NOT NULL DEFAULT 0,"
+        "  avg_start_date  TEXT NOT NULL DEFAULT '9999-12-31'"
+        ")"
+    )
+    conn.commit()
+
+
+def _make_db_missing_payoff_column():
+    """One priceable FX_OPTION trade on a DB whose `instrument_options` table predates
+    the `payoff` column -- reproduces the 2026-09-17 dev-DB bug (module docstring on
+    `_instrument_options_columns`): a bare `SELECT o.payoff` used to raise
+    `OperationalError: no such column: o.payoff`, uncaught, turning into an HTTP 500
+    that made the whole Options sub-tab look like it "did not load"."""
+    conn = sqlite3.connect(":memory:")
+    schema.create_schema(conn)
+    _drop_instrument_options_new_columns(conn)
+    _insert_pair_spot(conn, "EURUSD", "EUR", "USD", spot=1.1050)
+    conn.execute(
+        "INSERT INTO instruments VALUES ('EURUSD092226C-1', 'FX_OPTION', 'EUR', 'USD', 1, 0, '', '2026-09-22')"
+    )
+    conn.execute("INSERT INTO instrument_options VALUES ('EURUSD092226C-1', 1.11, 'CALL', 0, '9999-12-31')")
+    conn.execute(
+        "INSERT INTO trades VALUES ('O1', 'XLSX', 'EURUSD092226C-1', 'FX_OPTION', 'O1', '2026-06-01', "
+        "1000000, 0.0050, 'ACC', 'CPTY', 'HAHY7', 'TR', 'option', '')"
+    )
+    conn.execute(
+        "INSERT INTO trade_legs VALUES ('O1', 1, 'NOTIONAL', 'EUR', 1000000, '2026-06-01', '2026-09-22', 0.0050, 0)"
+    )
+    conn.execute(
+        "INSERT INTO marks VALUES ('2026-06-20', 'EURUSD092226C-1', '2026-09-22', 'PREMIUM', 0.0062, "
+        "'QL_OPTIONS_PRICER', '2026-06-20T17:00:00-04:00')"
+    )
+    conn.commit()
+    return conn
+
+
+# ----------------------------------------------------- stale dev-DB (missing `payoff` column)
+
+def test_instrument_options_columns_reports_the_reduced_set():
+    conn = _make_db_missing_payoff_column()
+    try:
+        cols = options._instrument_options_columns(conn)
+        assert "payoff" not in cols
+        assert {"instrument_id", "strike", "option_type", "barrier_level"} <= cols
+    finally:
+        conn.close()
+
+
+def test_leg_rows_survives_missing_payoff_column():
+    conn = _make_db_missing_payoff_column()
+    try:
+        legs = options._leg_rows(conn, AS_OF)
+        assert len(legs) == 1
+        assert legs[0]["type"].startswith("Vanilla Call")  # payoff defaulted to VANILLA
+        assert legs[0]["mktval"] == pytest.approx(0.0062 * 1_000_000.0 * 1.1050)
+    finally:
+        conn.close()
+
+
+def test_option_rows_survives_missing_payoff_column():
+    conn = _make_db_missing_payoff_column()
+    try:
+        df = options.option_rows(conn, AS_OF)
+        row = df[df["instrument"] == "EURUSD092226C-1"].iloc[0]
+        assert row["mktval"] == pytest.approx(0.0062 * 1_000_000.0 * 1.1050)
+    finally:
+        conn.close()
+
+
+def test_build_layout_survives_missing_payoff_column():
+    """The exact call `ui.tabs.blotter.scope_layout` makes for the Options sub-tab --
+    this is the regression test for the HTTP 500 seen live against `data/raw/risk.db`."""
+    conn = _make_db_missing_payoff_column()
+    try:
+        layout = options.build_layout(conn, AS_OF)
+        table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+        assert table.id == options.TABLE_ID
+        assert any(r["instrument"] == "EURUSD092226C-1" for r in table.data)
+    finally:
+        conn.close()
+
+
+def test_option_instruments_survives_missing_payoff_column():
+    conn = _make_db_missing_payoff_column()
+    try:
+        insts = options.option_instruments(conn)
+        row = next(i for i in insts if i["instrument_id"] == "EURUSD092226C-1")
+        assert row["payoff"] == "VANILLA"
+        assert row["strike"] == 1.11
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- option_rows
 
 def test_option_rows_total_equals_sum_of_asset_class_rows():
