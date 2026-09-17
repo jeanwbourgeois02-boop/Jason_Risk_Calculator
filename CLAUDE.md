@@ -4,7 +4,7 @@
 
 `docs/BUILD_PLAN.md` is the build specification. The app's headline P&L is the per-trade valuation in its section 2 (each FX leg marked at the outright for its own value date, quote P&L converted at spot, futures as contracts × multiplier × price change, settled trades frozen), the close series and periods in section 3, and the four tabs in section 5. The "P&L conventions" section below is in force again and the "Must not replicate" list applies to the headline.
 
-The literal workbook arithmetic (`engine/pnl/pnl.py`, `docs/excel-parity-audit.md`) is retained unchanged as the Reconciliation tab only. It never feeds the header, the blotter or the ladder. Missing values stay missing everywhere.
+The literal workbook arithmetic (`engine/pnl/pnl.py`, `docs/excel-parity-audit.md`) is retained unchanged; it never feeds the header, the blotter or the ladder. The Reconciliation tab that displayed it was removed 2026-09-16 (user decision), so that arithmetic is currently unreachable from the app (`docs/open-questions.md` item 58). Missing values stay missing everywhere.
 
 The cash ladder is a pure delta table: leg by leg, crosses included, spot for delta, no P&L on it (engine change landed 2026-09-15).
 
@@ -205,7 +205,7 @@ This section documents `data/raw/HA-portfolio vJean.xlsx`, the Excel calculator 
 
 `All IRS trades`: `Direction (local ccy)` < 0 = receive fixed (`Curve!B4 = +1`); `Yield` = fixed rate; `Start`/`End`; PV, DV01, PV T-1 are consumed as marks `PV_USD`, `DV01_USD` (T-1 as the previous `as_of_date`).
 
-`All Options Trades`: `Name` (free text), `Expiry`, `Size` (notional), `Entry Price` (premium), `Current price` → marks `PREMIUM`. Option deltas are typed by hand in `Portfolio!M29:O44` → marks `DELTA`, `source = MANUAL`, value = base-ccy delta / `Size`.
+`All Options Trades`: `Name` (free text), `Expiry`, `Size` (notional), `Entry Price` (premium), `Current price` → marks `PREMIUM`. Option deltas are typed by hand in `Portfolio!M29:O44` → marks `DELTA`, `source = MANUAL`, value = base-ccy delta / `Size` (historical: since 2026-09-17 the official `DELTA`/`PREMIUM` come from `engine/options`, source `QL_OPTIONS_PRICER`; MANUAL is reconciliation-only).
 
 ### `package_id` rule (FX swaps)
 
@@ -224,12 +224,12 @@ Two forward rows form one `FX_SWAP` package when all hold: same source, same acc
 
 | Tab | View |
 |---|---|
-| Cash ladder | `trade_legs` where `settles_cash = 1 AND settle_date ≥ as_of`, grouped by `ccy, settle_date`, plus `CASH` rows from `positions` where `source = 'BNP'` (BNP is the source for ladder cash balances, summed per currency across accounts). The `≥` here versus `>` in the delta query is intentional: a leg settling on `as_of` is cash that moves today but carries no delta by close, matching BNP dropping settled forwards. |
+| Cash ladder | `trade_legs` where `settles_cash = 1 AND settle_date ≥ as_of`, grouped by `ccy, settle_date` — cashflow timing and delta exposure only; no cash-balance rows (the `positions`-based `CASH` column was BNP-fed and is inert since BNP was removed 2026-09-17, `docs/open-questions.md` item 59). The `≥` here versus `>` in the delta query is intentional: a leg settling on `as_of` is cash that moves today but carries no delta by close, matching BNP dropping settled forwards. |
 | FX | FX trades × `marks_official` (`FWD_OUTRIGHT` at the leg's own `settle_date`, `SPOT` for USD conversion); per-pair USD notional = Σ sign(base leg) × \|USD leg\| |
 | Rates | IRS trades × `marks_official` (`PV_USD`, `DV01_USD`, `PAR_RATE`, official source `QL_PRICER`); `curves` is live via `engine/rates` (`bootstrap_and_store` / `price_and_store`), single-currency OIS only (Phase 1: USD SOFR, EUR ESTR, GBP SONIA, JPY TONA, CHF SARON, CAD CORRA, AUD AONIA) — term-rate, basis and XCCY swaps are Phase 2 |
 | Options | FX_OPTION trades × `marks_official` (`PREMIUM`, `DELTA`) |
 | Delta | query below |
-| Overall book | `positions` (BNP vs CALC), P&L rollups by strategy / account, LTD series |
+| Overall book | P&L rollups by strategy / account, LTD series from `value_book` (the `positions` BNP-vs-CALC comparison has no BNP data since 2026-09-17) |
 
 **Options tab placement, decided 2026-09-17 (resolves the standing conflict with `ui/app.py`'s docstring, which claimed BUILD_PLAN's 3/4-tab structure superseded this table — both now agree):** Options is not a standalone top-level tab. It lives inside the Blotter, as a grouped, collapsible trade summary — Portfolio Totals roll-up, then grouped by asset class, then by structure/`package_id` (a multi-leg `combine()`-built package collapses to one summary row with its legs nested underneath), columns Position / Notional / MktVal / MktPx / Delta / Theta / Gamma / Vega / Expiry / Underlying / Strike / UndFwdPx / Rho — per the user's Bloomberg MARS-style reference layout. The row above ("Options | FX_OPTION trades × marks_official") still describes the correct *data* view; only its placement in the UI is corrected here. See `engine/options/__init__.py`'s scope ledger and `docs/open-questions.md` item 61 for the phased build-out (options-pricer, ui-shell Phase 8).
 
@@ -263,7 +263,7 @@ Per-pair delta (the sheet's "Position") is the same union grouped by `t.instrume
 
 - **Sign**: `quantity > 0` = long base currency / receive; P&L is positive when the mark moves in favour of the position. Long USDXXX profits when the pair rises; long XXXUSD profits when the pair rises.
 - **Display notional**: USD notional per pair, sign = direction of the base currency (the xlsx convention). Storage keeps exact leg amounts.
-- **Source of truth**: fills (`trades` + `trade_legs`). Marks come from Bloomberg (`BFXFORWARD` / `BDH` / `BDP`). The daily PB file archive is an independent reconciliation check only; it never feeds P&L.
+- **Source of truth**: fills (`trades` + `trade_legs`). Marks come from Bloomberg (`BFXFORWARD` / `BDH` / `BDP`). The BNP daily file is no longer ingested by the app (2026-09-17); its `BNP_BVAL` marks remain reconciliation-only wherever they exist and never feed P&L.
 - **Mark date**: each FX leg is marked with the `FWD_OUTRIGHT` for its own `settle_date` (not a single T+5 date).
 - **USD conversion**: quote-currency P&L converts to USD at **spot** of the same `as_of_date`, never at the forward outright.
 - **Per-trade LTD P&L (USD)**, with `Q` = base amount, `f` = fill, `m` = outright mark for the leg's value date, `S` = spot (quote→USD):

@@ -306,21 +306,11 @@ def cmd_setup(args) -> int:
 
 
 def cmd_load_sample(args) -> int:
-    """Import the sample trade blotter (runs inside .venv). Blotter uploads have no
-    idempotent re-upload mode (data/ingest/blotter.py's own docstring): re-running this
-    against a DB that already has the sample loaded raises a clean 'Duplicate key'
-    error, which is the expected, harmless outcome -- the sample is only for an empty
-    database, not something to keep re-importing."""
+    """Import the sample trade blotter (runs inside .venv). Re-running it is harmless:
+    the import is idempotent, so trades already present are replaced, not duplicated."""
     from ui.app import get_db_path
     from data.ingest.upload import import_blotter
-    try:
-        say("  sample: " + str(import_blotter(SAMPLE.read_bytes(), SAMPLE.name, get_db_path())))
-    except ValueError as exc:
-        if "Duplicate key" in str(exc):
-            say("  sample: NOT loaded. The database already holds this sample (or real data).")
-            say("          That is fine; the sample is only for empty databases.")
-        else:
-            raise
+    say("  sample: " + str(import_blotter(SAMPLE.read_bytes(), SAMPLE.name, get_db_path())))
     return 0
 
 
