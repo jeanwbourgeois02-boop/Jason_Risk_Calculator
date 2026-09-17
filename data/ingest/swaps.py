@@ -39,9 +39,15 @@ def _usd_leg_amount(conn: sqlite3.Connection, trade_id: str) -> Optional[float]:
 
 
 def _matches(candidate: dict, other: dict) -> bool:
+    """CLAUDE.md's "equal |USD-leg amount| within 0.01 %" test. For a cross (no USD leg on
+    either trade, e.g. EURSEK) the same tolerance is applied to |base quantity| instead
+    (2026-09-17 fix: crosses previously never packaged at all). A trade with a USD leg
+    never matches one without: same pair always means same kind, so this only guards
+    against malformed legs."""
     return (candidate["value_date"] != other["value_date"]
-            and other["usd"] > 0
-            and abs(candidate["usd"] - other["usd"]) <= other["usd"] * REL_TOL)
+            and candidate["notional_kind"] == other["notional_kind"]
+            and other["notional"] > 0
+            and abs(candidate["notional"] - other["notional"]) <= other["notional"] * REL_TOL)
 
 
 def package_swaps(conn: sqlite3.Connection) -> int:
@@ -82,8 +88,12 @@ def package_swaps(conn: sqlite3.Connection) -> int:
             continue
         for t in trades:
             t["value_date"] = _value_date(conn, t["trade_id"])
-            t["usd"] = _usd_leg_amount(conn, t["trade_id"])
-        eligible = [t for t in trades if t["value_date"] is not None and t["usd"] is not None]
+            usd = _usd_leg_amount(conn, t["trade_id"])
+            if usd is not None:
+                t["notional"], t["notional_kind"] = usd, "USD"
+            else:  # cross: no USD leg, compare base amounts instead
+                t["notional"], t["notional_kind"] = abs(t["quantity"]), "BASE"
+        eligible = [t for t in trades if t["value_date"] is not None]
         pos = [t for t in eligible if t["quantity"] > 0]
         neg = [t for t in eligible if t["quantity"] < 0]
         candidate_group = f"{key[0]}|{key[1]}|{key[2]}|{key[3]}"

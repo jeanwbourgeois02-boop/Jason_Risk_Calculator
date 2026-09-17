@@ -1279,3 +1279,29 @@ def test_synthetic_mv_local_tolerance_scales_with_quantity(tmp_path):
     r = bnp.parse(_write_csv(tmp_path / "HA_PNL_20260915.csv", [_fwd_row(**{"Market Value Local": 500006.0})]))
     fails = {f.check: f for f in r.recon.failures}
     assert set(fails) == {"mv_local"} and fails["mv_local"].tolerance == pytest.approx(5.0)
+
+
+def test_swap_cross_with_no_usd_leg_is_grouped_on_base_amount():
+    """2026-09-17 fix: a cross (EURSEK) has no USD leg, so the rule's |USD-leg| test
+    cannot apply; the same 0.01 % tolerance is applied to |base quantity| instead. The
+    real book had an EURSEK 5.9m buy / sell pair dealt 2026-08-24 for value 11-25 and
+    11-27 that stayed as two outrights."""
+    from data.ingest import swaps
+
+    conn = schema.connect()
+    conn.execute("INSERT INTO instruments VALUES ('EURSEK','FX','EUR','SEK',1,0,'EURSEK Curncy','9999-12-31')")
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        ("938350940", "XLSX", "EURSEK", "FX_FWD", "938350940", "2026-08-24", 5900000.0, 11.10, "acc", "cp", "", "t", "d", ""),
+        ("940235093", "XLSX", "EURSEK", "FX_FWD", "940235093", "2026-08-24", -5900000.0, 11.11, "acc", "cp", "", "t", "d", ""),
+    ])
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("938350940", 1, "FX_NEAR", "EUR", 5900000.0, "2026-08-24", "2026-11-25", 11.10, 1),
+        ("938350940", 2, "FX_NEAR", "SEK", -65490000.0, "2026-08-24", "2026-11-25", 11.10, 1),
+        ("940235093", 1, "FX_NEAR", "EUR", -5900000.0, "2026-08-24", "2026-11-27", 11.11, 1),
+        ("940235093", 2, "FX_NEAR", "SEK", 65549000.0, "2026-08-24", "2026-11-27", 11.11, 1),
+    ])
+    conn.commit()
+    assert swaps.package_swaps(conn) == 2
+    rows = conn.execute("SELECT product, package_id FROM trades ORDER BY trade_id").fetchall()
+    assert rows == [("FX_SWAP", "SWAP-938350940"), ("FX_SWAP", "SWAP-938350940")]
+    assert conn.execute("SELECT COUNT(*) FROM swap_review").fetchone()[0] == 0
