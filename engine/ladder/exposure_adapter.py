@@ -168,6 +168,8 @@ def records_from_db(conn, as_of_date: str,
     unresolved: List[Unresolved] = []
     for trade_id, legs in by_trade.items():
         product, pair, desc, trade_date, price, strategy, account, is_ndf = legs[0][1:9]
+        if product == "FX_OPTION":
+            continue  # delta records built by option_records_from_db below, not from the notional leg
         if product not in FX_PRODUCTS:
             unresolved.append(Unresolved(trade_id, pair, f"non-FX product {product} excluded"))
             continue
@@ -182,6 +184,73 @@ def records_from_db(conn, as_of_date: str,
                 "account": account, "fund": FUND, "strategy": strategy,
                 "is_ndf": int(is_ndf), "settles_cash": int(settles_cash),
             })
+    opt_records, opt_unresolved = option_records_from_db(conn, as_of_date, mapping)
+    return records + opt_records, unresolved + opt_unresolved
+
+
+# FX options (2026-09-17): the option's delta joins the ladder, so Net/Gross, the
+# per-currency risk table and the stress block include it (docs/BUILD_PLAN.md section
+# 7, CLAUDE.md "Aggregate delta per currency"). Same reads as engine/ladder/ladder.py's
+# delta_per_ccy: trades_official, official DELTA (per unit of trades.quantity, sign of
+# the trade carried by quantity) and the PAIR's official SPOT joined on
+# base_ccy || quote_ccy -- never on the option's own instrument_id, which is the blotter
+# Symbol and can never match a SPOT row. Expiry-day options are excluded in both modes
+# (settle_date > as_of): an option expiring today carries no delta by close, and its
+# leg is not cash either (settles_cash = 0), so the grid has nothing to show for it.
+_DB_SQL_OPTIONS = """
+SELECT t.trade_id, t.instrument_id, t.description, t.trade_date, t.price, t.strategy, t.account,
+       t.quantity, i.base_ccy, i.quote_ccy, i.is_ndf, l.settle_date,
+       m.value AS delta, s.value AS spot
+FROM trades_official t JOIN instruments i USING (instrument_id)
+JOIN trade_legs l ON l.trade_id = t.trade_id AND l.leg_no = 1
+LEFT JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA'
+       AND m.as_of_date = :as_of
+LEFT JOIN marks_official s ON s.instrument_id = i.base_ccy || i.quote_ccy AND s.mark_type = 'SPOT'
+       AND s.as_of_date = :as_of AND s.settle_date = :as_of
+WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND l.settle_date > :as_of
+ORDER BY t.trade_id, m.snapped_at DESC, s.snapped_at DESC
+"""
+
+
+def option_records_from_db(conn, as_of_date: str,
+                           book_mapping: Dict[str, str] | None = None) -> Tuple[List[dict], List[Unresolved]]:
+    """Two delta records per open FX option (base-ccy delta = quantity x DELTA at the
+    option's expiry date; quote-ccy delta = -quantity x DELTA x pair SPOT), in the same
+    shape as the FX leg records so build_exposure treats them like any other leg. An
+    option with no official DELTA mark, or with a DELTA but no official SPOT for its
+    pair, contributes nothing and is listed in `unresolved` with the reason -- never
+    dropped silently, never valued at a substitute (CLAUDE.md: the engine must raise
+    rather than drop a NULL delta; here the ladder shows it as unresolved instead)."""
+    mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
+    records: List[dict] = []
+    unresolved: List[Unresolved] = []
+    seen: set = set()
+    for row in conn.execute(_DB_SQL_OPTIONS, {"as_of": as_of_date}).fetchall():
+        (trade_id, instrument_id, desc, trade_date, price, strategy, account,
+         quantity, base_ccy, quote_ccy, is_ndf, expiry, delta, spot) = row
+        if trade_id in seen:
+            continue  # latest official mark per trade wins (ORDER BY snapped_at DESC)
+        seen.add(trade_id)
+        pair = f"{base_ccy}{quote_ccy}"
+        if delta is None:
+            unresolved.append(Unresolved(trade_id, instrument_id,
+                                         f"no official DELTA mark for {instrument_id} on {as_of_date}"))
+            continue
+        if spot is None:
+            unresolved.append(Unresolved(trade_id, instrument_id,
+                                         f"no official SPOT for {pair} on {as_of_date} (option delta not converted)"))
+            continue
+        common = {
+            "trade_id": trade_id, "source_row_id": trade_id, "product_type": "FX_OPTION",
+            "symbol": f"{pair}-{trade_id}", "symbol_description": desc,
+            "trade_date": trade_date, "settlement_date": expiry, "currency_pair": pair,
+            "entry_rate": float(price), "book_source": strategy, "book": mapping.get(strategy, strategy),
+            "account": account, "fund": FUND, "strategy": strategy,
+            "is_ndf": int(is_ndf), "settles_cash": 0,
+        }
+        records.append({**common, "currency": base_ccy, "local_amount": float(quantity) * float(delta)})
+        records.append({**common, "currency": quote_ccy,
+                        "local_amount": -float(quantity) * float(delta) * float(spot)})
     return records, unresolved
 
 

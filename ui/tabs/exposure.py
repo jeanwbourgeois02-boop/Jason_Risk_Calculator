@@ -700,7 +700,9 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     """Ladder tab body per the user's 2026-09-15 "Reorder the Ladder tab" decision
     (items 1-2, superseding the same-day C-split layout below): three headline cards,
     then three tables in this order -- (a) the currency ladder grid with its summary
-    rows ("Cash ladder: spot, forwards, swaps and cash balances"), (b) the open-futures
+    rows ("Cash ladder: spot, forwards, swaps and option deltas" -- option delta records
+    come from engine.ladder.exposure_adapter.option_records_from_db, 2026-09-17; cash
+    balances have had no source since the BNP upload was removed), (b) the open-futures
     block ("Open futures"), (c) the combined risk table ("Risk and scenarios"). Nothing
     else is rendered on this tab (snapshot cards, metadata line, legend, alternative
     views and the settlement-only ladder are retired, not moved).
@@ -738,7 +740,7 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
             else html.P("No open FX trades for this as-of date.", className="section-kicker"))
     return html.Div(className="section", children=[
         headline_numbers(exposure_result, futures, fallback_ccys, forward_proxy_ccys),
-        html.H4("Cash ladder: spot, forwards, swaps and cash balances"),
+        html.H4("Cash ladder: spot, forwards, swaps and option deltas"),
         main,
         html.H4("Open futures"),
         futures_table(futures, futures_details),

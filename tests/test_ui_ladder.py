@@ -382,7 +382,7 @@ def test_exposure_section_builds_without_market_data_panel():
     text = _render_text(section)
     assert "Risk and scenarios" in text
     assert "Open futures" in text
-    assert "Cash ladder: spot, forwards, swaps and cash balances" in text
+    assert "Cash ladder: spot, forwards, swaps and option deltas" in text
 
 
 def test_scenario_columns_follow_config_order_not_alphabetical():
