@@ -275,6 +275,11 @@ def test_futures_scope_no_trades_shows_reason_and_empty_table():
 
 
 def test_scope_layout_fx_filters_out_nonfx_products():
+    """FX sub-tab rebuilt 2026-09-17 (user authorisation) as a literal xlsx "All FX
+    trades" replica -- see `ui.tabs.blotter_fx`. It no longer renders `value_book`-shaped
+    rows with a `product` column; instead it sources from `engine.pnl.xlsx_fx_replica`,
+    which only selects FX_SPOT/FX_FWD/FX_SWAP/FUTURE trades, so an IRS trade must not
+    appear in the table at all."""
     conn = _make_db()
     try:
         conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','9999-12-31')")
@@ -285,7 +290,9 @@ def test_scope_layout_fx_filters_out_nonfx_products():
         conn.commit()
         layout = blotter.scope_layout("fx", conn, "2026-06-20")
         table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
-        assert all(r["product"] == "Forward" for r in table.data)
+        ids = [c["id"] for c in table.columns]
+        assert "instrument_id" in ids and "pnl_eod" in ids
+        assert all(r["instrument_id"] != "IRSOIS-USD-1" for r in table.data)
     finally:
         conn.close()
 

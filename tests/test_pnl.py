@@ -13,7 +13,8 @@ from data.bloomberg.bnp_marks import load_bnp_marks
 from data.bloomberg.marks_csv import MarkRow
 from data.ingest import bnp, schema
 from engine.pnl.pnl import ltd_per_trade, workbook_valuation_date, workbook_fx_pnl
-from engine.pnl.aggregate import aggregate_by_pair, book_totals, period_pnl
+from engine.pnl.aggregate import aggregate_by_pair, book_totals, period_pnl, _n_business_days_back
+from engine.pnl.xlsx_fx_replica import fx_replica
 
 REPO = Path(__file__).resolve().parents[1]
 RAW = REPO / "data" / "raw" / "HA_PNL_20260818.csv"
@@ -156,6 +157,92 @@ def test_missing_trade_poison_pair_aggregate_instead_of_zero():
 def test_aggregate_empty():
     conn = _make_conn()
     assert aggregate_by_pair(ltd_per_trade(conn, AS_OF), conn).empty
+
+
+# --------------------------------------------------------------------- xlsx_fx_replica
+# User-authorised override of the "Must not replicate" list, confirmed 2026-09-17, for
+# this one replica table only (engine/pnl/xlsx_fx_replica.py's module docstring).
+
+def _t1_t2(as_of=AS_OF):
+    import datetime as dt
+    d = dt.date.fromisoformat(as_of)
+    return _n_business_days_back(d, 1).isoformat(), _n_business_days_back(d, 2).isoformat()
+
+
+def _insert_future_instrument(conn, instrument_id="ESU6 Index", multiplier=50.0):
+    conn.execute(
+        "INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        (instrument_id, "FUTURE", "ES", "USD", multiplier, 0, instrument_id, "2026-09-18"),
+    )
+    conn.commit()
+
+
+def _insert_future_trade(conn, trade_id, instrument_id, contracts, fill, settle_date, trade_date="2026-08-01"):
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, "XLSX", instrument_id, "FUTURE", trade_id, trade_date, contracts, fill,
+         "ACC", "CPTY", "STRAT", "TRADER", "test future", ""),
+    )
+    conn.execute(
+        "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+        (trade_id, 1, "NOTIONAL", "USD", contracts * 50.0 * fill, trade_date, settle_date, 0, 0),
+    )
+    conn.commit()
+
+
+def test_replica_fx_row_matches_workbook_formula_and_reuses_shared_maturity():
+    conn = _make_conn()
+    _insert_trade(conn, "X", "USDJPY", 1_000_000, 147, "2026-09-01")
+    t1, t2 = _t1_t2()
+    _rate(conn, "USDJPY", 148)  # EOD, at the shared maturity 2026-08-24
+    _insert_mark(conn, "USDJPY", "2026-08-24", "FWD_OUTRIGHT", 146, as_of=t1)
+    _insert_mark(conn, "USDJPY", "2026-08-24", "FWD_OUTRIGHT", 145, as_of=t2)
+    out = fx_replica(conn, AS_OF)
+    row = out.iloc[0]
+    assert row.tenor == "2026-09-01"  # trade's own value date is preserved as a column...
+    assert row.mark_eod == 148
+    assert row.mark_t1 == 146
+    assert row.mark_t2 == 145
+    # ... but the mark itself came from the SHARED maturity 2026-08-24, not row.tenor
+    # (must-not-replicate item 4, deliberately reproduced).
+    assert row.pnl_eod == pytest.approx(workbook_fx_pnl("USDJPY", 1_000_000, 147, 148))
+    assert row.pnl_t1 == pytest.approx(workbook_fx_pnl("USDJPY", 1_000_000, 147, 146))
+    # LTD-2 uses mark_t1 (146) as the denominator, not mark_t2 (145): must-not-replicate
+    # item 2, deliberately reproduced.
+    assert row.pnl_t2 == pytest.approx(workbook_fx_pnl("USDJPY", 1_000_000, 147, 145, 146))
+    assert row.pnl_t2 != pytest.approx(workbook_fx_pnl("USDJPY", 1_000_000, 147, 145, 145))
+
+
+def test_replica_futures_row_understates_via_mark_divisor():
+    conn = _make_conn()
+    _insert_future_instrument(conn)
+    _insert_future_trade(conn, "F1", "ESU6 Index", 10, 4500, "2026-09-18")
+    _insert_mark(conn, "ESU6 Index", "2026-09-18", "FUTURE_PX", 4600, source="BBG_BDH")
+    out = fx_replica(conn, AS_OF)
+    row = out.iloc[0]
+    notional = 10 * 50.0 * 4500
+    assert row.quantity_usd_notional == pytest.approx(notional)
+    assert row.mark_eod == 4600
+    # must-not-replicate item 1: divides by mark (4600), not fill (4500) -- since
+    # 'ESU6 Index' does not end in "USD", understating true P&L of notional*(100)/4500.
+    expected = notional * (4600 - 4500) / 4600
+    assert row.pnl_eod == pytest.approx(expected)
+    true_pnl = notional * (4600 - 4500) / 4500
+    assert row.pnl_eod != pytest.approx(true_pnl)
+
+
+def test_replica_missing_mark_stays_none_not_zero():
+    conn = _make_conn()
+    _insert_trade(conn, "X", "USDJPY", 1_000_000, 147, "2026-09-01")
+    _rate(conn, "USDJPY", 148)  # EOD only; no t-1 / t-2 marks inserted
+    out = fx_replica(conn, AS_OF)
+    row = out.iloc[0]
+    assert row.mark_eod == 148
+    assert row.mark_t1 is None
+    assert row.mark_t2 is None
+    assert row.pnl_t1 is None
+    assert row.pnl_t2 is None
+    assert row.pnl_eod == pytest.approx(workbook_fx_pnl("USDJPY", 1_000_000, 147, 148))
 
 
 def test_period_marks_use_current_shared_maturity_and_t2_f_denominator():

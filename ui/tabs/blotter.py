@@ -35,6 +35,19 @@ reads "Unavailable (no option trades loaded; view not built yet)" and its table 
 empty with the same columns as the other sub-tabs -- never hidden, per the "rows must
 always render" rule; there just are none to show.
 
+FX (rebuilt 2026-09-17, user decision) no longer goes through `value_book`/
+`priced_value_book` either: it is `ui.tabs.blotter_fx.build_layout`, a literal replica
+of the old xlsx workbook's "All FX trades" sheet (see that module's docstring for the
+row shape and the deliberately-preserved quirks -- futures P&L divided by mark instead
+of fill, the LTD-2 column's t-1-mark divisor bug, one shared per-pair valuation date --
+all intentional display fidelity to the historical sheet per this user instruction, a
+one-off, named override of CLAUDE.md's "must not replicate" list for this table only).
+Like Rates below, it has no P&L strip, filter bar or row-click detail panel -- its rows
+(trade_id/instrument_id/quantity_usd_notional/tenor/fill/mark_*/pnl_*) don't have
+`value_book`'s shape (trade_id/mark/pnl_usd/...) that scaffolding assumes; it is a
+single always-current table, rebuilt on the same top-level `_update` callback as every
+other sub-tab.
+
 Rates (added 2026-09-15, once `engine/rates` started writing QL_PRICER marks) is a
 real view but does NOT go through `value_book`/`priced_value_book` at all -- that
 pipeline still only builds FX/FUTURE rows. It is `ui.tabs.rates.build_layout`, an IRS
@@ -60,6 +73,7 @@ import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs import blotter_bundles as bundles_ui
+from ui.tabs import blotter_fx as blotter_fx_ui
 from ui.tabs import rates as rates_ui
 from ui.tabs.blotter_pricing import (
     HEADLINE_ORDER,
@@ -448,6 +462,9 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     if scope == "rates":
         return rates_ui.build_layout(conn, as_of)
 
+    if scope == "fx":
+        return blotter_fx_ui.build_layout(conn, as_of)
+
     if scope in PLACEHOLDER_SCOPES:
         empty = pd.DataFrame(columns=_DISPLAY_COLUMNS)
         return html.Div([
@@ -694,11 +711,12 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             prevent_initial_call=True,
         )(_clear_filters)
 
-    # "rates" (ui.tabs.rates) has no strip/detail/filter of its own (module docstring
-    # above / ui.tabs.rates docstring) -- its table isn't priced_value_book-shaped, so
-    # the generic callbacks below (which assume trade_id/mark/pnl_usd rows) don't apply.
+    # "rates" (ui.tabs.rates) and "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17) have no
+    # strip/detail/filter of their own (module docstring above) -- neither table is
+    # priced_value_book-shaped, so the generic callbacks below (which assume
+    # trade_id/mark/pnl_usd rows) don't apply.
     for _scope in SCOPE_ORDER:
-        if _scope not in ("bundles", "rates"):
+        if _scope not in ("bundles", "rates", "fx"):
             _register_strip_callback(_scope)
             _register_detail_callback(_scope)
             _register_filter_callback(_scope)

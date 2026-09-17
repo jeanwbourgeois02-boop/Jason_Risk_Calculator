@@ -72,3 +72,28 @@ metadata:
   When computing a display USD notional as `sign(quantity) * |USD-leg amount|` (the xlsx
   convention, CLAUDE.md "Display notional"), don't assume the USD leg is always leg 2 --
   query `trade_legs WHERE ccy = 'USD'` rather than hard-coding leg_no per pair type.
+
+- pandas `read_sql_query` with a plain sqlite3 connection cannot mix `?` (qmark) and
+  `:name` (named) placeholders in the same query -- sqlite3's DB-API picks one style
+  from the whole statement based on the *first* placeholder it sees, so a query using
+  `IN (?,?,?)` for a tuple of products must also use `?` for every other parameter
+  (e.g. `AND t.trade_date <= ?`), not `:as_of`, or pandas raises
+  `DatabaseError: ... Binding N (':as_of') is a named parameter, but you supplied a
+  sequence`. `engine/pnl/pnl.py`'s existing queries avoid this by using named params
+  throughout and building the `IN (...)` list from a separate `.format()`'d literal
+  count of `?`s passed positionally at the *start* of the params tuple -- either be
+  fully positional or fully named in one query, never mixed.
+
+- 2026-09-17: added `engine/pnl/xlsx_fx_replica.py` (user-authorised, one-off override
+  of the "Must not replicate" list) -- a literal replica of the old xlsx workbook's "All
+  FX trades" row-per-fill formula, but sourced from live `trades`/`trade_legs`, not the
+  xlsx file. Reuses `pnl.py`'s `workbook_fx_pnl`/`workbook_valuation_date` unchanged
+  rather than re-deriving the formula/quirks. Produces t-1/EOD/t-2 mark+P&L columns per
+  trade; t-2's P&L deliberately divides by the t-1 mark (bug item 2), and futures always
+  divide by the mark not fill (bug item 1) since a futures instrument_id never ends in
+  "USD". Missing marks on any of the three observation dates surface as Python `None`
+  in that trade's row, never 0 or NaN-silently-summed. This module is separate from and
+  must never be confused with `engine/pnl/pnl.py`'s Reconciliation-tab arithmetic --
+  both replicate the same workbook formula but from different data sources (this one
+  from our own trades tables, pnl.py historically tied to the xlsx file itself) and
+  CLAUDE.md's override note only applies per-table, not blanket.

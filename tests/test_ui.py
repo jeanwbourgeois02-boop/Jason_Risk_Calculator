@@ -782,13 +782,12 @@ def test_blotter_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
                "4 legs. 0 currency rows seen (no position snapshot -- this file has no EOD balance "
                "grain). Excluded: 0 rows from other funds/status, 0 malformed IRS rows, "
                "0 other unsupported rows.")
-    monkeypatch.setattr("ui.uploads.sniff_format", lambda payload, filename: ("blotter", None))
     monkeypatch.setattr("ui.uploads.import_blotter", lambda *a, **k: summary)
     monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
     monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "none", "trades": 2, "positions": 0})
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    result, source_line, history, ladder_date, stage_style = fn(1, contents, "blotter.csv", None, None)
+    result, source_line, history, stage_style = fn(1, contents, "blotter.csv")
 
     # The loader's summary must actually be visible in the rendered result -- not "",
     # not only passed to a logger.
@@ -796,12 +795,11 @@ def test_blotter_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
     assert result.className == "source-result--info"
     assert summary in str(result)
     assert source_line == "Loaded: 2 trades in database (no BNP position snapshot)."
-    assert ladder_date is dash.no_update
 
 
 def test_blotter_confirm_surfaces_clean_rejection(tmp_path, monkeypatch):
     # import_blotter raises a plain ValueError when the file isn't blotter-shaped; the
-    # UI must show that message, not a raw traceback, and must not gate on any date.
+    # UI must show that message, not a raw traceback.
     db_path = tmp_path / "risk.db"
     app = uiapp.create_app(db_path=db_path, start_feed=False)
     fn = _report_confirm_callback(app)
@@ -809,86 +807,53 @@ def test_blotter_confirm_surfaces_clean_rejection(tmp_path, monkeypatch):
     def _reject(*a, **k):
         raise ValueError("This file is not a trade blotter. Missing columns: Fin Type, Status, Trade Id")
 
-    monkeypatch.setattr("ui.uploads.sniff_format", lambda payload, filename: ("blotter", None))
     monkeypatch.setattr("ui.uploads.import_blotter", _reject)
     monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    result, source_line, history, ladder_date, stage_style = fn(1, contents, "not-a-blotter.csv", None, None)
+    result, source_line, history, stage_style = fn(1, contents, "not-a-blotter.csv")
 
     assert "not a trade blotter" in str(result)
     assert source_line is dash.no_update
 
 
-def test_selected_shows_filename_with_no_date_ui_for_blotter(monkeypatch):
+def test_selected_shows_filename_for_recognized_blotter_file(monkeypatch):
     app = uiapp.create_app(db_path=None, start_feed=False)
     key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
     cb = app.callback_map[key]["callback"]
     fn = getattr(cb, "__wrapped__", cb)
 
     monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
-    monkeypatch.setattr(uploads, "sniff_format", lambda payload, filename: ("blotter", None))
+    monkeypatch.setattr(uploads, "preview_frame", lambda payload, filename: object())
+    monkeypatch.setattr(uploads, "validate_blotter_shape", lambda frame: None)
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    stage_style, fname, date_wrap_style, manual_value, date_store, result = fn(contents, "blotter.csv")
+    stage_style, fname, result = fn(contents, "blotter.csv")
 
     assert stage_style == {}
     assert fname == "blotter.csv"
-    assert date_wrap_style == {"display": "none"}  # no date picker for a blotter file
-    assert date_store is None
     assert result == ""
 
 
-def test_selected_shows_date_picker_for_bnp_with_recognisable_filename(monkeypatch):
+def test_selected_shows_error_for_unrecognized_file(monkeypatch):
     app = uiapp.create_app(db_path=None, start_feed=False)
     key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
     cb = app.callback_map[key]["callback"]
     fn = getattr(cb, "__wrapped__", cb)
 
     monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
-    monkeypatch.setattr(uploads, "sniff_format", lambda payload, filename: ("bnp", None))
-    monkeypatch.setattr(uploads, "suggested_date", lambda filename: "2026-08-17")
+
+    def _reject(frame):
+        raise ValueError("This file is not a trade blotter. Missing columns: Fin Type, Status, Trade Id")
+
+    monkeypatch.setattr(uploads, "preview_frame", lambda payload, filename: object())
+    monkeypatch.setattr(uploads, "validate_blotter_shape", _reject)
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    stage_style, fname, date_wrap_style, manual_value, date_store, result = fn(contents, "HA_PNL_20260818.csv")
-
-    assert stage_style == {}
-    assert date_wrap_style == {"display": "none"}  # date resolved silently from the filename
-    assert date_store == "2026-08-17"
-
-
-def test_selected_shows_manual_date_input_for_bnp_unrecognisable_filename(monkeypatch):
-    app = uiapp.create_app(db_path=None, start_feed=False)
-    key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
-    cb = app.callback_map[key]["callback"]
-    fn = getattr(cb, "__wrapped__", cb)
-
-    monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
-    monkeypatch.setattr(uploads, "sniff_format", lambda payload, filename: ("bnp", None))
-    monkeypatch.setattr(uploads, "suggested_date", lambda filename: None)
-
-    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    stage_style, fname, date_wrap_style, manual_value, date_store, result = fn(contents, "report.csv")
-
-    assert date_wrap_style == {}  # manual date input shown
-    assert date_store is None
-    assert "no recognisable date" in result
-
-
-def test_selected_shows_error_for_unrecognized_format(monkeypatch):
-    app = uiapp.create_app(db_path=None, start_feed=False)
-    key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
-    cb = app.callback_map[key]["callback"]
-    fn = getattr(cb, "__wrapped__", cb)
-
-    monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
-    monkeypatch.setattr(uploads, "sniff_format", lambda payload, filename: (None, None))
-
-    contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    stage_style, fname, date_wrap_style, manual_value, date_store, result = fn(contents, "mystery.csv")
+    stage_style, fname, result = fn(contents, "mystery.csv")
 
     assert stage_style == {"display": "none"}
-    assert "doesn't match either recognized format" in str(result)
+    assert "not a trade blotter" in str(result)
 
 
 def test_describe_source_positions_present():
@@ -921,3 +886,98 @@ def test_launch_configures_root_logging_handler():
     from ui import launch
 
     assert "logging.basicConfig" in inspect.getsource(launch.main)
+
+
+# ------------------------------------------------------ blotter FX sub-tab (xlsx replica)
+
+
+def _seed_fx_replica_trade(conn, trade_id="T1", instrument_id="EURUSD", trade_date="2026-06-18"):
+    conn.execute(
+        "INSERT INTO instruments VALUES (?,'FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')",
+        (instrument_id,),
+    )
+    conn.execute(
+        "INSERT INTO trades VALUES (?,'XLSX',?,'FX_FWD',?,?,1000000,1.10,"
+        "'ACC','CPTY','HAHY7','TR','buy eur','')",
+        (trade_id, instrument_id, trade_id, trade_date),
+    )
+    conn.executemany(
+        "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (trade_id, 1, "FX_NEAR", "EUR", 1000000, trade_date, "2026-06-20", 1.10, 1),
+            (trade_id, 2, "FX_NEAR", "USD", -1100000, trade_date, "2026-06-20", 1.10, 1),
+        ],
+    )
+
+
+def test_blotter_fx_scope_renders_xlsx_replica_columns(tmp_path):
+    """The Blotter 'FX' sub-tab (rebuilt 2026-09-17) is `fx_replica`-shaped, not
+    `value_book`-shaped -- confirms the new column set and labels."""
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    _seed_fx_replica_trade(conn)
+    # fx_replica marks every FX row at the shared WORKDAY(as_of,5) outright, not each
+    # trade's own tenor (must-not-replicate item 4, deliberately preserved for this
+    # table -- see engine/pnl/xlsx_fx_replica.py's docstring).
+    from engine.pnl.pnl import workbook_valuation_date
+    valuation_date = workbook_valuation_date("2026-06-20")
+    conn.execute(
+        "INSERT INTO marks VALUES "
+        "('2026-06-20','EURUSD',?,'FWD_OUTRIGHT',1.1080,'BBG_BFXFORWARD','2026-06-20T15:00:00-04:00')",
+        (valuation_date,),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        layout = blotter.scope_layout("fx", conn, "2026-06-20")
+    finally:
+        conn.close()
+
+    table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+    ids = [c["id"] for c in table.columns]
+    assert ids == [
+        "trade_date", "instrument_id", "quantity_usd_notional", "tenor", "fill",
+        "mark_t1", "mark_eod", "mark_t2", "pnl_t1", "pnl_eod", "pnl_t2",
+    ]
+    names = [c["name"] for c in table.columns]
+    assert "LTD P&L" in names and "LTD-1 P&L" in names and "LTD-2 P&L" in names
+    assert len(table.data) == 1
+    row = table.data[0]
+    assert row["instrument_id"] == "EURUSD"
+    # Only mark_eod was seeded -- mark_t1/mark_t2 and their dependent P&L columns must
+    # render blank, never "0.00" or "n/a" (nothing was computed, see
+    # ui.tabs.blotter_fx's docstring).
+    assert row["mark_t1"] == ""
+    assert row["mark_t2"] == ""
+    assert row["pnl_t1"] == ""
+    assert row["pnl_t2"] == ""
+    assert row["mark_eod"] != ""
+    assert row["pnl_eod"] != ""
+
+
+def test_blotter_fx_scope_empty_still_renders_table(tmp_path):
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    conn.commit()
+    try:
+        layout = blotter.scope_layout("fx", conn, "2026-06-20")
+    finally:
+        conn.close()
+    table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+    assert table.data == []
+    ids = [c["id"] for c in table.columns]
+    assert "pnl_eod" in ids
+
+
+def test_blotter_fx_scope_has_no_pnl_strip_or_filter_bar(tmp_path):
+    """FX (like Rates) is excluded from the generic strip/filter/detail callback loop --
+    its rows aren't value_book-shaped (module docstrings)."""
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    app = uiapp.create_app(str(db_path))
+    assert not any("blotter-strip-fx" in k for k in app.callback_map)
+    assert not any("blotter-fx-replica-datatable" in k for k in app.callback_map)
