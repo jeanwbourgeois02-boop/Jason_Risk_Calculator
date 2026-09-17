@@ -379,6 +379,14 @@ def venv_imports_ok() -> bool:
 
 def cmd_start(args) -> int:
     if not in_venv():
+        if not VENV_PY.exists():
+            # A PC that was never set up (or a fresh clone): do the setup here rather than
+            # stopping with "No .venv yet" -- one time, a few minutes.
+            say("No .venv yet: running setup first (one time; creates .venv, installs packages, creates the database).")
+            setup_args = build_parser().parse_args(["setup", "--skip-tests"])
+            code = cmd_setup(setup_args)
+            if code != 0:
+                return code
         if not args.no_sync:
             changed, message = sync_with_github()
             say(f"GitHub: {message}")

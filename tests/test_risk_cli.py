@@ -75,13 +75,18 @@ def test_start_reexecs_in_venv_when_outside(monkeypatch):
     assert calls[0][0] == str(risk.VENV_PY) and calls[0][-2:] == ["start", "--force-new"]
 
 
-def test_start_without_venv_tells_user_to_setup(monkeypatch, capsys):
+def test_start_without_venv_runs_setup_first(monkeypatch, capsys):
+    """2026-09-17: a PC with no .venv used to stop with 'No .venv yet'; start now runs
+    setup itself (skipping the tests) and only gives up if that setup fails."""
     monkeypatch.setattr(risk, "in_venv", lambda: False)
     monkeypatch.setattr(risk, "sync_with_github", lambda: (False, "code is current with GitHub (test)"))
     monkeypatch.setattr(risk, "venv_imports_ok", lambda: True)
     monkeypatch.setattr(risk.VENV_PY.__class__, "exists", lambda self: False)
-    assert risk.cmd_start(risk.build_parser().parse_args(["start"])) == 2
-    assert "py 2_launcher.py setup" in capsys.readouterr().out
+    ran = []
+    monkeypatch.setattr(risk, "cmd_setup", lambda a: ran.append(a.skip_tests) or 5)
+    assert risk.cmd_start(risk.build_parser().parse_args(["start"])) == 5
+    assert ran == [True]
+    assert "running setup first" in capsys.readouterr().out
 
 
 def test_start_inside_venv_calls_launcher(monkeypatch):
