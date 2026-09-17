@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import dataclasses
 
 import pandas as pd
 import pytest
@@ -97,14 +98,25 @@ def test_forward_rejects_symbol_mismatch(tmp_csv):
     res = blotter.parse(tmp_csv([row]))
     assert res.n_forward == 1
     assert len(res.rejects) == 1
-    assert "disagrees" in res.rejects[0].reason
+    assert "disagree" in res.rejects[0].reason
 
 
-def test_forward_rejects_bad_description(tmp_csv):
-    row = _forward_row(Description="not a valid description")
-    res = blotter.parse(tmp_csv([row]))
+def test_forward_with_unparseable_description_falls_back_to_structured_columns(tmp_csv):
+    via_desc = blotter.parse(tmp_csv([_forward_row()]))
+    via_cols = blotter.parse(tmp_csv([_forward_row(
+        Description="free text the export changed", TradeDate="20/8/2026",
+        **{"Settle Date": "16/9/2026"}, Price="158.26755")]))
+    assert not via_cols.rejects
+    assert via_cols.trades[0] == dataclasses.replace(via_desc.trades[0], description="free text the export changed")
+    assert [(l.ccy, l.amount, l.settle_date, l.rate) for l in via_cols.legs] == \
+           [(l.ccy, l.amount, l.settle_date, l.rate) for l in via_desc.legs]
+    assert via_cols.trades[0].trade_date == "2026-08-20"
+
+
+def test_forward_with_no_description_and_no_dates_is_rejected_not_guessed(tmp_csv):
+    res = blotter.parse(tmp_csv([_forward_row(Description="")]))
     assert len(res.rejects) == 1
-    assert "Description does not match" in res.rejects[0].reason
+    assert "trade date" in res.rejects[0].reason
 
 
 def test_forward_rejects_blank_trade_id(tmp_csv):
@@ -277,10 +289,20 @@ def test_irs_row_rejects_zero_notional(tmp_csv):
     assert "Notional is zero" in res.rejects[0].reason
 
 
-def test_irs_row_rejects_bad_symbol(tmp_csv):
+def test_irs_row_with_unrecognised_symbol_falls_back_to_description_and_columns(tmp_csv):
     res = blotter.parse(tmp_csv([_irs_row(Symbol="IRS-USD-1")]))
+    assert not res.rejects
+    t = res.trades[0]
+    assert t.instrument_id == "IRS-USD-1"
+    assert res.instruments["IRS-USD-1"].base_ccy == "USD"
+    assert t.quantity == pytest.approx(625_000_000.0)
+
+
+def test_irs_row_with_no_currency_anywhere_is_rejected(tmp_csv):
+    res = blotter.parse(tmp_csv([_irs_row(Symbol="IRS-1", Description="", Currency="")]))
     assert len(res.rejects) == 1
     assert res.n_skipped_irs == 1
+    assert "currency" in res.rejects[0].reason
 
 
 # --------------------------------------------------------------------------- filters

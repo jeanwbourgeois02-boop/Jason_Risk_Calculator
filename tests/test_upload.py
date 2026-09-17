@@ -1,6 +1,6 @@
-"""Tests for data/ingest/upload.py -- blotter-only upload (BNP support removed
-2026-09-17, per direct user instruction; data/ingest/bnp.py itself is untouched and
-still used by data/load.py's CLI, just no longer reachable through this module)."""
+"""Tests for data/ingest/upload.py -- blotter-only upload. File-shape tolerance
+(encodings, delimiters, header casing, preamble rows, Excel, re-upload) is exercised
+here end to end through import_blotter; per-row parsing lives in test_blotter.py."""
 from io import BytesIO
 from pathlib import Path
 import sqlite3
@@ -8,122 +8,111 @@ import sqlite3
 import pandas as pd
 import pytest
 
-from data.ingest.upload import (
-    BLOTTER_REQUIRED,
-    _canonicalize_columns,
-    import_blotter,
-    validate_blotter_shape,
-)
+from data.ingest import blotter
+from data.ingest.upload import import_blotter, preview_frame, validate_blotter_shape
 
-RAW_BLOTTER = Path(__file__).resolve().parents[1] / 'data/raw/new_sample_trades.csv'
-needs_raw_blotter = pytest.mark.skipif(not RAW_BLOTTER.exists(), reason=f'raw file absent: {RAW_BLOTTER}')
+RAW_BLOTTER = Path(__file__).resolve().parents[1] / 'data/sample/blotter_sample.csv'
+EXPECTED_TRADES, EXPECTED_LEGS = 772, 1525
 
 
-def snapshot(path):
-    with sqlite3.connect(path) as conn:
-        return list(conn.iterdump())
+def trade_count(db):
+    with sqlite3.connect(db) as conn:
+        return (conn.execute('SELECT COUNT(*) FROM trades').fetchone()[0],
+                conn.execute('SELECT COUNT(*) FROM trade_legs').fetchone()[0])
+
+
+def sample_frame():
+    return blotter.read_table(RAW_BLOTTER)
 
 
 # --------------------------------------------------------------------------- shape validation
 
 def test_validate_blotter_shape_accepts_superset_of_required_columns():
-    frame = pd.DataFrame(columns=list(BLOTTER_REQUIRED) + ['TradeDate', 'Notional', 'Something Extra'])
-    validate_blotter_shape(frame)  # must not raise
+    validate_blotter_shape(pd.DataFrame(columns=['Symbol', 'Trade Id', 'Fin Type', 'Something Extra']))
+
+
+def test_validate_blotter_shape_accepts_product_in_place_of_fin_type():
+    validate_blotter_shape(pd.DataFrame(columns=['symbol', 'TRADE ID', 'Product']))
 
 
 def test_validate_blotter_shape_rejects_missing_columns():
-    frame = pd.DataFrame(columns=['Foo', 'Bar', 'Baz'])
     with pytest.raises(ValueError, match='not a trade blotter'):
-        validate_blotter_shape(frame)
+        validate_blotter_shape(pd.DataFrame(columns=['Foo', 'Bar', 'Baz']))
 
 
-def test_validate_blotter_shape_is_case_and_whitespace_insensitive():
-    # 'STATUS', ' fin type ', 'Trade ID' etc. must all still count as present.
-    columns = [c.upper() if i % 2 else f' {c} ' for i, c in enumerate(BLOTTER_REQUIRED)]
-    frame = pd.DataFrame(columns=columns)
-    validate_blotter_shape(frame)  # must not raise
+def test_preview_frame_refuses_file_with_no_blotter_header():
+    with pytest.raises(ValueError, match='not a trade blotter'):
+        preview_frame(b'just,some,numbers\n1,2,3\n', 'x.csv')
 
 
-# --------------------------------------------------------------------------- canonicalization
+# --------------------------------------------------------------------------- import
 
-def test_canonicalize_columns_recases_known_columns():
-    frame = pd.DataFrame(columns=['STATUS', 'fin type', 'Trade id', 'Symbol'])
-    out = _canonicalize_columns(frame)
-    assert list(out.columns) == ['Status', 'Fin Type', 'Trade Id', 'Symbol']
-
-
-def test_canonicalize_columns_leaves_unknown_columns_untouched():
-    frame = pd.DataFrame(columns=['Status', 'Some Unrecognized Column'])
-    out = _canonicalize_columns(frame)
-    assert list(out.columns) == ['Status', 'Some Unrecognized Column']
-
-
-# --------------------------------------------------------------------------- import_blotter
-
-@needs_raw_blotter
 def test_import_blotter_loads_real_file(tmp_path):
     db = tmp_path / 'risk.db'
     message = import_blotter(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, db)
-    assert '772 trades' in message
-    assert '743 forwards' in message
-    assert '11 futures' in message
-    assert '8 options' in message
-    assert '10 rate swaps' in message
-    assert '85 currency rows seen' in message
-    assert 'no position snapshot' in message
-    with sqlite3.connect(db) as conn:
-        assert conn.execute('SELECT COUNT(*) FROM trades').fetchone()[0] == 772
-        assert conn.execute('SELECT COUNT(*) FROM trade_legs').fetchone()[0] == 1525
-        assert conn.execute('SELECT COUNT(*) FROM positions').fetchone()[0] == 0
+    assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
+    assert f'{EXPECTED_TRADES} trades ({EXPECTED_TRADES} new, 0 updated)' in message
+    assert 'could not be read' not in message
 
 
-@needs_raw_blotter
-def test_import_blotter_duplicate_raises_clean_valueerror(tmp_path):
+def test_import_blotter_reupload_is_idempotent_and_reports_updated(tmp_path):
     db = tmp_path / 'risk.db'
     payload = RAW_BLOTTER.read_bytes()
     import_blotter(payload, RAW_BLOTTER.name, db)
-    before = list(sqlite3.connect(db).iterdump())
-    with pytest.raises(ValueError, match='Duplicate key'):
-        import_blotter(payload, RAW_BLOTTER.name, db)
-    assert list(sqlite3.connect(db).iterdump()) == before
+    message = import_blotter(payload, RAW_BLOTTER.name, db)
+    assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
+    assert f'(0 new, {EXPECTED_TRADES} updated)' in message
 
 
-@needs_raw_blotter
-def test_import_blotter_tolerates_bom_and_mixed_case_headers(tmp_path):
-    """A UTF-8 BOM before the header, plus a mixed-case 'Fin Type'/'Trade Id', must
-    not change the outcome versus the plain reference file."""
-    text = RAW_BLOTTER.read_text(encoding='utf-8')
-    text = text.replace('Fin Type', 'FIN TYPE', 1).replace('Trade Id', 'trade id', 1)
-    payload = ('﻿' + text).encode('utf-8')
+def test_import_blotter_newer_export_replaces_amended_trade(tmp_path):
     db = tmp_path / 'risk.db'
-    message = import_blotter(payload, 'bom_mixed_case.csv', db)
-    assert '772 trades' in message
+    frame = sample_frame()
+    import_blotter(frame.to_csv(index=False).encode(), 'day1.csv', db)
+    fut = frame[frame['Fin Type'] == 'FUTURE'].index[0]
+    frame.loc[fut, 'Price'] = '1234.5'
+    message = import_blotter(frame.to_csv(index=False).encode(), 'day2.csv', db)
+    assert f'(0 new, {EXPECTED_TRADES} updated)' in message
     with sqlite3.connect(db) as conn:
-        assert conn.execute('SELECT COUNT(*) FROM trades').fetchone()[0] == 772
+        price, = conn.execute('SELECT price FROM trades WHERE trade_id = ?', (frame.loc[fut, 'Trade Id'],)).fetchone()
+    assert price == 1234.5
+    assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
+
+
+def test_import_blotter_tolerates_bom_semicolons_cp1252_and_mixed_case_headers(tmp_path):
+    frame = sample_frame()
+    text = frame.to_csv(index=False, sep=';')
+    header, body = text.split('\n', 1)
+    payload = b'\xef\xbb\xbf' + (header.upper() + '\n' + body).encode('cp1252')
+    message = import_blotter(payload, 'export.csv', tmp_path / 'risk.db')
+    assert f'{EXPECTED_TRADES} trades' in message
+    assert 'could not be read' not in message
+
+
+def test_import_blotter_reads_excel_with_cover_sheet_preamble_and_real_dates(tmp_path):
+    frame = sample_frame()
+    for col in ['TradeDate', 'Settle Date', 'Effective Date', 'Termination']:
+        frame[col] = pd.to_datetime(frame[col], dayfirst=True, errors='coerce')
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        pd.DataFrame([['Cover page'], ['nothing here']]).to_excel(writer, sheet_name='Cover', index=False, header=False)
+        pd.DataFrame([['Blotter as of 17/09/2026']]).to_excel(writer, sheet_name='Trades', index=False, header=False)
+        frame.to_excel(writer, sheet_name='Trades', index=False, startrow=3)
+    message = import_blotter(buf.getvalue(), 'export.xlsx', tmp_path / 'risk.db')
+    assert f'{EXPECTED_TRADES} trades' in message
+    assert 'could not be read' not in message
+
+
+def test_import_blotter_without_status_or_fund_columns_loads_everything(tmp_path):
+    frame = sample_frame().drop(columns=['Status', 'Fund'])
+    message = import_blotter(frame.to_csv(index=False).encode(), 'x.csv', tmp_path / 'risk.db')
+    assert f'{EXPECTED_TRADES} trades' in message
 
 
 def test_import_blotter_one_bad_row_does_not_block_the_rest(tmp_path):
-    """strict=False (2026-09-17, 'as flexible as possible'): a single malformed row
-    must not prevent every other good row in the same file from loading."""
-    good_row = (
-        'Completed,Firm,APAC,TD 08/20/2026 VD 09/16/2026 SELL JPY VS .BUY USD @ 158.26755000,'
-        'Buy,FORWARD,934530555,5,,,USDJPY091626-197584766,USDJPY-XXAA,"1,137,580.00",158.26755,,,,'
-        'SCBANK,,,HA,PARIUK,,NMCL,NMMF,HAHY7,HAHY7:XXNMMFNMCL0001,20/8/2026,,,Unchecked,JPY.C-JPAA,,'
-        '"180,042,000.00",,,0,Explicit,CUSTOM,16/9/2026,,,,,,,,"180,042,000.00",0,,ASIA,1010,0,'
-        'NMCL911783813,NEW,,,,20/8/2026 19:54,20/8/2026 20:59,sys_il_tramp,PRIMEBKR,BNPP-IPBFX-NMMF,'
-        'FUTURE,,,812,420817455,197584766,FX Forward,,,,,,,HFS,,,Matched in FX,,,,,,,,,,,,,,,,,,,'
-        'sys_il_tramp,USDJPY-XXAA,DOL.C-USAA,JPY.C-JPAA,"1,137,580.00","180,042,000.00",,,,,,,'
-    )
-    bad_row = good_row.replace(
-        'TD 08/20/2026 VD 09/16/2026 SELL JPY VS .BUY USD @ 158.26755000', 'not a real description'
-    ).replace('934530555', '934530556')  # different Trade Id so it isn't a duplicate key
-    header = RAW_BLOTTER.read_text(encoding='utf-8').splitlines()[0]
-    payload = ('\n'.join([header, good_row, bad_row]) + '\n').encode('utf-8')
-
-    db = tmp_path / 'risk.db'
-    message = import_blotter(payload, 'one_bad_row.csv', db)
-
-    assert '1 trades' in message
-    assert 'could not be parsed and were skipped' in message
-    with sqlite3.connect(db) as conn:
-        assert conn.execute('SELECT COUNT(*) FROM trades').fetchone()[0] == 1
+    frame = sample_frame()
+    fwd = frame[frame['Fin Type'] == 'FORWARD'].index[0]
+    frame.loc[fwd, 'Buy Currency'] = 'EUR.C-EUAA'  # contradicts the USD/JPY description
+    message = import_blotter(frame.to_csv(index=False).encode(), 'x.csv', tmp_path / 'risk.db')
+    assert trade_count(tmp_path / 'risk.db') == (EXPECTED_TRADES - 1, EXPECTED_LEGS - 2)
+    assert '1 row(s) could not be read' in message
+    assert 'disagree' in message

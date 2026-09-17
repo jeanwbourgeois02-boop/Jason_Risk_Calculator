@@ -1,71 +1,53 @@
-"""Trade blotter CSV -> instruments, trades, trade_legs.
+"""Trade blotter CSV/Excel -> instruments, trades, trade_legs.
 
 Source: the transaction-level blotter export (``data/raw/new_sample_trades.csv``-shaped
-files), which supersedes the BNP position/P&L snapshot (``data/ingest/bnp.py``) as the
-trade source going forward. ``data/ingest/bnp.py`` is left untouched: it may still be
-referenced elsewhere (e.g. reconciliation, futures-position snapshots) and this module
-only adds a second source alongside it.
+files), the app's only trade source. ``data/ingest/bnp.py`` is left untouched and is
+used here only for shared dataclasses/regexes.
 
-Scope: rows with ``Status == 'Completed'`` and ``Fund == 'NMMF'``. ``Fin Type`` (not
-``Financial Type`` as in the BNP file) selects the row kind: FORWARD, CURRENCY, FUTURE
-(singular, not FUTURES), OPTION, INTEREST_RATE_SWAP; any other value, or a non-Completed /
-non-NMMF row, is filtered out silently and counted. The ``Product`` column is NOT
-authoritative (mostly junk, e.g. 'FUTURE' on non-future rows) -- ``Fin Type`` decides.
+Row kind is decided by ``Fin Type`` (``Product`` is the fallback when Fin Type is blank
+or unrecognised): FORWARD, CURRENCY, FUTURE, OPTION, INTEREST_RATE_SWAP -- matched by
+keyword after normalisation, so 'Futures', 'FX Forward', 'Interest Rate Swap', 'fx
+option' all resolve. Rows whose Status says cancelled/rejected/pending/void, or whose
+Fund is populated and is not NMMF, are filtered out and counted. A missing Status or
+Fund column (or a blank cell) never excludes a row.
 
-This file is transaction-level (one row per fill), unlike the BNP snapshot (one netted
-row per open position per day), which changes what each row produces:
-  - FORWARD: a trade + 2 FX_NEAR legs, same shape as bnp.py's FORWARD handling. The
-    ``Symbol`` (``<PAIR><mmddyy>-<id>``) and ``Description`` (``TD .. VD .. SELL/BUY ..
-    VS .BUY/SELL .. @ rate``) regexes are byte-identical to bnp.py's on every row of the
-    reference sample, so they are imported from there rather than redefined. Quantity
-    direction and amounts come from the structured ``Buy Currency`` / ``Sell Currency`` /
-    ``BuyCurrency Amount`` / ``SellCurrency Amount`` columns (this format gives clean
-    buy/sell legs directly, unlike BNP's ``Local Cost`` which has to be reverse engineered
-    from ``Quantity x rate``), cross-checked against the description's sold/bought
-    currencies.
-  - CURRENCY: cash trade/settlement rows, not an EOD balance snapshot. This module writes
-    the CASH instrument only (``setdefault``, matching bnp.py); no trade / legs / positions
-    row is produced for CURRENCY rows here -- cash movement bookkeeping stays BNP's job
-    (this is a data-contract gap, flagged rather than guessed at: there is no ``positions``
-    grain in this file since it is not an EOD snapshot).
-  - FUTURE: unlike the BNP snapshot (which never carries a per-fill futures price and so
-    produces no trade at all -- see bnp.py's module docstring), this file gives ``Trade
-    Id`` and a real fill ``Price`` per contract, so a trade + 1 NOTIONAL leg IS written
-    here. This is in fact the futures-fill source CLAUDE.md's "xlsx -> tables" section
-    describes as coming from the workbook; that expectation is stale now that the blotter
-    carries it directly (flagged for the housekeeper, not changed here).
-  - OPTION: new versus bnp.py. product FX_OPTION, 1 NOTIONAL leg in the base currency of
-    the pair (``Currency Pair`` column), quantity signed by ``Side`` (Buy = long = +,
-    Sell = short = -), price = premium fill (``Price``, per unit).
-  - INTEREST_RATE_SWAP: ``Side`` is 'Buy' on every row in the reference sample and carries
-    no direction here (unlike FUTURE/OPTION). The direction signal is instead the sign of
-    ``Notional`` itself (user-confirmed 2026-09-16): positive Notional = pay fixed,
-    negative = receive fixed -- the same convention as ``trades.quantity`` in CLAUDE.md's
-    IRS leg layout (payer/quantity > 0 has a negative FIXED leg, positive FLOAT leg).
-    ``trades.quantity`` = ``Notional`` signed, in full notional units (this file's
-    ``Notional`` column is already the full unit amount, e.g. ``625,000,000`` --
-    unlike the millions-scaled ``Quantity`` column). This matches ``irs.py``'s BNP path
-    (``quantity_mm * 1e6``) and CLAUDE.md's "notional (IRS: + = pay fixed)" wording, so
-    IRS quantity/leg amounts are on the same scale regardless of source. All 10 rows in
-    the 2026-09-16 reference sample have positive Notional (all payers); a negative
-    Notional has not been observed but is honoured if seen.
+This file is transaction-level (one row per fill), unlike the BNP snapshot:
+  - FORWARD: a trade + 2 FX_NEAR legs. The ``Description`` (``TD .. VD .. SELL/BUY ..
+    VS .BUY/SELL .. @ rate``) is the primary source of dates, currencies and rate when
+    it parses; when it is blank or in another shape, the structured ``TradeDate`` /
+    ``Settle Date`` / ``Buy Currency`` / ``Sell Currency`` / ``Price`` columns are used
+    instead. Amounts always come from ``BuyCurrency Amount`` / ``SellCurrency Amount``
+    (fallback: ``Quantity`` x rate).
+  - CURRENCY: settlement-level cash movements; the CASH instrument only is written.
+  - FUTURE: a trade + 1 NOTIONAL leg (``Quantity`` = contracts signed by ``Side``).
+  - OPTION: product FX_OPTION, 1 NOTIONAL leg in the pair's base currency, quantity
+    signed by ``Side``, price = premium fill. Strike from the Description when present.
+  - INTEREST_RATE_SWAP: direction is the sign of ``Notional`` (+ = pay fixed, - =
+    receive fixed; user-confirmed 2026-09-16), in full notional units.
 
-``trades.strategy`` has no equivalent column in this file (BNP's ``NM Strategy``); left
-``''`` (schema allows empty string, not NULL). ``trades.account`` = ``ExtAccount``,
-``trades.trader`` = ``Trader``.
+Tolerance rule (user instruction 2026-09-17, "as flexible as possible"): a blank,
+missing or oddly formatted field never rejects a row when the value can be recovered
+from another column; only a genuine contradiction between two populated fields does
+(pair vs buy/sell currencies, value date in Symbol vs Description, option pair vs
+Currency Pair). Rejected rows are counted and reported, never coerced or invented.
 
-Numeric cells may carry thousands separators (``'1,137,580.00'``) and so arrive as
-strings; ``_num()`` strips separators before ``float()``. Column order, and extra/missing
-trailing columns, are not relied upon -- every field is looked up by name, as in bnp.py.
+Input tolerance (``read_table``): UTF-8 with or without BOM, or cp1252; ',' ';' tab or
+'|' delimiters; a header row anywhere in the first 50 lines (title/preamble rows are
+skipped); any column casing/whitespace; extra, missing and reordered columns; single-
+or multi-sheet workbooks (the first sheet that looks like a blotter is used). Within a
+file, a repeated ``Trade Id`` keeps the row with the highest ``Version`` (last row
+otherwise). ``load`` is idempotent: re-uploading replaces trades of the same id.
 """
 from __future__ import annotations
 
+import csv
 import logging
 import math
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -75,7 +57,6 @@ from data.ingest.bnp import (
     CASH_CCY_RE,
     DESCRIPTION_RE,
     FORWARD_SYMBOL_RE,
-    FUTURE_SYMBOL_RE,
     Instrument,
     InstrumentOption,
     NDF_CCYS,
@@ -83,26 +64,55 @@ from data.ingest.bnp import (
     Reject,
     Trade,
     TradeLeg,
-    cash_ccy,
     future_expiry,
 )
-from data.ingest.irs import IRS_SYMBOL_RE
+from data.ingest.irs import IRS_DESCRIPTION_RE, IRS_SYMBOL_RE
 
 log = logging.getLogger(__name__)
 
-SOURCE = "XLSX"  # 'trades' PK has no source-specific namespace of its own; the value
-# just has to be one of the enum CLAUDE.md lists for `trades.source` ('BNP | XLSX |
-# MANUAL'). This is a blotter export, not the xlsx calculator, but 'XLSX' is the closest
-# fit in the fixed enum and keeps this module from having to widen the contract; flagged
-# for the housekeeper if a dedicated 'BLOTTER' value is wanted.
+SOURCE = "XLSX"  # closest value in CLAUDE.md's trades.source enum ('BNP | XLSX | MANUAL')
 FUND = "NMMF"
-STATUS_OK = "Completed"
 IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION", "INTEREST_RATE_SWAP")
+EXCLUDED_STATUS_WORDS = ("cancel", "reject", "void", "pend", "delet", "fail", "error", "draft")
 
-# 'EURSEK092326C-197727826' -> ('EURSEK', '092326', 'C', '197727826').
+# Reference header, exactly as data/raw/new_sample_trades.csv's own header row: the
+# casing every row.get(...) below expects. Incoming columns matching case-insensitively
+# are re-cased to this; anything else is left alone and ignored.
+REFERENCE_HEADER = (
+    "Status,Firm,Client Domicile,Description,Side,Fin Type,Trade Id,Version,RollSide,"
+    "Swap ID,Symbol,Underlying Symbol,Quantity,Price,Yield,Total Fees,Accrued Fees,"
+    "Counterparty,Execution Venue,Counterparty Desc,Trader,Clearing Cpty,"
+    "Trade Request ID,Desk,Fund,PBRoot,Position Block,TradeDate,NotificationID,"
+    "Email Notification Status,Is Swap,Currency,Valuation Currency,NetInvoice,Notes,"
+    "CCP/Confirm ID,Commission,Commission Type,Settle Type,Settle Date,PaymentDate,"
+    "Swap Type,Dividend,Spread,FixedRate,Notional,IsSellOfBook,Invoice,Invoice Comm,"
+    "QtyFactor,Region,OTC Type,Oasys Ref Id,External Ref Id,Tran Type,"
+    "CDS Classification,Effective Date,Termination,CreateDate,LastModified,ModifiedBy,"
+    "Account Type,ExtAccount,Sub Account,PSET Code,Is Excess Return,Counterparty Id,"
+    "Alt Src,Instrument Id,Product,CUSIP,SEDOL,LoanxID,ISIN,BB_YK_IDENTIFIER,FOID,"
+    "BusinessLine,TradeGroup,TrailerTradeId,Error Message,PositionType Id,"
+    "Repo Interest Index,Order Id,Cut Time,Cut Location,Repo Term Date,Close Date,"
+    "Repo Financing Interest,Repo Interest Rate,Premium,Adj. Expiry Date,Factor,"
+    "Original Face,Current Face,Gross Amnt/Principal,Accrued Interest,"
+    "External Execution Id,Settlement Status,Created By,Currency Pair,Buy Currency,"
+    "Sell Currency,BuyCurrency Amount,SellCurrency Amount,PayLegPmtFreq,"
+    "RecvLegPmtFreq,PayLegDCF,RecvLeg DCF,FxOption Type,PM Name,CPI Factor"
+).split(",")
+_CANONICAL_BY_KEY = {re.sub(r"[^a-z0-9]", "", c.casefold()): c for c in REFERENCE_HEADER}
+# Columns whose presence identifies the header row / a blotter-shaped sheet.
+HEADER_MARKERS = ("symbol", "tradeid", "fintype", "product")
+
 OPTION_SYMBOL_RE = re.compile(r"^([A-Z]{6})(\d{6})([CP])-(\d+)$")
-# '11.058400 STRIKE' in the free-text Description column -- see _parse_option.
 STRIKE_RE = re.compile(r"(\d+\.\d+)\s+STRIKE")
+PAIR_RE = re.compile(r"^([A-Z]{3})[ /\-]?([A-Z]{3})(?![A-Z])")
+US_DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{4})\b")
+# Market convention for which currency is the base when only the two currencies of a
+# pair are known (last-resort fallback, logged when used).
+PAIR_PRIORITY = ("XAU", "XAG", "XPT", "XPD", "EUR", "GBP", "AUD", "NZD", "USD", "CAD", "CHF", "JPY")
+DATE_FORMATS = ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M",
+                "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d.%m.%Y", "%d-%b-%Y", "%d-%b-%y",
+                "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y", "%Y%m%d", "%d/%m/%Y %H:%M:%S")
+EXCEL_EPOCH = date(1899, 12, 30)
 
 
 @dataclass
@@ -116,26 +126,36 @@ class ParseResult:
     n_currency: int = 0
     n_future: int = 0
     n_option: int = 0
+    n_irs: int = 0
     n_skipped_irs: int = 0
     n_skipped_other: int = 0
     n_skipped_status_or_fund: int = 0
+    n_superseded: int = 0   # earlier versions of a Trade Id repeated within the file
+    n_updated: int = 0      # set by load(): trades that already existed and were replaced
 
 
+# --------------------------------------------------------------------------- cell helpers
 def _num(v) -> float:
-    """float() that tolerates thousands separators and blank/NaN cells (-> NaN, not 0,
-    so a genuinely missing amount fails a downstream check rather than silently zeroing)."""
+    """float() tolerant of thousands separators, currency symbols, '(1,000)' negatives,
+    trailing '-' and blank cells (-> NaN, never 0)."""
     if v is None:
         return math.nan
-    if isinstance(v, float):
-        return v
-    s = str(v).strip()
-    if s == "" or s.lower() == "nan":
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace("−", "-")
+    if s == "" or s.lower() in ("nan", "none", "null", "n/a", "-"):
         return math.nan
-    s = s.replace(",", "")
+    neg = False
+    if s.startswith("(") and s.endswith(")"):
+        neg, s = True, s[1:-1]
+    if s.endswith("-"):
+        neg, s = True, s[:-1]
+    s = re.sub(r"[^0-9eE+\-.]", "", s.replace(",", ""))
     try:
-        return float(s)
+        x = float(s)
     except ValueError:
         return math.nan
+    return -x if neg else x
 
 
 def _s(v) -> str:
@@ -143,61 +163,245 @@ def _s(v) -> str:
         return ""
     if isinstance(v, float) and math.isnan(v):
         return ""
-    return str(v).strip()
+    s = str(v).strip()
+    return "" if s.lower() in ("nan", "none", "null") else s
 
 
-def _ddmy_iso(v: str) -> str:
-    """'20/8/2026' (day/month/year, not zero-padded) -> ISO. Used only as a fallback /
-    cross-check; FORWARD trade_date and value_date come from the (US mm/dd/yyyy)
-    Description regex instead, which is unambiguous."""
-    return datetime.strptime(v.strip(), "%d/%m/%Y").date().isoformat()
+def _date(v) -> Optional[str]:
+    """Any common date shape -> ISO, or None if blank/unparseable. Day-first for the
+    numeric d/m/y shapes (the file's own convention); an impossible day-first reading
+    such as 8/20/2026 falls back to month-first."""
+    s = _s(v)
+    if not s:
+        return None
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    if re.fullmatch(r"\d{5}(\.0+)?", s):
+        return (EXCEL_EPOCH + timedelta(days=int(float(s)))).isoformat()
+    try:
+        ts = pd.to_datetime(s, dayfirst=True)
+    except (ValueError, TypeError):
+        return None
+    return None if pd.isna(ts) else ts.date().isoformat()
 
 
-def parse(csv_path: Union[str, Path]) -> ParseResult:
-    """Pure parse of a blotter CSV. Never writes; never coerces malformed rows.
+def _us_date(s: str) -> str:
+    return datetime.strptime(s, "%m/%d/%Y").date().isoformat()
 
-    ``encoding='utf-8-sig'`` (matching ``data/ingest/upload.py::_parse_frame``): tolerates
-    a leading UTF-8 byte-order-mark (common in an Excel-exported CSV) without corrupting
-    the first column name, which would otherwise make every row look unrecognized.
-    """
-    csv_path = Path(csv_path)
-    df = pd.read_csv(csv_path, dtype=str, encoding='utf-8-sig')
+
+def _mmddyy(s: str) -> Optional[str]:
+    try:
+        return datetime.strptime(s, "%m%d%y").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _side(v) -> Optional[str]:
+    s = _s(v).casefold()
+    if s in ("buy", "b", "bought", "long", "bot", "+", "purchase"):
+        return "Buy"
+    if s in ("sell", "s", "sold", "short", "sld", "-", "sale"):
+        return "Sell"
+    return None
+
+
+def _ccy(code) -> Optional[str]:
+    """'DOL.C-USAA' -> 'USD'; 'JPY.C-JPAA' -> 'JPY'; 'usd' -> 'USD'; None if unrecognised."""
+    s = _s(code).upper()
+    m = CASH_CCY_RE.match(s)
+    if m:
+        c = m.group(1)
+    elif re.fullmatch(r"[A-Z]{3}", s):
+        c = s
+    else:
+        return None
+    return "USD" if c == "DOL" else c
+
+
+def _pair_of(*candidates) -> Optional[str]:
+    for c in candidates:
+        m = PAIR_RE.match(_s(c).upper())
+        if m and m.group(1) != m.group(2):
+            return m.group(1) + m.group(2)
+    return None
+
+
+def _pair_by_convention(a: str, b: str) -> str:
+    def rank(c):
+        return PAIR_PRIORITY.index(c) if c in PAIR_PRIORITY else len(PAIR_PRIORITY) + ord(c[0])
+    base, quote = sorted((a, b), key=rank)
+    return base + quote
+
+
+def _status_excluded(v) -> bool:
+    s = _s(v).casefold()
+    return any(w in s for w in EXCLUDED_STATUS_WORDS)
+
+
+def _fund_excluded(v) -> bool:
+    s = _s(v).casefold()
+    return bool(s) and s != FUND.casefold()
+
+
+def _kind_of(label: str) -> Optional[str]:
+    s = re.sub(r"[^A-Z0-9]+", " ", _s(label).upper()).strip()
+    if not s:
+        return None
+    words = set(s.split())
+    if words & {"IRS", "OIS", "INTEREST"} or "INTEREST RATE" in s:
+        return "INTEREST_RATE_SWAP"
+    if words & {"OPTION", "OPTIONS", "OPT"}:
+        return "OPTION"
+    if words & {"FUTURE", "FUTURES", "FUT"}:
+        return "FUTURE"
+    if words & {"FORWARD", "FORWARDS", "FWD", "SPOT", "NDF", "OUTRIGHT"}:
+        return "FORWARD"
+    if words & {"CURRENCY", "CASH"}:
+        return "CURRENCY"
+    if "SWAP" in words:
+        return "INTEREST_RATE_SWAP"
+    return None
+
+
+def _row_kind(row: pd.Series) -> Optional[str]:
+    return _kind_of(row.get("Fin Type")) or _kind_of(row.get("Product"))
+
+
+# --------------------------------------------------------------------------- table reading
+def _header_key(v) -> str:
+    return re.sub(r"[^a-z0-9]", "", _s(v).casefold())
+
+
+def _looks_like_header(cells) -> bool:
+    keys = {_header_key(c) for c in cells}
+    return "symbol" in keys and bool(keys & set(HEADER_MARKERS) - {"symbol"})
+
+
+def canonicalize_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Re-case any column matching a reference header name (ignoring case, spaces and
+    punctuation) to the reference casing; leave anything else untouched."""
+    rename = {}
+    for col in frame.columns:
+        canonical = _CANONICAL_BY_KEY.get(_header_key(col))
+        if canonical is not None and canonical != col:
+            rename[col] = canonical
+    frame = frame.rename(columns=rename) if rename else frame
+    frame.columns = [str(c).strip() for c in frame.columns]
+    return frame
+
+
+def _frame_from_rows(rows: List[list]) -> Optional[pd.DataFrame]:
+    for i, cells in enumerate(rows[:50]):
+        if _looks_like_header(cells):
+            header = [_s(c) for c in cells]
+            body = [list(r) + [""] * (len(header) - len(r)) for r in rows[i + 1:]]
+            body = [r[:len(header)] for r in body]
+            frame = pd.DataFrame(body, columns=header, dtype=str).fillna("")
+            frame = frame.loc[:, [c for c in frame.columns if c != ""]]
+            return frame[~(frame == "").all(axis=1)].reset_index(drop=True)
+    return None
+
+
+def _read_csv_text(text: str) -> Optional[pd.DataFrame]:
+    lines = text.splitlines()
+    for i, line in enumerate(lines[:50]):
+        for sep in (",", ";", "\t", "|"):
+            cells = next(csv.reader([line], delimiter=sep))
+            if len(cells) > 1 and _looks_like_header(cells):
+                frame = pd.read_csv(StringIO("\n".join(lines[i:])), sep=sep, dtype=str,
+                                    keep_default_na=False, engine="python")
+                frame = frame.loc[:, [c for c in frame.columns if not str(c).startswith("Unnamed")]]
+                return frame
+    return None
+
+
+def read_table(source: Union[str, Path, bytes], filename: Optional[str] = None) -> pd.DataFrame:
+    """Blotter file (path or raw bytes) -> DataFrame of strings with canonical column
+    names. Raises ValueError only when no sheet/section of the file has a header row
+    containing a Symbol column plus one of Trade Id / Fin Type / Product."""
+    if isinstance(source, (str, Path)):
+        filename = filename or Path(source).name
+        payload = Path(source).read_bytes()
+    else:
+        payload = source
+    suffix = Path(filename or "").suffix.lower()
+    frame = None
+    if suffix in (".xlsx", ".xlsm", ".xls") or payload[:2] == b"PK":
+        with pd.ExcelFile(BytesIO(payload)) as book:
+            for name in book.sheet_names:
+                raw = pd.read_excel(book, sheet_name=name, header=None, dtype=str)
+                frame = _frame_from_rows(raw.fillna("").values.tolist())
+                if frame is not None:
+                    break
+    else:
+        try:
+            text = payload.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = payload.decode("cp1252", errors="replace")
+        frame = _read_csv_text(text)
+    if frame is None:
+        raise ValueError("This file is not a trade blotter: no header row with a Symbol column "
+                         "plus Trade Id / Fin Type / Product was found.")
+    return canonicalize_columns(frame)
+
+
+def _dedupe_versions(df: pd.DataFrame) -> tuple:
+    """Keep one row per Trade Id: the highest Version, else the last occurrence."""
+    if "Trade Id" not in df.columns:
+        return df, 0
+    ids = df["Trade Id"].map(_s)
+    version = df["Version"].map(_num).fillna(-1.0) if "Version" in df.columns else pd.Series(0.0, index=df.index)
+    keyed = pd.DataFrame({"id": ids, "v": version, "i": range(len(df))}, index=df.index)
+    keyed = keyed[keyed["id"] != ""]
+    winners = keyed.sort_values(["v", "i"]).drop_duplicates("id", keep="last").index
+    drop = keyed.index.difference(winners)
+    return df.drop(index=drop), len(drop)
+
+
+# --------------------------------------------------------------------------- parse
+def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str] = None) -> ParseResult:
+    """Pure parse of a blotter (path, bytes or an already-read DataFrame). Never writes;
+    never coerces a contradictory row."""
+    df = source if isinstance(source, pd.DataFrame) else read_table(source, filename)
+    df = canonicalize_columns(df).reset_index(drop=True)
     res = ParseResult()
+    df, res.n_superseded = _dedupe_versions(df)
 
     for idx, row in df.iterrows():
         row_no = int(idx) + 2  # header is line 1
-        # Case-insensitive on purpose (flexibility, not a contract requirement): an
-        # export with 'completed'/'COMPLETED' or 'nmmf'/'Nmmf' should still be
-        # recognized rather than silently skipped over a trivial case difference.
-        if _s(row.get("Status")).casefold() != STATUS_OK.casefold() or \
-           _s(row.get("Fund")).casefold() != FUND.casefold():
+        if _status_excluded(row.get("Status")) or _fund_excluded(row.get("Fund")):
             res.n_skipped_status_or_fund += 1
             continue
-        # Upper-cased for the same reason as Status/Fund above: 'Forward'/'forward'
-        # should not silently fall into "unsupported row" just because of case.
-        ftype = _s(row.get("Fin Type")).upper()
-        if ftype == "FORWARD":
+        kind = _row_kind(row)
+        if kind == "FORWARD":
             res.n_forward += 1
             _parse_forward(res, row, row_no)
-        elif ftype == "CURRENCY":
+        elif kind == "CURRENCY":
             res.n_currency += 1
             _parse_currency(res, row, row_no)
-        elif ftype == "FUTURE":
+        elif kind == "FUTURE":
             res.n_future += 1
             _parse_future(res, row, row_no)
-        elif ftype == "OPTION":
+        elif kind == "OPTION":
             res.n_option += 1
             _parse_option(res, row, row_no)
-        elif ftype == "INTEREST_RATE_SWAP":
+        elif kind == "INTEREST_RATE_SWAP":
+            res.n_irs += 1
             n_rejects_before = len(res.rejects)
             _parse_irs(res, row, row_no)
             if len(res.rejects) > n_rejects_before:
                 res.n_skipped_irs += 1
-                log.info("row %d: skipping %s %s (%s)", row_no, ftype,
-                         _s(row.get("Symbol")), res.rejects[-1].reason)
         else:
             res.n_skipped_other += 1
     return res
+
+
+def _common(row: pd.Series) -> dict:
+    return dict(account=_s(row.get("ExtAccount")), counterparty=_s(row.get("Counterparty")),
+                strategy="", trader=_s(row.get("Trader")), description=_s(row.get("Description")))
 
 
 def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
@@ -209,47 +413,49 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
         return
 
     sm = FORWARD_SYMBOL_RE.match(symbol)
-    if not sm:
-        res.rejects.append(Reject(row_no, symbol, f"Symbol does not match <PAIR><mmddyy>-<id>: {symbol!r}"))
-        return
-    pair, sym_vd, sym_id = sm.groups()
-    # NOTE: unlike the BNP file, the trailing id in Symbol here is 'Instrument Id', not
-    # 'Trade Id' (e.g. Symbol '...-197584766' vs Trade Id '934530555' on the same row) --
-    # confirmed against the 'Instrument Id' column in the reference sample. Not
-    # cross-checked against Trade Id; Instrument Id is not otherwise used by this parser.
-
     dm = DESCRIPTION_RE.match(desc)
-    if not dm:
-        res.rejects.append(Reject(row_no, symbol, f"Description does not match FORWARD regex: {desc!r}"))
-        return
-    td_us, vd_us, verb1, ccy1, verb2, ccy2, rate_s = dm.groups()
-    if verb1 == verb2:
-        res.rejects.append(Reject(row_no, symbol, f"description verbs are both {verb1}: {desc!r}"))
-        return
-    sold_ccy, bought_ccy = (ccy1, ccy2) if verb1 == "SELL" else (ccy2, ccy1)
-    rate = float(rate_s)
-    trade_date = datetime.strptime(td_us, "%m/%d/%Y").date().isoformat()
-    value_date = datetime.strptime(vd_us, "%m/%d/%Y").date().isoformat()
-    vd_desc_mmddyy = datetime.strptime(vd_us, "%m/%d/%Y").strftime("%m%d%y")
-    if vd_desc_mmddyy != sym_vd:
-        res.rejects.append(Reject(row_no, symbol,
-                                  f"value date {sym_vd} in Symbol disagrees with description VD {vd_us}"))
-        return
+    pair = sm.group(1) if sm else _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol"))
 
+    buy_ccy = _ccy(row.get("Buy Currency"))
+    sell_ccy = _ccy(row.get("Sell Currency"))
+    rate = math.nan
+    trade_date = value_date = None
+    if dm:
+        td_us, vd_us, verb1, ccy1, verb2, ccy2, rate_s = dm.groups()
+        if verb1 == verb2:
+            res.rejects.append(Reject(row_no, symbol, f"description verbs are both {verb1}: {desc!r}"))
+            return
+        d_sold, d_bought = (ccy1, ccy2) if verb1 == "SELL" else (ccy2, ccy1)
+        if buy_ccy and sell_ccy and {buy_ccy, sell_ccy} != {d_sold, d_bought}:
+            res.rejects.append(Reject(row_no, symbol,
+                                      f"Buy/Sell Currency columns {buy_ccy}/{sell_ccy} disagree with "
+                                      f"description currencies {d_bought}/{d_sold}"))
+            return
+        buy_ccy, sell_ccy = buy_ccy or d_bought, sell_ccy or d_sold
+        rate = float(rate_s)
+        trade_date, value_date = _us_date(td_us), _us_date(vd_us)
+        if sm and datetime.strptime(vd_us, "%m/%d/%Y").strftime("%m%d%y") != sm.group(2):
+            res.rejects.append(Reject(row_no, symbol,
+                                      f"value date {sm.group(2)} in Symbol disagrees with description VD {vd_us}"))
+            return
+    if not (buy_ccy and sell_ccy):
+        res.rejects.append(Reject(row_no, symbol, "cannot tell the two currencies: Buy/Sell Currency "
+                                                   "blank and Description not in 'TD .. VD .. SELL x VS .BUY y' form"))
+        return
+    if buy_ccy == sell_ccy:
+        res.rejects.append(Reject(row_no, symbol, f"Buy and Sell Currency are both {buy_ccy}"))
+        return
+    if math.isnan(rate):
+        rate = _num(row.get("Price"))
+    trade_date = trade_date or _date(row.get("TradeDate"))
+    value_date = value_date or _date(row.get("Settle Date")) or (_mmddyy(sm.group(2)) if sm else None)
+    if trade_date is None or value_date is None:
+        res.rejects.append(Reject(row_no, symbol, "no trade date / value date in Description, TradeDate or Settle Date"))
+        return
+    if pair is None:
+        pair = _pair_by_convention(buy_ccy, sell_ccy)
+        log.warning("row %d %s: pair not given; assuming %s by market convention", row_no, trade_id, pair)
     base_ccy, quote_ccy = pair[:3], pair[3:]
-    if {sold_ccy, bought_ccy} != {base_ccy, quote_ccy}:
-        res.rejects.append(Reject(row_no, symbol,
-                                  f"pair {pair} disagrees with description currencies {sold_ccy}/{bought_ccy}"))
-        return
-
-    buy_ccy_raw = _s(row.get("Buy Currency"))
-    sell_ccy_raw = _s(row.get("Sell Currency"))
-    try:
-        buy_ccy = cash_ccy(buy_ccy_raw)
-        sell_ccy = cash_ccy(sell_ccy_raw)
-    except ValueError as e:
-        res.rejects.append(Reject(row_no, symbol, str(e)))
-        return
     if {buy_ccy, sell_ccy} != {base_ccy, quote_ccy}:
         res.rejects.append(Reject(row_no, symbol,
                                   f"Buy/Sell Currency columns {buy_ccy}/{sell_ccy} disagree with pair {pair}"))
@@ -258,10 +464,21 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
     buy_amt = _num(row.get("BuyCurrency Amount"))
     sell_amt = _num(row.get("SellCurrency Amount"))
     if math.isnan(buy_amt) or math.isnan(sell_amt):
-        res.rejects.append(Reject(row_no, symbol, "blank BuyCurrency/SellCurrency Amount"))
-        return
+        qty = abs(_num(row.get("Quantity")))
+        if math.isnan(qty) or math.isnan(rate) or rate == 0:
+            res.rejects.append(Reject(row_no, symbol, "blank BuyCurrency/SellCurrency Amount and no Quantity x Price to derive them"))
+            return
+        base_amt, quote_amt = qty, qty * rate
+        buy_amt, sell_amt = (base_amt, quote_amt) if buy_ccy == base_ccy else (quote_amt, base_amt)
+    buy_amt, sell_amt = abs(buy_amt), abs(sell_amt)
+    if math.isnan(rate) or rate == 0:
+        base_amt = buy_amt if buy_ccy == base_ccy else sell_amt
+        quote_amt = sell_amt if buy_ccy == base_ccy else buy_amt
+        if base_amt == 0:
+            res.rejects.append(Reject(row_no, symbol, "no rate and zero base amount"))
+            return
+        rate = quote_amt / base_amt
 
-    # base_ccy amount, signed: + if we bought the base ccy, - if we sold it.
     if buy_ccy == base_ccy:
         base_amount, quote_amount = buy_amt, -sell_amt
     else:
@@ -272,12 +489,9 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
         instrument_id=pair, asset_class="FX", base_ccy=base_ccy, quote_ccy=quote_ccy,
         multiplier=1.0, is_ndf=is_ndf, bbg_ticker=f"{pair} Curncy", expiry_date=PERPETUAL,
     ))
-
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=pair, product="FX_FWD", package_id=trade_id,
-        trade_date=trade_date, quantity=base_amount, price=rate, account=_s(row.get("ExtAccount")),
-        counterparty=_s(row.get("Counterparty")), strategy="", trader=_s(row.get("Trader")),
-        description=desc,
+        trade_date=trade_date, quantity=base_amount, price=rate, **_common(row),
     ))
     settles_cash = 0 if is_ndf else 1
     res.legs.append(TradeLeg(trade_id, 1, "FX_NEAR", base_ccy, base_amount, trade_date, value_date, rate, settles_cash))
@@ -286,51 +500,54 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
 
 def _parse_currency(res: ParseResult, row: pd.Series, row_no: int) -> None:
     symbol = _s(row.get("Symbol"))
-    try:
-        ccy = cash_ccy(symbol)
-    except ValueError as e:
-        res.rejects.append(Reject(row_no, symbol, str(e)))
+    ccy = _ccy(symbol) or _ccy(row.get("Currency")) or _ccy(row.get("Buy Currency"))
+    if ccy is None:
+        res.rejects.append(Reject(row_no, symbol, f"unrecognised currency code {symbol!r}"))
         return
     instrument_id = f"CASH-{ccy}"
     res.instruments.setdefault(instrument_id, Instrument(
         instrument_id=instrument_id, asset_class="CASH", base_ccy=ccy, quote_ccy=ccy,
         multiplier=1.0, is_ndf=0, bbg_ticker=f"{ccy} Curncy", expiry_date=PERPETUAL,
     ))
-    # No trade / legs / positions row: see module docstring (CURRENCY rows here are
-    # settlement-level cash movements, not the EOD balance the `positions` grain expects).
+
+
+def _signed_quantity(row: pd.Series, symbol: str, row_no: int, res: ParseResult, label: str) -> Optional[float]:
+    qty = _num(row.get("Quantity"))
+    if math.isnan(qty):
+        res.rejects.append(Reject(row_no, symbol, f"blank Quantity ({label})"))
+        return None
+    side = _side(row.get("Side"))
+    if side is None:
+        if qty < 0:
+            return qty
+        res.rejects.append(Reject(row_no, symbol, f"unrecognised Side {_s(row.get('Side'))!r} and Quantity carries no sign"))
+        return None
+    return abs(qty) if side == "Buy" else -abs(qty)
 
 
 def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
-    symbol = _s(row.get("Symbol"))
+    symbol = _s(row.get("Symbol")) or _s(row.get("Underlying Symbol"))
     trade_id = _s(row.get("Trade Id"))
     if not trade_id:
         res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
         return
-    side = _s(row.get("Side"))
-    if side not in ("Buy", "Sell"):
-        res.rejects.append(Reject(row_no, symbol, f"unrecognised Side {side!r}"))
+    trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
+    if trade_date is None:
+        res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
         return
-
-    trade_date_raw = _s(row.get("TradeDate"))
-    try:
-        trade_date = _ddmy_iso(trade_date_raw)
-    except ValueError:
-        res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {trade_date_raw!r}"))
-        return
-
     try:
         root, code, expiry = future_expiry(symbol, date.fromisoformat(trade_date))
     except ValueError as e:
         res.rejects.append(Reject(row_no, symbol, str(e)))
         return
     instrument_id = f"{code} Index"
-
-    contracts = _num(row.get("Quantity"))
-    price = _num(row.get("Price"))
-    if math.isnan(contracts) or math.isnan(price):
-        res.rejects.append(Reject(row_no, symbol, "blank Quantity/Price"))
+    signed_contracts = _signed_quantity(row, symbol, row_no, res, "contracts")
+    if signed_contracts is None:
         return
-    signed_contracts = contracts if side == "Buy" else -contracts
+    price = _num(row.get("Price"))
+    if math.isnan(price):
+        res.rejects.append(Reject(row_no, symbol, "blank Price"))
+        return
     multiplier = 50.0  # ES only (KNOWN_FUTURE_ROOTS in bnp.py); revisit if other roots added.
     expiry_iso = expiry.isoformat()
 
@@ -340,9 +557,7 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
     ))
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="FUTURE",
-        package_id=trade_id, trade_date=trade_date, quantity=signed_contracts, price=price,
-        account=_s(row.get("ExtAccount")), counterparty=_s(row.get("Counterparty")), strategy="",
-        trader=_s(row.get("Trader")), description=_s(row.get("Description")),
+        package_id=trade_id, trade_date=trade_date, quantity=signed_contracts, price=price, **_common(row),
     ))
     res.legs.append(TradeLeg(
         trade_id, 1, "NOTIONAL", "USD", signed_contracts * multiplier * price,
@@ -351,150 +566,128 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
 
 def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     symbol = _s(row.get("Symbol"))
+    desc = _s(row.get("Description"))
     trade_id = _s(row.get("Trade Id"))
     if not trade_id:
         res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
         return
     om = OPTION_SYMBOL_RE.match(symbol)
-    if not om:
-        res.rejects.append(Reject(row_no, symbol, f"Symbol does not match <PAIR><mmddyy>[CP]-<id>: {symbol!r}"))
-        return
-    pair, exp_s, cp, _sym_id = om.groups()
-    # _sym_id is 'Instrument Id', not 'Trade Id' -- see the same note in _parse_forward.
-    option_type = "CALL" if cp == "C" else "PUT"
-    # Strike is not a dedicated column in this file; when present it's embedded in the
-    # free-text Description as '<N.NNNNNN> STRIKE' (e.g. 'EURSEK-XXAA 11.058400 STRIKE
-    # EUR Call ...'). Several real rows in the reference sample omit it entirely (e.g.
-    # 'USDJPY-XXAA EUR Put 11/19/2026 MLILUK') -- those get the 0.0 sentinel per
-    # CLAUDE.md, never a fabricated value.
-    strike_m = STRIKE_RE.search(_s(row.get("Description")))
-    strike = float(strike_m.group(1)) if strike_m else 0.0
-    try:
-        expiry = datetime.strptime(exp_s, "%m%d%y").date()
-    except ValueError:
-        res.rejects.append(Reject(row_no, symbol, f"unparseable expiry {exp_s!r} in Symbol"))
-        return
-
-    ccy_pair_raw = _s(row.get("Currency Pair"))
-    # 'Currency Pair' looks like 'EURSEK-XXAA': first 6 chars are the pair, same
-    # convention as the FORWARD Symbol prefix -- reused directly rather than via cash_ccy
-    # (which expects the CURRENCY-row '<CCY>.C-xxAA' shape, not this one).
-    if ccy_pair_raw[:6] != pair:
-        res.rejects.append(Reject(row_no, symbol,
-                                  f"Currency Pair {ccy_pair_raw!r} disagrees with Symbol pair {pair}"))
-        return
+    col_pair = _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol"))
+    if om:
+        pair, exp_s, cp, _sym_id = om.groups()
+        if col_pair and col_pair != pair:
+            res.rejects.append(Reject(row_no, symbol,
+                                      f"Currency Pair {_s(row.get('Currency Pair'))!r} disagrees with Symbol pair {pair}"))
+            return
+        expiry = _mmddyy(exp_s)
+        if expiry is None:
+            res.rejects.append(Reject(row_no, symbol, f"unparseable expiry {exp_s!r} in Symbol"))
+            return
+        option_type = "CALL" if cp == "C" else "PUT"
+    else:
+        pair = col_pair
+        if pair is None:
+            res.rejects.append(Reject(row_no, symbol, f"cannot tell the pair: Symbol {symbol!r} and Currency Pair blank"))
+            return
+        expiry = _date(row.get("Adj. Expiry Date")) or _date(row.get("Termination"))
+        if expiry is None:
+            dates = US_DATE_RE.findall(desc)
+            expiry = _date(dates[-1]) if dates else None
+        words = set(re.sub(r"[^A-Z]+", " ", (desc + " " + _s(row.get("FxOption Type"))).upper()).split())
+        option_type = "CALL" if words & {"CALL", "C"} else "PUT" if words & {"PUT", "P"} else None
+        if expiry is None or option_type is None:
+            res.rejects.append(Reject(row_no, symbol, "Symbol not <PAIR><mmddyy>[CP]-<id> and no expiry / call-put "
+                                                       "in Adj. Expiry Date, Description or FxOption Type"))
+            return
+        symbol = symbol or f"{pair}{datetime.fromisoformat(expiry).strftime('%m%d%y')}{option_type[0]}-{trade_id}"
+    strike_m = STRIKE_RE.search(desc)
+    strike = float(strike_m.group(1)) if strike_m else 0.0  # 0.0 sentinel, never invented
     base_ccy = pair[:3]
-
-    side = _s(row.get("Side"))
-    if side not in ("Buy", "Sell"):
-        res.rejects.append(Reject(row_no, symbol, f"unrecognised Side {side!r}"))
+    trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
+    if trade_date is None:
+        res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
         return
-
-    trade_date_raw = _s(row.get("TradeDate"))
-    try:
-        trade_date = _ddmy_iso(trade_date_raw)
-    except ValueError:
-        res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {trade_date_raw!r}"))
+    signed_notional = _signed_quantity(row, symbol, row_no, res, "notional")
+    if signed_notional is None:
         return
-
-    notional = _num(row.get("Quantity"))
     premium = _num(row.get("Price"))
-    if math.isnan(notional) or math.isnan(premium):
-        res.rejects.append(Reject(row_no, symbol, "blank Quantity/Price"))
+    if math.isnan(premium):
+        premium = _num(row.get("Premium"))
+    if math.isnan(premium):
+        res.rejects.append(Reject(row_no, symbol, "blank Price/Premium"))
         return
-    signed_notional = notional if side == "Buy" else -notional
-    expiry_iso = expiry.isoformat()
 
     res.instruments.setdefault(symbol, Instrument(
         instrument_id=symbol, asset_class="FX_OPTION", base_ccy=base_ccy, quote_ccy=pair[3:],
-        multiplier=1.0, is_ndf=0, bbg_ticker=symbol, expiry_date=expiry_iso,
+        multiplier=1.0, is_ndf=0, bbg_ticker=symbol, expiry_date=expiry,
     ))
     res.instrument_options.setdefault(symbol, InstrumentOption(
         instrument_id=symbol, strike=strike, option_type=option_type,
     ))
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=symbol, product="FX_OPTION",
-        package_id=trade_id, trade_date=trade_date, quantity=signed_notional, price=premium,
-        account=_s(row.get("ExtAccount")), counterparty=_s(row.get("Counterparty")), strategy="",
-        trader=_s(row.get("Trader")), description=_s(row.get("Description")),
+        package_id=trade_id, trade_date=trade_date, quantity=signed_notional, price=premium, **_common(row),
     ))
     res.legs.append(TradeLeg(
-        trade_id, 1, "NOTIONAL", base_ccy, signed_notional, trade_date, expiry_iso, premium, 0))
+        trade_id, 1, "NOTIONAL", base_ccy, signed_notional, trade_date, expiry, premium, 0))
 
 
 def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
-    """INTEREST_RATE_SWAP row -> instrument + trade + FIXED/FLOAT legs.
-
-    Direction: sign of ``Notional`` (positive = pay fixed, negative = receive fixed;
-    user-confirmed 2026-09-16 -- see module docstring). ``Side`` is not used: it is
-    'Buy' on every reference row and carries no direction here, unlike FUTURE/OPTION.
-    Leg shape mirrors ``irs.py``'s BNP handling (FIXED amount = -quantity, FLOAT amount
-    = +quantity, spread = 0 on FLOAT) rather than duplicating it independently, since
-    that is the CLAUDE.md-specified leg layout, not something specific to the BNP
-    column names.
-    """
+    """Direction: sign of ``Notional`` (+ = pay fixed). ``Side`` is not used ('Buy' on
+    every reference row). Leg shape mirrors ``irs.py`` (FIXED = -quantity, FLOAT = +quantity)."""
     symbol = _s(row.get("Symbol"))
+    desc = _s(row.get("Description"))
     trade_id = _s(row.get("Trade Id"))
     if not trade_id:
         res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
         return
     sm = IRS_SYMBOL_RE.match(symbol)
-    if not sm:
-        res.rejects.append(Reject(row_no, symbol, f"Symbol does not match IRSOIS-<CCY>-<id>: {symbol!r}"))
+    dm = IRS_DESCRIPTION_RE.match(desc)
+    ccy = (sm.group(1) if sm else None) or (dm.group(5) if dm else None) or _ccy(row.get("Currency"))
+    if ccy is None:
+        res.rejects.append(Reject(row_no, symbol, "cannot tell the swap currency from Symbol, Description or Currency"))
         return
-    ccy, _sym_id = sm.groups()  # _sym_id is 'Instrument Id', not 'Trade Id' -- see FORWARD note.
-
-    eff_raw = _s(row.get("Effective Date"))
-    mat_raw = _s(row.get("Termination"))
-    try:
-        effective_date = _ddmy_iso(eff_raw)
-        maturity_date = _ddmy_iso(mat_raw)
-    except ValueError:
-        res.rejects.append(Reject(row_no, symbol,
-                                  f"unparseable Effective Date/Termination {eff_raw!r}/{mat_raw!r}"))
+    effective_date = _date(row.get("Effective Date")) or (_us_date(dm.group(2)) if dm else None)
+    maturity_date = _date(row.get("Termination")) or (_us_date(dm.group(3)) if dm else None)
+    if effective_date is None or maturity_date is None:
+        res.rejects.append(Reject(row_no, symbol, "no Effective Date / Termination (nor in Description)"))
         return
     if maturity_date <= effective_date:
-        res.rejects.append(Reject(
-            row_no, symbol, f"maturity {maturity_date} is not after effective date {effective_date}"))
+        res.rejects.append(Reject(row_no, symbol, f"maturity {maturity_date} is not after effective date {effective_date}"))
         return
-
     notional = _num(row.get("Notional"))
-    fixed_rate_pct = _num(row.get("FixedRate"))
-    if math.isnan(notional) or math.isnan(fixed_rate_pct):
-        res.rejects.append(Reject(row_no, symbol, "blank Notional/FixedRate"))
+    if math.isnan(notional):
+        qty_mm = _num(row.get("Quantity"))
+        notional = qty_mm * 1e6 if not math.isnan(qty_mm) else math.nan  # Quantity is in millions
+    if math.isnan(notional):
+        res.rejects.append(Reject(row_no, symbol, "blank Notional (and no Quantity)"))
         return
     if notional == 0.0:
         res.rejects.append(Reject(row_no, symbol, "Notional is zero; cannot infer pay/receive direction"))
         return
-
-    # quantity = Notional, signed, in full notional units -- matches irs.py's BNP path
-    # (quantity_mm * 1e6) and CLAUDE.md's "notional (IRS: + = pay fixed)" wording. Do NOT
-    # divide by 1e6: unlike this file's own 'Quantity' column (millions-scaled), Notional
-    # is already the full unit amount.
-    quantity = notional  # signed: + = pay fixed, - = receive fixed
+    fixed_rate_pct = _num(row.get("FixedRate"))
+    if math.isnan(fixed_rate_pct):
+        fixed_rate_pct = _num(row.get("Yield"))
+    if math.isnan(fixed_rate_pct) and dm:
+        fixed_rate_pct = float(dm.group(4))
+    if math.isnan(fixed_rate_pct):
+        res.rejects.append(Reject(row_no, symbol, "blank FixedRate (and no Yield / rate in Description)"))
+        return
+    quantity = notional  # signed, full units: + = pay fixed, - = receive fixed
     fixed_rate = fixed_rate_pct / 100.0
+    trade_date = _date(row.get("TradeDate")) or effective_date
+    instrument_id = symbol or f"IRS-{ccy}-{trade_id}"
 
-    trade_date_raw = _s(row.get("TradeDate"))
-    try:
-        trade_date = _ddmy_iso(trade_date_raw)
-    except ValueError:
-        trade_date = effective_date  # placeholder, mirrors irs.py's fallback when no trade date is given
-
-    res.instruments.setdefault(symbol, Instrument(
-        instrument_id=symbol, asset_class="IRS", base_ccy=ccy, quote_ccy=ccy,
-        multiplier=1.0, is_ndf=0, bbg_ticker=symbol, expiry_date=maturity_date,
+    res.instruments.setdefault(instrument_id, Instrument(
+        instrument_id=instrument_id, asset_class="IRS", base_ccy=ccy, quote_ccy=ccy,
+        multiplier=1.0, is_ndf=0, bbg_ticker=instrument_id, expiry_date=maturity_date,
     ))
     res.trades.append(Trade(
-        trade_id=trade_id, source=SOURCE, instrument_id=symbol, product="IRS", package_id=trade_id,
-        trade_date=trade_date, quantity=quantity, price=fixed_rate, account=_s(row.get("ExtAccount")),
-        counterparty=_s(row.get("Counterparty")), strategy="", trader=_s(row.get("Trader")),
-        description=_s(row.get("Description")),
+        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="IRS", package_id=trade_id,
+        trade_date=trade_date, quantity=quantity, price=fixed_rate, **_common(row),
     ))
-    # IRS notional never exchanges: settles_cash = 0 on both legs (matches irs.py).
-    res.legs.append(TradeLeg(
-        trade_id, 1, "FIXED", ccy, -quantity, effective_date, maturity_date, fixed_rate, 0))
-    res.legs.append(TradeLeg(
-        trade_id, 2, "FLOAT", ccy, quantity, effective_date, maturity_date, 0.0, 0))
+    res.legs.append(TradeLeg(trade_id, 1, "FIXED", ccy, -quantity, effective_date, maturity_date, fixed_rate, 0))
+    res.legs.append(TradeLeg(trade_id, 2, "FLOAT", ccy, quantity, effective_date, maturity_date, 0.0, 0))
 
 
 # --------------------------------------------------------------------------- load
@@ -502,33 +695,47 @@ def _rows(objs) -> List[tuple]:
     return [tuple(vars(o).values()) for o in objs]
 
 
-def load(csv_path: Union[str, Path], conn: sqlite3.Connection, strict: bool = True) -> ParseResult:
-    """Parse and insert. Instruments are upserted; trades / legs error on duplicate keys
-    (plain INSERT, matching bnp.py's default 'error' on_duplicate mode -- no idempotent
-    skip mode here yet; add one the same way as bnp.load if the blotter is re-uploaded).
-
-    With ``strict=True`` (default) any reject raises ValueError before anything is
-    written; with ``strict=False`` the parsed rows are inserted anyway (rejected rows are
-    never inserted in either mode).
-    """
+def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection,
+         strict: bool = False, filename: Optional[str] = None) -> ParseResult:
+    """Parse and upsert. Re-loading a trade id replaces its trade and legs; a swap
+    package containing a replaced trade is dissolved so the packaging rule can re-run on
+    the new data. With ``strict=True`` any reject raises ValueError before anything is
+    written; otherwise rejected rows are skipped and the rest is loaded."""
     from data.ingest.schema import create_schema
 
     create_schema(conn)
-    res = parse(csv_path)
-    name = Path(csv_path).name
+    res = parse(source, filename)
+    name = filename or (Path(source).name if isinstance(source, (str, Path)) else "blotter")
     for rj in res.rejects:
         log.warning("%s row %d %s: REJECT %s", name, rj.row_no, rj.symbol, rj.reason)
     if strict and res.rejects:
         head = [f"reject row {rj.row_no} {rj.symbol}: {rj.reason}" for rj in res.rejects[:5]]
-        raise ValueError(
-            f"{name}: {len(res.rejects)} reject(s); nothing loaded (strict=True). "
-            f"First: " + " | ".join(head))
+        raise ValueError(f"{name}: {len(res.rejects)} reject(s); nothing loaded (strict=True). First: " + " | ".join(head))
 
+    trade_cols = list(vars(res.trades[0]).keys()) if res.trades else []
     with conn:
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS _incoming (trade_id TEXT PRIMARY KEY)")
+        conn.execute("DELETE FROM _incoming")
+        conn.executemany("INSERT OR IGNORE INTO _incoming VALUES (?)", [(t.trade_id,) for t in res.trades])
+        res.n_updated = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE trade_id IN (SELECT trade_id FROM _incoming)").fetchone()[0]
+        conn.execute(
+            "DELETE FROM swap_review WHERE trade_id IN (SELECT trade_id FROM _incoming) OR trade_id IN ("
+            "SELECT trade_id FROM trades WHERE package_id IN ("
+            "SELECT package_id FROM trades WHERE trade_id IN (SELECT trade_id FROM _incoming) AND package_id != trade_id))")
+        conn.execute(
+            "UPDATE trades SET product = 'FX_FWD', package_id = trade_id WHERE product = 'FX_SWAP' AND package_id IN ("
+            "SELECT package_id FROM trades WHERE trade_id IN (SELECT trade_id FROM _incoming) AND package_id != trade_id)")
+        conn.execute("DELETE FROM trade_legs WHERE trade_id IN (SELECT trade_id FROM _incoming)")
         conn.executemany("INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                          _rows(res.instruments.values()))
-        conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", _rows(res.trades))
+        if res.trades:
+            updates = ",".join(f"{c}=excluded.{c}" for c in trade_cols if c != "trade_id")
+            conn.executemany(
+                f"INSERT INTO trades ({','.join(trade_cols)}) VALUES ({','.join('?' for _ in trade_cols)}) "
+                f"ON CONFLICT(trade_id) DO UPDATE SET {updates}", _rows(res.trades))
         conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", _rows(res.legs))
         conn.executemany("INSERT OR REPLACE INTO instrument_options VALUES (?,?,?,?,?,?)",
                          _rows(res.instrument_options.values()))
+        conn.execute("DROP TABLE _incoming")
     return res
