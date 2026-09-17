@@ -18,12 +18,17 @@ def _load_tool():
 
 def _seed_db(path: Path) -> None:
     from data.ingest import schema
+    from datetime import date, timedelta
+    # Settle date relative to the real clock: the tool's ledger check counts trades
+    # settled before today with no realised row, so a fixed 2026-09-16 turned the
+    # "0 realised trade(s)" assertion below into a time bomb once that day passed.
+    settle = (date.today() + timedelta(days=60)).isoformat()
     conn = schema.connect(path)
     conn.execute("INSERT INTO instruments VALUES ('AUDUSD','FX','AUD','USD',1,0,'AUDUSD Curncy','9999-12-31')")
     conn.execute("INSERT INTO trades VALUES ('a1','BNP','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,'acc','cp','HAHY7','t','d','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-16", 0.65, 1),
-        ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-09-16", 0.65, 1)])
+        ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", settle, 0.65, 1),
+        ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", settle, 0.65, 1)])
     conn.execute("INSERT INTO positions VALUES ('2026-08-17','BNP','acc','AUDUSD','2026-09-16',-1e6,650000,0.66,1,0,0,0,0,0)")
     conn.commit()
     conn.close()
