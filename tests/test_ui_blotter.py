@@ -275,11 +275,11 @@ def test_futures_scope_no_trades_shows_reason_and_empty_table():
 
 
 def test_scope_layout_fx_filters_out_nonfx_products():
-    """FX sub-tab rebuilt 2026-09-17 (user authorisation) as a literal xlsx "All FX
-    trades" replica -- see `ui.tabs.blotter_fx`. It no longer renders `value_book`-shaped
-    rows with a `product` column; instead it sources from `engine.pnl.xlsx_fx_replica`,
-    which only selects FX_SPOT/FX_FWD/FX_SWAP/FUTURE trades, so an IRS trade must not
-    appear in the table at all."""
+    """FX sub-tab rebuilt 2026-09-17 in the legacy sheet's column layout -- see
+    `ui.tabs.blotter_fx`. It no longer renders `value_book`-shaped rows with a `product`
+    column; it sources from `engine.pnl.fx_blotter.fx_blotter_rows`, which only covers
+    the FX_SPOT/FX_FWD/FX_SWAP/FUTURE trades `value_book` builds, so an IRS trade must
+    not appear in the table at all."""
     conn = _make_db()
     try:
         conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','9999-12-31')")

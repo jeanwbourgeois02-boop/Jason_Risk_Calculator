@@ -21,3 +21,5 @@
 - [Exposure vs grid settle_date split 2026-09-16](exposure-vs-grid-settle-date-split-2026-09-16.md) — exposure_section takes optional exposure_records for delta math (>), grid keeps records (>=); net_gross_usd switched fully; empty-records NaN gotcha in portfolio_totals
 - [Dual-format upload 2026-09-16](dual-format-upload-2026-09-16.md) — SUPERSEDED same-day by [blotter-only-upload](blotter-only-upload-2026-09-16.md); detect_format was deleted, no longer exists
 - [Blotter-only upload 2026-09-16](blotter-only-upload-2026-09-16.md) — BNP path removed from ui/uploads.py entirely, no date picker; fresh DB has zero positions rows so cash-ladder balance panel is empty
+- [Blotter FX strip + samples 2026-09-17](blotter-fx-strip-and-samples-2026-09-17.md) — SUPERSEDED same day, see next entry; kept for history only
+- [Blotter FX standard convention 2026-09-17](blotter-fx-standard-convention-2026-09-17.md) — xlsx-replica table reversed onto engine/pnl/fx_blotter.py+value_book; table/strip now share one pricing path, sample formula rewritten locally

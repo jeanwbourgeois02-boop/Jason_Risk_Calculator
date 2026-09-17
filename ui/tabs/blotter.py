@@ -35,24 +35,24 @@ reads "Unavailable (no option trades loaded; view not built yet)" and its table 
 empty with the same columns as the other sub-tabs -- never hidden, per the "rows must
 always render" rule; there just are none to show.
 
-FX (rebuilt 2026-09-17, user decision) no longer goes through `value_book`/
-`priced_value_book` for its TABLE either: it is `ui.tabs.blotter_fx.build_layout`, a
-literal replica of the old xlsx workbook's "All FX trades" sheet (see that module's
-docstring for the row shape and the deliberately-preserved quirks -- futures P&L
-divided by mark instead of fill, the LTD-2 column's t-1-mark divisor bug, one shared
-per-pair valuation date -- all intentional display fidelity to the historical sheet per
-this user instruction, a one-off, named override of CLAUDE.md's "must not replicate"
-list for this table only). It has no filter bar or row-click detail panel -- its rows
-(trade_id/instrument_id/quantity_usd_notional/tenor/fill/mark_*/pnl_*) don't have
-`value_book`'s shape (trade_id/mark/pnl_usd/...) that scaffolding assumes. It DOES have
-a P&L strip (added 2026-09-17, user decision), built statically inside
-`blotter_fx.build_layout` itself rather than through the generic
+FX is `ui.tabs.blotter_fx.build_layout`: the legacy sheet's "All FX trades" column
+layout (trade / tenor / fill / t-1-EOD-t-2 mark and P&L), but priced by
+`engine.pnl.fx_blotter.fx_blotter_rows` -> `engine.pnl.valuation.value_book` (market-
+standard convention: each FX leg at its own settle_date's FWD_OUTRIGHT, quote P&L
+converted at spot, futures contracts x multiplier x (mark - fill), settled trades
+frozen) -- rebuilt first as a literal xlsx replica on 2026-09-17 and replaced the same
+day, by user decision, with this standard-convention version. It has no filter bar or
+row-click detail panel -- its rows (trade_id/instrument_id/quantity_usd_notional/tenor/
+fill/mark_*/pnl_*) don't have `value_book`'s shape (trade_id/mark/pnl_usd/...) that
+scaffolding assumes. It DOES have a P&L strip (added 2026-09-17), built statically
+inside `blotter_fx.build_layout` itself rather than through the generic
 `_register_strip_callback` loop below: `blotter_fx._fx_strip` calls this same module's
 `render_headline_strip`/`priced_value_book`/`row_scoped_headline` scoped to the
-FX+FUTURE trade universe -- the app's official per-trade valuation, a deliberately
-DIFFERENT number from the replica table beneath it (captioned in the UI so this reads as
-intentional, not a bug). The whole sub-tab is a single always-current block, rebuilt on
-the same top-level `_update` callback as every other sub-tab.
+FX+FUTURE trade universe, through the identical `priced_value_book` pricing path the
+table uses -- so the strip and the table now agree exactly on any priced trade (unlike
+the retired replica table, which deliberately differed). The whole sub-tab is a single
+always-current block, rebuilt on the same top-level `_update` callback as every other
+sub-tab.
 
 Rates (added 2026-09-15, once `engine/rates` started writing QL_PRICER marks) is a
 real view but does NOT go through `value_book`/`priced_value_book` at all -- that

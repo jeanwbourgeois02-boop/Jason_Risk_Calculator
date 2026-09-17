@@ -84,16 +84,25 @@ metadata:
   count of `?`s passed positionally at the *start* of the params tuple -- either be
   fully positional or fully named in one query, never mixed.
 
-- 2026-09-17: added `engine/pnl/xlsx_fx_replica.py` (user-authorised, one-off override
-  of the "Must not replicate" list) -- a literal replica of the old xlsx workbook's "All
-  FX trades" row-per-fill formula, but sourced from live `trades`/`trade_legs`, not the
-  xlsx file. Reuses `pnl.py`'s `workbook_fx_pnl`/`workbook_valuation_date` unchanged
-  rather than re-deriving the formula/quirks. Produces t-1/EOD/t-2 mark+P&L columns per
-  trade; t-2's P&L deliberately divides by the t-1 mark (bug item 2), and futures always
-  divide by the mark not fill (bug item 1) since a futures instrument_id never ends in
-  "USD". Missing marks on any of the three observation dates surface as Python `None`
-  in that trade's row, never 0 or NaN-silently-summed. This module is separate from and
-  must never be confused with `engine/pnl/pnl.py`'s Reconciliation-tab arithmetic --
-  both replicate the same workbook formula but from different data sources (this one
-  from our own trades tables, pnl.py historically tied to the xlsx file itself) and
-  CLAUDE.md's override note only applies per-table, not blanket.
+- 2026-09-17 (retired same day): `engine/pnl/xlsx_fx_replica.py` was built as a
+  user-authorised, one-off override of the "Must not replicate" list -- a literal
+  replica of the old xlsx workbook's "All FX trades" row-per-fill formula, sourced from
+  live `trades`/`trade_legs`. The user reversed that decision hours later: they want the
+  sheet's column *shape* only (trade/tenor/fill/t-1-EOD-t-2), priced under the normal
+  market-standard CLAUDE.md conventions, not the workbook bugs. The module was deleted
+  and replaced by `engine/pnl/fx_blotter.py` (`fx_blotter_rows`), which calls
+  `engine.pnl.valuation.value_book` three times (as_of, t-1bd, t-2bd via
+  `aggregate._n_business_days_back`) and reshapes the three results into one row per
+  trade -- it never re-derives a P&L formula itself. If this "replicate the sheet
+  shape, not its bugs" pattern recurs, `fx_blotter.py` is the template: one module per
+  physical layout, always delegating the actual math to `valuation.value_book`.
+  `value_fn` is an injectable `(conn, date) -> DataFrame` parameter (default
+  `value_book`) so `ui.tabs.blotter_pricing.priced_value_book` (BNP_BVAL-fallback
+  wrapper) can be swapped in without this module importing anything from `ui/`.
+
+- pandas gotcha: `Series.where(cond, None)` on a `float64` column silently coerces the
+  replacement `None` back to `np.nan` (dtype-driven), so a check like `row.x is None`
+  fails even though the cell is "missing" by value. To get a real Python `None` in a
+  missing cell (as several tests assert via `is None`, not `math.isnan`), cast the
+  column to `object` first: `col.astype(object).where(pd.notna(col), None)`. Caught by
+  `test_fx_blotter_missing_t2_mark_stays_none` in tests/test_pnl.py.

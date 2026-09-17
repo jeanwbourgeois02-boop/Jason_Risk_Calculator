@@ -21,6 +21,8 @@ dash = pytest.importorskip("dash", reason="dash is not installed in this environ
 from data.ingest import schema  # noqa: E402
 from ui import app as uiapp  # noqa: E402
 from ui.tabs import blotter, blotter_fx, cash_ladder, header, market_data  # noqa: E402
+from ui.tabs.blotter_pricing import priced_value_book  # noqa: E402
+from ui.tabs.formatting import format_cell  # noqa: E402
 from ui import uploads  # noqa: E402
 
 
@@ -890,10 +892,15 @@ def test_launch_configures_root_logging_handler():
     assert "logging.basicConfig" in inspect.getsource(launch.main)
 
 
-# ------------------------------------------------------ blotter FX sub-tab (xlsx replica)
+# ------------------------------------------------------ blotter FX sub-tab
 
 
-def _seed_fx_replica_trade(conn, trade_id="T1", instrument_id="EURUSD", trade_date="2026-06-18"):
+def _seed_fx_trade(conn, trade_id="T1", instrument_id="EURUSD", trade_date="2026-06-18",
+                    settle_date="2026-06-20"):
+    """A single FX_FWD trade + its two legs. `settle_date` is the trade's OWN value
+    date -- `engine.pnl.fx_blotter.fx_blotter_rows`/`value_book` mark it there directly
+    (market-standard convention), unlike the retired xlsx-replica's shared
+    WORKDAY(as_of,5) valuation node."""
     conn.execute(
         "INSERT INTO instruments VALUES (?,'FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')",
         (instrument_id,),
@@ -906,28 +913,26 @@ def _seed_fx_replica_trade(conn, trade_id="T1", instrument_id="EURUSD", trade_da
     conn.executemany(
         "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
         [
-            (trade_id, 1, "FX_NEAR", "EUR", 1000000, trade_date, "2026-06-20", 1.10, 1),
-            (trade_id, 2, "FX_NEAR", "USD", -1100000, trade_date, "2026-06-20", 1.10, 1),
+            (trade_id, 1, "FX_NEAR", "EUR", 1000000, trade_date, settle_date, 1.10, 1),
+            (trade_id, 2, "FX_NEAR", "USD", -1100000, trade_date, settle_date, 1.10, 1),
         ],
     )
 
 
-def test_blotter_fx_scope_renders_xlsx_replica_columns(tmp_path):
-    """The Blotter 'FX' sub-tab (rebuilt 2026-09-17) is `fx_replica`-shaped, not
-    `value_book`-shaped -- confirms the new column set and labels."""
+def test_blotter_fx_scope_renders_table_columns(tmp_path):
+    """The Blotter 'FX' sub-tab is `fx_blotter_rows`-shaped -- confirms the column set
+    and labels are still the legacy sheet's layout even though the maths underneath
+    changed."""
     db_path = tmp_path / "risk.db"
     conn = sqlite3.connect(db_path)
     schema.create_schema(conn)
-    _seed_fx_replica_trade(conn)
-    # fx_replica marks every FX row at the shared WORKDAY(as_of,5) outright, not each
-    # trade's own tenor (must-not-replicate item 4, deliberately preserved for this
-    # table -- see engine/pnl/xlsx_fx_replica.py's docstring).
-    from engine.pnl.pnl import workbook_valuation_date
-    valuation_date = workbook_valuation_date("2026-06-20")
+    _seed_fx_trade(conn, settle_date="2026-06-20")
+    # Real mark_eod at the trade's OWN settle_date (2026-06-20 == as_of here); no t-1/t-2
+    # marks seeded, so those columns are genuinely missing.
     conn.execute(
         "INSERT INTO marks VALUES "
-        "('2026-06-20','EURUSD',?,'FWD_OUTRIGHT',1.1080,'BBG_BFXFORWARD','2026-06-20T15:00:00-04:00')",
-        (valuation_date,),
+        "('2026-06-20','EURUSD','2026-06-20','FWD_OUTRIGHT',1.1080,'BBG_BFXFORWARD',"
+        "'2026-06-20T15:00:00-04:00')"
     )
     conn.commit()
     conn.close()
@@ -985,40 +990,10 @@ def test_blotter_fx_scope_has_no_reactive_strip_filter_or_detail_callback(tmp_pa
     _seeded_db(db_path)
     app = uiapp.create_app(str(db_path))
     assert not any("blotter-strip-fx" in k for k in app.callback_map)
-    assert not any("blotter-fx-replica-datatable" in k for k in app.callback_map)
+    assert not any(blotter_fx.DATATABLE_ID in k for k in app.callback_map)
 
 
 # --------------------------------------------------------- blotter FX P&L strip (2026-09-17)
-
-
-def _seed_fx_strip_trade(conn, trade_id="T1", instrument_id="EURUSD",
-                          trade_date="2026-06-18", settle_date="2026-06-20"):
-    """Like `_seed_fx_replica_trade`, but the official FWD_OUTRIGHT mark is planted at
-    the trade's OWN `settle_date` (what `value_book`/`priced_value_book` -- the strip's
-    official pricing -- looks up), not at `fx_replica`'s shared workbook-valuation-date
-    node. So the strip prices this trade for real while the replica table below still
-    shows it as unpriced (sample-filled) -- deliberately exercising the fact that the
-    two numbers are computed differently and are expected to diverge."""
-    conn.execute(
-        "INSERT INTO instruments VALUES (?,'FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')",
-        (instrument_id,),
-    )
-    conn.execute(
-        "INSERT INTO trades VALUES (?,'XLSX',?,'FX_FWD',?,?,1000000,1.10,"
-        "'ACC','CPTY','HAHY7','TR','buy eur','')",
-        (trade_id, instrument_id, trade_id, trade_date),
-    )
-    conn.executemany(
-        "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
-        [
-            (trade_id, 1, "FX_NEAR", "EUR", 1000000, trade_date, settle_date, 1.10, 1),
-            (trade_id, 2, "FX_NEAR", "USD", -1100000, trade_date, settle_date, 1.10, 1),
-        ],
-    )
-    conn.execute(
-        "INSERT INTO marks VALUES (?,?,?,'FWD_OUTRIGHT',1.1200,'BBG_BFXFORWARD',?)",
-        (settle_date, instrument_id, settle_date, settle_date + "T15:00:00-04:00"),
-    )
 
 
 def test_blotter_fx_scoped_trade_ids_includes_future_excludes_irs_and_options():
@@ -1030,33 +1005,46 @@ def test_blotter_fx_scoped_trade_ids_includes_future_excludes_irs_and_options():
     assert blotter_fx._scoped_trade_ids(pd.DataFrame(columns=["trade_id", "product"])) == []
 
 
-def test_blotter_fx_strip_uses_official_valuation_not_replica_number(tmp_path):
-    """The strip's LTD (real per-trade valuation, quantity * (mark - fill) = 1,000,000 *
-    (1.1200 - 1.10) = 20,000 USD) must render, and the caption distinguishing it from
-    the replica table below must be present."""
+def test_blotter_fx_table_and_strip_agree_on_pnl(tmp_path):
+    """Since the FX sub-tab table (`fx_blotter_rows`) and the strip (`_fx_strip`) both
+    price through the identical `priced_value_book` pipeline (2026-09-17 reversal of the
+    earlier xlsx-replica table, which deliberately used a DIFFERENT number from the
+    strip), a priced trade's `pnl_eod` cell and the strip's LTD figure must now agree
+    exactly: quantity * (mark - fill) = 1,000,000 * (1.1200 - 1.10) = 20,000 USD."""
     db_path = tmp_path / "risk.db"
     conn = sqlite3.connect(db_path)
     schema.create_schema(conn)
-    _seed_fx_strip_trade(conn)
+    _seed_fx_trade(conn)
+    conn.execute(
+        "INSERT INTO marks VALUES ('2026-06-20','EURUSD','2026-06-20','FWD_OUTRIGHT',"
+        "1.1200,'BBG_BFXFORWARD','2026-06-20T15:00:00-04:00')"
+    )
     conn.commit()
     conn.close()
 
     conn = sqlite3.connect(db_path)
     try:
         layout = blotter.scope_layout("fx", conn, "2026-06-20")
+        rows = blotter_fx.fx_blotter_rows(conn, "2026-06-20", value_fn=blotter_fx._priced_value_fn)
+        priced, _, _ = priced_value_book(conn, "2026-06-20")
     finally:
         conn.close()
 
     text = str(layout)
     assert "LTD P&L" in text
     assert "20,000" in text
-    assert blotter_fx.STRIP_CAPTION in text
 
-    # And the replica table itself still shows this trade's mark_eod as missing (hence
-    # sample-filled) -- the shared workbook-valuation-date node was never given a mark.
     table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
     assert len(table.data) == 1
-    assert table.data[0]["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert not table.data[0]["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert table.data[0]["pnl_eod"] == format_cell(20_000.0)
+
+    # The underlying maths: fx_blotter_rows's pnl_eod for this trade is exactly
+    # priced_value_book's pnl_usd for the same trade_id -- one shared pricing path.
+    row = rows[rows["trade_id"] == "T1"].iloc[0]
+    priced_row = priced[priced["trade_id"] == "T1"].iloc[0]
+    assert row["pnl_eod"] == pytest.approx(priced_row["pnl_usd"])
+    assert row["pnl_eod"] == pytest.approx(20_000.0)
 
 
 def test_blotter_fx_strip_renders_placeholder_when_no_fx_or_future_trades(tmp_path):
@@ -1115,7 +1103,7 @@ def test_blotter_fx_sample_cells_are_visually_flagged():
 
     # One rule per column with any sample cell, keyed on the "(sample)" suffix -- not
     # one rule per cell, which would be thousands of rules on a full book.
-    table = blotter_fx.fx_replica_table(out, sample_mask=mask)
+    table = blotter_fx.fx_blotter_table(out, sample_mask=mask)
     sample_rules = [r for r in table.style_data_conditional
                      if r["if"].get("column_id") == "mark_t1"]
     assert len(sample_rules) == 1, "expected exactly one style rule for the mark_t1 column"
@@ -1131,13 +1119,11 @@ def test_blotter_fx_sample_caption_present_only_when_samples_used(tmp_path):
     db_path = tmp_path / "risk.db"
     conn = sqlite3.connect(db_path)
     schema.create_schema(conn)
-    _seed_fx_replica_trade(conn)  # only mark_eod seeded -> mark_t1/mark_t2 sample-filled
-    from engine.pnl.pnl import workbook_valuation_date
-    valuation_date = workbook_valuation_date("2026-06-20")
+    _seed_fx_trade(conn)  # only mark_eod seeded below -> mark_t1/mark_t2 sample-filled
     conn.execute(
         "INSERT INTO marks VALUES "
-        "('2026-06-20','EURUSD',?,'FWD_OUTRIGHT',1.1080,'BBG_BFXFORWARD','2026-06-20T15:00:00-04:00')",
-        (valuation_date,),
+        "('2026-06-20','EURUSD','2026-06-20','FWD_OUTRIGHT',1.1080,'BBG_BFXFORWARD',"
+        "'2026-06-20T15:00:00-04:00')"
     )
     conn.commit()
     conn.close()
@@ -1152,23 +1138,21 @@ def test_blotter_fx_sample_caption_present_only_when_samples_used(tmp_path):
 
 def test_blotter_fx_sample_caption_absent_when_every_mark_is_real(tmp_path):
     from engine.pnl.aggregate import _n_business_days_back
-    from engine.pnl.pnl import workbook_valuation_date
 
     as_of = "2026-06-20"
-    valuation_date = workbook_valuation_date(as_of)
     t1_date = _n_business_days_back(dt.date.fromisoformat(as_of), 1).isoformat()
     t2_date = _n_business_days_back(dt.date.fromisoformat(as_of), 2).isoformat()
 
     db_path = tmp_path / "risk.db"
     conn = sqlite3.connect(db_path)
     schema.create_schema(conn)
-    _seed_fx_replica_trade(conn)
+    _seed_fx_trade(conn)
     conn.executemany(
-        "INSERT INTO marks VALUES (?,?,?,'FWD_OUTRIGHT',?,'BBG_BFXFORWARD',?)",
+        "INSERT INTO marks VALUES (?,?,'2026-06-20','FWD_OUTRIGHT',?,'BBG_BFXFORWARD',?)",
         [
-            (as_of, "EURUSD", valuation_date, 1.1080, as_of + "T15:00:00-04:00"),
-            (t1_date, "EURUSD", valuation_date, 1.1075, t1_date + "T15:00:00-04:00"),
-            (t2_date, "EURUSD", valuation_date, 1.1070, t2_date + "T15:00:00-04:00"),
+            (as_of, "EURUSD", 1.1080, as_of + "T15:00:00-04:00"),
+            (t1_date, "EURUSD", 1.1075, t1_date + "T15:00:00-04:00"),
+            (t2_date, "EURUSD", 1.1070, t2_date + "T15:00:00-04:00"),
         ],
     )
     conn.commit()
