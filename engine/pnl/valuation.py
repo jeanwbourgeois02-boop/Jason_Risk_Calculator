@@ -143,6 +143,9 @@ def _mark_at(conn: sqlite3.Connection, instrument_id: str, settle_date: str, mar
     source (the BNP file fallback) uses the latest mark dated on or before `as_of`: the
     BNP file is a T-1 snapshot and is the only price on a PC without Bloomberg, so a
     stale-but-labelled value beats a blank (user decision 2026-09-15)."""
+    cache = getattr(conn, "official_marks", None)
+    if source is None and cache is not None and conn.as_of == as_of:
+        return cache.get((instrument_id, settle_date, mark_type))
     table = _mark_table(source)
     if source is None:
         where, order = "as_of_date = :d", "snapped_at DESC"
@@ -165,20 +168,58 @@ def usd_per_quote(conn: sqlite3.Connection, quote_ccy: str, as_of: str,
     Never invents a USD leg for a cross: tries USD<quote> (inverted) then <quote>USD."""
     if quote_ccy == "USD":
         return 1.0, "USD", "identity"
+    memo = getattr(conn, "usd_memo", None)
+    key = (quote_ccy, as_of, source)
+    if memo is not None and key in memo:
+        return memo[key]
     inv_pair = f"USD{quote_ccy}"
     hit = _mark_at(conn, inv_pair, as_of, "SPOT", as_of, source)
     if hit is not None and hit[0]:
-        return 1.0 / float(hit[0]), inv_pair, hit[1]
-    direct_pair = f"{quote_ccy}USD"
-    hit = _mark_at(conn, direct_pair, as_of, "SPOT", as_of, source)
-    if hit is not None:
-        return float(hit[0]), direct_pair, hit[1]
-    return _NAN, None, None
+        out = (1.0 / float(hit[0]), inv_pair, hit[1])
+    else:
+        direct_pair = f"{quote_ccy}USD"
+        hit = _mark_at(conn, direct_pair, as_of, "SPOT", as_of, source)
+        out = (float(hit[0]), direct_pair, hit[1]) if hit is not None else (_NAN, None, None)
+    if memo is not None:
+        memo[key] = out
+    return out
 
 
 def _realised_row(conn: sqlite3.Connection, trade_id: str) -> Optional[pd.Series]:
+    realised = getattr(conn, "realised", None)
+    if realised is not None:
+        return realised.get(trade_id)
     df = pd.read_sql_query("SELECT * FROM realised_pnl WHERE trade_id = :t", conn, params={"t": trade_id})
     return None if df.empty else df.iloc[0]
+
+
+class _BookConn:
+    """The connection value_book hands to its row builders: the real connection plus
+    everything they would otherwise fetch with one query per trade, loaded once per
+    call (2026-09-17: 772 trades x 5 header dates took 4 s; now well under 1 s).
+      official_marks -- every marks_official row dated `as_of`, keyed
+                        (instrument_id, settle_date, mark_type) -> (value, source),
+                        newest snapped_at winning, exactly what _mark_at returns
+      realised       -- realised_pnl rows keyed by trade_id
+      usd_memo       -- usd_per_quote results for this call
+      last_memo      -- _last_official_on_or_before results for this call
+    `execute` delegates, so helpers that need an ad-hoc query (the fallback-source
+    path, _frozen_row's look-back) still work unchanged."""
+
+    def __init__(self, conn: sqlite3.Connection, as_of: str):
+        self.conn, self.as_of = conn, as_of
+        marks = {}
+        for inst, settle, mt, value, source in conn.execute(
+                "SELECT instrument_id, settle_date, mark_type, value, source FROM marks_official "
+                "WHERE as_of_date = ? ORDER BY snapped_at", (as_of,)):
+            marks[(inst, settle, mt)] = (value, source)
+        self.official_marks = marks
+        df = pd.read_sql_query("SELECT * FROM realised_pnl", conn)
+        self.realised = {row["trade_id"]: row for _, row in df.iterrows()} if not df.empty else {}
+        self.usd_memo, self.last_memo = {}, {}
+
+    def execute(self, *args, **kwargs):
+        return self.conn.execute(*args, **kwargs)
 
 
 def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str] = None) -> pd.DataFrame:
@@ -191,6 +232,7 @@ def value_book(conn: sqlite3.Connection, as_of: str, marks_source: Optional[str]
     fut = pd.read_sql_query(_fut_sql(theme), conn, params={"as_of": as_of})
     irs = pd.read_sql_query(_irs_sql(theme), conn, params={"as_of": as_of})
     opt = pd.read_sql_query(_opt_sql(theme), conn, params={"as_of": as_of})
+    conn = _BookConn(conn, as_of)  # one load of the day's marks and realised rows for every row below
 
     for r in fx.itertuples(index=False):
         status = "SETTLED" if r.settle_date < as_of else "OPEN"
@@ -279,6 +321,17 @@ def _open_fx_row(conn, r, as_of, marks_source) -> dict:
 def _last_official_on_or_before(conn, instrument_id: str, mark_type: str, day: str):
     """(value, as_of_date, source) of the last official mark on or before `day`, or None.
     Same lookup `engine.pnl.ledger._last_on_or_before` uses to freeze a trade."""
+    memo = getattr(conn, "last_memo", None)
+    key = (instrument_id, mark_type, day)
+    if memo is not None and key in memo:
+        return memo[key]
+    out = _last_official_query(conn, instrument_id, mark_type, day)
+    if memo is not None:
+        memo[key] = out
+    return out
+
+
+def _last_official_query(conn, instrument_id: str, mark_type: str, day: str):
     row = conn.execute(
         "SELECT value, as_of_date, source FROM marks_official WHERE instrument_id = :i "
         "AND mark_type = :m AND as_of_date <= :d ORDER BY as_of_date DESC, snapped_at DESC LIMIT 1",
