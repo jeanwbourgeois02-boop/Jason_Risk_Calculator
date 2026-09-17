@@ -82,16 +82,18 @@ def _now_iso() -> str:
 
 
 # --------------------------------------------------------------------------- requests
+# trades_official (2026-09-17): legacy BNP-sourced trades never reach P&L or delta, so
+# no mark is requested for them either -- the same view every engine query reads.
 _OPEN_FX_SQL = """
 SELECT DISTINCT i.instrument_id, i.bbg_ticker, l.settle_date
-FROM trade_legs l JOIN trades t USING (trade_id) JOIN instruments i USING (instrument_id)
+FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
 WHERE i.asset_class = 'FX' AND t.trade_date <= :as_of AND l.settle_date >= :as_of
 ORDER BY i.instrument_id, l.settle_date
 """
 
 _OPEN_FUTURE_SQL = """
 SELECT DISTINCT i.instrument_id, i.bbg_ticker, l.settle_date
-FROM trade_legs l JOIN trades t USING (trade_id) JOIN instruments i USING (instrument_id)
+FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
 WHERE i.asset_class = 'FUTURE' AND t.trade_date <= :as_of AND l.settle_date >= :as_of
 ORDER BY i.instrument_id, l.settle_date
 """

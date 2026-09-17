@@ -17,8 +17,8 @@ def _db(tmp_path):
         ("EURSEK", "FX", "EUR", "SEK", 1, 0, "EURSEK Curncy", "9999-12-31"),
     ])
     conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-        ("a1", "BNP", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "HAHY7", "t", "d", ""),
-        ("j1", "BNP", "USDJPY", "FX_FWD", "j1", "2026-08-10", 1e6, 150.0, "acc", "cp", "HAHY7", "t", "d", ""),
+        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "HAHY7", "t", "d", ""),
+        ("j1", "XLSX", "USDJPY", "FX_FWD", "j1", "2026-08-10", 1e6, 150.0, "acc", "cp", "HAHY7", "t", "d", ""),
     ])
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-16", 0.65, 1),
@@ -69,7 +69,7 @@ def test_build_requests_spot_per_pair_and_forward_per_open_date(tmp_path):
 def test_build_requests_includes_open_futures(tmp_path):
     p, conn = _db(tmp_path)
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','BNP','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','')")
     conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*50*7528.25,'2026-08-10','2026-09-18',0,0)")
     conn.commit()
@@ -140,7 +140,7 @@ def test_pull_once_with_fake_session_writes_marks_and_itemised_status(tmp_path, 
 def test_pull_once_includes_future_px(tmp_path, monkeypatch):
     p, conn = _db(tmp_path)
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','BNP','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','')")
     conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*50*7528.25,'2026-08-10','2026-09-18',0,0)")
     conn.commit()
