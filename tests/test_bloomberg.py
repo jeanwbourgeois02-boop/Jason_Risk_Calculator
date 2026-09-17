@@ -599,6 +599,100 @@ def test_pull_marks_end_to_end_with_fake_blpapi(monkeypatch, tmp_path):
     assert result.n_loaded == 4
 
 
+# =========================================================================== build_future_rows(live=True), 2026-09-17
+# Live pull FUTURE_PX fix: PX_SETTLE for `as_of` doesn't exist until after that day's US
+# close, so a live pull running earlier in the day (found on the Bloomberg PC at 06:27
+# America/New_York) always reported MISSING for every future. live=True tries a live
+# ReferenceDataRequest PX_LAST first, falling back to the latest prior PX_SETTLE only if
+# that comes back empty. Source stays BBG_BDH either way (CLAUDE.md's official source for
+# FUTURE_PX is unchanged); `detail` records which path was actually used.
+def test_build_future_rows_live_uses_px_last_and_never_sends_historical(monkeypatch):
+    from data.bloomberg import pull_marks
+
+    def responder(request):
+        if request.req_type == "ReferenceDataRequest":
+            assert request.fields == ["PX_LAST"]
+            return [{"securityData": [{"security": "ESU6 Index", "fieldData": {"PX_LAST": 7601.0}}]}]
+        raise AssertionError(f"HistoricalDataRequest must not be sent when live PX_LAST succeeds "
+                             f"({request.req_type})")
+
+    _install_fake_blpapi(monkeypatch, responder)
+    session, service = pull_marks.open_session()
+    reqs = [pull_marks.RequestRow("ESU6 Index", "ESU6 Index", "2026-09-18", "FUTURE_PX")]
+    rows, warnings, failures = pull_marks.build_future_rows(session, service, reqs, date(2026, 9, 17), live=True)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["value"] == 7601.0 and row["source"] == "BBG_BDH" and row["detail"] == "live PX_LAST"
+    assert warnings == [] and failures == []
+
+
+def test_build_future_rows_live_falls_back_to_latest_px_settle_before_close(monkeypatch):
+    """The exact Bloomberg-PC scenario: no PX_LAST yet (before the US close), so the
+    fallback HistoricalDataRequest is tried over a multi-day range and must pick the MOST
+    RECENT settle in that window, not the earliest one in the response."""
+    from data.bloomberg import pull_marks
+
+    def responder(request):
+        if request.req_type == "ReferenceDataRequest":
+            return [{"securityData": [{"security": "ESU6 Index", "fieldData": {}}]}]  # no PX_LAST yet
+        if request.req_type == "HistoricalDataRequest":
+            assert request.fields == ["PX_SETTLE"]
+            assert request.startDate < request.endDate        # a real multi-day range, not a single day
+            # ascending date order; the fallback must use the LAST (most recent) point
+            return [{"securityData": {"security": "ESU6 Index",
+                                      "fieldData": [{"PX_SETTLE": 7550.0}, {"PX_SETTLE": 7598.5}]}}]
+        raise AssertionError(request.req_type)
+
+    _install_fake_blpapi(monkeypatch, responder)
+    session, service = pull_marks.open_session()
+    reqs = [pull_marks.RequestRow("ESU6 Index", "ESU6 Index", "2026-09-18", "FUTURE_PX")]
+    rows, warnings, failures = pull_marks.build_future_rows(session, service, reqs, date(2026, 9, 17), live=True)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["value"] == 7598.5 and row["source"] == "BBG_BDH"
+    assert "no live PX_LAST" in row["detail"] and "PX_SETTLE" in row["detail"]
+    assert warnings == [] and failures == []
+
+
+def test_build_future_rows_live_fails_clearly_when_both_px_last_and_px_settle_empty(monkeypatch):
+    from data.bloomberg import pull_marks
+
+    def responder(request):
+        if request.req_type == "ReferenceDataRequest":
+            return [{"securityData": [{"security": "ESU6 Index", "fieldData": {}}]}]
+        if request.req_type == "HistoricalDataRequest":
+            return [{"securityData": {"security": "ESU6 Index", "fieldData": []}}]
+        raise AssertionError(request.req_type)
+
+    _install_fake_blpapi(monkeypatch, responder)
+    session, service = pull_marks.open_session()
+    reqs = [pull_marks.RequestRow("ESU6 Index", "ESU6 Index", "2026-09-18", "FUTURE_PX")]
+    rows, warnings, failures = pull_marks.build_future_rows(session, service, reqs, date(2026, 9, 17), live=True)
+    assert rows == []
+    assert len(failures) == 1
+    assert failures[0]["instrument_id"] == "ESU6 Index"
+    assert "no live PX_LAST" in failures[0]["detail"] and "PX_SETTLE" in failures[0]["detail"]
+    assert any("ESU6 Index" in w for w in warnings)
+
+
+def test_build_future_rows_default_is_unaffected_single_day_historical_only(monkeypatch):
+    """The historical/backfill path (live=False, the default): unchanged -- a single-day
+    PX_SETTLE HistoricalDataRequest, no ReferenceDataRequest at all, no `detail` key."""
+    from data.bloomberg import pull_marks
+
+    def responder(request):
+        assert request.req_type == "HistoricalDataRequest"
+        assert request.startDate == request.endDate      # single day, not a range
+        return [{"securityData": {"security": "ESU6 Index", "fieldData": [{"PX_SETTLE": 7528.25}]}}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    session, service = pull_marks.open_session()
+    reqs = [pull_marks.RequestRow("ESU6 Index", "ESU6 Index", "2026-09-18", "FUTURE_PX")]
+    rows, warnings, failures = pull_marks.build_future_rows(session, service, reqs, date(2026, 8, 17))
+    assert len(rows) == 1 and rows[0]["value"] == 7528.25 and rows[0]["source"] == "BBG_BDH"
+    assert "detail" not in rows[0]
+
+
 def _responder_ref_and_hist(ref_data, hist_data):
     def responder(request):
         if request.req_type == "HistoricalDataRequest":

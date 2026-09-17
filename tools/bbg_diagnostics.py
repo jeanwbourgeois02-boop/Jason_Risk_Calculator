@@ -295,11 +295,38 @@ def check_irs_curve_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check
 
 
 # --------------------------------------------------------------------------- 5b. FX options
-def check_option_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+def _last_option_skip_reasons(db_path: Optional[Path]) -> Dict[str, str]:
+    """{trade_id: reason} from the last recorded pull's status["options"]["skipped"]
+    (data.bloomberg.live._options_step's own per-trade list -- a plain string there means
+    the whole step was skipped, e.g. "no FX_OPTION trades to price", not a per-trade
+    reason, and is ignored here). Never raises: any failure to read returns {}."""
+    if db_path is None:
+        return {}
+    try:
+        from data.bloomberg.live import read_status
+        status = read_status(db_path)
+    except Exception:
+        return {}
+    if not status:
+        return {}
+    skipped = status.get("options", {}).get("skipped")
+    if not isinstance(skipped, list):
+        return {}
+    return {s["trade_id"]: s.get("reason", "") for s in skipped if isinstance(s, dict) and s.get("trade_id")}
+
+
+def check_option_coverage(conn: sqlite3.Connection, as_of: str, db_path: Optional[Path] = None) -> List[Check]:
     """Every open FX option (expiry on or after as_of) must have an official PREMIUM and
     DELTA mark for as_of. An option whose terms are incomplete (strike 0 in
     instrument_options) can never be priced and is reported separately, because the fix
-    is typing its terms in the Blotter's Options view, not a Bloomberg pull."""
+    is typing its terms in the Blotter's Options view, not a Bloomberg pull.
+
+    Item 3a (2026-09-17): a missing-mark FAIL used to say only "N of M ... did not price
+    them; check the vol surface and the OIS curves" -- forcing the user to go read the raw
+    status JSON to find out *why* a specific option was skipped. It now looks up the last
+    recorded pull's per-trade skip reason (data.bloomberg.live._options_step's own
+    diagnosis, e.g. "no curve/rate SEK" or a vol-step ticker failure) via `db_path` and
+    prints it verbatim next to the instrument."""
     out: List[Check] = []
     try:
         rows = conn.execute(
@@ -312,6 +339,10 @@ def check_option_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check]:
     if not rows:
         return [_row("FX option marks coverage", "pass", "No open FX options; no option marks are required today.")]
 
+    trade_ids_by_instrument: Dict[str, List[str]] = {}
+    for tid, inst, _expiry, _strike, _payoff in rows:
+        trade_ids_by_instrument.setdefault(inst, []).append(tid)
+
     no_terms = [inst for _, inst, _, strike, payoff in rows
                 if strike == 0 and payoff in ("VANILLA", "DIGITAL", "AMERICAN", "ASIAN", "BARRIER_KI", "BARRIER_KO")]
     if no_terms:
@@ -321,6 +352,7 @@ def check_option_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check]:
     else:
         out.append(_row("FX option terms on file", "pass", f"All {len(rows)} open option(s) carry a strike and payoff type."))
 
+    skip_reasons = _last_option_skip_reasons(db_path)
     priceable = sorted({inst for _, inst, _, strike, _ in rows if strike != 0})
     for mark_type in ("PREMIUM", "DELTA"):
         if not priceable:
@@ -330,10 +362,22 @@ def check_option_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check]:
             (mark_type, as_of))}
         missing = [inst for inst in priceable if inst not in have]
         if missing:
-            out.append(_row(f"FX option {mark_type} coverage", "fail",
-                             f"{len(missing)} of {len(priceable)} priceable open option(s) have no official {mark_type} "
-                             f"for {as_of} (e.g. {', '.join(missing[:4])}) -- the options step of the live feed "
-                             "did not price them; check the vol surface and the OIS curves for their currencies."))
+            message = (f"{len(missing)} of {len(priceable)} priceable open option(s) have no official {mark_type} "
+                      f"for {as_of} (e.g. {', '.join(missing[:4])}) -- the options step of the live feed "
+                      "did not price them; check the vol surface and the OIS curves for their currencies.")
+            reasons = []
+            for inst in missing:
+                for tid in trade_ids_by_instrument.get(inst, []):
+                    reason = skip_reasons.get(tid)
+                    if reason:
+                        reasons.append(f"{inst} ({tid}): {reason}")
+            if reasons:
+                shown = "; ".join(reasons[:6])
+                more = f" (+{len(reasons) - 6} more)" if len(reasons) > 6 else ""
+                message += f" Last pull's reported reason(s): {shown}{more}"
+            elif skip_reasons or db_path is not None:
+                message += " (the last pull's status file has no per-trade reason recorded for these -- press Pull now and re-check)."
+            out.append(_row(f"FX option {mark_type} coverage", "fail", message))
         else:
             out.append(_row(f"FX option {mark_type} coverage", "pass",
                              f"All {len(priceable)} priceable open option(s) have an official {mark_type} for {as_of}."))
@@ -483,9 +527,20 @@ def check_last_pull(db_path: Optional[Path], as_of: Optional[str] = None) -> Lis
                      f"Last pull at {status.get('time', 'an unknown time')} wrote "
                      f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks.")]
     if status.get("connected"):
-        return [_row("Last marks pull", "warning",
-                     f"Last pull connected but {status.get('failed', 0)} of {status.get('requested', 0)} "
-                     "requested marks failed.")]
+        # Item 3a (2026-09-17): "2 of 27 failed" alone forces the user to open the Market
+        # data tab's own table to find out which -- list the failed instrument + detail
+        # right here, so the diagnostics panel is self-contained.
+        failed_items = [i for i in status.get("items", []) if i.get("status") == "FAILED"]
+        message = (f"Last pull connected but {status.get('failed', 0)} of {status.get('requested', 0)} "
+                  "requested marks failed.")
+        if failed_items:
+            shown = "; ".join(
+                f"{i.get('instrument_id', '?')} {i.get('mark_type', '?')} {i.get('settle_date', '')}: "
+                f"{i.get('detail') or 'no detail recorded'}"
+                for i in failed_items[:6])
+            more = f" (+{len(failed_items) - 6} more)" if len(failed_items) > 6 else ""
+            message += " " + shown + more
+        return [_row("Last marks pull", "warning", message)]
     return [_row("Last marks pull", "fail", f"Last pull did not connect: {status.get('reason', 'unknown reason')}.")]
 
 
@@ -531,7 +586,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
         _safe("FX/futures marks coverage", check_fx_and_future_coverage, conn, resolved_as_of)
         _safe("IRS / OIS curve coverage", check_irs_curve_coverage, conn, resolved_as_of)
         _safe("Overnight index fixings", check_index_fixings, conn, resolved_as_of)
-        _safe("FX option marks coverage", check_option_coverage, conn, resolved_as_of)
+        _safe("FX option marks coverage", check_option_coverage, conn, resolved_as_of, resolved_db)
         _safe("snapped_at carries a resolved offset", check_snapped_at_offset, conn, resolved_as_of)
         conn.close()
         _safe("PC clock / New York date", check_clock, resolved_as_of)

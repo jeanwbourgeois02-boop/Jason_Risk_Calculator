@@ -611,17 +611,23 @@ def fetch_reference(session, service, tickers: Sequence[str], fields: Sequence[s
 
 
 def fetch_historical(session, service, tickers: Sequence[str], field: str, as_of: date,
-                      diag: Optional[Diagnostics] = None, tag: Optional[dict] = None) -> Dict[str, Optional[float]]:
-    """Thin network layer: HistoricalDataRequest for a single date (start = end = as_of).
-    Returns {ticker: value or None}. Same diagnostics/TIMEOUT/correlation-id behaviour as
+                      diag: Optional[Diagnostics] = None, tag: Optional[dict] = None,
+                      start: Optional[date] = None) -> Dict[str, Optional[float]]:
+    """Thin network layer: HistoricalDataRequest for [start, as_of] (default start=as_of,
+    i.e. a single date, unchanged from before `start` existed). Returns {ticker: value or
+    None} -- the MOST RECENT point on or before `as_of` when the range covers more than
+    one day (2026-09-17: build_future_rows' live fallback needs "latest PX_SETTLE on or
+    before as_of" when as_of's own settle doesn't exist yet before the US close; Bloomberg
+    returns fieldData points in ascending date order, so the last element is the latest --
+    for a single-day range there is only one point, so this is exactly the old behaviour
+    when `start` is not given). Same diagnostics/TIMEOUT/correlation-id behaviour as
     fetch_reference (see its docstring)."""
     request = service.createRequest("HistoricalDataRequest")
     for t in tickers:
         request.getElement("securities").appendValue(t)
     request.getElement("fields").appendValue(field)
-    d = as_of.strftime("%Y%m%d")
-    request.set("startDate", d)
-    request.set("endDate", d)
+    request.set("startDate", (start or as_of).strftime("%Y%m%d"))
+    request.set("endDate", as_of.strftime("%Y%m%d"))
 
     rec = diag.new_request("HistoricalDataRequest", tickers, [field], None, tag) if diag is not None else None
 
@@ -661,7 +667,12 @@ def fetch_historical(session, service, tickers: Sequence[str], field: str, as_of
             if sec_data.hasElement("fieldData"):
                 fd = sec_data.getElement("fieldData")
                 if fd.numValues() > 0:
-                    point = fd.getValueAsElement(0)
+                    # Bloomberg returns historical points in ascending date order; the
+                    # last one is the most recent on or before `endDate` (== as_of).
+                    # Index 0 for a single-day range (numValues()==1, the old behaviour)
+                    # is the same element as index -1, so this is a no-op change for
+                    # every caller that doesn't pass `start`.
+                    point = fd.getValueAsElement(fd.numValues() - 1)
                     if point.hasElement(field):
                         value = point.getElement(field).getValue()
                         field_data_repr = {field: value}
@@ -786,17 +797,62 @@ def build_spot_rows(session, service, requests: Sequence[RequestRow], as_of: dat
 
 
 def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: date,
-                       diag: Optional[Diagnostics] = None) -> Tuple[List[dict], List[str], List[dict]]:
-    """FUTURE_PX: HistoricalDataRequest PX_SETTLE for as_of. See module docstring and
-    build_spot_rows for the (rows, warnings, failures) contract."""
+                       diag: Optional[Diagnostics] = None, live: bool = False,
+                       lookback_days: int = 7) -> Tuple[List[dict], List[str], List[dict]]:
+    """FUTURE_PX. Default (`live=False`, the historical/backfill CLI path): unchanged --
+    HistoricalDataRequest PX_SETTLE for `as_of` alone.
+
+    `live=True` (data.bloomberg.live's intraday pull, 2026-09-17 fix): PX_SETTLE for
+    `as_of` does not exist until after that day's US close, so a live pull running before
+    the close (e.g. 06:27 America/New_York) always got MISSING for every future -- found
+    on the Bloomberg PC as ESU6 Index. Instead, try a live ReferenceDataRequest PX_LAST
+    first; only for a ticker with no PX_LAST, fall back to the latest PX_SETTLE on or
+    before `as_of` (a HistoricalDataRequest over the trailing `lookback_days` calendar
+    days -- "yesterday's settle" in the ordinary case, further back only to cover a
+    weekend/holiday). Source stays BBG_BDH either way -- CLAUDE.md names BBG_BDH official
+    for FUTURE_PX regardless of which field produced it, this never touches that mapping
+    -- but each row's `detail` records which one was actually used, and a failure's detail
+    says whether PX_LAST, PX_SETTLE, or both came back empty.
+
+    See build_spot_rows for the (rows, warnings, failures) contract."""
     rows = [r for r in requests if r.mark_type == "FUTURE_PX"]
     if not rows:
         return [], [], []
     tickers = sorted({r.bbg_ticker for r in rows})
+    snapped = snapped_at(as_of)
+    out, warnings, failures = [], [], []
+    if live:
+        live_data = fetch_reference(session, service, tickers, ["PX_LAST"], diag=diag,
+                                    tag={"purpose": "FUTURE_PX_LIVE"})
+        missing = sorted({r.bbg_ticker for r in rows if live_data.get(r.bbg_ticker, {}).get("PX_LAST") is None})
+        settle_data: Dict[str, Optional[float]] = {}
+        if missing:
+            settle_data = fetch_historical(session, service, missing, "PX_SETTLE", as_of, diag,
+                                           {"purpose": "FUTURE_PX_FALLBACK"},
+                                           start=as_of - timedelta(days=lookback_days))
+        for r in rows:
+            live_val = live_data.get(r.bbg_ticker, {}).get("PX_LAST")
+            if live_val is not None:
+                out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
+                           "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": float(live_val),
+                           "source": SRC_FUTURE, "snapped_at": snapped, "detail": "live PX_LAST"})
+                continue
+            settle_val = settle_data.get(r.bbg_ticker)
+            if settle_val is not None:
+                out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
+                           "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": float(settle_val),
+                           "source": SRC_FUTURE, "snapped_at": snapped,
+                           "detail": f"no live PX_LAST; used the latest PX_SETTLE on or before {as_of.isoformat()}"})
+                continue
+            detail = (f"no live PX_LAST and no PX_SETTLE in the {lookback_days} day(s) up to and "
+                     f"including {as_of.isoformat()}")
+            warnings.append(f"FUTURE_PX {r.instrument_id} ({r.bbg_ticker}): {detail}")
+            failures.append({"instrument_id": r.instrument_id, "settle_date": r.settle_date, "mark_type": "FUTURE_PX",
+                             "classification": CLASS_NO_VALUE, "detail": detail})
+        return out, warnings, failures
+
     data = fetch_historical(session, service, tickers, "PX_SETTLE", as_of, diag, {"purpose": "FUTURE_PX"})
     batch_classification, batch_detail = _batch_classification(diag)
-    out, warnings, failures = [], [], []
-    snapped = snapped_at(as_of)
     for r in rows:
         val = data.get(r.bbg_ticker)
         if val is None:
