@@ -1,8 +1,15 @@
 # Build plan: one valuation, one line, four tabs
 
 Authorised by the user on 2026-09-15. Supersedes the 2026-09-14 "literal workbook
-arithmetic" correction as the app's headline calculation. The workbook copy is kept,
-unchanged, as a reconciliation view only.
+arithmetic" correction as the app's headline calculation. The workbook copy was kept,
+unchanged, as a reconciliation view only, from 2026-09-15 until the Reconciliation tab
+was deleted 2026-09-16 (dead code from then on) and then the underlying BNP file and
+Excel workbook themselves were ordered removed entirely on 2026-09-17 (user decision:
+"no bnp fall back - that excel and everything linked to it need to go") -- see
+`docs/bnp-excel-removal.md` for what that removal actually reached and what is still
+blocked by live cross-module dependencies. Every "reconciliation view" reference below
+is historical: describing what Task A/B/C were told at the time, not current app
+behaviour.
 
 Scope now: FX spot, forwards, swaps, futures, cash. IRS and options come later and
 must fit the same structure without changing it.
@@ -25,7 +32,7 @@ Three layers:
 |---|---|---|
 | 1 Stored | trades, legs, marks per close, realised results, calendar | no, this is the memory |
 | 2 One function | `value_book(date)` -> one row per trade at that date's marks | yes, from layer 1 |
-| 3 Views | header, Ladder, Blotter, Market data, Reconciliation | yes, read-only |
+| 3 Views | header, Ladder, Blotter, Market data | yes, read-only (Reconciliation removed 2026-09-16, its underlying BNP/Excel inputs removed 2026-09-17) |
 
 ## 2. Valuation spec (layer 2)
 
@@ -113,6 +120,10 @@ only.
 
 ### 3a. Decisions of 2026-09-15 (evening review)
 
+*(Historical: the BNP reconciliation described in the next two bullets no longer exists
+in the app as of 2026-09-17 -- BNP is not an input at all. Close stayed at 17:00
+America/New_York.)*
+
 - Close is 17:00 America/New_York (changed from 15:00 on 2026-09-15). Reconciliation against BNP is same-date,
   same-close.
 - The market value break (our open LTD at the BNP file date minus BNP `mv_usd`, per
@@ -146,7 +157,7 @@ where it sits.
 | Ladder | What am I long/short and when is it cash? | date x currency grid incl. USD and cash balances at as_of; local delta, spot, USD delta rows; Net/Gross; futures delta line; stress block; cell click -> trades |
 | Blotter | Where did the P&L come from? | `value_book(as_of)` rows; filters open/settled, product, pair, strategy, theme, date range; group-by with LTD/Daily/MTD/YTD per group; spot/carry columns; row click -> legs and marks used |
 | Market data | Can I trust the numbers? | every mark needed today with value, source, time, status (official/interp/manual/missing); pull button; close completeness per past date; manual entry |
-| ~~Reconciliation~~ | *(removed 2026-09-16: BNP and the Excel are no longer inputs; Options is a grouped view inside Blotter since 2026-09-17)* | |
+| ~~Reconciliation~~ | *(tab removed 2026-09-16; its BNP-file and Excel-workbook inputs removed from the app entirely 2026-09-17, see `docs/bnp-excel-removal.md` -- some of the underlying arithmetic (`engine/pnl/pnl.py`, `engine/pnl/reconcile.py`) is still physically present because live modules outside this task's lane still import from it, but it is unreachable from any UI; Options is a grouped view inside Blotter since 2026-09-17)* | |
 
 Removed from the Cash ladder tab: workbook mark-to-market panel, ledger cards, Exposure
 P&L card, workbook FX rates grid (moves to Market data as manual entry).
@@ -183,7 +194,13 @@ listed in the report, not edited.
 > from `engine.ladder.exposure.build_exposure(...).summary` and a futures USD delta.
 >
 > Leave `engine/pnl/pnl.py` and `aggregate.py`'s workbook functions untouched; they
-> are the reconciliation view.
+> are the reconciliation view. *(Historical instruction, 2026-09-15. As of 2026-09-17
+> the reconciliation view itself is gone -- the user ordered the BNP file, the Excel
+> workbook and everything linked to them removed, not kept as dead code. `pnl.py`'s
+> workbook functions are still physically present only because `aggregate.py`'s live
+> business-day-calendar helpers share the same file/import and `engine/ladder/
+> valuation.py` still imports `ltd_per_trade`; see `docs/bnp-excel-removal.md` for the
+> exact split needed before it can be deleted.)*
 >
 > Tests: the four worked examples in section 2 as exact assertions; a swap package
 > whose near leg realises and far leg stays open with LTD continuous across the
@@ -334,6 +351,10 @@ The original single-agent Task C prompt below is kept for reference only.
 > `py -3 -m pytest tests/ -q`; all tests must pass; report the count.
 
 ### Task D: live check (user, on the Bloomberg machine)
+
+*(Historical, 2026-09-15. Overtaken by events: the user retired the workbook and the
+BNP file directly on 2026-09-17, without waiting for this comparison -- see
+`docs/bnp-excel-removal.md`. Kept for the record, not as a remaining task.)*
 
 Run the pull after 17:00 New York, upload the next BNP file, and compare on the
 Reconciliation tab: ours vs BNP per instrument, and ours vs the recalculated workbook

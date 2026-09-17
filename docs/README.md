@@ -117,7 +117,6 @@ Everything else lives under `2_launcher.py` too, but the raw commands are:
 .venv\Scripts\python -m data.bloomberg.live --status the last pull, itemised
 .venv\Scripts\python -m data.bloomberg.backfill --start ... --end ...   run the backfill manually (normally automatic)
 .venv\Scripts\python 3_diagnostic.py              Bloomberg diagnostics (same checks as the Market data button)
-.venv\Scripts\python tools\make_sample_data.py    rebuild the sample from the real file
 ```
 
 Environment variables: `RISK_DB` (database path), `RISK_LIVE=0` (disable the feed), `BLP_HOST`, `BLP_PORT`.

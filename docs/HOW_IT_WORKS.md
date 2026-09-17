@@ -38,7 +38,7 @@ Three things to know before quoting a number from it:
 
 ### The old BNP report and the Excel are history
 
-Neither is an input any more. The BNP daily report was the trade source until 2026-09-16 and is no longer uploadable. The Excel's formulas are kept in one module (`engine/pnl/pnl.py`) as a reconciliation reference and feed nothing on screen.
+Neither is an input any more. The BNP daily report was the trade source until 2026-09-16 and is no longer uploadable. The Excel's formulas were removed from the code on 2026-09-17 (user decision: no BNP fallback, the old workbook and everything linked to it deleted); see docs/bnp-excel-removal.md.
 
 ### Rates come from Bloomberg, tagged by source
 
@@ -166,7 +166,7 @@ Two warnings: most real value dates are broken dates, so many forward marks will
 Not exactly, by design: BNP prints its `Price` to 5 decimals and uses its own spot. The BNP rates are kept as a labelled fallback, never as the official number.
 
 **Is it the same as the Excel?**
-No. The Excel marked every pair at one date five days out, divided by the mark instead of converting at spot, and mis-stated futures. Those formulas are kept in `engine/pnl/pnl.py` for reference only.
+No. The Excel marked every pair at one date five days out, divided by the mark instead of converting at spot, and mis-stated futures. Those formulas were removed from the code on 2026-09-17; only git history keeps them.
 
 **What happens at settlement?**
 Blotter: the row is frozen at the rate observed on its date and stays in LTD forever. Ladder: the leg drops out once the as-of date passes its settlement date.
