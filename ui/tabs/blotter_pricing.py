@@ -27,10 +27,12 @@ so nothing here needed to change when that parameter disappeared.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Dict, Optional, Tuple
@@ -62,11 +64,15 @@ def _db_cache_key(conn: sqlite3.Connection):
     return None
 
 
+log = logging.getLogger(__name__)
+
 _SNAPSHOT = threading.local()
+# A render slower than this says so in the terminal (see `pricing_snapshot`).
+SLOW_RENDER_SECONDS = 3.0
 
 
 @contextmanager
-def pricing_snapshot(conn: sqlite3.Connection):
+def pricing_snapshot(conn: sqlite3.Connection, label: str = ""):
     """Pin `priced_value_book`'s cache key for the duration of ONE render (2026-09-18).
 
     `_db_cache_key` re-reads the file's mtime on every call, so a write landing in the
@@ -81,15 +87,28 @@ def pricing_snapshot(conn: sqlite3.Connection):
     Scoped to the calling thread (a Dash callback runs start to finish on its request's
     thread) and released on exit, so the NEXT render always takes a fresh key: an upload
     is never served from a snapshot taken before it. Re-entrant -- an inner block keeps
-    the outer key. Callers that never enter one behave exactly as before."""
+    the outer key. Callers that never enter one behave exactly as before.
+
+    With a `label`, a render that takes `SLOW_RENDER_SECONDS` or more logs one WARNING
+    naming the view, how long it took and how many full `value_book` runs it cost. A
+    view that ERRORS already prints its traceback in the terminal; a view that is merely
+    slow printed nothing at all, so "the tab did not load" on the Bloomberg PC left no
+    trace to diagnose from (user, 2026-09-18). Logging only: nothing about the render
+    itself changes."""
     if getattr(_SNAPSHOT, "key", None) is not None:
         yield
         return
     _SNAPSHOT.key = (_db_cache_key(conn),)  # 1-tuple: a None key (in-memory db) is still "pinned"
+    _SNAPSHOT.repricings = 0
+    started = time.perf_counter()
     try:
         yield
     finally:
+        elapsed = time.perf_counter() - started
         _SNAPSHOT.key = None
+        if label and elapsed >= SLOW_RENDER_SECONDS:
+            log.warning("slow render: %s took %.1fs (%d full re-pricings of the book)",
+                        label, elapsed, getattr(_SNAPSHOT, "repricings", 0))
 
 
 def _render_cache_key(conn: sqlite3.Connection):
@@ -100,6 +119,8 @@ def _render_cache_key(conn: sqlite3.Connection):
 @lru_cache(maxsize=256)
 def _priced_value_book_cached(path: str, _mtime: float, as_of: str) -> Tuple[pd.DataFrame, int, int]:
     from ui.app import connect_readonly
+    # Only reached on a cache miss, on the caller's own thread: counted for the slow-render log.
+    _SNAPSHOT.repricings = getattr(_SNAPSHOT, "repricings", 0) + 1
     conn = connect_readonly(path)
     try:
         return _priced_value_book_uncached(conn, as_of)
@@ -251,6 +272,20 @@ _PRODUCT_LABELS = {
 }
 
 
+BAD_VALUE_TAG = "stored value is not a number"
+# How many full `value_book` reasons a breakdown spells out for bad-stored-value rows.
+_BAD_VALUE_EXAMPLES = 3
+
+
+def is_bad_value_reason(reason) -> bool:
+    """True for the reasons `engine.pnl.valuation._guarded_row` writes when a trade could
+    not be valued because of what is STORED for it (text in a REAL column, a malformed
+    date) rather than because a mark is missing -- "trade <id>: trades.price is not a
+    number ('24-Jul')" / "trade <id>: could not be valued (...)". These name the trade id,
+    the table.column and the offending value, so the views repeat them in full."""
+    return isinstance(reason, str) and ("is not a number" in reason or "could not be valued" in reason)
+
+
 def _reason_tag(reason: str) -> str:
     """Short tag extracted from one of `value_book`'s own `reason` strings, for the
     unpriced-trade breakdown tooltip -- e.g. "no PREMIUM" from "no PREMIUM mark for ...
@@ -261,6 +296,8 @@ def _reason_tag(reason: str) -> str:
         return "unpriced"
     if "cannot be frozen" in reason:
         return "no historical mark at settlement"
+    if is_bad_value_reason(reason):
+        return BAD_VALUE_TAG
     if "SPOT for USD conversion" in reason:
         return "no SPOT (USD conversion)"
     m = _MISSING_TAG_RE.search(reason)
@@ -282,8 +319,99 @@ def _unpriced_breakdown(unpriced: pd.DataFrame) -> str:
         return ""
     tags = unpriced["reason"].map(_reason_tag)
     groups = unpriced.groupby([unpriced["product"], tags]).size().sort_values(ascending=False)
-    return "; ".join(f"{count} {_product_label(product, count)}: {tag}"
-                      for (product, tag), count in groups.items())
+    out = "; ".join(f"{count} {_product_label(product, count)}: {tag}"
+                     for (product, tag), count in groups.items())
+    return out + bad_value_detail(unpriced)
+
+
+def bad_value_detail(unpriced: pd.DataFrame) -> str:
+    """" -- trade 928825333: trades.price is not a number ('24-Jul')" for the rows of
+    `unpriced` that are unpriced because of a bad STORED value (`is_bad_value_reason`):
+    `value_book`'s own reason in full (trade id, table.column, offending value), at most
+    `_BAD_VALUE_EXAMPLES` of them. "" when there are none. A missing mark is fixed by a
+    Bloomberg pull; this is fixed in the data, so the breakdown says exactly where."""
+    if unpriced.empty:
+        return ""
+    reasons = [r for r in unpriced["reason"].tolist() if is_bad_value_reason(r)]
+    if not reasons:
+        return ""
+    more = f" (+{len(reasons) - _BAD_VALUE_EXAMPLES} more)" if len(reasons) > _BAD_VALUE_EXAMPLES else ""
+    return " -- " + "; ".join(reasons[:_BAD_VALUE_EXAMPLES]) + more
+
+
+def bad_value_note(unpriced: pd.DataFrame) -> str:
+    """" (1 with a stored value that is not a number)" -- appended to a card's VISIBLE
+    "excludes N of M trades unpriced" caption when some of those N are unpriced because
+    of a bad stored value; "" otherwise, so every other caption reads exactly as before.
+    Visible, not hover-only: a data error the user must fix should not need a mouse-over."""
+    if unpriced.empty:
+        return ""
+    n = sum(1 for r in unpriced["reason"].tolist() if is_bad_value_reason(r))
+    return f" ({n} with a {BAD_VALUE_TAG})" if n else ""
+
+
+# Every REAL column the P&L, the ladder or a Blotter table multiplies, with the key that
+# names a row to the user. `bad_stored_values` scans these for anything that is not a number.
+_NUMERIC_COLUMNS = (
+    ("trades", ("trade_id",), ("quantity", "price")),
+    ("trade_legs", ("trade_id", "leg_no"), ("amount", "rate")),
+    ("instruments", ("instrument_id",), ("multiplier",)),
+    ("instrument_options", ("instrument_id",), ("strike", "barrier_level")),
+    ("realised_pnl", ("trade_id",), ("local_amount", "usd_entry_amount", "spot_usd_per_local", "pnl_usd")),
+    ("marks", ("as_of_date", "instrument_id", "settle_date", "mark_type", "source"), ("value",)),
+)
+_BAD_VALUE_FIX = {
+    "trades": "re-upload the blotter (or delete and re-book the manual trade)",
+    "trade_legs": "re-upload the blotter (or delete and re-book the manual trade)",
+    "instruments": "re-upload the blotter",
+    "instrument_options": "re-enter the option's terms under Manual entry > Option terms",
+    "realised_pnl": "rebuilt automatically by the next Bloomberg pull; the trade is valued at its last "
+                    "official mark meanwhile",
+    "marks": "re-run the Bloomberg pull or backfill for that date (or re-enter the manual mark)",
+}
+
+
+def bad_stored_values(conn: sqlite3.Connection, examples: int = 3) -> list:
+    """Stored figures that are not numbers, one entry per table.column that has any:
+    `{table, column, count, examples: [(key text, value), ...], fix}`. SQLite keeps text it
+    cannot convert as TEXT even in a REAL column, and `float()` on it is what produced the
+    bare "could not convert string to float: '...'" error cards (2026-09-18) -- which said
+    neither which trade nor which column. This names both, straight from the database, so
+    it also covers the views that never go through `value_book` (the ladder's leg amounts,
+    the Options table's strikes). Read-only; [] when everything is a number, when a table
+    does not exist on this database, or when the scan itself fails (it never raises)."""
+    out = []
+    for table, keys, columns in _NUMERIC_COLUMNS:
+        for column in columns:
+            where = f'typeof("{column}") NOT IN (\'real\', \'integer\')'
+            try:
+                count = conn.execute(f'SELECT COUNT(*) FROM "{table}" WHERE {where}').fetchone()[0]
+                if not count:
+                    continue
+                rows = conn.execute(f'SELECT {", ".join(keys)}, "{column}" FROM "{table}" WHERE {where} LIMIT ?',
+                                     (examples,)).fetchall()
+            except sqlite3.Error:
+                continue
+            shown = [(" ".join(f"{k} {v}" for k, v in zip(keys, row[:-1])), row[-1]) for row in rows]
+            out.append({"table": table, "column": column, "count": count, "examples": shown,
+                        "fix": _BAD_VALUE_FIX.get(table, "")})
+    return out
+
+
+def describe_bad_stored_values(conn: sqlite3.Connection) -> str:
+    """One sentence per entry of `bad_stored_values`, "" when there are none:
+    "trades.price: 1 value that is not a number -- '24-Jul' (trade_id 928825333); to fix:
+    re-upload the blotter ..."."""
+    parts = []
+    for item in bad_stored_values(conn):
+        n = item["count"]
+        shown = "; ".join(f"{value!r} ({key})" for key, value in item["examples"])
+        more = f", +{n - len(item['examples'])} more" if n > len(item["examples"]) else ""
+        fix = f"; to fix: {item['fix']}" if item["fix"] else ""
+        parts.append(f"{item['table']}.{item['column']}: "
+                     f"{f'{n} values that are not numbers' if n != 1 else '1 value that is not a number'}"
+                     f" -- {shown}{more}{fix}")
+    return ". ".join(parts)
 
 
 def _nothing_priced_reason(unpriced: pd.DataFrame, day: str) -> str:
@@ -344,7 +472,7 @@ def _priced_single_from_df(df: pd.DataFrame, ref_date: str) -> dict:
                 "excluded_summary": "", "excluded_detail": ""}
     n = len(unpriced)
     return {"value": value, "ref_date": ref_date, "available": True, "reason": "",
-            "excluded_summary": f"excludes {n} of {total} trades unpriced",
+            "excluded_summary": f"excludes {n} of {total} trades unpriced" + bad_value_note(unpriced),
             "excluded_detail": _unpriced_breakdown(unpriced)}
 
 
@@ -426,7 +554,8 @@ def _priced_diff_scoped(conn: sqlite3.Connection, date_a: str, date_b: str, trad
         note = f"{len(blocked_ids)} priced now but unpriced on {note_label}"
         detail = f"{detail}; {note}" if detail else note
     return {"value": value, "ref_date": ref_date, "available": True, "reason": "",
-            "excluded_summary": f"excludes {n_excluded} of {total} trades unpriced", "excluded_detail": detail}
+            "excluded_summary": f"excludes {n_excluded} of {total} trades unpriced" + bad_value_note(a_unpriced),
+            "excluded_detail": detail}
 
 
 # --------------------------------------------------------------------------- headline strip
@@ -494,7 +623,16 @@ def _official_mark(conn: sqlite3.Connection, instrument_id: str, settle_date: st
         "AND mark_type = :m AND as_of_date = :d",
         {"i": instrument_id, "s": settle_date, "m": mark_type, "d": as_of},
     ).fetchone()
-    return None if row is None else float(row[0])
+    if row is None:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        # A mark that is not a number is no mark for this display-only column (the T-1
+        # rate): blank here, and reported where it matters -- `value_book(t-1)` names it on
+        # the trade's row, `bad_stored_values` names it on the Blotter's notice. One such
+        # cell used to raise out of `scope_df` and blank the whole sub-tab.
+        return None
 
 
 def add_row_display_fields(conn: sqlite3.Connection, df: pd.DataFrame, as_of: str) -> pd.DataFrame:
@@ -512,7 +650,9 @@ def add_row_display_fields(conn: sqlite3.Connection, df: pd.DataFrame, as_of: st
         return df
 
     df = df.copy()
-    df["side"] = df["quantity"].map(lambda q: "Buy" if q >= 0 else "Sell")
+    # A quantity `value_book` could not read is NaN on the row (its `reason` names the
+    # stored text): no side can be said for it, and "Sell" would be an invention.
+    df["side"] = df["quantity"].map(lambda q: "" if q != q else ("Buy" if q >= 0 else "Sell"))
 
     base_ccy = {}
     for instrument_id in df["instrument_id"].unique():
@@ -528,7 +668,10 @@ def add_row_display_fields(conn: sqlite3.Connection, df: pd.DataFrame, as_of: st
         elif ccy == "USD":
             notional.append(float(r.quantity))
         else:
-            s, pair, _src = usd_per_quote(conn, ccy, as_of)
+            try:
+                s, pair, _src = usd_per_quote(conn, ccy, as_of)
+            except ValueError:  # the conversion SPOT on file is not a number: no notional, not an error card
+                s = float("nan")
             notional.append(float(r.quantity) * s if s == s else float("nan"))
     df["notional_usd"] = notional
 

@@ -289,7 +289,7 @@ p { margin: 8px 0; }
 .top-bar .details--compact[open] { position: absolute; right: 0; top: 40px; width: 380px; background: var(--card);
   color: var(--text); border-radius: 8px; padding: 8px 12px; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
 .top-bar .details--compact[open] > summary { color: var(--navy); }
-.top-bar .source-row--stage, .top-bar .source-result:not(:empty), .top-bar .source-busy:not(:empty) {
+.top-bar .source-row--stage, .top-bar .source-busy:not(:empty) {
   position: absolute; right: 0; top: 40px; min-width: 380px; background: var(--card); color: var(--text);
   border-radius: 8px; padding: 10px 12px; margin: 0; box-shadow: 0 2px 8px rgba(0,0,0,.25); text-align: left; }
 .top-bar .source-row--stage { flex-direction: row; align-items: center; justify-content: flex-start; border-top: none; }
@@ -355,3 +355,60 @@ p { margin: 8px 0; }
   align-self: flex-end; height: 32px; padding: 0 14px; border-radius: 6px; font-weight: 600;
   font-size: 12px; transition: color .1s ease, border-color .1s ease; }
 .btn--ghost:hover { color: var(--navy); border-color: var(--navy); }
+
+/* ---------------------------------------------------------------- 2026-09-18: top-bar strip, second pass
+   (ui/uploads.py + ui/feed_controls.py). Two changes:
+   1. The upload result is a TRANSIENT box with its own x, not a permanent panel. Closed
+      (`.source-result-box`) it has no panel and no x, but the dcc.Loading dots inside
+      still show while an import runs; open (`--open`, set by a callback from the box's
+      own children) it is the card. It and the Confirm row now stack inside one dropped
+      container (`.source-drop`) instead of both sitting at top:40px on top of each other,
+      which is what hid the Confirm row under a failed import's message.
+   2. "Pull Bloomberg now" and its one status line share the upload control's row. The
+      status line is the only part allowed to shrink; it wraps to three lines at most
+      inside the 44px bar, and carries the whole sentence as its tooltip for when a long
+      "not connected" reason is clamped.
+   The tabs stretch to fill everything LEFT of a fixed reserve and the strip lives INSIDE
+   that reserve, so the strip's max-width and the tabs' right margin are one number
+   (`--strip-reserve`). A first attempt gave the strip `calc(100% - 400px)` while the tabs
+   kept their 620px margin, and the status line was drawn over the "Market data" tab at
+   every window width (caught on a headless-Edge screenshot, 2026-09-18). 770px = two
+   buttons + the source line (~485px) + a status line wide enough for the connected
+   sentence on two lines; narrower windows give the tabs priority. */
+.top-bar { --strip-reserve: 770px; }
+@media (max-width: 1240px) { .top-bar { --strip-reserve: 640px; } }
+.tabs-bar { margin-right: var(--strip-reserve); }
+.top-bar .source-strip { max-width: calc(var(--strip-reserve) - 16px); min-width: 0; }
+.top-bar .source-row { min-width: 0; }
+/* Only the status line gives way. `nowrap` has to reach the real <button>, which dcc.Upload
+   nests inside its own wrapper: `flex: 0 0 auto` on the wrapper alone let the label wrap to
+   "Upload / trade / file" and poke out of the bar once the row got tight. */
+.top-bar .source-row > .source-upload, .top-bar .source-row > .btn, .top-bar .source-row > .source-line { flex: 0 0 auto; }
+.top-bar .source-row .source-upload, .top-bar .source-row .btn { white-space: nowrap; }
+.top-bar .btn--feed-pull { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.55);
+  white-space: nowrap; padding: 7px 14px; }
+.top-bar .btn--feed-pull:hover { background: var(--navy-2); color: var(--gold); border-color: var(--gold); }
+.top-bar .btn--feed-pull:disabled { opacity: .55; cursor: default; color: #fff; border-color: rgba(255,255,255,.55);
+  background: transparent; }
+.feed-pull-status { font-size: 12px; color: var(--muted); }
+.top-bar .feed-pull-status { flex: 0 1 auto; min-width: 0; max-width: 460px; font-size: 11px; font-weight: 500;
+  line-height: 1.25; color: rgba(255,255,255,.72); text-align: right; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+
+.top-bar .source-drop { position: absolute; right: 0; top: 40px; display: flex; flex-direction: column;
+  align-items: flex-end; gap: 6px; }
+.top-bar .source-drop .source-row--stage { position: static; gap: 10px; }
+/* The staged file's name sits on the white card, not on the navy bar: `.top-bar .source-file`
+   above paints it white, which made it invisible in the Confirm row (found 2026-09-18). */
+.top-bar .source-drop .source-file { color: var(--text); }
+.top-bar .source-drop .source-row--stage .btn--ghost { align-self: center; }
+.source-result-close { display: none; flex: 0 0 auto; border: none; background: transparent; color: var(--muted);
+  font-size: 18px; line-height: 1; padding: 0 5px 2px; border-radius: 4px; cursor: pointer; }
+.source-result-close:hover { color: var(--navy); background: #eef1f7; }
+.source-result-close:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+.source-result-box--open { display: flex; align-items: flex-start; gap: 8px; min-width: 380px; max-width: 560px;
+  background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; box-shadow: 0 2px 8px rgba(0,0,0,.25); text-align: left; }
+.source-result-box--open > :first-child { flex: 1 1 auto; min-width: 0; }
+.source-result-box--open .source-result { margin-top: 0; }
+.source-result-box--open .source-result-close { display: inline-block; }

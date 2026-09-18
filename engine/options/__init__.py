@@ -211,6 +211,69 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   SWESTR/NOWA OIS conventions to ``engine/rates/conventions.py::CCY_RFR`` would let SEK/NOK
   resolve real curves directly and skip this fallback (and manual_rates) entirely; that
   file is rates-pricer's, not this package's, to extend.
+- Units audit (options-pricer, landed 2026-09-18): is the PREMIUM mark in the blotter
+  fill's own unit, for every payoff ``store.py`` dispatches, so that CLAUDE.md's
+  ``quantity x (PREMIUM - fill) x S`` holds? VANILLA / AMERICAN / ASIAN / BARRIER_KI/KO:
+  yes, unchanged (vendored quote-ccy price / spot = fraction of BASE notional, paid in
+  base ccy; checked on the sample's EURSEK cross and EURUSD). **DIGITAL / ONE_TOUCH /
+  NO_TOUCH: no -- fixed.** They priced "1 QUOTE unit paid per base unit of quantity" and
+  divided by spot, 1/150 of the right mark for USDJPY and 1/11 for EURSEK. The blotter
+  books a digital with Quantity = the PAYOUT and the fill a fraction of it, invoiced in
+  the BASE currency, so ``store.CASH_PAYOUT_CCY = 'BASE'``: PREMIUM is now a fraction of
+  a BASE-ccy payout, in [0, base-ccy discount factor] (``pricer.py``'s "Cash payoffs"
+  section: static replication for the digital, inverted-pair symmetry for the touches,
+  both from vendored pricers only; ``payout_ccy='QUOTE'`` keeps the vendored meaning).
+  The payout currency is inferred from the invoice currency, NOT a field in the export --
+  pending the user's confirmation. Also: the unit of every mark type is now written down
+  (``store.py`` docstring) with the conversion to USD for each; ``portfolio.py`` no longer
+  converts DELTA / GAMMA with the quote-ccy factor (which gave "USD per 1.0 of spot",
+  150x too small for USDJPY and not summable across pairs) but as USD delta notional and
+  USD delta change per 1 % move; a missing strike skips as "no strike on file ...";
+  ``store.on_file_terms`` lets a one-term editor hand the other terms back to
+  ``set_option_terms``, which WRITES its ``payoff='VANILLA'`` default (the blotter marks
+  no digital as digital, so a strike-only save would price one as a vanilla, silently).
+  (An expiry-day intrinsic PREMIUM mark was NOT part of that audit; it landed the same
+  day as its own entry, "Expiry-day intrinsic mark", below. The BASE payout currency was
+  CONFIRMED BY THE USER 2026-09-18: USD on the USDJPY digitals, EUR on the EURSEK one.)
+- Stale marks after a terms change (options-pricer, landed 2026-09-18): the Options table
+  edits a strike / payoff in the cell, calls ``set_option_terms`` then
+  ``price_and_store``; when that reprice was skipped the marks priced under the OLD terms
+  stayed official (a digital kept a vanilla's premium). ``set_option_terms`` now deletes,
+  in the terms write's own transaction, every ``QL_OPTIONS_PRICER`` mark of that
+  instrument -- all as_of dates, all seven ``store.PRICER_MARK_TYPES`` -- whenever
+  strike, option type, payoff or barrier level actually changes; an identical re-save
+  deletes nothing; MANUAL and every other source are never touched. Consequences, by
+  design: options are only ever priced for the live date (no historical option
+  backfill), so after a change the option has no mark on earlier dates and its period
+  P&L against them is unavailable until new marks accumulate. Frozen realised P&L
+  (same day, coordinator's decision -- handled HERE, not in the ledger): under the same
+  condition and in the same transaction ``set_option_terms`` also deletes the
+  instrument's ``realised_pnl`` rows, because ``engine/pnl/ledger.realise_settled``
+  freezes an expired option once and never revisits it, and a figure frozen from a
+  premium priced under the wrong terms is not a realised P&L. The ledger's next pass
+  freezes the trade afresh from the corrected marks, or names it unrealisable until a
+  corrected PREMIUM dated on or before expiry exists. No ``realised_pnl`` table -> skipped
+  silently (never created from here); mirrors ``data/ingest/irs_direction.py``.
+- Expiry-day intrinsic mark (options-pricer, approved by the user and landed 2026-09-18,
+  ahead of five tickets expiring 22 / 23 Sep 2026): ``store.py`` used to skip ``expiry <=
+  as_of``, so the ledger -- which freezes an option the day AFTER expiry, at the last
+  official PREMIUM on or before it -- froze the T-1 MODEL premium. Now ``as_of == expiry``
+  writes the PAYOFF at the pair's official SPOT of that date
+  (``pricer.price_fx_at_expiry``: vanilla / american max(S-K,0)/S or max(K-S,0)/S,
+  BASE-payout digital 1.0 in the money else 0.0; strict "in the money", 0 at S == K, the
+  vendored / QuantLib convention), same unit as every PREMIUM, with DELTA = the payoff's
+  own spot delta and GAMMA/THETA/VEGA/RHO = 0.0; no SPOT -> "no SPOT mark", never a model
+  fallback; path-dependent payoffs skip with a reason; ``as_of > expiry`` unchanged.
+  ``price_all_and_store`` also CATCHES UP a missed expiry day: intrinsic marks DATED THE
+  EXPIRY DATE from that date's official SPOT, written once, never rewritten, and the
+  instrument's ``realised_pnl`` rows frozen from an older premium dropped in the same
+  transaction. ``PricingOutcome.mark_basis`` ('MODEL' | 'INTRINSIC') / ``.mark_date`` say
+  which. ``engine/pnl/ledger.py`` needed NO change (``settle_date < as_of`` already waits
+  for the expiry day to be over; ``live.pull_once`` already runs the options step before
+  ``realise_settled``). Known limits, documented in ``store.py``, not solved: the cut
+  time (payoff fixed at 10:00 NY / 15:00 Tokyo, mark uses the day's last official spot,
+  and the app's day is the New York date), and the double count if an exercised option
+  is delivered as a spot trade booked at the strike.
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

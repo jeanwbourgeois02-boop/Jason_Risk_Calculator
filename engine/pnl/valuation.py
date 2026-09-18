@@ -46,6 +46,17 @@ Total book strip and the bundles all include them.
     unit at spot (identity when base is USD).
   Missing marks give NaN with a reason exactly like FX. Matured swaps and expired
   options read their frozen row from `realised_pnl` (engine/pnl/ledger.realise_settled).
+
+One bad value, one trade (2026-09-18, guards only -- no formula changed): every stored
+figure a formula uses (`trades.quantity`, `trades.price`, `instruments.multiplier`, each
+`marks.value`, `realised_pnl.pnl_usd`) passes through `_number` first. SQLite keeps text
+it cannot convert as TEXT even in a REAL column, and `float()` on one such cell used to
+raise out of `value_book`, which blanked the header, every Blotter strip and every table
+at once ("could not convert string to float: '<a date>'" on the Bloomberg PC: a
+`realised_pnl.pnl_usd` holding a date, see `_readable_realised`). Now the trade that needs
+the bad value is left unpriced with a `reason` naming the trade id, the table.column and
+the offending value (`_guarded_row`), a settled trade whose frozen row is unreadable is
+valued as not yet frozen (`_provisional`), and every other trade prices as before.
 """
 from __future__ import annotations
 
@@ -67,6 +78,41 @@ COLUMNS = [
 FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")
 
 _NAN = float("nan")
+
+
+class _BadValue(ValueError):
+    """A stored figure that is not a number: TEXT sitting in a REAL column (SQLite keeps
+    text it cannot convert as text, whatever the column's declared type). `where` names
+    the table.column -- and for a mark, which mark -- so the reason on the trade's row can
+    say exactly what to fix. A ValueError subclass, so a caller that never heard of it
+    sees the same exception class `float()` raised before this guard existed."""
+
+    def __init__(self, where: str, value):
+        self.where, self.value = where, value
+        super().__init__(f"{where} is not a number ({value!r})")
+
+
+def _number(value, where: str) -> float:
+    """`value` as a finite float, or `_BadValue` naming `where` and the offending value.
+    Guard only (2026-09-18): every figure that reaches the P&L formulas passes through
+    here first, so one bad cell leaves ONE trade unpriced with a reason instead of
+    raising out of `value_book` and blanking the header, every Blotter strip and every
+    table at once. Never substitutes anything: a value that is not a number is an error
+    on that trade, not a zero."""
+    if value is None or isinstance(value, (bool, bytes)):
+        raise _BadValue(where, value)
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise _BadValue(where, value) from None
+    if out != out or out in (float("inf"), float("-inf")):
+        raise _BadValue(where, value)
+    return out
+
+
+def _mark_number(hit, instrument_id: str, settle_date: str, mark_type: str, as_of: str) -> float:
+    """The value of a `_mark_at` hit as a float (`_BadValue` naming the mark otherwise)."""
+    return _number(hit[0], f"marks.value ({mark_type} for {instrument_id} settle {settle_date} on {as_of})")
 
 
 def _business_days_between(start: dt.date, end: dt.date, holidays, cap: Optional[int] = None) -> int:
@@ -182,11 +228,12 @@ def usd_per_quote(conn: sqlite3.Connection, quote_ccy: str, as_of: str) -> tuple
     inv_pair = f"USD{quote_ccy}"
     hit = _mark_at(conn, inv_pair, as_of, "SPOT", as_of)
     if hit is not None and hit[0]:
-        out = (1.0 / float(hit[0]), inv_pair, hit[1])
+        out = (1.0 / _mark_number(hit, inv_pair, as_of, "SPOT", as_of), inv_pair, hit[1])
     else:
         direct_pair = f"{quote_ccy}USD"
         hit = _mark_at(conn, direct_pair, as_of, "SPOT", as_of)
-        out = (float(hit[0]), direct_pair, hit[1]) if hit is not None else (_NAN, None, None)
+        out = ((_mark_number(hit, direct_pair, as_of, "SPOT", as_of), direct_pair, hit[1])
+               if hit is not None else (_NAN, None, None))
     if memo is not None:
         memo[key] = out
     return out
@@ -247,57 +294,83 @@ def value_book(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     conn = _BookConn(conn, as_of)  # one load of the day's marks and realised rows for every row below
 
     for r in fx.itertuples(index=False):
-        status = "SETTLED" if r.settle_date < as_of else "OPEN"
-        reported_product = _reported_product(r.product, r.trade_date, r.settle_date, holidays)
-        base = {
-            "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": reported_product,
-            "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
-            "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
-        }
-        if status == "SETTLED":
-            rows.append({**base, **_settled_fx_row(conn, r, as_of)})
-            continue
-        rows.append({**base, **_open_fx_row(conn, r, as_of)})
-
+        rows.append(_guarded_row(conn, r, as_of, _open_fx_row, _settled_fx_row, _TRADE_NUMBERS, holidays))
     for r in fut.itertuples(index=False):
-        status = "SETTLED" if r.settle_date < as_of else "OPEN"
-        base = {
-            "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": r.product,
-            "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
-            "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
-        }
-        if status == "SETTLED":
-            rows.append({**base, **_settled_future_row(conn, r, as_of)})
-            continue
-        rows.append({**base, **_open_future_row(conn, r, as_of)})
-
+        rows.append(_guarded_row(conn, r, as_of, _open_future_row, _settled_future_row, _FUTURE_NUMBERS))
     for r in irs.itertuples(index=False):
-        status = "SETTLED" if r.settle_date < as_of else "OPEN"
-        base = {
-            "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": r.product,
-            "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
-            "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
-        }
-        if status == "SETTLED":
-            rows.append({**base, **_settled_irs_row(conn, r, as_of)})
-            continue
-        rows.append({**base, **_open_irs_row(conn, r, as_of)})
-
+        rows.append(_guarded_row(conn, r, as_of, _open_irs_row, _settled_irs_row, _IRS_NUMBERS))
     for r in opt.itertuples(index=False):
-        status = "SETTLED" if r.settle_date < as_of else "OPEN"
-        base = {
-            "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": r.product,
-            "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
-            "settle_date": r.settle_date, "status": status, "quantity": r.quantity, "fill": r.fill,
-        }
-        if status == "SETTLED":
-            rows.append({**base, **_settled_option_row(conn, r, as_of)})
-            continue
-        rows.append({**base, **_open_option_row(conn, r, as_of)})
+        rows.append(_guarded_row(conn, r, as_of, _open_option_row, _settled_option_row, _TRADE_NUMBERS))
 
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
     return pd.DataFrame(rows, columns=COLUMNS)
+
+
+# (attribute on the SQL row, table.column it came from, whether the row's P&L formula
+# uses it): the stored figures `_guarded_row` checks before any formula sees them. A swap's
+# P&L is PV_USD + CASHFLOW_USD, both marks, so its quantity and fixed rate are shown on
+# the row but never enter the P&L: a bad one blanks that cell and is named in `note`,
+# while the swap still prices.
+_TRADE_NUMBERS = (("quantity", "trades.quantity", True), ("fill", "trades.price", True))
+_FUTURE_NUMBERS = _TRADE_NUMBERS + (("multiplier", "instruments.multiplier", True),)
+_IRS_NUMBERS = (("quantity", "trades.quantity", False), ("fill", "trades.price", False))
+
+
+def _unpriced(reason: str) -> dict:
+    return dict(mark=_NAN, mark_date="", mark_source="", spot=_NAN, spot_source="", pnl_local=_NAN,
+                pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason=reason, note="")
+
+
+def _guarded_row(conn, r, as_of, open_builder, settled_builder, numbers, holidays=None) -> dict:
+    """One `value_book` row for the trade `r`: exactly what the loops in `value_book`
+    built inline before 2026-09-18 (status, the FX_SPOT relabel when `holidays` is given,
+    then the settled or the open builder), with one guard around it.
+
+    Why (user, Bloomberg PC, 2026-09-18: every Blotter view showed "could not convert
+    string to float: '<a date>'" and no headline or strip had a figure): ONE stored value
+    that is not a number -- there, a `realised_pnl.pnl_usd` holding a date, written by
+    `engine.pnl.ledger`'s then-positional INSERT into a table whose column order depends
+    on the database's age -- raised out of `value_book`, and since the header, every
+    strip and every table start from `value_book`, one bad cell blanked the whole app.
+    Now the trade whose figure is bad is left UNPRICED (NaN P&L, like a trade with no
+    mark) with a `reason` naming the trade id, the table.column and the offending value,
+    and every other trade prices as before. Nothing is substituted: a bad `quantity` /
+    `fill` shows as missing (NaN) on the row, never as 0 and never as the raw text, so
+    the views' own number formatting cannot trip over it either. No formula changes."""
+    base = {
+        "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": r.product,
+        "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
+        "settle_date": r.settle_date, "status": "", "quantity": _NAN, "fill": _NAN,
+    }
+    bad, shown_only = None, []
+    for attr, column, in_formula in numbers:
+        try:
+            _number(getattr(r, attr), column)
+        except _BadValue as exc:
+            if in_formula:
+                bad = bad or exc
+            else:
+                shown_only.append(str(exc))
+        else:
+            if attr in base:
+                base[attr] = getattr(r, attr)
+    try:
+        base["status"] = "SETTLED" if r.settle_date < as_of else "OPEN"
+        if holidays is not None:
+            base["product"] = _reported_product(r.product, r.trade_date, r.settle_date, holidays)
+        if bad is not None:
+            raise bad
+        builder = settled_builder if base["status"] == "SETTLED" else open_builder
+        row = {**base, **builder(conn, r, as_of)}
+        if shown_only:
+            note = row.get("note") or ""
+            row["note"] = "; ".join(([note] if isinstance(note, str) and note else []) + shown_only)
+        return row
+    except _BadValue as exc:
+        return {**base, **_unpriced(f"trade {r.trade_id}: {exc}")}
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        return {**base, **_unpriced(f"trade {r.trade_id}: could not be valued ({type(exc).__name__}: {exc})")}
 
 
 def _open_fx_row(conn, r, as_of) -> dict:
@@ -307,7 +380,7 @@ def _open_fx_row(conn, r, as_of) -> dict:
     if m_hit is None:
         out["reason"] = f"no FWD_OUTRIGHT mark for {r.instrument_id} settle {r.settle_date} on {as_of}"
         return out
-    m, m_src = float(m_hit[0]), m_hit[1]
+    m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
     s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, as_of)
     if s != s or s_pair is None:
@@ -323,7 +396,14 @@ def _open_fx_row(conn, r, as_of) -> dict:
         out["pnl_spot_usd"], out["pnl_carry_usd"] = pnl_usd, 0.0
         out["note"] = f"no SPOT for {r.instrument_id} on {as_of}; carry split unavailable"
         return out
-    m_spot = float(spot_hit[0])
+    try:
+        m_spot = _mark_number(spot_hit, r.instrument_id, as_of, "SPOT", as_of)
+    except _BadValue as exc:
+        # The pair's own SPOT only splits the P&L into spot and carry; the P&L itself
+        # (outright mark, converted at the quote currency's spot) is already computed.
+        out["pnl_spot_usd"], out["pnl_carry_usd"] = pnl_usd, 0.0
+        out["note"] = f"{exc}; carry split unavailable"
+        return out
     pnl_carry = r.quantity * (m - m_spot) * s
     out["pnl_carry_usd"] = pnl_carry
     out["pnl_spot_usd"] = pnl_usd - pnl_carry
@@ -348,7 +428,11 @@ def _last_official_query(conn, instrument_id: str, mark_type: str, day: str):
         "SELECT value, as_of_date, source FROM marks_official WHERE instrument_id = :i "
         "AND mark_type = :m AND as_of_date <= :d ORDER BY as_of_date DESC, snapped_at DESC LIMIT 1",
         {"i": instrument_id, "m": mark_type, "d": day}).fetchone()
-    return None if row is None else (float(row[0]), row[1], row[2])
+    if row is None:
+        return None
+    # A mark that is not a number is an error on the trade that needs it (`_guarded_row`
+    # reports it), never a reason to reach further back for an older mark.
+    return (_number(row[0], f"marks.value ({mark_type} for {instrument_id} on {row[1]})"), row[1], row[2])
 
 
 def _frozen_row(conn, r) -> Optional[dict]:
@@ -391,7 +475,7 @@ def _frozen_row(conn, r) -> Optional[dict]:
         if cf is None:
             return None
         m = pv
-        pnl_local = pnl_usd = pv + float(cf[0])
+        pnl_local = pnl_usd = pv + _number(cf[0], f"marks.value (CASHFLOW_USD for {r.instrument_id} on {m_day})")
         spot, spot_src, mark_label = 1.0, "identity", "PV + cashflows"
     elif product == "FX_OPTION":
         hit = _last_official_on_or_before(conn, r.instrument_id, "PREMIUM", settle)
@@ -412,32 +496,71 @@ def _frozen_row(conn, r) -> Optional[dict]:
                 note=f"frozen at {mark_label}{when}; not yet recorded in realised_pnl")
 
 
-def _provisional(conn, r, as_of) -> dict:
+def _provisional(conn, r, as_of, unreadable: str = "") -> dict:
     """A settled trade with no frozen result yet: valued at the last official mark on
     or before settlement (`_frozen_row`, the same figure `realise_settled` will
     persist), Unavailable when that mark is not on file. The realised table is never
     written here; `realise_settled` does that properly later. A settled trade with no
     frozen result and no official mark on or before its settlement is simply
     Unavailable, never a provisional value from a fallback source (2026-09-17 user
-    decision, "no bnp fall back" -- see module docstring)."""
+    decision, "no bnp fall back" -- see module docstring).
+
+    `unreadable` (2026-09-18): the trade HAS a `realised_pnl` row but a figure in it is
+    not a number (`_readable_realised`). Such a row is no frozen result at all, so the
+    trade is valued exactly as if it had none -- same `_frozen_row`, same arithmetic --
+    and the note/reason names the unreadable value; `engine.pnl.ledger.realise_settled`
+    deletes and re-freezes such rows the next time it runs."""
     trade_id = r.trade_id
     frozen = _frozen_row(conn, r)
     if frozen is not None:
+        if unreadable:
+            frozen["note"] = frozen["note"].replace(
+                "not yet recorded in realised_pnl",
+                f"its stored realised_pnl row is unreadable ({unreadable}) and is rebuilt by the next Bloomberg pull")
         return frozen
+    if unreadable:
+        return _unpriced(f"settled trade {trade_id}: its realised_pnl row is unreadable ({unreadable}) and there "
+                         f"is no official mark on or before its settlement {r.settle_date}, so it cannot be frozen again")
     return dict(mark=_NAN, mark_date="", mark_source="", spot=_NAN, spot_source="",
                 pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN,
                 reason=f"settled trade {trade_id}: no official mark on or before its settlement "
                        f"{r.settle_date}, so it cannot be frozen")
 
 
-def _settled_fx_row(conn, r, as_of) -> dict:
-    trade_id = r.trade_id
+def _readable_realised(conn, trade_id: str, with_spot: bool = False) -> tuple:
+    """(row, pnl_usd, unreadable) for the trade's frozen `realised_pnl` row: `(None, None,
+    "")` when none is on file, `(row, pnl_usd, "")` when its figures are numbers, and
+    `(None, None, why)` when the row is on file but a figure in it is not a number --
+    the caller then values the trade as not yet frozen (`_provisional`), never from the
+    unreadable row and never as zero.
+
+    How such a row came to exist (root cause of the 2026-09-18 Bloomberg-PC blank
+    Blotter): `realised_pnl` gained `product` and `mark_type` on 2026-09-15. A fresh
+    database has them in the middle of the table (the DDL order); a database created
+    before that got them APPENDED by `ALTER TABLE ADD COLUMN`. The ledger's INSERT was
+    positional, so on an older database every value landed two columns off and `pnl_usd`
+    received `spot_as_of_date` -- a date string, which SQLite keeps as text in a REAL
+    column. `float('2026-07-24')` then raised for every view. The INSERT names its
+    columns now and `realise_settled` re-freezes such rows; this is the read-side guard."""
     row = _realised_row(conn, trade_id)
     if row is None:
-        return _provisional(conn, r, as_of)
+        return None, None, ""
+    try:
+        pnl = _number(row["pnl_usd"], "realised_pnl.pnl_usd")
+        if with_spot:
+            _number(row["spot_usd_per_local"], "realised_pnl.spot_usd_per_local")
+    except _BadValue as exc:
+        return None, None, str(exc)
+    return row, pnl, ""
+
+
+def _settled_fx_row(conn, r, as_of) -> dict:
+    row, pnl, unreadable = _readable_realised(conn, r.trade_id, with_spot=True)
+    if row is None:
+        return _provisional(conn, r, as_of, unreadable)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=row["spot_usd_per_local"], spot_source=row["spot_source"],
-                pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]), pnl_spot_usd=float(row["pnl_usd"]),
+                pnl_local=_NAN, pnl_usd=pnl, pnl_spot_usd=pnl,
                 pnl_carry_usd=0.0, reason="", note=row["note"])
 
 
@@ -448,7 +571,7 @@ def _open_future_row(conn, r, as_of) -> dict:
     if m_hit is None:
         out["reason"] = f"no FUTURE_PX mark for {r.instrument_id} expiry {r.settle_date} on {as_of}"
         return out
-    m, m_src = float(m_hit[0]), m_hit[1]
+    m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FUTURE_PX", as_of), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
     pnl = r.quantity * r.multiplier * (m - r.fill)
     out["pnl_local"], out["pnl_usd"], out["pnl_spot_usd"] = pnl, pnl, pnl
@@ -456,13 +579,12 @@ def _open_future_row(conn, r, as_of) -> dict:
 
 
 def _settled_future_row(conn, r, as_of) -> dict:
-    trade_id = r.trade_id
-    row = _realised_row(conn, trade_id)
+    row, pnl, unreadable = _readable_realised(conn, r.trade_id)
     if row is None:
-        return _provisional(conn, r, as_of)
+        return _provisional(conn, r, as_of, unreadable)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
-                spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]),
-                pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason="", note=row["note"])
+                spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=pnl,
+                pnl_spot_usd=pnl, pnl_carry_usd=0.0, reason="", note=row["note"])
 
 
 # --------------------------------------------------------------------------- IRS
@@ -478,22 +600,23 @@ def _open_irs_row(conn, r, as_of) -> dict:
     if cf_hit is None:
         out["reason"] = f"no CASHFLOW_USD mark for {r.instrument_id} maturity {r.settle_date} on {as_of}"
         return out
-    pv, pv_src = float(pv_hit[0]), pv_hit[1]
-    pnl = pv + float(cf_hit[0])
+    pv, pv_src = _mark_number(pv_hit, r.instrument_id, r.settle_date, "PV_USD", as_of), pv_hit[1]
+    cf = _mark_number(cf_hit, r.instrument_id, r.settle_date, "CASHFLOW_USD", as_of)
+    pnl = pv + cf
     out["mark"], out["mark_source"] = pv, pv_src
     out["pnl_local"], out["pnl_usd"], out["pnl_spot_usd"] = pnl, pnl, pnl
-    if float(cf_hit[0]) != 0.0:
-        out["note"] = f"includes {float(cf_hit[0]):,.2f} USD of settled coupons"
+    if cf != 0.0:
+        out["note"] = f"includes {cf:,.2f} USD of settled coupons"
     return out
 
 
 def _settled_irs_row(conn, r, as_of) -> dict:
-    row = _realised_row(conn, r.trade_id)
+    row, pnl, unreadable = _readable_realised(conn, r.trade_id)
     if row is None:
-        return _provisional(conn, r, as_of)
+        return _provisional(conn, r, as_of, unreadable)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
-                spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]),
-                pnl_spot_usd=float(row["pnl_usd"]), pnl_carry_usd=0.0, reason="", note=row["note"])
+                spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=pnl,
+                pnl_spot_usd=pnl, pnl_carry_usd=0.0, reason="", note=row["note"])
 
 
 # --------------------------------------------------------------------------- FX options
@@ -505,7 +628,7 @@ def _open_option_row(conn, r, as_of) -> dict:
     if m_hit is None:
         out["reason"] = f"no PREMIUM mark for {r.instrument_id} expiry {r.settle_date} on {as_of}"
         return out
-    m, m_src = float(m_hit[0]), m_hit[1]
+    m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "PREMIUM", as_of), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
     s, s_pair, s_src = usd_per_quote(conn, r.base_ccy, as_of)
     if s != s or s_pair is None:
@@ -519,10 +642,10 @@ def _open_option_row(conn, r, as_of) -> dict:
 
 
 def _settled_option_row(conn, r, as_of) -> dict:
-    row = _realised_row(conn, r.trade_id)
+    row, pnl, unreadable = _readable_realised(conn, r.trade_id, with_spot=True)
     if row is None:
-        return _provisional(conn, r, as_of)
+        return _provisional(conn, r, as_of, unreadable)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=row["spot_usd_per_local"], spot_source=row["spot_source"],
-                pnl_local=_NAN, pnl_usd=float(row["pnl_usd"]), pnl_spot_usd=float(row["pnl_usd"]),
+                pnl_local=_NAN, pnl_usd=pnl, pnl_spot_usd=pnl,
                 pnl_carry_usd=0.0, reason="", note=row["note"])

@@ -48,7 +48,7 @@ import pandas as pd
 
 from engine.pnl.aggregate import (_last_business_day_of_prev_month, _last_business_day_of_prev_year,
                                   _n_business_days_back, _prev_business_day, load_holidays)
-from engine.pnl.valuation import usd_per_quote, value_book
+from engine.pnl.valuation import _BadValue, _number, usd_per_quote, value_book
 
 GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 
@@ -86,86 +86,154 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+_REALISED_COLUMNS = ("trade_id", "instrument_id", "product", "currency", "settle_date", "local_amount",
+                     "usd_entry_amount", "mark_type", "spot_usd_per_local", "spot_as_of_date", "spot_source",
+                     "pnl_usd", "frozen_at", "note")
+_REALISED_NUMERIC = ("local_amount", "usd_entry_amount", "spot_usd_per_local", "pnl_usd")
+
+
 def _insert_realised(conn, trade_id, instrument_id, product, currency, settle_date, local_amount,
                       usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source,
                       pnl_usd, note):
-    conn.execute("INSERT INTO realised_pnl VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (trade_id, instrument_id, product, currency, settle_date, local_amount, usd_entry_amount,
-                  mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, _now(), note))
+    """Columns are NAMED (2026-09-18, root cause of the Bloomberg-PC "could not convert
+    string to float: '<a date>'" that blanked every Blotter view and every headline).
+    This INSERT used to be positional (`VALUES (?,?,...)` x 14 in the DDL's order), but
+    `realised_pnl`'s physical column order depends on the database's age: `product` and
+    `mark_type` were added on 2026-09-15, in the MIDDLE of the DDL for a fresh database
+    and, through `data.ingest.schema._migrate_columns`' `ALTER TABLE ADD COLUMN`, at the
+    END of the table for a database created before that (the dev database and the
+    Bloomberg PC's are both that shape). On such a database every value landed two
+    columns off: `pnl_usd` received `spot_as_of_date` (a date string, which SQLite keeps
+    as TEXT in a REAL column), `local_amount` the settle date, `currency` the product.
+    It only ever showed with live marks, because only then does anything get realised."""
+    conn.execute(
+        f"INSERT INTO realised_pnl ({', '.join(_REALISED_COLUMNS)}) VALUES ({','.join('?' * len(_REALISED_COLUMNS))})",
+        (trade_id, instrument_id, product, currency, settle_date, local_amount, usd_entry_amount,
+         mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, _now(), note))
+
+
+def purge_unreadable_realised(conn: sqlite3.Connection) -> list:
+    """Delete the `realised_pnl` rows the positional INSERT above misaligned (see
+    `_insert_realised`) and return their trade ids. A row is unreadable when any of its
+    four REAL columns holds something that is not a number -- always true of a misaligned
+    row (`pnl_usd` holds a date, `local_amount` the settle date) and never of a healthy
+    one, whose figures this module computed as floats. Nothing is recomputed here: the
+    deleted trades simply are "not yet in realised_pnl" again, so `realise_settled`
+    freezes them afresh, with the same arithmetic as any other trade, in the same call.
+    Not committed here; `realise_settled` commits once at its end."""
+    where = " OR ".join(f"typeof({c}) NOT IN ('real','integer')" for c in _REALISED_NUMERIC)
+    ids = [r[0] for r in conn.execute(f"SELECT trade_id FROM realised_pnl WHERE {where}")]
+    if ids:
+        conn.execute(f"DELETE FROM realised_pnl WHERE {where}")
+    return ids
+
+
+def _unrealisable(trade_id, exc: Exception) -> dict:
+    """The `unrealisable` entry for a trade one of whose stored figures is not a number
+    (`engine.pnl.valuation._BadValue` names the table.column and the value) or whose
+    arithmetic otherwise failed: that ONE trade is skipped and named, the rest of the
+    book is still realised -- before 2026-09-18 the exception aborted the whole step."""
+    detail = str(exc) if isinstance(exc, _BadValue) else f"could not be realised ({type(exc).__name__}: {exc})"
+    return {"trade_id": trade_id, "reason": f"trade {trade_id}: {detail}"}
 
 
 # --------------------------------------------------------------------------- realise
 def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
     """Freeze P&L for FX and future trades whose settle date is before `as_of` and are
-    not yet in `realised_pnl`. Returns {'realised': n, 'unrealisable': [{trade_id, reason}]}."""
+    not yet in `realised_pnl`. Returns {'realised': n, 'unrealisable': [{trade_id, reason}],
+    'repaired': [trade_id, ...]}.
+
+    `repaired` (2026-09-18): rows an earlier, positional INSERT misaligned
+    (`_insert_realised`) are deleted first (`purge_unreadable_realised`), so the trades
+    they belonged to are frozen afresh below like any trade not yet realised -- a
+    database the old INSERT corrupted heals itself on the next Bloomberg pull, no manual
+    step. One trade with a stored figure that is not a number is reported as
+    unrealisable (`_unrealisable`) instead of aborting the step for the whole book."""
     realised, unrealisable = 0, []
+    repaired = purge_unreadable_realised(conn)
 
     for trade_id, pair, product, quote_ccy, qty, fill, settle in conn.execute(_OPEN_FX_SQL, {"as_of": as_of}).fetchall():
-        m_hit = _last_on_or_before(conn, pair, "SPOT", settle)
-        if m_hit is None:
-            unrealisable.append({"trade_id": trade_id, "reason": f"no official SPOT for {pair} on or before {settle}"})
-            continue
-        m, m_day, m_src = m_hit
-        s, s_pair, s_src = usd_per_quote(conn, quote_ccy, m_day)
-        if s != s:
-            unrealisable.append({"trade_id": trade_id, "reason": f"no SPOT to convert {quote_ccy} to USD on or before {settle}"})
-            continue
-        entry = qty * fill * s
-        combined = m * s
-        pnl = qty * combined - entry
-        note = "" if m_day == settle else f"spot dated {m_day} (last before settlement)"
-        _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, entry, "SPOT", combined, m_day, m_src, pnl, note)
-        realised += 1
+        try:
+            qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
+            m_hit = _last_on_or_before(conn, pair, "SPOT", settle)
+            if m_hit is None:
+                unrealisable.append({"trade_id": trade_id, "reason": f"no official SPOT for {pair} on or before {settle}"})
+                continue
+            m, m_day, m_src = m_hit
+            s, s_pair, s_src = usd_per_quote(conn, quote_ccy, m_day)
+            if s != s:
+                unrealisable.append({"trade_id": trade_id, "reason": f"no SPOT to convert {quote_ccy} to USD on or before {settle}"})
+                continue
+            entry = qty * fill * s
+            combined = m * s
+            pnl = qty * combined - entry
+            note = "" if m_day == settle else f"spot dated {m_day} (last before settlement)"
+            _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, entry, "SPOT", combined, m_day, m_src, pnl, note)
+            realised += 1
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            unrealisable.append(_unrealisable(trade_id, exc))
 
     for trade_id, pair, product, multiplier, qty, fill, settle in conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of}).fetchall():
-        m_hit = _last_on_or_before(conn, pair, "FUTURE_PX", settle)
-        if m_hit is None:
-            unrealisable.append({"trade_id": trade_id, "reason": f"no official FUTURE_PX for {pair} on or before {settle}"})
-            continue
-        m, m_day, m_src = m_hit
-        combined = multiplier * m
-        entry = qty * multiplier * fill
-        pnl = qty * combined - entry
-        note = "" if m_day == settle else f"settlement price dated {m_day} (last before expiry)"
-        _insert_realised(conn, trade_id, pair, product, "USD", settle, qty, entry, "FUTURE_PX", combined, m_day, m_src, pnl, note)
-        realised += 1
+        try:
+            qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
+            multiplier = _number(multiplier, "instruments.multiplier")
+            m_hit = _last_on_or_before(conn, pair, "FUTURE_PX", settle)
+            if m_hit is None:
+                unrealisable.append({"trade_id": trade_id, "reason": f"no official FUTURE_PX for {pair} on or before {settle}"})
+                continue
+            m, m_day, m_src = m_hit
+            combined = multiplier * m
+            entry = qty * multiplier * fill
+            pnl = qty * combined - entry
+            note = "" if m_day == settle else f"settlement price dated {m_day} (last before expiry)"
+            _insert_realised(conn, trade_id, pair, product, "USD", settle, qty, entry, "FUTURE_PX", combined, m_day, m_src, pnl, note)
+            realised += 1
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            unrealisable.append(_unrealisable(trade_id, exc))
 
     for trade_id, inst, product, ccy, qty, fill, settle in conn.execute(_OPEN_IRS_SQL, {"as_of": as_of}).fetchall():
-        pv_hit = _last_on_or_before(conn, inst, "PV_USD", settle)
-        if pv_hit is None:
-            unrealisable.append({"trade_id": trade_id, "reason": f"no official PV_USD for {inst} on or before {settle}"})
-            continue
-        pv, m_day, m_src = pv_hit
-        cf_row = conn.execute(
-            "SELECT value FROM marks_official WHERE instrument_id = :i AND mark_type = 'CASHFLOW_USD' "
-            "AND as_of_date = :d ORDER BY snapped_at DESC LIMIT 1", {"i": inst, "d": m_day}).fetchone()
-        if cf_row is None:
-            unrealisable.append({"trade_id": trade_id, "reason": f"no official CASHFLOW_USD for {inst} on {m_day}"})
-            continue
-        pnl = pv + float(cf_row[0])
-        note = "" if m_day == settle else f"PV + cashflows dated {m_day} (last before maturity)"
-        _insert_realised(conn, trade_id, inst, product, ccy, settle, pnl, 0.0, "PV_USD", 1.0, m_day, m_src, pnl, note)
-        realised += 1
+        try:
+            pv_hit = _last_on_or_before(conn, inst, "PV_USD", settle)
+            if pv_hit is None:
+                unrealisable.append({"trade_id": trade_id, "reason": f"no official PV_USD for {inst} on or before {settle}"})
+                continue
+            pv, m_day, m_src = pv_hit
+            cf_row = conn.execute(
+                "SELECT value FROM marks_official WHERE instrument_id = :i AND mark_type = 'CASHFLOW_USD' "
+                "AND as_of_date = :d ORDER BY snapped_at DESC LIMIT 1", {"i": inst, "d": m_day}).fetchone()
+            if cf_row is None:
+                unrealisable.append({"trade_id": trade_id, "reason": f"no official CASHFLOW_USD for {inst} on {m_day}"})
+                continue
+            pnl = pv + _number(cf_row[0], f"marks.value (CASHFLOW_USD for {inst} on {m_day})")
+            note = "" if m_day == settle else f"PV + cashflows dated {m_day} (last before maturity)"
+            _insert_realised(conn, trade_id, inst, product, ccy, settle, pnl, 0.0, "PV_USD", 1.0, m_day, m_src, pnl, note)
+            realised += 1
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            unrealisable.append(_unrealisable(trade_id, exc))
 
     for trade_id, inst, product, base_ccy, qty, fill, settle in conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall():
-        m_hit = _last_on_or_before(conn, inst, "PREMIUM", settle)
-        if m_hit is None:
-            unrealisable.append({"trade_id": trade_id, "reason": f"no official PREMIUM for {inst} on or before {settle}"})
-            continue
-        m, m_day, m_src = m_hit
-        s, s_pair, s_src = usd_per_quote(conn, base_ccy, m_day)
-        if s != s:
-            unrealisable.append({"trade_id": trade_id, "reason": f"no SPOT to convert {base_ccy} to USD on or before {settle}"})
-            continue
-        entry = qty * fill * s
-        combined = m * s
-        pnl = qty * combined - entry
-        note = f"premium dated {m_day}" + ("" if m_day == settle else " (last before expiry)")
-        _insert_realised(conn, trade_id, inst, product, base_ccy, settle, qty, entry, "PREMIUM", combined, m_day, m_src, pnl, note)
-        realised += 1
+        try:
+            qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
+            m_hit = _last_on_or_before(conn, inst, "PREMIUM", settle)
+            if m_hit is None:
+                unrealisable.append({"trade_id": trade_id, "reason": f"no official PREMIUM for {inst} on or before {settle}"})
+                continue
+            m, m_day, m_src = m_hit
+            s, s_pair, s_src = usd_per_quote(conn, base_ccy, m_day)
+            if s != s:
+                unrealisable.append({"trade_id": trade_id, "reason": f"no SPOT to convert {base_ccy} to USD on or before {settle}"})
+                continue
+            entry = qty * fill * s
+            combined = m * s
+            pnl = qty * combined - entry
+            note = f"premium dated {m_day}" + ("" if m_day == settle else " (last before expiry)")
+            _insert_realised(conn, trade_id, inst, product, base_ccy, settle, qty, entry, "PREMIUM", combined, m_day, m_src, pnl, note)
+            realised += 1
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            unrealisable.append(_unrealisable(trade_id, exc))
 
     conn.commit()
-    return {"realised": realised, "unrealisable": unrealisable}
+    return {"realised": realised, "unrealisable": unrealisable, "repaired": repaired}
 
 
 def _last_on_or_before(conn: sqlite3.Connection, instrument_id: str, mark_type: str, day: str) -> Optional[tuple]:
@@ -174,7 +242,9 @@ def _last_on_or_before(conn: sqlite3.Connection, instrument_id: str, mark_type: 
         "AND mark_type = :m AND as_of_date <= :d ORDER BY as_of_date DESC, snapped_at DESC LIMIT 1",
         {"i": instrument_id, "m": mark_type, "d": day},
     ).fetchone()
-    return None if row is None else (float(row[0]), row[1], row[2])
+    if row is None:
+        return None
+    return (_number(row[0], f"marks.value ({mark_type} for {instrument_id} on {row[1]})"), row[1], row[2])
 
 
 def realised_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:

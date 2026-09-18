@@ -1,0 +1,327 @@
+"""The "Pull Bloomberg now" control in the top bar, beside the upload button, and the one
+Bloomberg status line every screen shares (2026-09-18, user: "what rate is Bloomberg
+polled at" / wants to order a pull at a chosen moment).
+
+What the button does: `app.bloomberg_feed.trigger_now()` (`data.bloomberg.live.LiveFeed`),
+which wakes the feed thread for one extra cycle right away. The pull itself runs on the
+feed thread, not inside the Dash callback, so the click returns at once with
+"pull requested..." and a fast poll (`PULL_POLL_ID`, enabled ONLY while a requested pull
+is outstanding, switched off again when it lands or after `PULL_TIMEOUT_SECONDS`) watches
+the status file until a pull that started at or after the click has reported. When it
+lands the poll publishes `ui.revision.DATA_REVISION_ID`, so every open view re-renders
+from the new marks with no browser reload.
+
+Where the status comes from: `data.bloomberg.live.read_status`, the same status file the
+Market data tab reads (the feed thread, that tab's synchronous "Pull now" and the
+backfill all rewrite it). Nothing here prices anything or reads a mark.
+
+`feed_headline` moved here from `ui/tabs/market_data.py` (which now imports it) so the
+top bar and the Market data tab print the same sentence. The cadence words come from
+the running feed's own `interval`, else `data.bloomberg.live.INTERVAL_SECONDS`; they are
+never typed in as a literal. With no feed running (`app.bloomberg_feed is None`) the line
+says there are no automatic pulls rather than claiming a cadence that is not happening,
+and a click says why in plain words, never nothing.
+
+Rapid clicks: `PullGuard` is a server-side record of the one outstanding request, under
+a lock, so ten clicks (or two browser tabs) make one `trigger_now()` call; the button is
+also disabled in the browser while a request is outstanding. An upload's own
+`trigger_now()` (`ui/uploads.py::_trigger_feed_refresh`) deliberately does NOT go through
+the guard: a second upload must always get its own pull, because the pull already running
+built its request list from the previous book.
+"""
+from __future__ import annotations
+
+import threading
+from datetime import datetime, timezone
+from typing import Callable, Optional, Tuple
+
+from dash import Input, Output, State, dcc, html, no_update
+
+from ui import revision
+
+PULL_BUTTON_ID = "feed-pull-now"
+PULL_STATUS_ID = "feed-pull-status"
+PULL_PENDING_ID = "feed-pull-pending"
+PULL_POLL_ID = "feed-pull-poll"
+STATUS_REFRESH_ID = "feed-status-refresh"
+
+PULL_BUTTON_LABEL = "Pull Bloomberg now"
+PULL_POLL_MS = 2_000
+PULL_TIMEOUT_SECONDS = 180
+NO_FEED_REASON = "no live Bloomberg feed was started in this session"
+
+
+# --------------------------------------------------------------------------- words
+def feed_interval_seconds(feed=None) -> Optional[int]:
+    """Seconds between automatic pulls: the running feed's own `interval` when there is
+    one, else `data.bloomberg.live.INTERVAL_SECONDS`. None when neither can be read (the
+    line then states no cadence rather than inventing one)."""
+    value = getattr(feed, "interval", None)
+    if value is None:
+        try:
+            from data.bloomberg.live import INTERVAL_SECONDS as value
+        except Exception:  # noqa: BLE001 -- a module mid-edit must not take the top bar down
+            return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def cadence_words(seconds) -> str:
+    """'every 2 min', 'every 90 s', 'every 2 min 30 s'."""
+    seconds = int(seconds)
+    minutes, rest = divmod(seconds, 60)
+    if minutes and not rest:
+        return f"every {minutes} min"
+    if minutes:
+        return f"every {minutes} min {rest} s"
+    return f"every {seconds} s"
+
+
+def _parse_time(text) -> Optional[datetime]:
+    """An aware datetime from a status-file timestamp; None when it is not ISO. A naive
+    value is taken as this machine's local time, which is what `live._now_iso` writes."""
+    try:
+        parsed = datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.astimezone()
+
+
+def short_time(text, now: Optional[datetime] = None) -> str:
+    """'14:32:05' for a timestamp dated today (local), 'YYYY-MM-DD HH:MM' otherwise, and
+    the raw text when it is not a timestamp at all."""
+    parsed = _parse_time(text)
+    if parsed is None:
+        return str(text or "")
+    local = parsed.astimezone()
+    today = (now.astimezone() if now else datetime.now().astimezone()).date()
+    return local.strftime("%H:%M:%S") if local.date() == today else local.strftime("%Y-%m-%d %H:%M")
+
+
+def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None,
+                  feed_running: Optional[bool] = None, now: Optional[datetime] = None) -> str:
+    """One line: connected or the stated reason it is not, time of the last pull, marks
+    written / failed, and the cadence in words.
+
+    `feed_running`: True = the feed thread exists, False = it does not (no automatic
+    pulls, said so), None = the caller cannot tell (the Market data tab's one-argument
+    call), which keeps the cadence clause on a connected status only."""
+    if not status:
+        line = "Bloomberg: no pull recorded yet"
+        return f"{line} · no automatic pulls in this session" if feed_running is False else line
+    when = short_time(status.get("time"), now)
+    if not status.get("connected"):
+        line = f"Bloomberg: not connected — {status.get('reason') or 'unknown reason'}"
+        if when:
+            # "as of", not "last attempt": the file also holds placeholders written at
+            # startup ("no pull has run yet", "first Bloomberg pull in progress"), whose
+            # timestamp is not an attempt at anything.
+            line += f" · status as of {when}"
+    else:
+        line = (f"Bloomberg: connected · last pull {when or 'time not recorded'} · "
+                f"{status.get('written', 0)} marks written, {status.get('failed', 0)} failed")
+    if feed_running is False:
+        return f"{line} · no automatic pulls in this session"
+    if feed_running is None and not status.get("connected"):
+        return line
+    if interval_seconds is None:
+        interval_seconds = feed_interval_seconds()
+    return f"{line} · pulls automatically {cadence_words(interval_seconds)}" if interval_seconds else line
+
+
+def not_connected_message(app, status: Optional[dict]) -> str:
+    """What a click says when there is no feed to wake. The reason is the one recorded
+    when the app tried to start the feed (`ui.app.create_app` keeps it on
+    `app.bloomberg_feed_reason`), else the status file's, else a plain default."""
+    reason = getattr(app, "bloomberg_feed_reason", "") or ""
+    if not reason and status and not status.get("connected"):
+        reason = status.get("reason") or ""
+    return f"Bloomberg is not connected on this machine: {reason or NO_FEED_REASON}"
+
+
+# --------------------------------------------------------------------------- one request at a time
+def read_feed_status(db_path) -> Optional[dict]:
+    try:
+        from data.bloomberg.live import read_status
+        return read_status(db_path)
+    except Exception:  # noqa: BLE001 -- unreadable status is "no pull recorded", never a 500
+        return None
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def status_fingerprint(status: Optional[dict]) -> str:
+    """Identity of one pull report: the fields `live.pull_once` rewrites every cycle. The
+    backfill's progress patches (`live.patch_status`, the "backfill" key only) leave it
+    unchanged, so they are never mistaken for a pull landing."""
+    if not status:
+        return ""
+    return repr(tuple(status.get(k) for k in ("time", "connected", "reason", "requested", "written", "failed")))
+
+
+def pull_landed(status: Optional[dict], pending: Optional[dict]) -> bool:
+    """True once the status file holds a report that (a) is not the one that was already
+    there when the button was clicked (`pending["baseline"]`) and (b) is of a pull that
+    STARTED at or after the request (`status["time"]` is the pull's start,
+    `live.pull_once`).
+
+    (a) alone would accept a pull already in flight at the click, which finishes first
+    and did not see what the user wanted priced; the feed runs the requested cycle
+    straight after it. (b) alone would accept the report already on file whenever its
+    timestamp shares the click's second (the status file carries no fraction), e.g. the
+    placeholder written at app start, and the guard would then let a second click
+    through. An unreadable timestamp falls back to (a)."""
+    if not status or not pending:
+        return False
+    if status_fingerprint(status) == pending.get("baseline"):
+        return False
+    started, asked = _parse_time(status.get("time")), _parse_time(pending.get("requested_at"))
+    if started is not None and asked is not None:
+        return started >= asked
+    return True
+
+
+def seconds_waited(pending: Optional[dict], now: Optional[datetime] = None) -> int:
+    asked = _parse_time((pending or {}).get("requested_at"))
+    if asked is None:
+        return PULL_TIMEOUT_SECONDS + 1     # unreadable request: treat as expired, never spin
+    return max(0, int(((now or _utcnow()) - asked).total_seconds()))
+
+
+class PullGuard:
+    """The one outstanding manual pull, server-side and under a lock, so rapid clicks (or
+    a second browser tab) cannot call `trigger_now()` again before the first has landed."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._outstanding: Optional[dict] = None
+
+    def request(self, feed, status: Optional[dict], now: Optional[datetime] = None) -> Tuple[dict, bool]:
+        """`(pending, triggered)`. `triggered` is False when an earlier request is still
+        outstanding; `pending` is then that earlier request, so the caller waits on it."""
+        now = now or _utcnow()
+        with self._lock:
+            out = self._outstanding
+            if out is not None and not pull_landed(status, out) and seconds_waited(out, now) <= PULL_TIMEOUT_SECONDS:
+                return dict(out), False
+            feed.trigger_now()
+            self._outstanding = {"requested_at": now.replace(microsecond=0).isoformat(),
+                                 "baseline": status_fingerprint(status)}
+            return dict(self._outstanding), True
+
+
+def click_outcome(app, guard: PullGuard, status: Optional[dict],
+                  now: Optional[datetime] = None) -> Tuple[str, Optional[dict]]:
+    """`(status line, pending)` for one click. `pending` is None when nothing was asked
+    for (no feed on this machine), which leaves the fast poll switched off."""
+    feed = getattr(app, "bloomberg_feed", None)
+    if feed is None:
+        return not_connected_message(app, status), None
+    pending, triggered = guard.request(feed, status, now)
+    if triggered:
+        return "Bloomberg: pull requested...", pending
+    # A repeat click while one is outstanding: same waiting line the poll prints, and the
+    # caller waits on the FIRST request. (Seen live: rapid clicks reach the server before
+    # the first response has disabled the button, so this branch is not hypothetical.)
+    return f"Bloomberg: pull requested... {seconds_waited(pending, now)} s", pending
+
+
+def poll_outcome(status: Optional[dict], pending: Optional[dict], feed=None,
+                 now: Optional[datetime] = None) -> Tuple[str, bool, bool]:
+    """`(status line, finished, landed)` for one fast-poll tick. `finished` switches the
+    poll off; `landed` is what publishes the data revision."""
+    headline = feed_headline(status, feed_interval_seconds(feed), feed_running=feed is not None, now=now)
+    if not pending:
+        return headline, True, False
+    if pull_landed(status, pending):
+        return headline, True, True
+    waited = seconds_waited(pending, now)
+    if waited > PULL_TIMEOUT_SECONDS:
+        return (f"Bloomberg: the pull requested at {short_time(pending.get('requested_at'), now)} has not reported "
+                f"after {PULL_TIMEOUT_SECONDS} s (feed busy or stopped). Last status: {headline}"), True, False
+    return f"Bloomberg: pull requested... {waited} s", False, False
+
+
+# --------------------------------------------------------------------------- layout + callbacks
+def controls() -> list:
+    """The button and its status line, for the upload strip's own row."""
+    return [
+        html.Button(PULL_BUTTON_LABEL, id=PULL_BUTTON_ID, n_clicks=0, className="btn btn--feed-pull",
+                    title="Wake the Bloomberg feed for one extra pull right now"),
+        html.Div(id=PULL_STATUS_ID, role="status", className="feed-pull-status"),
+    ]
+
+
+def plumbing() -> list:
+    """The invisible parts. The fast poll starts disabled and runs only while a requested
+    pull is outstanding. The slow refresh ticks once per feed cycle so a pull that failed
+    (and so never touched the database, which is what `ui.revision` watches) still
+    updates the line; 60 s only when the feed module cannot be imported at all."""
+    return [
+        dcc.Store(id=PULL_PENDING_ID),
+        dcc.Interval(id=PULL_POLL_ID, interval=PULL_POLL_MS, n_intervals=0, disabled=True),
+        dcc.Interval(id=STATUS_REFRESH_ID, interval=(feed_interval_seconds() or 60) * 1000, n_intervals=0),
+    ]
+
+
+def register(app, get_db_path: Callable[[], object]) -> None:
+    guard = PullGuard()
+
+    # Every writer of the status line also writes it as the element's tooltip (`title`):
+    # the bar clamps the text to three lines, and a long "not connected" reason must
+    # still be readable in full.
+    @app.callback(
+        Output(PULL_STATUS_ID, "children", allow_duplicate=True),
+        Output(PULL_STATUS_ID, "title", allow_duplicate=True),
+        Output(PULL_PENDING_ID, "data"),
+        Output(PULL_POLL_ID, "disabled"),
+        Output(PULL_BUTTON_ID, "disabled"),
+        Input(PULL_BUTTON_ID, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _pull_clicked(n_clicks):
+        if not n_clicks:
+            return no_update, no_update, no_update, no_update, no_update
+        line, pending = click_outcome(app, guard, read_feed_status(get_db_path()))
+        waiting = pending is not None
+        return line, line, pending, not waiting, waiting
+
+    @app.callback(
+        Output(PULL_STATUS_ID, "children", allow_duplicate=True),
+        Output(PULL_STATUS_ID, "title", allow_duplicate=True),
+        Output(PULL_PENDING_ID, "data", allow_duplicate=True),
+        Output(PULL_POLL_ID, "disabled", allow_duplicate=True),
+        Output(PULL_BUTTON_ID, "disabled", allow_duplicate=True),
+        Output(revision.DATA_REVISION_ID, "data", allow_duplicate=True),
+        Input(PULL_POLL_ID, "n_intervals"),
+        State(PULL_PENDING_ID, "data"),
+        prevent_initial_call=True,
+    )
+    def _pull_poll(_n, pending):
+        db_path = get_db_path()
+        line, finished, landed = poll_outcome(read_feed_status(db_path), pending,
+                                              getattr(app, "bloomberg_feed", None))
+        if not finished:
+            return line, line, no_update, no_update, no_update, no_update
+        # Landed: tell every open view the marks changed (ui/revision.py), no reload.
+        return line, line, None, True, False, (revision.file_signature(db_path) if landed else no_update)
+
+    @app.callback(
+        Output(PULL_STATUS_ID, "children"),
+        Output(PULL_STATUS_ID, "title"),
+        Input(STATUS_REFRESH_ID, "n_intervals"),
+        Input(revision.DATA_REVISION_ID, "data"),
+        State(PULL_PENDING_ID, "data"),
+    )
+    def _status_refresh(_n, _data_rev, pending):
+        # While a requested pull is outstanding the fast poll owns the line.
+        if pending and seconds_waited(pending) <= PULL_TIMEOUT_SECONDS:
+            return no_update, no_update
+        feed = getattr(app, "bloomberg_feed", None)
+        line = feed_headline(read_feed_status(get_db_path()), feed_interval_seconds(feed),
+                             feed_running=feed is not None)
+        return line, line

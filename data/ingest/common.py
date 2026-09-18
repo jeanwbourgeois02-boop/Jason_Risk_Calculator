@@ -122,6 +122,31 @@ class Reject:
     reason: str
 
 
+@dataclass(frozen=True)
+class ParseWarning:
+    """Something the parser recovered or could not cross-check on a row it still loaded
+    (a Price that arrived as a date and was rebuilt from the amounts, an option
+    NetInvoice that disagrees with Quantity x Price, ...). Never a reject."""
+    row_no: int
+    symbol: str
+    message: str
+
+
+@dataclass(frozen=True)
+class IrsDirection:
+    """Which way a swap was read and what decided it, so the UI can show it.
+    ``direction`` is 'PAY' (pay fixed, quantity > 0) or 'RECEIVE' (receive fixed,
+    quantity < 0); ``decided_by`` names the column and cell that decided, the user's
+    stored override, or NO_DIRECTION_SIGNAL when the file carries nothing at all."""
+    trade_id: str
+    direction: str
+    decided_by: str
+    defaulted: bool = False
+
+
+NO_DIRECTION_SIGNAL = "no direction signal in file: defaulted to pay fixed"
+
+
 # --------------------------------------------------------------------------- helpers
 def cash_ccy(code: str) -> str:
     """'DOL.C-USAA' -> 'USD'; '<CCY>.C-xxAA' -> CCY."""

@@ -149,14 +149,10 @@ def backfill_headline(status: Optional[dict]) -> Optional[str]:
     return None
 
 
-def feed_headline(status: Optional[dict]) -> str:
-    """One line for the toolbar / summary: connection, last pull, counts."""
-    if not status:
-        return "Bloomberg: no pull recorded yet"
-    if not status.get("connected"):
-        return f"Bloomberg: not connected — {status.get('reason', 'unknown reason')}"
-    return (f"Bloomberg: connected · last pull {status.get('time', '')} · "
-            f"{status.get('written', 0)} marks written, {status.get('failed', 0)} failed · refresh every 2 min")
+# Moved to ui/feed_controls.py 2026-09-18 so the top bar's "Pull Bloomberg now" status line
+# and this tab print one sentence, with the cadence read from the feed's own interval
+# instead of typed in here. Re-exported under the old name for ui/tabs/cash_ladder.py.
+from ui.feed_controls import feed_headline  # noqa: E402,F401
 
 
 def top_bar_status(status: Optional[dict]) -> str:

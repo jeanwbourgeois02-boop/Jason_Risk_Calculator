@@ -248,24 +248,43 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
         lambda selected: [{} if label == selected else {"display": "none"} for label in VISIBLE_TABS]
     )
 
-    app.bloomberg_feed = start_bloomberg_feed(resolved) if start_feed else None
+    # `bloomberg_feed_reason` is why there is no feed ("" when there is one), kept so the
+    # top bar's "Pull Bloomberg now" button (ui/feed_controls.py) can say it in plain
+    # words instead of doing nothing on a machine without Bloomberg.
+    if start_feed:
+        app.bloomberg_feed, app.bloomberg_feed_reason = start_bloomberg_feed_with_reason(resolved)
+    else:
+        app.bloomberg_feed, app.bloomberg_feed_reason = None, FEED_NOT_REQUESTED
     return app
 
 
-def start_bloomberg_feed(db_path: Path):
-    """Start the 2-minute Bloomberg feed when blpapi and a Bloomberg API service are
-    present on this computer (data.bloomberg.live). Otherwise record why in the status
-    file and run without live rates; no prices are invented. RISK_LIVE=0 disables."""
+FEED_NOT_REQUESTED = "the live feed was not started for this session (start_feed=False)"
+FEED_SWITCHED_OFF = "the live feed is switched off (RISK_LIVE=0)"
+
+
+def start_bloomberg_feed_with_reason(db_path: Path):
+    """`(feed, reason)`: start the Bloomberg feed when blpapi and a Bloomberg API service
+    are present on this computer (data.bloomberg.live). Otherwise `feed` is None and
+    `reason` says why, in the same words the status file gets; the app runs without live
+    rates and no prices are invented. RISK_LIVE=0 disables."""
     if os.environ.get("RISK_LIVE", "1") == "0":
-        return None
+        return None, FEED_SWITCHED_OFF
     from data.bloomberg.live import start_feed_if_available
+    from ui.feed_controls import cadence_words, feed_interval_seconds
     host = os.environ.get("BLP_HOST", "localhost")
     port = int(os.environ.get("BLP_PORT", "8194"))
     feed, why = start_feed_if_available(db_path, host=host, port=port)
-    print(f"Bloomberg feed: {'started (every 2 min)' if feed else 'not started: ' + why}", flush=True)
+    seconds = feed_interval_seconds(feed) if feed else None
+    started = f"started ({cadence_words(seconds)})" if seconds else "started"
+    print(f"Bloomberg feed: {started if feed else 'not started: ' + why}", flush=True)
     from data.bloomberg.backfill import start_auto_backfill
     start_auto_backfill(db_path, host=host, port=port)
-    return feed
+    return feed, ("" if feed else why)
+
+
+def start_bloomberg_feed(db_path: Path):
+    """The feed alone (None when unavailable); see `start_bloomberg_feed_with_reason`."""
+    return start_bloomberg_feed_with_reason(db_path)[0]
 
 
 if __name__ == "__main__":

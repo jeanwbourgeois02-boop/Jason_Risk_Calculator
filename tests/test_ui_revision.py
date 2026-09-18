@@ -184,6 +184,38 @@ def test_pricing_snapshot_is_reentrant_and_always_released(tmp_path):
         conn.close()
 
 
+def test_a_slow_render_says_so_in_the_terminal_and_a_fast_one_stays_quiet(tmp_path, monkeypatch, caplog):
+    """A view that errors prints a traceback; a view that is merely slow printed nothing,
+    so a tab that "did not load" on the Bloomberg PC left nothing to diagnose from."""
+    import logging
+    conn = uiapp.connect_readonly(_db(tmp_path))
+    bp._priced_value_book_cached.cache_clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger=bp.log.name):
+            with bp.pricing_snapshot(conn, "Blotter total"):  # fast: under the threshold
+                bp.priced_value_book(conn, "2026-09-18")
+            assert not caplog.records
+
+            monkeypatch.setattr(bp, "SLOW_RENDER_SECONDS", 0.0)  # now everything counts as slow
+            bp._priced_value_book_cached.cache_clear()
+            with bp.pricing_snapshot(conn, "Blotter total"):
+                bp.priced_value_book(conn, "2026-09-18")
+                bp.priced_value_book(conn, "2026-09-18")  # cache hit: not a re-pricing
+                bp.priced_value_book(conn, "2026-09-17")
+            (record,) = caplog.records
+            message = record.getMessage()
+            assert "slow render: Blotter total took" in message
+            assert "(2 full re-pricings of the book)" in message
+
+            caplog.clear()
+            with bp.pricing_snapshot(conn):  # no label: never logs, as before
+                bp.priced_value_book(conn, "2026-09-16")
+            assert not caplog.records
+    finally:
+        conn.close()
+        bp._priced_value_book_cached.cache_clear()
+
+
 # --------------------------------------------------------------------------- header failure card
 def test_header_shows_why_instead_of_staying_blank_when_the_figures_raise(tmp_path, monkeypatch):
     """An exception here used to escape as an HTTP 500 and leave the placeholder on

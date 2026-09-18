@@ -379,13 +379,17 @@ def test_options_scope_prices_an_option_row():
         assert layout.children[0].id == "blotter-strip-options"
         table = next(t for t in _find_tables(layout) if t.id == options.TABLE_ID)
         row = next(r for r in table.data if r["instrument"] == "EURUSD092226C-1")
-        # MktPx is the raw premium mark, shown as the blotter quotes it (base-notional fraction).
-        assert row["mktpx"] == "0.006200"
+        # Cells are raw numbers now (the table carries its own display format), checked
+        # against the running code 2026-09-18.
+        # MktPx is the raw premium mark, as the blotter quotes it (base-notional fraction).
+        assert row["mktpx"] == 0.0062
         # MktVal = premium(0.0062) * quantity(1,000,000) * EUR->USD spot(1.1050) = 6,851
-        assert row["mktval"] == "6,851"
-        # Delta USD-equivalent = 0.55 * (1,000,000 * multiplier 1) * USD spot(1.0) = 550,000
-        assert row["delta"] == "550,000"
-        assert row["strike"] == "1.110000"
+        assert row["mktval"] == pytest.approx(6851.0)
+        # Delta USD-equivalent = 0.55 * 1,000,000 EUR * the BASE currency's rate, EUR->USD
+        # spot 1.1050 = 607,750. It used to be converted at the quote currency's rate (USD,
+        # 1.0 -> 550,000), a bug the pricer audit found: a delta is an amount of base currency.
+        assert row["delta"] == pytest.approx(607750.0)
+        assert row["strike"] == 1.11
     finally:
         conn.close()
 
@@ -1166,6 +1170,21 @@ def test_missing_terms_notice_names_the_option_and_where_to_enter_it(tmp_path):
     assert "Option terms" in text
 
 
+def test_missing_terms_notice_says_the_editable_cell_first_then_the_alternatives(tmp_path):
+    """2026-09-18: the Options table's Strike / Type / Payoff cells are editable, so the
+    banner sends the user there first; the Manual entry form and a re-upload follow, one
+    plain sentence each."""
+    from ui.tabs import options as options_ui
+    assert "strike" in options_ui.EDITABLE_COLUMNS and "payoff" in options_ui.EDITABLE_COLUMNS
+    conn = _db_with_option_missing_strike(tmp_path)
+    sentences = [c.children for c in blotter.missing_terms_notice(conn).children[2:]]
+    assert sentences == [
+        "Type the strike straight into the Strike cell under Options, and set Payoff to Digital where it is one. ",
+        "You can also enter it under Manual entry ▸ Option terms. ",
+        "Or re-upload a blotter export that includes a Strike column.",
+    ]
+
+
 def test_missing_terms_notice_absent_when_every_option_has_a_strike(tmp_path):
     conn = _db_with_option_missing_strike(tmp_path)
     conn.execute("UPDATE instrument_options SET strike = 11.25")
@@ -1214,3 +1233,499 @@ def test_nothing_priced_reason_summarises_instead_of_dumping_ids():
     reason = blotter_pricing._nothing_priced_reason(_frame(rows), "2026-08-31")
     assert reason.startswith("nothing priced on 2026-08-31: 9 forwards: no FWD_OUTRIGHT; 1 option: no PREMIUM (e.g. ")
     assert reason.count("T") <= 6 and reason.endswith(", ...)")
+
+
+# --------------------------------------------------------------------------- 2026-09-18
+# Bloomberg PC: "Blotter > FX, Total book and the forwards view do not load" -- an error card
+# ending "could not convert string to float: '<a date>'" -- "and none of the top headlines
+# of the app and in the blotter work". Root cause: `realised_pnl.pnl_usd` holding a date
+# (engine/pnl/ledger.py's then-positional INSERT on a table migrated from 12 columns), which
+# only ever happens once marks exist. Pinned here: (d) a whole book WITH official marks
+# shows real figures on the header and on every scope's strip; (b) one bad stored value
+# never blanks a view; (c) what is shown names the trade, the column and the value.
+
+_AS_OF = "2026-09-18"
+_HEADLINE_PERIODS = ("LTD P&L", "Daily P&L", "Previous day P&L", "5d", "MTD", "YTD")
+
+
+def _book_with_marks():
+    """Every product the Blotter shows, each with official marks on the as-of and on
+    every reference date the periods subtract (t-1, t-2, 5d, month-end, year-end): two
+    open forwards (one marked by a direct quote, one by BBG_INTERP), a settled forward, a
+    future, a swap and an option."""
+    from engine.pnl.ledger import period_reference_dates
+
+    conn = sqlite3.connect(":memory:")
+    schema.create_schema(conn)
+    conn.executescript("""
+        INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31');
+        INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31');
+        INSERT INTO instruments VALUES ('ESZ6 Index','FUTURE','ES','USD',50,0,'ESZ6 Index','2026-12-18');
+        INSERT INTO instruments VALUES ('IRSOIS-USD-9','IRS','USD','USD',1,0,'','2031-06-20');
+        INSERT INTO instruments VALUES ('EURUSD121526C-1','FX_OPTION','EUR','USD',1,0,'','2026-12-15');
+        INSERT INTO trades VALUES ('E1','XLSX','EURUSD','FX_FWD','E1','2026-06-01',2000000,1.10,'ACC','CP','','TR','d','');
+        INSERT INTO trades VALUES ('J1','XLSX','USDJPY','FX_FWD','J1','2026-06-01',1000000,147.0,'ACC','CP','','TR','d','');
+        INSERT INTO trades VALUES ('OLD','XLSX','EURUSD','FX_FWD','OLD','2026-06-01',1000000,1.08,'ACC','CP','','TR','d','');
+        INSERT INTO trades VALUES ('F1','XLSX','ESZ6 Index','FUTURE','F1','2026-06-01',3,6000.0,'ACC','CP','','TR','d','');
+        INSERT INTO trades VALUES ('S1','XLSX','IRSOIS-USD-9','IRS','S1','2026-06-01',10000000,3.85,'ACC','CP','','TR','d','');
+        INSERT INTO trades VALUES ('O1','XLSX','EURUSD121526C-1','FX_OPTION','O1','2026-06-01',1000000,0.005,'ACC','CP','','TR','d','');
+        INSERT INTO trade_legs VALUES ('E1',1,'FX_NEAR','EUR',2000000,'2026-06-01','2026-10-20',1.10,1);
+        INSERT INTO trade_legs VALUES ('E1',2,'FX_NEAR','USD',-2200000,'2026-06-01','2026-10-20',1.10,1);
+        INSERT INTO trade_legs VALUES ('J1',1,'FX_NEAR','USD',1000000,'2026-06-01','2026-11-05',147.0,1);
+        INSERT INTO trade_legs VALUES ('J1',2,'FX_NEAR','JPY',-147000000,'2026-06-01','2026-11-05',147.0,1);
+        INSERT INTO trade_legs VALUES ('OLD',1,'FX_NEAR','EUR',1000000,'2026-06-01','2026-07-24',1.08,1);
+        INSERT INTO trade_legs VALUES ('OLD',2,'FX_NEAR','USD',-1080000,'2026-06-01','2026-07-24',1.08,1);
+        INSERT INTO trade_legs VALUES ('F1',1,'NOTIONAL','USD',900000,'2026-06-01','2026-12-18',6000.0,0);
+        INSERT INTO trade_legs VALUES ('S1',1,'FIXED','USD',-10000000,'2026-06-03','2031-06-20',3.85,1);
+        INSERT INTO trade_legs VALUES ('S1',2,'FLOAT','USD',10000000,'2026-06-03','2031-06-20',0.0,1);
+        INSERT INTO trade_legs VALUES ('O1',1,'NOTIONAL','EUR',1000000,'2026-06-01','2026-12-15',0.005,0);
+        INSERT INTO marks VALUES ('2026-07-24','EURUSD','2026-07-24','SPOT',1.09,'BBG_BFXFORWARD','2026-07-24T17:00:00-04:00');
+    """)
+    refs = period_reference_dates(_AS_OF)
+    days = sorted({_AS_OF, refs["daily"], refs["previous_day"], refs["d5"], refs["mtd"]})
+    for k, day in enumerate(days):
+        stamp, step = f"{day}T17:00:00-04:00", k * 0.001
+        conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+            (day, "EURUSD", day, "SPOT", 1.11 + step, "BBG_BFXFORWARD", stamp),
+            (day, "EURUSD", "2026-10-20", "FWD_OUTRIGHT", 1.12 + step, "BBG_BFXFORWARD", stamp),
+            (day, "USDJPY", day, "SPOT", 149.0 + k, "BBG_BFXFORWARD", stamp),
+            (day, "USDJPY", "2026-11-05", "FWD_OUTRIGHT", 148.0 + k, "BBG_INTERP", stamp),
+            (day, "ESZ6 Index", "2026-12-18", "FUTURE_PX", 6100.0 + 10 * k, "BBG_BDH", stamp),
+            (day, "IRSOIS-USD-9", "2031-06-20", "PV_USD", 12_000.0 + 500 * k, "QL_PRICER", stamp),
+            (day, "IRSOIS-USD-9", "2031-06-20", "CASHFLOW_USD", 0.0, "QL_PRICER", stamp),
+            (day, "EURUSD121526C-1", "2026-12-15", "PREMIUM", 0.006 + step, "QL_OPTIONS_PRICER", stamp),
+        ])
+    conn.commit()
+    return conn
+
+
+def _strip_cards(layout, scope) -> dict:
+    """{card label: (value text, [caption texts], [caption tooltips])} of `scope`'s P&L strip."""
+    # The FX sub-tab builds its strip statically, with no id: it is the layout's only `.cards` row.
+    wanted = (lambda n: getattr(n, "className", "") == "cards") if scope == "fx" else \
+        (lambda n: getattr(n, "id", None) == f"blotter-strip-{scope}")
+    stack, strip = [layout], None
+    while stack and strip is None:
+        node = stack.pop()
+        if wanted(node):
+            strip = node
+            break
+        children = getattr(node, "children", None)
+        if isinstance(children, (list, tuple)):
+            stack.extend(children)
+        elif children is not None and not isinstance(children, str):
+            stack.append(children)
+    assert strip is not None, f"no P&L strip for {scope} in the layout"
+    cards = {}
+
+    def collect(node):  # depth-first, in document order: the dict keeps the cards' on-screen order
+        if getattr(node, "className", "") == "card":
+            label, value, *rest = node.children
+            cards[label.children] = (value.children, [c.children for c in rest], [getattr(c, "title", None) for c in rest])
+            return
+        children = getattr(node, "children", None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                collect(child)
+        elif children is not None and not isinstance(children, str):
+            collect(children)
+
+    collect(strip)
+    return cards
+
+
+def _all_text(component) -> str:
+    parts, stack = [], [component]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            parts.append(node)
+            continue
+        if isinstance(node, (list, tuple)):
+            stack.extend(node)
+            continue
+        children = getattr(node, "children", None)
+        if children is not None:
+            stack.append(children)
+    return " ".join(parts)
+
+
+def _is_figure(text) -> bool:
+    return isinstance(text, str) and text not in ("", "n/a") and any(ch.isdigit() for ch in text)
+
+
+@pytest.mark.parametrize("scope", ["total", "futures", "rates", "options"])
+def test_every_scope_strip_shows_real_figures_on_a_book_with_official_marks(scope):
+    conn = _book_with_marks()
+    try:
+        cards = _strip_cards(blotter.scope_layout(scope, conn, _AS_OF), scope)
+        for label in _HEADLINE_PERIODS:
+            assert _is_figure(cards[label][0]), f"{scope} strip: {label} shows {cards[label][0]!r}"
+        assert cards["Trades"][0] == {"total": "6", "futures": "1", "rates": "1", "options": "1"}[scope]
+    finally:
+        conn.close()
+
+
+def test_fx_scope_strip_and_table_show_real_figures_on_a_book_with_official_marks():
+    conn = _book_with_marks()
+    try:
+        layout = blotter.scope_layout("fx", conn, _AS_OF)
+        assert "could not be rendered" not in _all_text(layout)
+        cards = _strip_cards(layout, "fx")
+        for label in _HEADLINE_PERIODS:
+            assert _is_figure(cards[label][0]), f"fx strip: {label} shows {cards[label][0]!r}"
+        assert cards["Trades"][0] == "3"
+        table = next(t for t in _find_tables(layout) if t.id == "blotter-fx-datatable")
+        by_pair_fill = {(r["instrument_id"], r["fill"]): r for r in table.data}
+        assert by_pair_fill[("EURUSD", "1.100000")]["pnl_eod"] == "48,000"   # 2,000,000 x (1.124 - 1.10), direct quote
+        assert _is_figure(by_pair_fill[("USDJPY", "147.000000")]["pnl_eod"])  # BBG_INTERP outright is official
+        assert by_pair_fill[("EURUSD", "1.080000")]["pnl_eod"] == "10,000"   # settled: frozen at the 2026-07-24 spot
+    finally:
+        conn.close()
+
+
+def test_header_cards_show_real_figures_on_a_book_with_official_marks():
+    conn = _book_with_marks()
+    try:
+        cards = [c for c in header._build_figures(conn, _AS_OF) if getattr(c, "className", "") == "header-figure"]
+        by_title = {c.children[0].children: c for c in cards}
+        for title in ("LTD", "Daily", "Previous day", "5d", "MTD", "YTD", "Trading"):
+            assert _is_figure(by_title[title].children[1].children), f"header {title}: {by_title[title].children[1].children!r}"
+            assert len(by_title[title].children) == 2, f"header {title} carries a caption: {by_title[title].children[2:]}"
+        assert by_title["Trades"].children[1].children == "6"
+        assert _is_figure(by_title["Net USD delta"].children[1].children)
+    finally:
+        conn.close()
+
+
+def _misaligned_realised_row(conn):
+    """What engine/pnl/ledger.py's old positional INSERT left for trade OLD on a database
+    whose `realised_pnl` was migrated from 12 columns: every value two columns off, so
+    `pnl_usd` holds `spot_as_of_date` -- text in a REAL column."""
+    conn.execute(
+        "INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
+        "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, note) "
+        "VALUES ('OLD','EURUSD','2026-09-18T17:00:00','FX_FWD','USD','2026-07-24',1000000,'',1080000,'SPOT','1.09',"
+        "'2026-07-24','BBG_BFXFORWARD','10000.0')")
+    conn.commit()
+    assert conn.execute("SELECT typeof(pnl_usd) FROM realised_pnl").fetchone()[0] == "text"
+
+
+def test_the_2026_09_18_incident_no_longer_blanks_any_view():
+    conn = _book_with_marks()
+    try:
+        clean = {s: _strip_cards(blotter.scope_layout(s, conn, _AS_OF), s) for s in ("total", "futures", "rates")}
+        _misaligned_realised_row(conn)
+        for scope in ("total", "fx", "futures", "rates", "options"):
+            layout = blotter.scope_layout(scope, conn, _AS_OF)
+            text = _all_text(layout)
+            assert "could not convert string to float" not in text, scope
+            # the banner names the table.column, the row and the value, and says it heals itself
+            assert "realised_pnl.pnl_usd: 1 value that is not a number -- '2026-07-24' (trade_id OLD)" in text
+            assert "rebuilt automatically by the next Bloomberg pull" in text
+            if scope in clean:  # same figures as with no bad row: OLD is valued as not yet frozen
+                assert _strip_cards(layout, scope)["LTD P&L"][0] == clean[scope]["LTD P&L"][0]
+        ltd = next(c for c in header._build_figures(conn, _AS_OF) if c.children[0].children == "LTD")
+        assert _is_figure(ltd.children[1].children) and len(ltd.children) == 2
+    finally:
+        conn.close()
+
+
+def test_one_text_price_unprices_one_row_and_every_view_still_renders():
+    conn = _book_with_marks()
+    try:
+        conn.execute("UPDATE trades SET price = '24-Jul' WHERE trade_id = 'J1'")
+        conn.commit()
+        layout = blotter.scope_layout("total", conn, _AS_OF)
+        text = _all_text(layout)
+        assert "could not be rendered" not in text
+        assert "trades.price: 1 value that is not a number -- '24-Jul' (trade_id J1)" in text   # the banner
+        cards = _strip_cards(layout, "total")
+        value, captions, tooltips = cards["LTD P&L"]
+        assert _is_figure(value)
+        assert "excludes 1 of 6 trades unpriced (1 with a stored value is not a number)" in captions
+        assert any("trade J1: trades.price is not a number ('24-Jul')" in (t or "") for t in tooltips)
+        table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total")
+        row = next(r for r in table.data if r["trade_id"] == "J1")
+        assert row["pnl_usd"] == "n/a" and row["fill"] == "n/a"          # missing stays missing: no 0, no raw text
+        tip = table.tooltip_data[table.data.index(row)]
+        assert tip["pnl_usd"]["value"] == "trade J1: trades.price is not a number ('24-Jul')"
+        assert sum(1 for r in table.data if r["pnl_usd"] != "n/a") == 5  # every other trade prices
+        fx = blotter.scope_layout("fx", conn, _AS_OF)
+        assert "could not be rendered" not in _all_text(fx)
+        assert len(next(t for t in _find_tables(fx) if t.id == "blotter-fx-datatable").data) == 3
+    finally:
+        conn.close()
+
+
+def test_text_quantity_has_no_side_and_no_notional():
+    conn = _book_with_marks()
+    try:
+        conn.execute("UPDATE trades SET quantity = '24-Jul' WHERE trade_id = 'E1'")
+        conn.commit()
+        df = blotter.scope_df(conn, "total", _AS_OF).set_index("trade_id")
+        assert df.loc["E1", "side"] == "" and df.loc["E1", "notional_usd"] != df.loc["E1", "notional_usd"]
+        assert df.loc["J1", "side"] == "Buy" and df.loc["J1", "notional_usd"] == 1_000_000
+    finally:
+        conn.close()
+
+
+def test_a_text_t1_mark_blanks_the_t1_rate_cell_only():
+    from engine.pnl.ledger import period_reference_dates
+    conn = _book_with_marks()
+    try:
+        t1 = period_reference_dates(_AS_OF)["daily"]
+        conn.execute("UPDATE marks SET value = '24-Jul' WHERE as_of_date = ? AND instrument_id = 'USDJPY' "
+                     "AND mark_type = 'FWD_OUTRIGHT'", (t1,))
+        conn.commit()
+        df = blotter.scope_df(conn, "total", _AS_OF).set_index("trade_id")
+        assert df.loc["J1", "t1_rate"] != df.loc["J1", "t1_rate"]     # NaN, not a raise
+        assert df.loc["J1", "reason"] == "" and df.loc["E1", "t1_rate"] == df.loc["E1", "t1_rate"]
+    finally:
+        conn.close()
+
+
+def test_error_card_names_table_column_row_value_and_the_fix():
+    conn = _book_with_marks()
+    try:
+        conn.execute("UPDATE instrument_options SET strike = 'x' WHERE 0")  # no-op: table exists
+        conn.execute("UPDATE trade_legs SET rate = '24-Jul' WHERE trade_id = 'F1'")
+        conn.commit()
+        card = blotter._error_card("FX", ValueError("could not convert string to float: '24-Jul'"), conn)
+        text = _all_text(card)
+        assert "FX could not be rendered (could not convert string to float: '24-Jul')." in text
+        assert "trade_legs.rate: 1 value that is not a number -- '24-Jul' (trade_id F1 leg_no 1)" in text
+        assert "to fix: re-upload the blotter" in text
+        # without a connection, or with nothing bad on file, the card is exactly the old one-liner
+        assert len(blotter._error_card("FX", ValueError("boom")).children) == 1
+        assert len(blotter._error_card("FX", ValueError("boom"), _book_with_marks()).children) == 1
+    finally:
+        conn.close()
+
+
+def test_bad_stored_values_is_empty_on_a_clean_book_and_survives_a_missing_table():
+    conn = _book_with_marks()
+    try:
+        assert blotter_pricing.bad_stored_values(conn) == []
+        assert blotter.bad_values_notice(conn) is None
+        conn.execute("DROP TABLE instrument_options")
+        assert blotter_pricing.bad_stored_values(conn) == []
+    finally:
+        conn.close()
+
+
+def test_fx_sub_tab_keeps_its_strip_when_its_table_fails(monkeypatch):
+    from ui.tabs import blotter_fx
+
+    def boom(*args, **kwargs):
+        raise ValueError("could not convert string to float: '24-Jul'")
+
+    conn = _book_with_marks()
+    try:
+        monkeypatch.setattr(blotter_fx, "fx_blotter_rows", boom)
+        layout = blotter.scope_layout("fx", conn, _AS_OF)
+        assert _is_figure(_strip_cards(layout, "fx")["LTD P&L"][0])   # the strip is still there, still a figure
+        assert "FX trade table could not be rendered (could not convert string to float: '24-Jul')." in _all_text(layout)
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------- 2026-09-18 integration
+# Rates callbacks hooked in; Options no longer rebuilt on a marks-only revision; the strip
+# above the Options table shows only the cards that have a value.
+
+def _blotter_app(db_path):
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    blotter.register_callbacks(app, get_db_path=lambda: str(db_path))
+    return app
+
+
+def _wrapped(app, key_test):
+    keys = [k for k in app.callback_map if key_test(k)]
+    assert len(keys) == 1, keys
+    fn = app.callback_map[keys[0]]["callback"]
+    return getattr(fn, "__wrapped__", fn)
+
+
+def _call_triggered_by(prop_ids, fn, *args):
+    """Call a wrapped callback the way Dash would when exactly `prop_ids` changed."""
+    import contextvars
+    from dash._callback_context import context_value
+    from dash._utils import AttributeDict
+
+    def _run():
+        context_value.set(AttributeDict(triggered_inputs=[{"prop_id": p, "value": None} for p in prop_ids]))
+        return fn(*args)
+    return contextvars.copy_context().run(_run)
+
+
+def _empty_file_db(tmp_path):
+    db_path = tmp_path / "risk.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    conn.close()
+    return db_path
+
+
+def test_register_callbacks_hooks_the_rates_callback_and_no_output_is_registered_twice(tmp_path):
+    from ui.tabs import rates
+    assert rates.DEFAULT_DATE_PICKER_ID == blotter.DATE_PICKER_ID   # registered with its default picker
+    app = _blotter_app(_empty_file_db(tmp_path))
+    # `id.prop` per Output; an `allow_duplicate` Output carries an "@<hash>" suffix and is
+    # unique by construction. Every plain one must appear exactly once across the app.
+    outputs = [o for key in app.callback_map for o in key.strip(".").split("...")]
+    plain = [o for o in outputs if "@" not in o]
+    assert sorted(plain) == sorted(set(plain)), [o for o in set(plain) if plain.count(o) > 1]
+    assert len(outputs) == len(set(outputs))                 # nor the same duplicate twice
+    # the Direction write is hooked in: exactly one callback owns the plain `rates-datatable.data`
+    assert plain.count(f"{rates.DATATABLE_ID}.data") == 1
+    # and it was registered once, not once here and once somewhere else
+    standalone = dash.Dash(__name__, suppress_callback_exceptions=True)
+    rates.register_callbacks(standalone, get_db_path=lambda: ":memory:")
+    assert set(standalone.callback_map) <= set(app.callback_map)
+    # the strips this module builds above the Options and Rates tables follow new marks in place
+    assert "blotter-strip-options.children" in plain and "blotter-strip-rates.children" in plain
+
+
+def test_options_and_rates_sub_tabs_are_not_rebuilt_on_a_marks_only_revision(tmp_path):
+    """Both modules refresh their own table in place from the revision stores
+    (`ui.tabs.options._render`, `ui.tabs.rates._refresh`), so a Bloomberg pull must not
+    rebuild the sub-tab under the user's hands; a new book, date or sub-tab still does."""
+    from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
+    from ui.tabs import rates
+    for module in (options, rates):   # the premise: each listens to both revision stores itself
+        probe = dash.Dash(__name__, suppress_callback_exceptions=True)
+        module.register_callbacks(probe, get_db_path=lambda: ":memory:")
+        listened = {d["id"] for cb in probe.callback_map.values() for d in cb["inputs"]}
+        assert {DATA_REVISION_ID, BOOK_REVISION_ID} <= listened, module.__name__
+    app = _blotter_app(_empty_file_db(tmp_path))
+    update = _wrapped(app, lambda k: k.startswith(blotter.CONTENT_ID))
+    data, book = f"{DATA_REVISION_ID}.data", f"{BOOK_REVISION_ID}.data"
+    date, tab = f"{blotter.DATE_PICKER_ID}.date", f"{blotter.SUBTABS_ID}.value"
+
+    def render(scope, *triggers):
+        return _call_triggered_by(triggers, update, "2026-06-20", scope, "b1", "d1")
+
+    assert render("options", data) is dash.no_update           # a Bloomberg pull: Options refreshes itself in place
+    assert render("options", book) is not dash.no_update       # a new upload still rebuilds
+    assert render("options", data, book) is not dash.no_update  # both published in one tick (ui/revision.py)
+    assert render("options", date) is not dash.no_update
+    assert render("options", tab) is not dash.no_update
+    assert render("rates", data) is dash.no_update             # same treatment: Rates refreshes itself in place
+    assert render("rates", book) is not dash.no_update
+    assert render("rates", data, book) is not dash.no_update
+    assert render("rates", date) is not dash.no_update and render("rates", tab) is not dash.no_update
+    assert render("fx", data) is not dash.no_update            # unchanged: one static block, rebuilt on new marks
+    assert render("bundles", data) is not dash.no_update
+    assert render("total", data) is dash.no_update             # unchanged: rows refresh through _apply_filters
+    assert render("manual", data, book) is dash.no_update      # unchanged: the form is never rebuilt
+    assert blotter._MARKS_REBUILD_SCOPES == ("bundles", "fx")
+    assert blotter._SELF_REFRESHING_SCOPES == ("options", "rates")
+
+
+def _options_book(tmp_path, premium_on_earlier_closes: bool):
+    """`_book_with_marks` on disk. Without `premium_on_earlier_closes` the option has a
+    PREMIUM mark on the as-of only -- the app has run with Bloomberg today and never before."""
+    db_path = tmp_path / "options.db"
+    src = _book_with_marks()
+    disk = sqlite3.connect(db_path)
+    src.backup(disk)
+    src.close()
+    if not premium_on_earlier_closes:
+        disk.execute("DELETE FROM marks WHERE mark_type = 'PREMIUM' AND as_of_date < ?", (_AS_OF,))
+        disk.commit()
+    return db_path, disk
+
+
+_WAITING = ("Daily P&L, Previous day P&L, 5d, MTD, LTD-1 P&L and LTD-2 P&L appear once option marks exist for "
+            "the earlier close; they are written each day the app runs with Bloomberg.")
+
+
+def test_options_strip_shows_only_cards_with_a_value_and_one_caption_for_the_rest(tmp_path):
+    _path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
+    try:
+        layout = blotter.scope_layout("options", conn, _AS_OF)
+        cards = _strip_cards(layout, "options")
+        assert list(cards) == ["LTD P&L", "YTD", "Trades", "Trading P&L", "Trading P&L T-1"]
+        assert all(value != "n/a" for value, _c, _t in cards.values())
+        assert _is_figure(cards["LTD P&L"][0]) and cards["LTD P&L"][0] != "0"
+        assert cards["LTD P&L"][0] == cards["YTD"][0]        # the option is new since the year-end: all of its LTD
+        text = _all_text(layout)
+        assert text.count(_WAITING) == 1                     # ONE line, naming every hidden card and why
+        # never a 0 in place of an n/a: the hidden cards are absent, not zeroed
+        assert blotter.options_hidden_cards(conn, _AS_OF, ["O1"], blotter_pricing.row_scoped_headline(conn, _AS_OF, ["O1"])) \
+            == ("daily", "ltd1_daily", "d5", "mtd", "ltd1", "ltd2")
+    finally:
+        conn.close()
+
+
+def test_options_strip_is_the_full_row_with_no_caption_once_every_close_has_option_marks(tmp_path):
+    _path, conn = _options_book(tmp_path, premium_on_earlier_closes=True)
+    try:
+        layout = blotter.scope_layout("options", conn, _AS_OF)
+        cards = _strip_cards(layout, "options")
+        assert list(cards) == [blotter.HEADLINE_TITLES[k] for k in blotter.HEADLINE_ORDER]
+        assert all(_is_figure(cards[label][0]) for label in _HEADLINE_PERIODS)
+        assert "appear once option marks exist" not in _all_text(layout)
+    finally:
+        conn.close()
+
+
+def test_options_strip_keeps_a_card_that_is_na_for_any_other_reason(tmp_path):
+    """Yesterday's PREMIUM is on file but is not a number: Daily is "n/a" because of a data
+    error, not because the app did not run -- it stays on screen with its reason."""
+    from engine.pnl.ledger import period_reference_dates
+    _path, conn = _options_book(tmp_path, premium_on_earlier_closes=True)
+    try:
+        t1 = period_reference_dates(_AS_OF)["daily"]
+        conn.execute("UPDATE marks SET value = '24-Jul' WHERE mark_type = 'PREMIUM' AND as_of_date = ?", (t1,))
+        conn.commit()
+        cards = _strip_cards(blotter.scope_layout("options", conn, _AS_OF), "options")
+        assert cards["Daily P&L"][0] == "n/a" and cards["LTD-1 P&L"][0] == "n/a"
+        assert _is_figure(cards["5d"][0]) and _is_figure(cards["LTD-2 P&L"][0])
+    finally:
+        conn.close()
+
+
+def test_options_strip_hides_nothing_about_today_when_today_itself_is_unpriced(tmp_path):
+    _path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
+    try:
+        conn.execute("DELETE FROM marks WHERE mark_type = 'PREMIUM'")
+        conn.commit()
+        cards = _strip_cards(blotter.scope_layout("options", conn, _AS_OF), "options")
+        for label in ("LTD P&L", "Daily P&L", "5d", "MTD", "YTD"):   # today's problem: said, with its reason
+            assert cards[label][0] == "n/a", label
+        assert "LTD-1 P&L" not in cards and "LTD-2 P&L" not in cards and "Previous day P&L" not in cards
+    finally:
+        conn.close()
+
+
+def test_only_the_options_strip_hides_cards(tmp_path):
+    """Same gap on the Rates side (no swap marks before today): every card stays, "n/a"."""
+    _path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
+    try:
+        conn.execute("DELETE FROM marks WHERE mark_type IN ('PV_USD', 'CASHFLOW_USD') AND as_of_date < ?", (_AS_OF,))
+        conn.commit()
+        cards = _strip_cards(blotter.scope_layout("rates", conn, _AS_OF), "rates")
+        assert list(cards) == [blotter.HEADLINE_TITLES[k] for k in blotter.HEADLINE_ORDER]
+        assert cards["Daily P&L"][0] == "n/a" and _is_figure(cards["LTD P&L"][0])
+        assert "appear once option marks exist" not in _all_text(blotter.scope_layout("total", conn, _AS_OF))
+    finally:
+        conn.close()
+
+
+def test_options_strip_refreshes_in_place_on_a_data_revision(tmp_path):
+    db_path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
+    conn.close()
+    app = _blotter_app(db_path)
+    refresh = _wrapped(app, lambda k: k == "blotter-strip-options.children")
+    strip = refresh("rev-2", _AS_OF)
+    assert _WAITING in _all_text(strip)
+    labels = [c.children[0].children for c in strip.children[0].children]
+    assert labels == ["LTD P&L", "YTD", "Trades", "Trading P&L", "Trading P&L T-1"]
+    assert refresh("rev-3", None) is dash.no_update          # no date yet: leave what is on screen
+    # Rates: the same in-place refresh, the full generic row (no card is ever hidden there)
+    rates_strip = _wrapped(app, lambda k: k == "blotter-strip-rates.children")("rev-2", _AS_OF)
+    rates_labels = [c.children[0].children for c in rates_strip.children[0].children]
+    assert rates_labels == [blotter.HEADLINE_TITLES[k] for k in blotter.HEADLINE_ORDER]
+    assert len(rates_strip.children) == 1                     # no caption line

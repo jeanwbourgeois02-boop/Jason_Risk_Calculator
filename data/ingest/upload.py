@@ -24,6 +24,13 @@ together make up one book). Instruments, marks, curves, curve_quotes and index_f
 are untouched -- keyed by instrument/date, not by trade. Deletion only happens after the
 new file has parsed successfully (inside the same transaction as publishing its rows),
 so a parse failure leaves the existing book completely intact; see ``_stage_and_publish``.
+The one exception to "marks are untouched" (2026-09-18): an interest rate swap that the
+new file turns round has its priced history reversed in place, never deleted, because
+swaps are priced for today only (``data/ingest/irs_direction.py``). The user's own
+pay/receive overrides live in ``irs_direction_overrides``, which no upload ever clears.
+
+``import_blotter_report`` returns the outcome as data (message, rejects, warnings,
+notes) so the UI decides from counts, not from prose; ``import_blotter`` is its message.
 """
 from __future__ import annotations
 
@@ -34,9 +41,14 @@ import sqlite3
 
 import pandas as pd
 
-from data.ingest import blotter, schema, swaps
+from data.ingest import blotter, irs_direction, schema, swaps
 
 MAX_BYTES = 25 * 1024 * 1024
+# The words the rejects sentence always carries. ui/uploads.py used to decide from this
+# phrase whether the result box may dismiss itself (its REJECTS_PHRASE, pinned by a test
+# on each side); `import_blotter_report` now gives it the counts instead, but the phrase
+# stays so the sentence and every caller reading it keep working.
+REJECTS_PHRASE = "could not be read"
 
 # What a sheet must carry to be treated as a blotter, matched on the canonical names
 # blotter.read_table produces. 'Fin Type' may be absent when 'Product' is present.
@@ -127,6 +139,9 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
                 with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as reader:
                     reader.backup(staged)
                 replaced = {}
+                # Which way every swap faces in the book about to be replaced: the marks
+                # on file were priced for exactly these directions (see below).
+                swap_signs_before = irs_direction.irs_signs(live)
                 if full_replace:
                     # staged is a snapshot of live at this instant, so counting on
                     # either connection gives the same pre-delete totals.
@@ -150,6 +165,17 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
                     live.executemany(
                         f"INSERT INTO {table} ({names}) VALUES ({placeholders}) ON CONFLICT DO UPDATE SET {updates}",
                         staged.execute(f"SELECT {names} FROM {table}"))
+                # A swap the new file turned round (no user override holding it) keeps its
+                # priced history: the pricer's PV / DV01 / cashflow marks are reversed in
+                # place, ONCE, here on live -- which is why `import_blotter` loads into
+                # staged with turn_swap_marks=False. Staged could not do it properly
+                # anyway: on a full replace its book is emptied before the load, so the
+                # load sees no "before"; and the merge above only upserts, so the deletes
+                # a flip also needs (other sources' swap marks, the realised_pnl row) would
+                # never reach live. Swaps are priced for today only, so deleting the
+                # history instead would blank the swap's Daily / 5d / MTD / YTD for good
+                # (data/ingest/irs_direction.py docstring).
+                irs_direction.reverse_flipped(live, swap_signs_before)
                 live.commit()
                 swaps.package_swaps(live)
         except Exception:
@@ -162,15 +188,43 @@ def import_blotter(payload, filename, db_path):
     """Load a blotter file into `db_path`, replacing the entire existing trade book (see
     module docstring: every existing `trades` row and trade-keyed dependent, any source,
     is deleted first). Rows that cannot be parsed are skipped and listed in the returned
-    message; everything else loads. Only a file with no recognisable blotter header at
-    all is refused -- and refusing it never touches the existing book (the delete only
-    happens after this file has parsed)."""
+    message, in a sentence that always carries the words "could not be read"
+    (REJECTS_PHRASE); everything else loads. Only a file with no recognisable blotter
+    header at all is refused -- and refusing it never touches the existing book (the
+    delete only happens after this file has parsed).
+
+    Returns the one-paragraph message, exactly `import_blotter_report(...)["message"]`.
+    A caller that needs to know whether anything was skipped or doubtful should call
+    `import_blotter_report` and read its counts rather than this prose."""
+    return import_blotter_report(payload, filename, db_path)["message"]
+
+
+def import_blotter_report(payload, filename, db_path) -> dict:
+    """`import_blotter`, with the outcome as data. Keys, exactly:
+
+      message   str        the summary paragraph: what was imported and replaced, what
+                           was excluded, the rejected rows (the REJECTS_PHRASE sentence),
+                           then every note below
+      rejects   int        rows skipped because they could not be read
+      warnings  int        things the user should read: a cell that was not a number and
+                           was rebuilt from other columns, a NetInvoice that disagrees
+                           with Quantity x Price beyond tolerance, a non-numeric strike
+                           cell that was ignored, a cell naming both pay and receive --
+                           anywhere the file's content was doubtful and the parser had
+                           to rebuild, ignore or distrust a cell
+      notes     list[str]  the individual note sentences (information first, then the
+                           warnings sentence, which names the rows)
+
+    INFORMATION is in `notes` and `message` but never raises `warnings`: a swap read as
+    pay fixed by default, a user direction override kept, an option with no strike in
+    the file. The app shows each of those persistently elsewhere (the Rates notice, the
+    Blotter's missing-terms banner), so an import that only has those is a clean one."""
     frame = blotter.read_table(payload, filename)
     validate_blotter_shape(frame)
 
     def _load(staged):
         try:
-            return blotter.load(frame, staged, strict=False, filename=filename)
+            return blotter.load(frame, staged, strict=False, filename=filename, turn_swap_marks=False)
         except sqlite3.Error as e:
             raise ValueError(f"Nothing imported. Database error: {e}") from e
 
@@ -195,5 +249,7 @@ def import_blotter(payload, filename, db_path):
     if result.rejects:
         head = "; ".join(f"row {rj.row_no} {rj.symbol}: {rj.reason}" for rj in result.rejects[:5])
         more = f" (+{len(result.rejects) - 5} more)" if len(result.rejects) > 5 else ""
-        parts.append(f"{len(result.rejects)} row(s) could not be read and were skipped: {head}{more}.")
-    return " ".join(parts)
+        parts.append(f"{len(result.rejects)} row(s) {REJECTS_PHRASE} and were skipped: {head}{more}.")
+    notes = result.notes()
+    return {"message": " ".join(parts + notes), "rejects": len(result.rejects),
+            "warnings": len(result.warnings), "notes": notes}

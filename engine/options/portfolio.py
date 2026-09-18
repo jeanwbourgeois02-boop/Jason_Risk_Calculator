@@ -18,17 +18,29 @@ index points, commodity dollars) -- not one coherent number. This module
 is the "real desk normalizes to a common basis" step MODELS.md says the
 vendored package deliberately leaves to the caller.
 
-**The conversion, stated once (applies uniformly to price/delta/gamma/
-theta/vega/rho).** Every Greek the vendored FX/equity/commodity pricers
-return is already a QUOTE-CURRENCY-denominated sensitivity per 1 unit of
-underlying (delta = dPrice/dSpot, gamma = d^2Price/dSpot^2, vega =
-dPrice/dVol, theta = dPrice/dt, rho = dPrice/dRate -- every one of these
-is "quote ccy per (unit move)", not itself a price level needing its own
-separate FX conversion). So the SAME single factor converts all six:
+**The conversion (corrected 2026-09-18, units audit).** price, theta, vega
+and rho are QUOTE-currency amounts per 1 unit of underlying (per vol point /
+calendar day / percentage point of rate -- see store.py's unit list), so
+one factor converts them:
 
-    usd_equivalent = native_greek * (quantity * multiplier) * spot_to_usd
+    usd = native * (quantity * multiplier) * spot_to_usd
 
-where `spot_to_usd` is the position's own `quote_ccy` -> USD rate (this
+delta and gamma are NOT quote-currency amounts: delta = dPrice/dSpot is a
+number of UNDERLYING units (base-ccy units for FX), and gamma is its change
+per move of 1.0 in the spot rate as quoted, whose size depends on the
+pair's price scale. Pushing them through the same factor (as this module
+did until 2026-09-18) gave "USD P&L per 1.0 move of spot": a EURUSD option
+and a USDJPY option of the same USD size came out ~150x apart, and the sum
+across pairs meant nothing. They are first put on a spot-value basis with
+the underlying's own official SPOT, S:
+
+    delta_usd = delta * S        * (quantity * multiplier) * spot_to_usd
+              = USD value of the delta-equivalent position in the underlying
+                (FX: quantity x DELTA base-ccy units, at USD per base ccy)
+    gamma_usd = gamma * S**2/100 * (quantity * multiplier) * spot_to_usd
+              = change in delta_usd for a 1 % move in spot
+
+In both, `spot_to_usd` is the position's own `quote_ccy` -> USD rate (this
 package's `Position.fx_rate_to_base`, read from `marks_official`'s
 official SPOT per CLAUDE.md: quote-ccy P&L converts to USD at SPOT, never
 the forward outright -- matching the FX leg P&L rule CLAUDE.md already
@@ -45,7 +57,10 @@ and one contract covers `multiplier` units of it.
 **Missing conversion rate -> skipped, not defaulted.** A priced outcome
 whose `quote_ccy` has no official SPOT on `as_of` (no `quote_ccy+USD` or
 `USD+quote_ccy` pair marked) is excluded from the Portfolio and reported
-separately in `skipped` -- never silently assumed 1.0.
+separately in `skipped` -- never silently assumed 1.0. Likewise one whose
+own underlying has no official SPOT (FX: the pair `base_ccy+quote_ccy`;
+equity/commodity: the underlying named in `instruments.bbg_ticker`), which
+delta and gamma need.
 
 **Grouping / UI hierarchy.** ``Position.label`` is set to `package_id`, so
 `Portfolio.by_label()` gives the "package" level of the "Portfolio Totals
@@ -109,24 +124,37 @@ def build_positions(conn: sqlite3.Connection, as_of: str, outcomes: Iterable) ->
         if not outcome.priced:
             continue
         row = conn.execute(
-            "SELECT asset_class, quote_ccy, multiplier FROM instruments WHERE instrument_id = ?",
+            "SELECT asset_class, base_ccy, quote_ccy, multiplier, bbg_ticker FROM instruments WHERE instrument_id = ?",
             (outcome.instrument_id,),
         ).fetchone()
         if row is None:
             skipped.append({"instrument_id": outcome.instrument_id, "reason": "no instruments row"})
             continue
-        asset_class, quote_ccy, multiplier = row
+        asset_class, base_ccy, quote_ccy, multiplier, bbg_ticker = row
 
         spot_to_usd, reason = _quote_ccy_to_usd(conn, as_of, quote_ccy)
         if spot_to_usd is None:
             skipped.append({"instrument_id": outcome.instrument_id, "reason": reason})
             continue
 
+        # The underlying's own spot, S: the pair for FX; for equity/commodity the
+        # underlying whose instrument_id `bbg_ticker` holds (equity_commodity.py).
+        underlying = base_ccy + quote_ccy if asset_class == "FX_OPTION" else bbg_ticker
+        spot_row = conn.execute(
+            "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'SPOT'",
+            (as_of, underlying),
+        ).fetchone()
+        if spot_row is None or not spot_row[0]:
+            skipped.append({"instrument_id": outcome.instrument_id,
+                            "reason": f"no official SPOT for {underlying} to put delta and gamma on a USD basis"})
+            continue
+        spot = spot_row[0]
+
         result = outcome.result
         raw = {
             "price": result.quote_price,
-            "delta": result.delta,
-            "gamma": result.gamma,
+            "delta": result.delta * spot,                  # units of underlying -> quote-ccy value
+            "gamma": result.gamma * spot * spot / 100.0,   # per 1.0 of spot -> per 1 % of spot
             "theta": result.theta,
             "vega": result.vega,
             "rho": result.rho,

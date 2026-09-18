@@ -424,3 +424,98 @@ def test_build_chart_plots_partially_priced_days_with_hover_note():
     assert trace["y"][-1] is not None  # the priced trade's sum, not a gap
     assert trace["text"][-1] == "excludes 1 of 2 trades unpriced"
     assert "%{text}" in trace["hovertemplate"]
+
+
+# --------------------------------------------------------------------- one bad stored value
+# 2026-09-18, Bloomberg PC: "none of the top headlines of the app work" -- one stored value
+# that was not a number raised out of `value_book`, so `_build_figures` raised and the
+# whole header was one "headline could not be computed (... could not convert string to
+# float: '<a date>')" card, naming neither the trade nor the column.
+
+
+def _card(cards, title):
+    return next(c for c in cards if getattr(c, "className", "") == "header-figure"
+                and c.children[0].children == title)
+
+
+def _db_two_priced_forwards(as_of="2026-09-17"):
+    conn = schema.connect()
+    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
+    _insert_instrument(conn, "EURUSD", "FX", "EUR", "USD")
+    _insert_trade(conn, "j1", "USDJPY", "FX_FWD", "2026-08-03", 1_000_000, 147.0)
+    _insert_trade(conn, "e1", "EURUSD", "FX_FWD", "2026-08-03", 2_000_000, 1.10)
+    _insert_legs(conn, [
+        ("j1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-03", "2026-10-20", 147.0, 1),
+        ("j1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-08-03", "2026-10-20", 147.0, 1),
+        ("e1", 1, "FX_NEAR", "EUR", 2_000_000, "2026-08-03", "2026-10-20", 1.10, 1),
+        ("e1", 2, "FX_NEAR", "USD", -2_200_000, "2026-08-03", "2026-10-20", 1.10, 1),
+    ])
+    _insert_official_mark(conn, as_of, "USDJPY", as_of, "SPOT", 149.0, "BBG_BFXFORWARD")
+    _insert_official_mark(conn, as_of, "USDJPY", "2026-10-20", "FWD_OUTRIGHT", 148.0, "BBG_INTERP")
+    _insert_official_mark(conn, as_of, "EURUSD", as_of, "SPOT", 1.11, "BBG_BFXFORWARD")
+    _insert_official_mark(conn, as_of, "EURUSD", "2026-10-20", "FWD_OUTRIGHT", 1.12, "BBG_BFXFORWARD")
+    conn.commit()
+    return conn
+
+
+def test_build_figures_survives_a_text_price_and_says_which_trade_and_column():
+    conn = _db_two_priced_forwards()
+    conn.execute("UPDATE trades SET price = '24-Jul' WHERE trade_id = 'j1'")
+    conn.commit()
+    cards = header._build_figures(conn, "2026-09-17")
+    ltd = _card(cards, "LTD")
+    assert ltd.children[1].children == "$40,000"  # e1 alone: 2,000,000 x (1.12 - 1.10); j1 contributes nothing
+    caption = ltd.children[2]
+    assert caption.children == "excludes 1 of 2 trades unpriced (1 with a stored value is not a number)"
+    assert "trade j1: trades.price is not a number ('24-Jul')" in caption.title
+    assert _card(cards, "Trades").children[1].children == "2"
+
+
+def test_build_figures_survives_the_misaligned_realised_row_of_the_2026_09_18_incident():
+    """`realised_pnl.pnl_usd` holding a date (engine/pnl/ledger.py's old positional INSERT
+    on a migrated table): the header used to be one error card. The settled trade is valued
+    as not yet frozen and every card is a figure."""
+    conn = _db_two_priced_forwards()
+    _insert_trade(conn, "old", "EURUSD", "FX_FWD", "2026-06-01", 1_000_000, 1.08)
+    _insert_legs(conn, [
+        ("old", 1, "FX_NEAR", "EUR", 1_000_000, "2026-06-01", "2026-07-24", 1.08, 1),
+        ("old", 2, "FX_NEAR", "USD", -1_080_000, "2026-06-01", "2026-07-24", 1.08, 1),
+    ])
+    _insert_official_mark(conn, "2026-07-24", "EURUSD", "2026-07-24", "SPOT", 1.09, "BBG_BFXFORWARD")
+    conn.execute(
+        "INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
+        "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, note) "
+        "VALUES ('old','EURUSD','FX_FWD','USD','2026-07-24','2026-07-24',1000000,'SPOT',1080000,'SPOT','1.09',"
+        "'2026-07-24','BBG_BFXFORWARD','10000.0')")
+    conn.commit()
+    cards = header._build_figures(conn, "2026-09-17")
+    ltd = _card(cards, "LTD")
+    # j1 1,000,000/149 JPY->USD + e1 40,000 + old 1,000,000 x (1.09 - 1.08) = 10,000
+    assert ltd.children[1].children == f"${1_000_000 / 149.0 + 40_000 + 10_000:,.0f}"
+    assert len(ltd.children) == 2  # fully priced: no "excludes" caption
+
+
+def test_a_failing_usd_delta_no_longer_takes_the_pnl_cards_with_it():
+    conn = _db_two_priced_forwards()
+    conn.execute("UPDATE trade_legs SET amount = '24-Jul' WHERE trade_id = 'j1' AND leg_no = 1")
+    conn.commit()
+    cards = header._build_figures(conn, "2026-09-17")
+    assert _card(cards, "LTD").children[1].children != "n/a"
+    net = _card(cards, "Net USD delta")
+    assert net.children[1].children == "n/a"  # the ladder raised on the text amount: only these two cards say so
+    reason = net.children[2].children
+    assert "USD delta could not be computed" in reason
+    assert "trade_legs.amount" in reason and "'24-Jul'" in reason and "trade_id j1 leg_no 1" in reason
+
+
+def test_failure_reason_names_table_column_row_and_value():
+    conn = _db_two_priced_forwards()
+    conn.execute("UPDATE marks SET value = '24-Jul' WHERE instrument_id = 'USDJPY' AND mark_type = 'SPOT'")
+    conn.commit()
+    text = header._failure_reason("headline could not be computed", ValueError("could not convert string to float: '24-Jul'"), conn)
+    assert text.startswith("headline could not be computed (ValueError: could not convert string to float: '24-Jul')")
+    assert "marks.value: 1 value that is not a number -- '24-Jul'" in text
+    assert "instrument_id USDJPY" in text and "mark_type SPOT" in text
+    # nothing bad on file: just the exception, no empty "Stored values" sentence
+    clean = header._failure_reason("x", ValueError("y"), _db_two_priced_forwards())
+    assert clean == "x (ValueError: y)"

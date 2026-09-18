@@ -317,10 +317,12 @@ def _price_eq_cmdty_row(conn: sqlite3.Connection, as_of: str, row: dict, asset_k
     if payoff not in supported:
         return _skip(row, f"payoff {payoff!r} not supported for {asset_kind}")
 
-    if payoff in _STRIKE_PAYOFFS and row["strike"] == 0:
-        return _skip(row, "strike is 0 (not known)")
-    if payoff in _BARRIER_PAYOFFS and row["barrier_level"] == 0:
-        return _skip(row, "barrier_level is 0 (not known)")
+    # Same wording as the FX path (store.py::NO_STRIKE_REASON / NO_BARRIER_REASON; not
+    # imported, store.py is the FX glue and this module stays independent of it).
+    if payoff in _STRIKE_PAYOFFS and not (row["strike"] and row["strike"] > 0):
+        return _skip(row, "no strike on file: enter the strike under Option terms")
+    if payoff in _BARRIER_PAYOFFS and not (row["barrier_level"] and row["barrier_level"] > 0):
+        return _skip(row, "no barrier / touch level on file: enter it under Option terms")
     if payoff not in ("ONE_TOUCH", "NO_TOUCH") and row["option_type"] not in ("CALL", "PUT"):
         return _skip(row, f"unrecognized option_type {row['option_type']!r}")
 

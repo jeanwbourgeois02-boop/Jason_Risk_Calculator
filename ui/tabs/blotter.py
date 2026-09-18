@@ -34,6 +34,18 @@ FX_OPTION rows (premium mark minus fill, in base currency, converted at spot), s
 Options sub-tab is the same strip + filter bar + table as Total book, scoped to
 `FX_OPTION`. `PLACEHOLDER_SCOPES` is kept (empty) for the placeholder rendering path.
 
+Options and Rates wiring (2026-09-18). `ui.tabs.options` and `ui.tabs.rates` each bring
+their own callbacks, both registered from `register_callbacks` here (Rates' Direction
+dropdown did nothing until it was). Both refresh their own table in place from the
+revision stores, so `_update` no longer rebuilds those sub-tabs on a marks-only revision
+(`_SELF_REFRESHING_SCOPES`); the P&L strip above each table, built here, follows through
+`_register_strip_refresh`. A book revision, a date change and a sub-tab change still
+rebuild them. The Options strip (`options_strip`) shows only the cards that have a value:
+a card waiting for an EARLIER close's option marks -- which exist only for the days the
+app ran with Bloomberg -- is left out and named in one caption line under the row
+(`options_hidden_cards`); a card that is "n/a" for any other reason stays, with its
+reason. The Rates strip, like every other scope's, always shows every card.
+
 Total book (2026-09-17, user request "there should be P&L by asset type"): under the
 strip, `asset_class_pnl_table` shows one row per asset class present (FX, Futures,
 Rates, Options) plus Total, each with LTD / Daily / Previous day / 5d / MTD / YTD /
@@ -83,6 +95,7 @@ the Options sub-tab shows for options the export left without a strike.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Callable, Optional
 
@@ -98,6 +111,7 @@ from ui.tabs.blotter_pricing import (
     HEADLINE_ORDER,
     HEADLINE_TITLES,
     add_row_display_fields,
+    describe_bad_stored_values,
     priced_value_book,
     pricing_snapshot,
     row_scoped_headline,
@@ -140,7 +154,16 @@ SCOPE_PRODUCTS = {
 # no strip / row-detail / filter callbacks are registered for them.
 _NON_TABLE_SCOPES = ("bundles", "rates", "fx", "options", "manual")
 # Views rebuilt whole when only marks changed (ui/revision.py); see `_update`.
-_MARKS_REBUILD_SCOPES = ("bundles", "rates", "fx", "options")
+_MARKS_REBUILD_SCOPES = ("bundles", "fx")
+# Sub-tabs whose own module refreshes its table IN PLACE from the revision stores
+# (`ui.tabs.options._render` / `_headline`, `ui.tabs.rates._refresh`), so they left the
+# list above on 2026-09-18: a wholesale rebuild on every 2-minute Bloomberg pull reset the
+# Options terms editor's dropdown, could wipe a strike being typed into a cell and closed a
+# Direction dropdown the user had open. A BOOK revision (upload, booking, terms or a
+# direction saved) and a date or sub-tab change still rebuild them. The one piece of those
+# sub-tabs built HERE, the P&L strip above the table, follows new marks through
+# `_register_strip_refresh`.
+_SELF_REFRESHING_SCOPES = ("options", "rates")
 # "rates" (2026-09-15) and "options" (2026-09-17) are both real views now -- see
 # scope_layout and the module docstring. Kept (empty) so the placeholder path stays
 # available for a future scope.
@@ -354,10 +377,14 @@ def _filter_bar(df: pd.DataFrame, table_id: str, display_columns: list, column_l
     return html.Div(className="blotter-filter-bar", children=children)
 
 
-def render_headline_strip(headline: dict) -> html.Div:
+def render_headline_strip(headline: dict, hidden: tuple = (), caption: str = "") -> html.Div:
     """The Excel Portfolio header's card row (LTD/Daily/Trades/Trading/LTD-1
     daily/LTD-1/LTD-2/Trading T-1/5d/MTD/YTD), bold green/red by sign, reference date
     underneath, "n/a" muted italic with the reason as a tooltip when unavailable.
+
+    `hidden` / `caption` (2026-09-18, used by the Options strip only -- `options_strip`):
+    the keys of `HEADLINE_ORDER` to leave out, and one plain line shown under the row in
+    their place. Both empty (every other scope): the row is exactly what it always was.
 
     No longer takes an optional caption (removed 2026-09-17, user decision "no bnp
     fall back"): its only use was the "n of m rows priced from BNP file rates, not
@@ -375,6 +402,8 @@ def render_headline_strip(headline: dict) -> html.Div:
     the caption differs from a fully-priced card."""
     cards = []
     for key in HEADLINE_ORDER:
+        if key in hidden:
+            continue
         entry = headline.get(key, {})
         available = entry.get("available")
         value = entry.get("value")
@@ -401,7 +430,105 @@ def render_headline_strip(headline: dict) -> html.Div:
                 style={"fontStyle": "italic", "color": "var(--muted)"},
                 title=entry.get("excluded_detail", "")))
         cards.append(html.Div(className="card", children=card_children))
-    return html.Div([html.Div(cards, className="cards")])
+    children = [html.Div(cards, className="cards")]
+    if caption:
+        children.append(html.P(caption, className="section-kicker", style={"fontStyle": "italic"}))
+    return html.Div(children)
+
+
+# The strip's cards that compare with, or stand on, an EARLIER close, and the earlier
+# dates each one needs (keys of `engine.pnl.ledger.period_reference_dates`). `ltd`,
+# `trades` and `trading` are about the as-of itself and are never hidden.
+_EARLIER_CLOSE_CARDS = {
+    "daily": ("daily",), "ltd1_daily": ("daily", "previous_day"), "d5": ("d5",), "mtd": ("mtd",),
+    "ytd": ("ytd",), "trading_t1": ("daily",), "ltd1": ("daily",), "ltd2": ("previous_day",),
+}
+_NO_PREMIUM_PREFIX = "no PREMIUM mark"   # `engine.pnl.valuation._open_option_row`'s own reason text
+
+
+def options_hidden_cards(conn: sqlite3.Connection, as_of: str, trade_ids, headline: dict) -> tuple:
+    """The Options strip's cards to leave out: the ones that are unavailable ONLY because
+    the earlier close they need has no option marks.
+
+    Why (user, 2026-09-18): option PREMIUM marks are written by the options pricer on the
+    days the app runs with Bloomberg -- the historical backfill writes spots, forwards and
+    futures, never option premiums -- so on the first days Daily / Previous day / 5d / MTD /
+    LTD-1 / LTD-2 are all "n/a", and a row of six "n/a" reads as "the headlines don't
+    work" although today's figures are right beside them.
+
+    A card is hidden only when ALL of this holds, so nothing else is ever swept under it:
+      - it is one of `_EARLIER_CLOSE_CARDS` and it is unavailable (a card with a value,
+        even a partial one with an "excludes" caption, always shows);
+      - a period DIFFERENCE from today (Daily, 5d, MTD, YTD) is hidden only while today's
+        LTD itself has a value -- when nothing prices TODAY, that is today's problem and
+        every card keeps its "n/a" and its reason;
+      - on each earlier date the card needs, every unpriced option is unpriced for want of
+        a PREMIUM mark (`value_book`'s own reason). A stored value that is not a number, a
+        missing conversion spot, an expired option that cannot be frozen: any other reason
+        keeps the card on screen, "n/a", with that reason as its tooltip.
+    Never a 0 in place of "n/a": a hidden card is absent and named in the caption."""
+    from engine.pnl.ledger import period_reference_dates
+
+    trade_ids = set(trade_ids)
+    if not trade_ids:
+        return ()
+    refs = period_reference_dates(as_of)
+    today_priced = bool(headline.get("ltd", {}).get("available"))
+
+    def unpriced_reasons(day: str) -> list:
+        df, _, _ = priced_value_book(conn, day)   # memoised: the same frames the strip was built from
+        if df.empty:
+            return []
+        rows = df[df["trade_id"].isin(trade_ids)]
+        return [str(r) for r in rows["reason"].tolist() if r]
+
+    hidden = []
+    for key in HEADLINE_ORDER:
+        needs = _EARLIER_CLOSE_CARDS.get(key)
+        if needs is None or headline.get(key, {}).get("available"):
+            continue
+        if key in ("daily", "d5", "mtd", "ytd") and not today_priced:
+            continue
+        reasons = [r for name in needs for r in unpriced_reasons(refs[name])]
+        if reasons and all(r.startswith(_NO_PREMIUM_PREFIX) for r in reasons):
+            hidden.append(key)
+    return tuple(hidden)
+
+
+def options_hidden_caption(hidden: tuple) -> str:
+    """"Daily P&L, 5d and MTD appear once option marks exist for the earlier close; they
+    are written each day the app runs with Bloomberg." -- "" when nothing is hidden."""
+    names = [HEADLINE_TITLES[key] for key in hidden]
+    if not names:
+        return ""
+    listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    verb = "appears" if len(names) == 1 else "appear"
+    return (f"{listed} {verb} once option marks exist for the earlier close; "
+            f"they are written each day the app runs with Bloomberg.")
+
+
+def options_strip(conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """The P&L strip above the Options table: the generic row scoped to the option trades,
+    minus the cards `options_hidden_cards` names, plus one caption line in their place.
+    Shared by the sub-tab's build (`_scope_layout_body`) and its in-place refresh on new
+    marks (`_refresh_options_strip`), so the two can never disagree."""
+    df = scope_df(conn, "options", as_of)
+    trade_ids = df["trade_id"].tolist() if not df.empty else []
+    headline = row_scoped_headline(conn, as_of, trade_ids)
+    hidden = options_hidden_cards(conn, as_of, trade_ids, headline)
+    return render_headline_strip(headline, hidden=hidden, caption=options_hidden_caption(hidden))
+
+
+def scope_strip(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """The whole-scope P&L strip of a sub-tab whose table belongs to another module
+    (`_SELF_REFRESHING_SCOPES`): Options gets `options_strip`; Rates the full generic row
+    over its swaps, every card shown. One builder for the sub-tab's first render and for
+    its in-place refresh on new marks."""
+    if scope == "options":
+        return options_strip(conn, as_of)
+    df = scope_df(conn, scope, as_of)
+    trade_ids = df["trade_id"].tolist() if not df.empty else []
+    return render_headline_strip(row_scoped_headline(conn, as_of, trade_ids))
 
 
 def asset_class_pnl_rows(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame) -> list:
@@ -569,7 +696,18 @@ def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
     return _sorted_scope_df(df)
 
 
-def _error_card(label: str, exc: Exception) -> html.Div:
+def _bad_values_text(conn: Optional[sqlite3.Connection]) -> str:
+    """`describe_bad_stored_values(conn)`, "" when there is no connection or nothing bad.
+    Never raises: it only ever decorates an error card or a notice."""
+    if conn is None:
+        return ""
+    try:
+        return describe_bad_stored_values(conn)
+    except Exception:  # noqa: BLE001 -- diagnosis only, must never be the thing that fails
+        return ""
+
+
+def _error_card(label: str, exc: Exception, conn: Optional[sqlite3.Connection] = None) -> html.Div:
     """Inline failure card for one Blotter sub-section (2026-09-17 coordinator
     instruction, live incident: `ui.tabs.options`'s stale-dev-DB `payoff` column threw
     an uncaught `OperationalError` from `_leg_rows`, which propagated all the way past
@@ -577,14 +715,24 @@ def _error_card(label: str, exc: Exception) -> html.Div:
     `Output(CONTENT_ID, "children")` never fired, so the tab just stayed on whatever it
     showed before, which is what "the blotter sub tabs do not load" looked like from
     the browser). Shows the exception's one-line message so the cause is visible on
-    the page itself, not only in the server log."""
-    return html.Div(className="section section--error", children=[
-        html.P(f"{label} could not be rendered ({exc}).", className="section-kicker",
-               style={"color": "var(--neg)"}),
-    ])
+    the page itself, not only in the server log.
+
+    With `conn` (2026-09-18): the card also names every stored figure that is not a
+    number -- table.column, the trade/instrument/mark it belongs to, the offending text
+    and how to fix it (`blotter_pricing.bad_stored_values`). The bare message the user
+    got on the Bloomberg PC, "could not convert string to float: '<a date>'", said
+    neither which trade nor which column, so nobody could act on it."""
+    children = [html.P(f"{label} could not be rendered ({exc}).", className="section-kicker",
+                       style={"color": "var(--neg)"})]
+    found = _bad_values_text(conn)
+    if found:
+        children.append(html.P(f"Stored values that are not numbers: {found}.", className="section-kicker",
+                               style={"color": "var(--neg)"}))
+    return html.Div(className="section section--error", children=children)
 
 
-def _safe_section(label: str, builder: Callable[[], html.Div]) -> html.Div:
+def _safe_section(label: str, builder: Callable[[], html.Div],
+                  conn: Optional[sqlite3.Connection] = None) -> html.Div:
     """Run one sub-section builder (a P&L strip, a delegated sub-tab's table, the
     asset-class breakdown, ...) and turn any exception into an inline `_error_card`
     instead of letting it propagate. A pure pass-through on success -- returns exactly
@@ -600,9 +748,27 @@ def _safe_section(label: str, builder: Callable[[], html.Div]) -> html.Div:
     try:
         return builder()
     except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
-        import logging
         logging.getLogger(__name__).exception("Blotter section %r failed to render", label)
-        return _error_card(label, exc)
+        return _error_card(label, exc, conn)
+
+
+def bad_values_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
+    """A red banner, on top of every Blotter sub-tab, naming every stored figure that is
+    not a number: table.column, the trade / instrument / mark it belongs to, the offending
+    text, and what fixes it (`blotter_pricing.bad_stored_values`). None when every stored
+    figure is a number, which is the normal case.
+
+    2026-09-18: `value_book` now leaves a trade with such a value unpriced instead of
+    failing, so the views load -- which also means the only trace of the bad cell would
+    otherwise be one "n/a" row and an "excludes 1 of N trades unpriced" caption. A data
+    error the user has to fix is said outright, like the missing-option-terms banner."""
+    found = _bad_values_text(conn)
+    if not found:
+        return None
+    return html.Div(className="notice notice--bad-values", role="alert",
+                    style={"border": "1px solid var(--neg)", "borderRadius": "6px", "padding": "8px 12px",
+                           "margin": "0 0 10px", "background": "rgba(178, 59, 59, 0.08)"},
+                    children=[html.B("Stored values that are not numbers. "), html.Span(found + ".")])
 
 
 def missing_terms_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
@@ -624,19 +790,29 @@ def missing_terms_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
                     children=[
                         html.B(f"{len(missing)} option{'s' if len(missing) != 1 else ''} cannot be priced: no strike on file. "),
                         html.Span(", ".join(missing) + ". "),
-                        html.Span("Enter the strike under Manual entry ▸ Option terms (also shown under Options), "
-                                  "or re-upload a blotter export that includes a Strike column."),
+                        # The Options table's Strike, Type and Payoff cells are editable
+                        # (`ui.tabs.options.EDITABLE_COLUMNS`), so that comes first; the form
+                        # and a re-upload are the alternatives. One plain sentence each.
+                        html.Span("Type the strike straight into the Strike cell under Options, "
+                                  "and set Payoff to Digital where it is one. "),
+                        html.Span("You can also enter it under Manual entry ▸ Option terms. "),
+                        html.Span("Or re-upload a blotter export that includes a Strike column."),
                     ])
 
 
 def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """One sub-tab's content, with the missing-option-terms banner (if any) on top of
-    the scope body built by `_scope_layout_body`."""
+    """One sub-tab's content, with the missing-option-terms banner and the
+    stored-values-that-are-not-numbers banner (each only if it has something to say) on
+    top of the scope body built by `_scope_layout_body`. With neither, the body is
+    returned as it is -- no extra nesting."""
     body = _scope_layout_body(scope, conn, as_of)
-    notice = _safe_section("Option terms notice", lambda: missing_terms_notice(conn))
-    if notice is None:
+    notices = [n for n in (
+        _safe_section("Stored values notice", lambda: bad_values_notice(conn)),
+        _safe_section("Option terms notice", lambda: missing_terms_notice(conn)),
+    ) if n is not None]
+    if not notices:
         return body
-    return html.Div([notice, body])
+    return html.Div([*notices, body])
 
 
 def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
@@ -654,28 +830,24 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
 
     if scope == "rates":
         def _strip():
-            df = scope_df(conn, scope, as_of)
-            trade_ids = df["trade_id"].tolist() if not df.empty else []
-            headline = row_scoped_headline(conn, as_of, trade_ids)
-            return html.Div(id=strip_id, children=render_headline_strip(headline))
+            return html.Div(id=strip_id, children=scope_strip(scope, conn, as_of))
         return html.Div([
-            _safe_section("P&L strip", _strip),
-            _safe_section("Rates", lambda: rates_ui.build_layout(conn, as_of)),
+            _safe_section("P&L strip", _strip, conn),
+            _safe_section("Rates", lambda: rates_ui.build_layout(conn, as_of), conn),
         ])
 
     if scope == "options":
         def _strip():
-            df = scope_df(conn, scope, as_of)
-            trade_ids = df["trade_id"].tolist() if not df.empty else []
-            headline = row_scoped_headline(conn, as_of, trade_ids)
-            return html.Div(id=strip_id, children=render_headline_strip(headline))
+            # Only the cards that have a value, and one caption for the ones that are
+            # waiting for an earlier close's option marks (`options_strip`).
+            return html.Div(id=strip_id, children=scope_strip(scope, conn, as_of))
         return html.Div([
-            _safe_section("P&L strip", _strip),
-            _safe_section("Options", lambda: options_ui.build_layout(conn, as_of)),
+            _safe_section("P&L strip", _strip, conn),
+            _safe_section("Options", lambda: options_ui.build_layout(conn, as_of), conn),
         ])
 
     if scope == "fx":
-        return _safe_section("FX", lambda: blotter_fx_ui.build_layout(conn, as_of))
+        return _safe_section("FX", lambda: blotter_fx_ui.build_layout(conn, as_of), conn)
 
     if scope == "manual":
         return _safe_section("Manual entry", lambda: manual_entry_ui.build_layout(conn))
@@ -700,7 +872,7 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
     except Exception as exc:  # noqa: BLE001 -- see _safe_section's docstring
         import logging
         logging.getLogger(__name__).exception("Blotter section %r failed to render", "Pricing")
-        return html.Div([_error_card("Pricing", exc), html.Div(id=detail_id)])
+        return html.Div([_error_card("Pricing", exc, conn), html.Div(id=detail_id)])
 
     if scope == "futures" and df.empty:
         empty = pd.DataFrame(columns=display_columns)
@@ -716,9 +888,9 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
         headline = row_scoped_headline(conn, as_of, trade_ids)
         return html.Div(id=strip_id, children=render_headline_strip(headline))
 
-    body = [_safe_section("P&L strip", _strip)]
+    body = [_safe_section("P&L strip", _strip, conn)]
     if scope == "total" and not df.empty:
-        body.append(_safe_section("P&L by asset class", lambda: asset_class_pnl_table(conn, as_of, df)))
+        body.append(_safe_section("P&L by asset class", lambda: asset_class_pnl_table(conn, as_of, df), conn))
     if df.empty:
         body.append(message_box("No trades for this as-of date in this scope."))
         body.append(html.Div(id=detail_id))
@@ -728,7 +900,7 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
         body.append(_safe_section(
             "Trade table",
             lambda: detail_table(df, table_id=table_id, display_columns=display_columns,
-                                  column_labels=column_labels)))
+                                  column_labels=column_labels), conn))
         body.append(html.Div(id=detail_id))
     return html.Div(body)
 
@@ -819,10 +991,13 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
         # No browser reload (ui/revision.py, 2026-09-18). A changed TRADE SET (upload,
         # manual booking) rebuilds whatever sub-tab is showing. A marks-only change
-        # rebuilds the views that are one static block (FX, Rates, Options, Bundles); the
-        # Total book and Futures tables instead refresh their rows in place through
-        # `_apply_filters`, so a Bloomberg pull never resets the user's filters, sort or
-        # page. The Manual entry form is never rebuilt under the user's hands.
+        # rebuilds the views that are one static block (FX, Bundles); the Total book and
+        # Futures tables instead refresh their rows in place through `_apply_filters`, so
+        # a Bloomberg pull never resets the user's filters, sort or page, and Options and
+        # Rates refresh their own table and their strip in place
+        # (`_SELF_REFRESHING_SCOPES`), so a pull never resets the terms editor, a cell
+        # being typed into or an open Direction dropdown. The Manual entry form is never
+        # rebuilt under the user's hands.
         from dash import ctx, no_update
         from dash.exceptions import MissingCallbackContextException
         try:
@@ -841,9 +1016,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         except sqlite3.OperationalError as exc:
             return message_box(f"Database not available ({exc}).")
         try:
-            with pricing_snapshot(conn):  # one view of the marks per render, see its docstring
+            with pricing_snapshot(conn, f"Blotter {scope}"):  # one view of the marks per render
                 if scope == "bundles":
-                    return _safe_section("Bundles", lambda: bundles_layout(conn, as_of_date))
+                    return _safe_section("Bundles", lambda: bundles_layout(conn, as_of_date), conn)
                 return scope_layout(scope, conn, as_of_date)
         except ImportError as exc:
             return message_box(f"Blotter view not available yet ({exc}).")
@@ -859,7 +1034,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             import logging
             logging.getLogger(__name__).exception(
                 "Blotter sub-tab %r failed to render for as_of=%s", scope, as_of_date)
-            return message_box(f"This view could not be rendered ({exc}).")
+            found = _bad_values_text(conn)  # names the trade/column of any stored value that is not a number
+            return message_box(f"This view could not be rendered ({exc})."
+                               + (f" Stored values that are not numbers: {found}." if found else ""))
         finally:
             conn.close()
 
@@ -886,13 +1063,16 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             except sqlite3.OperationalError as exc:
                 return message_box(f"Database not available ({exc}).")
             try:
-                with pricing_snapshot(conn):
+                with pricing_snapshot(conn, f"Blotter {_scope} P&L strip"):
                     if _scope == "futures" and not trade_ids:
                         df, _, _ = priced_value_book(conn, as_of_date)
                         if df.empty or df[df["product"] == "FUTURE"].empty:
                             return render_placeholder_strip(FUTURES_NO_TRADES_REASON)
                     headline = row_scoped_headline(conn, as_of_date, trade_ids)
                     return render_headline_strip(headline)
+            except Exception as exc:  # noqa: BLE001 -- an HTTP 500 here left the strip on stale figures, silently
+                logging.getLogger(__name__).exception("Blotter %r P&L strip failed for as_of=%s", _scope, as_of_date)
+                return _error_card("P&L strip", exc, conn)
             finally:
                 conn.close()
 
@@ -949,7 +1129,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             except sqlite3.OperationalError:
                 return [], []
             try:
-                with pricing_snapshot(conn):
+                with pricing_snapshot(conn, f"Blotter {_scope} rows"):
                     df = scope_df(conn, _scope, as_of_date)
             finally:
                 conn.close()
@@ -978,7 +1158,52 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         )(_clear_filters)
 
     options_ui.register_callbacks(app, get_db_path)
+    # Rates (2026-09-18): the Direction column is a Pay fixed / Receive fixed dropdown and
+    # the notice has a "confirm the rest" button; those, and the table's in-place refresh,
+    # are `ui.tabs.rates`' own callbacks, which were never hooked up here, so an edited
+    # cell did nothing. Its date picker defaults to this tab's
+    # (`rates.DEFAULT_DATE_PICKER_ID == DATE_PICKER_ID`). Its Outputs (`rates-datatable`,
+    # the notice, the status line, and the two revision stores with `allow_duplicate`) are
+    # registered nowhere else: Rates is in `_NON_TABLE_SCOPES`, so the generic strip /
+    # detail / filter callbacks below skip it.
+    rates_ui.register_callbacks(app, get_db_path)
     manual_entry_ui.register_callbacks(app, get_db_path)
+
+    def _register_strip_refresh(scope: str) -> None:
+        @app.callback(
+            Output(f"blotter-strip-{scope}", "children"),
+            Input(DATA_REVISION_ID, "data"),
+            State(DATE_PICKER_ID, "date"),
+            prevent_initial_call=True,
+        )
+        def _refresh_strip(_data_rev, as_of_date, _scope=scope):
+            """New marks: redraw the P&L strip above an Options / Rates table in place.
+            Those sub-tabs are no longer rebuilt whole on a data revision
+            (`_SELF_REFRESHING_SCOPES`) and their modules refresh only their OWN table, so
+            without this the strip would keep the figures of the last rebuild next to a
+            table that has moved on. The strip exists only while its sub-tab is showing;
+            Dash does not call this otherwise. A failure leaves the strip as it is rather
+            than blanking it -- the next revision tries again."""
+            from dash import no_update
+            if not as_of_date:
+                return no_update
+            from ui.app import connect_readonly
+            try:
+                conn = connect_readonly(get_db_path())
+            except sqlite3.OperationalError:
+                return no_update
+            try:
+                with pricing_snapshot(conn, f"Blotter {_scope} P&L strip"):
+                    return scope_strip(_scope, conn, as_of_date)
+            except Exception:  # noqa: BLE001 -- keep what is on screen
+                logging.getLogger(__name__).exception(
+                    "Blotter %r P&L strip refresh failed for as_of=%s", _scope, as_of_date)
+                return no_update
+            finally:
+                conn.close()
+
+    for _scope in _SELF_REFRESHING_SCOPES:
+        _register_strip_refresh(_scope)
 
     # "rates" (ui.tabs.rates), "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17),
     # "options" (ui.tabs.options, Phase 8) and "manual" (ui.tabs.manual_entry) have no

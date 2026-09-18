@@ -49,7 +49,9 @@ introduced) — a title-row test must assert against `today_ny()`, not a fixed d
 **Screenshot verification quirk**: headless Edge via `msedge.exe --headless=new
 --screenshot=...` hung indefinitely when many old `msedge.exe`/`msedgewebview2.exe`
 processes from prior sessions were still alive (it silently attaches to an existing
-instance rather than running a fresh headless one). Fix: `taskkill //F //IM msedge.exe`
-and `//IM msedgewebview2.exe` first, then run with an explicit fresh
-`--user-data-dir=<scratch>/edge-profile-...` and a `timeout N` wrapper (no
-`--virtual-time-budget`, which does not reliably end the process either).
+instance rather than running a fresh headless one). Fix: an explicit fresh
+`--user-data-dir=<scratch>/edge-profile-...` and a `timeout N` wrapper; that alone was
+enough on 2026-09-18 (nine runs, no hang, `--virtual-time-budget=9000` ended cleanly).
+**CORRECTED 2026-09-18: do NOT `taskkill //IM msedge.exe` / `msedgewebview2.exe` as this
+note originally advised** -- it kills the user's own browser (the live app is usually open
+in it) and other agents' work. See [[real-browser-verification-2026-09-18]].

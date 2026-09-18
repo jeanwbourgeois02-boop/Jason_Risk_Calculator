@@ -158,3 +158,177 @@ def test_reported_product_relabel_boundary_unchanged_by_the_cap():
     df = value_book(conn, "2026-09-17")
     assert df[df["trade_id"] == "near"].iloc[0]["product"] == "FX_SPOT"
     assert df[df["trade_id"] == "far"].iloc[0]["product"] == "FX_FWD"
+
+
+# --------------------------------------------------------------------- one bad value, one trade
+# 2026-09-18 (Bloomberg PC: every Blotter view showed "could not convert string to float:
+# '<a date>'" and no headline had a figure). SQLite keeps text it cannot convert as TEXT
+# even in a REAL column; one such cell raised out of `value_book` and blanked everything
+# built on it. Now it leaves ONE trade unpriced, with a reason naming the trade id, the
+# table.column and the offending value. Nothing is substituted for the bad value.
+
+
+def _two_pairs(conn):
+    """t1: USDJPY forward (as `_one_open_fx_trade`); t2: EURUSD forward. Both open and
+    fully marked on 2026-09-17."""
+    _one_open_fx_trade(conn, settle_date="2026-10-20")
+    _insert_instrument(conn, "EURUSD", "EUR", "USD")
+    _insert_trade(conn, "t2", "EURUSD", "FX_FWD", "2026-08-01", 2_000_000, 1.10)
+    _insert_legs(conn, [
+        ("t2", 1, "FX_NEAR", "EUR", 2_000_000, "2026-08-01", "2026-10-20", 1.10, 1),
+        ("t2", 2, "FX_NEAR", "USD", -2_200_000, "2026-08-01", "2026-10-20", 1.10, 1),
+    ])
+    stamp = "2026-09-17T17:00:00-04:00"
+    _insert_mark(conn, "2026-09-17", "USDJPY", "2026-10-20", "FWD_OUTRIGHT", 148.0, "BBG_BFXFORWARD", stamp)
+    _insert_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "SPOT", 149.0, "BBG_BFXFORWARD", stamp)
+    _insert_mark(conn, "2026-09-17", "EURUSD", "2026-10-20", "FWD_OUTRIGHT", 1.12, "BBG_INTERP", stamp)
+    _insert_mark(conn, "2026-09-17", "EURUSD", "2026-09-17", "SPOT", 1.11, "BBG_BFXFORWARD", stamp)
+    conn.commit()
+
+
+def _by_id(conn, as_of="2026-09-17"):
+    return value_book(conn, as_of).set_index("trade_id")
+
+
+def test_clean_book_is_priced_exactly_as_before_the_guard():
+    conn = schema.connect()
+    _two_pairs(conn)
+    vb = _by_id(conn)
+    assert vb.loc["t1", "pnl_usd"] == 1_000_000 * (148.0 - 147.0) / 149.0
+    assert vb.loc["t2", "pnl_usd"] == 2_000_000 * (1.12 - 1.10)
+    assert list(vb["reason"]) == ["", ""]
+    assert vb.loc["t1", "quantity"] == 1_000_000 and vb.loc["t1", "fill"] == 147.0
+
+
+def test_text_in_trades_price_leaves_that_one_trade_unpriced_and_names_it():
+    conn = schema.connect()
+    _two_pairs(conn)
+    conn.execute("UPDATE trades SET price = '24-Jul' WHERE trade_id = 't1'")
+    conn.commit()
+    assert conn.execute("SELECT typeof(price) FROM trades WHERE trade_id = 't1'").fetchone()[0] == "text"
+    vb = _by_id(conn)
+    assert vb.loc["t1", "reason"] == "trade t1: trades.price is not a number ('24-Jul')"
+    assert vb.loc["t1", "pnl_usd"] != vb.loc["t1", "pnl_usd"]          # NaN: never 0, never invented
+    assert vb.loc["t1", "fill"] != vb.loc["t1", "fill"]                # shown as missing, not as the raw text
+    assert vb.loc["t1", "quantity"] == 1_000_000 and vb.loc["t1", "status"] == "OPEN"
+    assert vb.loc["t2", "reason"] == "" and vb.loc["t2", "pnl_usd"] == 2_000_000 * (1.12 - 1.10)
+
+
+def test_text_in_trades_quantity_leaves_that_one_trade_unpriced_and_names_it():
+    conn = schema.connect()
+    _two_pairs(conn)
+    conn.execute("UPDATE trades SET quantity = '2026-07-24' WHERE trade_id = 't2'")
+    conn.commit()
+    vb = _by_id(conn)
+    assert vb.loc["t2", "reason"] == "trade t2: trades.quantity is not a number ('2026-07-24')"
+    assert vb.loc["t2", "quantity"] != vb.loc["t2", "quantity"]
+    assert vb.loc["t1", "reason"] == "" and vb.loc["t1", "pnl_usd"] == 1_000_000 / 149.0
+
+
+def test_text_in_a_forward_mark_unprices_only_the_trades_that_need_that_mark():
+    conn = schema.connect()
+    _two_pairs(conn)
+    conn.execute("UPDATE marks SET value = '24-Jul' WHERE instrument_id = 'USDJPY' AND mark_type = 'FWD_OUTRIGHT'")
+    conn.commit()
+    vb = _by_id(conn)
+    assert vb.loc["t1", "reason"] == ("trade t1: marks.value (FWD_OUTRIGHT for USDJPY settle 2026-10-20 on "
+                                      "2026-09-17) is not a number ('24-Jul')")
+    assert vb.loc["t1", "pnl_usd"] != vb.loc["t1", "pnl_usd"]
+    assert vb.loc["t2", "reason"] == "" and vb.loc["t2", "pnl_usd"] == 2_000_000 * (1.12 - 1.10)
+
+
+def test_text_in_the_conversion_spot_unprices_the_trades_converted_with_it():
+    conn = schema.connect()
+    _two_pairs(conn)
+    conn.execute("UPDATE marks SET value = '24-Jul' WHERE instrument_id = 'USDJPY' AND mark_type = 'SPOT'")
+    conn.commit()
+    vb = _by_id(conn)
+    assert "marks.value (SPOT for USDJPY settle 2026-09-17 on 2026-09-17) is not a number ('24-Jul')" in vb.loc["t1", "reason"]
+    assert vb.loc["t1", "reason"].startswith("trade t1: ")
+    assert vb.loc["t2", "reason"] == ""
+
+
+def test_text_in_a_pair_spot_used_only_for_the_carry_split_keeps_the_pnl():
+    """EURUSD's own SPOT splits the P&L into spot and carry; the P&L itself needs only the
+    outright (quote is USD). A bad one costs the split, named in `note`, not the P&L."""
+    conn = schema.connect()
+    _two_pairs(conn)
+    conn.execute("UPDATE marks SET value = '24-Jul' WHERE instrument_id = 'EURUSD' AND mark_type = 'SPOT'")
+    conn.commit()
+    vb = _by_id(conn)
+    assert vb.loc["t2", "reason"] == "" and vb.loc["t2", "pnl_usd"] == 2_000_000 * (1.12 - 1.10)
+    assert "is not a number ('24-Jul')" in vb.loc["t2", "note"] and "carry split unavailable" in vb.loc["t2", "note"]
+
+
+def _future(conn, multiplier=50):
+    conn.execute("INSERT INTO instruments VALUES ('ESZ6 Index','FUTURE','ES','USD',?,0,'ESZ6 Index','2026-12-18')",
+                 (multiplier,))
+    _insert_trade(conn, "f1", "ESZ6 Index", "FUTURE", "2026-08-01", 3, 6000.0)
+    _insert_legs(conn, [("f1", 1, "NOTIONAL", "USD", 900_000, "2026-08-01", "2026-12-18", 6000.0, 0)])
+    _insert_mark(conn, "2026-09-17", "ESZ6 Index", "2026-12-18", "FUTURE_PX", 6100.0, "BBG_BDH", "2026-09-17T17:00:00-04:00")
+    conn.commit()
+
+
+def test_text_in_a_futures_multiplier_unprices_the_future_only():
+    conn = schema.connect()
+    _two_pairs(conn)
+    _future(conn)
+    assert _by_id(conn).loc["f1", "pnl_usd"] == 3 * 50 * (6100.0 - 6000.0)
+    conn.execute("UPDATE instruments SET multiplier = '24-Jul' WHERE instrument_id = 'ESZ6 Index'")
+    conn.commit()
+    vb = _by_id(conn)
+    assert vb.loc["f1", "reason"] == "trade f1: instruments.multiplier is not a number ('24-Jul')"
+    assert vb.loc["f1", "pnl_usd"] != vb.loc["f1", "pnl_usd"]
+    assert list(vb.loc[["t1", "t2"], "reason"]) == ["", ""]
+
+
+def test_a_swap_with_a_text_fixed_rate_still_prices_because_its_pnl_is_marks_only():
+    conn = schema.connect()
+    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','2031-06-01')")
+    _insert_trade(conn, "s1", "IRSOIS-USD-1", "IRS", "2026-06-01", 10_000_000, 3.85)
+    _insert_legs(conn, [("s1", 1, "FIXED", "USD", -10_000_000, "2026-06-03", "2031-06-01", 3.85, 1),
+                        ("s1", 2, "FLOAT", "USD", 10_000_000, "2026-06-03", "2031-06-01", 0.0, 1)])
+    for mark_type, value in (("PV_USD", 12_500.0), ("CASHFLOW_USD", 500.0)):
+        _insert_mark(conn, "2026-09-17", "IRSOIS-USD-1", "2031-06-01", mark_type, value, "QL_PRICER", "t")
+    conn.execute("UPDATE trades SET price = '24-Jul' WHERE trade_id = 's1'")
+    conn.commit()
+    vb = _by_id(conn)
+    assert vb.loc["s1", "reason"] == "" and vb.loc["s1", "pnl_usd"] == 13_000.0
+    assert vb.loc["s1", "fill"] != vb.loc["s1", "fill"]  # the cell is blank, never the raw text
+    assert "trades.price is not a number ('24-Jul')" in vb.loc["s1", "note"]
+
+
+def test_a_malformed_trade_date_unprices_that_trade_instead_of_raising():
+    conn = schema.connect()
+    _two_pairs(conn)
+    conn.execute("UPDATE trades SET trade_date = '07/24/2026' WHERE trade_id = 't1'")
+    conn.commit()
+    vb = value_book(conn, "2026-09-17")
+    # '07/24/2026' sorts before the as-of, so the trade is still selected; the relabel's date parse fails on it.
+    bad = vb[vb["trade_id"] == "t1"].iloc[0]
+    assert bad["reason"].startswith("trade t1: could not be valued (ValueError")
+    assert vb[vb["trade_id"] == "t2"].iloc[0]["reason"] == ""
+
+
+def test_settled_trade_whose_realised_row_is_unreadable_and_has_no_mark_names_the_row():
+    """The misaligned `realised_pnl` row of the 2026-09-18 incident (`pnl_usd` holding a
+    date), with no official mark on or before settlement to value the trade from instead:
+    unpriced, reason naming the trade id, the column and the value -- never a raise."""
+    conn = schema.connect()
+    _two_pairs(conn)
+    _insert_trade(conn, "old", "EURUSD", "FX_FWD", "2026-06-01", 1_000_000, 1.08)
+    _insert_legs(conn, [
+        ("old", 1, "FX_NEAR", "EUR", 1_000_000, "2026-06-01", "2026-07-24", 1.08, 1),
+        ("old", 2, "FX_NEAR", "USD", -1_080_000, "2026-06-01", "2026-07-24", 1.08, 1),
+    ])
+    conn.execute(
+        "INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
+        "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, note) "
+        "VALUES ('old','EURUSD','FX_FWD','USD','2026-07-24',1000000,1080000,'SPOT',1.09,'2026-07-24','BBG_BFXFORWARD',"
+        "'2026-07-24','t','')")
+    conn.commit()
+    vb = _by_id(conn)
+    assert vb.loc["old", "pnl_usd"] != vb.loc["old", "pnl_usd"]
+    assert "settled trade old" in vb.loc["old", "reason"]
+    assert "realised_pnl.pnl_usd is not a number ('2026-07-24')" in vb.loc["old", "reason"]
+    assert list(vb.loc[["t1", "t2"], "reason"]) == ["", ""]

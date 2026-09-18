@@ -2,7 +2,8 @@
 name: rates-exotics
 description: Prices swaptions, caps/floors, SABR vol and Bermudan swaptions via the vendored options_calc.rates QuantLib library — a Black-76/Hull-White model family separate from engine/rates/'s OIS-NPV pricer.
 tools: Read, Edit, Write, Bash, Grep, Glob
-model: sonnet
+model: fable
+effort: xhigh
 memory: project
 ---
 

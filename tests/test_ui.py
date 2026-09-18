@@ -495,13 +495,17 @@ def test_get_db_path_env_override(monkeypatch, tmp_path):
     assert uiapp.get_db_path() == custom
 
 
-def test_every_static_callback_id_exists_in_layout():
+def test_every_static_callback_id_exists_in_layout(tmp_path):
     """A callback Input/State/Output whose component is not in the initial layout
     fires with a missing argument ('Inputs do not match callback definition', HTTP 500)
     or never fires. Components created inside another callback's output are exempt
-    only if listed here with a reason."""
+    only if listed here with a reason.
+
+    Built on a tmp_path database (2026-09-18): a bare `create_app()` resolves to
+    data/raw/risk.db, the user's live database, and runs `ensure_schema` on it -- DDL, the
+    column migration and the retired-source purge -- every time anyone runs the suite."""
     import ui.app as a
-    app = a.create_app()
+    app = a.create_app(db_path=tmp_path / "risk.db", start_feed=False)
     ids = set()
 
     def walk(c):
@@ -522,7 +526,8 @@ def test_every_static_callback_id_exists_in_layout():
                   "options-datatable", "options-collapsed-packages"}
     dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
                         "blotter-row-detail-", "options-terms-",
-                        "manual-")  # per-sub-tab, rendered by callback (manual-*: Manual entry sub-tab, 2026-09-18)
+                        "manual-",  # per-sub-tab, rendered by callback (manual-*: Manual entry sub-tab, 2026-09-18)
+                        "rates-")   # rendered inside the Blotter's Rates sub-tab (ui.tabs.rates.build_layout), like the Options ids
     missing = []
     for key, cb in app.callback_map.items():
         for kind in ("inputs", "state"):
@@ -829,8 +834,10 @@ def test_blotter_confirm_surfaces_clean_rejection(tmp_path, monkeypatch):
     assert data_rev is dash.no_update and book_rev is dash.no_update
 
 
-def test_selected_shows_filename_for_recognized_blotter_file(monkeypatch):
-    app = uiapp.create_app(db_path=None, start_feed=False)
+def test_selected_shows_filename_for_recognized_blotter_file(monkeypatch, tmp_path):
+    # tmp_path, never db_path=None: None resolves to the user's live data/raw/risk.db and
+    # create_app runs ensure_schema (DDL, migration, purge) on whatever it is given.
+    app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)
     key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
     cb = app.callback_map[key]["callback"]
     fn = getattr(cb, "__wrapped__", cb)
@@ -847,8 +854,8 @@ def test_selected_shows_filename_for_recognized_blotter_file(monkeypatch):
     assert result == ""
 
 
-def test_selected_shows_error_for_unrecognized_file(monkeypatch):
-    app = uiapp.create_app(db_path=None, start_feed=False)
+def test_selected_shows_error_for_unrecognized_file(monkeypatch, tmp_path):
+    app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)  # never the live database
     key = next(k for k in app.callback_map if k.startswith(f"..{uploads.STAGE_ID}.style"))
     cb = app.callback_map[key]["callback"]
     fn = getattr(cb, "__wrapped__", cb)

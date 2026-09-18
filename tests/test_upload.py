@@ -162,6 +162,167 @@ def test_import_blotter_one_bad_row_does_not_block_the_rest(tmp_path):
     assert 'disagree' in message
 
 
+# --------------------------------------------------------------------------- import_blotter_report
+# The outcome as data (2026-09-18): ui/uploads.py auto-dismisses a clean import after 8 s
+# and used to decide "clean" by reading the message for a phrase. The report gives it
+# counts instead: `rejects` (rows skipped), `warnings` (the file's content was doubtful
+# and a cell had to be rebuilt, ignored or distrusted) and `notes`; things the app shows
+# persistently elsewhere (swaps defaulted to pay fixed, overrides kept, options with no
+# strike) are information and never raise `warnings`.
+
+def test_report_for_the_clean_sample_has_no_rejects_and_no_warnings_only_information(tmp_path):
+    from data.ingest.upload import import_blotter_report
+
+    report = import_blotter_report(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, tmp_path / 'risk.db')
+    assert set(report) == {'message', 'rejects', 'warnings', 'notes'}
+    assert (report['rejects'], report['warnings']) == (0, 0)
+    assert isinstance(report['message'], str) and isinstance(report['notes'], list)
+    assert 'could not be read' not in report['message']
+    # information: the ten swaps read as pay fixed by default (names cut at "and n more")
+    # and the three options with no strike -- present, short, and not warnings
+    swaps_note, strike_note = report['notes']
+    assert swaps_note.startswith('10 rate swap(s) carry no pay/receive marker') and 'and 5 more' in swaps_note
+    assert strike_note.startswith('3 option(s) have no strike in the file: EURSEK112526C-197906813')
+    assert all(note in report['message'] for note in report['notes'])
+    assert report['message'].startswith(f'Imported {RAW_BLOTTER.name}: {EXPECTED_TRADES} trades')
+    assert len(report['message']) < 900                       # a paragraph, not a line per row
+
+
+def test_import_blotter_is_the_reports_message_and_still_a_plain_string(tmp_path):
+    import inspect
+
+    from data.ingest import upload
+    from data.ingest.upload import import_blotter_report
+
+    payload = RAW_BLOTTER.read_bytes()
+    message = import_blotter(payload, RAW_BLOTTER.name, tmp_path / 'a.db')
+    report = import_blotter_report(payload, RAW_BLOTTER.name, tmp_path / 'b.db')
+    assert type(message) is str and message == report['message']
+    assert list(inspect.signature(import_blotter).parameters) == ['payload', 'filename', 'db_path']
+    assert list(inspect.signature(import_blotter_report).parameters) == ['payload', 'filename', 'db_path']
+    # the phrase ui/uploads.py pins against this function's own source stays in it
+    assert upload.REJECTS_PHRASE == 'could not be read'
+    assert upload.REJECTS_PHRASE in inspect.getsource(import_blotter)
+
+
+def test_report_counts_a_price_that_arrived_as_a_date_and_was_rebuilt_as_a_warning_naming_the_row(tmp_path):
+    from data.ingest.upload import import_blotter_report
+
+    frame = sample_frame()
+    fut = frame[frame['Fin Type'] == 'FUTURE'].index[0]
+    fill = blotter._num(frame.loc[fut, 'Price'])
+    frame.loc[fut, 'Price'] = '24-Jul'                        # what Excel makes of 7.24
+    db = tmp_path / 'risk.db'
+    report = import_blotter_report(frame.to_csv(index=False).encode(), 'x.csv', db)
+    assert report['rejects'] == 0 and report['warnings'] >= 1
+    assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)      # rebuilt, so nothing was lost
+    (warning_note,) = [n for n in report['notes'] if "'24-Jul'" in n]
+    assert f'row {fut + 2} ' in warning_note and 'Price' in warning_note and 'is not a number' in warning_note
+    assert warning_note in report['message']
+    with sqlite3.connect(db) as conn:
+        price, kind = conn.execute('SELECT price, typeof(price) FROM trades WHERE trade_id = ?',
+                                   (frame.loc[fut, 'Trade Id'],)).fetchone()
+    assert kind == 'real' and price == pytest.approx(fill, abs=0.005)
+
+
+def test_report_counts_a_rejected_row_and_keeps_the_phrase_in_the_message(tmp_path):
+    from data.ingest.upload import import_blotter_report
+
+    frame = sample_frame()
+    opt = frame[frame['Fin Type'] == 'OPTION'].index[0]
+    frame.loc[opt, ['Price', 'NetInvoice']] = ['24-Jul', '']  # nothing left to rebuild the premium from
+    report = import_blotter_report(frame.to_csv(index=False).encode(), 'x.csv', tmp_path / 'risk.db')
+    assert report['rejects'] == 1 and report['warnings'] == 0
+    assert '1 row(s) could not be read and were skipped' in report['message']
+    assert f'row {opt + 2} ' in report['message'] and "Price '24-Jul' is not a number" in report['message']
+    assert trade_count(tmp_path / 'risk.db') == (EXPECTED_TRADES - 1, EXPECTED_LEGS - 1)
+
+
+def test_report_says_how_many_direction_overrides_were_kept_as_information(tmp_path):
+    from data.ingest import irs_direction, schema
+    from data.ingest.upload import import_blotter_report
+
+    db = tmp_path / 'risk.db'
+    payload = RAW_BLOTTER.read_bytes()
+    import_blotter(payload, RAW_BLOTTER.name, db)
+    conn = schema.connect(db)
+    for trade_id in ('918421481', '920118423', '932385416'):
+        irs_direction.set_direction(conn, trade_id, 'RECEIVE')
+    conn.close()
+    report = import_blotter_report(payload, RAW_BLOTTER.name, db)
+    assert (report['rejects'], report['warnings']) == (0, 0)
+    assert report['notes'][0].startswith('3 rate swap directions set by you kept')
+    assert any(n.startswith('7 rate swap(s) carry no pay/receive marker') for n in report['notes'])
+    with sqlite3.connect(db) as conn:
+        receivers = {r[0] for r in conn.execute("SELECT trade_id FROM trades WHERE product='IRS' AND quantity < 0")}
+    assert receivers == {'918421481', '920118423', '932385416'}
+
+
+# --------------------------------------------------------------------------- swap history across an upload
+SWAP_TRADE, SWAP_INSTRUMENT = '918421481', 'IRSOIS-USD-22860996'
+
+
+def _seed_swap_history(db):
+    from data.ingest import schema
+
+    conn = schema.connect(db)
+    rows = [(d, SWAP_INSTRUMENT, '2027-02-11', mt, v, src, 't')
+            for d in ('2026-09-16', '2026-09-17')
+            for mt, v, src in (('PV_USD', 100.0, 'QL_PRICER'), ('DV01_USD', 10.0, 'QL_PRICER'),
+                               ('CASHFLOW_USD', 1.0, 'QL_PRICER'), ('PAR_RATE', 0.04, 'QL_PRICER'),
+                               ('PV_USD', 99.0, 'BBG_BDH'))]
+    conn.executemany('INSERT INTO marks VALUES (?,?,?,?,?,?,?)', rows)
+    conn.commit()
+    conn.close()
+
+
+def _swap_history(db):
+    with sqlite3.connect(db) as conn:
+        return sorted(conn.execute('SELECT as_of_date, mark_type, source, value FROM marks WHERE instrument_id = ?',
+                                   (SWAP_INSTRUMENT,)).fetchall())
+
+
+def test_upload_that_turns_a_swap_round_reverses_its_priced_history_once_and_deletes_nothing_it_can_keep(tmp_path):
+    """Full-replace path: the staging copy's book is emptied before the load, so only
+    `_stage_and_publish` can see the flip -- and it must reverse exactly once."""
+    db = tmp_path / 'risk.db'
+    frame = sample_frame()
+    import_blotter(frame.to_csv(index=False).encode(), 'day1.csv', db)
+    _seed_swap_history(db)
+    before = _swap_history(db)
+
+    import_blotter(frame.to_csv(index=False).encode(), 'day1-again.csv', db)      # same direction
+    assert _swap_history(db) == before
+
+    swap = frame[frame['Trade Id'] == SWAP_TRADE].index[0]
+    frame.loc[swap, 'Notional'] = '(625,000,000)'                                  # the export now marks it short
+    import_blotter(frame.to_csv(index=False).encode(), 'day2.csv', db)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute('SELECT quantity FROM trades WHERE trade_id = ?', (SWAP_TRADE,)).fetchone()[0] == -625e6
+    expected = sorted((d, mt, s, v if mt == 'PAR_RATE' else -v) for d, mt, s, v in before if s == 'QL_PRICER')
+    assert _swap_history(db) == expected                       # both dates reversed, PAR_RATE kept, BBG_BDH gone
+
+    import_blotter(frame.to_csv(index=False).encode(), 'day2-again.csv', db)      # still short: not reversed again
+    assert _swap_history(db) == expected
+
+
+def test_upload_never_reverses_the_history_of_a_swap_the_user_has_already_set(tmp_path):
+    from data.ingest import irs_direction, schema
+
+    db = tmp_path / 'risk.db'
+    payload = RAW_BLOTTER.read_bytes()
+    import_blotter(payload, RAW_BLOTTER.name, db)
+    _seed_swap_history(db)
+    conn = schema.connect(db)
+    irs_direction.set_direction(conn, SWAP_TRADE, 'RECEIVE')   # the one real flip: history reversed here
+    conn.close()
+    after_set = _swap_history(db)
+    assert ('2026-09-17', 'PV_USD', 'QL_PRICER', -100.0) in after_set
+    import_blotter(payload, RAW_BLOTTER.name, db)              # the file still says nothing; the override holds
+    import_blotter(payload, RAW_BLOTTER.name, db)
+    assert _swap_history(db) == after_set
+
+
 # --------------------------------------------------------------------------- schema migration
 # Regression for a bug reported live (2026-09-17): a DB created before the
 # `instrument_options.payoff` column landed in the DDL is never migrated by

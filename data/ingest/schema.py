@@ -293,6 +293,23 @@ CREATE TABLE IF NOT EXISTS bundles (
 """
 
 
+# --------------------------------------------------------------------------- IRS direction
+# The user's own pay/receive decision per swap (data/ingest/irs_direction.py, 2026-09-18).
+# The blotter export can carry no direction at all (Side = 'Buy' and unsigned Notional on
+# every reference row, receivers included), so the direction typed in the app is the only
+# source for those swaps and must outlive every re-upload. Deliberately NO foreign key to
+# `trades`: an upload deletes and rewrites the whole book, and the override has to be
+# there to be re-applied when the trade comes back.
+IRS_DIRECTION_TABLES = ("irs_direction_overrides",)
+IRS_DIRECTION_DDL = """
+CREATE TABLE IF NOT EXISTS irs_direction_overrides (
+  trade_id        TEXT PRIMARY KEY,
+  direction       TEXT NOT NULL CHECK(direction IN ('PAY','RECEIVE')),
+  set_at          TEXT NOT NULL
+);
+"""
+
+
 _CREATE_TABLE_RE = re.compile(r'CREATE TABLE IF NOT EXISTS\s+"?(\w+)"?\s*\((.*?)\n\);', re.DOTALL)
 _CONSTRAINT_KEYWORDS = frozenset({"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"})
 
@@ -384,7 +401,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
     unconditionally (see `_views_ddl`'s docstring for why); enable foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
     try:
-        conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
+        conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL
+                           + IRS_DIRECTION_DDL)
         _migrate_columns(conn)
         conn.commit()
     except sqlite3.OperationalError as exc:

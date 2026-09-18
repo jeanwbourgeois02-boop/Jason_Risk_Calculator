@@ -40,6 +40,63 @@ package:
   dimensionless fraction of base notional -- the same unit trades.price is
   already in.
 
+- **Cash payoffs (DIGITAL / ONE_TOUCH / NO_TOUCH): payout currency and PREMIUM
+  unit (2026-09-18 units audit).** The vendored ``fx/digital.py`` and
+  ``fx/one_touch.py`` pay ``cash_payout`` units of the QUOTE (domestic)
+  currency. Until this audit the wrappers here called them with
+  ``cash_payout=1.0`` and divided by spot like a vanilla, so the PREMIUM mark was
+  "the base-ccy value of 1 QUOTE unit paid per 1 base unit of quantity" --
+  ``exp(-r_d T) N(d2) / S``: about 1/150 of the right number for USDJPY and 1/11
+  for EURSEK. The blotter books a digital differently (the three in
+  ``data/raw/new_sample_trades.csv``): ``Quantity`` is the PAYOUT notional, the
+  fill is a FRACTION OF THAT PAYOUT, and the premium is invoiced in the pair's
+  BASE currency (``Currency`` = EUR for EURSEK112526C, USD for both
+  USDJPY111926P; ``NetInvoice = Quantity x Price``). The payout can only be in
+  the BASE currency as well: USD 248,000 of premium cannot buy a JPY 2,000,000
+  payout, nor EUR 121,000 a SEK 1,000,000 one. CONFIRMED BY THE USER 2026-09-18:
+  USD on the USDJPY digitals, EUR on the EURSEK one. So ``payout_ccy='BASE'`` is the
+  default of every cash-payoff wrapper below: the option pays ``cash_payout``
+  units of BASE currency per 1 unit of ``trades.quantity``, and ``premium`` is
+  the base-ccy value of that, i.e. with ``cash_payout=1`` a fraction of the
+  payout, between 0 and the BASE currency's discount factor -- the same unit
+  as the blotter fill, so ``quantity x (PREMIUM - fill)`` is base-ccy P&L for a
+  digital exactly as for a vanilla. ``payout_ccy='QUOTE'`` keeps the old
+  vendored meaning (``cash_payout`` QUOTE units per 1 unit of quantity; e.g.
+  ``cash_payout=strike`` is "base notional converted at the strike") for a
+  ticket the user confirms is booked that way. No pricing model is added here:
+    - a BASE-payout digital is the static replication
+      ``S_T 1{S_T>K} = (S_T-K)^+ + K 1{S_T>K}`` (call) /
+      ``S_T 1{S_T<K} = K 1{S_T<K} - (K-S_T)^+`` (put), i.e. the vendored
+      cash digital paying K plus/minus the vendored vanilla, combined
+      linearly field by field like ``options_calc.structures.combine``;
+    - a BASE-payout touch is the vendored touch priced in the inverted pair
+      (spot ``1/S``, level ``1/B``, the two rates swapped, up <-> down), which
+      values 1 BASE unit directly, then mapped back to this module's units by
+      ``_flip_to_quote_terms``. Tests check the two routes against each other
+      and against the closed form ``exp(-r_f T) N(+-d1)``.
+
+- **Units of every field on ``OptionPriceResult`` (FX), all per 1 unit of
+  ``trades.quantity`` and for a LONG position** (``store.py`` writes them to
+  ``marks`` unchanged; its docstring restates this list and how to turn each
+  into a USD figure):
+    - ``premium``  dimensionless: base-ccy value / base notional (vanilla,
+      American, Asian, barrier) or / base-ccy payout (digital, touch). Paid in
+      BASE ccy. NOT pips, NOT a percentage, NOT quote currency.
+    - ``quote_price``  ``premium x spot``: QUOTE ccy per 1 unit of quantity.
+    - ``delta``  d(quote_price)/d(spot): BASE-ccy units (spot delta, not
+      premium-adjusted; exceeds 1 for a digital near its strike).
+    - ``delta_premium_adjusted``  ``delta - premium``, BASE-ccy units.
+    - ``gamma``  d(delta)/d(spot): change in ``delta`` per move of 1.0 in the
+      spot rate as quoted (1 SEK per EUR, 1 JPY per USD, 1.00 USD per EUR) --
+      NOT per 1 % and NOT per pip, so it is not comparable across pairs until
+      rescaled (``gamma x spot / 100`` = change in delta per 1 % spot move).
+    - ``vega``  QUOTE ccy per 1 vol POINT (vol 10 % -> 11 %).
+    - ``theta``  QUOTE ccy per 1 CALENDAR day of decay (negative when time
+      decay costs the holder).
+    - ``rho``  QUOTE ccy per 1 PERCENTAGE POINT (100 bp) rise in the DOMESTIC
+      (= quote currency) rate. The foreign-rate rho is computed by the vendored
+      pricers but not carried on the result.
+
 - **Lazy vendor imports.** Every function below imports its vendored
   ``options_calc.fx.*`` submodule locally, not at module top level.
   Importing ANY name from ``engine.options.vendor.options_calc`` (even one
@@ -100,8 +157,9 @@ from typing import Dict, Optional
 class OptionPriceResult:
     """One pricer call's output, already converted to this app's units.
 
-    premium: for FX (price_fx_*), base-ccy fraction of notional (see
-        module docstring) -- the number directly comparable to
+    premium: for FX (price_fx_*), base-ccy fraction of notional -- of the
+        base-ccy PAYOUT for a digital / touch (see module docstring's "Cash
+        payoffs" section) -- the number directly comparable to
         ``trades.price`` / marks_official's PREMIUM value. For equity/
         commodity (price_equity_option / price_commodity_option), this is
         instead the UNSCALED quote-ccy price per 1 unit of underlying (no
@@ -232,6 +290,53 @@ def price_fx_vanilla(
     return _to_result(raw, spot, pair)
 
 
+# Fields every vendored fx/*.py pricer returns in the same units (quote ccy per 1 unit
+# of base notional, Greeks w.r.t. spot / vol point / calendar day / 1pp of rate), so a
+# static replication can add them field by field.
+_LINEAR_FIELDS = ("price", "delta", "gamma", "theta", "vega", "rho", "rho_foreign")
+
+PAYOUT_BASE = "BASE"
+PAYOUT_QUOTE = "QUOTE"
+
+
+def _payout_ccy(payout_ccy: str) -> str:
+    value = (payout_ccy or "").upper()
+    if value not in (PAYOUT_BASE, PAYOUT_QUOTE):
+        raise ValueError(f"payout_ccy must be 'BASE' or 'QUOTE', got {payout_ccy!r}")
+    return value
+
+
+def _flip_to_quote_terms(flipped: Dict[str, float], spot: float) -> Dict[str, float]:
+    """Map a vendored result priced in the INVERTED pair back to this module's units.
+
+    `flipped` comes from a vendored fx pricer called with spot ``u = 1/S``, the level(s)
+    inverted, and the two rates swapped (its "domestic" is this pair's BASE currency), so
+    its ``price`` is V_b(u): BASE-ccy value per 1 BASE unit paid. Every other wrapper here
+    returns QUOTE-ccy value per unit of quantity, V_q(S) = S * V_b(1/S), with Greeks
+    w.r.t. S and the QUOTE-ccy rate. Chain rule, u = 1/S:
+
+        delta  dV_q/dS   = V_b - u * V_b'(u)
+        gamma  d2V_q/dS2 = u**3 * V_b''(u)
+        theta, vega      = S * (flipped theta, vega)      (S held fixed)
+        rho (quote-ccy rate)  = S * flipped rho_foreign   (that world's foreign rate)
+        rho_foreign (base-ccy rate) = S * flipped rho
+
+    A change of numeraire on the vendored output, not a pricing model of its own."""
+    u = 1.0 / spot
+    price_b = flipped["price"]
+    raw = {
+        "price": spot * price_b,
+        "delta": price_b - u * flipped["delta"],
+        "gamma": flipped["gamma"] * u ** 3,
+        "theta": spot * flipped["theta"],
+        "vega": spot * flipped["vega"],
+        "rho": spot * flipped["rho_foreign"],
+        "rho_foreign": spot * flipped["rho"],
+    }
+    raw["delta_premium_adjusted"] = raw["delta"] - raw["price"] / spot
+    return raw
+
+
 def price_fx_digital(
     spot: float,
     strike: float,
@@ -244,15 +349,35 @@ def price_fx_digital(
     cash_payout: float = 1.0,
     pair: Optional[str] = None,
     calendar_aware: bool = True,
+    payout_ccy: str = PAYOUT_BASE,
 ) -> OptionPriceResult:
-    """European cash-or-nothing digital FX option. cash_payout is in quote
-    ccy, same units as the vanilla pricer's raw price -- divided by spot the
-    same way to land in the base-notional-fraction premium convention.
+    """European digital FX option paying `cash_payout` per 1 unit of quantity if it
+    finishes in the money (call: S_T > K; put: S_T < K).
+
+    `payout_ccy='BASE'` (default, the blotter's convention -- module docstring's "Cash
+    payoffs" section): the payout is in the pair's BASE currency, so with
+    `cash_payout=1.0` the returned `premium` is a FRACTION OF THE PAYOUT, paid in base
+    ccy, between 0 and the base-ccy discount factor: exp(-r_f T) N(d1) for a call,
+    exp(-r_f T) N(-d1) for a put. Built from the two vendored closed-form pricers by
+    static replication (cash digital paying K, plus the vanilla call / minus the vanilla
+    put), so every Greek is the same linear combination in the vanilla's own units.
+
+    `payout_ccy='QUOTE'`: the vendored pricer as is -- `cash_payout` QUOTE-ccy units per 1
+    unit of quantity; `premium` is then that value in base ccy (price / spot).
     See module docstring for `pair` / `calendar_aware`."""
-    from .vendor.options_calc.fx import digital
+    from .vendor.options_calc.fx import digital, european
 
     T = _resolve_T(pair, as_of, expiry, calendar_aware)
-    raw = digital.price(spot, strike, T, domestic_rate, foreign_rate, vol, option_type.lower(), cash_payout)
+    kind = option_type.lower()
+    if _payout_ccy(payout_ccy) == PAYOUT_QUOTE:
+        raw = digital.price(spot, strike, T, domestic_rate, foreign_rate, vol, kind, cash_payout)
+        return _to_result(raw, spot, pair)
+
+    cash_leg = digital.price(spot, strike, T, domestic_rate, foreign_rate, vol, kind, strike)
+    vanilla_leg = european.price(spot, strike, T, domestic_rate, foreign_rate, vol, kind)
+    sign = 1.0 if kind == "call" else -1.0
+    raw = {key: cash_payout * (cash_leg[key] + sign * vanilla_leg[key]) for key in _LINEAR_FIELDS}
+    raw["delta_premium_adjusted"] = raw["delta"] - raw["price"] / spot
     return _to_result(raw, spot, pair)
 
 
@@ -357,10 +482,17 @@ def price_fx_one_touch(
     cash_payout: float = 1.0,
     pair: Optional[str] = None,
     calendar_aware: bool = True,
+    payout_ccy: str = PAYOUT_BASE,
 ) -> OptionPriceResult:
-    """One-touch FX option: pays cash_payout (quote ccy) if barrier is ever
-    touched before expiry. ``direction`` is 'up' or 'down' -- store.py's
-    dispatch derives it from barrier vs spot; see that module."""
+    """One-touch FX option: pays `cash_payout` per 1 unit of quantity, at expiry, if
+    the barrier is ever touched before expiry. ``direction`` is 'up' or 'down' --
+    store.py's dispatch derives it from barrier vs spot; see that module.
+
+    `payout_ccy='BASE'` (default): payout in the pair's BASE currency, `premium` = a
+    fraction of the payout (with `cash_payout=1.0`), between 0 and the base-ccy discount
+    factor -- same convention as `price_fx_digital`, see module docstring's "Cash
+    payoffs" section. `payout_ccy='QUOTE'`: the vendored pricer as is (`cash_payout`
+    QUOTE-ccy units per 1 unit of quantity)."""
     # NOTE: `fx/__init__.py` does `from .one_touch import one_touch, no_touch`,
     # which REBINDS the `fx` package's `one_touch` attribute from the
     # submodule to the FUNCTION of the same name (a real Python gotcha: a
@@ -372,8 +504,24 @@ def price_fx_one_touch(
     from .vendor.options_calc.fx import one_touch as _one_touch_fn
 
     T = _resolve_T(pair, as_of, expiry, calendar_aware)
-    raw = _one_touch_fn(spot, barrier, T, domestic_rate, foreign_rate, vol, cash_payout=cash_payout, direction=direction)
-    return _to_result(raw, spot, pair)
+    return _price_touch(_one_touch_fn, spot, barrier, T, domestic_rate, foreign_rate, vol,
+                        direction, cash_payout, pair, payout_ccy)
+
+
+def _price_touch(touch_fn, spot, barrier, T, domestic_rate, foreign_rate, vol, direction,
+                 cash_payout, pair, payout_ccy) -> OptionPriceResult:
+    """Shared body of price_fx_one_touch / price_fx_no_touch. BASE payout = the vendored
+    touch priced in the inverted pair (spot 1/S, level 1/B, rates swapped, up <-> down),
+    which values 1 BASE unit directly, mapped back by `_flip_to_quote_terms`."""
+    if _payout_ccy(payout_ccy) == PAYOUT_QUOTE:
+        raw = touch_fn(spot, barrier, T, domestic_rate, foreign_rate, vol,
+                       cash_payout=cash_payout, direction=direction)
+        return _to_result(raw, spot, pair)
+    if direction not in ("up", "down"):
+        raise ValueError(f"direction must be 'up' or 'down', got {direction!r}")
+    flipped = touch_fn(1.0 / spot, 1.0 / barrier, T, foreign_rate, domestic_rate, vol,
+                       cash_payout=cash_payout, direction="down" if direction == "up" else "up")
+    return _to_result(_flip_to_quote_terms(flipped, spot), spot, pair)
 
 
 def price_fx_no_touch(
@@ -388,15 +536,80 @@ def price_fx_no_touch(
     cash_payout: float = 1.0,
     pair: Optional[str] = None,
     calendar_aware: bool = True,
+    payout_ccy: str = PAYOUT_BASE,
 ) -> OptionPriceResult:
-    """No-touch FX option: pays cash_payout (quote ccy) if barrier is NEVER
-    touched before expiry. Arguments: same as price_fx_one_touch."""
+    """No-touch FX option: pays `cash_payout` per 1 unit of quantity, at expiry, if the
+    barrier is NEVER touched before expiry. Arguments and payout-currency convention:
+    same as price_fx_one_touch (BASE-ccy payout by default, `premium` = fraction of it)."""
     # Same shadowing note as price_fx_one_touch above -- `no_touch` here is
     # the FUNCTION, not a submodule.
     from .vendor.options_calc.fx import no_touch as _no_touch_fn
 
     T = _resolve_T(pair, as_of, expiry, calendar_aware)
-    raw = _no_touch_fn(spot, barrier, T, domestic_rate, foreign_rate, vol, cash_payout=cash_payout, direction=direction)
+    return _price_touch(_no_touch_fn, spot, barrier, T, domestic_rate, foreign_rate, vol,
+                        direction, cash_payout, pair, payout_ccy)
+
+
+# --------------------------------------------------------------------------- expiry day (2026-09-18)
+
+# Payoffs whose value at expiry is a function of the closing spot alone. The others
+# (ASIAN, BARRIER_KI, BARRIER_KO, ONE_TOUCH, NO_TOUCH) depend on the path spot took.
+EXPIRY_PAYOFFS = ("VANILLA", "AMERICAN", "DIGITAL")
+PATH_DEPENDENT_PAYOFFS = ("ASIAN", "BARRIER_KI", "BARRIER_KO", "ONE_TOUCH", "NO_TOUCH")
+
+
+def price_fx_at_expiry(
+    payoff: str,
+    spot: float,
+    strike: float,
+    option_type: str,
+    pair: Optional[str] = None,
+    payout_ccy: str = PAYOUT_BASE,
+) -> OptionPriceResult:
+    """The option's PAYOFF at `spot`, in this module's units -- what `store.py` writes on
+    the expiry date itself, when there is no time value left and a model price (which
+    needs T > 0, a vol and two rates) would be both unnecessary and wrong.
+
+    premium (fraction of base notional / of the base-ccy payout, paid in BASE ccy):
+      VANILLA, AMERICAN   call max(S-K, 0) / S        put max(K-S, 0) / S
+      DIGITAL             1.0 in the money, else 0.0   (BASE payout; QUOTE payout: 1/S)
+    "In the money" is STRICT, the vendored pricers' own convention (their docstrings:
+    a digital call "pays out if S > K", a put "if S < K"; QuantLib's CashOrNothingPayoff
+    and PlainVanillaPayoff both return 0 at S == K): at S == K every payoff here is 0.
+    `quote_price` = premium x S as always, so quantity x premium x S is (S-K) x notional
+    in QUOTE ccy for an in-the-money call.
+
+    Greeks, same units as every other result: delta = d(quote_price)/dS of the payoff
+    itself -- +1 for a call in the money, -1 for a put in the money, 0 otherwise (the
+    holder is long / short one unit of BASE ccy against K of QUOTE until the cut; out
+    of the money there is nothing left). A BASE-payout digital in the money is worth S
+    in quote ccy (one BASE unit is about to be received), so ITS delta is +1 for call
+    and put alike and its premium-adjusted delta 0; a QUOTE-payout digital has delta 0.
+    gamma = theta = vega = rho = 0.0: no time value, no vol or rate sensitivity left.
+    delta_premium_adjusted = delta - premium, as everywhere (an in-the-money call: K/S).
+
+    Raises ValueError for a path-dependent payoff (PATH_DEPENDENT_PAYOFFS): the closing
+    spot cannot say whether a barrier was touched or what an average was. No QuantLib
+    pricing happens here; `pair` only selects the delta convention, as elsewhere."""
+    payoff = (payoff or "").upper()
+    if payoff not in EXPIRY_PAYOFFS:
+        raise ValueError(f"payoff {payoff!r} cannot be valued from the closing spot alone")
+    kind = (option_type or "").lower()
+    if kind not in ("call", "put"):
+        raise ValueError(f"option_type must be call or put, got {option_type!r}")
+    if not (spot and spot > 0 and strike and strike > 0):
+        raise ValueError(f"spot and strike must be positive, got spot={spot!r} strike={strike!r}")
+
+    in_the_money = spot > strike if kind == "call" else spot < strike
+    if payoff == "DIGITAL":
+        base_payout = _payout_ccy(payout_ccy) == PAYOUT_BASE
+        quote_value = (spot if base_payout else 1.0) if in_the_money else 0.0
+        delta = 1.0 if (in_the_money and base_payout) else 0.0
+    else:
+        quote_value = abs(spot - strike) if in_the_money else 0.0
+        delta = (1.0 if kind == "call" else -1.0) if in_the_money else 0.0
+    raw = {"price": quote_value, "delta": delta, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
+    raw["delta_premium_adjusted"] = delta - quote_value / spot
     return _to_result(raw, spot, pair)
 
 

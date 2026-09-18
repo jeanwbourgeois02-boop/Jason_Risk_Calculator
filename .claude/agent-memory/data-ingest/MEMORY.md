@@ -5,3 +5,4 @@
 - [Blotter source quirks](blotter-source-quirks.md) — new transaction-level trade source (blotter.py); Symbol id ≠ Trade Id, IRS has no pay/receive field, futures fills now real; 2026-09-17 guess-audit findings + 2 bug fixes appended
 - [Upload full replace](upload-dual-format-detection.md) — SUPERSEDED old content: import_blotter now full-replaces trades/legs/realised_pnl/swap_review on every call (2026-09-17); blotter.load itself stays idempotent-merge
 - [Schema generic migration](schema-generic-migration.md) — _migrate_columns is DDL-parsed now, not a hand list; fixed a live 500 from instrument_options.payoff missing on an old DB
+- [IRS direction and numeric gate](irs-direction-and-numeric-gate.md) — no export carries swap direction (user override is primary, never guess); NetInvoice/Notional/Quantity identities for cell recovery; _num turned '24 Jul' into 24.0 (fixed)

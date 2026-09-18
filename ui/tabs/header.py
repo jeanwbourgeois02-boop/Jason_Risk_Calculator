@@ -268,6 +268,12 @@ def _reason_tag(reason: str) -> str:
     # match _MISSING_TAG_RE first and produce the much less informative tag "no official".
     if "cannot be frozen" in reason:
         return "no historical mark at settlement"
+    from ui.tabs.blotter_pricing import BAD_VALUE_TAG, is_bad_value_reason
+    if is_bad_value_reason(reason):
+        # 2026-09-18: a trade `value_book` left unpriced because a STORED figure is not a
+        # number ("trade <id>: trades.price is not a number ('24-Jul')"), not because a
+        # mark is missing. `_unpriced_breakdown` repeats those reasons in full.
+        return BAD_VALUE_TAG
     if "SPOT for USD conversion" in reason:
         return "no SPOT (USD conversion)"
     m = _MISSING_TAG_RE.search(reason)
@@ -283,13 +289,17 @@ def _product_label(product: str, count: int) -> str:
 
 def _unpriced_breakdown(unpriced) -> str:
     """"5 options: no PREMIUM; 1 forward: no FWD_OUTRIGHT" -- grouped by (product, a
-    short reason tag), most-affected group first. "" for no unpriced rows."""
+    short reason tag), most-affected group first. "" for no unpriced rows. A trade
+    unpriced because of a bad stored value has `value_book`'s full reason appended (trade
+    id, table.column, offending value -- `blotter_pricing.bad_value_detail`): that one is
+    fixed in the data, not by a Bloomberg pull, so the tooltip says exactly where."""
     if unpriced.empty:
         return ""
+    from ui.tabs.blotter_pricing import bad_value_detail
     tags = unpriced["reason"].map(_reason_tag)
     groups = unpriced.groupby([unpriced["product"], tags]).size().sort_values(ascending=False)
     return "; ".join(f"{count} {_product_label(product, count)}: {tag}"
-                      for (product, tag), count in groups.items())
+                      for (product, tag), count in groups.items()) + bad_value_detail(unpriced)
 
 
 _EMPTY_PRICED = {"value": 0.0, "available": True, "reason": "", "excluded_summary": "", "excluded_detail": ""}
@@ -314,8 +324,9 @@ def _priced_single(df, root_reason: str) -> dict:
     if unpriced.empty:
         return {"value": value, "available": True, "reason": "", "excluded_summary": "", "excluded_detail": ""}
     n = len(unpriced)
+    from ui.tabs.blotter_pricing import bad_value_note
     return {"value": value, "available": True, "reason": "",
-            "excluded_summary": f"excludes {n} of {total} trades unpriced",
+            "excluded_summary": f"excludes {n} of {total} trades unpriced" + bad_value_note(unpriced),
             "excluded_detail": _unpriced_breakdown(unpriced)}
 
 
@@ -384,8 +395,26 @@ def _priced_diff(df_a, df_b, root_reason: str, ref_label: str,
     if blocked_ids:
         note = f"{len(blocked_ids)} priced now but unpriced on {ref_label}"
         detail = f"{detail}; {note}" if detail else note
+    from ui.tabs.blotter_pricing import bad_value_note
     return {"value": value, "available": True, "reason": "",
-            "excluded_summary": f"excludes {n_excluded} of {total} trades unpriced", "excluded_detail": detail}
+            "excluded_summary": f"excludes {n_excluded} of {total} trades unpriced" + bad_value_note(a_unpriced),
+            "excluded_detail": detail}
+
+
+def _failure_reason(what: str, exc: Exception, conn: Optional[sqlite3.Connection]) -> str:
+    """"<what> (ValueError: could not convert string to float: '24-Jul'). Stored values
+    that are not numbers: trade_legs.amount: 1 value ... '24-Jul' (trade_id 928825333
+    leg_no 1); to fix: re-upload the blotter" -- the exception, plus every stored figure
+    that is not a number named by table.column, row and value
+    (`blotter_pricing.describe_bad_stored_values`). The bare float message the user got on
+    2026-09-18 named neither the trade nor the column. The scan never raises."""
+    text = f"{what} ({type(exc).__name__}: {exc})"
+    try:
+        from ui.tabs.blotter_pricing import describe_bad_stored_values
+        found = describe_bad_stored_values(conn) if conn is not None else ""
+    except Exception:  # noqa: BLE001 -- diagnosis only
+        found = ""
+    return f"{text}. Stored values that are not numbers: {found}" if found else text
 
 
 def _root_reason(conn: sqlite3.Connection, as_of: str) -> str:
@@ -453,7 +482,16 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     cards.append(_figure_card("Trades", f"{n_total:,}", f"{n_open:,} open, {n_settled:,} settled"))
 
     cards.append(_divider())
-    ng = net_gross_usd(conn, as_of)
+    try:
+        ng = net_gross_usd(conn, as_of)
+    except Exception as exc:  # noqa: BLE001 -- the delta cards must never take the P&L cards with them
+        # 2026-09-18: `net_gross_usd` reads `trade_legs.amount` / spot through the ladder,
+        # not through `value_book`, so a stored value that is not a number raised here and
+        # the whole header -- every P&L card already built above -- was replaced by one
+        # "headline could not be computed" card. Now only these two cards say why.
+        import logging
+        logging.getLogger(__name__).exception("header Net/Gross USD delta failed for as_of=%s", as_of)
+        ng = {"available": False, "reason": _failure_reason("USD delta could not be computed", exc, conn)}
     if ng["available"]:
         # `ng["net"]` is the engine's net non-USD delta (+ = long foreign currency).
         # The header shows the USD *position* instead (CLAUDE.md sign: + = long USD),
@@ -609,7 +647,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         except sqlite3.OperationalError as exc:
             return [_figure_card("LTD", f"Database not available ({exc}).")]
         try:
-            with pricing_snapshot(conn):  # one view of the marks for all the cards
+            with pricing_snapshot(conn, "Header figures"):  # one view of the marks for all the cards
                 return _build_figures(conn, as_of)
         except Exception as exc:  # noqa: BLE001 -- deliberately broad, see below
             # Anything raised in here used to escape as an HTTP 500: the Output never
@@ -619,7 +657,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             import logging
             logging.getLogger(__name__).exception("header figures failed for as_of=%s", as_of)
             return [_pnl_card("LTD", {"available": False,
-                                      "reason": f"headline could not be computed ({type(exc).__name__}: {exc})"})]
+                                      "reason": _failure_reason("headline could not be computed", exc, conn)})]
         finally:
             conn.close()
 

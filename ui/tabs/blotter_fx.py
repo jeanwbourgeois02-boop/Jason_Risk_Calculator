@@ -298,9 +298,30 @@ def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
     """The whole FX sub-tab body: a P&L strip (`_fx_strip`), `fx_blotter_rows` rows with
     missing marks/P&L sample-filled (`_fill_sample_values`), plus a short note when
     there are no trades (table still renders, empty, with the full column set -- "rows
-    must always render" rule elsewhere in this app)."""
+    must always render" rule elsewhere in this app).
+
+    The strip and the table fail separately (2026-09-18): each is built under
+    `ui.tabs.blotter._safe_section`, so whatever breaks one -- on the Bloomberg PC it was
+    one stored value that was not a number -- leaves the other on the page, and the card
+    in its place names the table.column and the row of any such value instead of a bare
+    "could not convert string to float". On success both are passed through untouched, so
+    the children stay the same flat list as before: strip, optional caption, table."""
+    from ui.tabs.blotter import _error_card, _safe_section
+
+    children = [_safe_section("P&L strip", lambda: _fx_strip(conn, as_of), conn)]
+    try:
+        children.extend(_table_children(conn, as_of))
+    except Exception as exc:  # noqa: BLE001 -- same deliberate breadth as `_safe_section`
+        import logging
+        logging.getLogger(__name__).exception("Blotter FX trade table failed to render for as_of=%s", as_of)
+        children.append(_error_card("FX trade table", exc, conn))
+    return html.Div(children)
+
+
+def _table_children(conn: sqlite3.Connection, as_of: str) -> list:
+    """The optional "no trades" / sample caption and the trade table, in display order."""
     df = fx_blotter_rows(conn, as_of, value_fn=_priced_value_fn, products=FX_PRODUCTS)
-    children = [_fx_strip(conn, as_of)]
+    children = []
     sample_mask = None
     if df.empty:
         children.append(html.P("No FX trades on file for this as-of date.",
@@ -313,4 +334,4 @@ def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
         else:
             sample_mask = None
     children.append(fx_blotter_table(df, sample_mask=sample_mask))
-    return html.Div(children)
+    return children

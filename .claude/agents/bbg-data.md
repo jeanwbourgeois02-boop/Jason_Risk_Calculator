@@ -2,7 +2,8 @@
 name: bbg-data
 description: Pulls Bloomberg marks via blpapi and maintains the marks table, curves table and marks_official view.
 tools: Read, Edit, Write, Bash, Grep, Glob
-model: sonnet
+model: fable
+effort: xhigh
 memory: project
 ---
 

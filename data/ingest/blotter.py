@@ -26,20 +26,44 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
   - FUTURE: a trade + 1 NOTIONAL leg (``Quantity`` = contracts signed by ``Side``).
   - OPTION: product FX_OPTION, 1 NOTIONAL leg in the pair's base currency, quantity
     signed by ``Side``, price = premium fill. Strike from the Description when present
-    (genuinely absent from the file for some rows -- 0.0 sentinel, never invented).
+    (genuinely absent from the file for some rows -- 0.0 "not known" sentinel, never
+    invented, and listed on ``ParseResult.options_missing_strike`` so the UI can ask).
     Expiry / call-put come from ``Symbol`` when it parses, cross-checked against the
     Description's own date/CALL-PUT word when Description is populated (a disagreement
     rejects, per the tolerance rule below) rather than trusting the Symbol blindly.
+    ``NetInvoice`` is |Quantity x Price| but its sign is unreliable, so it never gives
+    direction: it rebuilds a Price / Quantity cell that is unusable, and is otherwise a
+    cross-check that warns above 0.5 % and never rejects.
   - INTEREST_RATE_SWAP: + = pay fixed, - = receive fixed (user-confirmed 2026-09-16), in
-    full notional units. A short is whatever the book marks with brackets or a minus
-    sign (user, 2026-09-18): on ``Notional`` or, where an export leaves ``Notional``
-    unsigned, on ``Quantity``. ``Side`` still carries no direction here.
+    full notional units. Direction, in order: the user's stored override
+    (``data/ingest/irs_direction.py`` -- the PRIMARY source, since neither the reference
+    export nor the user's own carries any direction marker); else every EXPLICIT signal
+    in the row (brackets / minus on Notional, Quantity, Gross Amnt/Principal, Current
+    Face, Original Face -- not NetInvoice, which on a swap is an upfront cash amount; a
+    sell-type ``Side``; pay / receive wording in Description, Notes, Swap Type,
+    RollSide, Tran Type), two of which contradicting each other reject the row; else
+    pay fixed BY DEFAULT, recorded as such per swap on ``ParseResult.irs_directions``.
+    ``Side`` = Buy and an unsigned amount are NOT signals (both sit on every reference
+    row, receivers included), and direction is never inferred from anything else.
 
 Tolerance rule (user instruction 2026-09-17, "as flexible as possible"): a blank,
 missing or oddly formatted field never rejects a row when the value can be recovered
 from another column; only a genuine contradiction between two populated fields does
 (pair vs buy/sell currencies, value date in Symbol vs Description, option pair vs
 Currency Pair). Rejected rows are counted and reported, never coerced or invented.
+
+Numbers (2026-09-18, the "could not convert string to float" / "24 Jul" incident): no
+text may ever reach a numeric column. Excel turns a number such as 7.24 into the date
+24-Jul, and a real .xlsx date cell reads as '2026-07-24 00:00:00'. ``_num`` is strict
+(the whole cell must be one number; it used to delete every non-digit, so '24 Jul'
+became 24.0 and '7/24/2026' 7242026.0), a cell that is not a number is rebuilt from
+another column (forward / spot rate and amounts from each other, Quantity and
+NetInvoice; option Price and Quantity from |NetInvoice|; futures price from NetInvoice
+and fees, contracts from Notional / multiplier; swap notional from Quantity x 1e6,
+fixed rate from Yield / Description) with a ``ParseWarning``, and only when nothing can
+rebuild it is that ONE row rejected, naming the column and the cell. ``_enforce_numeric``
+is the last gate: only finite numbers reach a REAL column (NaN binds as NULL and used to
+fail the whole upload). ``non_numeric_cells`` lists text already sitting in a database.
 
 Input tolerance (``read_table``): UTF-8 with or without BOM, or cp1252; ',' ';' tab or
 '|' delimiters; a header row anywhere in the first 50 lines (title/preamble rows are
@@ -53,10 +77,11 @@ from __future__ import annotations
 import csv
 import logging
 import math
+import numbers
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -69,9 +94,12 @@ from data.ingest.common import (
     FORWARD_SYMBOL_RE,
     Instrument,
     InstrumentOption,
+    IrsDirection,
     IRS_DESCRIPTION_RE,
     IRS_SYMBOL_RE,
     NDF_CCYS,
+    NO_DIRECTION_SIGNAL,
+    ParseWarning,
     PERPETUAL,
     Reject,
     Trade,
@@ -86,6 +114,8 @@ SOURCE = "XLSX"  # closest value in CLAUDE.md's trades.source enum ('BNP | XLSX 
 FUND = "NMMF"
 IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION", "INTEREST_RATE_SWAP")
 EXCLUDED_STATUS_WORDS = ("cancel", "reject", "void", "pend", "delet", "fail", "error", "draft")
+# Option NetInvoice vs |Quantity x Price|: a larger relative gap is a warning, never a reject.
+NET_INVOICE_TOLERANCE = 0.005
 
 # Reference header, exactly as data/raw/new_sample_trades.csv's own header row: the
 # casing every row.get(...) below expects. Incoming columns matching case-insensitively
@@ -147,6 +177,9 @@ _PAYOFF_KEYWORDS = (
     (("AMERICAN",), "AMERICAN"),
 )
 EXCEL_EPOCH = date(1899, 12, 30)
+# Payoffs that cannot be priced without a strike (touch options use the barrier level
+# instead) -- the same set data/ingest/manual.py and engine/options enforce.
+STRIKE_PAYOFFS = ("VANILLA", "DIGITAL", "AMERICAN", "ASIAN", "BARRIER_KI", "BARRIER_KO")
 
 
 @dataclass
@@ -168,30 +201,168 @@ class ParseResult:
     n_skipped_status_or_fund: int = 0
     n_superseded: int = 0   # earlier versions of a Trade Id repeated within the file
     n_updated: int = 0      # set by load(): trades that already existed and were replaced
+    # Rows that loaded but needed a repair or failed a cross-check (a Price that arrived
+    # as a date and was rebuilt from the amounts, an option NetInvoice that disagrees
+    # with Quantity x Price, ...). Never rejects.
+    warnings: List[ParseWarning] = field(default_factory=list)
+    # trade_id -> which way each swap was read and which signal decided it (or
+    # NO_DIRECTION_SIGNAL when the file carries none and pay fixed was assumed).
+    irs_directions: Dict[str, IrsDirection] = field(default_factory=dict)
+    # Option instruments the file gives no strike for (stored as the schema's 0 = "not
+    # known" sentinel, never a real strike of 0), so the UI can ask for them by name.
+    options_missing_strike: List[str] = field(default_factory=list)
+    trade_rows: Dict[str, int] = field(default_factory=dict)   # trade_id -> file row number
+    # Input, not output: the user's stored pay/receive overrides (load() passes
+    # irs_direction.get_overrides). An override always wins over a file signal.
+    direction_overrides: Dict[str, str] = field(default_factory=dict)
+    n_direction_overrides: int = 0   # set by load(): swaps on file facing the way the user set
+
+    def information_notes(self) -> List[str]:
+        """Things the app also shows persistently elsewhere (the Rates notice, the
+        Blotter's missing-terms banner), so they inform and never count as warnings:
+        overrides kept, swaps defaulted to pay fixed, swaps that took their direction
+        from a marker in the file, options with no strike. Counts and names only."""
+        out: List[str] = []
+        if self.n_direction_overrides:
+            n = self.n_direction_overrides
+            out.append(f"{n} rate swap direction{'s' if n != 1 else ''} set by you kept (your setting wins over the file).")
+        defaulted = sorted(t for t, d in self.irs_directions.items() if d.defaulted)
+        if defaulted:
+            out.append(f"{len(defaulted)} rate swap(s) carry no pay/receive marker in the file and were read as pay "
+                       f"fixed: {_some(defaulted)}. Set Pay or Receive in the Rates table.")
+        signalled = sorted(f"{t} {_DIRECTION_WORDS[d.direction]}" for t, d in self.irs_directions.items()
+                           if not d.defaulted and not d.decided_by.startswith("user override"))
+        if signalled:
+            out.append(f"{len(signalled)} rate swap(s) took their direction from a marker in the file: {_some(signalled)}.")
+        if self.options_missing_strike:
+            out.append(f"{len(self.options_missing_strike)} option(s) have no strike in the file: "
+                       f"{_some(self.options_missing_strike)}.")
+        return out
+
+    def warning_notes(self) -> List[str]:
+        """Where the file's content was doubtful and the parser had to rebuild, ignore or
+        distrust a cell (`self.warnings`): one sentence, the rows named, the first few
+        spelled out."""
+        if not self.warnings:
+            return []
+        rows = sorted({w.row_no for w in self.warnings})
+        shown = "; ".join(f"row {w.row_no} {w.symbol}: {w.message}" for w in self.warnings[:3])
+        more = f"; and {len(self.warnings) - 3} more" if len(self.warnings) > 3 else ""
+        return [f"{len(self.warnings)} cell(s) in {len(rows)} row(s) were doubtful and were rebuilt or ignored "
+                f"(rows {_some([str(r) for r in rows])}): {shown}{more}."]
+
+    def notes(self) -> List[str]:
+        """Plain sentences for the upload summary: `information_notes` then `warning_notes`."""
+        return self.information_notes() + self.warning_notes()
+
+
+def _some(names: List[str], limit: int = 8, head: int = 5) -> str:
+    """'a, b, c' -- or the first few and 'and n more' once the list passes `limit`."""
+    names = list(names)
+    if len(names) <= limit:
+        return ", ".join(names)
+    return ", ".join(names[:head]) + f" and {len(names) - head} more"
 
 
 # --------------------------------------------------------------------------- cell helpers
+_BLANK_WORDS = frozenset(("nan", "nat", "none", "null", "n/a", "#n/a", "-", "--"))
+_MONTH_WORDS = frozenset(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"))
+_CURRENCY_MARKS_RE = re.compile(r"[$€£¥%]")
+_CODE_PREFIX_RE = re.compile(r"^([A-Za-z]{3})\s*(?=[-+.\d])")     # 'USD 5', 'USD-5'
+_CODE_SUFFIX_RE = re.compile(r"(?<=[\d.])\s*([A-Za-z]{3})$")       # '5 USD'
+_PLAIN_NUMBER_RE = re.compile(r"(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+_MONTH_NAME_RE = re.compile(r"(?<![A-Za-z])(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*(?![A-Za-z])", re.I)
+_DATE_SHAPE_RE = re.compile(r"^\s*\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}(\s|T|$)|^\s*\d{1,2}:\d{2}")
+
+
+def _ungroup(s: str) -> Optional[str]:
+    """Digits with their thousands separators removed and a decimal comma turned into a
+    point, or None when the separators fit no number layout (so '24,07,2026' or
+    '1,2,3' is refused, never squeezed into a number)."""
+    if re.fullmatch(r"\d{1,3}(?:[ '’]\d{3})+(?:[.,]\d+)?", s):          # 1 000 000,5 / 1'000'000.5
+        s = re.sub(r"[ '’]", "", s)
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):                                       # 1.234.567,89
+            if not re.fullmatch(r"\d{1,3}(?:\.\d{3})+,\d*", s):
+                return None
+            return s.replace(".", "").replace(",", ".")
+        if not re.fullmatch(r"\d{1,3}(?:,\d{2,3})+\.\d*(?:[eE][+-]?\d+)?", s):  # 1,137,580.00
+            return None
+        return s.replace(",", "")
+    if "," in s:
+        if re.fullmatch(r"\d{1,3}(?:,\d{3})+", s):                           # 35,000,000
+            return s.replace(",", "")
+        if re.fullmatch(r"\d+,\d+", s):                                      # 0,00579 (decimal comma)
+            return s.replace(",", ".")
+        return None
+    return s
+
+
 def _num(v) -> float:
-    """float() tolerant of thousands separators, currency symbols, '(1,000)' negatives,
-    trailing '-' and blank cells (-> NaN, never 0)."""
-    if v is None:
+    """A cell as a finite float, or NaN -- never 0, never a guess. Tolerates thousands
+    separators, a decimal comma, currency symbols / a 3-letter currency code, '%',
+    '(1,000)' negatives, a trailing '-' and blank cells.
+
+    STRICT about what is left (2026-09-18): the whole cell has to read as one number.
+    Until then every character that was not a digit was simply deleted, so text that
+    Excel had turned into a date became a wrong number instead of a miss -- '24 Jul'
+    read as 24.0, 'Jul-24' as -24.0, '7/24/2026' as 7242026.0, a time '05:45:36' as
+    54536.0 -- and '1e999' as inf. A date / datetime / time cell object, a bool, and
+    any text that is not a number are NaN here, so the caller recovers the value from
+    another column or rejects that one row, naming the cell (`_bad_cell`)."""
+    if v is None or isinstance(v, bool):
         return math.nan
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).strip().replace("−", "-")
-    if s == "" or s.lower() in ("nan", "none", "null", "n/a", "-"):
+    if isinstance(v, numbers.Real):
+        x = float(v)
+        return x if math.isfinite(x) else math.nan
+    if isinstance(v, (datetime, date, time)):          # pd.Timestamp is a datetime
+        return math.nan
+    s = str(v).replace("−", "-").replace(" ", " ").strip()
+    if s == "" or s.lower() in _BLANK_WORDS:
         return math.nan
     neg = False
     if s.startswith("(") and s.endswith(")"):
-        neg, s = True, s[1:-1]
+        neg, s = True, s[1:-1].strip()
+    s = _CURRENCY_MARKS_RE.sub("", s).strip()
+    for rx in (_CODE_PREFIX_RE, _CODE_SUFFIX_RE):
+        m = rx.search(s)
+        if m:
+            if m.group(1).upper() in _MONTH_WORDS:      # '24 Jul', 'Jul-24': a date, not a currency code
+                return math.nan
+            s = (s[:m.start()] + s[m.end():]).strip()
     if s.endswith("-"):
-        neg, s = True, s[:-1]
-    s = re.sub(r"[^0-9eE+\-.]", "", s.replace(",", ""))
-    try:
-        x = float(s)
-    except ValueError:
+        neg, s = True, s[:-1].strip()
+    if s[:1] in ("+", "-"):
+        neg, s = neg or s[0] == "-", s[1:].strip()
+    s = _ungroup(s)
+    if s is None or not _PLAIN_NUMBER_RE.fullmatch(s):
+        return math.nan
+    x = float(s)
+    if not math.isfinite(x):
         return math.nan
     return -x if neg else x
+
+
+def _bad_cell(row: pd.Series, col: str) -> Optional[str]:
+    """The cell's own text when it is populated but is not a number (the '24-Jul' /
+    datetime-cell case), else None -- a blank cell is not a bad cell."""
+    v = row.get(col)
+    text = _s(v)
+    if text == "" or text.lower() in _BLANK_WORDS:
+        return None
+    return text if math.isnan(_num(v)) else None
+
+
+def _looks_like_date(text: str) -> bool:
+    return bool(_MONTH_NAME_RE.search(text) or _DATE_SHAPE_RE.search(text))
+
+
+def _not_a_number(col: str, text: str) -> str:
+    """'Price '24-Jul' is not a number (it reads as a date ...)' -- the wording every
+    numeric-cell reject and repair warning uses, naming the column and the cell. (Excel
+    is the usual cause: it turns a typed 7.24 into the date 24-Jul.)"""
+    why = " (it reads as a date, as Excel makes of 7.24)" if _looks_like_date(text) else ""
+    return f"{col} {text!r} is not a number{why}"
 
 
 def _s(v) -> str:
@@ -463,12 +634,15 @@ def _dedupe_versions(df: pd.DataFrame) -> tuple:
 
 
 # --------------------------------------------------------------------------- parse
-def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str] = None) -> ParseResult:
+def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str] = None,
+          direction_overrides: Optional[Dict[str, str]] = None) -> ParseResult:
     """Pure parse of a blotter (path, bytes or an already-read DataFrame). Never writes;
-    never coerces a contradictory row."""
+    never coerces a contradictory row. ``direction_overrides`` ({trade_id: 'PAY' |
+    'RECEIVE'}, from ``irs_direction.get_overrides``) is the user's own swap direction,
+    which wins over anything the file says."""
     df = source if isinstance(source, pd.DataFrame) else read_table(source, filename)
     df = canonicalize_columns(df).reset_index(drop=True)
-    res = ParseResult()
+    res = ParseResult(direction_overrides=dict(direction_overrides or {}))
     df, res.n_superseded = _dedupe_versions(df)
     global _DAY_FIRST
     previous, _DAY_FIRST = _DAY_FIRST, detect_day_first(df)
@@ -477,41 +651,164 @@ def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str]
         _parse_rows(df, res)
     finally:
         _DAY_FIRST = previous
+    _enforce_numeric(res)
+    res.options_missing_strike = sorted(
+        k for k, o in res.instrument_options.items() if o.strike == 0 and o.payoff in STRIKE_PAYOFFS)
     return res
+
+
+# Every numeric field that reaches a REAL column, per record type. `_enforce_numeric`
+# checks each one, so "no text and no NaN can reach a numeric column" holds by
+# construction and does not rest on every parse path being read correctly.
+_NUMERIC_FIELDS = (("quantity", "price"), ("amount", "rate"), ("multiplier",), ("strike", "barrier_level"))
+
+
+def _is_number(x) -> bool:
+    return isinstance(x, numbers.Real) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def _enforce_numeric(res: "ParseResult") -> None:
+    """Last gate before anything can be written: drop (as a named, single-row reject)
+    any trade whose own numbers, legs, instrument or option terms hold anything but a
+    finite number. Python's sqlite3 binds NaN as NULL, which fails NOT NULL and used to
+    take the whole upload down with it, and SQLite stores non-numeric text in a REAL
+    column as text, on which the pricing layer later dies in float()."""
+    trade_fields, leg_fields, instrument_fields, option_fields = _NUMERIC_FIELDS
+    bad_instruments = {}
+    for iid, inst in res.instruments.items():
+        for f in instrument_fields:
+            if not _is_number(getattr(inst, f)):
+                bad_instruments[iid] = f"instruments.{f} = {getattr(inst, f)!r}"
+    for iid, opt in res.instrument_options.items():
+        for f in option_fields:
+            if not _is_number(getattr(opt, f)):
+                bad_instruments[iid] = f"instrument_options.{f} = {getattr(opt, f)!r}"
+    bad_trades: Dict[str, str] = {}
+    for t in res.trades:
+        for f in trade_fields:
+            if not _is_number(getattr(t, f)):
+                bad_trades[t.trade_id] = f"trades.{f} = {getattr(t, f)!r}"
+        if t.instrument_id in bad_instruments:
+            bad_trades.setdefault(t.trade_id, bad_instruments[t.instrument_id])
+    for leg in res.legs:
+        for f in leg_fields:
+            if not _is_number(getattr(leg, f)):
+                bad_trades.setdefault(leg.trade_id, f"trade_legs.{f} (leg {leg.leg_no}) = {getattr(leg, f)!r}")
+    if not bad_trades and not bad_instruments:
+        return
+    for t in res.trades:
+        if t.trade_id in bad_trades:
+            res.rejects.append(Reject(res.trade_rows.get(t.trade_id, 0), t.instrument_id,
+                                      f"not a finite number: {bad_trades[t.trade_id]}; row not loaded"))
+            res.irs_directions.pop(t.trade_id, None)
+    res.trades = [t for t in res.trades if t.trade_id not in bad_trades]
+    res.legs = [l for l in res.legs if l.trade_id not in bad_trades]
+    for iid in bad_instruments:
+        res.instruments.pop(iid, None)
+        res.instrument_options.pop(iid, None)
 
 
 def _parse_rows(df: pd.DataFrame, res: "ParseResult") -> None:
     for idx, row in df.iterrows():
         row_no = int(idx) + 2  # header is line 1
-        if _status_excluded(row.get("Status")) or _fund_excluded(row.get("Fund")):
-            res.n_skipped_status_or_fund += 1
-            continue
-        kind = _row_kind(row)
-        if kind == "FORWARD":
-            res.n_forward += 1
-            _parse_forward(res, row, row_no)
-        elif kind == "CURRENCY":
-            res.n_currency += 1
-            _parse_currency(res, row, row_no)
-        elif kind == "FUTURE":
-            res.n_future += 1
-            _parse_future(res, row, row_no)
-        elif kind == "OPTION":
-            res.n_option += 1
-            _parse_option(res, row, row_no)
-        elif kind == "INTEREST_RATE_SWAP":
-            res.n_irs += 1
-            n_rejects_before = len(res.rejects)
-            _parse_irs(res, row, row_no)
-            if len(res.rejects) > n_rejects_before:
-                res.n_skipped_irs += 1
-        else:
-            res.n_skipped_other += 1
+        n_trades_before = len(res.trades)
+        _parse_row(res, row, row_no)
+        for t in res.trades[n_trades_before:]:
+            res.trade_rows[t.trade_id] = row_no
+
+
+def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
+    if _status_excluded(row.get("Status")) or _fund_excluded(row.get("Fund")):
+        res.n_skipped_status_or_fund += 1
+        return
+    kind = _row_kind(row)
+    if kind == "FORWARD":
+        res.n_forward += 1
+        _parse_forward(res, row, row_no)
+    elif kind == "CURRENCY":
+        res.n_currency += 1
+        _parse_currency(res, row, row_no)
+    elif kind == "FUTURE":
+        res.n_future += 1
+        _parse_future(res, row, row_no)
+    elif kind == "OPTION":
+        res.n_option += 1
+        _parse_option(res, row, row_no)
+    elif kind == "INTEREST_RATE_SWAP":
+        res.n_irs += 1
+        n_rejects_before = len(res.rejects)
+        _parse_irs(res, row, row_no)
+        if len(res.rejects) > n_rejects_before:
+            res.n_skipped_irs += 1
+    else:
+        res.n_skipped_other += 1
 
 
 def _common(row: pd.Series) -> dict:
     return dict(account=_s(row.get("ExtAccount")), counterparty=_s(row.get("Counterparty")),
                 strategy="", trader=_s(row.get("Trader")), description=_s(row.get("Description")))
+
+
+def _warn(res: ParseResult, row_no: int, symbol: str, message: str) -> None:
+    res.warnings.append(ParseWarning(row_no, symbol, message))
+    log.warning("row %d %s: %s", row_no, symbol, message)
+
+
+def _fx_amounts(row: pd.Series, buy_is_base: bool, rate: float, rate_from_description: bool = False) -> tuple:
+    """Base amount, quote amount (both unsigned) and rate of a FORWARD / spot CURRENCY
+    row -> ``(base_amt, quote_amt, rate, repairs, problem)``.
+
+    Each of the three is read from its own column and, when that cell is blank or is not
+    a number (Excel turning 7.24 into 24-Jul is the known way a number becomes a date),
+    rebuilt from the others -- never coerced, never 0:
+      base amount   <- BuyCurrency/SellCurrency Amount, else |Quantity| (the base amount
+                       on all 828 FX rows of the reference sample), else quote / rate
+      quote amount  <- the other Amount column, else base x rate, else |NetInvoice| (the
+                       quote amount on all 828 reference rows)
+      rate          <- the Description's '@ rate', else Price, else quote / base
+    ``repairs`` names every populated-but-not-a-number cell that was rebuilt and from
+    what; ``problem`` is the reject reason (naming column and cell) when something
+    cannot be rebuilt, else None."""
+    base_col, quote_col = (("BuyCurrency Amount", "SellCurrency Amount") if buy_is_base
+                           else ("SellCurrency Amount", "BuyCurrency Amount"))
+    base_amt, quote_amt = abs(_num(row.get(base_col))), abs(_num(row.get(quote_col)))
+    rate_ok = not math.isnan(rate) and rate != 0
+    rebuilt: Dict[str, str] = {}
+    if rate_ok and rate_from_description:
+        rebuilt["Price"] = "the Description"
+    if math.isnan(base_amt):
+        qty = abs(_num(row.get("Quantity")))
+        if not math.isnan(qty):
+            base_amt, rebuilt[base_col] = qty, "Quantity"
+        elif rate_ok and not math.isnan(quote_amt):
+            base_amt, rebuilt[base_col] = quote_amt / rate, f"{quote_col} / rate"
+    if math.isnan(quote_amt):
+        net = abs(_num(row.get("NetInvoice")))
+        if rate_ok and not math.isnan(base_amt):
+            quote_amt, rebuilt[quote_col] = base_amt * rate, "base amount x rate"
+        elif not math.isnan(net):
+            quote_amt, rebuilt[quote_col] = net, "NetInvoice"
+    if not rate_ok and not math.isnan(base_amt) and not math.isnan(quote_amt) and base_amt != 0:
+        rate, rebuilt["Price"] = quote_amt / base_amt, f"{quote_col} / {base_col}"
+        rate_ok = rate != 0
+
+    missing = [name for name, v in ((base_col, base_amt), (quote_col, quote_amt)) if math.isnan(v)]
+    if not rate_ok:
+        missing.append("rate")
+    if missing:
+        bad = [_not_a_number(c, t) for c in ("Price", base_col, quote_col, "Quantity", "NetInvoice")
+               if (t := _bad_cell(row, c)) is not None]
+        if bad:
+            return base_amt, quote_amt, rate, [], ("; ".join(bad) + "; cannot be rebuilt from the other columns "
+                                                   f"(still missing: {', '.join(missing)})")
+        if missing == ["rate"]:
+            return base_amt, quote_amt, rate, [], "no rate and zero base amount"
+        return base_amt, quote_amt, rate, [], ("blank BuyCurrency/SellCurrency Amount and no Quantity x Price "
+                                               "to derive them")
+    values = {"Price": rate, base_col: base_amt, quote_col: quote_amt}
+    repairs = [f"{_not_a_number(c, t)}; rebuilt {values[c]:.10g} from {how}"
+               for c, how in rebuilt.items() if (t := _bad_cell(row, c)) is not None]
+    return base_amt, quote_amt, rate, repairs, None
 
 
 def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
@@ -571,28 +868,14 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
                                   f"Buy/Sell Currency columns {buy_ccy}/{sell_ccy} disagree with pair {pair}"))
         return
 
-    buy_amt = _num(row.get("BuyCurrency Amount"))
-    sell_amt = _num(row.get("SellCurrency Amount"))
-    if math.isnan(buy_amt) or math.isnan(sell_amt):
-        qty = abs(_num(row.get("Quantity")))
-        if math.isnan(qty) or math.isnan(rate) or rate == 0:
-            res.rejects.append(Reject(row_no, symbol, "blank BuyCurrency/SellCurrency Amount and no Quantity x Price to derive them"))
-            return
-        base_amt, quote_amt = qty, qty * rate
-        buy_amt, sell_amt = (base_amt, quote_amt) if buy_ccy == base_ccy else (quote_amt, base_amt)
-    buy_amt, sell_amt = abs(buy_amt), abs(sell_amt)
-    if math.isnan(rate) or rate == 0:
-        base_amt = buy_amt if buy_ccy == base_ccy else sell_amt
-        quote_amt = sell_amt if buy_ccy == base_ccy else buy_amt
-        if base_amt == 0:
-            res.rejects.append(Reject(row_no, symbol, "no rate and zero base amount"))
-            return
-        rate = quote_amt / base_amt
-
-    if buy_ccy == base_ccy:
-        base_amount, quote_amount = buy_amt, -sell_amt
-    else:
-        base_amount, quote_amount = -sell_amt, buy_amt
+    buy_is_base = buy_ccy == base_ccy
+    base_amt, quote_amt, rate, repairs, problem = _fx_amounts(row, buy_is_base, rate, rate_from_description=bool(dm))
+    if problem:
+        res.rejects.append(Reject(row_no, symbol, problem))
+        return
+    for message in repairs:
+        _warn(res, row_no, symbol, message)
+    base_amount, quote_amount = (base_amt, -quote_amt) if buy_is_base else (-base_amt, quote_amt)
 
     is_ndf = 1 if (quote_ccy in NDF_CCYS or base_ccy in NDF_CCYS) else 0
     res.instruments.setdefault(pair, Instrument(
@@ -648,10 +931,12 @@ def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int,
     the ladder (a settled ZAR balance stays ZAR until a spot trade in the file converts
     it) and its P&L joins the book. A CURRENCY row with only one currency (a fee, a
     balance, a single-sided movement) stays what it was: the CASH instrument only,
-    never a trade, never a reject. Tolerance rule as for forwards: amounts fall back to
-    Quantity x Price, the pair to market convention, the trade date to the settle date
-    and vice versa; only a blank Trade Id or two identical currencies stops the trade
-    being written, and neither rejects the row."""
+    never a trade, never a reject. Tolerance rule as for forwards (`_fx_amounts`): the
+    amounts and the rate rebuild each other (Quantity, NetInvoice, Price), the pair falls
+    back to market convention, the trade date to the settle date and vice versa; a blank
+    Trade Id, two identical currencies or blank amounts stop the trade being written
+    without rejecting the row. The one reject: a populated amount / Price cell that is
+    not a number (a date, say) and cannot be rebuilt -- named, that row only."""
     buy_ccy = _ccy(row.get("Buy Currency"))
     sell_ccy = _ccy(row.get("Sell Currency"))
     trade_id = _s(row.get("Trade Id"))
@@ -661,24 +946,19 @@ def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int,
     if pair is None or {pair[:3], pair[3:]} != {buy_ccy, sell_ccy}:
         pair = _pair_by_convention(buy_ccy, sell_ccy)
     base_ccy, quote_ccy = pair[:3], pair[3:]
-    rate = _num(row.get("Price"))
-    buy_amt = _num(row.get("BuyCurrency Amount"))
-    sell_amt = _num(row.get("SellCurrency Amount"))
-    if math.isnan(buy_amt) or math.isnan(sell_amt):
-        qty = abs(_num(row.get("Quantity")))
-        if math.isnan(qty) or math.isnan(rate) or rate == 0:
+    buy_is_base = buy_ccy == base_ccy
+    base_amt, quote_amt, rate, repairs, problem = _fx_amounts(row, buy_is_base, _num(row.get("Price")))
+    if problem:
+        # Blank amounts: a cash movement with nothing to book, as before (instrument
+        # only, not a reject). A populated cell that is not a number and cannot be
+        # rebuilt is different: a real fill would silently leave the book, so that one
+        # row is rejected by name.
+        if "is not a number" in problem:
+            res.rejects.append(Reject(row_no, symbol, problem))
+        else:
             log.warning("row %d %s: CURRENCY row names %s/%s but has no amounts; cash instrument only",
                         row_no, trade_id, buy_ccy, sell_ccy)
-            return
-        base_amt, quote_amt = qty, qty * rate
-        buy_amt, sell_amt = (base_amt, quote_amt) if buy_ccy == base_ccy else (quote_amt, base_amt)
-    buy_amt, sell_amt = abs(buy_amt), abs(sell_amt)
-    if math.isnan(rate) or rate == 0:
-        base_amt = buy_amt if buy_ccy == base_ccy else sell_amt
-        quote_amt = sell_amt if buy_ccy == base_ccy else buy_amt
-        if base_amt == 0:
-            return
-        rate = quote_amt / base_amt
+        return
     trade_date = _date(row.get("TradeDate"))
     value_date = _date(row.get("Settle Date"))
     trade_date, value_date = trade_date or value_date, value_date or trade_date
@@ -686,10 +966,9 @@ def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int,
         log.warning("row %d %s: CURRENCY row names %s/%s but has no date; cash instrument only",
                     row_no, trade_id, buy_ccy, sell_ccy)
         return
-    if buy_ccy == base_ccy:
-        base_amount, quote_amount = buy_amt, -sell_amt
-    else:
-        base_amount, quote_amount = -sell_amt, buy_amt
+    for message in repairs:
+        _warn(res, row_no, symbol, message)
+    base_amount, quote_amount = (base_amt, -quote_amt) if buy_is_base else (-base_amt, quote_amt)
     is_ndf = 1 if (quote_ccy in NDF_CCYS or base_ccy in NDF_CCYS) else 0
     res.instruments.setdefault(pair, Instrument(
         instrument_id=pair, asset_class="FX", base_ccy=base_ccy, quote_ccy=quote_ccy,
@@ -705,11 +984,23 @@ def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int,
     res.n_spot += 1
 
 
-def _signed_quantity(row: pd.Series, symbol: str, row_no: int, res: ParseResult, label: str) -> Optional[float]:
+def _signed_quantity(row: pd.Series, symbol: str, row_no: int, res: ParseResult, label: str,
+                     rebuilt: float = math.nan, rebuilt_from: str = "") -> Optional[float]:
+    """``Quantity`` signed by ``Side``. When the cell is blank or is not a number the
+    caller's ``rebuilt`` magnitude (from other columns, NaN if there is none) is used
+    instead; a populated cell that is not a number is named in the warning, or in the
+    reject when nothing can rebuild it."""
     qty = _num(row.get("Quantity"))
     if math.isnan(qty):
-        res.rejects.append(Reject(row_no, symbol, f"blank Quantity ({label})"))
-        return None
+        bad = _bad_cell(row, "Quantity")
+        if math.isnan(rebuilt) or rebuilt == 0:
+            reason = (f"blank Quantity ({label})" if bad is None else
+                      f"{_not_a_number('Quantity', bad)}; cannot be rebuilt from the other columns ({label})")
+            res.rejects.append(Reject(row_no, symbol, reason))
+            return None
+        qty = abs(rebuilt)
+        if bad is not None:
+            _warn(res, row_no, symbol, f"{_not_a_number('Quantity', bad)}; rebuilt {qty:.10g} from {rebuilt_from}")
     side = _side(row.get("Side"))
     if side is None:
         if qty < 0:
@@ -735,14 +1026,43 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
         res.rejects.append(Reject(row_no, symbol, str(e)))
         return
     instrument_id = f"{code} Index"
-    signed_contracts = _signed_quantity(row, symbol, row_no, res, "contracts")
+    multiplier = FUTURE_MULTIPLIERS[root]  # root already validated by future_expiry
+    price = _num(row.get("Price"))
+    net = abs(_num(row.get("NetInvoice")))
+    # Contracts, when the Quantity cell is unusable: Notional / multiplier (the export's
+    # Notional is contracts x multiplier on all 11 reference FUTURE rows), else
+    # NetInvoice / (multiplier x Price), which is whole contracts to within the fees.
+    rebuilt, rebuilt_from = math.nan, ""
+    if math.isnan(_num(row.get("Quantity"))):
+        lots = abs(_num(row.get("Notional"))) / multiplier
+        if not math.isnan(lots) and round(lots) >= 1 and abs(lots - round(lots)) < 1e-6:
+            rebuilt, rebuilt_from = float(round(lots)), f"Notional / {multiplier:g}"
+        elif not math.isnan(net) and not math.isnan(price) and price > 0:
+            lots = net / (multiplier * price)
+            if round(lots) >= 1 and abs(lots - round(lots)) <= 0.01:
+                rebuilt, rebuilt_from = float(round(lots)), f"NetInvoice / ({multiplier:g} x Price)"
+    signed_contracts = _signed_quantity(row, symbol, row_no, res, "contracts", rebuilt, rebuilt_from)
     if signed_contracts is None:
         return
-    price = _num(row.get("Price"))
     if math.isnan(price):
-        res.rejects.append(Reject(row_no, symbol, "blank Price"))
-        return
-    multiplier = FUTURE_MULTIPLIERS[root]  # root already validated by future_expiry
+        # Fill price from the invoice: NetInvoice = contracts x multiplier x price, plus
+        # the fees on a buy, less them on a sell (exact on 10 of the 11 reference rows,
+        # and within the Price column's own 2-decimal rounding on the 11th).
+        bad = _bad_cell(row, "Price")
+        fees = _num(row.get("Total Fees"))
+        fee_note = ""
+        if math.isnan(fees):
+            fees, fee_note = 0.0, " (Total Fees not given: the rebuilt price still includes any fees)"
+        if not math.isnan(net) and net > 0 and signed_contracts != 0:
+            sign = 1.0 if signed_contracts > 0 else -1.0
+            price = (net - sign * fees) / (abs(signed_contracts) * multiplier)
+        if math.isnan(price) or price <= 0:
+            res.rejects.append(Reject(row_no, symbol, "blank Price" if bad is None else
+                                      f"{_not_a_number('Price', bad)}; cannot be rebuilt (needs NetInvoice and Quantity)"))
+            return
+        _warn(res, row_no, symbol,
+              (f"{_not_a_number('Price', bad)}" if bad is not None else "Price is blank")
+              + f"; rebuilt {price:.10g} from NetInvoice / (contracts x {multiplier:g}){fee_note}")
     expiry_iso = expiry.isoformat()
 
     res.instruments.setdefault(instrument_id, Instrument(
@@ -814,6 +1134,10 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
         if not math.isnan(v) and v > 0:
             col_strike = v
             break
+        bad_strike = _bad_cell(row, col)
+        if bad_strike is not None:   # never stored as text, never coerced: left unknown
+            _warn(res, row_no, symbol, f"{_not_a_number(col, bad_strike)}; ignored"
+                  + ("" if desc_strike else ": the strike stays unknown until it is entered in the app"))
     if col_strike and desc_strike and abs(col_strike - desc_strike) > 1e-9 * max(col_strike, desc_strike):
         res.rejects.append(Reject(row_no, symbol, f"strike column {col_strike} disagrees with Description strike {desc_strike}"))
         return
@@ -823,15 +1147,42 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     if trade_date is None:
         res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
         return
-    signed_notional = _signed_quantity(row, symbol, row_no, res, "notional")
-    if signed_notional is None:
-        return
+    # Premium fill and notional. NetInvoice is |Quantity x Price| on the reference
+    # sample (35,000,000 x 0.00579 = 202,650.00) but its SIGN is unreliable: -142,500 on
+    # Trade Id 934168029 whose Side is Buy, positive on the one Sell row. Direction
+    # therefore comes from Side alone, and NetInvoice is used for two things only:
+    # (1) rebuilding a Price or Quantity cell that is blank or is not a number, and
+    # (2) a magnitude cross-check that warns above 0.5 % and never rejects.
     premium = _num(row.get("Price"))
     if math.isnan(premium):
         premium = _num(row.get("Premium"))
-    if math.isnan(premium):
-        res.rejects.append(Reject(row_no, symbol, "blank Price/Premium"))
+    net = abs(_num(row.get("NetInvoice")))
+    net_ok = not math.isnan(net) and net > 0
+    quantity_cell = _num(row.get("Quantity"))
+    rebuilt, rebuilt_from = math.nan, ""
+    if math.isnan(quantity_cell) and net_ok and not math.isnan(premium) and premium > 0:
+        rebuilt, rebuilt_from = net / premium, "|NetInvoice| / Price"
+    signed_notional = _signed_quantity(row, symbol, row_no, res, "notional", rebuilt, rebuilt_from)
+    if signed_notional is None:
         return
+    if math.isnan(premium):
+        bad = [(c, t) for c in ("Price", "Premium") if (t := _bad_cell(row, c)) is not None]
+        if net_ok and not math.isnan(quantity_cell) and quantity_cell != 0:
+            premium = net / abs(quantity_cell)
+            _warn(res, row_no, symbol,
+                  ("; ".join(_not_a_number(c, t) for c, t in bad) if bad else "Price is blank")
+                  + f"; rebuilt {premium:.10g} from |NetInvoice| / |Quantity|")
+        else:
+            res.rejects.append(Reject(row_no, symbol, "blank Price/Premium" if not bad else
+                                      "; ".join(_not_a_number(c, t) for c, t in bad)
+                                      + "; cannot be rebuilt (needs NetInvoice and Quantity)"))
+            return
+    elif net_ok and not math.isnan(quantity_cell):
+        expected = abs(quantity_cell * premium)
+        if expected > 0 and abs(net - expected) / expected > NET_INVOICE_TOLERANCE:
+            _warn(res, row_no, symbol,
+                  f"NetInvoice {net:,.2f} differs from |Quantity x Price| {expected:,.2f} by "
+                  f"{abs(net - expected) / expected:.2%} (above {NET_INVOICE_TOLERANCE:.1%}); the Price fill is kept")
 
     res.instruments.setdefault(symbol, Instrument(
         instrument_id=symbol, asset_class="FX_OPTION", base_ccy=base_ccy, quote_ccy=pair[3:],
@@ -849,10 +1200,82 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
         trade_id, 1, "NOTIONAL", base_ccy, signed_notional, trade_date, expiry, premium, 0))
 
 
+# ------------------------------------------------------------------- IRS direction signals
+_DIRECTION_WORDS = {"PAY": "pay fixed", "RECEIVE": "receive fixed"}
+# Amount columns on which brackets or a minus sign mark a short = receive fixed (user,
+# 2026-09-18: "if the book has brackets or a negative sign that's a short"). NetInvoice is
+# deliberately NOT one of them: on a swap it is an upfront cash amount, so its sign says
+# which way cash moved, not which way the swap faces (a payer who paid a fee would read
+# as a receiver, or be rejected against 'Pay Fixed' wording).
+IRS_SIGN_COLUMNS = ("Notional", "Quantity", "Gross Amnt/Principal", "Current Face", "Original Face")
+# Free-text columns searched for pay / receive wording.
+IRS_TEXT_COLUMNS = ("Description", "Notes", "Swap Type", "RollSide", "Tran Type")
+_PAY_WORDS = frozenset(("PAY", "PAYS", "PAYER", "PAYING"))
+_RECEIVE_WORDS = frozenset(("REC", "RCV", "RECV", "RECEIVE", "RECEIVES", "RECEIVER", "RECEIVING"))
+# 'Pay Float' / 'Rec SOFR' describes the floating leg: the fixed leg faces the other way.
+_FLOAT_LEG_WORDS = frozenset(("FLOAT", "FLOATING", "FLT", "FLTG", "VARIABLE", "OIS", "SOFR", "ESTR", "SONIA",
+                              "TONA", "TONAR", "SARON", "CORRA", "AONIA", "LIBOR", "EURIBOR"))
+# 'Pay date', 'Pay freq', 'Rec leg DCF': schedule wording, not a direction.
+_NOT_A_DIRECTION_NEXT = frozenset(("DATE", "DATES", "FREQ", "FREQUENCY", "LEG", "LEGS", "DAY", "DAYS", "LAG",
+                                   "DELAY", "CALENDAR", "DCF", "BASIS", "CONVENTION", "SCHEDULE"))
+
+
+def _direction_in_text(text: str) -> set:
+    """{'PAY'}, {'RECEIVE'}, both (the text contradicts itself) or empty, from whole
+    words only: REC / RCV / RECEIVE / RECEIVER / 'Rec Fixed' = receive fixed; PAY /
+    PAYER / 'Pay Fixed' = pay fixed; the same word followed by a floating-leg word
+    ('Pay Float', 'Rec SOFR') names the other leg, so the fixed leg is the opposite."""
+    tokens = re.sub(r"[^A-Z0-9]+", " ", text.upper()).split()
+    found = set()
+    for i, token in enumerate(tokens):
+        if token not in _PAY_WORDS and token not in _RECEIVE_WORDS:
+            continue
+        following = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if following in _NOT_A_DIRECTION_NEXT:
+            continue
+        pays = token in _PAY_WORDS
+        if following in _FLOAT_LEG_WORDS:
+            pays = not pays
+        found.add("PAY" if pays else "RECEIVE")
+    return found
+
+
+def _irs_direction_signals(row: pd.Series) -> tuple:
+    """Every EXPLICIT pay/receive signal a swap row carries -> ``(signals, ambiguous)``,
+    ``signals`` a list of (direction, 'Column 'cell'' it came from).
+
+      - brackets or a minus sign on any of IRS_SIGN_COLUMNS  -> RECEIVE (a short)
+      - ``Side`` in the sell-synonym set (`_side`)             -> RECEIVE
+      - pay / receive wording in any of IRS_TEXT_COLUMNS       -> PAY or RECEIVE
+
+    What is deliberately NOT a signal: ``Side`` = Buy and an unsigned amount. Both are
+    on every one of the 10 reference swap rows, the three the desk holds as receivers
+    included, so they say nothing about direction; only an explicit sell / short /
+    receive marker counts. ``ambiguous`` lists text cells naming both directions at
+    once, which are reported and ignored rather than allowed to decide anything."""
+    signals: List[tuple] = []
+    ambiguous: List[str] = []
+    for col in IRS_SIGN_COLUMNS:
+        v = _num(row.get(col))
+        if not math.isnan(v) and v < 0:
+            signals.append(("RECEIVE", f"{col} {_s(row.get(col))!r} (brackets / minus = short)"))
+    if _side(row.get("Side")) == "Sell":
+        signals.append(("RECEIVE", f"Side {_s(row.get('Side'))!r}"))
+    for col in IRS_TEXT_COLUMNS:
+        text = _s(row.get(col))
+        found = _direction_in_text(text) if text else set()
+        if len(found) == 1:
+            signals.append((next(iter(found)), f"{col} {text!r}"))
+        elif len(found) > 1:
+            ambiguous.append(f"{col} {text!r}")
+    return signals, ambiguous
+
+
 def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
-    """Direction: + = pay fixed; brackets or a minus sign on ``Notional`` OR ``Quantity``
-    is a short = receive fixed (user, 2026-09-18). ``Side`` is not used ('Buy' on every
-    reference row, receivers included). Legs: FIXED = -quantity, FLOAT = +quantity."""
+    """Magnitude from ``Notional`` (else ``Quantity`` x 1e6); direction from the user's
+    stored override, else the row's explicit signals (`_irs_direction_signals`), else
+    pay fixed -- recorded on ``res.irs_directions`` either way. Two explicit signals that
+    contradict each other reject the row. Legs: FIXED = -quantity, FLOAT = +quantity."""
     symbol = _s(row.get("Symbol"))
     desc = _s(row.get("Description"))
     trade_id = _s(row.get("Trade Id"))
@@ -876,10 +1299,15 @@ def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
     notional = _num(row.get("Notional"))
     qty_mm = _num(row.get("Quantity"))
     if math.isnan(notional):
+        bad = _bad_cell(row, "Notional")
         notional = qty_mm * 1e6 if not math.isnan(qty_mm) else math.nan  # Quantity is in millions
-    if math.isnan(notional):
-        res.rejects.append(Reject(row_no, symbol, "blank Notional (and no Quantity)"))
-        return
+        if math.isnan(notional):
+            bad_cells = [_not_a_number(c, t) for c in ("Notional", "Quantity") if (t := _bad_cell(row, c)) is not None]
+            res.rejects.append(Reject(row_no, symbol, "blank Notional (and no Quantity)" if not bad_cells else
+                                      "; ".join(bad_cells) + "; the notional cannot be rebuilt"))
+            return
+        if bad is not None:
+            _warn(res, row_no, symbol, f"{_not_a_number('Notional', bad)}; rebuilt {abs(notional):,.0f} from Quantity x 1,000,000")
     if notional == 0.0:
         res.rejects.append(Reject(row_no, symbol, "Notional is zero; cannot infer pay/receive direction"))
         return
@@ -888,15 +1316,40 @@ def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
         fixed_rate_pct = _num(row.get("Yield"))
     if math.isnan(fixed_rate_pct) and dm:
         fixed_rate_pct = float(dm.group(4))
+    bad_rate = _bad_cell(row, "FixedRate")
     if math.isnan(fixed_rate_pct):
-        res.rejects.append(Reject(row_no, symbol, "blank FixedRate (and no Yield / rate in Description)"))
+        res.rejects.append(Reject(row_no, symbol, "blank FixedRate (and no Yield / rate in Description)" if bad_rate is None else
+                                  f"{_not_a_number('FixedRate', bad_rate)}; no Yield / rate in Description to rebuild it from"))
         return
-    # Signed, full units: + = pay fixed, - = receive fixed. A short is marked by brackets
-    # or a minus sign in the book (user, 2026-09-18), and an export may carry that mark on
-    # ``Quantity`` while ``Notional`` stays unsigned, so a negative on EITHER column is a
-    # short; the magnitude still comes from ``Notional``.
-    short = notional < 0 or (not math.isnan(qty_mm) and qty_mm < 0)
-    quantity = -abs(notional) if short else abs(notional)
+    if bad_rate is not None:
+        _warn(res, row_no, symbol, f"{_not_a_number('FixedRate', bad_rate)}; rebuilt {fixed_rate_pct:.10g} from Yield / the Description")
+    # Signed, full units: + = pay fixed, - = receive fixed; the magnitude comes from
+    # ``Notional``. The user's stored override decides when there is one; otherwise every
+    # explicit signal in the row (`_irs_direction_signals`); otherwise pay fixed, recorded
+    # as defaulted so the Rates table can ask. Never inferred from anything else.
+    signals, ambiguous = _irs_direction_signals(row)
+    for cell in ambiguous:
+        _warn(res, row_no, symbol, f"{cell} names both pay and receive; not used as a direction signal")
+    said = {d for d, _ in signals}
+    override = res.direction_overrides.get(trade_id)
+    if override in ("PAY", "RECEIVE"):
+        direction = override
+        file_view = "; ".join(f"{why} says {_DIRECTION_WORDS[d]}" for d, why in signals)
+        decided = IrsDirection(trade_id, direction, f"user override ({_DIRECTION_WORDS[direction]})"
+                               + (f"; the file: {file_view}" if file_view else ""))
+    elif len(said) > 1:
+        res.rejects.append(Reject(row_no, symbol, "direction signals contradict: "
+                                  + "; ".join(f"{why} says {_DIRECTION_WORDS[d]}" for d, why in signals)
+                                  + ". The row is not loaded until the file agrees with itself"))
+        return
+    elif said:
+        direction = said.pop()
+        decided = IrsDirection(trade_id, direction, "; ".join(why for _, why in signals))
+    else:
+        direction = "PAY"
+        decided = IrsDirection(trade_id, direction, NO_DIRECTION_SIGNAL, defaulted=True)
+    res.irs_directions[trade_id] = decided
+    quantity = abs(notional) if direction == "PAY" else -abs(notional)
     fixed_rate = fixed_rate_pct / 100.0
     trade_date = _date(row.get("TradeDate")) or effective_date
     instrument_id = symbol or f"IRS-{ccy}-{trade_id}"
@@ -919,15 +1372,33 @@ def _rows(objs) -> List[tuple]:
 
 
 def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection,
-         strict: bool = False, filename: Optional[str] = None) -> ParseResult:
+         strict: bool = False, filename: Optional[str] = None, turn_swap_marks: bool = True) -> ParseResult:
     """Parse and upsert. Re-loading a trade id replaces its trade and legs; a swap
     package containing a replaced trade is dissolved so the packaging rule can re-run on
     the new data. With ``strict=True`` any reject raises ValueError before anything is
-    written; otherwise rejected rows are skipped and the rest is loaded."""
+    written; otherwise rejected rows are skipped and the rest is loaded.
+
+    Swap direction: the user's stored overrides (``data/ingest/irs_direction.py``) are
+    handed to the parser, so an overridden swap is written the way the user set it
+    whatever the file says, and the overrides are re-applied once more at the end as the
+    guarantee (``irs_direction.reapply_after_load``); ``res.n_direction_overrides`` is
+    how many swaps on file carry one. A swap that was already on file and comes back
+    facing the other way (the file changed its mind, no override) has its priced history
+    turned round with it, by sign reversal, never deleted (``irs_direction.reverse_flipped``).
+    ``turn_swap_marks=False`` leaves that last step to the caller: the app's upload loads
+    into a staging copy and publishes it by upsert, so it reverses ONCE on the live
+    database itself (``upload._stage_and_publish``) -- reversing here as well would carry
+    the reversed values across and the live step would then put the old signs back.
+
+    Numbers: everything written to a REAL column has passed ``_enforce_numeric`` (finite
+    numbers only), so neither text nor NaN can reach ``trades.quantity`` / ``price``,
+    ``trade_legs.amount`` / ``rate``, ``instruments.multiplier`` or the option strike."""
+    from data.ingest import irs_direction
     from data.ingest.schema import create_schema
 
     create_schema(conn)
-    res = parse(source, filename)
+    signs_before = irs_direction.irs_signs(conn)
+    res = parse(source, filename, direction_overrides=irs_direction.get_overrides(conn))
     name = filename or (Path(source).name if isinstance(source, (str, Path)) else "blotter")
     for rj in res.rejects:
         log.warning("%s row %d %s: REJECT %s", name, rj.row_no, rj.symbol, rj.reason)
@@ -979,4 +1450,50 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
             "payoff = CASE WHEN excluded.payoff != 'VANILLA' THEN excluded.payoff ELSE payoff END",
             _rows(res.instrument_options.values()))
         conn.execute("DROP TABLE _incoming")
+    # Overrides first (trades and legs only), then ONE decision per swap on its priced
+    # history: direction before this load against direction after it.
+    res.n_direction_overrides = irs_direction.reapply_after_load(conn)
+    if turn_swap_marks:
+        irs_direction.reverse_flipped(conn, signs_before)
+    for note in res.notes():
+        log.info("%s: %s", name, note)
     return res
+
+
+# --------------------------------------------------------------------------- diagnostics
+# Columns the pricing layer reads with float(): (table, key columns, numeric columns).
+NUMERIC_COLUMNS = (
+    ("trades", ("trade_id",), ("quantity", "price")),
+    ("trade_legs", ("trade_id", "leg_no"), ("amount", "rate")),
+    ("instruments", ("instrument_id",), ("multiplier",)),
+    ("instrument_options", ("instrument_id",), ("strike", "barrier_level")),
+    ("marks", ("as_of_date", "instrument_id", "settle_date", "mark_type", "source"), ("value",)),
+    ("realised_pnl", ("trade_id",), ("local_amount", "usd_entry_amount", "spot_usd_per_local", "pnl_usd")),
+)
+
+
+def non_numeric_cells(conn: sqlite3.Connection, limit_per_column: int = 200) -> List[dict]:
+    """Rows ALREADY in a database that hold something other than a number in a numeric
+    column -- SQLite keeps text that is not a number as text even in a REAL column, and
+    the pricing layer then dies on it with "could not convert string to float". One dict
+    per offending cell: ``table``, ``key`` ('trade_id=934530555, leg_no=1'), ``column``,
+    ``value`` (the stored text, None for a NULL) and ``stored_as`` (SQLite's typeof:
+    'text' | 'blob' | 'null'). Report only: nothing is changed or deleted. Read-only
+    safe; tables and columns an older database lacks are skipped."""
+    out: List[dict] = []
+    for table, keys, columns in NUMERIC_COLUMNS:
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not have or not set(keys) <= have:
+            continue
+        key_sql = ", ".join(f'"{k}"' for k in keys)
+        for column in columns:
+            if column not in have:
+                continue
+            rows = conn.execute(
+                f'SELECT {key_sql}, "{column}", typeof("{column}") FROM {table} '
+                f'WHERE typeof("{column}") NOT IN (\'real\', \'integer\') ORDER BY {key_sql} LIMIT ?',
+                (int(limit_per_column),)).fetchall()
+            for r in rows:
+                out.append({"table": table, "key": ", ".join(f"{k}={v}" for k, v in zip(keys, r)),
+                            "column": column, "value": r[len(keys)], "stored_as": r[len(keys) + 1]})
+    return out

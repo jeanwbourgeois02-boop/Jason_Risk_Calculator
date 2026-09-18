@@ -202,3 +202,116 @@ def test_realise_settled_freezes_expired_option_at_last_premium_and_spot():
     # 1m EUR * (0.0080 - 0.0050) = 3,000 EUR * 1.20
     assert row[0] == "PREMIUM" and row[1] == pytest.approx(3_600.0) and row[2] == "2026-09-09"
     assert "last before expiry" in row[3]
+
+
+# --------------------------------------------------------------------------- 2026-09-18
+# Root cause of the Bloomberg-PC "could not convert string to float: '<a date>'" that
+# blanked every Blotter view and every headline: `_insert_realised` was a positional
+# INSERT, and `realised_pnl`'s physical column order depends on the database's age
+# (`product` / `mark_type` sit in the MIDDLE of a fresh table but are APPENDED by
+# `schema._migrate_columns` to a table created before 2026-09-15).
+
+_REALISED_DDL_2026_09_14 = """
+CREATE TABLE realised_pnl (
+  trade_id            TEXT PRIMARY KEY REFERENCES trades,
+  instrument_id       TEXT NOT NULL,
+  currency            TEXT NOT NULL,
+  settle_date         TEXT NOT NULL,
+  local_amount        REAL NOT NULL,
+  usd_entry_amount    REAL NOT NULL,
+  spot_usd_per_local  REAL NOT NULL,
+  spot_as_of_date     TEXT NOT NULL,
+  spot_source         TEXT NOT NULL,
+  pnl_usd             REAL NOT NULL,
+  frozen_at           TEXT NOT NULL,
+  note                TEXT NOT NULL
+);
+"""
+
+
+def _migrated_db():
+    """`_db()` on a database whose `realised_pnl` was created with the original 12
+    columns and then brought up to date by `create_schema` -- the dev database's and the
+    Bloomberg PC's shape: `product` and `mark_type` are the LAST two columns."""
+    conn = _db()
+    conn.execute("DROP TABLE realised_pnl")
+    conn.executescript(_REALISED_DDL_2026_09_14)
+    schema.create_schema(conn)
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(realised_pnl)")]
+    assert columns[-2:] == ["product", "mark_type"] and columns[2] == "currency"
+    return conn
+
+
+def test_realise_settled_writes_every_value_to_its_own_column_on_a_migrated_database():
+    conn = _migrated_db()
+    res = ledger.realise_settled(conn, "2026-09-14")
+    assert res["realised"] == 1 and res["repaired"] == []
+    row = conn.execute("SELECT typeof(pnl_usd), pnl_usd, typeof(local_amount), local_amount, currency, settle_date, "
+                       "product, mark_type, spot_as_of_date, spot_source FROM realised_pnl WHERE trade_id = 'a1'").fetchone()
+    assert row == ("real", pytest.approx(30000), "real", -1e6, "USD", "2026-09-10",
+                   "FX_FWD", "SPOT", "2026-09-09", "BBG_BFXFORWARD")
+    assert ledger.value_book(conn, "2026-09-14").set_index("trade_id").loc["a1", "pnl_usd"] == pytest.approx(30000)
+
+
+def _misalign_a1(conn):
+    """Exactly what the old positional INSERT did to trade a1 on a migrated database."""
+    conn.execute("INSERT INTO realised_pnl VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("a1", "AUDUSD", "FX_FWD", "USD", "2026-09-10", -1e6, -650000.0, "SPOT", 0.62,
+                  "2026-09-09", "BBG_BFXFORWARD", 30000.0, "2026-09-14T17:00:00-04:00", ""))
+    conn.commit()
+    # pnl_usd received spot_as_of_date: a date string, kept as TEXT in a REAL column.
+    assert conn.execute("SELECT typeof(pnl_usd), pnl_usd FROM realised_pnl").fetchone() == ("text", "2026-09-09")
+
+
+def test_realise_settled_deletes_and_refreezes_the_rows_the_positional_insert_misaligned():
+    conn = _migrated_db()
+    _misalign_a1(conn)
+    res = ledger.realise_settled(conn, "2026-09-14")
+    assert res["repaired"] == ["a1"] and res["realised"] == 1
+    assert conn.execute("SELECT typeof(pnl_usd), pnl_usd, spot_as_of_date FROM realised_pnl WHERE trade_id = 'a1'"
+                        ).fetchone() == ("real", pytest.approx(30000), "2026-09-09")
+    # a healthy row is never touched again
+    again = ledger.realise_settled(conn, "2026-09-14")
+    assert again["repaired"] == [] and again["realised"] == 0
+
+
+def test_value_book_prices_a_trade_whose_realised_row_is_unreadable_as_not_yet_frozen():
+    """Before any pull has repaired it: the misaligned row must not raise (it blanked the
+    whole app), must not be read as a number, and the trade is valued exactly as a settled
+    trade with no realised row -- the figure `realise_settled` then persists."""
+    conn = _migrated_db()
+    _misalign_a1(conn)
+    vb = ledger.value_book(conn, "2026-09-14").set_index("trade_id")
+    assert vb.loc["a1", "pnl_usd"] == pytest.approx(30000) and vb.loc["a1", "reason"] == ""
+    assert "realised_pnl.pnl_usd is not a number ('2026-09-09')" in vb.loc["a1", "note"]
+    assert vb.loc["a2", "pnl_usd"] == pytest.approx(2e6 * (0.71 - 0.70))  # every other trade prices
+    ledger.realise_settled(conn, "2026-09-14")
+    after = ledger.value_book(conn, "2026-09-14").set_index("trade_id")
+    assert after.loc["a1", "pnl_usd"] == pytest.approx(vb.loc["a1", "pnl_usd"])
+
+
+def test_one_trade_with_a_text_price_is_unrealisable_and_the_rest_is_still_realised():
+    conn = _db()
+    _insert_trade(conn, "a3", "AUDUSD", "FX_FWD", "2026-08-10", -1e6, 0.66)
+    _insert_legs(conn, [
+        ("a3", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-10", 0.66, 1),
+        ("a3", 2, "FX_NEAR", "USD", 660000, "2026-08-10", "2026-09-10", 0.66, 1),
+    ])
+    conn.execute("UPDATE trades SET price = '24-Jul' WHERE trade_id = 'a3'")
+    conn.commit()
+    assert conn.execute("SELECT typeof(price) FROM trades WHERE trade_id = 'a3'").fetchone()[0] == "text"
+    res = ledger.realise_settled(conn, "2026-09-14")
+    reasons = {u["trade_id"]: u["reason"] for u in res["unrealisable"]}
+    assert res["realised"] == 1  # a1
+    assert reasons["a3"] == "trade a3: trades.price is not a number ('24-Jul')"
+    assert [r[0] for r in conn.execute("SELECT trade_id FROM realised_pnl")] == ["a1"]
+
+
+def test_a_text_mark_makes_the_trades_that_need_it_unrealisable_and_names_the_mark():
+    conn = _db()
+    conn.execute("UPDATE marks SET value = '24-Jul' WHERE as_of_date = '2026-09-09' AND mark_type = 'SPOT'")
+    conn.commit()
+    res = ledger.realise_settled(conn, "2026-09-14")
+    reasons = {u["trade_id"]: u["reason"] for u in res["unrealisable"]}
+    assert res["realised"] == 0
+    assert reasons["a1"] == "trade a1: marks.value (SPOT for AUDUSD on 2026-09-09) is not a number ('24-Jul')"

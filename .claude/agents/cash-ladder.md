@@ -2,7 +2,8 @@
 name: cash-ladder
 description: Builds the cash ladder and the delta-per-currency and per-pair delta queries.
 tools: Read, Edit, Write, Bash, Grep, Glob
-model: sonnet
+model: fable
+effort: xhigh
 memory: project
 ---
 

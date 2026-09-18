@@ -5,6 +5,13 @@ metadata:
   type: project
 ---
 
+**STALE IN PART (2026-09-18, see [[options-inline-terms-and-headline-2026-09-18]]):** the
+"two conversions ... quote ccy for every Greek" note below is WRONG for delta and gamma
+(engine units audit; the tab now delegates to `engine.options.portfolio.build_positions`);
+the module is no longer write-free (typed terms go through `set_option_terms` +
+`price_and_store`); the table carries raw numbers, not formatted strings; `_refresh_table`
+is now `_render`. Grouping, `_agg`/`_single` and the collapse store are still as described.
+
 2026-09-17 (options_calc merge Phase 8): the Blotter "Options" sub-tab is now
 `ui.tabs.options` (new module), not the generic `priced_value_book` path any more.
 Old ids `blotter-datatable-options` / `blotter-datatable-options-detail` and the

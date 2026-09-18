@@ -38,7 +38,11 @@ Non-obvious things found in `data/raw/new_sample_trades.csv` (857 rows, 111 cols
   docstring). This makes the blotter the actual futures-fill source; CLAUDE.md's
   "xlsx → tables" section describing futures fills as coming from the workbook is now
   stale (flagged for the housekeeper, not changed).
-- **`INTEREST_RATE_SWAP` direction**: `Side` is `'Buy'` on all 10 reference rows and
+- **`INTEREST_RATE_SWAP` direction — SUPERSEDED 2026-09-18, see
+  [[irs-direction-and-numeric-gate]]**: the export carries NO direction at all (not the
+  reference sample, not the user's own export); the user's override is the primary source.
+  What follows is the 2026-09-16 understanding, kept for the scale facts only. `Side` is
+  `'Buy'` on all 10 reference rows and
   carries no direction. User-confirmed 2026-09-16: the sign of the `Notional` column IS
   the direction signal (positive = pay fixed, negative = receive fixed) — `blotter.py`
   now parses IRS rows using `quantity = Notional` signed, in **full notional units**

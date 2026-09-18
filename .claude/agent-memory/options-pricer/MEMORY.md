@@ -1,5 +1,6 @@
 - [Vendored options_calc API quirks](vendor-api-quirks.md) — submodule-name shadowing in fx/__init__.py, evaluationDate ignores as_of, lazy-import requirement
-- [Premium and delta unit conventions](premium-delta-conventions.md) — blotter premium is base-ccy fraction; DELTA mark is unsigned per-unit, sign applied downstream
+- [Mark units and digital payout convention](premium-delta-conventions.md) — unit of all six marks + USD conversion per Greek; digitals/touches = fraction of BASE-ccy payout (fixed 2026-09-18, user confirmation pending); set_option_terms default-payoff trap
+- [Expiry-day intrinsic mark 2026-09-18](expiry-day-intrinsic-mark-2026-09-18.md) — payoff at expiry-date SPOT + catch-up; ledger/live verified read-only (no ledger change); digital DELTA +1 ITM flagged; cut-time and delivery double-count limits
 - [Phase 2 + 4 landed 2026-09-17](phase-2-4-landed-2026-09-17.md) — what shipped, follow-ups owed to data-ingest/housekeeper/ui-shell/cash-ladder
 - [Phase 5b smile vol landed 2026-09-17](phase-5b-smile-vol-landed-2026-09-17.md) — SMILE/ATM_INTERP/MANUAL priority, SMILE+ATM_INTERP share one day-range (test gotcha), surface caching
 - [Phase 7 landed 2026-09-17](phase-7-landed-2026-09-17.md) — real OIS rates only cover 7 currencies (not full G10), EURSEK→EURUSD fixture switch, Business252 vs Act/365, marks_official SPOT source gotcha for equity/commodity; DELTA_PA now official (update 2026-09-17)
