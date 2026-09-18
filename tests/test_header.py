@@ -355,3 +355,72 @@ def test_build_figures_ltd_shows_partial_sum_and_label_when_some_trades_unpriced
     assert caption.children == "excludes 1 of 2 trades unpriced"
     assert "no PREMIUM" in caption.title
     assert "option" in caption.title
+
+
+# ------------------------------------------------- reference-date gap (2026-09-18)
+
+
+def test_priced_diff_unavailable_when_blocked_trades_outnumber_anchored_ones():
+    """First day on the Bloomberg PC: today's book prices, yesterday's has no marks, so
+    every trade is "priced now but unpriced on t-1". One settled trade anchored at both
+    ends used to be enough to show "$0 -- excludes 771 of 772"; the difference is now
+    unavailable and the reason names the REFERENCE date and the count."""
+    df_today = _vb_frame([("a", "FX_FWD", "", 10.0), ("b", "FX_FWD", "", 20.0), ("c", "FX_FWD", "", 5.0)])
+    df_ref = _vb_frame([("a", "FX_FWD", "", 4.0),
+                        ("b", "FX_FWD", "no FWD_OUTRIGHT mark for X settle Y on Z", float("nan")),
+                        ("c", "FX_FWD", "no FWD_OUTRIGHT mark for X settle Y on Z", float("nan"))])
+    entry = header._priced_diff(df_today, df_ref, "root reason", "2026-09-16",
+                                lambda n_blocked, n_open: f"Daily needs the 2026-09-16 close: {n_blocked} of {n_open}")
+    assert entry["available"] is False
+    assert entry["reason"] == "Daily needs the 2026-09-16 close: 2 of 3"
+    assert entry["excluded_summary"] == ""
+
+
+def test_priced_diff_minority_blocked_keeps_partial_figure():
+    df_today = _vb_frame([("a", "FX_FWD", "", 10.0), ("b", "FX_FWD", "", 20.0), ("c", "FX_FWD", "", 5.0)])
+    df_ref = _vb_frame([("a", "FX_FWD", "", 4.0), ("b", "FX_FWD", "", 1.0),
+                        ("c", "FX_FWD", "no FWD_OUTRIGHT mark for X settle Y on Z", float("nan"))])
+    entry = header._priced_diff(df_today, df_ref, "root reason", "2026-09-16", lambda *_: "unused")
+    assert entry["available"] is True
+    assert entry["value"] == pytest.approx((10 - 4) + (20 - 1))
+    assert entry["excluded_summary"] == "excludes 1 of 3 trades unpriced"
+
+
+def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
+    """End to end: marks for today only. Daily's caption must talk about the
+    reference date (t-1) and the backfill, not about today, which is fully priced."""
+    conn = schema.connect()
+    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
+    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-09-10", 1_000_000, 147.0)  # open on t-1 and today
+    _insert_legs(conn, [
+        ("t1", 1, "FX_NEAR", "USD", 1_000_000, "2026-09-10", "2026-09-30", 147.0, 1),
+        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-09-10", "2026-09-30", 147.0, 1),
+    ])
+    _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "SPOT", 147.0, "BBG_BFXFORWARD")
+    _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-30", "FWD_OUTRIGHT", 148.0, "BBG_BFXFORWARD")
+    conn.commit()
+    cards = header._build_figures(conn, "2026-09-17")
+    by_title = {c.children[0].children: c for c in cards if getattr(c, "children", None) and c.children
+                and hasattr(c.children[0], "children")}
+    daily = by_title["Daily"]
+    assert daily.children[1].children == "n/a"
+    caption = daily.children[2].children
+    assert caption.startswith("Daily needs the 2026-09-16 close: 1 of 1 trades open that day")
+    assert "backfill" in caption
+    assert "2026-09-17" not in caption
+
+
+def test_priced_day_sums_priced_rows_and_counts_excluded():
+    df = _vb_frame([("a", "FX_FWD", "", 10.0), ("b", "FX_OPTION", "no PREMIUM mark for X expiry Y on Z", float("nan"))])
+    assert header._priced_day(df) == (10.0, 1, 2)
+    assert header._priced_day(_vb_frame([("b", "FX_OPTION", "no PREMIUM mark", float("nan"))])) == (None, 1, 1)
+    assert header._priced_day(_vb_frame([])) == (0.0, 0, 0)
+
+
+def test_build_chart_plots_partially_priced_days_with_hover_note():
+    conn = _db_with_one_priced_and_one_unpriced_trade("2026-09-17")
+    graph = header._build_chart(conn, "2026-09-17")
+    trace = graph.figure["data"][0]
+    assert trace["y"][-1] is not None  # the priced trade's sum, not a gap
+    assert trace["text"][-1] == "excludes 1 of 2 trades unpriced"
+    assert "%{text}" in trace["hovertemplate"]

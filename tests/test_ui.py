@@ -519,7 +519,8 @@ def test_every_static_callback_id_exists_in_layout():
     dynamic_ok = {"blotter-datatable", "blotter-subtotal",
                   "options-datatable", "options-collapsed-packages"}
     dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
-                        "blotter-row-detail-", "options-terms-")  # per-sub-tab, rendered by callback
+                        "blotter-row-detail-", "options-terms-",
+                        "manual-")  # per-sub-tab, rendered by callback (manual-*: Manual entry sub-tab, 2026-09-18)
     missing = []
     for key, cb in app.callback_map.items():
         for kind in ("inputs", "state"):

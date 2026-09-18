@@ -20,10 +20,18 @@ Follow this on the PC that has the Bloomberg Terminal, every time you start the 
      may lack curve permissions.
    - FAIL on FX option PREMIUM / DELTA coverage: the option needs its strike on file
      before it can price. See the next item.
-   - WARNING "no strike on file": open the Blotter's Options view and type the strike
-     for that trade. On 2026-09-17 these were EURSEK112526C-197906813,
-     USDJPY111926P-197571137 and USDJPY111926P-197957397. The diagnostics panel shows
-     the current list.
+   - WARNING "no strike on file": open the Blotter's **Manual entry** sub-tab (the same
+     "Option terms" editor is also under Options), pick the option and type its terms
+     once; they survive every re-upload. For the reference export the terms come from
+     the old Excel's "All Options Trades" sheet (checked 2026-09-18):
+       - USDJPY111926P-197571137: Digital, Put, strike 152
+       - USDJPY111926P-197957397: Digital, Put, strike 152
+       - EURSEK112526C-197906813: Digital, Call, strike 11.4
+     The diagnostics panel shows the current list.
+   - A trade the export does not carry at all (an option booked at another venue, a
+     forward dealt outside the prime broker): book it under Blotter > Manual entry >
+     "Book an OTC trade by hand". It is saved as source MANUAL, priced on the next pull,
+     and never removed by a blotter upload; delete it there if it is wrong.
    - "FX vol ticker assumptions": the option Greeks rest on Bloomberg vol tickers that
      were written without a Terminal. Every live pull with an option in the book checks
      them against Bloomberg's own answers and records the result, so this line reads

@@ -249,6 +249,27 @@ def _unpriced_breakdown(unpriced: pd.DataFrame) -> str:
                       for (product, tag), count in groups.items())
 
 
+def _nothing_priced_reason(unpriced: pd.DataFrame, day: str) -> str:
+    """"nothing priced on 2026-08-31: 742 forwards: no FWD_OUTRIGHT; 11 futures: no
+    FUTURE_PX (e.g. 896328363, 896328364, ...)" -- the per-product breakdown first, then
+    at most five trade ids. Replaces a plain dump of every unpriced trade id (2026-09-18:
+    768 ids in one tooltip on the reference data, which said nothing about WHY)."""
+    ids = sorted(set(unpriced["trade_id"])) if not unpriced.empty else []
+    if not ids:
+        return f"nothing priced on {day}"
+    sample = ", ".join(ids[:5]) + (", ..." if len(ids) > 5 else "")
+    return f"nothing priced on {day}: {_unpriced_breakdown(unpriced)} (e.g. {sample})"
+
+
+def _reference_missing_reason(b_unpriced: pd.DataFrame, ref_day: str, n_blocked: int, n_open: int) -> str:
+    """Why a period difference cannot be formed: most trades open on `ref_day` are
+    unpriced there (mirrors `ui/tabs/header.py::_reference_reason`, row-scoped). Points
+    at the backfill, since a past day's close only ever arrives that way."""
+    breakdown = _unpriced_breakdown(b_unpriced)
+    return (f"needs the {ref_day} close: {n_blocked} of {n_open} trades open that day have no official mark there"
+            + (f" ({breakdown})" if breakdown else "") + " -- run the Bloomberg backfill (Market data tab)")
+
+
 def _scoped_frame(conn: sqlite3.Connection, date: str, trade_ids) -> pd.DataFrame:
     """`priced_value_book(conn, date)` filtered to `trade_ids` present on that date's
     book (a trade_id not yet on the book on `date`, e.g. traded later, is simply
@@ -277,9 +298,8 @@ def _priced_single_from_df(df: pd.DataFrame, ref_date: str) -> dict:
     priced = df[df["reason"] == ""]
     unpriced = df[df["reason"] != ""]
     if priced.empty:
-        bad = sorted(set(unpriced["trade_id"]))
         return {"value": float("nan"), "ref_date": ref_date, "available": False,
-                "reason": f"no mark (any source) for {', '.join(bad)}",
+                "reason": _nothing_priced_reason(unpriced, ref_date),
                 "excluded_summary": "", "excluded_detail": ""}
     value = float(priced["pnl_usd"].sum())
     if unpriced.empty:
@@ -309,6 +329,12 @@ def _priced_diff_scoped(conn: sqlite3.Connection, date_a: str, date_b: str, trad
         diff outright (contributes nothing) rather than credited with its full
         one-sided value, which would fake a jump the size of its whole LTD on whichever
         single day a mark happened to appear or vanish.
+      - (2026-09-18) when the blocked trades outnumber the trades priced at both ends --
+        most of what was open on `date_b` is unpriced there -- the difference is anchored
+        by a minority of the set: the figure is unavailable, with a reason naming
+        `date_b`, the count and what it is missing (`_reference_missing_reason`), never a
+        "$0, excludes 771 of 772" that is really nothing. Same rule as
+        `header.py::_priced_diff`.
     `ref_date` is this entry's own displayed reference date (callers use two different
     conventions -- see `row_scoped_headline`/`row_scoped_period_pnl`'s own docstrings);
     `note_label` names `date_b` only inside the "N priced now but unpriced on
@@ -336,11 +362,16 @@ def _priced_diff_scoped(conn: sqlite3.Connection, date_a: str, date_b: str, trad
     contributing_a_ids = a_priced_ids - blocked_ids
     contributing_b_ids = a_priced_ids & b_priced_ids  # priced at both ends
 
+    if blocked_ids and len(blocked_ids) > len(contributing_b_ids):
+        b_unpriced = df_b[df_b["reason"] != ""] if not df_b.empty else df_b
+        n_blocked, n_open = len(blocked_ids), len(blocked_ids) + len(contributing_b_ids)
+        return {"value": float("nan"), "ref_date": ref_date, "available": False,
+                "reason": _reference_missing_reason(b_unpriced, note_label, n_blocked, n_open),
+                "excluded_summary": "", "excluded_detail": ""}
+
     if not contributing_a_ids:
-        bad = sorted(set(a_unpriced["trade_id"]) | blocked_ids)
-        reason = (f"no mark (any source) for {', '.join(bad)}" if bad
-                  else "a reference close is unavailable")
-        return {"value": float("nan"), "ref_date": ref_date, "available": False, "reason": reason,
+        return {"value": float("nan"), "ref_date": ref_date, "available": False,
+                "reason": _nothing_priced_reason(a_unpriced, date_a),
                 "excluded_summary": "", "excluded_detail": ""}
 
     a_sum = float(a_priced[a_priced["trade_id"].isin(contributing_a_ids)]["pnl_usd"].sum())

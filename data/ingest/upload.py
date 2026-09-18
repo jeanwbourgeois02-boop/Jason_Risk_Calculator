@@ -13,7 +13,11 @@ previous excels - so there are no duplicates or fake things." A successful
 dependents (``trade_legs``, ``realised_pnl``, ``swap_review`` -- see
 ``FULL_REPLACE_CHILD_TABLES``) for EVERY source, including legacy ``source='BNP'`` rows
 and a previous upload's (or the launcher sample's) rows, before writing the new file's
-own trades. This is the app's upload path only: ``blotter.load`` itself (the library
+own trades. The one exception (2026-09-18) is ``source='MANUAL'``: trades booked by hand
+on the Blotter's Manual entry sub-tab (``data/ingest/manual.py``) exist precisely
+because the export does not carry them, so a new export can never be evidence that
+they are gone -- they survive every upload and are removed only through
+``manual.delete_manual_trade``. This is the app's upload path only: ``blotter.load`` itself (the library
 function this module calls) keeps its own idempotent-by-``trade_id`` upsert behaviour
 unchanged, for callers that still want a merge (e.g. a script loading several files that
 together make up one book). Instruments, marks, curves, curve_quotes and index_fixings
@@ -50,6 +54,25 @@ BLOTTER_KIND_COLUMNS = {"Fin Type", "Product"}
 # trade_id (checked 2026-09-17), so they are untouched by a trade replace.
 FULL_REPLACE_CHILD_TABLES = ("trade_legs", "realised_pnl", "swap_review")
 FULL_REPLACE_TABLES = FULL_REPLACE_CHILD_TABLES + ("trades",)
+# Rows a full replace removes: every trade NOT booked by hand (see the module docstring
+# on ``source='MANUAL'``). Child tables are filtered through this subquery, so it must
+# run before the ``trades`` delete itself.
+_REPLACED_TRADES_SQL = "SELECT trade_id FROM trades WHERE source != 'MANUAL'"
+
+
+def _delete_replaced_book(conn: sqlite3.Connection) -> None:
+    """Delete every non-MANUAL trade and its trade-keyed dependents, children first."""
+    for table in FULL_REPLACE_CHILD_TABLES:
+        conn.execute(f"DELETE FROM {table} WHERE trade_id IN ({_REPLACED_TRADES_SQL})")
+    conn.execute("DELETE FROM trades WHERE source != 'MANUAL'")
+
+
+def _replaced_counts(conn: sqlite3.Connection) -> dict:
+    """Pre-delete row counts per FULL_REPLACE_TABLES name, MANUAL trades excluded."""
+    counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE trade_id IN ({_REPLACED_TRADES_SQL})").fetchone()[0]
+              for t in FULL_REPLACE_CHILD_TABLES}
+    counts["trades"] = conn.execute("SELECT COUNT(*) FROM trades WHERE source != 'MANUAL'").fetchone()[0]
+    return counts
 
 
 def preview_frame(payload: bytes, filename: str) -> pd.DataFrame:
@@ -88,9 +111,10 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
 
     `full_replace=True` (``import_blotter``'s "one input, no leftovers" rule): after
     `load_fn` succeeds, every row of `FULL_REPLACE_TABLES` (trades and everything keyed
-    off trade_id) is deleted from `live` -- ALL of it, every source, not just rows whose
-    id also appears in `staged` -- before the merge loop runs, so the merge becomes a
-    plain insert of exactly the new file's trades. Returns `(result, replaced)` where
+    off trade_id) is deleted from `live` -- every source except MANUAL (module
+    docstring), not just rows whose id also appears in `staged` -- before the merge loop
+    runs, so the merge becomes a plain insert of exactly the new file's trades (plus
+    the untouched MANUAL rows, which the merge re-upserts unchanged). Returns `(result, replaced)` where
     `replaced` is a dict of pre-delete row counts per `FULL_REPLACE_TABLES` name (used
     for the "replaced N trades" summary); `replaced` is `{}` when `full_replace=False`.
     """
@@ -106,19 +130,16 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
                 if full_replace:
                     # staged is a snapshot of live at this instant, so counting on
                     # either connection gives the same pre-delete totals.
-                    replaced = {t: staged.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                               for t in FULL_REPLACE_TABLES}
+                    replaced = _replaced_counts(staged)
                     # Clear staged's full-replace tables BEFORE load_fn runs: staged was
                     # seeded from the old book, so without this, load_fn only adds the
                     # new file's rows alongside the old ones still sitting in staged, and
                     # the merge loop below would copy both back into live -- undoing the
                     # live-side delete a few lines down instead of replacing anything.
-                    for table in FULL_REPLACE_CHILD_TABLES + ("trades",):
-                        staged.execute(f"DELETE FROM {table}")
+                    _delete_replaced_book(staged)
                 result = load_fn(staged)
                 if full_replace:
-                    for table in FULL_REPLACE_CHILD_TABLES + ("trades",):
-                        live.execute(f"DELETE FROM {table}")
+                    _delete_replaced_book(live)
                 for table in schema.TABLES:
                     # Quoted throughout: curve_quotes.index is a reserved word.
                     columns = [r[1] for r in staged.execute(f"PRAGMA table_info({table})")]

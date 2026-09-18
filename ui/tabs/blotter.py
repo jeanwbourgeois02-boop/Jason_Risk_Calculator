@@ -74,6 +74,12 @@ Bundles sub-tab (item 4): `ui.tabs.blotter_bundles` renders a list of bundles (f
 `engine.pnl.ledger.period_pnl_by(conn, as_of, 'theme')`, plus an "Unassigned" line, a
 create form and add/remove-pair actions calling `data.ingest.themes.set_theme` (via the
 `add_pair_to_bundle` / `remove_pair_from_bundle` helpers).
+
+Manual entry sub-tab (2026-09-18, user request "need a place to manually input OTC
+products"): `ui.tabs.manual_entry` -- book an FX option or forward the blotter export
+does not carry (`data/ingest/manual.py`, `trades.source = 'MANUAL'`, survives every
+re-upload), list/delete the manual trades on file, and the same Option terms editor
+the Options sub-tab shows for options the export left without a strike.
 """
 from __future__ import annotations
 
@@ -85,6 +91,7 @@ from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs import blotter_bundles as bundles_ui
 from ui.tabs import blotter_fx as blotter_fx_ui
+from ui.tabs import manual_entry as manual_entry_ui
 from ui.tabs import options as options_ui
 from ui.tabs import rates as rates_ui
 from ui.tabs.blotter_pricing import (
@@ -115,16 +122,21 @@ _ALL = "All"
 # --------------------------------------------------------------------------- sub-tabs
 # Order per user decision 2026-09-15: Total book | FX | Futures | Rates | Options |
 # Bundles. "FX" scope is FX_SPOT/FX_FWD/FX_SWAP only (FUTURE moved to its own sub-tab).
-SCOPE_ORDER = ("total", "fx", "futures", "rates", "options", "bundles")
+# "Manual entry" (2026-09-18) closes the row: it is a form, not a view of the book.
+SCOPE_ORDER = ("total", "fx", "futures", "rates", "options", "bundles", "manual")
 SCOPE_LABELS = {"total": "Total book", "fx": "FX", "futures": "Futures", "rates": "Rates",
-                "options": "Options", "bundles": "Bundles"}
+                "options": "Options", "bundles": "Bundles", "manual": "Manual entry"}
 SCOPE_PRODUCTS = {
     "total": None,
     "fx": ("FX_SPOT", "FX_FWD", "FX_SWAP"),
     "futures": ("FUTURE",),
     "rates": ("IRS",),
     "options": ("FX_OPTION",),
+    "manual": None,
 }
+# Sub-tabs that are forms/lists of their own, not `priced_value_book`-shaped tables:
+# no strip / row-detail / filter callbacks are registered for them.
+_NON_TABLE_SCOPES = ("bundles", "rates", "fx", "options", "manual")
 # "rates" (2026-09-15) and "options" (2026-09-17) are both real views now -- see
 # scope_layout and the module docstring. Kept (empty) so the placeholder path stays
 # available for a future scope.
@@ -608,8 +620,8 @@ def missing_terms_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
                     children=[
                         html.B(f"{len(missing)} option{'s' if len(missing) != 1 else ''} cannot be priced: no strike on file. "),
                         html.Span(", ".join(missing) + ". "),
-                        html.Span("Enter the strike under Options ▸ Option terms, or re-upload a blotter export "
-                                  "that includes a Strike column."),
+                        html.Span("Enter the strike under Manual entry ▸ Option terms (also shown under Options), "
+                                  "or re-upload a blotter export that includes a Strike column."),
                     ])
 
 
@@ -660,6 +672,9 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
 
     if scope == "fx":
         return _safe_section("FX", lambda: blotter_fx_ui.build_layout(conn, as_of))
+
+    if scope == "manual":
+        return _safe_section("Manual entry", lambda: manual_entry_ui.build_layout(conn))
 
     if scope in PLACEHOLDER_SCOPES:
         def _placeholder():
@@ -936,13 +951,15 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         )(_clear_filters)
 
     options_ui.register_callbacks(app, get_db_path)
+    manual_entry_ui.register_callbacks(app, get_db_path)
 
-    # "rates" (ui.tabs.rates), "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17) and
-    # "options" (ui.tabs.options, Phase 8) have no strip/detail/filter of their own
-    # (module docstring above) -- neither table is priced_value_book-shaped, so the
-    # generic callbacks below (which assume trade_id/mark/pnl_usd rows) don't apply.
+    # "rates" (ui.tabs.rates), "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17),
+    # "options" (ui.tabs.options, Phase 8) and "manual" (ui.tabs.manual_entry) have no
+    # strip/detail/filter of their own (module docstring above) -- none is a
+    # priced_value_book-shaped table, so the generic callbacks below (which assume
+    # trade_id/mark/pnl_usd rows) don't apply.
     for _scope in SCOPE_ORDER:
-        if _scope not in ("bundles", "rates", "fx", "options"):
+        if _scope not in _NON_TABLE_SCOPES:
             _register_strip_callback(_scope)
             _register_detail_callback(_scope)
             _register_filter_callback(_scope)

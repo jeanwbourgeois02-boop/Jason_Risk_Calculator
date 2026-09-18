@@ -869,20 +869,30 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
             "UPDATE trades SET product = 'FX_FWD', package_id = trade_id WHERE product = 'FX_SWAP' AND package_id IN ("
             "SELECT package_id FROM trades WHERE trade_id IN (SELECT trade_id FROM _incoming) AND package_id != trade_id)")
         conn.execute("DELETE FROM trade_legs WHERE trade_id IN (SELECT trade_id FROM _incoming)")
-        conn.executemany("INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
-                         _rows(res.instruments.values()))
+        # Column lists are explicit (2026-09-18): a database created by a transient
+        # schema variant carries extra `instruments` columns (strike/option_type/...,
+        # before `instrument_options` existed), and a positional VALUES list of 8 then
+        # failed the whole upload with "table instruments has 12 columns but 8 values
+        # were supplied" -- an import error over nothing the file did wrong.
+        conn.executemany(
+            "INSERT OR REPLACE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, "
+            "is_ndf, bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
+            _rows(res.instruments.values()))
         if res.trades:
             updates = ",".join(f"{c}=excluded.{c}" for c in trade_cols if c != "trade_id")
             conn.executemany(
                 f"INSERT INTO trades ({','.join(trade_cols)}) VALUES ({','.join('?' for _ in trade_cols)}) "
                 f"ON CONFLICT(trade_id) DO UPDATE SET {updates}", _rows(res.trades))
-        conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", _rows(res.legs))
+        conn.executemany(
+            "INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, rate, "
+            "settles_cash) VALUES (?,?,?,?,?,?,?,?,?)", _rows(res.legs))
         # Option terms: the blotter only ever knows strike (when its Description carries
         # one), call/put and a payoff keyword. Terms typed in the app for options the
         # export leaves incomplete (digitals with no strike, barrier levels) must survive
         # a re-upload, so a field is only overwritten by a populated blotter value.
         conn.executemany(
-            "INSERT INTO instrument_options VALUES (?,?,?,?,?,?) ON CONFLICT(instrument_id) DO UPDATE SET "
+            "INSERT INTO instrument_options (instrument_id, strike, option_type, barrier_level, avg_start_date, payoff) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT(instrument_id) DO UPDATE SET "
             "strike = CASE WHEN excluded.strike != 0 THEN excluded.strike ELSE strike END, "
             "option_type = CASE WHEN excluded.option_type != '' THEN excluded.option_type ELSE option_type END, "
             "payoff = CASE WHEN excluded.payoff != 'VANILLA' THEN excluded.payoff ELSE payoff END",

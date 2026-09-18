@@ -241,7 +241,7 @@ def test_subtab_presence_and_order():
     layout = blotter.build_layout(default_date="2026-06-20")
     tabs = next(c for c in layout.children if getattr(c, "id", None) == blotter.SUBTABS_ID)
     labels = [t.label for t in tabs.children]
-    assert labels == ["Total book", "FX", "Futures", "Rates", "Options", "Bundles"]
+    assert labels == ["Total book", "FX", "Futures", "Rates", "Options", "Bundles", "Manual entry"]
     assert tabs.className == "subtabs"
     assert all(t.className == "subtab" for t in tabs.children)
     assert all(t.selected_className == "subtab--selected" for t in tabs.children)
@@ -1187,3 +1187,30 @@ def test_options_table_flags_no_strike_rows_red():
                         "type": "Call (no strike on file)", "package_id": "p", "trade_id": "t"}])
     _, styles = options_ui.format_rows(df)
     assert any("no strike" in str(s.get("if", {}).get("filter_query", "")) for s in styles)
+
+
+def test_priced_diff_scoped_unavailable_when_blocked_trades_outnumber_anchored_ones(monkeypatch):
+    """Reference-date gap (2026-09-18): most rows open on the reference date are unpriced
+    there, so the strip's Daily is n/a with a reason naming that date and the count, not
+    "0 -- excludes 771 of 772"."""
+    df_a = _frame([("T1", "FX_FWD", "", 10.0), ("T2", "FX_FWD", "", 20.0), ("T3", "FUTURE", "", 5.0)])
+    df_b = _frame([("T1", "FX_FWD", "", 4.0),
+                   ("T2", "FX_FWD", "no FWD_OUTRIGHT mark for T2", float("nan")),
+                   ("T3", "FUTURE", "no FUTURE_PX mark for T3", float("nan"))])
+    frames = {"2026-06-20": df_a, "2026-06-19": df_b}
+    monkeypatch.setattr(blotter_pricing, "priced_value_book",
+                         lambda conn, date: (frames[date], 0, len(frames[date])))
+    entry = blotter_pricing._priced_diff_scoped(None, "2026-06-20", "2026-06-19", ["T1", "T2", "T3"],
+                                                 "2026-06-19", "2026-06-19")
+    assert entry["available"] is False
+    assert entry["reason"].startswith("needs the 2026-06-19 close: 2 of 3 trades open that day have no official mark there")
+    assert "1 forward: no FWD_OUTRIGHT" in entry["reason"] and "1 future: no FUTURE_PX" in entry["reason"]
+    assert "backfill" in entry["reason"]
+
+
+def test_nothing_priced_reason_summarises_instead_of_dumping_ids():
+    rows = [(f"T{i}", "FX_FWD", "no FWD_OUTRIGHT mark for X", float("nan")) for i in range(9)]
+    rows.append(("O1", "FX_OPTION", "no PREMIUM mark for O1", float("nan")))
+    reason = blotter_pricing._nothing_priced_reason(_frame(rows), "2026-08-31")
+    assert reason.startswith("nothing priced on 2026-08-31: 9 forwards: no FWD_OUTRIGHT; 1 option: no PREMIUM (e.g. ")
+    assert reason.count("T") <= 6 and reason.endswith(", ...)")

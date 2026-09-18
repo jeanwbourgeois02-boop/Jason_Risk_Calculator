@@ -70,9 +70,18 @@ Design choices (no one to ask, so noted here):
   P&L strips (via `ui.tabs.blotter_pricing`'s `priced_value_book`/`scoped_period_pnl`/
   `row_scoped_headline`, all still poisoning) are a different lane's files -- not
   edited here, see this agent's handoff report for the equivalent change they need.
-  The collapsible LTD line chart (`_build_chart`/`_cached_ltd`) also still poisons
-  per-day (a day with any unpriced trade renders as a gap) -- out of scope for this
-  follow-up, which was specifically about "the headline cards".
+  The collapsible LTD line chart (`_build_chart`/`_cached_ltd`/`_priced_day`) follows
+  the same rule since 2026-09-18: a day is plotted at the sum of its priced trades with
+  the excluded count in the hover text; only a day with nothing priced is a gap.
+
+  Reference-date gap (2026-09-18, first day on the Bloomberg PC): today's book prices
+  but yesterday's has no marks at all (the live pull writes today only; history comes
+  from the backfill), so every trade is "priced now but unpriced on t-1" and Daily /
+  Previous day / 5d / MTD showed "$0 -- excludes 771 of 772", i.e. a figure that was
+  really nothing. `_priced_diff` now reports such a period as unavailable, and the
+  caption (`_reference_reason`) names the REFERENCE date and what it is missing --
+  "Daily needs the 2026-09-16 close: no official FWD_OUTRIGHT/SPOT for 2026-09-16 (N of
+  M needed marks) — run the Bloomberg backfill" -- instead of a sentence about today.
 """
 from __future__ import annotations
 
@@ -196,7 +205,8 @@ def layout() -> html.Div:
 # `_render_bbg_results`, and `run_bloomberg_diagnostics_safe`.
 
 
-def _missing_marks_reason(conn: sqlite3.Connection, as_of: str) -> str:
+def _missing_marks_reason(conn: sqlite3.Connection, as_of: str,
+                          action: str = "run the Bloomberg pull") -> str:
     """Plain-English, actionable reason for `as_of` built from `data.bloomberg.
     inventory.mark_inventory` (a DB-only read -- it never opens a Bloomberg session,
     so it is safe to call from a UI callback per CLAUDE.md/the perf rule against
@@ -217,7 +227,24 @@ def _missing_marks_reason(conn: sqlite3.Connection, as_of: str) -> str:
         return ""
     mark_types = "/".join(sorted(not_official["mark_type"].unique()))
     return (f"no official {mark_types} for {as_of} "
-            f"({len(not_official)} of {len(df)} needed marks) — run the Bloomberg pull")
+            f"({len(not_official)} of {len(df)} needed marks) — {action}")
+
+
+def _reference_reason(conn: sqlite3.Connection, ref_iso: str, period_title: str) -> Callable[[int, int], str]:
+    """Why a period DIFFERENCE cannot be formed (2026-09-18): most trades open on the
+    reference date are unpriced THERE, while today's book may be fully priced. Returns
+    a `(n_blocked, n_open_then) -> sentence` builder for `_priced_diff`, naming the
+    reference date, the count, and -- when the inventory can tell -- which mark types
+    and how many are missing on it; always points at the backfill, since a past day's
+    close only ever arrives that way (the live pull only writes today's marks)."""
+    action = "run the Bloomberg backfill (Market data tab)"
+    detail = _missing_marks_reason(conn, ref_iso, action)
+
+    def build(n_blocked: int, n_open: int) -> str:
+        head = (f"{period_title} needs the {ref_iso} close: {n_blocked} of {n_open} trades open that day "
+                f"have no official mark dated {ref_iso}")
+        return f"{head} ({detail})" if detail else f"{head} — {action}"
+    return build
 
 
 _MISSING_TAG_RE = re.compile(r"no (\S+) mark")
@@ -292,7 +319,8 @@ def _priced_single(df, root_reason: str) -> dict:
             "excluded_detail": _unpriced_breakdown(unpriced)}
 
 
-def _priced_diff(df_a, df_b, root_reason: str, ref_label: str) -> dict:
+def _priced_diff(df_a, df_b, root_reason: str, ref_label: str,
+                 ref_reason: Optional[Callable[[int, int], str]] = None) -> dict:
     """{value, available, reason, excluded_summary, excluded_detail} for LTD(a) -
     LTD(b), `b` the earlier reference date's book. "Nothing invented, nothing faked"
     (2026-09-17 live-Bloomberg-PC follow-up):
@@ -303,7 +331,15 @@ def _priced_diff(df_a, df_b, root_reason: str, ref_label: str) -> dict:
       - a trade present in both but priced in only one of the two is EXCLUDED from the
         diff outright (contributes nothing) rather than credited with its full
         one-sided value, which would fake a jump the size of its whole LTD on
-        whichever single day a mark happened to appear or vanish."""
+        whichever single day a mark happened to appear or vanish.
+      - (2026-09-18) when the blocked trades OUTNUMBER the trades priced at both ends --
+        i.e. most of what was open on the reference date is unpriced there -- the
+        difference is anchored by a minority of the book (on the first Bloomberg day: one
+        settled trade against 768 blocked), so the figure is unavailable with
+        `ref_reason(n_blocked, n_open_then)` (naming the reference date, see
+        `_reference_reason`) rather than a "$0, excludes 771 of 772" that reads like a
+        number but is really nothing. A minority of blocked trades keeps the partial
+        figure with its caption, as before."""
     total = len(df_a)
     if total == 0:
         return dict(_EMPTY_PRICED)
@@ -323,6 +359,13 @@ def _priced_diff(df_a, df_b, root_reason: str, ref_label: str) -> dict:
     blocked_ids = a_priced_ids & b_unpriced_ids  # priced now, unpriced back then -- excluded
     contributing_a_ids = a_priced_ids - blocked_ids
     contributing_b_ids = a_priced_ids & b_priced_ids  # priced at both ends
+
+    if blocked_ids and len(blocked_ids) > len(contributing_b_ids):
+        n_blocked, n_open = len(blocked_ids), len(blocked_ids) + len(contributing_b_ids)
+        reason = (ref_reason(n_blocked, n_open) if ref_reason is not None else
+                  f"{n_blocked} of {n_open} trades open on {ref_label} have no mark there; the reference close is missing")
+        return {"value": float("nan"), "available": False, "reason": reason,
+                "excluded_summary": "", "excluded_detail": ""}
 
     if not contributing_a_ids:
         return {"value": float("nan"), "available": False, "reason": root_reason,
@@ -388,8 +431,10 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     for key in ("daily", "d5", "mtd", "ytd"):
         ref_iso = ref_dates[key]
         df_ref = df_t1 if key == "daily" else priced_value_book(conn, ref_iso)[0]
-        entries[key] = _priced_diff(df_today, df_ref, _root_reason(conn, as_of), ref_iso)
-    entries["previous_day"] = _priced_diff(df_t1, df_t2, _root_reason(conn, t1_iso), t2_iso)
+        entries[key] = _priced_diff(df_today, df_ref, _root_reason(conn, as_of), ref_iso,
+                                    _reference_reason(conn, ref_iso, _PERIOD_TITLES[key]))
+    entries["previous_day"] = _priced_diff(df_t1, df_t2, _root_reason(conn, t1_iso), t2_iso,
+                                           _reference_reason(conn, t2_iso, _PERIOD_TITLES["previous_day"]))
 
     trading_rows = df_today[df_today["trade_date"] == as_of] if not df_today.empty else df_today
     entries["trading"] = _priced_single(
@@ -433,10 +478,26 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     return cards
 
 
+def _priced_day(df) -> tuple:
+    """(sum over priced rows, n unpriced, n total) for one day's value_book frame -- the
+    chart's per-day analogue of `_priced_single` (2026-09-18): a day with a few unpriced
+    trades is plotted at the sum of the rest, with the hover text saying how many are
+    excluded, instead of becoming a gap in the line; only a day with nothing priced at
+    all is left out (value None, which plotly draws as a gap). An empty book is 0."""
+    if df.empty:
+        return 0.0, 0, 0
+    priced = df[df["reason"] == ""]
+    n_unpriced = int(len(df) - len(priced))
+    if priced.empty:
+        return None, n_unpriced, int(len(df))
+    return float(priced["pnl_usd"].sum()), n_unpriced, int(len(df))
+
+
 @lru_cache(maxsize=1024)
-def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> float:
-    """`engine.pnl.ledger.ltd` memoised on (db path, db mtime, as_of): a header-chart
-    render used to re-run 20 full `value_book` evaluations (~4s) on every as-of change.
+def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> tuple:
+    """`_priced_day` of that date's book, memoised on (db path, db mtime, as_of): a
+    header-chart render used to re-run 20 full `value_book` evaluations (~4s) on every
+    as-of change.
     `_mtime` is part of the key purely to invalidate the cache when the file changes
     (a new upload / Bloomberg write) -- callers pass `os.path.getmtime(db_path)`, never
     a value this function computes itself, so a stale cache never outlives the file it
@@ -446,10 +507,8 @@ def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> float:
     from ui.app import connect_readonly
     conn = connect_readonly(db_path)
     try:
-        df, _, _ = priced_value_book(conn, as_of)  # same fallback path as the figures
-        if df.empty:
-            return 0.0
-        return float("nan") if df["pnl_usd"].isna().any() else float(df["pnl_usd"].sum())
+        df, _, _ = priced_value_book(conn, as_of)  # same pricing path as the figures
+        return _priced_day(df)
     finally:
         conn.close()
 
@@ -486,18 +545,26 @@ def _build_chart(conn: sqlite3.Connection, as_of: str, db_path=None):
     from engine.pnl.ledger import ltd
 
     days = _business_days_back(conn, as_of, _CHART_LOOKBACK_DAYS)
-    xs, ys = [], []
+    xs, ys, texts = [], [], []
     mtime = os.path.getmtime(db_path) if db_path is not None else None
     for d in days:
         xs.append(d.isoformat())
         if db_path is not None:
-            ys.append(_cached_ltd(str(db_path), mtime, d.isoformat()))
+            value, n_unpriced, n_total = _cached_ltd(str(db_path), mtime, d.isoformat())
         else:
             from ui.tabs.blotter_pricing import priced_value_book as _pvb
             _df, _, _ = _pvb(conn, d.isoformat())
-            ys.append(0.0 if _df.empty else (float("nan") if _df["pnl_usd"].isna().any() else float(_df["pnl_usd"].sum())))
+            value, n_unpriced, n_total = _priced_day(_df)
+        ys.append(value)
+        if value is None:
+            texts.append(f"nothing priced ({n_total} trades)")
+        elif n_unpriced:
+            texts.append(f"excludes {n_unpriced} of {n_total} trades unpriced")
+        else:
+            texts.append("")
     figure = {
-        "data": [{"x": xs, "y": ys, "type": "scatter", "mode": "lines+markers", "name": "LTD"}],
+        "data": [{"x": xs, "y": ys, "type": "scatter", "mode": "lines+markers", "name": "LTD",
+                  "text": texts, "hovertemplate": "%{x}<br>LTD %{y:$,.0f}<br>%{text}<extra></extra>"}],
         "layout": {"margin": {"l": 50, "r": 20, "t": 10, "b": 30}, "height": 260,
                    "yaxis": {"title": "USD"}},
     }
