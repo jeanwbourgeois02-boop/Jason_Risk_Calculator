@@ -81,8 +81,9 @@ marks (
                                       --   the ladder reads DELTA, never DELTA_PA)
   value           REAL NOT NULL,      -- DELTA = base-ccy delta per 1 unit of trades.quantity (may exceed 1 for digitals)
   source          TEXT NOT NULL,      -- BNP_BVAL | BBG_BFXFORWARD | BBG_BDH | BBG_BDP | BBG_INTERP | MANUAL
-                                      -- BBG_INTERP = linear interpolation in forward points between standard
-                                      -- tenors (fallback for broken dates); never official
+                                      -- BBG_INTERP = linear interpolation between the two bracketing standard
+                                      -- tenors of Bloomberg's own forward curve (broken dates); official only
+                                      -- as the FWD_OUTRIGHT fallback (user decision 2026-09-18), never for SPOT
   snapped_at      TEXT NOT NULL,      -- ISO timestamp, offset resolved from America/New_York for that row
   PRIMARY KEY (as_of_date, instrument_id, settle_date, mark_type, source)
 );
@@ -130,17 +131,18 @@ Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4
 
 | mark_type | official source |
 |---|---|
-| SPOT, FWD_OUTRIGHT | BBG_BFXFORWARD |
+| SPOT | BBG_BFXFORWARD |
+| FWD_OUTRIGHT | BBG_BFXFORWARD where Bloomberg quotes that exact date (a standard tenor of `FWD_CURVE`); otherwise BBG_INTERP (user decision 2026-09-18): linear interpolation between the two bracketing standard-tenor outrights of Bloomberg's own curve, never extrapolated beyond the last tenor, what the Excel `BFXForward` call did for broken dates. A direct quote always wins over an interpolated row for the same key |
 | FUTURE_PX | BBG_BDH |
 | PAR_RATE, PV_USD, DV01_USD, CASHFLOW_USD | QL_PRICER |
 | DELTA, DELTA_PA, PREMIUM, GAMMA, THETA, VEGA, RHO | QL_OPTIONS_PRICER (`engine/options`, vendored options_calc; since 2026-09-17 — MANUAL is reconciliation-only for these) |
 | any | BNP_BVAL, if it remains in an old database, is never official — BNP is no longer a live input at all (removed 2026-09-17, `docs/bnp-excel-removal.md`); nothing writes a BNP_BVAL row any more |
-| any | BBG_INTERP (linear interpolation in forward points between standard tenors, written by the pull script when a broken-date outright cannot be requested directly) is reconciliation / fallback only, never official |
+| SPOT, FUTURE_PX, any other | BBG_INTERP is reconciliation-only everywhere except its one official role above (the FWD_OUTRIGHT fallback); a SPOT or FUTURE_PX is never interpolated into existence |
 | PAR_RATE, PV_USD, DV01_USD | BBG_BDH (Bloomberg SWPM) is reconciliation only, never official, mirroring BNP_BVAL for FX (decided 2026-09-15 with the `engine/rates` QuantLib OIS pricer landing) |
 
-The mapping is held in a `marks_official` view (`marks` filtered to the official source per `mark_type`, so `(as_of_date, instrument_id, settle_date, mark_type)` is unique). Every P&L or delta query reads from `marks_official`, never from `marks` directly.
+The mapping is held in a `marks_official` view (`marks` filtered to the official source per `mark_type`, plus the FWD_OUTRIGHT fallback row only where no direct-quote row exists for the same key — `data/ingest/schema.py::OFFICIAL_MARK_SOURCE` and `OFFICIAL_FALLBACK_SOURCE` — so `(as_of_date, instrument_id, settle_date, mark_type)` is unique). Every P&L or delta query reads from `marks_official`, never from `marks` directly.
 
-**Standard-tenor forward points are official (2026-09-18).** The live pull (`data/bloomberg/live.py`) requests Bloomberg's bulk `FWD_CURVE` table once per pair — every pair with an open FX leg and every open FX option's underlying pair — and writes each standard-tenor row as an official `BBG_BFXFORWARD` `FWD_OUTRIGHT` at that tenor's own settle date, because each row is Bloomberg's own outright quote, not an interpolation. A leg or option expiry that falls between two tenors is still written only as `BBG_INTERP` (never official; the API exposes no direct broken-date outright, `docs/open-questions.md` item 27), and P&L reads forwards by exact leg date so the extra rows change nothing there. They exist so that `engine/options/rates.py`'s covered-interest-parity fallback has official points to interpolate between when a currency has no OIS curve (SEK, NOK, TWD, ZAR): before this, a pair whose open dates were all broken dates had no official forward at all and its options were skipped as `no curve/rate <CCY>`. The pull reports these rows under `curve_points_written`, separately from the requested-mark count.
+**Standard-tenor forward points are official (2026-09-18).** The live pull (`data/bloomberg/live.py`) requests Bloomberg's bulk `FWD_CURVE` table once per pair — every pair with an open FX leg and every open FX option's underlying pair — and writes each standard-tenor row as an official `BBG_BFXFORWARD` `FWD_OUTRIGHT` at that tenor's own settle date, because each row is Bloomberg's own outright quote, not an interpolation. A leg or option expiry that falls between two tenors is written as `BBG_INTERP` (the API exposes no direct broken-date outright, `docs/open-questions.md` item 27), which since the user's decision of 2026-09-18 is official for `FWD_OUTRIGHT` wherever no direct quote exists for that key (table above): that is how a broken-date leg gets its P&L at all. P&L reads forwards by exact leg date, so the tenor rows themselves change nothing there. They exist so that `engine/options/rates.py`'s covered-interest-parity fallback has official points to interpolate between when a currency has no OIS curve (SEK, NOK, TWD, ZAR): before this, a pair whose open dates were all broken dates had no official forward at all and its options were skipped as `no curve/rate <CCY>`. The pull reports these rows under `curve_points_written`, separately from the requested-mark count.
 
 ### Blotter → tables
 

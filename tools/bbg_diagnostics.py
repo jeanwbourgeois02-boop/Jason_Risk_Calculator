@@ -22,10 +22,11 @@ CLI:
 
 Checks (each becomes one or more result rows):
   1. Session connectivity      -- blpapi import + TCP + Session.start + //blp/refdata
-  2. Official-source mapping   -- schema.OFFICIAL_MARK_SOURCE matches CLAUDE.md's table
-                                   exactly, and marks_official never resolves a mark_type
-                                   to BNP_BVAL or BBG_INTERP (or BBG_BDH for the three
-                                   IRS mark_types, now reconciliation-only)
+  2. Official-source mapping   -- schema.OFFICIAL_MARK_SOURCE / OFFICIAL_FALLBACK_SOURCE
+                                   match CLAUDE.md's table exactly, and marks_official
+                                   never serves BNP_BVAL, nor BBG_INTERP outside its one
+                                   official role (the FWD_OUTRIGHT fallback, user decision
+                                   2026-09-18), nor BBG_BDH for the three IRS mark_types
   3. FX marks coverage         -- every open FX pair/leg's SPOT and FWD_OUTRIGHT is
                                    OFFICIAL (not MISSING/INTERP/MANUAL fallback) as of
                                    the given date, via data.bloomberg.inventory
@@ -138,18 +139,24 @@ _EXPECTED_OFFICIAL = {
     "RHO": "QL_OPTIONS_PRICER",
 }
 _NEVER_OFFICIAL = {"BNP_BVAL", "BBG_INTERP"}
+# CLAUDE.md "Official marks", 2026-09-18: BBG_INTERP is official ONLY as the FWD_OUTRIGHT
+# fallback where no direct BBG_BFXFORWARD quote exists for the same key.
+_EXPECTED_FALLBACK = {"FWD_OUTRIGHT": "BBG_INTERP"}
 
 
 def check_official_source_mapping(conn: Optional[sqlite3.Connection]) -> List[Check]:
     out: List[Check] = []
     try:
-        from data.ingest.schema import OFFICIAL_MARK_SOURCE
+        from data.ingest.schema import OFFICIAL_MARK_SOURCE, OFFICIAL_FALLBACK_SOURCE
     except Exception as exc:
         return [_row("Official-source mapping", "fail",
                      f"Could not import data.ingest.schema.OFFICIAL_MARK_SOURCE ({exc.__class__.__name__}).")]
 
     mismatches = [f"{mt}: schema says {OFFICIAL_MARK_SOURCE.get(mt)!r}, CLAUDE.md says {src!r}"
                   for mt, src in _EXPECTED_OFFICIAL.items() if OFFICIAL_MARK_SOURCE.get(mt) != src]
+    if dict(OFFICIAL_FALLBACK_SOURCE) != _EXPECTED_FALLBACK:
+        mismatches.append(f"fallback: schema says {dict(OFFICIAL_FALLBACK_SOURCE)!r}, "
+                          f"CLAUDE.md says {_EXPECTED_FALLBACK!r}")
     bad_official = {mt: src for mt, src in OFFICIAL_MARK_SOURCE.items() if src in _NEVER_OFFICIAL}
     if mismatches or bad_official:
         detail = "; ".join(mismatches + [f"{mt} wrongly points at {src} (reconciliation-only)"
@@ -158,7 +165,8 @@ def check_official_source_mapping(conn: Optional[sqlite3.Connection]) -> List[Ch
                          f"OFFICIAL_MARK_SOURCE has drifted from the contract: {detail}."))
     else:
         out.append(_row("Official-source mapping matches CLAUDE.md", "pass",
-                         "SPOT/FWD_OUTRIGHT->BBG_BFXFORWARD, FUTURE_PX->BBG_BDH, "
+                         "SPOT/FWD_OUTRIGHT->BBG_BFXFORWARD (FWD_OUTRIGHT falls back to BBG_INTERP where "
+                         "Bloomberg has no direct quote for that date), FUTURE_PX->BBG_BDH, "
                          "PAR_RATE/PV_USD/DV01_USD/CASHFLOW_USD->QL_PRICER, "
                          "PREMIUM/DELTA/Greeks->QL_OPTIONS_PRICER, as specified."))
 
@@ -170,7 +178,8 @@ def check_official_source_mapping(conn: Optional[sqlite3.Connection]) -> List[Ch
     try:
         leaks = conn.execute(
             "SELECT mark_type, source, COUNT(*) FROM marks_official "
-            "WHERE source IN ('BNP_BVAL','BBG_INTERP') GROUP BY mark_type, source").fetchall()
+            "WHERE source = 'BNP_BVAL' OR (source = 'BBG_INTERP' AND mark_type != 'FWD_OUTRIGHT') "
+            "GROUP BY mark_type, source").fetchall()
     except sqlite3.Error as exc:
         out.append(_row("marks_official never resolves to a reconciliation-only source", "fail",
                          f"Could not query marks_official ({exc})."))
@@ -183,7 +192,8 @@ def check_official_source_mapping(conn: Optional[sqlite3.Connection]) -> List[Ch
                          "check the view definition has not been altered."))
     else:
         out.append(_row("marks_official never resolves to a reconciliation-only source", "pass",
-                         "No BNP_BVAL or BBG_INTERP rows are being served as official marks."))
+                         "No BNP_BVAL row, and no BBG_INTERP row outside its FWD_OUTRIGHT fallback role, "
+                         "is served as official."))
     return out
 
 

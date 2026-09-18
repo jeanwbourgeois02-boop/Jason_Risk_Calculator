@@ -165,6 +165,21 @@ CREATE TABLE IF NOT EXISTS index_fixings (
 # outright on any existing database that still has it from before this change.
 
 
+# Official FALLBACK per mark_type (user decision 2026-09-18): a row from this source is
+# official only where no row from OFFICIAL_MARK_SOURCE exists for the same
+# (as_of_date, instrument_id, settle_date, mark_type). Only FWD_OUTRIGHT has one:
+# Bloomberg's API serves standard tenors, so a leg or option expiry on a broken date can
+# only ever be BBG_INTERP (linear interpolation between the two bracketing tenor outrights
+# of Bloomberg's own FWD_CURVE, never extrapolated) -- exactly what the Excel BFXForward
+# call did for broken dates -- and without it 720 of 743 forwards in the reference book
+# had no P&L while the pull reported every request OK (2026-09-18 audit). SPOT and
+# FUTURE_PX never fall back: BBG_INTERP stays reconciliation-only for every other
+# mark_type. The view keeps (as_of_date, instrument_id, settle_date, mark_type) unique.
+OFFICIAL_FALLBACK_SOURCE = {
+    "FWD_OUTRIGHT": "BBG_INTERP",
+}
+
+
 def _views_ddl() -> str:
     """Every view is dropped and recreated unconditionally on every `create_schema` call
     (not `CREATE VIEW IF NOT EXISTS`): a view holds no data, so re-running its
@@ -178,6 +193,11 @@ def _views_ddl() -> str:
     cases = "\n".join(
         f"      WHEN '{mt}' THEN '{src}'" for mt, src in OFFICIAL_MARK_SOURCE.items()
     )
+    fallback_cases = "\n".join(
+        f"      WHEN '{mt}' THEN '{src}'" for mt, src in OFFICIAL_FALLBACK_SOURCE.items()
+    )
+    # Second branch (2026-09-18): the OFFICIAL_FALLBACK_SOURCE row for a key that has no
+    # primary-source row. NOT EXISTS keeps the key unique and lets a direct quote win.
     return f"""
 DROP VIEW IF EXISTS marks_official;
 CREATE VIEW marks_official AS
@@ -185,7 +205,20 @@ SELECT as_of_date, instrument_id, settle_date, mark_type, value, source, snapped
 FROM marks
 WHERE source = CASE mark_type
 {cases}
-    END;
+    END
+UNION ALL
+SELECT f.as_of_date, f.instrument_id, f.settle_date, f.mark_type, f.value, f.source, f.snapped_at
+FROM marks f
+WHERE f.source = CASE f.mark_type
+{fallback_cases}
+    END
+  AND NOT EXISTS (
+    SELECT 1 FROM marks p
+    WHERE p.as_of_date = f.as_of_date AND p.instrument_id = f.instrument_id
+      AND p.settle_date = f.settle_date AND p.mark_type = f.mark_type
+      AND p.source = CASE p.mark_type
+{cases}
+    END);
 
 -- trades_official: a plain passthrough of `trades`, kept as a named view so every
 -- engine query can read "the official trades" without caring whether that is ever

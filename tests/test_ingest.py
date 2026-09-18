@@ -281,3 +281,26 @@ def test_purge_retired_sources_on_a_scratch_db_with_legacy_bnp_data(tmp_path):
     # idempotent: nothing left to purge on a second run
     second = schema.purge_retired_sources(conn)
     assert all(v == 0 for v in second.values())
+
+
+def test_marks_official_falls_back_to_interpolated_forward_only_where_no_direct_quote():
+    """User decision 2026-09-18 (CLAUDE.md "Official marks"): BBG_INTERP is the official
+    FWD_OUTRIGHT fallback where no BBG_BFXFORWARD row exists for the same key; a direct
+    quote still wins over it; SPOT (and every other mark_type) never falls back."""
+    conn = schema.connect()
+    _seed_instrument(conn)
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        ("2026-09-17", "USDJPY", "2026-09-24", "FWD_OUTRIGHT", 147.5, "BBG_INTERP", "t"),      # broken date: fallback
+        ("2026-09-17", "USDJPY", "2026-10-19", "FWD_OUTRIGHT", 147.2, "BBG_INTERP", "t"),      # both exist: direct wins
+        ("2026-09-17", "USDJPY", "2026-10-19", "FWD_OUTRIGHT", 147.3, "BBG_BFXFORWARD", "t"),
+        ("2026-09-17", "USDJPY", "2026-09-17", "SPOT", 147.9, "BBG_INTERP", "t"),               # never official
+    ])
+    conn.commit()
+    rows = {(r[0], r[1]): (r[2], r[3]) for r in conn.execute(
+        "SELECT mark_type, settle_date, value, source FROM marks_official WHERE instrument_id='USDJPY'")}
+    assert rows[("FWD_OUTRIGHT", "2026-09-24")] == (147.5, "BBG_INTERP")
+    assert rows[("FWD_OUTRIGHT", "2026-10-19")] == (147.3, "BBG_BFXFORWARD")
+    assert ("SPOT", "2026-09-17") not in rows
+    assert conn.execute("SELECT COUNT(*) FROM marks_official WHERE instrument_id='USDJPY'").fetchone()[0] == 2
+    assert schema.OFFICIAL_FALLBACK_SOURCE == {"FWD_OUTRIGHT": "BBG_INTERP"}
+    assert schema.OFFICIAL_MARK_SOURCE["FWD_OUTRIGHT"] == "BBG_BFXFORWARD"

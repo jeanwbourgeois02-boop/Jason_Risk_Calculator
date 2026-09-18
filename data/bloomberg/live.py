@@ -276,10 +276,16 @@ def _ensure_fx_instruments(conn: sqlite3.Connection, pairs) -> List[str]:
         is_ndf = 1 if (base in NDF_CCYS or quote in NDF_CCYS) else 0
         try:
             with conn:
-                conn.execute("INSERT OR IGNORE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                # Column-explicit: a live database can carry extra instrument columns from
+                # an earlier schema (the dev DB has 12, all with defaults); a positional
+                # insert fails there with "table instruments has 12 columns but 8 values".
+                conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, "
+                             "multiplier, is_ndf, bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
                              (pair, "FX", base, quote, 1.0, is_ndf, f"{pair} Curncy", "9999-12-31"))
-        except sqlite3.OperationalError:
-            break  # read-only connection (diagnostics): nothing to create here
+        except sqlite3.OperationalError as exc:
+            if "readonly" in str(exc).lower() or "read-only" in str(exc).lower():
+                break  # read-only connection (diagnostics): nothing to create here
+            raise
         created.append(pair)
     return created
 

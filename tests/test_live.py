@@ -830,7 +830,8 @@ def test_pull_once_writes_fwd_curve_tenor_points_as_official_forwards(tmp_path, 
     """Bloomberg's own FWD_CURVE points are quoted outrights, so they are written as
     official BBG_BFXFORWARD FWD_OUTRIGHT rows at their own tenor dates (2026-09-18) --
     what engine/options' implied-rate path needs for a currency with no OIS curve. A
-    leg's own broken date is still interpolated (BBG_INTERP, not official): unchanged."""
+    leg's own broken date is interpolated (BBG_INTERP) and, since the user's 2026-09-18
+    decision, official as the FWD_OUTRIGHT fallback -- so the leg prices."""
     p, conn = _db(tmp_path)
     from data.bloomberg import pull_marks as pm, fwd_curve
     from datetime import date as _date
@@ -857,8 +858,8 @@ def test_pull_once_writes_fwd_curve_tenor_points_as_official_forwards(tmp_path, 
         "SELECT instrument_id, settle_date, value FROM marks_official "
         "WHERE mark_type='FWD_OUTRIGHT' AND as_of_date='2026-08-20'")}
     assert official[("AUDUSD", "2026-10-20")] == 0.6630 and official[("USDJPY", "2026-09-18")] == 149.5
-    assert ("AUDUSD", "2026-09-16") not in official
-    assert conn.execute("SELECT source FROM marks WHERE instrument_id='AUDUSD' AND settle_date='2026-09-16'"
+    assert ("AUDUSD", "2026-09-16") in official
+    assert conn.execute("SELECT source FROM marks_official WHERE instrument_id='AUDUSD' AND settle_date='2026-09-16'"
                         ).fetchone()[0] == "BBG_INTERP"
 
 
@@ -907,7 +908,7 @@ def test_option_pair_forward_curve_gives_the_implied_rate_fallback_its_official_
         "SELECT settle_date FROM marks_official WHERE as_of_date=? AND instrument_id='EURSEK' "
         "AND mark_type='FWD_OUTRIGHT'", (today.isoformat(),))}
     assert {"2026-09-21", "2026-09-28"} <= official_dates
-    assert "2026-09-23" not in official_dates                     # the broken expiry date itself: BBG_INTERP only
+    assert "2026-09-23" in official_dates                         # the broken expiry: BBG_INTERP, official as the fallback
     rates, reason = resolve_fx_rates(conn, today.isoformat(), "EURSEK", "2026-09-23")
     assert reason == "" and rates is not None
     assert rates.foreign_rate_source.source_kind == OIS_CURVE          # EUR: the real ESTR curve
