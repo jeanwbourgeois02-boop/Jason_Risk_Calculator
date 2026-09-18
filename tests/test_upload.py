@@ -12,7 +12,7 @@ from data.ingest import blotter
 from data.ingest.upload import import_blotter, preview_frame, validate_blotter_shape
 
 RAW_BLOTTER = Path(__file__).resolve().parents[1] / 'data/sample/blotter_sample.csv'
-EXPECTED_TRADES, EXPECTED_LEGS = 772, 1525
+EXPECTED_TRADES, EXPECTED_LEGS = 857, 1695  # 743 fwd + 85 spot + 11 fut + 8 opt + 10 IRS (spot rows since 2026-09-18)
 
 
 def trade_count(db):

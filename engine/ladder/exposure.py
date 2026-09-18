@@ -123,27 +123,88 @@ def portfolio_totals(result: "ExposureResult", *, commodity_ccys: frozenset = CO
     }
 
 
-def ladder_usd_equivalent(result: "ExposureResult") -> pd.Series:
-    """Spot USD value per settlement date: sum over currencies of local amount x that
-    currency's spot rate from the summary. This is a funding/exposure view (how much
-    USD each date's flows are worth today), NOT a P&L figure. NaN for a date where any
-    non-zero amount has no rate. Index = settlement_date."""
+def ladder_usd_cells(result: "ExposureResult",
+                     forward_rates: Mapping[tuple, Mapping[str, Any]] | None = None) -> pd.DataFrame:
+    """USD equivalent of every ladder cell: local amount x the USD-per-unit mark for
+    that (currency, settlement date). With `forward_rates` (the
+    `engine.ladder.usd_marks.forward_usd_rates` shape, keyed (ccy, date)) each cell is
+    marked at the outright for its own value date -- the user's cash-ladder spec
+    (2026-09-18): value date on or before the spot date at spot, later dates at the
+    forward outright, undiscounted -- so the sum of every cell is the book's FX value
+    at outrights. Without it every cell is at spot (the summary's fx_rate). A cell with
+    a non-zero amount and no mark is NaN, never zero. Same index/columns as
+    `result.ladder`."""
     if result.ladder.empty:
-        return pd.Series(dtype=float, name="usd_equivalent")
+        return result.ladder.copy()
     fx = result.summary.set_index("currency")["fx_rate"]
-    out = {}
-    for day, row in result.ladder.iterrows():
-        total = 0.0
-        for ccy, amount in row.items():
+    forward_rates = forward_rates or {}
+    cells = result.ladder.copy().astype(float)
+    for day in cells.index:
+        for ccy in cells.columns:
+            amount = cells.at[day, ccy]
             if amount == 0:
                 continue
-            rate = fx.get(ccy, float("nan"))
-            if pd.isna(rate):
-                total = float("nan")
-                break
-            total += amount * rate
-        out[day] = total
+            entry = forward_rates.get((ccy, day))
+            rate = float(entry["rate"]) if entry is not None else fx.get(ccy, float("nan"))
+            cells.at[day, ccy] = amount * rate
+    return cells
+
+
+def ladder_usd_equivalent(result: "ExposureResult",
+                          forward_rates: Mapping[tuple, Mapping[str, Any]] | None = None) -> pd.Series:
+    """USD value per settlement date: sum over currencies of `ladder_usd_cells`. At
+    spot by default; at each date's own forward outright when `forward_rates` is
+    supplied (see `ladder_usd_cells`). This is a funding/exposure view (what each
+    date's flows are worth in USD), NOT the headline P&L, which converts at spot per
+    CLAUDE.md. NaN for a date where any non-zero amount has no rate. Index =
+    settlement_date."""
+    if result.ladder.empty:
+        return pd.Series(dtype=float, name="usd_equivalent")
+    cells = ladder_usd_cells(result, forward_rates)
+    out = {day: float(row.sum(skipna=False)) for day, row in cells.iterrows()}
     return pd.Series(out, name="usd_equivalent")
+
+
+LOCAL_VS_USD_COLUMNS = ["currency", "settlement_date", "net_local", "net_local_vs_usd",
+                        "net_local_cross", "net_usd", "implied_rate_local_per_usd"]
+
+
+def local_vs_usd(records) -> pd.DataFrame:
+    """Per (non-USD currency, settlement date), the user's cash-ladder spec's "Local vs
+    USD by value date" table: `net_local` (every leg in that currency), `net_local_vs_usd`
+    (legs whose contra currency is USD), `net_local_cross` (legs from crosses, e.g. the
+    SEK side of EURSEK), `net_usd` (the USD legs whose contra is this currency) and
+    `implied_rate_local_per_usd = |net_local_vs_usd / net_usd|` -- so a cross leg never
+    distorts the implied rate. A record's contra currency is the other side of its
+    `currency_pair`; records without a 6-letter pair (hand-built fixtures) count in
+    `net_local` only. NaN implied rate where `net_usd` is zero."""
+    df = pd.DataFrame(list(records)) if not isinstance(records, pd.DataFrame) else records.copy()
+    if df.empty or not {"currency", "settlement_date", "local_amount"}.issubset(df.columns):
+        return pd.DataFrame(columns=LOCAL_VS_USD_COLUMNS)
+    pairs = df["currency_pair"] if "currency_pair" in df.columns else pd.Series("", index=df.index)
+
+    def contra(ccy, pair):
+        pair = str(pair)
+        if len(pair) != 6 or ccy not in (pair[:3], pair[3:]):
+            return ""
+        return pair[3:] if pair[:3] == ccy else pair[:3]
+
+    df = df.assign(_contra=[contra(c, p) for c, p in zip(df["currency"], pairs)],
+                   local_amount=df["local_amount"].astype(float))
+    rows = []
+    non_usd = df[df["currency"] != "USD"]
+    usd_legs = df[df["currency"] == "USD"]
+    for (ccy, day), grp in non_usd.groupby(["currency", "settlement_date"], sort=True):
+        net_local = float(grp["local_amount"].sum())
+        vs_usd = float(grp.loc[grp["_contra"] == "USD", "local_amount"].sum())
+        cross = float(grp.loc[~grp["_contra"].isin(["USD", ""]), "local_amount"].sum())
+        usd = usd_legs[(usd_legs["settlement_date"] == day) & (usd_legs["_contra"] == ccy)]
+        net_usd = float(usd["local_amount"].sum())
+        implied = abs(vs_usd / net_usd) if net_usd != 0 else float("nan")
+        rows.append({"currency": ccy, "settlement_date": day, "net_local": net_local,
+                     "net_local_vs_usd": vs_usd, "net_local_cross": cross, "net_usd": net_usd,
+                     "implied_rate_local_per_usd": implied})
+    return pd.DataFrame(rows, columns=LOCAL_VS_USD_COLUMNS)
 
 
 def usd_per_local(entry: Mapping[str, Any]) -> float:
@@ -233,8 +294,19 @@ def _suspect_reason(ccy: str, entry: Mapping[str, Any], fx: float, implied: floa
     quoted = float(entry["rate"])
     # Show the fill the same way round as the mark so the two are directly comparable.
     fill_quoted = 1.0 / implied if entry["inverted"] else implied
+    # Name the failure mode (2026-09-18 review): a mark near the RECIPROCAL of the fill
+    # is the pair pulled the wrong way round (USD per KRW instead of KRW per USD --
+    # wrong ticker or field on the Bloomberg side); a mark near fill / 1,000 or x 1,000
+    # is a scale error. Different fixes, so the message must not conflate them.
+    if fill_quoted > 0 and abs(quoted * fill_quoted - 1.0) < 0.05:
+        diagnosis = (f"it is the reciprocal of the fill ({1.0 / quoted:,.6g}): the quote looks INVERTED "
+                     f"(wrong ticker or field), not mis-scaled")
+    elif any(abs(quoted / fill_quoted - s) / s < 0.05 for s in (1e-3, 1e3)):
+        diagnosis = "a 1,000x SCALE error"
+    else:
+        diagnosis = "neither a clean inversion nor a 1,000x scale error -- check the ticker, field and scale"
     return (f"official SPOT {pair} {quoted:,.6g} is {factor:,.0f}x away from the book's own "
-            f"{ccy} fills (~{fill_quoted:,.6g}); USD delta not computed -- check the SPOT mark's scale")
+            f"{ccy} fills (~{fill_quoted:,.6g}); USD delta not computed -- {diagnosis}")
 
 
 def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,

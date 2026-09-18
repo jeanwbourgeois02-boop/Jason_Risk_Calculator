@@ -46,7 +46,7 @@ from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from dash import Input, Output, dash_table, dcc, html
+from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs.controls import build_date_picker
 from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
@@ -58,6 +58,20 @@ TITLE_ID = "cash-ladder-title"
 TODAY_BUTTON_ID = "cash-ladder-today"
 REFRESH_ID = "cash-ladder-refresh"
 REFRESH_MS = 120_000  # matches data.bloomberg.live.INTERVAL_SECONDS
+# View controls (user's cash-ladder spec, 2026-09-18, "Cash ladder tab"): currency
+# multiselect, From/To value dates, "Settled dates one by one", "Show table in USD
+# equivalent", and the two downloads. They shape the grid only (ui.tabs.exposure.
+# LadderView); the headline card and the risk table always show the whole book.
+FILTERS_ID = "cash-ladder-filters"
+CCY_FILTER_ID = "cash-ladder-ccy-filter"
+DATE_RANGE_ID = "cash-ladder-date-range"
+SETTLED_TOGGLE_ID = "cash-ladder-settled-one-by-one"
+USD_TOGGLE_ID = "cash-ladder-show-usd"
+DOWNLOAD_LADDER_BTN_ID = "cash-ladder-download-ladder"
+DOWNLOAD_LEGS_BTN_ID = "cash-ladder-download-legs"
+DOWNLOAD_LADDER_ID = "cash-ladder-download-ladder-file"
+DOWNLOAD_LEGS_ID = "cash-ladder-download-legs-file"
+TOGGLE_ON = "on"
 
 _WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August",
@@ -237,15 +251,50 @@ def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
 
 
+def build_filters() -> html.Div:
+    """The spec's view controls in one toolbar row: currencies, From/To value dates,
+    the two toggles and the two downloads. Currency options are filled by a callback
+    from the book on the selected as-of date."""
+    return html.Div(id=FILTERS_ID, className="toolbar ladder-filters", children=[
+        html.Div(className="toolbar-group", children=[
+            html.Label("Currencies (grid only)"),
+            dcc.Dropdown(id=CCY_FILTER_ID, options=[], value=[], multi=True, placeholder="All currencies",
+                         style={"minWidth": "280px"}),
+        ]),
+        html.Div(className="toolbar-group", children=[
+            html.Label("Value dates (unsettled rows)"),
+            dcc.DatePickerRange(id=DATE_RANGE_ID, display_format="D MMM YYYY", clearable=True,
+                                first_day_of_week=1, minimum_nights=0),
+        ]),
+        html.Div(className="toolbar-group", children=[
+            html.Label("View"),
+            dcc.Checklist(id=SETTLED_TOGGLE_ID, value=[],
+                          options=[{"label": " Settled dates one by one", "value": TOGGLE_ON}]),
+            dcc.Checklist(id=USD_TOGGLE_ID, value=[],
+                          options=[{"label": " Show table in USD equivalent", "value": TOGGLE_ON}]),
+        ]),
+        html.Div(className="toolbar-group", children=[
+            html.Label("Download"),
+            html.Div(children=[
+                html.Button("Ladder CSV", id=DOWNLOAD_LADDER_BTN_ID, n_clicks=0, className="btn"),
+                html.Button("Legs CSV", id=DOWNLOAD_LEGS_BTN_ID, n_clicks=0, className="btn",
+                            style={"marginLeft": "8px"}),
+            ]),
+            dcc.Download(id=DOWNLOAD_LADDER_ID),
+            dcc.Download(id=DOWNLOAD_LEGS_ID),
+        ]),
+    ])
+
+
 def build_layout(default_date: Optional[str] = None) -> html.Div:
     """Ladder tab shell (user decision 2026-09-15, items A/C; title row added by the
     coordinator's same-day follow-up, item 2): a heading naming the as-of date in full
     ("Monday 15 September 2026"), the date picker beside it, and a "Today" button that
     resets the picker (and so the header store, which mirrors this picker) to today's
-    America/New_York date -- plus an (initially empty) table container. No other
-    controls, no dropdowns -- sort/scope toolbars, snapshot cards, metadata, legend and
-    alternative views are removed outright by `ui.tabs.exposure.exposure_section`, not
-    moved here."""
+    America/New_York date -- then (2026-09-18, user's cash-ladder spec) the view
+    controls row (`build_filters`) and the table container. The sort/scope toolbars,
+    snapshot cards, metadata, legend and alternative views retired on 2026-09-15 stay
+    retired; the filters here are the spec's own, and they shape the grid only."""
     return html.Div(className="cash-ladder", children=[
         html.Div(id=TOOLBAR_ID, className="ladder-title-row", children=[
             html.H3("Cash ladder", className="ladder-title-row-heading"),
@@ -255,9 +304,64 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
                 html.Button("Today", id=TODAY_BUTTON_ID, n_clicks=0, className="btn"),
             ]),
         ]),
+        build_filters(),
         dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
         html.Div(id=TABLE_CONTAINER_ID),
     ])
+
+
+def view_from_controls(ccys=None, start=None, end=None, settled=None, usd=None):
+    """LadderView from the raw control values (Dash hands dates as ISO strings, the
+    checklists as lists of selected values)."""
+    from ui.tabs.exposure import LadderView
+    return LadderView(
+        currencies=frozenset(ccys) if ccys else None,
+        date_from=str(start)[:10] if start else None,
+        date_to=str(end)[:10] if end else None,
+        settled_one_by_one=bool(settled and TOGGLE_ON in settled),
+        show_usd=bool(usd and TOGGLE_ON in usd),
+    )
+
+
+def load_inputs(conn: sqlite3.Connection, as_of_date: str) -> dict:
+    """Everything the Ladder tab body needs for one as-of date, read once: grid records
+    (`>=` rule) and exposure records (`>` rule) with their merged unresolved list,
+    official SPOT rates, the per-(currency, value date) forward USD marks
+    (engine.ladder.usd_marks, spec 2026-09-18), the futures delta dict and the per-pair
+    Position frame. Raises ImportError if an engine module is missing (the caller
+    reports it); everything else is the engine's own reasons/blanks, never a substitute."""
+    from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
+    from engine.ladder.futures_delta import futures_usd_delta
+    from engine.ladder.ladder import per_pair_delta
+    from engine.ladder.usd_marks import forward_usd_rates
+    from data.bloomberg.live import rates_from_marks
+    from ui.tabs.exposure import BOOK_DISPLAY
+
+    records, unresolved = records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
+    # Delta/exposure math (Net/Gross headline, risk-and-scenarios table) must use
+    # settle_date > as_of, not >= -- a leg settling today carries no delta by close
+    # (CLAUDE.md "Six tabs as views"). The grid stays on records (>=): today's
+    # settling leg is still cash that moves today.
+    exposure_records, exposure_unresolved = exposure_records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
+    # 2026-09-16 fix: a trade unresolved only under the exposure rule (e.g. its sole
+    # leg settles exactly on as_of) must still reach the "Unresolved trades" caption.
+    # Merge both lists, deduped by trade_id (the grid's own entry wins).
+    seen_trade_ids = {u.trade_id for u in unresolved}
+    unresolved = list(unresolved) + [u for u in exposure_unresolved if u.trade_id not in seen_trade_ids]
+    # Rates: latest official SPOT marks written by the Bloomberg feed -- the ONLY
+    # source (2026-09-17, "no bnp fall back"). A currency with no official SPOT stays
+    # missing, never substituted.
+    rates = rates_from_marks(conn)
+    # USD-equivalent marks per (currency, value date): spot up to the spot date, then
+    # each date's own official forward outright (user's cash-ladder spec, 2026-09-18).
+    needed = {(r["currency"], r["settlement_date"]) for r in records}
+    needed |= {(r["currency"], r["settled_on"]) for r in records if r.get("settled_on")}
+    forward_rates = forward_usd_rates(conn, rates, needed)
+    return {
+        "records": records, "unresolved": unresolved, "exposure_records": exposure_records,
+        "rates": rates, "forward_rates": forward_rates,
+        "futures": futures_usd_delta(conn, as_of_date), "pairs": per_pair_delta(conn, as_of_date),
+    }
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
@@ -282,11 +386,82 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(TABLE_CONTAINER_ID, "children"),
         Input(DATE_PICKER_ID, "date"),
         Input(REFRESH_ID, "n_intervals"),
+        Input(CCY_FILTER_ID, "value"),
+        Input(DATE_RANGE_ID, "start_date"),
+        Input(DATE_RANGE_ID, "end_date"),
+        Input(SETTLED_TOGGLE_ID, "value"),
+        Input(USD_TOGGLE_ID, "value"),
     )
-    def _update_table(as_of_date, _n_intervals=0):
+    def _update_table(as_of_date, _n_intervals=0, ccys=None, start=None, end=None, settled=None, usd=None):
         """Re-runs every REFRESH_MS so the ladder follows the 2-minute Bloomberg feed
-        (data.bloomberg.live)."""
-        return _render(as_of_date)
+        (data.bloomberg.live), and on every view-control change (spec 2026-09-18)."""
+        return _render(as_of_date, view_from_controls(ccys, start, end, settled, usd))
+
+    @app.callback(Output(CCY_FILTER_ID, "options"), Input(DATE_PICKER_ID, "date"))
+    def _currency_options(as_of_date):
+        """Currencies with any record on the as-of date, for the multiselect."""
+        if not as_of_date:
+            return []
+        from ui.app import connect_readonly
+        try:
+            conn = connect_readonly(get_db_path())
+        except sqlite3.OperationalError:
+            return []
+        try:
+            from engine.ladder.exposure_adapter import records_from_db
+            from ui.tabs.exposure import BOOK_DISPLAY
+            records, _ = records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
+        except ImportError:
+            return []
+        finally:
+            conn.close()
+        return [{"label": c, "value": c} for c in sorted({r["currency"] for r in records})]
+
+    _view_states = [State(DATE_PICKER_ID, "date"), State(CCY_FILTER_ID, "value"),
+                    State(DATE_RANGE_ID, "start_date"), State(DATE_RANGE_ID, "end_date"),
+                    State(SETTLED_TOGGLE_ID, "value"), State(USD_TOGGLE_ID, "value")]
+
+    @app.callback(Output(DOWNLOAD_LADDER_ID, "data"), Input(DOWNLOAD_LADDER_BTN_ID, "n_clicks"),
+                  *_view_states, prevent_initial_call=True)
+    def _download_ladder(_n, as_of_date, ccys=None, start=None, end=None, settled=None, usd=None):
+        frame = _export(as_of_date, view_from_controls(ccys, start, end, settled, usd), "ladder")
+        return None if frame is None else dcc.send_data_frame(frame.to_csv, "cash_ladder.csv", index=False)
+
+    @app.callback(Output(DOWNLOAD_LEGS_ID, "data"), Input(DOWNLOAD_LEGS_BTN_ID, "n_clicks"),
+                  *_view_states, prevent_initial_call=True)
+    def _download_legs(_n, as_of_date, ccys=None, start=None, end=None, settled=None, usd=None):
+        frame = _export(as_of_date, view_from_controls(ccys, start, end, settled, usd), "legs")
+        return None if frame is None else dcc.send_data_frame(frame.to_csv, "legs.csv", index=False)
+
+    def _export(as_of_date, view, which: str):
+        """The spec's two downloads: the displayed ladder (`cash_ladder.csv`) and every
+        leg with its mark and USD equivalent (`legs.csv`), from the same inputs the
+        grid renders. None when there is no date or no database."""
+        if not as_of_date:
+            return None
+        from ui.app import connect_readonly
+        try:
+            conn = connect_readonly(get_db_path())
+        except sqlite3.OperationalError:
+            return None
+        try:
+            from engine.ladder.exposure import build_exposure
+            from ui.tabs.exposure import (combined_frame, grid_records, ladder_export_frame,
+                                          legs_export_frame)
+            inputs = load_inputs(conn, as_of_date)
+        except ImportError:
+            return None
+        finally:
+            conn.close()
+        grid = grid_records(inputs["records"], view)
+        if which == "legs":
+            return legs_export_frame(grid, inputs["rates"], inputs["forward_rates"])
+        result = build_exposure(grid, inputs["rates"])
+        if result.ladder.empty:
+            return ladder_export_frame(result, inputs["forward_rates"], view)
+        _frame, ccys = combined_frame(result, grid, rates=inputs["rates"],
+                                      forward_rates=inputs["forward_rates"], view=view)
+        return ladder_export_frame(result, inputs["forward_rates"], view, ccys)
 
     @app.callback(Output(TITLE_ID, "children"), Input(DATE_PICKER_ID, "date"))
     def _update_title(as_of_date):
@@ -300,7 +475,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     def _jump_to_today(_n_clicks):
         return today_ny()
 
-    def _render(as_of_date):
+    def _render(as_of_date, view=None):
         if not as_of_date:
             return message_box("No as-of date available.")
 
@@ -315,53 +490,16 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         try:
             # Delta view (docs/BUILD_PLAN.md section 5, "Ladder"): local delta, spot, USD
             # delta rows, Net/Gross, futures delta line, stress block -- from
-            # engine.ladder.exposure via records_from_db. Never P&L.
+            # engine.ladder.exposure via records_from_db. Never P&L. Every input comes
+            # from `load_inputs` (one read per render, shared with the downloads).
             try:
-                from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
-                from data.bloomberg.live import rates_from_marks
-                from ui.tabs.exposure import BOOK_DISPLAY, exposure_section
-                records, unresolved = records_from_db(conn, as_of_date, book_mapping=BOOK_DISPLAY)
-                # Delta/exposure math (Net/Gross headline, risk-and-scenarios table) must
-                # use settle_date > as_of, not >= -- a leg settling today carries no delta
-                # by close (CLAUDE.md "Six tabs as views"). The grid above stays on
-                # records (>=): today's settling leg is still cash that moves today.
-                exposure_records, exposure_unresolved = exposure_records_from_db(
-                    conn, as_of_date, book_mapping=BOOK_DISPLAY)
-                # 2026-09-16 fix: exposure_unresolved was previously discarded here. A
-                # trade unresolved only under the exposure calc's settle_date > as_of
-                # rule (not the grid's >= rule) -- e.g. a trade whose sole leg settles
-                # exactly on as_of -- could silently affect Net/Gross USD with no
-                # "Unresolved trades" caption at all, since that caption only ever read
-                # the grid's own `unresolved`. Merge both, deduped by trade_id (the
-                # grid's own entry for a trade wins if it appears in both, since the
-                # two lists usually share the same reason for the same trade_id).
-                seen_trade_ids = {u.trade_id for u in unresolved}
-                unresolved = list(unresolved) + [
-                    u for u in exposure_unresolved if u.trade_id not in seen_trade_ids
-                ]
-                # Rates: latest official SPOT marks written by the Bloomberg feed --
-                # ONLY source (2026-09-17, "no bnp fall back": the BNP_BVAL SPOT and
-                # forward-outright fallback chain formerly here is removed outright, not
-                # merely unused). A currency missing an official SPOT simply stays
-                # missing -- never substituted, never for P&L (this tab has none).
-                rates = rates_from_marks(conn)
-                # Futures USD delta: engine.ladder.futures_delta.futures_usd_delta (C5
-                # wiring). The full dict (value/by_instrument/missing/reason) is passed
-                # through so exposure_section's combined risk table and futures block can
-                # render a per-instrument Unavailable with the engine's own reason,
-                # rather than a single fabricated zero.
-                from engine.ladder.futures_delta import futures_usd_delta as _futures_usd_delta
-                _fut = _futures_usd_delta(conn, as_of_date)
-                # Per-pair Position table (2026-09-17 "dollar convention" decision):
-                # engine.ladder.ladder.per_pair_delta needs the DB connection, which
-                # ui/tabs/exposure.py deliberately never touches -- fetched here and
-                # passed through as a plain DataFrame, same pattern as `_fut` above.
-                from engine.ladder.ladder import per_pair_delta as _per_pair_delta
-                _pairs = _per_pair_delta(conn, as_of_date)
-                exposure = exposure_section(records, unresolved, as_of_date, rates=rates,
-                                            futures=_fut, futures_details=(_fut or {}).get("details"),
-                                            exposure_records=exposure_records,
-                                            pair_positions=_pairs)
+                from ui.tabs.exposure import exposure_section
+                inputs = load_inputs(conn, as_of_date)
+                exposure = exposure_section(
+                    inputs["records"], inputs["unresolved"], as_of_date, rates=inputs["rates"],
+                    futures=inputs["futures"], futures_details=(inputs["futures"] or {}).get("details"),
+                    exposure_records=inputs["exposure_records"], pair_positions=inputs["pairs"],
+                    forward_rates=inputs["forward_rates"], view=view)
             except ImportError as exc:
                 exposure = message_box(f"Exposure ladder not available ({exc}).")
         finally:

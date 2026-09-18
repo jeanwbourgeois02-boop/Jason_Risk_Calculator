@@ -19,7 +19,10 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     ``Settle Date`` / ``Buy Currency`` / ``Sell Currency`` / ``Price`` columns are used
     instead. Amounts always come from ``BuyCurrency Amount`` / ``SellCurrency Amount``
     (fallback: ``Quantity`` x rate).
-  - CURRENCY: settlement-level cash movements; the CASH instrument only is written.
+  - CURRENCY: the CASH instrument is written for the row's own currency, and (2026-09-18,
+    user's cash-ladder spec) a row naming two currencies is a SPOT FX fill: a trade
+    (product FX_SPOT) + 2 FX_NEAR legs on ``Settle Date``, exactly like a forward. A
+    single-currency row stays instrument-only. See ``_parse_spot_from_currency_row``.
   - FUTURE: a trade + 1 NOTIONAL leg (``Quantity`` = contracts signed by ``Side``).
   - OPTION: product FX_OPTION, 1 NOTIONAL leg in the pair's base currency, quantity
     signed by ``Side``, price = premium fill. Strike from the Description when present
@@ -154,6 +157,7 @@ class ParseResult:
     rejects: List[Reject] = field(default_factory=list)
     n_forward: int = 0
     n_currency: int = 0
+    n_spot: int = 0         # CURRENCY rows that named two currencies and became FX_SPOT trades
     n_future: int = 0
     n_option: int = 0
     n_irs: int = 0
@@ -628,6 +632,75 @@ def _parse_currency(res: ParseResult, row: pd.Series, row_no: int) -> None:
         instrument_id=instrument_id, asset_class="CASH", base_ccy=ccy, quote_ccy=ccy,
         multiplier=1.0, is_ndf=0, bbg_ticker=f"{ccy} Curncy", expiry_date=PERPETUAL,
     ))
+    _parse_spot_from_currency_row(res, row, row_no, symbol)
+
+
+def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int, symbol: str) -> None:
+    """A CURRENCY row that names two currencies is a SPOT FX trade (user's cash-ladder
+    spec, 2026-09-18: "Keep rows whose Fin Type is FORWARD or CURRENCY (spot) and whose
+    Buy Currency is non-blank" -- every one of the reference sample's 85 CURRENCY rows
+    is a T+1/T+2 fill with its own Trade Id, both currencies, both amounts and a price,
+    and none matches any FORWARD row's amounts, so they are conversions in their own
+    right, not settlements of forwards). It becomes a trade (product FX_SPOT) with the
+    same two FX_NEAR legs a forward gets, dated on ``Settle Date``, so its cash joins
+    the ladder (a settled ZAR balance stays ZAR until a spot trade in the file converts
+    it) and its P&L joins the book. A CURRENCY row with only one currency (a fee, a
+    balance, a single-sided movement) stays what it was: the CASH instrument only,
+    never a trade, never a reject. Tolerance rule as for forwards: amounts fall back to
+    Quantity x Price, the pair to market convention, the trade date to the settle date
+    and vice versa; only a blank Trade Id or two identical currencies stops the trade
+    being written, and neither rejects the row."""
+    buy_ccy = _ccy(row.get("Buy Currency"))
+    sell_ccy = _ccy(row.get("Sell Currency"))
+    trade_id = _s(row.get("Trade Id"))
+    if not (buy_ccy and sell_ccy and trade_id) or buy_ccy == sell_ccy:
+        return
+    pair = _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol"))
+    if pair is None or {pair[:3], pair[3:]} != {buy_ccy, sell_ccy}:
+        pair = _pair_by_convention(buy_ccy, sell_ccy)
+    base_ccy, quote_ccy = pair[:3], pair[3:]
+    rate = _num(row.get("Price"))
+    buy_amt = _num(row.get("BuyCurrency Amount"))
+    sell_amt = _num(row.get("SellCurrency Amount"))
+    if math.isnan(buy_amt) or math.isnan(sell_amt):
+        qty = abs(_num(row.get("Quantity")))
+        if math.isnan(qty) or math.isnan(rate) or rate == 0:
+            log.warning("row %d %s: CURRENCY row names %s/%s but has no amounts; cash instrument only",
+                        row_no, trade_id, buy_ccy, sell_ccy)
+            return
+        base_amt, quote_amt = qty, qty * rate
+        buy_amt, sell_amt = (base_amt, quote_amt) if buy_ccy == base_ccy else (quote_amt, base_amt)
+    buy_amt, sell_amt = abs(buy_amt), abs(sell_amt)
+    if math.isnan(rate) or rate == 0:
+        base_amt = buy_amt if buy_ccy == base_ccy else sell_amt
+        quote_amt = sell_amt if buy_ccy == base_ccy else buy_amt
+        if base_amt == 0:
+            return
+        rate = quote_amt / base_amt
+    trade_date = _date(row.get("TradeDate"))
+    value_date = _date(row.get("Settle Date"))
+    trade_date, value_date = trade_date or value_date, value_date or trade_date
+    if trade_date is None:
+        log.warning("row %d %s: CURRENCY row names %s/%s but has no date; cash instrument only",
+                    row_no, trade_id, buy_ccy, sell_ccy)
+        return
+    if buy_ccy == base_ccy:
+        base_amount, quote_amount = buy_amt, -sell_amt
+    else:
+        base_amount, quote_amount = -sell_amt, buy_amt
+    is_ndf = 1 if (quote_ccy in NDF_CCYS or base_ccy in NDF_CCYS) else 0
+    res.instruments.setdefault(pair, Instrument(
+        instrument_id=pair, asset_class="FX", base_ccy=base_ccy, quote_ccy=quote_ccy,
+        multiplier=1.0, is_ndf=is_ndf, bbg_ticker=f"{pair} Curncy", expiry_date=PERPETUAL,
+    ))
+    res.trades.append(Trade(
+        trade_id=trade_id, source=SOURCE, instrument_id=pair, product="FX_SPOT", package_id=trade_id,
+        trade_date=trade_date, quantity=base_amount, price=rate, **_common(row),
+    ))
+    settles_cash = 0 if is_ndf else 1
+    res.legs.append(TradeLeg(trade_id, 1, "FX_NEAR", base_ccy, base_amount, trade_date, value_date, rate, settles_cash))
+    res.legs.append(TradeLeg(trade_id, 2, "FX_NEAR", quote_ccy, quote_amount, trade_date, value_date, rate, settles_cash))
+    res.n_spot += 1
 
 
 def _signed_quantity(row: pd.Series, symbol: str, row_no: int, res: ParseResult, label: str) -> Optional[float]:

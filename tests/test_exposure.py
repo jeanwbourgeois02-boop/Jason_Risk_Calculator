@@ -207,7 +207,7 @@ def test_spot_at_wrong_scale_is_reported_suspect_and_not_used():
     assert krw["rate_source"] == "BBG_BFXFORWARD"  # provenance kept: it is the mark that is wrong
     msg = result.status.set_index("currency").loc["KRW", "message"]
     assert msg.startswith("official SPOT USDKRW 1.3945 is 1,013x away from the book's own KRW fills (~1,413.14)")
-    assert "check the SPOT mark's scale" in msg
+    assert "a 1,000x SCALE error" in msg
     assert portfolio_totals(result)["missing"] == ["KRW"]
     # the same scale error the other way round (1,394,500) is caught too
     assert build_exposure(_krw_records(), _krw_rate(1_394_500.0)).summary.set_index("currency").loc["KRW", "status"] == "SUSPECT_RATE"
@@ -238,3 +238,85 @@ def test_guard_is_silent_without_fill_fields_or_for_crosses():
     assert build_exposure(cross, sek).summary.set_index("currency").loc["SEK", "status"] == "OK"
     assert fill_implied_rates(pd.DataFrame(_krw_records())) == {"KRW": 1.0 / 1413.138}
 
+
+
+# --------------------------------------------------------------------------- USD at outrights (spec 2026-09-18)
+def test_ladder_usd_cells_use_each_dates_own_outright_and_fall_back_to_spot():
+    """User's cash-ladder spec: a cell is amount x the USD-per-unit mark for its own value
+    date (forward outright), the settled row stays at spot, and a date with no forward
+    entry falls back to the summary's spot rate. The sum of all cells is the ladder's
+    USD equivalent per row."""
+    from engine.ladder.exposure import ladder_usd_cells, ladder_usd_equivalent
+    recs = [rec("T1", "2026-10-21", "JPY", -149_000_000.0), rec("T1", "2026-10-21", "USD", 1_000_000.0),
+            rec("T2", "settled", "JPY", 150_000_000.0), rec("T2", "settled", "USD", -1_000_000.0),
+            rec("T3", "2026-12-15", "JPY", -1_500_000.0)]
+    res = build_exposure(recs, {"JPY": rate(150.0, inverted=True)})
+    fwd = {("JPY", "2026-10-21"): {"rate": 1 / 149.0, "basis": "outright"},
+           ("JPY", "settled"): {"rate": 1 / 150.0, "basis": "spot"},
+           ("USD", "2026-10-21"): {"rate": 1.0, "basis": "spot"}, ("USD", "settled"): {"rate": 1.0, "basis": "spot"}}
+    cells = ladder_usd_cells(res, fwd)
+    assert cells.loc["2026-10-21", "JPY"] == pytest.approx(-1_000_000.0)   # at the 21 Oct outright, not spot
+    assert cells.loc["settled", "JPY"] == pytest.approx(1_000_000.0)
+    assert cells.loc["2026-12-15", "JPY"] == pytest.approx(-10_000.0)      # no entry: spot 150
+    eq = ladder_usd_equivalent(res, fwd)
+    assert abs(eq["2026-10-21"]) < 1e-6 and abs(eq["settled"]) < 1e-6
+    # without forward rates every cell is at spot (unchanged behaviour)
+    assert ladder_usd_cells(res).loc["2026-10-21", "JPY"] == pytest.approx(-149_000_000.0 / 150.0)
+
+
+def test_ladder_usd_cells_missing_rate_is_nan_never_zero():
+    from engine.ladder.exposure import ladder_usd_cells, ladder_usd_equivalent
+    res = build_exposure([rec("T1", "2026-10-21", "SEK", 100.0), rec("T1", "2026-10-21", "USD", -10.0)], {})
+    assert math.isnan(ladder_usd_cells(res).loc["2026-10-21", "SEK"])
+    assert math.isnan(ladder_usd_equivalent(res)["2026-10-21"])
+
+
+def test_local_vs_usd_separates_cross_legs_from_the_implied_rate():
+    """Spec's "Local vs USD by value date": the SEK side of a EURSEK cross counts in
+    net_local and net_local_cross but never in the implied SEK-per-USD rate, which uses
+    only SEK legs dealt against USD and the USD legs dealt against SEK."""
+    from engine.ladder.exposure import local_vs_usd
+    recs = [
+        {**rec("A", "2026-10-21", "SEK", 9_500_000.0), "currency_pair": "USDSEK"},
+        {**rec("A", "2026-10-21", "USD", -1_000_000.0), "currency_pair": "USDSEK"},
+        {**rec("B", "2026-10-21", "SEK", 11_000_000.0), "currency_pair": "EURSEK"},
+        {**rec("B", "2026-10-21", "EUR", -1_000_000.0), "currency_pair": "EURSEK"},
+        {**rec("C", "2026-10-21", "JPY", -150_000.0), "currency_pair": "USDJPY"},
+        {**rec("C", "2026-10-21", "USD", 1_000.0), "currency_pair": "USDJPY"},
+    ]
+    out = local_vs_usd(recs).set_index(["currency", "settlement_date"])
+    sek = out.loc[("SEK", "2026-10-21")]
+    assert sek["net_local"] == pytest.approx(20_500_000.0)
+    assert sek["net_local_vs_usd"] == pytest.approx(9_500_000.0)
+    assert sek["net_local_cross"] == pytest.approx(11_000_000.0)
+    assert sek["net_usd"] == pytest.approx(-1_000_000.0)
+    assert sek["implied_rate_local_per_usd"] == pytest.approx(9.5)
+    eur = out.loc[("EUR", "2026-10-21")]
+    assert eur["net_local_cross"] == pytest.approx(-1_000_000.0) and math.isnan(eur["implied_rate_local_per_usd"])
+    assert "USD" not in out.index.get_level_values(0)
+    assert local_vs_usd([]).empty
+
+
+# --------------------------------------------------------------------------- rate guard: inverted vs scaled (review 2026-09-18)
+def test_inverted_usdkrw_quote_is_refused_and_named_as_inverted():
+    """A USDKRW SPOT stored as USD-per-KRW (0.000717, the reciprocal) is refused: USD
+    delta NaN, status SUSPECT_RATE, and the reason says INVERTED, not scale."""
+    res = build_exposure(_krw_records(), _krw_rate(0.000717))
+    s = _row(res, "KRW")
+    assert s["status"] == "SUSPECT_RATE" and math.isnan(s["usd_delta"])
+    msg = res.status.set_index("currency").loc["KRW", "message"]
+    assert "INVERTED" in msg and "SCALE" not in msg
+
+
+def test_thousandfold_usdkrw_quote_is_refused_and_named_as_scale():
+    res = build_exposure(_krw_records(), _krw_rate(1.3945))
+    s = _row(res, "KRW")
+    assert s["status"] == "SUSPECT_RATE" and math.isnan(s["usd_delta"])
+    msg = res.status.set_index("currency").loc["KRW", "message"]
+    assert "SCALE" in msg and "INVERTED" not in msg
+
+
+def test_sane_usdkrw_quote_passes_the_guard():
+    res = build_exposure(_krw_records(), _krw_rate(1394.5))
+    s = _row(res, "KRW")
+    assert s["status"] == "OK" and s["usd_delta"] == pytest.approx(1_413_138_000.0 / 1394.5)

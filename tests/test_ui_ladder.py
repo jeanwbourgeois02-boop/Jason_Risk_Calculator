@@ -93,7 +93,9 @@ def test_transpose_ladder_empty_frame():
     assert out.empty
 
 
-def test_build_layout_has_only_date_picker_no_dropdowns():
+def test_build_layout_keeps_retired_controls_out():
+    """The 2026-09-15 retirements stay retired; the spec's own view controls (2026-09-18)
+    are covered in tests/test_ui_ladder_view.py."""
     layout = cash_ladder.build_layout(default_date="2026-08-17")
     ids = _all_ids(layout)
     assert cash_ladder.DATE_PICKER_ID in ids

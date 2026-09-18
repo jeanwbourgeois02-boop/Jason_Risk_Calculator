@@ -157,6 +157,56 @@ def test_currency_row_writes_instrument_but_no_trade(tmp_csv):
     assert not res.trades
 
 
+def _currency_spot_row(**overrides) -> dict:
+    row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "CURRENCY"}, **{"Trade Id": "938038060"},
+               Symbol="DOL.C-USAA", Side="Buy", Description="UNITED STATES DOLLARS", Currency="CAD.C-CNAA",
+               **{"Buy Currency": "DOL.C-USAA", "Sell Currency": "CAD.C-CNAA",
+                  "BuyCurrency Amount": "273,204.00", "SellCurrency Amount": "376,879.45",
+                  "Price": "1.37948", "TradeDate": "24/8/2026", "Settle Date": "25/8/2026", "Quantity": "273,204"})
+    row.update(overrides)
+    return row
+
+
+def test_currency_row_with_two_currencies_is_a_spot_trade_with_two_legs(tmp_csv):
+    """User's cash-ladder spec (2026-09-18): a CURRENCY row naming both currencies is a
+    spot FX fill and enters the book like a forward -- product FX_SPOT, two FX_NEAR
+    legs on the settle date, our side kept as the file gives it (Buy USD / Sell CAD)."""
+    res = blotter.parse(tmp_csv([_currency_spot_row()]))
+    assert not res.rejects and res.n_currency == 1 and res.n_spot == 1
+    assert "CASH-USD" in res.instruments and "USDCAD" in res.instruments
+    (t,) = res.trades
+    assert (t.product, t.instrument_id, t.trade_id, t.trade_date) == ("FX_SPOT", "USDCAD", "938038060", "2026-08-24")
+    assert t.quantity == pytest.approx(273204.0) and t.price == pytest.approx(1.37948)
+    legs = {l.ccy: l for l in res.legs}
+    assert legs["USD"].amount == pytest.approx(273204.0) and legs["CAD"].amount == pytest.approx(-376879.45)
+    assert all(l.settle_date == "2026-08-25" and l.settles_cash == 1 and l.leg_type == "FX_NEAR" for l in res.legs)
+
+
+def test_currency_spot_row_tolerates_blank_amounts_pair_and_dates(tmp_csv):
+    """Tolerance rule: amounts from Quantity x Price, pair by market convention when the
+    column is '0', settle date from the trade date when blank -- never a reject."""
+    row = _currency_spot_row(**{"BuyCurrency Amount": "", "SellCurrency Amount": "", "Currency Pair": "0",
+                                "Settle Date": ""})
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects and res.n_spot == 1
+    legs = {l.ccy: l for l in res.legs}
+    assert legs["USD"].amount == pytest.approx(273204.0)
+    assert legs["CAD"].amount == pytest.approx(-273204.0 * 1.37948)
+    assert legs["CAD"].settle_date == "2026-08-24"
+    # a sell of the base currency flips both legs
+    res = blotter.parse(tmp_csv([_currency_spot_row(Side="Sell", **{"Buy Currency": "CAD.C-CNAA", "Sell Currency": "DOL.C-USAA",
+                                                                       "BuyCurrency Amount": "376,879.45",
+                                                                       "SellCurrency Amount": "273,204.00"})]))
+    assert res.trades[0].quantity == pytest.approx(-273204.0)
+
+
+def test_currency_row_with_one_currency_stays_instrument_only(tmp_csv):
+    row = _currency_spot_row(**{"Sell Currency": "", "SellCurrency Amount": ""})
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects and res.n_spot == 0 and not res.trades
+    assert "CASH-USD" in res.instruments
+
+
 def test_currency_row_rejects_bad_symbol(tmp_csv):
     row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "CURRENCY"},
                **{"Trade Id": "300"}, Symbol="NOT-A-CASH-SYMBOL")
@@ -472,9 +522,14 @@ def test_real_sample_file_parses_with_no_rejects():
     assert res.n_skipped_other == 0
     assert res.n_skipped_status_or_fund == 0
     assert not res.rejects
-    # 743 forward + 11 future + 8 option + 10 IRS trades; CURRENCY produces none
-    assert len(res.trades) == 743 + 11 + 8 + 10
-    assert len(res.legs) == 743 * 2 + 11 + 8 + 10 * 2
+    # 743 forward + 85 spot (every CURRENCY row names two currencies) + 11 future
+    # + 8 option + 10 IRS trades (2026-09-18: CURRENCY rows are spot fills)
+    assert res.n_spot == 85
+    assert len(res.trades) == 743 + 85 + 11 + 8 + 10
+    assert len(res.legs) == (743 + 85) * 2 + 11 + 8 + 10 * 2
+    spot = [t for t in res.trades if t.product == "FX_SPOT"]
+    assert len(spot) == 85 and all(t.trade_id for t in spot)
+    assert {t.instrument_id for t in spot} == {"EURSEK", "EURUSD", "USDCAD", "USDHKD", "USDJPY", "XAUUSD"}
     irs_trades = [t for t in res.trades if t.product == "IRS"]
     assert len(irs_trades) == 10
     assert all(t.quantity > 0 for t in irs_trades)  # every reference-sample Notional is positive

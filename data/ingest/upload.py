@@ -177,8 +177,9 @@ def import_blotter(payload, filename, db_path):
     result, replaced = _stage_and_publish(db_path, _load, full_replace=True)
     n_trades, n_legs = len(result.trades), len(result.legs)
     parts = [f"Imported {filename}: {n_trades} trades -- "
-             f"{result.n_forward} forwards, {result.n_future} futures, {result.n_option} options, "
-             f"{result.n_irs} rate swaps; {n_legs} legs. {result.n_currency} cash rows seen."]
+             f"{result.n_forward} forwards, {result.n_spot} spot, {result.n_future} futures, "
+             f"{result.n_option} options, {result.n_irs} rate swaps; {n_legs} legs. "
+             f"{result.n_currency} cash rows seen ({result.n_spot} of them spot fills)."]
     if replaced.get("trades"):
         parts.append(f"Replaced the previous book: {replaced['trades']} trade(s) and "
                      f"{replaced['trade_legs']} leg(s) removed.")
