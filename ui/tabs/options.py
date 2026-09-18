@@ -395,6 +395,12 @@ def format_rows(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None) -> 
         {"if": {"filter_query": "{level} = 'LEG'", "column_id": "label"},
          "paddingLeft": "44px", "color": "var(--muted)"},
     ]
+    # An option with no strike on file cannot be priced: the whole row is flagged so it
+    # is impossible to miss (user request 2026-09-18), and the terms editor below the
+    # table is where the strike is typed in.
+    style_data_conditional.append(
+        {"if": {"filter_query": "{type} contains 'no strike'"},
+         "backgroundColor": "rgba(178, 59, 59, 0.14)", "color": "var(--neg)", "fontWeight": "700"})
     for key in ("delta", "theta", "gamma", "vega", "rho", "mktval"):
         style_data_conditional += [
             {"if": {"filter_query": f"{{{key}}} contains '('", "column_id": key},

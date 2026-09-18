@@ -589,7 +589,41 @@ def _safe_section(label: str, builder: Callable[[], html.Div]) -> html.Div:
         return _error_card(label, exc)
 
 
+def missing_terms_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
+    """A red banner naming every option that has no strike on file (so cannot be
+    priced) and where to enter it -- shown at the top of every Blotter sub-tab, not
+    only under Options, because a blank P&L anywhere else is otherwise unexplained
+    (user request 2026-09-18). None when every option has its terms."""
+    from ui.tabs import options as options_ui
+    try:
+        missing = [i["instrument_id"] for i in options_ui.option_instruments(conn) if not i["strike"]]
+    except Exception:  # never let the notice itself blank a tab
+        logging.getLogger(__name__).exception("missing_terms_notice failed")
+        return None
+    if not missing:
+        return None
+    return html.Div(className="notice notice--terms", role="alert",
+                    style={"border": "1px solid var(--neg)", "borderRadius": "6px", "padding": "8px 12px",
+                           "margin": "0 0 10px", "background": "rgba(178, 59, 59, 0.08)"},
+                    children=[
+                        html.B(f"{len(missing)} option{'s' if len(missing) != 1 else ''} cannot be priced: no strike on file. "),
+                        html.Span(", ".join(missing) + ". "),
+                        html.Span("Enter the strike under Options ▸ Option terms, or re-upload a blotter export "
+                                  "that includes a Strike column."),
+                    ])
+
+
 def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """One sub-tab's content, with the missing-option-terms banner (if any) on top of
+    the scope body built by `_scope_layout_body`."""
+    body = _scope_layout_body(scope, conn, as_of)
+    notice = _safe_section("Option terms notice", lambda: missing_terms_notice(conn))
+    if notice is None:
+        return body
+    return html.Div([notice, body])
+
+
+def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     """Build one sub-tab's content: headline strip (initial, whole-scope) + filter
     dropdown bar + trade table + an (empty until a row is clicked) detail container
     below it. Rates/Options are placeholders per module docstring.

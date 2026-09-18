@@ -1140,3 +1140,50 @@ def test_register_callbacks_smoke():
     app.layout = header.layout()
     header.register_callbacks(app, get_db_path=lambda: ":memory:")
     assert any(header.CHART_CONTAINER_ID in k for k in app.callback_map)
+
+
+# --------------------------------------------------------------------------- missing option terms
+def _db_with_option_missing_strike(tmp_path):
+    from data.ingest import schema
+    conn = schema.connect(tmp_path / "terms.db")
+    conn.execute("INSERT INTO instruments VALUES ('EURSEK112526C-1','FX_OPTION','EUR','SEK',1,0,'EURSEK112526C-1','2026-11-25')")
+    conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type) VALUES ('EURSEK112526C-1', 0, 'CALL')")
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, "
+                 "account, counterparty, strategy, trader, description) VALUES "
+                 "('o1','XLSX','EURSEK112526C-1','FX_OPTION','o1','2026-09-01',1000000,0.01,'acct','cp','','tr','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','EUR',1000000,'2026-09-01','2026-11-25',0,0)")
+    conn.commit()
+    return conn
+
+
+def test_missing_terms_notice_names_the_option_and_where_to_enter_it(tmp_path):
+    conn = _db_with_option_missing_strike(tmp_path)
+    notice = blotter.missing_terms_notice(conn)
+    assert notice is not None
+    text = str(notice.to_plotly_json())
+    assert "EURSEK112526C-1" in text
+    assert "no strike on file" in text
+    assert "Option terms" in text
+
+
+def test_missing_terms_notice_absent_when_every_option_has_a_strike(tmp_path):
+    conn = _db_with_option_missing_strike(tmp_path)
+    conn.execute("UPDATE instrument_options SET strike = 11.25")
+    conn.commit()
+    assert blotter.missing_terms_notice(conn) is None
+
+
+def test_scope_layout_shows_missing_terms_notice_on_every_sub_tab(tmp_path):
+    conn = _db_with_option_missing_strike(tmp_path)
+    for scope in ("total", "fx", "options"):
+        text = str(blotter.scope_layout(scope, conn, "2026-09-17").to_plotly_json())
+        assert "no strike on file" in text, scope
+
+
+def test_options_table_flags_no_strike_rows_red():
+    from ui.tabs import options as options_ui
+    import pandas as pd
+    df = pd.DataFrame([{**{c: None for c in options_ui.ALL_COLUMNS}, "label": "x", "level": "LEG",
+                        "type": "Call (no strike on file)", "package_id": "p", "trade_id": "t"}])
+    _, styles = options_ui.format_rows(df)
+    assert any("no strike" in str(s.get("if", {}).get("filter_query", "")) for s in styles)
