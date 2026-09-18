@@ -25,6 +25,14 @@ REPO = Path(__file__).resolve().parents[1]
 AS_OF = "2026-08-17"
 
 
+def _book_today():
+    """Today as the code under test sees it: the New York book date, not the PC's
+    local date (a day ahead of New York every morning in Asia)."""
+    from data.bloomberg.live import book_today
+    return book_today()
+
+
+
 def _mk_conn():
     conn = schema.connect(":memory:")
     conn.execute(
@@ -1836,7 +1844,7 @@ def test_rates_bloomberg_source_get_curve_quotes_with_fake_blpapi(monkeypatch):
 
     src = rmd.RatesBloombergSource("localhost", 8194)
     assert src.name() == "RatesBloombergSource(localhost:8194)"
-    snap = src.get_curve_quotes("USD", date.today())
+    snap = src.get_curve_quotes("USD", _book_today())
     assert snap.currency == "USD"
     assert snap.index == "SOFR"
     assert len(snap.quotes) == 9  # only tickers with a PX_LAST in the fake response
@@ -1859,7 +1867,7 @@ def test_rates_bloomberg_source_get_curve_quotes_too_few_raises(monkeypatch):
 
     src = rmd.RatesBloombergSource("localhost", 8194)
     with pytest.raises(rmd.MarketDataUnavailable):
-        src.get_curve_quotes("USD", date.today())
+        src.get_curve_quotes("USD", _book_today())
 
 
 def test_rates_bloomberg_source_get_fixings_with_fake_blpapi(monkeypatch):
@@ -2304,6 +2312,166 @@ def test_vol_marketdata_module_imports_without_blpapi():
     import data.bloomberg.vol_marketdata as vmd
     importlib.reload(vmd)
     assert callable(vmd.vol_ticker)
+
+
+# -- UNVERIFIED assumption verification: vol_ticker_checks (2026-09-18) ------------------
+# The live pull itself is the probe: data/bloomberg/live.py's `_vol_step` requests every
+# UNVERIFIED ticker/field on every cycle with an open FX_OPTION in the book, and
+# assess_ticker_assumptions / record_vol_ticker_checks turn VolFetchResult.diagnostics
+# (already produced, no extra request) into a persistent per-assumption verdict that
+# tools/bbg_diagnostics.py::check_unverified_assumptions reads.
+
+def test_get_vol_quotes_diagnostics_carry_bbg_status_for_security_and_field_errors(monkeypatch):
+    """The live per-ticker classification (2026-09-18) must distinguish a rejected
+    ticker (SECURITY_ERROR) from a rejected field on an otherwise-valid ticker
+    (FIELD_EXCEPTION) -- both previously collapsed into a bare 'MISSING'."""
+    from data.bloomberg import vol_marketdata as vmd
+
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        sec_list = []
+        for t in request.securities:
+            if t == "EURUSDV1M BGN Curncy":
+                sec_list.append({"security": t, "fieldData": {},
+                                  "securityError": {"message": "UNKNOWN_SECURITY"}})
+            elif t == "EURUSD25R1M BGN Curncy":
+                sec_list.append({"security": t, "fieldData": {},
+                                  "fieldExceptions": [{"fieldId": "PX_LAST",
+                                                        "errorInfo": {"message": "NOT_APPLICABLE_TO_REF_DATA"}}]})
+            else:
+                sec_list.append({"security": t, "fieldData": {"PX_LAST": 7.5}})
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    src = vmd.VolBloombergSource("localhost", 8194)
+    result = src.get_vol_quotes(["EURUSD"], as_of=None, tenors=["1M"])
+
+    by_ticker = {d["ticker"]: d for d in result.diagnostics}
+    assert by_ticker["EURUSDV1M BGN Curncy"]["bbg_status"] == "SECURITY_ERROR"
+    assert "UNKNOWN_SECURITY" in by_ticker["EURUSDV1M BGN Curncy"]["detail"]
+    assert by_ticker["EURUSD25R1M BGN Curncy"]["bbg_status"] == "FIELD_EXCEPTION"
+    assert "NOT_APPLICABLE_TO_REF_DATA" in by_ticker["EURUSD25R1M BGN Curncy"]["detail"]
+    # everything else in the 1M batch still resolved fine
+    assert "EURUSD25B1M BGN Curncy" not in by_ticker
+
+
+def test_assess_ticker_assumptions_all_confirmed_from_bloomberg_source(monkeypatch):
+    from data.bloomberg import vol_marketdata as vmd
+
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        return [{"securityData": [{"security": t, "fieldData": {"PX_LAST": 7.5}} for t in request.securities]}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    src = vmd.VolBloombergSource("localhost", 8194)
+    result = src.get_vol_quotes(["EURUSD"], as_of=None)  # default tenors: all of VOL_TENORS, incl. 'ON'
+    assert not result.diagnostics
+
+    rows = vmd.assess_ticker_assumptions(result)
+    ids = {r["assumption_id"] for r in rows}
+    assert ids == set(vmd.ALL_ASSUMPTION_IDS)
+    assert all(r["outcome"] == "OK" for r in rows)
+
+
+def test_assess_ticker_assumptions_flags_rejected_ticker_shape(monkeypatch):
+    """Every RR25 ticker (all tenors) is rejected outright by Bloomberg -- the ticker
+    SHAPE assumption must FAIL naming that exact ticker, while unrelated assumptions
+    (ATM ticker shape, etc.) stay confirmed."""
+    from data.bloomberg import vol_marketdata as vmd
+
+    def responder(request):
+        sec_list = []
+        for t in request.securities:
+            if "25R" in t:
+                sec_list.append({"security": t, "fieldData": {}, "securityError": {"message": "UNKNOWN_SECURITY"}})
+            else:
+                sec_list.append({"security": t, "fieldData": {"PX_LAST": 7.5}})
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    src = vmd.VolBloombergSource("localhost", 8194)
+    result = src.get_vol_quotes(["EURUSD"], as_of=None)
+
+    rows = {r["assumption_id"]: r for r in vmd.assess_ticker_assumptions(result)}
+    assert rows["rr25_ticker"]["outcome"] == "SECURITY_ERROR"
+    assert "25R" in rows["rr25_ticker"]["tickers"]
+    assert "UNKNOWN_SECURITY" in rows["rr25_ticker"]["detail"]
+    # unrelated assumptions are unaffected
+    assert rows["atm_ticker"]["outcome"] == "OK"
+    assert rows["bf25_ticker"]["outcome"] == "OK"
+
+
+def test_assess_ticker_assumptions_flags_out_of_range_scale(monkeypatch):
+    """ATM values coming back as a decimal fraction (0.075) rather than vol points (7.5)
+    must fail the scale assumption specifically -- the ticker shape itself is still fine
+    since a value WAS returned under PX_LAST."""
+    from data.bloomberg import vol_marketdata as vmd
+
+    atm_tickers = {vmd.vol_ticker("EURUSD", t, "ATM") for t in vmd.VOL_TENORS}
+
+    def responder(request):
+        sec_list = [{"security": t, "fieldData": {"PX_LAST": 0.075 if t in atm_tickers else 7.5}}
+                    for t in request.securities]
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    src = vmd.VolBloombergSource("localhost", 8194)
+    result = src.get_vol_quotes(["EURUSD"], as_of=None)
+
+    rows = {r["assumption_id"]: r for r in vmd.assess_ticker_assumptions(result)}
+    assert rows["vol_scale"]["outcome"] == "OUT_OF_RANGE"
+    assert "decimal fraction" in rows["vol_scale"]["detail"]
+    assert rows["atm_ticker"]["outcome"] == "OK"  # ticker shape confirmed independent of scale
+
+
+def test_record_and_read_vol_ticker_checks_round_trip():
+    from data.bloomberg import vol_marketdata as vmd
+
+    conn = sqlite3.connect(":memory:")
+    src = vmd.VolFileSource(VOL_FIXTURE)
+    result = src.get_vol_quotes(["EURUSD"], as_of=date(2026, 9, 17))
+    n = vmd.record_vol_ticker_checks(conn, result, checked_at="2026-09-17T17:00:00-04:00")
+    assert n == len(vmd.ALL_ASSUMPTION_IDS)
+
+    checked = vmd.read_vol_ticker_checks(conn)
+    assert set(checked) == set(vmd.ALL_ASSUMPTION_IDS)
+    assert all(c["outcome"] == "OK" for c in checked.values())
+    assert checked["atm_ticker"]["last_checked"] == "2026-09-17T17:00:00-04:00"
+
+    # Idempotent / defensive table creation: calling again on the same conn never raises.
+    n2 = vmd.record_vol_ticker_checks(conn, result, checked_at="2026-09-17T17:00:00-04:00")
+    assert n2 == n
+
+
+def test_read_vol_ticker_checks_empty_when_no_pull_has_run():
+    from data.bloomberg import vol_marketdata as vmd
+
+    conn = sqlite3.connect(":memory:")
+    assert vmd.read_vol_ticker_checks(conn) == {}  # table doesn't exist yet -- never raises
+
+
+def test_record_vol_ticker_checks_leaves_unexercised_assumption_untouched():
+    """An assumption with no evidence this cycle (e.g. a narrower probe that never asked
+    for the 'ON' tenor) must keep its previous verdict, not be wiped or marked stale."""
+    from data.bloomberg import vol_marketdata as vmd
+
+    conn = sqlite3.connect(":memory:")
+    src = vmd.VolFileSource(VOL_FIXTURE)
+    full = src.get_vol_quotes(["EURUSD"], as_of=date(2026, 9, 17))
+    vmd.record_vol_ticker_checks(conn, full, checked_at="2026-09-17T17:00:00-04:00")
+
+    partial = vmd.VolFetchResult(
+        as_of=date(2026, 9, 18), source="BBG_BDP",
+        pairs={"EURUSD": vmd.PairVolSnapshot(pair="EURUSD", as_of=date(2026, 9, 18), quotes=[
+            vmd.VolQuote(tenor="1M", quote_type="ATM", ticker="EURUSDV1M BGN Curncy", value=7.10),
+        ])},
+    )
+    vmd.record_vol_ticker_checks(conn, partial, checked_at="2026-09-18T17:00:00-04:00")
+
+    checked = vmd.read_vol_ticker_checks(conn)
+    assert checked["atm_ticker"]["last_checked"] == "2026-09-18T17:00:00-04:00"
+    assert math.isclose(checked["atm_ticker"]["value"], 7.10)
+    assert checked["on_tenor"]["last_checked"] == "2026-09-17T17:00:00-04:00"  # untouched
 
 
 # =========================================================================== rates_vol_marketdata.py

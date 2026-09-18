@@ -128,3 +128,94 @@ def test_check_last_pull_warning_with_no_items_still_reports_the_count(tmp_path)
     checks = tool.check_last_pull(db)
     assert checks[0]["status"] == "warning"
     assert "2 of 5" in checks[0]["message"]
+
+
+# --------------------------------------------------------------------------- check_unverified_assumptions
+# 2026-09-18: this check used to just count UNVERIFIED lines in vol_marketdata.py's
+# docstring and unconditionally tell the user to run --probe by hand. Since
+# data/bloomberg/live.py's `_vol_step` requests every one of those tickers on every live
+# pull with an open FX_OPTION in the book, the live pull itself is now the probe, and this
+# check reads what it actually confirmed/rejected from the `vol_ticker_checks` table
+# (data.bloomberg.vol_marketdata.record_vol_ticker_checks writes it -- see
+# tests/test_bloomberg.py and tests/test_live.py for that side). These tests build the
+# VolFetchResult from a real fake blpapi session (tests.test_bloomberg's fixture), the
+# same "fake session" the live pull itself would talk to.
+def _vol_result_all_confirmed(monkeypatch):
+    from data.bloomberg import vol_marketdata as vm
+    from tests.test_bloomberg import _install_fake_blpapi
+
+    def responder(request):
+        return [{"securityData": [{"security": t, "fieldData": {"PX_LAST": 7.5}} for t in request.securities]}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    src = vm.VolBloombergSource("localhost", 8194)
+    return src.get_vol_quotes(["EURUSD"], as_of=None)
+
+
+def test_check_unverified_assumptions_pass_when_every_assumption_confirmed(tmp_path, monkeypatch):
+    from data.bloomberg import vol_marketdata as vm
+
+    tool = _load_tool()
+    db = tmp_path / "risk.db"
+    conn = schema.connect(db)
+    result = _vol_result_all_confirmed(monkeypatch)
+    vm.record_vol_ticker_checks(conn, result, checked_at="2026-09-18T17:00:00-04:00")
+    conn.commit()
+    conn.close()
+
+    checks = tool.check_unverified_assumptions(db)
+    assert len(checks) == 1
+    assert checks[0]["status"] == "pass"
+    assert "All 9" in checks[0]["message"] or f"All {len(vm.ALL_ASSUMPTION_IDS)}" in checks[0]["message"]
+
+
+def test_check_unverified_assumptions_fail_names_rejected_assumption_and_ticker(tmp_path, monkeypatch):
+    from data.bloomberg import vol_marketdata as vm
+    from tests.test_bloomberg import _install_fake_blpapi
+
+    tool = _load_tool()
+    db = tmp_path / "risk.db"
+    conn = schema.connect(db)
+
+    def responder(request):
+        sec_list = []
+        for t in request.securities:
+            if "25R" in t:
+                sec_list.append({"security": t, "fieldData": {}, "securityError": {"message": "UNKNOWN_SECURITY"}})
+            else:
+                sec_list.append({"security": t, "fieldData": {"PX_LAST": 7.5}})
+        return [{"securityData": sec_list}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    src = vm.VolBloombergSource("localhost", 8194)
+    result = src.get_vol_quotes(["EURUSD"], as_of=None)
+    vm.record_vol_ticker_checks(conn, result, checked_at="2026-09-18T17:00:00-04:00")
+    conn.commit()
+    conn.close()
+
+    checks = tool.check_unverified_assumptions(db)
+    assert len(checks) == 1
+    assert checks[0]["status"] == "fail"
+    msg = checks[0]["message"]
+    assert "rr25_ticker" in msg
+    assert "25R" in msg
+    assert "SECURITY_ERROR" in msg
+    assert "UNKNOWN_SECURITY" in msg
+
+
+def test_check_unverified_assumptions_warning_when_no_record_yet(tmp_path):
+    tool = _load_tool()
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()  # a real, current schema -- just no live vol pull has run
+
+    checks = tool.check_unverified_assumptions(db)
+    assert len(checks) == 1
+    assert checks[0]["status"] == "warning"
+    assert "not yet exercised" in checks[0]["message"]
+
+
+def test_check_unverified_assumptions_warning_when_db_path_missing():
+    tool = _load_tool()
+    checks = tool.check_unverified_assumptions(None)
+    assert checks[0]["status"] == "warning"
+    assert "not yet exercised" in checks[0]["message"]

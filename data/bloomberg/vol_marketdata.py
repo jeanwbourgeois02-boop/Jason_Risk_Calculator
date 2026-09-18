@@ -50,6 +50,20 @@ FWD_OUTRIGHT guesses):
      FWD_POINTS_SCALE) -- i.e. that PX_LAST really is "7.85" meaning 7.85%,
      not something requiring further conversion.
 
+Since 2026-09-17, ``data/bloomberg/live.py``'s ``_vol_step`` requests every one of the
+tickers above on every live pull with an open FX_OPTION in the book -- so a live pull now
+doubles as this module's own probe, and the user no longer needs to run ``--probe`` by
+hand for these to get checked. ``assess_ticker_assumptions`` / ``record_vol_ticker_checks``
+below (2026-09-18) turn what Bloomberg actually returned into a persistent
+``vol_ticker_checks`` table row per assumption (last checked time, ticker(s) tried,
+outcome, value seen), derived entirely from the same ``VolFetchResult.diagnostics`` the
+vol step already produces -- no extra Bloomberg request is made for this, except that the
+scale assumption (item 9) is judged from the returned ATM value itself (7.5 vs 0.075).
+``tools/bbg_diagnostics.py``'s "FX vol ticker assumptions" check reads that table instead
+of unconditionally telling the user to run ``--probe``. The numbered UNVERIFIED list above
+stays as documentation of what each assumption means and why it was originally a guess --
+it is not removed just because a live pull may since have confirmed it.
+
 Units: ``vol_quotes.value`` is stored RAW, in vol points exactly as Bloomberg
 quotes them (e.g. 7.85 meaning 7.85%). The consumer (options-pricer) divides
 by 100 before feeding a decimal vol into any pricer -- this module never
@@ -77,7 +91,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from engine.rates.store import snapped_at
 
@@ -338,6 +352,78 @@ class VolFileSource:
 _MAX_CONSECUTIVE_TIMEOUTS = 3
 
 
+def _bbg_error_message(el, key: str) -> Optional[str]:
+    """`el.<key>`'s message text if present, else None (e.g. key="securityError").
+    Deliberately a small local helper, not imported from pull_marks.py's equivalent --
+    see module docstring "Structure mirrors ... exactly" / "kept as its own class, not
+    shared, so this module has no import dependency on rates_marketdata" (same reasoning
+    extends to pull_marks.py here)."""
+    if not el.hasElement(key):
+        return None
+    sub = el.getElement(key)
+    return sub.getElementAsString("message") if sub.hasElement("message") else key
+
+
+def _bbg_field_exception_message(el, field_name: str) -> Optional[str]:
+    if not el.hasElement("fieldExceptions"):
+        return None
+    fx_el = el.getElement("fieldExceptions")
+    for j in range(fx_el.numValues()):
+        fx = fx_el.getValueAsElement(j)
+        fid = fx.getElementAsString("fieldId") if fx.hasElement("fieldId") else None
+        if fid is not None and fid != field_name:
+            continue
+        if fx.hasElement("errorInfo"):
+            ei = fx.getElement("errorInfo")
+            if ei.hasElement("message"):
+                return ei.getElementAsString("message")
+        return "fieldException"
+    return None
+
+
+def _classify_live_ticker(sd, field_name: str) -> dict:
+    """One ticker's per-security element (live/ReferenceDataRequest shape) ->
+    {"value", "status", "detail"}. status is OK / SECURITY_ERROR / FIELD_EXCEPTION /
+    NO_VALUE (2026-09-18, added so a live pull can tell a rejected ticker apart from a
+    field simply not populated -- feeds assess_ticker_assumptions / record_vol_ticker_
+    checks below, itself never a new Bloomberg request: same response, read more fully)."""
+    sec_err = _bbg_error_message(sd, "securityError")
+    if sec_err:
+        return {"value": None, "status": "SECURITY_ERROR", "detail": sec_err}
+    value = None
+    if sd.hasElement("fieldData"):
+        fd = sd.getElement("fieldData")
+        if fd.hasElement(field_name):
+            value = fd.getElement(field_name).getValue()
+    if value is not None:
+        return {"value": value, "status": "OK", "detail": ""}
+    field_err = _bbg_field_exception_message(sd, field_name)
+    if field_err:
+        return {"value": None, "status": "FIELD_EXCEPTION", "detail": field_err}
+    return {"value": None, "status": "NO_VALUE", "detail": "no value returned for this ticker"}
+
+
+def _classify_hist_ticker(sec_data, field_name: str) -> dict:
+    """Same as `_classify_live_ticker` but for the HistoricalDataRequest shape, where
+    fieldData is a list of daily points (see `_fetch`'s historical branch)."""
+    sec_err = _bbg_error_message(sec_data, "securityError")
+    if sec_err:
+        return {"value": None, "status": "SECURITY_ERROR", "detail": sec_err}
+    value = None
+    if sec_data.hasElement("fieldData"):
+        fd = sec_data.getElement("fieldData")
+        if fd.numValues() > 0:
+            point = fd.getValueAsElement(0)
+            if point.hasElement(field_name):
+                value = point.getElement(field_name).getValue()
+    if value is not None:
+        return {"value": value, "status": "OK", "detail": ""}
+    field_err = _bbg_field_exception_message(sec_data, field_name)
+    if field_err:
+        return {"value": None, "status": "FIELD_EXCEPTION", "detail": field_err}
+    return {"value": None, "status": "NO_VALUE", "detail": "no value returned for this ticker"}
+
+
 class VolBloombergSource:
     """Live blpapi wrapper for FX vol quotes. Opens its OWN blpapi.Session -- see module
     docstring. Every ticker/field name used here is UNVERIFIED (see module docstring
@@ -393,11 +479,16 @@ class VolBloombergSource:
     # rates_marketdata.py for the pattern this matches) -----------------------------------
 
     def _fetch(self, tickers: Sequence[str], as_of: Optional[date]):
-        """Returns (values: {ticker: raw value or None}, detail: Optional[str]).
-        `detail` is set (values may be partial/empty) on a timeout or any unexpected
-        exception talking to the fake/real session -- this method NEVER raises, so a
-        single bad batch degrades to "everything in it missing" with a reason attached,
-        rather than aborting the whole pull (see module docstring)."""
+        """Returns (info: {ticker: {"value", "status", "detail"}}, batch_detail:
+        Optional[str]). status is OK / SECURITY_ERROR / FIELD_EXCEPTION / NO_VALUE per
+        ticker (2026-09-18, added so a live pull can tell a rejected ticker shape apart
+        from a field simply not populated yet -- feeds assess_ticker_assumptions /
+        record_vol_ticker_checks below; this is reading more of the SAME response, not an
+        extra Bloomberg request). `batch_detail` is set (info may be partial/empty) on a
+        timeout or any unexpected exception talking to the fake/real session -- this
+        method NEVER raises, so a single bad batch degrades to "everything in it missing"
+        with a reason attached, rather than aborting the whole pull (see module
+        docstring)."""
         blpapi = self._blpapi
         try:
             live = as_of is None
@@ -413,7 +504,7 @@ class VolBloombergSource:
 
             self._session.sendRequest(request)
 
-            out: Dict[str, object] = {}
+            out: Dict[str, dict] = {}
             consecutive_timeouts = 0
             while True:
                 event = self._session.nextEvent(self.timeout_ms)
@@ -434,22 +525,10 @@ class VolBloombergSource:
                         for i in range(sec_data.numValues()):
                             sd = sec_data.getValueAsElement(i)
                             ticker = sd.getElementAsString("security")
-                            value = None
-                            if sd.hasElement("fieldData"):
-                                fd = sd.getElement("fieldData")
-                                if fd.hasElement(VOL_FIELD):
-                                    value = fd.getElement(VOL_FIELD).getValue()
-                            out[ticker] = value
+                            out[ticker] = _classify_live_ticker(sd, VOL_FIELD)
                     else:
                         ticker = sec_data.getElementAsString("security")
-                        value = None
-                        if sec_data.hasElement("fieldData"):
-                            fd = sec_data.getElement("fieldData")
-                            if fd.numValues() > 0:
-                                point = fd.getValueAsElement(0)
-                                if point.hasElement(VOL_FIELD):
-                                    value = point.getElement(VOL_FIELD).getValue()
-                        out[ticker] = value
+                        out[ticker] = _classify_hist_ticker(sec_data, VOL_FIELD)
                 if event_type == blpapi.Event.RESPONSE and event_is_ours:
                     break
             return out, None
@@ -479,12 +558,20 @@ class VolBloombergSource:
         diagnostics: List[dict] = []
         pairs_out: Dict[str, PairVolSnapshot] = {}
         for pair, tenor, quote_type, ticker in needed:
-            val = values.get(ticker)
+            info = values.get(ticker)
+            if info is None:
+                diagnostics.append({
+                    "pair": pair, "tenor": tenor, "quote_type": quote_type, "ticker": ticker,
+                    "status": "MISSING", "bbg_status": "NO_VALUE",
+                    "detail": batch_detail or "no value returned for this ticker",
+                })
+                continue
+            val = info.get("value")
             if val is None or isinstance(val, bool) or not isinstance(val, (int, float)):
                 diagnostics.append({
                     "pair": pair, "tenor": tenor, "quote_type": quote_type, "ticker": ticker,
-                    "status": "MISSING",
-                    "detail": batch_detail or "no value returned for this ticker",
+                    "status": "MISSING", "bbg_status": info.get("status", "NO_VALUE"),
+                    "detail": info.get("detail") or batch_detail or "no value returned for this ticker",
                 })
                 continue
             pairs_out.setdefault(pair, PairVolSnapshot(pair=pair, as_of=effective_as_of, quotes=[]))
@@ -561,6 +648,201 @@ def write_vol_quotes(
             rows,
         )
     return len(rows)
+
+
+# --------------------------------------------------------------------------- assumption verification (2026-09-18)
+# tools/bbg_diagnostics.py::check_unverified_assumptions used to just count how many
+# UNVERIFIED lines remain in this module's docstring and unconditionally tell the user to
+# run --probe by hand. data/bloomberg/live.py's `_vol_step` already requests every one of
+# these tickers on every live pull with an open FX_OPTION in the book (2026-09-17) -- so
+# the live pull itself is the probe. This section turns what Bloomberg actually returned
+# (VolFetchResult.diagnostics, already produced by get_vol_quotes -- no new request) into
+# a persistent `vol_ticker_checks` table row per assumption, so the diagnostics check can
+# report a real PASS/FAIL instead.
+
+ASSUMPTION_DESCRIPTIONS: Dict[str, str] = {
+    "atm_ticker": "ATM ticker shape '<PAIR>V<TENOR> BGN Curncy' (probe item 1)",
+    "rr25_ticker": "25-delta risk reversal ticker '<PAIR>25R<TENOR> BGN Curncy' (probe item 2)",
+    "bf25_ticker": "25-delta butterfly ticker '<PAIR>25B<TENOR> BGN Curncy' (probe item 3)",
+    "rr10_ticker": "10-delta risk reversal ticker '<PAIR>10R<TENOR> BGN Curncy' (probe item 4)",
+    "bf10_ticker": "10-delta butterfly ticker '<PAIR>10B<TENOR> BGN Curncy' (probe item 5)",
+    "px_last_field": "field PX_LAST is correct for all five quote types (probe item 6)",
+    "on_tenor": "'ON' (overnight) is a valid tenor suffix on these vol tickers (probe item 7)",
+    "request_type": "live ReferenceDataRequest (as_of=None) is the right request shape for vol quotes (probe item 8)",
+    "vol_scale": "values come back already in vol points (7.85 = 7.85%), no separate scale field (probe item 9)",
+}
+
+# Fixed order matches the module docstring's numbered list (1-9).
+ALL_ASSUMPTION_IDS: List[str] = list(ASSUMPTION_DESCRIPTIONS)
+
+_QUOTE_TYPE_ASSUMPTION: Dict[str, str] = {
+    "ATM": "atm_ticker", "RR25": "rr25_ticker", "BF25": "bf25_ticker",
+    "RR10": "rr10_ticker", "BF10": "bf10_ticker",
+}
+
+# Priority when several diagnostics exist for the same assumption this cycle -- a rejected
+# ticker/field is more informative than a plain "no value" (same relative order
+# pull_marks.py's _classify_secs uses for a whole batch, applied per-assumption here).
+_OUTCOME_PRIORITY = {"SECURITY_ERROR": 0, "FIELD_EXCEPTION": 1, "NO_VALUE": 2}
+
+
+def _assumption_row(assumption_id: str, tickers: Sequence[str], outcome: str,
+                     value: Optional[float], detail: str) -> dict:
+    return {
+        "assumption_id": assumption_id, "description": ASSUMPTION_DESCRIPTIONS[assumption_id],
+        "tickers": ", ".join(tickers), "outcome": outcome,
+        "value": None if value is None else float(value), "detail": detail,
+    }
+
+
+def _pick_assumption_outcome(assumption_id: str, ok_quotes: Sequence[VolQuote],
+                              bad_diagnostics: Sequence[dict]) -> Optional[dict]:
+    """One assumption's verdict from whatever evidence this cycle's pull produced for it:
+    a confirmed value beats a failure (the ticker shape works even if a different
+    tenor/pair happened to fail for an unrelated reason this cycle), and among failures
+    the most specific rejection wins (SECURITY_ERROR names a wrong ticker; FIELD_EXCEPTION
+    names a wrong field on an otherwise-valid ticker; NO_VALUE is the least informative).
+    None if this assumption was not exercised at all this cycle (e.g. no option in the
+    book, so nothing was requested) -- record_vol_ticker_checks then leaves any
+    previously recorded row for it untouched."""
+    if ok_quotes:
+        q = ok_quotes[0]
+        return _assumption_row(assumption_id, [q.ticker], "OK", q.value,
+                                f"Bloomberg returned {q.value} for {q.ticker}.")
+    if bad_diagnostics:
+        d = sorted(bad_diagnostics, key=lambda x: _OUTCOME_PRIORITY.get(x.get("bbg_status", ""), 3))[0]
+        outcome = d.get("bbg_status") or "NO_VALUE"
+        return _assumption_row(assumption_id, [d["ticker"]], outcome, None,
+                                f"Bloomberg returned {outcome} for {d['ticker']}: {d.get('detail', '')}")
+    return None
+
+
+def _scale_outcome(value: float) -> Tuple[str, str]:
+    """Judge whether `value` looks like Bloomberg's vol-points convention (7.85 = 7.85%)
+    or a decimal fraction (0.0785) that this module would otherwise store un-rescaled --
+    probe item 9, judged from the value itself per the task spec, no extra Bloomberg
+    request. Checked on an ATM value only (RR/BF quotes can legitimately be small in
+    either convention, e.g. near a flat skew, so they are not a reliable signal)."""
+    magnitude = abs(value)
+    if 0.5 <= magnitude <= 200:
+        return "OK", f"value {value:g} is a plausible vol-points quote (e.g. 7.85 meaning 7.85%)."
+    if 0 < magnitude < 0.5:
+        return "OUT_OF_RANGE", (f"value {value:g} looks like a decimal fraction (e.g. 0.075), not vol points "
+                                 "(7.5) -- vol_quotes.value may need to be re-scaled, or PX_LAST is not the "
+                                 "right field/convention here.")
+    return "OUT_OF_RANGE", f"value {value:g} is outside the plausible vol-points range (0.5 to 200)."
+
+
+def assess_ticker_assumptions(result: VolFetchResult) -> List[dict]:
+    """Turn one live VolFetchResult (VolBloombergSource.get_vol_quotes's return value)
+    into a verification record per UNVERIFIED assumption in this module's docstring: a
+    dict per assumption id with `tickers` / `outcome` / `value` / `detail`, ready for
+    record_vol_ticker_checks to persist. Only assumptions with real evidence THIS CYCLE
+    are returned -- one never exercised (e.g. an 'ON' tenor request that never went out
+    because there were no open options at all) is simply absent from the result, rather
+    than a manufactured "not checked" overwriting a real prior confirmation.
+
+    A VolFileSource result (offline/test mode) has pair-level-only diagnostics with no
+    `ticker` key (see that class's docstring) -- `failures` below is filtered to
+    ticker-keyed entries, so those are never mistaken for a rejection; successes (VolQuote
+    objects, which always carry ticker/tenor/quote_type/value regardless of source) still
+    count as evidence either way."""
+    successes = [(pair, q) for pair, pv in result.pairs.items() for q in pv.quotes]
+    failures = [d for d in result.diagnostics if d.get("ticker")]
+
+    out: List[dict] = []
+    for quote_type, assumption_id in _QUOTE_TYPE_ASSUMPTION.items():
+        ok = [q for _, q in successes if q.quote_type == quote_type]
+        bad = [d for d in failures if d.get("quote_type") == quote_type]
+        row = _pick_assumption_outcome(assumption_id, ok, bad)
+        if row:
+            out.append(row)
+
+    field_bad = [d for d in failures if d.get("bbg_status") == "FIELD_EXCEPTION"]
+    if field_bad:
+        d = field_bad[0]
+        out.append(_assumption_row("px_last_field", [d["ticker"]], "FIELD_EXCEPTION", None,
+                                    f"Bloomberg rejected field PX_LAST on {d['ticker']}: {d.get('detail', '')}"))
+    elif successes:
+        _, q = successes[0]
+        out.append(_assumption_row("px_last_field", [q.ticker], "OK", q.value,
+                                    f"PX_LAST returned a value on {q.ticker} ({q.value})."))
+
+    on_ok = [q for _, q in successes if q.tenor == "ON"]
+    on_bad = [d for d in failures if d.get("tenor") == "ON"]
+    row = _pick_assumption_outcome("on_tenor", on_ok, on_bad)
+    if row:
+        out.append(row)
+
+    if successes or failures:
+        example = successes[0][1].ticker if successes else failures[0]["ticker"]
+        out.append(_assumption_row("request_type", [example], "OK", None,
+                                    "Live ReferenceDataRequest returned a structured per-security response "
+                                    "(a wrong request shape fails the whole batch with no per-ticker detail "
+                                    "at all, never gets this far)."))
+
+    atm_ok = [q for _, q in successes if q.quote_type == "ATM"]
+    if atm_ok:
+        q = atm_ok[0]
+        outcome, detail = _scale_outcome(q.value)
+        out.append(_assumption_row("vol_scale", [q.ticker], outcome, q.value, detail))
+
+    return out
+
+
+_VOL_TICKER_CHECKS_DDL = """
+CREATE TABLE IF NOT EXISTS vol_ticker_checks (
+  assumption_id TEXT PRIMARY KEY,
+  description   TEXT NOT NULL,
+  last_checked  TEXT NOT NULL,
+  tickers       TEXT NOT NULL,
+  outcome       TEXT NOT NULL,
+  value         REAL,
+  detail        TEXT NOT NULL
+);
+"""
+
+
+def ensure_vol_ticker_checks_table(conn: sqlite3.Connection) -> None:
+    conn.execute(_VOL_TICKER_CHECKS_DDL)
+
+
+def record_vol_ticker_checks(conn: sqlite3.Connection, result: VolFetchResult,
+                              checked_at: Optional[str] = None) -> int:
+    """Persist assess_ticker_assumptions(result) into vol_ticker_checks (created
+    defensively), one row per assumption id, INSERT OR REPLACE so the latest live pull's
+    verdict always wins over a stale one. Returns the number of assumption rows written
+    (0 when nothing in `result` bears on any assumption -- e.g. every ticker timed out
+    with no per-security breakdown at all)."""
+    ensure_vol_ticker_checks_table(conn)
+    rows = assess_ticker_assumptions(result)
+    if not rows:
+        return 0
+    checked_at = checked_at or datetime.now(timezone.utc).isoformat()
+    with conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO vol_ticker_checks "
+            "(assumption_id, description, last_checked, tickers, outcome, value, detail) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(r["assumption_id"], r["description"], checked_at, r["tickers"], r["outcome"], r["value"], r["detail"])
+             for r in rows],
+        )
+    return len(rows)
+
+
+def read_vol_ticker_checks(conn: sqlite3.Connection) -> Dict[str, dict]:
+    """{assumption_id: {description, last_checked, tickers, outcome, value, detail}} --
+    empty dict if the table doesn't exist yet or has no rows (no live pull with options
+    in the book has ever run). Never raises."""
+    try:
+        ensure_vol_ticker_checks_table(conn)
+        rows = conn.execute(
+            "SELECT assumption_id, description, last_checked, tickers, outcome, value, detail "
+            "FROM vol_ticker_checks").fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r[0]: {"description": r[1], "last_checked": r[2], "tickers": r[3],
+                   "outcome": r[4], "value": r[5], "detail": r[6]} for r in rows}
 
 
 # --------------------------------------------------------------------------- read helpers (for options-pricer)

@@ -521,6 +521,24 @@ def test_vol_step_writes_vol_quotes_for_option_pairs_via_injected_source(tmp_pat
     assert conn.execute("SELECT COUNT(*) FROM vol_quotes WHERE pair = 'EURUSD'").fetchone()[0] > 0
 
 
+def test_vol_step_records_ticker_checks_so_the_live_pull_is_the_probe(tmp_path):
+    """2026-09-18: the live vol pull itself now doubles as the UNVERIFIED ticker/field
+    probe -- every cycle with an open option must persist a vol_ticker_checks verdict per
+    assumption, so tools/bbg_diagnostics.py can report a real PASS/FAIL instead of always
+    pointing the user at --probe."""
+    from data.bloomberg import vol_marketdata as vm
+    from pathlib import Path
+    from datetime import date as _date
+
+    p, conn = _option_db(tmp_path, base="EUR", quote="USD", option_id="EURUSD091826C-1", pair_ticker="EURUSD Curncy")
+    fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "fx_vol_snapshot_v1.json"
+    out = live._vol_step(conn, _date(2026, 9, 17), "localhost", 8194, vol_source=vm.VolFileSource(fixture))
+    assert out["ticker_checks_recorded"] == len(vm.ALL_ASSUMPTION_IDS)
+    checked = vm.read_vol_ticker_checks(conn)
+    assert set(checked) == set(vm.ALL_ASSUMPTION_IDS)
+    assert all(c["outcome"] == "OK" for c in checked.values())
+
+
 def test_vol_step_skipped_when_no_open_option(tmp_path):
     from datetime import date as _date
     p, conn = _db(tmp_path)

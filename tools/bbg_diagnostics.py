@@ -43,8 +43,10 @@ Checks (each becomes one or more result rows):
                                    (CLAUDE.md: 17:00 America/New_York close), not a naive
                                    timestamp
   7. Last live feed pull       -- data.bloomberg.live's last recorded status
-  8. Unverified assumptions    -- how many FX vol ticker/field guesses in
-                                   data/bloomberg/vol_marketdata.py are still UNVERIFIED
+  8. Unverified assumptions    -- whether each FX vol ticker/field guess in
+                                   data/bloomberg/vol_marketdata.py has been confirmed by
+                                   a real response on a live pull (vol_ticker_checks),
+                                   not just counted as still UNVERIFIED in the docstring
 """
 from __future__ import annotations
 
@@ -419,24 +421,66 @@ def check_index_fixings(conn: sqlite3.Connection, as_of: str) -> List[Check]:
 
 
 # --------------------------------------------------------------------------- 5d. unverified assumptions
-def check_unverified_assumptions() -> List[Check]:
+def check_unverified_assumptions(db_path: Optional[Path]) -> List[Check]:
     """The FX vol feed (data/bloomberg/vol_marketdata.py) was written without Terminal
     access and lists every ticker / field / request-shape guess as 'UNVERIFIED' in its
-    docstring. Surface that count here so the person on the Bloomberg PC knows the option
-    Greeks rest on guesses until each is ticked off."""
+    docstring. Since 2026-09-17, data/bloomberg/live.py's `_vol_step` requests every one
+    of those tickers on every live pull with an open FX_OPTION in the book, and
+    (2026-09-18) `vol_marketdata.record_vol_ticker_checks` persists what Bloomberg
+    actually returned for each assumption into the `vol_ticker_checks` table -- so the
+    live pull itself is now the probe, and this check reads that record instead of
+    unconditionally telling the user to run --probe by hand.
+
+    PASS once every assumption has been confirmed (outcome "OK") by a real Bloomberg
+    response; FAIL naming the assumption and the exact ticker/field Bloomberg rejected
+    (SECURITY_ERROR / FIELD_EXCEPTION / a value outside the plausible vol-points range);
+    WARNING "not yet exercised" when no live pull with options in the book has ever
+    written anything to vol_ticker_checks (nothing to report on yet), or when only some
+    assumptions have evidence so far."""
     try:
         import data.bloomberg.vol_marketdata as vm
-        doc = vm.__doc__ or ""
     except Exception as exc:
-        return [_row("FX vol ticker assumptions", "fail", f"Could not import data.bloomberg.vol_marketdata ({exc.__class__.__name__}).")]
-    items = [ln.strip() for ln in doc.splitlines() if "UNVERIFIED --" in ln]
-    if not items:
-        return [_row("FX vol ticker assumptions", "pass", "No unverified ticker assumptions remain in the vol feed.")]
-    return [_row("FX vol ticker assumptions", "warning",
-                 f"{len(items)} FX vol ticker/field assumptions are still marked UNVERIFIED in "
-                 "data/bloomberg/vol_marketdata.py (ATM/RR/BF ticker shapes, PX_LAST field, 'ON' tenor, "
-                 "request type, vol-point scale). Run  py -3 -m data.bloomberg.vol_marketdata --probe  "
-                 "on the Bloomberg PC and tick each one off; option Greeks are only as good as these.")]
+        return [_row("FX vol ticker assumptions", "fail",
+                     f"Could not import data.bloomberg.vol_marketdata ({exc.__class__.__name__}).")]
+
+    if db_path is None or not Path(db_path).exists():
+        return [_row("FX vol ticker assumptions", "warning",
+                     "not yet exercised: no live pull with options in the book has run "
+                     "(no database found to read the vol_ticker_checks record from).")]
+    try:
+        conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return [_row("FX vol ticker assumptions", "warning", f"Could not open {db_path} read-only ({exc}).")]
+    try:
+        checked = vm.read_vol_ticker_checks(conn)
+    finally:
+        conn.close()
+
+    if not checked:
+        return [_row("FX vol ticker assumptions", "warning",
+                     "not yet exercised: no live pull with options in the book has run.")]
+
+    expected = vm.ALL_ASSUMPTION_IDS
+    failed = {aid: c for aid, c in checked.items() if c["outcome"] != "OK"}
+    not_yet = [aid for aid in expected if aid not in checked]
+
+    if failed:
+        parts = [f"{aid} ({c['description']}): {c['detail']}" for aid, c in sorted(failed.items())]
+        last_checked = next(iter(failed.values()))["last_checked"]
+        return [_row("FX vol ticker assumptions", "fail",
+                     f"{len(failed)} of {len(expected)} FX vol ticker/field assumptions were rejected by "
+                     f"Bloomberg on the last live pull ({last_checked}): " + "; ".join(parts))]
+
+    if not_yet:
+        return [_row("FX vol ticker assumptions", "warning",
+                     f"{len(checked)} of {len(expected)} FX vol ticker/field assumptions confirmed by a live "
+                     f"pull so far; not yet exercised (no evidence yet): {', '.join(sorted(not_yet))}.")]
+
+    last_checked = next(iter(checked.values()))["last_checked"]
+    return [_row("FX vol ticker assumptions", "pass",
+                 f"All {len(expected)} FX vol ticker/field assumptions (ATM/RR/BF ticker shapes, PX_LAST "
+                 f"field, 'ON' tenor, request type, vol-point scale) were confirmed by a real Bloomberg "
+                 f"response on the last live pull with options in the book ({last_checked}).")]
 
 
 # --------------------------------------------------------------------------- 5e. clock
@@ -591,7 +635,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
         conn.close()
         _safe("PC clock / New York date", check_clock, resolved_as_of)
 
-    _safe("FX vol ticker assumptions", check_unverified_assumptions)
+    _safe("FX vol ticker assumptions", check_unverified_assumptions, resolved_db)
 
     _safe("Last marks pull", check_last_pull, resolved_db, resolved_as_of)
 

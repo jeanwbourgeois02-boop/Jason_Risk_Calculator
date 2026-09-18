@@ -14,6 +14,14 @@ from data.bloomberg import backfill, live
 from data.ingest import schema
 
 
+def _book_today():
+    """Today as the code under test sees it: the New York book date, not the PC's
+    local date (a day ahead of New York every morning in Asia)."""
+    from data.bloomberg.live import book_today
+    return book_today()
+
+
+
 def _db(tmp_path, earliest_trade_date: str):
     p = tmp_path / "risk.db"
     conn = schema.connect(p)
@@ -36,7 +44,7 @@ def _fake_fetch(session, service, tickers, field, day):
 
 
 def test_auto_backfill_fills_from_earliest_trade_to_yesterday(tmp_path):
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _book_today() - timedelta(days=1)
     earliest = yesterday - timedelta(days=5)
     while earliest.weekday() >= 5:
         earliest -= timedelta(days=1)
@@ -65,7 +73,7 @@ def test_auto_backfill_no_trades_does_nothing(tmp_path):
 
 
 def test_auto_backfill_already_complete_reports_zero_remaining(tmp_path):
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _book_today() - timedelta(days=1)
     p, conn = _db(tmp_path, yesterday.isoformat())
     # First pass fills everything.
     backfill.auto_backfill(p, fetch=_fake_fetch, log=lambda *_: None)
@@ -87,7 +95,7 @@ def test_start_auto_backfill_without_bloomberg_writes_status_reason(tmp_path, mo
 
 
 def test_start_auto_backfill_runs_in_background_and_publishes_progress(tmp_path, monkeypatch):
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _book_today() - timedelta(days=1)
     earliest = yesterday - timedelta(days=3)
     while earliest.weekday() >= 5:
         earliest -= timedelta(days=1)
@@ -109,7 +117,7 @@ def test_start_auto_backfill_runs_in_background_and_publishes_progress(tmp_path,
 
 
 def test_start_auto_backfill_second_call_while_running_is_a_noop(tmp_path):
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _book_today() - timedelta(days=1)
     earliest = yesterday - timedelta(days=10)
     while earliest.weekday() >= 5:
         earliest -= timedelta(days=1)

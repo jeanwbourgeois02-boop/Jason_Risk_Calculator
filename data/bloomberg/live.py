@@ -458,6 +458,16 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
         out["written"] = vm.write_vol_quotes(conn, result, today.isoformat(), source=result.source)
         out["diagnostics"] = list(result.diagnostics)
         out["pairs"] = {p: len(pv.quotes) for p, pv in result.pairs.items()}
+        # 2026-09-18: persist what this cycle's response actually confirmed/rejected for
+        # each UNVERIFIED ticker/field assumption in vol_marketdata.py's docstring, so
+        # tools/bbg_diagnostics.py can report a real PASS/FAIL instead of always pointing
+        # the user at --probe. Isolated in its own try/except so a bookkeeping failure
+        # here never masks a vol_quotes write that otherwise succeeded (same discipline as
+        # the fixings-vs-curve-quotes gotcha in _rates_step above).
+        try:
+            out["ticker_checks_recorded"] = vm.record_vol_ticker_checks(conn, result)
+        except Exception as exc2:  # noqa: BLE001
+            out["ticker_checks_error"] = f"{type(exc2).__name__}: {exc2}"
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{type(exc).__name__}: {exc}"
     close = getattr(vol_source, "close", None)
