@@ -588,11 +588,17 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     each day's value on (db path, db mtime) so re-expanding after a figures-only render
     is instant."""
 
+    from ui import revision
+    from ui.tabs.blotter_pricing import pricing_snapshot
+
     @app.callback(
         Output(f"{HEADER_ID}-figures", "children"),
         Input(AS_OF_STORE_ID, "data"),
+        Input(revision.DATA_REVISION_ID, "data"),
     )
-    def _update_figures(as_of: Optional[str]):
+    def _update_figures(as_of: Optional[str], _data_rev=None):
+        # `_data_rev` (ui/revision.py, 2026-09-18): re-run when an upload or a Bloomberg
+        # write changes the database, so the headline never needs a browser reload.
         if not as_of:
             return [_figure_card("LTD", "No as-of date available.")]
 
@@ -603,7 +609,17 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         except sqlite3.OperationalError as exc:
             return [_figure_card("LTD", f"Database not available ({exc}).")]
         try:
-            return _build_figures(conn, as_of)
+            with pricing_snapshot(conn):  # one view of the marks for all the cards
+                return _build_figures(conn, as_of)
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad, see below
+            # Anything raised in here used to escape as an HTTP 500: the Output never
+            # fired and the header sat on its "LTD -" placeholder for good, with nothing
+            # on the page saying why (user, 2026-09-18: "the headlines ... didn't even
+            # show"). Say what failed instead; the next data revision retries it.
+            import logging
+            logging.getLogger(__name__).exception("header figures failed for as_of=%s", as_of)
+            return [_pnl_card("LTD", {"available": False,
+                                      "reason": f"headline could not be computed ({type(exc).__name__}: {exc})"})]
         finally:
             conn.close()
 
@@ -611,8 +627,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(CHART_CONTAINER_ID, "children"),
         Input(DETAILS_ID, "open"),
         Input(AS_OF_STORE_ID, "data"),
+        Input(revision.DATA_REVISION_ID, "data"),
     )
-    def _update_chart(is_open: bool, as_of: Optional[str]):
+    def _update_chart(is_open: bool, as_of: Optional[str], _data_rev=None):
         if not is_open or not as_of:
             # Collapsed, or no date yet: nothing to compute. Dash keeps whatever was
             # last rendered hidden inside the closed <details>, so this is not a

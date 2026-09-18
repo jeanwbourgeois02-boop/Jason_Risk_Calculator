@@ -48,6 +48,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
+from ui.revision import DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
 from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
 
@@ -391,14 +392,17 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Input(DATE_RANGE_ID, "end_date"),
         Input(SETTLED_TOGGLE_ID, "value"),
         Input(USD_TOGGLE_ID, "value"),
+        Input(DATA_REVISION_ID, "data"),
     )
-    def _update_table(as_of_date, _n_intervals=0, ccys=None, start=None, end=None, settled=None, usd=None):
+    def _update_table(as_of_date, _n_intervals=0, ccys=None, start=None, end=None, settled=None, usd=None,
+                      _data_rev=None):
         """Re-runs every REFRESH_MS so the ladder follows the 2-minute Bloomberg feed
         (data.bloomberg.live), and on every view-control change (spec 2026-09-18)."""
         return _render(as_of_date, view_from_controls(ccys, start, end, settled, usd))
 
-    @app.callback(Output(CCY_FILTER_ID, "options"), Input(DATE_PICKER_ID, "date"))
-    def _currency_options(as_of_date):
+    @app.callback(Output(CCY_FILTER_ID, "options"), Input(DATE_PICKER_ID, "date"),
+                  Input(DATA_REVISION_ID, "data"))
+    def _currency_options(as_of_date, _data_rev=None):
         """Currencies with any record on the as-of date, for the multiselect."""
         if not as_of_date:
             return []

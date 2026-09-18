@@ -11,6 +11,12 @@ is the permanent record. The loader's summary sentence (new/updated trades, excl
 rejected rows) renders verbatim as `.source-result--info`; errors render in
 `.source-result--error` with the Confirm row left in place for a retry.
 
+On a successful import `_confirm` also publishes both `ui.revision` stores (2026-09-18),
+which is what makes the header, the Ladder, the Blotter and Market data redraw from the
+new book at once: before that, nothing but this strip's own status line heard about an
+upload, and the page kept showing the old book until the browser was reloaded. A failed
+import publishes neither.
+
 On a successful import, `_trigger_feed_refresh` wakes `app.bloomberg_feed`
 (`data.bloomberg.live.LiveFeed.trigger_now`, 2026-09-17) for one extra pull right away
 so marks for the trades just uploaded are priced within seconds rather than waiting out
@@ -24,6 +30,7 @@ import logging
 from dash import Input, Output, State, dcc, html, no_update
 
 from data.ingest.upload import decode, import_blotter, preview_frame, validate_blotter_shape
+from ui import revision
 
 log = logging.getLogger(__name__)
 
@@ -99,12 +106,14 @@ def register(app, get_db_path):
     @app.callback(
         Output(RESULT_ID, "children"), Output(SOURCE_LINE_ID, "children"),
         Output(STAGE_ID, "style", allow_duplicate=True),
+        Output(revision.DATA_REVISION_ID, "data", allow_duplicate=True),
+        Output(revision.BOOK_REVISION_ID, "data", allow_duplicate=True),
         Input(CONFIRM_ID, "n_clicks"),
         State(FILE_UPLOAD_ID, "contents"), State(FILE_UPLOAD_ID, "filename"),
         prevent_initial_call=True,
     )
     def _confirm(clicks, contents, filename):
-        keep = (no_update, no_update)  # source line, stage
+        keep = (no_update, no_update, no_update, no_update)  # source line, stage, data rev, book rev
         if not contents:
             return (no_update, *keep)
         db_path = get_db_path()
@@ -117,4 +126,7 @@ def register(app, get_db_path):
         data = load_summary(db_path)
         _trigger_feed_refresh(app)
         result = html.Div(message, className="source-result--info")
-        return result, describe_source(data), {"display": "none"}
+        # Publish both revisions now (ui/revision.py) so the header and every tab redraw
+        # from the new book straight away, no browser reload and no wait for the poll.
+        return (result, describe_source(data), {"display": "none"},
+                revision.file_signature(db_path), revision.book_signature(db_path))

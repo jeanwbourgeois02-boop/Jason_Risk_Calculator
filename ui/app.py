@@ -31,7 +31,7 @@ import dash
 from dash import Input, Output, dcc, html
 
 from ui.tabs import blotter, cash_ladder, header, market_data
-from ui import uploads
+from ui import revision, uploads
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
@@ -203,6 +203,9 @@ def build_layout(data: dict, db_path=None) -> html.Div:
         header.layout(),
         html.Div(id="tab-bodies", children=bodies),
         dcc.Store(id=header.AS_OF_STORE_ID, data=ladder_default_date),
+        # "The data changed" signal (ui/revision.py): every tab listens, so an upload or a
+        # Bloomberg pull shows up without a browser reload.
+        *revision.components(db_path if db_path is not None else get_db_path()),
     ])
 
 
@@ -229,6 +232,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     blotter.register_callbacks(app, get_db_path=lambda: resolved)
     market_data.register_callbacks(app, get_db_path=lambda: resolved)
     uploads.register(app, get_db_path=lambda: resolved)
+    revision.register(app, get_db_path=lambda: resolved)
 
     # Mirror the Ladder tab's date picker into the header's as-of store so the header
     # figures track whichever date the user has selected there. The Ladder tab is the

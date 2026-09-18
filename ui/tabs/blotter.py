@@ -99,8 +99,10 @@ from ui.tabs.blotter_pricing import (
     HEADLINE_TITLES,
     add_row_display_fields,
     priced_value_book,
+    pricing_snapshot,
     row_scoped_headline,
 )
+from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
 from ui.tabs.formatting import format_cell
 
@@ -137,6 +139,8 @@ SCOPE_PRODUCTS = {
 # Sub-tabs that are forms/lists of their own, not `priced_value_book`-shaped tables:
 # no strip / row-detail / filter callbacks are registered for them.
 _NON_TABLE_SCOPES = ("bundles", "rates", "fx", "options", "manual")
+# Views rebuilt whole when only marks changed (ui/revision.py); see `_update`.
+_MARKS_REBUILD_SCOPES = ("bundles", "rates", "fx", "options")
 # "rates" (2026-09-15) and "options" (2026-09-17) are both real views now -- see
 # scope_layout and the module docstring. Kept (empty) so the placeholder path stays
 # available for a future scope.
@@ -805,11 +809,30 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(CONTENT_ID, "children"),
         Input(DATE_PICKER_ID, "date"),
         Input(SUBTABS_ID, "value"),
+        Input(BOOK_REVISION_ID, "data"),
+        Input(DATA_REVISION_ID, "data"),
     )
-    def _update(as_of_date, scope):
+    def _update(as_of_date, scope, _book_rev=None, _data_rev=None):
         if not as_of_date:
             return message_box("No as-of date available.")
         scope = scope or SCOPE_ORDER[0]
+
+        # No browser reload (ui/revision.py, 2026-09-18). A changed TRADE SET (upload,
+        # manual booking) rebuilds whatever sub-tab is showing. A marks-only change
+        # rebuilds the views that are one static block (FX, Rates, Options, Bundles); the
+        # Total book and Futures tables instead refresh their rows in place through
+        # `_apply_filters`, so a Bloomberg pull never resets the user's filters, sort or
+        # page. The Manual entry form is never rebuilt under the user's hands.
+        from dash import ctx, no_update
+        from dash.exceptions import MissingCallbackContextException
+        try:
+            triggered = {t["prop_id"].split(".")[0] for t in (ctx.triggered or [])}
+        except MissingCallbackContextException:  # called directly, not by Dash: just render
+            triggered = set()
+        if triggered and triggered <= {DATA_REVISION_ID} and scope not in _MARKS_REBUILD_SCOPES:
+            return no_update
+        if triggered and triggered <= {DATA_REVISION_ID, BOOK_REVISION_ID} and scope == "manual":
+            return no_update
 
         from ui.app import connect_readonly
         db_path = get_db_path()
@@ -818,9 +841,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         except sqlite3.OperationalError as exc:
             return message_box(f"Database not available ({exc}).")
         try:
-            if scope == "bundles":
-                return _safe_section("Bundles", lambda: bundles_layout(conn, as_of_date))
-            return scope_layout(scope, conn, as_of_date)
+            with pricing_snapshot(conn):  # one view of the marks per render, see its docstring
+                if scope == "bundles":
+                    return _safe_section("Bundles", lambda: bundles_layout(conn, as_of_date))
+                return scope_layout(scope, conn, as_of_date)
         except ImportError as exc:
             return message_box(f"Blotter view not available yet ({exc}).")
         except Exception as exc:  # noqa: BLE001 -- last-resort guard, 2026-09-17
@@ -862,12 +886,13 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             except sqlite3.OperationalError as exc:
                 return message_box(f"Database not available ({exc}).")
             try:
-                if _scope == "futures" and not trade_ids:
-                    df, _, _ = priced_value_book(conn, as_of_date)
-                    if df.empty or df[df["product"] == "FUTURE"].empty:
-                        return render_placeholder_strip(FUTURES_NO_TRADES_REASON)
-                headline = row_scoped_headline(conn, as_of_date, trade_ids)
-                return render_headline_strip(headline)
+                with pricing_snapshot(conn):
+                    if _scope == "futures" and not trade_ids:
+                        df, _, _ = priced_value_book(conn, as_of_date)
+                        if df.empty or df[df["product"] == "FUTURE"].empty:
+                            return render_placeholder_strip(FUTURES_NO_TRADES_REASON)
+                    headline = row_scoped_headline(conn, as_of_date, trade_ids)
+                    return render_headline_strip(headline)
             finally:
                 conn.close()
 
@@ -914,7 +939,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
         def _apply_filters(*args, _scope=scope, _filter_cols=filter_cols,
                             _display_columns=display_columns, _column_labels=column_labels):
-            *values, as_of_date = args
+            *values, _data_rev, as_of_date = args
             if not as_of_date:
                 return [], []
             from ui.app import connect_readonly
@@ -924,7 +949,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             except sqlite3.OperationalError:
                 return [], []
             try:
-                df = scope_df(conn, _scope, as_of_date)
+                with pricing_snapshot(conn):
+                    df = scope_df(conn, _scope, as_of_date)
             finally:
                 conn.close()
             for col, picked in zip(_filter_cols, values):
@@ -937,6 +963,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             Output(table_id, "data"),
             Output(table_id, "tooltip_data"),
             *[Input(fid, "value") for fid in filter_ids],
+            Input(DATA_REVISION_ID, "data"),  # new marks: refresh the rows, keep the filters
             State(DATE_PICKER_ID, "date"),
             prevent_initial_call=True,
         )(_apply_filters)

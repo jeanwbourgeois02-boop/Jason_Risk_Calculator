@@ -66,8 +66,9 @@ _COLUMN_LABELS = {
 
 def _direction(quantity: float) -> str:
     """`trades.quantity > 0` -> pay fixed, else receive fixed (CLAUDE.md / engine/rates
-    sign convention)."""
-    return "Pay fixed" if quantity > 0 else "Receive fixed"
+    sign convention). The negative side is labelled "Short" as well, the word the user
+    uses for a bracketed line in the book (2026-09-18)."""
+    return "Long (pay fixed)" if quantity > 0 else "Short (receive fixed)"
 
 
 def _is_missing(value) -> bool:
@@ -125,7 +126,9 @@ def irs_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     bbg_map = dict(zip(bbg["instrument_id"], bbg["value"]))
 
     df = trades.copy()
-    df["notional"] = df["quantity"].abs()
+    # Signed, as the book shows it (user, 2026-09-18): a short (receive fixed) is a
+    # negative notional, rendered in brackets by `_fmt_notional`.
+    df["notional"] = df["quantity"]
     df["direction"] = df["quantity"].map(_direction)
     for mark_type in _MARK_TYPES:
         col = mark_type.lower()
@@ -147,9 +150,8 @@ def _fmt_rate(value) -> str:
 
 
 def _fmt_notional(value) -> str:
-    if _is_missing(value):
-        return ""
-    return f"{round(float(value)):,}"
+    """Whole units, a short in brackets (`format_cell`'s own convention)."""
+    return "" if _is_missing(value) else format_cell(value)
 
 
 def _fmt_usd(value) -> str:

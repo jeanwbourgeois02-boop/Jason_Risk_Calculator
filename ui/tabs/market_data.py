@@ -47,6 +47,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
+from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
 
 BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"
@@ -703,8 +704,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(PAIR_DROPDOWN_ID, "options"),
         Output(PAIR_DROPDOWN_ID, "value"),
         Input(DATE_PICKER_ID, "date"),
+        Input(BOOK_REVISION_ID, "data"),
     )
-    def _update_pairs(as_of_date):
+    def _update_pairs(as_of_date, _book_rev=None):
         if not as_of_date:
             return [], None
         try:
@@ -726,8 +728,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Input(REFRESH_ID, "n_intervals"),
         Input(PULL_REVISION_ID, "data"),
         Input(MANUAL_STATUS_ID, "children"),
+        Input(DATA_REVISION_ID, "data"),
     )
-    def _update_body(as_of_date, pair, _n_intervals=0, _pull_rev=None, _manual_status=None):
+    def _update_body(as_of_date, pair, _n_intervals=0, _pull_rev=None, _manual_status=None, _data_rev=None):
         return _render(as_of_date, pair)
 
     def _render(as_of_date, pair):

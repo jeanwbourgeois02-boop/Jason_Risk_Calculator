@@ -30,6 +30,8 @@ import datetime as dt
 import os
 import re
 import sqlite3
+import threading
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
@@ -60,6 +62,41 @@ def _db_cache_key(conn: sqlite3.Connection):
     return None
 
 
+_SNAPSHOT = threading.local()
+
+
+@contextmanager
+def pricing_snapshot(conn: sqlite3.Connection):
+    """Pin `priced_value_book`'s cache key for the duration of ONE render (2026-09-18).
+
+    `_db_cache_key` re-reads the file's mtime on every call, so a write landing in the
+    middle of a render (the Bloomberg pull, the backfill, the pull an upload triggers)
+    changed the key part-way through and every later call missed the cache: measured on
+    a 772-trade book, one Total book render went from 6 full `value_book` runs to 76
+    (1.5 s to 11.7 s), FX from 6 to 19. Inside this block the key is read once, so a
+    render costs one `value_book` per distinct date whatever is being written, and the
+    strip and the table of that render are priced off the same view of the marks rather
+    than a mix of before and after the write.
+
+    Scoped to the calling thread (a Dash callback runs start to finish on its request's
+    thread) and released on exit, so the NEXT render always takes a fresh key: an upload
+    is never served from a snapshot taken before it. Re-entrant -- an inner block keeps
+    the outer key. Callers that never enter one behave exactly as before."""
+    if getattr(_SNAPSHOT, "key", None) is not None:
+        yield
+        return
+    _SNAPSHOT.key = (_db_cache_key(conn),)  # 1-tuple: a None key (in-memory db) is still "pinned"
+    try:
+        yield
+    finally:
+        _SNAPSHOT.key = None
+
+
+def _render_cache_key(conn: sqlite3.Connection):
+    pinned = getattr(_SNAPSHOT, "key", None)
+    return pinned[0] if pinned is not None else _db_cache_key(conn)
+
+
 @lru_cache(maxsize=256)
 def _priced_value_book_cached(path: str, _mtime: float, as_of: str) -> Tuple[pd.DataFrame, int, int]:
     from ui.app import connect_readonly
@@ -77,7 +114,7 @@ def priced_value_book(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFram
     upload or mark write invalidates it; the cached frame is returned as a copy so a
     caller's in-place edits never leak into another caller. Connections with no file
     (tests on ':memory:') bypass the cache."""
-    key = _db_cache_key(conn)
+    key = _render_cache_key(conn)  # pinned for the whole render inside `pricing_snapshot`
     if key is None:
         return _priced_value_book_uncached(conn, as_of)
     df, n_fallback, n_total = _priced_value_book_cached(key[0], key[1], as_of)

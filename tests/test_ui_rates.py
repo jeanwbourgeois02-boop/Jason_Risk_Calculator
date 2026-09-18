@@ -85,7 +85,7 @@ def test_irs_rows_direction_pay_fixed_when_quantity_positive():
     conn = _make_db_with_irs(pay_fixed=True)
     try:
         df = rates.irs_rows(conn, "2026-06-20")
-        assert df.iloc[0]["direction"] == "Pay fixed"
+        assert df.iloc[0]["direction"] == "Long (pay fixed)"
     finally:
         conn.close()
 
@@ -94,8 +94,10 @@ def test_irs_rows_direction_receive_fixed_when_quantity_negative():
     conn = _make_db_with_irs(pay_fixed=False)
     try:
         df = rates.irs_rows(conn, "2026-06-20")
-        assert df.iloc[0]["direction"] == "Receive fixed"
-        assert df.iloc[0]["notional"] == 10_000_000.0  # unsigned
+        assert df.iloc[0]["direction"] == "Short (receive fixed)"
+        assert df.iloc[0]["notional"] == -10_000_000.0  # signed: a short is negative
+        records, _style = rates.format_rows(df)
+        assert records[0]["notional"] == "(10,000,000)"  # brackets, as the book shows a short
     finally:
         conn.close()
 

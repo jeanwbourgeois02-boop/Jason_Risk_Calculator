@@ -30,8 +30,10 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     Expiry / call-put come from ``Symbol`` when it parses, cross-checked against the
     Description's own date/CALL-PUT word when Description is populated (a disagreement
     rejects, per the tolerance rule below) rather than trusting the Symbol blindly.
-  - INTEREST_RATE_SWAP: direction is the sign of ``Notional`` (+ = pay fixed, - =
-    receive fixed; user-confirmed 2026-09-16), in full notional units.
+  - INTEREST_RATE_SWAP: + = pay fixed, - = receive fixed (user-confirmed 2026-09-16), in
+    full notional units. A short is whatever the book marks with brackets or a minus
+    sign (user, 2026-09-18): on ``Notional`` or, where an export leaves ``Notional``
+    unsigned, on ``Quantity``. ``Side`` still carries no direction here.
 
 Tolerance rule (user instruction 2026-09-17, "as flexible as possible"): a blank,
 missing or oddly formatted field never rejects a row when the value can be recovered
@@ -848,8 +850,9 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
 
 
 def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
-    """Direction: sign of ``Notional`` (+ = pay fixed). ``Side`` is not used ('Buy' on
-    every reference row). Leg shape mirrors ``irs.py`` (FIXED = -quantity, FLOAT = +quantity)."""
+    """Direction: + = pay fixed; brackets or a minus sign on ``Notional`` OR ``Quantity``
+    is a short = receive fixed (user, 2026-09-18). ``Side`` is not used ('Buy' on every
+    reference row, receivers included). Legs: FIXED = -quantity, FLOAT = +quantity."""
     symbol = _s(row.get("Symbol"))
     desc = _s(row.get("Description"))
     trade_id = _s(row.get("Trade Id"))
@@ -871,8 +874,8 @@ def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
         res.rejects.append(Reject(row_no, symbol, f"maturity {maturity_date} is not after effective date {effective_date}"))
         return
     notional = _num(row.get("Notional"))
+    qty_mm = _num(row.get("Quantity"))
     if math.isnan(notional):
-        qty_mm = _num(row.get("Quantity"))
         notional = qty_mm * 1e6 if not math.isnan(qty_mm) else math.nan  # Quantity is in millions
     if math.isnan(notional):
         res.rejects.append(Reject(row_no, symbol, "blank Notional (and no Quantity)"))
@@ -888,7 +891,12 @@ def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
     if math.isnan(fixed_rate_pct):
         res.rejects.append(Reject(row_no, symbol, "blank FixedRate (and no Yield / rate in Description)"))
         return
-    quantity = notional  # signed, full units: + = pay fixed, - = receive fixed
+    # Signed, full units: + = pay fixed, - = receive fixed. A short is marked by brackets
+    # or a minus sign in the book (user, 2026-09-18), and an export may carry that mark on
+    # ``Quantity`` while ``Notional`` stays unsigned, so a negative on EITHER column is a
+    # short; the magnitude still comes from ``Notional``.
+    short = notional < 0 or (not math.isnan(qty_mm) and qty_mm < 0)
+    quantity = -abs(notional) if short else abs(notional)
     fixed_rate = fixed_rate_pct / 100.0
     trade_date = _date(row.get("TradeDate")) or effective_date
     instrument_id = symbol or f"IRS-{ccy}-{trade_id}"

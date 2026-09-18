@@ -475,6 +475,8 @@ def test_blotter_filter_dropdown_end_to_end_narrows_table(tmp_path):
             {"id": "blotter-datatable-total-filter-product", "property": "value", "value": []},
             {"id": "blotter-datatable-total-filter-strategy", "property": "value", "value": []},
             {"id": "blotter-datatable-total-filter-theme", "property": "value", "value": []},
+            # ui/revision.py (2026-09-18): new marks refresh the rows in place, filters kept
+            {"id": "data-revision", "property": "data", "value": "rev-1"},
         ],
         "state": [{"id": "blotter-date", "property": "date", "value": "2026-08-17"}],
         "changedPropIds": ["blotter-datatable-total-filter-instrument_id.value"],
@@ -795,7 +797,7 @@ def test_blotter_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
     monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "none", "trades": 2})
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    result, source_line, stage_style = fn(1, contents,"blotter.csv")
+    result, source_line, stage_style, _data_rev, _book_rev = fn(1, contents,"blotter.csv")
 
     # The loader's summary must actually be visible in the rendered result -- not "",
     # not only passed to a logger.
@@ -819,10 +821,12 @@ def test_blotter_confirm_surfaces_clean_rejection(tmp_path, monkeypatch):
     monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
 
     contents = "data:application/octet-stream;base64," + __import__("base64").b64encode(b"x").decode()
-    result, source_line, stage_style = fn(1, contents,"not-a-blotter.csv")
+    result, source_line, stage_style, data_rev, book_rev = fn(1, contents,"not-a-blotter.csv")
 
     assert "not a trade blotter" in str(result)
     assert source_line is dash.no_update
+    # a failed import saved nothing, so it must not tell the page the data changed
+    assert data_rev is dash.no_update and book_rev is dash.no_update
 
 
 def test_selected_shows_filename_for_recognized_blotter_file(monkeypatch):

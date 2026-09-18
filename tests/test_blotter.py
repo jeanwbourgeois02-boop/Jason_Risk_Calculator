@@ -405,6 +405,27 @@ def test_irs_row_negative_notional_is_receiver(tmp_csv):
     assert floating.amount == pytest.approx(-625_000_000.0)
 
 
+@pytest.mark.parametrize("overrides", [
+    {"Notional": "(625,000,000)"},                     # brackets on Notional
+    {"Notional": "625,000,000", "Quantity": "(625)"},  # Notional unsigned, brackets on Quantity
+    {"Notional": "625,000,000", "Quantity": "-625"},   # Notional unsigned, minus on Quantity
+    {"Notional": "", "Quantity": "(625)"},             # Quantity only (millions), in brackets
+    {"Notional": "-625,000,000", "Quantity": "-625"},  # both signed: still one short, not a double flip
+])
+def test_irs_row_brackets_or_minus_on_either_column_is_short(tmp_csv, overrides):
+    res = blotter.parse(tmp_csv([_irs_row(**{"Trade Id": "603", **overrides})]))
+    assert not res.rejects
+    assert res.trades[0].quantity == pytest.approx(-625_000_000.0)
+    fixed = next(l for l in res.legs if l.leg_type == "FIXED")
+    assert fixed.amount == pytest.approx(625_000_000.0)  # receiver: positive FIXED leg
+
+
+def test_irs_row_positive_quantity_column_stays_payer(tmp_csv):
+    res = blotter.parse(tmp_csv([_irs_row(**{"Trade Id": "604", "Quantity": "625"})]))
+    assert not res.rejects
+    assert res.trades[0].quantity == pytest.approx(625_000_000.0)
+
+
 def test_irs_row_rejects_zero_notional(tmp_csv):
     res = blotter.parse(tmp_csv([_irs_row(**{"Trade Id": "602", "Notional": "0"})]))
     assert len(res.rejects) == 1

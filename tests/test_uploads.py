@@ -85,8 +85,12 @@ def test_successful_import_with_no_bloomberg_feed_does_not_raise(tmp_path, monke
     monkeypatch.setattr(uploads, "decode", lambda contents: b"irrelevant")
     monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "none", "trades": 1, "positions": 0})
 
-    result, source_line, stage_style = fn(1, _data_url(), "blotter.csv")
+    result, source_line, stage_style, data_rev, book_rev = fn(1, _data_url(), "blotter.csv")
     assert source_line == "Loaded: 1 trades in database."
+    # ui/revision.py (2026-09-18): a successful import publishes both revisions, which is
+    # what makes the header and every tab redraw without a browser reload.
+    assert isinstance(data_rev, str) and data_rev
+    assert isinstance(book_rev, str) and book_rev
 
 
 def test_trigger_feed_refresh_helper_guards_missing_attribute():
