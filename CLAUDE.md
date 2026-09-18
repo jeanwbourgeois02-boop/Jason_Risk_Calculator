@@ -1,31 +1,46 @@
 # risk-monitor
 
-## User-authorised direction, 2026-09-15 (supersedes the 2026-09-14 correction)
+FX, futures, rates and options risk monitor for fund NMMF, base currency USD. Python, SQLite, Dash. It shows one P&L (per-trade valuation, an LTD line, Daily / 5d / MTD / YTD / trading), a cash ladder (delta exposure, cashflow timing, settled cash, stress) and a blotter (every trade with its P&L and Greeks).
 
-`docs/BUILD_PLAN.md` is the build specification. The app's headline P&L is the per-trade valuation in its section 2 (each FX leg marked at the outright for its own value date, quote P&L converted at spot, futures as contracts × multiplier × price change, settled trades frozen), the close series and periods in section 3, and the four tabs in section 5. The "P&L conventions" section below is in force again and the "Must not replicate" list applies to the headline.
+This file is the rulebook: what is true of the app now and what must not change without the user's say-so. It is not a changelog. History lives in git and `docs/bnp-excel-removal.md`; open items live in `docs/open-questions.md`, not here; the valuation spec is `docs/BUILD_PLAN.md` sections 2 to 4, which agree with "P&L conventions" below. Reference input: `data/raw/new_sample_trades.csv`.
 
-The literal workbook arithmetic (`engine/pnl/pnl.py`) and the Excel workbook itself (`data/raw/HA-portfolio vJean.xlsx`) it replicated were deleted outright 2026-09-17 (user decision, "no bnp fall back - that excel and everything linked to it need to go" — `docs/bnp-excel-removal.md`), along with the BNP CSV parser, its P&L/reconciliation modules and everything downstream of them that had no live successor. This was never a partial deprecation: the Reconciliation tab that displayed this arithmetic was already removed 2026-09-16, and by 2026-09-17 nothing in the app could reach it at all, so it was deleted rather than left dormant. See "Trade-source history" below for what that removal actually touched. Missing values stay missing everywhere.
+## Hard rules
 
-The cash ladder is a pure delta table: leg by leg, crosses included, spot for delta, no P&L on it (engine change landed 2026-09-15).
-
-FX and futures risk monitor: cash ladder (delta exposure + cashflow timing + scenario analysis — not a cash-balance ledger, see below), blotter (all trades, P&L, Greeks), delta per currency. Python; Dash front end later. Fund NMMF, base currency USD. Reference input: `data/raw/new_sample_trades.csv` (transaction-level blotter export — see "Blotter → tables"; the app's **only** trade source, parsed by `data/ingest/blotter.py`). `data/raw/HA_PNL_20260818.csv` (BNP position/P&L snapshot) and `data/raw/HA-portfolio vJean.xlsx` (the Excel calculator this app replaced) are historical inputs only — see "Trade-source history" below. Open items live in `docs/open-questions.md`, not here.
-
-**Trade-source history:** four stages. (1) Until 2026-09-16, `HA_PNL_*.csv` was "the trade source" and futures fills came from the xlsx workbook's `All FX trades` sheet. (2) 2026-09-16: both superseded by the blotter (`data/ingest/blotter.py`), which carries a genuine per-trade fill price and trade ID for every product including futures; BNP was kept alongside it for its `positions` cash-balance snapshot and `BNP_BVAL` reconciliation marks, with an EOD blotter-vs-BNP check (`engine/pnl/reconcile.py`) added the same day. (3) 2026-09-17 (morning): the app's upload control was narrowed to the blotter only; BNP upload code was deleted from `data/ingest/upload.py`, but `data/ingest/bnp.py` and `data/bloomberg/bnp_marks.py` were kept as libraries (still used by `data/load.py`'s CLI), since other agents were mid-edit on files that imported shared symbols from them. (4) **2026-09-17 (afternoon, current, user decision) — BNP and the Excel workbook removed entirely, not kept as dead code** ("no bnp fall back - that excel and everything linked to it need to go"). The user confirmed directly that the cash ladder he actually wants is delta exposure and cashflow timing (already fully derivable from the blotter's trade legs alone, no balance needed) plus scenario analysis, not a literal bank-balance figure — so BNP's one remaining job (the `positions` cash balance) was never needed by anything in the app once the blotter existed. Completed: `data/ingest/bnp.py`, `data/ingest/irs.py`, `data/bloomberg/bnp_marks.py`, `data/load.py`, `engine/pnl/pnl.py`, `engine/pnl/reconcile.py`, `engine/ladder/valuation.py`, `ui/workbook_rates.py`, `data/ingest/workbook_rates.py` all deleted outright; the shared dataclasses/regexes/helpers the live blotter parser needs moved to a new `data/ingest/common.py` first, so `data/ingest/blotter.py` (the app's only trade source) has no dependency on any of it. The `positions` table is dropped from the schema, and `data/ingest/schema.py::purge_retired_sources` (run once per app startup) cleans up any of this an existing database still has on disk. `data/raw/HA-portfolio vJean.xlsx` and `data/raw/HA_PNL_*.csv` were never git-tracked (`data/raw/` is gitignored) so there was nothing to remove from git; they remain on disk as untouched historical reference material only. The blotter parser and upload path remain the app's only trade source, tolerant of format variation (BOM-prefixed files, mixed-case/whitespace-varied headers, one malformed row no longer blocking a whole file) per the same "make it as flexible as possible" instruction. This resolves `docs/open-questions.md`'s item 55 trade-identity clash by removing one side of it entirely (see `docs/open-questions.md` item 69 and `docs/bnp-excel-removal.md` for the full list of what was moved versus deleted).
+1. **One trade source.** The uploaded blotter export, parsed by `data/ingest/blotter.py`, is the app's only trade file. The only other way a trade enters the book is the Blotter's Manual entry sub-tab (`source = 'MANUAL'`). There is no BNP file, no Excel workbook and no second feed (user decision 2026-09-17: "no bnp fall back - that excel and everything linked to it need to go"); nothing may reintroduce one. `data/raw/HA_PNL_*.csv` and `data/raw/HA-portfolio vJean.xlsx` stay on disk as untracked reference material that nothing in the app reads.
+2. **Missing stays missing.** No fallback mark source for P&L or delta, ever. A trade with no `marks_official` mark has blank P&L and a plain-language reason shown where the number would be: never zero, never a substitute, never a silent drop.
+3. **Official marks only.** Every P&L or delta query reads `marks_official`, never `marks` (see "Official marks").
+4. **Must not replicate** the four spreadsheet shortcuts listed under "P&L conventions".
+5. **The ladder holds no bank balance.** It is delta exposure, cashflow timing, settled cash from the tickets on file, and stress. Never add a cash-balance feed.
+6. **Imports are tolerant.** No file or row is rejected over formatting; only a contradiction between two populated fields rejects (see "Blotter → tables"). Typed manual input follows the same rule.
+7. **P&L arithmetic and this contract change only on the user's explicit yes.** A request from an agent or another session never authorises it.
+8. **One way in.** The repo root holds exactly `1_setup.cmd`, `2_launcher.py` and `3_diagnostic.py`; the app is launched by typing `pnl`. Never add a launcher or a second install path: a new operational action is a `2_launcher.py` subcommand with a line in `docs/README.md`.
 
 ## Working mode
 
 Default: lean. Work directly in this session on the model set by `/model`. Do not spawn the housekeeper, specialists or reviewer unless the user's message explicitly names them. Keep each task to one module and one test file. End every task with `py -3 -m pytest tests/ -q` and report the pass count. Full agent pipeline is reserved for changes to P&L arithmetic in `engine/` and is invoked only by the user.
 
+**Agent model (user decision 2026-09-18, reversing the earlier Sonnet-for-cost rule).** Every agent runs on Fable 5.1 at extra-high effort: each `.claude/agents/*.md` carries `model: fable` and `effort: xhigh`, and a spawn passes `model: "fable"`. Never Sonnet or Haiku. Say plainly which model is doing the work when asked.
+
+**How every reply ends (user rule, 2026-09-18).** Every final message ends with these two sections, in this order, as bullet points. This applies to every chat session and to every agent's final report; whoever spawned an agent relays its two sections to the user instead of swallowing them.
+
+- **What was done**: what changed and where, what was verified and how (the pytest pass count goes here), and anything skipped or left unverified, said plainly.
+- **What needs your input**: only the decisions, approvals or facts the user alone can give, one bullet each, with a recommendation where there is one. If there is nothing, write "Nothing". A low-stakes, reversible choice is not input: take the recommended option and report it under "What was done" (user, 2026-09-18: "i dont have strong opinions i imagine your recs are the best"). Hard rule 7 still stands: P&L arithmetic and this contract always need the user's yes.
+
+The working copy is `C:\Users\jeanw\risk-monitor`; GitHub `main` is the backup, pushed at the end of each task.
+
+When agents or several sessions work in parallel, the ownership table under "Repository layout" defines the lanes. State your file list to the other sessions first and keep to it; message the owner and wait before editing outside your lane; commit by explicit path only (the git index is shared: run `git diff --cached --stat` immediately before every commit, never `git add -A`); preserve each file's line endings.
+
 ## Data contract
 
 ### Tables
 
-All dates ISO `YYYY-MM-DD`, all amounts signed (`+` = receive / long). No column is nullable; "not applicable" uses the documented sentinel.
+All dates ISO `YYYY-MM-DD`, all amounts signed (`+` = receive / long). No column is nullable; "not applicable" uses the documented sentinel. `data/ingest/schema.py` is the executable copy of this section: a column added to its DDL is migrated onto existing databases automatically (`_migrate_columns`), so every `NOT NULL` column added later carries a `DEFAULT`.
 
 ```sql
 instruments (
   instrument_id   TEXT PRIMARY KEY,   -- 'USDJPY', 'EURSEK', 'XAUUSD', 'ESU6 Index', 'IRSOIS-USD-22860996',
-                                      -- 'USDJPY digi p 152 2026-08-26'
+                                      -- 'USDJPY111926P-197571137' (option: one instrument per option trade),
+                                      -- 'CASH-CAD'
   asset_class     TEXT NOT NULL,      -- FX | FUTURE | IRS | FX_OPTION | IRS_OPTION | EQ_OPTION | CMDTY_OPTION | CASH
   base_ccy        TEXT NOT NULL,      -- unit of trades.quantity: 'USD' for USDJPY, 'AUD' for AUDUSD, 'XAU',
                                       -- 'ES' (index units), notional ccy for IRS, base of pair for options
@@ -35,17 +50,28 @@ instruments (
   bbg_ticker      TEXT NOT NULL,      -- 'USDJPY Curncy', 'ESU6 Index', ...
   expiry_date     TEXT NOT NULL       -- '9999-12-31' for perpetual (FX pairs, cash)
 );
+-- Always name the columns when inserting into instruments: an old database can carry
+-- extra columns, and a positional INSERT fails every upload on it.
+
+instrument_options (                   -- option terms, kept out of instruments
+  instrument_id   TEXT PRIMARY KEY REFERENCES instruments,
+  strike          REAL NOT NULL DEFAULT 0,             -- 0 = not known (never fabricated)
+  option_type     TEXT NOT NULL DEFAULT '',            -- CALL | PUT | ''
+  barrier_level   REAL NOT NULL DEFAULT 0,             -- barrier / touch level; 0 = n/a
+  avg_start_date  TEXT NOT NULL DEFAULT '9999-12-31',  -- Asian averaging start; sentinel = n/a
+  payoff          TEXT NOT NULL DEFAULT 'VANILLA'      -- VANILLA | DIGITAL | BARRIER_KI | BARRIER_KO
+                                                       -- | ASIAN | ONE_TOUCH | NO_TOUCH | AMERICAN
+);
 
 trades (
-  trade_id        TEXT PRIMARY KEY,   -- BNP file's Symbol-derived id ('196789440'), blotter 'Trade Id' column
-                                      -- (different numbering scheme from the BNP one, see "BNP file -> tables"),
-                                      -- 'XL-<row>' from the xlsx workbook, or app-generated
-  source          TEXT NOT NULL,      -- BNP | XLSX (both the blotter and the xlsx-workbook futures loader use
-                                      -- this literal value; see "Blotter -> tables") | MANUAL
+  trade_id        TEXT PRIMARY KEY,   -- blotter 'Trade Id' column, or app-generated 'MANUAL-<n>'
+  source          TEXT NOT NULL,      -- 'XLSX' = every blotter-sourced trade (a historical literal, kept so
+                                      -- existing databases and the swap rule's "same source" test are
+                                      -- unaffected) | 'MANUAL' = booked on the Manual entry sub-tab
   instrument_id   TEXT NOT NULL REFERENCES instruments,
   product         TEXT NOT NULL,      -- FX_SPOT | FX_FWD | FX_SWAP | FUTURE | IRS | FX_OPTION
-                                      -- | SWAPTION | CAP_FLOOR (engine/rates_vol; no ingest path yet, 2026-09-17)
-                                      -- | EQ_OPTION | CMDTY_OPTION (engine/options; no ingest path yet, 2026-09-17)
+                                      -- | SWAPTION | CAP_FLOOR (engine/rates_vol; no ingest path yet)
+                                      -- | EQ_OPTION | CMDTY_OPTION (engine/options; no ingest path yet)
   package_id      TEXT NOT NULL,      -- = trade_id unless grouped by the swap rule below
   trade_date      TEXT NOT NULL,
   quantity        REAL NOT NULL,      -- signed, in base_ccy units: base amount (FX), contracts (FUTURE),
@@ -53,9 +79,21 @@ trades (
   price           REAL NOT NULL,      -- fill: forward outright / futures price / fixed rate / premium per unit
   account         TEXT NOT NULL,      -- 'BNPP-IPBFX-NMMF', ...
   counterparty    TEXT NOT NULL,
-  strategy        TEXT NOT NULL,      -- 'HAHY7' | 'HACA'
+  strategy        TEXT NOT NULL,      -- '' for blotter trades (the export has no such column)
   trader          TEXT NOT NULL,
-  description     TEXT NOT NULL       -- raw PB description or free text
+  description     TEXT NOT NULL,      -- raw description or free text
+  theme           TEXT NOT NULL DEFAULT ''   -- bundle membership, see instrument_theme
+);
+
+instrument_theme (                     -- theme = bundle name; membership of a Blotter bundle
+  instrument_id   TEXT PRIMARY KEY REFERENCES instruments,
+  theme           TEXT NOT NULL
+);
+
+bundles (                              -- a bundle's own metadata only, never its membership
+  name            TEXT PRIMARY KEY,
+  description     TEXT NOT NULL,
+  created_at      TEXT NOT NULL
 );
 
 trade_legs (
@@ -75,15 +113,13 @@ marks (
   as_of_date      TEXT NOT NULL,
   instrument_id   TEXT NOT NULL REFERENCES instruments,
   settle_date     TEXT NOT NULL,      -- outright date; = as_of_date for SPOT; expiry for futures
-  mark_type       TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | PAR_RATE | PV_USD | DV01_USD | CASHFLOW_USD | PREMIUM | DELTA
-                                      -- | GAMMA | THETA | VEGA | RHO (option Greeks, engine/options, 2026-09-17)
-                                      -- | DELTA_PA (premium-adjusted delta, written only for G10 pairs quoted that way;
-                                      --   the ladder reads DELTA, never DELTA_PA)
+  mark_type       TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | PAR_RATE | PV_USD | DV01_USD | CASHFLOW_USD
+                                      -- | PREMIUM | DELTA | GAMMA | THETA | VEGA | RHO
+                                      -- | DELTA_PA (premium-adjusted delta, written only for G10 pairs quoted
+                                      --   that way; the ladder reads DELTA, never DELTA_PA)
   value           REAL NOT NULL,      -- DELTA = base-ccy delta per 1 unit of trades.quantity (may exceed 1 for digitals)
-  source          TEXT NOT NULL,      -- BNP_BVAL | BBG_BFXFORWARD | BBG_BDH | BBG_BDP | BBG_INTERP | MANUAL
-                                      -- BBG_INTERP = linear interpolation between the two bracketing standard
-                                      -- tenors of Bloomberg's own forward curve (broken dates); official only
-                                      -- as the FWD_OUTRIGHT fallback (user decision 2026-09-18), never for SPOT
+  source          TEXT NOT NULL,      -- BBG_BFXFORWARD | BBG_BDH | BBG_BDP | BBG_INTERP | QL_PRICER
+                                      -- | QL_OPTIONS_PRICER | MANUAL
   snapped_at      TEXT NOT NULL,      -- ISO timestamp, offset resolved from America/New_York for that row
   PRIMARY KEY (as_of_date, instrument_id, settle_date, mark_type, source)
 );
@@ -98,7 +134,7 @@ curves (                               -- curve nodes so the IRS pricer can be r
   PRIMARY KEY (curve_id, as_of_date, node_date, source)
 );
 
-curve_quotes (                         -- raw OIS quote staging (data-ingest DDL, bbg-data writer, engine/rates reader)
+curve_quotes (                         -- raw OIS quote staging (bbg-data writes, engine/rates reads)
   as_of_date      TEXT NOT NULL,
   ccy             TEXT NOT NULL,
   index           TEXT NOT NULL,      -- 'SOFR', 'ESTR', 'SONIA', 'TONA', 'SARON', 'CORRA', 'AONIA' (Phase 1: OIS only)
@@ -119,11 +155,40 @@ index_fixings (                        -- overnight fixings loaded into QuantLib
   source          TEXT NOT NULL,      -- BBG_BDH | MANUAL
   PRIMARY KEY (index, fixing_date, source)
 );
+
+realised_pnl (                         -- one frozen row per settled trade, written by engine/pnl/ledger.realise_settled;
+                                       -- a SETTLED row in value_book comes from here and is never recomputed
+  trade_id            TEXT PRIMARY KEY REFERENCES trades,
+  instrument_id       TEXT NOT NULL,
+  product             TEXT NOT NULL DEFAULT 'FX_FWD',
+  currency            TEXT NOT NULL,
+  settle_date         TEXT NOT NULL,
+  local_amount        REAL NOT NULL,
+  usd_entry_amount    REAL NOT NULL,   -- 0.0 = not applicable (crosses, futures), not "zero P&L"
+  mark_type           TEXT NOT NULL DEFAULT 'SPOT',   -- which mark_type froze this row
+  spot_usd_per_local  REAL NOT NULL,
+  spot_as_of_date     TEXT NOT NULL,   -- date of the mark used to freeze (settle date, or last prior)
+  spot_source         TEXT NOT NULL,
+  pnl_usd             REAL NOT NULL,
+  frozen_at           TEXT NOT NULL,
+  note                TEXT NOT NULL    -- '' or 'spot dated <d> (last before settlement)'
+);
+
+swap_review (                          -- ambiguous FX-swap candidates the package rule refuses to auto-group
+  candidate_group     TEXT NOT NULL,   -- 'source|account|instrument_id|trade_date'
+  trade_id            TEXT NOT NULL REFERENCES trades,
+  reason              TEXT NOT NULL,
+  PRIMARY KEY (candidate_group, trade_id)
+);
 ```
 
-`positions` (one row per PB position per day, BNP grain) was dropped from the schema 2026-09-17: it was written only by the retired BNP CSV parser, and the app's only trade source (the blotter) never had an equivalent snapshot to write there. `data/ingest/schema.py::purge_retired_sources` drops the table outright on any existing database that still has it from before this change.
+Views: `marks_official` (below) and `trades_official` (a passthrough of `trades`, the name every engine query reads). Both are dropped and recreated on every startup by `create_schema`, never `CREATE VIEW IF NOT EXISTS`, so a view-definition change always reaches an existing database.
 
-Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4 legs (`FX_NEAR` × 2, `FX_FAR` × 2) under one `trade_id`; FUTURE = 1 `NOTIONAL` leg in USD, amount `contracts × multiplier × fill`, `settle_date` = expiry, `settles_cash` 0; IRS = `FIXED` leg (amount = `−quantity`, rate = fixed) + `FLOAT` leg (amount = `+quantity`, rate = spread), `settle_date` = maturity — a payer (`quantity > 0`) has a negative FIXED leg (pays) and a positive FLOAT leg (receives); FX_OPTION = 1 `NOTIONAL` leg in base ccy, `settles_cash` 0.
+`engine/rates_vol/` keeps its option attributes, manual vols and SABR / Hull-White parameters in its own defensively created tables (`instrument_rate_options`, `rate_vols`, `rate_model_params`), keyed by instrument, not by trade.
+
+`data/ingest/schema.py::purge_retired_sources` runs once per startup and removes what the retired BNP parser and workbook left in an old database (`source = 'BNP'` trades, `BNP_BVAL` / `WORKBOOK_REFERENCE` marks, the `positions` table). It never deletes `BBG_INTERP`.
+
+Leg layouts: FX spot / forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4 legs (`FX_NEAR` × 2, `FX_FAR` × 2) under one `trade_id`; FUTURE = 1 `NOTIONAL` leg in USD, amount `contracts × multiplier × fill`, `settle_date` = expiry, `settles_cash` 0; IRS = `FIXED` leg (amount = `−quantity`, rate = fixed) + `FLOAT` leg (amount = `+quantity`, rate = spread), `settle_date` = maturity, so a payer (`quantity > 0`) has a negative FIXED leg (pays) and a positive FLOAT leg (receives); FX_OPTION = 1 `NOTIONAL` leg in base ccy, `settles_cash` 0.
 
 ### Official marks
 
@@ -132,60 +197,68 @@ Leg layouts: FX spot/forward = 2 legs (`FX_NEAR`, one per currency); FX swap = 4
 | mark_type | official source |
 |---|---|
 | SPOT | BBG_BFXFORWARD |
-| FWD_OUTRIGHT | BBG_BFXFORWARD where Bloomberg quotes that exact date (a standard tenor of `FWD_CURVE`); otherwise BBG_INTERP (user decision 2026-09-18): linear interpolation between the two bracketing standard-tenor outrights of Bloomberg's own curve, never extrapolated beyond the last tenor, what the Excel `BFXForward` call did for broken dates. A direct quote always wins over an interpolated row for the same key |
+| FWD_OUTRIGHT | BBG_BFXFORWARD where Bloomberg quotes that exact date (a standard tenor of `FWD_CURVE`); otherwise BBG_INTERP (user decision 2026-09-18): linear interpolation between the two bracketing standard-tenor outrights of Bloomberg's own curve, never extrapolated beyond the last tenor. A direct quote always wins over an interpolated row for the same key |
 | FUTURE_PX | BBG_BDH |
-| PAR_RATE, PV_USD, DV01_USD, CASHFLOW_USD | QL_PRICER |
-| DELTA, DELTA_PA, PREMIUM, GAMMA, THETA, VEGA, RHO | QL_OPTIONS_PRICER (`engine/options`, vendored options_calc; since 2026-09-17 — MANUAL is reconciliation-only for these) |
-| any | BNP_BVAL, if it remains in an old database, is never official — BNP is no longer a live input at all (removed 2026-09-17, `docs/bnp-excel-removal.md`); nothing writes a BNP_BVAL row any more |
-| SPOT, FUTURE_PX, any other | BBG_INTERP is reconciliation-only everywhere except its one official role above (the FWD_OUTRIGHT fallback); a SPOT or FUTURE_PX is never interpolated into existence |
-| PAR_RATE, PV_USD, DV01_USD | BBG_BDH (Bloomberg SWPM) is reconciliation only, never official, mirroring BNP_BVAL for FX (decided 2026-09-15 with the `engine/rates` QuantLib OIS pricer landing) |
+| PAR_RATE, PV_USD, DV01_USD, CASHFLOW_USD | QL_PRICER (`engine/rates`) |
+| DELTA, DELTA_PA, PREMIUM, GAMMA, THETA, VEGA, RHO | QL_OPTIONS_PRICER (`engine/options`, vendored options_calc) |
 
-The mapping is held in a `marks_official` view (`marks` filtered to the official source per `mark_type`, plus the FWD_OUTRIGHT fallback row only where no direct-quote row exists for the same key — `data/ingest/schema.py::OFFICIAL_MARK_SOURCE` and `OFFICIAL_FALLBACK_SOURCE` — so `(as_of_date, instrument_id, settle_date, mark_type)` is unique). Every P&L or delta query reads from `marks_official`, never from `marks` directly.
+Never official, reconciliation only: `BBG_INTERP` for anything but the FWD_OUTRIGHT fallback (a SPOT or FUTURE_PX is never interpolated into existence); `BBG_BDH` (Bloomberg SWPM) for PAR_RATE / PV_USD / DV01_USD; `MANUAL` for option premiums and Greeks; any `BNP_BVAL` row surviving in an old database (nothing writes one any more).
 
-**Standard-tenor forward points are official (2026-09-18).** The live pull (`data/bloomberg/live.py`) requests Bloomberg's bulk `FWD_CURVE` table once per pair — every pair with an open FX leg and every open FX option's underlying pair — and writes each standard-tenor row as an official `BBG_BFXFORWARD` `FWD_OUTRIGHT` at that tenor's own settle date, because each row is Bloomberg's own outright quote, not an interpolation. A leg or option expiry that falls between two tenors is written as `BBG_INTERP` (the API exposes no direct broken-date outright, `docs/open-questions.md` item 27), which since the user's decision of 2026-09-18 is official for `FWD_OUTRIGHT` wherever no direct quote exists for that key (table above): that is how a broken-date leg gets its P&L at all. P&L reads forwards by exact leg date, so the tenor rows themselves change nothing there. They exist so that `engine/options/rates.py`'s covered-interest-parity fallback has official points to interpolate between when a currency has no OIS curve (SEK, NOK, TWD, ZAR): before this, a pair whose open dates were all broken dates had no official forward at all and its options were skipped as `no curve/rate <CCY>`. The pull reports these rows under `curve_points_written`, separately from the requested-mark count.
+The mapping is the `marks_official` view: `marks` filtered to the official source per `mark_type`, plus the FWD_OUTRIGHT fallback row only where no direct-quote row exists for the same key (`data/ingest/schema.py::OFFICIAL_MARK_SOURCE` and `OFFICIAL_FALLBACK_SOURCE`), so `(as_of_date, instrument_id, settle_date, mark_type)` is unique.
+
+Standard-tenor forward points are official. The live pull (`data/bloomberg/live.py`) requests Bloomberg's bulk `FWD_CURVE` table once per pair, for every pair with an open FX leg and every open FX option's underlying pair, and writes each standard-tenor row as an official `BBG_BFXFORWARD` `FWD_OUTRIGHT` at that tenor's own settle date, because each row is Bloomberg's own outright quote. A leg or option expiry that falls between two tenors is written as `BBG_INTERP` (the API exposes no direct broken-date outright, `docs/open-questions.md` item 27); that is how a broken-date leg gets its P&L at all. P&L reads forwards by exact leg date, so the tenor rows change nothing there; they exist so that `engine/options/rates.py`'s covered-interest-parity fallback has official points to interpolate between when a currency has no OIS curve (SEK, NOK, TWD, ZAR). The pull reports them under `curve_points_written`, separately from the requested-mark count.
 
 ### Blotter → tables
 
-`data/ingest/blotter.py` parses the transaction-level blotter export (`data/raw/new_sample_trades.csv`-shaped files) — one row per fill, unlike the BNP snapshot's one netted row per open position per day. This is the current source of `trades` / `trade_legs` for FX forward/spot, futures, options and IRS: it carries a genuine per-fill `Price` and `Trade Id` for every row, including futures, which the BNP file never does (see "BNP file → tables" below).
+`data/ingest/blotter.py` parses the transaction-level blotter export (`data/raw/new_sample_trades.csv`-shaped files): one row per fill, with a genuine per-fill `Price` and `Trade Id` for every product. Shared dataclasses, regexes and helpers live in `data/ingest/common.py`.
 
-Scope: a row is excluded only when its `Status` says cancelled/rejected/pending/void/deleted/failed, or its `Fund` is populated and is not `NMMF` (a missing column or blank cell never excludes). Row kind is decided by `Fin Type`, matched by keyword after normalisation (`Futures`, `FX Forward`, `Interest Rate Swap` all resolve), with `Product` as the fallback when `Fin Type` is blank or unrecognised: `FORWARD | CURRENCY | FUTURE | OPTION | INTEREST_RATE_SWAP`; anything else is counted and skipped, never coerced. Tolerance rule (2026-09-17): a blank, missing or oddly formatted field never rejects a row when the value can be recovered from another column (forwards fall back from the Description to `TradeDate` / `Settle Date` / `Buy Currency` / `Sell Currency` / `Price`; IRS to Description / `Currency` / `Quantity`×1e6; options to `Currency Pair` / `Adj. Expiry Date` / `FxOption Type`); only a contradiction between two populated fields does. A repeated `Trade Id` within a file keeps the highest `Version`; re-uploading replaces trades by id (`blotter.load` is idempotent, and dissolves any swap package containing a replaced trade so the package rule re-runs). File reading (`blotter.read_table`) accepts UTF-8/BOM/cp1252, comma/semicolon/tab/pipe delimiters, a header row after preamble lines, any header casing, and multi-sheet workbooks with real Excel date cells.
+Scope: a row is excluded only when its `Status` says cancelled / rejected / pending / void / deleted / failed, or its `Fund` is populated and is not `NMMF` (a missing column or blank cell never excludes). Row kind is decided by `Fin Type`, matched by keyword after normalisation (`Futures`, `FX Forward`, `Interest Rate Swap` all resolve), with `Product` as the fallback when `Fin Type` is blank or unrecognised: `FORWARD | CURRENCY | FUTURE | OPTION | INTEREST_RATE_SWAP`; anything else is counted and skipped, never coerced.
 
-- FORWARD: same `Symbol` (`<PAIR><VD mmddyy>-<id>`) and `Description` regexes as the BNP file (byte-identical on the reference sample); the trailing id in `Symbol` here is `Instrument Id`, not `Trade Id` — `trades.trade_id` comes from the `Trade Id` column, a different numbering scheme from BNP's Symbol-derived id (see the trade-identity note above). Base/quote leg amounts come from the structured `Buy Currency` / `Sell Currency` / `BuyCurrency Amount` / `SellCurrency Amount` columns, cross-checked against the description's sold/bought currencies.
-- CURRENCY: **spot FX fills (user's cash-ladder spec, 2026-09-18).** A row naming both a `Buy Currency` and a `Sell Currency` is a spot trade in its own right (every one of the reference sample's 85 CURRENCY rows: T+1/T+2, its own `Trade Id`, both amounts and a `Price`, none matching any FORWARD row) and is written as a trade with product `FX_SPOT` plus the same two `FX_NEAR` legs a forward gets, dated on `Settle Date`, so its cash reaches the ladder (a settled CAD balance stays CAD until a spot trade in the file converts it) and its P&L the book. The `CASH-<ccy>` instrument is still written for the row's own currency; a single-currency row (fee, balance, one-sided movement) stays instrument-only, never a trade, never a reject. Spot trades are not candidates for the FX-swap package rule (forwards only, below). Before 2026-09-18 these rows were dropped from the book entirely.
-- FUTURE: unlike the BNP FUTURES row (netted position, no fill date/price), this file gives `Trade Id` and a real per-contract fill `Price`, so a trade + 1 `NOTIONAL` leg is written (`Quantity` = contracts signed by `Side`, `multiplier` = 50 for ES).
-- OPTION: product `FX_OPTION`, 1 `NOTIONAL` leg in the pair's base currency (`Currency Pair` column), quantity signed by `Side` (Buy = long = +), price = premium fill.
-- INTEREST_RATE_SWAP: + = pay fixed, − = receive fixed, not `Side` (always `'Buy'` in the reference sample, carries no direction here). **A short is whatever the book marks with brackets or a minus sign (user, 2026-09-18, "if the book has brackets or a negative sign that's a short on the instrument"): on `Notional`, or on `Quantity` where an export leaves `Notional` unsigned — a negative on either column is a short (receive fixed); the magnitude still comes from `Notional`.** The reference sample carries no sign on either column even for the three swaps the old Excel book held as receivers (−625M, −995M, −158.22M), so it cannot show this; the user's live export does. `Notional` is already full-unit (not millions-scaled like this file's own `Quantity` column) — same scale as `trades.quantity` elsewhere. Leg shape mirrors `data/ingest/irs.py`'s BNP path (FIXED = `−quantity`, FLOAT = `+quantity`).
+Tolerance rule: a blank, missing or oddly formatted field never rejects a row when the value can be recovered from another column (forwards fall back from the Description to `TradeDate` / `Settle Date` / `Buy Currency` / `Sell Currency` / `Price`; IRS to Description / `Currency` / `Quantity` × 1e6; options to `Currency Pair` / `Adj. Expiry Date` / `FxOption Type`); only a contradiction between two populated fields does. A repeated `Trade Id` within a file keeps the highest `Version`. File reading (`blotter.read_table`) accepts UTF-8 / BOM / cp1252, comma / semicolon / tab / pipe delimiters, a header row after preamble lines, any header casing, and multi-sheet workbooks with real Excel date cells. Parser guesses are listed in `docs/blotter-parser-assumptions.md`.
 
-`trades.source = 'XLSX'` for every blotter-sourced trade (the schema's `source` column is free text, not a checked enum; the blotter reuses the same literal `'XLSX'` value the xlsx-workbook futures loader below uses for `trade_id='XL-<row>'` rows — a naming overlap between two different files, tracked in `docs/open-questions.md` rather than resolved here). `trades.strategy` is `''` (no equivalent column in this file).
+- FORWARD: `Symbol` is `<PAIR><VD mmddyy>-<id>`; that trailing id is the `Instrument Id`, not the trade id, which comes from the `Trade Id` column. Base / quote leg amounts come from the structured `Buy Currency` / `Sell Currency` / `BuyCurrency Amount` / `SellCurrency Amount` columns, cross-checked against the description's sold / bought currencies. The blotter's Buy / Sell is our side, for USD-base pairs too (`docs/open-questions.md` item 70).
+- CURRENCY: spot FX fills. A row naming both a `Buy Currency` and a `Sell Currency` is a spot trade in its own right and is written as product `FX_SPOT` with the same two `FX_NEAR` legs a forward gets, dated on `Settle Date`, so its cash reaches the ladder and its P&L the book. The `CASH-<ccy>` instrument is still written for the row's own currency; a single-currency row (fee, balance, one-sided movement) stays instrument-only, never a trade, never a reject. Spot trades are not candidates for the FX-swap package rule.
+- FUTURE: a trade + 1 `NOTIONAL` leg per fill (`Quantity` = contracts signed by `Side`, `multiplier` = 50 for ES).
+- OPTION: product `FX_OPTION`, 1 `NOTIONAL` leg in the pair's base currency (`Currency Pair` column), quantity signed by `Side` (Buy = long = +), price = premium fill as a fraction of base notional. Terms the export leaves blank (the reference sample's three digitals carry no strike) are typed once on the Blotter's Manual entry sub-tab and stored in `instrument_options`.
+- INTEREST_RATE_SWAP: + = pay fixed, − = receive fixed. `Side` carries no direction here (always `'Buy'` in the reference sample). A short is whatever the book marks with brackets or a minus sign (user, 2026-09-18): on `Notional`, or on `Quantity` where an export leaves `Notional` unsigned; the magnitude still comes from `Notional`, which is already full-unit (not millions-scaled like this file's `Quantity`). The reference sample carries no sign on either column, so it cannot show this; the user's live export does.
 
-### BNP file → tables (removed 2026-09-17)
+`trades.strategy` is `''` for blotter trades.
 
-The BNP daily PB snapshot and its parser (`data/ingest/bnp.py`, `data/ingest/irs.py`'s BNP row handler, `data/bloomberg/bnp_marks.py`, `data/load.py`'s CLI) are deleted entirely per user decision ("no bnp fall back — that excel and everything linked to it need to go", `docs/bnp-excel-removal.md`), not kept as historical documentation or dead code. `data/raw/HA_PNL_*.csv` was never git-tracked and remains on disk as untouched historical reference material only — it is not read by anything in the app any more, at any layer. The shared dataclasses/regexes/helpers the live blotter parser (`data/ingest/blotter.py`) actually needs (`Instrument`, `Trade`, `TradeLeg`, `Reject`, the forward/IRS symbol and description regexes, `NDF_CCYS`, `future_expiry`, `FUTURE_MULTIPLIERS`, `cash_ccy`) were moved into `data/ingest/common.py` first, so the live parser has no dependency on anything BNP-specific. `BNP_BVAL` is no longer written anywhere (see "Official marks" below); the `positions` table this file's rows used to populate is dropped from the schema entirely. What this section used to document (the `Symbol`/`Symbol Description` regex shapes, the FORWARD/CURRENCY/FUTURES/INTEREST_RATE_SWAP row formats, the reconciliation tolerances BNP's own arithmetic was checked against) is preserved only in git history and in `docs/bnp-excel-removal.md`, not here.
+### Upload and manual entry
 
-### xlsx → tables (removed 2026-09-17)
-
-`data/raw/HA-portfolio vJean.xlsx` (the Excel calculator), its workbook-arithmetic module (`engine/pnl/pnl.py`) and the Reconciliation tab that once displayed it are removed entirely per the same user decision. `data/raw/HA-portfolio vJean.xlsx` was never git-tracked and remains on disk as untouched historical reference material only. The xlsx workbook's futures-fill loader (`data/ingest/xlsx_futures.py`) was already deleted 2026-09-16, superseded by the blotter's per-trade futures fills; `engine/pnl/pnl.py` (the remaining literal workbook row arithmetic — `ltd_per_trade`, `workbook_valuation_date`, `workbook_fx_pnl`) and its aggregation layer (`engine/pnl/aggregate.py`'s former `aggregate_by_pair`/`book_totals`/`period_pnl`) followed 2026-09-17. What this section used to document (the `All FX trades`/`All IRS trades`/`All Options Trades` sheet layouts and cell formulas) is preserved only in git history, not here.
+- **An upload replaces the whole book** (user decision 2026-09-17: "when a new excel is put in - that's the only input for the trades - all of the old stuff gets deleted"). `data/ingest/upload.py::import_blotter` deletes every non-MANUAL trade and its trade-keyed rows (`trade_legs`, `realised_pnl`, `swap_review`) inside the same transaction that publishes the new file, and only after the new file has parsed, so a parse failure leaves the existing book intact. Instruments, marks, curves and fixings are untouched. `blotter.load` itself stays an idempotent upsert by `trade_id` for library callers, and dissolves any swap package containing a replaced trade so the package rule re-runs.
+- **Manual entry** (`data/ingest/manual.py`, Blotter sub-tab): books OTC trades the export does not carry, as `source = 'MANUAL'`, ids `MANUAL-<n>`, with the same instrument / trade / leg shape the parser writes for that product, so every engine query sees them like any other trade. A MANUAL trade survives every upload and leaves only through `delete_manual_trade`.
+- The launcher's sample import runs only on an empty database.
+- After an upload or a marks write the UI refreshes in place, with no browser reload (`ui/revision.py`).
 
 ### `package_id` rule (FX swaps)
 
-Two forward rows form one `FX_SWAP` package when all hold: same source, same account, same pair, same trade date, opposite-signed quantities, equal |USD-leg amount| within 0.01 % (for a cross with no USD leg, equal |base amount| within the same tolerance), **different** value dates. `package_id = 'SWAP-' || min(trade_id)`; near leg = earlier value date. Opposite-signed rows with the same value date are intraday round trips and stay separate outrights. Groups with more than one candidate on a side are not auto-grouped; they go to a review list. A swap's near leg settles T+2 and drops out of the PB snapshot, so swaps are identified from the blotter or by diffing the daily PB archive, never from one snapshot.
+Two forward rows form one `FX_SWAP` package when all hold: same source, same account, same pair, same trade date, opposite-signed quantities, equal |USD-leg amount| within 0.01 % (for a cross with no USD leg, equal |base amount| within the same tolerance), **different** value dates. `package_id = 'SWAP-' || min(trade_id)`; near leg = earlier value date. Opposite-signed rows with the same value date are intraday round trips and stay separate outrights. Groups with more than one candidate on a side are not auto-grouped; they go to `swap_review`.
 
-### Reconciliation checks and tolerances (removed 2026-09-17)
+### Tabs as views
 
-These tolerances applied to the retired BNP file's own internal arithmetic (`Local Cost`, `MV Local`, `MV Base`, DTD/MTD identities) and to netting the retired Excel workbook against it. Neither input exists in the app any more; nothing reads these checks. Kept only in `docs/bnp-excel-removal.md`'s history, not here.
+Three tabs under a header that sits above all of them (`ui/app.py::VISIBLE_TABS`). Every tab is a read-only view: `ui/` never recomputes P&L or delta. The header and the ladder's risk table are always the whole book; filters shape only the view they sit on.
 
-### Six tabs as views
+**Header (all tabs).** LTD, Daily, Previous day, 5d, MTD, YTD and Trading P&L, the trade count (open / settled), Net and Gross USD delta, and a collapsible LTD line chart. Aggregation: a figure sums the priced trades only and says so in a visible caption ("excludes N of M trades unpriced", breakdown by product and reason on hover); a period difference leaves out any trade priced on only one of its two dates; and when the trades unpriced on the reference date outnumber those priced at both ends, the period is n/a with a sentence naming the reference date and pointing at the Bloomberg backfill. The engine's own `ledger.ltd` stays strict (NaN if any row is NaN); the partial sum is the header's display rule, never a change to a trade's P&L. The trade count and Net / Gross USD delta are shown even when no P&L mark exists. No figure is ever blank without its reason.
 
-| Tab | View |
-|---|---|
-| Cash ladder | `trade_legs` where `settles_cash = 1 AND settle_date ≥ as_of`, grouped by `ccy, settle_date` — cashflow timing and delta exposure only; no cash-balance rows (the `positions`-based `CASH` column was BNP-fed; both it and the `positions` table were removed 2026-09-17 along with BNP itself, `docs/bnp-excel-removal.md`). The `≥` here versus `>` in the delta query is intentional: a leg settling on `as_of` is cash that moves today but carries no delta by close. **Settled cash row (user decision 2026-09-18, "there should be a settled cash row toward the top", "expired tickets must settle not disappear"):** the Ladder tab's grid (`engine/ladder/exposure_adapter.py::settled_records_from_db`) adds one row above the value dates holding, per currency, the legs of every ticket in the uploaded blotter whose value date has passed: deliverable legs (`settles_cash = 1`, `settle_date < as_of`) at face value in their own currency, which still carry that currency's delta (NOK received on a settled forward is NOK exposure until sold), and for non-deliverable tickets (NDF pairs, futures, FX options) the USD settlement read from `realised_pnl` (the ledger's realised P&L, which for an NDF is exactly the USD cash settlement) — never recomputed, and a settled ticket the ledger has not realised yet is named under the grid, not valued. The tab's per-currency delta therefore includes settled deliverable cash (deliverable legs settling on `as_of` count as cash by close; NDF legs settling on `as_of` still carry no delta); the SQL delta query below and the per-pair Position table remain open-forward-only. This is settled cash from the tickets on file, not a bank balance. **USD equivalent and view controls (user's cash-ladder spec, 2026-09-18, `docs/open-questions.md` item 70):** the grid's `USD equivalent` column marks each cell at the USD-per-unit rate for its own value date (`engine/ladder/usd_marks.py`): spot on or before the spot date (as-of + 2 weekdays), otherwise the official `FWD_OUTRIGHT` for that exact date, else linear interpolation between the bracketing official outrights with spot as the first pillar, flat beyond the last tenor, and spot when a pair has no forward curve on file (named in a caption, never silent); undiscounted; settled cash at spot. The column's total is the book's FX value at outrights, which is not the headline P&L (that converts quote P&L at spot). The per-currency delta rows stay at spot. The tab's controls (currency multiselect, From/To value dates, "Settled dates one by one", "Show table in USD equivalent", ladder/legs CSV downloads, the heatmap coloured by USD equivalent and the collapsed "Local vs USD by value date" table) shape the grid only; the headline card and the risk table are always the whole book. |
-| FX | FX trades × `marks_official` (`FWD_OUTRIGHT` at the leg's own `settle_date`, `SPOT` for USD conversion); per-pair USD notional = Σ sign(base leg) × \|USD leg\| |
-| Rates | IRS trades × `marks_official` (`PV_USD`, `DV01_USD`, `PAR_RATE`, official source `QL_PRICER`); `curves` is live via `engine/rates` (`bootstrap_and_store` / `price_and_store`), single-currency OIS only (Phase 1: USD SOFR, EUR ESTR, GBP SONIA, JPY TONA, CHF SARON, CAD CORRA, AUD AONIA) — term-rate, basis and XCCY swaps are Phase 2 |
-| Options | FX_OPTION trades × `marks_official` (`PREMIUM`, `DELTA`) |
-| Delta | query below |
-| Overall book | P&L rollups by strategy / account, LTD series from `value_book` (the `positions` BNP-vs-CALC comparison no longer applies: the `positions` table itself was dropped 2026-09-17 along with BNP) |
+**Ladder.** "What am I long or short, and when is it cash?"
+- Grid: `trade_legs` where `settles_cash = 1 AND settle_date ≥ as_of`, grouped by `ccy, settle_date`, leg by leg, crosses included. No P&L on it.
+- `≥` here versus `>` in the delta query is intentional: a leg settling on `as_of` is cash that moves today but carries no delta by close.
+- **Settled cash row**, on top (user decision 2026-09-18: "expired tickets must settle not disappear"; `engine/ladder/exposure_adapter.py::settled_records_from_db` is its only source). Deliverable legs past their value date sit there at face value in their own currency and still carry that currency's delta (NOK received on a settled forward is NOK exposure until sold). Non-deliverable tickets (NDF pairs, futures, FX options) contribute their USD settlement read from `realised_pnl`, never recomputed; one the ledger has not realised yet is named under the grid, not valued. This is settled cash from the tickets on file, not a bank balance.
+- The tab's per-currency delta therefore includes settled deliverable cash, and deliverable legs settling on `as_of` count as cash by close; NDF legs settling on `as_of` carry no delta. The SQL delta query below and the per-pair Position table stay open-forward-only. Delta rows are at spot. Gold keeps its own sign in the dollar-convention column (a metal is not a dollar position).
+- **USD equivalent column** (`engine/ladder/usd_marks.py`): each cell at the USD-per-unit rate for its own value date: spot on or before the spot date (as-of + 2 weekdays), otherwise the official `FWD_OUTRIGHT` for that exact date, else linear interpolation between the bracketing official outrights with spot as the first pillar, flat beyond the last tenor, and spot when a pair has no forward curve on file (named in a caption, never silent). Undiscounted; settled cash at spot. Its total is the book's FX value at outrights, which is not the headline P&L (that converts quote P&L at spot).
+- View controls (currency multiselect, From / To value dates, "Settled dates one by one", "Show table in USD equivalent", CSV downloads, the heatmap, "Local vs USD by value date") shape the grid only.
+- Stress block per `docs/BUILD_PLAN.md` section 4 (`config/stress.yaml`); futures delta as its own line.
 
-**Options tab placement, decided 2026-09-17 (resolves the standing conflict with `ui/app.py`'s docstring, which claimed BUILD_PLAN's 3/4-tab structure superseded this table — both now agree):** Options is not a standalone top-level tab. It lives inside the Blotter, as a grouped, collapsible trade summary — Portfolio Totals roll-up, then grouped by asset class, then by structure/`package_id` (a multi-leg `combine()`-built package collapses to one summary row with its legs nested underneath), columns Position / Notional / MktVal / MktPx / Delta / Theta / Gamma / Vega / Expiry / Underlying / Strike / UndFwdPx / Rho — per the user's Bloomberg MARS-style reference layout. The row above ("Options | FX_OPTION trades × marks_official") still describes the correct *data* view; only its placement in the UI is corrected here. See `engine/options/__init__.py`'s scope ledger and `docs/open-questions.md` item 61 for the phased build-out (options-pricer, ui-shell Phase 8).
+**Blotter.** "Where did the P&L come from?" `value_book(as_of)` rows, one per trade, open or settled. Sub-tabs: Total book, FX, Futures, Rates, Options, Bundles, Manual entry.
+- FX: FX trades × `marks_official` (`FWD_OUTRIGHT` at the leg's own `settle_date`, `SPOT` for USD conversion); per-pair USD notional = Σ sign(base leg) × |USD leg|.
+- Rates: IRS trades × `marks_official` (`PV_USD`, `DV01_USD`, `PAR_RATE`). `curves` is built by `engine/rates` (`bootstrap_and_store` / `price_and_store`), single-currency OIS only (Phase 1: USD SOFR, EUR ESTR, GBP SONIA, JPY TONA, CHF SARON, CAD CORRA, AUD AONIA); term-rate, basis and XCCY swaps are Phase 2.
+- Options: not a top-level tab. A grouped, collapsible trade summary in the user's Bloomberg MARS-style layout: Portfolio Totals, then asset class, then structure / `package_id` (a multi-leg package collapses to one summary row with its legs nested underneath); columns Position / Notional / MktVal / MktPx / Delta / Theta / Gamma / Vega / Expiry / Underlying / Strike / UndFwdPx / Rho. Data: FX_OPTION trades × `marks_official`. Phased build-out in `engine/options/__init__.py`'s scope ledger and `docs/open-questions.md` item 61.
+- Bundles: named groups of trades; membership is `instrument_theme` / `trades.theme`, metadata in `bundles`.
+
+**Market data.** "Can I trust the numbers?" Organised by currency pair: spot and the forward curve with each mark's source and snap time, official first; "Pull now" and feed status; close completeness for the trailing business days; the manual mark-entry form; the Bloomberg connection check.
+
+### Delta per currency
 
 Aggregate delta per currency across forwards, futures and option deltas in one query:
 
@@ -209,26 +282,27 @@ WITH d AS (
 SELECT ccy, SUM(delta) AS delta FROM d GROUP BY ccy;
 ```
 
-The `SPOT` join in the option quote-currency branch is a `LEFT JOIN` so that a missing spot mark surfaces as a `NULL` delta; the engine must raise if any resulting delta is `NULL`, never drop the leg silently. The join key is the **pair** (`i.base_ccy || i.quote_ccy`, e.g. `USDJPY`), not the option's own `instrument_id` (the blotter Symbol, e.g. `USDJPY111926P-197571137`), which can never match a SPOT row — corrected 2026-09-17 (options merge Phase 3) when `engine/ladder/ladder.py` was brought in line with this query. Because SQL `SUM()` drops individual NULL rows inside a `GROUP BY` group, the engine checks for options with a DELTA mark but no pair SPOT *before* aggregating (`_OPTION_MISSING_SPOT_SQL`) rather than inspecting the summed output.
+The `SPOT` join in the option quote-currency branch is a `LEFT JOIN` so that a missing spot mark surfaces as a `NULL` delta; the engine must raise if any resulting delta is `NULL`, never drop the leg silently. The join key is the **pair** (`i.base_ccy || i.quote_ccy`, e.g. `USDJPY`), not the option's own `instrument_id` (e.g. `USDJPY111926P-197571137`), which can never match a SPOT row. Because SQL `SUM()` drops individual NULL rows inside a `GROUP BY` group, the engine checks for options with a DELTA mark but no pair SPOT *before* aggregating (`engine/ladder/ladder.py::_OPTION_MISSING_SPOT_SQL`) rather than inspecting the summed output.
 
-Per-pair delta (the sheet's "Position") is the same union grouped by `t.instrument_id` in USD-notional terms.
+Per-pair delta (the "Position" table) is the same union grouped by `t.instrument_id` in USD-notional terms.
 
 ## P&L conventions
 
 - **Sign**: `quantity > 0` = long base currency / receive; P&L is positive when the mark moves in favour of the position. Long USDXXX profits when the pair rises; long XXXUSD profits when the pair rises.
-- **Display notional**: USD notional per pair, sign = direction of the base currency (the xlsx convention). Storage keeps exact leg amounts.
-- **Source of truth**: fills (`trades` + `trade_legs`). Marks come from Bloomberg (`BFXFORWARD` / `BDH` / `BDP`). The BNP daily file, its parser and its `BNP_BVAL` marks are removed entirely (2026-09-17, `docs/bnp-excel-removal.md`) — a `BNP_BVAL` row surviving in an old database is reconciliation-only wherever it exists and never feeds P&L, but nothing writes one any more.
+- **Display notional**: USD notional per pair, sign = direction of the base currency. Storage keeps exact leg amounts.
+- **Source of truth**: fills (`trades` + `trade_legs`). Marks come from Bloomberg (`BFXFORWARD` / `BDH` / `BDP`) and from the app's own pricers on Bloomberg inputs.
 - **Mark date**: each FX leg is marked with the `FWD_OUTRIGHT` for its own `settle_date` (not a single T+5 date).
 - **USD conversion**: quote-currency P&L converts to USD at **spot** of the same `as_of_date`, never at the forward outright.
 - **Per-trade LTD P&L (USD)**, with `Q` = base amount, `f` = fill, `m` = outright mark for the leg's value date, `S` = spot (quote→USD):
-  - FX, any pair: `PnL_quote = Q × (m − f)`; `PnL_USD = PnL_quote × S` (`S = 1` when quote is USD).
+  - FX, any pair: `PnL_quote = Q × (m − f)`; `PnL_USD = PnL_quote × S` (`S = 1` when quote is USD). Crosses: `S` = USD per quote unit from that currency's own USD pair; never invent a USD leg.
   - Futures: `PnL_USD = contracts × multiplier × (m − f)`.
   - IRS: `PnL_USD = PV_USD(t) + CASHFLOW_USD(t)`, both official marks from `engine/rates` at the swap's maturity date. A swap dealt at its fixed rate with no upfront is worth zero at the fill by construction, so this is the mark-minus-fill analogue of the FX formula; `CASHFLOW_USD` is the net of coupons already settled on or before `t` (0 for a forward-starting swap), which keeps LTD continuous across a coupon payment and at maturity, when PV goes to 0. Both are computed in the swap's currency and converted at that day's SPOT by the pricer. Realised at maturity by `engine/pnl/ledger.realise_settled` at the last official PV + cashflows on or before maturity.
   - FX option: `PnL_USD = quantity × (PREMIUM_mark − premium_fill) × S`, premium in base-ccy fraction, `S` = USD per base unit at spot; realised at expiry at the last official PREMIUM on or before expiry (an expiry-day intrinsic mark would be more exact, not written yet).
-- **Daily P&L** = `LTD(t) − LTD(t−1bd)`. **Trading P&L** = LTD of trades with `trade_date = t`. **5d P&L** = `LTD(t) − LTD(t−5bd)`. **MTD** = `LTD(t) − LTD(last bd of previous month)`. **YTD** = `LTD(t) − LTD(last bd of previous year)`. All from our own recomputed daily series; `t−n bd` uses the trading calendar.
-- **Mark time**: official close is 17:00 `America/New_York` (user decision 2026-09-15; Bloomberg's daily FX close, so historical `PX_LAST` spot and the `snapped_at` stamp agree). The retired xlsx workbook hard-coded `"PricingTime","15:00:00-04:00"`; that 15:00 convention was a Reconciliation-tab input only and has no live successor now that both are removed (2026-09-17). The app resolves the offset from the zone per date; intraday = live. Every mark row carries `snapped_at` with the resolved offset for that row.
-- **Net USD** (FX only) = the USD position: Σ over pairs of sign × USD notional, sign +1 for USDXXX pairs (long base = long USD), −1 otherwise. The header shows this sign with the word "short USD" / "long USD" underneath. The engine's `portfolio_totals` returns the opposite quantity, the net non-USD delta (+ = long foreign), which the Delta tab labels as such and combines with futures delta; the header negates it. **Gross USD** = Σ over pairs of |net USD notional per pair|. Gold and equity futures are reported separately (see open questions).
-- **Must not replicate** (from any legacy spreadsheet-style shortcut; the xlsx workbook itself and its literal arithmetic are gone as of 2026-09-17, but the principles below still guard the live P&L path):
+- **Settled trades are frozen.** A trade whose last leg has settled takes its row from `realised_pnl` and is never marked again; settlement does not move LTD.
+- **Daily P&L** = `LTD(t) − LTD(t−1bd)`. **Trading P&L** = LTD of trades with `trade_date = t`. **5d P&L** = `LTD(t) − LTD(t−5bd)`. **MTD** = `LTD(t) − LTD(last bd of previous month)`. **YTD** = `LTD(t) − LTD(last bd of previous year)`. All from our own recomputed daily series, never summed day by day; `t−n bd` uses the trading calendar (`config/holidays.txt`). Past closes are valued at historical Bloomberg marks written by the backfill; the live pull only writes today's.
+- **Mark time**: official close is 17:00 `America/New_York` (user decision 2026-09-15; Bloomberg's daily FX close, so historical `PX_LAST` spot and the `snapped_at` stamp agree). The app resolves the offset from the zone per date; intraday = live. Every mark row carries `snapped_at` with the resolved offset for that row.
+- **Net USD** (FX only) = the USD position: Σ over pairs of sign × USD notional, sign +1 for USDXXX pairs (long base = long USD), −1 otherwise. The header shows this sign with the word "short USD" / "long USD" underneath. The engine's `portfolio_totals` returns the opposite quantity, the net non-USD delta (+ = long foreign); every view that displays Net USD (the header, the Ladder's headline and risk table) negates it exactly once, itself. **Gross USD** = Σ over pairs of |net USD notional per pair|. Gold and equity futures are reported separately (see open questions).
+- **Must not replicate** (spreadsheet shortcuts the old Excel calculator used; they guard the live P&L path):
   1. Futures P&L computed as `Q × (m − f) / m`: understates by `f/m`. Always `contracts × multiplier × (m − f)`.
   2. Converting quote-currency P&L at the forward outright instead of spot (≈ 2.3 % error on TRY; also BRL, MXN, IDR).
   3. Marking every pair at one shared date regardless of each leg's own value date, and marking matured trades forever instead of freezing settled trades.
@@ -236,25 +310,35 @@ Per-pair delta (the sheet's "Position") is the same union grouped by `t.instrume
 
 ## Repository layout and ownership
 
-Every directory has exactly one owning agent. No agent edits outside its own directory.
+Each directory has one owning agent. In the default lean mode the main session works across directories as the task needs; when agents or parallel sessions are in use, each stays inside its own directories (see "Working mode").
 
 ```
-data/ingest/     blotter CSV/xlsx parser, SQLite schema, swap rule    -> data-ingest
-data/bloomberg/  blpapi pulls, marks table, marks_official view       -> bbg-data
-engine/pnl/      LTD, daily, 5d, MTD, YTD per CLAUDE.md conventions   -> pnl-engine
-engine/ladder/   cash ladder and delta-per-currency query             -> cash-ladder
-engine/rates/    OIS curve bootstrap + swap valuation (QuantLib)      -> rates-pricer
-engine/options/  FX/equity/commodity option pricing, vendored          -> options-pricer
-                 options_calc (QuantLib); phase status in
-                 engine/options/__init__.py's scope ledger
-ui/              Dash app, one module per tab                         -> ui-shell
-tests/           pytest, one file per module, owned by the module's agent
-docs/            contract and open questions, owned by housekeeper
+data/ingest/      blotter parser, upload, manual entry, SQLite schema,   -> data-ingest
+                  swap package rule
+data/bloomberg/   blpapi pulls (live, backfill), marks, inventory,       -> bbg-data
+                  manual marks, diagnostics
+engine/pnl/       value_book, realised ledger, LTD / daily / 5d / MTD /  -> pnl-engine
+                  YTD, stress
+engine/ladder/    cash ladder, settled cash, USD equivalents, delta      -> cash-ladder
+                  per currency and per pair
+engine/rates/     OIS curve bootstrap + swap valuation (QuantLib)        -> rates-pricer
+engine/options/   FX / equity / commodity option pricing, vendored       -> options-pricer
+                  options_calc (QuantLib); phase status in
+                  engine/options/__init__.py's scope ledger
+engine/rates_vol/ swaptions, caps / floors, SABR, Bermudan (vendored     -> rates-exotics
+                  options_calc.rates)
+ui/               Dash app, one module per tab or sub-tab                -> ui-shell
+tests/            pytest, one file per module, owned by the module's agent
+config/           holidays.txt (trading calendar), stress.yaml
+tools/            Bloomberg diagnostics and terminal probe, setup script
+docs/             contract, build plan and open questions, owned by housekeeper
 ```
 
-```
-engine/rates_vol/ swaptions, caps/floors, SABR, Bermudan (vendored        -> rates-exotics
-                 options_calc.rates; landed 2026-09-17, options merge Phase 6)
-```
+`engine/rates_vol/` writes `PV_USD` / `DV01_USD` under `QL_PRICER` and `VEGA` / `GAMMA` / `THETA` under `QL_OPTIONS_PRICER` (both already official for those mark types). No trade source carries swaptions or caps yet (`docs/open-questions.md` item 61).
 
-`engine/rates_vol/` writes `PV_USD`/`DV01_USD` under `QL_PRICER` and `VEGA`/`GAMMA`/`THETA` under `QL_OPTIONS_PRICER` (both already official for those mark_types); its option attributes, manual vols and SABR/Hull-White parameters live in its own defensively-created tables (`instrument_rate_options`, `rate_vols`, `rate_model_params`). No trade source carries swaptions or caps yet — see `docs/open-questions.md` item 61.
+## Guard rails learned the hard way
+
+- SQLite stays in `journal_mode=delete`. Do not switch to WAL as a quick fix: in WAL the main file's mtime stops changing on write, which silently breaks every mtime-keyed cache (`ui/revision.py`, the header's LTD cache, the Blotter's pricing cache) and serves stale P&L.
+- Writers wait up to 60 s for the lock (`schema.BUSY_TIMEOUT_SECONDS`): an upload holds it for its whole parse and load, and a pull landing meanwhile must not be recorded as a Bloomberg failure.
+- Diagnostics pasted by the user come from the Bloomberg PC. The dev `risk.db` has no marks, so "fast" or "blank" locally says nothing about the live app; trace reasons through the code.
+- The "Last marks pull" diagnostic fails when the last pull requested 0 marks but the book needs some (the feed's first pull runs before any blotter is uploaded).

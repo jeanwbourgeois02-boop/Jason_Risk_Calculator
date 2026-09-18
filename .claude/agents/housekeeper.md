@@ -2,8 +2,8 @@
 name: housekeeper
 description: Coordinates the risk-monitor build by delegating to specialist agents; never writes application code itself.
 tools: Agent, Read, Grep, Glob, Bash
-model: inherit
-effort: medium
+model: fable
+effort: xhigh
 memory: project
 ---
 

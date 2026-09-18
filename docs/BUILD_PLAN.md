@@ -1,18 +1,18 @@
-# Build plan: one valuation, one line, four tabs
+# Build plan: one valuation, one line, three tabs
 
 Authorised by the user on 2026-09-15. Supersedes the 2026-09-14 "literal workbook
-arithmetic" correction as the app's headline calculation. The workbook copy was kept,
-unchanged, as a reconciliation view only, from 2026-09-15 until the Reconciliation tab
-was deleted 2026-09-16 (dead code from then on) and then the underlying BNP file and
-Excel workbook themselves were ordered removed entirely on 2026-09-17 (user decision:
-"no bnp fall back - that excel and everything linked to it need to go") -- see
-`docs/bnp-excel-removal.md` for what that removal actually reached and what is still
-blocked by live cross-module dependencies. Every "reconciliation view" reference below
-is historical: describing what Task A/B/C were told at the time, not current app
-behaviour.
+arithmetic" correction as the app's headline calculation. The plan was written for four
+tabs; the fourth (Reconciliation, the workbook copy kept as a reconciliation view) was
+deleted 2026-09-16, and the BNP file and Excel workbook behind it were removed from the
+app entirely on 2026-09-17 (user decision: "no bnp fall back - that excel and everything
+linked to it need to go", completed the same day -- see `docs/bnp-excel-removal.md`).
+Every "reconciliation view" reference below is historical: describing what Task A/B/C
+were told at the time, not current app behaviour. Where this plan and `CLAUDE.md`
+disagree, `CLAUDE.md` is the current rule.
 
-Scope now: FX spot, forwards, swaps, futures, cash. IRS and options come later and
-must fit the same structure without changing it.
+Scope: FX spot, forwards, swaps and futures were built first; IRS (`engine/rates`) and
+FX options (`engine/options`) have since landed in the same structure without changing
+it (per-trade formulas in `CLAUDE.md` "P&L conventions").
 
 ## 1. The model
 
@@ -44,9 +44,13 @@ pnl_local, pnl_usd, pnl_spot_usd, pnl_carry_usd, reason`.
 Rules, all products:
 
 - A missing mark gives `pnl_usd = NaN` and a non-empty `reason`. Never zero, never a
-  substitute. Any NaN row makes every total that includes it Unavailable.
-- Marks come from `marks_official` unless `marks_source` is given. `BBG_INTERP` and
-  `BNP_BVAL` are never official.
+  substitute. Any NaN row makes every engine total that includes it (`ledger.ltd`,
+  `period_pnl`) Unavailable. The header (2026-09-17) instead sums the priced trades and
+  captions the figure "excludes N of M trades unpriced"; see `CLAUDE.md` "Tabs as views".
+- Marks come from `marks_official` unless `marks_source` is given. `BBG_INTERP` is
+  official only as the `FWD_OUTRIGHT` fallback for a date Bloomberg does not quote
+  directly (user decision 2026-09-18, `CLAUDE.md` "Official marks"); no other source is
+  ever substituted.
 - `status = SETTLED` when the trade's last leg settles before `as_of`; its row comes
   from `realised_pnl` and is never recomputed.
 - Trades with `trade_date > as_of` are excluded.
@@ -92,8 +96,10 @@ Display groups both under `package_id`.
 `FUTURE_PX` at the contract's expiry `settle_date`. Realised at close-out fill or
 final settlement on expiry.
 
-**Cash** balances have no fill and no row in the blotter. They appear in the ladder
-only.
+**Cash**: the app holds no bank balance anywhere (user decision 2026-09-17). A blotter
+CURRENCY row naming two currencies is a spot fill and is valued as an `FX_SPOT` trade
+like any forward; cash from tickets whose value date has passed appears in the
+ladder's Settled cash row (2026-09-18), read from the legs and `realised_pnl`.
 
 ## 3. Close series and periods (layer 2)
 
@@ -153,11 +159,11 @@ where it sits.
 
 | Tab | Question | Content |
 |---|---|---|
-| Header (all tabs) | How am I doing? | LTD, Daily, 5d, MTD, YTD, trading; as-of; mark time and feed status; LTD line chart, collapsible |
-| Ladder | What am I long/short and when is it cash? | date x currency grid incl. USD and cash balances at as_of; local delta, spot, USD delta rows; Net/Gross; futures delta line; stress block; cell click -> trades |
-| Blotter | Where did the P&L come from? | `value_book(as_of)` rows; filters open/settled, product, pair, strategy, theme, date range; group-by with LTD/Daily/MTD/YTD per group; spot/carry columns; row click -> legs and marks used |
-| Market data | Can I trust the numbers? | every mark needed today with value, source, time, status (official/interp/manual/missing); pull button; close completeness per past date; manual entry |
-| ~~Reconciliation~~ | *(tab removed 2026-09-16; its BNP-file and Excel-workbook inputs removed from the app entirely 2026-09-17, see `docs/bnp-excel-removal.md` -- some of the underlying arithmetic (`engine/pnl/pnl.py`, `engine/pnl/reconcile.py`) is still physically present because live modules outside this task's lane still import from it, but it is unreachable from any UI; Options is a grouped view inside Blotter since 2026-09-17)* | |
+| Header (all tabs) | How am I doing? | LTD, Daily, Previous day, 5d, MTD, YTD, Trading; trade count; Net/Gross USD delta; LTD line chart, collapsible. Figures sum priced trades with an "excludes N of M" caption; a period whose reference close is mostly unpriced is n/a with the reason |
+| Ladder | What am I long/short and when is it cash? | date x currency grid incl. USD, leg by leg, no bank balance; Settled cash row on top (2026-09-18); local delta, spot, USD delta rows; USD equivalent at each date's outright; Net/Gross; futures delta line; stress block; view controls and CSV downloads |
+| Blotter | Where did the P&L come from? | `value_book(as_of)` rows; sub-tabs Total book, FX, Futures, Rates, Options (grouped MARS-style summary, not a top-level tab), Bundles, Manual entry; filters, group-by with LTD/Daily/MTD/YTD per group; spot/carry columns; row click -> legs and marks used |
+| Market data | Can I trust the numbers? | by currency pair: spot and forward curve with source, time and official status; pull button and feed status; close completeness per past date; manual mark entry; Bloomberg connection check |
+| ~~Reconciliation~~ | *(tab removed 2026-09-16; its BNP-file and Excel-workbook inputs and all of their arithmetic (`engine/pnl/pnl.py`, `engine/pnl/reconcile.py`) deleted 2026-09-17, see `docs/bnp-excel-removal.md`)* | |
 
 Removed from the Cash ladder tab: workbook mark-to-market panel, ledger cards, Exposure
 P&L card, workbook FX rates grid (moves to Market data as manual entry).
