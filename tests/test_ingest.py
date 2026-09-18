@@ -268,13 +268,16 @@ def test_purge_retired_sources_on_a_scratch_db_with_legacy_bnp_data(tmp_path):
 
     counts = schema.purge_retired_sources(conn)
     assert counts["trades"] == 1 and counts["trade_legs"] == 2 and counts["realised_pnl"] == 1
-    assert counts["marks"] == 3 and counts["positions_table_dropped"] == 1
+    # BNP_BVAL + WORKBOOK_REFERENCE only: the BBG_INTERP forward is the official FWD_OUTRIGHT
+    # fallback since 2026-09-18 and must survive every startup purge
+    assert counts["marks"] == 2 and counts["positions_table_dropped"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE source='BBG_INTERP'").fetchone()[0] == 1
 
     assert conn.execute("SELECT trade_id FROM trades").fetchall() == [("xlsx-1",)]
     assert conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM realised_pnl").fetchone()[0] == 0
     remaining_marks = {r[0] for r in conn.execute("SELECT source FROM marks")}
-    assert remaining_marks == {"BBG_BFXFORWARD"}
+    assert remaining_marks == {"BBG_BFXFORWARD", "BBG_INTERP"}   # the interpolated forward survives
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "positions" not in tables
 

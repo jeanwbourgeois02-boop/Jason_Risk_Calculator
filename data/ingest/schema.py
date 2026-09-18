@@ -436,7 +436,10 @@ def purge_retired_sources(conn: sqlite3.Connection) -> Dict[str, int]:
         counts["realised_pnl"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         cur = conn.execute("DELETE FROM trades WHERE source='BNP'")
         counts["trades"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-        cur = conn.execute("DELETE FROM marks WHERE source IN ('BNP_BVAL','BBG_INTERP','WORKBOOK_REFERENCE')")
+        # BBG_INTERP was purged here until 2026-09-18; it is now the live feed's official
+        # FWD_OUTRIGHT fallback (OFFICIAL_FALLBACK_SOURCE above), so deleting it at startup
+        # would wipe every broken-date forward and the backfilled history on each launch.
+        cur = conn.execute("DELETE FROM marks WHERE source IN ('BNP_BVAL','WORKBOOK_REFERENCE')")
         counts["marks"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         had_positions = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='positions'"
