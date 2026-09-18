@@ -401,8 +401,9 @@ def _run_bloomberg_diagnostics_placeholder() -> list:
         "name": "marks_official coverage",
         "status": "warning",
         "message": "Detailed checks of official vs reconciliation-only marks sources "
-                   "(BNP_BVAL, BBG_INTERP) are not available yet; this placeholder does "
-                   "not enumerate them.",
+                   "(BNP_BVAL, MANUAL for FX marks) are not available yet; this placeholder does "
+                   "not enumerate them. Interpolated broken-date forwards (BBG_INTERP) are "
+                   "official for FWD_OUTRIGHT since 2026-09-18.",
     })
     return checks
 
@@ -583,7 +584,7 @@ def curve_chart(df: pd.DataFrame, spot: Optional[dict], pair: str, as_of: str):
     other_y = [v for v, o in zip(df["outright"], official_mask) if not o]
     if other_x:
         fig.add_trace(go.Scatter(x=other_x, y=other_y, mode="markers",
-                                 marker_symbol="diamond", name="interp/manual/BNP"))
+                                 marker_symbol="diamond", name="manual/BNP (not official)"))
     used_dates = list(df.loc[df["used_by_book"] != "", "settle_date"])
     fig.update_layout(
         title=f"{pair} forward curve, {as_of}",
