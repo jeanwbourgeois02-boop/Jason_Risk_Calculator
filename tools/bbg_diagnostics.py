@@ -220,8 +220,11 @@ def check_fx_and_future_coverage(conn: sqlite3.Connection, as_of: str) -> List[C
         elif mark_type == "FWD_OUTRIGHT" and not interp.empty:
             examples = ", ".join(f"{r.instrument_id} {r.settle_date}" for r in interp.itertuples())
             out.append(_row(f"{label} coverage", "warning",
-                             f"{len(interp)} of {needed} forward outrights are only available via BBG_INTERP "
-                             f"fallback interpolation, not the direct broken-date quote (e.g. {examples})."))
+                             f"{len(interp)} of {needed} forward outrights fall on broken dates between Bloomberg's "
+                             f"standard tenors and are interpolated (BBG_INTERP, never official) between the pair's "
+                             f"own FWD_CURVE points (e.g. {examples}). The API exposes no direct broken-date "
+                             "outright (docs/open-questions.md item 27); the standard-tenor points themselves are "
+                             "stored as official FWD_OUTRIGHT marks at their own dates."))
         else:
             out.append(_row(f"{label} coverage", "pass",
                              f"All {needed} required {mark_type} marks are present as official for {as_of}."))
@@ -567,9 +570,11 @@ def check_last_pull(db_path: Optional[Path], as_of: Optional[str] = None) -> Lis
         if stale_reason:
             return [_row("Last marks pull", "fail",
                          f"Last pull at {status.get('time', 'an unknown time')} looks stale: {stale_reason}")]
+        curve_points = status.get("curve_points_written") or 0
+        extra = f" plus {curve_points} standard-tenor forward curve points" if curve_points else ""
         return [_row("Last marks pull", "pass",
                      f"Last pull at {status.get('time', 'an unknown time')} wrote "
-                     f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks.")]
+                     f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks{extra}.")]
     if status.get("connected"):
         # Item 3a (2026-09-17): "2 of 27 failed" alone forces the user to open the Market
         # data tab's own table to find out which -- list the failed instrument + detail
