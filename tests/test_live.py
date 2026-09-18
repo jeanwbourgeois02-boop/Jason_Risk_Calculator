@@ -155,10 +155,12 @@ def test_needed_marks_stays_in_step_with_build_requests_for_cross_legs(tmp_path)
     assert req_keys == needed_keys
 
 
-def test_pull_once_warns_when_cross_leg_instrument_missing_and_never_writes_it(tmp_path, monkeypatch):
-    """The gap must be visible (status["warnings"], naming the pair) rather than the mark
-    silently never appearing -- and it truly is never written, even if Bloomberg happily
-    returns a price for the conventional ticker."""
+def test_pull_once_creates_missing_cross_leg_pair_instruments_and_writes_their_spot(tmp_path, monkeypatch):
+    """2026-09-18: the USD-conversion pairs a cross needs (EURUSD / USDSEK for EURSEK) used
+    to be requested but could never be written when no instrument row existed -- the gap
+    was only reported as a warning and the ladder's USD conversion stayed NaN.
+    build_requests now creates the plain FX pair rows first, so the SPOT Bloomberg
+    returns is persisted."""
     p, conn = _cross_db(tmp_path)
     from data.bloomberg import pull_marks as pm
     from datetime import date as _date
@@ -172,13 +174,14 @@ def test_pull_once_warns_when_cross_leg_instrument_missing_and_never_writes_it(t
     monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
     status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=_date(2026, 8, 17))
     assert status["connected"] is True
-    joined = " ".join(status["warnings"])
-    assert "EURUSD" in joined and "USDSEK" in joined
-    # Bloomberg "returned" a price for both synthetic tickers, but neither has an
-    # instrument row, so neither is ever persisted.
+    assert not [w for w in status["warnings"] if "instrument is on file" in w]
     written_ids = {r[0] for r in conn.execute("SELECT DISTINCT instrument_id FROM marks")}
-    assert "EURUSD" not in written_ids and "USDSEK" not in written_ids
-    assert "EURSEK" in written_ids       # the actually-traded pair's own SPOT still writes fine
+    assert {"EURSEK", "EURUSD", "USDSEK"} <= written_ids
+    rows = {r[0]: r[1:] for r in conn.execute(
+        "SELECT instrument_id, asset_class, base_ccy, quote_ccy, bbg_ticker FROM instruments "
+        "WHERE instrument_id IN ('EURUSD', 'USDSEK')")}
+    assert rows["EURUSD"] == ("FX", "EUR", "USD", "EURUSD Curncy")
+    assert rows["USDSEK"] == ("FX", "USD", "SEK", "USDSEK Curncy")
 
 
 # --------------------------------------------------------------------------- FWD_OUTRIGHT settling today (2026-09-17)
@@ -325,8 +328,12 @@ def test_pull_once_with_fake_session_writes_marks_and_itemised_status(tmp_path, 
     aud_exact = by[("AUDUSD", "FWD_OUTRIGHT", "2026-09-16")]
     assert aud_exact["status"] == "OK" and aud_exact["value"] == 0.6620 and aud_exact["source"] == "BBG_BFXFORWARD"
     assert status["failed"] == 2 and status["written"] == 2
+    # plus Bloomberg's own AUDUSD tenor point at 2026-10-16, official at its own date (2026-09-18),
+    # reported separately so "written N of M requested" stays exact
+    assert status["curve_points_written"] == 1
     marks = conn.execute("SELECT instrument_id, mark_type, value, source FROM marks ORDER BY mark_type, settle_date").fetchall()
-    assert ("AUDUSD", "SPOT", 0.6612, "BBG_BFXFORWARD") in marks and len(marks) == 2
+    assert ("AUDUSD", "SPOT", 0.6612, "BBG_BFXFORWARD") in marks and len(marks) == 3
+    assert ("AUDUSD", "FWD_OUTRIGHT", 0.6630, "BBG_BFXFORWARD") in marks
     # the ladder now sees the live spot, and USDJPY is simply missing (never invented)
     rates = live.rates_from_marks(conn)
     assert rates["AUD"]["rate"] == 0.6612 and "JPY" not in rates
@@ -591,24 +598,32 @@ def test_options_step_leaves_other_skip_reasons_and_missing_diagnostics_unchange
     assert out2["skipped"] == [{"trade_id": "o1", "reason": "no vol"}]
 
 
-def test_pull_once_early_return_branch_still_pulls_curves_and_vol_for_options(tmp_path):
+def test_pull_once_option_only_book_requests_its_pair_and_pulls_curves_and_vol(tmp_path, monkeypatch):
     """The exact Bloomberg-PC scenario (2026-09-17): an FX_OPTION-only book (no direct FX
-    forward/spot trade, no IRS) takes pull_once's early-return branch
-    (build_requests() == []), but must still pull OIS curves and vol quotes for the
-    option's pair currencies rather than skip them along with the (correctly) skipped FX
-    request."""
+    forward/spot trade, no IRS) must still pull OIS curves and vol quotes for the option's
+    pair currencies. Since 2026-09-18 such a book no longer takes the early-return branch
+    at all: build_requests asks Bloomberg for the option pair's own SPOT and a forward at
+    the option's expiry (engine/options needs both), so this runs the main path."""
     from data.bloomberg.rates_marketdata import RatesFileSource
     from data.bloomberg.vol_marketdata import VolFileSource
+    from data.bloomberg import pull_marks as pm, fwd_curve
     from pathlib import Path
     from datetime import date as _date
 
     p, conn = _option_db(tmp_path, base="EUR", quote="USD", option_id="EURUSD091826C-1", pair_ticker="EURUSD Curncy")
+    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: {"EURUSD Curncy": {"PX_LAST": 1.17}})
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
     rates_fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "ois_snapshot_v1.json"
     vol_fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "fx_vol_snapshot_v1.json"
     status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()),
                             today=_date(2026, 8, 17), rates_source=RatesFileSource(rates_fixture),
                             vol_source=VolFileSource(vol_fixture))
-    assert status["connected"] is True and status["reason"] == "no open FX legs or futures to price"
+    assert status["connected"] is True
+    keys = {(i["instrument_id"], i["mark_type"], i["settle_date"]) for i in status["items"]}
+    assert ("EURUSD", "SPOT", "2026-08-17") in keys and ("EURUSD", "FWD_OUTRIGHT", "2026-09-18") in keys
+    assert conn.execute("SELECT value FROM marks_official WHERE instrument_id='EURUSD' AND mark_type='SPOT'"
+                        ).fetchone()[0] == 1.17
     assert status["rates"]["currencies"]["EUR"]["quotes"] > 0
     assert status["vol"]["pairs"].get("EURUSD", 0) > 0
     assert conn.execute("SELECT COUNT(*) FROM curve_quotes WHERE ccy='EUR'").fetchone()[0] > 0
@@ -753,3 +768,147 @@ def test_stop_also_wakes_a_waiting_loop(tmp_path, monkeypatch):
     feed.stop()
     feed._thread.join(timeout=5)
     assert not feed._thread.is_alive()
+
+
+# --------------------------------------------------------------------------- 2026-09-18 audit fixes
+def test_build_requests_includes_option_pair_spot_and_expiry_forward(tmp_path):
+    """An open FX_OPTION needs its PAIR's SPOT (engine/options/inputs.get_spot) and a
+    FWD_OUTRIGHT at its own expiry (covered-interest-parity rate for a currency with no
+    OIS curve); until 2026-09-18 neither was ever requested for an option-only pair, and a
+    pair with no `instruments` row could not even have the mark written."""
+    p, conn = _db(tmp_path)
+    conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)", [
+        ("USDJPY111926P-1", "FX_OPTION", "USD", "JPY", 1, 0, "USDJPY111926P-1", "2026-11-19"),
+        ("USDMXN120126C-2", "FX_OPTION", "USD", "MXN", 1, 0, "USDMXN120126C-2", "2026-12-01"),
+        ("USDBRL120126C-3", "FX_OPTION", "USD", "BRL", 1, 0, "USDBRL120126C-3", "2026-12-01"),
+    ])
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        ("o1", "XLSX", "USDJPY111926P-1", "FX_OPTION", "o1", "2026-08-19", 1e6, 0.1425, "acc", "cp", "", "t", "d", ""),
+        ("o2", "XLSX", "USDMXN120126C-2", "FX_OPTION", "o2", "2026-08-19", 1e6, 0.01, "acc", "cp", "", "t", "d", ""),
+        ("o3", "XLSX", "USDBRL120126C-3", "FX_OPTION", "o3", "2026-08-19", 1e6, 0.01, "acc", "cp", "", "t", "d", ""),
+    ])
+    conn.commit()
+    # 2026-10-01: every FX forward leg in _db has settled, so only the options drive requests
+    keys = {(r.instrument_id, r.mark_type, r.settle_date) for r in live.build_requests(conn, "2026-10-01")}
+    assert ("USDJPY", "SPOT", "2026-10-01") in keys and ("USDJPY", "FWD_OUTRIGHT", "2026-11-19") in keys
+    assert ("USDMXN", "SPOT", "2026-10-01") in keys and ("USDMXN", "FWD_OUTRIGHT", "2026-12-01") in keys
+    assert ("USDBRL", "SPOT", "2026-10-01") in keys
+    # the USDMXN / USDBRL pair rows did not exist: created as plain FX instruments, NDF flag per currency
+    rows = {r[0]: r for r in conn.execute(
+        "SELECT instrument_id, asset_class, base_ccy, quote_ccy, is_ndf, bbg_ticker FROM instruments "
+        "WHERE instrument_id IN ('USDMXN', 'USDBRL')")}
+    assert rows["USDMXN"][1:] == ("FX", "USD", "MXN", 0, "USDMXN Curncy")
+    assert rows["USDBRL"][4] == 1
+    # an expired option drives nothing
+    later = {r.instrument_id for r in live.build_requests(conn, "2026-11-20")}
+    assert "USDJPY" not in later and {"USDMXN", "USDBRL"} <= later
+
+
+def test_pull_once_stops_the_session_it_opened(tmp_path, monkeypatch):
+    """One blpapi session per 2-minute cycle (and per Pull-now click) was never stopped
+    before 2026-09-18 -- cleanup was left to garbage collection."""
+    p, conn = _db(tmp_path)
+    from data.bloomberg import pull_marks as pm, fwd_curve
+    from datetime import date as _date
+    stopped = []
+
+    class _Session:
+        def stop(self):
+            stopped.append(True)
+
+    monkeypatch.setattr(live, "availability", lambda host, port: (True, ""))
+    monkeypatch.setattr(pm, "open_session", lambda host, port, diag=None: (_Session(), object()))
+    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: {})
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
+    status = live.pull_once(p, "2026-08-17", today=_date(2026, 8, 20))
+    assert status["connected"] is True
+    assert stopped == [True]
+
+
+def test_pull_once_writes_fwd_curve_tenor_points_as_official_forwards(tmp_path, monkeypatch):
+    """Bloomberg's own FWD_CURVE points are quoted outrights, so they are written as
+    official BBG_BFXFORWARD FWD_OUTRIGHT rows at their own tenor dates (2026-09-18) --
+    what engine/options' implied-rate path needs for a currency with no OIS curve. A
+    leg's own broken date is still interpolated (BBG_INTERP, not official): unchanged."""
+    p, conn = _db(tmp_path)
+    from data.bloomberg import pull_marks as pm, fwd_curve
+    from datetime import date as _date
+
+    def fake_fetch_reference(session, service, tickers, fields, overrides=None, diag=None, tag=None):
+        return {"AUDUSD Curncy": {"PX_LAST": 0.6612}, "USDJPY Curncy": {"PX_LAST": 150.0}}
+
+    def fake_curves(blpapi, session, service, tickers, timeout_ms=15000):
+        return {"AUDUSD Curncy": {"points": [(_date(2026, 8, 24), 0.6615), (_date(2026, 9, 21), 0.6620),
+                                             (_date(2026, 10, 20), 0.6630)], "columns": [], "error": ""},
+                "USDJPY Curncy": {"points": [(_date(2026, 8, 24), 149.9), (_date(2026, 9, 18), 149.5),
+                                             (_date(2026, 10, 20), 149.0)], "columns": [], "error": ""}}
+
+    monkeypatch.setattr(pm, "fetch_reference", fake_fetch_reference)
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", fake_curves)
+    status = live.pull_once(p, "2026-08-20", session_factory=lambda: (object(), object()), today=_date(2026, 8, 20))
+    assert status["connected"] is True
+    # requested: 2 SPOT + AUDUSD fwd 2026-09-16 (INTERP) + USDJPY fwd 2026-09-18 (EXACT); all written
+    assert status["requested"] == 4 and status["written"] == 4 and status["failed"] == 0
+    # 3 AUD + 3 JPY tenor points, minus the JPY 2026-09-18 point that was itself a requested mark
+    assert status["curve_points_written"] == 5
+    official = {(r[0], r[1]): r[2] for r in conn.execute(
+        "SELECT instrument_id, settle_date, value FROM marks_official "
+        "WHERE mark_type='FWD_OUTRIGHT' AND as_of_date='2026-08-20'")}
+    assert official[("AUDUSD", "2026-10-20")] == 0.6630 and official[("USDJPY", "2026-09-18")] == 149.5
+    assert ("AUDUSD", "2026-09-16") not in official
+    assert conn.execute("SELECT source FROM marks WHERE instrument_id='AUDUSD' AND settle_date='2026-09-16'"
+                        ).fetchone()[0] == "BBG_INTERP"
+
+
+def test_write_status_is_atomic_and_patch_status_merges_under_the_lock(tmp_path):
+    p = tmp_path / "risk.db"
+    live.write_status(p, {"connected": True, "written": 3, "items": []})
+    merged = live.patch_status(p, "backfill", {"running": True, "remaining": 4})
+    assert merged["backfill"] == {"running": True, "remaining": 4} and merged["written"] == 3
+    live.patch_status(p, "backfill", {"remaining": 3})
+    on_disk = live.read_status(p)
+    assert on_disk["backfill"] == {"running": True, "remaining": 3} and on_disk["connected"] is True
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_option_pair_forward_curve_gives_the_implied_rate_fallback_its_official_points(tmp_path, monkeypatch):
+    """The Bloomberg-PC failure of 2026-09-17: three EURSEK options skipped "no curve/rate
+    SEK" although engine/options/rates.py can imply SEK from EUR's OIS curve and the EURSEK
+    forward -- every EURSEK forward on file was a broken date (BBG_INTERP only), so the
+    fallback had no official point to read. The pull must fetch the FWD_CURVE for an open
+    option's pair even with no FX leg in it, store its tenors as official, and the option's
+    expiry (between two tenors) must then resolve an IMPLIED_FORWARD SEK rate end to end."""
+    from data.bloomberg.rates_marketdata import RatesFileSource
+    from data.bloomberg import pull_marks as pm, fwd_curve
+    from engine.options.rates import resolve_fx_rates, IMPLIED_FORWARD, OIS_CURVE
+    from pathlib import Path
+    from datetime import date as _date
+
+    p, conn = _option_db(tmp_path, option_id="EURSEK092326C-1", expiry="2026-09-23")   # EUR/SEK, no pair row
+    fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "ois_snapshot_v1.json"
+    seen = {}
+
+    def fake_curves(blpapi, session, service, tickers, timeout_ms=15000):
+        seen["tickers"] = list(tickers)
+        return {"EURSEK Curncy": {"points": [(_date(2026, 9, 21), 11.05), (_date(2026, 9, 28), 11.06)],
+                                  "columns": [], "error": ""}}
+
+    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: {"EURSEK Curncy": {"PX_LAST": 11.04}})
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", fake_curves)
+    today = _date(2026, 8, 17)   # the OIS fixture's own as_of
+    status = live.pull_once(p, today.isoformat(), session_factory=lambda: (object(), object()), today=today,
+                            rates_source=RatesFileSource(fixture))
+    assert status["connected"] is True
+    assert "EURSEK Curncy" in seen["tickers"]
+    official_dates = {r[0] for r in conn.execute(
+        "SELECT settle_date FROM marks_official WHERE as_of_date=? AND instrument_id='EURSEK' "
+        "AND mark_type='FWD_OUTRIGHT'", (today.isoformat(),))}
+    assert {"2026-09-21", "2026-09-28"} <= official_dates
+    assert "2026-09-23" not in official_dates                     # the broken expiry date itself: BBG_INTERP only
+    rates, reason = resolve_fx_rates(conn, today.isoformat(), "EURSEK", "2026-09-23")
+    assert reason == "" and rates is not None
+    assert rates.foreign_rate_source.source_kind == OIS_CURVE          # EUR: the real ESTR curve
+    assert rates.domestic_rate_source.source_kind == IMPLIED_FORWARD   # SEK: implied, no manual entry needed

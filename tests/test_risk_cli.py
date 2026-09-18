@@ -67,6 +67,8 @@ def test_start_reexecs_in_venv_when_outside(monkeypatch):
     monkeypatch.setattr(risk, "in_venv", lambda: False)
     monkeypatch.setattr(risk, "sync_with_github", lambda: (False, "code is current with GitHub (test)"))
     monkeypatch.setattr(risk, "venv_imports_ok", lambda: True)
+    monkeypatch.setattr(risk, "terminal_installed", lambda: False)   # not a Bloomberg PC: no blpapi step
+    monkeypatch.setattr(risk, "tcp_open", lambda *a, **k: False)
     monkeypatch.setattr(risk.VENV_PY.__class__, "exists", lambda self: True)
     calls = []
     monkeypatch.setattr(risk.subprocess, "call", lambda cmd, **kw: calls.append(cmd) or 7)
@@ -100,6 +102,7 @@ def test_start_inside_venv_calls_launcher(monkeypatch):
 def _doctor(monkeypatch, tmp_path, db=None):
     monkeypatch.setattr(risk, "in_venv", lambda: True)
     monkeypatch.setattr(risk, "tcp_open", lambda *a, **k: False)
+    monkeypatch.setattr(risk, "terminal_installed", lambda: False)   # the dev PC has C:\blp but no Terminal login
     monkeypatch.setattr("ui.launch.probe", lambda url: None)
     monkeypatch.setenv("RISK_DB", str(db or tmp_path / "risk.db"))
     d = risk.Doctor()
@@ -168,3 +171,18 @@ def test_root_bloomberg_diagnostics_is_a_thin_wrapper(monkeypatch):
     mod = __import__("importlib.util", fromlist=["util"]).module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert mod.main is called
+
+
+def test_doctor_fails_when_a_terminal_is_present_but_blpapi_is_missing(monkeypatch, tmp_path):
+    """2026-09-18 audit: plain `doctor` used to report blpapi as information only, so a
+    Bloomberg PC whose .venv lacks blpapi (setup ran before the Terminal was installed or
+    logged in) got "Everything checks out" while the live feed could never start."""
+    monkeypatch.setattr(risk, "in_venv", lambda: True)
+    monkeypatch.setattr(risk, "tcp_open", lambda *a, **k: True)      # a Terminal answers on 8194 ...
+    monkeypatch.setitem(sys.modules, "blpapi", None)                 # ... but blpapi does not import
+    monkeypatch.setattr("ui.launch.probe", lambda url: None)
+    monkeypatch.setenv("RISK_DB", str(tmp_path / "risk.db"))
+    d = risk.Doctor()
+    risk.doctor_checks(d, bloomberg=False, git=False)
+    failed = {name: fix for name, ok, _, fix in d.rows if ok is False}
+    assert "blpapi" in failed and "--bloomberg" in failed["blpapi"]

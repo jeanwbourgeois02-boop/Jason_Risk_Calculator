@@ -24,13 +24,12 @@ Follow this on the PC that has the Bloomberg Terminal, every time you start the 
      for that trade. On 2026-09-17 these were EURSEK112526C-197906813,
      USDJPY111926P-197571137 and USDJPY111926P-197957397. The diagnostics panel shows
      the current list.
-   - WARNING "FX vol ticker assumptions": the option Greeks rest on Bloomberg tickers
-     that have not been verified on a real Terminal. Run this in a terminal on the
-     Bloomberg PC and tick off each item it reports:
-
-     ```
-     py -3 -m data.bloomberg.vol_marketdata --probe
-     ```
+   - "FX vol ticker assumptions": the option Greeks rest on Bloomberg vol tickers that
+     were written without a Terminal. Every live pull with an option in the book checks
+     them against Bloomberg's own answers and records the result, so this line reads
+     WARNING "not yet exercised" until the first such pull, then PASS, or FAIL naming
+     the exact ticker or field Bloomberg rejected. Nothing to run by hand; a FAIL is a
+     ticker-naming fix in `data/bloomberg/vol_marketdata.py`.
 
    - FAIL "Last marks pull ... looks stale": the last pull asked for zero marks but the
      book now needs some. Press Pull now.

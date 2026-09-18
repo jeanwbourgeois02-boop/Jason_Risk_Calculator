@@ -364,9 +364,20 @@ def create_schema(conn: sqlite3.Connection) -> None:
             raise
 
 
-def connect(path: Union[str, Path] = ":memory:") -> sqlite3.Connection:
-    """Open (or create) a database at `path` and apply the schema."""
-    conn = sqlite3.connect(str(path))
+# How long a connection waits for another writer before raising "database is locked".
+# sqlite3's default is 5 s; the blotter upload holds its write lock for the whole backup +
+# parse + load (data/ingest/upload.py), and the Bloomberg feed thread, the Market data
+# tab's "Pull now" callback and the auto-backfill thread each write from their own
+# connection -- with 5 s a pull landing during an upload was recorded as a Bloomberg
+# failure ("pull failed: database is locked") although Bloomberg had answered
+# (2026-09-18 audit). 60 s outlasts any upload without hiding a genuinely stuck writer.
+BUSY_TIMEOUT_SECONDS = 60.0
+
+
+def connect(path: Union[str, Path] = ":memory:", timeout: float = BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
+    """Open (or create) a database at `path` and apply the schema. `timeout` is the
+    SQLite busy timeout (see BUSY_TIMEOUT_SECONDS)."""
+    conn = sqlite3.connect(str(path), timeout=timeout)
     create_schema(conn)
     return conn
 

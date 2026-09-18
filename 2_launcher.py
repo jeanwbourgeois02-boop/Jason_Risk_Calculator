@@ -269,10 +269,16 @@ def bloomberg_host() -> tuple:
     return os.environ.get("BLP_HOST", "localhost"), int(os.environ.get("BLP_PORT", "8194"))
 
 
+def terminal_installed() -> bool:
+    """A Bloomberg Terminal is installed on this PC (its C:\blp folder exists), whether or
+    not anyone is logged in right now. Separate from tcp_open() so tests can pin it."""
+    return Path("C:/blp").exists()
+
+
 def bloomberg_pc() -> bool:
     """Heuristic: a Terminal is installed or answering on the API port."""
     host, port = bloomberg_host()
-    return Path("C:/blp").exists() or tcp_open(host, port)
+    return terminal_installed() or tcp_open(host, port)
 
 
 def db_path() -> Path:
@@ -448,6 +454,15 @@ def venv_imports_ok() -> bool:
     return ok
 
 
+def venv_blpapi_ok() -> bool:
+    """True when `blpapi` imports inside .venv. Not part of IMPORT_CHECKS on purpose --
+    blpapi only exists on a Bloomberg PC -- so `start` checks it separately whenever a
+    Terminal is detected (see cmd_start)."""
+    code = subprocess.call([str(VENV_PY), "-c", "import blpapi"], cwd=str(ROOT),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return code == 0
+
+
 def cmd_start(args) -> int:
     if not in_venv():
         if not VENV_PY.exists():
@@ -482,6 +497,17 @@ def cmd_start(args) -> int:
             if not venv_imports_ok():
                 say("FAILED: packages still missing after install. Run:  py 2_launcher.py setup")
                 return 1
+        # blpapi is installed by `setup` only when a Terminal was detected AT SETUP TIME
+        # (bloomberg_pc()), and venv_imports_ok() deliberately ignores it, so a PC whose
+        # Terminal was installed or logged in after setup ran started the app without the
+        # live feed on every launch, with nothing but the feed's own "blpapi is not
+        # installed" status to say so (2026-09-18 audit). Re-check on every start.
+        if VENV_PY.exists() and bloomberg_pc() and not venv_blpapi_ok():
+            say("Bloomberg Terminal detected but blpapi is not installed in .venv: installing it now")
+            run([VENV_PY, "-m", "pip", "install", "--index-url", BLPAPI_INDEX, "blpapi", "--quiet"], check=False)
+            if not venv_blpapi_ok():
+                say("WARNING: blpapi still does not import; the app starts without the live feed. "
+                    "Fix: py 2_launcher.py setup --bloomberg")
         return reexec_in_venv([a for a in sys.argv[1:] if a not in ("--no-sync", "--refresh-packages")])
     from ui.launch import main
     return main(["--force-new"] if args.force_new else [])
@@ -565,6 +591,13 @@ def doctor_checks(d: Doctor, bloomberg: bool, git: bool = True) -> None:
         d.add("terminal", terminal, f"{host}:{port} {'answers' if terminal else 'no answer'}",
               "log in to the Bloomberg Terminal on this PC, then retry")
     else:
+        # A Terminal on this PC (answering, or installed under C:lp) with no blpapi in
+        # .venv is a failure even in plain doctor mode: the live feed can never start, and
+        # before 2026-09-18 this row was informational only, so `doctor` said "Everything
+        # checks out" on exactly the PC where the feed was silently missing.
+        if (terminal or terminal_installed()) and not have_blp:
+            d.add("blpapi", False, "a Bloomberg Terminal is on this PC but blpapi is not installed in .venv "
+                                   "(the live feed cannot start)", "py 2_launcher.py setup --bloomberg")
         d.add("bloomberg", None, ("blpapi installed, " if have_blp else "blpapi not installed, ")
               + (f"Terminal answers on {host}:{port}" if terminal else "no Terminal on this PC")
               + "  (run  py 2_launcher.py doctor --bloomberg  on the Bloomberg PC)")

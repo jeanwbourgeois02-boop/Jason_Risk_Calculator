@@ -106,6 +106,11 @@ VOL_QUOTE_TYPES = ["ATM", "RR25", "BF25", "RR10", "BF10"]
 
 VOL_FIELD = "PX_LAST"
 
+# Every request carries its own blpapi.CorrelationId (2026-09-18), so a late reply to an
+# earlier, timed-out request on this session is discarded rather than read as this one's
+# answer (same discipline as data/bloomberg/pull_marks.py and rates_marketdata.py).
+_CORRELATION_COUNTER = __import__("itertools").count(1)
+
 # Pairs to pull when the book has no FX_OPTION instruments yet (see vol_pairs_needed).
 DEFAULT_PAIRS = ["EURUSD", "EURSEK", "USDJPY"]
 
@@ -502,7 +507,8 @@ class VolBloombergSource:
                 request.set("startDate", d)
                 request.set("endDate", d)
 
-            self._session.sendRequest(request)
+            correlation_id = blpapi.CorrelationId(next(_CORRELATION_COUNTER))
+            self._session.sendRequest(request, correlationId=correlation_id)
 
             out: Dict[str, dict] = {}
             consecutive_timeouts = 0
@@ -517,9 +523,20 @@ class VolBloombergSource:
                 consecutive_timeouts = 0
                 event_is_ours = False
                 for msg in event:
+                    cids = list(msg.correlationIds()) if hasattr(msg, "correlationIds") else []
+                    if cids and correlation_id not in cids:
+                        continue  # a late reply to a previous request on this session
+                    event_is_ours = True
+                    # A whole-request rejection (bad field/override, entitlement, daily
+                    # limit) arrives as a RESPONSE with `responseError` and no
+                    # securityData; until 2026-09-18 it was skipped here and the loop
+                    # waited out three timeouts (~90 s) before reporting "timed out"
+                    # instead of Bloomberg's own reason.
+                    response_error = _bbg_error_message(msg, "responseError")
+                    if response_error:
+                        return out, f"Bloomberg rejected the {request_type}: {response_error}"
                     if not msg.hasElement("securityData"):
                         continue
-                    event_is_ours = True
                     sec_data = msg.getElement("securityData")
                     if live:
                         for i in range(sec_data.numValues()):
@@ -774,8 +791,12 @@ def assess_ticker_assumptions(result: VolFetchResult) -> List[dict]:
     if row:
         out.append(row)
 
-    if successes or failures:
-        example = successes[0][1].ticker if successes else failures[0]["ticker"]
+    # Only a real per-security answer is evidence for the request shape: a batch that
+    # timed out or raised is synthesised locally as all-NO_VALUE diagnostics (see _fetch /
+    # get_vol_quotes), and must not be credited as "Bloomberg answered" (2026-09-18 audit).
+    rejected = [d for d in failures if d.get("bbg_status") in ("SECURITY_ERROR", "FIELD_EXCEPTION")]
+    if successes or rejected:
+        example = successes[0][1].ticker if successes else rejected[0]["ticker"]
         out.append(_assumption_row("request_type", [example], "OK", None,
                                     "Live ReferenceDataRequest returned a structured per-security response "
                                     "(a wrong request shape fails the whole batch with no per-ticker detail "

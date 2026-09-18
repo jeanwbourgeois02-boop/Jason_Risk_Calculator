@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import threading
@@ -77,8 +78,35 @@ def status_path(db_path) -> Path:
     return p.with_name(p.name + ".bloomberg_status.json")
 
 
+_STATUS_LOCK = threading.Lock()
+
+
+def _replace_status_file(target: Path, status: dict) -> None:
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(status, indent=2, default=str), encoding="utf-8")
+    os.replace(tmp, target)
+
+
 def write_status(db_path, status: dict) -> None:
-    status_path(db_path).write_text(json.dumps(status, indent=2, default=str), encoding="utf-8")
+    """Atomic replace (temp file + os.replace) under a process-wide lock. The feed
+    thread, the Market data tab's "Pull now" callback and the backfill thread all rewrite
+    this file; a reader must never see a half-written JSON, which `read_status` would
+    turn into None ("no pull recorded yet") for a pull that just succeeded (2026-09-18
+    audit)."""
+    with _STATUS_LOCK:
+        _replace_status_file(status_path(db_path), status)
+
+
+def patch_status(db_path, key: str, patch: dict) -> dict:
+    """Read-modify-write of one top-level key (e.g. "backfill") under the same lock
+    `write_status` takes, so a concurrent full rewrite by the feed can neither tear the
+    file nor be lost between this function's read and its write. Returns the merged
+    status. Meant for data/bloomberg/backfill.py's progress publisher."""
+    with _STATUS_LOCK:
+        current = read_status(db_path) or {}
+        current[key] = {**(current.get(key) or {}), **patch}
+        _replace_status_file(status_path(db_path), current)
+    return current
 
 
 def read_status(db_path) -> Optional[dict]:
@@ -179,12 +207,92 @@ def _cross_usd_legs(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
     return out
 
 
+_OPEN_OPTION_PAIRS_SQL = """
+SELECT DISTINCT i.base_ccy || i.quote_ccy AS pair, i.expiry_date
+FROM trades_official t JOIN instruments i USING (instrument_id)
+WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND i.expiry_date >= :as_of
+  AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
+ORDER BY pair, i.expiry_date
+"""
+
+
+def _option_mark_rows(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+    """One row per (pair, expiry) an open FX_OPTION needs marks for:
+    {pair, expiry, instrument_id, bbg_ticker, has_instrument}.
+
+    engine/options prices an option off the PAIR's own official SPOT
+    (inputs.get_spot keys marks_official by the plain 6-char pair, never the option's
+    own instrument_id) and, for a currency with no OIS curve, off the pair's official
+    FWD_OUTRIGHT points around the expiry (rates._forward_for_expiry, covered interest
+    parity). Until 2026-09-18 nothing ever requested either of those for a pair with no
+    open FX forward leg, so an option-only pair was skipped "no SPOT mark" forever (both
+    USDJPY options on the fake-pull audit). Read-only; shared with
+    data.bloomberg.inventory._needed_marks so "needed" and "requested" cannot drift."""
+    out = []
+    for pair, expiry in conn.execute(_OPEN_OPTION_PAIRS_SQL, {"as_of": as_of_date}):
+        row = conn.execute("SELECT instrument_id, bbg_ticker FROM instruments WHERE instrument_id = ?",
+                           (pair,)).fetchone()
+        out.append({"pair": pair, "expiry": expiry,
+                    "instrument_id": row[0] if row else pair,
+                    "bbg_ticker": row[1] if row else f"{pair} Curncy",
+                    "has_instrument": row is not None})
+    return out
+
+
+def option_needed_marks(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+    """The marks open FX_OPTIONs need on `as_of_date`, in the shape
+    data.bloomberg.inventory._needed_marks lists everything else in:
+    [{instrument_id, settle_date, mark_type}] -- one SPOT (settle_date = as_of) per option
+    pair and one FWD_OUTRIGHT at each open option's expiry. Read-only wrapper over
+    _option_mark_rows so the inventory / diagnostics "needed" set and build_requests can
+    never disagree about options."""
+    out, seen = [], set()
+    for o in _option_mark_rows(conn, as_of_date):
+        for settle, mark_type in ((as_of_date, "SPOT"), (o["expiry"], "FWD_OUTRIGHT")):
+            key = (o["instrument_id"], settle, mark_type)
+            if key not in seen:
+                seen.add(key)
+                out.append({"instrument_id": o["instrument_id"], "settle_date": settle, "mark_type": mark_type})
+    return out
+
+
+def _ensure_fx_instruments(conn: sqlite3.Connection, pairs) -> List[str]:
+    """Insert the plain FX `instruments` row for each 6-char pair that has none yet --
+    the same conventional reference-data row the blotter parser writes for a traded pair
+    (multiplier 1, is_ndf from data.ingest.common.NDF_CCYS, '<pair> Curncy', perpetual).
+    `write_marks` can only persist a SPOT / FWD_OUTRIGHT for a known instrument, and an
+    option-only pair or a cross's USD-conversion pair may never have been traded
+    outright, so without this row the mark Bloomberg returned vanished silently
+    (2026-09-18). Returns the pairs created. A read-only connection is left alone."""
+    created: List[str] = []
+    try:
+        from data.ingest.common import NDF_CCYS
+    except Exception:  # noqa: BLE001
+        NDF_CCYS = frozenset()
+    for pair in sorted({p for p in pairs if isinstance(p, str) and len(p) == 6}):
+        if conn.execute("SELECT 1 FROM instruments WHERE instrument_id = ?", (pair,)).fetchone():
+            continue
+        base, quote = pair[:3], pair[3:]
+        is_ndf = 1 if (base in NDF_CCYS or quote in NDF_CCYS) else 0
+        try:
+            with conn:
+                conn.execute("INSERT OR IGNORE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                             (pair, "FX", base, quote, 1.0, is_ndf, f"{pair} Curncy", "9999-12-31"))
+        except sqlite3.OperationalError:
+            break  # read-only connection (diagnostics): nothing to create here
+        created.append(pair)
+    return created
+
+
 def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     """RequestRows per BUILD_PLAN.md section 2: one SPOT per open FX pair, one
     FWD_OUTRIGHT per (pair, open leg's own settle_date) -- no shared workbook maturity --
-    one FUTURE_PX per open future at its own settle_date (expiry), and (2026-09-17) one
-    extra SPOT per USD-conversion pair an open cross's legs need (see _cross_usd_legs) that
-    isn't already covered by one of the pairs above."""
+    one FUTURE_PX per open future at its own settle_date (expiry), (2026-09-17) one
+    extra SPOT per USD-conversion pair an open cross's legs need (see _cross_usd_legs),
+    and (2026-09-18) one SPOT per open FX_OPTION's pair plus one FWD_OUTRIGHT at each
+    open option's own expiry (see _option_mark_rows). The pair instrument row those last
+    two need is created here when missing (_ensure_fx_instruments), since this is the
+    one writable call site."""
     from data.bloomberg.pull_marks import RequestRow
     fx_rows = conn.execute(_OPEN_FX_SQL, {"as_of": as_of_date}).fetchall()
     out, seen = [], set()
@@ -195,11 +303,21 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
         if (instrument_id, "FWD_OUTRIGHT", settle) not in seen:
             seen.add((instrument_id, "FWD_OUTRIGHT", settle))
             out.append(RequestRow(instrument_id, ticker, settle, "FWD_OUTRIGHT"))
-    for leg in _cross_usd_legs(conn, as_of_date):
+    cross_legs = _cross_usd_legs(conn, as_of_date)
+    option_rows = _option_mark_rows(conn, as_of_date)
+    _ensure_fx_instruments(conn, [leg["pair_name"] for leg in cross_legs] + [o["pair"] for o in option_rows])
+    for leg in cross_legs:
         key = (leg["instrument_id"], "SPOT")
         if key not in seen:
             seen.add(key)
             out.append(RequestRow(leg["instrument_id"], leg["bbg_ticker"], as_of_date, "SPOT"))
+    for o in option_rows:
+        if (o["instrument_id"], "SPOT") not in seen:
+            seen.add((o["instrument_id"], "SPOT"))
+            out.append(RequestRow(o["instrument_id"], o["bbg_ticker"], as_of_date, "SPOT"))
+        if (o["instrument_id"], "FWD_OUTRIGHT", o["expiry"]) not in seen:
+            seen.add((o["instrument_id"], "FWD_OUTRIGHT", o["expiry"]))
+            out.append(RequestRow(o["instrument_id"], o["bbg_ticker"], o["expiry"], "FWD_OUTRIGHT"))
     fut_rows = conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of_date}).fetchall()
     for instrument_id, ticker, settle in fut_rows:
         if (instrument_id, "FUTURE_PX", settle) not in seen:
@@ -242,10 +360,19 @@ def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str)
 
 
 def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Dict[str, float],
-                       snapped: str) -> Tuple[List[dict], List[str], List[dict]]:
+                       snapped: str) -> Tuple[List[dict], List[str], List[dict], List[dict]]:
     """FWD_OUTRIGHT per (pair, settle date) from the bulk FWD_CURVE table (one request
     per cycle for all pairs). EXACT tenor -> BBG_BFXFORWARD; interpolated -> BBG_INTERP
-    (never official). Returns (rows, warnings, failures).
+    (never official). Returns (rows, warnings, failures, curve_rows).
+
+    `curve_rows` (2026-09-18): one official BBG_BFXFORWARD FWD_OUTRIGHT row per FWD_CURVE
+    point with settle_date > as_of, at the tenor's OWN settle date, for every pair whose
+    curve was fetched. Those points are Bloomberg's own quoted outrights, not
+    interpolations, so official is correct for them; P&L reads a forward by the leg's
+    exact settle date so nothing else changes, and engine/options' covered-interest-parity
+    rate for a currency with no OIS curve (SEK, NOK, ...) needs at least two official
+    points around the option expiry -- which, when every leg-date row was BBG_INTERP,
+    it never had ("no curve/rate SEK" on the Bloomberg PC, 2026-09-17).
 
     A leg settling on or before `as_of` is marked directly at that pair's live SPOT
     (source BBG_BFXFORWARD -- still official, not a fallback) rather than through the
@@ -259,8 +386,8 @@ def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Di
     from data.bloomberg.fwd_curve import outright_for_date, request_fwd_curves
     from data.bloomberg.pull_marks import _get_blpapi
     if not fwd_reqs:
-        return [], [], []
-    rows, warnings, failures = [], [], []
+        return [], [], [], []
+    rows, warnings, failures, curve_rows = [], [], [], []
     today_reqs = [r for r in fwd_reqs if date.fromisoformat(r.settle_date) <= as_of]
     curve_reqs = [r for r in fwd_reqs if date.fromisoformat(r.settle_date) > as_of]
     for r in today_reqs:
@@ -274,7 +401,7 @@ def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Di
                      "mark_type": "FWD_OUTRIGHT", "value": float(spot), "source": SRC_SPOT_FWD, "snapped_at": snapped,
                      "detail": "settles today: marked at spot"})
     if not curve_reqs:
-        return rows, warnings, failures
+        return rows, warnings, failures, curve_rows
     blpapi = _get_blpapi()
     tickers = sorted({r.bbg_ticker for r in curve_reqs})
     try:
@@ -282,7 +409,21 @@ def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Di
     except Exception as exc:  # network layer raised: every forward fails with that reason
         failures += [{"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT", "settle_date": r.settle_date,
                      "detail": f"FWD_CURVE request raised: {exc!r}"} for r in curve_reqs]
-        return rows, warnings, failures
+        return rows, warnings, failures, curve_rows
+    instrument_by_ticker = {r.bbg_ticker: r.instrument_id for r in curve_reqs}
+    seen_points = set()
+    for ticker, curve in curves.items():
+        instrument_id = instrument_by_ticker.get(ticker)
+        if instrument_id is None:
+            continue
+        for point_date, value in curve.get("points") or []:
+            if point_date <= as_of or (instrument_id, point_date) in seen_points:
+                continue
+            seen_points.add((instrument_id, point_date))
+            curve_rows.append({"as_of_date": as_of.isoformat(), "instrument_id": instrument_id,
+                               "settle_date": point_date.isoformat(), "mark_type": "FWD_OUTRIGHT",
+                               "value": float(value), "source": SRC_SPOT_FWD, "snapped_at": snapped,
+                               "detail": "FWD_CURVE tenor point"})
     for r in curve_reqs:
         curve = curves.get(r.bbg_ticker, {"points": [], "error": "no curve"})
         if not curve["points"]:
@@ -302,7 +443,7 @@ def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Di
             warnings.append(f"{r.instrument_id} {r.settle_date}: {how.lower()} from FWD_CURVE tenors (source {SRC_INTERP})")
         rows.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id, "settle_date": r.settle_date,
                      "mark_type": "FWD_OUTRIGHT", "value": float(value), "source": source, "snapped_at": snapped})
-    return rows, warnings, failures
+    return rows, warnings, failures, curve_rows
 
 
 def write_marks(conn: sqlite3.Connection, rows: List[dict]) -> int:
@@ -373,7 +514,10 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
         out["currencies"][ccy] = {
             "quotes": 0, "fixings": 0,
             "error": f"{ccy} has no OIS index in Phase 1 scope ({', '.join(sorted(rm.OIS_INDEX))} only); "
-                     "enter a manual rate (engine/options/rates.py::set_manual_rate) instead.",
+                     "an option in this currency gets its rate implied from the pair's forward curve and "
+                     "the other currency's OIS curve (engine/options/rates.py, IMPLIED_FORWARD); a manual "
+                     "rate (engine/options/rates.py::set_manual_rate) is only needed if that forward curve "
+                     "is not on file.",
         }
     if in_scope:
         if rates_source is None:
@@ -547,6 +691,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             write_status(db_path, status)
             return status
         from data.bloomberg import pull_marks as pm
+        session = None
         conn = connect(Path(db_path))
         try:
             # The book date defaults to the live mark date (2026-09-17 fix). It used to
@@ -584,7 +729,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             past = {(r.instrument_id, r.settle_date) for r in requests
                     if r.mark_type == "FWD_OUTRIGHT" and date.fromisoformat(r.settle_date) < today}
             fwd_reqs = [r for r in requests if r.mark_type == "FWD_OUTRIGHT" and (r.instrument_id, r.settle_date) not in past]
-            fwd_rows, fwd_warnings, fwd_fail = _fwd_outright_rows(session, service, fwd_reqs, today, spot_by_pair, snapped)
+            fwd_rows, fwd_warnings, fwd_fail, curve_rows = _fwd_outright_rows(
+                session, service, fwd_reqs, today, spot_by_pair, snapped)
             fut_reqs = [r for r in requests if r.mark_type == "FUTURE_PX"]
             # live=True: PX_SETTLE for `today` has nothing to return before that day's US
             # close, so the live pull tries PX_LAST first and only falls back to the
@@ -594,20 +740,19 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # keeps calling this with the default live=False.
             fut_rows, fut_warnings, fut_fail = pm.build_future_rows(session, service, fut_reqs, today, diag, live=True) \
                 if fut_reqs else ([], [], [])
-            # A cross's USD-conversion leg with no instrument row on file (see
-            # _cross_usd_legs) is still requested from Bloomberg above, but write_marks
-            # below can never persist it (no instrument to satisfy the FK-like
-            # relationship) -- surface that gap explicitly instead of letting the mark
-            # silently vanish (2026-09-17, ladder agent's usd_delta NaN report).
-            cross_leg_warnings = [
-                f"{leg['pair_name']}: needed to convert {leg['ccy']} to USD for a cross's delta/P&L, but no "
-                f"'{leg['pair_name']}' instrument is on file -- its SPOT cannot be written even when Bloomberg "
-                "returns a price."
-                for leg in _cross_usd_legs(conn, as_of_date) if not leg["has_instrument"]
-            ]
-            warnings = fwd_warnings + fut_warnings + cross_leg_warnings
+            # A cross's USD-conversion pair or an option's own pair with no instrument row
+            # on file used to be requested but never written (write_marks skips unknown
+            # instruments); build_requests now creates that row first
+            # (_ensure_fx_instruments), so the mark lands (2026-09-18).
+            warnings = fwd_warnings + fut_warnings
             rows = spot_rows + fwd_rows + fut_rows
             written = write_marks(conn, rows)
+            # Bloomberg's own FWD_CURVE tenor points, at their own dates, as official
+            # forwards -- kept out of `written` so "wrote N of M requested" stays exact.
+            requested_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]) for r in rows}
+            curve_points_written = write_marks(
+                conn, [r for r in curve_rows
+                       if (r["instrument_id"], r["mark_type"], r["settle_date"]) not in requested_keys])
             # Rates (2026-09-17): OIS curve quotes + fixings per swap currency AND per open
             # FX_OPTION's pair currencies into curve_quotes / index_fixings, then every IRS
             # priced (PV_USD / DV01_USD / CASHFLOW_USD / PAR_RATE, source QL_PRICER). Vol
@@ -633,8 +778,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             except Exception as exc:
                 status["ledger"] = {"error": f"{exc!r}"}
                 status.setdefault("warnings", []).append(f"realise_settled failed: {exc!r}")
-            status.update(connected=True, written=written, warnings=list(warnings)[:50],
-                          as_of_marks=today.isoformat())
+            status.update(connected=True, written=written, curve_points_written=curve_points_written,
+                          warnings=list(warnings)[:50], as_of_marks=today.isoformat())
             ok_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]): r for r in rows}
             items = []
             for r in requests:
@@ -660,6 +805,16 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             status["skipped"] = sum(1 for i in items if i["status"] == "SKIPPED")
         finally:
             conn.close()
+            # The blpapi session this cycle opened must be stopped here, not left to
+            # garbage collection: one leaked session per 2-minute cycle (and per "Pull
+            # now" click) was the 2026-09-18 audit's top resource finding. The rates and
+            # vol sources close their own sessions inside their steps.
+            stop = getattr(session, "stop", None)
+            if callable(stop):
+                try:
+                    stop()
+                except Exception:  # noqa: BLE001
+                    pass
     except Exception:
         status["connected"] = False
         status["reason"] = "pull failed: " + traceback.format_exc(limit=3).strip().splitlines()[-1]

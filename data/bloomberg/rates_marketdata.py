@@ -48,6 +48,47 @@ logger = logging.getLogger(__name__)
 
 _MIN_QUOTES = 4
 _MAX_CONSECUTIVE_TIMEOUTS = 3
+# Every request carries its own blpapi.CorrelationId (2026-09-18): a late reply to an
+# earlier, timed-out request on the same session is then discarded instead of being read
+# as this request's answer (same discipline as data/bloomberg/pull_marks.py).
+_CORRELATION_COUNTER = __import__("itertools").count(1)
+
+
+def _element_message(el) -> str:
+    """Text of a blpapi error element (responseError / securityError): its `message`
+    sub-element when present, else the element's own string form."""
+    try:
+        if el.hasElement("message"):
+            return el.getElementAsString("message")
+    except Exception:  # noqa: BLE001
+        pass
+    return str(el)
+
+
+def _response_error_text(msg) -> Optional[str]:
+    """The text of a whole-request failure (`responseError`: bad field or override, an
+    entitlement or daily-limit refusal), or None. Such a RESPONSE carries no securityData
+    at all; until 2026-09-18 the loops below ignored it and kept waiting for more events
+    until three consecutive timeouts (~90 s per currency) mislabeled Bloomberg's immediate,
+    explicit rejection as "timed out"."""
+    try:
+        if msg.hasElement("responseError"):
+            return _element_message(msg.getElement("responseError"))
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _security_error_text(sd) -> Optional[str]:
+    """Per-security rejection text (`securityError`: unknown ticker, no permission), or
+    None. The ticker is then reported as having no value, with the reason logged, rather
+    than silently absent."""
+    try:
+        if sd.hasElement("securityError"):
+            return _element_message(sd.getElement("securityError"))
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 # CCY -> OIS index name in scope for this phase (CLAUDE.md-adjacent: this module
 # owns its own mapping, curve_quotes.index mirrors this value).
@@ -519,6 +560,47 @@ class RatesBloombergSource:
 
     # -- internal: request/response, named-element access (see note above) --------------
 
+    def _send_and_collect(self, request, request_type: str):
+        """Send `request` under a fresh CorrelationId and yield every `securityData`
+        element of ITS response (PARTIAL_RESPONSE and RESPONSE events alike), stopping at
+        the final RESPONSE. Raises MarketDataUnavailable on a `responseError` (Bloomberg
+        rejected the whole request -- reported with Bloomberg's own text, immediately) or
+        after _MAX_CONSECUTIVE_TIMEOUTS empty waits. Messages tagged with another
+        request's CorrelationId are ignored; untagged session/service status messages are
+        passed over harmlessly."""
+        blpapi = self._blpapi
+        correlation_id = blpapi.CorrelationId(next(_CORRELATION_COUNTER))
+        self._session.sendRequest(request, correlationId=correlation_id)
+        consecutive_timeouts = 0
+        while True:
+            event = self._session.nextEvent(self.timeout_ms)
+            event_type = event.eventType()
+            if event_type == blpapi.Event.TIMEOUT:
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
+                    raise MarketDataUnavailable(
+                        f"Bloomberg {request_type} on {self.host}:{self.port} timed out "
+                        f"after {consecutive_timeouts} consecutive waits."
+                    )
+                continue
+            consecutive_timeouts = 0
+            event_is_ours = False
+            for msg in event:
+                cids = list(msg.correlationIds()) if hasattr(msg, "correlationIds") else []
+                if cids and correlation_id not in cids:
+                    logger.debug("Discarding message for another request (correlation ids %s)", cids)
+                    continue
+                event_is_ours = True
+                error = _response_error_text(msg)
+                if error is not None:
+                    raise MarketDataUnavailable(
+                        f"Bloomberg rejected the {request_type} on {self.host}:{self.port}: {error}"
+                    )
+                if msg.hasElement("securityData"):
+                    yield msg.getElement("securityData")
+            if event_type == blpapi.Event.RESPONSE and event_is_ours:
+                return
+
     def _fetch_reference(
         self, tickers: List[str], fields: List[str], overrides: Optional[Dict[str, str]] = None
     ) -> Dict[str, Dict[str, Any]]:
@@ -539,40 +621,21 @@ class RatesBloombergSource:
                 o.setElement("value", value)
 
         logger.debug("Sending ReferenceDataRequest: %d securities, fields=%s", len(tickers), fields)
-        self._session.sendRequest(request)
-
         out: Dict[str, Dict[str, Any]] = {}
-        consecutive_timeouts = 0
-        while True:
-            event = self._session.nextEvent(self.timeout_ms)
-            event_type = event.eventType()
-            if event_type == blpapi.Event.TIMEOUT:
-                consecutive_timeouts += 1
-                if consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
-                    raise MarketDataUnavailable(
-                        f"Bloomberg ReferenceDataRequest on {self.host}:{self.port} timed out "
-                        f"after {consecutive_timeouts} consecutive waits."
-                    )
-                continue
-            consecutive_timeouts = 0
-            event_is_ours = False
-            for msg in event:
-                if not msg.hasElement("securityData"):
-                    continue
-                event_is_ours = True
-                sec_data = msg.getElement("securityData")
-                for i in range(sec_data.numValues()):
-                    sd = sec_data.getValueAsElement(i)
-                    ticker = sd.getElementAsString("security")
-                    row: Dict[str, Any] = {}
-                    if sd.hasElement("fieldData"):
-                        fd = sd.getElement("fieldData")
-                        for f in fields:
-                            if fd.hasElement(f):
-                                row[f] = fd.getElement(f).getValue()
-                    out[ticker] = row
-            if event_type == blpapi.Event.RESPONSE and event_is_ours:
-                break
+        for sec_data in self._send_and_collect(request, "ReferenceDataRequest"):
+            for i in range(sec_data.numValues()):
+                sd = sec_data.getValueAsElement(i)
+                ticker = sd.getElementAsString("security")
+                row: Dict[str, Any] = {}
+                sec_error = _security_error_text(sd)
+                if sec_error is not None:
+                    logger.warning("Bloomberg securityError on %s: %s", ticker, sec_error)
+                elif sd.hasElement("fieldData"):
+                    fd = sd.getElement("fieldData")
+                    for f in fields:
+                        if fd.hasElement(f):
+                            row[f] = fd.getElement(f).getValue()
+                out[ticker] = row
         return out
 
     def _fetch_historical_single(self, tickers: List[str], field: str, as_of: datetime.date) -> Dict[str, Any]:
@@ -588,39 +651,20 @@ class RatesBloombergSource:
         request.set("endDate", d)
 
         logger.debug("Sending HistoricalDataRequest: %d securities, field=%s, date=%s", len(tickers), field, d)
-        self._session.sendRequest(request)
-
         out: Dict[str, Any] = {}
-        consecutive_timeouts = 0
-        while True:
-            event = self._session.nextEvent(self.timeout_ms)
-            event_type = event.eventType()
-            if event_type == blpapi.Event.TIMEOUT:
-                consecutive_timeouts += 1
-                if consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
-                    raise MarketDataUnavailable(
-                        f"Bloomberg HistoricalDataRequest on {self.host}:{self.port} timed out "
-                        f"after {consecutive_timeouts} consecutive waits."
-                    )
-                continue
-            consecutive_timeouts = 0
-            event_is_ours = False
-            for msg in event:
-                if not msg.hasElement("securityData"):
-                    continue
-                event_is_ours = True
-                sec_data = msg.getElement("securityData")
-                ticker = sec_data.getElementAsString("security")
-                value = None
-                if sec_data.hasElement("fieldData"):
-                    fd = sec_data.getElement("fieldData")
-                    if fd.numValues() > 0:
-                        point = fd.getValueAsElement(0)
-                        if point.hasElement(field):
-                            value = point.getElement(field).getValue()
-                out[ticker] = value
-            if event_type == blpapi.Event.RESPONSE and event_is_ours:
-                break
+        for sec_data in self._send_and_collect(request, "HistoricalDataRequest"):
+            ticker = sec_data.getElementAsString("security")
+            value = None
+            sec_error = _security_error_text(sec_data)
+            if sec_error is not None:
+                logger.warning("Bloomberg securityError on %s: %s", ticker, sec_error)
+            elif sec_data.hasElement("fieldData"):
+                fd = sec_data.getElement("fieldData")
+                if fd.numValues() > 0:
+                    point = fd.getValueAsElement(0)
+                    if point.hasElement(field):
+                        value = point.getElement(field).getValue()
+            out[ticker] = value
         return out
 
     def _fetch_historical_series(self, ticker: str, field: str, start: datetime.date, end: datetime.date) -> List[tuple]:
@@ -634,38 +678,20 @@ class RatesBloombergSource:
         request.set("endDate", end.strftime("%Y%m%d"))
 
         logger.debug("Sending HistoricalDataRequest: %s, field=%s, %s to %s", ticker, field, start, end)
-        self._session.sendRequest(request)
-
         points: List[tuple] = []
-        consecutive_timeouts = 0
-        while True:
-            event = self._session.nextEvent(self.timeout_ms)
-            event_type = event.eventType()
-            if event_type == blpapi.Event.TIMEOUT:
-                consecutive_timeouts += 1
-                if consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
-                    raise MarketDataUnavailable(
-                        f"Bloomberg HistoricalDataRequest on {self.host}:{self.port} timed out "
-                        f"after {consecutive_timeouts} consecutive waits."
-                    )
+        for sec_data in self._send_and_collect(request, "HistoricalDataRequest"):
+            sec_error = _security_error_text(sec_data)
+            if sec_error is not None:
+                logger.warning("Bloomberg securityError on %s: %s", ticker, sec_error)
                 continue
-            consecutive_timeouts = 0
-            event_is_ours = False
-            for msg in event:
-                if not msg.hasElement("securityData"):
-                    continue
-                event_is_ours = True
-                sec_data = msg.getElement("securityData")
-                if sec_data.hasElement("fieldData"):
-                    fd = sec_data.getElement("fieldData")
-                    for i in range(fd.numValues()):
-                        point = fd.getValueAsElement(i)
-                        if point.hasElement(field):
-                            d = point.getElement("date").getValue() if point.hasElement("date") else None
-                            v = point.getElement(field).getValue()
-                            points.append((d, v))
-            if event_type == blpapi.Event.RESPONSE and event_is_ours:
-                break
+            if sec_data.hasElement("fieldData"):
+                fd = sec_data.getElement("fieldData")
+                for i in range(fd.numValues()):
+                    point = fd.getValueAsElement(i)
+                    if point.hasElement(field):
+                        d = point.getElement("date").getValue() if point.hasElement("date") else None
+                        v = point.getElement(field).getValue()
+                        points.append((d, v))
         return points
 
     # -- public API -----------------------------------------------------------------------

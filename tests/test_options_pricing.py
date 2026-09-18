@@ -1293,3 +1293,27 @@ def test_portfolio_sums_two_packages_and_skips_missing_quote_ccy_spot():
     grand_total = portfolio.total()
     summed_delta = sum(totals[k]["delta"] for k in totals)
     assert grand_total["delta"] == pytest.approx(summed_delta)
+
+
+def test_price_all_and_store_isolates_one_trades_pricer_exception(monkeypatch):
+    """2026-09-18 audit: an exception from the pricer for ONE option must not abort the
+    whole options step -- the other trades still price, the bad one is reported with the
+    error text as its skip reason."""
+    if not HAVE_QUANTLIB:
+        pytest.skip("QuantLib not installed")
+    from engine.options import store
+
+    conn = _new_db()
+    _full_setup(conn, trade_id="T1", instrument_id="EURUSD092326C-1")
+    _seed_option_trade(conn, trade_id="T2", instrument_id="EURUSD092326P-2", option_type="PUT")
+    real = store._price_row
+
+    def exploding(conn_, as_of, row, **kw):
+        if row["trade_id"] == "T1":
+            raise RuntimeError("QuantLib blew up")
+        return real(conn_, as_of, row, **kw)
+
+    monkeypatch.setattr(store, "_price_row", exploding)
+    outcomes = {o.trade_id: o for o in store.price_all_and_store(conn, AS_OF)}
+    assert outcomes["T2"].priced
+    assert not outcomes["T1"].priced and "QuantLib blew up" in outcomes["T1"].reason

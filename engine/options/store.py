@@ -345,5 +345,18 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[PricingOut
     outcomes = []
     for trade_id in trade_ids:
         row = _read_option_trade(conn, trade_id)
-        outcomes.append(_price_row(conn, as_of, row, surface_cache=surface_cache, curve_cache=curve_cache))
+        try:
+            outcomes.append(_price_row(conn, as_of, row, surface_cache=surface_cache, curve_cache=curve_cache))
+        except Exception as exc:  # noqa: BLE001
+            # One option's pricer blowing up (an edge-case payoff / vol / rate combination
+            # inside the vendored QuantLib wrappers) must not zero the whole options step
+            # for every other trade in the book: before 2026-09-18 the exception escaped
+            # to live._options_step's step-level guard and no option priced that cycle.
+            # The failing trade is reported like any other skip, with the error text.
+            reason = f"pricer error: {exc!r}"
+            if row:
+                outcomes.append(_skip(row, reason))
+            else:
+                outcomes.append(PricingOutcome(trade_id=trade_id, instrument_id="", package_id=trade_id,
+                                               quantity=0.0, priced=False, reason=reason))
     return outcomes
