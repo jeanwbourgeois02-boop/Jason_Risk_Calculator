@@ -2,7 +2,9 @@
 
 If `blpapi` is importable and a Bloomberg API service answers (Terminal / B-PIPE on
 localhost:8194 by default), `LiveFeed` pulls every INTERVAL_SECONDS:
-  * SPOT (PX_LAST, live ReferenceDataRequest) for every FX pair with an open leg;
+  * SPOT (PX_LAST, live ReferenceDataRequest) for every FX pair with an open leg, every
+    open FX option's pair, and the USD-conversion pairs a cross's legs or an option's
+    base / quote currency need (each asked for once);
   * FWD_OUTRIGHT for every open leg's own settle date (direct broken-date request first,
     standard-tenor interpolation as fallback, exactly as data/bloomberg/pull_marks.py
     does). There is no shared WORKDAY(as_of,5) maturity request any more: BUILD_PLAN.md
@@ -177,24 +179,21 @@ def _usd_pair_name(ccy: str) -> str:
     return f"{ccy}USD" if ccy in _MAJOR_QUOTE_CCYS else f"USD{ccy}"
 
 
-def _cross_usd_legs(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
-    """One row per USD-conversion pair an open cross's legs need for their delta/P&L USD
-    conversion: {ccy, pair_name, instrument_id, bbg_ticker, has_instrument}.
+def _usd_pair_rows(conn: sqlite3.Connection, ccys) -> List[dict]:
+    """One row per USD-conversion pair for each non-USD currency in `ccys`:
+    {ccy, pair_name, instrument_id, bbg_ticker, has_instrument}. The one place a currency
+    becomes its USD pair (orientation from `_usd_pair_name`, nowhere else), shared by the
+    forwards' cross-leg path (`_cross_usd_legs`) and the options' path (`_option_usd_legs`).
 
     `instrument_id`/`bbg_ticker` come from the `instruments` row when one already exists
     for the conventional pair name (canonical orientation, e.g. EURUSD, USDSEK); otherwise
-    they are the conventional pair name itself and '<pair> Curncy' -- never written to
-    `instruments` (this module never inserts instrument rows). `has_instrument` tells the
-    caller whether a pulled SPOT for this pair can actually be written: `write_marks`
-    silently drops any row whose instrument_id isn't a known instrument, so a caller that
-    requests a `has_instrument=False` pair must report that gap explicitly (a warning
-    naming the pair) rather than let it vanish silently."""
-    ccys = set()
-    for base, quote in conn.execute(_OPEN_CROSS_LEG_CCYS_SQL, {"as_of": as_of_date}):
-        ccys.add(base)
-        ccys.add(quote)
+    they are the conventional pair name itself and '<pair> Curncy'. `has_instrument` tells
+    the caller whether a pulled SPOT for this pair can be written as things stand:
+    `write_marks` drops any row whose instrument_id isn't a known instrument, so the
+    writable call sites (`build_requests`, `backfill.backfill`) create the plain pair row
+    first (`_ensure_fx_instruments`). USD itself needs no conversion and is skipped."""
     out = []
-    for ccy in sorted(ccys):
+    for ccy in sorted({c for c in ccys if c and c != "USD"}):
         pair_name = _usd_pair_name(ccy)
         row = conn.execute("SELECT instrument_id, bbg_ticker FROM instruments WHERE instrument_id = ?",
                            (pair_name,)).fetchone()
@@ -207,18 +206,45 @@ def _cross_usd_legs(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
     return out
 
 
+def _cross_usd_legs(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+    """One row per USD-conversion pair an open cross's legs need for their delta/P&L USD
+    conversion (row shape and instrument lookup: `_usd_pair_rows`)."""
+    ccys = set()
+    for base, quote in conn.execute(_OPEN_CROSS_LEG_CCYS_SQL, {"as_of": as_of_date}):
+        ccys.add(base)
+        ccys.add(quote)
+    return _usd_pair_rows(conn, ccys)
+
+
+# `i.expiry_date >= :as_of`: the expiry day itself counts as open. It has to: on expiry day
+# engine/options writes the option's PAYOFF at that day's official SPOT of the pair, and
+# the ledger converts it to USD at that same day's base->USD SPOT.
 _OPEN_OPTION_PAIRS_SQL = """
-SELECT DISTINCT i.base_ccy || i.quote_ccy AS pair, i.expiry_date
+SELECT DISTINCT i.base_ccy || i.quote_ccy AS pair, i.expiry_date, i.base_ccy, i.quote_ccy
 FROM trades_official t JOIN instruments i USING (instrument_id)
 WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND i.expiry_date >= :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
 ORDER BY pair, i.expiry_date
 """
 
+# The same question asked of a PAST close (`historical=True` below): every option that was
+# open that day, whether or not the ledger has frozen it since. The realised filter must
+# NOT apply here: engine/options' expiry-day catch-up deliberately re-prices an option
+# that was already frozen from an older premium (it deletes that realised_pnl row and the
+# ledger freezes it afresh at the payoff), and it can only do so once the expiry date's
+# closing SPOT is on file -- so that SPOT has to stay "needed" for an option the ledger
+# has already realised, or an option-only pair would never get it.
+_OPTION_PAIRS_OPEN_ON_DAY_SQL = """
+SELECT DISTINCT i.base_ccy || i.quote_ccy AS pair, i.expiry_date, i.base_ccy, i.quote_ccy
+FROM trades_official t JOIN instruments i USING (instrument_id)
+WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND i.expiry_date >= :as_of
+ORDER BY pair, i.expiry_date
+"""
 
-def _option_mark_rows(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+
+def _option_mark_rows(conn: sqlite3.Connection, as_of_date: str, historical: bool = False) -> List[dict]:
     """One row per (pair, expiry) an open FX_OPTION needs marks for:
-    {pair, expiry, instrument_id, bbg_ticker, has_instrument}.
+    {pair, expiry, base, quote, instrument_id, bbg_ticker, has_instrument}.
 
     engine/options prices an option off the PAIR's own official SPOT
     (inputs.get_spot keys marks_official by the plain 6-char pair, never the option's
@@ -227,32 +253,85 @@ def _option_mark_rows(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
     parity). Until 2026-09-18 nothing ever requested either of those for a pair with no
     open FX forward leg, so an option-only pair was skipped "no SPOT mark" forever (both
     USDJPY options on the fake-pull audit). Read-only; shared with
-    data.bloomberg.inventory._needed_marks so "needed" and "requested" cannot drift."""
+    data.bloomberg.inventory._needed_marks so "needed" and "requested" cannot drift.
+    `historical`: see _OPTION_PAIRS_OPEN_ON_DAY_SQL."""
+    sql = _OPTION_PAIRS_OPEN_ON_DAY_SQL if historical else _OPEN_OPTION_PAIRS_SQL
     out = []
-    for pair, expiry in conn.execute(_OPEN_OPTION_PAIRS_SQL, {"as_of": as_of_date}):
+    for pair, expiry, base, quote in conn.execute(sql, {"as_of": as_of_date}):
         row = conn.execute("SELECT instrument_id, bbg_ticker FROM instruments WHERE instrument_id = ?",
                            (pair,)).fetchone()
-        out.append({"pair": pair, "expiry": expiry,
+        out.append({"pair": pair, "expiry": expiry, "base": base, "quote": quote,
                     "instrument_id": row[0] if row else pair,
                     "bbg_ticker": row[1] if row else f"{pair} Curncy",
                     "has_instrument": row is not None})
     return out
 
 
-def option_needed_marks(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+def option_spot_pair_names(base_ccy: str, quote_ccy: str) -> List[str]:
+    """The plain pair names whose SPOT one FX_OPTION on `base_ccy`/`quote_ccy` needs, own
+    pair first, de-duplicated: the pair itself (pricing, and the expiry-day payoff), then
+    base->USD (CLAUDE.md: an option's value and P&L are in the BASE currency and convert
+    to USD at spot -- the EURSEK digital pays EUR), then quote->USD (vega / theta / rho
+    convert through the quote currency, engine/options/portfolio.py). A USD leg needs no
+    conversion, so USDJPY yields just ['USDJPY'] -- never a 'USDUSD'. Orientation comes
+    from `_usd_pair_name`, the same helper the forwards' cross-leg path uses. Used by
+    data.bloomberg.backfill.traded_pairs for the historical closing-SPOT set."""
+    names = [f"{base_ccy}{quote_ccy}"]
+    for ccy in (base_ccy, quote_ccy):
+        if ccy and ccy != "USD":
+            name = _usd_pair_name(ccy)
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _option_usd_legs(conn: sqlite3.Connection, as_of_date: str, historical: bool = False) -> List[dict]:
+    """One row per USD-conversion pair the open FX_OPTIONs need on their OWN account (row
+    shape and instrument lookup: `_usd_pair_rows`): base->USD when the base is not USD,
+    quote->USD when the quote is not USD.
+
+    Found 2026-09-18 (options-pricer): only forwards drove USD-conversion SPOT requests
+    (`_OPEN_CROSS_LEG_CCYS_SQL` filters asset_class 'FX'), so an option's USD value rode
+    on whatever forwards happened to be open in its currencies. The EURSEK digital runs
+    to 2026-11-25; the day the last EUR forward settled, its USD value would have gone
+    "unpriced: no SPOT for USD conversion of EUR" with nothing asking for EURUSD.
+    Read-only; shared with option_needed_marks so inventory and build_requests agree."""
+    ccys = set()
+    for o in _option_mark_rows(conn, as_of_date, historical):
+        ccys.add(o["base"])
+        ccys.add(o["quote"])
+    return _usd_pair_rows(conn, ccys)
+
+
+def option_needed_marks(conn: sqlite3.Connection, as_of_date: str, historical: bool = False) -> List[dict]:
     """The marks open FX_OPTIONs need on `as_of_date`, in the shape
     data.bloomberg.inventory._needed_marks lists everything else in:
     [{instrument_id, settle_date, mark_type}] -- one SPOT (settle_date = as_of) per option
-    pair and one FWD_OUTRIGHT at each open option's expiry. Read-only wrapper over
-    _option_mark_rows so the inventory / diagnostics "needed" set and build_requests can
-    never disagree about options."""
+    pair, one FWD_OUTRIGHT at each open option's expiry, and one SPOT per USD-conversion
+    pair (`_option_usd_legs`). Read-only wrapper over the same two functions
+    build_requests uses, so the inventory / diagnostics "needed" set and the live request
+    list can never disagree about options.
+
+    `historical=True` is the same question for a PAST close (close_completeness and the
+    backfill): SPOT only, for every option open that day including its expiry date,
+    realised since or not (_OPTION_PAIRS_OPEN_ON_DAY_SQL). No FWD_OUTRIGHT: nothing
+    prices an option on a past date (there is no historical vol), so a past forward at
+    the expiry would feed nothing, and for an option-only pair the backfill has no curve
+    history to build one from -- listing it would leave such a day incomplete forever."""
     out, seen = [], set()
-    for o in _option_mark_rows(conn, as_of_date):
-        for settle, mark_type in ((as_of_date, "SPOT"), (o["expiry"], "FWD_OUTRIGHT")):
-            key = (o["instrument_id"], settle, mark_type)
-            if key not in seen:
-                seen.add(key)
-                out.append({"instrument_id": o["instrument_id"], "settle_date": settle, "mark_type": mark_type})
+
+    def _add(instrument_id: str, settle: str, mark_type: str) -> None:
+        key = (instrument_id, settle, mark_type)
+        if key not in seen:
+            seen.add(key)
+            out.append({"instrument_id": instrument_id, "settle_date": settle, "mark_type": mark_type})
+
+    for o in _option_mark_rows(conn, as_of_date, historical):
+        _add(o["instrument_id"], as_of_date, "SPOT")
+        if not historical:
+            _add(o["instrument_id"], o["expiry"], "FWD_OUTRIGHT")
+    for leg in _option_usd_legs(conn, as_of_date, historical):
+        _add(leg["instrument_id"], as_of_date, "SPOT")
     return out
 
 
@@ -296,9 +375,11 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     one FUTURE_PX per open future at its own settle_date (expiry), (2026-09-17) one
     extra SPOT per USD-conversion pair an open cross's legs need (see _cross_usd_legs),
     and (2026-09-18) one SPOT per open FX_OPTION's pair plus one FWD_OUTRIGHT at each
-    open option's own expiry (see _option_mark_rows). The pair instrument row those last
-    two need is created here when missing (_ensure_fx_instruments), since this is the
-    one writable call site."""
+    open option's own expiry (see _option_mark_rows), plus one SPOT per USD-conversion
+    pair the option itself needs -- base->USD and quote->USD, see _option_usd_legs --
+    appended after the option's own rows and only where nothing above already asked for
+    it. The pair instrument row those need is created here when missing
+    (_ensure_fx_instruments), since this is the one writable call site."""
     from data.bloomberg.pull_marks import RequestRow
     fx_rows = conn.execute(_OPEN_FX_SQL, {"as_of": as_of_date}).fetchall()
     out, seen = [], set()
@@ -311,7 +392,9 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
             out.append(RequestRow(instrument_id, ticker, settle, "FWD_OUTRIGHT"))
     cross_legs = _cross_usd_legs(conn, as_of_date)
     option_rows = _option_mark_rows(conn, as_of_date)
-    _ensure_fx_instruments(conn, [leg["pair_name"] for leg in cross_legs] + [o["pair"] for o in option_rows])
+    option_legs = _option_usd_legs(conn, as_of_date)
+    _ensure_fx_instruments(conn, [leg["pair_name"] for leg in cross_legs] + [o["pair"] for o in option_rows]
+                           + [leg["pair_name"] for leg in option_legs])
     for leg in cross_legs:
         key = (leg["instrument_id"], "SPOT")
         if key not in seen:
@@ -324,7 +407,12 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
         if (o["instrument_id"], "FWD_OUTRIGHT", o["expiry"]) not in seen:
             seen.add((o["instrument_id"], "FWD_OUTRIGHT", o["expiry"]))
             out.append(RequestRow(o["instrument_id"], o["bbg_ticker"], o["expiry"], "FWD_OUTRIGHT"))
-    fut_rows = conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of_date}).fetchall()
+    for leg in option_legs:
+        key = (leg["instrument_id"], "SPOT")
+        if key not in seen:
+            seen.add(key)
+            out.append(RequestRow(leg["instrument_id"], leg["bbg_ticker"], as_of_date, "SPOT"))
+    fut_rows =conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of_date}).fetchall()
     for instrument_id, ticker, settle in fut_rows:
         if (instrument_id, "FUTURE_PX", settle) not in seen:
             seen.add((instrument_id, "FUTURE_PX", settle))

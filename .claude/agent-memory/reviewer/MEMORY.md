@@ -9,3 +9,4 @@
 - [Broad repo review 2026-09-16](review-findings-broad-2026-09-16.md) — post-BUILD_PLAN.md pass: CRITICAL delta >= vs > conflation in exposure_adapter.py; ladder.py now dead code for UI
 - [Upload review 2026-09-16, 2 passes](review-findings-upload-blotter-2026-09-16.md) — pass1 dual-format then pass2 blotter-only pivot; no criticals either pass; item 59 gap confirmed real
 - [Rates-vol review](review-findings-rates-vol.md) — 2026-09-17 swaption/cap/SABR/Bermudan HW pricer (Phase 6 options_calc merge): no criticals, sign/DV01/marks_official all clean
+- [Guards, digitals, expiry mark, IRS direction](review-findings-2026-09-18-guards-digitals-expiry-irs.md) — 2026-09-18 commit 184d56d: no criticals; 6 open follow-ups (stale pre-fix digital marks, silent blank rebuilds, expiry-day delta drift)

@@ -2,7 +2,9 @@
 
 `mark_inventory(conn, as_of)` lists exactly the marks `data/bloomberg/live.py::build_requests`
 would ask Bloomberg for on `as_of` (one SPOT per open FX pair, one FWD_OUTRIGHT per open FX
-leg's own settle_date, one FUTURE_PX per open future at its own expiry) and reports what is
+leg's own settle_date, one FUTURE_PX per open future at its own expiry, and for each open FX
+option its pair's SPOT, a FWD_OUTRIGHT at its expiry and the SPOT of the USD-conversion pairs
+of its base and quote currency) and reports what is
 actually in `marks` for each: OFFICIAL (present in `marks_official` -- since 2026-09-18 this
 includes a BBG_INTERP row for FWD_OUTRIGHT when no BBG_BFXFORWARD row exists for the same key,
 data/ingest/schema.py's OFFICIAL_FALLBACK_SOURCE, so INTERP status below is not reachable for
@@ -30,35 +32,46 @@ STATUS_MANUAL = "MANUAL"
 STATUS_MISSING = "MISSING"
 
 
-def _option_needed_marks(conn: sqlite3.Connection, as_of: str) -> List[dict]:
-    """FX_OPTION SPOT/FWD_OUTRIGHT needs, from `data.bloomberg.live.option_needed_marks`
-    when that function exists -- looked up via getattr so this module never hard-depends
-    on a live.py function that may not have landed in this working tree yet (2026-09-18:
-    landed on origin/main as `option_needed_marks`, public, already returning exactly
-    [{instrument_id, settle_date, mark_type}] -- one SPOT per open FX_OPTION pair, one
-    FWD_OUTRIGHT at each open option's own expiry -- so no reshaping is needed here).
-    Returns `[]`, unchanged from before this integration, when the function is absent."""
+def _option_needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False) -> List[dict]:
+    """FX_OPTION needs, from `data.bloomberg.live.option_needed_marks` when that function
+    exists -- looked up via getattr so this module never hard-depends on a live.py
+    function that may not have landed in this working tree yet. It returns exactly
+    [{instrument_id, settle_date, mark_type}]: one SPOT per open FX_OPTION pair, one
+    FWD_OUTRIGHT at each open option's own expiry, and (2026-09-18) one SPOT per
+    USD-conversion pair the option itself needs (base->USD, quote->USD: EURUSD and USDSEK
+    for a EURSEK option), so a missing conversion spot is named on the diagnostics panel
+    instead of only surfacing as "no SPOT for USD conversion of EUR" on the blotter.
+    `historical=True` (a past close): SPOT only, see live.option_needed_marks.
+    Returns `[]` when the function is absent."""
     from data.bloomberg import live
     fn = getattr(live, "option_needed_marks", None)
     if fn is None:
         return []
-    return list(fn(conn, as_of))
+    return list(fn(conn, as_of, historical=historical))
 
 
-def _needed_marks(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False) -> List[dict]:
     """Same (instrument_id, settle_date, mark_type) set as live.build_requests, without
     requiring blpapi (RequestRow construction there is Bloomberg-request specific).
 
     Includes one SPOT per USD-conversion pair an open cross's legs need
     (live._cross_usd_legs, 2026-09-17) even when no instrument row backs it: a cross like
-    EURSEK with no direct EURUSD/USDSEK trade must still show that gap here (MISSING,
-    forever, until an instrument is added or the pair is traded directly) rather than
-    silently never asking -- the same reasoning live.build_requests uses, shared via that
-    one function so the two definitions of "needed" can never drift apart.
+    EURSEK with no direct EURUSD/USDSEK trade must still show that gap here (MISSING
+    until a writable pull or backfill creates the pair's instrument row and writes the
+    mark) rather than silently never asking -- the same reasoning live.build_requests
+    uses, shared via that one function so the two definitions of "needed" can never
+    drift apart.
 
-    Also includes FX_OPTION pair SPOT/FWD_OUTRIGHT needs via `_option_needed_marks`
-    (2026-09-18), which calls `live.option_needed_marks` when it exists -- same "call
-    live, don't reimplement" discipline, so this can never drift from build_requests."""
+    Also includes FX_OPTION needs via `_option_needed_marks` (2026-09-18): the option
+    pair's SPOT and FWD_OUTRIGHT at expiry, and the SPOT of the option's own
+    USD-conversion pairs -- same "call live, don't reimplement" discipline, so this can
+    never drift from build_requests.
+
+    `historical=True` is what a PAST close needed (close_completeness, backfill.backfill):
+    identical for forwards and futures; for options it is SPOT only -- pair and
+    USD-conversion pairs, for every option open that day up to and including its expiry
+    date, whether or not the ledger has realised it since (live.option_needed_marks says
+    why). The default is the live request list, unchanged."""
     from data.bloomberg.live import _OPEN_FX_SQL, _OPEN_FUTURE_SQL, _cross_usd_legs
     out, seen = [], set()
     for instrument_id, _ticker, settle in conn.execute(_OPEN_FX_SQL, {"as_of": as_of}):
@@ -73,7 +86,7 @@ def _needed_marks(conn: sqlite3.Connection, as_of: str) -> List[dict]:
         if key not in seen:
             seen.add(key)
             out.append({"instrument_id": leg["instrument_id"], "settle_date": as_of, "mark_type": "SPOT"})
-    for item in _option_needed_marks(conn, as_of):
+    for item in _option_needed_marks(conn, as_of, historical=historical):
         key = (item["instrument_id"], item["settle_date"], item["mark_type"])
         if key not in seen:
             seen.add(key)
@@ -170,14 +183,21 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str) -> pd.Dat
     every forward's LTD(t) was unpriced -- found live on the Bloomberg PC's first launch,
     where the header's period cards silently excluded the whole FX book on every
     reference date. `needed == 0` still reports `complete = False` (nothing to confirm
-    against), unchanged from before this fix."""
+    against), unchanged from before this fix.
+
+    Options (2026-09-18): a close needs the closing SPOT of each option's pair and of its
+    USD-conversion pairs, for every day the option was open including its expiry date --
+    `_needed_marks(..., historical=True)`, the set `backfill.backfill` fills. It does not
+    need a forward at the option's expiry: nothing prices an option on a past date, and
+    the backfill cannot build one for a pair held only through options, so requiring it
+    left every such day incomplete (and re-requested from Bloomberg) forever."""
     from data.bloomberg.backfill import business_days
     from datetime import date as _date
     days = business_days(_date.fromisoformat(start), _date.fromisoformat(end))
     rows = []
     for d in days:
         day = d.isoformat()
-        needed_items = _needed_marks(conn, day)
+        needed_items = _needed_marks(conn, day, historical=True)
         present = 0
         missing = []
         for item in needed_items:

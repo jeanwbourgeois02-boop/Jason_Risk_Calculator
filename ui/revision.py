@@ -9,19 +9,46 @@ seconds after an upload.
 
 Two `dcc.Store`s, both published by one cheap poll (`POLL_MS`):
 
-  DATA_REVISION_ID  the database FILE changed (trades or marks). Header, Ladder and
-                    Market data listen to it; the Blotter's Total book / Futures tables
-                    refresh their rows in place from it (filters, sort and page are
-                    kept) and its FX / Rates / Options / Bundles views re-render.
-  BOOK_REVISION_ID  the TRADE SET changed (an upload, a manually booked or deleted
-                    trade, option terms typed in). The Blotter rebuilds its current
-                    sub-tab from it, since its filter options depend on the trades.
+  DATA_REVISION_ID  the database FILE changed (trades, marks, option terms, a swap's
+                    direction -- anything). Everything that shows a figure listens to
+                    it and refreshes IN PLACE: the header, the Ladder, Market data, the
+                    Blotter's Total book / Futures rows (filters, sort and page are
+                    kept), the Options and Rates tables (their own modules:
+                    `ui.tabs.options._render`, `ui.tabs.rates._refresh`), the P&L strip
+                    above those two tables and the Blotter's banners (missing option
+                    terms, stored values that are not numbers). Only the Blotter's FX
+                    and Bundles views, which are one static block, are rebuilt on it.
+  BOOK_REVISION_ID  the book's fingerprint moved (`book_signature`): a trade added,
+                    replaced or deleted, but ALSO option terms typed in (it sums the
+                    strikes) and a swap's pay/receive flipped (it sums signed
+                    quantities). Publishers: this poll, `uploads._confirm`,
+                    `ui.tabs.options` (Save in the terms editor) and `ui.tabs.rates`
+                    (a Direction set).
+
+What rebuilds a Blotter sub-tab (2026-09-18). Tearing a sub-tab down and building it
+again resets whatever the user is doing in it -- a strike half typed into an Options
+cell, a Direction dropdown held open -- and the first thing the user does after a
+restart is type three strikes and flip three swaps in a row. So `ui.tabs.blotter._update`
+rebuilds on a book revision only when the TRADE SET really moved: it compares
+`trade_set_signature` -- blind to option terms and to the SIGN of a quantity or a leg --
+with the one the content on screen was built from (kept in the page, per browser tab).
+A genuine book change (an upload, a manual trade booked or deleted) still rebuilds; a
+saved term or a flipped direction is, for the Blotter, a data revision like any other,
+and everything that depends on it refreshes in place. The decision is taken THERE, not by
+the publishers, on purpose: Dash fires a store's listeners even when a callback sets it to
+the value it already holds (checked in a real browser, Dash 4.4.1), so a publisher that
+re-publishes an unchanged book signature would otherwise still cause a rebuild. A
+callback that publishes to a store whose value may not have moved should go through
+`publish_if_changed`.
 
 The poll costs one `os.stat` per tick and opens the database only when the file has
 actually changed. A change is published once the file has been quiet for a whole tick
 (`decide`), so a pull that lands as dozens of write batches over several seconds causes
 ONE redraw when it settles rather than one per batch. `uploads._confirm` publishes both
-revisions itself, immediately, so an upload never waits for the poll.
+revisions itself, immediately, so an upload never waits for the poll; so do the terms
+editor's Save and a Direction set, and `ui.tabs.blotter` publishes the data revision the
+moment an Options cell edit has been saved, so the banner and the figures never wait 5-10
+seconds for the poll to notice.
 
 Nothing here reads a mark or computes a number; every listener re-runs its own
 unchanged render.
@@ -53,11 +80,44 @@ def file_signature(db_path: Union[str, Path]) -> str:
     return f"{st.st_mtime_ns}:{st.st_size}"
 
 
+def trade_set_signature(db_path: Union[str, Path]) -> str:
+    """A fingerprint of the TRADE SET alone: how many trades and legs there are and how
+    big, blind to the sign of a quantity or a leg amount and to option terms. It moves on
+    an upload and on a manually booked or deleted trade; it does NOT move when a strike,
+    type or payoff is typed in, nor when a swap's pay/receive is flipped (which negates
+    `trades.quantity` and both legs and changes nothing else it reads). This is what the
+    Blotter compares to decide whether a sub-tab must be rebuilt (module docstring). ""
+    when the database cannot be read right now -- the caller then rebuilds, the safe side."""
+    try:
+        conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return ""
+    try:
+        trades = conn.execute(
+            "SELECT COUNT(*), TOTAL(ABS(quantity)), TOTAL(price), MAX(trade_date) FROM trades").fetchone()
+        legs = conn.execute("SELECT COUNT(*), TOTAL(ABS(amount)) FROM trade_legs").fetchone()
+        return repr((tuple(trades), tuple(legs)))
+    except sqlite3.Error:
+        return ""
+    finally:
+        conn.close()
+
+
+def publish_if_changed(now: Optional[str], current: Optional[str]):
+    """`now` when it is a real signature that differs from what the store holds, else
+    `no_update`. For a callback that publishes to a revision store: Dash fires the store's
+    listeners even when it is set to the value it already has, so an unchanged signature
+    must not be returned as if it were news."""
+    return now if now and now != current else no_update
+
+
 def book_signature(db_path: Union[str, Path]) -> str:
-    """A fingerprint of the trade set: counts and sums that move whenever a trade is
-    added, replaced or deleted, or option terms are typed in. "" when the database
-    cannot be read right now (the caller then leaves the book revision alone and the
-    next tick tries again)."""
+    """A fingerprint of the book as the BOOK revision publishes it: counts and sums that
+    move whenever a trade is added, replaced or deleted, option terms are typed in (the
+    strikes are summed) or a swap's direction is flipped (quantities are summed signed).
+    Wider than the trade set on purpose -- see `trade_set_signature` for the narrower one
+    the Blotter rebuilds on. "" when the database cannot be read right now (the caller
+    then leaves the book revision alone and the next tick tries again)."""
     try:
         conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
     except sqlite3.Error:

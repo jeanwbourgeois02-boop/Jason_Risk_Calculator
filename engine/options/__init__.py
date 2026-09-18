@@ -274,6 +274,23 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   time (payoff fixed at 10:00 NY / 15:00 Tokyo, mark uses the day's last official spot,
   and the app's day is the New York date), and the double count if an exercised option
   is delivered as a spot trade booked at the strike.
+- Reviewer follow-ups (options-pricer, landed 2026-09-18). **W-1:**
+  ``store.purge_old_unit_cash_payoff_marks`` -- ONE-TIME, idempotent, first thing in
+  ``price_all_and_store``: deletes every QL_OPTIONS_PRICER mark (seven types, all dates)
+  and the ``realised_pnl`` rows of every FX_OPTION instrument whose payoff on file is
+  DIGITAL / ONE_TOUCH / NO_TOUCH, because those written before the units audit are 1/S of
+  the truth, stay official for their dates, and would put a jump that never happened
+  into Daily / 5d / MTD; then records itself in a defensively-created
+  ``options_migrations(name, applied_at)`` table (no meta/settings table exists in the
+  schema) so it never runs again -- marks written afterwards survive. Vanilla-type marks,
+  MANUAL rows and equity digitals are never touched. **W-2:** until an option is frozen
+  from an expiry-dated mark, the catch-up RECOMPUTES the expiry-dated intrinsic from the
+  official SPOT on file NOW for the expiry date and rewrites the marks when the payoff
+  differs (last live pull 151.90 vs the close 152.30 on a 152 digital put), so mark and
+  SPOT agree when the ledger freezes; once frozen from it, both are left alone. The
+  payoff is therefore the one at the official spot on file at the moment of the first
+  freeze -- still not the cut. **S-3:** the catch-up reads the stored PREMIUM from
+  ``marks_official``.
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

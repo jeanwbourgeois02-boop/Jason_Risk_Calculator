@@ -6,9 +6,15 @@ from ui import launch
 
 
 @pytest.fixture(autouse=True)
-def _no_live_feed(monkeypatch):
-    """The launcher starts the Bloomberg feed; keep tests off the network / status file."""
+def _no_live_feed(monkeypatch, tmp_path):
+    """The launcher starts the Bloomberg feed; keep tests off the network / status file.
+
+    And off the user's live database (2026-09-18): `launch.main` calls
+    `create_app(start_feed=True)` with no path, which resolves to RISK_DB or
+    data/raw/risk.db and runs `ensure_schema` on it -- DDL, the column migration and the
+    retired-source purge, on the real book, every time anyone ran this file."""
     monkeypatch.setenv("RISK_LIVE", "0")
+    monkeypatch.setenv("RISK_DB", str(tmp_path / "risk.db"))
 
 
 def _me():

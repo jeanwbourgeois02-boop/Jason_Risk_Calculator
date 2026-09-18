@@ -652,7 +652,7 @@ def test_num_refuses_anything_that_is_not_a_whole_number_cell(cell):
 @pytest.mark.parametrize("cell,value", [
     ("1,137,580.00", 1137580.0), ("35,000,000", 35e6), ("0.00579", 0.00579), ("(625,000,000)", -625e6),
     ("-142,500.00", -142500.0), ("142,500.00-", -142500.0), ("−5", -5.0), ("$1,000", 1000.0), ("USD 5", 5.0),
-    ("5 USD", 5.0), ("(USD 5)", -5.0), ("3.98%", 3.98), (" 7.24 ", 7.24), ("1e5", 1e5), ("1.5E+06", 1.5e6),
+    ("5 USD", 5.0), ("(USD 5)", -5.0), (" 7.24 ", 7.24), ("1e5", 1e5), ("1.5E+06", 1.5e6),
     ("0,00579", 0.00579), ("1.234.567,89", 1234567.89), ("1 000 000", 1e6), ("1'000'000.5", 1000000.5),
     (".5", 0.5), ("+5", 5.0), ("0", 0.0), (7, 7.0), (7.24, 7.24),
 ])
@@ -955,7 +955,6 @@ def test_a_strike_entered_in_the_app_survives_a_re_upload_of_the_same_file(tmp_p
 @pytest.mark.parametrize("overrides,decided_by", [
     ({"Notional": "(625,000,000)"}, "Notional '(625,000,000)'"),
     ({"Quantity": "-625"}, "Quantity '-625'"),
-    ({"Gross Amnt/Principal": "-625,000,000"}, "Gross Amnt/Principal '-625,000,000'"),
     ({"Current Face": "(625,000,000)"}, "Current Face '(625,000,000)'"),
     ({"Original Face": "625,000,000-"}, "Original Face '625,000,000-'"),
     ({"Side": "Sell"}, "Side 'Sell'"),
@@ -977,12 +976,52 @@ def test_irs_every_explicit_short_signal_reads_as_receive_fixed(tmp_csv, overrid
     assert d.direction == "RECEIVE" and not d.defaulted and decided_by in d.decided_by
 
 
+def test_percent_sign_is_handled_per_column_never_silently(tmp_csv):
+    """S-4: '%' used to be stripped everywhere. FixedRate keeps its meaning (3.98 = 3.98 %),
+    an option Price is a fraction so '0.58%' = 0.0058 with a warning, anywhere else it is
+    not a number."""
+    assert math.isnan(blotter._num("3.98%"))
+    assert blotter._num("3.98%", blotter.PERCENT_KEEP) == pytest.approx(3.98)
+    assert blotter._num("0.58%", blotter.PERCENT_FRACTION) == pytest.approx(0.0058)
+    res = blotter.parse(tmp_csv([_irs_row(FixedRate="3.98%")]))
+    assert not res.rejects and not res.warnings and res.trades[0].price == pytest.approx(0.0398)
+    res = blotter.parse(tmp_csv([_option_row(Price="0.579%")]))
+    assert not res.rejects and res.trades[0].price == pytest.approx(0.00579)
+    assert "percent sign" in res.warnings[0].message
+    res = blotter.parse(tmp_csv([_future_row(Price="7716%")]))
+    assert "Price '7716%' is not a number" in res.rejects[0].reason
+
+
+def test_every_rebuild_warns_blank_or_not_and_a_date_serial_price_is_caught(tmp_csv):
+    """W-3: a BLANK cell rebuilt from another column used to be silent. The reviewer's
+    case: option Quantity blank, NetInvoice 204,150 (a fee inside) -> notional 35,259,067."""
+    res = blotter.parse(tmp_csv([_option_row(Quantity="", NetInvoice="204,150.00")]))
+    assert res.trades[0].quantity == pytest.approx(204_150 / 0.00579)
+    assert "Quantity is blank" in res.warnings[0].message and "NetInvoice" in res.warnings[0].message
+    res = blotter.parse(tmp_csv([_future_row(Quantity="", Notional="50")]))
+    assert "Quantity is blank" in res.warnings[0].message and "Notional / 50" in res.warnings[0].message
+    res = blotter.parse(tmp_csv([_forward_row(**{"BuyCurrency Amount": ""}, Quantity="1,137,580.00")]))
+    assert "BuyCurrency Amount is blank" in res.warnings[0].message and "Quantity" in res.warnings[0].message
+    res = blotter.parse(tmp_csv([_irs_row(Notional="", Quantity="625")]))
+    assert "Notional is blank" in res.warnings[0].message
+    assert not blotter.parse(tmp_csv([_forward_row()])).warnings          # the normal path stays quiet
+    # an Excel date serial in Price is a fine float: only the consistency check sees it
+    serial = _currency_spot_row(Price="46227", NetInvoice="376,879.45")
+    res = blotter.parse(tmp_csv([serial]))
+    assert not res.rejects and "odd one out" in res.warnings[0].message
+    assert res.trades[0].price == pytest.approx(376_879.45 / 273_204.00)
+    res = blotter.parse(tmp_csv([_currency_spot_row(Price="46227", Quantity="")]))   # not doubly confirmed: kept
+    assert res.trades[0].price == 46227.0 and "kept as read" in res.warnings[0].message
+
+
 @pytest.mark.parametrize("net_invoice", ["(1,250.00)", "-1,250.00", "1,250.00-"])
 def test_irs_negative_netinvoice_is_an_upfront_cash_amount_not_a_direction(tmp_csv, net_invoice):
     """Coordinator decision 2026-09-18: on a swap NetInvoice is cash paid or received up
     front, so its sign says nothing about pay/receive fixed. A payer who paid a fee stays
     a (defaulted) payer, and never collides with explicit 'Pay Fixed' wording."""
-    assert "NetInvoice" not in blotter.IRS_SIGN_COLUMNS
+    assert blotter.IRS_SIGN_COLUMNS == ("Notional", "Quantity", "Current Face", "Original Face")
+    gross = blotter.parse(tmp_csv([_irs_row(**{"Gross Amnt/Principal": net_invoice})]))   # W-6: cash too
+    assert gross.trades[0].quantity == pytest.approx(625_000_000.0) and gross.irs_directions["600"].defaulted
     res = blotter.parse(tmp_csv([_irs_row(NetInvoice=net_invoice)]))
     assert not res.rejects and res.trades[0].quantity == pytest.approx(625_000_000.0)
     assert res.irs_directions["600"].defaulted

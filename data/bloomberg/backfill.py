@@ -11,7 +11,12 @@ dated that day:
     (`traded_pairs`, mirrors `live._cross_usd_legs`; USD-pairs-only until 2026-09-18,
     which meant a cross like EURSEK never got a SPOT close backfilled at all and could
     never be frozen by realise_settled once it settled) -- one HistoricalDataRequest per
-    day (unchanged mechanism, wider ticker set).
+    day (unchanged mechanism, wider ticker set). Also (2026-09-18) every FX option's pair
+    and the option's own USD-conversion pairs, for every day the option was open
+    including its expiry date (`spot_only_pair_names`). SPOT only for options: no
+    historical forward at the expiry and no historical vol, since nothing prices an
+    option on a past date -- the closes are what the expiry-day catch-up's payoff and the
+    ledger's base->USD conversion read.
   - FWD_OUTRIGHT (2026-09-18): for every FX leg open on that day (trade_date <= day <=
     ... <= settle_date), at the leg's own settle_date. A leg settling on or before that
     day is marked at that day's own SPOT close (same rule the live feed uses). Otherwise
@@ -104,6 +109,15 @@ WHERE i.asset_class = 'FX' AND t.trade_date <= :end AND l.settle_date >= :start
   AND i.base_ccy != 'USD' AND i.quote_ccy != 'USD'
 """
 
+# FX options open at any point in the range, expiry date included (`>= :start`), realised
+# since or not -- the range form of live._OPTION_PAIRS_OPEN_ON_DAY_SQL, which says why the
+# realised filter must not apply to a past close.
+_OPEN_OPTIONS_RANGE_SQL = """
+SELECT DISTINCT i.base_ccy, i.quote_ccy
+FROM trades_official t JOIN instruments i USING (instrument_id)
+WHERE t.product = 'FX_OPTION' AND t.trade_date <= :end AND i.expiry_date >= :start
+"""
+
 
 def business_days(start: date, end: date) -> List[date]:
     """Monday-Friday dates from start to end inclusive."""
@@ -132,23 +146,48 @@ def traded_pairs(conn: sqlite3.Connection, start: date, end: date) -> List[tuple
 
     Now returns every FX instrument with a leg open at any point in [start, end] --
     crosses included -- via the same range query the forward-curve history uses
-    (`_OPEN_FX_LEGS_RANGE_SQL`), PLUS every USD-conversion pair a cross's legs need
-    (mirrors `live._cross_usd_legs`, unioned across the whole range) so a cross's own USD
-    legs' SPOT (needed for delta/P&L USD conversion, not just the cross's own outright)
-    is backfilled too. A cross-conversion pair with no instrument row on file is skipped
-    here exactly as `live._cross_usd_legs` skips it for the live pull (`write_marks`
-    can never persist an unknown instrument_id; this module never inserts one)."""
+    (`_OPEN_FX_LEGS_RANGE_SQL`), PLUS every pair `spot_only_pair_names` lists: the
+    USD-conversion pairs a cross's legs need (a cross's own USD legs' SPOT, needed for
+    delta/P&L USD conversion, not just the cross's own outright) and, since 2026-09-18,
+    every FX option's pair with the option's own USD-conversion pairs. A listed pair
+    with no instrument row on file is skipped (`write_marks` can never persist an unknown
+    instrument_id); `backfill()` creates those rows first, so that only happens on a
+    connection that cannot write."""
     legs = conn.execute(_OPEN_FX_LEGS_RANGE_SQL, {"start": start.isoformat(), "end": end.isoformat()}).fetchall()
     pairs = {(instrument_id, ticker) for instrument_id, ticker, _settle in legs}
-    from data.bloomberg.live import _MAJOR_QUOTE_CCYS
-    for base, quote in conn.execute(_OPEN_CROSS_LEG_CCYS_RANGE_SQL, {"start": start.isoformat(), "end": end.isoformat()}):
-        for ccy in (base, quote):
-            pair_name = f"{ccy}USD" if ccy in _MAJOR_QUOTE_CCYS else f"USD{ccy}"
-            row = conn.execute("SELECT instrument_id, bbg_ticker FROM instruments WHERE instrument_id = ?",
-                               (pair_name,)).fetchone()
-            if row is not None:
-                pairs.add((row[0], row[1]))
+    for pair_name in spot_only_pair_names(conn, start, end):
+        row = conn.execute("SELECT instrument_id, bbg_ticker FROM instruments WHERE instrument_id = ?",
+                           (pair_name,)).fetchone()
+        if row is not None:
+            pairs.add((row[0], row[1]))
     return sorted(pairs)
+
+
+def spot_only_pair_names(conn: sqlite3.Connection, start: date, end: date) -> List[str]:
+    """Plain pair names whose closing SPOT [start, end] needs although no FX leg of that
+    pair need be open in it -- SPOT only, never a forward curve or a vol:
+
+      * the USD-conversion pairs of every cross with a leg open in the range (EURSEK ->
+        EURUSD, USDSEK), the range form of `live._cross_usd_legs`;
+      * (2026-09-18) for every FX option open at any point in the range -- trade date to
+        expiry date INCLUSIVE, realised since or not -- its own pair and its base->USD /
+        quote->USD pairs (`live.option_spot_pair_names`). `traded_pairs` looked at FX legs
+        only, so a pair held only through options never got a historical close. That
+        matters on a missed expiry day: engine/options writes the option's payoff on a
+        later pull FROM THE EXPIRY DATE'S CLOSING SPOT (the catch-up), and the ledger
+        converts it to USD at the base->USD SPOT of that same date; without both closes
+        an expired option stays unrealisable. The other open days' conversion closes let
+        a PREMIUM written by a live pull on that day convert to USD.
+
+    Orientation is `live._usd_pair_name` throughout (one table, in live.py)."""
+    from data.bloomberg.live import _usd_pair_name, option_spot_pair_names
+    params = {"start": start.isoformat(), "end": end.isoformat()}
+    names = set()
+    for base, quote in conn.execute(_OPEN_CROSS_LEG_CCYS_RANGE_SQL, params):
+        names.update(_usd_pair_name(ccy) for ccy in (base, quote))
+    for base, quote in conn.execute(_OPEN_OPTIONS_RANGE_SQL, params):
+        names.update(option_spot_pair_names(base, quote))
+    return sorted(names)
 
 
 def close_stamp(day: date) -> str:
@@ -268,9 +307,16 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     pull_marks.open_session. All are injectable so the loop is testable without blpapi."""
     from data.ingest.schema import connect
     from data.bloomberg.inventory import close_completeness, _needed_marks
+    from data.bloomberg.live import _ensure_fx_instruments
     realise_settled = _import_realise_settled()
     conn = connect(Path(db_path))
     try:
+        # A conversion pair or an option's pair may never have been traded outright, and
+        # the live pull only creates the plain pair row for what is open TODAY: a cross
+        # that settled, or an option that expired, before this PC first connected would
+        # otherwise have its closes fetched by nobody and written nowhere (write_marks
+        # skips an unknown instrument). Same row the live pull creates, same function.
+        _ensure_fx_instruments(conn, spot_only_pair_names(conn, start, end))
         pairs = traded_pairs(conn, start, end)
         has_futures = conn.execute(
             "SELECT 1 FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id) "
@@ -358,7 +404,10 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                 # settling on or before this day is marked at this day's own SPOT (same
                 # rule the live feed uses); otherwise interpolated from the historical
                 # tenor curve, never extrapolated beyond the last tenor point.
-                needed = _needed_marks(conn, day)
+                # historical=True: what a PAST close needs -- for an FX option that is
+                # closing SPOT only (pair + USD-conversion pairs, covered by spot_rows
+                # above), never a forward at its expiry (inventory._needed_marks).
+                needed = _needed_marks(conn, day, historical=True)
                 fwd_rows, fut_rows, missing_marks = [], [], []
                 for item in needed:
                     instrument_id, settle, mark_type = item["instrument_id"], item["settle_date"], item["mark_type"]
@@ -406,12 +455,11 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                          "mark_type": "FUTURE_PX", "value": float(settle_value), "source": SRC_FUTURE,
                                          "snapped_at": close_stamp(d)})
                     # SPOT items in `needed` are already covered by spot_rows above:
-                    # traded_pairs() (2026-09-18) now includes every open FX pair
-                    # (crosses included) plus every cross's USD-conversion legs, the same
-                    # superset _needed_marks' SPOT entries are drawn from. An FX_OPTION-
-                    # only pair's SPOT (no direct forward/spot trade in that pair at all)
-                    # is a separate, still-open gap -- neither traded_pairs() nor
-                    # _OPEN_FX_LEGS_RANGE_SQL look at FX_OPTION trades at all.
+                    # traded_pairs() (2026-09-18) includes every open FX pair (crosses
+                    # included), every cross's USD-conversion legs, and every FX option's
+                    # pair with its own USD-conversion pairs -- the same superset
+                    # _needed_marks' SPOT entries are drawn from. A close Bloomberg did
+                    # not return is named under `missing_pairs`.
 
                 all_rows = spot_rows + fwd_rows + fut_rows
                 new_rows = all_rows if overwrite else _drop_already_official(conn, all_rows)

@@ -39,8 +39,16 @@ their own callbacks, both registered from `register_callbacks` here (Rates' Dire
 dropdown did nothing until it was). Both refresh their own table in place from the
 revision stores, so `_update` no longer rebuilds those sub-tabs on a marks-only revision
 (`_SELF_REFRESHING_SCOPES`); the P&L strip above each table, built here, follows through
-`_register_strip_refresh`. A book revision, a date change and a sub-tab change still
-rebuild them. The Options strip (`options_strip`) shows only the cards that have a value:
+`_register_strip_refresh`. A genuine book change (an upload, a manual trade booked or
+deleted), a date change and a sub-tab change still rebuild them; a saved option term or a
+flipped swap direction does not, although both are published as book revisions:
+`_update` compares `ui.revision.trade_set_signature` with the one the content on screen
+was built from (`BUILT_TRADE_SET_ID`), so typing three strikes or flipping three swaps in
+a row is never interrupted by a rebuild. The banners (missing option terms, stored values
+that are not numbers) sit in `NOTICES_ID`, always in the page and refreshed in place on
+every revision (`_refresh_notices`), and a saved Options cell publishes the data revision
+at once (`_publish_option_cell_edit`), so the banner drops an option the moment its strike
+is saved. The Options strip (`options_strip`) shows only the cards that have a value:
 a card waiting for an EARLIER close's option marks -- which exist only for the days the
 app ran with Bloomberg -- is left out and named in one caption line under the row
 (`options_hidden_cards`); a card that is "n/a" for any other reason stays, with its
@@ -116,7 +124,13 @@ from ui.tabs.blotter_pricing import (
     pricing_snapshot,
     row_scoped_headline,
 )
-from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
+from ui.revision import (
+    BOOK_REVISION_ID,
+    DATA_REVISION_ID,
+    file_signature,
+    publish_if_changed,
+    trade_set_signature,
+)
 from ui.tabs.controls import build_date_picker
 from ui.tabs.formatting import format_cell
 
@@ -126,6 +140,12 @@ SUBTABS_ID = "blotter-subtabs"
 CONTENT_ID = "blotter-content"
 TITLE_ID = "blotter-title"
 TODAY_BUTTON_ID = "blotter-today-button"
+# Always in the page (`build_layout`), never inside the rebuilt content (2026-09-18):
+# the banners, so they refresh in place on every revision instead of only when a sub-tab
+# is rebuilt, and the trade-set signature the content on screen was built from, which
+# `_update` reads back to tell a genuine book change from a saved term or flipped swap.
+NOTICES_ID = "blotter-notices"
+BUILT_TRADE_SET_ID = "blotter-built-trade-set"
 
 # Kept for the pre-2026-09-15 tests that still exercise a single detail table by id.
 TABLE_CONTAINER_ID = "blotter-table-container"
@@ -159,10 +179,11 @@ _MARKS_REBUILD_SCOPES = ("bundles", "fx")
 # (`ui.tabs.options._render` / `_headline`, `ui.tabs.rates._refresh`), so they left the
 # list above on 2026-09-18: a wholesale rebuild on every 2-minute Bloomberg pull reset the
 # Options terms editor's dropdown, could wipe a strike being typed into a cell and closed a
-# Direction dropdown the user had open. A BOOK revision (upload, booking, terms or a
-# direction saved) and a date or sub-tab change still rebuild them. The one piece of those
-# sub-tabs built HERE, the P&L strip above the table, follows new marks through
-# `_register_strip_refresh`.
+# Direction dropdown the user had open. A genuine book change (an upload, a manual trade
+# booked or deleted -- `_update` compares `revision.trade_set_signature`) and a date or
+# sub-tab change still rebuild them; a saved term or a flipped direction does NOT, although
+# it is published as a book revision too. The one piece of those sub-tabs built HERE, the
+# P&L strip above the table, follows new marks through `_register_strip_refresh`.
 _SELF_REFRESHING_SCOPES = ("options", "rates")
 # "rates" (2026-09-15) and "options" (2026-09-17) are both real views now -- see
 # scope_layout and the module docstring. Kept (empty) so the placeholder path stays
@@ -800,16 +821,30 @@ def missing_terms_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
                     ])
 
 
-def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """One sub-tab's content, with the missing-option-terms banner and the
-    stored-values-that-are-not-numbers banner (each only if it has something to say) on
-    top of the scope body built by `_scope_layout_body`. With neither, the body is
-    returned as it is -- no extra nesting."""
-    body = _scope_layout_body(scope, conn, as_of)
-    notices = [n for n in (
+def blotter_notices(conn: sqlite3.Connection) -> list:
+    """The Blotter's banners, in display order, each only if it has something to say:
+    stored values that are not numbers, then options with no strike on file. [] is the
+    normal case. One builder for the always-present container the page refreshes in place
+    (`NOTICES_ID`, `_refresh_notices`) and for `scope_layout`'s direct callers."""
+    return [n for n in (
         _safe_section("Stored values notice", lambda: bad_values_notice(conn)),
         _safe_section("Option terms notice", lambda: missing_terms_notice(conn)),
     ) if n is not None]
+
+
+def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str, with_notices: bool = True) -> html.Div:
+    """One sub-tab's content, with the missing-option-terms banner and the
+    stored-values-that-are-not-numbers banner (each only if it has something to say) on
+    top of the scope body built by `_scope_layout_body`. With neither, the body is
+    returned as it is -- no extra nesting.
+
+    `with_notices=False` is how the page itself calls it (`_update`, 2026-09-18): there
+    the banners live in `NOTICES_ID`, above the content and outside it, so they follow
+    every revision in place -- a saved strike leaves the banner at once -- instead of
+    being frozen into the sub-tab until its next rebuild (and never, under Manual entry,
+    which is not rebuilt on a revision at all)."""
+    body = _scope_layout_body(scope, conn, as_of)
+    notices = blotter_notices(conn) if with_notices else []
     if not notices:
         return body
     return html.Div([*notices, body])
@@ -956,6 +991,12 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
                     selected_className="subtab--selected")
             for s in SCOPE_ORDER
         ]),
+        # Banners (missing option terms, stored values that are not numbers): always in
+        # the page and refreshed in place on every revision (`_refresh_notices`), not
+        # frozen into a sub-tab's content until its next rebuild.
+        html.Div(id=NOTICES_ID),
+        # The trade-set signature the content below was built from (`_update`).
+        dcc.Store(id=BUILT_TRADE_SET_ID),
         html.Div(id=CONTENT_ID),
     ])
 
@@ -979,38 +1020,61 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     @app.callback(
         Output(CONTENT_ID, "children"),
+        Output(BUILT_TRADE_SET_ID, "data"),
         Input(DATE_PICKER_ID, "date"),
         Input(SUBTABS_ID, "value"),
         Input(BOOK_REVISION_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
+        State(BUILT_TRADE_SET_ID, "data"),
     )
-    def _update(as_of_date, scope, _book_rev=None, _data_rev=None):
-        if not as_of_date:
-            return message_box("No as-of date available.")
-        scope = scope or SCOPE_ORDER[0]
+    def _update(as_of_date, scope, _book_rev=None, _data_rev=None, built_trade_set=None):
+        """`(content, trade-set signature it was built from)`; `(no_update, no_update)`
+        when what is on screen stays.
 
-        # No browser reload (ui/revision.py, 2026-09-18). A changed TRADE SET (upload,
-        # manual booking) rebuilds whatever sub-tab is showing. A marks-only change
-        # rebuilds the views that are one static block (FX, Bundles); the Total book and
-        # Futures tables instead refresh their rows in place through `_apply_filters`, so
-        # a Bloomberg pull never resets the user's filters, sort or page, and Options and
-        # Rates refresh their own table and their strip in place
-        # (`_SELF_REFRESHING_SCOPES`), so a pull never resets the terms editor, a cell
-        # being typed into or an open Direction dropdown. The Manual entry form is never
-        # rebuilt under the user's hands.
+        No browser reload (ui/revision.py, 2026-09-18). A changed TRADE SET (an upload, a
+        manual trade booked or deleted) rebuilds whatever sub-tab is showing. A marks-only
+        change rebuilds the views that are one static block (FX, Bundles); the Total book
+        and Futures tables instead refresh their rows in place through `_apply_filters`,
+        so a Bloomberg pull never resets the user's filters, sort or page, and Options and
+        Rates refresh their own table and their strip in place
+        (`_SELF_REFRESHING_SCOPES`). The Manual entry form is never rebuilt under the
+        user's hands.
+
+        A BOOK revision is not taken at its word. It also fires when a strike, type or
+        payoff is saved and when a swap's direction is flipped (`revision.book_signature`
+        sums strikes and signed quantities, and those two publishers send it at once) --
+        exactly the edits the user makes several of in a row, each of which used to tear
+        down the sub-tab he was typing the next one into. So on a revision the trade set
+        is compared with the one this content was built from (`BUILT_TRADE_SET_ID`, held
+        in the page, so it is right per browser tab): unchanged means the revision is, for
+        this view, a data revision. An unreadable database counts as changed."""
         from dash import ctx, no_update
         from dash.exceptions import MissingCallbackContextException
+        if not as_of_date:
+            return message_box("No as-of date available."), no_update
+        scope = scope or SCOPE_ORDER[0]
         try:
             triggered = {t["prop_id"].split(".")[0] for t in (ctx.triggered or [])}
         except MissingCallbackContextException:  # called directly, not by Dash: just render
             triggered = set()
-        if triggered and triggered <= {DATA_REVISION_ID} and scope not in _MARKS_REBUILD_SCOPES:
-            return no_update
-        if triggered and triggered <= {DATA_REVISION_ID, BOOK_REVISION_ID} and scope == "manual":
-            return no_update
-
-        from ui.app import connect_readonly
         db_path = get_db_path()
+        trade_set = None
+        if triggered and triggered <= {DATA_REVISION_ID, BOOK_REVISION_ID}:
+            if scope == "manual":
+                return no_update, no_update
+            book_moved = False
+            if BOOK_REVISION_ID in triggered:
+                trade_set = trade_set_signature(db_path)
+                book_moved = not trade_set or trade_set != built_trade_set
+            if not book_moved and scope not in _MARKS_REBUILD_SCOPES:
+                return no_update, no_update
+        content = _render_content(db_path, as_of_date, scope)
+        if trade_set is None:
+            trade_set = trade_set_signature(db_path)
+        return content, (trade_set or no_update)
+
+    def _render_content(db_path, as_of_date, scope):
+        from ui.app import connect_readonly
         try:
             conn = connect_readonly(db_path)
         except sqlite3.OperationalError as exc:
@@ -1019,7 +1083,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             with pricing_snapshot(conn, f"Blotter {scope}"):  # one view of the marks per render
                 if scope == "bundles":
                     return _safe_section("Bundles", lambda: bundles_layout(conn, as_of_date), conn)
-                return scope_layout(scope, conn, as_of_date)
+                # The banners are in `NOTICES_ID`, outside this content (`_refresh_notices`).
+                return scope_layout(scope, conn, as_of_date, with_notices=False)
         except ImportError as exc:
             return message_box(f"Blotter view not available yet ({exc}).")
         except Exception as exc:  # noqa: BLE001 -- last-resort guard, 2026-09-17
@@ -1204,6 +1269,49 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     for _scope in _SELF_REFRESHING_SCOPES:
         _register_strip_refresh(_scope)
+
+    @app.callback(
+        Output(NOTICES_ID, "children"),
+        Input(DATA_REVISION_ID, "data"),
+        Input(BOOK_REVISION_ID, "data"),
+    )
+    def _refresh_notices(_data_rev=None, _book_rev=None):
+        """The banners, read from the database on page load and on EVERY revision, so the
+        count is never stale: an option leaves the missing-terms banner the moment its
+        strike is saved (the save publishes a revision at once -- the terms editor's Save
+        does it itself, a cell edit through `_publish_option_cell_edit`), whichever sub-tab
+        is showing, Manual entry included, without rebuilding anything. A database that
+        cannot be read right now leaves the banners as they are; the next revision retries."""
+        from dash import no_update
+        from ui.app import connect_readonly
+        try:
+            conn = connect_readonly(get_db_path())
+        except sqlite3.OperationalError:
+            return no_update
+        try:
+            return blotter_notices(conn)
+        except sqlite3.Error:
+            return no_update
+        finally:
+            conn.close()
+
+    @app.callback(
+        Output(DATA_REVISION_ID, "data", allow_duplicate=True),
+        Input(options_ui.EDIT_STATUS_ID, "children"),
+        State(DATA_REVISION_ID, "data"),
+        prevent_initial_call=True,
+    )
+    def _publish_option_cell_edit(_status, current_data_rev):
+        """A Strike / Type / Payoff CELL has just been saved: publish the data revision
+        now. `ui.tabs.options._render` writes the terms and refreshes its own table but
+        publishes nothing, so everything else that depends on the new terms -- the
+        missing-terms banner, the header cards, the strips -- waited 5-10 seconds for the
+        poll to notice the file had changed, with the banner still counting an option the
+        user had just fixed. The edit status line is an OUTPUT of `_render`, so this runs
+        after the save has landed, never before it. Nothing is published when the file did
+        not move (a payoff merely noted until its strike is typed, a refused entry, the
+        sub-tab being opened): Dash would fire every listener even for an unchanged value."""
+        return publish_if_changed(file_signature(get_db_path()), current_data_rev)
 
     # "rates" (ui.tabs.rates), "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17),
     # "options" (ui.tabs.options, Phase 8) and "manual" (ui.tabs.manual_entry) have no

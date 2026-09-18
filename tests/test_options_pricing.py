@@ -2318,12 +2318,12 @@ def test_expiry_day_mark_follows_the_days_last_spot_and_the_day_after_writes_not
     assert len(_pricer_marks(conn, instrument_id)) == 7  # still one row per type: rewritten, not added
 
     before = _pricer_marks(conn, instrument_id)
-    _mark_spot(conn, day_after, EURUSD, 11.40)
-    _mark_spot(conn, EXPIRY, EURUSD, 11.00)  # even a revised expiry-date spot does not reopen the mark
+    _mark_spot(conn, day_after, EURUSD, 11.40)  # the next day's own spot is not the option's business
     single = price_and_store(conn, day_after, "T1")
     assert not single.priced and "is not after as_of" in single.reason
     book = price_all_and_store(conn, day_after)[0]
-    assert not book.priced and book.reason == single.reason  # mark on file: no catch-up, plain skip
+    # The mark on file agrees with the SPOT on file for the expiry date: plain skip, nothing rewritten.
+    assert not book.priced and book.reason == single.reason
     assert _pricer_marks(conn, instrument_id) == before
 
 
@@ -2394,9 +2394,9 @@ def test_catch_up_writes_the_expiry_mark_once_only_with_a_spot_and_clears_a_stal
     assert _realised_trade_ids(conn) == ["T2"]      # T1's stale frozen row is gone; T2's is not this instrument's
     assert not outcomes["T2"].priced and outcomes["T2"].reason.startswith("no strike")
 
-    # (c) Once it exists it is never rewritten, and a row frozen FROM it is left alone.
+    # (c) Once a row is frozen FROM the expiry-dated mark, mark and row are both left alone for good.
     freeze("T1", instrument_id, EXPIRY)
-    _mark_spot(conn, EXPIRY, EURUSD, 10.00)  # even if that date's spot were revised
+    _mark_spot(conn, EXPIRY, EURUSD, 10.00)  # even if that date's spot is revised afterwards
     again = {o.trade_id: o for o in price_all_and_store(conn, later)}["T1"]
     assert not again.priced and again.reason == f"expiry {EXPIRY} is not after as_of {later}"
     assert _option_marks(conn, instrument_id)[EXPIRY]["PREMIUM"] == pytest.approx((11.20 - STRIKE) / 11.20)
@@ -2459,3 +2459,219 @@ def test_expiry_week_end_to_end_the_five_tickets_freeze_at_their_intrinsic_in_do
     # The bought and the sold EURSEK put are the same option: their payoffs cancel, leaving the premium difference.
     net = frozen("EURSEK092326P-197728105")[0] + frozen("EURSEK092326P-197838147")[0]
     assert net == pytest.approx(35_000_000 * (0.005645 - 0.0057) * eurusd_wed)
+
+
+# --------------------------------------------------------------------------- reviewer W-2: expiry mark vs the official SPOT on file
+#
+# The approved rule is "the payoff at the pair's official SPOT of that date". The last
+# live pull of expiry day and the close that later lands for the same date can differ, so
+# until the option is frozen the catch-up recomputes the expiry-dated intrinsic from the
+# SPOT on file NOW and rewrites the marks when the payoff differs.
+
+def _seed_usd_jpy_expiring(conn, payoff, fill, trade_id="T1"):
+    """USDJPY 152 put, USD 2,000,000, expiring 2026-11-19, with the NOTIONAL leg the ledger reads."""
+    instrument_id = _seed_option_trade(conn, trade_id=trade_id, pair="USDJPY", instrument_id=f"USDJPY111926P-{trade_id}",
+                                       strike=152.0, option_type="PUT", payoff=payoff, expiry="2026-11-19",
+                                       quantity=2_000_000.0, price=fill)
+    conn.execute(
+        "INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, rate, settles_cash) "
+        "VALUES (?,?,?,?,?,?,?,?,?)", (trade_id, 1, "NOTIONAL", "USD", 2_000_000.0, "2026-08-27", "2026-11-19", 0.0, 0))
+    conn.commit()
+    return instrument_id
+
+
+@needs_quantlib
+def test_digital_expiry_mark_is_recomputed_from_the_close_on_file_before_the_first_freeze():
+    """The reviewer's scenario. USDJPY 152 put digital: the last pull of expiry day sees
+    151.90 -> PREMIUM 1.0 (pays). Before anything is frozen the close on file for that
+    date becomes 152.30. The next pull rewrites PREMIUM 0.0 and the ledger, run right
+    after the options step as in live.pull_once, freezes at 0.0 - fill."""
+    from engine.options.store import price_all_and_store, purge_old_unit_cash_payoff_marks
+    from engine.pnl.ledger import realise_settled
+
+    conn = _new_db()
+    purge_old_unit_cash_payoff_marks(conn)  # the one-time purge has long since run on this database
+    expiry, next_day, fill, quantity = "2026-11-19", "2026-11-20", 0.124, 2_000_000.0
+    instrument_id = _seed_usd_jpy_expiring(conn, "DIGITAL", fill)
+
+    _mark_spot(conn, expiry, "USDJPY", 151.90)
+    assert price_all_and_store(conn, expiry)[0].priced
+    assert _official_mark(conn, expiry, instrument_id, "PREMIUM") == 1.0
+    assert realise_settled(conn, expiry)["realised"] == 0  # expiry day is not over
+
+    _mark_spot(conn, expiry, "USDJPY", 152.30)  # the official close replaces the last live spot of that date
+    _mark_spot(conn, next_day, "USDJPY", 152.10)
+    outcome = price_all_and_store(conn, next_day)[0]  # options step ...
+    assert outcome.priced and (outcome.mark_basis, outcome.mark_date) == ("INTRINSIC", expiry)
+    marks = _option_marks(conn, instrument_id)
+    assert list(marks) == [expiry]
+    assert marks[expiry]["PREMIUM"] == 0.0 and marks[expiry]["DELTA"] == 0.0
+
+    assert realise_settled(conn, next_day)["realised"] == 1  # ... then the ledger
+    pnl_usd, dated = conn.execute("SELECT pnl_usd, spot_as_of_date FROM realised_pnl WHERE trade_id = 'T1'").fetchone()
+    assert pnl_usd == pytest.approx(quantity * (0.0 - fill))  # USD is the base ccy: -248,000
+    assert dated == expiry
+
+    # Frozen from the expiry-dated mark: a later revision of that date's spot changes neither.
+    _mark_spot(conn, expiry, "USDJPY", 151.50)
+    again = price_all_and_store(conn, next_day)[0]
+    assert not again.priced and "is not after as_of" in again.reason
+    assert _official_mark(conn, expiry, instrument_id, "PREMIUM") == 0.0
+    assert conn.execute("SELECT pnl_usd FROM realised_pnl WHERE trade_id = 'T1'").fetchone()[0] == pytest.approx(pnl_usd)
+
+
+@needs_quantlib
+def test_vanilla_expiry_mark_is_recomputed_from_the_close_on_file_and_only_on_a_difference():
+    from engine.options.store import price_all_and_store
+    from engine.pnl.ledger import realise_settled
+
+    conn = _new_db()
+    expiry, next_day, fill, quantity, K = "2026-11-19", "2026-11-20", 0.02, 2_000_000.0, 152.0
+    instrument_id = _seed_usd_jpy_expiring(conn, "VANILLA", fill)
+
+    _mark_spot(conn, expiry, "USDJPY", 151.90)
+    assert price_all_and_store(conn, expiry)[0].priced
+    live_rows = _pricer_marks(conn, instrument_id)
+    assert _official_mark(conn, expiry, instrument_id, "PREMIUM") == pytest.approx((K - 151.90) / 151.90)
+
+    # Same SPOT on file the next day: mark and SPOT agree, so NOTHING is rewritten.
+    same = price_all_and_store(conn, next_day)[0]
+    assert not same.priced and "is not after as_of" in same.reason
+    assert _pricer_marks(conn, instrument_id) == live_rows
+
+    # The close lands at 151.20: the put is worth more, and every expiry-dated row follows.
+    _mark_spot(conn, expiry, "USDJPY", 151.20)
+    outcome = price_all_and_store(conn, next_day)[0]
+    assert outcome.priced and outcome.mark_date == expiry
+    marks = _option_marks(conn, instrument_id)[expiry]
+    assert marks["PREMIUM"] == pytest.approx((K - 151.20) / 151.20)
+    assert marks["DELTA"] == -1.0 and all(marks[g] == 0.0 for g in ZERO_GREEKS)
+    assert len(_pricer_marks(conn, instrument_id)) == len(live_rows)  # rewritten in place, nothing added
+
+    assert realise_settled(conn, next_day)["realised"] == 1
+    pnl_usd = conn.execute("SELECT pnl_usd FROM realised_pnl WHERE trade_id = 'T1'").fetchone()[0]
+    assert pnl_usd == pytest.approx(quantity * ((K - 151.20) / 151.20 - fill))
+
+    # No SPOT left on file for the expiry date and not frozen: nothing to recompute from, the mark stands.
+    conn2 = _new_db()
+    inst2 = _seed_usd_jpy_expiring(conn2, "VANILLA", fill)
+    _mark_spot(conn2, expiry, "USDJPY", 151.90)
+    assert price_all_and_store(conn2, expiry)[0].priced
+    conn2.execute("DELETE FROM marks WHERE instrument_id = 'USDJPY' AND as_of_date = ?", (expiry,))
+    conn2.commit()
+    assert not price_all_and_store(conn2, next_day)[0].priced
+    assert _official_mark(conn2, expiry, inst2, "PREMIUM") == pytest.approx((K - 151.90) / 151.90)
+
+
+# --------------------------------------------------------------------------- reviewer W-1: one-time purge of old-unit digital / touch marks
+#
+# Every DIGITAL / ONE_TOUCH / NO_TOUCH mark written before the units audit is 1/S of the
+# truth and stays official for its own date; a re-pull only overwrites today's and an
+# identical re-save of terms deletes nothing. price_all_and_store starts with a purge
+# that runs ONCE per database (marker row in options_migrations).
+
+def _old_unit_rows(instrument_id, as_of, expiry, premium):
+    stamp = f"{as_of}T17:00:00-04:00"
+    return [(as_of, instrument_id, expiry, mark_type, value, "QL_OPTIONS_PRICER", stamp)
+            for mark_type, value in (("PREMIUM", premium), ("DELTA", -0.05), ("DELTA_PA", -0.06), ("GAMMA", 0.004),
+                                     ("THETA", 0.0005), ("VEGA", -0.018), ("RHO", -0.015))]
+
+
+def _insert_mark_rows(conn, rows):
+    conn.executemany(
+        "INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+        "VALUES (?,?,?,?,?,?,?)", rows)
+    conn.commit()
+
+
+@needs_quantlib
+def test_one_time_purge_clears_old_unit_cash_payoff_marks_once_and_only_those():
+    from engine.options.store import (CASH_PAYOFF_UNIT_PURGE, price_all_and_store, price_and_store,
+                                      purge_old_unit_cash_payoff_marks)
+
+    conn = _new_db()
+    expiry, d1, d2, today = "2026-11-19", "2026-09-16", "2026-09-17", "2026-09-18"
+    digital = _seed_option_trade(conn, trade_id="D", pair="USDJPY", instrument_id="USDJPY111926P-D", strike=152.0,
+                                 option_type="PUT", payoff="DIGITAL", expiry=expiry, quantity=2_000_000.0, price=0.124)
+    touch = _seed_option_trade(conn, trade_id="OT", pair="USDJPY", instrument_id="USDJPY111926-OT", strike=0.0,
+                               option_type="CALL", payoff="ONE_TOUCH", barrier_level=160.0, expiry=expiry,
+                               quantity=1_000_000.0, price=0.30)
+    vanilla = _seed_option_trade(conn, trade_id="V", pair="USDJPY", instrument_id="USDJPY111926P-V", strike=152.0,
+                                 option_type="PUT", payoff="VANILLA", expiry=expiry, quantity=2_000_000.0, price=0.02)
+    american = _seed_option_trade(conn, trade_id="A", pair="USDJPY", instrument_id="USDJPY111926P-A", strike=152.0,
+                                  option_type="PUT", payoff="AMERICAN", expiry=expiry, quantity=2_000_000.0, price=0.02)
+    # Marks of the old code on two dates: the digital's and the touch's are 1/S of the truth.
+    for as_of in (d1, d2):
+        _insert_mark_rows(conn, _old_unit_rows(digital, as_of, expiry, 0.0057) + _old_unit_rows(touch, as_of, expiry, 0.0021)
+                          + _old_unit_rows(vanilla, as_of, expiry, 0.021) + _old_unit_rows(american, as_of, expiry, 0.022))
+    manual = (d1, digital, expiry, "PREMIUM", 0.13, "MANUAL", f"{d1}T17:00:00-04:00")
+    _insert_mark_rows(conn, [manual])
+    _insert_realised_row(conn, "D", digital)   # frozen from an old-unit mark
+    _insert_realised_row(conn, "V", vanilla)
+
+    # Today's market, so the same run that purges also rewrites today's marks in the right unit.
+    _seed_pair_spot(conn, as_of=today, pair="USDJPY", spot=150.0)
+    _seed_vol(conn, pair="USDJPY", expiry=expiry, vol=0.10, as_of=today)
+    assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'options_migrations'").fetchone()[0] == 0
+
+    outcomes = {o.trade_id: o for o in price_all_and_store(conn, today)}
+    assert all(o.priced for o in outcomes.values()), {k: o.reason for k, o in outcomes.items()}
+
+    assert conn.execute("SELECT name FROM options_migrations").fetchall() == [(CASH_PAYOFF_UNIT_PURGE,)]
+    for instrument_id in (digital, touch):
+        assert list(_option_marks(conn, instrument_id)) == [today]          # both old dates gone, all seven types
+    assert _option_marks(conn, digital)[today]["PREMIUM"] > 100 * 0.0057    # and today's is in the right unit
+    for instrument_id in (vanilla, american):
+        marks = _option_marks(conn, instrument_id)
+        assert sorted(marks) == [d1, d2, today]                             # their unit was always right: untouched
+        assert marks[d1]["PREMIUM"] in (0.021, 0.022) and len(marks[d1]) == 7
+    assert conn.execute("SELECT value FROM marks WHERE source = 'MANUAL' AND instrument_id = ?",
+                        (digital,)).fetchall() == [(0.13,)]                 # the user's own row
+    assert _realised_trade_ids(conn) == ["V"]                               # the digital's frozen row went, the vanilla's stayed
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE instrument_id = 'USDJPY' AND mark_type = 'SPOT'").fetchone()[0] == 1
+
+    # It never runs twice: marks written after the marker survive every later call.
+    correct = _pricer_marks(conn, digital)
+    tomorrow = "2026-09-21"
+    _seed_pair_spot(conn, as_of=tomorrow, pair="USDJPY", spot=150.5)
+    _seed_vol(conn, pair="USDJPY", expiry=expiry, vol=0.10, as_of=tomorrow)
+    assert purge_old_unit_cash_payoff_marks(conn) == {"ran": False, "instruments": [], "marks_deleted": 0,
+                                                      "realised_deleted": 0}
+    price_all_and_store(conn, tomorrow)
+    price_all_and_store(conn, tomorrow)
+    assert sorted(_option_marks(conn, digital)) == [today, tomorrow]
+    assert [r for r in _pricer_marks(conn, digital) if r[0] == today] == correct
+    # A digital's own marks written through the UI path the day after are just as safe.
+    assert price_and_store(conn, tomorrow, "D").priced
+    price_all_and_store(conn, "2026-09-22")
+    assert today in _option_marks(conn, digital) and tomorrow in _option_marks(conn, digital)
+
+
+def test_one_time_purge_reports_what_it_did_and_tolerates_a_missing_realised_pnl_table():
+    from engine.options.store import purge_old_unit_cash_payoff_marks
+
+    conn = _new_db()
+    digital = _seed_option_trade(conn, trade_id="D", pair="USDJPY", instrument_id="USDJPY111926P-D", strike=152.0,
+                                 option_type="PUT", payoff="DIGITAL", expiry="2026-11-19")
+    lower = _seed_option_trade(conn, trade_id="NT", pair="USDJPY", instrument_id="USDJPY111926-NT", strike=0.0,
+                               option_type="CALL", payoff="no_touch", barrier_level=140.0, expiry="2026-11-19")
+    # An EQUITY digital's premium never went through the FX spot division: not the purge's business.
+    equity = _seed_eq_cmdty_option_trade(conn, "EQ1", "SPX 5600 Digital 2026-12-18", "SPX Index", "EQ_OPTION",
+                                         "EQ_OPTION", 5600.0, "CALL", payoff="DIGITAL")
+    for as_of in ("2026-09-16", "2026-09-17"):
+        _insert_mark_rows(conn, _old_unit_rows(digital, as_of, "2026-11-19", 0.0057)
+                          + _old_unit_rows(lower, as_of, "2026-11-19", 0.004)
+                          + _old_unit_rows(equity, as_of, "2026-12-18", 41.0))
+    conn.execute("DROP TABLE realised_pnl")
+    conn.commit()
+
+    first = purge_old_unit_cash_payoff_marks(conn)
+    assert first == {"ran": True, "instruments": sorted([digital, lower]), "marks_deleted": 28, "realised_deleted": 0}
+    assert _pricer_marks(conn, digital) == [] and _pricer_marks(conn, lower) == []
+    assert len(_pricer_marks(conn, equity)) == 14
+    assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'realised_pnl'").fetchone()[0] == 0
+
+    # Idempotent: rows that appear later are not the purge's business.
+    _insert_mark_rows(conn, _old_unit_rows(digital, "2026-09-18", "2026-11-19", 0.68))
+    assert purge_old_unit_cash_payoff_marks(conn)["ran"] is False
+    assert len(_pricer_marks(conn, digital)) == 7

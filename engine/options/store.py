@@ -98,27 +98,37 @@ full detail):**
         took, which the closing spot cannot tell: skipped with a reason saying so (none
         is in the book).
       * ``as_of > expiry``: skipped as before ("expiry ... is not after as_of ...").
-      * Catch-up, in ``price_all_and_store`` only (every live pull): an option that
-        expired before ``as_of`` and has NO ``QL_OPTIONS_PRICER`` PREMIUM dated its
-        expiry date gets the same intrinsic marks, DATED THE EXPIRY DATE, from that
-        date's official SPOT (the historical backfill writes closing SPOT rows). No SPOT
-        for that date: nothing is written, and the skip reason says so. One that exists
-        is never rewritten. In the same transaction the instrument's ``realised_pnl``
-        rows frozen from a premium dated before the expiry date are deleted, so the
-        ledger's next pass -- which ``data/bloomberg/live.py::pull_once`` runs right
-        after the options step -- freezes them afresh at the intrinsic (same reasoning
-        as ``set_option_terms``: a figure frozen from the wrong premium is not a
-        realised P&L, and the ledger never revisits a trade that has a row).
+      * Catch-up, in ``price_all_and_store`` only (every live pull), for an option that
+        expired before ``as_of`` and is NOT YET FROZEN from an expiry-dated mark: the
+        expiry-dated intrinsic marks are made to agree with the official SPOT ON FILE
+        NOW for the expiry date. No official PREMIUM dated the expiry date (the app did
+        not run that day): written, DATED THE EXPIRY DATE, from that date's official
+        SPOT (the historical backfill writes closing SPOT rows); no SPOT for that date:
+        nothing is written, and the skip reason says so. One on file whose PREMIUM
+        differs from the payoff recomputed from the SPOT now on file (the last live
+        pull of expiry day saw 151.90, the close that later replaced it says 152.30):
+        rewritten from the SPOT on file; identical: left alone. In the same transaction
+        the instrument's ``realised_pnl`` rows frozen from a premium dated before the
+        expiry date are deleted, so the ledger's next pass -- which
+        ``data/bloomberg/live.py::pull_once`` runs right after the options step (marks
+        written, options step incl. this catch-up, then ``realise_settled``) -- freezes
+        them at the intrinsic (same reasoning as ``set_option_terms``: a figure frozen
+        from the wrong premium is not a realised P&L, and the ledger never revisits a
+        trade that has a row). Once a row IS frozen from an expiry-dated mark, mark and
+        row are both left alone for good.
     KNOWN LIMITS, documented, deliberately not solved here:
       * Cut time. The true payoff is fixed at the option's cut (the blotter's 'Cut Time'
         / 'Cut Location' columns: 10:00 New York on six of the book's eight options,
         15:00 Tokyo on one, and one row whose location reads 'NONE'), which the app does
-        not store. This mark uses the day's official spot -- the last live pull stamped
-        with the expiry date, or the 17:00 New York close when caught up -- hours after
-        the cut. The app's day is the NEW YORK date (``data/bloomberg/live.py::
-        book_today``), so a pull made in Asia on the following morning, before midday
-        Hong Kong time, still rewrites the expiry date's mark, with a spot observed after
-        the New York close.
+        not store. The payoff frozen is the one AT THE OFFICIAL SPOT ON FILE FOR THE
+        EXPIRY DATE AT THE MOMENT OF THE FIRST FREEZE -- the last live pull stamped with
+        the expiry date, or that date's 17:00 New York close where a backfill / import
+        has since replaced it or the app did not run that day -- still not the spot at
+        the cut, hours earlier. The app's day is the NEW YORK date
+        (``data/bloomberg/live.py::book_today``), so a pull made in Asia on the following
+        morning, before midday Hong Kong time, still rewrites the expiry date's SPOT and
+        mark, with a spot observed after the New York close. A SPOT for the expiry date
+        that changes AFTER the first freeze changes nothing.
       * Delivery double count. If an exercised option is delivered as a spot trade booked
         AT THE STRIKE, the book counts (S - K) twice: once in the option frozen at its
         intrinsic, once in the delivery trade's own P&L against the market. Nothing here
@@ -466,24 +476,49 @@ def _intrinsic_outcome(conn: sqlite3.Connection, row: dict, pair: str, mark_date
 
 
 def _catch_up_expiry_mark(conn: sqlite3.Connection, as_of: str, row: dict) -> Optional[PricingOutcome]:
-    """For an option that expired BEFORE `as_of` with no expiry-day mark on file (the app
-    did not run that day): write the intrinsic marks dated the expiry date, from that
-    date's official SPOT (the historical backfill writes closing SPOT rows). Returns the
-    priced outcome; a skip naming the missing SPOT when there is none for that date
-    (nothing written); None when there is nothing to do -- not expired, terms incomplete,
-    a path-dependent payoff, or a QL_OPTIONS_PRICER PREMIUM dated the expiry date already
-    on file, which is never rewritten."""
+    """For an option that expired BEFORE `as_of` and is not yet frozen from an
+    expiry-dated mark, make the expiry-dated intrinsic marks agree with the official SPOT
+    ON FILE NOW for the expiry date (module docstring, "Expiry day"):
+      - no official PREMIUM dated the expiry date (the app did not run that day): write
+        the intrinsic marks dated the expiry date from that date's official SPOT (the
+        historical backfill writes closing SPOT rows);
+      - one on file, but the payoff recomputed from the SPOT now on file for that date
+        differs from it (the last live pull of expiry day saw 151.90, the close that
+        later replaced it is 152.30): rewrite the marks from the SPOT on file. Compared
+        on PREMIUM; nothing is rewritten when they agree.
+    Either way the instrument's `realised_pnl` rows frozen from a premium dated BEFORE the
+    expiry date go in the same transaction. Once a `realised_pnl` row frozen FROM an
+    expiry-dated mark exists, mark and row are both left alone for good: the payoff is
+    the one at the official spot on file at the moment of that first freeze.
+    Returns the priced outcome when marks were (re)written; a skip naming the missing
+    SPOT when there is no expiry-dated mark and none can be written; None when there is
+    nothing to do -- not expired, terms incomplete, a path-dependent payoff, already
+    frozen from an expiry-dated mark, or mark and SPOT on file already agree."""
+    import math
+
+    from .inputs import get_spot
+
     if _terms_skip_reason(row) or row["payoff"] not in pricer.EXPIRY_PAYOFFS:
         return None
     expiry_iso = row["expiry_date"]
     if not datetime.date.fromisoformat(expiry_iso) < datetime.date.fromisoformat(as_of):
         return None
-    on_file = conn.execute(
-        "SELECT 1 FROM marks WHERE instrument_id = ? AND mark_type = 'PREMIUM' AND source = ? AND as_of_date = ?",
-        (row["instrument_id"], PRICER_SOURCE, expiry_iso)).fetchone()
-    if on_file is not None:
+    if _table_exists(conn, "realised_pnl") and conn.execute(
+            "SELECT 1 FROM realised_pnl WHERE instrument_id = ? AND spot_as_of_date >= ?",
+            (row["instrument_id"], expiry_iso)).fetchone() is not None:
         return None
     pair = row["base_ccy"] + row["quote_ccy"]
+    stored = conn.execute(
+        "SELECT value FROM marks_official WHERE instrument_id = ? AND mark_type = 'PREMIUM' AND as_of_date = ?",
+        (row["instrument_id"], expiry_iso)).fetchone()
+    if stored is not None:
+        spot = get_spot(conn, expiry_iso, pair)
+        if spot is None:
+            return None  # no SPOT on file for that date to recompute from: the stored mark stands
+        recomputed = pricer.price_fx_at_expiry(row["payoff"], spot, row["strike"], row["option_type"], pair=pair,
+                                               payout_ccy=CASH_PAYOUT_CCY)
+        if math.isclose(recomputed.premium, stored[0], rel_tol=1e-12, abs_tol=1e-15):
+            return None
     outcome = _intrinsic_outcome(conn, row, pair, mark_date=expiry_iso, refreeze=True)
     if not outcome.priced:
         outcome.reason = (f"{_expired_reason(row, as_of)}; no expiry-day mark on file and none could be written: "
@@ -617,6 +652,68 @@ def set_option_terms(conn: sqlite3.Connection, instrument_id: str, strike: float
                 conn.execute("DELETE FROM realised_pnl WHERE instrument_id = ?", (instrument_id,))
 
 
+# --------------------------------------------------------------------------- one-time migrations
+# No meta / settings table exists anywhere in the schema (data/ingest/schema.py), so this
+# package keeps its own tiny marker table, created defensively like `option_vols` and
+# `manual_rates`: one row per migration that has run on this database.
+_MIGRATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS options_migrations (
+  name        TEXT PRIMARY KEY,
+  applied_at  TEXT NOT NULL
+);
+"""
+CASH_PAYOFF_UNIT_PURGE = "2026-09-18-purge-cash-payoff-marks-written-in-the-old-unit"
+_CASH_PAYOFFS = ("DIGITAL", "ONE_TOUCH", "NO_TOUCH")
+
+
+def purge_old_unit_cash_payoff_marks(conn: sqlite3.Connection) -> dict:
+    """ONE-TIME, idempotent. Until the 2026-09-18 units audit every DIGITAL / ONE_TOUCH /
+    NO_TOUCH PREMIUM and Greek was written as "1 QUOTE unit per base unit of quantity,
+    divided by spot": 1/S of the truth (1/150 on USDJPY). Those rows stay official for
+    their own dates -- a re-pull only overwrites today's -- so Daily = LTD(today) -
+    LTD(yesterday) would show a jump that never happened (about USD 420k on the book's
+    three digitals) and 5d / MTD would carry it for weeks; and an identical re-save of
+    the terms deletes nothing, so the user could not clear them.
+
+    On its first call on a database this deletes, in ONE transaction: every
+    QL_OPTIONS_PRICER mark (all seven `PRICER_MARK_TYPES`, all dates) of every FX_OPTION
+    instrument whose payoff on file is DIGITAL, ONE_TOUCH or NO_TOUCH, those instruments'
+    `realised_pnl` rows (frozen from such marks; table absent -> skipped), and records
+    itself in `options_migrations` -- so it never runs again: marks written after it, in
+    the right unit, survive every later call. Old-unit and new-unit rows cannot be told
+    apart by value, which is why this is a run-once purge and not a filter. Never
+    touched: VANILLA / AMERICAN / ASIAN / BARRIER marks (their unit was always right),
+    MANUAL or any other source's rows, any other instrument. `price_all_and_store` calls
+    it first, so the same pull rewrites today's marks in the right unit.
+    Returns {'ran', 'instruments', 'marks_deleted', 'realised_deleted'}."""
+    conn.execute(_MIGRATIONS_DDL)
+    if conn.execute("SELECT 1 FROM options_migrations WHERE name = ?", (CASH_PAYOFF_UNIT_PURGE,)).fetchone():
+        return {"ran": False, "instruments": [], "marks_deleted": 0, "realised_deleted": 0}
+    payoffs = ",".join("?" * len(_CASH_PAYOFFS))
+    types = ",".join("?" * len(PRICER_MARK_TYPES))
+    with conn:
+        # FX only: the old unit came from the FX wrappers (pricer.price_fx_digital / touch).
+        # An equity digital's PREMIUM never went through a spot division.
+        instruments = [r[0] for r in conn.execute(
+            "SELECT o.instrument_id FROM instrument_options o JOIN instruments i USING (instrument_id) "
+            f"WHERE i.asset_class = 'FX_OPTION' AND UPPER(o.payoff) IN ({payoffs}) ORDER BY o.instrument_id",
+            _CASH_PAYOFFS).fetchall()]
+        marks_deleted = realised_deleted = 0
+        has_ledger = _table_exists(conn, "realised_pnl")
+        for instrument_id in instruments:
+            cur = conn.execute(
+                f"DELETE FROM marks WHERE instrument_id = ? AND source = ? AND mark_type IN ({types})",
+                (instrument_id, PRICER_SOURCE, *PRICER_MARK_TYPES))
+            marks_deleted += max(cur.rowcount, 0)
+            if has_ledger:
+                cur = conn.execute("DELETE FROM realised_pnl WHERE instrument_id = ?", (instrument_id,))
+                realised_deleted += max(cur.rowcount, 0)
+        conn.execute("INSERT INTO options_migrations (name, applied_at) VALUES (?, ?)",
+                     (CASH_PAYOFF_UNIT_PURGE, datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")))
+    return {"ran": True, "instruments": instruments, "marks_deleted": marks_deleted,
+            "realised_deleted": realised_deleted}
+
+
 def price_and_store(conn: sqlite3.Connection, as_of: str, trade_id: str) -> PricingOutcome:
     """Price one FX_OPTION trade (read from ``trades_official``) as of
     ``as_of`` (ISO date string) and write its marks. Raises ValueError if no
@@ -647,7 +744,18 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[PricingOut
     DATED ITS EXPIRY DATE (``PricingOutcome.mark_date``), from that date's official SPOT,
     and any `realised_pnl` row frozen from an older premium is dropped so the ledger
     freezes it afresh. Such an outcome comes back ``priced=True, mark_basis='INTRINSIC'``;
-    every other expired option stays the usual skip."""
+    every other expired option stays the usual skip.
+
+    First of all, once per database: `purge_old_unit_cash_payoff_marks` (digital / touch
+    marks written in the pre-2026-09-18 unit), so the first pull after a restart clears
+    them and this same run rewrites today's in the right unit."""
+    purged = purge_old_unit_cash_payoff_marks(conn)
+    if purged["ran"] and purged["marks_deleted"]:
+        import logging
+        logging.getLogger(__name__).warning(
+            "one-time purge of digital / touch marks written in the pre-2026-09-18 unit: %d marks and %d "
+            "realised_pnl rows deleted for %s", purged["marks_deleted"], purged["realised_deleted"],
+            ", ".join(purged["instruments"]))
     trade_ids = [
         r[0] for r in conn.execute(
             "SELECT trade_id FROM trades_official WHERE product = 'FX_OPTION' ORDER BY trade_id"

@@ -913,3 +913,213 @@ def test_option_pair_forward_curve_gives_the_implied_rate_fallback_its_official_
     assert reason == "" and rates is not None
     assert rates.foreign_rate_source.source_kind == OIS_CURVE          # EUR: the real ESTR curve
     assert rates.domestic_rate_source.source_kind == IMPLIED_FORWARD   # SEK: implied, no manual entry needed
+
+
+# --------------------------------------------------------------------------- options' own USD-conversion spots (2026-09-18)
+# An FX option's value and P&L are in the pair's BASE currency and convert to USD at the
+# base->USD SPOT of the same as_of (CLAUDE.md; the EURSEK digital pays EUR); its vega /
+# theta / rho convert through quote->USD. Only forwards used to drive USD-conversion SPOT
+# requests, so a book holding just the EURSEK options asked for EURSEK SPOT and the EURSEK
+# forwards at expiry and nothing else -- the reproduction below.
+_EURSEK_OPTIONS = [   # the reference book's EURSEK options: two 23 Sep vanillas and the 25 Nov digital
+    ("o1", "EURSEK092326C-197727826", "2026-08-21", 35e6, "2026-09-23"),
+    ("o2", "EURSEK092326P-197838147", "2026-08-24", -35e6, "2026-09-23"),
+    ("o3", "EURSEK112526C-197906813", "2026-08-24", 1e6, "2026-11-25"),
+]
+
+
+def _options_only_db(tmp_path, options, base="EUR", quote="SEK"):
+    """A book holding ONLY FX options: no forward, no spot trade, and no plain pair
+    instrument row at all (not the option's pair, not a USD-conversion pair)."""
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    for trade_id, option_id, trade_date, qty, expiry in options:
+        conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                     (option_id, "FX_OPTION", base, quote, 1, 0, option_id, expiry))
+        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (trade_id, "XLSX", option_id, "FX_OPTION", trade_id, trade_date, qty, 0.01,
+                      "acc", "cp", "", "t", "d", ""))
+        conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                     (trade_id, 1, "NOTIONAL", base, qty, trade_date, expiry, 0, 0))
+    conn.commit()
+    return p, conn
+
+
+def test_build_requests_eursek_options_only_book_requests_both_usd_conversion_spots_once(tmp_path):
+    p, conn = _options_only_db(tmp_path, _EURSEK_OPTIONS)
+    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")   # the forwards' own orientation helper
+    assert live.option_spot_pair_names("EUR", "SEK") == ["EURSEK", eur_usd, usd_sek]
+    reqs = live.build_requests(conn, "2026-09-18")
+    keys = [(r.instrument_id, r.mark_type, r.settle_date) for r in reqs]
+    assert keys == [("EURSEK", "SPOT", "2026-09-18"),
+                    ("EURSEK", "FWD_OUTRIGHT", "2026-09-23"), ("EURSEK", "FWD_OUTRIGHT", "2026-11-25"),
+                    (eur_usd, "SPOT", "2026-09-18"), (usd_sek, "SPOT", "2026-09-18")]      # each exactly once
+    by_id = {r.instrument_id: r for r in reqs if r.mark_type == "SPOT"}
+    assert by_id[eur_usd].bbg_ticker == f"{eur_usd} Curncy" and by_id[usd_sek].bbg_ticker == f"{usd_sek} Curncy"
+    # SPOT only for a conversion pair: never a forward, never anything else
+    assert {r.mark_type for r in reqs if r.instrument_id in (eur_usd, usd_sek)} == {"SPOT"}
+    # the plain pair rows a written mark needs, created by the existing _ensure_fx_instruments
+    rows = {r[0]: r[1:] for r in conn.execute(
+        "SELECT instrument_id, asset_class, base_ccy, quote_ccy, bbg_ticker, expiry_date FROM instruments "
+        "WHERE asset_class = 'FX'")}
+    assert rows == {"EURSEK": ("FX", "EUR", "SEK", "EURSEK Curncy", "9999-12-31"),
+                    eur_usd: ("FX", eur_usd[:3], eur_usd[3:], f"{eur_usd} Curncy", "9999-12-31"),
+                    usd_sek: ("FX", usd_sek[:3], usd_sek[3:], f"{usd_sek} Curncy", "9999-12-31")}
+    # The expiry day itself still counts as open (`expiry_date >= as_of`): that day's
+    # payoff mark needs that day's SPOT of the pair AND of the base->USD pair.
+    expiry_day = {(r.instrument_id, r.mark_type) for r in live.build_requests(conn, "2026-11-25")}
+    assert {("EURSEK", "SPOT"), (eur_usd, "SPOT"), (usd_sek, "SPOT")} <= expiry_day
+    assert live.build_requests(conn, "2026-11-26") == []                       # the day after: nothing open
+
+
+def test_build_requests_usdjpy_only_option_book_requests_usdjpy_spot_and_no_usdusd(tmp_path):
+    """USD is the base: no base->USD conversion exists, and quote->USD is the option's own
+    pair, already requested -- one USDJPY SPOT, never a 'USDUSD'."""
+    p, conn = _options_only_db(tmp_path, [("o1", "USDJPY111926P-197571137", "2026-08-19", 1e6, "2026-11-19")],
+                               base="USD", quote="JPY")
+    assert live.option_spot_pair_names("USD", "JPY") == [live._usd_pair_name("JPY")] == ["USDJPY"]
+    reqs = live.build_requests(conn, "2026-09-18")
+    assert [(r.instrument_id, r.mark_type, r.settle_date) for r in reqs] == [
+        ("USDJPY", "SPOT", "2026-09-18"), ("USDJPY", "FWD_OUTRIGHT", "2026-11-19")]
+    assert not any("USDUSD" in r.instrument_id or "USDUSD" in r.bbg_ticker for r in reqs)
+    assert [r[0] for r in conn.execute("SELECT instrument_id FROM instruments WHERE asset_class = 'FX'")] == ["USDJPY"]
+
+
+def test_build_requests_option_conversion_spot_not_duplicated_when_a_forward_already_asks_for_it(tmp_path):
+    """De-duplicated against every request already made: a direct forward in the
+    conversion pair, a cross's own conversion legs, or another option's own pair."""
+    p, conn = _cross_db(tmp_path, with_usd_leg_instruments=True)     # a EURSEK forward: asks for EURUSD + USDSEK SPOT
+    conn.execute("INSERT INTO instruments VALUES ('EURSEK112526C-3','FX_OPTION','EUR','SEK',1,0,'x','2026-11-25')")
+    conn.execute("INSERT INTO trades VALUES ('o3','XLSX','EURSEK112526C-3','FX_OPTION','o3','2026-08-10',1e6,0.01,"
+                 "'acc','cp','','t','d','')")
+    conn.commit()
+    spot_ids = [r.instrument_id for r in live.build_requests(conn, "2026-08-17") if r.mark_type == "SPOT"]
+    assert sorted(spot_ids) == sorted({"EURSEK", live._usd_pair_name("EUR"), live._usd_pair_name("SEK")})
+    # once the forward has settled the option alone keeps all three alive
+    later = [r.instrument_id for r in live.build_requests(conn, "2026-10-01") if r.mark_type == "SPOT"]
+    assert sorted(later) == sorted({"EURSEK", live._usd_pair_name("EUR"), live._usd_pair_name("SEK")})
+
+
+def test_inventory_names_the_option_conversion_spots_and_stays_in_step_with_build_requests(tmp_path):
+    from data.bloomberg import inventory
+    p, conn = _options_only_db(tmp_path, _EURSEK_OPTIONS)
+    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
+    needed = inventory._needed_marks(conn, "2026-09-18")             # read before any instrument row exists
+    needed_keys = [(n["instrument_id"], n["mark_type"], n["settle_date"]) for n in needed]
+    assert (eur_usd, "SPOT", "2026-09-18") in needed_keys and (usd_sek, "SPOT", "2026-09-18") in needed_keys
+    req_keys = [(r.instrument_id, r.mark_type, r.settle_date) for r in live.build_requests(conn, "2026-09-18")]
+    assert needed_keys == req_keys                                    # same set, same order, no duplicate
+    # the diagnostics panel reads mark_inventory: a missing conversion spot is there BY NAME
+    df = inventory.mark_inventory(conn, "2026-09-18")
+    status = {(r.instrument_id, r.mark_type): r.status for r in df.itertuples()}
+    assert status[(eur_usd, "SPOT")] == "MISSING" and status[(usd_sek, "SPOT")] == "MISSING"
+    conn.execute("INSERT INTO marks VALUES ('2026-09-18',?,'2026-09-18','SPOT',1.17,'BBG_BFXFORWARD','t')", (eur_usd,))
+    conn.commit()
+    status = {(r.instrument_id, r.mark_type): r.status
+              for r in inventory.mark_inventory(conn, "2026-09-18").itertuples()}
+    assert status[(eur_usd, "SPOT")] == "OFFICIAL" and status[(usd_sek, "SPOT")] == "MISSING"
+
+
+def test_historical_needed_marks_for_options_are_spot_only_and_keep_a_realised_option(tmp_path):
+    """What a PAST close needs for an option (close_completeness, the backfill): the
+    closing SPOT of its pair and of its USD-conversion pairs, nothing else, on every day
+    it was open including the expiry date -- and still when the ledger has realised it:
+    engine/options' catch-up re-freezes an option frozen from an older premium, but only
+    once the expiry date's closing SPOT is on file."""
+    from data.bloomberg import inventory
+    p, conn = _options_only_db(tmp_path, _EURSEK_OPTIONS[:1])          # o1: traded 08-21, expires 09-23
+    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
+    conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
+                 "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, "
+                 "note) VALUES ('o1','EURSEK092326C-197727826','FX_OPTION','EUR','2026-09-23',35e6,0,'PREMIUM',"
+                 "0.01,'2026-09-22','QL_OPTIONS_PRICER',0,'t','premium dated 2026-09-22 (last before expiry)')")
+    conn.commit()
+    expected = [("EURSEK", "SPOT"), (eur_usd, "SPOT"), (usd_sek, "SPOT")]
+    for day in ("2026-08-21", "2026-09-22", "2026-09-23"):             # trade date .. expiry date inclusive
+        items = inventory._needed_marks(conn, day, historical=True)
+        assert [(i["instrument_id"], i["mark_type"]) for i in items] == expected
+        assert all(i["settle_date"] == day for i in items)
+    assert inventory._needed_marks(conn, "2026-08-20", historical=True) == []   # not traded yet
+    assert inventory._needed_marks(conn, "2026-09-24", historical=True) == []   # expired
+    # the live list is unchanged: a realised option drives no live request
+    assert inventory._needed_marks(conn, "2026-09-22") == [] and live.build_requests(conn, "2026-09-22") == []
+
+
+def test_pull_once_writes_option_conversion_spots_where_valuation_and_portfolio_look_them_up(tmp_path, monkeypatch):
+    """The written mark must be FOUND: engine/pnl/valuation.usd_per_quote (the option's
+    base->USD conversion) and engine/options/portfolio._quote_ccy_to_usd (the Greeks'
+    quote->USD conversion) both key marks_official by the plain pair name, trying both
+    orientations, so whichever one `_usd_pair_name` yields is the one they read."""
+    from data.bloomberg import pull_marks as pm, fwd_curve
+    from datetime import date as _date
+    from engine.pnl.valuation import usd_per_quote
+    from engine.options.portfolio import _quote_ccy_to_usd
+    p, conn = _options_only_db(tmp_path, _EURSEK_OPTIONS)
+    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
+    px = {"EURSEK Curncy": 11.04, f"{eur_usd} Curncy": 1.17, f"{usd_sek} Curncy": 9.44}
+    asked = []
+
+    def fake_fetch_reference(session, service, tickers, fields, overrides=None, diag=None, tag=None):
+        asked.extend(tickers)
+        return {t: {"PX_LAST": px[t]} for t in tickers}
+
+    monkeypatch.setattr(pm, "fetch_reference", fake_fetch_reference)
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
+    monkeypatch.setattr(live, "_rates_step", lambda *a, **k: {"skipped": "not under test"})
+    monkeypatch.setattr(live, "_vol_step", lambda *a, **k: {"skipped": "not under test"})
+    monkeypatch.setattr(live, "_options_step", lambda *a, **k: {"skipped": "not under test"})
+    status = live.pull_once(p, "2026-09-18", session_factory=lambda: (object(), object()), today=_date(2026, 9, 18))
+    assert status["connected"] is True
+    assert sorted(asked) == sorted(px)                                  # one SPOT request, each ticker once
+    ok = {(i["instrument_id"], i["mark_type"]): i for i in status["items"] if i["status"] == "OK"}
+    assert ok[(eur_usd, "SPOT")]["value"] == 1.17 and ok[(usd_sek, "SPOT")]["value"] == 9.44
+    assert ok[(eur_usd, "SPOT")]["source"] == "BBG_BFXFORWARD"         # the official SPOT source
+    s, pair, source = usd_per_quote(conn, "EUR", "2026-09-18")          # option value / P&L: base -> USD
+    assert pair == eur_usd and source == "BBG_BFXFORWARD"
+    assert s == pytest.approx(1.17 if eur_usd == "EURUSD" else 1 / 1.17)
+    sek_to_usd, reason = _quote_ccy_to_usd(conn, "2026-09-18", "SEK")   # vega / theta / rho: quote -> USD
+    assert reason == "" and sek_to_usd == pytest.approx(1 / 9.44 if usd_sek == "USDSEK" else 9.44)
+
+
+_SAMPLE_CSV = __import__("pathlib").Path(__file__).resolve().parents[1] / "data" / "raw" / "new_sample_trades.csv"
+
+
+@pytest.mark.skipif(not _SAMPLE_CSV.exists(), reason="data/raw/new_sample_trades.csv is not on this machine")
+def test_sample_book_request_list_is_unchanged_except_for_deduplicated_conversion_spots(tmp_path, monkeypatch):
+    """Before/after on the real reference book. 'Before' is build_requests with the new
+    options' conversion legs switched off -- the only thing this change adds."""
+    from data.ingest.upload import import_blotter
+    p = tmp_path / "risk.db"
+    import_blotter(_SAMPLE_CSV.read_bytes(), _SAMPLE_CSV.name, p)
+    conn = schema.connect(p)
+    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
+
+    def before_and_after(as_of):
+        with monkeypatch.context() as m:
+            m.setattr(live, "_option_usd_legs", lambda conn_, as_of_date, historical=False: [])
+            before = [(r.instrument_id, r.mark_type, r.settle_date, r.bbg_ticker) for r in live.build_requests(conn, as_of)]
+        after = [(r.instrument_id, r.mark_type, r.settle_date, r.bbg_ticker) for r in live.build_requests(conn, as_of)]
+        assert len(after) == len(set(after))                            # nothing requested twice
+        added = [k for k in after if k not in before]
+        assert [k for k in after if k in before] == before              # everything else: same rows, same order
+        return before, added
+
+    # Today's book: every option's conversion pair is already asked for by an open forward
+    # (EURUSD), by the EURSEK forwards' cross legs (USDSEK) or is the option's own pair
+    # (USDJPY) -- so the difference is exactly nothing, on every date checked.
+    for as_of in ("2026-08-24", "2026-09-18", "2026-09-23", "2026-10-15", "2026-11-25"):
+        before, added = before_and_after(as_of)
+        assert before and added == [], (as_of, added)
+    # The day the EUR forwards are gone (here: removed), the EURSEK digital keeps its own
+    # conversion spots alive. EURUSD is still asked for by the EURUSD options' own pair, so
+    # the one addition on 2026-09-18 is the quote->USD spot; after those expire, both.
+    conn.execute("DELETE FROM trade_legs WHERE trade_id IN (SELECT trade_id FROM trades "
+                 "WHERE instrument_id IN ('EURSEK', 'EURUSD'))")
+    conn.execute("DELETE FROM trades WHERE instrument_id IN ('EURSEK', 'EURUSD')")
+    conn.commit()
+    _, added = before_and_after("2026-09-18")
+    assert added == [(usd_sek, "SPOT", "2026-09-18", f"{usd_sek} Curncy")]
+    _, added = before_and_after("2026-10-15")
+    assert added == [(eur_usd, "SPOT", "2026-10-15", f"{eur_usd} Curncy"),
+                     (usd_sek, "SPOT", "2026-10-15", f"{usd_sek} Curncy")]

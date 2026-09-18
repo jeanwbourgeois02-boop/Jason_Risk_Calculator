@@ -558,7 +558,9 @@ def test_bundles_scope_failure_via_update_does_not_crash_whole_callback(tmp_path
 
     app = dash.Dash(__name__)
     blotter.register_callbacks(app, get_db_path=lambda: str(db_path))
-    update_key = next(k for k in app.callback_map if k.startswith(blotter.CONTENT_ID))
+    # `_update` has two Outputs since 2026-09-18: the content, and the trade-set signature
+    # it was built from (`blotter.BUILT_TRADE_SET_ID`).
+    update_key = next(k for k in app.callback_map if f"{blotter.CONTENT_ID}.children" in k)
     update_fn = app.callback_map[update_key]["callback"]
     update_fn = getattr(update_fn, "__wrapped__", update_fn)
 
@@ -566,7 +568,7 @@ def test_bundles_scope_failure_via_update_does_not_crash_whole_callback(tmp_path
         raise RuntimeError("bundles boom")
 
     monkeypatch.setattr(blotter, "bundles_layout", boom)
-    result = update_fn("2026-06-20", "bundles")
+    result, _built_from = update_fn("2026-06-20", "bundles")
     assert "Bundles could not be rendered (bundles boom)." in result.children[0].children
 
 
@@ -1030,16 +1032,16 @@ def test_update_content_degrades_to_message_on_unexpected_exception(tmp_path, mo
 
     app = dash.Dash(__name__)
     blotter.register_callbacks(app, get_db_path=lambda: str(db_path))
-    update_key = next(k for k in app.callback_map if k.startswith(blotter.CONTENT_ID))
+    update_key = next(k for k in app.callback_map if f"{blotter.CONTENT_ID}.children" in k)
     update_fn = app.callback_map[update_key]["callback"]
     update_fn = getattr(update_fn, "__wrapped__", update_fn)
 
-    def boom(scope, conn, as_of):
+    def boom(scope, conn, as_of, **kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(blotter, "scope_layout", boom)
-    result = update_fn("2026-06-20", "total")
-    assert "could not be rendered" in result.children
+    result, _built_from = update_fn("2026-06-20", "total")
+    assert "could not be rendered (boom)" in result.children
 
 
 def test_register_callbacks_and_render_via_app():
@@ -1598,29 +1600,129 @@ def test_options_and_rates_sub_tabs_are_not_rebuilt_on_a_marks_only_revision(tmp
         module.register_callbacks(probe, get_db_path=lambda: ":memory:")
         listened = {d["id"] for cb in probe.callback_map.values() for d in cb["inputs"]}
         assert {DATA_REVISION_ID, BOOK_REVISION_ID} <= listened, module.__name__
-    app = _blotter_app(_empty_file_db(tmp_path))
-    update = _wrapped(app, lambda k: k.startswith(blotter.CONTENT_ID))
+    db_path = _empty_file_db(tmp_path)
+    app = _blotter_app(db_path)
+    update = _wrapped(app, lambda k: f"{blotter.CONTENT_ID}.children" in k)
     data, book = f"{DATA_REVISION_ID}.data", f"{BOOK_REVISION_ID}.data"
     date, tab = f"{blotter.DATE_PICKER_ID}.date", f"{blotter.SUBTABS_ID}.value"
+    from ui import revision
+    on_screen = revision.trade_set_signature(db_path)   # what the content on screen was built from
 
-    def render(scope, *triggers):
-        return _call_triggered_by(triggers, update, "2026-06-20", scope, "b1", "d1")
+    def rebuilt(scope, *triggers, built_from=on_screen):
+        content, built = _call_triggered_by(triggers, update, "2026-06-20", scope, "b1", "d1", built_from)
+        assert (content is dash.no_update) == (built is dash.no_update)
+        return content is not dash.no_update
 
-    assert render("options", data) is dash.no_update           # a Bloomberg pull: Options refreshes itself in place
-    assert render("options", book) is not dash.no_update       # a new upload still rebuilds
-    assert render("options", data, book) is not dash.no_update  # both published in one tick (ui/revision.py)
-    assert render("options", date) is not dash.no_update
-    assert render("options", tab) is not dash.no_update
-    assert render("rates", data) is dash.no_update             # same treatment: Rates refreshes itself in place
-    assert render("rates", book) is not dash.no_update
-    assert render("rates", data, book) is not dash.no_update
-    assert render("rates", date) is not dash.no_update and render("rates", tab) is not dash.no_update
-    assert render("fx", data) is not dash.no_update            # unchanged: one static block, rebuilt on new marks
-    assert render("bundles", data) is not dash.no_update
-    assert render("total", data) is dash.no_update             # unchanged: rows refresh through _apply_filters
-    assert render("manual", data, book) is dash.no_update      # unchanged: the form is never rebuilt
+    assert not rebuilt("options", data)                 # a Bloomberg pull: Options refreshes itself in place
+    assert not rebuilt("options", book)                 # a book revision with the SAME trade set: a saved term
+    assert not rebuilt("options", data, book)
+    assert rebuilt("options", book, built_from="an-older-trade-set")        # a genuine book change rebuilds
+    assert rebuilt("options", data, book, built_from="an-older-trade-set")  # both published in one tick
+    assert rebuilt("options", book, built_from=None)    # nothing recorded yet: rebuild, the safe side
+    assert rebuilt("options", date) and rebuilt("options", tab)
+    assert not rebuilt("rates", data) and not rebuilt("rates", book)        # same treatment: a flipped swap
+    assert rebuilt("rates", book, built_from="an-older-trade-set")
+    assert rebuilt("rates", date) and rebuilt("rates", tab)
+    assert rebuilt("fx", data) and rebuilt("bundles", data)   # unchanged: one static block, rebuilt on new marks
+    assert not rebuilt("total", data)                   # unchanged: rows refresh through _apply_filters
+    assert not rebuilt("total", book)                   # a saved term is no reason to rebuild the Total book either
+    assert rebuilt("total", book, built_from="an-older-trade-set")
+    assert not rebuilt("manual", data, book, built_from="an-older-trade-set")  # unchanged: the form is never rebuilt
     assert blotter._MARKS_REBUILD_SCOPES == ("bundles", "fx")
     assert blotter._SELF_REFRESHING_SCOPES == ("options", "rates")
+    # a rebuild records the trade set it was built from, for the next comparison
+    _content, built = _call_triggered_by((tab,), update, "2026-06-20", "options", "b1", "d1", None)
+    assert built == on_screen
+
+
+def _swap_and_digital_book(tmp_path):
+    """On disk: one swap and one digital with no strike on file -- the two things the user
+    edits several of in a row right after a restart."""
+    db_path = tmp_path / "edits.db"
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    conn.executescript("""
+        INSERT INTO instruments VALUES ('IRSOIS-USD-9','IRS','USD','USD',1,0,'','2031-06-20');
+        INSERT INTO instruments VALUES ('USDJPY111926P-1','FX_OPTION','USD','JPY',1,0,'','2026-11-19');
+        INSERT INTO instrument_options (instrument_id, strike, option_type) VALUES ('USDJPY111926P-1', 0, 'PUT');
+        INSERT INTO trades VALUES ('S1','XLSX','IRSOIS-USD-9','IRS','S1','2026-06-01',10000000,3.85,'ACC','CP','','TR','d','');
+        INSERT INTO trades VALUES ('O1','XLSX','USDJPY111926P-1','FX_OPTION','O1','2026-06-01',5000000,0.01,'ACC','CP','','TR','d','');
+        INSERT INTO trade_legs VALUES ('S1',1,'FIXED','USD',-10000000,'2026-06-03','2031-06-20',3.85,1);
+        INSERT INTO trade_legs VALUES ('S1',2,'FLOAT','USD',10000000,'2026-06-03','2031-06-20',0.0,1);
+        INSERT INTO trade_legs VALUES ('O1',1,'NOTIONAL','USD',5000000,'2026-06-01','2026-11-19',0.01,0);
+    """)
+    conn.commit()
+    return db_path, conn
+
+
+def test_a_saved_term_or_a_flipped_swap_moves_the_book_revision_but_not_the_trade_set(tmp_path):
+    """The whole point: both edits ARE published as book revisions (`book_signature` sums
+    strikes and signed quantities, and other modules' tests pin that), yet neither may
+    rebuild a sub-tab -- so the Blotter compares the narrower `trade_set_signature`."""
+    from ui import revision
+    db_path, conn = _swap_and_digital_book(tmp_path)
+    book, trade_set = revision.book_signature(db_path), revision.trade_set_signature(db_path)
+
+    conn.execute("UPDATE instrument_options SET strike = 152, payoff = 'DIGITAL' WHERE instrument_id = 'USDJPY111926P-1'")
+    conn.commit()
+    assert revision.book_signature(db_path) != book
+    assert revision.trade_set_signature(db_path) == trade_set          # a strike typed in: not a book change
+
+    book = revision.book_signature(db_path)
+    conn.execute("UPDATE trades SET quantity = -quantity WHERE trade_id = 'S1'")     # pay fixed -> receive fixed,
+    conn.execute("UPDATE trade_legs SET amount = -amount WHERE trade_id = 'S1'")     # as irs_direction writes it
+    conn.commit()
+    assert revision.book_signature(db_path) != book
+    assert revision.trade_set_signature(db_path) == trade_set          # a flipped swap: not a book change
+
+    conn.execute("DELETE FROM trade_legs WHERE trade_id = 'O1'")
+    conn.execute("DELETE FROM trades WHERE trade_id = 'O1'")            # a manual trade deleted
+    conn.commit()
+    assert revision.trade_set_signature(db_path) != trade_set
+    conn.close()
+
+
+def test_the_banners_live_outside_the_rebuilt_content_and_follow_every_revision(tmp_path):
+    db_path, conn = _swap_and_digital_book(tmp_path)
+    shell = blotter.build_layout(default_date="2026-06-20")
+    ids = [getattr(c, "id", None) for c in shell.children]
+    assert ids.index(blotter.NOTICES_ID) < ids.index(blotter.CONTENT_ID)       # above the content, not in it
+    assert blotter.BUILT_TRADE_SET_ID in ids
+
+    app = _blotter_app(db_path)
+    notices = _wrapped(app, lambda k: k == f"{blotter.NOTICES_ID}.children")
+    update = _wrapped(app, lambda k: f"{blotter.CONTENT_ID}.children" in k)
+    shown = notices("d1", "b1")
+    assert len(shown) == 1 and "1 option cannot be priced: no strike on file." in _all_text(shown)
+    assert "USDJPY111926P-1" in _all_text(shown)
+    content, _built = update("2026-06-20", "options", "b1", "d1", None)
+    assert "cannot be priced: no strike on file" not in _all_text(content)   # the banner is never twice on the page
+
+    conn.execute("UPDATE instrument_options SET strike = 152 WHERE instrument_id = 'USDJPY111926P-1'")
+    conn.commit()
+    assert notices("d2", "b1") == []                                     # gone on the very next revision
+    # `scope_layout`'s direct callers still get the banners on top, as before
+    conn.execute("UPDATE instrument_options SET strike = 0")
+    conn.commit()
+    assert "no strike on file" in _all_text(blotter.scope_layout("rates", conn, "2026-06-20"))
+    assert "no strike on file" not in _all_text(blotter.scope_layout("rates", conn, "2026-06-20", with_notices=False))
+    conn.close()
+
+
+def test_a_saved_options_cell_publishes_the_data_revision_at_once_and_only_when_the_file_moved(tmp_path):
+    from ui import revision
+    from ui.revision import DATA_REVISION_ID
+    db_path, conn = _swap_and_digital_book(tmp_path)
+    conn.close()
+    app = _blotter_app(db_path)
+    key = next(k for k in app.callback_map if k.startswith(f"{DATA_REVISION_ID}.data@"))
+    spec = app.callback_map[key]
+    assert [i["id"] for i in spec["inputs"]] == [options.EDIT_STATUS_ID]   # an OUTPUT of options._render: after the save
+    publish = getattr(spec["callback"], "__wrapped__", spec["callback"])
+    now = revision.file_signature(db_path)
+    assert publish("Saved USDJPY111926P-1: ...", "an-older-signature") == now
+    assert publish("Digital noted for ...", now) is dash.no_update       # nothing written: nothing published
+    assert revision.publish_if_changed("", "x") is dash.no_update        # an unreadable file is never news
 
 
 def _options_book(tmp_path, premium_on_earlier_closes: bool):

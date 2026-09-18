@@ -38,8 +38,8 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     full notional units. Direction, in order: the user's stored override
     (``data/ingest/irs_direction.py`` -- the PRIMARY source, since neither the reference
     export nor the user's own carries any direction marker); else every EXPLICIT signal
-    in the row (brackets / minus on Notional, Quantity, Gross Amnt/Principal, Current
-    Face, Original Face -- not NetInvoice, which on a swap is an upfront cash amount; a
+    in the row (brackets / minus on Notional, Quantity, Current Face, Original Face --
+    not NetInvoice or Gross Amnt/Principal, which on a swap are upfront cash amounts; a
     sell-type ``Side``; pay / receive wording in Description, Notes, Swap Type,
     RollSide, Tran Type), two of which contradicting each other reject the row; else
     pay fixed BY DEFAULT, recorded as such per swap on ``ParseResult.irs_directions``.
@@ -114,8 +114,17 @@ SOURCE = "XLSX"  # closest value in CLAUDE.md's trades.source enum ('BNP | XLSX 
 FUND = "NMMF"
 IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION", "INTEREST_RATE_SWAP")
 EXCLUDED_STATUS_WORDS = ("cancel", "reject", "void", "pend", "delet", "fail", "error", "draft")
-# Option NetInvoice vs |Quantity x Price|: a larger relative gap is a warning, never a reject.
+# Option / futures NetInvoice vs what Quantity x Price implies: a larger relative gap is a
+# warning, never a reject.
 NET_INVOICE_TOLERANCE = 0.005
+# FX rows (FORWARD, spot CURRENCY): |base x rate - quote| / quote above this warns, never
+# rejects. Chosen against the 828 reference FX rows, all of which pass: the worst is
+# 0.0404 % (Trade Id 896192283, a 10 EUR spot ticket at 1.14046 whose 11.4046 USD is
+# booked as 11.40 -- pure cent rounding), the worst forward 1.6e-8. The floor, in quote
+# currency units, is that rounding (cents, or whole units for JPY-style amounts) on a
+# ticket too small for a relative tolerance to mean anything.
+FX_CONSISTENCY_TOLERANCE = 0.001
+FX_CONSISTENCY_FLOOR = 1.0
 
 # Reference header, exactly as data/raw/new_sample_trades.csv's own header row: the
 # casing every row.get(...) below expects. Incoming columns matching case-insensitively
@@ -267,7 +276,18 @@ def _some(names: List[str], limit: int = 8, head: int = 5) -> str:
 # --------------------------------------------------------------------------- cell helpers
 _BLANK_WORDS = frozenset(("nan", "nat", "none", "null", "n/a", "#n/a", "-", "--"))
 _MONTH_WORDS = frozenset(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"))
-_CURRENCY_MARKS_RE = re.compile(r"[$€£¥%]")
+_CURRENCY_MARKS_RE = re.compile(r"[$€£¥]")
+# What a '%' sign in a numeric cell means is decided per column, never silently (`_num`'s
+# `percent` argument). The columns, as decided 2026-09-18:
+#   'keep'      FixedRate, Yield (INTEREST_RATE_SWAP): the file writes 3.98 for 3.98 %, so
+#               '3.98%' is that same 3.98 -- the sign adds nothing and nothing is scaled.
+#   'fraction'  Price, Premium on an OPTION row: the value is a fraction of the notional
+#               (0.00579), so '0.58%' means 0.0058 -- divided by 100, and warned about,
+#               because stripping the sign (the old behaviour) read it 100 times too big.
+#   'refuse'    every other numeric cell (amounts, Quantity, Notional, NetInvoice, fees,
+#               FX and futures Price, strike columns, Version): a percent sign there makes
+#               no sense, so the cell is not a number and is rebuilt or rejected by name.
+PERCENT_KEEP, PERCENT_FRACTION, PERCENT_REFUSE = "keep", "fraction", "refuse"
 _CODE_PREFIX_RE = re.compile(r"^([A-Za-z]{3})\s*(?=[-+.\d])")     # 'USD 5', 'USD-5'
 _CODE_SUFFIX_RE = re.compile(r"(?<=[\d.])\s*([A-Za-z]{3})$")       # '5 USD'
 _PLAIN_NUMBER_RE = re.compile(r"(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
@@ -298,10 +318,12 @@ def _ungroup(s: str) -> Optional[str]:
     return s
 
 
-def _num(v) -> float:
+def _num(v, percent: str = PERCENT_REFUSE) -> float:
     """A cell as a finite float, or NaN -- never 0, never a guess. Tolerates thousands
-    separators, a decimal comma, currency symbols / a 3-letter currency code, '%',
-    '(1,000)' negatives, a trailing '-' and blank cells.
+    separators, a decimal comma, currency symbols / a 3-letter currency code, '(1,000)'
+    negatives, a trailing '-' and blank cells. A '%' sign is handled as the caller says
+    the column means it (PERCENT_KEEP / PERCENT_FRACTION, see above); by default it makes
+    the cell not a number.
 
     STRICT about what is left (2026-09-18): the whole cell has to read as one number.
     Until then every character that was not a digit was simply deleted, so text that
@@ -323,6 +345,11 @@ def _num(v) -> float:
     neg = False
     if s.startswith("(") and s.endswith(")"):
         neg, s = True, s[1:-1].strip()
+    has_percent = "%" in s
+    if has_percent:
+        if percent == PERCENT_REFUSE or s.count("%") > 1:
+            return math.nan
+        s = s.replace("%", "").strip()
     s = _CURRENCY_MARKS_RE.sub("", s).strip()
     for rx in (_CODE_PREFIX_RE, _CODE_SUFFIX_RE):
         m = rx.search(s)
@@ -340,17 +367,27 @@ def _num(v) -> float:
     x = float(s)
     if not math.isfinite(x):
         return math.nan
+    if has_percent and percent == PERCENT_FRACTION:
+        x /= 100.0
     return -x if neg else x
 
 
-def _bad_cell(row: pd.Series, col: str) -> Optional[str]:
+def _bad_cell(row: pd.Series, col: str, percent: str = PERCENT_REFUSE) -> Optional[str]:
     """The cell's own text when it is populated but is not a number (the '24-Jul' /
-    datetime-cell case), else None -- a blank cell is not a bad cell."""
+    datetime-cell case), else None -- a blank cell is not a bad cell. `percent` must be
+    the mode the caller reads the column with."""
     v = row.get(col)
     text = _s(v)
     if text == "" or text.lower() in _BLANK_WORDS:
         return None
-    return text if math.isnan(_num(v)) else None
+    return text if math.isnan(_num(v, percent)) else None
+
+
+def _unusable(row: pd.Series, col: str, percent: str = PERCENT_REFUSE) -> str:
+    """How a cell that could not be used reads in a warning or a reject: 'Price is
+    blank', or 'Price '24-Jul' is not a number (it reads as a date ...)'."""
+    bad = _bad_cell(row, col, percent)
+    return f"{col} is blank" if bad is None else _not_a_number(col, bad)
 
 
 def _looks_like_date(text: str) -> bool:
@@ -766,30 +803,38 @@ def _fx_amounts(row: pd.Series, buy_is_base: bool, rate: float, rate_from_descri
       quote amount  <- the other Amount column, else base x rate, else |NetInvoice| (the
                        quote amount on all 828 reference rows)
       rate          <- the Description's '@ rate', else Price, else quote / base
-    ``repairs`` names every populated-but-not-a-number cell that was rebuilt and from
-    what; ``problem`` is the reject reason (naming column and cell) when something
-    cannot be rebuilt, else None."""
+    ``repairs`` are the warnings for the row: one for EVERY fallback used, whether the
+    cell was blank or was not a number, naming the column and what it was rebuilt from
+    (P&L scales with these numbers, so a silent rebuild is never acceptable). What is NOT
+    a fallback is the parser's normal path for the product: a forward's rate read from a
+    Description that parses (how every reference forward loads) and each amount read from
+    its own column. Then, when the row has all three from independent cells, the
+    CONSISTENCY check: |base x rate - quote| above FX_CONSISTENCY_TOLERANCE of the quote
+    amount (and above FX_CONSISTENCY_FLOOR, the cent / whole-unit rounding of a tiny
+    ticket) warns and never rejects. That is what catches a Price cell holding an Excel
+    date SERIAL such as 46227.0, which is a perfectly good float and so passes `_num`.
+    ``problem`` is the reject reason (naming column and cell) when something cannot be
+    rebuilt, else None."""
     base_col, quote_col = (("BuyCurrency Amount", "SellCurrency Amount") if buy_is_base
                            else ("SellCurrency Amount", "BuyCurrency Amount"))
     base_amt, quote_amt = abs(_num(row.get(base_col))), abs(_num(row.get(quote_col)))
     rate_ok = not math.isnan(rate) and rate != 0
     rebuilt: Dict[str, str] = {}
-    if rate_ok and rate_from_description:
-        rebuilt["Price"] = "the Description"
+    derived = False            # one of the three was computed from the other two: nothing left to cross-check
     if math.isnan(base_amt):
         qty = abs(_num(row.get("Quantity")))
         if not math.isnan(qty):
             base_amt, rebuilt[base_col] = qty, "Quantity"
         elif rate_ok and not math.isnan(quote_amt):
-            base_amt, rebuilt[base_col] = quote_amt / rate, f"{quote_col} / rate"
+            base_amt, rebuilt[base_col], derived = quote_amt / rate, f"{quote_col} / rate", True
     if math.isnan(quote_amt):
         net = abs(_num(row.get("NetInvoice")))
         if rate_ok and not math.isnan(base_amt):
-            quote_amt, rebuilt[quote_col] = base_amt * rate, "base amount x rate"
+            quote_amt, rebuilt[quote_col], derived = base_amt * rate, "base amount x rate", True
         elif not math.isnan(net):
             quote_amt, rebuilt[quote_col] = net, "NetInvoice"
     if not rate_ok and not math.isnan(base_amt) and not math.isnan(quote_amt) and base_amt != 0:
-        rate, rebuilt["Price"] = quote_amt / base_amt, f"{quote_col} / {base_col}"
+        rate, rebuilt["Price"], derived = quote_amt / base_amt, f"{quote_col} / {base_col}", True
         rate_ok = rate != 0
 
     missing = [name for name, v in ((base_col, base_amt), (quote_col, quote_amt)) if math.isnan(v)]
@@ -806,8 +851,41 @@ def _fx_amounts(row: pd.Series, buy_is_base: bool, rate: float, rate_from_descri
         return base_amt, quote_amt, rate, [], ("blank BuyCurrency/SellCurrency Amount and no Quantity x Price "
                                                "to derive them")
     values = {"Price": rate, base_col: base_amt, quote_col: quote_amt}
-    repairs = [f"{_not_a_number(c, t)}; rebuilt {values[c]:.10g} from {how}"
-               for c, how in rebuilt.items() if (t := _bad_cell(row, c)) is not None]
+    repairs = [f"{_unusable(row, c)}; rebuilt {values[c]:.10g} from {how}" for c, how in rebuilt.items()]
+    price_cell = _num(row.get("Price"))
+    if rate_from_description:
+        # Normal path, not a fallback -- but a Price cell that is there and is wrong is
+        # still doubtful content the user should hear about.
+        bad_price = _bad_cell(row, "Price")
+        if bad_price is not None:
+            repairs.append(f"{_not_a_number('Price', bad_price)}; rebuilt {rate:.10g} from the Description")
+        elif not math.isnan(price_cell) and abs(price_cell - rate) > FX_CONSISTENCY_TOLERANCE * abs(rate):
+            repairs.append(f"Price {price_cell:.10g} differs from the Description's rate {rate:.10g} by "
+                           f"{abs(price_cell - rate) / abs(rate):.2%} (tolerance {FX_CONSISTENCY_TOLERANCE:.1%}); "
+                           "the Description's rate is used")
+    if not derived and quote_amt > 0:
+        expected = base_amt * rate
+        gap = abs(expected - quote_amt)
+        if gap > max(FX_CONSISTENCY_TOLERANCE * quote_amt, FX_CONSISTENCY_FLOOR):
+            said = (f"{base_col} x rate = {base_amt:,.2f} x {rate:.10g} = {expected:,.2f} against {quote_col} "
+                    f"{quote_amt:,.2f}: {gap / quote_amt:.2%} apart (tolerance {FX_CONSISTENCY_TOLERANCE:.1%})")
+            # Five cells describe one fill: two amounts, Quantity (= base), NetInvoice
+            # (= quote) and Price. When the rate came from the Price cell and BOTH amounts
+            # are confirmed by their second cell, Price is provably the odd one out (a date
+            # serial, typically) and the fill is rebuilt from the amounts. Anything short
+            # of that double confirmation is warned about and kept exactly as read.
+            qty, net = abs(_num(row.get("Quantity"))), abs(_num(row.get("NetInvoice")))
+            confirmed = (not rate_from_description and base_col not in rebuilt and quote_col not in rebuilt
+                         and not math.isnan(qty) and not math.isnan(net) and base_amt != 0
+                         and abs(qty - base_amt) <= max(FX_CONSISTENCY_TOLERANCE * base_amt, FX_CONSISTENCY_FLOOR)
+                         and abs(net - quote_amt) <= max(FX_CONSISTENCY_TOLERANCE * quote_amt, FX_CONSISTENCY_FLOOR))
+            if confirmed:
+                rate = quote_amt / base_amt
+                repairs.append(f"{said}. Quantity and NetInvoice both confirm the amounts, so the Price cell is the "
+                               f"odd one out (an Excel date serial looks like this): fill rebuilt {rate:.10g} "
+                               f"from {quote_col} / {base_col}")
+            else:
+                repairs.append(f"{said}; the cells are kept as read, check them")
     return base_amt, quote_amt, rate, repairs, None
 
 
@@ -988,8 +1066,9 @@ def _signed_quantity(row: pd.Series, symbol: str, row_no: int, res: ParseResult,
                      rebuilt: float = math.nan, rebuilt_from: str = "") -> Optional[float]:
     """``Quantity`` signed by ``Side``. When the cell is blank or is not a number the
     caller's ``rebuilt`` magnitude (from other columns, NaN if there is none) is used
-    instead; a populated cell that is not a number is named in the warning, or in the
-    reject when nothing can rebuild it."""
+    instead, ALWAYS with a warning naming the column and the source -- blank or not: the
+    position's size, and so its P&L and delta, now rests on another cell. When nothing
+    can rebuild it the row is rejected, naming the cell."""
     qty = _num(row.get("Quantity"))
     if math.isnan(qty):
         bad = _bad_cell(row, "Quantity")
@@ -999,8 +1078,7 @@ def _signed_quantity(row: pd.Series, symbol: str, row_no: int, res: ParseResult,
             res.rejects.append(Reject(row_no, symbol, reason))
             return None
         qty = abs(rebuilt)
-        if bad is not None:
-            _warn(res, row_no, symbol, f"{_not_a_number('Quantity', bad)}; rebuilt {qty:.10g} from {rebuilt_from}")
+        _warn(res, row_no, symbol, f"{_unusable(row, 'Quantity')}; rebuilt {qty:.10g} {label} from {rebuilt_from}")
     side = _side(row.get("Side"))
     if side is None:
         if qty < 0:
@@ -1063,6 +1141,19 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
         _warn(res, row_no, symbol,
               (f"{_not_a_number('Price', bad)}" if bad is not None else "Price is blank")
               + f"; rebuilt {price:.10g} from NetInvoice / (contracts x {multiplier:g}){fee_note}")
+    elif not math.isnan(net) and net > 0 and not math.isnan(_num(row.get("Quantity"))):
+        # Everything is there: does the invoice agree with contracts x multiplier x price?
+        # (Worst reference row: 5e-7, the Price column's 2-decimal rounding.) A Price cell
+        # holding an Excel date serial is a fine float and only this catches it. Warns,
+        # never rejects, and the cells are kept as read: two sources cannot say which is wrong.
+        fees = _num(row.get("Total Fees"))
+        fees = 0.0 if math.isnan(fees) else fees
+        expected = abs(signed_contracts) * multiplier * price + (fees if signed_contracts > 0 else -fees)
+        if abs(expected - net) / net > NET_INVOICE_TOLERANCE:
+            _warn(res, row_no, symbol,
+                  f"NetInvoice {net:,.2f} differs from contracts x {multiplier:g} x Price = {expected:,.2f} by "
+                  f"{abs(expected - net) / net:.2%} (tolerance {NET_INVOICE_TOLERANCE:.1%}); the cells are kept "
+                  "as read, check the Price")
     expiry_iso = expiry.isoformat()
 
     res.instruments.setdefault(instrument_id, Instrument(
@@ -1153,25 +1244,33 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     # therefore comes from Side alone, and NetInvoice is used for two things only:
     # (1) rebuilding a Price or Quantity cell that is blank or is not a number, and
     # (2) a magnitude cross-check that warns above 0.5 % and never rejects.
-    premium = _num(row.get("Price"))
+    # The premium is a FRACTION of the notional (0.00579), so a percent sign in these two
+    # cells means "divide by 100" ('0.58%' = 0.0058) and is warned about (PERCENT_FRACTION).
+    premium, premium_col = _num(row.get("Price"), PERCENT_FRACTION), "Price"
     if math.isnan(premium):
-        premium = _num(row.get("Premium"))
+        premium, premium_col = _num(row.get("Premium"), PERCENT_FRACTION), "Premium"
+        if not math.isnan(premium):   # a fallback, and an unverified one: the reference file's Premium is blank
+            _warn(res, row_no, symbol, f"{_unusable(row, 'Price', PERCENT_FRACTION)}; premium {premium:.10g} "
+                                       "read from the Premium column instead")
+    if not math.isnan(premium) and "%" in _s(row.get(premium_col)):
+        _warn(res, row_no, symbol, f"{premium_col} {_s(row.get(premium_col))!r} carries a percent sign; read as "
+                                   f"{premium:.10g} of the notional (divided by 100)")
     net = abs(_num(row.get("NetInvoice")))
     net_ok = not math.isnan(net) and net > 0
     quantity_cell = _num(row.get("Quantity"))
     rebuilt, rebuilt_from = math.nan, ""
     if math.isnan(quantity_cell) and net_ok and not math.isnan(premium) and premium > 0:
-        rebuilt, rebuilt_from = net / premium, "|NetInvoice| / Price"
+        rebuilt, rebuilt_from = net / premium, "|NetInvoice| / Price (NetInvoice may include fees: check it)"
     signed_notional = _signed_quantity(row, symbol, row_no, res, "notional", rebuilt, rebuilt_from)
     if signed_notional is None:
         return
     if math.isnan(premium):
-        bad = [(c, t) for c in ("Price", "Premium") if (t := _bad_cell(row, c)) is not None]
+        bad = [(c, t) for c in ("Price", "Premium") if (t := _bad_cell(row, c, PERCENT_FRACTION)) is not None]
         if net_ok and not math.isnan(quantity_cell) and quantity_cell != 0:
             premium = net / abs(quantity_cell)
             _warn(res, row_no, symbol,
                   ("; ".join(_not_a_number(c, t) for c, t in bad) if bad else "Price is blank")
-                  + f"; rebuilt {premium:.10g} from |NetInvoice| / |Quantity|")
+                  + f"; rebuilt {premium:.10g} from |NetInvoice| / |Quantity| (NetInvoice may include fees: check it)")
         else:
             res.rejects.append(Reject(row_no, symbol, "blank Price/Premium" if not bad else
                                       "; ".join(_not_a_number(c, t) for c, t in bad)
@@ -1183,6 +1282,11 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
             _warn(res, row_no, symbol,
                   f"NetInvoice {net:,.2f} differs from |Quantity x Price| {expected:,.2f} by "
                   f"{abs(net - expected) / expected:.2%} (above {NET_INVOICE_TOLERANCE:.1%}); the Price fill is kept")
+    if premium > 1.0:
+        # More than the whole notional: not a premium any desk pays. An Excel date serial
+        # (46227.0) in the Price cell is a finite float and looks exactly like this.
+        _warn(res, row_no, symbol, f"premium {premium:.10g} is above 100 % of the notional; kept as read, "
+                                   "check the Price cell (an Excel date serial looks like this)")
 
     res.instruments.setdefault(symbol, Instrument(
         instrument_id=symbol, asset_class="FX_OPTION", base_ccy=base_ccy, quote_ccy=pair[3:],
@@ -1202,12 +1306,13 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
 
 # ------------------------------------------------------------------- IRS direction signals
 _DIRECTION_WORDS = {"PAY": "pay fixed", "RECEIVE": "receive fixed"}
-# Amount columns on which brackets or a minus sign mark a short = receive fixed (user,
-# 2026-09-18: "if the book has brackets or a negative sign that's a short"). NetInvoice is
-# deliberately NOT one of them: on a swap it is an upfront cash amount, so its sign says
-# which way cash moved, not which way the swap faces (a payer who paid a fee would read
-# as a receiver, or be rejected against 'Pay Fixed' wording).
-IRS_SIGN_COLUMNS = ("Notional", "Quantity", "Gross Amnt/Principal", "Current Face", "Original Face")
+# Size columns on which brackets or a minus sign mark a short = receive fixed (user,
+# 2026-09-18: "if the book has brackets or a negative sign that's a short"). NetInvoice
+# and 'Gross Amnt/Principal' are deliberately NOT among them: on a swap both are CASH
+# amounts (an upfront payment), so their sign says which way cash moved, not which way
+# the swap faces -- a payer with a negative upfront would load as RECEIVE, tagged as
+# decided by the file, and never be flagged for the user's choice.
+IRS_SIGN_COLUMNS = ("Notional", "Quantity", "Current Face", "Original Face")
 # Free-text columns searched for pay / receive wording.
 IRS_TEXT_COLUMNS = ("Description", "Notes", "Swap Type", "RollSide", "Tran Type")
 _PAY_WORDS = frozenset(("PAY", "PAYS", "PAYER", "PAYING"))
@@ -1298,31 +1403,39 @@ def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
         return
     notional = _num(row.get("Notional"))
     qty_mm = _num(row.get("Quantity"))
+    if not math.isnan(notional) and not math.isnan(qty_mm) and notional != 0:
+        # Both cells are there (Quantity is the notional in millions on all 10 reference
+        # rows, exactly): a gap means one of them is mangled. Warned, kept as read.
+        if abs(abs(qty_mm) * 1e6 - abs(notional)) / abs(notional) > FX_CONSISTENCY_TOLERANCE:
+            _warn(res, row_no, symbol, f"Notional {abs(notional):,.0f} differs from Quantity x 1,000,000 = "
+                                       f"{abs(qty_mm) * 1e6:,.0f}; the Notional is kept as read, check both cells")
     if math.isnan(notional):
-        bad = _bad_cell(row, "Notional")
         notional = qty_mm * 1e6 if not math.isnan(qty_mm) else math.nan  # Quantity is in millions
         if math.isnan(notional):
             bad_cells = [_not_a_number(c, t) for c in ("Notional", "Quantity") if (t := _bad_cell(row, c)) is not None]
             res.rejects.append(Reject(row_no, symbol, "blank Notional (and no Quantity)" if not bad_cells else
                                       "; ".join(bad_cells) + "; the notional cannot be rebuilt"))
             return
-        if bad is not None:
-            _warn(res, row_no, symbol, f"{_not_a_number('Notional', bad)}; rebuilt {abs(notional):,.0f} from Quantity x 1,000,000")
+        # A fallback, so always said (blank or not): the swap's size now rests on the
+        # millions-scaled Quantity column.
+        _warn(res, row_no, symbol, f"{_unusable(row, 'Notional')}; rebuilt {abs(notional):,.0f} from Quantity x 1,000,000")
     if notional == 0.0:
         res.rejects.append(Reject(row_no, symbol, "Notional is zero; cannot infer pay/receive direction"))
         return
-    fixed_rate_pct = _num(row.get("FixedRate"))
+    # FixedRate / Yield are already in percent units (3.98 = 3.98 %), so '3.98%' is the
+    # same number: the sign is accepted and nothing is scaled (PERCENT_KEEP).
+    fixed_rate_pct, rate_from = _num(row.get("FixedRate"), PERCENT_KEEP), "FixedRate"
     if math.isnan(fixed_rate_pct):
-        fixed_rate_pct = _num(row.get("Yield"))
+        fixed_rate_pct, rate_from = _num(row.get("Yield"), PERCENT_KEEP), "Yield"
     if math.isnan(fixed_rate_pct) and dm:
-        fixed_rate_pct = float(dm.group(4))
-    bad_rate = _bad_cell(row, "FixedRate")
+        fixed_rate_pct, rate_from = float(dm.group(4)), "the Description"
+    bad_rate = _bad_cell(row, "FixedRate", PERCENT_KEEP)
     if math.isnan(fixed_rate_pct):
         res.rejects.append(Reject(row_no, symbol, "blank FixedRate (and no Yield / rate in Description)" if bad_rate is None else
                                   f"{_not_a_number('FixedRate', bad_rate)}; no Yield / rate in Description to rebuild it from"))
         return
-    if bad_rate is not None:
-        _warn(res, row_no, symbol, f"{_not_a_number('FixedRate', bad_rate)}; rebuilt {fixed_rate_pct:.10g} from Yield / the Description")
+    if rate_from != "FixedRate":
+        _warn(res, row_no, symbol, f"{_unusable(row, 'FixedRate', PERCENT_KEEP)}; rebuilt {fixed_rate_pct:.10g} from {rate_from}")
     # Signed, full units: + = pay fixed, - = receive fixed; the magnitude comes from
     # ``Notional``. The user's stored override decides when there is one; otherwise every
     # explicit signal in the row (`_irs_direction_signals`); otherwise pay fixed, recorded

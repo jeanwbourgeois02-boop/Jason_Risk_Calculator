@@ -307,13 +307,23 @@ def test_backfill_lone_cross_forward_gets_historical_spot_and_fwd_outright(tmp_p
     ])
     conn.commit()
 
+    from data.bloomberg import live
+    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
+
     def spot_fetch(session, service, tickers, field, day):
-        assert set(tickers) == {"EURSEK Curncy"}
-        return {"EURSEK Curncy": 11.21}
+        # 2026-09-18: the cross's USD-conversion pairs are asked for too even though no
+        # instrument row existed for them -- backfill() now creates the plain pair rows
+        # first (live._ensure_fx_instruments), as the live pull does. Before, they were
+        # "needed" forever and fetched by nobody, so a cross that settled before this PC
+        # first connected could never be converted to USD, hence never realised.
+        assert set(tickers) == {"EURSEK Curncy", f"{eur_usd} Curncy", f"{usd_sek} Curncy"}
+        return {"EURSEK Curncy": 11.21, f"{eur_usd} Curncy": 1.17, f"{usd_sek} Curncy": 9.58}
 
     def fwd_fetch(session, service, tickers, fields, start, end):
         # exact-match trick: every tenor ticker quotes the leg's own settle date, so
         # outright_for_date resolves it directly regardless of which day is asked.
+        # SPOT only for the conversion pairs: no forward curve is ever asked for them.
+        assert all(t.startswith("EURSEK") for t in tickers)
         out = {}
         d = start
         while d <= end:
@@ -325,6 +335,13 @@ def test_backfill_lone_cross_forward_gets_historical_spot_and_fwd_outright(tmp_p
     results = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 8), fetch=spot_fetch, fwd_fetch=fwd_fetch,
                                 fut_fetch=fwd_fetch, log=lambda *_: None)
     assert [r["status"] for r in results] == ["DONE", "DONE"]
+    conversion_spots = {(r[0], r[1]): r[2] for r in conn.execute(
+        "SELECT instrument_id, as_of_date, value FROM marks_official WHERE mark_type='SPOT' "
+        "AND instrument_id IN (?, ?)", (eur_usd, usd_sek))}
+    assert conversion_spots == {(eur_usd, "2026-09-07"): 1.17, (eur_usd, "2026-09-08"): 1.17,
+                                (usd_sek, "2026-09-07"): 9.58, (usd_sek, "2026-09-08"): 9.58}
+    from data.bloomberg.inventory import close_completeness
+    assert list(close_completeness(conn, "2026-09-07", "2026-09-08")["complete"]) == [True, True]
 
     spot_days = {r[0] for r in conn.execute(
         "SELECT as_of_date FROM marks WHERE instrument_id='EURSEK' AND mark_type='SPOT'")}
@@ -382,3 +399,130 @@ def test_backfill_future_expiring_inside_range_gets_future_px_on_expiry_day(tmp_
     from data.bloomberg.inventory import close_completeness
     comp = {r.as_of_date: r for r in close_completeness(conn, "2026-09-17", "2026-09-18").itertuples()}
     assert comp["2026-09-18"].complete is True and comp["2026-09-18"].missing == []
+
+
+# =========================================================================== 2026-09-18: FX options' closing SPOT
+# traded_pairs() looked at FX legs only, so a pair held only through options never got a
+# historical SPOT close -- nor did the option's own USD-conversion pairs (an option's value
+# converts base->USD at spot; the EURSEK digital pays EUR). On a missed expiry day
+# engine/options writes the payoff on a later pull FROM THE EXPIRY DATE'S CLOSING SPOT and
+# the ledger converts it at the base->USD SPOT of that same date: without those closes an
+# expired option stays unrealisable. SPOT only: no historical forward, no historical vol.
+def _options_only_db(tmp_path, options):
+    """Only EURSEK options: no forward, and no plain pair instrument row of any kind."""
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    for trade_id, option_id, trade_date, qty, expiry in options:
+        conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                     (option_id, "FX_OPTION", "EUR", "SEK", 1, 0, option_id, expiry))
+        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (trade_id, "XLSX", option_id, "FX_OPTION", trade_id, trade_date, qty, 0.01,
+                      "acc", "cp", "", "t", "d", ""))
+        conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                     (trade_id, 1, "NOTIONAL", "EUR", qty, trade_date, expiry, 0, 0))
+    conn.commit()
+    return p, conn
+
+
+def _never_called(*a, **k):
+    raise AssertionError("no forward-curve / future history may be requested for an option-only book")
+
+
+def test_backfill_option_only_pair_gets_closing_spot_and_usd_conversion_spots_through_expiry(tmp_path):
+    from data.bloomberg import live
+    from data.bloomberg.inventory import close_completeness
+    # traded Fri 09-18, expires Wed 09-23; the range runs a day either side
+    p, conn = _options_only_db(tmp_path, [("o1", "EURSEK092326C-1", "2026-09-18", 35e6, "2026-09-23")])
+    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
+    tickers_wanted = {"EURSEK Curncy", f"{eur_usd} Curncy", f"{usd_sek} Curncy"}
+    assert backfill.spot_only_pair_names(conn, date(2026, 9, 17), date(2026, 9, 24)) == sorted(
+        live.option_spot_pair_names("EUR", "SEK"))
+
+    def spot_fetch(session, service, tickers, field, day):
+        assert field == "PX_LAST" and set(tickers) == tickers_wanted and len(tickers) == 3   # each once
+        bump = day.day / 1000.0
+        return {"EURSEK Curncy": 11.0 + bump, f"{eur_usd} Curncy": 1.1 + bump, f"{usd_sek} Curncy": 9.4 + bump}
+
+    results = backfill.backfill(p, date(2026, 9, 17), date(2026, 9, 24), fetch=spot_fetch, fwd_fetch=_never_called,
+                                fut_fetch=_never_called, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE"] * 6
+    assert all(r["fwd_outrights"] == 0 and r["missing_marks"] == [] and r["missing_pairs"] == [] for r in results)
+
+    open_days = ["2026-09-18", "2026-09-21", "2026-09-22", "2026-09-23"]          # trade date .. EXPIRY DATE inclusive
+    spots = {(r[0], r[1]): (r[2], r[3], r[4]) for r in conn.execute(
+        "SELECT instrument_id, as_of_date, value, source, snapped_at FROM marks_official WHERE mark_type = 'SPOT'")}
+    for day in open_days:
+        for pair in ("EURSEK", eur_usd, usd_sek):
+            assert (pair, day) in spots, (pair, day)
+    assert spots[("EURSEK", "2026-09-23")] == (pytest.approx(11.023), "BBG_BFXFORWARD", "2026-09-23T17:00:00-04:00")
+    assert spots[(eur_usd, "2026-09-23")][0] == pytest.approx(1.123)
+    # SPOT only: nothing but SPOT was written for anything
+    assert {r[0] for r in conn.execute("SELECT DISTINCT mark_type FROM marks")} == {"SPOT"}
+    # the plain pair rows were created by the live pull's own helper, not a second one
+    assert {r[0] for r in conn.execute("SELECT instrument_id FROM instruments WHERE asset_class = 'FX'")} == {
+        "EURSEK", eur_usd, usd_sek}
+
+    # the expiry date's closes are found by the two readers that need them
+    from engine.options.inputs import get_spot
+    from engine.pnl.valuation import usd_per_quote
+    assert get_spot(conn, "2026-09-23", "EURSEK") == pytest.approx(11.023)         # the catch-up's payoff spot
+    s, pair, _src = usd_per_quote(conn, "EUR", "2026-09-23")                       # the ledger's base->USD conversion
+    assert pair == eur_usd and s == pytest.approx(1.123 if eur_usd == "EURUSD" else 1 / 1.123)
+
+    # every open day is now a complete close (SPOT is all a past option day needs), so a
+    # second run has nothing to do on them
+    comp = {r.as_of_date: r for r in close_completeness(conn, "2026-09-17", "2026-09-24").itertuples()}
+    assert all(comp[d].complete and comp[d].needed == 3 and comp[d].missing == [] for d in open_days)
+    assert comp["2026-09-17"].needed == 0 and comp["2026-09-24"].needed == 0       # not traded yet / expired
+    again = backfill.backfill(p, date(2026, 9, 18), date(2026, 9, 23), fetch=_never_called, fwd_fetch=_never_called,
+                              fut_fetch=_never_called, log=lambda *_: None)
+    assert [r["status"] for r in again] == ["SKIPPED"] * 4
+
+
+def test_backfill_still_fetches_the_expiry_close_of_an_option_the_ledger_already_realised(tmp_path):
+    """The catch-up case: the app did not run on the expiry date, a later pull froze the
+    option from an older premium, and only THEN does the backfill reach the expiry date.
+    That close must still be fetched (engine/options drops the stale realised row and the
+    ledger freezes it afresh at the payoff) -- a realised filter here would strand it."""
+    from data.bloomberg import live
+    p, conn = _options_only_db(tmp_path, [("o1", "EURSEK092326C-1", "2026-09-18", 35e6, "2026-09-23")])
+    conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
+                 "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, "
+                 "note) VALUES ('o1','EURSEK092326C-1','FX_OPTION','EUR','2026-09-23',35e6,0,'PREMIUM',0.01,"
+                 "'2026-09-22','QL_OPTIONS_PRICER',0,'t','premium dated 2026-09-22 (last before expiry)')")
+    conn.commit()
+    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
+    closes = {"EURSEK Curncy": 11.05, f"{eur_usd} Curncy": 1.17, f"{usd_sek} Curncy": 9.44}
+    results = backfill.backfill(p, date(2026, 9, 23), date(2026, 9, 23),
+                                fetch=lambda session, service, tickers, field, day: {t: closes[t] for t in tickers},
+                                fwd_fetch=_never_called, fut_fetch=_never_called, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE"] and results[0]["closes"] == 3
+    assert dict(conn.execute("SELECT instrument_id, value FROM marks_official WHERE as_of_date = '2026-09-23' "
+                             "AND mark_type = 'SPOT'")) == {"EURSEK": 11.05, eur_usd: 1.17, usd_sek: 9.44}
+
+
+def test_backfill_option_pair_shared_with_a_forward_gets_no_historical_forward_at_the_option_expiry(tmp_path):
+    """SPOT only for options, also where the pair has a forward curve history because a
+    forward is open in it: the forward's own leg date is backfilled, the option's expiry
+    is not (nothing prices an option on a past date)."""
+    p, conn = _options_only_db(tmp_path, [("o3", "EURSEK112526C-3", "2026-08-24", 1e6, "2026-11-25")])
+    conn.execute("INSERT INTO instruments VALUES ('EURSEK','FX','EUR','SEK',1,0,'EURSEK Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('e1','XLSX','EURSEK','FX_FWD','e1','2026-08-10',1e6,11.20,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("e1", 1, "FX_NEAR", "EUR", 1e6, "2026-08-10", "2026-09-25", 11.20, 1),
+        ("e1", 2, "FX_NEAR", "SEK", -11200000, "2026-08-10", "2026-09-25", 11.20, 1),
+    ])
+    conn.commit()
+
+    def fwd_fetch(session, service, tickers, fields, start, end):
+        assert all(t.startswith("EURSEK") for t in tickers)             # never a curve for a conversion pair
+        return {t: {"2026-09-08": {"PX_LAST": 11.25, "SETTLE_DT": "2026-09-25"}} for t in tickers}
+
+    results = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8),
+                                fetch=lambda session, service, tickers, field, day: {t: 10.0 for t in tickers},
+                                fwd_fetch=fwd_fetch, fut_fetch=_never_called, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE"] and results[0]["missing_marks"] == []
+    assert [r[0] for r in conn.execute("SELECT settle_date FROM marks WHERE mark_type = 'FWD_OUTRIGHT'")] == ["2026-09-25"]
+    from data.bloomberg.inventory import close_completeness
+    assert bool(close_completeness(conn, "2026-09-08", "2026-09-08")["complete"].iloc[0]) is True

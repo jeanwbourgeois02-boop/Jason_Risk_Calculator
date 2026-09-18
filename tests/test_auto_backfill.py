@@ -93,6 +93,51 @@ def test_auto_backfill_fills_from_earliest_trade_to_yesterday(tmp_path):
     assert have_fwd == {d.isoformat() for d in business_days}
 
 
+def test_auto_backfill_option_only_book_fills_closing_spots_then_reports_complete(tmp_path):
+    """2026-09-18: a book holding only a EURSEK option gets the closing SPOT of its pair
+    and of its own USD-conversion pairs for every business day since it was traded, and
+    those days then count as complete -- a past option day needs SPOT only. Before, the
+    option pair's SPOT was 'needed' but fetched by nobody, so every such day stayed
+    incomplete and was asked of Bloomberg again on every feed cycle."""
+    yesterday = _book_today() - timedelta(days=1)
+    earliest = yesterday - timedelta(days=4)
+    while earliest.weekday() >= 5:
+        earliest -= timedelta(days=1)
+    expiry = _settle_date()
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 ("EURSEK-OPT-1", "FX_OPTION", "EUR", "SEK", 1, 0, "EURSEK-OPT-1", expiry))
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("o1", "XLSX", "EURSEK-OPT-1", "FX_OPTION", "o1", earliest.isoformat(), 1e6, 0.01,
+                  "acc", "cp", "", "t", "d", ""))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("o1", 1, "NOTIONAL", "EUR", 1e6, earliest.isoformat(), expiry, 0, 0))
+    conn.commit()
+    pairs = live.option_spot_pair_names("EUR", "SEK")           # own pair + base->USD + quote->USD, helper's orientation
+    assert len(pairs) == 3
+
+    def fetch(session, service, tickers, field, day):
+        assert sorted(tickers) == sorted(f"{pair} Curncy" for pair in pairs)
+        return {t: 1.5 for t in tickers}
+
+    def never(*a, **k):
+        raise AssertionError("SPOT only for options: no forward-curve or future history request")
+
+    results = backfill.auto_backfill(p, fetch=fetch, fwd_fetch=never, fut_fetch=never, log=lambda *_: None)
+    business_days = backfill.business_days(earliest, yesterday)
+    assert [r["day"] for r in results] == [d.isoformat() for d in business_days]
+    assert all(r["status"] == "DONE" and r["closes"] == 3 and r["missing_marks"] == [] for r in results)
+    have = {(r[0], r[1]) for r in schema.connect(p).execute(
+        "SELECT instrument_id, as_of_date FROM marks_official WHERE mark_type='SPOT'")}
+    assert have == {(pair, d.isoformat()) for pair in pairs for d in business_days}
+
+    progress = []
+    again = backfill.auto_backfill(p, fetch=never, fwd_fetch=never, fut_fetch=never, log=lambda *_: None,
+                                   on_progress=progress.append)
+    assert again == [] and progress == [0]                      # history complete: nothing re-requested
+
+
 def test_auto_backfill_no_trades_does_nothing(tmp_path):
     p = tmp_path / "risk.db"
     schema.connect(p).commit()

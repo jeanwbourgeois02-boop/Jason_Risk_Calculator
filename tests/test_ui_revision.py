@@ -95,6 +95,44 @@ def test_book_signature_is_blank_when_the_database_cannot_be_read(tmp_path):
     assert revision.book_signature(tmp_path / "absent.db") == ""
 
 
+def test_trade_set_signature_moves_on_a_trade_added_or_resized_but_not_on_a_sign_or_on_option_terms(tmp_path):
+    """What the Blotter rebuilds a sub-tab on (2026-09-18). A flipped sign is a swap's
+    pay/receive set under Rates; option terms are a strike typed under Options: the user
+    makes several of each in a row and none may tear down the sub-tab he is editing in."""
+    path = _db(tmp_path)
+    before = revision.trade_set_signature(path)
+    assert before
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT INTO marks VALUES ('2026-09-18','EURUSD','2026-09-18','SPOT',1.17,'BBG_BFXFORWARD','x')")
+    conn.execute("UPDATE trades SET quantity = -quantity")
+    conn.execute("UPDATE trade_legs SET amount = -amount")
+    conn.execute("INSERT INTO instruments VALUES ('EURUSD1C','FX_OPTION','EUR','USD',1,0,'','2026-12-15')")
+    conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type) VALUES ('EURUSD1C', 1.15, 'CALL')")
+    conn.commit()
+    assert revision.trade_set_signature(path) == before
+    assert revision.book_signature(path)                      # the wider fingerprint is still there, unchanged in shape
+    conn.execute("UPDATE trades SET quantity = quantity * 2")  # a re-upload with a different size
+    conn.commit()
+    resized = revision.trade_set_signature(path)
+    assert resized != before
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
+                 "price, account, counterparty, strategy, trader, description) VALUES "
+                 "('m1','MANUAL','EURUSD','FX_FWD','m1','2026-09-02',1,1.10,'a','c','','t','')")  # a manual trade booked
+    conn.commit()
+    conn.close()
+    assert revision.trade_set_signature(path) not in (before, resized)
+    assert revision.trade_set_signature(tmp_path / "absent.db") == ""
+
+
+def test_publish_if_changed_never_republishes_the_value_a_store_already_holds():
+    """Dash fires a store's listeners even when a callback sets it to the value it already
+    has (checked in a real browser, Dash 4.4.1), so an unchanged signature is `no_update`."""
+    assert revision.publish_if_changed("b", "a") == "b"
+    assert revision.publish_if_changed("b", None) == "b"
+    assert revision.publish_if_changed("a", "a") is dash.no_update
+    assert revision.publish_if_changed("", "a") is dash.no_update   # file missing / unreadable: not news
+
+
 # --------------------------------------------------------------------------- wiring
 def test_every_view_listens_to_the_revision_signal(tmp_path):
     """The point of the change: header, Ladder, Blotter and Market data all re-run when
@@ -107,7 +145,10 @@ def test_every_view_listens_to_the_revision_signal(tmp_path):
             listeners[key] = ids
     joined = " ".join(listeners)
     for output in (f"{header.HEADER_ID}-figures", "cash-ladder-table-container", "blotter-content",
-                   "market-data-body", "blotter-datatable-total"):
+                   "market-data-body", "blotter-datatable-total",
+                   # refreshed IN PLACE rather than by a rebuild of their sub-tab (2026-09-18):
+                   "blotter-notices", "blotter-strip-options", "blotter-strip-rates",
+                   "options-datatable", "rates-datatable"):
         assert output in joined, f"{output} does not listen to the revision signal"
 
 

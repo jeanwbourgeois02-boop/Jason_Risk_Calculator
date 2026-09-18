@@ -15,6 +15,24 @@ Wed 23 Sep 2026. Full text: `store.py` docstring "Expiry day", `pricer.price_fx_
   **Why:** the ledger froze the T-1 MODEL premium: ~EUR 45-50k of time value per 35M ATM
   ticket locked into realised P&L and the last day's spot move lost.
 
+- **Reviewer W-2 (same day):** until a `realised_pnl` row frozen FROM an expiry-dated mark
+  exists (`spot_as_of_date >= expiry`), the catch-up recomputes the intrinsic from the SPOT
+  on file NOW for the expiry date and rewrites on a PREMIUM difference; after that both
+  are left alone. So the frozen payoff = official spot on file at the FIRST freeze.
+  Found while doing it: `data/bloomberg/backfill.py` by default never rewrites an
+  already-official SPOT (`_drop_already_official`; only `--overwrite` does), so after a
+  live expiry day the SPOT on file stays the last live pull's unless someone overwrites
+  it -- and the backfill's own per-day `realise_settled` runs WITHOUT the options step, so
+  a backfilled missed expiry day first freezes at the old model premium and self-heals
+  at the next live pull (catch-up drops the row, ledger refreezes).
+
+- **Reviewer W-1 (same day):** `store.purge_old_unit_cash_payoff_marks`, run-once via
+  the `options_migrations(name, applied_at)` marker table this package creates itself
+  (no meta table exists in the schema -- reuse this one for any future one-off). Old- and
+  new-unit digital marks cannot be told apart by value (on EURUSD-scale pairs 1/S ~ 0.85),
+  hence run-once rather than a filter. FX_OPTION only. Tests that exercise a DIGITAL
+  through `price_all_and_store` must set the marker first or the purge eats their setup.
+
 - **Verified read-only, do not re-derive:** `engine/pnl/ledger.py::_OPEN_OPTION_SQL` uses
   `settle_date < :as_of` (freezes only once expiry day is OVER) -- no ledger change was
   needed; `live.pull_once` runs rates -> vol -> options -> `realise_settled`; on expiry
