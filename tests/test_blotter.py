@@ -491,3 +491,29 @@ def test_real_sample_file_loads_into_db(tmp_csv):
         "SELECT COUNT(*) FROM trades t LEFT JOIN instruments i ON t.instrument_id = i.instrument_id "
         "WHERE i.instrument_id IS NULL").fetchone()[0]
     assert dangling == 0
+
+
+# --------------------------------------------------------------------------- strike column
+def test_option_strike_read_from_structured_column_when_description_has_none(tmp_csv):
+    row = _option_row(Symbol="EURSEK112526C-197906813",
+                      Description="EURSEK-XXAA EUR Call 11/25/2026 SBILUK", Strike="11.25")
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects
+    assert res.instrument_options["EURSEK112526C-197906813"].strike == pytest.approx(11.25)
+
+
+def test_option_strike_from_description_when_no_column(tmp_csv):
+    res = blotter.parse(tmp_csv([_option_row()]))
+    assert res.instrument_options["EURSEK092326C-197727826"].strike == pytest.approx(11.0584)
+
+
+def test_option_strike_column_contradicting_description_rejects(tmp_csv):
+    res = blotter.parse(tmp_csv([_option_row(Strike="11.30")]))
+    assert len(res.rejects) == 1
+    assert "strike column" in res.rejects[0].reason
+
+
+def test_option_strike_column_agreeing_with_description_is_fine(tmp_csv):
+    res = blotter.parse(tmp_csv([_option_row(**{"Strike Price": "11.0584"})]))
+    assert not res.rejects
+    assert res.instrument_options["EURSEK092326C-197727826"].strike == pytest.approx(11.0584)

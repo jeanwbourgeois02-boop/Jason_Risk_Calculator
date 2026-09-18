@@ -111,6 +111,7 @@ HEADER_MARKERS = ("symbol", "tradeid", "fintype", "product")
 
 OPTION_SYMBOL_RE = re.compile(r"^([A-Z]{6})(\d{6})([CP])-(\d+)$")
 STRIKE_RE = re.compile(r"(\d+\.\d+)\s+STRIKE")
+STRIKE_COLUMNS = ("Strike", "Strike Price", "Strike Rate", "Strike Px", "Option Strike", "StrikePrice")
 PAIR_RE = re.compile(r"^([A-Z]{3})[ /\-]?([A-Z]{3})(?![A-Z])")
 US_DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{4})\b")
 # Market convention for which currency is the base when only the two currencies of a
@@ -727,7 +728,21 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
             return
         symbol = symbol or f"{pair}{datetime.fromisoformat(expiry).strftime('%m%d%y')}{option_type[0]}-{trade_id}"
     strike_m = STRIKE_RE.search(desc)
-    strike = float(strike_m.group(1)) if strike_m else 0.0  # 0.0 sentinel, never invented
+    desc_strike = float(strike_m.group(1)) if strike_m else 0.0
+    # A structured strike column wins when the export carries one (2026-09-18: three
+    # options in the reference file have no "<n> STRIKE" in their Description and the
+    # export has no strike column at all, so a re-export with one is the way to get
+    # them priced without typing). Both populated and different = contradiction.
+    col_strike = 0.0
+    for col in STRIKE_COLUMNS:
+        v = _num(row.get(col))
+        if not math.isnan(v) and v > 0:
+            col_strike = v
+            break
+    if col_strike and desc_strike and abs(col_strike - desc_strike) > 1e-9 * max(col_strike, desc_strike):
+        res.rejects.append(Reject(row_no, symbol, f"strike column {col_strike} disagrees with Description strike {desc_strike}"))
+        return
+    strike = col_strike or desc_strike  # 0.0 sentinel when neither is present, never invented
     base_ccy = pair[:3]
     trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
     if trade_date is None:
