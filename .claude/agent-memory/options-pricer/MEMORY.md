@@ -3,4 +3,5 @@
 - [Phase 2 + 4 landed 2026-09-17](phase-2-4-landed-2026-09-17.md) — what shipped, follow-ups owed to data-ingest/housekeeper/ui-shell/cash-ladder
 - [Phase 5b smile vol landed 2026-09-17](phase-5b-smile-vol-landed-2026-09-17.md) — SMILE/ATM_INTERP/MANUAL priority, SMILE+ATM_INTERP share one day-range (test gotcha), surface caching
 - [Phase 7 landed 2026-09-17](phase-7-landed-2026-09-17.md) — real OIS rates only cover 7 currencies (not full G10), EURSEK→EURUSD fixture switch, Business252 vs Act/365, marks_official SPOT source gotcha for equity/commodity; DELTA_PA now official (update 2026-09-17)
-- [Phase 7.1 manual_rates fallback 2026-09-17](phase-7-1-manual-rates-fallback-2026-09-17.md) — manual_rates table + resolution order for currencies with no OIS convention (SEK/NOK/TWD/ZAR); provenance stops at MarketInputs, not yet in PricingOutcome
+- [Phase 7.1 manual_rates fallback 2026-09-17](phase-7-1-manual-rates-fallback-2026-09-17.md) — manual_rates table + resolution order for currencies with no OIS convention (SEK/NOK/TWD/ZAR); provenance now reaches PricingOutcome (Phase 7.2 update)
+- [Phase 7.2 implied-forward rate 2026-09-18](phase-7-2-implied-forward-rate-2026-09-18.md) — covered-interest-parity rate fallback (SEK etc.) off pair's own SPOT+FWD_OUTRIGHT; reject keeps ORIGINAL skip reason; precedence curve>manual>implied

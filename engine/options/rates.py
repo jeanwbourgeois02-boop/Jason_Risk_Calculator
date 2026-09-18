@@ -46,7 +46,13 @@ never invented by this module. Resolution order per currency, used by both
      ``source_kind == MANUAL_EXPIRY``.
   3. ``manual_rates`` flat ``'*'`` row for the currency --
      ``source_kind == MANUAL_FLAT``.
-  4. Neither -- skip, reason ``"no curve/rate <CCY>"``.
+  4. Covered interest parity, implied from the PAIR's own official forward
+     and spot plus the OTHER currency's already-resolved rate (steps 1-3
+     for that other currency) -- ``source_kind == IMPLIED_FORWARD``. Only
+     tried per-currency (never both legs at once: if neither currency
+     resolves 1-3, there is nothing to imply from and the pair skips as
+     before). See "Implied-forward fallback" below.
+  5. Neither -- skip, reason ``"no curve/rate <CCY>"``.
 
 This is a genuine, currently-unclosable gap for SEK/NOK specifically (not a
 bug in this module): both currencies' central banks publish overnight rates
@@ -57,9 +63,43 @@ Bloomberg deposit-rate feed to auto-populate ``manual_rates`` is a further
 follow-up, not built here -- this phase only adds the manual entry point and
 its resolution order.
 
-**Never falls back to a placeholder.** No ``curve_quotes`` rows AND no
-``manual_rates`` row for a required currency on ``as_of`` ->
-``resolve_fx_rates`` / ``resolve_ccy_rate`` return
+**Implied-forward fallback (Phase 7.2, 2026-09-18).** SEK (and NOK/TWD/ZAR)
+have no OIS convention, and the user does not want to hand-enter a
+``manual_rates`` row for every one of them -- the live Bloomberg pull
+already writes an official ``FWD_OUTRIGHT`` for EURSEK (and its own SPOT),
+so the missing rate can be derived instead of asked for. Covered interest
+parity for pair BASE/QUOTE (domestic = quote, foreign = base, this module's
+own convention throughout) with spot ``S``, forward ``F`` to time ``T``
+(plain ACT/365 from ``as_of`` to the option's expiry -- deliberately not
+this package's calendar-aware Business252 day count used elsewhere, since
+this is a closed-form rearrangement of the forward-pricing identity itself,
+not a discounting day-count choice):
+
+    r_quote = r_base  + ln(F/S) / T
+    r_base  = r_quote - ln(F/S) / T
+
+Only invoked for a currency that resolves NEITHER an OIS curve NOR a manual
+rate (steps 1-3 above) -- an existing curve or manual rate is never
+overridden by an implied one, so precedence is exactly OIS_CURVE >
+MANUAL_EXPIRY / MANUAL_FLAT > IMPLIED_FORWARD. ``F`` is read via
+``_forward_for_expiry``: an exact ``marks_official`` ``FWD_OUTRIGHT`` for
+the option's own expiry date if one exists, else linear interpolation in
+forward points between the two bracketing ``FWD_OUTRIGHT`` marks (mirrors
+CLAUDE.md's own ``BBG_INTERP`` convention), else linear extrapolation from
+the nearest two marks -- but capped at one more "last tenor gap" beyond the
+final point in that direction, never further (a lone point with nothing to
+interpolate or extrapolate against, or an expiry beyond that one-gap cap,
+returns ``None``). Rejects (returns ``None``, so the caller keeps its
+PRE-EXISTING ``"no curve/rate <CCY>"`` skip reason -- this fallback never
+invents its own reason string) when: fewer than two ``FWD_OUTRIGHT`` marks
+are staged for the pair, the expiry falls outside the bracket-or-capped-
+extrapolation window, the pair's SPOT is missing, or ``T <= 0``.
+``RateInput.detail`` records provenance for diagnostics, e.g. ``"implied
+from EURSEK forward 2026-11-25 and EUR ESTR curve"``.
+
+**Never falls back to a placeholder.** No ``curve_quotes`` rows, no
+``manual_rates`` row, and no implied-forward rate for a required currency on
+``as_of`` -> ``resolve_fx_rates`` / ``resolve_ccy_rate`` return
 ``(None, "no curve/rate <CCY>")``. Nothing here ever reads
 ``options_calc.fx.rate_curves.get_rate`` or ships a made-up number.
 
@@ -107,6 +147,7 @@ FLAT_EXPIRY = "*"
 OIS_CURVE = "OIS_CURVE"
 MANUAL_EXPIRY = "MANUAL_EXPIRY"
 MANUAL_FLAT = "MANUAL_FLAT"
+IMPLIED_FORWARD = "IMPLIED_FORWARD"
 
 
 def ensure_manual_rates_table(conn: sqlite3.Connection) -> None:
@@ -230,7 +271,7 @@ class RateInput:
     docstring's resolution-order list. Mirrors `inputs.py::VolInput`'s
     provenance pattern."""
     rate: float
-    source_kind: str  # OIS_CURVE | MANUAL_EXPIRY | MANUAL_FLAT
+    source_kind: str  # OIS_CURVE | MANUAL_EXPIRY | MANUAL_FLAT | IMPLIED_FORWARD
     detail: str = ""
 
 
@@ -264,7 +305,8 @@ def resolve_ccy_rate_with_source(
         as_of_date = datetime.date.fromisoformat(as_of)
         expiry_date = datetime.date.fromisoformat(expiry_iso)
         rate = zero_rate_to(curve_set, as_of_date, expiry_date)
-        return RateInput(rate, OIS_CURVE, detail=f"{ccy} OIS curve"), ""
+        index = CCY_RFR.get(ccy, "OIS")
+        return RateInput(rate, OIS_CURVE, detail=f"{ccy} {index} curve"), ""
 
     manual_rate, source_kind = _get_manual_rate(conn, as_of, ccy, expiry_iso)
     if manual_rate is not None:
@@ -272,6 +314,125 @@ def resolve_ccy_rate_with_source(
         return RateInput(manual_rate, source_kind, detail=detail), ""
 
     return None, f"no curve/rate {ccy}"
+
+
+# --------------------------------------------------------------- implied-forward fallback (Phase 7.2, 2026-09-18)
+# Covered interest parity -- see module docstring's "Implied-forward fallback" section for
+# the formula, precedence and reject conditions.
+
+def _get_pair_spot(conn: sqlite3.Connection, as_of: str, pair: str) -> Optional[float]:
+    """Duplicated from `inputs.py::get_spot` rather than imported -- same
+    "small private query duplicated, not cross-imported" pattern this module
+    already uses for `_read_curve_quotes` (its own docstring explains why:
+    avoids a module-level import cycle with `inputs.py`, which lazily
+    imports THIS module inside a function body)."""
+    row = conn.execute(
+        "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'SPOT'",
+        (as_of, pair),
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
+def _get_fwd_outright_points(conn: sqlite3.Connection, as_of: str, pair: str):
+    """Every official FWD_OUTRIGHT mark for `pair` on `as_of`, as
+    `(settle_date, value)` pairs sorted by date -- the raw material for
+    `_forward_for_expiry`."""
+    rows = conn.execute(
+        "SELECT settle_date, value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? "
+        "AND mark_type = 'FWD_OUTRIGHT'",
+        (as_of, pair),
+    ).fetchall()
+    return sorted((datetime.date.fromisoformat(d), v) for d, v in rows)
+
+
+def _forward_for_expiry(
+    conn: sqlite3.Connection, as_of: str, pair: str, expiry_date: datetime.date
+) -> Optional[float]:
+    """The pair's forward outright to `expiry_date`: an exact FWD_OUTRIGHT
+    mark if one exists; else linear interpolation in forward points between
+    the two bracketing marks (mirrors CLAUDE.md's own BBG_INTERP
+    convention); else linear extrapolation from the nearest two marks,
+    capped at one more "last tenor gap" beyond the final point in that
+    direction -- never further. None if fewer than two marks are staged, or
+    the target falls outside both the bracket and that capped-extrapolation
+    window."""
+    points = _get_fwd_outright_points(conn, as_of, pair)
+    for d, v in points:
+        if d == expiry_date:
+            return v
+    if len(points) < 2:
+        return None
+
+    before = [(d, v) for d, v in points if d < expiry_date]
+    after = [(d, v) for d, v in points if d > expiry_date]
+
+    if before and after:
+        d0, v0 = before[-1]
+        d1, v1 = after[0]
+        w = (expiry_date - d0).days / (d1 - d0).days
+        return v0 + w * (v1 - v0)
+
+    if before and not after:
+        d0, v0 = points[-2]
+        d1, v1 = points[-1]
+        gap = (d1 - d0).days
+        if gap <= 0 or (expiry_date - d1).days > gap:
+            return None
+        w = (expiry_date - d0).days / gap
+        return v0 + w * (v1 - v0)
+
+    if after and not before:
+        d0, v0 = points[0]
+        d1, v1 = points[1]
+        gap = (d1 - d0).days
+        if gap <= 0 or (d0 - expiry_date).days > gap:
+            return None
+        w = (expiry_date - d0).days / gap
+        return v0 + w * (v1 - v0)
+
+    return None
+
+
+def _imply_rate_from_forward(
+    conn: sqlite3.Connection,
+    as_of: str,
+    pair: str,
+    expiry_iso: str,
+    known_input: RateInput,
+    solve_for: str,
+) -> Optional[RateInput]:
+    """Covered interest parity: given the OTHER currency's already-resolved
+    `known_input`, imply this currency's rate from the pair's own official
+    spot + forward. `solve_for` is 'domestic' or 'foreign'. Returns None on
+    any reject condition (missing/non-positive spot, missing/non-positive
+    forward, `T <= 0`) -- the caller keeps its own pre-existing
+    "no curve/rate <CCY>" skip reason in that case, this function never
+    invents its own reason string (see module docstring)."""
+    spot = _get_pair_spot(conn, as_of, pair)
+    if spot is None or spot <= 0:
+        return None
+
+    as_of_date = datetime.date.fromisoformat(as_of)
+    expiry_date = datetime.date.fromisoformat(expiry_iso)
+    t_years = (expiry_date - as_of_date).days / 365.0
+    if t_years <= 0:
+        return None
+
+    forward = _forward_for_expiry(conn, as_of, pair, expiry_date)
+    if forward is None or forward <= 0:
+        return None
+
+    import math
+    ln_fs = math.log(forward / spot)
+    if solve_for == "domestic":
+        rate = known_input.rate + ln_fs / t_years
+    elif solve_for == "foreign":
+        rate = known_input.rate - ln_fs / t_years
+    else:
+        raise ValueError(f"solve_for must be 'domestic' or 'foreign', got {solve_for!r}")
+
+    detail = f"implied from {pair} forward {expiry_iso} and {known_input.detail}"
+    return RateInput(rate, IMPLIED_FORWARD, detail=detail)
 
 
 def resolve_fx_rates(
@@ -288,23 +449,40 @@ def resolve_fx_rates(
     resolved from this schema's plain 6-char pair id directly rather than
     via g10.py's lookup table, so it works for ANY pair (not just the 45
     recognized G10 ones). Each currency independently tries its OIS curve
-    first, then manual_rates -- see module docstring's resolution order and
-    `resolve_ccy_rate_with_source`.
+    first, then manual_rates (`resolve_ccy_rate_with_source`); if exactly
+    one currency resolves neither and the OTHER one does, covered interest
+    parity off the pair's own forward + spot is tried as a last resort
+    before giving up (`_imply_rate_from_forward` -- see module docstring's
+    "Implied-forward fallback" section). An existing curve or manual rate is
+    never overridden by an implied one.
 
-    Returns (FxRates, "") on success, or (None, reason) on the first
-    currency that resolves neither a curve nor a manual rate -- never falls
-    back to a placeholder rate.
+    Returns (FxRates, "") on success, or (None, reason) when a currency
+    resolves neither a curve, a manual rate, nor an implied-forward rate --
+    never falls back to a placeholder rate. `reason` is always the plain
+    per-currency "no curve/rate <CCY>" message (never a CIP-specific one),
+    so a still-unpriceable option's skip reason is unchanged by this
+    fallback existing.
     """
     if len(pair) != 6:
         return None, f"pair {pair!r} is not a plain 6-char base+quote instrument_id"
     foreign_ccy, domestic_ccy = pair[:3], pair[3:]
 
-    foreign_input, reason = resolve_ccy_rate_with_source(conn, as_of, foreign_ccy, expiry_iso, curve_cache)
+    foreign_input, foreign_reason = resolve_ccy_rate_with_source(conn, as_of, foreign_ccy, expiry_iso, curve_cache)
+    domestic_input, domestic_reason = resolve_ccy_rate_with_source(conn, as_of, domestic_ccy, expiry_iso, curve_cache)
+
+    if foreign_input is None and domestic_input is None:
+        return None, foreign_reason
+
     if foreign_input is None:
-        return None, reason
-    domestic_input, reason = resolve_ccy_rate_with_source(conn, as_of, domestic_ccy, expiry_iso, curve_cache)
-    if domestic_input is None:
-        return None, reason
+        implied = _imply_rate_from_forward(conn, as_of, pair, expiry_iso, domestic_input, solve_for="foreign")
+        if implied is None:
+            return None, foreign_reason
+        foreign_input = implied
+    elif domestic_input is None:
+        implied = _imply_rate_from_forward(conn, as_of, pair, expiry_iso, foreign_input, solve_for="domestic")
+        if implied is None:
+            return None, domestic_reason
+        domestic_input = implied
 
     return FxRates(
         domestic_input.rate, foreign_input.rate, domestic_ccy, foreign_ccy,

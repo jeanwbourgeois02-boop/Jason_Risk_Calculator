@@ -13,10 +13,11 @@ a guessed number.
   e.g. 'EURSEK092326C-197727826', and has no SPOT mark of its own).
   Missing -> ``get_spot`` returns ``None``.
 
-- **Rates (Phase 7, 2026-09-17; manual fallback added Phase 7.1,
-  2026-09-17)**: ``engine/options/rates.py::resolve_fx_rates`` -- REAL
-  continuously-compounded zero rates to the option's own expiry, read off
-  the bootstrapped OIS discount curve of each currency (``curve_quotes`` ->
+- **Rates (Phase 7, 2026-09-17; manual fallback Phase 7.1, 2026-09-17;
+  implied-forward fallback Phase 7.2, 2026-09-18)**:
+  ``engine/options/rates.py::resolve_fx_rates`` -- REAL continuously-
+  compounded zero rates to the option's own expiry, read off the
+  bootstrapped OIS discount curve of each currency (``curve_quotes`` ->
   ``engine.rates.curves.build_curve_set``, same source-preference rule as
   ``engine/rates/store.py::_read_curve_quotes``). domestic = quote ccy,
   foreign = base ccy -- see rates.py's own docstring for why this is exact
@@ -27,15 +28,22 @@ a guessed number.
   no OIS convention (``engine/rates/conventions.py::CCY_RFR`` -- seven
   currencies: USD/EUR/GBP/JPY/CHF/CAD/AUD, NOT the full 45-pair G10 set
   ``options_calc.fx.g10`` covers), such as SEK/NOK/TWD/ZAR, or a supported
-  currency simply missing ``curve_quotes`` rows on ``as_of``, falls back to
-  a manual rate (``rates.py::manual_rates``, ``set_manual_rate``) -- exact
-  expiry first, then a ccy-wide flat ``'*'`` entry -- before giving up with
-  reason ``"no curve/rate <CCY>"``. Never a fabricated rate: an unresolved
-  currency with no manual entry still skips the trade. Each resolved rate's
-  provenance (``rates.py::RateInput.source_kind`` in
-  ``{OIS_CURVE, MANUAL_EXPIRY, MANUAL_FLAT}``) is carried onto
+  currency simply missing ``curve_quotes`` rows on ``as_of``, falls back in
+  order to: a manual rate (``rates.py::manual_rates``, ``set_manual_rate``
+  -- exact expiry first, then a ccy-wide flat ``'*'`` entry), then covered
+  interest parity implied from the pair's own official SPOT + FWD_OUTRIGHT
+  marks and the OTHER currency's already-resolved rate (never invoked when
+  BOTH currencies are unresolved, and never overriding a curve or manual
+  rate that does exist) -- before giving up with reason
+  ``"no curve/rate <CCY>"``. Never a fabricated rate: a currency with no
+  curve, no manual entry, and no forward to imply from still skips the
+  trade, with that same unchanged reason string. Each resolved rate's
+  provenance (``rates.py::RateInput.source_kind`` in ``{OIS_CURVE,
+  MANUAL_EXPIRY, MANUAL_FLAT, IMPLIED_FORWARD}``) is carried onto
   ``MarketInputs.domestic_rate_source`` / ``.foreign_rate_source`` the same
-  way ``VolInput`` is carried onto ``MarketInputs.vol_source`` below.
+  way ``VolInput`` is carried onto ``MarketInputs.vol_source`` below -- see
+  ``rates.py``'s own docstring for the implied-forward formula and reject
+  conditions.
 
 - **Vol**: resolved by ``resolve_vol`` with a documented priority, never
   blending sources for one trade (Phase 5b, 2026-09-17):

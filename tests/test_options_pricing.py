@@ -787,6 +787,232 @@ def test_no_curve_skip_via_store_price_and_store():
     assert outcome.reason.startswith("no curve")
 
 
+# --------------------------------------------------------------------------- Phase 7.2: implied-forward (CIP) rate fallback
+
+def _seed_bare_pair(conn, pair, spot, as_of=AS_OF):
+    """Just the plain FX pair instrument + its official SPOT mark -- NO
+    curve_quotes seeding (unlike _seed_pair_spot), so the implied-forward
+    fallback tests control exactly which currency has a real OIS curve."""
+    base_ccy, quote_ccy = pair[:3], pair[3:]
+    conn.execute(
+        "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        (pair, "FX", base_ccy, quote_ccy, 1.0, 0, f"{pair} Curncy", "9999-12-31"),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (as_of, pair, as_of, "SPOT", spot, "BBG_BFXFORWARD", f"{as_of}T17:00:00-04:00"),
+    )
+    conn.commit()
+
+
+def _seed_fwd_outright(conn, pair, settle_date, value, as_of=AS_OF):
+    conn.execute(
+        "INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (as_of, pair, settle_date, "FWD_OUTRIGHT", value, "BBG_BFXFORWARD", f"{as_of}T17:00:00-04:00"),
+    )
+    conn.commit()
+
+
+@needs_quantlib
+def test_implied_forward_rate_matches_covered_interest_parity_by_hand():
+    """SEK has no OIS convention and no manual_rates row, but EURSEK's own
+    official SPOT + an exact FWD_OUTRIGHT at the option's own expiry, plus
+    EUR's real OIS rate, let SEK's rate be implied via covered interest
+    parity. Checked against an independent by-hand computation of the same
+    r_domestic = r_foreign + ln(F/S)/T formula (not by calling any of
+    rates.py's own helpers)."""
+    import math
+    from engine.options.rates import resolve_fx_rates, resolve_ccy_rate_with_source, IMPLIED_FORWARD, OIS_CURVE
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")  # SEK gets no curve -- it has none, ever
+    spot, forward = 11.06, 11.10
+    _seed_bare_pair(conn, "EURSEK", spot)
+    _seed_fwd_outright(conn, "EURSEK", EXPIRY, forward)
+
+    eur_input, reason = resolve_ccy_rate_with_source(conn, AS_OF, "EUR", EXPIRY)
+    assert eur_input is not None, reason
+    assert eur_input.source_kind == OIS_CURVE
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is not None, reason
+    assert result.domestic_rate_source.source_kind == IMPLIED_FORWARD
+    assert result.foreign_rate_source.source_kind == OIS_CURVE
+
+    as_of_date, expiry_date = datetime.date.fromisoformat(AS_OF), datetime.date.fromisoformat(EXPIRY)
+    T = (expiry_date - as_of_date).days / 365.0
+    expected_sek_rate = eur_input.rate + math.log(forward / spot) / T
+    assert result.domestic_rate == pytest.approx(expected_sek_rate)
+    assert result.domestic_rate_source.detail == f"implied from EURSEK forward {EXPIRY} and {eur_input.detail}"
+    assert eur_input.detail == "EUR ESTR curve"
+
+
+@needs_quantlib
+def test_implied_forward_interpolates_between_bracketing_marks():
+    """The forward fed into CIP is linearly interpolated in forward points
+    between the two nearest FWD_OUTRIGHT marks when there is no exact match
+    at the option's own expiry -- checked by hand against the same linear
+    interpolation formula CLAUDE.md documents for BBG_INTERP."""
+    import math
+    from engine.options.rates import resolve_fx_rates, resolve_ccy_rate_with_source, IMPLIED_FORWARD
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    spot = 11.06
+    d0, d1 = "2026-09-01", "2026-10-01"  # bracket EXPIRY (2026-09-23)
+    v0, v1 = 11.08, 11.14
+    _seed_bare_pair(conn, "EURSEK", spot)
+    _seed_fwd_outright(conn, "EURSEK", d0, v0)
+    _seed_fwd_outright(conn, "EURSEK", d1, v1)
+
+    eur_input, reason = resolve_ccy_rate_with_source(conn, AS_OF, "EUR", EXPIRY)
+    assert eur_input is not None, reason
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is not None, reason
+    assert result.domestic_rate_source.source_kind == IMPLIED_FORWARD
+
+    d0_date, d1_date, expiry_date = (
+        datetime.date.fromisoformat(d0), datetime.date.fromisoformat(d1), datetime.date.fromisoformat(EXPIRY),
+    )
+    w = (expiry_date - d0_date).days / (d1_date - d0_date).days
+    expected_forward = v0 + w * (v1 - v0)
+    T = (expiry_date - datetime.date.fromisoformat(AS_OF)).days / 365.0
+    expected_rate = eur_input.rate + math.log(expected_forward / spot) / T
+    assert result.domestic_rate == pytest.approx(expected_rate)
+
+
+@needs_quantlib
+def test_curve_beats_implied_even_when_a_forward_mark_exists():
+    """Precedence: a currency with a real OIS curve never falls through to
+    an implied rate, even when a FWD_OUTRIGHT mark is staged that would
+    imply something very different -- the curve always wins (same
+    precedence rule as test_ois_curve_ignores_manual_rate_for_same_currency,
+    one rung further down the fallback chain)."""
+    from engine.options.rates import resolve_fx_rates, OIS_CURVE
+
+    conn = _new_db()
+    _seed_pair_spot(conn)  # EURUSD SPOT + real OIS curves for both EUR and USD
+    # A forward that would imply a wildly different USD rate if it were ever
+    # used -- it must not be, since USD already resolves via its own curve.
+    _seed_fwd_outright(conn, EURUSD, EXPIRY, 999.0)
+
+    result, reason = resolve_fx_rates(conn, AS_OF, EURUSD, EXPIRY)
+    assert result is not None, reason
+    assert result.domestic_rate_source.source_kind == OIS_CURVE
+    assert result.foreign_rate_source.source_kind == OIS_CURVE
+    assert result.domestic_rate == pytest.approx(_FLAT_OIS_RATE["USD"], abs=0.005)
+
+
+@needs_quantlib
+def test_manual_beats_implied_forward():
+    """Precedence: a currency with a manual_rates entry never falls through
+    to an implied rate either, even when a FWD_OUTRIGHT mark is staged that
+    would imply something very different."""
+    from engine.options.rates import resolve_fx_rates, set_manual_rate, MANUAL_FLAT
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    set_manual_rate(conn, AS_OF, "SEK", 0.02)
+    _seed_bare_pair(conn, "EURSEK", 11.06)
+    # Would imply a very different SEK rate if manual didn't win first.
+    _seed_fwd_outright(conn, "EURSEK", EXPIRY, 20.0)
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is not None, reason
+    assert result.domestic_rate_source.source_kind == MANUAL_FLAT
+    assert result.domestic_rate == pytest.approx(0.02)
+
+
+@needs_quantlib
+def test_implied_forward_rejects_when_no_forward_brackets_expiry():
+    """Two FWD_OUTRIGHT marks staged, both well short of the option's
+    expiry, with a gap far smaller than the overshoot -- capped
+    extrapolation refuses to reach that far, so the pair falls back to its
+    ORIGINAL "no curve/rate SEK" skip reason, not a CIP-specific one."""
+    from engine.options.rates import resolve_fx_rates
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    _seed_bare_pair(conn, "EURSEK", 11.06)
+    as_of_date = datetime.date.fromisoformat(AS_OF)
+    near1 = (as_of_date + datetime.timedelta(days=7)).isoformat()
+    near2 = (as_of_date + datetime.timedelta(days=14)).isoformat()
+    _seed_fwd_outright(conn, "EURSEK", near1, 11.07)
+    _seed_fwd_outright(conn, "EURSEK", near2, 11.08)
+    # EXPIRY is 2026-09-23, 33 days after AS_OF -- 19 days past the last
+    # point (14d), which is more than that pair's 7-day tenor gap.
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is None
+    assert reason == "no curve/rate SEK"
+
+
+@needs_quantlib
+def test_implied_forward_rejects_when_spot_missing():
+    """A FWD_OUTRIGHT exists at the exact expiry, but the pair's own SPOT is
+    never staged -- CIP needs both, so this rejects and keeps the original
+    skip reason."""
+    from engine.options.rates import resolve_fx_rates
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    conn.execute(
+        "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+        ("EURSEK", "FX", "EUR", "SEK", 1.0, 0, "EURSEK Curncy", "9999-12-31"),
+    )
+    # Deliberately no SPOT mark.
+    _seed_fwd_outright(conn, "EURSEK", EXPIRY, 11.10)
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is None
+    assert reason == "no curve/rate SEK"
+
+
+@needs_quantlib
+def test_implied_forward_rejects_with_fewer_than_two_marks_and_no_exact_match():
+    """A single FWD_OUTRIGHT mark, nowhere near the option's own expiry, is
+    not enough to interpolate OR extrapolate from (no second point defines a
+    slope or a tenor gap) -- rejects, original skip reason kept."""
+    from engine.options.rates import resolve_fx_rates
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    _seed_bare_pair(conn, "EURSEK", 11.06)
+    _seed_fwd_outright(conn, "EURSEK", "2026-09-01", 11.07)  # only one point, not at EXPIRY
+
+    result, reason = resolve_fx_rates(conn, AS_OF, "EURSEK", EXPIRY)
+    assert result is None
+    assert reason == "no curve/rate SEK"
+
+
+@needs_quantlib
+def test_eursek_option_prices_end_to_end_via_implied_forward_no_manual_entry():
+    """The task's own motivating scenario: an EURSEK option that previously
+    always skipped 'no curve/rate SEK' now prices with NO manual_rates entry
+    at all, purely from the pair's own official SPOT + FWD_OUTRIGHT and EUR's
+    real OIS curve -- store.py's PricingOutcome records the implied
+    provenance for diagnostics."""
+    from engine.options.store import price_and_store
+    from engine.options.rates import IMPLIED_FORWARD
+
+    conn = _new_db()
+    _seed_ois_curve(conn, AS_OF, "EUR")
+    _seed_bare_pair(conn, "EURSEK", 11.06)
+    _seed_fwd_outright(conn, "EURSEK", EXPIRY, 11.10)
+    _seed_option_trade(conn, pair="EURSEK", instrument_id="EURSEK092326C-1")
+    _seed_vol(conn, pair="EURSEK")
+
+    outcome = price_and_store(conn, AS_OF, "T1")
+    assert outcome.priced, outcome.reason
+    assert outcome.result.premium > 0
+    assert outcome.domestic_rate_source_kind == IMPLIED_FORWARD
+    assert outcome.domestic_rate_detail.startswith("implied from EURSEK forward")
+    assert outcome.foreign_rate_source_kind == "OIS_CURVE"
+
+
 # --------------------------------------------------------------------------- Phase 7: calendars.py
 
 @needs_quantlib

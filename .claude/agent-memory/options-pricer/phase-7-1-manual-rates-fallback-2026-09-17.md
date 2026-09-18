@@ -38,3 +38,12 @@ auto-populate `manual_rates` (stopgap only, someone still has to type a
 number today), and adding SWESTR (SEK) / NOWA (NOK) OIS conventions to
 `engine/rates/conventions.py::CCY_RFR` (rates-pricer's file) would let those
 two currencies skip the manual step entirely.
+
+**Update 2026-09-18 (Phase 7.2):** the "provenance stops at MarketInputs"
+gap above is closed -- see [[phase-7-2-implied-forward-rate-2026-09-18]].
+`store.py::PricingOutcome` now carries `domestic_rate_source_kind`/
+`.domestic_rate_detail` and the `foreign_` pair. A fourth resolution rung
+(`IMPLIED_FORWARD`, covered interest parity) was also added below
+`MANUAL_FLAT` and above the final skip, for the user's stated preference
+(see that memory) of never hand-entering a rate when it can be derived from
+market data already on file.

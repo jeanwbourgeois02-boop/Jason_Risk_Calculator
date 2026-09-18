@@ -181,6 +181,36 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   2026-09-17 to agree on this) as a grouped, collapsible summary: Portfolio Totals ->
   asset class -> structure/package -> individual legs, per the user's Bloomberg
   MARS-style reference layout.
+- Phase 7.2 (options-pricer, landed 2026-09-18): closed the SEK/NOK/TWD/ZAR gap Phase 7.1
+  left open WITHOUT requiring a hand-entered ``manual_rates`` row, for the live-Bloomberg-PC
+  case where EURSEK options were skipping "no curve/rate SEK" and the user did not want to
+  type in a rate. ``engine/options/rates.py`` adds a fourth rung to the per-currency
+  resolution order -- OIS_CURVE > MANUAL_EXPIRY/MANUAL_FLAT > **IMPLIED_FORWARD** > skip --
+  used only when a currency resolves NEITHER a curve NOR a manual rate AND the pair's OTHER
+  currency does resolve one of those: covered interest parity off the pair's own official
+  SPOT + FWD_OUTRIGHT marks (``r_quote = r_base + ln(F/S)/T``, plain ACT/365 ``T``,
+  ``_imply_rate_from_forward``/``_forward_for_expiry``/`_get_fwd_outright_points``/
+  ``_get_pair_spot``, all new). The forward is an exact FWD_OUTRIGHT mark at the expiry if
+  one exists, else linearly interpolated in forward points between the two bracketing marks
+  (mirrors CLAUDE.md's BBG_INTERP convention), else linearly extrapolated from the nearest
+  two marks capped at one more "last tenor gap" beyond the final point -- never further.
+  Never overrides an existing curve or manual rate (precedence tests:
+  ``test_curve_beats_implied_even_when_a_forward_mark_exists``,
+  ``test_manual_beats_implied_forward``); on any reject condition (missing/non-positive
+  spot, no forward bracketing/within-cap, ``T <= 0``) the function returns ``None`` and
+  ``resolve_fx_rates`` keeps its ORIGINAL pre-existing ``"no curve/rate <CCY>"`` reason
+  unchanged -- this fallback never invents its own skip-reason string. Provenance
+  (``RateInput.source_kind == IMPLIED_FORWARD``, ``.detail`` e.g. "implied from EURSEK
+  forward 2026-11-25 and EUR ESTR curve") is now wired all the way onto
+  ``store.py::PricingOutcome.domestic_rate_source_kind``/``.domestic_rate_detail`` (and the
+  ``foreign_`` pair) -- the Phase 7.1 "not carried further than MarketInputs" gap is closed
+  for diagnostics screens. Tests: ``tests/test_options_pricing.py``'s "Phase 7.2:
+  implied-forward (CIP) rate fallback" section (by-hand CIP check, bracket interpolation,
+  both precedence cases, three reject cases, one end-to-end ``price_and_store`` case).
+  **Not done this phase** (unchanged from Phase 7.1, still flagged for rates-pricer): adding
+  SWESTR/NOWA OIS conventions to ``engine/rates/conventions.py::CCY_RFR`` would let SEK/NOK
+  resolve real curves directly and skip this fallback (and manual_rates) entirely; that
+  file is rates-pricer's, not this package's, to extend.
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

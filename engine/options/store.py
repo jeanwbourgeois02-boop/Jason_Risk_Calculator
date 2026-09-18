@@ -38,6 +38,15 @@ full detail):**
     dict is shared across every trade in a single ``price_all_and_store``
     run so trades sharing a pair don't each rebuild that pair's
     FXDeltaVolSurface (see inputs.py::_cached_surface).
+  - Rate provenance (Phase 7.1, 2026-09-17; wired onto PricingOutcome Phase
+    7.2, 2026-09-18): ``PricingOutcome.domestic_rate_source_kind`` /
+    ``.domestic_rate_detail`` and ``.foreign_rate_source_kind`` /
+    ``.foreign_rate_detail`` mirror the vol fields above, one pair per
+    currency leg -- ``OIS_CURVE`` / ``MANUAL_EXPIRY`` / ``MANUAL_FLAT`` /
+    ``IMPLIED_FORWARD`` (``engine/options/rates.py::RateInput.source_kind``).
+    An ``IMPLIED_FORWARD`` detail reads e.g. "implied from EURSEK forward
+    2026-11-25 and EUR ESTR curve" -- this is the string a diagnostics
+    screen should surface for a covered-interest-parity-implied rate.
 """
 from __future__ import annotations
 
@@ -81,6 +90,13 @@ class PricingOutcome:
     # human-readable detail string, "" when vol_source_kind is None.
     vol_source_kind: Optional[str] = None
     vol_detail: str = ""
+    # Rate provenance (Phase 7.2, 2026-09-18) -- see module docstring's
+    # "Rate provenance" bullet. None/"" for a skipped trade (inputs never
+    # resolved), same convention as the vol fields above.
+    domestic_rate_source_kind: Optional[str] = None
+    domestic_rate_detail: str = ""
+    foreign_rate_source_kind: Optional[str] = None
+    foreign_rate_detail: str = ""
 
 
 def _read_option_trade(conn: sqlite3.Connection, trade_id: str) -> Optional[dict]:
@@ -250,11 +266,17 @@ def _price_row(
         "rho": result.rho,
     }
     vol_source = inputs.vol_source
+    dom_rate_source = inputs.domestic_rate_source
+    for_rate_source = inputs.foreign_rate_source
     return PricingOutcome(
         trade_id=row["trade_id"], instrument_id=row["instrument_id"], package_id=row["package_id"],
         quantity=row["quantity"], priced=True, result=result, raw=raw,
         vol_source_kind=vol_source.source_kind if vol_source is not None else None,
         vol_detail=vol_source.detail if vol_source is not None else "",
+        domestic_rate_source_kind=dom_rate_source.source_kind if dom_rate_source is not None else None,
+        domestic_rate_detail=dom_rate_source.detail if dom_rate_source is not None else "",
+        foreign_rate_source_kind=for_rate_source.source_kind if for_rate_source is not None else None,
+        foreign_rate_detail=for_rate_source.detail if for_rate_source is not None else "",
     )
 
 
