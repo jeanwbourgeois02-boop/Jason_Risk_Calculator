@@ -354,7 +354,136 @@ def test_exposure_section_builds_without_market_data_panel():
     text = _render_text(section)
     assert "Risk and scenarios" in text
     assert "Open futures" in text
-    assert "Cash ladder: spot, forwards, swaps and option deltas" in text
+    assert "Cash ladder: settled cash, spot, forwards, swaps and option deltas" in text
+
+
+# --------------------------------------------------------------------------- settled cash row (2026-09-18)
+def _rec(trade_id, ccy, amount, settle, pair="USDJPY", fill=147.0):
+    return {"trade_id": trade_id, "settlement_date": settle, "book": "HAHY7", "book_source": "HAHY7",
+            "currency": ccy, "local_amount": amount, "currency_pair": pair, "entry_rate": fill,
+            "product_type": "FX_FWD", "settles_cash": 1}
+
+
+def _find_id(node, wanted):
+    """First component in the tree whose id == wanted (DataTable cells live in `data`,
+    not in rendered children text)."""
+    if getattr(node, "id", None) == wanted:
+        return node
+    for child in getattr(node, "children", None) or []:
+        if hasattr(child, "children") or hasattr(child, "id"):
+            hit = _find_id(child, wanted)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _jpy_rate(rate=150.0, pair="USDJPY"):
+    return {"JPY": {"rate": rate, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "", "stale": False,
+                    "pair": pair}}
+
+
+def test_combined_frame_settled_row_first_then_dates_then_summary():
+    """The settled-cash row (engine.ladder.exposure_adapter.SETTLED) renders first,
+    labelled 'Settled cash' with kind 'settled', ahead of the value dates even though
+    the engine's pivot sorts the sentinel last; its amounts and USD equivalent are the
+    settled legs at spot, and the Local delta row sums settled and open together."""
+    from engine.ladder.exposure import build_exposure
+    from engine.ladder.exposure_adapter import SETTLED
+    records = [_rec("s1", "JPY", 500_000.0, SETTLED), _rec("s1", "USD", -3_000.0, SETTLED),
+               _rec("o1", "JPY", -147_000_000.0, "2026-09-25"), _rec("o1", "USD", 1_000_000.0, "2026-09-25")]
+    result = build_exposure(records, _jpy_rate())
+    frame, ccys = exposure.combined_frame(result, records, rates=_jpy_rate())
+    labels = list(frame[exposure.ROW_LABEL_COL])
+    assert labels[0] == exposure.SETTLED_ROW_LABEL
+    assert labels[1] == "25 Sep 2026"
+    assert list(frame["kind"])[:2] == ["settled", "date"]
+    first = frame.iloc[0]
+    assert first["JPY"] == "500,000" and first["USD"] == "(3,000)"
+    assert first[exposure.USD_EQUIVALENT_COL] == "333"  # 500,000 / 150 - 3,000
+    by_label = frame.set_index(exposure.ROW_LABEL_COL)
+    assert by_label.loc["Local delta", "JPY"] == "(146,500,000)"
+
+
+def test_combined_frame_spot_row_shows_rate_as_quoted():
+    """Spot is shown the way Bloomberg quotes it ('USDJPY 150'), not as a USD-per-local
+    fraction ('0.006667'): a KRW mark stored at the wrong scale must be visible at a
+    glance (2026-09-18, 'krw is wrong by a factor of 1000')."""
+    from engine.ladder.exposure import build_exposure
+    records = [_rec("o1", "JPY", -147_000_000.0, "2026-09-25"), _rec("o1", "USD", 1_000_000.0, "2026-09-25")]
+    result = build_exposure(records, _jpy_rate(147.25))
+    frame, _ = exposure.combined_frame(result, records, rates=_jpy_rate(147.25))
+    by_label = frame.set_index(exposure.ROW_LABEL_COL)
+    assert by_label.loc["Spot (as quoted)", "JPY"] == "USDJPY 147.25"
+    assert by_label.loc["Spot (as quoted)", "USD"] == "1"
+    assert by_label.loc["Rate source", "JPY"] == "Bloomberg"
+    # without the quote dict the engine's USD-per-local rate is still shown, not blank
+    frame, _ = exposure.combined_frame(result, records)
+    assert frame.set_index(exposure.ROW_LABEL_COL).loc["Spot (as quoted)", "JPY"] == "0.00679117"
+    assert exposure.format_quoted_rate(1394.5) == "1,394.5"
+    assert exposure.format_quoted_rate(0.66) == "0.66"
+    assert exposure.format_quoted_rate(float("nan")) == ""
+
+
+def test_combined_frame_names_suspect_rate_in_rate_source_row():
+    """A spot 1,000x away from the book's fills is not used: the USD delta cell is
+    blank and the 'Rate source' row carries the engine's reason instead of 'Bloomberg'."""
+    from engine.ladder.exposure import build_exposure
+    records = [_rec("k1", "KRW", 1_413_138_000.0, "2026-09-21", pair="USDKRW", fill=1413.138),
+               _rec("k1", "USD", -1_000_000.0, "2026-09-21", pair="USDKRW", fill=1413.138)]
+    bad = {"KRW": {"rate": 1.3945, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "",
+                   "stale": False, "pair": "USDKRW"}}
+    result = build_exposure(records, bad)
+    frame, _ = exposure.combined_frame(result, records, rates=bad)
+    by_label = frame.set_index(exposure.ROW_LABEL_COL)
+    assert by_label.loc["USD delta", "KRW"] == ""
+    assert by_label.loc["Rate source", "KRW"].startswith("SUSPECT: official SPOT USDKRW 1.3945 is 1,013x away")
+    assert by_label.loc["Spot (as quoted)", "KRW"] == "USDKRW 1.3945"
+
+
+def test_settled_unknown_caption_lists_only_settlement_reasons():
+    from engine.ladder.exposure_adapter import Unresolved
+    none = exposure.settled_unknown_caption([Unresolved("f1", "ESU6 Index", "non-FX product FUTURE excluded")])
+    assert none is None
+    cap = exposure.settled_unknown_caption([
+        Unresolved("n1", "USDKRW", "settled 2026-09-16 (FX_FWD), USD settlement unknown: not realised yet"),
+        Unresolved("f1", "ESU6 Index", "non-FX product FUTURE excluded"),
+    ])
+    text = _render_text(cap)
+    assert "1 settled non-deliverable ticket not yet in Settled cash" in text
+    assert "USDKRW (n1)" in text and "ESU6" not in text
+    section = exposure.exposure_section(RECORDS, [
+        Unresolved("n1", "USDKRW", "settled 2026-09-16 (FX_FWD), USD settlement unknown: not realised yet")],
+        "2026-08-17", rates=RATES)
+    assert exposure.SETTLED_CAPTION_ID in _all_ids(section)
+
+
+def test_render_shows_settled_cash_row_for_expired_ticket(tmp_path, monkeypatch):
+    """End to end through the tab's own callback: the seeded USDJPY forward settled
+    2026-08-20, so as of 2026-08-25 it must be on the ladder as Settled cash, not gone
+    ("expired tickets must settle not disappear")."""
+    import sys
+    import types
+    stub = types.ModuleType("ui.app")
+    stub.connect_readonly = lambda path: schema.connect(str(path))
+    monkeypatch.setitem(sys.modules, "ui.app", stub)
+    db_path = tmp_path / "risk.db"
+    seeded = schema.connect(str(db_path))
+    _seed(seeded)
+    seeded.close()
+    app = dash.Dash(__name__)
+    cash_ladder.register_callbacks(app, get_db_path=lambda: str(db_path))
+    matches = [v for k, v in app.callback_map.items() if "cash-ladder-table-container" in k]
+    callback = matches[0]["callback"].__wrapped__
+    body = callback("2026-08-25", 0)
+    assert "No open FX trades" not in _render_text(body)
+    grid = _find_id(body, exposure.COMBINED_TABLE_ID)
+    assert grid is not None
+    first = grid.data[0]
+    assert first[exposure.ROW_LABEL_COL] == exposure.SETTLED_ROW_LABEL and first["kind"] == "settled"
+    assert first["JPY"] == "(147,100,000)" and first["USD"] == "1,000,000"
+    by_label = {r[exposure.ROW_LABEL_COL]: r for r in grid.data}
+    assert by_label["Spot (as quoted)"]["JPY"] == "USDJPY 147.12"
+    assert by_label["Local delta"]["JPY"] == "(147,100,000)"
 
 
 def test_scenario_columns_follow_config_order_not_alphabetical():

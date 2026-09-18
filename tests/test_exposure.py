@@ -177,3 +177,64 @@ def test_no_pnl_fields_present():
     assert "exposure_pnl" not in res.summary.columns
     assert "usd_delta_entry" not in res.summary.columns
     assert "usd_entry_amount" not in res.contributions.columns
+
+
+# --------------------------------------------------------------------------- rate plausibility guard (2026-09-18)
+def _krw_records(fill=1413.138):
+    return [
+        {"trade_id": "k1", "settlement_date": "2026-09-21", "book": "HA", "currency": "KRW",
+         "local_amount": 1_413_138_000.0, "currency_pair": "USDKRW", "entry_rate": fill, "product_type": "FX_FWD"},
+        {"trade_id": "k1", "settlement_date": "2026-09-21", "book": "HA", "currency": "USD",
+         "local_amount": -1_000_000.0, "currency_pair": "USDKRW", "entry_rate": fill, "product_type": "FX_FWD"},
+    ]
+
+
+def _krw_rate(rate):
+    return {"KRW": {"rate": rate, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "t",
+                    "stale": False, "pair": "USDKRW"}}
+
+
+def test_spot_at_wrong_scale_is_reported_suspect_and_not_used():
+    """"krw is wrong by a factor of 1000": a USDKRW spot of 1.3945 instead of 1,394.5
+    would multiply the KRW USD delta by 1,000. The guard compares the mark with the
+    book's own fills and reports it, with both numbers, as SUSPECT_RATE; the USD delta
+    stays NaN exactly like a missing rate and the portfolio totals name the currency."""
+    from engine.ladder.exposure import portfolio_totals
+    result = build_exposure(_krw_records(), _krw_rate(1.3945))
+    krw = result.summary.set_index("currency").loc["KRW"]
+    assert krw["status"] == "SUSPECT_RATE"
+    assert math.isnan(krw["usd_delta"])
+    assert krw["rate_source"] == "BBG_BFXFORWARD"  # provenance kept: it is the mark that is wrong
+    msg = result.status.set_index("currency").loc["KRW", "message"]
+    assert msg.startswith("official SPOT USDKRW 1.3945 is 1,013x away from the book's own KRW fills (~1,413.14)")
+    assert "check the SPOT mark's scale" in msg
+    assert portfolio_totals(result)["missing"] == ["KRW"]
+    # the same scale error the other way round (1,394,500) is caught too
+    assert build_exposure(_krw_records(), _krw_rate(1_394_500.0)).summary.set_index("currency").loc["KRW", "status"] == "SUSPECT_RATE"
+
+
+def test_plausible_spot_passes_guard_even_after_a_large_move():
+    """A real move, forward points, or a 30 % devaluation are nowhere near the 100x
+    threshold: the rate is used and the status stays OK."""
+    ok = build_exposure(_krw_records(), _krw_rate(1394.5)).summary.set_index("currency").loc["KRW"]
+    assert ok["status"] == "OK"
+    assert math.isclose(ok["usd_delta"], 1_413_138_000.0 / 1394.5)
+    devalued = build_exposure(_krw_records(), _krw_rate(1900.0)).summary.set_index("currency").loc["KRW"]
+    assert devalued["status"] == "OK"
+
+
+def test_guard_is_silent_without_fill_fields_or_for_crosses():
+    """Records that carry no fill (hand-built fixtures), option-delta records and
+    cross pairs give the guard nothing to compare with, so it never fires on them."""
+    from engine.ladder.exposure import fill_implied_rates
+    import pandas as pd
+    assert fill_implied_rates(pd.DataFrame(AUD_FIXTURE)) == {}
+    cross = [{"trade_id": "c1", "settlement_date": "2026-09-25", "book": "HA", "currency": "SEK",
+              "local_amount": 11_000_000.0, "currency_pair": "EURSEK", "entry_rate": 11.0, "product_type": "FX_FWD"},
+             {"trade_id": "p1", "settlement_date": "2026-09-25", "book": "HA", "currency": "SEK",
+              "local_amount": -1_000_000.0, "currency_pair": "USDSEK", "entry_rate": 0.0125, "product_type": "FX_OPTION"}]
+    assert fill_implied_rates(pd.DataFrame(cross)) == {}
+    sek = {"SEK": {"rate": 10.6, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "", "stale": False}}
+    assert build_exposure(cross, sek).summary.set_index("currency").loc["SEK", "status"] == "OK"
+    assert fill_implied_rates(pd.DataFrame(_krw_records())) == {"KRW": 1.0 / 1413.138}
+

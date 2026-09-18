@@ -370,13 +370,35 @@ def ladder_table(result) -> dash_table.DataTable:
 # ------------------------------------------------------------------ 4b. combined workbook-style ladder
 COMBINED_TABLE_ID = "exposure-combined-table"
 ROW_LABEL_COL = "row"
-SUMMARY_ROWS = [("FX rate (USD per local)", "fx_rate"), ("Local delta", "local_delta"), ("USD delta", "usd_delta")]
+SETTLED_ROW_LABEL = "Settled cash"
+SUMMARY_ROWS = [("Spot (as quoted)", "fx_rate"), ("Local delta", "local_delta"), ("USD delta", "usd_delta")]
+
+
+def format_quoted_rate(value) -> str:
+    """A spot rate the way Bloomberg quotes it: '1,394.5' for USDKRW, '0.66' for AUDUSD,
+    '147.25' for USDJPY -- up to 5 decimals, trailing zeros dropped, thousands
+    separated. Blank for NaN/None. Shown instead of the USD-per-local fraction
+    (2026-09-18): '0.000714' for KRW cannot be checked by eye, '1,394.5' can, and a mark
+    stored at the wrong scale (1.3945) is then visible at a glance."""
+    if value is None or pd.isna(value):
+        return ""
+    text = f"{float(value):,.5f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _ladder_row_order(index) -> list:
+    """Settlement rows in display order: the settled-cash row (engine.ladder.
+    exposure_adapter.SETTLED) first, then value dates ascending."""
+    from engine.ladder.exposure_adapter import SETTLED
+    dates = sorted(str(d) for d in index if str(d) != SETTLED)
+    return ([SETTLED] if any(str(d) == SETTLED for d in index) else []) + dates
 # "Settlement type" (NDF / Deliverable) summary row and its NDF super-header removed
 # 2026-09-15 per the user's decision -- NDF currencies stay in the grid unmarked.
 
 
 def combined_frame(result, records: List[dict], sort: str = SORT_USD,
-                   fallback_ccys: Optional[set] = None) -> pd.DataFrame:
+                   fallback_ccys: Optional[set] = None,
+                   rates: Optional[Dict[str, dict]] = None) -> pd.DataFrame:
     """Screenshot layout: settlement-date rows (signed local amounts) followed by the
     per-currency summary rows, all in the same currency columns. Currency columns
     ordered by |USD delta| desc (default) or A-Z. A `USD equivalent` column carries the
@@ -388,16 +410,32 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
     populates this set any more, see `headline_numbers`'s docstring): currencies priced
     from a non-official fallback rate, were one ever supplied. Adds a 'Rate source'
     summary row so a fallback would be visible in place, never silent, if this is ever
-    wired to a source again."""
+    wired to a source again.
+
+    2026-09-18: the settled-cash row (engine.ladder.exposure_adapter.SETTLED, "expired
+    tickets must settle not disappear") is rendered FIRST, labelled "Settled cash", kind
+    'settled', before the value-date rows. The spot row shows the rate as Bloomberg
+    quotes it (`rates[ccy]['rate']`, e.g. USDKRW 1,394.5) when `rates` is supplied,
+    falling back to the engine's USD-per-local rate; a SUSPECT_RATE currency (rate
+    plausibility guard, engine.ladder.exposure) shows its reason in the 'Rate source'
+    row instead of 'Bloomberg'."""
     fallback_ccys = fallback_ccys or set()
+    rates = rates or {}
     from engine.ladder.exposure import ladder_usd_equivalent, portfolio_totals
+    from engine.ladder.exposure_adapter import SETTLED
     summary = summary_frame(result, records, sort=sort, scope=SCOPE_ALL)
     ccys = list(summary["currency"])
     fx = result.summary.set_index("currency")["fx_rate"]
+    status_msg = (dict(zip(result.status["currency"], result.status["message"]))
+                  if not result.status.empty else {})
+    status_of = (dict(zip(result.status["currency"], result.status["status"]))
+                 if not result.status.empty else {})
     rows = []
     usd_eq = ladder_usd_equivalent(result)
-    for day in result.ladder.index:
-        row = {ROW_LABEL_COL: format_date(day), "settlement_date": day, "kind": "date"}
+    for day in _ladder_row_order(result.ladder.index):
+        settled = day == SETTLED
+        row = {ROW_LABEL_COL: SETTLED_ROW_LABEL if settled else format_date(day),
+               "settlement_date": "" if settled else day, "kind": "settled" if settled else "date"}
         for c in ccys:
             row[c] = format_amount(result.ladder.loc[day, c]) if c in result.ladder.columns else EM_DASH
         row[USD_EQUIVALENT_COL] = format_amount(usd_eq.get(day, float("nan")))
@@ -408,10 +446,20 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
         row = {ROW_LABEL_COL: label, "settlement_date": "", "kind": key}
         for c in ccys:
             if key == "fx_rate":
-                v = fx.get(c, float("nan"))
-                row[c] = "" if pd.isna(v) else f"{v:.6f}"
+                entry = rates.get(c)
+                if c == "USD":
+                    row[c] = "1"
+                elif entry is not None and entry.get("rate") is not None:
+                    pair = entry.get("pair") or ""
+                    row[c] = (f"{pair} " if pair else "") + format_quoted_rate(entry["rate"])
+                else:
+                    v = fx.get(c, float("nan"))
+                    row[c] = "" if pd.isna(v) else f"{v:.6g}"
             elif key == "rate_source":
-                row[c] = "BNP file" if c in fallback_ccys else "Bloomberg"
+                if status_of.get(c) == "SUSPECT_RATE":
+                    row[c] = "SUSPECT: " + status_msg.get(c, "")
+                else:
+                    row[c] = "BNP file" if c in fallback_ccys else "Bloomberg"
             else:
                 row[c] = format_amount(by_ccy.loc[c, key])
         row[USD_EQUIVALENT_COL] = format_amount(totals["net_usd"]) if key == "usd_delta" else ""
@@ -420,8 +468,9 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
 
 
 def combined_table(result, records: List[dict], sort: str = SORT_USD,
-                   fallback_ccys: Optional[set] = None) -> dash_table.DataTable:
-    frame, ccys = combined_frame(result, records, sort, fallback_ccys)
+                   fallback_ccys: Optional[set] = None,
+                   rates: Optional[Dict[str, dict]] = None) -> dash_table.DataTable:
+    frame, ccys = combined_frame(result, records, sort, fallback_ccys, rates=rates)
     columns = ([{"name": "Settlement date", "id": ROW_LABEL_COL}]
                + [{"name": c, "id": c} for c in ccys]
                + [{"name": "USD equivalent", "id": USD_EQUIVALENT_COL}])
@@ -448,6 +497,12 @@ def combined_table(result, records: List[dict], sort: str = SORT_USD,
             # not an error, so it is never red.
             {"if": {"row_index": first_summary}, "borderTop": "2px solid #1f2933"},
             {"if": {"filter_query": "{kind} != 'date'"}, "backgroundColor": "#f7f8fa", "fontWeight": "400"},
+            # Settled cash (2026-09-18): the balance the value-date rows add to -- first
+            # row, bold, tinted, ruled off from the dated flows beneath it.
+            {"if": {"filter_query": "{kind} = 'settled'"}, "fontWeight": "700", "backgroundColor": "#eef7ee",
+             "borderBottom": "2px solid #1f2933"},
+            {"if": {"filter_query": "{kind} = 'rate_source' && {row} contains 'SUSPECT'"},
+             "color": "#b42318", "fontWeight": "600"},
             {"if": {"filter_query": "{kind} = 'fx_rate'"}, "color": "#1b2333", "fontWeight": "700"},
             {"if": {"filter_query": "{kind} = 'local_delta'"}, "fontWeight": "500"},
             {"if": {"filter_query": "{kind} = 'usd_delta'"}, "fontWeight": "700", "backgroundColor": "#e8edf7",
@@ -457,6 +512,29 @@ def combined_table(result, records: List[dict], sort: str = SORT_USD,
             {"if": {"filter_query": "{kind} = 'settlement'"}, "color": "#3538cd", "fontWeight": "600", "fontSize": "11px"},
         ],
     )
+
+
+# ------------------------------------------------------------------ 4c. settled tickets caption
+SETTLED_CAPTION_ID = "exposure-settled-caption"
+
+
+def settled_unknown_caption(unresolved: list):
+    """One line under the ladder grid naming the settled non-deliverable tickets (NDF
+    forwards, futures, options) whose USD settlement is not in the Settled cash row yet
+    because the ledger has not realised them (engine.ladder.exposure_adapter.
+    settled_records_from_db lists them in `unresolved` with a reason starting
+    'settled'). Nothing is rendered when there are none. Never a number: a settlement
+    without a mark stays out of the row and is named here instead."""
+    items = [u for u in (unresolved or []) if str(getattr(u, "reason", "")).startswith("settled")]
+    if not items:
+        return None
+    ids = ", ".join(f"{u.symbol} ({u.trade_id})" for u in items[:6])
+    more = f" and {len(items) - 6} more" if len(items) > 6 else ""
+    return html.P(
+        f"{len(items)} settled non-deliverable ticket{'s' if len(items) != 1 else ''} not yet in Settled "
+        f"cash (USD settlement unknown until realised at an official mark on or before the value "
+        f"date -- run the Bloomberg pull or backfill): {ids}{more}.",
+        id=SETTLED_CAPTION_ID, className="section-kicker")
 
 
 # ------------------------------------------------------------------ 5. legend
@@ -810,9 +888,13 @@ def pair_position_table(df: Optional[pd.DataFrame]) -> html.Div:
         "base currency). “USD notional” is signed by the USD direction itself "
         "(+ = long USD, the “dollar convention”): identical to the base-ccy "
         "column for USDJPY-style pairs (base_ccy = USD), sign-flipped for AUDUSD/EURUSD/"
-        "GBPUSD/XAUUSD-style pairs (quote_ccy = USD) -- buying the base currency there "
-        "means selling USD. “1% P&L” always follows the base-ccy sign, so long "
-        "AUDUSD gains when AUDUSD rises. A cross pair (cross, no USD leg, e.g. EURSEK) "
+        "GBPUSD-style pairs (quote_ccy = USD) -- buying the base currency there "
+        "means selling USD. A metal (XAUUSD, marked “metal”) is not flipped: gold is a "
+        "metal position, not a dollar position, so both columns show + for long gold. "
+        "“1% P&L” always follows the base-ccy sign, so long "
+        "AUDUSD gains when AUDUSD rises. Settled tickets are not in this table: once a "
+        "forward has settled its cash sits in the Settled cash row of the currency "
+        "table above. A cross pair (cross, no USD leg, e.g. EURSEK) "
         "prices both notional columns off the base currency's own USD spot alone -- the "
         "quote currency's own exposure (e.g. SEK) stays fully visible, independently "
         "converted, in the currency table above; it is never merged into one EURSEK "
@@ -880,12 +962,13 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
                        if exposure_records is not None else result)
     empty = result.ladder.empty
     scenarios = load_scenarios()
-    main = (combined_table(result, records, sort, all_fallback) if not empty
+    main = (combined_table(result, records, sort, all_fallback, rates=rates) if not empty
             else html.P("No open FX trades for this as-of date.", className="section-kicker"))
     return html.Div(className="section", children=[
         headline_numbers(exposure_result, futures, fallback_ccys, forward_proxy_ccys),
-        html.H4("Cash ladder: spot, forwards, swaps and option deltas"),
+        html.H4("Cash ladder: settled cash, spot, forwards, swaps and option deltas"),
         main,
+        settled_unknown_caption(unresolved),
         html.H4("Open futures"),
         futures_table(futures, futures_details),
         combined_risk_table(exposure_result, futures, scenarios, futures_pct_by_scenario(scenarios), all_fallback),

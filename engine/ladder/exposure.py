@@ -28,6 +28,18 @@ against itself.
 
 Rounding tolerance: USD figures are exact floats; callers compare to whole-USD
 reference values with ROUNDING_TOLERANCE_USD. A larger difference is material.
+
+Rate plausibility guard (2026-09-18, "krw is wrong by a factor of 1000"): the only
+number this module takes on trust is the spot rate. A SPOT mark stored at the wrong
+scale (1.39 for USDKRW instead of 1,390, or 1,390,000) would silently multiply that
+currency's USD delta, Net/Gross USD and every scenario cell by 1,000 -- worse than a
+blank. So each currency's USD-per-local rate is compared with the rate the book's own
+FX fills imply for it (records carry `currency_pair` and `entry_rate`, the fill; for
+USDKRW at 1,394 that is 1/1,394 USD per KRW). A rate more than RATE_PLAUSIBILITY_FACTOR
+(100x) away from the fills' median is reported as SUSPECT_RATE with the mark, the pair
+and the fill rate named, and that currency's USD delta is left NaN exactly like a
+missing rate -- never used, never substituted. Forward points and any real move are
+orders of magnitude inside the threshold; only a scale error can trip it.
 """
 from __future__ import annotations
 
@@ -42,6 +54,11 @@ ROUNDING_TOLERANCE_USD = 1.0
 
 SUMMARY_COLUMNS = ["currency", "fx_rate", "local_delta", "usd_delta",
                    "rate_source", "rate_timestamp", "status"]
+# Ratio between the official spot and the book's own fill rates beyond which a rate is
+# reported SUSPECT_RATE rather than used (module docstring). 100x: a 1,000x scale error
+# is caught, a 30 % devaluation is not.
+RATE_PLAUSIBILITY_FACTOR = 100.0
+_FX_PRODUCTS = frozenset({"FX_SPOT", "FX_FWD", "FX_SWAP"})
 CONTRIBUTION_COLUMNS = ["settlement_date", "currency", "trade_id", "book", "local_amount"]
 STATUS_COLUMNS = ["currency", "status", "message"]
 
@@ -170,6 +187,56 @@ def _validate_rates(rates: Mapping[str, Mapping[str, Any]]) -> None:
 _USD_IDENTITY = {"rate": 1.0, "inverted": False, "source": "identity", "timestamp": "", "stale": False}
 
 
+def fill_implied_rates(df: pd.DataFrame) -> dict:
+    """currency -> median USD-per-local rate implied by the book's own FX fills (module
+    docstring, rate plausibility guard). Uses only FX leg records (`product_type` in
+    FX_SPOT/FX_FWD/FX_SWAP) whose `currency_pair` is that currency against USD: USDXXX
+    fills give 1/entry_rate, XXXUSD fills give entry_rate. Records without those fields
+    (hand-built fixtures), crosses, option-delta records and non-positive fills are
+    skipped, so a book with no usable fill for a currency simply has no entry here and
+    the guard stays silent for it."""
+    out: dict = {}
+    needed = {"currency", "currency_pair", "entry_rate", "product_type"}
+    if df.empty or not needed.issubset(df.columns):
+        return out
+    fx = df[df["product_type"].isin(_FX_PRODUCTS)]
+    implied: dict = {}
+    for ccy, pair, fill in zip(fx["currency"], fx["currency_pair"], fx["entry_rate"]):
+        if ccy == "USD" or not isinstance(pair, str) or len(pair) != 6:
+            continue
+        try:
+            fill = float(fill)
+        except (TypeError, ValueError):
+            continue
+        if not fill > 0 or pd.isna(fill):
+            continue
+        base, quote = pair[:3], pair[3:]
+        if base == "USD" and quote == ccy:
+            implied.setdefault(ccy, []).append(1.0 / fill)
+        elif quote == "USD" and base == ccy:
+            implied.setdefault(ccy, []).append(fill)
+    for ccy, values in implied.items():
+        out[ccy] = float(pd.Series(values).median())
+    return out
+
+
+def _suspect_reason(ccy: str, entry: Mapping[str, Any], fx: float, implied: float) -> str:
+    """'' when `fx` (USD per local) is within RATE_PLAUSIBILITY_FACTOR of the fill-implied
+    rate, else the plain-English reason naming the mark as quoted and the fill rate."""
+    if not implied > 0 or not fx > 0:
+        return ""
+    ratio = fx / implied
+    if ratio < RATE_PLAUSIBILITY_FACTOR and ratio > 1.0 / RATE_PLAUSIBILITY_FACTOR:
+        return ""
+    factor = ratio if ratio >= 1 else 1.0 / ratio
+    pair = entry.get("pair") or ""
+    quoted = float(entry["rate"])
+    # Show the fill the same way round as the mark so the two are directly comparable.
+    fill_quoted = 1.0 / implied if entry["inverted"] else implied
+    return (f"official SPOT {pair} {quoted:,.6g} is {factor:,.0f}x away from the book's own "
+            f"{ccy} fills (~{fill_quoted:,.6g}); USD delta not computed -- check the SPOT mark's scale")
+
+
 def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,
                    books: Iterable[str] | None = None) -> ExposureResult:
     """Build ladder, summary, contributions and rate status from normalized records.
@@ -191,6 +258,7 @@ def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,
         ladder = df.pivot_table(index="settlement_date", columns="currency", values="local_amount",
                                 aggfunc="sum", fill_value=0.0).sort_index()
     ladder.index.name, ladder.columns.name = "settlement_date", None
+    implied_rates = fill_implied_rates(df)
 
     summary_rows, status_rows = [], []
     for ccy, grp in df.groupby("currency", sort=True):
@@ -198,7 +266,15 @@ def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,
         entry = _USD_IDENTITY if ccy == "USD" else rates.get(ccy)
         fx = float("nan")
         source = timestamp = ""
-        if entry is None:
+        suspect = ""
+        if entry is not None and ccy in implied_rates:
+            suspect = _suspect_reason(ccy, entry, usd_per_local(entry), implied_rates[ccy])
+        if suspect:
+            # Rate plausibility guard (module docstring): a mark at the wrong scale is
+            # reported, with the numbers, and treated exactly like a missing rate.
+            source, timestamp = str(entry["source"]), str(entry["timestamp"])
+            status, msg = "SUSPECT_RATE", suspect
+        elif entry is None:
             # 2026-09-17 ("no bnp fall back" -- user decision): reworded from "no
             # market-data rate" -- this module only ever receives official SPOT rates
             # (rates_from_marks, marks_official) from its callers now, never a BNP

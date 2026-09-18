@@ -250,35 +250,51 @@ def test_cash_ladder_columns_are_leg_only():
 
 def test_records_from_db_settle_on_as_of_grid_vs_exposure_boundary():
     """CLAUDE.md 'Six tabs as views': the grid keeps settle_date >= as_of (a leg
-    settling today is cash that moves today) but delta/exposure aggregation
-    (build_exposure / summary / portfolio_totals: Net USD, Gross USD, per-currency
-    delta) must use settle_date > as_of (a leg settling on as_of carries no delta by
-    close). A leg settling exactly on as_of should appear in the grid path but be
+    settling today is cash that moves today, shown on today's date row). For the
+    delta/exposure path the rule depends on deliverability (2026-09-18, settled cash):
+    a DELIVERABLE leg settling on as_of is cash by close and still carries its
+    currency's delta, so it reaches portfolio_totals through the settled records; an
+    NDF leg settling on as_of delivers nothing and carries no delta by close, so it is
     excluded from the exposure path -- and that exclusion must actually reach
     portfolio_totals, not just the raw record list."""
     from engine.ladder.exposure import build_exposure, portfolio_totals
-    from engine.ladder.exposure_adapter import exposure_records_from_db, records_from_db
+    from engine.ladder.exposure_adapter import SETTLED, exposure_records_from_db, records_from_db
 
     conn = _mk_conn()
     _insert_instrument(conn, "AUDUSD", "AUD", "USD")
     _insert_trade(conn, "t1", "AUDUSD", "FX_FWD", 100.0)
-    # settles exactly on as_of
+    # deliverable, settles exactly on as_of
     _insert_leg(conn, "t1", 1, "FX_NEAR", "AUD", 100.0, AS_OF)
     _insert_leg(conn, "t1", 2, "FX_NEAR", "USD", -70.0, AS_OF)
     conn.commit()
 
     grid_records, _ = records_from_db(conn, AS_OF)
     assert any(r["currency"] == "AUD" and r["settlement_date"] == AS_OF for r in grid_records)
+    assert not any(r["settlement_date"] == SETTLED for r in grid_records)
 
     exposure_records, _ = records_from_db(conn, AS_OF, for_exposure=True)
-    assert exposure_records == []
-    assert exposure_records_from_db(conn, AS_OF)[0] == []
+    assert {(r["currency"], r["settlement_date"]) for r in exposure_records} == {("AUD", SETTLED), ("USD", SETTLED)}
+    assert exposure_records_from_db(conn, AS_OF)[0] == exposure_records
 
     rate = {"AUD": {"rate": 0.6, "inverted": False, "source": "TEST", "timestamp": "", "stale": False}}
-    result = build_exposure(exposure_records, rate)
+    totals = portfolio_totals(build_exposure(exposure_records, rate))
+    assert math.isclose(totals["net_usd"], 100.0 * 0.6)
+    assert totals["missing"] == []
+
+    # NDF leg settling on as_of: no delivery, no delta by close, nothing in either
+    # settled or open exposure records; zero exposure is a real 0.0, never NaN.
+    ndf = _mk_conn()
+    ndf.execute("INSERT INTO instruments VALUES ('USDKRW','FX','USD','KRW',1,1,'USDKRW Curncy','9999-12-31')")
+    _insert_trade(ndf, "n1", "USDKRW", "FX_FWD", 100.0)
+    ndf.execute("INSERT INTO trade_legs VALUES ('n1',1,'FX_NEAR','USD',100.0,'2026-08-01',?,1400.0,0)", (AS_OF,))
+    ndf.execute("INSERT INTO trade_legs VALUES ('n1',2,'FX_NEAR','KRW',-140000.0,'2026-08-01',?,1400.0,0)", (AS_OF,))
+    ndf.commit()
+    assert any(r["currency"] == "KRW" and r["settlement_date"] == AS_OF for r in records_from_db(ndf, AS_OF)[0])
+    ndf_exposure, _ = exposure_records_from_db(ndf, AS_OF)
+    assert ndf_exposure == []
+    result = build_exposure(ndf_exposure, rate)
     assert result.summary.empty
     totals = portfolio_totals(result)
-    # Zero exposure is a real zero, not a missing value: must be 0.0, never NaN.
     assert totals["net_usd"] == 0.0
     assert totals["gross_usd"] == 0.0
     assert totals["missing"] == []
@@ -292,7 +308,8 @@ def test_records_from_db_settle_on_as_of_grid_vs_exposure_boundary():
     assert any(r["currency"] == "AUD" and r["settlement_date"] == "2026-08-18" for r in exposure_records2)
     result2 = build_exposure(exposure_records2, rate)
     totals2 = portfolio_totals(result2)
-    assert math.isclose(totals2["net_usd"], 50.0 * 0.6)
+    # settled AUD 100 (cash by close, still delta) + the open AUD 50
+    assert math.isclose(totals2["net_usd"], 150.0 * 0.6)
 
 
 def test_portfolio_totals_empty_record_set_returns_zero_not_nan():
@@ -778,7 +795,19 @@ def test_per_pair_delta_xauusd_flagged_commodity_not_cross():
     assert bool(row["commodity"]) is True
     assert bool(row["cross"]) is False  # XAUUSD has a USD leg like any other XXXUSD pair
     assert math.isclose(row["notional_base"], 1_750_000.0)
-    assert math.isclose(row["notional_usd"], -1_750_000.0)
+    # 2026-09-18 ("gold the sign is the wrong one"): a metal is not flipped into the
+    # dollar convention -- long gold is + in both columns, not "short USD".
+    assert math.isclose(row["notional_usd"], 1_750_000.0)
+    assert math.isclose(row["move_1pct_usd"], 17_500.0)
+    # ...while an ordinary XXXUSD pair in the same book still flips.
+    _insert_instrument(conn, "AUDUSD", "AUD", "USD")
+    _insert_trade(conn, "t2", "AUDUSD", "FX_FWD", 1_000_000.0)
+    _insert_leg(conn, "t2", 1, "FX_NEAR", "AUD", 1_000_000.0, "2026-08-20")
+    _insert_leg(conn, "t2", 2, "FX_NEAR", "USD", -650_000.0, "2026-08-20")
+    conn.commit()
+    df = per_pair_delta(conn, AS_OF).set_index("instrument_id")
+    assert math.isclose(df.loc["AUDUSD", "notional_usd"], -650_000.0)
+    assert math.isclose(df.loc["XAUUSD", "notional_usd"], 1_750_000.0)
 
 
 def test_ui_exposure_combined_risk_frame_tags_xau_as_commodity_kind():

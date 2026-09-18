@@ -257,7 +257,12 @@ def convert_to_usd(ladder: pd.DataFrame, spot: pd.DataFrame) -> pd.DataFrame:
 #     currency, so the USD leg's amount IS already USD-direction-signed with no
 #     transformation needed). Identical to `notional_base` when base_ccy == 'USD';
 #     sign-flipped relative to `notional_base` when quote_ccy == 'USD' -- this is the
-#     "dollar convention" adjustment the user asked for.
+#     "dollar convention" adjustment the user asked for -- EXCEPT for a commodity pair
+#     (XAUUSD etc., `commodity` below): gold is a metal position, not a dollar position,
+#     and the 2026-09-17 instruction named AUD, EUR and GBP only. Applying the flip to
+#     gold showed a long gold book as a negative number ("gold the sign is the wrong
+#     one", 2026-09-18), so for a commodity pair `notional_usd` keeps the metal's own
+#     sign (+ = long the metal), i.e. equals `notional_base`.
 #   - `spot`: the pair's own official SPOT mark exactly as quoted (never inverted), e.g.
 #     AUDUSD 0.66, USDJPY 150, EURSEK ~11.05 -- read directly off marks_official keyed
 #     on the pair's own instrument_id. This is independent of, and never derived from,
@@ -337,10 +342,12 @@ def per_pair_delta(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
         quote_amt = float(amounts.get(quote_ccy, 0.0))
         cross = "USD" not in (base_ccy, quote_ccy)
 
+        commodity = base_ccy in COMMODITY_CCYS or quote_ccy in COMMODITY_CCYS
         if quote_ccy == "USD":
             usd_leg = quote_amt
             notional_base = _signed_magnitude(usd_leg, base_amt)
-            notional_usd = usd_leg
+            # Dollar convention flips XXXUSD pairs only; a metal keeps its own sign.
+            notional_usd = notional_base if commodity else usd_leg
         elif base_ccy == "USD":
             usd_leg = base_amt
             notional_base = usd_leg
@@ -350,7 +357,6 @@ def per_pair_delta(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
             notional_base = base_amt * rate
             notional_usd = notional_base
 
-        commodity = base_ccy in COMMODITY_CCYS or quote_ccy in COMMODITY_CCYS
         rows.append({
             "instrument_id": instrument_id, "base_ccy": base_ccy, "quote_ccy": quote_ccy,
             "cross": cross, "commodity": commodity, "spot": pair_spot.get(instrument_id, float("nan")),

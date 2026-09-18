@@ -603,13 +603,15 @@ def test_net_gross_usd_matches_ladder_portfolio_totals(tmp_path):
 
 def test_leg_settling_on_as_of_excluded_from_net_gross_but_still_in_grid(tmp_path):
     """CLAUDE.md 'Six tabs as views': the ladder grid uses settle_date >= as_of (a leg
-    settling today is still cash that moves today) but Net/Gross USD and per-currency
-    delta must use settle_date > as_of (no delta by close on the settlement day) --
-    engine/ladder/exposure_adapter.exposure_records_from_db vs records_from_db. t1
-    (seeded, settles 2026-08-17 = as_of) must appear in the grid record set but drop out
-    of the exposure record set and out of net_gross_usd; t2 (settles 2026-08-20, still
-    open) must appear in both and drive net_gross_usd's non-zero total."""
-    from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
+    settling today is still cash that moves today, on its own date row). Since the
+    settled-cash row (user decision 2026-09-18, "expired tickets must settle not
+    disappear") a DELIVERABLE leg settling on as_of is cash by close and still carries
+    its currency's delta: engine/ladder/exposure_adapter.exposure_records_from_db
+    returns it as a settled record (settlement_date = SETTLED) rather than dropping it.
+    t1 (seeded, deliverable, settles 2026-08-17 = as_of) must appear on the grid's date
+    row AND, as settled cash, in the exposure record set and net_gross_usd; t2 (settles
+    2026-08-20, still open) appears in both as an open leg."""
+    from engine.ladder.exposure_adapter import SETTLED, records_from_db, exposure_records_from_db
 
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
@@ -638,15 +640,18 @@ def test_leg_settling_on_as_of_excluded_from_net_gross_but_still_in_grid(tmp_pat
         exposure_records, _ = exposure_records_from_db(conn, "2026-08-17")
 
         assert {r["trade_id"] for r in grid_records} == {"t1", "t2"}
-        assert {r["trade_id"] for r in exposure_records} == {"t2"}
+        assert {r["settlement_date"] for r in grid_records if r["trade_id"] == "t1"} == {"2026-08-17"}
+        assert {r["trade_id"] for r in exposure_records} == {"t1", "t2"}
+        assert {r["settlement_date"] for r in exposure_records if r["trade_id"] == "t1"} == {SETTLED}
+        assert {r["settlement_date"] for r in exposure_records if r["trade_id"] == "t2"} == {"2026-08-20"}
 
         result = cash_ladder.net_gross_usd(conn, "2026-08-17")
     finally:
         conn.close()
     assert result["available"] is True
-    # Only t2's 2,000,000 USD notional drives Net/Gross -- t1 (settling on as_of) is
-    # excluded from the delta math even though it is still present in the grid above.
-    assert result["gross"] == pytest.approx(2_000_000, rel=1e-3)
+    # t2's 2,000,000 open notional plus t1's 1,000,000 now held as settled JPY cash
+    # (still JPY delta) drive Net/Gross: 441,300,000 JPY at the 147.12 spot.
+    assert result["gross"] == pytest.approx(3_000_000, rel=1e-3)
 
 
 def test_scoped_period_pnl_previous_day_is_ltd_t1_minus_ltd_t2(tmp_path):

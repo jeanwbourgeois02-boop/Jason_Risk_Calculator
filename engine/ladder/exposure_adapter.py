@@ -26,14 +26,43 @@ contributes one record per leg like any other trade, with no invented USD leg.
 Excluded: CURRENCY balance rows (never reach `trades`), FUTURES (product != FX_*), and
 any leg whose trade has no instrument record. Each exclusion is reported in
 `unresolved`, never dropped silently.
+
+Settled cash (user decision 2026-09-18, "there should be a settled cash row toward the
+top" / "expired tickets must settle not disappear"): a ticket whose value date has
+passed no longer vanishes from the ladder. Its legs land in ONE extra row, keyed by the
+sentinel `settlement_date = SETTLED`, which the grid shows first as "Settled cash":
+  - a deliverable leg (`settles_cash = 1`) is cash in its own currency from its value
+    date on, and still carries that currency's delta (NOK received on a forward is NOK
+    exposure until it is sold) -- so it is summed per (trade, currency) into the row;
+  - a non-deliverable ticket (NDF leg pair, future, FX option -- `settles_cash = 0`)
+    never delivers its local currency; the only cash it produces is its USD settlement,
+    which is exactly the realised P&L `engine.pnl.ledger.realise_settled` froze for it
+    (NDF: quantity x (fixing - fill) converted at that spot). That USD figure is read
+    from `realised_pnl` -- never recomputed here -- and added to the row's USD column.
+    A settled non-deliverable ticket with no realised row yet (no official mark on or
+    before its value date) is listed in `unresolved` with a "settled ... USD settlement
+    unknown" reason, never valued at a substitute.
+Boundary: the grid keeps a leg settling exactly on as_of on its own date row (cash
+that moves today), so its settled rule is `settle_date < as_of`; the exposure/delta
+records use `settle_date <= as_of` for deliverable legs (by close it is cash, and cash
+carries delta) and `> as_of` for open legs, so a deliverable leg is counted exactly
+once either way. Non-deliverable USD settlements use `<` in both modes, matching the
+ledger's own realisation rule (a settlement in transit carries no FX delta anyway).
+The settled row only covers tickets the uploaded blotter carries: it is settled cash
+from those tickets, not a bank balance.
 """
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 FX_PRODUCTS = frozenset({"FX_SPOT", "FX_FWD", "FX_SWAP"})
 FUND = "NMMF"
+# Sentinel `settlement_date` of settled-cash records (module docstring). A plain word
+# rather than a date so it can never collide with a real value date; it sorts after
+# every ISO date in engine.ladder.exposure's pivot and the UI reorders it to the top.
+SETTLED = "settled"
 
 
 @dataclass(frozen=True)
@@ -72,10 +101,103 @@ ORDER BY t.trade_id, l.leg_no
 # Backward-compatible alias: historically the only query this module ran.
 _DB_SQL = _DB_SQL_GRID
 
+# Settled deliverable legs, summed per (trade, currency) so a swap whose near and far
+# legs have both settled in the same currency is one record (the exposure engine's
+# natural key is (trade_id, currency, settlement_date), and both would share SETTLED).
+# {op} is '<' (grid) or '<=' (exposure) -- a constant chosen in code, never user input.
+_DB_SQL_SETTLED_LEGS = """
+SELECT t.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
+       t.strategy, t.account, i.is_ndf,
+       l.ccy, SUM(l.amount) AS amount, MAX(l.settle_date) AS settled_on
+FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND l.settles_cash = 1
+  AND t.trade_date <= :as_of AND l.settle_date {op} :as_of
+GROUP BY t.trade_id, l.ccy
+ORDER BY t.trade_id, l.ccy
+"""
+
+# USD settlement of settled non-deliverable tickets: the realised P&L the ledger froze
+# (engine/pnl/ledger.py), read back, never recomputed. NDF forwards (is_ndf = 1) plus
+# futures and FX options; deliverable FX rows in realised_pnl are NOT read here -- their
+# legs above already are the cash, adding their P&L too would double count.
+_DB_SQL_SETTLED_REALISED = """
+SELECT r.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
+       t.strategy, t.account, i.is_ndf, r.settle_date, r.pnl_usd
+FROM realised_pnl r JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
+WHERE t.trade_date <= :as_of AND r.settle_date < :as_of
+  AND ((t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND i.is_ndf = 1)
+       OR t.product IN ('FUTURE','FX_OPTION'))
+ORDER BY r.trade_id
+"""
+
+# Settled non-deliverable tickets the ledger has NOT frozen yet: reported, never valued.
+_DB_SQL_SETTLED_UNREALISED = """
+SELECT t.trade_id, t.instrument_id, t.product, MAX(l.settle_date) AS settled_on
+FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+WHERE t.trade_date <= :as_of AND l.settle_date < :as_of
+  AND ((t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND i.is_ndf = 1)
+       OR t.product IN ('FUTURE','FX_OPTION'))
+  AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
+GROUP BY t.trade_id
+ORDER BY t.trade_id
+"""
+
+
+def settled_records_from_db(conn, as_of_date: str,
+                            book_mapping: Dict[str, str] | None = None, *,
+                            for_exposure: bool = False) -> Tuple[List[dict], List[Unresolved]]:
+    """Settled-cash records (module docstring), same shape as the leg records plus
+    `settled_on` (the value date the cash arrived, or the last one for a fully settled
+    swap). `for_exposure=False`: deliverable legs with settle_date < as_of (the grid keeps
+    today's on its own row); `for_exposure=True`: settle_date <= as_of (cash by close,
+    still delta). Non-deliverable USD settlements are `< as_of` in both modes. A missing
+    `realised_pnl` table (database older than the ledger) simply contributes nothing --
+    the deliverable legs are still returned."""
+    mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
+    op = "<=" if for_exposure else "<"
+    records: List[dict] = []
+    unresolved: List[Unresolved] = []
+    for r in conn.execute(_DB_SQL_SETTLED_LEGS.format(op=op), {"as_of": as_of_date}).fetchall():
+        (trade_id, product, pair, desc, trade_date, price, strategy, account, is_ndf,
+         ccy, amount, settled_on) = r
+        records.append({
+            "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
+            "symbol": f"{pair}-{trade_id}", "symbol_description": desc,
+            "trade_date": trade_date, "settlement_date": SETTLED, "settled_on": settled_on,
+            "currency_pair": pair, "currency": ccy, "local_amount": float(amount),
+            "entry_rate": float(price), "book_source": strategy, "book": mapping.get(strategy, strategy),
+            "account": account, "fund": FUND, "strategy": strategy,
+            "is_ndf": int(is_ndf), "settles_cash": 1,
+        })
+    try:
+        realised = conn.execute(_DB_SQL_SETTLED_REALISED, {"as_of": as_of_date}).fetchall()
+        unrealised = conn.execute(_DB_SQL_SETTLED_UNREALISED, {"as_of": as_of_date}).fetchall()
+    except sqlite3.OperationalError:  # no realised_pnl table: ledger never created here
+        return records, unresolved
+    for r in realised:
+        (trade_id, product, inst, desc, trade_date, price, strategy, account, is_ndf,
+         settled_on, pnl_usd) = r
+        records.append({
+            "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
+            "symbol": f"{inst}-{trade_id}", "symbol_description": desc,
+            "trade_date": trade_date, "settlement_date": SETTLED, "settled_on": settled_on,
+            "currency_pair": inst, "currency": "USD", "local_amount": float(pnl_usd),
+            "entry_rate": float(price), "book_source": strategy, "book": mapping.get(strategy, strategy),
+            "account": account, "fund": FUND, "strategy": strategy,
+            "is_ndf": int(is_ndf), "settles_cash": 1,
+        })
+    for trade_id, inst, product, settled_on in unrealised:
+        unresolved.append(Unresolved(
+            trade_id, inst,
+            f"settled {settled_on} ({product}), USD settlement unknown: not realised yet -- "
+            f"no official mark on or before {settled_on}"))
+    return records, unresolved
+
 
 def records_from_db(conn, as_of_date: str,
                     book_mapping: Dict[str, str] | None = None, *,
-                    for_exposure: bool = False) -> Tuple[List[dict], List[Unresolved]]:
+                    for_exposure: bool = False,
+                    include_settled: bool = True) -> Tuple[List[dict], List[Unresolved]]:
     """Same records as records_from_parse, read back from the SQLite tables the upload
     flow populates (trades / trade_legs / instruments). Read-only; no schema change.
 
@@ -83,11 +205,15 @@ def records_from_db(conn, as_of_date: str,
     settle_date >= as_of (matches the cash ladder grid's `>=` rule) -- use this for the
     Cash ladder tab display.
 
-    ``for_exposure=True``: delta rule, trade_date <= as_of and settle_date > as_of. Use
-    this for anything that feeds engine.ladder.exposure.build_exposure /
-    portfolio_totals / summary (Net USD, Gross USD, per-currency delta): a leg settling
-    exactly on as_of carries no delta by close of that day (CLAUDE.md "Six tabs as
-    views"; the `≥` vs `>` distinction is intentional).
+    ``for_exposure=True``: delta rule, trade_date <= as_of and settle_date > as_of for
+    open legs. Use this for anything that feeds engine.ladder.exposure.build_exposure /
+    portfolio_totals / summary (Net USD, Gross USD, per-currency delta): an NDF leg
+    settling exactly on as_of carries no delta by close of that day, and a deliverable
+    one is counted through the settled-cash records instead (below), never twice.
+
+    ``include_settled`` (default True, 2026-09-18): append `settled_records_from_db`'s
+    settled-cash records (module docstring) so expired tickets settle into the
+    "Settled cash" row instead of disappearing. False restores the open-legs-only view.
 
     Field derivations are identical to records_from_parse either way: one record per
     leg, priced at spot only (no P&L, no usd_entry_amount)."""
@@ -117,7 +243,12 @@ def records_from_db(conn, as_of_date: str,
                 "is_ndf": int(is_ndf), "settles_cash": int(settles_cash),
             })
     opt_records, opt_unresolved = option_records_from_db(conn, as_of_date, mapping)
-    return records + opt_records, unresolved + opt_unresolved
+    records, unresolved = records + opt_records, unresolved + opt_unresolved
+    if include_settled:
+        settled, settled_unresolved = settled_records_from_db(
+            conn, as_of_date, mapping, for_exposure=for_exposure)
+        records, unresolved = records + settled, unresolved + settled_unresolved
+    return records, unresolved
 
 
 # FX options (2026-09-17): the option's delta joins the ladder, so Net/Gross, the
@@ -187,10 +318,12 @@ def option_records_from_db(conn, as_of_date: str,
 
 
 def exposure_records_from_db(conn, as_of_date: str,
-                             book_mapping: Dict[str, str] | None = None) -> Tuple[List[dict], List[Unresolved]]:
+                             book_mapping: Dict[str, str] | None = None, *,
+                             include_settled: bool = True) -> Tuple[List[dict], List[Unresolved]]:
     """records_from_db(..., for_exposure=True) under an explicit name, so callers that
     only want delta/exposure aggregation (Net USD, Gross USD, per-currency delta -- i.e.
     anything feeding engine.ladder.exposure.build_exposure / portfolio_totals /
     summary) cannot accidentally pick up the grid's `>=` rule. The Cash ladder grid
     itself must keep calling records_from_db(..., for_exposure=False) (the default)."""
-    return records_from_db(conn, as_of_date, book_mapping, for_exposure=True)
+    return records_from_db(conn, as_of_date, book_mapping, for_exposure=True,
+                           include_settled=include_settled)
