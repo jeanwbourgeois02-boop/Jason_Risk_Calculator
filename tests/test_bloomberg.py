@@ -783,6 +783,135 @@ def test_pull_marks_rejects_settle_date_before_spot(monkeypatch):
     assert any("before spot" in w for w in warnings)
 
 
+# =========================================================================== fetch_historical_series (2026-09-18 backfill)
+def test_fetch_historical_series_keeps_every_day_not_just_the_latest(monkeypatch):
+    """Unlike fetch_historical (latest point only), this is backfill's batch-friendly
+    forward/future history: one request over the whole range, every day kept."""
+    from data.bloomberg import pull_marks
+
+    def responder(request):
+        assert request.req_type == "HistoricalDataRequest"
+        assert request.fields == ["PX_LAST", "SETTLE_DT"]
+        assert request.startDate == "20260817" and request.endDate == "20260819"
+        return [{"securityData": {"security": "EURUSD1M Curncy", "fieldData": [
+            {"date": "2026-08-17", "PX_LAST": 1.1000, "SETTLE_DT": "2026-09-17"},
+            {"date": "2026-08-18", "PX_LAST": 1.1010, "SETTLE_DT": "2026-09-18"},
+            {"date": "2026-08-19", "PX_LAST": 1.1020, "SETTLE_DT": "2026-09-21"},
+        ]}}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    session, service = pull_marks.open_session()
+    out = pull_marks.fetch_historical_series(
+        session, service, ["EURUSD1M Curncy"], ["PX_LAST", "SETTLE_DT"],
+        date(2026, 8, 17), date(2026, 8, 19))
+    assert set(out["EURUSD1M Curncy"]) == {"2026-08-17", "2026-08-18", "2026-08-19"}
+    assert out["EURUSD1M Curncy"]["2026-08-18"] == {"PX_LAST": 1.1010, "SETTLE_DT": "2026-09-18"}
+
+
+def test_fetch_historical_series_multiple_tickers_each_own_series(monkeypatch):
+    from data.bloomberg import pull_marks
+
+    def responder(request):
+        return [
+            {"securityData": {"security": "EURUSDSP Curncy",
+                              "fieldData": [{"date": "2026-08-17", "PX_LAST": 0.0}]}},
+            {"securityData": {"security": "EURUSD1M Curncy",
+                              "fieldData": [{"date": "2026-08-17", "PX_LAST": 55.0}]}},
+        ]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    session, service = pull_marks.open_session()
+    out = pull_marks.fetch_historical_series(
+        session, service, ["EURUSDSP Curncy", "EURUSD1M Curncy"], ["PX_LAST"],
+        date(2026, 8, 17), date(2026, 8, 17))
+    assert out["EURUSDSP Curncy"]["2026-08-17"] == {"PX_LAST": 0.0}
+    assert out["EURUSD1M Curncy"]["2026-08-17"] == {"PX_LAST": 55.0}
+
+
+def test_fetch_historical_series_point_with_no_date_is_skipped_never_guessed(monkeypatch):
+    from data.bloomberg import pull_marks
+
+    def responder(request):
+        return [{"securityData": {"security": "EURUSD1M Curncy", "fieldData": [
+            {"PX_LAST": 1.10},  # no "date" element at all
+            {"date": "2026-08-18", "PX_LAST": 1.1010},
+        ]}}]
+
+    _install_fake_blpapi(monkeypatch, responder)
+    session, service = pull_marks.open_session()
+    out = pull_marks.fetch_historical_series(
+        session, service, ["EURUSD1M Curncy"], ["PX_LAST"], date(2026, 8, 17), date(2026, 8, 18))
+    assert list(out["EURUSD1M Curncy"]) == ["2026-08-18"]
+
+
+# =========================================================================== fwd_curve.historical_points_by_day
+def test_historical_points_by_day_builds_one_curve_per_day():
+    from data.bloomberg import fwd_curve
+
+    tenor_series = {
+        "EURUSD1M Curncy": {
+            "2026-08-17": {"PX_LAST": 1.1010, "SETTLE_DT": "2026-09-17"},
+            "2026-08-18": {"PX_LAST": 1.1015, "SETTLE_DT": "2026-09-18"},
+        },
+        "EURUSD3M Curncy": {
+            "2026-08-17": {"PX_LAST": 1.1030, "SETTLE_DT": "2026-11-17"},
+        },
+    }
+    by_day = fwd_curve.historical_points_by_day(
+        tenor_series, {"1M": "EURUSD1M Curncy", "3M": "EURUSD3M Curncy"})
+    assert by_day["2026-08-17"] == [(date(2026, 9, 17), 1.1010), (date(2026, 11, 17), 1.1030)]
+    assert by_day["2026-08-18"] == [(date(2026, 9, 18), 1.1015)]
+
+
+def test_historical_points_by_day_drops_incomplete_or_non_positive_points():
+    from data.bloomberg import fwd_curve
+
+    tenor_series = {
+        "EURUSD1M Curncy": {
+            "2026-08-17": {"PX_LAST": 1.1010},                                  # no SETTLE_DT
+            "2026-08-18": {"SETTLE_DT": "2026-09-18"},                          # no PX_LAST
+            "2026-08-19": {"PX_LAST": 0.0, "SETTLE_DT": "2026-09-19"},          # non-positive
+            "2026-08-20": {"PX_LAST": 1.10, "SETTLE_DT": "not-a-date"},         # unparseable date
+        },
+    }
+    by_day = fwd_curve.historical_points_by_day(tenor_series, {"1M": "EURUSD1M Curncy"})
+    assert by_day == {}
+
+
+# =========================================================================== request_fwd_curves correlation id (2026-09-18)
+def test_request_fwd_curves_discards_late_reply_with_mismatched_correlation_id(monkeypatch):
+    """Found live: a late reply to an unrelated, already-timed-out request (tagged with a
+    DIFFERENT correlationId) used to be read as if it were this request's own RESPONSE
+    event and broke the wait loop before the real FWD_CURVE data ever arrived, leaving
+    every ticker at its "no response" sentinel -- silently treated downstream as an empty
+    curve. The stale event here carries zero messages (as an unrelated event would) and
+    must not end the loop; only the later, correctly-tagged event may."""
+    from data.bloomberg import fwd_curve, pull_marks
+
+    def responder(request, correlation_id):
+        assert request.req_type == "ReferenceDataRequest"
+        blp = sys.modules["blpapi"]
+        stale_cid = blp.CorrelationId(999999)
+        # A securityError response needs no bulk-table element walk (element_rows'
+        # numElements()/getElement(j) machinery is exercised elsewhere) -- it's enough
+        # here to prove the real, correctly-tagged event is what actually got processed,
+        # not the stale one.
+        real = [{"securityData": [{"security": "EURUSD Curncy",
+                                   "securityError": {"message": "not authorised"}}]}]
+        return blp.MultiEvent([
+            ([], "RESPONSE", stale_cid),          # a stale, unrelated RESPONSE event
+            (real, "RESPONSE", correlation_id),   # the real one, correctly tagged
+        ])
+
+    _install_fake_blpapi(monkeypatch, responder)
+    blp = sys.modules["blpapi"]
+    session, service = pull_marks.open_session()
+    result = fwd_curve.request_fwd_curves(blp, session, service, ["EURUSD Curncy"])
+    # Proves the real event was read (not the stale one's "no response for ticker"
+    # sentinel, and not skipped past because the stale event ended the loop early).
+    assert result["EURUSD Curncy"]["error"] == "securityError: not authorised"
+
+
 def test_pull_marks_fwd_curve_bulk_value_falls_back_to_tenor(monkeypatch):
     # A real terminal can return FWD_CURVE as a bulk field (a list) when the override
     # doesn't pin it to a scalar; float(list) would raise TypeError. Must fall back to
@@ -1532,6 +1661,13 @@ def _inventory_db():
 
 
 def test_mark_inventory_statuses(tmp_path):
+    """2026-09-18 user decision: BBG_INTERP is now the OFFICIAL fallback source for
+    FWD_OUTRIGHT wherever no BBG_BFXFORWARD row exists for the same key (data/ingest
+    /schema.py OFFICIAL_FALLBACK_SOURCE) -- 720 of 743 forwards in the reference book
+    had no P&L before this, since a broken-date leg's only Bloomberg-servable value IS
+    the interpolated one. mark_inventory reports that row OFFICIAL (source BBG_INTERP),
+    not INTERP; inventory.STATUS_INTERP is now only reachable for a BBG_INTERP row of a
+    mark_type other than FWD_OUTRIGHT (none has a fallback entry yet)."""
     from data.bloomberg import inventory
     conn = _inventory_db()
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
@@ -1543,7 +1679,10 @@ def test_mark_inventory_statuses(tmp_path):
     df = inventory.mark_inventory(conn, "2026-08-17")
     by = {(r.instrument_id, r.mark_type, r.settle_date): r.status for r in df.itertuples()}
     assert by[("AUDUSD", "SPOT", "2026-08-17")] == "OFFICIAL"
-    assert by[("AUDUSD", "FWD_OUTRIGHT", "2026-09-16")] == "INTERP"
+    assert by[("AUDUSD", "FWD_OUTRIGHT", "2026-09-16")] == "OFFICIAL"
+    by_source = {(r.instrument_id, r.mark_type, r.settle_date): r.source for r in df.itertuples()}
+    assert by_source[("AUDUSD", "FWD_OUTRIGHT", "2026-09-16")] == "BBG_INTERP"
+    # MANUAL has no fallback entry in OFFICIAL_FALLBACK_SOURCE -- stays non-official.
     assert by[("USDJPY", "FWD_OUTRIGHT", "2026-09-18")] == "MANUAL"
     assert by[("USDJPY", "SPOT", "2026-08-17")] == "MISSING"
     assert by[("ESU6 Index", "FUTURE_PX", "2026-09-18")] == "MISSING"
@@ -1551,18 +1690,29 @@ def test_mark_inventory_statuses(tmp_path):
 
 
 def test_close_completeness(tmp_path):
+    """2026-09-18: a day is complete only once SPOT, FWD_OUTRIGHT (per open leg's own
+    settle_date) and FUTURE_PX (per open future) are all official -- SPOT alone used to
+    be enough, silently leaving LTD(t) unpriced for every forward/future on that day."""
     from data.bloomberg import inventory
     conn = _inventory_db()
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
         ("2026-08-17", "AUDUSD", "2026-08-17", "SPOT", 0.66, "BBG_BFXFORWARD", "2026-08-17T15:00:00-04:00"),
         ("2026-08-18", "AUDUSD", "2026-08-18", "SPOT", 0.67, "BBG_BFXFORWARD", "2026-08-18T15:00:00-04:00"),
         ("2026-08-18", "USDJPY", "2026-08-18", "SPOT", 150.5, "BBG_BFXFORWARD", "2026-08-18T15:00:00-04:00"),
+        # 2026-08-18 completes every remaining need: FWD_OUTRIGHT for both pairs' own
+        # settle dates, and FUTURE_PX for the one open future.
+        ("2026-08-18", "AUDUSD", "2026-09-16", "FWD_OUTRIGHT", 0.665, "BBG_BFXFORWARD", "2026-08-18T15:00:00-04:00"),
+        ("2026-08-18", "USDJPY", "2026-09-18", "FWD_OUTRIGHT", 149.0, "BBG_BFXFORWARD", "2026-08-18T15:00:00-04:00"),
+        ("2026-08-18", "ESU6 Index", "2026-09-18", "FUTURE_PX", 7550.0, "BBG_BDH", "2026-08-18T15:00:00-04:00"),
     ])
     conn.commit()
     df = inventory.close_completeness(conn, "2026-08-17", "2026-08-18")
     rows = {r.as_of_date: r for r in df.itertuples()}
-    assert rows["2026-08-17"].needed == 2 and rows["2026-08-17"].present == 1 and not rows["2026-08-17"].complete
-    assert rows["2026-08-18"].present == 2 and rows["2026-08-18"].complete
+    # needed = 2 (SPOT+FWD_OUTRIGHT) per pair x2 pairs + 1 FUTURE_PX = 5.
+    assert rows["2026-08-17"].needed == 5 and rows["2026-08-17"].present == 1 and not rows["2026-08-17"].complete
+    assert {m["mark_type"] for m in rows["2026-08-17"].missing} == {"SPOT", "FWD_OUTRIGHT", "FUTURE_PX"}
+    assert rows["2026-08-18"].needed == 5 and rows["2026-08-18"].present == 5 and rows["2026-08-18"].complete
+    assert rows["2026-08-18"].missing == []
 
 
 # --------------------------------------------------------------------------- inventory.py: stale_empty_pull_reason

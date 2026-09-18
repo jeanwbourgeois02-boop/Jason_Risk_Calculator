@@ -3,15 +3,19 @@
 `mark_inventory(conn, as_of)` lists exactly the marks `data/bloomberg/live.py::build_requests`
 would ask Bloomberg for on `as_of` (one SPOT per open FX pair, one FWD_OUTRIGHT per open FX
 leg's own settle_date, one FUTURE_PX per open future at its own expiry) and reports what is
-actually in `marks` for each: OFFICIAL (present in `marks_official`), INTERP (present but only
-as BBG_INTERP, so a fallback and never official for FWD_OUTRIGHT), MANUAL (present but only as
-a MANUAL row -- official for DELTA/PREMIUM, informational only here since those mark_types are
-never requested by build_requests), or MISSING (no row at all for as_of/instrument/settle/type).
+actually in `marks` for each: OFFICIAL (present in `marks_official` -- since 2026-09-18 this
+includes a BBG_INTERP row for FWD_OUTRIGHT when no BBG_BFXFORWARD row exists for the same key,
+data/ingest/schema.py's OFFICIAL_FALLBACK_SOURCE, so INTERP status below is not reachable for
+FWD_OUTRIGHT any more), INTERP (present but only as BBG_INTERP for a mark_type with no
+official-fallback entry), MANUAL (present but only as a MANUAL row -- official for
+DELTA/PREMIUM, informational only here since those mark_types are never requested by
+build_requests), or MISSING (no row at all for as_of/instrument/settle/type).
 
 `close_completeness(conn, start, end)` is the calendar strip: one row per business day with
-the count of marks the book needed that day (traded USD FX pairs, per CLAUDE.md backfill
-scope) versus how many have an official SPOT mark, so the Market data tab can show holes in
-history at a glance.
+the count of marks the book needed that day (SPOT + FWD_OUTRIGHT + FUTURE_PX per
+`_needed_marks`, 2026-09-18 -- SPOT alone used to leave every forward/future's LTD(t)
+unpriced on an otherwise "complete" day) versus how many are official, so the Market data tab
+can show holes in history at a glance.
 """
 from __future__ import annotations
 
@@ -26,6 +30,21 @@ STATUS_MANUAL = "MANUAL"
 STATUS_MISSING = "MISSING"
 
 
+def _option_needed_marks(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+    """FX_OPTION SPOT/FWD_OUTRIGHT needs, from `data.bloomberg.live.option_needed_marks`
+    when that function exists -- looked up via getattr so this module never hard-depends
+    on a live.py function that may not have landed in this working tree yet (2026-09-18:
+    landed on origin/main as `option_needed_marks`, public, already returning exactly
+    [{instrument_id, settle_date, mark_type}] -- one SPOT per open FX_OPTION pair, one
+    FWD_OUTRIGHT at each open option's own expiry -- so no reshaping is needed here).
+    Returns `[]`, unchanged from before this integration, when the function is absent."""
+    from data.bloomberg import live
+    fn = getattr(live, "option_needed_marks", None)
+    if fn is None:
+        return []
+    return list(fn(conn, as_of))
+
+
 def _needed_marks(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     """Same (instrument_id, settle_date, mark_type) set as live.build_requests, without
     requiring blpapi (RequestRow construction there is Bloomberg-request specific).
@@ -35,7 +54,11 @@ def _needed_marks(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     EURSEK with no direct EURUSD/USDSEK trade must still show that gap here (MISSING,
     forever, until an instrument is added or the pair is traded directly) rather than
     silently never asking -- the same reasoning live.build_requests uses, shared via that
-    one function so the two definitions of "needed" can never drift apart."""
+    one function so the two definitions of "needed" can never drift apart.
+
+    Also includes FX_OPTION pair SPOT/FWD_OUTRIGHT needs via `_option_needed_marks`
+    (2026-09-18), which calls `live.option_needed_marks` when it exists -- same "call
+    live, don't reimplement" discipline, so this can never drift from build_requests."""
     from data.bloomberg.live import _OPEN_FX_SQL, _OPEN_FUTURE_SQL, _cross_usd_legs
     out, seen = [], set()
     for instrument_id, _ticker, settle in conn.execute(_OPEN_FX_SQL, {"as_of": as_of}):
@@ -50,6 +73,11 @@ def _needed_marks(conn: sqlite3.Connection, as_of: str) -> List[dict]:
         if key not in seen:
             seen.add(key)
             out.append({"instrument_id": leg["instrument_id"], "settle_date": as_of, "mark_type": "SPOT"})
+    for item in _option_needed_marks(conn, as_of):
+        key = (item["instrument_id"], item["settle_date"], item["mark_type"])
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
     for instrument_id, _ticker, settle in conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of}):
         if (instrument_id, settle, "FUTURE_PX") not in seen:
             seen.add((instrument_id, settle, "FUTURE_PX"))
@@ -129,19 +157,39 @@ def stale_empty_pull_reason(conn: sqlite3.Connection, status: Optional[dict], as
 
 
 def close_completeness(conn: sqlite3.Connection, start: str, end: str) -> pd.DataFrame:
-    """One row per business day in [start, end]: as_of_date, needed (traded USD FX pairs),
-    present (official SPOT marks that day), complete (present >= needed and needed > 0)."""
-    from data.bloomberg.backfill import business_days, traded_pairs
+    """One row per business day in [start, end]: as_of_date, needed, present, complete,
+    missing (list of {instrument_id, settle_date, mark_type} still missing that day).
+
+    2026-09-18 (BUILD_PLAN.md section 3 / CLAUDE.md "P&L conventions": Daily/5d/MTD/YTD
+    all difference LTD(t) against LTD(t-1bd) etc., and every FX leg's LTD needs the
+    FWD_OUTRIGHT for its own settle_date, every future's needs FUTURE_PX): `needed`/
+    `present` now cover every mark_type the book needed on that day -- SPOT,
+    FWD_OUTRIGHT (per open leg's own settle_date) and FUTURE_PX (per open future) -- via
+    the same `_needed_marks` `live.build_requests` and `backfill.backfill` both use, not
+    SPOT alone. A day used to count as "complete" from a bare SPOT close even though
+    every forward's LTD(t) was unpriced -- found live on the Bloomberg PC's first launch,
+    where the header's period cards silently excluded the whole FX book on every
+    reference date. `needed == 0` still reports `complete = False` (nothing to confirm
+    against), unchanged from before this fix."""
+    from data.bloomberg.backfill import business_days
     from datetime import date as _date
-    pairs = traded_pairs(conn)
-    needed = len(pairs)
     days = business_days(_date.fromisoformat(start), _date.fromisoformat(end))
     rows = []
     for d in days:
         day = d.isoformat()
-        present = conn.execute(
-            "SELECT COUNT(DISTINCT instrument_id) FROM marks_official "
-            "WHERE mark_type='SPOT' AND as_of_date=?", (day,)).fetchone()[0]
-        rows.append({"as_of_date": day, "needed": needed, "present": present,
-                     "complete": needed > 0 and present >= needed})
-    return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete"])
+        needed_items = _needed_marks(conn, day)
+        present = 0
+        missing = []
+        for item in needed_items:
+            hit = conn.execute(
+                "SELECT 1 FROM marks_official WHERE as_of_date=:as_of AND instrument_id=:instrument_id "
+                "AND settle_date=:settle AND mark_type=:mark_type",
+                {"as_of": day, "instrument_id": item["instrument_id"], "settle": item["settle_date"],
+                 "mark_type": item["mark_type"]}).fetchone()
+            if hit:
+                present += 1
+            else:
+                missing.append(item)
+        rows.append({"as_of_date": day, "needed": len(needed_items), "present": present,
+                     "complete": len(needed_items) > 0 and present >= len(needed_items), "missing": missing})
+    return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete", "missing"])

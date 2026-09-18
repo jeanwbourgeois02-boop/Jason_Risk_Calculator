@@ -695,6 +695,118 @@ def fetch_historical(session, service, tickers: Sequence[str], field: str, as_of
     return out
 
 
+def _to_date(value) -> Optional[date]:
+    """Normalise a Bloomberg date-ish value (real blpapi returns a `datetime.date`; a
+    fake session in tests may return an ISO or YYYYMMDD string) to a plain `date`, or
+    `None` if it can't be parsed. Mirrors fetch_tenor_points's own inline SETTLE_DT
+    parsing (kept separate rather than refactored into a shared helper there, to avoid
+    touching that already-working live-pull code for this backfill-only need)."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date() if "-" in value else datetime.strptime(value, "%Y%m%d").date()
+        except ValueError:
+            return None
+    return None
+
+
+def fetch_historical_series(session, service, tickers: Sequence[str], fields: Sequence[str],
+                             start: date, end: date, diag: Optional[Diagnostics] = None,
+                             tag: Optional[dict] = None) -> Dict[str, Dict[str, Dict[str, object]]]:
+    """Thin network layer: ONE HistoricalDataRequest for `tickers` x `fields` over
+    [start, end], keeping every day's point (unlike `fetch_historical`, which keeps only
+    the most recent) -- backfill's batch-friendly forward-curve/future history: one
+    request per ticker set over the whole date range, not one request per day per ticker
+    (2026-09-18, BUILD_PLAN.md section 3 / CLAUDE.md "P&L conventions": LTD(t-1bd) needs
+    FWD_OUTRIGHT and FUTURE_PX history, not SPOT alone).
+
+    Returns {ticker: {date_iso: {field: value}}}. Each historical point carries its own
+    "date" element (confirmed real Bloomberg behaviour -- see
+    data/bloomberg/rates_marketdata.py::RatesBloombergSource._fetch_historical_series,
+    which this mirrors); a point with no "date" element is skipped (never guessed which
+    day it belongs to), and a field absent from a given day's point is simply absent from
+    that day's dict rather than defaulted. Same diagnostics/TIMEOUT/correlation-id
+    behaviour as fetch_reference (see its docstring)."""
+    request = service.createRequest("HistoricalDataRequest")
+    for t in tickers:
+        request.getElement("securities").appendValue(t)
+    for f in fields:
+        request.getElement("fields").appendValue(f)
+    request.set("startDate", start.strftime("%Y%m%d"))
+    request.set("endDate", end.strftime("%Y%m%d"))
+
+    rec = diag.new_request("HistoricalDataRequest", tickers, fields, None, tag) if diag is not None else None
+
+    blpapi = _get_blpapi()
+    correlation_id = blpapi.CorrelationId(next(_CORRELATION_COUNTER))
+    session.sendRequest(request, correlationId=correlation_id)
+    out: Dict[str, Dict[str, Dict[str, object]]] = {t: {} for t in tickers}
+    raw_secs: List[dict] = []
+    late_responses: List[dict] = []
+    timed_out = False
+    while True:
+        event = session.nextEvent(EVENT_TIMEOUT_MS)
+        event_type = event.eventType()
+        if rec is not None:
+            rec["events"].append(str(event_type))
+        if event_type == getattr(blpapi.Event, "TIMEOUT", None):
+            timed_out = True
+            print(f"WARNING: nextEvent timed out after {EVENT_TIMEOUT_MS}ms waiting for "
+                  f"HistoricalDataRequest response", file=sys.stderr)
+            break
+        event_is_ours = False
+        for msg in event:
+            msg_cids = list(msg.correlationIds()) if hasattr(msg, "correlationIds") else []
+            if msg_cids and correlation_id not in msg_cids:
+                late_responses.append({
+                    "reason": "correlationId mismatch: message belongs to a previous request, discarded",
+                    "expected": str(correlation_id), "got": [str(c) for c in msg_cids],
+                })
+                continue
+            event_is_ours = True
+            if not msg.hasElement("securityData"):
+                continue
+            sec_data = msg.getElement("securityData")
+            ticker = sec_data.getElementAsString("security")
+            per_day = out.setdefault(ticker, {})
+            field_data_repr: Dict[str, object] = {}
+            if sec_data.hasElement("fieldData"):
+                fd = sec_data.getElement("fieldData")
+                for i in range(fd.numValues()):
+                    point = fd.getValueAsElement(i)
+                    if not point.hasElement("date"):
+                        continue
+                    day = _to_date(point.getElement("date").getValue())
+                    if day is None:
+                        continue
+                    row: Dict[str, object] = {}
+                    for f in fields:
+                        if point.hasElement(f):
+                            row[f] = point.getElement(f).getValue()
+                    if row:
+                        per_day[day.isoformat()] = row
+                        field_data_repr[day.isoformat()] = row
+            raw_secs.append({
+                "security": ticker, "fieldData": field_data_repr,
+                "fieldExceptions": _parse_field_exceptions(sec_data),
+                "securityError": _parse_security_error(sec_data),
+            })
+        if event_type == blpapi.Event.RESPONSE and event_is_ours:
+            break
+
+    classification, detail = _classify_secs(raw_secs, timed_out, tickers)
+    if rec is not None:
+        rec["raw_response"] = raw_secs
+        rec["late_responses"] = late_responses
+        diag.finish_request(rec, classification, detail)
+    if classification == CLASS_TIMEOUT:
+        raise BloombergRequestError("HistoricalDataRequest", tickers, fields, classification, detail)
+    return out
+
+
 # --------------------------------------------------------------------------- pure logic
 @dataclass(frozen=True)
 class TenorPoint:

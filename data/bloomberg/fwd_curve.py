@@ -15,6 +15,20 @@ column names so the field mapping can be corrected.
 `request_fwd_curves` talks to blpapi directly (element access is needed for bulk data);
 `points_from_rows` / `outright_for_date` are pure and unit-tested with plain dicts.
 tools/bloomberg_diagnostic.py carries its own copy of this logic (standalone file).
+
+`historical_points_by_day` (2026-09-18, backfill) does the same "rows -> (settle_date,
+outright) points" job for a PAST day: `FWD_CURVE` itself is a bulk/table field, which
+Bloomberg does not serve through `HistoricalDataRequest` the way it does through
+`ReferenceDataRequest` (see data/bloomberg/pull_marks.py's own module docstring, which
+already documents this as a known limitation of the live pull's tenor-fallback path) --
+so a day's curve is assembled instead from the STANDARD-TENOR outright tickers
+(`data.bloomberg.pull_marks.STANDARD_TENORS`, e.g. 'EURUSD1M Curncy'), each queried
+historically for both PX_LAST and SETTLE_DT via
+`data.bloomberg.pull_marks.fetch_historical_series`. UNVERIFIED: that a rolling-tenor
+ticker's SETTLE_DT is available (and correct for that day) via HistoricalDataRequest the
+same way it is live via ReferenceDataRequest -- see docs/bloomberg-pc-checklist.md.
+`outright_for_date` (below) is then reused unchanged for the actual interpolation, exactly
+as the live path uses it.
 """
 from __future__ import annotations
 
@@ -122,7 +136,16 @@ def element_rows(bulk_element) -> List[dict]:
 def request_fwd_curves(blpapi, session, service, tickers: List[str], timeout_ms: int = 15000
                        ) -> Dict[str, dict]:
     """{ticker: {'points': [...], 'columns': [...], 'error': str}} for FWD_CURVE in
-    OUTRIGHTS format. Plain Python out; no blpapi objects escape."""
+    OUTRIGHTS format. Plain Python out; no blpapi objects escape.
+
+    Sent with its own CorrelationId (2026-09-18): without one, a message left over from a
+    PREVIOUS request on the same session/service that timed out (e.g. live.py's own SPOT
+    ReferenceDataRequest a moment earlier in the same pull cycle) can arrive late and be
+    read here as if it were this request's response -- its `securityData` (or lack of one)
+    would silently produce an empty/wrong curve for every ticker rather than the real
+    FWD_CURVE data, since nothing was checking whose response was whose. A message whose
+    correlationIds() don't include this request's id is discarded (matches
+    pull_marks.fetch_reference / fetch_historical's existing pattern)."""
     req = service.createRequest("ReferenceDataRequest")
     for t in tickers:
         req.getElement("securities").appendValue(t)
@@ -130,7 +153,8 @@ def request_fwd_curves(blpapi, session, service, tickers: List[str], timeout_ms:
     ov = req.getElement("overrides").appendElement()
     ov.setElement("fieldId", "FWD_CURVE_QUOTE_FORMAT")
     ov.setElement("value", "OUTRIGHTS")
-    session.sendRequest(req)
+    correlation_id = blpapi.CorrelationId(id(req))
+    session.sendRequest(req, correlationId=correlation_id)
     out: Dict[str, dict] = {t: {"points": [], "columns": [], "error": "no response for ticker"} for t in tickers}
     while True:
         ev = session.nextEvent(timeout_ms)
@@ -139,7 +163,12 @@ def request_fwd_curves(blpapi, session, service, tickers: List[str], timeout_ms:
                 if out[t]["error"] == "no response for ticker":
                     out[t]["error"] = "TIMEOUT"
             break
+        event_is_ours = False
         for msg in ev:
+            msg_cids = list(msg.correlationIds()) if hasattr(msg, "correlationIds") else []
+            if msg_cids and correlation_id not in msg_cids:
+                continue  # late reply to a previous (e.g. timed-out) request, not ours
+            event_is_ours = True
             if not msg.hasElement("securityData"):
                 if msg.hasElement("responseError"):
                     for t in tickers:
@@ -167,6 +196,41 @@ def request_fwd_curves(blpapi, session, service, tickers: List[str], timeout_ms:
                 points, columns = points_from_rows(rows)
                 out[t] = {"points": points, "columns": columns,
                           "error": "" if points else f"FWD_CURVE table not parseable; columns={columns}"}
-        if ev.eventType() == blpapi.Event.RESPONSE:
+        if ev.eventType() == blpapi.Event.RESPONSE and event_is_ours:
             break
     return out
+
+
+def historical_points_by_day(tenor_series: Dict[str, Dict[str, Dict[str, object]]],
+                             tenor_tickers: Dict[str, str]) -> Dict[str, List[Point]]:
+    """Turn a `data.bloomberg.pull_marks.fetch_historical_series` result for a pair's
+    standard-tenor outright tickers (`tenor_tickers`: {tenor label -> bbg_ticker}, fields
+    PX_LAST + SETTLE_DT) into `{date_iso: [(settle_date, outright), ...]}` -- one curve per
+    historical day, ready for `outright_for_date` exactly as the live path's bulk-table
+    points are (see module docstring for the "why not just historical FWD_CURVE" backdrop
+    and the SETTLE_DT-via-HistoricalDataRequest assumption this rests on).
+
+    A tenor missing either PX_LAST or SETTLE_DT on a given day (or with a non-positive
+    price -- same filter `points_from_rows` applies) is simply absent from that day's
+    points, never guessed; a day with no usable tenor at all is simply absent from the
+    returned dict (callers see an empty curve, not a fabricated one)."""
+    by_day: Dict[str, List[Point]] = {}
+    for tenor, ticker in tenor_tickers.items():
+        series = tenor_series.get(ticker, {})
+        for day_iso, row in series.items():
+            px, sd = row.get("PX_LAST"), row.get("SETTLE_DT")
+            if px is None or sd is None:
+                continue
+            settle = _to_date(sd)
+            if settle is None:
+                continue
+            try:
+                value = float(px)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            by_day.setdefault(day_iso, []).append((settle, value))
+    for points in by_day.values():
+        points.sort()
+    return by_day
