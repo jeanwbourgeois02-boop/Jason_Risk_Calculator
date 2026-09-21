@@ -1195,6 +1195,37 @@ def unpriced_trades_panel(conn: sqlite3.Connection, as_of: str) -> html.Div:
     ])
 
 
+UPLOAD_ISSUES_TITLE = "Rows of the blotter file that did not become trades"
+UPLOAD_ISSUES_TABLE_ID = "market-data-upload-issues-table"
+
+
+def upload_issue_rows(conn: sqlite3.Connection) -> List[dict]:
+    try:
+        found = conn.execute("SELECT row_no, symbol, kind, reason, filename, uploaded_at FROM upload_issues "
+                             "ORDER BY row_no").fetchall()
+    except sqlite3.Error:      # no upload since this panel was added: no table yet
+        return []
+    return [{"row_no": n, "symbol": sym, "kind": kind, "reason": why, "filename": name, "uploaded_at": at,
+             "flag": "x"} for n, sym, kind, why, name, at in found]
+
+
+def upload_issues_panel(conn: sqlite3.Connection) -> html.Div:
+    """What the last upload left out of the book entirely, row by row, with the parser's own
+    reason -- these are not in any table or count elsewhere in the app."""
+    rows = upload_issue_rows(conn)
+    if not rows:
+        return _panel(UPLOAD_ISSUES_TITLE, [_kicker("Nothing on file: every row of the last upload became a trade "
+                                                    "(or no blotter has been uploaded since this list was added; "
+                                                    "upload the file again to fill it).")])
+    return _panel(f"{UPLOAD_ISSUES_TITLE} · {len(rows)} in {rows[0]['filename']}", [
+        _kicker("These rows are in your file but NOT in the book: no P&L, no position, not in any count. "
+                "REJECTED = the row could not be read; NOT LOADED = a type the app does not handle yet."),
+        _panel_table(UPLOAD_ISSUES_TABLE_ID,
+                     [("File row", "row_no"), ("Symbol", "symbol"), ("What happened", "kind"), ("Why", "reason")],
+                     rows, wide=("reason",), numeric=("row_no",)),
+    ])
+
+
 def safe_panel(title: str, build: Callable[[], html.Div]) -> html.Div:
     """One panel failing must not take the tab, or the other panels, down with it."""
     try:
@@ -1213,7 +1244,8 @@ def whole_book_panels(conn: sqlite3.Connection, as_of: str, status: Optional[dic
     what ui/tabs/header.py differences from), and the New York book date when the header has
     none yet."""
     header_day = header_as_of or _book_today_iso()
-    return (html.Div([safe_panel(UNPRICED_TITLE, lambda: unpriced_trades_panel(conn, header_day)),
+    return (html.Div([safe_panel(UPLOAD_ISSUES_TITLE, lambda: upload_issues_panel(conn)),
+                      safe_panel(UNPRICED_TITLE, lambda: unpriced_trades_panel(conn, header_day)),
                       safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status)),
                       safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of))]),
             safe_panel(SUSPECT_TITLE, lambda: suspect_panel(conn, as_of)),

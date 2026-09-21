@@ -207,6 +207,9 @@ class ParseResult:
     n_irs: int = 0
     n_skipped_irs: int = 0
     n_skipped_other: int = 0
+    # the rows behind n_skipped_other, named: (row_no, symbol, reason) -- a row of a type the
+    # app does not load must never vanish without a trace (user, 2026-09-21)
+    skipped_other_rows: list = field(default_factory=list)
     n_skipped_status_or_fund: int = 0
     n_superseded: int = 0   # earlier versions of a Trade Id repeated within the file
     n_updated: int = 0      # set by load(): trades that already existed and were replaced
@@ -779,6 +782,9 @@ def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
             res.n_skipped_irs += 1
     else:
         res.n_skipped_other += 1
+        res.skipped_other_rows.append((row_no, _s(row.get("Symbol")),
+                                       f"type not loaded by the app: Fin Type {_s(row.get('Fin Type'))!r}, "
+                                       f"Product {_s(row.get('Product'))!r}"))
 
 
 def _common(row: pd.Series) -> dict:
@@ -1208,11 +1214,18 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
             return
         expiry = _date(row.get("Adj. Expiry Date")) or _date(row.get("Termination")) or desc_expiry
         option_type = desc_type
-        if expiry is None or option_type is None:
-            res.rejects.append(Reject(row_no, symbol, "Symbol not <PAIR><mmddyy>[CP]-<id> and no expiry / call-put "
-                                                       "in Adj. Expiry Date, Description or FxOption Type"))
+        if expiry is None:
+            res.rejects.append(Reject(row_no, symbol, "Symbol not <PAIR><mmddyy>[CP]-<id> and no expiry "
+                                                       "in Adj. Expiry Date, Termination or Description"))
             return
-        symbol = symbol or f"{pair}{datetime.fromisoformat(expiry).strftime('%m%d%y')}{option_type[0]}-{trade_id}"
+        if option_type is None:
+            # A touch or another structure with no call / put in the file (2026-09-21: a ZAR
+            # option was missing from the book): loaded with the type unknown, typed in the
+            # Options table like a missing strike, never rejected for it.
+            option_type = ""
+            _warn(res, row_no, symbol, "no call / put in Symbol, Description or FxOption Type; loaded with the "
+                                       "type unknown: pick it in the Options table")
+        symbol = symbol or f"{pair}{datetime.fromisoformat(expiry).strftime('%m%d%y')}{(option_type or 'X')[0]}-{trade_id}"
     strike_m = STRIKE_RE.search(desc)
     desc_strike = float(strike_m.group(1)) if strike_m else 0.0
     # A structured strike column wins when the export carries one (2026-09-18: three

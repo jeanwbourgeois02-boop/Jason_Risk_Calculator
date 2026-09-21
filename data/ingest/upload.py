@@ -215,6 +215,34 @@ def import_blotter(payload, filename, db_path):
     return import_blotter_report(payload, filename, db_path)["message"]
 
 
+UPLOAD_ISSUES_DDL = ("CREATE TABLE IF NOT EXISTS upload_issues (row_no INTEGER NOT NULL, symbol TEXT NOT NULL, "
+                     "kind TEXT NOT NULL, reason TEXT NOT NULL, filename TEXT NOT NULL, uploaded_at TEXT NOT NULL)")
+
+
+def record_upload_issues(db_path, filename, result) -> int:
+    """Every row of the uploaded file that did NOT become a trade, with why (user, 2026-09-21:
+    "a zar option and spx option that just isnt in the table"): the parser's rejects and the
+    rows of a type the app does not load. Replaced by each upload; shown on the Market data
+    tab. Never fails an import: a database error here is swallowed."""
+    import datetime as _dt
+    rows = [(rj.row_no, rj.symbol or "", "REJECTED", rj.reason) for rj in getattr(result, "rejects", [])]
+    rows += [(n, sym or "", "NOT LOADED", why) for n, sym, why in getattr(result, "skipped_other_rows", [])]
+    stamp = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=60)
+        try:
+            with conn:
+                conn.execute(UPLOAD_ISSUES_DDL)
+                conn.execute("DELETE FROM upload_issues")
+                conn.executemany("INSERT INTO upload_issues VALUES (?,?,?,?,?,?)",
+                                 [(n, sym, kind, why, str(filename), stamp) for n, sym, kind, why in rows])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+    return len(rows)
+
+
 def import_blotter_report(payload, filename, db_path) -> dict:
     """`import_blotter`, with the outcome as data. Keys, exactly:
 
@@ -245,6 +273,7 @@ def import_blotter_report(payload, filename, db_path) -> dict:
             raise ValueError(f"Nothing imported. Database error: {e}") from e
 
     result, replaced = _stage_and_publish(db_path, _load, full_replace=True)
+    record_upload_issues(db_path, filename, result)
     n_trades, n_legs = len(result.trades), len(result.legs)
     parts = [f"Imported {filename}: {n_trades} trades -- "
              f"{result.n_forward} forwards, {result.n_spot} spot, {result.n_future} futures, "
