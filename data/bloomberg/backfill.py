@@ -1030,6 +1030,29 @@ def _plain_reasons(result: dict, still_missing: List[dict]) -> List[str]:
     return list(dict.fromkeys(reasons))[:MAX_STATUS_REASONS]
 
 
+def _freeze_ndfs_at_present_spot(db_path, today: date, log: Callable[[str], None]) -> None:
+    """User decision 2026-09-21 ("we can use a present spot for the past fixes"): once the
+    backfill has tried for the past closes, an NDF ticket that settled with no official SPOT
+    on or before its settlement is frozen at the latest official SPOT on file
+    (engine.pnl.ledger.realise_settled, ndf_present_spot=True). Here and nowhere else: the
+    live pull's own realise_settled runs before the backfill of the same button press, and a
+    freeze is never recomputed."""
+    realise_settled = _import_realise_settled()
+    if realise_settled is None:
+        return
+    from data.ingest.schema import connect
+    conn = connect(Path(db_path))
+    try:
+        led = realise_settled(conn, today.isoformat(), ndf_present_spot=True)
+        if led["realised"]:
+            log(f"Auto-backfill: {led['realised']} settled trade(s) frozen after the backfill (an NDF with no "
+                f"SPOT on or before its settlement takes the present spot).")
+    except Exception as exc:  # noqa: BLE001 -- as in backfill(): report and move on
+        log(f"  realise_settled raised: {exc!r}")
+    finally:
+        conn.close()
+
+
 def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                    fetch: Optional[Callable] = None, fwd_fetch: Optional[Callable] = None,
                    fut_fetch: Optional[Callable] = None, session_factory: Optional[Callable] = None,
@@ -1098,6 +1121,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                 f"Auto-backfill: {len(signatures)} day(s) cannot be completed yet; each is tried again within the hour.")
             if on_progress:
                 on_progress(0)
+            _freeze_ndfs_at_present_spot(db_path, today, log)   # nothing left to ask for: the backfill has tried
             return []
         order = [d for d in refs if d in due] + sorted((d for d in due if d not in refs), reverse=True)
         log(f"Auto-backfill: {len(order)} incomplete day(s) between {min(order)} and {max(order)}, "
@@ -1113,6 +1137,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         backfill(db_path, min(order), max(order), fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
                  session_factory=session_factory, host=host, port=port, log=log, scale_fetch=scale_fetch,
                  order=order, on_day=_on_day)
+        _freeze_ndfs_at_present_spot(db_path, today, log)
         return results
     finally:
         _record_outcome(db_path, key, results, signatures, refs, clock)

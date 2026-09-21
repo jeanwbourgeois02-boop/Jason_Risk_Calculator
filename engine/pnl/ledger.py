@@ -141,10 +141,18 @@ def _unrealisable(trade_id, exc: Exception) -> dict:
 
 
 # --------------------------------------------------------------------------- realise
-def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
+def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool = False) -> dict:
     """Freeze P&L for FX and future trades whose settle date is before `as_of` and are
     not yet in `realised_pnl`. Returns {'realised': n, 'unrealisable': [{trade_id, reason}],
     'repaired': [trade_id, ...]}.
+
+    `ndf_present_spot` (user decision 2026-09-21: "we can use a present spot for the past
+    fixes"): an NDF ticket whose pair has no official SPOT on or before its settlement is
+    frozen at the latest official SPOT on or before `as_of` (`valuation.present_spot_for_ndf`,
+    NDF pairs only) instead of staying unrealisable, and its note says so. Off by default: the
+    live pull's own call runs BEFORE the backfill of the same button press and a freeze is
+    never recomputed, so only data.bloomberg.backfill.auto_backfill passes it, once the
+    backfill has tried for the settlement date's own close.
 
     `repaired` (2026-09-18): rows an earlier, positional INSERT misaligned
     (`_insert_realised`) are deleted first (`purge_unreadable_realised`), so the trades
@@ -152,6 +160,7 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
     database the old INSERT corrupted heals itself on the next Bloomberg pull, no manual
     step. One trade with a stored figure that is not a number is reported as
     unrealisable (`_unrealisable`) instead of aborting the step for the whole book."""
+    from engine.pnl.valuation import PRESENT_SPOT_NOTE, present_spot_for_ndf
     realised, unrealisable = 0, []
     repaired = purge_unreadable_realised(conn)
 
@@ -159,6 +168,9 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
             m_hit = _last_on_or_before(conn, pair, "SPOT", settle)
+            present = m_hit is None and ndf_present_spot
+            if present:
+                m_hit = present_spot_for_ndf(conn, pair, as_of)
             if m_hit is None:
                 unrealisable.append({"trade_id": trade_id, "reason": f"no official SPOT for {pair} on or before {settle}"})
                 continue
@@ -170,7 +182,7 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
             entry = qty * fill * s
             combined = m * s
             pnl = qty * combined - entry
-            note = "" if m_day == settle else f"spot dated {m_day} (last before settlement)"
+            note = "" if m_day == settle else f"spot dated {m_day} ({PRESENT_SPOT_NOTE if present else 'last before settlement'})"
             _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, entry, "SPOT", combined, m_day, m_src, pnl, note)
             realised += 1
         except (TypeError, ValueError, ArithmeticError) as exc:

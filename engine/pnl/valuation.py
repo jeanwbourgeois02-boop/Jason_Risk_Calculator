@@ -461,7 +461,28 @@ def _last_official_query(conn, instrument_id: str, mark_type: str, day: str):
     return (_number(row[0], f"marks.value ({mark_type} for {instrument_id} on {row[1]})"), row[1], row[2])
 
 
-def _frozen_row(conn, r) -> Optional[dict]:
+# A settled NDF with no past fix on file (user decision 2026-09-21: "we can use a present spot
+# for the past fixes"). The one exception to "missing stays missing": an NDF ticket whose pair
+# has NO official SPOT on or before its settlement is valued at the latest official SPOT on
+# file on or before the valuation date, and the row says which date's spot that is. NDF pairs
+# only (engine.ladder.ndf.is_ndf_pair); a deliverable trade in the same position stays blank.
+# The ledger persists it only once the backfill has tried for the settlement date's own close
+# (`engine.pnl.ledger.realise_settled`, `ndf_present_spot`), because a freeze is never recomputed.
+PRESENT_SPOT_NOTE = "present spot: none on file on or before settlement"
+
+
+def present_spot_for_ndf(conn, pair: str, as_of: str) -> Optional[tuple]:
+    """(value, as_of_date, source) of the latest official SPOT of the NDF `pair` on or before
+    `as_of`; None when the pair is not an NDF or has no SPOT on file at all. Called only after
+    the on-or-before-settlement lookup found nothing, so the row is dated after settlement."""
+    from engine.ladder.ndf import is_ndf_pair
+    row = conn.execute("SELECT is_ndf FROM instruments WHERE instrument_id = ?", (pair,)).fetchone()
+    if not is_ndf_pair(pair, int((row[0] if row else 0) or 0)):
+        return None
+    return _last_official_on_or_before(conn, pair, "SPOT", as_of)
+
+
+def _frozen_row(conn, r, as_of: Optional[str] = None) -> Optional[dict]:
     """A settled trade that has no `realised_pnl` row yet, valued exactly as
     `engine.pnl.ledger.realise_settled` would freeze it -- the last official mark on or
     before its settlement date -- but without writing anything (value_book is read-only
@@ -470,10 +491,14 @@ def _frozen_row(conn, r) -> Optional[dict]:
     ever called from the Bloomberg feed, so on any PC without a live session every
     settled trade stayed Unavailable forever and took the headline LTD with it, even with
     every official mark loaded. The arithmetic here and in realise_settled must stay
-    identical; realise_settled remains the path that persists the frozen figure."""
+    identical; realise_settled remains the path that persists the frozen figure.
+    `as_of`: the valuation date, for `present_spot_for_ndf` (an NDF with no past fix on file)."""
     product, settle = r.product, r.settle_date
+    present = False
     if product in FX_PRODUCTS:
         hit = _last_official_on_or_before(conn, r.instrument_id, "SPOT", settle)
+        if hit is None and as_of is not None:
+            hit, present = present_spot_for_ndf(conn, r.instrument_id, as_of), True
         if hit is None:
             return None
         m, m_day, m_src = hit
@@ -519,7 +544,7 @@ def _frozen_row(conn, r) -> Optional[dict]:
         spot, spot_src, mark_label = s, s_src, "premium"
     else:
         return None
-    when = "" if m_day == settle else f" dated {m_day} (last before settlement)"
+    when = "" if m_day == settle else f" dated {m_day} ({PRESENT_SPOT_NOTE if present else 'last before settlement'})"
     return dict(mark=m, mark_date=m_day, mark_source=m_src, spot=spot, spot_source=spot_src,
                 pnl_local=pnl_local, pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd, pnl_carry_usd=0.0, reason="",
                 note=f"frozen at {mark_label}{when}; not yet recorded in realised_pnl")
@@ -540,7 +565,7 @@ def _provisional(conn, r, as_of, unreadable: str = "") -> dict:
     and the note/reason names the unreadable value; `engine.pnl.ledger.realise_settled`
     deletes and re-freezes such rows the next time it runs."""
     trade_id = r.trade_id
-    frozen = _frozen_row(conn, r)
+    frozen = _frozen_row(conn, r, as_of)
     if frozen is not None:
         if unreadable:
             frozen["note"] = frozen["note"].replace(
