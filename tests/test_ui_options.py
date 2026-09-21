@@ -393,11 +393,14 @@ def test_format_rows_column_set_and_order():
     try:
         df = options.option_rows(conn, AS_OF)
         records, _style = options.format_rows(df)
-        expected_tail = ["position", "notional", "mktval", "mktpx", "delta", "theta",
-                          "gamma", "vega", "expiry", "underlying", "undfwdpx", "rho"]
+        # 2026-09-21 (user: "too many columns"): the details, then what was paid, what it is
+        # worth and the P&L, all in USD, then the four main Greeks; the rest travels hidden.
+        expected_tail = ["expiry", "position", "notional", "start_value_usd", "mktval", "pnl_usd",
+                          "delta", "gamma", "vega", "theta"]
         keys = list(records[0].keys())
-        display_keys = [k for k in keys if k in expected_tail]
-        assert display_keys == expected_tail
+        assert [c for c in options.DISPLAY_COLUMNS if c in expected_tail] == expected_tail
+        assert set(expected_tail) <= set(keys) and {"mktpx", "underlying", "undfwdpx", "rho"} <= set(keys)
+        assert {"mktpx", "underlying", "undfwdpx", "rho"} <= set(options.HIDDEN_COLUMNS)
         assert keys[0] == "level"  # hidden bookkeeping fields also travel with each row
         assert "label" in keys
         # Strike left its MARS slot (2026-09-21): there it was the 23rd column, off-screen,
@@ -1552,3 +1555,26 @@ def test_digital_terms_survive_a_re_upload(sample_db, ui_app_stub, fake_pricer, 
                            {"strike": 152.0, "option_type": "PUT", "payoff": "DIGITAL", "barrier_level": 0.0})
     import_blotter(sample_options_csv[0], "sample_options.csv", str(db_path))
     assert _terms(db_path, instrument) == (152.0, "PUT", "DIGITAL")
+
+
+def test_breakdown_tables_sit_above_the_table_and_sum_priced_options_in_usd():
+    """User, 2026-09-21: four aggregate tables (payoff type, strike, expiry date, put / call)
+    above the options table, each with premium paid, current value and P&L in dollars."""
+    conn = _make_db()
+    try:
+        legs = options.option_rows(conn, AS_OF, flat=True)
+        for _title, key in options.BREAKDOWNS:
+            rows = options.breakdown_rows(legs, key)
+            total = rows[-1]
+            assert total["group"] == "Total" and total["options"] == len(legs)
+            assert sum(r["options"] for r in rows[:-1]) == len(legs)
+            priced = legs[legs["pnl_usd"].notna()]
+            if len(priced):
+                assert total["pnl"] == pytest.approx(priced["pnl_usd"].sum())
+                assert total["value"] - total["paid"] == pytest.approx(total["pnl"])   # current value - premium paid
+        layout = options.build_layout(conn, AS_OF)
+        ids = [getattr(c, "id", None) for c in layout.children]
+        assert ids.index(options.BREAKDOWNS_ID) < ids.index(options.TABLE_ID)
+        assert len(layout.children[ids.index(options.BREAKDOWNS_ID)].children) == 4
+    finally:
+        conn.close()

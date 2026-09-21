@@ -174,13 +174,17 @@ REFRESH_NOTE_ID = "options-terms-refresh-note"
 # off most screens (the table's scrollbar sits under the last row), while the row's own
 # note says "type it in the Strike cell". It now sits with the other two typed terms,
 # right after Payoff, in the order they are filled in.
+# 2026-09-21 (user: "theres too many columns - need premium paid - how much you paid in
+# dollars, current value and then pnl - after the details"): the option's details, then the
+# three dollar figures, then the four main Greeks. Everything else stays in each row's data,
+# hidden (LESS_USED_COLUMNS), so filters, the callbacks and the downloads still find it.
 DISPLAY_COLUMNS = [
-    "label", "side", "option_type", "payoff", "strike", "note",
-    "position", "notional", "premium_ccy", "premium_paid", "start_value", "start_value_usd",
-    "mktval", "mktpx", "current_value", "pnl_ccy", "pnl_usd",
-    "delta", "theta", "gamma", "vega", "expiry", "underlying", "undfwdpx", "rho",
-    "instrument",
+    "label", "side", "option_type", "payoff", "strike", "expiry", "note",
+    "position", "notional", "start_value_usd", "mktval", "pnl_usd",
+    "delta", "gamma", "vega", "theta",
 ]
+LESS_USED_COLUMNS = ["premium_ccy", "premium_paid", "start_value", "mktpx", "current_value", "pnl_ccy",
+                     "underlying", "undfwdpx", "rho", "instrument"]
 # Carried in every row's data so filter_query / the callbacks can key off them, but not
 # shown -- `hidden_columns`, not omitted from `columns`, so filter_query can still
 # reference them (Dash evaluates filter_query against defined columns). `is_leg` = 1 on a
@@ -190,7 +194,7 @@ DISPLAY_COLUMNS = [
 # value and P&L it must cover the same options, or an unpriced ticket's premium reads as
 # a loss (Start of 8 options against the Current value of 7).
 HIDDEN_COLUMNS = ["level", "group_key", "parent_key", "leg_count", "priced_count", "is_leg", "trade_id",
-                  "start_priced_usd"]
+                  "start_priced_usd"] + LESS_USED_COLUMNS
 PAYOFF_WORDS = {"VANILLA": "Vanilla", "DIGITAL": "Digital", "AMERICAN": "American", "ASIAN": "Asian",
                 "BARRIER_KI": "Knock-in", "BARRIER_KO": "Knock-out", "ONE_TOUCH": "One-touch",
                 "NO_TOUCH": "No-touch"}
@@ -206,7 +210,7 @@ ALL_COLUMNS = DISPLAY_COLUMNS + HIDDEN_COLUMNS
 COLUMN_LABELS = {
     "label": "Structure", "side": "Side", "option_type": "Type", "payoff": "Payoff", "note": "Note",
     "position": "Position", "notional": "Notional USD", "premium_ccy": "Ccy", "premium_paid": "Premium paid",
-    "start_value": "Start value", "start_value_usd": "Start value USD", "mktval": "MktVal USD",
+    "start_value": "Start value", "start_value_usd": "Premium paid USD", "mktval": "Current value USD",
     "mktpx": "MktPx (current premium)", "current_value": "Current value", "pnl_ccy": "P&L (ccy)",
     "pnl_usd": "P&L USD", "delta": "Delta", "theta": "Theta", "gamma": "Gamma", "vega": "Vega",
     "expiry": "Expiry", "underlying": "Underlying", "strike": "Strike", "undfwdpx": "UndFwdPx", "rho": "Rho",
@@ -1338,6 +1342,59 @@ def terms_editor(conn: sqlite3.Connection) -> html.Details:
     ])
 
 
+# ------------------------------------------------------------------ aggregates above the table (2026-09-21)
+BREAKDOWNS_ID = "options-breakdowns"
+BREAKDOWNS = (("Payoff type", "payoff"), ("Strike", "strike"), ("Expiry date", "expiry"), ("Put / call", "option_type"))
+
+
+def breakdown_rows(legs: pd.DataFrame, key: str) -> List[dict]:
+    """One row per value of `key` over the option legs, plus a Total: how many options, what
+    was paid for them, what they are worth now and their P&L, all in USD. Sums cover the
+    options the book has priced (the header's rule); the unpriced ones are counted beside
+    them, never summed as zero. Grouping and adding only: no figure is recomputed."""
+    if legs is None or legs.empty:
+        return []
+    out = []
+    groups = [(str(name) if not _is_missing(name) and name != "" else "not on file", g)
+              for name, g in legs.groupby(legs[key].map(lambda v: "" if _is_missing(v) else v), sort=True)]
+    for name, g in groups + [("Total", legs)]:
+        priced = g[g["pnl_usd"].map(lambda v: not _is_missing(v))]
+        out.append({"group": name, "options": len(g), "unpriced": len(g) - len(priced),
+                    "paid": _agg(priced["start_priced_usd"]), "value": _agg(priced["mktval"]),
+                    "pnl": _agg(priced["pnl_usd"])})
+    return out
+
+
+def _breakdown_table(title: str, rows: List[dict]) -> html.Div:
+    def money(v, signed=False):
+        if _is_missing(v):
+            return html.Td("n/a", className="cell--unavailable")
+        cls = ("fx-ccy-num--neg" if v < 0 else "fx-ccy-num--pos") if signed else ""
+        return html.Td(format_cell(v), className=cls)
+
+    def tr(r):
+        count = f"{r['options']}" + (f" ({r['unpriced']} unpriced)" if r["unpriced"] else "")
+        return html.Tr([html.Td(r["group"], className="fx-ccy-label"), html.Td(count), money(r["paid"]),
+                        money(r["value"]), money(r["pnl"], signed=True)])
+
+    head = html.Thead(html.Tr([html.Th(title, className="fx-ccy-label"), html.Th("Options"),
+                               html.Th("Premium paid USD"), html.Th("Current value USD"), html.Th("P&L USD")]))
+    body, total = [r for r in rows if r["group"] != "Total"], [r for r in rows if r["group"] == "Total"]
+    return html.Div(className="section fx-ccy-panel", children=[
+        html.H4(f"P&L by {title.lower()}", className="fx-ccy-title"),
+        html.Div(className="fx-ccy-scroll", children=html.Table(className="fx-ccy-table", children=[
+            head, html.Tbody([tr(r) for r in body]), html.Tfoot([tr(r) for r in total])])),
+    ])
+
+
+def breakdown_tables(conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """The four aggregate tables above the options table (user, 2026-09-21): P&L by payoff
+    type, by strike, by expiry date and by put / call, one row per option underneath them."""
+    legs = option_rows(conn, as_of, flat=True)
+    return html.Div(id=BREAKDOWNS_ID, className="fx-ccy-tables",
+                    children=[_breakdown_table(title, breakdown_rows(legs, key)) for title, key in BREAKDOWNS])
+
+
 def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
     """The whole Options sub-tab body: the Greeks / value / P&L headline, then Portfolio
     Totals -> asset class -> package -> leg (multi-leg packages collapsed by default),
@@ -1362,6 +1419,7 @@ def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
         html.Div(id=EDIT_STATUS_ID, className="status-line", role="status"),
         html.Div(id=REFRESH_NOTE_ID, className="section-kicker", style={"fontStyle": "italic"}),
         html.Div(id=VIEW_NOTE_ID, className="section-kicker", style={"fontStyle": "italic"}),
+        breakdown_tables(conn, as_of),
         table,
         terms_editor(conn),
     ])
