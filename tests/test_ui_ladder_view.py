@@ -91,7 +91,8 @@ def test_grid_is_one_row_per_currency_with_settled_dates_total_columns_and_a_usd
     assert exposure.TOTAL_COLUMN_LABEL == "Total shown"
     # the settled-cash emphasis and the sign colours follow the new shape
     styles = table.style_data_conditional
-    assert any(s["if"].get("column_id") == SETTLED and s.get("fontWeight") == "700" for s in styles)
+    # Settled cash is the last column of the key-figure block: the thick bar is on its right edge
+    assert any(s["if"].get("column_id") == SETTLED and s.get("borderRight", "").startswith("4px solid") for s in styles)
     assert any(s["if"].get("column_id") == "2026-09-24" and "contains '('" in s["if"]["filter_query"] for s in styles)
     block, _ = exposure.summary_block_frame(result, records, rates=RATES)
     assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "AUD"] == "13,808,542"
