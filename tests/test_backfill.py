@@ -1043,3 +1043,40 @@ def test_a_missing_close_is_reported_in_the_sources_own_words(tmp_path, monkeypa
                                 log=lambda *_: None)
     assert results[0]["status"] == "NO_CLOSES" and results[0]["missing_pair_reasons"] == {"USDJPY": why}
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0
+
+
+def test_points_divisor_is_worked_out_from_bloombergs_own_forwards_when_neither_field_answers(tmp_path):
+    """The user's terminal (2026-09-21): past forwards come as points and no scale field answers,
+    so 5d / MTD stayed n/a. The live pull's own outrights are on file though (FWD_CURVE, as of
+    Fri 2026-09-18: spot date 09-22, 1M = 10-22, 1Y = 2027-09-22): points / (outright - spot) is
+    -50 / -0.49 = 102 and -550 / -5.4 = 101.9, i.e. a divisor of 100, from Bloomberg's numbers alone."""
+    p, conn = _usdjpy_db(tmp_path)
+    stamp = "2026-09-18T11:40:12-04:00"
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        ("2026-09-18", "USDJPY", "2026-09-18", "SPOT", 147.2, "BBG_BFXFORWARD", stamp),
+        ("2026-09-18", "USDJPY", "2026-10-22", "FWD_OUTRIGHT", 146.71, "BBG_BFXFORWARD", stamp),
+        ("2026-09-18", "USDJPY", "2027-09-22", "FWD_OUTRIGHT", 141.8, "BBG_BFXFORWARD", stamp),
+    ])
+    conn.commit()
+    results = backfill.backfill(p, date(2026, 9, 14), date(2026, 9, 14), fetch=_usdjpy_spot, fwd_fetch=_usdjpy_points,
+                                fut_fetch=_never_called, scale_fetch=lambda *a: {}, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE"] and results[0]["missing_marks"] == []
+    value, source = conn.execute("SELECT value, source FROM marks WHERE mark_type = 'FWD_OUTRIGHT' "
+                                 "AND as_of_date = '2026-09-14'").fetchone()
+    assert value == pytest.approx(146.88 + (8 / 23) * (146.50 - 146.88), abs=1e-9) and source == "BBG_INTERP"
+    report = backfill._scale_reports[backfill._db_key(p)]["USDJPY"]
+    assert report["divisor"] == 100.0 and report["field"] == backfill.INFERRED_SCALE_FIELD
+
+
+def test_points_divisor_is_not_guessed_when_the_tenors_disagree_or_nothing_is_on_file(tmp_path):
+    p, conn = _usdjpy_db(tmp_path)
+    rows = {"2026-09-14": {"1M": {"PX_LAST": -50.0}, "1Y": {"PX_LAST": -550.0}}}
+    assert backfill._infer_points_scale(conn, "USDJPY", rows) is None                 # no forwards on file
+    stamp = "2026-09-18T11:40:12-04:00"
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        ("2026-09-18", "USDJPY", "2026-09-18", "SPOT", 147.2, "BBG_BFXFORWARD", stamp),
+        ("2026-09-18", "USDJPY", "2026-10-22", "FWD_OUTRIGHT", 146.71, "BBG_BFXFORWARD", stamp),   # 1M says 100
+        ("2026-09-18", "USDJPY", "2027-09-22", "FWD_OUTRIGHT", 146.65, "BBG_BFXFORWARD", stamp),   # 1Y says 1,000
+    ])
+    conn.commit()
+    assert backfill._infer_points_scale(conn, "USDJPY", rows) is None                 # the votes disagree

@@ -426,6 +426,75 @@ def _fetch_points_scales(session, service, pairs: List[str], scale_fetch: Option
         return {}
 
 
+INFERRED_SCALE_FIELD = "Bloomberg's own forwards on file"
+
+
+def _infer_points_scale(conn: sqlite3.Connection, pair: str, rows_by_day: Dict[str, Dict[str, dict]],
+                        holidays=frozenset()) -> Optional[dict]:
+    """The points divisor worked out from Bloomberg's own numbers, for a terminal that
+    answers neither scale field (2026-09-21: 5d / MTD stayed n/a on the user's terminal for
+    exactly that reason, every past forward being points with no divisor).
+
+    The live pull writes Bloomberg's own OUTRIGHT forwards at the standard tenor dates
+    (FWD_CURVE, source BBG_BFXFORWARD) next to the pair's SPOT. On the latest day that has
+    them, outright - spot at a tenor's date is that tenor's points divided by the divisor,
+    so the tenor ticker's points (from `rows_by_day`, the day nearest to it) over that
+    difference is 10 ** n up to a day or two of market drift, and n is its rounded log10.
+    A tenor votes only when it carries at least one point and lands within 0.3 of a whole
+    power of ten; every vote must agree. None when the marks on file do not allow it.
+    Nothing is assumed about pip sizes: both numbers are Bloomberg's."""
+    import math
+    hit = conn.execute(
+        "SELECT as_of_date FROM marks WHERE instrument_id = ? AND mark_type = 'FWD_OUTRIGHT' AND source = ? "
+        "AND julianday(settle_date) - julianday(as_of_date) >= 20 ORDER BY as_of_date DESC LIMIT 1",
+        (pair, SRC_SPOT_FWD)).fetchone()
+    if hit is None or not rows_by_day:
+        return None
+    d0_iso = hit[0]
+    spot_row = conn.execute("SELECT value FROM marks_official WHERE instrument_id = ? AND mark_type = 'SPOT' "
+                            "AND as_of_date = ?", (pair, d0_iso)).fetchone()
+    try:
+        spot = float(spot_row[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if spot <= 0:
+        return None
+    pillars = []
+    for settle, value in conn.execute(
+            "SELECT settle_date, value FROM marks WHERE instrument_id = ? AND as_of_date = ? AND mark_type = "
+            "'FWD_OUTRIGHT' AND source = ? ORDER BY settle_date", (pair, d0_iso, SRC_SPOT_FWD)):
+        try:
+            pillars.append((date.fromisoformat(settle), float(value)))
+        except (TypeError, ValueError):
+            continue
+    d0 = date.fromisoformat(d0_iso)
+    spot_day = fc.spot_date_for(d0, pair, holidays)
+    pillars = [(d, v) for d, v in pillars if d > spot_day and v > 0]
+    day_iso = min(rows_by_day, key=lambda iso: abs((date.fromisoformat(iso) - d0).days))
+    votes = []
+    for tenor, row in (rows_by_day.get(day_iso) or {}).items():
+        try:
+            points = float((row or {}).get("PX_LAST"))
+        except (TypeError, ValueError):
+            continue
+        tenor_day = fc.tenor_settle_date(spot_day, tenor, holidays)
+        if tenor.upper() == "SP" or tenor_day is None or abs(points) < 1.0:
+            continue
+        outright, _how = fc.outright_for_date(pillars, tenor_day, spot, spot_day)
+        if outright is None or outright == spot or (points > 0) != (outright > spot):
+            continue
+        log_ratio = math.log10(points / (outright - spot))
+        n = round(log_ratio)
+        if abs(log_ratio - n) <= 0.3 and 0 <= n <= 8:
+            votes.append(n)
+    if not votes or len(set(votes)) != 1:
+        return None
+    return {"scale": float(10 ** votes[0]), "field": INFERRED_SCALE_FIELD,
+            "raw": {INFERRED_SCALE_FIELD: f"points of {day_iso} against the outrights of {d0_iso}, "
+                                          f"{len(votes)} tenor(s) agreeing"},
+            "errors": {}}
+
+
 def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
                              fut_fetch: Optional[Callable] = None) -> Dict[str, Dict[str, float]]:
     """{instrument_id: {date_iso: PX_SETTLE}} -- one HistoricalDataRequest per stretch of
@@ -679,7 +748,15 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             def scale_report_for(pair: str) -> dict:
                 if "by_pair" not in scales:      # asked for once, and only if some series is points
                     scales["by_pair"] = _fetch_points_scales(session, service, sorted(tenor_rows_by_pair), scale_fetch)
-                return scales["by_pair"].get(pair) or {}
+                report = scales["by_pair"].get(pair) or {}
+                if not report.get("scale"):
+                    # neither field answered: work the divisor out from Bloomberg's own
+                    # outrights on file against these points (_infer_points_scale)
+                    inferred = _infer_points_scale(conn, pair, tenor_rows_by_pair.get(pair) or {}, holidays)
+                    if inferred:
+                        inferred["errors"] = report.get("errors") or {}
+                        scales["by_pair"][pair] = report = inferred
+                return report
 
             spot_reason = getattr(fetch, "reason", None)     # the source's own words, when it has any
 
