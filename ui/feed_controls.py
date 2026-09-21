@@ -131,16 +131,22 @@ def short_time(text, now: Optional[datetime] = None) -> str:
 
 
 def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None,
-                  feed_running: Optional[bool] = None, now: Optional[datetime] = None) -> str:
+                  feed_running: Optional[bool] = None, now: Optional[datetime] = None,
+                  say_on_request: bool = True) -> str:
     """One line: connected or the stated reason it is not, time of the last pull, marks
     written / failed, how long that pull took (only when the status file carries
     `timings["total"]`), and that Bloomberg is pulled on request only.
 
     `feed_running`: False = there is no feed to ask (RISK_LIVE=0, start_feed=False), said
-    so. `interval_seconds` is accepted for the callers that still pass it and ignored."""
+    so. `interval_seconds` is accepted for the callers that still pass it and ignored.
+    `say_on_request=False` leaves the closing "pulls only when you press ..." off: the top
+    bar prints this line right beside that very button (the button's tooltip says it)."""
+    if feed_running is False:
+        tail = f" · {NO_FEED_WORDS}"
+    else:
+        tail = f" · {ON_REQUEST_WORDS}" if say_on_request else ""
     if not status:
-        line = "Bloomberg: no pull recorded yet"
-        return f"{line} · {NO_FEED_WORDS if feed_running is False else ON_REQUEST_WORDS}"
+        return f"Bloomberg: no pull recorded yet{tail}"
     when = short_time(status.get("time"), now)
     if not status.get("connected"):
         line = f"Bloomberg: not connected — {status.get('reason') or 'unknown reason'}"
@@ -155,7 +161,7 @@ def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None
         took = seconds_words(pull_timings(status).get("total"))
         if took:
             line += f" · last pull took {took}"
-    return f"{line} · {NO_FEED_WORDS if feed_running is False else ON_REQUEST_WORDS}"
+    return f"{line}{tail}"
 
 
 def not_connected_message(app, status: Optional[dict]) -> str:
@@ -261,7 +267,8 @@ def poll_outcome(status: Optional[dict], pending: Optional[dict], feed=None,
                  now: Optional[datetime] = None) -> Tuple[str, bool, bool]:
     """`(status line, finished, landed)` for one fast-poll tick. `finished` switches the
     poll off; `landed` is what publishes the data revision."""
-    headline = feed_headline(status, feed_interval_seconds(feed), feed_running=feed is not None, now=now)
+    headline = feed_headline(status, feed_interval_seconds(feed), feed_running=feed is not None, now=now,
+                             say_on_request=False)
     if not pending:
         return headline, True, False
     if pull_landed(status, pending):
@@ -275,7 +282,9 @@ def poll_outcome(status: Optional[dict], pending: Optional[dict], feed=None,
 
 # --------------------------------------------------------------------------- layout + callbacks
 def controls() -> list:
-    """The button and its status line, for the upload strip's own row."""
+    """The button and its status line, for the top bar's right corner (`ui/uploads.py`
+    places them; the bar is pinned to the top of the window, so the button is in reach
+    from every tab and at any scroll position)."""
     return [
         html.Button(PULL_BUTTON_LABEL, id=PULL_BUTTON_ID, n_clicks=0, className="btn btn--feed-pull",
                     title="Pull today's marks and any missing past closes from Bloomberg, for what the "
@@ -360,5 +369,5 @@ def register(app, get_db_path: Callable[[], object]) -> None:
             return no_update, no_update
         feed = getattr(app, "bloomberg_feed", None)
         line = feed_headline(read_feed_status(get_db_path()), feed_interval_seconds(feed),
-                             feed_running=feed is not None)
+                             feed_running=feed is not None, say_on_request=False)
         return line, line

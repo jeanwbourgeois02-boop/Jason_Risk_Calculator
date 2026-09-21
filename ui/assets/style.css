@@ -385,15 +385,21 @@ p { margin: 8px 0; }
    "Upload / trade / file" and poke out of the bar once the row got tight. */
 .top-bar .source-row > .source-upload, .top-bar .source-row > .btn, .top-bar .source-row > .source-line { flex: 0 0 auto; }
 .top-bar .source-row .source-upload, .top-bar .source-row .btn { white-space: nowrap; }
-.top-bar .btn--feed-pull { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.55);
-  white-space: nowrap; padding: 7px 14px; }
-.top-bar .btn--feed-pull:hover { background: var(--navy-2); color: var(--gold); border-color: var(--gold); }
-.top-bar .btn--feed-pull:disabled { opacity: .55; cursor: default; color: #fff; border-color: rgba(255,255,255,.55);
-  background: transparent; }
+/* 2026-09-21: Bloomberg is pulled on request only, so "Pull Bloomberg now" is the bar's
+   main action: the filled gold button in the far right corner, its status line beside it,
+   then a divider and the (now outlined) upload button. The bar itself is pinned to the top
+   of the window so the button is in reach from every tab at any scroll position. */
+.top-bar { position: sticky; top: 0; z-index: 30; box-shadow: 0 1px 0 rgba(255,255,255,.08); }
+.top-bar .btn--feed-pull { white-space: nowrap; padding: 7px 16px; }
+.top-bar .btn--feed-pull:disabled { opacity: .6; cursor: default; }
+.top-bar .source-upload .btn { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.55);
+  padding: 7px 14px; }
+.top-bar .source-upload .btn:hover { background: var(--navy-2); color: var(--gold); border-color: var(--gold); }
+.top-bar-divider { flex: 0 0 1px; align-self: center; width: 1px; height: 22px; background: rgba(255,255,255,.22); }
 .feed-pull-status { font-size: 12px; color: var(--muted); }
-.top-bar .feed-pull-status { flex: 0 1 auto; min-width: 0; max-width: 460px; font-size: 11px; font-weight: 500;
-  line-height: 1.25; color: rgba(255,255,255,.72); text-align: right; overflow: hidden;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.top-bar .feed-pull-status { flex: 0 1 auto; min-width: 0; max-width: 360px; font-size: 11px; font-weight: 500;
+  line-height: 1.3; color: rgba(255,255,255,.78); text-align: right; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 
 .top-bar .source-drop { position: absolute; right: 0; top: 40px; display: flex; flex-direction: column;
   align-items: flex-end; gap: 6px; }

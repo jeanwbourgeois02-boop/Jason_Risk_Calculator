@@ -241,12 +241,16 @@ def run_import(payload, filename, db_path) -> dict:
 def layout(data: dict = None):
     data = data or {}
     return html.Div(className="source-strip", children=[
+        # The bar draws this row right to left (style.css, row-reverse), so the first child
+        # is the far right corner: "Pull Bloomberg now", the one thing that pulls Bloomberg
+        # (2026-09-21), then its status line, a divider, the upload button and its line.
         html.Div(className="source-row", children=[
+            *feed_controls.controls(),
+            html.Span(className="top-bar-divider", **{"aria-hidden": "true"}),
             dcc.Upload(id=FILE_UPLOAD_ID, className="source-upload",
                        children=html.Button("Upload trade file", className="btn"),
                        accept=".csv,.xlsx,.xls", multiple=False, max_size=25 * 1024 * 1024),
             html.Div(id=SOURCE_LINE_ID, className="source-line", children=describe_source(data)),
-            *feed_controls.controls(),
         ]),
         # Everything that drops below the bar, stacked, so a failed import's message sits
         # under the Confirm row it belongs to instead of on top of it.

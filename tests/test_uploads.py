@@ -413,6 +413,16 @@ def test_pull_button_sits_in_the_upload_row_with_its_status_line():
     assert ids.index(feed_controls.PULL_STATUS_ID) == ids.index(feed_controls.PULL_BUTTON_ID) + 1
     button = row.children[ids.index(feed_controls.PULL_BUTTON_ID)]
     assert button.children == "Pull Bloomberg now"
+    # 2026-09-21 (user: "put on the top top headline ... clicked from wherever in the app"):
+    # the bar draws the row right to left, so the FIRST child is the far right corner --
+    # the pull button, its status line beside it, a divider, then the upload control.
+    assert ids[:2] == [feed_controls.PULL_BUTTON_ID, feed_controls.PULL_STATUS_ID]
+    assert row.children[2].className == "top-bar-divider" and ids.index(uploads.FILE_UPLOAD_ID) == 3
+    css = (__import__("pathlib").Path(uploads.__file__).parent / "assets" / "style.css").read_text(encoding="utf-8")
+    assert ".top-bar { position: sticky; top: 0;" in css     # the bar stays in reach at any scroll position
+    # beside the button itself the line does not repeat "pulls only when you press ..."
+    beside = feed_controls.poll_outcome(_status(T0), None, feed=object())[0]
+    assert "212 marks written" in beside and feed_controls.ON_REQUEST_WORDS not in beside
     poll = next(c for c in layout.children if getattr(c, "id", None) == feed_controls.PULL_POLL_ID)
     assert poll.disabled is True                          # runs only while a pull is outstanding
 
