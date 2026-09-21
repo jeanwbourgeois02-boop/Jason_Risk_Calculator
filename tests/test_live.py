@@ -1403,6 +1403,10 @@ def test_pull_once_opens_one_session_per_cycle_and_writes_what_three_sessions_wr
     today = _date(2026, 8, 17)
     (tmp_path / "before").mkdir()
     (tmp_path / "after").mkdir()
+    # Both pulls snap at the same moment: an option's vol is scaled by the true time from the
+    # SPOT snap to the expiry cut (engine.options.store.cut_time_factor), so two pulls seconds
+    # apart price the same option a few 1e-9 apart, which is time decay, not a session difference.
+    monkeypatch.setattr(live, "_now_iso", lambda: "2026-08-17T11:40:00-04:00")
 
     log = _install_answering_blpapi(monkeypatch, today)
     p_before, conn_before = _fx_irs_option_db(tmp_path / "before")
