@@ -205,7 +205,7 @@ ALL_COLUMNS = DISPLAY_COLUMNS + HIDDEN_COLUMNS
 
 COLUMN_LABELS = {
     "label": "Structure", "side": "Side", "option_type": "Type", "payoff": "Payoff", "note": "Note",
-    "position": "Position", "notional": "Notional", "premium_ccy": "Ccy", "premium_paid": "Premium paid",
+    "position": "Position", "notional": "Notional USD", "premium_ccy": "Ccy", "premium_paid": "Premium paid",
     "start_value": "Start value", "start_value_usd": "Start value USD", "mktval": "MktVal USD",
     "mktpx": "MktPx (current premium)", "current_value": "Current value", "pnl_ccy": "P&L (ccy)",
     "pnl_usd": "P&L USD", "delta": "Delta", "theta": "Theta", "gamma": "Gamma", "vega": "Vega",
@@ -432,9 +432,19 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
 
     start_value = quantity * fill if not _is_missing(fill) else None
     current_value = quantity * premium if premium is not None else None
-    pnl_ccy = current_value - start_value if current_value is not None and start_value is not None else None
-    start_value_usd = start_value * usd_per_base if start_value is not None and usd_per_base is not None else None
     mktval = current_value * usd_per_base if current_value is not None and usd_per_base is not None else None
+    from engine.pnl.valuation import option_fill_is_per_ounce
+    per_ounce = not _is_missing(fill) and option_fill_is_per_ounce(rec["base_ccy"], float(fill))
+    if per_ounce:
+        # A gold option is dealt in USD per ounce (engine.pnl.valuation.option_fill_is_per_ounce):
+        # its start value is ounces x fill in the QUOTE currency, never ounces read as money.
+        usd_per_quote_ccy = _spot_to_usd(conn, as_of, rec["quote_ccy"])
+        start_value_usd = start_value * usd_per_quote_ccy if usd_per_quote_ccy is not None else None
+        # the current value in the same (quote) currency, so Current value - Start value reads across
+        current_value = mktval / usd_per_quote_ccy if mktval is not None and usd_per_quote_ccy else None
+    else:
+        start_value_usd = start_value * usd_per_base if start_value is not None and usd_per_base is not None else None
+    pnl_ccy = current_value - start_value if current_value is not None and start_value is not None else None
 
     # The book's own per-trade P&L (CLAUDE.md FX option line), taken as is.
     pnl_usd = None
@@ -469,8 +479,11 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         "option_type": TYPE_WORDS.get(option_type, option_type.title()), "payoff": payoff_word,
         "note": _leg_note(rec, as_of, premium, book, greeks_reason, pending, skip_reason),
         "priced": premium is not None,
-        "position": quantity, "notional": abs(quantity),
-        "premium_ccy": rec["base_ccy"], "premium_paid": None if _is_missing(fill) else fill,
+        # Notional in DOLLARS (user, 2026-09-21: "everything in dollars"; 5,000 ounces of gold is
+        # not $5,000): |quantity| x USD per base unit at spot; Position keeps the base units.
+        "position": quantity, "notional": abs(quantity) * usd_per_base if usd_per_base is not None else None,
+        "premium_ccy": rec["quote_ccy"] if per_ounce else rec["base_ccy"],
+        "premium_paid": None if _is_missing(fill) else fill,
         "start_value": start_value, "start_value_usd": start_value_usd,
         "start_priced_usd": start_value_usd if pnl_usd is not None else None,
         "mktval": mktval, "mktpx": premium, "current_value": current_value,

@@ -620,8 +620,23 @@ def _settled_irs_row(conn, r, as_of) -> dict:
 
 
 # --------------------------------------------------------------------------- FX options
+METALS = frozenset({"XAU", "XAG", "XPT", "XPD"})
+
+
+def option_fill_is_per_ounce(base_ccy: str, fill: float) -> bool:
+    """A metal option's premium is dealt in the quote currency per ounce (USD 38.50 an
+    ounce), not as a fraction of the base notional the way an FX option's is, while the
+    PREMIUM mark is always that fraction. A fraction of notional can never reach 1, so a
+    fill of 1 or more on a metal base is per-ounce and nothing else (user, 2026-09-21:
+    "the gold options are wrong because it reads the ounces of gold as dollars"). Its
+    start value is quantity x fill in the QUOTE currency; the current value is still
+    quantity x PREMIUM x USD per ounce; P&L = current value - start value, in USD."""
+    return base_ccy in METALS and fill == fill and abs(fill) >= 1.0
+
+
 def _open_option_row(conn, r, as_of) -> dict:
-    """quantity * (PREMIUM - fill) in base currency, converted to USD at spot."""
+    """quantity * (PREMIUM - fill) in base currency, converted to USD at spot. A metal
+    option dealt per ounce (`option_fill_is_per_ounce`): current value - start value."""
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
     m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PREMIUM", as_of)
@@ -635,8 +650,16 @@ def _open_option_row(conn, r, as_of) -> dict:
         out["reason"] = f"no SPOT for USD conversion of {r.base_ccy} on {as_of}"
         return out
     out["spot"], out["spot_source"] = s, s_src
-    pnl_local = r.quantity * (m - r.fill)
-    pnl_usd = pnl_local * s
+    if option_fill_is_per_ounce(r.base_ccy, r.fill):
+        q, q_pair, _q_src = usd_per_quote(conn, r.quote_ccy, as_of)
+        if q != q or q_pair is None:
+            out["reason"] = f"no SPOT for USD conversion of {r.quote_ccy} on {as_of}"
+            return out
+        pnl_usd = r.quantity * m * s - r.quantity * r.fill * q      # current value - start value, USD
+        pnl_local = pnl_usd / s
+    else:
+        pnl_local = r.quantity * (m - r.fill)
+        pnl_usd = pnl_local * s
     out["pnl_local"], out["pnl_usd"], out["pnl_spot_usd"] = pnl_local, pnl_usd, pnl_usd
     return out
 

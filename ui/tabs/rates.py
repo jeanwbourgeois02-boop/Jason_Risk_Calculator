@@ -107,12 +107,12 @@ _MARK_TYPES = ("PAR_RATE", "PV_USD", "DV01_USD", "CASHFLOW_USD")
 # its place.
 _DISPLAY_COLUMNS = [
     "trade_id", "instrument_id", "ccy", "direction", "set_by", "notional",
-    "par_rate", "pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd", "recon_status",
+    "entry_rate", "par_rate", "pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd", "recon_status",
 ]
 _COLUMN_LABELS = {
     "trade_id": "Trade id", "instrument_id": "Swap", "ccy": "Ccy",
     "direction": "Direction", "set_by": "Set by", "notional": "Notional",
-    "par_rate": "Par rate", "pv_usd": "PV (USD)", "dv01_usd": "DV01 (USD)",
+    "entry_rate": "Entry rate", "par_rate": "Par rate", "pv_usd": "PV (USD)", "dv01_usd": "DV01 (USD)",
     "cashflow_usd": "Settled cashflows (USD)", "pnl_usd": "P&L (USD)",
     "recon_status": "Recon (QL_PRICER vs BBG SWPM)",
 }
@@ -188,7 +188,7 @@ def irs_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     `direction` is `irs_direction`'s code ('PAY' | 'RECEIVE' | '' when the stored
     quantity is unusable); `direction_source` / `needs_user_choice` / `set_by` come from
     `irs_direction.direction_report`, which is read-only and needs no override table."""
-    empty_cols = ["trade_id", "instrument_id", "ccy", "quantity", "notional", "direction",
+    empty_cols = ["trade_id", "instrument_id", "ccy", "quantity", "entry_rate", "notional", "direction",
                   "direction_source", "needs_user_choice", "set_by",
                   "par_rate", "pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd", "bbg_pv_usd", "recon_status"]
     trades = pd.read_sql_query(
@@ -196,7 +196,7 @@ def irs_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
         # from both the once-daily BNP snapshot and the real-time blotter under two
         # different trade_ids (docs/open-questions.md item 55) is not listed, and its
         # PV/DV01 not double-counted, twice.
-        "SELECT t.trade_id, t.instrument_id, i.base_ccy AS ccy, t.quantity "
+        "SELECT t.trade_id, t.instrument_id, i.base_ccy AS ccy, t.quantity, t.price AS entry_rate "
         "FROM trades_official t JOIN instruments i ON i.instrument_id = t.instrument_id "
         "WHERE t.product = 'IRS' ORDER BY t.trade_id",
         conn,
@@ -280,7 +280,7 @@ def format_rows(df: pd.DataFrame) -> tuple:
     for col in cols:
         if col == "notional":
             formatted[col] = formatted[col].map(_fmt_notional)
-        elif col == "par_rate":
+        elif col in ("entry_rate", "par_rate"):
             formatted[col] = formatted[col].map(_fmt_rate)
         elif col in ("pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd"):
             formatted[col] = formatted[col].map(_fmt_usd)

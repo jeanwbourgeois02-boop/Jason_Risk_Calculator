@@ -48,7 +48,7 @@ import pandas as pd
 
 from engine.pnl.aggregate import (_last_business_day_of_prev_month, _last_business_day_of_prev_year,
                                   _n_business_days_back, _prev_business_day, load_holidays)
-from engine.pnl.valuation import _BadValue, _number, usd_per_quote, value_book
+from engine.pnl.valuation import _BadValue, _number, option_fill_is_per_ounce, usd_per_quote, value_book
 
 GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 
@@ -75,7 +75,7 @@ WHERE t.product = 'IRS' AND l.leg_no = 1 AND l.settle_date < :as_of
 """
 
 _OPEN_OPTION_SQL = """
-SELECT t.trade_id, t.instrument_id, t.product, i.base_ccy, t.quantity, t.price, l.settle_date
+SELECT t.trade_id, t.instrument_id, t.product, i.base_ccy, t.quantity, t.price, l.settle_date, i.quote_ccy
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product = 'FX_OPTION' AND l.leg_no = 1 AND l.settle_date < :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
@@ -211,7 +211,7 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
         except (TypeError, ValueError, ArithmeticError) as exc:
             unrealisable.append(_unrealisable(trade_id, exc))
 
-    for trade_id, inst, product, base_ccy, qty, fill, settle in conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall():
+    for trade_id, inst, product, base_ccy, qty, fill, settle, quote_ccy in conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall():
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
             m_hit = _last_on_or_before(conn, inst, "PREMIUM", settle)
@@ -224,6 +224,14 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
                 unrealisable.append({"trade_id": trade_id, "reason": f"no SPOT to convert {base_ccy} to USD on or before {settle}"})
                 continue
             entry = qty * fill * s
+            if option_fill_is_per_ounce(base_ccy, fill):
+                # a metal option dealt in quote currency per ounce: its start value is in the
+                # QUOTE currency (engine.pnl.valuation.option_fill_is_per_ounce)
+                q, _q_pair, _q_src = usd_per_quote(conn, quote_ccy, m_day)
+                if q != q:
+                    unrealisable.append({"trade_id": trade_id, "reason": f"no SPOT to convert {quote_ccy} to USD on or before {settle}"})
+                    continue
+                entry = qty * fill * q
             combined = m * s
             pnl = qty * combined - entry
             note = f"premium dated {m_day}" + ("" if m_day == settle else " (last before expiry)")

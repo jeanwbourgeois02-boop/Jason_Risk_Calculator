@@ -50,6 +50,7 @@ expected, not a bug, until a live Bloomberg pull lands BBG_BFXFORWARD rows.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
@@ -1152,6 +1153,48 @@ def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     return html.Details(className="details", children=[html.Summary(summary), *body])
 
 
+UNPRICED_TITLE = "Trades left out of the headline P&L"
+UNPRICED_TABLE_ID = "market-data-unpriced-trades-table"
+
+
+def unpriced_trade_rows(conn: sqlite3.Connection, as_of: str) -> Tuple[int, List[dict]]:
+    """(trades in the book, one row per trade the header's figures leave out on `as_of`),
+    each with the book's own plain-language reason -- the same `value_book` rows and
+    reasons the header counts as "excludes N of M trades unpriced", listed by name."""
+    from ui.tabs.blotter_pricing import priced_value_book
+    df = priced_value_book(conn, as_of)[0]
+    if df.empty:
+        return 0, []
+    out = df[df["reason"] != ""]
+    rows = [{"trade_id": r.trade_id, "product": r.product, "instrument_id": r.instrument_id,
+             "trade_date": getattr(r, "trade_date", ""), "status": getattr(r, "status", ""),
+             "reason": r.reason, "flag": ""}
+            for r in out.sort_values(["product", "instrument_id", "trade_id"]).itertuples()]
+    return len(df), rows
+
+
+def unpriced_trades_panel(conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """Every trade that is on file but missing from the headline P&L on the header's date,
+    and why (user, 2026-09-21). The count here is the header's own "excludes N of M"."""
+    total, rows = unpriced_trade_rows(conn, as_of)
+    if not rows:
+        return _panel(UNPRICED_TITLE, [_kicker(f"All {total} trades on file are priced on {as_of}: nothing is left "
+                                               "out of the headline figures.")])
+    by_reason: Dict[str, int] = {}
+    for r in rows:
+        key = re.sub(r"\s+for\s+\S+.*$", "", r["reason"]) or r["reason"]
+        by_reason[key] = by_reason.get(key, 0) + 1
+    top = "; ".join(f"{n} x {why}" for why, n in sorted(by_reason.items(), key=lambda kv: -kv[1])[:4])
+    return _panel(f"{UNPRICED_TITLE} · {len(rows)} of {total} on {as_of}", [
+        _kicker("These trades are in the book but have no P&L on this date, so the header's LTD, Daily, 5d, MTD "
+                "and YTD leave them out. Most common reasons: " + top + "."),
+        _panel_table(UNPRICED_TABLE_ID,
+                     [("Trade id", "trade_id"), ("Product", "product"), ("Instrument", "instrument_id"),
+                      ("Trade date", "trade_date"), ("Status", "status"), ("Why it has no P&L", "reason")],
+                     rows, wide=("reason",)),
+    ])
+
+
 def safe_panel(title: str, build: Callable[[], html.Div]) -> html.Div:
     """One panel failing must not take the tab, or the other panels, down with it."""
     try:
@@ -1170,7 +1213,8 @@ def whole_book_panels(conn: sqlite3.Connection, as_of: str, status: Optional[dic
     what ui/tabs/header.py differences from), and the New York book date when the header has
     none yet."""
     header_day = header_as_of or _book_today_iso()
-    return (html.Div([safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status)),
+    return (html.Div([safe_panel(UNPRICED_TITLE, lambda: unpriced_trades_panel(conn, header_day)),
+                      safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status)),
                       safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of))]),
             safe_panel(SUSPECT_TITLE, lambda: suspect_panel(conn, as_of)),
             safe_panel(PAST_CLOSES_TITLE, lambda: past_closes_panel(conn, header_day)))

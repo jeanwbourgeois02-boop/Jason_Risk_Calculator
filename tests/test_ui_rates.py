@@ -448,7 +448,7 @@ def test_direction_is_a_dropdown_cell_and_the_only_editable_column():
 
 def test_column_order_keeps_every_existing_column_in_place_with_set_by_after_direction():
     ids = [c["id"] for c in rates.table_columns()]
-    assert ids == ["trade_id", "instrument_id", "ccy", "direction", "set_by", "notional", "par_rate",
+    assert ids == ["trade_id", "instrument_id", "ccy", "direction", "set_by", "notional", "entry_rate", "par_rate",
                    "pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd", "recon_status"]
     assert {c["id"]: c["name"] for c in rates.table_columns()}["set_by"] == "Set by"
 
