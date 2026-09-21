@@ -495,37 +495,46 @@ def test_render_shows_settled_cash_row_for_expired_ticket(tmp_path, monkeypatch)
     assert "No open FX trades" not in _render_text(body)
     grid = _find_id(body, exposure.COMBINED_TABLE_ID)
     assert grid is not None
-    assert [c["id"] for c in grid.columns][1] == SETTLED           # first value column
-    assert [c["name"] for c in grid.columns][1] == exposure.SETTLED_ROW_LABEL
+    grid_ids = [c["id"] for c in grid.columns]
+    assert grid_ids[1:4] == ["fx_rate", "local_delta", "usd_delta"]   # the rate / delta figures lead each row
+    assert grid_ids[4] == SETTLED                                     # first value column
+    assert [c["name"] for c in grid.columns][4] == exposure.SETTLED_ROW_LABEL
     by_label = {r[exposure.ROW_LABEL_COL]: r for r in grid.data}
     assert by_label["JPY"][SETTLED] == "(147,100,000)" and by_label["USD"][SETTLED] == "1,000,000"
-    block = _find_id(body, exposure.SUMMARY_BLOCK_TABLE_ID)
-    by_label = {r[exposure.ROW_LABEL_COL]: r for r in block.data}
-    assert by_label["FX rate (as quoted)"]["JPY"] == "USDJPY 147.12"
-    assert by_label["Local delta"]["JPY"] == "(147,100,000)"
+    assert _find_id(body, exposure.SUMMARY_BLOCK_TABLE_ID) is None     # one table, no block above it
+    assert by_label["JPY"]["fx_rate"] == "USDJPY 147.12"
+    assert by_label["JPY"]["local_delta"] == "(147,100,000)"
 
 
-# --------------------------------------------------------------------------- 2026-09-21: block above the grid, NDF display
-def test_exposure_section_puts_the_rate_delta_block_above_the_grid_with_currencies_across():
-    """User, 2026-09-21: "the rows at the bottom showing delta, fx rate etc - they stay as
-    they are and get put at the top of the table". Its own table, above the grid,
-    currencies across in the grid's own row order, the net USD delta total where it was
-    (end of the USD delta row)."""
+# --------------------------------------------------------------------------- 2026-09-21: one table, NDF display
+def test_exposure_section_folds_the_rate_delta_figures_into_the_grid_as_its_first_columns():
+    """User, 2026-09-21: the rate / delta block as a table of its own above the grid was
+    "super clunky with the other stuff above and scrolling odd". One table: FX rate, Local
+    delta and USD delta lead each currency's row, the same strings the block frame holds,
+    and the bottom USD row carries the net USD delta."""
     from engine.ladder.exposure import build_exposure, portfolio_totals
     section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES)
     ids = _all_ids(section)
-    assert ids.index(exposure.HEADLINE_ID) < ids.index(exposure.SUMMARY_BLOCK_TABLE_ID) < ids.index(exposure.COMBINED_TABLE_ID)
-    block = _find_id(section, exposure.SUMMARY_BLOCK_TABLE_ID)
+    assert exposure.SUMMARY_BLOCK_TABLE_ID not in ids
+    assert ids.index(exposure.HEADLINE_ID) < ids.index(exposure.COMBINED_TABLE_ID)
     grid = _find_id(section, exposure.COMBINED_TABLE_ID)
-    assert [r[exposure.ROW_LABEL_COL] for r in block.data] == ["FX rate (as quoted)", "Local delta", "USD delta",
-                                                               "Rate source"]
+    assert [(c["id"], c["name"]) for c in grid.columns][:4] == [
+        (exposure.ROW_LABEL_COL, "Currency"), ("fx_rate", "FX rate (as quoted)"), ("local_delta", "Local delta"),
+        ("usd_delta", "USD delta")]
     grid_currencies = [r[exposure.CURRENCY_COL] for r in grid.data if r["kind"] == "currency"]
-    assert [c["id"] for c in block.columns] == [exposure.ROW_LABEL_COL] + grid_currencies + [exposure.TOTAL_COL]
     assert grid_currencies == ["JPY", "USD"]  # |USD delta| descending: 1,000,680 (147.1m / 147) then 1,000,000
+    block, _ccys = exposure.summary_block_frame(build_exposure(RECORDS, RATES), RECORDS, rates=RATES)
+    by_kind = block.set_index("kind")
+    for row in grid.data:
+        if row["kind"] == "currency":
+            assert [row[k] for k in ("fx_rate", "local_delta", "usd_delta")] == [
+                by_kind.at[k, row[exposure.CURRENCY_COL]] for k in ("fx_rate", "local_delta", "usd_delta")]
+    jpy = next(r for r in grid.data if r[exposure.CURRENCY_COL] == "JPY")
+    assert jpy["fx_rate"] == "147" and jpy["local_delta"] == "(147,100,000)"   # RATES names no pair
     totals = portfolio_totals(build_exposure(RECORDS, RATES))
-    usd_delta = next(r for r in block.data if r["kind"] == "usd_delta")
-    assert usd_delta[exposure.TOTAL_COL] == exposure.format_amount(totals["net_usd"])
-    assert all(r[exposure.TOTAL_COL] == "" for r in block.data if r["kind"] != "usd_delta")
+    usd_row = next(r for r in grid.data if r["kind"] == exposure.USD_EQUIVALENT_COL)
+    assert usd_row["usd_delta"] == exposure.format_amount(totals["net_usd"])
+    assert usd_row["fx_rate"] == "" and usd_row["local_delta"] == ""
 
 
 def _ndf_records():
@@ -605,7 +614,9 @@ def test_ndf_currency_with_no_1m_price_is_blank_with_its_reason_never_spot():
     assert "the 1M NDF price is missing for KRW (KWN+1M)" in card.children[2].children
     section = exposure.exposure_section(records, [], "2026-08-17", rates=rates)
     ids = _all_ids(section)
-    assert ids.index(exposure.SUMMARY_BLOCK_TABLE_ID) < ids.index(exposure.RATE_REASONS_ID) < ids.index(exposure.COMBINED_TABLE_ID)
+    assert ids.index(exposure.RATE_REASONS_ID) < ids.index(exposure.COMBINED_TABLE_ID)
+    krw = next(r for r in _find_id(section, exposure.COMBINED_TABLE_ID).data if r[exposure.CURRENCY_COL] == "KRW")
+    assert krw["fx_rate"] == "" and krw["usd_delta"] == ""                       # blank in the grid too, never spot
 
 
 def _seed_ndf(conn, with_1m_price: bool):
@@ -645,8 +656,7 @@ def test_load_inputs_and_net_gross_usd_price_ndf_currencies_at_the_1m_ndf_mark(c
     grid = _find_id(section, exposure.COMBINED_TABLE_ID)
     row = next(r for r in grid.data if r[exposure.CURRENCY_COL] == "KRW")
     assert row[exposure.ROW_LABEL_COL] == "KRW (NDF, fixing dates)" and row[fixing] == "(1,394,500,000)"
-    block = _find_id(section, exposure.SUMMARY_BLOCK_TABLE_ID)
-    assert next(r for r in block.data if r["kind"] == "fx_rate")["KRW"] == "KWN+1M 1,394.5"
+    assert row["fx_rate"] == "KWN+1M 1,394.5"
     totals = cash_ladder.net_gross_usd(conn, "2026-08-17")
     assert totals["available"] is True
     # KRW -1,394,500,000 / 1,394.5 = -1,000,000 (at the 1,380 spot it would be -1,010,507); JPY from the seed

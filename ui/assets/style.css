@@ -423,24 +423,25 @@ p { margin: 8px 0; }
    (ui/tabs/blotter_fx.py, 2026-09-21). Two compact tables above the trade table: side by
    side when the window has room for both, stacked otherwise. Plain html tables, not
    dash_table: a figure's reason, or its "excludes N of M" note, is the cell's own tooltip.
-   The rows scroll under a pinned heading with the Total pinned beneath them, so twenty
-   currencies do not push the trade table off the screen. */
+   Shown at full length, every currency in sight with no scroll box of their own (user,
+   2026-09-21: "dont make them scrollable - just make them longer"); only a table too wide
+   for a narrow window scrolls sideways. */
 .fx-ccy-tables { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; margin: 0 0 16px; }
 .fx-ccy-tables > * { flex: 1 1 520px; min-width: 0; margin-bottom: 0; }
 .fx-ccy-panel { padding: 12px 16px; }
 .fx-ccy-title { margin: 0 0 2px; font-size: 13px; color: var(--navy); }
 .fx-ccy-panel .section-kicker { margin: 0 0 8px; }
-.fx-ccy-scroll { max-height: 322px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.fx-ccy-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
 .fx-ccy-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px;
   font-variant-numeric: tabular-nums; }
 .fx-ccy-table th, .fx-ccy-table td { padding: 3px 10px; text-align: right; white-space: nowrap;
   border-bottom: 1px solid var(--line); }
-.fx-ccy-table thead th { position: sticky; top: 0; z-index: 1; background: var(--navy); color: #fff;
+.fx-ccy-table thead th { background: var(--navy); color: #fff;
   font-weight: 700; padding: 5px 10px; border-bottom: 1px solid var(--navy); }
 .fx-ccy-table .fx-ccy-label { text-align: left; font-weight: 600; }
 .fx-ccy-table tbody tr:nth-child(even) td { background: rgba(15, 31, 61, 0.03); }
 .fx-ccy-table tbody tr:hover td { background: #eef1f7; }
-.fx-ccy-table tfoot td { position: sticky; bottom: 0; background: #f1f3f8; font-weight: 700;
+.fx-ccy-table tfoot td { background: #f1f3f8; font-weight: 700;
   border-top: 2px solid var(--navy); border-bottom: none; }
 .fx-ccy-num--pos { color: var(--pos); font-weight: 600; }
 .fx-ccy-num--neg { color: var(--neg); font-weight: 600; }

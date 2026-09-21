@@ -9,6 +9,17 @@ import pytest
 from data.bloomberg import backfill
 from data.ingest import schema
 
+@pytest.fixture(autouse=True)
+def _close_1500_on_every_date(monkeypatch):
+    """The 15:00 New York close applies from backfill.CLOSE_1500_FROM (2026-09-21) and inside
+    Bloomberg's intraday history counted from today. These tests exercise it on earlier dates,
+    so the cutover is moved back and 'today' is pinned (a test that needs another today
+    passes it or patches live.book_today itself). The real cutover has its own tests."""
+    from data.bloomberg import live as _live
+    monkeypatch.setattr(backfill, "CLOSE_1500_FROM", date(2000, 1, 1))
+    monkeypatch.setattr(_live, "book_today", lambda: date(2026, 9, 21))
+
+
 
 def _db(tmp_path):
     p = tmp_path / "risk.db"
@@ -158,8 +169,10 @@ def test_helpers():
     # the official close is 15:00 New York (user decision 2026-09-21), one constant for it
     from data.bloomberg import pull_marks
     assert pull_marks.CLOSE_HOUR_NY == 15
-    assert backfill.close_stamp(date(2026, 1, 15)) == "2026-01-15T15:00:00-05:00"      # EST
+    assert backfill.close_stamp(date(2026, 1, 15), today=date(2026, 3, 2)) == "2026-01-15T15:00:00-05:00"   # EST
     assert backfill.close_stamp(date(2026, 7, 15)) == "2026-07-15T15:00:00-04:00"      # EDT
+    # a day Bloomberg's intraday history no longer reaches closes at the 17:00 daily close
+    assert backfill.close_stamp(date(2026, 1, 15), today=date(2026, 9, 21)) == "2026-01-15T17:00:00-05:00"
     assert pull_marks.snapped_at(date(2026, 7, 15)) == "2026-07-15T15:00:00-04:00"    # the same stamp
 
 
@@ -873,10 +886,10 @@ def test_a_past_fx_row_that_is_not_the_1500_close_is_replaced_and_one_that_is_ne
     fri, mon = "2026-09-04", "2026-09-07"
     fri_close = backfill.close_stamp(date(2026, 9, 4))
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
-        # Monday as earlier versions left it: a live pull's last spot, a forward from the old
-        # 17:00 PX_LAST backfill, and a live futures price (a future keeps what it has)
+        # Monday as its last live pull left it: a spot, a direct-quote forward and a live
+        # futures price (a future keeps what it has)
         (mon, "AUDUSD", mon, "SPOT", 0.9001, "BBG_BFXFORWARD", "2026-09-07T11:40:12-04:00"),
-        (mon, "AUDUSD", "2026-09-08", "FWD_OUTRIGHT", 0.9002, "BBG_BFXFORWARD", "2026-09-07T17:00:00-04:00"),
+        (mon, "AUDUSD", "2026-09-08", "FWD_OUTRIGHT", 0.9002, "BBG_BFXFORWARD", "2026-09-07T11:40:12-04:00"),
         (mon, "ESU6 Index", "2026-12-19", "FUTURE_PX", 7111.0, "BBG_BDH", "2026-09-07T11:40:12-04:00"),
         # Friday already holds its 15:00 closes; only its future is missing
         (fri, "AUDUSD", fri, "SPOT", 0.8001, "BBG_BFXFORWARD", fri_close),
@@ -946,8 +959,11 @@ def test_todays_rows_are_never_replaced_by_the_close_rule(tmp_path):
     assert conn.execute("SELECT value FROM marks WHERE mark_type = 'SPOT'").fetchall() == [(0.5,)]
 
 
-def test_a_day_older_than_bloombergs_intraday_history_stays_missing_and_is_never_given_px_last(tmp_path, monkeypatch):
+def test_a_day_older_than_bloombergs_intraday_history_takes_the_daily_close(tmp_path, monkeypatch):
+    """User decision 2026-09-21: an old day is "not that serious" -- where Bloomberg no longer
+    holds a 15:00 price the day closes at Bloomberg's daily close, stamped 17:00."""
     from data.bloomberg import pull_marks as pm
+    from data.bloomberg.inventory import close_completeness
     p, conn = _db_with_future(tmp_path)
     asked = []
 
@@ -957,7 +973,11 @@ def test_a_day_older_than_bloombergs_intraday_history_stays_missing_and_is_never
 
     def daily(session, service, tickers, fields, start, end, **kw):
         asked.append(("daily", tuple(sorted(tickers)), tuple(fields)))
-        return {"ESU6 Index": {d.isoformat(): {"PX_SETTLE": 7550.0} for d in backfill.business_days(start, end)}}
+        out = {t: {d.isoformat(): {"PX_LAST": 0.6505} for d in backfill.business_days(start, end)}
+               for t in tickers if t == "AUDUSD Curncy"}
+        if "ESU6 Index" in tickers:
+            out["ESU6 Index"] = {d.isoformat(): {"PX_SETTLE": 7550.0} for d in backfill.business_days(start, end)}
+        return out
 
     monkeypatch.setattr(pm, "fetch_intraday_close_series", intraday)
     monkeypatch.setattr(pm, "fetch_historical_series", daily)
@@ -967,16 +987,45 @@ def test_a_day_older_than_bloombergs_intraday_history_stays_missing_and_is_never
     log = []
     results = backfill.backfill(p, day, day, session_factory=lambda: (object(), object()), today=today, log=log.append)
     r = results[0]
-    # no intraday request for a day Bloomberg no longer holds -- and no daily PX_LAST in its place
-    assert asked == [("daily", ("ESU6 Index",), ("PX_SETTLE",))]
-    assert r["status"] == "DONE" and (r["closes"], r["fwd_outrights"], r["future_px"]) == (0, 0, 1)
-    assert r["missing_pairs"] == ["AUDUSD"]
-    for reason in (r["missing_pair_reasons"]["AUDUSD"], r["missing_marks"][0]["reason"]):
-        assert "more than 140 business days ago" in reason and "never used in its place" in reason
-    assert [m["mark_type"] for m in r["missing_marks"]] == ["FWD_OUTRIGHT"]
-    assert {row[0] for row in conn.execute("SELECT mark_type FROM marks")} == {"FUTURE_PX"}
-    assert any("older than Bloomberg's intraday history" in line for line in log)
-    assert backfill._plain_reasons(r, [])[0] == r["missing_pair_reasons"]["AUDUSD"]
+    # no intraday request for a day Bloomberg no longer holds: the daily series answers instead
+    assert not [a for a in asked if a[0] == "intraday"]
+    assert ("daily", ("AUDUSD Curncy",), ("PX_LAST",)) in asked and ("daily", ("ESU6 Index",), ("PX_SETTLE",)) in asked
+    assert r["status"] == "DONE" and (r["closes"], r["future_px"]) == (1, 1) and r["missing_pairs"] == []
+    assert conn.execute("SELECT value, snapped_at FROM marks WHERE mark_type = 'SPOT'").fetchall() == [
+        (0.6505, "2026-09-07T17:00:00-04:00")]
+    assert any("take Bloomberg's daily close (17:00 New York)" in line for line in log)
+    # that 17:00 row IS the day's close: never asked for again
+    done = close_completeness(conn, "2026-09-07", "2026-09-07", today=today.isoformat())
+    assert [m["mark_type"] for m in done["missing"].iloc[0]] == ["FWD_OUTRIGHT"] and done["not_closed"].iloc[0] == 0
+
+
+def test_the_1500_close_applies_from_2026_09_21_and_older_days_keep_what_they_have(monkeypatch):
+    """User decision 2026-09-21: "from now on its 3pm new york but surely for like a month ago
+    its not that serious"."""
+    from data.bloomberg import pull_marks as pm
+    monkeypatch.setattr(backfill, "CLOSE_1500_FROM", date(2026, 9, 21))      # the real cutover, not the fixture's
+    assert backfill.first_1500_day(date(2026, 9, 23)) == date(2026, 9, 21)
+    # before the cutover: whatever is on file is that day's close (a live pull's row, an old 17:00 row)
+    assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T11:40:12-04:00") is True
+    assert backfill.is_close_row("FWD_OUTRIGHT", "2026-09-14", "2026-09-14T17:00:00-04:00") is True
+    assert backfill.close_stamp(date(2026, 9, 18), today=date(2026, 9, 23)) == "2026-09-18T17:00:00-04:00"
+    # from the cutover on: only the 15:00 row (or the daily close of a day beyond the intraday window)
+    assert backfill.is_close_row("SPOT", "2026-09-21", "2026-09-21T11:40:12-04:00") is False
+    assert backfill.is_close_row("SPOT", "2026-09-21", "2026-09-21T15:00:00-04:00") is True
+    assert backfill.close_stamp(date(2026, 9, 22), today=date(2026, 9, 23)) == "2026-09-22T15:00:00-04:00"
+    assert backfill.is_close_row("FUTURE_PX", "2026-09-21", "2026-09-21T11:40:12-04:00") is True
+    # a stretch across the cutover is asked for in its two parts: daily before, 15:00 from it on
+    asked = []
+    monkeypatch.setattr(pm, "fetch_historical_series",
+                        lambda s, v, tickers, fields, start, end, **kw: asked.append(("daily", start, end)) or {
+                            "EURUSD Curncy": {"2026-09-18": {"PX_LAST": 1.10}}})
+    monkeypatch.setattr(pm, "fetch_intraday_close_series",
+                        lambda s, v, tickers, fields, start, end, **kw: asked.append(("15:00", start, end)) or {
+                            "EURUSD Curncy": {"2026-09-21": {"PX_LAST": 1.11}}})
+    series = backfill._close_series_fetch(date(2026, 9, 21))(None, None, ["EURUSD Curncy"], ["PX_LAST"],
+                                                             date(2026, 9, 18), date(2026, 9, 22))
+    assert asked == [("daily", date(2026, 9, 18), date(2026, 9, 20)), ("15:00", date(2026, 9, 21), date(2026, 9, 22))]
+    assert series == {"EURUSD Curncy": {"2026-09-18": {"PX_LAST": 1.10}, "2026-09-21": {"PX_LAST": 1.11}}}
 
 
 def test_a_missing_close_is_reported_in_the_sources_own_words(tmp_path, monkeypatch):

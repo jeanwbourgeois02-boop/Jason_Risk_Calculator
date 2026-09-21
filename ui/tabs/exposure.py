@@ -697,11 +697,37 @@ def _grid_column_name(col: str) -> str:
     return TOTAL_COLUMN_LABEL if col == TOTAL_COL else format_date(col)
 
 
-def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None) -> dash_table.DataTable:
+# The rate / delta figures sit IN the grid, as its first columns (user, 2026-09-21: the
+# separate block above the grid was "super clunky with the other stuff above and
+# scrolling odd"): each currency's rate, local delta and USD delta read across on its own
+# row, in one table with one scrollbar. The bottom USD row carries the net USD delta.
+SUMMARY_GRID_COLUMNS = [("fx_rate", FX_RATE_ROW_LABEL), ("local_delta", "Local delta"), ("usd_delta", "USD delta")]
+
+
+def grid_records_with_summary(frame: pd.DataFrame, summary: Optional[pd.DataFrame]) -> List[dict]:
+    """The grid's records with `summary_block_frame`'s three figures added to each
+    currency row under the SUMMARY_GRID_COLUMNS ids; the bottom USD row takes the block's
+    own Total (the net USD delta under 'usd_delta', blank elsewhere). Display only: the
+    same formatted strings the block shows, nothing recomputed."""
+    records = frame.to_dict("records")
+    if summary is None or summary.empty:
+        return records
+    by_kind = summary.set_index("kind")
+    for rec in records:
+        col = rec.get(CURRENCY_COL) if rec.get("kind") == "currency" else TOTAL_COL
+        for key, _label in SUMMARY_GRID_COLUMNS:
+            rec[key] = by_kind.at[key, col] if (key in by_kind.index and col in by_kind.columns) else ""
+    return records
+
+
+def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
+                    summary: Optional[pd.DataFrame] = None) -> dash_table.DataTable:
     from engine.ladder.exposure_adapter import SETTLED
     view = view or DEFAULT_VIEW
     value_cols = grid_value_columns(frame)
+    summary_cols = [] if summary is None or summary.empty else SUMMARY_GRID_COLUMNS
     columns = ([{"name": "Currency (cells in USD eq.)" if view.show_usd else "Currency", "id": ROW_LABEL_COL}]
+               + [{"name": label, "id": key} for key, label in summary_cols]
                + [{"name": _grid_column_name(c), "id": c} for c in value_cols])
     # The currency label stays in sight when the dates scroll sideways. Done with
     # `position: sticky` on that one column, NOT Dash's `fixed_columns`: that option
@@ -714,19 +740,24 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None) -> d
     return dash_table.DataTable(
         id=COMBINED_TABLE_ID,
         columns=columns,
-        data=frame.to_dict("records"),  # includes CURRENCY_COL (plain code) and kind, not displayed
-        fixed_rows={},
+        data=grid_records_with_summary(frame, summary),  # includes CURRENCY_COL (plain code) and kind, not displayed
         style_table=_TABLE_STYLE,
         style_cell={**_MONO, "minWidth": "125px", "width": "125px", "maxWidth": "170px"},
         style_cell_conditional=[
             {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "fontWeight": "600",
              "minWidth": "190px", "width": "190px", "maxWidth": "240px", **sticky},
+            # the rate / delta columns: the rate bold (the bridge between local and USD),
+            # USD delta the heaviest, tinted and ruled off from the cash columns beside it
+            {"if": {"column_id": "fx_rate"}, "fontWeight": "700", "color": "#1b2333",
+             "minWidth": "150px", "width": "150px", "maxWidth": "190px"},
+            {"if": {"column_id": "usd_delta"}, "fontWeight": "700", "backgroundColor": "#e8edf7",
+             "borderRight": "2px solid #1f2933"},
         ],
         style_header=_HEAD,
         style_header_conditional=[
             {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "position": "sticky", "left": 0, "zIndex": 3},
         ],
-        style_data_conditional=_sign_styles(value_cols) + [
+        style_data_conditional=_sign_styles(value_cols + [k for k, _ in summary_cols if k != "fx_rate"]) + [
             # USD equivalent (the old right-hand column, now the bottom row): ruled off
             # from the currency rows above it.
             {"if": {"filter_query": f"{{kind}} = '{USD_EQUIVALENT_COL}'"}, "fontWeight": "700",
@@ -1425,9 +1456,11 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     the downloads only; the headline card and the risk table are always the whole book
     at spot.
 
-    2026-09-21 (user decisions): the rate / delta block is its own table ABOVE the grid
-    (`summary_block_frame`), the grid beneath it is transposed (`combined_frame`: one row
-    per currency, dates across, a bottom USD equivalent row), and NDF currencies are
+    2026-09-21 (user decisions): the grid is transposed (`combined_frame`: one row per
+    currency, dates across, a bottom USD equivalent row) and the rate / delta figures
+    (`summary_block_frame`) are its first columns, FX rate / Local delta / USD delta on
+    each currency's own row (first built as a table of its own above the grid, which the
+    user found clunky and odd to scroll; `grid_records_with_summary`), and NDF currencies are
     dated on fixing dates and valued at the 1M NDF price: `rates` is then
     `engine.ladder.ndf.apply_ndf_1m_rates(conn, rates_from_marks(conn))`, in which an NDF
     currency with no 1M price has no entry at all, so it is blank here with the engine's
@@ -1447,19 +1480,19 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     scenarios = load_scenarios()
     if empty:
         main = html.P("No open FX trades for this as-of date.", className="section-kicker")
-        block = reasons = heat = details = None
+        reasons = heat = details = None
     else:
+        # One table (user, 2026-09-21, second note): the rate / delta block is folded into
+        # the grid as its first columns instead of standing above it as a table of its own.
         summary, ccys = summary_block_frame(result, grid, sort, all_fallback, rates=rates, view=view)
-        block = html.Div([_summary_block_datatable(summary, ccys)], style={"marginBottom": "12px"})
         reasons = rate_reasons_caption(result, ccys)
         frame, _ccys = combined_frame(result, grid, sort, forward_rates=forward_rates, view=view)
-        main = _grid_datatable(frame, view)
+        main = _grid_datatable(frame, view, summary=summary)
         heat = ladder_heatmap(result, ccys, forward_rates, view)
         details = local_vs_usd_details(grid)
     return html.Div(className="section", children=[
         headline_numbers(exposure_result, futures, fallback_ccys, forward_proxy_ccys),
         html.H4("Cash ladder: settled cash, spot, forwards, swaps and option deltas"),
-        block,
         reasons,
         usd_basis_caption(forward_rates, view),
         main,

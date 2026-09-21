@@ -15,6 +15,17 @@ import pytest
 from data.bloomberg import backfill, live
 from data.ingest import schema
 
+@pytest.fixture(autouse=True)
+def _close_1500_on_every_date(monkeypatch):
+    """The 15:00 New York close applies from backfill.CLOSE_1500_FROM (2026-09-21) and inside
+    Bloomberg's intraday history counted from today. These tests exercise it on earlier dates,
+    so the cutover is moved back and 'today' is pinned (a test that needs another today
+    passes it or patches live.book_today itself). The real cutover has its own tests."""
+    from data.bloomberg import live as _live
+    monkeypatch.setattr(backfill, "CLOSE_1500_FROM", date(2000, 1, 1))
+    monkeypatch.setattr(_live, "book_today", lambda: date(2026, 9, 21))
+
+
 
 def _book_today():
     """Today as the code under test sees it: the New York book date, not the PC's
@@ -422,7 +433,8 @@ def test_auto_backfill_says_that_past_days_not_stamped_at_the_close_are_requeste
         yesterday -= timedelta(days=1)
     p, conn = _db(tmp_path, yesterday.isoformat())
     day = yesterday.isoformat()
-    old_stamp = datetime(yesterday.year, yesterday.month, yesterday.day, 17, 0,
+    # yesterday's last live pull, not its close
+    old_stamp = datetime(yesterday.year, yesterday.month, yesterday.day, 11, 40, 12,
                          tzinfo=ZoneInfo("America/New_York")).isoformat(timespec="seconds")
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
         (day, "AUDUSD", day, "SPOT", 0.9001, "BBG_BFXFORWARD", old_stamp),
@@ -435,8 +447,8 @@ def test_auto_backfill_says_that_past_days_not_stamped_at_the_close_are_requeste
                                      log=log.append)
     assert [r["status"] for r in results] == ["DONE"]
     note = backfill._notes[key]
-    assert "1 past day(s) hold FX marks that are not the 15:00 New York close" in note
-    assert "re-requests the past days once" in note and any(note in line for line in log)
+    assert "1 past day(s) since" in note and "last pull, not its 15:00 New York close" in note
+    assert "keep the marks they have" in note and any(note in line for line in log)
     # both rows are now the close
     assert conn.execute("SELECT mark_type, value, snapped_at FROM marks_official WHERE as_of_date = ? ORDER BY 1",
                         (day,)).fetchall() == [("FWD_OUTRIGHT", 0.665, backfill.close_stamp(yesterday)),

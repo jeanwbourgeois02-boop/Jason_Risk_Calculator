@@ -252,10 +252,10 @@ def test_ladder_csv_is_the_displayed_grid_number_for_number_under_every_view():
 def test_exposure_section_renders_heatmap_caption_and_details_after_the_grid():
     section = exposure.exposure_section(_spec_records(), [], "2026-09-17", rates=RATES, forward_rates=FWD)
     ids = _all_ids(section)
-    for wanted in (exposure.SUMMARY_BLOCK_TABLE_ID, exposure.USD_BASIS_CAPTION_ID, exposure.COMBINED_TABLE_ID,
+    for wanted in (exposure.USD_BASIS_CAPTION_ID, exposure.COMBINED_TABLE_ID,
                    exposure.HEATMAP_ID, exposure.LOCAL_VS_USD_DETAILS_ID, exposure.RISK_TABLE_ID):
         assert wanted in ids
-    assert ids.index(exposure.SUMMARY_BLOCK_TABLE_ID) < ids.index(exposure.COMBINED_TABLE_ID)   # the block sits above the grid
+    assert exposure.SUMMARY_BLOCK_TABLE_ID not in ids   # one table: the rate / delta figures are the grid's first columns
     assert ids.index(exposure.COMBINED_TABLE_ID) < ids.index(exposure.HEATMAP_ID) < ids.index(exposure.RISK_TABLE_ID)
     # the headline card ignores the grid's view filters
     filtered = exposure.exposure_section(_spec_records(), [], "2026-09-17", rates=RATES,
@@ -293,12 +293,11 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     assert by_ccy["AUD"]["2026-09-28"] == "11,146,505"
     names = {c["id"]: c["name"] for c in grid.columns}
     assert names[SETTLED] == exposure.SETTLED_ROW_LABEL and names["2026-09-24"] == "24 Sep 2026"
-    block = _find_id(body, exposure.SUMMARY_BLOCK_TABLE_ID)
-    assert next(r for r in block.data if r["kind"] == "local_delta")["AUD"] == "13,808,543"  # exact sample amounts round up here
+    assert by_ccy["AUD"]["local_delta"] == "13,808,543"  # exact sample amounts round up here
     # the 51 USDCAD spot fills (all settled by 17 Sep) sit in the settled CAD balance
     assert by_ccy["CAD"][SETTLED] != exposure.EM_DASH
     # filtered out of the grid and of the block above it by the currency control
-    assert set(by_ccy) == {"AUD", "USD", "CAD", ""} and "JPY" not in [c["id"] for c in block.columns]
+    assert set(by_ccy) == {"AUD", "USD", "CAD", ""}
 
     # the Ladder CSV download follows the display: a row per currency, the same view
     import io
