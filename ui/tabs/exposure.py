@@ -29,9 +29,19 @@ is the explicit, optional display mapping; empty by default so HAHY7 shows as HA
 Display conventions (UI only, stored values untouched): whole units, thousands
 separators, negatives in parentheses and red, positives restrained green, exact zero
 as an em dash, dates as '08 Sep 2026' with ISO retained in the data.
+
+2026-09-21 (user decisions, CLAUDE.md "Ladder"): the grid is TRANSPOSED -- one row per
+currency, "Settled cash" then the dates across, a "Total (columns shown)" column and a
+bottom "USD equivalent" row (`combined_frame` / `combined_table`) -- and the rate /
+delta block that used to be its bottom rows is its own table ABOVE it, currencies
+across as before (`summary_block_frame` / `summary_block_table`). NDF currencies are
+dated on fixing dates and valued at Bloomberg's 1M NDF price, never spot
+(engine.ladder.ndf): the row label says so, the rate cell shows 'KWN+1M 1,394.5', and a
+missing 1M price is a blank with the engine's reason.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Dict, Iterable, List, Mapping, Optional
@@ -207,7 +217,11 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
     else:
         reasons = []
         if not rate_ok:
-            reasons.append("no rate: " + ", ".join(totals["missing"]))
+            # The engine's own sentence, the one the app header uses too: a currency with
+            # no official SPOT, and an NDF currency whose 1M NDF price is missing (never
+            # valued at spot), are named apart, each with its reason (2026-09-21).
+            from engine.ladder.ndf import missing_rate_reason
+            reasons.append(missing_rate_reason(totals["missing"]))
         if not fut_ok:
             reasons.append(futures.get("reason") or "futures delta unavailable")
         combined_card = _gross_net_card("Delta (FX + futures)", "Unavailable", note="; ".join(reasons), unavailable=True)
@@ -369,14 +383,23 @@ def ladder_table(result) -> dash_table.DataTable:
 
 
 # ------------------------------------------------------------------ 4b. combined workbook-style ladder
-COMBINED_TABLE_ID = "exposure-combined-table"
+COMBINED_TABLE_ID = "exposure-combined-table"            # the grid: currencies down, dates across
+SUMMARY_BLOCK_TABLE_ID = "exposure-summary-block-table"  # rate / delta block above it, currencies across
+RATE_REASONS_ID = "exposure-rate-reasons"
+NDF_CAPTION_ID = "exposure-ndf-fixing-caption"
 ROW_LABEL_COL = "row"
+CURRENCY_COL = "currency"      # the grid row's plain currency code ('' on the USD equivalent row)
+TOTAL_COL = "total"
 SETTLED_ROW_LABEL = "Settled cash"
-SUMMARY_ROWS = [("Spot (as quoted)", "fx_rate"), ("Local delta", "local_delta"), ("USD delta", "usd_delta")]
+TOTAL_COLUMN_LABEL = "Total (columns shown)"
+USD_EQUIVALENT_ROW_LABEL = "USD equivalent"
+FX_RATE_ROW_LABEL = "FX rate (as quoted)"
+SUMMARY_ROWS = [(FX_RATE_ROW_LABEL, "fx_rate"), ("Local delta", "local_delta"), ("USD delta", "usd_delta")]
+_GRID_META_COLUMNS = (ROW_LABEL_COL, CURRENCY_COL, "kind")
 
 
 def format_quoted_rate(value) -> str:
-    """A spot rate the way Bloomberg quotes it: '1,394.5' for USDKRW, '0.66' for AUDUSD,
+    """A rate the way Bloomberg quotes it: '1,394.5' for USDKRW, '0.66' for AUDUSD,
     '147.25' for USDJPY -- up to 5 decimals, trailing zeros dropped, thousands
     separated. Blank for NaN/None. Shown instead of the USD-per-local fraction
     (2026-09-18): '0.000714' for KRW cannot be checked by eye, '1,394.5' can, and a mark
@@ -396,17 +419,14 @@ def _ladder_row_order(index) -> list:
 
 
 # ------------------------------------------------------------------ 4a. view filters (user's cash-ladder spec, 2026-09-18)
-TOTAL_ROW_LABEL = "Total (rows shown)"
-
-
 @dataclass(frozen=True)
 class LadderView:
     """What the grid shows (the spec's "Cash ladder tab" controls). Filters change the
     GRID only: the headline card and the risk/scenario tables below always use the
     whole book. `currencies` None = every currency; `date_from`/`date_to` (ISO,
-    inclusive) apply to value-date rows -- the rolled "Settled cash" row is always the
-    full settled history, never a date slice; `settled_one_by_one` shows each settled
-    leg on its own value date instead of one rolled row; `show_usd` puts USD
+    inclusive) apply to the value-date columns -- the rolled "Settled cash" column is
+    always the full settled history, never a date slice; `settled_one_by_one` shows each
+    settled leg on its own value date instead of one rolled column; `show_usd` puts USD
     equivalents in the cells instead of local amounts (`ladder_usd_cells`)."""
     currencies: Optional[frozenset] = None
     date_from: Optional[str] = None
@@ -436,7 +456,8 @@ def grid_records(records: List[dict], view: Optional[LadderView] = None) -> List
 
 
 def _rows_in_view(index, view: LadderView) -> list:
-    """Row keys to show: the settled row always, value dates inside the range."""
+    """Keys of the engine ladder's date rows to show (they are the grid's COLUMNS since
+    2026-09-21): the settled key always, value dates inside the range."""
     from engine.ladder.exposure_adapter import SETTLED
     rows = []
     for day in _ladder_row_order(index):
@@ -450,184 +471,347 @@ def _rows_in_view(index, view: LadderView) -> list:
 
 
 def _shown_currencies(ladder: pd.DataFrame, ordered: List[str], rows: list) -> List[str]:
-    """`ordered` minus the currencies that are zero on every shown row (the spec hides
-    all-zero columns in the view). Nothing hidden when no row is shown."""
+    """`ordered` minus the currencies that are zero on every shown date (the spec hides
+    all-zero currencies in the view). Nothing hidden when no date is shown."""
     if not rows:
         return list(ordered)
     keep = [c for c in ordered if c in ladder.columns and bool((ladder.loc[rows, c] != 0).any())]
     return keep or list(ordered)
 # "Settlement type" (NDF / Deliverable) summary row and its NDF super-header removed
-# 2026-09-15 per the user's decision -- NDF currencies stay in the grid unmarked.
+# 2026-09-15 per the user's decision. Since 2026-09-21 an NDF currency's grid row is
+# labelled by engine.ladder.ndf.currency_label ('KRW (NDF, fixing dates)').
 
 
-def combined_frame(result, records: List[dict], sort: str = SORT_USD,
-                   fallback_ccys: Optional[set] = None,
-                   rates: Optional[Dict[str, dict]] = None,
-                   forward_rates: Optional[Mapping[tuple, dict]] = None,
-                   view: Optional[LadderView] = None) -> pd.DataFrame:
-    """Screenshot layout: settlement-date rows (signed local amounts) followed by the
-    per-currency summary rows, all in the same currency columns. Currency columns
-    ordered by |USD delta| desc (default) or A-Z. A `USD equivalent` column carries the
-    engine's per-date USD equivalent and, on the summary rows, the portfolio totals.
-    Every value comes from build_exposure / portfolio_totals / ladder_usd_equivalent.
+def grid_shape(result, records: List[dict], sort: str = SORT_USD, view: Optional[LadderView] = None):
+    """`(dates, currencies)` the view shows, shared by the summary block, the grid, the
+    heatmap and the Ladder CSV so they can never disagree: `dates` = the engine ladder's
+    keys in display order (settled first, then value dates ascending, inside From / To);
+    `currencies` ordered by |USD delta| descending (or A-Z), all-zero ones hidden."""
+    view = view or DEFAULT_VIEW
+    summary = summary_frame(result, records, sort=sort, scope=SCOPE_ALL)
+    shown = _rows_in_view(result.ladder.index, view)
+    return shown, _shown_currencies(result.ladder, list(summary["currency"]), shown)
 
-    2026-09-18 (user's cash-ladder spec): `forward_rates` (engine.ladder.usd_marks.
-    forward_usd_rates) marks each cell's USD equivalent at its OWN value date's outright
-    (settled row at spot) instead of spot everywhere, so the USD column's total is the
-    book's FX value at outrights, undiscounted. `view` (LadderView) selects the rows and
-    columns shown and, with `show_usd`, puts those USD equivalents in the cells. A
-    "Total (rows shown)" row (kind 'total') follows the value-date rows; the summary rows
-    beneath it are always the whole grid's deltas, never a date slice.
+
+def _grid_numbers(result, shown: list, ccys: List[str],
+                  forward_rates: Optional[Mapping[tuple, dict]], show_usd: bool):
+    """The grid as numbers, one computation for the screen and the CSV: `body` (index =
+    currencies, columns = the shown dates + TOTAL_COL; local amounts, or USD equivalents
+    when `show_usd`) and `usd_row` (same columns: each date's USD equivalent at its own
+    outright over every currency of the grid, NaN where any non-zero amount has no mark;
+    its TOTAL_COL is the sum of the dates shown, NaN if any of them is)."""
+    from engine.ladder.exposure import ladder_usd_cells
+    usd_cells = ladder_usd_cells(result, forward_rates)
+    cells = (usd_cells if show_usd else result.ladder).reindex(columns=ccys, fill_value=0.0)
+    body = cells.loc[shown].T if shown else pd.DataFrame(index=ccys)
+    usd_eq = usd_cells.sum(axis=1, skipna=False) if not usd_cells.empty else pd.Series(dtype=float)
+    usd_row = usd_eq.reindex(shown)
+    if shown:
+        body[TOTAL_COL] = cells.loc[shown].sum(axis=0, skipna=False)
+        usd_row[TOTAL_COL] = usd_row.sum(skipna=False)
+    return body, usd_row
+
+
+def _rate_status(result):
+    """`(status, message)` dicts per currency from the engine's status frame."""
+    if result.status.empty:
+        return {}, {}
+    return (dict(zip(result.status["currency"], result.status["status"])),
+            dict(zip(result.status["currency"], result.status["message"])))
+
+
+def summary_block_frame(result, records: List[dict], sort: str = SORT_USD,
+                        fallback_ccys: Optional[set] = None,
+                        rates: Optional[Dict[str, dict]] = None,
+                        view: Optional[LadderView] = None):
+    """The rate / delta block shown ABOVE the grid (user decision 2026-09-21: "the rows
+    at the bottom showing delta, fx rate etc - they stay as they are and get put at the
+    top of the table"): rows FX rate (as quoted), Local delta, USD delta, Rate source;
+    one column per currency in the grid's own row order (`grid_shape`), and TOTAL_COL
+    carrying the net USD delta total on the USD delta row, where it was before. Always
+    the whole grid's deltas, never a date slice. Returns `(frame, currencies)`; every
+    value comes from build_exposure / portfolio_totals.
+
+    The FX rate row shows the rate as Bloomberg quotes it under the name the engine
+    gives it: `rates[ccy]['label']` for an NDF currency priced at its 1M NDF mark
+    ('KWN+1M 1,394.5', engine.ladder.ndf.apply_ndf_1m_rates), else the pair ('USDJPY
+    147.25'), else the engine's USD-per-local rate. A currency with no rate -- an NDF
+    currency whose 1M price is missing has none, spot is never used for it -- is BLANK
+    there and on the USD delta row, and the 'Rate source' row carries the engine's own
+    reason ('MISSING: ...'; 'SUSPECT: ...' for a mark the plausibility guard refused)
+    instead of 'Bloomberg'. `rate_reasons_caption` repeats those reasons in full.
 
     `fallback_ccys` (user decision 2026-09-15, item D; the BNP_BVAL source it originally
     labelled was removed outright 2026-09-17, "no bnp fall back" -- the live app never
     populates this set any more, see `headline_numbers`'s docstring): currencies priced
-    from a non-official fallback rate, were one ever supplied. Adds a 'Rate source'
-    summary row so a fallback would be visible in place, never silent, if this is ever
-    wired to a source again.
-
-    2026-09-18: the settled-cash row (engine.ladder.exposure_adapter.SETTLED, "expired
-    tickets must settle not disappear") is rendered FIRST, labelled "Settled cash", kind
-    'settled', before the value-date rows. The spot row shows the rate as Bloomberg
-    quotes it (`rates[ccy]['rate']`, e.g. USDKRW 1,394.5) when `rates` is supplied,
-    falling back to the engine's USD-per-local rate; a SUSPECT_RATE currency (rate
-    plausibility guard, engine.ladder.exposure) shows its reason in the 'Rate source'
-    row instead of 'Bloomberg'."""
+    from a non-official fallback rate, were one ever supplied, named in 'Rate source'."""
+    from engine.ladder.exposure import portfolio_totals
     fallback_ccys = fallback_ccys or set()
     rates = rates or {}
-    view = view or DEFAULT_VIEW
-    from engine.ladder.exposure import ladder_usd_cells, portfolio_totals
-    from engine.ladder.exposure_adapter import SETTLED
     summary = summary_frame(result, records, sort=sort, scope=SCOPE_ALL)
-    shown = _rows_in_view(result.ladder.index, view)
-    ccys = _shown_currencies(result.ladder, list(summary["currency"]), shown)
+    _shown, ccys = grid_shape(result, records, sort, view)
     fx = result.summary.set_index("currency")["fx_rate"]
-    status_msg = (dict(zip(result.status["currency"], result.status["message"]))
-                  if not result.status.empty else {})
-    status_of = (dict(zip(result.status["currency"], result.status["status"]))
-                 if not result.status.empty else {})
-    rows = []
-    usd_cells = ladder_usd_cells(result, forward_rates)
-    cells = usd_cells if view.show_usd else result.ladder
-    usd_eq = usd_cells.sum(axis=1, skipna=False) if not usd_cells.empty else pd.Series(dtype=float)
-    for day in shown:
-        settled = day == SETTLED
-        row = {ROW_LABEL_COL: SETTLED_ROW_LABEL if settled else format_date(day),
-               "settlement_date": "" if settled else day, "kind": "settled" if settled else "date"}
-        for c in ccys:
-            row[c] = format_amount(cells.loc[day, c]) if c in cells.columns else EM_DASH
-        row[USD_EQUIVALENT_COL] = format_amount(usd_eq.get(day, float("nan")))
-        rows.append(row)
-    if shown:
-        total = {ROW_LABEL_COL: TOTAL_ROW_LABEL, "settlement_date": "", "kind": "total"}
-        for c in ccys:
-            total[c] = format_amount(cells.loc[shown, c].sum(skipna=False)) if c in cells.columns else EM_DASH
-        total[USD_EQUIVALENT_COL] = format_amount(usd_eq.loc[shown].sum(skipna=False))
-        rows.append(total)
+    status_of, status_msg = _rate_status(result)
     totals = portfolio_totals(result)
     by_ccy = summary.set_index("currency")
+    rows = []
     for label, key in SUMMARY_ROWS + [("Rate source", "rate_source")]:
-        row = {ROW_LABEL_COL: label, "settlement_date": "", "kind": key}
+        row = {ROW_LABEL_COL: label, "kind": key}
         for c in ccys:
+            entry = rates.get(c)
             if key == "fx_rate":
-                entry = rates.get(c)
                 if c == "USD":
                     row[c] = "1"
                 elif entry is not None and entry.get("rate") is not None:
-                    pair = entry.get("pair") or ""
-                    row[c] = (f"{pair} " if pair else "") + format_quoted_rate(entry["rate"])
+                    name = entry.get("label") or entry.get("pair") or ""
+                    row[c] = (f"{name} " if name else "") + format_quoted_rate(entry["rate"])
                 else:
                     v = fx.get(c, float("nan"))
                     row[c] = "" if pd.isna(v) else f"{v:.6g}"
             elif key == "rate_source":
                 if status_of.get(c) == "SUSPECT_RATE":
                     row[c] = "SUSPECT: " + status_msg.get(c, "")
+                elif status_of.get(c) == "MISSING_RATE":
+                    row[c] = "MISSING: " + status_msg.get(c, "")
+                elif c in fallback_ccys:
+                    row[c] = "BNP file"
                 else:
-                    row[c] = "BNP file" if c in fallback_ccys else "Bloomberg"
+                    row[c] = "Bloomberg 1M NDF" if (entry or {}).get("mark_type") == "NDF_1M" else "Bloomberg"
             else:
                 row[c] = format_amount(by_ccy.loc[c, key])
-        row[USD_EQUIVALENT_COL] = format_amount(totals["net_usd"]) if key == "usd_delta" else ""
+        row[TOTAL_COL] = format_amount(totals["net_usd"]) if key == "usd_delta" else ""
         rows.append(row)
-    return pd.DataFrame(rows), ccys
+    return pd.DataFrame(rows, columns=[ROW_LABEL_COL, "kind"] + ccys + [TOTAL_COL]), ccys
 
 
-def combined_table(result, records: List[dict], sort: str = SORT_USD,
-                   fallback_ccys: Optional[set] = None,
-                   rates: Optional[Dict[str, dict]] = None,
-                   forward_rates: Optional[Mapping[tuple, dict]] = None,
-                   view: Optional[LadderView] = None) -> dash_table.DataTable:
-    view = view or DEFAULT_VIEW
-    frame, ccys = combined_frame(result, records, sort, fallback_ccys, rates=rates,
-                                 forward_rates=forward_rates, view=view)
-    unit = " (USD eq.)" if view.show_usd else ""
-    columns = ([{"name": "Settlement date", "id": ROW_LABEL_COL}]
-               + [{"name": c + unit, "id": c} for c in ccys]
-               + [{"name": "USD equivalent", "id": USD_EQUIVALENT_COL}])
-    first_summary = int(frame["kind"].isin(["settled", "date", "total"]).sum()) if not frame.empty else 0
+def _summary_block_datatable(frame: pd.DataFrame, ccys: List[str]) -> dash_table.DataTable:
+    columns = ([{"name": "Per currency", "id": ROW_LABEL_COL}]
+               + [{"name": c, "id": c} for c in ccys]
+               + [{"name": "Total", "id": TOTAL_COL}])
     return dash_table.DataTable(
-        id=COMBINED_TABLE_ID,
+        id=SUMMARY_BLOCK_TABLE_ID,
         columns=columns,
         data=frame.to_dict("records"),
-        merge_duplicate_headers=True,
         fixed_rows={},
-        fixed_columns={},
         style_table=_TABLE_STYLE,
         style_cell={**_MONO, "minWidth": "125px", "width": "125px", "maxWidth": "170px"},
         style_cell_conditional=[
             {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "fontWeight": "600", "minWidth": "170px", "width": "170px"},
-            {"if": {"column_id": USD_EQUIVALENT_COL}, "fontWeight": "600", "borderLeft": "2px solid #d9dee3"},
+            {"if": {"column_id": TOTAL_COL}, "fontWeight": "600", "borderLeft": "2px solid #d9dee3"},
         ],
         style_header=_HEAD,
-        style_data_conditional=_sign_styles(ccys + [USD_EQUIVALENT_COL]) + [
-            # Visual hierarchy of the summary block (user decision 2026-09-15): date rows
-            # regular; FX rate bold (the bridge between local and USD); local delta
-            # medium; USD delta the single heaviest row with a navy tint (the answer the
-            # table exists to give); rate source small and muted -- it is provenance,
-            # not an error, so it is never red.
-            {"if": {"row_index": first_summary}, "borderTop": "2px solid #1f2933"},
-            {"if": {"filter_query": "{kind} != 'date'"}, "backgroundColor": "#f7f8fa", "fontWeight": "400"},
-            # Settled cash (2026-09-18): the balance the value-date rows add to -- first
-            # row, bold, tinted, ruled off from the dated flows beneath it.
-            {"if": {"filter_query": "{kind} = 'settled'"}, "fontWeight": "700", "backgroundColor": "#eef7ee",
-             "borderBottom": "2px solid #1f2933"},
-            # Total of the rows shown (user's cash-ladder spec, 2026-09-18): the view's
-            # own column sums, ruled off from the dated rows above it.
-            {"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700", "backgroundColor": "#f1f3f7",
-             "borderTop": "1px solid #c8d0e0"},
-            {"if": {"filter_query": "{kind} = 'rate_source' && {row} contains 'SUSPECT'"},
-             "color": "#b42318", "fontWeight": "600"},
+        style_data_conditional=_sign_styles(ccys + [TOTAL_COL]) + [
+            # Visual hierarchy of the block (user decision 2026-09-15, unchanged by the
+            # 2026-09-21 move above the grid): FX rate bold (the bridge between local and
+            # USD); local delta medium; USD delta the single heaviest row with a navy tint
+            # (the answer the block exists to give); rate source small and muted -- it is
+            # provenance, so it is grey, except a cell that says why a rate is missing or
+            # was refused, which is red.
             {"if": {"filter_query": "{kind} = 'fx_rate'"}, "color": "#1b2333", "fontWeight": "700"},
             {"if": {"filter_query": "{kind} = 'local_delta'"}, "fontWeight": "500"},
             {"if": {"filter_query": "{kind} = 'usd_delta'"}, "fontWeight": "700", "backgroundColor": "#e8edf7",
              "borderTop": "1px solid #c8d0e0", "borderBottom": "1px solid #c8d0e0"},
             {"if": {"filter_query": "{kind} = 'rate_source'"}, "color": "#6b7280", "fontWeight": "400", "fontSize": "11px"},
-            {"if": {"filter_query": "{kind} = 'exposure_pnl'"}, "backgroundColor": "#eef4fb"},
-            {"if": {"filter_query": "{kind} = 'settlement'"}, "color": "#3538cd", "fontWeight": "600", "fontSize": "11px"},
+        ] + [
+            {"if": {"column_id": c, "filter_query": f"{{kind}} = 'rate_source' && {{{c}}} contains '{word}'"},
+             "color": "#b42318", "fontWeight": "600"}
+            for c in ccys for word in ("SUSPECT", "MISSING")
         ],
     )
+
+
+def summary_block_table(result, records: List[dict], sort: str = SORT_USD,
+                        fallback_ccys: Optional[set] = None,
+                        rates: Optional[Dict[str, dict]] = None,
+                        view: Optional[LadderView] = None) -> dash_table.DataTable:
+    frame, ccys = summary_block_frame(result, records, sort, fallback_ccys, rates=rates, view=view)
+    return _summary_block_datatable(frame, ccys)
+
+
+def rate_reasons_caption(result, ccys: Optional[List[str]] = None):
+    """One line under the rate / delta block naming every shown currency whose rate is
+    missing or was refused, with the engine's own plain-language reason in full (a table
+    cell cuts a sentence short). An NDF currency with no 1M NDF price on file is named
+    here with the pull button that fetches it; it is never valued at spot (CLAUDE.md
+    hard rule 2). None when every shown currency has a rate."""
+    status_of, status_msg = _rate_status(result)
+    wanted = list(ccys) if ccys is not None else list(status_of)
+    parts = [f"{c}: {status_msg.get(c, '')}" for c in wanted
+             if status_of.get(c) in ("MISSING_RATE", "SUSPECT_RATE")]
+    if not parts:
+        return None
+    return html.P("Shown blank, never a substitute rate. " + " | ".join(parts) + ".",
+                  id=RATE_REASONS_ID, className="section-kicker")
+
+
+def combined_frame(result, records: List[dict], sort: str = SORT_USD,
+                   forward_rates: Optional[Mapping[tuple, dict]] = None,
+                   view: Optional[LadderView] = None):
+    """The grid (user decision 2026-09-21, "flip the other way, currency vertical, dates
+    horizontal"): one ROW per currency, ordered by |USD delta| descending (or A-Z);
+    COLUMNS = "Settled cash" first (engine.ladder.exposure_adapter.SETTLED, "expired
+    tickets must settle not disappear"), then the value dates ascending (column id = the
+    ISO date), then TOTAL_COL "Total (columns shown)"; and a bottom "USD equivalent" row
+    (kind 'usd_equivalent') with each date's USD equivalent and their total. Returns
+    `(frame, currencies)`; frame columns = ROW_LABEL_COL, CURRENCY_COL, 'kind', then the
+    value columns in display order. Every number comes from build_exposure /
+    ladder_usd_cells (`_grid_numbers`); nothing is computed here.
+
+    The row label is engine.ladder.ndf.currency_label ('KRW (NDF, fixing dates)' for an
+    NDF currency, whose records are dated on fixing dates); CURRENCY_COL keeps the plain
+    code, so nothing that filters or looks up by currency depends on the label.
+
+    `forward_rates` (engine.ladder.usd_marks.forward_usd_rates, spec 2026-09-18) marks
+    each cell's USD equivalent at its OWN value date's outright (settled cash at spot, an
+    NDF currency at its 1M NDF price on every date), so the USD equivalent row's total is
+    the book's FX value at outrights, undiscounted; a date where any non-zero amount has
+    no mark is blank, never a partial sum. `view` (LadderView) selects the currencies and
+    dates shown and, with `show_usd`, puts those USD equivalents in the cells."""
+    from engine.ladder.ndf import currency_label
+    view = view or DEFAULT_VIEW
+    shown, ccys = grid_shape(result, records, sort, view)
+    body, usd_row = _grid_numbers(result, shown, ccys, forward_rates, view.show_usd)
+    value_cols = list(body.columns)
+    rows = []
+    for c in ccys:
+        row = {ROW_LABEL_COL: currency_label(c), CURRENCY_COL: c, "kind": "currency"}
+        row.update({col: format_amount(body.at[c, col]) for col in value_cols})
+        rows.append(row)
+    if shown:
+        row = {ROW_LABEL_COL: USD_EQUIVALENT_ROW_LABEL, CURRENCY_COL: "", "kind": USD_EQUIVALENT_COL}
+        row.update({col: format_amount(usd_row[col]) for col in value_cols})
+        rows.append(row)
+    return pd.DataFrame(rows, columns=list(_GRID_META_COLUMNS) + value_cols), ccys
+
+
+def grid_value_columns(frame: pd.DataFrame) -> List[str]:
+    """The grid frame's value column ids in display order: the settled key, the ISO
+    dates, TOTAL_COL."""
+    return [c for c in frame.columns if c not in _GRID_META_COLUMNS]
+
+
+def _grid_column_name(col: str) -> str:
+    from engine.ladder.exposure_adapter import SETTLED
+    if col == SETTLED:
+        return SETTLED_ROW_LABEL
+    return TOTAL_COLUMN_LABEL if col == TOTAL_COL else format_date(col)
+
+
+def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None) -> dash_table.DataTable:
+    from engine.ladder.exposure_adapter import SETTLED
+    view = view or DEFAULT_VIEW
+    value_cols = grid_value_columns(frame)
+    columns = ([{"name": "Currency (cells in USD eq.)" if view.show_usd else "Currency", "id": ROW_LABEL_COL}]
+               + [{"name": _grid_column_name(c), "id": c} for c in value_cols])
+    # The currency label stays in sight when the dates scroll sideways. Done with
+    # `position: sticky` on that one column, NOT Dash's `fixed_columns`: that option
+    # splits the table into separate fixed and scrolling tables whose widths and row
+    # heights can drift apart, and it could not be checked in a browser for this change;
+    # a sticky cell that a browser ignores just scrolls like any other column. The cell
+    # needs its own opaque background or the dates show through it.
+    sticky = {"position": "sticky", "left": 0, "zIndex": 2, "backgroundColor": "#ffffff",
+              "boxShadow": "1px 0 0 #d9dee3"}
+    return dash_table.DataTable(
+        id=COMBINED_TABLE_ID,
+        columns=columns,
+        data=frame.to_dict("records"),  # includes CURRENCY_COL (plain code) and kind, not displayed
+        fixed_rows={},
+        style_table=_TABLE_STYLE,
+        style_cell={**_MONO, "minWidth": "125px", "width": "125px", "maxWidth": "170px"},
+        style_cell_conditional=[
+            {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "fontWeight": "600",
+             "minWidth": "190px", "width": "190px", "maxWidth": "240px", **sticky},
+        ],
+        style_header=_HEAD,
+        style_header_conditional=[
+            {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "position": "sticky", "left": 0, "zIndex": 3},
+        ],
+        style_data_conditional=_sign_styles(value_cols) + [
+            # USD equivalent (the old right-hand column, now the bottom row): ruled off
+            # from the currency rows above it.
+            {"if": {"filter_query": f"{{kind}} = '{USD_EQUIVALENT_COL}'"}, "fontWeight": "700",
+             "backgroundColor": "#f7f8fa", "borderTop": "2px solid #1f2933"},
+            # Settled cash (2026-09-18): the balance the value dates add to -- first
+            # column, bold, tinted, ruled off from the dated flows beside it.
+            {"if": {"column_id": SETTLED}, "fontWeight": "700", "backgroundColor": "#eef7ee",
+             "borderRight": "2px solid #1f2933"},
+            # Total of the columns shown (spec 2026-09-18): the view's own sums.
+            {"if": {"column_id": TOTAL_COL}, "fontWeight": "700", "backgroundColor": "#f1f3f7",
+             "borderLeft": "1px solid #c8d0e0"},
+        ],
+    )
+
+
+def combined_table(result, records: List[dict], sort: str = SORT_USD,
+                   forward_rates: Optional[Mapping[tuple, dict]] = None,
+                   view: Optional[LadderView] = None) -> dash_table.DataTable:
+    frame, _ccys = combined_frame(result, records, sort, forward_rates=forward_rates, view=view)
+    return _grid_datatable(frame, view)
+
+
+def ndf_fixing_caption(result, unresolved: Optional[list] = None):
+    """engine.ladder.ndf.FIXING_CAPTION, the one line under the grid that says NDF rows
+    are dated on fixing dates -- shown when the grid holds an NDF currency, or when an
+    NDF ticket that has already fixed is named below it. None otherwise."""
+    from engine.ladder.exposure_adapter import NDF_FIXED_REASON_PREFIX
+    from engine.ladder.ndf import FIXING_CAPTION, is_ndf_currency
+    in_grid = any(is_ndf_currency(c) for c in result.ladder.columns)
+    fixed = any(str(getattr(u, "reason", "")).startswith(NDF_FIXED_REASON_PREFIX) for u in (unresolved or []))
+    if not (in_grid or fixed):
+        return None
+    return html.P(FIXING_CAPTION, id=NDF_CAPTION_ID, className="section-kicker")
 
 
 # ------------------------------------------------------------------ 4c. settled tickets caption
 SETTLED_CAPTION_ID = "exposure-settled-caption"
 
 
+_VALUE_DATE_IN_REASON = re.compile(r"value date (\d{4}-\d{2}-\d{2})")
+
+
+def _named_tickets(items: list, with_value_date: bool = False) -> str:
+    """'USDKRW (n1), ...' for the first six tickets, then 'and N more'."""
+    names = []
+    for u in items[:6]:
+        hit = _VALUE_DATE_IN_REASON.search(str(getattr(u, "reason", ""))) if with_value_date else None
+        names.append(f"{u.symbol} ({u.trade_id}" + (f", value date {format_date(hit.group(1))}" if hit else "") + ")")
+    return ", ".join(names) + (f" and {len(items) - 6} more" if len(items) > 6 else "")
+
+
 def settled_unknown_caption(unresolved: list):
-    """One line under the ladder grid naming the settled non-deliverable tickets (NDF
-    forwards, futures, options) whose USD settlement is not in the Settled cash row yet
-    because the ledger has not realised them (engine.ladder.exposure_adapter.
-    settled_records_from_db lists them in `unresolved` with a reason starting
-    'settled'). Nothing is rendered when there are none. Never a number: a settlement
-    without a mark stays out of the row and is named here instead."""
+    """Under the ladder grid: the non-deliverable tickets (NDF forwards, futures,
+    options) that are off the grid while their USD settlement is not in Settled cash yet
+    (engine.ladder.exposure_adapter lists them in `unresolved` with a reason starting
+    'settled'). Two kinds of waiting, worded apart, one line each:
+      - an NDF that has FIXED and is waiting for its value date (reason starting
+        NDF_FIXED_REASON_PREFIX): nothing is missing and no Bloomberg pull changes it;
+        the ledger realises it the day after the value date;
+      - a ticket whose value date has passed and which the ledger could not realise:
+        it needs an official mark on or before that date, which a pull fetches.
+    Nothing is rendered when there are none. Never a number: a settlement the ledger has
+    not realised stays out of the column and is named here instead."""
+    from engine.ladder.exposure_adapter import NDF_FIXED_REASON_PREFIX
     items = [u for u in (unresolved or []) if str(getattr(u, "reason", "")).startswith("settled")]
     if not items:
         return None
-    ids = ", ".join(f"{u.symbol} ({u.trade_id})" for u in items[:6])
-    more = f" and {len(items) - 6} more" if len(items) > 6 else ""
-    return html.P(
-        f"{len(items)} settled non-deliverable ticket{'s' if len(items) != 1 else ''} not yet in Settled "
-        f"cash (USD settlement unknown until realised at an official mark on or before the value "
-        f"date -- run the Bloomberg pull or backfill): {ids}{more}.",
-        id=SETTLED_CAPTION_ID, className="section-kicker")
+    fixed = [u for u in items if str(u.reason).startswith(NDF_FIXED_REASON_PREFIX)]
+    unmarked = [u for u in items if not str(u.reason).startswith(NDF_FIXED_REASON_PREFIX)]
+    lines = []
+    if unmarked:
+        lines.append(html.P(
+            f"{len(unmarked)} settled non-deliverable ticket{'s' if len(unmarked) != 1 else ''} not yet in "
+            f"Settled cash (USD settlement unknown until realised at an official mark on or before the "
+            f"value date -- press \"Pull Bloomberg now\" to fetch it): {_named_tickets(unmarked)}.",
+            className="section-kicker"))
+    if fixed:
+        lines.append(html.P(
+            f"{len(fixed)} NDF ticket{'s have' if len(fixed) != 1 else ' has'} fixed and "
+            f"{'are' if len(fixed) != 1 else 'is'} waiting for the value date: off the grid since the "
+            f"fixing, and in Settled cash the day after the value date, when the USD settlement is "
+            f"realised (nothing is missing, no Bloomberg pull is needed): "
+            f"{_named_tickets(fixed, with_value_date=True)}.",
+            className="section-kicker"))
+    return html.Div(lines, id=SETTLED_CAPTION_ID)
 
 
 # ------------------------------------------------------------------ 4d. USD basis, heatmap, local vs USD, downloads (spec 2026-09-18)
@@ -645,18 +829,24 @@ def usd_basis_caption(forward_rates: Optional[Mapping[tuple, dict]], view: Optio
     marks: each value date at its own official outright (spot on or before the spot
     date, broken dates interpolated between Bloomberg's tenors, flat beyond the last,
     undiscounted), naming any currency with no forward curve on file, which is shown at
-    spot rather than hidden. Without: spot for every date."""
-    from engine.ladder.usd_marks import BASIS_NO_CURVE
+    spot rather than hidden, and the NDF currencies valued on BASIS_NDF_1M (Bloomberg's
+    1M NDF price on every date, settled cash included, never spot; user decision
+    2026-09-21). Without: spot for every date."""
+    from engine.ladder.usd_marks import BASIS_NDF_1M, BASIS_NO_CURVE
     view = view or DEFAULT_VIEW
     cells = "Cells are USD equivalents. " if view.show_usd else "Cells are local amounts. "
     if not forward_rates:
         return html.P(cells + "USD equivalent: at spot for every date (no forward marks on file for this day).",
                       id=USD_BASIS_CAPTION_ID, className="section-kicker")
     no_curve = sorted({ccy for (ccy, _day), e in forward_rates.items() if e.get("basis") == BASIS_NO_CURVE})
-    text = (cells + "USD equivalent: each value date at its own official forward outright (spot on or "
-            "before the spot date, broken dates interpolated between Bloomberg's tenors, flat beyond "
-            "the last tenor; undiscounted), settled cash at spot. The USD column's total is the book's "
+    ndf_1m = sorted({ccy for (ccy, _day), e in forward_rates.items() if e.get("basis") == BASIS_NDF_1M})
+    text = (cells + "USD equivalent (bottom row): each value date at its own official forward outright "
+            "(spot on or before the spot date, broken dates interpolated between Bloomberg's tenors, flat "
+            "beyond the last tenor; undiscounted), settled cash at spot. Its total is the book's "
             "FX value at outrights; the headline P&L converts at spot and is not this number.")
+    if ndf_1m:
+        text += (" NDF currencies are valued at Bloomberg's 1M NDF price on every date, settled cash "
+                 "included, never at spot: " + ", ".join(ndf_1m) + ".")
     if no_curve:
         text += " No forward curve on file for " + ", ".join(no_curve) + ": shown at spot."
     return html.P(text, id=USD_BASIS_CAPTION_ID, className="section-kicker")
@@ -753,30 +943,27 @@ def local_vs_usd_details(records: List[dict]):
 
 def ladder_export_frame(result, forward_rates: Optional[Mapping[tuple, dict]] = None,
                         view: Optional[LadderView] = None, ccys: Optional[List[str]] = None) -> pd.DataFrame:
-    """The displayed ladder as numbers (spec download `cash_ladder.csv`): one row per
-    shown row plus Total, one column per shown currency (local amounts, or USD
-    equivalents when `view.show_usd`) and `usd_equivalent`."""
-    from engine.ladder.exposure import ladder_usd_cells
+    """The displayed grid as numbers (spec download `cash_ladder.csv`), in the displayed
+    orientation (2026-09-21): one row per shown currency, labelled as on screen ('KRW
+    (NDF, fixing dates)'), then a 'USD equivalent' row; columns `currency`, 'Settled
+    cash', the ISO value dates, 'Total'. Local amounts, or USD equivalents when
+    `view.show_usd`. Same numbers as the screen (`_grid_numbers`): a date or a total with
+    an unmarked amount is empty in the file, never a partial sum."""
     from engine.ladder.exposure_adapter import SETTLED
+    from engine.ladder.ndf import currency_label
     view = view or DEFAULT_VIEW
     if result.ladder.empty:
-        return pd.DataFrame(columns=["settlement_date", USD_EQUIVALENT_COL])
+        return pd.DataFrame(columns=[CURRENCY_COL, "Total"])
     shown = _rows_in_view(result.ladder.index, view)
     ccys = [c for c in (ccys or list(result.ladder.columns)) if c in result.ladder.columns]
-    usd = ladder_usd_cells(result, forward_rates)
-    cells = usd if view.show_usd else result.ladder
-    rows = []
-    for day in shown:
-        row = {"settlement_date": SETTLED_ROW_LABEL if day == SETTLED else day}
-        row.update({c: float(cells.loc[day, c]) for c in ccys})
-        row[USD_EQUIVALENT_COL] = float(usd.loc[day, ccys].sum(skipna=False))
-        rows.append(row)
+    body, usd_row = _grid_numbers(result, shown, ccys, forward_rates, view.show_usd)
+    names = {SETTLED: SETTLED_ROW_LABEL, TOTAL_COL: "Total"}
+    rows = [{CURRENCY_COL: currency_label(c), **{names.get(col, col): float(body.at[c, col]) for col in body.columns}}
+            for c in ccys]
     if shown:
-        total = {"settlement_date": "Total"}
-        total.update({c: float(cells.loc[shown, c].sum(skipna=False)) for c in ccys})
-        total[USD_EQUIVALENT_COL] = float(usd.loc[shown, ccys].sum(skipna=False).sum())
-        rows.append(total)
-    return pd.DataFrame(rows, columns=["settlement_date"] + ccys + [USD_EQUIVALENT_COL])
+        rows.append({CURRENCY_COL: USD_EQUIVALENT_ROW_LABEL,
+                     **{names.get(col, col): float(usd_row[col]) for col in body.columns}})
+    return pd.DataFrame(rows, columns=[CURRENCY_COL] + [names.get(col, col) for col in body.columns])
 
 
 LEGS_EXPORT_COLUMNS = ["trade_id", "product_type", "currency_pair", "currency", "settlement_date", "settled_on",
@@ -814,14 +1001,17 @@ def legs_export_frame(records: List[dict], rates: Optional[Dict[str, dict]] = No
 
 # ------------------------------------------------------------------ 5. legend
 def legend() -> html.Dl:
+    from engine.ladder.ndf import NDF_1M_TICKERS, ticker_label
+    ndf_tickers = ", ".join(f"{ccy} {ticker_label(t)}" for ccy, t in sorted(NDF_1M_TICKERS.items()))
     items = [
         ("Local delta", "sum of signed local-currency amounts across all settlement dates."),
         ("USD delta", "local delta x USD-per-local rate. This is a delta table, not P&L "
                       "-- see the Blotter tab for LTD/Daily/MTD/YTD."),
         (NDF_BADGE, NDF_EXPLANATION),
-        ("Bloomberg rates", "latest official SPOT mark per currency, pulled from the Bloomberg terminal on this "
-                            "computer when you press \"Pull Bloomberg now\" (never by itself); blank when no mark exists. "
-                            "Nothing is substituted."),
+        ("Bloomberg rates", "latest official SPOT mark per currency; an NDF currency uses Bloomberg's 1M NDF "
+                            f"price instead, never spot ({ndf_tickers}). Pulled from the Bloomberg terminal on this "
+                            "computer when you press \"Pull Bloomberg now\" (never by itself); blank when no mark "
+                            "exists. Nothing is substituted."),
         (EM_DASH, "zero amount (display only)."),
     ]
     return html.Dl(id=LEGEND_ID, className="legend",
@@ -1231,9 +1421,17 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
 
     `forward_rates` / `view` (2026-09-18, user's cash-ladder spec): per-(currency, value
     date) USD marks from engine.ladder.usd_marks.forward_usd_rates, and the grid's
-    filters/toggles (LadderView). Both affect the grid, its heatmap, its total row and
+    filters/toggles (LadderView). Both affect the grid, its heatmap, its total column and
     the downloads only; the headline card and the risk table are always the whole book
-    at spot."""
+    at spot.
+
+    2026-09-21 (user decisions): the rate / delta block is its own table ABOVE the grid
+    (`summary_block_frame`), the grid beneath it is transposed (`combined_frame`: one row
+    per currency, dates across, a bottom USD equivalent row), and NDF currencies are
+    dated on fixing dates and valued at the 1M NDF price: `rates` is then
+    `engine.ladder.ndf.apply_ndf_1m_rates(conn, rates_from_marks(conn))`, in which an NDF
+    currency with no 1M price has no entry at all, so it is blank here with the engine's
+    reason (`rate_reasons_caption`), never at spot."""
     from engine.ladder.exposure import build_exposure
     from engine.pnl.stress import load_scenarios, futures_pct_by_scenario
     rates = rates or {}
@@ -1249,18 +1447,23 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     scenarios = load_scenarios()
     if empty:
         main = html.P("No open FX trades for this as-of date.", className="section-kicker")
-        heat = details = None
+        block = reasons = heat = details = None
     else:
-        main = combined_table(result, grid, sort, all_fallback, rates=rates, forward_rates=forward_rates, view=view)
-        _frame, ccys = combined_frame(result, grid, sort, all_fallback, rates=rates,
-                                      forward_rates=forward_rates, view=view)
+        summary, ccys = summary_block_frame(result, grid, sort, all_fallback, rates=rates, view=view)
+        block = html.Div([_summary_block_datatable(summary, ccys)], style={"marginBottom": "12px"})
+        reasons = rate_reasons_caption(result, ccys)
+        frame, _ccys = combined_frame(result, grid, sort, forward_rates=forward_rates, view=view)
+        main = _grid_datatable(frame, view)
         heat = ladder_heatmap(result, ccys, forward_rates, view)
         details = local_vs_usd_details(grid)
     return html.Div(className="section", children=[
         headline_numbers(exposure_result, futures, fallback_ccys, forward_proxy_ccys),
         html.H4("Cash ladder: settled cash, spot, forwards, swaps and option deltas"),
+        block,
+        reasons,
         usd_basis_caption(forward_rates, view),
         main,
+        ndf_fixing_caption(result, unresolved),
         settled_unknown_caption(unresolved),
         heat,
         details,

@@ -270,6 +270,9 @@ def test_backfill_stops_a_session_it_opened_itself(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "open_session", fake_open_session)
     monkeypatch.setattr(pm, "fetch_historical", fake_fetch_historical)
     monkeypatch.setattr(pm, "fetch_historical_series", fake_fetch_historical_series)
+    # 2026-09-21: FX closes (SPOT and the tenor series) default to the 15:00 New York
+    # intraday close; futures still default to the daily series above.
+    monkeypatch.setattr(pm, "fetch_intraday_close_series", fake_fetch_historical_series)
 
     # No fetch/fwd_fetch/fut_fetch/session_factory at all: the exact shape that makes
     # backfill() fall back to pm.open_session() itself.
@@ -406,3 +409,45 @@ def test_start_auto_backfill_run_that_raises_says_failed_in_its_reason(tmp_path,
     assert block["running"] is False and "failed" in block["reason"] and "terminal went away" in block["reason"]
     assert block["days"]["2026-09-18"] == {"status": "INCOMPLETE", "missing_count": 2,
                                            "missing": ["the backfill has not reached this day yet"]}
+
+
+# =========================================================================== 2026-09-21: the 15:00 New York close
+# A past day's FX row that is not stamped at the close (an earlier pull's last price, or a
+# 17:00 PX_LAST row from before the close moved) is not a close: the day is due again, the
+# run says so once, and the row is replaced.
+def test_auto_backfill_says_that_past_days_not_stamped_at_the_close_are_requested_again_once(tmp_path):
+    from zoneinfo import ZoneInfo
+    yesterday = _book_today() - timedelta(days=1)
+    while yesterday.weekday() >= 5:
+        yesterday -= timedelta(days=1)
+    p, conn = _db(tmp_path, yesterday.isoformat())
+    day = yesterday.isoformat()
+    old_stamp = datetime(yesterday.year, yesterday.month, yesterday.day, 17, 0,
+                         tzinfo=ZoneInfo("America/New_York")).isoformat(timespec="seconds")
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        (day, "AUDUSD", day, "SPOT", 0.9001, "BBG_BFXFORWARD", old_stamp),
+        (day, "AUDUSD", _settle_date(), "FWD_OUTRIGHT", 0.9002, "BBG_BFXFORWARD", old_stamp),
+    ])
+    conn.commit()
+    key = backfill._db_key(p)
+    log = []
+    results = backfill.auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch,
+                                     log=log.append)
+    assert [r["status"] for r in results] == ["DONE"]
+    note = backfill._notes[key]
+    assert "1 past day(s) hold FX marks that are not the 15:00 New York close" in note
+    assert "re-requests the past days once" in note and any(note in line for line in log)
+    # both rows are now the close
+    assert conn.execute("SELECT mark_type, value, snapped_at FROM marks_official WHERE as_of_date = ? ORDER BY 1",
+                        (day,)).fetchall() == [("FWD_OUTRIGHT", 0.665, backfill.close_stamp(yesterday)),
+                                               ("SPOT", 0.61, backfill.close_stamp(yesterday))]
+    # so a second run has nothing to ask for and nothing to say
+    assert backfill.auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch,
+                                  log=lambda *_: None) == []
+    assert backfill._notes[key] == ""
+
+    # the status file's "backfill" block carries the note and which scale field answered
+    t = backfill.start_auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch)
+    t.join(timeout=10)
+    block = live.read_status(p)["backfill"]
+    assert block["note"] == "" and "points_scale" in block

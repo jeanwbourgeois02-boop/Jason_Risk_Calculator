@@ -1,2 +1,3 @@
 - [Data quirks](data_quirks.md) — spot derivation rule (USD+quote lookup), real-file has no crosses, grep-test/docstring gotcha, xlsx_fx_replica retired for fx_blotter.py, pandas Series.where(None) dtype gotcha
 - [Blotter vs BNP reconcile](blotter-bnp-reconcile.md) — reconcile.py design, USD-leg netting reuse, chosen $1/0.5e-6 tolerance rationale
+- [Reference-date step-back](reference-date-step-back.md) — 2026-09-21 "use previous date until has value": a reference-close rule, never a mark carry-forward; ui files in a brief stay out of lane

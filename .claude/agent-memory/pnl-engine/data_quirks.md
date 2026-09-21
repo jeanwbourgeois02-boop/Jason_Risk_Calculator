@@ -100,6 +100,10 @@ metadata:
   `value_book`) so `ui.tabs.blotter_pricing.priced_value_book` (BNP_BVAL-fallback
   wrapper) can be swapped in without this module importing anything from `ui/`.
 
+- Line endings differ inside my own lane (checked 2026-09-21 with `file`): `tests/test_pnl.py`
+  is CRLF, every `engine/pnl/*.py` is LF. Append to the test file in binary mode with
+  `\n` -> `\r\n` and confirm zero bare LFs afterwards; new engine modules stay LF.
+
 - pandas gotcha: `Series.where(cond, None)` on a `float64` column silently coerces the
   replacement `None` back to `np.nan` (dtype-driven), so a check like `row.x is None`
   fails even though the cell is "missing" by value. To get a real Python `None` in a

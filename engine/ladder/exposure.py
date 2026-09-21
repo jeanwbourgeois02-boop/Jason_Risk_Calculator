@@ -48,7 +48,9 @@ from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
-REQUIRED_FIELDS = ("trade_id", "settlement_date", "book", "currency", "local_amount")
+from engine.ladder.ndf import missing_rate_message
+
+REQUIRED_FIELDS =("trade_id", "settlement_date", "book", "currency", "local_amount")
 RATE_FIELDS = ("rate", "inverted", "source", "timestamp", "stale")
 ROUNDING_TOLERANCE_USD = 1.0
 
@@ -305,7 +307,9 @@ def _suspect_reason(ccy: str, entry: Mapping[str, Any], fx: float, implied: floa
         diagnosis = "a 1,000x SCALE error"
     else:
         diagnosis = "neither a clean inversion nor a 1,000x scale error -- check the ticker, field and scale"
-    return (f"official SPOT {pair} {quoted:,.6g} is {factor:,.0f}x away from the book's own "
+    # An NDF currency's rate is its 1M NDF mark, not a SPOT (engine.ladder.ndf): name it so.
+    named = f"NDF 1M {entry.get('label') or pair}" if entry.get("mark_type") == "NDF_1M" else f"SPOT {pair}"
+    return (f"official {named} {quoted:,.6g} is {factor:,.0f}x away from the book's own "
             f"{ccy} fills (~{fill_quoted:,.6g}); USD delta not computed -- {diagnosis}")
 
 
@@ -354,7 +358,10 @@ def build_exposure(records, rates: Mapping[str, Mapping[str, Any]], *,
             # date-agnostic (records/rates only), so the caller (which does know
             # as_of_date) may append it, e.g. ui/tabs/cash_ladder.py::net_gross_usd's
             # "no official SPOT for {as_of_date}: {ccys}".
-            status, msg = "MISSING_RATE", f"no official SPOT for {ccy}; USD delta not computed"
+            # 2026-09-21: an NDF currency is valued at its 1M NDF price, never spot
+            # (engine.ladder.ndf.apply_ndf_1m_rates drops its entry when that mark is
+            # missing), so its reason names the 1M price and the pull button instead.
+            status, msg = "MISSING_RATE", f"{missing_rate_message(ccy)}; USD delta not computed"
         else:
             fx = usd_per_local(entry)
             source, timestamp = str(entry["source"]), str(entry["timestamp"])

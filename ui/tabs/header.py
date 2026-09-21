@@ -178,6 +178,12 @@ def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
         html.Div(title, className="header-figure-title"),
         html.Div(_fmt_usd(value), className=f"header-figure-value header-figure-value--{cls}"),
     ]
+    ref_note = entry.get("ref_note", "")
+    if ref_note:
+        # The period is measured from an earlier close than its own reference date
+        # (engine.pnl.reference): always visible, the skipped dates' reasons on hover.
+        children.append(html.Div(ref_note, className="header-figure-caption header-figure-caption--partial",
+                                  title=entry.get("ref_note_detail", "")))
     summary = entry.get("excluded_summary", "")
     if summary:
         children.append(html.Div(summary, className="header-figure-caption header-figure-caption--partial",
@@ -580,13 +586,25 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     }
     entries = {}
     backfill = backfill_status(conn)  # one read of the status file for every card's missing-close reason
+    # A reference close with no value steps back to the previous business day that has
+    # one (user decision 2026-09-21, engine.pnl.reference): the date the period is
+    # measured from moves and the card says so; no mark is copied for any trade.
+    from engine.pnl.reference import annotate, resolve_reference
+
+    def _book(iso: str):
+        return priced_value_book(conn, iso)[0]  # per-date cached
+
+    def _period(df_a, a_iso: str, ref_iso: str, key: str) -> dict:
+        title = _PERIOD_TITLES[key]
+        choice = resolve_reference(df_a, ref_iso, _book, holidays)
+        entry = _priced_diff(df_a, choice.frame, _root_reason(conn, a_iso), choice.ref_date_used,
+                             _reference_reason(conn, ref_iso, title, backfill))
+        return annotate(entry, choice,
+                        lambda s: _reference_reason(conn, s.date, title, backfill)(s.n_blocked, s.n_open_then))
+
     for key in ("daily", "d5", "mtd", "ytd"):
-        ref_iso = ref_dates[key]
-        df_ref = df_t1 if key == "daily" else priced_value_book(conn, ref_iso)[0]
-        entries[key] = _priced_diff(df_today, df_ref, _root_reason(conn, as_of), ref_iso,
-                                    _reference_reason(conn, ref_iso, _PERIOD_TITLES[key], backfill))
-    entries["previous_day"] = _priced_diff(df_t1, df_t2, _root_reason(conn, t1_iso), t2_iso,
-                                           _reference_reason(conn, t2_iso, _PERIOD_TITLES["previous_day"], backfill))
+        entries[key] = _period(df_today, as_of, ref_dates[key], key)
+    entries["previous_day"] = _period(df_t1, t1_iso, t2_iso, "previous_day")
 
     trading_rows = df_today[df_today["trade_date"] == as_of] if not df_today.empty else df_today
     entries["trading"] = _priced_single(

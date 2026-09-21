@@ -219,3 +219,43 @@ def test_check_unverified_assumptions_warning_when_db_path_missing():
     checks = tool.check_unverified_assumptions(None)
     assert checks[0]["status"] == "warning"
     assert "not yet exercised" in checks[0]["message"]
+
+
+# --------------------------------------------------------------------------- 2026-09-21: the backfill block
+# The diagnostics paste says which field gave the forward-points divisor (the Bloomberg PC
+# returned nothing for FWD_POINTS_SCALE) and that past days are re-requested at 15:00 NY.
+def _backfill_status(tmp_path, block):
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    (tmp_path / "risk.db.bloomberg_status.json").write_text(json.dumps(
+        {"time": "t", "connected": True, "requested": 1, "written": 1, "failed": 0, "items": [], "backfill": block}),
+        encoding="utf-8")
+    return db
+
+
+def test_check_backfill_report_names_the_scale_field_that_answered_and_the_1500_note(tmp_path):
+    tool = _load_tool()
+    db = _backfill_status(tmp_path, {
+        "points_scale": {"AUDUSD": {"field": "FWD_SCALE", "divisor": 10000.0, "raw": {"FWD_SCALE": 4}, "errors": {}},
+                         "USDJPY": {"field": "FWD_SCALE", "divisor": 100.0, "raw": {"FWD_SCALE": 2}, "errors": {}}},
+        "note": "3 past day(s) hold FX marks that are not the 15:00 New York close; they are asked of Bloomberg again once."})
+    rows = {c["name"]: c for c in tool.check_backfill_report(db)}
+    assert rows["Forward points divisor"]["status"] == "pass"
+    assert "FWD_SCALE answered for all 2 pair(s)" in rows["Forward points divisor"]["message"]
+    assert "AUDUSD: FWD_SCALE = 4, divisor 10000" in rows["Forward points divisor"]["message"]
+    assert rows["Past closes at 15:00 New York"]["status"] == "warning"
+    assert "3 past day(s)" in rows["Past closes at 15:00 New York"]["message"]
+
+
+def test_check_backfill_report_fails_naming_both_fields_when_neither_answered(tmp_path):
+    tool = _load_tool()
+    db = _backfill_status(tmp_path, {"points_scale": {
+        "EURSEK": {"field": "", "divisor": None, "raw": {}, "errors": {"FWD_POINTS_SCALE": "Field not valid"}},
+        "AUDUSD": {"field": "FWD_SCALE", "divisor": 10000.0, "raw": {"FWD_SCALE": 4}, "errors": {}}}})
+    rows = tool.check_backfill_report(db)
+    assert [c["status"] for c in rows] == ["fail"]
+    message = rows[0]["message"]
+    assert "1 of 2 pair(s)" in message and "EURSEK: FWD_POINTS_SCALE: Field not valid, FWD_SCALE: not returned" in message
+    # nothing to say: no row at all (no status file / a backfill that needed no divisor)
+    assert tool.check_backfill_report(_backfill_status(tmp_path, {"running": False})) == []
+    assert tool.check_backfill_report(tmp_path / "absent.db") == []

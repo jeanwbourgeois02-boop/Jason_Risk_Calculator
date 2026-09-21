@@ -1218,15 +1218,38 @@ def test_priced_diff_scoped_unavailable_when_blocked_trades_outnumber_anchored_o
     df_b = _frame([("T1", "FX_FWD", "", 4.0),
                    ("T2", "FX_FWD", "no FWD_OUTRIGHT mark for T2", float("nan")),
                    ("T3", "FUTURE", "no FUTURE_PX mark for T3", float("nan"))])
-    frames = {"2026-06-20": df_a, "2026-06-19": df_b}
+    # every earlier close is just as unpriced, so the step-back (2026-09-21) finds nothing
     monkeypatch.setattr(blotter_pricing, "priced_value_book",
-                         lambda conn, date: (frames[date], 0, len(frames[date])))
+                         lambda conn, date: (df_a, 0, len(df_a)) if date == "2026-06-20" else (df_b, 0, len(df_b)))
     entry = blotter_pricing._priced_diff_scoped(None, "2026-06-20", "2026-06-19", ["T1", "T2", "T3"],
                                                  "2026-06-19", "2026-06-19")
     assert entry["available"] is False
     assert entry["reason"].startswith("needs the 2026-06-19 close: 2 of 3 trades open that day have no official mark there")
     assert "1 forward: no FWD_OUTRIGHT" in entry["reason"] and "1 future: no FUTURE_PX" in entry["reason"]
     assert "backfill" in entry["reason"]
+    assert "No earlier close within 10 business days has one either" in entry["reason"]
+    assert entry["ref_note"] == "" and entry["ref_date"] == "2026-06-19"
+
+
+def test_priced_diff_scoped_steps_back_to_the_previous_close_that_has_value(monkeypatch):
+    """User decision 2026-09-21 ("use previous date until has value"): the 2026-06-19 close
+    is unusable, the 2026-06-18 close is priced, so the strip's Daily is measured from
+    2026-06-18 and says so; `ref_date` keeps its meaning."""
+    df_a = _frame([("T1", "FX_FWD", "", 10.0), ("T2", "FX_FWD", "", 20.0), ("T3", "FUTURE", "", 5.0)])
+    df_bad = _frame([("T1", "FX_FWD", "", 4.0),
+                     ("T2", "FX_FWD", "no FWD_OUTRIGHT mark for T2", float("nan")),
+                     ("T3", "FUTURE", "no FUTURE_PX mark for T3", float("nan"))])
+    df_good = _frame([("T1", "FX_FWD", "", 3.0), ("T2", "FX_FWD", "", 8.0), ("T3", "FUTURE", "", 1.0)])
+    frames = {"2026-06-20": df_a, "2026-06-19": df_bad, "2026-06-18": df_good}
+    monkeypatch.setattr(blotter_pricing, "priced_value_book",
+                         lambda conn, date: (frames[date], 0, len(frames[date])))  # KeyError = valued too far back
+    entry = blotter_pricing._priced_diff_scoped(None, "2026-06-20", "2026-06-19", ["T1", "T2", "T3"],
+                                                 "2026-06-20", "2026-06-19")
+    assert entry["available"] is True
+    assert entry["value"] == pytest.approx((10 - 3) + (20 - 8) + (5 - 1))
+    assert entry["ref_date"] == "2026-06-20" and entry["ref_date_used"] == "2026-06-18"
+    assert entry["ref_note"] == "from the 2026-06-18 close: 2026-06-19 has no usable close"
+    assert "needs the 2026-06-19 close: 2 of 3" in entry["ref_note_detail"]
 
 
 def test_nothing_priced_reason_summarises_instead_of_dumping_ids():
@@ -1774,16 +1797,22 @@ def test_options_strip_is_the_full_row_with_no_caption_once_every_close_has_opti
 
 
 def test_options_strip_keeps_a_card_that_is_na_for_any_other_reason(tmp_path):
-    """Yesterday's PREMIUM is on file but is not a number: Daily is "n/a" because of a data
-    error, not because the app did not run -- it stays on screen with its reason."""
+    """Yesterday's PREMIUM is on file but is not a number: LTD-1 is "n/a" because of a data
+    error, not because the app did not run -- it stays on screen with its reason. Daily
+    (2026-09-21, "use previous date until has value") is measured from the close before
+    and says so on the card."""
     from engine.pnl.ledger import period_reference_dates
     _path, conn = _options_book(tmp_path, premium_on_earlier_closes=True)
     try:
         t1 = period_reference_dates(_AS_OF)["daily"]
         conn.execute("UPDATE marks SET value = '24-Jul' WHERE mark_type = 'PREMIUM' AND as_of_date = ?", (t1,))
         conn.commit()
-        cards = _strip_cards(blotter.scope_layout("options", conn, _AS_OF), "options")
-        assert cards["Daily P&L"][0] == "n/a" and cards["LTD-1 P&L"][0] == "n/a"
+        layout = blotter.scope_layout("options", conn, _AS_OF)
+        cards = _strip_cards(layout, "options")
+        assert cards["LTD-1 P&L"][0] == "n/a"
+        assert _is_figure(cards["Daily P&L"][0])
+        t2 = period_reference_dates(_AS_OF)["previous_day"]
+        assert f"from the {t2} close: {t1} has no usable close" in _all_text(layout)
         assert _is_figure(cards["5d"][0]) and _is_figure(cards["LTD-2 P&L"][0])
     finally:
         conn.close()

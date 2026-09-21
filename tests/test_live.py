@@ -1524,3 +1524,70 @@ def test_rates_step_reports_bloomberg_and_pricing_seconds_apart(tmp_path):
     out = live._rates_step(conn, _date(2026, 8, 17), "localhost", 8194, rates_source=RatesFileSource(fixture))
     assert set(out["seconds"]) == {"bloomberg", "pricing"}
     assert all(isinstance(v, float) and v >= 0 for v in out["seconds"].values())
+
+
+# --------------------------------------------------------------------------- NDF 1-month price (2026-09-21)
+# User: "NDFs - always show 1m forward date price, not spot ... based off the monthly not
+# the spot". On "Pull Bloomberg now" each needed 1M NDF ticker is asked for as a spot is,
+# and written on the currency's USD pair dated today under mark_type NDF_1M, as quoted.
+def _ndf_live_db(tmp_path):
+    p = tmp_path / "ndf.db"
+    conn = schema.connect(p)
+    conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)", [
+        ("USDKRW", "FX", "USD", "KRW", 1, 1, "USDKRW Curncy", "9999-12-31"),
+        ("USDIDR", "FX", "USD", "IDR", 1, 1, "USDIDR Curncy", "9999-12-31"),
+    ])
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        ("k1", "XLSX", "USDKRW", "FX_FWD", "k1", "2026-08-10", 1e6, 1390.0, "acc", "cp", "", "t", "d", ""),
+        ("d1", "XLSX", "USDIDR", "FX_FWD", "d1", "2026-08-10", 1e6, 16400.0, "acc", "cp", "", "t", "d", ""),
+    ])
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("k1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", "2026-09-21", 1390.0, 0),       # settles on the pull date
+        ("k1", 2, "FX_NEAR", "KRW", -1390e6, "2026-08-10", "2026-09-21", 1390.0, 0),
+        ("d1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", "2026-09-21", 16400.0, 0),
+        ("d1", 2, "FX_NEAR", "IDR", -16400e6, "2026-08-10", "2026-09-21", 16400.0, 0),
+    ])
+    conn.commit()
+    return p, conn
+
+
+def test_pull_once_writes_the_ndf_1m_price_on_the_usd_pair_and_counts_it_like_any_requested_mark(tmp_path, monkeypatch):
+    from datetime import date as _date
+    from data.bloomberg import pull_marks as pm
+    p, conn = _ndf_live_db(tmp_path)
+    asked = []
+
+    def fake_fetch_reference(session, service, tickers, fields, overrides=None, diag=None, tag=None):
+        asked.append((sorted(tickers), list(fields)))
+        rec = diag.new_request("ReferenceDataRequest", tickers, fields, overrides, tag)
+        rec["raw_response"] = [{"security": "IHN+1M Curncy", "fieldData": {}, "fieldExceptions": [],
+                                "securityError": {"message": "Unknown/Invalid Security [nid:123]"}}]
+        return {"USDKRW Curncy": {"PX_LAST": 1389.2}, "KWN+1M Curncy": {"PX_LAST": 1394.5},
+                "USDIDR Curncy": {"PX_LAST": 16500.0}}
+
+    monkeypatch.setattr(pm, "fetch_reference", fake_fetch_reference)
+    today = _date(2026, 9, 21)
+    status = live.pull_once(p, session_factory=lambda: (object(), object()), today=today)
+
+    # ONE request, the same field, for the spots and the 1M NDF tickers alike -- and nothing else
+    assert asked == [(["IHN+1M Curncy", "KWN+1M Curncy", "USDIDR Curncy", "USDKRW Curncy"], ["PX_LAST"])]
+    # counted like the other requested marks: 2 SPOT + 2 FWD_OUTRIGHT + 2 NDF_1M
+    assert status["connected"] is True and status["requested"] == 6
+    by = {(i["instrument_id"], i["mark_type"]): i for i in status["items"]}
+    krw = by[("USDKRW", "NDF_1M")]
+    assert krw["status"] == "OK" and krw["value"] == 1394.5 and krw["source"] == "BBG_BFXFORWARD"
+    assert krw["settle_date"] == "2026-09-21"
+    # a ticker Bloomberg refuses fails with Bloomberg's own reason, and nothing is put in its place
+    idr = by[("USDIDR", "NDF_1M")]
+    assert idr["status"] == "FAILED" and "IHN+1M Curncy" in idr["detail"] and "Unknown/Invalid Security" in idr["detail"]
+    assert status["failed"] == 1 and status["written"] == 5
+
+    rows = {(r[0], r[1]): r[2:] for r in conn.execute(
+        "SELECT instrument_id, mark_type, as_of_date, settle_date, value, source, snapped_at FROM marks_official")}
+    assert rows[("USDKRW", "NDF_1M")][:4] == ("2026-09-21", "2026-09-21", 1394.5, "BBG_BFXFORWARD")   # as quoted
+    assert rows[("USDKRW", "NDF_1M")][4] == rows[("USDKRW", "SPOT")][4]                  # stamped like the spot
+    assert ("USDIDR", "NDF_1M") not in rows
+    # the 1M price never stands in for the pair's spot: the leg settling today is marked at SPOT
+    assert rows[("USDKRW", "SPOT")][2] == 1389.2 and rows[("USDKRW", "FWD_OUTRIGHT")][2] == 1389.2
+    # and the ladder's spot rates are still the spots
+    assert live.rates_from_marks(conn)["KRW"]["rate"] == 1389.2

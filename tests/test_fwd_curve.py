@@ -109,4 +109,5 @@ def test_historical_curve_gives_a_reason_and_no_points_rather_than_a_guess():
     assert "no forward tenor prices" in historical_curve(day, {}, 1.17, pair="EURUSD")["reason"]
     assert "no SPOT close" in historical_curve(day, points_rows, None, 10000.0, "EURUSD")["reason"]
     no_scale = historical_curve(day, points_rows, 1.17, None, "EURUSD")
-    assert no_scale["points"] == [] and "FWD_POINTS_SCALE" in no_scale["reason"]
+    # 2026-09-21: the divisor is FWD_POINTS_SCALE, else 10 ** FWD_SCALE; with neither, the reason names both
+    assert no_scale["points"] == [] and "neither FWD_POINTS_SCALE nor FWD_SCALE" in no_scale["reason"]

@@ -6,7 +6,8 @@ etc, and every FX leg's LTD needs the FWD_OUTRIGHT for its OWN settle_date (neve
 shared date), every future's needs FUTURE_PX -- SPOT alone is not enough to price a single
 past day. For every business day in [start, end] this module writes, as official marks
 dated that day:
-  - SPOT: PX_LAST close of every FX pair with a leg open at any point in [start, end] --
+  - SPOT: the 15:00 New York close (2026-09-21, see "The close" below) of every FX pair
+    with a leg open at any point in [start, end] --
     crosses included, plus every USD-conversion pair a cross's legs need for delta/P&L
     (`traded_pairs`, mirrors `live._cross_usd_legs`; USD-pairs-only until 2026-09-18,
     which meant a cross like EURSEK never got a SPOT close backfilled at all and could
@@ -25,9 +26,12 @@ dated that day:
     FWD_CURVE field through HistoricalDataRequest the way it does live via
     ReferenceDataRequest, so the historical curve is assembled from the standard-tenor
     tickers instead (pull_marks.STANDARD_TENORS), one HistoricalDataRequest per stretch
-    of days being worked, not one per day. Those tickers' PX_LAST is forward points
+    of days being worked, not one per day. Those tickers quote forward points
     by the live tenor path's account (converted as it converts them: spot + points /
-    FWD_POINTS_SCALE), and HistoricalDataRequest sends no SETTLE_DT, so the tenor dates are
+    the pair's points divisor, pull_marks.fetch_points_scales: FWD_POINTS_SCALE as is,
+    else 10 ** FWD_SCALE -- the Bloomberg PC returned nothing for the first, 2026-09-21;
+    a converted forward more than 20 % away from that day's spot is a wrong divisor and
+    is not written), and history sends no SETTLE_DT, so the tenor dates are
     computed by market convention; a forward built on either is written BBG_INTERP, and
     BBG_BFXFORWARD is kept for Bloomberg's own outright at Bloomberg's own date
     (2026-09-21: before, no past forward was ever written, so no past day could complete).
@@ -42,12 +46,27 @@ of the pairs needed that day; and per pair, the tenors up to the one that clears
 furthest open leg (`_tenors_needed`), since a forward is read between the two tenors
 either side of its date.
 
+The close (user decision 2026-09-21: "the EOD is 3pm New York time"; "for previous or any
+closes in FX, we need to use NY 3pm"). A past FX close -- SPOT, and the tenor series the
+forwards are built from -- is Bloomberg's value at 15:00 America/New_York that day, read
+from intraday bars (pull_marks.fetch_intraday_close_series: two IntradayBarRequests per
+ticker per stretch, BID and ASK, the hourly bar ending 15:00 New York, mid of the two
+closes). The daily PX_LAST is the 17:00 close and is NOT used, not even when the 15:00
+bar is missing or the day is older than Bloomberg's intraday history (about 140 business
+days): that mark stays missing, with the reason. Futures keep PX_SETTLE. Rows are stamped
+`close_stamp` (15:00 New York on their date). UNVERIFIED on a terminal.
+
 A day counts as complete (skipped unless overwrite=True) only once ALL of the above are
 official for it -- `data.bloomberg.inventory.close_completeness`, the same "needed" set
 `data.bloomberg.live.build_requests` uses for the live feed, so the three can never drift
-apart. A row already official for its (day, instrument, settle_date, mark_type) is never
-rewritten, even when overwrite is False and the day is otherwise incomplete (e.g. a new
-trade added a settle_date this day never needed before).
+apart. A row already official AT THE CLOSE for its (day, instrument, settle_date,
+mark_type) is never rewritten, even when overwrite is False and the day is otherwise
+incomplete (e.g. a new trade added a settle_date this day never needed before). A past
+day's official FX row that is NOT stamped at the close -- that day's last live pull (say
+11:40), or a 17:00 PX_LAST row written before 2026-09-21 -- is not a close: the day counts
+as incomplete and the row is replaced once the 15:00 value is in hand (`is_close_row`,
+`_write_closes`). It is never deleted without its replacement, today's rows are never
+touched (intraday = live), and realised_pnl is never touched: frozen rows stay frozen.
 
 Only if `engine.pnl.ledger.realise_settled` is importable, trades settled before a day are
 frozen once that day's marks are on file: every day's SPOT and FUTURE_PX (all a freeze
@@ -58,14 +77,16 @@ pnl-engine task, which recomputes `ltd(conn, date)` straight from `marks` instea
 Limits, stated plainly:
   - Trades are only those currently in the database (the blotter is the app's only trade
     source; a re-upload replaces the whole book -- see CLAUDE.md's schema notes).
-  - Closes are Bloomberg's daily PX_LAST/PX_SETTLE, not the live-feed's intraday mid. Both
-    are stored under the same official sources; the snapped_at timestamp tells them apart
-    (backfill rows are stamped 17:00 America/New_York on their date).
+  - FX closes are Bloomberg's 15:00 New York intraday mid, futures the daily PX_SETTLE;
+    the live pull's rows are stored under the same official sources, and the snapped_at
+    timestamp tells them apart (backfill rows are stamped 15:00 America/New_York on
+    their date, a live row carries the time it was pulled).
   - NDFs still realise at spot on the value date, not the fixing.
   - Calendar is Monday-Friday only; holidays simply return no close and are reported.
   - UNVERIFIED on a terminal (docs/open-questions.md items 28 and 30): that the tenor
-    tickers' PX_LAST is points (fwd_curve.tenor_unit checks its magnitude against spot
-    rather than assume), and the FWD_POINTS_SCALE field name. Computed tenor dates use
+    tickers quote points (fwd_curve.tenor_unit checks the magnitude against spot
+    rather than assume), the points-divisor field (FWD_POINTS_SCALE / FWD_SCALE), and
+    the IntradayBarRequest the 15:00 close is read from. Computed tenor dates use
     config/holidays.txt only -- there are no per-currency calendars -- so around a local
     holiday a pillar can sit a day away from Bloomberg's.
   - If `engine.pnl.ledger.realise_settled` cannot be imported (e.g. mid-rewrite by the
@@ -86,8 +107,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from data.bloomberg import fwd_curve as fc
-from data.bloomberg.live import SRC_INTERP, SRC_SPOT_FWD, write_marks
-from data.bloomberg.pull_marks import SRC_FUTURE
+from data.bloomberg.live import SRC_INTERP, SRC_SPOT_FWD
+from data.bloomberg.pull_marks import CLOSE_HOUR_NY, CLOSE_REASON, INTRADAY_HISTORY_BUSINESS_DAYS, SRC_FUTURE
 from engine.pnl.aggregate import _last_business_day_of_prev_year
 from engine.pnl.calendar import load_holidays
 
@@ -172,8 +193,43 @@ def spot_only_pair_names(conn: sqlite3.Connection, start: date, end: date) -> Li
 
 
 def close_stamp(day: date) -> str:
-    """17:00 New York on `day`, with that date's UTC offset resolved (CLAUDE.md mark time)."""
-    return datetime(day.year, day.month, day.day, 17, 0, tzinfo=NY).isoformat(timespec="seconds")
+    """The official close on `day` -- 15:00 New York (pull_marks.CLOSE_HOUR_NY, user
+    decision 2026-09-21; it was 17:00) -- with that date's UTC offset resolved."""
+    return datetime(day.year, day.month, day.day, CLOSE_HOUR_NY, 0, tzinfo=NY).isoformat(timespec="seconds")
+
+
+# The mark types the 15:00 New York close rule covers (the user said FX closes; a future
+# keeps its PX_SETTLE whatever its stamp).
+FX_CLOSE_MARK_TYPES = ("SPOT", "FWD_OUTRIGHT")
+
+
+def is_close_row(mark_type: str, as_of_date: str, snapped_at: str) -> bool:
+    """Is this official row of a PAST day a close? An FX row (SPOT / FWD_OUTRIGHT) is one
+    only when it is stamped at the close of its own as_of_date; anything else is that
+    day's last live pull or an old 17:00 PX_LAST row. Other mark types always are."""
+    if mark_type not in FX_CLOSE_MARK_TYPES:
+        return True
+    try:
+        return datetime.fromisoformat(snapped_at) == datetime.fromisoformat(close_stamp(date.fromisoformat(as_of_date)))
+    except (TypeError, ValueError):
+        return False
+
+
+def intraday_floor(today: date) -> date:
+    """The oldest day whose 15:00 close can still be asked for: INTRADAY_HISTORY_BUSINESS_DAYS
+    weekdays before `today` (Bloomberg keeps intraday prices for about that long)."""
+    d, left = today, INTRADAY_HISTORY_BUSINESS_DAYS
+    while left > 0:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            left -= 1
+    return d
+
+
+def _too_old_reason(day: str) -> str:
+    return (f"{day} is more than {INTRADAY_HISTORY_BUSINESS_DAYS} business days ago: Bloomberg keeps intraday "
+            f"prices for about that long, so that day's {CLOSE_HOUR_NY}:00 New York close can no longer be "
+            "retrieved (the daily close is 17:00 New York and is never used in its place)")
 
 
 def rates_on_date(conn: sqlite3.Connection, day: str) -> Dict[str, dict]:
@@ -257,24 +313,25 @@ def _tenor_tickers(pair: str, tenors: List[str]) -> Dict[str, str]:
 
 
 def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
-                                fwd_fetch: Optional[Callable] = None, holidays=frozenset()
-                                ) -> Dict[str, Dict[str, Dict[str, dict]]]:
+                                fwd_fetch: Optional[Callable] = None, holidays=frozenset(),
+                                fields: Optional[List[str]] = None) -> Dict[str, Dict[str, Dict[str, dict]]]:
     """{instrument_id: {date_iso: {tenor label: {'PX_LAST': ..., 'SETTLE_DT': ... if sent}}}}
-    -- one HistoricalDataRequest per stretch of `runs`, for the pairs with a leg still to
+    -- one call of `fwd_fetch` per stretch of `runs`, for the pairs with a leg still to
     settle inside it (the Bloomberg library's FWD_OUTRIGHT rows; a leg settling on or
     before a day is marked at that day's spot and needs no tenor) and the tenors those
     legs need (`_tenors_needed`). The raw rows, not a curve: a day's curve needs that
     day's SPOT close (fwd_curve.historical_curve), which backfill() only has inside its
     day loop. `fwd_fetch(session, service, tickers, fields, start, end) -> {ticker:
-    {date_iso: {field: value}}}` defaults to pull_marks.fetch_historical_series.
+    {date_iso: {field: value}}}` defaults to pull_marks.fetch_intraday_close_series, the
+    15:00 New York close (2026-09-21), which is asked for `fields` = ['PX_LAST'] alone.
 
-    SETTLE_DT is still asked for (2026-09-21) so Bloomberg's own tenor dates are used
-    wherever it does send them, but it is a static reference field that
-    HistoricalDataRequest does not serve; if a request comes back with no PX_LAST at all
+    An injected `fwd_fetch` is still asked for SETTLE_DT too, so Bloomberg's own tenor
+    dates are used wherever a source does send them (a daily HistoricalDataRequest does
+    not: it is a static reference field); if a request comes back with no PX_LAST at all
     it is sent once more for PX_LAST alone, and the later stretches ask for PX_LAST alone."""
     from data.bloomberg import library
     out: Dict[str, Dict[str, Dict[str, dict]]] = {}
-    fields = ["PX_LAST", "SETTLE_DT"]
+    fields = list(fields) if fields else ["PX_LAST", "SETTLE_DT"]
     for run_start, run_end in runs:
         legs_by_pair: Dict[str, List[dict]] = {}
         for r in library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat()):
@@ -286,8 +343,8 @@ def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, runs
                      for pair, legs in sorted(legs_by_pair.items())}
         tickers = sorted({t for by_tenor in tenor_map.values() for t in by_tenor.values()})
         if fwd_fetch is None:
-            from data.bloomberg.pull_marks import fetch_historical_series
-            fwd_fetch = fetch_historical_series
+            from data.bloomberg.pull_marks import fetch_intraday_close_series
+            fwd_fetch, fields = fetch_intraday_close_series, ["PX_LAST"]
         series = fwd_fetch(session, service, tickers, fields, run_start, run_end) or {}
         if len(fields) > 1 and not any("PX_LAST" in row for per_day in series.values() for row in per_day.values()):
             fields = ["PX_LAST"]
@@ -300,33 +357,23 @@ def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, runs
     return out
 
 
-def _fetch_points_scales(session, service, pairs: List[str], scale_fetch: Optional[Callable] = None) -> Dict[str, float]:
-    """{pair: FWD_POINTS_SCALE} -- the divisor that turns a pair's forward points into an
-    outright, read exactly as the live tenor path reads it (pull_marks.fetch_tenor_points:
-    field FWD_POINTS_SCALE on '<pair> Curncy'), one ReferenceDataRequest for every pair.
-    Only asked for when a tenor series turns out to be points. `scale_fetch(session,
-    service, tickers, fields) -> {ticker: {field: value}}` defaults to
-    pull_marks.fetch_reference when there is a real session; with neither there is no
-    scale, and the forward is reported missing with that reason. A pair Bloomberg sends no
-    scale for is simply absent -- never a hard-coded pip size."""
-    if scale_fetch is None:
-        if session is None:
-            return {}
-        from data.bloomberg.pull_marks import fetch_reference
-        scale_fetch = fetch_reference
+def _fetch_points_scales(session, service, pairs: List[str], scale_fetch: Optional[Callable] = None) -> Dict[str, dict]:
+    """{pair: scale report} -- the divisor that turns a pair's forward points into an
+    outright, from the one helper the live tenor path uses too
+    (pull_marks.fetch_points_scales: FWD_POINTS_SCALE as is, else 10 ** FWD_SCALE, both
+    fields in ONE ReferenceDataRequest for every pair). A report is {'scale': divisor or
+    None, 'field': the field that answered, 'raw', 'errors'}. Only asked for when a tenor
+    series turns out to be points. `scale_fetch(session, service, tickers, fields) ->
+    {ticker: {field: value}}` replaces the real request; with neither it nor a session
+    there is no scale, and the forward is reported missing with that reason. A pair
+    Bloomberg sends no scale for has none -- never a hard-coded pip size."""
+    from data.bloomberg.pull_marks import fetch_points_scales
+    if scale_fetch is None and session is None:
+        return {}
     try:
-        data = scale_fetch(session, service, [f"{pair} Curncy" for pair in pairs], ["FWD_POINTS_SCALE"]) or {}
+        return fetch_points_scales(session, service, pairs, fetch=scale_fetch)
     except Exception:  # noqa: BLE001 -- a failed lookup is "no scale", reported per forward, not a dead run
         return {}
-    out: Dict[str, float] = {}
-    for pair in pairs:
-        try:
-            scale = float((data.get(f"{pair} Curncy") or {}).get("FWD_POINTS_SCALE"))
-        except (TypeError, ValueError):
-            continue
-        if scale > 0:
-            out[pair] = scale
-    return out
 
 
 def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
@@ -356,29 +403,76 @@ def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: L
     return out
 
 
-def _drop_already_official(conn: sqlite3.Connection, rows: List[dict]) -> List[dict]:
+def _drop_already_official(conn: sqlite3.Connection, rows: List[dict], today: Optional[str] = None) -> List[dict]:
     """Filter out any row whose (as_of_date, instrument_id, settle_date, mark_type)
-    already has an OFFICIAL mark on file -- a backfill run must never overwrite an
-    existing official mark, even with an identical re-computed value, and even on a day
-    that is otherwise incomplete (e.g. a trade added later needs a settle_date this day
-    never needed before, but this day's SPOT was already official)."""
+    already has an OFFICIAL mark on file that is a close -- a backfill run must never
+    overwrite an existing close, even with an identical re-computed value, and even on a
+    day that is otherwise incomplete (e.g. a trade added later needs a settle_date this
+    day never needed before, but this day's SPOT was already official).
+
+    2026-09-21: a PAST day's official FX row that is not stamped at the 15:00 New York
+    close (`is_close_row`) is that day's last live pull or an old 17:00 PX_LAST row, not a
+    close, so the new row is kept and `_write_closes` replaces the old one. A row dated
+    `today` (default: the New York book date) or later is live and is never replaced."""
+    if today is None:
+        from data.bloomberg.live import book_today
+        today = book_today().isoformat()
     out = []
     for r in rows:
         hit = conn.execute(
-            "SELECT 1 FROM marks_official WHERE as_of_date=? AND instrument_id=? AND settle_date=? AND mark_type=?",
+            "SELECT snapped_at FROM marks_official WHERE as_of_date=? AND instrument_id=? AND settle_date=? AND mark_type=?",
             (r["as_of_date"], r["instrument_id"], r["settle_date"], r["mark_type"])).fetchone()
-        if hit is None:
+        if hit is None or (r["as_of_date"] < today and not is_close_row(r["mark_type"], r["as_of_date"], hit[0])):
             out.append(r)
     return out
 
 
+def _write_closes(conn: sqlite3.Connection, rows: List[dict], overwrite: bool = False, today: Optional[str] = None) -> int:
+    """Write the backfill's rows: those whose key already holds a close are left out
+    (`_drop_already_official`) unless `overwrite`; for an FX row that is written, the
+    same key's rows that are NOT the close (BBG_BFXFORWARD or BBG_INTERP, stamped at any
+    other time) are deleted in the same transaction. Without that a stale direct-quote
+    row would go on beating the new BBG_INTERP close in marks_official (a direct quote
+    wins over an interpolated row for the same key). Nothing is deleted unless its
+    replacement is being written, and only `marks` is touched, never realised_pnl."""
+    if today is None:
+        from data.bloomberg.live import book_today
+        today = book_today().isoformat()
+    keep = rows if overwrite else _drop_already_official(conn, rows, today)
+    known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
+    written = 0
+    with conn:                                   # the delete and its replacement commit together
+        for r in keep:
+            if r["instrument_id"] not in known:  # as live.write_marks: only known instruments
+                continue
+            key = (r["as_of_date"], r["instrument_id"], r["settle_date"], r["mark_type"])
+            if r["mark_type"] in FX_CLOSE_MARK_TYPES and r["as_of_date"] < today:
+                stale = conn.execute(
+                    "SELECT source, snapped_at FROM marks WHERE as_of_date=? AND instrument_id=? AND settle_date=? "
+                    "AND mark_type=? AND source IN (?, ?)", key + (SRC_SPOT_FWD, SRC_INTERP)).fetchall()
+                for source, snapped in stale:
+                    if not is_close_row(r["mark_type"], r["as_of_date"], snapped):
+                        conn.execute("DELETE FROM marks WHERE as_of_date=? AND instrument_id=? AND settle_date=? "
+                                     "AND mark_type=? AND source=?", key + (source,))
+            conn.execute("INSERT OR REPLACE INTO marks VALUES (?,?,?,?,?,?,?)",
+                         key + (float(r["value"]), r["source"], r["snapped_at"]))
+            written += 1
+    return written
+
+
 def _spot_fetch_from_series(series_fetch: Callable, conn: sqlite3.Connection, runs: List[Tuple[date, date]]) -> Callable:
     """A per-day SPOT fetch (the `fetch` signature backfill() takes) answered from one
-    HistoricalDataRequest per stretch of `runs`, for the pairs whose SPOT is needed inside
-    that stretch (the Bloomberg library's SPOT rows), sent the first time one of its days
-    is asked for. Same field, same single-date points as a per-day request."""
+    `series_fetch` call per stretch of `runs` (pull_marks.fetch_intraday_close_series: the
+    15:00 New York close), for the pairs whose SPOT is needed inside that stretch (the
+    Bloomberg library's SPOT rows), sent the first time one of its days is asked for.
+    `fetch.reason(ticker, day)` is the source's own reason a day has no close ('' when it
+    gave none), so a missing close is reported in Bloomberg's words."""
     from data.bloomberg import library
     cache: Dict[Tuple[date, date], dict] = {}
+
+    def _row(ticker, day) -> dict:
+        run = next(((a, b) for a, b in runs if a <= day <= b), None)
+        return ((cache.get(run) or {}).get(ticker) or {}).get(day.isoformat()) or {}
 
     def fetch(session, service, wanted, field, day):
         run = next(((a, b) for a, b in runs if a <= day <= b), None)
@@ -389,13 +483,20 @@ def _spot_fetch_from_series(series_fetch: Callable, conn: sqlite3.Connection, ru
             tickers = sorted({r["bbg_ticker"] for r in library.needed_in_range(conn, run[0].isoformat(), run[1].isoformat())
                               if r["kind"] == "SPOT" and r["key"] in known})
             cache[run] = (series_fetch(session, service, tickers, [field], run[0], run[1]) or {}) if tickers else {}
-        return {t: ((cache[run].get(t) or {}).get(day.isoformat()) or {}).get(field) for t in wanted}
+        return {t: _row(t, day).get(field) for t in wanted}
+
+    fetch.reason = lambda ticker, day: str(_row(ticker, day).get(CLOSE_REASON) or "")
     return fetch
 
 
 def _skipped(day: str) -> dict:
     return {"day": day, "status": "SKIPPED", "closes": 0, "fwd_outrights": 0, "future_px": 0,
-            "missing_pairs": [], "missing_marks": [], "realised": 0, "unrealisable": []}
+            "missing_pairs": [], "missing_pair_reasons": {}, "missing_marks": [], "realised": 0, "unrealisable": []}
+
+
+# db -> {pair: scale report} of the last backfill() that needed a points divisor; published
+# under the status file's "backfill" block so a paste says which field answered.
+_scale_reports: Dict[str, dict] = {}
 
 
 def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
@@ -403,16 +504,25 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
              session_factory: Optional[Callable] = None, host: str = "localhost", port: int = 8194,
              overwrite: bool = False, log: Callable[[str], None] = print,
              scale_fetch: Optional[Callable] = None, order: Optional[List[date]] = None,
-             on_day: Optional[Callable[[dict], None]] = None) -> List[dict]:
+             on_day: Optional[Callable[[dict], None]] = None, today: Optional[date] = None) -> List[dict]:
     """Run the backfill. Returns one dict per business day of [start, end], in date order:
     {day, status: DONE|SKIPPED|NO_CLOSES|ERROR, closes, fwd_outrights, future_px,
-    missing_pairs, missing_marks, realised, unrealisable}. `realised`/`unrealisable` are
+    missing_pairs, missing_pair_reasons, missing_marks, realised, unrealisable}.
+    `realised`/`unrealisable` are
     None on a day where realise_settled could not be imported (marks are still written).
     `missing_marks` lists {instrument_id, settle_date, mark_type, reason} for anything
     this day needed (per inventory.close_completeness) but could not resolve -- a settle
     date beyond the last tenor, no forward tenors / future history for that pair / day,
-    etc; never silently dropped. ERROR (2026-09-21) is a day whose own processing raised:
+    etc; never silently dropped. `missing_pair_reasons` is {pair: why it has no SPOT
+    close}, in the source's own words where it gave any. ERROR (2026-09-21) is a day
+    whose own processing raised:
     it carries `error`, and the other days still run -- one bad day used to end the run.
+
+    The close (2026-09-21): FX closes are the 15:00 New York value from intraday bars, see
+    the module docstring. A day older than Bloomberg's intraday history
+    (`intraday_floor(today)`, `today` defaulting to the New York book date) is not asked
+    for at all when the default fetchers are in use: its FX marks are reported missing
+    with that reason (never the daily PX_LAST instead), and its futures still run.
 
     ONE session for the whole call, and one request per kind per stretch of days being
     worked (`_runs`), however many days it covers.
@@ -431,16 +541,23 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     once, after the last day. `on_day(result)` is called as each day finishes.
 
     `fetch(session, service, tickers, field, day) -> {ticker: value|None}` (SPOT, per
-    day) defaults to one pull_marks.fetch_historical_series request for the span
-    (`_spot_fetch_from_series`). `fwd_fetch`/`fut_fetch` (both `(session, service,
-    tickers, fields, start, end) -> {ticker: {date_iso: {field: value}}}`, ONE call for
-    the whole date range, 2026-09-18) default to pull_marks.fetch_historical_series.
+    day; the field is still called PX_LAST) defaults to pull_marks.fetch_intraday_close_series
+    per stretch (`_spot_fetch_from_series`). `fwd_fetch`/`fut_fetch` (both `(session,
+    service, tickers, fields, start, end) -> {ticker: {date_iso: {field: value}}}`, ONE
+    call per stretch, 2026-09-18) default to pull_marks.fetch_intraday_close_series (the
+    tenor series) and pull_marks.fetch_historical_series (futures' PX_SETTLE).
     `scale_fetch`: see `_fetch_points_scales`. `session_factory` defaults to
     pull_marks.open_session. All are injectable so the loop is testable without blpapi."""
     from data.ingest.schema import connect
     from data.bloomberg.inventory import close_completeness, _needed_marks
-    from data.bloomberg.live import _ensure_fx_instruments
+    from data.bloomberg.live import _ensure_fx_instruments, book_today
+    from data.bloomberg import pull_marks as pm
     realise_settled = _import_realise_settled()
+    today = today or book_today()
+    today_iso = today.isoformat()
+    # The intraday window only binds the real intraday requests; injected fetchers
+    # (tests, another source) answer for whatever day they are asked.
+    floor = intraday_floor(today) if (fetch is None or fwd_fetch is None) else None
     conn = connect(Path(db_path))
     try:
         # A conversion pair or an option's pair may never have been traded outright, and
@@ -462,7 +579,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         by_ticker = {t: p for p, t in pairs}
         ticker_of = {p: t for p, t in pairs}
         days = business_days(start, end)
-        completeness = close_completeness(conn, start.isoformat(), end.isoformat())
+        completeness = close_completeness(conn, start.isoformat(), end.isoformat(), today=today_iso)
         complete_by_day = dict(zip(completeness["as_of_date"], completeness["complete"]))
         todo = [d for d in days if overwrite or not complete_by_day.get(d.isoformat(), False)]
         if order is not None:
@@ -478,14 +595,21 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             return [_skipped(d.isoformat()) for d in days]
         span_end = max(work)
         runs = _runs(work)
+        # FX closes are asked for only inside Bloomberg's intraday window; futures' daily
+        # PX_SETTLE has no such limit.
+        too_old = {d for d in work if floor is not None and d < floor}
+        fx_runs = _runs([d for d in work if d not in too_old])
+        if too_old:
+            log(f"  {len(too_old)} day(s) before {floor} are older than Bloomberg's intraday history: their "
+                f"{CLOSE_HOUR_NY}:00 New York FX closes are not asked for and stay missing.")
         session = service = None
         own_session = False  # did THIS call open the session itself (pm.open_session)?
+        fwd_fields = None    # an injected fwd_fetch is asked for PX_LAST + SETTLE_DT, as before
         if fetch is None or fwd_fetch is None or fut_fetch is None:
-            from data.bloomberg import pull_marks as pm
             if fetch is None:
-                fetch = _spot_fetch_from_series(pm.fetch_historical_series, conn, runs)
+                fetch = _spot_fetch_from_series(pm.fetch_intraday_close_series, conn, fx_runs)
             if fwd_fetch is None:
-                fwd_fetch = pm.fetch_historical_series
+                fwd_fetch, fwd_fields = pm.fetch_intraday_close_series, ["PX_LAST"]
             if fut_fetch is None:
                 fut_fetch = pm.fetch_historical_series
             if session_factory is None:
@@ -501,14 +625,17 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             # being worked (`_runs`), never one per day per ticker, and never a day, a
             # pair or a tenor the book did not need (2026-09-21).
             holidays = load_holidays()
-            tenor_rows_by_pair = _fetch_fwd_outright_history(conn, session, service, runs, fwd_fetch, holidays)
+            tenor_rows_by_pair = _fetch_fwd_outright_history(conn, session, service, fx_runs, fwd_fetch, holidays,
+                                                             fields=fwd_fields)
             future_px_by_instrument = _fetch_future_px_history(conn, session, service, runs, fut_fetch)
-            scales: Dict[str, Dict[str, float]] = {}
+            scales: Dict[str, Dict[str, dict]] = {}
 
-            def scale_for(pair: str) -> Optional[float]:
+            def scale_report_for(pair: str) -> dict:
                 if "by_pair" not in scales:      # asked for once, and only if some series is points
                     scales["by_pair"] = _fetch_points_scales(session, service, sorted(tenor_rows_by_pair), scale_fetch)
-                return scales["by_pair"].get(pair)
+                return scales["by_pair"].get(pair) or {}
+
+            spot_reason = getattr(fetch, "reason", None)     # the source's own words, when it has any
 
             # ---- pass 1: SPOT + FUTURE_PX of every day, written together (see docstring)
             prepared: Dict[date, dict] = {}
@@ -525,26 +652,32 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                 # of the whole range, on every day.
                 tickers = [ticker_of[i["instrument_id"]] for i in needed
                            if i["mark_type"] == "SPOT" and i["instrument_id"] in ticker_of]
-                closes = (fetch(session, service, tickers, "PX_LAST", d) or {}) if tickers else {}
-                spot_rows, spot_by_pair, missing_pairs = [], {}, []
+                old = d in too_old       # beyond the intraday window: no FX close is asked for
+                closes = (fetch(session, service, tickers, "PX_LAST", d) or {}) if tickers and not old else {}
+                spot_rows, spot_by_pair, missing_pairs, pair_reasons = [], {}, [], {}
                 for ticker in tickers:
                     value = closes.get(ticker)
                     try:
                         fvalue = float(value)
                     except (TypeError, ValueError):
-                        missing_pairs.append(by_ticker[ticker])
+                        pair = by_ticker[ticker]
+                        missing_pairs.append(pair)
+                        pair_reasons[pair] = _too_old_reason(day) if old else (
+                            (spot_reason(ticker, d) if spot_reason else "")
+                            or f"Bloomberg returned no {CLOSE_HOUR_NY}:00 New York close for {pair} on {day}")
                         continue
                     spot_by_pair[by_ticker[ticker]] = fvalue
                     spot_rows.append({"as_of_date": day, "instrument_id": by_ticker[ticker], "settle_date": day,
                                       "mark_type": "SPOT", "value": fvalue, "source": SRC_SPOT_FWD,
                                       "snapped_at": close_stamp(d)})
-                if tickers and not spot_rows:
+                if tickers and not spot_rows and not old:
                     # Only a genuine holiday/no-data day (there WERE FX tickers to ask
                     # for, and none came back) short-circuits here. A futures-only book
                     # (2026-09-18 fix) has `tickers == []` -- trivially "no spot rows"
                     # every day -- and must still reach the FUTURE_PX logic, not be
-                    # treated as a holiday.
-                    prepared[d] = {"no_closes": True, "missing_pairs": missing_pairs}
+                    # treated as a holiday. Nor is a day beyond the intraday window: its
+                    # futures still have a PX_SETTLE to write.
+                    prepared[d] = {"no_closes": True, "missing_pairs": missing_pairs, "pair_reasons": pair_reasons}
                     continue
                 fut_rows, missing_marks = [], []
                 for item in needed:
@@ -560,10 +693,12 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                      "mark_type": "FUTURE_PX", "value": settle_value, "source": SRC_FUTURE,
                                      "snapped_at": close_stamp(d)})
                 prepared[d] = {"no_closes": False, "needed": needed, "spot_rows": spot_rows, "spot_by_pair": spot_by_pair,
-                               "missing_pairs": missing_pairs, "fut_rows": fut_rows, "missing_marks": missing_marks}
+                               "missing_pairs": missing_pairs, "pair_reasons": pair_reasons, "fut_rows": fut_rows,
+                               "missing_marks": missing_marks, "too_old": old}
                 first_rows += spot_rows + fut_rows
-            # A row already official is never rewritten (_drop_already_official).
-            write_marks(conn, first_rows if overwrite else _drop_already_official(conn, first_rows))
+            # A row already official AT THE CLOSE is never rewritten; a past day's FX row
+            # that is not the close is replaced (_write_closes).
+            _write_closes(conn, first_rows, overwrite, today_iso)
 
             # ---- pass 2: FWD_OUTRIGHT day by day, in the caller's order
             results: Dict[date, dict] = {}
@@ -572,8 +707,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                 if p["no_closes"]:
                     log(f"  {day}  NO_CLOSES  (holiday or Bloomberg returned nothing; nothing written)")
                     results[d] = {"day": day, "status": "NO_CLOSES", "closes": 0, "fwd_outrights": 0, "future_px": 0,
-                                  "missing_pairs": p["missing_pairs"], "missing_marks": [], "realised": None,
-                                  "unrealisable": []}
+                                  "missing_pairs": p["missing_pairs"], "missing_pair_reasons": p["pair_reasons"],
+                                  "missing_marks": [], "realised": None, "unrealisable": []}
                     if on_day:
                         on_day(results[d])
                     continue
@@ -592,6 +727,9 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         instrument_id, settle = item["instrument_id"], item["settle_date"]
                         target = date.fromisoformat(settle)
                         spot = spot_by_pair.get(instrument_id)
+                        if p["too_old"]:
+                            missing_marks.append({**item, "reason": _too_old_reason(day)})
+                            continue
                         if target <= d:
                             # A leg settling on or before this day is marked at this
                             # day's own SPOT (same rule the live feed uses).
@@ -607,7 +745,16 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                             rows = tenor_rows_by_pair.get(instrument_id, {}).get(day, {})
                             curve = fc.historical_curve(d, rows, spot, None, instrument_id, holidays)
                             if curve["unit"] == fc.UNIT_POINTS and not curve["points"]:
-                                curve = fc.historical_curve(d, rows, spot, scale_for(instrument_id), instrument_id, holidays)
+                                report = scale_report_for(instrument_id)
+                                curve = fc.historical_curve(d, rows, spot, report.get("scale"), instrument_id, holidays)
+                                if not curve["points"] and not report.get("scale"):
+                                    # neither field answered: say so, with what each one sent
+                                    curve["reason"] = pm.describe_scale(instrument_id, report)
+                            elif not curve["unit"] and spot is not None:
+                                # no tenor value at all that day: the source's own reason, if it gave one
+                                said = next((row[CLOSE_REASON] for row in rows.values()
+                                             if isinstance(row, dict) and row.get(CLOSE_REASON)), "")
+                                curve["reason"] = said or curve["reason"]
                             curves[instrument_id] = curve
                         curve = curves[instrument_id]
                         points = curve["points"]
@@ -618,6 +765,11 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         if value is None:
                             missing_marks.append({**item, "reason": f"{instrument_id} {settle}: outside the forward "
                                                   f"tenors {points[0][0]}..{points[-1][0]}, not extrapolated"})
+                            continue
+                        if curve["unit"] == fc.UNIT_POINTS and not pm.points_outright_is_plausible(value, spot):
+                            # a wrong points divisor must never reach `marks`
+                            missing_marks.append({**item, "reason": pm.implausible_outright_reason(
+                                instrument_id, settle, value, spot, scale_report_for(instrument_id))})
                             continue
                         # BBG_BFXFORWARD only for Bloomberg's own outright at Bloomberg's
                         # own tenor date. Interpolated, converted from points, or sitting
@@ -631,7 +783,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         fwd_rows.append({"as_of_date": day, "instrument_id": instrument_id, "settle_date": settle,
                                          "mark_type": "FWD_OUTRIGHT", "value": float(value),
                                          "source": SRC_SPOT_FWD if direct else SRC_INTERP, "snapped_at": close_stamp(d)})
-                    write_marks(conn, fwd_rows if overwrite else _drop_already_official(conn, fwd_rows))
+                    _write_closes(conn, fwd_rows, overwrite, today_iso)
                     realised, unrealisable, flag = None, [], "realisation after the last day"
                     if realise_settled is None:
                         flag = "no realisation (realise_settled unavailable)"
@@ -648,12 +800,13 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         f"  realised={realised}  {flag}")
                     results[d] = {"day": day, "status": "DONE", "closes": len(p["spot_rows"]),
                                   "fwd_outrights": len(fwd_rows), "future_px": len(p["fut_rows"]),
-                                  "missing_pairs": p["missing_pairs"], "missing_marks": missing_marks,
-                                  "realised": realised, "unrealisable": unrealisable}
+                                  "missing_pairs": p["missing_pairs"], "missing_pair_reasons": p["pair_reasons"],
+                                  "missing_marks": missing_marks, "realised": realised, "unrealisable": unrealisable}
                 except Exception as exc:  # noqa: BLE001 -- one bad day must not end the run for the others
                     log(f"  {day}  ERROR  {exc!r}")
                     results[d] = {"day": day, "status": "ERROR", "closes": len(p["spot_rows"]), "fwd_outrights": 0,
                                   "future_px": len(p["fut_rows"]), "missing_pairs": p["missing_pairs"],
+                                  "missing_pair_reasons": p["pair_reasons"],
                                   "missing_marks": p["missing_marks"], "realised": None, "unrealisable": [],
                                   "error": repr(exc)}
                 if on_day:
@@ -664,6 +817,14 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     log(f"  realised after the last day: {led['realised']}")
                 except Exception as exc:  # noqa: BLE001 -- as above: report and move on
                     log(f"  realise_settled raised: {exc!r}")
+            if "by_pair" in scales:
+                # Which field gave each pair's points divisor (or that neither did): in the
+                # log, and kept for the status file's "backfill" block.
+                _scale_reports[_db_key(db_path)] = {
+                    pair: {"field": r.get("field") or "", "divisor": r.get("scale"), "raw": r.get("raw") or {},
+                           "errors": r.get("errors") or {}} for pair, r in sorted(scales["by_pair"].items())}
+                for pair, r in sorted(scales["by_pair"].items()):
+                    log("  points divisor  " + pm.describe_scale(pair, r))
             log(f"Finished: {sum(1 for r in results.values() if r['status'] == 'DONE')} days written, "
                 f"{sum(1 for r in results.values() if r['status'] == 'NO_CLOSES')} with no closes, "
                 f"{len(days) - len(results)} skipped.")
@@ -703,6 +864,7 @@ MAX_STATUS_REASONS = 5
 _day_state: Dict[Tuple[str, str], dict] = {}   # (db, day) -> {at, signature, status, missing_count, missing}
 _days_block: Dict[str, dict] = {}              # db -> the "days" dict last built by auto_backfill
 _published: Dict[str, dict] = {}               # db -> the whole "backfill" block last published
+_notes: Dict[str, str] = {}                    # db -> the last run's "note" (past days being re-requested at 15:00)
 
 
 def _db_key(db_path) -> str:
@@ -736,12 +898,15 @@ def _plain_reasons(result: dict, still_missing: List[dict]) -> List[str]:
     """At most MAX_STATUS_REASONS distinct plain sentences saying why a day is not
     complete, from backfill()'s own result for it -- never a second guess at the cause."""
     reasons: List[str] = []
+    pair_reasons = result.get("missing_pair_reasons") or {}
     if result["status"] == "NO_CLOSES":
-        reasons.append("Bloomberg returned no FX close for this day (a holiday, or no data)")
+        reasons.append(f"Bloomberg returned no {CLOSE_HOUR_NY}:00 New York FX close for this day (a holiday, or no data)")
+        reasons += [pair_reasons[pair] for pair in result["missing_pairs"] if pair_reasons.get(pair)][:1]
     else:
         if result.get("error"):
             reasons.append(f"this day's run raised {result['error']}")
-        reasons += [f"Bloomberg returned no closing SPOT (PX_LAST) for {pair}" for pair in result["missing_pairs"]]
+        reasons += [pair_reasons.get(pair) or f"Bloomberg returned no {CLOSE_HOUR_NY}:00 New York closing SPOT for {pair}"
+                    for pair in result["missing_pairs"]]
         reasons += [m["reason"] for m in result["missing_marks"]]
     if not reasons:
         reasons = [f"{m['instrument_id']} {m['mark_type']} {m['settle_date']}: not written" for m in still_missing]
@@ -788,6 +953,27 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         conn.close()
     open_rows = completeness[(completeness["needed"] > 0) & ~completeness["complete"]]
     signatures = {row.as_of_date: _signature(row.missing) for row in open_rows.itertuples()}
+    # Days that hold FX marks which are not the 15:00 New York close (that day's last live
+    # pull, or a 17:00 PX_LAST row from before 2026-09-21): said once in the log and in the
+    # status block, since the first run after the change asks for every past day again.
+    floor_iso = intraday_floor(today).isoformat()
+    not_closed = [row.as_of_date for row in open_rows.itertuples() if getattr(row, "not_closed", 0) > 0]
+    restamp = sum(1 for day_iso in not_closed if day_iso >= floor_iso)
+    stuck = len(not_closed) - restamp
+    note = ""
+    if restamp:
+        note = (f"{restamp} past day(s) hold FX marks that are not the {CLOSE_HOUR_NY}:00 New York close (an earlier "
+                f"pull's last price, or a 17:00 close written before the close moved to {CLOSE_HOUR_NY}:00 on "
+                "2026-09-21); they are asked of Bloomberg again once and replaced, so the first run after that "
+                "change re-requests the past days once.")
+    if stuck:
+        note += (" " if note else "") + (
+            f"{stuck} older day(s) are beyond Bloomberg's intraday history (about {INTRADAY_HISTORY_BUSINESS_DAYS} "
+            f"business days): their {CLOSE_HOUR_NY}:00 close cannot be retrieved, so they keep the marks they have "
+            "and stay reported as not closed.")
+    _notes[key] = note
+    if note:
+        log("Auto-backfill: " + note)
     for stale in [k for k in _day_state if k[0] == key and k[1] not in signatures]:
         del _day_state[stale]                     # complete since (or no longer needed): nothing to report
     now = clock()
@@ -881,6 +1067,11 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
       "days": {"<YYYY-MM-DD>": {"status": "DONE" | "NO_CLOSES" | "INCOMPLETE",
                                 "missing_count": <int>, "missing": [<plain reason>, ... at most 5]}}
       "last_run": "<ISO timestamp>" of the end of the last run
+      "note": "" or a sentence saying how many past days hold FX marks that are not the
+              15:00 New York close and are being asked for again (2026-09-21)
+      "points_scale": {"<pair>": {"field": "FWD_POINTS_SCALE" | "FWD_SCALE" | "",
+                                  "divisor": <float or null>, "raw": {...}, "errors": {...}}}
+              -- which Bloomberg field gave each pair's forward-points divisor
     "days" holds the header's reference dates and the newest days that are not DONE, so
     the header can say WHY a period is n/a. A "reason" of a run that raised contains the
     word "failed". live.pull_once rewrites the whole status file without this key on
@@ -919,6 +1110,7 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             _publish({"running": False, "reason": f"auto-backfill failed: {exc!r}"})
         finally:
             _publish({"running": False, "remaining": 0, "days": _days_block.get(key, {}),
+                      "note": _notes.get(key, ""), "points_scale": _scale_reports.get(key, {}),
                       "last_run": datetime.now().astimezone().isoformat(timespec="seconds")})
             _auto_lock.release()
 

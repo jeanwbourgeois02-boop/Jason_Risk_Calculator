@@ -158,9 +158,18 @@ def stale_empty_pull_reason(conn: sqlite3.Connection, status: Optional[dict], as
             "after that pull ran. Press \"Pull Bloomberg now\" (Bloomberg is pulled on request only).")
 
 
-def close_completeness(conn: sqlite3.Connection, start: str, end: str) -> pd.DataFrame:
+def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Optional[str] = None) -> pd.DataFrame:
     """One row per business day in [start, end]: as_of_date, needed, present, complete,
-    missing (list of {instrument_id, settle_date, mark_type} still missing that day).
+    missing (list of {instrument_id, settle_date, mark_type} still missing that day),
+    not_closed (how many of those DO have an official row, only not the close).
+
+    The close (user decision 2026-09-21: "for previous or any closes in FX, we need to use
+    NY 3pm"): on a day before `today` (default: the New York book date) an official FX row
+    -- SPOT or FWD_OUTRIGHT -- counts as present only when it is stamped at the 15:00 New
+    York close of its own date (`data.bloomberg.backfill.is_close_row`). A row stamped at
+    any other time is that day's last live pull (say 11:40) or a 17:00 PX_LAST row from
+    before the change: not a close, so the day is not complete and the backfill replaces
+    it. Today's rows are live and count as they are; a future keeps its PX_SETTLE.
 
     2026-09-18 (BUILD_PLAN.md section 3 / CLAUDE.md "P&L conventions": Daily/5d/MTD/YTD
     all difference LTD(t) against LTD(t-1bd) etc., and every FX leg's LTD needs the
@@ -180,25 +189,30 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str) -> pd.Dat
     need a forward at the option's expiry: nothing prices an option on a past date, and
     the backfill cannot build one for a pair held only through options, so requiring it
     left every such day incomplete (and re-requested from Bloomberg) forever."""
-    from data.bloomberg.backfill import business_days
+    from data.bloomberg.backfill import business_days, is_close_row
     from datetime import date as _date
+    if today is None:
+        from data.bloomberg.live import book_today
+        today = book_today().isoformat()
     days = business_days(_date.fromisoformat(start), _date.fromisoformat(end))
     rows = []
     for d in days:
         day = d.isoformat()
         needed_items = _needed_marks(conn, day, historical=True)
-        present = 0
+        present = not_closed = 0
         missing = []
         for item in needed_items:
             hit = conn.execute(
-                "SELECT 1 FROM marks_official WHERE as_of_date=:as_of AND instrument_id=:instrument_id "
+                "SELECT snapped_at FROM marks_official WHERE as_of_date=:as_of AND instrument_id=:instrument_id "
                 "AND settle_date=:settle AND mark_type=:mark_type",
                 {"as_of": day, "instrument_id": item["instrument_id"], "settle": item["settle_date"],
                  "mark_type": item["mark_type"]}).fetchone()
-            if hit:
+            if hit and (day >= today or is_close_row(item["mark_type"], day, hit[0])):
                 present += 1
             else:
                 missing.append(item)
+                not_closed += 1 if hit else 0
         rows.append({"as_of_date": day, "needed": len(needed_items), "present": present,
-                     "complete": len(needed_items) > 0 and present >= len(needed_items), "missing": missing})
-    return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete", "missing"])
+                     "complete": len(needed_items) > 0 and present >= len(needed_items), "missing": missing,
+                     "not_closed": not_closed})
+    return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete", "missing", "not_closed"])

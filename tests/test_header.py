@@ -61,7 +61,7 @@ def _insert_legs(conn, rows):
 def _insert_official_mark(conn, as_of, instrument_id, settle_date, mark_type, value, source):
     conn.execute(
         "INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-        (as_of, instrument_id, settle_date, mark_type, value, source, f"{as_of}T17:00:00-04:00"),
+        (as_of, instrument_id, settle_date, mark_type, value, source, f"{as_of}T15:00:00-04:00"),
     )
 
 
@@ -440,14 +440,15 @@ def test_priced_diff_minority_blocked_keeps_partial_figure():
 
 
 def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
-    """End to end: marks for today only. Daily's caption must talk about the
+    """End to end: marks for today only, and no earlier close within 10 business days has
+    any either (the trade was open on all of them). Daily's caption must talk about the
     reference date (t-1) and the backfill, not about today, which is fully priced."""
     conn = schema.connect()
     _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
-    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-09-10", 1_000_000, 147.0)  # open on t-1 and today
+    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-08-20", 1_000_000, 147.0)  # open on every close tried
     _insert_legs(conn, [
-        ("t1", 1, "FX_NEAR", "USD", 1_000_000, "2026-09-10", "2026-09-30", 147.0, 1),
-        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-09-10", "2026-09-30", 147.0, 1),
+        ("t1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
+        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
     ])
     _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "SPOT", 147.0, "BBG_BFXFORWARD")
     _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-30", "FWD_OUTRIGHT", 148.0, "BBG_BFXFORWARD")
@@ -465,6 +466,38 @@ def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
     # instruction to run something no screen can run
     assert "needed marks) — the backfill fills past closes by itself after each Bloomberg pull" in caption
     assert "run the" not in caption and "Market data tab" not in caption
+    # 2026-09-21: the earlier closes were tried first, and the caption says none has value
+    # (10 business days before 2026-09-16, the 2026-09-07 holiday skipped)
+    assert caption.endswith("No earlier close within 10 business days has one either (checked back to 2026-09-01).")
+
+
+def test_build_figures_period_steps_back_to_the_previous_close_that_has_value():
+    """User decision 2026-09-21 ("use previous date until has value"): the 2026-09-16 close
+    has no marks, the 2026-09-15 close has, so Daily is measured from 2026-09-15 and the
+    card says so. No mark is written or copied: the 2026-09-16 book stays unpriced."""
+    conn = schema.connect()
+    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
+    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-08-20", 1_000_000, 147.0)
+    _insert_legs(conn, [
+        ("t1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
+        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
+    ])
+    for day, fwd in (("2026-09-15", 147.5), ("2026-09-17", 148.0)):
+        _insert_official_mark(conn, day, "USDJPY", day, "SPOT", 147.0, "BBG_BFXFORWARD")
+        _insert_official_mark(conn, day, "USDJPY", "2026-09-30", "FWD_OUTRIGHT", fwd, "BBG_BFXFORWARD")
+    conn.commit()
+    marks_before = conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0]
+    cards = header._build_figures(conn, "2026-09-17")
+    by_title = {c.children[0].children: c for c in cards if getattr(c, "children", None) and c.children
+                and hasattr(c.children[0], "children")}
+    daily = by_title["Daily"]
+    # 1m x (148.0 - 147.5) JPY at spot 147
+    assert daily.children[1].children == header._fmt_usd(1_000_000 * 0.5 / 147.0)
+    assert daily.children[2].children == "from the 2026-09-15 close: 2026-09-16 has no usable close"
+    assert "Daily needs the 2026-09-16 close" in daily.children[2].title   # the skipped date's reason, on hover
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == marks_before
+    from engine.pnl.valuation import value_book
+    assert (value_book(conn, "2026-09-16")["reason"] != "").all()
 
 
 # ------------------------------------------------- why the past close is missing (2026-09-21)

@@ -995,6 +995,9 @@ def _full_probe_responder(ref_data, hist_data):
                         row[f] = val
                 sec_list.append({"security": t, "fieldData": row})
             return [{"securityData": sec_list}]
+        elif request.req_type == "IntradayBarRequest":
+            # 2026-09-21 probe step `intraday_close_bar`: one hourly bar, starting when asked
+            return [{"barData": {"barTickData": [{"time": request.startDateTime, "close": 1.1712}]}}]
         raise AssertionError(f"unexpected request type {request.req_type}")
     return responder
 
@@ -1283,6 +1286,7 @@ def test_pull_marks_probe_continues_after_non_candidate_step_failure(monkeypatch
         "session_start", "spot_reference", "spot_historical", "fwd_outright_direct_primary",
         "fwd_outright_direct_alt_reference_date", "fwd_outright_direct_alt_fwd_outright_field",
         "tenor_1m", "tenor_3m", "fwd_points_scale", "es_settle_px_settle", "es_settle_px_last",
+        "intraday_close_bar",                                    # 2026-09-21: the 15:00 New York close bar
     }
     assert diag["summary"]["outcome"] == "PROBE_COMPLETE_WITH_FAILURES"
     assert diag["summary"]["outcome"] != "OK"
@@ -2169,7 +2173,9 @@ def test_vol_file_source_get_vol_quotes_and_round_trip_write():
     assert row[5] == "EURUSDV1M BGN Curncy"
     assert row[6] == "PX_LAST"
     assert row[7] == "BBG_BDP"
-    assert row[8].startswith("2026-09-17T17:00:00")  # snapped_at: 17:00 America/New_York
+    # snapped_at: the close stamp engine/rates/store.py gives (its hour is that module's to set)
+    from engine.rates.store import snapped_at as _pricer_stamp
+    assert row[8] == _pricer_stamp(date(2026, 9, 17))
 
 
 def test_write_vol_quotes_is_idempotent_via_insert_or_replace():
@@ -2741,7 +2747,9 @@ def test_rate_vol_file_source_get_quotes_and_round_trip_write():
     assert row[10] == "USSV0110 Curncy"
     assert row[11] == "PX_LAST"
     assert row[12] == "BBG_BDP"
-    assert row[13].startswith("2026-09-17T17:00:00")  # snapped_at: 17:00 America/New_York
+    # snapped_at: the close stamp engine/rates/store.py gives (its hour is that module's to set)
+    from engine.rates.store import snapped_at as _pricer_stamp
+    assert row[13] == _pricer_stamp(date(2026, 9, 17))
 
 
 def test_write_rate_vol_quotes_is_idempotent_via_insert_or_replace():
@@ -3231,3 +3239,225 @@ def test_tcp_open_resolves_localhost_to_127_0_0_1(monkeypatch):
     monkeypatch.setattr(risk.socket, "create_connection", fake_create_connection)
     assert risk.tcp_open("localhost", 8194) is True
     assert seen == [("127.0.0.1", 8194)]
+
+
+# =========================================================================== 2026-09-21: points divisor
+# Found on the Bloomberg PC: "Bloomberg returned forward points for AUDUSD but no
+# FWD_POINTS_SCALE, so they cannot be converted to outrights" -- 45 of 67 marks of a past
+# close. The field name was never verified. Both candidates are now asked for in ONE
+# request: FWD_POINTS_SCALE as the divisor itself, else 10 ** FWD_SCALE.
+def test_scale_from_fields_prefers_fwd_points_scale_then_ten_to_the_fwd_scale():
+    from data.bloomberg.pull_marks import scale_from_fields
+    assert scale_from_fields({"FWD_POINTS_SCALE": 10000.0, "FWD_SCALE": 2}) == (10000.0, "FWD_POINTS_SCALE")
+    assert scale_from_fields({"FWD_SCALE": 4}) == (10000.0, "FWD_SCALE")            # EURUSD: 4 decimal places
+    assert scale_from_fields({"FWD_SCALE": 2.0}) == (100.0, "FWD_SCALE")            # USDJPY
+    assert scale_from_fields({"FWD_SCALE": 0}) == (1.0, "FWD_SCALE")
+    # FWD_POINTS_SCALE that is not a positive number falls through to FWD_SCALE
+    assert scale_from_fields({"FWD_POINTS_SCALE": 0, "FWD_SCALE": 4}) == (10000.0, "FWD_SCALE")
+    assert scale_from_fields({"FWD_POINTS_SCALE": "n.a.", "FWD_SCALE": "4"}) == (10000.0, "FWD_SCALE")
+    # never a guess: not a whole number, out of range, a bool, nothing at all
+    for row in ({"FWD_SCALE": 2.5}, {"FWD_SCALE": 9}, {"FWD_SCALE": -1}, {"FWD_SCALE": True},
+                {"FWD_POINTS_SCALE": float("nan")}, {}, None):
+        assert scale_from_fields(row) == (None, "")
+
+
+def _scale_responder(sent):
+    """A terminal that does not know FWD_POINTS_SCALE (a field exception for that field
+    only) and answers FWD_SCALE for AUDUSD and USDJPY, nothing for EURSEK."""
+    answers = {"AUDUSD Curncy": {"FWD_SCALE": 4}, "USDJPY Curncy": {"FWD_SCALE": 2}, "EURSEK Curncy": {}}
+
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        sent.append((list(request.securities), list(request.fields)))
+        secs = []
+        for t in request.securities:
+            exceptions = [{"fieldId": "FWD_POINTS_SCALE", "errorInfo": {"message": "Field not valid"}}]
+            if not answers.get(t):
+                exceptions.append({"fieldId": "FWD_SCALE", "errorInfo": {"message": "Field not applicable to security"}})
+            secs.append({"security": t, "fieldData": dict(answers.get(t) or {}), "fieldExceptions": exceptions})
+        return [{"securityData": secs}]
+    return responder
+
+
+def test_fetch_points_scales_asks_both_fields_in_one_request_and_survives_a_field_exception(monkeypatch):
+    sent = []
+    _install_fake_blpapi(monkeypatch, _scale_responder(sent))
+    from data.bloomberg import pull_marks as pm
+    session, service = pm.open_session("localhost", 8194)
+    reports = pm.fetch_points_scales(session, service, ["AUDUSD", "USDJPY", "EURSEK"])
+    # ONE ReferenceDataRequest for every pair, both fields in it
+    assert sent == [(["AUDUSD Curncy", "USDJPY Curncy", "EURSEK Curncy"], ["FWD_POINTS_SCALE", "FWD_SCALE"])]
+    # the refused field costs nothing: the other one is still read
+    assert (reports["AUDUSD"]["scale"], reports["AUDUSD"]["field"]) == (10000.0, "FWD_SCALE")
+    assert (reports["USDJPY"]["scale"], reports["USDJPY"]["field"]) == (100.0, "FWD_SCALE")
+    assert reports["AUDUSD"]["raw"] == {"FWD_SCALE": 4}
+    assert reports["AUDUSD"]["errors"] == {"FWD_POINTS_SCALE": "Field not valid"}
+    assert "FWD_SCALE = 4" in pm.describe_scale("AUDUSD", reports["AUDUSD"])        # names the field that answered
+    # neither answered: no scale (never a hard-coded pip size), and the reason names BOTH
+    # fields, each with Bloomberg's own words
+    assert reports["EURSEK"]["scale"] is None and reports["EURSEK"]["field"] == ""
+    reason = pm.describe_scale("EURSEK", reports["EURSEK"])
+    assert "neither FWD_POINTS_SCALE nor FWD_SCALE" in reason
+    assert "Field not valid" in reason and "Field not applicable to security" in reason
+
+
+def _tenor_path_responder(scale_row):
+    ref = {("EURUSDSP Curncy", "PX_LAST"): 0.0, ("EURUSDSP Curncy", "SETTLE_DT"): "2026-08-19",
+           ("EURUSD1W Curncy", "PX_LAST"): 50.0, ("EURUSD1W Curncy", "SETTLE_DT"): "2026-08-24"}
+    ref.update({("EURUSD Curncy", f): v for f, v in scale_row.items()})
+
+    def responder(request):
+        assert request.req_type == "ReferenceDataRequest"
+        return [{"securityData": [{"security": t, "fieldData": {f: ref[(t, f)] for f in request.fields if (t, f) in ref}}
+                                  for t in request.securities]}]
+    return responder
+
+
+def test_live_tenor_path_uses_the_shared_scale_helper_and_never_writes_an_implausible_outright(monkeypatch):
+    from data.bloomberg import pull_marks as pm
+    rows = [pm.RequestRow("EURUSD", "EURUSD Curncy", "2026-08-20", "FWD_OUTRIGHT")]
+
+    # FWD_SCALE alone answers: 10 points / 10 ** 4 on a 1.1000 spot
+    _install_fake_blpapi(monkeypatch, _tenor_path_responder({"FWD_SCALE": 4}))
+    session, service = pm.open_session("localhost", 8194)
+    diag = pm.Diagnostics()
+    out, _warnings, failures = pm.build_fwd_outright_rows(session, service, rows, date(2026, 8, 17), {"EURUSD": 1.1}, diag)
+    assert failures == [] and math.isclose(out[0]["value"], 1.1 + 10.0 / 10000.0) and out[0]["source"] == "BBG_INTERP"
+    assert diag.interpolations[-1]["scale_field"] == "FWD_SCALE"                    # the report names the field
+    scale_requests = [r for r in diag.requests if r.get("purpose") == "tenor_fallback_scale"]
+    assert [r["fields"] for r in scale_requests] == [["FWD_POINTS_SCALE", "FWD_SCALE"]]
+
+    # a divisor that throws the outright more than 20 % off spot is never written
+    _install_fake_blpapi(monkeypatch, _tenor_path_responder({"FWD_POINTS_SCALE": 10.0}))
+    session, service = pm.open_session("localhost", 8194)
+    out, _warnings, failures = pm.build_fwd_outright_rows(session, service, rows, date(2026, 8, 17), {"EURUSD": 1.1})
+    assert out == [] and failures[0]["classification"] == pm.CLASS_REJECTED
+    assert "20%" in failures[0]["detail"] and "FWD_POINTS_SCALE" in failures[0]["detail"]
+
+    # neither field: the failure names both
+    _install_fake_blpapi(monkeypatch, _tenor_path_responder({}))
+    session, service = pm.open_session("localhost", 8194)
+    out, _warnings, failures = pm.build_fwd_outright_rows(session, service, rows, date(2026, 8, 17), {"EURUSD": 1.1})
+    assert out == [] and "neither FWD_POINTS_SCALE nor FWD_SCALE" in failures[0]["detail"]
+
+
+# =========================================================================== 2026-09-21: the 15:00 New York close
+# User: "the EOD is 3pm New York time"; "for previous or any closes in FX, we need to use NY
+# 3pm". Bloomberg's daily history has no 15:00 field, so a past FX close is read from
+# hourly intraday bars: one IntradayBarRequest per security per side (BID, ASK) per stretch.
+def _bars_responder(sent, bars, errors=None):
+    """bars: {(ticker, side): [(naive UTC bar start, close), ...]}; errors: {ticker: message}."""
+    def responder(request):
+        assert request.req_type == "IntradayBarRequest"
+        sent.append({"security": request.security, "eventType": request.eventType, "interval": request.interval,
+                     "start": request.startDateTime, "end": request.endDateTime, "gapFill": request.gapFillInitialBar})
+        if (errors or {}).get(request.security):
+            return [{"responseError": {"message": errors[request.security]}}]
+        ticks = [{"time": when, "close": close} for when, close in bars.get((request.security, request.eventType), [])]
+        return [{"barData": {"barTickData": ticks}}]
+    return responder
+
+
+def test_close_bar_times_resolve_the_new_york_offset_per_date():
+    from datetime import datetime, timezone
+    from data.bloomberg import pull_marks as pm
+    assert pm.CLOSE_HOUR_NY == 15 and pm.snapped_at(date(2026, 1, 15)) == "2026-01-15T15:00:00-05:00"
+    # 15:00 New York is 19:00 UTC in summer and 20:00 UTC in winter; the bar starts an hour before
+    assert pm.close_time_utc(date(2026, 7, 15)) == datetime(2026, 7, 15, 19, 0, tzinfo=timezone.utc)
+    assert pm.close_time_utc(date(2026, 1, 15)) == datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc)
+    assert pm.close_bar_start_utc(date(2026, 7, 15)) == datetime(2026, 7, 15, 18, 0, tzinfo=timezone.utc)
+    assert pm.close_bar_start_utc(date(2026, 1, 15)) == datetime(2026, 1, 15, 19, 0, tzinfo=timezone.utc)
+
+
+def test_fetch_intraday_close_series_takes_the_bar_ending_1500_new_york_mid_of_bid_and_ask(monkeypatch):
+    """A stretch across the US clock change (Sunday 2026-03-08): Friday's close bar starts
+    19:00 UTC (EST), Monday's 18:00 UTC (EDT). Decoy bars sit at the other hour."""
+    from datetime import datetime
+    sent = []
+    fri, mon = datetime(2026, 3, 6, 19, 0), datetime(2026, 3, 9, 18, 0)
+    bars = {
+        ("EURUSD Curncy", "BID"): [(datetime(2026, 3, 6, 18, 0), 9.0), (fri, 1.1700), (mon, 1.1800), (datetime(2026, 3, 9, 19, 0), 9.0)],
+        ("EURUSD Curncy", "ASK"): [(datetime(2026, 3, 6, 18, 0), 9.0), (fri, 1.1704), (mon, 1.1806), (datetime(2026, 3, 9, 19, 0), 9.0)],
+        # forward points, negative: a mid all the same; Monday has a BID bar only
+        ("USDJPY1M Curncy", "BID"): [(fri, -51.0), (mon, -49.0)],
+        ("USDJPY1M Curncy", "ASK"): [(fri, -49.0)],
+        # a ticker with no bar at the close on either day (only an earlier hour)
+        ("USDTHB Curncy", "BID"): [(datetime(2026, 3, 6, 15, 0), 32.0)],
+        ("USDTHB Curncy", "ASK"): [(datetime(2026, 3, 6, 15, 0), 32.1)],
+    }
+    _install_fake_blpapi(monkeypatch, _bars_responder(sent, bars, errors={"XXXYYY Curncy": "Security is not valid"}))
+    from data.bloomberg import pull_marks as pm
+    session, service = pm.open_session("localhost", 8194)
+    tickers = ["EURUSD Curncy", "USDJPY1M Curncy", "USDTHB Curncy", "XXXYYY Curncy"]
+    out = pm.fetch_intraday_close_series(session, service, tickers, ["PX_LAST"], date(2026, 3, 6), date(2026, 3, 9))
+
+    # one request per (ticker, side) for the whole stretch -- never one per day
+    assert [(r["security"], r["eventType"]) for r in sent] == [(t, side) for t in tickers for side in ("BID", "ASK")]
+    # hourly bars, gap fill on, UTC from the first day's bar start to the last day's close
+    assert all(r["interval"] == 60 and r["gapFill"] is True for r in sent)
+    assert all(r["start"] == fri and r["end"] == datetime(2026, 3, 9, 19, 0) for r in sent)
+
+    # the shape fetch_historical_series returns for PX_LAST; weekdays only
+    assert set(out) == set(tickers) and set(out["EURUSD Curncy"]) == {"2026-03-06", "2026-03-09"}
+    assert out["EURUSD Curncy"]["2026-03-06"] == {"PX_LAST": pytest.approx(1.1702)}   # mid of 1.1700 / 1.1704
+    assert out["EURUSD Curncy"]["2026-03-09"] == {"PX_LAST": pytest.approx(1.1803)}   # the 18:00 UTC bar, not 19:00
+    assert out["USDJPY1M Curncy"]["2026-03-06"] == {"PX_LAST": pytest.approx(-50.0)}
+
+    # one side only, no bar at the close, Bloomberg's own error: missing with a plain
+    # reason, never a substitute value
+    one_side = out["USDJPY1M Curncy"]["2026-03-09"]
+    assert set(one_side) == {pm.CLOSE_REASON} and "only the BID side" in one_side[pm.CLOSE_REASON]
+    no_bar = out["USDTHB Curncy"]["2026-03-06"]
+    assert set(no_bar) == {pm.CLOSE_REASON} and "no hourly bar ending 15:00 New York" in no_bar[pm.CLOSE_REASON]
+    refused = out["XXXYYY Curncy"]["2026-03-09"]
+    assert set(refused) == {pm.CLOSE_REASON} and "Security is not valid" in refused[pm.CLOSE_REASON]
+
+
+def test_fetch_intraday_bars_reads_aware_bar_times_too_and_records_the_request(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    sent = []
+    aware = datetime(2026, 7, 15, 14, 0, tzinfo=timezone(timedelta(hours=-4)))
+    _install_fake_blpapi(monkeypatch, _bars_responder(sent, {("EURUSD Curncy", "BID"): [(aware, 1.17)]}))
+    from data.bloomberg import pull_marks as pm
+    session, service = pm.open_session("localhost", 8194)
+    diag = pm.Diagnostics()
+    day = date(2026, 7, 15)
+    bars, error = pm.fetch_intraday_bars(session, service, "EURUSD Curncy", "BID", pm.close_bar_start_utc(day),
+                                         pm.close_time_utc(day), diag=diag)
+    assert error == "" and bars == [{"time": pm.close_bar_start_utc(day), "close": 1.17}]   # 14:00-04:00 == 18:00 UTC
+    rec = diag.requests[-1]
+    assert rec["request_type"] == "IntradayBarRequest" and rec["classification"] == pm.CLASS_OK
+    assert rec["overrides"]["startDateTime"] == "2026-07-15T18:00:00Z" and rec["overrides"]["interval"] == "60"
+
+
+def test_probe_asks_both_scale_fields_and_runs_one_intraday_bar_request(monkeypatch, tmp_path, capsys):
+    ref_data = {("EURUSD Curncy", "FWD_SCALE"): 4, ("USDJPY Curncy", "FWD_SCALE"): 2, ("EURUSD Curncy", "PX_LAST"): 1.17}
+    seen = []
+    inner = _full_probe_responder(ref_data, {"EURUSD Curncy": 1.17, "ESU6 Index": 6500.0})
+
+    def responder(request):
+        seen.append(request)
+        return inner(request)
+
+    _install_fake_blpapi(monkeypatch, responder)
+    from data.bloomberg import pull_marks, pull_report
+    out = tmp_path / "probe"
+    assert pull_marks.main(["--probe", "--as-of", "2026-09-21", "--out", str(out)]) == 0      # a Monday
+    diag = pull_report.load_diag(Path(str(out) + ".diag.json"))
+    steps = {r["probe_name"]: r for r in diag["requests"] if r.get("probe_name")}
+
+    scale = steps["fwd_points_scale"]
+    assert scale["fields"] == ["FWD_POINTS_SCALE", "FWD_SCALE"] and scale["tickers"] == ["EURUSD Curncy", "USDJPY Curncy"]
+    assert "'FWD_SCALE': 4" in scale["detail"] and "'FWD_SCALE': 2" in scale["detail"]      # what came back, printed
+    printed = capsys.readouterr().err
+    assert "points divisor 10000 from FWD_SCALE" in printed and "points divisor 100 from FWD_SCALE" in printed
+
+    bar = steps["intraday_close_bar"]
+    assert bar["request_type"] == "IntradayBarRequest" and bar["tickers"] == ["EURUSD Curncy"] and bar["fields"] == ["BID"]
+    # the business day before --as-of (Friday 2026-09-18), 14:00-15:00 New York = 18:00-19:00 UTC
+    assert bar["overrides"]["startDateTime"] == "2026-09-18T18:00:00Z"
+    assert bar["overrides"]["endDateTime"] == "2026-09-18T19:00:00Z"
+    assert bar["classification"] == "OK" and "1.1712" in bar["detail"]
+    request = next(r for r in seen if r.req_type == "IntradayBarRequest")
+    assert (request.security, request.eventType, request.interval) == ("EURUSD Curncy", "BID", 60)
+    assert "intraday_close_bar" in pull_report.render_report(diag)

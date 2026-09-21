@@ -507,9 +507,27 @@ def _priced_diff_scoped(conn: sqlite3.Connection, date_a: str, date_b: str, trad
     `ref_date` is this entry's own displayed reference date (callers use two different
     conventions -- see `row_scoped_headline`/`row_scoped_period_pnl`'s own docstrings);
     `note_label` names `date_b` only inside the "N priced now but unpriced on
-    <note_label>" detail note."""
+    <note_label>" detail note.
+
+    (2026-09-21, user decision "use previous date until has value") a `date_b` with no
+    usable close steps back to the previous business day that has one
+    (`engine.pnl.reference.resolve_reference`, the header's rule): the entry gains
+    `ref_date_used` / `ref_note` / `ref_note_detail` / `ref_dates_skipped`, every
+    existing key keeps its meaning, and no mark is copied for any trade."""
+    from engine.pnl.reference import annotate, resolve_reference
+
     df_a = _scoped_frame(conn, date_a, trade_ids)
-    df_b = _scoped_frame(conn, date_b, trade_ids)
+    choice = resolve_reference(df_a, date_b, lambda iso: _scoped_frame(conn, iso, trade_ids))
+    label = choice.ref_date_used if choice.stepped_back else note_label
+    entry = _priced_diff_frames(conn, df_a, choice.frame, date_a, ref_date, label)
+    return annotate(entry, choice,
+                    lambda s: _reference_missing_reason(s.unpriced, s.date, s.n_blocked, s.n_open_then, conn))
+
+
+def _priced_diff_frames(conn: sqlite3.Connection, df_a: pd.DataFrame, df_b: pd.DataFrame,
+                        date_a: str, ref_date: str, note_label: str) -> dict:
+    """`_priced_diff_scoped`'s figure for two already-scoped books, `df_b` the reference
+    close's."""
     total = len(df_a)
     if total == 0:
         return {"value": 0.0, "ref_date": ref_date, "available": True, "reason": "",

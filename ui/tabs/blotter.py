@@ -444,6 +444,14 @@ def render_headline_strip(headline: dict, hidden: tuple = (), caption: str = "")
             value_div,
             html.Small(entry.get("ref_date", ""), className="card-note"),
         ]
+        ref_note = entry.get("ref_note")
+        if ref_note and available:
+            # Measured from an earlier close than the period's own reference date
+            # (engine.pnl.reference, 2026-09-21): visible, the skipped dates' reasons on hover.
+            card_children.append(html.Div(
+                ref_note, className="card-note",
+                style={"fontStyle": "italic", "color": "var(--muted)"},
+                title=entry.get("ref_note_detail", "")))
         excluded_summary = entry.get("excluded_summary")
         if excluded_summary:
             card_children.append(html.Div(
@@ -595,6 +603,10 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
                 if summary:
                     detail = entry.get("excluded_detail", "")
                     tip[key] = {"value": f"{summary}. {detail}" if detail else summary, "type": "text"}
+                ref_note = entry.get("ref_note")
+                if ref_note:  # measured from an earlier close (engine.pnl.reference)
+                    rest = tip.get(key, {}).get("value", "")
+                    tip[key] = {"value": f"{ref_note}. {rest}" if rest else ref_note, "type": "text"}
             else:
                 rec[key] = "n/a"
                 tip[key] = {"value": entry.get("reason", "") or "unavailable", "type": "text"}
@@ -1233,6 +1245,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     # detail / filter callbacks below skip it.
     rates_ui.register_callbacks(app, get_db_path)
     manual_entry_ui.register_callbacks(app, get_db_path)
+    # FX (2026-09-21): "P&L by currency, rows shown" follows the FX trade table's native
+    # column filter; that one callback is `ui.tabs.blotter_fx`' own.
+    blotter_fx_ui.register_callbacks(app, get_db_path)
 
     def _register_strip_refresh(scope: str) -> None:
         @app.callback(

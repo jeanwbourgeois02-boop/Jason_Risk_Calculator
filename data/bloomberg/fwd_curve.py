@@ -38,8 +38,10 @@ day's curve from that day's tenor PX_LAST values and that day's SPOT close:
     market convention (`spot_date_for`, `tenor_settle_date`) and flagged as computed, so the
     caller never writes a value at a computed date as Bloomberg's own quote;
   * unit: the live tenor path (pull_marks.fetch_tenor_points) documents these tickers'
-    PX_LAST as forward POINTS (outright = spot + points / FWD_POINTS_SCALE), which this
-    module used to read as outrights. Neither is verified on a terminal
+    PX_LAST as forward POINTS (outright = spot + points / the pair's points divisor,
+    pull_marks.fetch_points_scales), which this module used to read as outrights. Since
+    2026-09-21 the values are the 15:00 New York close from intraday bars, under the same
+    PX_LAST key (pull_marks.fetch_intraday_close_series). Neither is verified on a terminal
     (docs/open-questions.md item 28, which gives the test used here: a PX_LAST of the same
     order of magnitude as spot is an outright, anything else is points) -- `tenor_unit`.
 """
@@ -355,7 +357,8 @@ def historical_curve(day: date, tenor_rows: Dict[str, Dict[str, object]], spot: 
     points, else ''}.
 
     POINTS: outright = spot + points / scale, exactly pull_marks.outright_from_points
-    (`scale` = the pair's FWD_POINTS_SCALE); the first pillar is the spot date at spot
+    (`scale` = the pair's points divisor, pull_marks.fetch_points_scales: FWD_POINTS_SCALE
+    as is, else 10 ** FWD_SCALE); the first pillar is the spot date at spot
     itself (forward points are zero there by definition, so the SP ticker's own value is
     not used); a negative or zero points value is a real quote and is kept. Linear
     interpolation between these outrights is the live path's linear interpolation in
@@ -378,8 +381,11 @@ def historical_curve(day: date, tenor_rows: Dict[str, Dict[str, object]], spot: 
         return out
     unit = out["unit"] = tenor_unit(list(quotes.values()), spot)
     if unit == UNIT_POINTS and (scale is None or scale <= 0):
-        out["reason"] = (f"Bloomberg returned forward points for {label} but no FWD_POINTS_SCALE, "
-                         "so they cannot be converted to outrights")
+        # The divisor comes from pull_marks.fetch_points_scales (FWD_POINTS_SCALE as is,
+        # else 10 ** FWD_SCALE); the backfill replaces this sentence with one that also
+        # says what each field sent (pull_marks.describe_scale).
+        out["reason"] = (f"Bloomberg returned forward points for {label} but neither FWD_POINTS_SCALE nor "
+                         "FWD_SCALE, so they cannot be converted to outrights")
         return out
 
     def own_date(tenor: str) -> Optional[date]:

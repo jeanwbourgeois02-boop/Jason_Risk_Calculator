@@ -24,6 +24,13 @@ and never silently pass a spot-for-forward substitute off as a quote: 'spot' (on
 before the spot date), 'outright' (exact official row), 'interpolated', 'flat beyond
 last tenor', or 'spot (no forward curve)'. A currency with no SPOT entry in `rates`
 gets no entry here at all (NaN downstream, exactly like a missing rate).
+
+NDF currencies (user decision 2026-09-21, "always show 1m forward date price, not
+spot"): a `rates` entry that `engine.ladder.ndf.apply_ndf_1m_rates` priced at the 1M
+NDF mark (`mark_type` = 'NDF_1M') is used as it stands for EVERY date, settled cash
+included, under a basis of its own, 'NDF 1M'. No spot date, no forward pillars and no
+interpolation apply to it. An NDF currency whose 1M price is missing has no `rates`
+entry, so it gets no entry here either: blank, never spot.
 """
 from __future__ import annotations
 
@@ -36,6 +43,7 @@ BASIS_OUTRIGHT = "outright"
 BASIS_INTERPOLATED = "interpolated"
 BASIS_FLAT = "flat beyond last tenor"
 BASIS_NO_CURVE = "spot (no forward curve)"
+BASIS_NDF_1M = "NDF 1M"
 
 _FWD_SQL = """
 SELECT settle_date, value FROM marks_official
@@ -103,6 +111,13 @@ def forward_usd_rates(conn: sqlite3.Connection, rates: Mapping[str, Mapping],
             continue
         inverted = bool(entry.get("inverted"))
         pair = str(entry.get("pair") or ("USD" + ccy if inverted else ccy + "USD"))
+        if entry.get("mark_type") == "NDF_1M":
+            # Module docstring: the 1M NDF price for every date, never a spot or a pillar.
+            rate = 1.0 / spot_value if inverted else spot_value
+            for day in days:
+                out[(ccy, day)] = {"rate": rate, "quoted": spot_value, "basis": BASIS_NDF_1M,
+                                   "pair": pair, "ticker": str(entry.get("ticker") or "")}
+            continue
         as_of = str(entry.get("as_of_date") or "")
         spot_day = spot_date(as_of) if as_of else ""
         if pair not in curves:

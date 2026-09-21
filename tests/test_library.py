@@ -166,6 +166,92 @@ def test_tickers_lists_the_securities_a_pull_asks_for(tmp_path):
     assert summary["tickers"] == len(found) and summary["trades"] == 5 and summary["synced_at"]
 
 
+# --------------------------------------------------------------------------- NDF 1-month price (2026-09-21)
+# User: "NDFs - always show 1m forward date price, not spot ... based off the monthly not
+# the spot". The user's own tickers (data.ingest.common.NDF_1M_TICKERS) quote the 1M NDF
+# outright as the USD pair; the library lists one per NDF currency a trade touches.
+def _ndf_db(tmp_path):
+    """A USDKRW forward, a EURKRW cross, a USDBRL option still open and a USDINR forward
+    long settled; AUDUSD for contrast (no NDF currency)."""
+    p = tmp_path / "ndf.db"
+    conn = schema.connect(p)
+    conn.executemany(_INSTRUMENT, [
+        ("USDKRW", "FX", "USD", "KRW", 1, 1, "USDKRW Curncy", "9999-12-31"),
+        ("EURKRW", "FX", "EUR", "KRW", 1, 1, "EURKRW Curncy", "9999-12-31"),
+        ("USDINR", "FX", "USD", "INR", 1, 1, "USDINR Curncy", "9999-12-31"),
+        ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"),
+        ("USDBRL111926C-1", "FX_OPTION", "USD", "BRL", 1, 1, "USDBRL111926C-1", "2026-11-19"),
+    ])
+    conn.executemany(_TRADE, [
+        ("k1", "XLSX", "USDKRW", "FX_SWAP", "k1", "2026-08-10", 1e6, 1390.0, "acc", "cp", "", "t", "d", ""),
+        ("x1", "XLSX", "EURKRW", "FX_FWD", "x1", "2026-08-12", 1e6, 1620.0, "acc", "cp", "", "t", "d", ""),
+        ("i1", "XLSX", "USDINR", "FX_FWD", "i1", "2026-06-01", 1e6, 84.0, "acc", "cp", "", "t", "d", ""),
+        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "", "t", "d", ""),
+        ("o1", "XLSX", "USDBRL111926C-1", "FX_OPTION", "o1", "2026-08-19", 1e6, 0.02, "acc", "cp", "", "t", "d", ""),
+    ])
+    conn.executemany(_LEG, [
+        ("k1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", "2026-09-30", 1390.0, 0),          # swap: near leg ...
+        ("k1", 2, "FX_NEAR", "KRW", -1390e6, "2026-08-10", "2026-09-30", 1390.0, 0),
+        ("k1", 3, "FX_FAR", "USD", -1e6, "2026-08-10", "2026-12-30", 1395.0, 0),          # ... and far leg
+        ("k1", 4, "FX_FAR", "KRW", 1395e6, "2026-08-10", "2026-12-30", 1395.0, 0),
+        ("x1", 1, "FX_NEAR", "EUR", 1e6, "2026-08-12", "2026-10-30", 1620.0, 1),
+        ("x1", 2, "FX_NEAR", "KRW", -1620e6, "2026-08-12", "2026-10-30", 1620.0, 0),
+        ("i1", 1, "FX_NEAR", "USD", 1e6, "2026-06-01", "2026-07-01", 84.0, 0),
+        ("i1", 2, "FX_NEAR", "INR", -84e6, "2026-06-01", "2026-07-01", 84.0, 0),
+        ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-10-16", 0.65, 1),
+        ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-10-16", 0.65, 1),
+        ("o1", 1, "NOTIONAL", "USD", 1e6, "2026-08-19", "2026-11-19", 0.02, 0),
+    ])
+    conn.commit()
+    return p, conn
+
+
+def test_ndf_currencies_need_their_1m_ticker_from_trade_date_until_the_last_leg_settles(tmp_path):
+    p, conn = _ndf_db(tmp_path)
+    ndf = {(r["trade_id"], r["key"]): r for r in library.rows(conn) if r["kind"] == library.NDF_1M}
+    # one row per trade per NDF currency, on that currency's USD pair -- the cross too
+    assert set(ndf) == {("k1", "USDKRW"), ("x1", "USDKRW"), ("i1", "USDINR"), ("o1", "USDBRL")}
+    swap = ndf[("k1", "USDKRW")]
+    assert swap["bbg_ticker"] == "KWN+1M Curncy" and swap["settle_date"] == library.SENTINEL
+    assert swap["role"] == library.ROLE_PAIR
+    assert (swap["needed_from"], swap["needed_until"]) == ("2026-08-10", "2026-12-30")   # the swap's LAST leg
+    assert ndf[("o1", "USDBRL")]["bbg_ticker"] == "BCN+1M Curncy"
+    assert ndf[("o1", "USDBRL")]["needed_until"] == "2026-11-19"                         # an option: its expiry
+    assert ndf[("i1", "USDINR")]["bbg_ticker"] == "IRN+1M Curncy"
+
+    # today's pull asks for each ticker once, as it asks for a spot, dated today
+    as_of = "2026-09-21"
+    asked = {r for r in _requested(conn, as_of) if r[1] == "NDF_1M"}
+    assert asked == {("USDKRW", "NDF_1M", as_of, "KWN+1M Curncy"), ("USDBRL", "NDF_1M", as_of, "BCN+1M Curncy")}
+    # nothing after the last leg has settled / the option has expired, nothing for a settled trade
+    assert {r[0] for r in _requested(conn, "2026-11-20") if r[1] == "NDF_1M"} == {"USDKRW"}     # the swap's far leg
+    assert not [r for r in _requested(conn, "2026-12-31") if r[1] == "NDF_1M"]
+    # the pair the mark is written on exists (USDBRL was never traded outright)
+    assert conn.execute("SELECT is_ndf FROM instruments WHERE instrument_id = 'USDBRL'").fetchone() == (1,)
+
+
+def test_ndf_1m_is_todays_pull_only_never_a_past_close(tmp_path):
+    """No P&L query reads NDF_1M, so a past close does not need it: the backfill never asks
+    for it and a day is complete without it."""
+    from data.bloomberg import inventory
+    p, conn = _ndf_db(tmp_path)
+    assert library.NDF_1M in library.LIVE_ONLY_KINDS and library.NDF_1M not in library.MARK_KINDS
+    assert not [r for r in library.needed_on(conn, "2026-09-14", historical=True) if r["kind"] == library.NDF_1M]
+    assert not [r for r in library.needed_in_range(conn, "2026-08-01", "2026-09-18") if r["kind"] == library.NDF_1M]
+    assert "NDF_1M" not in {m["mark_type"] for m in inventory._needed_marks(conn, "2026-09-14", historical=True)}
+    assert "NDF_1M" not in {m["mark_type"] for m in inventory._needed_marks(conn, "2026-09-21")}
+
+
+def test_the_library_listing_describes_the_ndf_ticker_in_plain_words(tmp_path):
+    p, conn = _ndf_db(tmp_path)
+    found = {(t["ticker"], t["field"]): t for t in library.tickers(conn, "2026-09-21")}
+    krw = found[("KWN+1M Curncy", "PX_LAST")]
+    assert krw["used_for"] == "1M NDF price, the ladder's rate for KRW"
+    assert krw["trades"] == 2 and krw["needed_until"] == "2026-12-30"                    # the swap and the cross
+    assert found[("BCN+1M Curncy", "PX_LAST")]["used_for"] == "1M NDF price, the ladder's rate for BRL"
+    assert ("IRN+1M Curncy", "PX_LAST") not in found                                     # settled in July
+
+
 @pytest.mark.skipif(not _SAMPLE_CSV.exists(), reason="data/raw/new_sample_trades.csv is not on this machine")
 def test_sample_book_request_list_is_what_the_trades_themselves_call_for(tmp_path):
     """The library yields the list the pull used to work out from the trades on every
@@ -178,10 +264,16 @@ def test_sample_book_request_list_is_what_the_trades_themselves_call_for(tmp_pat
     conn = schema.connect(p)
     assert not library.is_out_of_date(conn)                            # the upload synced it
 
+    from data.ingest.common import NDF_1M_TICKERS
+
     def from_the_trades(as_of):
         keys = set()
         for instrument_id, ticker, settle in conn.execute(live._OPEN_FX_SQL, {"as_of": as_of}):
             keys |= {(instrument_id, "SPOT", as_of, ticker), (instrument_id, "FWD_OUTRIGHT", settle, ticker)}
+            # 2026-09-21: an NDF currency's 1M outright, on its USD pair, from its own ticker
+            for ccy in (instrument_id[:3], instrument_id[3:]):
+                if ccy in NDF_1M_TICKERS:
+                    keys.add((live._usd_pair_name(ccy), "NDF_1M", as_of, NDF_1M_TICKERS[ccy]))
         for leg in live._cross_usd_legs(conn, as_of) + live._option_usd_legs(conn, as_of):
             keys.add((leg["instrument_id"], "SPOT", as_of, leg["bbg_ticker"]))
         for o in live._option_mark_rows(conn, as_of):

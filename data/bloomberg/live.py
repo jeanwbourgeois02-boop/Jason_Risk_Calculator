@@ -13,7 +13,12 @@ localhost:8194 by default), each requested pull of `LiveFeed` fetches:
     tab (see data/bloomberg/marks_csv.py::export_request, which still emits that request
     for the workbook comparison and is unchanged);
   * FUTURE_PX for every FUTURE instrument with an open leg, at the contract's own expiry
-    (settle_date).
+    (settle_date);
+  * NDF_1M (2026-09-21, user: "NDFs - always show 1m forward date price, not spot") for
+    every NDF currency the open FX trades and options touch: PX_LAST of the user's own 1M
+    ticker (data.ingest.common.NDF_1M_TICKERS, 'KWN+1M Curncy'), asked for in the same
+    request as the spots and written on the currency's USD pair ('USDKRW') dated today, as
+    quoted, source BBG_BFXFORWARD. The ladder reads it; no P&L query does.
 Rows are written to `marks` with INSERT OR REPLACE (same primary key each cycle, new
 `snapped_at`), sources BBG_BFXFORWARD (official) / BBG_INTERP (fallback, never official).
 
@@ -59,6 +64,9 @@ INTERVAL_SECONDS = 900
 STALE_AFTER_SECONDS = 2 * INTERVAL_SECONDS + 300
 SRC_SPOT_FWD = "BBG_BFXFORWARD"
 SRC_INTERP = "BBG_INTERP"
+# Marks asked for as one live PX_LAST and written on their pair dated today: a pair's SPOT,
+# and an NDF currency's 1M outright (NDF_1M, the ladder's rate for it, 2026-09-21).
+SPOT_LIKE_MARK_TYPES = ("SPOT", "NDF_1M")
 # Keys of status["timings"], seconds per step of one cycle (see pull_once).
 TIMING_KEYS = ("session", "spot", "forwards", "futures", "rates", "vol", "options", "ledger", "total")
 
@@ -150,8 +158,9 @@ def read_status(db_path) -> Optional[dict]:
 
 
 def book_today() -> date:
-    """The book date marks are stamped with: today in America/New_York (CLAUDE.md: the
-    official close is 17:00 New York). Never the PC's local date -- a PC in Asia is a day
+    """The book date marks are stamped with: today in America/New_York (the official close
+    is 15:00 New York, pull_marks.CLOSE_HOUR_NY, user decision 2026-09-21). Never the PC's
+    local date -- a PC in Asia is a day
     ahead of New York until early afternoon, and marks stamped with its local date would
     be a day away from the date every screen looks up (found on the first live run,
     2026-09-17)."""
@@ -417,15 +426,15 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     from data.bloomberg import library
     from data.bloomberg.pull_marks import RequestRow
     needed = library.needed_on(conn, as_of_date)
-    _ensure_fx_instruments(conn, [r["key"] for r in needed if r["kind"] in ("SPOT", "FWD_OUTRIGHT")])
+    _ensure_fx_instruments(conn, [r["key"] for r in needed if r["kind"] in ("SPOT", "FWD_OUTRIGHT", library.NDF_1M)])
     out, seen = [], set()
 
     def _add(r: dict) -> None:
         key = (r["key"], "SPOT") if r["kind"] == "SPOT" else (r["key"], r["kind"], r["settle_date"])
         if key not in seen:
             seen.add(key)
-            out.append(RequestRow(r["key"], r["bbg_ticker"], as_of_date if r["kind"] == "SPOT" else r["settle_date"],
-                                  r["kind"]))
+            out.append(RequestRow(r["key"], r["bbg_ticker"],
+                                  as_of_date if r["kind"] in SPOT_LIKE_MARK_TYPES else r["settle_date"], r["kind"]))
 
     is_option = lambda r: r["product"] == "FX_OPTION"                     # noqa: E731
     is_conversion = lambda r: r["role"] == library.ROLE_CONVERSION        # noqa: E731
@@ -435,9 +444,13 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     options = [r for r in marks if is_option(r)]
     # Forwards' own pairs (SPOT, then each leg date), crosses' conversion pairs, options'
     # own pairs, options' conversion pairs, futures: the order the list always had.
+    # Last (2026-09-21, user: "NDFs - always show 1m forward date price, not spot"): one
+    # NDF_1M per NDF currency's USD pair, asked of the user's own 1M ticker (KWN+1M Curncy
+    # for USDKRW) exactly as a SPOT is, and written on that pair dated today.
     for group in ([r for r in fx if not is_conversion(r)], [r for r in fx if is_conversion(r)],
                   [r for r in options if not is_conversion(r)], [r for r in options if is_conversion(r)],
-                  [r for r in marks if r["kind"] == "FUTURE_PX"]):
+                  [r for r in marks if r["kind"] == "FUTURE_PX"],
+                  sorted((r for r in needed if r["kind"] == library.NDF_1M), key=lambda r: r["key"])):
         for r in group:
             _add(r)
     return out
@@ -485,34 +498,55 @@ class _SharedSession:
                 pass
 
 
+def _bloomberg_said(diag, ticker: str) -> str:
+    """Bloomberg's own words for `ticker` in the LIVE_SPOT request just recorded in `diag`
+    (its security error, else its field exceptions); '' when it said nothing."""
+    rec = (getattr(diag, "requests", None) or [{}])[-1]
+    if rec.get("purpose") != "LIVE_SPOT":
+        return ""
+    for sec in rec.get("raw_response") or []:
+        if sec.get("security") != ticker:
+            continue
+        if sec.get("securityError"):
+            return str(sec["securityError"].get("message") or "security error")
+        return "; ".join(f"{fx.get('fieldId')}: {fx.get('message')}" for fx in sec.get("fieldExceptions") or [])
+    return ""
+
+
 def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str):
     """Live PX_LAST via ReferenceDataRequest (intraday), unlike pull_marks' close-of-day
-    historical path. Returns (rows, failures)."""
+    historical path, for every SPOT and every NDF_1M request (SPOT_LIKE_MARK_TYPES) in ONE
+    request: an NDF currency's 1M outright (2026-09-21) is asked of its own ticker
+    ('KWN+1M Curncy') with the same field, and written on its USD pair dated `as_of` under
+    mark_type NDF_1M, the value as quoted. A failure carries Bloomberg's own reason when
+    it gave one. Returns (rows, failures)."""
     from data.bloomberg.pull_marks import fetch_reference, BloombergRequestError
-    spot_reqs = [r for r in requests if r.mark_type == "SPOT"]
+    spot_reqs = [r for r in requests if r.mark_type in SPOT_LIKE_MARK_TYPES]
     if not spot_reqs:
         return [], []
     tickers = sorted({r.bbg_ticker for r in spot_reqs})
     try:
         data = fetch_reference(session, service, tickers, ["PX_LAST"], diag=diag, tag={"purpose": "LIVE_SPOT"})
     except BloombergRequestError as exc:
-        return [], [{"instrument_id": r.instrument_id, "mark_type": "SPOT", "settle_date": r.settle_date,
-                     "detail": f"SPOT request failed: {exc}"} for r in spot_reqs]
+        return [], [{"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
+                     "detail": f"{r.mark_type} request failed: {exc}"} for r in spot_reqs]
     rows, failures = [], []
     for r in spot_reqs:
         value = data.get(r.bbg_ticker, {}).get("PX_LAST")
         if value is None:
-            failures.append({"instrument_id": r.instrument_id, "mark_type": "SPOT", "settle_date": r.settle_date,
-                             "detail": "no PX_LAST returned"})
+            said = _bloomberg_said(diag, r.bbg_ticker)
+            asked = "" if r.mark_type == "SPOT" else f" for {r.bbg_ticker}"
+            failures.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
+                             "detail": f"no PX_LAST returned{asked}" + (f" (Bloomberg: {said})" if said else "")})
             continue
         try:
             fvalue = float(value)
         except (TypeError, ValueError):
-            failures.append({"instrument_id": r.instrument_id, "mark_type": "SPOT", "settle_date": r.settle_date,
+            failures.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
                              "detail": f"PX_LAST not numeric: {value!r}"})
             continue
         rows.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
-                     "settle_date": as_of.isoformat(), "mark_type": "SPOT", "value": fvalue,
+                     "settle_date": as_of.isoformat(), "mark_type": r.mark_type, "value": fvalue,
                      "source": SRC_SPOT_FWD, "snapped_at": snapped})
     return rows, failures
 
@@ -929,7 +963,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             today = today or book_today()
             spot_rows, spot_fail = _timed(timings, "spot", _live_spot_rows, session, service, requests, today, diag,
                                           snapped)
-            spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows}
+            # SPOT only: an NDF_1M row sits on the same pair (USDKRW) and is not its spot.
+            spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows if r["mark_type"] == "SPOT"}
             # A forward whose settle date is already past (trade settled since the snapshot)
             # has nothing to price: reported SKIPPED, never FAILED, never counted as missing.
             past = {(r.instrument_id, r.settle_date) for r in requests
@@ -993,7 +1028,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             ok_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]): r for r in rows}
             items = []
             for r in requests:
-                settle = today.isoformat() if r.mark_type == "SPOT" else r.settle_date
+                settle = today.isoformat() if r.mark_type in SPOT_LIKE_MARK_TYPES else r.settle_date
                 if (r.instrument_id, r.settle_date) in past and r.mark_type == "FWD_OUTRIGHT":
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
                                   "status": "SKIPPED", "value": None, "source": "",
@@ -1007,7 +1042,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 else:
                     detail = next((f.get("detail", "") for f in spot_fail + fwd_fail + fut_fail
                                    if f.get("instrument_id") == r.instrument_id and f.get("mark_type") == r.mark_type
-                                   and (r.mark_type == "SPOT" or f.get("settle_date") == r.settle_date)), "not returned")
+                                   and (r.mark_type in SPOT_LIKE_MARK_TYPES or f.get("settle_date") == r.settle_date)),
+                                  "not returned")
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
                                   "status": "FAILED", "value": None, "source": "", "detail": detail})
             status["items"] = items

@@ -20,10 +20,19 @@ cycle until 2026-09-21; the rules did not change, only where they are kept):
     today only, nothing prices an option on a past date -- a FWD_OUTRIGHT at the expiry,
     the OIS curve of both currencies and the pair's vol smile.
   * IRS, until maturity and today only: the currency's OIS curve and overnight fixings.
+  * NDF currencies (user decision 2026-09-21: "NDFs - always show 1m forward date price,
+    not spot ... based off the monthly not the spot"): every FX spot / forward / swap and
+    every FX option with a currency in data.ingest.common.NDF_1M_TICKERS (KRW, IDR, INR,
+    TWD, BRL) also needs that currency's 1M NDF outright -- kind NDF_1M, key = the
+    currency's USD pair ('USDKRW', for a cross such as EURKRW too), bbg_ticker = the
+    user's own ticker ('KWN+1M Curncy'), from trade date until the last leg settles (the
+    expiry for an option). Today's pull only: no P&L query reads it (the ladder does), so
+    the backfill never asks for it.
 
-`kind` is the mark_type for what lands in `marks` (SPOT, FWD_OUTRIGHT, FUTURE_PX) and
-OIS_CURVE / FIXINGS / VOL_SMILE for what lands in `curve_quotes` / `index_fixings` /
-`vol_quotes`; those three stand for a set of Bloomberg securities (`tickers` lists them).
+`kind` is the mark_type for what lands in `marks` (SPOT, FWD_OUTRIGHT, FUTURE_PX, and
+NDF_1M) and OIS_CURVE / FIXINGS / VOL_SMILE for what lands in `curve_quotes` /
+`index_fixings` / `vol_quotes`; those three stand for a set of Bloomberg securities
+(`tickers` lists them).
 """
 from __future__ import annotations
 
@@ -35,7 +44,11 @@ SENTINEL = "9999-12-31"
 ROLE_PAIR = "PAIR"                 # the traded pair / contract / currency itself
 ROLE_CONVERSION = "CONVERSION"     # a USD-conversion pair's SPOT
 MARK_KINDS = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX")
-LIVE_ONLY_KINDS = ("OIS_CURVE", "FIXINGS", "VOL_SMILE")
+NDF_1M = "NDF_1M"                  # an NDF currency's 1M outright, on its USD pair (the ladder's rate)
+# Asked for by today's pull only, never of Bloomberg's history: nothing prices a past date
+# off them. NDF_1M lands in `marks` like the MARK_KINDS do, but no P&L query reads it, so
+# it is kept out of MARK_KINDS -- which is what a past close needs and the backfill fills.
+LIVE_ONLY_KINDS = ("OIS_CURVE", "FIXINGS", "VOL_SMILE", NDF_1M)
 # Products whose rows stop being asked for once the ledger has realised the trade (the
 # pull's own rule for options and swaps; an FX leg or a future simply runs to its date).
 _REALISED_FILTER_PRODUCTS = ("FX_OPTION", "IRS")
@@ -104,11 +117,26 @@ def compute(conn: sqlite3.Connection) -> List[dict]:
                 add(trade_id, product, "SPOT", instrument_id, SENTINEL, ticker, needed_from, needed_until,
                     role=ROLE_CONVERSION)
 
+    def add_ndf_1m(trade_id, product, ccys, needed_from, needed_until) -> None:
+        # The 1M NDF outright of each NDF currency, on that currency's USD pair (a cross
+        # such as EURKRW is keyed USDKRW as well): `add` keeps the latest needed_until, so
+        # it runs until the trade's last leg settles.
+        for ccy in ccys:
+            if ccy in ndf_tickers:
+                instrument_id, _ticker = _pair_row(conn, _usd_pair_name(ccy))
+                add(trade_id, product, NDF_1M, instrument_id, SENTINEL, ndf_tickers[ccy], needed_from, needed_until)
+
+    try:
+        from data.ingest.common import NDF_1M_TICKERS as ndf_tickers
+    except ImportError:            # an older data/ingest: no NDF list, nothing extra is asked for
+        ndf_tickers = {}
+
     for trade_id, product, trade_date, instrument_id, ticker, base, quote, settle in conn.execute(_FX_LEGS_SQL):
         add(trade_id, product, "SPOT", instrument_id, SENTINEL, ticker, trade_date, settle)
         add(trade_id, product, "FWD_OUTRIGHT", instrument_id, settle, ticker, trade_date, settle)
         if base != "USD" and quote != "USD":
             add_conversions(trade_id, product, (base, quote), trade_date, settle)
+        add_ndf_1m(trade_id, product, (base, quote), trade_date, settle)
     for trade_id, product, trade_date, instrument_id, ticker, settle in conn.execute(_FUTURE_LEGS_SQL):
         add(trade_id, product, "FUTURE_PX", instrument_id, settle, ticker, trade_date, settle)
     for trade_id, product, trade_date, base, quote, expiry in conn.execute(_OPTIONS_SQL):
@@ -120,6 +148,7 @@ def compute(conn: sqlite3.Connection) -> List[dict]:
         for ccy in (base, quote):
             add(trade_id, product, "OIS_CURVE", ccy, SENTINEL, "", trade_date, expiry)
         add(trade_id, product, "VOL_SMILE", pair, SENTINEL, "", trade_date, expiry)
+        add_ndf_1m(trade_id, product, (base, quote), trade_date, expiry)
     for trade_id, product, trade_date, ccy, maturity in conn.execute(_IRS_SQL):
         add(trade_id, product, "OIS_CURVE", ccy, SENTINEL, "", trade_date, maturity)
         add(trade_id, product, "FIXINGS", ccy, SENTINEL, "", trade_date, maturity)
@@ -139,7 +168,7 @@ def sync(conn: sqlite3.Connection) -> dict:
     mark can be written for it. Returns {added, removed, total}."""
     from data.bloomberg.live import _ensure_fx_instruments
     wanted = {(r["trade_id"], r["kind"], r["key"], r["settle_date"]): r for r in compute(conn)}
-    _ensure_fx_instruments(conn, [r["key"] for r in wanted.values() if r["kind"] in ("SPOT", "FWD_OUTRIGHT")])
+    _ensure_fx_instruments(conn, [r["key"] for r in wanted.values() if r["kind"] in ("SPOT", "FWD_OUTRIGHT", NDF_1M)])
     have = {(r[0], r[1], r[2], r[3]): r for r in conn.execute(
         "SELECT trade_id, kind, key, settle_date, bbg_ticker, role, product, needed_from, needed_until FROM bbg_library")}
     now = _now_iso()
@@ -242,6 +271,9 @@ def tickers(conn: sqlite3.Connection, as_of: str) -> List[dict]:
                 put(r["bbg_ticker"], "FWD_CURVE", f"{key} forward curve", r)
         elif kind == "FUTURE_PX":
             put(r["bbg_ticker"], "PX_LAST", f"{key} futures price", r)
+        elif kind == NDF_1M:
+            ccy = key[3:] if key.startswith("USD") else key[:3]
+            put(r["bbg_ticker"], "PX_LAST", f"1M NDF price, the ladder's rate for {ccy}", r)
         elif kind in ("OIS_CURVE", "FIXINGS"):
             try:
                 from data.bloomberg import rates_marketdata as rm

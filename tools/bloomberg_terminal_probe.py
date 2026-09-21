@@ -28,6 +28,11 @@ Checks (all required for exit code 0):
                      FWD_CURVE table (FWD_CURVE_QUOTE_FORMAT=OUTRIGHTS): exact tenor row,
                      or linear interpolation between tenors / from live spot (labelled
                      BBG_INTERP). Never extrapolated beyond the last tenor.
+Informational (2026-09-21, not required for exit 0; each prints what came back):
+    fwdscale         FWD_POINTS_SCALE and FWD_SCALE together on EURUSD and USDJPY: the
+                     forward-points divisor the past-close forwards need
+    intraday         one IntradayBarRequest (EURUSD Curncy, BID, hourly, the last business
+                     day, 14:00-15:00 New York): the 15:00 New York close the app now uses
 Reports: reports/bloomberg_diagnostic_<timestamp>.json and .txt (next to this file's
 parent directory unless --out is given).
 """
@@ -314,6 +319,92 @@ def check_prices(rep: Report, blpapi, session, service, reqs: list) -> None:
               + (f" ({skipped} skipped: settle date already past, nothing to price)" if skipped else ""))
 
 
+# --------------------------------------------------------------------------- 2026-09-21 probes (informational)
+# Two things the app now relies on and nobody has seen answered on a terminal. Neither is
+# required for exit 0; each prints exactly what came back so a paste settles it.
+SCALE_FIELDS = ["FWD_POINTS_SCALE", "FWD_SCALE"]
+CLOSE_HOUR_NY = 15          # the official close (user decision 2026-09-21), as data/bloomberg/pull_marks.py
+
+
+def check_fwd_scale(rep: Report, blpapi, session, service) -> None:
+    """The forward-points divisor. The Bloomberg PC returned nothing for FWD_POINTS_SCALE,
+    so past-close forwards could not be built; the app now asks for FWD_POINTS_SCALE (the
+    divisor itself) and FWD_SCALE (decimal places, divisor = 10 ** n) in ONE request. Asked
+    here on a 4-decimal pair and a 2-decimal pair: expect FWD_SCALE 4 and 2 (or
+    FWD_POINTS_SCALE 10000 and 100)."""
+    tickers = ["EURUSD Curncy", "USDJPY Curncy"]
+    try:
+        data, errors = reference_request(blpapi, session, service, tickers, SCALE_FIELDS)
+    except Exception as exc:
+        rep.check("fwdscale", False, f"request raised: {exc!r}", required=False)
+        return
+    parts, usable = [], 0
+    for t in tickers:
+        vals = data.get(t, {})
+        divisor = None
+        if isinstance(vals.get("FWD_POINTS_SCALE"), float) and vals["FWD_POINTS_SCALE"] > 0:
+            divisor = f"divisor {vals['FWD_POINTS_SCALE']:g} from FWD_POINTS_SCALE"
+        elif isinstance(vals.get("FWD_SCALE"), float) and vals["FWD_SCALE"] == int(vals["FWD_SCALE"]) and 0 <= vals["FWD_SCALE"] <= 8:
+            divisor = f"divisor {10 ** int(vals['FWD_SCALE']):g} from FWD_SCALE"
+        usable += divisor is not None
+        parts.append(f"{t}: sent {vals or 'nothing'}" + (f" [{errors[t]}]" if t in errors else "")
+                     + f" -> {divisor or 'NO usable divisor'}")
+    rep.check("fwdscale", usable == len(tickers), "; ".join(parts), required=False, fields=SCALE_FIELDS,
+              values={t: data.get(t, {}) for t in tickers}, errors=errors)
+
+
+def check_intraday_close(rep: Report, blpapi, session, service) -> None:
+    """ONE IntradayBarRequest: EURUSD Curncy, BID, hourly, the last business day before
+    today, 14:00-15:00 New York. Past FX closes are read this way (the 15:00 New York
+    close; Bloomberg's daily PX_LAST is the 17:00 one). Confirms the request shape and the
+    event type work for a Curncy ticker here, and shows the bar's own time."""
+    try:
+        from zoneinfo import ZoneInfo
+        ny = ZoneInfo("America/New_York")
+    except Exception as exc:
+        rep.check("intraday", False, f"America/New_York not resolvable ({exc!r}): py -3 -m pip install tzdata", required=False)
+        return
+    day = datetime.now(ny).date() - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    end = datetime(day.year, day.month, day.day, CLOSE_HOUR_NY, 0, tzinfo=ny).astimezone(timezone.utc)
+    start = end - timedelta(hours=1)
+    bars, error = [], ""
+    try:
+        req = service.createRequest("IntradayBarRequest")
+        req.set("security", "EURUSD Curncy")
+        req.set("eventType", "BID")
+        req.set("interval", 60)
+        req.set("startDateTime", start.replace(tzinfo=None))      # UTC, naive
+        req.set("endDateTime", end.replace(tzinfo=None))
+        req.set("gapFillInitialBar", True)
+        session.sendRequest(req)
+        while True:
+            ev = session.nextEvent(15000)
+            if ev.eventType() == blpapi.Event.TIMEOUT:
+                error = "TIMEOUT waiting for response"
+                break
+            for msg in ev:
+                if msg.hasElement("responseError"):
+                    error = f"responseError: {msg.getElement('responseError')}"
+                    continue
+                if not msg.hasElement("barData"):
+                    continue
+                ticks = msg.getElement("barData").getElement("barTickData")
+                for i in range(ticks.numValues()):
+                    bar = ticks.getValueAsElement(i)
+                    bars.append({"time": str(bar.getElement("time").getValue()),
+                                 "close": bar.getElement("close").getValue()})
+            if ev.eventType() == blpapi.Event.RESPONSE:
+                break
+    except Exception as exc:
+        error = f"request raised: {exc!r}"
+    asked = f"EURUSD Curncy BID 60-minute bars {start:%Y-%m-%d %H:%M}-{end:%H:%M} UTC (= 14:00-15:00 New York on {day})"
+    detail = f"{asked}: " + (f"{len(bars)} bar(s) {bars}" if bars else "NO bar returned") + (f" [{error}]" if error else "")
+    rep.check("intraday", bool(bars) and not error, detail, required=False, bars=bars, error=error,
+              expected_bar_start_utc=start.isoformat())
+
+
 # --------------------------------------------------------------------------- FWD_CURVE bulk parsing
 # Standalone copy of data/bloomberg/fwd_curve.py (this file must not import the repo).
 _MID_KEYS = ("MID", "OUTRIGHT", "RATE", "PX_MID", "VALUE")
@@ -551,6 +642,13 @@ def main(argv=None) -> int:
         why = "no Bloomberg service" if service is None else "no instruments to request"
         rep.check("spot", False, f"skipped: {why}")
         rep.check("forward", False, f"skipped: {why}")
+    if service is not None:
+        # 2026-09-21, informational: the points-divisor fields and the 15:00 New York close bar
+        for probe in (check_fwd_scale, check_intraday_close):
+            try:
+                probe(rep, blpapi, session, service)
+            except Exception as exc:
+                rep.check(probe.__name__.replace("check_", ""), False, f"unhandled: {exc!r}", required=False)
     if session is not None:
         try:
             session.stop()

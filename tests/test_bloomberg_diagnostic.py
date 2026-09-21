@@ -88,3 +88,133 @@ def test_missing_database_is_reported_not_raised(tmp_path, capsys):
     assert code == 1
     data = json.loads(next((tmp_path / "r").glob("*.json")).read_text(encoding="utf-8"))
     assert data["checks"]["database"]["ok"] is False and "does not exist" in data["checks"]["database"]["detail"]
+
+
+# --------------------------------------------------------------------------- 2026-09-21 informational probes
+# The forward-points divisor fields (FWD_POINTS_SCALE / FWD_SCALE, one request) and one
+# IntradayBarRequest for the 15:00 New York close bar: each prints exactly what came back.
+class _El:
+    """Just enough of a blpapi Element over plain dicts / lists / scalars."""
+
+    def __init__(self, v):
+        self._v = v
+
+    def hasElement(self, name):
+        return isinstance(self._v, dict) and name in self._v
+
+    def getElement(self, name):
+        return _El(self._v[name])
+
+    def getElementAsString(self, name):
+        return str(self._v[name])
+
+    def values(self):
+        return [_El(x) for x in self._v]
+
+    def numValues(self):
+        return len(self._v) if isinstance(self._v, list) else 1
+
+    def getValueAsElement(self, i):
+        return _El(self._v[i])
+
+    def isArray(self):
+        return isinstance(self._v, list)
+
+    def getValueAsFloat(self):
+        return float(self._v)
+
+    def getValue(self):
+        return self._v
+
+    def __str__(self):
+        return str(self._v)
+
+
+class _Msg(_El):
+    pass
+
+
+class _Event:
+    RESPONSE, TIMEOUT = "RESPONSE", "TIMEOUT"
+
+    def __init__(self, msgs):
+        self._msgs = msgs
+
+    def __iter__(self):
+        return iter(self._msgs)
+
+    def eventType(self):
+        return _Event.RESPONSE
+
+
+class _Blpapi:
+    Event = _Event
+
+
+class _List:
+    def __init__(self):
+        self.items = []
+
+    def appendValue(self, v):
+        self.items.append(v)
+
+
+class _Request:
+    def __init__(self, kind):
+        self.kind, self.lists, self.scalars = kind, {}, {}
+
+    def getElement(self, name):
+        return self.lists.setdefault(name, _List())
+
+    def set(self, name, value):
+        self.scalars[name] = value
+
+
+class _Session:
+    """Answers FWD_SCALE only (FWD_POINTS_SCALE is a field exception), and one BID bar."""
+
+    def __init__(self):
+        self.sent, self._next = [], None
+
+    def createRequest(self, kind):
+        return _Request(kind)
+
+    def sendRequest(self, request):
+        self.sent.append(request)
+        if request.kind == "ReferenceDataRequest":
+            scale = {"EURUSD Curncy": 4, "USDJPY Curncy": 2}
+            self._next = {"securityData": [
+                {"security": t, "fieldData": {"FWD_SCALE": scale[t]},
+                 "fieldExceptions": [{"fieldId": "FWD_POINTS_SCALE", "errorInfo": {"message": "Field not valid"}}]}
+                for t in request.getElement("securities").items]}
+        else:
+            self._next = {"barData": {"barTickData": [{"time": request.scalars["startDateTime"], "close": 1.1712}]}}
+
+    def nextEvent(self, timeout=None):
+        return _Event([_Msg(self._next)])
+
+
+def test_informational_probes_print_both_scale_fields_and_the_1500_close_bar(capsys):
+    tool = _load_tool()
+    rep, session = tool.Report(), _Session()
+    tool.check_fwd_scale(rep, _Blpapi, session, session)
+    tool.check_intraday_close(rep, _Blpapi, session, session)
+
+    scale = rep.checks["fwdscale"]
+    assert scale["required"] is False and scale["ok"] is True
+    assert session.sent[0].getElement("fields").items == ["FWD_POINTS_SCALE", "FWD_SCALE"]     # ONE request, both fields
+    assert "divisor 10000 from FWD_SCALE" in scale["detail"] and "divisor 100 from FWD_SCALE" in scale["detail"]
+    assert "FWD_POINTS_SCALE: Field not valid" in scale["detail"]                               # Bloomberg's own words
+
+    bar = rep.checks["intraday"]
+    request = session.sent[1]
+    assert request.kind == "IntradayBarRequest" and request.scalars["security"] == "EURUSD Curncy"
+    assert request.scalars["eventType"] == "BID" and request.scalars["interval"] == 60
+    assert request.scalars["gapFillInitialBar"] is True
+    start, end = request.scalars["startDateTime"], request.scalars["endDateTime"]
+    assert (end - start).total_seconds() == 3600 and start.tzinfo is None                      # one hour, UTC, naive
+    assert end.hour in (19, 20) and start.weekday() < 5                                         # 15:00 New York, a weekday
+    assert bar["required"] is False and bar["ok"] is True and "1.1712" in bar["detail"]
+    assert "14:00-15:00 New York" in bar["detail"]
+    assert rep.all_required_ok is False                       # informational: they decide nothing about exit 0
+    assert "] fwdscale" in capsys.readouterr().out

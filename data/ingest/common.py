@@ -22,9 +22,20 @@ from typing import Tuple
 
 PERPETUAL = "9999-12-31"
 
-# PROVISIONAL: taken from docs/open-questions.md "NDF list" (BRL, TWD, KRW, IDR
-# non-deliverable; TRY, MXN deliverable). Not yet verified with the prime broker.
-NDF_CCYS = frozenset({"BRL", "TWD", "KRW", "IDR"})
+# The user's NDF list (2026-09-21): KRW, IDR, INR, TWD, BRL non-deliverable (INR added
+# that day); TRY, MXN deliverable.
+NDF_CCYS = frozenset({"BRL", "TWD", "KRW", "IDR", "INR"})
+
+# NDF currencies trade off the 1-month, not spot (user, 2026-09-21: "always show 1m
+# forward date price, not spot"). The user's own tickers: Bloomberg's 1M NDF outright,
+# quoted as the USD pair (KWN+1M = USDKRW 1M). Written as mark_type NDF_1M on the pair.
+NDF_1M_TICKERS = {
+    "KRW": "KWN+1M Curncy",
+    "IDR": "IHN+1M Curncy",
+    "INR": "IRN+1M Curncy",
+    "TWD": "NTN+1M Curncy",
+    "BRL": "BCN+1M Curncy",
+}
 
 DESCRIPTION_RE = re.compile(
     r"^TD (\d{2}/\d{2}/\d{4}) VD (\d{2}/\d{2}/\d{4}) (SELL|BUY) ([A-Z]{3}) VS \.(BUY|SELL) ([A-Z]{3}) @ (\d+\.\d{8})$"

@@ -231,7 +231,7 @@ def _trade(conn, trade_id, instrument_id, product, trade_date, quantity, price, 
 
 def _mark(conn, as_of, instrument_id, settle, mark_type, value, source="BBG_BFXFORWARD", snapped_at=None):
     conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-                 (as_of, instrument_id, settle, mark_type, value, source, snapped_at or f"{as_of}T17:00:00-04:00"))
+                 (as_of, instrument_id, settle, mark_type, value, source, snapped_at or f"{as_of}T15:00:00-04:00"))
 
 
 def _book():
@@ -378,7 +378,7 @@ def test_suspect_rows_flag_a_big_move_and_an_exactly_unchanged_mark_flagged_firs
 def test_suspect_rows_flag_an_old_snap_only_on_the_live_date():
     from data.bloomberg.live import STALE_AFTER_SECONDS
     conn = _marked_book()
-    snapped = dt.datetime.fromisoformat(f"{TODAY}T17:00:00-04:00")
+    snapped = dt.datetime.fromisoformat(f"{TODAY}T15:00:00-04:00")
     fresh = md.suspect_rows(conn, TODAY, today=TODAY, now=snapped + dt.timedelta(seconds=STALE_AFTER_SECONDS - 60))
     assert not any("snapped" in r["flag"] for r in fresh["rows"])
     old = md.suspect_rows(conn, TODAY, today=TODAY, now=snapped + dt.timedelta(seconds=STALE_AFTER_SECONDS + 60))

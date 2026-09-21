@@ -54,6 +54,10 @@ Field / override choices (see fetch_reference / fetch_historical / fetch_fwd_out
 docstrings below for exact names):
   - SPOT: HistoricalDataRequest, field PX_LAST, single date = as_of (consistent with
     FUTURE_PX: both read the closing snapshot for that date rather than a live quote).
+    NOTE (2026-09-21): the app's official close is now 15:00 New York (CLOSE_HOUR_NY) and
+    the app's own backfill reads past FX closes from intraday bars
+    (fetch_intraday_close_series below). This standalone CSV pull still reads the daily
+    PX_LAST, which is Bloomberg's 17:00 New York close, for its SPOT rows.
   - FUTURE_PX: HistoricalDataRequest, field PX_SETTLE, single date = as_of. PX_SETTLE
     (not PX_LAST) because CLAUDE.md's FUTURES row description says "Price = settlement
     price", and marks.mark_type FUTURE_PX should match that, not an intraday last trade.
@@ -75,10 +79,13 @@ docstrings below for exact names):
     pre-spot convention, outright = spot - points for TN, which this module's
     spot + points / scale formula would get backwards) via ReferenceDataRequest field
     PX_LAST, plus each tenor's settlement date from field SETTLE_DT (or FWD_SETTLE_DT)
-    on the same ticker. Outright = spot + points / scale; scale is read per pair from
-    field FWD_POINTS_SCALE (a.k.a. the "points divisor") on the '<PAIR> Curncy' ticker
-    rather than hard-coded, since it varies by pair (e.g. 100 for JPY-style pairs, 10000
-    for others). Rows whose target settle_date falls before the first tenor (SP) or
+    on the same ticker. Outright = spot + points / scale; scale (the "points divisor") is
+    read per pair from the '<PAIR> Curncy' ticker rather than hard-coded, since it varies
+    by pair (e.g. 100 for JPY-style pairs, 10000 for others): field FWD_POINTS_SCALE as
+    is, else 10 ** FWD_SCALE, both asked for in one request (fetch_points_scales,
+    2026-09-21: the Bloomberg PC returned nothing for FWD_POINTS_SCALE). An outright more
+    than 20 % away from spot is rejected as a wrong divisor, never written. Rows whose
+    target settle_date falls before the first tenor (SP) or
     after the last tenor are rejected/logged, never extrapolated. Interpolation is
     linear in forward points (not in outright levels) between the two bracketing tenor
     dates.
@@ -101,7 +108,9 @@ Diagnostics:
 --probe mode: runs a fixed sequence of exploratory requests (session start; open
 //blp/refdata; EURUSD PX_LAST via ReferenceDataRequest and HistoricalDataRequest; the
 direct broken-date FWD_OUTRIGHT request plus two alternative candidates; the EURUSD1M
-and EURUSD3M tenor tickers; FWD_POINTS_SCALE; PX_SETTLE/PX_LAST on ESU6 Index) and
+and EURUSD3M tenor tickers; FWD_POINTS_SCALE and FWD_SCALE together on EURUSD and USDJPY;
+one IntradayBarRequest for the 15:00 New York close bar of EURUSD, BID side; PX_SETTLE /
+PX_LAST on ESU6 Index) and
 records every result in the same diagnostics JSON, tagged with a probe_name and (where
 relevant) which numbered open-questions item it answers. Each step failing never aborts
 the remaining steps. No marks CSV is written or needed in probe mode.
@@ -115,7 +124,7 @@ import json
 import sys
 import traceback
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -183,9 +192,16 @@ _REQUEST_COUNTER = itertools.count(1)
 _CORRELATION_COUNTER = itertools.count(1)
 
 
+# The official close (user decision 2026-09-21: "the EOD is 3pm New York time"; it was
+# 17:00 until then). The one constant for it in data/bloomberg: this module's stamp,
+# backfill.close_stamp and the intraday close request below all read it.
+CLOSE_HOUR_NY = 15
+
+
 def snapped_at(as_of: date) -> str:
-    """17:00 America/New_York on as_of, ISO with the resolved offset for that date."""
-    return datetime(as_of.year, as_of.month, as_of.day, 17, 0, 0, tzinfo=_ny()).isoformat()
+    """The official close (CLOSE_HOUR_NY:00 America/New_York) on as_of, ISO with the
+    resolved offset for that date."""
+    return datetime(as_of.year, as_of.month, as_of.day, CLOSE_HOUR_NY, 0, 0, tzinfo=_ny()).isoformat()
 
 
 class StaleAsOfError(RuntimeError):
@@ -807,6 +823,185 @@ def fetch_historical_series(session, service, tickers: Sequence[str], fields: Se
     return out
 
 
+# --------------------------------------------------------------------------- the 15:00 New York close (2026-09-21)
+# User decision 2026-09-21: "for previous or any closes in FX, we need to use NY 3pm".
+# Bloomberg's daily history has no 15:00 field (PX_LAST is the 17:00 New York close), so a
+# past FX close is read from intraday bars: IntradayBarRequest on //blp/refdata, one
+# request per security per side (BID, ASK) per stretch of days, hourly bars; per day the
+# bar that ENDS at the close (it starts CLOSE_HOUR_NY - 1h New York, the UTC offset
+# resolved from the zone for that date), its close; the mark is the mid of the two sides.
+# UNVERIFIED on a terminal (request shape, event types and bar timing for Curncy tickers):
+# the probe step `intraday_close_bar` prints what one such request returns.
+INTRADAY_BAR_MINUTES = 60
+INTRADAY_SIDES = ("BID", "ASK")
+# Bloomberg keeps intraday history for about this many business days; an older day has no
+# 15:00 close to ask for, and the daily PX_LAST is never put in its place.
+INTRADAY_HISTORY_BUSINESS_DAYS = 140
+# Key of a day's row in fetch_intraday_close_series' result when that day has no close:
+# the plain reason. A row carries either the price field or this, never both.
+CLOSE_REASON = "CLOSE_REASON"
+
+
+def close_time_utc(day: date) -> datetime:
+    """The official close on `day` (CLOSE_HOUR_NY:00 America/New_York) as an aware UTC
+    datetime: 19:00 UTC in summer, 20:00 UTC in winter, from the zone for that date."""
+    return datetime(day.year, day.month, day.day, CLOSE_HOUR_NY, 0, tzinfo=_ny()).astimezone(timezone.utc)
+
+
+def close_bar_start_utc(day: date) -> datetime:
+    """Start (aware UTC) of the bar that ends at the close of `day`."""
+    return close_time_utc(day) - timedelta(minutes=INTRADAY_BAR_MINUTES)
+
+
+def _bar_time_utc(value) -> Optional[datetime]:
+    """A bar's `time` as an aware UTC datetime. Bloomberg sends bar times in UTC; blpapi
+    hands them over naive or offset-aware depending on its version."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def fetch_intraday_bars(session, service, ticker: str, event_type: str, start_utc: datetime, end_utc: datetime,
+                        interval: int = INTRADAY_BAR_MINUTES, diag: Optional[Diagnostics] = None,
+                        tag: Optional[dict] = None) -> Tuple[List[dict], str]:
+    """Thin network layer: ONE IntradayBarRequest (one security, one event type) over
+    [start_utc, end_utc], gapFillInitialBar on. Returns (bars, error): bars as
+    [{'time': aware UTC bar start, 'close': float}] in the order sent, error = Bloomberg's
+    own responseError text ('' when there was none). Same diagnostics / TIMEOUT /
+    correlation-id behaviour as fetch_reference. UNVERIFIED on a terminal."""
+    start_naive = start_utc.astimezone(timezone.utc).replace(tzinfo=None)
+    end_naive = end_utc.astimezone(timezone.utc).replace(tzinfo=None)
+    request = service.createRequest("IntradayBarRequest")
+    request.set("security", ticker)
+    request.set("eventType", event_type)
+    request.set("interval", interval)
+    request.set("startDateTime", start_naive)     # UTC, naive: what the API documents
+    request.set("endDateTime", end_naive)
+    request.set("gapFillInitialBar", True)
+
+    rec = None
+    if diag is not None:
+        rec = diag.new_request("IntradayBarRequest", [ticker], [event_type],
+                               {"interval": str(interval), "startDateTime": start_naive.isoformat() + "Z",
+                                "endDateTime": end_naive.isoformat() + "Z", "gapFillInitialBar": "true"}, tag)
+
+    blpapi = _get_blpapi()
+    correlation_id = blpapi.CorrelationId(next(_CORRELATION_COUNTER))
+    session.sendRequest(request, correlationId=correlation_id)
+    bars: List[dict] = []
+    error = ""
+    late_responses: List[dict] = []
+    timed_out = False
+    while True:
+        event = session.nextEvent(EVENT_TIMEOUT_MS)
+        event_type_seen = event.eventType()
+        if rec is not None:
+            rec["events"].append(str(event_type_seen))
+        if event_type_seen == getattr(blpapi.Event, "TIMEOUT", None):
+            timed_out = True
+            print(f"WARNING: nextEvent timed out after {EVENT_TIMEOUT_MS}ms waiting for "
+                  f"IntradayBarRequest response", file=sys.stderr)
+            break
+        event_is_ours = False
+        for msg in event:
+            msg_cids = list(msg.correlationIds()) if hasattr(msg, "correlationIds") else []
+            if msg_cids and correlation_id not in msg_cids:
+                late_responses.append({
+                    "reason": "correlationId mismatch: message belongs to a previous request, discarded",
+                    "expected": str(correlation_id), "got": [str(c) for c in msg_cids],
+                })
+                continue
+            event_is_ours = True
+            if msg.hasElement("responseError"):
+                err = msg.getElement("responseError")
+                error = err.getElementAsString("message") if err.hasElement("message") else "responseError"
+                continue
+            if not msg.hasElement("barData"):
+                continue
+            bar_data = msg.getElement("barData")
+            if not bar_data.hasElement("barTickData"):
+                continue
+            ticks = bar_data.getElement("barTickData")
+            for i in range(ticks.numValues()):
+                bar = ticks.getValueAsElement(i)
+                if not (bar.hasElement("time") and bar.hasElement("close")):
+                    continue
+                when = _bar_time_utc(bar.getElement("time").getValue())
+                close = _plain_number(bar.getElement("close").getValue())
+                if when is not None and close is not None:
+                    bars.append({"time": when, "close": close})
+        if event_type_seen == blpapi.Event.RESPONSE and event_is_ours:
+            break
+
+    raw_secs = [{"security": ticker, "fieldData": {b["time"].isoformat(): b["close"] for b in bars},
+                 "fieldExceptions": [], "securityError": {"message": error} if error else None}]
+    classification, detail = _classify_secs(raw_secs, timed_out, [ticker])
+    if rec is not None:
+        rec["raw_response"] = raw_secs
+        rec["late_responses"] = late_responses
+        diag.finish_request(rec, classification, detail)
+    if classification == CLASS_TIMEOUT:
+        raise BloombergRequestError("IntradayBarRequest", [ticker], [event_type], classification, detail)
+    return bars, error
+
+
+def fetch_intraday_close_series(session, service, tickers: Sequence[str], fields: Sequence[str],
+                                start: date, end: date, diag: Optional[Diagnostics] = None,
+                                tag: Optional[dict] = None) -> Dict[str, Dict[str, Dict[str, object]]]:
+    """The 15:00 New York close of every ticker on every weekday of [start, end], in the
+    shape fetch_historical_series returns for PX_LAST -- {ticker: {date_iso: {field:
+    value}}}, `field` being fields[0] -- so the backfill's fetchers are interchangeable.
+
+    Two IntradayBarRequests per ticker for the whole span (BID and ASK), never one per
+    day. A day's value is the mid of the BID close and the ASK close of the hourly bar
+    ending at the close. A day without both is NOT given the daily PX_LAST or any other
+    substitute: its row is {CLOSE_REASON: why} instead -- only one side came back, no bar
+    ends at the close that day (a holiday, or no quote in that hour even after the gap
+    fill), or Bloomberg's own error for the request. UNVERIFIED on a terminal."""
+    field = fields[0] if fields else "PX_LAST"
+    days, d = [], start
+    while d <= end:
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+    out: Dict[str, Dict[str, Dict[str, object]]] = {t: {} for t in tickers}
+    if not days:
+        return out
+    start_utc, end_utc = close_bar_start_utc(days[0]), close_time_utc(days[-1])
+    for ticker in tickers:
+        closes: Dict[str, Dict[datetime, float]] = {}
+        errors: Dict[str, str] = {}
+        for side in INTRADAY_SIDES:
+            side_tag = {**(tag or {"purpose": "close_1500_ny"}), "side": side}
+            bars, errors[side] = fetch_intraday_bars(session, service, ticker, side, start_utc, end_utc,
+                                                     diag=diag, tag=side_tag)
+            closes[side] = {bar["time"]: bar["close"] for bar in bars}
+        for day in days:
+            bar_start = close_bar_start_utc(day)
+            got = {side: closes[side].get(bar_start) for side in INTRADAY_SIDES}
+            have = [side for side in INTRADAY_SIDES if got[side] is not None]
+            if len(have) == len(INTRADAY_SIDES):
+                out[ticker][day.isoformat()] = {field: sum(got.values()) / len(got)}
+                continue
+            said = next((errors[side] for side in INTRADAY_SIDES if errors[side]), "")
+            if have:
+                lacking = [side for side in INTRADAY_SIDES if side not in have][0]
+                reason = (f"only the {have[0]} side of {ticker} came back for the hour ending {CLOSE_HOUR_NY}:00 "
+                          f"New York on {day.isoformat()} (no {lacking}), and a mid needs both")
+            elif said:
+                reason = f"Bloomberg answered the intraday request for {ticker} with: {said}"
+            else:
+                reason = (f"Bloomberg returned no hourly bar ending {CLOSE_HOUR_NY}:00 New York for {ticker} on "
+                          f"{day.isoformat()} (a holiday, or no quote in that hour)")
+            out[ticker][day.isoformat()] = {CLOSE_REASON: reason}
+    return out
+
+
 # --------------------------------------------------------------------------- pure logic
 @dataclass(frozen=True)
 class TenorPoint:
@@ -841,8 +1036,117 @@ def interpolate_forward_points(target: date, tenor_points: Sequence[TenorPoint])
 def outright_from_points(spot: float, points: float, scale: float) -> float:
     """outright = spot + points / scale (CLAUDE.md gives no formula; this is the
     standard FX forward-points convention: points are quoted in pips-of-the-pair,
-    scale = FWD_POINTS_SCALE for that pair, e.g. 100 for JPY-style pairs)."""
+    scale = the pair's points divisor, e.g. 100 for JPY-style pairs -- see
+    fetch_points_scales)."""
     return spot + points / scale
+
+
+# ---- the points divisor (2026-09-21). Found on the Bloomberg PC: the tenor tickers answer
+# with forward points, but the terminal returns nothing for FWD_POINTS_SCALE, a field name
+# that was never verified (docs/open-questions.md item 28) -- so no past forward could be
+# built. Both candidate fields are asked for in ONE ReferenceDataRequest:
+#   FWD_POINTS_SCALE  read as the divisor itself (10000 for EURUSD, 100 for USDJPY);
+#   FWD_SCALE         read as the number of decimal places the points are shifted (4 for
+#                     EURUSD, 2 for USDJPY): divisor = 10 ** FWD_SCALE.
+# UNVERIFIED on a terminal, both of them: the probe step `fwd_points_scale` prints what
+# came back for each. Never a hard-coded pip size; a pair neither field answers for has
+# no scale, and its forwards stay missing with a reason that names both fields.
+SCALE_FIELD_DIVISOR = "FWD_POINTS_SCALE"
+SCALE_FIELD_EXPONENT = "FWD_SCALE"
+SCALE_FIELDS = (SCALE_FIELD_DIVISOR, SCALE_FIELD_EXPONENT)
+MAX_SCALE_EXPONENT = 8
+# A forward converted from points must sit within this fraction of the same day's spot, or
+# it is not written: a wrong divisor by a factor of 100 or more throws the outright far off
+# spot, and that must never reach `marks`. (It cannot catch a divisor that is too LARGE,
+# which shrinks the points towards zero; the probe's printout settles that.)
+MAX_POINTS_OUTRIGHT_DEVIATION = 0.20
+
+
+def _plain_number(value) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number not in (float("inf"), float("-inf")) else None
+
+
+def scale_from_fields(row: Optional[Dict[str, object]]) -> Tuple[Optional[float], str]:
+    """(divisor, the field that gave it) from one security's answer to SCALE_FIELDS:
+    FWD_POINTS_SCALE when it is a positive number, otherwise 10 ** FWD_SCALE when FWD_SCALE
+    is a whole number from 0 to MAX_SCALE_EXPONENT. (None, '') when neither answers. Pure."""
+    row = row or {}
+    divisor = _plain_number(row.get(SCALE_FIELD_DIVISOR))
+    if divisor is not None and divisor > 0:
+        return divisor, SCALE_FIELD_DIVISOR
+    exponent = _plain_number(row.get(SCALE_FIELD_EXPONENT))
+    if exponent is not None and exponent == int(exponent) and 0 <= exponent <= MAX_SCALE_EXPONENT:
+        return float(10 ** int(exponent)), SCALE_FIELD_EXPONENT
+    return None, ""
+
+
+def fetch_points_scales(session, service, pairs: Sequence[str], diag: Optional[Diagnostics] = None,
+                        tag: Optional[dict] = None, fetch=None) -> Dict[str, dict]:
+    """The points divisor of each pair, for the backfill and the live tenor path alike:
+    ONE ReferenceDataRequest for SCALE_FIELDS on every '<pair> Curncy'. Returns
+    {pair: {'scale': divisor or None, 'field': the field that answered or '',
+            'raw': {field: value as Bloomberg sent it}, 'errors': {field: Bloomberg's message}}}.
+
+    A field this terminal does not know comes back as a field exception for that field
+    only; fetch_reference leaves it out of the row and still returns the other one, and
+    its message is kept under 'errors' so a reason can repeat Bloomberg's own words.
+    `fetch(session, service, tickers, fields) -> {ticker: {field: value}}` replaces
+    fetch_reference (tests, backfill's `scale_fetch`)."""
+    pairs = list(pairs)
+    tickers = [f"{pair} Curncy" for pair in pairs]
+    errors: Dict[str, Dict[str, str]] = {}
+    if fetch is not None:
+        data = fetch(session, service, tickers, list(SCALE_FIELDS)) or {}
+    else:
+        own_diag = diag if diag is not None else Diagnostics()
+        data = fetch_reference(session, service, tickers, list(SCALE_FIELDS), diag=own_diag,
+                               tag=tag or {"purpose": "points_scale"})
+        for sec in (own_diag.requests[-1].get("raw_response") or []) if own_diag.requests else []:
+            for fx in sec.get("fieldExceptions") or []:
+                if fx.get("fieldId"):
+                    errors.setdefault(sec.get("security"), {})[fx["fieldId"]] = fx.get("message") or "field exception"
+            if sec.get("securityError"):
+                message = sec["securityError"].get("message") or "security error"
+                errors[sec.get("security")] = {f: message for f in SCALE_FIELDS}
+    out: Dict[str, dict] = {}
+    for pair, ticker in zip(pairs, tickers):
+        row = data.get(ticker) or {}
+        scale, field = scale_from_fields(row)
+        out[pair] = {"scale": scale, "field": field, "raw": {f: row[f] for f in SCALE_FIELDS if f in row},
+                     "errors": dict(errors.get(ticker) or {})}
+    return out
+
+
+def describe_scale(pair: str, report: Optional[dict]) -> str:
+    """One plain sentence on where `pair`'s points divisor came from, or why there is
+    none -- naming both fields when neither answered, with what each one sent."""
+    report = report or {}
+    raw, errors = report.get("raw") or {}, report.get("errors") or {}
+    if report.get("scale"):
+        field = report.get("field") or "?"
+        return f"{pair}: {field} = {raw.get(field)!r}, points divisor {report['scale']:g}"
+    said = "; ".join(f"{f}: " + (f"{raw[f]!r}, not usable" if f in raw else errors.get(f) or "not returned")
+                     for f in SCALE_FIELDS)
+    return (f"Bloomberg returned forward points for {pair} but neither {SCALE_FIELD_DIVISOR} nor "
+            f"{SCALE_FIELD_EXPONENT}, so they cannot be converted to outrights ({said})")
+
+
+def points_outright_is_plausible(outright: float, spot: float) -> bool:
+    """A points-converted forward within MAX_POINTS_OUTRIGHT_DEVIATION of spot."""
+    return spot > 0 and abs(outright / spot - 1.0) <= MAX_POINTS_OUTRIGHT_DEVIATION
+
+
+def implausible_outright_reason(pair: str, settle: str, outright: float, spot: float, report: Optional[dict]) -> str:
+    report = report or {}
+    return (f"{pair} {settle}: the forward built from Bloomberg's points is {outright:g}, more than "
+            f"{MAX_POINTS_OUTRIGHT_DEVIATION:.0%} away from that day's spot {spot:g}; the points divisor "
+            f"{report.get('scale')!r} (from {report.get('field') or 'no field'}) looks wrong, so nothing was written")
 
 
 # --------------------------------------------------------------------------- request CSV
@@ -1014,11 +1318,13 @@ def fetch_fwd_outright_direct(session, service, bbg_ticker: str, settle_date: st
     return float(val)
 
 
-def fetch_tenor_points(session, service, pair: str,
-                        diag: Optional[Diagnostics] = None) -> Tuple[List[TenorPoint], Optional[float]]:
+def fetch_tenor_points(session, service, pair: str, diag: Optional[Diagnostics] = None
+                       ) -> Tuple[List[TenorPoint], Optional[float], dict]:
     """Fetch standard-tenor forward points (PX_LAST) and settlement dates (SETTLE_DT)
-    for '<pair><TENOR> Curncy', plus the pair's FWD_POINTS_SCALE from '<pair> Curncy'.
-    Tenors whose response is missing either field are skipped, not defaulted.
+    for '<pair><TENOR> Curncy', plus the pair's points divisor from '<pair> Curncy'
+    (fetch_points_scales: FWD_POINTS_SCALE, else 10 ** FWD_SCALE, one request for both).
+    Tenors whose response is missing either field are skipped, not defaulted. Returns
+    (points, divisor or None, the scale report fetch_points_scales gives for the pair).
     """
     tenor_tickers = {tenor: f"{pair}{tenor} Curncy" for tenor in STANDARD_TENORS}
     data = fetch_reference(session, service, list(tenor_tickers.values()), ["PX_LAST", "SETTLE_DT"],
@@ -1035,11 +1341,9 @@ def fetch_tenor_points(session, service, pair: str,
             sd = sd.date()
         points.append(TenorPoint(tenor, sd, float(row["PX_LAST"])))
 
-    scale_data = fetch_reference(session, service, [f"{pair} Curncy"], ["FWD_POINTS_SCALE"],
-                                  diag=diag, tag={"purpose": "tenor_fallback_scale", "pair": pair})
-    scale_val = scale_data.get(f"{pair} Curncy", {}).get("FWD_POINTS_SCALE")
-    scale = float(scale_val) if scale_val is not None else None
-    return points, scale
+    report = fetch_points_scales(session, service, [pair], diag=diag,
+                                 tag={"purpose": "tenor_fallback_scale", "pair": pair})[pair]
+    return points, report["scale"], report
 
 
 def build_fwd_outright_rows(session, service, requests: Sequence[RequestRow], as_of: date,
@@ -1062,16 +1366,21 @@ def build_fwd_outright_rows(session, service, requests: Sequence[RequestRow], as
     returns, via _batch_classification) -- when a row here has no SPOT to interpolate off
     of, the failure this function records uses that underlying classification (e.g.
     SECURITY_ERROR/TIMEOUT) instead of always hard-coding CLASS_NO_VALUE, which previously
-    hid the real reason SPOT was missing. Same idea for FWD_POINTS_SCALE: the scale
+    hid the real reason SPOT was missing. Same idea for the points divisor: the scale
     request's own classification is captured right after it is made and cached alongside
     the tenor points, so a scale-missing failure reflects why (e.g. FIELD_EXCEPTION) rather
-    than a blanket NO_VALUE."""
+    than a blanket NO_VALUE.
+
+    2026-09-21: the divisor comes from fetch_points_scales (FWD_POINTS_SCALE, else
+    10 ** FWD_SCALE); which field answered is recorded with every interpolation, the
+    failure names both fields when neither did, and an outright more than
+    MAX_POINTS_OUTRIGHT_DEVIATION away from spot is rejected, never written."""
     rows = [r for r in requests if r.mark_type == "FWD_OUTRIGHT"]
     if not rows:
         return [], [], []
     out, warnings, failures = [], [], []
     snapped = snapped_at(as_of)
-    tenor_cache: Dict[str, Tuple[List[TenorPoint], Optional[float], Optional[str], Optional[str]]] = {}
+    tenor_cache: Dict[str, Tuple[List[TenorPoint], Optional[float], Optional[str], Optional[str], dict]] = {}
 
     def _fail(detail: str, classification: str) -> None:
         warnings.append(f"FWD_OUTRIGHT {pair} {r.settle_date}: {detail}")
@@ -1109,15 +1418,15 @@ def build_fwd_outright_rows(session, service, requests: Sequence[RequestRow], as
         # fallback: tenor interpolation
         if pair not in tenor_cache:
             try:
-                t_points, t_scale = fetch_tenor_points(session, service, pair, diag=diag)
+                t_points, t_scale, t_report = fetch_tenor_points(session, service, pair, diag=diag)
             except BloombergRequestError as e:
                 _fail(f"tenor fallback request failed: {e}", e.classification)
                 continue
-            # fetch_tenor_points' last request is the FWD_POINTS_SCALE lookup, so the most
+            # fetch_tenor_points' last request is the points-divisor lookup, so the most
             # recently recorded diag entry is that request's own classification/detail.
             scale_classification, scale_detail = _batch_classification(diag)
-            tenor_cache[pair] = (t_points, t_scale, scale_classification, scale_detail)
-        points, scale, scale_classification, scale_detail = tenor_cache[pair]
+            tenor_cache[pair] = (t_points, t_scale, scale_classification, scale_detail, t_report)
+        points, scale, scale_classification, scale_detail, scale_report = tenor_cache[pair]
         spot = spot_rows_by_instrument.get(pair)
         if spot is None:
             classification = (spot_batch_classification
@@ -1132,7 +1441,7 @@ def build_fwd_outright_rows(session, service, requests: Sequence[RequestRow], as
             classification = (scale_classification
                                if scale_classification and scale_classification != CLASS_OK
                                else CLASS_NO_VALUE)
-            detail = "no FWD_POINTS_SCALE returned, cannot interpolate"
+            detail = describe_scale(pair, scale_report)
             if scale_detail:
                 detail += f" ({scale_detail})"
             _fail(detail, classification)
@@ -1152,6 +1461,9 @@ def build_fwd_outright_rows(session, service, requests: Sequence[RequestRow], as
             _fail(detail, CLASS_REJECTED)
             continue
         outright = outright_from_points(spot, interp_points, scale)
+        if not points_outright_is_plausible(outright, spot):
+            _fail(implausible_outright_reason(pair, r.settle_date, outright, spot, scale_report), CLASS_REJECTED)
+            continue
         out.append({
             "as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
             "settle_date": r.settle_date, "mark_type": "FWD_OUTRIGHT", "value": outright,
@@ -1159,6 +1471,7 @@ def build_fwd_outright_rows(session, service, requests: Sequence[RequestRow], as
         })
         if diag is not None:
             diag.record_interpolation(pair, r.settle_date, points, scale, interp_points, outright, spot)
+            diag.interpolations[-1]["scale_field"] = scale_report.get("field")
             diag.record_fwd_outright_result(r.instrument_id, r.settle_date, "interp",
                                              source=SRC_INTERP, value=outright)
     return out, warnings, failures
@@ -1359,10 +1672,42 @@ def run_probe(args, diag: Diagnostics) -> int:
                                       diag=diag, tag=tag),
          answers_question=28)
 
-    step("fwd_points_scale", "FWD_POINTS_SCALE on EURUSD Curncy",
-         lambda tag: fetch_reference(session, service, ["EURUSD Curncy"], ["FWD_POINTS_SCALE"],
-                                      diag=diag, tag=tag),
-         answers_question=28)
+    # 2026-09-21: the Bloomberg PC returned nothing for FWD_POINTS_SCALE, so both
+    # candidate fields are asked for, on a 4-decimal pair and a 2-decimal pair, and what
+    # each sent is printed (the step's detail carries the whole answer; the field
+    # exceptions, if any, are in its raw_response).
+    def _scale_step(tag):
+        result = fetch_reference(session, service, ["EURUSD Curncy", "USDJPY Curncy"], list(SCALE_FIELDS),
+                                 diag=diag, tag=tag)
+        for ticker in ("EURUSD Curncy", "USDJPY Curncy"):
+            scale, field = scale_from_fields(result.get(ticker))
+            print(f"probe fwd_points_scale: {ticker} sent {result.get(ticker) or {}} -> "
+                  + (f"points divisor {scale:g} from {field}" if scale else
+                     f"no usable divisor from {' or '.join(SCALE_FIELDS)}"), file=sys.stderr)
+        return result
+
+    step("fwd_points_scale", f"{' and '.join(SCALE_FIELDS)} on EURUSD Curncy and USDJPY Curncy "
+         f"(the points divisor: {SCALE_FIELD_DIVISOR} as is, else 10 ** {SCALE_FIELD_EXPONENT})",
+         _scale_step, answers_question=28, candidate=True)   # two guesses in one request: one may well be refused
+
+    # 2026-09-21: the 15:00 New York close of a past day comes from intraday bars
+    # (fetch_intraday_close_series). One request, as small as it gets, to confirm the
+    # request shape and the BID event type work for a Curncy ticker on this terminal.
+    def _intraday_step(tag):
+        day = as_of - timedelta(days=1)
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+        bars, error = fetch_intraday_bars(session, service, "EURUSD Curncy", "BID", close_bar_start_utc(day),
+                                          close_time_utc(day), diag=diag, tag=tag)
+        result = {"EURUSD Curncy": {"day": day.isoformat(), "expected_bar_start_utc": close_bar_start_utc(day).isoformat(),
+                                    "bars": [{"time": b["time"].isoformat(), "close": b["close"]} for b in bars],
+                                    "responseError": error}}
+        print(f"probe intraday_close_bar: {result}", file=sys.stderr)
+        return result
+
+    step("intraday_close_bar", f"IntradayBarRequest EURUSD Curncy BID, {INTRADAY_BAR_MINUTES}-minute bars, the "
+         f"business day before --as-of, {CLOSE_HOUR_NY - 1}:00-{CLOSE_HOUR_NY}:00 New York (the official close bar)",
+         _intraday_step)
 
     step("es_settle_px_settle", "PX_SETTLE on ESU6 Index via HistoricalDataRequest for --as-of",
          lambda tag: fetch_historical(session, service, ["ESU6 Index"], "PX_SETTLE", as_of, diag=diag, tag=tag),

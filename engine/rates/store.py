@@ -66,9 +66,9 @@ def _ny() -> ZoneInfo:
 
 
 def snapped_at(as_of: datetime.date) -> str:
-    """17:00 America/New_York on as_of, ISO with the resolved offset for that date --
+    """15:00 America/New_York (the official close, user decision 2026-09-21) on as_of, ISO with the resolved offset for that date --
     same close convention as CLAUDE.md "Mark time" / data/bloomberg/pull_marks.py."""
-    return datetime.datetime(as_of.year, as_of.month, as_of.day, 17, 0, 0, tzinfo=_ny()).isoformat()
+    return datetime.datetime(as_of.year, as_of.month, as_of.day, 15, 0, 0, tzinfo=_ny()).isoformat()
 
 
 def _curve_id(ccy: str, index: str) -> str:

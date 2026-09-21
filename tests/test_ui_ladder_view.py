@@ -60,51 +60,99 @@ def test_view_from_controls_maps_dash_values():
     assert cash_ladder.view_from_controls(None, None, None, None, None) == exposure.DEFAULT_VIEW
 
 
-def test_combined_frame_marks_usd_column_at_each_dates_outright_and_appends_total():
-    """Spec section 5: a value-date row's USD equivalent is its legs at that date's
-    outright, the settled row at spot, and a Total row follows the dated rows."""
+def test_grid_is_one_row_per_currency_with_settled_dates_total_columns_and_a_usd_equivalent_row():
+    """User, 2026-09-21: "flip the other way, currency vertical, dates horizontal". One
+    row per currency (|USD delta| descending), columns Settled cash / dates ascending /
+    Total (columns shown), and the old per-date USD equivalent column as the bottom row:
+    spec section 5 numbers unchanged (a value date's USD equivalent is its legs at that
+    date's outright, settled cash at spot)."""
     from engine.ladder.exposure import build_exposure
+    from engine.ladder.exposure_adapter import SETTLED
     records = _spec_records()
     result = build_exposure(records, RATES)
-    frame, ccys = exposure.combined_frame(result, records, rates=RATES, forward_rates=FWD)
+    frame, ccys = exposure.combined_frame(result, records, forward_rates=FWD)
+    assert ccys == ["AUD", "USD", "JPY"]
+    assert list(frame[exposure.ROW_LABEL_COL]) == ["AUD", "USD", "JPY", exposure.USD_EQUIVALENT_ROW_LABEL]
+    assert list(frame["kind"]) == ["currency"] * 3 + [exposure.USD_EQUIVALENT_COL]
+    assert exposure.grid_value_columns(frame) == [SETTLED, "2026-09-24", "2026-09-28", "2026-10-21", exposure.TOTAL_COL]
     by_label = frame.set_index(exposure.ROW_LABEL_COL)
-    assert list(frame["kind"])[:5] == ["settled", "date", "date", "date", "total"]
+    assert by_label.loc["AUD", SETTLED] == "23,771,313" and by_label.loc["AUD", "2026-09-24"] == "(21,109,276)"
+    assert by_label.loc["AUD", "2026-10-21"] == exposure.EM_DASH and by_label.loc["JPY", "2026-10-21"] == "(147,000,000)"
+    assert by_label.loc["AUD", exposure.TOTAL_COL] == "13,808,542"
     # settled: 23,771,313 x 0.66 - 16,500,000 ; 24 Sep: -21,109,276 x 0.659 + 15,000,000
-    assert by_label.loc[exposure.SETTLED_ROW_LABEL, exposure.USD_EQUIVALENT_COL] == "(810,933)"
-    assert by_label.loc["24 Sep 2026", exposure.USD_EQUIVALENT_COL] == "1,088,987"
-    assert by_label.loc["28 Sep 2026", exposure.USD_EQUIVALENT_COL] == "(665,600)"
-    assert by_label.loc["21 Oct 2026", exposure.USD_EQUIVALENT_COL] == "13,423"
-    total = by_label.loc[exposure.TOTAL_ROW_LABEL]
-    assert total["AUD"] == "13,808,542" and total[exposure.USD_EQUIVALENT_COL] == "(374,123)"
-    assert by_label.loc["Local delta", "AUD"] == "13,808,542"
+    usd = by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL]
+    assert usd[SETTLED] == "(810,933)" and usd["2026-09-24"] == "1,088,987"
+    assert usd["2026-09-28"] == "(665,600)" and usd["2026-10-21"] == "13,423"
+    assert usd[exposure.TOTAL_COL] == "(374,123)"
+    table = exposure.combined_table(result, records, forward_rates=FWD)
+    assert table.id == exposure.COMBINED_TABLE_ID
+    assert [c["name"] for c in table.columns] == ["Currency", exposure.SETTLED_ROW_LABEL, "24 Sep 2026", "28 Sep 2026",
+                                                  "21 Oct 2026", exposure.TOTAL_COLUMN_LABEL]
+    assert exposure.TOTAL_COLUMN_LABEL == "Total (columns shown)"
+    # the settled-cash emphasis and the sign colours follow the new shape
+    styles = table.style_data_conditional
+    assert any(s["if"].get("column_id") == SETTLED and s.get("fontWeight") == "700" for s in styles)
+    assert any(s["if"].get("column_id") == "2026-09-24" and "contains '('" in s["if"]["filter_query"] for s in styles)
+    block, _ = exposure.summary_block_frame(result, records, rates=RATES)
+    assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "AUD"] == "13,808,542"
 
 
-def test_view_filters_rows_and_hides_all_zero_columns_but_keeps_settled_and_deltas():
+def test_usd_equivalent_row_equals_the_engines_per_date_usd_equivalents():
+    """The bottom row is the old right-hand column, number for number: the engine's
+    `ladder_usd_equivalent` per date, its Total the sum of the dates shown, and blank
+    (never a partial sum) where an amount has no mark."""
+    from engine.ladder.exposure import build_exposure, ladder_usd_equivalent
+    from engine.ladder.exposure_adapter import SETTLED
+    records = _spec_records()
+    result = build_exposure(records, RATES)
+    engine = ladder_usd_equivalent(result, FWD)
+    frame, _ = exposure.combined_frame(result, records, forward_rates=FWD)
+    usd = frame.set_index(exposure.ROW_LABEL_COL).loc[exposure.USD_EQUIVALENT_ROW_LABEL]
+    for day in (SETTLED, "2026-09-24", "2026-09-28", "2026-10-21"):
+        assert usd[day] == exposure.format_amount(engine[day])
+    assert usd[exposure.TOTAL_COL] == exposure.format_amount(engine.sum())
+    # no JPY rate: the JPY date and the total are blank, the AUD-only dates are not
+    no_jpy = {"AUD": RATES["AUD"]}
+    frame, _ = exposure.combined_frame(build_exposure(records, no_jpy), records)
+    usd = frame.set_index(exposure.ROW_LABEL_COL).loc[exposure.USD_EQUIVALENT_ROW_LABEL]
+    assert usd["2026-10-21"] == "" and usd[exposure.TOTAL_COL] == "" and usd["2026-09-24"] != ""
+
+
+def test_view_filters_dates_and_hides_all_zero_currencies_but_keeps_settled_and_deltas():
     from engine.ladder.exposure import build_exposure
+    from engine.ladder.exposure_adapter import SETTLED
     records = _spec_records()
     result = build_exposure(records, RATES)
     view = exposure.LadderView(date_from="2026-09-24", date_to="2026-09-28")
-    frame, ccys = exposure.combined_frame(result, records, rates=RATES, forward_rates=FWD, view=view)
-    labels = list(frame[exposure.ROW_LABEL_COL])
-    assert labels[:4] == [exposure.SETTLED_ROW_LABEL, "24 Sep 2026", "28 Sep 2026", exposure.TOTAL_ROW_LABEL]
-    assert "21 Oct 2026" not in labels
-    assert "JPY" not in ccys  # zero on every shown row: hidden in this view
+    frame, ccys = exposure.combined_frame(result, records, forward_rates=FWD, view=view)
+    assert exposure.grid_value_columns(frame) == [SETTLED, "2026-09-24", "2026-09-28", exposure.TOTAL_COL]
+    assert "2026-10-21" not in frame.columns
+    assert "JPY" not in ccys and "JPY" not in list(frame[exposure.CURRENCY_COL])  # zero on every shown date: hidden
     by_label = frame.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc[exposure.TOTAL_ROW_LABEL, "AUD"] == "13,808,542"      # settled + 24 Sep + 28 Sep
-    assert by_label.loc["Local delta", "AUD"] == "13,808,542"                   # whole grid, unchanged
+    assert by_label.loc["AUD", exposure.TOTAL_COL] == "13,808,542"              # settled + 24 Sep + 28 Sep
+    assert by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, exposure.TOTAL_COL] == "(387,546)"  # the three shown
+    block, block_ccys = exposure.summary_block_frame(result, records, rates=RATES, view=view)
+    assert block_ccys == ccys                                                   # same currencies, same order
+    assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "AUD"] == "13,808,542"   # whole grid, unchanged
     grid = exposure.grid_records(records, exposure.LadderView(currencies=frozenset({"AUD"})))
     assert {r["currency"] for r in grid} == {"AUD"}
+    frame, ccys = exposure.combined_frame(build_exposure(grid, RATES), grid, forward_rates=FWD)
+    assert ccys == ["AUD"] and list(frame[exposure.CURRENCY_COL]) == ["AUD", ""]
 
 
 def test_settled_one_by_one_puts_settled_legs_on_their_own_dates():
     from engine.ladder.exposure import build_exposure
+    from engine.ladder.exposure_adapter import SETTLED
     view = exposure.LadderView(settled_one_by_one=True)
     records = exposure.grid_records(_spec_records(), view)
     result = build_exposure(records, RATES)
-    frame, _ = exposure.combined_frame(result, records, rates=RATES, view=view)
-    labels = list(frame[exposure.ROW_LABEL_COL])
-    assert exposure.SETTLED_ROW_LABEL not in labels and labels[0] == "16 Sep 2026"
-    assert frame.iloc[0]["AUD"] == "23,771,313"
+    frame, _ = exposure.combined_frame(result, records, view=view)
+    columns = exposure.grid_value_columns(frame)
+    assert SETTLED not in columns and columns[0] == "2026-09-16"
+    assert frame.set_index(exposure.ROW_LABEL_COL).loc["AUD", "2026-09-16"] == "23,771,313"
+    table = exposure.combined_table(result, records, view=view)
+    names = [c["name"] for c in table.columns]
+    assert exposure.SETTLED_ROW_LABEL not in names and names[1] == "16 Sep 2026"
 
 
 def test_show_usd_puts_usd_equivalents_in_the_cells():
@@ -112,12 +160,14 @@ def test_show_usd_puts_usd_equivalents_in_the_cells():
     records = _spec_records()
     result = build_exposure(records, RATES)
     view = exposure.LadderView(show_usd=True)
-    frame, _ = exposure.combined_frame(result, records, rates=RATES, forward_rates=FWD, view=view)
+    frame, _ = exposure.combined_frame(result, records, forward_rates=FWD, view=view)
     by_label = frame.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc["24 Sep 2026", "AUD"] == "(13,911,013)"   # -21,109,276 x 0.659
-    assert by_label.loc["24 Sep 2026", "USD"] == "15,000,000"
-    table = exposure.combined_table(result, records, rates=RATES, forward_rates=FWD, view=view)
-    assert [c["name"] for c in table.columns][1].endswith("(USD eq.)")
+    assert by_label.loc["AUD", "2026-09-24"] == "(13,911,013)"   # -21,109,276 x 0.659
+    assert by_label.loc["USD", "2026-09-24"] == "15,000,000"
+    # in USD cells the bottom row is simply the column sum
+    assert by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, "2026-09-24"] == "1,088,987"
+    table = exposure.combined_table(result, records, forward_rates=FWD, view=view)
+    assert [c["name"] for c in table.columns][0] == "Currency (cells in USD eq.)"
     assert "Cells are USD equivalents" in exposure.usd_basis_caption(FWD, view).children
 
 
@@ -155,11 +205,15 @@ def test_local_vs_usd_details_and_export_frames():
     assert rows[("AUD", "24 Sep 2026")]["implied_rate_local_per_usd"] == "1.40729"   # 21,109,276 / 15,000,000
     assert rows[("AUD", exposure.SETTLED_ROW_LABEL)]["net_local"] == "23,771,313"
     result = build_exposure(records, RATES)
+    # the Ladder CSV follows the displayed orientation: a row per currency, dates across
     ladder = exposure.ladder_export_frame(result, FWD, ccys=["AUD", "USD", "JPY"])
-    assert list(ladder["settlement_date"]) == [exposure.SETTLED_ROW_LABEL, "2026-09-24", "2026-09-28",
-                                               "2026-10-21", "Total"]
-    assert ladder.iloc[-1]["AUD"] == pytest.approx(13_808_542.0)
-    assert ladder.iloc[1][exposure.USD_EQUIVALENT_COL] == pytest.approx(-21_109_276.0 * 0.659 + 15_000_000.0)
+    assert list(ladder.columns) == [exposure.CURRENCY_COL, exposure.SETTLED_ROW_LABEL, "2026-09-24", "2026-09-28",
+                                    "2026-10-21", "Total"]
+    assert list(ladder[exposure.CURRENCY_COL]) == ["AUD", "USD", "JPY", exposure.USD_EQUIVALENT_ROW_LABEL]
+    by_ccy = ladder.set_index(exposure.CURRENCY_COL)
+    assert by_ccy.loc["AUD", "Total"] == pytest.approx(13_808_542.0)
+    assert by_ccy.loc["AUD", exposure.SETTLED_ROW_LABEL] == pytest.approx(23_771_313.0)
+    assert by_ccy.loc[exposure.USD_EQUIVALENT_ROW_LABEL, "2026-09-24"] == pytest.approx(-21_109_276.0 * 0.659 + 15_000_000.0)
     legs = exposure.legs_export_frame(records, RATES, FWD)
     assert len(legs) == len(records) and set(exposure.LEGS_EXPORT_COLUMNS) == set(legs.columns)
     aud24 = legs[(legs["currency"] == "AUD") & (legs["settlement_date"] == "2026-09-24")].iloc[0]
@@ -167,12 +221,41 @@ def test_local_vs_usd_details_and_export_frames():
     assert set(legs[legs["settled_on"] == "2026-09-16"]["mark_basis"]) == {"spot", "identity"}  # AUD at spot, USD identity
 
 
+def test_ladder_csv_is_the_displayed_grid_number_for_number_under_every_view():
+    """`ladder_export_frame` and the grid on screen come from one computation: same
+    currencies in the same order, same columns, same numbers, whatever the view."""
+    from engine.ladder.exposure import build_exposure
+    from engine.ladder.exposure_adapter import SETTLED
+    views = [exposure.DEFAULT_VIEW, exposure.LadderView(date_from="2026-09-24", date_to="2026-09-28"),
+             exposure.LadderView(show_usd=True), exposure.LadderView(settled_one_by_one=True),
+             exposure.LadderView(currencies=frozenset({"AUD", "USD"}))]
+    for view in views:
+        records = exposure.grid_records(_spec_records(), view)
+        result = build_exposure(records, RATES)
+        frame, ccys = exposure.combined_frame(result, records, forward_rates=FWD, view=view)
+        csv = exposure.ladder_export_frame(result, FWD, view, ccys)
+        assert list(csv[exposure.CURRENCY_COL]) == list(frame[exposure.ROW_LABEL_COL])
+        shown = exposure.grid_value_columns(frame)
+        names = {SETTLED: exposure.SETTLED_ROW_LABEL, exposure.TOTAL_COL: "Total"}
+        assert list(csv.columns)[1:] == [names.get(c, c) for c in shown]
+        for i in range(len(frame)):
+            for col in shown:
+                assert exposure.format_amount(csv.iloc[i][names.get(col, col)]) == frame.iloc[i][col]
+    # an NDF row keeps its on-screen label in the file; an unmarked total is empty, never a partial sum
+    ndf = [_rec("k1", "KRW", -1_394_500_000.0, "2026-09-17", pair="USDKRW", fill=1394.5),
+           _rec("k1", "USD", 1_000_000.0, "2026-09-17", pair="USDKRW", fill=1394.5)]
+    csv = exposure.ladder_export_frame(build_exposure(ndf, {}), None, ccys=["KRW", "USD"])
+    assert list(csv[exposure.CURRENCY_COL]) == ["KRW (NDF, fixing dates)", "USD", exposure.USD_EQUIVALENT_ROW_LABEL]
+    assert csv.iloc[-1].isna()["Total"] and csv.iloc[0]["Total"] == pytest.approx(-1_394_500_000.0)
+
+
 def test_exposure_section_renders_heatmap_caption_and_details_after_the_grid():
     section = exposure.exposure_section(_spec_records(), [], "2026-09-17", rates=RATES, forward_rates=FWD)
     ids = _all_ids(section)
-    for wanted in (exposure.USD_BASIS_CAPTION_ID, exposure.COMBINED_TABLE_ID, exposure.HEATMAP_ID,
-                   exposure.LOCAL_VS_USD_DETAILS_ID, exposure.RISK_TABLE_ID):
+    for wanted in (exposure.SUMMARY_BLOCK_TABLE_ID, exposure.USD_BASIS_CAPTION_ID, exposure.COMBINED_TABLE_ID,
+                   exposure.HEATMAP_ID, exposure.LOCAL_VS_USD_DETAILS_ID, exposure.RISK_TABLE_ID):
         assert wanted in ids
+    assert ids.index(exposure.SUMMARY_BLOCK_TABLE_ID) < ids.index(exposure.COMBINED_TABLE_ID)   # the block sits above the grid
     assert ids.index(exposure.COMBINED_TABLE_ID) < ids.index(exposure.HEATMAP_ID) < ids.index(exposure.RISK_TABLE_ID)
     # the headline card ignores the grid's view filters
     filtered = exposure.exposure_section(_spec_records(), [], "2026-09-17", rates=RATES,
@@ -201,13 +284,31 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     app = dash.Dash(__name__)
     cash_ladder.register_callbacks(app, get_db_path=lambda: str(db_path))
     callback = [v for k, v in app.callback_map.items() if "cash-ladder-table-container" in k][0]["callback"].__wrapped__
+    from engine.ladder.exposure_adapter import SETTLED
     body = callback("2026-09-17", 0, ["AUD", "USD", "CAD"], None, None, [], [])
     grid = _find_id(body, exposure.COMBINED_TABLE_ID)
-    by_label = {r[exposure.ROW_LABEL_COL]: r for r in grid.data}
-    assert by_label[exposure.SETTLED_ROW_LABEL]["AUD"] == "23,771,313"
-    assert by_label["24 Sep 2026"]["AUD"] == "(21,109,276)"
-    assert by_label["28 Sep 2026"]["AUD"] == "11,146,505"
-    assert by_label["Local delta"]["AUD"] == "13,808,543"  # exact sample amounts round up here
+    by_ccy = {r[exposure.CURRENCY_COL]: r for r in grid.data}
+    assert by_ccy["AUD"][SETTLED] == "23,771,313"
+    assert by_ccy["AUD"]["2026-09-24"] == "(21,109,276)"
+    assert by_ccy["AUD"]["2026-09-28"] == "11,146,505"
+    names = {c["id"]: c["name"] for c in grid.columns}
+    assert names[SETTLED] == exposure.SETTLED_ROW_LABEL and names["2026-09-24"] == "24 Sep 2026"
+    block = _find_id(body, exposure.SUMMARY_BLOCK_TABLE_ID)
+    assert next(r for r in block.data if r["kind"] == "local_delta")["AUD"] == "13,808,543"  # exact sample amounts round up here
     # the 51 USDCAD spot fills (all settled by 17 Sep) sit in the settled CAD balance
-    assert by_label[exposure.SETTLED_ROW_LABEL]["CAD"] != exposure.EM_DASH
-    assert "JPY" not in grid.data[0]  # filtered out of the grid by the currency control
+    assert by_ccy["CAD"][SETTLED] != exposure.EM_DASH
+    # filtered out of the grid and of the block above it by the currency control
+    assert set(by_ccy) == {"AUD", "USD", "CAD", ""} and "JPY" not in [c["id"] for c in block.columns]
+
+    # the Ladder CSV download follows the display: a row per currency, the same view
+    import io
+    import pandas as pd
+    download = [v for k, v in app.callback_map.items() if cash_ladder.DOWNLOAD_LADDER_ID in k][0]["callback"].__wrapped__
+    payload = download(1, "2026-09-17", ["AUD", "USD", "CAD"], None, None, [], [])
+    assert payload["filename"] == "cash_ladder.csv"
+    csv = pd.read_csv(io.StringIO(payload["content"]))
+    shown = [r[exposure.ROW_LABEL_COL] for r in grid.data]
+    assert list(csv[exposure.CURRENCY_COL]) == shown and shown[-1] == exposure.USD_EQUIVALENT_ROW_LABEL
+    assert list(csv.columns)[1] == exposure.SETTLED_ROW_LABEL and list(csv.columns)[-1] == "Total"
+    aud = csv.set_index(exposure.CURRENCY_COL).loc["AUD"]
+    assert aud[exposure.SETTLED_ROW_LABEL] == pytest.approx(23_771_313.0, abs=1) and aud["2026-09-24"] == pytest.approx(-21_109_276.0, abs=1)

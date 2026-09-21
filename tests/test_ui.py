@@ -526,6 +526,7 @@ def test_every_static_callback_id_exists_in_layout(tmp_path):
                   "options-datatable", "options-collapsed-packages"}
     dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
                         "blotter-row-detail-", "options-terms-",
+                        "blotter-fx-",  # the FX sub-tab's trade table and its "rows shown" currency table (2026-09-21)
                         "manual-",  # per-sub-tab, rendered by callback (manual-*: Manual entry sub-tab, 2026-09-18)
                         "rates-")   # rendered inside the Blotter's Rates sub-tab (ui.tabs.rates.build_layout), like the Options ids
     missing = []
@@ -954,11 +955,14 @@ def test_blotter_fx_scope_renders_table_columns(tmp_path):
         conn.close()
 
     table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
-    ids = [c["id"] for c in table.columns]
+    # What the user sees: the legacy sheet's columns. The bookkeeping columns behind
+    # "P&L by currency, rows shown" (2026-09-21) are in `columns` too, all of them hidden.
+    ids = [c["id"] for c in table.columns if c["id"] not in table.hidden_columns]
     assert ids == [
         "trade_date", "instrument_id", "quantity_usd_notional", "tenor", "fill",
         "mark_t1", "mark_eod", "mark_t2", "pnl_t1", "pnl_eod", "pnl_t2",
     ]
+    assert [c["id"] for c in table.columns if c["id"] in table.hidden_columns] == blotter_fx._HIDDEN_COLUMNS
     names = [c["name"] for c in table.columns]
     assert "LTD P&L" in names and "LTD-1 P&L" in names and "LTD-2 P&L" in names
     assert len(table.data) == 1
@@ -995,12 +999,17 @@ def test_blotter_fx_scope_has_no_reactive_strip_filter_or_detail_callback(tmp_pa
     """FX (like Rates) is excluded from the generic strip/filter/detail callback loop --
     its rows aren't value_book-shaped (module docstrings). It still shows a P&L strip
     (2026-09-17), but that strip is built statically inside `blotter_fx.build_layout`
-    on every render of the sub-tab, not re-scoped by any reactive callback of its own."""
+    on every render of the sub-tab, not re-scoped by any reactive callback of its own.
+    The sub-tab's ONE callback (2026-09-21) reads the trade table's filtered rows and
+    writes "P&L by currency, rows shown"; nothing writes to the trade table itself."""
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     app = uiapp.create_app(str(db_path))
     assert not any("blotter-strip-fx" in k for k in app.callback_map)
     assert not any(blotter_fx.DATATABLE_ID in k for k in app.callback_map)
+    shown = app.callback_map[f"{blotter_fx.SHOWN_CURRENCY_ID}.children"]
+    assert [(i["id"], i["property"]) for i in shown["inputs"]] == [(blotter_fx.DATATABLE_ID, "derived_virtual_data")]
+    assert shown["state"] == []
 
 
 # --------------------------------------------------------- blotter FX P&L strip (2026-09-17)
@@ -1184,3 +1193,379 @@ def test_blotter_fx_sample_caption_absent_when_every_mark_is_real(tmp_path):
     assert not row["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
     assert not row["mark_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
     assert blotter_fx.SAMPLE_CAPTION not in str(layout)
+
+
+# --------------------------------------------------------- blotter FX P&L by currency (2026-09-21)
+# Two tables above the trade table: "P&L by currency" (whole FX book, the strip's own
+# pricing path per currency) and "P&L by currency, rows shown" (sums of the rows the trade
+# table shows after its native filter, made from hidden real numbers, never from samples).
+
+_CCY_AS_OF = "2026-06-24"   # a Wednesday: T-1 = 06-23 and T-2 = 06-22, no holiday in between
+_CCY_T1, _CCY_T2 = "2026-06-23", "2026-06-22"
+_CCY_SETTLE = "2026-07-15"
+_JPY_LTD = (1_000_000 * 2.0 - 500_000 * 1.0 + 1_000_000 * 3.0) / 152.5   # J1 + J2 + J3, quote P&L at spot
+
+
+def _ccy_trade(conn, trade_id, pair, base, quote, quantity, price, trade_date="2026-06-15"):
+    conn.execute(
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
+        "price, account, counterparty, strategy, trader, description, theme) "
+        "VALUES (?,'XLSX',?,'FX_FWD',?,?,?,?,'ACC','CPTY','','TR','fwd','')",
+        (trade_id, pair, trade_id, trade_date, quantity, price))
+    conn.executemany(
+        "INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, rate, "
+        "settles_cash) VALUES (?,?,'FX_NEAR',?,?,?,?,?,1)",
+        [(trade_id, 1, base, quantity, trade_date, _CCY_SETTLE, price),
+         (trade_id, 2, quote, -quantity * price, trade_date, _CCY_SETTLE, price)])
+
+
+def _ccy_marks(conn, pair, mark_type, by_date):
+    for day, value in by_date.items():
+        conn.execute(
+            "INSERT INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+            "VALUES (?,?,?,?,?,'BBG_BFXFORWARD',?)",
+            (day, pair, _CCY_SETTLE if mark_type == "FWD_OUTRIGHT" else day, mark_type, value,
+             day + "T17:00:00-04:00"))
+
+
+def _currency_book(db_path, aud_history=True):
+    """USDJPY x3 (one dealt on the as-of), AUDUSD, XAUUSD, the cross EURSEK (converted through
+    USDSEK), USDMXN with no mark at all, and a future that must stay out of the FX sub-tab.
+    Marks on the as-of, T-1 and T-2; `aud_history=False` leaves AUDUSD with today's only, so
+    its T-1 / T-2 cells are illustrative samples."""
+    conn = sqlite3.connect(db_path)
+    schema.create_schema(conn)
+    for pair, base, quote in [("USDJPY", "USD", "JPY"), ("AUDUSD", "AUD", "USD"), ("XAUUSD", "XAU", "USD"),
+                              ("EURSEK", "EUR", "SEK"), ("USDSEK", "USD", "SEK"), ("USDMXN", "USD", "MXN")]:
+        conn.execute(
+            "INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+            "bbg_ticker, expiry_date) VALUES (?,'FX',?,?,1,0,?,'9999-12-31')", (pair, base, quote, pair + " Curncy"))
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+        "bbg_ticker, expiry_date) VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
+    _ccy_trade(conn, "J1", "USDJPY", "USD", "JPY", 1_000_000, 150.0)
+    _ccy_trade(conn, "J2", "USDJPY", "USD", "JPY", -500_000, 151.0)
+    _ccy_trade(conn, "J3", "USDJPY", "USD", "JPY", 1_000_000, 149.0, trade_date=_CCY_AS_OF)
+    _ccy_trade(conn, "A1", "AUDUSD", "AUD", "USD", 2_000_000, 0.65)
+    _ccy_trade(conn, "X1", "XAUUSD", "XAU", "USD", 100, 2400.0)
+    _ccy_trade(conn, "E1", "EURSEK", "EUR", "SEK", 1_000_000, 11.40)
+    _ccy_trade(conn, "M1", "USDMXN", "USD", "MXN", 1_000_000, 18.0)
+    conn.execute(
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
+        "price, account, counterparty, strategy, trader, description, theme) "
+        "VALUES ('F1','XLSX','ESU6 Index','FUTURE','F1','2026-06-15',2,5000,'ACC','CPTY','','TR','fut','')")
+    conn.execute(
+        "INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, rate, "
+        "settles_cash) VALUES ('F1',1,'NOTIONAL','USD',500000,'2026-06-15','2026-09-18',5000,0)")
+
+    def three(today, t1, t2):
+        return {_CCY_AS_OF: today, _CCY_T1: t1, _CCY_T2: t2}
+
+    _ccy_marks(conn, "USDJPY", "FWD_OUTRIGHT", three(152.0, 151.5, 151.0))
+    _ccy_marks(conn, "USDJPY", "SPOT", three(152.5, 152.0, 151.5))
+    _ccy_marks(conn, "AUDUSD", "FWD_OUTRIGHT", three(0.66, 0.658, 0.655) if aud_history else {_CCY_AS_OF: 0.66})
+    _ccy_marks(conn, "XAUUSD", "FWD_OUTRIGHT", three(2450.0, 2440.0, 2430.0))
+    _ccy_marks(conn, "EURSEK", "FWD_OUTRIGHT", three(11.50, 11.45, 11.42))
+    _ccy_marks(conn, "USDSEK", "SPOT", three(10.0, 10.0, 10.0))
+    conn.commit()
+    conn.close()
+
+
+def _nodes(component):
+    """Every node under `component`, depth first, in document order."""
+    stack = [component]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (list, tuple)):
+            stack.extend(reversed(node))
+            continue
+        yield node
+        children = getattr(node, "children", None)
+        if children is not None and not isinstance(children, str):
+            stack.append(children)
+
+
+def _currency_tables(component) -> list:
+    """Each per-currency table under `component`, in document order, as
+    `{"Currency": [heading texts], "<row label>": [its cells]}`."""
+    tables = []
+    for table in (n for n in _nodes(component) if isinstance(n, dash.html.Table)):
+        rows = {}
+        for tr in (n for n in _nodes(table) if isinstance(n, dash.html.Tr)):
+            cells = list(tr.children)
+            rows[cells[0].children] = [c.children for c in cells] if isinstance(cells[0], dash.html.Th) else cells
+        tables.append(rows)
+    return tables
+
+
+def _cell(table_rows, row, column):
+    return table_rows[row][table_rows["Currency"].index(column)]
+
+
+def _fx_layout(db_path, as_of=_CCY_AS_OF):
+    conn = sqlite3.connect(db_path)
+    try:
+        return blotter.scope_layout("fx", conn, as_of)
+    finally:
+        conn.close()
+
+
+def test_blotter_fx_currency_label_is_the_non_usd_side_and_a_cross_keeps_its_pair_name():
+    assert blotter_fx.currency_label("USDJPY", "USD", "JPY") == "JPY"
+    assert blotter_fx.currency_label("AUDUSD", "AUD", "USD") == "AUD"
+    assert blotter_fx.currency_label("XAUUSD", "XAU", "USD") == "XAU"
+    assert blotter_fx.currency_label("EURSEK", "EUR", "SEK") == "EURSEK"   # one number, never split in two
+    # No currencies on file for it: a six-letter id is read as the pair it names.
+    assert blotter_fx.currency_label("USDTRY") == "TRY"
+    assert blotter_fx.currency_label("NZDUSD") == "NZD"
+    assert blotter_fx.currency_label("EURNOK") == "EURNOK"
+    assert blotter_fx.currency_label("ESU6 Index") == "ESU6 Index"
+
+
+def test_blotter_fx_by_currency_groups_the_whole_fx_book_including_a_cross(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _currency_book(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        rows, total = blotter_fx.by_currency_rows(conn, _CCY_AS_OF)
+    finally:
+        conn.close()
+    by = {r["currency"]: r for r in rows}
+    # The cross is ONE row under its pair name (no "EUR", no "SEK"); USDSEK only converts
+    # it and has no trade; the future belongs to another sub-tab.
+    assert {c: r["trades"] for c, r in by.items()} == {"JPY": 3, "AUD": 1, "XAU": 1, "EURSEK": 1, "MXN": 1}
+    assert (total["currency"], total["trades"]) == ("Total", 7)
+    assert by["JPY"]["figures"]["ltd"]["value"] == pytest.approx(_JPY_LTD)
+    assert by["AUD"]["figures"]["ltd"]["value"] == pytest.approx(20_000.0)      # 2m x (0.66 - 0.65)
+    assert by["XAU"]["figures"]["ltd"]["value"] == pytest.approx(5_000.0)       # 100 x (2450 - 2400)
+    assert by["EURSEK"]["figures"]["ltd"]["value"] == pytest.approx(10_000.0)   # 1m x 0.10 SEK at 10 SEK per USD
+    assert not by["MXN"]["figures"]["ltd"]["available"]
+    # |LTD| descending, the unavailable currency last.
+    assert [r["currency"] for r in rows] == ["JPY", "AUD", "EURSEK", "XAU", "MXN"]
+
+
+def test_blotter_fx_fixed_table_total_is_the_strip_and_rows_shown_start_equal_to_it(tmp_path):
+    from ui.tabs.blotter_pricing import row_scoped_headline
+
+    db_path = tmp_path / "risk.db"
+    _currency_book(db_path)
+    layout = _fx_layout(db_path)
+    fixed, shown = _currency_tables(layout)
+    assert fixed["Currency"] == ["Currency", "Trades", "LTD", "Daily", "Previous day", "5d", "MTD", "YTD"]
+    assert shown["Currency"] == ["Currency", "Trades shown", "LTD", "LTD-1", "LTD-2", "Daily", "Previous day"]
+
+    # The Total row reads exactly what the strip's cards read, figure for figure.
+    cards = {n.children[0].children: n.children[1].children
+             for n in _nodes(layout) if getattr(n, "className", "") == "card"}
+    for card, column in [("LTD P&L", "LTD"), ("Daily P&L", "Daily"), ("Previous day P&L", "Previous day"),
+                         ("5d", "5d"), ("MTD", "MTD"), ("YTD", "YTD"), ("Trades", "Trades")]:
+        assert _cell(fixed, "Total", column).children == cards[card], column
+    assert _cell(fixed, "Total", "LTD").children == format_cell(_JPY_LTD + 35_000.0)
+
+    # ... and is the pricing path's own figure, not a sum made here.
+    conn = sqlite3.connect(db_path)
+    try:
+        headline = row_scoped_headline(conn, _CCY_AS_OF, ["J1", "J2", "J3", "A1", "X1", "E1", "M1"])
+        _rows, total = blotter_fx.by_currency_rows(conn, _CCY_AS_OF)
+    finally:
+        conn.close()
+    for key, _label in blotter_fx.FIXED_PERIODS:
+        assert total["figures"][key]["available"] == headline[key]["available"], key
+        if headline[key]["available"]:
+            assert total["figures"][key]["value"] == pytest.approx(headline[key]["value"]), key
+
+    # With no filter typed the rows-shown table opens on the same LTD column, row for row.
+    assert [k for k in shown if k != "Currency"] == [k for k in fixed if k != "Currency"]
+    for currency in fixed:
+        if currency != "Currency":
+            assert _cell(shown, currency, "LTD").children == _cell(fixed, currency, "LTD").children, currency
+            assert _cell(shown, currency, "Trades shown").children == _cell(fixed, currency, "Trades").children
+
+
+def test_blotter_fx_currency_tables_sit_between_the_strip_and_the_trade_table(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _currency_book(db_path)
+    layout = _fx_layout(db_path)
+    kinds = ["table" if isinstance(c, dash.dash_table.DataTable)
+             else "currency" if getattr(c, "id", None) == blotter_fx.CURRENCY_TABLES_ID
+             else "strip" if any(getattr(n, "className", "") == "cards" for n in _nodes(c)) else "other"
+             for c in layout.children]
+    assert [k for k in kinds if k != "other"] == ["strip", "currency", "table"]
+    block = next(c for c in layout.children if getattr(c, "id", None) == blotter_fx.CURRENCY_TABLES_ID)
+    assert block.className == "fx-ccy-tables" and len(block.children) == 2   # side by side, stacking when narrow
+    text = str(layout)
+    assert "Whole FX book" in text and "Rows shown in the table below" in text
+    assert blotter_fx.SHOWN_CURRENCY_ID in _all_ids(layout)
+
+    table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+    assert table.filter_action == "native"
+    assert getattr(table, "sort_action", None) in (None, "none")   # its fixed order is kept
+    assert "filter_query" in table.persisted_props               # a rebuild on new marks keeps what was typed
+    assert table.hidden_columns == blotter_fx._HIDDEN_COLUMNS
+
+
+def test_blotter_fx_sample_values_never_enter_the_rows_shown_sums(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _currency_book(db_path, aud_history=False)   # AUDUSD has today's mark only; USDMXN has none
+    layout = _fx_layout(db_path)
+    table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+    by_id = {r["trade_id"]: r for r in table.data}
+    # On screen: illustrative figures, flagged. Behind them: no number at all.
+    assert by_id["A1"]["pnl_t1"].endswith(blotter_fx.SAMPLE_SUFFIX) and by_id["A1"]["pnl_t1_num"] is None
+    assert by_id["M1"]["pnl_eod"].endswith(blotter_fx.SAMPLE_SUFFIX) and by_id["M1"]["pnl_eod_num"] is None
+    assert by_id["A1"]["pnl_eod_num"] == pytest.approx(20_000.0)   # a real cell carries its real number
+    assert by_id["J3"]["on_book_t1"] == 0 and by_id["J1"]["on_book_t1"] == 1
+
+    rows, total = blotter_fx.shown_currency_rows(table.data)
+    by = {r["currency"]: r["figures"] for r in rows}
+    assert total["figures"]["ltd"]["value"] == pytest.approx(_JPY_LTD + 35_000.0)   # M1's sample is not in it
+    assert total["figures"]["ltd"]["excluded_summary"] == "excludes 1 of 7 rows unpriced"
+    assert not by["MXN"]["ltd"]["available"] and "no real LTD figure" in by["MXN"]["ltd"]["reason"]
+    assert not by["AUD"]["ltd1"]["available"]                      # its only T-1 figure is a sample
+    assert not by["AUD"]["daily"]["available"] and "LTD-1" in by["AUD"]["daily"]["reason"]
+    # Six trades were on the book at T-1 (J3 was dealt today); A1 and M1 have no real value there.
+    assert total["figures"]["ltd1"]["excluded_summary"] == "excludes 2 of 6 rows unpriced"
+    ltd1_jpy = (1_000_000 * 1.5 - 500_000 * 0.5) / 152.0
+    assert total["figures"]["ltd1"]["value"] == pytest.approx(ltd1_jpy + 100 * 40.0 + 1_000_000 * 0.05 / 10.0)
+
+    # A formatted string, a sample string or junk in a number column is refused, never parsed.
+    rows, total = blotter_fx.shown_currency_rows([
+        {"currency": "JPY", "pnl_eod": "500", "pnl_eod_num": 500.0},
+        {"currency": "JPY", "pnl_eod": "1,000 (sample)", "pnl_eod_num": None},
+        {"currency": "JPY", "pnl_eod": "9,999", "pnl_eod_num": "9,999"},
+    ])
+    assert rows[0]["figures"]["ltd"]["value"] == 500.0
+    assert rows[0]["figures"]["ltd"]["excluded_summary"] == "excludes 2 of 3 rows unpriced"
+
+
+def test_blotter_fx_rows_shown_differences_use_rows_priced_at_both_ends():
+    def row(eod, t1, t2=None, on_t1=1, on_t2=1):
+        return {"currency": "JPY", "pnl_eod_num": eod, "pnl_t1_num": t1, "pnl_t2_num": t2,
+                "on_book_t1": on_t1, "on_book_t2": on_t2}
+
+    rows = [row(100.0, 60.0, 50.0),              # priced at every close
+            row(30.0, None, on_t1=0, on_t2=0),   # dealt today: counts in full, as in the strip
+            row(500.0, None),                    # priced today only: left out, no one-sided jump
+            row(None, 10.0, 4.0)]                # unpriced today
+    _by, total = blotter_fx.shown_currency_rows(rows)
+    figures = total["figures"]
+    assert figures["ltd"]["value"] == 630.0 and figures["ltd"]["excluded_summary"] == "excludes 1 of 4 rows unpriced"
+    assert figures["ltd1"]["value"] == 70.0 and figures["ltd1"]["excluded_summary"] == "excludes 1 of 3 rows unpriced"
+    assert figures["daily"]["value"] == 70.0     # (100 - 60) + 30
+    assert figures["daily"]["excluded_summary"] == "excludes 2 of 4 rows unpriced"
+    assert figures["ltd1_daily"]["value"] == 16.0   # (60 - 50) + (10 - 4), over the three on the book at T-1
+    assert figures["ltd1_daily"]["excluded_summary"] == "excludes 1 of 3 rows unpriced"
+
+    # Most rows have no T-1 figure: no Daily at all, with the reason, rather than a sum of a minority.
+    _by, total = blotter_fx.shown_currency_rows([row(100.0, 60.0), row(500.0, None), row(700.0, None)])
+    daily = total["figures"]["daily"]
+    assert not daily["available"] and "2 of 3 rows shown" in daily["reason"] and "LTD-1" in daily["reason"]
+
+    # Nothing shown: a Total of zero trades, not an error.
+    by, total = blotter_fx.shown_currency_rows([])
+    assert by == [] and total["trades"] == 0 and total["figures"]["ltd"]["value"] == 0.0
+    assert blotter_fx.shown_currency_rows(None)[1]["trades"] == 0
+
+
+def test_blotter_fx_rows_shown_callback_follows_the_filtered_rows(tmp_path):
+    db_path = tmp_path / "risk.db"
+    _currency_book(db_path)
+    table = next(c for c in _fx_layout(db_path).children if isinstance(c, dash.dash_table.DataTable))
+
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    blotter_fx.register_callbacks(app)
+    callback = app.callback_map[f"{blotter_fx.SHOWN_CURRENCY_ID}.children"]["callback"]
+    update = getattr(callback, "__wrapped__", callback)
+
+    # What the browser sends once "JPY" is typed in the Instrument filter: the matching rows only.
+    jpy_rows = [r for r in table.data if "JPY" in r["instrument_id"]]
+    (shown,) = _currency_tables(update(jpy_rows))
+    assert [k for k in shown if k != "Currency"] == ["JPY", "Total"]
+    assert _cell(shown, "Total", "Trades shown").children == "3"
+    assert _cell(shown, "Total", "LTD").children == format_cell(_JPY_LTD)
+    assert _cell(shown, "JPY", "LTD").className.endswith("fx-ccy-num--pos")
+
+    (everything,) = _currency_tables(update(table.data))
+    assert _cell(everything, "Total", "Trades shown").children == "7"
+    assert _cell(everything, "Total", "LTD").children == format_cell(_JPY_LTD + 35_000.0)
+
+    (nothing,) = _currency_tables(update([]))   # a filter that matches no row
+    assert [k for k in nothing if k != "Currency"] == ["Total"]
+    assert _cell(nothing, "Total", "Trades shown").children == "0"
+    assert update(None) is dash.no_update        # the table has not worked its rows out yet
+
+
+def test_blotter_fx_unavailable_and_partial_figures_say_why(tmp_path):
+    from ui.tabs.blotter_pricing import row_scoped_headline
+
+    db_path = tmp_path / "risk.db"
+    _currency_book(db_path)
+    layout = _fx_layout(db_path)
+    fixed, shown = _currency_tables(layout)
+    conn = sqlite3.connect(db_path)
+    try:
+        reason = row_scoped_headline(conn, _CCY_AS_OF, ["M1"])["ltd"]["reason"]
+    finally:
+        conn.close()
+
+    # Unavailable: "n/a", muted, with the pricing path's own reason on hover. Never a zero.
+    cell = _cell(fixed, "MXN", "LTD")
+    assert cell.children == "n/a" and "cell--unavailable" in cell.className
+    assert reason and cell.title == reason
+    cell = _cell(shown, "MXN", "LTD")
+    assert cell.children == "n/a" and "cell--unavailable" in cell.className and "no real LTD figure" in cell.title
+
+    # A sum of the priced trades only: flagged, the count on hover, and said in a visible line.
+    cell = _cell(fixed, "Total", "LTD")
+    assert "fx-ccy-num--partial" in cell.className and cell.title.startswith("excludes 1 of 7 trades unpriced")
+    notes = [n.children for n in _nodes(layout) if getattr(n, "className", "") == "fx-ccy-note"]
+    assert len(notes) == 2
+    assert "Total LTD excludes 1 of 7 trades unpriced." in notes[0] and "n/a: hover it for the reason." in notes[0]
+    assert "Total LTD excludes 1 of 7 rows unpriced." in notes[1]
+
+    # A loss is in brackets and red, like everywhere else in the app.
+    cell = blotter_fx._figure_cell({"value": -1234.4, "available": True})
+    assert cell.children == "(1,234)" and "fx-ccy-num--neg" in cell.className
+    # Anything else the pricing path puts in an entry is carried along and ignored ...
+    cell = blotter_fx._figure_cell({"value": 10.0, "available": True, "chosen_close": "2026-06-22", "x": object()})
+    assert cell.children == "10" and "fx-ccy-num--partial" not in cell.className
+    # ... except its own caption for a period measured from an earlier close, shown on hover.
+    cell = blotter_fx._figure_cell({"value": 10.0, "available": True, "ref_note": "from the 2026-06-19 close",
+                                    "excluded_summary": "excludes 1 of 2 trades unpriced"})
+    assert cell.title == "excludes 1 of 2 trades unpriced\nfrom the 2026-06-19 close"
+    assert "fx-ccy-num--partial" in cell.className
+
+
+def test_blotter_fx_by_currency_is_reworked_only_when_the_figures_can_have_moved(tmp_path, monkeypatch):
+    """Coming back to the sub-tab with nothing changed costs one whole-book headline (the
+    Total, which has to equal the strip), not one per currency; any change that moves the
+    Total, or a trade from one currency to another, drops the kept rows even under the
+    same cache key."""
+    db_path = tmp_path / "risk.db"
+    _currency_book(db_path)
+    calls = []
+    real = blotter_fx.row_scoped_headline
+    monkeypatch.setattr(blotter_fx, "row_scoped_headline",
+                        lambda conn, as_of, ids: calls.append(len(list(ids))) or real(conn, as_of, ids))
+    monkeypatch.setattr(blotter_fx, "_render_cache_key", lambda conn: ("same-file", 1.0))   # mtime did not move
+    blotter_fx._BY_CURRENCY_CACHE.clear()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        first, _total = blotter_fx.by_currency_rows(conn, _CCY_AS_OF)
+        assert sorted(calls) == [1, 1, 1, 1, 3, 7]        # five currencies and the Total
+        calls.clear()
+        again, _total = blotter_fx.by_currency_rows(conn, _CCY_AS_OF)
+        assert calls == [7] and again is first            # the Total only
+
+        calls.clear()
+        conn.execute("UPDATE marks SET value = 0.67 WHERE instrument_id = 'AUDUSD' AND as_of_date = ?", (_CCY_AS_OF,))
+        conn.commit()
+        moved, total = blotter_fx.by_currency_rows(conn, _CCY_AS_OF)
+        assert len(calls) == 6
+        aud = next(r for r in moved if r["currency"] == "AUD")
+        assert aud["figures"]["ltd"]["value"] == pytest.approx(40_000.0)
+        assert total["figures"]["ltd"]["value"] == pytest.approx(_JPY_LTD + 55_000.0)
+    finally:
+        conn.close()
+        blotter_fx._BY_CURRENCY_CACHE.clear()

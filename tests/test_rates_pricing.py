@@ -255,7 +255,7 @@ def test_price_and_store_writes_pv_dv01_par_rate_marks():
     for mark_type, value, source, settle_date, snapped_at in rows:
         assert source == "QL_PRICER"
         assert settle_date == "2031-08-19"
-        assert "2026-08-17T17:00:00" in snapped_at
+        assert "2026-08-17T15:00:00" in snapped_at  # the official close, 15:00 New York
     assert by_type["DV01_USD"][1] > 0  # payer (quantity > 0), rate rise benefits
 
     # marks_official must resolve to these QL_PRICER rows (CLAUDE.md "Official marks").

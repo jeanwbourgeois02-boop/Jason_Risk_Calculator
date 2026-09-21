@@ -479,3 +479,238 @@ def test_value_book_matured_swap_reads_realised_row_only():
     conn.commit()
     row = value_book(conn, VB_AS_OF).iloc[0]
     assert row["status"] == "SETTLED" and row["pnl_usd"] == pytest.approx(7_500.0) and row["reason"] == ""
+
+
+# =========================================================================================
+# engine/pnl/reference.py -- which close a period difference is measured from
+# (user decision 2026-09-21: "use previous date until has value")
+# =========================================================================================
+from engine.pnl import reference
+
+REF_AS_OF = "2026-09-15"          # Tuesday
+REF_D5 = "2026-09-08"             # 5 business days back: 2026-09-07 is a holiday (Labor Day)
+REF_SETTLE = "2026-10-20"
+REF_HOLIDAYS = frozenset({"2026-09-07"})
+
+
+def _ref_trade(conn, trade_id, trade_date="2026-05-01", quantity=1_000_000.0, fill=1.1000):
+    conn.execute(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, "MANUAL", "EURUSD", "FX_FWD", trade_id, trade_date, quantity, fill,
+         "ACC", "CPTY", "STRAT", "TRADER", "test", ""),
+    )
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 (trade_id, 1, "FX_NEAR", "EUR", quantity, trade_date, REF_SETTLE, fill, 1))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 (trade_id, 2, "FX_NEAR", "USD", -quantity * fill, trade_date, REF_SETTLE, fill, 1))
+    conn.commit()
+
+
+def _ref_book(marked_days, trade_date="2026-05-01", n_trades=3):
+    """EURUSD forwards with an official FWD_OUTRIGHT on `marked_days` only ({iso: mark})."""
+    conn = _vb_conn()
+    for i in range(n_trades):
+        _ref_trade(conn, f"R{i + 1}", trade_date)
+    for day, mark in marked_days.items():
+        _vb_mark(conn, "EURUSD", REF_SETTLE, "FWD_OUTRIGHT", mark, as_of=day)
+    return conn
+
+
+def _recording_reader(conn):
+    calls = []
+
+    def frame_for(iso):
+        calls.append(iso)
+        return value_book(conn, iso)
+    return frame_for, calls
+
+
+def test_reference_usable_close_is_returned_untouched_with_no_note():
+    conn = _ref_book({REF_AS_OF: 1.1100, REF_D5: 1.1050})
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    assert calls == [REF_D5]                      # no other date is valued
+    assert (choice.found, choice.stepped_back, choice.skipped) == (True, False, ())
+    assert (choice.ref_date, choice.ref_date_used, choice.note) == (REF_D5, REF_D5, "")
+    assert choice.split.status == reference.OK
+
+    before = {"value": 15_000.0, "ref_date": REF_D5, "available": True, "reason": "",
+              "excluded_summary": "", "excluded_detail": ""}
+    after = reference.annotate(before, choice, lambda s: "never asked")
+    assert {k: after[k] for k in before} == before      # every existing key keeps its value
+    assert after["ref_date_used"] == REF_D5
+    assert (after["ref_note"], after["ref_note_detail"], after["ref_dates_skipped"]) == ("", "", ())
+
+
+def test_reference_minority_blocked_is_still_usable_as_before():
+    """One of three trades unpriced on the reference date: the existing partial figure
+    (with its "excludes N" caption), not a step-back."""
+    conn = _ref_book({REF_AS_OF: 1.1100, REF_D5: 1.1050}, n_trades=2)
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 ("GBPUSD", "FX", "GBP", "USD", 1.0, 0, "GBPUSD Curncy", "9999-12-31"))
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("G1", "MANUAL", "GBPUSD", "FX_FWD", "G1", "2026-05-01", 1e6, 1.30,
+                  "ACC", "CPTY", "STRAT", "TRADER", "test", ""))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("G1", 1, "FX_NEAR", "GBP", 1e6, "2026-05-01", REF_SETTLE, 1.30, 1))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("G1", 2, "FX_NEAR", "USD", -1.3e6, "2026-05-01", REF_SETTLE, 1.30, 1))
+    _vb_mark(conn, "GBPUSD", REF_SETTLE, "FWD_OUTRIGHT", 1.31, as_of=REF_AS_OF)   # none on REF_D5
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    assert calls == [REF_D5] and not choice.stepped_back
+    assert choice.split.status == reference.OK
+    assert (choice.split.n_blocked, choice.split.n_open_then) == (1, 3)
+
+
+def test_reference_steps_back_over_holiday_and_weekend_and_names_both_dates():
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-04": 1.1050})     # nothing dated 2026-09-08
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    # 2026-09-07 (holiday) and 2026-09-05/06 (weekend) are never candidates, never valued
+    assert calls == [REF_D5, "2026-09-04"]
+    assert choice.found and choice.stepped_back
+    assert (choice.ref_date, choice.ref_date_used) == (REF_D5, "2026-09-04")
+    assert choice.note == "from the 2026-09-04 close: 2026-09-08 has no usable close"
+    assert [(s.date, s.n_blocked, s.n_open_then) for s in choice.skipped] == [(REF_D5, 3, 3)]
+    assert set(choice.skipped[0].unpriced["trade_id"]) == {"R1", "R2", "R3"}
+    # the frame handed back is that date's own book, row for row
+    pd.testing.assert_frame_equal(choice.frame.reset_index(drop=True),
+                                  value_book(conn, "2026-09-04").reset_index(drop=True))
+
+    entry = reference.annotate({"value": 15_000.0, "ref_date": REF_D5, "available": True, "reason": ""},
+                               choice, lambda s: f"full reason for {s.date}: {s.n_blocked} of {s.n_open_then}")
+    assert entry["ref_date"] == REF_D5                   # unchanged meaning
+    assert entry["ref_date_used"] == "2026-09-04"
+    assert REF_D5 in entry["ref_note"] and "2026-09-04" in entry["ref_note"]
+    assert entry["ref_note_detail"] == "full reason for 2026-09-08: 3 of 3"
+    assert entry["ref_dates_skipped"] == (REF_D5,)
+
+
+def test_reference_default_calendar_is_config_holidays():
+    """holidays=None reads the trading calendar the period dates use (config/holidays.txt,
+    which lists 2026-09-07)."""
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-04": 1.1050})
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for)
+    assert calls == [REF_D5, "2026-09-04"] and choice.ref_date_used == "2026-09-04"
+
+
+def test_reference_several_skipped_closes_caption_and_lazy_walk():
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-03": 1.1050, "2026-09-01": 1.0900})
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    # stops at the FIRST usable close; 2026-09-02 / 2026-09-01 are never valued
+    assert calls == [REF_D5, "2026-09-04", "2026-09-03"]
+    assert choice.ref_date_used == "2026-09-03"
+    assert choice.note == ("from the 2026-09-03 close: 2026-09-08 and the 1 business day "
+                           "before it have no usable close")
+    assert [s.date for s in choice.skipped] == [REF_D5, "2026-09-04"]
+
+
+def test_reference_nothing_usable_within_ten_business_days_is_na_with_extended_reason():
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-08-21": 1.1050})     # 11 business days before REF_D5
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    assert calls == [REF_D5, "2026-09-04", "2026-09-03", "2026-09-02", "2026-09-01", "2026-08-31",
+                     "2026-08-28", "2026-08-27", "2026-08-26", "2026-08-25", "2026-08-24"]
+    assert all(c <= REF_D5 for c in calls)               # never forward
+    assert (choice.found, choice.stepped_back, choice.note) == (False, False, "")
+    assert choice.ref_date_used == REF_D5                # the original date, with its own frame
+    assert choice.split.status == reference.REFERENCE_MISSING
+    assert set(choice.frame["trade_id"]) == {"R1", "R2", "R3"} and (choice.frame["reason"] != "").all()
+
+    today = "5d needs the 2026-09-08 close: 3 of 3 trades open that day have no official mark dated 2026-09-08"
+    entry = reference.annotate({"value": float("nan"), "available": False, "reason": today}, choice)
+    assert not entry["available"] and math.isnan(entry["value"])
+    assert entry["reason"] == (today + ". No earlier close within 10 business days has one either "
+                               "(checked back to 2026-08-24).")
+    assert (entry["ref_date_used"], entry["ref_note"]) == (REF_D5, "")
+    assert len(entry["ref_dates_skipped"]) == 11
+
+
+def test_reference_trade_less_date_is_a_zero_reference_and_ends_the_walk():
+    # nothing in scope open yet on the period's own reference date: usable as it is today
+    conn = _ref_book({REF_AS_OF: 1.1100}, trade_date="2026-09-10")
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    assert calls == [REF_D5] and not choice.stepped_back and choice.frame.empty
+
+    # traded ON the reference date and unmarked there: the walk stops at the first earlier
+    # close, where the book is empty, and never goes past it
+    conn = _ref_book({REF_AS_OF: 1.1100}, trade_date=REF_D5)
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    assert calls == [REF_D5, "2026-09-04"]
+    assert choice.ref_date_used == "2026-09-04" and choice.frame.empty
+
+
+def test_reference_date_a_with_nothing_priced_never_steps_back():
+    """"Previous day" when t-1 itself has no marks: n/a for its own reason, no walk."""
+    conn = _ref_book({"2026-09-04": 1.1050})             # nothing dated REF_AS_OF
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    assert calls == [REF_D5]
+    assert choice.split.status == reference.NOTHING_PRICED and not choice.split.usable
+    assert choice.found and not choice.stepped_back
+    entry = reference.annotate({"value": float("nan"), "available": False, "reason": "no marks today"}, choice)
+    assert entry["reason"] == "no marks today"           # nothing appended: no walk was exhausted
+
+    empty = reference.diff_split(value_book(conn, "2026-01-02"), value_book(conn, "2026-01-01"))
+    assert empty.status == reference.EMPTY and empty.usable
+
+
+def test_reference_writes_no_mark_and_leaves_per_trade_pnl_unchanged():
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-03": 1.1050})
+    days = [REF_AS_OF, REF_D5, "2026-09-04", "2026-09-03"]
+    marks_sql = "SELECT * FROM marks ORDER BY as_of_date, instrument_id, settle_date, mark_type, source"
+    marks_before = conn.execute(marks_sql).fetchall()
+    books_before = {day: value_book(conn, day) for day in days}
+    changes_before = conn.total_changes
+
+    frame_for, _calls = _recording_reader(conn)
+    choice = reference.resolve_reference(books_before[REF_AS_OF], REF_D5, frame_for, REF_HOLIDAYS)
+    reference.annotate({"value": 0.0, "available": True, "reason": ""}, choice, lambda s: s.date)
+    assert choice.ref_date_used == "2026-09-03"
+
+    assert conn.total_changes == changes_before          # not one row written, in any table
+    assert conn.execute(marks_sql).fetchall() == marks_before
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE as_of_date IN (?, ?)",
+                        (REF_D5, "2026-09-04")).fetchone()[0] == 0      # skipped closes stay unmarked
+    for day in days:
+        pd.testing.assert_frame_equal(value_book(conn, day), books_before[day])
+    skipped_book = value_book(conn, REF_D5)               # still blank with its reason, never zero
+    assert skipped_book["pnl_usd"].isna().all() and (skipped_book["reason"] != "").all()
+
+
+def test_reference_usable_rule_matches_the_header_display_rule():
+    """`diff_split` must agree with `ui/tabs/header.py::_priced_diff`, the rule it holds once
+    for both screens; and the stepped-back frame prices through that function unchanged."""
+    pytest.importorskip("dash")
+    from ui.tabs.header import _priced_diff
+
+    def book(rows):
+        return pd.DataFrame([{"trade_id": t, "reason": r, "pnl_usd": p, "product": "FX_FWD",
+                              "trade_date": "2026-05-01"} for t, r, p in rows],
+                            columns=["trade_id", "reason", "pnl_usd", "product", "trade_date"])
+
+    nan, miss = float("nan"), "no FWD_OUTRIGHT mark for EURUSD 2026-10-20 on 2026-09-08"
+    a_full = book([("A", "", 10.0), ("B", "", 20.0), ("C", "", 30.0)])
+    cases = [
+        (a_full, book([("A", "", 1.0), ("B", "", 2.0), ("C", "", 3.0)])),          # all priced
+        (a_full, book([("A", miss, nan), ("B", miss, nan), ("C", miss, nan)])),   # close missing
+        (a_full, book([("A", "", 1.0), ("B", "", 2.0), ("C", miss, nan)])),       # minority blocked
+        (a_full, book([("A", "", 1.0), ("B", miss, nan)])),                       # tie: not outnumbered
+        (a_full, book([])),                                                       # zero reference
+        (book([("A", miss, nan)]), book([("A", "", 1.0)])),                       # nothing priced on a
+        (book([]), book([("A", "", 1.0)])),                                       # empty scope
+    ]
+    for df_a, df_b in cases:
+        split = reference.diff_split(df_a, df_b)
+        assert split.usable == _priced_diff(df_a, df_b, "root", "ref")["available"]
+
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-04": 1.1050})
+    df_today = value_book(conn, REF_AS_OF)
+    choice = reference.resolve_reference(df_today, REF_D5, lambda iso: value_book(conn, iso), REF_HOLIDAYS)
+    entry = _priced_diff(df_today, choice.frame, "root", choice.ref_date_used)
+    assert entry["available"] and entry["value"] == pytest.approx(3 * 1_000_000 * (1.1100 - 1.1050))

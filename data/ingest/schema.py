@@ -44,6 +44,10 @@ OFFICIAL_MARK_SOURCE = {
     # whose G10 convention is premium-adjusted; DELTA itself is unchanged and stays
     # what the ladder reads. Same pricer, same official source as the other Greeks.
     "DELTA_PA": "QL_OPTIONS_PRICER",
+    # NDF_1M (2026-09-21, user: NDF currencies show the 1M forward price, not spot):
+    # Bloomberg's 1M NDF outright (data.ingest.common.NDF_1M_TICKERS), on the USD pair,
+    # as quoted. Read by the ladder only; no P&L query reads it.
+    "NDF_1M": "BBG_BFXFORWARD",
 }
 
 _DDL = """
@@ -320,7 +324,7 @@ BBG_LIBRARY_TABLES = ("bbg_library", "bbg_library_state")
 _BBG_LIBRARY_DDL = """
 CREATE TABLE IF NOT EXISTS bbg_library (
   trade_id        TEXT NOT NULL,
-  kind            TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | OIS_CURVE | FIXINGS | VOL_SMILE
+  kind            TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | OIS_CURVE | FIXINGS | VOL_SMILE | NDF_1M
   key             TEXT NOT NULL,      -- pair / future instrument_id; currency for OIS_CURVE and FIXINGS
   settle_date     TEXT NOT NULL,      -- FWD_OUTRIGHT, FUTURE_PX: the date marked; '9999-12-31' otherwise
   bbg_ticker      TEXT NOT NULL,      -- the security asked for; '' where the kind stands for a set of them

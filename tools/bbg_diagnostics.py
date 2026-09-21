@@ -41,9 +41,13 @@ Checks (each becomes one or more result rows):
                                    never be priced) and an official PREMIUM and DELTA
   5d. Clock                    -- local time vs New York, and whether as_of is today NY
   6. snapped_at offset         -- official marks carry a timezone-resolved snapped_at
-                                   (CLAUDE.md: 17:00 America/New_York close), not a naive
-                                   timestamp
+                                   (the close is 15:00 America/New_York, user decision
+                                   2026-09-21), not a naive timestamp
   7. Last live feed pull       -- data.bloomberg.live's last recorded status
+  7b. Past closes (backfill)   -- from the status file's "backfill" block: which Bloomberg
+                                   field gave the forward-points divisor (FWD_POINTS_SCALE
+                                   or FWD_SCALE) or that neither did, and whether past days
+                                   are being asked for again at the 15:00 New York close
   8. Unverified assumptions    -- whether each FX vol ticker/field guess in
                                    data/bloomberg/vol_marketdata.py has been confirmed by
                                    a real response on a live pull (vol_ticker_checks),
@@ -603,6 +607,45 @@ def check_last_pull(db_path: Optional[Path], as_of: Optional[str] = None) -> Lis
     return [_row("Last marks pull", "fail", f"Last pull did not connect: {status.get('reason', 'unknown reason')}.")]
 
 
+# --------------------------------------------------------------------------- 7b. past closes (backfill block)
+def check_backfill_report(db_path: Optional[Path]) -> List[Check]:
+    """What the last backfill recorded in the status file's "backfill" block (2026-09-21),
+    read-only: `points_scale` -- per pair, which Bloomberg field gave the forward-points
+    divisor (FWD_POINTS_SCALE as is, or 10 ** FWD_SCALE), or that neither answered, with
+    Bloomberg's own message -- and `note`, the sentence saying past days hold marks that
+    are not the 15:00 New York close and are being asked for again. No row when there is
+    nothing to say (no status file, or a backfill that needed no divisor and has no note)."""
+    if db_path is None:
+        return []
+    try:
+        from data.bloomberg.live import read_status
+        block = (read_status(db_path) or {}).get("backfill") or {}
+    except Exception:
+        return []
+    out: List[Check] = []
+    scales = block.get("points_scale") or {}
+    if scales:
+        without = {pair: r for pair, r in scales.items() if not r.get("divisor")}
+        if without:
+            said = "; ".join(
+                f"{pair}: " + ", ".join(f"{field}: {(r.get('errors') or {}).get(field) or (r.get('raw') or {}).get(field, 'not returned')}"
+                                        for field in ("FWD_POINTS_SCALE", "FWD_SCALE"))
+                for pair, r in sorted(without.items())[:6])
+            out.append(_row("Forward points divisor", "fail",
+                            f"{len(without)} of {len(scales)} pair(s) got no points divisor from FWD_POINTS_SCALE or "
+                            f"FWD_SCALE on the last backfill, so their past-close forwards cannot be built ({said})."))
+        else:
+            fields = sorted({r.get("field") for r in scales.values()})
+            pair, r = sorted(scales.items())[0]
+            out.append(_row("Forward points divisor", "pass",
+                            f"{' / '.join(fields)} answered for all {len(scales)} pair(s) on the last backfill "
+                            f"(e.g. {pair}: {r.get('field')} = {(r.get('raw') or {}).get(r.get('field'))!r}, "
+                            f"divisor {r.get('divisor'):g})."))
+    if block.get("note"):
+        out.append(_row("Past closes at 15:00 New York", "warning", str(block["note"])))
+    return out
+
+
 # --------------------------------------------------------------------------- orchestration
 def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str] = None,
                               host: Optional[str] = None, port: Optional[int] = None) -> List[Check]:
@@ -653,6 +696,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
     _safe("FX vol ticker assumptions", check_unverified_assumptions, resolved_db)
 
     _safe("Last marks pull", check_last_pull, resolved_db, resolved_as_of)
+    _safe("Past closes (backfill)", check_backfill_report, resolved_db)
 
     return results
 

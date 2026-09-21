@@ -41,6 +41,8 @@ official FUTURE_PX/FWD_OUTRIGHT/SPOT (37 of 54 needed marks)". Follows
   `start_auto_backfill` republishes its whole remembered block on every call.
 
 ## Still unverified on a terminal
+(Later the same day the terminal did return points and NOTHING for `FWD_POINTS_SCALE`; both fields are now
+asked for, and the closes moved to 15:00 NY intraday bars: see [[close-1500-scale-ndf-2026-09-21]].)
 Whether the tenor tickers are points or outrights (handled either way), the `FWD_POINTS_SCALE` field name
 (`FWD_SCALE`, an exponent, is the likely alternative if the status says no scale came back), whether
 history serves `PX_SETTLE` for an expired future (ESU6 expired 2026-09-18).

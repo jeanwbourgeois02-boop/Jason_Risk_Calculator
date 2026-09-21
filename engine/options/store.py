@@ -122,7 +122,7 @@ full detail):**
         15:00 Tokyo on one, and one row whose location reads 'NONE'), which the app does
         not store. The payoff frozen is the one AT THE OFFICIAL SPOT ON FILE FOR THE
         EXPIRY DATE AT THE MOMENT OF THE FIRST FREEZE -- the last live pull stamped with
-        the expiry date, or that date's 17:00 New York close where a backfill / import
+        the expiry date, or that date's 15:00 New York close where a backfill / import
         has since replaced it or the app did not run that day -- still not the spot at
         the cut, hours earlier. The app's day is the NEW YORK date
         (``data/bloomberg/live.py::book_today``), so a pull made in Asia on the following
