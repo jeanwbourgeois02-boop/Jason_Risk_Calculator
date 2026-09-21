@@ -574,13 +574,6 @@ def register_callbacks(app, get_db_path: Callable[[], object],
     from dash import ctx, no_update
     from dash.exceptions import MissingCallbackContextException
 
-    def _nudge_feed():
-        # Same call `ui.tabs.options`, `ui.tabs.manual_entry` and `ui.uploads` make after a
-        # write: one extra Bloomberg cycle now. No feed on this machine: a no-op.
-        feed = getattr(app, "bloomberg_feed", None)
-        if feed is not None:
-            feed.trigger_now()
-
     def _triggered_ids() -> set:
         try:
             return {t["prop_id"].split(".")[0] for t in (ctx.triggered or []) if t.get("prop_id")}
@@ -613,7 +606,7 @@ def register_callbacks(app, get_db_path: Callable[[], object],
             return nothing
         from ui import revision
         db_path = get_db_path()
-        event = handle_direction_event(db_path, as_of_date, rows, previous, confirm_rest, _nudge_feed)
+        event = handle_direction_event(db_path, as_of_date, rows, previous, confirm_rest)
         status = _status_line(event.result.message, not event.result.ok)
         if event.result.written:
             # Published here, at once, so nothing waits for the poll (ui/revision.py).

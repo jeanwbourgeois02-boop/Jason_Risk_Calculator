@@ -1,11 +1,9 @@
 """ui/uploads.py: the blotter upload control.
 
-Covers the 2026-09-17 coordinator request: after a successful `import_blotter()`,
-wake the Bloomberg feed for an extra pull right away
-(`data.bloomberg.live.LiveFeed.trigger_now`, added by bbg-data the same day) instead
-of leaving marks for the trades just uploaded to wait out the feed's normal 2-minute
-interval. `app.bloomberg_feed` is `None` on a machine with no Bloomberg session
-(`ui.app.create_app(start_feed=False)`, the default in tests) -- that must never raise.
+An upload asks nothing of Bloomberg (user decision 2026-09-21: Bloomberg is pulled on
+request only, by the "Pull Bloomberg now" button); until then a successful import woke
+the feed for a pull. `app.bloomberg_feed` is `None` with `create_app(start_feed=False)`,
+the default in tests -- that must never raise.
 """
 from __future__ import annotations
 
@@ -41,7 +39,7 @@ def _data_url() -> str:
     return "data:application/octet-stream;base64," + base64.b64encode(b"x").decode()
 
 
-def test_successful_import_triggers_an_immediate_feed_pull(tmp_path, monkeypatch):
+def test_successful_import_asks_nothing_of_bloomberg(tmp_path, monkeypatch):
     db_path = tmp_path / "risk.db"
     app = uiapp.create_app(db_path=db_path, start_feed=False)
     fake_feed = _FakeFeed()
@@ -54,7 +52,7 @@ def test_successful_import_triggers_an_immediate_feed_pull(tmp_path, monkeypatch
 
     fn(1, _data_url(), "blotter.csv")
 
-    assert fake_feed.triggered == 1
+    assert fake_feed.triggered == 0      # 2026-09-21: on request only, an upload pulls nothing
 
 
 def test_failed_import_does_not_trigger_a_feed_pull(tmp_path, monkeypatch):
@@ -93,21 +91,9 @@ def test_successful_import_with_no_bloomberg_feed_does_not_raise(tmp_path, monke
     assert isinstance(book_rev, str) and book_rev
 
 
-def test_trigger_feed_refresh_helper_guards_missing_attribute():
-    class _NoFeedAttr:
-        pass
-
-    uploads._trigger_feed_refresh(_NoFeedAttr())  # must not raise
-
-
-def test_trigger_feed_refresh_helper_calls_trigger_now_when_present():
-    fake_feed = _FakeFeed()
-
-    class _WithFeed:
-        bloomberg_feed = fake_feed
-
-    uploads._trigger_feed_refresh(_WithFeed())
-    assert fake_feed.triggered == 1
+def test_uploads_has_no_way_to_pull_bloomberg():
+    """2026-09-21: the helper that woke the feed after an import is gone, not just unused."""
+    assert not hasattr(uploads, "_trigger_feed_refresh")
 
 
 # ---------------------------------------------------------------- transient result box
@@ -488,7 +474,7 @@ def test_status_line_is_built_from_the_status_dict(monkeypatch):
     assert "connected" in line and "not connected" not in line
     assert f"last pull {T0.astimezone().strftime('%H:%M:%S')}" in line
     assert "212 marks written, 3 failed" in line
-    assert line.endswith("pulls automatically every 2 minutes")
+    assert line.endswith(feed_controls.ON_REQUEST_WORDS) and "automatically" not in line
     assert "took" not in line                                # no timings in the status file: nothing said
 
     down = feed_controls.feed_headline(
@@ -496,22 +482,23 @@ def test_status_line_is_built_from_the_status_dict(monkeypatch):
         feed_running=False, now=now)
     assert "not connected — no Bloomberg API service on localhost:8194" in down
     assert "status as of" in down and "last pull" not in down   # nothing was pulled, so it does not say so
-    assert "no automatic pulls in this session" in down and "every 2 min" not in down
+    assert down.endswith(feed_controls.NO_FEED_WORDS) and "every 2 min" not in down
     # the startup placeholder's timestamp is not an attempt at anything, and is not called one
     placeholder = feed_controls.feed_headline(
         _status(T0, connected=False, reason="no pull has run yet", written=0, failed=0), 120, feed_running=False, now=now)
     assert "attempt" not in placeholder
-    assert feed_controls.feed_headline(None) == "Bloomberg: no pull recorded yet"
+    assert feed_controls.feed_headline(None) == f"Bloomberg: no pull recorded yet · {feed_controls.ON_REQUEST_WORDS}"
 
 
-def test_cadence_words_come_from_the_feed_interval_never_a_literal(monkeypatch):
+def test_headline_never_claims_a_cadence_and_the_safety_net_interval_is_still_read(monkeypatch):
+    """2026-09-21: no pull is scheduled, so no headline says "every N minutes", whatever
+    interval is passed or on file. The interval is only the screens' own re-read timer."""
     from data.bloomberg import live
-    assert feed_controls.cadence_words(live.INTERVAL_SECONDS) in feed_controls.feed_headline(
-        _status(T0), feed_running=True)
+    for seconds in (None, 120, 900):
+        line = feed_controls.feed_headline(_status(T0), seconds, feed_running=True)
+        assert line.endswith("pulls only when you press Pull Bloomberg now") and "every" not in line
     monkeypatch.setattr(live, "INTERVAL_SECONDS", 300)
-    assert feed_controls.feed_headline(_status(T0), feed_running=True).endswith("pulls automatically every 5 minutes")
-    monkeypatch.setattr(live, "INTERVAL_SECONDS", 900)       # the feed's 15-minute cadence
-    assert feed_controls.feed_headline(_status(T0), feed_running=True).endswith("pulls automatically every 15 minutes")
+    assert feed_controls.feed_interval_seconds() == 300
 
     class _Feed:
         interval = 45
@@ -526,7 +513,7 @@ def test_last_pull_duration_is_in_the_headline_only_when_the_status_file_has_it(
     now = T0 + timedelta(minutes=1)
     timed = _status(T0, timings={"session": 1.2, "spot": 3.1, "forwards": 21.4, "total": 48.3})
     line = feed_controls.feed_headline(timed, 900, feed_running=True, now=now)
-    assert "212 marks written, 3 failed · last pull took 48 s · pulls automatically every 15 minutes" in line
+    assert f"212 marks written, 3 failed · last pull took 48 s · {feed_controls.ON_REQUEST_WORDS}" in line
     assert "last pull took 3.4 s" in feed_controls.feed_headline(_status(T0, timings={"total": 3.42}), 900, now=now)
     for absent in ({}, {"timings": None}, {"timings": {}}, {"timings": {"spot": 2.0}},
                    {"timings": {"total": "n/a"}}, {"timings": "12"}):
@@ -622,7 +609,7 @@ def test_passive_refresh_leaves_the_line_alone_while_a_pull_is_outstanding(tmp_p
     waiting = {"requested_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), "baseline": None}
     assert refresh(1, "rev", waiting) == (dash.no_update, dash.no_update)
     idle, tooltip = refresh(1, "rev", None)
-    assert "212 marks written, 3 failed" in idle and "no automatic pulls in this session" in idle
+    assert "212 marks written, 3 failed" in idle and feed_controls.NO_FEED_WORDS in idle
     assert tooltip == idle
 
 

@@ -149,7 +149,8 @@ def test_build_layout_has_expected_ids():
 
 
 def test_feed_headline_and_backfill_headline_and_top_bar_status():
-    assert md.feed_headline(None) == "Bloomberg: no pull recorded yet"
+    assert md.feed_headline(None).startswith("Bloomberg: no pull recorded yet")
+    assert md.feed_headline(None).endswith("pulls only when you press Pull Bloomberg now")
     assert "not connected" in md.feed_headline({"connected": False, "reason": "no port"})
     text = md.feed_headline({"connected": True, "time": "t", "written": 3, "failed": 1})
     assert "3 marks written, 1 failed" in text

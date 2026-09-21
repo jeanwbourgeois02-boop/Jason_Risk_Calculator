@@ -15,9 +15,9 @@ One place for everything the blotter export does not carry:
      MANUAL trade leaves the book).
 
 Writes go through `data.ingest.schema.connect` (writable), never the read-only handle
-the view callbacks use; after a booking the Bloomberg feed is nudged for one extra pull
-(`app.bloomberg_feed.trigger_now()`, same as an upload) so the new trade's marks do not
-wait for the next scheduled cycle. Dates are typed as text and parsed tolerantly
+the view callbacks use. A booking asks nothing of Bloomberg (2026-09-21: pulls are on
+request only); the new trade's needs join the Bloomberg library and the next "Pull
+Bloomberg now" prices it. Dates are typed as text and parsed tolerantly
 (`data.ingest.manual._iso`: ISO, 25/11/2026, 20261125, 25 Nov 2026) per the
 "never reject over formatting" rule; only an impossible trade is refused, with the
 plain-sentence ValueError shown next to the button.
@@ -83,7 +83,7 @@ def booking_form() -> html.Div:
         html.H4("Book an OTC trade by hand"),
         html.P("For trades the blotter export does not carry (an option booked at another venue, a "
                "forward dealt outside the prime broker). Saved as source MANUAL: a blotter re-upload "
-               "never removes it; delete it below when it is wrong. Priced on the next Bloomberg cycle.",
+               "never removes it; delete it below when it is wrong. Priced the next time you press Pull Bloomberg now.",
                className="section-kicker"),
         html.Div(className="toolbar", children=[
             _field("Product", dcc.Dropdown(id=PRODUCT_ID, options=PRODUCT_OPTIONS, value="FX_OPTION",
@@ -201,11 +201,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         from data.ingest.schema import connect
         return connect(get_db_path())
 
-    def _nudge_feed():
-        feed = getattr(app, "bloomberg_feed", None)
-        if feed is not None:
-            feed.trigger_now()
-
     @app.callback(
         Output(BOOK_STATUS_ID, "children"),
         Output(LIST_ID, "children"),
@@ -240,9 +235,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 conn.close()
         except (ValueError, sqlite3.Error) as exc:
             return html.Span(f"Not booked: {exc}", className="source-result--error"), no_update
-        _nudge_feed()
-        return (html.Span(f"Booked {trade_id}. It is in the book now and will be priced on the next "
-                          "Bloomberg cycle.", className="source-result--info"), listing)
+        # No Bloomberg pull here (2026-09-21: on request only). The new trade's needs are in
+        # the Bloomberg library already; the next "Pull Bloomberg now" prices it.
+        return (html.Span(f"Booked {trade_id}. It is in the book now; press Pull Bloomberg now to price it.",
+                          className="source-result--info"), listing)
 
     @app.callback(
         Output(DELETE_STATUS_ID, "children"),

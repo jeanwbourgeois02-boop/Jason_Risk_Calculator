@@ -184,6 +184,22 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
     return result, replaced
 
 
+def _library_sentence(db_path) -> str:
+    """Bring the Bloomberg library (data/bloomberg/library.py: what the trades on file need
+    from Bloomberg for their P&L) up to date with the book just published, and say what
+    changed. An upload asks nothing of Bloomberg (user decision 2026-09-21); the next
+    "Pull Bloomberg now" asks for exactly what is listed there."""
+    try:
+        from data.bloomberg import library
+        with closing(schema.connect(Path(db_path).resolve())) as conn:
+            changed = library.sync(conn)
+            tickers = library.summary(conn)["tickers"]
+    except Exception as exc:  # noqa: BLE001 -- the book is already published; a reader syncs the library itself
+        return f"Bloomberg library not updated here ({exc}); it updates itself on the next pull."
+    return (f"Bloomberg library: {tickers} ticker(s) needed today, {changed['added']} item(s) added, "
+            f"{changed['removed']} removed. Nothing was pulled; press Pull Bloomberg now to price the book.")
+
+
 def import_blotter(payload, filename, db_path):
     """Load a blotter file into `db_path`, replacing the entire existing trade book (see
     module docstring: every existing `trades` row and trade-keyed dependent, any source,
@@ -250,6 +266,7 @@ def import_blotter_report(payload, filename, db_path) -> dict:
         head = "; ".join(f"row {rj.row_no} {rj.symbol}: {rj.reason}" for rj in result.rejects[:5])
         more = f" (+{len(result.rejects) - 5} more)" if len(result.rejects) > 5 else ""
         parts.append(f"{len(result.rejects)} row(s) {REJECTS_PHRASE} and were skipped: {head}{more}.")
+    parts.append(_library_sentence(db_path))
     notes = result.notes()
     return {"message": " ".join(parts + notes), "rejects": len(result.rejects),
             "warnings": len(result.warnings), "notes": notes}

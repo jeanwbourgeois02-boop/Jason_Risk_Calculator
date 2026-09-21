@@ -1062,7 +1062,7 @@ def test_terms_editor_callbacks_need_nothing_outside_the_editor(tmp_path, ui_app
         assert used <= editor_ids | always_on_page, used - editor_ids - always_on_page
 
 
-def test_terms_editor_save_prices_wakes_the_feed_and_publishes_revisions(tmp_path, ui_app_stub, fake_pricer):
+def test_terms_editor_save_prices_without_pulling_bloomberg_and_publishes_revisions(tmp_path, ui_app_stub, fake_pricer):
     from ui import revision
 
     db_path = _file_db(tmp_path)
@@ -1074,7 +1074,8 @@ def test_terms_editor_save_prices_wakes_the_feed_and_publishes_revisions(tmp_pat
 
     status, dropdown, data_rev, book_rev = save_fn(1, "USDJPY111926P-1", "DIGITAL", "PUT", 152, None, AS_OF)
     assert _terms(db_path) == (152.0, "PUT", "DIGITAL")
-    assert fake_pricer.calls == [(AS_OF, "D1")] and woken == [1]
+    # priced at once from what is on file; 2026-09-21: no Bloomberg pull, that is on request only
+    assert fake_pricer.calls == [(AS_OF, "D1")] and woken == []
     assert "Saved USDJPY111926P-1: Digital Put strike 152" in status.children
     assert not any("NO STRIKE" in o["label"] for o in dropdown)      # the list no longer flags it
     assert data_rev == revision.file_signature(str(db_path)) and book_rev == revision.book_signature(str(db_path))

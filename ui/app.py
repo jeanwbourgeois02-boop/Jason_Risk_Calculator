@@ -265,22 +265,28 @@ FEED_SWITCHED_OFF = "the live feed is switched off (RISK_LIVE=0)"
 
 
 def start_bloomberg_feed_with_reason(db_path: Path):
-    """`(feed, reason)`: start the Bloomberg feed when blpapi and a Bloomberg API service
-    are present on this computer (data.bloomberg.live). Otherwise `feed` is None and
-    `reason` says why, in the same words the status file gets; the app runs without live
-    rates and no prices are invented. RISK_LIVE=0 disables."""
+    """`(feed, reason)`: the on-request Bloomberg feed (data.bloomberg.live.LiveFeed). It is
+    started asleep: nothing is asked of Bloomberg at start-up, on a timer or after an
+    upload (user decision 2026-09-21), only when "Pull Bloomberg now" is pressed, and that
+    one request also fills the past closes still missing. `feed` is None with the `reason`
+    only when RISK_LIVE=0 switches it off; no prices are invented either way. The Bloomberg
+    library is brought up to date here once, so a database from before it existed gets one."""
     if os.environ.get("RISK_LIVE", "1") == "0":
         return None, FEED_SWITCHED_OFF
     from data.bloomberg.live import start_feed_if_available
-    from ui.feed_controls import cadence_words, feed_interval_seconds
     host = os.environ.get("BLP_HOST", "localhost")
     port = int(os.environ.get("BLP_PORT", "8194"))
+    try:
+        from contextlib import closing
+        from data.bloomberg import library
+        from data.ingest.schema import connect
+        with closing(connect(db_path)) as conn:
+            if library.is_out_of_date(conn):
+                library.sync(conn)
+    except Exception as exc:  # noqa: BLE001 -- a reader brings the library up to date itself
+        print(f"Bloomberg library: not brought up to date at start ({exc!r})", flush=True)
     feed, why = start_feed_if_available(db_path, host=host, port=port)
-    seconds = feed_interval_seconds(feed) if feed else None
-    started = f"started ({cadence_words(seconds)})" if seconds else "started"
-    print(f"Bloomberg feed: {started if feed else 'not started: ' + why}", flush=True)
-    from data.bloomberg.backfill import start_auto_backfill
-    start_auto_backfill(db_path, host=host, port=port)
+    print(f"Bloomberg feed: {'on request only (Pull Bloomberg now)' if feed else 'not started: ' + why}", flush=True)
     return feed, ("" if feed else why)
 
 

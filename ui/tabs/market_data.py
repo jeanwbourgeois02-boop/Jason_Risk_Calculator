@@ -1126,6 +1126,32 @@ def past_closes_panel(conn: sqlite3.Connection, header_as_of: str, backfill: Opt
     ])
 
 
+LIBRARY_TITLE = "Bloomberg library"
+LIBRARY_TABLE_ID = "market-data-library-table"
+
+
+def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
+    """The Bloomberg library (data/bloomberg/library.py, user decision 2026-09-21): every
+    Bloomberg security a pull on `as_of` asks for, what it is for, how many trades need it
+    and until when. It changes only when trades come in; nothing outside it is pulled.
+    Collapsed by default: the summary line is the monitor, the table is the detail."""
+    from data.bloomberg import library
+    rows = library.tickers(conn, as_of)
+    trades = len({r["trade_id"] for r in library.needed_on(conn, as_of)})
+    summary = (f"{LIBRARY_TITLE} · {len(rows)} ticker(s) for {trades} trade(s) on {as_of} · "
+               "changes only when trades come in · pulled only on request")
+    if not rows:
+        body = [_kicker("No trade on file needs anything from Bloomberg on this date.")]
+    else:
+        body = [_kicker("Everything \"Pull Bloomberg now\" asks for, and nothing else. A forward curve is one "
+                        "request per pair; a vol smile and an OIS curve are one ticker per point."),
+                _panel_table(LIBRARY_TABLE_ID,
+                             [("Ticker", "ticker"), ("Field", "field"), ("Used for", "used_for"),
+                              ("Trades", "trades"), ("Needed until", "needed_until"), ("In the library since", "added_at")],
+                             [{**r, "flag": ""} for r in rows], numeric=("trades",))]
+    return html.Details(className="details", children=[html.Summary(summary), *body])
+
+
 def safe_panel(title: str, build: Callable[[], html.Div]) -> html.Div:
     """One panel failing must not take the tab, or the other panels, down with it."""
     try:
@@ -1144,7 +1170,8 @@ def whole_book_panels(conn: sqlite3.Connection, as_of: str, status: Optional[dic
     what ui/tabs/header.py differences from), and the New York book date when the header has
     none yet."""
     header_day = header_as_of or _book_today_iso()
-    return (safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status)),
+    return (html.Div([safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status)),
+                      safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of))]),
             safe_panel(SUSPECT_TITLE, lambda: suspect_panel(conn, as_of)),
             safe_panel(PAST_CLOSES_TITLE, lambda: past_closes_panel(conn, header_day)))
 

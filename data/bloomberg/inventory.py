@@ -71,30 +71,20 @@ def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False
     identical for forwards and futures; for options it is SPOT only -- pair and
     USD-conversion pairs, for every option open that day up to and including its expiry
     date, whether or not the ledger has realised it since (live.option_needed_marks says
-    why). The default is the live request list, unchanged."""
-    from data.bloomberg.live import _OPEN_FX_SQL, _OPEN_FUTURE_SQL, _cross_usd_legs
+    why). The default is the live request list, unchanged.
+
+    2026-09-21: read from the Bloomberg library (data/bloomberg/library.py), the one
+    record of what the trades need; build_requests and the backfill read the same rows."""
+    from data.bloomberg import library
+    needed = [r for r in library.needed_on(conn, as_of, historical=historical) if r["kind"] in library.MARK_KINDS]
+    needed.sort(key=lambda r: (r["kind"] == "FUTURE_PX", r["product"] == "FX_OPTION", r["key"],
+                               r["kind"] != "SPOT", r["settle_date"]))
     out, seen = [], set()
-    for instrument_id, _ticker, settle in conn.execute(_OPEN_FX_SQL, {"as_of": as_of}):
-        if (instrument_id, as_of, "SPOT") not in seen:
-            seen.add((instrument_id, as_of, "SPOT"))
-            out.append({"instrument_id": instrument_id, "settle_date": as_of, "mark_type": "SPOT"})
-        if (instrument_id, settle, "FWD_OUTRIGHT") not in seen:
-            seen.add((instrument_id, settle, "FWD_OUTRIGHT"))
-            out.append({"instrument_id": instrument_id, "settle_date": settle, "mark_type": "FWD_OUTRIGHT"})
-    for leg in _cross_usd_legs(conn, as_of):
-        key = (leg["instrument_id"], as_of, "SPOT")
-        if key not in seen:
-            seen.add(key)
-            out.append({"instrument_id": leg["instrument_id"], "settle_date": as_of, "mark_type": "SPOT"})
-    for item in _option_needed_marks(conn, as_of, historical=historical):
-        key = (item["instrument_id"], item["settle_date"], item["mark_type"])
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    for instrument_id, _ticker, settle in conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of}):
-        if (instrument_id, settle, "FUTURE_PX") not in seen:
-            seen.add((instrument_id, settle, "FUTURE_PX"))
-            out.append({"instrument_id": instrument_id, "settle_date": settle, "mark_type": "FUTURE_PX"})
+    for r in needed:
+        settle = as_of if r["kind"] == "SPOT" else r["settle_date"]
+        if (r["key"], settle, r["kind"]) not in seen:
+            seen.add((r["key"], settle, r["kind"]))
+            out.append({"instrument_id": r["key"], "settle_date": settle, "mark_type": r["kind"]})
     return out
 
 
@@ -165,8 +155,7 @@ def stale_empty_pull_reason(conn: sqlite3.Connection, status: Optional[dict], as
     return (f"the last recorded pull ({when}) asked Bloomberg for 0 marks, but {len(needed)} "
             f"mark(s) are needed right now for {as_of} (e.g. {example['instrument_id']} "
             f"{example['mark_type']} {example['settle_date']}) -- trades were likely imported "
-            "after that pull ran. Press \"Pull now\" on the Market data tab, or wait for the "
-            "next automatic pull (every 15 minutes).")
+            "after that pull ran. Press \"Pull Bloomberg now\" (Bloomberg is pulled on request only).")
 
 
 def close_completeness(conn: sqlite3.Connection, start: str, end: str) -> pd.DataFrame:

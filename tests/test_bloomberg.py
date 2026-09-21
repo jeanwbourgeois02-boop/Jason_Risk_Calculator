@@ -1751,8 +1751,8 @@ def test_stale_empty_pull_reason_fails_when_requested_zero_but_marks_now_needed(
     assert reason is not None
     assert "2026-09-17T15:23:23+08:00" in reason
     assert "0 marks" in reason
-    assert "Pull now" in reason
-    assert "next automatic pull" in reason
+    assert "Pull Bloomberg now" in reason
+    assert "automatic" not in reason and "on request only" in reason
 
 
 # --------------------------------------------------------------------------- manual.py

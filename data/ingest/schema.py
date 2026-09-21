@@ -310,6 +310,39 @@ CREATE TABLE IF NOT EXISTS irs_direction_overrides (
 """
 
 
+# --------------------------------------------------------------------------- Bloomberg library
+# What the trades on file need from Bloomberg for their P&L (data/bloomberg/library.py,
+# user decision 2026-09-21): a pull asks for what is in here and nothing else. It changes
+# only when the trades change -- the triggers below mark it out of date on any write to
+# `trades` / `trade_legs`, and library.sync brings it up to date. Deliberately NO foreign
+# key to `trades`: an upload deletes and rewrites the whole book before the sync runs.
+BBG_LIBRARY_TABLES = ("bbg_library", "bbg_library_state")
+_BBG_LIBRARY_DDL = """
+CREATE TABLE IF NOT EXISTS bbg_library (
+  trade_id        TEXT NOT NULL,
+  kind            TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | OIS_CURVE | FIXINGS | VOL_SMILE
+  key             TEXT NOT NULL,      -- pair / future instrument_id; currency for OIS_CURVE and FIXINGS
+  settle_date     TEXT NOT NULL,      -- FWD_OUTRIGHT, FUTURE_PX: the date marked; '9999-12-31' otherwise
+  bbg_ticker      TEXT NOT NULL,      -- the security asked for; '' where the kind stands for a set of them
+  role            TEXT NOT NULL,      -- PAIR | CONVERSION (a USD-conversion pair's SPOT)
+  product         TEXT NOT NULL,
+  needed_from     TEXT NOT NULL,      -- the trade's trade_date
+  needed_until    TEXT NOT NULL,      -- settle date / expiry / maturity: not asked for after it
+  added_at        TEXT NOT NULL,
+  PRIMARY KEY (trade_id, kind, key, settle_date)
+);
+CREATE TABLE IF NOT EXISTS bbg_library_state (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  dirty           INTEGER NOT NULL DEFAULT 1,   -- 1 = the trades changed since the last sync
+  synced_at       TEXT NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO bbg_library_state (id, dirty, synced_at) VALUES (1, 1, '');
+""" + "".join(
+    f"CREATE TRIGGER IF NOT EXISTS bbg_library_{table}_{name} AFTER {event} ON {table} "
+    f"BEGIN UPDATE bbg_library_state SET dirty = 1; END;\n"
+    for table in ("trades", "trade_legs") for name, event in (("ai", "INSERT"), ("au", "UPDATE"), ("ad", "DELETE")))
+
+
 _CREATE_TABLE_RE = re.compile(r'CREATE TABLE IF NOT EXISTS\s+"?(\w+)"?\s*\((.*?)\n\);', re.DOTALL)
 _CONSTRAINT_KEYWORDS = frozenset({"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"})
 
@@ -402,7 +435,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL
-                           + IRS_DIRECTION_DDL)
+                           + IRS_DIRECTION_DDL + _BBG_LIBRARY_DDL)
         _migrate_columns(conn)
         conn.commit()
     except sqlite3.OperationalError as exc:

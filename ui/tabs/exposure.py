@@ -820,7 +820,7 @@ def legend() -> html.Dl:
                       "-- see the Blotter tab for LTD/Daily/MTD/YTD."),
         (NDF_BADGE, NDF_EXPLANATION),
         ("Bloomberg rates", "latest official SPOT mark per currency, pulled from the Bloomberg terminal on this "
-                            "computer every 15 minutes (or on \"Pull Bloomberg now\"); blank when no mark exists. "
+                            "computer when you press \"Pull Bloomberg now\" (never by itself); blank when no mark exists. "
                             "Nothing is substituted."),
         (EM_DASH, "zero amount (display only)."),
     ]

@@ -3,7 +3,8 @@ Bloomberg status line every screen shares (2026-09-18, user: "what rate is Bloom
 polled at" / wants to order a pull at a chosen moment).
 
 What the button does: `app.bloomberg_feed.trigger_now()` (`data.bloomberg.live.LiveFeed`),
-which wakes the feed thread for one extra cycle right away. The pull itself runs on the
+which wakes the feed thread for one cycle. Since 2026-09-21 that is the ONLY thing that
+pulls Bloomberg (user: "make it only pull the bloomberg info on request - no automatic"). The pull itself runs on the
 feed thread, not inside the Dash callback, so the click returns at once with
 "pull requested..." and a fast poll (`PULL_POLL_ID`, enabled ONLY while a requested pull
 is outstanding, switched off again when it lands or after `PULL_TIMEOUT_SECONDS`) watches
@@ -16,18 +17,13 @@ Market data tab reads (the feed thread, that tab's synchronous "Pull now" and th
 backfill all rewrite it). Nothing here prices anything or reads a mark.
 
 `feed_headline` moved here from `ui/tabs/market_data.py` (which now imports it) so the
-top bar and the Market data tab print the same sentence. The cadence words come from
-the running feed's own `interval`, else `data.bloomberg.live.INTERVAL_SECONDS`; they are
-never typed in as a literal. With no feed running (`app.bloomberg_feed is None`) the line
-says there are no automatic pulls rather than claiming a cadence that is not happening,
-and a click says why in plain words, never nothing.
+top bar and the Market data tab print the same sentence. It ends by saying that Bloomberg
+is pulled on request only. With no feed (`app.bloomberg_feed is None`, RISK_LIVE=0) a
+click says why in plain words, never nothing.
 
 Rapid clicks: `PullGuard` is a server-side record of the one outstanding request, under
 a lock, so ten clicks (or two browser tabs) make one `trigger_now()` call; the button is
-also disabled in the browser while a request is outstanding. An upload's own
-`trigger_now()` (`ui/uploads.py::_trigger_feed_refresh`) deliberately does NOT go through
-the guard: a second upload must always get its own pull, because the pull already running
-built its request list from the previous book.
+also disabled in the browser while a request is outstanding.
 """
 from __future__ import annotations
 
@@ -51,13 +47,15 @@ PULL_TIMEOUT_SECONDS = 180
 FALLBACK_INTERVAL_SECONDS = 900     # the feed's cadence, used only when data.bloomberg.live cannot be imported
 STATUS_REFRESH_MAX_SECONDS = 60     # the passive status line re-reads the status file at least this often
 NO_FEED_REASON = "no live Bloomberg feed was started in this session"
+NO_FEED_WORDS = "Bloomberg pulls are switched off in this session"
+ON_REQUEST_WORDS = "pulls only when you press Pull Bloomberg now"
 
 
 # --------------------------------------------------------------------------- words
 def feed_interval_seconds(feed=None) -> Optional[int]:
-    """Seconds between automatic pulls: the running feed's own `interval` when there is
-    one, else `data.bloomberg.live.INTERVAL_SECONDS`. None when neither can be read (the
-    line then states no cadence rather than inventing one)."""
+    """Seconds between the screens' own safety-net re-reads of the marks on file
+    (`safety_refresh_ms`, `status_refresh_ms`): `data.bloomberg.live.INTERVAL_SECONDS`.
+    No Bloomberg pull runs on it (2026-09-21). None when it cannot be read."""
     value = getattr(feed, "interval", None)
     if value is None:
         try:
@@ -136,14 +134,13 @@ def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None
                   feed_running: Optional[bool] = None, now: Optional[datetime] = None) -> str:
     """One line: connected or the stated reason it is not, time of the last pull, marks
     written / failed, how long that pull took (only when the status file carries
-    `timings["total"]`), and the cadence in words.
+    `timings["total"]`), and that Bloomberg is pulled on request only.
 
-    `feed_running`: True = the feed thread exists, False = it does not (no automatic
-    pulls, said so), None = the caller cannot tell (the Market data tab's one-argument
-    call), which keeps the cadence clause on a connected status only."""
+    `feed_running`: False = there is no feed to ask (RISK_LIVE=0, start_feed=False), said
+    so. `interval_seconds` is accepted for the callers that still pass it and ignored."""
     if not status:
         line = "Bloomberg: no pull recorded yet"
-        return f"{line} · no automatic pulls in this session" if feed_running is False else line
+        return f"{line} · {NO_FEED_WORDS if feed_running is False else ON_REQUEST_WORDS}"
     when = short_time(status.get("time"), now)
     if not status.get("connected"):
         line = f"Bloomberg: not connected — {status.get('reason') or 'unknown reason'}"
@@ -158,13 +155,7 @@ def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None
         took = seconds_words(pull_timings(status).get("total"))
         if took:
             line += f" · last pull took {took}"
-    if feed_running is False:
-        return f"{line} · no automatic pulls in this session"
-    if feed_running is None and not status.get("connected"):
-        return line
-    if interval_seconds is None:
-        interval_seconds = feed_interval_seconds()
-    return f"{line} · pulls automatically {cadence_words(interval_seconds)}" if interval_seconds else line
+    return f"{line} · {NO_FEED_WORDS if feed_running is False else ON_REQUEST_WORDS}"
 
 
 def not_connected_message(app, status: Optional[dict]) -> str:
@@ -287,18 +278,17 @@ def controls() -> list:
     """The button and its status line, for the upload strip's own row."""
     return [
         html.Button(PULL_BUTTON_LABEL, id=PULL_BUTTON_ID, n_clicks=0, className="btn btn--feed-pull",
-                    title="Wake the Bloomberg feed for one extra pull right now"),
+                    title="Pull today's marks and any missing past closes from Bloomberg, for what the "
+                          "trades on file need. Nothing is pulled until this is pressed."),
         html.Div(id=PULL_STATUS_ID, role="status", className="feed-pull-status"),
     ]
 
 
 def status_refresh_ms() -> int:
-    """How often the passive status line re-reads the status file: once per feed cycle,
-    but never less often than `STATUS_REFRESH_MAX_SECONDS`. A pull that failed never
-    touches the database (which is what `ui.revision` watches), so this timer is the only
-    thing that shows it; at the feed's 15-minute cadence a once-per-cycle tick would leave
-    "connected" on screen for up to 15 minutes after Bloomberg went away. The read is one
-    small local JSON file."""
+    """How often the passive status line re-reads the status file: never less often than
+    `STATUS_REFRESH_MAX_SECONDS`. A pull that failed never touches the database (which is
+    what `ui.revision` watches), so this timer is the only thing that shows it. The read
+    is one small local JSON file; nothing is asked of Bloomberg."""
     seconds = feed_interval_seconds() or STATUS_REFRESH_MAX_SECONDS
     return max(1, min(seconds, STATUS_REFRESH_MAX_SECONDS)) * 1000
 

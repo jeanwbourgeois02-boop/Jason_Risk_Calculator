@@ -49,9 +49,10 @@ same. Keep the terminal window open; **Ctrl+C** stops the app.
 - If a copy with **older code** is still running on 8050, it is stopped (force-stopped if it is too old to
   answer the stop request) and the new one takes 8050, so an old bookmark never shows old code.
 - `py -3 2_launcher.py start --no-sync` starts without touching GitHub.
-- On the Bloomberg PC, log in to the Terminal first, then run `pnl`. The console says
-  `Bloomberg feed: started (every 15 minutes)` or the reason it did not start, and Bloomberg history is backfilled
-  automatically in the background (see below) — there is nothing to run for that.
+- On the Bloomberg PC, run `pnl` and log in to the Terminal (in either order). The console says
+  `Bloomberg feed: on request only (Pull Bloomberg now)`: nothing is pulled from Bloomberg until you press
+  **Pull Bloomberg now** in the top bar. One press pulls today's marks and then fills the missing past closes
+  (see below), and only for what the trades on file need (the "Bloomberg library" on the Market data tab).
 - `py -3 2_launcher.py start --force-new` (inside the project folder) always starts a fresh instance.
 
 **Working copy**: the repository lives in `C:\Users\<you>\risk-monitor`, a plain local folder. GitHub is the
@@ -62,9 +63,9 @@ versions of the app.
 **Daily routine**: upload the latest blotter export with the **Upload trade file** button, leave the Ladder on
 today, read the header and the ladder. Details in [HOW_IT_WORKS.md](HOW_IT_WORKS.md) section 8.
 
-**Bloomberg history backfill**: automatic. Whenever a Terminal is available — on `pnl` / `start`, and again at
-the end of every live feed cycle — the app fills any business day between the earliest trade in the database
-and yesterday that lacks a complete official close, in the background, without blocking the UI. Progress
+**Bloomberg history backfill**: part of every **Pull Bloomberg now**. Straight after today's marks, the app
+fills any business day between the earliest trade in the database and yesterday that lacks a complete official
+close, in the background, without blocking the UI. Nothing runs at `pnl` / `start` or on a timer. Progress
 ("Backfill: n days remaining") is written to the same status file the live feed uses, and shown on the Market
 data tab. Without a Terminal it does nothing and says so in the status.
 
@@ -115,7 +116,7 @@ Everything else lives under `2_launcher.py` too, but the raw commands are:
 .venv\Scripts\python -m ui.launch                 the launcher 2_launcher.py start calls
 .venv\Scripts\python -m data.bloomberg.live --once   one Bloomberg pull now
 .venv\Scripts\python -m data.bloomberg.live --status the last pull, itemised
-.venv\Scripts\python -m data.bloomberg.backfill --start ... --end ...   run the backfill manually (normally automatic)
+.venv\Scripts\python -m data.bloomberg.backfill --start ... --end ...   run the backfill manually (normally part of Pull Bloomberg now)
 .venv\Scripts\python 3_diagnostic.py              Bloomberg diagnostics (same checks as the Market data button)
 ```
 

@@ -1,7 +1,7 @@
 """Live Bloomberg feed for the FX cash ladder.
 
 If `blpapi` is importable and a Bloomberg API service answers (Terminal / B-PIPE on
-localhost:8194 by default), `LiveFeed` pulls every INTERVAL_SECONDS:
+localhost:8194 by default), each requested pull of `LiveFeed` fetches:
   * SPOT (PX_LAST, live ReferenceDataRequest) for every FX pair with an open leg, every
     open FX option's pair, and the USD-conversion pairs a cross's legs or an option's
     base / quote currency need (each asked for once);
@@ -25,13 +25,15 @@ listing each requested (instrument, mark_type, settle_date) as OK or FAILED with
 value or the failure detail. `py -3 -m data.bloomberg.live --status` prints it;
 `--once` runs a single pull.
 
-Cadence (user decision 2026-09-21: "make bloomberg load less often (maybe every 15min)"):
-one scheduled cycle every INTERVAL_SECONDS = 15 minutes. Anything that changes what needs
-pricing does not wait for it: a "Pull Bloomberg now" click, a blotter upload, a manual
-trade, a typed strike or a swap direction edit all call `LiveFeed.trigger_now()`, which
-runs a cycle at once. A cycle opens ONE blpapi session and shares it between the FX marks,
-the OIS quotes / fixings and the vol quotes (`_SharedSession`; it used to open three), and
-records where its time went in `status["timings"]` (see `pull_once`).
+On request only (user decision 2026-09-21, replacing the 15-minute cadence of the same
+day: "make it only pull the bloomberg info on request - no automatic"): a cycle runs when
+"Pull Bloomberg now" is pressed (`LiveFeed.trigger_now()`), never at start, on a timer,
+or after an upload, a manual trade or an edit. What a cycle asks for is READ from the
+Bloomberg library (data/bloomberg/library.py, table `bbg_library`): what the trades on
+file need for their P&L, written when trades come in. A cycle opens ONE blpapi session
+and shares it between the FX marks, the OIS quotes / fixings and the vol quotes
+(`_SharedSession`), and records where its time went in `status["timings"]` (see
+`pull_once`).
 """
 from __future__ import annotations
 
@@ -48,10 +50,12 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-INTERVAL_SECONDS = 900  # 15 minutes between scheduled cycles (was 120 until 2026-09-21)
-# A SPOT mark is called stale once two scheduled cycles in a row have failed to refresh it,
-# plus five minutes for the cycle's own run time. It must stay well above INTERVAL_SECONDS:
-# at the old fixed 600 s every mark would read STALE for the last third of each interval.
+# No pull is scheduled any more (2026-09-21: Bloomberg is pulled on request only). What is
+# left of the old 15-minute cadence is the screens' own safety-net re-read of the marks on
+# file (ui/feed_controls.py::safety_refresh_ms), which asks nothing of Bloomberg.
+INTERVAL_SECONDS = 900
+# A SPOT mark older than this reads STALE on the Ladder and the Market data tab: a flag
+# that the rate is not fresh, never a reason to drop it.
 STALE_AFTER_SECONDS = 2 * INTERVAL_SECONDS + 300
 SRC_SPOT_FWD = "BBG_BFXFORWARD"
 SRC_INTERP = "BBG_INTERP"
@@ -403,44 +407,39 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     pair the option itself needs -- base->USD and quote->USD, see _option_usd_legs --
     appended after the option's own rows and only where nothing above already asked for
     it. The pair instrument row those need is created here when missing
-    (_ensure_fx_instruments), since this is the one writable call site."""
+    (_ensure_fx_instruments), since this is the one writable call site.
+
+    2026-09-21 (user: "only pull data that is essential to calculate the pnl of the trades
+    ... they will be in this cache"): the list is READ from the Bloomberg library
+    (data/bloomberg/library.py, `bbg_library`), which is written when trades come in, not
+    worked out from the trades here. Same rules, same order; what is not in the library is
+    not asked for."""
+    from data.bloomberg import library
     from data.bloomberg.pull_marks import RequestRow
-    fx_rows = conn.execute(_OPEN_FX_SQL, {"as_of": as_of_date}).fetchall()
+    needed = library.needed_on(conn, as_of_date)
+    _ensure_fx_instruments(conn, [r["key"] for r in needed if r["kind"] in ("SPOT", "FWD_OUTRIGHT")])
     out, seen = [], set()
-    for instrument_id, ticker, settle in fx_rows:
-        if (instrument_id, "SPOT") not in seen:
-            seen.add((instrument_id, "SPOT"))
-            out.append(RequestRow(instrument_id, ticker, as_of_date, "SPOT"))
-        if (instrument_id, "FWD_OUTRIGHT", settle) not in seen:
-            seen.add((instrument_id, "FWD_OUTRIGHT", settle))
-            out.append(RequestRow(instrument_id, ticker, settle, "FWD_OUTRIGHT"))
-    cross_legs = _cross_usd_legs(conn, as_of_date)
-    option_rows = _option_mark_rows(conn, as_of_date)
-    option_legs = _option_usd_legs(conn, as_of_date)
-    _ensure_fx_instruments(conn, [leg["pair_name"] for leg in cross_legs] + [o["pair"] for o in option_rows]
-                           + [leg["pair_name"] for leg in option_legs])
-    for leg in cross_legs:
-        key = (leg["instrument_id"], "SPOT")
+
+    def _add(r: dict) -> None:
+        key = (r["key"], "SPOT") if r["kind"] == "SPOT" else (r["key"], r["kind"], r["settle_date"])
         if key not in seen:
             seen.add(key)
-            out.append(RequestRow(leg["instrument_id"], leg["bbg_ticker"], as_of_date, "SPOT"))
-    for o in option_rows:
-        if (o["instrument_id"], "SPOT") not in seen:
-            seen.add((o["instrument_id"], "SPOT"))
-            out.append(RequestRow(o["instrument_id"], o["bbg_ticker"], as_of_date, "SPOT"))
-        if (o["instrument_id"], "FWD_OUTRIGHT", o["expiry"]) not in seen:
-            seen.add((o["instrument_id"], "FWD_OUTRIGHT", o["expiry"]))
-            out.append(RequestRow(o["instrument_id"], o["bbg_ticker"], o["expiry"], "FWD_OUTRIGHT"))
-    for leg in option_legs:
-        key = (leg["instrument_id"], "SPOT")
-        if key not in seen:
-            seen.add(key)
-            out.append(RequestRow(leg["instrument_id"], leg["bbg_ticker"], as_of_date, "SPOT"))
-    fut_rows =conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of_date}).fetchall()
-    for instrument_id, ticker, settle in fut_rows:
-        if (instrument_id, "FUTURE_PX", settle) not in seen:
-            seen.add((instrument_id, "FUTURE_PX", settle))
-            out.append(RequestRow(instrument_id, ticker, settle, "FUTURE_PX"))
+            out.append(RequestRow(r["key"], r["bbg_ticker"], as_of_date if r["kind"] == "SPOT" else r["settle_date"],
+                                  r["kind"]))
+
+    is_option = lambda r: r["product"] == "FX_OPTION"                     # noqa: E731
+    is_conversion = lambda r: r["role"] == library.ROLE_CONVERSION        # noqa: E731
+    marks = sorted((r for r in needed if r["kind"] in library.MARK_KINDS),
+                   key=lambda r: (r["key"], r["kind"] != "SPOT", r["settle_date"]))
+    fx = [r for r in marks if r["kind"] != "FUTURE_PX" and not is_option(r)]
+    options = [r for r in marks if is_option(r)]
+    # Forwards' own pairs (SPOT, then each leg date), crosses' conversion pairs, options'
+    # own pairs, options' conversion pairs, futures: the order the list always had.
+    for group in ([r for r in fx if not is_conversion(r)], [r for r in fx if is_conversion(r)],
+                  [r for r in options if not is_conversion(r)], [r for r in options if is_conversion(r)],
+                  [r for r in marks if r["kind"] == "FUTURE_PX"]):
+        for r in group:
+            _add(r)
     return out
 
 
@@ -621,14 +620,6 @@ def write_marks(conn: sqlite3.Connection, rows: List[dict]) -> int:
     return n
 
 
-_OPEN_OPTION_CCYS_SQL = """
-SELECT DISTINCT i.base_ccy, i.quote_ccy
-FROM trades_official t JOIN instruments i USING (instrument_id)
-WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND i.expiry_date >= :as_of
-  AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
-"""
-
-
 def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rates_source=None,
                 shared: Optional[_SharedSession] = None) -> dict:
     """Pull OIS quotes and fixings for every currency with an un-matured IRS trade, PLUS
@@ -657,15 +648,13 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
     pasted status says which of the two a slow rates step was."""
     out: dict = {"currencies": {}, "priced": 0, "failed": [], "as_of_date": today.isoformat()}
     step_started = time.perf_counter()
-    irs_ccys = {r[0] for r in conn.execute(
-        "SELECT DISTINCT i.base_ccy FROM trades_official t JOIN instruments i USING (instrument_id) "
-        "WHERE t.product = 'IRS' AND t.trade_date <= ? "
-        "AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)", (today.isoformat(),))}
-    option_ccys: set = set()
-    for base, quote in conn.execute(_OPEN_OPTION_CCYS_SQL, {"as_of": today.isoformat()}):
-        option_ccys.add(base)
-        option_ccys.add(quote)
-    ccys = sorted(irs_ccys | option_ccys)
+    # Which currencies: read from the Bloomberg library (2026-09-21), never worked out
+    # here. OIS_CURVE = every live swap's currency and both currencies of every open
+    # option; FIXINGS = the swaps' currencies only (see below).
+    from data.bloomberg import library
+    needed = library.needed_on(conn, today.isoformat())
+    irs_ccys = {r["key"] for r in needed if r["kind"] == "FIXINGS"}
+    ccys = sorted({r["key"] for r in needed if r["kind"] == "OIS_CURVE"} | irs_ccys)
     if not ccys:
         out["skipped"] = "no IRS or FX_OPTION trades to price"
         return out
@@ -709,9 +698,10 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
                 # otherwise overwrite this entry's error with an unrelated fixings failure
                 # even though the curve pull above succeeded fine.
                 if ccy in irs_ccys:
+                    swap_ids = sorted({r["trade_id"] for r in needed if r["kind"] == "FIXINGS" and r["key"] == ccy})
                     first = conn.execute(
-                        "SELECT MIN(l.start_date) FROM trade_legs l JOIN trades_official t USING (trade_id) "
-                        "JOIN instruments i USING (instrument_id) WHERE t.product = 'IRS' AND i.base_ccy = ?", (ccy,)).fetchone()[0]
+                        f"SELECT MIN(start_date) FROM trade_legs WHERE trade_id IN ({','.join('?' * len(swap_ids))})",
+                        swap_ids).fetchone()[0]
                     start = date.fromisoformat(first) if first else today
                     if start <= today:
                         fixings = rates_source.get_fixings(ccy, start, today)
@@ -755,9 +745,13 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
     parameter. `shared` (2026-09-21): the cycle's one blpapi session, borrowed by the live
     source instead of opening its own."""
     out: dict = {"pairs": {}, "written": 0, "diagnostics": [], "as_of_date": today.isoformat()}
-    n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product = 'FX_OPTION' AND trade_date <= ?",
-                     (today.isoformat(),)).fetchone()[0]
-    if not n:
+    # Which pairs: the Bloomberg library's VOL_SMILE rows in force today (2026-09-21), so
+    # only options still open. It used to be every FX_OPTION instrument ever on file
+    # (vm.vol_pairs_needed; instruments outlive an upload), 45 tickers a pair, as long as
+    # the book held one option of any age -- and three default pairs when it found none.
+    from data.bloomberg import library
+    pairs = library.keys(conn, today.isoformat(), "VOL_SMILE")
+    if not pairs:
         out["skipped"] = "no FX_OPTION trades to price"
         return out
     try:
@@ -765,7 +759,6 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"vol_marketdata not importable: {exc!r}"
         return out
-    pairs = vm.vol_pairs_needed(conn)
     if vol_source is None:
         try:
             if shared is not None:
@@ -1037,8 +1030,13 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
 # --------------------------------------------------------------------------- feed thread
 @dataclass
 class LiveFeed:
+    """Pulls Bloomberg ON REQUEST only (user decision 2026-09-21: "make it only pull the
+    bloomberg info on request - no automatic"). The thread sleeps until `trigger_now()`
+    -- the "Pull Bloomberg now" button -- and then runs one cycle: today's marks
+    (`pull_once`), then the past closes still missing (`start_auto_backfill`). There is
+    no pull when the app starts, none on a timer and none after an upload or an edit;
+    between requests the app shows the marks on file, with the time of the last pull."""
     db_path: Path
-    interval: int = INTERVAL_SECONDS
     host: str = "localhost"
     port: int = 8194
     last_status: Optional[dict] = None
@@ -1056,26 +1054,16 @@ class LiveFeed:
         self._wake.set()
 
     def trigger_now(self) -> None:
-        """Wake the feed loop immediately instead of waiting out the rest of the 15-minute
-        interval, and run one extra cycle right away. Call this after any event that could
-        change what needs pricing -- most importantly a blotter import landing new trades
-        (data.ingest.upload.import_blotter / ui/uploads.py) -- so marks for trades a user
-        just uploaded are pulled within seconds rather than up to INTERVAL_SECONDS later.
-
-        Root cause this exists for (found 2026-09-17): the feed's very first pull runs the
-        instant the app starts (LiveFeed._loop below), typically before any trade has been
-        uploaded through the browser, so build_requests() finds nothing to price and the
-        cycle writes {requested: 0, written: 0, connected: True}. Nothing then re-triggers
-        a pull until the next scheduled tick (up to INTERVAL_SECONDS away), so a user who
-        uploads a blotter and immediately checks diagnostics can see that stale empty pull
-        reported as if it were current. ui/uploads.py (owned by ui-shell, not bbg-data)
-        must call `app.bloomberg_feed.trigger_now()` after a successful import_blotter()
-        for this to take effect end to end; see the bbg-data agent's handoff note for the
-        exact call site."""
+        """Ask for one pull, now. A request made while a pull is running gets a pull of
+        its own straight after it (that one built its request list before the request)."""
         self._wake.set()
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
+        while True:
+            self._wake.wait()
+            self._wake.clear()
+            if self._stop.is_set():
+                return
             try:
                 self.last_status = pull_once(self.db_path, host=self.host, port=self.port)
                 from data.bloomberg.backfill import start_auto_backfill
@@ -1085,26 +1073,24 @@ class LiveFeed:
                                             "reason": "feed thread error: " + traceback.format_exc().strip().splitlines()[-1],
                                             "traceback": traceback.format_exc(), "requested": 0, "written": 0,
                                             "failed": 0, "items": [], "warnings": []})
-            self._wake.wait(self.interval)
-            self._wake.clear()
 
 
-def start_feed_if_available(db_path, host: str = "localhost", port: int = 8194,
-                            interval: int = INTERVAL_SECONDS) -> Tuple[Optional[LiveFeed], str]:
-    """Start the 15-minute feed when Bloomberg is reachable; otherwise write a status file
-    explaining why and return (None, reason). Never fabricates data either way."""
-    ok, why = availability(host, port)
-    if not ok:
-        write_status(db_path, {"time": _now_iso(), "connected": False, "reason": why,
+def start_feed_if_available(db_path, host: str = "localhost", port: int = 8194) -> Tuple[Optional[LiveFeed], str]:
+    """`(feed, "")`: the on-request feed, started asleep -- nothing is asked of Bloomberg
+    here. It is started whether or not Bloomberg answers right now, so that a Terminal
+    logged into after the app was launched still gets its pull when the button is pressed
+    (`pull_once` checks the connection itself on every request and records why it could
+    not pull). The status file is left as the last pull wrote it, so every screen keeps
+    showing when the marks on file were pulled; only when there is no status at all is
+    one written, saying no pull has been requested yet."""
+    if read_status(db_path) is None:
+        ok, why = availability(host, port)
+        write_status(db_path, {"time": _now_iso(), "connected": False,
+                               "reason": (why if not ok else
+                                          "no pull requested yet: press Pull Bloomberg now"),
                                "host": f"{host}:{port}", "requested": 0, "written": 0, "failed": 0,
                                "items": [], "warnings": []})
-        return None, why
-    # Record immediately that the feed thread exists, so the UI never says "no pull recorded"
-    # while the first pull is in flight.
-    write_status(db_path, {"time": _now_iso(), "connected": False,
-                           "reason": "feed started; first Bloomberg pull in progress", "host": f"{host}:{port}",
-                           "requested": 0, "written": 0, "failed": 0, "items": [], "warnings": []})
-    return LiveFeed(Path(db_path), interval, host, port).start(), ""
+    return LiveFeed(Path(db_path), host, port).start(), ""
 
 
 # --------------------------------------------------------------------------- rates for the ladder

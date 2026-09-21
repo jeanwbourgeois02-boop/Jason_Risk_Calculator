@@ -9,9 +9,9 @@ diagnostics).
     py 2_launcher.py freeze     (re)write requirements.txt from the list below, for `pip install -r`
                                  or CI that doesn't go through this file
 
-Backfilling P&L history from Bloomberg daily closes is automatic: `start` and every
-Bloomberg feed cycle in data/bloomberg/live.py trigger it in the background (see
-data/bloomberg/backfill.py). There is no separate command for it.
+Backfilling P&L history from Bloomberg daily closes is part of every "Pull Bloomberg now"
+in the app (data/bloomberg/live.py runs data/bloomberg/backfill.py straight after
+today's marks). Nothing is pulled at `start`. There is no separate command for it.
 
 `setup` runs with whatever Python launched it and creates `.venv` beside this file.
 Every other command re-runs itself inside `.venv` so the packages installed by

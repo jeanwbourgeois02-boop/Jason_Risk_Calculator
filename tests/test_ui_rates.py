@@ -590,7 +590,7 @@ def test_flip_through_the_callback_changes_direction_quantity_sign_and_shown_pv(
     assert row["direction"] == "RECEIVE" and row["notional"] == "(10,000,000)" and row["pv_usd"] == "(1,000,000)"
     assert notice_style["display"] == "flex" and notice_text.startswith("2 of 3 swaps have")
     assert "T1 set to Receive fixed" in status.children and status.className == "source-result--info"
-    assert feed.woken == 1
+    assert feed.woken == 0      # 2026-09-21: Bloomberg is pulled on request only, never by an edit
     # both revisions published at once, so the header and the strips redraw with no reload
     assert new_data_rev == revision.file_signature(db_path) and new_data_rev != data_rev
     assert new_book_rev == revision.book_signature(db_path) and new_book_rev != book_rev

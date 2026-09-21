@@ -60,7 +60,9 @@ def test_feed_switched_off_by_environment_says_so(tmp_path, monkeypatch):
 def test_unreachable_bloomberg_reason_is_kept_and_a_started_feed_has_none(tmp_path, monkeypatch, capsys):
     from data.bloomberg import backfill, live
     monkeypatch.delenv("RISK_LIVE", raising=False)
-    monkeypatch.setattr(backfill, "start_auto_backfill", lambda *a, **k: None)
+    started = []
+    # 2026-09-21: nothing is asked of Bloomberg at start-up, the past-close backfill included
+    monkeypatch.setattr(backfill, "start_auto_backfill", lambda *a, **k: started.append(1))
 
     why = "no Bloomberg API service on localhost:8194 (refused)"
     monkeypatch.setattr(live, "start_feed_if_available", lambda *a, **k: (None, why))
@@ -73,5 +75,5 @@ def test_unreachable_bloomberg_reason_is_kept_and_a_started_feed_has_none(tmp_pa
     feed = _Feed()
     monkeypatch.setattr(live, "start_feed_if_available", lambda *a, **k: (feed, ""))
     assert uiapp.start_bloomberg_feed_with_reason(tmp_path / "risk.db") == (feed, "")
-    # the console line's cadence is read from the feed, not typed in
-    assert "started (every 15 minutes)" in capsys.readouterr().out
+    assert "on request only" in capsys.readouterr().out
+    assert started == []

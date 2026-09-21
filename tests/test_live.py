@@ -290,8 +290,14 @@ def test_pull_once_without_bloomberg_writes_status_and_no_marks(tmp_path, monkey
     assert status["connected"] is False and "blpapi" in status["reason"] and status["items"] == []
     assert live.read_status(p) == status
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0
+    # 2026-09-21: the on-request feed is started asleep whether or not Bloomberg answers
+    # (a Terminal logged into later still gets its pull), and it leaves the last pull's
+    # status on file alone.
     feed, why = live.start_feed_if_available(p)
-    assert feed is None and "blpapi" in why and live.read_status(p)["connected"] is False
+    try:
+        assert feed is not None and why == "" and live.read_status(p) == status
+    finally:
+        feed.stop()
 
 
 def test_pull_once_with_fake_session_writes_marks_and_itemised_status(tmp_path, monkeypatch):
@@ -725,35 +731,34 @@ def test_availability_no_blpapi_never_touches_the_socket(monkeypatch):
 
 
 # --------------------------------------------------------------------------- LiveFeed.trigger_now() (2026-09-17)
-def test_trigger_now_wakes_the_loop_immediately_instead_of_waiting_the_full_interval(tmp_path, monkeypatch):
-    """Root-cause fix: without this, a blotter uploaded moments after the app starts is
-    not priced until the next scheduled pull (up to INTERVAL_SECONDS later). A caller
-    (ui/uploads.py, after import_blotter) is expected to call feed.trigger_now()."""
+def test_feed_pulls_only_when_asked_and_each_request_also_fills_past_closes(tmp_path, monkeypatch):
+    """User decision 2026-09-21: "make it only pull the bloomberg info on request - no
+    automatic". A started feed asks nothing of Bloomberg -- no pull at start, none on a
+    timer -- until trigger_now(); one request is one pull followed by the backfill."""
+    import time as _t
     p, conn = _db(tmp_path)
-    calls = []
+    calls, backfills = [], []
 
     def fake_pull_once(db_path, host="localhost", port=8194):
         calls.append(1)
         return {"connected": True, "requested": 0, "written": 0, "failed": 0, "items": [], "warnings": []}
 
     monkeypatch.setattr(live, "pull_once", fake_pull_once)
-    monkeypatch.setattr("data.bloomberg.backfill.start_auto_backfill", lambda *a, **k: None)
-    feed = live.LiveFeed(p, interval=60)
+    monkeypatch.setattr("data.bloomberg.backfill.start_auto_backfill", lambda *a, **k: backfills.append(1))
+    feed = live.LiveFeed(p)
+    assert not hasattr(feed, "interval")
     feed.start()
     try:
-        for _ in range(200):  # wait for the first (immediate) cycle
-            if calls:
-                break
-            import time as _t
-            _t.sleep(0.01)
-        assert calls == [1]
-        feed.trigger_now()  # must not require waiting out the 60s interval
+        _t.sleep(0.3)
+        assert calls == [] and backfills == []      # started, and nothing was pulled
+        feed.trigger_now()
         for _ in range(200):
-            if len(calls) >= 2:
+            if backfills:
                 break
-            import time as _t
             _t.sleep(0.01)
-        assert len(calls) >= 2
+        assert calls == [1] and backfills == [1]
+        _t.sleep(0.3)
+        assert calls == [1]                         # and nothing more until asked again
     finally:
         feed.stop()
 
@@ -763,11 +768,13 @@ def test_stop_also_wakes_a_waiting_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(live, "pull_once", lambda *a, **k: {"connected": False, "reason": "x", "requested": 0,
                                                              "written": 0, "failed": 0, "items": [], "warnings": []})
     monkeypatch.setattr("data.bloomberg.backfill.start_auto_backfill", lambda *a, **k: None)
-    feed = live.LiveFeed(p, interval=120)
+    pulled = []
+    monkeypatch.setattr(live, "pull_once", lambda *a, **k: pulled.append(1))
+    feed = live.LiveFeed(p)
     feed.start()
     feed.stop()
     feed._thread.join(timeout=5)
-    assert not feed._thread.is_alive()
+    assert not feed._thread.is_alive() and pulled == []      # stopping is not a request to pull
 
 
 # --------------------------------------------------------------------------- 2026-09-18 audit fixes
@@ -1111,8 +1118,17 @@ def test_sample_book_request_list_is_unchanged_except_for_deduplicated_conversio
     eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
 
     def before_and_after(as_of):
+        # 'before': the list with the options' conversion rows left out. build_requests
+        # reads the Bloomberg library (2026-09-21), so they are left out of what it reads.
+        from data.bloomberg import library
+        full = library.needed_on
+
+        def without_option_conversions(conn_, as_of_date, historical=False):
+            return [r for r in full(conn_, as_of_date, historical)
+                    if not (r["product"] == "FX_OPTION" and r["role"] == library.ROLE_CONVERSION)]
+
         with monkeypatch.context() as m:
-            m.setattr(live, "_option_usd_legs", lambda conn_, as_of_date, historical=False: [])
+            m.setattr(library, "needed_on", without_option_conversions)
             before = [(r.instrument_id, r.mark_type, r.settle_date, r.bbg_ticker) for r in live.build_requests(conn, as_of)]
         after = [(r.instrument_id, r.mark_type, r.settle_date, r.bbg_ticker) for r in live.build_requests(conn, as_of)]
         assert len(after) == len(set(after))                            # nothing requested twice
@@ -1141,13 +1157,11 @@ def test_sample_book_request_list_is_unchanged_except_for_deduplicated_conversio
 
 
 # --------------------------------------------------------------------------- cadence, one session per cycle, timings (2026-09-21)
-def test_cadence_is_fifteen_minutes_and_stale_threshold_follows_it(tmp_path):
-    """User decision 2026-09-21: one scheduled pull every 15 minutes. The stale threshold
-    must follow the interval: at the old fixed 600 s every SPOT would read STALE for the
-    last third of each interval, on every screen that reads rates_from_marks."""
+def test_stale_threshold_and_the_screens_safety_net_interval(tmp_path):
+    """No pull is scheduled any more (2026-09-21); INTERVAL_SECONDS is only the screens'
+    own re-read of the marks on file, and the stale threshold is unchanged."""
     assert live.INTERVAL_SECONDS == 900
     assert live.STALE_AFTER_SECONDS == 2 * live.INTERVAL_SECONDS + 300 == 2100
-    assert live.LiveFeed(tmp_path / "risk.db").interval == 900
     p, conn = _db(tmp_path)
     now = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
 

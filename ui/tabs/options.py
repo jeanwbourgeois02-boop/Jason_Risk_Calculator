@@ -404,7 +404,7 @@ def _leg_note(rec: dict, as_of: str, premium, book: Optional[dict], greeks_reaso
             return book_reason or f"expired {rec['expiry_date']}"
         if skip_reason:
             return f"not priced: {skip_reason}"
-        return book_reason or f"no PREMIUM mark on {as_of}: priced on the next Bloomberg cycle"
+        return book_reason or f"no PREMIUM mark on {as_of}: priced the next time you press Pull Bloomberg now"
     return book_reason or greeks_reason
 
 
@@ -1106,9 +1106,10 @@ def save_and_price(db_path, as_of: Optional[str], trade_id: Optional[str], instr
     `engine.options.store.set_option_terms` validates and persists (in
     `instrument_options`, which a blotter re-upload never overwrites), then
     `engine.options.store.price_and_store` prices `trade_id` as of `as_of` and writes its
-    official marks; a skip's `reason` is kept for the row (`_LAST_SKIP`). `nudge` wakes the
-    Bloomberg feed, which pulls whatever market input the new terms need and re-prices on
-    its own cycle. Nothing is priced or computed here."""
+    official marks; a skip's `reason` is kept for the row (`_LAST_SKIP`). `nudge`, when a
+    caller passes one, is called after a save; the app passes none (2026-09-21: Bloomberg
+    is pulled on request only, and a strike changes nothing about what is asked of it).
+    Nothing is priced or computed here."""
     from data.ingest.schema import connect
     from engine.options.store import price_and_store, set_option_terms
 
@@ -1362,13 +1363,6 @@ def register_callbacks(app, get_db_path: Callable[[], object],
     from dash import ctx, no_update
     from dash.exceptions import MissingCallbackContextException, PreventUpdate
 
-    def _nudge_feed():
-        # Same call `ui.tabs.manual_entry` and `ui.uploads` make after a write: one extra
-        # Bloomberg cycle now, so a new strike's market inputs are pulled within seconds.
-        feed = getattr(app, "bloomberg_feed", None)
-        if feed is not None:
-            feed.trigger_now()
-
     def _triggered_props() -> set:
         try:
             return {t["prop_id"] for t in (ctx.triggered or [])}
@@ -1443,7 +1437,7 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         edited = f"{TABLE_ID}.data_timestamp" in triggered
         try:
             records, status = handle_table_event(get_db_path(), as_of_date, collapsed, filter_query, sort_by,
-                                                 rows, previous, edited, _nudge_feed)
+                                                 rows, previous, edited)
         except sqlite3.OperationalError:
             raise PreventUpdate
         note = FLAT_VIEW_NOTE if view_is_flat(filter_query, sort_by) else ""
@@ -1531,7 +1525,7 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         db_path = get_db_path()
         terms = {"strike": strike or 0.0, "option_type": (option_type or "").upper(),
                  "payoff": (payoff or "VANILLA").upper(), "barrier_level": barrier or 0.0}
-        result = save_and_price(db_path, as_of_date, None, instrument_id, terms, _nudge_feed)
+        result = save_and_price(db_path, as_of_date, None, instrument_id, terms)
         if not result.ok:
             return html.Span(result.message, className="source-result--error"), no_update, no_update, no_update
         _LAST_SAVE[_norm_path(db_path)] = (time.time(), result.message)

@@ -17,11 +17,9 @@ new book at once: before that, nothing but this strip's own status line heard ab
 upload, and the page kept showing the old book until the browser was reloaded. A failed
 import publishes neither.
 
-On a successful import, `_trigger_feed_refresh` wakes `app.bloomberg_feed`
-(`data.bloomberg.live.LiveFeed.trigger_now`, 2026-09-17) for one extra pull right away
-so marks for the trades just uploaded are priced within seconds rather than waiting out
-the feed's normal interval; a failed import never triggers it, and a machine with no
-Bloomberg feed (`app.bloomberg_feed is None`) is a no-op, never an error.
+An import asks nothing of Bloomberg (user decision 2026-09-21: pulls are on request
+only). `data.ingest.upload.import_blotter` brings the Bloomberg library up to date with
+the new book and says so in its summary; "Pull Bloomberg now" then prices it.
 
 The result box is transient (2026-09-18, user: "it's always there, it won't go, it needs
 to go"); the source line is the durable record and is untouched by any of this:
@@ -271,20 +269,6 @@ def layout(data: dict = None):
     ])
 
 
-def _trigger_feed_refresh(app) -> None:
-    """Wake the Bloomberg feed for one extra pull right away after a successful
-    upload, instead of leaving marks for the trades just uploaded to wait out the
-    rest of the feed's normal interval (`data.bloomberg.live.LiveFeed.trigger_now`
-    names this exact call site in its own docstring, 2026-09-17). `app.bloomberg_feed`
-    is `None` whenever no Bloomberg session is available (`ui.app.create_app`'s
-    `start_feed=False`, or `start_feed_if_available` found nothing) -- guarded for
-    `None` and for the attribute being absent entirely (e.g. a lightweight test
-    double standing in for `app`), so a Bloomberg-less machine never raises here."""
-    feed = getattr(app, "bloomberg_feed", None)
-    if feed is not None:
-        feed.trigger_now()
-
-
 def register(app, get_db_path):
     @app.callback(
         Output(STAGE_ID, "style"), Output(FILENAME_ID, "children"),
@@ -332,7 +316,6 @@ def register(app, get_db_path):
                  report["rejects"], report["warnings"], report["notes"])
         from ui.app import load_summary
         data = load_summary(db_path)
-        _trigger_feed_refresh(app)
         result = report_result(report)
         # Publish both revisions now (ui/revision.py) so the header and every tab redraw
         # from the new book straight away, no browser reload and no wait for the poll.

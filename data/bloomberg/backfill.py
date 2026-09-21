@@ -91,39 +91,9 @@ WHERE m.mark_type = 'SPOT' AND i.asset_class = 'FX' AND m.as_of_date = :day
 ORDER BY m.instrument_id, m.snapped_at
 """
 
-# Open FX legs / futures across a *range* (not one as_of date, unlike live.py's
-# _OPEN_FX_SQL / _OPEN_FUTURE_SQL): the historical forward-curve / future-settle history
-# is fetched once for the whole span a backfill run needs, not once per day.
-_OPEN_FX_LEGS_RANGE_SQL = """
-SELECT DISTINCT i.instrument_id, i.bbg_ticker, l.settle_date
-FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
-WHERE i.asset_class = 'FX' AND t.trade_date <= :end AND l.settle_date >= :start
-"""
-
-_OPEN_FUTURES_RANGE_SQL = """
-SELECT DISTINCT i.instrument_id, i.bbg_ticker, l.settle_date
-FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
-WHERE i.asset_class = 'FUTURE' AND t.trade_date <= :end AND l.settle_date >= :start
-"""
-
-# Same cross-leg USD-conversion need as live._cross_usd_legs (EURSEK needs EURUSD and
-# USDSEK for delta/P&L, per live.py's own module docstring), but over a *range* rather
-# than one as_of date -- 2026-09-18, see traded_pairs' docstring for why this matters.
-_OPEN_CROSS_LEG_CCYS_RANGE_SQL = """
-SELECT DISTINCT i.base_ccy, i.quote_ccy
-FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
-WHERE i.asset_class = 'FX' AND t.trade_date <= :end AND l.settle_date >= :start
-  AND i.base_ccy != 'USD' AND i.quote_ccy != 'USD'
-"""
-
-# FX options open at any point in the range, expiry date included (`>= :start`), realised
-# since or not -- the range form of live._OPTION_PAIRS_OPEN_ON_DAY_SQL, which says why the
-# realised filter must not apply to a past close.
-_OPEN_OPTIONS_RANGE_SQL = """
-SELECT DISTINCT i.base_ccy, i.quote_ccy
-FROM trades_official t JOIN instruments i USING (instrument_id)
-WHERE t.product = 'FX_OPTION' AND t.trade_date <= :end AND i.expiry_date >= :start
-"""
+# What a span of past closes needs (pairs, leg dates, futures) is read from the Bloomberg
+# library (data/bloomberg/library.py::needed_in_range, 2026-09-21); the range queries over
+# the trades that used to live here are gone.
 
 
 def business_days(start: date, end: date) -> List[date]:
@@ -159,15 +129,14 @@ def traded_pairs(conn: sqlite3.Connection, start: date, end: date) -> List[tuple
     every FX option's pair with the option's own USD-conversion pairs. A listed pair
     with no instrument row on file is skipped (`write_marks` can never persist an unknown
     instrument_id); `backfill()` creates those rows first, so that only happens on a
-    connection that cannot write."""
-    legs = conn.execute(_OPEN_FX_LEGS_RANGE_SQL, {"start": start.isoformat(), "end": end.isoformat()}).fetchall()
-    pairs = {(instrument_id, ticker) for instrument_id, ticker, _settle in legs}
-    for pair_name in spot_only_pair_names(conn, start, end):
-        row = conn.execute("SELECT instrument_id, bbg_ticker FROM instruments WHERE instrument_id = ?",
-                           (pair_name,)).fetchone()
-        if row is not None:
-            pairs.add((row[0], row[1]))
-    return sorted(pairs)
+    connection that cannot write.
+
+    2026-09-21: read from the Bloomberg library (data/bloomberg/library.py) -- every SPOT
+    row in force on some day of the range. Same set as before, kept in one place."""
+    from data.bloomberg import library
+    known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
+    return sorted({(r["key"], r["bbg_ticker"]) for r in library.needed_in_range(conn, start.isoformat(), end.isoformat())
+                   if r["kind"] == "SPOT" and r["key"] in known})
 
 
 def spot_only_pair_names(conn: sqlite3.Connection, start: date, end: date) -> List[str]:
@@ -186,15 +155,11 @@ def spot_only_pair_names(conn: sqlite3.Connection, start: date, end: date) -> Li
         an expired option stays unrealisable. The other open days' conversion closes let
         a PREMIUM written by a live pull on that day convert to USD.
 
-    Orientation is `live._usd_pair_name` throughout (one table, in live.py)."""
-    from data.bloomberg.live import _usd_pair_name, option_spot_pair_names
-    params = {"start": start.isoformat(), "end": end.isoformat()}
-    names = set()
-    for base, quote in conn.execute(_OPEN_CROSS_LEG_CCYS_RANGE_SQL, params):
-        names.update(_usd_pair_name(ccy) for ccy in (base, quote))
-    for base, quote in conn.execute(_OPEN_OPTIONS_RANGE_SQL, params):
-        names.update(option_spot_pair_names(base, quote))
-    return sorted(names)
+    Orientation is `live._usd_pair_name` throughout (one table, in live.py). Read from
+    the Bloomberg library (2026-09-21): the conversion rows and the options' own SPOT rows."""
+    from data.bloomberg import library
+    return sorted({r["key"] for r in library.needed_in_range(conn, start.isoformat(), end.isoformat())
+                   if r["kind"] == "SPOT" and (r["role"] == library.ROLE_CONVERSION or r["product"] == "FX_OPTION")})
 
 
 def close_stamp(day: date) -> str:
@@ -249,10 +214,11 @@ def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, span
     HistoricalDataRequest does not serve; if the request comes back with no PX_LAST at all
     it is sent once more for PX_LAST alone, in case the field it cannot serve is what
     emptied the first response."""
-    legs = conn.execute(_OPEN_FX_LEGS_RANGE_SQL, {"start": span_start.isoformat(), "end": span_end.isoformat()}).fetchall()
-    if not legs:
+    from data.bloomberg import library
+    pairs = sorted({r["key"] for r in library.needed_in_range(conn, span_start.isoformat(), span_end.isoformat())
+                    if r["kind"] == "FWD_OUTRIGHT"})
+    if not pairs:
         return {}
-    pairs = sorted({instrument_id for instrument_id, _ticker, _settle in legs})
     tenor_map = {pair: _tenor_tickers(pair) for pair in pairs}
     all_tenor_tickers = sorted({t for tickers in tenor_map.values() for t in tickers.values()})
     if fwd_fetch is None:
@@ -305,10 +271,12 @@ def _fetch_future_px_history(conn: sqlite3.Connection, session, service, span_st
     point in [span_start, span_end] -- one HistoricalDataRequest for the whole span.
     `fut_fetch` mirrors `_fetch_fwd_outright_history`'s `fwd_fetch`; defaults to
     pull_marks.fetch_historical_series."""
-    futs = conn.execute(_OPEN_FUTURES_RANGE_SQL, {"start": span_start.isoformat(), "end": span_end.isoformat()}).fetchall()
+    from data.bloomberg import library
+    futs = [r for r in library.needed_in_range(conn, span_start.isoformat(), span_end.isoformat())
+            if r["kind"] == "FUTURE_PX"]
     if not futs:
         return {}
-    ticker_to_instrument = {ticker: instrument_id for instrument_id, ticker, _settle in futs}
+    ticker_to_instrument = {r["bbg_ticker"]: r["key"] for r in futs}
     tickers = sorted(ticker_to_instrument)
     if fut_fetch is None:
         from data.bloomberg.pull_marks import fetch_historical_series
@@ -409,10 +377,9 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         # skips an unknown instrument). Same row the live pull creates, same function.
         _ensure_fx_instruments(conn, spot_only_pair_names(conn, start, end))
         pairs = traded_pairs(conn, start, end)
-        has_futures = conn.execute(
-            "SELECT 1 FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id) "
-            "WHERE i.asset_class = 'FUTURE' AND t.trade_date <= ? AND l.settle_date >= ? LIMIT 1",
-            (end.isoformat(), start.isoformat())).fetchone()
+        from data.bloomberg import library
+        has_futures = any(r["kind"] == "FUTURE_PX"
+                          for r in library.needed_in_range(conn, start.isoformat(), end.isoformat()))
         if not pairs and not has_futures:
             # 2026-09-18: this used to bail out on `not pairs` alone, before traded_pairs
             # covered crosses -- a book with only futures and zero FX trades of any kind

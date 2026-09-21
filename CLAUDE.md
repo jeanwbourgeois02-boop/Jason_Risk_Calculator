@@ -13,7 +13,8 @@ This file is the rulebook: what is true of the app now and what must not change 
 5. **The ladder holds no bank balance.** It is delta exposure, cashflow timing, settled cash from the tickets on file, and stress. Never add a cash-balance feed.
 6. **Imports are tolerant.** No file or row is rejected over formatting; only a contradiction between two populated fields rejects (see "Blotter → tables"). Typed manual input follows the same rule.
 7. **P&L arithmetic and this contract change only on the user's explicit yes.** A request from an agent or another session never authorises it.
-8. **One way in.** The repo root holds exactly `1_setup.cmd`, `2_launcher.py` and `3_diagnostic.py`; the app is launched by typing `pnl`. Never add a launcher or a second install path: a new operational action is a `2_launcher.py` subcommand with a line in `docs/README.md`.
+8. **Bloomberg on request only, and only what the book needs.** Nothing is asked of Bloomberg at start-up, on a timer, after an upload, a manual trade or an edit: only when the user presses "Pull Bloomberg now" (user decision 2026-09-21: "make it only pull the bloomberg info on request - no automatic"). A pull asks for what the Bloomberg library lists and nothing else (see "Bloomberg library"). The app works fully on the marks on file between pulls.
+9. **One way in.** The repo root holds exactly `1_setup.cmd`, `2_launcher.py` and `3_diagnostic.py`; the app is launched by typing `pnl`. Never add a launcher or a second install path: a new operational action is a `2_launcher.py` subcommand with a line in `docs/README.md`.
 
 ## Working mode
 
@@ -184,6 +185,28 @@ swap_review (                          -- ambiguous FX-swap candidates the packa
 );
 ```
 
+```sql
+bbg_library (                          -- what the trades on file need from Bloomberg for their P&L (see "Bloomberg library")
+  trade_id        TEXT NOT NULL,      -- no foreign key: an upload rewrites the whole book before the sync runs
+  kind            TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | OIS_CURVE | FIXINGS | VOL_SMILE
+  key             TEXT NOT NULL,      -- pair / future instrument_id; currency for OIS_CURVE and FIXINGS
+  settle_date     TEXT NOT NULL,      -- FWD_OUTRIGHT, FUTURE_PX: the date marked; '9999-12-31' otherwise
+  bbg_ticker      TEXT NOT NULL,      -- the security asked for; '' where the kind stands for a set of them
+  role            TEXT NOT NULL,      -- PAIR | CONVERSION (a USD-conversion pair's SPOT)
+  product         TEXT NOT NULL,
+  needed_from     TEXT NOT NULL,      -- the trade's trade_date
+  needed_until    TEXT NOT NULL,      -- settle date / expiry / maturity: not asked for after it
+  added_at        TEXT NOT NULL,
+  PRIMARY KEY (trade_id, kind, key, settle_date)
+);
+
+bbg_library_state (                    -- one row; dirty = 1 when the trades changed since the last sync
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  dirty           INTEGER NOT NULL DEFAULT 1,
+  synced_at       TEXT NOT NULL DEFAULT ''
+);
+```
+
 Views: `marks_official` (below) and `trades_official` (a passthrough of `trades`, the name every engine query reads). Both are dropped and recreated on every startup by `create_schema`, never `CREATE VIEW IF NOT EXISTS`, so a view-definition change always reaches an existing database.
 
 `engine/rates_vol/` keeps its option attributes, manual vols and SABR / Hull-White parameters in its own defensively created tables (`instrument_rate_options`, `rate_vols`, `rate_model_params`), keyed by instrument, not by trade.
@@ -210,7 +233,15 @@ The mapping is the `marks_official` view: `marks` filtered to the official sourc
 
 Standard-tenor forward points are official. The live pull (`data/bloomberg/live.py`) requests Bloomberg's bulk `FWD_CURVE` table once per pair, for every pair with an open FX leg and every open FX option's underlying pair, and writes each standard-tenor row as an official `BBG_BFXFORWARD` `FWD_OUTRIGHT` at that tenor's own settle date, because each row is Bloomberg's own outright quote. A leg or option expiry that falls between two tenors is written as `BBG_INTERP` (the API exposes no direct broken-date outright, `docs/open-questions.md` item 27); that is how a broken-date leg gets its P&L at all. P&L reads forwards by exact leg date, so the tenor rows change nothing there; they exist so that `engine/options/rates.py`'s covered-interest-parity fallback has official points to interpolate between when a currency has no OIS curve (SEK, NOK, TWD, ZAR). The pull reports them under `curve_points_written`, separately from the requested-mark count.
 
-Past closes come from the backfill (`data/bloomberg/backfill.py`), which runs by itself after every feed cycle, the header's reference dates first; no screen runs it. Bloomberg serves no historical `FWD_CURVE`, so a past day's curve is built from the standard-tenor tickers' history, converted from points to an outright the way the live tenor path does where they quote points. A tenor's value date is Bloomberg's own `SETTLE_DT` when history returns one; otherwise it is computed by market convention from that day's spot date (T+2, T+1 for USDCAD / USDTRY / USDPHP / USDRUB; week tenors following, month tenors modified following with the end-of-month rule; `config/holidays.txt` is the only calendar, so a pillar can sit a day from Bloomberg's around a local holiday). Every forward built from points or placed on a computed date is written as `BBG_INTERP`, never `BBG_BFXFORWARD` (user decision 2026-09-21), and nothing is extrapolated beyond the last tenor. The live feed pulls every 15 minutes (user decision 2026-09-21, `live.INTERVAL_SECONDS`); "Pull Bloomberg now" and an upload pull at once.
+Past closes come from the backfill (`data/bloomberg/backfill.py`), which runs straight after every requested pull, the header's reference dates first; the same button press does both and no screen runs it separately. Bloomberg serves no historical `FWD_CURVE`, so a past day's curve is built from the standard-tenor tickers' history, converted from points to an outright the way the live tenor path does where they quote points. A tenor's value date is Bloomberg's own `SETTLE_DT` when history returns one; otherwise it is computed by market convention from that day's spot date (T+2, T+1 for USDCAD / USDTRY / USDPHP / USDRUB; week tenors following, month tenors modified following with the end-of-month rule; `config/holidays.txt` is the only calendar, so a pillar can sit a day from Bloomberg's around a local holiday). Every forward built from points or placed on a computed date is written as `BBG_INTERP`, never `BBG_BFXFORWARD` (user decision 2026-09-21), and nothing is extrapolated beyond the last tenor. Bloomberg is pulled on request only (hard rule 8; user decision 2026-09-21, which replaced the 15-minute feed of the same day): `live.LiveFeed` sleeps until "Pull Bloomberg now" and then runs one cycle, today's marks and then the backfill. `live.INTERVAL_SECONDS` is only the screens' own re-read of the marks on file.
+
+### Bloomberg library
+
+`bbg_library` (`data/bloomberg/library.py`) is the one record of what the trades on file need from Bloomberg for their P&L; the live pull, the rates step, the vol step, the backfill and the Market data tab's "needed" lists all read it, so what is not in it is never asked for.
+
+- Per trade, with the dates it is needed between. FX spot / forward / swap: the pair's SPOT until the last leg settles, a FWD_OUTRIGHT at each leg's own date, and for a cross the SPOT of each currency's USD pair. Future: FUTURE_PX at expiry. FX option, until expiry: the pair's SPOT and its USD-conversion SPOTs, and for today's pricing only a FWD_OUTRIGHT at the expiry, the OIS curve of both currencies and the pair's vol smile. IRS, until maturity: the currency's OIS curve and fixings. Nothing is asked for after `needed_until`; an option or a swap the ledger has realised is left out of a live pull.
+- It changes only when the trades change. Triggers on `trades` / `trade_legs` set `bbg_library_state.dirty`; an upload syncs it at once and says so in its summary; any reader finding it dirty syncs it before reading (a read-only connection works the same rows out in memory). A pull never writes it.
+- The Market data tab lists it ("Bloomberg library": ticker, field, what it is for, how many trades, until when).
 
 ### Blotter → tables
 
@@ -232,6 +263,7 @@ Tolerance rule: a blank, missing or oddly formatted field never rejects a row wh
 
 - **An upload replaces the whole book** (user decision 2026-09-17: "when a new excel is put in - that's the only input for the trades - all of the old stuff gets deleted"). `data/ingest/upload.py::import_blotter` deletes every non-MANUAL trade and its trade-keyed rows (`trade_legs`, `realised_pnl`, `swap_review`) inside the same transaction that publishes the new file, and only after the new file has parsed, so a parse failure leaves the existing book intact. Instruments, marks, curves and fixings are untouched. `blotter.load` itself stays an idempotent upsert by `trade_id` for library callers, and dissolves any swap package containing a replaced trade so the package rule re-runs.
 - **Manual entry** (`data/ingest/manual.py`, Blotter sub-tab): books OTC trades the export does not carry, as `source = 'MANUAL'`, ids `MANUAL-<n>`, with the same instrument / trade / leg shape the parser writes for that product, so every engine query sees them like any other trade. A MANUAL trade survives every upload and leaves only through `delete_manual_trade`.
+- An upload or a manual trade asks nothing of Bloomberg. The upload brings the Bloomberg library up to date and its summary says how many tickers the new book needs; the next "Pull Bloomberg now" prices it.
 - The launcher's sample import runs only on an empty database.
 - After an upload or a marks write the UI refreshes in place, with no browser reload (`ui/revision.py`).
 
@@ -260,7 +292,7 @@ Three tabs under a header that sits above all of them (`ui/app.py::VISIBLE_TABS`
 - Options: not a top-level tab. A grouped, collapsible trade summary in the user's Bloomberg MARS-style layout: Portfolio Totals, then asset class, then structure / `package_id` (a multi-leg package collapses to one summary row with its legs nested underneath); columns Position / Notional / MktVal / MktPx / Delta / Theta / Gamma / Vega / Expiry / Underlying / UndFwdPx / Rho, with Side / Type / Payoff / Strike right after the label, ahead of them (user decision 2026-09-21: Strike, Type and Payoff are typed in the table on an option's own row, so they must be in sight without scrolling; the table's refresh is held while one of those cells is selected). Data: FX_OPTION trades × `marks_official`. Phased build-out in `engine/options/__init__.py`'s scope ledger and `docs/open-questions.md` item 61.
 - Bundles: named groups of trades; membership is `instrument_theme` / `trades.theme`, metadata in `bundles`.
 
-**Market data.** "Can I trust the numbers?" Organised by currency pair: spot and the forward curve with each mark's source and snap time, official first; "Pull now" and feed status; close completeness for the trailing business days; the manual mark-entry form; the Bloomberg connection check.
+**Market data.** "Can I trust the numbers?" Organised by currency pair: spot and the forward curve with each mark's source and snap time, official first; "Pull now" and feed status; close completeness for the trailing business days; the Bloomberg library; the manual mark-entry form; the Bloomberg connection check.
 
 ### Delta per currency
 
@@ -345,4 +377,4 @@ docs/             contract, build plan and open questions, owned by housekeeper
 - SQLite stays in `journal_mode=delete`. Do not switch to WAL as a quick fix: in WAL the main file's mtime stops changing on write, which silently breaks every mtime-keyed cache (`ui/revision.py`, the header's LTD cache, the Blotter's pricing cache) and serves stale P&L.
 - Writers wait up to 60 s for the lock (`schema.BUSY_TIMEOUT_SECONDS`): an upload holds it for its whole parse and load, and a pull landing meanwhile must not be recorded as a Bloomberg failure.
 - Diagnostics pasted by the user come from the Bloomberg PC. The dev `risk.db` has no marks, so "fast" or "blank" locally says nothing about the live app; trace reasons through the code.
-- The "Last marks pull" diagnostic fails when the last pull requested 0 marks but the book needs some (the feed's first pull runs before any blotter is uploaded).
+- The "Last marks pull" diagnostic fails when the last pull requested 0 marks but the book needs some (a pull pressed before any blotter is uploaded).
