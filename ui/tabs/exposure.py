@@ -711,6 +711,9 @@ def _grid_column_name(col: str, with_year: bool = True) -> str:
 # scrolling odd"): each currency's rate, local delta and USD delta read across on its own
 # row, in one table with one scrollbar. The bottom USD row carries the net USD delta.
 SUMMARY_GRID_COLUMNS = [("fx_rate", "FX rate"), ("local_delta", "Local delta"), ("usd_delta", "USD delta")]
+# User, 2026-09-21: "a thick black bar going down the column between settled cash and the
+# first date", to set the row headers and key figures apart from the data per date.
+_KEY_INFO_DIVIDER = "4px solid #0b1220"
 
 
 def grid_records_with_summary(frame: pd.DataFrame, summary: Optional[pd.DataFrame]) -> List[dict]:
@@ -747,6 +750,9 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
     # needs its own opaque background or the dates show through it.
     sticky = {"position": "sticky", "left": 0, "zIndex": 2, "backgroundColor": "#ffffff",
               "boxShadow": "1px 0 0 #d9dee3"}
+    # The bar sits after the last key-figure column: Settled cash, or USD delta when the
+    # settled dates are shown one by one and there is no Settled cash column.
+    divider_col = SETTLED if SETTLED in value_cols else (summary_cols[-1][0] if summary_cols else ROW_LABEL_COL)
     return dash_table.DataTable(
         id=COMBINED_TABLE_ID,
         columns=columns,
@@ -760,12 +766,12 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
             # the rate / delta columns: the rate bold (the bridge between local and USD),
             # USD delta the heaviest, tinted and ruled off from the cash columns beside it
             {"if": {"column_id": "fx_rate"}, "fontWeight": "700", "color": "#1b2333"},
-            {"if": {"column_id": "usd_delta"}, "fontWeight": "700", "backgroundColor": "#e8edf7",
-             "borderRight": "2px solid #1f2933"},
+            {"if": {"column_id": "usd_delta"}, "fontWeight": "700", "backgroundColor": "#e8edf7"},
         ],
         style_header={**_HEAD, "fontSize": "12px", "padding": "4px 8px"},
         style_header_conditional=[
             {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "position": "sticky", "left": 0, "zIndex": 3},
+            {"if": {"column_id": divider_col}, "borderRight": _KEY_INFO_DIVIDER},
         ],
         style_data_conditional=_sign_styles(value_cols + [k for k, _ in summary_cols if k != "fx_rate"]) + [
             # USD equivalent (the old right-hand column, now the bottom row): ruled off
@@ -774,11 +780,13 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
              "backgroundColor": "#f7f8fa", "borderTop": "2px solid #1f2933"},
             # Settled cash (2026-09-18): the balance the value dates add to -- first
             # column, bold, tinted, ruled off from the dated flows beside it.
-            {"if": {"column_id": SETTLED}, "fontWeight": "700", "backgroundColor": "#eef7ee",
-             "borderRight": "2px solid #1f2933"},
+            {"if": {"column_id": SETTLED}, "fontWeight": "700", "backgroundColor": "#eef7ee"},
             # Total of the columns shown (spec 2026-09-18): the view's own sums.
             {"if": {"column_id": TOTAL_COL}, "fontWeight": "700", "backgroundColor": "#f1f3f7",
              "borderLeft": "1px solid #c8d0e0"},
+            # Last, so nothing above overrides it: the thick black bar down the table between
+            # the key figures and the per-date data (user, 2026-09-21).
+            {"if": {"column_id": divider_col}, "borderRight": _KEY_INFO_DIVIDER},
         ],
     )
 
