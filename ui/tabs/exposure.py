@@ -714,6 +714,7 @@ SUMMARY_GRID_COLUMNS = [("fx_rate", "FX rate"), ("local_delta", "Local delta"), 
 # User, 2026-09-21: "a thick black bar going down the column between settled cash and the
 # first date", to set the row headers and key figures apart from the data per date.
 _KEY_INFO_DIVIDER = "4px solid #0b1220"
+_KEY_INFO_TINT = "#f1f4f9"   # one background for every column left of the bar, Currency to Settled cash
 
 
 def grid_records_with_summary(frame: pd.DataFrame, summary: Optional[pd.DataFrame]) -> List[dict]:
@@ -748,7 +749,7 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
     # heights can drift apart, and it could not be checked in a browser for this change;
     # a sticky cell that a browser ignores just scrolls like any other column. The cell
     # needs its own opaque background or the dates show through it.
-    sticky = {"position": "sticky", "left": 0, "zIndex": 2, "backgroundColor": "#ffffff",
+    sticky = {"position": "sticky", "left": 0, "zIndex": 2, "backgroundColor": _KEY_INFO_TINT,
               "boxShadow": "1px 0 0 #d9dee3"}
     # The bar sits after the last key-figure column: Settled cash, or USD delta when the
     # settled dates are shown one by one and there is no Settled cash column.
@@ -763,10 +764,12 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
         style_cell={**_MONO, "fontSize": "12px", "padding": "3px 8px", "height": "26px", "minWidth": "48px"},
         style_cell_conditional=[
             {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "fontWeight": "600", **sticky},
-            # the rate / delta columns: the rate bold (the bridge between local and USD),
-            # USD delta the heaviest, tinted and ruled off from the cash columns beside it
-            {"if": {"column_id": "fx_rate"}, "fontWeight": "700", "color": "#1b2333"},
-            {"if": {"column_id": "usd_delta"}, "fontWeight": "700", "backgroundColor": "#e8edf7"},
+            # Currency to Settled cash is one block left of the bar, so it looks like one
+            # (user, 2026-09-21: "all these columns should be similar"): the same tint on every
+            # column of it, regular weight, and only the USD delta number bold.
+        ] + [{"if": {"column_id": c}, "backgroundColor": _KEY_INFO_TINT}
+             for c in [k for k, _ in summary_cols] + [SETTLED]] + [
+            {"if": {"column_id": "usd_delta"}, "fontWeight": "700"},
         ],
         style_header={**_HEAD, "fontSize": "12px", "padding": "4px 8px"},
         style_header_conditional=[
@@ -778,9 +781,6 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
             # from the currency rows above it.
             {"if": {"filter_query": f"{{kind}} = '{USD_EQUIVALENT_COL}'"}, "fontWeight": "700",
              "backgroundColor": "#f7f8fa", "borderTop": "2px solid #1f2933"},
-            # Settled cash (2026-09-18): the balance the value dates add to -- first
-            # column, bold, tinted, ruled off from the dated flows beside it.
-            {"if": {"column_id": SETTLED}, "fontWeight": "700", "backgroundColor": "#eef7ee"},
             # Total of the columns shown (spec 2026-09-18): the view's own sums.
             {"if": {"column_id": TOTAL_COL}, "fontWeight": "700", "backgroundColor": "#f1f3f7",
              "borderLeft": "1px solid #c8d0e0"},
