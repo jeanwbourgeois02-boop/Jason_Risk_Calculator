@@ -143,14 +143,17 @@ def priced_value_book(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFram
 
 
 def _priced_value_book_uncached(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, int, int]:
-    """`value_book(as_of)` unchanged -- no second pass, no fallback merge (removed
-    2026-09-17, module docstring). Returns `(df, 0, n_total)`: the `0` and the
-    3-tuple shape are kept only so callers outside this lane (`ui/tabs/header.py`)
-    that still unpack `(df, n_fallback, n_total)` do not break. A row with no
-    official mark keeps its `reason` and `pnl_usd = NaN` exactly as `value_book`
-    returns it; this function does not touch it further."""
+    """`value_book(as_of)` with the fill (user decision 2026-09-21: "there should be a fill
+    when bloomberg doesnt have the data"): a trade with no price on `as_of` takes its own
+    valuation from the last earlier business day that has one, at most 5 back, and its
+    `note` says so (`engine.pnl.reference.fill_book`). No other mark source is involved (the
+    BNP fallback merge removed 2026-09-17 stays removed) and nothing is written to `marks`.
+    Returns `(df, n_filled, n_total)`; a trade with no earlier price in reach keeps its
+    `reason` and `pnl_usd = NaN` exactly as `value_book` returns it."""
+    from engine.pnl.reference import fill_book
     df = value_book(conn, as_of)
-    return df, 0, len(df)
+    df, filled = fill_book(df, as_of, lambda iso, ids: value_book(conn, iso, trade_ids=ids))
+    return df, sum(n for _day, n in filled), len(df)
 
 
 def _sum_pnl(df: pd.DataFrame) -> float:
@@ -517,7 +520,8 @@ def _priced_diff_scoped(conn: sqlite3.Connection, date_a: str, date_b: str, trad
     from engine.pnl.reference import annotate, resolve_reference
 
     df_a = _scoped_frame(conn, date_a, trade_ids)
-    choice = resolve_reference(df_a, date_b, lambda iso: _scoped_frame(conn, iso, trade_ids))
+    choice = resolve_reference(df_a, date_b, lambda iso: _scoped_frame(conn, iso, trade_ids),
+                               frames_filled=True)   # `priced_value_book` frames already carry the fill
     label = choice.ref_date_used if choice.stepped_back else note_label
     entry = _priced_diff_frames(conn, df_a, choice.frame, date_a, ref_date, label)
     return annotate(entry, choice,

@@ -472,9 +472,11 @@ def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
 
 
 def test_build_figures_period_steps_back_to_the_previous_close_that_has_value():
-    """User decision 2026-09-21 ("use previous date until has value"): the 2026-09-16 close
-    has no marks, the 2026-09-15 close has, so Daily is measured from 2026-09-15 and the
-    card says so. No mark is written or copied: the 2026-09-16 book stays unpriced."""
+    """User decision 2026-09-21 ("use previous date until has value", then "there should be a
+    fill when bloomberg doesnt have the data"): the 2026-09-16 close has no marks, the
+    2026-09-15 close has, so the trade is valued there at its 2026-09-15 close, Daily is
+    measured from it and the card says so, with the reason on hover. No mark is written or
+    copied: `marks` is untouched and `value_book` itself still has the 2026-09-16 row unpriced."""
     conn = schema.connect()
     _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
     _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-08-20", 1_000_000, 147.0)
@@ -493,8 +495,9 @@ def test_build_figures_period_steps_back_to_the_previous_close_that_has_value():
     daily = by_title["Daily"]
     # 1m x (148.0 - 147.5) JPY at spot 147
     assert daily.children[1].children == header._fmt_usd(1_000_000 * 0.5 / 147.0)
-    assert daily.children[2].children == "from the 2026-09-15 close: 2026-09-16 has no usable close"
-    assert "Daily needs the 2026-09-16 close" in daily.children[2].title   # the skipped date's reason, on hover
+    assert daily.children[2].children == ("1 trade with no price on 2026-09-16 measured from its last earlier "
+                                          "close (back to 2026-09-15)")
+    assert "t1: no price on 2026-09-16: value of the 2026-09-15 close (no FWD_OUTRIGHT mark for USDJPY"         in daily.children[2].title                                          # which close, and why, on hover
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == marks_before
     from engine.pnl.valuation import value_book
     assert (value_book(conn, "2026-09-16")["reason"] != "").all()

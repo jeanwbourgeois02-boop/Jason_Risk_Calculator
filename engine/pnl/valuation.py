@@ -303,9 +303,14 @@ class _BookConn:
         return self.conn.execute(*args, **kwargs)
 
 
-def value_book(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
+def value_book(conn: sqlite3.Connection, as_of: str, trade_ids=None) -> pd.DataFrame:
     """One row per trade at `as_of`'s marks. See module docstring and BUILD_PLAN section 2.
-    Every mark this function reads comes from `marks_official`, always."""
+    Every mark this function reads comes from `marks_official`, always.
+
+    `trade_ids` (2026-09-21) values only those trades, each row exactly as the whole book
+    would give it (a closed-out option group is still recognised over every option on
+    file): the fill (`engine.pnl.reference.fill_book`) asks an earlier day for the handful
+    of trades with no price, not for the whole book again."""
     rows = []
     theme = _has_theme_column(conn)
     holidays = load_holidays()
@@ -316,6 +321,9 @@ def value_book(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     opt = pd.read_sql_query(_opt_sql(theme, _has_option_terms(conn)), conn, params={"as_of": as_of})
     conn = _BookConn(conn, as_of)  # one load of the day's marks and realised rows for every row below
     conn.closed_out = closed_out_from_rows(opt)
+    if trade_ids is not None:
+        wanted = set(trade_ids)
+        fx, fut, irs, opt = (f[f["trade_id"].isin(wanted)] for f in (fx, fut, irs, opt))
 
     for r in fx.itertuples(index=False):
         rows.append(_guarded_row(conn, r, as_of, _open_fx_row, _settled_fx_row, _TRADE_NUMBERS, holidays))

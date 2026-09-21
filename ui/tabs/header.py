@@ -568,8 +568,15 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     from ui.tabs.blotter_pricing import priced_value_book
     from ui.tabs.cash_ladder import net_gross_usd
 
-    df_today, _n_fallback, n_total = priced_value_book(conn, as_of)
+    df_today, _n_filled, n_total = priced_value_book(conn, as_of)
     ltd_entry = _priced_single(df_today, _root_reason(conn, as_of))
+    # The fill (user decision 2026-09-21): trades with no price on `as_of` are valued at their
+    # last earlier close. Said on the card, each trade's own note on hover -- never silent.
+    from engine.pnl.reference import fill_caption, filled_from
+    ltd_entry["ref_note"] = fill_caption(df_today, as_of)
+    if ltd_entry["ref_note"]:
+        notes = [f"{r.trade_id}: {r.note}" for r in df_today.itertuples() if filled_from(r.note)]
+        ltd_entry["ref_note_detail"] = "\n".join(notes[:40] + ([f"and {len(notes) - 40} more"] if len(notes) > 40 else []))
     cards = [_pnl_card("LTD", ltd_entry)]
 
     holidays = load_holidays()
@@ -598,7 +605,7 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
 
     def _period(df_a, a_iso: str, ref_iso: str, key: str) -> dict:
         title = _PERIOD_TITLES[key]
-        choice = resolve_reference(df_a, ref_iso, _book, holidays)
+        choice = resolve_reference(df_a, ref_iso, _book, holidays, frames_filled=True)  # `_book` frames carry the fill
         entry = _priced_diff(df_a, choice.frame, _root_reason(conn, a_iso), choice.ref_date_used,
                              _reference_reason(conn, ref_iso, title, backfill))
         return annotate(entry, choice,
@@ -674,6 +681,12 @@ def _priced_day(df) -> tuple:
     return float(priced["pnl_usd"].sum()), n_unpriced, int(len(df))
 
 
+def _filled_count(df) -> int:
+    """Trades on this day's frame valued at an earlier close (the fill, 2026-09-21)."""
+    from engine.pnl.reference import filled_days
+    return sum(n for _day, n in filled_days(df))
+
+
 @lru_cache(maxsize=1024)
 def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> tuple:
     """`_priced_day` of that date's book, memoised on (db path, db mtime, as_of): a
@@ -689,7 +702,7 @@ def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> tuple:
     conn = connect_readonly(db_path)
     try:
         df, _, _ = priced_value_book(conn, as_of)  # same pricing path as the figures
-        return _priced_day(df)
+        return (*_priced_day(df), _filled_count(df))
     finally:
         conn.close()
 
@@ -731,18 +744,19 @@ def _build_chart(conn: sqlite3.Connection, as_of: str, db_path=None):
     for d in days:
         xs.append(d.isoformat())
         if db_path is not None:
-            value, n_unpriced, n_total = _cached_ltd(str(db_path), mtime, d.isoformat())
+            value, n_unpriced, n_total, n_filled = _cached_ltd(str(db_path), mtime, d.isoformat())
         else:
             from ui.tabs.blotter_pricing import priced_value_book as _pvb
             _df, _, _ = _pvb(conn, d.isoformat())
-            value, n_unpriced, n_total = _priced_day(_df)
+            (value, n_unpriced, n_total), n_filled = _priced_day(_df), _filled_count(_df)
         ys.append(value)
+        filled = f"{n_filled} valued at an earlier close" if n_filled else ""   # the fill, 2026-09-21
         if value is None:
             texts.append(f"nothing priced ({n_total} trades)")
         elif n_unpriced:
-            texts.append(f"excludes {n_unpriced} of {n_total} trades unpriced")
+            texts.append(f"excludes {n_unpriced} of {n_total} trades unpriced" + (f"; {filled}" if filled else ""))
         else:
-            texts.append("")
+            texts.append(filled)
     figure = {
         "data": [{"x": xs, "y": ys, "type": "scatter", "mode": "lines+markers", "name": "LTD",
                   "text": texts, "hovertemplate": "%{x}<br>LTD %{y:$,.0f}<br>%{text}<extra></extra>"}],

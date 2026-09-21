@@ -33,6 +33,7 @@ own per-date cached reader (`ui.tabs.blotter_pricing.priced_value_book`).
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 from typing import Callable, FrozenSet, Optional, Tuple
 
@@ -159,6 +160,97 @@ class ReferenceChoice:
                 f"(checked back to {self.skipped[-1].date}).")
 
 
+# ------------------------------------------------------------------ the fill (2026-09-21)
+# User decision 2026-09-21: "there should be a fill when bloomberg doesnt have the data"
+# (after "use previous date until has value", "let it backfill up to 5 days" and "ive told
+# you like 5 times about the fill function"). Until then only a period's REFERENCE side was
+# filled (`fill_single_trades`), so a trade with no price on the date being looked at was
+# still blank in LTD, on the chart and in the Blotter.
+_VALUATION_COLUMNS = ("mark", "mark_date", "mark_source", "spot", "spot_source", "pnl_local", "pnl_usd",
+                      "pnl_spot_usd", "pnl_carry_usd")
+_NEVER_FILLED = (" is not a number (", "could not be valued")
+_FILL_NOTE_RE = re.compile(r"^no price on (\d{4}-\d{2}-\d{2}): value of the (\d{4}-\d{2}-\d{2}) close")
+
+
+def filled_from(note) -> str:
+    """The close a filled row's value comes from ('' for a row priced on its own date)."""
+    m = _FILL_NOTE_RE.match(note) if isinstance(note, str) else None
+    return m.group(2) if m else ""
+
+
+def filled_days(frame: pd.DataFrame, trade_ids=None) -> Tuple[Tuple[str, int], ...]:
+    """((earlier close, trades valued from it), ...) newest first, over `frame`'s filled rows
+    (only those of `trade_ids` when given)."""
+    if frame is None or frame.empty or "note" not in frame.columns:
+        return ()
+    rows = frame if trade_ids is None else frame[frame["trade_id"].isin(trade_ids)]
+    days = [d for d in (filled_from(n) for n in rows["note"]) if d]
+    return tuple(sorted(((d, days.count(d)) for d in set(days)), reverse=True))
+
+
+def fill_caption(frame: pd.DataFrame, as_of: str, trade_ids=None) -> str:
+    """"12 trades with no price on 2026-09-18 valued at their last earlier close (back to
+    2026-09-15)", '' when nothing on `frame` was filled."""
+    filled = filled_days(frame, trade_ids)
+    if not filled:
+        return ""
+    n = sum(count for _day, count in filled)
+    return (f"{n} trade{'s' if n != 1 else ''} with no price on {as_of} valued at "
+            f"{'their' if n != 1 else 'its'} last earlier close (back to {filled[-1][0]})")
+
+
+def fill_book(frame: pd.DataFrame, as_of: str, rows_for: Callable[[str, FrozenSet[str]], pd.DataFrame],
+              holidays: Optional[FrozenSet[str]] = None,
+              max_steps: int = MAX_STEP_BACK_BUSINESS_DAYS) -> Tuple[pd.DataFrame, Tuple[Tuple[str, int], ...]]:
+    """(frame, filled): the book on `as_of` with every trade that has no price there given
+    ITS OWN valuation from the last earlier business day on which it has one, at most
+    `max_steps` back. `rows_for(iso_date, trade_ids)` values those trades on that day,
+    UNFILLED (`value_book(conn, iso, trade_ids)`), so a value is never carried further than
+    `max_steps` business days. `filled` is ((earlier close, trades), ...), newest first.
+
+    The filled row keeps what it is on `as_of` (status, product, quantity, fill) and takes
+    the earlier day's valuation columns whole -- mark, spot and P&L of ONE close, never a
+    mix of two dates; `reason` becomes '' so it sums like any priced row, and `note` opens
+    with "no price on <as_of>: value of the <day> close" followed by why it had none, so it
+    is never silent. Nothing is written to `marks`: the Market data tab still shows the
+    mark as missing. A trade with no earlier price in reach stays blank with its reason."""
+    if frame is None or frame.empty:
+        return frame, ()
+    if holidays is None:
+        from engine.pnl.aggregate import load_holidays
+        holidays = load_holidays()
+    # A stored value that is not a number is a data error to fix, not data Bloomberg does not
+    # have: that row stays blank and loud (`valuation._BadValue`, `_guarded_row`).
+    remaining = {tid for tid, reason in zip(frame["trade_id"], frame["reason"])
+                 if reason and not any(s in str(reason) for s in _NEVER_FILLED)}
+    if not remaining:
+        return frame, ()
+    frame = frame.copy()
+    counts = {}
+    day = dt.date.fromisoformat(as_of)
+    for _ in range(max_steps):
+        if not remaining:
+            break
+        day = _prev_business_day(day, holidays)
+        try:
+            earlier = rows_for(day.isoformat(), frozenset(remaining))
+        except Exception:  # noqa: BLE001 -- an earlier day that cannot be valued fills nothing
+            break
+        if earlier is None or earlier.empty:
+            continue
+        usable = earlier[earlier["trade_id"].isin(remaining) & (earlier["reason"] == "")]
+        for row in usable.itertuples(index=False):
+            at = frame.index[frame["trade_id"] == row.trade_id][0]
+            why = str(frame.at[at, "reason"])
+            for column in _VALUATION_COLUMNS:
+                frame.at[at, column] = getattr(row, column)
+            frame.at[at, "reason"] = ""
+            frame.at[at, "note"] = f"no price on {as_of}: value of the {day.isoformat()} close ({why})"
+            remaining.discard(row.trade_id)
+            counts[day.isoformat()] = counts.get(day.isoformat(), 0) + 1
+    return frame, tuple(sorted(counts.items(), reverse=True))
+
+
 def fill_single_trades(df_a: pd.DataFrame, ref_date: str, frame: pd.DataFrame,
                        frame_for: Callable[[str], pd.DataFrame], holidays: FrozenSet[str],
                        max_steps: int = MAX_STEP_BACK_BUSINESS_DAYS):
@@ -183,6 +275,7 @@ def fill_single_trades(df_a: pd.DataFrame, ref_date: str, frame: pd.DataFrame,
         if earlier is None or earlier.empty:
             continue
         usable = earlier[earlier["trade_id"].isin(remaining) & (earlier["reason"] == "")]
+        usable = usable[[not filled_from(n) for n in usable["note"]]]   # a filled row is never carried further
         if usable.empty:
             continue
         frame = pd.concat([frame[~frame["trade_id"].isin(usable["trade_id"])], usable], ignore_index=True)
@@ -194,7 +287,8 @@ def fill_single_trades(df_a: pd.DataFrame, ref_date: str, frame: pd.DataFrame,
 def resolve_reference(df_a: pd.DataFrame, ref_date: str,
                       frame_for: Callable[[str], pd.DataFrame],
                       holidays: Optional[FrozenSet[str]] = None,
-                      max_steps: int = MAX_STEP_BACK_BUSINESS_DAYS) -> ReferenceChoice:
+                      max_steps: int = MAX_STEP_BACK_BUSINESS_DAYS,
+                      frames_filled: bool = False) -> ReferenceChoice:
     """The close `LTD(a) - LTD(ref)` is measured from. `df_a` is the book on `a`;
     `frame_for(iso_date)` returns the book on a date, scoped the way `df_a` is.
 
@@ -210,6 +304,11 @@ def resolve_reference(df_a: pd.DataFrame, ref_date: str,
 
     first_frame = frame_for(ref_date)
     first_split = diff_split(df_a, first_frame)
+    if frames_filled and first_split.status != REFERENCE_MISSING:
+        # `frame_for` already applies the fill (`fill_book`, the screens' shared reader): the
+        # trades filled on this close are read off the frame, never walked back a second time
+        return ReferenceChoice(ref_date, ref_date, first_frame, first_split, (), True, max_steps,
+                               filled_days(first_frame, first_split.contributing_b_ids))
     if first_split.status != REFERENCE_MISSING:
         if not first_split.blocked_ids:
             return ReferenceChoice(ref_date, ref_date, first_frame, first_split, (), True, max_steps)
@@ -249,6 +348,11 @@ def annotate(entry: dict, choice: ReferenceChoice,
     detail = ""
     if choice.stepped_back and skipped_reason is not None:
         detail = "\n".join(skipped_reason(s) for s in choice.skipped)
+    elif choice.filled and "note" in choice.frame.columns:
+        # the filled trades' own notes: which close each value is from, and why it had none
+        notes = [f"{r.trade_id}: {r.note}" for r in choice.frame.itertuples()
+                 if filled_from(r.note) and r.trade_id in choice.split.contributing_b_ids]
+        detail = "\n".join(notes[:40] + ([f"and {len(notes) - 40} more"] if len(notes) > 40 else []))
     out["ref_note_detail"] = detail
     if not choice.found and not out.get("available"):
         reason = str(out.get("reason") or "").rstrip()

@@ -856,3 +856,68 @@ def test_reference_usable_rule_matches_the_header_display_rule():
     choice = reference.resolve_reference(df_today, REF_D5, lambda iso: value_book(conn, iso), REF_HOLIDAYS)
     entry = _priced_diff(df_today, choice.frame, "root", choice.ref_date_used)
     assert entry["available"] and entry["value"] == pytest.approx(3 * 1_000_000 * (1.1100 - 1.1050))
+
+
+# ---------------------------------------------------------------- the fill (user decision 2026-09-21:
+# "there should be a fill when bloomberg doesnt have the data"; "let it backfill up to 5 days")
+def _fill(conn, as_of):
+    return reference.fill_book(value_book(conn, as_of), as_of,
+                               lambda iso, ids: value_book(conn, iso, trade_ids=ids), REF_HOLIDAYS)
+
+
+def test_fill_gives_a_trade_with_no_price_its_own_value_from_the_last_earlier_close():
+    """No mark on Tue 09-15; the last close with one is Thu 09-10 (3 business days back).
+    By hand: 1m EUR x (1.1050 - 1.1000) = 5,000 USD per trade, the 09-10 valuation whole."""
+    conn = _ref_book({"2026-09-10": 1.1050, "2026-09-03": 1.2000})
+    raw = value_book(conn, REF_AS_OF)
+    assert raw["pnl_usd"].isna().all()
+    frame, filled = _fill(conn, REF_AS_OF)
+    assert filled == (("2026-09-10", 3),)
+    assert list(frame["pnl_usd"]) == [pytest.approx(5000.0)] * 3 and list(frame["mark"]) == [1.1050] * 3
+    assert (frame["reason"] == "").all() and list(frame.columns) == VALUATION_COLUMNS
+    note = frame["note"].iloc[0]
+    assert note.startswith("no price on 2026-09-15: value of the 2026-09-10 close (no FWD_OUTRIGHT mark")
+    assert reference.filled_from(note) == "2026-09-10" and reference.filled_days(frame) == filled
+    assert reference.fill_caption(frame, REF_AS_OF) == (
+        "3 trades with no price on 2026-09-15 valued at their last earlier close (back to 2026-09-10)")
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE as_of_date = ?", (REF_AS_OF,)).fetchone()[0] == 0  # nothing written
+
+
+def test_fill_reaches_five_business_days_back_over_a_holiday_and_no_further():
+    """From Tue 09-15 the five days are 09-14, 09-11, 09-10, 09-09, 09-08 (Labor Day 09-07 is
+    no business day): a price on 09-08 is in reach, one on Fri 09-04 only is not."""
+    frame, filled = _fill(_ref_book({"2026-09-08": 1.1050}), REF_AS_OF)
+    assert filled == (("2026-09-08", 3),) and frame["pnl_usd"].notna().all()
+    frame, filled = _fill(_ref_book({"2026-09-04": 1.1050}), REF_AS_OF)
+    assert filled == () and frame["pnl_usd"].isna().all() and (frame["reason"] != "").all()   # stays blank, with its reason
+
+
+def test_fill_leaves_a_priced_book_alone_and_a_priced_trade_untouched():
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-14": 1.3000})
+    raw = value_book(conn, REF_AS_OF)
+    frame, filled = _fill(conn, REF_AS_OF)
+    assert filled == () and frame.equals(raw)
+
+
+def test_value_book_for_some_trades_gives_the_rows_the_whole_book_gives():
+    conn = _ref_book({REF_AS_OF: 1.1100})
+    whole = value_book(conn, REF_AS_OF)
+    some = value_book(conn, REF_AS_OF, trade_ids={"R2"})
+    assert list(some["trade_id"]) == ["R2"]
+    assert some.iloc[0].to_dict() == whole[whole["trade_id"] == "R2"].iloc[0].to_dict()
+
+
+def test_reference_reads_the_fill_off_filled_frames_and_never_walks_back_twice():
+    """The screens' reader hands `resolve_reference` frames that already carry the fill:
+    the reference close is used as it is, only that one date is read, and the caption
+    names the trades filled on it."""
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-04": 1.1050})   # REF_D5 = 09-08: filled from 09-04, 2 days back
+    calls = []
+
+    def frame_for(iso):
+        calls.append(iso)
+        return _fill(conn, iso)[0]
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS, frames_filled=True)
+    assert calls == [REF_D5] and (choice.found, choice.stepped_back) == (True, False)
+    assert choice.filled == (("2026-09-04", 3),) and not choice.split.blocked_ids
+    assert "3 trades with no price on 2026-09-08" in choice.note
