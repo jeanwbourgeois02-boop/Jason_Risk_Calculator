@@ -446,6 +446,18 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         start_value_usd = start_value * usd_per_quote_ccy if usd_per_quote_ccy is not None else None
         # the current value in the same (quote) currency, so Current value - Start value reads across
         current_value = mktval / usd_per_quote_ccy if mktval is not None and usd_per_quote_ccy else None
+    elif asset_class != "FX":
+        # An index / equity / commodity option (SPX, 2026-09-21): contracts x premium in index
+        # points x the contract multiplier, in the QUOTE currency (15 x 121.5 x 100 = $182,250).
+        # Its PREMIUM mark is already per contract (engine/options writes it x multiplier).
+        multiplier = float(rec.get("multiplier") or 1.0)
+        usd_per_quote_ccy = _spot_to_usd(conn, as_of, rec["quote_ccy"])
+        start_value = quantity * fill * multiplier if not _is_missing(fill) else None
+        start_value_usd = (start_value * usd_per_quote_ccy
+                           if start_value is not None and usd_per_quote_ccy is not None else None)
+        mktval = current_value * usd_per_quote_ccy if current_value is not None and usd_per_quote_ccy is not None else None
+        usd_per_base = (float(rec.get("strike") or 0.0) * multiplier * usd_per_quote_ccy
+                        if usd_per_quote_ccy is not None and rec.get("strike") else None)   # notional = contracts x multiplier x strike
     else:
         start_value_usd = start_value * usd_per_base if start_value is not None and usd_per_base is not None else None
     pnl_ccy = current_value - start_value if current_value is not None and start_value is not None else None
@@ -486,7 +498,7 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         # Notional in DOLLARS (user, 2026-09-21: "everything in dollars"; 5,000 ounces of gold is
         # not $5,000): |quantity| x USD per base unit at spot; Position keeps the base units.
         "position": quantity, "notional": abs(quantity) * usd_per_base if usd_per_base is not None else None,
-        "premium_ccy": rec["quote_ccy"] if per_ounce else rec["base_ccy"],
+        "premium_ccy": rec["quote_ccy"] if (per_ounce or asset_class != "FX") else rec["base_ccy"],
         "premium_paid": None if _is_missing(fill) else fill,
         "start_value": start_value, "start_value_usd": start_value_usd,
         "start_priced_usd": start_value_usd if pnl_usd is not None else None,

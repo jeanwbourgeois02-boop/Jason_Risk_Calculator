@@ -1185,3 +1185,41 @@ def test_real_sample_swaps_all_default_to_pay_and_the_three_receivers_stick_once
     assert sum(1 for q in got.values() if q > 0) == 7
     assert sorted(irs_direction.needs_user_choice(conn)) == sorted(set(got) - set(receivers))
     conn.close()
+
+
+# --------------------------------------------------------------------------- the user's live options export, 2026-09-21
+def test_option_symbol_carrying_the_delivery_date_loads_with_the_descriptions_expiry(tmp_csv):
+    """'USDZAR101326C' with 'Call 10/09/2026': the Symbol date is the delivery date (expiry + 2
+    business days over a weekend and a holiday). It was rejected as a contradiction, so the ZAR,
+    CHF and one EURSEK option were missing from the book."""
+    row = _option_row(Symbol="USDZAR101326C-198564638", **{"Currency Pair": "", "Underlying Symbol": "USDZAR-XXAA"},
+                      Quantity="25,000,000", Price="0.005315",
+                      Description="USDZAR-XXAA 16.350000 STRIKE EUR Call 10/09/2026 SBILUK")
+    res = blotter.parse(tmp_csv([row]))
+    assert res.rejects == [] and len(res.trades) == 1
+    assert res.instruments["USDZAR101326C-198564638"].expiry_date == "2026-10-09"
+    assert res.instrument_options["USDZAR101326C-198564638"].strike == 16.35
+    assert any("delivery date" in str(w) for w in res.warnings)
+
+
+def test_spx_index_option_loads_as_an_equity_option_in_contracts(tmp_csv):
+    row = _option_row(Symbol="SPX/E261016P7615-USAA", **{"Currency Pair": ""}, Quantity="15", Price="121.5",
+                      Description="SPX 7615 STRIKE EUR PUT 10/16/2026")
+    res = blotter.parse(tmp_csv([row]))
+    assert res.rejects == [] and len(res.trades) == 1
+    trade, inst = res.trades[0], res.instruments["SPX/E261016P7615"]
+    assert (trade.product, trade.quantity, trade.price) == ("EQ_OPTION", 15.0, 121.5)
+    assert (inst.asset_class, inst.base_ccy, inst.quote_ccy, inst.multiplier, inst.expiry_date) == (
+        "EQ_OPTION", "SPX", "USD", 100.0, "2026-10-16")
+    opt = res.instrument_options["SPX/E261016P7615"]
+    assert (opt.strike, opt.option_type) == (7615.0, "PUT")
+    assert res.legs[0].amount == 15 * 100 * 7615 and res.legs[0].settles_cash == 0
+
+
+def test_gold_option_premium_in_usd_per_ounce_is_not_flagged_as_above_the_notional(tmp_csv):
+    row = _option_row(Symbol="XAUUSD101526P-199095036", **{"Currency Pair": "", "Underlying Symbol": "XAUUSD-XXAA"},
+                      Quantity="4635.37", Price="125.941005788",
+                      Description="XAUUSD-XXAA 4314.650000 STRIKE EUR Put 10/15/2026 SCBANK")
+    res = blotter.parse(tmp_csv([row]))
+    assert res.rejects == [] and res.trades[0].quantity == 4635.37 and res.trades[0].price == 125.941005788
+    assert not any("above 100" in str(w) for w in res.warnings)

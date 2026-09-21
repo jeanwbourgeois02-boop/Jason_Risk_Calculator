@@ -1175,12 +1175,68 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
         trade_date, expiry_iso, price, 0))
 
 
+DELIVERY_LAG_DAYS = 7   # expiry + 2 business days, over a long weekend
+# 'SPX/E261016P7615-USAA': underlying / European-or-American, expiry yymmdd, put-call, strike
+INDEX_OPTION_SYMBOL_RE = re.compile(r"^([A-Z0-9]{2,6})/([EA])(\d{6})([CP])(\d+(?:\.\d+)?)(?:-.*)?$")
+INDEX_OPTION_MULTIPLIER = {"SPX": 100.0, "NDX": 100.0, "RUT": 100.0, "SX5E": 10.0}
+
+
+def _days_between(earlier_iso: str, later_iso: str) -> int:
+    return (datetime.fromisoformat(later_iso) - datetime.fromisoformat(earlier_iso)).days
+
+
+def _parse_index_option(res: ParseResult, row: pd.Series, row_no: int, m) -> None:
+    """An equity index option (the user's live export, 2026-09-21: 'SPX/E261016P7615-USAA',
+    Quantity 15 contracts, Price 121.5 index points, NetInvoice 182,272.50 = 15 x 121.5 x 100
+    plus fees). Product EQ_OPTION, quantity = contracts signed by Side, price = the premium in
+    index points, instruments.multiplier = the contract multiplier, one NOTIONAL leg in the
+    quote currency at contracts x multiplier x strike (settles_cash 0), like a future's."""
+    symbol, trade_id = _s(row.get("Symbol")), _s(row.get("Trade Id"))
+    root, _style, yymmdd, cp, strike_s = m.groups()
+    try:
+        expiry = datetime.strptime(yymmdd, "%y%m%d").date().isoformat()
+    except ValueError:
+        res.rejects.append(Reject(row_no, symbol, f"unparseable expiry {yymmdd!r} in Symbol"))
+        return
+    multiplier = INDEX_OPTION_MULTIPLIER.get(root)
+    if multiplier is None:
+        res.rejects.append(Reject(row_no, symbol, f"index option on {root}: contract multiplier not known to the app"))
+        return
+    trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
+    premium = _num(row.get("Price"))
+    if trade_date is None or math.isnan(premium):
+        res.rejects.append(Reject(row_no, symbol, "blank or unreadable TradeDate / Price"))
+        return
+    contracts = _signed_quantity(row, symbol, row_no, res, "contracts", math.nan, "")
+    if contracts is None:
+        return
+    instrument_id = symbol.split("-")[0]            # one instrument per series: 'SPX/E261016P7615'
+    strike = float(strike_s)
+    res.instruments.setdefault(instrument_id, Instrument(
+        instrument_id=instrument_id, asset_class="EQ_OPTION", base_ccy=root, quote_ccy="USD",
+        multiplier=multiplier, is_ndf=0, bbg_ticker=f"{root} Index", expiry_date=expiry,
+    ))
+    res.instrument_options.setdefault(instrument_id, InstrumentOption(
+        instrument_id=instrument_id, strike=strike, option_type="CALL" if cp == "C" else "PUT", payoff="VANILLA",
+    ))
+    res.trades.append(Trade(
+        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="EQ_OPTION",
+        package_id=trade_id, trade_date=trade_date, quantity=contracts, price=premium, **_common(row),
+    ))
+    res.legs.append(TradeLeg(
+        trade_id, 1, "NOTIONAL", "USD", contracts * multiplier * strike, trade_date, expiry, premium, 0))
+
+
 def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     symbol = _s(row.get("Symbol"))
     desc = _s(row.get("Description"))
     trade_id = _s(row.get("Trade Id"))
     if not trade_id:
         res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
+        return
+    index_m = INDEX_OPTION_SYMBOL_RE.match(symbol)
+    if index_m and trade_id:
+        _parse_index_option(res, row, row_no, index_m)
         return
     om = OPTION_SYMBOL_RE.match(symbol)
     col_pair = _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol"))
@@ -1199,6 +1255,14 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
         # Symbol is the primary source, but a populated Description is a real second
         # source of the same facts (verified on the reference sample's 8 OPTION rows,
         # always in agreement) -- cross-checked rather than blindly trusting the Symbol.
+        if desc_expiry and desc_expiry != expiry and 0 < _days_between(desc_expiry, expiry) <= DELIVERY_LAG_DAYS:
+            # The user's live export, 2026-09-21: USDZAR101326C with 'Call 10/09/2026', USDCHF101926
+            # with '10/15/2026', EURSEK092526C with '09/23/2026' -- the Symbol carries the delivery
+            # date (expiry + 2 business days, a weekend or holiday in between), the Description the
+            # expiry. Both are true; the expiry is the Description's.
+            _warn(res, row_no, symbol, f"Symbol date {expiry} is the delivery date; expiry {desc_expiry} "
+                                       "taken from the Description")
+            expiry = desc_expiry
         if desc_expiry and desc_expiry != expiry:
             res.rejects.append(Reject(row_no, symbol,
                                       f"Symbol expiry {expiry} disagrees with Description date {desc_expiry}: {desc!r}"))
@@ -1295,7 +1359,7 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
             _warn(res, row_no, symbol,
                   f"NetInvoice {net:,.2f} differs from |Quantity x Price| {expected:,.2f} by "
                   f"{abs(net - expected) / expected:.2%} (above {NET_INVOICE_TOLERANCE:.1%}); the Price fill is kept")
-    if premium > 1.0:
+    if premium > 1.0 and base_ccy not in ("XAU", "XAG", "XPT", "XPD"):   # a metal is dealt in USD per ounce
         # More than the whole notional: not a premium any desk pays. An Excel date serial
         # (46227.0) in the Price cell is a finite float and looks exactly like this.
         _warn(res, row_no, symbol, f"premium {premium:.10g} is above 100 % of the notional; kept as read, "
