@@ -40,6 +40,7 @@ def test_import_checks_are_a_subset_of_installed_packages():
     # import name -> pip distribution name, for the handful that differ
     import_to_dist = {"yaml": "pyyaml", "zoneinfo": None}  # zoneinfo is stdlib, not pip-installed
     for mod in risk.IMPORT_CHECKS:
+        mod = mod.split(".")[0]                # 'scipy.optimize' is installed by 'scipy'
         dist = import_to_dist.get(mod, mod)
         if dist is None:
             continue

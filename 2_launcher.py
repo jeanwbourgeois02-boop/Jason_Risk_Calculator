@@ -70,9 +70,12 @@ DEV_PACKAGES = [
 ]
 # Modules `doctor` / `setup` import-check after install, to catch "pip said OK but the
 # module doesn't actually import" (wrong wheel, ABI mismatch, etc). zoneinfo is stdlib
-# (3.9+) but still checked since tzdata above depends on it existing.
+# (3.9+) but still checked since tzdata above depends on it existing. scipy is checked by
+# the two submodules the option pricers really import (2026-09-21: the Options pricer on a
+# new PC said scipy was missing while the launcher saw nothing wrong): a bare `import
+# scipy` is lazy and succeeds even when its compiled parts cannot load.
 IMPORT_CHECKS = ("dash", "pandas", "numpy", "openpyxl", "xlrd", "plotly", "werkzeug",
-                  "yaml", "QuantLib", "zoneinfo", "scipy")
+                  "yaml", "QuantLib", "zoneinfo", "scipy.optimize", "scipy.stats")
 
 
 def requirements_text() -> str:
@@ -412,11 +415,14 @@ def cmd_load_sample(args) -> int:
 # ----------------------------------------------------------------------------- start
 
 def _packages_fingerprint() -> str:
-    """Hash of PACKAGES + DEV_PACKAGES + this interpreter's python version (major.minor):
-    changes exactly when a `pip install` would actually need to do something."""
+    """Hash of PACKAGES + DEV_PACKAGES + IMPORT_CHECKS + this interpreter's python version
+    (major.minor): changes when a `pip install` would need to do something, and when what
+    counts as "the packages import" changes -- so a PC whose stamp was written under a
+    weaker check re-verifies once on its next `pnl` instead of trusting that stamp forever."""
     import hashlib
     v = sys.version_info
-    payload = "\n".join(sorted(PACKAGES + DEV_PACKAGES)) + f"|py{v.major}.{v.minor}"
+    payload = ("\n".join(sorted(PACKAGES + DEV_PACKAGES)) + "|" + ",".join(IMPORT_CHECKS)
+               + f"|py{v.major}.{v.minor}")
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
