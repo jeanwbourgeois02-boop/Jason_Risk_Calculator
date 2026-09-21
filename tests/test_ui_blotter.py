@@ -1227,7 +1227,7 @@ def test_priced_diff_scoped_unavailable_when_blocked_trades_outnumber_anchored_o
     assert entry["reason"].startswith("needs the 2026-06-19 close: 2 of 3 trades open that day have no official mark there")
     assert "1 forward: no FWD_OUTRIGHT" in entry["reason"] and "1 future: no FUTURE_PX" in entry["reason"]
     assert "backfill" in entry["reason"]
-    assert "No earlier close within 10 business days has one either" in entry["reason"]
+    assert "No earlier close within 5 business days has one either" in entry["reason"]
     assert entry["ref_note"] == "" and entry["ref_date"] == "2026-06-19"
 
 

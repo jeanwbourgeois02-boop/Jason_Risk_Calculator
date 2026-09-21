@@ -40,7 +40,8 @@ import pandas as pd
 
 from engine.pnl.calendar import _prev_business_day
 
-MAX_STEP_BACK_BUSINESS_DAYS = 10
+# User, 2026-09-21: "if the previous day is also blank then what - let it backfill up to 5 days".
+MAX_STEP_BACK_BUSINESS_DAYS = 5
 
 EMPTY = "EMPTY"                          # nothing in scope on `a`: 0.0, available
 OK = "OK"                                # a figure can be formed against this reference

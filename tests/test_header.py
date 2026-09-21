@@ -440,7 +440,7 @@ def test_priced_diff_minority_blocked_keeps_partial_figure():
 
 
 def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
-    """End to end: marks for today only, and no earlier close within 10 business days has
+    """End to end: marks for today only, and no earlier close within 5 business days has
     any either (the trade was open on all of them). Daily's caption must talk about the
     reference date (t-1) and the backfill, not about today, which is fully priced."""
     conn = schema.connect()
@@ -467,8 +467,8 @@ def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
     assert "needed marks) — the backfill fills past closes by itself after each Bloomberg pull" in caption
     assert "run the" not in caption and "Market data tab" not in caption
     # 2026-09-21: the earlier closes were tried first, and the caption says none has value
-    # (10 business days before 2026-09-16, the 2026-09-07 holiday skipped)
-    assert caption.endswith("No earlier close within 10 business days has one either (checked back to 2026-09-01).")
+    # (5 business days before 2026-09-16)
+    assert caption.endswith("No earlier close within 5 business days has one either (checked back to 2026-09-09).")
 
 
 def test_build_figures_period_steps_back_to_the_previous_close_that_has_value():

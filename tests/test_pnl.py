@@ -608,12 +608,11 @@ def test_reference_several_skipped_closes_caption_and_lazy_walk():
     assert [s.date for s in choice.skipped] == [REF_D5, "2026-09-04"]
 
 
-def test_reference_nothing_usable_within_ten_business_days_is_na_with_extended_reason():
-    conn = _ref_book({REF_AS_OF: 1.1100, "2026-08-21": 1.1050})     # 11 business days before REF_D5
+def test_reference_nothing_usable_within_five_business_days_is_na_with_extended_reason():
+    conn = _ref_book({REF_AS_OF: 1.1100, "2026-08-28": 1.1050})     # 6 business days before REF_D5
     frame_for, calls = _recording_reader(conn)
     choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
-    assert calls == [REF_D5, "2026-09-04", "2026-09-03", "2026-09-02", "2026-09-01", "2026-08-31",
-                     "2026-08-28", "2026-08-27", "2026-08-26", "2026-08-25", "2026-08-24"]
+    assert calls == [REF_D5, "2026-09-04", "2026-09-03", "2026-09-02", "2026-09-01", "2026-08-31"]
     assert all(c <= REF_D5 for c in calls)               # never forward
     assert (choice.found, choice.stepped_back, choice.note) == (False, False, "")
     assert choice.ref_date_used == REF_D5                # the original date, with its own frame
@@ -623,10 +622,10 @@ def test_reference_nothing_usable_within_ten_business_days_is_na_with_extended_r
     today = "5d needs the 2026-09-08 close: 3 of 3 trades open that day have no official mark dated 2026-09-08"
     entry = reference.annotate({"value": float("nan"), "available": False, "reason": today}, choice)
     assert not entry["available"] and math.isnan(entry["value"])
-    assert entry["reason"] == (today + ". No earlier close within 10 business days has one either "
-                               "(checked back to 2026-08-24).")
+    assert entry["reason"] == (today + ". No earlier close within 5 business days has one either "
+                               "(checked back to 2026-08-31).")
     assert (entry["ref_date_used"], entry["ref_note"]) == (REF_D5, "")
-    assert len(entry["ref_dates_skipped"]) == 11
+    assert len(entry["ref_dates_skipped"]) == 6
 
 
 def test_reference_trade_less_date_is_a_zero_reference_and_ends_the_walk():
