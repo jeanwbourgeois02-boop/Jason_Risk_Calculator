@@ -562,6 +562,10 @@ def _common_ccy(group_legs: List[dict]) -> str:
 
 def _group_numeric(group_legs: List[dict]) -> dict:
     out = {f: _agg(l[f] for l in group_legs) for f in SUM_FIELDS}
+    # Position is in the pair's own units (EUR, USD, ounces of gold): it only adds up inside
+    # one underlying. Across pairs it is blank; Notional USD is the figure that adds up.
+    if len({l.get("underlying") for l in group_legs}) > 1:
+        out["position"] = None
     same_ccy = _common_ccy(group_legs) not in ("", "mixed")
     for f in CCY_SUM_FIELDS:  # EUR and USD premiums do not add up: blank unless one currency
         out[f] = _agg(l[f] for l in group_legs) if same_ccy else None
