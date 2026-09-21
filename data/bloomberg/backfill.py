@@ -10,8 +10,8 @@ dated that day:
     crosses included, plus every USD-conversion pair a cross's legs need for delta/P&L
     (`traded_pairs`, mirrors `live._cross_usd_legs`; USD-pairs-only until 2026-09-18,
     which meant a cross like EURSEK never got a SPOT close backfilled at all and could
-    never be frozen by realise_settled once it settled) -- one HistoricalDataRequest for
-    the whole range (2026-09-21; it was one per day). Also (2026-09-18) every FX option's pair
+    never be frozen by realise_settled once it settled) -- one HistoricalDataRequest per
+    stretch of days being worked (see below). Also (2026-09-18) every FX option's pair
     and the option's own USD-conversion pairs, for every day the option was open
     including its expiry date (`spot_only_pair_names`). SPOT only for options: no
     historical forward at the expiry and no historical vol, since nothing prices an
@@ -24,8 +24,8 @@ dated that day:
     -- never extrapolated beyond the last tenor point. Bloomberg does not serve the bulk
     FWD_CURVE field through HistoricalDataRequest the way it does live via
     ReferenceDataRequest, so the historical curve is assembled from the standard-tenor
-    tickers instead (pull_marks.STANDARD_TENORS), one HistoricalDataRequest for the whole
-    date range's tenor tickers, not one per day. Those tickers' PX_LAST is forward points
+    tickers instead (pull_marks.STANDARD_TENORS), one HistoricalDataRequest per stretch
+    of days being worked, not one per day. Those tickers' PX_LAST is forward points
     by the live tenor path's account (converted as it converts them: spot + points /
     FWD_POINTS_SCALE), and HistoricalDataRequest sends no SETTLE_DT, so the tenor dates are
     computed by market convention; a forward built on either is written BBG_INTERP, and
@@ -33,6 +33,15 @@ dated that day:
     (2026-09-21: before, no past forward was ever written, so no past day could complete).
   - FUTURE_PX (2026-09-18): PX_SETTLE of every future open on that day, same batched
     one-request-for-the-whole-range approach.
+Only what is needed is asked for (user decision 2026-09-21: "only the data necessary for
+the pnl calcs of the trades ... also for the backfill"), all of it read from the Bloomberg
+library (data/bloomberg/library.py): the days being worked, as stretches of consecutive
+business days (`_runs`) -- never the days between an old incomplete day and yesterday;
+within a stretch, the pairs and futures the book needed inside it; on a day, the closes
+of the pairs needed that day; and per pair, the tenors up to the one that clears its
+furthest open leg (`_tenors_needed`), since a forward is read between the two tenors
+either side of its date.
+
 A day counts as complete (skipped unless overwrite=True) only once ALL of the above are
 official for it -- `data.bloomberg.inventory.close_completeness`, the same "needed" set
 `data.bloomberg.live.build_requests` uses for the live feed, so the three can never drift
@@ -190,49 +199,104 @@ def _import_realise_settled():
         return None
 
 
-def _tenor_tickers(pair: str) -> Dict[str, str]:
-    """{tenor label -> bbg_ticker} for `pair`'s standard-tenor outright tickers, the same
-    list and naming the live tenor-fallback path uses (pull_marks.STANDARD_TENORS,
-    fetch_tenor_points)."""
+# Only what the days being worked need is asked of Bloomberg's history (user decision
+# 2026-09-21: "only the data necessary for the pnl calcs of the trades ... also for the
+# backfill"). Until then every ticker was requested for every day between the oldest and
+# the newest day being worked -- one old day that could never complete made each run
+# re-request months of history for the whole book -- and every pair got all eight tenors.
+RUN_MAX_DAYS = 22          # business days per request, so each stretch asks only for the tickers it needs
+TENOR_MARGIN_DAYS = 7      # a kept tenor's computed date clears the furthest leg by this much (see _tenors_needed)
+MIN_TENORS = 4             # SP..1M are always asked for (see _tenors_needed)
+
+
+def _runs(work: List[date]) -> List[Tuple[date, date]]:
+    """The days to work as (first, last) stretches of consecutive business days, each at
+    most RUN_MAX_DAYS long. One request per kind per stretch: days that are not being
+    worked are never asked for, and a stretch asks only for the tickers needed inside it
+    (a pair first traded in September is not asked for in June)."""
+    runs: List[List[date]] = []
+    for d in sorted(set(work)):
+        if runs and len(runs[-1]) < RUN_MAX_DAYS and business_days(runs[-1][-1], d) == [runs[-1][-1], d]:
+            runs[-1].append(d)
+        else:
+            runs.append([d])
+    return [(run[0], run[-1]) for run in runs]
+
+
+def _tenors_needed(pair: str, legs: List[dict], run_start: date, holidays) -> List[str]:
+    """The standard tenors `pair`'s open legs (`legs`: its FWD_OUTRIGHT library rows) need
+    over a stretch starting `run_start`: SP up to the first tenor whose date clears the
+    furthest leg, seen from the first day the leg is needed (later days see it nearer).
+    A leg's forward is read between the two tenors either side of its date
+    (fwd_curve.outright_for_date), so the longer tenors change nothing and are not asked
+    for. Two safeguards, both on the side of asking for more: the kept tenor must clear
+    the leg by TENOR_MARGIN_DAYS, because its date is computed by convention and can sit
+    a day from Bloomberg's; and SP..1M are always kept, because fwd_curve.tenor_unit tells
+    points from outrights by the spread of the values it is given. A leg beyond the last
+    tenor keeps them all (it is reported "outside the forward tenors", as before)."""
     from data.bloomberg.pull_marks import STANDARD_TENORS
-    return {t: f"{pair}{t} Curncy" for t in STANDARD_TENORS}
+    keep = MIN_TENORS
+    for leg in legs:
+        first_day = max(run_start, date.fromisoformat(leg["needed_from"]))
+        clear = date.fromisoformat(leg["settle_date"]) + timedelta(days=TENOR_MARGIN_DAYS)
+        spot_day = fc.spot_date_for(first_day, pair, holidays)
+        reach = len(STANDARD_TENORS)
+        for i, tenor in enumerate(STANDARD_TENORS):
+            settle = fc.tenor_settle_date(spot_day, tenor, holidays)
+            if settle is not None and settle >= clear:
+                reach = i + 1
+                break
+        keep = max(keep, reach)
+    return list(STANDARD_TENORS[:keep])
 
 
-def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, span_start: date, span_end: date,
-                                fwd_fetch: Optional[Callable] = None) -> Dict[str, Dict[str, Dict[str, dict]]]:
+def _tenor_tickers(pair: str, tenors: List[str]) -> Dict[str, str]:
+    """{tenor label -> bbg_ticker} for `pair`, the naming the live tenor-fallback path uses
+    (pull_marks.fetch_tenor_points)."""
+    return {t: f"{pair}{t} Curncy" for t in tenors}
+
+
+def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
+                                fwd_fetch: Optional[Callable] = None, holidays=frozenset()
+                                ) -> Dict[str, Dict[str, Dict[str, dict]]]:
     """{instrument_id: {date_iso: {tenor label: {'PX_LAST': ..., 'SETTLE_DT': ... if sent}}}}
-    for every FX pair with a leg open at any point in [span_start, span_end] -- ONE
-    HistoricalDataRequest across every pair's standard-tenor tickers for the whole span
-    (2026-09-18: "batch-friendly", not one request per day per ticker). The raw rows, not
-    a curve: a day's curve needs that day's SPOT close (fwd_curve.historical_curve), which
-    backfill() only has inside its day loop. `fwd_fetch(session, service, tickers, fields,
-    start, end) -> {ticker: {date_iso: {field: value}}}` defaults to
-    pull_marks.fetch_historical_series; injectable for tests.
+    -- one HistoricalDataRequest per stretch of `runs`, for the pairs with a leg still to
+    settle inside it (the Bloomberg library's FWD_OUTRIGHT rows; a leg settling on or
+    before a day is marked at that day's spot and needs no tenor) and the tenors those
+    legs need (`_tenors_needed`). The raw rows, not a curve: a day's curve needs that
+    day's SPOT close (fwd_curve.historical_curve), which backfill() only has inside its
+    day loop. `fwd_fetch(session, service, tickers, fields, start, end) -> {ticker:
+    {date_iso: {field: value}}}` defaults to pull_marks.fetch_historical_series.
 
     SETTLE_DT is still asked for (2026-09-21) so Bloomberg's own tenor dates are used
     wherever it does send them, but it is a static reference field that
-    HistoricalDataRequest does not serve; if the request comes back with no PX_LAST at all
-    it is sent once more for PX_LAST alone, in case the field it cannot serve is what
-    emptied the first response."""
+    HistoricalDataRequest does not serve; if a request comes back with no PX_LAST at all
+    it is sent once more for PX_LAST alone, and the later stretches ask for PX_LAST alone."""
     from data.bloomberg import library
-    pairs = sorted({r["key"] for r in library.needed_in_range(conn, span_start.isoformat(), span_end.isoformat())
-                    if r["kind"] == "FWD_OUTRIGHT"})
-    if not pairs:
-        return {}
-    tenor_map = {pair: _tenor_tickers(pair) for pair in pairs}
-    all_tenor_tickers = sorted({t for tickers in tenor_map.values() for t in tickers.values()})
-    if fwd_fetch is None:
-        from data.bloomberg.pull_marks import fetch_historical_series
-        fwd_fetch = fetch_historical_series
-    series = fwd_fetch(session, service, all_tenor_tickers, ["PX_LAST", "SETTLE_DT"], span_start, span_end) or {}
-    if not any("PX_LAST" in row for per_day in series.values() for row in per_day.values()):
-        series = fwd_fetch(session, service, all_tenor_tickers, ["PX_LAST"], span_start, span_end) or {}
     out: Dict[str, Dict[str, Dict[str, dict]]] = {}
-    for pair in pairs:
-        by_day = out.setdefault(pair, {})
-        for tenor, ticker in tenor_map[pair].items():
-            for day_iso, row in (series.get(ticker) or {}).items():
-                by_day.setdefault(day_iso, {})[tenor] = row
+    fields = ["PX_LAST", "SETTLE_DT"]
+    for run_start, run_end in runs:
+        legs_by_pair: Dict[str, List[dict]] = {}
+        for r in library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat()):
+            if r["kind"] == "FWD_OUTRIGHT" and r["settle_date"] > run_start.isoformat():
+                legs_by_pair.setdefault(r["key"], []).append(r)
+        if not legs_by_pair:
+            continue
+        tenor_map = {pair: _tenor_tickers(pair, _tenors_needed(pair, legs, run_start, holidays))
+                     for pair, legs in sorted(legs_by_pair.items())}
+        tickers = sorted({t for by_tenor in tenor_map.values() for t in by_tenor.values()})
+        if fwd_fetch is None:
+            from data.bloomberg.pull_marks import fetch_historical_series
+            fwd_fetch = fetch_historical_series
+        series = fwd_fetch(session, service, tickers, fields, run_start, run_end) or {}
+        if len(fields) > 1 and not any("PX_LAST" in row for per_day in series.values() for row in per_day.values()):
+            fields = ["PX_LAST"]
+            series = fwd_fetch(session, service, tickers, fields, run_start, run_end) or {}
+        for pair, by_tenor in tenor_map.items():
+            by_day = out.setdefault(pair, {})
+            for tenor, ticker in by_tenor.items():
+                for day_iso, row in (series.get(ticker) or {}).items():
+                    by_day.setdefault(day_iso, {})[tenor] = row
     return out
 
 
@@ -265,29 +329,30 @@ def _fetch_points_scales(session, service, pairs: List[str], scale_fetch: Option
     return out
 
 
-def _fetch_future_px_history(conn: sqlite3.Connection, session, service, span_start: date, span_end: date,
+def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
                              fut_fetch: Optional[Callable] = None) -> Dict[str, Dict[str, float]]:
-    """{instrument_id: {date_iso: PX_SETTLE}} for every future with a leg open at any
-    point in [span_start, span_end] -- one HistoricalDataRequest for the whole span.
+    """{instrument_id: {date_iso: PX_SETTLE}} -- one HistoricalDataRequest per stretch of
+    `runs`, for the futures open inside it (the Bloomberg library's FUTURE_PX rows).
     `fut_fetch` mirrors `_fetch_fwd_outright_history`'s `fwd_fetch`; defaults to
     pull_marks.fetch_historical_series."""
     from data.bloomberg import library
-    futs = [r for r in library.needed_in_range(conn, span_start.isoformat(), span_end.isoformat())
-            if r["kind"] == "FUTURE_PX"]
-    if not futs:
-        return {}
-    ticker_to_instrument = {r["bbg_ticker"]: r["key"] for r in futs}
-    tickers = sorted(ticker_to_instrument)
-    if fut_fetch is None:
-        from data.bloomberg.pull_marks import fetch_historical_series
-        fut_fetch = fetch_historical_series
-    series = fut_fetch(session, service, tickers, ["PX_SETTLE"], span_start, span_end)
     out: Dict[str, Dict[str, float]] = {}
-    for ticker, per_day in series.items():
-        instrument_id = ticker_to_instrument.get(ticker)
-        if instrument_id is None:
+    for run_start, run_end in runs:
+        ticker_to_instrument = {r["bbg_ticker"]: r["key"]
+                                for r in library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat())
+                                if r["kind"] == "FUTURE_PX"}
+        if not ticker_to_instrument:
             continue
-        out[instrument_id] = {day: row["PX_SETTLE"] for day, row in per_day.items() if "PX_SETTLE" in row}
+        if fut_fetch is None:
+            from data.bloomberg.pull_marks import fetch_historical_series
+            fut_fetch = fetch_historical_series
+        series = fut_fetch(session, service, sorted(ticker_to_instrument), ["PX_SETTLE"], run_start, run_end) or {}
+        for ticker, per_day in series.items():
+            instrument_id = ticker_to_instrument.get(ticker)
+            if instrument_id is None:
+                continue
+            out.setdefault(instrument_id, {}).update(
+                {day: row["PX_SETTLE"] for day, row in per_day.items() if "PX_SETTLE" in row})
     return out
 
 
@@ -307,17 +372,24 @@ def _drop_already_official(conn: sqlite3.Connection, rows: List[dict]) -> List[d
     return out
 
 
-def _spot_fetch_from_series(series_fetch: Callable, tickers: List[str], span_start: date, span_end: date) -> Callable:
-    """A per-day SPOT fetch (the `fetch` signature backfill() takes) answered from ONE
-    HistoricalDataRequest for every pair over the whole span (2026-09-21) -- the default
-    used to be one request per day. Same field, same single-date points, so a day's close
-    is the value the per-day request returned. The request is sent on first use."""
-    cache: Dict[str, dict] = {}
+def _spot_fetch_from_series(series_fetch: Callable, conn: sqlite3.Connection, runs: List[Tuple[date, date]]) -> Callable:
+    """A per-day SPOT fetch (the `fetch` signature backfill() takes) answered from one
+    HistoricalDataRequest per stretch of `runs`, for the pairs whose SPOT is needed inside
+    that stretch (the Bloomberg library's SPOT rows), sent the first time one of its days
+    is asked for. Same field, same single-date points as a per-day request."""
+    from data.bloomberg import library
+    cache: Dict[Tuple[date, date], dict] = {}
 
     def fetch(session, service, wanted, field, day):
-        if "series" not in cache:
-            cache["series"] = series_fetch(session, service, list(tickers), [field], span_start, span_end) or {}
-        return {t: ((cache["series"].get(t) or {}).get(day.isoformat()) or {}).get(field) for t in wanted}
+        run = next(((a, b) for a, b in runs if a <= day <= b), None)
+        if run is None:
+            return {}
+        if run not in cache:
+            known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
+            tickers = sorted({r["bbg_ticker"] for r in library.needed_in_range(conn, run[0].isoformat(), run[1].isoformat())
+                              if r["kind"] == "SPOT" and r["key"] in known})
+            cache[run] = (series_fetch(session, service, tickers, [field], run[0], run[1]) or {}) if tickers else {}
+        return {t: ((cache[run].get(t) or {}).get(day.isoformat()) or {}).get(field) for t in wanted}
     return fetch
 
 
@@ -342,7 +414,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     etc; never silently dropped. ERROR (2026-09-21) is a day whose own processing raised:
     it carries `error`, and the other days still run -- one bad day used to end the run.
 
-    ONE session and one request per kind for the whole call, however many days it covers.
+    ONE session for the whole call, and one request per kind per stretch of days being
+    worked (`_runs`), however many days it covers.
     The work is done in two passes (2026-09-21):
       1. every day's SPOT closes and FUTURE_PX are collected and written in ONE
          transaction. The live pull calls engine.pnl.ledger.realise_settled every cycle,
@@ -386,8 +459,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             # would otherwise never reach the FUTURE_PX logic below at all.
             log("No FX pairs or futures with a leg open in this range; nothing to backfill.")
             return []
-        tickers = [t for _, t in pairs]
         by_ticker = {t: p for p, t in pairs}
+        ticker_of = {p: t for p, t in pairs}
         days = business_days(start, end)
         completeness = close_completeness(conn, start.isoformat(), end.isoformat())
         complete_by_day = dict(zip(completeness["as_of_date"], completeness["complete"]))
@@ -403,13 +476,14 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             log("  note: engine.pnl.ledger.realise_settled not importable; marks only, no realisation this run.")
         if not work:
             return [_skipped(d.isoformat()) for d in days]
-        span_start, span_end = min(work), max(work)
+        span_end = max(work)
+        runs = _runs(work)
         session = service = None
         own_session = False  # did THIS call open the session itself (pm.open_session)?
         if fetch is None or fwd_fetch is None or fut_fetch is None:
             from data.bloomberg import pull_marks as pm
             if fetch is None:
-                fetch = _spot_fetch_from_series(pm.fetch_historical_series, tickers, span_start, span_end)
+                fetch = _spot_fetch_from_series(pm.fetch_historical_series, conn, runs)
             if fwd_fetch is None:
                 fwd_fetch = pm.fetch_historical_series
             if fut_fetch is None:
@@ -423,11 +497,12 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             session, service = session_factory()
 
         try:
-            # FWD_OUTRIGHT / FUTURE_PX history, batched over the whole `work` span in one
-            # request each (2026-09-18) -- never one request per day per ticker.
-            tenor_rows_by_pair = _fetch_fwd_outright_history(conn, session, service, span_start, span_end, fwd_fetch)
-            future_px_by_instrument = _fetch_future_px_history(conn, session, service, span_start, span_end, fut_fetch)
+            # FWD_OUTRIGHT / FUTURE_PX history: one request per kind per stretch of days
+            # being worked (`_runs`), never one per day per ticker, and never a day, a
+            # pair or a tenor the book did not need (2026-09-21).
             holidays = load_holidays()
+            tenor_rows_by_pair = _fetch_fwd_outright_history(conn, session, service, runs, fwd_fetch, holidays)
+            future_px_by_instrument = _fetch_future_px_history(conn, session, service, runs, fut_fetch)
             scales: Dict[str, Dict[str, float]] = {}
 
             def scale_for(pair: str) -> Optional[float]:
@@ -440,6 +515,16 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             first_rows: List[dict] = []
             for d in work:
                 day = d.isoformat()
+                # Every mark this day actually needs (inventory._needed_marks -- the same
+                # set live.build_requests and close_completeness use, so all three can
+                # never drift apart). historical=True: what a PAST close needs -- for an
+                # FX option that is closing SPOT only (pair + USD-conversion pairs,
+                # covered by spot_rows), never a forward at its expiry.
+                needed = _needed_marks(conn, day, historical=True)
+                # Only the pairs THIS day needs a close for (2026-09-21); it was every pair
+                # of the whole range, on every day.
+                tickers = [ticker_of[i["instrument_id"]] for i in needed
+                           if i["mark_type"] == "SPOT" and i["instrument_id"] in ticker_of]
                 closes = (fetch(session, service, tickers, "PX_LAST", d) or {}) if tickers else {}
                 spot_rows, spot_by_pair, missing_pairs = [], {}, []
                 for ticker in tickers:
@@ -461,12 +546,6 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     # treated as a holiday.
                     prepared[d] = {"no_closes": True, "missing_pairs": missing_pairs}
                     continue
-                # Every mark this day actually needs (inventory._needed_marks -- the same
-                # set live.build_requests and close_completeness use, so all three can
-                # never drift apart). historical=True: what a PAST close needs -- for an
-                # FX option that is closing SPOT only (pair + USD-conversion pairs,
-                # covered by spot_rows), never a forward at its expiry.
-                needed = _needed_marks(conn, day, historical=True)
                 fut_rows, missing_marks = [], []
                 for item in needed:
                     if item["mark_type"] != "FUTURE_PX":

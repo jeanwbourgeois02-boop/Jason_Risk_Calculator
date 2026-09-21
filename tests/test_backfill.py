@@ -44,8 +44,12 @@ CLOSES = {
 }
 
 
+ASKED = {}      # day -> the tickers a close was asked for on that day (fake_fetch)
+
+
 def fake_fetch(session, service, tickers, field, day):
-    assert field == "PX_LAST" and set(tickers) == {"AUDUSD Curncy", "USDJPY Curncy"}
+    assert field == "PX_LAST" and set(tickers) <= {"AUDUSD Curncy", "USDJPY Curncy"}
+    ASKED[day] = sorted(tickers)
     return CLOSES.get(day, {})
 
 
@@ -82,14 +86,20 @@ def test_backfill_writes_marks_and_realises_in_order(tmp_path):
     marks = conn.execute("SELECT as_of_date, instrument_id, value, source, snapped_at FROM marks ORDER BY 1,2").fetchall()
     assert ("2026-09-07", "AUDUSD", 0.60, "BBG_BFXFORWARD", "2026-09-07T17:00:00-04:00") in marks
     assert not any(m[1] == "EURSEK" for m in marks)
-    # 09-10: AUDUSD's own SPOT close is missing (and it's no longer open -- settled
-    # 09-09) but USDJPY (still open) gets both its SPOT and its FWD_OUTRIGHT.
+    # 09-10: USDJPY (still open) gets both its SPOT and its FWD_OUTRIGHT.
     assert len([m for m in marks if m[0] == "2026-09-10"]) == 2
     assert {m[1:4] for m in marks if m[0] == "2026-09-10"} == {
         ("USDJPY", 151.0, "BBG_BFXFORWARD"), ("USDJPY", 149.5, "BBG_BFXFORWARD")}
 
+    # 2026-09-21 ("only the data necessary ... also for the backfill"): a day asks only for
+    # the pairs the book needed THAT day. USDJPY was not traded before 09-08; AUDUSD settled
+    # 09-09, so on 09-10 it is neither asked for nor reported missing (it used to be both).
+    assert ASKED[date(2026, 9, 7)] == ["AUDUSD Curncy"]
+    assert ASKED[date(2026, 9, 9)] == ["AUDUSD Curncy", "USDJPY Curncy"]
+    assert ASKED[date(2026, 9, 10)] == ["USDJPY Curncy"]
+    assert not any(m[0] == "2026-09-07" and m[1] == "USDJPY" for m in marks)
     by_day = {r["day"]: r for r in results}
-    assert by_day["2026-09-10"]["missing_pairs"] == ["AUDUSD"]
+    assert by_day["2026-09-10"]["missing_pairs"] == []
     assert "Finished: 4 days written, 1 with no closes, 0 skipped" in log[-1]
     # Realisation itself is engine/pnl/ledger.py::realise_settled (owned by the pnl-engine
     # task, developed in parallel). backfill.py only calls it, guarded: if the call raised
@@ -133,9 +143,10 @@ def test_backfill_without_realise_settled_still_writes_marks(tmp_path, monkeypat
     results = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 8), fetch=fake_fetch, fwd_fetch=fake_fwd_fetch, fut_fetch=fake_fwd_fetch, log=log.append)
     assert [r["status"] for r in results] == ["DONE", "DONE"]
     assert all(r["realised"] is None for r in results)
-    # 09-07: SPOT x2 (AUDUSD+USDJPY) + FWD_OUTRIGHT x1 (AUDUSD only -- USDJPY not yet
-    # traded that day); 09-08: SPOT x2 + FWD_OUTRIGHT x2 (both open) = 3 + 4 = 7.
-    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 7
+    # 09-07: SPOT x1 + FWD_OUTRIGHT x1 (AUDUSD only -- USDJPY not yet traded that day, so
+    # since 2026-09-21 its close is not asked for either); 09-08: SPOT x2 + FWD_OUTRIGHT x2
+    # (both open) = 2 + 4 = 6.
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 6
     assert conn.execute("SELECT COUNT(*) FROM marks WHERE mark_type='FWD_OUTRIGHT'").fetchone()[0] == 3
     assert conn.execute("SELECT COUNT(*) FROM realised_pnl").fetchone()[0] == 0
     assert any("realise_settled not importable" in s for s in log)
@@ -654,3 +665,110 @@ def test_backfill_works_the_days_in_the_callers_order_and_one_bad_day_does_not_e
         "2026-09-14", "2026-09-15", "2026-09-16"]
     assert [r[0] for r in conn.execute("SELECT as_of_date FROM marks WHERE mark_type = 'FWD_OUTRIGHT' ORDER BY rowid")] == [
         "2026-09-16", "2026-09-14"]
+
+
+# --------------------------------------------------------------------------- only what is needed (2026-09-21)
+# User: "only the data necessary for the pnl calcs of the trades being done is being pulled
+# also for the backfill". Days that are not being worked, pairs a day does not need and
+# tenors beyond the legs' reach are not asked of Bloomberg's history.
+_TENOR_OUTRIGHT = {"SP": 0.6600, "1W": 0.6601, "2W": 0.6602, "1M": 0.6604, "2M": 0.6608, "3M": 0.6612,
+                   "6M": 0.6624, "1Y": 0.6648}
+
+
+def _needed_only_db(tmp_path, name="risk.db"):
+    """AUDUSD sold 08-10 for 09-30 (three weeks from the days worked); USDJPY bought 09-01
+    for 2027-02-15 (five months); a June AUDUSD trade long settled."""
+    p = tmp_path / name
+    conn = schema.connect(p)
+    conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)", [
+        ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"),
+        ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31"),
+    ])
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        ("old", "XLSX", "AUDUSD", "FX_FWD", "old", "2026-06-01", 1e6, 0.64, "acc", "cp", "", "t", "d", ""),
+        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "", "t", "d", ""),
+        ("j1", "XLSX", "USDJPY", "FX_FWD", "j1", "2026-09-01", 1e6, 150.0, "acc", "cp", "", "t", "d", ""),
+    ])
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("old", 1, "FX_NEAR", "AUD", 1e6, "2026-06-01", "2026-06-10", 0.64, 1),
+        ("old", 2, "FX_NEAR", "USD", -640000, "2026-06-01", "2026-06-10", 0.64, 1),
+        ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-30", 0.65, 1),
+        ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-09-30", 0.65, 1),
+        ("j1", 1, "FX_NEAR", "USD", 1e6, "2026-09-01", "2027-02-15", 150.0, 1),
+        ("j1", 2, "FX_NEAR", "JPY", -150e6, "2026-09-01", "2027-02-15", 150.0, 1),
+    ])
+    conn.commit()
+    return p, conn
+
+
+def _recording_fetchers():
+    asked = {"spot": [], "fwd": []}
+
+    def spot_fetch(session, service, tickers, field, day):
+        asked["spot"].append((day, sorted(tickers)))
+        return {"AUDUSD Curncy": 0.66, "USDJPY Curncy": 150.0}
+
+    def fwd_fetch(session, service, tickers, fields, start, end):
+        asked["fwd"].append((start, end, sorted(tickers)))
+        out = {}
+        for d in backfill.business_days(start, end):
+            for ticker in tickers:
+                pair, tenor = ticker[:6], ticker[6:].split(" ")[0]
+                scale = 1.0 if pair == "AUDUSD" else 150.0 / 0.66
+                out.setdefault(ticker, {})[d.isoformat()] = {"PX_LAST": _TENOR_OUTRIGHT[tenor] * scale}
+        return out
+    return asked, spot_fetch, fwd_fetch
+
+
+def test_runs_are_stretches_of_consecutive_business_days_of_at_most_a_month():
+    days = [date(2026, 6, 8), date(2026, 9, 17), date(2026, 9, 18), date(2026, 9, 21)]
+    assert backfill._runs(list(reversed(days))) == [(date(2026, 6, 8), date(2026, 6, 8)),
+                                                    (date(2026, 9, 17), date(2026, 9, 21))]   # over the weekend
+    long = backfill.business_days(date(2026, 6, 1), date(2026, 8, 31))
+    runs = backfill._runs(long)
+    assert all(len(backfill.business_days(a, b)) <= backfill.RUN_MAX_DAYS for a, b in runs)
+    assert [d for a, b in runs for d in backfill.business_days(a, b)] == long
+
+
+def test_backfill_asks_only_for_the_days_pairs_and_tenors_the_book_needed(tmp_path):
+    p, conn = _needed_only_db(tmp_path)
+    asked, spot_fetch, fwd_fetch = _recording_fetchers()
+    # one old day and two recent ones: it used to request every ticker from 06-08 to 09-09
+    order = [date(2026, 9, 9), date(2026, 9, 8), date(2026, 6, 8)]
+    results = backfill.backfill(p, date(2026, 6, 8), date(2026, 9, 9), fetch=spot_fetch, fwd_fetch=fwd_fetch,
+                                fut_fetch=fwd_fetch, order=order, log=lambda s: None)
+    assert [r["day"] for r in results if r["status"] == "DONE"] == ["2026-06-08", "2026-09-08", "2026-09-09"]
+    # days: two requests, one per stretch worked, never the three months between them
+    assert sorted((start, end) for start, end, _ in asked["fwd"]) == [
+        (date(2026, 6, 8), date(2026, 6, 8)), (date(2026, 9, 8), date(2026, 9, 9))]
+    by_start = {start: tickers for start, _end, tickers in asked["fwd"]}
+    # pairs: in June only the AUDUSD trade of that month was open (USDJPY is not asked for)
+    assert all(t.startswith("AUDUSD") for t in by_start[date(2026, 6, 8)])
+    assert dict(asked["spot"])[date(2026, 6, 8)] == ["AUDUSD Curncy"]
+    assert dict(asked["spot"])[date(2026, 9, 8)] == ["AUDUSD Curncy", "USDJPY Curncy"]
+    # tenors: the three-week AUDUSD leg needs SP..1M; the five-month USDJPY leg needs up to
+    # 6M; nobody needs 1Y, and AUDUSD needs nothing beyond 1M
+    september = by_start[date(2026, 9, 8)]
+    assert [t for t in september if t.startswith("AUDUSD")] == sorted(f"AUDUSD{t} Curncy" for t in ("SP", "1W", "2W", "1M"))
+    assert "USDJPY6M Curncy" in september and "USDJPY1Y Curncy" not in september
+    assert not any(t.endswith("1Y Curncy") for _s, _e, tickers in asked["fwd"] for t in tickers)
+
+
+def test_trimmed_tenors_give_the_same_forwards_as_all_eight(tmp_path, monkeypatch):
+    """A leg's forward is read between the two tenors either side of its date, so leaving
+    the longer ones out changes no mark."""
+    from data.bloomberg.pull_marks import STANDARD_TENORS
+
+    def run(name, all_tenors):
+        p, conn = _needed_only_db(tmp_path, name)
+        _asked, spot_fetch, fwd_fetch = _recording_fetchers()
+        with monkeypatch.context() as m:
+            if all_tenors:
+                m.setattr(backfill, "_tenors_needed", lambda pair, legs, run_start, holidays: list(STANDARD_TENORS))
+            backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 9), fetch=spot_fetch, fwd_fetch=fwd_fetch,
+                              fut_fetch=fwd_fetch, log=lambda s: None)
+        return conn.execute("SELECT as_of_date, instrument_id, settle_date, mark_type, value, source FROM marks "
+                            "ORDER BY 1, 2, 3, 4").fetchall()
+
+    trimmed, full = run("trimmed.db", False), run("full.db", True)
+    assert trimmed == full and any(m[3] == "FWD_OUTRIGHT" and m[5] == "BBG_INTERP" for m in trimmed)
