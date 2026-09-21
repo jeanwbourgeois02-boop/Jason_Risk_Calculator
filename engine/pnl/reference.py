@@ -121,6 +121,7 @@ class ReferenceChoice:
     skipped: Tuple[SkippedClose, ...]   # newest first; the original reference date leads
     found: bool                         # False: nothing usable within `max_steps` business days
     max_steps: int
+    filled: Tuple[Tuple[str, int], ...] = ()   # (earlier close, trades taken from it), newest first
 
     @property
     def stepped_back(self) -> bool:
@@ -131,7 +132,7 @@ class ReferenceChoice:
         """Visible caption when a step-back happened, '' otherwise:
         "from the 2026-09-11 close: 2026-09-14 has no usable close"."""
         if not self.stepped_back:
-            return ""
+            return self.fill_note
         earlier = len(self.skipped) - 1
         if earlier == 0:
             return f"from the {self.ref_date_used} close: {self.ref_date} has no usable close"
@@ -140,12 +141,54 @@ class ReferenceChoice:
                 f"before it have no usable close")
 
     @property
+    def fill_note(self) -> str:
+        """"12 trades with no price on 2026-09-14 measured from their last earlier close (back to
+        2026-09-10)" when single trades were filled, '' otherwise."""
+        if not self.filled:
+            return ""
+        n = sum(count for _day, count in self.filled)
+        return (f"{n} trade{'s' if n != 1 else ''} with no price on {self.ref_date_used} measured from "
+                f"{'their' if n != 1 else 'its'} last earlier close (back to {self.filled[-1][0]})")
+
+    @property
     def exhausted_sentence(self) -> str:
         """The one sentence added to the original reason when nothing usable was found."""
         if self.found:
             return ""
         return (f"No earlier close within {self.max_steps} business days has one either "
                 f"(checked back to {self.skipped[-1].date}).")
+
+
+def fill_single_trades(df_a: pd.DataFrame, ref_date: str, frame: pd.DataFrame,
+                       frame_for: Callable[[str], pd.DataFrame], holidays: FrozenSet[str],
+                       max_steps: int = MAX_STEP_BACK_BUSINESS_DAYS):
+    """(frame, filled): `frame` (the book on `ref_date`) with every trade that is priced on `a`
+    but has no price on `ref_date` given ITS OWN row from the last earlier business day on
+    which it is priced, at most `max_steps` back (user, 2026-09-21: "use previous date until has
+    value", "let it backfill up to 5 days" -- per trade, not only when the whole close is
+    blank). The row is that day's own valuation of the trade: no mark is copied or written,
+    and a trade with no earlier price stays left out. An earlier day that cannot be valued
+    ends the walk."""
+    remaining = set(diff_split(df_a, frame).blocked_ids)
+    filled = []
+    day = dt.date.fromisoformat(ref_date)
+    for _ in range(max_steps):
+        if not remaining:
+            break
+        day = _prev_business_day(day, holidays)
+        try:
+            earlier = frame_for(day.isoformat())
+        except Exception:  # noqa: BLE001 -- an earlier day that cannot be valued fills nothing
+            break
+        if earlier is None or earlier.empty:
+            continue
+        usable = earlier[earlier["trade_id"].isin(remaining) & (earlier["reason"] == "")]
+        if usable.empty:
+            continue
+        frame = pd.concat([frame[~frame["trade_id"].isin(usable["trade_id"])], usable], ignore_index=True)
+        filled.append((day.isoformat(), len(usable)))
+        remaining -= set(usable["trade_id"])
+    return frame, tuple(filled)
 
 
 def resolve_reference(df_a: pd.DataFrame, ref_date: str,
@@ -168,7 +211,11 @@ def resolve_reference(df_a: pd.DataFrame, ref_date: str,
     first_frame = frame_for(ref_date)
     first_split = diff_split(df_a, first_frame)
     if first_split.status != REFERENCE_MISSING:
-        return ReferenceChoice(ref_date, ref_date, first_frame, first_split, (), True, max_steps)
+        if not first_split.blocked_ids:
+            return ReferenceChoice(ref_date, ref_date, first_frame, first_split, (), True, max_steps)
+        # a usable close with a few trades unpriced on it: each takes its own last earlier price
+        frame, filled = fill_single_trades(df_a, ref_date, first_frame, frame_for, holidays, max_steps)
+        return ReferenceChoice(ref_date, ref_date, frame, diff_split(df_a, frame), (), True, max_steps, filled)
 
     skipped = [SkippedClose(ref_date, first_split.n_blocked, first_split.n_open_then, first_split.b_unpriced)]
     day = dt.date.fromisoformat(ref_date)

@@ -542,9 +542,10 @@ def test_reference_usable_close_is_returned_untouched_with_no_note():
     assert (after["ref_note"], after["ref_note_detail"], after["ref_dates_skipped"]) == ("", "", ())
 
 
-def test_reference_minority_blocked_is_still_usable_as_before():
-    """One of three trades unpriced on the reference date: the existing partial figure
-    (with its "excludes N" caption), not a step-back."""
+def test_reference_minority_blocked_walks_back_for_that_trade_and_leaves_it_out_when_it_has_no_earlier_price():
+    """One of three trades unpriced on the reference date: the date itself stays (no whole-date
+    step-back); the trade's own earlier closes are tried, up to 5, and with no price on any of
+    them it stays left out, as before."""
     conn = _ref_book({REF_AS_OF: 1.1100, REF_D5: 1.1050}, n_trades=2)
     conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  ("GBPUSD", "FX", "GBP", "USD", 1.0, 0, "GBPUSD Curncy", "9999-12-31"))
@@ -558,9 +559,38 @@ def test_reference_minority_blocked_is_still_usable_as_before():
     _vb_mark(conn, "GBPUSD", REF_SETTLE, "FWD_OUTRIGHT", 1.31, as_of=REF_AS_OF)   # none on REF_D5
     frame_for, calls = _recording_reader(conn)
     choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
-    assert calls == [REF_D5] and not choice.stepped_back
+    assert calls == [REF_D5, "2026-09-04", "2026-09-03", "2026-09-02", "2026-09-01", "2026-08-31"]
+    assert not choice.stepped_back and choice.filled == () and choice.note == ""
     assert choice.split.status == reference.OK
     assert (choice.split.n_blocked, choice.split.n_open_then) == (1, 3)
+
+
+def test_reference_single_trade_with_no_price_on_the_close_takes_its_own_last_earlier_price():
+    """User, 2026-09-21: "how is that possible given the fill function??" -- a few trades with no
+    price on the period's close were dropped from that figure. Each now takes ITS OWN valuation
+    from the last earlier business day it is priced on (up to 5 back); nothing is written."""
+    conn = _ref_book({REF_AS_OF: 1.1100, REF_D5: 1.1050}, n_trades=2)
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 ("GBPUSD", "FX", "GBP", "USD", 1.0, 0, "GBPUSD Curncy", "9999-12-31"))
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("G1", "MANUAL", "GBPUSD", "FX_FWD", "G1", "2026-05-01", 1e6, 1.30,
+                  "ACC", "CPTY", "STRAT", "TRADER", "test", ""))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("G1", 1, "FX_NEAR", "GBP", 1e6, "2026-05-01", REF_SETTLE, 1.30, 1))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("G1", 2, "FX_NEAR", "USD", -1.3e6, "2026-05-01", REF_SETTLE, 1.30, 1))
+    _vb_mark(conn, "GBPUSD", REF_SETTLE, "FWD_OUTRIGHT", 1.31, as_of=REF_AS_OF)
+    _vb_mark(conn, "GBPUSD", REF_SETTLE, "FWD_OUTRIGHT", 1.305, as_of="2026-09-03")   # none on REF_D5 or 09-04
+    marks_before = conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0]
+    frame_for, calls = _recording_reader(conn)
+    choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
+    assert calls == [REF_D5, "2026-09-04", "2026-09-03"]            # stops once every trade has a price
+    assert not choice.stepped_back and choice.ref_date_used == REF_D5 and choice.filled == (("2026-09-03", 1),)
+    assert choice.split.n_blocked == 0
+    g1 = choice.frame[choice.frame["trade_id"] == "G1"].iloc[0]
+    assert g1["reason"] == "" and g1["pnl_usd"] == pytest.approx(1e6 * (1.305 - 1.30))   # its 09-03 valuation
+    assert choice.note == "1 trade with no price on 2026-09-08 measured from its last earlier close (back to 2026-09-03)"
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == marks_before
 
 
 def test_reference_steps_back_over_holiday_and_weekend_and_names_both_dates():
