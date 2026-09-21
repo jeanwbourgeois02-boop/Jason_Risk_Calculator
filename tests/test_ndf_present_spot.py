@@ -59,6 +59,17 @@ def test_after_the_backfill_the_ndf_freezes_once_at_the_present_spot_and_a_deliv
     assert _frozen(conn)["b1"][1] == pytest.approx(1e6 * (5.40 - 5.20) / 5.40)
 
 
+def test_the_true_close_replaces_the_present_spot_once_it_lands():
+    conn = _load(schema.connect())
+    ledger.realise_settled(conn, AS_OF, ndf_present_spot=True)
+    assert PRESENT_SPOT_NOTE in _frozen(conn)["b1"][3]
+    conn.execute("INSERT INTO marks VALUES ('2026-09-16','USDBRL','2026-09-16','SPOT',5.25,'BBG_BFXFORWARD','2026-09-16T17:00:00-04:00')")
+    assert ledger.realise_settled(conn, "2026-09-22")["realised"] == 1   # any later call, the live pull's included
+    b1 = _frozen(conn)["b1"]
+    assert b1[1] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25) and b1[2] == "2026-09-16" and b1[3] == ""
+    assert ledger.realise_settled(conn, "2026-09-22", ndf_present_spot=True)["realised"] == 0   # and it stays there
+
+
 def test_a_spot_on_or_before_settlement_always_wins():
     conn = _load(schema.connect(), past_brl_spot=5.25)
     ledger.realise_settled(conn, AS_OF, ndf_present_spot=True)

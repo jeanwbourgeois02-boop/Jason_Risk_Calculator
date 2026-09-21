@@ -50,8 +50,9 @@ import pandas as pd
 
 from engine.pnl.aggregate import (_last_business_day_of_prev_month, _last_business_day_of_prev_year,
                                   _n_business_days_back, _prev_business_day, load_holidays)
-from engine.pnl.valuation import (_BadValue, _number, close_out_ccy, closed_out_options, last_usd_conversion,
-                                  option_fill_is_per_ounce, usd_per_quote, value_book)
+from engine.pnl.valuation import (PRESENT_SPOT_NOTE, _BadValue, _number, close_out_ccy, closed_out_options,
+                                  last_usd_conversion, option_fill_is_per_ounce, present_spot_for_ndf, usd_per_quote,
+                                  value_book)
 
 GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 
@@ -131,6 +132,25 @@ def purge_unreadable_realised(conn: sqlite3.Connection) -> list:
     return ids
 
 
+def purge_superseded_present_spot(conn: sqlite3.Connection) -> list:
+    """Delete the `realised_pnl` rows frozen at a present spot (`valuation.PRESENT_SPOT_NOTE`:
+    an NDF with no past fix on file) whose pair now HAS an official SPOT on or before the
+    settlement date, and return their trade ids (user, 2026-09-21: the true close replaces the
+    present spot once it lands). As above, nothing is recomputed here: `realise_settled`
+    freezes them afresh, by the strict rule, in the same call."""
+    ids = []
+    for trade_id, pair, settle in conn.execute(
+            "SELECT trade_id, instrument_id, settle_date FROM realised_pnl WHERE mark_type = 'SPOT' AND note LIKE ?",
+            (f"%{PRESENT_SPOT_NOTE}%",)).fetchall():
+        try:
+            if _last_on_or_before(conn, pair, "SPOT", settle) is not None:
+                ids.append(trade_id)
+        except (TypeError, ValueError):   # a past SPOT that is not a number replaces nothing
+            continue
+    conn.executemany("DELETE FROM realised_pnl WHERE trade_id = ?", [(t,) for t in ids])
+    return ids
+
+
 def _unrealisable(trade_id, exc: Exception) -> dict:
     """The `unrealisable` entry for a trade one of whose stored figures is not a number
     (`engine.pnl.valuation._BadValue` names the table.column and the value) or whose
@@ -150,9 +170,10 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
     fixes"): an NDF ticket whose pair has no official SPOT on or before its settlement is
     frozen at the latest official SPOT on or before `as_of` (`valuation.present_spot_for_ndf`,
     NDF pairs only) instead of staying unrealisable, and its note says so. Off by default: the
-    live pull's own call runs BEFORE the backfill of the same button press and a freeze is
-    never recomputed, so only data.bloomberg.backfill.auto_backfill passes it, once the
-    backfill has tried for the settlement date's own close.
+    live pull's own call runs BEFORE the backfill of the same button press, so only
+    data.bloomberg.backfill.auto_backfill passes it, once the backfill has tried for the
+    settlement date's own close. Such a row lasts only until that close is on file: every call
+    then drops it and freezes the trade again by the strict rule (`purge_superseded_present_spot`).
 
     `repaired` (2026-09-18): rows an earlier, positional INSERT misaligned
     (`_insert_realised`) are deleted first (`purge_unreadable_realised`), so the trades
@@ -160,9 +181,9 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
     database the old INSERT corrupted heals itself on the next Bloomberg pull, no manual
     step. One trade with a stored figure that is not a number is reported as
     unrealisable (`_unrealisable`) instead of aborting the step for the whole book."""
-    from engine.pnl.valuation import PRESENT_SPOT_NOTE, present_spot_for_ndf
     realised, unrealisable = 0, []
     repaired = purge_unreadable_realised(conn)
+    purge_superseded_present_spot(conn)
 
     for trade_id, pair, product, quote_ccy, qty, fill, settle in conn.execute(_OPEN_FX_SQL, {"as_of": as_of}).fetchall():
         try:

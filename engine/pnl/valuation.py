@@ -467,7 +467,8 @@ def _last_official_query(conn, instrument_id: str, mark_type: str, day: str):
 # file on or before the valuation date, and the row says which date's spot that is. NDF pairs
 # only (engine.ladder.ndf.is_ndf_pair); a deliverable trade in the same position stays blank.
 # The ledger persists it only once the backfill has tried for the settlement date's own close
-# (`engine.pnl.ledger.realise_settled`, `ndf_present_spot`), because a freeze is never recomputed.
+# (`engine.pnl.ledger.realise_settled`, `ndf_present_spot`), and drops it for the strict freeze
+# as soon as that close is on file (`ledger.purge_superseded_present_spot`).
 PRESENT_SPOT_NOTE = "present spot: none on file on or before settlement"
 
 
