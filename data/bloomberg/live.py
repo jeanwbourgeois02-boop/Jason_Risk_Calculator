@@ -24,6 +24,14 @@ Every cycle writes a status JSON next to the database (`<db>.bloomberg_status.js
 listing each requested (instrument, mark_type, settle_date) as OK or FAILED with the
 value or the failure detail. `py -3 -m data.bloomberg.live --status` prints it;
 `--once` runs a single pull.
+
+Cadence (user decision 2026-09-21: "make bloomberg load less often (maybe every 15min)"):
+one scheduled cycle every INTERVAL_SECONDS = 15 minutes. Anything that changes what needs
+pricing does not wait for it: a "Pull Bloomberg now" click, a blotter upload, a manual
+trade, a typed strike or a swap direction edit all call `LiveFeed.trigger_now()`, which
+runs a cycle at once. A cycle opens ONE blpapi session and shares it between the FX marks,
+the OIS quotes / fixings and the vol quotes (`_SharedSession`; it used to open three), and
+records where its time went in `status["timings"]` (see `pull_once`).
 """
 from __future__ import annotations
 
@@ -33,16 +41,22 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-INTERVAL_SECONDS = 120
-STALE_AFTER_SECONDS = 600
+INTERVAL_SECONDS = 900  # 15 minutes between scheduled cycles (was 120 until 2026-09-21)
+# A SPOT mark is called stale once two scheduled cycles in a row have failed to refresh it,
+# plus five minutes for the cycle's own run time. It must stay well above INTERVAL_SECONDS:
+# at the old fixed 600 s every mark would read STALE for the last third of each interval.
+STALE_AFTER_SECONDS = 2 * INTERVAL_SECONDS + 300
 SRC_SPOT_FWD = "BBG_BFXFORWARD"
 SRC_INTERP = "BBG_INTERP"
+# Keys of status["timings"], seconds per step of one cycle (see pull_once).
+TIMING_KEYS = ("session", "spot", "forwards", "futures", "rates", "vol", "options", "ledger", "total")
 
 
 # --------------------------------------------------------------------------- availability
@@ -94,8 +108,18 @@ def write_status(db_path, status: dict) -> None:
     thread, the Market data tab's "Pull now" callback and the backfill thread all rewrite
     this file; a reader must never see a half-written JSON, which `read_status` would
     turn into None ("no pull recorded yet") for a pull that just succeeded (2026-09-18
-    audit)."""
+    audit).
+
+    The "backfill" block on file is carried over when `status` has none of its own
+    (2026-09-21): every full rewrite here is a PULL's status, and it used to wipe the
+    backfill's progress and per-day reasons (`patch_status`) on every cycle and on every
+    "Pull now" click -- the very reasons the header reads to say why a past close is
+    missing. The caller's dict is left as it was."""
     with _STATUS_LOCK:
+        if "backfill" not in status:
+            kept = (read_status(db_path) or {}).get("backfill")
+            if kept is not None:
+                status = {**status, "backfill": kept}
         _replace_status_file(status_path(db_path), status)
 
 
@@ -421,6 +445,47 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
 
 
 # --------------------------------------------------------------------------- one pull
+class _SharedSession:
+    """The one blpapi session of a pull cycle (2026-09-21). Opened on first use, handed to
+    the FX marks requests, to `RatesBloombergSource` and to `VolBloombergSource`, stopped
+    once by `pull_once`. Until then a cycle opened three sessions in a row (FX, rates, vol),
+    each paying its own connect + //blp/refdata handshake, against the same host and port
+    and the same service. Requests stay strictly sequential, and the three modules draw
+    their CorrelationIds from disjoint ranges, so a late reply to one step's timed-out
+    request can never be read as another step's answer. `seconds` is the time spent
+    opening (status["timings"]["session"])."""
+
+    def __init__(self, host: str, port: int, session_factory: Optional[Callable] = None, diag=None):
+        self.host, self.port, self._factory, self._diag = host, port, session_factory, diag
+        self.session = self.service = None
+        self.seconds = 0.0
+
+    def get(self):
+        """(session, service), opening the session the first time it is asked for. An open
+        that fails raises to the caller and is tried again by the next step that asks."""
+        if self.session is None:
+            started = time.perf_counter()
+            try:
+                if self._factory is None:
+                    from data.bloomberg.pull_marks import open_session
+                    session, service = open_session(self.host, self.port, self._diag)
+                else:
+                    session, service = self._factory()
+                self.session, self.service = session, service
+            finally:
+                self.seconds += time.perf_counter() - started
+        return self.session, self.service
+
+    def stop(self) -> None:
+        stop = getattr(self.session, "stop", None)
+        self.session = self.service = None
+        if callable(stop):
+            try:
+                stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str):
     """Live PX_LAST via ReferenceDataRequest (intraday), unlike pull_marks' close-of-day
     historical path. Returns (rows, failures)."""
@@ -541,8 +606,8 @@ def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Di
 
 
 def write_marks(conn: sqlite3.Connection, rows: List[dict]) -> int:
-    """INSERT OR REPLACE so each 2-minute cycle refreshes the same key with a new
-    snapped_at. Only known instruments; anything else is skipped and reported."""
+    """INSERT OR REPLACE so each cycle refreshes the same key with a new snapped_at. Only
+    known instruments; anything else is skipped and reported."""
     known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
     n = 0
     with conn:
@@ -564,7 +629,8 @@ WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND i.expiry_date >= :a
 """
 
 
-def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rates_source=None) -> dict:
+def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rates_source=None,
+                shared: Optional[_SharedSession] = None) -> dict:
     """Pull OIS quotes and fixings for every currency with an un-matured IRS trade, PLUS
     every currency of an open FX_OPTION's underlying pair (2026-09-17 fix): each option
     needs a domestic AND a foreign discount curve
@@ -583,8 +649,14 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
     ask for -- SEK, for one, has no OIS index in scope per CLAUDE.md); it is recorded
     directly with a plain-English reason instead, so a per-option "no curve/rate" skip
     (engine/options always falls back to a manual rate for these) can name the missing
-    curve rather than a bare currency code."""
+    curve rather than a bare currency code.
+
+    `shared` (2026-09-21): the cycle's one blpapi session; the live source borrows it
+    instead of opening its own. `seconds` in the result splits the step between Bloomberg
+    (quotes and fixings, written as they arrive) and QuantLib (the IRS pricing), so a
+    pasted status says which of the two a slow rates step was."""
     out: dict = {"currencies": {}, "priced": 0, "failed": [], "as_of_date": today.isoformat()}
+    step_started = time.perf_counter()
     irs_ccys = {r[0] for r in conn.execute(
         "SELECT DISTINCT i.base_ccy FROM trades_official t JOIN instruments i USING (instrument_id) "
         "WHERE t.product = 'IRS' AND t.trade_date <= ? "
@@ -616,7 +688,11 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
     if in_scope:
         if rates_source is None:
             try:
-                rates_source = rm.RatesBloombergSource(host=host, port=port)
+                if shared is not None:
+                    session, service = shared.get()
+                    rates_source = rm.RatesBloombergSource(host=host, port=port, session=session, service=service)
+                else:
+                    rates_source = rm.RatesBloombergSource(host=host, port=port)
             except Exception as exc:  # noqa: BLE001
                 out["error"] = f"RatesBloombergSource unavailable: {exc!r}"
                 return out
@@ -649,6 +725,7 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
                 close()
             except Exception:  # noqa: BLE001
                 pass
+    pricing_started = time.perf_counter()
     try:
         from engine.rates.store import price_all_and_store
         results = price_all_and_store(conn, today.isoformat())
@@ -656,10 +733,13 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
         out["failed"] = [{"trade_id": r["trade_id"], "error": r["error"]} for r in results if not r["ok"]]
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"pricing failed: {exc!r}"
+    out["seconds"] = {"bloomberg": round(pricing_started - step_started, 1),
+                      "pricing": round(time.perf_counter() - pricing_started, 1)}
     return out
 
 
-def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_source=None) -> dict:
+def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_source=None,
+              shared: Optional[_SharedSession] = None) -> dict:
     """Pull the FX vol smile (ATM/RR/BF) for every pair with an open FX_OPTION into
     `vol_quotes`, so engine/options has something to resolve from (2026-09-17 fix): this
     pull never ran at all before -- live.py had no call into
@@ -672,7 +752,8 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
     (pair/tenor/quote_type/ticker/detail, exactly VolFetchResult.diagnostics) rather than
     only a currency/pair name, so `_options_step` can name the specific failing Bloomberg
     ticker in a "no vol" skip reason (item 3c) -- see that function's `vol_diagnostics`
-    parameter."""
+    parameter. `shared` (2026-09-21): the cycle's one blpapi session, borrowed by the live
+    source instead of opening its own."""
     out: dict = {"pairs": {}, "written": 0, "diagnostics": [], "as_of_date": today.isoformat()}
     n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product = 'FX_OPTION' AND trade_date <= ?",
                      (today.isoformat(),)).fetchone()[0]
@@ -687,7 +768,11 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
     pairs = vm.vol_pairs_needed(conn)
     if vol_source is None:
         try:
-            vol_source = vm.VolBloombergSource(host=host, port=port)
+            if shared is not None:
+                session, service = shared.get()
+                vol_source = vm.VolBloombergSource(host=host, port=port, session=session, service=service)
+            else:
+                vol_source = vm.VolBloombergSource(host=host, port=port)
         except Exception as exc:  # noqa: BLE001
             out["error"] = f"VolBloombergSource unavailable: {exc!r}"
             return out
@@ -773,19 +858,53 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     becomes connected=False with the traceback in `reason`. `today` (live mark date)
     defaults to the wall-clock date; injectable for tests. `vol_source` mirrors
     `rates_source`'s injection for _vol_step (data.bloomberg.vol_marketdata's live/file
-    source)."""
+    source).
+
+    `status["timings"]` (2026-09-21) says where the cycle's time went, in seconds rounded
+    to 0.1, always with the same keys (TIMING_KEYS; 0.0 for a step that did not run):
+    `session` opening the one shared blpapi session; `spot`, `forwards` (the FWD_CURVE
+    request and the interpolation) and `futures` the three FX-side Bloomberg requests;
+    `rates` OIS quotes + fixings + IRS pricing (split again in status["rates"]["seconds"]);
+    `vol` the vol quotes; `options` the option pricing; `ledger` realise_settled; `total`
+    the whole cycle. What the steps do not cover is in `status["timings_other"]`: building
+    the request list and writing the FX marks, which is where a wait for the SQLite write
+    lock (an upload, the backfill) would show."""
     from data.ingest.schema import connect
+    clock_started = time.perf_counter()
     started = _now_iso()
     status = {"time": started, "connected": False, "reason": "", "host": f"{host}:{port}",
               "as_of_date": as_of_date, "requested": 0, "written": 0, "failed": 0, "items": [], "warnings": []}
+    timings = {key: 0.0 for key in TIMING_KEYS}
+    other = {"build_requests": 0.0, "write_marks": 0.0}
+    shared: Optional[_SharedSession] = None
+
+    def _timed(book: dict, key: str, fn, *args, **kwargs):
+        """fn(*args, **kwargs), its wall time added to book[key] -- less whatever it spent
+        opening the shared session, which is reported once, under "session"."""
+        opening = shared.seconds if shared is not None else 0.0
+        step_started = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            opened = (shared.seconds if shared is not None else 0.0) - opening
+            book[key] += time.perf_counter() - step_started - opened
+
+    def _finish() -> dict:
+        timings["session"] = shared.seconds if shared is not None else 0.0
+        timings["total"] = time.perf_counter() - clock_started
+        status["timings"] = {key: round(timings[key], 1) for key in TIMING_KEYS}
+        status["timings_other"] = {key: round(value, 1) for key, value in other.items()}
+        write_status(db_path, status)
+        return status
+
     try:
         ok, why = availability(host, port) if session_factory is None else (True, "")
         if not ok:
             status["reason"] = why
-            write_status(db_path, status)
-            return status
+            return _finish()
         from data.bloomberg import pull_marks as pm
-        session = None
+        diag = pm.Diagnostics()
+        shared = _SharedSession(host, port, session_factory, diag)
         conn = connect(Path(db_path))
         try:
             # The book date defaults to the live mark date (2026-09-17 fix). It used to
@@ -797,34 +916,34 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             if as_of_date is None:
                 as_of_date = today.isoformat()
             status["as_of_date"] = as_of_date
-            requests = build_requests(conn, as_of_date)
+            requests = _timed(other, "build_requests", build_requests, conn, as_of_date)
             status["requested"] = len(requests)
             if not requests:
                 # Nothing FX-shaped to price, but swaps and options may still need a
                 # curve / premium refresh (2026-09-17) before the FX-only early return.
                 today = today or book_today()
-                status["rates"] = _rates_step(conn, today, host, port, rates_source)
-                status["vol"] = _vol_step(conn, today, host, port, vol_source)
-                status["options"] = _options_step(conn, today, status["vol"].get("diagnostics"))
+                status["rates"] = _timed(timings, "rates", _rates_step, conn, today, host, port, rates_source,
+                                         shared=shared)
+                status["vol"] = _timed(timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
+                status["options"] = _timed(timings, "options", _options_step, conn, today,
+                                           status["vol"].get("diagnostics"))
                 status.update(connected=True, reason="no open FX legs or futures to price")
-                write_status(db_path, status)
-                return status
-            diag = pm.Diagnostics()
-            if session_factory is None:
-                session, service = pm.open_session(host, port, diag)
-            else:
-                session, service = session_factory()
+                return _finish()
+            # One session for the whole cycle (2026-09-21): the rates and vol steps below
+            # borrow this one instead of each opening their own.
+            session, service = shared.get()
             snapped = _now_iso()  # live pull: real wall-clock time, not the 15:00 NY convention
             today = today or book_today()
-            spot_rows, spot_fail = _live_spot_rows(session, service, requests, today, diag, snapped)
+            spot_rows, spot_fail = _timed(timings, "spot", _live_spot_rows, session, service, requests, today, diag,
+                                          snapped)
             spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows}
             # A forward whose settle date is already past (trade settled since the snapshot)
             # has nothing to price: reported SKIPPED, never FAILED, never counted as missing.
             past = {(r.instrument_id, r.settle_date) for r in requests
                     if r.mark_type == "FWD_OUTRIGHT" and date.fromisoformat(r.settle_date) < today}
             fwd_reqs = [r for r in requests if r.mark_type == "FWD_OUTRIGHT" and (r.instrument_id, r.settle_date) not in past]
-            fwd_rows, fwd_warnings, fwd_fail, curve_rows = _fwd_outright_rows(
-                session, service, fwd_reqs, today, spot_by_pair, snapped)
+            fwd_rows, fwd_warnings, fwd_fail, curve_rows = _timed(
+                timings, "forwards", _fwd_outright_rows, session, service, fwd_reqs, today, spot_by_pair, snapped)
             fut_reqs = [r for r in requests if r.mark_type == "FUTURE_PX"]
             # live=True: PX_SETTLE for `today` has nothing to return before that day's US
             # close, so the live pull tries PX_LAST first and only falls back to the
@@ -832,7 +951,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # found MISSING every cycle before the close). Historical backfill
             # (data.bloomberg.backfill.py) always requests a past, already-closed date and
             # keeps calling this with the default live=False.
-            fut_rows, fut_warnings, fut_fail = pm.build_future_rows(session, service, fut_reqs, today, diag, live=True) \
+            fut_rows, fut_warnings, fut_fail = _timed(timings, "futures", pm.build_future_rows, session, service,
+                                                      fut_reqs, today, diag, live=True) \
                 if fut_reqs else ([], [], [])
             # A cross's USD-conversion pair or an option's own pair with no instrument row
             # on file used to be requested but never written (write_marks skips unknown
@@ -840,11 +960,12 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # (_ensure_fx_instruments), so the mark lands (2026-09-18).
             warnings = fwd_warnings + fut_warnings
             rows = spot_rows + fwd_rows + fut_rows
-            written = write_marks(conn, rows)
+            written = _timed(other, "write_marks", write_marks, conn, rows)
             # Bloomberg's own FWD_CURVE tenor points, at their own dates, as official
             # forwards -- kept out of `written` so "wrote N of M requested" stays exact.
             requested_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]) for r in rows}
-            curve_points_written = write_marks(
+            curve_points_written = _timed(
+                other, "write_marks", write_marks,
                 conn, [r for r in curve_rows
                        if (r["instrument_id"], r["mark_type"], r["settle_date"]) not in requested_keys])
             # Rates (2026-09-17): OIS curve quotes + fixings per swap currency AND per open
@@ -855,16 +976,18 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # QL_OPTIONS_PRICER), with the vol step's per-ticker diagnostics available to
             # enrich a "no vol" skip reason. All three before realise_settled so a swap
             # maturing today or an option expiring today freezes at today's mark.
-            status["rates"] = _rates_step(conn, today, host, port, rates_source)
-            status["vol"] = _vol_step(conn, today, host, port, vol_source)
-            status["options"] = _options_step(conn, today, status["vol"].get("diagnostics"))
+            status["rates"] = _timed(timings, "rates", _rates_step, conn, today, host, port, rates_source,
+                                     shared=shared)
+            status["vol"] = _timed(timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
+            status["options"] = _timed(timings, "options", _options_step, conn, today,
+                                       status["vol"].get("diagnostics"))
             # Realisation only (BUILD_PLAN.md section 6, Task B): freeze FX trades whose
             # settle date is before `today` and are not yet in realised_pnl. The daily LTD
             # snapshot itself is engine/pnl/ledger.py's job (task A); this module only
             # calls the one guarded function it needs and never writes pnl_snapshots.
             try:
                 from engine.pnl.ledger import realise_settled
-                led = realise_settled(conn, today.isoformat())
+                led = _timed(timings, "ledger", realise_settled, conn, today.isoformat())
                 status["ledger"] = {"as_of_date": today.isoformat(), "realised": led.get("realised"),
                                     "unrealisable": led.get("unrealisable")}
             except ImportError as exc:
@@ -900,21 +1023,15 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         finally:
             conn.close()
             # The blpapi session this cycle opened must be stopped here, not left to
-            # garbage collection: one leaked session per 2-minute cycle (and per "Pull
-            # now" click) was the 2026-09-18 audit's top resource finding. The rates and
-            # vol sources close their own sessions inside their steps.
-            stop = getattr(session, "stop", None)
-            if callable(stop):
-                try:
-                    stop()
-                except Exception:  # noqa: BLE001
-                    pass
+            # garbage collection: one leaked session per cycle (and per "Pull now" click)
+            # was the 2026-09-18 audit's top resource finding. The rates and vol sources
+            # only borrow it (their close() leaves a borrowed session alone).
+            shared.stop()
     except Exception:
         status["connected"] = False
         status["reason"] = "pull failed: " + traceback.format_exc(limit=3).strip().splitlines()[-1]
         status["traceback"] = traceback.format_exc()
-    write_status(db_path, status)
-    return status
+    return _finish()
 
 
 # --------------------------------------------------------------------------- feed thread
@@ -939,7 +1056,7 @@ class LiveFeed:
         self._wake.set()
 
     def trigger_now(self) -> None:
-        """Wake the feed loop immediately instead of waiting out the rest of the 2-minute
+        """Wake the feed loop immediately instead of waiting out the rest of the 15-minute
         interval, and run one extra cycle right away. Call this after any event that could
         change what needs pricing -- most importantly a blotter import landing new trades
         (data.ingest.upload.import_blotter / ui/uploads.py) -- so marks for trades a user
@@ -974,7 +1091,7 @@ class LiveFeed:
 
 def start_feed_if_available(db_path, host: str = "localhost", port: int = 8194,
                             interval: int = INTERVAL_SECONDS) -> Tuple[Optional[LiveFeed], str]:
-    """Start the 2-minute feed when Bloomberg is reachable; otherwise write a status file
+    """Start the 15-minute feed when Bloomberg is reachable; otherwise write a status file
     explaining why and return (None, reason). Never fabricates data either way."""
     ok, why = availability(host, port)
     if not ok:

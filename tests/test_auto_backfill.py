@@ -8,7 +8,7 @@ thread and publishes progress into the Bloomberg status file. Both are exercised
 fake fetch -- no blpapi required."""
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -79,7 +79,8 @@ def test_auto_backfill_fills_from_earliest_trade_to_yesterday(tmp_path):
     results = backfill.auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch,
                                      log=lambda *_: None, on_progress=progress.append)
     business_days = backfill.business_days(earliest, yesterday)
-    assert [r["day"] for r in results] == [d.isoformat() for d in business_days]
+    # every day, worked newest first (2026-09-21; the order itself is tested further down)
+    assert sorted(r["day"] for r in results) == [d.isoformat() for d in business_days]
     assert all(r["status"] == "DONE" for r in results)
     assert progress[0] == len(business_days)
     assert progress[-1] == 0
@@ -126,7 +127,7 @@ def test_auto_backfill_option_only_book_fills_closing_spots_then_reports_complet
 
     results = backfill.auto_backfill(p, fetch=fetch, fwd_fetch=never, fut_fetch=never, log=lambda *_: None)
     business_days = backfill.business_days(earliest, yesterday)
-    assert [r["day"] for r in results] == [d.isoformat() for d in business_days]
+    assert sorted(r["day"] for r in results) == [d.isoformat() for d in business_days]
     assert all(r["status"] == "DONE" and r["closes"] == 3 and r["missing_marks"] == [] for r in results)
     have = {(r[0], r[1]) for r in schema.connect(p).execute(
         "SELECT instrument_id, as_of_date FROM marks_official WHERE mark_type='SPOT'")}
@@ -246,6 +247,8 @@ def test_backfill_stops_a_session_it_opened_itself(tmp_path, monkeypatch):
     stop that session again once done -- and must NOT stop a session supplied via an
     injected session_factory (that stays the caller's responsibility)."""
     yesterday = _book_today() - timedelta(days=1)
+    while yesterday.weekday() >= 5:      # run on a Monday, "yesterday" is a Sunday: no business day, no session
+        yesterday -= timedelta(days=1)
     p, conn = _db(tmp_path, yesterday.isoformat())
 
     stopped = []
@@ -280,3 +283,126 @@ def test_backfill_stops_a_session_it_opened_itself(tmp_path, monkeypatch):
     backfill.backfill(p, yesterday, yesterday, session_factory=lambda: (_FakeSession(), object()),
                       overwrite=True, log=lambda *_: None)
     assert stopped == []
+
+
+# =========================================================================== 2026-09-21: order, outcome, retry
+# Found from the Bloomberg PC ("5d n/a -- 5d needs the 2026-09-14 close ... run the
+# Bloomberg backfill"): the run walked oldest day first with one session per day, so the
+# closes the header needs came last; every incomplete day was asked of Bloomberg again
+# after every feed cycle; and why a day stayed incomplete was printed, never kept.
+_MONDAY = date(2026, 9, 21)     # reference dates: 09-18 (t-1), 09-17 (t-2), 09-14 (5d), 08-31 (MTD), 2025-12-31 (YTD)
+
+
+def _no_tenor_prices(session, service, tickers, fields, start, end):
+    return {}
+
+
+def test_auto_backfill_works_the_headers_reference_dates_first_then_newest_first_in_one_call(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-08-27")
+    calls = []
+    real = backfill.backfill
+
+    def counting(*a, **k):
+        calls.append((a[1], a[2]))
+        return real(*a, **k)
+
+    monkeypatch.setattr(backfill, "backfill", counting)
+    results = backfill.auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch,
+                                     log=lambda *_: None)
+    assert backfill.reference_dates(_MONDAY) == [date(2026, 9, 18), date(2026, 9, 17), date(2026, 9, 14),
+                                                 date(2026, 8, 31), date(2025, 12, 31)]
+    worked = [r["day"] for r in results]
+    assert worked[:4] == ["2026-09-18", "2026-09-17", "2026-09-14", "2026-08-31"]      # the header's closes first
+    assert worked[4:] == sorted(worked[4:], reverse=True) and worked[4] == "2026-09-16"  # then newest first
+    assert len(worked) == len(backfill.business_days(date(2026, 8, 27), date(2026, 9, 18)))
+    assert calls == [(date(2026, 8, 27), date(2026, 9, 18))]                           # ONE backfill() call, one session
+    forwards = [r[0] for r in conn.execute("SELECT as_of_date FROM marks WHERE mark_type='FWD_OUTRIGHT' ORDER BY rowid")]
+    assert forwards == worked
+
+
+def test_auto_backfill_does_not_ask_bloomberg_again_for_a_day_that_cannot_complete_until_an_hour_has_passed(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-09-16")
+    requests, now = [], [1000.0]
+
+    def fetch(session, service, tickers, field, day):
+        requests.append(day.isoformat())
+        return _fake_fetch(session, service, tickers, field, day)
+
+    def run():
+        return backfill.auto_backfill(p, fetch=fetch, fwd_fetch=_no_tenor_prices, fut_fetch=_no_tenor_prices,
+                                      log=lambda *_: None, clock=lambda: now[0])
+
+    first = run()                                       # no forward tenors: every day stays incomplete
+    assert sorted(requests) == ["2026-09-16", "2026-09-17", "2026-09-18"] and len(first) == 3
+    assert all(r["status"] == "DONE" and r["missing_marks"] for r in first)
+    requests.clear()
+    now[0] += 120                                       # the next feed cycle
+    assert run() == [] and requests == []
+    now[0] += backfill.RETRY_SECONDS                    # an hour on: tried again
+    assert len(run()) == 3 and sorted(requests) == ["2026-09-16", "2026-09-17", "2026-09-18"]
+
+    # what a day lacks has changed (a new trade): it is tried at once, the others still wait
+    requests.clear()
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 ("NZDUSD", "FX", "NZD", "USD", 1, 0, "NZDUSD Curncy", "9999-12-31"))
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("n1", "XLSX", "NZDUSD", "FX_FWD", "n1", "2026-09-18", 1e6, 0.59, "acc", "cp", "", "t", "d", ""))
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("n1", 1, "FX_NEAR", "NZD", 1e6, "2026-09-18", _settle_date(), 0.59, 1),
+        ("n1", 2, "FX_NEAR", "USD", -590000, "2026-09-18", _settle_date(), 0.59, 1)])
+    conn.commit()
+    backfill.auto_backfill(p, fetch=lambda s, sv, tickers, field, day: requests.append(day.isoformat()) or {
+        t: 0.6 for t in tickers}, fwd_fetch=_no_tenor_prices, fut_fetch=_no_tenor_prices, log=lambda *_: None,
+        clock=lambda: now[0])
+    assert requests == ["2026-09-18"]
+
+
+def test_start_auto_backfill_publishes_why_each_reference_date_is_incomplete_and_survives_the_feeds_rewrite(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-09-10")
+    thread = backfill.start_auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_no_tenor_prices,
+                                          fut_fetch=_no_tenor_prices, session_factory=lambda: (None, None))
+    thread.join(timeout=10)
+    block = live.read_status(p)["backfill"]
+    assert block["running"] is False and block["remaining"] == 0 and block["reason"] == ""   # the existing keys
+    assert datetime.fromisoformat(block["last_run"]).tzinfo is not None
+    days = block["days"]
+    # every reference date is there; the ones before the first trade need nothing, so DONE
+    assert {d.isoformat() for d in backfill.reference_dates(_MONDAY)} <= set(days)
+    assert days["2026-08-31"] == {"status": "DONE", "missing_count": 0, "missing": []}
+    entry = days["2026-09-14"]
+    assert set(entry) == {"status", "missing_count", "missing"}
+    assert entry["status"] == "INCOMPLETE" and entry["missing_count"] == 1                   # the forward; SPOT was written
+    assert entry["missing"] == ["Bloomberg returned no forward tenor prices for AUDUSD on 2026-09-14"]
+    assert all(v["status"] in ("DONE", "NO_CLOSES", "INCOMPLETE") and len(v["missing"]) <= 5 for v in days.values())
+    assert "2026-09-11" in days and len(days) <= backfill.MAX_STATUS_DAYS + 5                # other open days, bounded
+
+    # live.pull_once rewrites the whole status file every cycle with no "backfill" key of
+    # its own: write_status carries the block on file over (2026-09-21; it used to wipe
+    # it), and the trigger that follows republishes the same block (nothing is due: the
+    # days that stayed incomplete wait for their hour).
+    live.write_status(p, {"time": "t", "connected": True})
+    assert live.read_status(p)["backfill"]["days"] == days
+    asked = []
+    again = backfill.start_auto_backfill(p, fetch=lambda *a: asked.append(a) or {}, fwd_fetch=_no_tenor_prices,
+                                         fut_fetch=_no_tenor_prices, session_factory=lambda: (None, None))
+    again.join(timeout=10)
+    assert asked == [] and live.read_status(p)["backfill"]["days"] == days
+
+
+def test_start_auto_backfill_run_that_raises_says_failed_in_its_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-09-16")
+
+    def broken(session, service, tickers, fields, start, end):
+        raise RuntimeError("terminal went away")
+
+    thread = backfill.start_auto_backfill(p, fetch=_fake_fetch, fwd_fetch=broken, fut_fetch=broken,
+                                          session_factory=lambda: (None, None))
+    thread.join(timeout=10)
+    block = live.read_status(p)["backfill"]
+    assert block["running"] is False and "failed" in block["reason"] and "terminal went away" in block["reason"]
+    assert block["days"]["2026-09-18"] == {"status": "INCOMPLETE", "missing_count": 2,
+                                           "missing": ["the backfill has not reached this day yet"]}

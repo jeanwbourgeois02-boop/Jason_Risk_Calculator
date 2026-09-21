@@ -10,9 +10,9 @@ table (manual, flat placeholder) is untouched by this module.
 Structure mirrors ``data/bloomberg/rates_marketdata.py`` exactly: two source
 implementations behind one informal interface (``get_vol_quotes``):
   - ``VolBloombergSource``: live blpapi wrapper. Opens its OWN blpapi.Session
-    (same deliberate non-sharing as RatesBloombergSource -- see that module's
-    docstring; the same follow-up to merge sessions is tracked by the
-    housekeeper, not addressed here). Requires the `blpapi` package (raises
+    unless it is handed one (``session=`` / ``service=``, 2026-09-21: the live
+    pull lends it the session it already opened for the FX marks, exactly as it
+    does RatesBloombergSource). Requires the `blpapi` package (raises
     MarketDataError with an install hint if missing) and a running Bloomberg
     Terminal / B-PIPE. NEVER crashes on a per-ticker failure: every missing
     ticker is recorded in ``VolFetchResult.diagnostics`` instead, in the
@@ -108,8 +108,11 @@ VOL_FIELD = "PX_LAST"
 
 # Every request carries its own blpapi.CorrelationId (2026-09-18), so a late reply to an
 # earlier, timed-out request on this session is discarded rather than read as this one's
-# answer (same discipline as data/bloomberg/pull_marks.py and rates_marketdata.py).
-_CORRELATION_COUNTER = __import__("itertools").count(1)
+# answer (same discipline as data/bloomberg/pull_marks.py and rates_marketdata.py). The ids
+# start at 2,000,000,001 (2026-09-21): the live pull lends this source the session its FX
+# and rates requests just used, and an id still pending there (pull_marks counts from 1,
+# rates_marketdata from 1,000,000,001) must never be sent again on the same session.
+_CORRELATION_COUNTER = __import__("itertools").count(2_000_000_001)
 
 # Pairs to pull when the book has no FX_OPTION instruments yet (see vol_pairs_needed).
 DEFAULT_PAIRS = ["EURUSD", "EURSEK", "USDJPY"]
@@ -431,12 +434,15 @@ def _classify_hist_ticker(sec_data, field_name: str) -> dict:
 
 class VolBloombergSource:
     """Live blpapi wrapper for FX vol quotes. Opens its OWN blpapi.Session -- see module
-    docstring. Every ticker/field name used here is UNVERIFIED (see module docstring
-    numbered list); a per-ticker failure is recorded in the returned VolFetchResult's
-    diagnostics, never raised -- only session/service-open failures raise
+    docstring -- unless `session` / `service` (an already started session and its opened
+    //blp/refdata service) are passed, as the live pull cycle does; a borrowed session is
+    never stopped by `close()`. Every ticker/field name used here is UNVERIFIED (see
+    module docstring numbered list); a per-ticker failure is recorded in the returned
+    VolFetchResult's diagnostics, never raised -- only session/service-open failures raise
     MarketDataError (there is genuinely nothing useful to return in that case)."""
 
-    def __init__(self, host: str = "localhost", port: int = 8194, timeout_ms: int = 30000) -> None:
+    def __init__(self, host: str = "localhost", port: int = 8194, timeout_ms: int = 30000,
+                 session=None, service=None) -> None:
         try:
             import blpapi  # noqa: F401
         except ImportError as exc:
@@ -449,6 +455,10 @@ class VolBloombergSource:
         self.host = host
         self.port = port
         self.timeout_ms = timeout_ms
+        self._owns_session = session is None or service is None
+        if not self._owns_session:
+            self._session, self._service = session, service
+            return
 
         session_options = blpapi.SessionOptions()
         session_options.setServerHost(host)
@@ -469,6 +479,8 @@ class VolBloombergSource:
         return f"VolBloombergSource({self.host}:{self.port})"
 
     def close(self) -> None:
+        if not self._owns_session:
+            return  # borrowed from the live pull cycle, which stops it itself
         try:
             self._session.stop()
         except Exception:  # noqa: BLE001

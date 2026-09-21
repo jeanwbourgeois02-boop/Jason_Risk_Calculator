@@ -48,6 +48,8 @@ STATUS_REFRESH_ID = "feed-status-refresh"
 PULL_BUTTON_LABEL = "Pull Bloomberg now"
 PULL_POLL_MS = 2_000
 PULL_TIMEOUT_SECONDS = 180
+FALLBACK_INTERVAL_SECONDS = 900     # the feed's cadence, used only when data.bloomberg.live cannot be imported
+STATUS_REFRESH_MAX_SECONDS = 60     # the passive status line re-reads the status file at least this often
 NO_FEED_REASON = "no live Bloomberg feed was started in this session"
 
 
@@ -68,15 +70,45 @@ def feed_interval_seconds(feed=None) -> Optional[int]:
         return None
 
 
+def safety_refresh_ms() -> int:
+    """Milliseconds for a tab's own safety-net `dcc.Interval` (Ladder, Market data): one
+    feed cycle, read from the feed module, `FALLBACK_INTERVAL_SECONDS` when that cannot be
+    imported. The in-place refresh on a data change comes from `ui/revision.py` within
+    seconds; these timers only catch what that misses, so they follow the feed instead of
+    carrying a number of their own that goes stale when the cadence changes."""
+    return (feed_interval_seconds() or FALLBACK_INTERVAL_SECONDS) * 1000
+
+
 def cadence_words(seconds) -> str:
-    """'every 2 min', 'every 90 s', 'every 2 min 30 s'."""
+    """'every 15 minutes', 'every minute', 'every 45 s', 'every 2 min 30 s'."""
     seconds = int(seconds)
     minutes, rest = divmod(seconds, 60)
     if minutes and not rest:
-        return f"every {minutes} min"
+        return "every minute" if minutes == 1 else f"every {minutes} minutes"
     if minutes:
         return f"every {minutes} min {rest} s"
     return f"every {seconds} s"
+
+
+def seconds_words(value) -> str:
+    """'48 s', '3.4 s' (one decimal under ten seconds); '' when it is not a number."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if seconds != seconds or seconds < 0:
+        return ""
+    return f"{seconds:.1f} s" if seconds < 10 else f"{seconds:.0f} s"
+
+
+def pull_timings(status: Optional[dict]) -> dict:
+    """`status["timings"]` (seconds per step of the last pull, written by
+    `data.bloomberg.live.pull_once`; absent on an older status file) with anything that is
+    not a number dropped. {} when there is nothing usable."""
+    timings = (status or {}).get("timings")
+    if not isinstance(timings, dict):
+        return {}
+    return {str(step): float(value) for step, value in timings.items() if seconds_words(value)}
 
 
 def _parse_time(text) -> Optional[datetime]:
@@ -103,7 +135,8 @@ def short_time(text, now: Optional[datetime] = None) -> str:
 def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None,
                   feed_running: Optional[bool] = None, now: Optional[datetime] = None) -> str:
     """One line: connected or the stated reason it is not, time of the last pull, marks
-    written / failed, and the cadence in words.
+    written / failed, how long that pull took (only when the status file carries
+    `timings["total"]`), and the cadence in words.
 
     `feed_running`: True = the feed thread exists, False = it does not (no automatic
     pulls, said so), None = the caller cannot tell (the Market data tab's one-argument
@@ -122,6 +155,9 @@ def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None
     else:
         line = (f"Bloomberg: connected · last pull {when or 'time not recorded'} · "
                 f"{status.get('written', 0)} marks written, {status.get('failed', 0)} failed")
+        took = seconds_words(pull_timings(status).get("total"))
+        if took:
+            line += f" · last pull took {took}"
     if feed_running is False:
         return f"{line} · no automatic pulls in this session"
     if feed_running is None and not status.get("connected"):
@@ -256,15 +292,26 @@ def controls() -> list:
     ]
 
 
+def status_refresh_ms() -> int:
+    """How often the passive status line re-reads the status file: once per feed cycle,
+    but never less often than `STATUS_REFRESH_MAX_SECONDS`. A pull that failed never
+    touches the database (which is what `ui.revision` watches), so this timer is the only
+    thing that shows it; at the feed's 15-minute cadence a once-per-cycle tick would leave
+    "connected" on screen for up to 15 minutes after Bloomberg went away. The read is one
+    small local JSON file."""
+    seconds = feed_interval_seconds() or STATUS_REFRESH_MAX_SECONDS
+    return max(1, min(seconds, STATUS_REFRESH_MAX_SECONDS)) * 1000
+
+
 def plumbing() -> list:
     """The invisible parts. The fast poll starts disabled and runs only while a requested
-    pull is outstanding. The slow refresh ticks once per feed cycle so a pull that failed
-    (and so never touched the database, which is what `ui.revision` watches) still
-    updates the line; 60 s only when the feed module cannot be imported at all."""
+    pull is outstanding (`PULL_POLL_MS`, independent of the feed's cadence, so the line
+    under the button still moves within seconds of a click). The slow refresh is
+    `status_refresh_ms`."""
     return [
         dcc.Store(id=PULL_PENDING_ID),
         dcc.Interval(id=PULL_POLL_ID, interval=PULL_POLL_MS, n_intervals=0, disabled=True),
-        dcc.Interval(id=STATUS_REFRESH_ID, interval=(feed_interval_seconds() or 60) * 1000, n_intervals=0),
+        dcc.Interval(id=STATUS_REFRESH_ID, interval=status_refresh_ms(), n_intervals=0),
     ]
 
 

@@ -159,6 +159,35 @@ def test_feed_headline_and_backfill_headline_and_top_bar_status():
     assert md.backfill_headline(None) is None
 
 
+def test_pull_timings_line_lists_the_steps_slowest_first_and_is_absent_without_timings():
+    timings = {"session": 1.2, "spot": 3.14, "forwards": 21.4, "futures": 0.9, "rates": 8.0, "vol": 0.8,
+               "options": 12.0, "ledger": 0.4, "total": 48.3}
+    status = {"connected": True, "time": "t", "written": 5, "failed": 0, "timings": timings}
+    assert md.pull_timings_line(status) == (
+        "Last pull took 48 s: forwards 21 s · options 12 s · rates 8.0 s · spot 3.1 s · session 1.2 s · "
+        "futures 0.9 s · vol 0.8 s · ledger 0.4 s")
+    # a value that is not a number is left out, never shown as one; "total" alone still reads
+    assert md.pull_timings_line({"timings": {"spot": 2.0, "rates": None, "vol": "n/a"}}) == "Last pull by step: spot 2.0 s"
+    assert md.pull_timings_line({"timings": {"total": 12}}) == "Last pull took 12 s"
+    for absent in (None, {}, {"connected": True}, {"timings": None}, {"timings": {}}, {"timings": "48"}):
+        assert md.pull_timings_line(absent) == ""
+
+    # the tab's feed-status block: the status line alone, plus one compact line when there are timings
+    assert md.status_block({"connected": True, "time": "t", "written": 5, "failed": 0}) == \
+        md.top_bar_status({"connected": True, "time": "t", "written": 5, "failed": 0})
+    line, timing_row = md.status_block(status)
+    assert line == md.top_bar_status(status) and "last pull took 48 s" in line
+    assert timing_row.id == md.PULL_TIMINGS_ID and timing_row.children == md.pull_timings_line(status)
+
+
+def test_refresh_timer_follows_the_feed_interval_not_a_typed_in_number():
+    from data.bloomberg import live
+    assert md.REFRESH_MS == live.INTERVAL_SECONDS * 1000
+    layout = md.build_layout(default_date="2026-08-18")
+    timer = next(c for c in layout.children if getattr(c, "id", None) == md.REFRESH_ID)
+    assert timer.interval == md.REFRESH_MS
+
+
 def test_tenor_label_boundaries():
     assert md.tenor_label("2026-08-18", "2026-08-25") == "1W"
     assert md.tenor_label("2026-08-18", "2027-08-18") == "1Y"

@@ -805,7 +805,7 @@ def test_build_requests_includes_option_pair_spot_and_expiry_forward(tmp_path):
 
 
 def test_pull_once_stops_the_session_it_opened(tmp_path, monkeypatch):
-    """One blpapi session per 2-minute cycle (and per Pull-now click) was never stopped
+    """One blpapi session per cycle (and per Pull-now click) was never stopped
     before 2026-09-18 -- cleanup was left to garbage collection."""
     p, conn = _db(tmp_path)
     from data.bloomberg import pull_marks as pm, fwd_curve
@@ -872,6 +872,21 @@ def test_write_status_is_atomic_and_patch_status_merges_under_the_lock(tmp_path)
     on_disk = live.read_status(p)
     assert on_disk["backfill"] == {"running": True, "remaining": 3} and on_disk["connected"] is True
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_a_pull_status_rewrite_keeps_the_backfill_block_on_file(tmp_path):
+    """The header reads the backfill's per-day reasons from this file to say why a past
+    close is missing; a pull's full rewrite used to wipe them on every cycle (2026-09-21)."""
+    p = tmp_path / "risk.db"
+    days = {"2026-09-14": {"status": "INCOMPLETE", "missing_count": 2, "missing": ["no forward-curve history"]}}
+    live.patch_status(p, "backfill", {"running": False, "days": days})
+    pull = {"connected": True, "written": 5, "items": []}
+    live.write_status(p, pull)
+    assert live.read_status(p)["backfill"]["days"] == days and live.read_status(p)["written"] == 5
+    assert "backfill" not in pull  # the caller's dict is left as it was
+    # A status that brings its own block wins over the one on file.
+    live.write_status(p, {"connected": True, "backfill": {"running": True}})
+    assert live.read_status(p)["backfill"] == {"running": True}
 
 
 def test_option_pair_forward_curve_gives_the_implied_rate_fallback_its_official_points(tmp_path, monkeypatch):
@@ -1123,3 +1138,375 @@ def test_sample_book_request_list_is_unchanged_except_for_deduplicated_conversio
     _, added = before_and_after("2026-10-15")
     assert added == [(eur_usd, "SPOT", "2026-10-15", f"{eur_usd} Curncy"),
                      (usd_sek, "SPOT", "2026-10-15", f"{usd_sek} Curncy")]
+
+
+# --------------------------------------------------------------------------- cadence, one session per cycle, timings (2026-09-21)
+def test_cadence_is_fifteen_minutes_and_stale_threshold_follows_it(tmp_path):
+    """User decision 2026-09-21: one scheduled pull every 15 minutes. The stale threshold
+    must follow the interval: at the old fixed 600 s every SPOT would read STALE for the
+    last third of each interval, on every screen that reads rates_from_marks."""
+    assert live.INTERVAL_SECONDS == 900
+    assert live.STALE_AFTER_SECONDS == 2 * live.INTERVAL_SECONDS + 300 == 2100
+    assert live.LiveFeed(tmp_path / "risk.db").interval == 900
+    p, conn = _db(tmp_path)
+    now = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
+
+    def stale_after(seconds):
+        conn.execute("INSERT OR REPLACE INTO marks VALUES ('2026-09-14','AUDUSD','2026-09-14','SPOT',0.66,"
+                     "'BBG_BFXFORWARD',?)", ((now - timedelta(seconds=seconds)).isoformat(),))
+        conn.commit()
+        return live.rates_from_marks(conn, now=now)["AUD"]["stale"]
+
+    assert stale_after(live.INTERVAL_SECONDS + 60) is False        # one cycle old, the next is just running: fresh
+    assert stale_after(2 * live.INTERVAL_SECONDS) is False         # one missed cycle is not yet stale
+    assert stale_after(live.STALE_AFTER_SECONDS + 1) is True       # two missed cycles and the slack: stale
+
+
+class _FakeEl:
+    """A blpapi Element over plain dicts / lists / scalars: just the accessors
+    pull_marks, fwd_curve, rates_marketdata and vol_marketdata use."""
+
+    def __init__(self, value, name=""):
+        self._v, self._name = value, name
+
+    def name(self):
+        return self._name
+
+    def hasElement(self, name):
+        return isinstance(self._v, dict) and name in self._v
+
+    def getElement(self, key):
+        if isinstance(key, int):
+            key = list(self._v)[key]
+        return _FakeEl(self._v[key], key)
+
+    def getElementAsString(self, name):
+        return str(self._v[name])
+
+    def numValues(self):
+        return len(self._v) if isinstance(self._v, list) else 1
+
+    def numElements(self):
+        return len(self._v) if isinstance(self._v, dict) else 0
+
+    def getValueAsElement(self, i):
+        return _FakeEl(self._v[i])
+
+    def getValue(self, i=0):
+        return self._v
+
+
+def _install_answering_blpapi(monkeypatch, today):
+    """A fake `blpapi` whose sessions ANSWER each request from the request's own
+    securities and fields (values are a fixed function of the ticker), so the real
+    open_session / fetch_reference / request_fwd_curves / RatesBloombergSource /
+    VolBloombergSource code runs end to end. Returns the log: sessions started and
+    stopped, and every request sent as (session number, correlation id, type, fields)."""
+    import zlib
+    from datetime import timedelta as _td
+    log = {"started": 0, "stopped": 0, "sent": []}
+
+    def h(ticker):
+        return (zlib.crc32(ticker.encode()) % 1000) / 1000.0
+
+    def px_last(ticker):
+        head = ticker.split()[0]
+        if ticker.endswith("Index"):
+            return 4.0 + 0.5 * h(ticker)                                   # overnight fixing, percent
+        if " BGN " in ticker:                                              # vol: ATM in vol points, RR / BF small
+            return 8.0 + 2 * h(ticker) if head[6:7] == "V" else 0.1 + 0.2 * h(ticker)
+        if head in ("AUDUSD", "USDJPY"):
+            return {"AUDUSD": 0.66, "USDJPY": 150.0}[head] * (1 + 0.01 * h(ticker))
+        return 3.5 + 0.5 * h(ticker)                                       # OIS quote, percent
+
+    def fwd_curve(ticker):
+        spot = px_last(ticker)
+        return [{"Tenor": f"T{k}", "Settlement Date": today + _td(days=days), "Bid": spot * (1 + 0.0001 * days),
+                 "Ask": spot * (1 + 0.0001 * days)} for k, days in enumerate((9, 16, 32, 63, 94, 185, 367))]
+
+    class _Cid:
+        def __init__(self, v):
+            self.v = v
+
+        def __eq__(self, other):
+            return isinstance(other, _Cid) and other.v == self.v
+
+        def __hash__(self):
+            return hash(self.v)
+
+    class _Msg:
+        def __init__(self, data, cid):
+            self._d, self._cid = data, cid
+
+        def hasElement(self, name):
+            return name in self._d
+
+        def getElement(self, name):
+            return _FakeEl(self._d[name], name)
+
+        def correlationIds(self):
+            return [self._cid]
+
+    class _Event:
+        TIMEOUT, RESPONSE, PARTIAL_RESPONSE = "TIMEOUT", "RESPONSE", "PARTIAL_RESPONSE"
+
+        def __init__(self, msgs, kind):
+            self._m, self._k = msgs, kind
+
+        def __iter__(self):
+            return iter(self._m)
+
+        def eventType(self):
+            return self._k
+
+    class _Override:
+        def setElement(self, k, v):
+            setattr(self, k, v)
+
+    class _List:
+        def __init__(self):
+            self.items = []
+
+        def appendValue(self, v):
+            self.items.append(v)
+
+        def appendElement(self):
+            self.items.append(_Override())
+            return self.items[-1]
+
+    class _Request:
+        def __init__(self, kind):
+            self.kind, self.lists, self.scalars = kind, {}, {}
+
+        def getElement(self, name):
+            return self.lists.setdefault(name, _List())
+
+        def set(self, name, value):
+            self.scalars[name] = value
+
+    class _Options:
+        def setServerHost(self, host):
+            pass
+
+        def setServerPort(self, port):
+            pass
+
+    class _Session:
+        def __init__(self, options=None):
+            self._events, self.number = [], None
+
+        def start(self):
+            log["started"] += 1
+            self.number = log["started"]
+            return True
+
+        def openService(self, name):
+            return True
+
+        def getService(self, name):
+            return self
+
+        def createRequest(self, kind):
+            return _Request(kind)
+
+        def sendRequest(self, request, correlationId=None):
+            secs = request.getElement("securities").items
+            fields = request.getElement("fields").items
+            log["sent"].append((self.number, correlationId.v, request.kind, tuple(fields)))
+            if request.kind == "ReferenceDataRequest":
+                data = [{"security": s, "fieldData": {f: fwd_curve(s) if f == "FWD_CURVE" else px_last(s) for f in fields}}
+                        for s in secs]
+                self._events.append(_Event([_Msg({"securityData": data}, correlationId)], _Event.RESPONSE))
+                return
+            start = datetime.strptime(request.scalars["startDate"], "%Y%m%d").date()
+            end = datetime.strptime(request.scalars["endDate"], "%Y%m%d").date()
+            days = [start + _td(days=n) for n in range((end - start).days + 1)]
+            for n, s in enumerate(secs):
+                points = [{"date": d, **{f: px_last(s) for f in fields}} for d in days if d.weekday() < 5]
+                kind = _Event.RESPONSE if n == len(secs) - 1 else _Event.PARTIAL_RESPONSE
+                self._events.append(_Event([_Msg({"securityData": {"security": s, "fieldData": points}}, correlationId)],
+                                           kind))
+
+        def nextEvent(self, timeout=None):
+            return self._events.pop(0) if self._events else _Event([], _Event.TIMEOUT)
+
+        def stop(self):
+            log["stopped"] += 1
+
+    fake = types.ModuleType("blpapi")
+    fake.Session, fake.SessionOptions, fake.CorrelationId, fake.Event = _Session, _Options, _Cid, _Event
+    monkeypatch.setitem(sys.modules, "blpapi", fake)
+    monkeypatch.setattr(live, "availability", lambda host, port: (True, ""))
+    monkeypatch.setattr(live, "book_today", lambda: today)      # the rates source asks "is as_of today?" -> live request
+    return log
+
+
+def _fx_irs_option_db(tmp_path):
+    """Forwards (AUDUSD, USDJPY), a seasoned USD swap and a USDJPY put with its strike on
+    file: every step of a cycle has something to ask Bloomberg for and something to price."""
+    from engine.options.store import set_option_terms
+    p, conn = _db(tmp_path)
+    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'IRSOIS-USD-1','2031-08-19')")
+    conn.execute("INSERT INTO trades VALUES ('s1','XLSX','IRSOIS-USD-1','IRS','s1','2026-08-14',10000000,0.041,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('s1',1,'FIXED','USD',-10000000,'2026-08-14','2031-08-19',0.041,0)")
+    conn.execute("INSERT INTO trade_legs VALUES ('s1',2,'FLOAT','USD',10000000,'2026-08-14','2031-08-19',0.0,0)")
+    conn.execute("INSERT INTO instruments VALUES ('USDJPY111926P-1','FX_OPTION','USD','JPY',1,0,'USDJPY Curncy','2026-11-19')")
+    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','USDJPY111926P-1','FX_OPTION','o1','2026-08-14',1000000,0.01,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','USD',1000000,'2026-08-14','2026-11-19',0,0)")
+    conn.commit()
+    set_option_terms(conn, "USDJPY111926P-1", 150.0, "PUT")
+    return p, conn
+
+
+def _written_tables(conn):
+    """Everything a cycle writes, minus the wall-clock stamps (the live SPOT / forward
+    snapped_at and the vol ticker checks' last_checked)."""
+    out = {}
+    for table, wall_clock in (("marks", "snapped_at"), ("curves", ""), ("curve_quotes", ""), ("index_fixings", ""),
+                              ("vol_quotes", ""), ("vol_ticker_checks", "last_checked"), ("realised_pnl", "frozen_at"),
+                              ("instruments", "")):
+        cur = conn.execute(f"SELECT * FROM {table}")
+        cols = [c[0] for c in cur.description]
+        rows = []
+        for r in cur.fetchall():
+            d = dict(zip(cols, r))
+            if wall_clock and (table != "marks" or d["source"] in ("BBG_BFXFORWARD", "BBG_INTERP")):
+                d[wall_clock] = ""
+            rows.append(tuple(sorted(d.items())))
+        out[table] = sorted(rows, key=repr)
+    return out
+
+
+def test_pull_once_opens_one_session_per_cycle_and_writes_what_three_sessions_wrote(tmp_path, monkeypatch):
+    """One blpapi session per cycle, shared by the FX marks, the OIS quotes / fixings and
+    the vol quotes (it used to be three), and not one written row differs. 'Before' is the
+    old arrangement rebuilt by hand: the rates and vol sources injected with a session of
+    their own each. Same fake Bloomberg answers for both books."""
+    from datetime import date as _date
+    from data.bloomberg import rates_marketdata as rm, vol_marketdata as vm
+    today = _date(2026, 8, 17)
+    (tmp_path / "before").mkdir()
+    (tmp_path / "after").mkdir()
+
+    log = _install_answering_blpapi(monkeypatch, today)
+    p_before, conn_before = _fx_irs_option_db(tmp_path / "before")
+    before = live.pull_once(p_before, today=today, rates_source=rm.RatesBloombergSource("localhost", 8194),
+                            vol_source=vm.VolBloombergSource("localhost", 8194))
+    assert (log["started"], log["stopped"]) == (3, 3)
+
+    log = _install_answering_blpapi(monkeypatch, today)
+    p_after, conn_after = _fx_irs_option_db(tmp_path / "after")
+    after = live.pull_once(p_after, today=today)
+    assert (log["started"], log["stopped"]) == (1, 1)                # one session opened, and stopped
+    kinds = [(kind, fields) for _n, _cid, kind, fields in log["sent"]]
+    assert kinds == [("ReferenceDataRequest", ("PX_LAST",)),          # SPOT, every pair at once
+                     ("ReferenceDataRequest", ("FWD_CURVE",)),        # forwards, every pair at once
+                     ("ReferenceDataRequest", ("PX_LAST",)),          # OIS quotes JPY
+                     ("ReferenceDataRequest", ("PX_LAST",)),          # OIS quotes USD
+                     ("HistoricalDataRequest", ("PX_LAST",)),         # SOFR fixings for the seasoned swap
+                     ("ReferenceDataRequest", ("PX_LAST",))]          # vol quotes, every ticker at once
+    assert {n for n, *_ in log["sent"]} == {1}                        # all of them on that one session
+    cids = [cid for _n, cid, *_ in log["sent"]]
+    assert len(set(cids)) == len(cids)                                # no CorrelationId sent twice on it
+
+    # every step really ran: marks pulled, swap and option priced
+    assert after["connected"] is True and after["failed"] == 0 and after["written"] == after["requested"] == 5
+    assert after["rates"]["currencies"]["USD"]["quotes"] == 17 and after["rates"]["currencies"]["USD"]["fixings"] == 2
+    assert after["rates"]["priced"] == 1 and after["rates"]["failed"] == []
+    assert after["vol"]["written"] == 45 and after["options"]["priced"] == 1
+    sources = {r[0] for r in conn_after.execute("SELECT DISTINCT source FROM marks")}
+    assert {"BBG_BFXFORWARD", "QL_PRICER", "QL_OPTIONS_PRICER"} <= sources
+
+    # and what was written is what three sessions wrote: same keys, same values, same sources
+    written_before, written_after = _written_tables(conn_before), _written_tables(conn_after)
+    assert written_after["marks"] and written_after["curve_quotes"] and written_after["vol_quotes"]
+    assert written_after == written_before
+    for key in ("requested", "written", "failed", "curve_points_written", "items", "warnings", "vol", "options", "ledger"):
+        assert after[key] == before[key], key
+    assert {k: v for k, v in after["rates"].items() if k != "seconds"} == \
+           {k: v for k, v in before["rates"].items() if k != "seconds"}
+
+
+def test_borrowed_session_is_not_stopped_by_the_source_and_an_own_session_is(monkeypatch):
+    from datetime import date as _date
+    from data.bloomberg import rates_marketdata as rm, vol_marketdata as vm
+    log = _install_answering_blpapi(monkeypatch, _date(2026, 8, 17))
+    blpapi = sys.modules["blpapi"]
+    session = blpapi.Session()
+    session.start()
+    for source in (rm.RatesBloombergSource("localhost", 8194, session=session, service=session),
+                   vm.VolBloombergSource("localhost", 8194, session=session, service=session)):
+        source.close()
+    assert (log["started"], log["stopped"]) == (1, 0)                # borrowed: no second open, never stopped
+    rm.RatesBloombergSource("localhost", 8194).close()
+    vm.VolBloombergSource("localhost", 8194).close()
+    assert (log["started"], log["stopped"]) == (3, 2)                # their own: opened and stopped by them
+
+
+def _assert_timings_shape(status):
+    timings = status["timings"]
+    assert list(timings) == ["session", "spot", "forwards", "futures", "rates", "vol", "options", "ledger", "total"]
+    assert list(timings) == list(live.TIMING_KEYS)
+    for key, seconds in timings.items():
+        assert isinstance(seconds, float) and seconds >= 0 and seconds == round(seconds, 1), (key, seconds)
+    assert timings["total"] >= max(v for k, v in timings.items() if k != "total")
+
+
+def test_pull_once_status_timings_say_where_the_cycle_went(tmp_path, monkeypatch):
+    """status["timings"]: seconds per step, floats rounded to 0.1, the same nine keys on
+    every status pull_once writes (the UI's 'Last pull took ...' line reads them)."""
+    import time as _time
+    from datetime import date as _date
+    from data.bloomberg import pull_marks as pm, fwd_curve
+    p, conn = _db(tmp_path)
+
+    def slow(seconds, result):
+        def fn(*a, **k):
+            _time.sleep(seconds)
+            return result
+        return fn
+
+    def slow_session():
+        _time.sleep(0.06)
+        return object(), object()
+
+    monkeypatch.setattr(pm, "fetch_reference", slow(0.06, {"AUDUSD Curncy": {"PX_LAST": 0.6612}}))
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", slow(0.16, {}))
+    monkeypatch.setattr(live, "_rates_step", slow(0.26, {"skipped": "not under test"}))
+    status = live.pull_once(p, "2026-08-17", session_factory=slow_session, today=_date(2026, 8, 20))
+    assert status["connected"] is True
+    _assert_timings_shape(status)
+    timings = status["timings"]
+    assert timings["session"] >= 0.1 and timings["spot"] >= 0.1 and timings["forwards"] >= 0.2
+    assert timings["rates"] >= 0.3 and timings["futures"] == 0.0           # no future in this book: step not run
+    assert timings["total"] >= timings["session"] + timings["spot"] + timings["forwards"] + timings["rates"] - 0.2
+    assert set(status["timings_other"]) == {"build_requests", "write_marks"}
+    assert live.read_status(p)["timings"] == timings                       # and it is in the status file
+
+    # the same keys when nothing FX-shaped is open (early return), when the pull fails, and with no Bloomberg
+    early = live.pull_once(p, "2026-10-01", session_factory=slow_session, today=_date(2026, 10, 1))
+    assert early["reason"] == "no open FX legs or futures to price" and early["timings"]["rates"] >= 0.3
+    _assert_timings_shape(early)
+    assert early["timings"]["session"] == 0.0                              # nothing needed a session: none opened
+    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    failed = live.pull_once(p, "2026-08-17", session_factory=slow_session, today=_date(2026, 8, 20))
+    assert failed["connected"] is False and "boom" in failed["reason"]
+    _assert_timings_shape(failed)
+    monkeypatch.setattr(live, "availability", lambda host, port: (False, "blpapi is not installed on this computer"))
+    down = live.pull_once(p, "2026-08-17")
+    assert down["connected"] is False
+    _assert_timings_shape(down)
+
+
+def test_rates_step_reports_bloomberg_and_pricing_seconds_apart(tmp_path):
+    from pathlib import Path
+    from datetime import date as _date
+    from data.bloomberg.rates_marketdata import RatesFileSource
+    p, conn = _option_db(tmp_path)
+    fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "ois_snapshot_v1.json"
+    out = live._rates_step(conn, _date(2026, 8, 17), "localhost", 8194, rates_source=RatesFileSource(fixture))
+    assert set(out["seconds"]) == {"bloomberg", "pricing"}
+    assert all(isinstance(v, float) and v >= 0 for v in out["seconds"].values())

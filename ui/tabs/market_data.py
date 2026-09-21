@@ -5,7 +5,9 @@ inventory table. Layout:
 
   1. Top bar: as-of date picker, a pair dropdown (every FX instrument with trades or
      marks, default = the pair with the most open trades) -- the only dropdown on the
-     tab -- the "Pull now" button and a one-line feed status.
+     tab -- the "Pull now" button and a one-line feed status, with a second compact line
+     giving the last pull's seconds per step, slowest first, when the status file
+     carries `timings` (`pull_timings_line`; nothing when absent).
   2. For the selected pair: spot (value/source/snapped time), the forward curve as a
      table (one row per settle_date with a FWD_OUTRIGHT mark on the as-of date, all
      sources, official first), and a line chart of outright vs settle date.
@@ -47,6 +49,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
+from ui.feed_controls import pull_timings, safety_refresh_ms, seconds_words
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
 
@@ -62,7 +65,11 @@ REFRESH_ID = "market-data-refresh"
 PULL_NOW_ID = "market-data-pull-now"
 PULL_NOW_STATUS_ID = "market-data-pull-now-status"
 PULL_REVISION_ID = "market-data-pull-revision"
-REFRESH_MS = 120_000  # matches data.bloomberg.live.INTERVAL_SECONDS
+PULL_TIMINGS_ID = "market-data-pull-timings"
+# Safety-net timer only: one feed cycle, read from data.bloomberg.live.INTERVAL_SECONDS
+# (ui.feed_controls.safety_refresh_ms), never a number typed in here. A data change
+# redraws the tab within seconds through ui/revision.py's DATA_REVISION_ID.
+REFRESH_MS = safety_refresh_ms()
 
 CURVE_TABLE_ID = "market-data-curve-table"
 CURVE_CHART_ID = "market-data-curve-chart"
@@ -163,6 +170,32 @@ def top_bar_status(status: Optional[dict]) -> str:
     if bf_line:
         line = f"{line} | {bf_line}"
     return line
+
+
+def pull_timings_line(status: Optional[dict]) -> str:
+    """'Last pull took 48 s: forwards 21 s · options 12 s · rates 8.0 s · ...', the steps
+    of the last pull slowest first, from `status["timings"]` (seconds per step, written by
+    data.bloomberg.live's pull; "total" is the whole pull and heads the line). "" when the
+    status file carries no timings (an older file, or no pull yet), so nothing is shown."""
+    timings = pull_timings(status)
+    total = seconds_words(timings.pop("total", None))
+    steps = sorted(timings.items(), key=lambda kv: (-kv[1], kv[0]))
+    parts = " · ".join(f"{step} {seconds_words(value)}" for step, value in steps)
+    if total and parts:
+        return f"Last pull took {total}: {parts}"
+    if total:
+        return f"Last pull took {total}"
+    return f"Last pull by step: {parts}" if parts else ""
+
+
+def status_block(status: Optional[dict]):
+    """What the tab's feed-status block shows: the one-line status, plus the last pull's
+    per-step timings on a second compact line when the status file has them."""
+    line = top_bar_status(status)
+    timings = pull_timings_line(status)
+    if not timings:
+        return line
+    return [line, html.Div(timings, id=PULL_TIMINGS_ID, className="status-line")]
 
 
 def _rates_step_lines(rates_status: Optional[dict]) -> List[str]:
@@ -761,7 +794,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         finally:
             conn.close()
 
-        return body, strip, top_bar_status(feed_status), pair
+        return body, strip, status_block(feed_status), pair
 
     @app.callback(
         Output(PULL_NOW_STATUS_ID, "children"),

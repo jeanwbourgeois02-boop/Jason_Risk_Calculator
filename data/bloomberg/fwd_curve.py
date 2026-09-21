@@ -29,11 +29,26 @@ ticker's SETTLE_DT is available (and correct for that day) via HistoricalDataReq
 same way it is live via ReferenceDataRequest -- see docs/bloomberg-pc-checklist.md.
 `outright_for_date` (below) is then reused unchanged for the actual interpolation, exactly
 as the live path uses it.
+
+`historical_curve` (2026-09-21) is what the backfill uses now. SETTLE_DT is a static
+reference field and HistoricalDataRequest does not serve it, so `historical_points_by_day`
+dropped every tenor of every past day and no past forward was ever written. It builds ONE
+day's curve from that day's tenor PX_LAST values and that day's SPOT close:
+  * pillar dates: Bloomberg's own SETTLE_DT when the row carries one, otherwise computed by
+    market convention (`spot_date_for`, `tenor_settle_date`) and flagged as computed, so the
+    caller never writes a value at a computed date as Bloomberg's own quote;
+  * unit: the live tenor path (pull_marks.fetch_tenor_points) documents these tickers'
+    PX_LAST as forward POINTS (outright = spot + points / FWD_POINTS_SCALE), which this
+    module used to read as outrights. Neither is verified on a terminal
+    (docs/open-questions.md item 28, which gives the test used here: a PX_LAST of the same
+    order of magnitude as spot is an outright, anything else is points) -- `tenor_unit`.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import Dict, List, Optional, Tuple
+import calendar
+import re
+from datetime import date, datetime, timedelta
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 Point = Tuple[date, float]
 
@@ -213,7 +228,10 @@ def historical_points_by_day(tenor_series: Dict[str, Dict[str, Dict[str, object]
     A tenor missing either PX_LAST or SETTLE_DT on a given day (or with a non-positive
     price -- same filter `points_from_rows` applies) is simply absent from that day's
     points, never guessed; a day with no usable tenor at all is simply absent from the
-    returned dict (callers see an empty curve, not a fabricated one)."""
+    returned dict (callers see an empty curve, not a fabricated one).
+
+    The backfill no longer calls this (2026-09-21): it needs SETTLE_DT on every row and
+    reads PX_LAST as an outright -- see `historical_curve`."""
     by_day: Dict[str, List[Point]] = {}
     for tenor, ticker in tenor_tickers.items():
         series = tenor_series.get(ticker, {})
@@ -234,3 +252,160 @@ def historical_points_by_day(tenor_series: Dict[str, Dict[str, Dict[str, object]
     for points in by_day.values():
         points.sort()
     return by_day
+
+
+# --------------------------------------------------------------------------- historical curve (2026-09-21)
+UNIT_OUTRIGHT = "OUTRIGHT"
+UNIT_POINTS = "POINTS"
+
+# Spot settles T+1 for these pairs by market convention, T+2 for everything else.
+_SPOT_LAG_ONE_DAY = frozenset({"USDCAD", "USDTRY", "USDPHP", "USDRUB"})
+
+_NO_HOLIDAYS: FrozenSet[str] = frozenset()
+_TENOR_RE = re.compile(r"(\d+)([WMY])")
+
+
+def _is_good_day(d: date, holidays: FrozenSet[str]) -> bool:
+    return d.weekday() < 5 and d.isoformat() not in holidays
+
+
+def spot_date_for(day: date, pair: str = "", holidays: FrozenSet[str] = _NO_HOLIDAYS) -> date:
+    """The spot value date of a trade dealt on `day`: `day` + 2 weekdays (+ 1 for the T+1
+    pairs), then rolled forward off a holiday. For a T+2 pair with no holiday in the way
+    this is engine.ladder.usd_marks.spot_date, the app's existing spot-date rule. A holiday
+    on the day in between does not count against the lag (the convention for a US holiday);
+    only the spot date itself must be a good day. `holidays` is config/holidays.txt's set
+    (engine.pnl.calendar.load_holidays): the app has no per-currency calendars, so a date
+    computed here can sit a day away from Bloomberg's around a local holiday -- one reason
+    a value at a computed date is never written as Bloomberg's own quote."""
+    lag = 1 if pair in _SPOT_LAG_ONE_DAY else 2
+    d, added = day, 0
+    while added < lag:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            added += 1
+    while not _is_good_day(d, holidays):
+        d += timedelta(days=1)
+    return d
+
+
+def _is_last_good_day_of_month(d: date, holidays: FrozenSet[str]) -> bool:
+    nxt = d + timedelta(days=1)
+    while nxt.month == d.month:
+        if _is_good_day(nxt, holidays):
+            return False
+        nxt += timedelta(days=1)
+    return True
+
+
+def tenor_settle_date(spot: date, tenor: str, holidays: FrozenSet[str] = _NO_HOLIDAYS) -> Optional[date]:
+    """Value date of a standard tenor counted from the spot date `spot`, by market
+    convention: 'SP' is the spot date; a week tenor is spot + 7n days rolled FOLLOWING; a
+    month / year tenor is spot + n months rolled MODIFIED FOLLOWING, with the end-of-month
+    rule (a spot date that is the last good day of its month gives the last good day of
+    the target month). None for a label this does not know (ON, TN, ...)."""
+    tenor = tenor.upper()
+    if tenor == "SP":
+        return spot
+    m = _TENOR_RE.fullmatch(tenor)
+    if m is None:
+        return None
+    n, unit = int(m.group(1)), m.group(2)
+    if unit == "W":
+        d = spot + timedelta(weeks=n)
+        while not _is_good_day(d, holidays):
+            d += timedelta(days=1)
+        return d
+    month_index = spot.month - 1 + n * (12 if unit == "Y" else 1)
+    year, month = spot.year + month_index // 12, month_index % 12 + 1
+    last = calendar.monthrange(year, month)[1]
+    if _is_last_good_day_of_month(spot, holidays):
+        d = date(year, month, last)
+        while not _is_good_day(d, holidays):
+            d -= timedelta(days=1)
+        return d
+    target = date(year, month, min(spot.day, last))
+    d = target
+    while not _is_good_day(d, holidays):
+        d += timedelta(days=1)
+    if d.month != target.month:                 # modified following: never into the next month
+        d = target
+        while not _is_good_day(d, holidays):
+            d -= timedelta(days=1)
+    return d
+
+
+def tenor_unit(values: List[float], spot: float) -> str:
+    """OUTRIGHT when every tenor value lies within [0.5, 2] x spot, else POINTS -- the
+    test docs/open-questions.md item 28 gives ("a PX_LAST in the same order of magnitude
+    as spot means it is an outright, not points"). An outright out to one year never
+    leaves that band; a run of forward points grows roughly with the tenor (1W to 1Y is
+    fifty-fold) and is often negative, so it cannot sit inside it as a whole."""
+    return UNIT_OUTRIGHT if values and all(0.5 * spot <= v <= 2.0 * spot for v in values) else UNIT_POINTS
+
+
+def historical_curve(day: date, tenor_rows: Dict[str, Dict[str, object]], spot: Optional[float],
+                     scale: Optional[float] = None, pair: str = "",
+                     holidays: FrozenSet[str] = _NO_HOLIDAYS) -> dict:
+    """ONE past day's forward curve for `pair`, from that day's standard-tenor rows
+    (`tenor_rows`: {tenor label: {'PX_LAST': value, 'SETTLE_DT': date, if Bloomberg sent
+    one}}) and that day's SPOT close. Returns
+    {'points': [(settle_date, outright), ...] sorted, 'own_dates': {settle dates that are
+    Bloomberg's own SETTLE_DT}, 'unit': OUTRIGHT | POINTS | '', 'reason': why there are no
+    points, else ''}.
+
+    POINTS: outright = spot + points / scale, exactly pull_marks.outright_from_points
+    (`scale` = the pair's FWD_POINTS_SCALE); the first pillar is the spot date at spot
+    itself (forward points are zero there by definition, so the SP ticker's own value is
+    not used); a negative or zero points value is a real quote and is kept. Linear
+    interpolation between these outrights is the live path's linear interpolation in
+    points, since spot and scale are the same for every pillar. OUTRIGHT: each positive
+    value is used as it came. Nothing is guessed: no SPOT that day, or points with no
+    scale, gives no points and a reason."""
+    out = {"points": [], "own_dates": set(), "unit": "", "reason": ""}
+    quotes: Dict[str, float] = {}
+    for tenor, row in tenor_rows.items():
+        try:
+            quotes[tenor] = float((row or {}).get("PX_LAST"))
+        except (TypeError, ValueError):
+            continue
+    label = pair or "this pair"
+    if not quotes:
+        out["reason"] = f"Bloomberg returned no forward tenor prices for {label} on {day.isoformat()}"
+        return out
+    if spot is None or spot <= 0:
+        out["reason"] = f"{label} has no SPOT close on {day.isoformat()}, so its forward tenors cannot be read"
+        return out
+    unit = out["unit"] = tenor_unit(list(quotes.values()), spot)
+    if unit == UNIT_POINTS and (scale is None or scale <= 0):
+        out["reason"] = (f"Bloomberg returned forward points for {label} but no FWD_POINTS_SCALE, "
+                         "so they cannot be converted to outrights")
+        return out
+
+    def own_date(tenor: str) -> Optional[date]:
+        return _to_date((tenor_rows.get(tenor) or {}).get("SETTLE_DT"))
+
+    spot_day = own_date("SP") or spot_date_for(day, pair, holidays)
+    by_date: Dict[date, float] = {}
+    if unit == UNIT_POINTS:
+        by_date[spot_day] = float(spot)
+        if own_date("SP") is not None:
+            out["own_dates"].add(spot_day)
+    for tenor, value in quotes.items():
+        if unit == UNIT_POINTS and tenor.upper() == "SP":
+            continue
+        settle = own_date(tenor)
+        if settle is not None:
+            is_own = True
+        else:
+            settle, is_own = tenor_settle_date(spot_day, tenor, holidays), False
+        outright = spot + value / scale if unit == UNIT_POINTS else value
+        if settle is None or outright <= 0 or settle in by_date:
+            continue
+        by_date[settle] = outright
+        if is_own:
+            out["own_dates"].add(settle)
+    out["points"] = sorted(by_date.items())
+    if not out["points"]:
+        out["reason"] = f"no usable forward tenor for {label} on {day.isoformat()}"
+    return out

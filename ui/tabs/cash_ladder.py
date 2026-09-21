@@ -48,6 +48,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
+from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
 from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
@@ -58,7 +59,10 @@ TOOLBAR_ID = "cash-ladder-toolbar"
 TITLE_ID = "cash-ladder-title"
 TODAY_BUTTON_ID = "cash-ladder-today"
 REFRESH_ID = "cash-ladder-refresh"
-REFRESH_MS = 120_000  # matches data.bloomberg.live.INTERVAL_SECONDS
+# Safety-net timer only: one feed cycle, read from data.bloomberg.live.INTERVAL_SECONDS
+# (ui.feed_controls.safety_refresh_ms), never a number typed in here. A data change
+# redraws the ladder within seconds through ui/revision.py's DATA_REVISION_ID.
+REFRESH_MS = safety_refresh_ms()
 # View controls (user's cash-ladder spec, 2026-09-18, "Cash ladder tab"): currency
 # multiselect, From/To value dates, "Settled dates one by one", "Show table in USD
 # equivalent", and the two downloads. They shape the grid only (ui.tabs.exposure.
@@ -396,8 +400,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     )
     def _update_table(as_of_date, _n_intervals=0, ccys=None, start=None, end=None, settled=None, usd=None,
                       _data_rev=None):
-        """Re-runs every REFRESH_MS so the ladder follows the 2-minute Bloomberg feed
-        (data.bloomberg.live), and on every view-control change (spec 2026-09-18)."""
+        """Re-runs every REFRESH_MS (one Bloomberg feed cycle, data.bloomberg.live) as a
+        safety net, on every data revision, and on every view-control change (spec
+        2026-09-18)."""
         return _render(as_of_date, view_from_controls(ccys, start, end, settled, usd))
 
     @app.callback(Output(CCY_FILTER_ID, "options"), Input(DATE_PICKER_ID, "date"),

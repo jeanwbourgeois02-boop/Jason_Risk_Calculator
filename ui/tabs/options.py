@@ -76,7 +76,9 @@ UndFwdPx, Side, Type, Payoff) are not aggregatable across instruments; a group s
 only when it has exactly one contributing leg (`_single`) -- which is also how a
 single-leg package renders "flat": its PACKAGE row IS that one leg's row, with no
 separate LEG row beneath it. A multi-leg package's PACKAGE row is a pure summary with its
-LEG rows nested beneath, collapsed by default.
+LEG rows nested beneath, collapsed by default -- unless one of its legs still needs its
+strike, which must not be hidden under a row that takes no typing
+(`default_collapsed_packages`).
 
 **Filters and sorting (2026-09-18, user: "the column heads aren't good filters").**
 Native `DataTable` filtering, case-insensitive, with a hint in every filter box. Numeric
@@ -109,12 +111,26 @@ browser session so a rebuild of the sub-tab keeps what the user expanded.
 not an import of `ui.tabs.blotter`, which would be circular since `blotter.py` imports
 this module).
 
-**No page reload (`ui/revision.py`).** The render callback listens to both revision
-stores, so new marks or terms refresh the rows in place; a revision that changes nothing
-on screen returns `no_update`, so a Bloomberg write never disturbs a cell being typed
-into. (`ui/tabs/blotter.py` additionally rebuilds this whole sub-tab on a revision today;
-the table's filters and sort are persisted in the session for exactly that reason.) The
-editor's Save publishes both revisions itself, so nothing waits for the poll.
+**No page reload, and never under a cell being typed into (`ui/revision.py`; root cause
+2026-09-21, user: "make it so you can input strike in the table", three days after the
+cells above shipped).** dash-table (4.4.1, read in its bundle) renders the ACTIVE editable
+cell as a plain label for as long as any callback with `Output(table, "data")` is in
+flight -- its `loading_state`, which the renderer sets when the callback is DISPATCHED,
+whatever it goes on to return -- and that unmounts the cell's input together with the text
+typed so far; a re-sent `data` also resets the input's text to the stored value. The
+render callback used to listen to both revision stores, so every revision did that: every
+few seconds while the Bloomberg feed writes, and once right after each saved strike
+(`ui.tabs.blotter` publishes the data revision on a saved cell), just as the next strike
+was being typed. Returning `no_update` never helped, since the damage is done at dispatch,
+and no test could see it, since none runs the browser component. Now the revisions reach
+the render callback only through `_gate_refresh` -> `REFRESH_ID` (`refresh_gate`): while
+the table's selection sits on a Strike / Type / Payoff cell the revision is HELD, nothing
+that outputs to the table is dispatched, and a line under the toolbar says the refresh is
+paused; it is let through the moment the selection moves to any other cell. The signal is
+`active_cell` because dash-table exposes nothing finer: its `is_focused` is set by a
+double-click only, not by clicking a cell and typing. A committed edit is still answered
+at once with rows rebuilt from the database, so a saved strike never waits for the gate.
+The editor's Save publishes both revisions itself, so nothing waits for the poll.
 
 **Component ids** reuse prefixes that `tests/test_ui.py::
 test_every_static_callback_id_exists_in_layout` already lists as rendered-by-callback
@@ -144,17 +160,25 @@ HEADLINE_ID = "blotter-strip-options-greeks"
 CLEAR_FILTERS_ID = "blotter-datatable-options-filter-clear"
 EDIT_STATUS_ID = "options-terms-edit-status"
 VIEW_NOTE_ID = "options-terms-view-note"
+# The revision last let through to the table, and the "refresh paused" line (module
+# docstring, "never under a cell being typed into").
+REFRESH_ID = "options-terms-refresh"
+REFRESH_NOTE_ID = "options-terms-refresh-note"
 
-# The user's MARS reference order is kept for its thirteen columns (CLAUDE.md "Options
-# tab placement"): Position, Notional, MktVal, MktPx, Delta, Theta, Gamma, Vega, Expiry,
-# Underlying, Strike, UndFwdPx, Rho. Around them (2026-09-18): Side / Type / Payoff and
-# the reason column up front, the cost block (Ccy, Premium paid, Start value) before
-# MktVal, and Current value / P&L after MktPx, which IS the current premium.
+# The user's MARS reference order is kept for its columns (CLAUDE.md "Options"): Position,
+# Notional, MktVal, MktPx, Delta, Theta, Gamma, Vega, Expiry, Underlying, UndFwdPx, Rho.
+# Around them (2026-09-18): the option's terms and the reason column up front, the cost
+# block (Ccy, Premium paid, Start value) before MktVal, and Current value / P&L after
+# MktPx, which IS the current premium. Strike is the one MARS column moved (2026-09-21):
+# in its MARS slot after Underlying it was the 23rd column, about 2,000 px to the right and
+# off most screens (the table's scrollbar sits under the last row), while the row's own
+# note says "type it in the Strike cell". It now sits with the other two typed terms,
+# right after Payoff, in the order they are filled in.
 DISPLAY_COLUMNS = [
-    "label", "side", "option_type", "payoff", "note",
+    "label", "side", "option_type", "payoff", "strike", "note",
     "position", "notional", "premium_ccy", "premium_paid", "start_value", "start_value_usd",
     "mktval", "mktpx", "current_value", "pnl_ccy", "pnl_usd",
-    "delta", "theta", "gamma", "vega", "expiry", "underlying", "strike", "undfwdpx", "rho",
+    "delta", "theta", "gamma", "vega", "expiry", "underlying", "undfwdpx", "rho",
     "instrument",
 ]
 # Carried in every row's data so filter_query / the callbacks can key off them, but not
@@ -661,11 +685,16 @@ def _fmt_label(rec: dict, collapsed: set) -> str:
 
 def default_collapsed_packages(df: pd.DataFrame) -> List[str]:
     """Packages with >1 leg start collapsed; a single-leg package has no toggle at
-    all (task instruction: "single-leg packages shown flat")."""
+    all (task instruction: "single-leg packages shown flat"). A package with a leg whose
+    strike is still missing starts EXPANDED: collapsed, the user would see a flagged
+    package row saying "type it in the Strike cell" whose own Strike cell takes no input,
+    and the leg that does take it hidden underneath."""
     if df.empty:
         return []
     mask = (df["level"] == "PACKAGE") & (df["leg_count"] > 1)
-    return sorted(df.loc[mask, "group_key"].tolist())
+    legs = df[df["level"] == "LEG"]
+    needs_strike = set(legs.loc[legs["note"].astype(str).str.contains("no strike"), "parent_key"])
+    return sorted(k for k in df.loc[mask, "group_key"].tolist() if k not in needs_strike)
 
 
 def format_rows(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None) -> tuple:
@@ -877,6 +906,31 @@ def table_records(conn: sqlite3.Connection, as_of: str, collapsed: Optional[Iter
     flat = view_is_flat(filter_query, sort_by)
     records, _styles = format_rows(option_rows(conn, as_of, flat=flat), [] if flat else collapsed)
     return records
+
+
+REFRESH_PAUSED_NOTE = ("Table refresh is paused while a Strike / Type / Payoff cell is selected, so new marks "
+                       "never wipe what you are typing. A term you save still shows at once; click any other "
+                       "cell to let new marks in again.")
+
+
+def cell_takes_typing(active_cell) -> bool:
+    """True while the table's selection sits on a Strike / Type / Payoff cell -- the only
+    sign dash-table gives that something may be being typed (module docstring)."""
+    return isinstance(active_cell, dict) and active_cell.get("column_id") in EDITABLE_COLUMNS
+
+
+def refresh_gate(active_cell, data_rev, book_rev, released) -> Tuple[Optional[str], str]:
+    """`(revision to let through to the table or None, note)` for `_gate_refresh`.
+
+    Held (None) for as long as the selection sits on a cell that takes typing: anything
+    that then reached the render callback would turn that cell into a label and discard
+    its text (module docstring). Nothing is lost by holding: the revision stores keep their
+    latest value, and the first selection change away from those cells lets it through.
+    None as well when the table has already had this revision."""
+    if cell_takes_typing(active_cell):
+        return None, REFRESH_PAUSED_NOTE
+    token = f"{data_rev or ''}|{book_rev or ''}"
+    return (None if token == released else token), ""
 
 
 # (field, card title, what the figure is) -- units per engine/options/store.py's list.
@@ -1281,15 +1335,18 @@ def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
     return html.Div(className="section", children=[
         # Session storage: a rebuild of the sub-tab keeps what the user expanded.
         dcc.Store(id=COLLAPSED_STORE_ID, data=collapsed, storage_type="session"),
+        # The revision last let through to the table (`refresh_gate`).
+        dcc.Store(id=REFRESH_ID),
         html.Div(id=HEADLINE_ID, children=headline_strip(headline_totals(table.data))),
         html.Div(className="toolbar", children=[
-            html.Span("Type a strike straight into its Strike cell, and pick Type / Payoff in theirs "
-                      "(the gold-outlined cells on an option's own row; a solid gold box is a strike "
-                      "still missing). Filter boxes take text, or a comparison "
+            html.Span("Click a Strike cell, type the strike and press Enter; pick Type / Payoff in theirs "
+                      "(the gold-outlined cells right after the structure name, on an option's own row; a "
+                      "solid gold box is a strike still missing). Filter boxes take text, or a comparison "
                       "such as > 1000000, < 0, >= 2026-11.", className="section-kicker"),
             html.Button("Clear filters", id=CLEAR_FILTERS_ID, n_clicks=0, className="btn btn--ghost"),
         ]),
         html.Div(id=EDIT_STATUS_ID, className="status-line", role="status"),
+        html.Div(id=REFRESH_NOTE_ID, className="section-kicker", style={"fontStyle": "italic"}),
         html.Div(id=VIEW_NOTE_ID, className="section-kicker", style={"fontStyle": "italic"}),
         table,
         terms_editor(conn),
@@ -1298,8 +1355,9 @@ def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
 
 def register_callbacks(app, get_db_path: Callable[[], object],
                         date_picker_id: str = DEFAULT_DATE_PICKER_ID) -> None:
-    """Four callbacks on the table -- expand/collapse, render (collapse, filter/sort
-    view, cell edits, data revisions), headline, clear filters -- and two on the
+    """Five callbacks on the table -- expand/collapse, the refresh gate (revisions, held
+    while a term cell is selected), render (collapse, filter/sort view, cell edits, the
+    revisions the gate lets through), headline, clear filters -- and two on the
     Option-terms editor (prefill, save). See the module docstring for each mechanism."""
     from dash import ctx, no_update
     from dash.exceptions import MissingCallbackContextException, PreventUpdate
@@ -1346,6 +1404,24 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         return sorted(current)
 
     @app.callback(
+        Output(REFRESH_ID, "data"),
+        Output(REFRESH_NOTE_ID, "children"),
+        Input(DATA_REVISION_ID, "data"),
+        Input(BOOK_REVISION_ID, "data"),
+        Input(TABLE_ID, "active_cell"),
+        State(REFRESH_ID, "data"),
+    )
+    def _gate_refresh(data_rev, book_rev, active_cell, released):
+        """The ONLY listener of the revision stores on this table's behalf, and it does not
+        output to the table: dash-table turns the cell being typed into into a label, text
+        lost, for as long as a callback that does is in flight (module docstring). So a
+        revision is passed on to `_render` -- through `REFRESH_ID` -- only while the
+        selection is on no Strike / Type / Payoff cell; `active_cell` is an Input so that
+        moving off such a cell lets a held revision through at once. No database access."""
+        token, note = refresh_gate(active_cell, data_rev, book_rev, released)
+        return (no_update if token is None else token), note
+
+    @app.callback(
         Output(TABLE_ID, "data"),
         Output(EDIT_STATUS_ID, "children"),
         Output(VIEW_NOTE_ID, "children"),
@@ -1353,13 +1429,12 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         Input(TABLE_ID, "filter_query"),
         Input(TABLE_ID, "sort_by"),
         Input(TABLE_ID, "data_timestamp"),
-        Input(DATA_REVISION_ID, "data"),
-        Input(BOOK_REVISION_ID, "data"),
+        Input(REFRESH_ID, "data"),   # never the revision stores themselves: `_gate_refresh`
         State(TABLE_ID, "data"),
         State(TABLE_ID, "data_previous"),
         State(date_picker_id, "date"),
     )
-    def _render(collapsed, filter_query, sort_by, _edited_at, _data_rev, _book_rev, rows, previous, as_of_date):
+    def _render(collapsed, filter_query, sort_by, _edited_at, _refresh, rows, previous, as_of_date):
         # Not `prevent_initial_call`: a rebuilt sub-tab comes back with the session's
         # filter / sort / collapse state, and the rows must match it from the start.
         if not as_of_date:
@@ -1372,11 +1447,9 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         except sqlite3.OperationalError:
             raise PreventUpdate
         note = FLAT_VIEW_NOTE if view_is_flat(filter_query, sort_by) else ""
-        revision_only = bool(triggered) and triggered <= {f"{DATA_REVISION_ID}.data", f"{BOOK_REVISION_ID}.data"}
+        revision_only = bool(triggered) and triggered <= {f"{REFRESH_ID}.data"}
         if revision_only and records == rows:
-            # Nothing on screen changed: leave the table alone, so a Bloomberg write never
-            # interrupts a cell that is being typed into.
-            return no_update, no_update, note
+            return no_update, no_update, note  # nothing on screen changed: leave the table alone
         return records, (status if edited else no_update), note
 
     @app.callback(

@@ -488,7 +488,8 @@ def test_status_line_is_built_from_the_status_dict(monkeypatch):
     assert "connected" in line and "not connected" not in line
     assert f"last pull {T0.astimezone().strftime('%H:%M:%S')}" in line
     assert "212 marks written, 3 failed" in line
-    assert line.endswith("pulls automatically every 2 min")
+    assert line.endswith("pulls automatically every 2 minutes")
+    assert "took" not in line                                # no timings in the status file: nothing said
 
     down = feed_controls.feed_headline(
         _status(T0, connected=False, reason="no Bloomberg API service on localhost:8194"), 120,
@@ -508,14 +509,52 @@ def test_cadence_words_come_from_the_feed_interval_never_a_literal(monkeypatch):
     assert feed_controls.cadence_words(live.INTERVAL_SECONDS) in feed_controls.feed_headline(
         _status(T0), feed_running=True)
     monkeypatch.setattr(live, "INTERVAL_SECONDS", 300)
-    assert feed_controls.feed_headline(_status(T0), feed_running=True).endswith("pulls automatically every 5 min")
+    assert feed_controls.feed_headline(_status(T0), feed_running=True).endswith("pulls automatically every 5 minutes")
+    monkeypatch.setattr(live, "INTERVAL_SECONDS", 900)       # the feed's 15-minute cadence
+    assert feed_controls.feed_headline(_status(T0), feed_running=True).endswith("pulls automatically every 15 minutes")
 
     class _Feed:
         interval = 45
 
     assert feed_controls.feed_interval_seconds(_Feed()) == 45   # a running feed's own interval wins
     assert (feed_controls.cadence_words(45), feed_controls.cadence_words(90), feed_controls.cadence_words(3600)) == \
-        ("every 45 s", "every 1 min 30 s", "every 60 min")
+        ("every 45 s", "every 1 min 30 s", "every 60 minutes")
+    assert (feed_controls.cadence_words(900), feed_controls.cadence_words(60)) == ("every 15 minutes", "every minute")
+
+
+def test_last_pull_duration_is_in_the_headline_only_when_the_status_file_has_it():
+    now = T0 + timedelta(minutes=1)
+    timed = _status(T0, timings={"session": 1.2, "spot": 3.1, "forwards": 21.4, "total": 48.3})
+    line = feed_controls.feed_headline(timed, 900, feed_running=True, now=now)
+    assert "212 marks written, 3 failed · last pull took 48 s · pulls automatically every 15 minutes" in line
+    assert "last pull took 3.4 s" in feed_controls.feed_headline(_status(T0, timings={"total": 3.42}), 900, now=now)
+    for absent in ({}, {"timings": None}, {"timings": {}}, {"timings": {"spot": 2.0}},
+                   {"timings": {"total": "n/a"}}, {"timings": "12"}):
+        assert "took" not in feed_controls.feed_headline(_status(T0, **absent), 900, feed_running=True, now=now)
+    # a pull that did not connect took no pull's worth of time
+    down = _status(T0, connected=False, reason="no port", timings={"total": 30.0})
+    assert "took" not in feed_controls.feed_headline(down, 900, feed_running=True, now=now)
+
+
+def test_safety_net_timers_follow_the_feed_interval_and_the_pull_poll_does_not(monkeypatch):
+    from data.bloomberg import live
+    from ui.tabs import cash_ladder, market_data
+    # the Ladder's and the Market data tab's own timers are one feed cycle, not a typed-in number
+    assert cash_ladder.REFRESH_MS == market_data.REFRESH_MS == live.INTERVAL_SECONDS * 1000
+    monkeypatch.setattr(live, "INTERVAL_SECONDS", 900)
+    assert feed_controls.safety_refresh_ms() == 900_000
+    # the status line under the button re-reads the status file every minute at most ...
+    assert feed_controls.status_refresh_ms() == 60_000
+    monkeypatch.setattr(live, "INTERVAL_SECONDS", 20)
+    assert feed_controls.status_refresh_ms() == 20_000
+    # ... and the wait after a "Pull Bloomberg now" click stays a 2-second poll, whatever the cadence
+    assert feed_controls.PULL_POLL_MS == 2_000
+    poll = next(c for c in feed_controls.plumbing() if getattr(c, "id", None) == feed_controls.PULL_POLL_ID)
+    assert poll.interval == 2_000
+    # the feed module cannot be imported: 15 minutes, not a crash
+    monkeypatch.setattr(feed_controls, "feed_interval_seconds", lambda feed=None: None)
+    assert feed_controls.safety_refresh_ms() == 900_000
+    assert feed_controls.status_refresh_ms() == 60_000
 
 
 def test_report_already_on_file_at_the_click_is_never_the_requested_pull():

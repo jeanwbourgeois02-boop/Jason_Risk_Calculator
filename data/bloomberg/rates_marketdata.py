@@ -15,10 +15,11 @@ Two source implementations, both satisfying the same informal interface
     ois_snapshot_v1.json for the shape); used by tests and for offline work.
     Mirrors the reference project's FileSource pattern.
 
-NOTE on sessions: RatesBloombergSource opens its OWN blpapi.Session, separate
-from pull_marks.py's session. This is deliberate for this task -- merging the
-two into one shared session is flagged as a follow-up and is tracked by the
-housekeeper in docs/open-questions.md, not addressed here.
+NOTE on sessions: used on its own (CLI, tests) RatesBloombergSource opens its OWN
+blpapi.Session. Since 2026-09-21 the live pull (data/bloomberg/live.py) passes
+it the session it already opened for the FX marks (`session=` / `service=`), so
+one cycle opens one session instead of three; a borrowed session is left open
+by `close()`.
 
 get_bbg_curve is for reconciliation only, mirroring how CLAUDE.md treats
 BBG_BDH as reconciliation-only for PAR_RATE/PV_USD/DV01_USD (and BNP_BVAL for
@@ -50,8 +51,11 @@ _MIN_QUOTES = 4
 _MAX_CONSECUTIVE_TIMEOUTS = 3
 # Every request carries its own blpapi.CorrelationId (2026-09-18): a late reply to an
 # earlier, timed-out request on the same session is then discarded instead of being read
-# as this request's answer (same discipline as data/bloomberg/pull_marks.py).
-_CORRELATION_COUNTER = __import__("itertools").count(1)
+# as this request's answer (same discipline as data/bloomberg/pull_marks.py). The ids
+# start at 1,000,000,001 (2026-09-21): the live pull now lends this source the session its
+# FX requests just used, and an id still pending there (pull_marks counts from 1, the vol
+# feed from 2,000,000,001) must never be sent again on the same session.
+_CORRELATION_COUNTER = __import__("itertools").count(1_000_000_001)
 
 
 def _element_message(el) -> str:
@@ -504,13 +508,19 @@ def build_histdata_spec(
 
 class RatesBloombergSource:
     """Live blpapi wrapper for OIS curve quotes, fixings and Bloomberg's own
-    reconciliation curve. Opens its own blpapi.Session -- see module docstring."""
+    reconciliation curve. Opens its own blpapi.Session -- see module docstring -- unless
+    it is handed one: `session` / `service` (2026-09-21) are an already started session and
+    its opened //blp/refdata service, as data/bloomberg/live.py's pull cycle passes so the
+    FX, rates and vol steps share one session. A borrowed session is never stopped by
+    `close()`; whoever opened it stops it."""
 
     def __init__(
         self,
         host: str = "localhost",
         port: int = 8194,
         timeout_ms: int = 30000,
+        session: Any = None,
+        service: Any = None,
     ) -> None:
         try:
             import blpapi  # noqa: F401
@@ -524,13 +534,15 @@ class RatesBloombergSource:
         self.host = host
         self.port = port
         self.timeout_ms = timeout_ms
+        self._owns_session = session is None or service is None
+        if not self._owns_session:
+            self._session, self._service = session, service
+            return
 
         session_options = blpapi.SessionOptions()
         session_options.setServerHost(host)
         session_options.setServerPort(port)
-        # Own session: deliberately not shared with pull_marks.py's session -- see
-        # module docstring. Follow-up to merge is tracked by the housekeeper in
-        # docs/open-questions.md, not addressed here.
+        # Own session: nobody lent us one (CLI, tests) -- see module docstring.
         self._session = blpapi.Session(session_options)
 
         if not self._session.start():
@@ -547,6 +559,8 @@ class RatesBloombergSource:
         return f"RatesBloombergSource({self.host}:{self.port})"
 
     def close(self) -> None:
+        if not self._owns_session:
+            return  # borrowed from the live pull cycle, which stops it itself
         try:
             self._session.stop()
         except Exception:  # noqa: BLE001

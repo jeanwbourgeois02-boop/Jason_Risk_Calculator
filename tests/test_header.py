@@ -408,6 +408,188 @@ def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
     assert caption.startswith("Daily needs the 2026-09-16 close: 1 of 1 trades open that day")
     assert "backfill" in caption
     assert "2026-09-17" not in caption
+    # an in-memory database has no status file: the "nothing known" sentence, and never an
+    # instruction to run something no screen can run
+    assert "needed marks) — the backfill fills past closes by itself after each Bloomberg pull" in caption
+    assert "run the" not in caption and "Market data tab" not in caption
+
+
+# ------------------------------------------------- why the past close is missing (2026-09-21)
+# The caption ended "run the Bloomberg backfill (Market data tab)"; no screen has such a
+# control (the backfill runs by itself after every feed cycle). It now ends with what the
+# backfill itself published under status["backfill"]. Every key may be absent.
+
+DAY = "2026-09-14"
+
+
+def test_past_close_says_the_backfill_is_running_with_the_days_remaining():
+    assert header.past_close_explanation({"running": True, "remaining": 4}, DAY) == \
+        "the Bloomberg backfill is filling past closes now (4 days remaining)"
+    assert header.past_close_explanation({"running": True, "remaining": 1}, DAY).endswith("now (1 day remaining)")
+    assert header.past_close_explanation({"running": True}, DAY) == \
+        "the Bloomberg backfill is filling past closes now"
+
+
+def test_past_close_says_what_the_backfill_recorded_for_that_date():
+    no_closes = {"running": False, "remaining": 0, "days": {DAY: {"status": "NO_CLOSES", "missing_count": 0,
+                                                                   "missing": []}}}
+    assert header.past_close_explanation(no_closes, DAY) == \
+        f"Bloomberg returned no closes for {DAY} (a holiday, or no data for that date)"
+
+    reasons = ["no forward-curve history for USDTWD", "no PX_SETTLE history for ESU6 Index on 2026-09-14",
+               "2027-03-17 outside curve for EURSEK"]
+    incomplete = {"days": {DAY: {"status": "INCOMPLETE", "missing_count": 37, "missing": reasons}},
+                  "last_run": "2026-09-21T09:15:00"}
+    text = header.past_close_explanation(incomplete, DAY)
+    assert text == (f"the Bloomberg backfill reached {DAY} but could not fill 37 marks: "
+                    f"{reasons[0]}; {reasons[1]} (and 35 more)")
+    assert reasons[2] not in text                                    # the first reason or two, not the list
+    # another date's entry says nothing about this one
+    assert "none has reached this date yet" in header.past_close_explanation(incomplete, "2026-09-11")
+
+    done = {"days": {DAY: {"status": "DONE", "missing_count": 0, "missing": []}}}
+    assert "reports 2026-09-14 as filled" in header.past_close_explanation(done, DAY)
+    bare = {"days": {DAY: {"status": "INCOMPLETE"}}}               # no count, no reasons: still a sentence
+    assert "could not fill every mark (no reason recorded)" in header.past_close_explanation(bare, DAY)
+
+
+def test_past_close_says_bloomberg_is_not_reachable_with_the_reason():
+    why = "no Bloomberg API service on localhost:8194 ([WinError 10061] refused)"
+    assert header.past_close_explanation({"running": False, "reason": why}, DAY) == \
+        f"past closes come from Bloomberg, and the terminal is not reachable ({why})"
+    # a run that raised is not called an unreachable terminal
+    failed = header.past_close_explanation({"running": False, "remaining": 0,
+                                            "reason": "auto-backfill failed: ValueError('x')"}, DAY)
+    assert "its last run failed (auto-backfill failed: ValueError('x'))" in failed and "not reachable" not in failed
+    # what was recorded for the date is still said when the terminal has since gone away
+    both = header.past_close_explanation(
+        {"running": False, "reason": why, "days": {DAY: {"status": "NO_CLOSES"}}}, DAY)
+    assert both.startswith("Bloomberg returned no closes for 2026-09-14") and "not reachable" in both
+
+
+def test_past_close_with_nothing_known_says_the_backfill_runs_by_itself():
+    expected = "the backfill fills past closes by itself after each Bloomberg pull; none has reached this date yet"
+    for nothing in (None, {}, {"running": False}, {"running": False, "remaining": 0, "reason": ""},
+                    {"days": "not a dict"}, "not a dict"):
+        assert header.past_close_explanation(nothing, DAY) == expected
+
+
+def test_no_missing_close_sentence_tells_the_user_to_run_the_backfill():
+    blocks = (None, {"running": True, "remaining": 2}, {"running": False, "reason": "blpapi is not installed"},
+              {"days": {DAY: {"status": "INCOMPLETE", "missing_count": 1, "missing": ["no curve"]}}})
+    for block in blocks:
+        text = header.past_close_explanation(block, DAY)
+        assert "run the" not in text and "Market data tab" not in text
+
+
+def test_backfill_status_reads_the_status_file_beside_the_database(tmp_path):
+    import json
+    from data.bloomberg.live import status_path
+    from ui.app import connect_readonly
+
+    def block_for(db_path):
+        ro = connect_readonly(db_path)
+        try:
+            return header.backfill_status(ro)
+        finally:
+            ro.close()
+
+    assert header.backfill_status(None) == {}
+    assert header.backfill_status(schema.connect()) == {}                      # in-memory: no file to read
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    assert block_for(db) == {}                                                 # no status file yet
+    status_path(db).write_text(json.dumps({"connected": True, "time": "t"}), encoding="utf-8")
+    assert block_for(db) == {}                                                 # a file with no backfill key
+    block = {"running": True, "remaining": 3}
+    status_path(db).write_text(json.dumps({"connected": True, "backfill": block}), encoding="utf-8")
+    assert block_for(db) == block
+    status_path(db).write_text("{ half written", encoding="utf-8")
+    assert block_for(db) == {}                                                 # unreadable: nothing known, no raise
+
+
+def test_reference_reason_keeps_its_head_and_the_needed_marks_detail(tmp_path):
+    """The pasted 5d sentence, end to end from a status file: same head, same
+    "(N of M needed marks)", and the backfill's own report where "run the Bloomberg
+    backfill (Market data tab)" used to be."""
+    import json
+    from data.bloomberg.live import status_path
+    from ui.app import connect_readonly
+
+    db = tmp_path / "risk.db"
+    conn = schema.connect(db)
+    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
+    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-09-01", 1_000_000, 147.0)
+    _insert_legs(conn, [
+        ("t1", 1, "FX_NEAR", "USD", 1_000_000, "2026-09-01", "2026-09-30", 147.0, 1),
+        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-09-01", "2026-09-30", 147.0, 1),
+    ])
+    conn.commit()
+    conn.close()
+    status_path(db).write_text(json.dumps({"connected": True, "backfill": {
+        "running": False, "remaining": 0, "last_run": "2026-09-21T09:15:00",
+        "days": {DAY: {"status": "INCOMPLETE", "missing_count": 2,
+                       "missing": ["no forward-curve history for USDJPY on 2026-09-14"]}}}}), encoding="utf-8")
+
+    ro = connect_readonly(db)
+    try:
+        sentence = header._reference_reason(ro, DAY, "5d")(576, 577)
+    finally:
+        ro.close()
+    assert sentence.startswith("5d needs the 2026-09-14 close: 576 of 577 trades open that day have no official "
+                               "mark dated 2026-09-14 (no official ")
+    assert " needed marks) — the Bloomberg backfill reached 2026-09-14 but could not fill 2 marks: " \
+           "no forward-curve history for USDJPY on 2026-09-14 (and 1 more))" in sentence
+    assert "run the" not in sentence and "Market data tab" not in sentence
+    # a block the caller already read is used as given (one status read for all the cards)
+    given = header._reference_reason(schema.connect(), DAY, "MTD", {"running": True, "remaining": 6})(3, 4)
+    assert given == ("MTD needs the 2026-09-14 close: 3 of 4 trades open that day have no official mark dated "
+                     "2026-09-14 — the Bloomberg backfill is filling past closes now (6 days remaining)")
+
+
+def test_blotter_strip_missing_close_sentence_says_the_same_thing(tmp_path):
+    """`ui/tabs/blotter_pricing.py::_reference_missing_reason` carried the same "run the
+    Bloomberg backfill (Market data tab)"; it now ends with the header's explanation."""
+    import json
+    from data.bloomberg.live import status_path
+    from ui.app import connect_readonly
+    from ui.tabs import blotter_pricing
+
+    unpriced = _vb_frame([("T2", "FX_FWD", "no FWD_OUTRIGHT mark for T2", float("nan"))])
+    nothing_known = blotter_pricing._reference_missing_reason(unpriced, DAY, 2, 3)
+    assert nothing_known == ("needs the 2026-09-14 close: 2 of 3 trades open that day have no official mark there "
+                             "(1 forward: no FWD_OUTRIGHT) -- the backfill fills past closes by itself after each "
+                             "Bloomberg pull; none has reached this date yet")
+
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    status_path(db).write_text(json.dumps({"backfill": {"running": True, "remaining": 9}}), encoding="utf-8")
+    ro = connect_readonly(db)
+    try:
+        running = blotter_pricing._reference_missing_reason(unpriced, DAY, 2, 3, ro)
+    finally:
+        ro.close()
+    assert running.endswith(" -- the Bloomberg backfill is filling past closes now (9 days remaining)")
+    assert "run the" not in running and "Market data tab" not in running
+
+
+def test_market_data_tab_has_no_control_that_runs_the_backfill():
+    """Why no sentence may send the user there to run it: the tab's only Bloomberg buttons
+    are "Pull now" and "Check Bloomberg connection"."""
+    from ui.tabs import market_data
+
+    def buttons(node, found):
+        if type(node).__name__ == "Button":
+            found.append(str(node.children))
+        children = getattr(node, "children", None)
+        for child in (children if isinstance(children, (list, tuple)) else [children]):
+            if hasattr(child, "children"):
+                buttons(child, found)
+        return found
+
+    labels = buttons(market_data.build_layout(default_date="2026-09-21"), [])
+    assert "Pull now" in labels
+    assert not [label for label in labels if "backfill" in label.lower()]
 
 
 def test_priced_day_sums_priced_rows_and_counts_excluded():

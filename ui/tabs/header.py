@@ -81,7 +81,16 @@ Design choices (no one to ask, so noted here):
   really nothing. `_priced_diff` now reports such a period as unavailable, and the
   caption (`_reference_reason`) names the REFERENCE date and what it is missing --
   "Daily needs the 2026-09-16 close: no official FWD_OUTRIGHT/SPOT for 2026-09-16 (N of
-  M needed marks) — run the Bloomberg backfill" -- instead of a sentence about today.
+  M needed marks) — <why>" -- instead of a sentence about today.
+
+  Why the close is missing (2026-09-21): the caption used to end "run the Bloomberg
+  backfill (Market data tab)", which no one can do -- no screen has such a control; the
+  backfill runs by itself after every feed cycle. It now ends with what the backfill
+  itself reports in the Bloomberg status file (`backfill_status` /
+  `past_close_explanation`): filling now with the days remaining, what it recorded for
+  that date (no closes from Bloomberg, or the marks it could not fill and why), the
+  terminal not being reachable, or that it has not reached the date yet. Text only: no
+  figure changes.
 """
 from __future__ import annotations
 
@@ -230,20 +239,109 @@ def _missing_marks_reason(conn: sqlite3.Connection, as_of: str,
             f"({len(not_official)} of {len(df)} needed marks) — {action}")
 
 
-def _reference_reason(conn: sqlite3.Connection, ref_iso: str, period_title: str) -> Callable[[int, int], str]:
+def backfill_status(conn: Optional[sqlite3.Connection]) -> dict:
+    """The "backfill" block of the Bloomberg status file that sits beside the database
+    `conn` has open (`data.bloomberg.live.read_status`: one small local JSON read, never a
+    Bloomberg session). {} when there is nothing to read: no connection, an in-memory
+    database, no status file yet, a file written before the backfill published anything,
+    or the feed module mid-edit. Never raises."""
+    try:
+        path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+        if not path:
+            return {}
+        from data.bloomberg.live import read_status
+        block = (read_status(path) or {}).get("backfill")
+        return block if isinstance(block, dict) else {}
+    except Exception:  # noqa: BLE001 -- a reason sentence must never take a figure down
+        return {}
+
+
+_BACKFILL_REASONS_SHOWN = 2
+
+
+def _plural(n, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def _backfill_day_words(entry: dict, day: str) -> str:
+    """What the backfill recorded for one past date (`backfill["days"][day]`:
+    `{"status": DONE | NO_CLOSES | INCOMPLETE, "missing_count": n, "missing": [...]}`),
+    in plain words. Repeats the backfill's own reasons, the first two only."""
+    status = str(entry.get("status") or "").upper()
+    if status == "NO_CLOSES":
+        return f"Bloomberg returned no closes for {day} (a holiday, or no data for that date)"
+    if status == "DONE":
+        return f"the Bloomberg backfill reports {day} as filled, yet these marks are not on file"
+    missing = entry.get("missing")
+    reasons = [str(m) for m in missing if m] if isinstance(missing, (list, tuple)) else []
+    try:
+        count = int(entry.get("missing_count"))
+    except (TypeError, ValueError):
+        count = len(reasons)
+    if not reasons:
+        what = _plural(count, "mark") if count else "every mark"
+        return f"the Bloomberg backfill reached {day} but could not fill {what} (no reason recorded)"
+    shown = reasons[:_BACKFILL_REASONS_SHOWN]
+    more = f" (and {count - len(shown)} more)" if count > len(shown) else ""
+    what = _plural(count, "mark") if count else "every mark"
+    return f"the Bloomberg backfill reached {day} but could not fill {what}: {'; '.join(shown)}{more}"
+
+
+def past_close_explanation(backfill: Optional[dict], day: str) -> str:
+    """Why a PAST date's close is not on file, from the backfill's own report in the
+    status file (`backfill_status`). A past close only ever arrives through the backfill
+    (the live pull writes today's marks), and the backfill runs by itself after every feed
+    cycle (`data.bloomberg.live.LiveFeed` -> `backfill.start_auto_backfill`); no screen has
+    a control that runs it, so the sentence says what is happening, never "run the
+    backfill" (user, 2026-09-21: the old caption told them to do something they cannot).
+
+    Every key may be absent (an older status file, a feed that never started). What is
+    known is said, in this order, joined with "; ":
+      - running           -> it is filling past closes now, with the days remaining;
+      - an entry for `day` -> what the backfill recorded for that date (`_backfill_day_words`);
+      - not running, with a reason -> past closes come from Bloomberg and the terminal is
+        not reachable (or the last run failed), with that reason;
+      - nothing known     -> it runs by itself after each pull and has not reached this date."""
+    backfill = backfill if isinstance(backfill, dict) else {}
+    running = bool(backfill.get("running"))
+    parts = []
+    if running:
+        remaining = backfill.get("remaining")
+        left = f" ({_plural(remaining, 'day')} remaining)" if isinstance(remaining, int) and remaining > 0 else ""
+        parts.append(f"the Bloomberg backfill is filling past closes now{left}")
+    days = backfill.get("days")
+    entry = days.get(day) if isinstance(days, dict) else None
+    if isinstance(entry, dict):
+        parts.append(_backfill_day_words(entry, day))
+    reason = str(backfill.get("reason") or "").strip()
+    if not running and reason:
+        if "failed" in reason.lower():
+            parts.append(f"past closes come from the Bloomberg backfill, and its last run failed ({reason})")
+        else:
+            parts.append(f"past closes come from Bloomberg, and the terminal is not reachable ({reason})")
+    if not parts:
+        parts.append("the backfill fills past closes by itself after each Bloomberg pull; "
+                     "none has reached this date yet")
+    return "; ".join(parts)
+
+
+def _reference_reason(conn: sqlite3.Connection, ref_iso: str, period_title: str,
+                      backfill: Optional[dict] = None) -> Callable[[int, int], str]:
     """Why a period DIFFERENCE cannot be formed (2026-09-18): most trades open on the
     reference date are unpriced THERE, while today's book may be fully priced. Returns
     a `(n_blocked, n_open_then) -> sentence` builder for `_priced_diff`, naming the
     reference date, the count, and -- when the inventory can tell -- which mark types
-    and how many are missing on it; always points at the backfill, since a past day's
-    close only ever arrives that way (the live pull only writes today's marks)."""
-    action = "run the Bloomberg backfill (Market data tab)"
-    detail = _missing_marks_reason(conn, ref_iso, action)
+    and how many are missing on it; it ends with what the backfill itself reports about
+    that date (`past_close_explanation`), since a past day's close only ever arrives that
+    way (the live pull only writes today's marks). `backfill` is the status block when the
+    caller has already read it (one read for all the cards), else it is read here."""
+    explanation = past_close_explanation(backfill_status(conn) if backfill is None else backfill, ref_iso)
+    detail = _missing_marks_reason(conn, ref_iso, explanation)
 
     def build(n_blocked: int, n_open: int) -> str:
         head = (f"{period_title} needs the {ref_iso} close: {n_blocked} of {n_open} trades open that day "
                 f"have no official mark dated {ref_iso}")
-        return f"{head} ({detail})" if detail else f"{head} — {action}"
+        return f"{head} ({detail})" if detail else f"{head} — {explanation}"
     return build
 
 
@@ -457,13 +555,14 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         "ytd": _last_business_day_of_prev_year(d, holidays).isoformat(),
     }
     entries = {}
+    backfill = backfill_status(conn)  # one read of the status file for every card's missing-close reason
     for key in ("daily", "d5", "mtd", "ytd"):
         ref_iso = ref_dates[key]
         df_ref = df_t1 if key == "daily" else priced_value_book(conn, ref_iso)[0]
         entries[key] = _priced_diff(df_today, df_ref, _root_reason(conn, as_of), ref_iso,
-                                    _reference_reason(conn, ref_iso, _PERIOD_TITLES[key]))
+                                    _reference_reason(conn, ref_iso, _PERIOD_TITLES[key], backfill))
     entries["previous_day"] = _priced_diff(df_t1, df_t2, _root_reason(conn, t1_iso), t2_iso,
-                                           _reference_reason(conn, t2_iso, _PERIOD_TITLES["previous_day"]))
+                                           _reference_reason(conn, t2_iso, _PERIOD_TITLES["previous_day"], backfill))
 
     trading_rows = df_today[df_today["trade_date"] == as_of] if not df_today.empty else df_today
     entries["trading"] = _priced_single(

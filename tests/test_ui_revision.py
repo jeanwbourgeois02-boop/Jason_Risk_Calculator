@@ -18,6 +18,7 @@ from ui import app as uiapp  # noqa: E402
 from ui import revision  # noqa: E402
 from ui.tabs import blotter_pricing as bp  # noqa: E402
 from ui.tabs import header  # noqa: E402
+from ui.tabs import options  # noqa: E402
 
 
 def _db(tmp_path, name="risk.db") -> Path:
@@ -148,8 +149,13 @@ def test_every_view_listens_to_the_revision_signal(tmp_path):
                    "market-data-body", "blotter-datatable-total",
                    # refreshed IN PLACE rather than by a rebuild of their sub-tab (2026-09-18):
                    "blotter-notices", "blotter-strip-options", "blotter-strip-rates",
-                   "options-datatable", "rates-datatable"):
+                   # the Options table hears it through its refresh gate, which holds a
+                   # revision while a Strike / Type / Payoff cell is being typed (2026-09-21):
+                   options.REFRESH_ID, "rates-datatable"):
         assert output in joined, f"{output} does not listen to the revision signal"
+    gated = [key for key, spec in app.callback_map.items()
+             if options.REFRESH_ID in {i["id"] for i in spec["inputs"]}]
+    assert any("options-datatable" in key for key in gated), "options-datatable does not listen to its refresh gate"
 
 
 def test_poll_publishes_a_settled_change_and_leaves_an_unchanged_file_alone(tmp_path):

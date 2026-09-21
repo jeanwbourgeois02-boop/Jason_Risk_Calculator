@@ -68,10 +68,10 @@ def test_unreachable_bloomberg_reason_is_kept_and_a_started_feed_has_none(tmp_pa
     assert f"not started: {why}" in capsys.readouterr().out
 
     class _Feed:
-        interval = live.INTERVAL_SECONDS
+        interval = 900
 
     feed = _Feed()
     monkeypatch.setattr(live, "start_feed_if_available", lambda *a, **k: (feed, ""))
     assert uiapp.start_bloomberg_feed_with_reason(tmp_path / "risk.db") == (feed, "")
     # the console line's cadence is read from the feed, not typed in
-    assert f"started (every {live.INTERVAL_SECONDS // 60} min)" in capsys.readouterr().out
+    assert "started (every 15 minutes)" in capsys.readouterr().out

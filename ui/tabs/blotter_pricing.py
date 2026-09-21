@@ -426,13 +426,17 @@ def _nothing_priced_reason(unpriced: pd.DataFrame, day: str) -> str:
     return f"nothing priced on {day}: {_unpriced_breakdown(unpriced)} (e.g. {sample})"
 
 
-def _reference_missing_reason(b_unpriced: pd.DataFrame, ref_day: str, n_blocked: int, n_open: int) -> str:
+def _reference_missing_reason(b_unpriced: pd.DataFrame, ref_day: str, n_blocked: int, n_open: int,
+                              conn: Optional[sqlite3.Connection] = None) -> str:
     """Why a period difference cannot be formed: most trades open on `ref_day` are
-    unpriced there (mirrors `ui/tabs/header.py::_reference_reason`, row-scoped). Points
-    at the backfill, since a past day's close only ever arrives that way."""
+    unpriced there (mirrors `ui/tabs/header.py::_reference_reason`, row-scoped). Ends with
+    what the backfill itself reports about that date (the header's
+    `past_close_explanation`, read from the status file beside `conn`'s database), since a
+    past day's close only ever arrives that way and no screen has a control that runs it."""
+    from ui.tabs.header import backfill_status, past_close_explanation
     breakdown = _unpriced_breakdown(b_unpriced)
     return (f"needs the {ref_day} close: {n_blocked} of {n_open} trades open that day have no official mark there"
-            + (f" ({breakdown})" if breakdown else "") + " -- run the Bloomberg backfill (Market data tab)")
+            + (f" ({breakdown})" if breakdown else "") + " -- " + past_close_explanation(backfill_status(conn), ref_day))
 
 
 def _scoped_frame(conn: sqlite3.Connection, date: str, trade_ids) -> pd.DataFrame:
@@ -531,7 +535,7 @@ def _priced_diff_scoped(conn: sqlite3.Connection, date_a: str, date_b: str, trad
         b_unpriced = df_b[df_b["reason"] != ""] if not df_b.empty else df_b
         n_blocked, n_open = len(blocked_ids), len(blocked_ids) + len(contributing_b_ids)
         return {"value": float("nan"), "ref_date": ref_date, "available": False,
-                "reason": _reference_missing_reason(b_unpriced, note_label, n_blocked, n_open),
+                "reason": _reference_missing_reason(b_unpriced, note_label, n_blocked, n_open, conn),
                 "excluded_summary": "", "excluded_detail": ""}
 
     if not contributing_a_ids:

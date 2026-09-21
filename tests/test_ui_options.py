@@ -394,12 +394,18 @@ def test_format_rows_column_set_and_order():
         df = options.option_rows(conn, AS_OF)
         records, _style = options.format_rows(df)
         expected_tail = ["position", "notional", "mktval", "mktpx", "delta", "theta",
-                          "gamma", "vega", "expiry", "underlying", "strike", "undfwdpx", "rho"]
+                          "gamma", "vega", "expiry", "underlying", "undfwdpx", "rho"]
         keys = list(records[0].keys())
         display_keys = [k for k in keys if k in expected_tail]
         assert display_keys == expected_tail
         assert keys[0] == "level"  # hidden bookkeeping fields also travel with each row
         assert "label" in keys
+        # Strike left its MARS slot (2026-09-21): there it was the 23rd column, off-screen,
+        # while the row's note says "type it in the Strike cell". The three typed terms sit
+        # together right after the structure name, in the order they are filled in.
+        shown = options.DISPLAY_COLUMNS
+        assert shown[:5] == ["label", "side", "option_type", "payoff", "strike"]
+        assert all(shown.index(c) < 5 for c in options.EDITABLE_COLUMNS)
     finally:
         conn.close()
 
@@ -829,7 +835,7 @@ def test_register_callbacks_toggle_and_render_via_wrapped_functions(tmp_path, ui
                      viewport, []) is dash.no_update
 
     data, status, note = _with_trigger(f"{options.COLLAPSED_STORE_ID}.data", render_fn,
-                                       new_collapsed, "", [], None, None, None, None, None, AS_OF)
+                                       new_collapsed, "", [], None, None, None, None, AS_OF)
     assert not any(r["level"] == "LEG" for r in data) and note == ""
     assert status is dash.no_update
 
@@ -838,38 +844,171 @@ def test_register_callbacks_toggle_and_render_via_wrapped_functions(tmp_path, ui
     rows = copy.deepcopy(previous)
     next(r for r in rows if r["group_key"] == "D1")["strike"] = 152
     data, status, _note = _with_trigger(f"{options.TABLE_ID}.data_timestamp", render_fn,
-                                        ["PKG1"], "", [], 1, None, None, rows, previous, AS_OF)
+                                        ["PKG1"], "", [], 1, None, rows, previous, AS_OF)
     assert _terms(db_path)[0] == 152.0 and "Saved" in _status_text(status)
     assert next(r for r in data if r["group_key"] == "D1")["strike"] == 152.0
 
     # The same rows + previous on any OTHER trigger are not an edit (no phantom re-save).
     before = len(fake_pricer.calls)
     _with_trigger(f"{options.TABLE_ID}.filter_query", render_fn,
-                  ["PKG1"], "{notional} > 1", [], 1, None, None, rows, previous, AS_OF)
+                  ["PKG1"], "{notional} > 1", [], 1, None, rows, previous, AS_OF)
     assert len(fake_pricer.calls) == before
 
 
 def test_render_on_a_revision_that_changes_nothing_leaves_the_table_alone(tmp_path, ui_app_stub):
-    """A Bloomberg write that does not move any option number must not re-send `data`
-    (it would interrupt a cell being typed into); one that does, refreshes in place."""
-    from ui.revision import DATA_REVISION_ID
-
+    """A revision the gate lets through that does not move any option number does not
+    re-send `data`; one that does, refreshes in place."""
     db_path = _file_db(tmp_path)
     app = dash.Dash(__name__, suppress_callback_exceptions=True)
     options.register_callbacks(app, get_db_path=lambda: str(db_path))
     _spec, render_fn = _callback(app, f"{options.TABLE_ID}.data.")
     on_screen = _records(db_path, collapsed=["PKG1"])
-    args = (["PKG1"], "", [], None, "rev-2", None, on_screen, None, AS_OF)
-    data, status, _note = _with_trigger(f"{DATA_REVISION_ID}.data", render_fn, *args)
+    args = (["PKG1"], "", [], None, "rev-2|book-1", on_screen, None, AS_OF)
+    data, status, _note = _with_trigger(f"{options.REFRESH_ID}.data", render_fn, *args)
     assert data is dash.no_update and status is dash.no_update
 
     conn = sqlite3.connect(str(db_path))
     conn.execute("UPDATE marks SET value = 0.0070 WHERE instrument_id = 'EURUSD092226C-1' AND mark_type = 'PREMIUM'")
     conn.commit()
     conn.close()
-    data, _status, _note = _with_trigger(f"{DATA_REVISION_ID}.data", render_fn, *args)
+    data, _status, _note = _with_trigger(f"{options.REFRESH_ID}.data", render_fn, *args)
     assert next(r for r in data if r["group_key"] == "PKG1")["mktval"] == pytest.approx(
         (0.0070 - 0.0048) * 1_000_000.0 * 1.1050)
+
+
+# --------------------------------------------------------------------------- a revision never lands on a cell being typed into
+
+def _table_outputs(key):
+    """The props of the Options table a callback writes, from its `callback_map` key."""
+    outs = [part.split("@")[0] for part in key.strip(".").split("...") if part]
+    return {o.split(".", 1)[1] for o in outs if o.split(".", 1)[0] == options.TABLE_ID}
+
+
+def test_no_callback_that_writes_the_table_listens_to_a_revision_store(tmp_path):
+    """ROOT CAUSE of "make it so you can input strike in the table" (2026-09-21).
+    dash-table renders the active editable cell as a LABEL -- its input unmounted, the
+    typed text gone -- while any callback with `Output(table, "data")` is in flight, and
+    the renderer sets that state when the callback is DISPATCHED, whatever it returns. The
+    render callback listened to both revision stores, so every Bloomberg write, and the
+    data revision the Blotter publishes after each saved strike, wiped the strike being
+    typed. Structural guard: a revision may only reach the table through the gate."""
+    from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
+
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    options.register_callbacks(app, get_db_path=lambda: str(tmp_path / "unused.db"))
+    revisions = {DATA_REVISION_ID, BOOK_REVISION_ID}
+    listeners = []
+    for key, spec in app.callback_map.items():
+        listens = {d["id"] for d in spec["inputs"]} & revisions
+        if listens:
+            listeners.append(key)
+            assert not _table_outputs(key), (key, listens)
+    # exactly one listener in this module, the gate, and it listens to BOTH stores
+    gate_spec, _gate = _callback(app, f"{options.REFRESH_ID}.data")
+    assert listeners == [k for k in app.callback_map if f"{options.REFRESH_ID}.data" in k]
+    assert revisions <= {d["id"] for d in gate_spec["inputs"]}
+    assert (options.TABLE_ID, "active_cell") in {(d["id"], d["property"]) for d in gate_spec["inputs"]}
+    # the render callback hears of a revision through the gate's store, and only there
+    render_spec, _render = _callback(app, f"{options.TABLE_ID}.data.")
+    render_inputs = {d["id"] for d in render_spec["inputs"]}
+    assert options.REFRESH_ID in render_inputs and not (render_inputs & revisions)
+    # both new components are in the sub-tab's own layout, next to the table: a callback
+    # with an Output missing from the page is dropped by Dash without a word
+    conn = _make_db()
+    try:
+        ids = _component_ids(options.build_layout(conn, AS_OF))
+    finally:
+        conn.close()
+    assert {options.REFRESH_ID, options.REFRESH_NOTE_ID, options.TABLE_ID} <= ids
+
+
+def test_a_revision_arriving_while_a_strike_is_typed_is_held_and_the_edit_still_saves(tmp_path, ui_app_stub,
+                                                                                     fake_pricer):
+    db_path = _file_db(tmp_path)
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    options.register_callbacks(app, get_db_path=lambda: str(db_path))
+    _spec, gate_fn = _callback(app, f"{options.REFRESH_ID}.data")
+    _spec, render_fn = _callback(app, f"{options.TABLE_ID}.data.")
+    strike_col = options.DISPLAY_COLUMNS.index("strike")
+
+    # The table is up to date with revision d1|b1; the user clicks D1's Strike cell.
+    on_screen = _records(db_path, collapsed=["PKG1"])
+    d1_row = next(i for i, r in enumerate(on_screen) if r["group_key"] == "D1")
+    typing = {"row": d1_row, "column": strike_col, "column_id": "strike"}
+    token, note = gate_fn("d1", "b1", typing, "d1|b1")
+    assert token is dash.no_update and note == options.REFRESH_PAUSED_NOTE
+
+    # Bloomberg writes marks while "152" is half typed: two revisions, both HELD -- the
+    # gate answers no_update for its store, so `_render` (the only callback that writes
+    # the table) is never dispatched and the cell's input stays mounted.
+    before = db_path.stat().st_mtime_ns
+    for data_rev in ("d2", "d3"):
+        token, note = gate_fn(data_rev, "b1", typing, "d1|b1")
+        assert token is dash.no_update and note == options.REFRESH_PAUSED_NOTE
+    assert db_path.stat().st_mtime_ns == before and fake_pricer.calls == []   # the gate touches no database
+
+    # Enter: the edit commits and saves exactly as before the gate existed.
+    rows = copy.deepcopy(on_screen)
+    rows[d1_row]["strike"] = 152
+    data, status, _note = _with_trigger(f"{options.TABLE_ID}.data_timestamp", render_fn,
+                                        ["PKG1"], "", [], 1, "d1|b1", rows, on_screen, AS_OF)
+    assert _terms(db_path)[0] == 152.0 and fake_pricer.calls == [(AS_OF, "D1")]
+    assert "Saved USDJPY111926P-1" in _status_text(status)
+    assert next(r for r in data if r["group_key"] == "D1")["strike"] == 152.0    # shown at once, no gate involved
+
+    # Enter moved the selection one row down, still in the Strike column, where the next
+    # strike is about to be typed; the Blotter publishes the save as a data revision
+    # (`_publish_option_cell_edit`) and the poll follows with a book revision: all held.
+    below = {**typing, "row": d1_row + 1}
+    assert gate_fn("d4", "b1", below, "d1|b1")[0] is dash.no_update
+    assert gate_fn("d5", "b2", below, "d1|b1")[0] is dash.no_update
+    # The Type / Payoff dropdown cells are protected the same way (an open menu closes on a refresh).
+    for column_id in ("option_type", "payoff"):
+        assert gate_fn("d5", "b2", {"row": d1_row, "column": 2, "column_id": column_id}, "d1|b1")[0] is dash.no_update
+
+    # The selection leaves the term cells: the LATEST revision goes through, once.
+    elsewhere = {"row": d1_row, "column": 0, "column_id": "label"}
+    token, note = gate_fn("d5", "b2", elsewhere, "d1|b1")
+    assert token == "d5|b2" and note == ""
+    assert gate_fn("d5", "b2", elsewhere, "d5|b2") == (dash.no_update, "")        # already on screen: nothing to do
+    assert gate_fn("d6", "b2", None, "d5|b2") == ("d6|b2", "")                    # no selection at all: straight through
+    # ... and `_render` then refreshes the rows in place from the database.
+    data, status, _note = _with_trigger(f"{options.REFRESH_ID}.data", render_fn,
+                                        ["PKG1"], "", [], 1, "d5|b2", on_screen, None, AS_OF)
+    assert next(r for r in data if r["group_key"] == "D1")["strike"] == 152.0 and status is dash.no_update
+    assert fake_pricer.calls == [(AS_OF, "D1")]                                   # a refresh never saves or prices
+
+
+def test_refresh_gate_holds_on_the_three_term_columns_only():
+    for column_id in options.EDITABLE_COLUMNS:
+        assert options.cell_takes_typing({"row": 0, "column": 1, "column_id": column_id})
+        assert options.refresh_gate({"column_id": column_id}, "d2", "b1", "d1|b1") == (None, options.REFRESH_PAUSED_NOTE)
+    for active_cell in (None, {}, {"row": 0, "column": 0, "column_id": "label"}, {"column_id": "pnl_usd"}):
+        assert not options.cell_takes_typing(active_cell)
+        assert options.refresh_gate(active_cell, "d2", "b1", "d1|b1") == ("d2|b1", "")
+    assert options.refresh_gate(None, "d1", "b1", "d1|b1") == (None, "")
+    assert options.refresh_gate(None, None, None, None) == ("|", "")   # a page with no signature yet still renders
+
+
+def test_a_package_with_a_leg_that_needs_its_strike_starts_expanded():
+    """Collapsed, the flagged package row says "type it in the Strike cell" while its own
+    Strike cell takes no input and the leg that does is hidden."""
+    conn = _make_db()
+    try:
+        _insert_option_leg(conn, "O4", "PKG2", "EURUSD102226C-1", "EUR", "USD", 1_000_000.0,
+                            "2026-10-22", strike=1.12, option_type="CALL")
+        _insert_option_leg(conn, "O5", "PKG2", "EURUSD102226P-1", "EUR", "USD", -1_000_000.0,
+                            "2026-10-22", strike=0.0, option_type="PUT", marks=False)
+        conn.commit()
+        df = options.option_rows(conn, AS_OF)
+        assert options.default_collapsed_packages(df) == ["PKG1"]      # PKG2 stays open, PKG1 as before
+        layout = options.build_layout(conn, AS_OF)
+        table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+        leg = next(r for r in table.data if r["trade_id"] == "O5" and r["level"] == "LEG")
+        assert leg["is_leg"] == 1 and leg["strike"] is None and "no strike on file" in leg["note"]
+        assert not any(r["level"] == "LEG" and r["parent_key"] == "PKG1" for r in table.data)
+    finally:
+        conn.close()
 
 
 def test_clear_filters_callback_resets_filter_and_sort():

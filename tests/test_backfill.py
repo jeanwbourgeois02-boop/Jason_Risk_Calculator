@@ -526,3 +526,131 @@ def test_backfill_option_pair_shared_with_a_forward_gets_no_historical_forward_a
     assert [r[0] for r in conn.execute("SELECT settle_date FROM marks WHERE mark_type = 'FWD_OUTRIGHT'")] == ["2026-09-25"]
     from data.bloomberg.inventory import close_completeness
     assert bool(close_completeness(conn, "2026-09-08", "2026-09-08")["complete"].iloc[0]) is True
+
+
+# =========================================================================== 2026-09-21: no SETTLE_DT in history, points
+# Found from the Bloomberg PC ("5d n/a ... no official FUTURE_PX/FWD_OUTRIGHT/SPOT for
+# 2026-09-14"): SETTLE_DT is a static reference field that HistoricalDataRequest does not
+# serve, so every tenor of every past day was dropped and no past forward was ever written.
+# The tenor tickers' PX_LAST is also forward POINTS by the live tenor path's own account,
+# which the backfill read as outrights.
+def _usdjpy_db(tmp_path, settle="2026-10-01"):
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('j1','XLSX','USDJPY','FX_FWD','j1','2026-08-10',1e6,150.0,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("j1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", settle, 150.0, 1),
+        ("j1", 2, "FX_NEAR", "JPY", -150e6, "2026-08-10", settle, 150.0, 1),
+    ])
+    conn.commit()
+    return p, conn
+
+
+def _usdjpy_spot(session, service, tickers, field, day):
+    return {"USDJPY Curncy": 147.0}
+
+
+def _usdjpy_points(session, service, tickers, fields, start, end):
+    """What a terminal is expected to send: PX_LAST only (forward points, negative for
+    USDJPY), never a SETTLE_DT, on every weekday of the range."""
+    points = {"USDJPYSP Curncy": 0.0, "USDJPY1W Curncy": -12.0, "USDJPY1M Curncy": -50.0, "USDJPY1Y Curncy": -550.0}
+    out, d = {}, start
+    while d <= end:
+        if d.weekday() < 5:
+            for ticker, value in points.items():
+                out.setdefault(ticker, {})[d.isoformat()] = {"PX_LAST": value}
+        d += timedelta(days=1)
+    return out
+
+
+def _scale_100(session, service, tickers, fields):
+    assert fields == ["FWD_POINTS_SCALE"] and tickers == ["USDJPY Curncy"]
+    return {"USDJPY Curncy": {"FWD_POINTS_SCALE": 100.0}}
+
+
+def test_backfill_without_settle_dt_converts_points_and_writes_the_forward_as_bbg_interp(tmp_path):
+    p, conn = _usdjpy_db(tmp_path)
+    results = backfill.backfill(p, date(2026, 9, 14), date(2026, 9, 14), fetch=_usdjpy_spot, fwd_fetch=_usdjpy_points,
+                                fut_fetch=_never_called, scale_fetch=_scale_100, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE"] and results[0]["missing_marks"] == []
+    # By hand, as of Mon 2026-09-14: spot date Wed 09-16 (T+2); 1W = 09-23, 1M = Fri 10-16
+    # (computed by convention, Bloomberg sent no dates). Outright = spot + points / 100, as
+    # pull_marks.outright_from_points: 1W 147 - 0.12 = 146.88, 1M 147 - 0.50 = 146.50.
+    # Target 2026-10-01 is 8 of the 23 days from 09-23 to 10-16:
+    #   146.88 + (8 / 23) * (146.50 - 146.88) = 146.747826...
+    value, source, snapped = conn.execute(
+        "SELECT value, source, snapped_at FROM marks WHERE mark_type = 'FWD_OUTRIGHT' AND settle_date = '2026-10-01'").fetchone()
+    assert value == pytest.approx(146.88 + (8 / 23) * (146.50 - 146.88), abs=1e-9)
+    assert source == "BBG_INTERP" and snapped == "2026-09-14T17:00:00-04:00"
+    from data.bloomberg.inventory import close_completeness
+    assert bool(close_completeness(conn, "2026-09-14", "2026-09-14")["complete"].iloc[0]) is True
+
+
+def test_backfill_forward_on_a_computed_tenor_date_is_never_written_as_bloombergs_own_quote(tmp_path):
+    """The leg settles exactly on the computed 1M date: the value is that tenor's own
+    number, but the DATE is this app's, so the row is BBG_INTERP, not BBG_BFXFORWARD."""
+    p, conn = _usdjpy_db(tmp_path, settle="2026-10-16")
+    backfill.backfill(p, date(2026, 9, 14), date(2026, 9, 14), fetch=_usdjpy_spot, fwd_fetch=_usdjpy_points,
+                      fut_fetch=_never_called, scale_fetch=_scale_100, log=lambda *_: None)
+    assert conn.execute("SELECT value, source FROM marks WHERE mark_type = 'FWD_OUTRIGHT'").fetchall() == [
+        (pytest.approx(146.50), "BBG_INTERP")]
+
+
+def test_backfill_outrights_without_settle_dt_are_used_as_they_come_at_computed_dates(tmp_path):
+    """If the tenor tickers turn out to quote outrights (same order of magnitude as spot),
+    nothing is converted; the dates are still computed, so the row is still BBG_INTERP."""
+    p, conn = _usdjpy_db(tmp_path)
+
+    def outrights(session, service, tickers, fields, start, end):
+        return {"USDJPY1W Curncy": {"2026-09-14": {"PX_LAST": 146.88}},
+                "USDJPY1M Curncy": {"2026-09-14": {"PX_LAST": 146.50}}}
+
+    backfill.backfill(p, date(2026, 9, 14), date(2026, 9, 14), fetch=_usdjpy_spot, fwd_fetch=outrights,
+                      fut_fetch=_never_called, scale_fetch=_never_called, log=lambda *_: None)
+    assert conn.execute("SELECT value, source FROM marks WHERE mark_type = 'FWD_OUTRIGHT'").fetchall() == [
+        (pytest.approx(146.88 + (8 / 23) * (146.50 - 146.88)), "BBG_INTERP")]
+
+
+def test_backfill_points_without_a_scale_or_beyond_the_last_tenor_stay_missing_with_a_reason(tmp_path):
+    p, conn = _usdjpy_db(tmp_path)
+    results = backfill.backfill(p, date(2026, 9, 14), date(2026, 9, 14), fetch=_usdjpy_spot, fwd_fetch=_usdjpy_points,
+                                fut_fetch=_never_called, scale_fetch=lambda *a: {}, log=lambda *_: None)
+    assert results[0]["status"] == "DONE"                                       # the SPOT close was written
+    assert [m["mark_type"] for m in results[0]["missing_marks"]] == ["FWD_OUTRIGHT"]
+    assert "FWD_POINTS_SCALE" in results[0]["missing_marks"][0]["reason"]
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE mark_type = 'FWD_OUTRIGHT'").fetchone()[0] == 0
+
+    (tmp_path / "far").mkdir()
+    far, conn_far = _usdjpy_db(tmp_path / "far", settle="2028-03-15")
+    results = backfill.backfill(far, date(2026, 9, 14), date(2026, 9, 14), fetch=_usdjpy_spot, fwd_fetch=_usdjpy_points,
+                                fut_fetch=_never_called, scale_fetch=_scale_100, log=lambda *_: None)
+    assert "not extrapolated" in results[0]["missing_marks"][0]["reason"]       # 1Y is the last tenor
+    assert conn_far.execute("SELECT COUNT(*) FROM marks WHERE mark_type = 'FWD_OUTRIGHT'").fetchone()[0] == 0
+
+
+def test_backfill_works_the_days_in_the_callers_order_and_one_bad_day_does_not_end_the_run(tmp_path, monkeypatch):
+    p, conn = _usdjpy_db(tmp_path)
+    real = backfill.fc.historical_curve
+
+    def curve(day, *a, **k):
+        if day == date(2026, 9, 15):
+            raise RuntimeError("boom")
+        return real(day, *a, **k)
+
+    monkeypatch.setattr(backfill.fc, "historical_curve", curve)
+    seen = []
+    order = [date(2026, 9, 16), date(2026, 9, 14), date(2026, 9, 15)]
+    results = backfill.backfill(p, date(2026, 9, 14), date(2026, 9, 16), fetch=_usdjpy_spot, fwd_fetch=_usdjpy_points,
+                                fut_fetch=_never_called, scale_fetch=_scale_100, order=order,
+                                on_day=lambda r: seen.append(r["day"]), log=lambda *_: None)
+    assert seen == ["2026-09-16", "2026-09-14", "2026-09-15"]                   # the caller's order
+    assert [(r["day"], r["status"]) for r in results] == [                     # returned in date order
+        ("2026-09-14", "DONE"), ("2026-09-15", "ERROR"), ("2026-09-16", "DONE")]
+    assert "boom" in results[1]["error"]
+    # every day's SPOT went in together, before any forward; the bad day's forward alone is absent
+    assert [r[0] for r in conn.execute("SELECT as_of_date FROM marks WHERE mark_type = 'SPOT' ORDER BY 1")] == [
+        "2026-09-14", "2026-09-15", "2026-09-16"]
+    assert [r[0] for r in conn.execute("SELECT as_of_date FROM marks WHERE mark_type = 'FWD_OUTRIGHT' ORDER BY rowid")] == [
+        "2026-09-16", "2026-09-14"]
