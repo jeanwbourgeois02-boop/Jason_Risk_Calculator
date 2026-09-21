@@ -409,7 +409,7 @@ def test_combined_frame_settled_column_first_then_dates_then_total():
     assert by_label.loc["JPY", SETTLED] == "500,000" and by_label.loc["USD", SETTLED] == "(3,000)"
     assert by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, SETTLED] == "333"  # 500,000 / 150 - 3,000
     table = exposure.combined_table(result, records)
-    assert [c["name"] for c in table.columns] == ["Currency", exposure.SETTLED_ROW_LABEL, "25 Sep 2026",
+    assert [c["name"] for c in table.columns] == ["Currency", exposure.SETTLED_ROW_LABEL, "25 Sep",
                                                   exposure.TOTAL_COLUMN_LABEL]
     block, _ = exposure.summary_block_frame(result, records, rates=_jpy_rate())
     assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "JPY"] == "(146,500,000)"
@@ -519,7 +519,7 @@ def test_exposure_section_folds_the_rate_delta_figures_into_the_grid_as_its_firs
     assert ids.index(exposure.HEADLINE_ID) < ids.index(exposure.COMBINED_TABLE_ID)
     grid = _find_id(section, exposure.COMBINED_TABLE_ID)
     assert [(c["id"], c["name"]) for c in grid.columns][:4] == [
-        (exposure.ROW_LABEL_COL, "Currency"), ("fx_rate", "FX rate (as quoted)"), ("local_delta", "Local delta"),
+        (exposure.ROW_LABEL_COL, "Currency"), ("fx_rate", "FX rate"), ("local_delta", "Local delta"),
         ("usd_delta", "USD delta")]
     grid_currencies = [r[exposure.CURRENCY_COL] for r in grid.data if r["kind"] == "currency"]
     assert grid_currencies == ["JPY", "USD"]  # |USD delta| descending: 1,000,680 (147.1m / 147) then 1,000,000
@@ -558,7 +558,7 @@ def test_ndf_currency_row_label_rate_cell_and_fixing_caption():
     result = build_exposure(records, rates)
     frame, ccys = exposure.combined_frame(result, records)
     labels = dict(zip(frame[exposure.CURRENCY_COL], frame[exposure.ROW_LABEL_COL]))
-    assert labels["KRW"] == "KRW (NDF, fixing dates)" and labels["JPY"] == "JPY" and labels["USD"] == "USD"
+    assert labels["KRW"] == "KRW (NDF)" and labels["JPY"] == "JPY" and labels["USD"] == "USD"
     # the label never reaches an id or the filter: block columns and the currency filter use the plain code
     block, block_ccys = exposure.summary_block_frame(result, records, rates=rates)
     assert "KRW" in block.columns and block_ccys == ccys
@@ -655,7 +655,7 @@ def test_load_inputs_and_net_gross_usd_price_ndf_currencies_at_the_1m_ndf_mark(c
                                         forward_rates=inputs["forward_rates"])
     grid = _find_id(section, exposure.COMBINED_TABLE_ID)
     row = next(r for r in grid.data if r[exposure.CURRENCY_COL] == "KRW")
-    assert row[exposure.ROW_LABEL_COL] == "KRW (NDF, fixing dates)" and row[fixing] == "(1,394,500,000)"
+    assert row[exposure.ROW_LABEL_COL] == "KRW (NDF)" and row[fixing] == "(1,394,500,000)"
     assert row["fx_rate"] == "KWN+1M 1,394.5"
     totals = cash_ladder.net_gross_usd(conn, "2026-08-17")
     assert totals["available"] is True

@@ -86,9 +86,9 @@ def test_grid_is_one_row_per_currency_with_settled_dates_total_columns_and_a_usd
     assert usd[exposure.TOTAL_COL] == "(374,123)"
     table = exposure.combined_table(result, records, forward_rates=FWD)
     assert table.id == exposure.COMBINED_TABLE_ID
-    assert [c["name"] for c in table.columns] == ["Currency", exposure.SETTLED_ROW_LABEL, "24 Sep 2026", "28 Sep 2026",
-                                                  "21 Oct 2026", exposure.TOTAL_COLUMN_LABEL]
-    assert exposure.TOTAL_COLUMN_LABEL == "Total (columns shown)"
+    assert [c["name"] for c in table.columns] == ["Currency", exposure.SETTLED_ROW_LABEL, "24 Sep", "28 Sep",
+                                                  "21 Oct", exposure.TOTAL_COLUMN_LABEL]   # short headers: thin columns
+    assert exposure.TOTAL_COLUMN_LABEL == "Total shown"
     # the settled-cash emphasis and the sign colours follow the new shape
     styles = table.style_data_conditional
     assert any(s["if"].get("column_id") == SETTLED and s.get("fontWeight") == "700" for s in styles)
@@ -152,7 +152,7 @@ def test_settled_one_by_one_puts_settled_legs_on_their_own_dates():
     assert frame.set_index(exposure.ROW_LABEL_COL).loc["AUD", "2026-09-16"] == "23,771,313"
     table = exposure.combined_table(result, records, view=view)
     names = [c["name"] for c in table.columns]
-    assert exposure.SETTLED_ROW_LABEL not in names and names[1] == "16 Sep 2026"
+    assert exposure.SETTLED_ROW_LABEL not in names and names[1] == "16 Sep"
 
 
 def test_show_usd_puts_usd_equivalents_in_the_cells():
@@ -167,7 +167,7 @@ def test_show_usd_puts_usd_equivalents_in_the_cells():
     # in USD cells the bottom row is simply the column sum
     assert by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, "2026-09-24"] == "1,088,987"
     table = exposure.combined_table(result, records, forward_rates=FWD, view=view)
-    assert [c["name"] for c in table.columns][0] == "Currency (cells in USD eq.)"
+    assert [c["name"] for c in table.columns][0] == "Currency (USD eq.)"
     assert "Cells are USD equivalents" in exposure.usd_basis_caption(FWD, view).children
 
 
@@ -245,7 +245,7 @@ def test_ladder_csv_is_the_displayed_grid_number_for_number_under_every_view():
     ndf = [_rec("k1", "KRW", -1_394_500_000.0, "2026-09-17", pair="USDKRW", fill=1394.5),
            _rec("k1", "USD", 1_000_000.0, "2026-09-17", pair="USDKRW", fill=1394.5)]
     csv = exposure.ladder_export_frame(build_exposure(ndf, {}), None, ccys=["KRW", "USD"])
-    assert list(csv[exposure.CURRENCY_COL]) == ["KRW (NDF, fixing dates)", "USD", exposure.USD_EQUIVALENT_ROW_LABEL]
+    assert list(csv[exposure.CURRENCY_COL]) == ["KRW (NDF)", "USD", exposure.USD_EQUIVALENT_ROW_LABEL]
     assert csv.iloc[-1].isna()["Total"] and csv.iloc[0]["Total"] == pytest.approx(-1_394_500_000.0)
 
 
@@ -292,7 +292,7 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     assert by_ccy["AUD"]["2026-09-24"] == "(21,109,276)"
     assert by_ccy["AUD"]["2026-09-28"] == "11,146,505"
     names = {c["id"]: c["name"] for c in grid.columns}
-    assert names[SETTLED] == exposure.SETTLED_ROW_LABEL and names["2026-09-24"] == "24 Sep 2026"
+    assert names[SETTLED] == exposure.SETTLED_ROW_LABEL and names["2026-09-24"] == "24 Sep"
     assert by_ccy["AUD"]["local_delta"] == "13,808,543"  # exact sample amounts round up here
     # the 51 USDCAD spot fills (all settled by 17 Sep) sit in the settled CAD balance
     assert by_ccy["CAD"][SETTLED] != exposure.EM_DASH
@@ -311,3 +311,10 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     assert list(csv.columns)[1] == exposure.SETTLED_ROW_LABEL and list(csv.columns)[-1] == "Total"
     aud = csv.set_index(exposure.CURRENCY_COL).loc["AUD"]
     assert aud[exposure.SETTLED_ROW_LABEL] == pytest.approx(23_771_313.0, abs=1) and aud["2026-09-24"] == pytest.approx(-21_109_276.0, abs=1)
+
+
+def test_grid_headers_are_short_and_name_the_year_only_when_the_dates_span_two():
+    """User, 2026-09-21: "make the columns thinner - theres so much wasted space"."""
+    assert exposure._grid_column_name("2026-09-24", with_year=False) == "24 Sep"
+    assert exposure._grid_column_name("2027-01-15", with_year=True) == "15 Jan 27"
+    assert exposure._grid_column_name(exposure.TOTAL_COL) == "Total shown"

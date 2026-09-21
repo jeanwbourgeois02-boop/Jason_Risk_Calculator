@@ -1057,7 +1057,7 @@ def test_ndf_ticket_is_decided_by_currency_not_only_by_the_stored_flag():
     assert not is_ndf_pair("USDJPY", 0) and not is_ndf_pair("USDTRY", 0) and not is_ndf_pair("USDMXN", 0)
     assert is_ndf_pair("USDJPY", 1)            # the stored flag still counts
     assert not is_ndf_pair("ESU6 Index", 0) and not is_ndf_pair("", 0)
-    assert currency_label("KRW") == "KRW (NDF, fixing dates)" and currency_label("JPY") == "JPY"
+    assert currency_label("KRW") == "KRW (NDF)" and currency_label("JPY") == "JPY"
 
 
 def _ndf_book(is_ndf=1, settles_cash=0, pair="USDKRW", ccy="KRW"):

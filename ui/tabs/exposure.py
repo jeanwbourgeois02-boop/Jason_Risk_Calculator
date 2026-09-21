@@ -391,7 +391,7 @@ ROW_LABEL_COL = "row"
 CURRENCY_COL = "currency"      # the grid row's plain currency code ('' on the USD equivalent row)
 TOTAL_COL = "total"
 SETTLED_ROW_LABEL = "Settled cash"
-TOTAL_COLUMN_LABEL = "Total (columns shown)"
+TOTAL_COLUMN_LABEL = "Total shown"
 USD_EQUIVALENT_ROW_LABEL = "USD equivalent"
 FX_RATE_ROW_LABEL = "FX rate (as quoted)"
 SUMMARY_ROWS = [(FX_RATE_ROW_LABEL, "fx_rate"), ("Local delta", "local_delta"), ("USD delta", "usd_delta")]
@@ -479,7 +479,7 @@ def _shown_currencies(ladder: pd.DataFrame, ordered: List[str], rows: list) -> L
     return keep or list(ordered)
 # "Settlement type" (NDF / Deliverable) summary row and its NDF super-header removed
 # 2026-09-15 per the user's decision. Since 2026-09-21 an NDF currency's grid row is
-# labelled by engine.ladder.ndf.currency_label ('KRW (NDF, fixing dates)').
+# labelled by engine.ladder.ndf.currency_label ('KRW (NDF)').
 
 
 def grid_shape(result, records: List[dict], sort: str = SORT_USD, view: Optional[LadderView] = None):
@@ -657,7 +657,7 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
     value columns in display order. Every number comes from build_exposure /
     ladder_usd_cells (`_grid_numbers`); nothing is computed here.
 
-    The row label is engine.ladder.ndf.currency_label ('KRW (NDF, fixing dates)' for an
+    The row label is engine.ladder.ndf.currency_label ('KRW (NDF)' for an
     NDF currency, whose records are dated on fixing dates); CURRENCY_COL keeps the plain
     code, so nothing that filters or looks up by currency depends on the label.
 
@@ -690,18 +690,27 @@ def grid_value_columns(frame: pd.DataFrame) -> List[str]:
     return [c for c in frame.columns if c not in _GRID_META_COLUMNS]
 
 
-def _grid_column_name(col: str) -> str:
+def _grid_column_name(col: str, with_year: bool = True) -> str:
+    """A grid column's header. Kept short: a header's width is paid on every date column
+    (user, 2026-09-21: "make the columns thinner - theres so much wasted space so you have
+    to scroll a lot"). '24 Sep' when every date shown is in one year (`with_year` False),
+    '24 Sep 26' otherwise."""
     from engine.ladder.exposure_adapter import SETTLED
     if col == SETTLED:
         return SETTLED_ROW_LABEL
-    return TOTAL_COLUMN_LABEL if col == TOTAL_COL else format_date(col)
+    if col == TOTAL_COL:
+        return TOTAL_COLUMN_LABEL
+    text = format_date(col)                       # '24 Sep 2026', or `col` itself when not a date
+    if text == col:
+        return text
+    return f"{text[:6]} {text[-2:]}" if with_year else text[:6]
 
 
 # The rate / delta figures sit IN the grid, as its first columns (user, 2026-09-21: the
 # separate block above the grid was "super clunky with the other stuff above and
 # scrolling odd"): each currency's rate, local delta and USD delta read across on its own
 # row, in one table with one scrollbar. The bottom USD row carries the net USD delta.
-SUMMARY_GRID_COLUMNS = [("fx_rate", FX_RATE_ROW_LABEL), ("local_delta", "Local delta"), ("usd_delta", "USD delta")]
+SUMMARY_GRID_COLUMNS = [("fx_rate", "FX rate"), ("local_delta", "Local delta"), ("usd_delta", "USD delta")]
 
 
 def grid_records_with_summary(frame: pd.DataFrame, summary: Optional[pd.DataFrame]) -> List[dict]:
@@ -726,9 +735,10 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
     view = view or DEFAULT_VIEW
     value_cols = grid_value_columns(frame)
     summary_cols = [] if summary is None or summary.empty else SUMMARY_GRID_COLUMNS
-    columns = ([{"name": "Currency (cells in USD eq.)" if view.show_usd else "Currency", "id": ROW_LABEL_COL}]
+    several_years = len({c[:4] for c in value_cols if c not in (SETTLED, TOTAL_COL)}) > 1
+    columns = ([{"name": "Currency (USD eq.)" if view.show_usd else "Currency", "id": ROW_LABEL_COL}]
                + [{"name": label, "id": key} for key, label in summary_cols]
-               + [{"name": _grid_column_name(c), "id": c} for c in value_cols])
+               + [{"name": _grid_column_name(c, several_years), "id": c} for c in value_cols])
     # The currency label stays in sight when the dates scroll sideways. Done with
     # `position: sticky` on that one column, NOT Dash's `fixed_columns`: that option
     # splits the table into separate fixed and scrolling tables whose widths and row
@@ -742,18 +752,18 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
         columns=columns,
         data=grid_records_with_summary(frame, summary),  # includes CURRENCY_COL (plain code) and kind, not displayed
         style_table=_TABLE_STYLE,
-        style_cell={**_MONO, "minWidth": "125px", "width": "125px", "maxWidth": "170px"},
+        # Thin columns (user, 2026-09-21): no fixed width, so each column is as wide as its
+        # own longest number and no wider; tighter padding and rows than the other tables.
+        style_cell={**_MONO, "fontSize": "12px", "padding": "3px 8px", "height": "26px", "minWidth": "48px"},
         style_cell_conditional=[
-            {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "fontWeight": "600",
-             "minWidth": "190px", "width": "190px", "maxWidth": "240px", **sticky},
+            {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "fontWeight": "600", **sticky},
             # the rate / delta columns: the rate bold (the bridge between local and USD),
             # USD delta the heaviest, tinted and ruled off from the cash columns beside it
-            {"if": {"column_id": "fx_rate"}, "fontWeight": "700", "color": "#1b2333",
-             "minWidth": "150px", "width": "150px", "maxWidth": "190px"},
+            {"if": {"column_id": "fx_rate"}, "fontWeight": "700", "color": "#1b2333"},
             {"if": {"column_id": "usd_delta"}, "fontWeight": "700", "backgroundColor": "#e8edf7",
              "borderRight": "2px solid #1f2933"},
         ],
-        style_header=_HEAD,
+        style_header={**_HEAD, "fontSize": "12px", "padding": "4px 8px"},
         style_header_conditional=[
             {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "position": "sticky", "left": 0, "zIndex": 3},
         ],
@@ -976,7 +986,7 @@ def ladder_export_frame(result, forward_rates: Optional[Mapping[tuple, dict]] = 
                         view: Optional[LadderView] = None, ccys: Optional[List[str]] = None) -> pd.DataFrame:
     """The displayed grid as numbers (spec download `cash_ladder.csv`), in the displayed
     orientation (2026-09-21): one row per shown currency, labelled as on screen ('KRW
-    (NDF, fixing dates)'), then a 'USD equivalent' row; columns `currency`, 'Settled
+    (NDF)'), then a 'USD equivalent' row; columns `currency`, 'Settled
     cash', the ISO value dates, 'Total'. Local amounts, or USD equivalents when
     `view.show_usd`. Same numbers as the screen (`_grid_numbers`): a date or a total with
     an unmarked amount is empty in the file, never a partial sum."""

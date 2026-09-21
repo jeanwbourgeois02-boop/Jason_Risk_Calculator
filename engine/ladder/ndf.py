@@ -54,9 +54,10 @@ def is_ndf_currency(ccy: str) -> bool:
 
 
 def currency_label(ccy: str) -> str:
-    """Row label of a currency on the grid: 'KRW (NDF, fixing dates)' for an NDF
-    currency so the different dating is visible in place, the plain code otherwise."""
-    return f"{ccy} (NDF, fixing dates)" if is_ndf_currency(ccy) else str(ccy)
+    """Row label of a currency on the grid: 'KRW (NDF)' for an NDF currency, the plain
+    code otherwise. Short on purpose (it is the grid's pinned column); FIXING_CAPTION under
+    the grid says that NDF rows are dated on fixing dates."""
+    return f"{ccy} (NDF)" if is_ndf_currency(ccy) else str(ccy)
 
 
 def fixing_date(value_date: str, holidays: Optional[Iterable[str]] = None) -> str:
