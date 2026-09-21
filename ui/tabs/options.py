@@ -1347,56 +1347,126 @@ def terms_editor(conn: sqlite3.Connection) -> html.Details:
 
 
 # ------------------------------------------------------------------ aggregates above the table (2026-09-21)
+# Four views of the options book above the table (user, 2026-09-21: the first set, by payoff
+# type / strike / expiry / put-call, said little): where the risk is (by pair), what decays
+# when (expiry ladder), which ideas are working (by structure), what is in play (spot against
+# strike). Grouping and adding the legs' own figures only; sums cover the priced options and
+# the unpriced ones are counted beside them, never added as zero.
 BREAKDOWNS_ID = "options-breakdowns"
-BREAKDOWNS = (("Payoff type", "payoff"), ("Strike", "strike"), ("Expiry date", "expiry"), ("Put / call", "option_type"))
+EXPIRY_BUCKETS = ((7, "This week"), (31, "Within 1 month"), (92, "1 to 3 months"), (10 ** 6, "Beyond 3 months"))
 
 
-def breakdown_rows(legs: pd.DataFrame, key: str) -> List[dict]:
-    """One row per value of `key` over the option legs, plus a Total: how many options, what
-    was paid for them, what they are worth now and their P&L, all in USD. Sums cover the
-    options the book has priced (the header's rule); the unpriced ones are counted beside
-    them, never summed as zero. Grouping and adding only: no figure is recomputed."""
-    if legs is None or legs.empty:
-        return []
-    out = []
-    groups = [(str(name) if not _is_missing(name) and name != "" else "not on file", g)
-              for name, g in legs.groupby(legs[key].map(lambda v: "" if _is_missing(v) else v), sort=True)]
-    for name, g in groups + [("Total", legs)]:
-        priced = g[g["pnl_usd"].map(lambda v: not _is_missing(v))]
-        out.append({"group": name, "options": len(g), "unpriced": len(g) - len(priced),
-                    "paid": _agg(priced["start_priced_usd"]), "value": _agg(priced["mktval"]),
-                    "pnl": _agg(priced["pnl_usd"])})
+def _sum_group(name: str, g: pd.DataFrame) -> dict:
+    priced = g[g["pnl_usd"].map(lambda v: not _is_missing(v))]
+    out = {"group": name, "options": len(g), "unpriced": len(g) - len(priced),
+           "paid": _agg(priced["start_priced_usd"]), "value": _agg(priced["mktval"]), "pnl": _agg(priced["pnl_usd"])}
+    out.update({k: _agg(g[k]) for k in ("delta", "gamma", "vega", "theta")})
+    out["pnl_pct"] = (out["pnl"] / abs(out["paid"]) * 100.0) if out["pnl"] is not None and out["paid"] else None
     return out
 
 
-def _breakdown_table(title: str, rows: List[dict]) -> html.Div:
-    def money(v, signed=False):
-        if _is_missing(v):
-            return html.Td("n/a", className="cell--unavailable")
-        cls = ("fx-ccy-num--neg" if v < 0 else "fx-ccy-num--pos") if signed else ""
-        return html.Td(format_cell(v), className=cls)
+def grouped_rows(legs: pd.DataFrame, keys: pd.Series, order: Optional[List[str]] = None) -> List[dict]:
+    """One `_sum_group` row per value of `keys` (in `order` when given), then a Total."""
+    if legs is None or legs.empty:
+        return []
+    names = [n for n in (order or sorted(set(keys))) if (keys == n).any()]
+    return [_sum_group(n, legs[keys == n]) for n in names] + [_sum_group("Total", legs)]
 
+
+def days_to_expiry(expiry, as_of: str) -> Optional[int]:
+    try:
+        return int((pd.Timestamp(str(expiry)[:10]) - pd.Timestamp(as_of)).days)
+    except (TypeError, ValueError):
+        return None
+
+
+def expiry_bucket(expiry, as_of: str) -> str:
+    days = days_to_expiry(expiry, as_of)
+    if days is None:
+        return "No expiry on file"
+    if days < 0:
+        return "Expired"
+    return next(label for limit, label in EXPIRY_BUCKETS if days <= limit)
+
+
+def in_play_rows(conn: sqlite3.Connection, as_of: str, legs: pd.DataFrame) -> List[dict]:
+    """Per open option: spot against strike (how far, in per cent of spot), days left, delta and
+    value, nearest to the strike first. Spot is the pair's official SPOT on `as_of`."""
+    rows = []
+    for leg in legs.to_dict("records"):
+        days = days_to_expiry(leg.get("expiry"), as_of)
+        if days is None or days < 0:
+            continue
+        spot = _official_marks(conn, as_of, leg.get("underlying") or "", as_of, ("SPOT",)).get("SPOT")
+        strike = leg.get("strike")
+        away = ((strike - spot) / spot * 100.0) if spot and not _is_missing(strike) and strike else None
+        name = " ".join(str(leg.get(k) or "") for k in ("underlying", "side", "option_type", "payoff")).strip()
+        rows.append({"group": name, "strike": strike, "spot": spot, "away_pct": away, "days": days,
+                     "delta": leg.get("delta"), "value": leg.get("mktval")})
+    return sorted(rows, key=lambda r: (abs(r["away_pct"]) if r["away_pct"] is not None else 1e9, r["days"]))
+
+
+def _cell(value, kind: str = "money"):
+    if _is_missing(value):
+        return html.Td("n/a", className="cell--unavailable")
+    if kind == "count":
+        return html.Td(str(value))
+    if kind == "rate":
+        return html.Td(f"{float(value):,.4f}".rstrip("0").rstrip("."))
+    if kind == "pct":
+        return html.Td(f"{float(value):+.1f}%", className="fx-ccy-num--neg" if value < 0 else "fx-ccy-num--pos")
+    cls = ("fx-ccy-num--neg" if value < 0 else "fx-ccy-num--pos") if kind == "signed" else ""
+    return html.Td(format_cell(value), className=cls)
+
+
+def _agg_table(title: str, kicker: str, first: str, columns: List[Tuple[str, str, str]], rows: List[dict]) -> html.Div:
+    """One compact table: `columns` = (heading, row key, kind); a row named 'Total' is the footer."""
     def tr(r):
-        count = f"{r['options']}" + (f" ({r['unpriced']} unpriced)" if r["unpriced"] else "")
-        return html.Tr([html.Td(r["group"], className="fx-ccy-label"), html.Td(count), money(r["paid"]),
-                        money(r["value"]), money(r["pnl"], signed=True)])
-
-    head = html.Thead(html.Tr([html.Th(title, className="fx-ccy-label"), html.Th("Options"),
-                               html.Th("Premium paid USD"), html.Th("Current value USD"), html.Th("P&L USD")]))
+        label = r["group"] + (f" ({r['unpriced']} unpriced)" if r.get("unpriced") else "")
+        return html.Tr([html.Td(label, className="fx-ccy-label")] + [_cell(r.get(key), kind) for _h, key, kind in columns])
+    head = html.Thead(html.Tr([html.Th(first, className="fx-ccy-label")] + [html.Th(h) for h, _k, _kind in columns]))
     body, total = [r for r in rows if r["group"] != "Total"], [r for r in rows if r["group"] == "Total"]
+    inner = (html.Table(className="fx-ccy-table", children=[head, html.Tbody([tr(r) for r in body]),
+                                                             html.Tfoot([tr(r) for r in total])])
+             if rows else html.P("No options on file.", className="section-kicker"))
     return html.Div(className="section fx-ccy-panel", children=[
-        html.H4(f"P&L by {title.lower()}", className="fx-ccy-title"),
-        html.Div(className="fx-ccy-scroll", children=html.Table(className="fx-ccy-table", children=[
-            head, html.Tbody([tr(r) for r in body]), html.Tfoot([tr(r) for r in total])])),
-    ])
+        html.H4(title, className="fx-ccy-title"), html.P(kicker, className="section-kicker"),
+        html.Div(className="fx-ccy-scroll", children=inner)])
+
+
+def structure_names(conn: sqlite3.Connection, as_of: str, legs: pd.DataFrame) -> pd.Series:
+    """Each leg's structure: its package's own label in the grouped view (a straddle, a
+    spread), the leg's own label for a single-leg package."""
+    grouped = option_rows(conn, as_of)
+    label_of = {r["group_key"]: r["label"] for r in grouped.to_dict("records") if r.get("level") == "PACKAGE"}
+    parent_of = {r["trade_id"]: r.get("parent_key") for r in grouped.to_dict("records") if r.get("level") == "LEG"}
+    return legs.apply(lambda r: label_of.get(parent_of.get(r["trade_id"]) or r["group_key"]) or r["label"], axis=1)
 
 
 def breakdown_tables(conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """The four aggregate tables above the options table (user, 2026-09-21): P&L by payoff
-    type, by strike, by expiry date and by put / call, one row per option underneath them."""
     legs = option_rows(conn, as_of, flat=True)
-    return html.Div(id=BREAKDOWNS_ID, className="fx-ccy-tables",
-                    children=[_breakdown_table(title, breakdown_rows(legs, key)) for title, key in BREAKDOWNS])
+    empty = legs is None or legs.empty
+    money = [("Options", "options", "count"), ("Premium paid USD", "paid", "money"),
+             ("Current value USD", "value", "money"), ("P&L USD", "pnl", "signed")]
+    greeks = [("Delta USD", "delta", "signed"), ("Gamma", "gamma", "signed"), ("Vega", "vega", "signed"),
+              ("Theta / day", "theta", "signed")]
+    by_pair = [] if empty else grouped_rows(legs, legs["underlying"].fillna(""))
+    ladder = [] if empty else grouped_rows(legs, legs["expiry"].map(lambda e: expiry_bucket(e, as_of)),
+                                           ["Expired"] + [label for _l, label in EXPIRY_BUCKETS] + ["No expiry on file"])
+    structures = [] if empty else grouped_rows(legs, structure_names(conn, as_of, legs))
+    return html.Div(id=BREAKDOWNS_ID, className="fx-ccy-tables", children=[
+        _agg_table("By pair: where the risk is", "Dollars paid, worth and made, with the net Greeks, per underlying.",
+                   "Pair", money + greeks, by_pair),
+        _agg_table("Expiry ladder: what decays when", "Current value is what is lost if these expire worthless.",
+                   "Expires", [money[0], money[2], greeks[3], greeks[1], greeks[2], money[3]], ladder),
+        _agg_table("By structure: which ideas are working", "P&L as a per cent of the premium paid.",
+                   "Structure", money + [("P&L % of premium", "pnl_pct", "pct")], structures),
+        _agg_table("Spot against strike: what is in play", "Open options, nearest to their strike first.",
+                   "Option", [("Strike", "strike", "rate"), ("Spot", "spot", "rate"), ("Strike vs spot", "away_pct", "pct"),
+                              ("Days left", "days", "count"), ("Delta USD", "delta", "signed"),
+                              ("Current value USD", "value", "money")],
+                   [] if empty else in_play_rows(conn, as_of, legs)),
+    ])
 
 
 def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:

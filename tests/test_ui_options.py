@@ -1557,21 +1557,29 @@ def test_digital_terms_survive_a_re_upload(sample_db, ui_app_stub, fake_pricer, 
     assert _terms(db_path, instrument) == (152.0, "PUT", "DIGITAL")
 
 
-def test_breakdown_tables_sit_above_the_table_and_sum_priced_options_in_usd():
-    """User, 2026-09-21: four aggregate tables (payoff type, strike, expiry date, put / call)
-    above the options table, each with premium paid, current value and P&L in dollars."""
+def test_four_portfolio_tables_sit_above_the_table_and_add_up_in_usd():
+    """User, 2026-09-21: by pair (risk), expiry ladder (decay), by structure (what is working)
+    and spot against strike (what is in play), above the options table, all in dollars."""
     conn = _make_db()
     try:
         legs = options.option_rows(conn, AS_OF, flat=True)
-        for _title, key in options.BREAKDOWNS:
-            rows = options.breakdown_rows(legs, key)
+        priced = legs[legs["pnl_usd"].notna()]
+        for keys in (legs["underlying"], legs["expiry"].map(lambda e: options.expiry_bucket(e, AS_OF)),
+                     options.structure_names(conn, AS_OF, legs)):
+            rows = options.grouped_rows(legs, keys)
             total = rows[-1]
             assert total["group"] == "Total" and total["options"] == len(legs)
             assert sum(r["options"] for r in rows[:-1]) == len(legs)
-            priced = legs[legs["pnl_usd"].notna()]
             if len(priced):
                 assert total["pnl"] == pytest.approx(priced["pnl_usd"].sum())
                 assert total["value"] - total["paid"] == pytest.approx(total["pnl"])   # current value - premium paid
+                assert sum(r["pnl"] or 0.0 for r in rows[:-1]) == pytest.approx(total["pnl"])
+        assert options.expiry_bucket("2026-09-23", "2026-09-21") == "This week"
+        assert options.expiry_bucket("2026-11-19", "2026-09-21") == "1 to 3 months"
+        assert options.expiry_bucket("2026-09-18", "2026-09-21") == "Expired"
+        for row in options.in_play_rows(conn, AS_OF, legs):
+            if row["away_pct"] is not None:
+                assert row["away_pct"] == pytest.approx((row["strike"] - row["spot"]) / row["spot"] * 100.0)
         layout = options.build_layout(conn, AS_OF)
         ids = [getattr(c, "id", None) for c in layout.children]
         assert ids.index(options.BREAKDOWNS_ID) < ids.index(options.TABLE_ID)
