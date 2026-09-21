@@ -9,6 +9,10 @@ import pytest
 from data.bloomberg import backfill
 from data.ingest import schema
 
+import engine.pnl.calendar as _calendar
+REAL_HOLIDAYS = _calendar._DEFAULT_HOLIDAYS_PATH   # config/holidays.txt, before any test pins the calendar
+
+
 @pytest.fixture(autouse=True)
 def _close_1500_on_every_date(monkeypatch):
     """The 15:00 New York close applies from backfill.CLOSE_1500_FROM (2026-09-21) and inside
@@ -18,6 +22,15 @@ def _close_1500_on_every_date(monkeypatch):
     from data.bloomberg import live as _live
     monkeypatch.setattr(backfill, "CLOSE_1500_FROM", date(2000, 1, 1))
     monkeypatch.setattr(_live, "book_today", lambda: date(2026, 9, 21))
+
+
+@pytest.fixture(autouse=True)
+def _monday_to_friday_calendar(monkeypatch, tmp_path):
+    """These tests work Mon 2026-09-07 (Labor Day in config/holidays.txt) as an ordinary day.
+    The backfill now skips a listed holiday, so the calendar is pinned to Monday-Friday here;
+    the holiday rule has its own test, which puts the real file back."""
+    import engine.pnl.calendar as cal
+    monkeypatch.setattr(cal, "_DEFAULT_HOLIDAYS_PATH", tmp_path / "no-holidays.txt")
 
 
 
@@ -164,8 +177,28 @@ def test_backfill_without_realise_settled_still_writes_marks(tmp_path, monkeypat
     assert any("realise_settled not importable" in s for s in log)
 
 
+def test_a_listed_holiday_is_never_worked_or_listed_as_incomplete(tmp_path, monkeypatch):
+    """Labor Day (Mon 2026-09-07, in config/holidays.txt): FX quotes that day but futures do
+    not settle, so under the old Monday-Friday day list it was asked of Bloomberg on every
+    run and could never complete. It is no trading day: not worked, not in the completeness
+    list, and Fri 09-04 and Tue 09-08 are one stretch (one request, not two)."""
+    import engine.pnl.calendar as cal
+    from data.bloomberg.inventory import close_completeness
+    monkeypatch.setattr(cal, "_DEFAULT_HOLIDAYS_PATH", REAL_HOLIDAYS)
+    assert backfill.business_days(date(2026, 9, 4), date(2026, 9, 8)) == [date(2026, 9, 4), date(2026, 9, 8)]
+    assert backfill._runs([date(2026, 9, 4), date(2026, 9, 8)]) == [(date(2026, 9, 4), date(2026, 9, 8))]
+    p, conn = _db(tmp_path)
+    ASKED.clear()
+    results = backfill.backfill(p, date(2026, 9, 4), date(2026, 9, 8), fetch=fake_fetch, fwd_fetch=fake_fwd_fetch,
+                                fut_fetch=lambda *a, **k: {}, log=lambda *_: None)
+    assert [r["day"] for r in results] == ["2026-09-04", "2026-09-08"] and date(2026, 9, 7) not in ASKED
+    assert list(close_completeness(conn, "2026-09-04", "2026-09-08")["as_of_date"]) == ["2026-09-04", "2026-09-08"]
+
+
 def test_helpers():
     assert backfill.business_days(date(2026, 9, 4), date(2026, 9, 8)) == [date(2026, 9, 4), date(2026, 9, 7), date(2026, 9, 8)]
+    assert backfill.business_days(date(2026, 9, 4), date(2026, 9, 8), frozenset({"2026-09-07"})) == [
+        date(2026, 9, 4), date(2026, 9, 8)]
     # the official close is 15:00 New York (user decision 2026-09-21), one constant for it
     from data.bloomberg import pull_marks
     assert pull_marks.CLOSE_HOUR_NY == 15

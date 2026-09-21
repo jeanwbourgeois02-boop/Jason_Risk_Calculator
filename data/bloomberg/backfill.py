@@ -82,7 +82,9 @@ Limits, stated plainly:
     timestamp tells them apart (backfill rows are stamped 15:00 America/New_York on
     their date, a live row carries the time it was pulled).
   - NDFs still realise at spot on the value date, not the fixing.
-  - Calendar is Monday-Friday only; holidays simply return no close and are reported.
+  - Calendar is the trading calendar (Monday-Friday less config/holidays.txt, see
+    `business_days`): a listed holiday is never asked of Bloomberg. A day Bloomberg
+    returns nothing for is still reported as NO_CLOSES.
   - UNVERIFIED on a terminal (docs/open-questions.md items 28 and 30): that the tenor
     tickers quote points (fwd_curve.tenor_unit checks the magnitude against spot
     rather than assume), the points-divisor field (FWD_POINTS_SCALE / FWD_SCALE), and
@@ -126,11 +128,17 @@ ORDER BY m.instrument_id, m.snapped_at
 # the trades that used to live here are gone.
 
 
-def business_days(start: date, end: date) -> List[date]:
-    """Monday-Friday dates from start to end inclusive."""
+def business_days(start: date, end: date, holidays=None) -> List[date]:
+    """Trading days from start to end inclusive: Monday-Friday less config/holidays.txt, the
+    calendar the header's period dates use (`holidays=None` reads it). Until 2026-09-21 this
+    was Monday-Friday only, so a US holiday (Labor Day: FX quotes, no futures settle) was
+    asked of Bloomberg on every run, could never complete, and sat in the close-completeness
+    list as a day with marks missing although no period is ever measured from it."""
+    if holidays is None:
+        holidays = load_holidays()
     out, d = [], start
     while d <= end:
-        if d.weekday() < 5:
+        if d.weekday() < 5 and d.isoformat() not in holidays:
             out.append(d)
         d += timedelta(days=1)
     return out
