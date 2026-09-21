@@ -269,6 +269,44 @@ def _skip(row: dict, reason: str) -> PricingOutcome:
     )
 
 
+# Time to expiry to the hour (user decision 2026-09-21: "yes" to "fix time-to-expiry, so it
+# uses actual hours to the 10am New York cut"). The vendored engine counts whole calendar
+# days (QuantLib dates), so a pull at 15:00 New York for an option cut at 10:00 tomorrow was
+# priced with 1.00 day to go when 0.79 remain -- about 10 % too much time value on the
+# book's one- and two-day options. An option's value depends on time through vol x sqrt(T)
+# (rates over part of a day are nothing), so the whole-day engine is handed
+# vol x sqrt(T_hours / T_days): the same total variance as the true time to the cut. The
+# factor is 0.999 on a two-month option. Vega is scaled back to the quoted vol.
+CUT_HOUR_NY = 10
+
+
+def cut_time_factor(conn: sqlite3.Connection, as_of: str, pair: str, expiry: datetime.date) -> float:
+    """sqrt(T_hours / T_days): true time from the pricing moment -- the pair's official SPOT
+    snap on `as_of` (15:00 New York when it carries no readable time) -- to 10:00 New York
+    on the expiry date, over the engine's whole calendar days. 1.0 when it cannot be worked out."""
+    import math
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    as_of_date = datetime.date.fromisoformat(as_of)
+    days = (expiry - as_of_date).days
+    if days <= 0:
+        return 1.0
+    moment = datetime.datetime(as_of_date.year, as_of_date.month, as_of_date.day, 15, 0, tzinfo=ny)
+    row = conn.execute("SELECT snapped_at FROM marks_official WHERE as_of_date = ? AND instrument_id = ? "
+                       "AND mark_type = 'SPOT'", (as_of, pair)).fetchone()
+    try:
+        snapped = datetime.datetime.fromisoformat(row[0])
+        if snapped.tzinfo is not None:
+            moment = snapped.astimezone(ny)
+    except (TypeError, ValueError, IndexError):
+        pass
+    cut = datetime.datetime(expiry.year, expiry.month, expiry.day, CUT_HOUR_NY, 0, tzinfo=ny)
+    true_days = (cut - moment).total_seconds() / 86400.0
+    if true_days <= 0:
+        return 1.0
+    return math.sqrt(true_days / days)
+
+
 def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, inputs, pair: str) -> pricer.OptionPriceResult:
     """Call the payoff-appropriate pricer.py wrapper. Raises only for
     programmer error (unreachable payoff values are filtered by callers
@@ -352,7 +390,13 @@ def _price_row(
         return _skip(row, inputs_result.reason)
     inputs = inputs_result.inputs
 
-    result = _dispatch(row, as_of_date, expiry, inputs, pair)
+    factor = cut_time_factor(conn, as_of, pair, expiry)
+    if factor != 1.0:
+        import dataclasses
+        result = _dispatch(row, as_of_date, expiry, dataclasses.replace(inputs, vol=inputs.vol * factor), pair)
+        result = dataclasses.replace(result, vega=result.vega * factor)   # per point of the QUOTED vol
+    else:
+        result = _dispatch(row, as_of_date, expiry, inputs, pair)
 
     with conn:
         _insert_marks(conn, as_of, row, result)

@@ -1459,8 +1459,11 @@ def test_sample_vanilla_premium_marks_are_in_the_blotter_fill_unit(tmp_path):
 
         inputs = resolve_market_inputs(conn, AUDIT_AS_OF, pair, expiry, strike=strike).inputs
         T = (datetime.date.fromisoformat(expiry) - as_of_date).days / 365.0
+        # 2026-09-21: the vol the engine is handed carries the true hours to the 10:00 New York cut
+        from engine.options.store import cut_time_factor
+        cut_vol = inputs.vol * cut_time_factor(conn, AUDIT_AS_OF, pair, datetime.date.fromisoformat(expiry))
         vendored = european.price(inputs.spot, strike, T, inputs.domestic_rate, inputs.foreign_rate,
-                                  inputs.vol, option_type.lower())
+                                  cut_vol, option_type.lower())
         assert premium * inputs.spot == pytest.approx(vendored["price"], rel=1e-12)
 
         # The book's own arithmetic, in the BASE currency (EUR for all five): starting cost
@@ -1497,6 +1500,7 @@ def test_sample_digitals_price_as_a_fraction_of_a_base_currency_payout(tmp_path)
     assert {r[1] for r in digitals} == set(SAMPLE_DIGITAL_TERMS)
 
     as_of_date = datetime.date.fromisoformat(AUDIT_AS_OF)
+    from engine.options.store import cut_time_factor
     for trade_id, instrument_id, quantity, fill, pair, expiry, strike, option_type, _ in digitals:
         outcome = price_and_store(conn, AUDIT_AS_OF, trade_id)
         assert outcome.priced, (instrument_id, outcome.reason)
@@ -1507,8 +1511,10 @@ def test_sample_digitals_price_as_a_fraction_of_a_base_currency_payout(tmp_path)
         df_base = math.exp(-inputs.foreign_rate * T)  # discount factor of the PAYOUT currency
         assert 0.0 < premium < 1.0 * df_base, (instrument_id, premium, df_base)
         assert premium == pytest.approx(
-            _base_payout_digital_closed_form(inputs.spot, strike, T, inputs.domestic_rate, inputs.foreign_rate,
-                                             inputs.vol, option_type.lower()), abs=1e-9)
+            _base_payout_digital_closed_form(
+                inputs.spot, strike, T, inputs.domestic_rate, inputs.foreign_rate,
+                inputs.vol * cut_time_factor(conn, AUDIT_AS_OF, pair, datetime.date.fromisoformat(expiry)),  # hours to the cut
+                option_type.lower()), abs=1e-9)
 
         old_mark = digital.price(inputs.spot, strike, T, inputs.domestic_rate, inputs.foreign_rate, inputs.vol,
                                  option_type.lower(), 1.0)["price"] / inputs.spot
@@ -2675,3 +2681,23 @@ def test_one_time_purge_reports_what_it_did_and_tolerates_a_missing_realised_pnl
     _insert_mark_rows(conn, _old_unit_rows(digital, "2026-09-18", "2026-11-19", 0.68))
     assert purge_old_unit_cash_payoff_marks(conn)["ran"] is False
     assert len(_pricer_marks(conn, digital)) == 7
+
+
+def test_time_to_expiry_runs_to_the_1000_new_york_cut_in_hours_not_whole_days():
+    """User decision 2026-09-21. A pull at 15:00 New York for an option cut at 10:00 tomorrow has
+    19 hours to go, not a day: the engine's whole-day count is corrected through the vol."""
+    import math
+    from data.ingest import schema
+    from engine.options.store import cut_time_factor
+    conn = schema.connect()
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, bbg_ticker, "
+                 "expiry_date) VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
+    conn.execute("INSERT INTO marks VALUES ('2026-09-21','EURUSD','2026-09-21','SPOT',1.17,'BBG_BFXFORWARD',"
+                 "'2026-09-21T15:00:00-04:00')")
+    conn.commit()
+    one_day = cut_time_factor(conn, "2026-09-21", "EURUSD", datetime.date(2026, 9, 22))
+    assert one_day == pytest.approx(math.sqrt((19 / 24) / 1))                 # 15:00 -> 10:00 next day
+    two_months = cut_time_factor(conn, "2026-09-21", "EURUSD", datetime.date(2026, 11, 20))
+    assert 0.998 < two_months < 1.0                                           # nothing on a long option
+    assert cut_time_factor(conn, "2026-09-18", "EURUSD", datetime.date(2026, 9, 22)) == pytest.approx(
+        math.sqrt((4 - 5 / 24) / 4))                                          # no SPOT time on file: 15:00 New York
