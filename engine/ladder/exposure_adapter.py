@@ -57,17 +57,22 @@ record of an NDF ticket carries `settlement_date` = fixing date (value date less
 business days), with the real value date kept in `value_date` and the fixing repeated
 in `fixing_date`. The Ladder tab's own rules read that date: the grid shows an NDF leg
 while fixing date >= as_of, the tab's delta / exposure counts it while fixing date >
-as_of, because an NDF's currency exposure ends at the fixing. An NDF that has fixed but
-whose USD settlement the ledger has not realised yet (the ledger realises the day after
-the VALUE date) does not vanish: it is named in `unresolved` with a reason starting
-'settled', the same channel that names every other unrealised non-deliverable ticket.
-Its realised USD settlement is still read from `realised_pnl`, dated on the value date
-the cash arrives (`settled_on`), never recomputed. "Is this an NDF ticket" is decided by
+as_of. An NDF that has fixed while its value date has not passed is handled like
+settled cash (user decision 2026-09-21: "the NDF ticket that fixes out should be handled
+like settled cash, where the Local amnt stays in 'settled' and be priced using spot
+rate"): its legs sit in the Settled cash row at face value in their own currency, the
+local amount valued at SPOT (engine/ladder/usd_marks.py), never at the 1M NDF price, and
+they carry the currency's delta until the value date, exactly like a deliverable leg
+that has settled (`ndf_fixed_records`; it replaced naming such a ticket in `unresolved`
+unvalued). engine/pnl marks the same ticket at each day's spot over the same days. After
+the value date the ledger realises it and the row shows the USD settlement instead,
+read from `realised_pnl`, dated on the value date the cash arrives (`settled_on`), never
+recomputed; one the ledger could not realise is named in `unresolved` with a reason
+starting 'settled'. "Is this an NDF ticket" is decided by
 `ndf.is_ndf_pair`: the stored flag OR the pair's currencies against NDF_CCYS, so a
 USDINR row stored as deliverable before INR joined the list is still treated as the NDF
 it is (no deliverable INR cash in the settled row). engine/ladder/ladder.py's contract
-SQL (delta_per_ccy, per_pair_delta) and engine/pnl are untouched and stay value-date
-based.
+SQL (delta_per_ccy, per_pair_delta) is untouched and stays value-date based.
 """
 from __future__ import annotations
 
@@ -164,19 +169,20 @@ ORDER BY t.trade_id
 """
 
 # FX legs whose VALUE date has not passed: the candidates for "NDF that has fixed but has
-# not settled" (fixing date < as_of <= value date), worked out in code because the
-# fixing date is computed (ndf.fixing_date), not stored.
+# not settled" (fixing date before as_of, value date not before it), worked out in code
+# because the fixing date is computed (ndf.fixing_date), not stored.
 _DB_SQL_OPEN_FX_LEGS = """
-SELECT t.trade_id, t.instrument_id, t.product, i.is_ndf, l.settle_date
+SELECT t.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
+       t.strategy, t.account, i.is_ndf, l.ccy, l.amount, l.settle_date
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND t.trade_date <= :as_of AND l.settle_date >= :as_of
-ORDER BY t.trade_id, l.settle_date
+ORDER BY t.trade_id, l.settle_date, l.leg_no
 """
 
 
-# How an `Unresolved.reason` for an NDF that has fixed but not settled begins. It starts
-# with 'settled' (what the caption under the grid filters on), and a caller that wants
-# to word those tickets apart from the ones whose value date has passed can test for it.
+# How an `Unresolved.reason` for an NDF that had fixed but not settled began, while such a
+# ticket was named instead of valued. Nothing writes it since 2026-09-21 (a fixed NDF sits
+# in Settled cash, `ndf_fixed_records`); kept for ui/tabs/exposure.py, which still reads it.
 NDF_FIXED_REASON_PREFIX = "settled at its fixing"
 
 
@@ -199,26 +205,41 @@ def _fixings(holidays=None):
     return fix
 
 
-def ndf_fixed_not_settled(conn, as_of_date: str) -> List["Unresolved"]:
-    """NDF tickets with a leg that has FIXED (fixing date < as_of) while its value date
-    has not passed (module docstring): off the grid and out of the tab's delta from the
-    day after the fixing, and not in Settled cash before the ledger realises them the
-    day after the value date. Named, never valued. The reason starts with 'settled' so
-    the caption that names unrealised non-deliverable tickets picks them up."""
+def ndf_fixed_records(conn, as_of_date: str, mapping: Dict[str, str], *,
+                      for_exposure: bool = False) -> List[dict]:
+    """Settled-cash records of the NDF legs that have FIXED while their value date has not
+    passed (module docstring; user decision 2026-09-21): each leg at face value in its own
+    currency, USD leg included, summed per (trade, currency) like a settled deliverable
+    ticket, `settled_on` = the fixing date it moved to the row on, `value_date` kept.
+    Same boundary as deliverable cash, read on the fixing date: the grid keeps a leg
+    fixing exactly on as_of on its own date (`<`), the exposure / delta records count it
+    as settled cash by close (`<=`), so with `records_from_db`'s own rule (grid: fixing
+    >= as_of, exposure: fixing > as_of) a leg is counted exactly once either way."""
     fix = _fixings()
-    latest: Dict[str, tuple] = {}
-    for trade_id, pair, product, stored_flag, value_date in conn.execute(
-            _DB_SQL_OPEN_FX_LEGS, {"as_of": as_of_date}).fetchall():
-        if not is_ndf_pair(pair, int(stored_flag or 0)):
+    summed: Dict[tuple, dict] = {}
+    for (trade_id, product, pair, desc, trade_date, price, strategy, account, is_ndf,
+         ccy, amount, value_date) in conn.execute(_DB_SQL_OPEN_FX_LEGS, {"as_of": as_of_date}).fetchall():
+        if not is_ndf_pair(pair, int(is_ndf or 0)):
             continue
         fixed_on = fix(value_date)
-        if fixed_on < as_of_date:
-            latest[trade_id] = (pair, product, fixed_on, value_date)  # ascending: the last fixed leg wins
-    return [Unresolved(trade_id, pair,
-                       f"{NDF_FIXED_REASON_PREFIX} on {fixed_on} ({product} NDF, value date {value_date}), "
-                       f"USD settlement unknown: not realised yet -- the ledger realises it the day "
-                       f"after the value date")
-            for trade_id, (pair, product, fixed_on, value_date) in latest.items()]
+        if not (fixed_on <= as_of_date if for_exposure else fixed_on < as_of_date):
+            continue
+        if (trade_id, ccy) in summed:
+            record = summed[(trade_id, ccy)]
+            record["local_amount"] += float(amount)  # ascending value dates: the last fixed leg names the dates
+            record["settled_on"], record["value_date"], record["fixing_date"] = fixed_on, value_date, fixed_on
+            continue
+        summed[(trade_id, ccy)] = {
+            "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
+            "symbol": f"{pair}-{trade_id}", "symbol_description": desc,
+            "trade_date": trade_date, "settlement_date": SETTLED, "settled_on": fixed_on,
+            "value_date": value_date, "fixing_date": fixed_on,
+            "currency_pair": pair, "currency": ccy, "local_amount": float(amount),
+            "entry_rate": float(price), "book_source": strategy, "book": mapping.get(strategy, strategy),
+            "account": account, "fund": FUND, "strategy": strategy,
+            "is_ndf": 1, "settles_cash": 0,
+        }
+    return list(summed.values())
 
 
 def settled_records_from_db(conn, as_of_date: str,
@@ -233,10 +254,10 @@ def settled_records_from_db(conn, as_of_date: str,
     the deliverable legs are still returned.
 
     NDF tickets (ndf.is_ndf_pair: stored flag OR the pair's currencies) never count as
-    deliverable legs, whatever `settles_cash` an old database stored for them; their USD
-    settlement comes from `realised_pnl`, dated on the value date the cash arrives. One
-    that has fixed but is not realised yet is named in `unresolved`
-    (`ndf_fixed_not_settled`), in both modes."""
+    deliverable legs, whatever `settles_cash` an old database stored for them. From the
+    fixing until the value date their legs sit here at face value (`ndf_fixed_records`);
+    after it their USD settlement comes from `realised_pnl`, dated on the value date the
+    cash arrives."""
     mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
     op = "<=" if for_exposure else "<"
     records: List[dict] = []
@@ -255,12 +276,12 @@ def settled_records_from_db(conn, as_of_date: str,
             "account": account, "fund": FUND, "strategy": strategy,
             "is_ndf": int(is_ndf), "settles_cash": 1,
         })
-    fixed = ndf_fixed_not_settled(conn, as_of_date)
+    records += ndf_fixed_records(conn, as_of_date, mapping, for_exposure=for_exposure)
     try:
         realised = conn.execute(_DB_SQL_SETTLED_REALISED, {"as_of": as_of_date}).fetchall()
         unrealised = conn.execute(_DB_SQL_SETTLED_UNREALISED, {"as_of": as_of_date}).fetchall()
     except sqlite3.OperationalError:  # no realised_pnl table: ledger never created here
-        return records, unresolved + fixed
+        return records, unresolved
     for r in realised:
         (trade_id, product, inst, desc, trade_date, price, strategy, account, is_ndf,
          settled_on, pnl_usd) = r
@@ -283,8 +304,7 @@ def settled_records_from_db(conn, as_of_date: str,
             trade_id, inst,
             f"settled {settled_on} ({product}), USD settlement unknown: not realised yet -- "
             f"no official mark on or before {settled_on}"))
-    named = {u.trade_id for u in unresolved}
-    return records, unresolved + [u for u in fixed if u.trade_id not in named]
+    return records, unresolved
 
 
 def records_from_db(conn, as_of_date: str,
@@ -341,7 +361,7 @@ def records_from_db(conn, as_of_date: str,
             if ndf_ticket:
                 fixed_on = fix(settle_date)
                 if fixed_on < as_of_date or (for_exposure and fixed_on == as_of_date):
-                    continue  # fixed: no currency exposure left (named by ndf_fixed_not_settled)
+                    continue  # fixed: in Settled cash from here on (ndf_fixed_records)
                 if (ccy, fixed_on) in dated:
                     # Two value dates sharing one fixing date (a weekend value date): one
                     # record, or build_exposure's (trade, currency, date) key would clash.

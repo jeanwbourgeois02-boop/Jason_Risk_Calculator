@@ -283,27 +283,29 @@ def test_records_from_db_settle_on_as_of_grid_vs_exposure_boundary():
 
     # NDF leg FIXING on as_of (2026-09-21: NDFs are dated on fixing dates, value date
     # less 2 business days -- here value date Wed 2026-08-19, fixing Mon 2026-08-17 =
-    # as_of): on the grid under its fixing date, no delivery, no delta by close, nothing
-    # in either settled or open exposure records; zero exposure is a real 0.0, never NaN.
+    # as_of): on the grid under its fixing date; by close it is handled like settled cash
+    # (user decision 2026-09-21), so the exposure records carry both legs in Settled at
+    # face value and the KRW amount is still KRW delta until the value date.
     ndf = _mk_conn()
     ndf.execute("INSERT INTO instruments VALUES ('USDKRW','FX','USD','KRW',1,1,'USDKRW Curncy','9999-12-31')")
     _insert_trade(ndf, "n1", "USDKRW", "FX_FWD", 100.0)
     ndf.execute("INSERT INTO trade_legs VALUES ('n1',1,'FX_NEAR','USD',100.0,'2026-08-01','2026-08-19',1400.0,0)")
     ndf.execute("INSERT INTO trade_legs VALUES ('n1',2,'FX_NEAR','KRW',-140000.0,'2026-08-01','2026-08-19',1400.0,0)")
+    ndf.execute("UPDATE trades SET price = 1400.0 WHERE trade_id = 'n1'")  # a fill the rate check accepts
     ndf.commit()
     ndf_grid, ndf_named = records_from_db(ndf, AS_OF)
     assert any(r["currency"] == "KRW" and r["settlement_date"] == AS_OF and r["value_date"] == "2026-08-19"
                for r in ndf_grid)
     assert ndf_named == []
+    assert not any(r["settlement_date"] == SETTLED for r in ndf_grid)
     ndf_exposure, _ = exposure_records_from_db(ndf, AS_OF)
-    assert ndf_exposure == []
-    result = build_exposure(ndf_exposure, rate)
-    assert result.summary.empty
-    totals = portfolio_totals(result)
-    assert totals["net_usd"] == 0.0
-    assert totals["gross_usd"] == 0.0
+    assert {(r["currency"], r["settlement_date"], r["local_amount"], r["settled_on"], r["value_date"])
+            for r in ndf_exposure} == {("USD", SETTLED, 100.0, AS_OF, "2026-08-19"),
+                                       ("KRW", SETTLED, -140000.0, AS_OF, "2026-08-19")}
+    krw = {"KRW": {"rate": 1400.0, "inverted": True, "source": "TEST", "timestamp": "", "stale": False}}
+    totals = portfolio_totals(build_exposure(ndf_exposure, krw))
+    assert math.isclose(totals["net_usd"], -100.0) and math.isclose(totals["gross_usd"], 100.0)
     assert totals["missing"] == []
-    assert totals["currencies"] == 0
 
     # A leg settling one day later than as_of must still be included on both paths.
     _insert_trade(conn, "t2", "AUDUSD", "FX_FWD", 50.0)
@@ -1103,24 +1105,28 @@ def test_ndf_records_sit_under_their_fixing_date_and_the_rules_read_it(weekdays_
         assert all((r["settlement_date"], r["fixing_date"], r["value_date"]) ==
                    ("2026-09-21", "", "2026-09-21") for r in jpy)
 
-    # on the fixing date: grid rule is fixing >= as_of (still shown), delta rule is
-    # fixing > as_of (exposure ends at the fixing)
+    # on the fixing date: the grid still shows it under that date (fixing >= as_of); by
+    # close it is settled cash, so the delta records carry it in Settled (fixing <= as_of)
+    fixed = [("KRW", 1_400_000_000.0, SETTLED, "2026-09-17", "2026-09-21", 1, 0),
+             ("USD", -1_000_000.0, SETTLED, "2026-09-17", "2026-09-21", 1, 0)]
+
+    def ticket(records):
+        return sorted((r["currency"], r["local_amount"], r["settlement_date"], r["settled_on"], r["value_date"],
+                       r["is_ndf"], r["settles_cash"]) for r in records if r["trade_id"] == "n1")
+
     grid, named = records_from_db(conn, "2026-09-17")
     assert {r["settlement_date"] for r in grid if r["trade_id"] == "n1"} == {"2026-09-17"} and named == []
     exposure, named = exposure_records_from_db(conn, "2026-09-17")
-    assert [r for r in exposure if r["trade_id"] == "n1"] == [] and named == []
-    assert {r["trade_id"] for r in exposure} == {"j1"}
+    assert ticket(exposure) == fixed and named == []
 
-    # fixed, value date not passed, not realised: off the grid and the delta, but NAMED
-    # through the channel that names unrealised non-deliverable tickets ('settled ...')
-    for fn in (records_from_db, exposure_records_from_db):
-        records, named = fn(conn, "2026-09-18")
-        assert [r for r in records if r["trade_id"] == "n1"] == []
-        assert [(u.trade_id, u.symbol) for u in named] == [("n1", "USDKRW")]
-        assert named[0].reason.startswith("settled at its fixing on 2026-09-17 (FX_FWD NDF, value date 2026-09-21)")
-        assert "not realised yet" in named[0].reason
-    # still named on its value date itself (the ledger realises the day after)
-    assert [u.trade_id for u in records_from_db(conn, "2026-09-21")[1]] == ["n1"]
+    # fixed, value date not passed (user decision 2026-09-21: "handled like settled cash,
+    # where the Local amnt stays in 'settled'"): both legs at face value in Settled cash,
+    # on the grid and in the delta, each counted once, nothing named -- up to and including
+    # the value date itself (the ledger realises the day after)
+    for day in ("2026-09-18", "2026-09-21"):
+        for fn in (records_from_db, exposure_records_from_db):
+            records, named = fn(conn, day)
+            assert ticket(records) == fixed and named == []
 
     # value date passed, no realised row: named once, by the existing wording
     records, named = records_from_db(conn, "2026-09-22")
@@ -1258,7 +1264,7 @@ def test_a_mis_scaled_1m_ndf_mark_is_named_as_such_not_as_a_spot():
         "official NDF 1M KWN+1M 1.3945 is 1,013x away")
 
 
-def test_usd_equivalent_of_an_ndf_currency_is_the_1m_ndf_rate_on_every_date():
+def test_usd_equivalent_of_an_ndf_currency_is_the_1m_ndf_rate_on_open_dates_and_spot_for_settled_cash():
     from data.bloomberg.live import rates_from_marks
     from engine.ladder.exposure import build_exposure, ladder_usd_cells
     from engine.ladder.exposure_adapter import SETTLED
@@ -1276,9 +1282,19 @@ def test_usd_equivalent_of_an_ndf_currency_is_the_1m_ndf_rate_on_every_date():
 
     for day in days:
         entry = marks[("KRW", day)]
-        assert math.isclose(entry["rate"], 1 / 1394.5) and entry["quoted"] == 1394.5
-        assert (entry["basis"], entry["pair"], entry["ticker"]) == (BASIS_NDF_1M, "USDKRW", "KWN+1M Curncy")
+        if day in (AS_OF, SETTLED):
+            # a fixed NDF ticket's amount (user decision 2026-09-21: "handled like settled
+            # cash ... priced using spot rate"): the official spot, never the 1M price
+            assert math.isclose(entry["rate"], 1 / 1380.0) and entry["quoted"] == 1380.0
+            assert (entry["basis"], entry["pair"]) == ("spot", "USDKRW")
+        else:
+            assert math.isclose(entry["rate"], 1 / 1394.5) and entry["quoted"] == 1394.5
+            assert (entry["basis"], entry["pair"], entry["ticker"]) == (BASIS_NDF_1M, "USDKRW", "KWN+1M Curncy")
         assert ("BRL", day) not in marks                  # 1M price missing: blank, never spot
+    # no spot on file: the settled cell is blank, the open dates keep the 1M price
+    no_spot = {"KRW": {k: v for k, v in rates["KRW"].items() if k != "spot_rate"}}
+    marks_no_spot = forward_usd_rates(conn, no_spot, [("KRW", SETTLED), ("KRW", "2026-11-19")])
+    assert ("KRW", SETTLED) not in marks_no_spot and marks_no_spot[("KRW", "2026-11-19")]["basis"] == BASIS_NDF_1M
     assert BASIS_NDF_1M == "NDF 1M"
     assert marks[("JPY", "2026-11-19")]["basis"] == "outright" and marks[("JPY", AS_OF)]["basis"] == "spot"
 

@@ -581,7 +581,8 @@ def test_ndf_currency_row_label_rate_cell_and_fixing_caption():
     fwd = {("KRW", "2026-09-17"): {"rate": 1 / 1394.5, "basis": BASIS_NDF_1M},
            ("JPY", "2026-09-25"): {"rate": 1 / 149.0, "basis": "outright"}}
     text = exposure.usd_basis_caption(fwd).children
-    assert "valued at Bloomberg's 1M NDF price on every date" in text and text.rstrip(".").endswith("never at spot: KRW")
+    assert "valued at Bloomberg's 1M NDF price on every open date: KRW." in text
+    assert text.endswith("An NDF ticket that has fixed sits in Settled cash at spot until its value date.")
     assert "1M NDF" not in exposure.usd_basis_caption({("JPY", "2026-09-25"): {"rate": 1 / 149.0, "basis": "outright"}}).children
     legend = _render_text(exposure.legend())
     assert "an NDF currency uses Bloomberg's 1M NDF price instead, never spot" in legend and "KRW KWN+1M" in legend

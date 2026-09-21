@@ -168,7 +168,7 @@ def _fx_sql(theme: bool) -> str:
     return f"""
         SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
                t.trade_date, t.quantity, t.price AS fill,
-               i.base_ccy, i.quote_ccy, l.settle_date
+               i.base_ccy, i.quote_ccy, i.is_ndf, l.settle_date
         FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
         WHERE t.product IN ({",".join("?" * len(FX_PRODUCTS))}) AND t.trade_date <= ?
           AND l.leg_no = 1
@@ -407,14 +407,46 @@ def _guarded_row(conn, r, as_of, open_builder, settled_builder, numbers, holiday
         return {**base, **_unpriced(f"trade {r.trade_id}: could not be valued ({type(exc).__name__}: {exc})")}
 
 
+def _ndf_at_spot(r, as_of: str, has_forward: bool) -> str:
+    """Why this open FX ticket is marked at the pair's SPOT of `as_of` instead of its value
+    date's forward, or '' when it is marked at the forward as always (user decision
+    2026-09-21: "the NDF ticket that fixes out should be handled like settled cash, where
+    the Local amnt stays in 'settled' and be priced using spot rate"). NDF tickets only
+    (`engine.ladder.ndf.is_ndf_pair`), in two cases:
+      - it has fixed: fixing date (value date less 2 business days, `ndf.fixing_date`, the
+        Ladder's own rule) on or before `as_of`. From then until the value date it is
+        revalued at each day's spot, and the ledger freezes it after the value date as it
+        always has, at the last official SPOT on or before settlement;
+      - it has not fixed, but there is no official forward for its value date on `as_of`.
+    A deliverable ticket is never marked at spot: with no forward it stays blank."""
+    from engine.ladder.ndf import fixing_date, is_ndf_pair
+    if not is_ndf_pair(r.instrument_id, int(getattr(r, "is_ndf", 0) or 0)):
+        return ""
+    fixed_on = fixing_date(r.settle_date)
+    if fixed_on <= as_of:
+        return f"NDF fixed {fixed_on}: marked at the spot of {as_of}, like settled cash"
+    if not has_forward:
+        return f"NDF with no forward for {r.settle_date} on {as_of}: marked at the spot of {as_of}"
+    return ""
+
+
 def _open_fx_row(conn, r, as_of) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="", note="")
     m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
-    if m_hit is None:
+    at_spot = _ndf_at_spot(r, as_of, m_hit is not None)
+    if at_spot:
+        m_hit = _mark_at(conn, r.instrument_id, as_of, "SPOT", as_of)
+        out["mark_date"] = as_of
+        if m_hit is None:
+            out["reason"] = f"no SPOT mark for {r.instrument_id} on {as_of} ({at_spot})"
+            return out
+        m, m_src = _mark_number(m_hit, r.instrument_id, as_of, "SPOT", as_of), m_hit[1]
+    elif m_hit is None:
         out["reason"] = f"no FWD_OUTRIGHT mark for {r.instrument_id} settle {r.settle_date} on {as_of}"
         return out
-    m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of), m_hit[1]
+    else:
+        m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
     s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, as_of)
     if s != s or s_pair is None:
@@ -425,6 +457,9 @@ def _open_fx_row(conn, r, as_of) -> dict:
     pnl_local = r.quantity * (m - r.fill)
     pnl_usd = pnl_local * s
     out["pnl_local"], out["pnl_usd"] = pnl_local, pnl_usd
+    if at_spot:  # the mark IS the spot: all of it is spot P&L, no carry
+        out["pnl_spot_usd"], out["pnl_carry_usd"], out["note"] = pnl_usd, 0.0, at_spot
+        return out
     spot_hit = _mark_at(conn, r.instrument_id, as_of, "SPOT", as_of)
     if spot_hit is None:
         out["pnl_spot_usd"], out["pnl_carry_usd"] = pnl_usd, 0.0

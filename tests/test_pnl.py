@@ -271,6 +271,57 @@ def test_value_book_eur_sek_cross_no_invented_usd_leg():
     assert row["spot_source"] != ""
 
 
+def _vb_brl(conn):
+    conn.execute("INSERT INTO instruments VALUES ('USDBRL','FX','USD','BRL',1.0,1,'USDBRL Curncy','9999-12-31')")
+    conn.commit()
+    return conn
+
+
+def test_value_book_ndf_that_has_fixed_is_marked_at_the_days_spot_like_settled_cash():
+    """User decision 2026-09-21: "the NDF ticket that fixes out should be handled like
+    settled cash ... priced using spot rate". Value date Wed 2026-06-03 -> fixing Mon
+    2026-06-01 = as_of: from the fixing on the mark is the day's SPOT, never the forward."""
+    conn = _vb_brl(_vb_conn())
+    _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-03")
+    _vb_mark(conn, "USDBRL", "2026-06-03", "FWD_OUTRIGHT", 5.30)  # on file, but no longer the mark
+    _vb_mark(conn, "USDBRL", VB_AS_OF, "SPOT", 5.10)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert (row["status"], row["mark"], row["mark_date"]) == ("OPEN", 5.10, VB_AS_OF)
+    assert row["pnl_local"] == pytest.approx(100_000)
+    assert row["pnl_usd"] == pytest.approx(100_000 / 5.10)
+    assert row["pnl_spot_usd"] == pytest.approx(row["pnl_usd"]) and row["pnl_carry_usd"] == 0.0
+    assert row["reason"] == "" and row["note"].startswith("NDF fixed 2026-06-01: marked at the spot of 2026-06-01")
+
+
+def test_value_book_ndf_with_no_forward_is_marked_at_spot_and_a_deliverable_one_stays_blank():
+    # value date Wed 2026-06-24 -> fixing 2026-06-22: not fixed on 2026-06-01
+    conn = _vb_brl(_vb_conn())
+    _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-24")
+    _vb_fx_trade(conn, "J1", "USDJPY", "USD", "JPY", 1_000_000, 150.00, settle="2026-06-24")
+    _vb_mark(conn, "USDBRL", VB_AS_OF, "SPOT", 5.10)
+    _vb_mark(conn, "USDJPY", VB_AS_OF, "SPOT", 149.00)
+    book = value_book(conn, VB_AS_OF).set_index("trade_id")
+    ndf, jpy = book.loc["N1"], book.loc["J1"]
+    assert ndf["mark"] == 5.10 and ndf["pnl_usd"] == pytest.approx(100_000 / 5.10)
+    assert ndf["note"] == "NDF with no forward for 2026-06-24 on 2026-06-01: marked at the spot of 2026-06-01"
+    assert math.isnan(jpy["pnl_usd"]) and jpy["reason"].startswith("no FWD_OUTRIGHT mark for USDJPY")
+
+    # with its forward on file an NDF that has not fixed is marked at the forward, as always
+    _vb_mark(conn, "USDBRL", "2026-06-24", "FWD_OUTRIGHT", 5.30)
+    ndf = value_book(conn, VB_AS_OF).set_index("trade_id").loc["N1"]
+    assert ndf["mark"] == 5.30 and ndf["note"] == ""
+    assert ndf["pnl_usd"] == pytest.approx(-100_000 / 5.10)
+
+
+def test_value_book_fixed_ndf_with_no_spot_is_blank_and_says_why():
+    conn = _vb_brl(_vb_conn())
+    _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-03")
+    _vb_mark(conn, "USDBRL", "2026-06-03", "FWD_OUTRIGHT", 5.30)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert math.isnan(row["pnl_usd"])
+    assert row["reason"].startswith("no SPOT mark for USDBRL on 2026-06-01 (NDF fixed 2026-06-01")
+
+
 def test_value_book_future():
     conn = _vb_conn()
     conn.execute(

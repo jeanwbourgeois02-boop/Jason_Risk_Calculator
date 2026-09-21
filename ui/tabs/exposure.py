@@ -894,8 +894,9 @@ def usd_basis_caption(forward_rates: Optional[Mapping[tuple, dict]], view: Optio
             "beyond the last tenor; undiscounted), settled cash at spot. Its total is the book's "
             "FX value at outrights; the headline P&L converts at spot and is not this number.")
     if ndf_1m:
-        text += (" NDF currencies are valued at Bloomberg's 1M NDF price on every date, settled cash "
-                 "included, never at spot: " + ", ".join(ndf_1m) + ".")
+        text += (" NDF currencies are valued at Bloomberg's 1M NDF price on every open date: "
+                 + ", ".join(ndf_1m) + ". An NDF ticket that has fixed sits in Settled cash at spot "
+                 "until its value date.")
     if no_curve:
         text += " No forward curve on file for " + ", ".join(no_curve) + ": shown at spot."
     return html.P(text, id=USD_BASIS_CAPTION_ID, className="section-kicker")
