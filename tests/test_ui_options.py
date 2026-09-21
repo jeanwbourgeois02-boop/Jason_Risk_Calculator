@@ -906,9 +906,11 @@ def test_no_callback_that_writes_the_table_listens_to_a_revision_store(tmp_path)
         if listens:
             listeners.append(key)
             assert not _table_outputs(key), (key, listens)
-    # exactly one listener in this module, the gate, and it listens to BOTH stores
+    # two listeners in this module: the gate, which listens to BOTH stores, and the four
+    # tables above the grid, which write nothing to the table (checked in the loop above)
     gate_spec, _gate = _callback(app, f"{options.REFRESH_ID}.data")
-    assert listeners == [k for k in app.callback_map if f"{options.REFRESH_ID}.data" in k]
+    assert sorted(listeners) == sorted(k for k in app.callback_map
+                                       if f"{options.REFRESH_ID}.data" in k or f"{options.BREAKDOWNS_ID}." in k)
     assert revisions <= {d["id"] for d in gate_spec["inputs"]}
     assert (options.TABLE_ID, "active_cell") in {(d["id"], d["property"]) for d in gate_spec["inputs"]}
     # the render callback hears of a revision through the gate's store, and only there
@@ -1586,3 +1588,56 @@ def test_four_portfolio_tables_sit_above_the_table_and_add_up_in_usd():
         assert len(layout.children[ids.index(options.BREAKDOWNS_ID)].children) == 4
     finally:
         conn.close()
+
+
+def _cell_texts(component, out=None):
+    out = [] if out is None else out
+    children = getattr(component, "children", None)
+    if isinstance(children, (list, tuple)):
+        for child in children:
+            _cell_texts(child, out)
+    elif hasattr(children, "children"):
+        _cell_texts(children, out)
+    elif isinstance(children, str):
+        out.append(children)
+    return out
+
+
+def test_the_four_tables_are_redrawn_in_place_on_a_revision(tmp_path, ui_app_stub):
+    """User, 2026-09-21: "make it so i dont have to refresh". The four tables were built once
+    per sub-tab, so a saved strike or new marks moved the grid and left them as they were."""
+    from dash.exceptions import PreventUpdate
+    from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
+
+    db_path = _file_db(tmp_path)
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    options.register_callbacks(app, get_db_path=lambda: str(db_path))
+    spec, refresh_fn = _callback(app, f"{options.BREAKDOWNS_ID}.children")
+    assert {d["id"] for d in spec["inputs"]} == {DATA_REVISION_ID, BOOK_REVISION_ID}
+
+    before = refresh_fn("rev-1", "book-1", AS_OF)
+    assert len(before) == 4
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE marks SET value = 0.0070 WHERE instrument_id = 'EURUSD092226C-1' AND mark_type = 'PREMIUM'")
+    conn.commit()
+    conn.close()
+    after = refresh_fn("rev-2", "book-1", AS_OF)
+    assert len(after) == 4 and _cell_texts(after[0]) != _cell_texts(before[0])   # by pair: the new value is in it
+    with pytest.raises(PreventUpdate):
+        refresh_fn("rev-3", "book-1", None)
+
+
+def test_a_cell_edit_releases_the_selection_so_the_refresh_gate_reopens(tmp_path):
+    """Enter leaves the selection on the Strike cell below, and the gate held every later
+    revision for as long as it sat there: the table looked frozen until a page reload."""
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    options.register_callbacks(app, get_db_path=lambda: str(tmp_path / "unused.db"))
+    key = next(k for k in app.callback_map if f"{options.TABLE_ID}.active_cell" in k)
+    spec = app.callback_map[key]
+    assert _table_outputs(key) == {"active_cell", "selected_cells"}
+    # fired by an answered cell edit and by nothing else -- never by a revision store
+    assert [(d["id"], d["property"]) for d in spec["inputs"]] == [(options.EDIT_STATUS_ID, "children")]
+    release_fn = getattr(spec["callback"], "__wrapped__", spec["callback"])
+    assert release_fn("Saved") == (None, [])
+    # with no selection the gate lets the waiting revision through
+    assert options.refresh_gate(None, "rev-2", "book-1", "rev-1|book-1") == ("rev-2|book-1", "")

@@ -131,6 +131,12 @@ paused; it is let through the moment the selection moves to any other cell. The 
 double-click only, not by clicking a cell and typing. A committed edit is still answered
 at once with rows rebuilt from the database, so a saved strike never waits for the gate.
 The editor's Save publishes both revisions itself, so nothing waits for the poll.
+Two holes left the user reloading the page after typing terms (2026-09-21, "make it so i
+dont have to refresh"): Enter leaves the selection on the Strike cell of the row below, so
+the gate stayed shut for every later revision until another cell was clicked -- the
+selection is now dropped once a cell edit has been answered (`_release_selection`) -- and
+the four tables above the grid were built once per sub-tab and followed nothing; they are
+now redrawn on every revision (`_refresh_breakdowns`).
 
 **Component ids** reuse prefixes that `tests/test_ui.py::
 test_every_static_callback_id_exists_in_layout` already lists as rendered-by-callback
@@ -1364,7 +1370,9 @@ def terms_editor(conn: sqlite3.Connection) -> html.Details:
 # when (expiry ladder), which ideas are working (by structure), what is in play (spot against
 # strike). Grouping and adding the legs' own figures only; sums cover the priced options and
 # the unpriced ones are counted beside them, never added as zero.
-BREAKDOWNS_ID = "options-breakdowns"
+# Refreshed in place on every revision (`_refresh_breakdowns`), so the id carries one of the
+# rendered-by-callback prefixes (module docstring, "Component ids").
+BREAKDOWNS_ID = "options-terms-breakdowns"
 EXPIRY_BUCKETS = ((7, "This week"), (31, "Within 1 month"), (92, "1 to 3 months"), (10 ** 6, "Beyond 3 months"))
 
 
@@ -1470,6 +1478,12 @@ def structure_names(conn: sqlite3.Connection, as_of: str, legs: pd.DataFrame) ->
 
 
 def breakdown_tables(conn: sqlite3.Connection, as_of: str) -> html.Div:
+    return html.Div(id=BREAKDOWNS_ID, className="fx-ccy-tables", children=breakdown_children(conn, as_of))
+
+
+def breakdown_children(conn: sqlite3.Connection, as_of: str) -> List[html.Div]:
+    """The four tables themselves: what `build_layout` puts in `BREAKDOWNS_ID` and what
+    `_refresh_breakdowns` replaces there on a revision."""
     legs = option_rows(conn, as_of, flat=True)
     empty = legs is None or legs.empty
     money = [("Options", "options", "count"), ("Premium paid USD", "paid", "money"),
@@ -1480,7 +1494,7 @@ def breakdown_tables(conn: sqlite3.Connection, as_of: str) -> html.Div:
     ladder = [] if empty else grouped_rows(legs, legs["expiry"].map(lambda e: expiry_bucket(e, as_of)),
                                            ["Expired"] + [label for _l, label in EXPIRY_BUCKETS] + ["No expiry on file"])
     structures = [] if empty else grouped_rows(legs, structure_names(conn, as_of, legs))
-    return html.Div(id=BREAKDOWNS_ID, className="fx-ccy-tables", children=[
+    return [
         _agg_table("By pair: where the risk is", "Dollars paid, worth and made, with the net Greeks, per underlying.",
                    "Pair", money + greeks, by_pair),
         _agg_table("Expiry ladder: what decays when", "Current value is what is lost if these expire worthless.",
@@ -1492,7 +1506,7 @@ def breakdown_tables(conn: sqlite3.Connection, as_of: str) -> html.Div:
                               ("Days left", "days", "count"), ("Delta USD", "delta", "signed"),
                               ("Current value USD", "value", "money")],
                    [] if empty else in_play_rows(conn, as_of, legs)),
-    ])
+    ]
 
 
 def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
@@ -1527,10 +1541,11 @@ def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
 
 def register_callbacks(app, get_db_path: Callable[[], object],
                         date_picker_id: str = DEFAULT_DATE_PICKER_ID) -> None:
-    """Five callbacks on the table -- expand/collapse, the refresh gate (revisions, held
+    """Six callbacks on the table -- expand/collapse, the refresh gate (revisions, held
     while a term cell is selected), render (collapse, filter/sort view, cell edits, the
-    revisions the gate lets through), headline, clear filters -- and two on the
-    Option-terms editor (prefill, save). See the module docstring for each mechanism."""
+    revisions the gate lets through), the selection released after a cell edit, headline,
+    clear filters -- one on the four tables above it (redrawn on every revision) and two on
+    the Option-terms editor (prefill, save). See the module docstring for each mechanism."""
     from dash import ctx, no_update
     from dash.exceptions import MissingCallbackContextException, PreventUpdate
 
@@ -1616,6 +1631,49 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         if revision_only and records == rows:
             return no_update, no_update, note  # nothing on screen changed: leave the table alone
         return records, (status if edited else no_update), note
+
+    @app.callback(
+        Output(TABLE_ID, "active_cell", allow_duplicate=True),
+        Output(TABLE_ID, "selected_cells", allow_duplicate=True),
+        Input(EDIT_STATUS_ID, "children"),
+        prevent_initial_call=True,
+    )
+    def _release_selection(_status):
+        """A cell edit has just been answered (`_render` writes the status line on an edit
+        and on nothing else): drop the table's selection. Enter leaves it on the Strike cell
+        of the row below, and for as long as it sat there `_gate_refresh` held every later
+        revision -- the next "Pull Bloomberg now", an upload -- so the table stayed as it was
+        until the user clicked elsewhere or reloaded the page (2026-09-21, user: "make it so
+        i dont have to refresh"). `allow_duplicate`, so these two props are no second route
+        from `_render` back to the gate in Dash's callback graph."""
+        return None, []
+
+    @app.callback(
+        Output(BREAKDOWNS_ID, "children"),
+        Input(DATA_REVISION_ID, "data"),
+        Input(BOOK_REVISION_ID, "data"),
+        State(date_picker_id, "date"),
+        prevent_initial_call=True,
+    )
+    def _refresh_breakdowns(_data_rev, _book_rev, as_of_date):
+        """The four tables above the grid, redrawn in place on every revision: a saved
+        strike, new marks, a re-upload. They were built once per sub-tab and kept the
+        figures of that moment beside a table that had moved on. Not behind the gate:
+        nothing here outputs to the table, so no typing is at risk. A database that cannot
+        be read right now leaves them as they are; the next revision tries again."""
+        if not as_of_date:
+            raise PreventUpdate
+        from ui.app import connect_readonly
+        try:
+            conn = connect_readonly(get_db_path())
+        except sqlite3.Error:
+            raise PreventUpdate
+        try:
+            return breakdown_children(conn, as_of_date)
+        except sqlite3.Error:
+            raise PreventUpdate
+        finally:
+            conn.close()
 
     @app.callback(
         Output(HEADLINE_ID, "children"),
