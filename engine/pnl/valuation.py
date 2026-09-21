@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
+from collections import namedtuple
 from typing import Optional
 
 import pandas as pd
@@ -194,14 +195,31 @@ def _irs_sql(theme: bool) -> str:
     """
 
 
-def _opt_sql(theme: bool) -> str:
+def _opt_sql(theme: bool, terms: bool = True) -> str:
+    """`terms`: the option's own terms from `instrument_options`, which `closed_out_options`
+    matches on (False on a database that has no such table yet: nothing is closed out there)."""
     theme_col = "COALESCE(t.theme, '')" if theme else "''"
+    terms_cols = ("COALESCE(o.strike, 0) AS strike, COALESCE(o.option_type, '') AS option_type, "
+                  "COALESCE(o.payoff, 'VANILLA') AS payoff, COALESCE(o.barrier_level, 0) AS barrier_level, "
+                  "COALESCE(o.avg_start_date, '9999-12-31') AS avg_start_date") if terms else (
+                  "0 AS strike, '' AS option_type, 'VANILLA' AS payoff, 0 AS barrier_level, "
+                  "'9999-12-31' AS avg_start_date")
+    terms_join = "LEFT JOIN instrument_options o ON o.instrument_id = t.instrument_id" if terms else ""
     return f"""
         SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
-               t.trade_date, t.quantity, t.price AS fill, i.base_ccy, i.quote_ccy, l.settle_date
+               t.trade_date, t.quantity, t.price AS fill, i.base_ccy, i.quote_ccy, l.settle_date,
+               {terms_cols}
         FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
+        {terms_join}
         WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND l.leg_no = 1
     """
+
+
+def _has_option_terms(conn: sqlite3.Connection) -> bool:
+    """Every term `_opt_sql` reads is a column of `instrument_options` (a stale database can
+    lack the table, or `payoff` and the columns added after it)."""
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(instrument_options)")}
+    return {"strike", "option_type", "payoff", "barrier_level", "avg_start_date"} <= columns
 
 
 def _mark_at(conn: sqlite3.Connection, instrument_id: str, settle_date: str, mark_type: str,
@@ -279,6 +297,7 @@ class _BookConn:
         df = pd.read_sql_query("SELECT * FROM realised_pnl", conn)
         self.realised = {row["trade_id"]: row for _, row in df.iterrows()} if not df.empty else {}
         self.usd_memo, self.last_memo = {}, {}
+        self.closed_out = {}   # trade_id -> CloseOut, set by value_book (`closed_out_from_rows`)
 
     def execute(self, *args, **kwargs):
         return self.conn.execute(*args, **kwargs)
@@ -294,8 +313,9 @@ def value_book(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     fx = pd.read_sql_query(_fx_sql(theme), conn, params=(*FX_PRODUCTS, as_of))
     fut = pd.read_sql_query(_fut_sql(theme), conn, params={"as_of": as_of})
     irs = pd.read_sql_query(_irs_sql(theme), conn, params={"as_of": as_of})
-    opt = pd.read_sql_query(_opt_sql(theme), conn, params={"as_of": as_of})
+    opt = pd.read_sql_query(_opt_sql(theme, _has_option_terms(conn)), conn, params={"as_of": as_of})
     conn = _BookConn(conn, as_of)  # one load of the day's marks and realised rows for every row below
+    conn.closed_out = closed_out_from_rows(opt)
 
     for r in fx.itertuples(index=False):
         rows.append(_guarded_row(conn, r, as_of, _open_fx_row, _settled_fx_row, _TRADE_NUMBERS, holidays))
@@ -361,6 +381,8 @@ def _guarded_row(conn, r, as_of, open_builder, settled_builder, numbers, holiday
                 base[attr] = getattr(r, attr)
     try:
         base["status"] = "SETTLED" if r.settle_date < as_of else "OPEN"
+        if base["status"] == "OPEN" and r.trade_id in getattr(conn, "closed_out", {}):
+            base["status"] = "CLOSED"   # an option bought and sold back in full: not live (`_closed_option_row`)
         if holidays is not None:
             base["product"] = _reported_product(r.product, r.trade_date, r.settle_date, holidays)
         if bad is not None:
@@ -482,6 +504,9 @@ def _frozen_row(conn, r) -> Optional[dict]:
         pnl_local = pnl_usd = pv + _number(cf[0], f"marks.value (CASHFLOW_USD for {r.instrument_id} on {m_day})")
         spot, spot_src, mark_label = 1.0, "identity", "PV + cashflows"
     elif product == "FX_OPTION":
+        closed = getattr(conn, "closed_out", {}).get(r.trade_id)
+        if closed is not None:   # bought and sold back in full: the closing fill, never a PREMIUM mark
+            return _closed_frozen_row(conn, r, closed)
         hit = _last_official_on_or_before(conn, r.instrument_id, "PREMIUM", settle)
         if hit is None:
             return None
@@ -640,9 +665,137 @@ def option_fill_is_per_ounce(base_ccy: str, fill: float) -> bool:
     return base_ccy in METALS and fill == fill and abs(fill) >= 1.0
 
 
+# Closed-out options (user, 2026-09-21: "for options closed out theyre not live ... for the pnl
+# calculations this has to be factored in"). An option bought and sold back in full is not a
+# live position: over trades of the SAME option (pair, call / put, payoff, strike, barrier,
+# averaging start, expiry) whose quantities net to zero, the PREMIUM mark cancels out of
+# sum(quantity x (PREMIUM - fill)) exactly, so the P&L is the fills' own difference and needs
+# no mark. Each trade of such a group is valued at the closing fill instead of a PREMIUM mark:
+# the total is what the marked formula gives whenever the marks exist, and it is still there
+# when they do not. Nothing else changes: the conversion to USD is at spot of `as_of` until
+# expiry and frozen at the last official spot on or before expiry after it, as for any option.
+# The export books the buy and the sell-back under two instrument ids (the reference sample's
+# EURSEK 23-Sep put: '...-197728105' bought, '...-197838147' sold), so the match is on the
+# terms, never on the id; an option whose terms are not on file (strike 0 = not known) is
+# never matched -- two unknown strikes could be a spread, not a close-out.
+CLOSE_OUT_SOURCE = "CLOSE_OUT_FILL"
+CloseOut = namedtuple("CloseOut", "price date trade_ids")
+
+
+def _option_terms_key(r) -> Optional[tuple]:
+    """What makes two option trades the same option, or None when the terms are not all on file."""
+    payoff = (r.payoff or "VANILLA").upper()
+    strike, barrier = _number(r.strike, "instrument_options.strike"), _number(r.barrier_level, "instrument_options.barrier_level")
+    if payoff in ("ONE_TOUCH", "NO_TOUCH"):
+        known = barrier > 0
+    else:
+        known = strike > 0 and r.option_type in ("CALL", "PUT") and (payoff not in ("BARRIER_KI", "BARRIER_KO") or barrier > 0)
+    if not known:
+        return None
+    return (r.base_ccy, r.quote_ccy, r.settle_date, r.option_type, payoff, round(strike, 10), round(barrier, 10),
+            r.avg_start_date)
+
+
+def closed_out_from_rows(opt: pd.DataFrame) -> dict:
+    """trade_id -> CloseOut(price, date, trade_ids) for every trade of a fully closed-out
+    option among `opt` (the `_opt_sql` rows, already limited to trade_date <= as_of, so a past
+    date sees the position as it stood then). `price` = the quantity-weighted fill of the
+    closing side (the side opposite the first trade), `date` = the last trade's date. With one
+    buy and one sell-back the opening trade carries quantity x (closing fill - fill) and the
+    closing trade zero; with more fills the split between trades follows the average, and the
+    total is the same whatever the split. A group with a quantity or fill that is not a number,
+    or with gold fills dealt both per ounce and as a fraction, is left to the marked path."""
+    groups: dict = {}
+    for r in opt.itertuples(index=False):
+        try:
+            key = _option_terms_key(r)
+            row = (r.trade_date, str(r.trade_id), _number(r.quantity, "trades.quantity"), _number(r.fill, "trades.price"),
+                   option_fill_is_per_ounce(r.base_ccy, float(r.fill)))
+        except (TypeError, ValueError):
+            key, row = ("unreadable", r.base_ccy, r.quote_ccy, r.settle_date), None
+        if key is not None:
+            groups.setdefault(key, []).append(row)
+    out = {}
+    for rows in groups.values():
+        if any(row is None for row in rows) or len({row[4] for row in rows}) != 1:
+            continue
+        rows.sort()
+        gross = sum(abs(q) for _d, _t, q, _f, _oz in rows)
+        if gross <= 0 or abs(sum(q for _d, _t, q, _f, _oz in rows)) > 1e-9 * gross:
+            continue
+        closing = [(q, f) for _d, _t, q, f, _oz in rows if q * rows[0][2] < 0]
+        price = sum(abs(q) * f for q, f in closing) / sum(abs(q) for q, _f in closing)
+        closed = CloseOut(price, max(d for d, *_rest in rows), tuple(t for _d, t, *_rest in rows))
+        out.update({t: closed for t in closed.trade_ids})
+    return out
+
+
+def closed_out_options(conn: sqlite3.Connection, as_of: str) -> dict:
+    """`closed_out_from_rows` for the option trades on file up to `as_of` (the ledger's entry point)."""
+    opt = pd.read_sql_query(_opt_sql(False, _has_option_terms(conn)), conn, params={"as_of": as_of})
+    return closed_out_from_rows(opt)
+
+
+def close_out_ccy(base_ccy: str, quote_ccy: str, fill: float) -> str:
+    """The currency a closed-out option's fills (and so its P&L) are in: the base currency, or
+    the quote currency for a metal dealt per ounce (`option_fill_is_per_ounce`)."""
+    return quote_ccy if option_fill_is_per_ounce(base_ccy, fill) else base_ccy
+
+
+def last_usd_conversion(conn, ccy: str, day: str) -> Optional[tuple]:
+    """(S, as_of_date, source): USD per unit of `ccy` at the last official SPOT on or before
+    `day`, tried in `usd_per_quote`'s order; None when neither USD pair has one."""
+    if ccy == "USD":
+        return 1.0, day, "identity"
+    hit = _last_official_on_or_before(conn, f"USD{ccy}", "SPOT", day)
+    if hit is not None and hit[0]:
+        return 1.0 / hit[0], hit[1], hit[2]
+    return _last_official_on_or_before(conn, f"{ccy}USD", "SPOT", day)
+
+
+def _close_out_note(closed: CloseOut) -> str:
+    return (f"closed out {closed.date}: bought and sold back in full (trades {', '.join(closed.trade_ids)}); "
+            f"realised at the closing fill {closed.price:.10g}, no PREMIUM mark needed")
+
+
+def _closed_option_row(conn, r, as_of, closed: CloseOut) -> dict:
+    """quantity * (closing fill - fill) in the fills' currency, converted to USD at spot of `as_of`."""
+    out = dict(mark=closed.price, mark_date=closed.date, mark_source=CLOSE_OUT_SOURCE, spot=_NAN, spot_source="",
+               pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="",
+               note=_close_out_note(closed))
+    ccy = close_out_ccy(r.base_ccy, r.quote_ccy, r.fill)
+    s, s_pair, s_src = usd_per_quote(conn, ccy, as_of)
+    if s != s or s_pair is None:
+        out["reason"] = f"closed out {closed.date}; no SPOT for USD conversion of {ccy} on {as_of}"
+        return out
+    out["spot"], out["spot_source"] = s, s_src
+    pnl_local = r.quantity * (closed.price - r.fill)
+    out["pnl_local"], out["pnl_usd"], out["pnl_spot_usd"] = pnl_local, pnl_local * s, pnl_local * s
+    return out
+
+
+def _closed_frozen_row(conn, r, closed: CloseOut) -> Optional[dict]:
+    """A closed-out option past its expiry with no `realised_pnl` row yet: the same figure
+    `engine.pnl.ledger.realise_settled` will persist (closing fill, converted at the last
+    official spot on or before expiry); None when no such spot is on file."""
+    ccy = close_out_ccy(r.base_ccy, r.quote_ccy, r.fill)
+    hit = last_usd_conversion(conn, ccy, r.settle_date)
+    if hit is None:
+        return None
+    s, s_day, s_src = hit
+    pnl_local = r.quantity * (closed.price - r.fill)
+    return dict(mark=closed.price, mark_date=closed.date, mark_source=CLOSE_OUT_SOURCE, spot=s, spot_source=s_src,
+                pnl_local=pnl_local, pnl_usd=pnl_local * s, pnl_spot_usd=pnl_local * s, pnl_carry_usd=0.0, reason="",
+                note=f"{_close_out_note(closed)}; converted at spot dated {s_day}; not yet recorded in realised_pnl")
+
+
 def _open_option_row(conn, r, as_of) -> dict:
     """quantity * (PREMIUM - fill) in base currency, converted to USD at spot. A metal
-    option dealt per ounce (`option_fill_is_per_ounce`): current value - start value."""
+    option dealt per ounce (`option_fill_is_per_ounce`): current value - start value.
+    A closed-out option needs no PREMIUM mark (`_closed_option_row`)."""
+    closed = getattr(conn, "closed_out", {}).get(r.trade_id)
+    if closed is not None:
+        return _closed_option_row(conn, r, as_of, closed)
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
     m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PREMIUM", as_of)

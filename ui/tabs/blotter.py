@@ -266,7 +266,7 @@ def _fmt_amount(value) -> str:
 
 
 def _fmt_status(value) -> str:
-    return {"OPEN": "Open", "SETTLED": "Settled"}.get(value, value or "")
+    return {"OPEN": "Open", "SETTLED": "Settled", "CLOSED": "Closed out"}.get(value, value or "")
 
 
 _PRODUCT_LABELS = {"FX_SPOT": "Spot", "FX_FWD": "Forward", "FX_SWAP": "Swap", "FUTURE": "Future",

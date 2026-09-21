@@ -204,6 +204,33 @@ def test_realise_settled_freezes_expired_option_at_last_premium_and_spot():
     assert "last before expiry" in row[3]
 
 
+def test_realise_settled_freezes_every_trade_of_a_closed_out_option_at_the_closing_fill():
+    """An option bought and sold back in full needs no PREMIUM (user, 2026-09-21: "for options
+    closed out theyre not live"). The purchase here was frozen at a PREMIUM while the sale's
+    strike was not on file yet; once it is, both are frozen alike or the total would be wrong."""
+    conn = _irs_db()
+    _insert_instruments(conn, [("EURUSD091026C-2", "FX_OPTION", "EUR", "USD", 1, 0, "", "2026-09-10")])
+    _insert_trade(conn, "o2", "EURUSD091026C-2", "FX_OPTION", "2026-04-01", -1e6, 0.0070)
+    _insert_legs(conn, [("o2", 1, "NOTIONAL", "EUR", -1e6, "2026-04-01", "2026-09-10", 0.0070, 0)])
+    conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type, payoff) "
+                 "VALUES ('EURUSD091026C', 1.15, 'CALL', 'VANILLA')")
+    _insert_marks(conn, [
+        ("2026-09-10", "EURUSD091026C", "2026-09-10", "PREMIUM", 0.0200, "QL_OPTIONS_PRICER", "t"),
+        ("2026-09-10", "EURUSD", "2026-09-10", "SPOT", 1.20, "BBG_BFXFORWARD", "t"),
+    ])
+    out = ledger.realise_settled(conn, "2026-09-14")
+    assert out["realised"] == 1 and [u["trade_id"] for u in out["unrealisable"]] == ["s1", "o2"]   # the swap has no marks
+    assert conn.execute("SELECT mark_type FROM realised_pnl WHERE trade_id = 'o1'").fetchone() == ("PREMIUM",)
+
+    conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type, payoff) "
+                 "VALUES ('EURUSD091026C-2', 1.15, 'CALL', 'VANILLA')")
+    ledger.realise_settled(conn, "2026-09-14")
+    rows = dict(conn.execute("SELECT trade_id, pnl_usd FROM realised_pnl WHERE mark_type = 'CLOSE_OUT'").fetchall())
+    # 1m EUR * (0.0070 - 0.0050) = 2,000 EUR * 1.20 on the purchase, nothing on the sale
+    assert rows == {"o1": pytest.approx(2_400.0), "o2": pytest.approx(0.0)}
+    assert ledger.realise_settled(conn, "2026-09-14")["realised"] == 0   # a re-run never re-freezes
+
+
 # --------------------------------------------------------------------------- 2026-09-18
 # Root cause of the Bloomberg-PC "could not convert string to float: '<a date>'" that
 # blanked every Blotter view and every headline: `_insert_realised` was a positional

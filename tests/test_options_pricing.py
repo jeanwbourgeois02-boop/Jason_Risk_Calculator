@@ -2507,10 +2507,14 @@ def test_expiry_week_end_to_end_the_five_tickets_freeze_at_their_intrinsic_in_do
         assert row[1:4] == (tue, "PREMIUM", "QL_OPTIONS_PRICER") and row[4] == f"premium dated {tue}"
 
     realise_settled(conn, thu)
+    closed_out = {"EURSEK092326P-197728105", "EURSEK092326P-197838147"}   # bought and sold back in full
     for instrument_id, (pair, expiry, strike, option_type, quantity, fill) in SEPT_TICKETS.items():
         if pair != "EURSEK":
             continue
         row = frozen(instrument_id)
+        if instrument_id in closed_out:   # not live: frozen at the closing fill, never at a payoff (2026-09-21)
+            assert row[1:3] == (wed, "CLOSE_OUT")
+            continue
         intrinsic = _payoff_fraction(option_type, eursek_wed, strike)
         assert row[0] == pytest.approx(quantity * (intrinsic - fill) * eurusd_wed)  # EUR -> USD at that day's EURUSD
         assert row[1] == wed

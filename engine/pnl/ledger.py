@@ -31,7 +31,9 @@ identity above still holds. FX_OPTION: frozen at the last official `PREMIUM` on 
 expiry, converted at that day's spot, same columns as an FX trade (`local_amount` =
 base notional, `mark_type='PREMIUM'`). An expiry-day intrinsic-value mark would be more
 exact than the last premium; until the options pricer writes one, the note says which
-date's premium was used.
+date's premium was used. A closed-out option (bought and sold back in full,
+`engine.pnl.valuation.closed_out_options`) is frozen at its closing fill instead, converted
+at the last official spot on or before expiry, `mark_type='CLOSE_OUT'`: it needs no PREMIUM.
 
 `ltd(conn, d)` = sum of value_book(d).pnl_usd, NaN if any row is NaN, 0.0 for an empty
 book (first trading day, not Unavailable). Periods subtract `ltd` at a reference
@@ -48,7 +50,8 @@ import pandas as pd
 
 from engine.pnl.aggregate import (_last_business_day_of_prev_month, _last_business_day_of_prev_year,
                                   _n_business_days_back, _prev_business_day, load_holidays)
-from engine.pnl.valuation import _BadValue, _number, option_fill_is_per_ounce, usd_per_quote, value_book
+from engine.pnl.valuation import (_BadValue, _number, close_out_ccy, closed_out_options, last_usd_conversion,
+                                  option_fill_is_per_ounce, usd_per_quote, value_book)
 
 GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 
@@ -211,9 +214,36 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
         except (TypeError, ValueError, ArithmeticError) as exc:
             unrealisable.append(_unrealisable(trade_id, exc))
 
-    for trade_id, inst, product, base_ccy, qty, fill, settle, quote_ccy in conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall():
+    closed_out = closed_out_options(conn, as_of)
+    option_rows = conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall()
+    # Every trade of a closed-out option is frozen at the same closing fill, or the group's total
+    # is wrong. One of them frozen at a PREMIUM before the group could be recognised (the other
+    # trade's strike was typed after expiry) is dropped here and frozen again below with the rest.
+    siblings = sorted({t for row in option_rows if row[0] in closed_out for t in closed_out[row[0]].trade_ids})
+    if siblings:
+        marks = ",".join("?" * len(siblings))
+        if conn.execute(f"DELETE FROM realised_pnl WHERE mark_type != 'CLOSE_OUT' AND trade_id IN ({marks})", siblings).rowcount:
+            option_rows = conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall()
+    for trade_id, inst, product, base_ccy, qty, fill, settle, quote_ccy in option_rows:
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
+            closed = closed_out.get(trade_id)
+            if closed is not None:
+                # Bought and sold back in full (engine.pnl.valuation, "Closed-out options"): frozen at
+                # the closing fill, never a PREMIUM mark, so every trade of the group is frozen alike.
+                ccy = close_out_ccy(base_ccy, quote_ccy, fill)
+                s_hit = last_usd_conversion(conn, ccy, settle)
+                if s_hit is None:
+                    unrealisable.append({"trade_id": trade_id, "reason": f"closed out {closed.date}; no SPOT to convert {ccy} to USD on or before {settle}"})
+                    continue
+                s, s_day, s_src = s_hit
+                entry = qty * fill * s
+                combined = closed.price * s
+                pnl = qty * combined - entry
+                note = f"closed out {closed.date} at the closing fill {closed.price:.10g}; spot dated {s_day}"
+                _insert_realised(conn, trade_id, inst, product, ccy, settle, qty, entry, "CLOSE_OUT", combined, s_day, s_src, pnl, note)
+                realised += 1
+                continue
             m_hit = _last_on_or_before(conn, inst, "PREMIUM", settle)
             if m_hit is None:
                 unrealisable.append({"trade_id": trade_id, "reason": f"no official PREMIUM for {inst} on or before {settle}"})

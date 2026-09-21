@@ -363,6 +363,109 @@ def test_value_book_expired_option_is_unavailable_not_stale():
     assert "cannot be frozen" in row["reason"]
 
 
+# ----- closed-out options (user, 2026-09-21: "for options closed out theyre not live ... for
+# the pnl calculations this has to be factored in"). The reference sample's own case: the EURSEK
+# 23-Sep put bought 35m at 0.0057 and sold back at 0.005645 under a second instrument id.
+VB_PUT_BOUGHT, VB_PUT_SOLD = "EURSEK092326P-197728105", "EURSEK092326P-197838147"
+
+
+def _vb_terms(conn, instrument_id, strike, option_type="PUT", payoff="VANILLA"):
+    conn.execute("INSERT OR REPLACE INTO instrument_options (instrument_id, strike, option_type, payoff) "
+                 "VALUES (?,?,?,?)", (instrument_id, strike, option_type, payoff))
+    conn.commit()
+
+
+def _vb_round_trip(conn, sold=-35_000_000, sold_on="2026-05-05", strikes=(11.2, 11.2), expiry=VB_OPT_EXPIRY):
+    _vb_option(conn, "BUY", VB_PUT_BOUGHT, "EUR", "SEK", 35_000_000, 0.0057, expiry=expiry)
+    _vb_option(conn, "SELL", VB_PUT_SOLD, "EUR", "SEK", sold, 0.005645, expiry=expiry)
+    conn.execute("UPDATE trades SET trade_date = ? WHERE trade_id = 'SELL'", (sold_on,))
+    for instrument_id, strike in zip((VB_PUT_BOUGHT, VB_PUT_SOLD), strikes):
+        if strike:
+            _vb_terms(conn, instrument_id, strike)
+    conn.commit()
+
+
+def _vb_rows(conn, as_of=VB_AS_OF):
+    return value_book(conn, as_of).set_index("trade_id")
+
+
+def test_value_book_closed_out_option_is_realised_at_its_closing_fill_with_no_premium_mark():
+    conn = _vb_conn()
+    _vb_round_trip(conn)
+    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
+    vb = _vb_rows(conn)
+    assert list(vb["status"]) == ["CLOSED", "CLOSED"] and list(vb["reason"]) == ["", ""]
+    assert vb.loc["BUY", "pnl_local"] == pytest.approx(35_000_000 * (0.005645 - 0.0057))   # -1,925 EUR
+    assert vb.loc["BUY", "pnl_usd"] == pytest.approx(-1_925 * 1.10)
+    assert vb.loc["SELL", "pnl_usd"] == pytest.approx(0.0)
+    assert vb.loc["BUY", "mark"] == pytest.approx(0.005645) and vb.loc["BUY", "mark_source"] == "CLOSE_OUT_FILL"
+    assert "closed out 2026-05-05" in vb.loc["BUY", "note"]
+
+
+def test_value_book_closed_out_total_is_what_the_marked_formula_gives():
+    """The PREMIUM mark cancels over a closed position, so nothing about the total changes."""
+    conn = _vb_conn()
+    _vb_round_trip(conn)
+    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
+    for instrument_id in (VB_PUT_BOUGHT, VB_PUT_SOLD):
+        _vb_premium(conn, instrument_id, 0.0031)
+    marked = (35_000_000 * (0.0031 - 0.0057) - 35_000_000 * (0.0031 - 0.005645)) * 1.10
+    assert _vb_rows(conn)["pnl_usd"].sum() == pytest.approx(marked)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"strikes": (0.0, 0.0)},          # no strike on file: two unknown strikes could be a spread
+    {"strikes": (11.2, 11.4)},        # a put spread, not a close-out
+    {"sold": -20_000_000},            # sold back in part: 15m is still live
+])
+def test_value_book_option_that_is_not_fully_closed_out_still_needs_its_premium_mark(kwargs):
+    conn = _vb_conn()
+    _vb_round_trip(conn, **kwargs)
+    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
+    vb = _vb_rows(conn)
+    assert list(vb["status"]) == ["OPEN", "OPEN"]
+    assert vb["pnl_usd"].isna().all() and all("PREMIUM" in reason for reason in vb["reason"])
+
+
+def test_value_book_before_the_sell_back_the_option_is_still_live():
+    conn = _vb_conn()
+    _vb_round_trip(conn, sold_on="2026-06-10")
+    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
+    vb = _vb_rows(conn)   # 2026-06-01: only the purchase is on the book
+    assert list(vb.index) == ["BUY"] and vb.loc["BUY", "status"] == "OPEN" and math.isnan(vb.loc["BUY", "pnl_usd"])
+
+
+def test_value_book_closed_out_option_without_a_conversion_spot_says_so():
+    conn = _vb_conn()
+    _vb_round_trip(conn)
+    vb = _vb_rows(conn)
+    assert vb["pnl_usd"].isna().all() and "no SPOT for USD conversion of EUR" in vb.loc["BUY", "reason"]
+
+
+def test_value_book_closed_out_gold_option_dealt_per_ounce_is_in_dollars():
+    conn = _vb_conn()
+    for trade_id, instrument_id, ounces, fill in (("G1", "XAUUSD092226C-1", 1_000, 38.5), ("G2", "XAUUSD092226C-2", -1_000, 41.0)):
+        _vb_option(conn, trade_id, instrument_id, "XAU", "USD", ounces, fill)
+        _vb_terms(conn, instrument_id, 4_200.0, option_type="CALL")
+    vb = _vb_rows(conn)   # no XAU spot on file and none needed: the fills are dollars per ounce
+    assert vb.loc["G1", "pnl_usd"] == pytest.approx(2_500.0) and vb.loc["G2", "pnl_usd"] == pytest.approx(0.0)
+
+
+def test_value_book_closed_out_option_past_expiry_freezes_at_the_last_spot_on_or_before_expiry():
+    from engine.pnl import ledger
+    conn = _vb_conn()
+    _vb_round_trip(conn, expiry="2026-05-20")
+    _vb_mark(conn, "EURUSD", "2026-05-19", "SPOT", 1.20, as_of="2026-05-19")
+    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
+    vb = _vb_rows(conn)   # not yet in realised_pnl: the figure the ledger will persist
+    assert list(vb["status"]) == ["SETTLED", "SETTLED"]
+    assert vb["pnl_usd"].sum() == pytest.approx(-1_925 * 1.20)
+    assert ledger.realise_settled(conn, VB_AS_OF) == {"realised": 2, "unrealisable": [], "repaired": []}
+    assert conn.execute("SELECT DISTINCT mark_type, spot_as_of_date FROM realised_pnl").fetchall() == [("CLOSE_OUT", "2026-05-19")]
+    assert _vb_rows(conn)["pnl_usd"].sum() == pytest.approx(-1_925 * 1.20)
+    assert ledger.ltd(conn, VB_AS_OF) == pytest.approx(-1_925 * 1.20)
+
+
 def test_value_book_missing_mark_is_nan_with_reason():
     conn = _vb_conn()
     _vb_fx_trade(conn, "T5", "EURUSD", "EUR", "USD", 1_000_000, 1.1000)
