@@ -30,7 +30,8 @@ _VersionInfo = namedtuple("_VersionInfo", "major minor micro")
 def test_parser_has_exactly_the_documented_commands():
     parser = risk.build_parser()
     sub = next(a for a in parser._actions if a.dest == "command")
-    assert set(sub.choices) == {"setup", "start", "doctor", "_load_sample", "freeze"}
+    assert set(sub.choices) == {"setup", "start", "doctor", "_load_sample", "freeze",
+                                "marks-export", "marks-import"}
 
 
 def test_import_checks_are_a_subset_of_installed_packages():

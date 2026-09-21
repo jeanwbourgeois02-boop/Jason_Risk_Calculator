@@ -8,6 +8,8 @@ diagnostics).
     py 2_launcher.py doctor     check every prerequisite and say exactly what to fix
     py 2_launcher.py freeze     (re)write requirements.txt from the list below, for `pip install -r`
                                  or CI that doesn't go through this file
+    py 2_launcher.py marks-export   Bloomberg PC: write the marks on file to data/bbg_snapshot/ and commit it
+    py 2_launcher.py marks-import   PC with no Terminal: load data/bbg_snapshot/ (after a git pull)
 
 Backfilling P&L history from Bloomberg daily closes is part of every "Pull Bloomberg now"
 in the app (data/bloomberg/live.py runs data/bloomberg/backfill.py straight after
@@ -696,6 +698,85 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------------- marks snapshot
+
+SNAPSHOT_REL = "data/bbg_snapshot"
+
+
+def cmd_marks_export(args) -> int:
+    """Bloomberg PC: write the marks on file to data/bbg_snapshot/ (data/bloomberg/snapshot.py)
+    and commit that folder, so `git push` carries them to a PC with no Terminal. The commit
+    names the folder explicitly, so nothing else staged or edited goes with it."""
+    from data.bloomberg import snapshot
+    try:
+        m = snapshot.export_snapshot(db_path())
+    except snapshot.SnapshotError as exc:
+        say(f"  marks-export: {exc}")
+        return 1
+    say(f"  marks-export: {m['rows'].get('marks', 0)} marks, {m['marks_from']} to {m['marks_through']}, "
+        f"written to {SNAPSHOT_REL}/")
+    if args.no_commit:
+        return 0
+    if not (ROOT / ".git").exists():
+        say("  not a git clone: nothing committed")
+        return 0
+    try:
+        _git("add", "--", SNAPSHOT_REL)
+        unchanged, _, _ = _git("diff", "--cached", "--quiet", "--", SNAPSHOT_REL)
+        if unchanged == 0:
+            say("  the snapshot already committed is identical: nothing to commit")
+        else:
+            code, _, err = _git("commit", "-m", f"Bloomberg marks snapshot {m['exported_at']}: "
+                                f"marks through {m['marks_through']}", "--", SNAPSHOT_REL)
+            if code != 0:
+                say(f"  git commit failed: {(err.splitlines() or ['no detail'])[-1]}")
+                return 1
+            say("  committed")
+        if not args.push:
+            say("  next:  git push      then on the other PC:  git pull  and  2_launcher.py marks-import")
+            return 0
+        code, _, err = _git("push", "origin", "HEAD")
+        if code != 0:
+            say(f"  git push failed: {(err.splitlines() or ['no detail'])[-1]}  (run  git push  yourself)")
+            return 1
+        say("  pushed. On the other PC:  git pull  and  2_launcher.py marks-import")
+    except (OSError, subprocess.SubprocessError) as exc:
+        say(f"  git unavailable ({exc.__class__.__name__}): the files are written, commit them yourself")
+        return 1
+    return 0
+
+
+def cmd_marks_import(args) -> int:
+    """PC with no Terminal: load data/bbg_snapshot/ into the database (runs inside .venv: the
+    ledger's freeze of settled trades needs the app's packages)."""
+    if not in_venv() and VENV_PY.exists():
+        return reexec_in_venv(sys.argv[1:])
+    from data.bloomberg import snapshot
+    if bloomberg_pc() and not args.force:
+        say("  marks-import: this PC has Bloomberg. An import replaces the marks on file with the snapshot's,")
+        say("  so anything pulled here since that export would be lost. Add --force if that is what you want.")
+        return 1
+    try:
+        r = snapshot.import_snapshot(db_path())
+    except snapshot.SnapshotError as exc:
+        say(f"  marks-import: {exc}")
+        return 1
+    m = r["manifest"] or {}
+    say(f"  marks-import: snapshot of {m.get('exported_at', 'unknown time')}, "
+        f"marks {m.get('marks_from', '?')} to {m.get('marks_through', '?')}")
+    say("  loaded: " + ", ".join(f"{n} {t}" for t, n in r["rows"].items())
+        + f"; {r['instruments_added']} instrument(s) added")
+    if r["skipped_marks"]:
+        say(f"  {r['skipped_marks']} mark(s) skipped: their instrument is not in the snapshot")
+    led = r["ledger"]
+    if led is not None:
+        say(f"  settled trades frozen: {led['realised']}; not freezable: {len(led['unrealisable'])}")
+    if _trades_count() == 0:
+        say("  No trades on file yet: upload the blotter in the app, then run marks-import again")
+        say("  (an upload clears the frozen settled trades, and only this command freezes them here).")
+    return 0
+
+
 # ----------------------------------------------------------------------------- cli
 
 def build_parser() -> argparse.ArgumentParser:
@@ -721,6 +802,15 @@ def build_parser() -> argparse.ArgumentParser:
     dcm.add_argument("--tests", action="store_true", help="also run the test suite")
     dcm.add_argument("--no-git", action="store_true", help="skip the GitHub sync check")
     dcm.set_defaults(func=cmd_doctor)
+
+    me = sub.add_parser("marks-export", help="Bloomberg PC: write the marks on file to data/bbg_snapshot/ and commit it")
+    me.add_argument("--push", action="store_true", help="also git push")
+    me.add_argument("--no-commit", action="store_true", help="write the files only")
+    me.set_defaults(func=cmd_marks_export)
+
+    mi = sub.add_parser("marks-import", help="PC with no Terminal: load data/bbg_snapshot/ into the database")
+    mi.add_argument("--force", action="store_true", help="import even on a PC that has Bloomberg")
+    mi.set_defaults(func=cmd_marks_import)
 
     sub.add_parser("_load_sample", help=argparse.SUPPRESS).set_defaults(func=cmd_load_sample)
 
