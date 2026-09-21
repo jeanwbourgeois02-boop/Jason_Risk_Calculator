@@ -844,7 +844,7 @@ def test_priced_diff_scoped_excludes_trade_priced_now_unpriced_before(monkeypatc
                                                  "2026-06-19", "2026-06-19")
     assert entry["available"] is True
     assert entry["value"] == pytest.approx(20.0)  # T1 only: 120 - 100; T2 excluded both ways
-    assert entry["excluded_summary"] == "excludes 1 of 2 trades unpriced"
+    assert entry["excluded_summary"] == "excludes 1 of 2 trades: 0 unpriced today, 1 with no price on 2026-06-19"
     assert "priced now but unpriced on 2026-06-19" in entry["excluded_detail"]
 
 

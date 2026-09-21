@@ -1168,9 +1168,44 @@ def unpriced_trade_rows(conn: sqlite3.Connection, as_of: str) -> Tuple[int, List
     out = df[df["reason"] != ""]
     rows = [{"trade_id": r.trade_id, "product": r.product, "instrument_id": r.instrument_id,
              "trade_date": getattr(r, "trade_date", ""), "status": getattr(r, "status", ""),
-             "reason": r.reason, "flag": ""}
+             "left_out_of": "every figure (no price today)", "reason": r.reason, "flag": ""}
             for r in out.sort_values(["product", "instrument_id", "trade_id"]).itertuples()]
+    rows += period_only_rows(conn, as_of, df)
     return len(df), rows
+
+
+_PERIOD_NAMES = (("daily", "Daily"), ("d5", "5d"), ("mtd", "MTD"), ("ytd", "YTD"))
+
+
+def period_only_rows(conn: sqlite3.Connection, as_of: str, df_today: pd.DataFrame) -> List[dict]:
+    """Why Daily / 5d / MTD / YTD leave out MORE trades than LTD does (user, 2026-09-21): a period
+    is today's value minus the value on an earlier close, so a trade priced today but with no
+    price on THAT close cannot be in it. One row per such trade, naming the figures and dates."""
+    from engine.pnl.ledger import period_reference_dates
+    from engine.pnl.reference import diff_split
+    from ui.tabs.blotter_pricing import priced_value_book
+    refs = period_reference_dates(as_of)
+    by_trade: Dict[str, dict] = {}
+    for key, name in _PERIOD_NAMES:
+        ref = refs.get(key)
+        if not ref:
+            continue
+        df_ref = priced_value_book(conn, ref)[0]
+        blocked = diff_split(df_today, df_ref).blocked_ids
+        if not blocked:
+            continue
+        why = dict(zip(df_ref["trade_id"], df_ref["reason"])) if not df_ref.empty else {}
+        for r in df_today[df_today["trade_id"].isin(blocked)].itertuples():
+            row = by_trade.setdefault(r.trade_id, {
+                "trade_id": r.trade_id, "product": r.product, "instrument_id": r.instrument_id,
+                "trade_date": getattr(r, "trade_date", ""), "status": getattr(r, "status", ""),
+                "figures": [], "reason": why.get(r.trade_id, ""), "flag": ""})
+            row["figures"].append(f"{name} ({ref})")
+    out = []
+    for row in sorted(by_trade.values(), key=lambda x: (x["product"], x["instrument_id"], x["trade_id"])):
+        row["left_out_of"] = "only " + ", ".join(row.pop("figures")) + ": priced today, no price on that close"
+        out.append(row)
+    return out
 
 
 def unpriced_trades_panel(conn: sqlite3.Connection, as_of: str) -> html.Div:
@@ -1185,13 +1220,17 @@ def unpriced_trades_panel(conn: sqlite3.Connection, as_of: str) -> html.Div:
         key = re.sub(r"\s+for\s+\S+.*$", "", r["reason"]) or r["reason"]
         by_reason[key] = by_reason.get(key, 0) + 1
     top = "; ".join(f"{n} x {why}" for why, n in sorted(by_reason.items(), key=lambda kv: -kv[1])[:4])
-    return _panel(f"{UNPRICED_TITLE} · {len(rows)} of {total} on {as_of}", [
-        _kicker("These trades are in the book but have no P&L on this date, so the header's LTD, Daily, 5d, MTD "
-                "and YTD leave them out. Most common reasons: " + top + "."),
+    n_today = sum(1 for r in rows if r["left_out_of"].startswith("every"))
+    return _panel(f"{UNPRICED_TITLE} · {n_today} of {total} unpriced on {as_of}, {len(rows) - n_today} more in some periods", [
+        _kicker(f"{n_today} trades have no price today, so EVERY headline figure leaves them out. Daily, 5d, MTD and "
+                "YTD are today's value minus the value on an earlier close, so each also leaves out the trades with "
+                "no price on ITS close: that is why the counts differ from one figure to the next. "
+                "Most common reasons: " + top + "."),
         _panel_table(UNPRICED_TABLE_ID,
                      [("Trade id", "trade_id"), ("Product", "product"), ("Instrument", "instrument_id"),
-                      ("Trade date", "trade_date"), ("Status", "status"), ("Why it has no P&L", "reason")],
-                     rows, wide=("reason",)),
+                      ("Trade date", "trade_date"), ("Status", "status"), ("Left out of", "left_out_of"),
+                      ("Why", "reason")],
+                     rows, wide=("reason", "left_out_of")),
     ])
 
 

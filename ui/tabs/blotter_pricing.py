@@ -576,7 +576,9 @@ def _priced_diff_frames(conn: sqlite3.Connection, df_a: pd.DataFrame, df_b: pd.D
         note = f"{len(blocked_ids)} priced now but unpriced on {note_label}"
         detail = f"{detail}; {note}" if detail else note
     return {"value": value, "ref_date": ref_date, "available": True, "reason": "",
-            "excluded_summary": f"excludes {n_excluded} of {total} trades unpriced" + bad_value_note(a_unpriced),
+            "excluded_summary": (f"excludes {n_excluded} of {total} trades unpriced" if not blocked_ids else
+                                 f"excludes {n_excluded} of {total} trades: {len(a_unpriced_ids)} unpriced today, "
+                                 f"{len(blocked_ids)} with no price on {note_label}") + bad_value_note(a_unpriced),
             "excluded_detail": detail}
 
 

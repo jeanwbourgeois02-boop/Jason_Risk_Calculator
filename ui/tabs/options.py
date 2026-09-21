@@ -1382,7 +1382,16 @@ def grouped_rows(legs: pd.DataFrame, keys: pd.Series, order: Optional[List[str]]
     if legs is None or legs.empty:
         return []
     names = [n for n in (order or sorted(set(keys))) if (keys == n).any()]
-    return [_sum_group(n, legs[keys == n]) for n in names] + [_sum_group("Total", legs)]
+    rows = [_sum_group(n, legs[keys == n]) for n in names]
+    # A group whose options are all priced and worth nothing in total is closed (bought and sold
+    # back): not shown (user, 2026-09-21: "if the value is 0 it means its closed"). The Total
+    # still carries its P&L.
+    rows = [r for r in rows if not _is_closed(r)]
+    return rows + [_sum_group("Total", legs)]
+
+
+def _is_closed(row: dict) -> bool:
+    return row.get("unpriced") == 0 and row.get("value") is not None and abs(row["value"]) < 0.5
 
 
 def days_to_expiry(expiry, as_of: str) -> Optional[int]:
@@ -1405,9 +1414,14 @@ def in_play_rows(conn: sqlite3.Connection, as_of: str, legs: pd.DataFrame) -> Li
     """Per open option: spot against strike (how far, in per cent of spot), days left, delta and
     value, nearest to the strike first. Spot is the pair's official SPOT on `as_of`."""
     rows = []
+    # An option bought and sold back in full is closed: the same terms net to no position.
+    terms = lambda l: tuple(str(l.get(k)) for k in ("underlying", "option_type", "payoff", "strike", "expiry"))  # noqa: E731
+    net: Dict[tuple, float] = {}
+    for leg in legs.to_dict("records"):
+        net[terms(leg)] = net.get(terms(leg), 0.0) + float(leg.get("position") or 0.0)
     for leg in legs.to_dict("records"):
         days = days_to_expiry(leg.get("expiry"), as_of)
-        if days is None or days < 0:
+        if days is None or days < 0 or abs(net[terms(leg)]) < 1e-9:
             continue
         spot = _official_marks(conn, as_of, leg.get("underlying") or "", as_of, ("SPOT",)).get("SPOT")
         strike = leg.get("strike")

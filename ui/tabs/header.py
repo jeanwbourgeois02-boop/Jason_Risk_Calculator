@@ -525,7 +525,9 @@ def _priced_diff(df_a, df_b, root_reason: str, ref_label: str,
         detail = f"{detail}; {note}" if detail else note
     from ui.tabs.blotter_pricing import bad_value_note
     return {"value": value, "available": True, "reason": "",
-            "excluded_summary": f"excludes {n_excluded} of {total} trades unpriced" + bad_value_note(a_unpriced),
+            "excluded_summary": (f"excludes {n_excluded} of {total} trades unpriced" if not blocked_ids else
+                                 f"excludes {n_excluded} of {total} trades: {len(a_unpriced_ids)} unpriced today, "
+                                 f"{len(blocked_ids)} with no price on {ref_label}") + bad_value_note(a_unpriced),
             "excluded_detail": detail}
 
 

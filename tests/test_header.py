@@ -247,7 +247,7 @@ def test_priced_diff_excludes_trades_unpriced_on_either_date():
     # (100 - 40) for both_priced, + 30 for new_trade (no ref-side value to subtract);
     # "blocked" and "still_unpriced" contribute nothing either way.
     assert entry["value"] == pytest.approx(90.0)
-    assert entry["excluded_summary"] == "excludes 2 of 4 trades unpriced"
+    assert entry["excluded_summary"] == "excludes 2 of 4 trades: 1 unpriced today, 1 with no price on 2026-09-16"
     assert "priced now but unpriced on 2026-09-16" in entry["excluded_detail"]
     assert "no PREMIUM" in entry["excluded_detail"]
 
@@ -436,7 +436,7 @@ def test_priced_diff_minority_blocked_keeps_partial_figure():
     entry = header._priced_diff(df_today, df_ref, "root reason", "2026-09-16", lambda *_: "unused")
     assert entry["available"] is True
     assert entry["value"] == pytest.approx((10 - 4) + (20 - 1))
-    assert entry["excluded_summary"] == "excludes 1 of 3 trades unpriced"
+    assert entry["excluded_summary"] == "excludes 1 of 3 trades: 0 unpriced today, 1 with no price on 2026-09-16"
 
 
 def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
