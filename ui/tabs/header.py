@@ -223,20 +223,44 @@ def _missing_marks_reason(conn: sqlite3.Connection, as_of: str,
     needs but does not have an official mark for, and how many. Returns "" when the
     book needs no marks at all, or needs marks and already has every one of them --
     in either case the caller should keep the engine's own (more specific) reason
-    instead, e.g. "settled trade X: no official mark on or before its settlement"."""
+    instead, e.g. "settled trade X: no official mark on or before its settlement".
+
+    2026-09-21: the count comes from `needed_marks`, which asks a PAST date what a past
+    close needed, not what a live pull would request."""
     try:
-        from data.bloomberg.inventory import mark_inventory, STATUS_OFFICIAL
-        df = mark_inventory(conn, as_of)
+        needed, missing = needed_marks(conn, as_of)
     except Exception:
         return ""
-    if df.empty:
+    if not needed or not missing:
         return ""
-    not_official = df[df["status"] != STATUS_OFFICIAL]
-    if not_official.empty:
-        return ""
-    mark_types = "/".join(sorted(not_official["mark_type"].unique()))
+    mark_types = "/".join(sorted({m["mark_type"] for m in missing}))
     return (f"no official {mark_types} for {as_of} "
-            f"({len(not_official)} of {len(df)} needed marks) — {action}")
+            f"({len(missing)} of {needed} needed marks) — {action}")
+
+
+def needed_marks(conn: sqlite3.Connection, as_of: str) -> tuple:
+    """(how many marks the book needs on `as_of`, the ones with no official mark as
+    [{instrument_id, settle_date, mark_type}]). DB-only reads, never a Bloomberg session.
+
+    Two needs lists exist in `data.bloomberg.inventory`, and the date decides which applies:
+      - today (the New York book date) or later: `mark_inventory`, the LIVE request list;
+      - a date before today: `close_completeness(as_of, as_of)`, the PAST-close list the
+        backfill fills. The live list also asks for a forward at every open option's
+        expiry, which the backfill never writes for a past date by design, so counting a
+        past date with it left "(N of M needed marks)" too high for good (2026-09-21).
+        A past date that is not a weekday has no close row and keeps the live list.
+    The Market data tab's "What is missing" and "Past closes the header needs" panels read
+    this same function, so they cannot disagree with the header's sentence."""
+    from data.bloomberg.inventory import STATUS_OFFICIAL, close_completeness, mark_inventory
+    from data.bloomberg.live import book_today
+    if as_of < book_today().isoformat():
+        closes = close_completeness(conn, as_of, as_of)
+        if not closes.empty:
+            row = closes.iloc[0]
+            return int(row["needed"]), [dict(m) for m in row["missing"]]
+    df = mark_inventory(conn, as_of)
+    missing = df[df["status"] != STATUS_OFFICIAL]
+    return len(df), missing[["instrument_id", "settle_date", "mark_type"]].to_dict("records")
 
 
 def backfill_status(conn: Optional[sqlite3.Connection]) -> dict:

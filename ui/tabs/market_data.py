@@ -8,6 +8,14 @@ inventory table. Layout:
      tab -- the "Pull now" button and a one-line feed status, with a second compact line
      giving the last pull's seconds per step, slowest first, when the status file
      carries `timings` (`pull_timings_line`; nothing when absent).
+  1b. Whole-book checks (2026-09-21, user-approved), above the per-pair section and
+     independent of the pair dropdown: "What is missing" (`missing_panel`: every needed
+     mark with no official mark, trades and notional blocked, Bloomberg's own reason from
+     the last pull) and "Marks that look wrong" (`suspect_panel`: today's official marks
+     against the previous business day's, flagged above BAD_TICK_PCT, when exactly
+     unchanged, or when the snap is old on the live date). "Past closes the header needs"
+     (`past_closes_panel`) sits under the completeness strip and follows the HEADER's
+     as-of date. All three are filled by `_update_body` through `whole_book_panels`.
   2. For the selected pair: spot (value/source/snapped time), the forward curve as a
      table (one row per settle_date with a FWD_OUTRIGHT mark on the as-of date, all
      sources, official first), and a line chart of outright vs settle date.
@@ -43,7 +51,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -75,6 +83,23 @@ CURVE_TABLE_ID = "market-data-curve-table"
 CURVE_CHART_ID = "market-data-curve-chart"
 COMPLETENESS_STRIP_ID = "market-data-completeness-strip"
 COMPLETENESS_DAYS = 20  # trailing business days shown in the calendar strip; not specified in BUILD_PLAN.md
+
+# Whole-book checks (2026-09-21), none of which depends on the pair dropdown.
+MISSING_PANEL_ID = "market-data-missing-panel"
+MISSING_TABLE_ID = "market-data-missing-table"
+SUSPECT_PANEL_ID = "market-data-suspect-panel"
+SUSPECT_FLAGGED_TABLE_ID = "market-data-suspect-flagged-table"
+SUSPECT_ALL_TABLE_ID = "market-data-suspect-all-table"
+PAST_CLOSES_PANEL_ID = "market-data-past-closes-panel"
+PAST_CLOSES_TABLE_ID = "market-data-past-closes-table"
+MISSING_TITLE = "What is missing"
+SUSPECT_TITLE = "Marks that look wrong"
+PAST_CLOSES_TITLE = "Past closes the header needs"
+# "Marks that look wrong": one rule for every instrument, stated in the panel's caption.
+# A day's move above this is flagged. 2.5 % is loose for a G10 pair and tight for TRY, and
+# is meant to be: a flag asks for a look, it does not say the mark is wrong.
+BAD_TICK_PCT = 2.5
+PANEL_PAGE_SIZE = 15   # rows per page in the two exception tables, so a bad day stays a bounded height
 
 MANUAL_INSTRUMENT_ID = "market-data-manual-instrument"
 MANUAL_SETTLE_ID = "market-data-manual-settle"
@@ -653,6 +678,477 @@ def completeness_strip(df: pd.DataFrame) -> html.Div:
     return html.Div(id=COMPLETENESS_STRIP_ID, children=squares)
 
 
+# --------------------------------------------------------------------------- whole-book checks (2026-09-21)
+# "What is missing", "Marks that look wrong" and "Past closes the header needs". All three
+# read stored rows and the Bloomberg status file only: no Bloomberg session, nothing
+# written, no P&L or delta computed. Each is a handful of queries for the whole book.
+MarkKey = Tuple[str, str, str]   # (instrument_id, mark_type, settle_date)
+
+_OPEN_LEGS_SQL = """
+SELECT t.trade_id, t.instrument_id, i.asset_class, i.base_ccy, i.quote_ccy, l.ccy, l.amount, l.settle_date
+FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
+WHERE i.asset_class IN ('FX', 'FUTURE') AND t.trade_date <= :as_of AND l.settle_date >= :as_of
+"""
+
+_OPEN_OPTIONS_SQL = """
+SELECT t.trade_id, i.base_ccy, i.quote_ccy, i.expiry_date, t.quantity
+FROM trades_official t JOIN instruments i USING (instrument_id)
+WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND i.expiry_date >= :as_of
+"""
+
+_UNOFFICIAL_ON_FILE_SQL = """
+SELECT instrument_id, mark_type, settle_date, value, source FROM marks
+WHERE as_of_date = ? AND source IN ('BBG_INTERP', 'MANUAL') ORDER BY snapped_at
+"""
+
+# Today's official marks the book uses and the same marks on the previous business day, in
+# one query: every official SPOT, and a FWD_OUTRIGHT / FUTURE_PX only at a settle date some
+# open leg of that instrument needs (the bulk FWD_CURVE tenor rows are left out).
+_SUSPECT_MARKS_SQL = """
+WITH used AS (
+  SELECT DISTINCT t.instrument_id, l.settle_date
+  FROM trade_legs l JOIN trades_official t USING (trade_id)
+  WHERE t.trade_date <= :as_of AND l.settle_date >= :as_of
+)
+SELECT m.as_of_date, m.instrument_id, m.mark_type, m.settle_date, m.value, m.snapped_at
+FROM marks_official m
+LEFT JOIN used u ON u.instrument_id = m.instrument_id AND u.settle_date = m.settle_date
+WHERE m.as_of_date IN (:as_of, :prev) AND m.mark_type IN ('SPOT', 'FWD_OUTRIGHT', 'FUTURE_PX')
+  AND (m.mark_type = 'SPOT' OR u.instrument_id IS NOT NULL)
+ORDER BY m.instrument_id, m.mark_type, m.settle_date
+"""
+
+
+def _book_today_iso() -> str:
+    from data.bloomberg.live import book_today
+    return book_today().isoformat()
+
+
+def _abs_amount(value) -> float:
+    """|value| as a float; 0.0 for a stored value that is not a number (never raises)."""
+    try:
+        return abs(float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fmt_mark(value) -> str:
+    """Enough digits to see a bad tick or a copied value, no more."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if abs(v) >= 1000:
+        return f"{v:,.2f}"
+    if abs(v) >= 10:
+        return f"{v:.4f}"
+    return f"{v:.6f}"
+
+
+def notional_words(notional: Dict[str, float]) -> str:
+    """'USD 12,500,000 + EUR 5,000,000': one amount per currency, USD first. Amounts in
+    different currencies are listed side by side, never converted into one another."""
+    parts = sorted(((c, a) for c, a in notional.items() if a), key=lambda kv: (kv[0] != "USD", kv[0]))
+    return " + ".join(f"{ccy} {amount:,.0f}" for ccy, amount in parts)
+
+
+def blocked_by_mark(conn: sqlite3.Connection, as_of: str) -> Dict[MarkKey, dict]:
+    """Which open trades read which mark on `as_of`:
+    (instrument_id, mark_type, settle_date) -> {"trades": set of trade ids, "notional": {ccy: amount}}.
+
+    Two queries for the whole book (open FX / futures legs, open FX options), folded here:
+      - an FX leg reads the FWD_OUTRIGHT of its pair at its own settle date, the pair's SPOT,
+        and for a cross the SPOT of each currency's USD pair (EURSEK reads EURUSD and USDSEK);
+      - a futures leg reads the FUTURE_PX at its expiry;
+      - an FX option reads its pair's SPOT, the forward at its expiry and the same USD pairs.
+    The pair names come from `data.bloomberg.live.option_spot_pair_names`, the function the
+    needs list itself is built from, so a row here matches a row of the inventory.
+
+    Notional is a face amount straight from the ticket: the leg's absolute USD amount where
+    the pair has a USD leg, otherwise the base amount under its own currency; an option's
+    is its base-currency notional. It is never converted with a mark."""
+    from data.bloomberg.live import option_spot_pair_names
+    out: Dict[MarkKey, dict] = {}
+
+    def add(key: MarkKey, trade_id: str, ccy: str, amount: float) -> None:
+        entry = out.setdefault(key, {"trades": set(), "notional": {}})
+        entry["trades"].add(trade_id)
+        if ccy and amount:
+            entry["notional"][ccy] = entry["notional"].get(ccy, 0.0) + amount
+
+    for trade_id, instrument_id, asset_class, base, quote, ccy, amount, settle in conn.execute(
+            _OPEN_LEGS_SQL, {"as_of": as_of}):
+        wanted = "USD" if "USD" in (base, quote) else base
+        shown_ccy, shown = (ccy, _abs_amount(amount)) if ccy == wanted else ("", 0.0)
+        if asset_class == "FUTURE":
+            add((instrument_id, "FUTURE_PX", settle), trade_id, shown_ccy, shown)
+            continue
+        add((instrument_id, "FWD_OUTRIGHT", settle), trade_id, shown_ccy, shown)
+        add((instrument_id, "SPOT", as_of), trade_id, shown_ccy, shown)
+        for usd_pair in option_spot_pair_names(base, quote)[1:]:
+            add((usd_pair, "SPOT", as_of), trade_id, shown_ccy, shown)
+    for trade_id, base, quote, expiry, quantity in conn.execute(_OPEN_OPTIONS_SQL, {"as_of": as_of}):
+        names = option_spot_pair_names(base, quote)
+        add((names[0], "FWD_OUTRIGHT", expiry), trade_id, base, _abs_amount(quantity))
+        for name in names:
+            add((name, "SPOT", as_of), trade_id, base, _abs_amount(quantity))
+    return out
+
+
+def _pull_date(status: Optional[dict]) -> Optional[str]:
+    """The date the last pull's marks were stamped with; None when the file does not say."""
+    if not isinstance(status, dict):
+        return None
+    return status.get("as_of_marks") or status.get("as_of_date") or None
+
+
+def last_pull_reasons(status: Optional[dict], as_of: str) -> Dict[MarkKey, str]:
+    """Bloomberg's own word on each mark, from the last pull's `status["items"]` detail, and
+    only when that pull was for `as_of`: a forward's key carries no as-of date, so a reason
+    from another day's pull would be attached to the wrong date. Every key may be absent."""
+    if _pull_date(status) != as_of:
+        return {}
+    items = status.get("items")
+    out: Dict[MarkKey, str] = {}
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        key = (str(item.get("instrument_id") or ""), str(item.get("mark_type") or ""),
+               str(item.get("settle_date") or ""))
+        state = str(item.get("status") or "").upper()
+        detail = str(item.get("detail") or "").strip()
+        if state == "OK":
+            out[key] = "the last pull reports this mark as written, yet it is not on file as official"
+        else:
+            out[key] = detail or (f"last pull: {state.lower()}" if state else "last pull gave no reason")
+    return out
+
+
+def pull_note(status: Optional[dict], as_of: str, is_past: bool, backfill: Optional[dict]) -> str:
+    """One sentence on where the missing marks' reasons come from when the last pull cannot
+    give them row by row. "" when the last pull was for `as_of` (its reasons are in the rows)."""
+    if is_past:
+        from ui.tabs.header import past_close_explanation
+        return (f"{as_of} is a past date, and a past close only arrives through the Bloomberg backfill: "
+                f"{past_close_explanation(backfill, as_of)}.")
+    if not isinstance(status, dict):
+        return "No Bloomberg pull is recorded yet, so there is no reason from Bloomberg to show."
+    if not status.get("connected"):
+        return f"The last Bloomberg pull did not connect ({status.get('reason') or 'no reason recorded'})."
+    pulled_for = _pull_date(status)
+    if pulled_for != as_of:
+        return (f"The last Bloomberg pull was for {pulled_for or 'an unrecorded date'}, not {as_of}, "
+                "so its reasons are not shown here.")
+    return ""
+
+
+def missing_rows(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None) -> Tuple[int, List[dict]]:
+    """(marks the book needs on `as_of`, one row per needed mark with no OFFICIAL mark),
+    rows sorted by trades blocked, largest first. The needs list is `ui.tabs.header
+    .needed_marks`, the one the header's own sentence counts with."""
+    from ui.tabs.header import needed_marks
+    needed, missing = needed_marks(conn, as_of)
+    if not missing:
+        return needed, []
+    on_file = {(r[0], r[1], r[2]): (r[3], r[4]) for r in conn.execute(_UNOFFICIAL_ON_FILE_SQL, (as_of,))}
+    blocked = blocked_by_mark(conn, as_of)
+    reasons = last_pull_reasons(status, as_of)
+    asked = _pull_date(status) == as_of and bool((status or {}).get("connected"))
+    rows = []
+    for m in missing:
+        key = (m["instrument_id"], m["mark_type"], m["settle_date"])
+        entry = blocked.get(key, {"trades": set(), "notional": {}})
+        instead = on_file.get(key)
+        rows.append({
+            "instrument_id": key[0], "mark_type": key[1], "settle_date": key[2],
+            "on_file": "nothing" if instead is None else
+                       f"{source_label(instead[1]).lower()} {_fmt_mark(instead[0])} (not official)",
+            "trades_blocked": len(entry["trades"]),
+            "notional_blocked": notional_words(entry["notional"]),
+            "reason": reasons.get(key, "not requested by the last pull" if asked else ""),
+        })
+    rows.sort(key=lambda r: (-r["trades_blocked"], r["instrument_id"], r["mark_type"], r["settle_date"]))
+    return needed, rows
+
+
+def _panel(title: str, children: list, panel_id: Optional[str] = None) -> html.Div:
+    kwargs = {"id": panel_id} if panel_id else {}
+    return html.Div(className="section", children=[html.H4(title, style={"marginTop": "0"}), *children], **kwargs)
+
+
+def _kicker(text: str) -> html.P:
+    return html.P(text, className="section-kicker")
+
+
+def _panel_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict], wide: Tuple[str, ...] = (),
+                 numeric: Tuple[str, ...] = (), page_size: int = PANEL_PAGE_SIZE) -> dash_table.DataTable:
+    """The tab's DataTable look (`_MONO` / `_HEAD`). `wide` columns hold sentences and wrap;
+    a row whose `flag` is not empty is tinted. Colours are plain hex: inside a DataTable
+    var(--muted) and var(--accent) are dash-table's own, and border colours are forced grey
+    by style.css (see ui/tabs/options.py::table_styles)."""
+    return dash_table.DataTable(
+        id=table_id, columns=[{"name": name, "id": col} for name, col in columns], data=rows,
+        page_size=page_size, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
+        style_cell_conditional=(
+            [{"if": {"column_id": c}, "whiteSpace": "normal", "height": "auto",
+              "minWidth": "240px", "maxWidth": "520px"} for c in wide]
+            + [{"if": {"column_id": c}, "textAlign": "right"} for c in numeric]),
+        style_data_conditional=[
+            {"if": {"filter_query": "{flag} != ''"}, "backgroundColor": "#fff4f2"},
+            {"if": {"filter_query": "{flag} != ''", "column_id": "flag"}, "color": "#b42318", "fontWeight": "600"},
+        ])
+
+
+def missing_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None) -> html.Div:
+    """Panel 1: every mark the book needs on `as_of` that has no official mark."""
+    from ui.tabs.header import backfill_status
+    needed, rows = missing_rows(conn, as_of, status)
+    scope = ("Covers the marks requested from Bloomberg (spot, forwards, futures prices); swap and option "
+             "values are computed by the app from these.")
+    if not needed:
+        return _panel(MISSING_TITLE, [html.P(f"The book needs no marks on {as_of}: no FX, futures or option "
+                                             f"trade is open that day."), _kicker(scope)])
+    if not rows:
+        return _panel(MISSING_TITLE, [html.P(f"Every one of the {needed} marks the book needs on {as_of} is "
+                                             f"official."), _kicker(scope)])
+    is_past = as_of < _book_today_iso()
+    note = pull_note(status, as_of, is_past, backfill_status(conn) if is_past else None)
+    children = [
+        html.P(f"{len(rows)} of the {needed} marks the book needs on {as_of} have no official mark. "
+               "A trade that reads one of them shows no P&L until it arrives."),
+        _kicker("Trades blocked = open trades that read the mark. Notional blocked = the absolute USD leg of "
+                "those trades' open legs (the base amount, under its own currency, where a pair has no USD "
+                "leg); never converted with a mark. " + scope),
+        _panel_table(MISSING_TABLE_ID, [
+            ("Pair / instrument", "instrument_id"), ("Mark type", "mark_type"), ("Settle date", "settle_date"),
+            ("On file instead", "on_file"), ("Trades blocked", "trades_blocked"),
+            ("Notional blocked", "notional_blocked"), ("Bloomberg's reason (last pull)", "reason"),
+        ], rows, wide=("reason",), numeric=("trades_blocked", "notional_blocked")),
+    ]
+    if note:
+        children.append(html.P(note, className="status-line"))
+    return _panel(MISSING_TITLE, children)
+
+
+# ---- "Marks that look wrong"
+def _snap_age_seconds(snapped_at, now: datetime) -> Optional[float]:
+    """Seconds between `snapped_at` (ISO; a stamp with no offset is read as UTC, like
+    data.bloomberg.live.rates_from_marks) and `now`. None when it cannot be read."""
+    try:
+        ts = datetime.fromisoformat(str(snapped_at))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (now - ts).total_seconds()
+
+
+def _age_words(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    return f"{minutes} min" if minutes < 120 else f"{minutes // 60} h"
+
+
+def suspect_rows(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] = None,
+                 today: Optional[str] = None) -> dict:
+    """The bad tick and stale check: {"prev_day", "prev_has_marks", "rows"}.
+
+    One row per official SPOT on `as_of` and per official FWD_OUTRIGHT / FUTURE_PX at a settle
+    date an open leg needs, against the official mark for the same instrument, mark type and
+    settle date on the previous business day (engine/pnl/calendar.py + config/holidays.txt).
+    A SPOT is matched by instrument alone: its settle date is its own as-of date. A forward
+    whose settle date has no mark on the previous day is NOT compared, and says so: only that
+    pair's SPOT row carries a comparison. Nothing is interpolated.
+
+    A row is flagged when the move exceeds BAD_TICK_PCT, when the value is EXACTLY the previous
+    close (a stale or copied mark), or, when `as_of` is today's book date, when its snap is
+    older than data.bloomberg.live.STALE_AFTER_SECONDS. Flagged rows come first, a value flag
+    ahead of a stale-only one, largest move first. A comparison of two stored marks."""
+    from engine.pnl.calendar import _prev_business_day, load_holidays
+    prev_day = _prev_business_day(date.fromisoformat(as_of), load_holidays()).isoformat()
+    today = today or _book_today_iso()
+    live_date = as_of == today
+    if live_date:
+        from data.bloomberg.live import STALE_AFTER_SECONDS
+        now = now or datetime.now(timezone.utc)
+
+    todays, previous = [], {}
+    for mark_date, instrument_id, mark_type, settle, value, snapped_at in conn.execute(
+            _SUSPECT_MARKS_SQL, {"as_of": as_of, "prev": prev_day}):
+        if mark_date == as_of:
+            todays.append((instrument_id, mark_type, settle, value, snapped_at))
+        else:
+            previous[(instrument_id, mark_type, "" if mark_type == "SPOT" else settle)] = value
+
+    rows = []
+    for instrument_id, mark_type, settle, value, snapped_at in todays:
+        before = previous.get((instrument_id, mark_type, "" if mark_type == "SPOT" else settle))
+        flags, note, change, value_flag = [], "", None, False
+        if before is None:
+            note = (f"no SPOT on file for {prev_day}: not compared" if mark_type == "SPOT" else
+                    f"no {prev_day} mark for this settle date: not compared, only the pair's SPOT is")
+        else:
+            try:
+                now_value, before_value = float(value), float(before)
+            except (TypeError, ValueError):
+                now_value = before_value = None
+                note = "a stored value is not a number: not compared"
+            if before_value is not None:
+                if before_value != 0:
+                    change = (now_value / before_value - 1.0) * 100.0
+                if now_value == before_value:
+                    flags.append(f"exactly unchanged from {prev_day} (stale or copied mark)")
+                    value_flag = True
+                elif change is not None and abs(change) > BAD_TICK_PCT:
+                    flags.append(f"moved {abs(change):.1f} %, above {BAD_TICK_PCT:g} %")
+                    value_flag = True
+        if live_date:
+            age = _snap_age_seconds(snapped_at, now)
+            if age is None:
+                flags.append("snap time not readable")
+            elif age > STALE_AFTER_SECONDS:
+                flags.append(f"snapped {_age_words(age)} ago, older than {STALE_AFTER_SECONDS // 60} min")
+        rows.append({
+            "instrument_id": instrument_id, "mark_type": mark_type, "settle_date": settle,
+            "value": _fmt_mark(value), "previous": "" if before is None else _fmt_mark(before),
+            "previous_date": "" if before is None else prev_day,
+            "change_pct": "" if change is None else f"{change:+.2f} %",
+            "snapped_at": str(snapped_at or "").replace("T", " "),
+            "flag": "; ".join(flags), "note": note,
+            "_order": (not flags, not value_flag, -abs(change or 0.0)),
+        })
+    rows.sort(key=lambda r: (r["_order"], r["instrument_id"], r["mark_type"] != "SPOT", r["settle_date"]))
+    for r in rows:
+        del r["_order"]
+    return {"prev_day": prev_day, "prev_has_marks": bool(previous), "rows": rows}
+
+
+_SUSPECT_COLUMNS = [
+    ("Instrument", "instrument_id"), ("Mark type", "mark_type"), ("Settle date", "settle_date"),
+    ("Value", "value"), ("Previous", "previous"), ("Previous date", "previous_date"),
+    ("Change", "change_pct"), ("Snapped at", "snapped_at"), ("Flag", "flag"), ("Note", "note"),
+]
+
+
+def suspect_panel(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] = None,
+                  today: Optional[str] = None) -> html.Div:
+    """Panel 3: flagged marks in the open, the full list under a "Show all N marks" element."""
+    found = suspect_rows(conn, as_of, now=now, today=today)
+    rows, prev_day = found["rows"], found["prev_day"]
+    if not rows:
+        return _panel(SUSPECT_TITLE, [html.P(f"No official spot, forward or futures mark the book uses is on "
+                                             f"file for {as_of}, so there is nothing to check.")])
+    from data.bloomberg.live import STALE_AFTER_SECONDS
+    children = [_kicker(
+        f"Every official SPOT on {as_of}, and every official forward and futures price an open leg reads, against "
+        f"the same mark on {prev_day}, the previous business day. Flagged: a move above {BAD_TICK_PCT:g} %, a value "
+        f"exactly unchanged from the previous close (stale or copied), or, on today's date, a snap older than "
+        f"{STALE_AFTER_SECONDS // 60} minutes. A comparison of two stored marks: nothing is recomputed.")]
+    if not found["prev_has_marks"]:
+        from ui.tabs.header import backfill_status, past_close_explanation
+        children.append(html.P(
+            f"No official marks are on file for {prev_day}, the previous business day, so the marks of {as_of} "
+            f"cannot be compared with a previous close: {past_close_explanation(backfill_status(conn), prev_day)}."))
+    flagged = [r for r in rows if r["flag"]]
+    compared = sum(1 for r in rows if r["previous"])
+    if flagged:
+        children.append(html.P(f"{len(flagged)} of {len(rows)} marks flagged ({compared} compared with {prev_day})."))
+        children.append(_panel_table(SUSPECT_FLAGGED_TABLE_ID, _SUSPECT_COLUMNS, flagged, wide=("flag", "note"),
+                                     numeric=("value", "previous", "change_pct")))
+    elif found["prev_has_marks"]:
+        children.append(html.P(f"No mark is flagged: {compared} of {len(rows)} marks compared with {prev_day}."))
+    children.append(html.Details(className="details", children=[
+        html.Summary(f"Show all {len(rows)} marks"),
+        _panel_table(SUSPECT_ALL_TABLE_ID, _SUSPECT_COLUMNS, rows, wide=("flag", "note"),
+                     numeric=("value", "previous", "change_pct"), page_size=25),
+    ]))
+    return _panel(SUSPECT_TITLE, children)
+
+
+# ---- "Past closes the header needs"
+def header_reference_labels(as_of: date) -> Dict[str, List[str]]:
+    """ISO date -> the header figures that read that past close, built with the same
+    engine.pnl.calendar functions ui/tabs/header.py::_build_figures uses. Previous day is
+    LTD(t-1) - LTD(t-2), so it reads both of those dates."""
+    from engine.pnl.calendar import (_last_business_day_of_prev_month, _last_business_day_of_prev_year,
+                                     _n_business_days_back, _prev_business_day, load_holidays)
+    holidays = load_holidays()
+    t1 = _prev_business_day(as_of, holidays)
+    reads = [("Daily", t1), ("Previous day", t1), ("Previous day", _prev_business_day(t1, holidays)),
+             ("5d", _n_business_days_back(as_of, 5, holidays)),
+             ("MTD", _last_business_day_of_prev_month(as_of, holidays)),
+             ("YTD", _last_business_day_of_prev_year(as_of, holidays))]
+    out: Dict[str, List[str]] = {}
+    for label, day in reads:
+        labels = out.setdefault(day.isoformat(), [])
+        if label not in labels:
+            labels.append(label)
+    return out
+
+
+def past_close_rows(conn: sqlite3.Connection, header_as_of: str, backfill: Optional[dict] = None) -> List[dict]:
+    """One row per date of `data.bloomberg.backfill.reference_dates(header_as_of)`, newest
+    first: which figures read it, needed / present / complete, and when it is incomplete the
+    header's own sentence (`ui.tabs.header.past_close_explanation`). The counts come from
+    `ui.tabs.header.needed_marks`, which for a past date is `close_completeness(day, day)`,
+    the past-close needs list the backfill fills; the header's sentence counts the same way."""
+    from data.bloomberg.backfill import reference_dates
+    from ui.tabs.header import backfill_status, needed_marks, past_close_explanation
+    day0 = date.fromisoformat(header_as_of)
+    labels = header_reference_labels(day0)
+    if backfill is None:
+        backfill = backfill_status(conn)
+    rows = []
+    for ref in reference_dates(day0):
+        day = ref.isoformat()
+        needed, missing = needed_marks(conn, day)
+        if not needed:
+            state, why, flag = "nothing needed", "no FX, futures or option trade was open that day", ""
+        elif missing:
+            state, why, flag = f"incomplete: {len(missing)} missing", past_close_explanation(backfill, day), "incomplete"
+        else:
+            state, why, flag = "complete", "", ""
+        rows.append({"date": day, "read_by": ", ".join(labels.get(day, [])), "needed": needed,
+                     "present": needed - len(missing), "state": state, "why": why, "flag": flag})
+    return rows
+
+
+def past_closes_panel(conn: sqlite3.Connection, header_as_of: str, backfill: Optional[dict] = None) -> html.Div:
+    """Panel 2. It replaces nothing: the 20-day completeness strip stays above it."""
+    rows = past_close_rows(conn, header_as_of, backfill)
+    return _panel(PAST_CLOSES_TITLE, [
+        _kicker(f"The header's Daily, Previous day, 5d, MTD and YTD figures difference the LTD of {header_as_of} "
+                "(the header's as-of date) against these past closes. A close is complete when every mark the "
+                "book needed that day is official; the Bloomberg backfill fills them by itself after each pull."),
+        _panel_table(PAST_CLOSES_TABLE_ID, [
+            ("Date", "date"), ("Read by", "read_by"), ("Needed", "needed"), ("Present", "present"),
+            ("Status", "state"), ("Why it is incomplete", "why"),
+        ], rows, wide=("why",), numeric=("needed", "present")),
+    ])
+
+
+def safe_panel(title: str, build: Callable[[], html.Div]) -> html.Div:
+    """One panel failing must not take the tab, or the other panels, down with it."""
+    try:
+        return build()
+    except Exception as exc:  # noqa: BLE001 -- say what failed where the panel would be
+        import logging
+        logging.getLogger(__name__).exception("Market data panel %r failed", title)
+        return _panel(title, [message_box(f"This panel could not be built ({type(exc).__name__}: {exc}).")])
+
+
+def whole_book_panels(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
+                      header_as_of: Optional[str] = None) -> Tuple[html.Div, html.Div, html.Div]:
+    """(What is missing, Marks that look wrong, Past closes the header needs) for the tab's
+    `_update_body` render path. The first two follow the tab's own as-of date. The third
+    follows the HEADER's as-of date (`header_as_of`, the Ladder tab's date picker, which is
+    what ui/tabs/header.py differences from), and the New York book date when the header has
+    none yet."""
+    header_day = header_as_of or _book_today_iso()
+    return (safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status)),
+            safe_panel(SUSPECT_TITLE, lambda: suspect_panel(conn, as_of)),
+            safe_panel(PAST_CLOSES_TITLE, lambda: past_closes_panel(conn, header_day)))
+
+
 def manual_entry_form(default_pair: Optional[str] = None) -> html.Div:
     """Manual mark entry calling `data.bloomberg.manual.write_manual_mark`, pre-filled
     with the pair currently selected at the top of the tab."""
@@ -709,9 +1205,15 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
             html.Div(id=STATUS_ID, className="status-line"),
         ]),
         dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
+        # Whole-book checks first: what is missing, then what looks wrong. Neither depends
+        # on the pair dropdown. Static containers: each is an Output of `_update_body`.
+        html.Div(id=MISSING_PANEL_ID),
+        html.Div(id=SUSPECT_PANEL_ID),
+        html.H4("Spot and forward curve for the selected pair"),
         html.Div(id=BODY_ID),
         html.H4("Close completeness"),
         html.Div(id="market-data-completeness-container"),
+        html.Div(id=PAST_CLOSES_PANEL_ID, style={"marginTop": "16px"}),
         manual_entry_form(),  # static: its ids are callback inputs and must exist on first render
         html.Div(className="bbg-check-block", children=[
             html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
@@ -747,54 +1249,69 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         finally:
             conn.close()
 
+    # The header's own as-of date (the Ladder tab's date picker, mirrored into this store by
+    # ui/app.py): "Past closes the header needs" must list the dates the header itself reads.
+    from ui.tabs.header import AS_OF_STORE_ID as HEADER_AS_OF_STORE_ID
+
     @app.callback(
         Output(BODY_ID, "children"),
         Output("market-data-completeness-container", "children"),
         Output(STATUS_ID, "children"),
         Output(MANUAL_INSTRUMENT_ID, "value"),
+        Output(MISSING_PANEL_ID, "children"),
+        Output(SUSPECT_PANEL_ID, "children"),
+        Output(PAST_CLOSES_PANEL_ID, "children"),
         Input(DATE_PICKER_ID, "date"),
         Input(PAIR_DROPDOWN_ID, "value"),
         Input(REFRESH_ID, "n_intervals"),
         Input(PULL_REVISION_ID, "data"),
         Input(MANUAL_STATUS_ID, "children"),
         Input(DATA_REVISION_ID, "data"),
+        Input(HEADER_AS_OF_STORE_ID, "data"),
     )
-    def _update_body(as_of_date, pair, _n_intervals=0, _pull_rev=None, _manual_status=None, _data_rev=None):
-        return _render(as_of_date, pair)
+    def _update_body(as_of_date, pair, _n_intervals=0, _pull_rev=None, _manual_status=None, _data_rev=None,
+                     header_as_of=None):
+        return _render(as_of_date, pair, header_as_of)
 
-    def _render(as_of_date, pair):
+    def _render(as_of_date, pair, header_as_of=None):
+        blank = html.Div()
         if not as_of_date:
-            return message_box("No as-of date available."), html.Div(), "Bloomberg: status unknown", pair
+            return (message_box("No as-of date available."), blank, "Bloomberg: status unknown", pair,
+                    blank, blank, blank)
 
         db_path = get_db_path()
         try:
             conn = _connect_readonly(db_path)
         except sqlite3.OperationalError as exc:
-            return message_box(f"Database not available ({exc})."), html.Div(), "Bloomberg: status unknown", pair
+            return (message_box(f"Database not available ({exc})."), blank, "Bloomberg: status unknown", pair,
+                    blank, blank, blank)
 
         try:
-            body = pair_body(conn, as_of_date, pair) if pair else message_box("No FX pair available.")
-        except Exception as exc:
-            body = message_box(f"Market data not available ({exc}).")
+            try:
+                from data.bloomberg.live import read_status
+                feed_status = read_status(db_path)
+            except ImportError:
+                feed_status = None
 
-        try:
-            from data.bloomberg.inventory import close_completeness
-            end = date.fromisoformat(as_of_date)
-            start = end - timedelta(days=int(COMPLETENESS_DAYS * 1.6) + 5)  # generous calendar padding for bd count
-            completeness = close_completeness(conn, start.isoformat(), end.isoformat()).tail(COMPLETENESS_DAYS)
-            strip = completeness_strip(completeness)
-        except ImportError as exc:
-            strip = message_box(f"Completeness not available yet ({exc}).")
+            try:
+                body = pair_body(conn, as_of_date, pair) if pair else message_box("No FX pair available.")
+            except Exception as exc:
+                body = message_box(f"Market data not available ({exc}).")
 
-        try:
-            from data.bloomberg.live import read_status
-            feed_status = read_status(db_path)
-        except ImportError:
-            feed_status = None
+            try:
+                from data.bloomberg.inventory import close_completeness
+                end = date.fromisoformat(as_of_date)
+                start = end - timedelta(days=int(COMPLETENESS_DAYS * 1.6) + 5)  # generous calendar padding for bd count
+                completeness = close_completeness(conn, start.isoformat(), end.isoformat()).tail(COMPLETENESS_DAYS)
+                strip = completeness_strip(completeness)
+            except ImportError as exc:
+                strip = message_box(f"Completeness not available yet ({exc}).")
+
+            missing, suspect, past_closes = whole_book_panels(conn, as_of_date, feed_status, header_as_of)
         finally:
             conn.close()
 
-        return body, strip, status_block(feed_status), pair
+        return body, strip, status_block(feed_status), pair, missing, suspect, past_closes
 
     @app.callback(
         Output(PULL_NOW_STATUS_ID, "children"),

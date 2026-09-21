@@ -172,9 +172,11 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     which mirrors it) default to TODAY in America/New_York, not the last BNP snapshot
     date -- the ladder is a "what's open today" view, not a snapshot replay, and
     `engine.ladder.exposure_adapter.records_from_db` already selects trades open on
-    whatever as_of it is given (trade_date <= as_of <= settle_date). Other tabs
-    (Blotter/Market data) keep defaulting to the last uploaded snapshot date, since
-    they render the loaded trade file itself."""
+    whatever as_of it is given (trade_date <= as_of <= settle_date). The Blotter keeps
+    defaulting to the last uploaded snapshot date, since it renders the loaded trade file
+    itself. Market data opens on today too (2026-09-21): its whole-book panels ("What is
+    missing", "Marks that look wrong") ask whether TODAY's marks can be trusted, and the
+    live pull only writes today's -- the last trade date is often a past day."""
     snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     ladder_default_date = cash_ladder.today_ny()
     tab_builders = {
@@ -185,7 +187,7 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     tab_defaults = {
         "Ladder": ladder_default_date,
         "Blotter": snapshot_date,
-        "Market data": snapshot_date,
+        "Market data": ladder_default_date,
     }
     tabs = [dcc.Tab(label=label, value=label, className="tab", selected_className="tab--selected")
             for label in VISIBLE_TABS]

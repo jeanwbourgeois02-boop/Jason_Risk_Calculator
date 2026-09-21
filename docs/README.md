@@ -50,7 +50,7 @@ same. Keep the terminal window open; **Ctrl+C** stops the app.
   answer the stop request) and the new one takes 8050, so an old bookmark never shows old code.
 - `py -3 2_launcher.py start --no-sync` starts without touching GitHub.
 - On the Bloomberg PC, log in to the Terminal first, then run `pnl`. The console says
-  `Bloomberg feed: started (every 2 min)` or the reason it did not start, and Bloomberg history is backfilled
+  `Bloomberg feed: started (every 15 minutes)` or the reason it did not start, and Bloomberg history is backfilled
   automatically in the background (see below) — there is nothing to run for that.
 - `py -3 2_launcher.py start --force-new` (inside the project folder) always starts a fresh instance.
 

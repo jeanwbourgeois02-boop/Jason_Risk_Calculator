@@ -106,6 +106,59 @@ def test_missing_marks_reason_is_empty_once_official_marks_are_written():
     assert header._missing_marks_reason(conn, "2026-09-17") == ""
 
 
+def _db_with_one_open_option(trade_date="2026-09-10", expiry="2026-11-19"):
+    """One open USDJPY option and nothing else: a LIVE pull asks for the pair's SPOT and a
+    forward at the expiry; a PAST close needs the SPOT only (the backfill never writes that
+    forward for a past date, by design)."""
+    conn = schema.connect()
+    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+        "bbg_ticker, expiry_date) VALUES ('USDJPY111926P-1', 'FX_OPTION', 'USD', 'JPY', 1, 0, '', ?)", (expiry,))
+    _insert_trade(conn, "o1", "USDJPY111926P-1", "FX_OPTION", trade_date, 1_000_000, 0.01)
+    _insert_legs(conn, [("o1", 1, "NOTIONAL", "USD", 1_000_000, trade_date, expiry, 0.0, 0)])
+    conn.commit()
+    return conn
+
+
+def test_missing_marks_reason_counts_a_past_date_with_the_past_close_needs(monkeypatch):
+    import datetime as dt
+    from data.bloomberg import live
+
+    conn = _db_with_one_open_option()
+    day = "2026-09-17"
+    # seen as TODAY: the live request list, SPOT + the forward at the expiry (unchanged behaviour)
+    monkeypatch.setattr(live, "book_today", lambda: dt.date(2026, 9, 17))
+    assert header.needed_marks(conn, day)[0] == 2
+    assert "2 of 2 needed marks" in header._missing_marks_reason(conn, day)
+
+    # seen as a PAST date: the past-close list, SPOT only
+    monkeypatch.setattr(live, "book_today", lambda: dt.date(2026, 9, 21))
+    needed, missing = header.needed_marks(conn, day)
+    assert needed == 1
+    assert missing == [{"instrument_id": "USDJPY", "settle_date": day, "mark_type": "SPOT"}]
+    reason = header._missing_marks_reason(conn, day)
+    assert "no official SPOT for 2026-09-17" in reason and "1 of 1 needed marks" in reason
+    assert "FWD_OUTRIGHT" not in reason
+
+    # once the closing SPOT is on file the past date is complete: no "1 of 2" left over for good
+    _insert_official_mark(conn, day, "USDJPY", day, "SPOT", 147.0, "BBG_BFXFORWARD")
+    conn.commit()
+    assert header.needed_marks(conn, day) == (1, [])
+    assert header._missing_marks_reason(conn, day) == ""
+    monkeypatch.setattr(live, "book_today", lambda: dt.date(2026, 9, 17))
+    assert "1 of 2 needed marks" in header._missing_marks_reason(conn, day)  # today still wants the forward
+
+
+def test_needed_marks_keeps_the_live_list_for_a_past_date_that_has_no_close_row(monkeypatch):
+    import datetime as dt
+    from data.bloomberg import live
+
+    monkeypatch.setattr(live, "book_today", lambda: dt.date(2026, 9, 21))
+    conn = _db_with_one_open_option()
+    assert header.needed_marks(conn, "2026-09-19")[0] == 2  # a Saturday: close_completeness has no row for it
+
+
 # --------------------------------------------------------------------- _reason_tag / _unpriced_breakdown
 
 

@@ -166,7 +166,7 @@ def stale_empty_pull_reason(conn: sqlite3.Connection, status: Optional[dict], as
             f"mark(s) are needed right now for {as_of} (e.g. {example['instrument_id']} "
             f"{example['mark_type']} {example['settle_date']}) -- trades were likely imported "
             "after that pull ran. Press \"Pull now\" on the Market data tab, or wait for the "
-            "next automatic pull (every 2 minutes).")
+            "next automatic pull (every 15 minutes).")
 
 
 def close_completeness(conn: sqlite3.Connection, start: str, end: str) -> pd.DataFrame:
