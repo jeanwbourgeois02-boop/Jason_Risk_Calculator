@@ -150,7 +150,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 
 @dataclass
@@ -377,6 +377,72 @@ def price_fx_digital(
     vanilla_leg = european.price(spot, strike, T, domestic_rate, foreign_rate, vol, kind)
     sign = 1.0 if kind == "call" else -1.0
     raw = {key: cash_payout * (cash_leg[key] + sign * vanilla_leg[key]) for key in _LINEAR_FIELDS}
+    raw["delta_premium_adjusted"] = raw["delta"] - raw["price"] / spot
+    return _to_result(raw, spot, pair)
+
+
+# Half-width of the spread a digital is replicated with on the smile, as a fraction of the
+# strike: 1 bp (0.0152 on a 152 strike). Tight on purpose -- this is a mark, not a hedge
+# price -- and far above the closed-form pricer's own rounding.
+DIGITAL_SPREAD_HALF_WIDTH = 1e-4
+
+
+def price_fx_digital_on_smile(
+    spot: float,
+    strike: float,
+    expiry: datetime.date,
+    as_of: datetime.date,
+    domestic_rate: float,
+    foreign_rate: float,
+    vol_at: Callable[[float], float],
+    option_type: str,
+    cash_payout: float = 1.0,
+    pair: Optional[str] = None,
+    calendar_aware: bool = True,
+    payout_ccy: str = PAYOUT_BASE,
+) -> OptionPriceResult:
+    """The same digital as `price_fx_digital`, valued ON THE SMILE (user decision
+    2026-09-21: "yes, price off the smile"). `vol_at(K)` is the smile's vol at strike K for
+    this expiry.
+
+    `price_fx_digital` takes one vol, read at the strike, and so values the digital as if
+    the smile were flat there. A digital is the strike-derivative of a vanilla -- a tight
+    call / put spread -- and along the smile each leg of that spread has its own vol, so
+    the slope of the smile is part of the price:
+
+        cash digital call = -dC/dK = flat-vol digital - vega x dvol/dK
+        cash digital put  = +dP/dK = flat-vol digital + vega x dvol/dK
+
+    On USDJPY, whose risk reversal is strongly negative, that term is 2 to 5 points of
+    payout on the book's 152 digital puts, which the single-vol price overstated. Here the
+    derivative is the central difference of the vendored vanilla over K -/+ h (h =
+    `DIGITAL_SPREAD_HALF_WIDTH` x K), each leg at its own smile vol, and the BASE payout
+    is the same static replication as `price_fx_digital`:
+
+        call  S_T 1{S_T>K} = (S_T-K)^+ + K 1{S_T>K}
+        put   S_T 1{S_T<K} = K 1{S_T<K} - (K-S_T)^+
+
+    Every Greek is that same linear combination of the vanilla legs' own Greeks, vols held
+    at their strikes (sticky strike, as the single-vol price already assumed); vega is per
+    point of a parallel shift of the smile. No pricing model is added: vendored vanillas
+    only. On a flat smile this returns `price_fx_digital`'s value."""
+    from .vendor.options_calc.fx import european
+
+    T = _resolve_T(pair, as_of, expiry, calendar_aware)
+    kind = option_type.lower()
+    if kind not in ("call", "put"):
+        raise ValueError(f"option_type must be call or put, got {option_type!r}")
+    h = strike * DIGITAL_SPREAD_HALF_WIDTH
+    low = european.price(spot, strike - h, T, domestic_rate, foreign_rate, vol_at(strike - h), kind)
+    high = european.price(spot, strike + h, T, domestic_rate, foreign_rate, vol_at(strike + h), kind)
+    # a call loses value as its strike rises, a put gains: either way the digital is positive
+    sign = 1.0 if kind == "call" else -1.0
+    cash = {key: sign * (low[key] - high[key]) / (2.0 * h) for key in _LINEAR_FIELDS}   # pays 1 QUOTE unit
+    if _payout_ccy(payout_ccy) == PAYOUT_QUOTE:
+        raw = {key: cash_payout * cash[key] for key in _LINEAR_FIELDS}
+    else:
+        vanilla = european.price(spot, strike, T, domestic_rate, foreign_rate, vol_at(strike), kind)
+        raw = {key: cash_payout * (strike * cash[key] + sign * vanilla[key]) for key in _LINEAR_FIELDS}
     raw["delta_premium_adjusted"] = raw["delta"] - raw["price"] / spot
     return _to_result(raw, spot, pair)
 

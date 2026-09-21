@@ -78,7 +78,7 @@ from __future__ import annotations
 import datetime
 import sqlite3
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 # ------------------------------------------------------------------- vol store
 
@@ -172,6 +172,11 @@ class VolInput:
     vol: float
     source_kind: str  # SMILE | ATM_INTERP | MANUAL
     detail: str = ""
+    # SMILE only: the smile's vol at any strike for this option's expiry. A digital is a
+    # tight call / put spread, each leg at its own vol, so it needs the smile around its
+    # strike and not only the vol at it (pricer.price_fx_digital_on_smile). None when the
+    # vol is an ATM interpolation or a manual number: no slope is known there.
+    vol_at: Optional[Callable[[float], float]] = None
 
 
 def _build_fx_delta_vol_surface(conn, as_of, pair, spot, domestic_rate, foreign_rate):
@@ -288,6 +293,7 @@ def resolve_vol(
                 return VolInput(
                     vol=vol, source_kind=SMILE,
                     detail=f"{pair} delta smile @ K={strike}, expiry={expiry_iso}",
+                    vol_at=lambda k, _surface=surface, _T=T: _surface.get_vol(k, _T),
                 )
 
     atm = atm_vol_for_expiry(conn, as_of, pair, expiry_iso)

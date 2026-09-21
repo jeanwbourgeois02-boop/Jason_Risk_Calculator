@@ -141,6 +141,14 @@ full detail):**
     dict is shared across every trade in a single ``price_all_and_store``
     run so trades sharing a pair don't each rebuild that pair's
     FXDeltaVolSurface (see inputs.py::_cached_surface).
+  - Digitals are priced ON THE SMILE (user decision 2026-09-21: "yes, price off the
+    smile"). When the vol came off a smile (``vol_source_kind == 'SMILE'``) a DIGITAL is
+    valued as a tight call / put spread, each leg at its own smile vol
+    (``pricer.price_fx_digital_on_smile``), so the slope of the smile is in the price; one
+    vol read at the strike overstated the book's USDJPY 152 digital puts by 2 to 5 points
+    of payout on a typical smile. ``vol_detail`` then ends with ``SMILE_DIGITAL_DETAIL``.
+    With an ATM-interpolated or a manual vol no slope is known and the single-vol closed
+    form is used, as before. Touches and barriers are unchanged.
   - Rate provenance (Phase 7.1, 2026-09-17; wired onto PricingOutcome Phase
     7.2, 2026-09-18): ``PricingOutcome.domestic_rate_source_kind`` /
     ``.domestic_rate_detail`` and ``.foreign_rate_source_kind`` /
@@ -153,6 +161,7 @@ full detail):**
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import sqlite3
 from dataclasses import dataclass
@@ -307,13 +316,24 @@ def cut_time_factor(conn: sqlite3.Connection, as_of: str, pair: str, expiry: dat
     return math.sqrt(true_days / days)
 
 
-def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, inputs, pair: str) -> pricer.OptionPriceResult:
+SMILE_DIGITAL_DETAIL = "digital valued as a tight call / put spread on the smile"
+
+
+def _smile_vol_at(inputs):
+    """The smile's vol-at-strike function when the vol came off a smile, else None
+    (`inputs.VolInput.vol_at`)."""
+    return getattr(inputs.vol_source, "vol_at", None)
+
+
+def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, inputs, pair: str,
+              vol_factor: float = 1.0) -> pricer.OptionPriceResult:
     """Call the payoff-appropriate pricer.py wrapper. Raises only for
     programmer error (unreachable payoff values are filtered by callers
     before this is invoked). `pair` is passed through to every pricer.py
     call so T uses the calendar-aware year fraction and delta_convention/
     delta_premium_adjusted are populated -- see pricer.py / calendars.py
-    (Phase 7)."""
+    (Phase 7). `inputs.vol` arrives already scaled by `vol_factor` (`cut_time_factor`);
+    the factor itself is only needed to scale the smile a digital is priced on."""
     S = inputs.spot
     K = row["strike"]
     option_type = row["option_type"]
@@ -325,6 +345,16 @@ def _dispatch(row: dict, as_of_date: datetime.date, expiry: datetime.date, input
     if payoff == "DIGITAL":
         # cash_payout stays 1.0: trades.quantity is the payout notional, so PREMIUM comes
         # back as a fraction of the payout, the blotter fill's own unit.
+        vol_at = _smile_vol_at(inputs)
+        if vol_at is not None:
+            # User decision 2026-09-21 ("yes, price off the smile"): a digital is a tight
+            # call / put spread, so the slope of the smile is part of its price; one vol
+            # read at the strike overstated the book's USDJPY 152 digital puts by points of
+            # payout. With no smile on file (ATM interpolation, a manual vol) no slope is
+            # known and the single-vol price below is all there is.
+            return pricer.price_fx_digital_on_smile(
+                S, K, expiry, as_of_date, dr, fr, lambda k: vol_at(k) * vol_factor, option_type,
+                pair=pair, payout_ccy=CASH_PAYOUT_CCY)
         return pricer.price_fx_digital(S, K, expiry, as_of_date, dr, fr, vol, option_type, pair=pair,
                                        payout_ccy=CASH_PAYOUT_CCY)
     if payoff == "AMERICAN":
@@ -392,8 +422,8 @@ def _price_row(
 
     factor = cut_time_factor(conn, as_of, pair, expiry)
     if factor != 1.0:
-        import dataclasses
-        result = _dispatch(row, as_of_date, expiry, dataclasses.replace(inputs, vol=inputs.vol * factor), pair)
+        result = _dispatch(row, as_of_date, expiry, dataclasses.replace(inputs, vol=inputs.vol * factor), pair,
+                           vol_factor=factor)
         result = dataclasses.replace(result, vega=result.vega * factor)   # per point of the QUOTED vol
     else:
         result = _dispatch(row, as_of_date, expiry, inputs, pair)
@@ -402,6 +432,8 @@ def _price_row(
         _insert_marks(conn, as_of, row, result)
 
     vol_source = inputs.vol_source
+    if row["payoff"] == "DIGITAL" and _smile_vol_at(inputs) is not None:
+        vol_source =dataclasses.replace(vol_source, detail=f"{vol_source.detail}; {SMILE_DIGITAL_DETAIL}")
     dom_rate_source = inputs.domestic_rate_source
     for_rate_source = inputs.foreign_rate_source
     return PricingOutcome(
