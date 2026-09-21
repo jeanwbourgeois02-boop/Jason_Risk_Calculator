@@ -697,9 +697,12 @@ def option_fill_is_per_ounce(base_ccy: str, fill: float) -> bool:
 # averaging start, expiry) whose quantities net to zero, the PREMIUM mark cancels out of
 # sum(quantity x (PREMIUM - fill)) exactly, so the P&L is the fills' own difference and needs
 # no mark. Each trade of such a group is valued at the closing fill instead of a PREMIUM mark:
-# the total is what the marked formula gives whenever the marks exist, and it is still there
-# when they do not. Nothing else changes: the conversion to USD is at spot of `as_of` until
-# expiry and frozen at the last official spot on or before expiry after it, as for any option.
+# on the close-out date the total is what the marked formula gives, and it is still there when
+# the marks are not. The conversion to USD is frozen as well (user, 2026-09-21: "of course you
+# freeze the usd converstion"): the official spot of the close-out date -- the last trade's
+# date -- or the last one before it, named in the note, so from the close-out on the figure
+# never moves and nothing more is needed from Bloomberg for it; after expiry the ledger records
+# that same figure in `realised_pnl`.
 # The export books the buy and the sell-back under two instrument ids (the reference sample's
 # EURSEK 23-Sep put: '...-197728105' bought, '...-197838147' sold), so the match is on the
 # terms, never on the id; an option whose terms are not on file (strike 0 = not known) is
@@ -784,35 +787,35 @@ def _close_out_note(closed: CloseOut) -> str:
             f"realised at the closing fill {closed.price:.10g}, no PREMIUM mark needed")
 
 
-def _closed_option_row(conn, r, as_of, closed: CloseOut) -> dict:
-    """quantity * (closing fill - fill) in the fills' currency, converted to USD at spot of `as_of`."""
+def _closed_option_row(conn, r, closed: CloseOut) -> dict:
+    """quantity * (closing fill - fill) in the fills' currency, converted to USD at the
+    close-out date's spot (`last_usd_conversion`): the same figure on every date from the
+    close-out on, before expiry and after it, and the one the ledger records after expiry."""
     out = dict(mark=closed.price, mark_date=closed.date, mark_source=CLOSE_OUT_SOURCE, spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="",
                note=_close_out_note(closed))
     ccy = close_out_ccy(r.base_ccy, r.quote_ccy, r.fill)
-    s, s_pair, s_src = usd_per_quote(conn, ccy, as_of)
-    if s != s or s_pair is None:
-        out["reason"] = f"closed out {closed.date}; no SPOT for USD conversion of {ccy} on {as_of}"
+    hit = last_usd_conversion(conn, ccy, closed.date)
+    if hit is None:
+        out["reason"] = f"closed out {closed.date}; no official SPOT to convert {ccy} to USD on or before that date"
         return out
+    s, s_day, s_src = hit
     out["spot"], out["spot_source"] = s, s_src
+    if s_day != closed.date:
+        out["note"] += f"; converted at spot dated {s_day} (last before the close-out)"
     pnl_local = r.quantity * (closed.price - r.fill)
     out["pnl_local"], out["pnl_usd"], out["pnl_spot_usd"] = pnl_local, pnl_local * s, pnl_local * s
     return out
 
 
 def _closed_frozen_row(conn, r, closed: CloseOut) -> Optional[dict]:
-    """A closed-out option past its expiry with no `realised_pnl` row yet: the same figure
-    `engine.pnl.ledger.realise_settled` will persist (closing fill, converted at the last
-    official spot on or before expiry); None when no such spot is on file."""
-    ccy = close_out_ccy(r.base_ccy, r.quote_ccy, r.fill)
-    hit = last_usd_conversion(conn, ccy, r.settle_date)
-    if hit is None:
+    """A closed-out option past its expiry with no readable `realised_pnl` row: the figure
+    `engine.pnl.ledger.realise_settled` will record; None when the close-out spot is not on file."""
+    out = _closed_option_row(conn, r, closed)
+    if out["reason"]:
         return None
-    s, s_day, s_src = hit
-    pnl_local = r.quantity * (closed.price - r.fill)
-    return dict(mark=closed.price, mark_date=closed.date, mark_source=CLOSE_OUT_SOURCE, spot=s, spot_source=s_src,
-                pnl_local=pnl_local, pnl_usd=pnl_local * s, pnl_spot_usd=pnl_local * s, pnl_carry_usd=0.0, reason="",
-                note=f"{_close_out_note(closed)}; converted at spot dated {s_day}; not yet recorded in realised_pnl")
+    out["note"] += "; not yet recorded in realised_pnl"
+    return out
 
 
 def _open_option_row(conn, r, as_of) -> dict:
@@ -821,7 +824,7 @@ def _open_option_row(conn, r, as_of) -> dict:
     A closed-out option needs no PREMIUM mark (`_closed_option_row`)."""
     closed = getattr(conn, "closed_out", {}).get(r.trade_id)
     if closed is not None:
-        return _closed_option_row(conn, r, as_of, closed)
+        return _closed_option_row(conn, r, closed)
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
     m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PREMIUM", as_of)
@@ -852,6 +855,9 @@ def _open_option_row(conn, r, as_of) -> dict:
 def _settled_option_row(conn, r, as_of) -> dict:
     row, pnl, unreadable = _readable_realised(conn, r.trade_id, with_spot=True)
     if row is None:
+        closed = getattr(conn, "closed_out", {}).get(r.trade_id)
+        if closed is not None and not unreadable:   # its own reason when the close-out spot is not on file
+            return _closed_frozen_row(conn, r, closed) or _closed_option_row(conn, r, closed)
         return _provisional(conn, r, as_of, unreadable)
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
                 spot=row["spot_usd_per_local"], spot_source=row["spot_source"],

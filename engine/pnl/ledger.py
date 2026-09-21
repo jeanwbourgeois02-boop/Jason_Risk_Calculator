@@ -33,7 +33,8 @@ base notional, `mark_type='PREMIUM'`). An expiry-day intrinsic-value mark would 
 exact than the last premium; until the options pricer writes one, the note says which
 date's premium was used. A closed-out option (bought and sold back in full,
 `engine.pnl.valuation.closed_out_options`) is frozen at its closing fill instead, converted
-at the last official spot on or before expiry, `mark_type='CLOSE_OUT'`: it needs no PREMIUM.
+at the close-out date's spot (or the last official one before it), `mark_type='CLOSE_OUT'`:
+it needs no PREMIUM, and the row records the figure value_book has shown since the close-out.
 
 `ltd(conn, d)` = sum of value_book(d).pnl_usd, NaN if any row is NaN, 0.0 for an empty
 book (first trading day, not Unavailable). Periods subtract `ltd` at a reference
@@ -83,6 +84,13 @@ SELECT t.trade_id, t.instrument_id, t.product, i.base_ccy, t.quantity, t.price, 
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product = 'FX_OPTION' AND l.leg_no = 1 AND l.settle_date < :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
+"""
+
+
+_FROZEN_OPTION_SQL = """
+SELECT t.trade_id, i.base_ccy, i.quote_ccy, t.price, r.mark_type, r.spot_as_of_date
+FROM realised_pnl r JOIN trades_official t USING (trade_id) JOIN instruments i ON i.instrument_id = t.instrument_id
+WHERE t.product = 'FX_OPTION'
 """
 
 
@@ -248,32 +256,41 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
             unrealisable.append(_unrealisable(trade_id, exc))
 
     closed_out = closed_out_options(conn, as_of)
+    # Every trade of a closed-out option is frozen alike, at the closing fill and the close-out
+    # date's spot, or the group's total is wrong. A row frozen any other way -- at a PREMIUM before
+    # the group could be recognised (the other trade's strike was typed after expiry), or at the
+    # expiry date's spot (the rule of a few hours on 2026-09-21) -- is dropped here and frozen again
+    # below, and only when the close-out spot is on file, so a trade that has a figure keeps one.
+    for trade_id, base_ccy, quote_ccy, fill, mark_type, spot_day in conn.execute(_FROZEN_OPTION_SQL).fetchall():
+        closed = closed_out.get(trade_id)
+        if closed is None or (mark_type == "CLOSE_OUT" and spot_day <= closed.date):
+            continue
+        try:
+            ccy = close_out_ccy(base_ccy, quote_ccy, _number(fill, "trades.price"))
+            if last_usd_conversion(conn, ccy, closed.date) is not None:
+                conn.execute("DELETE FROM realised_pnl WHERE trade_id = ?", (trade_id,))
+        except (TypeError, ValueError, ArithmeticError):
+            pass   # a figure that is not a number: the row is left as it is
     option_rows = conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall()
-    # Every trade of a closed-out option is frozen at the same closing fill, or the group's total
-    # is wrong. One of them frozen at a PREMIUM before the group could be recognised (the other
-    # trade's strike was typed after expiry) is dropped here and frozen again below with the rest.
-    siblings = sorted({t for row in option_rows if row[0] in closed_out for t in closed_out[row[0]].trade_ids})
-    if siblings:
-        marks = ",".join("?" * len(siblings))
-        if conn.execute(f"DELETE FROM realised_pnl WHERE mark_type != 'CLOSE_OUT' AND trade_id IN ({marks})", siblings).rowcount:
-            option_rows = conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall()
     for trade_id, inst, product, base_ccy, qty, fill, settle, quote_ccy in option_rows:
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
             closed = closed_out.get(trade_id)
             if closed is not None:
                 # Bought and sold back in full (engine.pnl.valuation, "Closed-out options"): frozen at
-                # the closing fill, never a PREMIUM mark, so every trade of the group is frozen alike.
+                # the closing fill, never a PREMIUM mark, and at the close-out date's spot, the figure
+                # value_book has shown since the close-out, so every trade of the group is frozen alike.
                 ccy = close_out_ccy(base_ccy, quote_ccy, fill)
-                s_hit = last_usd_conversion(conn, ccy, settle)
+                s_hit = last_usd_conversion(conn, ccy, closed.date)
                 if s_hit is None:
-                    unrealisable.append({"trade_id": trade_id, "reason": f"closed out {closed.date}; no SPOT to convert {ccy} to USD on or before {settle}"})
+                    unrealisable.append({"trade_id": trade_id, "reason": f"closed out {closed.date}; no official SPOT to convert {ccy} to USD on or before that date"})
                     continue
                 s, s_day, s_src = s_hit
                 entry = qty * fill * s
                 combined = closed.price * s
                 pnl = qty * combined - entry
-                note = f"closed out {closed.date} at the closing fill {closed.price:.10g}; spot dated {s_day}"
+                note = (f"closed out {closed.date} at the closing fill {closed.price:.10g}"
+                        + ("" if s_day == closed.date else f"; spot dated {s_day} (last before the close-out)"))
                 _insert_realised(conn, trade_id, inst, product, ccy, settle, qty, entry, "CLOSE_OUT", combined, s_day, s_src, pnl, note)
                 realised += 1
                 continue

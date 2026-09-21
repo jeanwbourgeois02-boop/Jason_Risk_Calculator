@@ -217,6 +217,7 @@ def test_realise_settled_freezes_every_trade_of_a_closed_out_option_at_the_closi
     _insert_marks(conn, [
         ("2026-09-10", "EURUSD091026C", "2026-09-10", "PREMIUM", 0.0200, "QL_OPTIONS_PRICER", "t"),
         ("2026-09-10", "EURUSD", "2026-09-10", "SPOT", 1.20, "BBG_BFXFORWARD", "t"),
+        ("2026-04-01", "EURUSD", "2026-04-01", "SPOT", 1.10, "BBG_BFXFORWARD", "t"),   # the close-out date's spot
     ])
     out = ledger.realise_settled(conn, "2026-09-14")
     assert out["realised"] == 1 and [u["trade_id"] for u in out["unrealisable"]] == ["s1", "o2"]   # the swap has no marks
@@ -226,9 +227,16 @@ def test_realise_settled_freezes_every_trade_of_a_closed_out_option_at_the_closi
                  "VALUES ('EURUSD091026C-2', 1.15, 'CALL', 'VANILLA')")
     ledger.realise_settled(conn, "2026-09-14")
     rows = dict(conn.execute("SELECT trade_id, pnl_usd FROM realised_pnl WHERE mark_type = 'CLOSE_OUT'").fetchall())
-    # 1m EUR * (0.0070 - 0.0050) = 2,000 EUR * 1.20 on the purchase, nothing on the sale
-    assert rows == {"o1": pytest.approx(2_400.0), "o2": pytest.approx(0.0)}
+    # 1m EUR * (0.0070 - 0.0050) = 2,000 EUR on the purchase, nothing on the sale, in dollars at the
+    # close-out date's 1.10 (user, 2026-09-21: "of course you freeze the usd converstion"), not expiry's 1.20
+    assert rows == {"o1": pytest.approx(2_200.0), "o2": pytest.approx(0.0)}
     assert ledger.realise_settled(conn, "2026-09-14")["realised"] == 0   # a re-run never re-freezes
+
+    # a row frozen at the expiry date's spot (the rule of a few hours on 2026-09-21) is brought into line
+    conn.execute("UPDATE realised_pnl SET pnl_usd = 2400.0, spot_as_of_date = '2026-09-10' WHERE trade_id = 'o1'")
+    assert ledger.realise_settled(conn, "2026-09-14")["realised"] == 1
+    assert conn.execute("SELECT pnl_usd, spot_as_of_date FROM realised_pnl WHERE trade_id = 'o1'").fetchone() == (
+        pytest.approx(2_200.0), "2026-04-01")
 
 
 # --------------------------------------------------------------------------- 2026-09-18

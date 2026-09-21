@@ -389,28 +389,34 @@ def _vb_rows(conn, as_of=VB_AS_OF):
     return value_book(conn, as_of).set_index("trade_id")
 
 
+VB_CLOSED_ON = "2026-05-05"   # the sell-back's trade date: the close-out date
+
+
 def test_value_book_closed_out_option_is_realised_at_its_closing_fill_with_no_premium_mark():
+    """Frozen in dollars too (user, 2026-09-21: "of course you freeze the usd converstion"):
+    converted at the close-out date's spot, so a later spot never moves it."""
     conn = _vb_conn()
     _vb_round_trip(conn)
+    _vb_mark(conn, "EURUSD", VB_CLOSED_ON, "SPOT", 1.08, as_of=VB_CLOSED_ON)
     _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
     vb = _vb_rows(conn)
     assert list(vb["status"]) == ["CLOSED", "CLOSED"] and list(vb["reason"]) == ["", ""]
     assert vb.loc["BUY", "pnl_local"] == pytest.approx(35_000_000 * (0.005645 - 0.0057))   # -1,925 EUR
-    assert vb.loc["BUY", "pnl_usd"] == pytest.approx(-1_925 * 1.10)
+    assert vb.loc["BUY", "pnl_usd"] == pytest.approx(-1_925 * 1.08)
+    assert _vb_rows(conn, VB_CLOSED_ON)["pnl_usd"].sum() == pytest.approx(vb["pnl_usd"].sum())   # the same on every date
     assert vb.loc["SELL", "pnl_usd"] == pytest.approx(0.0)
     assert vb.loc["BUY", "mark"] == pytest.approx(0.005645) and vb.loc["BUY", "mark_source"] == "CLOSE_OUT_FILL"
     assert "closed out 2026-05-05" in vb.loc["BUY", "note"]
 
 
-def test_value_book_closed_out_total_is_what_the_marked_formula_gives():
-    """The PREMIUM mark cancels over a closed position, so nothing about the total changes."""
+def test_value_book_closed_out_total_on_the_close_out_date_is_what_the_marked_formula_gives():
+    """The PREMIUM mark cancels over a flat position, so the close-out day's total is the marked
+    formula's own; it is that day's figure that stays."""
     conn = _vb_conn()
     _vb_round_trip(conn)
-    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
-    for instrument_id in (VB_PUT_BOUGHT, VB_PUT_SOLD):
-        _vb_premium(conn, instrument_id, 0.0031)
-    marked = (35_000_000 * (0.0031 - 0.0057) - 35_000_000 * (0.0031 - 0.005645)) * 1.10
-    assert _vb_rows(conn)["pnl_usd"].sum() == pytest.approx(marked)
+    _vb_mark(conn, "EURUSD", VB_CLOSED_ON, "SPOT", 1.08, as_of=VB_CLOSED_ON)
+    marked = (35_000_000 * (0.0031 - 0.0057) - 35_000_000 * (0.0031 - 0.005645)) * 1.08
+    assert _vb_rows(conn, VB_CLOSED_ON)["pnl_usd"].sum() == pytest.approx(marked)
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -438,8 +444,10 @@ def test_value_book_before_the_sell_back_the_option_is_still_live():
 def test_value_book_closed_out_option_without_a_conversion_spot_says_so():
     conn = _vb_conn()
     _vb_round_trip(conn)
+    _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)   # a spot AFTER the close-out is no substitute
     vb = _vb_rows(conn)
-    assert vb["pnl_usd"].isna().all() and "no SPOT for USD conversion of EUR" in vb.loc["BUY", "reason"]
+    assert vb["pnl_usd"].isna().all()
+    assert "no official SPOT to convert EUR to USD on or before that date" in vb.loc["BUY", "reason"]
 
 
 def test_value_book_closed_out_gold_option_dealt_per_ounce_is_in_dollars():
@@ -451,19 +459,21 @@ def test_value_book_closed_out_gold_option_dealt_per_ounce_is_in_dollars():
     assert vb.loc["G1", "pnl_usd"] == pytest.approx(2_500.0) and vb.loc["G2", "pnl_usd"] == pytest.approx(0.0)
 
 
-def test_value_book_closed_out_option_past_expiry_freezes_at_the_last_spot_on_or_before_expiry():
+def test_value_book_closed_out_option_past_expiry_is_recorded_at_the_same_close_out_figure():
     from engine.pnl import ledger
     conn = _vb_conn()
     _vb_round_trip(conn, expiry="2026-05-20")
+    _vb_mark(conn, "EURUSD", "2026-05-04", "SPOT", 1.15, as_of="2026-05-04")   # the last before the close-out
     _vb_mark(conn, "EURUSD", "2026-05-19", "SPOT", 1.20, as_of="2026-05-19")
     _vb_mark(conn, "EURUSD", VB_AS_OF, "SPOT", 1.10)
-    vb = _vb_rows(conn)   # not yet in realised_pnl: the figure the ledger will persist
-    assert list(vb["status"]) == ["SETTLED", "SETTLED"]
-    assert vb["pnl_usd"].sum() == pytest.approx(-1_925 * 1.20)
+    before_expiry = _vb_rows(conn, "2026-05-12")["pnl_usd"].sum()
+    vb = _vb_rows(conn)   # not yet in realised_pnl: the figure the ledger will record
+    assert list(vb["status"]) == ["SETTLED", "SETTLED"] and "last before the close-out" in vb.loc["BUY", "note"]
+    assert vb["pnl_usd"].sum() == pytest.approx(-1_925 * 1.15) == pytest.approx(before_expiry)
     assert ledger.realise_settled(conn, VB_AS_OF) == {"realised": 2, "unrealisable": [], "repaired": []}
-    assert conn.execute("SELECT DISTINCT mark_type, spot_as_of_date FROM realised_pnl").fetchall() == [("CLOSE_OUT", "2026-05-19")]
-    assert _vb_rows(conn)["pnl_usd"].sum() == pytest.approx(-1_925 * 1.20)
-    assert ledger.ltd(conn, VB_AS_OF) == pytest.approx(-1_925 * 1.20)
+    assert conn.execute("SELECT DISTINCT mark_type, spot_as_of_date FROM realised_pnl").fetchall() == [("CLOSE_OUT", "2026-05-04")]
+    assert _vb_rows(conn)["pnl_usd"].sum() == pytest.approx(-1_925 * 1.15)
+    assert ledger.ltd(conn, VB_AS_OF) == pytest.approx(-1_925 * 1.15)
 
 
 def test_value_book_missing_mark_is_nan_with_reason():

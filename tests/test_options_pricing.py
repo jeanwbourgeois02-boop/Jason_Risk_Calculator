@@ -2486,6 +2486,8 @@ def test_expiry_week_end_to_end_the_five_tickets_freeze_at_their_intrinsic_in_do
                             "WHERE trade_id = ?", (ids[instrument_id],)).fetchone()
 
     eurusd_tue, eurusd_wed, eursek_wed = 1.1800, 1.1750, 10.95
+    closed_on, eurusd_closed = "2026-08-24", 1.1600   # the EURSEK put's sell-back date and that day's EURUSD
+    _mark_spot(conn, closed_on, "EURUSD", eurusd_closed)
     _mark_spot(conn, tue, "EURUSD", eurusd_tue)
     priced = {o.instrument_id for o in price_all_and_store(conn, tue) if o.priced}
     assert priced == {"EURUSD092226P-197728065", "EURUSD092226C-197728066"}
@@ -2512,15 +2514,16 @@ def test_expiry_week_end_to_end_the_five_tickets_freeze_at_their_intrinsic_in_do
         if pair != "EURSEK":
             continue
         row = frozen(instrument_id)
-        if instrument_id in closed_out:   # not live: frozen at the closing fill, never at a payoff (2026-09-21)
-            assert row[1:3] == (wed, "CLOSE_OUT")
+        if instrument_id in closed_out:   # not live: the closing fill and the close-out date's spot (2026-09-21)
+            assert row[1:3] == (closed_on, "CLOSE_OUT")
             continue
         intrinsic = _payoff_fraction(option_type, eursek_wed, strike)
         assert row[0] == pytest.approx(quantity * (intrinsic - fill) * eurusd_wed)  # EUR -> USD at that day's EURUSD
         assert row[1] == wed
-    # The bought and the sold EURSEK put are the same option: their payoffs cancel, leaving the premium difference.
+    # The bought and the sold EURSEK put are the same option: what is left is the premium difference, in
+    # dollars at the EURUSD of the day it was sold back (user, 2026-09-21: "of course you freeze the usd converstion").
     net = frozen("EURSEK092326P-197728105")[0] + frozen("EURSEK092326P-197838147")[0]
-    assert net == pytest.approx(35_000_000 * (0.005645 - 0.0057) * eurusd_wed)
+    assert net == pytest.approx(35_000_000 * (0.005645 - 0.0057) * eurusd_closed)
 
 
 # --------------------------------------------------------------------------- reviewer W-2: expiry mark vs the official SPOT on file
