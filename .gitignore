@@ -6,4 +6,3 @@ __pycache__/
 reports/
 .venv/
 .claude/settings.local.json
-/requirements.txt
