@@ -1189,6 +1189,58 @@ def test_equity_european_prices_and_stores():
 
 
 @needs_quantlib
+def test_listed_index_option_greeks_come_from_the_vol_bloombergs_price_implies():
+    """User decision 2026-09-21: an SPX option is marked at Bloomberg's own price of it; the
+    Greeks are the pricer's at the vol that price implies -- no manual vol, no vol surface."""
+    from engine.options.equity_commodity import price_all_and_store_equity, set_dividend_yield
+
+    conn = _new_db()
+    _seed_equity_underlying(conn, spot=7700.0)
+    instrument_id = _seed_eq_cmdty_option_trade(
+        conn, "SPX1", "SPX/E261016P7615", "SPX Index", "EQ_OPTION", "EQ_OPTION", 7615.0, "PUT",
+        expiry="2026-10-16", quantity=15.0, price=121.5,
+    )
+    set_dividend_yield(conn, AS_OF, "SPX Index", 0.0125, source="BBG_BDP")   # what the pull writes
+    conn.execute(
+        "INSERT INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (AS_OF, instrument_id, "2026-10-16", "FUTURE_PX", 140.0, "BBG_BDH", f"{AS_OF}T15:00:00-04:00"),
+    )
+    conn.commit()
+
+    (outcome,) = price_all_and_store_equity(conn, AS_OF)
+    assert outcome.priced, outcome.reason
+    assert outcome.vol_source == "IMPLIED"
+    marks = dict(conn.execute(
+        "SELECT mark_type, value FROM marks_official WHERE as_of_date = ? AND instrument_id = ?", (AS_OF, instrument_id)))
+    assert marks["PREMIUM"] == pytest.approx(140.0 * 100.0, rel=1e-4)   # Bloomberg's price x multiplier, by construction
+    assert -1.0 < marks["DELTA"] < 0.0                                   # a put
+    assert marks["GAMMA"] > 0 and marks["VEGA"] > 0
+
+
+@needs_quantlib
+def test_listed_index_option_with_no_dividend_yield_says_so_and_writes_no_greeks():
+    from engine.options.equity_commodity import price_all_and_store_equity
+
+    conn = _new_db()
+    _seed_equity_underlying(conn, spot=7700.0)
+    instrument_id = _seed_eq_cmdty_option_trade(
+        conn, "SPX1", "SPX/E261016P7615", "SPX Index", "EQ_OPTION", "EQ_OPTION", 7615.0, "PUT",
+        expiry="2026-10-16", quantity=15.0, price=121.5,
+    )
+    conn.execute(
+        "INSERT INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (AS_OF, instrument_id, "2026-10-16", "FUTURE_PX", 140.0, "BBG_BDH", f"{AS_OF}T15:00:00-04:00"),
+    )
+    conn.commit()
+
+    (outcome,) = price_all_and_store_equity(conn, AS_OF)
+    assert not outcome.priced and outcome.reason == "no dividend yield"
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE mark_type = 'DELTA'").fetchone()[0] == 0
+
+
+@needs_quantlib
 def test_equity_missing_dividend_yield_skips():
     from engine.options.equity_commodity import price_and_store_equity
     from engine.options.inputs import set_manual_vol

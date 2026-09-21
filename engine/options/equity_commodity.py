@@ -55,6 +55,17 @@ MODELS.md's commodity section).
       fallback, via the existing `get_manual_vol`.
   (c) else skip "no vol".
 
+**A listed option (user decision 2026-09-21: "Bloomberg's option price").** An index
+option the blotter carries ('SPX/E261016P7615') is marked by Bloomberg's own price of
+it -- the official FUTURE_PX mark on the option's instrument, in index points, which
+`engine/pnl` reads for the P&L with no model in between. With that price on file the
+vol is neither (a) nor (b): it is the vol IMPLIED by the price (vendored
+`equity.implied_vol`, VANILLA and AMERICAN), so the Greeks written here are the
+market's, and the PREMIUM written alongside is Bloomberg's price x multiplier by
+construction. The dividend yield is Bloomberg's (source 'BBG_BDP', written by the
+pull) when on file, else the manual one. A missing input blanks the Greeks with its
+reason; it can never blank the P&L, which does not pass through here.
+
 **Premium unit, restated (see pricer.py's OptionPriceResult docstring).**
 The vendored equity/commodity pricers return an UNSCALED quote-ccy price
 per 1 unit of underlying. The PREMIUM mark written here is that price
@@ -197,7 +208,37 @@ def _resolve_vol(conn, as_of, underlying, expiry_iso, strike, as_of_date, expiry
     return None, ""
 
 
-def _resolve_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curve_cache, need_dividend) -> EqCmdtyInputsResult:
+_IMPLIED_VOL_PAYOFFS = ("VANILLA", "AMERICAN")
+
+
+def _listed_price(conn: sqlite3.Connection, as_of: str, row: dict) -> Optional[float]:
+    """Bloomberg's own price of a listed option on `as_of` (official FUTURE_PX on the
+    option's instrument at its expiry, per unit of the underlying), or None."""
+    hit = conn.execute(
+        "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND settle_date = ? "
+        "AND mark_type = 'FUTURE_PX'", (as_of, row["instrument_id"], row["expiry_date"]),
+    ).fetchone()
+    return None if hit is None or hit[0] is None else float(hit[0])
+
+
+def _implied_vol(price, payoff, spot, strike, T, r, option_type, dividend_yield):
+    """(vol, '') implied by a listed option's market `price`, or (None, reason)."""
+    from .vendor.options_calc.equity import implied_vol as iv
+
+    solve = iv.implied_volatility_american if payoff == "AMERICAN" else iv.implied_volatility
+    try:
+        vol = float(solve(price, spot, strike, T, r, option_type.lower(), dividend_yield))
+    except Exception as exc:  # noqa: BLE001 -- a price outside the no-arbitrage bounds has no vol
+        return None, f"no vol is implied by Bloomberg's price {price:g} with the index at {spot:g} ({exc})"
+    if not vol > 0:
+        return None, f"no vol is implied by Bloomberg's price {price:g} with the index at {spot:g}"
+    return vol, ""
+
+
+def _resolve_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curve_cache, need_dividend,
+                    listed: Optional[tuple] = None) -> EqCmdtyInputsResult:
+    """`listed` = (Bloomberg's price, payoff, option_type) of a listed option: the vol is
+    then the one that price implies (module docstring)."""
     spot_row = conn.execute(
         "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'SPOT'",
         (as_of, underlying),
@@ -208,7 +249,9 @@ def _resolve_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curv
 
     dividend_yield = 0.0
     if need_dividend:
-        dividend_yield = get_dividend_yield(conn, as_of, underlying)
+        dividend_yield = get_dividend_yield(conn, as_of, underlying, source="BBG_BDP")
+        if dividend_yield is None:
+            dividend_yield = get_dividend_yield(conn, as_of, underlying)
         if dividend_yield is None:
             return EqCmdtyInputsResult(None, "no dividend yield")
 
@@ -218,7 +261,15 @@ def _resolve_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curv
 
     as_of_date = datetime.date.fromisoformat(as_of)
     expiry_date = datetime.date.fromisoformat(expiry_iso)
-    vol, vol_source = _resolve_vol(conn, as_of, underlying, expiry_iso, strike, as_of_date, expiry_date)
+    if listed is not None and listed[1] in _IMPLIED_VOL_PAYOFFS:
+        price, payoff, option_type = listed
+        vol, reason = _implied_vol(price, payoff, spot, strike, pricer.year_fraction(as_of_date, expiry_date),
+                                   r, option_type, dividend_yield)
+        if vol is None:
+            return EqCmdtyInputsResult(None, reason)
+        vol_source = "IMPLIED"
+    else:
+        vol, vol_source = _resolve_vol(conn, as_of, underlying, expiry_iso, strike, as_of_date, expiry_date)
     if vol is None:
         return EqCmdtyInputsResult(None, "no vol")
 
@@ -227,8 +278,10 @@ def _resolve_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curv
     ))
 
 
-def resolve_equity_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curve_cache=None) -> EqCmdtyInputsResult:
-    return _resolve_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curve_cache, need_dividend=True)
+def resolve_equity_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curve_cache=None,
+                          listed: Optional[tuple] = None) -> EqCmdtyInputsResult:
+    return _resolve_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curve_cache, need_dividend=True,
+                           listed=listed)
 
 
 def resolve_commodity_inputs(conn, as_of, underlying, quote_ccy, expiry_iso, strike, curve_cache=None) -> EqCmdtyInputsResult:
@@ -331,8 +384,14 @@ def _price_eq_cmdty_row(conn: sqlite3.Connection, as_of: str, row: dict, asset_k
     if expiry <= as_of_date:
         return _skip(row, f"expiry {row['expiry_date']} is not after as_of {as_of}")
 
-    resolver = resolve_equity_inputs if asset_kind == "EQ_OPTION" else resolve_commodity_inputs
-    inputs_result = resolver(conn, as_of, row["underlying"], row["quote_ccy"], row["expiry_date"], row["strike"], curve_cache)
+    if asset_kind == "EQ_OPTION":
+        price = _listed_price(conn, as_of, row)
+        inputs_result = resolve_equity_inputs(
+            conn, as_of, row["underlying"], row["quote_ccy"], row["expiry_date"], row["strike"], curve_cache,
+            listed=None if price is None else (price, payoff, row["option_type"]))
+    else:
+        inputs_result = resolve_commodity_inputs(conn, as_of, row["underlying"], row["quote_ccy"], row["expiry_date"],
+                                                 row["strike"], curve_cache)
     if inputs_result.inputs is None:
         return _skip(row, inputs_result.reason)
     inputs = inputs_result.inputs

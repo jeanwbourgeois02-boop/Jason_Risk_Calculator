@@ -46,6 +46,10 @@ Total book strip and the bundles all include them.
     unit at spot (identity when base is USD).
   Missing marks give NaN with a reason exactly like FX. Matured swaps and expired
   options read their frozen row from `realised_pnl` (engine/pnl/ledger.realise_settled).
+  - EQ_OPTION, a listed index option (user decision 2026-09-21: "Bloomberg's option
+    price"): valued exactly like a future, `contracts * multiplier * (m - fill)`, with `m`
+    Bloomberg's own price of the option (the official FUTURE_PX mark on the option's
+    instrument at its expiry date, in index points like the fill). No model is involved.
 
 One bad value, one trade (2026-09-18, guards only -- no formula changed): every stored
 figure a formula uses (`trades.quantity`, `trades.price`, `instruments.multiplier`, each
@@ -176,7 +180,7 @@ def _fut_sql(theme: bool) -> str:
         SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
                t.trade_date, t.quantity, t.price AS fill, i.multiplier, l.settle_date
         FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
-        WHERE t.product = 'FUTURE' AND t.trade_date <= :as_of AND l.leg_no = 1
+        WHERE t.product IN ('FUTURE', 'EQ_OPTION') AND t.trade_date <= :as_of AND l.leg_no = 1
     """
 
 
@@ -457,7 +461,7 @@ def _frozen_row(conn, r) -> Optional[dict]:
         pnl_local = r.quantity * (m - r.fill)
         pnl_usd = pnl_local * s
         spot, spot_src, mark_label = s, s_src, "spot"
-    elif product == "FUTURE":
+    elif product in ("FUTURE", "EQ_OPTION"):
         hit = _last_official_on_or_before(conn, r.instrument_id, "FUTURE_PX", settle)
         if hit is None:
             return None
@@ -569,7 +573,9 @@ def _open_future_row(conn, r, as_of) -> dict:
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
     m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FUTURE_PX", as_of)
     if m_hit is None:
-        out["reason"] = f"no FUTURE_PX mark for {r.instrument_id} expiry {r.settle_date} on {as_of}"
+        out["reason"] = (f"no Bloomberg price for the listed option {r.instrument_id} on {as_of}"
+                         if r.product == "EQ_OPTION" else
+                         f"no FUTURE_PX mark for {r.instrument_id} expiry {r.settle_date} on {as_of}")
         return out
     m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FUTURE_PX", as_of), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src

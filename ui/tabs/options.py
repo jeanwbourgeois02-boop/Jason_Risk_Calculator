@@ -428,8 +428,17 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
     fill = rec.get("fill")
 
     marks = _official_marks(conn, as_of, rec["instrument_id"], rec["expiry_date"],
-                             ("PREMIUM",) + tuple(mt for _, mt in _GREEK_MARK_TYPES))
+                             ("PREMIUM", "FUTURE_PX") + tuple(mt for _, mt in _GREEK_MARK_TYPES))
     premium = marks.get("PREMIUM")
+    if rec["product"] == "EQ_OPTION":
+        # A listed option (SPX, user decision 2026-09-21) is marked at Bloomberg's own price of
+        # it, the FUTURE_PX the book's P&L reads, in index points: x multiplier = per contract.
+        # The pricing step only adds the Greeks, so its skip reason is about them, never the value.
+        if marks.get("FUTURE_PX") is not None:
+            premium = marks["FUTURE_PX"] * float(rec.get("multiplier") or 1.0)
+        greeks_missing = "Greeks not calculated: " + (
+            skip_reason or "they are the next time you press Pull Bloomberg now")
+        skip_reason = ""
 
     # USD per 1 unit of the premium (base) currency: the spot the BOOK used for this trade
     # when it priced it, so MktVal - Start value USD equals the book's P&L USD exactly;
@@ -474,6 +483,8 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         pnl_usd = float(book["pnl_usd"])
 
     greeks, greeks_reason = _usd_greeks(conn, as_of, rec, marks)
+    if rec["product"] == "EQ_OPTION" and premium is not None and marks.get("DELTA") is None:
+        greeks_reason = greeks_reason or greeks_missing
 
     if asset_class == "FX":
         underlying = rec["base_ccy"] + rec["quote_ccy"]

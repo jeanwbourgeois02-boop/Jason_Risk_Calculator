@@ -45,6 +45,7 @@ instruments (
                                       -- 'USDJPY111926P-197571137' (option: one instrument per option trade),
                                       -- 'CASH-CAD'
   asset_class     TEXT NOT NULL,      -- FX | FUTURE | IRS | FX_OPTION | IRS_OPTION | EQ_OPTION | CMDTY_OPTION | CASH
+                                      -- | INDEX (a listed option's underlying, 'SPX Index': holds its level, never traded)
   base_ccy        TEXT NOT NULL,      -- unit of trades.quantity: 'USD' for USDJPY, 'AUD' for AUDUSD, 'XAU',
                                       -- 'ES' (index units), notional ccy for IRS, base of pair for options
   quote_ccy       TEXT NOT NULL,      -- currency of trades.price and of local P&L
@@ -74,7 +75,7 @@ trades (
   instrument_id   TEXT NOT NULL REFERENCES instruments,
   product         TEXT NOT NULL,      -- FX_SPOT | FX_FWD | FX_SWAP | FUTURE | IRS | FX_OPTION
                                       -- | SWAPTION | CAP_FLOOR (engine/rates_vol; no ingest path yet)
-                                      -- | EQ_OPTION | CMDTY_OPTION (engine/options; no ingest path yet)
+                                      -- | EQ_OPTION (a listed index option, from the blotter) | CMDTY_OPTION (engine/options; no ingest path yet)
   package_id      TEXT NOT NULL,      -- = trade_id unless grouped by the swap rule below
   trade_date      TEXT NOT NULL,
   quantity        REAL NOT NULL,      -- signed, in base_ccy units: base amount (FX), contracts (FUTURE),
@@ -190,11 +191,11 @@ swap_review (                          -- ambiguous FX-swap candidates the packa
 ```sql
 bbg_library (                          -- what the trades on file need from Bloomberg for their P&L (see "Bloomberg library")
   trade_id        TEXT NOT NULL,      -- no foreign key: an upload rewrites the whole book before the sync runs
-  kind            TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | OIS_CURVE | FIXINGS | VOL_SMILE | NDF_1M
+  kind            TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | OIS_CURVE | FIXINGS | VOL_SMILE | NDF_1M | DIV_YIELD
   key             TEXT NOT NULL,      -- pair / future instrument_id; currency for OIS_CURVE and FIXINGS
   settle_date     TEXT NOT NULL,      -- FWD_OUTRIGHT, FUTURE_PX: the date marked; '9999-12-31' otherwise
   bbg_ticker      TEXT NOT NULL,      -- the security asked for; '' where the kind stands for a set of them
-  role            TEXT NOT NULL,      -- PAIR | CONVERSION (a USD-conversion pair's SPOT)
+  role            TEXT NOT NULL,      -- PAIR | CONVERSION (a USD-conversion pair's SPOT) | UNDERLYING (a listed option's index level)
   product         TEXT NOT NULL,
   needed_from     TEXT NOT NULL,      -- the trade's trade_date
   needed_until    TEXT NOT NULL,      -- settle date / expiry / maturity: not asked for after it
@@ -225,7 +226,7 @@ Leg layouts: FX spot / forward = 2 legs (`FX_NEAR`, one per currency); FX swap =
 |---|---|
 | SPOT | BBG_BFXFORWARD |
 | FWD_OUTRIGHT | BBG_BFXFORWARD where Bloomberg quotes that exact date (a standard tenor of `FWD_CURVE`); otherwise BBG_INTERP (user decision 2026-09-18): linear interpolation between the two bracketing standard-tenor outrights of Bloomberg's own curve, never extrapolated beyond the last tenor. A direct quote always wins over an interpolated row for the same key |
-| FUTURE_PX | BBG_BDH |
+| FUTURE_PX | BBG_BDH (a future's price; also Bloomberg's own price of a listed index option, written on the option's instrument at its expiry date, in index points) |
 | NDF_1M | BBG_BFXFORWARD (the 1M NDF tickers in `data/ingest/common.py::NDF_1M_TICKERS`; read by the ladder only, never by a P&L query) |
 | PAR_RATE, PV_USD, DV01_USD, CASHFLOW_USD | QL_PRICER (`engine/rates`) |
 | DELTA, DELTA_PA, PREMIUM, GAMMA, THETA, VEGA, RHO | QL_OPTIONS_PRICER (`engine/options`, vendored options_calc) |
@@ -242,7 +243,7 @@ Past closes come from the backfill (`data/bloomberg/backfill.py`), which runs st
 
 `bbg_library` (`data/bloomberg/library.py`) is the one record of what the trades on file need from Bloomberg for their P&L; the live pull, the rates step, the vol step, the backfill and the Market data tab's "needed" lists all read it, so what is not in it is never asked for.
 
-- Per trade, with the dates it is needed between. FX spot / forward / swap: the pair's SPOT until the last leg settles, a FWD_OUTRIGHT at each leg's own date, and for a cross the SPOT of each currency's USD pair; with an NDF currency, also that currency's NDF_1M ticker, for today's pull only. Future: FUTURE_PX at expiry. FX option, until expiry: the pair's SPOT and its USD-conversion SPOTs, and for today's pricing only a FWD_OUTRIGHT at the expiry, the OIS curve of both currencies and the pair's vol smile. IRS, until maturity: the currency's OIS curve and fixings. Nothing is asked for after `needed_until`; an option or a swap the ledger has realised is left out of a live pull.
+- Per trade, with the dates it is needed between. FX spot / forward / swap: the pair's SPOT until the last leg settles, a FWD_OUTRIGHT at each leg's own date, and for a cross the SPOT of each currency's USD pair; with an NDF currency, also that currency's NDF_1M ticker, for today's pull only. Future: FUTURE_PX at expiry. Listed index option (EQ_OPTION), until expiry: FUTURE_PX on the option's own Bloomberg ticker (`library.listed_option_ticker`, 'SPX US 10/16/26 P7615 Index'), which is all its P&L needs, and for today's Greeks only the index level (SPOT of 'SPX Index', role UNDERLYING, never asked of Bloomberg's history), the USD OIS curve and the index's dividend yield (DIV_YIELD). FX option, until expiry: the pair's SPOT and its USD-conversion SPOTs, and for today's pricing only a FWD_OUTRIGHT at the expiry, the OIS curve of both currencies and the pair's vol smile. IRS, until maturity: the currency's OIS curve and fixings. Nothing is asked for after `needed_until`; an option or a swap the ledger has realised is left out of a live pull.
 - It changes only when the trades change. Triggers on `trades` / `trade_legs` set `bbg_library_state.dirty`; an upload syncs it at once and says so in its summary; any reader finding it dirty syncs it before reading (a read-only connection works the same rows out in memory). A pull never writes it.
 - The Market data tab lists it ("Bloomberg library": ticker, field, what it is for, how many trades, until when).
 
@@ -257,7 +258,7 @@ Tolerance rule: a blank, missing or oddly formatted field never rejects a row wh
 - FORWARD: `Symbol` is `<PAIR><VD mmddyy>-<id>`; that trailing id is the `Instrument Id`, not the trade id, which comes from the `Trade Id` column. Base / quote leg amounts come from the structured `Buy Currency` / `Sell Currency` / `BuyCurrency Amount` / `SellCurrency Amount` columns, cross-checked against the description's sold / bought currencies. The blotter's Buy / Sell is our side, for USD-base pairs too (`docs/open-questions.md` item 70).
 - CURRENCY: spot FX fills. A row naming both a `Buy Currency` and a `Sell Currency` is a spot trade in its own right and is written as product `FX_SPOT` with the same two `FX_NEAR` legs a forward gets, dated on `Settle Date`, so its cash reaches the ladder and its P&L the book. The `CASH-<ccy>` instrument is still written for the row's own currency; a single-currency row (fee, balance, one-sided movement) stays instrument-only, never a trade, never a reject. Spot trades are not candidates for the FX-swap package rule.
 - FUTURE: a trade + 1 `NOTIONAL` leg per fill (`Quantity` = contracts signed by `Side`, `multiplier` = 50 for ES).
-- OPTION: product `FX_OPTION`, 1 `NOTIONAL` leg in the pair's base currency (`Currency Pair` column), quantity signed by `Side` (Buy = long = +), price = premium fill as a fraction of base notional. Terms the export leaves blank (the reference sample's three digitals carry no strike) are typed once on the Blotter's Manual entry sub-tab and stored in `instrument_options`.
+- OPTION: product `FX_OPTION`, 1 `NOTIONAL` leg in the pair's base currency (`Currency Pair` column), quantity signed by `Side` (Buy = long = +), price = premium fill as a fraction of base notional. Terms the export leaves blank (the reference sample's three digitals carry no strike) are typed once on the Blotter's Manual entry sub-tab and stored in `instrument_options`. A listed index option (`Symbol` 'SPX/E261016P7615-USAA') is product `EQ_OPTION`: quantity = contracts signed by `Side`, price = the premium in index points, `multiplier` = the contract multiplier (100 for SPX), `bbg_ticker` = the underlying index ('SPX Index'), strike / type / expiry read from the Symbol.
 - INTEREST_RATE_SWAP: + = pay fixed, − = receive fixed. `Side` carries no direction here (always `'Buy'` in the reference sample). A short is whatever the book marks with brackets or a minus sign (user, 2026-09-18): on `Notional`, or on `Quantity` where an export leaves `Notional` unsigned; the magnitude still comes from `Notional`, which is already full-unit (not millions-scaled like this file's `Quantity`). The reference sample carries no sign on either column, so it cannot show this; the user's live export does.
 
 `trades.strategy` is `''` for blotter trades.
@@ -338,6 +339,7 @@ Per-pair delta (the "Position" table) is the same union grouped by `t.instrument
   - FX, any pair: `PnL_quote = Q × (m − f)`; `PnL_USD = PnL_quote × S` (`S = 1` when quote is USD). Crosses: `S` = USD per quote unit from that currency's own USD pair; never invent a USD leg.
   - Futures: `PnL_USD = contracts × multiplier × (m − f)`.
   - IRS: `PnL_USD = PV_USD(t) + CASHFLOW_USD(t)`, both official marks from `engine/rates` at the swap's maturity date. A swap dealt at its fixed rate with no upfront is worth zero at the fill by construction, so this is the mark-minus-fill analogue of the FX formula; `CASHFLOW_USD` is the net of coupons already settled on or before `t` (0 for a forward-starting swap), which keeps LTD continuous across a coupon payment and at maturity, when PV goes to 0. Both are computed in the swap's currency and converted at that day's SPOT by the pricer. Realised at maturity by `engine/pnl/ledger.realise_settled` at the last official PV + cashflows on or before maturity.
+  - Listed index option (EQ_OPTION, user decision 2026-09-21: "Bloomberg's option price"): the futures formula, `PnL_USD = contracts × multiplier × (m − f)`, with `m` Bloomberg's own price of the option (official `FUTURE_PX` on the option's instrument: its mid on a live pull, else last, else the latest settlement price; `PX_SETTLE` on a past close) and `f` the fill, both in index points. No model enters the P&L. Frozen after expiry at the last official price on or before it, like a future. Its Greeks are `engine/options`' at the vol that price implies (index level, USD OIS curve and Bloomberg's dividend yield for the index); a missing input blanks the Greeks with its reason, never the P&L.
   - FX option: `PnL_USD = quantity × (PREMIUM_mark − premium_fill) × S`, premium in base-ccy fraction, `S` = USD per base unit at spot; realised at expiry at the last official PREMIUM on or before expiry (since 2026-09-18, user-approved, that PREMIUM is the expiry-day payoff: on the expiry date `engine/options` writes the payoff at the pair's official SPOT of that date — call max(S−K,0)/S, put max(K−S,0)/S, a BASE-payout digital 1 in the money else 0, nothing at S = K — following the official SPOT on file for that date until the first freeze; if the app did not run that day it is written on a later pull, dated the expiry date; the ledger freezes the trade the day after expiry; the payoff is taken at the day's official spot, not at the option's cut time. Digitals pay the BASE currency: USD on USDJPY, EUR on EURSEK, confirmed by the user).
 - **Settled trades are frozen.** A trade whose last leg has settled takes its row from `realised_pnl` and is never marked again; settlement does not move LTD.
 - **Daily P&L** = `LTD(t) − LTD(t−1bd)`. **Trading P&L** = LTD of trades with `trade_date = t`. **5d P&L** = `LTD(t) − LTD(t−5bd)`. **MTD** = `LTD(t) − LTD(last bd of previous month)`. **YTD** = `LTD(t) − LTD(last bd of previous year)`. All from our own recomputed daily series, never summed day by day; `t−n bd` uses the trading calendar (`config/holidays.txt`). A reference close with no value steps back to the previous business day that has one (user decision 2026-09-21; see "Header"). Past closes are valued at historical Bloomberg marks written by the backfill; the live pull only writes today's.

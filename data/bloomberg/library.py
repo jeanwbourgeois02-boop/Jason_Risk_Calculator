@@ -29,10 +29,18 @@ cycle until 2026-09-21; the rules did not change, only where they are kept):
     expiry for an option). Today's pull only: no P&L query reads it (the ladder does), so
     the backfill never asks for it.
 
+  * Listed index option (EQ_OPTION, user decision 2026-09-21: "Bloomberg's option price"),
+    until expiry: FUTURE_PX on the option's OWN Bloomberg ticker ('SPX US 10/16/26 P7615
+    Index', `listed_option_ticker`) -- a listed option is priced exactly like a future,
+    Bloomberg's own quote today and its settlement price on a past close -- which is all
+    its P&L needs. For today's Greeks only: the SPOT of its underlying index ('SPX Index',
+    role UNDERLYING, never asked of Bloomberg's history), the quote currency's OIS curve
+    and the index's dividend yield (kind DIV_YIELD).
+
 `kind` is the mark_type for what lands in `marks` (SPOT, FWD_OUTRIGHT, FUTURE_PX, and
-NDF_1M) and OIS_CURVE / FIXINGS / VOL_SMILE for what lands in `curve_quotes` /
-`index_fixings` / `vol_quotes`; those three stand for a set of Bloomberg securities
-(`tickers` lists them).
+NDF_1M) and OIS_CURVE / FIXINGS / VOL_SMILE / DIV_YIELD for what lands in `curve_quotes` /
+`index_fixings` / `vol_quotes` / `equity_dividend_yields`; the first three stand for a set
+of Bloomberg securities (`tickers` lists them).
 """
 from __future__ import annotations
 
@@ -43,12 +51,15 @@ from typing import Dict, List, Optional
 SENTINEL = "9999-12-31"
 ROLE_PAIR = "PAIR"                 # the traded pair / contract / currency itself
 ROLE_CONVERSION = "CONVERSION"     # a USD-conversion pair's SPOT
+ROLE_UNDERLYING = "UNDERLYING"     # a listed option's underlying index level: today's Greeks only
 MARK_KINDS = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX")
 NDF_1M = "NDF_1M"                  # an NDF currency's 1M outright, on its USD pair (the ladder's rate)
+DIV_YIELD = "DIV_YIELD"            # an index's dividend yield, for a listed option's Greeks
+DIV_YIELD_FIELDS = ("IDX_EST_DVD_YLD", "EQY_DVD_YLD_12M")   # per cent; the first Bloomberg answers
 # Asked for by today's pull only, never of Bloomberg's history: nothing prices a past date
 # off them. NDF_1M lands in `marks` like the MARK_KINDS do, but no P&L query reads it, so
 # it is kept out of MARK_KINDS -- which is what a past close needs and the backfill fills.
-LIVE_ONLY_KINDS = ("OIS_CURVE", "FIXINGS", "VOL_SMILE", NDF_1M)
+LIVE_ONLY_KINDS = ("OIS_CURVE", "FIXINGS", "VOL_SMILE", NDF_1M, DIV_YIELD)
 # Products whose rows stop being asked for once the ledger has realised the trade (the
 # pull's own rule for options and swaps; an FX leg or a future simply runs to its date).
 _REALISED_FILTER_PRODUCTS = ("FX_OPTION", "IRS")
@@ -76,6 +87,15 @@ WHERE t.product = 'FX_OPTION'
 ORDER BY i.base_ccy || i.quote_ccy, i.expiry_date, t.trade_id
 """
 
+_LISTED_OPTIONS_SQL = """
+SELECT t.trade_id, t.product, t.trade_date, i.instrument_id, i.base_ccy, i.quote_ccy, i.bbg_ticker, i.expiry_date,
+       COALESCE(o.option_type, ''), COALESCE(o.strike, 0)
+FROM trades_official t JOIN instruments i USING (instrument_id)
+LEFT JOIN instrument_options o USING (instrument_id)
+WHERE t.product = 'EQ_OPTION'
+ORDER BY i.instrument_id, t.trade_id
+"""
+
 _IRS_SQL = """
 SELECT t.trade_id, t.product, t.trade_date, i.base_ccy, COALESCE(MAX(l.settle_date), '9999-12-31')
 FROM trades_official t JOIN instruments i USING (instrument_id) LEFT JOIN trade_legs l USING (trade_id)
@@ -94,6 +114,19 @@ def _pair_row(conn: sqlite3.Connection, pair: str) -> tuple:
     is one, else the conventional name and '<pair> Curncy' (the row `sync` then creates)."""
     row = conn.execute("SELECT instrument_id, bbg_ticker FROM instruments WHERE instrument_id = ?", (pair,)).fetchone()
     return (row[0], row[1]) if row else (pair, f"{pair} Curncy")
+
+
+def listed_option_ticker(root: str, expiry_iso: str, option_type: str, strike: float) -> str:
+    """Bloomberg's ticker of a listed index option: 'SPX US 10/16/26 P7615 Index' (root,
+    exchange code, expiry mm/dd/yy, C or P with the strike). '' when a term is missing --
+    nothing is asked of Bloomberg under a guessed name."""
+    if not (root and strike and strike > 0 and option_type in ("CALL", "PUT")):
+        return ""
+    try:
+        expiry = datetime.strptime(expiry_iso, "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return f"{root} US {expiry:%m/%d/%y} {option_type[0]}{strike:g} Index"
 
 
 def compute(conn: sqlite3.Connection) -> List[dict]:
@@ -149,6 +182,15 @@ def compute(conn: sqlite3.Connection) -> List[dict]:
             add(trade_id, product, "OIS_CURVE", ccy, SENTINEL, "", trade_date, expiry)
         add(trade_id, product, "VOL_SMILE", pair, SENTINEL, "", trade_date, expiry)
         add_ndf_1m(trade_id, product, (base, quote), trade_date, expiry)
+    for (trade_id, product, trade_date, instrument_id, root, quote, underlying, expiry,
+         option_type, strike) in conn.execute(_LISTED_OPTIONS_SQL):
+        ticker = listed_option_ticker(root, expiry, option_type, strike)
+        if ticker:
+            add(trade_id, product, "FUTURE_PX", instrument_id, expiry, ticker, trade_date, expiry)
+        if underlying:       # instruments.bbg_ticker of a listed option names its underlying ('SPX Index')
+            add(trade_id, product, "SPOT", underlying, SENTINEL, underlying, trade_date, expiry, role=ROLE_UNDERLYING)
+            add(trade_id, product, DIV_YIELD, underlying, SENTINEL, underlying, trade_date, expiry)
+        add(trade_id, product, "OIS_CURVE", quote, SENTINEL, "", trade_date, expiry)
     for trade_id, product, trade_date, ccy, maturity in conn.execute(_IRS_SQL):
         add(trade_id, product, "OIS_CURVE", ccy, SENTINEL, "", trade_date, maturity)
         add(trade_id, product, "FIXINGS", ccy, SENTINEL, "", trade_date, maturity)
@@ -166,9 +208,10 @@ def sync(conn: sqlite3.Connection) -> dict:
     whose dates moved is updated, everything else is left as it was. Also creates the
     plain pair `instruments` row a conversion pair or an option's pair needs before a
     mark can be written for it. Returns {added, removed, total}."""
-    from data.bloomberg.live import _ensure_fx_instruments
+    from data.bloomberg.live import _ensure_fx_instruments, _ensure_index_instruments
     wanted = {(r["trade_id"], r["kind"], r["key"], r["settle_date"]): r for r in compute(conn)}
     _ensure_fx_instruments(conn, [r["key"] for r in wanted.values() if r["kind"] in ("SPOT", "FWD_OUTRIGHT", NDF_1M)])
+    _ensure_index_instruments(conn, [r["key"] for r in wanted.values() if r["role"] == ROLE_UNDERLYING])
     have = {(r[0], r[1], r[2], r[3]): r for r in conn.execute(
         "SELECT trade_id, kind, key, settle_date, bbg_ticker, role, product, needed_from, needed_until FROM bbg_library")}
     now = _now_iso()
@@ -225,7 +268,8 @@ def needed_on(conn: sqlite3.Connection, as_of: str, historical: bool = False) ->
         if not (r["needed_from"] <= as_of <= r["needed_until"]):
             continue
         if historical:
-            if r["kind"] not in MARK_KINDS or (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION"):
+            if r["kind"] not in MARK_KINDS or (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION") \
+                    or r["role"] == ROLE_UNDERLYING:
                 continue
         elif r["product"] in _REALISED_FILTER_PRODUCTS and r["trade_id"] in realised:
             continue
@@ -238,7 +282,8 @@ def needed_in_range(conn: sqlite3.Connection, start: str, end: str) -> List[dict
     day of [start, end]. What the backfill asks Bloomberg's history for."""
     return [r for r in rows(conn)
             if r["needed_from"] <= end and r["needed_until"] >= start and r["kind"] in MARK_KINDS
-            and not (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION")]
+            and not (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION")
+            and r["role"] != ROLE_UNDERLYING]
 
 
 def keys(conn: sqlite3.Connection, as_of: str, kind: str) -> List[str]:
@@ -265,12 +310,20 @@ def tickers(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     for r in needed_on(conn, as_of):
         kind, key = r["kind"], r["key"]
         if kind == "SPOT":
-            put(r["bbg_ticker"], "PX_LAST", f"{key} spot" + (" (USD conversion)" if r["role"] == ROLE_CONVERSION else ""), r)
+            if r["role"] == ROLE_UNDERLYING:
+                put(r["bbg_ticker"], "PX_LAST", f"{key} level, for the Greeks of the options on it", r)
+            else:
+                put(r["bbg_ticker"], "PX_LAST", f"{key} spot" + (" (USD conversion)" if r["role"] == ROLE_CONVERSION else ""), r)
         elif kind == "FWD_OUTRIGHT":
             if r["settle_date"] > as_of:     # a leg settling today is marked at spot: no curve request
                 put(r["bbg_ticker"], "FWD_CURVE", f"{key} forward curve", r)
         elif kind == "FUTURE_PX":
-            put(r["bbg_ticker"], "PX_LAST", f"{key} futures price", r)
+            if r["product"] == "EQ_OPTION":
+                put(r["bbg_ticker"], "PX_MID", f"{key} listed option price", r)
+            else:
+                put(r["bbg_ticker"], "PX_LAST", f"{key} futures price", r)
+        elif kind == DIV_YIELD:
+            put(r["bbg_ticker"], DIV_YIELD_FIELDS[0], f"{key} dividend yield, for the Greeks of the options on it", r)
         elif kind == NDF_1M:
             ccy = key[3:] if key.startswith("USD") else key[:3]
             put(r["bbg_ticker"], "PX_LAST", f"1M NDF price, the ladder's rate for {ccy}", r)

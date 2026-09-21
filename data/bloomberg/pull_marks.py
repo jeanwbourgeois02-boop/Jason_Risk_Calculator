@@ -1214,7 +1214,7 @@ def build_spot_rows(session, service, requests: Sequence[RequestRow], as_of: dat
 
 def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: date,
                        diag: Optional[Diagnostics] = None, live: bool = False,
-                       lookback_days: int = 7) -> Tuple[List[dict], List[str], List[dict]]:
+                       lookback_days: int = 7, mid_first=()) -> Tuple[List[dict], List[str], List[dict]]:
     """FUTURE_PX. Default (`live=False`, the historical/backfill CLI path): unchanged --
     HistoricalDataRequest PX_SETTLE for `as_of` alone.
 
@@ -1230,6 +1230,11 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
     -- but each row's `detail` records which one was actually used, and a failure's detail
     says whether PX_LAST, PX_SETTLE, or both came back empty.
 
+    `mid_first` (2026-09-21): the tickers of listed options, which go through this path
+    like a future. Live, such a ticker takes PX_MID when Bloomberg has one -- the last
+    trade of a single strike can be hours old -- and otherwise PX_LAST, then PX_SETTLE, as
+    a future does. With no such ticker the request is the futures' own, unchanged.
+
     See build_spot_rows for the (rows, warnings, failures) contract."""
     rows = [r for r in requests if r.mark_type == "FUTURE_PX"]
     if not rows:
@@ -1238,8 +1243,13 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
     snapped = snapped_at(as_of)
     out, warnings, failures = [], [], []
     if live:
-        live_data = fetch_reference(session, service, tickers, ["PX_LAST"], diag=diag,
-                                    tag={"purpose": "FUTURE_PX_LIVE"})
+        mid_first = set(mid_first or ())
+        live_data = fetch_reference(session, service, tickers, ["PX_LAST"] + (["PX_MID"] if mid_first else []),
+                                    diag=diag, tag={"purpose": "FUTURE_PX_LIVE"})
+        for ticker in mid_first:       # a listed option: Bloomberg's mid stands in for the last trade
+            got = live_data.get(ticker) or {}
+            if got.get("PX_MID") is not None:
+                live_data[ticker] = {**got, "PX_LAST": got["PX_MID"], "_field": "PX_MID"}
         missing = sorted({r.bbg_ticker for r in rows if live_data.get(r.bbg_ticker, {}).get("PX_LAST") is None})
         settle_data: Dict[str, Optional[float]] = {}
         if missing:
@@ -1251,7 +1261,8 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
             if live_val is not None:
                 out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
                            "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": float(live_val),
-                           "source": SRC_FUTURE, "snapped_at": snapped, "detail": "live PX_LAST"})
+                           "source": SRC_FUTURE, "snapped_at": snapped,
+                           "detail": f"live {live_data[r.bbg_ticker].get('_field', 'PX_LAST')}"})
                 continue
             settle_val = settle_data.get(r.bbg_ticker)
             if settle_val is not None:

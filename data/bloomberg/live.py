@@ -406,6 +406,28 @@ def _ensure_fx_instruments(conn: sqlite3.Connection, pairs) -> List[str]:
     return created
 
 
+def _ensure_index_instruments(conn: sqlite3.Connection, tickers) -> List[str]:
+    """Insert the `instruments` row of each listed option's underlying index that has none
+    yet ('SPX Index': asset_class INDEX, its own Bloomberg ticker, perpetual), for the same
+    reason `_ensure_fx_instruments` exists: `write_marks` only persists a mark for a known
+    instrument. Returns the rows created. A read-only connection is left alone."""
+    created: List[str] = []
+    for ticker in sorted({t for t in tickers if isinstance(t, str) and t}):
+        if conn.execute("SELECT 1 FROM instruments WHERE instrument_id = ?", (ticker,)).fetchone():
+            continue
+        try:
+            with conn:
+                conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, "
+                             "multiplier, is_ndf, bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
+                             (ticker, "INDEX", ticker.split()[0], "USD", 1.0, 0, ticker, "9999-12-31"))
+        except sqlite3.OperationalError as exc:
+            if "readonly" in str(exc).lower() or "read-only" in str(exc).lower():
+                break
+            raise
+        created.append(ticker)
+    return created
+
+
 def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     """RequestRows per BUILD_PLAN.md section 2: one SPOT per open FX pair, one
     FWD_OUTRIGHT per (pair, open leg's own settle_date) -- no shared workbook maturity --
@@ -427,6 +449,7 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     from data.bloomberg.pull_marks import RequestRow
     needed = library.needed_on(conn, as_of_date)
     _ensure_fx_instruments(conn, [r["key"] for r in needed if r["kind"] in ("SPOT", "FWD_OUTRIGHT", library.NDF_1M)])
+    _ensure_index_instruments(conn, [r["key"] for r in needed if r["role"] == library.ROLE_UNDERLYING])
     out, seen = [], set()
 
     def _add(r: dict) -> None:
@@ -850,19 +873,50 @@ def _enrich_no_vol_reason(conn: sqlite3.Connection, trade_id: str, reason: str, 
             "py -3 -m data.bloomberg.vol_marketdata --probe on the Bloomberg PC to check these tickers.")
 
 
+def _dividend_step(conn: sqlite3.Connection, session, service, today: date, diag=None) -> dict:
+    """The dividend yield of every index a listed option on file is written on (the
+    Bloomberg library's DIV_YIELD rows), into `equity_dividend_yields` under BBG_BDP: an
+    input of that option's Greeks only, never of its P&L. Bloomberg quotes it in per cent;
+    the first of `library.DIV_YIELD_FIELDS` it answers is taken. Never raises."""
+    from data.bloomberg import library
+    out: dict = {"written": 0, "missing": []}
+    try:
+        tickers = library.keys(conn, today.isoformat(), library.DIV_YIELD)
+        if not tickers:
+            return out
+        from data.bloomberg.pull_marks import fetch_reference
+        from engine.options.equity_commodity import set_dividend_yield
+        data = fetch_reference(session, service, tickers, list(library.DIV_YIELD_FIELDS), diag=diag,
+                               tag={"purpose": "DIV_YIELD"})
+        for ticker in tickers:
+            got = data.get(ticker, {})
+            value = next((got[f] for f in library.DIV_YIELD_FIELDS if got.get(f) is not None), None)
+            try:
+                set_dividend_yield(conn, today.isoformat(), ticker, float(value) / 100.0, source="BBG_BDP")
+                out["written"] += 1
+            except (TypeError, ValueError):
+                out["missing"].append(f"{ticker}: Bloomberg returned no {' or '.join(library.DIV_YIELD_FIELDS)}")
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{exc!r}"
+    return out
+
+
 def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Optional[List[dict]] = None) -> dict:
-    """Price every FX option through engine/options (PREMIUM + Greeks). Never raises.
+    """Price every FX option through engine/options (PREMIUM + Greeks), and work out the
+    Greeks of every listed index option from Bloomberg's price of it. Never raises.
     `vol_diagnostics` (see _vol_step) is used only to enrich a "no vol" skip reason with
     the specific failing Bloomberg ticker(s) for that trade's pair (item 3c, 2026-09-17)."""
     out: dict = {"priced": 0, "skipped": [], "as_of_date": today.isoformat()}
-    n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product = 'FX_OPTION' AND trade_date <= ?",
-                     (today.isoformat(),)).fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product IN ('FX_OPTION','EQ_OPTION') "
+                     "AND trade_date <= ?", (today.isoformat(),)).fetchone()[0]
     if not n:
         out["skipped"] = "no FX_OPTION trades to price"
         return out
     try:
         from engine.options.store import price_all_and_store
-        outcomes = price_all_and_store(conn, today.isoformat())
+        from engine.options.equity_commodity import price_all_and_store_equity
+        outcomes = list(price_all_and_store(conn, today.isoformat()))
+        outcomes += price_all_and_store_equity(conn, today.isoformat())
         out["priced"] = sum(1 for o in outcomes if getattr(o, "priced", False))
         skipped = []
         for o in outcomes:
@@ -979,9 +1033,14 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # found MISSING every cycle before the close). Historical backfill
             # (data.bloomberg.backfill.py) always requests a past, already-closed date and
             # keeps calling this with the default live=False.
-            fut_rows, fut_warnings, fut_fail = _timed(timings, "futures", pm.build_future_rows, session, service,
-                                                      fut_reqs, today, diag, live=True) \
+            # A listed option (EQ_OPTION, 2026-09-21) is asked for like a future, but its
+            # live price is Bloomberg's mid: the last trade of one strike can be hours old.
+            listed = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments WHERE asset_class = 'EQ_OPTION'")}
+            fut_rows, fut_warnings, fut_fail = _timed(
+                timings, "futures", pm.build_future_rows, session, service, fut_reqs, today, diag, live=True,
+                mid_first={r.bbg_ticker for r in fut_reqs if r.instrument_id in listed}) \
                 if fut_reqs else ([], [], [])
+            status["dividends"] = _timed(timings, "futures", _dividend_step, conn, session, service, today, diag)
             # A cross's USD-conversion pair or an option's own pair with no instrument row
             # on file used to be requested but never written (write_marks skips unknown
             # instruments); build_requests now creates that row first

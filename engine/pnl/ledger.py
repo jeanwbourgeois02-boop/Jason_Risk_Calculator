@@ -62,7 +62,7 @@ WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND l.leg_no = 1 AND l.settle_
 _OPEN_FUTURE_SQL = """
 SELECT t.trade_id, t.instrument_id, t.product, i.multiplier, t.quantity, t.price, l.settle_date
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
-WHERE t.product = 'FUTURE' AND l.leg_no = 1 AND l.settle_date < :as_of
+WHERE t.product IN ('FUTURE', 'EQ_OPTION') AND l.leg_no = 1 AND l.settle_date < :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
 """
 
