@@ -19,7 +19,9 @@ def _load(conn, past_brl_spot=None):
         "expiry_date) VALUES (?,?,?,?,?,?,?,?)",
         [("USDBRL", "FX", "USD", "BRL", 1, 1, "USDBRL Curncy", "9999-12-31"),
          ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31")])
-    # b1: bought 1m USD against BRL @ 5.20, j1: bought 1m USD against JPY @ 150; both settled 09-16
+    # b1: bought 1m USD against BRL @ 5.20, j1: bought 1m USD against JPY @ 150; both settled Wed
+    # 09-16 -- b1 is an NDF, so its freeze reads the spot on or before its FIXING, Mon 09-14
+    # (user, 2026-09-22: an NDF is done at its fixing), j1's the spot on or before 09-16
     for trade_id, pair, fill in (("b1", "USDBRL", 5.20), ("j1", "USDJPY", 150.0)):
         conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (trade_id, "XLSX", pair, "FX_FWD", trade_id, "2026-08-14", 1e6, fill, "acc", "cp", "", "t", "d", ""))
@@ -29,7 +31,8 @@ def _load(conn, past_brl_spot=None):
     marks = [("2026-09-18", "USDBRL", "2026-09-18", "SPOT", 5.30), (AS_OF, "USDBRL", AS_OF, "SPOT", 5.40),
              ("2026-09-18", "USDJPY", "2026-09-18", "SPOT", 152.0), (AS_OF, "USDJPY", AS_OF, "SPOT", 153.0)]
     if past_brl_spot is not None:
-        marks.append(("2026-09-15", "USDBRL", "2026-09-15", "SPOT", past_brl_spot))
+        marks.append(("2026-09-14", "USDBRL", "2026-09-14", "SPOT", past_brl_spot))
+        marks.append(("2026-09-15", "USDBRL", "2026-09-15", "SPOT", 9.99))   # after the fixing: never the freeze
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
                      [m + ("BBG_BFXFORWARD", f"{m[0]}T15:00:00-04:00") for m in marks])
     conn.commit()
@@ -63,10 +66,12 @@ def test_the_true_close_replaces_the_present_spot_once_it_lands():
     conn = _load(schema.connect())
     ledger.realise_settled(conn, AS_OF, ndf_present_spot=True)
     assert PRESENT_SPOT_NOTE in _frozen(conn)["b1"][3]
-    conn.execute("INSERT INTO marks VALUES ('2026-09-16','USDBRL','2026-09-16','SPOT',5.25,'BBG_BFXFORWARD','2026-09-16T17:00:00-04:00')")
+    conn.execute("INSERT INTO marks VALUES ('2026-09-16','USDBRL','2026-09-16','SPOT',9.99,'BBG_BFXFORWARD','2026-09-16T17:00:00-04:00')")
+    assert ledger.realise_settled(conn, "2026-09-22")["realised"] == 0   # a spot after the fixing is not the fix
+    conn.execute("INSERT INTO marks VALUES ('2026-09-14','USDBRL','2026-09-14','SPOT',5.25,'BBG_BFXFORWARD','2026-09-14T17:00:00-04:00')")
     assert ledger.realise_settled(conn, "2026-09-22")["realised"] == 1   # any later call, the live pull's included
     b1 = _frozen(conn)["b1"]
-    assert b1[1] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25) and b1[2] == "2026-09-16" and b1[3] == ""
+    assert b1[1] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25) and b1[2] == "2026-09-14" and b1[3] == "spot dated 2026-09-14 (NDF fixing)"
     assert ledger.realise_settled(conn, "2026-09-22", ndf_present_spot=True)["realised"] == 0   # and it stays there
 
 
@@ -74,7 +79,7 @@ def test_a_spot_on_or_before_settlement_always_wins():
     conn = _load(schema.connect(), past_brl_spot=5.25)
     ledger.realise_settled(conn, AS_OF, ndf_present_spot=True)
     b1 = _frozen(conn)["b1"]
-    assert b1[1] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25) and b1[2] == "2026-09-15"
+    assert b1[1] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25) and b1[2] == "2026-09-14"
     assert PRESENT_SPOT_NOTE not in b1[3]
 
 

@@ -27,14 +27,10 @@ gets no entry here at all (NaN downstream, exactly like a missing rate).
 
 NDF currencies (user decision 2026-09-21, "always show 1m forward date price, not
 spot"): a `rates` entry that `engine.ladder.ndf.apply_ndf_1m_rates` priced at the 1M
-NDF mark (`mark_type` = 'NDF_1M') is used as it stands for every OPEN date, under a basis
-of its own, 'NDF 1M'. No spot date, no forward pillars and no interpolation apply to it.
-An NDF currency whose 1M price is missing has no `rates` entry, so it gets no entry here
-either: blank, never spot. Settled cash is the exception (user decision 2026-09-21: "the
-NDF ticket that fixes out should be handled like settled cash ... priced using spot
-rate"): the settled-cash sentinel, and any date on or before the entry's as_of_date (a
-fixed ticket shown on its own fixing date), is valued at the currency's official spot,
-which the entry carries as `spot_rate`; with no spot on file that cell has no entry.
+NDF mark (`mark_type` = 'NDF_1M') is used as it stands for EVERY date, settled cash
+included, under a basis of its own, 'NDF 1M'. No spot date, no forward pillars and no
+interpolation apply to it. An NDF currency whose 1M price is missing has no `rates`
+entry, so it gets no entry here either: blank, never spot.
 """
 from __future__ import annotations
 
@@ -116,18 +112,9 @@ def forward_usd_rates(conn: sqlite3.Connection, rates: Mapping[str, Mapping],
         inverted = bool(entry.get("inverted"))
         pair = str(entry.get("pair") or ("USD" + ccy if inverted else ccy + "USD"))
         if entry.get("mark_type") == "NDF_1M":
-            # Module docstring: the 1M NDF price for every open date, never a pillar;
-            # settled cash (a fixed ticket) at the currency's spot.
+            # Module docstring: the 1M NDF price for every date, never a spot or a pillar.
             rate = 1.0 / spot_value if inverted else spot_value
-            ndf_as_of = str(entry.get("as_of_date") or "")
             for day in days:
-                iso = _iso_or_none(day)
-                if iso is None or (ndf_as_of and iso <= ndf_as_of):
-                    settled_spot = entry.get("spot_rate")
-                    if settled_spot:
-                        out[(ccy, day)] = {"rate": 1.0 / settled_spot if inverted else settled_spot,
-                                           "quoted": settled_spot, "basis": BASIS_SPOT, "pair": pair}
-                    continue
                 out[(ccy, day)] = {"rate": rate, "quoted": spot_value, "basis": BASIS_NDF_1M,
                                    "pair": pair, "ticker": str(entry.get("ticker") or "")}
             continue

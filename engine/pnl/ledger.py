@@ -151,7 +151,7 @@ def purge_superseded_present_spot(conn: sqlite3.Connection) -> list:
             "SELECT trade_id, instrument_id, settle_date FROM realised_pnl WHERE mark_type = 'SPOT' AND note LIKE ?",
             (f"%{PRESENT_SPOT_NOTE}%",)).fetchall():
         try:
-            if _last_on_or_before(conn, pair, "SPOT", settle) is not None:
+            if _last_on_or_before(conn, pair, "SPOT", _freeze_day(conn, pair, settle)) is not None:
                 ids.append(trade_id)
         except (TypeError, ValueError):   # a past SPOT that is not a number replaces nothing
             continue
@@ -196,7 +196,10 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
     for trade_id, pair, product, quote_ccy, qty, fill, settle in conn.execute(_OPEN_FX_SQL, {"as_of": as_of}).fetchall():
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
-            m_hit = _last_on_or_before(conn, pair, "SPOT", settle)
+            # An NDF is done at its fixing (user, 2026-09-22: "they just disappears as they
+            # expired"): frozen at the last official SPOT on or before the FIXING date, the same
+            # figure value_book shows from the fixing on, not the value date's spot two days later.
+            m_hit = _last_on_or_before(conn, pair, "SPOT", _freeze_day(conn, pair, settle))
             present = m_hit is None and ndf_present_spot
             if present:
                 m_hit = present_spot_for_ndf(conn, pair, as_of)
@@ -211,7 +214,9 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
             entry = qty * fill * s
             combined = m * s
             pnl = qty * combined - entry
-            note = "" if m_day == settle else f"spot dated {m_day} ({PRESENT_SPOT_NOTE if present else 'last before settlement'})"
+            fix_day = _freeze_day(conn, pair, settle)
+            note = ("" if m_day == settle else
+                    f"spot dated {m_day} ({PRESENT_SPOT_NOTE if present else ('NDF fixing' if m_day == fix_day else 'last before ' + ('fixing' if fix_day != settle else 'settlement'))})")
             _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, entry, "SPOT", combined, m_day, m_src, pnl, note)
             realised += 1
         except (TypeError, ValueError, ArithmeticError) as exc:
@@ -322,6 +327,16 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
 
     conn.commit()
     return {"realised": realised, "unrealisable": unrealisable, "repaired": repaired}
+
+
+def _freeze_day(conn: sqlite3.Connection, pair: str, settle: str) -> str:
+    """The day an FX ticket's freeze reads its spot on or before: the fixing date (value
+    date less 2 business days) for an NDF pair, the value date for a deliverable one."""
+    from engine.ladder.ndf import fixing_date, is_ndf_pair
+    row = conn.execute("SELECT is_ndf FROM instruments WHERE instrument_id = ?", (pair,)).fetchone()
+    if is_ndf_pair(pair, int((row[0] if row else 0) or 0)):
+        return fixing_date(settle)
+    return settle
 
 
 def _last_on_or_before(conn: sqlite3.Connection, instrument_id: str, mark_type: str, day: str) -> Optional[tuple]:

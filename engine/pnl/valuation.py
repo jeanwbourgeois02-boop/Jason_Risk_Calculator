@@ -534,46 +534,56 @@ def _guarded_row(conn, r, as_of, open_builder, settled_builder, numbers, holiday
         return {**base, **_unpriced(f"trade {r.trade_id}: could not be valued ({type(exc).__name__}: {exc})")}
 
 
-def _ndf_at_spot(r, as_of: str, has_forward: bool) -> str:
-    """Why this open FX ticket is marked at the pair's SPOT of `as_of` instead of its value
-    date's forward, or '' when it is marked at the forward as always (user decision
-    2026-09-21: "the NDF ticket that fixes out should be handled like settled cash, where
-    the Local amnt stays in 'settled' and be priced using spot rate"). NDF tickets only
-    (`engine.ladder.ndf.is_ndf_pair`), in two cases:
-      - it has fixed: fixing date (value date less 2 business days, `ndf.fixing_date`, the
-        Ladder's own rule) on or before `as_of`. From then until the value date it is
-        revalued at each day's spot, and the ledger freezes it after the value date as it
-        always has, at the last official SPOT on or before settlement;
-    Until 2026-09-22 an NDF that had not fixed, or a metal ticket, with no official forward
-    on `as_of` was marked at the day's spot; that case is now the near-marks rule's
-    (`_mark_near`: the forward is interpolated along the day's curve, spot the first pillar,
-    so with spot alone on file it is still spot), for every pair alike."""
+def ndf_fixing(r) -> str:
+    """The fixing date of an NDF ticket (value date less 2 business days, `ndf.fixing_date`,
+    the Ladder's own rule), or '' for any other ticket (`engine.ladder.ndf.is_ndf_pair`)."""
     from engine.ladder.ndf import fixing_date, is_ndf_pair
     if not is_ndf_pair(str(r.instrument_id or ""), int(getattr(r, "is_ndf", 0) or 0)):
         return ""
-    fixed_on = fixing_date(r.settle_date)
-    if fixed_on <= as_of:
-        return f"NDF fixed {fixed_on}: marked at the spot of {as_of}, like settled cash"
-    return ""
+    return fixing_date(r.settle_date)
+
+
+def _ndf_fixed_on(r, as_of: str) -> str:
+    """The fixing date when this open FX ticket is an NDF that has fixed on or before
+    `as_of`, else ''. From its fixing an NDF is done (user, 2026-09-22: "NDFs - once they
+    expire, they should disappear ... 0 delta and 0 carry, they just disappears as they
+    expired", reversing the 2026-09-21 "like settled cash" rule): its P&L is `Q x (S_fix - f)`
+    at the pair's official SPOT of the fixing date, converted at that date's spot, and does
+    not move again; the ledger freezes it at the same spot after the value date
+    (`engine.pnl.ledger`). Before the fixing it is marked at its value date's forward like
+    any leg (with none on file, the near-marks rule: along the day's curve, spot alone being
+    spot -- which is what the 2026-09-21/22 NDF and metal "no forward" cases now are)."""
+    fixed_on = ndf_fixing(r)
+    return fixed_on if fixed_on and fixed_on <= as_of else ""
 
 
 def _open_fx_row(conn, r, as_of) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="", note="")
-    m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
-    at_spot = _ndf_at_spot(r, as_of, m_hit is not None)
-    if at_spot:
-        m_hit = _mark_near(conn, r.instrument_id, as_of, "SPOT", as_of)
-        out["mark_date"] = as_of
+    fixed_on = _ndf_fixed_on(r, as_of)
+    if fixed_on:
+        # Fixed: the spot of the fixing date, and the conversion of that date, frozen.
+        m_hit = _mark_near(conn, r.instrument_id, fixed_on, "SPOT", fixed_on)
+        out["mark_date"] = fixed_on
         if m_hit is None:
-            out["reason"] = f"no SPOT mark for {r.instrument_id} on {as_of} ({at_spot})"
+            out["reason"] = f"no SPOT mark for {r.instrument_id} on {fixed_on} (NDF fixed that day)"
             return out
-        m, m_src = _mark_number(m_hit, r.instrument_id, as_of, "SPOT", as_of), m_hit[1]
-    elif m_hit is None:
+        m, m_src = _mark_number(m_hit, r.instrument_id, fixed_on, "SPOT", fixed_on), m_hit[1]
+        s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, fixed_on)
+        if s != s or s_pair is None:
+            out["mark"], out["mark_source"] = m, m_src
+            out["reason"] = f"no SPOT for USD conversion of {r.quote_ccy} on {fixed_on} (NDF fixed that day)"
+            return out
+        pnl_usd = r.quantity * (m - r.fill) * s
+        out.update(mark=m, mark_source=m_src, spot=s, spot_source=s_src, pnl_local=r.quantity * (m - r.fill),
+                   pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd, pnl_carry_usd=0.0,
+                   note=f"NDF fixed {fixed_on}: frozen at the spot of {fixed_on}, no delta, no carry")
+        return out
+    m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
+    if m_hit is None:
         out["reason"] = f"no FWD_OUTRIGHT mark for {r.instrument_id} settle {r.settle_date} on {as_of}"
         return out
-    else:
-        m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of), m_hit[1]
+    m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
     s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, as_of)
     if s != s or s_pair is None:
@@ -584,9 +594,6 @@ def _open_fx_row(conn, r, as_of) -> dict:
     pnl_local = r.quantity * (m - r.fill)
     pnl_usd = pnl_local * s
     out["pnl_local"], out["pnl_usd"] = pnl_local, pnl_usd
-    if at_spot:  # the mark IS the spot: all of it is spot P&L, no carry
-        out["pnl_spot_usd"], out["pnl_carry_usd"], out["note"] = pnl_usd, 0.0, at_spot
-        return out
     spot_hit = _mark_near(conn, r.instrument_id, as_of, "SPOT", as_of)
     if spot_hit is None:
         out["pnl_spot_usd"], out["pnl_carry_usd"] = pnl_usd, 0.0

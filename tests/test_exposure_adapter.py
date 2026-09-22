@@ -75,11 +75,12 @@ def _leg(conn, trade_id, leg_no, leg_type, ccy, amount, settle, rate, settles_ca
                  (trade_id, leg_no, leg_type, ccy, amount, "2026-08-20", settle, rate, settles_cash))
 
 
-def test_settled_ndf_ticket_settles_in_usd_from_realised_pnl_or_is_named():
-    """An NDF never delivers KRW: after its value date the only cash is the USD
-    settlement the ledger froze as realised P&L. Without a realised row the ticket is
-    named in `unresolved`, never valued; with one, the USD amount joins the settled
-    records and nothing KRW-denominated does."""
+def test_settled_ndf_ticket_is_gone_from_the_ladder_realised_or_not():
+    """An NDF never delivers KRW, and once fixed it is gone from the ladder altogether
+    (user, 2026-09-22: "NDFs - once they expire, they should disappear, not become setteld
+    cash ... 0 delta and 0 carry"): nothing on the grid, nothing in Settled cash -- not its
+    legs, not its USD settlement -- and nothing named under the grid, with or without a
+    realised_pnl row. Its P&L lives in the Blotter, frozen at the fixing."""
     from engine.ladder.exposure_adapter import SETTLED, records_from_db, exposure_records_from_db
     conn = _fresh()
     conn.execute("INSERT INTO instruments VALUES ('USDKRW','FX','USD','KRW',1,1,'USDKRW Curncy','9999-12-31')")
@@ -88,10 +89,9 @@ def test_settled_ndf_ticket_settles_in_usd_from_realised_pnl_or_is_named():
     _leg(conn, "n1", 2, "FX_NEAR", "KRW", 1_413_138_000.0, "2026-09-16", 1413.138, 0)
     conn.commit()
 
-    records, unresolved = records_from_db(conn, "2026-09-18")
-    assert records == []
-    assert [u.trade_id for u in unresolved] == ["n1"]
-    assert unresolved[0].reason.startswith("settled 2026-09-16 (FX_FWD), USD settlement unknown")
+    for day in ("2026-09-15", "2026-09-18"):   # from the fixing (Mon 09-14) on, and after the value date
+        for fn in (records_from_db, exposure_records_from_db):
+            assert fn(conn, day) == ([], [])
 
     conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount,"
                  " usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd,"
@@ -99,13 +99,11 @@ def test_settled_ndf_ticket_settles_in_usd_from_realised_pnl_or_is_named():
                  " 0.000714286,'2026-09-16','BBG_BFXFORWARD',9384.0,'2026-09-17T00:00:00+00:00','')")
     conn.commit()
     for fn in (records_from_db, exposure_records_from_db):
-        records, unresolved = fn(conn, "2026-09-18")
-        assert unresolved == []
-        assert len(records) == 1
-        r = records[0]
-        assert (r["currency"], r["local_amount"], r["settlement_date"], r["settled_on"]) == \
-            ("USD", 9384.0, SETTLED, "2026-09-16")
-        assert r["product_type"] == "FX_FWD" and r["is_ndf"] == 1
+        assert fn(conn, "2026-09-18") == ([], [])
+    # before the fixing it is on the grid under its fixing date, as ever
+    grid, named = records_from_db(conn, "2026-09-11")
+    assert named == [] and {(r["currency"], r["settlement_date"]) for r in grid} == {("USD", "2026-09-14"), ("KRW", "2026-09-14")}
+    assert SETTLED not in {r["settlement_date"] for r in grid}
 
 
 def test_settled_deliverable_ticket_is_its_legs_not_its_realised_pnl():

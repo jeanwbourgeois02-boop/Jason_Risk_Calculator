@@ -289,20 +289,31 @@ def _vb_brl(conn):
     return conn
 
 
-def test_value_book_ndf_that_has_fixed_is_marked_at_the_days_spot_like_settled_cash():
-    """User decision 2026-09-21: "the NDF ticket that fixes out should be handled like
-    settled cash ... priced using spot rate". Value date Wed 2026-06-03 -> fixing Mon
-    2026-06-01 = as_of: from the fixing on the mark is the day's SPOT, never the forward."""
+def test_value_book_ndf_that_has_fixed_is_frozen_at_the_fixing_dates_spot():
+    """User, 2026-09-22: "NDFs - once they expire, they should disappear ... 0 delta and 0
+    carry" (reversing 2026-09-21's "like settled cash"). Value date Wed 2026-06-03 -> fixing
+    Mon 2026-06-01: from the fixing on the P&L is Q x (S_fix - f) at the fixing date's SPOT,
+    converted at that date, and does not move with later spots; the ledger then freezes the
+    same figure after the value date, at the fixing date's spot, not the value date's."""
+    from engine.pnl import ledger
     conn = _vb_brl(_vb_conn())
     _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-03")
     _vb_mark(conn, "USDBRL", "2026-06-03", "FWD_OUTRIGHT", 5.30)  # on file, but no longer the mark
     _vb_mark(conn, "USDBRL", VB_AS_OF, "SPOT", 5.10)
-    row = value_book(conn, VB_AS_OF).iloc[0]
-    assert (row["status"], row["mark"], row["mark_date"]) == ("OPEN", 5.10, VB_AS_OF)
-    assert row["pnl_local"] == pytest.approx(100_000)
-    assert row["pnl_usd"] == pytest.approx(100_000 / 5.10)
-    assert row["pnl_spot_usd"] == pytest.approx(row["pnl_usd"]) and row["pnl_carry_usd"] == 0.0
-    assert row["reason"] == "" and row["note"].startswith("NDF fixed 2026-06-01: marked at the spot of 2026-06-01")
+    for day, spot in (("2026-06-02", 5.00), ("2026-06-03", 4.90), ("2026-06-04", 4.80)):
+        _vb_mark(conn, "USDBRL", day, "SPOT", spot, as_of=day)
+    expected = 100_000 / 5.10
+    for day in (VB_AS_OF, "2026-06-02", "2026-06-03"):          # fixing day, then open until the value date
+        row = value_book(conn, day).iloc[0]
+        assert (row["status"], row["mark"], row["mark_date"]) == ("OPEN", 5.10, VB_AS_OF)
+        assert row["pnl_usd"] == pytest.approx(expected) and row["spot"] == pytest.approx(1 / 5.10)
+        assert row["pnl_spot_usd"] == pytest.approx(expected) and row["pnl_carry_usd"] == 0.0
+        assert row["reason"] == "" and row["note"] == "NDF fixed 2026-06-01: frozen at the spot of 2026-06-01, no delta, no carry"
+    assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
+    frozen = conn.execute("SELECT pnl_usd, spot_as_of_date, note FROM realised_pnl WHERE trade_id='N1'").fetchone()
+    assert frozen[0] == pytest.approx(expected) and frozen[1] == VB_AS_OF and frozen[2] == "spot dated 2026-06-01 (NDF fixing)"
+    row = value_book(conn, "2026-06-04").iloc[0]
+    assert row["status"] == "SETTLED" and row["pnl_usd"] == pytest.approx(expected)
 
 
 def test_value_book_any_pair_with_no_forward_takes_the_days_curve_spot_alone_being_spot():
@@ -429,7 +440,7 @@ def test_value_book_fixed_ndf_with_no_spot_is_blank_and_says_why():
     _vb_mark(conn, "USDBRL", "2026-06-03", "FWD_OUTRIGHT", 5.30)
     row = value_book(conn, VB_AS_OF).iloc[0]
     assert math.isnan(row["pnl_usd"])
-    assert row["reason"].startswith("no SPOT mark for USDBRL on 2026-06-01 (NDF fixed 2026-06-01")
+    assert row["reason"] == "no SPOT mark for USDBRL on 2026-06-01 (NDF fixed that day)"
 
 
 def test_value_book_future():

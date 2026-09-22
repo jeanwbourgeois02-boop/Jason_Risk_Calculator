@@ -19,11 +19,6 @@ Two things set a non-deliverable forward apart on the ladder:
    the same rule the spot entries follow). No such mark on file -> the currency has NO
    entry at all, so every consumer's missing-rate path shows a blank with the reason
    (CLAUDE.md hard rule 2: missing stays missing); spot is never used in its place.
-   One exception (user decision 2026-09-21: "the NDF ticket that fixes out should be
-   handled like settled cash ... priced using spot rate"): the amount of a FIXED NDF
-   ticket in the Settled cash row is valued at spot, so the 1M entry also carries the
-   currency's official spot as `spot_rate` (absent when there is none on file) for
-   engine/ladder/usd_marks.py to read. Every open date is still at the 1M price.
 
 "Is this an NDF ticket" is decided from the pair's currencies against
 `data.ingest.common.NDF_CCYS`, not only from the stored `instruments.is_ndf` flag: INR
@@ -138,15 +133,6 @@ def apply_ndf_1m_rates(conn: sqlite3.Connection, rates: Mapping[str, Mapping],
         out[ccy] = {"rate": value, "inverted": pair.startswith("USD"), "source": source,
                     "timestamp": snapped, "stale": stale, "as_of_date": as_of, "pair": pair,
                     "mark_type": MARK_TYPE_NDF_1M, "ticker": ticker, "label": ticker_label(ticker)}
-        spot = rates.get(ccy) or {}
-        # Settled cash of a fixed NDF is at spot (module docstring): the spot entry this 1M
-        # entry replaces, kept only when it is quoted the same way round.
-        if spot.get("mark_type") != MARK_TYPE_NDF_1M and bool(spot.get("inverted")) == pair.startswith("USD"):
-            try:
-                if float(spot["rate"]) > 0:
-                    out[ccy]["spot_rate"] = float(spot["rate"])
-            except (KeyError, TypeError, ValueError):
-                pass
     return out
 
 
