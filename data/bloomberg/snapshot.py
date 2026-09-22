@@ -9,9 +9,13 @@ other PC. Run from `2_launcher.py marks-export` / `marks-import`, never by the a
 
 What travels: `marks` whole, every source, exactly as Bloomberg and the app's own pricers
 wrote it on the Bloomberg PC (values, sources and `snapped_at` untouched, so
-`marks_official` decides the official row here the way it does there), plus `curves`,
-`curve_quotes` and `index_fixings`, and the `instruments` rows those marks hang off, only
-so a mark's foreign key holds before the blotter is uploaded here. No trade travels
+`marks_official` decides the official row here the way it does there), plus every other
+table a pull writes (MARKET_TABLES: the OIS curves and their quotes, the fixings, the FX
+and rates vol quotes, the dividend yields), the `instruments` rows those marks hang off,
+only so a mark's foreign key holds before the blotter is uploaded here, each table's DDL
+(so a table this database has never created still lands), and the pull's own log, the
+status JSON the live feed writes next to the database (`live.status_path`), copied as
+pull_status.json for reading, never installed as this PC's status. No trade travels
 (CLAUDE.md hard rule 1): the book on each PC is still the blotter uploaded on it.
 
 An import makes the market data here what the Bloomberg PC had at the export: rows of any
@@ -35,10 +39,15 @@ from typing import Dict, List, Optional, Union
 SNAPSHOT_DIR = Path(__file__).resolve().parents[2] / "data" / "bbg_snapshot"
 MANIFEST = "snapshot.json"
 
-# Import order: instruments first (marks.instrument_id references it).
+# Import order: instruments first (marks.instrument_id references it). Every table a
+# Bloomberg pull writes (data/bloomberg/live.py and the modules it calls), each with a
+# `source` column so the MANUAL rule below applies to all of them alike; a table the
+# source database has not created yet is simply not in the snapshot.
 INSTRUMENTS = "instruments"
-MARKET_TABLES = ("marks", "curves", "curve_quotes", "index_fixings")
+MARKET_TABLES = ("marks", "curves", "curve_quotes", "index_fixings",
+                 "vol_quotes", "rate_vol_quotes", "equity_dividend_yields")
 KEPT_SOURCE = "MANUAL"
+PULL_STATUS = "pull_status.json"
 
 
 class SnapshotError(Exception):
@@ -77,10 +86,36 @@ def _write_table(conn: sqlite3.Connection, table: str, path: Path, where: str = 
     return n, changed
 
 
+def _ddl(conn: sqlite3.Connection, table: str) -> str:
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+    return str(row[0]) if row and row[0] else ""
+
+
+def _copy_pull_status(db_path: Path, out_dir: Path) -> tuple:
+    """(summary of the last pull for the manifest, whether pull_status.json changed)."""
+    try:
+        from data.bloomberg.live import status_path
+        src = status_path(db_path)
+    except ImportError:
+        return None, False
+    dst = out_dir / PULL_STATUS
+    if not src.exists():
+        return None, False
+    data = src.read_bytes()
+    changed = not dst.exists() or dst.read_bytes() != data
+    dst.write_bytes(data)
+    try:
+        status = json.loads(data.decode("utf-8"))
+        return {k: status.get(k) for k in ("time", "connected", "requested", "written", "failed")}, changed
+    except (ValueError, AttributeError):
+        return None, changed
+
+
 def export_snapshot(db_path: Union[str, Path], out_dir: Union[str, Path] = SNAPSHOT_DIR) -> dict:
     """Write the snapshot of `db_path` to `out_dir`. Returns the manifest (also written as
-    snapshot.json): exported_at, the first and last as_of_date in marks, and rows per table.
-    Raises SnapshotError, touching nothing, when there is no database or no mark in it."""
+    snapshot.json): exported_at, the first and last as_of_date in marks, rows per table,
+    each table's DDL, and the last pull's summary line. Raises SnapshotError, touching
+    nothing, when there is no database or no mark in it."""
     db_path, out_dir = Path(db_path), Path(out_dir)
     if not db_path.exists():
         raise SnapshotError(f"no database at {db_path}")
@@ -92,6 +127,7 @@ def export_snapshot(db_path: Union[str, Path], out_dir: Union[str, Path] = SNAPS
             raise SnapshotError("no marks on file: nothing to export (press Pull Bloomberg now first)")
         out_dir.mkdir(parents=True, exist_ok=True)
         rows: Dict[str, int] = {}
+        ddl: Dict[str, str] = {}
         rows[INSTRUMENTS], changed = _write_table(
             conn, INSTRUMENTS, out_dir / f"{INSTRUMENTS}.csv",
             "WHERE instrument_id IN (SELECT DISTINCT instrument_id FROM marks)")
@@ -99,17 +135,20 @@ def export_snapshot(db_path: Union[str, Path], out_dir: Union[str, Path] = SNAPS
             if _table_info(conn, table):
                 rows[table], table_changed = _write_table(conn, table, out_dir / f"{table}.csv")
                 changed = changed or table_changed
+                ddl[table] = _ddl(conn, table)
         first, last = conn.execute("SELECT MIN(as_of_date), MAX(as_of_date) FROM marks").fetchone()
     finally:
         conn.close()
+    last_pull, status_changed = _copy_pull_status(db_path, out_dir)
+    changed = changed or status_changed
     # The same market data as the last export keeps that export's manifest, time included,
     # so exporting twice commits nothing the second time.
     previous = read_manifest(out_dir)
-    if not changed and previous and previous.get("rows") == rows:
+    if not changed and previous and previous.get("rows") == rows and previous.get("ddl") == ddl:
         return previous
     manifest = {
         "exported_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "marks_from": first, "marks_through": last, "rows": rows,
+        "marks_from": first, "marks_through": last, "rows": rows, "ddl": ddl, "last_pull": last_pull,
     }
     (out_dir / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
@@ -183,8 +222,11 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
                 cols, rows = _read_rows(inst_path, _table_info(conn, INSTRUMENTS))
                 out["instruments_added"] = _insert(conn, INSTRUMENTS, cols, rows, "INSERT OR IGNORE")
             known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
+            ddl = (out["manifest"] or {}).get("ddl") or {}
             for table in MARKET_TABLES:
                 path = in_dir / f"{table}.csv"
+                if path.exists() and not _table_info(conn, table) and ddl.get(table):
+                    conn.execute(ddl[table])  # a table this database never created: the source's own DDL
                 info = _table_info(conn, table)
                 if not path.exists() or not info:
                     continue

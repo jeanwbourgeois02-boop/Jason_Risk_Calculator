@@ -764,6 +764,10 @@ def cmd_marks_import(args) -> int:
     m = r["manifest"] or {}
     say(f"  marks-import: snapshot of {m.get('exported_at', 'unknown time')}, "
         f"marks {m.get('marks_from', '?')} to {m.get('marks_through', '?')}")
+    pull = m.get("last_pull") or {}
+    if pull:
+        say(f"  last pull on the Bloomberg PC: {pull.get('time', '?')}, {pull.get('written', '?')} written, "
+            f"{pull.get('failed', '?')} failed ({SNAPSHOT_REL}/pull_status.json has the detail)")
     say("  loaded: " + ", ".join(f"{n} {t}" for t, n in r["rows"].items())
         + f"; {r['instruments_added']} instrument(s) added")
     if r["skipped_marks"]:

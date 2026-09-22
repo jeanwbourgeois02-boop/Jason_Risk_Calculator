@@ -60,7 +60,9 @@ same. Keep the terminal window open; **Ctrl+C** stops the app.
   PC: `git pull`, upload the same blotter in the app, then `2_launcher.py marks-import`. The import makes
   the marks there what the Bloomberg PC had at the export (MANUAL marks typed there are kept) and freezes
   the settled trades; run it again after every blotter upload on that PC. It refuses on a PC that has
-  Bloomberg unless `--force` is given. No trade travels this way.
+  Bloomberg unless `--force` is given. No trade travels this way. The snapshot carries every table a pull
+  writes (marks, OIS curves and quotes, fixings, FX and rates vol quotes, dividend yields) and the last
+  pull's log (`pull_status.json`), which the import prints one line of.
 
 **Working copy**: the repository lives in `C:\Users\<you>\risk-monitor`, a plain local folder. GitHub is the
 backup: commit and `git push` at the end of every session. Do not keep a clone inside OneDrive: OneDrive syncs
