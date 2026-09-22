@@ -871,3 +871,70 @@ def test_failure_reason_names_table_column_row_and_value():
     # nothing bad on file: just the exception, no empty "Stored values" sentence
     clean = header._failure_reason("x", ValueError("y"), _db_two_priced_forwards())
     assert clean == "x (ValueError: y)"
+
+
+# ------------------------------------------------- the chart opens on a click (2026-09-22)
+# User: "the LTD line chart not working". The chart callback is gated on the Details'
+# `open` prop, and Dash's html bundle (4.4.1) never reports a native <details> toggle back
+# to it: a click opened the element in the browser while the server never heard of it, so
+# the container stayed empty (the server side was fine: a POST with open=true returned the
+# graph). A clientside callback now mirrors the element's DOM state into `open` after each
+# click on the summary. And a chart that cannot be built says why on the page instead of
+# escaping as an HTTP 500 that left the opened collapsible blank.
+
+
+def _app_with_header(tmp_path):
+    import dash
+
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    app = dash.Dash(__name__)
+    header.register_callbacks(app, get_db_path=lambda: db)
+    return app, db
+
+
+def test_layout_summary_carries_its_id_inside_the_details():
+    root = header.layout()
+    details = next(c for c in root.children if getattr(c, "id", None) == header.DETAILS_ID)
+    assert type(details).__name__ == "Details" and details.open is False      # collapsed by default, as before
+    summary = details.children[0]
+    assert type(summary).__name__ == "Summary"
+    assert summary.id == header.SUMMARY_ID
+    assert summary.children == "LTD line chart"
+    assert header.SUMMARY_ID.startswith(header.DETAILS_ID) and header.SUMMARY_ID != header.DETAILS_ID
+
+
+def test_register_callbacks_mirrors_the_summary_click_into_the_details_open_prop(tmp_path):
+    app, _db = _app_with_header(tmp_path)
+    key = f"{header.DETAILS_ID}.open"
+    assert key in app.callback_map, list(app.callback_map)
+    spec = app.callback_map[key]
+    assert [(d["id"], d["property"]) for d in spec["inputs"]] == [(header.SUMMARY_ID, "n_clicks")]
+    entry = next(c for c in app._callback_list if c["output"] == key)
+    fn = entry["clientside_function"]
+    assert fn is not None                                          # runs in the browser, not on the server
+    script = next(s for s in app._inline_scripts if fn["function_name"] in s)
+    assert f"getElementById('{header.DETAILS_ID}')" in script      # reads the element's own DOM state
+    assert "details.open" in script
+    assert "no_update" in script                                   # the initial call (n_clicks 0/null) mirrors nothing
+    # the server callback still runs off `open`, exactly as before: the mirror feeds it
+    chart = app.callback_map[f"{header.CHART_CONTAINER_ID}.children"]
+    assert (header.DETAILS_ID, "open") in {(d["id"], d["property"]) for d in chart["inputs"]}
+    assert chart["callback"] is not None
+
+
+def test_chart_callback_says_why_when_the_chart_cannot_be_built(tmp_path, monkeypatch):
+    app, _db = _app_with_header(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("no calendar file")
+
+    monkeypatch.setattr(header, "_build_chart", boom)
+    raw = app.callback_map[f"{header.CHART_CONTAINER_ID}.children"]["callback"].__wrapped__
+    out = raw(True, "2026-09-17", None)                            # open, a date: the chart is built... and fails
+    assert type(out).__name__ == "P"
+    assert out.children.startswith("LTD chart could not be built (RuntimeError: no calendar file)")
+    assert "header-figure-caption" in out.className
+    # collapsed, or no date yet: nothing computed and nothing raised, as before
+    assert type(raw(False, "2026-09-17", None)).__name__ == "NoUpdate"
+    assert type(raw(True, None, None)).__name__ == "NoUpdate"

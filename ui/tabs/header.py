@@ -12,6 +12,10 @@ Design choices (no one to ask, so noted here):
     separate `ltd(conn, as_of)` call (period_pnl does not return raw LTD).
   - The LTD line chart is a `dcc.Graph` inside a collapsible `html.Details`, defaulting
     to *closed* (`open=False`) to keep the header compact on tabs that do not need it.
+    Dash never reports a native <details> toggle back to the `open` prop, so a clientside
+    callback mirrors the element's DOM state into it on every click of the summary
+    (`SUMMARY_ID`, `_SUMMARY_OPEN_MIRROR_JS`; see `register_callbacks`): without it the
+    chart callback below never hears the collapsible open (2026-09-22).
   - The chart spans every business day from the book's first trade date (MIN(trade_date)
     in `trades`) to `as_of`, oldest first (user decision 2026-09-22: "yes I want to see
     the ltd line chart, which requires all the previous closes"; it showed the last 20
@@ -110,6 +114,10 @@ from dash import Input, Output, State, dcc, html
 HEADER_ID = "header-block"
 CHART_CONTAINER_ID = "header-ltd-chart-container"
 DETAILS_ID = "header-ltd-details"
+# The <summary> inside the Details. Its n_clicks is the only thing Dash's html bundle
+# reports about a click on it (dash 4.4.1 wires `n_clicks`, never the `open` prop), so
+# it is what the clientside mirror in `register_callbacks` listens to.
+SUMMARY_ID = f"{DETAILS_ID}-summary"
 AS_OF_STORE_ID = "header-as-of-store"
 # True once a date picker (Blotter or Ladder) was set to a day other than today: the header
 # then stays on that day; otherwise it follows the New York calendar (user, 2026-09-22:
@@ -136,6 +144,21 @@ def as_of_after_tick(store: Optional[str], picked: bool, today: str) -> Optional
 
 PERIOD_LABELS = (
     ("value" , None),
+)
+
+# The clientside callback registered in `register_callbacks`: after each click on the
+# summary it returns the Details element's own DOM `open` state, which Dash then writes
+# to the `open` prop the chart callback is gated on. By the time it runs the browser's
+# default toggle has completed, so the value read is the new state (keyboard activation
+# of a summary fires click too). `n_clicks` is 0 (the component's default) or null on
+# the initial call: nothing was clicked, nothing to mirror.
+_SUMMARY_OPEN_MIRROR_JS = (
+    "function(n_clicks) {\n"
+    "    if (!n_clicks) { return window.dash_clientside.no_update; }\n"
+    f"    var details = document.getElementById({DETAILS_ID!r});\n"
+    "    if (!details) { return window.dash_clientside.no_update; }\n"
+    "    return Boolean(details.open);\n"
+    "}"
 )
 
 _PERIODS = ("daily", "previous_day", "d5", "mtd", "ytd", "trading")
@@ -230,7 +253,7 @@ def layout() -> html.Div:
         html.Div(id=f"{HEADER_ID}-figures", className="header-figures",
                  children=[_figure_card("LTD", "-")]),
         html.Details(id=DETAILS_ID, className="section section--secondary details", open=False, children=[
-            html.Summary("LTD line chart"),
+            html.Summary("LTD line chart", id=SUMMARY_ID),
             html.Div(id=CHART_CONTAINER_ID),
         ]),
     ])
@@ -798,7 +821,8 @@ def _build_chart(conn: sqlite3.Connection, as_of: str, db_path=None):
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Registers two callbacks keyed on a shared `AS_OF_STORE_ID` dcc.Store; the module
+    """Registers two server callbacks keyed on a shared `AS_OF_STORE_ID` dcc.Store, plus
+    the clientside mirror of the chart collapsible's open state (below); the module
     that owns the date picker (e.g. cash_ladder's date picker, or C5's shared control)
     is expected to write the chosen ISO date into that store's `data` field. Until C5
     wires a store, these callbacks simply do nothing (Dash raises no error for an
@@ -814,7 +838,19 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     each day's value on (db path, db mtime) so re-expanding after a figures-only render
     is instant. Since the chart spans the whole book (2026-09-22), the first open after
     a database change is the one render that evaluates every business day since the
-    first trade."""
+    first trade.
+
+    Why the clientside mirror exists (2026-09-22, user: "the LTD line chart not
+    working"): the chart callback is gated on the Details' `open` prop, but Dash's html
+    bundle (dash 4.4.1, dash/html/dash_html_components.min.js) wires only `n_clicks` on
+    its elements and never reports a native <details> toggle back to `open`. A click on
+    the summary opened the element in the browser while `open` stayed False on the
+    server, so the chart callback never fired and the container stayed empty: the chart
+    had been unreachable by clicking since the 2026-09-15 split. The clientside callback
+    reads the element's own DOM state after each click of the summary and writes it to
+    `open`; the server callback then runs exactly as designed (only while open, and again
+    on an as-of or data-revision change while open). Do not remove it unless Dash itself
+    starts syncing `open`."""
 
     from ui import revision
     from ui.tabs.blotter_pricing import pricing_snapshot
@@ -851,6 +887,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         finally:
             conn.close()
 
+    # The mirror (see the docstring): Dash does not sync a native <details> toggle to
+    # `open`, so the browser reports the element's real state after every click.
+    app.clientside_callback(
+        _SUMMARY_OPEN_MIRROR_JS,
+        Output(DETAILS_ID, "open"),
+        Input(SUMMARY_ID, "n_clicks"),
+    )
+
     @app.callback(
         Output(CHART_CONTAINER_ID, "children"),
         Input(DETAILS_ID, "open"),
@@ -873,5 +917,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             return html.P(f"Database not available ({exc}).")
         try:
             return _build_chart(conn, as_of, db_path=db_path)
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad, as in _update_figures
+            # Anything raised here escaped as an HTTP 500: the Output never fired and the
+            # opened collapsible stayed empty with nothing on the page saying why
+            # (2026-09-22). Say what failed instead; the next as-of or data revision
+            # retries it.
+            import logging
+            logging.getLogger(__name__).exception("header LTD chart failed for as_of=%s", as_of)
+            return html.P(_failure_reason("LTD chart could not be built", exc, conn),
+                          className="header-figure-caption header-figure-caption--reason")
         finally:
             conn.close()
