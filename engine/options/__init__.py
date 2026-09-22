@@ -320,7 +320,15 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   ``_same_terms`` already did, so no shape of an identical re-save is refused or taken
   for a change (checked: the Options grid's and the editor's inputs all normalise to
   what is on file; the only deletes of pricer marks across dates in this package remain
-  a real terms change and the one-time unit purge). Tests: ``tests/test_options_close.py``.
+  a real terms change and the one-time unit purge). Same day, user: "pull bbg now should
+  recalc options too, using log data if no bbg access, or pull new data for new
+  calculation": ``store.recalc_on_file(conn, as_of, since=None) -> {"as_of", "since",
+  "days": [...], "priced", "skipped"}`` rebuilds every option mark from the data ON FILE
+  with no Bloomberg -- ``price_close`` for each past day (from the first option trade_date
+  on) that has an official SPOT for an option's pair, then ``price_all_and_store`` for
+  ``as_of`` -- for the pull button's no-terminal branch (``data/bloomberg/live.py``,
+  bbg-data's to wire; the connected branch already re-prices after its pull). Tests:
+  ``tests/test_options_close.py``.
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

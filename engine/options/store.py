@@ -12,6 +12,11 @@ Three entry points (the first two mirror engine/rates/store.py):
     (``data/bloomberg/live.py::_options_step``).
   - ``price_close(conn, day)`` (2026-09-22): a PAST CLOSE, for the backfill to call for
     each day it works, strictly from that day's own inputs. See "Past closes" below.
+  - ``recalc_on_file(conn, as_of)`` (2026-09-22): every day's option marks rebuilt from the
+    data ON FILE, no Bloomberg -- ``price_close`` for each past day with inputs, then
+    ``price_all_and_store`` for ``as_of``. For the pull button on a PC without a terminal
+    (user: "pull bbg now should recalc options too, using log data if no bbg access, or
+    pull new data for new calculation").
 
 **Past closes and the stamp on a mark (2026-09-22).** The user: "options daily pnl 0,
 that cannot be right, everything is moving", then "even on the bbg machine, it seems the
@@ -1037,6 +1042,69 @@ def price_close(conn: sqlite3.Connection, day: str) -> dict:
                 out["priced"] += 1
             else:
                 out["skipped"].append({"trade_id": trade_id, "reason": f"{day} close: {outcome.reason}"})
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{exc!r}"
+    return out
+
+
+# The past days whose logged data can price an option: every day before `as_of` (and from
+# `since` on) with an official SPOT for a pair some FX_OPTION on file is written on. SPOT is
+# the one input every payoff needs (the forward curve, OIS quotes and vols of the same day
+# are then resolved, or the trade skips with its reason), so a day with none has nothing
+# to recalculate from and is not visited.
+_DAYS_WITH_OPTION_SPOT_SQL = """
+SELECT DISTINCT m.as_of_date
+FROM marks_official m
+WHERE m.mark_type = 'SPOT' AND m.as_of_date < :as_of AND m.as_of_date >= :since
+  AND m.instrument_id IN (
+      SELECT DISTINCT i.base_ccy || i.quote_ccy
+      FROM trades_official t JOIN instruments i ON i.instrument_id = t.instrument_id
+      WHERE t.product = 'FX_OPTION')
+ORDER BY m.as_of_date
+"""
+
+
+def recalc_on_file(conn: sqlite3.Connection, as_of: str, since: Optional[str] = None) -> dict:
+    """Re-price every FX option from the data ON FILE, asking Bloomberg nothing (user,
+    2026-09-22: "pull bbg now should recalc options too, using log data if no bbg access, or
+    pull new data for new calculation"). For the pull button's no-Bloomberg branch
+    (``data/bloomberg/live.py``, bbg-data's to wire): on a PC without a terminal the logged
+    data -- the imported snapshot's SPOT, forwards, OIS quotes and vols, day by day -- is
+    all on file, so the option marks can be rebuilt from it; with a terminal the connected
+    path already re-prices after its own pull (``live.pull_once``'s options step).
+
+    Runs ``price_close(conn, day)`` for every day before `as_of`, from `since` (default:
+    the earliest FX_OPTION trade_date on file) on, that has an official SPOT for a pair
+    some option is written on (``_DAYS_WITH_OPTION_SPOT_SQL``), each strictly from its
+    own inputs; then ``price_all_and_store(conn, as_of)`` for `as_of` itself, stamped the
+    pricing time, which also runs the expiry-day catch-up. A day whose inputs are
+    incomplete skips its trades with the reason, as those two do; nothing is ever priced
+    from another day's data (hard rule 2 stays with ``engine/pnl/valuation.py``'s
+    near-marks rule at read time). Idempotent: every day is INSERT OR REPLACE.
+
+    Never raises. Returns ``{"as_of", "since", "days": [<price_close dict per day, the
+    last one as_of's own {"day", "priced", "skipped"}>], "priced": <total>, "skipped":
+    <total count>}``, plus ``"error"`` (repr) if something outside the per-day calls
+    raised, with the counts so far."""
+    out: dict = {"as_of": as_of, "since": since, "days": [], "priced": 0, "skipped": 0}
+    try:
+        datetime.date.fromisoformat(as_of)
+        if since is None:
+            row = conn.execute("SELECT MIN(trade_date) FROM trades_official WHERE product = 'FX_OPTION'").fetchone()
+            since = row[0] if row and row[0] else as_of
+            out["since"] = since
+        days = [r[0] for r in conn.execute(_DAYS_WITH_OPTION_SPOT_SQL, {"as_of": as_of, "since": since}).fetchall()]
+        for day in days:
+            result = price_close(conn, day)
+            out["days"].append(result)
+            out["priced"] += result["priced"]
+            out["skipped"] += len(result["skipped"])
+        outcomes = price_all_and_store(conn, as_of)
+        today = {"day": as_of, "priced": sum(1 for o in outcomes if o.priced),
+                 "skipped": [{"trade_id": o.trade_id, "reason": o.reason} for o in outcomes if not o.priced]}
+        out["days"].append(today)
+        out["priced"] += today["priced"]
+        out["skipped"] += len(today["skipped"])
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{exc!r}"
     return out

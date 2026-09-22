@@ -1,3 +1,4 @@
+- [Relative paths in reports](feedback-relative-paths.md) — user 2026-09-22: name files repo-relative in every report / hand-off, never absolute
 - [Vendored options_calc API quirks](vendor-api-quirks.md) — submodule-name shadowing in fx/__init__.py, evaluationDate ignores as_of, lazy-import requirement
 - [Mark units and digital payout convention](premium-delta-conventions.md) — unit of all six marks + USD conversion per Greek; digitals/touches = fraction of BASE-ccy payout (fixed 2026-09-18, user confirmation pending); set_option_terms default-payoff trap
 - [Expiry-day intrinsic mark 2026-09-18](expiry-day-intrinsic-mark-2026-09-18.md) — payoff at expiry-date SPOT + catch-up; ledger/live verified read-only (no ledger change); digital DELTA +1 ITM flagged; cut-time and delivery double-count limits
@@ -6,4 +7,4 @@
 - [Phase 7 landed 2026-09-17](phase-7-landed-2026-09-17.md) — real OIS rates only cover 7 currencies (not full G10), EURSEK→EURUSD fixture switch, Business252 vs Act/365, marks_official SPOT source gotcha for equity/commodity; DELTA_PA now official (update 2026-09-17)
 - [Phase 7.1 manual_rates fallback 2026-09-17](phase-7-1-manual-rates-fallback-2026-09-17.md) — manual_rates table + resolution order for currencies with no OIS convention (SEK/NOK/TWD/ZAR); provenance now reaches PricingOutcome (Phase 7.2 update)
 - [Phase 7.2 implied-forward rate 2026-09-18](phase-7-2-implied-forward-rate-2026-09-18.md) — covered-interest-parity rate fallback (SEK etc.) off pair's own SPOT+FWD_OUTRIGHT; reject keeps ORIGINAL skip reason; precedence curve>manual>implied
-- [Past-close pricing + stamps 2026-09-22](past-close-pricing-and-stamps-2026-09-22.md) — store.price_close for the backfill (not yet wired by bbg-data), live_stamp vs close_stamp, no cross-day fallback exists, what deletes pricer marks (ruled in/out)
+- [Past-close pricing + stamps 2026-09-22](past-close-pricing-and-stamps-2026-09-22.md) — store.price_close (backfill) + recalc_on_file (pull button, no terminal), both unwired by bbg-data; live_stamp vs close_stamp; no cross-day fallback; what deletes pricer marks

@@ -25,6 +25,14 @@ engine/options had ever written a PAST day's marks; the live pull writes today's
   -> skip, leave both alone). Skip reasons are prefixed `"<day> close: "`. Runs the
   one-time unit purge first so the purge can never eat what it writes. bbg-data still has
   to CALL it from `data/bloomberg/backfill.py` per day, after that day's closes are on file.
+- `store.recalc_on_file(conn, as_of, since=None) -> {"as_of","since","days":[...],"priced","skipped"}`
+  (same day; user: "pull bbg now should recalc options too, using log data if no bbg access,
+  or pull new data for new calculation"): `price_close` for every past day from the first
+  option trade_date that has an official SPOT for an option's pair, then
+  `price_all_and_store(as_of)`. Meant for the pull button's NO-Bloomberg branch
+  (`data/bloomberg/live.py`, bbg-data's to wire); the connected branch already re-prices
+  after its pull. Not wired by me. Note `marks-import` drops non-MANUAL rows first, so
+  marks recalculated on the Mac are replaced by the next import from the Bloomberg PC.
 - **No cross-day fallback existed to remove:** `inputs.get_spot`, `vol_marketdata.vol_smile`
   / `atm_vol_for_expiry`, `inputs.get_manual_vol`, `rates._read_curve_quotes` /
   `_get_manual_rate` / `_get_fwd_outright_points` / `_get_pair_spot` all key on the exact

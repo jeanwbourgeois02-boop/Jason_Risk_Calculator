@@ -239,6 +239,85 @@ def test_price_close_is_importable_without_pricing_anything():
     assert store.price_close(conn, DAY) == {"day": DAY, "priced": 0, "skipped": []}
 
 
+# --------------------------------------------------------------------------- recalc_on_file: no Bloomberg, the logged data
+
+@needs_quantlib
+def test_recalc_on_file_rebuilds_every_past_day_with_inputs_and_prices_as_of_from_what_is_there(monkeypatch):
+    """User, 2026-09-22: "pull bbg now should recalc options too, using log data if no bbg
+    access". Two past days have SPOT / curves / vol on file, the as-of day has nothing yet:
+    both past days get close-stamped marks from their own data, the as-of day skips with
+    its reason (the near-marks rule carries the last close forward at read time), and a
+    second run changes nothing."""
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_option_trade(conn)                              # dealt 2026-08-18
+    _seed_day(conn, day=DAY)                              # 2026-08-21
+    _seed_day(conn, day=LATER, spot=SPOT * 1.01)          # 2026-08-24
+    as_of = "2026-08-25"
+    monkeypatch.setattr(store, "_now_ny", lambda: datetime.datetime(2026, 8, 25, 9, 30, 0, tzinfo=NY))
+
+    out = store.recalc_on_file(conn, as_of)
+
+    assert out["as_of"] == as_of and out["since"] == "2026-08-18"
+    assert [d["day"] for d in out["days"]] == [DAY, LATER, as_of]
+    assert [d["priced"] for d in out["days"]] == [1, 1, 0]
+    assert out["days"][2]["skipped"] == [{"trade_id": "T1", "reason": "no SPOT mark"}]
+    assert out["priced"] == 2 and out["skipped"] == 1 and "error" not in out
+    assert {r[2] for r in _rows(conn, INSTRUMENT, DAY)} == {f"{DAY}T15:00:00-04:00"}
+    assert {r[2] for r in _rows(conn, INSTRUMENT, LATER)} == {f"{LATER}T15:00:00-04:00"}
+    assert _rows(conn, INSTRUMENT, as_of) == []
+    assert _official(conn, INSTRUMENT, LATER, "PREMIUM") > _official(conn, INSTRUMENT, DAY, "PREMIUM")   # a call, spot up
+
+    again = store.recalc_on_file(conn, as_of)
+    assert (again["priced"], again["skipped"]) == (2, 1)
+    assert len(_rows(conn, INSTRUMENT, DAY)) == 7 and len(_rows(conn, INSTRUMENT, LATER)) == 7
+
+
+@needs_quantlib
+def test_recalc_on_file_visits_only_days_with_an_option_pairs_spot_from_since_on(monkeypatch):
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_option_trade(conn)
+    _seed_day(conn, day="2026-08-14")                     # before the trade was dealt: not that option's day
+    _seed_day(conn, day=DAY)
+    _seed_day(conn, day=LATER)
+    _seed_pair_spot(conn, as_of="2026-08-20", pair="USDJPY", spot=150.0)   # a pair no option is written on
+    monkeypatch.setattr(store, "_now_ny", lambda: datetime.datetime(2026, 8, 25, 9, 30, 0, tzinfo=NY))
+
+    out = store.recalc_on_file(conn, "2026-08-25")
+    assert [d["day"] for d in out["days"]] == [DAY, LATER, "2026-08-25"]   # default since = first option trade_date
+    assert _rows(conn, INSTRUMENT, "2026-08-14") == []
+
+    out = store.recalc_on_file(conn, "2026-08-25", since=LATER)
+    assert [d["day"] for d in out["days"]] == [LATER, "2026-08-25"] and out["since"] == LATER
+
+    # As-of ON a day with inputs: that day is priced live (pricing-time stamp), not as a close.
+    out = store.recalc_on_file(conn, LATER)
+    assert [d["day"] for d in out["days"]] == [DAY, LATER] and out["days"][1]["priced"] == 1
+    assert {r[2] for r in _rows(conn, INSTRUMENT, LATER)} == {"2026-08-25T09:30:00-04:00"}
+
+
+def test_recalc_on_file_never_raises_and_is_empty_on_an_empty_book(monkeypatch):
+    from engine.options import store
+
+    conn = _new_db()
+    out = store.recalc_on_file(conn, DAY)
+    assert out == {"as_of": DAY, "since": DAY, "days": [{"day": DAY, "priced": 0, "skipped": []}],
+                   "priced": 0, "skipped": 0}
+
+    out = store.recalc_on_file(conn, "not-a-date")
+    assert out["days"] == [] and "ValueError" in out["error"]
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("no such table")
+
+    monkeypatch.setattr(store, "price_all_and_store", boom)
+    out = store.recalc_on_file(conn, DAY)
+    assert out["priced"] == 0 and "RuntimeError" in out["error"]
+
+
 # --------------------------------------------------------------------------- the stamp on a mark
 
 @needs_quantlib
