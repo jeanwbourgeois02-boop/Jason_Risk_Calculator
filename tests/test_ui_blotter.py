@@ -252,7 +252,7 @@ def test_scope_products_covers_task_products():
     assert set(blotter.SCOPE_PRODUCTS["fx"]) == {"FX_SPOT", "FX_FWD", "FX_SWAP"}
     assert blotter.SCOPE_PRODUCTS["futures"] == ("FUTURE",)
     assert blotter.SCOPE_PRODUCTS["rates"] == ("IRS",)
-    assert blotter.SCOPE_PRODUCTS["options"] == ("FX_OPTION",)
+    assert blotter.SCOPE_PRODUCTS["options"] == ("FX_OPTION", "EQ_OPTION")
 
 
 def test_futures_scope_no_trades_shows_reason_and_empty_table():
@@ -326,6 +326,23 @@ def _add_option(conn, trade_id="O1", premium_mark=0.0062, as_of="2026-06-20"):
     if premium_mark is not None:
         conn.execute("INSERT INTO marks VALUES (?,'EURUSD092226C-1','2026-09-22','PREMIUM',?,'QL_OPTIONS_PRICER',?)",
                      (as_of, premium_mark, f"{as_of}T17:00:00-04:00"))
+    conn.commit()
+
+
+def _add_eq_option(conn, trade_id="X1", price_mark=130.0, as_of="2026-06-20"):
+    """A listed index option the parser books as EQ_OPTION ('SPX/E261016P7615', 15 puts at
+    121.5 index points, multiplier 100), with Bloomberg's own price of the option as the
+    official FUTURE_PX on as_of: LTD = 15 * 100 * (price_mark - 121.5)."""
+    conn.execute("INSERT OR IGNORE INTO instruments VALUES ('SPX/E261016P7615','EQ_OPTION','SPX','USD',100,0,"
+                 "'SPX Index','2026-10-16')")
+    conn.execute(
+        "INSERT INTO trades VALUES (?,'XLSX','SPX/E261016P7615','EQ_OPTION',?,'2026-06-01',15,121.5,"
+        "'ACC','CPTY','','TR','spx put','')", (trade_id, trade_id))
+    conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL','USD',?,'2026-06-01','2026-10-16',121.5,0)",
+                 (trade_id, 15 * 100 * 7615.0))
+    if price_mark is not None:
+        conn.execute("INSERT INTO marks VALUES (?,'SPX/E261016P7615','2026-10-16','FUTURE_PX',?,'BBG_BDH',?)",
+                     (as_of, price_mark, f"{as_of}T15:00:00-04:00"))
     conn.commit()
 
 
@@ -620,6 +637,33 @@ def test_total_book_asset_class_missing_mark_is_unavailable_with_reason():
         assert table.data[1]["ltd"] == "n/a" and "S1" in table.tooltip_data[1]["ltd"]["value"]
         assert table.data[-1]["ltd"] != "n/a"  # Total row: a real value, not blanked
         assert "excludes 1 of 2" in table.tooltip_data[-1]["ltd"]["value"]
+    finally:
+        conn.close()
+
+
+def test_total_book_listed_index_option_is_on_the_options_line_not_other():
+    """User decision 2026-09-22 ("just add that to options"): the SPX listed index options
+    the parser books as EQ_OPTION belong on the existing "Options" line of the Total
+    book's per-class table, never on an "Other" line of their own, and the options scope
+    sees them like the Options sub-tab's own grouped table does."""
+    conn = _make_db()
+    try:
+        _add_eq_option(conn, price_mark=130.0)
+        df = blotter.scope_df(conn, "total", "2026-06-20")
+        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, "2026-06-20", df)}
+        assert list(rows) == ["FX", "Options", "Total"]
+        assert "Other" not in rows
+        assert rows["Options"]["trades"] == 1
+        assert rows["Options"]["ltd"]["value"] == pytest.approx(15 * 100 * (130.0 - 121.5))   # 12,750
+        assert rows["Total"]["ltd"]["value"] == pytest.approx(8_000.0 + 12_750.0)
+        layout = blotter.scope_layout("total", conn, "2026-06-20")
+        table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
+        assert [r["asset_class"] for r in table.data] == ["FX", "Options", "Total"]
+        assert table.data[1]["ltd"] == "12,750"
+        # The options scope's own frame (strip, row detail, filters) holds the same trade.
+        options_df = blotter.scope_df(conn, "options", "2026-06-20")
+        assert options_df["trade_id"].tolist() == ["X1"]
+        assert blotter.scope_df(conn, "fx", "2026-06-20")["trade_id"].tolist() == ["T1"]
     finally:
         conn.close()
 

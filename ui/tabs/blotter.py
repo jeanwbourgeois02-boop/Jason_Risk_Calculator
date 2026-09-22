@@ -167,7 +167,9 @@ SCOPE_PRODUCTS = {
     "fx": ("FX_SPOT", "FX_FWD", "FX_SWAP"),
     "futures": ("FUTURE",),
     "rates": ("IRS",),
-    "options": ("FX_OPTION",),
+    # EQ_OPTION (the SPX listed index options the parser books) joined 2026-09-22 so the
+    # options scope sees the same trades the Options sub-tab's own grouped table queries.
+    "options": ("FX_OPTION", "EQ_OPTION"),
     "manual": None,
 }
 # Sub-tabs that are forms/lists of their own, not `priced_value_book`-shaped tables:
@@ -191,8 +193,11 @@ _SELF_REFRESHING_SCOPES = ("options", "rates")
 PLACEHOLDER_SCOPES: dict = {}
 
 # Asset class per product for the Total book's per-class P&L table.
+# A listed index option (EQ_OPTION) sits on the "Options" line with the FX options (user,
+# 2026-09-22: "just add that to options"); a product not listed here (SWAPTION / CAP_FLOOR /
+# CMDTY_OPTION have no ingest path yet) still falls to "Other" in `asset_class_pnl_rows`.
 ASSET_CLASS_OF = {"FX_SPOT": "FX", "FX_FWD": "FX", "FX_SWAP": "FX", "FUTURE": "Futures",
-                  "IRS": "Rates", "FX_OPTION": "Options"}
+                  "IRS": "Rates", "FX_OPTION": "Options", "EQ_OPTION": "Options"}
 ASSET_CLASS_ORDER = ("FX", "Futures", "Rates", "Options")
 ASSET_TABLE_ID = "blotter-asset-class-table"
 POSITIONS_TABLE_ID = "blotter-positions-table"

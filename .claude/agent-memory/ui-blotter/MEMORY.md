@@ -13,3 +13,4 @@
 - [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
 - [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
 - [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable
+- [Blotter EQ_OPTION on the Options line 2026-09-22](blotter-eq-option-on-options-line-2026-09-22.md) — SPX listed options are "Options" in ASSET_CLASS_OF + options scope, never "Other"; header tests still live in test_ui_blotter.py and break on ui-header changes
