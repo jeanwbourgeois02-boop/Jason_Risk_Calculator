@@ -1,0 +1,25 @@
+{
+ "git_head": "001746c",
+ "summary": {
+  "app_files": 92,
+  "app_lines": 39013,
+  "bare_excepts": 0,
+  "broad_excepts": 125,
+  "crlf_files": 0,
+  "dated_citations": 667,
+  "duplicate_helpers": 10,
+  "forbidden_imports": 3,
+  "large_modules": 8,
+  "long_functions": 11,
+  "mixed_line_endings": 0,
+  "ruff_total": 36,
+  "syntax_errors": 0,
+  "test_files": 53,
+  "test_functions": 1317,
+  "todo_markers": 4,
+  "undefined_names": 2,
+  "unimported_modules": 0,
+  "unused_imports": 27,
+  "unused_variables": 7
+ }
+}

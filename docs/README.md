@@ -55,9 +55,9 @@ same. Keep the terminal window open; **Ctrl+C** stops the app.
   (see below), and only for what the trades on file need (the "Bloomberg library" on the Market data tab).
 - `py -3 2_launcher.py start --force-new` (inside the project folder) always starts a fresh instance.
 - **Marks on a PC without Bloomberg.** The database is not in git, so such a PC has no marks of its own.
-  On the Bloomberg PC every **Pull Bloomberg now** ends by writing the marks on file to `data/bbg_snapshot/`,
-  committing that folder alone and pushing it (the Market data tab's backfill status says what happened;
-  `py -3 2_launcher.py marks-export --push` does the same by hand). On the other
+  On the Bloomberg PC every **Pull Bloomberg now** ends by writing the marks on file to `data/bbg_snapshot/`
+  (the Market data tab's backfill status says so); you commit and push that folder yourself, or
+  `py -3 2_launcher.py marks-export --push` does export, commit and push in one go. On the other
   PC: `git pull`, upload the same blotter in the app, then `2_launcher.py marks-import`. The import makes
   the marks there what the Bloomberg PC had at the export (MANUAL marks typed there are kept) and freezes
   the settled trades; run it again after every blotter upload on that PC. It refuses on a PC that has
@@ -128,7 +128,17 @@ Everything else lives under `2_launcher.py` too, but the raw commands are:
 .venv\Scripts\python -m data.bloomberg.live --status the last pull, itemised
 .venv\Scripts\python -m data.bloomberg.backfill --start ... --end ...   run the backfill manually (normally part of Pull Bloomberg now)
 .venv\Scripts\python 3_diagnostic.py              Bloomberg diagnostics (same checks as the Market data button)
+py 2_launcher.py health                           code-health audit: ruff, dead code, duplicate helpers, dated comments, layering, line endings
+py 2_launcher.py health --baseline                the same, failing when a measure is worse than config/health_baseline.json
+.venv\Scripts\python -m tests.golden_book --write   re-pin tests/golden/book.json: only on the user's yes, it defines what the book is worth
 ```
+
+Code health is the infra agent's job (`.claude/agents/infra.md`, run on request: "run infra"). Its instruments:
+`py 2_launcher.py health` (tools/health.py, thresholds in `config/health.yaml`, the ratchet baseline in
+`config/health_baseline.json`), the golden book (`tests/test_golden_book.py`: the sample blotter at synthetic marks,
+every valuation pinned in `tests/golden/book.json`, so a refactor that changes nothing stays green), ruff and pytest
+configured in `pyproject.toml` (tool settings only, not a package), and a hook in `.claude/settings.json` that runs
+ruff on every Python file Claude edits. Provenance of rules moves from code comments to `decisions.md`.
 
 Environment variables: `RISK_DB` (database path), `RISK_LIVE=0` (disable the feed), `BLP_HOST`, `BLP_PORT`.
 

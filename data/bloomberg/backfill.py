@@ -1289,9 +1289,10 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                           on_progress=lambda remaining: _publish({"running": remaining > 0, "remaining": remaining}))
             if real_pull:
                 # The saving every pull ends with (user, 2026-09-22: "every pull from bbg
-                # triggers the saving"): the marks on file to data/bbg_snapshot/, committed and
-                # pushed (data/bloomberg/snapshot.py::save_after_pull). Only after a REAL pull:
-                # a test's fake fetches must never write or commit the repository's snapshot.
+                # triggers the saving" ... "I will trigger the commit and push myself"): the
+                # marks on file written to data/bbg_snapshot/, nothing committed
+                # (data/bloomberg/snapshot.py::save_after_pull). Only after a REAL pull: a test's
+                # fake fetches must never write the repository's own snapshot.
                 from data.bloomberg import snapshot
                 _publish({"snapshot": snapshot.save_after_pull(db_path)["message"]})
         except Exception as exc:  # never let a background thread take the process down

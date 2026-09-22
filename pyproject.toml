@@ -1,0 +1,20 @@
+# Tool configuration only: ruff and pytest read this file. It is NOT a package definition
+# (no [project] table, nothing to `pip install .`): the app is installed and launched through
+# 2_launcher.py alone (CLAUDE.md hard rule 9). Thresholds for the health audit live in
+# config/health.yaml.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["engine/options/vendor", ".venv", "data/raw", "data/bbg_snapshot"]
+
+[tool.ruff.lint]
+# F: pyflakes (unused imports and variables, undefined names). E9: syntax and IO errors.
+# B006 / B008: mutable or call defaults in a signature (evaluated once, shared by every call).
+select = ["F", "E9", "B006", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]   # a package re-exporting its public names
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
