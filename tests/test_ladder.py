@@ -952,9 +952,9 @@ def test_pair_position_frame_labels_cross_and_commodity_and_keeps_spot_precision
     # spot kept at 6 dp, never thousands-rounded to an integer (0.66 -> "0" would lose
     # all information for a sub-1.0 quote).
     aud_spot = frame.loc[frame["pair"] == "AUDUSD", "spot"].iloc[0]
-    assert aud_spot == "0.660000"
+    assert aud_spot == 0.66   # the number itself; the table prints it at 6 dp
     xau_spot = frame.loc[frame["pair"] == "XAUUSD (metal)", "spot"].iloc[0]
-    assert xau_spot == ""  # NaN spot renders blank, never a fabricated rate
+    assert xau_spot is None  # NaN spot renders blank, never a fabricated rate
 
 
 def test_pair_position_frame_empty_and_none_render_placeholder_not_crash():
@@ -981,8 +981,8 @@ def test_pair_position_table_renders_both_notional_columns_labelled():
     assert "Notional (base ccy)" in names
     assert "USD notional (USD sign: + long USD)" in names
     row = section.children[1].data[0]
-    assert row["notional_base"] == "660,000"
-    assert row["notional_usd"] == "(660,000)"
+    assert row["notional_base"] == 660_000
+    assert row["notional_usd"] == -660_000
 
 
 def test_net_gross_usd_passes_through_commodities(tmp_path):

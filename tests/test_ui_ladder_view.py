@@ -76,15 +76,16 @@ def test_grid_is_one_row_per_currency_with_settled_dates_total_columns_and_a_usd
     assert list(frame["kind"]) == ["currency"] * 3 + [exposure.USD_EQUIVALENT_COL]
     assert exposure.grid_value_columns(frame) == [SETTLED, "2026-09-24", "2026-09-28", "2026-10-21", exposure.TOTAL_COL]
     by_label = frame.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc["AUD", SETTLED] == "23,771,313" and by_label.loc["AUD", "2026-09-24"] == "(21,109,276)"
-    assert by_label.loc["AUD", "2026-10-21"] == exposure.EM_DASH and by_label.loc["JPY", "2026-10-21"] == "(147,000,000)"
-    assert by_label.loc["AUD", exposure.TOTAL_COL] == "13,808,542"
+    assert by_label.loc["AUD", SETTLED] == 23_771_313 and by_label.loc["AUD", "2026-09-24"] == -21_109_276
+    # None: an exact zero, which the table prints as the em dash
+    assert by_label.loc["AUD", "2026-10-21"] is None and by_label.loc["JPY", "2026-10-21"] == -147_000_000
+    assert by_label.loc["AUD", exposure.TOTAL_COL] == 13_808_542
     # settled: 23,771,313 x 0.66 - 16,500,000 ; 24 Sep: -21,109,276 x 0.659 + 15,000,000
     usd = by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL]
-    assert usd[SETTLED] == "(810,933)" and usd["2026-09-24"] == "1,088,987"
-    assert usd["2026-09-28"] == "(665,600)" and usd["2026-10-21"] == "13,423"
-    assert usd[exposure.TOTAL_COL] == "(374,123)"
-    table = exposure.combined_table(result, records, forward_rates=FWD)
+    assert round(usd[SETTLED]) == -810_933 and round(usd["2026-09-24"]) == 1_088_987
+    assert round(usd["2026-09-28"]) == -665_600 and round(usd["2026-10-21"]) == 13_423
+    assert round(usd[exposure.TOTAL_COL]) == -374_123
+    table = exposure.combined_table(result, records, forward_rates=FWD).children[0]
     assert table.id == exposure.COMBINED_TABLE_ID
     assert [c["name"] for c in table.columns] == ["Currency", exposure.SETTLED_ROW_LABEL, "24 Sep", "28 Sep",
                                                   "21 Oct", exposure.TOTAL_COLUMN_LABEL]   # short headers: thin columns
@@ -93,9 +94,9 @@ def test_grid_is_one_row_per_currency_with_settled_dates_total_columns_and_a_usd
     styles = table.style_data_conditional
     # Settled cash is the last column of the key-figure block: the thick bar is on its right edge
     assert any(s["if"].get("column_id") == SETTLED and s.get("borderRight", "").startswith("4px solid") for s in styles)
-    assert any(s["if"].get("column_id") == "2026-09-24" and "contains '('" in s["if"]["filter_query"] for s in styles)
+    assert any(s["if"].get("column_id") == "2026-09-24" and "< 0" in s["if"]["filter_query"] for s in styles)  # by the number
     block, _ = exposure.summary_block_frame(result, records, rates=RATES)
-    assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "AUD"] == "13,808,542"
+    assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "AUD"] == 13_808_542
 
 
 def test_usd_equivalent_row_equals_the_engines_per_date_usd_equivalents():
@@ -110,8 +111,8 @@ def test_usd_equivalent_row_equals_the_engines_per_date_usd_equivalents():
     frame, _ = exposure.combined_frame(result, records, forward_rates=FWD)
     usd = frame.set_index(exposure.ROW_LABEL_COL).loc[exposure.USD_EQUIVALENT_ROW_LABEL]
     for day in (SETTLED, "2026-09-24", "2026-09-28", "2026-10-21"):
-        assert usd[day] == exposure.format_amount(engine[day])
-    assert usd[exposure.TOTAL_COL] == exposure.format_amount(engine.sum())
+        assert usd[day] == exposure.grid_cell(engine[day])
+    assert usd[exposure.TOTAL_COL] == exposure.grid_cell(engine.sum())
     # no JPY rate: the JPY date and the total are blank, the AUD-only dates are not
     no_jpy = {"AUD": RATES["AUD"]}
     frame, _ = exposure.combined_frame(build_exposure(records, no_jpy), records)
@@ -130,11 +131,11 @@ def test_view_filters_dates_and_hides_all_zero_currencies_but_keeps_settled_and_
     assert "2026-10-21" not in frame.columns
     assert "JPY" not in ccys and "JPY" not in list(frame[exposure.CURRENCY_COL])  # zero on every shown date: hidden
     by_label = frame.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc["AUD", exposure.TOTAL_COL] == "13,808,542"              # settled + 24 Sep + 28 Sep
-    assert by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, exposure.TOTAL_COL] == "(387,546)"  # the three shown
+    assert by_label.loc["AUD", exposure.TOTAL_COL] == 13_808_542              # settled + 24 Sep + 28 Sep
+    assert round(by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, exposure.TOTAL_COL]) == -387_546  # the three shown
     block, block_ccys = exposure.summary_block_frame(result, records, rates=RATES, view=view)
     assert block_ccys == ccys                                                   # same currencies, same order
-    assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "AUD"] == "13,808,542"   # whole grid, unchanged
+    assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "AUD"] == 13_808_542   # whole grid, unchanged
     grid = exposure.grid_records(records, exposure.LadderView(currencies=frozenset({"AUD"})))
     assert {r["currency"] for r in grid} == {"AUD"}
     frame, ccys = exposure.combined_frame(build_exposure(grid, RATES), grid, forward_rates=FWD)
@@ -150,8 +151,8 @@ def test_settled_one_by_one_puts_settled_legs_on_their_own_dates():
     frame, _ = exposure.combined_frame(result, records, view=view)
     columns = exposure.grid_value_columns(frame)
     assert SETTLED not in columns and columns[0] == "2026-09-16"
-    assert frame.set_index(exposure.ROW_LABEL_COL).loc["AUD", "2026-09-16"] == "23,771,313"
-    table = exposure.combined_table(result, records, view=view)
+    assert frame.set_index(exposure.ROW_LABEL_COL).loc["AUD", "2026-09-16"] == 23_771_313
+    table = exposure.combined_table(result, records, view=view).children[0]
     names = [c["name"] for c in table.columns]
     assert exposure.SETTLED_ROW_LABEL not in names and names[1] == "16 Sep"
 
@@ -163,11 +164,11 @@ def test_show_usd_puts_usd_equivalents_in_the_cells():
     view = exposure.LadderView(show_usd=True)
     frame, _ = exposure.combined_frame(result, records, forward_rates=FWD, view=view)
     by_label = frame.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc["AUD", "2026-09-24"] == "(13,911,013)"   # -21,109,276 x 0.659
-    assert by_label.loc["USD", "2026-09-24"] == "15,000,000"
+    assert round(by_label.loc["AUD", "2026-09-24"]) == -13_911_013   # -21,109,276 x 0.659
+    assert by_label.loc["USD", "2026-09-24"] == 15_000_000
     # in USD cells the bottom row is simply the column sum
-    assert by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, "2026-09-24"] == "1,088,987"
-    table = exposure.combined_table(result, records, forward_rates=FWD, view=view)
+    assert round(by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, "2026-09-24"]) == 1_088_987
+    table = exposure.combined_table(result, records, forward_rates=FWD, view=view).children[0]
     assert [c["name"] for c in table.columns][0] == "Currency (USD eq.)"
     assert "Cells are USD equivalents" in exposure.usd_basis_caption(FWD, view).children
 
@@ -203,8 +204,9 @@ def test_local_vs_usd_details_and_export_frames():
     assert details.id == exposure.LOCAL_VS_USD_DETAILS_ID
     table = _find_id(details, exposure.LOCAL_VS_USD_ID)
     rows = {(r["currency"], r["settlement_date"]): r for r in table.data}
-    assert rows[("AUD", "24 Sep 2026")]["implied_rate_local_per_usd"] == "1.40729"   # 21,109,276 / 15,000,000
-    assert rows[("AUD", exposure.SETTLED_ROW_LABEL)]["net_local"] == "23,771,313"
+    # ISO dates in the cells, so "Value date" ranks in date order
+    assert rows[("AUD", "2026-09-24")]["implied_rate_local_per_usd"] == pytest.approx(1.40729, abs=1e-5)   # 21,109,276 / 15,000,000
+    assert rows[("AUD", exposure.SETTLED_ROW_LABEL)]["net_local"] == 23_771_313
     result = build_exposure(records, RATES)
     # the Ladder CSV follows the displayed orientation: a row per currency, dates across
     ladder = exposure.ladder_export_frame(result, FWD, ccys=["AUD", "USD", "JPY"])
@@ -241,7 +243,7 @@ def test_ladder_csv_is_the_displayed_grid_number_for_number_under_every_view():
         assert list(csv.columns)[1:] == [names.get(c, c) for c in shown]
         for i in range(len(frame)):
             for col in shown:
-                assert exposure.format_amount(csv.iloc[i][names.get(col, col)]) == frame.iloc[i][col]
+                assert exposure.grid_cell(csv.iloc[i][names.get(col, col)]) == frame.iloc[i][col]
     # an NDF row keeps its on-screen label in the file; an unmarked total is empty, never a partial sum
     ndf = [_rec("k1", "KRW", -1_394_500_000.0, "2026-09-17", pair="USDKRW", fill=1394.5),
            _rec("k1", "USD", 1_000_000.0, "2026-09-17", pair="USDKRW", fill=1394.5)]
@@ -294,9 +296,9 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     assert by_ccy["AUD"]["2026-09-28"] == "11,146,505"
     names = {c["id"]: c["name"] for c in grid.columns}
     assert names[SETTLED] == exposure.SETTLED_ROW_LABEL and names["2026-09-24"] == "24 Sep"
-    assert by_ccy["AUD"]["local_delta"] == "13,808,543"  # exact sample amounts round up here
+    assert round(by_ccy["AUD"]["local_delta"]) == 13_808_543  # exact sample amounts round up here
     # the 51 USDCAD spot fills (all settled by 17 Sep) sit in the settled CAD balance
-    assert by_ccy["CAD"][SETTLED] != exposure.EM_DASH
+    assert by_ccy["CAD"][SETTLED] not in (None, "")   # a number: not zero (None), not unmarked ('')
     # filtered out of the grid and of the block above it by the currency control
     assert set(by_ccy) == {"AUD", "USD", "CAD", ""}
 

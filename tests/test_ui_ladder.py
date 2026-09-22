@@ -280,10 +280,10 @@ def test_combined_risk_frame_futures_row_unavailable_with_reason():
     assert pd.isna(row["usd_delta"])
     assert "no FUTURE_PX" in row["_unavailable"]
     table = exposure.combined_risk_table(result, futures, scenarios={})
-    inner = table.children[1]
-    row = next(r for r in inner.data if r[exposure.RISK_LABEL_COL] == "ESU6 Index")
-    assert "Unavailable" in row["usd_delta"]
-    assert "no FUTURE_PX" in row["usd_delta"]
+    inner = table.children[1].children[0]          # the ranked table; its pinned footer is children[1]
+    i, row = next((i, r) for i, r in enumerate(inner.data) if r[exposure.RISK_LABEL_COL] == "ESU6 Index")
+    assert row["usd_delta"] == exposure.UNAVAILABLE   # the cell; the reason is its tooltip
+    assert "no FUTURE_PX" in inner.tooltip_data[i]["usd_delta"]["value"]
 
 
 def test_combined_risk_table_net_excludes_futures_gross_includes():
@@ -292,19 +292,19 @@ def test_combined_risk_table_net_excludes_futures_gross_includes():
     totals = portfolio_totals(result)
     futures = {"value": 100_000.0, "by_instrument": {"ESU6 Index": 100_000.0}, "missing": [], "reason": ""}
     table = exposure.combined_risk_table(result, futures, scenarios={})
-    inner = table.children[1]
-    rows = {r[exposure.RISK_LABEL_COL]: r for r in inner.data}
-    net_formatted = exposure.format_amount(-totals["net_usd"])  # USD position: + = long USD, as the header
-    gross_formatted = exposure.format_amount(totals["gross_usd"] + 100_000.0)
-    assert rows["Net USD delta, FX only (+ = long USD)"]["usd_delta"] == net_formatted
-    assert rows["Gross delta (incl. |futures|)"]["usd_delta"] == gross_formatted
+    inner, footer = table.children[1].children       # the totals are the pinned footer, never ranked
+    assert all(r["kind"] != "total" for r in inner.data)
+    rows = {r[exposure.RISK_LABEL_COL]: r for r in footer.data}
+    # USD position: + = long USD, as the header
+    assert rows["Net USD delta, FX only (+ = long USD)"]["usd_delta"] == pytest.approx(-totals["net_usd"])
+    assert rows["Gross delta (incl. |futures|)"]["usd_delta"] == pytest.approx(totals["gross_usd"] + 100_000.0)
 
 
 def test_combined_risk_table_marks_fallback_currency():
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, RATES)
     table = exposure.combined_risk_table(result, fallback_ccys={"JPY"})
-    inner = table.children[1]
+    inner = table.children[1].children[0]
     names = [r[exposure.RISK_LABEL_COL] for r in inner.data]
     assert "JPY *" in names
 
@@ -319,7 +319,7 @@ def test_summary_block_table_has_rate_source_row():
     rows = {r[exposure.ROW_LABEL_COL]: r for r in table.data}
     assert rows["Rate source"]["JPY"] == "BNP file"
     # the grid itself carries no rate / delta rows any more
-    grid = exposure.combined_table(result, RECORDS)
+    grid = exposure.combined_table(result, RECORDS).children[0]
     assert "Rate source" not in {r[exposure.ROW_LABEL_COL] for r in grid.data}
 
 
@@ -334,7 +334,8 @@ def test_futures_table_unavailable_with_reason_when_no_mark():
     futures = {"value": float("nan"), "by_instrument": {}, "missing": ["ESU6 Index"],
                "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
     table = exposure.futures_table(futures)
-    assert "no FUTURE_PX" in table.data[0]["usd_delta"]
+    assert table.data[0]["usd_delta"] == exposure.UNAVAILABLE
+    assert "no FUTURE_PX" in table.tooltip_data[0]["usd_delta"]["value"]
 
 
 def test_exposure_section_shows_fallback_note():
@@ -406,13 +407,15 @@ def test_combined_frame_settled_column_first_then_dates_then_total():
     assert list(frame["kind"]) == ["currency", "currency", exposure.USD_EQUIVALENT_COL]
     assert list(frame[exposure.CURRENCY_COL]) == ccys + [""]
     by_label = frame.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc["JPY", SETTLED] == "500,000" and by_label.loc["USD", SETTLED] == "(3,000)"
-    assert by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, SETTLED] == "333"  # 500,000 / 150 - 3,000
-    table = exposure.combined_table(result, records)
+    assert by_label.loc["JPY", SETTLED] == 500_000 and by_label.loc["USD", SETTLED] == -3_000
+    assert round(by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, SETTLED]) == 333  # 500,000 / 150 - 3,000
+    table, footer = exposure.combined_table(result, records).children   # the USD row is the pinned footer
     assert [c["name"] for c in table.columns] == ["Currency", exposure.SETTLED_ROW_LABEL, "25 Sep",
                                                   exposure.TOTAL_COLUMN_LABEL]
+    assert [r["kind"] for r in table.data] == ["currency", "currency"]
+    assert footer.data[0]["kind"] == exposure.USD_EQUIVALENT_COL and footer.columns == table.columns
     block, _ = exposure.summary_block_frame(result, records, rates=_jpy_rate())
-    assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "JPY"] == "(146,500,000)"
+    assert block.set_index(exposure.ROW_LABEL_COL).loc["Local delta", "JPY"] == -146_500_000
 
 
 def test_summary_block_rate_row_shows_rate_as_quoted():
@@ -500,10 +503,10 @@ def test_render_shows_settled_cash_row_for_expired_ticket(tmp_path, monkeypatch)
     assert grid_ids[4] == SETTLED                                     # first value column
     assert [c["name"] for c in grid.columns][4] == exposure.SETTLED_ROW_LABEL
     by_label = {r[exposure.ROW_LABEL_COL]: r for r in grid.data}
-    assert by_label["JPY"][SETTLED] == "(147,100,000)" and by_label["USD"][SETTLED] == "1,000,000"
+    assert by_label["JPY"][SETTLED] == -147_100_000 and by_label["USD"][SETTLED] == 1_000_000
     assert _find_id(body, exposure.SUMMARY_BLOCK_TABLE_ID) is None     # one table, no block above it
     assert by_label["JPY"]["fx_rate"] == "USDJPY 147.12"
-    assert by_label["JPY"]["local_delta"] == "(147,100,000)"
+    assert by_label["JPY"]["local_delta"] == -147_100_000
 
 
 # --------------------------------------------------------------------------- 2026-09-21: one table, NDF display
@@ -530,10 +533,12 @@ def test_exposure_section_folds_the_rate_delta_figures_into_the_grid_as_its_firs
             assert [row[k] for k in ("fx_rate", "local_delta", "usd_delta")] == [
                 by_kind.at[k, row[exposure.CURRENCY_COL]] for k in ("fx_rate", "local_delta", "usd_delta")]
     jpy = next(r for r in grid.data if r[exposure.CURRENCY_COL] == "JPY")
-    assert jpy["fx_rate"] == "147" and jpy["local_delta"] == "(147,100,000)"   # RATES names no pair
+    assert jpy["fx_rate"] == "147" and jpy["local_delta"] == -147_100_000   # RATES names no pair
     totals = portfolio_totals(build_exposure(RECORDS, RATES))
-    usd_row = next(r for r in grid.data if r["kind"] == exposure.USD_EQUIVALENT_COL)
-    assert usd_row["usd_delta"] == exposure.format_amount(totals["net_usd"])
+    footer = _find_id(section, exposure.COMBINED_TABLE_ID + "-footer")     # the USD row is pinned under the grid
+    assert all(r["kind"] != exposure.USD_EQUIVALENT_COL for r in grid.data)
+    usd_row = next(r for r in footer.data if r["kind"] == exposure.USD_EQUIVALENT_COL)
+    assert usd_row["usd_delta"] == pytest.approx(totals["net_usd"])
     assert usd_row["fx_rate"] == "" and usd_row["local_delta"] == ""
 
 
@@ -565,7 +570,7 @@ def test_ndf_currency_row_label_rate_cell_and_fixing_caption():
     by_label = block.set_index(exposure.ROW_LABEL_COL)
     assert by_label.loc["FX rate (as quoted)", "KRW"] == "KWN+1M 1,394.5"
     assert by_label.loc["FX rate (as quoted)", "JPY"] == "USDJPY 150"
-    assert by_label.loc["USD delta", "KRW"] == "(1,000,000)"          # / 1,394.5, the 1M NDF price
+    assert by_label.loc["USD delta", "KRW"] == pytest.approx(-1_000_000)   # / 1,394.5, the 1M NDF price
     assert by_label.loc["Rate source", "KRW"] == "Bloomberg 1M NDF"
     only_krw = exposure.grid_records(records, exposure.LadderView(currencies=frozenset({"KRW"})))
     assert {r["currency"] for r in only_krw} == {"KRW"}
@@ -599,7 +604,7 @@ def test_ndf_currency_with_no_1m_price_is_blank_with_its_reason_never_spot():
     by_label = block.set_index(exposure.ROW_LABEL_COL)
     assert by_label.loc["FX rate (as quoted)", "KRW"] == ""
     assert by_label.loc["USD delta", "KRW"] == "" and by_label.loc["USD delta", exposure.TOTAL_COL] == ""
-    assert by_label.loc["Local delta", "KRW"] == "(1,394,500,000)"      # the position itself is still shown
+    assert by_label.loc["Local delta", "KRW"] == -1_394_500_000      # the position itself is still shown
     assert by_label.loc["Rate source", "KRW"].startswith("MISSING: the 1M NDF price for KRW (KWN+1M) is missing")
     reasons = exposure.rate_reasons_caption(result).children
     assert 'KRW: the 1M NDF price for KRW (KWN+1M) is missing: press "Pull Bloomberg now"' in reasons
@@ -608,7 +613,7 @@ def test_ndf_currency_with_no_1m_price_is_blank_with_its_reason_never_spot():
     frame, _ = exposure.combined_frame(result, records)
     usd_row = frame.set_index(exposure.ROW_LABEL_COL).loc[exposure.USD_EQUIVALENT_ROW_LABEL]
     assert usd_row["2026-09-17"] == "" and usd_row[exposure.TOTAL_COL] == ""   # blank, never a partial sum
-    assert usd_row["2026-09-25"] == "20,000"                                     # -147m / 150 + 1m: JPY is priced
+    assert round(usd_row["2026-09-25"]) == 20_000                                # -147m / 150 + 1m: JPY is priced
     card = exposure.headline_numbers(result).children[0]
     assert card.children[1].children == "Unavailable"
     assert "the 1M NDF price is missing for KRW (KWN+1M)" in card.children[2].children
@@ -655,7 +660,7 @@ def test_load_inputs_and_net_gross_usd_price_ndf_currencies_at_the_1m_ndf_mark(c
                                         forward_rates=inputs["forward_rates"])
     grid = _find_id(section, exposure.COMBINED_TABLE_ID)
     row = next(r for r in grid.data if r[exposure.CURRENCY_COL] == "KRW")
-    assert row[exposure.ROW_LABEL_COL] == "KRW (NDF)" and row[fixing] == "(1,394,500,000)"
+    assert row[exposure.ROW_LABEL_COL] == "KRW (NDF)" and row[fixing] == -1_394_500_000
     assert row["fx_rate"] == "KWN+1M 1,394.5"
     totals = cash_ladder.net_gross_usd(conn, "2026-08-17")
     assert totals["available"] is True

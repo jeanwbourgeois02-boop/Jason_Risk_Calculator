@@ -449,3 +449,9 @@ p { margin: 8px 0; }
 .fx-ccy-num--partial { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
 .fx-ccy-table td.cell--unavailable { cursor: help; font-weight: 400; }
 .fx-ccy-note { color: var(--muted); font-size: 11.5px; font-style: italic; margin: 6px 0 0; }
+
+/* A ranked table with a pinned footer (ui/tabs/ranking.py::with_footer): the total row is a
+   header-less second table straight under the first, so the two read as one. */
+.ranked-table .dash-table-container:first-child { border-bottom: none; border-radius: 8px 8px 0 0; }
+.ranked-table .dash-table-container + .dash-table-container { border-top: none; border-radius: 0 0 8px 8px; }
+.ranked-table .dash-table-container + .dash-table-container .dash-spreadsheet-inner tr:nth-child(even) td { background: inherit; }

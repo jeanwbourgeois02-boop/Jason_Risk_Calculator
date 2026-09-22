@@ -49,6 +49,7 @@ from typing import Dict, Iterable, List, Mapping, Optional
 import pandas as pd
 from dash import dash_table, dcc, html
 
+from ui.tabs import ranking as rk
 from ui.tabs.formatting import format_cell
 
 SIGN_CONVENTION = "broker_reference"
@@ -125,6 +126,22 @@ def format_amount(value) -> str:
     return format_cell(value)
 
 
+def grid_cell(value):
+    """A cell as a ranked table stores it (ui.tabs.ranking): the number itself; None for an
+    exact zero, which the table prints as the em dash (`format_amount`'s rule); '' for an
+    amount with no mark, which stays blank, never a partial sum. Both rank last."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if pd.isna(f):
+        return ""
+    return None if round(f) == 0 else f
+
+
+UNAVAILABLE = "Unavailable"   # the cell; the reason is its tooltip (`_unavailable_label`)
+
+
 def format_date(iso: str) -> str:
     """'2026-09-08' -> '08 Sep 2026'; anything unparseable is returned unchanged."""
     try:
@@ -140,12 +157,8 @@ def rate_status_text(result) -> str:
 
 
 def _sign_styles(columns: Iterable[str]) -> list:
-    styles = []
-    for c in columns:
-        styles.append({"if": {"column_id": c, "filter_query": f"{{{c}}} contains '('"}, "color": _NEG})
-        styles.append({"if": {"column_id": c, "filter_query": f"{{{c}}} contains ',' && !({{{c}}} contains '(')"},
-                       "color": _POS})
-    return styles
+    """Sign colours by the cell's number (ui.tabs.ranking), never by its text."""
+    return rk.sign_styles(columns, neg=_NEG, pos=_POS)
 
 
 HEADLINE_ID = "exposure-headline"
@@ -332,6 +345,7 @@ def summary_table(frame: pd.DataFrame) -> dash_table.DataTable:
         f[col] = f[col].map(format_amount)
     return dash_table.DataTable(
         id=SUMMARY_TABLE_ID,
+        **rk.sortable(SUMMARY_TABLE_ID),
         columns=[{"name": labels[c], "id": c} for c in f.columns],
         data=f.to_dict("records"),
         style_table={"overflowX": "auto"},
@@ -366,6 +380,7 @@ def ladder_table(result) -> dash_table.DataTable:
                + [{"name": "USD equivalent", "id": USD_EQUIVALENT_COL}])
     return dash_table.DataTable(
         id=LADDER_TABLE_ID,
+        **rk.sortable(LADDER_TABLE_ID),
         columns=columns,
         data=frame.to_dict("records"),  # includes ISO settlement_date, not displayed
         fixed_rows={},
@@ -578,10 +593,10 @@ def summary_block_frame(result, records: List[dict], sort: str = SORT_USD,
                 else:
                     row[c] = "Bloomberg 1M NDF" if (entry or {}).get("mark_type") == "NDF_1M" else "Bloomberg"
             else:
-                row[c] = format_amount(by_ccy.loc[c, key])
-        row[TOTAL_COL] = format_amount(totals["net_usd"]) if key == "usd_delta" else ""
+                row[c] = grid_cell(by_ccy.loc[c, key])
+        row[TOTAL_COL] = grid_cell(totals["net_usd"]) if key == "usd_delta" else ""
         rows.append(row)
-    return pd.DataFrame(rows, columns=[ROW_LABEL_COL, "kind"] + ccys + [TOTAL_COL]), ccys
+    return pd.DataFrame(rows, columns=[ROW_LABEL_COL, "kind"] + ccys + [TOTAL_COL], dtype=object), ccys
 
 
 def _summary_block_datatable(frame: pd.DataFrame, ccys: List[str]) -> dash_table.DataTable:
@@ -675,13 +690,14 @@ def combined_frame(result, records: List[dict], sort: str = SORT_USD,
     rows = []
     for c in ccys:
         row = {ROW_LABEL_COL: currency_label(c), CURRENCY_COL: c, "kind": "currency"}
-        row.update({col: format_amount(body.at[c, col]) for col in value_cols})
+        row.update({col: grid_cell(body.at[c, col]) for col in value_cols})
         rows.append(row)
     if shown:
         row = {ROW_LABEL_COL: USD_EQUIVALENT_ROW_LABEL, CURRENCY_COL: "", "kind": USD_EQUIVALENT_COL}
-        row.update({col: format_amount(usd_row[col]) for col in value_cols})
+        row.update({col: grid_cell(usd_row[col]) for col in value_cols})
         rows.append(row)
-    return pd.DataFrame(rows, columns=list(_GRID_META_COLUMNS) + value_cols), ccys
+    # object dtype: None (an exact zero, the em dash) and '' (no mark, blank) must survive as they are
+    return pd.DataFrame(rows, columns=list(_GRID_META_COLUMNS) + value_cols, dtype=object), ccys
 
 
 def grid_value_columns(frame: pd.DataFrame) -> List[str]:
@@ -734,33 +750,44 @@ def grid_records_with_summary(frame: pd.DataFrame, summary: Optional[pd.DataFram
 
 
 def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
-                    summary: Optional[pd.DataFrame] = None) -> dash_table.DataTable:
+                    summary: Optional[pd.DataFrame] = None) -> html.Div:
+    """The grid as a ranked table (ui.tabs.ranking, user 2026-09-22: every table ranks):
+    a click on any header sorts the currency rows by it, the cells are numbers (an exact
+    zero is None and prints as the em dash, an unmarked amount is '' and stays blank), and
+    the "USD equivalent" row is pinned under the currency rows as the table's footer, so
+    it never joins a ranking. Both tables take their column widths from the content, so
+    the columns stay as thin as their longest number (user, 2026-09-21) and line up."""
     from engine.ladder.exposure_adapter import SETTLED
     view = view or DEFAULT_VIEW
     value_cols = grid_value_columns(frame)
     summary_cols = [] if summary is None or summary.empty else SUMMARY_GRID_COLUMNS
     several_years = len({c[:4] for c in value_cols if c not in (SETTLED, TOTAL_COL)}) > 1
-    columns = ([{"name": "Currency (USD eq.)" if view.show_usd else "Currency", "id": ROW_LABEL_COL}]
-               + [{"name": label, "id": key} for key, label in summary_cols]
-               + [{"name": _grid_column_name(c, several_years), "id": c} for c in value_cols])
+    grid_format = rk.amount(nully=EM_DASH)
+    columns = ([rk.text("Currency (USD eq.)" if view.show_usd else "Currency", ROW_LABEL_COL)]
+               + [rk.text(label, key) if key == "fx_rate" else rk.numeric(label, key, grid_format)
+                  for key, label in summary_cols]
+               + [rk.numeric(_grid_column_name(c, several_years), c, grid_format) for c in value_cols])
+    records = grid_records_with_summary(frame, summary)  # includes CURRENCY_COL (plain code) and kind, not displayed
+    body = [r for r in records if r.get("kind") != USD_EQUIVALENT_COL]
+    footer = [r for r in records if r.get("kind") == USD_EQUIVALENT_COL]
     # The currency label stays in sight when the dates scroll sideways. Done with
     # `position: sticky` on that one column, NOT Dash's `fixed_columns`: that option
     # splits the table into separate fixed and scrolling tables whose widths and row
-    # heights can drift apart, and it could not be checked in a browser for this change;
-    # a sticky cell that a browser ignores just scrolls like any other column. The cell
-    # needs its own opaque background or the dates show through it.
+    # heights can drift apart. The cell needs its own opaque background or the dates
+    # show through it.
     sticky = {"position": "sticky", "left": 0, "zIndex": 2, "backgroundColor": _KEY_INFO_TINT,
               "boxShadow": "1px 0 0 #d9dee3"}
     # The bar sits after the last key-figure column: Settled cash, or USD delta when the
     # settled dates are shown one by one and there is no Settled cash column.
     divider_col = SETTLED if SETTLED in value_cols else (summary_cols[-1][0] if summary_cols else ROW_LABEL_COL)
-    return dash_table.DataTable(
+    table = dash_table.DataTable(
         id=COMBINED_TABLE_ID,
         columns=columns,
-        data=grid_records_with_summary(frame, summary),  # includes CURRENCY_COL (plain code) and kind, not displayed
+        data=body,
+        **rk.sortable(COMBINED_TABLE_ID),
         style_table=_TABLE_STYLE,
-        # Thin columns (user, 2026-09-21): no fixed width, so each column is as wide as its
-        # own longest number and no wider; tighter padding and rows than the other tables.
+        # Thin columns (user, 2026-09-21): tighter padding and rows than the other tables;
+        # each column's width comes from its own content (`rk.with_footer`).
         style_cell={**_MONO, "fontSize": "12px", "padding": "3px 8px", "height": "26px", "minWidth": "48px"},
         style_cell_conditional=[
             {"if": {"column_id": ROW_LABEL_COL}, "textAlign": "left", "fontWeight": "600", **sticky},
@@ -777,10 +804,6 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
             {"if": {"column_id": divider_col}, "borderRight": _KEY_INFO_DIVIDER},
         ],
         style_data_conditional=_sign_styles(value_cols + [k for k, _ in summary_cols if k != "fx_rate"]) + [
-            # USD equivalent (the old right-hand column, now the bottom row): ruled off
-            # from the currency rows above it.
-            {"if": {"filter_query": f"{{kind}} = '{USD_EQUIVALENT_COL}'"}, "fontWeight": "700",
-             "backgroundColor": "#f7f8fa", "borderTop": "2px solid #1f2933"},
             # Total of the columns shown (spec 2026-09-18): the view's own sums.
             {"if": {"column_id": TOTAL_COL}, "fontWeight": "700", "backgroundColor": "#f1f3f7",
              "borderLeft": "1px solid #c8d0e0"},
@@ -789,6 +812,11 @@ def _grid_datatable(frame: pd.DataFrame, view: Optional[LadderView] = None,
             {"if": {"column_id": divider_col}, "borderRight": _KEY_INFO_DIVIDER},
         ],
     )
+    # USD equivalent (the old right-hand column, now the bottom row): ruled off from the
+    # currency rows above it, and never ranked with them.
+    usd_row_style = [{"if": {"filter_query": f"{{kind}} = '{USD_EQUIVALENT_COL}'"}, "fontWeight": "700",
+                      "backgroundColor": "#f7f8fa", "borderTop": "2px solid #1f2933"}]
+    return rk.with_footer(table, footer, footer_style=usd_row_style)
 
 
 def combined_table(result, records: List[dict], sort: str = SORT_USD,
@@ -964,16 +992,19 @@ def local_vs_usd_details(records: List[dict]):
         day = r["settlement_date"]
         data.append({
             "currency": r["currency"],
-            "settlement_date": SETTLED_ROW_LABEL if day == SETTLED else format_date(day),
-            "net_local": format_amount(r["net_local"]), "net_local_vs_usd": format_amount(r["net_local_vs_usd"]),
-            "net_local_cross": format_amount(r["net_local_cross"]), "net_usd": format_amount(r["net_usd"]),
-            "implied_rate_local_per_usd": ("" if pd.isna(r["implied_rate_local_per_usd"])
-                                           else f"{r['implied_rate_local_per_usd']:,.6g}"),
+            # ISO, so a click on "Value date" ranks the rows in date order (user, 2026-09-22).
+            "settlement_date": SETTLED_ROW_LABEL if day == SETTLED else str(day),
+            "net_local": grid_cell(r["net_local"]), "net_local_vs_usd": grid_cell(r["net_local_vs_usd"]),
+            "net_local_cross": grid_cell(r["net_local_cross"]), "net_usd": grid_cell(r["net_usd"]),
+            "implied_rate_local_per_usd": rk.value(r["implied_rate_local_per_usd"]),
         })
     table = dash_table.DataTable(
         id=LOCAL_VS_USD_ID,
-        columns=[{"name": LOCAL_VS_USD_LABELS[c], "id": c} for c in LOCAL_VS_USD_COLUMNS],
-        data=data, fixed_rows={}, style_table=_TABLE_STYLE,
+        columns=[rk.text(LOCAL_VS_USD_LABELS[c], c) if c in ("currency", "settlement_date")
+                 else rk.numeric(LOCAL_VS_USD_LABELS[c], c,
+                                 rk.rate(6, trim=True) if c == "implied_rate_local_per_usd" else rk.amount(nully=EM_DASH))
+                 for c in LOCAL_VS_USD_COLUMNS],
+        data=data, fixed_rows={}, style_table=_TABLE_STYLE, **rk.sortable(LOCAL_VS_USD_ID),
         style_cell={**_MONO, "minWidth": "125px", "width": "125px", "maxWidth": "170px"},
         style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left", "fontWeight": "600"}
                                 for c in ("currency", "settlement_date")],
@@ -1175,48 +1206,54 @@ def combined_risk_table(result, futures: Optional[dict] = None,
     frame = combined_risk_frame(result, futures, scenarios, futures_pct_by_scenario, fallback_ccys)
     scenario_names = list(scenarios)
 
-    display_rows = []
+    display_rows, tooltips = [], []
     for _, row in frame.iterrows():
         out = {RISK_LABEL_COL: row[RISK_LABEL_COL], "kind": row["kind"]}
+        tip = {}
         if row["_unavailable"]:
-            label = _unavailable_label(row["_unavailable"])
-            out["usd_delta"] = label
-            out["move_1pct"] = label
-            for name in scenario_names:
-                out[name] = label
+            # The cell says Unavailable and ranks last; the reason is its tooltip.
+            for col in ["usd_delta", "move_1pct", *scenario_names]:
+                out[col] = UNAVAILABLE
+                tip[col] = {"value": _unavailable_label(row["_unavailable"]), "type": "text"}
         else:
-            out["usd_delta"] = format_amount(row["usd_delta"])
-            out["move_1pct"] = format_amount(row["move_1pct"])
+            out["usd_delta"] = grid_cell(row["usd_delta"])
+            out["move_1pct"] = grid_cell(row["move_1pct"])
             for name in scenario_names:
                 v = row[name]
                 # A currency the scenario does not move is a zero, shown as the same em
                 # dash as any other zero, so a blank never reads as "not computed"
                 # (user decision 2026-09-15).
-                out[name] = format_amount(v) if v is not None else EM_DASH
+                out[name] = grid_cell(v) if v is not None else None
         display_rows.append(out)
+        tooltips.append(tip)
 
     totals = portfolio_totals(result)
     fut_value = futures.get("value", float("nan"))
+    net_tip = gross_tip = ""
     if totals["missing"]:
-        net_text = _unavailable_label("no rate: " + ", ".join(totals["missing"]))
+        net_value, net_tip = UNAVAILABLE, _unavailable_label("no rate: " + ", ".join(totals["missing"]))
     else:
         # USD position, same sign as the header's "Net USD delta" (CLAUDE.md: + = long USD):
         # the engine's net_usd is the net non-USD delta, so it is negated here, exactly as
         # ui/tabs/header.py and headline_numbers above do. One figure, one sign, everywhere.
-        net_text = format_amount(-totals["net_usd"])
+        net_value = grid_cell(-totals["net_usd"])
     if totals["missing"] or pd.isna(fut_value):
         reasons = []
         if totals["missing"]:
             reasons.append("no rate: " + ", ".join(totals["missing"]))
         if pd.isna(fut_value):
             reasons.append(futures.get("reason") or "futures delta unavailable")
-        gross_text = _unavailable_label("; ".join(reasons))
+        gross_value, gross_tip = UNAVAILABLE, _unavailable_label("; ".join(reasons))
     else:
-        gross_text = format_amount(totals["gross_usd"] + abs(fut_value))
-    display_rows.append({RISK_LABEL_COL: "Net USD delta, FX only (+ = long USD)", "usd_delta": net_text,
-                         "move_1pct": "", "kind": "total", **{name: "" for name in scenario_names}})
-    display_rows.append({RISK_LABEL_COL: "Gross delta (incl. |futures|)", "usd_delta": gross_text,
-                         "move_1pct": "", "kind": "total", **{name: "" for name in scenario_names}})
+        gross_value = grid_cell(totals["gross_usd"] + abs(fut_value))
+    # The two totals are the table's footer (ui.tabs.ranking.with_footer): pinned under the
+    # rows, never ranked with them.
+    footer = [{RISK_LABEL_COL: "Net USD delta, FX only (+ = long USD)", "usd_delta": net_value,
+               "move_1pct": "", "kind": "total", **{name: "" for name in scenario_names}},
+              {RISK_LABEL_COL: "Gross delta (incl. |futures|)", "usd_delta": gross_value,
+               "move_1pct": "", "kind": "total", **{name: "" for name in scenario_names}}]
+    footer_tips = [{"usd_delta": {"value": net_tip, "type": "text"}} if net_tip else {},
+                   {"usd_delta": {"value": gross_tip, "type": "text"}} if gross_tip else {}]
 
     commodities = totals.get("commodities") or []
     commodity_caption = None
@@ -1237,14 +1274,17 @@ def combined_risk_table(result, futures: Optional[dict] = None,
     # a plain string name lets Dash wrap it itself once whiteSpace is 'normal' below --
     # no manual line-break needed since dash_table headers already wrap on word
     # boundaries when the header cell allows it.
-    columns = ([{"name": "Name", "id": RISK_LABEL_COL}, {"name": "USD delta", "id": "usd_delta"},
-               {"name": "1% P&L (USD)", "id": "move_1pct"}]
-              + [{"name": name, "id": name} for name in scenario_names])
+    dash_zero = rk.amount(nully=EM_DASH)
+    columns = ([rk.text("Name", RISK_LABEL_COL), rk.numeric("USD delta", "usd_delta", dash_zero),
+               rk.numeric("1% P&L (USD)", "move_1pct", dash_zero)]
+              + [rk.numeric(name, name, dash_zero) for name in scenario_names])
     table = dash_table.DataTable(
         id=RISK_TABLE_ID,
         columns=columns,
         data=display_rows,
+        tooltip_data=tooltips,
         fixed_rows={},
+        **rk.sortable(RISK_TABLE_ID),
         style_table=_TABLE_STYLE,
         style_cell={**_MONO, "minWidth": "125px", "width": "125px", "maxWidth": "170px"},
         style_cell_conditional=[
@@ -1257,8 +1297,6 @@ def combined_risk_table(result, futures: Optional[dict] = None,
             {"if": {"column_id": RISK_LABEL_COL}, "textAlign": "left"},
         ],
         style_data_conditional=_sign_styles(["usd_delta", "move_1pct"] + scenario_names) + [
-            {"if": {"filter_query": "{" + RISK_LABEL_COL + "} contains 'Net USD' || {" + RISK_LABEL_COL + "} contains 'Gross USD'"},
-             "fontWeight": "700", "borderTop": "2px solid #1f2933"},
             # Gold/metals (XAU etc.): shown on their own row like any currency, but
             # excluded from the Net/Gross totals above (2026-09-17, "the XAU does not
             # work well" -- CLAUDE.md reports gold separately from FX Net/Gross USD).
@@ -1266,7 +1304,9 @@ def combined_risk_table(result, futures: Optional[dict] = None,
             {"if": {"filter_query": "{kind} = 'commodity'"}, "backgroundColor": "#fbf3e0", "fontStyle": "italic"},
         ],
     )
-    children = [html.H4("Risk and scenarios"), table]
+    total_style = [{"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700", "borderTop": "2px solid #1f2933"}]
+    children = [html.H4("Risk and scenarios"),
+                rk.with_footer(table, footer, widths=False, footer_style=total_style, footer_tooltips=footer_tips)]
     if commodity_caption is not None:
         children.append(commodity_caption)
     return html.Div(className="section", children=children)
@@ -1303,18 +1343,29 @@ def futures_table(futures: Optional[dict] = None, details: Optional[Dict[str, di
     frame = futures_table_frame(futures, details)
     if frame.empty:
         return html.P("No open futures for this as-of date.", className="section-kicker")
-    records = frame.to_dict("records")
+    records, tooltips = frame.to_dict("records"), []
     for row in records:
-        row["usd_delta"] = (_unavailable_label(row["_unavailable"]) if row["_unavailable"]
-                            else format_amount(row["usd_delta"]))
-        row.pop("_unavailable")
+        reason = row.pop("_unavailable")
+        for col in ("contracts", "multiplier", "settlement_price"):
+            row[col] = None if row[col] == "n/a" else rk.value(row[col])
+        if reason:  # the cell says Unavailable and ranks last; the reason is its tooltip
+            row["usd_delta"] = UNAVAILABLE
+            tooltips.append({"usd_delta": {"value": _unavailable_label(reason), "type": "text"}})
+        else:
+            row["usd_delta"] = grid_cell(row["usd_delta"])
+            tooltips.append({})
     labels = {"instrument": "Instrument", "contracts": "Contracts", "multiplier": "Multiplier",
               "settlement_price": "Settlement price", "usd_delta": "USD delta"}
+    formats = {"contracts": rk.count(nully="n/a"), "multiplier": rk.count(nully="n/a"),
+               "settlement_price": rk.rate(2, nully="n/a", trim=True), "usd_delta": rk.amount(nully=EM_DASH)}
     return dash_table.DataTable(
         id=FUTURES_TABLE_ID,
-        columns=[{"name": labels[c], "id": c} for c in FUTURES_COLUMNS],
+        columns=[rk.text(labels[c], c) if c == "instrument" else rk.numeric(labels[c], c, formats[c])
+                 for c in FUTURES_COLUMNS],
         data=records,
+        tooltip_data=tooltips,
         fixed_rows={},
+        **rk.sortable(FUTURES_TABLE_ID),
         style_table=_TABLE_STYLE,
         style_cell={**_MONO, "minWidth": "125px", "width": "125px", "maxWidth": "170px"},
         style_cell_conditional=[
@@ -1355,14 +1406,12 @@ def pair_position_frame(df: pd.DataFrame) -> pd.DataFrame:
             return r["instrument_id"] + " (cross)"
         return r["instrument_id"]
 
-    out = pd.DataFrame({
-        PAIR_LABEL_COL: df.apply(_label, axis=1),
-        "spot": df["spot"].map(lambda v: "" if pd.isna(v) else f"{v:.6f}"),
-        "notional_base": df["notional_base"].map(format_amount),
-        "notional_usd": df["notional_usd"].map(format_amount),
-        "move_1pct_usd": df["move_1pct_usd"].map(format_amount),
-    })
-    return out
+    rows = [{PAIR_LABEL_COL: _label(r), "spot": rk.value(r["spot"]), "notional_base": grid_cell(r["notional_base"]),
+             "notional_usd": grid_cell(r["notional_usd"]), "move_1pct_usd": grid_cell(r["move_1pct_usd"])}
+            for _, r in df.iterrows()]
+    # object dtype: a None (an exact zero, printed as the em dash) must stay None, not
+    # become NaN, and a '' (no mark) must stay a blank.
+    return pd.DataFrame(rows, columns=[PAIR_LABEL_COL] + PAIR_DISPLAY_COLUMNS, dtype=object)
 
 
 def pair_position_table(df: Optional[pd.DataFrame]) -> html.Div:
@@ -1377,15 +1426,17 @@ def pair_position_table(df: Optional[pd.DataFrame]) -> html.Div:
             html.P("No open FX forward/spot/swap pairs for this as-of date.", className="section-kicker"),
         ])
     frame = pair_position_frame(df)
-    columns = ([{"name": "Pair", "id": PAIR_LABEL_COL}, {"name": "Spot (market quote)", "id": "spot"},
-               {"name": "Notional (base ccy)", "id": "notional_base"},
-               {"name": "USD notional (USD sign: + long USD)", "id": "notional_usd"},
-               {"name": "1% P&L (USD)", "id": "move_1pct_usd"}])
+    dash_zero = rk.amount(nully=EM_DASH)
+    columns = ([rk.text("Pair", PAIR_LABEL_COL), rk.numeric("Spot (market quote)", "spot", rk.rate(6)),
+               rk.numeric("Notional (base ccy)", "notional_base", dash_zero),
+               rk.numeric("USD notional (USD sign: + long USD)", "notional_usd", dash_zero),
+               rk.numeric("1% P&L (USD)", "move_1pct_usd", dash_zero)])
     table = dash_table.DataTable(
         id=PAIR_TABLE_ID,
         columns=columns,
         data=frame.to_dict("records"),
         fixed_rows={},
+        **rk.sortable(PAIR_TABLE_ID),
         style_table=_TABLE_STYLE,
         style_cell={**_MONO, "minWidth": "150px", "width": "150px", "maxWidth": "220px"},
         style_cell_conditional=[
