@@ -1,0 +1,29 @@
+{
+  "exported_at": "2026-09-22T11:02:27+08:00",
+  "marks_from": "2026-07-08",
+  "marks_through": "2026-09-21",
+  "rows": {
+    "instruments": 71,
+    "marks": 3871,
+    "curves": 85,
+    "curve_quotes": 206,
+    "index_fixings": 0,
+    "vol_quotes": 1350,
+    "equity_dividend_yields": 1
+  },
+  "ddl": {
+    "marks": "CREATE TABLE marks (\n  as_of_date      TEXT NOT NULL,\n  instrument_id   TEXT NOT NULL REFERENCES instruments,\n  settle_date     TEXT NOT NULL,\n  mark_type       TEXT NOT NULL,\n  value           REAL NOT NULL,\n  source          TEXT NOT NULL,\n  snapped_at      TEXT NOT NULL,\n  PRIMARY KEY (as_of_date, instrument_id, settle_date, mark_type, source)\n)",
+    "curves": "CREATE TABLE curves (\n  curve_id        TEXT NOT NULL,\n  as_of_date      TEXT NOT NULL,\n  node_date       TEXT NOT NULL,\n  discount_factor REAL NOT NULL,\n  par_rate        REAL NOT NULL,\n  source          TEXT NOT NULL,\n  PRIMARY KEY (curve_id, as_of_date, node_date, source)\n)",
+    "curve_quotes": "CREATE TABLE curve_quotes (\n  as_of_date      TEXT NOT NULL,\n  ccy             TEXT NOT NULL,\n  \"index\"         TEXT NOT NULL,\n  tenor           TEXT NOT NULL,\n  ticker          TEXT NOT NULL,\n  value           REAL NOT NULL,\n  quote_type      TEXT NOT NULL,\n  field           TEXT NOT NULL,\n  source          TEXT NOT NULL,\n  PRIMARY KEY (as_of_date, ccy, \"index\", tenor, source)\n)",
+    "index_fixings": "CREATE TABLE index_fixings (\n  \"index\"         TEXT NOT NULL,      -- 'SOFR', 'ESTR', ...\n  fixing_date     TEXT NOT NULL,\n  value           REAL NOT NULL,\n  source          TEXT NOT NULL,      -- BBG_BDH | MANUAL\n  PRIMARY KEY (\"index\", fixing_date, source)\n)",
+    "vol_quotes": "CREATE TABLE vol_quotes (\n  as_of_date  TEXT NOT NULL,\n  pair        TEXT NOT NULL,\n  tenor       TEXT NOT NULL,\n  quote_type  TEXT NOT NULL,\n  value       REAL NOT NULL,\n  ticker      TEXT NOT NULL,\n  field       TEXT NOT NULL,\n  source      TEXT NOT NULL,\n  snapped_at  TEXT NOT NULL,\n  PRIMARY KEY (as_of_date, pair, tenor, quote_type, source)\n)",
+    "equity_dividend_yields": "CREATE TABLE equity_dividend_yields (\n  as_of_date      TEXT NOT NULL,\n  underlying      TEXT NOT NULL,   -- underlying instrument_id, e.g. 'SPX Index'\n  dividend_yield  REAL NOT NULL,   -- continuous, decimal; 0.0 for a non-dividend payer (explicit, not a sentinel)\n  source          TEXT NOT NULL,\n  PRIMARY KEY (as_of_date, underlying, source)\n)"
+  },
+  "last_pull": {
+    "time": "2026-09-22T11:01:57+08:00",
+    "connected": true,
+    "requested": 81,
+    "written": 79,
+    "failed": 2
+  }
+}

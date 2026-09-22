@@ -1,0 +1,1364 @@
+{
+  "time": "2026-09-22T11:01:57+08:00",
+  "connected": true,
+  "reason": "",
+  "host": "localhost:8194",
+  "as_of_date": "2026-09-21",
+  "requested": 81,
+  "written": 79,
+  "failed": 2,
+  "items": [
+    {
+      "instrument_id": "AUDUSD",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 0.7117,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "AUDUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 0.7117,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "AUDUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 0.71175,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "AUDUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 0.7118,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "AUDUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-24",
+      "status": "OK",
+      "value": 0.7118,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "AUDUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-28",
+      "status": "OK",
+      "value": 0.7117,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURSEK",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 11.2802,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-25",
+      "status": "OK",
+      "value": 11.2799,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-11-25",
+      "status": "OK",
+      "value": 11.266211764705883,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-11-27",
+      "status": "OK",
+      "value": 11.265835294117649,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURUSD",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 1.147,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 1.147,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "EURUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 1.14695,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 1.1469,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-24",
+      "status": "OK",
+      "value": 1.1469,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "SPX Index",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 7764.7,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDBRL",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 5.1089,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDBRL",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-24",
+      "status": "OK",
+      "value": 5.109,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDBRL",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-10-19",
+      "status": "FAILED",
+      "value": null,
+      "source": "",
+      "detail": "2026-10-19 outside curve 2026-09-23..2026-09-24"
+    },
+    {
+      "instrument_id": "USDCAD",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 1.4033,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCAD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 1.4033,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDCAD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 1.40335,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCAD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 1.4034,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCHF",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 0.8207,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCHF",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 0.8207,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDCHF",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 0.8208,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCHF",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 0.8209,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCHF",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-10-19",
+      "status": "OK",
+      "value": 0.818344,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCNH",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 6.6966,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCNH",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 6.6977,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDIDR",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 17895.0,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDIDR",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 17895.0,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDIDR",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-24",
+      "status": "OK",
+      "value": 17895.0,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDJPY",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 157.52,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDJPY",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-24",
+      "status": "OK",
+      "value": 157.567,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDJPY",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-25",
+      "status": "OK",
+      "value": 157.5274,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDJPY",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2027-03-01",
+      "status": "OK",
+      "value": 155.47857142857143,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDJPY",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2027-03-03",
+      "status": "OK",
+      "value": 155.45260714285715,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDKRW",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 1360.0,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDKRW",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 1360.0,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDKRW",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-28",
+      "status": "OK",
+      "value": 1360.0,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDKRW",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-10-13",
+      "status": "OK",
+      "value": 1359.8747727272728,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDMXN",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 17.2214,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDMXN",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 17.2214,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDMXN",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 17.220100000000002,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDMXN",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 17.2188,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDNOK",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 9.4349,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDNOK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 9.4349,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDNOK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 9.4348,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDNOK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 9.4347,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDSEK",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 9.8349,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 9.8349,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 9.8355,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 9.8361,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDTRY",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 48.8165,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDTRY",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 48.7818,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDTWD",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 31.711,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDTWD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 31.711,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDTWD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-24",
+      "status": "OK",
+      "value": 31.71,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDTWD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-29",
+      "status": "FAILED",
+      "value": null,
+      "source": "",
+      "detail": "2026-09-29 outside curve 2026-09-23..2026-09-24"
+    },
+    {
+      "instrument_id": "USDZAR",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 16.2512,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDZAR",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 16.2512,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDZAR",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 16.25,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDZAR",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 16.2488,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDZAR",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-10-13",
+      "status": "OK",
+      "value": 16.270062499999998,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "XAUUSD",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 4344.08,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "XAUUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 4344.08,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "XAUUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 4344.42597,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "XAUUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 4344.77194,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 11.2806,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDCHF",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-10-15",
+      "status": "OK",
+      "value": 0.818712,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDJPY",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-11-19",
+      "status": "OK",
+      "value": 156.8235,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDZAR",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-10-09",
+      "status": "OK",
+      "value": 16.2657125,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "XAUUSD",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-10-15",
+      "status": "OK",
+      "value": 4354.470876,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "ESZ6 Index",
+      "mark_type": "FUTURE_PX",
+      "settle_date": "2026-12-18",
+      "status": "OK",
+      "value": 7835.0,
+      "source": "BBG_BDH",
+      "detail": "live PX_LAST"
+    },
+    {
+      "instrument_id": "SPX/E261016C7615",
+      "mark_type": "FUTURE_PX",
+      "settle_date": "2026-10-16",
+      "status": "OK",
+      "value": 213.4,
+      "source": "BBG_BDH",
+      "detail": "live PX_MID"
+    },
+    {
+      "instrument_id": "SPX/E261016P7615",
+      "mark_type": "FUTURE_PX",
+      "settle_date": "2026-10-16",
+      "status": "OK",
+      "value": 41.65,
+      "source": "BBG_BDH",
+      "detail": "live PX_MID"
+    },
+    {
+      "instrument_id": "USDBRL",
+      "mark_type": "NDF_1M",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 5.1453,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDIDR",
+      "mark_type": "NDF_1M",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 17934.0,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDKRW",
+      "mark_type": "NDF_1M",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 1360.05,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDTWD",
+      "mark_type": "NDF_1M",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 31.707,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    }
+  ],
+  "warnings": [
+    "AUDUSD 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "AUDUSD 2026-09-28: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "EURSEK 2026-11-25: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "EURSEK 2026-11-27: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "EURUSD 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDCAD 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDCHF 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDCHF 2026-10-19: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDJPY 2027-03-01: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDJPY 2027-03-03: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDKRW 2026-10-13: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDMXN 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDNOK 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDSEK 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDZAR 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDZAR 2026-10-13: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "XAUUSD 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "XAUUSD 2026-09-23: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDCHF 2026-10-15: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDJPY 2026-11-19: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "USDZAR 2026-10-09: interp from FWD_CURVE tenors (source BBG_INTERP)",
+    "XAUUSD 2026-10-15: interp from FWD_CURVE tenors (source BBG_INTERP)"
+  ],
+  "dividends": {
+    "written": 1,
+    "missing": []
+  },
+  "rates": {
+    "currencies": {
+      "SEK": {
+        "quotes": 0,
+        "fixings": 0,
+        "error": "SEK has no OIS index in Phase 1 scope (AUD, CAD, CHF, EUR, GBP, JPY, USD only); an option in this currency gets its rate implied from the pair's forward curve and the other currency's OIS curve (engine/options/rates.py, IMPLIED_FORWARD); a manual rate (engine/options/rates.py::set_manual_rate) is only needed if that forward curve is not on file."
+      },
+      "XAU": {
+        "quotes": 0,
+        "fixings": 0,
+        "error": "XAU has no OIS index in Phase 1 scope (AUD, CAD, CHF, EUR, GBP, JPY, USD only); an option in this currency gets its rate implied from the pair's forward curve and the other currency's OIS curve (engine/options/rates.py, IMPLIED_FORWARD); a manual rate (engine/options/rates.py::set_manual_rate) is only needed if that forward curve is not on file."
+      },
+      "ZAR": {
+        "quotes": 0,
+        "fixings": 0,
+        "error": "ZAR has no OIS index in Phase 1 scope (AUD, CAD, CHF, EUR, GBP, JPY, USD only); an option in this currency gets its rate implied from the pair's forward curve and the other currency's OIS curve (engine/options/rates.py, IMPLIED_FORWARD); a manual rate (engine/options/rates.py::set_manual_rate) is only needed if that forward curve is not on file."
+      },
+      "CHF": {
+        "quotes": 8,
+        "fixings": 0,
+        "error": ""
+      },
+      "EUR": {
+        "quotes": 12,
+        "fixings": 0,
+        "error": ""
+      },
+      "JPY": {
+        "quotes": 9,
+        "fixings": 0,
+        "error": ""
+      },
+      "USD": {
+        "quotes": 17,
+        "fixings": 0,
+        "error": ""
+      }
+    },
+    "priced": 18,
+    "failed": [],
+    "as_of_date": "2026-09-21",
+    "seconds": {
+      "bloomberg": 3.4,
+      "pricing": 2.1
+    }
+  },
+  "vol": {
+    "pairs": {
+      "EURSEK": 45,
+      "EURUSD": 45,
+      "USDCHF": 45,
+      "USDJPY": 45,
+      "USDZAR": 45,
+      "XAUUSD": 45
+    },
+    "written": 270,
+    "diagnostics": [],
+    "as_of_date": "2026-09-21",
+    "ticker_checks_recorded": 9
+  },
+  "options": {
+    "priced": 29,
+    "skipped": [],
+    "as_of_date": "2026-09-21"
+  },
+  "ledger": {
+    "as_of_date": "2026-09-21",
+    "realised": 0,
+    "unrealisable": []
+  },
+  "curve_points_written": 236,
+  "as_of_marks": "2026-09-21",
+  "skipped": 0,
+  "timings": {
+    "session": 0.5,
+    "spot": 0.7,
+    "forwards": 3.5,
+    "futures": 1.5,
+    "rates": 5.5,
+    "vol": 1.0,
+    "options": 1.0,
+    "ledger": 0.0,
+    "total": 13.6
+  },
+  "timings_other": {
+    "build_requests": 0.0,
+    "write_marks": 0.0
+  },
+  "backfill": {
+    "running": false,
+    "reason": "",
+    "remaining": 0,
+    "days": {
+      "2026-09-18": {
+        "status": "INCOMPLETE",
+        "missing_count": 6,
+        "missing": [
+          "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-18",
+          "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-18",
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-18",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-18",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-18"
+        ]
+      },
+      "2026-09-17": {
+        "status": "INCOMPLETE",
+        "missing_count": 8,
+        "missing": [
+          "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-17",
+          "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-17",
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-17",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-17",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-17"
+        ]
+      },
+      "2026-09-16": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-16",
+          "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-16",
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-16",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-16",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-16"
+        ]
+      },
+      "2026-09-15": {
+        "status": "INCOMPLETE",
+        "missing_count": 14,
+        "missing": [
+          "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-15",
+          "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-15",
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-15",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-15",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-15"
+        ]
+      },
+      "2026-09-14": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-14",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-14",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-14",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-14"
+        ]
+      },
+      "2026-09-11": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-11",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-11",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-11",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-11"
+        ]
+      },
+      "2026-09-10": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-10",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-10",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-10",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-10"
+        ]
+      },
+      "2026-09-09": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-09",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-09",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-09",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-09"
+        ]
+      },
+      "2026-09-08": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-08",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-08",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-08",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-08"
+        ]
+      },
+      "2026-09-04": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-04",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-04",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-04",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-04"
+        ]
+      },
+      "2026-09-03": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-03",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-03",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-03",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-03"
+        ]
+      },
+      "2026-09-02": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-02",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-02",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-02",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-02"
+        ]
+      },
+      "2026-09-01": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-01",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-01",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-01",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-01"
+        ]
+      },
+      "2026-08-31": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-31",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-31",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-31",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-31"
+        ]
+      },
+      "2026-08-28": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-28",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-28",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-28",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-28"
+        ]
+      },
+      "2026-08-27": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-27",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-27",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-27",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-27"
+        ]
+      },
+      "2026-08-26": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-26",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-26",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-26",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-26"
+        ]
+      },
+      "2026-08-25": {
+        "status": "INCOMPLETE",
+        "missing_count": 11,
+        "missing": [
+          "Bloomberg returned no daily (17:00 New York) close for USDIDR on 2026-08-25",
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-25",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-25",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-25",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-25"
+        ]
+      },
+      "2026-08-24": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-24",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-24",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-24",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-24"
+        ]
+      },
+      "2026-08-21": {
+        "status": "INCOMPLETE",
+        "missing_count": 10,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-21",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-21",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-21",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-21"
+        ]
+      },
+      "2026-08-20": {
+        "status": "INCOMPLETE",
+        "missing_count": 9,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-20",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-20",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-20",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-20"
+        ]
+      },
+      "2026-08-19": {
+        "status": "INCOMPLETE",
+        "missing_count": 6,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-19",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-19",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-19",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-19"
+        ]
+      },
+      "2026-08-18": {
+        "status": "INCOMPLETE",
+        "missing_count": 6,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-18",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-18",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-18",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-18"
+        ]
+      },
+      "2026-08-17": {
+        "status": "INCOMPLETE",
+        "missing_count": 5,
+        "missing": [
+          "Bloomberg returned no daily (17:00 New York) close for USDIDR on 2026-08-17",
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-17",
+          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-17",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-17",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-17"
+        ]
+      },
+      "2026-08-14": {
+        "status": "INCOMPLETE",
+        "missing_count": 3,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-14",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-14",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-14"
+        ]
+      },
+      "2026-08-13": {
+        "status": "INCOMPLETE",
+        "missing_count": 3,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-13",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-13",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-13"
+        ]
+      },
+      "2026-08-12": {
+        "status": "INCOMPLETE",
+        "missing_count": 3,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-12",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-12",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-12"
+        ]
+      },
+      "2026-08-11": {
+        "status": "INCOMPLETE",
+        "missing_count": 3,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-11",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-11",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-11"
+        ]
+      },
+      "2026-08-10": {
+        "status": "INCOMPLETE",
+        "missing_count": 3,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-10",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-10",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-10"
+        ]
+      },
+      "2026-08-07": {
+        "status": "INCOMPLETE",
+        "missing_count": 4,
+        "missing": [
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-07",
+          "USDKRW 2026-09-16: outside the forward tenors 2026-08-11..2026-09-11, not extrapolated",
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-07",
+          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-07"
+        ]
+      },
+      "2025-12-31": {
+        "status": "DONE",
+        "missing_count": 0,
+        "missing": []
+      }
+    },
+    "last_run": "2026-09-22T10:46:05+08:00",
+    "note": "",
+    "points_scale": {
+      "AUDUSD": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "EURSEK": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "EURUSD": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "GBPUSD": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDBRL": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDCAD": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDCHF": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDHKD": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDIDR": {
+        "field": "FWD_SCALE",
+        "divisor": 1.0,
+        "raw": {
+          "FWD_SCALE": 0
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDJPY": {
+        "field": "FWD_SCALE",
+        "divisor": 100.0,
+        "raw": {
+          "FWD_SCALE": 2
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDKRW": {
+        "field": "FWD_SCALE",
+        "divisor": 1.0,
+        "raw": {
+          "FWD_SCALE": 0
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDMXN": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDNOK": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDSEK": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDSGD": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDTRY": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDTWD": {
+        "field": "FWD_SCALE",
+        "divisor": 1.0,
+        "raw": {
+          "FWD_SCALE": 0
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDZAR": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "XAUUSD": {
+        "field": "FWD_SCALE",
+        "divisor": 100.0,
+        "raw": {
+          "FWD_SCALE": 2
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      }
+    }
+  }
+}
