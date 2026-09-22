@@ -733,3 +733,26 @@ def test_apply_overrides_turns_marks_round_but_reapply_after_load_leaves_them_to
     conn = flipped_back_by_a_reload()
     assert irs_direction.apply_overrides(conn) == 1                        # standalone: a real flip on file
     assert ("2026-09-17", "PV_USD", "QL_PRICER", -1.0) in _marks_of(conn)
+
+
+# ---------------------------------------------------------------------------
+# NDF fixing tickers (data/ingest/common.py::NDF_FIX_TICKERS): the exit price of an
+# NDF is its currency's own official fixing, one Bloomberg ticker per NDF currency.
+# KRW and TWD are the user's terminal check of 2026-09-22 ("kobrusd for korea, try11
+# index for twd fix"), replacing KFTC18 / TAIFX1, which loaded but returned no PX_LAST.
+# ---------------------------------------------------------------------------
+
+
+def test_ndf_fix_tickers_are_the_users_verified_fixings():
+    from data.ingest.common import NDF_CCYS, NDF_FIX_TICKERS, NDF_1M_TICKERS
+
+    assert NDF_FIX_TICKERS == {
+        "BRL": "BZFXPTAX Index",
+        "KRW": "KOBRUSD Index",
+        "INR": "INRFBIL Index",
+        "TWD": "TRY11 Index",
+        "IDR": "JISDOR Index",
+    }
+    # One fixing per NDF currency, and every fixing is an Index security.
+    assert set(NDF_FIX_TICKERS) == NDF_CCYS == set(NDF_1M_TICKERS)
+    assert all(t.endswith(" Index") for t in NDF_FIX_TICKERS.values())

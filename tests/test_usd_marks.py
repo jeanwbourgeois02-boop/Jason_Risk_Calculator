@@ -41,6 +41,60 @@ def test_spot_date_skips_weekends():
     assert spot_date("2026-09-14") == "2026-09-16"  # Mon -> Wed
 
 
+def test_spot_date_is_the_shared_rule_per_pair():
+    """One spot-date rule for the app (engine.pnl.calendar.spot_date, 2026-09-22): T+1 for
+    USDCAD, T+2 for everything else, rolled forward off a holiday; a caller with no pair
+    keeps the T+2 rule."""
+    from engine.pnl import calendar as pnl_calendar
+    none = frozenset()
+    assert spot_date("2026-09-17", "USDCAD", none) == "2026-09-18"   # Thu -> Fri (T+1)
+    assert spot_date("2026-09-18", "USDCAD", none) == "2026-09-21"   # Fri -> Mon (T+1 over the weekend)
+    assert spot_date("2026-09-17", "USDJPY", none) == "2026-09-21"   # T+2 pairs unchanged
+    assert spot_date("2026-09-17", "EURUSD", none) == "2026-09-21"
+    assert spot_date("2026-09-17", "", none) == "2026-09-21"
+    # a holiday on the spot date itself rolls it forward; one in between does not count
+    assert spot_date("2026-11-24", "USDJPY", {"2026-11-26"}) == "2026-11-27"
+    assert spot_date("2026-11-24", "USDJPY", {"2026-11-25"}) == "2026-11-26"
+    assert spot_date("2026-11-25", "USDCAD", {"2026-11-26"}) == "2026-11-27"
+    for day, pair in (("2026-09-17", "USDCAD"), ("2026-09-17", "USDJPY"), ("2026-11-24", "USDJPY")):
+        assert spot_date(day, pair) == pnl_calendar.spot_date(day, pair).isoformat()
+
+
+def test_usdcad_leg_is_spot_at_t_plus_1_and_forward_at_t_plus_2(conn):
+    """The Ladder's column and the Blotter's curve agree on the spot date: a USDCAD leg at
+    T+2 is one day along the curve, not spot (reviewer finding m-6)."""
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,1,0,?,'9999-12-31')",
+                 ("USDCAD", "FX", "USD", "CAD", "USDCAD Curncy"))
+    _mark(conn, "USDCAD", AS_OF, "SPOT", 1.36)
+    _mark(conn, "USDCAD", "2026-10-19", "FWD_OUTRIGHT", 1.35)  # 1M for a T+1 pair
+    conn.commit()
+    rates = {"CAD": _entry(1.36, True, "USDCAD"), "JPY": _entry(150.0, True, "USDJPY")}
+    out = forward_usd_rates(conn, rates, [("CAD", "2026-09-18"), ("CAD", "2026-09-21"),
+                                          ("JPY", "2026-09-21"), ("JPY", "2026-09-22")])
+    assert out[("CAD", "2026-09-18")]["basis"] == BASIS_SPOT and out[("CAD", "2026-09-18")]["quoted"] == 1.36
+    t2 = out[("CAD", "2026-09-21")]
+    assert t2["basis"] == BASIS_INTERPOLATED
+    # spot pillar (18 Sep, 1.36) -> 1M (19 Oct, 1.35): 21 Sep is 3/31 of the way
+    assert t2["quoted"] == pytest.approx(1.36 - 0.01 * 3 / 31)
+    assert t2["rate"] == pytest.approx(1 / t2["quoted"])
+    assert out[("JPY", "2026-09-21")]["basis"] == BASIS_SPOT        # T+2 pairs unchanged
+    assert out[("JPY", "2026-09-22")]["basis"] == BASIS_INTERPOLATED
+
+
+def test_forward_usd_rates_rolls_spot_off_a_holiday(conn, tmp_path, monkeypatch):
+    """A config/holidays.txt holiday on the spot date moves it forward, so the day before
+    the rolled date is still spot on the column."""
+    from engine.pnl import calendar as pnl_calendar
+    hol = tmp_path / "holidays.txt"
+    hol.write_text("2026-09-21\n")
+    monkeypatch.setattr(pnl_calendar, "_DEFAULT_HOLIDAYS_PATH", hol)
+    rates = {"JPY": _entry(150.0, True, "USDJPY")}
+    out = forward_usd_rates(conn, rates, [("JPY", "2026-09-21"), ("JPY", "2026-09-22"), ("JPY", "2026-09-23")])
+    assert out[("JPY", "2026-09-22")]["basis"] == BASIS_SPOT      # rolled spot date: Tue 22 Sep
+    assert out[("JPY", "2026-09-23")]["basis"] == BASIS_INTERPOLATED
+    assert out[("JPY", "2026-09-21")]["basis"] == BASIS_SPOT      # before the spot date
+
+
 def test_spot_on_or_before_spot_date_and_exact_outright(conn):
     rates = {"JPY": _entry(150.0, True, "USDJPY"), "AUD": _entry(0.66, False, "AUDUSD")}
     out = forward_usd_rates(conn, rates, [("JPY", AS_OF), ("JPY", "2026-09-21"), ("JPY", "2026-10-21"),

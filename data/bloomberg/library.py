@@ -70,7 +70,9 @@ MARK_KINDS = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX", NDF_FIX)
 # older code is then out of date although no trade changed, and the next reader resyncs it
 # (2026-09-22: NDF_FIX had been added to `compute`, but every existing database kept the
 # library its last upload wrote, so no pull asked for a fixing until the next upload).
-LIBRARY_VERSION = "2026-09-22.1"
+# 2026-09-22.2: data/ingest/common.py::NDF_FIX_TICKERS changed (KRW -> 'KOBRUSD Index', TWD ->
+# 'TRY11 Index'), so an existing database re-syncs its NDF_FIX rows before the next pull.
+LIBRARY_VERSION = "2026-09-22.2"
 NDF_1M = "NDF_1M"                  # an NDF currency's 1M outright, on its USD pair (the ladder's rate)
 DIV_YIELD = "DIV_YIELD"            # an index's dividend yield, for a listed option's Greeks
 DIV_YIELD_FIELDS = ("IDX_EST_DVD_YLD", "EQY_DVD_YLD_12M")   # per cent; the first Bloomberg answers

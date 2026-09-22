@@ -6,6 +6,7 @@ lacks a complete official close, using `data.bloomberg.inventory.close_completen
 (now SPOT + FWD_OUTRIGHT + FUTURE_PX); `start_auto_backfill` runs it in a background
 thread and publishes progress into the Bloomberg status file. Both are exercised with a
 fake fetch -- no blpapi required."""
+import json
 import threading
 from datetime import date, datetime, timedelta
 
@@ -685,3 +686,285 @@ def test_auto_backfill_works_a_day_whose_closes_are_complete_but_whose_inputs_ar
     results = run()
     assert [r["day"] for r in results] == [d.isoformat() for d in reversed(days)]          # reference dates first, newest first
     assert asked == [(9, date(2026, 9, 16), date(2026, 9, 18))] and all(r["vol_quotes"] == 0 for r in results)
+
+
+# --------------------------------------------------------------------------- retry rule (2026-09-22, "yes do part 2")
+# A day is asked again only when what it lacks changes, when the ticker rules change
+# (backfill.state_version), or -- for a day within the last RECENT_BUSINESS_DAYS business
+# days that is not waiting on a ticker Bloomberg rejects -- when RETRY_SECONDS have passed;
+# and the per-day state survives a restart (a JSON sidecar next to the status file).
+_REJECTION = "Unknown/Invalid security [nid:11150] "
+
+
+class _RejectingFetch:
+    """A spot fetch Bloomberg rejects: every ticker unknown, with Bloomberg's own words
+    on `.reason` (what pull_marks.fetch_intraday_close_series exposes)."""
+    def __init__(self):
+        self.asked = []
+
+    def __call__(self, session, service, tickers, field, day):
+        self.asked.append(day.isoformat())
+        return {}
+
+    @staticmethod
+    def reason(ticker, day):
+        return f"Bloomberg answered the intraday request for {ticker} with: {_REJECTION}"
+
+
+def test_a_day_whose_only_failure_is_a_ticker_bloomberg_rejects_waits_for_the_ticker_list_not_the_hour(tmp_path, monkeypatch):
+    """(a) and (d): 09-14 / 09-15 are older than 3 business days before Monday 09-21, 09-16..18
+    are within them; every day's SPOT ticker is rejected. None is due an hour later; all
+    are due when the version stamp changes; a day whose needs change is due at once."""
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-09-14")
+    fetch, now = _RejectingFetch(), [1000.0]
+    run = lambda f=fetch: backfill.auto_backfill(p, fetch=f, fwd_fetch=_no_tenor_prices, fut_fetch=_no_tenor_prices,  # noqa: E731
+                                                  log=lambda *_: None, clock=lambda: now[0])
+    first = run()
+    assert sorted(fetch.asked) == ["2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"]
+    assert all(r["status"] == "NO_CLOSES" for r in first)
+    key = backfill._db_key(p)
+    state = backfill._day_state[(key, "2026-09-14")]
+    assert state["rejected"] == ["AUDUSD Curncy"] and state["rejected_only"] is True
+    assert state["version"] == backfill.state_version()
+    assert backfill.is_rejection(state["missing"][-1])
+    fetch.asked.clear()
+    now[0] += backfill.RETRY_SECONDS + 1                # an hour on: neither the old days nor the recent ones
+    assert run() == [] and fetch.asked == []
+    now[0] += 24 * 3600                                 # a day on: still nothing
+    assert run() == [] and fetch.asked == []
+    # the ticker rules change (a corrected ticker in the code): every day is asked once more
+    monkeypatch.setattr(backfill, "state_version", lambda: "2099-01-01.1+corrected")
+    assert len(run()) == 5 and sorted(fetch.asked) == ["2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"]
+    assert backfill._day_state[(key, "2026-09-14")]["version"] == "2099-01-01.1+corrected"
+    fetch.asked.clear()
+    assert run() == [] and fetch.asked == []            # stamped by the new version: not again
+    # what a day lacks changes (a new trade dated 09-18): that day is due at once, the others still wait
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 ("NZDUSD", "FX", "NZD", "USD", 1, 0, "NZDUSD Curncy", "9999-12-31"))
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("n1", "XLSX", "NZDUSD", "FX_FWD", "n1", "2026-09-18", 1e6, 0.59, "acc", "cp", "", "t", "d", ""))
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("n1", 1, "FX_NEAR", "NZD", 1e6, "2026-09-18", _settle_date(), 0.59, 1),
+        ("n1", 2, "FX_NEAR", "USD", -590000, "2026-09-18", _settle_date(), 0.59, 1)])
+    conn.commit()
+    assert len(run()) == 1 and fetch.asked == ["2026-09-18"]
+
+
+def test_a_recent_day_with_no_settlement_yet_is_retried_hourly_until_it_is_older_than_three_business_days(tmp_path, monkeypatch):
+    """(b): a future's PX_LAST that Bloomberg has not returned ("returned no ...", a valid
+    request) on a day within the last 3 business days is asked again after RETRY_SECONDS;
+    once the day is older than that it is not asked again by time."""
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-09-16")
+    conn.execute("INSERT INTO instruments VALUES ('ESZ6 Index','FUTURE','ES','USD',50,0,'ESZ6 Index','2026-12-18')")
+    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESZ6 Index','FUTURE','f1','2026-09-16',2,6500,"
+                 "'acc','cp','','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',2*50*6500,'2026-09-16','2026-12-18',0,0)")
+    conn.commit()
+    settles, now = [], [1000.0]
+
+    def no_settles(session, service, tickers, fields, start, end):
+        settles.append((tuple(tickers), start, end))
+        return {}
+
+    run = lambda: backfill.auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=no_settles,  # noqa: E731
+                                         log=lambda *_: None, clock=lambda: now[0])
+    first = run()
+    assert len(first) == 3 and all(r["missing_marks"][0]["reason"].startswith("Bloomberg returned no PX_LAST for ESZ6 Index")
+                                   for r in first)
+    key = backfill._db_key(p)
+    state = backfill._day_state[(key, "2026-09-18")]
+    assert state["rejected"] == [] and state["rejected_only"] is False
+    settles.clear()
+    now[0] += 120
+    assert run() == [] and settles == []
+    now[0] += backfill.RETRY_SECONDS                    # within the last 3 business days: tried again
+    assert [r["day"] for r in run()] == ["2026-09-18", "2026-09-17", "2026-09-16"]
+    assert settles == [(("ESZ6 Index",), date(2026, 9, 16), date(2026, 9, 18))]
+    # Thursday 09-24: the last 3 business days are 09-21..23; 09-16..18 are older and wait
+    monkeypatch.setattr(live, "book_today", lambda: date(2026, 9, 24))
+    settles.clear()
+    now[0] += backfill.RETRY_SECONDS
+    worked = [r["day"] for r in run()]
+    assert sorted(worked) == ["2026-09-21", "2026-09-22", "2026-09-23"]           # the new days only
+    assert all(start >= date(2026, 9, 21) for _, start, _ in settles)
+    settles.clear()
+    now[0] += backfill.RETRY_SECONDS
+    assert sorted(r["day"] for r in run()) == ["2026-09-21", "2026-09-22", "2026-09-23"]
+    assert "2026-09-18" not in {d for _, start, end in settles for d in [start.isoformat(), end.isoformat()]}
+    assert backfill._waiting[key] == ("3 older day(s) got nothing more from Bloomberg's history; asked again when what "
+                                      "they lack, or the ticker list, changes; 3 day(s) within the last 3 business days "
+                                      "are tried again within the hour")
+
+
+def test_the_per_day_state_survives_a_restart(tmp_path, monkeypatch):
+    """(c): the in-memory state is cleared (a restart); the next run loads the sidecar and
+    asks nothing again. A recent day's hour still runs from its last try, so it is asked
+    again once the hour has passed."""
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-09-14")
+    requests, now = [], [1000.0]
+
+    def fetch(session, service, tickers, field, day):
+        requests.append(day.isoformat())
+        return _fake_fetch(session, service, tickers, field, day)
+
+    run = lambda: backfill.auto_backfill(p, fetch=fetch, fwd_fetch=_no_tenor_prices, fut_fetch=_no_tenor_prices,  # noqa: E731
+                                         log=lambda *_: None, clock=lambda: now[0])
+    assert len(run()) == 5                              # no forward tenors: every day stays incomplete
+    key = backfill._db_key(p)
+    sidecar = backfill._state_path(p)
+    assert sidecar.exists() and sidecar.name == "risk.db.backfill_state.json"
+    on_file = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert on_file["version"] == backfill.state_version() and sorted(on_file["days"]) == [
+        "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"]
+    assert on_file["days"]["2026-09-18"]["missing"] == ["Bloomberg returned no forward tenor prices for AUDUSD on 2026-09-18"]
+    before = dict(backfill._day_state)
+    backfill._day_state.clear()                         # the restart
+    requests.clear()
+    now[0] = 5.0                                        # a fresh monotonic clock
+    assert run() == [] and requests == []
+    loaded = backfill._day_state[(key, "2026-09-18")]
+    assert loaded["signature"] == before[(key, "2026-09-18")]["signature"]
+    assert loaded["missing"] == before[(key, "2026-09-18")]["missing"] and loaded["version"] == backfill.state_version()
+    assert abs(loaded["at"] - 5.0) < 60                 # tried moments ago, on the new clock
+    now[0] += backfill.RETRY_SECONDS                    # the hour passes: the 3 recent days only
+    assert sorted(requests) == [] and sorted(r["day"] for r in run()) == ["2026-09-16", "2026-09-17", "2026-09-18"]
+    assert sorted(requests) == ["2026-09-16", "2026-09-17", "2026-09-18"]
+
+
+def test_a_sidecar_stamped_by_another_version_counts_as_never_tried(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-09-14")
+    fetch = _RejectingFetch()
+    run = lambda: backfill.auto_backfill(p, fetch=fetch, fwd_fetch=_no_tenor_prices, fut_fetch=_no_tenor_prices,  # noqa: E731
+                                         log=lambda *_: None, clock=lambda: 1000.0)
+    assert len(run()) == 5
+    sidecar = backfill._state_path(p)
+    on_file = json.loads(sidecar.read_text(encoding="utf-8"))
+    for entry in on_file["days"].values():
+        entry["version"] = "2026-01-01.1+old"
+    sidecar.write_text(json.dumps(on_file), encoding="utf-8")
+    backfill._day_state.clear()
+    fetch.asked.clear()
+    assert len(run()) == 5 and len(fetch.asked) == 5
+    # and a sidecar that is not JSON is an empty state, never an error
+    sidecar.write_text("{not json", encoding="utf-8")
+    backfill._day_state.clear()
+    fetch.asked.clear()
+    assert len(run()) == 5 and json.loads(sidecar.read_text(encoding="utf-8"))["days"]
+
+
+def test_the_status_block_names_the_tickers_bloomberg_rejects(tmp_path, monkeypatch):
+    """(e): "waiting_on_tickers" in the status file's "backfill" block, and the log line."""
+    monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
+    p, conn = _db(tmp_path, "2026-09-14")
+    thread = backfill.start_auto_backfill(p, fetch=_RejectingFetch(), fwd_fetch=_no_tenor_prices,
+                                          fut_fetch=_no_tenor_prices, session_factory=lambda: (None, None))
+    thread.join(timeout=10)
+    block = live.read_status(p)["backfill"]
+    assert block["waiting_on_tickers"] == ("5 day(s) wait on tickers Bloomberg rejects (AUDUSD Curncy); "
+                                           "asked again when the ticker list changes")
+    assert block["days"]["2026-09-18"]["status"] == "NO_CLOSES"
+    lines = []
+    fetch = _RejectingFetch()
+    assert backfill.auto_backfill(p, fetch=fetch, fwd_fetch=_no_tenor_prices, fut_fetch=_no_tenor_prices,
+                                  log=lines.append, clock=lambda: 1e9) == []
+    assert fetch.asked == []
+    assert lines[0] == ("Auto-backfill: 5 day(s) cannot be completed yet; nothing asked of Bloomberg: 5 day(s) wait on "
+                        "tickers Bloomberg rejects (AUDUSD Curncy); asked again when the ticker list changes.")
+
+
+def test_rejection_texts_and_ticker_labels():
+    assert backfill.is_rejection("Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:11150] ")
+    assert backfill.is_rejection("securityError: Unknown/Invalid Security [nid:11150]")
+    assert backfill.is_rejection("PX_LAST: Field not valid") and backfill.is_rejection("FWD_CURVE: invalid field")
+    assert not backfill.is_rejection("Bloomberg returned no PX_LAST for SPX/E261016C7615 on 2026-09-21")
+    assert not backfill.is_rejection("Bloomberg returned no forward tenor prices for USDBRL on 2026-09-18")
+    assert backfill._reason_label("Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security") == "USDBRLSP Curncy"
+    assert backfill._reason_label("Bloomberg returned no PX_LAST for SPX/E261016C7615 on 2026-09-21") == "PX_LAST of SPX/E261016C7615"
+    assert backfill._reason_label("Bloomberg returned no fixing (PX_LAST) for USDKRW on 2026-09-17") == "fixing (PX_LAST) of USDKRW"
+    assert backfill.recent_business_days(date(2026, 9, 21)) == ["2026-09-16", "2026-09-17", "2026-09-18"]
+    assert backfill.recent_business_days(date(2026, 9, 8)) == ["2026-09-02", "2026-09-03", "2026-09-04"]   # Labor Day 09-07 skipped
+    assert backfill.state_version().startswith(__import__("data.bloomberg.library", fromlist=["x"]).LIBRARY_VERSION + "+")
+
+
+# =========================================================================== 2026-09-22: the closing step's ledger block in the status file
+_NEW_LEDGER = {"realised": 2, "unrealisable": [{"trade_id": "u1", "reason": "no close on file"}], "repaired": ["r1"],
+               "refrozen": [{"trade_id": "a1", "product": "FX_FWD", "mark_type": "SPOT", "spot_as_of_date": "2026-09-09",
+                             "pnl_from": 1.0, "pnl_to": 2.0, "why": "the 15:00 close replaced a live row"}],
+               "kept": [{"trade_id": "z9", "product": "FX_OPTION", "reason": "no close-out spot on file yet"}]}
+
+
+def test_closing_step_records_the_ledgers_refreeze_in_the_status_file(tmp_path):
+    """`_realise_after_backfill` publishes what the ledger did under backfill.ledger: the
+    live pull's status["ledger"] shape (refrozen, kept, refrozen_count, refrozen_summary),
+    and returns it (user yes, 2026-09-22)."""
+    p, conn = _db(tmp_path, _book_today().isoformat())
+    conn.close()
+    backfill._published.pop(backfill._db_key(p), None)
+    fake = lambda c, as_of, **kw: dict(_NEW_LEDGER)  # noqa: E731
+    log = []
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backfill, "_import_realise_settled", lambda: fake)
+        block = backfill._realise_after_backfill(p, date(2026, 9, 22), log.append)
+    assert block["as_of_date"] == "2026-09-22" and block["realised"] == 2
+    assert block["refrozen"] == _NEW_LEDGER["refrozen"] and block["kept"] == _NEW_LEDGER["kept"]
+    assert block["refrozen_count"] == 1 and block["refrozen_summary"] == "1 settled trade re-frozen at the close"
+    assert "Auto-backfill: 2 settled trade(s) frozen after the backfill." in log
+    assert "Auto-backfill: 1 settled trade re-frozen at the close." in log
+    published = live.read_status(p)["backfill"]["ledger"]
+    assert published["as_of_date"] == "2026-09-22" and published["realised"] == 2
+    assert published["refrozen"] == _NEW_LEDGER["refrozen"] and published["kept"] == _NEW_LEDGER["kept"]
+    assert published["unrealisable"] == _NEW_LEDGER["unrealisable"] and published["repaired"] == ["r1"]
+    assert published["refrozen_count"] == 1 and published["refrozen_summary"] == "1 settled trade re-frozen at the close"
+    assert [s["step"] for s in published["steps"]] == ["closing"]
+
+
+def test_closing_step_merges_the_after_last_day_call_and_starts_afresh_next_run(tmp_path):
+    """auto_backfill's re-freeze at a past close lands in backfill()'s call after the last
+    worked day, then the closing step runs at today: the published block sums both, and a
+    later run with no due days (closing alone) does not carry the earlier run's."""
+    p, conn = _db(tmp_path, _book_today().isoformat())
+    conn.close()
+    backfill._published.pop(backfill._db_key(p), None)
+    after = live.ledger_block({"realised": 1, "refrozen": [{"trade_id": "a1", "why": "close"}]}, "2026-09-21")
+    backfill._record_ledger(p, "after_last_day", after)
+    closing = live.ledger_block({"realised": 0, "refrozen": ["b2"], "kept": [{"trade_id": "k1"}]}, "2026-09-22")
+    backfill._record_ledger(p, "closing", closing)
+    block = live.read_status(p)["backfill"]["ledger"]
+    assert block["as_of_date"] == "2026-09-22" and block["realised"] == 1
+    assert block["refrozen"] == [{"trade_id": "a1", "why": "close"}, {"trade_id": "b2"}]
+    assert block["kept"] == [{"trade_id": "k1"}]
+    assert block["refrozen_count"] == 2 and block["refrozen_summary"] == "2 settled trades re-frozen at the close"
+    assert [s["step"] for s in block["steps"]] == ["after_last_day", "closing"]
+    # the next run has nothing due: its closing step alone, nothing of the last run
+    backfill._record_ledger(p, "closing", live.ledger_block({"realised": 0}, "2026-09-23"))
+    block = live.read_status(p)["backfill"]["ledger"]
+    assert block["realised"] == 0 and block["refrozen"] == [] and block["refrozen_summary"] == ""
+    assert [s["step"] for s in block["steps"]] == ["closing"]
+
+
+def test_start_auto_backfill_keeps_the_ledger_block_in_the_published_backfill_block(tmp_path, monkeypatch):
+    yesterday = _book_today() - timedelta(days=1)
+    earliest = yesterday - timedelta(days=3)
+    while earliest.weekday() >= 5:
+        earliest -= timedelta(days=1)
+    p, conn = _db(tmp_path, earliest.isoformat())
+    conn.close()
+    seen = []
+    monkeypatch.setattr(backfill, "_import_realise_settled",
+                        lambda: (lambda c, as_of, **kw: seen.append(as_of) or {"realised": 0, "unrealisable": [],
+                                                                               "refrozen": ["a1"], "kept": []}))
+    thread = backfill.start_auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch,
+                                          session_factory=lambda: (None, None))
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    block = live.read_status(p)["backfill"]
+    assert block["running"] is False
+    assert seen and seen[-1] == _book_today().isoformat()                      # the closing step ran at today
+    assert block["ledger"]["as_of_date"] == _book_today().isoformat()
+    assert block["ledger"]["refrozen"][0] == {"trade_id": "a1"}                 # the old bare-id shape tolerated
+    assert block["ledger"]["refrozen_count"] == len(seen) and block["ledger"]["refrozen_summary"].endswith("re-frozen at the close")
+    assert [s["step"] for s in block["ledger"]["steps"]] == ["after_last_day", "closing"]

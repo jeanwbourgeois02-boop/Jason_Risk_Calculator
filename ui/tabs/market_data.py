@@ -82,6 +82,7 @@ PULL_REVISION_ID = "market-data-pull-revision"
 PULL_TIMINGS_ID = "market-data-pull-timings"
 RECALC_BLOCK_ID = "market-data-recalc"          # what a press did on a machine with no Bloomberg (2026-09-22)
 RECALC_DAYS_ID = "market-data-recalc-days"
+LEDGER_BLOCK_ID = "market-data-ledger"          # what the ledger's re-freeze did (2026-09-22)
 # Safety-net timer only: one feed cycle, read from data.bloomberg.live.INTERVAL_SECONDS
 # (ui.feed_controls.safety_refresh_ms), never a number typed in here. A data change
 # redraws the tab within seconds through ui/revision.py's DATA_REVISION_ID.
@@ -297,6 +298,133 @@ def recalc_block(status: Optional[dict]) -> Optional[html.Div]:
     return html.Div(children, id=RECALC_BLOCK_ID, className="status-line")
 
 
+def usd_words(value) -> str:
+    """'USD 12,500' / 'USD -1,234': whole dollars with thousands separators, the way the
+    tab writes money elsewhere (`notional_words`). 'n/a' for anything that is not a
+    number: a blank is never shown as zero."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if v != v:  # NaN
+        return "n/a"
+    return f"USD {v:,.0f}"
+
+
+def _ledger_entry_line(entry) -> Tuple[str, str]:
+    """(line, hover) for one `refrozen` entry: "trade_id product: pnl_from -> pnl_to (why)",
+    the mark type and its date on hover. An entry that is a bare string shows as its id
+    alone; a dict with keys missing shows what it has."""
+    if not isinstance(entry, dict):
+        return (str(entry), "")
+    head = " ".join(str(entry.get(k)) for k in ("trade_id", "product") if entry.get(k)) or "?"
+    why = str(entry.get("why") or "").strip()
+    line = f"{head}: {usd_words(entry.get('pnl_from'))} -> {usd_words(entry.get('pnl_to'))}"
+    if why:
+        line += f" ({why})"
+    hover = " ".join(str(entry.get(k)) for k in ("mark_type", "spot_as_of_date") if entry.get(k))
+    return (line, hover)
+
+
+def _kept_entry_line(entry) -> str:
+    """"trade_id product: reason" for one `kept` entry; a bare string is its id alone."""
+    if not isinstance(entry, dict):
+        return str(entry)
+    head = " ".join(str(entry.get(k)) for k in ("trade_id", "product") if entry.get(k)) or "?"
+    reason = str(entry.get("reason") or "").strip()
+    return f"{head}: {reason}" if reason else head
+
+
+def refrozen_rows(block: Optional[dict]) -> dict:
+    """What a ledger status block says the re-freeze did (2026-09-22, the keys bbg-data
+    writes on `status["ledger"]`, on each backfill day's ledger block and on the closing
+    step's): {"summary": the block's own sentence, "count", "refrozen": [(line, hover)],
+    "kept": [line]}. Every key read defensively: absent or empty means nothing, so an
+    older status file gives an empty result and the caller says nothing."""
+    out = {"summary": "", "count": 0, "refrozen": [], "kept": []}
+    if not isinstance(block, dict):
+        return out
+    refrozen = block.get("refrozen")
+    out["refrozen"] = [_ledger_entry_line(e) for e in refrozen] if isinstance(refrozen, (list, tuple)) else []
+    kept = block.get("kept")
+    out["kept"] = [_kept_entry_line(e) for e in kept] if isinstance(kept, (list, tuple)) else []
+    count = block.get("refrozen_count")
+    out["count"] = _count(count) if not isinstance(count, bool) else 0
+    if not out["count"]:
+        out["count"] = len(out["refrozen"])
+    summary = block.get("refrozen_summary")
+    if isinstance(summary, str) and summary.strip():
+        out["summary"] = summary.strip()
+    elif out["count"]:
+        out["summary"] = f"{out['count']} settled trade{'s' if out['count'] != 1 else ''} re-frozen at the close"
+    return out
+
+
+def _is_ledger_block(value) -> bool:
+    return isinstance(value, dict) and any(k in value for k in ("refrozen", "kept", "refrozen_count", "refrozen_summary"))
+
+
+def ledger_blocks(status: Optional[dict]) -> List[Tuple[str, dict]]:
+    """Every ledger block the status file carries, labelled: the pull's own step
+    (`status["ledger"]`, "Ledger"), the backfill's closing step and each backfill day's
+    (under `status["backfill"]`, as a "ledger" block of its own or on a day's entry;
+    "Backfill closing step" / "Backfill <day> ledger"). Only blocks that say something
+    are returned, so a status file from before the change gives []."""
+    found: List[Tuple[str, dict]] = []
+    status = status or {}
+    if _is_ledger_block(status.get("ledger")):
+        found.append(("Ledger", status["ledger"]))
+    backfill = status.get("backfill")
+    if isinstance(backfill, dict):
+        bf_ledger = backfill.get("ledger")
+        if _is_ledger_block(bf_ledger):
+            found.append(("Backfill closing step", bf_ledger))
+        elif isinstance(bf_ledger, dict):
+            for day, block in sorted(bf_ledger.items(), reverse=True):
+                if _is_ledger_block(block):
+                    label = "Backfill closing step" if str(day) in ("closing", "closing_step", "after") else f"Backfill {day} ledger"
+                    found.append((label, block))
+        days = backfill.get("days")
+        if isinstance(days, dict):
+            for day, entry in sorted(days.items(), reverse=True):
+                if isinstance(entry, dict) and _is_ledger_block(entry.get("ledger")):
+                    found.append((f"Backfill {day} ledger", entry["ledger"]))
+    out = []
+    for label, block in found:
+        rows = refrozen_rows(block)
+        if rows["refrozen"] or rows["kept"] or rows["count"]:
+            out.append((label, block))
+    return out
+
+
+def ledger_block(status: Optional[dict]) -> Optional[html.Div]:
+    """What the ledger's re-freeze did on the last press (user yes 2026-09-22): per ledger
+    block the summary sentence and, collapsed under it, one line per re-frozen trade
+    "trade_id product: pnl_from -> pnl_to (why)" followed by the trades it kept as they
+    were, "trade_id product: reason". Read from the status file only. None when no block
+    carries the keys (an older status file, or a press that re-froze nothing), so the
+    feed status renders exactly as before."""
+    blocks = ledger_blocks(status)
+    if not blocks:
+        return None
+    children: list = []
+    for label, block in blocks:
+        rows = refrozen_rows(block)
+        sentence = rows["summary"] or f"{len(rows['kept'])} settled trade(s) kept as frozen"
+        children.append(html.Div(f"{label}: {sentence}", className="status-line"))
+        items = [html.Li(line, title=hover or None) for line, hover in rows["refrozen"]]
+        items += [html.Li(f"kept: {line}") for line in rows["kept"]]
+        if items:
+            summary = f"Re-frozen: {len(rows['refrozen'])} trade(s)"
+            if rows["kept"]:
+                summary += f", kept: {len(rows['kept'])}"
+            children.append(html.Details(className="status-line", children=[
+                html.Summary(summary),
+                html.Ul(items, style={"margin": "2px 0 0 16px", "padding": 0}),
+            ]))
+    return html.Div(children, id=LEDGER_BLOCK_ID, className="status-line")
+
+
 def pull_timings_line(status: Optional[dict]) -> str:
     """'Last pull took 48 s: forwards 21 s · options 12 s · rates 8.0 s · ...', the steps
     of the last pull slowest first, from `status["timings"]` (seconds per step, written by
@@ -317,17 +445,21 @@ def status_block(status: Optional[dict]):
     """What the tab's feed-status block shows: the one-line status, plus the last pull's
     per-step timings on a second compact line when the status file has them, plus what a
     press did on a machine with no Bloomberg (`recalc_block`) when the last status says
-    so; that sentence is then kept off the first line, so it is read once."""
+    so; that sentence is then kept off the first line, so it is read once; and what the
+    ledger's re-freeze did (`ledger_block`) when the status carries it."""
     recalc = recalc_block(status)
+    ledger = ledger_block(status)
     line = top_bar_status(status, say_recalc=recalc is None)
     timings = pull_timings_line(status)
-    if not timings and recalc is None:
+    if not timings and recalc is None and ledger is None:
         return line
     parts: list = [line]
     if timings:
         parts.append(html.Div(timings, id=PULL_TIMINGS_ID, className="status-line"))
     if recalc is not None:
         parts.append(recalc)
+    if ledger is not None:
+        parts.append(ledger)
     return parts
 
 

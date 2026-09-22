@@ -670,3 +670,78 @@ def test_status_block_without_a_recalc_block_renders_as_before_and_a_connected_p
     assert "re-priced" not in rendered and "no Bloomberg" not in rendered and md.RECALC_BLOCK_ID not in rendered
     assert md.status_block({"connected": True, "time": "t", "written": 5, "failed": 0}) == \
         md.top_bar_status({"connected": True, "time": "t", "written": 5, "failed": 0})
+
+
+# =========================================================================== 2026-09-22: what the ledger's re-freeze did
+# What bbg-data writes on status["ledger"] (and on each backfill day's ledger block and the closing
+# step's) when realise_settled drops a row frozen at a spot or an older fix and freezes it again.
+LEDGER_STATUS = dict(CONNECTED_STATUS, ledger={
+    "as_of_date": "2026-09-22", "realised": 2, "unrealisable": [],
+    "refrozen": [
+        {"trade_id": "F1", "product": "FX_FWD", "mark_type": "NDF_FIX", "spot_as_of_date": "2026-09-19",
+         "pnl_from": -1234.4, "pnl_to": 2000.6, "why": "the 2026-09-19 fix landed"},
+        "F9",                                                             # a bare string: its id alone
+        {"trade_id": "O2", "product": "FX_OPTION", "pnl_from": None, "pnl_to": 15000, "why": ""},
+    ],
+    "kept": [{"trade_id": "F3", "product": "FX_FWD", "reason": "already frozen at the fix"}, "F4"],
+    "refrozen_count": 3, "refrozen_summary": "3 settled trades re-frozen at the close",
+}, backfill={"running": False, "remaining": 0, "days": {"2026-09-19": {"status": "DONE", "missing_count": 0, "missing": [],
+             "ledger": {"refrozen": [{"trade_id": "F1", "product": "FX_FWD", "pnl_from": -1234.4, "pnl_to": 2000.6,
+                                      "why": "the 2026-09-19 fix landed"}], "kept": [], "refrozen_count": 1,
+                        "refrozen_summary": "1 settled trade re-frozen at the close"}}},
+             "ledger": {"refrozen": [], "kept": [{"trade_id": "F5", "product": "FUTURE", "reason": "no close on file yet"}]}})
+
+
+def test_status_block_shows_what_the_ledger_refroze_with_money_the_tabs_way_and_the_kept_trades():
+    parts = md.status_block(LEDGER_STATUS)
+    assert isinstance(parts, list) and len(parts) == 3
+    line, timing_row, block = parts
+    assert line == md.top_bar_status(LEDGER_STATUS) and "re-frozen" not in line     # the block says it
+    assert timing_row.id == md.PULL_TIMINGS_ID and block.id == md.LEDGER_BLOCK_ID
+    text = str(block)
+    # the pull's own sentence, then one line per trade, money as the tab writes it elsewhere
+    assert "Ledger: 3 settled trades re-frozen at the close" in text
+    assert "F1 FX_FWD: USD -1,234 -> USD 2,001 (the 2026-09-19 fix landed)" in text
+    assert "O2 FX_OPTION: n/a -> USD 15,000" in text and "O2 FX_OPTION: n/a -> USD 15,000 (" not in text
+    assert "kept: F3 FX_FWD: already frozen at the fix" in text and "kept: F4" in text
+    # each backfill block under its own label, the day's and the closing step's
+    assert "Backfill 2026-09-19 ledger: 1 settled trade re-frozen at the close" in text
+    assert "Backfill closing step: 1 settled trade(s) kept as frozen" in text
+    assert "kept: F5 FUTURE: no close on file yet" in text
+    # the list is collapsed, the bare-string entry is its id alone, the mark and its date on hover
+    details = [c for c in block.children if type(c).__name__ == "Details"]
+    assert len(details) == 3 and not any(getattr(d, "open", False) for d in details)
+    first = details[0]
+    assert first.children[0].children == "Re-frozen: 3 trade(s), kept: 2"
+    items = first.children[1].children
+    assert [li.children for li in items][:2] == ["F1 FX_FWD: USD -1,234 -> USD 2,001 (the 2026-09-19 fix landed)", "F9"]
+    assert items[0].title == "NDF_FIX 2026-09-19" and getattr(items[1], "title", None) is None
+    assert details[1].children[0].children == "Re-frozen: 0 trade(s), kept: 1"       # the closing step
+    assert details[2].children[0].children == "Re-frozen: 1 trade(s)"                # the backfill day
+    rows = md.refrozen_rows(LEDGER_STATUS["ledger"])
+    assert rows["count"] == 3 and rows["summary"] == "3 settled trades re-frozen at the close"
+    assert [label for label, _ in md.ledger_blocks(LEDGER_STATUS)] == ["Ledger", "Backfill closing step", "Backfill 2026-09-19 ledger"]
+    # a count without a sentence gets the pull's wording; a blank never shows as zero
+    assert md.refrozen_rows({"refrozen": [{"trade_id": "F1"}]})["summary"] == "1 settled trade re-frozen at the close"
+    assert md.refrozen_rows({"refrozen_count": "2"})["summary"] == "2 settled trades re-frozen at the close"
+    assert md.usd_words(None) == "n/a" and md.usd_words("x") == "n/a" and md.usd_words(float("nan")) == "n/a"
+    assert md.usd_words(0) == "USD 0" and md.usd_words(-2.5e6) == "USD -2,500,000"
+
+
+def test_a_status_file_without_the_ledger_keys_renders_exactly_as_before():
+    """An older status file (status["ledger"] holds only as_of_date / realised /
+    unrealisable), or a press that re-froze nothing: nothing is added."""
+    plain = dict(CONNECTED_STATUS, ledger={"as_of_date": "2026-09-22", "realised": 0, "unrealisable": []})
+    assert str(md.status_block(plain)) == str(md.status_block(CONNECTED_STATUS))   # components compare by repr
+    assert len(md.status_block(plain)) == 2 and md.ledger_block(plain) is None
+    empty = dict(plain, ledger={**plain["ledger"], "refrozen": [], "kept": [], "refrozen_count": 0, "refrozen_summary": ""})
+    assert md.ledger_block(empty) is None and md.ledger_blocks(empty) == []
+    for absent in (None, {}, STATUS_BEFORE_THE_CHANGE, RECALC_STATUS, {"ledger": "not a dict"},
+                   {"ledger": {"error": "x"}}, {"backfill": {"ledger": "junk", "days": "junk"}}):
+        assert md.ledger_block(absent) is None
+    assert md.LEDGER_BLOCK_ID not in str(md.status_block(RECALC_STATUS))
+    assert md.status_block({"connected": True, "time": "t", "written": 5, "failed": 0}) == \
+        md.top_bar_status({"connected": True, "time": "t", "written": 5, "failed": 0})
+    # a ragged block never raises and says only what it can read
+    ragged = md.refrozen_rows({"refrozen": "F1", "kept": [None, {"reason": "r"}], "refrozen_count": True})
+    assert ragged == {"summary": "", "count": 0, "refrozen": [], "kept": ["None", "?: r"]}

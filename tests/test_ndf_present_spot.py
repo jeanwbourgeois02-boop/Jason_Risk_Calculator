@@ -79,7 +79,10 @@ def test_an_ndf_with_closes_only_after_its_fixing_takes_the_near_marks_estimate_
     assert ledger.realise_settled(conn, "2026-09-22")["refrozen"] == []
     conn.execute("INSERT INTO marks VALUES ('2026-09-14','USDBRL','2026-09-14','NDF_FIX',5.22,'BBG_BDH','2026-09-14T17:00:00-04:00')")
     conn.commit()
-    assert ledger.realise_settled(conn, "2026-09-22")["refrozen"] == ["b1"]
+    res = ledger.realise_settled(conn, "2026-09-22")
+    assert res["refrozen"] == [{"trade_id": "b1", "product": "FX_FWD", "mark_type": "NDF_FIX", "spot_as_of_date": "2026-09-14",
+                                "pnl_from": pytest.approx(1e6 * (5.30 - 5.20) / 5.30),
+                                "pnl_to": pytest.approx(1e6 * (5.22 - 5.20) / 5.22), "why": "NDF_FIX replaced SPOT"}]
     b1 = _frozen(conn)["b1"]
     assert b1[1] == pytest.approx(1e6 * (5.22 - 5.20) / 5.22) and b1[2:4] == ("2026-09-14", "NDF_FIX")
 
@@ -94,7 +97,10 @@ def test_a_row_the_retired_path_froze_is_dropped_and_frozen_again_by_the_standar
     conn.commit()
     assert RETIRED_NOTE in value_book(conn, AS_OF).set_index("trade_id").loc["b1", "note"]   # read back as stored, until the ledger runs
     res = ledger.realise_settled(conn, "2026-09-22")
-    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    assert [e["trade_id"] for e in res["refrozen"]] == ["b1"] and res["realised"] == 1
+    e = res["refrozen"][0]
+    assert e["why"] == "SPOT dated 2026-09-14 replaced the one dated 2026-09-21"
+    assert e["pnl_from"] == pytest.approx(1e6 * (5.40 - 5.20) / 5.40) and e["pnl_to"] == pytest.approx(1e6 * (5.30 - 5.20) / 5.30)
     b1 = _frozen(conn)["b1"]
     assert b1[2:4] == ("2026-09-14", "SPOT") and "present spot" not in b1[4]
     assert b1[1] == pytest.approx(1e6 * (5.30 - 5.20) / 5.30)

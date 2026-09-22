@@ -13,7 +13,8 @@ value_book reads settled rows straight from realised_pnl).
 
 Re-freeze at the close (user decision 2026-09-22): a frozen row is what the official marks on
 file give for its date and mark type, or it is dropped and frozen again by the same rule in
-the same call (`purge_superseded`, 'refrozen' in the result). That is how a trade frozen at a
+the same call (`purge_superseded`; 'refrozen' in the result says, per trade, what changed and
+the figure before and after, 'kept' names a row the rule could not recompute). That is how a trade frozen at a
 live press (the last pull before the day roll) takes the day's 15:00 close once the backfill
 lands it; a future or listed option frozen at a live PX_LAST takes that day's PX_SETTLE; an
 NDF frozen at a spot takes the fix once it lands; a matured swap takes a re-run PV; an option
@@ -72,6 +73,7 @@ import datetime as dt
 import math
 import sqlite3
 from collections import namedtuple
+from operator import itemgetter
 from typing import Dict, Optional
 
 import pandas as pd
@@ -304,28 +306,68 @@ def _same_freeze(stored: tuple, fresh: _Freeze) -> bool:
     return all(math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-9) for a, b in zip(numbers, fresh_numbers))
 
 
-def purge_superseded(conn: sqlite3.Connection, as_of: str, closed_out: dict) -> list:
+def _why_refrozen(stored: tuple, fresh: _Freeze) -> str:
+    """The `why` of a `refrozen` entry: one sentence naming what changed between the stored row
+    and the fresh freeze. The mark type ("NDF_FIX replaced SPOT"), else the mark date, else which
+    stored figures moved for the same mark and date: `mark` is `spot_usd_per_local` (USD per unit
+    of `local_amount`: the pair SPOT times its USD conversion, multiplier x FUTURE_PX for a
+    future), `entry` is `usd_entry_amount`, `amount` is `local_amount` (the frozen P&L itself
+    for a swap)."""
+    mark_type, spot_day, local_amount, entry, combined, pnl = stored
+    fresh_day = str(fresh.spot_as_of_date)
+    if mark_type != fresh.mark_type:
+        dates = "" if str(spot_day) == fresh_day else f" ({spot_day} -> {fresh_day})"
+        return f"{fresh.mark_type} replaced {mark_type}{dates}"
+    if str(spot_day) != fresh_day:
+        return f"{mark_type} dated {fresh_day} replaced the one dated {spot_day}"
+    moved = [f"{label} {float(old):.10g} -> {float(new):.10g}"
+             for label, old, new in (("mark", combined, fresh.spot_usd_per_local),
+                                     ("entry", entry, fresh.usd_entry_amount),
+                                     ("amount", local_amount, fresh.local_amount))
+             if not math.isclose(float(old), float(new), rel_tol=1e-9, abs_tol=1e-9)]
+    if not moved:
+        moved = [f"pnl_usd {float(pnl):.10g} -> {float(fresh.pnl_usd):.10g}"]
+    return f"{mark_type} {spot_day} {', '.join(moved)} (the marks of that date changed)"
+
+
+_Purge = namedtuple("_Purge", "refrozen kept")
+
+
+def purge_superseded(conn: sqlite3.Connection, as_of: str, closed_out: dict) -> _Purge:
     """Delete every `realised_pnl` row whose frozen figure is no longer what the official marks
     on file give for the same trade by the standard rule (`_freeze_for`: mark type, mark date,
-    or any stored figure differs), and return their trade ids (user decision 2026-09-22, the
-    re-freeze at the close: module docstring). Nothing is recomputed into the table here:
-    `realise_settled` freezes them afresh, by the same rule, in the same call -- which is why
-    only tickets with `settle_date < as_of` are looked at (reviewer, 2026-09-22): the refreeze
-    covers those alone, so a past-day call from the backfill never drops a row it cannot freeze
-    again. A row the rule cannot compute today (a mark since gone, a figure that is not a number)
-    keeps its figure: a trade that has one is never left blank by this."""
-    ids = []
+    or any stored figure differs) -- user decision 2026-09-22, the re-freeze at the close (module
+    docstring). Returns `(refrozen, kept)`, both sorted by trade_id so a status file written
+    from them is stable:
+        refrozen: one dict per dropped row, {trade_id, product, mark_type, spot_as_of_date (the
+                  fresh freeze's), pnl_from (the dropped row's pnl_usd), pnl_to (the fresh
+                  freeze's), why (`_why_refrozen`: what changed, in one sentence)}
+        kept:     one dict per row the rule could not recompute today (a mark since gone, a
+                  figure that is not a number), {trade_id, product, reason}; the row keeps its
+                  figure, a trade that has one is never left blank by this (reviewer m-2,
+                  2026-09-22: it was silent before).
+    Nothing is recomputed into the table here: `realise_settled` freezes the dropped rows afresh,
+    by the same rule, in the same call -- which is why only tickets with `settle_date < as_of` are
+    looked at (reviewer, 2026-09-22): the refreeze covers those alone, so a past-day call from
+    the backfill never drops a row it cannot freeze again."""
+    refrozen, kept = [], []
     for (trade_id, pair, product, base_ccy, quote_ccy, multiplier, qty, fill, settle,
          mark_type, spot_day, local_amount, entry, combined, pnl) in conn.execute(_FROZEN_SQL, {"as_of": as_of}).fetchall():
         try:
             fresh = _freeze_for(conn, product, pair, base_ccy, quote_ccy, multiplier, qty, fill, settle,
                                 closed_out.get(trade_id))
-        except (_Unrealisable, TypeError, ValueError, ArithmeticError):
+        except (_Unrealisable, TypeError, ValueError, ArithmeticError) as exc:
+            kept.append({"trade_id": trade_id, "product": product, "reason": _unrealisable(trade_id, exc)["reason"]})
             continue
-        if not _same_freeze((mark_type, spot_day, local_amount, entry, combined, pnl), fresh):
-            ids.append(trade_id)
-    conn.executemany("DELETE FROM realised_pnl WHERE trade_id = ?", [(t,) for t in ids])
-    return ids
+        stored = (mark_type, spot_day, local_amount, entry, combined, pnl)
+        if not _same_freeze(stored, fresh):
+            refrozen.append({"trade_id": trade_id, "product": product, "mark_type": fresh.mark_type,
+                             "spot_as_of_date": str(fresh.spot_as_of_date), "pnl_from": float(pnl),
+                             "pnl_to": float(fresh.pnl_usd), "why": _why_refrozen(stored, fresh)})
+    refrozen.sort(key=itemgetter("trade_id"))
+    kept.sort(key=itemgetter("trade_id"))
+    conn.executemany("DELETE FROM realised_pnl WHERE trade_id = ?", [(e["trade_id"],) for e in refrozen])
+    return _Purge(refrozen, kept)
 
 
 def _unrealisable(trade_id, exc: Exception) -> dict:
@@ -344,12 +386,18 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
     """Freeze P&L for the trades whose settle date is before `as_of` and are not yet in
     `realised_pnl`, after dropping every frozen row the marks on file no longer support.
     Returns {'realised': n, 'unrealisable': [{trade_id, reason}], 'repaired': [trade_id, ...],
-    'refrozen': [trade_id, ...]}.
+    'refrozen': [{trade_id, product, mark_type, spot_as_of_date, pnl_from, pnl_to, why}],
+    'kept': [{trade_id, product, reason}]}.
 
     `refrozen` (2026-09-22): the rows `purge_superseded` dropped because their frozen mark or
     spot is no longer what the official marks give for the same date and mark type (a live
     press replaced by the day's 15:00 close, a PX_LAST by PX_SETTLE, a spot by the fix, a
-    PREMIUM by a close-out, a re-run PV); they are frozen again below, in this same call.
+    PREMIUM by a close-out, a re-run PV); they are frozen again below, in this same call. Each
+    entry records the figure the trade had (`pnl_from`), the one it takes (`pnl_to`, with the
+    new row's `mark_type` and `spot_as_of_date`) and `why`, one sentence naming what changed
+    (reviewer M-2, user yes 2026-09-22; the status file and the Market data tab show them),
+    sorted by trade_id. `kept`: the frozen rows the rule could not recompute today (a mark since
+    gone, a stored figure that is not a number), with the reason; each keeps its figure.
     Only rows with `settle_date < as_of` are looked at, the ones this call re-freezes.
 
     `repaired` (2026-09-18): rows an earlier, positional INSERT misaligned
@@ -365,7 +413,7 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
     realised, unrealisable = 0, []
     repaired = purge_unreadable_realised(conn)
     closed_out = closed_out_options(conn, as_of)
-    refrozen = purge_superseded(conn, as_of, closed_out)
+    refrozen, kept = purge_superseded(conn, as_of, closed_out)
 
     def freeze(trade_id, inst, product, fresh: _Freeze, settle):
         _insert_realised(conn, trade_id, inst, product, fresh.currency, settle, fresh.local_amount,
@@ -406,7 +454,8 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
             unrealisable.append(_unrealisable(trade_id, exc))
 
     conn.commit()
-    return {"realised": realised, "unrealisable": unrealisable, "repaired": repaired, "refrozen": refrozen}
+    return {"realised": realised, "unrealisable": unrealisable, "repaired": repaired, "refrozen": refrozen,
+            "kept": kept}
 
 
 def _ndf_fixing_day(conn: sqlite3.Connection, pair: str, settle: str) -> str:

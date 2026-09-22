@@ -44,16 +44,19 @@ NDF_1M_TICKERS = {
 # fixes"). One Bloomberg ticker per currency, PX_LAST on the fixing date, written as
 # mark_type NDF_FIX on the USD pair dated the fixing date (source BBG_BDH). Quoted as the
 # USD pair (units of the currency per USD), like spot.
-# UNVERIFIED (2026-09-22): the fixing each row names is the market's settlement rate for that
-# currency's NDFs; the ticker spelling has not been checked against a terminal. An unknown
-# security fails loudly in the pull (the Market data tab lists it as missing) and the P&L
-# says "no official fix on file" and falls back to spot until the ticker is corrected here.
+# Status (2026-09-22): BRL and IDR are verified, their tickers returned fixings on the
+# Bloomberg PC that day and the NDF_FIX marks on file came from them. KRW and TWD are the
+# user's own terminal check of 2026-09-22 ("kobrusd for korea, try11 index for twd fix"),
+# replacing KFTC18 and TAIFX1, which loaded but returned no PX_LAST on the fixing dates.
+# INR is still unverified: the ticker spelling has not been checked against a terminal. An
+# unknown security fails loudly in the pull (the Market data tab lists it as missing) and the
+# P&L says "no official fix on file" and falls back to spot until the ticker is corrected here.
 NDF_FIX_TICKERS = {
-    "BRL": "BZFXPTAX Index",    # PTAX (Banco Central do Brasil), published ~13:15 Sao Paulo
-    "KRW": "KFTC18 Index",      # KFTC18, the Seoul Money Brokerage / KFTC market-average rate
-    "INR": "INRFBIL Index",     # FBIL reference rate (RBI until 2018)
-    "TWD": "TAIFX1 Index",      # TAIFX1, the Taipei Forex Inc. fixing
-    "IDR": "JISDOR Index",      # JISDOR (Bank Indonesia)
+    "BRL": "BZFXPTAX Index",    # PTAX (Banco Central do Brasil), ~13:15 Sao Paulo; returned fixings 2026-09-22 (verified)
+    "KRW": "KOBRUSD Index",     # user, 2026-09-22; yellow key assumed Index, a wrong key shows as 'Unknown/Invalid security' on the next pull
+    "INR": "INRFBIL Index",     # FBIL reference rate (RBI until 2018); unverified
+    "TWD": "TRY11 Index",       # user, 2026-09-22 ("try11 index for twd fix"), replacing TAIFX1 which returned no PX_LAST
+    "IDR": "JISDOR Index",      # JISDOR (Bank Indonesia); returned fixings 2026-09-22 (verified)
 }
 
 DESCRIPTION_RE = re.compile(

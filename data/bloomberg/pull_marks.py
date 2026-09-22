@@ -164,6 +164,33 @@ def _ny() -> ZoneInfo:
 # docstring "FWD_OUTRIGHT fallback".
 STANDARD_TENORS = ["SP", "1W", "2W", "1M", "2M", "3M", "6M", "1Y"]
 
+# 2026-09-22: Bloomberg rejects the '<pair><tenor> Curncy' spelling for the non-deliverable
+# pairs ('USDBRLSP Curncy', 'USDBRL1M Curncy' ...: "Unknown/Invalid security"), so no past
+# forward could be built for BRL, IDR or TWD. Their forward POINTS live on the NDF ticker
+# families (user, 2026-09-22: "for the ones that dont have, we need to use forward points
+# to get the forward. I checked bcn1m works for points, and similarly for ihn and ntn"):
+# 'BCN1M Curncy' etc. for the standard tenors 1W..1Y. The families carry no SP ticker: the
+# pair's own SPOT of the day is the first pillar (fwd_curve.historical_curve already puts
+# spot at the spot date when the tenors are points). The outright is spot + points at
+# Bloomberg's own divisor for the pair ticker (fetch_points_scales on 'USDBRL Curncy':
+# FWD_POINTS_SCALE, else 10 ** FWD_SCALE), exactly as for a deliverable pair. KRW and INR
+# keep the pair spelling (USDKRW's history works). A tenor a family lacks is simply missing
+# for that pair, as any rejected tenor is. The live FWD_CURVE bulk request on the pair is
+# untouched (it works for these pairs). The 1M of each family is verified on the terminal;
+# the other tenors' spellings are UNVERIFIED.
+NDF_TENOR_FAMILIES = {"BRL": "BCN", "IDR": "IHN", "TWD": "NTN"}
+
+
+def tenor_ticker(pair: str, tenor: str) -> str:
+    """The ticker of `pair`'s standard forward tenor in Bloomberg's history: '<pair><tenor>
+    Curncy', or for a USD pair of NDF_TENOR_FAMILIES '<family><tenor> Curncy'; '' for a
+    tenor that family has no ticker for (SP), which is then not asked for."""
+    ccy = pair[3:] if pair.startswith("USD") and len(pair) == 6 else ""
+    family = NDF_TENOR_FAMILIES.get(ccy)
+    if family:
+        return "" if tenor.upper() == "SP" else f"{family}{tenor} Curncy"
+    return f"{pair}{tenor} Curncy"
+
 # nextEvent() timeout so a stalled/unreachable session doesn't hang forever.
 EVENT_TIMEOUT_MS = 30000
 

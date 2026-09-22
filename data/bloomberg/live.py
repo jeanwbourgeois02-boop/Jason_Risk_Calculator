@@ -71,6 +71,40 @@ SPOT_LIKE_MARK_TYPES = ("SPOT", "NDF_1M")
 TIMING_KEYS = ("session", "spot", "forwards", "futures", "rates", "vol", "options", "ledger", "total")
 
 
+# --------------------------------------------------------------------------- ledger result
+def ledger_block(led, as_of: Optional[str] = None) -> dict:
+    """The status file's record of one `engine.pnl.ledger.realise_settled` call (user yes,
+    2026-09-22: the pull status records what the ledger's re-freeze did). One shape for the
+    live pull's `status["ledger"]`, each backfill day, the backfill's closing step and the
+    snapshot import: {as_of_date (when given), realised, unrealisable, repaired, refrozen,
+    kept, refrozen_count, refrozen_summary}. `refrozen` is the ledger's own list of
+    {trade_id, product, mark_type, spot_as_of_date, pnl_from, pnl_to, why} as given; `kept`
+    its [{trade_id, product, reason}] of rows it could not recompute and left alone.
+    Read defensively: an older ledger returning bare trade ids under `refrozen` (or no
+    `refrozen` / `kept` at all) still gives a block, each bare id as {"trade_id": id}, so a
+    ledger of another shape never breaks a pull. `refrozen_summary` is the one sentence
+    the status line shows when the count is above 0, '' otherwise."""
+    led = led if isinstance(led, dict) else {}
+
+    def _entries(key: str) -> List[dict]:
+        out = []
+        for entry in led.get(key) or []:
+            out.append(dict(entry) if isinstance(entry, dict) else {"trade_id": str(entry)})
+        return out
+
+    refrozen, kept = _entries("refrozen"), _entries("kept")
+    n = len(refrozen)
+    block = {"realised": led.get("realised"), "unrealisable": list(led.get("unrealisable") or []),
+             "repaired": list(led.get("repaired") or []), "refrozen": refrozen, "kept": kept,
+             "refrozen_count": n, "refrozen_summary": refrozen_summary(n)}
+    return {"as_of_date": as_of, **block} if as_of is not None else block
+
+
+def refrozen_summary(n: int) -> str:
+    """'' for none, else 'N settled trade(s) re-frozen at the close'."""
+    return f"{n} settled trade{'' if n == 1 else 's'} re-frozen at the close" if n else ""
+
+
 # --------------------------------------------------------------------------- availability
 def availability(host: str = "127.0.0.1", port: int = 8194, timeout: float = 0.5) -> Tuple[bool, str]:
     """(True, '') if blpapi imports and the API port accepts a TCP connection.
@@ -1230,8 +1264,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             try:
                 from engine.pnl.ledger import realise_settled
                 led = _timed(timings, "ledger", realise_settled, conn, today.isoformat())
-                status["ledger"] = {"as_of_date": today.isoformat(), "realised": led.get("realised"),
-                                    "unrealisable": led.get("unrealisable")}
+                # What the ledger did, its re-freeze included (2026-09-22): see ledger_block.
+                status["ledger"] = ledger_block(led, today.isoformat())
             except ImportError as exc:
                 status["ledger"] = {"skipped": f"engine.pnl.ledger.realise_settled not importable: {exc!r}"}
             except Exception as exc:

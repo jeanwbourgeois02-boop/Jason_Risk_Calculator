@@ -332,3 +332,25 @@ def test_import_freezes_as_of_the_book_date_not_the_machines_date(tmp_path, monk
     assert out["ledger"]["realised"] == 1
     assert sqlite3.connect(tmp_path / "mac.db").execute(
         "SELECT spot_as_of_date FROM realised_pnl WHERE trade_id='a1'").fetchone() == ("2026-09-09",)
+
+
+# =========================================================================== 2026-09-22: the import passes the ledger's re-freeze through
+def test_import_returns_the_ledgers_refrozen_and_kept(tmp_path, monkeypatch):
+    import engine.pnl.ledger as ledger_mod
+    _bloomberg_pc(tmp_path / "pc.db")
+    snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
+    schema.connect(tmp_path / "mac.db").close()
+    new = {"realised": 1, "unrealisable": [], "repaired": [],
+           "refrozen": [{"trade_id": "a1", "product": "FX_FWD", "mark_type": "SPOT", "spot_as_of_date": "2026-09-09",
+                         "pnl_from": 1.0, "pnl_to": 2.0, "why": "the imported close replaced a live row"}],
+           "kept": [{"trade_id": "z9", "product": "FX_OPTION", "reason": "no close-out spot on file yet"}]}
+    monkeypatch.setattr(ledger_mod, "realise_settled", lambda c, as_of, **kw: dict(new))
+    out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-09-14")
+    led = out["ledger"]
+    assert led["as_of_date"] == "2026-09-14" and led["realised"] == 1
+    assert led["refrozen"] == new["refrozen"] and led["kept"] == new["kept"]
+    assert led["refrozen_count"] == 1 and led["refrozen_summary"] == "1 settled trade re-frozen at the close"
+    # an older ledger's bare ids
+    monkeypatch.setattr(ledger_mod, "realise_settled", lambda c, as_of, **kw: {"realised": 0, "unrealisable": [], "refrozen": ["a1"]})
+    led = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-09-14")["ledger"]
+    assert led["refrozen"] == [{"trade_id": "a1"}] and led["kept"] == [] and led["refrozen_count"] == 1

@@ -106,7 +106,9 @@ def spot_date(day, pair: str = "", holidays=None) -> dt.date:
     None). A holiday on the day in between does not count against the lag (the convention for
     a US holiday); only the spot date itself must be a good day. The app has no per-currency
     calendars, so the date can sit a day from Bloomberg's around a local holiday.
-    engine.ladder.usd_marks.spot_date (as_of + 2 weekdays, no holidays) stays the Ladder's own."""
+    The app's one spot-date rule: engine.ladder.usd_marks.spot_date (the Ladder's USD
+    equivalents) and data.bloomberg.fwd_curve.spot_date_for (the backfill's tenor pillars)
+    both delegate to this function, per pair and with the same holidays."""
     if isinstance(day, dt.datetime):
         day = day.date()
     d = day if isinstance(day, dt.date) else dt.date.fromisoformat(str(day))

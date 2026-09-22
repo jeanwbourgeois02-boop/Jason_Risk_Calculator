@@ -264,11 +264,11 @@ def fwd_fetch_2(session, service, tickers, fields, start, end):
 
 
 def fut_fetch_2(session, service, tickers, fields, start, end):
-    assert set(tickers) == {"ESU6 Index"} and fields == ["PX_SETTLE"]
+    assert set(tickers) == {"ESU6 Index"} and fields == ["PX_LAST"]
     out = {}
     d = start
     while d <= end:
-        out.setdefault("ESU6 Index", {})[d.isoformat()] = {"PX_SETTLE": _FUTURE_PX_2[d]}
+        out.setdefault("ESU6 Index", {})[d.isoformat()] = {"PX_LAST": _FUTURE_PX_2[d]}
         d += timedelta(days=1)
     return out
 
@@ -437,12 +437,12 @@ def test_backfill_future_expiring_inside_range_gets_future_px_on_expiry_day(tmp_
     future_closes = {date(2026, 9, 17): 7600.0, date(2026, 9, 18): 7610.0}
 
     def fut_fetch(session, service, tickers, fields, start, end):
-        assert set(tickers) == {"ESU6 Index"} and fields == ["PX_SETTLE"]
+        assert set(tickers) == {"ESU6 Index"} and fields == ["PX_LAST"]
         out = {}
         d = start
         while d <= end:
             if d in future_closes:
-                out.setdefault("ESU6 Index", {})[d.isoformat()] = {"PX_SETTLE": future_closes[d]}
+                out.setdefault("ESU6 Index", {})[d.isoformat()] = {"PX_LAST": future_closes[d]}
             d += timedelta(days=1)
         return out
 
@@ -933,7 +933,7 @@ def test_backfill_never_writes_a_forward_that_a_wrong_divisor_throws_more_than_2
 # =========================================================================== 2026-09-21: the 15:00 New York close
 # User: "the EOD is 3pm New York time"; "Marks: for previous or any closes in FX, we need to
 # use NY 3pm". Past FX closes come from intraday bars (pull_marks.fetch_intraday_close_series,
-# tested with a fake blpapi in tests/test_bloomberg.py); futures keep the daily PX_SETTLE.
+# tested with a fake blpapi in tests/test_bloomberg.py); futures keep the daily PX_LAST.
 def test_backfill_by_default_reads_fx_closes_from_the_1500_series_and_futures_from_the_daily_one(tmp_path, monkeypatch):
     from data.bloomberg import pull_marks as pm
     p, conn = _db_with_future(tmp_path)
@@ -947,7 +947,7 @@ def test_backfill_by_default_reads_fx_closes_from_the_1500_series_and_futures_fr
 
     def daily(session, service, tickers, fields, start, end, **kw):
         asked["daily"].append((tuple(sorted(tickers)), tuple(fields)))
-        return {"ESU6 Index": {d.isoformat(): {"PX_SETTLE": 7550.0} for d in backfill.business_days(start, end)}}
+        return {"ESU6 Index": {d.isoformat(): {"PX_LAST": 7550.0} for d in backfill.business_days(start, end)}}
 
     monkeypatch.setattr(pm, "fetch_intraday_close_series", intraday)
     monkeypatch.setattr(pm, "fetch_historical_series", daily)
@@ -960,8 +960,8 @@ def test_backfill_by_default_reads_fx_closes_from_the_1500_series_and_futures_fr
     tenors = tuple(sorted(f"AUDUSD{t} Curncy" for t in ("SP", "1W", "2W", "1M")))
     assert sorted(asked["intraday"]) == sorted([(("AUDUSD Curncy",), ("PX_LAST",), day, day),
                                                 (tenors, ("PX_LAST",), day, day)])
-    # the daily history is asked for the future's PX_SETTLE and for nothing FX
-    assert asked["daily"] == [(("ESU6 Index",), ("PX_SETTLE",))]
+    # the daily history is asked for the future's PX_LAST and for nothing FX
+    assert asked["daily"] == [(("ESU6 Index",), ("PX_LAST",))]
     stamps = dict(conn.execute("SELECT mark_type, snapped_at FROM marks"))
     assert stamps == {"SPOT": "2026-09-07T15:00:00-04:00", "FWD_OUTRIGHT": "2026-09-07T15:00:00-04:00",
                       "FUTURE_PX": "2026-09-07T17:00:00-04:00"}          # a settlement is stamped 17:00 (2026-09-22)
@@ -1002,7 +1002,7 @@ def test_a_past_fx_row_that_is_not_the_1500_close_is_replaced_and_one_that_is_ne
     results = backfill.backfill(p, date(2026, 9, 4), date(2026, 9, 7), fwd_fetch=fwd_fetch_2,
                                 fetch=lambda session, service, tickers, field, day: {"AUDUSD Curncy": 0.6505},
                                 fut_fetch=lambda session, service, tickers, fields, start, end: {
-                                    "ESU6 Index": {d.isoformat(): {"PX_SETTLE": 7550.0}
+                                    "ESU6 Index": {d.isoformat(): {"PX_LAST": 7550.0}
                                                    for d in backfill.business_days(start, end)}},
                                 today=date(2026, 9, 21), log=lambda *_: None)
     assert [r["status"] for r in results] == ["DONE", "DONE"]
@@ -1017,7 +1017,7 @@ def test_a_past_fx_row_that_is_not_the_1500_close_is_replaced_and_one_that_is_ne
     assert rows[(mon, "FWD_OUTRIGHT", "BBG_INTERP")] == (pytest.approx(0.6510), mon_close)
     assert conn.execute("SELECT value, source FROM marks_official WHERE as_of_date = ? AND mark_type = 'FWD_OUTRIGHT'",
                         (mon,)).fetchall() == [(pytest.approx(0.6510), "BBG_INTERP")]
-    # the live futures price is replaced by the day's PX_SETTLE, stamped at the settlement (17:00)
+    # the live futures price is replaced by the day's PX_LAST, stamped at the settlement (17:00)
     assert rows[(mon, "FUTURE_PX", "BBG_BDH")] == (7550.0, backfill.settle_stamp(date(2026, 9, 7)))
     assert (mon, "FUTURE_PX", "BBG_BDH") in rows and rows[(mon, "FUTURE_PX", "BBG_BDH")][1] == "2026-09-07T17:00:00-04:00"
     # Friday: rows already stamped at the close are never rewritten; the missing future is written
@@ -1067,7 +1067,7 @@ def test_a_day_older_than_bloombergs_intraday_history_takes_the_daily_close(tmp_
         out = {t: {d.isoformat(): {"PX_LAST": 0.6505} for d in backfill.business_days(start, end)}
                for t in tickers if t == "AUDUSD Curncy"}
         if "ESU6 Index" in tickers:
-            out["ESU6 Index"] = {d.isoformat(): {"PX_SETTLE": 7550.0} for d in backfill.business_days(start, end)}
+            out["ESU6 Index"] = {d.isoformat(): {"PX_LAST": 7550.0} for d in backfill.business_days(start, end)}
         return out
 
     monkeypatch.setattr(pm, "fetch_intraday_close_series", intraday)
@@ -1080,7 +1080,7 @@ def test_a_day_older_than_bloombergs_intraday_history_takes_the_daily_close(tmp_
     r = results[0]
     # no intraday request for a day Bloomberg no longer holds: the daily series answers instead
     assert not [a for a in asked if a[0] == "intraday"]
-    assert ("daily", ("AUDUSD Curncy",), ("PX_LAST",)) in asked and ("daily", ("ESU6 Index",), ("PX_SETTLE",)) in asked
+    assert ("daily", ("AUDUSD Curncy",), ("PX_LAST",)) in asked and ("daily", ("ESU6 Index",), ("PX_LAST",)) in asked
     assert r["status"] == "DONE" and (r["closes"], r["future_px"]) == (1, 1) and r["missing_pairs"] == []
     assert conn.execute("SELECT value, snapped_at FROM marks WHERE mark_type = 'SPOT'").fetchall() == [
         (0.6505, "2026-09-07T17:00:00-04:00")]
@@ -1114,7 +1114,7 @@ def test_every_past_day_within_bloombergs_intraday_history_closes_at_1500_new_yo
     monkeypatch.setattr(__import__("data.bloomberg.live", fromlist=["x"]), "book_today", lambda: today)
     assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T17:00:00-04:00") is False
     before = floor - timedelta(days=3)
-    # a future's close is its PX_SETTLE, stamped at the settlement, 17:00 New York (2026-09-22: "for
+    # a future's close is its PX_LAST, stamped at the settlement, 17:00 New York (2026-09-22: "for
     # futures, can use market close"): a live press's row (the press time, or 15:00 of the book date
     # as pull_marks.build_future_rows stamps it) is not a close, on any past day, intraday reach or not
     assert backfill.is_close_row("FUTURE_PX", "2026-09-18", "2026-09-18T11:40:12-04:00", today) is False
@@ -1473,3 +1473,140 @@ def test_the_library_lists_a_past_days_curve_and_smile_for_options_and_swaps_onl
     assert library.history_inputs_needed(conn, "2026-08-31") == []                       # before either was dealt
     assert {(r["kind"], r["key"]) for r in library.needed_in_range(conn, "2026-09-01", "2026-09-08")} >= {
         ("OIS_CURVE", "USD"), ("VOL_SMILE", "EURSEK"), ("SPOT", "AUDUSD")}
+
+
+# =========================================================================== 2026-09-22: each day's ledger block records the re-freeze
+_NEW_LEDGER = {"realised": 1, "unrealisable": [], "repaired": [],
+               "refrozen": [{"trade_id": "a1", "product": "FX_FWD", "mark_type": "SPOT", "spot_as_of_date": "2026-09-09",
+                             "pnl_from": 1.0, "pnl_to": 2.0, "why": "the 15:00 close replaced a live row"}],
+               "kept": [{"trade_id": "z9", "product": "FX_OPTION", "reason": "no close-out spot on file yet"}]}
+
+
+def test_each_backfill_day_carries_the_ledgers_refrozen_and_kept(tmp_path, monkeypatch):
+    """A direct backfill() call runs the ledger after every day: the day's result carries
+    refrozen / kept / refrozen_count / refrozen_summary as the ledger gave them (user yes,
+    2026-09-22), and the log names the sentence."""
+    p, conn = _db(tmp_path)
+    monkeypatch.setattr(backfill, "_import_realise_settled", lambda: (lambda c, as_of, **kw: dict(_NEW_LEDGER)))
+    log = []
+    results = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 8), fetch=fake_fetch, fwd_fetch=fake_fwd_fetch,
+                                fut_fetch=fake_fwd_fetch, log=log.append)
+    assert [r["status"] for r in results] == ["DONE", "DONE"]
+    for r in results:
+        assert r["realised"] == 1 and r["unrealisable"] == []
+        assert r["refrozen"] == _NEW_LEDGER["refrozen"] and r["kept"] == _NEW_LEDGER["kept"]
+        assert r["refrozen_count"] == 1 and r["refrozen_summary"] == "1 settled trade re-frozen at the close"
+    assert any("1 settled trade re-frozen at the close" in s for s in log)
+
+
+def test_each_backfill_day_tolerates_the_old_ledger_shape(tmp_path, monkeypatch):
+    p, conn = _db(tmp_path)
+    monkeypatch.setattr(backfill, "_import_realise_settled",
+                        lambda: (lambda c, as_of, **kw: {"realised": 0, "unrealisable": [], "refrozen": ["a1"]}))
+    results = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 7), fetch=fake_fetch, fwd_fetch=fake_fwd_fetch,
+                                fut_fetch=fake_fwd_fetch, log=lambda s: None)
+    assert results[0]["status"] == "DONE" and results[0]["realised"] == 0
+    assert results[0]["refrozen"] == [{"trade_id": "a1"}] and results[0]["kept"] == []
+    assert results[0]["refrozen_count"] == 1
+
+
+# =========================================================================== 2026-09-22: NDF tenor families, PX_LAST for FUTURE_PX
+# User: "for the ones that dont have, we need to use forward points to get the forward. I
+# checked bcn1m works for points, and similarly for ihn and ntn". Bloomberg rejects
+# 'USDBRLSP Curncy' / 'USDBRL1M Curncy' ("Unknown/Invalid security"), so the history asks
+# the NDF families (pull_marks.NDF_TENOR_FAMILIES): no SP ticker, spot is the first pillar.
+def _usdbrl_db(tmp_path, settle="2026-10-01"):
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES ('USDBRL','FX','USD','BRL',1,1,'USDBRL Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('b1','XLSX','USDBRL','FX_FWD','b1','2026-08-10',1e6,5.40,"
+                 "'acc','cp','HAHY7','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("b1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", settle, 5.40, 1),
+        ("b1", 2, "FX_NEAR", "BRL", -5.4e6, "2026-08-10", settle, 5.40, 0),
+    ])
+    conn.commit()
+    return p, conn
+
+
+def test_backfill_asks_the_ndf_family_tickers_for_usdbrl_and_converts_their_points_at_the_pairs_divisor(tmp_path):
+    asked = []
+
+    def points(session, service, tickers, fields, start, end):
+        asked.append(sorted(tickers))
+        # BCN2W is rejected on this terminal: no series for it, the others come back as points
+        out, d = {}, start
+        while d <= end:
+            if d.weekday() < 5:
+                out.setdefault("BCN1W Curncy", {})[d.isoformat()] = {"PX_LAST": 100.0}
+                out.setdefault("BCN1M Curncy", {})[d.isoformat()] = {"PX_LAST": 400.0}
+            d += timedelta(days=1)
+        return out
+
+    def scale(session, service, tickers, fields):
+        assert fields == ["FWD_POINTS_SCALE", "FWD_SCALE"] and tickers == ["USDBRL Curncy"]
+        return {"USDBRL Curncy": {"FWD_SCALE": 4}}                                 # what the Bloomberg PC recorded
+
+    p, conn = _usdbrl_db(tmp_path)
+    results = backfill.backfill(p, date(2026, 9, 14), date(2026, 9, 14), fwd_fetch=points, fut_fetch=_never_called,
+                                fetch=lambda s, v, tickers, field, day: {"USDBRL Curncy": 5.30},
+                                scale_fetch=scale, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE"] and results[0]["missing_marks"] == []
+    # the family tickers, SP..1M less the SP the family has no ticker for; never the pair spelling
+    assert asked == [["BCN1M Curncy", "BCN1W Curncy", "BCN2W Curncy"]]
+    assert not any(t.startswith("USDBRL") for call in asked for t in call)
+    # spot date Wed 09-16, 1W = 09-23 at 5.30 + 100 / 10**4 = 5.31, 1M = Fri 10-16 at 5.34; the
+    # rejected 2W is simply absent; target 10-01 is 8 of the 23 days between them
+    value, source, snapped = conn.execute(
+        "SELECT value, source, snapped_at FROM marks WHERE mark_type = 'FWD_OUTRIGHT' AND settle_date = '2026-10-01'").fetchone()
+    assert value == pytest.approx(5.31 + (8 / 23) * (5.34 - 5.31), abs=1e-9)
+    assert source == "BBG_INTERP" and snapped == "2026-09-14T15:00:00-04:00"
+
+
+def test_tenor_tickers_keep_the_pair_spelling_for_krw_and_inr_and_deliverable_pairs():
+    from data.bloomberg import pull_marks as pm
+    assert backfill._tenor_tickers("USDKRW", ["SP", "1W", "1M"]) == {
+        "SP": "USDKRWSP Curncy", "1W": "USDKRW1W Curncy", "1M": "USDKRW1M Curncy"}
+    assert backfill._tenor_tickers("USDINR", ["SP", "1M"]) == {"SP": "USDINRSP Curncy", "1M": "USDINR1M Curncy"}
+    assert backfill._tenor_tickers("USDJPY", ["SP", "1Y"]) == {"SP": "USDJPYSP Curncy", "1Y": "USDJPY1Y Curncy"}
+    assert backfill._tenor_tickers("USDIDR", pm.STANDARD_TENORS) == {
+        t: f"IHN{t} Curncy" for t in ("1W", "2W", "1M", "2M", "3M", "6M", "1Y")}
+    assert backfill._tenor_tickers("USDTWD", ["SP", "1M"]) == {"1M": "NTN1M Curncy"}
+    # a family change re-asks every day the backfill gave up on (backfill.state_version)
+    version = backfill.state_version()
+    assert version.startswith(__import__("data.bloomberg.library", fromlist=["x"]).LIBRARY_VERSION + "+")
+
+
+def test_backfill_asks_the_daily_px_last_for_futures_and_listed_options_and_stamps_it_at_the_daily_close(tmp_path):
+    """User, 2026-09-22: "all futures for past date pnl calculation, use px last" (Bloomberg
+    served no PX_SETTLE history for 'SPX US 10/16/26 P7615 Index'). Both kinds in one
+    request, PX_LAST, written as the official FUTURE_PX stamped settle_stamp (17:00 New York)."""
+    p, conn = _db_with_future(tmp_path)
+    conn.execute("INSERT INTO instruments VALUES ('SPX/E261016P7615-USAA','EQ_OPTION','SPX','USD',100,0,'SPX Index','2026-10-16')")
+    conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type) VALUES ('SPX/E261016P7615-USAA', 7615, 'PUT')")
+    conn.execute("INSERT INTO trades VALUES ('s1','XLSX','SPX/E261016P7615-USAA','EQ_OPTION','s1','2026-08-10',-3,120.5,"
+                 "'acc','cp','','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('s1',1,'NOTIONAL','USD',-3*100*120.5,'2026-08-10','2026-10-16',0,0)")
+    conn.commit()
+    asked = []
+
+    def daily(session, service, tickers, fields, start, end):
+        asked.append((sorted(tickers), list(fields), start, end))
+        return {t: {d.isoformat(): {"PX_LAST": 7550.0 if t == "ESU6 Index" else 98.25, "PX_SETTLE": -1.0}
+                    for d in backfill.business_days(start, end)} for t in tickers}
+
+    results = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 7), fetch=spot_fetch_2, fwd_fetch=fwd_fetch_2,
+                                fut_fetch=daily, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE"] and results[0]["missing_marks"] == []
+    assert asked == [(["ESU6 Index", "SPX US 10/16/26 P7615 Index"], ["PX_LAST"], date(2026, 9, 7), date(2026, 9, 7))]
+    rows = conn.execute("SELECT instrument_id, settle_date, value, source, snapped_at FROM marks "
+                        "WHERE mark_type = 'FUTURE_PX' ORDER BY instrument_id").fetchall()
+    assert rows == [("ESU6 Index", "2026-12-19", 7550.0, "BBG_BDH", backfill.settle_stamp(date(2026, 9, 7))),
+                    ("SPX/E261016P7615-USAA", "2026-10-16", 98.25, "BBG_BDH", backfill.settle_stamp(date(2026, 9, 7)))]
+    assert rows[0][4] == "2026-09-07T17:00:00-04:00"
+    assert all(backfill.is_close_row("FUTURE_PX", "2026-09-07", r[4], date(2026, 9, 21)) for r in rows)
+    # a listed option with no PX_LAST that day is reported under that field's name
+    results = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8), fetch=spot_fetch_2, fwd_fetch=fwd_fetch_2,
+                                fut_fetch=lambda *a: {"ESU6 Index": {"2026-09-08": {"PX_LAST": 7560.0}}}, log=lambda *_: None)
+    assert [m["reason"] for m in results[0]["missing_marks"]] == [
+        "Bloomberg returned no PX_LAST for SPX/E261016P7615-USAA on 2026-09-08"]

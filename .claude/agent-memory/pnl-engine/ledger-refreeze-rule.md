@@ -10,8 +10,12 @@ freezing anything: for every `realised_pnl` row with leg settle_date < as_of, re
 frozen row by the standard per-product rule (`_fx_freeze`, `_future_freeze`, `_irs_freeze`,
 `_option_freeze`, dispatched by `_freeze_for`) and drop it when `(mark_type, spot_as_of_date,
 local_amount, usd_entry_amount, spot_usd_per_local, pnl_usd)` differs (`_same_freeze`,
-rel 1e-9); the same call freezes it again. Result key `refrozen` lists them (ordered by
-trade_id). Approved by the user 2026-09-22 (hard rule 7 satisfied for that change).
+rel 1e-9); the same call freezes it again. Result key `refrozen` is a list of dicts sorted by
+trade_id, `{trade_id, product, mark_type, spot_as_of_date, pnl_from, pnl_to, why}` (reviewer
+M-2, user yes 2026-09-22; bbg-data's status file and ui-market-data render it, so the keys are a
+contract with those lanes); `kept` lists `{trade_id, product, reason}` for rows the rule could
+not recompute (reviewer m-2). `purge_superseded` returns the `_Purge(refrozen, kept)` pair.
+Approved by the user 2026-09-22 (hard rule 7 satisfied for that change).
 
 **Why:** a trade frozen at a live press (the last pull before the 17:00 NY day roll) kept
 that press forever once the backfill replaced the day's row with its 15:00 close; a future

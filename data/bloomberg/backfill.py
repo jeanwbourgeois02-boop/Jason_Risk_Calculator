@@ -72,14 +72,15 @@ dated that day:
     computed by market convention; a forward built on either is written BBG_INTERP, and
     BBG_BFXFORWARD is kept for Bloomberg's own outright at Bloomberg's own date
     (2026-09-21: before, no past forward was ever written, so no past day could complete).
-  - FUTURE_PX (2026-09-18): PX_SETTLE of every future open on that day -- and of every
-    listed index option on its own ticker, which the library lists as a FUTURE_PX -- same
-    batched one-request-for-the-whole-range approach. Stamped at the settlement
-    (`settle_stamp`: 17:00 New York, Bloomberg's daily close, the time PX_SETTLE is a
-    field of; 2026-09-22). A past day's FUTURE_PX row that a live press wrote (PX_LAST or
-    PX_MID, stamped at the press or at 15:00 of the book date) is not a close: once the
-    day is past the backfill asks that day's PX_SETTLE and replaces it, as it replaces an
-    FX row that is not the 15:00 close.
+  - FUTURE_PX (2026-09-18): the daily PX_LAST of every future open on that day -- and of
+    every listed index option on its own ticker, which the library lists as a FUTURE_PX
+    (user, 2026-09-22: "all futures for past date pnl calculation, use px last"; PX_SETTLE
+    until then, of which Bloomberg served no history for the listed SPX options) -- same
+    batched one-request-for-the-whole-range approach. Stamped at Bloomberg's daily close
+    (`settle_stamp`: 17:00 New York; 2026-09-22). A past day's FUTURE_PX row that a live
+    press wrote (PX_LAST or PX_MID, stamped at the press or at 15:00 of the book date) is
+    not a close: once the day is past the backfill asks that day's daily PX_LAST and
+    replaces it, as it replaces an FX row that is not the 15:00 close.
 Only what is needed is asked for (user decision 2026-09-21: "only the data necessary for
 the pnl calcs of the trades ... also for the backfill"), all of it read from the Bloomberg
 library (data/bloomberg/library.py): the days being worked, as stretches of consecutive
@@ -100,7 +101,7 @@ closes), on every past day Bloomberg's intraday history still reaches (about 140
 days, `intraday_floor`). A 15:00 bar Bloomberg does not have stays missing, with the
 reason, never the daily PX_LAST instead. Only a day beyond the intraday history closes at
 Bloomberg's daily close (PX_LAST, 17:00 New York; `first_1500_day` is the floor). Futures
-take PX_SETTLE (the market close), stamped `settle_stamp` (17:00 New York). FX rows are
+take the daily PX_LAST (the market close), stamped `settle_stamp` (17:00 New York). FX rows are
 stamped `close_stamp` (15:00 New York on their date; 17:00 beyond the intraday history).
 UNVERIFIED on a terminal.
 
@@ -131,7 +132,7 @@ Limits, stated plainly:
   - Trades are only those currently in the database (the blotter is the app's only trade
     source; a re-upload replaces the whole book -- see CLAUDE.md's schema notes).
   - FX closes are Bloomberg's 15:00 New York intraday mid (the 17:00 daily close only
-    beyond the intraday history), futures the daily PX_SETTLE, vol and OIS quotes the daily
+    beyond the intraday history), futures and listed options the daily PX_LAST, vol and OIS quotes the daily
     PX_LAST; the live pull's rows are stored under the same official sources, and the
     snapped_at timestamp tells them apart (backfill rows are stamped at the close on their
     date, 17:00 for a settlement; a live row carries the time it was pulled).
@@ -167,7 +168,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from data.bloomberg import fwd_curve as fc
-from data.bloomberg.live import SRC_INTERP, SRC_SPOT_FWD
+from data.bloomberg.live import SRC_INTERP, SRC_SPOT_FWD, ledger_block
 from data.bloomberg.pull_marks import CLOSE_HOUR_NY, CLOSE_REASON, INTRADAY_HISTORY_BUSINESS_DAYS, SRC_FUTURE
 from engine.pnl.aggregate import _last_business_day_of_prev_year
 from engine.pnl.calendar import load_holidays
@@ -292,11 +293,13 @@ def close_stamp(day: date, today: Optional[date] = None) -> str:
 
 
 # The mark types the 15:00 New York close rule covers (the user said FX closes; a future
-# takes its PX_SETTLE, stamped at the settlement, see below).
+# takes its daily PX_LAST, stamped at Bloomberg's daily close, see below).
 FX_CLOSE_MARK_TYPES = ("SPOT", "FWD_OUTRIGHT")
 
-# A future's past close is its settlement price (user, 2026-09-22: "for futures, can use
-# market close"), a field of Bloomberg's daily history, and a settlement row is stamped at
+# A future's past close is its daily PX_LAST (user, 2026-09-22: "for futures, can use
+# market close", then "all futures for past date pnl calculation, use px last": PX_SETTLE
+# in between, of which Bloomberg served no history for the listed SPX options), a field
+# of Bloomberg's daily history, and that row is stamped at
 # Bloomberg's daily close, 17:00 New York, on its date. A live press stamps its FUTURE_PX
 # row (PX_LAST, or a listed option's PX_MID) at the press or at 15:00 of the book date
 # (pull_marks.build_future_rows), never 17:00, so the stamp alone tells a settlement row
@@ -307,8 +310,8 @@ SETTLE_HOUR_NY = DAILY_CLOSE_HOUR_NY
 
 
 def settle_stamp(day: date) -> str:
-    """The settlement on `day` a future's PX_SETTLE row is stamped with: SETTLE_HOUR_NY:00
-    New York with that date's UTC offset resolved."""
+    """The daily close on `day` a future's or listed option's FUTURE_PX history row is
+    stamped with: SETTLE_HOUR_NY:00 New York with that date's UTC offset resolved."""
     return datetime(day.year, day.month, day.day, SETTLE_HOUR_NY, 0, tzinfo=NY).isoformat(timespec="seconds")
 
 
@@ -698,9 +701,12 @@ def _tenors_needed(pair: str, legs: List[dict], run_start: date, holidays) -> Li
 
 
 def _tenor_tickers(pair: str, tenors: List[str]) -> Dict[str, str]:
-    """{tenor label -> bbg_ticker} for `pair`, the naming the live tenor-fallback path uses
-    (pull_marks.fetch_tenor_points)."""
-    return {t: f"{pair}{t} Curncy" for t in tenors}
+    """{tenor label -> bbg_ticker} for `pair` in Bloomberg's history (pull_marks.tenor_ticker:
+    '<pair><tenor> Curncy', or the NDF family's 'BCN1M Curncy' for USDBRL / IHN for USDIDR /
+    NTN for USDTWD, 2026-09-22). A tenor the naming has no ticker for (a family's SP: spot
+    itself is the first pillar) is left out and never asked for."""
+    from data.bloomberg.pull_marks import tenor_ticker
+    return {t: ticker for t in tenors if (ticker := tenor_ticker(pair, t))}
 
 
 def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
@@ -838,10 +844,12 @@ def _infer_points_scale(conn: sqlite3.Connection, pair: str, rows_by_day: Dict[s
 
 def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
                              fut_fetch: Optional[Callable] = None) -> Dict[str, Dict[str, float]]:
-    """{instrument_id: {date_iso: PX_SETTLE}} -- one HistoricalDataRequest per stretch of
-    `runs`, for the futures open inside it (the Bloomberg library's FUTURE_PX rows).
-    `fut_fetch` mirrors `_fetch_fwd_outright_history`'s `fwd_fetch`; defaults to
-    pull_marks.fetch_historical_series."""
+    """{instrument_id: {date_iso: PX_LAST}} -- one HistoricalDataRequest per stretch of
+    `runs`, for the futures and listed options open inside it (the Bloomberg library's
+    FUTURE_PX rows), asked for the daily PX_LAST (user, 2026-09-22: "all futures for past
+    date pnl calculation, use px last"; it was PX_SETTLE, which Bloomberg served no history
+    of for the listed SPX options). `fut_fetch` mirrors `_fetch_fwd_outright_history`'s
+    `fwd_fetch`; defaults to pull_marks.fetch_historical_series."""
     from data.bloomberg import library
     out: Dict[str, Dict[str, float]] = {}
     for run_start, run_end in runs:
@@ -853,13 +861,13 @@ def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: L
         if fut_fetch is None:
             from data.bloomberg.pull_marks import fetch_historical_series
             fut_fetch = fetch_historical_series
-        series = fut_fetch(session, service, sorted(ticker_to_instrument), ["PX_SETTLE"], run_start, run_end) or {}
+        series = fut_fetch(session, service, sorted(ticker_to_instrument), ["PX_LAST"], run_start, run_end) or {}
         for ticker, per_day in series.items():
             instrument_id = ticker_to_instrument.get(ticker)
             if instrument_id is None:
                 continue
             out.setdefault(instrument_id, {}).update(
-                {day: row["PX_SETTLE"] for day, row in per_day.items() if "PX_SETTLE" in row})
+                {day: row["PX_LAST"] for day, row in per_day.items() if "PX_LAST" in row})
     return out
 
 
@@ -1060,7 +1068,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     per stretch (`_spot_fetch_from_series`). `fwd_fetch`/`fut_fetch` (both `(session,
     service, tickers, fields, start, end) -> {ticker: {date_iso: {field: value}}}`, ONE
     call per stretch, 2026-09-18) default to pull_marks.fetch_intraday_close_series (the
-    tenor series) and pull_marks.fetch_historical_series (futures' PX_SETTLE, the NDF
+    tenor series) and pull_marks.fetch_historical_series (futures' daily PX_LAST, the NDF
     fixings). `quote_fetch` (same shape; the vol and OIS quote history, one call per kind
     per stretch, 2026-09-22) defaults to pull_marks.fetch_historical_series when this call
     has a session, else to `fut_fetch` (a test that injects the three fetchers and no
@@ -1238,7 +1246,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     try:
                         settle_value = float(future_px_by_instrument.get(instrument_id, {}).get(day))
                     except (TypeError, ValueError):
-                        missing_marks.append({**item, "reason": f"Bloomberg returned no PX_SETTLE for {instrument_id} on {day}"})
+                        missing_marks.append({**item, "reason": f"Bloomberg returned no PX_LAST for {instrument_id} on {day}"})
                         continue
                     fut_rows.append({"as_of_date": day, "instrument_id": instrument_id, "settle_date": item["settle_date"],
                                      "mark_type": "FUTURE_PX", "value": settle_value, "source": SRC_FUTURE,
@@ -1342,13 +1350,17 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     options_priced, options_skipped, options_note, options_closed_out = _price_options_close(
                         conn, day, price_close)
                     realised, unrealisable, flag = None, [], "realisation after the last day"
+                    ledger = ledger_block(None)          # what the ledger did on this day, re-freeze included
                     if realise_settled is None:
                         flag = "no realisation (realise_settled unavailable)"
                     elif order is None:
                         try:
                             led = realise_settled(conn, day)
-                            realised, unrealisable = led["realised"], led["unrealisable"]
+                            ledger = ledger_block(led, day)
+                            realised, unrealisable = ledger["realised"], ledger["unrealisable"]
                             flag = "complete" if not unrealisable else f"unrealisable={[u['trade_id'] for u in unrealisable]}"
+                            if ledger["refrozen_summary"]:
+                                flag += f"  {ledger['refrozen_summary']}"
                         except Exception as exc:  # engine/pnl/ledger.py is owned by another task; never let its
                             # in-progress state stop marks from being written -- report and move on.
                             flag = f"realise_settled raised: {exc!r}"
@@ -1368,6 +1380,9 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                   "fwd_outrights": len(fwd_rows), "future_px": len(p["fut_rows"]),
                                   "missing_pairs": p["missing_pairs"], "missing_pair_reasons": p["pair_reasons"],
                                   "missing_marks": missing_marks, "realised": realised, "unrealisable": unrealisable,
+                                  "refrozen": ledger["refrozen"], "kept": ledger["kept"],
+                                  "refrozen_count": ledger["refrozen_count"],
+                                  "refrozen_summary": ledger["refrozen_summary"],
                                   "options_priced": options_priced, "options_skipped": options_skipped,
                                   "options_note": options_note, "options_closed_out": options_closed_out,
                                   "vol_quotes": vol_written,
@@ -1385,7 +1400,9 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             if order is not None and realise_settled is not None:
                 try:
                     led = realise_settled(conn, span_end.isoformat())
-                    log(f"  realised after the last day: {led['realised']}")
+                    ledger = _record_ledger(db_path, "after_last_day", ledger_block(led, span_end.isoformat()))
+                    log(f"  realised after the last day: {ledger['realised']}"
+                        + (f"  {ledger['refrozen_summary']}" if ledger["refrozen_summary"] else ""))
                 except Exception as exc:  # noqa: BLE001 -- as above: report and move on
                     log(f"  realise_settled raised: {exc!r}")
             if "by_pair" in scales:
@@ -1468,7 +1485,9 @@ def state_version() -> str:
     whenever `library.compute` learns a new kind or ticker rule, the listed-option ticker
     included) plus a digest of the ticker tables and naming rules the backfill asks
     Bloomberg's history with -- `common.NDF_1M_TICKERS`, `common.NDF_FIX_TICKERS`, the
-    standard forward tenor tickers (`_tenor_tickers` over `pull_marks.STANDARD_TENORS`),
+    standard forward tenor tickers (`_tenor_tickers` over `pull_marks.STANDARD_TENORS` for
+    a deliverable pair and for each NDF family of `pull_marks.NDF_TENOR_FAMILIES`), the
+    field the FUTURE_PX history is asked for (PX_LAST since 2026-09-22),
     the vol smile tickers (`vol_marketdata.vol_ticker`) and the OIS curve tickers
     (`rates_marketdata.ois_curve`). A day's state stamped by any other value counts as
     never tried, so a corrected ticker is asked for on the next press: the stamp resets
@@ -1477,10 +1496,12 @@ def state_version() -> str:
     from data.bloomberg import rates_marketdata as rm
     from data.bloomberg import vol_marketdata as vm
     from data.bloomberg.library import LIBRARY_VERSION
-    from data.bloomberg.pull_marks import STANDARD_TENORS
+    from data.bloomberg.pull_marks import NDF_TENOR_FAMILIES, STANDARD_TENORS
     from data.ingest.common import NDF_1M_TICKERS, NDF_FIX_TICKERS
-    rules = {"ndf_1m": NDF_1M_TICKERS, "ndf_fix": NDF_FIX_TICKERS,
-             "tenors": _tenor_tickers("USDBRL", list(STANDARD_TENORS)),
+    rules = {"ndf_1m": NDF_1M_TICKERS, "ndf_fix": NDF_FIX_TICKERS, "ndf_tenor_families": NDF_TENOR_FAMILIES,
+             "tenors": {pair: _tenor_tickers(pair, list(STANDARD_TENORS))
+                        for pair in ["USDJPY"] + sorted("USD" + ccy for ccy in NDF_TENOR_FAMILIES)},
+             "future_px_field": "PX_LAST",
              "vol": [vm.vol_ticker("USDJPY", t, q) for t in vm.VOL_TENORS for q in vm.VOL_QUOTE_TYPES],
              "ois": {ccy: [(spec.ticker, spec.field) for spec in rm.ois_curve(ccy)] for ccy in sorted(rm.OIS_INDEX)}}
     digest = hashlib.sha1(json.dumps(rules, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
@@ -1507,7 +1528,7 @@ _RETURNED_NO_RE = re.compile(r"returned no (.+?) for (.+?)(?: on \d{4}-\d{2}-\d{
 
 def _reason_label(reason: str) -> str:
     """The ticker a failure reason is about, for the "waiting_on_tickers" sentence:
-    'USDBRLSP Curncy' from the intraday wording, 'PX_SETTLE of SPX/E261016C7615' from a
+    'USDBRLSP Curncy' from the intraday wording, 'PX_LAST of SPX/E261016C7615' from a
     "returned no <what> for <ticker> on <day>" wording; the reason's start otherwise."""
     m = _REQUEST_FOR_RE.search(reason)
     if m:
@@ -1659,7 +1680,43 @@ def _plain_reasons(result: dict, still_missing: List[dict]) -> List[str]:
     return list(dict.fromkeys(reasons))[:MAX_STATUS_REASONS]
 
 
-def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) -> None:
+def _record_ledger(db_path, step: str, block: dict) -> dict:
+    """Publish what one of the backfill's ledger calls did (user yes, 2026-09-22: the pull
+    status records what the ledger's re-freeze did) under the status file's "backfill" key
+    as "ledger": one block of `live.ledger_block`'s shape (the live pull's `status["ledger"]`
+    exactly: as_of_date, realised, unrealisable, repaired, refrozen, kept, refrozen_count,
+    refrozen_summary) summed over the run's calls -- `backfill()`'s call after the last
+    worked day (step "after_last_day", which is where a re-freeze at a past close lands)
+    and the closing step (`_realise_after_backfill`, "closing") -- with each call's own
+    block under "steps". The after-last-day call, the run's first, starts the block
+    afresh; the closing step merges into it unless the block already holds a closing (a
+    run with no due days makes no after-last-day call), so a stale run never shows.
+    Returns the step's block."""
+    from data.bloomberg.live import patch_status, refrozen_summary
+    key = _db_key(db_path)
+    with _publish_lock:
+        published = _published.setdefault(key, {})
+        current = published.get("ledger") if step == "closing" else None
+        if current and any(s.get("step") == "closing" for s in current.get("steps") or []):
+            current = None
+        steps = list((current or {}).get("steps") or []) + [{"step": step, **block}]
+        refrozen = [r for s in steps for r in s.get("refrozen") or []]
+        merged = {"as_of_date": block.get("as_of_date"),
+                  "realised": sum(s.get("realised") or 0 for s in steps),
+                  "unrealisable": list(block.get("unrealisable") or []),
+                  "repaired": [r for s in steps for r in s.get("repaired") or []],
+                  "refrozen": refrozen, "kept": list(block.get("kept") or []),
+                  "refrozen_count": len(refrozen), "refrozen_summary": refrozen_summary(len(refrozen)),
+                  "steps": steps}
+        published["ledger"] = merged
+        try:
+            patch_status(db_path, "backfill", {"ledger": merged})
+        except Exception:  # noqa: BLE001 -- the status file is a report, never a reason to stop the run
+            pass
+    return block
+
+
+def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) -> Optional[dict]:
     """The backfill's closing step: the ledger's plain `realise_settled(conn, today)` once
     the past closes are on file, so a trade settled since the live pull's own freeze (which
     runs before the backfill of the same button press) is frozen at its settlement date's
@@ -1667,18 +1724,24 @@ def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) ->
     it (the ledger's rule, 2026-09-22). Until 2026-09-22 this step was the one caller of
     the present-spot exception for settled NDFs (user decision 2026-09-21); that exception
     is retired (2026-09-22: the standard NDF rule covers every ticket) and the call is the
-    ledger's plain one."""
+    ledger's plain one. Returns the call's `live.ledger_block` (None when the ledger is not
+    importable or raised), after recording it in the status file (`_record_ledger`)."""
     realise_settled = _import_realise_settled()
     if realise_settled is None:
-        return
+        return None
     from data.ingest.schema import connect
     conn = connect(Path(db_path))
     try:
         led = realise_settled(conn, today.isoformat())
-        if led["realised"]:
-            log(f"Auto-backfill: {led['realised']} settled trade(s) frozen after the backfill.")
+        block = _record_ledger(db_path, "closing", ledger_block(led, today.isoformat()))
+        if block["realised"]:
+            log(f"Auto-backfill: {block['realised']} settled trade(s) frozen after the backfill.")
+        if block["refrozen_summary"]:
+            log(f"Auto-backfill: {block['refrozen_summary']}.")
+        return block
     except Exception as exc:  # noqa: BLE001 -- as in backfill(): report and move on
         log(f"  realise_settled raised: {exc!r}")
+        return None
     finally:
         conn.close()
 

@@ -4,7 +4,12 @@ User's cash-ladder spec (2026-09-18, "Marks and the USD ladder"): each leg gets 
 mark, ``usd_per_unit_at(ccy, value_date)``, and its USD equivalent is
 ``amount x mark``. The rule, reproduced here on this app's own marks table:
 
-  * spot date = as-of date + 2 weekdays (no holiday calendar, as in the spec);
+  * spot date = the app's one spot-date rule, `engine.pnl.calendar.spot_date`, per pair
+    (since 2026-09-22, reviewer finding m-6, user yes): as-of + 2 weekdays, + 1 for
+    USDCAD / USDTRY / USDPHP / USDRUB, rolled forward off a config/holidays.txt holiday.
+    The spec's own "as-of + 2 weekdays, no holidays" put a USDCAD leg at T+2 at spot here
+    and one day along the curve in the Blotter; the P&L's curve pillar and the backfill
+    already used the shared rule, so the Ladder now reads the same date;
   * value date <= spot date -> SPOT;
   * value date > spot date -> the forward outright for that date: an official
     FWD_OUTRIGHT row at exactly that date when Bloomberg (or the official BBG_INTERP
@@ -38,6 +43,8 @@ import datetime as dt
 import sqlite3
 from typing import Dict, Iterable, Mapping, Tuple
 
+from engine.pnl import calendar as _calendar
+
 BASIS_SPOT = "spot"
 BASIS_OUTRIGHT = "outright"
 BASIS_INTERPOLATED = "interpolated"
@@ -52,15 +59,14 @@ ORDER BY settle_date
 """
 
 
-def spot_date(as_of: str) -> str:
-    """as_of + 2 weekdays (Saturday/Sunday skipped, no holiday calendar), ISO."""
-    d = dt.date.fromisoformat(as_of)
-    added = 0
-    while added < 2:
-        d += dt.timedelta(days=1)
-        if d.weekday() < 5:
-            added += 1
-    return d.isoformat()
+def spot_date(as_of: str, pair: str = "", holidays=None) -> str:
+    """ISO spot value date of `pair` dealt on `as_of`, from the app's one spot-date rule
+    (`engine.pnl.calendar.spot_date`): + 2 weekdays, + 1 for USDCAD / USDTRY / USDPHP /
+    USDRUB, then rolled forward while the date is a weekend or a config/holidays.txt
+    holiday (`load_holidays()` when `holidays` is None). `pair=""` keeps the plain T+2
+    rule for a caller that has no pair; every "spot or forward" decision in this module
+    passes the currency's USD pair."""
+    return _calendar.spot_date(as_of, pair, holidays).isoformat()
 
 
 def _quoted_at(pillars: list, day: str, spot_day: str, spot_value: float) -> Tuple[float, str]:
@@ -94,6 +100,7 @@ def forward_usd_rates(conn: sqlite3.Connection, rates: Mapping[str, Mapping],
     the identity on every date. A date that is not an ISO date (the settled-cash
     sentinel) is marked at spot."""
     out: Dict[Tuple[str, str], dict] = {}
+    holidays = _calendar.load_holidays()  # once per call: spot_date would re-stat the file per pair
     by_ccy: Dict[str, list] = {}
     for ccy, day in needed:
         by_ccy.setdefault(ccy, []).append(day)
@@ -119,7 +126,7 @@ def forward_usd_rates(conn: sqlite3.Connection, rates: Mapping[str, Mapping],
                                    "pair": pair, "ticker": str(entry.get("ticker") or "")}
             continue
         as_of = str(entry.get("as_of_date") or "")
-        spot_day = spot_date(as_of) if as_of else ""
+        spot_day = spot_date(as_of, pair, holidays) if as_of else ""  # per pair: USDCAD is T+1
         if pair not in curves:
             pillars = []
             if as_of:

@@ -705,7 +705,8 @@ def test_value_book_closed_out_option_past_expiry_is_recorded_at_the_same_close_
     vb = _vb_rows(conn)   # not yet in realised_pnl: the figure the ledger will record
     assert list(vb["status"]) == ["SETTLED", "SETTLED"] and "last before the close-out" in vb.loc["BUY", "note"]
     assert vb["pnl_usd"].sum() == pytest.approx(-1_925 * 1.15) == pytest.approx(before_expiry)
-    assert ledger.realise_settled(conn, VB_AS_OF) == {"realised": 2, "unrealisable": [], "repaired": [], "refrozen": []}
+    assert ledger.realise_settled(conn, VB_AS_OF) == {"realised": 2, "unrealisable": [], "repaired": [], "refrozen": [],
+                                                      "kept": []}
     assert conn.execute("SELECT DISTINCT mark_type, spot_as_of_date FROM realised_pnl").fetchall() == [("CLOSE_OUT", "2026-05-04")]
     assert _vb_rows(conn)["pnl_usd"].sum() == pytest.approx(-1_925 * 1.15)
     assert ledger.ltd(conn, VB_AS_OF) == pytest.approx(-1_925 * 1.15)

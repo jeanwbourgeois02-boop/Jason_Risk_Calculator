@@ -3482,3 +3482,15 @@ def test_check_not_stale_defaults_today_to_the_book_date(monkeypatch):
     check_not_stale(date(2026, 9, 23), requests, allow_stale=False)                 # the book date: never refused
     with pytest.raises(StaleAsOfError, match="the book date: New York, rolled at 17:00"):
         check_not_stale(date(2026, 9, 22), requests, allow_stale=False)
+
+
+def test_tenor_ticker_uses_the_ndf_family_for_brl_idr_twd_and_the_pair_spelling_otherwise():
+    """2026-09-22: Bloomberg rejects 'USDBRL1M Curncy'; the user verified BCN1M / IHN1M /
+    NTN1M quote the forward points. No SP ticker in a family: spot is the first pillar."""
+    from data.bloomberg import pull_marks as pm
+    assert pm.NDF_TENOR_FAMILIES == {"BRL": "BCN", "IDR": "IHN", "TWD": "NTN"}
+    assert pm.tenor_ticker("USDBRL", "1M") == "BCN1M Curncy" and pm.tenor_ticker("USDBRL", "SP") == ""
+    assert pm.tenor_ticker("USDIDR", "1Y") == "IHN1Y Curncy" and pm.tenor_ticker("USDTWD", "2W") == "NTN2W Curncy"
+    assert pm.tenor_ticker("USDKRW", "1M") == "USDKRW1M Curncy" and pm.tenor_ticker("USDKRW", "SP") == "USDKRWSP Curncy"
+    assert pm.tenor_ticker("USDJPY", "1W") == "USDJPY1W Curncy" and pm.tenor_ticker("EURSEK", "SP") == "EURSEKSP Curncy"
+    assert pm.tenor_ticker("BRLUSD", "1M") == "BRLUSD1M Curncy"        # a family applies to the USD pair only

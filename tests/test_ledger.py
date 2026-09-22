@@ -395,6 +395,10 @@ def _frozen_row(conn, trade_id):
                         (trade_id,)).fetchone()
 
 
+def _refrozen_ids(res):
+    return [e["trade_id"] for e in res["refrozen"]]
+
+
 def test_ndf_freezes_at_the_fix_of_its_fixing_date_exactly_never_a_neighbouring_days():
     conn = _ndf_db()
     _brl_fix(conn, "2026-09-11", 5.30)   # the Friday before: not this ticket's fix
@@ -408,7 +412,11 @@ def test_ndf_freezes_at_the_fix_of_its_fixing_date_exactly_never_a_neighbouring_
     # the P&L converted at the fix itself (user decision 2026-09-22), spot_usd_per_local = 1 / FIX
     _brl_fix(conn, "2026-09-14", 5.22)
     res = ledger.realise_settled(conn, "2026-09-21")
-    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    assert res["realised"] == 1 and res["kept"] == []
+    # the entry records what the re-freeze did to the figure (reviewer M-2, 2026-09-22)
+    assert res["refrozen"] == [{"trade_id": "b1", "product": "FX_FWD", "mark_type": "NDF_FIX",
+                                "spot_as_of_date": "2026-09-14", "pnl_from": pytest.approx(1e6 * (5.25 - 5.20) / 5.25),
+                                "pnl_to": pytest.approx(1e6 * (5.22 - 5.20) / 5.22), "why": "NDF_FIX replaced SPOT"}]
     b1 = _frozen_row(conn, "b1")
     assert b1[:2] == ("NDF_FIX", "2026-09-14") and b1[2] == pytest.approx(1e6 * (5.22 - 5.20) / 5.22)
     assert b1[3] == "official fixing dated 2026-09-14 (NDF fixing), converted at the fixing"
@@ -428,7 +436,10 @@ def test_a_row_frozen_at_a_fix_of_another_day_is_dropped_and_frozen_again():
                  "note = 'official fixing dated 2026-09-11 (last before fixing)' WHERE trade_id = 'b1'")
     conn.commit()
     res = ledger.realise_settled(conn, "2026-09-21")
-    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    assert _refrozen_ids(res) == ["b1"] and res["realised"] == 1
+    e = res["refrozen"][0]
+    assert (e["mark_type"], e["spot_as_of_date"], e["pnl_from"]) == ("SPOT", "2026-09-14", 1.0)
+    assert e["pnl_to"] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25) and e["why"] == "SPOT replaced NDF_FIX (2026-09-11 -> 2026-09-14)"
     b1 = _frozen_row(conn, "b1")
     assert b1[:2] == ("SPOT", "2026-09-14") and b1[2] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25)
     assert b1[3] == "spot dated 2026-09-14 (NDF fixing), converted at that spot"
@@ -443,7 +454,7 @@ def test_a_deliverable_pairs_row_is_never_touched_by_the_ndf_guard():
     _insert_marks(conn, [("2026-09-16", "USDJPY", "2026-09-16", "NDF_FIX", 999.0, "BBG_BDH", "t")])   # a deliverable pair never reads one
     conn.commit()
     res = ledger.realise_settled(conn, "2026-09-21")
-    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    assert _refrozen_ids(res) == ["b1"] and res["realised"] == 1 and res["kept"] == []
     assert conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'j1'").fetchone() == j1
 
 
@@ -460,7 +471,7 @@ def test_a_past_day_call_never_drops_a_row_it_cannot_freeze_again():
     res = ledger.realise_settled(conn, "2026-09-15")                    # b1's value date 09-16 is not before as_of
     assert res["refrozen"] == [] and res["realised"] == 0 and _frozen_row(conn, "b1") == before
     res = ledger.realise_settled(conn, "2026-09-21")
-    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    assert _refrozen_ids(res) == ["b1"] and res["realised"] == 1
     assert _frozen_row(conn, "b1")[:2] == ("NDF_FIX", "2026-09-14")
 
 
@@ -511,7 +522,10 @@ def test_a_row_frozen_at_a_live_press_is_frozen_again_once_the_close_replaces_th
                  "WHERE as_of_date = '2026-09-09' AND instrument_id = 'AUDUSD' AND mark_type = 'SPOT'")
     conn.commit()
     res = ledger.realise_settled(conn, "2026-09-14")
-    assert res["refrozen"] == ["a1"] and res["realised"] == 1 and res["repaired"] == []
+    assert res["realised"] == 1 and res["repaired"] == [] and res["kept"] == []
+    assert res["refrozen"] == [{"trade_id": "a1", "product": "FX_FWD", "mark_type": "SPOT", "spot_as_of_date": "2026-09-09",
+                                "pnl_from": pytest.approx(30000), "pnl_to": pytest.approx(20000),
+                                "why": "SPOT 2026-09-09 mark 0.62 -> 0.63 (the marks of that date changed)"}]
     after = _a1(conn)
     assert after[:3] == (0.63, "2026-09-09", pytest.approx(-1e6 * 0.63 + 650000))
     assert ledger.value_book(conn, "2026-09-14").set_index("trade_id").loc["a1", "pnl_usd"] == pytest.approx(20000)
@@ -529,17 +543,19 @@ def test_an_unchanged_row_is_untouched_and_a_row_the_rule_cannot_recompute_keeps
     conn.commit()
     res = ledger.realise_settled(conn, "2026-09-14")
     assert res["refrozen"] == [] and res["realised"] == 0 and _a1(conn) == before
-    # the mark it was frozen from is gone: nothing to compare against, the row keeps its figure
+    # the mark it was frozen from is gone: nothing to compare against, the row keeps its figure,
+    # and says so under 'kept' (reviewer m-2, 2026-09-22: silent before)
     conn.execute("DELETE FROM marks WHERE as_of_date = '2026-09-09'")
     conn.commit()
     res = ledger.realise_settled(conn, "2026-09-14")
     assert res["refrozen"] == [] and _a1(conn) == before
+    assert res["kept"] == [{"trade_id": "a1", "product": "FX_FWD", "reason": "no official SPOT for AUDUSD on or before 2026-09-10"}]
     # a past-day call (the backfill's) never looks at a row whose value date it is not past
     _insert_marks(conn, [("2026-09-09", "AUDUSD", "2026-09-09", "SPOT", 0.64, "BBG_BFXFORWARD", "t")])
     conn.commit()
     res = ledger.realise_settled(conn, "2026-09-10")
-    assert res["refrozen"] == [] and _a1(conn) == before
-    assert ledger.realise_settled(conn, "2026-09-14")["refrozen"] == ["a1"]
+    assert res["refrozen"] == [] and res["kept"] == [] and _a1(conn) == before
+    assert _refrozen_ids(ledger.realise_settled(conn, "2026-09-14")) == ["a1"]
 
 
 def test_a_future_frozen_at_a_live_px_last_is_frozen_again_at_that_days_settlement_price():
@@ -554,7 +570,10 @@ def test_a_future_frozen_at_a_live_px_last_is_frozen_again_at_that_days_settleme
     conn.execute("UPDATE marks SET value = 6460.0, snapped_at = '2026-09-18T16:00:00-04:00' WHERE instrument_id = 'ESU6 Index'")
     conn.commit()
     res = ledger.realise_settled(conn, "2026-09-21")
-    assert res["refrozen"] == ["f1"] and res["realised"] == 1
+    assert res["realised"] == 1
+    assert res["refrozen"] == [{"trade_id": "f1", "product": "FUTURE", "mark_type": "FUTURE_PX", "spot_as_of_date": "2026-09-18",
+                                "pnl_from": pytest.approx(2 * 50 * 50.0), "pnl_to": pytest.approx(2 * 50 * 60.0),
+                                "why": "FUTURE_PX 2026-09-18 mark 322500 -> 323000 (the marks of that date changed)"}]
     assert conn.execute("SELECT pnl_usd, spot_usd_per_local FROM realised_pnl WHERE trade_id = 'f1'").fetchone() == (
         pytest.approx(2 * 50 * 60.0), pytest.approx(50 * 6460.0))
 
@@ -569,5 +588,35 @@ def test_a_matured_swap_is_frozen_again_when_its_maturity_pv_is_re_run():
     conn.execute("UPDATE marks SET value = 2_150.0 WHERE mark_type = 'CASHFLOW_USD'")   # engine/rates re-ran the day
     conn.commit()
     res = ledger.realise_settled(conn, "2026-09-14")
-    assert res["refrozen"] == ["s1"]
+    assert res["refrozen"] == [{"trade_id": "s1", "product": "IRS", "mark_type": "PV_USD", "spot_as_of_date": "2026-09-10",
+                                "pnl_from": 2_100.0, "pnl_to": 2_150.0,
+                                "why": "PV_USD 2026-09-10 amount 2100 -> 2150 (the marks of that date changed)"}]
     assert conn.execute("SELECT pnl_usd, local_amount FROM realised_pnl WHERE trade_id = 's1'").fetchone() == (2_150.0, 2_150.0)
+
+
+def test_kept_names_every_row_the_rule_cannot_recompute_and_refrozen_is_sorted_by_trade_id():
+    """Reviewer m-2 / M-2, 2026-09-22: a row the purge could not recompute was skipped in silence,
+    and 'refrozen' was bare ids. Two frozen AUD rows, both from the 09-09 spot: with the spot
+    gone both are kept with the reason and nothing is dropped; with the spot back at another
+    value both are re-frozen, listed by trade_id, each with its own from / to figure."""
+    conn = _db()
+    _insert_trade(conn, "a0", "AUDUSD", "FX_FWD", "2026-08-10", 2e6, 0.60)
+    _insert_legs(conn, [("a0", 1, "FX_NEAR", "AUD", 2e6, "2026-08-10", "2026-09-10", 0.60, 1),
+                        ("a0", 2, "FX_NEAR", "USD", -1200000, "2026-08-10", "2026-09-10", 0.60, 1)])
+    conn.commit()
+    assert ledger.realise_settled(conn, "2026-09-14")["realised"] == 2
+    conn.execute("DELETE FROM marks WHERE as_of_date = '2026-09-09'")
+    conn.commit()
+    res = ledger.realise_settled(conn, "2026-09-14")
+    assert res["refrozen"] == [] and res["realised"] == 0
+    assert res["kept"] == [{"trade_id": "a0", "product": "FX_FWD", "reason": "no official SPOT for AUDUSD on or before 2026-09-10"},
+                           {"trade_id": "a1", "product": "FX_FWD", "reason": "no official SPOT for AUDUSD on or before 2026-09-10"}]
+    assert conn.execute("SELECT COUNT(*) FROM realised_pnl").fetchone()[0] == 2
+    _insert_marks(conn, [("2026-09-09", "AUDUSD", "2026-09-09", "SPOT", 0.63, "BBG_BFXFORWARD", "t")])
+    conn.commit()
+    res = ledger.realise_settled(conn, "2026-09-14")
+    assert res["kept"] == [] and res["realised"] == 2
+    assert [(e["trade_id"], e["pnl_from"], e["pnl_to"]) for e in res["refrozen"]] == [
+        ("a0", pytest.approx(2e6 * (0.62 - 0.60)), pytest.approx(2e6 * (0.63 - 0.60))),
+        ("a1", pytest.approx(30000), pytest.approx(20000))]
+    assert {e["why"] for e in res["refrozen"]} == {"SPOT 2026-09-09 mark 0.62 -> 0.63 (the marks of that date changed)"}

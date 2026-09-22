@@ -339,9 +339,12 @@ def save_after_pull(db_path: Union[str, Path], repo_root: Union[str, Path] = REP
 def _realise(conn: sqlite3.Connection, as_of: str) -> Optional[dict]:
     """The backfill's closing step (`backfill._realise_after_backfill`: the ledger's plain
     `realise_settled`), which no pull runs on a PC without Bloomberg. Guarded like the
-    backfill's own import: this package must not depend on engine.pnl being importable."""
+    backfill's own import: this package must not depend on engine.pnl being importable.
+    Returns `live.ledger_block` (2026-09-22): realised, unrealisable, repaired, refrozen,
+    kept, refrozen_count and refrozen_summary passed through as the ledger gave them."""
     try:
         from engine.pnl.ledger import realise_settled
     except ImportError:
         return None
-    return realise_settled(conn, as_of)
+    from data.bloomberg.live import ledger_block
+    return ledger_block(realise_settled(conn, as_of), as_of)

@@ -1639,19 +1639,19 @@ def test_ndf_fix_rows_are_the_fixing_dates_history_value_on_the_pair():
     from data.bloomberg.live import ndf_fix_rows
     from data.bloomberg.pull_marks import RequestRow
     reqs = [RequestRow("USDBRL", "BZFXPTAX Index", "2026-09-22", "NDF_FIX"),
-            RequestRow("USDKRW", "KFTC18 Index", "2026-09-22", "NDF_FIX")]
+            RequestRow("USDKRW", "KOBRUSD Index", "2026-09-22", "NDF_FIX")]
     asked = {}
 
     def fetch(session, service, tickers, fields, start, end):
         asked["call"] = (sorted(tickers), list(fields), start, end)
-        return {"BZFXPTAX Index": {"2026-09-22": {"PX_LAST": 5.3412}}, "KFTC18 Index": {}}
+        return {"BZFXPTAX Index": {"2026-09-22": {"PX_LAST": 5.3412}}, "KOBRUSD Index": {}}
 
     rows, warnings, failed = ndf_fix_rows(None, None, reqs, _date(2026, 9, 22), fetch=fetch, snapped_at="2026-09-22T15:00:00-04:00")
-    assert asked["call"] == (["BZFXPTAX Index", "KFTC18 Index"], ["PX_LAST"], _date(2026, 9, 22), _date(2026, 9, 22))
+    assert asked["call"] == (["BZFXPTAX Index", "KOBRUSD Index"], ["PX_LAST"], _date(2026, 9, 22), _date(2026, 9, 22))
     assert rows == [{"as_of_date": "2026-09-22", "instrument_id": "USDBRL", "settle_date": "2026-09-22", "mark_type": "NDF_FIX",
                      "value": 5.3412, "source": "BBG_BDH", "snapped_at": "2026-09-22T15:00:00-04:00"}]
     assert warnings == [] and [f["instrument_id"] for f in failed] == ["USDKRW"]
-    assert failed[0]["reason"] == "Bloomberg returned no PX_LAST for KFTC18 Index on 2026-09-22 (the fixing)"
+    assert failed[0]["reason"] == "Bloomberg returned no PX_LAST for KOBRUSD Index on 2026-09-22 (the fixing)"
     assert ndf_fix_rows(None, None, [], _date(2026, 9, 22), fetch=fetch) == ([], [], [])
 
 
@@ -1798,7 +1798,9 @@ def test_pull_at_1600_new_york_still_writes_that_days_marks(tmp_path, monkeypatc
                   ("AUDUSD", "2026-11-16", "FWD_OUTRIGHT", 0.6630, stamp),
                   ("AUDUSD", "2026-09-22", "SPOT", 0.6612, stamp)]
     assert conn.execute("SELECT COUNT(*) FROM marks WHERE as_of_date = '2026-09-23'").fetchone() == (0,)
-    assert status["ledger"] == {"as_of_date": "2026-09-22", "realised": 0, "unrealisable": []}
+    assert status["ledger"]["as_of_date"] == "2026-09-22"
+    assert (status["ledger"]["realised"], status["ledger"]["unrealisable"]) == (0, [])
+    assert status["ledger"]["refrozen"] == [] and status["ledger"]["refrozen_count"] == 0     # 2026-09-22 shape
     assert conn.execute("SELECT COUNT(*) FROM realised_pnl").fetchone() == (0,)
 
 
@@ -1880,3 +1882,65 @@ def test_recalc_summary_and_the_helper_never_raise(tmp_path, monkeypatch):
     out = live.recalc_options_on_file(tmp_path / "none.db", _date(2026, 9, 23))
     assert out["as_of"] == "2026-09-23" and out["priced"] == out["skipped"] == 0 and out["days"] == []
     assert "not importable" in out["error"] and "no QuantLib" in out["error"]
+
+
+# =========================================================================== 2026-09-22: the pull status records the ledger's re-freeze
+NEW_LEDGER = {"realised": 1, "unrealisable": [], "repaired": [],
+              "refrozen": [{"trade_id": "b2", "product": "FX_FWD", "mark_type": "SPOT", "spot_as_of_date": "2026-09-21",
+                            "pnl_from": 100.0, "pnl_to": 120.0, "why": "frozen at a live row; the 15:00 close replaced it"},
+                           {"trade_id": "a1", "product": "FX_FWD", "mark_type": "NDF_FIX", "spot_as_of_date": "2026-09-18",
+                            "pnl_from": -5.0, "pnl_to": -7.5, "why": "the fixing landed"}],
+              "kept": [{"trade_id": "c3", "product": "FX_OPTION", "reason": "no close-out spot on file yet"}]}
+
+
+def test_ledger_block_carries_the_ledgers_refreeze_through_and_tolerates_the_old_shape():
+    block = live.ledger_block(NEW_LEDGER, "2026-09-22")
+    assert block["as_of_date"] == "2026-09-22" and block["realised"] == 1
+    assert block["refrozen"] == NEW_LEDGER["refrozen"] and block["kept"] == NEW_LEDGER["kept"]   # as given, order kept
+    assert block["refrozen_count"] == 2 and block["refrozen_summary"] == "2 settled trades re-frozen at the close"
+    assert block["repaired"] == [] and block["unrealisable"] == []
+    # the old ledger: bare ids under refrozen, no kept at all -- never breaks a pull
+    old = live.ledger_block({"realised": 0, "unrealisable": [{"trade_id": "x", "reason": "r"}], "refrozen": ["b2"]})
+    assert "as_of_date" not in old
+    assert old["refrozen"] == [{"trade_id": "b2"}] and old["kept"] == []
+    assert old["refrozen_count"] == 1 and old["refrozen_summary"] == "1 settled trade re-frozen at the close"
+    assert old["unrealisable"] == [{"trade_id": "x", "reason": "r"}]
+    # nothing re-frozen: no sentence; a result that is not a dict at all still gives the shape
+    assert live.ledger_block({"realised": 3})["refrozen_summary"] == ""
+    assert live.ledger_block(None)["refrozen"] == [] and live.ledger_block(None)["realised"] is None
+
+
+def test_pull_status_ledger_records_refrozen_and_kept(tmp_path, monkeypatch):
+    """status["ledger"] of a live pull carries the ledger's refrozen list, kept list, the
+    count and the one sentence the status line shows (user yes, 2026-09-22)."""
+    from zoneinfo import ZoneInfo
+    import engine.pnl.ledger as ledger_mod
+    p, conn = _rollover_db(tmp_path)
+    _fake_bloomberg(monkeypatch)
+    _clock(monkeypatch, datetime(2026, 9, 22, 16, 0, tzinfo=ZoneInfo("America/New_York")))
+    calls = []
+    monkeypatch.setattr(ledger_mod, "realise_settled", lambda c, as_of, **kw: calls.append(as_of) or dict(NEW_LEDGER))
+    status = live.pull_once(p, session_factory=lambda: (object(), object()))
+    assert calls == ["2026-09-22"]
+    led = status["ledger"]
+    assert led["as_of_date"] == "2026-09-22" and led["realised"] == 1 and led["unrealisable"] == []
+    assert led["refrozen"] == NEW_LEDGER["refrozen"] and led["kept"] == NEW_LEDGER["kept"]
+    assert led["refrozen_count"] == 2 and led["refrozen_summary"] == "2 settled trades re-frozen at the close"
+    assert "error" not in led and not any("realise_settled" in w for w in status.get("warnings") or [])
+    # the status file holds the same block
+    assert live.read_status(p)["ledger"] == led
+
+
+def test_pull_status_ledger_tolerates_an_older_ledger_returning_bare_ids(tmp_path, monkeypatch):
+    from zoneinfo import ZoneInfo
+    import engine.pnl.ledger as ledger_mod
+    p, conn = _rollover_db(tmp_path)
+    _fake_bloomberg(monkeypatch)
+    _clock(monkeypatch, datetime(2026, 9, 22, 16, 0, tzinfo=ZoneInfo("America/New_York")))
+    monkeypatch.setattr(ledger_mod, "realise_settled",
+                        lambda c, as_of, **kw: {"realised": 0, "unrealisable": [], "repaired": [], "refrozen": ["b2", "a1"]})
+    status = live.pull_once(p, session_factory=lambda: (object(), object()))
+    led = status["ledger"]
+    assert led["refrozen"] == [{"trade_id": "b2"}, {"trade_id": "a1"}] and led["kept"] == []
+    assert led["refrozen_count"] == 2 and led["refrozen_summary"] == "2 settled trades re-frozen at the close"
+    assert "error" not in led
