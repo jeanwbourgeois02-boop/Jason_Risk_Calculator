@@ -215,16 +215,34 @@ def _log(repo):
                           text=True, check=True).stdout.splitlines()
 
 
-def test_save_after_pull_exports_commits_the_snapshot_folder_alone_and_says_so(tmp_path, monkeypatch):
-    """User, 2026-09-22: "just set it up so every pull from bbg triggers the saving". The
-    export, then a commit naming data/bbg_snapshot only (a stray file on that PC is left
-    out), then the push (off here: no remote). An identical second save commits nothing."""
+def test_save_after_pull_only_writes_the_files_unless_asked_to_commit(tmp_path, monkeypatch):
+    """User, 2026-09-22: "every pull from bbg triggers the saving" and then "dont need to
+    trigger commit and push, just need to make sure the bbg data is logged and stored
+    locally, I will trigger the commit and push myself": the pull's own call writes the
+    folder and commits nothing; the files sit in the working copy for the user's commit."""
     import subprocess
     monkeypatch.delenv("RISK_SNAPSHOT", raising=False)
     repo = _git_repo(tmp_path)
     _bloomberg_pc(tmp_path / "pc.db").close()
     lines = []
-    out = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, push=False, log=lines.append)
+    out = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, log=lines.append)
+    assert out == {"exported": True, "committed": False, "pushed": False,
+                   "message": "marks snapshot: 5 marks through 2026-09-14 written to data/bbg_snapshot/ (commit and push it yourself)"}
+    assert lines == [out["message"]] and _log(repo) == []
+    status = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=repo, capture_output=True, text=True).stdout
+    assert "?? data/bbg_snapshot/marks.csv" in status and "?? stray.txt" in status   # written, untracked, for the user's commit
+
+
+def test_save_after_pull_with_commit_commits_the_snapshot_folder_alone_and_says_so(tmp_path, monkeypatch):
+    """marks-export's path: the export, then a commit naming data/bbg_snapshot only (a stray
+    file on that PC is left out), then the push (off here: no remote). An identical second
+    save commits nothing."""
+    import subprocess
+    monkeypatch.delenv("RISK_SNAPSHOT", raising=False)
+    repo = _git_repo(tmp_path)
+    _bloomberg_pc(tmp_path / "pc.db").close()
+    lines = []
+    out = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, commit=True, push=False, log=lines.append)
     assert (out["exported"], out["committed"], out["pushed"]) == (True, True, False)
     assert out["message"].startswith("marks snapshot: 5 marks through 2026-09-14 written to data/bbg_snapshot/; committed")
     assert lines == [out["message"]]
@@ -232,7 +250,7 @@ def test_save_after_pull_exports_commits_the_snapshot_folder_alone_and_says_so(t
                           + ": marks through 2026-09-14"]
     status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
     assert status.strip() == "?? stray.txt"                      # the stray file was never added
-    again = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, push=False, log=lines.append)
+    again = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, commit=True, push=False, log=lines.append)
     assert again["committed"] is False and "identical: nothing to commit" in again["message"]
     assert len(_log(repo)) == 1
 
@@ -246,7 +264,7 @@ def test_save_after_pull_never_raises_and_can_be_switched_off(tmp_path, monkeypa
                    "message": "marks snapshot: no marks on file: nothing to export (press Pull Bloomberg now first)"}
     _bloomberg_pc(tmp_path / "pc.db").close()
     plain = tmp_path / "plain"; plain.mkdir()
-    out = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=plain, push=False, log=lambda s: None)
+    out = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=plain, commit=True, push=False, log=lambda s: None)
     assert out["exported"] and not out["committed"] and "not a git clone" in out["message"]
     monkeypatch.setenv("RISK_SNAPSHOT", "0")
     assert snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, push=False, log=lambda s: None)["message"] == \

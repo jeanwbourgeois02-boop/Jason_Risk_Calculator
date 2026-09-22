@@ -7,9 +7,12 @@ plain CSV under `data/bbg_snapshot/` (tracked by git, one file per table, rows i
 primary-key order so a re-export diffs small); `import_snapshot` reads them back on the
 other PC. Every "Pull Bloomberg now" ends with `save_after_pull` (user, 2026-09-22: "I
 dont want to need to run step 3 export, just set it up so every pull from bbg triggers the
-saving"): the export, a commit of that folder alone and a push, each failure logged and
-none of them ever failing the pull; `2_launcher.py marks-export` is the same steps by hand,
-`marks-import` the other PC's side. Nothing here asks Bloomberg anything (hard rule 8).
+saving", then "dont need to trigger commit and push, just need to make sure the bbg data is
+logged and stored locally, I will trigger the commit and push myself"): the export alone,
+so the files sit in the working copy for the user's own commit and push; a failure is
+logged and never fails the pull. `2_launcher.py marks-export` is the export by hand, with a
+commit of that folder alone (and `--push`) for whoever wants it; `marks-import` is the
+other PC's side. Nothing here asks Bloomberg anything (hard rule 8).
 
 What travels: `marks` whole, every source, exactly as Bloomberg and the app's own pricers
 wrote it on the Bloomberg PC (values, sources and `snapped_at` untouched, so
@@ -293,10 +296,12 @@ def commit_snapshot(repo_root: Union[str, Path], manifest: dict, push: bool = Tr
 
 
 def save_after_pull(db_path: Union[str, Path], repo_root: Union[str, Path] = REPO_ROOT,
-                    out_dir: Optional[Union[str, Path]] = None, push: bool = True,
+                    out_dir: Optional[Union[str, Path]] = None, commit: bool = False, push: bool = False,
                     log=print) -> dict:
-    """The saving every Bloomberg pull ends with (module docstring): export, commit, push.
-    Returns {'exported': bool, 'committed', 'pushed', 'message'}; logs one line; never raises.
+    """The saving every Bloomberg pull ends with (module docstring): the export, and only
+    with `commit` a commit of the folder (and with `push` a push) -- the pull itself never
+    commits (user, 2026-09-22: "I will trigger the commit and push myself"). Returns
+    {'exported': bool, 'committed', 'pushed', 'message'}; logs one line; never raises.
     `RISK_SNAPSHOT=0` in the environment switches it off (a developer's clone)."""
     if os.environ.get("RISK_SNAPSHOT", "1") == "0":
         return {"exported": False, "committed": False, "pushed": False, "message": "marks snapshot off (RISK_SNAPSHOT=0)"}
@@ -313,11 +318,14 @@ def save_after_pull(db_path: Union[str, Path], repo_root: Union[str, Path] = REP
                "message": f"marks snapshot: export failed ({type(exc).__name__}: {exc})"}
         log(out["message"])
         return out
+    head = f"marks snapshot: {manifest['rows'].get('marks', 0)} marks through {manifest['marks_through']} written to {SNAPSHOT_REL}/"
+    if not commit:
+        out = {"exported": True, "committed": False, "pushed": False, "message": head + " (commit and push it yourself)"}
+        log(out["message"])
+        return out
     result = commit_snapshot(repo_root, manifest, push=push, rel=str(out_dir.relative_to(repo_root)).replace(os.sep, "/")
                              if out_dir.is_relative_to(repo_root) else SNAPSHOT_REL)
-    out = {"exported": True, **result,
-           "message": (f"marks snapshot: {manifest['rows'].get('marks', 0)} marks through {manifest['marks_through']} "
-                       f"written to {SNAPSHOT_REL}/; {result['message']}")}
+    out = {"exported": True, **result, "message": f"{head}; {result['message']}"}
     log(out["message"])
     return out
 
