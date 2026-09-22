@@ -33,6 +33,22 @@ Informational (2026-09-21, not required for exit 0; each prints what came back):
                      forward-points divisor the past-close forwards need
     intraday         one IntradayBarRequest (EURUSD Curncy, BID, hourly, the last business
                      day, 14:00-15:00 New York): the 15:00 New York close the app now uses
+Informational (2026-09-22): the tickers and fields the app asks for that nobody has yet
+seen answered on a terminal, one request per group, printed exactly as they came back:
+    ndf1m            the five 1M NDF outrights the ladder prices NDF currencies at
+                     (KWN+1M, IHN+1M, IRN+1M, NTN+1M, BCN+1M Curncy)
+    tenorhist        HistoricalDataRequest on EURUSD1M Curncy, PX_LAST + SETTLE_DT, last
+                     week: whether history carries the tenor's own settle date at all
+    spxopt           the listed option tickers in the Bloomberg library ('SPX US 10/16/26
+                     P7615 Index', or that sample when the library has none): PX_LAST,
+                     PX_MID, PX_BID, PX_ASK, PX_SETTLE; and SPX Index: PX_LAST and the two
+                     dividend-yield fields
+    ois              one 1Y OIS quote and the overnight fixing ticker per non-USD currency
+                     (EUR, GBP, JPY, CHF, CAD, AUD), all marked UNVERIFIED in
+                     data/bloomberg/rates_marketdata.py
+    vol              the 1M vol-smile tickers on EURUSD and USDJPY (ATM, 25d RR / BF,
+                     10d RR / BF, '<PAIR>V1M BGN Curncy' style), UNVERIFIED in
+                     data/bloomberg/vol_marketdata.py
 Reports: reports/bloomberg_diagnostic_<timestamp>.json and .txt (next to this file's
 parent directory unless --out is given).
 """
@@ -405,6 +421,161 @@ def check_intraday_close(rep: Report, blpapi, session, service) -> None:
               expected_bar_start_utc=start.isoformat())
 
 
+# --------------------------------------------------------------------------- 2026-09-22 probes (informational)
+# Tickers and fields the app asks for that nobody has seen answered on a terminal. Each is
+# one request; the check prints per ticker exactly what came back (values, field
+# exceptions, security errors) so a paste settles it. Copies of the app's own lists: the
+# NDF tickers from data/ingest/common.py::NDF_1M_TICKERS, the OIS and fixing tickers from
+# data/bloomberg/rates_marketdata.py::OIS_CURVES, the vol ticker shape from
+# data/bloomberg/vol_marketdata.py, the dividend fields from data/bloomberg/library.py.
+NDF_1M_TICKERS = ["KWN+1M Curncy", "IHN+1M Curncy", "IRN+1M Curncy", "NTN+1M Curncy", "BCN+1M Curncy"]
+OIS_PROBE_TICKERS = ["EESWE1 Curncy", "ESTRON Index",        # EUR ESTR 1Y, fixing
+                     "BPSWS1 Curncy", "SONIO/N Index",       # GBP SONIA
+                     "JYSO1 Curncy", "MUTKCALM Index",       # JPY TONA
+                     "SFSNT1 Curncy", "SSARON Index",        # CHF SARON
+                     "CDSO1 Curncy", "CAONREPO Index",       # CAD CORRA
+                     "ADSO1 Curncy", "RBACOR Index"]         # AUD AONIA
+VOL_PROBE_TICKERS = [f"{pair}{infix}1M BGN Curncy" for pair in ("EURUSD", "USDJPY")
+                     for infix in ("V", "25R", "25B", "10R", "10B")]
+LISTED_OPTION_FIELDS = ["PX_LAST", "PX_MID", "PX_BID", "PX_ASK", "PX_SETTLE"]
+INDEX_FIELDS = ["PX_LAST", "IDX_EST_DVD_YLD", "EQY_DVD_YLD_12M"]
+SAMPLE_LISTED_OPTION = "SPX US 10/16/26 P7615 Index"        # the reference sample's SPX/E261016P7615-USAA
+
+
+def listed_option_tickers(db_path: Path) -> list:
+    """The listed option tickers the Bloomberg library asks for (kind FUTURE_PX on an
+    EQ_OPTION), read-only; the sample ticker when the database has none, so the ticker
+    format is tried either way."""
+    tickers = []
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            tickers = [r[0] for r in conn.execute(
+                "SELECT DISTINCT bbg_ticker FROM bbg_library WHERE product = 'EQ_OPTION' AND kind = 'FUTURE_PX' "
+                "AND bbg_ticker <> '' ORDER BY bbg_ticker")]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    return tickers[:5] or [SAMPLE_LISTED_OPTION]
+
+
+def _describe(tickers, fields, data, errors) -> tuple:
+    """Per-ticker text of what came back; ok = every ticker returned a number for the
+    first field asked."""
+    parts, usable = [], 0
+    for t in tickers:
+        vals = data.get(t, {})
+        usable += isinstance(vals.get(fields[0]), float)
+        parts.append(f"{t}: {vals or 'nothing'}" + (f" [{errors[t]}]" if t in errors else ""))
+    return usable == len(tickers), f"{usable}/{len(tickers)} answered {fields[0]}; " + "; ".join(parts)
+
+
+def _reference_probe(rep: Report, name: str, blpapi, session, service, tickers, fields) -> None:
+    try:
+        data, errors = reference_request(blpapi, session, service, tickers, fields)
+    except Exception as exc:
+        rep.check(name, False, f"request raised: {exc!r}", required=False)
+        return
+    ok, detail = _describe(tickers, fields, data, errors)
+    rep.check(name, ok, detail, required=False, fields=fields, values={t: data.get(t, {}) for t in tickers}, errors=errors)
+
+
+def check_ndf_1m(rep: Report, blpapi, session, service) -> None:
+    _reference_probe(rep, "ndf1m", blpapi, session, service, NDF_1M_TICKERS, ["PX_LAST", "SETTLE_DT"])
+
+
+def check_ois_tickers(rep: Report, blpapi, session, service) -> None:
+    _reference_probe(rep, "ois", blpapi, session, service, OIS_PROBE_TICKERS, ["PX_LAST"])
+
+
+def check_vol_tickers(rep: Report, blpapi, session, service) -> None:
+    _reference_probe(rep, "vol", blpapi, session, service, VOL_PROBE_TICKERS, ["PX_LAST"])
+
+
+def check_listed_option(rep: Report, blpapi, session, service, db_path: Path) -> None:
+    """The option's own price fields, then the index level and dividend yield: two
+    requests, one check."""
+    options = listed_option_tickers(db_path)
+    try:
+        opt_data, opt_errors = reference_request(blpapi, session, service, options, LISTED_OPTION_FIELDS)
+        idx_data, idx_errors = reference_request(blpapi, session, service, ["SPX Index"], INDEX_FIELDS)
+    except Exception as exc:
+        rep.check("spxopt", False, f"request raised: {exc!r}", required=False)
+        return
+    opt_ok, opt_detail = _describe(options, LISTED_OPTION_FIELDS, opt_data, opt_errors)
+    idx_ok, idx_detail = _describe(["SPX Index"], INDEX_FIELDS, idx_data, idx_errors)
+    idx_vals = idx_data.get("SPX Index", {})
+    dividend = next((f for f in INDEX_FIELDS[1:] if isinstance(idx_vals.get(f), float)), None)
+    rep.check("spxopt", opt_ok and idx_ok and dividend is not None,
+              f"option {opt_detail} | index {idx_detail} -> dividend yield from {dividend or 'NEITHER field'}",
+              required=False, option_tickers=options, option_values=opt_data, option_errors=opt_errors,
+              index_values=idx_vals, index_errors=idx_errors, dividend_field=dividend)
+
+
+def historical_request(blpapi, session, service, ticker, fields, start: date, end: date, timeout_ms=15000):
+    """[{date, field: value, ...}] for one ticker (HistoricalDataRequest) plus error text."""
+    req = service.createRequest("HistoricalDataRequest")
+    req.getElement("securities").appendValue(ticker)
+    for f in fields:
+        req.getElement("fields").appendValue(f)
+    req.set("startDate", start.strftime("%Y%m%d"))
+    req.set("endDate", end.strftime("%Y%m%d"))
+    session.sendRequest(req)
+    rows, error = [], ""
+    while True:
+        ev = session.nextEvent(timeout_ms)
+        if ev.eventType() == blpapi.Event.TIMEOUT:
+            error = "TIMEOUT waiting for response"
+            break
+        for msg in ev:
+            if msg.hasElement("responseError"):
+                error = f"responseError: {msg.getElement('responseError')}"
+                continue
+            if not msg.hasElement("securityData"):
+                continue
+            sd = msg.getElement("securityData")
+            if sd.hasElement("securityError"):
+                error = "securityError: " + sd.getElement("securityError").getElementAsString("message")
+                continue
+            if sd.hasElement("fieldExceptions"):
+                fx = sd.getElement("fieldExceptions")
+                fe = [f"{fx.getValueAsElement(k).getElementAsString('fieldId')}: "
+                      f"{fx.getValueAsElement(k).getElement('errorInfo').getElementAsString('message')}"
+                      for k in range(fx.numValues())]
+                if fe:
+                    error = "fieldExceptions: " + "; ".join(fe)
+            fd = sd.getElement("fieldData")
+            for i in range(fd.numValues()):
+                row_el = fd.getValueAsElement(i)
+                row = {}
+                for name in ["date"] + list(fields):
+                    if row_el.hasElement(name):
+                        row[name] = row_el.getElement(name).getValue()
+                rows.append(row)
+        if ev.eventType() == blpapi.Event.RESPONSE:
+            break
+    return rows, error
+
+
+def check_tenor_history(rep: Report, blpapi, session, service) -> None:
+    """Whether Bloomberg's history carries a tenor ticker's own settle date (SETTLE_DT
+    beside PX_LAST). The backfill computes tenor dates by market convention when it does
+    not; a row with SETTLE_DT here means Bloomberg's own date can be used instead."""
+    end = date.today() - timedelta(days=1)
+    start = end - timedelta(days=7)
+    try:
+        rows, error = historical_request(blpapi, session, service, "EURUSD1M Curncy", ["PX_LAST", "SETTLE_DT"], start, end)
+    except Exception as exc:
+        rep.check("tenorhist", False, f"request raised: {exc!r}", required=False)
+        return
+    with_settle = sum(1 for r in rows if r.get("SETTLE_DT") not in (None, ""))
+    detail = (f"EURUSD1M Curncy PX_LAST + SETTLE_DT {start}..{end}: {len(rows)} row(s), {with_settle} with SETTLE_DT; "
+              f"{[{k: str(v) for k, v in r.items()} for r in rows]}" + (f" [{error}]" if error else ""))
+    rep.check("tenorhist", bool(rows) and not error, detail, required=False, rows=[{k: str(v) for k, v in r.items()} for r in rows],
+              rows_with_settle_dt=with_settle, error=error)
+
+
 # --------------------------------------------------------------------------- FWD_CURVE bulk parsing
 # Standalone copy of data/bloomberg/fwd_curve.py (this file must not import the repo).
 _MID_KEYS = ("MID", "OUTRIGHT", "RATE", "PX_MID", "VALUE")
@@ -643,12 +814,22 @@ def main(argv=None) -> int:
         rep.check("spot", False, f"skipped: {why}")
         rep.check("forward", False, f"skipped: {why}")
     if service is not None:
-        # 2026-09-21, informational: the points-divisor fields and the 15:00 New York close bar
-        for probe in (check_fwd_scale, check_intraday_close):
+        # 2026-09-21, informational: the points-divisor fields and the 15:00 New York close bar;
+        # 2026-09-22: the tickers and fields nobody has seen answered on a terminal
+        informational = [
+            ("fwdscale", lambda: check_fwd_scale(rep, blpapi, session, service)),
+            ("intraday", lambda: check_intraday_close(rep, blpapi, session, service)),
+            ("ndf1m", lambda: check_ndf_1m(rep, blpapi, session, service)),
+            ("tenorhist", lambda: check_tenor_history(rep, blpapi, session, service)),
+            ("spxopt", lambda: check_listed_option(rep, blpapi, session, service, db_path)),
+            ("ois", lambda: check_ois_tickers(rep, blpapi, session, service)),
+            ("vol", lambda: check_vol_tickers(rep, blpapi, session, service)),
+        ]
+        for name, probe in informational:
             try:
-                probe(rep, blpapi, session, service)
+                probe()
             except Exception as exc:
-                rep.check(probe.__name__.replace("check_", ""), False, f"unhandled: {exc!r}", required=False)
+                rep.check(name, False, f"unhandled: {exc!r}", required=False)
     if session is not None:
         try:
             session.stop()
