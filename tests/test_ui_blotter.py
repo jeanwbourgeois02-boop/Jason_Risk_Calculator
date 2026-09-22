@@ -1766,7 +1766,7 @@ _WAITING = ("Daily P&L, Previous day P&L, 5d, MTD, LTD-1 P&L and LTD-2 P&L appea
             "the earlier close; they are written each day the app runs with Bloomberg.")
 
 
-def test_options_strip_shows_only_cards_with_a_value_and_one_caption_for_the_rest(tmp_path):
+def test_options_strip_shows_only_cards_with_a_value_and_one_caption_for_the_rest(strict_marks, tmp_path):
     _path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
     try:
         layout = blotter.scope_layout("options", conn, _AS_OF)
@@ -1831,7 +1831,7 @@ def test_options_strip_hides_nothing_about_today_when_today_itself_is_unpriced(t
         conn.close()
 
 
-def test_only_the_options_strip_hides_cards(tmp_path):
+def test_only_the_options_strip_hides_cards(strict_marks, tmp_path):
     """Same gap on the Rates side (no swap marks before today): every card stays, "n/a"."""
     _path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
     try:
@@ -1845,7 +1845,7 @@ def test_only_the_options_strip_hides_cards(tmp_path):
         conn.close()
 
 
-def test_options_strip_refreshes_in_place_on_a_data_revision(tmp_path):
+def test_options_strip_refreshes_in_place_on_a_data_revision(strict_marks, tmp_path):
     db_path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
     conn.close()
     app = _blotter_app(db_path)

@@ -930,7 +930,7 @@ def _seed_fx_trade(conn, trade_id="T1", instrument_id="EURUSD", trade_date="2026
     )
 
 
-def test_blotter_fx_scope_renders_table_columns(tmp_path):
+def test_blotter_fx_scope_renders_table_columns(strict_marks, tmp_path):
     """The Blotter 'FX' sub-tab is `fx_blotter_rows`-shaped -- confirms the column set
     and labels are still the legacy sheet's layout even though the maths underneath
     changed."""
@@ -1404,7 +1404,7 @@ def test_blotter_fx_currency_tables_sit_between_the_strip_and_the_trade_table(tm
     assert table.hidden_columns == blotter_fx._HIDDEN_COLUMNS
 
 
-def test_blotter_fx_sample_values_never_enter_the_rows_shown_sums(tmp_path):
+def test_blotter_fx_sample_values_never_enter_the_rows_shown_sums(strict_marks, tmp_path):
     db_path = tmp_path / "risk.db"
     _currency_book(db_path, aud_history=False)   # AUDUSD has today's mark only; USDMXN has none
     layout = _fx_layout(db_path)

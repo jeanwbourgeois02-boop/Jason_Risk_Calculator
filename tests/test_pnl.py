@@ -148,7 +148,11 @@ def test_fx_blotter_futures_no_mark_divisor():
     assert row.pnl_eod == pytest.approx(10 * 50.0 * (4600 - 4500))
 
 
-def test_fx_blotter_missing_t2_mark_stays_none():
+def test_fx_blotter_missing_t2_marks_take_the_nearest_close(strict_marks):
+    """With the near-marks rule off, a day with no marks at all stays None (the fill and
+    the reference step-back then act, engine/pnl/reference.py); with it on (the default
+    since 2026-09-22) the day takes the nearest close's marks -- here t1, the only
+    neighbour -- and its P&L is that close's."""
     conn = _make_conn()
     _insert_trade(conn, "X", "USDJPY", 1_000_000, 147, "2026-09-01")
     t1, t2 = _t1_t2()
@@ -157,14 +161,22 @@ def test_fx_blotter_missing_t2_mark_stays_none():
     _insert_mark(conn, "USDJPY", "2026-09-01", "FWD_OUTRIGHT", 146, as_of=t1)
     _insert_mark(conn, "USDJPY", t1, "SPOT", 149, as_of=t1)
     # deliberately no marks at all on t2
-    out = fx_blotter_rows(conn, AS_OF)
-    row = out.iloc[0]
-    assert row.mark_eod == 148
-    assert row.mark_t1 == 146
-    assert row.mark_t2 is None
-    assert row.pnl_t2 is None
+    row = fx_blotter_rows(conn, AS_OF).iloc[0]
+    assert (row.mark_eod, row.mark_t1, row.mark_t2, row.pnl_t2) == (148, 146, None, None)
     assert row.pnl_eod == pytest.approx(1_000_000 * (148 - 147) / 150)
     assert row.pnl_t1 == pytest.approx(1_000_000 * (146 - 147) / 149)
+
+
+def test_fx_blotter_missing_t2_marks_take_the_nearest_close_with_the_near_rule_on():
+    conn = _make_conn()
+    _insert_trade(conn, "X", "USDJPY", 1_000_000, 147, "2026-09-01")
+    t1, t2 = _t1_t2()
+    _insert_mark(conn, "USDJPY", "2026-09-01", "FWD_OUTRIGHT", 148, as_of=AS_OF)
+    _insert_mark(conn, "USDJPY", AS_OF, "SPOT", 150, as_of=AS_OF)
+    _insert_mark(conn, "USDJPY", "2026-09-01", "FWD_OUTRIGHT", 146, as_of=t1)
+    _insert_mark(conn, "USDJPY", t1, "SPOT", 149, as_of=t1)
+    row = fx_blotter_rows(conn, AS_OF).iloc[0]
+    assert row.mark_t2 == 146 and row.pnl_t2 == pytest.approx(row.pnl_t1)  # t1 is the nearest later close
 
 
 def test_fx_blotter_injects_value_fn_and_calls_all_three_dates():
@@ -293,8 +305,10 @@ def test_value_book_ndf_that_has_fixed_is_marked_at_the_days_spot_like_settled_c
     assert row["reason"] == "" and row["note"].startswith("NDF fixed 2026-06-01: marked at the spot of 2026-06-01")
 
 
-def test_value_book_ndf_with_no_forward_is_marked_at_spot_and_a_deliverable_one_stays_blank():
-    # value date Wed 2026-06-24 -> fixing 2026-06-22: not fixed on 2026-06-01
+def test_value_book_any_pair_with_no_forward_takes_the_days_curve_spot_alone_being_spot():
+    """User decisions 2026-09-21/22: an NDF or a metal with no forward was marked at spot;
+    since "always interpolate/extrapolate with near marks" every pair's missing forward is
+    read off the day's own curve, and with spot the only pillar that is spot."""
     conn = _vb_brl(_vb_conn())
     _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-24")
     _vb_fx_trade(conn, "J1", "USDJPY", "USD", "JPY", 1_000_000, 150.00, settle="2026-06-24")
@@ -303,35 +317,110 @@ def test_value_book_ndf_with_no_forward_is_marked_at_spot_and_a_deliverable_one_
     book = value_book(conn, VB_AS_OF).set_index("trade_id")
     ndf, jpy = book.loc["N1"], book.loc["J1"]
     assert ndf["mark"] == 5.10 and ndf["pnl_usd"] == pytest.approx(100_000 / 5.10)
-    assert ndf["note"] == "NDF with no forward for 2026-06-24 on 2026-06-01: marked at the spot of 2026-06-01"
-    assert math.isnan(jpy["pnl_usd"]) and jpy["reason"].startswith("no FWD_OUTRIGHT mark for USDJPY")
+    assert ndf["mark_source"] == "INTERP: USDBRL 2026-06-03 mark of 2026-06-01 (the only pillar)"
+    assert jpy["mark"] == 149.0 and jpy["pnl_usd"] == pytest.approx(-1_000_000 / 149.0)
+    assert jpy["mark_source"].startswith("INTERP: USDJPY 2026-06-03 mark")
+    assert ndf["note"] == "" and jpy["reason"] == ""
 
-    # with its forward on file an NDF that has not fixed is marked at the forward, as always
+    # with its forward on file the ticket is marked at the forward, as always
     _vb_mark(conn, "USDBRL", "2026-06-24", "FWD_OUTRIGHT", 5.30)
     ndf = value_book(conn, VB_AS_OF).set_index("trade_id").loc["N1"]
-    assert ndf["mark"] == 5.30 and ndf["note"] == ""
+    assert ndf["mark"] == 5.30 and ndf["mark_source"] == "BBG_BFXFORWARD"
     assert ndf["pnl_usd"] == pytest.approx(-100_000 / 5.10)
 
 
-def test_value_book_gold_with_no_forward_is_marked_at_spot_like_an_ndf():
+def test_value_book_missing_forward_is_interpolated_along_the_days_curve_and_extrapolated_past_it():
+    conn = _vb_conn()
+    _vb_mark(conn, "USDJPY", VB_AS_OF, "SPOT", 149.00)                # spot date 2026-06-03
+    _vb_mark(conn, "USDJPY", "2026-06-13", "FWD_OUTRIGHT", 148.00)    # 10 days after spot date
+    _vb_mark(conn, "USDJPY", "2026-07-03", "FWD_OUTRIGHT", 147.00)    # 30 days after
+    for tid, settle in (("A", "2026-06-23"), ("B", "2026-07-13"), ("C", "2026-06-02"), ("D", "2026-06-13")):
+        _vb_fx_trade(conn, tid, "USDJPY", "USD", "JPY", 1_000_000, 150.00, settle=settle)
+    book = value_book(conn, VB_AS_OF).set_index("trade_id")
+    assert book.loc["A", "mark"] == pytest.approx(147.5)              # halfway between the pillars
+    assert book.loc["A", "mark_source"] == "INTERP: between USDJPY 2026-06-13 and 2026-07-03 marks of 2026-06-01"
+    assert book.loc["B", "mark"] == pytest.approx(146.5)              # 10 days past the last: same slope
+    assert book.loc["B", "mark_source"] == "INTERP: extrapolated from USDJPY 2026-06-13 and 2026-07-03 marks of 2026-06-01"
+    assert book.loc["C", "mark"] == 149.0                             # before the spot date: spot
+    assert book.loc["C", "mark_source"].startswith("INTERP: USDJPY 2026-06-03 mark of 2026-06-01 (nearest")
+    assert book.loc["D", "mark"] == 148.0 and book.loc["D", "mark_source"] == "BBG_BFXFORWARD"   # exact: untouched
+    assert (book["pnl_usd"].notna()).all()
+
+
+def test_value_book_missing_mark_is_interpolated_in_time_between_the_nearest_closes():
+    """A day with no spot and no forward of its own: spot and forward come from the closes
+    either side (linear in calendar days); with a close on one side only that close is
+    carried; the row names the closes. Nothing is written to marks."""
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T", "USDJPY", "USD", "JPY", 1_000_000, 150.00)
+    for day, spot, fwd in (("2026-05-29", 148.0, 147.0), ("2026-06-04", 152.0, 151.0)):   # Fri, Thu
+        _vb_mark(conn, "USDJPY", day, "SPOT", spot, as_of=day)
+        _vb_mark(conn, "USDJPY", VB_SETTLE, "FWD_OUTRIGHT", fwd, as_of=day)
+    n_marks = conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0]
+    row = value_book(conn, "2026-06-01").iloc[0]                       # Mon: 3 of 6 days along
+    assert row["mark"] == pytest.approx(149.0) and row["spot"] == pytest.approx(1 / 150.0)
+    assert row["mark_source"] == "INTERP: FWD_OUTRIGHT between the 2026-05-29 and 2026-06-04 closes"
+    assert row["spot_source"] == "INTERP: SPOT between the 2026-05-29 and 2026-06-04 closes"
+    assert row["pnl_usd"] == pytest.approx(1_000_000 * (149.0 - 150.0) / 150.0)
+    before = value_book(conn, "2026-05-20").iloc[0]                    # nothing earlier: the 05-29 close carried
+    assert before["mark"] == 147.0 and before["mark_source"] == "INTERP: FWD_OUTRIGHT of 2026-05-29 (nearest later close, none earlier)"
+    after = value_book(conn, "2026-06-10").iloc[0]
+    assert after["mark"] == 151.0 and after["mark_source"] == "INTERP: FWD_OUTRIGHT of 2026-06-04 (nearest earlier close)"
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == n_marks
+
+
+def test_value_book_swap_pv_is_interpolated_in_time_and_settled_coupons_take_the_earlier_close():
+    conn = _vb_conn()
+    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1.0,0,'','2030-06-01')")
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("S1", "MANUAL", "IRSOIS-USD-1", "IRS", "S1", "2026-05-01", 10_000_000, 0.04,
+                  "ACC", "CPTY", "STRAT", "TRADER", "test", ""))
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("S1", 1, "FIXED", "USD", -10_000_000, "2026-05-01", "2030-06-01", 0.04, 1),
+        ("S1", 2, "FLOAT", "USD", 10_000_000, "2026-05-01", "2030-06-01", 0.0, 1)])
+    for day, pv, cf in (("2026-05-29", 1000.0, 0.0), ("2026-06-04", 4000.0, 500.0)):
+        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (day, "IRSOIS-USD-1", "2030-06-01", "PV_USD", pv, "QL_PRICER", f"{day}T15:00:00-04:00"))
+        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (day, "IRSOIS-USD-1", "2030-06-01", "CASHFLOW_USD", cf, "QL_PRICER", f"{day}T15:00:00-04:00"))
+    conn.commit()
+    row = value_book(conn, "2026-06-01").iloc[0]
+    assert row["pnl_usd"] == pytest.approx(2500.0 + 0.0)   # PV halfway, coupons as of the earlier close
+    assert "PV_USD between the 2026-05-29 and 2026-06-04 closes" in row["mark_source"]
+    assert value_book(conn, "2026-05-20").iloc[0]["pnl_usd"] == pytest.approx(1000.0)   # carried back
+
+
+def test_near_marks_never_price_off_a_stored_value_that_is_not_a_number_and_the_ladder_stays_exact():
+    from engine.pnl.valuation import _mark_at, _mark_near
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T", "USDJPY", "USD", "JPY", 1_000_000, 150.00)
+    _vb_mark(conn, "USDJPY", "2026-05-29", "SPOT", 148.0, as_of="2026-05-29")
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", ("2026-05-29", "USDJPY", VB_SETTLE, "FWD_OUTRIGHT", "n/a", "BBG_BFXFORWARD", "2026-05-29T15:00:00-04:00"))
+    conn.commit()
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert math.isnan(row["pnl_usd"]) and "is not a number" in row["reason"]
+    assert _mark_at(conn, "USDJPY", "2026-05-29", "SPOT", VB_AS_OF) is None          # exact stays exact
+    assert _mark_near(conn, "USDJPY", VB_AS_OF, "SPOT", VB_AS_OF)[0] == 148.0
+
+
+def test_value_book_gold_with_no_forward_takes_spot_as_the_only_pillar():
     """User decision 2026-09-22: "xauusd has no fwd outright, this should be handled similar
     to the ndfs and settled cash". Long 482.474 oz at 4145.30 for 2026-06-24, no forward on
-    file: marked at the day's XAUUSD spot; with a forward on file, at the forward."""
+    file: marked off the day's curve, i.e. at the XAUUSD spot when that is all there is;
+    with a forward on file, at the forward."""
     conn = _vb_conn()
     conn.execute("INSERT INTO instruments VALUES ('XAUUSD','FX','XAU','USD',1.0,0,'XAUUSD Curncy','9999-12-31')")
     conn.commit()
     _vb_fx_trade(conn, "G1", "XAUUSD", "XAU", "USD", 482.474, 4145.30, settle="2026-06-24")
     row = value_book(conn, VB_AS_OF).iloc[0]
-    assert math.isnan(row["pnl_usd"]) and row["reason"].startswith("no SPOT mark for XAUUSD on 2026-06-01 (XAU with no forward")
+    assert math.isnan(row["pnl_usd"]) and row["reason"].startswith("no FWD_OUTRIGHT mark for XAUUSD settle 2026-06-24")
     _vb_mark(conn, "XAUUSD", VB_AS_OF, "SPOT", 4200.0)
     row = value_book(conn, VB_AS_OF).iloc[0]
-    assert (row["mark"], row["mark_date"], row["status"]) == (4200.0, VB_AS_OF, "OPEN")
+    assert (row["mark"], row["status"]) == (4200.0, "OPEN")
     assert row["pnl_usd"] == pytest.approx(482.474 * (4200.0 - 4145.30))
-    assert row["pnl_carry_usd"] == 0.0 and row["pnl_spot_usd"] == pytest.approx(row["pnl_usd"])
-    assert row["note"] == "XAU with no forward for 2026-06-24 on 2026-06-01: marked at the spot of 2026-06-01"
+    assert row["mark_source"] == "INTERP: XAUUSD 2026-06-03 mark of 2026-06-01 (the only pillar)"
     _vb_mark(conn, "XAUUSD", "2026-06-24", "FWD_OUTRIGHT", 4210.0)
     row = value_book(conn, VB_AS_OF).iloc[0]
-    assert row["mark"] == 4210.0 and row["note"] == "" and row["pnl_usd"] == pytest.approx(482.474 * (4210.0 - 4145.30))
+    assert row["mark"] == 4210.0 and row["mark_source"] == "BBG_BFXFORWARD"
+    assert row["pnl_usd"] == pytest.approx(482.474 * (4210.0 - 4145.30))
 
 
 def test_value_book_fixed_ndf_with_no_spot_is_blank_and_says_why():
@@ -727,7 +816,7 @@ def test_reference_usable_close_is_returned_untouched_with_no_note():
     assert (after["ref_note"], after["ref_note_detail"], after["ref_dates_skipped"]) == ("", "", ())
 
 
-def test_reference_minority_blocked_walks_back_for_that_trade_and_leaves_it_out_when_it_has_no_earlier_price():
+def test_reference_minority_blocked_walks_back_for_that_trade_and_leaves_it_out_when_it_has_no_earlier_price(strict_marks):
     """One of three trades unpriced on the reference date: the date itself stays (no whole-date
     step-back); the trade's own earlier closes are tried, up to 5, and with no price on any of
     them it stays left out, as before."""
@@ -750,7 +839,7 @@ def test_reference_minority_blocked_walks_back_for_that_trade_and_leaves_it_out_
     assert (choice.split.n_blocked, choice.split.n_open_then) == (1, 3)
 
 
-def test_reference_single_trade_with_no_price_on_the_close_takes_its_own_last_earlier_price():
+def test_reference_single_trade_with_no_price_on_the_close_takes_its_own_last_earlier_price(strict_marks):
     """User, 2026-09-21: "how is that possible given the fill function??" -- a few trades with no
     price on the period's close were dropped from that figure. Each now takes ITS OWN valuation
     from the last earlier business day it is priced on (up to 5 back); nothing is written."""
@@ -778,7 +867,7 @@ def test_reference_single_trade_with_no_price_on_the_close_takes_its_own_last_ea
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == marks_before
 
 
-def test_reference_steps_back_over_holiday_and_weekend_and_names_both_dates():
+def test_reference_steps_back_over_holiday_and_weekend_and_names_both_dates(strict_marks):
     conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-04": 1.1050})     # nothing dated 2026-09-08
     frame_for, calls = _recording_reader(conn)
     choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
@@ -802,7 +891,7 @@ def test_reference_steps_back_over_holiday_and_weekend_and_names_both_dates():
     assert entry["ref_dates_skipped"] == (REF_D5,)
 
 
-def test_reference_default_calendar_is_config_holidays():
+def test_reference_default_calendar_is_config_holidays(strict_marks):
     """holidays=None reads the trading calendar the period dates use (config/holidays.txt,
     which lists 2026-09-07)."""
     conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-04": 1.1050})
@@ -811,7 +900,7 @@ def test_reference_default_calendar_is_config_holidays():
     assert calls == [REF_D5, "2026-09-04"] and choice.ref_date_used == "2026-09-04"
 
 
-def test_reference_several_skipped_closes_caption_and_lazy_walk():
+def test_reference_several_skipped_closes_caption_and_lazy_walk(strict_marks):
     conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-03": 1.1050, "2026-09-01": 1.0900})
     frame_for, calls = _recording_reader(conn)
     choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
@@ -823,7 +912,7 @@ def test_reference_several_skipped_closes_caption_and_lazy_walk():
     assert [s.date for s in choice.skipped] == [REF_D5, "2026-09-04"]
 
 
-def test_reference_nothing_usable_within_five_business_days_is_na_with_extended_reason():
+def test_reference_nothing_usable_within_five_business_days_is_na_with_extended_reason(strict_marks):
     conn = _ref_book({REF_AS_OF: 1.1100, "2026-08-28": 1.1050})     # 6 business days before REF_D5
     frame_for, calls = _recording_reader(conn)
     choice = reference.resolve_reference(value_book(conn, REF_AS_OF), REF_D5, frame_for, REF_HOLIDAYS)
@@ -843,7 +932,7 @@ def test_reference_nothing_usable_within_five_business_days_is_na_with_extended_
     assert len(entry["ref_dates_skipped"]) == 6
 
 
-def test_reference_trade_less_date_is_a_zero_reference_and_ends_the_walk():
+def test_reference_trade_less_date_is_a_zero_reference_and_ends_the_walk(strict_marks):
     # nothing in scope open yet on the period's own reference date: usable as it is today
     conn = _ref_book({REF_AS_OF: 1.1100}, trade_date="2026-09-10")
     frame_for, calls = _recording_reader(conn)
@@ -859,7 +948,7 @@ def test_reference_trade_less_date_is_a_zero_reference_and_ends_the_walk():
     assert choice.ref_date_used == "2026-09-04" and choice.frame.empty
 
 
-def test_reference_date_a_with_nothing_priced_never_steps_back():
+def test_reference_date_a_with_nothing_priced_never_steps_back(strict_marks):
     """"Previous day" when t-1 itself has no marks: n/a for its own reason, no walk."""
     conn = _ref_book({"2026-09-04": 1.1050})             # nothing dated REF_AS_OF
     frame_for, calls = _recording_reader(conn)
@@ -874,7 +963,7 @@ def test_reference_date_a_with_nothing_priced_never_steps_back():
     assert empty.status == reference.EMPTY and empty.usable
 
 
-def test_reference_writes_no_mark_and_leaves_per_trade_pnl_unchanged():
+def test_reference_writes_no_mark_and_leaves_per_trade_pnl_unchanged(strict_marks):
     conn = _ref_book({REF_AS_OF: 1.1100, "2026-09-03": 1.1050})
     days = [REF_AS_OF, REF_D5, "2026-09-04", "2026-09-03"]
     marks_sql = "SELECT * FROM marks ORDER BY as_of_date, instrument_id, settle_date, mark_type, source"
@@ -897,7 +986,7 @@ def test_reference_writes_no_mark_and_leaves_per_trade_pnl_unchanged():
     assert skipped_book["pnl_usd"].isna().all() and (skipped_book["reason"] != "").all()
 
 
-def test_reference_usable_rule_matches_the_header_display_rule():
+def test_reference_usable_rule_matches_the_header_display_rule(strict_marks):
     """`diff_split` must agree with `ui/tabs/header.py::_priced_diff`, the rule it holds once
     for both screens; and the stepped-back frame prices through that function unchanged."""
     pytest.importorskip("dash")
@@ -937,7 +1026,7 @@ def _fill(conn, as_of):
                                lambda iso, ids: value_book(conn, iso, trade_ids=ids), REF_HOLIDAYS)
 
 
-def test_fill_gives_a_trade_with_no_price_its_own_value_from_the_last_earlier_close():
+def test_fill_gives_a_trade_with_no_price_its_own_value_from_the_last_earlier_close(strict_marks):
     """No mark on Tue 09-15; the last close with one is Thu 09-10 (3 business days back).
     By hand: 1m EUR x (1.1050 - 1.1000) = 5,000 USD per trade, the 09-10 valuation whole."""
     conn = _ref_book({"2026-09-10": 1.1050, "2026-09-03": 1.2000})
@@ -955,7 +1044,7 @@ def test_fill_gives_a_trade_with_no_price_its_own_value_from_the_last_earlier_cl
     assert conn.execute("SELECT COUNT(*) FROM marks WHERE as_of_date = ?", (REF_AS_OF,)).fetchone()[0] == 0  # nothing written
 
 
-def test_fill_reaches_five_business_days_back_over_a_holiday_and_no_further():
+def test_fill_reaches_five_business_days_back_over_a_holiday_and_no_further(strict_marks):
     """From Tue 09-15 the five days are 09-14, 09-11, 09-10, 09-09, 09-08 (Labor Day 09-07 is
     no business day): a price on 09-08 is in reach, one on Fri 09-04 only is not."""
     frame, filled = _fill(_ref_book({"2026-09-08": 1.1050}), REF_AS_OF)
@@ -979,7 +1068,7 @@ def test_value_book_for_some_trades_gives_the_rows_the_whole_book_gives():
     assert some.iloc[0].to_dict() == whole[whole["trade_id"] == "R2"].iloc[0].to_dict()
 
 
-def test_reference_reads_the_fill_off_filled_frames_and_never_walks_back_twice():
+def test_reference_reads_the_fill_off_filled_frames_and_never_walks_back_twice(strict_marks):
     """The screens' reader hands `resolve_reference` frames that already carry the fill:
     the reference close is used as it is, only that one date is read, and the caption
     names the trades filled on it."""

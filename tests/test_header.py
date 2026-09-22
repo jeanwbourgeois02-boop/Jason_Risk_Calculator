@@ -439,7 +439,7 @@ def test_priced_diff_minority_blocked_keeps_partial_figure():
     assert entry["excluded_summary"] == "excludes 1 of 3 trades: 0 unpriced today, 1 with no price on 2026-09-16"
 
 
-def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
+def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks(strict_marks):
     """End to end: marks for today only, and no earlier close within 5 business days has
     any either (the trade was open on all of them). Daily's caption must talk about the
     reference date (t-1) and the backfill, not about today, which is fully priced."""
@@ -471,7 +471,7 @@ def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks():
     assert caption.endswith("No earlier close within 5 business days has one either (checked back to 2026-09-09).")
 
 
-def test_build_figures_period_steps_back_to_the_previous_close_that_has_value():
+def test_build_figures_period_steps_back_to_the_previous_close_that_has_value(strict_marks):
     """User decision 2026-09-21 ("use previous date until has value", then "there should be a
     fill when bloomberg doesnt have the data"): the 2026-09-16 close has no marks, the
     2026-09-15 close has, so the trade is valued there at its 2026-09-15 close, Daily is

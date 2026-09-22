@@ -238,6 +238,133 @@ def _mark_at(conn: sqlite3.Connection, instrument_id: str, settle_date: str, mar
     return None if row is None else (row[0], row[1])
 
 
+
+
+# --------------------------------------------------------------------- near marks
+# User decision 2026-09-22 ("For the ndf or spot or irs forward curves, if there is no
+# price, we should always interpolate/extrapolate with near marks"): a mark that is not on
+# file for the exact key is worked out from the official marks nearest to it, on the fly,
+# and nothing is written to `marks` (the Market data tab still shows the gap). The row's
+# mark source names what was done, so no figure is ever a silent substitute. Two steps:
+#   1. a FWD_OUTRIGHT only: along the day's own curve, linear in date between the two
+#      pillars either side of the leg's date (the pair's SPOT at the spot date and every
+#      official outright of the pair on that day, any date); before the first pillar the
+#      first (spot), beyond the last a straight line through the last two, or the last
+#      alone when there is only one;
+#   2. any mark: in time, between the same mark on the nearest earlier close and the
+#      nearest later close, linear in calendar days; with a neighbour on one side only,
+#      that one is taken as it stands. CASHFLOW_USD (coupons settled so far, a step
+#      function) takes the nearest earlier close, the later one only with none earlier.
+# `_mark_at` itself stays the exact lookup (engine/ladder/futures_delta.py wants exactly
+# that: the ladder's delta is never filled); the row builders and the USD conversion read
+# `_mark_near`. A pillar or neighbour whose stored value is not a number raises `_BadValue`
+# like any other mark, so the trade is reported, never priced off a guess.
+INTERP = "INTERP"
+
+
+def _mark_near(conn, instrument_id: str, settle_date: str, mark_type: str, as_of: str) -> Optional[tuple]:
+    """(value, source) of the official mark for the key on `as_of`, or the nearest-marks
+    estimate described above, or None when there is nothing to work from."""
+    hit = _mark_at(conn, instrument_id, settle_date, mark_type, as_of)
+    if hit is not None:
+        return hit
+    memo = getattr(conn, "near_memo", None)
+    key = (instrument_id, settle_date, mark_type, as_of)
+    if memo is not None and key in memo:
+        return memo[key]
+    out = None
+    if mark_type == "FWD_OUTRIGHT":
+        out = _curve_interp(conn, instrument_id, settle_date, as_of)
+    if out is None:
+        out = _time_interp(conn, instrument_id, settle_date, mark_type, as_of)
+    if memo is not None:
+        memo[key] = out
+    return out
+
+
+def _day_pillars(conn, pair: str, as_of: str) -> list:
+    """[(settle_date, value, source)] of the pair's official curve on `as_of`: its SPOT at
+    the spot date (as_of + 2 weekdays, engine.ladder.usd_marks.spot_date) and every
+    FWD_OUTRIGHT row of the pair dated `as_of`, sorted by date, one per date."""
+    from engine.ladder.usd_marks import spot_date
+    cache = getattr(conn, "official_marks", None)
+    if cache is not None and conn.as_of == as_of:
+        rows = [(s, v, src) for (i, s, mt), (v, src) in cache.items() if i == pair and mt == "FWD_OUTRIGHT"]
+    else:
+        rows = conn.execute(
+            "SELECT settle_date, value, source FROM marks_official WHERE instrument_id = :i "
+            "AND mark_type = 'FWD_OUTRIGHT' AND as_of_date = :d ORDER BY settle_date, snapped_at",
+            {"i": pair, "d": as_of}).fetchall()
+    by_date = {str(s): (v, src) for s, v, src in rows}
+    spot = _mark_at(conn, pair, as_of, "SPOT", as_of)
+    if spot is not None:
+        by_date.setdefault(spot_date(as_of), (spot[0], spot[1]))
+    return [(d, _number(v, f"marks.value (curve pillar {pair} {d} on {as_of})"), src)
+            for d, (v, src) in sorted(by_date.items())]
+
+
+def _curve_interp(conn, pair: str, settle_date: str, as_of: str) -> Optional[tuple]:
+    pillars = _day_pillars(conn, pair, as_of)
+    if not pillars:
+        return None
+    try:
+        target = dt.date.fromisoformat(str(settle_date))
+        dates = [dt.date.fromisoformat(d) for d, _, _ in pillars]
+    except ValueError:
+        return None
+    if target <= dates[0]:
+        d0, v0, _ = pillars[0]
+        return v0, f"{INTERP}: {pair} {d0} mark of {as_of} (nearest, no earlier pillar)"
+    if target >= dates[-1]:
+        if len(pillars) == 1:
+            d0, v0, _ = pillars[0]
+            return v0, f"{INTERP}: {pair} {d0} mark of {as_of} (the only pillar)"
+        (d0, v0, _), (d1, v1, _) = pillars[-2], pillars[-1]
+        w = (target - dates[-2]).days / (dates[-1] - dates[-2]).days
+        return v0 + w * (v1 - v0), f"{INTERP}: extrapolated from {pair} {d0} and {d1} marks of {as_of}"
+    for k in range(1, len(pillars)):
+        if target < dates[k]:
+            (d0, v0, _), (d1, v1, _) = pillars[k - 1], pillars[k]
+            w = (target - dates[k - 1]).days / (dates[k] - dates[k - 1]).days
+            return v0 + w * (v1 - v0), f"{INTERP}: between {pair} {d0} and {d1} marks of {as_of}"
+    return None
+
+
+def _neighbour(conn, instrument_id: str, settle_date: str, mark_type: str, as_of: str, later: bool):
+    """(value, as_of_date, source) of the same mark on the nearest close after (`later`) or
+    before `as_of`, or None. A SPOT / NDF_1M row is keyed on its own day (settle_date =
+    as_of_date), every other mark on its fixed settle_date."""
+    own_day = mark_type in ("SPOT", "NDF_1M")
+    row = conn.execute(
+        "SELECT value, as_of_date, source FROM marks_official WHERE instrument_id = :i AND mark_type = :m "
+        + ("AND settle_date = as_of_date " if own_day else "AND settle_date = :s ")
+        + ("AND as_of_date > :d ORDER BY as_of_date ASC, snapped_at DESC LIMIT 1" if later else
+           "AND as_of_date < :d ORDER BY as_of_date DESC, snapped_at DESC LIMIT 1"),
+        {"i": instrument_id, "m": mark_type, "s": settle_date, "d": as_of}).fetchone()
+    if row is None:
+        return None
+    return (_number(row[0], f"marks.value ({mark_type} for {instrument_id} on {row[1]})"), str(row[1]), row[2])
+
+
+def _time_interp(conn, instrument_id: str, settle_date: str, mark_type: str, as_of: str) -> Optional[tuple]:
+    before = _neighbour(conn, instrument_id, settle_date, mark_type, as_of, later=False)
+    after = _neighbour(conn, instrument_id, settle_date, mark_type, as_of, later=True)
+    if before is None and after is None:
+        return None
+    if before is not None and after is not None and mark_type != "CASHFLOW_USD":
+        v0, d0, _ = before
+        v1, d1, _ = after
+        try:
+            day, day0, day1 = (dt.date.fromisoformat(x) for x in (as_of, d0, d1))
+            w = (day - day0).days / (day1 - day0).days
+        except (ValueError, ZeroDivisionError):
+            return v0, f"{INTERP}: {mark_type} of {d0} (nearest earlier close)"
+        return v0 + w * (v1 - v0), f"{INTERP}: {mark_type} between the {d0} and {d1} closes"
+    hit = before if before is not None else after
+    when = "nearest earlier close" if before is not None else "nearest later close, none earlier"
+    return hit[0], f"{INTERP}: {mark_type} of {hit[1]} ({when})"
+
+
 def usd_per_quote(conn: sqlite3.Connection, quote_ccy: str, as_of: str) -> tuple:
     """(S, pair, mark_source) converting 1 unit of quote_ccy to USD at spot on `as_of`.
     Never invents a USD leg for a cross: tries USD<quote> (inverted) then <quote>USD."""
@@ -248,12 +375,12 @@ def usd_per_quote(conn: sqlite3.Connection, quote_ccy: str, as_of: str) -> tuple
     if memo is not None and key in memo:
         return memo[key]
     inv_pair = f"USD{quote_ccy}"
-    hit = _mark_at(conn, inv_pair, as_of, "SPOT", as_of)
+    hit = _mark_near(conn, inv_pair, as_of, "SPOT", as_of)
     if hit is not None and hit[0]:
         out = (1.0 / _mark_number(hit, inv_pair, as_of, "SPOT", as_of), inv_pair, hit[1])
     else:
         direct_pair = f"{quote_ccy}USD"
-        hit = _mark_at(conn, direct_pair, as_of, "SPOT", as_of)
+        hit = _mark_near(conn, direct_pair, as_of, "SPOT", as_of)
         out = ((_mark_number(hit, direct_pair, as_of, "SPOT", as_of), direct_pair, hit[1])
                if hit is not None else (_NAN, None, None))
     if memo is not None:
@@ -296,7 +423,7 @@ class _BookConn:
 
         df = pd.read_sql_query("SELECT * FROM realised_pnl", conn)
         self.realised = {row["trade_id"]: row for _, row in df.iterrows()} if not df.empty else {}
-        self.usd_memo, self.last_memo = {}, {}
+        self.usd_memo, self.last_memo, self.near_memo = {}, {}, {}
         self.closed_out = {}   # trade_id -> CloseOut, set by value_book (`closed_out_from_rows`)
 
     def execute(self, *args, **kwargs):
@@ -417,33 +544,26 @@ def _ndf_at_spot(r, as_of: str, has_forward: bool) -> str:
         Ladder's own rule) on or before `as_of`. From then until the value date it is
         revalued at each day's spot, and the ledger freezes it after the value date as it
         always has, at the last official SPOT on or before settlement;
-      - it has not fixed, but there is no official forward for its value date on `as_of`.
-    Metals (XAUUSD and the other METALS pairs; user decision 2026-09-22: "xauusd has no fwd
-    outright, this should be handled similar to the ndfs and settled cash") take the second
-    case too: a metal ticket with no official forward for its value date is marked at the
-    day's spot, with its forward whenever Bloomberg has one. Any other deliverable ticket is
-    never marked at spot: with no forward it stays blank."""
+    Until 2026-09-22 an NDF that had not fixed, or a metal ticket, with no official forward
+    on `as_of` was marked at the day's spot; that case is now the near-marks rule's
+    (`_mark_near`: the forward is interpolated along the day's curve, spot the first pillar,
+    so with spot alone on file it is still spot), for every pair alike."""
     from engine.ladder.ndf import fixing_date, is_ndf_pair
-    pair = str(r.instrument_id or "")
-    if pair[:3] in METALS or pair[3:] in METALS:
-        return "" if has_forward else f"{pair[:3]} with no forward for {r.settle_date} on {as_of}: marked at the spot of {as_of}"
-    if not is_ndf_pair(pair, int(getattr(r, "is_ndf", 0) or 0)):
+    if not is_ndf_pair(str(r.instrument_id or ""), int(getattr(r, "is_ndf", 0) or 0)):
         return ""
     fixed_on = fixing_date(r.settle_date)
     if fixed_on <= as_of:
         return f"NDF fixed {fixed_on}: marked at the spot of {as_of}, like settled cash"
-    if not has_forward:
-        return f"NDF with no forward for {r.settle_date} on {as_of}: marked at the spot of {as_of}"
     return ""
 
 
 def _open_fx_row(conn, r, as_of) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="", note="")
-    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
+    m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
     at_spot = _ndf_at_spot(r, as_of, m_hit is not None)
     if at_spot:
-        m_hit = _mark_at(conn, r.instrument_id, as_of, "SPOT", as_of)
+        m_hit = _mark_near(conn, r.instrument_id, as_of, "SPOT", as_of)
         out["mark_date"] = as_of
         if m_hit is None:
             out["reason"] = f"no SPOT mark for {r.instrument_id} on {as_of} ({at_spot})"
@@ -467,7 +587,7 @@ def _open_fx_row(conn, r, as_of) -> dict:
     if at_spot:  # the mark IS the spot: all of it is spot P&L, no carry
         out["pnl_spot_usd"], out["pnl_carry_usd"], out["note"] = pnl_usd, 0.0, at_spot
         return out
-    spot_hit = _mark_at(conn, r.instrument_id, as_of, "SPOT", as_of)
+    spot_hit = _mark_near(conn, r.instrument_id, as_of, "SPOT", as_of)
     if spot_hit is None:
         out["pnl_spot_usd"], out["pnl_carry_usd"] = pnl_usd, 0.0
         out["note"] = f"no SPOT for {r.instrument_id} on {as_of}; carry split unavailable"
@@ -672,7 +792,7 @@ def _settled_fx_row(conn, r, as_of) -> dict:
 def _open_future_row(conn, r, as_of) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=1.0, spot_source="identity",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
-    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "FUTURE_PX", as_of)
+    m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FUTURE_PX", as_of)
     if m_hit is None:
         out["reason"] = (f"no Bloomberg price for the listed option {r.instrument_id} on {as_of}"
                          if r.product == "EQ_OPTION" else
@@ -699,11 +819,11 @@ def _open_irs_row(conn, r, as_of) -> dict:
     """PV_USD + CASHFLOW_USD at the swap's maturity date on `as_of` (module docstring)."""
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=1.0, spot_source="identity",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
-    pv_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PV_USD", as_of)
+    pv_hit = _mark_near(conn, r.instrument_id, r.settle_date, "PV_USD", as_of)
     if pv_hit is None:
         out["reason"] = f"no PV_USD mark for {r.instrument_id} maturity {r.settle_date} on {as_of}"
         return out
-    cf_hit = _mark_at(conn, r.instrument_id, r.settle_date, "CASHFLOW_USD", as_of)
+    cf_hit = _mark_near(conn, r.instrument_id, r.settle_date, "CASHFLOW_USD", as_of)
     if cf_hit is None:
         out["reason"] = f"no CASHFLOW_USD mark for {r.instrument_id} maturity {r.settle_date} on {as_of}"
         return out
@@ -877,7 +997,7 @@ def _open_option_row(conn, r, as_of) -> dict:
         return _closed_option_row(conn, r, closed)
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
-    m_hit = _mark_at(conn, r.instrument_id, r.settle_date, "PREMIUM", as_of)
+    m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "PREMIUM", as_of)
     if m_hit is None:
         out["reason"] = f"no PREMIUM mark for {r.instrument_id} expiry {r.settle_date} on {as_of}"
         return out
