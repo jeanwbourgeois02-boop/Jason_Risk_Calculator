@@ -291,6 +291,36 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   payoff is therefore the one at the official spot on file at the moment of the first
   freeze -- still not the cut. **S-3:** the catch-up reads the stored PREMIUM from
   ``marks_official``.
+- Past closes and the stamp on a mark (options-pricer, landed 2026-09-22; user: "options
+  daily pnl 0, that cannot be right, everything is moving", then "even on the bbg machine,
+  it seems the options are not priced live. I expect every time I pull bloomberg now, the
+  options are repriced with the latest data, and that the latest data is also logged /
+  overwriting previous marks"). On the Bloomberg PC the QL_OPTIONS_PRICER marks existed
+  for the latest day only (the live pull writes today's; nothing wrote a past day's), so
+  ``engine/pnl/valuation.py``'s near-marks rule carried today's PREMIUM back to the
+  previous close and Daily was 0 for every option. ``store.price_close(conn, day) ->
+  {"day", "priced", "skipped": [{"trade_id", "reason"}]}`` (new) prices a past close for
+  every FX_OPTION dealt on or before ``day`` and not expired before it, strictly from that
+  day's own SPOT, forward curve, OIS quotes (or CIP off that day's forwards) and vol smile
+  -- every resolver in ``inputs.py`` / ``rates.py`` already read its as_of's rows exactly,
+  no cross-day fallback existed to remove -- writes the seven marks dated ``day`` (INSERT
+  OR REPLACE, re-run overwrites), stamped the day's 15:00 New York close, never raises
+  (``"error"`` in the dict); expiry on ``day`` writes the payoff (and drops a
+  ``realised_pnl`` row frozen from an older premium, the catch-up's rule) unless the
+  ledger already froze the trade from an expiry-dated mark; a trade dealt after ``day``
+  is not in that day's book and is neither priced nor listed. For the backfill to call
+  per day (bbg-data's ``data/bloomberg/backfill.py``, not wired here). The live path is
+  unchanged in scope (every trade on file, whatever its trade_date: a mark dated before
+  the trade date never enters a valuation, and a trade dated tomorrow in Asia still needs
+  today's mark for tomorrow's book). The stamp: a LIVE run's marks now carry the actual
+  pricing time in New York (``store.live_stamp``; they said a flat 15:00 of the as_of,
+  so a 23:08 pull looked like the close), a past close or a catch-up mark the day's 15:00
+  (``store.close_stamp``); ``price_and_store`` / ``price_all_and_store`` take an optional
+  ``snapped``. ``set_option_terms`` strips padding before validating type / payoff, as
+  ``_same_terms`` already did, so no shape of an identical re-save is refused or taken
+  for a change (checked: the Options grid's and the editor's inputs all normalise to
+  what is on file; the only deletes of pricer marks across dates in this package remain
+  a real terms change and the one-time unit purge). Tests: ``tests/test_options_close.py``.
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

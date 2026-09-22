@@ -24,7 +24,10 @@ Wed 23 Sep 2026. Full text: `store.py` docstring "Expiry day", `pricer.price_fx_
   live expiry day the SPOT on file stays the last live pull's unless someone overwrites
   it -- and the backfill's own per-day `realise_settled` runs WITHOUT the options step, so
   a backfilled missed expiry day first freezes at the old model premium and self-heals
-  at the next live pull (catch-up drops the row, ledger refreezes).
+  at the next live pull (catch-up drops the row, ledger refreezes). Once bbg-data wires
+  `store.price_close` into the backfill (2026-09-22) the expiry day's pass writes the
+  payoff and drops the stale row itself (`refreeze=True`), unless the trade is already
+  frozen from an expiry-dated mark (W-2 -> skipped, left alone).
 
 - **Reviewer W-1 (same day):** `store.purge_old_unit_cash_payoff_marks`, run-once via
   the `options_migrations(name, applied_at)` marker table this package creates itself

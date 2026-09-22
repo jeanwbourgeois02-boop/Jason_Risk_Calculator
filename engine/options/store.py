@@ -4,11 +4,46 @@ FX_OPTION trades from ``trades_official`` / ``instruments`` /
 / ``VEGA`` / ``RHO`` marks (``source='QL_OPTIONS_PRICER'``) -- the same shape
 of glue ``engine/rates/store.py`` provides for IRS.
 
-Two entry points (task spec, mirrors engine/rates/store.py):
+Three entry points (the first two mirror engine/rates/store.py):
   - ``price_and_store(conn, as_of, trade_id)``: price one FX_OPTION trade,
     write its marks, return a ``PricingOutcome``.
   - ``price_all_and_store(conn, as_of)``: same, for every FX_OPTION trade in
-    ``trades_official`` as of that date.
+    ``trades_official`` as of that date -- the LIVE pull's step
+    (``data/bloomberg/live.py::_options_step``).
+  - ``price_close(conn, day)`` (2026-09-22): a PAST CLOSE, for the backfill to call for
+    each day it works, strictly from that day's own inputs. See "Past closes" below.
+
+**Past closes and the stamp on a mark (2026-09-22).** The user: "options daily pnl 0,
+that cannot be right, everything is moving", then "even on the bbg machine, it seems the
+options are not priced live. I expect every time I pull bloomberg now, the options are
+repriced with the latest data, and that the latest data is also logged / overwriting
+previous marks". On the Bloomberg PC the pricer marks existed for the latest day only:
+the live pull writes today's, nothing wrote a past day's, and ``engine/pnl/valuation.py``'s
+near-marks rule then carried today's PREMIUM back to the previous close, so LTD(t-1) =
+LTD(t) and Daily = 0 for every option. Two things here, both landed 2026-09-22:
+  * ``price_close(conn, day)`` prices every FX_OPTION trade dealt on or before ``day``
+    and not expired before it, from ``day``'s own official SPOT, forward curve, OIS
+    quotes (or the covered-interest-parity fallback off that day's forwards) and vol
+    smile -- every resolver in ``inputs.py`` / ``rates.py`` reads its as_of's rows
+    exactly, so a day with an input missing skips the trade with a reason naming the day
+    and the input, never a later day's vol, curve or spot. Marks are dated ``day``,
+    written INSERT OR REPLACE (a re-run overwrites), stamped that day's 15:00 New York
+    close with the offset resolved for the date. Expiry on ``day`` writes the payoff at
+    that day's official SPOT (the "Expiry day" rule below) unless the ledger has already
+    frozen the trade from an expiry-dated mark, in which case mark and frozen row are
+    left alone (the W-2 rule); an option expired before ``day`` is left to the catch-up
+    in ``price_all_and_store``; a trade dealt after ``day`` is not in that day's book
+    and is neither priced nor listed. Never raises: an exception becomes ``"error"`` in
+    the returned dict, one trade's pricer error a skip. Returns
+    ``{"day", "priced", "skipped": [{"trade_id", "reason"}]}``.
+  * ``snapped_at``: a mark priced by a LIVE run carries the actual pricing time in New
+    York (``live_stamp``: now, America/New_York, seconds) -- until 2026-09-22 every mark
+    was stamped a flat 15:00 of its as_of, so marks priced at 23:08 said 15:00 and the
+    user could not see that a pull had re-priced them. A mark that stands for a past
+    close (``price_close``, and the expiry-dated catch-up marks written later) carries
+    that day's 15:00 New York close stamp (``close_stamp``), like every other close the
+    backfill writes. ``price_and_store`` / ``price_all_and_store`` accept an explicit
+    ``snapped`` for a caller that knows better; the live pull passes none.
 
 **Conventions restated here (see CLAUDE.md, pricer.py, inputs.py for the
 full detail):**
@@ -209,6 +244,31 @@ NO_STRIKE_REASON = "no strike on file: enter the strike (and the payoff, if it i
 NO_BARRIER_REASON = "no barrier / touch level on file: enter it under Option terms"
 
 
+# --------------------------------------------------------------------------- snapped_at stamps (2026-09-22)
+# Module docstring, "Past closes and the stamp on a mark".
+
+def _now_ny() -> datetime.datetime:
+    """The clock, in America/New_York: the moment a live pricing run happens. Its own
+    function so a test can pin it (two runs in one second must still order)."""
+    from zoneinfo import ZoneInfo
+
+    return datetime.datetime.now(ZoneInfo("America/New_York"))
+
+
+def live_stamp() -> str:
+    """`snapped_at` of a mark priced NOW: the actual pricing time with the New York offset,
+    to the second, as the pull's own SPOT rows carry theirs. A pull at 23:08 New York
+    stamps 23:08, not the day's 15:00 close."""
+    return _now_ny().isoformat(timespec="seconds")
+
+
+def close_stamp(day: str) -> str:
+    """`snapped_at` of a mark that stands for `day`'s official close: 15:00 America/New_York
+    on that date, offset resolved for the date (`engine.rates.store.snapped_at`, the stamp
+    the IRS pricer uses for the same purpose)."""
+    return snapped_at(datetime.date.fromisoformat(day))
+
+
 @dataclass
 class PricingOutcome:
     trade_id: str
@@ -248,7 +308,7 @@ class PricingOutcome:
 def _read_option_trade(conn: sqlite3.Connection, trade_id: str) -> Optional[dict]:
     row = conn.execute(
         """
-        SELECT t.trade_id, t.instrument_id, t.product, t.package_id, t.quantity,
+        SELECT t.trade_id, t.instrument_id, t.product, t.package_id, t.quantity, t.trade_date,
                i.base_ccy, i.quote_ccy, i.expiry_date,
                o.strike, o.option_type, o.barrier_level, o.avg_start_date, o.payoff
         FROM trades_official t
@@ -260,12 +320,12 @@ def _read_option_trade(conn: sqlite3.Connection, trade_id: str) -> Optional[dict
     ).fetchone()
     if row is None:
         return None
-    (trade_id, instrument_id, product, package_id, quantity,
+    (trade_id, instrument_id, product, package_id, quantity, trade_date,
      base_ccy, quote_ccy, expiry_date,
      strike, option_type, barrier_level, avg_start_date, payoff) = row
     return dict(
         trade_id=trade_id, instrument_id=instrument_id, product=product, package_id=package_id,
-        quantity=quantity, base_ccy=base_ccy, quote_ccy=quote_ccy, expiry_date=expiry_date,
+        quantity=quantity, trade_date=trade_date, base_ccy=base_ccy, quote_ccy=quote_ccy, expiry_date=expiry_date,
         strike=strike, option_type=option_type, barrier_level=barrier_level,
         avg_start_date=avg_start_date, payoff=payoff,
     )
@@ -395,7 +455,11 @@ def _price_row(
     row: dict,
     surface_cache: Optional[dict] = None,
     curve_cache: Optional[dict] = None,
+    snapped: Optional[str] = None,
 ) -> PricingOutcome:
+    """Price one trade as of `as_of` from that date's own inputs and write its marks dated
+    `as_of`, stamped `snapped` -- the actual pricing time (`live_stamp`) when the caller
+    passes none, a close stamp when `price_close` does."""
     terms_reason = _terms_skip_reason(row)
     if terms_reason:
         return _skip(row, terms_reason)
@@ -405,12 +469,13 @@ def _price_row(
     if expiry < as_of_date:
         return _skip(row, _expired_reason(row, as_of))
 
+    stamp = snapped or live_stamp()
     pair = row["base_ccy"] + row["quote_ccy"]
     if expiry == as_of_date:
         # Expiry day: the payoff at today's official SPOT, never a model price (module
         # docstring, "Expiry day"). Rewritten by every pull of the day (INSERT OR REPLACE),
         # so its final value is the day's last official spot.
-        return _intrinsic_outcome(conn, row, pair, mark_date=as_of)
+        return _intrinsic_outcome(conn, row, pair, mark_date=as_of, snapped=stamp)
 
     inputs_result = resolve_market_inputs(
         conn, as_of, pair, row["expiry_date"], strike=row["strike"],
@@ -429,7 +494,7 @@ def _price_row(
         result = _dispatch(row, as_of_date, expiry, inputs, pair)
 
     with conn:
-        _insert_marks(conn, as_of, row, result)
+        _insert_marks(conn, as_of, row, result, stamp)
 
     vol_source = inputs.vol_source
     if row["payoff"] == "DIGITAL" and _smile_vol_at(inputs) is not None:
@@ -482,11 +547,13 @@ def _raw(result: pricer.OptionPriceResult) -> Dict[str, float]:
             "theta": result.theta, "vega": result.vega, "rho": result.rho}
 
 
-def _insert_marks(conn: sqlite3.Connection, mark_date: str, row: dict, result: pricer.OptionPriceResult) -> None:
-    """INSERT OR REPLACE the six marks (+ DELTA_PA) dated `mark_date`. No commit of its
-    own: the caller owns the transaction (`with conn:`), so a catch-up can drop a stale
-    frozen row in the same one."""
-    snapped = snapped_at(datetime.date.fromisoformat(mark_date))
+def _insert_marks(conn: sqlite3.Connection, mark_date: str, row: dict, result: pricer.OptionPriceResult,
+                  snapped: str) -> None:
+    """INSERT OR REPLACE the six marks (+ DELTA_PA) dated `mark_date`, every row stamped
+    `snapped` (module docstring, "the stamp on a mark": the actual pricing time for a live
+    run, the day's 15:00 New York close for a past close). No commit of its own: the caller
+    owns the transaction (`with conn:`), so a catch-up can drop a stale frozen row in the
+    same one."""
     settle_date = row["expiry_date"]
     values = {
         "PREMIUM": result.premium,
@@ -521,13 +588,15 @@ def _insert_marks(conn: sqlite3.Connection, mark_date: str, row: dict, result: p
 
 
 def _intrinsic_outcome(conn: sqlite3.Connection, row: dict, pair: str, mark_date: str,
-                       refreeze: bool = False) -> PricingOutcome:
+                       refreeze: bool = False, snapped: Optional[str] = None) -> PricingOutcome:
     """Write the option's PAYOFF at `pair`'s official SPOT of `mark_date` (= the expiry
     date) as its marks for that date -- module docstring, "Expiry day". Skips, writing
     nothing, for a path-dependent payoff and when that SPOT is not on file; never falls
-    back to a model price and never writes 0 for "unknown". `refreeze` (catch-up only):
-    in the same transaction, drop the instrument's `realised_pnl` rows frozen from a
-    premium dated BEFORE the expiry date, so the ledger freezes them afresh."""
+    back to a model price and never writes 0 for "unknown". `refreeze` (the catch-up and
+    `price_close`): in the same transaction, drop the instrument's `realised_pnl` rows
+    frozen from a premium dated BEFORE the expiry date, so the ledger freezes them afresh.
+    `snapped`: the stamp on the marks; none = the expiry date's 15:00 New York close (the
+    catch-up reconstructs a past day), the live expiry-day run passes the pricing time."""
     if row["payoff"] in pricer.PATH_DEPENDENT_PAYOFFS:
         return _skip(row, f"expiry day: the payoff of {row['payoff']} depends on the path spot took "
                           "(a barrier touched, an average), which the closing spot alone cannot tell; "
@@ -540,7 +609,7 @@ def _intrinsic_outcome(conn: sqlite3.Connection, row: dict, pair: str, mark_date
     result = pricer.price_fx_at_expiry(row["payoff"], spot, row["strike"], row["option_type"], pair=pair,
                                        payout_ccy=CASH_PAYOUT_CCY)
     with conn:
-        _insert_marks(conn, mark_date, row, result)
+        _insert_marks(conn, mark_date, row, result, snapped or close_stamp(mark_date))
         if refreeze and _table_exists(conn, "realised_pnl"):
             conn.execute("DELETE FROM realised_pnl WHERE instrument_id = ? AND spot_as_of_date < ?",
                          (row["instrument_id"], mark_date))
@@ -579,9 +648,7 @@ def _catch_up_expiry_mark(conn: sqlite3.Connection, as_of: str, row: dict) -> Op
     expiry_iso = row["expiry_date"]
     if not datetime.date.fromisoformat(expiry_iso) < datetime.date.fromisoformat(as_of):
         return None
-    if _table_exists(conn, "realised_pnl") and conn.execute(
-            "SELECT 1 FROM realised_pnl WHERE instrument_id = ? AND spot_as_of_date >= ?",
-            (row["instrument_id"], expiry_iso)).fetchone() is not None:
+    if _frozen_from_expiry_mark(conn, row):
         return None
     pair = row["base_ccy"] + row["quote_ccy"]
     stored = conn.execute(
@@ -607,6 +674,15 @@ VALID_PAYOFFS = ("VANILLA", "DIGITAL", "AMERICAN", "ASIAN", "BARRIER_KI", "BARRI
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
+
+
+def _frozen_from_expiry_mark(conn: sqlite3.Connection, row: dict) -> bool:
+    """Has the ledger frozen this instrument from an expiry-dated mark (`realised_pnl` row
+    with `spot_as_of_date >= expiry`)? From then on the expiry-day mark and the row are
+    left alone for good (module docstring, "Expiry day", the W-2 rule). No table: no."""
+    return _table_exists(conn, "realised_pnl") and conn.execute(
+        "SELECT 1 FROM realised_pnl WHERE instrument_id = ? AND spot_as_of_date >= ?",
+        (row["instrument_id"], row["expiry_date"])).fetchone() is not None
 
 
 def _same_terms(on_file: tuple, new: tuple) -> bool:
@@ -692,10 +768,13 @@ def set_option_terms(conn: sqlite3.Connection, instrument_id: str, strike: float
     row = conn.execute("SELECT asset_class FROM instruments WHERE instrument_id = ?", (instrument_id,)).fetchone()
     if row is None or row[0] not in ("FX_OPTION", "EQ_OPTION", "CMDTY_OPTION"):
         raise ValueError(f"{instrument_id!r} is not an option instrument on file")
-    payoff = (payoff or "VANILLA").upper()
+    # Formatting never refuses typed input (CLAUDE.md hard rule 6): case and padding are
+    # normalised here exactly as `_same_terms` normalises them, so a re-save of the same
+    # terms in any shape is neither refused nor taken for a change.
+    payoff = ((payoff or "").strip() or "VANILLA").upper()
     if payoff not in VALID_PAYOFFS:
         raise ValueError(f"payoff must be one of {', '.join(VALID_PAYOFFS)}")
-    option_type = (option_type or "").upper()
+    option_type = (option_type or "").strip().upper()
     if option_type not in ("CALL", "PUT"):
         raise ValueError("option type must be CALL or PUT")
     strike = float(strike or 0.0)
@@ -790,7 +869,8 @@ def purge_old_unit_cash_payoff_marks(conn: sqlite3.Connection) -> dict:
             "realised_deleted": realised_deleted}
 
 
-def price_and_store(conn: sqlite3.Connection, as_of: str, trade_id: str) -> PricingOutcome:
+def price_and_store(conn: sqlite3.Connection, as_of: str, trade_id: str,
+                    snapped: Optional[str] = None) -> PricingOutcome:
     """Price one FX_OPTION trade (read from ``trades_official``) as of
     ``as_of`` (ISO date string) and write its marks. Raises ValueError if no
     such trade exists; returns a PricingOutcome with ``priced=False`` (never
@@ -798,17 +878,24 @@ def price_and_store(conn: sqlite3.Connection, as_of: str, trade_id: str) -> Pric
     date writes the PAYOFF at that day's official SPOT instead of a model price
     (``mark_basis='INTRINSIC'``); ``as_of`` after expiry is skipped, and the catch-up for
     a missed expiry day runs only in ``price_all_and_store`` (module docstring, "Expiry
-    day")."""
+    day"). ``snapped``: the marks' stamp; none = the actual pricing time (``live_stamp``)."""
     row = _read_option_trade(conn, trade_id)
     if row is None:
         raise ValueError(f"No trade {trade_id!r} in trades_official")
     # Fresh, single-trade surface/curve cache -- no reuse across calls, but
     # keeps the same code path as price_all_and_store below.
-    return _price_row(conn, as_of, row, surface_cache={}, curve_cache={})
+    return _price_row(conn, as_of, row, surface_cache={}, curve_cache={}, snapped=snapped)
 
 
-def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[PricingOutcome]:
-    """Price every FX_OPTION trade in ``trades_official`` as of ``as_of``.
+def price_all_and_store(conn: sqlite3.Connection, as_of: str, snapped: Optional[str] = None) -> List[PricingOutcome]:
+    """Price every FX_OPTION trade in ``trades_official`` as of ``as_of`` -- the live
+    pull's step. Every trade on file is priced, whatever its trade_date: a mark dated
+    before a trade's own trade date never enters a valuation (``engine/pnl/valuation.py``
+    reads trades with ``trade_date <= as_of``), and a trade dealt in Asia after the New
+    York day has rolled, dated tomorrow, still needs today's mark for tomorrow's book to
+    be priced off (the near-marks rule). Marks are stamped ``snapped``, none = the actual
+    pricing time (``live_stamp``), so a re-pull visibly replaces the day's marks: same key,
+    new value, newer stamp (INSERT OR REPLACE, never a second row).
     One `surface_cache` dict is shared across the whole run (see
     inputs.py::_cached_surface) so that N trades on the same pair build
     that pair's FXDeltaVolSurface once, not N times; likewise one
@@ -843,7 +930,8 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[PricingOut
     for trade_id in trade_ids:
         row = _read_option_trade(conn, trade_id)
         try:
-            outcome = _price_row(conn, as_of, row, surface_cache=surface_cache, curve_cache=curve_cache)
+            outcome = _price_row(conn, as_of, row, surface_cache=surface_cache, curve_cache=curve_cache,
+                                 snapped=snapped)
             if not outcome.priced:
                 # Expired before `as_of` with no expiry-day mark (the app did not run that
                 # day): write it now from the expiry date's own official SPOT, if there is
@@ -865,3 +953,90 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[PricingOut
                 outcomes.append(PricingOutcome(trade_id=trade_id, instrument_id="", package_id=trade_id,
                                                quantity=0.0, priced=False, reason=reason))
     return outcomes
+
+
+# --------------------------------------------------------------------------- past closes (2026-09-22)
+
+_CLOSE_BOOK_SQL = """
+SELECT t.trade_id
+FROM trades_official t
+JOIN instruments i ON i.instrument_id = t.instrument_id
+WHERE t.product = 'FX_OPTION' AND t.trade_date <= :day AND i.expiry_date >= :day
+ORDER BY t.trade_id
+"""
+
+
+def price_close(conn: sqlite3.Connection, day: str) -> dict:
+    """Price `day`'s CLOSE for every FX_OPTION trade in that day's book -- dealt on or
+    before `day` (``trades.trade_date <= day``) and not expired before it
+    (``instruments.expiry_date >= day``) -- strictly from `day`'s own inputs on file, and
+    write the marks dated `day`. For the backfill to call for each day it works, after that
+    day's closes (SPOT, forwards, OIS quotes, vol smile) are on file (module docstring,
+    "Past closes and the stamp on a mark"; user, 2026-09-22: "options daily pnl 0, that
+    cannot be right, everything is moving").
+
+    Inputs: the pair's official SPOT of `day`, the OIS ``curve_quotes`` of `day` (or the
+    covered-interest-parity rate off `day`'s own SPOT + FWD_OUTRIGHT marks), the
+    ``vol_quotes`` smile of `day` (else its ATM interpolation, else a manual vol dated
+    `day`) -- every resolver reads its own date's rows exactly (``inputs.get_spot``,
+    ``vol_marketdata.vol_smile`` / ``atm_vol_for_expiry``, ``inputs.get_manual_vol``,
+    ``rates._read_curve_quotes`` / ``_get_manual_rate`` / ``_get_fwd_outright_points``),
+    so nothing of another day can leak in: an input missing on `day` skips the trade,
+    reason "<day> close: <what is missing>", never a later day's vol, curve or spot.
+    ``cut_time_factor`` reads the pricing moment off that day's SPOT stamp (15:00 New York
+    for a close row), so the hours to the cut are the close's.
+
+    Expiry on `day`: the payoff at `day`'s official SPOT ("Expiry day" rule), and the
+    instrument's ``realised_pnl`` rows frozen from a premium dated before the expiry are
+    dropped in the same transaction so the ledger's next pass freezes them from it (the
+    catch-up's own rule) -- unless the ledger has ALREADY frozen the trade from an
+    expiry-dated mark, in which case mark and row are left alone (W-2) and the trade is
+    listed as skipped saying so. Expired before `day`: not in that day's book, left to
+    ``price_all_and_store``'s catch-up. Dealt after `day`: not in that day's book, neither
+    priced nor listed.
+
+    Marks: the seven ``PRICER_MARK_TYPES`` under ``QL_OPTIONS_PRICER``, dated `day`,
+    INSERT OR REPLACE (a re-run overwrites the same keys, never a second row), stamped
+    `day`'s 15:00 New York close with the offset resolved for the date (``close_stamp``).
+    One short transaction per trade, as ``price_all_and_store``. Idempotent. The one-time
+    unit purge runs first, as there, so it can never eat what this writes.
+
+    Never raises. Returns ``{"day": day, "priced": <int>, "skipped": [{"trade_id",
+    "reason"}, ...]}``; an exception outside one trade's pricing adds ``"error"`` (its
+    repr) and the counts so far; one trade's pricer error is its own skip."""
+    out: dict = {"day": day, "priced": 0, "skipped": []}
+    try:
+        datetime.date.fromisoformat(day)
+        purge_old_unit_cash_payoff_marks(conn)
+        trade_ids = [r[0] for r in conn.execute(_CLOSE_BOOK_SQL, {"day": day}).fetchall()]
+        stamp = close_stamp(day)
+        surface_cache: dict = {}
+        curve_cache: dict = {}
+        for trade_id in trade_ids:
+            row = _read_option_trade(conn, trade_id)
+            if row is None:  # pragma: no cover -- the id came from trades_official a moment ago
+                out["skipped"].append({"trade_id": trade_id, "reason": f"{day} close: trade not on file"})
+                continue
+            try:
+                if row["expiry_date"] == day:
+                    terms_reason = _terms_skip_reason(row)
+                    if terms_reason:
+                        outcome = _skip(row, terms_reason)
+                    elif _frozen_from_expiry_mark(conn, row):
+                        outcome = _skip(row, "expiry day: the payoff is already frozen in realised P&L from the "
+                                             "expiry-dated mark; mark and frozen row are left as they stand")
+                    else:
+                        pair = row["base_ccy"] + row["quote_ccy"]
+                        outcome = _intrinsic_outcome(conn, row, pair, mark_date=day, refreeze=True, snapped=stamp)
+                else:
+                    outcome = _price_row(conn, day, row, surface_cache=surface_cache, curve_cache=curve_cache,
+                                         snapped=stamp)
+            except Exception as exc:  # noqa: BLE001 -- one trade's blow-up is its own skip, as in price_all_and_store
+                outcome = _skip(row, f"pricer error: {exc!r}")
+            if outcome.priced:
+                out["priced"] += 1
+            else:
+                out["skipped"].append({"trade_id": trade_id, "reason": f"{day} close: {outcome.reason}"})
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{exc!r}"
+    return out

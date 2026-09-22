@@ -58,8 +58,9 @@ option P&L line, the UI's Greek headline). Full text lives in
   **Why:** the UI's edit-then-reprice left a vanilla's marks official on a digital
   whenever the reprice was skipped. **How to apply:** any NEW pricing term added to
   `instrument_options` (avg_start_date once the engine uses it, a payout-ccy column) must
-  join `_same_terms`' comparison. Options are only priced for the live date, so past
-  dates stay empty after a change. `engine/pnl/ledger.realise_settled` freezes an expired
+  join `_same_terms`' comparison. After a change past dates stay empty until the backfill
+  rebuilds them with `store.price_close` (2026-09-22, see
+  [[past-close-pricing-and-stamps-2026-09-22]]). `engine/pnl/ledger.realise_settled` freezes an expired
   option ONCE and never revisits it, so (coordinator's decision 2026-09-18, done in
   `set_option_terms`, not the ledger) the same change also deletes the instrument's
   `realised_pnl` rows in the same transaction; table absent -> skip silently. An option
