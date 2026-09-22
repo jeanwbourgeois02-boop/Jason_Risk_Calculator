@@ -1595,3 +1595,46 @@ def test_pull_once_writes_the_ndf_1m_price_on_the_usd_pair_and_counts_it_like_an
     assert rows[("USDKRW", "SPOT")][2] == 1389.2 and rows[("USDKRW", "FWD_OUTRIGHT")][2] == 1389.2
     # and the ladder's spot rates are still the spots
     assert live.rates_from_marks(conn)["KRW"]["rate"] == 1389.2
+
+
+# =========================================================================== 2026-09-22: NDF_FIX
+def test_ndf_fix_rows_are_the_fixing_dates_history_value_on_the_pair():
+    """The fix is asked of Bloomberg's daily history for exactly the fixing date (a reference
+    request would hand back yesterday's fix before today's is published) and written as
+    NDF_FIX on the pair, source BBG_BDH, the official source; a ticker with no value that day
+    is reported failed with the reason and nothing is written for it."""
+    from datetime import date as _date
+    from data.bloomberg.live import ndf_fix_rows
+    from data.bloomberg.pull_marks import RequestRow
+    reqs = [RequestRow("USDBRL", "BZFXPTAX Index", "2026-09-22", "NDF_FIX"),
+            RequestRow("USDKRW", "KFTC18 Index", "2026-09-22", "NDF_FIX")]
+    asked = {}
+
+    def fetch(session, service, tickers, fields, start, end):
+        asked["call"] = (sorted(tickers), list(fields), start, end)
+        return {"BZFXPTAX Index": {"2026-09-22": {"PX_LAST": 5.3412}}, "KFTC18 Index": {}}
+
+    rows, warnings, failed = ndf_fix_rows(None, None, reqs, _date(2026, 9, 22), fetch=fetch, snapped_at="2026-09-22T15:00:00-04:00")
+    assert asked["call"] == (["BZFXPTAX Index", "KFTC18 Index"], ["PX_LAST"], _date(2026, 9, 22), _date(2026, 9, 22))
+    assert rows == [{"as_of_date": "2026-09-22", "instrument_id": "USDBRL", "settle_date": "2026-09-22", "mark_type": "NDF_FIX",
+                     "value": 5.3412, "source": "BBG_BDH", "snapped_at": "2026-09-22T15:00:00-04:00"}]
+    assert warnings == [] and [f["instrument_id"] for f in failed] == ["USDKRW"]
+    assert failed[0]["reason"] == "Bloomberg returned no PX_LAST for KFTC18 Index on 2026-09-22 (the fixing)"
+    assert ndf_fix_rows(None, None, [], _date(2026, 9, 22), fetch=fetch) == ([], [], [])
+
+
+def test_build_requests_asks_for_the_fix_on_the_fixing_date_and_never_as_a_spot(tmp_path):
+    from data.ingest import schema
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, bbg_ticker, "
+                 "expiry_date) VALUES ('USDBRL','FX','USD','BRL',1,1,'USDBRL Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('b1','XLSX','USDBRL','FX_FWD','b1','2026-09-01',1e6,5.2,'a','c','','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("b1", 1, "FX_NEAR", "USD", 1e6, "2026-09-01", "2026-09-24", 5.2, 0),
+        ("b1", 2, "FX_NEAR", "BRL", -5.2e6, "2026-09-01", "2026-09-24", 5.2, 0)])
+    conn.commit()
+    on_fixing = live.build_requests(conn, "2026-09-22")            # Thu 09-24 fixes Tue 09-22
+    assert [(r.bbg_ticker, r.settle_date, r.mark_type) for r in on_fixing][-1] == ("BZFXPTAX Index", "2026-09-22", "NDF_FIX")
+    assert [r.mark_type for r in on_fixing if r.bbg_ticker == "BZFXPTAX Index"] == ["NDF_FIX"]   # not in the SPOT group
+    assert "NDF_FIX" not in {r.mark_type for r in live.build_requests(conn, "2026-09-21")}

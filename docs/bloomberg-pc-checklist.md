@@ -28,6 +28,13 @@ Follow this on the PC that has the Bloomberg Terminal, every time you start the 
        - USDJPY111926P-197957397: Digital, Put, strike 152
        - EURSEK112526C-197906813: Digital, Call, strike 11.4
      The diagnostics panel shows the current list.
+   - FAIL or "not returned" on an NDF fixing ticker (`BZFXPTAX Index`, `KFTC18 Index`,
+     `INRFBIL Index`, `TAIFX1 Index`, `JISDOR Index`; the "official fixing" rows of the
+     Bloomberg library): these spellings are UNVERIFIED (2026-09-22). Look the fixing up
+     on the Terminal (PTAX for BRL, KFTC18 for KRW, FBIL for INR, TAIFX1 for TWD, JISDOR
+     for IDR) and correct the ticker in `data/ingest/common.py::NDF_FIX_TICKERS`; until
+     then a fixed NDF's P&L says "no official fixing on file" and uses the fixing day's
+     spot instead.
    - A trade the export does not carry at all (an option booked at another venue, a
      forward dealt outside the prime broker): book it under Blotter > Manual entry >
      "Book an OTC trade by hand". It is saved as source MANUAL, priced on the next pull,

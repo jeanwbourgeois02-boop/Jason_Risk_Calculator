@@ -308,12 +308,42 @@ def test_value_book_ndf_that_has_fixed_is_frozen_at_the_fixing_dates_spot():
         assert (row["status"], row["mark"], row["mark_date"]) == ("OPEN", 5.10, VB_AS_OF)
         assert row["pnl_usd"] == pytest.approx(expected) and row["spot"] == pytest.approx(1 / 5.10)
         assert row["pnl_spot_usd"] == pytest.approx(expected) and row["pnl_carry_usd"] == 0.0
-        assert row["reason"] == "" and row["note"] == "NDF fixed 2026-06-01: frozen at the spot of 2026-06-01, no delta, no carry"
+        assert row["reason"] == "" and row["note"] == ("NDF fixed 2026-06-01: no official fixing on file: at the spot of "
+                                                       "2026-06-01 instead, no delta, no carry")
     assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
-    frozen = conn.execute("SELECT pnl_usd, spot_as_of_date, note FROM realised_pnl WHERE trade_id='N1'").fetchone()
-    assert frozen[0] == pytest.approx(expected) and frozen[1] == VB_AS_OF and frozen[2] == "spot dated 2026-06-01 (NDF fixing)"
+    frozen = conn.execute("SELECT pnl_usd, spot_as_of_date, note, mark_type FROM realised_pnl WHERE trade_id='N1'").fetchone()
+    assert frozen[0] == pytest.approx(expected) and frozen[1] == VB_AS_OF
+    assert frozen[2] == "spot dated 2026-06-01 (NDF fixing)" and frozen[3] == "SPOT"
     row = value_book(conn, "2026-06-04").iloc[0]
     assert row["status"] == "SETTLED" and row["pnl_usd"] == pytest.approx(expected)
+
+
+def test_value_book_ndf_exit_price_is_the_official_fixing_of_the_fixing_date():
+    """User, 2026-09-22: "the entry price is where we traded, and the exit price is the fix
+    on that day, as pulled from bbg". The NDF_FIX mark of the fixing date beats the spot;
+    the ledger records it as the freeze (mark_type NDF_FIX); a fix from a neighbouring day
+    is a named estimate."""
+    from engine.pnl import ledger
+    conn = _vb_brl(_vb_conn())
+    _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-03")   # fixes 06-01
+    _vb_mark(conn, "USDBRL", VB_AS_OF, "SPOT", 5.10)
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (VB_AS_OF, "USDBRL", VB_AS_OF, "NDF_FIX", 5.15, "BBG_BDH", f"{VB_AS_OF}T15:00:00-04:00"))
+    conn.commit()
+    row = value_book(conn, "2026-06-02").iloc[0]
+    assert (row["mark"], row["mark_source"], row["mark_date"]) == (5.15, "BBG_BDH", VB_AS_OF)
+    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (5.15 - 5.20) / 5.10)   # exit = fix, converted at the fixing day's spot
+    assert row["note"] == "NDF fixed 2026-06-01: at the official fixing of 2026-06-01, no delta, no carry"
+    assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
+    frozen = conn.execute("SELECT pnl_usd, spot_as_of_date, mark_type, note FROM realised_pnl WHERE trade_id='N1'").fetchone()
+    assert frozen[0] == pytest.approx(row["pnl_usd"]) and frozen[1:] == (VB_AS_OF, "NDF_FIX", "official fixing dated 2026-06-01 (NDF fixing)")
+
+    # the fixing day's own fix not on file, a neighbour's is: a named estimate, not the spot
+    conn.execute("DELETE FROM realised_pnl")
+    conn.execute("UPDATE marks SET as_of_date = '2026-05-29', settle_date = '2026-05-29' WHERE mark_type = 'NDF_FIX'")
+    conn.commit()
+    row = value_book(conn, "2026-06-02").iloc[0]
+    assert row["mark"] == 5.15 and row["mark_source"].startswith("INTERP: NDF_FIX of 2026-05-29")
+    assert row["note"].startswith("NDF fixed 2026-06-01: at the fixing estimated from near marks (INTERP: NDF_FIX of 2026-05-29")
 
 
 def test_value_book_any_pair_with_no_forward_takes_the_days_curve_spot_alone_being_spot():
@@ -440,7 +470,7 @@ def test_value_book_fixed_ndf_with_no_spot_is_blank_and_says_why():
     _vb_mark(conn, "USDBRL", "2026-06-03", "FWD_OUTRIGHT", 5.30)
     row = value_book(conn, VB_AS_OF).iloc[0]
     assert math.isnan(row["pnl_usd"])
-    assert row["reason"] == "no SPOT mark for USDBRL on 2026-06-01 (NDF fixed that day)"
+    assert row["reason"] == "no official fixing and no SPOT mark for USDBRL on 2026-06-01 (NDF fixed that day)"
 
 
 def test_value_book_future():

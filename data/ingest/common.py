@@ -37,6 +37,25 @@ NDF_1M_TICKERS = {
     "BRL": "BCN+1M Curncy",
 }
 
+# An NDF settles against its currency's own official fixing, not spot (user, 2026-09-22:
+# "we need the fix value from each date for the NDFs, thats the only correct way to compute
+# the pnl. so the entry price is where we traded, and the exit price is the fix on that day,
+# as pulled from bbg"; "each ndf has a unique fix, like inr and krw and twd have their own
+# fixes"). One Bloomberg ticker per currency, PX_LAST on the fixing date, written as
+# mark_type NDF_FIX on the USD pair dated the fixing date (source BBG_BDH). Quoted as the
+# USD pair (units of the currency per USD), like spot.
+# UNVERIFIED (2026-09-22): the fixing each row names is the market's settlement rate for that
+# currency's NDFs; the ticker spelling has not been checked against a terminal. An unknown
+# security fails loudly in the pull (the Market data tab lists it as missing) and the P&L
+# says "no official fix on file" and falls back to spot until the ticker is corrected here.
+NDF_FIX_TICKERS = {
+    "BRL": "BZFXPTAX Index",    # PTAX (Banco Central do Brasil), published ~13:15 Sao Paulo
+    "KRW": "KFTC18 Index",      # KFTC18, the Seoul Money Brokerage / KFTC market-average rate
+    "INR": "INRFBIL Index",     # FBIL reference rate (RBI until 2018)
+    "TWD": "TAIFX1 Index",      # TAIFX1, the Taipei Forex Inc. fixing
+    "IDR": "JISDOR Index",      # JISDOR (Bank Indonesia)
+}
+
 DESCRIPTION_RE = re.compile(
     r"^TD (\d{2}/\d{2}/\d{4}) VD (\d{2}/\d{2}/\d{4}) (SELL|BUY) ([A-Z]{3}) VS \.(BUY|SELL) ([A-Z]{3}) @ (\d+\.\d{8})$"
 )

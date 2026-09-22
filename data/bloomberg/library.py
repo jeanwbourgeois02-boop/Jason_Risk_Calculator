@@ -52,7 +52,13 @@ SENTINEL = "9999-12-31"
 ROLE_PAIR = "PAIR"                 # the traded pair / contract / currency itself
 ROLE_CONVERSION = "CONVERSION"     # a USD-conversion pair's SPOT
 ROLE_UNDERLYING = "UNDERLYING"     # a listed option's underlying index level: today's Greeks only
-MARK_KINDS = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX")
+# NDF_FIX (2026-09-22): an NDF currency's own official fixing, asked for on the ticket's
+# fixing date only (needed_from = needed_until = the fixing date), key = the USD pair,
+# settle_date = that date; the NDF's exit price in P&L (user: "the exit price is the fix on
+# that day, as pulled from bbg"). In MARK_KINDS because a past fixing date's fix is what the
+# backfill fills, like a past close.
+NDF_FIX = "NDF_FIX"
+MARK_KINDS = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX", NDF_FIX)
 NDF_1M = "NDF_1M"                  # an NDF currency's 1M outright, on its USD pair (the ladder's rate)
 DIV_YIELD = "DIV_YIELD"            # an index's dividend yield, for a listed option's Greeks
 DIV_YIELD_FIELDS = ("IDX_EST_DVD_YLD", "EQY_DVD_YLD_12M")   # per cent; the first Bloomberg answers
@@ -163,6 +169,19 @@ def compute(conn: sqlite3.Connection) -> List[dict]:
         from data.ingest.common import NDF_1M_TICKERS as ndf_tickers
     except ImportError:            # an older data/ingest: no NDF list, nothing extra is asked for
         ndf_tickers = {}
+    try:
+        from data.ingest.common import NDF_FIX_TICKERS as fix_tickers
+        from engine.ladder.ndf import fixing_date
+    except ImportError:
+        fix_tickers, fixing_date = {}, None
+
+    def add_ndf_fix(trade_id, product, instrument_id, base, quote, settle) -> None:
+        # The fix of the ticket's own USD pair, on its fixing date only. A cross NDF (EURBRL)
+        # has no single fix to settle against here and is left to the spot rule.
+        ccy = quote if base == "USD" else base if quote == "USD" else None
+        if ccy in fix_tickers and fixing_date is not None and fix_tickers[ccy]:
+            fixed_on = fixing_date(settle)
+            add(trade_id, product, NDF_FIX, instrument_id, fixed_on, fix_tickers[ccy], fixed_on, fixed_on)
 
     for trade_id, product, trade_date, instrument_id, ticker, base, quote, settle in conn.execute(_FX_LEGS_SQL):
         add(trade_id, product, "SPOT", instrument_id, SENTINEL, ticker, trade_date, settle)
@@ -170,6 +189,7 @@ def compute(conn: sqlite3.Connection) -> List[dict]:
         if base != "USD" and quote != "USD":
             add_conversions(trade_id, product, (base, quote), trade_date, settle)
         add_ndf_1m(trade_id, product, (base, quote), trade_date, settle)
+        add_ndf_fix(trade_id, product, instrument_id, base, quote, settle)
     for trade_id, product, trade_date, instrument_id, ticker, settle in conn.execute(_FUTURE_LEGS_SQL):
         add(trade_id, product, "FUTURE_PX", instrument_id, settle, ticker, trade_date, settle)
     for trade_id, product, trade_date, base, quote, expiry in conn.execute(_OPTIONS_SQL):
@@ -327,6 +347,9 @@ def tickers(conn: sqlite3.Connection, as_of: str) -> List[dict]:
         elif kind == NDF_1M:
             ccy = key[3:] if key.startswith("USD") else key[:3]
             put(r["bbg_ticker"], "PX_LAST", f"1M NDF price, the ladder's rate for {ccy}", r)
+        elif kind == NDF_FIX:
+            ccy = key[3:] if key.startswith("USD") else key[:3]
+            put(r["bbg_ticker"], "PX_LAST", f"{ccy} official fixing on {r['settle_date']}, the NDF's exit price", r)
         elif kind in ("OIS_CURVE", "FIXINGS"):
             try:
                 from data.bloomberg import rates_marketdata as rm

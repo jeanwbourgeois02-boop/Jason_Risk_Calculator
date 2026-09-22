@@ -48,6 +48,9 @@ OFFICIAL_MARK_SOURCE = {
     # Bloomberg's 1M NDF outright (data.ingest.common.NDF_1M_TICKERS), on the USD pair,
     # as quoted. Read by the ladder only; no P&L query reads it.
     "NDF_1M": "BBG_BFXFORWARD",
+    # NDF_FIX (2026-09-22): the currency's own official fixing on the fixing date, Bloomberg's
+    # history value (PX_LAST of data/ingest/common.py::NDF_FIX_TICKERS), the NDF's exit price.
+    "NDF_FIX": "BBG_BDH",
 }
 
 _DDL = """

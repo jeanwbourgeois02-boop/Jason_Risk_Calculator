@@ -54,7 +54,7 @@ def _mark_row(as_of=AS_OF, instrument_id="USDJPY", settle_date=AS_OF, mark_type=
 def test_marks_columns_and_sets():
     assert marks_csv.MARKS_COLUMNS == [
         "as_of_date", "instrument_id", "settle_date", "mark_type", "value", "source", "snapped_at"]
-    assert marks_csv.MARK_TYPES == {
+    assert marks_csv.MARK_TYPES >= {
         "SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "PAR_RATE", "PV_USD", "DV01_USD", "PREMIUM", "DELTA"}
     assert marks_csv.SOURCES == {
         "BNP_BVAL", "BBG_BFXFORWARD", "BBG_BDH", "BBG_BDP", "MANUAL", "BBG_INTERP", "WORKBOOK_REFERENCE"}

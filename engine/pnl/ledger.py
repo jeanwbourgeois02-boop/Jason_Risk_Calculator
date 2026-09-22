@@ -199,7 +199,15 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
             # An NDF is done at its fixing (user, 2026-09-22: "they just disappears as they
             # expired"): frozen at the last official SPOT on or before the FIXING date, the same
             # figure value_book shows from the fixing on, not the value date's spot two days later.
-            m_hit = _last_on_or_before(conn, pair, "SPOT", _freeze_day(conn, pair, settle))
+            fix_day = _freeze_day(conn, pair, settle)
+            # An NDF settles against its currency's official fixing (NDF_FIX, 2026-09-22): that
+            # mark on or before the fixing date first, spot only when no fix is on file.
+            fix_type = "SPOT"
+            m_hit = _last_on_or_before(conn, pair, "NDF_FIX", fix_day) if fix_day != settle else None
+            if m_hit is not None:
+                fix_type = "NDF_FIX"
+            else:
+                m_hit = _last_on_or_before(conn, pair, "SPOT", fix_day)
             present = m_hit is None and ndf_present_spot
             if present:
                 m_hit = present_spot_for_ndf(conn, pair, as_of)
@@ -214,10 +222,10 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
             entry = qty * fill * s
             combined = m * s
             pnl = qty * combined - entry
-            fix_day = _freeze_day(conn, pair, settle)
+            what = "official fixing" if fix_type == "NDF_FIX" else "spot"
             note = ("" if m_day == settle else
-                    f"spot dated {m_day} ({PRESENT_SPOT_NOTE if present else ('NDF fixing' if m_day == fix_day else 'last before ' + ('fixing' if fix_day != settle else 'settlement'))})")
-            _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, entry, "SPOT", combined, m_day, m_src, pnl, note)
+                    f"{what} dated {m_day} ({PRESENT_SPOT_NOTE if present else ('NDF fixing' if m_day == fix_day else 'last before ' + ('fixing' if fix_day != settle else 'settlement'))})")
+            _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, entry, fix_type, combined, m_day, m_src, pnl, note)
             realised += 1
         except (TypeError, ValueError, ArithmeticError) as exc:
             unrealisable.append(_unrealisable(trade_id, exc))

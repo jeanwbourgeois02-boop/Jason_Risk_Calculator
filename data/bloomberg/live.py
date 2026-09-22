@@ -463,8 +463,8 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     is_conversion = lambda r: r["role"] == library.ROLE_CONVERSION        # noqa: E731
     marks = sorted((r for r in needed if r["kind"] in library.MARK_KINDS),
                    key=lambda r: (r["key"], r["kind"] != "SPOT", r["settle_date"]))
-    fx = [r for r in marks if r["kind"] != "FUTURE_PX" and not is_option(r)]
-    options = [r for r in marks if is_option(r)]
+    fx = [r for r in marks if r["kind"] not in ("FUTURE_PX", library.NDF_FIX) and not is_option(r)]
+    options = [r for r in marks if is_option(r) and r["kind"] != library.NDF_FIX]
     # Forwards' own pairs (SPOT, then each leg date), crosses' conversion pairs, options'
     # own pairs, options' conversion pairs, futures: the order the list always had.
     # Last (2026-09-21, user: "NDFs - always show 1m forward date price, not spot"): one
@@ -473,10 +473,51 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     for group in ([r for r in fx if not is_conversion(r)], [r for r in fx if is_conversion(r)],
                   [r for r in options if not is_conversion(r)], [r for r in options if is_conversion(r)],
                   [r for r in marks if r["kind"] == "FUTURE_PX"],
-                  sorted((r for r in needed if r["kind"] == library.NDF_1M), key=lambda r: r["key"])):
+                  sorted((r for r in needed if r["kind"] == library.NDF_1M), key=lambda r: r["key"]),
+                  # NDF_FIX (2026-09-22): the currency's official fixing, on a ticket's fixing
+                  # date only (the library lists it for that date alone), the NDF's exit price.
+                  [r for r in marks if r["kind"] == library.NDF_FIX]):
         for r in group:
             _add(r)
     return out
+
+
+def ndf_fix_rows(session, service, requests: list, day, fetch=None, snapped_at: str = "") -> tuple:
+    """(rows, warnings, failed) for the NDF_FIX requests of `day`: PX_LAST of each fixing
+    ticker for exactly that date, from Bloomberg's daily history (a ReferenceDataRequest
+    would return the latest fix published, which before the day's publication is
+    yesterday's, so the history request is asked for the one date). Written as mark_type
+    NDF_FIX on the pair, settle_date = the fixing date, source BBG_BDH (the official source,
+    data/ingest/schema.py). A ticker with no value that day is reported failed with the
+    reason and nothing is written for it."""
+    from data.bloomberg import library
+    if not requests:
+        return [], [], []
+    if fetch is None:
+        from data.bloomberg.pull_marks import fetch_historical_series
+        fetch = fetch_historical_series
+    from data.bloomberg.pull_marks import SRC_FUTURE
+    day_iso = day.isoformat() if hasattr(day, "isoformat") else str(day)
+    tickers = sorted({r.bbg_ticker for r in requests})
+    try:
+        series = fetch(session, service, tickers, ["PX_LAST"], day, day) or {}
+    except Exception as exc:  # noqa: BLE001 -- reported per ticker, never raised into the cycle
+        return [], [f"NDF fix request failed: {exc!r}"], [
+            {"instrument_id": r.instrument_id, "settle_date": r.settle_date, "mark_type": r.mark_type,
+             "bbg_ticker": r.bbg_ticker, "reason": f"request failed: {exc!r}"} for r in requests]
+    rows, failed = [], []
+    for r in requests:
+        try:
+            value = float((series.get(r.bbg_ticker) or {}).get(day_iso, {}).get("PX_LAST"))
+        except (TypeError, ValueError):
+            failed.append({"instrument_id": r.instrument_id, "settle_date": r.settle_date, "mark_type": r.mark_type,
+                           "bbg_ticker": r.bbg_ticker,
+                           "reason": f"Bloomberg returned no PX_LAST for {r.bbg_ticker} on {day_iso} (the fixing)"})
+            continue
+        rows.append({"as_of_date": day_iso, "instrument_id": r.instrument_id, "settle_date": r.settle_date,
+                     "mark_type": library.NDF_FIX, "value": value, "source": SRC_FUTURE,
+                     "snapped_at": snapped_at or _now_iso()})
+    return rows, [], failed
 
 
 # --------------------------------------------------------------------------- one pull
@@ -1045,8 +1086,11 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # on file used to be requested but never written (write_marks skips unknown
             # instruments); build_requests now creates that row first
             # (_ensure_fx_instruments), so the mark lands (2026-09-18).
-            warnings = fwd_warnings + fut_warnings
-            rows = spot_rows + fwd_rows + fut_rows
+            fix_reqs = [r for r in requests if r.mark_type == "NDF_FIX"]
+            fix_rows, fix_warnings, fix_fail = _timed(timings, "futures", ndf_fix_rows, session, service, fix_reqs,
+                                                      today, snapped_at=snapped) if fix_reqs else ([], [], [])
+            warnings = fwd_warnings + fut_warnings + fix_warnings
+            rows = spot_rows + fwd_rows + fut_rows + fix_rows
             written = _timed(other, "write_marks", write_marks, conn, rows)
             # Bloomberg's own FWD_CURVE tenor points, at their own dates, as official
             # forwards -- kept out of `written` so "wrote N of M requested" stays exact.
@@ -1099,7 +1143,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                                   "status": "OK", "value": hit["value"], "source": hit["source"],
                                   "detail": hit.get("detail", "")})
                 else:
-                    detail = next((f.get("detail", "") for f in spot_fail + fwd_fail + fut_fail
+                    detail = next((f.get("detail", "") or f.get("reason", "") for f in spot_fail + fwd_fail + fut_fail + fix_fail
                                    if f.get("instrument_id") == r.instrument_id and f.get("mark_type") == r.mark_type
                                    and (r.mark_type in SPOT_LIKE_MARK_TYPES or f.get("settle_date") == r.settle_date)),
                                   "not returned")

@@ -334,7 +334,7 @@ def _neighbour(conn, instrument_id: str, settle_date: str, mark_type: str, as_of
     """(value, as_of_date, source) of the same mark on the nearest close after (`later`) or
     before `as_of`, or None. A SPOT / NDF_1M row is keyed on its own day (settle_date =
     as_of_date), every other mark on its fixed settle_date."""
-    own_day = mark_type in ("SPOT", "NDF_1M")
+    own_day = mark_type in ("SPOT", "NDF_1M", "NDF_FIX")
     row = conn.execute(
         "SELECT value, as_of_date, source FROM marks_official WHERE instrument_id = :i AND mark_type = :m "
         + ("AND settle_date = as_of_date " if own_day else "AND settle_date = :s ")
@@ -543,6 +543,23 @@ def ndf_fixing(r) -> str:
     return fixing_date(r.settle_date)
 
 
+def ndf_fix(conn, pair: str, fixed_on: str) -> tuple:
+    """((value, source), how) of an NDF's exit price on its fixing date (user, 2026-09-22:
+    "the exit price is the fix on that day, as pulled from bbg"): the pair's official NDF_FIX
+    mark of that date (data/ingest/common.py::NDF_FIX_TICKERS, written by the pull and the
+    backfill), the near-marks estimate of it when that day's is not on file (a neighbouring
+    day's fix, named), and only with no fix on file at all the pair's SPOT of the fixing date,
+    named as the substitute it is. (None, reason) when there is nothing to work from."""
+    hit = _mark_near(conn, pair, fixed_on, "NDF_FIX", fixed_on)
+    if hit is not None:
+        exact = str(hit[1]).startswith(INTERP) is False
+        return hit, (f"at the official fixing of {fixed_on}" if exact else f"at the fixing estimated from near marks ({hit[1]})")
+    hit = _mark_near(conn, pair, fixed_on, "SPOT", fixed_on)
+    if hit is not None:
+        return hit, f"no official fixing on file: at the spot of {fixed_on} instead"
+    return None, "no official fixing and no spot on file"
+
+
 def _ndf_fixed_on(r, as_of: str) -> str:
     """The fixing date when this open FX ticket is an NDF that has fixed on or before
     `as_of`, else ''. From its fixing an NDF is done (user, 2026-09-22: "NDFs - once they
@@ -562,13 +579,14 @@ def _open_fx_row(conn, r, as_of) -> dict:
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="", note="")
     fixed_on = _ndf_fixed_on(r, as_of)
     if fixed_on:
-        # Fixed: the spot of the fixing date, and the conversion of that date, frozen.
-        m_hit = _mark_near(conn, r.instrument_id, fixed_on, "SPOT", fixed_on)
+        # Fixed: the currency's official fixing of the fixing date (`ndf_fix`), converted at
+        # that date's spot, frozen.
+        m_hit, how = ndf_fix(conn, r.instrument_id, fixed_on)
         out["mark_date"] = fixed_on
         if m_hit is None:
-            out["reason"] = f"no SPOT mark for {r.instrument_id} on {fixed_on} (NDF fixed that day)"
+            out["reason"] = f"no official fixing and no SPOT mark for {r.instrument_id} on {fixed_on} (NDF fixed that day)"
             return out
-        m, m_src = _mark_number(m_hit, r.instrument_id, fixed_on, "SPOT", fixed_on), m_hit[1]
+        m, m_src = _mark_number(m_hit, r.instrument_id, fixed_on, "NDF_FIX", fixed_on), m_hit[1]
         s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, fixed_on)
         if s != s or s_pair is None:
             out["mark"], out["mark_source"] = m, m_src
@@ -577,7 +595,7 @@ def _open_fx_row(conn, r, as_of) -> dict:
         pnl_usd = r.quantity * (m - r.fill) * s
         out.update(mark=m, mark_source=m_src, spot=s, spot_source=s_src, pnl_local=r.quantity * (m - r.fill),
                    pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd, pnl_carry_usd=0.0,
-                   note=f"NDF fixed {fixed_on}: frozen at the spot of {fixed_on}, no delta, no carry")
+                   note=f"NDF fixed {fixed_on}: {how}, no delta, no carry")
         return out
     m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
     if m_hit is None:

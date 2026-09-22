@@ -1113,3 +1113,50 @@ def test_points_divisor_is_not_guessed_when_the_tenors_disagree_or_nothing_is_on
     ])
     conn.commit()
     assert backfill._infer_points_scale(conn, "USDJPY", rows) is None                 # the votes disagree
+
+
+# =========================================================================== 2026-09-22: NDF_FIX
+def test_backfill_writes_the_ndf_fixing_on_the_fixing_date_from_its_own_ticker(tmp_path):
+    """A past fixing date's official fixing (PX_LAST of the currency's fixing ticker, one
+    history request per stretch) lands as NDF_FIX on the pair, source BBG_BDH, and the day
+    is not complete without it; a fixing Bloomberg has no value for is in missing_marks."""
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES ('USDBRL','FX','USD','BRL',1,1,'USDBRL Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('b1','XLSX','USDBRL','FX_FWD','b1','2026-09-01',1e6,5.2,'acc','cp','HAHY7','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("b1", 1, "FX_NEAR", "USD", 1e6, "2026-09-01", "2026-09-10", 5.2, 0),      # Thu 09-10 fixes Tue 09-08
+        ("b1", 2, "FX_NEAR", "BRL", -5.2e6, "2026-09-01", "2026-09-10", 5.2, 0)])
+    conn.commit()
+    asked = []
+
+    def history(session, service, tickers, fields, start, end):
+        asked.append((sorted(tickers), list(fields), start, end))
+        if tickers == ["BZFXPTAX Index"]:
+            return {"BZFXPTAX Index": {"2026-09-08": {"PX_LAST": 5.3399}}}
+        return {}
+
+    def spot(session, service, tickers, field, day):
+        return {"USDBRL Curncy": 5.30} if day <= date(2026, 9, 8) else {}
+
+    results = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 8), fetch=spot, fwd_fetch=history,
+                                fut_fetch=history, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE", "DONE"]
+    assert any(t == ["BZFXPTAX Index"] and f == ["PX_LAST"] for t, f, _, _ in asked)     # one request, the fixing ticker
+    assert conn.execute("SELECT as_of_date, settle_date, value, source FROM marks WHERE mark_type='NDF_FIX'").fetchall() == \
+        [("2026-09-08", "2026-09-08", 5.3399, "BBG_BDH")]
+    assert conn.execute("SELECT value FROM marks_official WHERE mark_type='NDF_FIX'").fetchone() == (5.3399,)
+    assert results[0]["future_px"] == 0 and results[1]["future_px"] == 1                # counted with the day's single-value marks
+    from data.bloomberg.inventory import close_completeness
+    comp = {r.as_of_date: r for r in close_completeness(conn, "2026-09-07", "2026-09-08").itertuples()}
+    assert "NDF_FIX" not in {m["mark_type"] for m in comp["2026-09-08"].missing}
+    assert "NDF_FIX" not in {m["mark_type"] for m in comp["2026-09-07"].missing}      # the day before: not needed
+    # no fixing on file for the day: the day is incomplete for it, the backfill names it, nothing written
+    conn.execute("DELETE FROM marks WHERE mark_type='NDF_FIX'")
+    conn.commit()
+    comp = {r.as_of_date: r for r in close_completeness(conn, "2026-09-08", "2026-09-08").itertuples()}
+    assert {"instrument_id": "USDBRL", "settle_date": "2026-09-08", "mark_type": "NDF_FIX"} in comp["2026-09-08"].missing
+    results = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8), fetch=spot, fwd_fetch=lambda *a, **k: {},
+                                fut_fetch=lambda *a, **k: {}, log=lambda *_: None)
+    assert ("NDF_FIX", "Bloomberg returned no fixing (PX_LAST) for USDBRL on 2026-09-08") in \
+        [(m["mark_type"], m["reason"]) for m in results[0]["missing_marks"]]

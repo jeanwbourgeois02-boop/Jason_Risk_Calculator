@@ -530,6 +530,32 @@ def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: L
     return out
 
 
+def _fetch_ndf_fix_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
+                           fix_fetch: Optional[Callable] = None) -> Dict[str, Dict[str, float]]:
+    """{pair: {fixing_date_iso: fix}} -- one HistoricalDataRequest (PX_LAST) per stretch of
+    `runs` for the fixing tickers of the NDF tickets fixing inside it (the Bloomberg
+    library's NDF_FIX rows, 2026-09-22: the NDF's exit price is its currency's own official
+    fixing on the fixing date). `fix_fetch` mirrors `fut_fetch`."""
+    from data.bloomberg import library
+    out: Dict[str, Dict[str, float]] = {}
+    for run_start, run_end in runs:
+        ticker_to_pair = {r["bbg_ticker"]: r["key"]
+                          for r in library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat())
+                          if r["kind"] == library.NDF_FIX}
+        if not ticker_to_pair:
+            continue
+        if fix_fetch is None:
+            from data.bloomberg.pull_marks import fetch_historical_series
+            fix_fetch = fetch_historical_series
+        series = fix_fetch(session, service, sorted(ticker_to_pair), ["PX_LAST"], run_start, run_end) or {}
+        for ticker, per_day in series.items():
+            pair = ticker_to_pair.get(ticker)
+            if pair is None:
+                continue
+            out.setdefault(pair, {}).update({day: row["PX_LAST"] for day, row in per_day.items() if "PX_LAST" in row})
+    return out
+
+
 def _drop_already_official(conn: sqlite3.Connection, rows: List[dict], today: Optional[str] = None) -> List[dict]:
     """Filter out any row whose (as_of_date, instrument_id, settle_date, mark_type)
     already has an OFFICIAL mark on file that is a close -- a backfill run must never
@@ -751,6 +777,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             tenor_rows_by_pair = _fetch_fwd_outright_history(conn, session, service, fx_runs, fwd_fetch, holidays,
                                                              fields=fwd_fields)
             future_px_by_instrument = _fetch_future_px_history(conn, session, service, runs, fut_fetch)
+            ndf_fix_by_pair = _fetch_ndf_fix_history(conn, session, service, runs, fut_fetch)
             scales: Dict[str, Dict[str, dict]] = {}
 
             def scale_report_for(pair: str) -> dict:
@@ -809,9 +836,20 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     continue
                 fut_rows, missing_marks = [], []
                 for item in needed:
+                    instrument_id = item["instrument_id"]
+                    if item["mark_type"] == "NDF_FIX":
+                        # The currency's official fixing of this day (2026-09-22), on the pair.
+                        try:
+                            fix_value = float(ndf_fix_by_pair.get(instrument_id, {}).get(day))
+                        except (TypeError, ValueError):
+                            missing_marks.append({**item, "reason": f"Bloomberg returned no fixing (PX_LAST) for {instrument_id} on {day}"})
+                            continue
+                        fut_rows.append({"as_of_date": day, "instrument_id": instrument_id, "settle_date": item["settle_date"],
+                                         "mark_type": "NDF_FIX", "value": fix_value, "source": SRC_FUTURE,
+                                         "snapped_at": close_stamp(d, today)})
+                        continue
                     if item["mark_type"] != "FUTURE_PX":
                         continue
-                    instrument_id = item["instrument_id"]
                     try:
                         settle_value = float(future_px_by_instrument.get(instrument_id, {}).get(day))
                     except (TypeError, ValueError):

@@ -291,3 +291,28 @@ def test_sample_book_request_list_is_what_the_trades_themselves_call_for(tmp_pat
     before = conn.execute("SELECT COUNT(*) FROM bbg_library").fetchone()[0]
     import_blotter(_SAMPLE_CSV.read_bytes(), _SAMPLE_CSV.name, p)
     assert conn.execute("SELECT COUNT(*) FROM bbg_library").fetchone()[0] == before
+
+
+# =========================================================================== 2026-09-22: NDF_FIX
+# An NDF's exit price is its currency's own official fixing on the fixing date (user: "the
+# entry price is where we traded, and the exit price is the fix on that day, as pulled from
+# bbg"; "each ndf has a unique fix"). The library asks for it on that one date, on the USD
+# pair, from data/ingest/common.py::NDF_FIX_TICKERS.
+def test_ndf_fix_is_asked_for_on_the_fixing_date_only_on_the_usd_pair(tmp_path):
+    from data.ingest.common import NDF_FIX_TICKERS
+    p, conn = _ndf_db(tmp_path)
+    fixes = [r for r in library.rows(conn) if r["kind"] == library.NDF_FIX]
+    by_key = {(r["trade_id"], r["key"], r["settle_date"]): r for r in fixes}
+    # the swap's two legs: value dates Wed 09-30 and Wed 12-30 -> fixings Mon 09-28 and Mon 12-28
+    assert set(by_key) == {("k1", "USDKRW", "2026-09-28"), ("k1", "USDKRW", "2026-12-28"),
+                           ("i1", "USDINR", "2026-06-29")}                               # x1 is a cross: spot rule
+    k = by_key[("k1", "USDKRW", "2026-09-28")]
+    assert (k["bbg_ticker"], k["needed_from"], k["needed_until"]) == (NDF_FIX_TICKERS["KRW"], "2026-09-28", "2026-09-28")
+    assert library.NDF_FIX in library.MARK_KINDS                       # a past fixing date is the backfill's to fill
+    # in force on the fixing date alone, live and historical
+    assert [r["kind"] for r in library.needed_on(conn, "2026-09-28", historical=True) if r["kind"] == library.NDF_FIX] == [library.NDF_FIX]
+    assert not [r for r in library.needed_on(conn, "2026-09-25", historical=True) if r["kind"] == library.NDF_FIX]
+    assert [r["settle_date"] for r in library.needed_in_range(conn, "2026-09-01", "2026-09-30") if r["kind"] == library.NDF_FIX] == ["2026-09-28"]
+    found = {(t["ticker"], t["field"]): t for t in library.tickers(conn, "2026-09-28")}
+    assert found[(NDF_FIX_TICKERS["KRW"], "PX_LAST")]["used_for"] == "KRW official fixing on 2026-09-28, the NDF's exit price"
+    assert (NDF_FIX_TICKERS["KRW"], "PX_LAST") not in {(t["ticker"], t["field"]) for t in library.tickers(conn, "2026-09-25")}

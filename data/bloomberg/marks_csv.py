@@ -24,6 +24,7 @@ MARKS_COLUMNS = ["as_of_date", "instrument_id", "settle_date", "mark_type", "val
 # CLAUDE.md "Data contract -> Tables" (marks.mark_type comment).
 MARK_TYPES = {
     "SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "PAR_RATE", "PV_USD", "DV01_USD", "PREMIUM", "DELTA",
+    "NDF_1M", "NDF_FIX",
 }
 
 # CLAUDE.md "Data contract -> Tables" (marks.source comment) plus BBG_INTERP: a new
