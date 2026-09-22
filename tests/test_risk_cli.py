@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 from unittest.mock import Mock
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -31,7 +30,7 @@ def test_parser_has_exactly_the_documented_commands():
     parser = risk.build_parser()
     sub = next(a for a in parser._actions if a.dest == "command")
     assert set(sub.choices) == {"setup", "start", "doctor", "_load_sample", "freeze",
-                                "marks-export", "marks-import", "health"}
+                                "marks-export", "marks-import", "reprice", "health"}
 
 
 def test_import_checks_are_a_subset_of_installed_packages():
@@ -188,3 +187,87 @@ def test_doctor_fails_when_a_terminal_is_present_but_blpapi_is_missing(monkeypat
     risk.doctor_checks(d, bloomberg=False, git=False)
     failed = {name: fix for name, ok, _, fix in d.rows if ok is False}
     assert "blpapi" in failed and "--bloomberg" in failed["blpapi"]
+
+
+# ----------------------------------------------------------------------------- reprice
+
+def _reprice(monkeypatch, tmp_path, argv, rates_result=None, options_result=None):
+    """Run `reprice` with both recalcs faked (no pricing, no Bloomberg): returns
+    (exit code, calls) where calls is [(pricer, as_of, since), ...] in call order.
+    `engine.rates.store.recalc_on_file` is patched with raising=False so the test holds
+    before and after the rates-pricer lands it."""
+    from data.ingest import schema
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    monkeypatch.setenv("RISK_DB", str(db))
+    monkeypatch.setattr(risk, "in_venv", lambda: True)
+    monkeypatch.setattr("data.bloomberg.live.book_today", lambda now=None: __import__("datetime").date(2026, 9, 22))
+    calls = []
+
+    def fake_rates(conn, as_of, since=None):
+        calls.append(("rates", as_of, since))
+        return rates_result or {"as_of": as_of, "since": since, "days": [
+            {"day": "2026-09-21", "priced": 2, "failed": []}], "priced": 2, "failed": 0}
+
+    def fake_options(conn, as_of, since=None):
+        calls.append(("options", as_of, since))
+        return options_result or {"as_of": as_of, "since": since, "days": [
+            {"day": "2026-09-21", "priced": 3, "skipped": [{"trade_id": "T1", "reason": "no smile"}]}],
+            "priced": 3, "skipped": 1}
+    monkeypatch.setattr("engine.rates.store.recalc_on_file", fake_rates, raising=False)
+    monkeypatch.setattr("engine.options.store.recalc_on_file", fake_options)
+    return risk.main(["reprice", *argv]), calls
+
+
+def test_reprice_runs_rates_then_options_on_the_book_date(monkeypatch, tmp_path, capsys):
+    code, calls = _reprice(monkeypatch, tmp_path, [])
+    assert code == 0
+    assert calls == [("rates", "2026-09-22", None), ("options", "2026-09-22", None)]
+    out = capsys.readouterr().out
+    assert "rates    2026-09-21  priced 2  failed 0" in out
+    assert "options  2026-09-21  priced 3  skipped 1" in out
+    assert "rates: 2 priced, 0 failed over 1 day(s)" in out
+    assert "options: 3 priced, 1 skipped over 1 day(s)" in out
+
+
+def test_reprice_passes_as_of_and_since_to_both_recalcs(monkeypatch, tmp_path):
+    code, calls = _reprice(monkeypatch, tmp_path, ["--as-of", "2026-09-18", "--since", "2026-09-15"])
+    assert code == 0
+    assert calls == [("rates", "2026-09-18", "2026-09-15"), ("options", "2026-09-18", "2026-09-15")]
+
+
+def test_reprice_exits_1_on_a_recalc_error(monkeypatch, tmp_path, capsys):
+    code, calls = _reprice(monkeypatch, tmp_path, [], options_result={
+        "as_of": "2026-09-22", "since": None, "days": [], "priced": 0, "skipped": 0,
+        "error": "RuntimeError('vol surface')"})
+    assert code == 1
+    assert [c[0] for c in calls] == ["rates", "options"]  # the options step still ran and was reported
+    assert "options: error RuntimeError('vol surface')" in capsys.readouterr().out
+    code, _ = _reprice(monkeypatch, tmp_path, [], rates_result={
+        "as_of": "2026-09-22", "since": None, "days": [], "priced": 0, "failed": 0,
+        "error": "ValueError('bad date')"})
+    assert code == 1
+
+
+def test_reprice_exits_1_when_the_swaps_failed_every_trade_of_a_quoted_day(monkeypatch, tmp_path, capsys):
+    code, _ = _reprice(monkeypatch, tmp_path, [], rates_result={
+        "as_of": "2026-09-22", "since": None, "days": [
+            {"day": "2026-09-21", "priced": 0, "failed": [{"trade_id": "S1", "error": "bootstrap did not converge"}]},
+            {"day": "2026-09-22", "priced": 1, "failed": []}],
+        "priced": 1, "failed": 1})
+    assert code == 1
+    assert "nothing priced on 2026-09-21" in capsys.readouterr().out
+
+
+def test_reprice_a_day_with_no_swaps_is_not_a_failure(monkeypatch, tmp_path):
+    code, _ = _reprice(monkeypatch, tmp_path, [], rates_result={
+        "as_of": "2026-09-22", "since": None, "days": [{"day": "2026-09-22", "priced": 0, "failed": []}],
+        "priced": 0, "failed": 0})
+    assert code == 0
+
+
+def test_reprice_refuses_without_a_database(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("RISK_DB", str(tmp_path / "missing.db"))
+    monkeypatch.setattr(risk, "in_venv", lambda: True)
+    assert risk.main(["reprice"]) == 1
+    assert "no database" in capsys.readouterr().out

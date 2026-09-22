@@ -10,32 +10,45 @@ Unlike the reference project, this module does not depend on a `MarketDataSource
 in `store.py` reads these from this repo's own `curve_quotes` SQLite table), since this
 repo's Phase 1 scope has no term/basis/FX-spot inputs to abstract over.
 
-Interpolation and the log-linear fallback (2026-09-22). The default is
-``LogCubicDiscount`` (the reference project's choice). QuantLib's bootstrap is lazy: a
-non-converging iteration only surfaces on the first ``discount()`` / ``zeroRate()``
-call, which on the Bloomberg PC's pull of 2026-09-22 was inside the swap pricer and the
-options pricer, so every IRS and every FX option needing the USD curve failed with
-``convergence not reached after 99 iterations`` and no ``curves`` rows were written.
-The cause was the evaluation date, not the quotes: with 1W / 2W / 3W / 1M pillars the
-non-local log-cubic iterative bootstrap oscillates at the short end on some dates
-(the 09-22 USD SOFR quotes converge at a 09-21 evaluation date and fail at 09-22 and
-09-23; dropping any one of the week pillars also makes it converge), and log-linear
-converges every day. ``build_curve_set`` therefore forces the bootstrap before
-returning; if the requested interpolation does not converge it rebuilds with
-``LogLinear``, logs a warning and records the fact on the returned ``CurveSet``
-(``interpolation`` = what was actually used, ``bootstrap_note`` = a sentence naming
-the currency, index, date and QuantLib's message, empty when the requested one
-converged). A day that converges is untouched: same interpolation, same discount
-factors. If log-linear fails too, ``CurveBuildError`` is raised: never a silent curve.
-DV01 (``valuation.py``) bumps the live quotes of the same curve object, so a bumped
-re-bootstrap always uses the interpolation the base curve ended up with.
+Interpolation: flat forwards by default (user decision 2026-09-22: "yes switch to flat
+forwards and rerun the past days"). ``build_curve_set`` builds
+``ql.PiecewiseLogLinearDiscount`` (log-linear in the discount factor, i.e. a constant
+overnight forward between pillars, the market standard for an OIS curve) unless
+``interpolation="LogCubicDiscount"`` is asked for explicitly, which is the reference
+project's monotone log-cubic and the default until 2026-09-22. Why it changed: on the
+Bloomberg PC's 2026-09-22 pull the USD SOFR log-cubic bootstrap raised ``convergence
+not reached after 99 iterations`` and every IRS (18) and every FX option needing the
+USD curve (16 of 25) went unpriced. The cause is the evaluation date, not the quotes:
+with the 1W / 2W / 3W pillars QuantLib 1.43's non-local log-cubic iteration oscillates
+at the short end on the 22 and 23 September evaluation dates (the same quotes converge
+on 09-18, 09-21, 09-24, 09-25; dropping any one week pillar also converges), and
+log-linear converges on every date. On 2026-09-21 the 18-swap book's PV moved
+9,895,018 -> 10,019,751 and DV01 318,568 -> 318,663 under the switch; the user accepted
+that. Every path that builds a curve (``store.bootstrap_and_store``, hence
+``price_and_store`` / ``price_all_and_store`` / ``recalc_on_file``, and the callers in
+``engine/options/rates.py`` and ``engine/rates_vol/``) calls ``build_curve_set`` with
+no interpolation argument and so follows the default. DV01 (``valuation.py``) bumps the
+live quotes of the same curve object, so a bumped re-bootstrap always uses the
+interpolation the base curve was built with.
+
+QuantLib's bootstrap is lazy: a non-converging iteration only surfaces on the first
+``discount()`` / ``zeroRate()`` call, which is why the 2026-09-22 failure appeared
+inside the pricers. ``build_curve_set`` therefore forces the bootstrap before returning
+and raises ``CurveBuildError`` (naming the currency, index, date, interpolation and
+QuantLib's own message) when it does not converge: never a silent curve, and no
+fallback to another interpolation (the explicit log-cubic request fails on those dates
+rather than being quietly replaced; the log-linear fallback that existed for one day,
+2026-09-22, was retired with the switch). ``CurveSet.interpolation`` records what was
+built; ``CurveSet.bootstrap_note`` stays for the readers that show it
+(``store.price_all_and_store``'s ``note``, the pull status, ``engine/options``) and is
+always "" now.
 """
 from __future__ import annotations
 
 import datetime
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import QuantLib as ql
 
@@ -45,8 +58,9 @@ from .errors import CurveBuildError, PricingConfigError
 
 CcyIndex = Tuple[str, str]
 
-DEFAULT_INTERPOLATION = "LogCubicDiscount"
-FALLBACK_INTERPOLATION = "LogLinear"
+# Flat forwards (log-linear discount), user decision 2026-09-22; see module docstring.
+DEFAULT_INTERPOLATION = "LogLinear"
+INTERPOLATIONS = ("LogLinear", "LogCubicDiscount")
 
 log = logging.getLogger(__name__)
 
@@ -66,12 +80,12 @@ class CurveSet:
     ql_index: ql.OvernightIndex
     quotes: List[Tuple[str, ql.SimpleQuote]] = field(default_factory=list)
     curve_date: datetime.date = None
-    # The interpolation actually used (the requested one, or the log-linear fallback
-    # when the requested one did not converge; see module docstring).
+    # The interpolation the curve was built with ("LogLinear" = flat forwards, the
+    # default since 2026-09-22; "LogCubicDiscount" only when asked for explicitly).
     interpolation: str = DEFAULT_INTERPOLATION
-    # "" when the requested interpolation converged; otherwise one plain sentence, e.g.
-    # "USD SOFR bootstrap 2026-09-22: log-cubic did not converge (<QuantLib's
-    # message>); log-linear used". Read by engine/options via getattr as well.
+    # Always "" since the log-linear fallback was retired (2026-09-22): a curve that does
+    # not converge raises instead. Kept because store.price_all_and_store's `note`, the
+    # pull status and engine/options (via getattr) read it.
     bootstrap_note: str = ""
 
     def get_discount(self) -> ql.YieldTermStructureHandle:
@@ -92,7 +106,7 @@ def _piecewise(cal, helpers, interpolation: str):
     elif interpolation == "LogCubicDiscount":
         curve = ql.PiecewiseLogCubicDiscount(0, cal, helpers, ql.Actual365Fixed())
     else:
-        raise PricingConfigError("interpolation", interpolation, ["LogCubicDiscount", "LogLinear"])
+        raise PricingConfigError("interpolation", interpolation, list(INTERPOLATIONS))
     curve.enableExtrapolation()
     return curve
 
@@ -105,7 +119,7 @@ def _force_bootstrap(curve) -> None:
 
 
 def _interpolation_label(interpolation: str) -> str:
-    return {"LogCubicDiscount": "log-cubic", "LogLinear": "log-linear"}.get(interpolation, interpolation)
+    return {"LogCubicDiscount": "log-cubic", "LogLinear": "log-linear (flat forwards)"}.get(interpolation, interpolation)
 
 
 def build_curve_set(
@@ -119,13 +133,16 @@ def build_curve_set(
     (a list of `(tenor, value)` pairs, value = decimal par OIS rate, e.g. 0.0398 for
     3.98%). `index` defaults to the currency's canonical RFR index (`CCY_RFR`).
 
-    The bootstrap is forced before returning. If `interpolation` does not converge the
-    curve is rebuilt with `LogLinear` (a warning is logged; the returned CurveSet's
-    `interpolation` and `bootstrap_note` say so); if that fails too, `CurveBuildError`.
+    `interpolation` is `"LogLinear"` (flat forwards, the default) or
+    `"LogCubicDiscount"` (see module docstring). The bootstrap is forced before
+    returning; if it does not converge, `CurveBuildError` is raised with QuantLib's
+    message, never a fallback to another interpolation.
     """
     index = index or CCY_RFR.get(ccy)
     if index is None:
         raise PricingConfigError("ccy", ccy, sorted(CCY_RFR.keys()))
+    if interpolation not in INTERPOLATIONS:
+        raise PricingConfigError("interpolation", interpolation, list(INTERPOLATIONS))
 
     ql.Settings.instance().evaluationDate = qlmap.ql_date(as_of)
     conv = CONVENTIONS.get(ccy, index)
@@ -156,30 +173,15 @@ def build_curve_set(
     if not helpers:
         raise CurveBuildError((ccy, index), "no OIS quotes supplied")
 
-    used = interpolation
-    note = ""
     curve = _piecewise(cal, helpers, interpolation)
     try:
         _force_bootstrap(curve)
     except RuntimeError as exc:  # QuantLib's own error, e.g. "convergence not reached after 99 iterations; ..."
-        first_message = str(exc)
-        if interpolation == FALLBACK_INTERPOLATION:
-            raise CurveBuildError((ccy, index), f"{interpolation} bootstrap on {as_of.isoformat()} failed: {first_message}") from exc
-        used = FALLBACK_INTERPOLATION
-        note = (
-            f"{ccy} {index} bootstrap {as_of.isoformat()}: {_interpolation_label(interpolation)} did not converge "
-            f"({first_message}); {_interpolation_label(used)} used"
+        message = (
+            f"{_interpolation_label(interpolation)} bootstrap on {as_of.isoformat()} did not converge: {exc}"
         )
-        log.warning("%s", note)
-        curve = _piecewise(cal, helpers, used)
-        try:
-            _force_bootstrap(curve)
-        except RuntimeError as exc2:
-            raise CurveBuildError(
-                (ccy, index),
-                f"{interpolation} bootstrap on {as_of.isoformat()} failed ({first_message}) and the "
-                f"{used} fallback failed too ({exc2})",
-            ) from exc2
+        log.warning("%s %s %s", ccy, index, message)
+        raise CurveBuildError((ccy, index), message) from exc
 
     handle = ql.RelinkableYieldTermStructureHandle()
     handle.linkTo(curve)
@@ -197,6 +199,6 @@ def build_curve_set(
         ql_index=ql_index,
         quotes=stored,
         curve_date=as_of,
-        interpolation=used,
-        bootstrap_note=note,
+        interpolation=interpolation,
+        bootstrap_note="",
     )

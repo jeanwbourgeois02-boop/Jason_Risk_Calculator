@@ -2,7 +2,7 @@
 SQLite schema (``data/ingest/schema.py``): reads ``curve_quotes`` / ``trades`` /
 ``trade_legs``, writes ``curves`` / ``marks``.
 
-Two entry points (task spec):
+Three entry points:
   - ``bootstrap_and_store(conn, as_of, ccy, index=None)``: bootstraps the OIS curve for
     (ccy, index) from ``curve_quotes`` and writes one ``curves`` row per pillar,
     ``source='QL_PRICER'``. Returns the in-memory ``CurveSet`` (used by
@@ -10,6 +10,10 @@ Two entry points (task spec):
     perturb, not just the frozen discount factors written to ``curves``).
   - ``price_and_store(conn, as_of, trade_id)``: prices one IRS trade and writes
     ``PV_USD`` / ``DV01_USD`` / ``PAR_RATE`` marks, ``source='QL_PRICER'``.
+  - ``recalc_on_file(conn, as_of, since=None)`` (2026-09-22): re-prices every IRS from
+    the ``curve_quotes`` on file, day by day, asking Bloomberg nothing; the rerun of
+    the past days after the switch to flat forwards (``curves.py``), and the launcher's
+    / the pull button's no-Bloomberg path.
 
 Sign / value conventions (see also ``valuation.py`` and ``instruments.py``
 docstrings, and CLAUDE.md "P&L conventions"):
@@ -260,10 +264,11 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     error, interpolation, note}`, so a swap with a missing fixing or an unsupported
     currency reports its own reason while the rest of the book still prices. A currency
     with no `curve_quotes` fails every swap in that currency with the same reason.
-    `interpolation` is the interpolation the currency's curve was actually built with
-    and `note` its `CurveSet.bootstrap_note` (2026-09-22: "" when the default
-    log-cubic converged, else the sentence naming the log-linear fallback, see
-    curves.py), both "" when no curve could be built; the pull's status shows them."""
+    `interpolation` is the interpolation the currency's curve was built with
+    ("LogLinear", flat forwards, the default since 2026-09-22, see curves.py) and
+    `note` its `CurveSet.bootstrap_note` (always "" now that a non-converging curve
+    raises instead of falling back), both "" when no curve could be built; the pull's
+    status shows them."""
     trades = conn.execute(
         "SELECT t.trade_id, t.instrument_id, i.base_ccy FROM trades_official t "
         "JOIN instruments i USING (instrument_id) "
@@ -288,4 +293,60 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[dict]:
         except Exception as exc:  # noqa: BLE001 - reported per trade, never swallowed silently
             entry["error"] = f"{type(exc).__name__}: {exc}"
         out.append(entry)
+    return out
+
+
+_OIS_QUOTE_DAYS_SQL = (
+    "SELECT DISTINCT as_of_date FROM curve_quotes WHERE quote_type = 'OIS' "
+    "AND as_of_date >= :since AND as_of_date <= :as_of ORDER BY as_of_date"
+)
+
+
+def recalc_on_file(conn: sqlite3.Connection, as_of: str, since: Optional[str] = None) -> dict:
+    """Re-price every IRS from the data ON FILE, asking Bloomberg nothing (user,
+    2026-09-22: "yes switch to flat forwards and rerun the past days"). The past days'
+    ``curves`` rows and ``PV_USD`` / ``DV01_USD`` / ``CASHFLOW_USD`` / ``PAR_RATE``
+    marks were written off the log-cubic curve (or not at all, on the days it did not
+    converge); the OIS quotes of every day are on file in ``curve_quotes`` (the pull's
+    own or the imported snapshot's), so the marks are rebuilt from them under the
+    interpolation ``curves.py`` now defaults to. Also the pull button's no-Bloomberg
+    branch for swaps, like ``engine/options/store.py::recalc_on_file`` for options.
+
+    Runs ``price_all_and_store(conn, day)`` for every ``as_of_date`` in ``curve_quotes``
+    (quote_type 'OIS') from `since` (default: the earliest such date on file) to `as_of`
+    inclusive, ascending: each day rebuilds and stores the curve per currency from that
+    day's own quotes and re-prices every swap dealt on or before it and not frozen in
+    ``realised_pnl``, INSERT OR REPLACE under the same keys, so the old rows are
+    replaced and the run is idempotent. A day priced at another day's data never
+    happens; a currency whose quotes do not build, or a swap missing a fixing, is
+    reported under that day's ``failed`` with its reason, as ``price_all_and_store``
+    reports it, and the rest of the day still prices. ``snapped_at`` is the day's
+    official close (``snapped_at(day)``), as ``price_and_store`` always writes.
+
+    Never raises. Returns ``{"as_of", "since", "days": [{"day", "priced", "failed":
+    [{"trade_id", "error"}, ...]}, ...], "priced": <total>, "failed": <total count>}``,
+    plus ``"error"`` (repr) if something outside the per-day calls raised, with the
+    counts so far."""
+    out: dict = {"as_of": as_of, "since": since, "days": [], "priced": 0, "failed": 0}
+    try:
+        datetime.date.fromisoformat(as_of)
+        if since is None:
+            row = conn.execute("SELECT MIN(as_of_date) FROM curve_quotes WHERE quote_type = 'OIS'").fetchone()
+            since = row[0] if row and row[0] else as_of
+            out["since"] = since
+        else:
+            datetime.date.fromisoformat(since)
+        days = [r[0] for r in conn.execute(_OIS_QUOTE_DAYS_SQL, {"since": since, "as_of": as_of}).fetchall()]
+        for day in days:
+            outcomes = price_all_and_store(conn, day)
+            entry = {
+                "day": day,
+                "priced": sum(1 for o in outcomes if o["ok"]),
+                "failed": [{"trade_id": o["trade_id"], "error": o["error"]} for o in outcomes if not o["ok"]],
+            }
+            out["days"].append(entry)
+            out["priced"] += entry["priced"]
+            out["failed"] += len(entry["failed"])
+    except Exception as exc:  # noqa: BLE001 - reported, never raised: the caller is a button / a subcommand
+        out["error"] = f"{exc!r}"
     return out

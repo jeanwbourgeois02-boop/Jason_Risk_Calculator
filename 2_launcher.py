@@ -10,6 +10,7 @@ diagnostics).
                                  or CI that doesn't go through this file
     py 2_launcher.py marks-export   Bloomberg PC: write the marks on file to data/bbg_snapshot/ and commit it
     py 2_launcher.py marks-import   PC with no Terminal: load data/bbg_snapshot/ (after a git pull)
+    py 2_launcher.py reprice        re-price the swaps, then the FX options, from the marks on file (no Bloomberg)
 
 Backfilling P&L history from Bloomberg daily closes is part of every "Pull Bloomberg now"
 in the app (data/bloomberg/live.py runs data/bloomberg/backfill.py straight after
@@ -773,6 +774,51 @@ def cmd_marks_import(args) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------------- reprice
+
+def cmd_reprice(args) -> int:
+    """Re-price the swaps and then the FX options from the marks on file, day by day, asking
+    Bloomberg nothing (user decision 2026-09-22: the OIS curve bootstrap moved to flat
+    forwards, so the past days on file are re-run). Rates first, because the options price
+    off the same OIS curves. Runs inside .venv (QuantLib). Exit 1 when either recalc reports
+    an error, or when the swaps failed on every trade of a day that had quotes."""
+    if not in_venv() and VENV_PY.exists():
+        return reexec_in_venv(sys.argv[1:])
+    if not db_path().exists():
+        say(f"  reprice: no database at {db_path()} (py 2_launcher.py setup creates it)")
+        return 1
+    from data.bloomberg.live import book_today
+    from data.ingest.schema import connect
+    from engine.options import store as options_store
+    from engine.rates import store as rates_store
+    as_of = args.as_of or book_today().isoformat()
+    say(f"  reprice: as of {as_of}, since {args.since or 'the earliest data on file'}, from the marks on file")
+    conn = connect(db_path())
+    try:
+        rates = rates_store.recalc_on_file(conn, as_of, since=args.since)
+        options = options_store.recalc_on_file(conn, as_of, since=args.since)
+    finally:
+        conn.close()
+    code = 0
+    for day in rates.get("days", []):
+        say(f"  rates    {day['day']}  priced {day['priced']}  failed {len(day.get('failed', []))}")
+    say(f"  rates: {rates.get('priced', 0)} priced, {rates.get('failed', 0)} failed over {len(rates.get('days', []))} day(s)")
+    if rates.get("error"):
+        say(f"  rates: error {rates['error']}")
+        code = 1
+    dead_days = [d["day"] for d in rates.get("days", []) if not d["priced"] and d.get("failed")]
+    if dead_days:
+        say(f"  rates: nothing priced on {', '.join(dead_days)} (every swap failed on a day with quotes)")
+        code = 1
+    for day in options.get("days", []):
+        say(f"  options  {day['day']}  priced {day['priced']}  skipped {len(day.get('skipped', []))}")
+    say(f"  options: {options.get('priced', 0)} priced, {options.get('skipped', 0)} skipped over {len(options.get('days', []))} day(s)")
+    if options.get("error"):
+        say(f"  options: error {options['error']}")
+        code = 1
+    return code
+
+
 # ----------------------------------------------------------------------------- health
 
 def cmd_health(args) -> int:
@@ -830,6 +876,12 @@ def build_parser() -> argparse.ArgumentParser:
     mi = sub.add_parser("marks-import", help="PC with no Terminal: load data/bbg_snapshot/ into the database")
     mi.add_argument("--force", action="store_true", help="import even on a PC that has Bloomberg")
     mi.set_defaults(func=cmd_marks_import)
+
+    rp = sub.add_parser("reprice", help="re-price the swaps, then the FX options, from the marks on file, day by day "
+                                        "(asks Bloomberg nothing)")
+    rp.add_argument("--as-of", dest="as_of", metavar="YYYY-MM-DD", help="the last day to price (default: the book date)")
+    rp.add_argument("--since", metavar="YYYY-MM-DD", help="the first day to price (default: the earliest data on file)")
+    rp.set_defaults(func=cmd_reprice)
 
     sub.add_parser("_load_sample", help=argparse.SUPPRESS).set_defaults(func=cmd_load_sample)
 

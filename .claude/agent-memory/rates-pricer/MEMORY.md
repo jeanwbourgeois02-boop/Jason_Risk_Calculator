@@ -2,4 +2,4 @@
 - [pricing_conventions.md doesn't exist here](pricing-conventions-doc-does-not-exist.md) — reference-project-only file; conventions live in engine/rates/__init__.py instead
 - [Sign & scope conventions](sign-and-scope-conventions.md) — IRS pay/receive sign, DV01 definition, OIS-only Phase 1 scope, curve_id/source precedence
 - [No live pipeline caller (2026-09-16)](no-live-pipeline-caller-2026-09-16.md) — engine/rates works end-to-end in tests; nothing in the running app calls it, so live DB has no IRS/curve data
-- [Log-cubic bootstrap non-convergence (2026-09-22)](log-cubic-bootstrap-nonconvergence.md) — QL 1.43 log-cubic OIS bootstrap fails on some eval dates with 1W/2W/3W pillars; lazy error; LogLinear fallback + bootstrap_note
+- [Flat forwards default & log-cubic non-convergence (2026-09-22)](log-cubic-bootstrap-nonconvergence.md) — default is LogLinear (user yes); QL 1.43 log-cubic fails on some eval dates; no fallback, raises; recalc_on_file reruns past days

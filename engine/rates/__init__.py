@@ -22,7 +22,8 @@ Module map
                        file in this repo) -- see module docstring.
 - ``curves.py``     -- ``CurveSet`` + ``build_curve_set``: bootstraps one
                        self-discounted OIS curve from a list of ``(tenor, value)``
-                       quotes.
+                       quotes, flat forwards (log-linear discount) by default since
+                       2026-09-22 (user decision; see its docstring for why).
 - ``instruments.py`` -- ``build_instrument``: IRS trade fields -> a QuantLib
                        ``OvernightIndexedSwap`` with a ``DiscountingSwapEngine``.
 - ``valuation.py``  -- ``price_swap``: NPV, par rate, parallel + per-tenor-bucket DV01.
@@ -61,7 +62,7 @@ three mark_types now, mirroring how ``BNP_BVAL`` is reconciliation-only for FX.
 """
 from .curves import CurveSet, build_curve_set
 from .instruments import BuiltSwap, build_instrument
-from .store import bootstrap_and_store, load_fixings, price_all_and_store, price_and_store, snapped_at
+from .store import bootstrap_and_store, load_fixings, price_all_and_store, price_and_store, recalc_on_file, snapped_at
 from .valuation import SwapResult, price_swap
 
 __all__ = [
@@ -74,6 +75,7 @@ __all__ = [
     "bootstrap_and_store",
     "price_and_store",
     "price_all_and_store",
+    "recalc_on_file",
     "load_fixings",
     "snapped_at",
 ]

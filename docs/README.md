@@ -130,6 +130,7 @@ Everything else lives under `2_launcher.py` too, but the raw commands are:
 .venv\Scripts\python 3_diagnostic.py              Bloomberg diagnostics (same checks as the Market data button)
 py 2_launcher.py health                           code-health audit: ruff, dead code, duplicate helpers, dated comments, layering, line endings
 py 2_launcher.py health --baseline                the same, failing when a measure is worse than config/health_baseline.json
+py 2_launcher.py reprice                          re-price the swaps, then the FX options, from the marks on file, day by day; asks Bloomberg nothing (--as-of, --since)
 .venv\Scripts\python -m tests.golden_book --write   re-pin tests/golden/book.json: only on the user's yes, it defines what the book is worth
 ```
 
