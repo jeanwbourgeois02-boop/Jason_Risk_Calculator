@@ -58,7 +58,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
-from ui.feed_controls import pull_timings, safety_refresh_ms, seconds_words
+from ui.feed_controls import PullGuard, click_outcome, pull_timings, safety_refresh_ms, seconds_words
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
 
@@ -1366,6 +1366,22 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     ])
 
 
+def pull_now_outcome(app, guard: PullGuard, get_db_path: Callable[[], object]) -> Tuple[str, str]:
+    """One click of this tab's "Pull now": the SAME action as the top bar's "Pull Bloomberg
+    now" (user, 2026-09-22: "the pull bloomberg now on the top right corner should trigger
+    this, not from the market data page" -- until then this button called `pull_once` on
+    its own, so its press pulled today's marks but ran neither the backfill nor the marks
+    snapshot). It asks the feed for one cycle (`ui.feed_controls.click_outcome`:
+    `LiveFeed.trigger_now`, then `pull_once`, the backfill and `snapshot.save_after_pull`
+    in the feed's thread) and returns its status line and a fresh revision; the tab's own
+    status poll shows the outcome as it lands. With no feed on this machine, the
+    not-connected message, and nothing is asked of Bloomberg."""
+    import time
+    from data.bloomberg.live import read_status
+    text, _pending = click_outcome(app, guard, read_status(get_db_path()))
+    return text, str(time.time())
+
+
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     """Register the callbacks: pair dropdown population, main body refresh (spot +
     curve table + chart), completeness strip, the "Pull now" button, and the
@@ -1455,6 +1471,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
         return body, strip, status_block(feed_status), pair, missing, suspect, past_closes
 
+    guard = PullGuard()
+
     @app.callback(
         Output(PULL_NOW_STATUS_ID, "children"),
         Output(PULL_REVISION_ID, "data"),
@@ -1462,15 +1480,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         prevent_initial_call=True,
     )
     def _pull_now(n_clicks):
-        """Synchronous single Bloomberg pull (data.bloomberg.live.pull_once)."""
-        import time
-        from data.bloomberg.live import pull_once
-        status = pull_once(get_db_path())
-        if status.get("connected"):
-            text = f"Pulled {status.get('time', '')}: {status.get('written', 0)} marks written, {status.get('failed', 0)} failed"
-        else:
-            text = f"Not pulled: {status.get('reason', 'unknown')}"
-        return text, str(time.time())
+        return pull_now_outcome(app, guard, get_db_path)
 
     @app.callback(
         Output(MANUAL_STATUS_ID, "children"),

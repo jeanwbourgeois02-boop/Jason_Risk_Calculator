@@ -483,3 +483,21 @@ def test_every_input_and_output_of_this_tabs_callbacks_exists_in_the_app_layout(
         wanted |= {i["id"] for i in spec["inputs"]} | {s["id"] for s in spec["state"]}
     app_ids = _ids(ui_app.create_app(db_path=tmp_path / "layout.db").layout, set())
     assert wanted <= app_ids, sorted(wanted - app_ids)
+
+
+# =========================================================================== 2026-09-22: one pull action
+def test_market_data_pull_now_is_the_top_bars_pull_not_a_pull_of_its_own(tmp_path, monkeypatch):
+    """Both buttons ask the feed for one cycle (pull, backfill, marks snapshot). Until
+    2026-09-22 this tab's button called pull_once directly, which ran neither."""
+    from types import SimpleNamespace
+    from ui.feed_controls import PullGuard
+    called = []
+    monkeypatch.setattr("data.bloomberg.live.pull_once", lambda *a, **k: called.append("pull_once") or {})
+    triggered = []
+    app = SimpleNamespace(bloomberg_feed=SimpleNamespace(trigger_now=lambda: triggered.append(True)))
+    text, revision = md.pull_now_outcome(app, PullGuard(), lambda: tmp_path / "risk.db")
+    assert triggered == [True] and called == []
+    assert text == "Bloomberg: pull requested..." and revision
+    # no feed on this machine: nothing asked, the not-connected message
+    text, _ = md.pull_now_outcome(SimpleNamespace(bloomberg_feed=None), PullGuard(), lambda: tmp_path / "risk.db")
+    assert called == [] and "not connected" in text.lower()
