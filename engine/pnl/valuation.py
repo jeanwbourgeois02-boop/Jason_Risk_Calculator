@@ -71,7 +71,7 @@ from typing import Optional
 
 import pandas as pd
 
-from engine.pnl.calendar import _is_business_day, load_holidays
+from engine.pnl.calendar import _is_business_day, load_holidays, spot_date
 
 COLUMNS = [
     "trade_id", "instrument_id", "product", "strategy", "theme", "trade_date",
@@ -325,9 +325,10 @@ def _neighbour_curves(conn, pair: str, settle_date: str, as_of: str) -> Optional
 
 def _day_pillars(conn, pair: str, as_of: str) -> list:
     """[(settle_date, value, source)] of the pair's official curve on `as_of`: its SPOT at
-    the spot date (as_of + 2 weekdays, engine.ladder.usd_marks.spot_date) and every
+    the pair's spot date (engine.pnl.calendar.spot_date, the app's one spot-date rule since
+    2026-09-22: T+2 weekdays, T+1 for USDCAD / USDTRY / USDPHP / USDRUB, rolled off a holiday;
+    the historical curve builder places its tenors from the same date) and every
     FWD_OUTRIGHT row of the pair dated `as_of`, sorted by date, one per date."""
-    from engine.ladder.usd_marks import spot_date
     cache = getattr(conn, "official_marks", None)
     if cache is not None and conn.as_of == as_of:
         rows = [(s, v, src) for (i, s, mt), (v, src) in cache.items() if i == pair and mt == "FWD_OUTRIGHT"]
@@ -339,7 +340,7 @@ def _day_pillars(conn, pair: str, as_of: str) -> list:
     by_date = {str(s): (v, src) for s, v, src in rows}
     spot = _mark_at(conn, pair, as_of, "SPOT", as_of)
     if spot is not None:
-        by_date.setdefault(spot_date(as_of), (spot[0], spot[1]))
+        by_date.setdefault(spot_date(as_of, pair).isoformat(), (spot[0], spot[1]))
     return [(d, _number(v, f"marks.value (curve pillar {pair} {d} on {as_of})"), src)
             for d, (v, src) in sorted(by_date.items())]
 
@@ -608,21 +609,18 @@ def ndf_fix(conn, pair: str, fixed_on: str) -> tuple:
     return None, "no official fixing and no spot on file", False
 
 
-def ndf_fixing_marks_on_file(conn, pair: str, fixed_on: str) -> bool:
-    """True when the strict NDF rule has something to work from: the pair's official NDF_FIX
-    dated `fixed_on`, or an official SPOT on or before it (the fixing date's own, or an earlier
-    close the near-marks estimate starts from). False is the one case left to the present-spot
-    rule (user, 2026-09-21; `present_spot_for_ndf`): closes after the fixing only, or none."""
-    return (_mark_at(conn, pair, fixed_on, "NDF_FIX", fixed_on) is not None
-            or _last_official_on_or_before(conn, pair, "SPOT", fixed_on) is not None)
-
-
 def ndf_fixed_valuation(conn, pair: str, quote_ccy: str, quantity: float, fill: float, fixed_on: str) -> tuple:
     """(row, how, fix_used): the ONE valuation of an NDF ticket from its fixing date on,
     whatever date it is looked at and whether or not the ledger has run. `Q x (FIX - f)` at
     `ndf_fix` (the exact-day NDF_FIX, else the fixing date's SPOT as the near-marks estimate,
-    named), converted at the fixing date's spot, no carry. `row` carries value_book's mark /
-    spot / P&L / note keys, with `reason` set and NaN P&L when it cannot be priced.
+    named), converted to USD at that exit price itself (user decision 2026-09-22): a USDXXX
+    NDF settles the quote-currency difference at the fix, so USD per quote unit is 1 / FIX and
+    `PnL_USD = Q x (FIX - f) / FIX`; the row's `spot` is 1 / FIX and `spot_source` names the
+    fix (or the substitute). No carry. A cross NDF (neither currency USD, none in the book)
+    still converts its quote currency at the fixing date's spot (`usd_per_quote`), the only
+    conversion it has; every other product keeps its conversion at spot. `row` carries
+    value_book's mark / spot / P&L / note keys, with `reason` set and NaN P&L when it cannot
+    be priced; with nothing to work from at all it is blank like a deliverable trade.
 
     Why one function (reviewer, 2026-09-22): `_frozen_row` had no NDF branch, so a settled NDF
     with no `realised_pnl` row yet (every settled NDF after an upload, until the next
@@ -639,15 +637,25 @@ def ndf_fixed_valuation(conn, pair: str, quote_ccy: str, quantity: float, fill: 
         out["reason"] = f"no official fixing and no SPOT mark for {pair} on {fixed_on} (NDF fixed that day)"
         return out, how, fix_used
     m, m_src = _mark_number(m_hit, pair, fixed_on, "NDF_FIX" if fix_used else "SPOT", fixed_on), m_hit[1]
-    s, s_pair, s_src = usd_per_quote(conn, quote_ccy, fixed_on)
-    if s != s or s_pair is None:
-        out["mark"], out["mark_source"] = m, m_src
-        out["reason"] = f"no SPOT for USD conversion of {quote_ccy} on {fixed_on} (NDF fixed that day)"
-        return out, how, fix_used
+    out["mark"], out["mark_source"] = m, m_src
+    if quote_ccy == "USD":
+        s, s_src, converted = 1.0, "identity", ""
+    elif pair == f"USD{quote_ccy}":
+        if m == 0.0:
+            out["reason"] = f"{'fixing' if fix_used else 'SPOT'} of {pair} on {fixed_on} is 0: no USD conversion (NDF fixed that day)"
+            return out, how, fix_used
+        s, s_src = 1.0 / m, m_src
+        converted = ", converted at the fixing" if fix_used else ", converted at that spot"
+    else:
+        s, s_pair, s_src = usd_per_quote(conn, quote_ccy, fixed_on)
+        if s != s or s_pair is None:
+            out["reason"] = f"no SPOT for USD conversion of {quote_ccy} on {fixed_on} (NDF fixed that day)"
+            return out, how, fix_used
+        converted = f", converted at the {fixed_on} spot of {quote_ccy}"
     pnl_usd = quantity * (m - fill) * s
-    out.update(mark=m, mark_source=m_src, spot=s, spot_source=s_src, pnl_local=quantity * (m - fill),
+    out.update(spot=s, spot_source=s_src, pnl_local=quantity * (m - fill),
                pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd, pnl_carry_usd=0.0,
-               note=f"NDF fixed {fixed_on}: {how}, no delta, no carry")
+               note=f"NDF fixed {fixed_on}: {how}{converted}, no delta, no carry")
     return out, how, fix_used
 
 
@@ -737,29 +745,7 @@ def _last_official_query(conn, instrument_id: str, mark_type: str, day: str):
     return (_number(row[0], f"marks.value ({mark_type} for {instrument_id} on {row[1]})"), row[1], row[2])
 
 
-# A settled NDF with no past fix on file (user decision 2026-09-21: "we can use a present spot
-# for the past fixes"). The one exception to "missing stays missing": an NDF ticket whose pair
-# has NO official SPOT on or before its settlement is valued at the latest official SPOT on
-# file on or before the valuation date, and the row says which date's spot that is. NDF pairs
-# only (engine.ladder.ndf.is_ndf_pair); a deliverable trade in the same position stays blank.
-# The ledger persists it only once the backfill has tried for the settlement date's own close
-# (`engine.pnl.ledger.realise_settled`, `ndf_present_spot`), and drops it for the strict freeze
-# as soon as that close is on file (`ledger.purge_superseded_present_spot`).
-PRESENT_SPOT_NOTE = "present spot: none on file on or before settlement"
-
-
-def present_spot_for_ndf(conn, pair: str, as_of: str) -> Optional[tuple]:
-    """(value, as_of_date, source) of the latest official SPOT of the NDF `pair` on or before
-    `as_of`; None when the pair is not an NDF or has no SPOT on file at all. Called only after
-    the on-or-before-settlement lookup found nothing, so the row is dated after settlement."""
-    from engine.ladder.ndf import is_ndf_pair
-    row = conn.execute("SELECT is_ndf FROM instruments WHERE instrument_id = ?", (pair,)).fetchone()
-    if not is_ndf_pair(pair, int((row[0] if row else 0) or 0)):
-        return None
-    return _last_official_on_or_before(conn, pair, "SPOT", as_of)
-
-
-def _frozen_row(conn, r, as_of: Optional[str] = None) -> Optional[dict]:
+def _frozen_row(conn, r) -> Optional[dict]:
     """A settled trade that has no `realised_pnl` row yet, valued exactly as
     `engine.pnl.ledger.realise_settled` would freeze it -- the last official mark on or
     before its settlement date -- but without writing anything (value_book is read-only
@@ -769,28 +755,25 @@ def _frozen_row(conn, r, as_of: Optional[str] = None) -> Optional[dict]:
     settled trade stayed Unavailable forever and took the headline LTD with it, even with
     every official mark loaded. The arithmetic here and in realise_settled must stay
     identical; realise_settled remains the path that persists the frozen figure.
-    `as_of`: the valuation date, for `present_spot_for_ndf` (an NDF with no past fix on file).
 
     An NDF ticket (reviewer, 2026-09-22: this function had no NDF branch and read the VALUE
     date's spot, so the figure moved when the ledger ran) is the row the Blotter has shown
     since its fixing date, `ndf_fixed_valuation` at `ndf_fixing`'s date -- the same function,
-    so the figure is identical before and after the ledger runs; only a pair with neither a fix
-    nor an official SPOT on or before its fixing date takes the present-spot rule."""
+    so the figure is identical before and after the ledger runs. The "present spot" rule of
+    2026-09-21 (an NDF with no close on or before its fixing valued at the latest close on
+    file) was retired on 2026-09-22 (user decision): such a ticket takes the near-marks
+    estimate `ndf_fix` gives, and with no close of the pair on file at all it is blank with its
+    reason, like a deliverable trade."""
     product, settle = r.product, r.settle_date
-    present = False
     if product in FX_PRODUCTS:
         fixed_on = ndf_fixing(r)
-        if fixed_on and ndf_fixing_marks_on_file(conn, r.instrument_id, fixed_on):
+        if fixed_on:
             row = _ndf_fixed_row(conn, r, fixed_on)
             if row["reason"]:
                 return None
             row["note"] += "; not yet recorded in realised_pnl"
             return row
-        if fixed_on:
-            hit = present_spot_for_ndf(conn, r.instrument_id, as_of) if as_of is not None else None
-            present = True
-        else:
-            hit = _last_official_on_or_before(conn, r.instrument_id, "SPOT", settle)
+        hit = _last_official_on_or_before(conn, r.instrument_id, "SPOT", settle)
         if hit is None:
             return None
         m, m_day, m_src = hit
@@ -836,7 +819,7 @@ def _frozen_row(conn, r, as_of: Optional[str] = None) -> Optional[dict]:
         spot, spot_src, mark_label = s, s_src, "premium"
     else:
         return None
-    when = "" if m_day == settle else f" dated {m_day} ({PRESENT_SPOT_NOTE if present else 'last before settlement'})"
+    when = "" if m_day == settle else f" dated {m_day} (last before settlement)"
     return dict(mark=m, mark_date=m_day, mark_source=m_src, spot=spot, spot_source=spot_src,
                 pnl_local=pnl_local, pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd, pnl_carry_usd=0.0, reason="",
                 note=f"frozen at {mark_label}{when}; not yet recorded in realised_pnl")
@@ -857,7 +840,7 @@ def _provisional(conn, r, as_of, unreadable: str = "") -> dict:
     and the note/reason names the unreadable value; `engine.pnl.ledger.realise_settled`
     deletes and re-freezes such rows the next time it runs."""
     trade_id = r.trade_id
-    frozen = _frozen_row(conn, r, as_of)
+    frozen = _frozen_row(conn, r)
     if frozen is not None:
         if unreadable:
             frozen["note"] = frozen["note"].replace(

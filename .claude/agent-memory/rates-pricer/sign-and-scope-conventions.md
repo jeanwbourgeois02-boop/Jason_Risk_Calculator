@@ -1,6 +1,6 @@
 ---
 name: sign-and-scope-conventions
-description: IRS pay/receive sign convention, DV01 definition, and Phase 1 (OIS-only) scope for engine/rates/
+description: IRS pay/receive sign convention, DV01 definition, direction-flip mark reversal (the pricer's own, QuantLib-free callers import it lazily), and Phase 1 (OIS-only) scope for engine/rates/
 metadata:
   type: project
 ---
@@ -17,12 +17,24 @@ version, that docstring is authoritative):
   = asset to the fund). `DV01_USD` mark = NPV(+1bp parallel bump) − NPV(base)
   (`valuation.BUMP = 1e-4`). Verified in tests: a payer's DV01 is positive (benefits
   from rates rising), a receiver's is negative.
-- **Known gap, not yet fixed**: Phase 1 has no FX-spot source wired into
-  `engine/rates/`, so for a non-USD-notional IRS, the `PV_USD`/`DV01_USD` marks are
-  actually PV/DV01 in the swap's own notional currency, not converted to USD. Every IRS
-  in `data/raw/HA_PNL_20260818.csv` today is USD notional (`IRSOIS-USD-...`), so this
-  doesn't bite yet. If a non-USD IRS ever appears, this needs an FX conversion step
-  before the mark can be trusted as literally USD.
+- Non-USD notional: since 2026-09-17 PV / DV01 / cashflows are computed in the swap's
+  currency and converted at that day's official SPOT (`store._usd_per_ccy`); no SPOT
+  on file raises, never an unconverted number under a `_USD` name.
+- **Direction flip (2026-09-22, reviewer finding):** when the user flips a swap's
+  pay/receive (`data/ingest/irs_direction.py`), the pricer's own marks are reversed by
+  the pricer, `engine/rates/store.py::reverse_direction_marks(conn, trade_id,
+  instrument_id)`: QL_PRICER PV_USD / DV01_USD / CASHFLOW_USD × −1 on every date,
+  PAR_RATE untouched, other sources' rows of those types deleted, `realised_pnl` row
+  deleted, all three types deleted (not reversed) when two trades share one
+  instrument. Exact for a vanilla OIS (receiver = payer with every cashflow negated on
+  the same curve; USD conversion one positive factor). Hard rule 2 is why it lives in
+  the pricer, not in ingest. **Why:** `engine.rates.store` loads QuantLib at import
+  (via `.curves` / `.valuation`), and the parser, upload and UI must stay QuantLib-free
+  at import time, so ingest imports it lazily inside `irs_direction._reverse_marks`.
+  **How to apply:** never add a module-level `engine.rates` import to `data/ingest/`
+  or `ui/`; anything else the ingest layer needs from the pricer goes the same lazy
+  way, and stays inside the caller's transaction (commit nothing in store.py helpers
+  called from ingest).
 - Scope is deliberately OIS-only (USD SOFR, EUR ESTR, GBP SONIA, JPY TONA, CHF SARON,
   CAD CORRA, AUD AONIA) -- term-rate (EURIBOR/BBSW), basis and cross-currency (XCCY)
   curve/instrument logic from the reference project ("Rates Swap Calculator",

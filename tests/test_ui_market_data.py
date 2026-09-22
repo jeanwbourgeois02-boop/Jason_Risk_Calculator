@@ -259,11 +259,18 @@ def _book():
 
 
 def _write_needed_marks(conn, as_of):
-    """An official mark for every mark the header says the book needs on `as_of`."""
+    """An official mark for every mark the header says the book needs on `as_of`, stamped
+    the way the backfill stamps a close: 15:00 New York for an FX row, the settlement
+    (`backfill.settle_stamp`, 17:00 New York) for a FUTURE_PX row, since 2026-09-22 a
+    future's row on a past day counts as a close only at that stamp (a live press's PX_LAST
+    is not a close and the backfill replaces it with PX_SETTLE)."""
+    from data.bloomberg import backfill
     from ui.tabs import header
     for row in header.needed_marks(conn, as_of)[1]:
-        source = "BBG_BDH" if row["mark_type"] == "FUTURE_PX" else "BBG_BFXFORWARD"
-        _mark(conn, as_of, row["instrument_id"], row["settle_date"], row["mark_type"], 1.0, source)
+        is_future = row["mark_type"] == "FUTURE_PX"
+        source = "BBG_BDH" if is_future else "BBG_BFXFORWARD"
+        stamp = backfill.settle_stamp(dt.date.fromisoformat(as_of)) if is_future else None
+        _mark(conn, as_of, row["instrument_id"], row["settle_date"], row["mark_type"], 1.0, source, snapped_at=stamp)
     conn.commit()
 
 
@@ -599,6 +606,56 @@ def test_status_block_shows_the_recalc_error_and_reads_a_ragged_block_without_fa
     # an empty block still says what the status carries, and never raises
     assert md.recalc_block({"recalc": {"as_of": "2026-09-22", "days": []}}).id == md.RECALC_BLOCK_ID
     assert md.recalc_day_rows(None) == [] and md.recalc_day_rows({"days": "3"}) == []
+
+
+def test_closed_out_options_are_counted_where_the_options_step_counts_are_shown():
+    """2026-09-22 (user: "we dont need to price all options, as some of them might be closed
+    out already"): the pricer leaves a closed-out option unpriced and the pull lists it under
+    "closed_out", kept out of "skipped", with "N closed-out options not priced" appended to
+    its sentence. The tab shows the count beside priced / skipped; the top bar's line
+    carries the pull's sentence untouched."""
+    from ui import feed_controls as fc
+    # the connected pull's options block, on the tab's diagnostics panel
+    lines = md._options_step_lines({"priced": 4, "skipped": [{"trade_id": "O3", "reason": "no vol smile"}],
+                                    "closed_out": ["O1", "O2"]})
+    assert lines == ["Options: 4 option(s) priced this cycle.", "Options: 2 closed-out options not priced.",
+                     "Options O3: not priced -- no vol smile."]
+    assert md._options_step_lines({"priced": 1, "skipped": [], "closed_out": ["O1"]})[1] == \
+        "Options: 1 closed-out option not priced."
+    # a press with no Bloomberg: the recalc block, day by day, and its sentence on the top bar
+    summary = RECALC_SUMMARY + "; 2 closed-out options not priced"
+    status = dict(RECALC_STATUS, recalc_summary=summary,
+                  recalc={**RECALC_STATUS["recalc"], "closed_out": 2, "days": [
+                      {"day": "2026-09-18", "priced": 6, "skipped": [], "closed_out": []},
+                      {"day": "2026-09-22", "priced": 5, "skipped": [{"trade_id": "O3", "reason": "no vol smile on file for USDJPY"}],
+                       "closed_out": ["O1", "O2"]}]})
+    rows = md.recalc_day_rows(status["recalc"])
+    assert [(r["day"], r["priced"], r["skipped"], r["closed_out"]) for r in rows] == \
+        [("2026-09-18", 6, 0, 0), ("2026-09-22", 5, 1, 2)]
+    text = str(md.status_block(status)[-1])
+    assert "2026-09-18: 6 priced, 0 skipped" in text and "2026-09-18: 6 priced, 0 skipped," not in text
+    assert "2026-09-22: 5 priced, 1 skipped, 2 closed-out options not priced" in text
+    assert summary in text and text.count("closed-out") == 2      # the sentence once, the day once
+    assert "2 closed-out options not priced" in fc.feed_headline(status, feed_running=True)
+    # the count is read defensively: a list, a number, or nothing
+    assert md.closed_out_count({"closed_out": ["O1"]}) == 1 and md.closed_out_count({"closed_out": 3}) == 3
+    assert md.closed_out_count({"closed_out": "2"}) == 2 and md.closed_out_count({"closed_out": "junk"}) == 0
+    assert md.closed_out_count({"closed_out": True}) == 0 and md.closed_out_count("not a dict") == 0
+    assert md.closed_out_words(0) == ""
+
+
+def test_a_status_file_without_the_closed_out_key_renders_unchanged():
+    """An older status file, or a pull with nothing closed out: the key is absent or empty
+    and the tab says nothing of it."""
+    for block in ({"priced": 4, "skipped": []}, {"priced": 4, "skipped": [], "closed_out": []},
+                  {"priced": 4, "skipped": [], "closed_out": None}):
+        assert md._options_step_lines(block) == ["Options: 4 option(s) priced this cycle."]
+    rows = md.recalc_day_rows(RECALC_STATUS["recalc"])
+    assert [r["closed_out"] for r in rows] == [0, 0]
+    text = str(md.status_block(RECALC_STATUS)[-1])
+    assert "closed-out" not in text
+    assert "2026-09-18: 6 priced, 0 skipped" in text and "2026-09-22: 5 priced, 1 skipped" in text
+    assert md.closed_out_count(None) == 0 and md.closed_out_count({}) == 0
 
 
 def test_status_block_without_a_recalc_block_renders_as_before_and_a_connected_pull_says_nothing_of_it():

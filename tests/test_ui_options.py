@@ -1590,6 +1590,106 @@ def test_four_portfolio_tables_sit_above_the_table_and_add_up_in_usd():
         conn.close()
 
 
+def _add_closed_out_pair(conn, stale_marks_on_c1=False):
+    """The same EURUSD call (strike 1.12, expiry 2026-09-22) bought on 2026-06-01 at 0.0050 and
+    sold back in full on 2026-06-10 at 0.0060, under two instrument ids as the export books
+    them: status CLOSED in the book, P&L 1m x 0.0010 at the close-out spot 1.10 = 1,100 USD on
+    C1 and 0 on C2. No option marks -- the pricer skips a closed-out trade -- unless
+    `stale_marks_on_c1`, which leaves an old PREMIUM and Greeks on C1 to prove they are not
+    what tells the tab it is closed."""
+    _insert_option_leg(conn, "C1", "C1", "EURUSD092226C-2", "EUR", "USD", 1_000_000.0,
+                        "2026-09-22", strike=1.12, option_type="CALL", fill=0.0050, premium=0.0070,
+                        marks=stale_marks_on_c1)
+    _insert_option_leg(conn, "C2", "C2", "EURUSD092226C-3", "EUR", "USD", -1_000_000.0,
+                        "2026-09-22", strike=1.12, option_type="CALL", fill=0.0060, marks=False)
+    conn.execute("UPDATE trades SET trade_date = '2026-06-10' WHERE trade_id = 'C2'")
+    conn.execute("INSERT INTO marks VALUES ('2026-06-10', 'EURUSD', '2026-06-10', 'SPOT', 1.10, "
+                 "'BBG_BFXFORWARD', '2026-06-10T15:00:00-04:00')")
+    conn.commit()
+
+
+def test_by_pair_and_the_ladder_show_live_options_only_and_the_total_keeps_the_closed_out_pnl():
+    """User, 2026-09-22: "In the options tab, the by pair, where the risk is, I only want to see
+    live options, no need show closed out options." Told by the book's status CLOSED, never by
+    a mark or a zero value: the closed-out legs on EURUSD are left out before grouping, so the
+    pair row carries the live call / put alone; the Total, the Portfolio Totals and the trade
+    summary still carry the closed-out group's P&L, marked closed out."""
+    conn = _make_db()
+    try:
+        _add_closed_out_pair(conn, stale_marks_on_c1=True)
+        book = _book(conn)
+        assert book["C1"]["status"] == book["C2"]["status"] == "CLOSED"
+        legs = options.option_rows(conn, AS_OF, flat=True)
+        by_id = {r["trade_id"]: r for r in legs.to_dict("records")}
+        assert by_id["C1"]["closed_count"] == 1 and by_id["O1"]["closed_count"] == 0
+        assert by_id["C1"]["pnl_usd"] == pytest.approx(1_000_000.0 * 0.0010 * 1.10)
+        assert by_id["C1"]["mktpx"] == 0.0060 and by_id["C1"]["mktval"] - by_id["C1"]["start_value_usd"] == pytest.approx(1100.0)
+        assert options._is_missing(by_id["C1"]["delta"]) and options._is_missing(by_id["C1"]["vega"])   # stale marks are not its risk
+        assert by_id["C1"]["note"].startswith("closed out 2026-06-10")
+
+        by_pair = options.grouped_rows(legs, legs["underlying"].fillna(""))
+        assert [r["group"] for r in by_pair] == ["EURUSD", "USDJPY", "Total"]
+        eur = by_pair[0]
+        assert eur["options"] == 2 and eur["closed"] == 0
+        assert eur["pnl"] == pytest.approx(by_id["O1"]["pnl_usd"] + by_id["O2"]["pnl_usd"])
+        assert eur["paid"] == pytest.approx(by_id["O1"]["start_value_usd"] + by_id["O2"]["start_value_usd"])
+        assert eur["delta"] == pytest.approx(by_id["O1"]["delta"] + by_id["O2"]["delta"])
+        total = by_pair[-1]
+        assert total["options"] == 5 and total["closed"] == 2
+        assert total["pnl"] == pytest.approx(sum(by_id[t]["pnl_usd"] for t in ("O1", "O2", "O3", "C1", "C2")))
+        assert total["pnl"] == pytest.approx(eur["pnl"] + by_pair[1]["pnl"] + 1100.0)
+
+        ladder = options.grouped_rows(legs, legs["expiry"].map(lambda e: options.expiry_bucket(e, AS_OF)),
+                                      ["Expired"] + [label for _l, label in options.EXPIRY_BUCKETS] + ["No expiry on file"])
+        beyond = next(r for r in ladder if r["group"] == "Beyond 3 months")   # the 2026-09-22 expiries
+        assert beyond["options"] == 2 and ladder[-1]["options"] == 5
+        assert not any(r["strike"] == 1.12 for r in options.in_play_rows(conn, AS_OF, legs))
+
+        # The trade summary: Portfolio Totals carry every P&L; the closed-out rows say so.
+        grouped = options.option_rows(conn, AS_OF)
+        totals = grouped[grouped["level"] == "TOTAL"].iloc[0]
+        assert totals["pnl_usd"] == pytest.approx(total["pnl"]) and totals["closed_count"] == 2
+        records, _styles = options.format_rows(grouped)
+        labels = {r["trade_id"]: r["label"] for r in records if r["is_leg"]}
+        assert labels["C1"].endswith(options.CLOSED_OUT_TAG) and labels["C2"].endswith(options.CLOSED_OUT_TAG)
+        assert not any(labels[t].endswith(options.CLOSED_OUT_TAG) for t in ("O1", "O2", "O3"))
+        assert "closed" not in next(r["label"] for r in records if r["level"] == "TOTAL")
+        assert "closed out 2026-06-10" in next(r["note"] for r in records if r["trade_id"] == "C2")
+
+        tables = options.breakdown_children(conn, AS_OF)
+        footer = [t for t in _breakdown_tables(tables[0]) if t.data and t.data[0]["group"].startswith("Total")]
+        assert footer and footer[0].data[0]["group"] == "Total (incl. 2 closed out)"
+        assert "C1" not in str(tables[3].to_plotly_json()) and "1.12" not in str(tables[3].to_plotly_json())
+    finally:
+        conn.close()
+
+
+def test_a_live_option_worth_nothing_stays_in_by_pair():
+    """The 2026-09-21 rule dropped a group whose value summed to about zero as closed; a live
+    option marked at 0 is still a position and stays."""
+    conn = _make_db()
+    try:
+        conn.execute("UPDATE marks SET value = 0.0 WHERE instrument_id = 'USDJPY091026P-1' AND mark_type = 'PREMIUM'")
+        conn.commit()
+        legs = options.option_rows(conn, AS_OF, flat=True)
+        rows = options.grouped_rows(legs, legs["underlying"].fillna(""))
+        jpy = next(r for r in rows if r["group"] == "USDJPY")
+        assert jpy["value"] == 0.0 and jpy["closed"] == 0 and jpy["options"] == 1
+    finally:
+        conn.close()
+
+
+def _breakdown_tables(component):
+    out, stack = [], [component]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dash.dash_table.DataTable):
+            out.append(node)
+        children = getattr(node, "children", None)
+        stack.extend(children if isinstance(children, list) else [children] if children is not None else [])
+    return out
+
+
 def _cell_texts(component, out=None):
     out = [] if out is None else out
     children = getattr(component, "children", None)

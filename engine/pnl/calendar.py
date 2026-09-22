@@ -88,3 +88,35 @@ def _last_business_day_of_prev_year(d: dt.date, holidays: FrozenSet[str] = _NO_H
     while not _is_business_day(last_day, holidays):
         last_day -= dt.timedelta(days=1)
     return last_day
+
+
+# --------------------------------------------------------------------- spot date
+# One spot-date rule for the app (2026-09-22). It is the rule the historical curve builder
+# applies when it places a tenor on a computed date (data/bloomberg/fwd_curve.py::spot_date_for),
+# now here so the valuation's curve pillars (engine.pnl.valuation._day_pillars) put the day's
+# SPOT on the very date the curve's own tenors are measured from. Spot settles T+1 for these
+# pairs by market convention, T+2 for everything else.
+_SPOT_LAG_ONE_DAY = frozenset({"USDCAD", "USDTRY", "USDPHP", "USDRUB"})
+
+
+def spot_date(day, pair: str = "", holidays=None) -> dt.date:
+    """The spot value date of `pair` dealt on `day` (an ISO string or a date): `day` + 2
+    weekdays (+ 1 for the T+1 pairs of `_SPOT_LAG_ONE_DAY`), then rolled forward while the
+    date is a weekend or a config/holidays.txt holiday (`load_holidays()` when `holidays` is
+    None). A holiday on the day in between does not count against the lag (the convention for
+    a US holiday); only the spot date itself must be a good day. The app has no per-currency
+    calendars, so the date can sit a day from Bloomberg's around a local holiday.
+    engine.ladder.usd_marks.spot_date (as_of + 2 weekdays, no holidays) stays the Ladder's own."""
+    if isinstance(day, dt.datetime):
+        day = day.date()
+    d = day if isinstance(day, dt.date) else dt.date.fromisoformat(str(day))
+    cal = load_holidays() if holidays is None else frozenset(holidays)
+    lag = 1 if pair in _SPOT_LAG_ONE_DAY else 2
+    added = 0
+    while added < lag:
+        d += dt.timedelta(days=1)
+        if d.weekday() < 5:
+            added += 1
+    while not _is_business_day(d, cal):
+        d += dt.timedelta(days=1)
+    return d

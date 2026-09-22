@@ -378,7 +378,7 @@ def test_a_fix_of_another_day_is_never_the_exit_price_the_spot_of_the_fixing_dat
     assert (row["mark"], row["mark_source"], row["mark_date"]) == (17_850.0, "BBG_BFXFORWARD", "2026-09-22")
     assert row["pnl_usd"] == pytest.approx(-1_000_000 * (17_850.0 - 17_900.0) / 17_850.0)
     assert row["note"] == ("NDF fixed 2026-09-22: no official fixing on file: at the spot of 2026-09-22 instead, "
-                           "no delta, no carry")
+                           "converted at that spot, no delta, no carry")
     assert row["reason"] == ""
     # and on a later valuation date still the fixing date's spot, still neither fix
     later = _n1(conn, "2026-09-25")
@@ -387,7 +387,8 @@ def test_a_fix_of_another_day_is_never_the_exit_price_the_spot_of_the_fixing_dat
 
 def test_the_fix_of_the_fixing_date_is_the_exit_price_once_on_file():
     """(b) with the fixing date's own fix on file it is the mark, whatever the spot and the
-    other days' fixes say; converted at the fixing date's spot."""
+    other days' fixes say; converted to USD at the fix itself (user decision 2026-09-22: a
+    USDXXX NDF settles its quote-currency difference at the fix), never at the spot."""
     conn = schema.connect()
     _ndf_book(conn)
     _idr_mark(conn, "2026-09-21", "NDF_FIX", 17_700.0)
@@ -396,8 +397,9 @@ def test_the_fix_of_the_fixing_date_is_the_exit_price_once_on_file():
     conn.commit()
     row = _n1(conn, "2026-09-23")
     assert (row["mark"], row["mark_source"], row["mark_date"]) == (17_820.0, "BBG_BDH", "2026-09-22")
-    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (17_820.0 - 17_900.0) / 17_850.0)
-    assert row["note"] == "NDF fixed 2026-09-22: at the official fixing of 2026-09-22, no delta, no carry"
+    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (17_820.0 - 17_900.0) / 17_820.0)
+    assert (row["spot"], row["spot_source"]) == (pytest.approx(1 / 17_820.0), "BBG_BDH")
+    assert row["note"] == "NDF fixed 2026-09-22: at the official fixing of 2026-09-22, converted at the fixing, no delta, no carry"
 
 
 def test_a_fixing_date_with_no_marks_at_all_carries_the_previous_close_and_the_pnl_stands_still():
@@ -416,7 +418,7 @@ def test_a_fixing_date_with_no_marks_at_all_carries_the_previous_close_and_the_p
     assert row["mark"] == 17_880.0 and row["mark_source"] == "INTERP: SPOT of 2026-09-21 (nearest earlier close)"
     assert row["pnl_usd"] == before["pnl_usd"]
     assert row["note"] == ("NDF fixed 2026-09-22: no official fixing on file: at the spot of 2026-09-22 instead "
-                           "(INTERP: SPOT of 2026-09-21 (nearest earlier close)), no delta, no carry")
+                           "(INTERP: SPOT of 2026-09-21 (nearest earlier close)), converted at that spot, no delta, no carry")
     assert row["reason"] == ""
 
 
@@ -457,15 +459,15 @@ def test_a_settled_ndf_with_no_realised_row_is_the_fixed_branch_figure_never_the
     assert open_row["pnl_usd"] == pytest.approx(1_000_000 * (5.25 - 5.20) / 5.25)
     assert settled_row["pnl_usd"] == open_row["pnl_usd"]
     assert settled_row["note"] == ("NDF fixed 2026-09-14: no official fixing on file: at the spot of 2026-09-14 instead, "
-                                   "no delta, no carry; not yet recorded in realised_pnl")
+                                   "converted at that spot, no delta, no carry; not yet recorded in realised_pnl")
     # the fix lands: the same 3,810 on every screen, before the ledger runs and after
     _insert_mark(conn, "2026-09-14", "USDBRL", "2026-09-14", "NDF_FIX", 5.22, "BBG_BDH", "2026-09-14T17:00:00-04:00")
     conn.commit()
     open_row, settled_row = b1("2026-09-15"), b1("2026-09-21")
-    assert open_row["pnl_usd"] == pytest.approx(1_000_000 * (5.22 - 5.20) / 5.25)
+    assert open_row["pnl_usd"] == pytest.approx(1_000_000 * (5.22 - 5.20) / 5.22)   # converted at the fix itself
     assert settled_row["pnl_usd"] == open_row["pnl_usd"]
     assert (settled_row["mark"], settled_row["mark_date"], settled_row["mark_source"]) == (5.22, "2026-09-14", "BBG_BDH")
-    assert settled_row["note"] == ("NDF fixed 2026-09-14: at the official fixing of 2026-09-14, no delta, no carry; "
-                                   "not yet recorded in realised_pnl")
+    assert settled_row["note"] == ("NDF fixed 2026-09-14: at the official fixing of 2026-09-14, converted at the fixing, "
+                                   "no delta, no carry; not yet recorded in realised_pnl")
     assert ledger.realise_settled(conn, "2026-09-21")["realised"] == 1
     assert b1("2026-09-21")["pnl_usd"] == settled_row["pnl_usd"]

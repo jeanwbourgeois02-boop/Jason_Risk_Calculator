@@ -80,7 +80,7 @@ def test_price_close_prices_the_days_book_from_that_days_inputs_and_stamps_the_c
 
     out = store.price_close(conn, DAY)
 
-    assert out == {"day": DAY, "priced": 1, "skipped": []}
+    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": []}
     rows = _rows(conn, INSTRUMENT, DAY)
     assert {r[0] for r in rows} == SEVEN_TYPES
     assert {r[2] for r in rows} == {f"{DAY}T15:00:00-04:00"}          # the close, offset resolved for August
@@ -124,7 +124,7 @@ def test_price_close_reads_only_that_days_inputs_and_names_the_day_and_the_missi
 
     _seed_vol(conn, as_of=DAY)
     out = store.price_close(conn, DAY)
-    assert out == {"day": DAY, "priced": 1, "skipped": []}
+    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": []}
     # Nothing was ever written for LATER: price_close(DAY) touches DAY alone.
     assert _rows(conn, INSTRUMENT, LATER) == []
 
@@ -143,7 +143,7 @@ def test_price_close_leaves_out_a_trade_not_yet_dealt_and_one_already_expired():
 
     out = store.price_close(conn, DAY)
 
-    assert out == {"day": DAY, "priced": 1, "skipped": []}     # neither priced nor listed
+    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": []}     # neither priced nor listed
     assert len(_rows(conn, INSTRUMENT, DAY)) == 7
     assert _rows(conn, dealt_later, DAY) == []
     assert _rows(conn, expired, DAY) == []
@@ -162,7 +162,7 @@ def test_price_close_on_the_expiry_day_writes_the_payoff_drops_a_stale_frozen_ro
 
     out = store.price_close(conn, EXPIRY)
 
-    assert out == {"day": EXPIRY, "priced": 1, "skipped": []}
+    assert out == {"day": EXPIRY, "priced": 1, "skipped": [], "closed_out": []}
     assert _official(conn, INSTRUMENT, EXPIRY, "PREMIUM") == pytest.approx((SPOT - STRIKE) / SPOT)
     assert _official(conn, INSTRUMENT, EXPIRY, "DELTA") == 1.0
     for greek in ("GAMMA", "THETA", "VEGA", "RHO"):
@@ -236,7 +236,7 @@ def test_price_close_is_importable_without_pricing_anything():
     from engine.options import store
 
     conn = _new_db()
-    assert store.price_close(conn, DAY) == {"day": DAY, "priced": 0, "skipped": []}
+    assert store.price_close(conn, DAY) == {"day": DAY, "priced": 0, "skipped": [], "closed_out": []}
 
 
 # --------------------------------------------------------------------------- recalc_on_file: no Bloomberg, the logged data
@@ -304,8 +304,8 @@ def test_recalc_on_file_never_raises_and_is_empty_on_an_empty_book(monkeypatch):
 
     conn = _new_db()
     out = store.recalc_on_file(conn, DAY)
-    assert out == {"as_of": DAY, "since": DAY, "days": [{"day": DAY, "priced": 0, "skipped": []}],
-                   "priced": 0, "skipped": 0}
+    assert out == {"as_of": DAY, "since": DAY, "days": [{"day": DAY, "priced": 0, "skipped": [], "closed_out": []}],
+                   "priced": 0, "skipped": 0, "closed_out": 0}
 
     out = store.recalc_on_file(conn, "not-a-date")
     assert out["days"] == [] and "ValueError" in out["error"]
@@ -443,3 +443,107 @@ def test_a_resave_of_a_barrier_option_with_the_level_as_text_or_int_is_not_a_cha
     set_option_terms(conn, instrument_id, str(STRIKE), "call", "BARRIER_KO", 12)
 
     assert _pricer_marks(conn, instrument_id) == before
+
+
+# --------------------------------------------------------------------------- closed-out options are not priced (2026-09-22)
+# User: "we dont need to price all options, as some of them might be closed out already. If
+# they are exactly the same, same strike / underlyer / expiry / type and closed out, we just
+# present the buy and sell price as pnl. We dont need to price them individually." The P&L's
+# own grouping (engine/pnl/valuation.py::closed_out_from_rows) decides; the pricer imports it.
+
+SELL_BACK_DAY = "2026-08-22"       # the sell-back's trade date: after DAY (08-21), before LATER (08-24)
+
+
+def _seed_leg(conn, trade_id, expiry=EXPIRY, quantity=NOTIONAL):
+    """The NOTIONAL leg the blotter writes for an FX option (the P&L's grouping reads leg 1's
+    settle_date as the expiry); _seed_option_trade writes no legs."""
+    conn.execute("INSERT OR REPLACE INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 (trade_id, 1, "NOTIONAL", "EUR", quantity, "2026-08-18", expiry, 0.0, 0))
+    conn.commit()
+
+
+def _seed_bought_and_sold_back(conn, sell_quantity=-NOTIONAL, sell_instrument="EURUSD092326C-197838147"):
+    """T1 bought 2026-08-18 and T2 the sell-back dealt SELL_BACK_DAY under another instrument id
+    (the export books each fill under its own id), same terms. sell_quantity = -NOTIONAL closes
+    the position; a smaller one is a part sell-back."""
+    _seed_option_trade(conn, trade_id="T1")
+    _seed_leg(conn, "T1")
+    _seed_option_trade(conn, trade_id="T2", instrument_id=sell_instrument, quantity=sell_quantity, price=0.0071)
+    _seed_leg(conn, "T2", quantity=sell_quantity)
+    conn.execute("UPDATE trades SET trade_date = ? WHERE trade_id = 'T2'", (SELL_BACK_DAY,))
+    conn.commit()
+
+
+@needs_quantlib
+def test_a_bought_and_sold_back_option_is_not_priced_after_the_close_out_and_is_before_it():
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_bought_and_sold_back(conn)
+    _seed_day(conn, DAY)
+    _seed_day(conn, LATER)
+    # Before the sell-back (DAY < SELL_BACK_DAY): T1 is live and priced; T2 not yet dealt.
+    before = store.price_close(conn, DAY)
+    assert before["priced"] == 1 and before["closed_out"] == [] and before["skipped"] == []
+    assert len(_rows(conn, INSTRUMENT, DAY)) == 7
+    # After it: neither trade is priced, both listed under closed_out, nothing under skipped.
+    after = store.price_close(conn, LATER)
+    assert after["priced"] == 0 and after["skipped"] == []
+    assert after["closed_out"] == ["T1", "T2"]
+    assert _rows(conn, INSTRUMENT, LATER) == []
+    assert _rows(conn, "EURUSD092326C-197838147", LATER) == []
+    # The live pass: the same two, flagged on the outcome with a reason naming the group.
+    outcomes = store.price_all_and_store(conn, LATER)
+    assert [o.trade_id for o in outcomes] == ["T1", "T2"]
+    assert all(o.closed_out and not o.priced for o in outcomes)
+    assert outcomes[0].reason.startswith(f"closed out {SELL_BACK_DAY}: bought and sold back with T2")
+    assert _rows(conn, INSTRUMENT, LATER) == []
+    # The day before the close-out: nothing is closed out yet, so the live pass prices both
+    # (it prices every trade on file whatever its trade date: a trade dated tomorrow still
+    # needs today's mark for tomorrow's book, price_all_and_store's docstring).
+    live_before = store.price_all_and_store(conn, DAY)
+    assert {o.trade_id: (o.priced, o.closed_out) for o in live_before} == {"T1": (True, False), "T2": (True, False)}
+
+
+@needs_quantlib
+def test_a_part_sell_back_is_still_priced():
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_bought_and_sold_back(conn, sell_quantity=-NOTIONAL / 2)
+    _seed_day(conn, LATER)
+    out = store.price_close(conn, LATER)
+    assert out["closed_out"] == [] and out["skipped"] == [] and out["priced"] == 2
+    assert all(not o.closed_out and o.priced for o in store.price_all_and_store(conn, LATER))
+
+
+@needs_quantlib
+def test_recalc_on_file_reports_the_closed_out_count_apart_from_skipped(monkeypatch):
+    from engine.options import store
+
+    monkeypatch.setattr(store, "purge_old_unit_cash_payoff_marks", lambda conn: {"ran": False, "marks_deleted": 0})
+    conn = _new_db()
+    _seed_bought_and_sold_back(conn)
+    _seed_day(conn, DAY)
+    _seed_day(conn, LATER)
+    out = store.recalc_on_file(conn, SECOND_AS_OF)
+    assert "error" not in out
+    by_day = {d["day"]: d for d in out["days"]}
+    assert by_day[DAY]["priced"] == 1 and by_day[DAY]["closed_out"] == []
+    assert by_day[LATER]["priced"] == 0 and by_day[LATER]["closed_out"] == ["T1", "T2"] and by_day[LATER]["skipped"] == []
+    assert out["priced"] == 1 and out["skipped"] == 0 and out["closed_out"] == 2
+
+
+def test_the_expiry_day_catch_up_leaves_a_closed_out_option_alone():
+    """Expired before as_of with no expiry-dated mark: the catch-up would write the payoff;
+    closed out, it writes nothing (the ledger's CLOSE_OUT freeze covers the group). No
+    QuantLib needed: nothing is priced."""
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_bought_and_sold_back(conn)
+    after_expiry = "2026-09-24"
+    _seed_pair_spot(conn, as_of=EXPIRY, spot=SPOT)   # the expiry date's own SPOT, so a catch-up could run
+    outcomes = store.price_all_and_store(conn, after_expiry)
+    assert all(o.closed_out and not o.priced for o in outcomes)
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE source = 'QL_OPTIONS_PRICER'").fetchone()[0] == 0

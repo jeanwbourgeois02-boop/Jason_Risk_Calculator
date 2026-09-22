@@ -21,10 +21,10 @@ def test_numeric_and_text_columns_carry_their_type_and_format():
     assert rk.text("Pair", "pair") == {"name": "Pair", "id": "pair", "type": "text"}
 
 
-def test_value_keeps_numbers_drops_blanks_and_passes_sample_text_through():
+def test_value_keeps_numbers_drops_blanks_and_passes_other_text_through():
     assert rk.value(None) is None and rk.value(float("nan")) is None and rk.value("") is None
     assert rk.value(3) == 3.0 and rk.value("12.5") == 12.5
-    assert rk.value("1.10 (sample)") == "1.10 (sample)"
+    assert rk.value("n/a") == "n/a"   # an unpriced cell's text: shown raw, ranked last
 
 
 def test_sortable_props_native_multi_and_persisted_only_with_an_id():

@@ -10,5 +10,5 @@
 - [Upload review 2026-09-16, 2 passes](review-findings-upload-blotter-2026-09-16.md) — pass1 dual-format then pass2 blotter-only pivot; no criticals either pass; item 59 gap confirmed real
 - [Rates-vol review](review-findings-rates-vol.md) — 2026-09-17 swaption/cap/SABR/Bermudan HW pricer (Phase 6 options_calc merge): no criticals, sign/DV01/marks_official all clean
 - [Guards, digitals, expiry mark, IRS direction](review-findings-2026-09-18-guards-digitals-expiry-irs.md) — 2026-09-18 commit 184d56d: no criticals; 6 open follow-ups (stale pre-fix digital marks, silent blank rebuilds, expiry-day delta drift)
-- [NDF exact-day fix review 2026-09-22](review-findings-ndf-fix-2026-09-22.md) — no critical in diff; open: _frozen_row has no NDF branch, purge/refreeze as_of gating, blotter-vs-ledger SPOT substitute drift
+- [NDF reviews 2026-09-22, 2 passes](review-findings-ndf-fix-2026-09-22.md) — pass 2 (spot_date pillar, present-spot retired, 1/FIX, purge_superseded): no criticals; open: CLAUDE.md drift, refrozen has no before/after, cross conversion via _mark_near
 - [Flat-forwards OIS review 2026-09-22](review-findings-flat-forwards-2026-09-22.md) — no criticals; rerun skips matured swaps and keeps old marks on failed days; options/rates.py has no except (CurveBuildError skips, never CIP)

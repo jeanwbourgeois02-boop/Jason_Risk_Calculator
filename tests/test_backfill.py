@@ -468,7 +468,30 @@ def test_backfill_future_expiring_inside_range_gets_future_px_on_expiry_day(tmp_
 # converts base->USD at spot; the EURSEK digital pays EUR). On a missed expiry day
 # engine/options writes the payoff on a later pull FROM THE EXPIRY DATE'S CLOSING SPOT and
 # the ledger converts it at the base->USD SPOT of that same date: without those closes an
-# expired option stays unrealisable. SPOT only: no historical forward, no historical vol.
+# expired option stays unrealisable. No historical forward at the option's expiry; since
+# 2026-09-22 the day's vol smile and OIS curves ARE asked of the daily history (`quote_history`
+# below), so the day's options price from their own inputs.
+QUOTE_ASKED = []      # (tickers, fields, start, end) of every vol / OIS history request (quote_history)
+
+
+def quote_history(session, service, tickers, fields, start, end):
+    """Bloomberg's daily history of the vol and OIS tickers: PX_LAST on every business day
+    of the stretch, vol tickers in vol points, OIS tickers in per cent (as Bloomberg quotes)."""
+    QUOTE_ASKED.append((sorted(tickers), list(fields), start, end))
+    return {t: {d.isoformat(): {"PX_LAST": 7.5 if "BGN" in t else 3.9} for d in backfill.business_days(start, end)}
+            for t in tickers}
+
+
+def _vol_tickers(pair):
+    from data.bloomberg import vol_marketdata as vm
+    return sorted(vm.vol_ticker(pair, tenor, qt) for tenor in vm.VOL_TENORS for qt in vm.VOL_QUOTE_TYPES)
+
+
+def _ois_tickers(ccy):
+    from data.bloomberg import rates_marketdata as rm
+    return sorted(spec.ticker for spec in rm.ois_curve(ccy))
+
+
 def _options_only_db(tmp_path, options):
     """Only EURSEK options: no forward, and no plain pair instrument row of any kind."""
     p = tmp_path / "risk.db"
@@ -504,12 +527,29 @@ def test_backfill_option_only_pair_gets_closing_spot_and_usd_conversion_spots_th
         bump = day.day / 1000.0
         return {"EURSEK Curncy": 11.0 + bump, f"{eur_usd} Curncy": 1.1 + bump, f"{usd_sek} Curncy": 9.4 + bump}
 
+    QUOTE_ASKED.clear()
     results = backfill.backfill(p, date(2026, 9, 17), date(2026, 9, 24), fetch=spot_fetch, fwd_fetch=_never_called,
-                                fut_fetch=_never_called, log=lambda *_: None)
+                                fut_fetch=_never_called, quote_fetch=quote_history, log=lambda *_: None)
     assert [r["status"] for r in results] == ["DONE"] * 6
     assert all(r["fwd_outrights"] == 0 and r["missing_marks"] == [] and r["missing_pairs"] == [] for r in results)
 
     open_days = ["2026-09-18", "2026-09-21", "2026-09-22", "2026-09-23"]          # trade date .. EXPIRY DATE inclusive
+    # the smile of the option's pair and the OIS curve of EUR (SEK has none in scope), from the
+    # daily history: ONE request per kind for the stretch, the live steps' own tickers, PX_LAST
+    assert QUOTE_ASKED == [(_vol_tickers("EURSEK"), ["PX_LAST"], date(2026, 9, 17), date(2026, 9, 24)),
+                           (_ois_tickers("EUR"), ["PX_LAST"], date(2026, 9, 17), date(2026, 9, 24))]
+    assert len(_vol_tickers("EURSEK")) == 45
+    vols = conn.execute("SELECT as_of_date, pair, COUNT(*), MIN(source), MAX(source), MIN(value), MIN(snapped_at) "
+                        "FROM vol_quotes GROUP BY 1, 2 ORDER BY 1").fetchall()
+    assert vols == [(d, "EURSEK", 45, "BBG_BDH", "BBG_BDH", 7.5, f"{d}T15:00:00-04:00") for d in open_days]
+    curves = conn.execute('SELECT as_of_date, ccy, "index", COUNT(*), MIN(source), MIN(value), MAX(value), quote_type '
+                          "FROM curve_quotes GROUP BY 1, 2 ORDER BY 1").fetchall()
+    assert curves == [(d, "EUR", "ESTR", len(_ois_tickers("EUR")), "BBG_BDH", 0.039, 0.039, "OIS") for d in open_days]
+    by_day = {r["day"]: r for r in results}
+    for d in open_days:
+        assert (by_day[d]["vol_quotes"], by_day[d]["curve_quotes"], by_day[d]["missing_inputs"]) == (45, 12, [])
+        assert by_day[d]["rates_priced"] is None and by_day[d]["rates_failed"] == [] and by_day[d]["rates_note"] == ""
+    assert (by_day["2026-09-17"]["vol_quotes"], by_day["2026-09-24"]["curve_quotes"]) == (0, 0)   # not open: nothing asked
     spots = {(r[0], r[1]): (r[2], r[3], r[4]) for r in conn.execute(
         "SELECT instrument_id, as_of_date, value, source, snapped_at FROM marks_official WHERE mark_type = 'SPOT'")}
     for day in open_days:
@@ -530,13 +570,14 @@ def test_backfill_option_only_pair_gets_closing_spot_and_usd_conversion_spots_th
     s, pair, _src = usd_per_quote(conn, "EUR", "2026-09-23")                       # the ledger's base->USD conversion
     assert pair == eur_usd and s == pytest.approx(1.123 if eur_usd == "EURUSD" else 1 / 1.123)
 
-    # every open day is now a complete close (SPOT is all a past option day needs), so a
-    # second run has nothing to do on them
+    # every open day is now a complete close (its SPOT marks) holding its inputs (the smile,
+    # the EUR curve), so a second run has nothing to do on them and asks the history nothing
     comp = {r.as_of_date: r for r in close_completeness(conn, "2026-09-17", "2026-09-24").itertuples()}
     assert all(comp[d].complete and comp[d].needed == 3 and comp[d].missing == [] for d in open_days)
+    assert all(comp[d].inputs_missing == [] for d in comp)
     assert comp["2026-09-17"].needed == 0 and comp["2026-09-24"].needed == 0       # not traded yet / expired
     again = backfill.backfill(p, date(2026, 9, 18), date(2026, 9, 23), fetch=_never_called, fwd_fetch=_never_called,
-                              fut_fetch=_never_called, log=lambda *_: None)
+                              fut_fetch=_never_called, quote_fetch=_never_called, log=lambda *_: None)
     assert [r["status"] for r in again] == ["SKIPPED"] * 4
 
 
@@ -556,16 +597,27 @@ def test_backfill_still_fetches_the_expiry_close_of_an_option_the_ledger_already
     closes = {"EURSEK Curncy": 11.05, f"{eur_usd} Curncy": 1.17, f"{usd_sek} Curncy": 9.44}
     results = backfill.backfill(p, date(2026, 9, 23), date(2026, 9, 23),
                                 fetch=lambda session, service, tickers, field, day: {t: closes[t] for t in tickers},
-                                fwd_fetch=_never_called, fut_fetch=_never_called, log=lambda *_: None)
+                                fwd_fetch=_never_called, fut_fetch=_never_called, quote_fetch=lambda *a, **k: {},
+                                log=lambda *_: None)
     assert [r["status"] for r in results] == ["DONE"] and results[0]["closes"] == 3
     assert dict(conn.execute("SELECT instrument_id, value FROM marks_official WHERE as_of_date = '2026-09-23' "
                              "AND mark_type = 'SPOT'")) == {"EURSEK": 11.05, eur_usd: 1.17, usd_sek: 9.44}
+    # the history had nothing for the smile or the curve: named, nothing written, the day still DONE
+    assert [(m["kind"], m["key"]) for m in results[0]["missing_inputs"]] == [("VOL_SMILE", "EURSEK"), ("OIS_CURVE", "EUR")]
+    assert results[0]["missing_inputs"][0]["reason"] == "Bloomberg returned no vol quotes (PX_LAST) for EURSEK on 2026-09-23"
+    assert results[0]["missing_inputs"][1]["reason"].startswith("fewer than 4 OIS quotes for EUR on 2026-09-23: Bloomberg "
+                                                                "returned no value for EESWE1Z Curncy, ")
+    for table in ("vol_quotes", "curve_quotes"):           # a table only exists once something was written to it
+        if conn.execute("SELECT name FROM sqlite_master WHERE name = ?", (table,)).fetchone():
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
 
 
 def test_backfill_option_pair_shared_with_a_forward_gets_no_historical_forward_at_the_option_expiry(tmp_path):
-    """SPOT only for options, also where the pair has a forward curve history because a
-    forward is open in it: the forward's own leg date is backfilled, the option's expiry
-    is not (nothing prices an option on a past date)."""
+    """No forward at an option's expiry, also where the pair has a forward curve history
+    because a forward is open in it: the forward's own leg date is backfilled, the option's
+    expiry is not (a past day's option is priced off the day's curve, which the pricer reads
+    itself). The smile and the curve the option needs are a day's inputs, not marks: their
+    absence is `inputs_missing`, never a missing mark, and the day's marks still count complete."""
     p, conn = _options_only_db(tmp_path, [("o3", "EURSEK112526C-3", "2026-08-24", 1e6, "2026-11-25")])
     conn.execute("INSERT INTO instruments VALUES ('EURSEK','FX','EUR','SEK',1,0,'EURSEK Curncy','9999-12-31')")
     conn.execute("INSERT INTO trades VALUES ('e1','XLSX','EURSEK','FX_FWD','e1','2026-08-10',1e6,11.20,"
@@ -582,11 +634,14 @@ def test_backfill_option_pair_shared_with_a_forward_gets_no_historical_forward_a
 
     results = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8),
                                 fetch=lambda session, service, tickers, field, day: {t: 10.0 for t in tickers},
-                                fwd_fetch=fwd_fetch, fut_fetch=_never_called, log=lambda *_: None)
+                                fwd_fetch=fwd_fetch, fut_fetch=_never_called, quote_fetch=lambda *a, **k: {},
+                                log=lambda *_: None)
     assert [r["status"] for r in results] == ["DONE"] and results[0]["missing_marks"] == []
     assert [r[0] for r in conn.execute("SELECT settle_date FROM marks WHERE mark_type = 'FWD_OUTRIGHT'")] == ["2026-09-25"]
     from data.bloomberg.inventory import close_completeness
-    assert bool(close_completeness(conn, "2026-09-08", "2026-09-08")["complete"].iloc[0]) is True
+    row = close_completeness(conn, "2026-09-08", "2026-09-08").iloc[0]
+    assert bool(row["complete"]) is True and row["missing"] == []
+    assert row["inputs_missing"] == [{"kind": "OIS_CURVE", "key": "EUR"}, {"kind": "VOL_SMILE", "key": "EURSEK"}]
 
 
 # =========================================================================== 2026-09-21: no SETTLE_DT in history, points
@@ -907,8 +962,10 @@ def test_backfill_by_default_reads_fx_closes_from_the_1500_series_and_futures_fr
                                                 (tenors, ("PX_LAST",), day, day)])
     # the daily history is asked for the future's PX_SETTLE and for nothing FX
     assert asked["daily"] == [(("ESU6 Index",), ("PX_SETTLE",))]
-    stamps = {r[0] for r in conn.execute("SELECT snapped_at FROM marks")}
-    assert stamps == {"2026-09-07T15:00:00-04:00"}
+    stamps = dict(conn.execute("SELECT mark_type, snapped_at FROM marks"))
+    assert stamps == {"SPOT": "2026-09-07T15:00:00-04:00", "FWD_OUTRIGHT": "2026-09-07T15:00:00-04:00",
+                      "FUTURE_PX": "2026-09-07T17:00:00-04:00"}          # a settlement is stamped 17:00 (2026-09-22)
+    assert stamps["FUTURE_PX"] == backfill.settle_stamp(day)
     assert conn.execute("SELECT value FROM marks WHERE mark_type = 'SPOT'").fetchone()[0] == 0.6505
 
 
@@ -919,7 +976,7 @@ def test_a_past_fx_row_that_is_not_the_1500_close_is_replaced_and_one_that_is_ne
     fri_close = backfill.close_stamp(date(2026, 9, 4))
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
         # Monday as its last live pull left it: a spot, a direct-quote forward and a live
-        # futures price (a future keeps what it has)
+        # futures price (PX_LAST at the press: not a close either, 2026-09-22)
         (mon, "AUDUSD", mon, "SPOT", 0.9001, "BBG_BFXFORWARD", "2026-09-07T11:40:12-04:00"),
         (mon, "AUDUSD", "2026-09-08", "FWD_OUTRIGHT", 0.9002, "BBG_BFXFORWARD", "2026-09-07T11:40:12-04:00"),
         (mon, "ESU6 Index", "2026-12-19", "FUTURE_PX", 7111.0, "BBG_BDH", "2026-09-07T11:40:12-04:00"),
@@ -936,8 +993,8 @@ def test_a_past_fx_row_that_is_not_the_1500_close_is_replaced_and_one_that_is_ne
 
     # a past day's row that is not stamped at the close is not a close ...
     before = {r.as_of_date: r for r in close_completeness(conn, fri, mon, today="2026-09-21").itertuples()}
-    assert before[mon].complete is False and before[mon].present == 1 and before[mon].not_closed == 2
-    assert {m["mark_type"] for m in before[mon].missing} == {"SPOT", "FWD_OUTRIGHT"}
+    assert before[mon].complete is False and before[mon].present == 0 and before[mon].not_closed == 3
+    assert {m["mark_type"] for m in before[mon].missing} == {"SPOT", "FWD_OUTRIGHT", "FUTURE_PX"}
     assert before[fri].present == 2 and before[fri].not_closed == 0               # its closes count; the future is missing
     # ... but today's rows are live and count as they are
     assert bool(close_completeness(conn, mon, mon, today=mon)["complete"].iloc[0]) is True
@@ -960,11 +1017,13 @@ def test_a_past_fx_row_that_is_not_the_1500_close_is_replaced_and_one_that_is_ne
     assert rows[(mon, "FWD_OUTRIGHT", "BBG_INTERP")] == (pytest.approx(0.6510), mon_close)
     assert conn.execute("SELECT value, source FROM marks_official WHERE as_of_date = ? AND mark_type = 'FWD_OUTRIGHT'",
                         (mon,)).fetchall() == [(pytest.approx(0.6510), "BBG_INTERP")]
-    assert rows[(mon, "FUTURE_PX", "BBG_BDH")][0] == 7111.0                        # futures keep PX_SETTLE / what they have
+    # the live futures price is replaced by the day's PX_SETTLE, stamped at the settlement (17:00)
+    assert rows[(mon, "FUTURE_PX", "BBG_BDH")] == (7550.0, backfill.settle_stamp(date(2026, 9, 7)))
+    assert (mon, "FUTURE_PX", "BBG_BDH") in rows and rows[(mon, "FUTURE_PX", "BBG_BDH")][1] == "2026-09-07T17:00:00-04:00"
     # Friday: rows already stamped at the close are never rewritten; the missing future is written
     assert rows[(fri, "SPOT", "BBG_BFXFORWARD")] == (0.8001, fri_close)
     assert rows[(fri, "FWD_OUTRIGHT", "BBG_INTERP")] == (0.8002, fri_close)
-    assert rows[(fri, "FUTURE_PX", "BBG_BDH")][0] == 7550.0
+    assert rows[(fri, "FUTURE_PX", "BBG_BDH")] == (7550.0, backfill.settle_stamp(date(2026, 9, 4)))
     # frozen rows stay frozen
     assert conn.execute("SELECT * FROM realised_pnl").fetchall() == frozen
 
@@ -1054,12 +1113,20 @@ def test_every_past_day_within_bloombergs_intraday_history_closes_at_1500_new_yo
     assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T17:00:00-04:00", "2026-09-22") is False
     monkeypatch.setattr(__import__("data.bloomberg.live", fromlist=["x"]), "book_today", lambda: today)
     assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T17:00:00-04:00") is False
-    # a future keeps its PX_SETTLE whatever the stamp (2026-09-22: "for futures, can use market close")
-    assert backfill.is_close_row("FUTURE_PX", "2026-09-18", "2026-09-18T11:40:12-04:00", today) is True
-    assert backfill.is_close_row("FUTURE_PX", "2026-09-18", "2026-09-18T17:00:00-04:00", today) is True
-    assert backfill.is_close_row("NDF_FIX", "2026-09-16", "2026-09-16T17:00:00-04:00", today) is True
-    # (b) beyond the intraday floor the 17:00 daily close counts (and so would a 15:00 row); a live press never
     before = floor - timedelta(days=3)
+    # a future's close is its PX_SETTLE, stamped at the settlement, 17:00 New York (2026-09-22: "for
+    # futures, can use market close"): a live press's row (the press time, or 15:00 of the book date
+    # as pull_marks.build_future_rows stamps it) is not a close, on any past day, intraday reach or not
+    assert backfill.is_close_row("FUTURE_PX", "2026-09-18", "2026-09-18T11:40:12-04:00", today) is False
+    assert backfill.is_close_row("FUTURE_PX", "2026-09-18", "2026-09-18T15:00:00-04:00", today) is False
+    assert backfill.is_close_row("FUTURE_PX", "2026-09-18", "2026-09-18T17:00:00-04:00", today) is True
+    assert backfill.is_close_row("FUTURE_PX", "2026-09-18", backfill.settle_stamp(date(2026, 9, 18)), today) is True
+    assert backfill.is_close_row("FUTURE_PX", before.isoformat(), f"{before}T15:00:00-05:00", today) is False
+    assert backfill.is_close_row("FUTURE_PX", before.isoformat(), f"{before}T17:00:00-05:00", today) is True
+    assert backfill.settle_stamp(date(2026, 1, 15)) == "2026-01-15T17:00:00-05:00"
+    assert backfill.is_close_row("NDF_FIX", "2026-09-16", "2026-09-16T17:00:00-04:00", today) is True
+    assert backfill.is_close_row("NDF_FIX", "2026-09-16", "2026-09-16T15:00:00-04:00", today) is True
+    # (b) beyond the intraday floor the 17:00 daily close counts (and so would a 15:00 row); a live press never
     assert backfill.is_close_row("SPOT", before.isoformat(), f"{before}T17:00:00-05:00", today) is True
     assert backfill.is_close_row("SPOT", before.isoformat(), f"{before}T15:00:00-05:00", today) is True
     assert backfill.is_close_row("SPOT", before.isoformat(), f"{before}T11:40:12-05:00", today) is False
@@ -1182,3 +1249,227 @@ def test_backfill_writes_the_ndf_fixing_on_the_fixing_date_from_its_own_ticker(t
                                 fut_fetch=lambda *a, **k: {}, log=lambda *_: None)
     assert ("NDF_FIX", "Bloomberg returned no fixing (PX_LAST) for USDBRL on 2026-09-08") in \
         [(m["mark_type"], m["reason"]) for m in results[0]["missing_marks"]]
+
+
+# =========================================================================== 2026-09-22: the day's inputs and its swaps
+# A past day prices its options and swaps from its own inputs (user: "options daily pnl 0,
+# that cannot be right, everything is moving"): the backfill asks Bloomberg's daily history
+# (PX_LAST) for the smile of every pair with an option open and the OIS curve of every
+# currency an option or a swap needs that day, writes them like the live steps do, and
+# prices the day's swaps from them (engine.rates.store.recalc_on_file for that day) before
+# its options. A day that holds a pair's or a currency's quotes is not asked again.
+def _swap_and_forward_db(tmp_path, with_forward=True):
+    """A USD OIS swap dealt Tue 09-01 to 2031, and (unless `with_forward` is False) the
+    AUDUSD forward of `_db`, so the days worked have closes of their own."""
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'',  '2031-09-03')")
+    conn.execute("INSERT INTO trades VALUES ('s1','XLSX','IRSOIS-USD-1','IRS','s1','2026-09-01',10e6,0.035,"
+                 "'acc','cp','','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("s1", 1, "FIXED", "USD", -10e6, "2026-09-03", "2031-09-03", 0.035, 1),
+        ("s1", 2, "FLOAT", "USD", 10e6, "2026-09-03", "2031-09-03", 0.0, 1),
+    ])
+    if with_forward:
+        conn.execute("INSERT INTO instruments VALUES ('AUDUSD','FX','AUD','USD',1,0,'AUDUSD Curncy','9999-12-31')")
+        conn.execute("INSERT INTO trades VALUES ('a1','XLSX','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,"
+                     "'acc','cp','','t','d','')")
+        conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+            ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-10-20", 0.65, 1),
+            ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-10-20", 0.65, 1),
+        ])
+    conn.commit()
+    return p, conn
+
+
+def _aud_spot(session, service, tickers, field, day):
+    return {t: 0.65 for t in tickers}
+
+
+def _aud_fwd(session, service, tickers, fields, start, end):
+    return {t: {d.isoformat(): {"PX_LAST": 0.655, "SETTLE_DT": "2026-10-20"} for d in backfill.business_days(start, end)}
+            for t in tickers}
+
+
+def _fake_rates(monkeypatch, calls, failed=()):
+    """engine.rates.store.recalc_on_file as a recording fake behind backfill._import_recalc_rates:
+    prices "the swaps" only from the day's OIS quotes on file, as the real one does, and
+    records how many curve_quotes rows the day held when it was asked."""
+    def fake_recalc(conn, as_of, since=None):
+        n = conn.execute("SELECT COUNT(*) FROM curve_quotes WHERE as_of_date = ? AND quote_type = 'OIS'", (as_of,)).fetchone()[0]
+        calls.append((as_of, since, n))
+        if not n:
+            return {"as_of": as_of, "since": since, "days": [], "priced": 0, "failed": 0}
+        day = {"day": as_of, "priced": 1, "failed": [dict(f) for f in failed]}
+        return {"as_of": as_of, "since": since, "days": [day], "priced": 1, "failed": len(day["failed"])}
+    monkeypatch.setattr(backfill, "_import_recalc_rates", lambda: fake_recalc)
+    return fake_recalc
+
+
+def test_backfill_asks_the_history_for_the_swaps_curve_and_prices_the_day_from_it(tmp_path, monkeypatch):
+    p, conn = _swap_and_forward_db(tmp_path)
+    calls = []
+    _fake_rates(monkeypatch, calls, failed=[{"trade_id": "s9", "error": "missing fixing"}])
+    QUOTE_ASKED.clear()
+    log = []
+    results = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 8), fetch=_aud_spot, fwd_fetch=_aud_fwd,
+                                fut_fetch=_never_called, quote_fetch=quote_history, log=log.append)
+    assert [r["status"] for r in results] == ["DONE", "DONE"]
+    # ONE daily-history request for the stretch: USD's own OIS tickers (rates_marketdata.ois_curve), PX_LAST
+    assert QUOTE_ASKED == [(_ois_tickers("USD"), ["PX_LAST"], date(2026, 9, 7), date(2026, 9, 8))]
+    assert len(_ois_tickers("USD")) == 17
+    # written as the live rates step writes them: per cent scaled to a decimal, index SOFR, BBG_BDH
+    rows = conn.execute('SELECT as_of_date, ccy, "index", tenor, ticker, value, quote_type, field, source '
+                        "FROM curve_quotes ORDER BY as_of_date, ticker").fetchall()
+    assert len(rows) == 34 and {r[1:3] for r in rows} == {("USD", "SOFR")}
+    assert {(r[5], r[6], r[7], r[8]) for r in rows} == {(0.039, "OIS", "PX_LAST", "BBG_BDH")}
+    assert ("2026-09-07", "USD", "SOFR", "1W", "USOSFR1Z Curncy", 0.039, "OIS", "PX_LAST", "BBG_BDH") in rows
+    # the swaps priced for each day, from that day's quotes, once the quotes were on file
+    assert calls == [("2026-09-07", "2026-09-07", 17), ("2026-09-08", "2026-09-08", 17)]
+    for r in results:
+        assert (r["curve_quotes"], r["vol_quotes"], r["missing_inputs"]) == (17, 0, [])
+        assert r["rates_priced"] == 1 and r["rates_failed"] == [{"trade_id": "s9", "error": "missing fixing"}]
+        assert r["rates_note"] == ""
+    assert any("2026-09-08  DONE" in s and "curve_quotes=17" in s and "rates=1" in s and "rates_failed=1" in s for s in log)
+    # the days hold their curves now: nothing is asked again, and the swaps are priced again
+    # from what is on file (a re-run is idempotent) only when the day is worked
+    QUOTE_ASKED.clear()
+    calls.clear()
+    from data.bloomberg.inventory import close_completeness
+    assert list(close_completeness(conn, "2026-09-07", "2026-09-08")["inputs_missing"]) == [[], []]
+    again = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 8), fetch=_never_called, fwd_fetch=_never_called,
+                              fut_fetch=_never_called, quote_fetch=_never_called, log=lambda *_: None)
+    assert [r["status"] for r in again] == ["SKIPPED", "SKIPPED"] and calls == [] and QUOTE_ASKED == []
+
+
+def test_a_book_of_swaps_alone_still_gets_its_curves_and_is_priced(tmp_path, monkeypatch):
+    """The early bail-out used to need an FX pair or a future; a swap's curve is a need too."""
+    p, conn = _swap_and_forward_db(tmp_path, with_forward=False)
+    calls = []
+    _fake_rates(monkeypatch, calls)
+    results = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8), fetch=_never_called, fwd_fetch=_never_called,
+                                fut_fetch=_never_called, quote_fetch=quote_history, log=lambda *_: None)
+    assert [(r["status"], r["closes"], r["curve_quotes"], r["rates_priced"]) for r in results] == [("DONE", 0, 17, 1)]
+    assert calls == [("2026-09-08", "2026-09-08", 17)]
+
+
+def test_a_day_that_holds_the_smile_or_the_curve_is_not_asked_for_it_again(tmp_path, monkeypatch):
+    """The live pull wrote Monday's USD curve (BBG_BDP) and USDJPY smile; Tuesday has neither.
+    One request per kind still goes for the stretch (Tuesday lacks them), Monday's rows are
+    left as they are, and a run over Monday alone asks nothing."""
+    p, conn = _swap_and_forward_db(tmp_path)
+    conn.execute("INSERT INTO instruments VALUES ('USDJPY101526C-1','FX_OPTION','USD','JPY',1,0,'USDJPY101526C-1','2026-10-15')")
+    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','USDJPY101526C-1','FX_OPTION','o1','2026-09-01',1e6,0.01,"
+                 "'acc','cp','','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','USD',1e6,'2026-09-01','2026-10-15',0,0)")
+    from data.bloomberg import rates_marketdata as rm, vol_marketdata as vm
+    mon = "2026-09-07"
+    rm.write_curve_quotes(conn, rm.CurveSnapshot("USD", "SOFR", date(2026, 9, 7), [
+        rm.CurveQuote(spec.tenor, spec.ticker, rm.scale_quote(__import__("decimal").Decimal("4.1")))
+        for spec in rm.ois_curve("USD")]), mon)                                      # BBG_BDP: the live pull's
+    vm.write_vol_quotes(conn, {"USDJPY": vm.PairVolSnapshot("USDJPY", date(2026, 9, 7), [
+        vm.VolQuote("1M", "ATM", vm.vol_ticker("USDJPY", "1M", "ATM"), 9.1)])}, mon)  # BBG_BDP, one quote is enough
+    conn.commit()
+    from data.bloomberg.inventory import close_completeness
+    strip = {r.as_of_date: r.inputs_missing for r in close_completeness(conn, "2026-09-07", "2026-09-08").itertuples()}
+    assert strip == {mon: [{"kind": "OIS_CURVE", "key": "JPY"}],
+                     "2026-09-08": [{"kind": "OIS_CURVE", "key": "JPY"}, {"kind": "OIS_CURVE", "key": "USD"},
+                                    {"kind": "VOL_SMILE", "key": "USDJPY"}]}
+    calls = []
+    _fake_rates(monkeypatch, calls)
+    monkeypatch.setattr(backfill, "_import_price_close", lambda: (lambda conn, day: {"day": day, "priced": 1, "skipped": []}))
+    QUOTE_ASKED.clear()
+    fetch = lambda s, v, tickers, field, day: {t: {"AUDUSD Curncy": 0.65, "USDJPY Curncy": 147.0}[t] for t in tickers}  # noqa: E731
+    results = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 8), fetch=fetch, fwd_fetch=_aud_fwd,
+                                fut_fetch=_never_called, quote_fetch=quote_history, log=lambda *_: None)
+    assert [r["status"] for r in results] == ["DONE", "DONE"]
+    assert QUOTE_ASKED == [(_vol_tickers("USDJPY"), ["PX_LAST"], date(2026, 9, 7), date(2026, 9, 8)),
+                           (sorted(_ois_tickers("JPY") + _ois_tickers("USD")), ["PX_LAST"], date(2026, 9, 7), date(2026, 9, 8))]
+    by_day = {r["day"]: r for r in results}
+    assert (by_day[mon]["vol_quotes"], by_day[mon]["curve_quotes"]) == (0, 9)             # JPY alone (9 tickers)
+    assert (by_day["2026-09-08"]["vol_quotes"], by_day["2026-09-08"]["curve_quotes"]) == (45, 17 + 9)
+    # Monday's own rows stand: the live curve's value and source, its one smile quote
+    assert conn.execute("SELECT DISTINCT source, value FROM curve_quotes WHERE as_of_date = ? AND ccy = 'USD'",
+                        (mon,)).fetchall() == [("BBG_BDP", 0.041)]
+    assert conn.execute("SELECT COUNT(*), MIN(source) FROM vol_quotes WHERE as_of_date = ?", (mon,)).fetchone() == (1, "BBG_BDP")
+    assert conn.execute("SELECT COUNT(*), MIN(source) FROM vol_quotes WHERE as_of_date = '2026-09-08'").fetchone() == (45, "BBG_BDH")
+    assert calls == [(mon, mon, 17 + 9), ("2026-09-08", "2026-09-08", 17 + 9)]
+    # a run over Monday alone, now complete with its inputs, asks nothing
+    QUOTE_ASKED.clear()
+    again = backfill.backfill(p, date(2026, 9, 7), date(2026, 9, 7), fetch=_never_called, fwd_fetch=_never_called,
+                              fut_fetch=_never_called, quote_fetch=_never_called, log=lambda *_: None)
+    assert [r["status"] for r in again] == ["SKIPPED"] and QUOTE_ASKED == []
+
+
+def test_a_curve_the_history_cannot_fill_is_named_and_the_swaps_say_why_they_were_not_priced(tmp_path, monkeypatch):
+    """Fewer than rates_marketdata._MIN_QUOTES (the live source's own floor) OIS quotes come
+    back: nothing is written for that currency, the day names it under missing_inputs and
+    stays due for it, and the rates step says the swaps had no quotes to price from."""
+    p, conn = _swap_and_forward_db(tmp_path)
+    calls = []
+    _fake_rates(monkeypatch, calls)
+
+    def thin(session, service, tickers, fields, start, end):
+        kept = [t for t in tickers if t in ("USOSFR1Z Curncy", "USOSFR2Z Curncy", "USOSFR3Z Curncy")]   # three of 17
+        return {t: {d.isoformat(): {"PX_LAST": 3.9} for d in backfill.business_days(start, end)} for t in kept}
+
+    results = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8), fetch=_aud_spot, fwd_fetch=_aud_fwd,
+                                fut_fetch=_never_called, quote_fetch=thin, log=lambda *_: None)
+    r = results[0]
+    assert r["status"] == "DONE" and r["curve_quotes"] == 0
+    assert [(m["kind"], m["key"]) for m in r["missing_inputs"]] == [("OIS_CURVE", "USD")]
+    assert r["missing_inputs"][0]["reason"].startswith("fewer than 4 OIS quotes for USD on 2026-09-08: Bloomberg returned "
+                                                       "no value for USOSFRA Curncy, USOSFRB Curncy")
+    assert conn.execute("SELECT COUNT(*) FROM curve_quotes").fetchone() == (0,)
+    assert calls == [("2026-09-08", "2026-09-08", 0)]
+    assert (r["rates_priced"], r["rates_failed"], r["rates_note"]) == (0, [], "no OIS quotes on file for 2026-09-08: swaps not priced")
+    from data.bloomberg.inventory import close_completeness
+    row = close_completeness(conn, "2026-09-08", "2026-09-08").iloc[0]
+    assert bool(row["complete"]) is True and row["inputs_missing"] == [{"kind": "OIS_CURVE", "key": "USD"}]
+    # the pricer not importable, or raising: the day stands and says so, like the options step
+    monkeypatch.setattr(backfill, "_import_recalc_rates", lambda: None)
+    r = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8), fetch=_aud_spot, fwd_fetch=_aud_fwd,
+                          fut_fetch=_never_called, quote_fetch=quote_history, log=lambda *_: None)[0]
+    assert (r["status"], r["curve_quotes"], r["rates_priced"], r["rates_note"]) == ("DONE", 17, None, backfill.RATES_RECALC_UNAVAILABLE)
+
+    def boom(conn, as_of, since=None):
+        raise RuntimeError("QuantLib refused the curve")
+
+    monkeypatch.setattr(backfill, "_import_recalc_rates", lambda: boom)
+    r = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8), fetch=_aud_spot, fwd_fetch=_aud_fwd,
+                          fut_fetch=_never_called, quote_fetch=quote_history, overwrite=True, log=lambda *_: None)[0]
+    assert r["rates_priced"] is None and "QuantLib refused the curve" in r["rates_note"]
+    # no swap open: the pricer is never called
+    conn.execute("DELETE FROM trade_legs WHERE trade_id = 's1'")
+    conn.execute("DELETE FROM trades WHERE trade_id = 's1'")
+    conn.commit()
+    calls.clear()
+    _fake_rates(monkeypatch, calls)
+    r = backfill.backfill(p, date(2026, 9, 8), date(2026, 9, 8), fetch=_aud_spot, fwd_fetch=_aud_fwd,
+                          fut_fetch=_never_called, quote_fetch=_never_called, overwrite=True, log=lambda *_: None)[0]
+    assert calls == [] and (r["rates_priced"], r["rates_failed"], r["rates_note"]) == (None, [], "")
+
+
+def test_the_library_lists_a_past_days_curve_and_smile_for_options_and_swaps_only(tmp_path):
+    """What a past close needs: the options' and swaps' OIS_CURVE / VOL_SMILE rows, a currency
+    out of the OIS scope never, a listed option's curve (its Greeks today) never, and the
+    live-only kinds (fixings, the 1M NDF, a dividend yield) never."""
+    from data.bloomberg import library
+    p, conn = _swap_and_forward_db(tmp_path)
+    conn.execute("INSERT INTO instruments VALUES ('EURSEK-OPT-1','FX_OPTION','EUR','SEK',1,0,'EURSEK-OPT-1','2026-10-15')")
+    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','EURSEK-OPT-1','FX_OPTION','o1','2026-09-01',1e6,0.01,"
+                 "'acc','cp','','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','EUR',1e6,'2026-09-01','2026-10-15',0,0)")
+    conn.commit()
+    assert library.LIVE_ONLY_KINDS == ("FIXINGS", library.NDF_1M, library.DIV_YIELD)
+    assert library.HISTORY_INPUT_KINDS == ("OIS_CURVE", "VOL_SMILE")
+    past = {(r["kind"], r["key"], r["product"]) for r in library.needed_on(conn, "2026-09-08", historical=True)
+            if r["kind"] in library.HISTORY_INPUT_KINDS}
+    assert past == {("OIS_CURVE", "USD", "IRS"), ("OIS_CURVE", "EUR", "FX_OPTION"), ("OIS_CURVE", "SEK", "FX_OPTION"),
+                    ("VOL_SMILE", "EURSEK", "FX_OPTION")}
+    assert not [r for r in library.needed_on(conn, "2026-09-08", historical=True) if r["kind"] in library.LIVE_ONLY_KINDS]
+    assert library.history_inputs_needed(conn, "2026-09-08") == [
+        {"kind": "OIS_CURVE", "key": "EUR"}, {"kind": "OIS_CURVE", "key": "USD"}, {"kind": "VOL_SMILE", "key": "EURSEK"}]
+    assert library.history_inputs_needed(conn, "2026-08-31") == []                       # before either was dealt
+    assert {(r["kind"], r["key"]) for r in library.needed_in_range(conn, "2026-09-01", "2026-09-08")} >= {
+        ("OIS_CURVE", "USD"), ("VOL_SMILE", "EURSEK"), ("SPOT", "AUDUSD")}

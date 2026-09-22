@@ -29,28 +29,24 @@ in the direction the user chose) and calls ``apply_overrides`` once more at the 
 Sign convention (CLAUDE.md): ``trades.quantity`` > 0 = pay fixed, < 0 = receive fixed;
 FIXED leg amount = -quantity, FLOAT leg amount = +quantity.
 
-A flipped swap KEEPS ITS HISTORY, by sign reversal. When a swap actually turns round
-(``set_direction``, ``apply_overrides``, ``reverse_flipped``), the marks engine/rates
-already wrote for it are not deleted: for that instrument's ``QL_PRICER`` rows, on
-every as_of_date, PV_USD, DV01_USD and CASHFLOW_USD are multiplied by -1 in place and
-PAR_RATE is left alone. Why not delete: swaps are priced for TODAY only (the live pull
-calls engine/rates for the current as-of, and the historical backfill never calls it),
-so deleted history never comes back and the swap's Daily, 5d, MTD and YTD would stay
-blank for good. Why reversal is exact and not an approximation: a vanilla
-single-currency OIS receiver is the same two legs as the payer with every cashflow's
-sign swapped, priced on the same curve, so its NPV, its bump-and-reprice DV01 (stored
-signed: bumped NPV minus NPV) and its settled cashflows are each exactly minus the
-payer's, and the fair rate does not depend on which side you are on. Proved against
-engine/rates itself in tests/test_ingest.py
-(``test_receiver_marks_are_exactly_minus_the_payers_...``): forward-starting, seasoned
-with a coupon already paid, and expired swaps all come out bit-for-bit negative, and
-the reversed marks equal what the pricer writes for the flipped trade. The USD
-conversion is one positive factor on both sides, so it holds for non-USD swaps too.
-What IS still deleted on a flip: PV_USD / DV01_USD / CASHFLOW_USD rows from any OTHER
-source (BBG_BDH SWPM reconciliation, MANUAL), because nothing records which direction
-they were entered for; and the trade's ``realised_pnl`` row, which the ledger
-re-realises at once from the reversed marks. If two trades ever share one instrument
-the marks cannot be attributed to either, so they are deleted, not reversed.
+A flipped swap KEEPS ITS HISTORY, by sign reversal, done by the pricer. When a swap
+actually turns round (``set_direction``, ``apply_overrides``, ``reverse_flipped``), the
+marks engine/rates already wrote for it are not deleted: this module calls
+``engine/rates/store.py::reverse_direction_marks``, which multiplies that instrument's
+``QL_PRICER`` PV_USD / DV01_USD / CASHFLOW_USD rows by -1 in place on every as_of_date,
+leaves PAR_RATE alone, deletes those three types from any other source (nothing
+records which direction a BBG_BDH or MANUAL row was entered for) and the trade's
+``realised_pnl`` row (re-realised at once from the reversed marks), and deletes rather
+than reverses when two trades share one instrument. The function lives in the pricer,
+not here (reviewer finding, 2026-09-22): hard rule 2 says nothing reaches ``marks``
+that the app's own pricers did not produce, and the ingest layer is not a pricer. Why
+reversal is exact, and why reverse rather than delete, is in that function's docstring;
+the proof (forward-starting, seasoned with a coupon paid, and expired swaps, reversed
+marks equal to what the pricer writes for the flipped trade) is in
+tests/test_rates_pricing.py and tests/test_ingest.py
+(``test_receiver_marks_are_exactly_minus_the_payers_...``). ``engine.rates.store``
+loads QuantLib at import, so it is imported lazily, inside ``_reverse_marks``, and this
+module stays QuantLib-free at import time for the parser and the UI.
 """
 from __future__ import annotations
 
@@ -62,18 +58,12 @@ from contextlib import contextmanager
 from typing import Dict, Iterator, List
 
 from data.ingest.common import NO_DIRECTION_SIGNAL
-from data.ingest.schema import IRS_DIRECTION_DDL, OFFICIAL_MARK_SOURCE
+from data.ingest.schema import IRS_DIRECTION_DDL
 
 log = logging.getLogger(__name__)
 
 TABLE = "irs_direction_overrides"
 DIRECTIONS = ("PAY", "RECEIVE")
-# Swap marks whose value is exactly minus itself for the opposite direction (module
-# docstring). PAR_RATE is direction-free and is never touched.
-DIRECTIONAL_MARK_TYPES = ("PV_USD", "DV01_USD", "CASHFLOW_USD")
-# The source whose rows are reversed in place: engine/rates' own output, priced from the
-# direction that was on file. Rows from any other source are deleted on a flip.
-PRICER_SOURCE = OFFICIAL_MARK_SOURCE["PV_USD"]   # 'QL_PRICER'
 
 
 def _now() -> str:
@@ -117,9 +107,10 @@ def _apply_one(conn: sqlite3.Connection, trade_id: str, instrument_id: str, quan
     """Point one IRS trade and its legs in `direction`. Returns True when anything on
     file actually changed, in which case (unless `turn_marks` is False, see
     `reapply_after_load`) what was priced or frozen for the old direction is turned round
-    with it (`_reverse_priced`: the pricer's own marks reversed in place on every date,
-    other sources' marks and the `realised_pnl` row deleted). An unchanged trade is left
-    exactly as it is: its marks were priced this way round."""
+    with it (`_reverse_marks`, the pricer's own `reverse_direction_marks`: its marks
+    reversed in place on every date, other sources' marks and the `realised_pnl` row
+    deleted). An unchanged trade is left exactly as it is: its marks were priced this
+    way round."""
     try:
         magnitude = abs(float(quantity))
     except (TypeError, ValueError):
@@ -137,8 +128,18 @@ def _apply_one(conn: sqlite3.Connection, trade_id: str, instrument_id: str, quan
         conn.execute("UPDATE trade_legs SET amount = ? WHERE trade_id = ? AND leg_type = ?",
                      (amount, trade_id, leg_type))
     if turn_marks:
-        _reverse_priced(conn, trade_id, instrument_id)
+        _reverse_marks(conn, trade_id, instrument_id)
     return True
+
+
+def _reverse_marks(conn: sqlite3.Connection, trade_id: str, instrument_id: str) -> None:
+    """The pricer turns its own marks round (module docstring; hard rule 2). Imported
+    here and not at module level because ``engine.rates.store`` loads QuantLib at
+    import, which the parser, the upload and the UI must not pay for on every import
+    of this module. Runs inside the caller's transaction: it commits nothing."""
+    from engine.rates.store import reverse_direction_marks
+
+    reverse_direction_marks(conn, trade_id, instrument_id)
 
 
 def set_direction(conn: sqlite3.Connection, trade_id: str, direction: str) -> None:
@@ -222,36 +223,6 @@ def _apply_overrides(conn: sqlite3.Connection, turn_marks: bool) -> int:
 
 
 # --------------------------------------------------------------------------- extras
-def _reverse_priced(conn: sqlite3.Connection, trade_id: str, instrument_id: str) -> None:
-    """Turn one flipped swap's priced history round (module docstring for why this is
-    exact). For `instrument_id`, on every as_of_date:
-      - PRICER_SOURCE rows of PV_USD / DV01_USD / CASHFLOW_USD: value * -1 in place
-        (0 stays 0.0, never -0.0);
-      - rows of those three types from any other source, and any PRICER_SOURCE row whose
-        stored value is not a number (nothing to reverse): deleted;
-      - PAR_RATE, and every other mark type: untouched.
-    Then the trade's `realised_pnl` row is deleted so the ledger re-realises it from the
-    reversed marks. If another trade shares the instrument the marks cannot be attributed
-    to this one, so all three types are deleted instead of reversed."""
-    if _table_exists(conn, "marks"):
-        types = ",".join("?" for _ in DIRECTIONAL_MARK_TYPES)
-        shared = conn.execute("SELECT COUNT(*) FROM trades WHERE instrument_id = ?", (instrument_id,)).fetchone()[0] > 1
-        if shared:
-            conn.execute(f"DELETE FROM marks WHERE instrument_id = ? AND mark_type IN ({types})",
-                         (instrument_id, *DIRECTIONAL_MARK_TYPES))
-        else:
-            conn.execute(
-                f"DELETE FROM marks WHERE instrument_id = ? AND mark_type IN ({types}) "
-                "AND (source != ? OR typeof(value) NOT IN ('real', 'integer'))",
-                (instrument_id, *DIRECTIONAL_MARK_TYPES, PRICER_SOURCE))
-            conn.execute(
-                f"UPDATE marks SET value = CASE WHEN value = 0 THEN 0.0 ELSE -value END "
-                f"WHERE instrument_id = ? AND mark_type IN ({types}) AND source = ?",
-                (instrument_id, *DIRECTIONAL_MARK_TYPES, PRICER_SOURCE))
-    if _table_exists(conn, "realised_pnl"):
-        conn.execute("DELETE FROM realised_pnl WHERE trade_id = ?", (trade_id,))
-
-
 def irs_signs(conn: sqlite3.Connection) -> Dict[str, int]:
     """{trade_id: +1 pay fixed | -1 receive fixed} for the IRS trades on file now. Taken
     before a book is rewritten so `reverse_flipped` can tell afterwards which swaps
@@ -264,7 +235,7 @@ def irs_signs(conn: sqlite3.Connection) -> Dict[str, int]:
 def reverse_flipped(conn: sqlite3.Connection, before: Dict[str, int]) -> int:
     """After a book rewrite: for every swap that was on file in `before` (`irs_signs`,
     taken before the rewrite) and now faces the other way, turn its priced history round
-    exactly as `set_direction` does (`_reverse_priced`). Returns how many swaps that was.
+    exactly as `set_direction` does (`_reverse_marks`). Returns how many swaps that was.
     A swap that is new, gone, or unchanged keeps its marks as they are. Call it ONCE per
     rewrite, on the connection whose marks are the live ones: reversing twice would put
     the old signs back."""
@@ -274,7 +245,7 @@ def reverse_flipped(conn: sqlite3.Connection, before: Dict[str, int]) -> int:
         for trade_id, sign in now.items():
             if trade_id in before and before[trade_id] != sign:
                 row = conn.execute("SELECT instrument_id FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
-                _reverse_priced(conn, trade_id, row[0])
+                _reverse_marks(conn, trade_id, row[0])
                 flipped += 1
     return flipped
 

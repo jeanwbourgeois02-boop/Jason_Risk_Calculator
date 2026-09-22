@@ -55,7 +55,8 @@ roll to new day after new york 5pm".
   when the close lands (`_write_closes` touches only marks; the purges cover NDF present-spot,
   exact-day NDF_FIX and closed-out options only). Pre-existing, but the roll makes it the
   ordinary HK-morning case. pnl-engine's.
-- FUTURE_PX: is_close_row says a future row is always a close, so a day's live PX_LAST press
+- (DONE later on 2026-09-22, see [[history-inputs-and-futures-settle-2026-09-22]]: settle_stamp 17:00.)
+  FUTURE_PX: is_close_row said a future row is always a close, so a day's live PX_LAST press
   is never replaced by that day's PX_SETTLE (CLAUDE.md "Futures keep PX_SETTLE" is only true
   for days with no live pull). pull_marks.build_future_rows stamps LIVE rows at
   snapped_at(as_of) = 15:00 of the book date - a future instant on the evening of D.

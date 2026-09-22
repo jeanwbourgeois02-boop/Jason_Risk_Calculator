@@ -2,7 +2,7 @@
 SQLite schema (``data/ingest/schema.py``): reads ``curve_quotes`` / ``trades`` /
 ``trade_legs``, writes ``curves`` / ``marks``.
 
-Three entry points:
+Four entry points:
   - ``bootstrap_and_store(conn, as_of, ccy, index=None)``: bootstraps the OIS curve for
     (ccy, index) from ``curve_quotes`` and writes one ``curves`` row per pillar,
     ``source='QL_PRICER'``. Returns the in-memory ``CurveSet`` (used by
@@ -14,6 +14,14 @@ Three entry points:
     the ``curve_quotes`` on file, day by day, asking Bloomberg nothing; the rerun of
     the past days after the switch to flat forwards (``curves.py``), and the launcher's
     / the pull button's no-Bloomberg path.
+  - ``reverse_direction_marks(conn, trade_id, instrument_id)`` (2026-09-22): when a
+    swap's pay / receive direction is flipped (``data/ingest/irs_direction.py``), this
+    package's own ``PV_USD`` / ``DV01_USD`` / ``CASHFLOW_USD`` rows are multiplied by
+    -1 on every date, exact for a vanilla OIS (below). It lives here and not in the
+    ingest layer because hard rule 2 says nothing reaches ``marks`` that the app's own
+    pricers did not produce: the pricer reverses its own marks (reviewer finding,
+    2026-09-22). Imports QuantLib at module load like the rest of this module, so the
+    ingest layer imports it lazily, inside the function that calls it.
 
 Sign / value conventions (see also ``valuation.py`` and ``instruments.py``
 docstrings, and CLAUDE.md "P&L conventions"):
@@ -294,6 +302,70 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[dict]:
             entry["error"] = f"{type(exc).__name__}: {exc}"
         out.append(entry)
     return out
+
+
+# --------------------------------------------------------------------------- direction flip
+# Swap marks whose value is exactly minus itself for the opposite direction. PAR_RATE is
+# direction-free and is never touched.
+DIRECTIONAL_MARK_TYPES = ("PV_USD", "DV01_USD", "CASHFLOW_USD")
+# This package's own source (CLAUDE.md "Official marks": QL_PRICER is official for these
+# mark types), the rows reversed in place; rows from any other source are deleted on a flip.
+PRICER_SOURCE = "QL_PRICER"
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
+
+
+def reverse_direction_marks(conn: sqlite3.Connection, trade_id: str, instrument_id: str) -> None:
+    """Turn one flipped swap's priced history round: the pricer's own marks, reversed by
+    the pricer. Called by ``data/ingest/irs_direction.py`` (``set_direction``,
+    ``apply_overrides``, ``reverse_flipped``) once a swap's ``trades.quantity`` and legs
+    have actually changed sign, inside the caller's transaction: this function commits
+    nothing and rolls back nothing, so a failure here undoes the flip with it.
+
+    Why reversal is exact and not an approximation: a vanilla single-currency OIS
+    receiver is the same two legs as the payer with every cashflow's sign swapped,
+    priced on the same curve, so its NPV, its bump-and-reprice DV01 (stored signed:
+    bumped NPV minus NPV) and its settled cashflows are each exactly minus the payer's,
+    and the fair rate does not depend on which side you are on. The USD conversion is
+    one positive factor on both sides, so it holds for non-USD swaps too. Proved against
+    this package itself in tests/test_rates_pricing.py and tests/test_ingest.py:
+    forward-starting, seasoned with a coupon already paid, and expired swaps all come
+    out bit-for-bit negative, and the reversed marks equal what ``price_and_store``
+    writes for the flipped trade. Why reverse rather than delete: swaps are priced for
+    today by the live pull and the past days only by ``recalc_on_file``, so deleted
+    history would leave the swap's Daily, 5d, MTD and YTD blank until the next rerun.
+
+    For `instrument_id`, on every as_of_date:
+      - PRICER_SOURCE rows of PV_USD / DV01_USD / CASHFLOW_USD: value * -1 in place
+        (0 stays 0.0, never -0.0);
+      - rows of those three types from any other source (BBG_BDH SWPM reconciliation,
+        MANUAL: nothing records which direction they were entered for), and any
+        PRICER_SOURCE row whose stored value is not a number (nothing to reverse):
+        deleted;
+      - PAR_RATE, and every other mark type: untouched.
+    Then the trade's `realised_pnl` row is deleted so the ledger re-realises it from the
+    reversed marks. If another trade shares the instrument the marks cannot be attributed
+    to this one, so all three types are deleted instead of reversed. A database without
+    a `marks` or `realised_pnl` table is left alone."""
+    if _table_exists(conn, "marks"):
+        types = ",".join("?" for _ in DIRECTIONAL_MARK_TYPES)
+        shared = conn.execute("SELECT COUNT(*) FROM trades WHERE instrument_id = ?", (instrument_id,)).fetchone()[0] > 1
+        if shared:
+            conn.execute(f"DELETE FROM marks WHERE instrument_id = ? AND mark_type IN ({types})",
+                         (instrument_id, *DIRECTIONAL_MARK_TYPES))
+        else:
+            conn.execute(
+                f"DELETE FROM marks WHERE instrument_id = ? AND mark_type IN ({types}) "
+                "AND (source != ? OR typeof(value) NOT IN ('real', 'integer'))",
+                (instrument_id, *DIRECTIONAL_MARK_TYPES, PRICER_SOURCE))
+            conn.execute(
+                f"UPDATE marks SET value = CASE WHEN value = 0 THEN 0.0 ELSE -value END "
+                f"WHERE instrument_id = ? AND mark_type IN ({types}) AND source = ?",
+                (instrument_id, *DIRECTIONAL_MARK_TYPES, PRICER_SOURCE))
+    if _table_exists(conn, "realised_pnl"):
+        conn.execute("DELETE FROM realised_pnl WHERE trade_id = ?", (trade_id,))
 
 
 _OIS_QUOTE_DAYS_SQL = (

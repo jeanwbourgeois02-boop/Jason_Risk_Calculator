@@ -342,6 +342,28 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   (rates-pricer's log-linear fallback record, read with ``getattr``) to
   ``RateInput.detail``, so a priced option's rate provenance names the fallback curve.
   No pricing formula changed.
+- Closed-out options are not priced (options-pricer, landed 2026-09-22; user: "we dont
+  need to price all options, as some of them might be closed out already. If they are
+  exactly the same, same strike / underlyer / expiry / type and closed out, we just
+  present the buy and sell price as pnl. We dont need to price them individually"). The
+  P&L already valued every trade of such a group at the closing fill, status CLOSED
+  (CLAUDE.md "A closed-out option is not live"; ``engine/pnl/valuation.py::
+  closed_out_from_rows``), and the ledger freezes them CLOSE_OUT after expiry, so no
+  mark of theirs is read; the pricer still priced them all. Now ``store.
+  closed_out_options(conn, as_of)`` wraps the P&L's own ``closed_out_options`` (lazy
+  import; no cycle exists today, engine.pnl imports nothing of engine.options) and
+  ``price_all_and_store`` (expiry-day catch-up included), ``price_close`` and so
+  ``recalc_on_file`` leave every trade of a group closed out as of the date priced
+  unpriced, old marks on file untouched, and report them under their own head:
+  ``PricingOutcome.closed_out = True`` (``priced=False``, reason "closed out <date>:
+  ..."), ``price_close``'s ``"closed_out": [trade_ids]``, ``recalc_on_file``'s
+  ``"closed_out"`` total. A date before the sell-back still prices the opening trade
+  (the group is as of the date); a part sell-back is still priced; ``price_and_store``
+  (one trade by name) and the listed-option path are unchanged (the P&L's rule covers
+  FX_OPTION only). ``data/bloomberg/live.py::_options_step`` still lists these outcomes
+  under ``skipped`` (it reads ``priced`` / ``reason`` only): bbg-data's to split on
+  ``closed_out`` so the status line can say "N closed-out options not priced". Tests:
+  ``tests/test_options_close.py``.
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

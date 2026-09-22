@@ -19,7 +19,7 @@ Status meaning:
 | Option Buy = long, Sell = short | 7 Buy, 1 Sell | documented; verified | | |
 | IRS `Quantity × 1e6` fallback when `Notional` is blank | never triggered; the 1e6 ratio itself holds on all 10 rows | documented; fallback unverified | notional wrong by six orders of magnitude | a real row with a blank Notional |
 | `Fin Type` exact values | 100 % exact: FORWARD, CURRENCY, FUTURE, OPTION, INTEREST_RATE_SWAP | verified | | |
-| `Fin Type` fuzzy keywords (Futures, FX Forward, OUTRIGHT, NDF, SPOT, CASH, bare SWAP) | never triggered | three documented in CLAUDE.md, the rest GUESS | a differently worded export misclassified or dropped | an export with different wording |
+| `Fin Type` fuzzy keywords (Futures, FX Forward, OUTRIGHT, NDF, SPOT, CASH; FX Swap / Currency Swap -> FORWARD, bare Swap -> skipped) | never triggered | three documented in CLAUDE.md, the rest GUESS | a differently worded export misclassified or dropped | an export with different wording |
 | `Version` de-duplication keeps the highest version | 0 repeated Trade Ids in 857 rows | documented; unit-tested; unverified on real data | a re-issued trade keeps the wrong version | a real file with a repeated Trade Id |
 | Day-first date detection | `TradeDate` values like 20/8/2026 make it unambiguous | verified for this file | wrong dates on a file with no day above 12 | |
 | Option expiry and call/put from the Symbol | 8 of 8 match; now cross-checked against the Description | verified | | |

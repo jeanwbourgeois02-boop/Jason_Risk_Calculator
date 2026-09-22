@@ -16,10 +16,14 @@ cycle until 2026-09-21; the rules did not change, only where they are kept):
     at each leg's own settle date until that date; for a cross, the SPOT of each
     currency's own USD pair (USD conversion of delta and P&L).
   * Future: FUTURE_PX at the contract's expiry.
-  * FX option, until expiry: the pair's SPOT, the SPOT of its USD-conversion pairs, and --
-    today only, nothing prices an option on a past date -- a FWD_OUTRIGHT at the expiry,
-    the OIS curve of both currencies and the pair's vol smile.
-  * IRS, until maturity and today only: the currency's OIS curve and overnight fixings.
+  * FX option, until expiry: the pair's SPOT, the SPOT of its USD-conversion pairs, the
+    OIS curve of both currencies and the pair's vol smile (on every day it is open: live
+    today, and from Bloomberg's daily history for a past close, 2026-09-22, so a past day
+    prices the option from its own inputs), and -- today only -- a FWD_OUTRIGHT at the
+    expiry (the past day's curve is built from the tenor history instead).
+  * IRS, until maturity: the currency's OIS curve on every day it is open (live today,
+    history for a past close), and -- today only -- its overnight fixings (the live rates
+    step pulls the fixing history from the swap's start, so no past day asks for them).
   * NDF currencies (user decision 2026-09-21: "NDFs - always show 1m forward date price,
     not spot ... based off the monthly not the spot"): every FX spot / forward / swap and
     every FX option with a currency in data.ingest.common.NDF_1M_TICKERS (KRW, IDR, INR,
@@ -40,7 +44,9 @@ cycle until 2026-09-21; the rules did not change, only where they are kept):
 `kind` is the mark_type for what lands in `marks` (SPOT, FWD_OUTRIGHT, FUTURE_PX, and
 NDF_1M) and OIS_CURVE / FIXINGS / VOL_SMILE / DIV_YIELD for what lands in `curve_quotes` /
 `index_fixings` / `vol_quotes` / `equity_dividend_yields`; the first three stand for a set
-of Bloomberg securities (`tickers` lists them).
+of Bloomberg securities (`tickers` lists them). What a PAST close needs (`needed_on(...,
+historical=True)`, `needed_in_range`) is the MARK_KINDS plus, for an FX option or a swap,
+its HISTORY_INPUT_KINDS (the OIS curve, the vol smile); the LIVE_ONLY_KINDS are today's.
 """
 from __future__ import annotations
 
@@ -68,10 +74,21 @@ LIBRARY_VERSION = "2026-09-22.1"
 NDF_1M = "NDF_1M"                  # an NDF currency's 1M outright, on its USD pair (the ladder's rate)
 DIV_YIELD = "DIV_YIELD"            # an index's dividend yield, for a listed option's Greeks
 DIV_YIELD_FIELDS = ("IDX_EST_DVD_YLD", "EQY_DVD_YLD_12M")   # per cent; the first Bloomberg answers
-# Asked for by today's pull only, never of Bloomberg's history: nothing prices a past date
-# off them. NDF_1M lands in `marks` like the MARK_KINDS do, but no P&L query reads it, so
-# it is kept out of MARK_KINDS -- which is what a past close needs and the backfill fills.
-LIVE_ONLY_KINDS = ("OIS_CURVE", "FIXINGS", "VOL_SMILE", NDF_1M, DIV_YIELD)
+# Asked for by today's pull only, never of Bloomberg's history: FIXINGS because the live
+# rates step pulls the fixing history from the swap's start; NDF_1M because no P&L query
+# reads it (it lands in `marks` like the MARK_KINDS do, but is kept out of them -- which is
+# what a past close needs and the backfill fills); DIV_YIELD because a listed option's Greeks
+# are today's only.
+LIVE_ONLY_KINDS = ("FIXINGS", NDF_1M, DIV_YIELD)
+# The inputs a past close prices its options and swaps from (2026-09-22; until then the
+# backfill wrote a past day's closes and price_close skipped every option whose smile or
+# curve that day lacked, so options had no true 5d / MTD / YTD): the OIS curve of every
+# currency an FX option or a swap needs that day, the vol smile of every pair with an FX
+# option open that day -- the same tickers the live rates and vol steps ask for, from
+# Bloomberg's daily history, into the same tables. A listed option's OIS_CURVE row is for
+# its Greeks today and is not asked of the history (`HISTORY_INPUT_PRODUCTS`).
+HISTORY_INPUT_KINDS = ("OIS_CURVE", "VOL_SMILE")
+HISTORY_INPUT_PRODUCTS = ("FX_OPTION", "IRS")
 # Products whose rows stop being asked for once the ledger has realised the trade (the
 # pull's own rule for options and swaps; an FX leg or a future simply runs to its date).
 _REALISED_FILTER_PRODUCTS = ("FX_OPTION", "IRS")
@@ -283,21 +300,32 @@ def _realised_ids(conn: sqlite3.Connection) -> set:
         return set()
 
 
+def _is_historical_need(r: dict) -> bool:
+    """Is this library row something a PAST close needed? The marks (SPOT, FWD_OUTRIGHT,
+    FUTURE_PX, NDF_FIX) less a forward at an option's expiry and a listed option's index
+    level, plus (2026-09-22) an FX option's or a swap's OIS curve and vol smile
+    (HISTORY_INPUT_KINDS): what the backfill asks Bloomberg's history for."""
+    if r["kind"] in HISTORY_INPUT_KINDS:
+        return r["product"] in HISTORY_INPUT_PRODUCTS
+    return (r["kind"] in MARK_KINDS and not (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION")
+            and r["role"] != ROLE_UNDERLYING)
+
+
 def needed_on(conn: sqlite3.Connection, as_of: str, historical: bool = False) -> List[dict]:
     """The library rows in force on `as_of` (needed_from <= as_of <= needed_until), one
     per trade. Live (the default): an option or a swap the ledger has realised is left
-    out. `historical=True` is what a PAST close needed: marks only (SPOT, FWD_OUTRIGHT,
-    FUTURE_PX), no forward at an option's expiry, and realised or not -- the expiry-day
-    catch-up needs the expiry date's closing SPOT for an option already frozen
-    (data.bloomberg.live.option_needed_marks says why)."""
+    out. `historical=True` is what a PAST close needed (`_is_historical_need`): the marks
+    (SPOT, FWD_OUTRIGHT, FUTURE_PX, NDF_FIX), no forward at an option's expiry, plus the
+    OIS curve and vol smile an FX option or a swap needs that day (2026-09-22), and
+    realised or not -- the expiry-day catch-up needs the expiry date's closing SPOT for an
+    option already frozen (data.bloomberg.live.option_needed_marks says why)."""
     realised = set() if historical else _realised_ids(conn)
     out = []
     for r in rows(conn):
         if not (r["needed_from"] <= as_of <= r["needed_until"]):
             continue
         if historical:
-            if r["kind"] not in MARK_KINDS or (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION") \
-                    or r["role"] == ROLE_UNDERLYING:
+            if not _is_historical_need(r):
                 continue
         elif r["product"] in _REALISED_FILTER_PRODUCTS and r["trade_id"] in realised:
             continue
@@ -306,12 +334,28 @@ def needed_on(conn: sqlite3.Connection, as_of: str, historical: bool = False) ->
 
 
 def needed_in_range(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
-    """`needed_on(historical=True)` for a span: every marks row in force on at least one
-    day of [start, end]. What the backfill asks Bloomberg's history for."""
+    """`needed_on(historical=True)` for a span: every row a past close needs
+    (`_is_historical_need`: the marks, and since 2026-09-22 the OIS_CURVE / VOL_SMILE rows
+    of the FX options and swaps) in force on at least one day of [start, end]. What the
+    backfill asks Bloomberg's history for; readers filter by `kind`."""
     return [r for r in rows(conn)
-            if r["needed_from"] <= end and r["needed_until"] >= start and r["kind"] in MARK_KINDS
-            and not (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION")
-            and r["role"] != ROLE_UNDERLYING]
+            if r["needed_from"] <= end and r["needed_until"] >= start and _is_historical_need(r)]
+
+
+def history_inputs_needed(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+    """The OIS curves and vol smiles a past close on `as_of` prices its options and swaps
+    from: [{kind: OIS_CURVE | VOL_SMILE, key: currency | pair}], sorted, one per key. Only
+    a currency with an OIS curve in scope (rates_marketdata.OIS_INDEX) is listed: SEK has
+    none to ask for, and its option's rate is implied from the pair's forward curve."""
+    try:
+        from data.bloomberg.rates_marketdata import OIS_INDEX
+    except Exception:  # noqa: BLE001 -- no rates layer importable: no curve can be asked for
+        OIS_INDEX = {}
+    found = set()
+    for r in needed_on(conn, as_of, historical=True):
+        if r["kind"] == "VOL_SMILE" or (r["kind"] == "OIS_CURVE" and r["key"] in OIS_INDEX):
+            found.add((r["kind"], r["key"]))
+    return [{"kind": kind, "key": key} for kind, key in sorted(found)]
 
 
 def keys(conn: sqlite3.Connection, as_of: str, kind: str) -> List[str]:

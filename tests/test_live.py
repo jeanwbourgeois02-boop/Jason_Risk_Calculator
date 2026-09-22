@@ -602,6 +602,35 @@ def test_options_step_leaves_other_skip_reasons_and_missing_diagnostics_unchange
                         lambda conn_, as_of: [type("O", (), {"priced": False, "trade_id": "o1", "skip_reason": "no vol"})()])
     out2 = live._options_step(conn, _date(2026, 8, 17), vol_diagnostics=None)
     assert out2["skipped"] == [{"trade_id": "o1", "reason": "no vol"}]
+    assert out2["closed_out"] == [] and "closed_out_summary" not in out2
+
+
+def test_options_step_lists_closed_out_options_under_their_own_head_never_as_skipped(tmp_path, monkeypatch):
+    """A closed-out option is not live (CLAUDE.md): the pricer returns it priced=False,
+    closed_out=True, and the status lists it under "closed_out" with one sentence for the
+    status line, never among the skipped (2026-09-22)."""
+    from datetime import date as _date
+    p, conn = _option_db(tmp_path)
+
+    def outcome(trade_id, priced=False, closed_out=False, reason=""):
+        return type("O", (), {"priced": priced, "closed_out": closed_out, "trade_id": trade_id, "reason": reason})()
+
+    monkeypatch.setattr("engine.options.store.price_all_and_store", lambda conn_, as_of: [
+        outcome("o1", priced=True), outcome("o2", closed_out=True, reason="closed out as of 2026-08-17"),
+        outcome("o3", closed_out=True, reason="closed out as of 2026-08-17"), outcome("o4", reason="no SPOT mark")])
+    out = live._options_step(conn, _date(2026, 8, 17))
+    assert out["priced"] == 1 and out["skipped"] == [{"trade_id": "o4", "reason": "no SPOT mark"}]
+    assert out["closed_out"] == ["o2", "o3"] and out["closed_out_summary"] == "2 closed-out options not priced"
+    assert live.closed_out_sentence(1) == "1 closed-out option not priced" and live.closed_out_sentence(0) == ""
+    # the no-Bloomberg recalc: the pricer's count (or list) is kept out of the skipped and appended to the sentence
+    assert live.recalc_summary({"as_of": "2026-09-23", "priced": 3, "skipped": 1, "closed_out": 2,
+                                "days": [{}, {}]}) == (
+        "no Bloomberg on this machine: options re-priced from the marks on file as of 2026-09-23, 3 priced, "
+        "1 skipped over 2 day(s); 2 closed-out options not priced")
+    assert live.recalc_summary({"as_of": "2026-09-23", "priced": 0, "skipped": 0, "closed_out": ["o2"], "days": []}) == (
+        "no Bloomberg on this machine: no FX option on file to re-price as of 2026-09-23; 1 closed-out option not priced")
+    assert live.recalc_summary({"as_of": "2026-09-23", "priced": 0, "skipped": 0, "days": []}).endswith("as of 2026-09-23")
+    assert live.recalc_options_on_file(tmp_path / "absent-dir" / "x.db", _date(2026, 9, 23))["closed_out"] == 0
 
 
 def test_pull_once_option_only_book_requests_its_pair_and_pulls_curves_and_vol(tmp_path, monkeypatch):
@@ -1817,8 +1846,11 @@ def test_pull_without_bloomberg_reprices_the_options_from_the_marks_on_file_as_o
     monkeypatch.setattr(store, "recalc_on_file", real_recalc)
     failed = live.pull_once(p, session_factory=no_terminal)
     assert failed["connected"] is False and "no Terminal logged in" in failed["reason"]
-    assert failed["recalc"] == {"as_of": "2026-09-23", "since": "2026-09-23", "priced": 0, "skipped": 0,
-                                "days": [{"day": "2026-09-23", "priced": 0, "skipped": []}]}
+    got = failed["recalc"]                                        # the pricer's own dict: its extra keys are its own
+    assert {k: got[k] for k in ("as_of", "since", "priced", "skipped")} == {
+        "as_of": "2026-09-23", "since": "2026-09-23", "priced": 0, "skipped": 0}
+    assert [{k: d[k] for k in ("day", "priced", "skipped")} for d in got["days"]] == [
+        {"day": "2026-09-23", "priced": 0, "skipped": []}]
     assert failed["recalc_summary"] == "no Bloomberg on this machine: no FX option on file to re-price as of 2026-09-23"
     # a pull that fails AFTER its session opened is Bloomberg's failure, not a machine without Bloomberg
     from data.bloomberg import pull_marks as pm

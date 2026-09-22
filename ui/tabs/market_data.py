@@ -213,10 +213,34 @@ def _count(value) -> int:
         return 0
 
 
+def closed_out_count(block: Optional[dict]) -> int:
+    """How many closed-out options the options step left unpriced, from a status block's
+    "closed_out" key (2026-09-22, user: "we dont need to price all options, as some of them
+    might be closed out already"): a list of trade ids in the pull's options block and in
+    each recalc / backfill day, a count at the recalc block's top level. Read defensively:
+    0 when the key is absent (a status file from before the change), empty or not a list
+    or a number, so the caller says nothing and renders as before."""
+    if not isinstance(block, dict):
+        return 0
+    value = block.get("closed_out")
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    if isinstance(value, bool):
+        return 0
+    return _count(value) if isinstance(value, (int, float, str)) else 0
+
+
+def closed_out_words(n: int) -> str:
+    """'3 closed-out options not priced' (the pull's own wording), '' for none."""
+    return f"{n} closed-out option{'s' if n != 1 else ''} not priced" if n > 0 else ""
+
+
 def recalc_day_rows(recalc: Optional[dict]) -> List[dict]:
     """One row per day of `status["recalc"]["days"]` (engine.options.store.recalc_on_file's
-    per-day dicts, {"day", "priced", "skipped": [{"trade_id", "reason"}], "error" when that
-    day stopped}), read defensively: {"day", "priced", "skipped" (a count), "reasons"
+    per-day dicts, {"day", "priced", "skipped": [{"trade_id", "reason"}], "closed_out":
+    [trade ids not priced because the option is closed out, 2026-09-22; absent on an older
+    file], "error" when that day stopped}), read defensively: {"day", "priced", "skipped"
+    (a count), "closed_out" (a count, 0 when the key is absent), "reasons"
     (["<trade>: <reason>", ...]), "error"}. Nothing is recomputed: the counts are the
     pricer's own, and a malformed entry is left out rather than guessed at."""
     rows: List[dict] = []
@@ -231,7 +255,8 @@ def recalc_day_rows(recalc: Optional[dict]) -> List[dict]:
         else:
             reasons, count = [], _count(skipped)
         rows.append({"day": str(entry.get("day") or "?"), "priced": _count(entry.get("priced")),
-                     "skipped": count, "reasons": reasons, "error": str(entry.get("error") or "")})
+                     "skipped": count, "closed_out": closed_out_count(entry), "reasons": reasons,
+                     "error": str(entry.get("error") or "")})
     return rows
 
 
@@ -239,7 +264,7 @@ def recalc_block(status: Optional[dict]) -> Optional[html.Div]:
     """What "Pull Bloomberg now" did on a machine with no Bloomberg (user decision
     2026-09-22: "pull bbg now should recalc options too, using log data if no bbg access"):
     the pull's own sentence (`status["recalc_summary"]`), its error when the re-pricing
-    stopped, and a collapsed day-by-day list (day, priced, skipped) with each skipped
+    stopped, and a collapsed day-by-day list (day, priced, skipped, closed-out when any) with each skipped
     trade's reason listed under its day and on hover. Read from the status file only,
     never from the pricer. None when the last status carries no `recalc` block: a
     connected pull, or a status file from before the change."""
@@ -257,6 +282,9 @@ def recalc_block(status: Optional[dict]) -> Optional[html.Div]:
         items = []
         for row in rows:
             text = f"{row['day']}: {row['priced']} priced, {row['skipped']} skipped"
+            closed = closed_out_words(row["closed_out"])
+            if closed:
+                text += f", {closed}"
             if row["error"]:
                 text += f" · stopped: {row['error']}"
             nested = ([html.Ul([html.Li(reason) for reason in row["reasons"]], style={"margin": "0 0 0 16px", "padding": 0})]
@@ -340,6 +368,11 @@ def _options_step_lines(options_status: Optional[dict]) -> List[str]:
     if isinstance(skipped, str):  # "no FX_OPTION trades to price" -- nothing was skipped, nothing to do
         return [f"Options: {skipped}."]
     lines = [f"Options: {options_status.get('priced', 0)} option(s) priced this cycle."]
+    closed = closed_out_words(closed_out_count(options_status))
+    if closed:
+        # the pull's "closed_out" list (2026-09-22): kept out of "skipped" by the pricer, said
+        # once as a count here; nothing when the key is absent or empty
+        lines.append(f"Options: {closed}.")
     for s in skipped or []:
         lines.append(f"Options {s.get('trade_id', '')}: not priced -- {s.get('reason') or 'no reason given'}.")
     return lines

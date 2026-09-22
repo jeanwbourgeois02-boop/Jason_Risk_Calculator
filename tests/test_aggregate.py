@@ -45,7 +45,6 @@ def test_load_holidays_picks_up_a_changed_file_not_a_stale_cache(tmp_path):
     # Bump the mtime explicitly (some filesystems have coarse mtime resolution) so this
     # test is not flaky on a fast machine that rewrites within the same tick.
     import os
-    import time
     p.write_text("2026-07-04\n2026-12-25\n")
     new_mtime = p.stat().st_mtime + 1
     os.utime(p, (new_mtime, new_mtime))

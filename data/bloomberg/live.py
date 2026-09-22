@@ -984,7 +984,7 @@ def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Option
     Greeks of every listed index option from Bloomberg's price of it. Never raises.
     `vol_diagnostics` (see _vol_step) is used only to enrich a "no vol" skip reason with
     the specific failing Bloomberg ticker(s) for that trade's pair (item 3c, 2026-09-17)."""
-    out: dict = {"priced": 0, "skipped": [], "as_of_date": today.isoformat()}
+    out: dict = {"priced": 0, "skipped": [], "closed_out": [], "as_of_date": today.isoformat()}
     n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product IN ('FX_OPTION','EQ_OPTION') "
                      "AND trade_date <= ?", (today.isoformat(),)).fetchone()[0]
     if not n:
@@ -996,18 +996,33 @@ def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Option
         outcomes = list(price_all_and_store(conn, today.isoformat()))
         outcomes += price_all_and_store_equity(conn, today.isoformat())
         out["priced"] = sum(1 for o in outcomes if getattr(o, "priced", False))
-        skipped = []
+        skipped, closed_out = [], []
         for o in outcomes:
             if getattr(o, "priced", False):
+                continue
+            if getattr(o, "closed_out", False):
+                # A closed-out option is not live (CLAUDE.md): not priced, no mark, and
+                # listed under its own head, never as a skip (2026-09-22).
+                closed_out.append(o.trade_id)
                 continue
             reason = getattr(o, "skip_reason", "") or getattr(o, "reason", "")
             if reason == "no vol" and vol_diagnostics:
                 reason = _enrich_no_vol_reason(conn, o.trade_id, reason, vol_diagnostics)
             skipped.append({"trade_id": o.trade_id, "reason": reason})
         out["skipped"] = skipped
+        out["closed_out"] = closed_out
+        if closed_out:
+            out["closed_out_summary"] = closed_out_sentence(len(closed_out))
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{exc!r}"
     return out
+
+
+def closed_out_sentence(n: int) -> str:
+    """The one sentence about closed-out options a status line carries when there are any
+    (2026-09-22): appended to the recalc summary, and under the options step's
+    "closed_out_summary". '' for none."""
+    return f"{n} closed-out option{'s' if n != 1 else ''} not priced" if n else ""
 
 
 def recalc_options_on_file(db_path, today: date) -> dict:
@@ -1019,12 +1034,13 @@ def recalc_options_on_file(db_path, today: date) -> dict:
     option trade to the book date (engine.options.store.recalc_on_file) -- instead of
     leaving everything as it was. Asks Bloomberg nothing (hard rule 8). Returns that
     function's own dict, {"as_of", "since", "days": [per-day price_close dicts], "priced",
-    "skipped"} plus "error" when something raised, in the same shape when the pricer is not
-    importable or the database cannot be opened. Never raises. With Bloomberg the connected
-    cycle's own options step and the backfill's price_close cover this, so `pull_once` calls
-    it only when no session was opened."""
+    "skipped", "closed_out" (the count of closed-out options, not priced and not among the
+    skipped; 2026-09-22)} plus "error" when something raised, in the same shape when the
+    pricer is not importable or the database cannot be opened. Never raises. With Bloomberg
+    the connected cycle's own options step and the backfill's price_close cover this, so
+    `pull_once` calls it only when no session was opened."""
     as_of = today.isoformat()
-    empty = {"as_of": as_of, "since": None, "days": [], "priced": 0, "skipped": 0}
+    empty = {"as_of": as_of, "since": None, "days": [], "priced": 0, "skipped": 0, "closed_out": 0}
     try:
         from engine.options.store import recalc_on_file
     except ImportError as exc:
@@ -1045,15 +1061,18 @@ def recalc_summary(result: dict) -> str:
     the Market data tab (status["recalc_summary"]; status["reason"] stays the connection
     reason)."""
     priced, skipped = int(result.get("priced") or 0), int(result.get("skipped") or 0)
+    closed_out = result.get("closed_out") or 0
+    closed_out = len(closed_out) if isinstance(closed_out, (list, tuple)) else int(closed_out)
     days, as_of = len(result.get("days") or []), result.get("as_of")
     head = "no Bloomberg on this machine: "
+    tail = f"; {closed_out_sentence(closed_out)}" if closed_out else ""      # never counted as skipped
     if result.get("error"):
         return head + (f"re-pricing the options from the marks on file stopped ({result['error']}); "
-                       f"{priced} priced, {skipped} skipped before that")
+                       f"{priced} priced, {skipped} skipped before that") + tail
     if priced == 0 and skipped == 0:
-        return head + f"no FX option on file to re-price as of {as_of}"
+        return head + f"no FX option on file to re-price as of {as_of}" + tail
     return head + (f"options re-priced from the marks on file as of {as_of}, "
-                   f"{priced} priced, {skipped} skipped over {days} day(s)")
+                   f"{priced} priced, {skipped} skipped over {days} day(s)") + tail
 
 
 def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost", port: int = 8194,

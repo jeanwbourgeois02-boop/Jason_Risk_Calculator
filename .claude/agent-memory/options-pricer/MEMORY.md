@@ -9,3 +9,4 @@
 - [Phase 7.2 implied-forward rate 2026-09-18](phase-7-2-implied-forward-rate-2026-09-18.md) — covered-interest-parity rate fallback (SEK etc.) off pair's own SPOT+FWD_OUTRIGHT; reject keeps ORIGINAL skip reason; precedence curve>manual>implied
 - [Past-close pricing + stamps 2026-09-22](past-close-pricing-and-stamps-2026-09-22.md) — store.price_close (backfill) + recalc_on_file (pull button, no terminal), both unwired by bbg-data; live_stamp vs close_stamp; no cross-day fallback; what deletes pricer marks
 - [Eq/cmdty loop guard 2026-09-22](eq-cmdty-loop-guard-2026-09-22.md) — bootstrap failure is LAZY (raises at zero_rate_to); every price_all_* loop needs the per-trade guard; bootstrap_note provenance
+- [Closed-out options not priced 2026-09-22](closed-out-options-not-priced-2026-09-22.md) — bulk passes skip closed-out groups via the P&L's rule (lazy import, no cycle); closed_out flag/key; live.py split owed to bbg-data; trade_legs test gotcha

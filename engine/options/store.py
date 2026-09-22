@@ -49,6 +49,15 @@ LTD(t) and Daily = 0 for every option. Two things here, both landed 2026-09-22:
     that day's 15:00 New York close stamp (``close_stamp``), like every other close the
     backfill writes. ``price_and_store`` / ``price_all_and_store`` accept an explicit
     ``snapped`` for a caller that knows better; the live pull passes none.
+  * Closed-out options (same day, later; user: "we dont need to price all options, as
+    some of them might be closed out already ... we just present the buy and sell price
+    as pnl"): a trade of an option bought and sold back, quantities netting to zero as
+    of the date priced, by the P&L's own grouping rule (``engine/pnl/valuation.py``,
+    CLAUDE.md "A closed-out option is not live"), is left out of every bulk pass --
+    ``price_all_and_store`` (catch-up included), ``price_close``, ``recalc_on_file`` --
+    and reported under its own head: ``PricingOutcome.closed_out = True`` with a reason,
+    the dicts' ``"closed_out"`` list / count, never among ``skipped``. See "Closed-out
+    options" at ``closed_out_options`` below.
 
 **Conventions restated here (see CLAUDE.md, pricer.py, inputs.py for the
 full detail):**
@@ -308,6 +317,46 @@ class PricingOutcome:
     # expiry date -- which is BEFORE the run's as_of for a catch-up mark. '' for a skip.
     mark_basis: str = ""
     mark_date: str = ""
+    # True for a trade of an option closed out as of the date priced (bought and sold back,
+    # quantities netting to zero; "Closed-out options" below): not priced, no mark written,
+    # `reason` says so. A consumer counting skips should list these under their own head
+    # ("N closed-out options not priced"), never among the trades that could not be priced.
+    closed_out: bool = False
+
+
+# --------------------------------------------------------------------------- closed-out options (2026-09-22)
+# User, 2026-09-22: "we dont need to price all options, as some of them might be closed out
+# already. If they are exactly the same, same strike / underlyer / expiry / type and closed
+# out, we just present the buy and sell price as pnl. We dont need to price them
+# individually." The P&L already values every trade of such a group at the closing fill
+# (CLAUDE.md, "A closed-out option is not live"; engine/pnl/valuation.py::closed_out_from_rows:
+# same pair, call / put, payoff, strike, barrier, averaging start, expiry, quantities netting
+# to zero as of the date, strike 0 never matched, a part sell-back still live) and the ledger
+# freezes them as CLOSE_OUT after expiry, so no mark of theirs is ever read. The bulk passes
+# (`price_all_and_store`, `price_close`, hence `recalc_on_file`) leave them out, catch-up
+# included; their old marks on file are left alone. The grouping rule is the P&L's own,
+# imported, never a second copy. `price_and_store` (one trade, asked for by name: the Options
+# grid after a terms edit, `structures.py`) still prices whatever it is given.
+
+
+def closed_out_options(conn: sqlite3.Connection, as_of: str) -> dict:
+    """trade_id -> engine.pnl.valuation.CloseOut for every FX_OPTION trade of a group closed
+    out as of `as_of` (trades dealt on or before it), by the P&L's own rule. The import is
+    lazy, as engine/rates/store.py's of the same module: engine.pnl does not import
+    engine.options today (no cycle), and this keeps engine.options importable without
+    pandas / engine.pnl and leaves that direction open."""
+    from engine.pnl.valuation import closed_out_options as _closed_out
+
+    return _closed_out(conn, as_of)
+
+
+def _closed_out_skip(row: dict, closed) -> PricingOutcome:
+    others = [t for t in closed.trade_ids if t != row["trade_id"]]
+    outcome = _skip(row, f"closed out {closed.date}: bought and sold back with {', '.join(others) or 'itself'}; "
+                         f"the P&L is the closing fill {closed.price:.6g} against the fill and no mark is needed "
+                         "(engine/pnl/valuation.py); not priced")
+    outcome.closed_out = True
+    return outcome
 
 
 def _read_option_trade(conn: sqlite3.Connection, trade_id: str) -> Optional[dict]:
@@ -914,6 +963,10 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str, snapped: Optional[
     freezes it afresh. Such an outcome comes back ``priced=True, mark_basis='INTRINSIC'``;
     every other expired option stays the usual skip.
 
+    A trade of an option closed out as of ``as_of`` ("Closed-out options" above) is
+    neither priced nor caught up: it comes back ``priced=False, closed_out=True`` with
+    its reason, its marks on file untouched.
+
     First of all, once per database: `purge_old_unit_cash_payoff_marks` (digital / touch
     marks written in the pre-2026-09-18 unit), so the first pull after a restart clears
     them and this same run rewrites today's in the right unit."""
@@ -929,11 +982,15 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str, snapped: Optional[
             "SELECT trade_id FROM trades_official WHERE product = 'FX_OPTION' ORDER BY trade_id"
         ).fetchall()
     ]
+    closed = closed_out_options(conn, as_of)
     surface_cache: dict = {}
     curve_cache: dict = {}
     outcomes = []
     for trade_id in trade_ids:
         row = _read_option_trade(conn, trade_id)
+        if row and trade_id in closed:
+            outcomes.append(_closed_out_skip(row, closed[trade_id]))
+            continue
         try:
             outcome = _price_row(conn, as_of, row, surface_cache=surface_cache, curve_cache=curve_cache,
                                  snapped=snapped)
@@ -1006,14 +1063,19 @@ def price_close(conn: sqlite3.Connection, day: str) -> dict:
     One short transaction per trade, as ``price_all_and_store``. Idempotent. The one-time
     unit purge runs first, as there, so it can never eat what this writes.
 
+    A trade of an option closed out as of `day` ("Closed-out options" above) is not priced,
+    expiry on `day` included, and is listed under ``"closed_out"``, never ``"skipped"``.
+
     Never raises. Returns ``{"day": day, "priced": <int>, "skipped": [{"trade_id",
-    "reason"}, ...]}``; an exception outside one trade's pricing adds ``"error"`` (its
-    repr) and the counts so far; one trade's pricer error is its own skip."""
-    out: dict = {"day": day, "priced": 0, "skipped": []}
+    "reason"}, ...], "closed_out": [<trade_id>, ...]}``; an exception outside one trade's
+    pricing adds ``"error"`` (its repr) and the counts so far; one trade's pricer error is
+    its own skip."""
+    out: dict = {"day": day, "priced": 0, "skipped": [], "closed_out": []}
     try:
         datetime.date.fromisoformat(day)
         purge_old_unit_cash_payoff_marks(conn)
         trade_ids = [r[0] for r in conn.execute(_CLOSE_BOOK_SQL, {"day": day}).fetchall()]
+        closed = closed_out_options(conn, day)
         stamp = close_stamp(day)
         surface_cache: dict = {}
         curve_cache: dict = {}
@@ -1021,6 +1083,9 @@ def price_close(conn: sqlite3.Connection, day: str) -> dict:
             row = _read_option_trade(conn, trade_id)
             if row is None:  # pragma: no cover -- the id came from trades_official a moment ago
                 out["skipped"].append({"trade_id": trade_id, "reason": f"{day} close: trade not on file"})
+                continue
+            if trade_id in closed:
+                out["closed_out"].append(trade_id)
                 continue
             try:
                 if row["expiry_date"] == day:
@@ -1083,10 +1148,11 @@ def recalc_on_file(conn: sqlite3.Connection, as_of: str, since: Optional[str] = 
     near-marks rule at read time). Idempotent: every day is INSERT OR REPLACE.
 
     Never raises. Returns ``{"as_of", "since", "days": [<price_close dict per day, the
-    last one as_of's own {"day", "priced", "skipped"}>], "priced": <total>, "skipped":
-    <total count>}``, plus ``"error"`` (repr) if something outside the per-day calls
+    last one as_of's own {"day", "priced", "skipped", "closed_out"}>], "priced": <total>,
+    "skipped": <total count>, "closed_out": <total count of closed-out trades not priced,
+    over every day>}``, plus ``"error"`` (repr) if something outside the per-day calls
     raised, with the counts so far."""
-    out: dict = {"as_of": as_of, "since": since, "days": [], "priced": 0, "skipped": 0}
+    out: dict = {"as_of": as_of, "since": since, "days": [], "priced": 0, "skipped": 0, "closed_out": 0}
     try:
         datetime.date.fromisoformat(as_of)
         if since is None:
@@ -1099,12 +1165,16 @@ def recalc_on_file(conn: sqlite3.Connection, as_of: str, since: Optional[str] = 
             out["days"].append(result)
             out["priced"] += result["priced"]
             out["skipped"] += len(result["skipped"])
+            out["closed_out"] += len(result.get("closed_out", []))
         outcomes = price_all_and_store(conn, as_of)
         today = {"day": as_of, "priced": sum(1 for o in outcomes if o.priced),
-                 "skipped": [{"trade_id": o.trade_id, "reason": o.reason} for o in outcomes if not o.priced]}
+                 "skipped": [{"trade_id": o.trade_id, "reason": o.reason}
+                             for o in outcomes if not o.priced and not o.closed_out],
+                 "closed_out": [o.trade_id for o in outcomes if o.closed_out]}
         out["days"].append(today)
         out["priced"] += today["priced"]
         out["skipped"] += len(today["skipped"])
+        out["closed_out"] += len(today["closed_out"])
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{exc!r}"
     return out

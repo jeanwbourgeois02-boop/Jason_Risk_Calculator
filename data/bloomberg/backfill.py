@@ -24,15 +24,37 @@ dated that day:
     once a day's closes are written, `engine.options.store.price_close(conn, day)` prices
     every FX option open that day (trade_date <= day <= expiry) strictly from whatever
     that day already has on file -- its SPOT close, forward curve, OIS curve and vol smile,
-    written by that day's own pull -- and writes the pricer marks dated that day at the
-    close stamp, replacing any earlier ones. A trade whose inputs that day lacks is skipped
-    with its reason (`options_skipped`) and the near-marks rule stands for it. Until then
-    no past day ever had a premium of its own (the Bloomberg PC's snapshot held vol_quotes
-    and curves for 2026-09-17..21 but pricer marks for 09-21 alone), so the later day's
-    premium was carried back: LTD identical on both days, options Daily 0. Guarded like
-    realise_settled (`_import_price_close`, `_price_options_close`): not importable, or
-    raising, the day's marks and realisation stand and `options_priced` is None with the
-    failure named in `options_note`. Nothing new is asked of Bloomberg for it.
+    written by that day's own pull or by this backfill -- and writes the pricer marks dated
+    that day at the close stamp, replacing any earlier ones. A trade whose inputs that day
+    lacks is skipped with its reason (`options_skipped`) and the near-marks rule stands for
+    it. Until then no past day ever had a premium of its own (the Bloomberg PC's snapshot
+    held vol_quotes and curves for 2026-09-17..21 but pricer marks for 09-21 alone), so the
+    later day's premium was carried back: LTD identical on both days, options Daily 0.
+    Guarded like realise_settled (`_import_price_close`, `_price_options_close`): not
+    importable, or raising, the day's marks and realisation stand and `options_priced` is
+    None with the failure named in `options_note`.
+  - The inputs those options and the day's swaps price from (2026-09-22, later the same
+    day: until then a past day's options were priced only where a live pull had happened
+    to write that day's smile and curve, so they had no true 5d / MTD / YTD and the LTD
+    chart carried premiums): for every past day worked, the vol-smile quotes of every
+    pair with an FX option open that day and the OIS quotes of every currency an open FX
+    option or swap needs that day -- the same tickers the live vol and rates steps ask for
+    today (vol_marketdata.vol_ticker over VOL_TENORS x VOL_QUOTE_TYPES,
+    rates_marketdata.ois_curve), read from the Bloomberg library like everything else
+    (library.history_inputs_needed) -- from Bloomberg's daily history, PX_LAST, one
+    HistoricalDataRequest per kind per stretch of days (`_fetch_vol_history`,
+    `_fetch_ois_history`), written into the same tables the live steps write (vol_quotes,
+    curve_quotes) dated that day under BBG_BDH, stamped at the close. ASSUMPTION: the
+    daily PX_LAST is Bloomberg's own close of those quotes; the user's 15:00 New York
+    rule was given for FX closes, and the smile and the curve are taken at Bloomberg's
+    daily close. A day that already holds a pair's smile or a currency's curve (the live
+    pull's own, or an earlier run's) is never asked for it again
+    (inventory.inputs_missing); a currency with no OIS curve in scope (SEK) is never
+    asked for. Then that day's swaps are priced from them the way the live rates step
+    prices today's (engine.rates.store.recalc_on_file for that one day, `rates_priced` /
+    `rates_failed` / `rates_note`, guarded like price_close), before the options step.
+    Nothing new is asked on a live pull for today; a swap's fixing history is the live
+    step's; a listed option's dividend yield stays today's only.
   - FWD_OUTRIGHT (2026-09-18): for every FX leg open on that day (trade_date <= day <=
     ... <= settle_date), at the leg's own settle_date. A leg settling on or before that
     day is marked at that day's own SPOT close (same rule the live feed uses). Otherwise
@@ -50,8 +72,14 @@ dated that day:
     computed by market convention; a forward built on either is written BBG_INTERP, and
     BBG_BFXFORWARD is kept for Bloomberg's own outright at Bloomberg's own date
     (2026-09-21: before, no past forward was ever written, so no past day could complete).
-  - FUTURE_PX (2026-09-18): PX_SETTLE of every future open on that day, same batched
-    one-request-for-the-whole-range approach.
+  - FUTURE_PX (2026-09-18): PX_SETTLE of every future open on that day -- and of every
+    listed index option on its own ticker, which the library lists as a FUTURE_PX -- same
+    batched one-request-for-the-whole-range approach. Stamped at the settlement
+    (`settle_stamp`: 17:00 New York, Bloomberg's daily close, the time PX_SETTLE is a
+    field of; 2026-09-22). A past day's FUTURE_PX row that a live press wrote (PX_LAST or
+    PX_MID, stamped at the press or at 15:00 of the book date) is not a close: once the
+    day is past the backfill asks that day's PX_SETTLE and replaces it, as it replaces an
+    FX row that is not the 15:00 close.
 Only what is needed is asked for (user decision 2026-09-21: "only the data necessary for
 the pnl calcs of the trades ... also for the backfill"), all of it read from the Bloomberg
 library (data/bloomberg/library.py): the days being worked, as stretches of consecutive
@@ -72,8 +100,9 @@ closes), on every past day Bloomberg's intraday history still reaches (about 140
 days, `intraday_floor`). A 15:00 bar Bloomberg does not have stays missing, with the
 reason, never the daily PX_LAST instead. Only a day beyond the intraday history closes at
 Bloomberg's daily close (PX_LAST, 17:00 New York; `first_1500_day` is the floor). Futures
-keep PX_SETTLE (the market close). Rows are stamped `close_stamp` (15:00 New York on their
-date; 17:00 beyond the intraday history). UNVERIFIED on a terminal.
+take PX_SETTLE (the market close), stamped `settle_stamp` (17:00 New York). FX rows are
+stamped `close_stamp` (15:00 New York on their date; 17:00 beyond the intraday history).
+UNVERIFIED on a terminal.
 
 A day counts as complete (skipped unless overwrite=True) only once ALL of the above are
 official for it -- `data.bloomberg.inventory.close_completeness`, the same "needed" set
@@ -83,10 +112,14 @@ mark_type) is never rewritten, even when overwrite is False and the day is other
 incomplete (e.g. a new trade added a settle_date this day never needed before). A past
 day's official FX row that is NOT stamped at the close -- that day's last live pull (say
 11:40), or a 17:00 PX_LAST row on a day the intraday history still reaches (written under
-the 2026-09-21 cut-over) -- is not a close: the day counts as incomplete and the row is
-replaced once the 15:00 value is in hand (`is_close_row`, `_write_closes`). It is never
-deleted without its replacement, today's rows are never touched (intraday = live), and
-realised_pnl is never touched: frozen rows stay frozen.
+the 2026-09-21 cut-over) -- is not a close, nor is a future's row not stamped at the
+settlement: the day counts as incomplete and the row is replaced once the close is in hand
+(`is_close_row`, `_write_closes`). It is never deleted without its replacement, today's
+rows are never touched (intraday = live), and realised_pnl is never touched here: frozen
+rows stay frozen (the ledger's own next pass re-freezes a trade whose mark changed). A day
+whose marks are all closes but that lacks a smile or a curve its options or swaps need
+(close_completeness's `inputs_missing`) is worked too, for those inputs alone: its rows at
+the close are left as they are.
 
 Only if `engine.pnl.ledger.realise_settled` is importable, trades settled before a day are
 frozen once that day's marks are on file: every day's SPOT and FUTURE_PX (all a freeze
@@ -98,10 +131,10 @@ Limits, stated plainly:
   - Trades are only those currently in the database (the blotter is the app's only trade
     source; a re-upload replaces the whole book -- see CLAUDE.md's schema notes).
   - FX closes are Bloomberg's 15:00 New York intraday mid (the 17:00 daily close only
-    beyond the intraday history), futures the daily PX_SETTLE; the live pull's rows are
-    stored under the same official sources, and the snapped_at timestamp tells them apart
-    (backfill rows are stamped at the close on their date, a live row carries the time it
-    was pulled).
+    beyond the intraday history), futures the daily PX_SETTLE, vol and OIS quotes the daily
+    PX_LAST; the live pull's rows are stored under the same official sources, and the
+    snapped_at timestamp tells them apart (backfill rows are stamped at the close on their
+    date, 17:00 for a settlement; a live row carries the time it was pulled).
   - An NDF's fixing date gets its currency's official fixing (NDF_FIX, 2026-09-22) on the
     pair, read from the Bloomberg library like a close (`_fetch_ndf_fix_history`).
   - Calendar is the trading calendar (Monday-Friday less config/holidays.txt, see
@@ -123,6 +156,9 @@ Default start is the last business day of the previous year (the YTD reference d
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import re
 import sqlite3
 import sys
 from datetime import date, datetime, timedelta
@@ -256,27 +292,48 @@ def close_stamp(day: date, today: Optional[date] = None) -> str:
 
 
 # The mark types the 15:00 New York close rule covers (the user said FX closes; a future
-# keeps its PX_SETTLE whatever its stamp).
+# takes its PX_SETTLE, stamped at the settlement, see below).
 FX_CLOSE_MARK_TYPES = ("SPOT", "FWD_OUTRIGHT")
+
+# A future's past close is its settlement price (user, 2026-09-22: "for futures, can use
+# market close"), a field of Bloomberg's daily history, and a settlement row is stamped at
+# Bloomberg's daily close, 17:00 New York, on its date. A live press stamps its FUTURE_PX
+# row (PX_LAST, or a listed option's PX_MID) at the press or at 15:00 of the book date
+# (pull_marks.build_future_rows), never 17:00, so the stamp alone tells a settlement row
+# from a live one: `is_close_row` counts only the former as a close and the backfill
+# replaces the latter once the day is past (2026-09-22; until then a future's row always
+# counted, so a day's live price stood as its close for good).
+SETTLE_HOUR_NY = DAILY_CLOSE_HOUR_NY
+
+
+def settle_stamp(day: date) -> str:
+    """The settlement on `day` a future's PX_SETTLE row is stamped with: SETTLE_HOUR_NY:00
+    New York with that date's UTC offset resolved."""
+    return datetime(day.year, day.month, day.day, SETTLE_HOUR_NY, 0, tzinfo=NY).isoformat(timespec="seconds")
 
 
 def is_close_row(mark_type: str, as_of_date: str, snapped_at: str, today=None) -> bool:
-    """Is this official row of a PAST day a close? Other mark types (FUTURE_PX, NDF_FIX)
-    always are, whatever their stamp. An FX row (SPOT / FWD_OUTRIGHT) is a close only when
-    it is stamped 15:00 New York of its own as_of_date -- on every past day, whichever side
-    of 2026-09-21 (user decision 2026-09-22) -- or, for a day before `first_1500_day(today)`
-    (beyond Bloomberg's intraday history, so the 15:00 value can no longer be asked for),
-    17:00 New York, the daily close the backfill writes there. Anything else -- a live
-    pull's last price on any day, a 17:00 row on a day still within intraday reach -- is
-    not a close, and the backfill asks for the 15:00 value and replaces it. `today` is a
-    date or ISO string (default: the New York book date)."""
-    if mark_type not in FX_CLOSE_MARK_TYPES:
+    """Is this official row of a PAST day a close? An FX row (SPOT / FWD_OUTRIGHT) is a
+    close only when it is stamped 15:00 New York of its own as_of_date -- on every past
+    day, whichever side of 2026-09-21 (user decision 2026-09-22) -- or, for a day before
+    `first_1500_day(today)` (beyond Bloomberg's intraday history, so the 15:00 value can no
+    longer be asked for), 17:00 New York, the daily close the backfill writes there. A
+    FUTURE_PX row (a future's, or a listed option's on its own ticker) is a close only when
+    it is stamped at the settlement (`settle_stamp`, 17:00 New York; 2026-09-22): a live
+    press's PX_LAST row of a past day is not. NDF_FIX always is, whatever its stamp (a
+    fixing has one value a day). Anything else -- a live pull's last price on any day, a
+    17:00 FX row on a day still within intraday reach -- is not a close, and the backfill
+    asks for the close and replaces it. `today` is a date or ISO string (default: the New
+    York book date)."""
+    if mark_type not in FX_CLOSE_MARK_TYPES and mark_type != "FUTURE_PX":
         return True
     try:
         day = date.fromisoformat(as_of_date)
         stamp = datetime.fromisoformat(snapped_at)
     except (TypeError, ValueError):
         return False
+    if mark_type == "FUTURE_PX":
+        return stamp == datetime(day.year, day.month, day.day, SETTLE_HOUR_NY, 0, tzinfo=NY)
     if stamp == datetime(day.year, day.month, day.day, CLOSE_HOUR_NY, 0, tzinfo=NY):
         return True
     return (stamp == datetime(day.year, day.month, day.day, DAILY_CLOSE_HOUR_NY, 0, tzinfo=NY)
@@ -372,30 +429,221 @@ def _options_open_on(conn: sqlite3.Connection, day: str) -> bool:
 PRICE_CLOSE_UNAVAILABLE = "options not priced: engine.options.store.price_close is not importable"
 
 
-def _price_options_close(conn: sqlite3.Connection, day: str, price_close) -> Tuple[Optional[int], List[dict], str]:
+def _price_options_close(conn: sqlite3.Connection, day: str, price_close
+                         ) -> Tuple[Optional[int], List[dict], str, List[str]]:
     """Price the FX options open on `day` from that day's own inputs on file, after its
     closes are written and before the ledger's freeze (which reads the expiry day's
-    premium). Returns (options_priced, options_skipped, options_note):
-      - no FX_OPTION open that day: (None, [], '') and `price_close` is never called;
-      - `price_close` is None (not importable): (None, [], PRICE_CLOSE_UNAVAILABLE);
-      - `price_close(conn, day)` raised: (None, [], 'price_close raised: ...');
-      - otherwise its own {'priced': int, 'skipped': [{'trade_id', 'reason'}], 'error'?}
-        as (priced, skipped, error or '').
-    Nothing here asks Bloomberg for anything, and nothing raises out of it."""
+    premium). Returns (options_priced, options_skipped, options_note, options_closed_out):
+      - no FX_OPTION open that day: (None, [], '', []) and `price_close` is never called;
+      - `price_close` is None (not importable): (None, [], PRICE_CLOSE_UNAVAILABLE, []);
+      - `price_close(conn, day)` raised: (None, [], 'price_close raised: ...', []);
+      - otherwise its own {'priced': int, 'skipped': [{'trade_id', 'reason'}], 'closed_out':
+        [trade_id, ...], 'error'?} as (priced, skipped, error or '', closed_out).
+    `closed_out` (2026-09-22) are the trades of an option closed out as of `day` (bought and
+    sold back; CLAUDE.md "A closed-out option is not live"): not priced, no mark, and never
+    counted among the skipped -- the pricer lists them under their own head and so does
+    this. Nothing here asks Bloomberg for anything, and nothing raises out of it."""
     if not _options_open_on(conn, day):
-        return None, [], ""
+        return None, [], "", []
     if price_close is None:
-        return None, [], PRICE_CLOSE_UNAVAILABLE
+        return None, [], PRICE_CLOSE_UNAVAILABLE, []
     try:
         out = price_close(conn, day) or {}
     except Exception as exc:  # noqa: BLE001 -- another agent's pricer: report it, keep the day's marks
-        return None, [], f"price_close raised: {exc!r}"
+        return None, [], f"price_close raised: {exc!r}", []
     try:
         priced = int(out.get("priced"))
     except (TypeError, ValueError):
         priced = None
     skipped = [dict(item) for item in (out.get("skipped") or [])]
-    return priced, skipped, str(out.get("error") or "")
+    closed_out = [str(t) for t in (out.get("closed_out") or [])]
+    return priced, skipped, str(out.get("error") or ""), closed_out
+
+
+def _import_recalc_rates():
+    """engine.rates.store.recalc_on_file if importable right now, else None (2026-09-22):
+    the same guard as `_import_price_close`, for the rates pricer (another agent's; it
+    imports QuantLib at module load)."""
+    try:
+        from engine.rates.store import recalc_on_file
+        return recalc_on_file
+    except Exception:  # noqa: BLE001 -- see _import_price_close
+        return None
+
+
+def _irs_open_on(conn: sqlite3.Connection, day: str) -> bool:
+    """Is any swap open on `day` -- an IRS OIS_CURVE row of the Bloomberg library in force
+    that day (trade date to maturity)? A book with no swap pays nothing for the rates step."""
+    from data.bloomberg import library
+    return any(r["kind"] == "OIS_CURVE" and r["product"] == "IRS"
+               for r in library.needed_on(conn, day, historical=True))
+
+
+RATES_RECALC_UNAVAILABLE = "swaps not priced: engine.rates.store.recalc_on_file is not importable"
+
+
+def _price_rates_close(conn: sqlite3.Connection, day: str, recalc_rates) -> Tuple[Optional[int], List[dict], str]:
+    """Price the swaps open on `day` from that day's OIS quotes on file, the way the live
+    rates step prices today's (engine.rates.store.recalc_on_file for `day` alone: one curve
+    per currency from the day's own curve_quotes, PV_USD / DV01_USD / CASHFLOW_USD /
+    PAR_RATE dated `day` at the close stamp, INSERT OR REPLACE, frozen swaps left alone).
+    Returns (rates_priced, rates_failed, rates_note), the shape of `_price_options_close`:
+      - no swap open that day: (None, [], '') and `recalc_rates` is never called;
+      - `recalc_rates` is None (not importable): (None, [], RATES_RECALC_UNAVAILABLE);
+      - the day has no OIS quotes on file at all: (0, [], 'no OIS quotes on file for <day>:
+        swaps not priced') -- the missing curve itself is named under `missing_inputs`;
+      - otherwise its own {'priced': int, 'days': [{'failed': [{'trade_id', 'error'}]}]}
+        as (priced, the day's failed list, its 'error' or '').
+    Nothing here asks Bloomberg for anything, and nothing raises out of it."""
+    if not _irs_open_on(conn, day):
+        return None, [], ""
+    if recalc_rates is None:
+        return None, [], RATES_RECALC_UNAVAILABLE
+    try:
+        out = recalc_rates(conn, day, since=day) or {}
+    except Exception as exc:  # noqa: BLE001 -- another agent's pricer: report it, keep the day's marks
+        return None, [], f"recalc_on_file raised: {exc!r}"
+    days = list(out.get("days") or [])
+    if not days and not out.get("error"):
+        return 0, [], f"no OIS quotes on file for {day}: swaps not priced"
+    try:
+        priced = int(out.get("priced"))
+    except (TypeError, ValueError):
+        priced = None
+    failed = [dict(item) for entry in days for item in (entry.get("failed") or [])]
+    return priced, failed, str(out.get("error") or "")
+
+
+def _lacking_inputs(conn: sqlite3.Connection, work: List[date]) -> Dict[str, Dict[str, set]]:
+    """{'VOL_SMILE': {day_iso: {pair, ...}}, 'OIS_CURVE': {day_iso: {ccy, ...}}}: the smiles
+    and curves each day being worked needs and does not hold (inventory.inputs_missing).
+    Worked out once before the history is asked for, so a request covers only the pairs
+    and currencies some day of its stretch lacks."""
+    from data.bloomberg.inventory import inputs_missing
+    out: Dict[str, Dict[str, set]] = {"VOL_SMILE": {}, "OIS_CURVE": {}}
+    for d in work:
+        for item in inputs_missing(conn, d.isoformat()):
+            out[item["kind"]].setdefault(d.isoformat(), set()).add(item["key"])
+    return out
+
+
+def _keys_in_run(lacking: Dict[str, set], run_start: date, run_end: date) -> List[str]:
+    return sorted({key for day_iso, keys in lacking.items()
+                   if run_start <= date.fromisoformat(day_iso) <= run_end for key in keys})
+
+
+def _fetch_vol_history(session, service, runs: List[Tuple[date, date]], quote_fetch: Callable,
+                       lacking: Dict[str, set]) -> Dict[str, Dict[str, Dict[str, float]]]:
+    """{pair: {date_iso: {ticker: PX_LAST}}} -- one `quote_fetch` call (a daily
+    HistoricalDataRequest, PX_LAST) per stretch of `runs`, for every vol ticker of every
+    pair some day of the stretch lacks a smile for (`lacking`: {day_iso: {pair}}): the
+    same tickers the live vol step asks for today (vol_marketdata.vol_ticker over
+    VOL_TENORS x VOL_QUOTE_TYPES). A stretch with nothing lacking asks for nothing."""
+    from data.bloomberg import vol_marketdata as vm
+    out: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for run_start, run_end in runs:
+        pairs = _keys_in_run(lacking, run_start, run_end)
+        if not pairs:
+            continue
+        ticker_to_pair = {vm.vol_ticker(pair, tenor, quote_type): pair
+                          for pair in pairs for tenor in vm.VOL_TENORS for quote_type in vm.VOL_QUOTE_TYPES}
+        series = quote_fetch(session, service, sorted(ticker_to_pair), [vm.VOL_FIELD], run_start, run_end) or {}
+        for ticker, per_day in series.items():
+            pair = ticker_to_pair.get(ticker)
+            if pair is None:
+                continue
+            for day_iso, row in (per_day or {}).items():
+                if isinstance(row, dict) and row.get(vm.VOL_FIELD) is not None:
+                    out.setdefault(pair, {}).setdefault(day_iso, {})[ticker] = row[vm.VOL_FIELD]
+    return out
+
+
+def _fetch_ois_history(session, service, runs: List[Tuple[date, date]], quote_fetch: Callable,
+                       lacking: Dict[str, set]) -> Dict[str, Dict[str, Dict[str, float]]]:
+    """{ccy: {date_iso: {ticker: value}}} -- one `quote_fetch` call per stretch of `runs`
+    for every OIS ticker of every currency some day of the stretch lacks a curve for
+    (`lacking`: {day_iso: {ccy}}): the same tickers the live rates step asks for today
+    (rates_marketdata.ois_curve). Every field the specs name is asked for in the one
+    request (PX_LAST throughout the Phase 1 map)."""
+    from data.bloomberg import rates_marketdata as rm
+    out: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for run_start, run_end in runs:
+        ccys = _keys_in_run(lacking, run_start, run_end)
+        if not ccys:
+            continue
+        ticker_to_ccy, fields = {}, set()
+        for ccy in ccys:
+            for spec in rm.ois_curve(ccy):
+                ticker_to_ccy[spec.ticker] = (ccy, spec.field)
+                fields.add(spec.field)
+        series = quote_fetch(session, service, sorted(ticker_to_ccy), sorted(fields), run_start, run_end) or {}
+        for ticker, per_day in series.items():
+            hit = ticker_to_ccy.get(ticker)
+            if hit is None:
+                continue
+            ccy, field = hit
+            for day_iso, row in (per_day or {}).items():
+                if isinstance(row, dict) and row.get(field) is not None:
+                    out.setdefault(ccy, {}).setdefault(day_iso, {})[ticker] = row[field]
+    return out
+
+
+def _write_day_inputs(conn: sqlite3.Connection, d: date, lacking: Dict[str, Dict[str, set]],
+                      vol_history: Dict[str, Dict[str, Dict[str, float]]],
+                      ois_history: Dict[str, Dict[str, Dict[str, float]]]) -> Tuple[int, int, List[dict]]:
+    """Write `d`'s smiles and curves from the fetched history, for the pairs and currencies
+    the day lacked: vol_quotes rows through vol_marketdata.write_vol_quotes (the live vol
+    step's writer; source BBG_BDH, the history's), curve_quotes rows through
+    rates_marketdata.write_curve_quotes (the live rates step's; BBG_BDH; values scaled from
+    per cent as it scales them). A smile is written with whatever quotes came back, as the
+    live step writes what Bloomberg answers; a curve only with at least
+    rates_marketdata._MIN_QUOTES quotes, the live source's own floor, else nothing. Returns
+    (vol rows written, curve rows written, missing_inputs: [{kind, key, reason}] for a pair
+    or currency the history had nothing usable for)."""
+    from data.bloomberg import rates_marketdata as rm
+    from data.bloomberg import vol_marketdata as vm
+    import decimal
+    day = d.isoformat()
+    vol_rows = curve_rows = 0
+    missing: List[dict] = []
+    for pair in sorted(lacking["VOL_SMILE"].get(day, ())):
+        values = (vol_history.get(pair) or {}).get(day) or {}
+        quotes = []
+        for tenor in vm.VOL_TENORS:
+            for quote_type in vm.VOL_QUOTE_TYPES:
+                ticker = vm.vol_ticker(pair, tenor, quote_type)
+                try:
+                    value = float(values[ticker])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                quotes.append(vm.VolQuote(tenor=tenor, quote_type=quote_type, ticker=ticker, value=value,
+                                          field=vm.VOL_FIELD, source="BBG"))
+        if not quotes:
+            missing.append({"kind": "VOL_SMILE", "key": pair,
+                            "reason": f"Bloomberg returned no vol quotes ({vm.VOL_FIELD}) for {pair} on {day}"})
+            continue
+        vol_rows += vm.write_vol_quotes(conn, {pair: vm.PairVolSnapshot(pair=pair, as_of=d, quotes=quotes)}, day,
+                                        source=SRC_FUTURE)
+    for ccy in sorted(lacking["OIS_CURVE"].get(day, ())):
+        values = (ois_history.get(ccy) or {}).get(day) or {}
+        quotes, failed = [], []
+        for spec in rm.ois_curve(ccy):
+            try:
+                raw = values[spec.ticker]
+                value = rm.scale_quote(decimal.Decimal(str(raw)))
+            except (KeyError, TypeError, ValueError, decimal.InvalidOperation):
+                failed.append(spec.ticker)
+                continue
+            quotes.append(rm.CurveQuote(tenor=spec.tenor, ticker=spec.ticker, value=value, field=spec.field))
+        if len(quotes) < rm._MIN_QUOTES:
+            missing.append({"kind": "OIS_CURVE", "key": ccy,
+                            "reason": f"fewer than {rm._MIN_QUOTES} OIS quotes for {ccy} on {day}: Bloomberg returned "
+                                      f"no value for {', '.join(failed)}"})
+            continue
+        quotes.sort(key=lambda q: rm.tenor_to_days(q.tenor))
+        snap = rm.CurveSnapshot(currency=ccy, index=rm.OIS_INDEX[ccy], as_of=d, quotes=quotes)
+        curve_rows += rm.write_curve_quotes(conn, snap, day, source=SRC_FUTURE)
+    return vol_rows, curve_rows, missing
 
 
 # Only what the days being worked need is asked of Bloomberg's history (user decision
@@ -728,10 +976,22 @@ def _spot_fetch_from_series(series_fetch: Callable, conn: sqlite3.Connection, ru
     return fetch
 
 
+# The keys every day's result carries for the inputs and pricing steps (2026-09-22), whatever
+# its status: what price_close and recalc_on_file made of the day, and the smiles / curves
+# written for it or found missing.
+_STEP_KEYS = {"options_priced": None, "options_skipped": [], "options_note": "", "options_closed_out": [],
+              "vol_quotes": 0, "curve_quotes": 0, "missing_inputs": [],
+              "rates_priced": None, "rates_failed": [], "rates_note": ""}
+
+
+def _step_keys() -> dict:
+    return {k: (list(v) if isinstance(v, list) else v) for k, v in _STEP_KEYS.items()}
+
+
 def _skipped(day: str) -> dict:
     return {"day": day, "status": "SKIPPED", "closes": 0, "fwd_outrights": 0, "future_px": 0,
             "missing_pairs": [], "missing_pair_reasons": {}, "missing_marks": [], "realised": 0, "unrealisable": [],
-            "options_priced": None, "options_skipped": [], "options_note": ""}
+            **_step_keys()}
 
 
 # db -> {pair: scale report} of the last backfill() that needed a points divisor; published
@@ -744,11 +1004,13 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
              session_factory: Optional[Callable] = None, host: str = "localhost", port: int = 8194,
              overwrite: bool = False, log: Callable[[str], None] = print,
              scale_fetch: Optional[Callable] = None, order: Optional[List[date]] = None,
-             on_day: Optional[Callable[[dict], None]] = None, today: Optional[date] = None) -> List[dict]:
+             on_day: Optional[Callable[[dict], None]] = None, today: Optional[date] = None,
+             quote_fetch: Optional[Callable] = None) -> List[dict]:
     """Run the backfill. Returns one dict per business day of [start, end], in date order:
     {day, status: DONE|SKIPPED|NO_CLOSES|ERROR, closes, fwd_outrights, future_px,
     missing_pairs, missing_pair_reasons, missing_marks, realised, unrealisable,
-    options_priced, options_skipped, options_note}.
+    options_priced, options_skipped, options_note, vol_quotes, curve_quotes,
+    missing_inputs, rates_priced, rates_failed, rates_note}.
     `realised`/`unrealisable` are
     None on a day where realise_settled could not be imported (marks are still written).
     `options_priced` / `options_skipped` / `options_note` (2026-09-22) are what
@@ -756,7 +1018,13 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     written (`_price_options_close`): the count priced, the [{trade_id, reason}] it could
     not price from that day's inputs, and '' or why the step did not run (no option open
     that day leaves None / [] / ''; the pricer not importable or raising leaves None / []
-    and the failure named). Only a DONE day runs it.
+    and the failure named). Only a DONE day runs it. `vol_quotes` / `curve_quotes` (2026-09-22,
+    module docstring) are the smile and OIS rows written for the day from Bloomberg's daily
+    history, for the pairs and currencies it lacked (`_write_day_inputs`), `missing_inputs`
+    the [{kind, key, reason}] the history had nothing usable for; `rates_priced` /
+    `rates_failed` / `rates_note` what engine.rates.store.recalc_on_file made of the day's
+    swaps from the day's quotes (`_price_rates_close`), the shape of the options keys. A day
+    whose marks are all at the close but that lacks an input is worked for the inputs.
     `missing_marks` lists {instrument_id, settle_date, mark_type, reason} for anything
     this day needed (per inventory.close_completeness) but could not resolve -- a settle
     date beyond the last tenor, no forward tenors / future history for that pair / day,
@@ -792,15 +1060,20 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     per stretch (`_spot_fetch_from_series`). `fwd_fetch`/`fut_fetch` (both `(session,
     service, tickers, fields, start, end) -> {ticker: {date_iso: {field: value}}}`, ONE
     call per stretch, 2026-09-18) default to pull_marks.fetch_intraday_close_series (the
-    tenor series) and pull_marks.fetch_historical_series (futures' PX_SETTLE).
-    `scale_fetch`: see `_fetch_points_scales`. `session_factory` defaults to
-    pull_marks.open_session. All are injectable so the loop is testable without blpapi."""
+    tenor series) and pull_marks.fetch_historical_series (futures' PX_SETTLE, the NDF
+    fixings). `quote_fetch` (same shape; the vol and OIS quote history, one call per kind
+    per stretch, 2026-09-22) defaults to pull_marks.fetch_historical_series when this call
+    has a session, else to `fut_fetch` (a test that injects the three fetchers and no
+    session has no daily-history fetcher but that one). `scale_fetch`: see
+    `_fetch_points_scales`. `session_factory` defaults to pull_marks.open_session. All are
+    injectable so the loop is testable without blpapi."""
     from data.ingest.schema import connect
     from data.bloomberg.inventory import close_completeness, _needed_marks
     from data.bloomberg.live import _ensure_fx_instruments, book_today
     from data.bloomberg import pull_marks as pm
     realise_settled = _import_realise_settled()
     price_close = _import_price_close()
+    recalc_rates = _import_recalc_rates()
     today = today or book_today()
     today_iso = today.isoformat()
     first_1500 = first_1500_day(today)   # the intraday floor: days before it close at Bloomberg's daily close
@@ -814,20 +1087,24 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         _ensure_fx_instruments(conn, spot_only_pair_names(conn, start, end))
         pairs = traded_pairs(conn, start, end)
         from data.bloomberg import library
-        has_futures = any(r["kind"] == "FUTURE_PX"
-                          for r in library.needed_in_range(conn, start.isoformat(), end.isoformat()))
-        if not pairs and not has_futures:
+        in_range = library.needed_in_range(conn, start.isoformat(), end.isoformat())
+        has_futures = any(r["kind"] == "FUTURE_PX" for r in in_range)
+        has_inputs = any(r["kind"] in library.HISTORY_INPUT_KINDS for r in in_range)
+        if not pairs and not has_futures and not has_inputs:
             # 2026-09-18: this used to bail out on `not pairs` alone, before traded_pairs
             # covered crosses -- a book with only futures and zero FX trades of any kind
-            # would otherwise never reach the FUTURE_PX logic below at all.
-            log("No FX pairs or futures with a leg open in this range; nothing to backfill.")
+            # would otherwise never reach the FUTURE_PX logic below at all. 2026-09-22: a
+            # book of swaps alone still has its curves to fetch and its days to price.
+            log("No FX pairs, futures, options or swaps open in this range; nothing to backfill.")
             return []
         by_ticker = {t: p for p, t in pairs}
         ticker_of = {p: t for p, t in pairs}
         days = business_days(start, end)
         completeness = close_completeness(conn, start.isoformat(), end.isoformat(), today=today_iso)
         complete_by_day = dict(zip(completeness["as_of_date"], completeness["complete"]))
-        todo = [d for d in days if overwrite or not complete_by_day.get(d.isoformat(), False)]
+        inputs_by_day = dict(zip(completeness["as_of_date"], completeness["inputs_missing"]))
+        todo = [d for d in days if overwrite or not complete_by_day.get(d.isoformat(), False)
+                or inputs_by_day.get(d.isoformat())]
         if order is not None:
             todo_set = set(todo)
             work = [d for d in dict.fromkeys(order) if d in todo_set]
@@ -839,6 +1116,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             log("  note: engine.pnl.ledger.realise_settled not importable; marks only, no realisation this run.")
         if price_close is None:
             log("  note: engine.options.store.price_close not importable; no past day's FX options are priced this run.")
+        if recalc_rates is None:
+            log("  note: engine.rates.store.recalc_on_file not importable; no past day's swaps are priced this run.")
         if not work:
             return [_skipped(d.isoformat()) for d in days]
         span_end = max(work)
@@ -866,6 +1145,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                 session, service = session_factory()
         elif session_factory is not None:
             session, service = session_factory()
+        if quote_fetch is None:
+            quote_fetch = pm.fetch_historical_series if (own_session or session_factory is not None) else fut_fetch
 
         try:
             # FWD_OUTRIGHT / FUTURE_PX history: one request per kind per stretch of days
@@ -876,6 +1157,12 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                                              fields=fwd_fields)
             future_px_by_instrument = _fetch_future_px_history(conn, session, service, runs, fut_fetch)
             ndf_fix_by_pair = _fetch_ndf_fix_history(conn, session, service, runs, fut_fetch)
+            # The smiles and curves the days' options and swaps price from (2026-09-22):
+            # only the pairs and currencies some day of the stretch lacks, one request per
+            # kind per stretch, from Bloomberg's daily history.
+            lacking = _lacking_inputs(conn, work)
+            vol_history = _fetch_vol_history(session, service, runs, quote_fetch, lacking["VOL_SMILE"])
+            ois_history = _fetch_ois_history(session, service, runs, quote_fetch, lacking["OIS_CURVE"])
             scales: Dict[str, Dict[str, dict]] = {}
 
             def scale_report_for(pair: str) -> dict:
@@ -955,7 +1242,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         continue
                     fut_rows.append({"as_of_date": day, "instrument_id": instrument_id, "settle_date": item["settle_date"],
                                      "mark_type": "FUTURE_PX", "value": settle_value, "source": SRC_FUTURE,
-                                     "snapped_at": close_stamp(d, today)})
+                                     "snapped_at": settle_stamp(d)})
                 prepared[d] = {"no_closes": False, "needed": needed, "spot_rows": spot_rows, "spot_by_pair": spot_by_pair,
                                "missing_pairs": missing_pairs, "pair_reasons": pair_reasons, "fut_rows": fut_rows,
                                "missing_marks": missing_marks}
@@ -972,8 +1259,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     log(f"  {day}  NO_CLOSES  (holiday or Bloomberg returned nothing; nothing written)")
                     results[d] = {"day": day, "status": "NO_CLOSES", "closes": 0, "fwd_outrights": 0, "future_px": 0,
                                   "missing_pairs": p["missing_pairs"], "missing_pair_reasons": p["pair_reasons"],
-                                  "missing_marks": [], "realised": None, "unrealisable": [],
-                                  "options_priced": None, "options_skipped": [], "options_note": ""}
+                                  "missing_marks": [], "realised": None, "unrealisable": [], **_step_keys()}
                     if on_day:
                         on_day(results[d])
                     continue
@@ -1046,10 +1332,15 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                          "mark_type": "FWD_OUTRIGHT", "value": float(value),
                                          "source": SRC_SPOT_FWD if direct else SRC_INTERP, "snapped_at": close_stamp(d, today)})
                     _write_closes(conn, fwd_rows, overwrite, today_iso)
-                    # The day's FX options from the inputs that day already has on file
-                    # (2026-09-22, module docstring) -- after its closes, before the freeze
-                    # below, which takes the expiry day's premium.
-                    options_priced, options_skipped, options_note = _price_options_close(conn, day, price_close)
+                    # The smiles and curves the day lacked, from the history (2026-09-22),
+                    # then the day's swaps from the day's quotes, then the day's FX options
+                    # from the inputs the day now has on file -- after its closes, before
+                    # the freeze below, which takes the expiry day's premium.
+                    vol_written, curve_written, missing_inputs = _write_day_inputs(conn, d, lacking, vol_history,
+                                                                                   ois_history)
+                    rates_priced, rates_failed, rates_note = _price_rates_close(conn, day, recalc_rates)
+                    options_priced, options_skipped, options_note, options_closed_out = _price_options_close(
+                        conn, day, price_close)
                     realised, unrealisable, flag = None, [], "realisation after the last day"
                     if realise_settled is None:
                         flag = "no realisation (realise_settled unavailable)"
@@ -1063,8 +1354,14 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                             flag = f"realise_settled raised: {exc!r}"
                     log(f"  {day}  DONE  closes={len(p['spot_rows'])}  fwd_outrights={len(fwd_rows)}  "
                         f"future_px={len(p['fut_rows'])}  missing={len(p['missing_pairs']) + len(missing_marks)}"
-                        f"  options={options_priced}"
+                        f"  vol_quotes={vol_written}  curve_quotes={curve_written}"
+                        + (f"  missing_inputs={len(missing_inputs)}" if missing_inputs else "")
+                        + f"  rates={rates_priced}"
+                        + (f"  rates_failed={len(rates_failed)}" if rates_failed else "")
+                        + (f"  {rates_note}" if rates_note else "")
+                        + f"  options={options_priced}"
                         + (f"  options_skipped={len(options_skipped)}" if options_skipped else "")
+                        + (f"  options_closed_out={len(options_closed_out)}" if options_closed_out else "")
                         + (f"  {options_note}" if options_note else "")
                         + f"  realised={realised}  {flag}")
                     results[d] = {"day": day, "status": "DONE", "closes": len(p["spot_rows"]),
@@ -1072,15 +1369,17 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                   "missing_pairs": p["missing_pairs"], "missing_pair_reasons": p["pair_reasons"],
                                   "missing_marks": missing_marks, "realised": realised, "unrealisable": unrealisable,
                                   "options_priced": options_priced, "options_skipped": options_skipped,
-                                  "options_note": options_note}
+                                  "options_note": options_note, "options_closed_out": options_closed_out,
+                                  "vol_quotes": vol_written,
+                                  "curve_quotes": curve_written, "missing_inputs": missing_inputs,
+                                  "rates_priced": rates_priced, "rates_failed": rates_failed, "rates_note": rates_note}
                 except Exception as exc:  # noqa: BLE001 -- one bad day must not end the run for the others
                     log(f"  {day}  ERROR  {exc!r}")
                     results[d] = {"day": day, "status": "ERROR", "closes": len(p["spot_rows"]), "fwd_outrights": 0,
                                   "future_px": len(p["fut_rows"]), "missing_pairs": p["missing_pairs"],
                                   "missing_pair_reasons": p["pair_reasons"],
                                   "missing_marks": p["missing_marks"], "realised": None, "unrealisable": [],
-                                  "options_priced": None, "options_skipped": [], "options_note": "",
-                                  "error": repr(exc)}
+                                  **_step_keys(), "error": repr(exc)}
                 if on_day:
                     on_day(results[d])
             if order is not None and realise_settled is not None:
@@ -1133,15 +1432,185 @@ RETRY_SECONDS = 3600
 MAX_STATUS_DAYS = 30      # "days" in the status file: the reference dates, plus the newest days not DONE
 MAX_STATUS_REASONS = 5
 
-_day_state: Dict[Tuple[str, str], dict] = {}   # (db, day) -> {at, signature, status, missing_count, missing}
+# 2026-09-22 (user: "yes do part 2"): the hourly retry is for a day that can still change.
+# Only the last RECENT_BUSINESS_DAYS business days before today are asked again by time
+# (a 15:00 bar or a settlement can still appear for a day that just turned past); an older
+# day is asked again only when what it lacks changes (a new upload) or the code's ticker
+# rules change (`state_version`), never because an hour passed -- on the Bloomberg PC 43
+# past days that could never complete (a few tickers Bloomberg rejects or has nothing for)
+# were re-asked on every press after a restart, some 20 minutes of requests for nothing.
+RECENT_BUSINESS_DAYS = 3
+# Bloomberg's own rejection of a ticker or field, as the pull code passes it through
+# verbatim (pull_marks.fetch_intraday_close_series: "Bloomberg answered the intraday
+# request for <ticker> with: Unknown/Invalid security [nid:11150]"; fwd_curve / live:
+# "securityError: ..." / "<field>: Field not valid"). Matched case-insensitively. A day
+# whose only failures carry one of these is never retried by time, whatever its age.
+REJECTION_TEXTS = ("unknown/invalid security", "unknown security", "invalid security",
+                   "invalid field", "field not valid")
+MAX_WAITING_TICKERS = 5   # tickers named in the "waiting_on_tickers" sentence
+
+_day_state: Dict[Tuple[str, str], dict] = {}   # (db, day) -> {at, tried_at, version, signature, status,
+#                                                               missing_count, missing, rejected, rejected_only}
 _days_block: Dict[str, dict] = {}              # db -> the "days" dict last built by auto_backfill
 _options_block: Dict[str, dict] = {}           # db -> the "options" dict of the last run that worked a day (2026-09-22)
+_rates_block: Dict[str, dict] = {}             # db -> the "rates" dict, likewise (2026-09-22)
 _published: Dict[str, dict] = {}               # db -> the whole "backfill" block last published
 _notes: Dict[str, str] = {}                    # db -> the last run's "note" (past days being re-requested at 15:00)
+_waiting: Dict[str, str] = {}                  # db -> the last run's "waiting_on_tickers" sentence (2026-09-22)
 
 
 def _db_key(db_path) -> str:
     return str(Path(db_path).resolve())
+
+
+def state_version() -> str:
+    """The version stamp every per-day state carries: `library.LIBRARY_VERSION` (bumped
+    whenever `library.compute` learns a new kind or ticker rule, the listed-option ticker
+    included) plus a digest of the ticker tables and naming rules the backfill asks
+    Bloomberg's history with -- `common.NDF_1M_TICKERS`, `common.NDF_FIX_TICKERS`, the
+    standard forward tenor tickers (`_tenor_tickers` over `pull_marks.STANDARD_TENORS`),
+    the vol smile tickers (`vol_marketdata.vol_ticker`) and the OIS curve tickers
+    (`rates_marketdata.ois_curve`). A day's state stamped by any other value counts as
+    never tried, so a corrected ticker is asked for on the next press: the stamp resets
+    when any of those constants or functions changes, and only then."""
+    import hashlib
+    from data.bloomberg import rates_marketdata as rm
+    from data.bloomberg import vol_marketdata as vm
+    from data.bloomberg.library import LIBRARY_VERSION
+    from data.bloomberg.pull_marks import STANDARD_TENORS
+    from data.ingest.common import NDF_1M_TICKERS, NDF_FIX_TICKERS
+    rules = {"ndf_1m": NDF_1M_TICKERS, "ndf_fix": NDF_FIX_TICKERS,
+             "tenors": _tenor_tickers("USDBRL", list(STANDARD_TENORS)),
+             "vol": [vm.vol_ticker("USDJPY", t, q) for t in vm.VOL_TENORS for q in vm.VOL_QUOTE_TYPES],
+             "ois": {ccy: [(spec.ticker, spec.field) for spec in rm.ois_curve(ccy)] for ccy in sorted(rm.OIS_INDEX)}}
+    digest = hashlib.sha1(json.dumps(rules, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    return f"{LIBRARY_VERSION}+{digest}"
+
+
+def recent_business_days(today: date, holidays=None) -> List[str]:
+    """The last RECENT_BUSINESS_DAYS business days before `today` (config/holidays.txt), as
+    ISO strings: the past days the hourly retry still applies to."""
+    days = business_days(today - timedelta(days=14), today - timedelta(days=1), holidays)
+    return [d.isoformat() for d in days[-RECENT_BUSINESS_DAYS:]]
+
+
+def is_rejection(reason: str) -> bool:
+    """True when a failure reason carries Bloomberg's own rejection of the ticker or field
+    (REJECTION_TEXTS), which no retry can change until the code names another ticker."""
+    text = (reason or "").lower()
+    return any(marker in text for marker in REJECTION_TEXTS)
+
+
+_REQUEST_FOR_RE = re.compile(r"request for (.+?) with:")
+_RETURNED_NO_RE = re.compile(r"returned no (.+?) for (.+?)(?: on \d{4}-\d{2}-\d{2}|$)")
+
+
+def _reason_label(reason: str) -> str:
+    """The ticker a failure reason is about, for the "waiting_on_tickers" sentence:
+    'USDBRLSP Curncy' from the intraday wording, 'PX_SETTLE of SPX/E261016C7615' from a
+    "returned no <what> for <ticker> on <day>" wording; the reason's start otherwise."""
+    m = _REQUEST_FOR_RE.search(reason)
+    if m:
+        return m.group(1).strip()
+    m = _RETURNED_NO_RE.search(reason)
+    if m:
+        return f"{m.group(1).strip()} of {m.group(2).strip()}"[:60]
+    return reason.strip()[:60]
+
+
+def _failure_reasons(result: dict, still_missing: List[dict]) -> List[str]:
+    """Every failure reason of a worked day, untruncated (unlike `_plain_reasons`, which
+    is the status file's five): the basis for telling a day Bloomberg rejects from one
+    that may still fill. A NO_CLOSES day's reasons are its pairs' own, so a day whose
+    every SPOT ticker is rejected counts as rejected, not as a holiday."""
+    pair_reasons = result.get("missing_pair_reasons") or {}
+    reasons: List[str] = []
+    if result.get("error"):
+        reasons.append(f"this day's run raised {result['error']}")
+    reasons += [pair_reasons.get(pair) or f"Bloomberg returned no {CLOSE_HOUR_NY}:00 New York closing SPOT for {pair}"
+                for pair in result.get("missing_pairs") or []]
+    if result["status"] != "NO_CLOSES":
+        reasons += [m["reason"] for m in result.get("missing_marks") or []]
+        reasons += [m["reason"] for m in result.get("missing_inputs") or []]
+    if not reasons:
+        reasons = [f"{m['instrument_id']} {m['mark_type']} {m['settle_date']}: not written" for m in still_missing]
+    return list(dict.fromkeys(reasons))
+
+
+def _state_path(db_path) -> Path:
+    """The per-day state's home across restarts: a JSON sidecar next to the status file
+    (`live.status_path` is `<db>.bloomberg_status.json`; this is `<db>.backfill_state.json`).
+    Not a table: `data/ingest/schema.py` is data-ingest's, and the state is the backfill's
+    own bookkeeping, never read for a P&L or a delta."""
+    p = Path(db_path)
+    return p.with_name(p.name + ".backfill_state.json")
+
+
+def _load_state(db_path, key: str, clock: Callable[[], float]) -> None:
+    """Fill `_day_state` for `key` from the sidecar when the process knows nothing about
+    this database yet (a restart). `at` is on the caller's `clock` (monotonic, or a test's
+    fake): each entry's wall-clock `tried_at` is turned into "that long before now". A
+    missing or unreadable sidecar means an empty state, as before 2026-09-22."""
+    if any(k[0] == key for k in _day_state):
+        return
+    try:
+        raw = json.loads(_state_path(db_path).read_text(encoding="utf-8"))
+        days = raw["days"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    now_wall, now = datetime.now().astimezone(), clock()
+    for day_iso, entry in days.items():
+        try:
+            elapsed = max(0.0, (now_wall - datetime.fromisoformat(entry["tried_at"])).total_seconds())
+            _day_state[(key, day_iso)] = {
+                "at": now - elapsed, "tried_at": entry["tried_at"], "version": str(entry.get("version") or ""),
+                "signature": frozenset(tuple(item) for item in entry["signature"]),
+                "status": entry["status"], "missing_count": int(entry["missing_count"]),
+                "missing": list(entry["missing"]), "rejected": list(entry.get("rejected") or []),
+                "rejected_only": bool(entry.get("rejected_only"))}
+        except (KeyError, TypeError, ValueError):
+            continue                                   # one bad entry: that day counts as never tried
+
+
+def _save_state(db_path, key: str) -> None:
+    """Write `_day_state` for `key` to the sidecar (temp file + os.replace). Never raises:
+    a state that cannot be saved only costs the next restart a retry."""
+    days = {day: {"tried_at": s["tried_at"], "version": s["version"],
+                  "signature": sorted(list(item) for item in s["signature"]), "status": s["status"],
+                  "missing_count": s["missing_count"], "missing": list(s["missing"]),
+                  "rejected": list(s["rejected"]), "rejected_only": bool(s["rejected_only"])}
+            for (k, day), s in sorted(_day_state.items()) if k == key}
+    target = _state_path(db_path)
+    try:
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(json.dumps({"version": state_version(), "days": days}, indent=1), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        pass
+
+
+def _waiting_sentence(key: str, signatures: Dict[str, frozenset], due: set, recent: List[str]) -> str:
+    """One plain sentence on the days not asked for this run and why, tickers Bloomberg
+    rejects named first (at most MAX_WAITING_TICKERS): the log line and the status block's
+    "waiting_on_tickers". '' when nothing waits."""
+    waiting = [(day, _day_state[(key, day)]) for day in sorted(signatures, reverse=True)
+               if day not in due and (key, day) in _day_state]
+    rejected_days = [(day, s) for day, s in waiting if s["rejected"]]
+    parts: List[str] = []
+    if rejected_days:
+        tickers = list(dict.fromkeys(t for _, s in rejected_days for t in s["rejected"]))
+        shown = ", ".join(tickers[:MAX_WAITING_TICKERS]) + (" ..." if len(tickers) > MAX_WAITING_TICKERS else "")
+        parts.append(f"{len(rejected_days)} day(s) wait on tickers Bloomberg rejects ({shown}); "
+                     f"asked again when the ticker list changes")
+    older = [day for day, s in waiting if not s["rejected"] and day not in recent]
+    if older:
+        parts.append(f"{len(older)} older day(s) got nothing more from Bloomberg's history; asked again when "
+                     f"what they lack, or the ticker list, changes")
+    hourly = [day for day, s in waiting if not s["rejected"] and day in recent]
+    if hourly:
+        parts.append(f"{len(hourly)} day(s) within the last {RECENT_BUSINESS_DAYS} business days are tried "
+                     f"again within the hour")
+    return "; ".join(parts)
 
 
 def _earliest_trade_date(conn: sqlite3.Connection) -> Optional[date]:
@@ -1163,8 +1632,11 @@ def reference_dates(today: date) -> List[date]:
     return sorted(refs, reverse=True)
 
 
-def _signature(missing: List[dict]) -> frozenset:
-    return frozenset((m["instrument_id"], m["settle_date"], m["mark_type"]) for m in missing)
+def _signature(missing: List[dict], inputs_missing: List[dict] = ()) -> frozenset:
+    """What a day still lacks, as a set: its missing marks and (2026-09-22) the smiles and
+    curves its options and swaps price from (`inputs_missing`, keyed by kind)."""
+    return (frozenset((m["instrument_id"], m["settle_date"], m["mark_type"]) for m in missing)
+            | frozenset((m["key"], m["kind"]) for m in inputs_missing))
 
 
 def _plain_reasons(result: dict, still_missing: List[dict]) -> List[str]:
@@ -1181,28 +1653,30 @@ def _plain_reasons(result: dict, still_missing: List[dict]) -> List[str]:
         reasons += [pair_reasons.get(pair) or f"Bloomberg returned no {CLOSE_HOUR_NY}:00 New York closing SPOT for {pair}"
                     for pair in result["missing_pairs"]]
         reasons += [m["reason"] for m in result["missing_marks"]]
+        reasons += [m["reason"] for m in result.get("missing_inputs") or []]
     if not reasons:
         reasons = [f"{m['instrument_id']} {m['mark_type']} {m['settle_date']}: not written" for m in still_missing]
     return list(dict.fromkeys(reasons))[:MAX_STATUS_REASONS]
 
 
-def _freeze_ndfs_at_present_spot(db_path, today: date, log: Callable[[str], None]) -> None:
-    """User decision 2026-09-21 ("we can use a present spot for the past fixes"): once the
-    backfill has tried for the past closes, an NDF ticket that settled with no official SPOT
-    on or before its settlement is frozen at the latest official SPOT on file
-    (engine.pnl.ledger.realise_settled, ndf_present_spot=True). Here and nowhere else: the
-    live pull's own realise_settled runs before the backfill of the same button press, and a
-    freeze is never recomputed."""
+def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) -> None:
+    """The backfill's closing step: the ledger's plain `realise_settled(conn, today)` once
+    the past closes are on file, so a trade settled since the live pull's own freeze (which
+    runs before the backfill of the same button press) is frozen at its settlement date's
+    close, and one the ledger froze at a live row is frozen again at the close that replaced
+    it (the ledger's rule, 2026-09-22). Until 2026-09-22 this step was the one caller of
+    the present-spot exception for settled NDFs (user decision 2026-09-21); that exception
+    is retired (2026-09-22: the standard NDF rule covers every ticket) and the call is the
+    ledger's plain one."""
     realise_settled = _import_realise_settled()
     if realise_settled is None:
         return
     from data.ingest.schema import connect
     conn = connect(Path(db_path))
     try:
-        led = realise_settled(conn, today.isoformat(), ndf_present_spot=True)
+        led = realise_settled(conn, today.isoformat())
         if led["realised"]:
-            log(f"Auto-backfill: {led['realised']} settled trade(s) frozen after the backfill (an NDF with no "
-                f"SPOT on or before its settlement takes the present spot).")
+            log(f"Auto-backfill: {led['realised']} settled trade(s) frozen after the backfill.")
     except Exception as exc:  # noqa: BLE001 -- as in backfill(): report and move on
         log(f"  realise_settled raised: {exc!r}")
     finally:
@@ -1215,21 +1689,31 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                    log: Callable[[str], None] = print,
                    on_progress: Optional[Callable[[int], None]] = None,
                    scale_fetch: Optional[Callable] = None,
-                   clock: Callable[[], float] = __import__("time").monotonic) -> List[dict]:
+                   clock: Callable[[], float] = __import__("time").monotonic,
+                   quote_fetch: Optional[Callable] = None) -> List[dict]:
     """Fill every business day from the earliest trade date to yesterday that needs marks
     and lacks a complete official close (per `data.bloomberg.inventory.close_completeness`
-    -- SPOT + FWD_OUTRIGHT + FUTURE_PX, 2026-09-18), in ONE `backfill()` call: the
+    -- SPOT + FWD_OUTRIGHT + FUTURE_PX, 2026-09-18) or a smile / curve its options and
+    swaps price from (`inputs_missing`, 2026-09-22), in ONE `backfill()` call: the
     header's `reference_dates` first, then the remaining days newest first. Calls
     `on_progress(days_remaining)` after each day so a caller can publish it, and returns
     the days' results in the order they were worked.
 
     A day that was tried and stayed incomplete (a holiday with no closes, a settle date
-    beyond the last tenor, a ticker Bloomberg does not serve) is left alone for
-    RETRY_SECONDS unless what it lacks has changed since; `clock` is injectable for tests.
-    A day on which the book needed nothing is never asked for. The outcome per day is kept
-    in `_day_state` and the status-file "days" dict in `_days_block` (see
-    `start_auto_backfill`). `fwd_fetch`/`fut_fetch`/`scale_fetch` are forwarded to
-    `backfill()` unchanged (see its docstring)."""
+    beyond the last tenor, a ticker Bloomberg does not serve) is asked again only when
+    (2026-09-22, user: "yes do part 2"): what it lacks has changed since (a new upload);
+    or the code's ticker rules changed (`state_version`, so a corrected ticker is asked
+    for on the next press); or, for a day within the last RECENT_BUSINESS_DAYS business
+    days alone, RETRY_SECONDS have passed and not every one of its failures is Bloomberg's
+    own rejection of a ticker (`is_rejection`) -- an older day, or a day whose every
+    failure is a rejected ticker, is never retried by time. `clock` is injectable for
+    tests. A day on which the book needed nothing is never asked for. The outcome per day
+    is kept in `_day_state`, remembered across restarts in the `_state_path` sidecar
+    (loaded here when the process knows nothing about this database yet, written by
+    `_record_outcome`), and the status-file "days" dict in `_days_block` (see
+    `start_auto_backfill`); the days left waiting are said in one sentence, tickers named
+    (`_waiting`, the block's "waiting_on_tickers"). `fwd_fetch`/`fut_fetch`/`quote_fetch`/
+    `scale_fetch` are forwarded to `backfill()` unchanged (see its docstring)."""
     from data.ingest.schema import connect
     from data.bloomberg.inventory import close_completeness
     from data.bloomberg.live import book_today
@@ -1247,42 +1731,55 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         completeness = close_completeness(conn, earliest.isoformat(), yesterday.isoformat())
     finally:
         conn.close()
-    open_rows = completeness[(completeness["needed"] > 0) & ~completeness["complete"]]
-    signatures = {row.as_of_date: _signature(row.missing) for row in open_rows.itertuples()}
-    # Days that hold FX marks which are not the 15:00 New York close (that day's last live
-    # pull, or a 17:00 PX_LAST row on a day still within Bloomberg's intraday reach, from
-    # the 2026-09-21 cut-over): said once in the log and in the status block, since the
+    lacks_input = completeness["inputs_missing"].map(bool)
+    open_rows = completeness[((completeness["needed"] > 0) & ~completeness["complete"]) | lacks_input]
+    signatures = {row.as_of_date: _signature(row.missing, row.inputs_missing) for row in open_rows.itertuples()}
+    # Days that hold marks which are not that day's close (an FX row not at 15:00 New York:
+    # that day's last live pull, or a 17:00 PX_LAST row on a day still within Bloomberg's
+    # intraday reach, from the 2026-09-21 cut-over; a future's live price rather than its
+    # settlement, 2026-09-22): said once in the log and in the status block, since the
     # first run after the change asks for every past day again (2026-09-22: every past
     # close is the 15:00 value; only days beyond the intraday history keep 17:00).
     restamp = sum(1 for row in open_rows.itertuples() if getattr(row, "not_closed", 0) > 0)
     note = ""
     if restamp:
         floor = first_1500_day(today)
-        note = (f"{restamp} past day(s) hold FX marks that are not that day's {CLOSE_HOUR_NY}:00 New York close (a "
-                f"live pull's last price, or a 17:00 daily close); every past day from {floor} on, as far as "
-                f"Bloomberg's intraday history reaches, is asked for at {CLOSE_HOUR_NY}:00 New York and those rows "
-                f"replaced. A day before {floor} is beyond that history and closes at Bloomberg's 17:00 daily close.")
+        note = (f"{restamp} past day(s) hold marks that are not that day's close (an FX row not at {CLOSE_HOUR_NY}:00 "
+                f"New York: a live pull's last price, or a 17:00 daily close; a future's live price rather than its "
+                f"settlement); every past day from {floor} on, as far as Bloomberg's intraday history reaches, is "
+                f"asked for at {CLOSE_HOUR_NY}:00 New York and those rows replaced, and a future's settlement is asked "
+                f"for on any past day. A day before {floor} is beyond that history and closes at Bloomberg's 17:00 "
+                f"daily close.")
     _notes[key] = note
     if note:
         log("Auto-backfill: " + note)
+    _load_state(db_path, key, clock)              # a restart: what the last process had tried (2026-09-22)
     for stale in [k for k in _day_state if k[0] == key and k[1] not in signatures]:
         del _day_state[stale]                     # complete since (or no longer needed): nothing to report
     now = clock()
+    version = state_version()
+    recent = recent_business_days(today)
     due = []
     for day_iso, signature in signatures.items():
         state = _day_state.get((key, day_iso))
-        if state is None or state["signature"] != signature or now - state["at"] >= RETRY_SECONDS:
+        if state is None or state["version"] != version or state["signature"] != signature:
             due.append(date.fromisoformat(day_iso))
+        elif day_iso in recent and not state["rejected_only"] and now - state["at"] >= RETRY_SECONDS:
+            due.append(date.fromisoformat(day_iso))
+    waiting = _waiting_sentence(key, signatures, {d.isoformat() for d in due}, recent)
+    _waiting[key] = waiting
     refs = reference_dates(today)
     results: List[dict] = []
     try:
         if not due:
             log("Auto-backfill: history already complete." if not signatures else
-                f"Auto-backfill: {len(signatures)} day(s) cannot be completed yet; each is tried again within the hour.")
+                f"Auto-backfill: {len(signatures)} day(s) cannot be completed yet; nothing asked of Bloomberg: {waiting}.")
             if on_progress:
                 on_progress(0)
-            _freeze_ndfs_at_present_spot(db_path, today, log)   # nothing left to ask for: the backfill has tried
+            _realise_after_backfill(db_path, today, log)   # nothing left to ask for: the backfill has tried
             return []
+        if waiting:
+            log(f"Auto-backfill: {waiting}.")
         order = [d for d in refs if d in due] + sorted((d for d in due if d not in refs), reverse=True)
         log(f"Auto-backfill: {len(order)} incomplete day(s) between {min(order)} and {max(order)}, "
             f"reference dates first, then newest first.")
@@ -1296,36 +1793,47 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
 
         backfill(db_path, min(order), max(order), fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
                  session_factory=session_factory, host=host, port=port, log=log, scale_fetch=scale_fetch,
-                 order=order, on_day=_on_day)
-        _freeze_ndfs_at_present_spot(db_path, today, log)
+                 order=order, on_day=_on_day, quote_fetch=quote_fetch)
+        _realise_after_backfill(db_path, today, log)
         return results
     finally:
-        _record_outcome(db_path, key, results, signatures, refs, clock)
+        _record_outcome(db_path, key, results, signatures, refs, clock, today)
 
 
 def _record_outcome(db_path, key: str, results: List[dict], signatures: Dict[str, frozenset],
-                    refs: List[date], clock: Callable[[], float]) -> None:
+                    refs: List[date], clock: Callable[[], float], today: Optional[date] = None) -> None:
     """After a run (finished or not): what each worked day still lacks goes into
-    `_day_state` (that is what the hourly retry and the status file read), and the
-    status-file "days" dict is rebuilt -- every reference date, plus the newest days that
-    are not DONE, MAX_STATUS_DAYS at most."""
+    `_day_state` (that is what the retry rule and the status file read) with the version
+    stamp, the tickers Bloomberg rejected and whether those were its only failures; the
+    state is saved to the sidecar; the status-file "days" dict is rebuilt -- every
+    reference date, plus the newest days that are not DONE, MAX_STATUS_DAYS at most --
+    and the "waiting_on_tickers" sentence is rebuilt over every day still incomplete."""
     from data.ingest.schema import connect
     from data.bloomberg.inventory import close_completeness
     if results:
+        version = state_version()
         conn = connect(Path(db_path))
         try:
             for result in results:
                 row = close_completeness(conn, result["day"], result["day"]).iloc[0]
-                if row["complete"] or not row["missing"]:
+                if (row["complete"] or not row["missing"]) and not row["inputs_missing"]:
                     _day_state.pop((key, result["day"]), None)
                     signatures.pop(result["day"], None)
                     continue
+                failures = _failure_reasons(result, row["missing"])
+                rejected = list(dict.fromkeys(_reason_label(r) for r in failures if is_rejection(r)))
                 _day_state[(key, result["day"])] = {
-                    "at": clock(), "signature": _signature(row["missing"]),
+                    "at": clock(), "tried_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "version": version, "signature": _signature(row["missing"], row["inputs_missing"]),
                     "status": "NO_CLOSES" if result["status"] == "NO_CLOSES" else "INCOMPLETE",
-                    "missing_count": len(row["missing"]), "missing": _plain_reasons(result, row["missing"])}
+                    "missing_count": len(row["missing"]) + len(row["inputs_missing"]),
+                    "missing": _plain_reasons(result, row["missing"]),
+                    "rejected": rejected, "rejected_only": bool(failures) and all(is_rejection(r) for r in failures)}
         finally:
             conn.close()
+    _save_state(db_path, key)
+    if today is not None:
+        _waiting[key] = _waiting_sentence(key, signatures, set(), recent_business_days(today))
     days: Dict[str, dict] = {}
     for ref in refs:
         iso = ref.isoformat()
@@ -1349,14 +1857,22 @@ def _record_outcome(db_path, key: str, results: List[dict], signatures: Dict[str
         # A block of its own, not keys on "days": that block's entries are built from
         # close_completeness, not from these results, and their shape is pinned.
         options = {r["day"]: {"priced": r.get("options_priced"), "skipped": list(r.get("options_skipped") or []),
-                              "note": r.get("options_note") or ""} for r in results}
+                              "note": r.get("options_note") or "",
+                              "closed_out": list(r.get("options_closed_out") or [])} for r in results}
         _options_block[key] = dict(sorted(options.items(), reverse=True)[:MAX_STATUS_DAYS])
+        # and what recalc_on_file made of each worked day's swaps, with the smile / curve
+        # rows the day got from the history (2026-09-22), the same shape
+        rates = {r["day"]: {"priced": r.get("rates_priced"), "failed": list(r.get("rates_failed") or []),
+                            "note": r.get("rates_note") or "", "vol_quotes": r.get("vol_quotes") or 0,
+                            "curve_quotes": r.get("curve_quotes") or 0,
+                            "missing_inputs": list(r.get("missing_inputs") or [])} for r in results}
+        _rates_block[key] = dict(sorted(rates.items(), reverse=True)[:MAX_STATUS_DAYS])
 
 
 def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                         fetch: Optional[Callable] = None, fwd_fetch: Optional[Callable] = None,
                         fut_fetch: Optional[Callable] = None, session_factory: Optional[Callable] = None,
-                        scale_fetch: Optional[Callable] = None):
+                        scale_fetch: Optional[Callable] = None, quote_fetch: Optional[Callable] = None):
     """Run `auto_backfill` in a background daemon thread when a Terminal is available,
     writing progress into the existing Bloomberg status file under key "backfill" so the
     Market data tab can show "Backfill: n days remaining". Without a Terminal, writes
@@ -1368,6 +1884,10 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
       "days": {"<YYYY-MM-DD>": {"status": "DONE" | "NO_CLOSES" | "INCOMPLETE",
                                 "missing_count": <int>, "missing": [<plain reason>, ... at most 5]}}
       "last_run": "<ISO timestamp>" of the end of the last run
+      "waiting_on_tickers": "" or one sentence on the incomplete days not asked for again
+              and why (2026-09-22): how many wait on tickers Bloomberg rejects, those
+              tickers named (at most MAX_WAITING_TICKERS), then how many older days got
+              nothing more from the history, then how many recent days are retried hourly
       "note": "" or a sentence saying how many past days hold FX marks that are not the
               15:00 New York close and are being asked for again (2026-09-21; every past
               day within Bloomberg's intraday reach from 2026-09-22, 17:00 only beyond it)
@@ -1375,11 +1895,20 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                                   "divisor": <float or null>, "raw": {...}, "errors": {...}}}
               -- which Bloomberg field gave each pair's forward-points divisor
       "options": {"<YYYY-MM-DD>": {"priced": <int or null>, "skipped": [{"trade_id", "reason"}, ...],
-                                   "note": "" | why the step did not run}}
+                                   "note": "" | why the step did not run,
+                                   "closed_out": [<trade_id>, ...] -- closed-out options, not priced
+                                   and not among the skipped (2026-09-22)}}
               -- (2026-09-22) what engine.options.store.price_close made of each worked
               day's FX options from that day's own inputs on file, the days of the last run
               that worked any, newest first, MAX_STATUS_DAYS at most (see backfill())
-    "days" holds the header's reference dates and the newest days that are not DONE, so
+      "rates": {"<YYYY-MM-DD>": {"priced": <int or null>, "failed": [{"trade_id", "error"}, ...],
+                                 "note": "" | why the step did not run, "vol_quotes": <int>,
+                                 "curve_quotes": <int>, "missing_inputs": [{"kind", "key", "reason"}, ...]}}
+              -- (2026-09-22) what engine.rates.store.recalc_on_file made of each worked
+              day's swaps from that day's OIS quotes, and the smile / curve rows the day
+              got from Bloomberg's history or could not (see backfill()), likewise
+    "days" holds the header's reference dates and the newest days that are not DONE (a
+    day lacking a smile or a curve its options or swaps need counts as not DONE), so
     the header can say WHY a period is n/a. A "reason" of a run that raised contains the
     word "failed". live.pull_once rewrites the whole status file without this key on
     every cycle, so every call here publishes the whole remembered block again."""
@@ -1397,7 +1926,9 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             block.update(patch)
             patch_status(db_path, "backfill", dict(block))
 
-    if session_factory is None and fetch is None and fwd_fetch is None and fut_fetch is None:
+    real_pull = (session_factory is None and fetch is None and fwd_fetch is None and fut_fetch is None
+                 and quote_fetch is None)
+    if real_pull:
         ok, why = availability(host, port)
         if not ok:
             _publish({"running": False, "reason": why})
@@ -1406,8 +1937,6 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     if not _auto_lock.acquire(blocking=False):
         _publish({})  # a run is already in flight; only put its block back after the feed's rewrite
         return None
-
-    real_pull = session_factory is None and fetch is None and fwd_fetch is None and fut_fetch is None
 
     def _save() -> None:
         # The saving every pull ends with (user, 2026-09-22: "every pull from bbg triggers the
@@ -1429,7 +1958,7 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             try:
                 _publish({"running": True, "reason": ""})
                 auto_backfill(db_path, host=host, port=port, fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
-                              session_factory=session_factory, scale_fetch=scale_fetch,
+                              session_factory=session_factory, scale_fetch=scale_fetch, quote_fetch=quote_fetch,
                               on_progress=lambda remaining: _publish({"running": remaining > 0, "remaining": remaining}))
             except Exception as exc:  # never let a background thread take the process down
                 _publish({"running": False, "reason": f"auto-backfill failed: {exc!r}"})
@@ -1437,7 +1966,8 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         finally:
             _publish({"running": False, "remaining": 0, "days": _days_block.get(key, {}),
                       "note": _notes.get(key, ""), "points_scale": _scale_reports.get(key, {}),
-                      "options": _options_block.get(key, {}),
+                      "options": _options_block.get(key, {}), "rates": _rates_block.get(key, {}),
+                      "waiting_on_tickers": _waiting.get(key, ""),
                       "last_run": datetime.now().astimezone().isoformat(timespec="seconds")})
             _auto_lock.release()
 

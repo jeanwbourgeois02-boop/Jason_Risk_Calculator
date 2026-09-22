@@ -542,7 +542,10 @@ def test_receiver_marks_are_exactly_minus_the_payers_so_reversing_history_is_exa
     swap on the same curve as a payer and as a receiver with engine/rates. PV_USD,
     DV01_USD (stored signed) and CASHFLOW_USD must be exact negatives (1e-6 relative)
     and PAR_RATE equal, in every regime. Then flip the payer with set_direction and
-    check the reversed marks ARE what the pricer writes for the receiver."""
+    check the reversed marks ARE what the pricer writes for the receiver. The reversal
+    itself is the pricer's, engine/rates/store.py::reverse_direction_marks (moved there
+    2026-09-22, hard rule 2: the pricer reverses its own marks), which set_direction
+    calls; tests/test_rates_pricing.py proves the function on its own."""
     payer = _priced_swap_db(625e6, effective, maturity)
     receiver = _priced_swap_db(-625e6, effective, maturity)
     p, r = _pricer_marks(payer), _pricer_marks(receiver)
@@ -575,6 +578,31 @@ def test_a_flipped_swaps_history_survives_on_every_date_and_matches_a_reprice(cl
     assert {d for d, _ in flipped} == set(dates) and set(flipped) == set(repriced)
     for key, value in repriced.items():
         assert flipped[key] == pytest.approx(value, rel=1e-6, abs=1e-9), key
+
+
+def test_a_flip_hands_the_mark_reversal_to_the_pricer_and_keeps_no_copy_of_its_own(monkeypatch):
+    """irs_direction writes trades and legs; the marks are engine/rates' own and are
+    reversed by engine.rates.store.reverse_direction_marks, called once per real flip
+    with (conn, trade_id, instrument_id) inside the same transaction. A choice that
+    does not flip the swap never calls it. Imported lazily: this module loads no
+    QuantLib at import time."""
+    import engine.rates.store as store
+
+    assert not hasattr(irs_direction, "_reverse_priced")
+    calls = []
+    monkeypatch.setattr(store, "reverse_direction_marks",
+                        lambda conn, trade_id, instrument_id: calls.append((conn.in_transaction, trade_id, instrument_id)))
+    conn = schema.connect()
+    _seed_swap(conn)
+    irs_direction.set_direction(conn, "918421481", "PAY")          # already pay fixed: no flip, no call
+    assert calls == []
+    irs_direction.set_direction(conn, "918421481", "RECEIVE")      # a real flip: the pricer is asked once
+    assert calls == [(True, "918421481", SWAP)]
+    before = irs_direction.irs_signs(conn)
+    conn.execute("UPDATE trades SET quantity = -quantity")
+    conn.commit()
+    assert irs_direction.reverse_flipped(conn, before) == 1
+    assert calls == [(True, "918421481", SWAP)] * 2
 
 
 def test_set_direction_raises_for_unknown_trade_non_irs_trade_and_bad_direction():

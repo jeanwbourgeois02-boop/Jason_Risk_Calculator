@@ -18,13 +18,16 @@ the count of marks the book needed that day (SPOT + FWD_OUTRIGHT + FUTURE_PX per
 `_needed_marks`, 2026-09-18 -- SPOT alone used to leave every forward/future's LTD(t)
 unpriced on an otherwise "complete" day; plus NDF_FIX on an NDF ticket's fixing date,
 2026-09-22) versus how many are official AT THE CLOSE (a past day's FX row counts only when
-stamped 15:00 New York, `backfill.is_close_row`), so the Market data tab can show holes in
-history at a glance and the backfill knows which days to ask for.
+stamped 15:00 New York, a future's only when stamped at the settlement,
+`backfill.is_close_row`), so the Market data tab can show holes in history at a glance and
+the backfill knows which days to ask for. Beside the marks, `inputs_missing` (2026-09-22)
+lists the OIS curves and vol smiles the day's options and swaps price from that the day
+does not hold yet (`inputs_missing`); the backfill asks Bloomberg's history for those too.
 """
 from __future__ import annotations
 
 import sqlite3
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import pandas as pd
 
@@ -160,10 +163,51 @@ def stale_empty_pull_reason(conn: sqlite3.Connection, status: Optional[dict], as
             "after that pull ran. Press \"Pull Bloomberg now\" (Bloomberg is pulled on request only).")
 
 
+def _holds_vol_smile(conn: sqlite3.Connection, day: str, pair: str) -> bool:
+    """Does `vol_quotes` hold any Bloomberg quote of `pair` dated `day` (the live vol step's
+    BBG_BDP rows or the backfill's BBG_BDH history)? A day that holds the pair's quotes is
+    never asked for them again."""
+    try:
+        return conn.execute("SELECT 1 FROM vol_quotes WHERE as_of_date = ? AND pair = ? AND source LIKE 'BBG%' LIMIT 1",
+                            (day, pair)).fetchone() is not None
+    except sqlite3.OperationalError:       # no table yet: nothing on file
+        return False
+
+
+def _holds_ois_curve(conn: sqlite3.Connection, day: str, ccy: str) -> bool:
+    """Does `curve_quotes` hold any Bloomberg OIS quote of `ccy` dated `day`?"""
+    try:
+        return conn.execute("SELECT 1 FROM curve_quotes WHERE as_of_date = ? AND ccy = ? AND quote_type = 'OIS' "
+                            "AND source LIKE 'BBG%' LIMIT 1", (day, ccy)).fetchone() is not None
+    except sqlite3.OperationalError:
+        return False
+
+
+def inputs_missing(conn: sqlite3.Connection, day: str) -> List[dict]:
+    """The OIS curves and vol smiles a past close on `day` prices its FX options and swaps
+    from (data.bloomberg.library.history_inputs_needed) that the day does not hold yet:
+    [{kind: OIS_CURVE | VOL_SMILE, key: currency | pair}], sorted. What the backfill asks
+    Bloomberg's daily history for on that day (2026-09-22); a day that already holds a
+    pair's or a currency's quotes -- from a live pull or an earlier backfill -- is never
+    asked for them again."""
+    from data.bloomberg import library
+    out = []
+    for item in library.history_inputs_needed(conn, day):
+        held = (_holds_vol_smile(conn, day, item["key"]) if item["kind"] == "VOL_SMILE"
+                else _holds_ois_curve(conn, day, item["key"]))
+        if not held:
+            out.append({"kind": item["kind"], "key": item["key"]})
+    return out
+
+
 def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Optional[str] = None) -> pd.DataFrame:
     """One row per business day in [start, end]: as_of_date, needed, present, complete,
     missing (list of {instrument_id, settle_date, mark_type} still missing that day),
-    not_closed (how many of those DO have an official row, only not the close).
+    not_closed (how many of those DO have an official row, only not the close), and
+    inputs_missing (2026-09-22: the [{kind, key}] OIS curves / vol smiles the day's options
+    and swaps price from that it does not hold, `inputs_missing`; on a day before `today`
+    only -- today's inputs are the live pull's). `needed` / `present` / `complete` /
+    `missing` stay about the marks: the header's "(N of M needed marks)" reads them.
 
     The close (user decision 2026-09-21: "for previous or any closes in FX, we need to use
     NY 3pm"; 2026-09-22: every previous close, not only from 2026-09-21 on): on a day
@@ -175,10 +219,11 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     cut-over: not a close, so the day is not complete (`not_closed` counts such rows) and
     the backfill replaces it. Only on a day beyond the intraday history (about 140
     business days back) does a 17:00 row count, since no 15:00 value can be asked for.
-    Today's rows are live and count as they are; a future keeps its PX_SETTLE, and an NDF
-    ticket's fixing date needs its NDF_FIX (in `_needed_marks` via the library's
-    MARK_KINDS), so a past fixing date with no official fixing is incomplete and the
-    backfill asks for it.
+    Today's rows are live and count as they are; a past day's future counts only at its
+    PX_SETTLE (stamped at the settlement, 2026-09-22: a live press's PX_LAST row is not a
+    close and the backfill replaces it), and an NDF ticket's fixing date needs its NDF_FIX
+    (in `_needed_marks` via the library's MARK_KINDS), so a past fixing date with no
+    official fixing is incomplete and the backfill asks for it.
 
     2026-09-18 (BUILD_PLAN.md section 3 / CLAUDE.md "P&L conventions": Daily/5d/MTD/YTD
     all difference LTD(t) against LTD(t-1bd) etc., and every FX leg's LTD needs the
@@ -223,5 +268,6 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
                 not_closed += 1 if hit else 0
         rows.append({"as_of_date": day, "needed": len(needed_items), "present": present,
                      "complete": len(needed_items) > 0 and present >= len(needed_items), "missing": missing,
-                     "not_closed": not_closed})
-    return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete", "missing", "not_closed"])
+                     "not_closed": not_closed, "inputs_missing": inputs_missing(conn, day) if day < today else []})
+    return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete", "missing", "not_closed",
+                                       "inputs_missing"])

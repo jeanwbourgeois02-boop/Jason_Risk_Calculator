@@ -108,9 +108,11 @@ def test_auto_backfill_fills_from_earliest_trade_to_yesterday(tmp_path):
 def test_auto_backfill_option_only_book_fills_closing_spots_then_reports_complete(tmp_path):
     """2026-09-18: a book holding only a EURSEK option gets the closing SPOT of its pair
     and of its own USD-conversion pairs for every business day since it was traded, and
-    those days then count as complete -- a past option day needs SPOT only. Before, the
-    option pair's SPOT was 'needed' but fetched by nobody, so every such day stayed
-    incomplete and was asked of Bloomberg again on every feed cycle."""
+    those days then count as complete. Before, the option pair's SPOT was 'needed' but
+    fetched by nobody, so every such day stayed incomplete and was asked of Bloomberg
+    again on every feed cycle. 2026-09-22: the day's smile and the EUR OIS curve (SEK has
+    none in scope) come from the daily history too, one request per kind for the stretch;
+    once on file the day is complete and nothing is asked again."""
     yesterday = _book_today() - timedelta(days=1)
     earliest = yesterday - timedelta(days=4)
     while earliest.weekday() >= 5:
@@ -134,19 +136,35 @@ def test_auto_backfill_option_only_book_fills_closing_spots_then_reports_complet
         return {t: 1.5 for t in tickers}
 
     def never(*a, **k):
-        raise AssertionError("SPOT only for options: no forward-curve or future history request")
+        raise AssertionError("no forward at an option's expiry, no future: no such history request")
 
-    results = backfill.auto_backfill(p, fetch=fetch, fwd_fetch=never, fut_fetch=never, log=lambda *_: None)
+    quotes_asked = []
+
+    def quotes(session, service, tickers, fields, start, end):
+        quotes_asked.append((len(tickers), tickers[0].split(" ")[0][:6], list(fields), start, end))
+        return {t: {d.isoformat(): {"PX_LAST": 8.0} for d in backfill.business_days(start, end)} for t in tickers}
+
+    results = backfill.auto_backfill(p, fetch=fetch, fwd_fetch=never, fut_fetch=never, quote_fetch=quotes,
+                                     log=lambda *_: None)
     business_days = backfill.business_days(earliest, yesterday)
     assert sorted(r["day"] for r in results) == [d.isoformat() for d in business_days]
     assert all(r["status"] == "DONE" and r["closes"] == 3 and r["missing_marks"] == [] for r in results)
+    assert all(r["vol_quotes"] == 45 and r["curve_quotes"] == 12 and r["missing_inputs"] == [] for r in results)
     have = {(r[0], r[1]) for r in schema.connect(p).execute(
         "SELECT instrument_id, as_of_date FROM marks_official WHERE mark_type='SPOT'")}
     assert have == {(pair, d.isoformat()) for pair in pairs for d in business_days}
+    # two history requests for the one stretch: the 45 EURSEK vol tickers, then EUR's 12 OIS tickers
+    last = business_days[-1]
+    assert quotes_asked == [(45, "EURSEK", ["PX_LAST"], earliest, last), (12, "EESWE1", ["PX_LAST"], earliest, last)]
+    conn = schema.connect(p)
+    assert conn.execute("SELECT COUNT(DISTINCT as_of_date), COUNT(*), MIN(source) FROM vol_quotes").fetchone() == (
+        len(business_days), 45 * len(business_days), "BBG_BDH")
+    assert conn.execute("SELECT COUNT(DISTINCT as_of_date), COUNT(*), MIN(ccy), MAX(ccy) FROM curve_quotes").fetchone() == (
+        len(business_days), 12 * len(business_days), "EUR", "EUR")
 
     progress = []
-    again = backfill.auto_backfill(p, fetch=never, fwd_fetch=never, fut_fetch=never, log=lambda *_: None,
-                                   on_progress=progress.append)
+    again = backfill.auto_backfill(p, fetch=never, fwd_fetch=never, fut_fetch=never, quote_fetch=never,
+                                   log=lambda *_: None, on_progress=progress.append)
     assert again == [] and progress == [0]                      # history complete: nothing re-requested
 
 
@@ -461,9 +479,10 @@ def test_auto_backfill_says_that_past_days_not_stamped_at_the_close_are_requeste
     assert sorted(r["day"] for r in results) == [old_day, day] and {r["status"] for r in results} == {"DONE"}
     assert sorted(asked) == [before, yesterday]                                   # (d) the older day is re-requested
     note = backfill._notes[key]
-    assert note.startswith("2 past day(s) hold FX marks that are not that day's 15:00 New York close")
+    assert note.startswith("2 past day(s) hold marks that are not that day's close (an FX row not at 15:00 New York")
     assert f"every past day from {backfill.intraday_floor(_book_today())} on" in note
     assert "is asked for at 15:00 New York and those rows replaced" in note
+    assert "a future's settlement is asked for on any past day" in note
     assert "closes at Bloomberg's 17:00 daily close" in note and "keep the marks they have" not in note
     assert any(note in line for line in log)
     # both days' rows are now the 15:00 close (the older day's 17:00 rows overwritten by the fake 15:00 series)
@@ -597,3 +616,72 @@ def test_after_the_1700_roll_the_day_just_ended_is_past_for_the_backfill_and_the
                         (d1.isoformat(),)).fetchall() == [("FWD_OUTRIGHT", 0.665, backfill.close_stamp(d1, d2)),
                                                           ("SPOT", 0.61, backfill.close_stamp(d1, d2))]
     assert conn.execute("SELECT COUNT(*) FROM marks WHERE snapped_at = ?", (press18,)).fetchone() == (0,)
+
+
+# =========================================================================== 2026-09-22: a day's smile and curve
+def test_auto_backfill_works_a_day_whose_closes_are_complete_but_whose_inputs_are_missing_and_says_why(tmp_path, monkeypatch):
+    """A day with every mark at its close still lacks the smile and the curves its option
+    prices from: it is due, the history is asked for them (and for nothing else that is on
+    file), the day is complete once they land, and a curve the history has nothing for is
+    named in the status block's reasons and tried again within the hour, not on every run."""
+    p, conn = _db(tmp_path, "2026-09-16")                                        # AUDUSD forward, Wed 09-16 on
+    conn.execute("INSERT INTO instruments VALUES ('USDJPY101526C-1','FX_OPTION','USD','JPY',1,0,'USDJPY101526C-1','2026-10-15')")
+    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','USDJPY101526C-1','FX_OPTION','o1','2026-09-16',1e6,0.01,"
+                 "'acc','cp','','t','d','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','USD',1e6,'2026-09-16','2026-10-15',0,0)")
+    conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
+    days = backfill.business_days(date(2026, 9, 16), date(2026, 9, 18))
+    for d in days:                                                               # every mark already at the close
+        stamp = backfill.close_stamp(d)
+        conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+            (d.isoformat(), "AUDUSD", d.isoformat(), "SPOT", 0.65, "BBG_BFXFORWARD", stamp),
+            (d.isoformat(), "AUDUSD", _settle_date(), "FWD_OUTRIGHT", 0.655, "BBG_INTERP", stamp),
+            (d.isoformat(), "USDJPY", d.isoformat(), "SPOT", 147.0, "BBG_BFXFORWARD", stamp)])
+    conn.commit()
+    from data.bloomberg.inventory import close_completeness
+    strip = close_completeness(conn, "2026-09-16", "2026-09-18")
+    assert list(strip["complete"]) == [True] * 3
+    assert list(strip["inputs_missing"]) == [[{"kind": "OIS_CURVE", "key": "JPY"}, {"kind": "OIS_CURVE", "key": "USD"},
+                                             {"kind": "VOL_SMILE", "key": "USDJPY"}]] * 3
+    monkeypatch.setattr(backfill, "_import_price_close", lambda: (lambda conn, day: {"day": day, "priced": 1, "skipped": []}))
+    asked = []
+
+    def quotes(session, service, tickers, fields, start, end):                    # nothing for JPY's curve
+        asked.append((len(tickers), start, end))
+        return {t: {d.isoformat(): {"PX_LAST": 4.0} for d in backfill.business_days(start, end)}
+                for t in tickers if not t.startswith("JYSO")}
+
+    now = [1000.0]
+    fetch = lambda s, v, tickers, field, day: {"AUDUSD Curncy": 0.61, "USDJPY Curncy": 147.5}   # noqa: E731
+    run = lambda: backfill.auto_backfill(p, fetch=fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch,  # noqa: E731
+                                         quote_fetch=quotes, log=lambda *_: None, clock=lambda: now[0])
+    results = run()
+    assert sorted(r["day"] for r in results) == [d.isoformat() for d in days]
+    assert all(r["status"] == "DONE" and r["vol_quotes"] == 45 and r["curve_quotes"] == 17 for r in results)
+    assert all([(m["kind"], m["key"]) for m in r["missing_inputs"]] == [("OIS_CURVE", "JPY")] for r in results)
+    assert asked == [(45, date(2026, 9, 16), date(2026, 9, 18)), (17 + 9, date(2026, 9, 16), date(2026, 9, 18))]
+    # the marks at the close were left alone
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone() == (9,)
+    assert conn.execute("SELECT DISTINCT value FROM marks WHERE mark_type = 'SPOT' AND instrument_id = 'AUDUSD'").fetchall() == [(0.65,)]
+    # the status block: each day INCOMPLETE for JPY's curve alone, with the history's own reason
+    key = backfill._db_key(p)
+    for d in days:
+        state = backfill._day_state[(key, d.isoformat())]
+        assert state["status"] == "INCOMPLETE" and state["missing_count"] == 1
+        assert state["missing"] == [f"fewer than 4 OIS quotes for JPY on {d}: Bloomberg returned no value for "
+                                    "JYSO1Z Curncy, JYSOA Curncy, JYSOC Curncy, JYSOF Curncy, JYSO1 Curncy, JYSO2 Curncy, "
+                                    "JYSO5 Curncy, JYSO10 Curncy, JYSO30 Curncy"]
+    days_block = backfill._days_block[key]
+    assert days_block["2026-09-18"] == {"status": "INCOMPLETE", "missing_count": 1,
+                                        "missing": [backfill._day_state[(key, "2026-09-18")]["missing"][0]]}
+    rates_block = backfill._rates_block[key]
+    assert rates_block["2026-09-18"] == {"priced": None, "failed": [], "note": "", "vol_quotes": 45, "curve_quotes": 17,
+                                         "missing_inputs": results[0]["missing_inputs"]}
+    # within the hour: nothing is asked again; after it, JPY's curve alone is asked for once more
+    asked.clear()
+    now[0] += 60
+    assert run() == [] and asked == []
+    now[0] += backfill.RETRY_SECONDS
+    results = run()
+    assert [r["day"] for r in results] == [d.isoformat() for d in reversed(days)]          # reference dates first, newest first
+    assert asked == [(9, date(2026, 9, 16), date(2026, 9, 18))] and all(r["vol_quotes"] == 0 for r in results)

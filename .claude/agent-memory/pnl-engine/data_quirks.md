@@ -127,3 +127,11 @@ metadata:
   ledger step is 0.0 s. To prove it: replicate the two pulls in a scratch script, print
   `SELECT source, snapped_at, COUNT(*) FROM marks GROUP BY 1,2` for both databases, pin
   `store._now_ny` and rerun. A bisection with 4-run samples on a ~50 % flake is not evidence.
+
+- Spot date (2026-09-22): `engine.pnl.calendar.spot_date(day, pair, holidays)` is the app's one
+  rule (T+2 weekdays, T+1 for USDCAD / USDTRY / USDPHP / USDRUB, rolled forward off a
+  config/holidays.txt holiday; a holiday in between still counts as a weekday) and `_day_pillars`
+  puts the day's SPOT there. `engine.ladder.usd_marks.spot_date` (T+2 weekdays, no holidays) is
+  deliberately the Ladder's own and must not be swapped in; `data/bloomberg/fwd_curve.py::
+  spot_date_for` is the same rule (tests/test_calendar.py pins they agree). Handy: as_of
+  2026-06-17 (Wed) has spot 2026-06-22 because 06-19 is a listed holiday.

@@ -62,7 +62,8 @@ three mark_types now, mirroring how ``BNP_BVAL`` is reconciliation-only for FX.
 """
 from .curves import CurveSet, build_curve_set
 from .instruments import BuiltSwap, build_instrument
-from .store import bootstrap_and_store, load_fixings, price_all_and_store, price_and_store, recalc_on_file, snapped_at
+from .store import (bootstrap_and_store, load_fixings, price_all_and_store, price_and_store, recalc_on_file,
+                    reverse_direction_marks, snapped_at)
 from .valuation import SwapResult, price_swap
 
 __all__ = [
@@ -76,6 +77,7 @@ __all__ = [
     "price_and_store",
     "price_all_and_store",
     "recalc_on_file",
+    "reverse_direction_marks",
     "load_fixings",
     "snapped_at",
 ]

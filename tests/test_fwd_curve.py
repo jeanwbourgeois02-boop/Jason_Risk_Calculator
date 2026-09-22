@@ -52,6 +52,21 @@ def test_spot_date_matches_the_ladders_rule_and_handles_t_plus_one_and_holidays(
     assert spot_date_for(date(2026, 9, 14), "EURUSD", frozenset({"2026-09-15"})) == date(2026, 9, 16)
 
 
+def test_spot_date_for_is_the_calendars_own_rule_with_the_holidays_it_is_given():
+    """2026-09-22: one spot-date rule, engine.pnl.calendar.spot_date; spot_date_for keeps its
+    signature for this module's callers, passes the holidays through (the empty default means
+    none, never config/holidays.txt behind the caller's back) and holds no rule of its own."""
+    from data.bloomberg import fwd_curve
+    from engine.pnl.calendar import spot_date
+    import engine.pnl.calendar as cal
+    assert fwd_curve._SPOT_LAG_ONE_DAY is cal._SPOT_LAG_ONE_DAY              # one set, re-exported, not a copy
+    for day, pair, holidays in ((date(2026, 9, 4), "USDCAD", frozenset()), (date(2026, 9, 4), "USDJPY", frozenset()),
+                                (date(2026, 9, 14), "EURUSD", frozenset({"2026-09-16"})),
+                                (date(2026, 12, 31), "USDTRY", frozenset({"2027-01-01"}))):
+        assert fwd_curve.spot_date_for(day, pair, holidays) == spot_date(day, pair, holidays)
+    assert fwd_curve.spot_date_for(date(2026, 9, 4), "USDCAD") == date(2026, 9, 7)      # Labor Day: no holidays given
+
+
 def test_tenor_settle_dates_by_market_convention():
     from data.bloomberg.fwd_curve import tenor_settle_date
     spot = date(2026, 9, 16)                                                   # a Wednesday

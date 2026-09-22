@@ -1007,14 +1007,18 @@ def test_blotter_fx_scope_renders_table_columns(strict_marks, tmp_path):
     row = table.data[0]
     assert row["instrument_id"] == "EURUSD"
     # Only mark_eod was seeded for real -- mark_t1/mark_t2 and their dependent P&L
-    # columns are genuinely missing, so (2026-09-17 user decision) they are illustrative
-    # SAMPLE values, clearly suffixed, never blank/"0.00"/"n/a" (ui.tabs.blotter_fx
-    # docstring). mark_eod/pnl_eod are the real computed values and carry no suffix.
-    assert row["mark_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert row["mark_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert row["pnl_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert row["pnl_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert isinstance(row["mark_eod"], float) and isinstance(row["pnl_eod"], float)   # real: numbers, no suffix
+    # columns are genuinely missing on a trade that was on the book at those closes, so
+    # (2026-09-22, reviewer finding, user yes) they read "n/a" with the reason as the
+    # cell's tooltip: never a made-up "(sample)" figure, never 0. mark_eod/pnl_eod are the
+    # real computed values.
+    # The trade was dealt 06-18 = t-1 (06-19 is a holiday), so t-1 is unpriced; at t-2
+    # (06-17) it was not on the book yet, and those cells are blank with no note.
+    for col in ("mark_t1", "pnl_t1"):
+        assert row[col] == blotter_fx.UNPRICED_TEXT, col
+        assert table.tooltip_data[0][col]["value"] == blotter_fx.NO_VALUE_AT_CLOSE
+    assert row["mark_t2"] is None and row["pnl_t2"] is None and "mark_t2" not in table.tooltip_data[0]
+    assert isinstance(row["mark_eod"], float) and isinstance(row["pnl_eod"], float)   # real: numbers
+    assert "(sample)" not in str(table)
 
 
 def test_blotter_fx_scope_empty_still_renders_table(tmp_path):
@@ -1118,10 +1122,13 @@ def test_blotter_fx_strip_renders_placeholder_when_no_fx_or_future_trades(tmp_pa
     assert "LTD P&L" in text  # strip still renders (with a 0/n.a. figure), never omitted
 
 
-# --------------------------------------------------------- blotter FX sample values (2026-09-17)
+# --------------------------------------------------------- blotter FX unpriced cells (2026-09-22)
+# Until 2026-09-22 a missing mark / P&L cell was painted with an illustrative "(sample)"
+# figure off the fill. Reviewer finding, user yes: an invented number where hard rule 2
+# wants the reason. An unpriced cell now reads "n/a" with the reason as its tooltip.
 
 
-def _sample_fixture_df() -> pd.DataFrame:
+def _unpriced_fixture_df() -> pd.DataFrame:
     return pd.DataFrame([{
         "trade_id": "T1", "instrument_id": "EURUSD", "quantity_usd_notional": 1_000_000.0,
         "fill": 1.10, "mark_eod": 1.12, "mark_t1": None, "mark_t2": None,
@@ -1129,55 +1136,44 @@ def _sample_fixture_df() -> pd.DataFrame:
     }])
 
 
-def test_blotter_fx_sample_values_fill_only_missing_cells():
-    df = _sample_fixture_df()
-    out, mask = blotter_fx._fill_sample_values(df)
+def test_blotter_fx_unpriced_cells_read_n_a_with_the_reason_and_real_cells_stay_numbers():
+    df = _unpriced_fixture_df()
+    records = blotter_fx.format_rows(df)
+    tips = blotter_fx.row_tooltips(df)
+    assert records[0]["mark_eod"] == 1.12 and records[0]["pnl_eod"] == 20_000.0   # real: untouched numbers
+    assert "mark_eod" not in tips[0] and "pnl_eod" not in tips[0]
+    for col in ("mark_t1", "mark_t2", "pnl_t1", "pnl_t2"):
+        assert records[0][col] == blotter_fx.UNPRICED_TEXT, col
+        assert tips[0][col] == {"value": blotter_fx.NO_VALUE_AT_CLOSE, "type": "text"}, col
+    assert records[0]["pnl_t1_num"] is None and records[0]["pnl_eod_num"] == 20_000.0
 
-    # Real cells are untouched.
-    assert out.loc[0, "mark_eod"] == 1.12
-    assert out.loc[0, "pnl_eod"] == 20_000.0
-    assert mask["mark_eod"][0] is False
-    assert mask["pnl_eod"][0] is False
+    # Unpriced at the as-of: the row's own reason on every cell the engine could not value.
+    df_unpriced = df.assign(mark_eod=None, pnl_eod=None, reason="no FWD_OUTRIGHT mark for 2026-10-20")
+    records, tips = blotter_fx.format_rows(df_unpriced), blotter_fx.row_tooltips(df_unpriced)
+    assert records[0]["pnl_eod"] == blotter_fx.UNPRICED_TEXT and records[0]["pnl_eod_num"] is None
+    assert tips[0]["pnl_eod"]["value"] == "no FWD_OUTRIGHT mark for 2026-10-20"
+    assert tips[0]["mark_t1"]["value"] == "no FWD_OUTRIGHT mark for 2026-10-20"
 
-    # Genuinely missing cells get a deterministic sample, derived from fill.
-    expected_t1 = 1.10 * (1 + blotter_fx._MARK_SAMPLE_OFFSETS["mark_t1"])
-    assert out.loc[0, "mark_t1"] == pytest.approx(expected_t1)
-    assert mask["mark_t1"][0] is True
-    assert out.loc[0, "pnl_t1"] is not None and out.loc[0, "pnl_t1"] == out.loc[0, "pnl_t1"]
-    assert mask["pnl_t1"][0] is True
+    # Not dealt by that close: blank, no note -- there was nothing to price.
+    df_new = df.assign(on_book_t1=0, on_book_t2=0)
+    records = blotter_fx.format_rows(df_new)
+    assert records[0]["mark_t1"] is None and records[0]["pnl_t2"] is None and blotter_fx.row_tooltips(df_new) == [{}]
 
-    # Re-running on the same input is deterministic (not random).
-    out2, mask2 = blotter_fx._fill_sample_values(df)
-    assert out2.loc[0, "mark_t1"] == out.loc[0, "mark_t1"]
-
-
-def test_blotter_fx_sample_cells_are_visually_flagged():
-    df = _sample_fixture_df()
-    out, mask = blotter_fx._fill_sample_values(df)
-
-    records = blotter_fx.format_rows(out, sample_mask=mask)
-    assert records[0]["mark_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert isinstance(records[0]["mark_eod"], float)
-
-    # One rule per column with any sample cell, keyed on the "(sample)" suffix -- not
-    # one rule per cell, which would be thousands of rules on a full book.
-    table = blotter_fx.fx_blotter_table(out, sample_mask=mask)
-    sample_rules = [r for r in table.style_data_conditional
-                     if r["if"].get("column_id") == "mark_t1"]
-    assert len(sample_rules) == 1, "expected exactly one style rule for the mark_t1 column"
-    assert sample_rules[0].get("fontStyle") == "italic"
-    assert "(sample)" in sample_rules[0]["if"]["filter_query"]
-    no_rules_for_real_cell = [r for r in table.style_data_conditional
-                                if r["if"].get("column_id") == "mark_eod"]
-    assert no_rules_for_real_cell == []
-    assert len(table.style_data_conditional) <= len(blotter_fx._SAMPLE_MARK_COLS) + len(blotter_fx._SAMPLE_PNL_COLS)
+    # One muted-italic rule per mark / P&L column, keyed on the "n/a" text -- not one per
+    # cell, which would be thousands of rules on a full book.
+    table = blotter_fx.fx_blotter_table(df)
+    rules = [r for r in table.style_data_conditional if r["if"].get("column_id") == "mark_t1"]
+    assert len(rules) == 1 and rules[0]["fontStyle"] == "italic" and '"n/a"' in rules[0]["if"]["filter_query"]
+    assert len(table.style_data_conditional) == 6
+    assert table.tooltip_data == blotter_fx.row_tooltips(df)
+    assert "(sample)" not in str(table)
 
 
-def test_blotter_fx_sample_caption_present_only_when_samples_used(tmp_path):
+def test_blotter_fx_unpriced_earlier_closes_carry_a_note_never_a_sample(strict_marks, tmp_path):
     db_path = tmp_path / "risk.db"
     conn = sqlite3.connect(db_path)
     schema.create_schema(conn)
-    _seed_fx_trade(conn)  # only mark_eod seeded below -> mark_t1/mark_t2 sample-filled
+    _seed_fx_trade(conn)  # only mark_eod seeded below -> mark_t1/mark_t2 unpriced
     conn.execute(
         "INSERT INTO marks VALUES "
         "('2026-06-20','EURUSD','2026-06-20','FWD_OUTRIGHT',1.1080,'BBG_BFXFORWARD',"
@@ -1191,10 +1187,13 @@ def test_blotter_fx_sample_caption_present_only_when_samples_used(tmp_path):
         layout = blotter.scope_layout("fx", conn, "2026-06-20")
     finally:
         conn.close()
-    assert blotter_fx.SAMPLE_CAPTION in str(layout)
+    table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
+    assert table.data[0]["mark_t1"] == blotter_fx.UNPRICED_TEXT
+    assert table.tooltip_data[0]["mark_t1"]["value"] == blotter_fx.NO_VALUE_AT_CLOSE
+    assert "(sample)" not in str(layout)
 
 
-def test_blotter_fx_sample_caption_absent_when_every_mark_is_real(tmp_path):
+def test_blotter_fx_no_n_a_when_every_mark_is_real(tmp_path):
     from engine.pnl.aggregate import _n_business_days_back
 
     as_of = "2026-06-20"
@@ -1226,14 +1225,14 @@ def test_blotter_fx_sample_caption_absent_when_every_mark_is_real(tmp_path):
 
     table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
     row = table.data[0]
-    assert not any(isinstance(row[c], str) for c in ("mark_t1", "mark_eod", "mark_t2"))   # real numbers, no sample
-    assert blotter_fx.SAMPLE_CAPTION not in str(layout)
+    assert not any(isinstance(row[c], str) for c in ("mark_t1", "mark_eod", "mark_t2"))   # real numbers, no "n/a"
+    assert table.tooltip_data == [{}]
 
 
 # --------------------------------------------------------- blotter FX P&L by currency (2026-09-21)
 # Two tables above the trade table: "P&L by currency" (whole FX book, the strip's own
 # pricing path per currency) and "P&L by currency, rows shown" (sums of the rows the trade
-# table shows after its native filter, made from hidden real numbers, never from samples).
+# table shows after its native filter, made from hidden real numbers, never from "n/a" cells).
 
 _CCY_AS_OF = "2026-06-24"   # a Wednesday: T-1 = 06-23 and T-2 = 06-22, no holiday in between
 _CCY_T1, _CCY_T2 = "2026-06-23", "2026-06-22"
@@ -1466,15 +1465,18 @@ def test_blotter_fx_currency_tables_sit_between_the_strip_and_the_trade_table(tm
     assert table.hidden_columns == blotter_fx._HIDDEN_COLUMNS
 
 
-def test_blotter_fx_sample_values_never_enter_the_rows_shown_sums(strict_marks, tmp_path):
+def test_blotter_fx_unpriced_rows_never_enter_the_rows_shown_sums(strict_marks, tmp_path):
     db_path = tmp_path / "risk.db"
     _currency_book(db_path, aud_history=False)   # AUDUSD has today's mark only; USDMXN has none
     layout = _fx_layout(db_path)
     table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
     by_id = {r["trade_id"]: r for r in table.data}
-    # On screen: illustrative figures, flagged. Behind them: no number at all.
-    assert by_id["A1"]["pnl_t1"].endswith(blotter_fx.SAMPLE_SUFFIX) and by_id["A1"]["pnl_t1_num"] is None
-    assert by_id["M1"]["pnl_eod"].endswith(blotter_fx.SAMPLE_SUFFIX) and by_id["M1"]["pnl_eod_num"] is None
+    # On screen: "n/a", the reason on hover. Behind them: no number at all.
+    assert by_id["A1"]["pnl_t1"] == blotter_fx.UNPRICED_TEXT and by_id["A1"]["pnl_t1_num"] is None
+    assert by_id["M1"]["pnl_eod"] == blotter_fx.UNPRICED_TEXT and by_id["M1"]["pnl_eod_num"] is None
+    tips = {r["trade_id"]: t for r, t in zip(table.data, table.tooltip_data)}
+    assert tips["M1"]["pnl_eod"]["value"] and "sample" not in tips["M1"]["pnl_eod"]["value"]
+    assert "(sample)" not in str(table)
     assert by_id["A1"]["pnl_eod_num"] == pytest.approx(20_000.0)   # a real cell carries its real number
     assert by_id["J3"]["on_book_t1"] == 0 and by_id["J1"]["on_book_t1"] == 1
 
@@ -1490,10 +1492,10 @@ def test_blotter_fx_sample_values_never_enter_the_rows_shown_sums(strict_marks, 
     ltd1_jpy = (1_000_000 * 1.5 - 500_000 * 0.5) / 152.0
     assert total["figures"]["ltd1"]["value"] == pytest.approx(ltd1_jpy + 100 * 40.0 + 1_000_000 * 0.05 / 10.0)
 
-    # A formatted string, a sample string or junk in a number column is refused, never parsed.
+    # A formatted string, an "n/a" or junk in a number column is refused, never parsed.
     rows, total = blotter_fx.shown_currency_rows([
         {"currency": "JPY", "pnl_eod": "500", "pnl_eod_num": 500.0},
-        {"currency": "JPY", "pnl_eod": "1,000 (sample)", "pnl_eod_num": None},
+        {"currency": "JPY", "pnl_eod": "n/a", "pnl_eod_num": None},
         {"currency": "JPY", "pnl_eod": "9,999", "pnl_eod_num": "9,999"},
     ])
     assert rows[0]["figures"]["ltd"]["value"] == 500.0

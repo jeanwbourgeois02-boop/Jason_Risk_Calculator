@@ -1707,7 +1707,8 @@ def test_close_completeness(tmp_path):
         # settle dates, and FUTURE_PX for the one open future.
         ("2026-08-18", "AUDUSD", "2026-09-16", "FWD_OUTRIGHT", 0.665, "BBG_BFXFORWARD", "2026-08-18T15:00:00-04:00"),
         ("2026-08-18", "USDJPY", "2026-09-18", "FWD_OUTRIGHT", 149.0, "BBG_BFXFORWARD", "2026-08-18T15:00:00-04:00"),
-        ("2026-08-18", "ESU6 Index", "2026-09-18", "FUTURE_PX", 7550.0, "BBG_BDH", "2026-08-18T15:00:00-04:00"),
+        # a future's close is its PX_SETTLE, stamped at the settlement (17:00 New York, 2026-09-22)
+        ("2026-08-18", "ESU6 Index", "2026-09-18", "FUTURE_PX", 7550.0, "BBG_BDH", "2026-08-18T17:00:00-04:00"),
     ])
     conn.commit()
     df = inventory.close_completeness(conn, "2026-08-17", "2026-08-18")
@@ -1717,6 +1718,13 @@ def test_close_completeness(tmp_path):
     assert {m["mark_type"] for m in rows["2026-08-17"].missing} == {"SPOT", "FWD_OUTRIGHT", "FUTURE_PX"}
     assert rows["2026-08-18"].needed == 5 and rows["2026-08-18"].present == 5 and rows["2026-08-18"].complete
     assert rows["2026-08-18"].missing == []
+    assert list(df["inputs_missing"]) == [[], []]          # no option or swap: no smile or curve to hold
+    # a past day's future row stamped by a live press (PX_LAST at 15:00 of the book date) is not a close
+    conn.execute("UPDATE marks SET snapped_at = '2026-08-18T15:00:00-04:00' WHERE mark_type = 'FUTURE_PX'")
+    conn.commit()
+    row = inventory.close_completeness(conn, "2026-08-18", "2026-08-18").iloc[0]
+    assert row["present"] == 4 and row["not_closed"] == 1 and not row["complete"]
+    assert row["missing"] == [{"instrument_id": "ESU6 Index", "settle_date": "2026-09-18", "mark_type": "FUTURE_PX"}]
 
 
 # --------------------------------------------------------------------------- inventory.py: stale_empty_pull_reason

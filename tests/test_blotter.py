@@ -494,6 +494,78 @@ def test_unknown_fin_type_is_skipped(tmp_csv):
     assert not res.trades
 
 
+# --------------------------------------------------------------------------- "swap" labels
+# Reviewer finding 2026-09-22: any label with "swap" and no forward word used to book as an
+# interest rate swap, so an export saying "FX Swap" would have loaded its fills as IRS.
+def test_reference_sample_labels_resolve_as_before():
+    # data/raw/new_sample_trades.csv uses these five exact labels (docs/blotter-parser-
+    # assumptions.md line 21); the rule change must not move any of them.
+    assert {k: blotter._kind_of(k) for k in blotter.IN_SCOPE_TYPES} == {k: k for k in blotter.IN_SCOPE_TYPES}
+    assert blotter._kind_of("Futures") == "FUTURE"
+    assert blotter._kind_of("FX Forward") == "FORWARD"
+    assert blotter._kind_of("Interest Rate Swap") == "INTEREST_RATE_SWAP"
+
+
+@pytest.mark.parametrize("label", ["Interest Rate Swap", "INTEREST_RATE_SWAP", "IRS", "irs", "OIS Swap",
+                                   "Rate Swap", "Rates Swap", "Interest rate swaps"])
+def test_swap_label_with_a_rates_word_is_an_interest_rate_swap(label):
+    assert blotter._kind_of(label) == "INTEREST_RATE_SWAP"
+
+
+@pytest.mark.parametrize("label", ["FX Swap", "fx swap", "FX_SWAP", "Currency Swap", "Foreign Exchange Swap",
+                                   "Forward Swap", "FX Swaps"])
+def test_swap_label_with_an_fx_word_is_a_forward(label):
+    assert blotter._kind_of(label) == "FORWARD"
+
+
+@pytest.mark.parametrize("label", ["Swap", "SWAP", "swaps", "Equity Swap", "Total Return Swap"])
+def test_swap_label_with_neither_word_is_not_loaded(label):
+    assert blotter._kind_of(label) is None
+
+
+def test_fx_swap_fin_type_books_the_row_as_a_forward_fill(tmp_csv):
+    row = _forward_row(**{"Fin Type": "FX Swap"})
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects and res.n_forward == 1 and res.n_irs == 0
+    t = res.trades[0]
+    assert t.product == "FX_FWD" and t.instrument_id == "USDJPY"
+    assert {(l.leg_type, l.ccy) for l in res.legs} == {("FX_NEAR", "USD"), ("FX_NEAR", "JPY")}
+
+
+def test_fx_swap_fin_type_pair_is_packaged_by_the_swap_rule(tmp_csv):
+    conn = schema.connect()
+    near = _forward_row(**{"Fin Type": "FX Swap", "Trade Id": "801"}, Symbol="USDJPY091626-1")
+    far = _forward_row(**{"Fin Type": "FX Swap", "Trade Id": "802"}, Symbol="USDJPY101626-2", Side="Sell",
+                       Description="TD 08/20/2026 VD 10/16/2026 BUY JPY VS .SELL USD @ 159.00000000",
+                       **{"Buy Currency": "JPY.C-JPAA", "Sell Currency": "DOL.C-USAA",
+                          "BuyCurrency Amount": "180,875,000.00", "SellCurrency Amount": "1,137,580.00"})
+    blotter.load(tmp_csv([near, far]), conn)
+    assert swaps.package_swaps(conn) == 2
+    rows = conn.execute("SELECT trade_id, product, package_id FROM trades ORDER BY trade_id").fetchall()
+    assert rows == [("801", "FX_SWAP", "SWAP-801"), ("802", "FX_SWAP", "SWAP-801")]
+
+
+def test_irs_fin_type_spelled_out_parses_as_a_rate_swap(tmp_csv):
+    for label in ("Interest Rate Swap", "IRS"):
+        res = blotter.parse(tmp_csv([_irs_row(**{"Fin Type": label})]))
+        assert not res.rejects and res.n_irs == 1 and res.n_forward == 0, label
+        assert res.trades[0].product == "IRS"
+
+
+def test_bare_swap_fin_type_is_counted_and_skipped_not_coerced(tmp_csv):
+    row = _irs_row(**{"Fin Type": "Swap"}, Product="")
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.trades and not res.rejects
+    assert res.n_irs == 0 and res.n_forward == 0 and res.n_skipped_other == 1
+    assert res.skipped_other_rows[0][2] == "type not loaded by the app: Fin Type 'Swap', Product ''"
+
+
+def test_bare_swap_fin_type_still_falls_back_to_product(tmp_csv):
+    row = _irs_row(**{"Fin Type": "Swap"}, Product="Interest Rate Swap")
+    res = blotter.parse(tmp_csv([row]))
+    assert not res.rejects and res.n_irs == 1 and res.trades[0].product == "IRS"
+
+
 # --------------------------------------------------------------------------- load()
 def test_load_writes_to_db_and_swap_packaging_still_works(tmp_csv):
     conn = schema.connect()
@@ -541,6 +613,7 @@ def test_real_sample_file_parses_with_no_rejects():
     assert res.n_currency == 85
     assert res.n_future == 11
     assert res.n_option == 8
+    assert res.n_irs == 10         # the swap-label rule (2026-09-22) moves none of the sample's rows
     assert res.n_skipped_irs == 0  # all 10 IRS rows have positive Notional -> payer, parsed
     assert res.n_skipped_other == 0
     assert res.n_skipped_status_or_fund == 0

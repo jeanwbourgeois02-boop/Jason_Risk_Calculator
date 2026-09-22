@@ -121,3 +121,12 @@ Two real (small) bugs fixed this session, both evidenced from the reference file
     on a different file. Fixed to always use `_us_date`, and added a cross-check: when
     Symbol parses (100% of the sample) AND Description carries its own date/CALL-PUT word,
     a disagreement between the two now rejects instead of blindly trusting the Symbol.
+
+- **"Swap" labels (2026-09-22, reviewer finding):** `_kind_of` used to send any label with
+  "swap" and no forward word to INTEREST_RATE_SWAP, so an export saying "FX Swap" would
+  have booked FX-swap fills as rate swaps. Now: swap + rates word (interest/rate/IRS/OIS)
+  = IRS; swap + FX word (FX/currency/forward/foreign exchange) = FORWARD (an FX swap's
+  rows are two forward fills, paired by the package rule); bare "Swap" = skipped. The
+  sample's five labels are exact so nothing moved. Hazard kept as-is: the Product fallback
+  still runs for a skipped Fin Type, and Product is junk on many sample rows ('FUTURE' on
+  non-futures), so a bare-"Swap" Fin Type next to Product 'FUTURE' would book as a future.

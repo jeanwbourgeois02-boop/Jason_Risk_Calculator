@@ -261,9 +261,11 @@ UNIT_OUTRIGHT = "OUTRIGHT"
 UNIT_POINTS = "POINTS"
 
 # Spot settles T+1 for these pairs by market convention, T+2 for everything else.
-_SPOT_LAG_ONE_DAY = frozenset({"USDCAD", "USDTRY", "USDPHP", "USDRUB"})
 
 _NO_HOLIDAYS: FrozenSet[str] = frozenset()
+# The T+1 pairs are the calendar's (engine.pnl.calendar, the app's one spot-date rule since
+# 2026-09-22); the name is kept here only as a re-export for its readers (tests/test_calendar.py).
+from engine.pnl.calendar import _SPOT_LAG_ONE_DAY  # noqa: E402,F401
 _TENOR_RE = re.compile(r"(\d+)([WMY])")
 
 
@@ -272,23 +274,13 @@ def _is_good_day(d: date, holidays: FrozenSet[str]) -> bool:
 
 
 def spot_date_for(day: date, pair: str = "", holidays: FrozenSet[str] = _NO_HOLIDAYS) -> date:
-    """The spot value date of a trade dealt on `day`: `day` + 2 weekdays (+ 1 for the T+1
-    pairs), then rolled forward off a holiday. For a T+2 pair with no holiday in the way
-    this is engine.ladder.usd_marks.spot_date, the app's existing spot-date rule. A holiday
-    on the day in between does not count against the lag (the convention for a US holiday);
-    only the spot date itself must be a good day. `holidays` is config/holidays.txt's set
-    (engine.pnl.calendar.load_holidays): the app has no per-currency calendars, so a date
-    computed here can sit a day away from Bloomberg's around a local holiday -- one reason
-    a value at a computed date is never written as Bloomberg's own quote."""
-    lag = 1 if pair in _SPOT_LAG_ONE_DAY else 2
-    d, added = day, 0
-    while added < lag:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            added += 1
-    while not _is_good_day(d, holidays):
-        d += timedelta(days=1)
-    return d
+    """The spot value date of a trade dealt on `day`: engine.pnl.calendar.spot_date, the
+    app's one spot-date rule (`day` + 2 weekdays, + 1 for its T+1 pairs, then rolled forward
+    off a holiday; tests/test_calendar.py pins that the two agree). The signature is kept for
+    this module's callers; `holidays` is passed through as given (the empty default means no
+    holiday, as before -- never `load_holidays()` behind the caller's back)."""
+    from engine.pnl.calendar import spot_date
+    return spot_date(day, pair, holidays)
 
 
 def _is_last_good_day_of_month(d: date, holidays: FrozenSet[str]) -> bool:

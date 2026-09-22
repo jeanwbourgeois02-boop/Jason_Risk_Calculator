@@ -8,7 +8,12 @@ files), the app's only trade source. Shared dataclasses/regexes live in
 Row kind is decided by ``Fin Type`` (``Product`` is the fallback when Fin Type is blank
 or unrecognised): FORWARD, CURRENCY, FUTURE, OPTION, INTEREST_RATE_SWAP -- matched by
 keyword after normalisation, so 'Futures', 'FX Forward', 'Interest Rate Swap', 'fx
-option' all resolve. Rows whose Status says cancelled/rejected/pending/void, or whose
+option' all resolve. A label with 'swap' is a rate swap only when it also carries a
+rates word (interest, rate, IRS, OIS); with an FX word (FX, currency, forward, foreign
+exchange) it is FORWARD, because an FX swap's rows are forward fills with their own
+value dates (the package rule pairs them); 'Swap' alone is counted and skipped, never
+coerced (reviewer finding 2026-09-22: bare 'swap' used to book as an interest rate
+swap). Rows whose Status says cancelled/rejected/pending/void, or whose
 Fund is populated and is not NMMF, are filtered out and counted. A missing Status or
 Fund column (or a blank cell) never excludes a row.
 
@@ -558,6 +563,13 @@ def _fund_excluded(v) -> bool:
     return bool(s) and s != FUND.casefold()
 
 
+# The words that decide what a label carrying "swap" is (see _kind_of): a rates word
+# makes it an interest rate swap, an FX word a forward fill; neither = not loaded.
+SWAP_RATES_WORDS = frozenset({"IRS", "OIS", "INTEREST", "RATE", "RATES"})
+SWAP_FX_WORDS = frozenset({"FX", "CURRENCY", "CURRENCIES", "FOREIGN", "EXCHANGE",
+                           "FORWARD", "FORWARDS", "FWD"})
+
+
 def _kind_of(label: str) -> Optional[str]:
     s = re.sub(r"[^A-Z0-9]+", " ", _s(label).upper()).strip()
     if not s:
@@ -565,6 +577,14 @@ def _kind_of(label: str) -> Optional[str]:
     words = set(s.split())
     if words & {"IRS", "OIS", "INTEREST"} or "INTEREST RATE" in s:
         return "INTEREST_RATE_SWAP"
+    if words & {"SWAP", "SWAPS"}:
+        # 'FX Swap' is two forward fills with their own value dates (the package rule
+        # groups them), never a rate swap; a bare 'Swap' says too little to book at all.
+        if words & SWAP_RATES_WORDS:
+            return "INTEREST_RATE_SWAP"
+        if words & SWAP_FX_WORDS:
+            return "FORWARD"
+        return None
     if words & {"OPTION", "OPTIONS", "OPT"}:
         return "OPTION"
     if words & {"FUTURE", "FUTURES", "FUT"}:
@@ -573,8 +593,6 @@ def _kind_of(label: str) -> Optional[str]:
         return "FORWARD"
     if words & {"CURRENCY", "CASH"}:
         return "CURRENCY"
-    if "SWAP" in words:
-        return "INTEREST_RATE_SWAP"
     return None
 
 

@@ -7,3 +7,4 @@
 - [Environment](environment.md) — Windows: py -3; Mac clone: .venv/bin/python; dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
 - [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
 - [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable
+- [Closed-out count + future close stamp 2026-09-22](closed-out-count-and-future-close-stamp-2026-09-22.md) — status "closed_out" key shown as a count beside priced/skipped (absent = silent); FUTURE_PX close rows stamp settle_stamp 17:00, _marked_book keeps 15:00 on purpose

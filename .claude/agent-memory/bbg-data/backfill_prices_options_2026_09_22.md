@@ -24,7 +24,9 @@ both days. Nothing new is asked of Bloomberg (no vol/OIS/forward history): hard 
   {status, missing_count, missing}; tests/test_auto_backfill.py pins that with `==` and `set(entry) ==`.
   Do not add keys there: the options outcome is the sibling `backfill.options` block
   ({day: {priced, skipped, note}}, newest first, MAX_STATUS_DAYS, kept from the last run that worked a day).
-- Only a DONE day is priced. A day already complete per close_completeness is SKIPPED and never repriced,
+- (Superseded later on 2026-09-22, see [[history-inputs-and-futures-settle-2026-09-22]]: a day lacking a
+  smile or curve is worked for its inputs even when its marks are complete.) Only a DONE day is priced.
+  A day already complete per close_completeness AND holding its inputs is SKIPPED and never repriced,
   so a complete past day with vols on file but no pricer marks stays unpriced until something makes it
   incomplete (the 2026-09-22 15:00 re-stamp run makes every past day DONE once, which covers the snapshot).
   Making completeness aware of pricer marks is inventory.py's decision, not taken.

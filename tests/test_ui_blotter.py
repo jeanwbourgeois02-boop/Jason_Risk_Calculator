@@ -1911,3 +1911,41 @@ def test_options_strip_refreshes_in_place_on_a_data_revision(strict_marks, tmp_p
     rates_labels = [c.children[0].children for c in rates_strip.children[0].children]
     assert rates_labels == [blotter.HEADLINE_TITLES[k] for k in blotter.HEADLINE_ORDER]
     assert len(rates_strip.children) == 1                     # no caption line
+
+
+# --------------------------------------------------------------------------- 2026-09-22 FX unpriced rows
+# Reviewer finding, user yes: the FX sub-tab painted "(sample)" cells for unpriced rows,
+# invented figures where hard rule 2 wants the reason. An unpriced row now reads "n/a"
+# with value_book's reason as the cell's tooltip, and no "(sample)" text exists anywhere.
+
+def test_fx_sub_tab_unpriced_row_shows_its_reason_and_never_a_sample(strict_marks):
+    from ui.tabs import blotter_fx
+
+    conn = _book_with_marks()
+    try:
+        # A pair with no mark of any kind on any date: nothing the near-marks rule or the
+        # fill could reach, so value_book leaves its row unpriced with a reason.
+        conn.executescript("""
+            INSERT INTO instruments VALUES ('USDMXN','FX','USD','MXN',1,0,'USDMXN Curncy','9999-12-31');
+            INSERT INTO trades VALUES ('M1','XLSX','USDMXN','FX_FWD','M1','2026-06-01',1000000,18.5,'ACC','CP','','TR','d','');
+            INSERT INTO trade_legs VALUES ('M1',1,'FX_NEAR','USD',1000000,'2026-06-01','2026-11-20',18.5,1);
+            INSERT INTO trade_legs VALUES ('M1',2,'FX_NEAR','MXN',-18500000,'2026-06-01','2026-11-20',18.5,1);
+        """)
+        layout = blotter.scope_layout("fx", conn, _AS_OF)
+    finally:
+        conn.close()
+
+    table = next(c for c in _find_tables(layout) if getattr(c, "id", None) == blotter_fx.DATATABLE_ID)
+    rows = {r["trade_id"]: (r, t) for r, t in zip(table.data, table.tooltip_data)}
+    unpriced, tip = rows["M1"]
+    for col in ("mark_t1", "mark_eod", "mark_t2", "pnl_t1", "pnl_eod", "pnl_t2"):
+        assert unpriced[col] == blotter_fx.UNPRICED_TEXT, col          # never zero, never a made-up mark
+        assert tip[col]["value"] and tip[col]["type"] == "text", col   # the reason, where the number would be
+    assert unpriced["pnl_eod_num"] is None
+    priced, priced_tip = rows["E1"]
+    assert isinstance(priced["pnl_eod"], float) and priced_tip == {}
+    text = _all_text(layout) + str(table)
+    assert "(sample)" not in text and "sample" not in text.lower()
+    # The rows-shown sums leave the unpriced row out and say so.
+    _by, total = blotter_fx.shown_currency_rows(table.data)
+    assert total["figures"]["ltd"]["excluded_summary"] == "excludes 1 of 4 rows unpriced"

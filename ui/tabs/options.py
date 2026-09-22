@@ -430,6 +430,10 @@ def _leg_note(rec: dict, as_of: str, premium, book: Optional[dict], greeks_reaso
     if payoff in ("BARRIER_KI", "BARRIER_KO", "ONE_TOUCH", "NO_TOUCH") and not rec.get("barrier_level"):
         return "no barrier / touch level on file: enter it under Option terms below"
     book_reason = (book or {}).get("reason") or ""
+    if (book or {}).get("status") == "CLOSED":
+        # Bought and sold back in full (CLAUDE.md "A closed-out option is not live"): valued at
+        # the closing fill, so a missing PREMIUM or Greek is nothing to explain.
+        return book_reason or (book or {}).get("note") or "closed out: bought and sold back in full"
     if premium is None:
         if (book or {}).get("status") == "SETTLED":
             return book_reason or f"expired {rec['expiry_date']}"
@@ -453,6 +457,13 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
     marks = _official_marks(conn, as_of, rec["instrument_id"], rec["expiry_date"],
                              ("PREMIUM", "FUTURE_PX") + tuple(mt for _, mt in _GREEK_MARK_TYPES))
     premium = marks.get("PREMIUM")
+    # Closed out (the book's status, never a mark or a value: user, 2026-09-22, "I only want
+    # to see live options"): the trade's price is its closing fill, the book's own mark, so
+    # MktVal - Start value is the book's P&L; the pricer writes it no marks, and any left on
+    # file from before are not its risk.
+    closed = (book or {}).get("status") == "CLOSED"
+    if closed and asset_class == "FX" and not _is_missing((book or {}).get("mark")):
+        premium = float(book["mark"])
     if rec["product"] == "EQ_OPTION":
         # A listed option (SPX, user decision 2026-09-21) is marked at Bloomberg's own price of
         # it, the FUTURE_PX the book's P&L reads, in index points: x multiplier = per contract.
@@ -467,7 +478,7 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
     # when it priced it, so MktVal - Start value USD equals the book's P&L USD exactly;
     # the official SPOT otherwise (an unpriced trade still gets its cost in USD).
     book_spot = (book or {}).get("spot")
-    if (book or {}).get("status") == "OPEN" and not _is_missing(book_spot) and book_spot:
+    if (book or {}).get("status") in ("OPEN", "CLOSED") and not _is_missing(book_spot) and book_spot:
         usd_per_base = float(book_spot)
     else:
         usd_per_base = _spot_to_usd(conn, as_of, rec["base_ccy"])
@@ -505,7 +516,10 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
     if book is not None and not book.get("reason") and not _is_missing(book.get("pnl_usd")):
         pnl_usd = float(book["pnl_usd"])
 
-    greeks, greeks_reason = _usd_greeks(conn, as_of, rec, marks)
+    if closed:   # no position left: no Greeks, whatever marks are on file
+        greeks, greeks_reason = {col: None for col, _mt in _GREEK_MARK_TYPES}, ""
+    else:
+        greeks, greeks_reason = _usd_greeks(conn, as_of, rec, marks)
     if rec["product"] == "EQ_OPTION" and premium is not None and marks.get("DELTA") is None:
         greeks_reason = greeks_reason or greeks_missing
 
@@ -535,6 +549,7 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         "option_type": TYPE_WORDS.get(option_type, option_type.title()), "payoff": payoff_word,
         "note": _leg_note(rec, as_of, premium, book, greeks_reason, pending, skip_reason, step_error),
         "priced": premium is not None,
+        "closed_out": closed,
         # Notional in DOLLARS (user, 2026-09-21: "everything in dollars"; 5,000 ounces of gold is
         # not $5,000): |quantity| x USD per base unit at spot; Position keeps the base units.
         "position": quantity, "notional": abs(quantity) * usd_per_base if usd_per_base is not None else None,
@@ -643,6 +658,7 @@ def _row(level: str, group_key: str, parent_key: str, label: str, group_legs: Li
     row = {"level": level, "group_key": group_key, "parent_key": parent_key, "label": label,
            "leg_count": len(group_legs), "priced_count": sum(1 for l in group_legs if l["priced"]),
            "is_leg": 1 if trade_id else 0, "trade_id": trade_id,
+           "closed_count": sum(1 for l in group_legs if l.get("closed_out")),
            "premium_ccy": _common_ccy(group_legs), "note": note}
     row.update(numeric)
     row.update(passthrough)
@@ -706,7 +722,7 @@ def option_rows(conn: sqlite3.Connection, as_of: str, flat: bool = False) -> pd.
 
 
 _FRAME_COLUMNS = ["level", "group_key", "parent_key", "label", "leg_count", "priced_count", "is_leg",
-                  "trade_id", "premium_ccy", "note", *NUMERIC_FIELDS, *PASSTHROUGH_FIELDS]
+                  "trade_id", "closed_count", "premium_ccy", "note", *NUMERIC_FIELDS, *PASSTHROUGH_FIELDS]
 
 
 # --------------------------------------------------------------------------- formatting
@@ -749,8 +765,14 @@ def _text(value) -> str:
     return "" if _is_missing(value) else str(value)
 
 
+CLOSED_OUT_TAG = "(closed out)"
+
+
 def _fmt_label(rec: dict, collapsed: set) -> str:
     label = rec["label"]
+    leg_count = _num(rec.get("leg_count")) or 0
+    if leg_count and (_num(rec.get("closed_count")) or 0) >= leg_count:
+        label = f"{label} {CLOSED_OUT_TAG}"   # every trade of the row is bought and sold back
     if rec["level"] == "PACKAGE" and rec.get("leg_count") and rec["leg_count"] > 1:
         arrow = "▸" if rec["group_key"] in collapsed else "▾"  # collapsed / expanded
         return f"{arrow} {label}"
@@ -1411,9 +1433,17 @@ BREAKDOWNS_ID = "options-terms-breakdowns"
 EXPIRY_BUCKETS = ((7, "This week"), (31, "Within 1 month"), (92, "1 to 3 months"), (10 ** 6, "Beyond 3 months"))
 
 
+def _live(legs: pd.DataFrame) -> pd.Series:
+    """True on a leg that is still a position: not closed out (the book's status)."""
+    if "closed_count" not in legs.columns:
+        return pd.Series(True, index=legs.index)
+    return legs["closed_count"].map(lambda v: not (_num(v) or 0)).astype(bool)
+
+
 def _sum_group(name: str, g: pd.DataFrame) -> dict:
     priced = g[g["pnl_usd"].map(lambda v: not _is_missing(v))]
     out = {"group": name, "options": len(g), "unpriced": len(g) - len(priced),
+           "closed": int((~_live(g)).sum()),
            "paid": _agg(priced["start_priced_usd"]), "value": _agg(priced["mktval"]), "pnl": _agg(priced["pnl_usd"])}
     out.update({k: _agg(g[k]) for k in ("delta", "gamma", "vega", "theta")})
     out["pnl_pct"] = (out["pnl"] / abs(out["paid"]) * 100.0) if out["pnl"] is not None and out["paid"] else None
@@ -1421,20 +1451,20 @@ def _sum_group(name: str, g: pd.DataFrame) -> dict:
 
 
 def grouped_rows(legs: pd.DataFrame, keys: pd.Series, order: Optional[List[str]] = None) -> List[dict]:
-    """One `_sum_group` row per value of `keys` (in `order` when given), then a Total."""
+    """One `_sum_group` row per value of `keys` (in `order` when given) over the LIVE legs
+    only, then a Total over every leg. A closed-out option (bought and sold back in full,
+    status CLOSED in the book) is no risk and decays nothing, so it is left out of the rows
+    before grouping (user, 2026-09-22: "I only want to see live options, no need show closed
+    out options"; until then a group was dropped only when its value summed to about zero,
+    which kept a pair that also had live options and folded the closed legs into it). The
+    Total still carries its P&L and says how many closed-out options are in it."""
     if legs is None or legs.empty:
         return []
-    names = [n for n in (order or sorted(set(keys))) if (keys == n).any()]
-    rows = [_sum_group(n, legs[keys == n]) for n in names]
-    # A group whose options are all priced and worth nothing in total is closed (bought and sold
-    # back): not shown (user, 2026-09-21: "if the value is 0 it means its closed"). The Total
-    # still carries its P&L.
-    rows = [r for r in rows if not _is_closed(r)]
+    live = _live(legs)
+    live_legs, live_keys = legs[live], keys[live]
+    names = [n for n in (order or sorted(set(live_keys))) if (live_keys == n).any()]
+    rows = [_sum_group(n, live_legs[live_keys == n]) for n in names]
     return rows + [_sum_group("Total", legs)]
-
-
-def _is_closed(row: dict) -> bool:
-    return row.get("unpriced") == 0 and row.get("value") is not None and abs(row["value"]) < 0.5
 
 
 def days_to_expiry(expiry, as_of: str) -> Optional[int]:
@@ -1457,14 +1487,10 @@ def in_play_rows(conn: sqlite3.Connection, as_of: str, legs: pd.DataFrame) -> Li
     """Per open option: spot against strike (how far, in per cent of spot), days left, delta and
     value, nearest to the strike first. Spot is the pair's official SPOT on `as_of`."""
     rows = []
-    # An option bought and sold back in full is closed: the same terms net to no position.
-    terms = lambda l: tuple(str(l.get(k)) for k in ("underlying", "option_type", "payoff", "strike", "expiry"))  # noqa: E731
-    net: Dict[tuple, float] = {}
-    for leg in legs.to_dict("records"):
-        net[terms(leg)] = net.get(terms(leg), 0.0) + float(leg.get("position") or 0.0)
-    for leg in legs.to_dict("records"):
+    # A closed-out option (the book's status) is no position: not in play.
+    for leg in legs[_live(legs)].to_dict("records"):
         days = days_to_expiry(leg.get("expiry"), as_of)
-        if days is None or days < 0 or abs(net[terms(leg)]) < 1e-9:
+        if days is None or days < 0:
             continue
         spot = _official_marks(conn, as_of, leg.get("underlying") or "", as_of, ("SPOT",)).get("SPOT")
         strike = leg.get("strike")
@@ -1497,7 +1523,8 @@ def _agg_table(title: str, kicker: str, first: str, columns: List[Tuple[str, str
     numbers stored as numbers and formatted by kind; a row named 'Total' is the pinned
     footer, never ranked with the rest."""
     def record(r: dict) -> dict:
-        rec = {"group": r["group"] + (f" ({r['unpriced']} unpriced)" if r.get("unpriced") else "")}
+        rec = {"group": r["group"] + (f" ({r['unpriced']} unpriced)" if r.get("unpriced") else "")
+               + (f" (incl. {r['closed']} closed out)" if r.get("closed") else "")}
         for _heading, key, _kind in columns:
             v = r.get(key)
             rec[key] = None if _is_missing(v) else float(v)

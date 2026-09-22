@@ -337,11 +337,11 @@ def save_after_pull(db_path: Union[str, Path], repo_root: Union[str, Path] = REP
 
 
 def _realise(conn: sqlite3.Connection, as_of: str) -> Optional[dict]:
-    """The backfill's closing step (`backfill._freeze_ndfs_at_present_spot`), which no pull
-    runs on a PC without Bloomberg. Guarded like the backfill's own import: this package
-    must not depend on engine.pnl being importable."""
+    """The backfill's closing step (`backfill._realise_after_backfill`: the ledger's plain
+    `realise_settled`), which no pull runs on a PC without Bloomberg. Guarded like the
+    backfill's own import: this package must not depend on engine.pnl being importable."""
     try:
         from engine.pnl.ledger import realise_settled
     except ImportError:
         return None
-    return realise_settled(conn, as_of, ndf_present_spot=True)
+    return realise_settled(conn, as_of)

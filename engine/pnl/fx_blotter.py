@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
-from typing import Callable, List, Optional
+from typing import Callable, List
 
 import numpy as np
 import pandas as pd

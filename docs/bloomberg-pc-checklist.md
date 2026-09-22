@@ -28,13 +28,20 @@ Follow this on the PC that has the Bloomberg Terminal, every time you start the 
        - USDJPY111926P-197957397: Digital, Put, strike 152
        - EURSEK112526C-197906813: Digital, Call, strike 11.4
      The diagnostics panel shows the current list.
-   - FAIL or "not returned" on an NDF fixing ticker (`BZFXPTAX Index`, `KFTC18 Index`,
-     `INRFBIL Index`, `TAIFX1 Index`, `JISDOR Index`; the "official fixing" rows of the
-     Bloomberg library): these spellings are UNVERIFIED (2026-09-22). Look the fixing up
-     on the Terminal (PTAX for BRL, KFTC18 for KRW, FBIL for INR, TAIFX1 for TWD, JISDOR
-     for IDR) and correct the ticker in `data/ingest/common.py::NDF_FIX_TICKERS`; until
-     then a fixed NDF's P&L says "no official fixing on file" and uses the fixing day's
-     spot instead.
+   - FAIL or "not returned" on an NDF fixing ticker (the "official fixing" rows of the
+     Bloomberg library, `data/ingest/common.py::NDF_FIX_TICKERS`). Status on 2026-09-22:
+     `BZFXPTAX Index` (BRL, PTAX) and `JISDOR Index` (IDR) return fixings and are verified;
+     `KOBRUSD Index` (KRW) and `TRY11 Index` (TWD) are the user's terminal check of
+     2026-09-22, replacing KFTC18 and TAIFX1, which loaded but returned no value (the KRW
+     yellow key is assumed Index: a wrong key shows as "Unknown/Invalid security" in the
+     pull table); `INRFBIL Index` (INR, FBIL) is still UNVERIFIED. Until a fixing is on file
+     a fixed NDF's P&L says "no official fixing on file" and uses the fixing day's spot.
+   - "Unknown/Invalid security" on `USDBRLSP`, `USDIDRSP`, `USDTWDSP` or "no forward tenor
+     prices" for those pairs in the backfill block: the history path used the deliverable
+     spelling for non-deliverable pairs. Checked on the terminal 2026-09-22: `BCN1M Curncy`
+     (BRL), `IHN1M Curncy` (IDR) and `NTN1M Curncy` (TWD) quote forward POINTS, so the
+     backfill builds those pairs' past outrights as spot plus points at Bloomberg's own
+     divisor. The live pull's FWD_CURVE on the pair was never affected.
    - A trade the export does not carry at all (an option booked at another venue, a
      forward dealt outside the prime broker): book it under Blotter > Manual entry >
      "Book an OTC trade by hand". It is saved as source MANUAL, priced on the next pull,

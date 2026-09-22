@@ -691,3 +691,137 @@ def test_recalc_on_file_never_raises():
     # No curve_quotes on file: nothing to run, since falls back to as_of, no error.
     out = recalc_on_file(conn, "2026-09-22")
     assert out == {"as_of": "2026-09-22", "since": "2026-09-22", "days": [], "priced": 0, "failed": 0}
+
+
+# --------------------------------------------------------------------------- direction flip
+
+def _seed_direction_marks(conn, instrument_id, settle="2031-08-19"):
+    """Two dates of the pricer's four marks, plus a BBG_BDH PV row, all at 1.0."""
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        (d, instrument_id, settle, mt, 1.0, src, "t")
+        for d in ("2026-09-16", "2026-09-17")
+        for mt, src in (("PV_USD", "QL_PRICER"), ("DV01_USD", "QL_PRICER"), ("PAR_RATE", "QL_PRICER"),
+                        ("CASHFLOW_USD", "QL_PRICER"), ("PV_USD", "BBG_BDH"))])
+    conn.commit()
+
+
+def _marks_rows(conn, instrument_id):
+    return sorted(conn.execute("SELECT as_of_date, mark_type, source, value FROM marks WHERE instrument_id = ?",
+                               (instrument_id,)).fetchall())
+
+
+def test_reverse_direction_marks_reverses_the_pricers_own_rows_and_nothing_else():
+    """Glue only (no QuantLib needed). The pricer's PV_USD / DV01_USD / CASHFLOW_USD rows
+    are multiplied by -1 on EVERY date (0 stays 0.0), PAR_RATE and any other mark type
+    are untouched, those three types from any other source and a QL_PRICER row whose
+    value is not a number are deleted, the trade's realised_pnl row goes, a bystander
+    swap is untouched, and the caller's transaction is left open (nothing committed)."""
+    from engine.rates.store import DIRECTIONAL_MARK_TYPES, PRICER_SOURCE, reverse_direction_marks
+
+    assert DIRECTIONAL_MARK_TYPES == ("PV_USD", "DV01_USD", "CASHFLOW_USD") and PRICER_SOURCE == "QL_PRICER"
+    conn = sqlite3.connect(":memory:")
+    create_schema(conn)
+    swap = _seed_manual_irs_trade(conn)
+    other = _seed_manual_irs_trade(conn, trade_id="TEST-IRS-2")
+    _seed_direction_marks(conn, swap)
+    _seed_direction_marks(conn, other)
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        ("2026-09-17", swap, "2026-09-17", "SPOT", 1.0, "BBG_BFXFORWARD", "t"),      # not a swap mark: kept
+        ("2026-09-17", swap, "2031-08-19", "DV01_USD", 7.0, "MANUAL", "t"),          # other source: deleted
+        ("2026-09-17", swap, "2031-08-19", "PAR_RATE", 0.04, "BBG_BDH", "t"),        # direction-free: kept
+        ("2026-09-15", swap, "2031-08-19", "PV_USD", 0.0, "QL_PRICER", "t"),         # 0 stays 0.0, not -0.0
+        ("2026-09-14", swap, "2031-08-19", "PV_USD", "abc", "QL_PRICER", "t"),       # not a number: deleted
+    ])
+    conn.execute("INSERT INTO realised_pnl VALUES (?,?,'IRS','USD','2031-08-19',5.0,0.0,'PV_USD',1.0,'2031-08-19',"
+                 "'QL_PRICER',5.0,'t','')", ("TEST-IRS-1", swap))
+    conn.execute("INSERT INTO realised_pnl VALUES (?,?,'IRS','USD','2031-08-19',5.0,0.0,'PV_USD',1.0,'2031-08-19',"
+                 "'QL_PRICER',5.0,'t','')", ("TEST-IRS-2", other))
+    conn.commit()
+    bystander = _marks_rows(conn, other)
+
+    reverse_direction_marks(conn, "TEST-IRS-1", swap)
+
+    assert conn.in_transaction                                   # the caller's transaction, left to the caller
+    assert _marks_rows(conn, swap) == sorted([
+        ("2026-09-15", "PV_USD", "QL_PRICER", 0.0),
+        ("2026-09-16", "PV_USD", "QL_PRICER", -1.0), ("2026-09-16", "DV01_USD", "QL_PRICER", -1.0),
+        ("2026-09-16", "CASHFLOW_USD", "QL_PRICER", -1.0), ("2026-09-16", "PAR_RATE", "QL_PRICER", 1.0),
+        ("2026-09-17", "PV_USD", "QL_PRICER", -1.0), ("2026-09-17", "DV01_USD", "QL_PRICER", -1.0),
+        ("2026-09-17", "CASHFLOW_USD", "QL_PRICER", -1.0), ("2026-09-17", "PAR_RATE", "QL_PRICER", 1.0),
+        ("2026-09-17", "PAR_RATE", "BBG_BDH", 0.04), ("2026-09-17", "SPOT", "BBG_BFXFORWARD", 1.0),
+    ])
+    zero = conn.execute("SELECT value FROM marks WHERE as_of_date='2026-09-15' AND instrument_id=?", (swap,)).fetchone()[0]
+    assert str(zero) == "0.0"                                    # never -0.0
+    assert _marks_rows(conn, other) == bystander
+    assert [r[0] for r in conn.execute("SELECT trade_id FROM realised_pnl")] == ["TEST-IRS-2"]
+    # Reversing again puts the old signs back: the caller must call it once per flip.
+    reverse_direction_marks(conn, "TEST-IRS-1", swap)
+    assert all(v == 1.0 for d, mt, s, v in _marks_rows(conn, swap) if s == "QL_PRICER" and d != "2026-09-15")
+
+    # Two trades on one instrument: the marks cannot be attributed, so the three types go.
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
+                 "price, account, counterparty, strategy, trader, description) "
+                 "VALUES ('TEST-IRS-1b','MANUAL',?,'IRS','TEST-IRS-1b','2026-08-19',1e6,0.04,'a','c','','t','d')", (swap,))
+    reverse_direction_marks(conn, "TEST-IRS-1", swap)
+    assert {(mt, s) for _, mt, s, _v in _marks_rows(conn, swap)} == {
+        ("PAR_RATE", "QL_PRICER"), ("PAR_RATE", "BBG_BDH"), ("SPOT", "BBG_BFXFORWARD")}
+
+    # A database without a marks or realised_pnl table is left alone, never an error.
+    bare = sqlite3.connect(":memory:")
+    bare.execute("CREATE TABLE trades (trade_id TEXT, instrument_id TEXT)")
+    reverse_direction_marks(bare, "x", "y")
+
+
+@needs_quantlib
+def test_reverse_direction_marks_is_sign_exact_against_the_pricers_own_receiver():
+    """THE PROOF behind keeping a flipped swap's history by sign reversal, on the
+    function itself: a seasoned USD SOFR swap with a coupon already paid, priced by
+    price_and_store on two dates as a payer and, in another database, as a receiver.
+    Flip the payer's trade and legs by SQL (what irs_direction does) and call
+    reverse_direction_marks: every QL_PRICER mark on every date must equal what the
+    pricer wrote for the receiver (1e-6 relative; PAR_RATE equal, the others exact
+    negatives, none of them trivially zero)."""
+    import QuantLib as ql
+
+    from engine.rates.store import price_and_store, reverse_direction_marks
+
+    def priced(quantity):
+        conn = sqlite3.connect(":memory:")
+        create_schema(conn)
+        instrument_id = _seed_manual_irs_trade(conn, quantity=quantity, effective="2025-08-12", maturity="2028-08-12",
+                                               fixed_rate=0.0398)
+        for day in ("2026-09-21", "2026-09-22"):
+            _seed_curve_quotes(conn, day, "USD", "SOFR", USD_SOFR_2026_09_22)
+        _seed_fixings(conn, "SOFR", datetime.date(2025, 8, 12), datetime.date(2026, 9, 22), value=0.0389)
+        ql.IndexManager.instance().clearHistories()
+        for day in ("2026-09-21", "2026-09-22"):
+            price_and_store(conn, day, "TEST-IRS-1")
+        return conn, instrument_id
+
+    try:
+        payer, swap = priced(10_000_000.0)
+        receiver, _ = priced(-10_000_000.0)
+    finally:
+        ql.IndexManager.instance().clearHistories()
+    p, r = _marks_rows(payer, swap), _marks_rows(receiver, swap)
+    assert {(d, mt) for d, mt, _s, _v in p} == {(d, mt) for d, mt in
+                                                 [(d, mt) for d in ("2026-09-21", "2026-09-22")
+                                                  for mt in ("PV_USD", "DV01_USD", "CASHFLOW_USD", "PAR_RATE")]}
+    by_key_p = {(d, mt): v for d, mt, _s, v in p}
+    by_key_r = {(d, mt): v for d, mt, _s, v in r}
+    for key, value in by_key_p.items():
+        if key[1] == "PAR_RATE":
+            assert by_key_r[key] == pytest.approx(value, rel=1e-12), key
+        else:
+            assert by_key_r[key] == pytest.approx(-value, rel=1e-6, abs=1e-9), key
+    for mt in ("PV_USD", "DV01_USD", "CASHFLOW_USD"):
+        assert by_key_p[("2026-09-22", mt)] != 0, mt                                   # not trivially true
+
+    payer.execute("UPDATE trades SET quantity = -quantity WHERE trade_id = 'TEST-IRS-1'")
+    payer.execute("UPDATE trade_legs SET amount = -amount WHERE trade_id = 'TEST-IRS-1'")
+    reverse_direction_marks(payer, "TEST-IRS-1", swap)
+    payer.commit()
+    flipped = {(d, mt): v for d, mt, _s, v in _marks_rows(payer, swap)}
+    assert set(flipped) == set(by_key_r)
+    for key, value in by_key_r.items():
+        assert flipped[key] == pytest.approx(value, rel=1e-6, abs=1e-9), key

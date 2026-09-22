@@ -65,3 +65,40 @@ def test_aggregate_reexports_the_same_functions():
     assert aggregate._last_business_day_of_prev_year is calendar._last_business_day_of_prev_year
     assert aggregate.load_holidays is not calendar.load_holidays
     assert aggregate.load_holidays() == calendar.load_holidays()
+
+
+# --------------------------------------------------------------------- spot_date (2026-09-22)
+# One spot-date rule for the app: the rule data/bloomberg/fwd_curve.py::spot_date_for applied
+# to its computed tenor dates, now in engine.pnl.calendar so the valuation's curve pillars
+# (engine.pnl.valuation._day_pillars) put spot on the same date.
+from engine.pnl.calendar import _SPOT_LAG_ONE_DAY, spot_date  # noqa: E402
+
+
+def test_spot_date_is_two_weekdays_on_for_a_t_plus_2_pair():
+    assert spot_date("2026-06-01", "USDJPY", frozenset()) == dt.date(2026, 6, 3)      # Mon -> Wed
+    assert spot_date(dt.date(2026, 6, 4), "EURUSD", frozenset()) == dt.date(2026, 6, 8)  # Thu -> Mon, over the weekend
+    assert spot_date("2026-06-01", holidays=frozenset()) == dt.date(2026, 6, 3)        # no pair: T+2
+
+
+def test_spot_date_is_one_weekday_on_for_the_t_plus_1_pairs():
+    assert _SPOT_LAG_ONE_DAY == frozenset({"USDCAD", "USDTRY", "USDPHP", "USDRUB"})
+    for pair in _SPOT_LAG_ONE_DAY:
+        assert spot_date("2026-06-01", pair, frozenset()) == dt.date(2026, 6, 2)      # Mon -> Tue
+    assert spot_date("2026-06-05", "USDCAD", frozenset()) == dt.date(2026, 6, 8)      # Fri -> Mon
+
+
+def test_spot_date_rolls_forward_off_a_holiday_but_a_holiday_in_between_does_not_count():
+    holidays = frozenset({"2026-06-19"})                                               # Friday
+    assert spot_date("2026-06-17", "USDJPY", holidays) == dt.date(2026, 6, 22)        # Wed -> Fri, rolled to Mon
+    assert spot_date("2026-06-18", "USDCAD", holidays) == dt.date(2026, 6, 22)        # Thu T+1 -> Fri, rolled to Mon
+    assert spot_date("2026-06-18", "USDJPY", holidays) == dt.date(2026, 6, 22)        # the holiday in between still counts as a weekday
+    assert spot_date("2026-06-17", "USDJPY") == dt.date(2026, 6, 22)                  # config/holidays.txt lists 2026-06-19
+
+
+def test_spot_date_is_the_historical_curve_builders_own_rule():
+    from data.bloomberg.fwd_curve import _SPOT_LAG_ONE_DAY as builder_lag, spot_date_for
+    assert builder_lag == _SPOT_LAG_ONE_DAY
+    holidays = frozenset({"2026-06-19", "2026-07-03"})
+    for day in ("2026-06-16", "2026-06-17", "2026-06-18", "2026-07-01", "2026-07-02"):
+        for pair in ("USDJPY", "USDCAD", ""):
+            assert spot_date(day, pair, holidays) == spot_date_for(dt.date.fromisoformat(day), pair, holidays)

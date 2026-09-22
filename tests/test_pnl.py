@@ -11,8 +11,6 @@ unaffected and covered below.
 from __future__ import annotations
 
 import math
-import re
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -309,11 +307,11 @@ def test_value_book_ndf_that_has_fixed_is_frozen_at_the_fixing_dates_spot():
         assert row["pnl_usd"] == pytest.approx(expected) and row["spot"] == pytest.approx(1 / 5.10)
         assert row["pnl_spot_usd"] == pytest.approx(expected) and row["pnl_carry_usd"] == 0.0
         assert row["reason"] == "" and row["note"] == ("NDF fixed 2026-06-01: no official fixing on file: at the spot of "
-                                                       "2026-06-01 instead, no delta, no carry")
+                                                       "2026-06-01 instead, converted at that spot, no delta, no carry")
     assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
     frozen = conn.execute("SELECT pnl_usd, spot_as_of_date, note, mark_type FROM realised_pnl WHERE trade_id='N1'").fetchone()
     assert frozen[0] == pytest.approx(expected) and frozen[1] == VB_AS_OF
-    assert frozen[2] == "spot dated 2026-06-01 (NDF fixing)" and frozen[3] == "SPOT"
+    assert frozen[2] == "spot dated 2026-06-01 (NDF fixing), converted at that spot" and frozen[3] == "SPOT"
     row = value_book(conn, "2026-06-04").iloc[0]
     assert row["status"] == "SETTLED" and row["pnl_usd"] == pytest.approx(expected)
 
@@ -332,11 +330,13 @@ def test_value_book_ndf_exit_price_is_the_official_fixing_of_the_fixing_date():
     conn.commit()
     row = value_book(conn, "2026-06-02").iloc[0]
     assert (row["mark"], row["mark_source"], row["mark_date"]) == (5.15, "BBG_BDH", VB_AS_OF)
-    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (5.15 - 5.20) / 5.10)   # exit = fix, converted at the fixing day's spot
-    assert row["note"] == "NDF fixed 2026-06-01: at the official fixing of 2026-06-01, no delta, no carry"
+    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (5.15 - 5.20) / 5.15)   # exit = fix, converted at the fix itself (2026-09-22)
+    assert row["spot"] == pytest.approx(1 / 5.15) and row["spot_source"] == "BBG_BDH"
+    assert row["note"] == "NDF fixed 2026-06-01: at the official fixing of 2026-06-01, converted at the fixing, no delta, no carry"
     assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
     frozen = conn.execute("SELECT pnl_usd, spot_as_of_date, mark_type, note FROM realised_pnl WHERE trade_id='N1'").fetchone()
-    assert frozen[0] == pytest.approx(row["pnl_usd"]) and frozen[1:] == (VB_AS_OF, "NDF_FIX", "official fixing dated 2026-06-01 (NDF fixing)")
+    assert frozen[0] == pytest.approx(row["pnl_usd"]) and frozen[1:] == (
+        VB_AS_OF, "NDF_FIX", "official fixing dated 2026-06-01 (NDF fixing), converted at the fixing")
 
     # the fixing day's own fix not on file, a neighbour's is: the neighbour is never the exit
     # price (user, 2026-09-22: "each ndf has a unique fix"); the fixing date's spot is, named
@@ -346,10 +346,11 @@ def test_value_book_ndf_exit_price_is_the_official_fixing_of_the_fixing_date():
     row = value_book(conn, "2026-06-02").iloc[0]
     assert (row["mark"], row["mark_source"], row["mark_date"]) == (5.10, "BBG_BFXFORWARD", VB_AS_OF)
     assert row["pnl_usd"] == pytest.approx(-1_000_000 * (5.10 - 5.20) / 5.10)
-    assert row["note"] == "NDF fixed 2026-06-01: no official fixing on file: at the spot of 2026-06-01 instead, no delta, no carry"
+    assert row["note"] == ("NDF fixed 2026-06-01: no official fixing on file: at the spot of 2026-06-01 instead, "
+                           "converted at that spot, no delta, no carry")
     assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
     assert conn.execute("SELECT mark_type, spot_as_of_date, note FROM realised_pnl WHERE trade_id='N1'").fetchone() == (
-        "SPOT", VB_AS_OF, "spot dated 2026-06-01 (NDF fixing)")
+        "SPOT", VB_AS_OF, "spot dated 2026-06-01 (NDF fixing), converted at that spot")
 
 
 def test_value_book_any_pair_with_no_forward_takes_the_days_curve_spot_alone_being_spot():
@@ -1155,3 +1156,32 @@ def test_reference_reads_the_fill_off_filled_frames_and_never_walks_back_twice(s
     assert calls == [REF_D5] and (choice.found, choice.stepped_back) == (True, False)
     assert choice.filled == (("2026-09-04", 3),) and not choice.split.blocked_ids
     assert "3 trades with no price on 2026-09-08" in choice.note
+
+
+# --------------------------------------------------------------------- the spot pillar (2026-09-22)
+# engine.pnl.calendar.spot_date is the app's one spot-date rule: the day's SPOT sits at the
+# pair's own spot date on the curve `_day_pillars` builds (T+1 for USDCAD, rolled off a holiday),
+# where engine.ladder.usd_marks.spot_date (T+2 weekdays for every pair) put it before.
+
+def test_value_book_spot_pillar_sits_at_the_pairs_own_spot_date():
+    conn = _vb_conn()
+    conn.execute("INSERT INTO instruments VALUES ('USDCAD','FX','USD','CAD',1.0,0,'USDCAD Curncy','9999-12-31')")
+    conn.commit()
+    for pair, spot, fwd in (("USDCAD", 1.35, 1.36), ("USDJPY", 150.0, 149.0)):
+        _vb_fx_trade(conn, pair[3:], pair, "USD", pair[3:], 1_000_000, spot, settle="2026-06-03")   # Wed, T+2 of Mon 06-01
+        _vb_mark(conn, pair, VB_AS_OF, "SPOT", spot)
+        _vb_mark(conn, pair, "2026-06-30", "FWD_OUTRIGHT", fwd)
+    book = value_book(conn, VB_AS_OF).set_index("trade_id")
+    # USDJPY spots on 06-03: the leg IS the spot pillar
+    assert book.loc["JPY", "mark"] == 150.0
+    assert book.loc["JPY", "mark_source"] == "INTERP: USDJPY 2026-06-03 mark of 2026-06-01 (nearest, no earlier pillar)"
+    # USDCAD spots on 06-02 (T+1): a leg on 06-03 is one day along the curve, between spot and the 06-30 pillar
+    assert book.loc["CAD", "mark"] == pytest.approx(1.35 + (1 / 28) * (1.36 - 1.35))
+    assert book.loc["CAD", "mark_source"] == "INTERP: between USDCAD 2026-06-02 and 2026-06-30 marks of 2026-06-01"
+
+
+def test_day_pillars_put_spot_on_the_next_good_day_after_a_holiday():
+    from engine.pnl.valuation import _day_pillars
+    conn = _vb_conn()
+    _vb_mark(conn, "USDJPY", "2026-06-17", "SPOT", 150.0, as_of="2026-06-17")   # Wed; T+2 is Fri 06-19, a config/holidays.txt holiday
+    assert [d for d, _v, _s in _day_pillars(conn, "USDJPY", "2026-06-17")] == ["2026-06-22"]

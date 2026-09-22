@@ -1,4 +1,5 @@
 - [Data quirks](data_quirks.md) — spot derivation rule (USD+quote lookup), real-file has no crosses, grep-test/docstring gotcha, xlsx_fx_replica retired for fx_blotter.py, pandas Series.where(None) dtype gotcha, lane is all-LF now, never git stash in the shared tree
 - [Blotter vs BNP reconcile](blotter-bnp-reconcile.md) — reconcile.py design, USD-leg netting reuse, chosen $1/0.5e-6 tolerance rationale
 - [Reference-date step-back](reference-date-step-back.md) — 2026-09-21 "use previous date until has value": a reference-close rule, never a mark carry-forward; ui files in a brief stay out of lane
-- [NDF fix exact day](ndf-fix-exact-day.md) — 2026-09-22: NDF_FIX of the fixing date only, SPOT substitute, expected forward-points residual on a no-pull day, ledger refreeze guard, golden book pins 43 neighbouring-fix rows
+- [NDF fix exact day](ndf-fix-exact-day.md) — 2026-09-22: NDF_FIX of the fixing date only, SPOT substitute, P&L converted at 1/FIX, present-spot exception retired, forward-points residual on a no-pull day, golden book pending
+- [Ledger re-freeze rule](ledger-refreeze-rule.md) — 2026-09-22: one generic purge re-freezes any realised row whose marks changed; freeze functions are the only place a frozen figure is computed; gating and knock-ons
