@@ -39,7 +39,8 @@ Checks (each becomes one or more result rows):
                                    its effective date to as_of (engine/rates needs them)
   5c. FX option coverage       -- every open option has a strike on file (else it can
                                    never be priced) and an official PREMIUM and DELTA
-  5d. Clock                    -- local time vs New York, and whether as_of is today NY
+  5d. Clock                    -- local time vs New York, and whether as_of is the book
+                                   date (New York, rolled at 17:00: data.bloomberg.live.book_today)
   6. snapped_at offset         -- official marks carry a timezone-resolved snapped_at
                                    (the close is 15:00 America/New_York, user decision
                                    2026-09-21), not a naive timestamp
@@ -86,16 +87,27 @@ def _default_db_path() -> Optional[Path]:
         return Path(env) if env else None
 
 
-def _today_ny() -> str:
-    """The book date the live feed stamps marks with: today in America/New_York.
+def _today_ny(now: Optional[datetime] = None) -> str:
+    """The book date the live feed stamps marks with: `data.bloomberg.live.book_today`, the
+    app's one day boundary (the New York date until 17:00 New York, the next date from then
+    on: user decision 2026-09-22, the day turns at 05:00 Hong Kong). Imported lazily so the
+    tool still runs when the app's imports fail; then, as before, the New York calendar
+    date, and the PC's date when the zone itself cannot be resolved. `now` is for tests: a
+    tz-aware datetime, taken as the moment the check runs.
     (The `positions` table -- BNP-fed, and dropped from the schema entirely 2026-09-17 --
     was never used as the default here for the same reason: it would have pointed every
     coverage check at a fixed stale snapshot date forever.)"""
     try:
         from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        ny_now = (now if now is not None else datetime.now(ZoneInfo("America/New_York"))
+                  ).astimezone(ZoneInfo("America/New_York"))
     except Exception:
         return date.today().isoformat()
+    try:
+        from data.bloomberg.live import book_today
+    except Exception:
+        return ny_now.date().isoformat()
+    return book_today(ny_now).isoformat()
 
 
 def _latest_as_of(conn: sqlite3.Connection) -> str:
@@ -501,24 +513,28 @@ def check_unverified_assumptions(db_path: Optional[Path]) -> List[Check]:
 
 
 # --------------------------------------------------------------------------- 5e. clock
-def check_clock(as_of: str) -> List[Check]:
-    """The feed stamps marks with today's New York date. A PC clock or zone that is off,
-    or an as-of date that is not today, is the usual reason 'everything is missing'."""
+def check_clock(as_of: str, now: Optional[datetime] = None) -> List[Check]:
+    """The feed stamps marks with the book date: the New York date until 17:00 New York,
+    the next date from then on (`data.bloomberg.live.book_today`, user decision 2026-09-22).
+    A PC clock or zone that is off, or an as-of date that is not the book date, is the
+    usual reason 'everything is missing'. `now` is for tests (a tz-aware datetime)."""
     try:
         from zoneinfo import ZoneInfo
-        now_ny = datetime.now(ZoneInfo("America/New_York"))
+        now_ny = (now if now is not None else datetime.now(ZoneInfo("America/New_York"))
+                  ).astimezone(ZoneInfo("America/New_York"))
     except Exception as exc:
         return [_row("PC clock / New York date", "fail",
                      f"Cannot resolve America/New_York ({exc.__class__.__name__}); tzdata may be missing -- "
                      "run  py -3 2_launcher.py setup.")]
-    today_ny = now_ny.date().isoformat()
-    local = datetime.now().astimezone()
+    book_date = _today_ny(now_ny)
+    local = now_ny.astimezone()
     detail = (f"Local time {local.strftime('%Y-%m-%d %H:%M %Z')} = New York {now_ny.strftime('%Y-%m-%d %H:%M')}; "
-              f"marks pulled now are stamped {today_ny}.")
-    if as_of != today_ny:
+              f"marks pulled now are stamped {book_date}, the book date (New York, rolled at 17:00).")
+    if as_of != book_date:
         return [_row("PC clock / New York date", "warning",
-                     detail + f" The checks above ran for as-of {as_of}, which is not today's New York date; "
-                              "a Ladder or Market data date picker left on an old date finds no official marks.")]
+                     detail + f" The checks above ran for as-of {as_of}, which is not the book date "
+                              f"(New York, rolled at 17:00), {book_date}; a Ladder or Market data date picker "
+                              "left on an old date finds no official marks.")]
     return [_row("PC clock / New York date", "pass", detail)]
 
 

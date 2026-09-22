@@ -3,6 +3,7 @@
 - [Bloomberg check button moved to Market Data 2026-09-16](bloomberg-check-button-moved-to-market-data-2026-09-16.md) — button/panel/diagnostics fns relocated header.py -> market_data.py, new ids, CSS retheme
 - [Missing-close reason + feed cadence 2026-09-21](missing-close-reason-and-feed-cadence-2026-09-21.md) — no screen can run the backfill; caption reads status["backfill"]; 900 s cadence, timers follow it, status line capped 60 s
 - [Market data whole-book panels 2026-09-21](market-data-whole-book-panels-2026-09-21.md) — What is missing / Marks that look wrong / Past closes; header.needed_marks picks live vs past-close needs list; status item keys; FK fixture trap
-- [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
+- [Recalc status on a no-Bloomberg press 2026-09-22](recalc-status-on-no-bloomberg-press-2026-09-22.md) — feed thread always starts, so the press line is feed_headline via the poll, not not_connected_message; sentence shown once on the tab
+- [Environment](environment.md) — Windows: py -3; Mac clone: .venv/bin/python; dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
 - [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
 - [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable

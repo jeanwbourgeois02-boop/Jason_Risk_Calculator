@@ -1641,3 +1641,210 @@ def test_build_requests_asks_for_the_fix_on_the_fixing_date_and_never_as_a_spot(
     assert [(r.bbg_ticker, r.settle_date, r.mark_type) for r in on_fixing][-1] == ("BZFXPTAX Index", "2026-09-22", "NDF_FIX")
     assert [r.mark_type for r in on_fixing if r.bbg_ticker == "BZFXPTAX Index"] == ["NDF_FIX"]   # not in the SPOT group
     assert "NDF_FIX" not in {r.mark_type for r in live.build_requests(conn, "2026-09-21")}
+
+
+# =========================================================================== 2026-09-22: one day boundary
+# User decision 2026-09-22: "I want to clarify the time today, so that all daily pnl is calculated
+# from the NY 3pm the day before. I am based in HK, so basically all date rollover at hkt 5am".
+# book_today is the one rule: the New York date until 17:00 New York, the next date from then on,
+# for the marks a pull stamps, every pricing step, the ledger and (through it) the backfill.
+def test_book_today_rolls_to_the_next_date_at_1700_new_york():
+    from datetime import date as _date
+    from zoneinfo import ZoneInfo
+    ny, hk = ZoneInfo("America/New_York"), ZoneInfo("Asia/Hong_Kong")
+    assert live.ROLLOVER_HOUR_NY == 17
+    assert live.book_today(datetime(2026, 9, 22, 16, 59, tzinfo=ny)) == _date(2026, 9, 22)
+    assert live.book_today(datetime(2026, 9, 22, 17, 0, tzinfo=ny)) == _date(2026, 9, 23)
+    assert live.book_today(datetime(2026, 9, 22, 23, 59, tzinfo=ny)) == _date(2026, 9, 23)
+    assert live.book_today(datetime(2026, 9, 23, 0, 5, tzinfo=ny)) == _date(2026, 9, 23)
+    # 05:00 Hong Kong on the 23rd is 17:00 New York on the 22nd: the fresh day starts there
+    assert live.book_today(datetime(2026, 9, 23, 4, 59, tzinfo=hk)) == _date(2026, 9, 22)
+    assert live.book_today(datetime(2026, 9, 23, 5, 0, tzinfo=hk)) == _date(2026, 9, 23)
+    assert live.book_today(datetime(2026, 9, 23, 11, 30, tzinfo=hk)) == _date(2026, 9, 23)   # the user's morning
+    # any zone is converted (17:00 EDT = 21:00 UTC; 17:00 EST = 22:00 UTC); a naive datetime is New York time
+    assert live.book_today(datetime(2026, 9, 22, 20, 59, tzinfo=timezone.utc)) == _date(2026, 9, 22)
+    assert live.book_today(datetime(2026, 9, 22, 21, 0, tzinfo=timezone.utc)) == _date(2026, 9, 23)
+    assert live.book_today(datetime(2026, 1, 15, 21, 59, tzinfo=timezone.utc)) == _date(2026, 1, 15)
+    assert live.book_today(datetime(2026, 1, 15, 22, 0, tzinfo=timezone.utc)) == _date(2026, 1, 16)
+    assert live.book_today(datetime(2026, 9, 22, 18, 0)) == _date(2026, 9, 23)
+    assert isinstance(live.book_today(), _date)                                             # no argument: now
+
+
+def _rollover_db(tmp_path):
+    """AUDUSD forwards: a1 open to 2026-10-16 (a tenor date of the fake FWD_CURVE below), a2
+    settling Tue 2026-09-22 (D); an ESZ6 future to 2026-12-18. D's SPOT on file is D's 16:00
+    press, the last before the 17:00 roll."""
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)", [
+        ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"),
+        ("ESZ6 Index", "FUTURE", "ES", "USD", 50, 0, "ESZ6 Index", "2026-12-18"),
+    ])
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-09-10", -1e6, 0.65, "acc", "cp", "", "t", "d", ""),
+        ("a2", "XLSX", "AUDUSD", "FX_FWD", "a2", "2026-09-10", 2e6, 0.66, "acc", "cp", "", "t", "d", ""),
+        ("f1", "XLSX", "ESZ6 Index", "FUTURE", "f1", "2026-09-10", 2, 7500.0, "acc", "cp", "", "t", "d", ""),
+    ])
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-09-10", "2026-10-16", 0.65, 1),
+        ("a1", 2, "FX_NEAR", "USD", 650000, "2026-09-10", "2026-10-16", 0.65, 1),
+        ("a2", 1, "FX_NEAR", "AUD", 2e6, "2026-09-10", "2026-09-22", 0.66, 1),
+        ("a2", 2, "FX_NEAR", "USD", -1320000, "2026-09-10", "2026-09-22", 0.66, 1),
+        ("f1", 1, "NOTIONAL", "USD", 2 * 50 * 7500.0, "2026-09-10", "2026-12-18", 7500.0, 0),
+    ])
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                 ("2026-09-22", "AUDUSD", "2026-09-22", "SPOT", 0.66, "BBG_BFXFORWARD", "2026-09-22T16:00:00-04:00"))
+    conn.commit()
+    return p, conn
+
+
+def _fake_bloomberg(monkeypatch):
+    """A Terminal that answers every request of a cycle: live PX_LAST for the pair and the
+    future, one FWD_CURVE with two tenor points for the pair."""
+    from datetime import date as _date
+    from data.bloomberg import pull_marks as pm, fwd_curve
+    monkeypatch.setattr(pm, "fetch_reference",
+                        lambda session, service, tickers, fields, overrides=None, diag=None, tag=None:
+                        {"AUDUSD Curncy": {"PX_LAST": 0.6612}, "ESZ6 Index": {"PX_LAST": 7601.0}})
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda blpapi, session, service, tickers, timeout_ms=15000: {
+        "AUDUSD Curncy": {"points": [(_date(2026, 10, 16), 0.6620), (_date(2026, 11, 16), 0.6630)],
+                          "columns": ["Tenor", "Settlement Date", "Bid", "Ask"], "error": ""}})
+
+
+def _clock(monkeypatch, when):
+    """The wall clock at `when` for the whole cycle: book_today (its default `now`) and the
+    live snap time both read it."""
+    real = live.book_today
+    monkeypatch.setattr(live, "book_today", lambda now=None: real(now if now is not None else when))
+    monkeypatch.setattr(live, "_now_iso", lambda: when.isoformat(timespec="seconds"))
+
+
+def test_pull_at_1800_new_york_writes_the_next_days_marks_and_runs_every_step_for_it(tmp_path, monkeypatch):
+    """18:00 New York on the 22nd (06:00 Hong Kong on the 23rd): the book is on the 23rd, so
+    the pull writes the 23rd's marks with the real snap time, prices and freezes as of the
+    23rd, and touches nothing dated the 22nd -- that day is past, and its last live row is
+    the backfill's to replace with the 15:00 close (tests/test_auto_backfill.py)."""
+    from zoneinfo import ZoneInfo
+    p, conn = _rollover_db(tmp_path)
+    _fake_bloomberg(monkeypatch)
+    _clock(monkeypatch, datetime(2026, 9, 22, 18, 0, tzinfo=ZoneInfo("America/New_York")))
+    status = live.pull_once(p, session_factory=lambda: (object(), object()))
+    assert status["connected"] is True and status["as_of_date"] == status["as_of_marks"] == "2026-09-23"
+    # a2, settled as of the 23rd, is not asked for; the 23rd's SPOT is
+    assert {(i["instrument_id"], i["mark_type"], i["settle_date"], i["status"]) for i in status["items"]} == {
+        ("AUDUSD", "SPOT", "2026-09-23", "OK"), ("AUDUSD", "FWD_OUTRIGHT", "2026-10-16", "OK"),
+        ("ESZ6 Index", "FUTURE_PX", "2026-12-18", "OK")}
+    fx = conn.execute("SELECT instrument_id, settle_date, mark_type, value, snapped_at FROM marks "
+                      "WHERE as_of_date = '2026-09-23' AND instrument_id = 'AUDUSD' ORDER BY mark_type, settle_date").fetchall()
+    assert fx == [("AUDUSD", "2026-10-16", "FWD_OUTRIGHT", 0.6620, "2026-09-22T18:00:00-04:00"),
+                  ("AUDUSD", "2026-11-16", "FWD_OUTRIGHT", 0.6630, "2026-09-22T18:00:00-04:00"),
+                  ("AUDUSD", "2026-09-23", "SPOT", 0.6612, "2026-09-22T18:00:00-04:00")]
+    assert conn.execute("SELECT as_of_date, value FROM marks WHERE mark_type = 'FUTURE_PX'").fetchall() == [("2026-09-23", 7601.0)]
+    # the 22nd keeps its 16:00 press untouched: the day just ended is not this pull's
+    assert conn.execute("SELECT value, snapped_at FROM marks WHERE as_of_date = '2026-09-22'").fetchall() == [
+        (0.66, "2026-09-22T16:00:00-04:00")]
+    # the rates / vol / options steps and realise_settled all ran as of the 23rd: a2 (value date the
+    # 22nd) is frozen by this cycle, at the 22nd's row on file at that moment
+    assert status["rates"]["as_of_date"] == status["vol"]["as_of_date"] == status["options"]["as_of_date"] == "2026-09-23"
+    assert status["ledger"]["as_of_date"] == "2026-09-23" and status["ledger"]["realised"] == 1
+    assert conn.execute("SELECT spot_as_of_date FROM realised_pnl WHERE trade_id = 'a2'").fetchone() == ("2026-09-22",)
+    assert live.read_status(p)["as_of_date"] == "2026-09-23"
+
+
+def test_pull_at_1600_new_york_still_writes_that_days_marks(tmp_path, monkeypatch):
+    """Before the roll the 22nd is the book date: its marks are the 22nd's live rows, a2
+    settling that day is still open (marked at spot) and nothing is frozen yet."""
+    from zoneinfo import ZoneInfo
+    p, conn = _rollover_db(tmp_path)
+    _fake_bloomberg(monkeypatch)
+    _clock(monkeypatch, datetime(2026, 9, 22, 16, 0, tzinfo=ZoneInfo("America/New_York")))
+    status = live.pull_once(p, session_factory=lambda: (object(), object()))
+    assert status["connected"] is True and status["as_of_date"] == status["as_of_marks"] == "2026-09-22"
+    stamp = "2026-09-22T16:00:00-04:00"
+    fx = conn.execute("SELECT instrument_id, settle_date, mark_type, value, snapped_at FROM marks "
+                      "WHERE as_of_date = '2026-09-22' AND instrument_id = 'AUDUSD' ORDER BY mark_type, settle_date").fetchall()
+    assert fx == [("AUDUSD", "2026-09-22", "FWD_OUTRIGHT", 0.6612, stamp),      # a2 settles today: marked at spot
+                  ("AUDUSD", "2026-10-16", "FWD_OUTRIGHT", 0.6620, stamp),
+                  ("AUDUSD", "2026-11-16", "FWD_OUTRIGHT", 0.6630, stamp),
+                  ("AUDUSD", "2026-09-22", "SPOT", 0.6612, stamp)]
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE as_of_date = '2026-09-23'").fetchone() == (0,)
+    assert status["ledger"] == {"as_of_date": "2026-09-22", "realised": 0, "unrealisable": []}
+    assert conn.execute("SELECT COUNT(*) FROM realised_pnl").fetchone() == (0,)
+
+
+# =========================================================================== 2026-09-22: no Bloomberg -> options re-priced on file
+def test_pull_without_bloomberg_reprices_the_options_from_the_marks_on_file_as_of_the_book_date(tmp_path, monkeypatch):
+    """User, 2026-09-22 (to the options-pricer agent): "pull bbg now should recalc options too,
+    using log data if no bbg access, or pull new data for new calculation"; confirmed "yes I
+    asked for the recalc, wire it in". No Bloomberg on this machine: the press re-prices every
+    FX option from the marks on file (engine.options.store.recalc_on_file, once, as of the book
+    date), asks Bloomberg nothing, and the status carries the totals and one plain sentence;
+    the connection reason stays what it was."""
+    from datetime import date as _date
+    import engine.options.store as store
+    p, conn = _rollover_db(tmp_path)                                  # a1 and f1 open as of the 23rd
+    monkeypatch.setattr(live, "availability", lambda host, port: (False, "blpapi is not installed on this computer"))
+    monkeypatch.setattr(live, "book_today", lambda now=None: _date(2026, 9, 23))
+    calls, real_recalc = [], store.recalc_on_file
+    result = {"as_of": "2026-09-23", "since": "2026-08-14", "priced": 3, "skipped": 1,
+              "days": [{"day": "2026-09-22", "priced": 2, "skipped": []},
+                       {"day": "2026-09-23", "priced": 1, "skipped": [{"trade_id": "o2", "reason": "no vol"}]}]}
+
+    def fake_recalc(conn_, as_of, since=None):
+        calls.append(as_of)
+        return {**result, "as_of": as_of}
+
+    monkeypatch.setattr(store, "recalc_on_file", fake_recalc)
+    status = live.pull_once(p)
+    assert calls == ["2026-09-23"]
+    assert status["connected"] is False and status["reason"] == "blpapi is not installed on this computer"
+    assert status["recalc"] == result
+    assert status["recalc_summary"] == ("no Bloomberg on this machine: options re-priced from the marks on file "
+                                        "as of 2026-09-23, 3 priced, 1 skipped over 2 day(s)")
+    assert status["items"] == [] and status["written"] == 0 and status["timings"]["options"] >= 0.0
+    assert live.read_status(p) == status                              # the block survives the JSON round trip
+    # a connected pull does not call it: its own options step and the backfill's price_close re-price
+    monkeypatch.setattr(live, "availability", lambda host, port: (True, ""))
+    _fake_bloomberg(monkeypatch)
+    connected = live.pull_once(p, "2026-09-23", session_factory=lambda: (object(), object()), today=_date(2026, 9, 23))
+    assert connected["connected"] is True and calls == ["2026-09-23"]
+    assert "recalc" not in connected and "recalc_summary" not in connected
+    # a press whose session cannot be opened (the port answers, no Terminal logged in) re-prices too,
+    # here through the real pricer: nothing on file to re-price, said as such
+    def no_terminal():
+        raise RuntimeError("no Terminal logged in")
+    monkeypatch.setattr(store, "recalc_on_file", real_recalc)
+    failed = live.pull_once(p, session_factory=no_terminal)
+    assert failed["connected"] is False and "no Terminal logged in" in failed["reason"]
+    assert failed["recalc"] == {"as_of": "2026-09-23", "since": "2026-09-23", "priced": 0, "skipped": 0,
+                                "days": [{"day": "2026-09-23", "priced": 0, "skipped": []}]}
+    assert failed["recalc_summary"] == "no Bloomberg on this machine: no FX option on file to re-price as of 2026-09-23"
+    # a pull that fails AFTER its session opened is Bloomberg's failure, not a machine without Bloomberg
+    from data.bloomberg import pull_marks as pm
+    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    later = live.pull_once(p, session_factory=lambda: (object(), object()))
+    assert later["connected"] is False and "boom" in later["reason"] and "recalc" not in later
+
+
+def test_recalc_summary_and_the_helper_never_raise(tmp_path, monkeypatch):
+    from datetime import date as _date
+    assert live.recalc_summary({"as_of": "2026-09-23", "priced": 0, "skipped": 0, "days": [{"day": "2026-09-23"}],
+                                "error": "RuntimeError('x')"}) == (
+        "no Bloomberg on this machine: re-pricing the options from the marks on file stopped (RuntimeError('x')); "
+        "0 priced, 0 skipped before that")
+    assert live.recalc_summary({"as_of": "2026-09-23", "priced": 0, "skipped": 2, "days": [{}]}) == (
+        "no Bloomberg on this machine: options re-priced from the marks on file as of 2026-09-23, 0 priced, "
+        "2 skipped over 1 day(s)")
+    # the pricer not importable: the same shape, with the reason under "error"
+    import builtins
+    real_import = builtins.__import__
+
+    def no_pricer(name, *a, **k):
+        if name == "engine.options.store":
+            raise ImportError("no QuantLib")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", no_pricer)
+    out = live.recalc_options_on_file(tmp_path / "none.db", _date(2026, 9, 23))
+    assert out["as_of"] == "2026-09-23" and out["priced"] == out["skipped"] == 0 and out["days"] == []
+    assert "not importable" in out["error"] and "no QuantLib" in out["error"]

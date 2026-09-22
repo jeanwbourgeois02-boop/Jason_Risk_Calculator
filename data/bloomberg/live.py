@@ -157,15 +157,52 @@ def read_status(db_path) -> Optional[dict]:
         return None
 
 
-def book_today() -> date:
-    """The book date marks are stamped with: today in America/New_York (the official close
-    is 15:00 New York, pull_marks.CLOSE_HOUR_NY, user decision 2026-09-21). Never the PC's
-    local date -- a PC in Asia is a day
-    ahead of New York until early afternoon, and marks stamped with its local date would
-    be a day away from the date every screen looks up (found on the first live run,
-    2026-09-17)."""
+# The book's day turns at 17:00 New York (05:00 Hong Kong), the FX day roll -- for every
+# date the app works with: the marks a pull stamps, the rates / vol / options steps, the
+# ledger's freeze date, the backfill's "past", the screens' as-of (ui/tabs/cash_ladder.py::
+# today_ny delegates to book_today and re-exports this constant). The one rule; nothing else
+# decides the day.
+ROLLOVER_HOUR_NY = 17
+
+
+def book_today(now: Optional[datetime] = None) -> date:
+    """The book date: the New York date until 17:00 New York, the NEXT date from 17:00 on.
+
+    User decision 2026-09-22: "I want to clarify the time today, so that all daily pnl is
+    calculated from the NY 3pm the day before. I am based in HK, so basically all date
+    rollover at hkt 5am"; earlier the same day: "no only roll to new day after new york
+    5pm" and "I am a hk user, I expect the date to reset by New york 5pm everyday. So the
+    full hk session until new york 5pm is a full day, then a fresh day from hk 5am". HKT
+    05:00 is 17:00 New York (ROLLOVER_HOUR_NY).
+
+    Why one boundary for everything: Daily is the live LTD against the previous day's
+    15:00 New York close. Until 2026-09-22 the screens rolled at 17:00 New York
+    (ui/tabs/cash_ladder.py::today_ny) while this function still gave the New York
+    calendar date, so between 17:00 and midnight New York -- 05:00 to 12:00 Hong Kong, the
+    user's morning -- the screen valued D+1, a pull wrote D's marks, D was not yet "past"
+    for the backfill (its row on file stayed the last live press instead of the 15:00
+    close), D+1 had no marks of its own and was carried from D, and Daily read 0 for the
+    whole book. With the pull, the rates / vol / options steps, realise_settled, the
+    backfill's "past" and the screens all on this one date, a pull at 18:00 New York on the
+    22nd writes marks dated the 23rd, the 22nd is a past day whose 15:00 close the same
+    button press fetches, and Daily is live against it. A live row dated D+1 that was
+    snapped on the evening of D is that day's live mark until D+1 turns past, when the
+    backfill replaces it with D+1's 15:00 bar as it does any row not stamped at the close
+    (backfill.is_close_row compares the stamp with 15:00 of the row's own as_of_date).
+
+    Never the PC's local date: a PC in Asia is a day ahead of New York until early
+    afternoon, and marks stamped with its local date would be a day away from the date
+    every screen looks up (found on the first live run, 2026-09-17). `now` is for tests:
+    any tz-aware datetime, converted to America/New_York; a naive one is taken as New York
+    time."""
     from zoneinfo import ZoneInfo
-    return datetime.now(ZoneInfo("America/New_York")).date()
+    ny = ZoneInfo("America/New_York")
+    if now is None:
+        now = datetime.now(ny)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=ny)
+    ny_now = now.astimezone(ny)
+    return ny_now.date() + timedelta(days=1 if ny_now.hour >= ROLLOVER_HOUR_NY else 0)
 
 
 def _now_iso() -> str:
@@ -973,14 +1010,68 @@ def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Option
     return out
 
 
+def recalc_options_on_file(db_path, today: date) -> dict:
+    """What "Pull Bloomberg now" does on a machine with no Bloomberg (user, 2026-09-22, to
+    the options-pricer agent: "pull bbg now should recalc options too, using log data if no
+    bbg access, or pull new data for new calculation"; confirmed to the session: "yes I asked
+    for the recalc, wire it in"): every FX option re-priced from the marks on file -- the
+    imported snapshot's spots, forwards, OIS quotes and vols, day by day from the first
+    option trade to the book date (engine.options.store.recalc_on_file) -- instead of
+    leaving everything as it was. Asks Bloomberg nothing (hard rule 8). Returns that
+    function's own dict, {"as_of", "since", "days": [per-day price_close dicts], "priced",
+    "skipped"} plus "error" when something raised, in the same shape when the pricer is not
+    importable or the database cannot be opened. Never raises. With Bloomberg the connected
+    cycle's own options step and the backfill's price_close cover this, so `pull_once` calls
+    it only when no session was opened."""
+    as_of = today.isoformat()
+    empty = {"as_of": as_of, "since": None, "days": [], "priced": 0, "skipped": 0}
+    try:
+        from engine.options.store import recalc_on_file
+    except ImportError as exc:
+        return {**empty, "error": f"engine.options.store.recalc_on_file not importable: {exc!r}"}
+    from data.ingest.schema import connect
+    try:
+        conn = connect(Path(db_path))
+        try:
+            return recalc_on_file(conn, as_of)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 -- said in the status, never raised into the cycle
+        return {**empty, "error": f"{exc!r}"}
+
+
+def recalc_summary(result: dict) -> str:
+    """One plain sentence about `recalc_options_on_file`'s result, for the status line and
+    the Market data tab (status["recalc_summary"]; status["reason"] stays the connection
+    reason)."""
+    priced, skipped = int(result.get("priced") or 0), int(result.get("skipped") or 0)
+    days, as_of = len(result.get("days") or []), result.get("as_of")
+    head = "no Bloomberg on this machine: "
+    if result.get("error"):
+        return head + (f"re-pricing the options from the marks on file stopped ({result['error']}); "
+                       f"{priced} priced, {skipped} skipped before that")
+    if priced == 0 and skipped == 0:
+        return head + f"no FX option on file to re-price as of {as_of}"
+    return head + (f"options re-priced from the marks on file as of {as_of}, "
+                   f"{priced} priced, {skipped} skipped over {days} day(s)")
+
+
 def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost", port: int = 8194,
               session_factory: Optional[Callable] = None, today: Optional[date] = None,
               rates_source=None, vol_source=None) -> dict:
     """One full cycle. Returns and writes the status dict. Never raises: any exception
-    becomes connected=False with the traceback in `reason`. `today` (live mark date)
-    defaults to the wall-clock date; injectable for tests. `vol_source` mirrors
+    becomes connected=False with the traceback in `reason`. `today` (the date every mark of
+    this cycle is stamped with, the rates / vol / options steps price and realise_settled
+    freezes as of) defaults to the book date, `book_today`: the New York date, rolled at
+    17:00 New York (user decision 2026-09-22); injectable for tests. `vol_source` mirrors
     `rates_source`'s injection for _vol_step (data.bloomberg.vol_marketdata's live/file
     source).
+
+    No Bloomberg on this machine (the availability check fails, or the session cannot be
+    opened): nothing is pulled, connected=False with the reason as before, and the FX
+    options are re-priced from the marks on file (`recalc_options_on_file`, user 2026-09-22),
+    the result under status["recalc"] and one sentence under status["recalc_summary"]; its
+    time is status["timings"]["options"].
 
     `status["timings"]` (2026-09-21) says where the cycle's time went, in seconds rounded
     to 0.1, always with the same keys (TIMING_KEYS; 0.0 for a step that did not run):
@@ -1019,22 +1110,24 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         write_status(db_path, status)
         return status
 
+    session_opened = False
     try:
+        # The book date (book_today), fixed once here so every date this cycle stamps,
+        # prices, freezes or re-prices as of is the same one. It used to default to
+        # MAX(positions.as_of_date) -- the last BNP snapshot date, a source that no longer
+        # feeds the app (2026-09-17 fix).
+        today = today or book_today()
         ok, why = availability(host, port) if session_factory is None else (True, "")
         if not ok:
             status["reason"] = why
+            status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today)
+            status["recalc_summary"] = recalc_summary(status["recalc"])
             return _finish()
         from data.bloomberg import pull_marks as pm
         diag = pm.Diagnostics()
         shared = _SharedSession(host, port, session_factory, diag)
         conn = connect(Path(db_path))
         try:
-            # The book date defaults to the live mark date (2026-09-17 fix). It used to
-            # default to MAX(positions.as_of_date) -- the last BNP snapshot date, a
-            # source that no longer feeds the app -- so on a database still carrying
-            # the 2026-08-17 BNP positions the feed built its request list as of that
-            # day and never asked for a mark on any trade dated after it.
-            today = today or book_today()
             if as_of_date is None:
                 as_of_date = today.isoformat()
             status["as_of_date"] = as_of_date
@@ -1043,7 +1136,6 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             if not requests:
                 # Nothing FX-shaped to price, but swaps and options may still need a
                 # curve / premium refresh (2026-09-17) before the FX-only early return.
-                today = today or book_today()
                 status["rates"] = _timed(timings, "rates", _rates_step, conn, today, host, port, rates_source,
                                          shared=shared)
                 status["vol"] = _timed(timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
@@ -1054,8 +1146,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # One session for the whole cycle (2026-09-21): the rates and vol steps below
             # borrow this one instead of each opening their own.
             session, service = shared.get()
+            session_opened = True
             snapped = _now_iso()  # live pull: real wall-clock time, not the 15:00 NY convention
-            today = today or book_today()
             spot_rows, spot_fail = _timed(timings, "spot", _live_spot_rows, session, service, requests, today, diag,
                                           snapped)
             # SPOT only: an NDF_1M row sits on the same pair (USDKRW) and is not its spot.
@@ -1163,6 +1255,12 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         status["connected"] = False
         status["reason"] = "pull failed: " + traceback.format_exc(limit=3).strip().splitlines()[-1]
         status["traceback"] = traceback.format_exc()
+        if today is not None and not session_opened:
+            # The session could not be opened (the port answers but no Terminal is logged
+            # in): no Bloomberg for this press either, so the options are re-priced from
+            # the marks on file as in the not-available branch above.
+            status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today)
+            status["recalc_summary"] = recalc_summary(status["recalc"])
     return _finish()
 
 

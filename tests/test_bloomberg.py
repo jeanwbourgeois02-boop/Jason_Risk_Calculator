@@ -3461,3 +3461,16 @@ def test_probe_asks_both_scale_fields_and_runs_one_intraday_bar_request(monkeypa
     request = next(r for r in seen if r.req_type == "IntradayBarRequest")
     assert (request.security, request.eventType, request.interval) == ("EURUSD Curncy", "BID", 60)
     assert "intraday_close_bar" in pull_report.render_report(diag)
+
+
+def test_check_not_stale_defaults_today_to_the_book_date(monkeypatch):
+    """The staleness guard's "today" is the book date (live.book_today: New York, rolled at
+    17:00 New York; user decision 2026-09-22), not the New York calendar date: at 18:00 New
+    York on the 22nd the live forwards belong to the 23rd's book day."""
+    from data.bloomberg import live
+    from data.bloomberg.pull_marks import RequestRow, StaleAsOfError, check_not_stale
+    monkeypatch.setattr(live, "book_today", lambda now=None: date(2026, 9, 23))
+    requests = [RequestRow("EURUSD", "EURUSD Curncy", "2026-10-16", "FWD_OUTRIGHT")]
+    check_not_stale(date(2026, 9, 23), requests, allow_stale=False)                 # the book date: never refused
+    with pytest.raises(StaleAsOfError, match="the book date: New York, rolled at 17:00"):
+        check_not_stale(date(2026, 9, 22), requests, allow_stale=False)

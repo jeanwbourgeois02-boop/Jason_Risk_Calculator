@@ -7,7 +7,10 @@ inventory table. Layout:
      marks, default = the pair with the most open trades) -- the only dropdown on the
      tab -- the "Pull now" button and a one-line feed status, with a second compact line
      giving the last pull's seconds per step, slowest first, when the status file
-     carries `timings` (`pull_timings_line`; nothing when absent).
+     carries `timings` (`pull_timings_line`; nothing when absent). When the last press
+     found no Bloomberg and re-priced the FX options from the marks on file instead
+     (2026-09-22, status["recalc"]), `recalc_block` adds the pull's own sentence, its
+     error if it stopped, and a collapsed day-by-day list with each skipped trade's reason.
   1b. Whole-book checks (2026-09-21, user-approved), above the per-pair section and
      independent of the pair dropdown: "What is missing" (`missing_panel`: every needed
      mark with no official mark, trades and notional blocked, Bloomberg's own reason from
@@ -59,7 +62,8 @@ import pandas as pd
 from ui.tabs import ranking as rk
 from dash import Input, Output, State, dash_table, dcc, html
 
-from ui.feed_controls import PullGuard, click_outcome, pull_timings, safety_refresh_ms, seconds_words
+from ui.feed_controls import (PullGuard, click_outcome, pull_timings, recalc_words, safety_refresh_ms,
+                              seconds_words)
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
 
@@ -76,6 +80,8 @@ PULL_NOW_ID = "market-data-pull-now"
 PULL_NOW_STATUS_ID = "market-data-pull-now-status"
 PULL_REVISION_ID = "market-data-pull-revision"
 PULL_TIMINGS_ID = "market-data-pull-timings"
+RECALC_BLOCK_ID = "market-data-recalc"          # what a press did on a machine with no Bloomberg (2026-09-22)
+RECALC_DAYS_ID = "market-data-recalc-days"
 # Safety-net timer only: one feed cycle, read from data.bloomberg.live.INTERVAL_SECONDS
 # (ui.feed_controls.safety_refresh_ms), never a number typed in here. A data change
 # redraws the tab within seconds through ui/revision.py's DATA_REVISION_ID.
@@ -189,14 +195,78 @@ def backfill_headline(status: Optional[dict]) -> Optional[str]:
 from ui.feed_controls import feed_headline  # noqa: E402,F401
 
 
-def top_bar_status(status: Optional[dict]) -> str:
+def top_bar_status(status: Optional[dict], say_recalc: bool = True) -> str:
     """The single top-bar status line: feed headline plus backfill progress when
-    there is any to report."""
-    line = feed_headline(status)
+    there is any to report. `say_recalc=False` keeps the options-recalc sentence off it,
+    for `status_block`, which prints that sentence in full underneath (`recalc_block`)."""
+    line = feed_headline(status, say_recalc=say_recalc)
     bf_line = backfill_headline(status)
     if bf_line:
         line = f"{line} | {bf_line}"
     return line
+
+
+def _count(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def recalc_day_rows(recalc: Optional[dict]) -> List[dict]:
+    """One row per day of `status["recalc"]["days"]` (engine.options.store.recalc_on_file's
+    per-day dicts, {"day", "priced", "skipped": [{"trade_id", "reason"}], "error" when that
+    day stopped}), read defensively: {"day", "priced", "skipped" (a count), "reasons"
+    (["<trade>: <reason>", ...]), "error"}. Nothing is recomputed: the counts are the
+    pricer's own, and a malformed entry is left out rather than guessed at."""
+    rows: List[dict] = []
+    for entry in (recalc or {}).get("days") or []:
+        if not isinstance(entry, dict):
+            continue
+        skipped = entry.get("skipped")
+        if isinstance(skipped, list):
+            reasons = [f"{s.get('trade_id') or '?'}: {s.get('reason') or 'no reason given'}"
+                       for s in skipped if isinstance(s, dict)]
+            count = len(skipped)
+        else:
+            reasons, count = [], _count(skipped)
+        rows.append({"day": str(entry.get("day") or "?"), "priced": _count(entry.get("priced")),
+                     "skipped": count, "reasons": reasons, "error": str(entry.get("error") or "")})
+    return rows
+
+
+def recalc_block(status: Optional[dict]) -> Optional[html.Div]:
+    """What "Pull Bloomberg now" did on a machine with no Bloomberg (user decision
+    2026-09-22: "pull bbg now should recalc options too, using log data if no bbg access"):
+    the pull's own sentence (`status["recalc_summary"]`), its error when the re-pricing
+    stopped, and a collapsed day-by-day list (day, priced, skipped) with each skipped
+    trade's reason listed under its day and on hover. Read from the status file only,
+    never from the pricer. None when the last status carries no `recalc` block: a
+    connected pull, or a status file from before the change."""
+    recalc = (status or {}).get("recalc")
+    if not isinstance(recalc, dict):
+        return None
+    children: list = []
+    sentence = recalc_words(status, drop_head=False)
+    if sentence:
+        children.append(html.Div(sentence, className="status-line"))
+    if recalc.get("error"):
+        children.append(html.Div(f"Re-pricing stopped: {recalc['error']}", className="status-line status-line--bad"))
+    rows = recalc_day_rows(recalc)
+    if rows:
+        items = []
+        for row in rows:
+            text = f"{row['day']}: {row['priced']} priced, {row['skipped']} skipped"
+            if row["error"]:
+                text += f" · stopped: {row['error']}"
+            nested = ([html.Ul([html.Li(reason) for reason in row["reasons"]], style={"margin": "0 0 0 16px", "padding": 0})]
+                      if row["reasons"] else [])
+            items.append(html.Li([text, *nested], title="\n".join(row["reasons"]) or None))
+        children.append(html.Details(className="status-line", children=[
+            html.Summary(f"Day by day: {len(rows)} day(s)"),
+            html.Ul(items, id=RECALC_DAYS_ID, style={"margin": "2px 0 0 16px", "padding": 0}),
+        ]))
+    return html.Div(children, id=RECALC_BLOCK_ID, className="status-line")
 
 
 def pull_timings_line(status: Optional[dict]) -> str:
@@ -217,12 +287,20 @@ def pull_timings_line(status: Optional[dict]) -> str:
 
 def status_block(status: Optional[dict]):
     """What the tab's feed-status block shows: the one-line status, plus the last pull's
-    per-step timings on a second compact line when the status file has them."""
-    line = top_bar_status(status)
+    per-step timings on a second compact line when the status file has them, plus what a
+    press did on a machine with no Bloomberg (`recalc_block`) when the last status says
+    so; that sentence is then kept off the first line, so it is read once."""
+    recalc = recalc_block(status)
+    line = top_bar_status(status, say_recalc=recalc is None)
     timings = pull_timings_line(status)
-    if not timings:
+    if not timings and recalc is None:
         return line
-    return [line, html.Div(timings, id=PULL_TIMINGS_ID, className="status-line")]
+    parts: list = [line]
+    if timings:
+        parts.append(html.Div(timings, id=PULL_TIMINGS_ID, className="status-line"))
+    if recalc is not None:
+        parts.append(recalc)
+    return parts
 
 
 def _rates_step_lines(rates_status: Optional[dict]) -> List[str]:

@@ -48,6 +48,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
+from data.bloomberg.live import ROLLOVER_HOUR_NY, book_today   # noqa: F401  (the day boundary; the constant is re-exported)
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
@@ -243,19 +244,28 @@ def net_gross_usd(conn: sqlite3.Connection, as_of_date: str) -> dict:
             "commodities": commodities}
 
 
-ROLLOVER_HOUR_NY = 17   # the book's day turns at 17:00 New York, the FX day roll
+# ROLLOVER_HOUR_NY (17) is data.bloomberg.live's, imported at the top and re-exported so
+# `cash_ladder.ROLLOVER_HOUR_NY` still reads 17 for anyone who learnt it from this module.
 
 
 def today_ny(now: Optional[dt.datetime] = None) -> str:
-    """The book's "today" (ISO): the as-of every screen and the header default to. It is
-    the New York date until 17:00 New York and the NEXT date from then on (user,
-    2026-09-22: "only roll to new day after new york 5pm", the FX day roll), so the top bar
-    shows a new day's numbers only once the old day has closed. Marks keep the calendar date
-    (data.bloomberg.live.book_today); a day valued before its own pull takes the latest
-    closes (the near-marks rule). `now` is for tests."""
-    ny = (now or dt.datetime.now(ZoneInfo("America/New_York"))).astimezone(ZoneInfo("America/New_York"))
-    day = ny.date() + dt.timedelta(days=1 if ny.hour >= ROLLOVER_HOUR_NY else 0)
-    return day.isoformat()
+    """The book's "today" (ISO): the as-of every screen and the header default to.
+
+    It is `data.bloomberg.live.book_today`, the app's ONE day boundary, as a string: the
+    New York date until 17:00 New York and the NEXT date from then on (user, 2026-09-22:
+    "I want to clarify the time today, so that all daily pnl is calculated from the NY 3pm
+    the day before. I am based in HK, so basically all date rollover at hkt 5am", after
+    "no only roll to new day after new york 5pm"; HKT 05:00 is 17:00 New York). The
+    screens, the marks a pull stamps, the backfill's "past" and the ledger's freeze date
+    all take their day from that one function, so at 18:00 New York on the 22nd the top
+    bar values the 23rd, a pull writes marks dated the 23rd, and the 22nd is a past day
+    whose 15:00 close the same press fetches: Daily is live against yesterday's 15:00
+    close, never 0 for want of a date the screens and the marks agreed on. Until
+    2026-09-22 this module rolled the screens on its own while the marks kept the calendar
+    date, which was exactly that mismatch between 17:00 and midnight New York. Nothing
+    here decides the hour; `calendar_today_ny` below is the one date on the app that does
+    not roll. `now` is for tests: a tz-aware datetime in any zone."""
+    return book_today(now).isoformat()
 
 
 def calendar_today_ny() -> str:

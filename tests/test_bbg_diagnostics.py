@@ -259,3 +259,26 @@ def test_check_backfill_report_fails_naming_both_fields_when_neither_answered(tm
     # nothing to say: no row at all (no status file / a backfill that needed no divisor)
     assert tool.check_backfill_report(_backfill_status(tmp_path, {"running": False})) == []
     assert tool.check_backfill_report(tmp_path / "absent.db") == []
+
+
+def test_check_clock_passes_for_the_next_date_after_1700_new_york():
+    """User decision 2026-09-22 ("all date rollover at hkt 5am", 17:00 New York): the book's
+    day turns at 17:00 New York for everything at once (data.bloomberg.live.book_today), so
+    a pull at 18:00 New York on the 22nd stamps its marks 2026-09-23. The clock check must
+    pass for that as-of and warn for the calendar date -- before this it did the reverse and
+    warned every Hong Kong morning that the pull's as-of was not today."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tool = _load_tool()
+    evening = datetime(2026, 9, 22, 18, 0, tzinfo=ZoneInfo("America/New_York"))
+    [row] = tool.check_clock("2026-09-23", now=evening)
+    assert row["status"] == "pass", row
+    assert "stamped 2026-09-23" in row["message"] and "rolled at 17:00" in row["message"]
+    [row] = tool.check_clock("2026-09-22", now=evening)
+    assert row["status"] == "warning", row
+    assert "as-of 2026-09-22" in row["message"] and "2026-09-23" in row["message"]
+    # before the roll the book date is still the New York calendar date, as it always was
+    afternoon = datetime(2026, 9, 22, 16, 59, tzinfo=ZoneInfo("America/New_York"))
+    assert tool.check_clock("2026-09-22", now=afternoon)[0]["status"] == "pass"
+    # the run's default as-of is the same date the check compares against
+    assert tool._today_ny(evening) == "2026-09-23" and tool._today_ny(afternoon) == "2026-09-22"

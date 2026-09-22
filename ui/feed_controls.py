@@ -21,6 +21,14 @@ top bar and the Market data tab print the same sentence. It ends by saying that 
 is pulled on request only. With no feed (`app.bloomberg_feed is None`, RISK_LIVE=0) a
 click says why in plain words, never nothing.
 
+A press on a machine with no Bloomberg still runs one cycle (user decision 2026-09-22:
+"pull bbg now should recalc options too, using log data if no bbg access"): `pull_once`
+re-prices the FX options from the marks on file and records it under `status["recalc"]`
+and `status["recalc_summary"]`. The not-connected line then also says what the press did
+(`recalc_words`), so a press never reads as if nothing happened. The no-feed message is
+left alone: with no feed to wake, that press ran nothing, and a summary from an earlier
+cycle would claim otherwise.
+
 Rapid clicks: `PullGuard` is a server-side record of the one outstanding request, under
 a lock, so ten clicks (or two browser tabs) make one `trigger_now()` call; the button is
 also disabled in the browser while a request is outstanding.
@@ -49,6 +57,7 @@ STATUS_REFRESH_MAX_SECONDS = 60     # the passive status line re-reads the statu
 NO_FEED_REASON = "no live Bloomberg feed was started in this session"
 NO_FEED_WORDS = "Bloomberg pulls are switched off in this session"
 ON_REQUEST_WORDS = "pulls only when you press Pull Bloomberg now"
+RECALC_HEAD = "no Bloomberg on this machine: "   # how data.bloomberg.live.recalc_summary opens its sentence
 
 
 # --------------------------------------------------------------------------- words
@@ -109,6 +118,22 @@ def pull_timings(status: Optional[dict]) -> dict:
     return {str(step): float(value) for step, value in timings.items() if seconds_words(value)}
 
 
+def recalc_words(status: Optional[dict], drop_head: bool = True) -> str:
+    """`status["recalc_summary"]`: the one sentence `data.bloomberg.live.pull_once` writes
+    when a press found no Bloomberg and re-priced the FX options from the marks on file
+    instead (user decision 2026-09-22). The pull's own words, untouched, except that with
+    `drop_head` the opening "no Bloomberg on this machine: " is left off, for a line that
+    has already said Bloomberg is not connected. "" when the status carries none: a
+    connected pull, or a status file from before the change."""
+    summary = (status or {}).get("recalc_summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return ""
+    summary = summary.strip()
+    if drop_head and summary.startswith(RECALC_HEAD):
+        summary = summary[len(RECALC_HEAD):].strip()
+    return summary
+
+
 def _parse_time(text) -> Optional[datetime]:
     """An aware datetime from a status-file timestamp; None when it is not ISO. A naive
     value is taken as this machine's local time, which is what `live._now_iso` writes."""
@@ -132,15 +157,19 @@ def short_time(text, now: Optional[datetime] = None) -> str:
 
 def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None,
                   feed_running: Optional[bool] = None, now: Optional[datetime] = None,
-                  say_on_request: bool = True) -> str:
+                  say_on_request: bool = True, say_recalc: bool = True) -> str:
     """One line: connected or the stated reason it is not, time of the last pull, marks
     written / failed, how long that pull took (only when the status file carries
-    `timings["total"]`), and that Bloomberg is pulled on request only.
+    `timings["total"]`), and that Bloomberg is pulled on request only. A not-connected
+    status that carries `recalc_summary` (a press with no Bloomberg re-priced the options
+    from the marks on file, 2026-09-22) also says so, in the pull's own words.
 
     `feed_running`: False = there is no feed to ask (RISK_LIVE=0, start_feed=False), said
     so. `interval_seconds` is accepted for the callers that still pass it and ignored.
     `say_on_request=False` leaves the closing "pulls only when you press ..." off: the top
-    bar prints this line right beside that very button (the button's tooltip says it)."""
+    bar prints this line right beside that very button (the button's tooltip says it).
+    `say_recalc=False` leaves the recalc sentence off: the Market data tab's status block
+    prints it in full underneath (`market_data.recalc_block`), once."""
     if feed_running is False:
         tail = f" · {NO_FEED_WORDS}"
     else:
@@ -150,6 +179,12 @@ def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None
     when = short_time(status.get("time"), now)
     if not status.get("connected"):
         line = f"Bloomberg: not connected — {status.get('reason') or 'unknown reason'}"
+        recalc = recalc_words(status) if say_recalc else ""
+        if recalc:
+            # What the press did instead: the options re-priced from the marks on file, in
+            # the pull's own words less its "no Bloomberg on this machine" opening, which
+            # this line has just said.
+            line += f" · {recalc}"
         if when:
             # "as of", not "last attempt": the file also holds placeholders written at
             # startup ("no pull has run yet", "first Bloomberg pull in progress"), whose

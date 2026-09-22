@@ -5,7 +5,8 @@ metadata:
   type: project
 ---
 
-- No `python` on PATH in Git Bash; use `py -3` (Python 3.14.7 launcher). pytest 9.1.1, pandas preinstalled.
+- Windows working copy (`C:\Users\jeanw\risk-monitor`): no `python` on PATH in Git Bash; use `py -3` (Python 3.14.7 launcher). pytest 9.1.1, pandas preinstalled.
+- Mac clone (`/Users/legend/PycharmProjects/Henry_Risk_Calculator`, seen 2026-09-22): `.venv/bin/python -m pytest tests/test_ui_market_data.py -q` and `.venv/bin/python -m ruff check ...`; dash 4.4.1 installed there. `py -3` does not exist on the Mac.
 - `dash` was NOT preinstalled as of 2026-09-14; installed via `py -3 -m pip install dash` -> dash 4.4.1
   (pulls in Flask, plotly, pydantic, etc). Tests must still `pytest.importorskip("dash", reason=...)` so
   the suite degrades gracefully in environments where install isn't possible/allowed.

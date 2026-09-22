@@ -764,3 +764,30 @@ def _add_blotter_trade(conn, trade_id, instrument_id, quantity, usd_amount, trad
     conn.commit()
 
 
+
+
+def test_today_ny_is_the_books_one_day_boundary():
+    """User, 2026-09-22: "all daily pnl is calculated from the NY 3pm the day before. I am
+    based in HK, so basically all date rollover at hkt 5am". The screens' today is
+    data.bloomberg.live.book_today, the same function every pull, the backfill and the
+    ledger use, so the top bar and the marks can never disagree on the day again: at 16:59
+    New York the 22nd, at 17:00 the 23rd, and 05:00 Hong Kong is that same 17:00 boundary."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from data.bloomberg import live
+
+    ny, hk = ZoneInfo("America/New_York"), ZoneInfo("Asia/Hong_Kong")
+    assert cash_ladder.ROLLOVER_HOUR_NY == live.ROLLOVER_HOUR_NY == 17
+    for when in (
+        datetime(2026, 9, 22, 16, 59, tzinfo=ny),
+        datetime(2026, 9, 22, 17, 0, tzinfo=ny),
+        datetime(2026, 9, 23, 4, 59, tzinfo=hk),     # 16:59 New York the 22nd: still the 22nd
+        datetime(2026, 9, 23, 5, 0, tzinfo=hk),      # 17:00 New York the 22nd: the 23rd
+    ):
+        assert cash_ladder.today_ny(when) == live.book_today(when).isoformat()
+    assert cash_ladder.today_ny(datetime(2026, 9, 22, 16, 59, tzinfo=ny)) == "2026-09-22"
+    assert cash_ladder.today_ny(datetime(2026, 9, 22, 17, 0, tzinfo=ny)) == "2026-09-23"
+    assert cash_ladder.today_ny(datetime(2026, 9, 23, 4, 59, tzinfo=hk)) == "2026-09-22"
+    assert cash_ladder.today_ny(datetime(2026, 9, 23, 5, 0, tzinfo=hk)) == "2026-09-23"
+    # no argument: the live clock, and still the same function's answer
+    assert cash_ladder.today_ny() == live.book_today().isoformat()

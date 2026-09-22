@@ -302,3 +302,33 @@ def test_the_background_backfill_saves_only_after_a_real_pull(tmp_path, monkeypa
     t.join(5)
     assert calls == [p]
     assert any(b.get("snapshot") == "saved" for b in published) and any("history down" in b.get("reason", "") for b in published)
+
+
+def test_import_freezes_as_of_the_book_date_not_the_machines_date(tmp_path, monkeypatch):
+    """The import's closing freeze (no pull runs on this PC) is as of the book date
+    (data.bloomberg.live.book_today: New York, rolled at 17:00 New York; user decision
+    2026-09-22), never the machine's local date -- a Hong Kong PC is a day ahead of New York
+    until early afternoon. The machine's date here is after a1's 09-10 settlement, so only
+    a book date before it can leave the trade unfrozen."""
+    from datetime import date
+    from data.bloomberg import live
+    _bloomberg_pc(tmp_path / "pc.db")
+    snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
+    mac = schema.connect(tmp_path / "mac.db")
+    _instruments(mac, [("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31")])
+    mac.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "", "t", "d", ""))
+    mac.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-10", 0.65, 1),
+        ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-09-10", 0.65, 1),
+    ])
+    mac.commit()
+    mac.close()
+    monkeypatch.setattr(live, "book_today", lambda now=None: date(2026, 9, 9))       # the book is still before settlement
+    out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap")            # no as_of: the book date
+    assert out["ledger"]["realised"] == 0
+    monkeypatch.setattr(live, "book_today", lambda now=None: date(2026, 9, 14))
+    out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap")
+    assert out["ledger"]["realised"] == 1
+    assert sqlite3.connect(tmp_path / "mac.db").execute(
+        "SELECT spot_as_of_date FROM realised_pnl WHERE trade_id='a1'").fetchone() == ("2026-09-09",)

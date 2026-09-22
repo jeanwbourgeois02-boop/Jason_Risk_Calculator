@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pandas as pd
 import pytest
 
 from ui.tabs import market_data as md
@@ -501,3 +500,116 @@ def test_market_data_pull_now_is_the_top_bars_pull_not_a_pull_of_its_own(tmp_pat
     # no feed on this machine: nothing asked, the not-connected message
     text, _ = md.pull_now_outcome(SimpleNamespace(bloomberg_feed=None), PullGuard(), lambda: tmp_path / "risk.db")
     assert called == [] and "not connected" in text.lower()
+
+
+# =========================================================================== 2026-09-22: a press with no Bloomberg re-prices the options
+# What data.bloomberg.live.pull_once writes when the press found no Bloomberg (user: "pull bbg now
+# should recalc options too, using log data if no bbg access"): connected / reason as before, plus
+# the recalc block and its one sentence. Neither key exists on a connected pull.
+RECALC_SUMMARY = ("no Bloomberg on this machine: options re-priced from the marks on file as of 2026-09-22, "
+                  "11 priced, 1 skipped over 2 day(s)")
+RECALC_STATUS = {
+    "time": "2026-09-22T14:32:05", "connected": False, "reason": "blpapi is not installed on this computer",
+    "requested": 0, "written": 0, "failed": 0, "items": [], "timings": {"options": 3.1, "total": 3.2},
+    "recalc": {"as_of": "2026-09-22", "since": "2026-09-01", "priced": 11, "skipped": 1, "days": [
+        {"day": "2026-09-18", "priced": 6, "skipped": []},
+        {"day": "2026-09-22", "priced": 5, "skipped": [{"trade_id": "O3", "reason": "no vol smile on file for USDJPY"}]},
+    ]},
+    "recalc_summary": RECALC_SUMMARY,
+}
+STATUS_BEFORE_THE_CHANGE = {k: v for k, v in RECALC_STATUS.items() if k not in ("recalc", "recalc_summary")}
+CONNECTED_STATUS = {"connected": True, "time": "2026-09-22T14:32:05", "written": 5, "failed": 0,
+                    "timings": {"options": 3.1, "total": 3.2}}
+
+
+def test_not_connected_line_says_what_the_press_did_in_the_pulls_own_words_said_once():
+    from types import SimpleNamespace
+    from ui import feed_controls as fc
+    line = fc.feed_headline(RECALC_STATUS, feed_running=True, say_on_request=False)
+    assert line.startswith("Bloomberg: not connected — blpapi is not installed on this computer · options re-priced "
+                           "from the marks on file as of 2026-09-22, 11 priced, 1 skipped over 2 day(s) · status as of ")
+    assert "no Bloomberg on this machine" not in line and line.count("not connected") == 1   # not said twice
+    # the fast poll after a press prints this very line when the cycle lands
+    text, finished, landed = fc.poll_outcome(RECALC_STATUS, {"requested_at": "2026-09-22T14:32:00", "baseline": ""},
+                                             feed=object())
+    assert finished and landed and "11 priced, 1 skipped over 2 day(s)" in text
+    # the summary whole, in its own words, for a line that has not said "not connected"
+    assert fc.recalc_words(RECALC_STATUS, drop_head=False) == RECALC_SUMMARY
+    assert fc.recalc_words({"recalc_summary": "  options re-priced: 3 priced "}) == "options re-priced: 3 priced"
+    for absent in (None, {}, {"connected": False, "reason": "x", "recalc_summary": ""}, {"recalc_summary": 3},
+                   STATUS_BEFORE_THE_CHANGE, CONNECTED_STATUS):
+        assert fc.recalc_words(absent) == ""
+    # without the block nothing changes, and say_recalc=False gives that same line
+    before = fc.feed_headline(STATUS_BEFORE_THE_CHANGE, feed_running=True)
+    assert "re-priced" not in before and "status as of" in before
+    assert fc.feed_headline(RECALC_STATUS, feed_running=True, say_recalc=False) == before
+    # a connected pull carries no recalc; a stray summary on one is not read into the connected line
+    assert "re-priced" not in fc.feed_headline(CONNECTED_STATUS)
+    assert "re-priced" not in fc.feed_headline(dict(CONNECTED_STATUS, recalc_summary=RECALC_SUMMARY))
+    # no feed to wake: that press ran nothing, so the message does not claim the re-pricing
+    app = SimpleNamespace(bloomberg_feed=None, bloomberg_feed_reason="the live feed is switched off (RISK_LIVE=0)")
+    assert fc.not_connected_message(app, RECALC_STATUS) == \
+        "Bloomberg is not connected on this machine: the live feed is switched off (RISK_LIVE=0)"
+    assert fc.click_outcome(app, fc.PullGuard(), RECALC_STATUS) == (fc.not_connected_message(app, RECALC_STATUS), None)
+
+
+def test_status_block_shows_the_recalc_sentence_once_and_every_day_with_each_skipped_reason():
+    parts = md.status_block(RECALC_STATUS)
+    assert isinstance(parts, list) and len(parts) == 3
+    line, timing_row, block = parts
+    assert line == md.top_bar_status(RECALC_STATUS, say_recalc=False) and "re-priced" not in line   # said in the block
+    assert "not connected — blpapi is not installed" in line
+    assert timing_row.id == md.PULL_TIMINGS_ID and "options 3.1 s" in timing_row.children
+    assert block.id == md.RECALC_BLOCK_ID
+    text = str(block)
+    assert RECALC_SUMMARY in text and text.count("re-priced") == 1
+    assert "2026-09-18: 6 priced, 0 skipped" in text and "2026-09-22: 5 priced, 1 skipped" in text
+    assert "O3: no vol smile on file for USDJPY" in text
+    assert "Re-pricing stopped" not in text
+    details = next(c for c in block.children if type(c).__name__ == "Details")
+    assert not getattr(details, "open", False) and details.children[0].children == "Day by day: 2 day(s)"
+    days = details.children[1]
+    assert days.id == md.RECALC_DAYS_ID and len(days.children) == 2
+    clean, with_skip = days.children
+    assert getattr(clean, "title", None) is None and len(clean.children) == 1
+    assert with_skip.title == "O3: no vol smile on file for USDJPY"           # on hover ...
+    assert with_skip.children[1].children[0].children == "O3: no vol smile on file for USDJPY"   # ... and listed under the day
+    rows = md.recalc_day_rows(RECALC_STATUS["recalc"])
+    assert [(r["day"], r["priced"], r["skipped"], r["reasons"]) for r in rows] == \
+        [("2026-09-18", 6, 0, []), ("2026-09-22", 5, 1, ["O3: no vol smile on file for USDJPY"])]
+
+
+def test_status_block_shows_the_recalc_error_and_reads_a_ragged_block_without_failing():
+    stopped = dict(RECALC_STATUS,
+                   recalc={**RECALC_STATUS["recalc"], "error": "OperationalError('database is locked')",
+                           "days": [{"day": "2026-09-18", "priced": 2, "skipped": 3}, "not a dict",
+                                    {"day": "2026-09-19", "priced": None, "skipped": [], "error": "ValueError('x')"},
+                                    {"skipped": [{"trade_id": "O1"}, "junk"]}]},
+                   recalc_summary="no Bloomberg on this machine: re-pricing the options from the marks on file stopped "
+                                  "(OperationalError('database is locked')); 2 priced, 3 skipped before that")
+    block = md.status_block(stopped)[-1]
+    text = str(block)
+    assert "Re-pricing stopped: OperationalError('database is locked')" in text
+    bad = next(c for c in block.children if getattr(c, "className", "") == "status-line status-line--bad")
+    assert bad.children.startswith("Re-pricing stopped")
+    assert "2026-09-18: 2 priced, 3 skipped" in text
+    assert "2026-09-19: 0 priced, 0 skipped · stopped: ValueError('x')" in text
+    assert "?: 0 priced, 2 skipped" in text and "O1: no reason given" in text
+    assert [r["day"] for r in md.recalc_day_rows(stopped["recalc"])] == ["2026-09-18", "2026-09-19", "?"]
+    # an empty block still says what the status carries, and never raises
+    assert md.recalc_block({"recalc": {"as_of": "2026-09-22", "days": []}}).id == md.RECALC_BLOCK_ID
+    assert md.recalc_day_rows(None) == [] and md.recalc_day_rows({"days": "3"}) == []
+
+
+def test_status_block_without_a_recalc_block_renders_as_before_and_a_connected_pull_says_nothing_of_it():
+    line, timing_row = md.status_block(STATUS_BEFORE_THE_CHANGE)
+    assert line == md.top_bar_status(STATUS_BEFORE_THE_CHANGE) and "re-priced" not in line
+    assert timing_row.id == md.PULL_TIMINGS_ID
+    assert md.recalc_block(STATUS_BEFORE_THE_CHANGE) is None and md.recalc_block(None) is None
+    assert md.recalc_block({"connected": False, "recalc": "not a dict"}) is None
+    line, timing_row = md.status_block(CONNECTED_STATUS)
+    assert line == md.top_bar_status(CONNECTED_STATUS) and "connected · last pull" in line
+    rendered = str(md.status_block(CONNECTED_STATUS))
+    assert "re-priced" not in rendered and "no Bloomberg" not in rendered and md.RECALC_BLOCK_ID not in rendered
+    assert md.status_block({"connected": True, "time": "t", "written": 5, "failed": 0}) == \
+        md.top_bar_status({"connected": True, "time": "t", "written": 5, "failed": 0})

@@ -232,17 +232,20 @@ def check_not_stale(as_of: date, requests: Sequence["RequestRow"], allow_stale: 
                      today: Optional[date] = None) -> None:
     """FWD_OUTRIGHT pulls (direct + tenor fallback) are live ReferenceDataRequest calls:
     they reflect the market at the moment the script runs, not the close of --as-of. If
-    --as-of != today (America/New_York) and the request has any FWD_OUTRIGHT rows,
-    refuse to run unless allow_stale is set, in which case log a warning and proceed.
-    SPOT and FUTURE_PX are HistoricalDataRequest for as_of and are unaffected either way.
+    --as-of != today (the book date, data.bloomberg.live.book_today: the New York date,
+    rolled at 17:00 New York) and the request has any FWD_OUTRIGHT rows, refuse to run
+    unless allow_stale is set, in which case log a warning and proceed. SPOT and FUTURE_PX
+    are HistoricalDataRequest for as_of and are unaffected either way.
     """
     if not any(r.mark_type == "FWD_OUTRIGHT" for r in requests):
         return
-    today = today if today is not None else datetime.now(_ny()).date()
+    if today is None:
+        from data.bloomberg.live import book_today
+        today = book_today()
     if as_of == today:
         return
     msg = (
-        f"--as-of {as_of.isoformat()} is not today ({today.isoformat()} America/New_York); "
+        f"--as-of {as_of.isoformat()} is not today ({today.isoformat()}, the book date: New York, rolled at 17:00); "
         f"FWD_OUTRIGHT rows are pulled live and would be mislabeled as {as_of.isoformat()}'s "
         f"close/snapped_at."
     )

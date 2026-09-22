@@ -7,13 +7,14 @@ lacks a complete official close, using `data.bloomberg.inventory.close_completen
 thread and publishes progress into the Bloomberg status file. Both are exercised with a
 fake fetch -- no blpapi required."""
 import threading
-import time
 from datetime import date, datetime, timedelta
 
 import pytest
 
 from data.bloomberg import backfill, live
 from data.ingest import schema
+
+REAL_BOOK_TODAY = live.book_today     # the unpatched rule, captured before any fixture pins the book date
 
 @pytest.fixture(autouse=True)
 def _close_1500_on_every_date(monkeypatch):
@@ -528,3 +529,71 @@ def test_auto_backfill_asks_for_a_past_fixing_dates_ndf_fix_when_that_is_all_the
     assert all(r.complete for r in close_completeness(conn, "2026-09-14", "2026-09-18").itertuples())
     assert backfill.auto_backfill(p, fetch=lambda *a: {"USDBRL Curncy": 5.30}, fwd_fetch=history, fut_fetch=history,
                                   log=lambda *_: None) == []
+
+
+# =========================================================================== 2026-09-22: one day boundary
+def test_after_the_1700_roll_the_day_just_ended_is_past_for_the_backfill_and_the_new_days_live_rows_stay(tmp_path, monkeypatch):
+    """User decision 2026-09-22 (a Hong Kong user: "all date rollover at hkt 5am", 17:00 New
+    York): from 17:00 New York on D the book is on D+1 (live.book_today), so in the same
+    button press the backfill treats D as past -- D's 16:00 press is no close (is_close_row),
+    D's 15:00 bars are asked for and replace it -- while D+1's rows, snapped at 18:00 on D by
+    that press's pull, are D+1's live marks and stay. LTD(D) is then at the 15:00 close and
+    the live D+1 valuation moves against it. When D+1 turns past (17:00 New York on D+1) its
+    evening-of-D row is replaced by D+1's own 15:00 bar like any row not stamped at the close."""
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    d, d1, d2 = date(2026, 9, 21), date(2026, 9, 22), date(2026, 9, 23)                  # Mon, Tue, Wed
+
+    def clock(when):
+        monkeypatch.setattr(live, "book_today", lambda now=None: REAL_BOOK_TODAY(now if now is not None else when))
+
+    clock(datetime(2026, 9, 21, 18, 0, tzinfo=ny))                                        # 18:00 NY on D = 06:00 HK on D+1
+    assert live.book_today() == d1
+    p, conn = _db(tmp_path, d.isoformat())
+    settle = _settle_date()
+
+    def fwd(session, service, tickers, fields, start, end):                                # as _fake_fwd_fetch, settle pinned
+        return {t: {day.isoformat(): {"PX_LAST": 0.665, "SETTLE_DT": settle} for day in backfill.business_days(start, end)}
+                for t in tickers}
+
+    press16 = datetime(2026, 9, 21, 16, 0, 12, tzinfo=ny).isoformat(timespec="seconds")   # D's last press before the roll
+    press18 = datetime(2026, 9, 21, 18, 0, 5, tzinfo=ny).isoformat(timespec="seconds")    # this press's pull, dated D+1
+    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
+        (d.isoformat(), "AUDUSD", d.isoformat(), "SPOT", 0.9001, "BBG_BFXFORWARD", press16),
+        (d.isoformat(), "AUDUSD", settle, "FWD_OUTRIGHT", 0.9002, "BBG_INTERP", press16),
+        (d1.isoformat(), "AUDUSD", d1.isoformat(), "SPOT", 0.9101, "BBG_BFXFORWARD", press18),
+        (d1.isoformat(), "AUDUSD", settle, "FWD_OUTRIGHT", 0.9102, "BBG_INTERP", press18),
+    ])
+    conn.commit()
+    # D is past: a 16:00 or an 18:00 row of D is no close; D+1 is today, its rows count as they are
+    assert backfill.is_close_row("SPOT", d.isoformat(), press16, d1) is False
+    assert backfill.is_close_row("SPOT", d.isoformat(), press18, d1) is False
+    assert backfill.is_close_row("SPOT", d.isoformat(), backfill.close_stamp(d, d1), d1) is True
+    from data.bloomberg.inventory import close_completeness
+    strip = {r.as_of_date: r for r in close_completeness(conn, d.isoformat(), d1.isoformat()).itertuples()}
+    assert (strip[d.isoformat()].complete, strip[d.isoformat()].not_closed) == (False, 2)
+    assert (strip[d1.isoformat()].complete, strip[d1.isoformat()].not_closed) == (True, 0)
+    asked = []
+    fetch = lambda s, v, tickers, field, day: asked.append(day) or _fake_fetch(s, v, tickers, field, day)   # noqa: E731
+    results = backfill.auto_backfill(p, fetch=fetch, fwd_fetch=fwd, fut_fetch=fwd, log=lambda *_: None)
+    assert asked == [d] and [(r["day"], r["status"]) for r in results] == [(d.isoformat(), "DONE")]
+    assert conn.execute("SELECT mark_type, value, snapped_at FROM marks_official WHERE as_of_date = ? ORDER BY 1",
+                        (d.isoformat(),)).fetchall() == [("FWD_OUTRIGHT", 0.665, backfill.close_stamp(d, d1)),
+                                                         ("SPOT", 0.61, backfill.close_stamp(d, d1))]
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE snapped_at = ?", (press16,)).fetchone() == (0,)
+    assert conn.execute("SELECT mark_type, value, snapped_at FROM marks_official WHERE as_of_date = ? ORDER BY 1",
+                        (d1.isoformat(),)).fetchall() == [("FWD_OUTRIGHT", 0.9102, press18), ("SPOT", 0.9101, press18)]
+    # so LTD(D) is at D's 15:00 close and the live day is valued against it: Daily is not 0
+    from engine.pnl.ledger import ltd
+    assert ltd(conn, d.isoformat()) == pytest.approx(-1e6 * (0.665 - 0.65))
+    assert ltd(conn, d1.isoformat()) == pytest.approx(-1e6 * (0.9102 - 0.65))
+    # 17:00 New York on D+1: D+1 turns past and its evening-of-D row goes the way of any non-close row
+    clock(datetime(2026, 9, 22, 17, 0, tzinfo=ny))
+    assert live.book_today() == d2
+    asked.clear()
+    results = backfill.auto_backfill(p, fetch=fetch, fwd_fetch=fwd, fut_fetch=fwd, log=lambda *_: None)
+    assert asked == [d1] and [(r["day"], r["status"]) for r in results] == [(d1.isoformat(), "DONE")]
+    assert conn.execute("SELECT mark_type, value, snapped_at FROM marks_official WHERE as_of_date = ? ORDER BY 1",
+                        (d1.isoformat(),)).fetchall() == [("FWD_OUTRIGHT", 0.665, backfill.close_stamp(d1, d2)),
+                                                          ("SPOT", 0.61, backfill.close_stamp(d1, d2))]
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE snapped_at = ?", (press18,)).fetchone() == (0,)

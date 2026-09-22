@@ -40,7 +40,7 @@ import json
 import os
 import sqlite3
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -250,7 +250,13 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
                     f"DELETE FROM {_q(table)} WHERE source <> ?", (KEPT_SOURCE,)).rowcount
                 _insert(conn, table, cols, rows, "INSERT OR REPLACE")
                 out["rows"][table] = len(rows)
-        out["ledger"] = _realise(conn, as_of or date.today().isoformat())
+        if as_of is None:
+            # The book date (New York, rolled at 17:00 New York), never the PC's local date: a
+            # PC in Asia is a day ahead until early afternoon, and this freeze must be as of
+            # the same day every screen and every pull is on.
+            from data.bloomberg.live import book_today
+            as_of = book_today().isoformat()
+        out["ledger"] = _realise(conn, as_of)
     finally:
         conn.close()
     return out
