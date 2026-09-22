@@ -1,46 +1,37 @@
 {
-  "time": "2026-09-22T11:08:59+08:00",
+  "time": "2026-09-22T12:20:04+08:00",
   "connected": true,
   "reason": "",
   "host": "localhost:8194",
-  "as_of_date": "2026-09-21",
-  "requested": 81,
-  "written": 79,
-  "failed": 2,
+  "as_of_date": "2026-09-22",
+  "requested": 73,
+  "written": 67,
+  "failed": 6,
   "items": [
     {
       "instrument_id": "AUDUSD",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.7117,
+      "value": 0.7123,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "AUDUSD",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 0.7117,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "AUDUSD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.7117,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 0.7123,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "AUDUSD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 0.7117,
+      "value": 0.7123,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -49,7 +40,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 0.7117,
+      "value": 0.7123,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -58,23 +49,14 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-28",
       "status": "OK",
-      "value": 0.7117,
+      "value": 0.7122,
       "source": "BBG_INTERP",
       "detail": ""
     },
     {
       "instrument_id": "EURSEK",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 11.28,
-      "source": "BBG_BFXFORWARD",
-      "detail": ""
-    },
-    {
-      "instrument_id": "EURSEK",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-25",
+      "settle_date": "2026-09-22",
       "status": "OK",
       "value": 11.2798,
       "source": "BBG_BFXFORWARD",
@@ -83,9 +65,18 @@
     {
       "instrument_id": "EURSEK",
       "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-25",
+      "status": "OK",
+      "value": 11.2797,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
+      "instrument_id": "EURSEK",
+      "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-11-25",
       "status": "OK",
-      "value": 11.266111764705881,
+      "value": 11.266011764705882,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -94,43 +85,34 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-11-27",
       "status": "OK",
-      "value": 11.265735294117647,
+      "value": 11.265635294117647,
       "source": "BBG_INTERP",
       "detail": ""
     },
     {
       "instrument_id": "EURUSD",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.147,
+      "value": 1.1475,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "EURUSD",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 1.147,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "EURUSD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.14695,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 1.1475,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "EURUSD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 1.1469,
+      "value": 1.1474,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -139,14 +121,14 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 1.1469,
+      "value": 1.1475,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "SPX Index",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
       "value": 7764.7,
       "source": "BBG_BFXFORWARD",
@@ -155,7 +137,7 @@
     {
       "instrument_id": "USDBRL",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
       "value": 5.1089,
       "source": "BBG_BFXFORWARD",
@@ -180,74 +162,65 @@
       "detail": "2026-10-19 outside curve 2026-09-23..2026-09-24"
     },
     {
-      "instrument_id": "USDCAD",
-      "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 1.4033,
-      "source": "BBG_BFXFORWARD",
-      "detail": ""
+      "instrument_id": "USDBRL",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-10-23",
+      "status": "FAILED",
+      "value": null,
+      "source": "",
+      "detail": "2026-10-23 outside curve 2026-09-23..2026-09-24"
     },
     {
       "instrument_id": "USDCAD",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
+      "mark_type": "SPOT",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.4033,
+      "value": 1.4026,
       "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
+      "detail": ""
     },
     {
       "instrument_id": "USDCAD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.4033,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 1.4026,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDCAD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 1.4033,
+      "value": 1.4026,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDCHF",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.8209,
+      "value": 0.8204,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "USDCHF",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 0.8209,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDCHF",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.821,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 0.8204,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDCHF",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 0.8211,
+      "value": 0.8206,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -256,16 +229,16 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-19",
       "status": "OK",
-      "value": 0.8185439999999999,
+      "value": 0.818044,
       "source": "BBG_INTERP",
       "detail": ""
     },
     {
       "instrument_id": "USDCNH",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 6.6966,
+      "value": 6.6958,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -274,43 +247,34 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 6.6977,
+      "value": 6.6969,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDIDR",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17895.0,
+      "value": 17875.0,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "USDIDR",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 17895.0,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDIDR",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 17895.0,
+      "value": 17874.5,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDJPY",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 157.52,
+      "value": 157.5,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -319,7 +283,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 157.567,
+      "value": 157.5406,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -328,7 +292,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-25",
       "status": "OK",
-      "value": 157.5274,
+      "value": 157.5125,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -337,7 +301,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2027-03-01",
       "status": "OK",
-      "value": 155.47855714285714,
+      "value": 155.46232857142857,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -346,34 +310,25 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2027-03-03",
       "status": "OK",
-      "value": 155.4525857142857,
+      "value": 155.43629285714286,
       "source": "BBG_INTERP",
       "detail": ""
     },
     {
       "instrument_id": "USDKRW",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1359.5,
+      "value": 1358.25,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDKRW",
       "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 1359.5,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
-    },
-    {
-      "instrument_id": "USDKRW",
-      "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-28",
       "status": "OK",
-      "value": 1359.55,
+      "value": 1358.25,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -382,124 +337,97 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-13",
       "status": "OK",
-      "value": 1359.4247727272727,
+      "value": 1358.1247727272728,
       "source": "BBG_INTERP",
       "detail": ""
     },
     {
       "instrument_id": "USDMXN",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17.2213,
+      "value": 17.2135,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "USDMXN",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 17.2213,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDMXN",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17.22005,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 17.2135,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDMXN",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 17.2188,
+      "value": 17.211,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDNOK",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.435,
+      "value": 9.4296,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "USDNOK",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 9.435,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDNOK",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.43495,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 9.4296,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDNOK",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 9.4349,
+      "value": 9.4294,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDSEK",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.8348,
+      "value": 9.83,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "USDSEK",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 9.8348,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDSEK",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.8354,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 9.83,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDSEK",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 9.836,
+      "value": 9.8312,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDTRY",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 48.8165,
+      "value": 48.8169,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -508,34 +436,25 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 48.7818,
+      "value": 48.7822,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDTWD",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 31.715,
+      "value": 31.711,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "USDTWD",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 31.715,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDTWD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 31.715,
+      "value": 31.7105,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -551,36 +470,27 @@
     {
       "instrument_id": "USDZAR",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 16.2521,
+      "value": 16.2497,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "USDZAR",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 16.2521,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDZAR",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 16.25085,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 16.2497,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "USDZAR",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 16.2496,
+      "value": 16.2473,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -589,43 +499,34 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-13",
       "status": "OK",
-      "value": 16.2707625,
+      "value": 16.268516666666667,
       "source": "BBG_INTERP",
       "detail": ""
     },
     {
       "instrument_id": "XAUUSD",
       "mark_type": "SPOT",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 4341.72,
+      "value": 4337.28,
       "source": "BBG_BFXFORWARD",
       "detail": ""
-    },
-    {
-      "instrument_id": "XAUUSD",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 4341.72,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "XAUUSD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 4342.04677,
-      "source": "BBG_INTERP",
-      "detail": ""
+      "value": 4337.28,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
     },
     {
       "instrument_id": "XAUUSD",
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 4342.3735400000005,
+      "value": 4337.6627,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -634,7 +535,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 11.2804,
+      "value": 11.2803,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -643,7 +544,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-15",
       "status": "OK",
-      "value": 0.818912,
+      "value": 0.818412,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -652,7 +553,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-11-19",
       "status": "OK",
-      "value": 156.82342,
+      "value": 156.80831999999998,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -661,7 +562,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-09",
       "status": "OK",
-      "value": 16.2664125,
+      "value": 16.26418333333333,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -670,7 +571,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-15",
       "status": "OK",
-      "value": 4351.914788,
+      "value": 4347.633804,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -679,7 +580,7 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-12-18",
       "status": "OK",
-      "value": 7834.75,
+      "value": 7832.75,
       "source": "BBG_BDH",
       "detail": "live PX_LAST"
     },
@@ -688,7 +589,7 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-10-16",
       "status": "OK",
-      "value": 214.6,
+      "value": 218.15,
       "source": "BBG_BDH",
       "detail": "live PX_MID"
     },
@@ -697,14 +598,14 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-10-16",
       "status": "OK",
-      "value": 41.65,
+      "value": 41.9,
       "source": "BBG_BDH",
       "detail": "live PX_MID"
     },
     {
       "instrument_id": "USDBRL",
       "mark_type": "NDF_1M",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
       "value": 5.1453,
       "source": "BBG_BFXFORWARD",
@@ -713,49 +614,67 @@
     {
       "instrument_id": "USDIDR",
       "mark_type": "NDF_1M",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17934.0,
+      "value": 17908.0,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDKRW",
       "mark_type": "NDF_1M",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1359.4,
+      "value": 1358.31,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
       "instrument_id": "USDTWD",
       "mark_type": "NDF_1M",
-      "settle_date": "2026-09-21",
+      "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 31.704,
+      "value": 31.689,
       "source": "BBG_BFXFORWARD",
       "detail": ""
+    },
+    {
+      "instrument_id": "USDBRL",
+      "mark_type": "NDF_FIX",
+      "settle_date": "2026-09-22",
+      "status": "FAILED",
+      "value": null,
+      "source": "",
+      "detail": "Bloomberg returned no PX_LAST for BZFXPTAX Index on 2026-09-22 (the fixing)"
+    },
+    {
+      "instrument_id": "USDIDR",
+      "mark_type": "NDF_FIX",
+      "settle_date": "2026-09-22",
+      "status": "FAILED",
+      "value": null,
+      "source": "",
+      "detail": "Bloomberg returned no PX_LAST for JISDOR Index on 2026-09-22 (the fixing)"
+    },
+    {
+      "instrument_id": "USDTWD",
+      "mark_type": "NDF_FIX",
+      "settle_date": "2026-09-22",
+      "status": "FAILED",
+      "value": null,
+      "source": "",
+      "detail": "Bloomberg returned no PX_LAST for TAIFX1 Index on 2026-09-22 (the fixing)"
     }
   ],
   "warnings": [
-    "AUDUSD 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
     "AUDUSD 2026-09-28: interp from FWD_CURVE tenors (source BBG_INTERP)",
     "EURSEK 2026-11-25: interp from FWD_CURVE tenors (source BBG_INTERP)",
     "EURSEK 2026-11-27: interp from FWD_CURVE tenors (source BBG_INTERP)",
-    "EURUSD 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
-    "USDCAD 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
-    "USDCHF 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
     "USDCHF 2026-10-19: interp from FWD_CURVE tenors (source BBG_INTERP)",
     "USDJPY 2027-03-01: interp from FWD_CURVE tenors (source BBG_INTERP)",
     "USDJPY 2027-03-03: interp from FWD_CURVE tenors (source BBG_INTERP)",
     "USDKRW 2026-10-13: interp from FWD_CURVE tenors (source BBG_INTERP)",
-    "USDMXN 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
-    "USDNOK 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
-    "USDSEK 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
-    "USDZAR 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
     "USDZAR 2026-10-13: interp from FWD_CURVE tenors (source BBG_INTERP)",
-    "XAUUSD 2026-09-22: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
     "XAUUSD 2026-09-23: interp_from_spot from FWD_CURVE tenors (source BBG_INTERP)",
     "USDCHF 2026-10-15: interp from FWD_CURVE tenors (source BBG_INTERP)",
     "USDJPY 2026-11-19: interp from FWD_CURVE tenors (source BBG_INTERP)",
@@ -804,12 +723,89 @@
         "error": ""
       }
     },
-    "priced": 18,
-    "failed": [],
-    "as_of_date": "2026-09-21",
+    "priced": 0,
+    "failed": [
+      {
+        "trade_id": "918421481",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "920118423",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "929068982",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "932385416",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "932385417",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "934493221",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "934493227",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "936123209",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "936141018",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "940096785",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "951429278",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "951429279",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "958454159",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "964338491",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "964338493",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "970381547",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "972350961",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "974788401",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      },
+      {
+        "trade_id": "978916620",
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+      }
+    ],
+    "as_of_date": "2026-09-22",
     "seconds": {
-      "bloomberg": 3.2,
-      "pricing": 2.0
+      "bloomberg": 2.9,
+      "pricing": 1.5
     }
   },
   "vol": {
@@ -823,32 +819,33 @@
     },
     "written": 270,
     "diagnostics": [],
-    "as_of_date": "2026-09-21",
+    "as_of_date": "2026-09-22",
     "ticker_checks_recorded": 9
   },
   "options": {
-    "priced": 29,
+    "priced": 0,
     "skipped": [],
-    "as_of_date": "2026-09-21"
+    "as_of_date": "2026-09-22",
+    "error": "RuntimeError('convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12')"
   },
   "ledger": {
-    "as_of_date": "2026-09-21",
-    "realised": 1134,
+    "as_of_date": "2026-09-22",
+    "realised": 0,
     "unrealisable": []
   },
   "curve_points_written": 236,
-  "as_of_marks": "2026-09-21",
+  "as_of_marks": "2026-09-22",
   "skipped": 0,
   "timings": {
     "session": 0.5,
-    "spot": 0.8,
+    "spot": 0.9,
     "forwards": 3.0,
-    "futures": 1.8,
-    "rates": 5.2,
-    "vol": 1.0,
-    "options": 0.9,
-    "ledger": 0.5,
-    "total": 13.9
+    "futures": 2.4,
+    "rates": 4.3,
+    "vol": 0.9,
+    "options": 1.3,
+    "ledger": 0.0,
+    "total": 13.3
   },
   "timings_other": {
     "build_requests": 0.0,
@@ -859,6 +856,17 @@
     "reason": "",
     "remaining": 0,
     "days": {
+      "2026-09-21": {
+        "status": "INCOMPLETE",
+        "missing_count": 8,
+        "missing": [
+          "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-21",
+          "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-21",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:11150] ",
+          "Bloomberg answered the intraday request for USDIDRSP Curncy with: Unknown/Invalid security [nid:6802] ",
+          "Bloomberg answered the intraday request for USDTWDSP Curncy with: Unknown/Invalid security [nid:10899] "
+        ]
+      },
       "2026-09-18": {
         "status": "INCOMPLETE",
         "missing_count": 6,
@@ -872,13 +880,13 @@
       },
       "2026-09-17": {
         "status": "INCOMPLETE",
-        "missing_count": 8,
+        "missing_count": 10,
         "missing": [
+          "Bloomberg returned no fixing (PX_LAST) for USDKRW on 2026-09-17",
+          "Bloomberg returned no fixing (PX_LAST) for USDTWD on 2026-09-17",
           "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-17",
           "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-17",
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-17",
-          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-17",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-17"
+          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-17"
         ]
       },
       "2026-09-16": {
@@ -905,12 +913,13 @@
       },
       "2026-09-14": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 12,
         "missing": [
+          "Bloomberg returned no fixing (PX_LAST) for USDKRW on 2026-09-14",
+          "Bloomberg returned no fixing (PX_LAST) for USDTWD on 2026-09-14",
           "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-14",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-14",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-14",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-14"
+          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-14"
         ]
       },
       "2026-09-11": {
@@ -1150,24 +1159,14 @@
           "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-10"
         ]
       },
-      "2026-08-07": {
-        "status": "INCOMPLETE",
-        "missing_count": 4,
-        "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-07",
-          "USDKRW 2026-09-16: outside the forward tenors 2026-08-11..2026-09-11, not extrapolated",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-07",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-07"
-        ]
-      },
       "2025-12-31": {
         "status": "DONE",
         "missing_count": 0,
         "missing": []
       }
     },
-    "last_run": "2026-09-22T11:05:12+08:00",
-    "note": "",
+    "last_run": "2026-09-22T12:05:32+08:00",
+    "note": "1 past day(s) since 2026-09-21 hold FX marks that are that day's last pull, not its 15:00 New York close; the close is asked of Bloomberg and replaces them. Days before 2026-09-21 keep the marks they have.",
     "points_scale": {
       "AUDUSD": {
         "field": "FWD_SCALE",
@@ -1190,16 +1189,6 @@
         }
       },
       "EURUSD": {
-        "field": "FWD_SCALE",
-        "divisor": 10000.0,
-        "raw": {
-          "FWD_SCALE": 4
-        },
-        "errors": {
-          "FWD_POINTS_SCALE": "Field not valid"
-        }
-      },
-      "GBPUSD": {
         "field": "FWD_SCALE",
         "divisor": 10000.0,
         "raw": {
@@ -1239,7 +1228,7 @@
           "FWD_POINTS_SCALE": "Field not valid"
         }
       },
-      "USDHKD": {
+      "USDCNH": {
         "field": "FWD_SCALE",
         "divisor": 10000.0,
         "raw": {
@@ -1309,16 +1298,6 @@
           "FWD_POINTS_SCALE": "Field not valid"
         }
       },
-      "USDSGD": {
-        "field": "FWD_SCALE",
-        "divisor": 10000.0,
-        "raw": {
-          "FWD_SCALE": 4
-        },
-        "errors": {
-          "FWD_POINTS_SCALE": "Field not valid"
-        }
-      },
       "USDTRY": {
         "field": "FWD_SCALE",
         "divisor": 10000.0,
@@ -1360,6 +1339,6 @@
         }
       }
     },
-    "snapshot": "marks snapshot: 3871 marks through 2026-09-21 written to data/bbg_snapshot/; committed; git push failed: fatal: could not read Username for 'https://github.com': No such file or directory (run  git push  yourself)"
+    "snapshot": "marks snapshot: 4235 marks through 2026-09-22 written to data/bbg_snapshot/ (commit and push it yourself)"
   }
 }
