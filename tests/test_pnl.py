@@ -410,6 +410,32 @@ def test_value_book_missing_mark_is_interpolated_in_time_between_the_nearest_clo
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == n_marks
 
 
+def test_value_book_forward_on_a_day_with_no_marks_is_read_off_the_nearest_closes_curve():
+    """Seen 2026-09-22 on the imported snapshot: no pull yet today, and a USDTWD leg date no
+    close ever quoted exactly, so 21 forwards were blank although yesterday's curve was on
+    file. The forward is read off the nearest earlier close's curve at the leg's date (and
+    between the two neighbouring curves when there is a later one too)."""
+    conn = _vb_conn()
+    _vb_fx_trade(conn, "T", "USDJPY", "USD", "JPY", 1_000_000, 150.00, settle="2026-06-23")
+    _vb_mark(conn, "USDJPY", "2026-05-29", "SPOT", 149.00, as_of="2026-05-29")             # spot date 06-02
+    _vb_mark(conn, "USDJPY", "2026-06-12", "FWD_OUTRIGHT", 148.00, as_of="2026-05-29")     # 10 days after
+    _vb_mark(conn, "USDJPY", "2026-07-02", "FWD_OUTRIGHT", 147.00, as_of="2026-05-29")     # 30 days after
+    row = value_book(conn, VB_AS_OF).iloc[0]                                               # 06-01: no marks at all
+    assert row["mark"] == pytest.approx(147.45)           # 06-23 on the 05-29 curve: 148 - 11/20 x 1
+    assert row["mark_source"] == "INTERP: FWD_OUTRIGHT from the 2026-05-29 curve of USDJPY (nearest earlier close)"
+    assert row["spot_source"].startswith("INTERP: SPOT of 2026-05-29") and row["pnl_usd"] == row["pnl_usd"]
+    _vb_mark(conn, "USDJPY", "2026-06-03", "SPOT", 151.00, as_of="2026-06-03")             # a later close's curve too
+    _vb_mark(conn, "USDJPY", "2026-06-26", "FWD_OUTRIGHT", 150.00, as_of="2026-06-03")     # spot date 06-05, pillar 06-26
+    later = 151.0 + (150.0 - 151.0) * 18 / 21                                                # 06-23 on the 06-03 curve
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["mark"] == pytest.approx(147.45 + (later - 147.45) * 3 / 5)                  # 3 of 5 days along
+    assert row["mark_source"] == "INTERP: FWD_OUTRIGHT between the 2026-05-29 and 2026-06-03 curves of USDJPY"
+    # an exact quote for the leg date on a neighbouring close is carried as it stands, before any curve
+    _vb_mark(conn, "USDJPY", "2026-06-23", "FWD_OUTRIGHT", 149.50, as_of="2026-06-03")
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["mark"] == 149.5 and row["mark_source"] == "INTERP: FWD_OUTRIGHT of 2026-06-03 (nearest later close, none earlier)"
+
+
 def test_value_book_swap_pv_is_interpolated_in_time_and_settled_coupons_take_the_earlier_close():
     conn = _vb_conn()
     conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1.0,0,'','2030-06-01')")

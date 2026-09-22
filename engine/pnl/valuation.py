@@ -277,9 +277,45 @@ def _mark_near(conn, instrument_id: str, settle_date: str, mark_type: str, as_of
         out = _curve_interp(conn, instrument_id, settle_date, as_of)
     if out is None:
         out = _time_interp(conn, instrument_id, settle_date, mark_type, as_of)
+    if out is None and mark_type == "FWD_OUTRIGHT":
+        # A day with no marks for the pair at all (no pull yet today) and a leg date no close
+        # ever quoted exactly: the nearest earlier and later closes' own curves, read at the
+        # leg's date, then in time between them (one side alone carried), so a forward is
+        # never blank while any close of the pair is on file.
+        out = _neighbour_curves(conn, instrument_id, settle_date, as_of)
     if memo is not None:
         memo[key] = out
     return out
+
+
+def _nearest_curve_day(conn, pair: str, as_of: str, later: bool) -> Optional[str]:
+    row = conn.execute(
+        "SELECT as_of_date FROM marks_official WHERE instrument_id = :i AND mark_type IN ('SPOT', 'FWD_OUTRIGHT') "
+        + ("AND as_of_date > :d ORDER BY as_of_date ASC LIMIT 1" if later else "AND as_of_date < :d ORDER BY as_of_date DESC LIMIT 1"),
+        {"i": pair, "d": as_of}).fetchone()
+    return None if row is None else str(row[0])
+
+
+def _neighbour_curves(conn, pair: str, settle_date: str, as_of: str) -> Optional[tuple]:
+    sides = []
+    for later in (False, True):
+        day = _nearest_curve_day(conn, pair, as_of, later)
+        hit = _curve_interp(conn, pair, settle_date, day) if day else None
+        if hit is not None:
+            sides.append((day, hit[0]))
+    if not sides:
+        return None
+    if len(sides) == 2:
+        (d0, v0), (d1, v1) = sides
+        try:
+            day, day0, day1 = (dt.date.fromisoformat(x) for x in (as_of, d0, d1))
+            w = (day - day0).days / (day1 - day0).days
+            return v0 + w * (v1 - v0), f"{INTERP}: FWD_OUTRIGHT between the {d0} and {d1} curves of {pair}"
+        except (ValueError, ZeroDivisionError):
+            pass
+    d0, v0 = sides[0]
+    when = "nearest earlier close" if d0 < as_of else "nearest later close, none earlier"
+    return v0, f"{INTERP}: FWD_OUTRIGHT from the {d0} curve of {pair} ({when})"
 
 
 def _day_pillars(conn, pair: str, as_of: str) -> list:
