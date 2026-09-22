@@ -429,3 +429,43 @@ def test_mark_near_never_estimates_a_fixing():
     conn.commit()
     assert _mark_near(conn, "USDIDR", "2026-09-22", "NDF_FIX", "2026-09-22") is None
     assert _mark_near(conn, "USDIDR", "2026-09-21", "NDF_FIX", "2026-09-21") == (17_700.0, "BBG_BDH")
+
+
+def test_a_settled_ndf_with_no_realised_row_is_the_fixed_branch_figure_never_the_value_dates_spot():
+    """Reviewer, 2026-09-22 (critical): `_frozen_row` had no NDF branch, so a settled NDF with
+    no realised_pnl row (every settled NDF after an upload, until the next realise_settled) was
+    valued at the last SPOT on or before the VALUE date -- 28,037 before the ledger ran, 3,810
+    after, on this probe. One rule, one function: the provisional figure is exactly what the
+    open fixed branch gives at the fixing date, before and after the ledger runs."""
+    from engine.pnl import ledger
+    conn = schema.connect()
+    conn.execute("INSERT INTO instruments VALUES ('USDBRL','FX','USD','BRL',1,1,'USDBRL Curncy','9999-12-31')")
+    _insert_trade(conn, "b1", "USDBRL", "FX_FWD", "2026-08-14", 1_000_000, 5.20)   # value Wed 09-16, fixing Mon 09-14
+    _insert_legs(conn, [("b1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-14", "2026-09-16", 5.20, 0),
+                        ("b1", 2, "FX_NEAR", "BRL", -5_200_000, "2026-08-14", "2026-09-16", 5.20, 0)])
+    _insert_mark(conn, "2026-09-14", "USDBRL", "2026-09-14", "SPOT", 5.25, "BBG_BFXFORWARD", "2026-09-14T15:00:00-04:00")
+    _insert_mark(conn, "2026-09-16", "USDBRL", "2026-09-16", "SPOT", 5.35, "BBG_BFXFORWARD", "2026-09-16T15:00:00-04:00")
+    conn.commit()
+
+    def b1(day):
+        return value_book(conn, day).set_index("trade_id").loc["b1"]
+
+    # no fix yet: the fixing date's spot stands in, on the fixing date (open) and after the value
+    # date (settled, not yet frozen) alike; the value date's 5.35 never enters
+    open_row, settled_row = b1("2026-09-15"), b1("2026-09-21")
+    assert (open_row["status"], settled_row["status"]) == ("OPEN", "SETTLED")
+    assert open_row["pnl_usd"] == pytest.approx(1_000_000 * (5.25 - 5.20) / 5.25)
+    assert settled_row["pnl_usd"] == open_row["pnl_usd"]
+    assert settled_row["note"] == ("NDF fixed 2026-09-14: no official fixing on file: at the spot of 2026-09-14 instead, "
+                                   "no delta, no carry; not yet recorded in realised_pnl")
+    # the fix lands: the same 3,810 on every screen, before the ledger runs and after
+    _insert_mark(conn, "2026-09-14", "USDBRL", "2026-09-14", "NDF_FIX", 5.22, "BBG_BDH", "2026-09-14T17:00:00-04:00")
+    conn.commit()
+    open_row, settled_row = b1("2026-09-15"), b1("2026-09-21")
+    assert open_row["pnl_usd"] == pytest.approx(1_000_000 * (5.22 - 5.20) / 5.25)
+    assert settled_row["pnl_usd"] == open_row["pnl_usd"]
+    assert (settled_row["mark"], settled_row["mark_date"], settled_row["mark_source"]) == (5.22, "2026-09-14", "BBG_BDH")
+    assert settled_row["note"] == ("NDF fixed 2026-09-14: at the official fixing of 2026-09-14, no delta, no carry; "
+                                   "not yet recorded in realised_pnl")
+    assert ledger.realise_settled(conn, "2026-09-21")["realised"] == 1
+    assert b1("2026-09-21")["pnl_usd"] == settled_row["pnl_usd"]

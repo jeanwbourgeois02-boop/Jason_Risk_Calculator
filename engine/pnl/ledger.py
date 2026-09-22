@@ -38,12 +38,15 @@ it needs no PREMIUM, and the row records the figure value_book has shown since t
 
 NDF (2026-09-22, user: "the exit price is the fix on that day, as pulled from bbg" and
 "each ndf has a unique fix"): an NDF ticket is done at its fixing date (value date less 2
-business days, `_freeze_day`), frozen at the pair's official NDF_FIX dated that day exactly
-(`mark_type='NDF_FIX'`, `spot_as_of_date` = the fixing date) and never at another day's fix;
-with no fix for that date on file, at the last official SPOT on or before the fixing date
-(`mark_type='SPOT'`), the figure value_book showed from the fixing on. A row frozen any other
-way while the exact-day fix is on file, or at a fix of another day, is dropped and frozen
-again by the same rule on the next call (`purge_superseded_ndf_fix`, 'refrozen' in the result).
+business days, `_freeze_day`) and is recorded at the very figure the Blotter has shown since
+(`valuation.ndf_fixed_valuation`, one function for both): the pair's official NDF_FIX dated
+that day exactly (`mark_type='NDF_FIX'`) and never another day's fix, else the fixing date's
+SPOT as the Blotter's own near-marks estimate (`mark_type='SPOT'`, the note naming the estimate);
+`spot_as_of_date` is the fixing date either way. Only a pair with neither a fix nor an official
+SPOT on or before its fixing date takes the present-spot rule below. A row frozen any other
+way while the exact-day fix is on file, or at a fix of another day, is dropped and frozen again
+by the same rule (`purge_superseded_ndf_fix`, 'refrozen' in the result) -- only by a call whose
+`as_of` is past the ticket's value date, the one that re-freezes it (reviewer, 2026-09-22).
 
 `ltd(conn, d)` = sum of value_book(d).pnl_usd, NaN if any row is NaN, 0.0 for an empty
 book (first trading day, not Unavailable). Periods subtract `ltd` at a reference
@@ -60,9 +63,9 @@ import pandas as pd
 
 from engine.pnl.aggregate import (_last_business_day_of_prev_month, _last_business_day_of_prev_year,
                                   _n_business_days_back, _prev_business_day, load_holidays)
-from engine.pnl.valuation import (PRESENT_SPOT_NOTE, _BadValue, _number, close_out_ccy, closed_out_options,
-                                  last_usd_conversion, option_fill_is_per_ounce, present_spot_for_ndf, usd_per_quote,
-                                  value_book)
+from engine.pnl.valuation import (INTERP, PRESENT_SPOT_NOTE, _BadValue, _number, close_out_ccy, closed_out_options,
+                                  last_usd_conversion, ndf_fixed_valuation, ndf_fixing_marks_on_file,
+                                  option_fill_is_per_ounce, present_spot_for_ndf, usd_per_quote, value_book)
 
 GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 
@@ -149,16 +152,18 @@ def purge_unreadable_realised(conn: sqlite3.Connection) -> list:
     return ids
 
 
-def purge_superseded_present_spot(conn: sqlite3.Connection) -> list:
+def purge_superseded_present_spot(conn: sqlite3.Connection, as_of: str) -> list:
     """Delete the `realised_pnl` rows frozen at a present spot (`valuation.PRESENT_SPOT_NOTE`:
     an NDF with no past fix on file) whose pair now HAS an official SPOT on or before the
     settlement date, and return their trade ids (user, 2026-09-21: the true close replaces the
     present spot once it lands). As above, nothing is recomputed here: `realise_settled`
-    freezes them afresh, by the strict rule, in the same call."""
+    freezes them afresh, by the strict rule, in the same call -- which is why only tickets with
+    `settle_date < as_of` are touched (reviewer, 2026-09-22): the refreeze covers those alone,
+    so a past-day call from the backfill must never drop a row it cannot freeze again."""
     ids = []
     for trade_id, pair, settle in conn.execute(
-            "SELECT trade_id, instrument_id, settle_date FROM realised_pnl WHERE mark_type = 'SPOT' AND note LIKE ?",
-            (f"%{PRESENT_SPOT_NOTE}%",)).fetchall():
+            "SELECT trade_id, instrument_id, settle_date FROM realised_pnl WHERE mark_type = 'SPOT' AND note LIKE :n "
+            "AND settle_date < :d", {"n": f"%{PRESENT_SPOT_NOTE}%", "d": as_of}).fetchall():
         try:
             if _last_on_or_before(conn, pair, "SPOT", _freeze_day(conn, pair, settle)) is not None:
                 ids.append(trade_id)
@@ -168,7 +173,7 @@ def purge_superseded_present_spot(conn: sqlite3.Connection) -> list:
     return ids
 
 
-def purge_superseded_ndf_fix(conn: sqlite3.Connection) -> list:
+def purge_superseded_ndf_fix(conn: sqlite3.Connection, as_of: str) -> list:
     """Delete the `realised_pnl` rows of NDF tickets (`engine.ladder.ndf.is_ndf_pair`) whose
     exit price is not the official fixing of their own fixing date (user, 2026-09-22: "each
     ndf has a unique fix"), and return their trade ids: a row frozen at a SPOT or a present
@@ -176,14 +181,16 @@ def purge_superseded_ndf_fix(conn: sqlite3.Connection) -> list:
     file (the fix landed after the freeze), and a row frozen at a fix of another day (the rule
     of a few hours on 2026-09-22 read the last fix on or before the fixing date), whatever is
     on file for it. Nothing is recomputed here: `realise_settled` freezes them afresh, by the
-    rule in the module docstring, in the same call. A fix that is not a number replaces
-    nothing (the trade that needs it is reported when it is read)."""
+    rule in the module docstring, in the same call -- so only tickets with `settle_date <
+    as_of` are touched (reviewer, 2026-09-22: a past-day call from the backfill dropped a row
+    the refreeze then skipped). A fix that is not a number replaces nothing (the trade that
+    needs it is reported when it is read)."""
     from engine.ladder.ndf import is_ndf_pair
     ids = []
     for trade_id, pair, settle, mark_type, spot_day, flag in conn.execute(
             "SELECT r.trade_id, r.instrument_id, r.settle_date, r.mark_type, r.spot_as_of_date, "
             "COALESCE(i.is_ndf, 0) FROM realised_pnl r LEFT JOIN instruments i USING (instrument_id) "
-            "WHERE r.mark_type IN ('SPOT', 'NDF_FIX')").fetchall():
+            "WHERE r.mark_type IN ('SPOT', 'NDF_FIX') AND r.settle_date < :d", {"d": as_of}).fetchall():
         if not is_ndf_pair(pair, int(flag or 0)):
             continue
         fix_day = _freeze_day(conn, pair, settle)
@@ -218,7 +225,8 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
     `refrozen` (2026-09-22): NDF tickets whose row was not frozen at the official fixing of
     their own fixing date although that fixing is now on file, or was frozen at a fix of
     another day (`purge_superseded_ndf_fix`); their rows are dropped first and the trades
-    frozen again below, at the exact-day fix, in this same call.
+    frozen again below, at the exact-day fix, in this same call. Both purges look only at
+    tickets with `settle_date < as_of`, the ones this call re-freezes.
 
     `ndf_present_spot` (user decision 2026-09-21: "we can use a present spot for the past
     fixes"): an NDF ticket whose pair has no official SPOT on or before its settlement is
@@ -237,28 +245,44 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
     unrealisable (`_unrealisable`) instead of aborting the step for the whole book."""
     realised, unrealisable = 0, []
     repaired = purge_unreadable_realised(conn)
-    purge_superseded_present_spot(conn)
-    refrozen = purge_superseded_ndf_fix(conn)
+    purge_superseded_present_spot(conn, as_of)
+    refrozen = purge_superseded_ndf_fix(conn, as_of)
 
     for trade_id, pair, product, quote_ccy, qty, fill, settle in conn.execute(_OPEN_FX_SQL, {"as_of": as_of}).fetchall():
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
-            # An NDF is done at its fixing (user, 2026-09-22: "they just disappears as they
-            # expired"): frozen on the FIXING date, the same figure value_book shows from the
-            # fixing on, not at the value date's spot two days later.
             fix_day = _freeze_day(conn, pair, settle)
-            # An NDF settles against its currency's official fixing (NDF_FIX, 2026-09-22): the
-            # fix dated the fixing date exactly, never another day's ("each ndf has a unique
-            # fix"); with none on file, the last official SPOT on or before the fixing date.
-            fix_type = "SPOT"
-            m_hit = _fix_on_day(conn, pair, fix_day) if fix_day != settle else None
-            if m_hit is not None:
-                fix_type = "NDF_FIX"
+            present = False
+            if fix_day != settle and ndf_fixing_marks_on_file(conn, pair, fix_day):
+                # An NDF is done at its fixing (user, 2026-09-22: "they just disappears as they
+                # expired"; "each ndf has a unique fix"): recorded at the figure the Blotter has
+                # shown since the fixing date (`valuation.ndf_fixed_valuation`: the exact-day
+                # NDF_FIX, else the fixing date's SPOT as the near-marks estimate, converted at the
+                # fixing date's spot), never the value date's spot, so settlement does not move LTD.
+                row, how, fix_used = ndf_fixed_valuation(conn, pair, quote_ccy, qty, fill, fix_day)
+                if row["reason"]:
+                    unrealisable.append({"trade_id": trade_id, "reason": row["reason"]})
+                    continue
+                m, m_src, s = row["mark"], row["mark_source"], row["spot"]
+                if fix_used:
+                    fix_type, note = "NDF_FIX", f"official fixing dated {fix_day} (NDF fixing)"
+                else:
+                    fix_type, note = "SPOT", f"spot dated {fix_day} (NDF fixing)"
+                    if str(m_src).startswith(INTERP):
+                        note += f"; {how}"
+                _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, qty * fill * s, fix_type, m * s,
+                                 fix_day, m_src, row["pnl_usd"], note)
+                realised += 1
+                continue
+            if fix_day != settle:
+                # An NDF with neither a fix nor an official SPOT on or before its fixing date: the
+                # present-spot rule (user, 2026-09-21), unchanged -- unrealisable on the live pull's
+                # strict call, the latest spot on the backfill's closing call, replaced by the rule
+                # above once a close on or before the fixing lands (`purge_superseded_present_spot`).
+                m_hit = present_spot_for_ndf(conn, pair, as_of) if ndf_present_spot else None
+                present = m_hit is not None
             else:
-                m_hit = _last_on_or_before(conn, pair, "SPOT", fix_day)
-            present = m_hit is None and ndf_present_spot
-            if present:
-                m_hit = present_spot_for_ndf(conn, pair, as_of)
+                m_hit = _last_on_or_before(conn, pair, "SPOT", settle)
             if m_hit is None:
                 unrealisable.append({"trade_id": trade_id, "reason": f"no official SPOT for {pair} on or before {settle}"})
                 continue
@@ -270,10 +294,8 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
             entry = qty * fill * s
             combined = m * s
             pnl = qty * combined - entry
-            what = "official fixing" if fix_type == "NDF_FIX" else "spot"
-            note = ("" if m_day == settle else
-                    f"{what} dated {m_day} ({PRESENT_SPOT_NOTE if present else ('NDF fixing' if m_day == fix_day else 'last before ' + ('fixing' if fix_day != settle else 'settlement'))})")
-            _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, entry, fix_type, combined, m_day, m_src, pnl, note)
+            note = "" if m_day == settle else f"spot dated {m_day} ({PRESENT_SPOT_NOTE if present else 'last before settlement'})"
+            _insert_realised(conn, trade_id, pair, product, quote_ccy, settle, qty, entry, "SPOT", combined, m_day, m_src, pnl, note)
             realised += 1
         except (TypeError, ValueError, ArithmeticError) as exc:
             unrealisable.append(_unrealisable(trade_id, exc))

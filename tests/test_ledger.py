@@ -442,3 +442,46 @@ def test_a_deliverable_pairs_row_is_never_touched_by_the_ndf_guard():
     res = ledger.realise_settled(conn, "2026-09-21")
     assert res["refrozen"] == ["b1"] and res["realised"] == 1
     assert conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'j1'").fetchone() == j1
+
+
+def test_a_past_day_call_never_drops_a_row_it_cannot_freeze_again():
+    """Reviewer W1, 2026-09-22: the purges had no as_of gate while the refreeze covers
+    settle_date < as_of only, so realise_settled(<past day>) from the backfill dropped a row
+    and froze nothing (refrozen=['b1'], realised=0, no row). A row is dropped only by a call
+    whose as_of is past the value date, the one that re-freezes it."""
+    conn = _ndf_db()
+    ledger.realise_settled(conn, "2026-09-21")
+    before = _frozen_row(conn, "b1")
+    assert before[:2] == ("SPOT", "2026-09-14")
+    _brl_fix(conn, "2026-09-14", 5.22)                                  # lands in a backfill span ending 09-15
+    res = ledger.realise_settled(conn, "2026-09-15")                    # b1's value date 09-16 is not before as_of
+    assert res["refrozen"] == [] and res["realised"] == 0 and _frozen_row(conn, "b1") == before
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    assert _frozen_row(conn, "b1")[:2] == ("NDF_FIX", "2026-09-14")
+
+
+def test_the_frozen_row_is_the_blotters_own_estimate_when_the_fixing_date_has_no_close():
+    """Reviewer W2, 2026-09-22: closes either side of the fixing date and none on it -- the
+    Blotter showed the near-marks estimate (between the closes) from the fixing on while the
+    ledger froze at the earlier close alone. The ledger now records the Blotter's figure: the
+    same number, the estimate named."""
+    conn = _ndf_db()
+    conn.execute("DELETE FROM marks WHERE instrument_id = 'USDBRL'")
+    _insert_marks(conn, [
+        ("2026-09-11", "USDBRL", "2026-09-11", "SPOT", 5.20, "BBG_BFXFORWARD", "t"),
+        ("2026-09-15", "USDBRL", "2026-09-15", "SPOT", 5.40, "BBG_BFXFORWARD", "t"),
+    ])
+    conn.commit()
+    est = 5.20 + 0.75 * (5.40 - 5.20)      # 3 of the 4 calendar days from 09-11 to 09-15
+    shown = ledger.value_book(conn, "2026-09-15").set_index("trade_id").loc["b1"]
+    assert shown["status"] == "OPEN" and shown["mark"] == pytest.approx(est)
+    assert shown["pnl_usd"] == pytest.approx(1e6 * (est - 5.20) / est)
+    assert ledger.realise_settled(conn, "2026-09-21")["realised"] == 2
+    b1 = conn.execute("SELECT mark_type, spot_as_of_date, spot_source, pnl_usd, note FROM realised_pnl "
+                      "WHERE trade_id = 'b1'").fetchone()
+    assert b1[:3] == ("SPOT", "2026-09-14", "INTERP: SPOT between the 2026-09-11 and 2026-09-15 closes")
+    assert b1[3] == shown["pnl_usd"]       # the very number the Blotter showed, not 1e6 * (5.20 - 5.20) / 5.20
+    assert b1[4] == ("spot dated 2026-09-14 (NDF fixing); no official fixing on file: at the spot of 2026-09-14 instead "
+                     "(INTERP: SPOT between the 2026-09-11 and 2026-09-15 closes)")
+    assert ledger.value_book(conn, "2026-09-21").set_index("trade_id").loc["b1", "pnl_usd"] == shown["pnl_usd"]

@@ -122,3 +122,17 @@ def test_the_fix_of_the_fixing_date_replaces_the_present_spot_once_it_lands():
     assert b1[2] == "2026-09-14" and b1[3] == "official fixing dated 2026-09-14 (NDF fixing)"
     assert conn.execute("SELECT mark_type, spot_source FROM realised_pnl WHERE trade_id = 'b1'").fetchone() == ("NDF_FIX", "BBG_BDH")
     assert ledger.realise_settled(conn, "2026-09-22", ndf_present_spot=True)["refrozen"] == []   # and it stays there
+
+
+def test_a_past_day_call_never_drops_the_present_spot_row_it_cannot_freeze_again():
+    """Reviewer W1, 2026-09-22, the same latent shape in purge_superseded_present_spot: the true
+    close lands in a backfill span that ends before the value date; that call keeps the
+    present-spot row, and the next call past the value date replaces it by the strict rule."""
+    conn = _load(schema.connect())
+    ledger.realise_settled(conn, AS_OF, ndf_present_spot=True)
+    before = _frozen(conn)["b1"]
+    conn.execute("INSERT INTO marks VALUES ('2026-09-14','USDBRL','2026-09-14','SPOT',5.25,'BBG_BFXFORWARD','2026-09-14T17:00:00-04:00')")
+    assert ledger.realise_settled(conn, "2026-09-15")["realised"] == 0 and _frozen(conn)["b1"] == before
+    assert ledger.realise_settled(conn, "2026-09-22")["realised"] == 1
+    b1 = _frozen(conn)["b1"]
+    assert b1[1] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25) and b1[2] == "2026-09-14" and PRESENT_SPOT_NOTE not in b1[3]
