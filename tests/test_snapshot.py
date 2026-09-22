@@ -293,3 +293,12 @@ def test_the_background_backfill_saves_only_after_a_real_pull(tmp_path, monkeypa
     assert t is not None
     t.join(5)
     assert calls == [p] and any(b.get("snapshot") == "saved" for b in published)
+    # a backfill that raises must not lose the pull's own marks: the save still runs
+    def boom(*a, **k):
+        raise RuntimeError("history down")
+    monkeypatch.setattr(backfill, "auto_backfill", boom)
+    calls.clear(); published.clear()
+    t = backfill.start_auto_backfill(p)
+    t.join(5)
+    assert calls == [p]
+    assert any(b.get("snapshot") == "saved" for b in published) and any("history down" in b.get("reason", "") for b in published)

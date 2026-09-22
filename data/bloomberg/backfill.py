@@ -1281,22 +1281,31 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
 
     real_pull = session_factory is None and fetch is None and fwd_fetch is None and fut_fetch is None
 
+    def _save() -> None:
+        # The saving every pull ends with (user, 2026-09-22: "every pull from bbg triggers the
+        # saving" ... "I will trigger the commit and push myself"): the marks on file written
+        # to data/bbg_snapshot/, nothing committed (data/bloomberg/snapshot.py::save_after_pull).
+        # Only after a REAL pull (a test's fake fetches must never write the repository's own
+        # snapshot), and whether or not the backfill itself got through: today's marks are on
+        # file either way, and the pull's own marks must never go unsaved over a history error.
+        if not real_pull:
+            return
+        try:
+            from data.bloomberg import snapshot
+            _publish({"snapshot": snapshot.save_after_pull(db_path)["message"]})
+        except Exception as exc:  # noqa: BLE001 -- said in the status, never raised into the thread
+            _publish({"snapshot": f"marks snapshot failed: {exc!r}"})
+
     def _run():
         try:
-            _publish({"running": True, "reason": ""})
-            auto_backfill(db_path, host=host, port=port, fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
-                          session_factory=session_factory, scale_fetch=scale_fetch,
-                          on_progress=lambda remaining: _publish({"running": remaining > 0, "remaining": remaining}))
-            if real_pull:
-                # The saving every pull ends with (user, 2026-09-22: "every pull from bbg
-                # triggers the saving" ... "I will trigger the commit and push myself"): the
-                # marks on file written to data/bbg_snapshot/, nothing committed
-                # (data/bloomberg/snapshot.py::save_after_pull). Only after a REAL pull: a test's
-                # fake fetches must never write the repository's own snapshot.
-                from data.bloomberg import snapshot
-                _publish({"snapshot": snapshot.save_after_pull(db_path)["message"]})
-        except Exception as exc:  # never let a background thread take the process down
-            _publish({"running": False, "reason": f"auto-backfill failed: {exc!r}"})
+            try:
+                _publish({"running": True, "reason": ""})
+                auto_backfill(db_path, host=host, port=port, fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
+                              session_factory=session_factory, scale_fetch=scale_fetch,
+                              on_progress=lambda remaining: _publish({"running": remaining > 0, "remaining": remaining}))
+            except Exception as exc:  # never let a background thread take the process down
+                _publish({"running": False, "reason": f"auto-backfill failed: {exc!r}"})
+            _save()
         finally:
             _publish({"running": False, "remaining": 0, "days": _days_block.get(key, {}),
                       "note": _notes.get(key, ""), "points_scale": _scale_reports.get(key, {}),
