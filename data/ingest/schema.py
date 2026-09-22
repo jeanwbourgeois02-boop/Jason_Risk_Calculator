@@ -341,7 +341,9 @@ CREATE TABLE IF NOT EXISTS bbg_library (
 CREATE TABLE IF NOT EXISTS bbg_library_state (
   id              INTEGER PRIMARY KEY CHECK (id = 1),
   dirty           INTEGER NOT NULL DEFAULT 1,   -- 1 = the trades changed since the last sync
-  synced_at       TEXT NOT NULL DEFAULT ''
+  synced_at       TEXT NOT NULL DEFAULT '',
+  code_version    TEXT NOT NULL DEFAULT ''      -- data/bloomberg/library.py::LIBRARY_VERSION that last synced it
+                                               -- (2026-09-22: a kind the code learned since is a resync too)
 );
 INSERT OR IGNORE INTO bbg_library_state (id, dirty, synced_at) VALUES (1, 1, '');
 """ + "".join(
@@ -426,7 +428,9 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     text -- SQLite refuses to ALTER TABLE ADD a NOT NULL column with no default -- which
     is already true of every column in this schema that has ever needed migrating onto
     an existing table (each has a documented sentinel: '' / 0 / 'VANILLA' / ...)."""
-    ddl_tables = _parse_ddl_columns(_DDL + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL)
+    # Every DDL block, the library's included (2026-09-22: bbg_library_state.code_version was
+    # added and never reached an existing database while this list stopped at the bundles).
+    ddl_tables = _parse_ddl_columns(_DDL + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL)
     for table, columns in ddl_tables.items():
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if not existing:

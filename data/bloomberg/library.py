@@ -59,6 +59,12 @@ ROLE_UNDERLYING = "UNDERLYING"     # a listed option's underlying index level: t
 # backfill fills, like a past close.
 NDF_FIX = "NDF_FIX"
 MARK_KINDS = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX", NDF_FIX)
+
+# Bump whenever `compute` learns a new need (a kind, a ticker rule): a library synced by
+# older code is then out of date although no trade changed, and the next reader resyncs it
+# (2026-09-22: NDF_FIX had been added to `compute`, but every existing database kept the
+# library its last upload wrote, so no pull asked for a fixing until the next upload).
+LIBRARY_VERSION = "2026-09-22.1"
 NDF_1M = "NDF_1M"                  # an NDF currency's 1M outright, on its USD pair (the ladder's rate)
 DIV_YIELD = "DIV_YIELD"            # an index's dividend yield, for a listed option's Greeks
 DIV_YIELD_FIELDS = ("IDX_EST_DVD_YLD", "EQY_DVD_YLD_12M")   # per cent; the first Bloomberg answers
@@ -218,8 +224,9 @@ def compute(conn: sqlite3.Connection) -> List[dict]:
 
 
 def is_out_of_date(conn: sqlite3.Connection) -> bool:
-    row = conn.execute("SELECT dirty FROM bbg_library_state WHERE id = 1").fetchone()
-    return row is None or bool(row[0])
+    """True when the trades changed since the last sync, or the code did (LIBRARY_VERSION)."""
+    row = conn.execute("SELECT dirty, code_version FROM bbg_library_state WHERE id = 1").fetchone()
+    return row is None or bool(row[0]) or str(row[1] or "") != LIBRARY_VERSION
 
 
 def sync(conn: sqlite3.Connection) -> dict:
@@ -250,7 +257,8 @@ def sync(conn: sqlite3.Connection) -> dict:
                 conn.execute("UPDATE bbg_library SET bbg_ticker = ?, role = ?, product = ?, needed_from = ?, "
                              "needed_until = ? WHERE trade_id = ? AND kind = ? AND key = ? AND settle_date = ?",
                              values + pk)
-        conn.execute("INSERT OR REPLACE INTO bbg_library_state (id, dirty, synced_at) VALUES (1, 0, ?)", (now,))
+        conn.execute("INSERT OR REPLACE INTO bbg_library_state (id, dirty, synced_at, code_version) VALUES (1, 0, ?, ?)",
+                     (now, LIBRARY_VERSION))
     return {"added": added, "removed": removed, "total": len(wanted)}
 
 

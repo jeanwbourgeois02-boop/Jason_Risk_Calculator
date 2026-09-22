@@ -293,6 +293,26 @@ def test_sample_book_request_list_is_what_the_trades_themselves_call_for(tmp_pat
     assert conn.execute("SELECT COUNT(*) FROM bbg_library").fetchone()[0] == before
 
 
+# =========================================================================== 2026-09-22: code version
+def test_a_library_synced_by_older_code_is_out_of_date_and_resyncs_with_the_new_kind(tmp_path, monkeypatch):
+    """Seen 2026-09-22: NDF_FIX was added to `compute`, but a database synced before that
+    kept its library (nothing set `dirty`), so no pull asked for a fixing. The stored code
+    version now counts: a mismatch is a resync."""
+    p, conn = _ndf_db(tmp_path)
+    library.sync(conn)
+    assert not library.is_out_of_date(conn)
+    assert conn.execute("SELECT code_version FROM bbg_library_state").fetchone() == (library.LIBRARY_VERSION,)
+    # the library an older code wrote: no NDF_FIX rows, an older (or empty) version stamp
+    conn.execute("DELETE FROM bbg_library WHERE kind = 'NDF_FIX'")
+    conn.execute("UPDATE bbg_library_state SET dirty = 0, code_version = ''")
+    conn.commit()
+    assert not [r for r in conn.execute("SELECT 1 FROM bbg_library WHERE kind = 'NDF_FIX'")]
+    assert library.is_out_of_date(conn)
+    assert [r["kind"] for r in library.rows(conn) if r["kind"] == library.NDF_FIX]      # a read resynced it
+    assert conn.execute("SELECT dirty, code_version FROM bbg_library_state").fetchone() == (0, library.LIBRARY_VERSION)
+    assert not library.is_out_of_date(conn)
+
+
 # =========================================================================== 2026-09-22: NDF_FIX
 # An NDF's exit price is its currency's own official fixing on the fixing date (user: "the
 # entry price is where we traded, and the exit price is the fix on that day, as pulled from
