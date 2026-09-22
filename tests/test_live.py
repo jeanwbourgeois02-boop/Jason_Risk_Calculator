@@ -1407,6 +1407,9 @@ def test_pull_once_opens_one_session_per_cycle_and_writes_what_three_sessions_wr
     # SPOT snap to the expiry cut (engine.options.store.cut_time_factor), so two pulls seconds
     # apart price the same option a few 1e-9 apart, which is time decay, not a session difference.
     monkeypatch.setattr(live, "_now_iso", lambda: "2026-08-17T11:40:00-04:00")
+    from zoneinfo import ZoneInfo
+    from engine.options import store
+    monkeypatch.setattr(store, "_now_ny", lambda: datetime(2026, 8, 17, 11, 40, tzinfo=ZoneInfo("America/New_York")))
 
     log = _install_answering_blpapi(monkeypatch, today)
     p_before, conn_before = _fx_irs_option_db(tmp_path / "before")

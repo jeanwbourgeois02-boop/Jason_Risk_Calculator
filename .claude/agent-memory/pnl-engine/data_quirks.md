@@ -114,3 +114,16 @@ metadata:
   missing cell (as several tests assert via `is None`, not `math.isnan`), cast the
   column to `object` first: `col.astype(object).where(pd.notna(col), None)`. Caught by
   `test_fx_blotter_missing_t2_mark_stays_none` in tests/test_pnl.py.
+
+- A `marks`-table diff blamed on engine/pnl is a stamp until proven otherwise (2026-09-22):
+  tests/test_live.py::test_pull_once_opens_one_session_per_cycle_and_writes_what_three_sessions_wrote
+  was bisected onto my d0f8ae5, but the only differing rows were the six QL_OPTIONS_PRICER
+  marks' `snapped_at`, one second apart: since fc07a04 `engine/options/store.py::live_stamp`
+  stamps a live run with the real New York clock (`store._now_ny`, pinnable), and the test's
+  `_written_tables` blanks `snapped_at` only for BBG_BFXFORWARD / BBG_INTERP and pins only
+  `live._now_iso`. Alone the test fails whenever a second boundary falls in the ~0.5 s
+  QuantLib warm-up between the two pulls (8 of 8 here, at fc07a04 too); inside the whole
+  file it passes (warm-up already paid). Nothing in engine/pnl writes a mark, and the pull's
+  ledger step is 0.0 s. To prove it: replicate the two pulls in a scratch script, print
+  `SELECT source, snapped_at, COUNT(*) FROM marks GROUP BY 1,2` for both databases, pin
+  `store._now_ny` and rerun. A bisection with 4-run samples on a ~50 % flake is not evidence.
