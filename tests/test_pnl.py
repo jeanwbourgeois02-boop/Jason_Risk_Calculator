@@ -313,6 +313,27 @@ def test_value_book_ndf_with_no_forward_is_marked_at_spot_and_a_deliverable_one_
     assert ndf["pnl_usd"] == pytest.approx(-100_000 / 5.10)
 
 
+def test_value_book_gold_with_no_forward_is_marked_at_spot_like_an_ndf():
+    """User decision 2026-09-22: "xauusd has no fwd outright, this should be handled similar
+    to the ndfs and settled cash". Long 482.474 oz at 4145.30 for 2026-06-24, no forward on
+    file: marked at the day's XAUUSD spot; with a forward on file, at the forward."""
+    conn = _vb_conn()
+    conn.execute("INSERT INTO instruments VALUES ('XAUUSD','FX','XAU','USD',1.0,0,'XAUUSD Curncy','9999-12-31')")
+    conn.commit()
+    _vb_fx_trade(conn, "G1", "XAUUSD", "XAU", "USD", 482.474, 4145.30, settle="2026-06-24")
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert math.isnan(row["pnl_usd"]) and row["reason"].startswith("no SPOT mark for XAUUSD on 2026-06-01 (XAU with no forward")
+    _vb_mark(conn, "XAUUSD", VB_AS_OF, "SPOT", 4200.0)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert (row["mark"], row["mark_date"], row["status"]) == (4200.0, VB_AS_OF, "OPEN")
+    assert row["pnl_usd"] == pytest.approx(482.474 * (4200.0 - 4145.30))
+    assert row["pnl_carry_usd"] == 0.0 and row["pnl_spot_usd"] == pytest.approx(row["pnl_usd"])
+    assert row["note"] == "XAU with no forward for 2026-06-24 on 2026-06-01: marked at the spot of 2026-06-01"
+    _vb_mark(conn, "XAUUSD", "2026-06-24", "FWD_OUTRIGHT", 4210.0)
+    row = value_book(conn, VB_AS_OF).iloc[0]
+    assert row["mark"] == 4210.0 and row["note"] == "" and row["pnl_usd"] == pytest.approx(482.474 * (4210.0 - 4145.30))
+
+
 def test_value_book_fixed_ndf_with_no_spot_is_blank_and_says_why():
     conn = _vb_brl(_vb_conn())
     _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-03")

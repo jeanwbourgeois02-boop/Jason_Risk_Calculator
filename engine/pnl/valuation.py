@@ -418,9 +418,16 @@ def _ndf_at_spot(r, as_of: str, has_forward: bool) -> str:
         revalued at each day's spot, and the ledger freezes it after the value date as it
         always has, at the last official SPOT on or before settlement;
       - it has not fixed, but there is no official forward for its value date on `as_of`.
-    A deliverable ticket is never marked at spot: with no forward it stays blank."""
+    Metals (XAUUSD and the other METALS pairs; user decision 2026-09-22: "xauusd has no fwd
+    outright, this should be handled similar to the ndfs and settled cash") take the second
+    case too: a metal ticket with no official forward for its value date is marked at the
+    day's spot, with its forward whenever Bloomberg has one. Any other deliverable ticket is
+    never marked at spot: with no forward it stays blank."""
     from engine.ladder.ndf import fixing_date, is_ndf_pair
-    if not is_ndf_pair(r.instrument_id, int(getattr(r, "is_ndf", 0) or 0)):
+    pair = str(r.instrument_id or "")
+    if pair[:3] in METALS or pair[3:] in METALS:
+        return "" if has_forward else f"{pair[:3]} with no forward for {r.settle_date} on {as_of}: marked at the spot of {as_of}"
+    if not is_ndf_pair(pair, int(getattr(r, "is_ndf", 0) or 0)):
         return ""
     fixed_on = fixing_date(r.settle_date)
     if fixed_on <= as_of:
