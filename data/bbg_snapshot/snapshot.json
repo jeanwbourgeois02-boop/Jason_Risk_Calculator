@@ -1,10 +1,10 @@
 {
-  "exported_at": "2026-09-22T12:40:37+08:00",
+  "exported_at": "2026-09-22T16:19:55+08:00",
   "marks_from": "2026-07-08",
   "marks_through": "2026-09-22",
   "rows": {
     "instruments": 72,
-    "marks": 4493,
+    "marks": 4494,
     "curves": 85,
     "curve_quotes": 252,
     "index_fixings": 0,
@@ -20,10 +20,10 @@
     "equity_dividend_yields": "CREATE TABLE equity_dividend_yields (\n  as_of_date      TEXT NOT NULL,\n  underlying      TEXT NOT NULL,   -- underlying instrument_id, e.g. 'SPX Index'\n  dividend_yield  REAL NOT NULL,   -- continuous, decimal; 0.0 for a non-dividend payer (explicit, not a sentinel)\n  source          TEXT NOT NULL,\n  PRIMARY KEY (as_of_date, underlying, source)\n)"
   },
   "last_pull": {
-    "time": "2026-09-22T12:20:04+08:00",
+    "time": "2026-09-22T16:19:39+08:00",
     "connected": true,
     "requested": 73,
-    "written": 67,
-    "failed": 6
+    "written": 68,
+    "failed": 5
   }
 }

@@ -1,19 +1,19 @@
 {
-  "time": "2026-09-22T12:20:04+08:00",
+  "time": "2026-09-22T16:19:39+08:00",
   "connected": true,
   "reason": "",
   "host": "localhost:8194",
   "as_of_date": "2026-09-22",
   "requested": 73,
-  "written": 67,
-  "failed": 6,
+  "written": 68,
+  "failed": 5,
   "items": [
     {
       "instrument_id": "AUDUSD",
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.7123,
+      "value": 0.71,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -22,7 +22,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.7123,
+      "value": 0.71,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -31,7 +31,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 0.7123,
+      "value": 0.71,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -40,7 +40,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 0.7123,
+      "value": 0.71,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -49,7 +49,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-28",
       "status": "OK",
-      "value": 0.7122,
+      "value": 0.71,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -58,7 +58,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 11.2798,
+      "value": 11.278,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -67,7 +67,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-25",
       "status": "OK",
-      "value": 11.2797,
+      "value": 11.2778,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -76,7 +76,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-11-25",
       "status": "OK",
-      "value": 11.266011764705882,
+      "value": 11.264205882352941,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -85,7 +85,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-11-27",
       "status": "OK",
-      "value": 11.265635294117647,
+      "value": 11.263817647058824,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -94,7 +94,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.1475,
+      "value": 1.1439,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -103,7 +103,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.1475,
+      "value": 1.1439,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -112,7 +112,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 1.1474,
+      "value": 1.1439,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -121,7 +121,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 1.1475,
+      "value": 1.1439,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -175,7 +175,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.4026,
+      "value": 1.4043,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -184,7 +184,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.4026,
+      "value": 1.4043,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -193,7 +193,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 1.4026,
+      "value": 1.4044,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -202,7 +202,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.8204,
+      "value": 0.8218,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -211,7 +211,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.8204,
+      "value": 0.8218,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -220,7 +220,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 0.8206,
+      "value": 0.822,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -229,7 +229,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-19",
       "status": "OK",
-      "value": 0.818044,
+      "value": 0.819444,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -238,7 +238,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 6.6958,
+      "value": 6.7013,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -247,7 +247,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 6.6969,
+      "value": 6.7026,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -256,7 +256,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17875.0,
+      "value": 17872.0,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -265,7 +265,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 17874.5,
+      "value": 17871.5,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -274,7 +274,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 157.5,
+      "value": 157.73,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -283,7 +283,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 157.5406,
+      "value": 157.7763,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -292,7 +292,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-25",
       "status": "OK",
-      "value": 157.5125,
+      "value": 157.7373,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -301,7 +301,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2027-03-01",
       "status": "OK",
-      "value": 155.46232857142857,
+      "value": 155.67764285714284,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -310,7 +310,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2027-03-03",
       "status": "OK",
-      "value": 155.43629285714286,
+      "value": 155.65151428571428,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -319,7 +319,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1358.25,
+      "value": 1362.85,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -328,7 +328,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-28",
       "status": "OK",
-      "value": 1358.25,
+      "value": 1362.85,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -337,7 +337,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-13",
       "status": "OK",
-      "value": 1358.1247727272728,
+      "value": 1362.7247727272727,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -346,7 +346,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17.2135,
+      "value": 17.2693,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -355,7 +355,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17.2135,
+      "value": 17.2693,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -364,7 +364,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 17.211,
+      "value": 17.2667,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -373,7 +373,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.4296,
+      "value": 9.4348,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -382,7 +382,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.4296,
+      "value": 9.4348,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -391,7 +391,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 9.4294,
+      "value": 9.4346,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -400,7 +400,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.83,
+      "value": 9.8589,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -409,7 +409,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.83,
+      "value": 9.8589,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -418,7 +418,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 9.8312,
+      "value": 9.8601,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -427,7 +427,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 48.8169,
+      "value": 48.82,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -436,7 +436,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 48.7822,
+      "value": 48.7855,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -445,7 +445,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 31.711,
+      "value": 31.698,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -454,7 +454,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 31.7105,
+      "value": 31.6975,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -472,7 +472,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 16.2497,
+      "value": 16.3144,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -481,7 +481,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 16.2497,
+      "value": 16.3144,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -490,7 +490,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 16.2473,
+      "value": 16.3123,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -499,7 +499,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-13",
       "status": "OK",
-      "value": 16.268516666666667,
+      "value": 16.3327625,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -508,7 +508,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 4337.28,
+      "value": 4303.83,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -517,7 +517,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 4337.28,
+      "value": 4303.83,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -526,7 +526,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 4337.6627,
+      "value": 4304.200855555556,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -535,7 +535,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 11.2803,
+      "value": 11.2785,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -544,7 +544,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-15",
       "status": "OK",
-      "value": 0.818412,
+      "value": 0.819812,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -553,7 +553,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-11-19",
       "status": "OK",
-      "value": 156.80831999999998,
+      "value": 157.03186000000002,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -562,7 +562,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-09",
       "status": "OK",
-      "value": 16.26418333333333,
+      "value": 16.3284125,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -571,7 +571,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-15",
       "status": "OK",
-      "value": 4347.633804,
+      "value": 4314.184388,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -580,7 +580,7 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-12-18",
       "status": "OK",
-      "value": 7832.75,
+      "value": 7822.75,
       "source": "BBG_BDH",
       "detail": "live PX_LAST"
     },
@@ -589,7 +589,7 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-10-16",
       "status": "OK",
-      "value": 218.15,
+      "value": 202.75,
       "source": "BBG_BDH",
       "detail": "live PX_MID"
     },
@@ -598,7 +598,7 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-10-16",
       "status": "OK",
-      "value": 41.9,
+      "value": 42.8,
       "source": "BBG_BDH",
       "detail": "live PX_MID"
     },
@@ -616,7 +616,7 @@
       "mark_type": "NDF_1M",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17908.0,
+      "value": 17927.0,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -625,7 +625,7 @@
       "mark_type": "NDF_1M",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1358.31,
+      "value": 1362.8,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -634,7 +634,7 @@
       "mark_type": "NDF_1M",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 31.689,
+      "value": 31.771,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -651,10 +651,10 @@
       "instrument_id": "USDIDR",
       "mark_type": "NDF_FIX",
       "settle_date": "2026-09-22",
-      "status": "FAILED",
-      "value": null,
-      "source": "",
-      "detail": "Bloomberg returned no PX_LAST for JISDOR Index on 2026-09-22 (the fixing)"
+      "status": "OK",
+      "value": 17883.0,
+      "source": "BBG_BDH",
+      "detail": ""
     },
     {
       "instrument_id": "USDTWD",
@@ -727,85 +727,85 @@
     "failed": [
       {
         "trade_id": "918421481",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "920118423",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "929068982",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "932385416",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "932385417",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "934493221",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "934493227",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "936123209",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "936141018",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "940096785",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "951429278",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "951429279",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "958454159",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "964338491",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "964338493",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "970381547",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "972350961",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "974788401",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       },
       {
         "trade_id": "978916620",
-        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12"
+        "error": "RuntimeError: convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12"
       }
     ],
     "as_of_date": "2026-09-22",
     "seconds": {
-      "bloomberg": 2.9,
-      "pricing": 1.5
+      "bloomberg": 3.6,
+      "pricing": 1.6
     }
   },
   "vol": {
@@ -826,7 +826,7 @@
     "priced": 0,
     "skipped": [],
     "as_of_date": "2026-09-22",
-    "error": "RuntimeError('convergence not reached after 99 iterations; last improvement 0.0178479, required accuracy 1e-12')"
+    "error": "RuntimeError('convergence not reached after 99 iterations; last improvement 0.0178574, required accuracy 1e-12')"
   },
   "ledger": {
     "as_of_date": "2026-09-22",
@@ -838,14 +838,14 @@
   "skipped": 0,
   "timings": {
     "session": 0.5,
-    "spot": 0.9,
-    "forwards": 3.0,
-    "futures": 2.4,
-    "rates": 4.3,
+    "spot": 1.1,
+    "forwards": 3.3,
+    "futures": 2.5,
+    "rates": 5.1,
     "vol": 0.9,
-    "options": 1.3,
+    "options": 1.5,
     "ledger": 0.0,
-    "total": 13.3
+    "total": 14.9
   },
   "timings_other": {
     "build_requests": 0.0,
@@ -860,303 +860,329 @@
         "status": "INCOMPLETE",
         "missing_count": 8,
         "missing": [
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-21 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-21 (a holiday, or no quote in that hour)",
           "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-21",
           "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-21",
-          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:11150] ",
-          "Bloomberg answered the intraday request for USDIDRSP Curncy with: Unknown/Invalid security [nid:6802] ",
-          "Bloomberg answered the intraday request for USDTWDSP Curncy with: Unknown/Invalid security [nid:10899] "
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-09-18": {
         "status": "INCOMPLETE",
-        "missing_count": 6,
+        "missing_count": 16,
         "missing": [
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-18 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-18 (a holiday, or no quote in that hour)",
           "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-18",
           "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-18",
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-18",
-          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-18",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-18"
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-09-17": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 18,
         "missing": [
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-17 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-17 (a holiday, or no quote in that hour)",
           "Bloomberg returned no fixing (PX_LAST) for USDKRW on 2026-09-17",
           "Bloomberg returned no fixing (PX_LAST) for USDTWD on 2026-09-17",
-          "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-17",
-          "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-17",
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-17"
+          "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-17"
         ]
       },
       "2026-09-16": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 17,
         "missing": [
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-16 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-16 (a holiday, or no quote in that hour)",
           "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-16",
           "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-16",
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-16",
-          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-16",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-16"
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-09-15": {
         "status": "INCOMPLETE",
-        "missing_count": 14,
+        "missing_count": 20,
         "missing": [
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-15 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-15 (a holiday, or no quote in that hour)",
           "Bloomberg returned no PX_SETTLE for SPX/E261016C7615 on 2026-09-15",
           "Bloomberg returned no PX_SETTLE for SPX/E261016P7615 on 2026-09-15",
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-15",
-          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-15",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-15"
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-09-14": {
         "status": "INCOMPLETE",
-        "missing_count": 12,
+        "missing_count": 18,
         "missing": [
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-14 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-14 (a holiday, or no quote in that hour)",
           "Bloomberg returned no fixing (PX_LAST) for USDKRW on 2026-09-14",
           "Bloomberg returned no fixing (PX_LAST) for USDTWD on 2026-09-14",
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-14",
-          "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-14",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-14"
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-09-11": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 18,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-11",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-11 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-11 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-11",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-11",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-11"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-09-10": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 16,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-10",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-10 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-10 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-10",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-10",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-10"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-09-09": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 16,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-09",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-09 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-09 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-09",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-09",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-09"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-09-08": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 15,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-08",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-08 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-08 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-08",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-08",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-08"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-09-04": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 16,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-04",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-04 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-04 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-04",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-04",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-04"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-09-03": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 15,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-03",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-03 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-03 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-03",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-03",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-03"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-09-02": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 15,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-02",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-02 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-02 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-02",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-02",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-02"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-09-01": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 16,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-09-01",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-09-01 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-09-01 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-09-01",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-09-01",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-09-01"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-08-31": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 15,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-31",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-31 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-31 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-31",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-31",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-31"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-08-28": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 15,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-28",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-28 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-28 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-28",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-28",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-28"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-08-27": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 15,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-27",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-27 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-27 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-27",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-27",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-27"
+          "USDKRW 2026-09-16: outside the forward tenors 2026-08-31..2026-09-08, not extrapolated"
         ]
       },
       "2026-08-26": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 16,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-26",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-26 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-26 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-26",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-26",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-26"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-08-25": {
         "status": "INCOMPLETE",
-        "missing_count": 11,
+        "missing_count": 15,
         "missing": [
-          "Bloomberg returned no daily (17:00 New York) close for USDIDR on 2026-08-25",
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-25",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-25 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-25 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-25",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-25",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-25"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-08-24": {
         "status": "INCOMPLETE",
-        "missing_count": 10,
+        "missing_count": 15,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-24",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-24 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-24 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-24",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-24",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-24"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:11141] "
         ]
       },
       "2026-08-21": {
         "status": "INCOMPLETE",
         "missing_count": 10,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-21",
-          "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-21",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-21",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-21"
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:7086] ",
+          "Bloomberg answered the intraday request for USDIDRSP Curncy with: Unknown/Invalid security [nid:11147] ",
+          "Bloomberg answered the intraday request for USDTWDSP Curncy with: Unknown/Invalid security [nid:15300] ",
+          "Bloomberg answered the intraday request for XAUUSDSP Curncy with: Unknown/Invalid security [nid:10435] "
         ]
       },
       "2026-08-20": {
         "status": "INCOMPLETE",
-        "missing_count": 9,
+        "missing_count": 14,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-20",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-20 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-20 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-20",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-20",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-20"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-08-19": {
         "status": "INCOMPLETE",
-        "missing_count": 6,
+        "missing_count": 10,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-19",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-19 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-19 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-19",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-19",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-19"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-08-18": {
         "status": "INCOMPLETE",
-        "missing_count": 6,
+        "missing_count": 10,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-18",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-18 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-18 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-18",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-18",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-18"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-08-17": {
         "status": "INCOMPLETE",
-        "missing_count": 5,
+        "missing_count": 8,
         "missing": [
-          "Bloomberg returned no daily (17:00 New York) close for USDIDR on 2026-08-17",
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-17",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDIDR Curncy on 2026-08-17 (a holiday, or no quote in that hour)",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-17 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
           "Bloomberg returned no forward tenor prices for USDIDR on 2026-08-17",
-          "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-17",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-17"
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:7086] "
         ]
       },
       "2026-08-14": {
         "status": "INCOMPLETE",
-        "missing_count": 3,
+        "missing_count": 5,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-14",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-14 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-14",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-14"
+          "Bloomberg answered the intraday request for XAUUSDSP Curncy with: Unknown/Invalid security [nid:3622] "
         ]
       },
       "2026-08-13": {
         "status": "INCOMPLETE",
-        "missing_count": 3,
+        "missing_count": 5,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-13",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-13 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-13",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-13"
+          "Bloomberg answered the intraday request for XAUUSDSP Curncy with: Unknown/Invalid security [nid:3622] "
         ]
       },
       "2026-08-12": {
         "status": "INCOMPLETE",
-        "missing_count": 3,
+        "missing_count": 5,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-12",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-12 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
+          "USDKRW 2026-09-16: outside the forward tenors 2026-08-14..2026-08-21, not extrapolated",
           "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-12",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-12"
+          "Bloomberg answered the intraday request for XAUUSDSP Curncy with: Unknown/Invalid security [nid:3622] "
         ]
       },
       "2026-08-11": {
         "status": "INCOMPLETE",
-        "missing_count": 3,
+        "missing_count": 5,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-11",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-11 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-11",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-11"
+          "Bloomberg answered the intraday request for XAUUSDSP Curncy with: Unknown/Invalid security [nid:3622] "
         ]
       },
       "2026-08-10": {
         "status": "INCOMPLETE",
-        "missing_count": 3,
+        "missing_count": 5,
         "missing": [
-          "Bloomberg returned no forward tenor prices for USDBRL on 2026-08-10",
+          "Bloomberg returned no hourly bar ending 15:00 New York for USDTWD Curncy on 2026-08-10 (a holiday, or no quote in that hour)",
+          "Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security [nid:3930] ",
+          "Bloomberg answered the intraday request for USDKRWSP Curncy with: Unknown/Invalid security [nid:7086] ",
           "Bloomberg returned no forward tenor prices for USDTWD on 2026-08-10",
-          "Bloomberg returned no forward tenor prices for XAUUSD on 2026-08-10"
+          "Bloomberg answered the intraday request for XAUUSDSP Curncy with: Unknown/Invalid security [nid:3622] "
         ]
       },
       "2025-12-31": {
@@ -1165,8 +1191,8 @@
         "missing": []
       }
     },
-    "last_run": "2026-09-22T12:05:32+08:00",
-    "note": "1 past day(s) since 2026-09-21 hold FX marks that are that day's last pull, not its 15:00 New York close; the close is asked of Bloomberg and replaces them. Days before 2026-09-21 keep the marks they have.",
+    "last_run": "2026-09-22T16:08:24+08:00",
+    "note": "37 past day(s) hold FX marks that are not that day's 15:00 New York close (a live pull's last price, or a 17:00 daily close); every past day from 2026-03-10 on, as far as Bloomberg's intraday history reaches, is asked for at 15:00 New York and those rows replaced. A day before 2026-03-10 is beyond that history and closes at Bloomberg's 17:00 daily close.",
     "points_scale": {
       "AUDUSD": {
         "field": "FWD_SCALE",
@@ -1189,6 +1215,16 @@
         }
       },
       "EURUSD": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "GBPUSD": {
         "field": "FWD_SCALE",
         "divisor": 10000.0,
         "raw": {
@@ -1229,6 +1265,16 @@
         }
       },
       "USDCNH": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
+      "USDHKD": {
         "field": "FWD_SCALE",
         "divisor": 10000.0,
         "raw": {
@@ -1298,6 +1344,16 @@
           "FWD_POINTS_SCALE": "Field not valid"
         }
       },
+      "USDSGD": {
+        "field": "FWD_SCALE",
+        "divisor": 10000.0,
+        "raw": {
+          "FWD_SCALE": 4
+        },
+        "errors": {
+          "FWD_POINTS_SCALE": "Field not valid"
+        }
+      },
       "USDTRY": {
         "field": "FWD_SCALE",
         "divisor": 10000.0,
@@ -1339,6 +1395,987 @@
         }
       }
     },
-    "snapshot": "marks snapshot: 4235 marks through 2026-09-22 written to data/bbg_snapshot/ (commit and push it yourself)"
+    "snapshot": "marks snapshot: 4493 marks through 2026-09-22 written to data/bbg_snapshot/ (commit and push it yourself)",
+    "options": {
+      "2026-09-21": {
+        "priced": 25,
+        "skipped": [],
+        "note": ""
+      },
+      "2026-09-18": {
+        "priced": 25,
+        "skipped": [],
+        "note": ""
+      },
+      "2026-09-17": {
+        "priced": 19,
+        "skipped": [
+          {
+            "trade_id": "968765244",
+            "reason": "2026-09-17 close: no curve/rate XAU"
+          },
+          {
+            "trade_id": "968765245",
+            "reason": "2026-09-17 close: no curve/rate XAU"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-16": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "960140434",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "960157098",
+            "reason": "2026-09-16 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "966493831",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "966499135",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "966519514",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "968765244",
+            "reason": "2026-09-16 close: no curve/rate XAU"
+          },
+          {
+            "trade_id": "968765245",
+            "reason": "2026-09-16 close: no curve/rate XAU"
+          },
+          {
+            "trade_id": "968765624",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "968765625",
+            "reason": "2026-09-16 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-15": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "960140434",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "960157098",
+            "reason": "2026-09-15 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "966493831",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "966499135",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "966519514",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "968765244",
+            "reason": "2026-09-15 close: no curve/rate XAU"
+          },
+          {
+            "trade_id": "968765245",
+            "reason": "2026-09-15 close: no curve/rate XAU"
+          },
+          {
+            "trade_id": "968765624",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "968765625",
+            "reason": "2026-09-15 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-14": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-14 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-14 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-14 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "960140434",
+            "reason": "2026-09-14 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "960157098",
+            "reason": "2026-09-14 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "966493831",
+            "reason": "2026-09-14 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "966499135",
+            "reason": "2026-09-14 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "966519514",
+            "reason": "2026-09-14 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-11": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-11 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-11 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-11 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "960140434",
+            "reason": "2026-09-11 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "960157098",
+            "reason": "2026-09-11 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-10": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-10 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-10 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-10 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "960140434",
+            "reason": "2026-09-10 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "960157098",
+            "reason": "2026-09-10 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-09": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-09 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-09 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-09 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "960140434",
+            "reason": "2026-09-09 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "960157098",
+            "reason": "2026-09-09 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-08": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-08 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-08 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-08 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-08 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-08 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-08 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-08 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-08 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-08 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-08 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-08 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-04": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-04 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-04 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-04 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-04 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-04 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-04 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-04 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-04 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-04 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-04 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-04 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-03": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-03 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-03 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-03 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-03 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-03 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-03 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-03 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-03 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-03 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "955514551",
+            "reason": "2026-09-03 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "955514552",
+            "reason": "2026-09-03 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-02": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-02 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-02 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-02 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-02 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-02 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-02 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-02 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-02 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-02 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-09-01": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-09-01 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-09-01 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-09-01 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-09-01 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-09-01 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-09-01 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-09-01 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-09-01 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "949567630",
+            "reason": "2026-09-01 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-31": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-31 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-08-31 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-08-31 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-08-31 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-08-31 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-08-31 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-08-31 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-08-31 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-28": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-28 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-08-28 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-08-28 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-08-28 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-08-28 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-08-28 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-08-28 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-08-28 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-27": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-27 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-08-27 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-08-27 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-08-27 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-08-27 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-08-27 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-08-27 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "943920760",
+            "reason": "2026-08-27 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-26": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-26 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-08-26 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-08-26 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-08-26 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-08-26 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-08-26 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-08-26 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-25": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-25 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-08-25 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-08-25 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-08-25 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-08-25 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-08-25 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-08-25 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-24": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-24 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-08-24 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-08-24 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-08-24 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-08-24 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "938795946",
+            "reason": "2026-08-24 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "941870096",
+            "reason": "2026-08-24 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-21": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-21 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388058",
+            "reason": "2026-08-21 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388059",
+            "reason": "2026-08-21 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-08-21 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-08-21 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-20": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-20 close: no curve/rate USD"
+          },
+          {
+            "trade_id": "936388060",
+            "reason": "2026-08-20 close: no curve/rate EUR"
+          },
+          {
+            "trade_id": "936388061",
+            "reason": "2026-08-20 close: no curve/rate EUR"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-19": {
+        "priced": 0,
+        "skipped": [
+          {
+            "trade_id": "934168029",
+            "reason": "2026-08-19 close: no curve/rate USD"
+          }
+        ],
+        "note": ""
+      },
+      "2026-08-18": {
+        "priced": null,
+        "skipped": [],
+        "note": ""
+      },
+      "2026-08-17": {
+        "priced": null,
+        "skipped": [],
+        "note": ""
+      },
+      "2026-08-14": {
+        "priced": null,
+        "skipped": [],
+        "note": ""
+      },
+      "2026-08-13": {
+        "priced": null,
+        "skipped": [],
+        "note": ""
+      },
+      "2026-08-12": {
+        "priced": null,
+        "skipped": [],
+        "note": ""
+      },
+      "2026-08-11": {
+        "priced": null,
+        "skipped": [],
+        "note": ""
+      },
+      "2026-08-10": {
+        "priced": null,
+        "skipped": [],
+        "note": ""
+      }
+    }
   }
 }
