@@ -36,7 +36,9 @@ from ui import revision, uploads
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
 
-VISIBLE_TABS = ["Ladder", "Blotter", "Market data"]
+# Order per user decision 2026-09-22 ("I want the first tab to be blotter, and the second to
+# be cash ladder"); the app opens on the first.
+VISIBLE_TABS = ["Blotter", "Ladder", "Market data"]
 
 
 def get_db_path() -> Path:

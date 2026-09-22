@@ -193,8 +193,8 @@ def test_four_tabs_present_in_order(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     layout = uiapp.build_layout(uiapp.load_summary(db_path))
-    assert _tab_labels(layout) == ["Ladder", "Blotter", "Market data"]
-    assert uiapp.VISIBLE_TABS == ["Ladder", "Blotter", "Market data"]
+    assert _tab_labels(layout) == ["Blotter", "Ladder", "Market data"]    # user, 2026-09-22: Blotter first
+    assert uiapp.VISIBLE_TABS == ["Blotter", "Ladder", "Market data"]
 
 
 def test_no_overall_book_or_placeholder_tabs(tmp_path):
@@ -273,7 +273,7 @@ def test_tab_show_hide_callback_toggles_bodies(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     app = uiapp.create_app(db_path=db_path, start_feed=False)
-    key = [k for k in app.callback_map if k.startswith("..tab-body-ladder.style")]
+    key = [k for k in app.callback_map if k.startswith(f"..tab-body-{uiapp._slug(uiapp.VISIBLE_TABS[0])}.style")]
     assert key, "expected a callback outputting tab-body-*.style keyed on main-tabs value"
     cb = app.callback_map[key[0]]
     assert any(d["id"] == uiapp.MAIN_TABS_ID and d["property"] == "value" for d in cb["inputs"])

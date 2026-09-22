@@ -195,6 +195,7 @@ ASSET_CLASS_OF = {"FX_SPOT": "FX", "FX_FWD": "FX", "FX_SWAP": "FX", "FUTURE": "F
                   "IRS": "Rates", "FX_OPTION": "Options"}
 ASSET_CLASS_ORDER = ("FX", "Futures", "Rates", "Options")
 ASSET_TABLE_ID = "blotter-asset-class-table"
+POSITIONS_TABLE_ID = "blotter-positions-table"
 # Futures is a real view (not a "not built yet" placeholder like Rates/Options), but on
 # this PC no futures trades are loaded -- BNP gives one netted position row per contract
 # with no fill/trade_date, and fills only arrive via the workbook import on the
@@ -639,6 +640,96 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
         html.H4("P&L by asset class"), table])
 
 
+def _pos_cell(value, digits: int = 0) -> str:
+    if value is None or (isinstance(value, float) and value != value):
+        return "n/a"
+    return format_cell(value) if digits == 0 else f"{value:,.{digits}f}"
+
+
+def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
+    """(records, tooltips) of the Total book's Positions table (user, 2026-09-22: "I want
+    to see my total positions delta, dv01 options in the total tab in blotter ... SPX
+    options - the detla should be added to the esz6 futures"): the figures of
+    `engine.ladder.positions.book_positions`, one line per asset class with its parts
+    indented under it. Columns: Position, Delta (units), Delta (USD), Detail. A figure that
+    could not be computed reads "n/a" with its reason in the cell's tooltip."""
+    from engine.ladder.positions import book_positions
+    pos = book_positions(conn, as_of)
+    records, tips = [], []
+
+    def add(label, units, usd, detail="", reason="", indent=False):
+        rec = {"position": ("    " if indent else "") + label, "units": units, "usd": usd, "detail": detail}
+        tip = {}
+        if reason:
+            for col in ("units", "usd"):
+                if rec[col] == "n/a":
+                    tip[col] = {"value": reason, "type": "text"}
+        records.append(rec)
+        tips.append(tip)
+
+    fx = pos["fx"]
+    add("FX net USD delta (+ = long USD)", "", _pos_cell(fx["net_usd"]), "the header's Net USD; FX options' delta included", fx["reason"])
+    add("FX gross USD delta", "", _pos_cell(fx["gross_usd"]), "sum of |per-pair USD delta|", fx["reason"])
+    for m in fx["metals"]:
+        add(f"{m['ccy']} (oz)", _pos_cell(m["units"], 2), _pos_cell(m["usd_delta"]), "at spot", m["reason"], indent=True)
+
+    eq = pos["equity_index"]
+    if eq["lines"]:
+        es = eq.get("es_contracts")
+        detail = (f"{_pos_cell(es, 2)} ES-contract equivalents" if es == es else "") + \
+                 (f"; {len(eq['missing'])} not priced (see the sub-lines)" if eq["missing"] else "")
+        add("Equity index delta (ES futures + SPX options)", _pos_cell(eq["index_units"], 2), _pos_cell(eq["usd_delta"]),
+            detail, eq["reason"] or (eq["missing"][0] if eq["missing"] and eq["usd_delta"] != eq["usd_delta"] else ""))
+        for line in eq["lines"]:
+            what = f"{_pos_cell(line['contracts'], 0)} contracts" + (f" at {line['level']:,.2f}" if line["level"] else "")
+            add(line["label"], _pos_cell(line["index_units"], 2), _pos_cell(line["usd_delta"]), what, line["reason"], indent=True)
+    else:
+        add("Equity index delta (ES futures + SPX options)", "", "n/a", "", eq["reason"])
+
+    rates = pos["rates"]
+    add("Rates DV01 (USD, +1bp parallel)", "", _pos_cell(rates["dv01_usd"]),
+        f"{rates['swaps']} open swap(s)" + (f"; {len(rates['missing'])} without a DV01 mark" if rates["missing"] else ""),
+        rates["reason"] or (rates["missing"][0] if rates["missing"] else ""))
+    for ccy, dv01 in sorted(rates["by_ccy"].items()):
+        add(f"{ccy} swaps", "", _pos_cell(dv01), "", indent=True)
+
+    opt = pos["fx_options"]
+    add("FX options delta (USD)", "", _pos_cell(opt["usd_delta"]),
+        f"{opt['options']} open option(s), part of the FX net above" + (f"; {len(opt['missing'])} not converted" if opt["missing"] else ""),
+        opt["reason"] or (opt["missing"][0] if opt["missing"] else ""))
+    for pair, usd in sorted(opt["by_pair"].items()):
+        add(pair, "", _pos_cell(usd), "", indent=True)
+    return records, tips
+
+
+def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """The Total book's Positions block (`positions_rows`), above the P&L by asset class."""
+    records, tips = positions_rows(conn, as_of)
+    table = dash_table.DataTable(
+        id=POSITIONS_TABLE_ID,
+        columns=[{"name": n, "id": c} for c, n in (("position", "Position"), ("units", "Delta (units)"),
+                                                     ("usd", "Delta (USD)"), ("detail", ""))],
+        data=records, tooltip_data=tips,
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
+                    "padding": "4px 8px", "whiteSpace": "pre"},
+        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("position", "detail")],
+        style_header={"fontWeight": "bold"},
+        style_data_conditional=[
+            {"if": {"filter_query": "{usd} contains '('", "column_id": "usd"}, "color": "var(--neg)", "fontWeight": "700"},
+            {"if": {"filter_query": "{usd} = 'n/a'", "column_id": "usd"}, "color": "var(--muted)", "fontStyle": "italic"},
+            {"if": {"filter_query": "{position} contains '    '"}, "color": "var(--muted)"},
+        ],
+    )
+    return html.Div(className="section section--secondary", children=[
+        html.H4("Positions"),
+        html.P("Delta by asset class at the day's official marks: FX at spot (an NDF currency at its 1M NDF price), "
+               "ES futures at their price and SPX options at the index level, added up in index units ($ per point) "
+               "and in USD; swaps as DV01. A figure with no mark reads n/a with the reason on hover.",
+               className="section-kicker"),
+        table])
+
+
 def render_placeholder_strip(message: str) -> html.Div:
     return html.Div(html.P(f"Unavailable ({message})", className="section-kicker",
                             style={"fontStyle": "italic"}))
@@ -937,6 +1028,7 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
 
     body = [_safe_section("P&L strip", _strip, conn)]
     if scope == "total" and not df.empty:
+        body.append(_safe_section("Positions", lambda: positions_table(conn, as_of), conn))
         body.append(_safe_section("P&L by asset class", lambda: asset_class_pnl_table(conn, as_of, df), conn))
     if df.empty:
         body.append(message_box("No trades for this as-of date in this scope."))

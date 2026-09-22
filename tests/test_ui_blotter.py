@@ -517,7 +517,8 @@ def test_asset_class_table_failure_still_renders_strip_and_trade_table():
             blotter.asset_class_pnl_table = original
 
         assert layout.children[0].id == "blotter-strip-total"
-        asset_class_section = layout.children[1]
+        assert layout.children[1].children[0].children == "Positions"       # the Positions block sits above it
+        asset_class_section = layout.children[2]
         assert "P&L by asset class could not be rendered (asset class boom)." in asset_class_section.children[0].children
         table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total")
         assert table.data  # trade table still rendered
