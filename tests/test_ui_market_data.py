@@ -371,7 +371,7 @@ def test_suspect_rows_flag_a_big_move_and_an_exactly_unchanged_mark_flagged_firs
     assert fwd["change_pct"] == pytest.approx(0.336, abs=1e-3) and fwd["flag"] == ""
     assert by_key[("ESZ6 Index", "FUTURE_PX", "2026-12-18")]["change_pct"] == pytest.approx(0.826, abs=1e-3)
     broken = by_key[("EURSEK", "FWD_OUTRIGHT", "2026-11-02")]          # never interpolated, and it says so
-    assert broken["previous"] == "" and broken["change_pct"] == "" and broken["flag"] == ""
+    assert broken["previous"] is None and broken["change_pct"] is None and broken["flag"] == ""
     assert f"no {PREV} mark for this settle date" in broken["note"] and "SPOT" in broken["note"]
 
 
