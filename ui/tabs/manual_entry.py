@@ -67,8 +67,8 @@ _LIST_COLUMNS = [("trade_id", "Trade id"), ("product", "Product"), ("instrument_
 
 
 def _today_ny() -> str:
-    from ui.tabs.cash_ladder import today_ny
-    return today_ny()
+    from ui.tabs.cash_ladder import calendar_today_ny
+    return calendar_today_ny()   # a trade is dated the calendar day it was dealt, no 17:00 roll
 
 
 def _field(label: str, component) -> html.Div:

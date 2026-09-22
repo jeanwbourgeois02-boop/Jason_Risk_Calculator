@@ -241,11 +241,24 @@ def net_gross_usd(conn: sqlite3.Connection, as_of_date: str) -> dict:
             "commodities": commodities}
 
 
-def today_ny() -> str:
-    """Today's date (ISO) in America/New_York -- the ladder's as-of default (2026-09-15
-    coordinator addition): open trades are trade_date <= today <= settle_date, evaluated
-    against "now" rather than the last BNP snapshot, so the ladder shows what is still
-    outstanding today even between uploads."""
+ROLLOVER_HOUR_NY = 17   # the book's day turns at 17:00 New York, the FX day roll
+
+
+def today_ny(now: Optional[dt.datetime] = None) -> str:
+    """The book's "today" (ISO): the as-of every screen and the header default to. It is
+    the New York date until 17:00 New York and the NEXT date from then on (user,
+    2026-09-22: "only roll to new day after new york 5pm", the FX day roll), so the top bar
+    shows a new day's numbers only once the old day has closed. Marks keep the calendar date
+    (data.bloomberg.live.book_today); a day valued before its own pull takes the latest
+    closes (the near-marks rule). `now` is for tests."""
+    ny = (now or dt.datetime.now(ZoneInfo("America/New_York"))).astimezone(ZoneInfo("America/New_York"))
+    day = ny.date() + dt.timedelta(days=1 if ny.hour >= ROLLOVER_HOUR_NY else 0)
+    return day.isoformat()
+
+
+def calendar_today_ny() -> str:
+    """Today's calendar date in New York, no roll: a trade booked at 18:00 New York on the
+    22nd is dated the 22nd (the Manual entry sub-tab's default trade date)."""
     return dt.datetime.now(ZoneInfo("America/New_York")).date().isoformat()
 
 

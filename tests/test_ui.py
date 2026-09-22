@@ -335,6 +335,18 @@ def test_header_as_of_defaults_to_today_follows_a_pick_and_rolls_over_at_midnigh
     assert header.as_of_after_tick("2026-09-15", True, "2026-09-22") is None             # picked: stays
 
 
+def test_the_books_today_rolls_at_five_pm_new_york():
+    """User, 2026-09-22: "only roll to new day after new york 5pm"."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    assert cash_ladder.ROLLOVER_HOUR_NY == 17
+    assert cash_ladder.today_ny(datetime(2026, 9, 22, 16, 59, tzinfo=ny)) == "2026-09-22"
+    assert cash_ladder.today_ny(datetime(2026, 9, 22, 17, 0, tzinfo=ny)) == "2026-09-23"
+    assert cash_ladder.today_ny(datetime(2026, 9, 22, 23, 30, tzinfo=ny)) == "2026-09-23"
+    assert cash_ladder.today_ny(datetime(2026, 9, 23, 0, 5, tzinfo=ny)) == "2026-09-23"
+
+
 def test_ladder_heading_text_and_today_button(tmp_path):
     """Coordinator addition 2026-09-15: the bare date-picker card is replaced by a
     heading naming the as-of date, the picker, and a Today button."""
