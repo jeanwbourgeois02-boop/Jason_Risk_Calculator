@@ -1,0 +1,2 @@
+- [History files and units](history_files_and_units.md) — where the nm-dashboard parquet cache lives on this Mac (two copies, different freshness), every column and unit verified 2026-09-22, the NDF columns are 1M outrights, DV01 sign already matches the dashboard.
+- [Definitions and choices 2026-09-22](definitions_2026_09_22.md) — the dashboard's exact metric definitions implemented in engine/risk/metrics.py, what was deliberately not replicated (payer accrual, NDF-implied carry, 2-day lag on VaR), test design on synthetic parquet.

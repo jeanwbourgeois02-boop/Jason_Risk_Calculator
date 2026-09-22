@@ -77,3 +77,75 @@ def test_unreachable_bloomberg_reason_is_kept_and_a_started_feed_has_none(tmp_pa
     assert uiapp.start_bloomberg_feed_with_reason(tmp_path / "risk.db") == (feed, "")
     assert "on request only" in capsys.readouterr().out
     assert started == []
+
+
+# ---------------------------------------------------------------- the Risk tab (2026-09-22)
+# ui/tabs/risk.py is ui-risk's; the shell only places it third, gives it the Ladder's
+# default date (it has no picker of its own and follows the header's as-of store) and
+# registers its one callback next to the other tabs'.
+
+def _ids(component):
+    """Every id in the subtree, leaves included: `_walk` above skips a component with
+    neither `children` nor `className` (a `dcc.Interval`), which the Risk body carries."""
+    from dash.development.base_component import Component
+    found = set()
+    stack = [component]
+    while stack:
+        c = stack.pop()
+        found.add(getattr(c, "id", None))
+        children = getattr(c, "children", None)
+        kids = children if isinstance(children, (list, tuple)) else [children]
+        stack.extend(k for k in kids if isinstance(k, Component))
+    return found
+
+
+def test_risk_tab_is_third_and_the_app_still_opens_on_the_blotter():
+    from dash import dcc
+    assert uiapp.VISIBLE_TABS == ["Blotter", "Ladder", "Risk", "Market data"]
+    assert uiapp.VISIBLE_TABS.index("Risk") == 2
+    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
+    tabs = layout.children[0].children[0]
+    assert isinstance(tabs, dcc.Tabs)
+    assert [t.label for t in tabs.children] == ["Blotter", "Ladder", "Risk", "Market data"]
+    assert tabs.value == "Blotter"
+
+
+def test_layout_carries_the_risk_body_and_its_container():
+    from ui.tabs import risk
+    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
+    bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
+    body_ids = [getattr(b, "id", None) for b in bodies.children]
+    assert body_ids == ["tab-body-blotter", "tab-body-ladder", "tab-body-risk", "tab-body-market-data"]
+    risk_body = bodies.children[2]
+    assert risk_body.className == "tab-body"
+    inside = _ids(risk_body)
+    assert risk.BODY_ID in inside                # "risk-body": the container the callback fills
+    assert risk.REFRESH_ID in inside             # "risk-refresh": its own safety interval
+
+
+def test_risk_tab_title_names_the_ladders_default_date(monkeypatch):
+    """Same default date as the Ladder (today in New York): the Risk title says which day
+    the header's as-of store starts on."""
+    from ui.tabs import cash_ladder
+    monkeypatch.setattr(cash_ladder, "today_ny", lambda: "2026-09-22")
+    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
+    bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
+    texts = [c.children for c in _walk(bodies.children[2]) if isinstance(getattr(c, "children", None), str)]
+    assert any("2026-09-22" in t and "as-of" in t for t in texts)
+
+
+def test_create_app_registers_the_risk_callback_and_the_show_hide_covers_its_body(tmp_path):
+    from ui import revision
+    from ui.tabs import header, risk
+    app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)
+    key = f"{risk.BODY_ID}.children"
+    assert key in app.callback_map, "risk.register_callbacks was not called from create_app"
+    inputs = {(d["id"], d["property"]) for d in app.callback_map[key]["inputs"]}
+    assert inputs == {(header.AS_OF_STORE_ID, "data"), (revision.DATA_REVISION_ID, "data"),
+                      (risk.REFRESH_ID, "n_intervals")}
+    # The one show/hide callback now toggles four bodies, the Risk one included.
+    style_key = [k for k in app.callback_map if k.startswith("..tab-body-blotter.style")]
+    assert style_key and "tab-body-risk.style" in style_key[0]
+    wrapped = app.callback_map[style_key[0]]["callback"]
+    toggle = getattr(wrapped, "__wrapped__", wrapped)    # the raw function, not Dash's context wrapper
+    assert toggle("Risk") == [{"display": "none"}, {"display": "none"}, {}, {"display": "none"}]

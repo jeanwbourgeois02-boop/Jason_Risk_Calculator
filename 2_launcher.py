@@ -66,6 +66,7 @@ PACKAGES = [
     "pyyaml>=6.0",        # engine/pnl/stress.py imports this as `yaml`
     "QuantLib==1.43",     # engine/rates, engine/options -- curve bootstrap and option pricing
     "scipy>=1.11",        # engine/options/vendor/options_calc -- implied-vol solvers (scipy.optimize.brentq)
+    "pyarrow>=15",        # engine/risk/history.py -- pandas.read_parquet of the nm-dashboard market history
 ]
 DEV_PACKAGES = [
     "pytest>=8",          # tests/
@@ -78,7 +79,7 @@ DEV_PACKAGES = [
 # new PC said scipy was missing while the launcher saw nothing wrong): a bare `import
 # scipy` is lazy and succeeds even when its compiled parts cannot load.
 IMPORT_CHECKS = ("dash", "pandas", "numpy", "openpyxl", "xlrd", "plotly", "werkzeug",
-                  "yaml", "QuantLib", "zoneinfo", "scipy.optimize", "scipy.stats")
+                  "yaml", "QuantLib", "zoneinfo", "scipy.optimize", "scipy.stats", "pyarrow")
 
 
 def requirements_text() -> str:

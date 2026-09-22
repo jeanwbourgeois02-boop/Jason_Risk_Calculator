@@ -1,52 +1,43 @@
 ---
 name: wiring-c5
-description: ui/app.py assembly pattern for the four-tab layout (Task C5, 2026-09-15) and a stale test file outside ui-shell scope that breaks full-suite runs
+description: ui/app.py assembly pattern for the tab layout (Blotter, Ladder, Risk, Market data + header as of 2026-09-22), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
 metadata:
   type: project
 ---
 
-`ui/app.py` assembles `ui/tabs/{header,cash_ladder,blotter,market_data,reconciliation}.py`,
-each exposing `build_layout(default_date)` / `register_callbacks(app, get_db_path)`
-(header also has a no-arg `layout()`). `VISIBLE_TABS = ["Ladder", "Blotter",
-"Market data", "Reconciliation"]`. `reconciliation.register_callbacks` registers
-`ui/workbook_rates` internally now — do not also call `workbook_rates.layout`/`register`
-at the top level in `ui/app.py`, or Dash raises on duplicate ids.
+`ui/app.py` assembles `ui/tabs/{header,blotter,cash_ladder,risk,market_data}.py`, each
+exposing `build_layout(default_date)` / `register_callbacks(app, get_db_path)` (header
+also has a no-arg `layout()`). `VISIBLE_TABS = ["Blotter", "Ladder", "Risk", "Market
+data"]`; the app opens on the first. Reconciliation was removed 2026-09-16; Risk
+(`ui/tabs/risk.py`, ui-risk's, engine/risk's output) was added 2026-09-22 between Ladder
+and Market data.
 
-The header's as-of store (`header.AS_OF_STORE_ID`) is mirrored from the Ladder tab's
-own date picker (`cash_ladder.DATE_PICKER_ID`) via a small `app.callback(...)` added
-directly in `create_app()` — there is no dedicated cross-tab store module.
+**Wiring a new tab (2026-09-22, Risk):** import it in `from ui.tabs import ...`, add the
+label to `VISIBLE_TABS`, an entry in `tab_builders` and `tab_defaults` inside
+`build_layout`, and one `x.register_callbacks(app, get_db_path=lambda: resolved)` line in
+`create_app`. The tab bodies and the show/hide callback derive from `VISIBLE_TABS`, so
+nothing else changes. A tab with no date picker of its own (Risk) follows
+`header.AS_OF_STORE_ID`, whose default is the Ladder's `cash_ladder.today_ny()`, so give it
+the Ladder's default date and do not touch `_follow_pickers` / `_roll_to_today`.
+
+The header's as-of store (`header.AS_OF_STORE_ID`) follows the Ladder's and the Blotter's
+date pickers via small `app.callback(...)`s written directly in `create_app()`; there is no
+dedicated cross-tab store module.
 
 **Why:** [[app-structure]] (old memory) describes the retired six-tab / summary()
-placeholder layout; that structure no longer exists after `docs/BUILD_PLAN.md`
-2026-09-15 replaced it with one valuation + four tabs + header. Trust BUILD_PLAN
-section 5/6 over the old CLAUDE.md "Six tabs as views" table when they conflict —
-BUILD_PLAN explicitly supersedes it.
+placeholder layout; `docs/BUILD_PLAN.md` 2026-09-15 replaced it with one valuation + tabs
++ header, and CLAUDE.md "Tabs as views" is now the authoritative list.
 
 **How to apply:** when re-wiring `ui/app.py`, check each tab module's actual
-`build_layout`/`register_callbacks` signature first (they can drift, e.g. `trades`
-gained a `theme` column making old 13-value INSERT fixtures fail with "14 columns but
-13 values supplied" — check `data/ingest/schema.py` column count before trusting an
-old test fixture literal).
+`build_layout`/`register_callbacks` signature first (they can drift). Test helpers in
+`tests/test_app.py` / `tests/test_ui.py`: (1) a registered callback is invoked through
+`getattr(cb, "__wrapped__", cb)` (Dash's wrapper wants `outputs_list` kwargs); (2) the
+`_walk` helper in test_app.py descends only into children that have `children` or
+`className`, so a leaf like `dcc.Interval` (neither) is never yielded -- use `_ids`
+(walks by `isinstance(child, dash.development.base_component.Component)`) to find an
+interval's id.
 
-**Known stray breakage (not ui-shell's to fix):** `tests/test_cash_ladder_parity.py`
-(not `tests/test_ui.py`, so outside this agent's owned test file) imports
-`ui.tabs.cash_ladder.valuation_table`, which no longer exists after the C1 ladder
-rewrite (workbook mark-to-market panel removed from that tab). This blocks
-`py -3 -m pytest tests/ -q` (collection error) until whichever agent owns that test
-file either deletes it or ports it to the new reconciliation-tab location. Reported to
-housekeeper/C1, not edited (outside ui-shell's directory/file allowlist).
-
-**Concurrent-edit hazard (2026-09-15):** another agent was actively mid-editing
-`ui/tabs/blotter.py` (a file this agent does not own) *during* this session --
-`build_layout` had already dropped the toolbar dropdown filter IDs (moved to native
-DataTable header filters) while `register_callbacks` still referenced the old IDs,
-so `py -3 -m pytest tests/` failed with `NameError: STATUS_FILTER_ID` partway through
-that agent's own edit. A `git stash` taken mid-edit will scoop up *their* uncommitted
-file too and can produce a confusing 3-way merge on `git stash pop`. **How to apply:**
-if you need to stash to compare against HEAD, `git stash push -- <only your files>`
-(or check `git status` first and stash foreign dirty files separately) rather than a
-bare `git stash`; and if a full-suite run shows a `NameError`/`AttributeError` inside a
-file you don't own, re-run a few minutes later before reporting it as broken -- it may
-just be another agent still mid-edit. `tests/test_ui_blotter.py` failures on
-2026-09-15 (`test_detail_table_*`, `test_subtotal_line_*`) were this in-progress state,
-not something introduced by this agent's exposure.py/cash_ladder.py changes.
+**Concurrent-edit hazard (2026-09-15):** another agent was mid-editing a tab module while
+this agent ran the suite, so a `NameError` inside a file you don't own may be their
+in-progress state; re-run before reporting it as broken. If you must stash, `git stash
+push -- <only your files>`, never a bare `git stash` (it scoops their dirty files too).

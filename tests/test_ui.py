@@ -193,8 +193,9 @@ def test_four_tabs_present_in_order(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     layout = uiapp.build_layout(uiapp.load_summary(db_path))
-    assert _tab_labels(layout) == ["Blotter", "Ladder", "Market data"]    # user, 2026-09-22: Blotter first
-    assert uiapp.VISIBLE_TABS == ["Blotter", "Ladder", "Market data"]
+    # user, 2026-09-22: Blotter first; Risk (ui/tabs/risk.py) third, same day
+    assert _tab_labels(layout) == ["Blotter", "Ladder", "Risk", "Market data"]
+    assert uiapp.VISIBLE_TABS == ["Blotter", "Ladder", "Risk", "Market data"]
 
 
 def test_no_overall_book_or_placeholder_tabs(tmp_path):
@@ -266,7 +267,7 @@ def test_tab_bodies_always_present_and_tabs_have_no_children(tmp_path):
     bodies = _find_tab_bodies(layout)
     assert bodies is not None
     slugs = {getattr(b, "id", None) for b in bodies.children}
-    assert slugs == {"tab-body-ladder", "tab-body-blotter", "tab-body-market-data"}
+    assert slugs == {"tab-body-ladder", "tab-body-blotter", "tab-body-risk", "tab-body-market-data"}
 
 
 def test_tab_show_hide_callback_toggles_bodies(tmp_path):

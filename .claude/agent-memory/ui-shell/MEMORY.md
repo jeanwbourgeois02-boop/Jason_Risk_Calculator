@@ -1,6 +1,6 @@
 - [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
 - [App structure](app-structure.md) — retired 2026-09-15; see [wiring-c5](wiring-c5.md) for the current four-tab layout
-- [Wiring C5](wiring-c5.md) — current ui/app.py assembly (Ladder/Blotter/Market data/Reconciliation + header), stray broken test file outside scope
+- [Wiring C5](wiring-c5.md) — ui/app.py assembly (Blotter/Ladder/Risk/Market data + header, 2026-09-22), how to wire a new tab, _walk skips dcc.Interval
 - [Top-bar restructure 2026-09-15](top-bar-restructure-2026-09-15.md) — no-children dcc.Tab + always-present tab-bodies, header perf split, Ladder today/title/forward-proxy rate, upload date-picker removal
 - [Futures upload diagnostics 2026-09-16](futures-upload-diagnostics-2026-09-16.md) — ImportResult.messages warning panel, never show raw exceptions, __wrapped__ trick to unit-test Dash callbacks
 - [Reconciliation upload declutter 2026-09-16](reconciliation-upload-declutter-2026-09-16.md) — date picker moved off the futures-import card into its own toolbar; upload card is standalone .upload-card

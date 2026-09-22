@@ -1,0 +1,40 @@
+# Risk tab parameters, read by engine/risk/config.py::load_config. The defaults in that
+# module are the nm-dashboard's own constants (fx_alpha/core/risk.py) and apply when this
+# file is missing; every value here can be edited by hand.
+
+# The fund's annualised vol allocation in USD (docs/open-questions.md item 15: capital 35m,
+# vol allocation 4.5m; the nm-dashboard's model book used 60m). The book's blended vol is
+# shown against it (vol_vs_target_pct).
+vol_target_usd: 4500000
+
+# The stress cap as a percentage of the vol target (core/risk.py STRESS_FRACTION = 0.50):
+# the book's worst day ex shocks must stay under stress_cap_usd = vol_target_usd x stress_pct / 100.
+stress_pct: 50
+
+# Blended annualised vol (core/risk.py blended_vol_scaler / dashboard.py _blended_vol_ann):
+# w_trail x std(last trail_window_bd daily P&L) x sqrt(252) + w_stress x std(daily P&L over
+# stress_start..stress_end) x sqrt(252); before the cutover the crisis leg is the trailing
+# vol. Fewer than trail_window_bd observations = no vol (NaN with the reason).
+blended:
+  trail_window_bd: 500
+  w_trail: 0.6666666667
+  w_stress: 0.3333333333
+  stress_start: 2008-01-01
+  stress_end: 2010-12-31
+  cutover: 2011-01-01
+
+# One-day historical-simulation VaR: minus the (1 - var_confidence) quantile of the last
+# var_window_bd daily P&L observations (the dashboard's var95_1y_$M). Fewer observations = NaN.
+var_window_bd: 252
+var_confidence: 0.95
+
+# The worst day ex shocks is the minimum daily P&L from this date to the lag-2 date
+# (dashboard.py _worst_start).
+worst_day_start: 2008-01-01
+
+# One-off shocks set to 0 in the worst-day-ex-shocks figure only (core/risk.py
+# STRESS_IGNORE_DATES); they stay in the vol, the VaR and the raw worst day. Add a line per
+# shock to exclude.
+shock_dates:
+  - {date: 2015-01-15, name: SNB floor removal}
+  - {date: 2016-06-24, name: Brexit referendum result}

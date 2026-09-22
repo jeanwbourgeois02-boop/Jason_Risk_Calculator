@@ -140,7 +140,7 @@ every valuation pinned in `tests/golden/book.json`, so a refactor that changes n
 configured in `pyproject.toml` (tool settings only, not a package), and a hook in `.claude/settings.json` that runs
 ruff on every Python file Claude edits. Provenance of rules moves from code comments to `decisions.md`.
 
-Environment variables: `RISK_DB` (database path), `RISK_LIVE=0` (disable the feed), `BLP_HOST`, `BLP_PORT`.
+Environment variables: `RISK_DB` (database path), `RISK_LIVE=0` (disable the feed), `BLP_HOST`, `BLP_PORT`, `RISK_HISTORY_DIR` (the nm-dashboard market-history folder the Risk tab reads for its return history; default: `../nm-dashboard/fx_alpha/bbg_data` next to this repo, else `../bbg_data/bbg_data`; the tab names the folder it used or that none was found).
 
 Dependencies are a single list, `PACKAGES`, in `2_launcher.py` (`py 2_launcher.py setup` installs it directly;
 there is no `requirements.txt` checked into the repo). Need one on disk for `pip install -r` or a

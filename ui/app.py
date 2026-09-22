@@ -3,10 +3,10 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Three tabs per docs/BUILD_PLAN.md section 5 ("Tabs (layer 3)"), Reconciliation
-removed 2026-09-16 (the old Excel workbook it existed to cross-check is no longer
-in use): Ladder, Blotter, Market data. A header (ui/tabs/header.py) sits above the
-tabs on every view, showing LTD / Daily / 5d / MTD / YTD / trading from
+Four tabs (CLAUDE.md "Tabs as views"), Reconciliation removed 2026-09-16 (the old
+Excel workbook it existed to cross-check is no longer in use) and Risk added
+2026-09-22: Blotter, Ladder, Risk, Market data. A header (ui/tabs/header.py) sits
+above the tabs on every view, showing LTD / Daily / 5d / MTD / YTD / trading from
 engine.pnl.ledger.
 
 The "Overall book" tab and the six-tab CLAUDE.md layout are retired by
@@ -30,15 +30,16 @@ from typing import Union
 import dash
 from dash import Input, Output, State, dcc, html
 
-from ui.tabs import blotter, cash_ladder, header, market_data
+from ui.tabs import blotter, cash_ladder, header, market_data, risk
 from ui import revision, uploads
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
 
 # Order per user decision 2026-09-22 ("I want the first tab to be blotter, and the second to
-# be cash ladder"); the app opens on the first.
-VISIBLE_TABS = ["Blotter", "Ladder", "Market data"]
+# be cash ladder"); the app opens on the first. Risk (ui/tabs/risk.py, 2026-09-22) sits
+# between the Ladder and Market data.
+VISIBLE_TABS = ["Blotter", "Ladder", "Risk", "Market data"]
 
 
 def get_db_path() -> Path:
@@ -158,11 +159,11 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     children of their own -- Dash nests a Tab's children inside its own styled wrapper,
     which was pushing the navy `.top-bar` around the whole page) sits at the very top
     with the upload control pinned to its right; the P&L header sits directly under the
-    tab bar, on every tab. Below that, all three tab bodies live in one always-present
+    tab bar, on every tab. Below that, all four tab bodies live in one always-present
     `html.Div(id="tab-bodies")`, each wrapped in its own `html.Div(id=f"tab-body-{slug}")`
     -- bodies never leave the layout, so every tab's own callbacks (registered against
     ids inside their body) keep firing regardless of which tab is selected. One
-    show/hide callback (registered in `create_app`) toggles the three bodies' `style` on
+    show/hide callback (registered in `create_app`) toggles the four bodies' `style` on
     `main-tabs`' `value`.
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
@@ -184,11 +185,15 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     tab_builders = {
         "Ladder": cash_ladder.build_layout,
         "Blotter": blotter.build_layout,
+        "Risk": risk.build_layout,
         "Market data": market_data.build_layout,
     }
     tab_defaults = {
         "Ladder": ladder_default_date,
         "Blotter": snapshot_date,
+        # Risk has no picker of its own: it follows the header's as-of store, whose default
+        # is the Ladder's (today in New York), so its title names the same date.
+        "Risk": ladder_default_date,
         "Market data": ladder_default_date,
     }
     tabs = [dcc.Tab(label=label, value=label, className="tab", selected_className="tab--selected")
@@ -239,6 +244,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     header.register_callbacks(app, get_db_path=lambda: resolved)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
     blotter.register_callbacks(app, get_db_path=lambda: resolved)
+    risk.register_callbacks(app, get_db_path=lambda: resolved)
     market_data.register_callbacks(app, get_db_path=lambda: resolved)
     uploads.register(app, get_db_path=lambda: resolved)
     revision.register(app, get_db_path=lambda: resolved)
