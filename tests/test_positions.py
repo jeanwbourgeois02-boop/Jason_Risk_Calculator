@@ -83,6 +83,14 @@ def test_positions_add_the_spx_option_delta_to_the_es_futures_and_sum_dv01_and_o
     fx = pos["fx"]
     assert fx["available"] and fx["net_usd"] == pytest.approx(1_000_000.0 - 1_210_000.0)
     assert fx["gross_usd"] == pytest.approx(1_000_000.0 + 1_210_000.0)
+    # the key table: one row per currency, largest |USD delta| first, USD last; a metal row flagged
+    rows = {c["ccy"]: c for c in fx["by_ccy"]}
+    assert [c["ccy"] for c in fx["by_ccy"]] == ["EUR", "JPY", "XAU", "USD"]
+    assert (rows["JPY"]["local_delta"], rows["JPY"]["usd_delta"], rows["JPY"]["quoted"], rows["JPY"]["label"]) == \
+        (-150e6, pytest.approx(-1_000_000.0), 150.0, "USDJPY")
+    assert (rows["EUR"]["local_delta"], rows["EUR"]["usd_delta"]) == (pytest.approx(1.1e6), pytest.approx(1_210_000.0))
+    assert rows["XAU"]["metal"] and rows["XAU"]["usd_delta"] == 435000.0 and not rows["JPY"]["metal"]
+    assert rows["USD"]["quoted"] == 1.0 and rows["USD"]["reason"] == ""
     assert [(m["ccy"], m["units"], m["usd_delta"]) for m in fx["metals"]] == [("XAU", 100.0, 435000.0)]
 
 
@@ -115,7 +123,12 @@ def test_positions_table_renders_the_lines_with_reasons_on_hover():
     _mark(conn, "USDJPY", AS_OF, "SPOT", 150.0, "BBG_BFXFORWARD")
     records, tips = positions_rows(conn, AS_OF)
     by_label = {r["position"].strip(): r for r in records}
+    assert by_label["JPY"]["rate"] == "USDJPY 150.00" and by_label["JPY"]["units"] == "(150,000,000)"
+    assert by_label["JPY"]["usd"] == "(1,000,000)" and by_label["JPY"]["kind"] == "ccy"
+    assert "EUR" not in by_label                                               # the option has no DELTA mark: no row, named below
+    assert by_label["XAU"]["detail"] == "metal, not in the FX net" and by_label["XAU"]["usd"] == "n/a"   # no gold price
     assert by_label["FX net USD delta (+ = long USD)"]["usd"] == "1,000,000"
+    assert by_label["FX options delta (USD)"]["usd"] == "n/a"
     assert by_label["Equity index delta (ES futures + SPX options)"]["usd"] == "n/a"
     assert by_label["ESZ6 Index"]["units"] == "-1,450.00" and by_label["ESZ6 Index"]["usd"] == "n/a"
     assert by_label["Rates DV01 (USD, +1bp parallel)"]["usd"] == "n/a"

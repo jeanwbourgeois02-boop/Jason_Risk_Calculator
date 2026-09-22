@@ -646,19 +646,29 @@ def _pos_cell(value, digits: int = 0) -> str:
     return format_cell(value) if digits == 0 else f"{value:,.{digits}f}"
 
 
+def _quoted(value) -> str:
+    if value is None or (isinstance(value, float) and value != value):
+        return ""
+    return f"{value:,.4f}" if abs(value) < 100 else f"{value:,.2f}"
+
+
 def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
     """(records, tooltips) of the Total book's Positions table (user, 2026-09-22: "I want
-    to see my total positions delta, dv01 options in the total tab in blotter ... SPX
-    options - the detla should be added to the esz6 futures"): the figures of
-    `engine.ladder.positions.book_positions`, one line per asset class with its parts
-    indented under it. Columns: Position, Delta (units), Delta (USD), Detail. A figure that
-    could not be computed reads "n/a" with its reason in the cell's tooltip."""
+    to see the delta by currency, futures and rates dv01 in the blotter tab. this is the
+    key table of the blotter"): the figures of `engine.ladder.positions.book_positions`.
+    First one row per currency with delta (the Ladder's risk table: rate as quoted, local
+    delta, USD delta; a metal row says it is not in the FX net), then the FX net and gross,
+    then the ES futures and SPX options with their equity-index total, then DV01 by
+    currency, then the FX options' delta by pair (already inside the currency rows). Columns:
+    Position, Rate, Delta (local), Delta (USD), Detail. A figure that could not be computed
+    reads "n/a" with its reason in the cell's tooltip."""
     from engine.ladder.positions import book_positions
     pos = book_positions(conn, as_of)
     records, tips = [], []
 
-    def add(label, units, usd, detail="", reason="", indent=False):
-        rec = {"position": ("    " if indent else "") + label, "units": units, "usd": usd, "detail": detail}
+    def add(label, units, usd, detail="", reason="", indent=False, rate="", kind=""):
+        rec = {"position": ("    " if indent else "") + label, "rate": rate, "units": units, "usd": usd,
+               "detail": detail, "kind": kind}
         tip = {}
         if reason:
             for col in ("units", "usd"):
@@ -668,37 +678,42 @@ def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
         tips.append(tip)
 
     fx = pos["fx"]
-    add("FX net USD delta (+ = long USD)", "", _pos_cell(fx["net_usd"]), "the header's Net USD; FX options' delta included", fx["reason"])
-    add("FX gross USD delta", "", _pos_cell(fx["gross_usd"]), "sum of |per-pair USD delta|", fx["reason"])
-    for m in fx["metals"]:
-        add(f"{m['ccy']} (oz)", _pos_cell(m["units"], 2), _pos_cell(m["usd_delta"]), "at spot", m["reason"], indent=True)
+    for c in fx.get("by_ccy", []):
+        detail = "metal, not in the FX net" if c["metal"] else ("" if c["ccy"] != "USD" else "USD legs")
+        add(f"{c['ccy']}", _pos_cell(c["local_delta"]), _pos_cell(c["usd_delta"]), detail, c["reason"],
+            rate=(f"{c['label']} {_quoted(c['quoted'])}".strip() if c["ccy"] != "USD" else ""), kind="ccy")
+    if not fx.get("by_ccy") and fx.get("reason"):
+        add("Delta by currency", "", "n/a", "", fx["reason"], kind="ccy")
+    add("FX net USD delta (+ = long USD)", "", _pos_cell(fx["net_usd"]), "the header's Net USD; FX options' delta included", fx["reason"], kind="total")
+    add("FX gross USD delta", "", _pos_cell(fx["gross_usd"]), "sum of |per-pair USD delta|", fx["reason"], kind="total")
 
     eq = pos["equity_index"]
     if eq["lines"]:
         es = eq.get("es_contracts")
         detail = (f"{_pos_cell(es, 2)} ES-contract equivalents" if es == es else "") + \
                  (f"; {len(eq['missing'])} not priced (see the sub-lines)" if eq["missing"] else "")
-        add("Equity index delta (ES futures + SPX options)", _pos_cell(eq["index_units"], 2), _pos_cell(eq["usd_delta"]),
-            detail, eq["reason"] or (eq["missing"][0] if eq["missing"] and eq["usd_delta"] != eq["usd_delta"] else ""))
         for line in eq["lines"]:
-            what = f"{_pos_cell(line['contracts'], 0)} contracts" + (f" at {line['level']:,.2f}" if line["level"] else "")
-            add(line["label"], _pos_cell(line["index_units"], 2), _pos_cell(line["usd_delta"]), what, line["reason"], indent=True)
+            what = f"{_pos_cell(line['contracts'], 0)} contracts"
+            add(line["label"], _pos_cell(line["index_units"], 2), _pos_cell(line["usd_delta"]), what, line["reason"],
+                rate=(f"{line['level']:,.2f}" if line["level"] else ""), kind="future")
+        add("Equity index delta (ES futures + SPX options)", _pos_cell(eq["index_units"], 2), _pos_cell(eq["usd_delta"]),
+            detail, eq["reason"] or (eq["missing"][0] if eq["missing"] and eq["usd_delta"] != eq["usd_delta"] else ""), kind="total")
     else:
-        add("Equity index delta (ES futures + SPX options)", "", "n/a", "", eq["reason"])
+        add("Equity index delta (ES futures + SPX options)", "", "n/a", "", eq["reason"], kind="total")
 
     rates = pos["rates"]
+    for ccy, dv01 in sorted(rates["by_ccy"].items()):
+        add(f"{ccy} swaps DV01", "", _pos_cell(dv01), "USD per +1bp parallel", kind="rates")
     add("Rates DV01 (USD, +1bp parallel)", "", _pos_cell(rates["dv01_usd"]),
         f"{rates['swaps']} open swap(s)" + (f"; {len(rates['missing'])} without a DV01 mark" if rates["missing"] else ""),
-        rates["reason"] or (rates["missing"][0] if rates["missing"] else ""))
-    for ccy, dv01 in sorted(rates["by_ccy"].items()):
-        add(f"{ccy} swaps", "", _pos_cell(dv01), "", indent=True)
+        rates["reason"] or (rates["missing"][0] if rates["missing"] else ""), kind="total")
 
     opt = pos["fx_options"]
+    for pair, usd in sorted(opt["by_pair"].items()):
+        add(f"{pair} options delta", "", _pos_cell(usd), "inside the currency rows above", kind="option")
     add("FX options delta (USD)", "", _pos_cell(opt["usd_delta"]),
         f"{opt['options']} open option(s), part of the FX net above" + (f"; {len(opt['missing'])} not converted" if opt["missing"] else ""),
-        opt["reason"] or (opt["missing"][0] if opt["missing"] else ""))
-    for pair, usd in sorted(opt["by_pair"].items()):
-        add(pair, "", _pos_cell(usd), "", indent=True)
+        opt["reason"] or (opt["missing"][0] if opt["missing"] else ""), kind="total")
     return records, tips
 
 
@@ -707,25 +722,27 @@ def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
     records, tips = positions_rows(conn, as_of)
     table = dash_table.DataTable(
         id=POSITIONS_TABLE_ID,
-        columns=[{"name": n, "id": c} for c, n in (("position", "Position"), ("units", "Delta (units)"),
-                                                     ("usd", "Delta (USD)"), ("detail", ""))],
-        data=records, tooltip_data=tips,
+        columns=[{"name": n, "id": c} for c, n in (("position", "Position"), ("rate", "Rate"),
+                                                     ("units", "Delta (local)"), ("usd", "Delta (USD)"), ("detail", ""))],
+        data=[{k: v for k, v in r.items() if k != "kind"} | {"kind": r["kind"]} for r in records], tooltip_data=tips,
+        hidden_columns=["kind"], css=[{"selector": ".show-hide", "rule": "display: none"}],
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
                     "padding": "4px 8px", "whiteSpace": "pre"},
-        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("position", "detail")],
+        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("position", "rate", "detail")],
         style_header={"fontWeight": "bold"},
         style_data_conditional=[
             {"if": {"filter_query": "{usd} contains '('", "column_id": "usd"}, "color": "var(--neg)", "fontWeight": "700"},
+            {"if": {"filter_query": "{units} contains '('", "column_id": "units"}, "color": "var(--neg)"},
             {"if": {"filter_query": "{usd} = 'n/a'", "column_id": "usd"}, "color": "var(--muted)", "fontStyle": "italic"},
-            {"if": {"filter_query": "{position} contains '    '"}, "color": "var(--muted)"},
+            {"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700", "borderTop": "1px solid var(--muted)"},
         ],
     )
-    return html.Div(className="section section--secondary", children=[
+    return html.Div(className="section", children=[
         html.H4("Positions"),
-        html.P("Delta by asset class at the day's official marks: FX at spot (an NDF currency at its 1M NDF price), "
-               "ES futures at their price and SPX options at the index level, added up in index units ($ per point) "
-               "and in USD; swaps as DV01. A figure with no mark reads n/a with the reason on hover.",
+        html.P("Delta by currency at the day's official rates (spot; an NDF currency at its 1M NDF price), FX options "
+               "included; ES futures at their price and SPX options at the index level, added up in index units "
+               "($ per point) and in USD; swaps as DV01 per +1bp. A figure with no mark reads n/a with the reason on hover.",
                className="section-kicker"),
         table])
 

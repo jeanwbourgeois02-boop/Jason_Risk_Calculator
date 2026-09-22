@@ -67,24 +67,42 @@ def _official(conn: sqlite3.Connection, instrument_id: str, settle_date: str, ma
 
 
 def fx_positions(conn: sqlite3.Connection, as_of: str) -> dict:
-    """{'available', 'net_usd' (+ = long USD), 'gross_usd', 'reason', 'metals': [{ccy, units,
-    usd_delta, reason}]} from the Ladder's own exposure path."""
+    """{'available', 'net_usd' (+ = long USD), 'gross_usd', 'reason', 'by_ccy': [...], 'metals':
+    [{ccy, units, usd_delta, reason}]} from the Ladder's own exposure path. `by_ccy` (user,
+    2026-09-22: "I want to see the delta by currency ... this is the key table of the
+    blotter") is the Ladder's per-currency risk table: one row per currency with delta,
+    {ccy, quoted (the rate as quoted), label ('USDKRW' or the 1M NDF ticker), local_delta,
+    usd_delta (NaN with `reason` when the currency has no rate), metal}, largest |USD
+    delta| first, USD itself last."""
     from data.bloomberg.live import rates_from_marks
-    from engine.ladder.exposure import build_exposure, portfolio_totals
+    from engine.ladder.exposure import COMMODITY_CCYS, build_exposure, portfolio_totals
     from engine.ladder.exposure_adapter import exposure_records_from_db
     from engine.ladder.ndf import apply_ndf_1m_rates, missing_rate_reason
     records, _unresolved = exposure_records_from_db(conn, as_of)
     rates = apply_ndf_1m_rates(conn, rates_from_marks(conn))
-    totals = portfolio_totals(build_exposure(records, rates))
+    result = build_exposure(records, rates)
+    totals = portfolio_totals(result)
+    messages = {r["currency"]: r["message"] for r in result.status.to_dict("records")} if not result.status.empty else {}
+    by_ccy = []
+    for s in result.summary.to_dict("records"):
+        ccy = s["currency"]
+        entry = rates.get(ccy) or {}
+        usd = s["usd_delta"]
+        ok = s["status"] in ("OK", "STALE") and usd == usd
+        by_ccy.append({"ccy": ccy, "quoted": 1.0 if ccy == "USD" else entry.get("rate"),
+                       "label": "USD" if ccy == "USD" else (entry.get("label") or entry.get("pair") or ""),
+                       "local_delta": float(s["local_delta"]), "usd_delta": float(usd) if ok else float("nan"),
+                       "reason": "" if ok else (messages.get(ccy) or str(s["status"])), "metal": ccy in COMMODITY_CCYS})
+    by_ccy.sort(key=lambda r: (r["ccy"] == "USD", -(abs(r["usd_delta"]) if r["usd_delta"] == r["usd_delta"] else -1), r["ccy"]))
     metals = [{"ccy": c.get("currency"), "units": c.get("local_delta"), "usd_delta": c.get("usd_delta"),
                "reason": c.get("reason") or ("" if c.get("status") == "OK" else str(c.get("status") or ""))}
               for c in totals.get("commodities", [])]
     if totals.get("missing"):
         return {"available": False, "net_usd": float("nan"), "gross_usd": float("nan"),
-                "reason": missing_rate_reason(totals["missing"], as_of), "metals": metals}
+                "reason": missing_rate_reason(totals["missing"], as_of), "by_ccy": by_ccy, "metals": metals}
     # portfolio_totals' net is the net non-USD delta (+ = long foreign); the USD position is its opposite.
     return {"available": True, "net_usd": -float(totals["net_usd"]), "gross_usd": float(totals["gross_usd"]),
-            "reason": "", "metals": metals}
+            "reason": "", "by_ccy": by_ccy, "metals": metals}
 
 
 def equity_index_positions(conn: sqlite3.Connection, as_of: str) -> dict:
@@ -171,7 +189,7 @@ def fx_option_positions(conn: sqlite3.Connection, as_of: str) -> dict:
 
 
 _EMPTY = {
-    "fx": {"available": False, "net_usd": float("nan"), "gross_usd": float("nan"), "metals": []},
+    "fx": {"available": False, "net_usd": float("nan"), "gross_usd": float("nan"), "by_ccy": [], "metals": []},
     "equity_index": {"lines": [], "index_units": float("nan"), "usd_delta": float("nan"), "es_contracts": float("nan"),
                      "es_multiplier": None, "missing": []},
     "rates": {"swaps": 0, "by_ccy": {}, "dv01_usd": float("nan"), "missing": []},
