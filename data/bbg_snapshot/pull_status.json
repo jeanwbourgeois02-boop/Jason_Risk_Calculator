@@ -1,5 +1,5 @@
 {
-  "time": "2026-09-22T11:04:45+08:00",
+  "time": "2026-09-22T11:08:59+08:00",
   "connected": true,
   "reason": "",
   "host": "localhost:8194",
@@ -13,7 +13,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 0.7118,
+      "value": 0.7117,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -22,7 +22,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 0.7118,
+      "value": 0.7117,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -31,7 +31,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.7118,
+      "value": 0.7117,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -40,7 +40,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 0.7118,
+      "value": 0.7117,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -49,7 +49,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 0.7118,
+      "value": 0.7117,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -58,7 +58,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-28",
       "status": "OK",
-      "value": 0.7118,
+      "value": 0.7117,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -67,7 +67,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 11.2796,
+      "value": 11.28,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -76,7 +76,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-25",
       "status": "OK",
-      "value": 11.2794,
+      "value": 11.2798,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -85,7 +85,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-11-25",
       "status": "OK",
-      "value": 11.265711764705882,
+      "value": 11.266111764705881,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -94,7 +94,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-11-27",
       "status": "OK",
-      "value": 11.265335294117648,
+      "value": 11.265735294117647,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -121,7 +121,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.147,
+      "value": 1.14695,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -130,7 +130,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 1.147,
+      "value": 1.1469,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -139,7 +139,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 1.147,
+      "value": 1.1469,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -184,7 +184,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 1.4032,
+      "value": 1.4033,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -193,7 +193,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 1.4032,
+      "value": 1.4033,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -202,7 +202,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 1.4032499999999999,
+      "value": 1.4033,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -220,7 +220,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 0.8207,
+      "value": 0.8209,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -229,7 +229,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 0.8207,
+      "value": 0.8209,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -238,7 +238,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 0.8208,
+      "value": 0.821,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -247,7 +247,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 0.8209,
+      "value": 0.8211,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -256,7 +256,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-19",
       "status": "OK",
-      "value": 0.818372,
+      "value": 0.8185439999999999,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -310,7 +310,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 157.51,
+      "value": 157.52,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -337,7 +337,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2027-03-01",
       "status": "OK",
-      "value": 155.47857142857143,
+      "value": 155.47855714285714,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -346,7 +346,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2027-03-03",
       "status": "OK",
-      "value": 155.45260714285715,
+      "value": 155.4525857142857,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -355,7 +355,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 1360.05,
+      "value": 1359.5,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -364,7 +364,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 1360.05,
+      "value": 1359.5,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -373,7 +373,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-28",
       "status": "OK",
-      "value": 1360.05,
+      "value": 1359.55,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -382,7 +382,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-13",
       "status": "OK",
-      "value": 1359.9247727272727,
+      "value": 1359.4247727272727,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -391,7 +391,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 17.2206,
+      "value": 17.2213,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -400,7 +400,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 17.2206,
+      "value": 17.2213,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -409,7 +409,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 17.21935,
+      "value": 17.22005,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -418,7 +418,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 17.2181,
+      "value": 17.2188,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -427,7 +427,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 9.4335,
+      "value": 9.435,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -436,7 +436,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 9.4335,
+      "value": 9.435,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -445,7 +445,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 9.43345,
+      "value": 9.43495,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -454,7 +454,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 9.4334,
+      "value": 9.4349,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -462,44 +462,44 @@
       "instrument_id": "USDSEK",
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 9.8336,
-      "source": "BBG_BFXFORWARD",
-      "detail": ""
-    },
-    {
-      "instrument_id": "USDSEK",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-21",
-      "status": "OK",
-      "value": 9.8336,
-      "source": "BBG_BFXFORWARD",
-      "detail": "settles today: marked at spot"
-    },
-    {
-      "instrument_id": "USDSEK",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-22",
-      "status": "OK",
-      "value": 9.8342,
-      "source": "BBG_INTERP",
-      "detail": ""
-    },
-    {
-      "instrument_id": "USDSEK",
-      "mark_type": "FWD_OUTRIGHT",
-      "settle_date": "2026-09-23",
       "status": "OK",
       "value": 9.8348,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
     {
+      "instrument_id": "USDSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-21",
+      "status": "OK",
+      "value": 9.8348,
+      "source": "BBG_BFXFORWARD",
+      "detail": "settles today: marked at spot"
+    },
+    {
+      "instrument_id": "USDSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-22",
+      "status": "OK",
+      "value": 9.8354,
+      "source": "BBG_INTERP",
+      "detail": ""
+    },
+    {
+      "instrument_id": "USDSEK",
+      "mark_type": "FWD_OUTRIGHT",
+      "settle_date": "2026-09-23",
+      "status": "OK",
+      "value": 9.836,
+      "source": "BBG_BFXFORWARD",
+      "detail": ""
+    },
+    {
       "instrument_id": "USDTRY",
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 48.8159,
+      "value": 48.8165,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -508,7 +508,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 48.7812,
+      "value": 48.7818,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -517,7 +517,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 31.713,
+      "value": 31.715,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -526,7 +526,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 31.713,
+      "value": 31.715,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -535,7 +535,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-24",
       "status": "OK",
-      "value": 31.7135,
+      "value": 31.715,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -553,7 +553,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 16.2505,
+      "value": 16.2521,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -562,7 +562,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 16.2505,
+      "value": 16.2521,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -571,7 +571,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 16.24935,
+      "value": 16.25085,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -580,7 +580,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 16.2482,
+      "value": 16.2496,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -589,7 +589,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-13",
       "status": "OK",
-      "value": 16.269308333333335,
+      "value": 16.2707625,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -598,7 +598,7 @@
       "mark_type": "SPOT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 4343.03,
+      "value": 4341.72,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -607,7 +607,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 4343.03,
+      "value": 4341.72,
       "source": "BBG_BFXFORWARD",
       "detail": "settles today: marked at spot"
     },
@@ -616,7 +616,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-22",
       "status": "OK",
-      "value": 4343.37539,
+      "value": 4342.04677,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -625,7 +625,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 4343.72078,
+      "value": 4342.3735400000005,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -634,7 +634,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-09-23",
       "status": "OK",
-      "value": 11.2801,
+      "value": 11.2804,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -643,7 +643,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-15",
       "status": "OK",
-      "value": 0.818756,
+      "value": 0.818912,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -661,7 +661,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-09",
       "status": "OK",
-      "value": 16.26494166666667,
+      "value": 16.2664125,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -670,7 +670,7 @@
       "mark_type": "FWD_OUTRIGHT",
       "settle_date": "2026-10-15",
       "status": "OK",
-      "value": 4353.41334,
+      "value": 4351.914788,
       "source": "BBG_INTERP",
       "detail": ""
     },
@@ -679,7 +679,7 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-12-18",
       "status": "OK",
-      "value": 7835.0,
+      "value": 7834.75,
       "source": "BBG_BDH",
       "detail": "live PX_LAST"
     },
@@ -688,7 +688,7 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-10-16",
       "status": "OK",
-      "value": 213.9,
+      "value": 214.6,
       "source": "BBG_BDH",
       "detail": "live PX_MID"
     },
@@ -697,7 +697,7 @@
       "mark_type": "FUTURE_PX",
       "settle_date": "2026-10-16",
       "status": "OK",
-      "value": 41.55,
+      "value": 41.65,
       "source": "BBG_BDH",
       "detail": "live PX_MID"
     },
@@ -715,7 +715,7 @@
       "mark_type": "NDF_1M",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 17933.0,
+      "value": 17934.0,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -724,7 +724,7 @@
       "mark_type": "NDF_1M",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 1359.99,
+      "value": 1359.4,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     },
@@ -733,7 +733,7 @@
       "mark_type": "NDF_1M",
       "settle_date": "2026-09-21",
       "status": "OK",
-      "value": 31.714,
+      "value": 31.704,
       "source": "BBG_BFXFORWARD",
       "detail": ""
     }
@@ -808,7 +808,7 @@
     "failed": [],
     "as_of_date": "2026-09-21",
     "seconds": {
-      "bloomberg": 3.5,
+      "bloomberg": 3.2,
       "pricing": 2.0
     }
   },
@@ -833,7 +833,7 @@
   },
   "ledger": {
     "as_of_date": "2026-09-21",
-    "realised": 0,
+    "realised": 1134,
     "unrealisable": []
   },
   "curve_points_written": 236,
@@ -842,13 +842,13 @@
   "timings": {
     "session": 0.5,
     "spot": 0.8,
-    "forwards": 2.5,
-    "futures": 1.7,
-    "rates": 5.5,
-    "vol": 0.9,
-    "options": 0.3,
-    "ledger": 0.0,
-    "total": 12.1
+    "forwards": 3.0,
+    "futures": 1.8,
+    "rates": 5.2,
+    "vol": 1.0,
+    "options": 0.9,
+    "ledger": 0.5,
+    "total": 13.9
   },
   "timings_other": {
     "build_requests": 0.0,
@@ -1166,7 +1166,7 @@
         "missing": []
       }
     },
-    "last_run": "2026-09-22T11:04:41+08:00",
+    "last_run": "2026-09-22T11:05:12+08:00",
     "note": "",
     "points_scale": {
       "AUDUSD": {
@@ -1360,6 +1360,6 @@
         }
       }
     },
-    "snapshot": "marks snapshot: 3871 marks through 2026-09-21 written to data/bbg_snapshot/; git unavailable (TimeoutExpired): snapshot written, commit it yourself"
+    "snapshot": "marks snapshot: 3871 marks through 2026-09-21 written to data/bbg_snapshot/; committed; git push failed: fatal: could not read Username for 'https://github.com': No such file or directory (run  git push  yourself)"
   }
 }
