@@ -1,0 +1,51 @@
+# Thresholds for tools/health.py (`py 2_launcher.py health`), the audit the infra agent
+# works from (CLAUDE.md "Infra agent"). Numbers are maxima: a measure above its limit is a
+# breach. `hard` breaches make `health` exit 1; `soft` ones are reported. `ratchet` lists
+# the measures that must never get worse than config/health_baseline.json between runs.
+
+thresholds:
+  function_lines: 120            # a function longer than this is listed
+  module_lines: 1200             # a module longer than this is listed
+  duplicate_helper_modules: 3    # a private helper name defined in this many modules is listed
+
+limits:
+  hard:
+    syntax_errors: 0
+    undefined_names: 0           # ruff F821: a NameError waiting for its code path
+    mixed_line_endings: 0        # one file, two conventions
+    forbidden_imports: 0         # the pairs under forbidden_imports below
+    unimported_modules: 0        # app modules nothing imports (entry_points are exempt)
+  soft:
+    unused_imports: 0            # ruff F401
+    unused_variables: 0          # ruff F841
+    long_functions: 0
+    large_modules: 0
+    duplicate_helpers: 0
+    dated_citations: 0           # YYYY-MM-DD in comments / docstrings: provenance for docs/decisions.md
+    todo_markers: 0
+    crlf_files: 0                # tracked text files still CRLF (outside *.cmd / *.ps1)
+
+ratchet:
+  - ruff_total
+  - unused_imports
+  - unused_variables
+  - long_functions
+  - large_modules
+  - duplicate_helpers
+  - dated_citations
+  - todo_markers
+  - broad_excepts
+  - crlf_files
+
+entry_points:                    # modules run, never imported: not "unimported"
+  - 2_launcher.py
+  - 3_diagnostic.py
+  - tools/bloomberg_terminal_probe.py
+  - tools/health.py
+  - tools/lint_hook.py
+
+forbidden_imports:               # [importing package, imported package]
+  - [data, ui]
+  - [engine, ui]
+  - [data, tools]
+  - [engine, tools]

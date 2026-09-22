@@ -128,7 +128,17 @@ Everything else lives under `2_launcher.py` too, but the raw commands are:
 .venv\Scripts\python -m data.bloomberg.live --status the last pull, itemised
 .venv\Scripts\python -m data.bloomberg.backfill --start ... --end ...   run the backfill manually (normally part of Pull Bloomberg now)
 .venv\Scripts\python 3_diagnostic.py              Bloomberg diagnostics (same checks as the Market data button)
+py 2_launcher.py health                           code-health audit: ruff, dead code, duplicate helpers, dated comments, layering, line endings
+py 2_launcher.py health --baseline                the same, failing when a measure is worse than config/health_baseline.json
+.venv\Scripts\python -m tests.golden_book --write   re-pin tests/golden/book.json: only on the user's yes, it defines what the book is worth
 ```
+
+Code health is the infra agent's job (`.claude/agents/infra.md`, run on request: "run infra"). Its instruments:
+`py 2_launcher.py health` (tools/health.py, thresholds in `config/health.yaml`, the ratchet baseline in
+`config/health_baseline.json`), the golden book (`tests/test_golden_book.py`: the sample blotter at synthetic marks,
+every valuation pinned in `tests/golden/book.json`, so a refactor that changes nothing stays green), ruff and pytest
+configured in `pyproject.toml` (tool settings only, not a package), and a hook in `.claude/settings.json` that runs
+ruff on every Python file Claude edits. Provenance of rules moves from code comments to `decisions.md`.
 
 Environment variables: `RISK_DB` (database path), `RISK_LIVE=0` (disable the feed), `BLP_HOST`, `BLP_PORT`.
 

@@ -69,6 +69,7 @@ PACKAGES = [
 ]
 DEV_PACKAGES = [
     "pytest>=8",          # tests/
+    "ruff>=0.6",          # tools/health.py and the ruff hook in .claude/settings.json (pyproject.toml rules)
 ]
 # Modules `doctor` / `setup` import-check after install, to catch "pip said OK but the
 # module doesn't actually import" (wrong wheel, ABI mismatch, etc). zoneinfo is stdlib
@@ -679,6 +680,16 @@ def cmd_doctor(args) -> int:
         code = run([sys.executable, str(ROOT / "tools" / "bloomberg_terminal_probe.py"), "--once"], check=False)
         d.add("bbg requests", code == 0, "every spot/forward request answered" if code == 0 else "see FAILED lines above",
               "read the Bloomberg error text above; reports/bloomberg_diagnostic_*.txt has the detail")
+    # Code health, informational: the audit the infra agent works from (tools/health.py).
+    # Never fails doctor; `py 2_launcher.py health` is the command that exits 1 on a breach.
+    try:
+        from tools import health as _health
+        _cfg = _health.load_config()
+        _hard = [b for b in _health.breaches(_health.collect(ROOT, _cfg)["summary"], _cfg) if b["level"] == "hard"]
+        d.add("health", None, ("; ".join(f"{b['measure']} {b['value']} (limit {b['limit']})" for b in _hard)
+                               + "  ->  py 2_launcher.py health") if _hard else "no hard breach (py 2_launcher.py health for the full report)")
+    except (ImportError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        d.add("health", None, f"audit not run: {exc!r}")
     if args.tests:
         say()
         tcode = run([sys.executable, "-m", "pytest", "tests/", "-q"], check=False)
@@ -761,6 +772,28 @@ def cmd_marks_import(args) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------------- health
+
+def cmd_health(args) -> int:
+    """Code-health audit (tools/health.py): the measures the infra agent works from, with
+    the thresholds in config/health.yaml. Exit 1 on a hard breach, or with --baseline when
+    a ratchet measure is worse than config/health_baseline.json. Runs inside .venv so the
+    same ruff the hook uses is the one measured."""
+    if not in_venv() and VENV_PY.exists():
+        return reexec_in_venv(sys.argv[1:])
+    from tools import health
+    argv = ["--json"] if args.json else []
+    if args.out:
+        argv += ["--out", args.out]
+    if args.baseline is not None:
+        argv += ["--baseline"] + ([args.baseline] if args.baseline else [])
+    if args.update_baseline is not None:
+        argv += ["--update-baseline"] + ([args.update_baseline] if args.update_baseline else [])
+    if args.compare:
+        argv += ["--compare", *args.compare]
+    return health.main(argv)
+
+
 # ----------------------------------------------------------------------------- cli
 
 def build_parser() -> argparse.ArgumentParser:
@@ -801,6 +834,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     f = sub.add_parser("freeze", help="(re)write requirements.txt from PACKAGES, for pip/CI use outside 2_launcher.py")
     f.set_defaults(func=cmd_freeze)
+
+    h = sub.add_parser("health", help="code-health audit: ruff, dead code, duplicate helpers, dated comments, layering, line endings (tools/health.py)")
+    h.add_argument("--json", action="store_true", help="print the report as JSON")
+    h.add_argument("--out", metavar="PATH", help="also write the JSON report to PATH")
+    h.add_argument("--baseline", nargs="?", const="", metavar="PATH",
+                   help="fail when a ratchet measure is worse than the baseline (default config/health_baseline.json)")
+    h.add_argument("--update-baseline", nargs="?", const="", metavar="PATH", help="record the current measures as the baseline")
+    h.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), help="print what changed from report A to report B")
+    h.set_defaults(func=cmd_health)
     return parser
 
 
