@@ -196,3 +196,82 @@ def test_a_stored_value_that_is_not_a_number_travels_as_the_data_error_it_is(tmp
     got = sqlite3.connect(tmp_path / "mac.db").execute(
         "SELECT typeof(value), value FROM marks WHERE settle_date='2026-10-30'").fetchone()
     assert got == ("text", "n/a")
+
+
+# =========================================================================== 2026-09-22: every pull saves
+def _git_repo(tmp_path):
+    import subprocess
+    repo = tmp_path / "repo"
+    (repo / "data").mkdir(parents=True)
+    for args in (["init", "-q"], ["config", "user.name", "t"], ["config", "user.email", "t@t"], ["commit", "-q", "--allow-empty", "-m", "root"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    (repo / "stray.txt").write_text("not part of the snapshot")
+    return repo
+
+
+def _log(repo):
+    import subprocess
+    return subprocess.run(["git", "log", "--format=%s", "--", "data/bbg_snapshot"], cwd=repo, capture_output=True,
+                          text=True, check=True).stdout.splitlines()
+
+
+def test_save_after_pull_exports_commits_the_snapshot_folder_alone_and_says_so(tmp_path, monkeypatch):
+    """User, 2026-09-22: "just set it up so every pull from bbg triggers the saving". The
+    export, then a commit naming data/bbg_snapshot only (a stray file on that PC is left
+    out), then the push (off here: no remote). An identical second save commits nothing."""
+    import subprocess
+    monkeypatch.delenv("RISK_SNAPSHOT", raising=False)
+    repo = _git_repo(tmp_path)
+    _bloomberg_pc(tmp_path / "pc.db").close()
+    lines = []
+    out = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, push=False, log=lines.append)
+    assert (out["exported"], out["committed"], out["pushed"]) == (True, True, False)
+    assert out["message"].startswith("marks snapshot: 5 marks through 2026-09-14 written to data/bbg_snapshot/; committed")
+    assert lines == [out["message"]]
+    assert _log(repo) == ["Bloomberg marks snapshot " + snapshot.read_manifest(repo / "data/bbg_snapshot")["exported_at"]
+                          + ": marks through 2026-09-14"]
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+    assert status.strip() == "?? stray.txt"                      # the stray file was never added
+    again = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, push=False, log=lines.append)
+    assert again["committed"] is False and "identical: nothing to commit" in again["message"]
+    assert len(_log(repo)) == 1
+
+
+def test_save_after_pull_never_raises_and_can_be_switched_off(tmp_path, monkeypatch):
+    monkeypatch.delenv("RISK_SNAPSHOT", raising=False)
+    repo = _git_repo(tmp_path)
+    schema.connect(tmp_path / "empty.db").close()
+    out = snapshot.save_after_pull(tmp_path / "empty.db", repo_root=repo, push=False, log=lambda s: None)
+    assert out == {"exported": False, "committed": False, "pushed": False,
+                   "message": "marks snapshot: no marks on file: nothing to export (press Pull Bloomberg now first)"}
+    _bloomberg_pc(tmp_path / "pc.db").close()
+    plain = tmp_path / "plain"; plain.mkdir()
+    out = snapshot.save_after_pull(tmp_path / "pc.db", repo_root=plain, push=False, log=lambda s: None)
+    assert out["exported"] and not out["committed"] and "not a git clone" in out["message"]
+    monkeypatch.setenv("RISK_SNAPSHOT", "0")
+    assert snapshot.save_after_pull(tmp_path / "pc.db", repo_root=repo, push=False, log=lambda s: None)["message"] == \
+        "marks snapshot off (RISK_SNAPSHOT=0)"
+    assert _log(repo) == []
+
+
+def test_the_background_backfill_saves_only_after_a_real_pull(tmp_path, monkeypatch):
+    """A test's or a developer's fake fetches must never write or commit the repository's
+    own data/bbg_snapshot/: the save runs only when start_auto_backfill was given no fakes
+    (a real Bloomberg session), i.e. from the feed's own cycle."""
+    from data.bloomberg import backfill
+    calls = []
+    monkeypatch.setattr(snapshot, "save_after_pull", lambda db_path, **kw: calls.append(db_path) or {"message": "saved"})
+    monkeypatch.setattr(backfill, "auto_backfill", lambda *a, **k: [])
+    p = tmp_path / "risk.db"
+    schema.connect(p).close()
+    t = backfill.start_auto_backfill(p, fetch=lambda *a, **k: {}, fwd_fetch=lambda *a, **k: {}, fut_fetch=lambda *a, **k: {})
+    if t is not None:
+        t.join(5)
+    assert calls == []                                            # fakes: no save
+    published = []
+    monkeypatch.setattr("data.bloomberg.live.availability", lambda host, port: (True, ""))
+    monkeypatch.setattr("data.bloomberg.live.patch_status", lambda db, key, block: published.append(dict(block)))
+    t = backfill.start_auto_backfill(p)                           # a real pull: no fakes given
+    assert t is not None
+    t.join(5)
+    assert calls == [p] and any(b.get("snapshot") == "saved" for b in published)

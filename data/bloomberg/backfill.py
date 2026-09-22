@@ -1279,12 +1279,21 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         _publish({})  # a run is already in flight; only put its block back after the feed's rewrite
         return None
 
+    real_pull = session_factory is None and fetch is None and fwd_fetch is None and fut_fetch is None
+
     def _run():
         try:
             _publish({"running": True, "reason": ""})
             auto_backfill(db_path, host=host, port=port, fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
                           session_factory=session_factory, scale_fetch=scale_fetch,
                           on_progress=lambda remaining: _publish({"running": remaining > 0, "remaining": remaining}))
+            if real_pull:
+                # The saving every pull ends with (user, 2026-09-22: "every pull from bbg
+                # triggers the saving"): the marks on file to data/bbg_snapshot/, committed and
+                # pushed (data/bloomberg/snapshot.py::save_after_pull). Only after a REAL pull:
+                # a test's fake fetches must never write or commit the repository's snapshot.
+                from data.bloomberg import snapshot
+                _publish({"snapshot": snapshot.save_after_pull(db_path)["message"]})
         except Exception as exc:  # never let a background thread take the process down
             _publish({"running": False, "reason": f"auto-backfill failed: {exc!r}"})
         finally:

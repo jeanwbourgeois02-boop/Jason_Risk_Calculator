@@ -5,7 +5,11 @@ The database (`data/raw/risk.db`) is never committed, so a PC without Bloomberg 
 marks and every USD figure is blank. `export_snapshot` writes the market-data tables as
 plain CSV under `data/bbg_snapshot/` (tracked by git, one file per table, rows in
 primary-key order so a re-export diffs small); `import_snapshot` reads them back on the
-other PC. Run from `2_launcher.py marks-export` / `marks-import`, never by the app.
+other PC. Every "Pull Bloomberg now" ends with `save_after_pull` (user, 2026-09-22: "I
+dont want to need to run step 3 export, just set it up so every pull from bbg triggers the
+saving"): the export, a commit of that folder alone and a push, each failure logged and
+none of them ever failing the pull; `2_launcher.py marks-export` is the same steps by hand,
+`marks-import` the other PC's side. Nothing here asks Bloomberg anything (hard rule 8).
 
 What travels: `marks` whole, every source, exactly as Bloomberg and the app's own pricers
 wrote it on the Bloomberg PC (values, sources and `snapped_at` untouched, so
@@ -32,11 +36,14 @@ import csv
 import json
 import os
 import sqlite3
+import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-SNAPSHOT_DIR = Path(__file__).resolve().parents[2] / "data" / "bbg_snapshot"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SNAPSHOT_DIR = REPO_ROOT / "data" / "bbg_snapshot"
+SNAPSHOT_REL = "data/bbg_snapshot"
 MANIFEST = "snapshot.json"
 
 # Import order: instruments first (marks.instrument_id references it). Every table a
@@ -243,6 +250,75 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
         out["ledger"] = _realise(conn, as_of or date.today().isoformat())
     finally:
         conn.close()
+    return out
+
+
+def _git(repo_root: Path, *args: str, timeout: int = 60) -> tuple:
+    r = subprocess.run(["git", *args], cwd=str(repo_root), capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def commit_snapshot(repo_root: Union[str, Path], manifest: dict, push: bool = True,
+                    rel: str = SNAPSHOT_REL) -> dict:
+    """Commit the snapshot folder alone (`git add -- <rel>`, `git commit -- <rel>`: nothing
+    else staged or edited on that PC goes with it) and, with `push`, push it. Returns
+    {'committed': bool, 'pushed': bool, 'message': one line for the log}. Never raises: a
+    missing git, a folder that is not a clone, a failed commit or push are all reported in
+    `message`. An identical snapshot (the export left every file as it was) commits nothing."""
+    repo_root = Path(repo_root)
+    if not (repo_root / ".git").exists():
+        return {"committed": False, "pushed": False, "message": "not a git clone: snapshot written, nothing committed"}
+    try:
+        _git(repo_root, "add", "--", rel)
+        unchanged, _, _ = _git(repo_root, "diff", "--cached", "--quiet", "--", rel)
+        if unchanged == 0:
+            committed, note = False, "the snapshot already committed is identical: nothing to commit"
+        else:
+            code, _, err = _git(repo_root, "commit", "-m", f"Bloomberg marks snapshot {manifest.get('exported_at', '')}: "
+                                f"marks through {manifest.get('marks_through', '')}", "--", rel)
+            if code != 0:
+                return {"committed": False, "pushed": False,
+                        "message": f"git commit failed: {(err.splitlines() or ['no detail'])[-1]}"}
+            committed, note = True, "committed"
+        if not push:
+            return {"committed": committed, "pushed": False, "message": note}
+        code, _, err = _git(repo_root, "push", "origin", "HEAD", timeout=120)
+        if code != 0:
+            return {"committed": committed, "pushed": False,
+                    "message": f"{note}; git push failed: {(err.splitlines() or ['no detail'])[-1]} (run  git push  yourself)"}
+        return {"committed": committed, "pushed": True, "message": f"{note}; pushed"}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"committed": False, "pushed": False,
+                "message": f"git unavailable ({exc.__class__.__name__}): snapshot written, commit it yourself"}
+
+
+def save_after_pull(db_path: Union[str, Path], repo_root: Union[str, Path] = REPO_ROOT,
+                    out_dir: Optional[Union[str, Path]] = None, push: bool = True,
+                    log=print) -> dict:
+    """The saving every Bloomberg pull ends with (module docstring): export, commit, push.
+    Returns {'exported': bool, 'committed', 'pushed', 'message'}; logs one line; never raises.
+    `RISK_SNAPSHOT=0` in the environment switches it off (a developer's clone)."""
+    if os.environ.get("RISK_SNAPSHOT", "1") == "0":
+        return {"exported": False, "committed": False, "pushed": False, "message": "marks snapshot off (RISK_SNAPSHOT=0)"}
+    repo_root = Path(repo_root)
+    out_dir = Path(out_dir) if out_dir is not None else repo_root / SNAPSHOT_REL
+    try:
+        manifest = export_snapshot(db_path, out_dir)
+    except SnapshotError as exc:
+        out = {"exported": False, "committed": False, "pushed": False, "message": f"marks snapshot: {exc}"}
+        log(out["message"])
+        return out
+    except Exception as exc:  # noqa: BLE001 -- the pull must not fail over its saving step
+        out = {"exported": False, "committed": False, "pushed": False,
+               "message": f"marks snapshot: export failed ({type(exc).__name__}: {exc})"}
+        log(out["message"])
+        return out
+    result = commit_snapshot(repo_root, manifest, push=push, rel=str(out_dir.relative_to(repo_root)).replace(os.sep, "/")
+                             if out_dir.is_relative_to(repo_root) else SNAPSHOT_REL)
+    out = {"exported": True, **result,
+           "message": (f"marks snapshot: {manifest['rows'].get('marks', 0)} marks through {manifest['marks_through']} "
+                       f"written to {SNAPSHOT_REL}/; {result['message']}")}
+    log(out["message"])
     return out
 
 

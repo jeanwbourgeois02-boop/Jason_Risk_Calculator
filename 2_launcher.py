@@ -704,9 +704,9 @@ SNAPSHOT_REL = "data/bbg_snapshot"
 
 
 def cmd_marks_export(args) -> int:
-    """Bloomberg PC: write the marks on file to data/bbg_snapshot/ (data/bloomberg/snapshot.py)
-    and commit that folder, so `git push` carries them to a PC with no Terminal. The commit
-    names the folder explicitly, so nothing else staged or edited goes with it."""
+    """Bloomberg PC, by hand: what every "Pull Bloomberg now" already does at its end
+    (data/bloomberg/snapshot.py::save_after_pull): write the marks on file to
+    data/bbg_snapshot/, commit that folder alone and, with --push, push it."""
     from data.bloomberg import snapshot
     try:
         m = snapshot.export_snapshot(db_path())
@@ -717,33 +717,13 @@ def cmd_marks_export(args) -> int:
         f"written to {SNAPSHOT_REL}/")
     if args.no_commit:
         return 0
-    if not (ROOT / ".git").exists():
-        say("  not a git clone: nothing committed")
-        return 0
-    try:
-        _git("add", "--", SNAPSHOT_REL)
-        unchanged, _, _ = _git("diff", "--cached", "--quiet", "--", SNAPSHOT_REL)
-        if unchanged == 0:
-            say("  the snapshot already committed is identical: nothing to commit")
-        else:
-            code, _, err = _git("commit", "-m", f"Bloomberg marks snapshot {m['exported_at']}: "
-                                f"marks through {m['marks_through']}", "--", SNAPSHOT_REL)
-            if code != 0:
-                say(f"  git commit failed: {(err.splitlines() or ['no detail'])[-1]}")
-                return 1
-            say("  committed")
-        if not args.push:
-            say("  next:  git push      then on the other PC:  git pull  and  2_launcher.py marks-import")
-            return 0
-        code, _, err = _git("push", "origin", "HEAD")
-        if code != 0:
-            say(f"  git push failed: {(err.splitlines() or ['no detail'])[-1]}  (run  git push  yourself)")
-            return 1
-        say("  pushed. On the other PC:  git pull  and  2_launcher.py marks-import")
-    except (OSError, subprocess.SubprocessError) as exc:
-        say(f"  git unavailable ({exc.__class__.__name__}): the files are written, commit them yourself")
-        return 1
-    return 0
+    result = snapshot.commit_snapshot(ROOT, m, push=args.push)
+    say(f"  {result['message']}")
+    if not result["pushed"]:
+        say("  next:  git push      then on the other PC:  git pull  and  2_launcher.py marks-import")
+    else:
+        say("  On the other PC:  git pull  and  2_launcher.py marks-import")
+    return 0 if (result["committed"] or "identical" in result["message"]) and (result["pushed"] or not args.push) else 1
 
 
 def cmd_marks_import(args) -> int:
@@ -807,7 +787,8 @@ def build_parser() -> argparse.ArgumentParser:
     dcm.add_argument("--no-git", action="store_true", help="skip the GitHub sync check")
     dcm.set_defaults(func=cmd_doctor)
 
-    me = sub.add_parser("marks-export", help="Bloomberg PC: write the marks on file to data/bbg_snapshot/ and commit it")
+    me = sub.add_parser("marks-export", help="Bloomberg PC: write the marks on file to data/bbg_snapshot/ and commit it "
+                                             "(every Pull Bloomberg now already does this)")
     me.add_argument("--push", action="store_true", help="also git push")
     me.add_argument("--no-commit", action="store_true", help="write the files only")
     me.set_defaults(func=cmd_marks_export)

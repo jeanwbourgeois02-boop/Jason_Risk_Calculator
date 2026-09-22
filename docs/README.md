@@ -55,8 +55,9 @@ same. Keep the terminal window open; **Ctrl+C** stops the app.
   (see below), and only for what the trades on file need (the "Bloomberg library" on the Market data tab).
 - `py -3 2_launcher.py start --force-new` (inside the project folder) always starts a fresh instance.
 - **Marks on a PC without Bloomberg.** The database is not in git, so such a PC has no marks of its own.
-  On the Bloomberg PC, after a pull: `py -3 2_launcher.py marks-export` writes the marks on file to
-  `data/bbg_snapshot/` and commits that folder (`--push` also pushes; otherwise `git push`). On the other
+  On the Bloomberg PC every **Pull Bloomberg now** ends by writing the marks on file to `data/bbg_snapshot/`,
+  committing that folder alone and pushing it (the Market data tab's backfill status says what happened;
+  `py -3 2_launcher.py marks-export --push` does the same by hand). On the other
   PC: `git pull`, upload the same blotter in the app, then `2_launcher.py marks-import`. The import makes
   the marks there what the Bloomberg PC had at the export (MANUAL marks typed there are kept) and freezes
   the settled trades; run it again after every blotter upload on that PC. It refuses on a PC that has
