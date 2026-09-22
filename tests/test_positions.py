@@ -123,14 +123,14 @@ def test_positions_table_renders_the_lines_with_reasons_on_hover():
     _mark(conn, "USDJPY", AS_OF, "SPOT", 150.0, "BBG_BFXFORWARD")
     records, tips = positions_rows(conn, AS_OF)
     by_label = {r["position"].strip(): r for r in records}
-    assert by_label["JPY"]["rate"] == "USDJPY 150.00" and by_label["JPY"]["units"] == "(150,000,000)"
-    assert by_label["JPY"]["usd"] == "(1,000,000)" and by_label["JPY"]["kind"] == "ccy"
+    assert by_label["JPY"]["rate"] == "USDJPY 150.00" and by_label["JPY"]["units"] == -150_000_000
+    assert by_label["JPY"]["usd"] == pytest.approx(-1_000_000) and by_label["JPY"]["kind"] == "ccy"
     assert "EUR" not in by_label                                               # the option has no DELTA mark: no row, named below
-    assert by_label["XAU"]["detail"] == "metal, not in the FX net" and by_label["XAU"]["usd"] == "n/a"   # no gold price
-    assert by_label["FX net USD delta (+ = long USD)"]["usd"] == "1,000,000"
-    assert by_label["FX options delta (USD)"]["usd"] == "n/a"
-    assert by_label["Equity index delta (ES futures + SPX options)"]["usd"] == "n/a"
-    assert by_label["ESZ6 Index"]["units"] == "-1,450.00" and by_label["ESZ6 Index"]["usd"] == "n/a"
-    assert by_label["Rates DV01 (USD, +1bp parallel)"]["usd"] == "n/a"
+    assert by_label["XAU"]["detail"] == "metal, not in the FX net" and by_label["XAU"]["usd"] is None   # no gold price
+    assert by_label["FX net USD delta (+ = long USD)"]["usd"] == pytest.approx(1_000_000)
+    assert by_label["FX options delta (USD)"]["usd"] is None
+    assert by_label["Equity index delta (ES futures + SPX options)"]["usd"] is None
+    assert by_label["ESZ6 Index"]["units"] == -1450.0 and by_label["ESZ6 Index"]["usd"] is None
+    assert by_label["Rates DV01 (USD, +1bp parallel)"]["usd"] is None
     tip = tips[[r["position"].strip() for r in records].index("Rates DV01 (USD, +1bp parallel)")]
     assert tip["usd"]["value"] == "IRSOIS-USD-1: no DV01_USD on 2026-09-22"

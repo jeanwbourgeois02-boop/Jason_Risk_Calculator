@@ -84,7 +84,7 @@ from dash import Input, Output, State, dash_table, html
 
 from data.ingest import irs_direction
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
-from ui.tabs.formatting import format_cell
+from ui.tabs import ranking as rk
 
 DATATABLE_ID = "rates-datatable"
 NOTICE_ID = "rates-direction-notice"
@@ -257,35 +257,20 @@ def irs_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     return df
 
 
-def _fmt_rate(value) -> str:
-    if _is_missing(value):
-        return "n/a"
-    return f"{float(value) * 100:.4f}%"
 
-
-def _fmt_notional(value) -> str:
-    """Whole units, a short in brackets (`format_cell`'s own convention)."""
-    return "" if _is_missing(value) else format_cell(value)
-
-
-def _fmt_usd(value) -> str:
-    return "n/a" if _is_missing(value) else format_cell(value)
 
 
 def format_rows(df: pd.DataFrame) -> tuple:
     """`(data_records, style_data_conditional)` for `rates_table`, split out so it can
-    be unit-tested without Dash, matching `ui.tabs.blotter._format_rows`'s convention."""
+    be unit-tested without Dash: the numeric columns as numbers, None where there is no
+    figure (printed "n/a" or blank by `_COLUMN_FORMATS`)."""
     cols = [c for c in _DISPLAY_COLUMNS if c in df.columns]
-    formatted = df[cols].copy() if not df.empty else pd.DataFrame(columns=cols)
-    for col in cols:
-        if col == "notional":
-            formatted[col] = formatted[col].map(_fmt_notional)
-        elif col in ("entry_rate", "par_rate"):
-            formatted[col] = formatted[col].map(_fmt_rate)
-        elif col in ("pv_usd", "dv01_usd", "cashflow_usd", "pnl_usd"):
-            formatted[col] = formatted[col].map(_fmt_usd)
-    data_records = formatted.to_dict("records")
-    return data_records, table_styles()
+    formatted = df[cols].copy().astype(object) if not df.empty else pd.DataFrame(columns=cols)
+    if not formatted.empty:
+        for col in cols:
+            if col in _COLUMN_FORMATS:
+                formatted[col] = pd.Series([rk.value(v) for v in df[col].tolist()], dtype=object, index=formatted.index)
+    return formatted.to_dict("records"), table_styles()
 
 
 def table_styles() -> List[dict]:
@@ -315,12 +300,22 @@ def table_styles() -> List[dict]:
     ]
 
 
+_COLUMN_FORMATS = {   # the numeric columns (ui.tabs.ranking); every other column is text
+    "notional": rk.amount(),                     # whole units, a short in brackets
+    "entry_rate": rk.percentage(4), "par_rate": rk.percentage(4),   # a fraction on file, a per cent on screen
+    "pv_usd": rk.amount(nully="n/a"), "dv01_usd": rk.amount(nully="n/a"),
+    "cashflow_usd": rk.amount(nully="n/a"), "pnl_usd": rk.amount(nully="n/a"),
+}
+
+
 def table_columns(cols: Optional[List[str]] = None) -> List[dict]:
-    """Column definitions. Direction is a dropdown cell and the only editable column
-    (the table itself is `editable=False`; a column's own `editable` wins)."""
+    """Column definitions, typed so every column ranks (ui.tabs.ranking). Direction is a
+    dropdown cell and the only editable column (the table itself is `editable=False`; a
+    column's own `editable` wins)."""
     columns = []
     for col in (cols if cols is not None else _DISPLAY_COLUMNS):
-        spec = {"name": _COLUMN_LABELS.get(col, col.replace("_", " ").title()), "id": col}
+        name = _COLUMN_LABELS.get(col, col.replace("_", " ").title())
+        spec = rk.numeric(name, col, _COLUMN_FORMATS[col]) if col in _COLUMN_FORMATS else rk.text(name, col)
         if col in EDITABLE_COLUMNS:
             spec["editable"] = True
             spec["presentation"] = "dropdown"
@@ -343,6 +338,7 @@ def rates_table(df: pd.DataFrame, table_id: str = DATATABLE_ID) -> dash_table.Da
         id=table_id,
         columns=table_columns(cols),
         data=data_records,
+        **rk.sortable(table_id),
         editable=False,  # per column: Direction only (`table_columns`)
         dropdown=direction_dropdown(),
         # A cell dropdown's menu is clipped by the table's scroll box unless it is forced

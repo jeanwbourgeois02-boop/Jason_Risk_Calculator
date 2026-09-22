@@ -1013,8 +1013,7 @@ def test_blotter_fx_scope_renders_table_columns(strict_marks, tmp_path):
     assert row["mark_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
     assert row["pnl_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
     assert row["pnl_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert row["mark_eod"] != "" and not row["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert row["pnl_eod"] != "" and not row["pnl_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert isinstance(row["mark_eod"], float) and isinstance(row["pnl_eod"], float)   # real: numbers, no suffix
 
 
 def test_blotter_fx_scope_empty_still_renders_table(tmp_path):
@@ -1094,8 +1093,8 @@ def test_blotter_fx_table_and_strip_agree_on_pnl(tmp_path):
 
     table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
     assert len(table.data) == 1
-    assert not table.data[0]["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert table.data[0]["pnl_eod"] == format_cell(20_000.0)
+    assert isinstance(table.data[0]["mark_eod"], float)
+    assert table.data[0]["pnl_eod"] == pytest.approx(20_000.0)   # a number; the table prints 20,000
 
     # The underlying maths: fx_blotter_rows's pnl_eod for this trade is exactly
     # priced_value_book's pnl_usd for the same trade_id -- one shared pricing path.
@@ -1157,7 +1156,7 @@ def test_blotter_fx_sample_cells_are_visually_flagged():
 
     records = blotter_fx.format_rows(out, sample_mask=mask)
     assert records[0]["mark_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert not records[0]["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert isinstance(records[0]["mark_eod"], float)
 
     # One rule per column with any sample cell, keyed on the "(sample)" suffix -- not
     # one rule per cell, which would be thousands of rules on a full book.
@@ -1226,9 +1225,7 @@ def test_blotter_fx_sample_caption_absent_when_every_mark_is_real(tmp_path):
 
     table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
     row = table.data[0]
-    assert not row["mark_t1"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert not row["mark_eod"].endswith(blotter_fx.SAMPLE_SUFFIX)
-    assert not row["mark_t2"].endswith(blotter_fx.SAMPLE_SUFFIX)
+    assert not any(isinstance(row[c], str) for c in ("mark_t1", "mark_eod", "mark_t2"))   # real numbers, no sample
     assert blotter_fx.SAMPLE_CAPTION not in str(layout)
 
 
@@ -1322,21 +1319,48 @@ def _nodes(component):
             stack.append(children)
 
 
+class _CellView:
+    """A currency-table cell read the way the old html cells were: `.children` is the text
+    the table prints, `.className` the old class words (sign, unavailable, partial) and
+    `.title` the tooltip."""
+
+    def __init__(self, value, tooltip: str, partial: bool, is_count: bool):
+        if value is None:
+            self.children, self.className = "n/a", "fx-ccy-num cell--unavailable"
+        elif is_count:
+            self.children, self.className = str(int(value)), "fx-ccy-num"
+        else:
+            self.children = format_cell(value)
+            self.className = "fx-ccy-num " + ("fx-ccy-num--neg" if round(float(value)) < 0 else "fx-ccy-num--pos")
+        if partial:
+            self.className += " fx-ccy-num--partial"
+        self.title = tooltip
+
+
 def _currency_tables(component) -> list:
-    """Each per-currency table under `component`, in document order, as
-    `{"Currency": [heading texts], "<row label>": [its cells]}`."""
+    """Each per-currency table under `component` (a ranked DataTable with its pinned Total
+    footer, ui.tabs.ranking), in document order, as `{"Currency": [heading texts],
+    "<row label>": {record, tip, ids}}`."""
     tables = []
-    for table in (n for n in _nodes(component) if isinstance(n, dash.html.Table)):
-        rows = {}
-        for tr in (n for n in _nodes(table) if isinstance(n, dash.html.Tr)):
-            cells = list(tr.children)
-            rows[cells[0].children] = [c.children for c in cells] if isinstance(cells[0], dash.html.Th) else cells
+    for div in (n for n in _nodes(component) if getattr(n, "className", "") == "ranked-table"):
+        table, footer = div.children
+        if not str(getattr(table, "id", "")).startswith("blotter-fx-ccy"):
+            continue
+        ids = [c["id"] for c in table.columns]
+        rows = {"Currency": [c["name"] for c in table.columns]}
+        for t in (table, footer):
+            tips = getattr(t, "tooltip_data", None) or [{}] * len(t.data)
+            for rec, tip in zip(t.data, tips):
+                rows[rec["currency"]] = {"record": rec, "tip": tip, "ids": ids}
         tables.append(rows)
     return tables
 
 
 def _cell(table_rows, row, column):
-    return table_rows[row][table_rows["Currency"].index(column)]
+    entry = table_rows[row]
+    key = entry["ids"][table_rows["Currency"].index(column)]
+    rec, tip = entry["record"], entry["tip"]
+    return _CellView(rec.get(key), (tip.get(key) or {}).get("value", ""), rec.get(f"{key}__partial") == 1, key == "trades")
 
 
 def _fx_layout(db_path, as_of=_CCY_AS_OF):
@@ -1436,7 +1460,7 @@ def test_blotter_fx_currency_tables_sit_between_the_strip_and_the_trade_table(tm
 
     table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
     assert table.filter_action == "native"
-    assert getattr(table, "sort_action", None) in (None, "none")   # its fixed order is kept
+    assert table.sort_action == "native" and "sort_by" in table.persisted_props   # ranks on a click; the order survives a rebuild
     assert "filter_query" in table.persisted_props               # a rebuild on new marks keeps what was typed
     assert table.hidden_columns == blotter_fx._HIDDEN_COLUMNS
 
@@ -1560,17 +1584,20 @@ def test_blotter_fx_unavailable_and_partial_figures_say_why(tmp_path):
     assert "Total LTD excludes 1 of 7 trades unpriced." in notes[0] and "n/a: hover it for the reason." in notes[0]
     assert "Total LTD excludes 1 of 7 rows unpriced." in notes[1]
 
-    # A loss is in brackets and red, like everywhere else in the app.
-    cell = blotter_fx._figure_cell({"value": -1234.4, "available": True})
-    assert cell.children == "(1,234)" and "fx-ccy-num--neg" in cell.className
+    # A loss is a negative number, coloured by its sign (ui.tabs.ranking), like everywhere else in the app.
+    periods = (("ltd", "LTD"),)
+    rec, tip = blotter_fx._currency_record({"currency": "JPY", "trades": 1, "figures": {"ltd": {"value": -1234.4, "available": True}}}, periods)
+    assert rec["ltd"] == -1234.4 and rec["ltd__partial"] == 0 and tip == {}
     # Anything else the pricing path puts in an entry is carried along and ignored ...
-    cell = blotter_fx._figure_cell({"value": 10.0, "available": True, "chosen_close": "2026-06-22", "x": object()})
-    assert cell.children == "10" and "fx-ccy-num--partial" not in cell.className
+    rec, tip = blotter_fx._currency_record({"currency": "JPY", "trades": 1, "figures": {"ltd": {
+        "value": 10.0, "available": True, "chosen_close": "2026-06-22", "x": object()}}}, periods)
+    assert rec["ltd"] == 10.0 and rec["ltd__partial"] == 0 and tip == {}
     # ... except its own caption for a period measured from an earlier close, shown on hover.
-    cell = blotter_fx._figure_cell({"value": 10.0, "available": True, "ref_note": "from the 2026-06-19 close",
-                                    "excluded_summary": "excludes 1 of 2 trades unpriced"})
-    assert cell.title == "excludes 1 of 2 trades unpriced\nfrom the 2026-06-19 close"
-    assert "fx-ccy-num--partial" in cell.className
+    rec, tip = blotter_fx._currency_record({"currency": "JPY", "trades": 1, "figures": {"ltd": {
+        "value": 10.0, "available": True, "ref_note": "from the 2026-06-19 close",
+        "excluded_summary": "excludes 1 of 2 trades unpriced"}}}, periods)
+    assert tip["ltd"]["value"] == "excludes 1 of 2 trades unpriced\nfrom the 2026-06-19 close"
+    assert rec["ltd__partial"] == 1
 
 
 def test_blotter_fx_by_currency_is_reworked_only_when_the_figures_can_have_moved(tmp_path, monkeypatch):

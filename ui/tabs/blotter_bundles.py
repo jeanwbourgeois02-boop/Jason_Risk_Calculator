@@ -16,7 +16,7 @@ from typing import Dict, List
 
 from dash import dash_table, dcc, html
 
-from ui.tabs.formatting import format_cell
+from ui.tabs import ranking as rk
 
 BUNDLE_LIST_ID = "blotter-bundle-list"
 BUNDLE_DETAIL_ID = "blotter-bundle-detail"
@@ -38,53 +38,67 @@ _PERIOD_ORDER = ("daily", "mtd", "ytd")
 _PERIOD_TITLES = {"daily": "Daily", "mtd": "MTD", "ytd": "YTD"}
 
 
-def _period_cell(periods: dict, key: str) -> str:
+def _period_cell(periods: dict, key: str) -> tuple:
+    """`(value, tooltip)`: the number, or None (printed "Unavailable") with the reason as
+    the cell's tooltip; never invented."""
     entry = periods.get(key, {})
     if entry.get("available"):
-        return format_cell(entry["value"])
+        return rk.value(entry["value"]), ""
     reason = entry.get("reason", "")
-    return f"Unavailable ({reason})" if reason else "Unavailable"
+    return None, (f"Unavailable ({reason})" if reason else "Unavailable")
 
 
-def bundle_list_table(bundles: List[dict], grouped_pnl: Dict[str, dict]) -> dash_table.DataTable:
+def bundle_list_table(bundles: List[dict], grouped_pnl: Dict[str, dict]) -> html.Div:
     """One row per bundle (name, description, pair count, LTD-period columns from
     `period_pnl_by(conn, as_of, 'theme')`) plus a trailing "Unassigned" row for the
-    empty-theme group. `grouped_pnl` is `{theme_value: {period: {...}}}`; a bundle or
-    "Unassigned" with no trades this period simply shows Unavailable/blank via the
-    same `_period_cell` used elsewhere, it is never invented."""
-    rows = []
+    empty-theme group, pinned as the table's footer (ui.tabs.ranking: the bundles rank on
+    a header click, Unassigned stays last). `grouped_pnl` is `{theme_value: {period:
+    {...}}}`; a bundle or "Unassigned" with no trades this period shows Unavailable with
+    the reason on hover, it is never invented."""
+    rows, tips = [], []
     for b in bundles:
         periods = grouped_pnl.get(b["name"], {})
         row = {"name": b["name"], "description": b["description"], "pairs": len(b["pairs"])}
+        tip = {}
         for p in _PERIOD_ORDER:
-            row[_PERIOD_TITLES[p]] = _period_cell(periods, p)
+            row[_PERIOD_TITLES[p]], why = _period_cell(periods, p)
+            if why:
+                tip[_PERIOD_TITLES[p]] = {"value": why, "type": "text"}
         rows.append(row)
+        tips.append(tip)
     unassigned_periods = grouped_pnl.get("", {})
-    unassigned_row = {"name": UNASSIGNED_LABEL, "description": "", "pairs": ""}
+    unassigned_row = {"name": UNASSIGNED_LABEL, "description": "", "pairs": None}
+    unassigned_tip = {}
     for p in _PERIOD_ORDER:
-        unassigned_row[_PERIOD_TITLES[p]] = _period_cell(unassigned_periods, p)
-    rows.append(unassigned_row)
+        unassigned_row[_PERIOD_TITLES[p]], why = _period_cell(unassigned_periods, p)
+        if why:
+            unassigned_tip[_PERIOD_TITLES[p]] = {"value": why, "type": "text"}
 
-    columns = [{"name": "Bundle", "id": "name"}, {"name": "Description", "id": "description"},
-               {"name": "Pairs", "id": "pairs"}] + \
-              [{"name": _PERIOD_TITLES[p], "id": _PERIOD_TITLES[p]} for p in _PERIOD_ORDER]
-    return dash_table.DataTable(
+    columns = [rk.text("Bundle", "name"), rk.text("Description", "description"),
+               rk.numeric("Pairs", "pairs", rk.count())] + \
+              [rk.numeric(_PERIOD_TITLES[p], _PERIOD_TITLES[p], rk.amount(nully="Unavailable")) for p in _PERIOD_ORDER]
+    table = dash_table.DataTable(
         id=BUNDLE_LIST_ID,
         columns=columns,
-        data=rows,
+        data=rows, tooltip_data=tips,
         row_selectable="single",
+        **rk.sortable(BUNDLE_LIST_ID),
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "left", "fontFamily": "monospace"},
         style_header={"fontWeight": "bold"},
+        style_data_conditional=rk.sign_styles([_PERIOD_TITLES[p] for p in _PERIOD_ORDER],
+                                              nil={"color": "var(--muted)", "fontStyle": "italic"}),
     )
+    return rk.with_footer(table, [unassigned_row], footer_tooltips=[unassigned_tip])
 
 
 def bundle_detail_table(pairs: List[str]) -> dash_table.DataTable:
     """The member pairs of the currently-selected bundle."""
     return dash_table.DataTable(
         id=BUNDLE_DETAIL_ID,
-        columns=[{"name": "Pair", "id": "pair"}],
+        columns=[rk.text("Pair", "pair")],
         data=[{"pair": p} for p in pairs] or [],
+        **rk.sortable(BUNDLE_DETAIL_ID),
         style_cell={"textAlign": "left", "fontFamily": "monospace"},
         style_header={"fontWeight": "bold"},
     )

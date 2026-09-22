@@ -51,7 +51,8 @@ from dash import Input, Output, State, dash_table, dcc, html
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
-from ui.tabs.formatting import format_cell, format_frame as format_ladder_frame
+from ui.tabs import ranking as rk
+from ui.tabs.formatting import format_frame as format_ladder_frame
 
 DATE_PICKER_ID = "cash-ladder-date"
 TABLE_CONTAINER_ID = "cash-ladder-table-container"
@@ -172,6 +173,7 @@ def table_from_ladder(
         id=table_id,
         columns=columns,
         data=formatted.to_dict("records"),
+        **rk.sortable(table_id),
         style_cell={"textAlign": "right", "fontFamily": "monospace"},
         style_header={"fontWeight": "bold"},
     )

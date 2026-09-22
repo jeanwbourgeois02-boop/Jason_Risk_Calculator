@@ -108,7 +108,7 @@ def test_irs_rows_direction_receive_fixed_when_quantity_negative():
         assert df.iloc[0]["direction"] == "RECEIVE"
         assert df.iloc[0]["notional"] == -10_000_000.0  # signed: a short is negative
         records, _style = rates.format_rows(df)
-        assert records[0]["notional"] == "(10,000,000)"  # brackets, as the book shows a short
+        assert records[0]["notional"] == -10_000_000  # the table prints (10,000,000), as the book shows a short
     finally:
         conn.close()
 
@@ -200,9 +200,11 @@ def test_format_rows_formats_rate_and_usd_columns():
         df = rates.irs_rows(conn, "2026-06-20")
         records, _style = rates.format_rows(df)
         row = records[0]
-        assert row["par_rate"] == "3.9800%"
-        assert row["pv_usd"] == "1,000,000"
-        assert row["notional"] == "10,000,000"
+        assert row["par_rate"] == pytest.approx(0.0398)   # printed 3.9800% (ui.tabs.ranking.percentage)
+        assert row["pv_usd"] == 1_000_000
+        assert row["notional"] == 10_000_000
+        formats = {c["id"]: c.get("format", {}).get("specifier") for c in rates.table_columns()}
+        assert formats["par_rate"] == ".4%" and formats["pv_usd"] == "(,.0f"
     finally:
         conn.close()
 
@@ -213,9 +215,9 @@ def test_format_rows_missing_marks_show_na():
         conn.execute("DELETE FROM marks")
         df = rates.irs_rows(conn, "2026-06-20")
         records, _style = rates.format_rows(df)
-        assert records[0]["par_rate"] == "n/a"
-        assert records[0]["pv_usd"] == "n/a"
-        assert records[0]["dv01_usd"] == "n/a"
+        assert records[0]["par_rate"] is None    # printed "n/a"
+        assert records[0]["pv_usd"] is None
+        assert records[0]["dv01_usd"] is None
     finally:
         conn.close()
 
@@ -282,7 +284,7 @@ def test_build_layout_missing_mark_does_not_crash():
     try:
         layout = rates.build_layout(conn, "2026-06-20")
         table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
-        assert table.data[0]["par_rate"] == "n/a"
+        assert table.data[0]["par_rate"] is None
     finally:
         conn.close()
 
@@ -587,7 +589,7 @@ def test_flip_through_the_callback_changes_direction_quantity_sign_and_shown_pv(
     assert df.loc["T2", "quantity"] == 25_000_000.0 and df.loc["T2", "pv_usd"] == 2_000_000.0  # untouched
 
     row = next(r for r in records if r["trade_id"] == "T1")
-    assert row["direction"] == "RECEIVE" and row["notional"] == "(10,000,000)" and row["pv_usd"] == "(1,000,000)"
+    assert row["direction"] == "RECEIVE" and row["notional"] == -10_000_000 and row["pv_usd"] == -1_000_000
     assert notice_style["display"] == "flex" and notice_text.startswith("2 of 3 swaps have")
     assert "T1 set to Receive fixed" in status.children and status.className == "source-result--info"
     assert feed.woken == 0      # 2026-09-21: Bloomberg is pulled on request only, never by an edit
@@ -748,7 +750,7 @@ def test_revision_refresh_updates_rows_in_place_and_leaves_an_unchanged_table_al
         conn.close()
     rows, style, text = refresh("rev-2", "book-2", shown, AS_OF)
     by_id = {r["trade_id"]: r for r in rows}
-    assert by_id["T3"]["pv_usd"] == "1,234,567" and by_id["T1"]["direction"] == "RECEIVE"
+    assert by_id["T3"]["pv_usd"] == 1_234_567 and by_id["T1"]["direction"] == "RECEIVE"
     assert text.startswith("2 of 3 swaps")
     assert refresh("rev-3", "book-3", shown, None) == (no_update,) * 3  # no as-of date: nothing to render
 

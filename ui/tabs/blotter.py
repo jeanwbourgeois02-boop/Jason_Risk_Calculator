@@ -15,9 +15,9 @@ Side, Status, Product, Strategy, Bundle), listing only the values present in tha
 sub-tab's own trades. Picking values there re-queries the same priced book, keeps only
 the matching rows, and replaces the table's `data` -- which is also what drives the
 P&L strip below (`Input(table_id, "derived_virtual_data")`), so picking USDJPY narrows
-both the rows and every LTD/Daily/.../Trading figure to just those trades. Native
-`sort_action` is dropped for the same reason (also silently inert in this Dash
-version); the table keeps a fixed settle-date/pair order instead.
+both the rows and every LTD/Daily/.../Trading figure to just those trades. Sorting is
+native (`ui.tabs.ranking`, user 2026-09-22: every table ranks on a header click, numbers
+stored as numbers); the settle-date / pair order is only the order a table opens in.
 
 Sub-tab layout, each (Total book / FX / Rates / Options):
   (a) a P&L strip: LTD, Daily, Previous day, 5d, MTD, YTD, Trading -- recomputed for
@@ -132,6 +132,7 @@ from ui.revision import (
     trade_set_signature,
 )
 from ui.tabs.controls import build_date_picker
+from ui.tabs import ranking as rk
 from ui.tabs.formatting import format_cell
 
 DATE_PICKER_ID = "blotter-date"
@@ -284,63 +285,57 @@ def _fmt_product(value) -> str:
 
 
 def _sorted_scope_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Fixed display order (settle date, then pair) -- replaces the broken interactive
-    `sort_action="native"` (verified inert in this Dash version, same as the filter
-    row; see module docstring). No-op on an empty frame."""
+    """The order the table opens in (settle date, then pair); a header click re-ranks it
+    (ui.tabs.ranking). No-op on an empty frame."""
     if df.empty or "settle_date" not in df.columns:
         return df
     return df.sort_values(["settle_date", "instrument_id"], kind="stable")
 
 
+_COLUMN_FORMATS = {   # the numeric columns of the trade table (ui.tabs.ranking); every other column is text
+    "quantity": rk.count(),                 # unsigned: direction is carried by `side`
+    "notional_usd": rk.amount(),
+    "pnl_usd": rk.amount(nully="n/a"),
+    "fill": rk.rate(6, nully="n/a"),
+    "mark": rk.rate(6, nully="n/a"),
+    "t1_rate": rk.rate(6, nully="n/a"),
+}
+
+
 def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
-    """Format the (already scope/dropdown-filtered, pricing-enriched) value_book frame
-    for display: Amount unsigned with commas, rates to 6dp, P&L bold green/red or "n/a"
-    with a tooltip reason when unpriced, dates left as ISO strings. Returns
-    `(data_records, tooltip_data, style_data_conditional)` -- split out from
-    `detail_table` (2026-09-15) so the filter-dropdown callback can refresh a table's
-    `data`/`tooltip_data` props without rebuilding the whole DataTable component."""
+    """Records for the trade table from the (already scope/dropdown-filtered,
+    pricing-enriched) value_book frame: numbers as numbers, which the table formats
+    (`_COLUMN_FORMATS`: Amount unsigned with commas, rates to 6 dp, P&L with a negative in
+    parentheses and "n/a" when unpriced, its reason as the cell's tooltip), dates left as
+    ISO strings. Returns `(data_records, tooltip_data, style_data_conditional)` -- split
+    out from `detail_table` (2026-09-15) so the filter-dropdown callback can refresh a
+    table's `data`/`tooltip_data` props without rebuilding the whole DataTable."""
     cols = [c for c in display_columns if c in df.columns]
     formatted = df[cols].copy() if not df.empty else pd.DataFrame(columns=cols)
-    usd_cols = {"notional_usd", "pnl_usd"}
-    rate_cols = {"fill", "mark", "t1_rate"}
     reasons = df["reason"] if "reason" in df.columns else pd.Series([""] * len(df))
     for col in cols:
-        if col == "quantity":
-            formatted[col] = formatted[col].map(_fmt_amount)
-        elif col == "status":
+        if col == "status":
             formatted[col] = formatted[col].map(_fmt_status)
         elif col == "product":
             formatted[col] = formatted[col].map(_fmt_product)
-        elif col == "pnl_usd":
-            formatted[col] = [
-                "n/a" if (v != v) else format_cell(v) for v in df[col].tolist()
-            ] if not df.empty else []
-        elif col in usd_cols:
-            formatted[col] = formatted[col].map(format_cell)
-        elif col in rate_cols:
-            formatted[col] = ["n/a" if (v != v) else _fmt_rate(v) for v in df[col].tolist()] \
-                if not df.empty else []
     data_records = formatted.to_dict("records")
     tooltip_data = []
     # trade_id/reason travel with the row (not all displayed) so the
     # derived_virtual_data callback and the row-click detail panel can use them.
     for i, rec in enumerate(data_records):
+        for col in _COLUMN_FORMATS:
+            if col in rec:
+                value = rk.value(rec[col])
+                rec[col] = abs(round(value)) if (col == "quantity" and isinstance(value, float)) else value
         if "trade_id" in df.columns:
             rec.setdefault("trade_id", df["trade_id"].iloc[i])
         reason = reasons.iloc[i] if i < len(reasons) else ""
-        if reason and rec.get("pnl_usd") == "n/a":
+        if reason and rec.get("pnl_usd") is None:
             tooltip_data.append({"pnl_usd": {"value": reason, "type": "text"}})
         else:
             tooltip_data.append({})
-    style_data_conditional = [
-        {"if": {"filter_query": "{pnl_usd} contains '('", "column_id": "pnl_usd"},
-         "color": "var(--neg)", "fontWeight": "700"},
-        {"if": {"filter_query": "{pnl_usd} != '' && {pnl_usd} != 'n/a' && "
-                                 "!({pnl_usd} contains '(')", "column_id": "pnl_usd"},
-         "color": "var(--pos)", "fontWeight": "700"},
-        {"if": {"filter_query": "{pnl_usd} = 'n/a'", "column_id": "pnl_usd"},
-         "color": "var(--muted)", "fontStyle": "italic"},
-    ]
+    style_data_conditional = rk.sign_styles(["pnl_usd"], bold=True,
+                                            nil={"color": "var(--muted)", "fontStyle": "italic"})
     return data_records, tooltip_data, style_data_conditional
 
 
@@ -349,19 +344,21 @@ def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
                   column_labels: Optional[dict] = None) -> dash_table.DataTable:
     """Build the trade table. `display_columns`/`column_labels` default to the FX/Total
     layout; the Futures sub-tab passes its own (Contract/Contracts/Expiry/Settlement
-    instead of Pair/Amount/Value date/Live rate). No native filter/sort -- see module
-    docstring; filtering is the dropdown bar built by `_filter_bar`, sorting is fixed
-    (`_sorted_scope_df`, applied by the caller before this is built)."""
+    instead of Pair/Amount/Value date/Live rate). Filtering is the dropdown bar built by
+    `_filter_bar` (see module docstring); sorting is native (ui.tabs.ranking): the table
+    opens in `_sorted_scope_df`'s order and any header click re-ranks it."""
     display_columns = display_columns if display_columns is not None else _DISPLAY_COLUMNS
     column_labels = column_labels if column_labels is not None else _COLUMN_LABELS
     cols = [c for c in display_columns if c in df.columns]
     data_records, tooltip_data, style_data_conditional = _format_rows(df, display_columns, column_labels)
     return dash_table.DataTable(
         id=table_id,
-        columns=[{"name": column_labels.get(c, c.replace("_", " ").title()), "id": c}
+        columns=[rk.numeric(column_labels.get(c, c.replace("_", " ").title()), c, _COLUMN_FORMATS[c])
+                 if c in _COLUMN_FORMATS else rk.text(column_labels.get(c, c.replace("_", " ").title()), c)
                  for c in cols],
         data=data_records,
         tooltip_data=tooltip_data,
+        **rk.sortable(table_id),
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
                     "minWidth": "80px", "padding": "4px 8px"},
@@ -595,16 +592,16 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
     computed over a mix of priced/unpriced rows (2026-09-17 partial-pricing follow-up,
     `row_scoped_period_pnl`) still shows its real value with the `excluded_summary`/
     `excluded_detail` text as the cell's tooltip -- only a class with NOTHING priced
-    at all shows "n/a"."""
+    at all shows "n/a". Ranked (ui.tabs.ranking): the Total row is the pinned footer."""
     rows = asset_class_pnl_rows(conn, as_of, df)
     records, tooltips = [], []
     for r in rows:
-        rec = {"asset_class": r["asset_class"], "trades": str(r["trades"])}
+        rec = {"asset_class": r["asset_class"], "trades": int(r["trades"])}
         tip = {}
         for key in _ASSET_PERIODS:
             entry = r.get(key, {})
             if entry.get("available"):
-                rec[key] = format_cell(entry["value"])
+                rec[key] = rk.value(entry["value"])
                 summary = entry.get("excluded_summary")
                 if summary:
                     detail = entry.get("excluded_detail", "")
@@ -614,38 +611,44 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
                     rest = tip.get(key, {}).get("value", "")
                     tip[key] = {"value": f"{ref_note}. {rest}" if rest else ref_note, "type": "text"}
             else:
-                rec[key] = "n/a"
+                rec[key] = None
                 tip[key] = {"value": entry.get("reason", "") or "unavailable", "type": "text"}
         records.append(rec)
         tooltips.append(tip)
-    style = []
-    for key in _ASSET_PERIODS:
-        style += [
-            {"if": {"filter_query": f"{{{key}}} contains '('", "column_id": key},
-             "color": "var(--neg)", "fontWeight": "700"},
-            {"if": {"filter_query": f"{{{key}}} != '' && {{{key}}} != 'n/a' && !({{{key}}} contains '(')",
-                    "column_id": key}, "color": "var(--pos)", "fontWeight": "700"},
-            {"if": {"filter_query": f"{{{key}}} = 'n/a'", "column_id": key},
-             "color": "var(--muted)", "fontStyle": "italic"},
-        ]
-    style.append({"if": {"filter_query": "{asset_class} = 'Total'"}, "fontWeight": "700",
-                  "borderTop": "2px solid var(--muted)"})
+    is_total = [rec["asset_class"] == "Total" for rec in records]
+    body = [rec for rec, t in zip(records, is_total) if not t]
+    body_tips = [tip for tip, t in zip(tooltips, is_total) if not t]
+    footer = [rec for rec, t in zip(records, is_total) if t]
+    footer_tips = [tip for tip, t in zip(tooltips, is_total) if t]
     table = dash_table.DataTable(
         id=ASSET_TABLE_ID,
-        columns=[{"name": _ASSET_LABELS[c], "id": c} for c in ("asset_class", "trades", *_ASSET_PERIODS)],
-        data=records, tooltip_data=tooltips,
+        columns=[rk.text(_ASSET_LABELS["asset_class"], "asset_class"), rk.numeric(_ASSET_LABELS["trades"], "trades", rk.count())]
+                + [rk.numeric(_ASSET_LABELS[c], c, rk.amount(nully="n/a")) for c in _ASSET_PERIODS],
+        data=body, tooltip_data=body_tips,
+        **rk.sortable(ASSET_TABLE_ID),
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
                     "minWidth": "80px", "padding": "4px 8px"},
         style_cell_conditional=[{"if": {"column_id": "asset_class"}, "textAlign": "left"}],
         style_header={"fontWeight": "bold"},
-        style_data_conditional=style,
+        style_data_conditional=rk.sign_styles(_ASSET_PERIODS, bold=True,
+                                              nil={"color": "var(--muted)", "fontStyle": "italic"}),
     )
+    total_style = [{"if": {"filter_query": "{asset_class} = 'Total'"}, "fontWeight": "700",
+                    "borderTop": "2px solid var(--muted)"}]
     return html.Div(className="section section--secondary", children=[
-        html.H4("P&L by asset class"), table])
+        html.H4("P&L by asset class"),
+        rk.with_footer(table, footer, footer_style=total_style, footer_tooltips=footer_tips)])
 
 
-def _pos_cell(value, digits: int = 0) -> str:
+def _pos_num(value, _digits: int = 0):
+    """A Positions cell: the number itself, None (printed "n/a") when there is none; the
+    table formats it (`_digits` is the Detail sentence's concern, `_pos_text`)."""
+    return rk.value(value)
+
+
+def _pos_text(value, digits: int = 0) -> str:
+    """A number inside the Detail sentence."""
     if value is None or (isinstance(value, float) and value != value):
         return "n/a"
     return format_cell(value) if digits == 0 else f"{value:,.{digits}f}"
@@ -666,7 +669,8 @@ def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
     then the ES futures and SPX options with their equity-index total, then DV01 by
     currency, then the FX options' delta by pair (already inside the currency rows). Columns:
     Position, Rate, Delta (local), Delta (USD), Detail. A figure that could not be computed
-    reads "n/a" with its reason in the cell's tooltip."""
+    reads "n/a" with its reason in the cell's tooltip. Cells are numbers (ui.tabs.ranking):
+    a missing one is None."""
     from engine.ladder.positions import book_positions
     pos = book_positions(conn, as_of)
     records, tips = [], []
@@ -677,7 +681,7 @@ def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
         tip = {}
         if reason:
             for col in ("units", "usd"):
-                if rec[col] == "n/a":
+                if rec[col] is None:
                     tip[col] = {"value": reason, "type": "text"}
         records.append(rec)
         tips.append(tip)
@@ -685,71 +689,74 @@ def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
     fx = pos["fx"]
     for c in fx.get("by_ccy", []):
         detail = "metal, not in the FX net" if c["metal"] else ("" if c["ccy"] != "USD" else "USD legs")
-        add(f"{c['ccy']}", _pos_cell(c["local_delta"]), _pos_cell(c["usd_delta"]), detail, c["reason"],
+        add(f"{c['ccy']}", _pos_num(c["local_delta"]), _pos_num(c["usd_delta"]), detail, c["reason"],
             rate=(f"{c['label']} {_quoted(c['quoted'])}".strip() if c["ccy"] != "USD" else ""), kind="ccy")
     if not fx.get("by_ccy") and fx.get("reason"):
-        add("Delta by currency", "", "n/a", "", fx["reason"], kind="ccy")
-    add("FX net USD delta (+ = long USD)", "", _pos_cell(fx["net_usd"]), "the header's Net USD; FX options' delta included", fx["reason"], kind="total")
-    add("FX gross USD delta", "", _pos_cell(fx["gross_usd"]), "sum of |per-pair USD delta|", fx["reason"], kind="total")
+        add("Delta by currency", "", None, "", fx["reason"], kind="ccy")
+    add("FX net USD delta (+ = long USD)", "", _pos_num(fx["net_usd"]), "the header's Net USD; FX options' delta included", fx["reason"], kind="total")
+    add("FX gross USD delta", "", _pos_num(fx["gross_usd"]), "sum of |per-pair USD delta|", fx["reason"], kind="total")
 
     eq = pos["equity_index"]
     if eq["lines"]:
         es = eq.get("es_contracts")
-        detail = (f"{_pos_cell(es, 2)} ES-contract equivalents" if es == es else "") + \
+        detail = (f"{_pos_text(es, 2)} ES-contract equivalents" if es == es else "") + \
                  (f"; {len(eq['missing'])} not priced (see the sub-lines)" if eq["missing"] else "")
         for line in eq["lines"]:
-            what = f"{_pos_cell(line['contracts'], 0)} contracts"
-            add(line["label"], _pos_cell(line["index_units"], 2), _pos_cell(line["usd_delta"]), what, line["reason"],
+            what = f"{_pos_text(line['contracts'], 0)} contracts"
+            add(line["label"], _pos_num(line["index_units"], 2), _pos_num(line["usd_delta"]), what, line["reason"],
                 rate=(f"{line['level']:,.2f}" if line["level"] else ""), kind="future")
-        add("Equity index delta (ES futures + SPX options)", _pos_cell(eq["index_units"], 2), _pos_cell(eq["usd_delta"]),
+        add("Equity index delta (ES futures + SPX options)", _pos_num(eq["index_units"], 2), _pos_num(eq["usd_delta"]),
             detail, eq["reason"] or (eq["missing"][0] if eq["missing"] and eq["usd_delta"] != eq["usd_delta"] else ""), kind="total")
     else:
-        add("Equity index delta (ES futures + SPX options)", "", "n/a", "", eq["reason"], kind="total")
+        add("Equity index delta (ES futures + SPX options)", "", None, "", eq["reason"], kind="total")
 
     rates = pos["rates"]
     for ccy, dv01 in sorted(rates["by_ccy"].items()):
-        add(f"{ccy} swaps DV01", "", _pos_cell(dv01), "USD per +1bp parallel", kind="rates")
-    add("Rates DV01 (USD, +1bp parallel)", "", _pos_cell(rates["dv01_usd"]),
+        add(f"{ccy} swaps DV01", "", _pos_num(dv01), "USD per +1bp parallel", kind="rates")
+    add("Rates DV01 (USD, +1bp parallel)", "", _pos_num(rates["dv01_usd"]),
         f"{rates['swaps']} open swap(s)" + (f"; {len(rates['missing'])} without a DV01 mark" if rates["missing"] else ""),
         rates["reason"] or (rates["missing"][0] if rates["missing"] else ""), kind="total")
 
     opt = pos["fx_options"]
     for pair, usd in sorted(opt["by_pair"].items()):
-        add(f"{pair} options delta", "", _pos_cell(usd), "inside the currency rows above", kind="option")
-    add("FX options delta (USD)", "", _pos_cell(opt["usd_delta"]),
+        add(f"{pair} options delta", "", _pos_num(usd), "inside the currency rows above", kind="option")
+    add("FX options delta (USD)", "", _pos_num(opt["usd_delta"]),
         f"{opt['options']} open option(s), part of the FX net above" + (f"; {len(opt['missing'])} not converted" if opt["missing"] else ""),
         opt["reason"] or (opt["missing"][0] if opt["missing"] else ""), kind="total")
     return records, tips
 
 
 def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """The Total book's Positions block (`positions_rows`), above the P&L by asset class."""
+    """The Total book's Positions block (`positions_rows`), above the P&L by asset class.
+    Ranked (ui.tabs.ranking): a click on Delta (USD) puts the largest risk first; the
+    section totals (FX net and gross, equity index, rates DV01, FX options) are the
+    pinned footer, in their own order, never ranked with the lines."""
     records, tips = positions_rows(conn, as_of)
+    body = [(r, t) for r, t in zip(records, tips) if r["kind"] != "total"]
+    footer = [(r, t) for r, t in zip(records, tips) if r["kind"] == "total"]
     table = dash_table.DataTable(
         id=POSITIONS_TABLE_ID,
-        columns=[{"name": n, "id": c} for c, n in (("position", "Position"), ("rate", "Rate"),
-                                                     ("units", "Delta (local)"), ("usd", "Delta (USD)"), ("detail", ""))],
-        data=[{k: v for k, v in r.items() if k != "kind"} | {"kind": r["kind"]} for r in records], tooltip_data=tips,
-        hidden_columns=["kind"], css=[{"selector": ".show-hide", "rule": "display: none"}],
+        columns=[rk.text("Position", "position"), rk.text("Rate", "rate"),
+                 rk.numeric("Delta (local)", "units", rk.amount(2, nully="n/a", trim=True)),
+                 rk.numeric("Delta (USD)", "usd", rk.amount(nully="n/a")), rk.text("", "detail")],
+        data=[r for r, _ in body], tooltip_data=[t for _, t in body],
+        **rk.sortable(POSITIONS_TABLE_ID),
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
                     "padding": "4px 8px", "whiteSpace": "pre"},
         style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("position", "rate", "detail")],
         style_header={"fontWeight": "bold"},
-        style_data_conditional=[
-            {"if": {"filter_query": "{usd} contains '('", "column_id": "usd"}, "color": "var(--neg)", "fontWeight": "700"},
-            {"if": {"filter_query": "{units} contains '('", "column_id": "units"}, "color": "var(--neg)"},
-            {"if": {"filter_query": "{usd} = 'n/a'", "column_id": "usd"}, "color": "var(--muted)", "fontStyle": "italic"},
-            {"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700", "borderTop": "1px solid var(--muted)"},
-        ],
+        style_data_conditional=rk.sign_styles(["units"], pos="inherit")
+                               + rk.sign_styles(["usd"], bold=True, nil={"color": "var(--muted)", "fontStyle": "italic"}),
     )
+    total_style = [{"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700", "borderTop": "1px solid var(--muted)"}]
     return html.Div(className="section", children=[
         html.H4("Positions"),
         html.P("Delta by currency at the day's official rates (spot; an NDF currency at its 1M NDF price), FX options "
                "included; ES futures at their price and SPX options at the index level, added up in index units "
                "($ per point) and in USD; swaps as DV01 per +1bp. A figure with no mark reads n/a with the reason on hover.",
                className="section-kicker"),
-        table])
+        rk.with_footer(table, [r for r, _ in footer], footer_style=total_style, footer_tooltips=[t for _, t in footer])])
 
 
 def render_placeholder_strip(message: str) -> html.Div:
@@ -758,9 +765,13 @@ def render_placeholder_strip(message: str) -> html.Div:
 
 
 def _legs_table(legs: pd.DataFrame) -> dash_table.DataTable:
+    formats = {"leg_no": rk.count(), "amount": rk.amount(), "rate": rk.rate(6, trim=True), "settles_cash": rk.count()}
+    records = [{k: (rk.value(v) if k in formats else v) for k, v in rec.items()} for rec in legs.to_dict("records")]
     return dash_table.DataTable(
-        columns=[{"name": c.replace("_", " ").title(), "id": c} for c in legs.columns],
-        data=legs.to_dict("records"),
+        columns=[rk.numeric(c.replace("_", " ").title(), c, formats[c]) if c in formats
+                 else rk.text(c.replace("_", " ").title(), c) for c in legs.columns],
+        data=records,
+        **rk.sortable(),
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontSize": "12px"},
         style_header={"fontWeight": "bold", "fontSize": "12px"},
     )

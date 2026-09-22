@@ -103,19 +103,22 @@ def test_detail_table_formats_usd_and_rates():
     df = _sample_df()
     table = blotter.detail_table(df)
     row = table.data[0]
-    assert row["pnl_usd"] == "8,843"
-    assert row["fill"] == "1.100000"
-    assert row["quantity"] == "1,000,000"  # unsigned; direction carried by side
+    # numbers as numbers (ui.tabs.ranking); the table prints 8,843 / 1.100000 / 1,000,000
+    assert row["pnl_usd"] == pytest.approx(8843.4)
+    assert row["fill"] == 1.1
+    assert row["quantity"] == 1_000_000  # unsigned; direction carried by side
+    formats = {c["id"]: c for c in table.columns}
+    assert formats["pnl_usd"]["type"] == "numeric" and formats["pnl_usd"]["format"]["specifier"] == "(,.0f"
+    assert formats["fill"]["format"]["specifier"] == ",.6f" and formats["instrument_id"]["type"] == "text"
 
 
-def test_detail_table_has_no_native_filter_or_sort():
-    """Replaced 2026-09-15 by the dropdown filter bar (`_filter_bar`) and a fixed sort
-    order (`_sorted_scope_df`): native filter_action/sort_action were verified inert in
-    the installed Dash version (a bare reproduction outside this app never filtered or
-    sorted either), so the table no longer advertises controls that do nothing."""
+def test_detail_table_has_no_native_filter_but_ranks_on_a_header_click():
+    """Filtering is the dropdown filter bar (`_filter_bar`, 2026-09-15); sorting is native
+    again (ui.tabs.ranking, 2026-09-22: every table ranks), kept in the browser session."""
     table = blotter.detail_table(_sample_df())
     assert not hasattr(table, "filter_action")
-    assert not hasattr(table, "sort_action")
+    assert table.sort_action == "native" and table.sort_mode == "multi"
+    assert table.persistence is True and "sort_by" in table.persisted_props
 
 
 def test_sorted_scope_df_orders_by_settle_date_then_pair():
@@ -170,7 +173,7 @@ def test_detail_table_status_is_title_cased():
 
 def test_detail_table_unpriced_pnl_shows_na_with_tooltip():
     table = blotter.detail_table(_sample_df(reason="no mark", pnl_usd=float("nan")))
-    assert table.data[0]["pnl_usd"] == "n/a"
+    assert table.data[0]["pnl_usd"] is None   # printed "n/a" (the column's nully)
     assert table.tooltip_data[0]["pnl_usd"]["value"] == "no mark"
 
 
@@ -609,8 +612,9 @@ def test_total_book_asset_class_rows_sum_to_total():
         assert headline["ltd"]["value"] == pytest.approx(rows["Total"]["ltd"]["value"])
         layout = blotter.scope_layout("total", conn, "2026-06-20")
         table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
-        assert [r["asset_class"] for r in table.data] == ["FX", "Rates", "Options", "Total"]
-        assert table.data[-1]["ltd"] == "260,326"
+        footer = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID + "-footer")
+        assert [r["asset_class"] for r in table.data] == ["FX", "Rates", "Options"]   # ranked; Total is pinned under them
+        assert footer.data[0]["asset_class"] == "Total" and footer.data[0]["ltd"] == pytest.approx(260_326)
     finally:
         conn.close()
 
@@ -634,9 +638,10 @@ def test_total_book_asset_class_missing_mark_is_unavailable_with_reason():
         assert "S1" in rows["Total"]["ltd"]["excluded_detail"] or "swap" in rows["Total"]["ltd"]["excluded_detail"]
         layout = blotter.scope_layout("total", conn, "2026-06-20")
         table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
-        assert table.data[1]["ltd"] == "n/a" and "S1" in table.tooltip_data[1]["ltd"]["value"]
-        assert table.data[-1]["ltd"] != "n/a"  # Total row: a real value, not blanked
-        assert "excludes 1 of 2" in table.tooltip_data[-1]["ltd"]["value"]
+        footer = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID + "-footer")
+        assert table.data[1]["ltd"] is None and "S1" in table.tooltip_data[1]["ltd"]["value"]
+        assert footer.data[0]["ltd"] is not None  # Total row: a real value, not blanked
+        assert "excludes 1 of 2" in footer.tooltip_data[0]["ltd"]["value"]
     finally:
         conn.close()
 
@@ -658,8 +663,8 @@ def test_total_book_listed_index_option_is_on_the_options_line_not_other():
         assert rows["Total"]["ltd"]["value"] == pytest.approx(8_000.0 + 12_750.0)
         layout = blotter.scope_layout("total", conn, "2026-06-20")
         table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
-        assert [r["asset_class"] for r in table.data] == ["FX", "Options", "Total"]
-        assert table.data[1]["ltd"] == "12,750"
+        assert [r["asset_class"] for r in table.data] == ["FX", "Options"]   # Total is the pinned footer
+        assert table.data[1]["ltd"] == pytest.approx(12_750)
         # The options scope's own frame (strip, row detail, filters) holds the same trade.
         options_df = blotter.scope_df(conn, "options", "2026-06-20")
         assert options_df["trade_id"].tolist() == ["X1"]
@@ -710,8 +715,8 @@ def test_scope_layout_rows_render_with_no_marks_at_all():
         row = table.data[0]
         assert row["trade_id"] == "T1"
         assert row["status"] in ("Open", "Settled")
-        assert row["fill"] == "1.100000"
-        assert row["pnl_usd"] == "n/a"  # unpriced -> n/a with a tooltip reason, not blank/zero
+        assert row["fill"] == 1.1
+        assert row["pnl_usd"] is None  # unpriced -> printed n/a with a tooltip reason, not blank/zero
     finally:
         conn.close()
 
@@ -1038,11 +1043,12 @@ def test_remove_pair_from_bundle():
 
 
 def test_bundle_list_table_shows_unassigned_line():
-    table = blotter_bundles.bundle_list_table(
+    ranked = blotter_bundles.bundle_list_table(
         [{"name": "Core EM", "description": "d", "pairs": ["EURUSD"]}], {})
-    names = [r["name"] for r in table.data]
-    assert "Core EM" in names
-    assert blotter_bundles.UNASSIGNED_LABEL in names
+    table, footer = ranked.children          # the bundles rank; Unassigned is the pinned footer
+    assert [r["name"] for r in table.data] == ["Core EM"] and table.sort_action == "native"
+    assert [r["name"] for r in footer.data] == [blotter_bundles.UNASSIGNED_LABEL]
+    assert footer.data[0]["Daily"] is None and "Unavailable" in footer.tooltip_data[0]["Daily"]["value"]
 
 
 def test_bundles_layout_smoke():
@@ -1050,7 +1056,7 @@ def test_bundles_layout_smoke():
     try:
         themes.create_bundle(conn, "Core EM")
         layout = blotter.bundles_layout(conn, "2026-06-20")
-        assert any(isinstance(c, dash.dash_table.DataTable) for c in layout.children)
+        assert any(t.id == blotter_bundles.BUNDLE_LIST_ID for t in _find_tables(layout))
     finally:
         conn.close()
 
@@ -1447,9 +1453,9 @@ def test_fx_scope_strip_and_table_show_real_figures_on_a_book_with_official_mark
         assert cards["Trades"][0] == "3"
         table = next(t for t in _find_tables(layout) if t.id == "blotter-fx-datatable")
         by_pair_fill = {(r["instrument_id"], r["fill"]): r for r in table.data}
-        assert by_pair_fill[("EURUSD", "1.100000")]["pnl_eod"] == "48,000"   # 2,000,000 x (1.124 - 1.10), direct quote
-        assert _is_figure(by_pair_fill[("USDJPY", "147.000000")]["pnl_eod"])  # BBG_INTERP outright is official
-        assert by_pair_fill[("EURUSD", "1.080000")]["pnl_eod"] == "10,000"   # settled: frozen at the 2026-07-24 spot
+        assert by_pair_fill[("EURUSD", 1.1)]["pnl_eod"] == pytest.approx(48_000)   # 2,000,000 x (1.124 - 1.10), direct quote
+        assert isinstance(by_pair_fill[("USDJPY", 147.0)]["pnl_eod"], float)     # BBG_INTERP outright is official
+        assert by_pair_fill[("EURUSD", 1.08)]["pnl_eod"] == pytest.approx(10_000)   # settled: frozen at the 2026-07-24 spot
     finally:
         conn.close()
 
@@ -1517,10 +1523,10 @@ def test_one_text_price_unprices_one_row_and_every_view_still_renders():
         assert any("trade J1: trades.price is not a number ('24-Jul')" in (t or "") for t in tooltips)
         table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total")
         row = next(r for r in table.data if r["trade_id"] == "J1")
-        assert row["pnl_usd"] == "n/a" and row["fill"] == "n/a"          # missing stays missing: no 0, no raw text
+        assert row["pnl_usd"] is None and row["fill"] is None            # missing stays missing (printed n/a): no 0, no raw text
         tip = table.tooltip_data[table.data.index(row)]
         assert tip["pnl_usd"]["value"] == "trade J1: trades.price is not a number ('24-Jul')"
-        assert sum(1 for r in table.data if r["pnl_usd"] != "n/a") == 5  # every other trade prices
+        assert sum(1 for r in table.data if r["pnl_usd"] is not None) == 5  # every other trade prices
         fx = blotter.scope_layout("fx", conn, _AS_OF)
         assert "could not be rendered" not in _all_text(fx)
         assert len(next(t for t in _find_tables(fx) if t.id == "blotter-fx-datatable").data) == 3

@@ -64,7 +64,7 @@ def test_manual_list_shows_booked_trades_with_terms():
     table = next(c for c in card.children if isinstance(c, dash_table.DataTable))
     assert len(table.data) == 1
     row = table.data[0]
-    assert row["trade_id"] == "MANUAL-1" and row["side"] == "Buy" and row["amount"] == "10,000,000"
+    assert row["trade_id"] == "MANUAL-1" and row["side"] == "Buy" and row["amount"] == 10_000_000
     assert row["terms"] == "Digital Put strike 147"
     assert "Manual trades on file (1)" in " ".join(_text(card))
 

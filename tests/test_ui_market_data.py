@@ -363,13 +363,13 @@ def test_suspect_rows_flag_a_big_move_and_an_exactly_unchanged_mark_flagged_firs
     assert [bool(r["flag"]) for r in rows] == [True, True, False, False, False]
     spot = rows[0]
     assert (spot["instrument_id"], spot["mark_type"]) == ("USDJPY", "SPOT")
-    assert spot["change_pct"] == "+3.45 %" and "moved 3.4 %, above 2.5 %" in spot["flag"]
-    assert spot["previous"] == "145.0000" and spot["previous_date"] == PREV
+    assert spot["change_pct"] == pytest.approx(3.448, abs=1e-3) and "moved 3.4 %, above 2.5 %" in spot["flag"]   # printed +3.45%
+    assert spot["previous"] == 145.0 and spot["previous_date"] == PREV
     assert rows[1]["instrument_id"] == "EURUSD" and "exactly unchanged" in rows[1]["flag"]
 
     fwd = by_key[("USDJPY", "FWD_OUTRIGHT", "2026-10-15")]
-    assert fwd["change_pct"] == "+0.34 %" and fwd["flag"] == ""
-    assert by_key[("ESZ6 Index", "FUTURE_PX", "2026-12-18")]["change_pct"] == "+0.83 %"
+    assert fwd["change_pct"] == pytest.approx(0.336, abs=1e-3) and fwd["flag"] == ""
+    assert by_key[("ESZ6 Index", "FUTURE_PX", "2026-12-18")]["change_pct"] == pytest.approx(0.826, abs=1e-3)
     broken = by_key[("EURSEK", "FWD_OUTRIGHT", "2026-11-02")]          # never interpolated, and it says so
     assert broken["previous"] == "" and broken["change_pct"] == "" and broken["flag"] == ""
     assert f"no {PREV} mark for this settle date" in broken["note"] and "SPOT" in broken["note"]

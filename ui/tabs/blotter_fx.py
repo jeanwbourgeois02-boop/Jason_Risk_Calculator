@@ -70,6 +70,7 @@ from dash import Input, Output, dash_table, html
 
 from engine.pnl.fx_blotter import fx_blotter_rows
 from ui.tabs.blotter_pricing import _render_cache_key, priced_value_book, row_scoped_headline
+from ui.tabs import ranking as rk
 from ui.tabs.formatting import format_cell
 
 DATATABLE_ID = "blotter-fx-datatable"
@@ -151,6 +152,8 @@ def _fx_strip(conn: sqlite3.Connection, as_of: str) -> html.Div:
 # own `{value, available, reason, excluded_summary, excluded_detail, ...}` -- whatever else
 # `row_scoped_headline` puts in one is carried along and ignored.
 TOTAL_LABEL = "Total"
+FIXED_TABLE_ID = "blotter-fx-ccy-fixed"     # "P&L by currency" (the whole FX book)
+SHOWN_TABLE_ID = "blotter-fx-ccy-shown"     # "P&L by currency, rows shown"
 # (key in `figures`, column heading). The fixed table reads `row_scoped_headline`'s keys
 # ("ltd1_daily" is its Previous day); the rows-shown table builds the same keys itself.
 FIXED_PERIODS = (("ltd", "LTD"), ("daily", "Daily"), ("ltd1_daily", "Previous day"),
@@ -362,33 +365,42 @@ def shown_currency_rows(rows: Optional[List[dict]]):
     return out, {"currency": TOTAL_LABEL, "trades": len(rows), "figures": _shown_figures(rows)}
 
 
-def _figure_cell(entry: dict) -> html.Td:
-    """One figure: the app's usual number format and colours; "n/a" muted with its reason
-    on hover when unavailable; dotted, with the "excludes N of M" note on hover, when it
-    is a sum of the priced trades only."""
-    value = entry.get("value")
-    if not entry.get("available") or value is None or value != value:
-        return html.Td("n/a", className="fx-ccy-num cell--unavailable", title=entry.get("reason") or "unavailable")
-    classes = "fx-ccy-num " + ("fx-ccy-num--neg" if round(float(value)) < 0 else "fx-ccy-num--pos")
+def _figure_notes(entry: dict) -> List[str]:
+    """What a figure's tooltip says beyond its value: the "excludes N of M" note when it is
+    a sum of the priced trades only, and the pricing path's own caption when a period is
+    measured from an earlier close than its usual one (`engine.pnl.reference.annotate`,
+    2026-09-21); nothing for a full sum."""
     notes = []
     summary = entry.get("excluded_summary") or ""
     if summary:
         detail = entry.get("excluded_detail") or ""
         notes.append(f"{summary}. {detail}" if detail else summary)
-    # The pricing path's own caption when a period is measured from an earlier close than
-    # its usual one (`engine.pnl.reference.annotate`, 2026-09-21); absent or '' otherwise.
-    ref_note = entry.get("ref_note")
-    if isinstance(ref_note, str) and ref_note:
+    ref_note = entry.get("ref_note") or ""
+    if ref_note:
         notes.append(ref_note)
-    if not notes:
-        return html.Td(format_cell(value), className=classes)
-    return html.Td(format_cell(value), className=classes + " fx-ccy-num--partial", title="\n".join(notes))
+    return notes
 
 
-def _currency_row(row: dict, periods: tuple) -> html.Tr:
-    return html.Tr([html.Td(row["currency"], className="fx-ccy-label"),
-                    html.Td(f"{int(row['trades']):,}", className="fx-ccy-num"),
-                    *[_figure_cell(row["figures"].get(key, {})) for key, _label in periods]])
+def _currency_record(row: dict, periods: tuple) -> tuple:
+    """`(record, tooltip)` for one currency, or the Total: the trade count and each period's
+    number (the table formats it, ui.tabs.ranking), None (printed "n/a") with its reason as
+    the tooltip when unavailable; a figure that is a sum of the priced trades only is
+    flagged in `<key>__partial` (a dotted underline) with the note as its tooltip."""
+    rec = {"currency": row["currency"], "trades": int(row["trades"])}
+    tip = {}
+    for key, _label in periods:
+        entry = row["figures"].get(key, {})
+        value = entry.get("value")
+        if not entry.get("available") or value is None or value != value:
+            rec[key], rec[f"{key}__partial"] = None, 0
+            tip[key] = {"value": entry.get("reason") or "unavailable", "type": "text"}
+            continue
+        rec[key] = float(value)
+        notes = _figure_notes(entry)
+        rec[f"{key}__partial"] = 1 if notes else 0
+        if notes:
+            tip[key] = {"value": "\n".join(notes), "type": "text"}
+    return rec, tip
 
 
 def _currency_notes(rows: List[dict], total: dict, periods: tuple) -> Optional[html.P]:
@@ -406,18 +418,34 @@ def _currency_notes(rows: List[dict], total: dict, periods: tuple) -> Optional[h
     return html.P(" ".join(parts), className="fx-ccy-note") if parts else None
 
 
-def currency_table(rows: List[dict], total: dict, periods: tuple, trades_label: str = "Trades") -> list:
-    """`[table, note]` (the note only when there is something to say): a compact plain
-    table, one row per currency and the Total pinned under them."""
-    head = html.Thead(html.Tr([html.Th("Currency", className="fx-ccy-label"), html.Th(trades_label),
-                               *[html.Th(label) for _key, label in periods]]))
-    table = html.Table(className="fx-ccy-table", children=[
-        head,
-        html.Tbody([_currency_row(row, periods) for row in rows]),
-        html.Tfoot(_currency_row(total, periods)),
-    ])
+def currency_table(rows: List[dict], total: dict, periods: tuple, trades_label: str = "Trades",
+                   table_id: Optional[str] = None) -> list:
+    """`[table, note]` (the note only when there is something to say): one row per currency,
+    ranked on a header click (ui.tabs.ranking), and the Total pinned under them as the
+    table's footer, so it stays put whatever the order."""
+    body = [_currency_record(r, periods) for r in rows]
+    total_rec, total_tip = _currency_record(total, periods)
+    keys = [key for key, _label in periods]
+    table = dash_table.DataTable(
+        **({"id": table_id} if table_id else {}),
+        columns=[rk.text("Currency", "currency"), rk.numeric(trades_label, "trades", rk.count())]
+                + [rk.numeric(label, key, rk.amount(nully="n/a")) for key, label in periods],
+        data=[r for r, _ in body], tooltip_data=[t for _, t in body],
+        **rk.sortable(table_id),
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
+                    "padding": "4px 8px"},
+        style_cell_conditional=[{"if": {"column_id": "currency"}, "textAlign": "left", "fontWeight": "600"}],
+        style_header={"fontWeight": "bold"},
+        style_data_conditional=rk.sign_styles(keys, bold=True, nil={"color": "var(--muted)", "fontStyle": "italic"})
+                               + [{"if": {"column_id": key, "filter_query": f"{{{key}__partial}} = 1"},
+                                   "textDecoration": "underline dotted"} for key in keys],
+    )
+    total_style = [{"if": {"filter_query": "{currency} = '" + TOTAL_LABEL + "'"}, "fontWeight": "700",
+                    "borderTop": "2px solid var(--muted)"}]
     note = _currency_notes(rows, total, periods)
-    return [html.Div(table, className="fx-ccy-scroll"), *([note] if note is not None else [])]
+    ranked = rk.with_footer(table, [total_rec], footer_style=total_style, footer_tooltips=[total_tip])
+    return [html.Div(ranked, className="fx-ccy-scroll"), *([note] if note is not None else [])]
 
 
 def _currency_panel(title: str, caption: str, body: list, body_id: Optional[str] = None) -> html.Div:
@@ -431,14 +459,14 @@ def _currency_panel(title: str, caption: str, body: list, body_id: Optional[str]
 
 def fixed_currency_panel(conn: sqlite3.Connection, as_of: str) -> html.Div:
     rows, total = by_currency_rows(conn, as_of)
-    return _currency_panel(FIXED_TITLE, FIXED_CAPTION, currency_table(rows, total, FIXED_PERIODS))
+    return _currency_panel(FIXED_TITLE, FIXED_CAPTION, currency_table(rows, total, FIXED_PERIODS, table_id=FIXED_TABLE_ID))
 
 
 def shown_currency_children(rows: Optional[List[dict]]) -> list:
     """What `SHOWN_CURRENCY_ID` holds: built once with the table's own `data` when the
     sub-tab is rendered, then by the callback from `derived_virtual_data`."""
     shown, total = shown_currency_rows(rows)
-    return currency_table(shown, total, SHOWN_PERIODS, trades_label="Trades shown")
+    return currency_table(shown, total, SHOWN_PERIODS, trades_label="Trades shown", table_id=SHOWN_TABLE_ID)
 
 
 def shown_currency_panel(rows: Optional[List[dict]]) -> html.Div:
@@ -610,26 +638,28 @@ def _fmt_rate(value) -> str:
 
 
 def format_rows(df: pd.DataFrame, sample_mask: Optional[dict] = None) -> list:
-    """Formatted `data` records for `fx_blotter_table`, split out so it can be
-    unit-tested without Dash, matching `ui.tabs.rates.format_rows`'s convention.
-    Missing marks/P&L render blank, never "0.00" or "n/a", UNLESS `sample_mask` flags
-    that cell as sample-filled (module docstring), in which case the formatted value
-    gets `SAMPLE_SUFFIX` appended so it reads e.g. "1.108750 (sample)"."""
+    """`data` records for `fx_blotter_table`, split out so it can be unit-tested without
+    Dash, matching `ui.tabs.rates.format_rows`'s convention: rates and USD amounts as
+    numbers, which the table formats (ui.tabs.ranking). A missing mark or P&L is None
+    (blank), never 0 or "n/a", UNLESS `sample_mask` flags that cell as sample-filled
+    (module docstring), in which case it carries the formatted text with `SAMPLE_SUFFIX`
+    ("1.108750 (sample)"), shown as it is and ranked last."""
     cols = [c for c in _DISPLAY_COLUMNS if c in df.columns]
-    formatted = df[cols].copy() if not df.empty else pd.DataFrame(columns=cols)
-    for col in cols:
-        if col in _RATE_COLS:
-            formatted[col] = formatted[col].map(_fmt_rate)
-        elif col in _USD_COLS:
-            formatted[col] = formatted[col].map(format_cell)
+    formatted = df[cols].copy().astype(object) if not df.empty else pd.DataFrame(columns=cols)
+    if not formatted.empty:
+        for col in cols:
+            if col in _RATE_COLS or col in _USD_COLS:
+                formatted[col] = pd.Series([rk.value(v) for v in df[col].tolist()], dtype=object, index=formatted.index)
     if sample_mask and not formatted.empty:
         formatted = formatted.reset_index(drop=True)
         for col, flags in sample_mask.items():
             if col not in formatted.columns:
                 continue
             for i, is_sample in enumerate(flags):
-                if is_sample and i < len(formatted) and formatted.at[i, col]:
-                    formatted.at[i, col] = formatted.at[i, col] + SAMPLE_SUFFIX
+                if is_sample and i < len(formatted):
+                    v = formatted.at[i, col]
+                    if v is not None and not isinstance(v, str):
+                        formatted.at[i, col] = (_fmt_rate(v) if col in _RATE_COLS else format_cell(v)) + SAMPLE_SUFFIX
     records = formatted.to_dict("records")
     for rec, hidden in zip(records, _hidden_values(df, sample_mask)):
         rec.update(hidden)
@@ -668,12 +698,21 @@ def _hidden_values(df: pd.DataFrame, sample_mask: Optional[dict] = None) -> List
 
 
 def table_columns(visible: List[str]) -> List[dict]:
-    """The visible columns as text (their cells are formatted strings, some with a
-    "(sample)" suffix), so the native filter matches on "contains", case-insensitively,
-    and `>= 2026-09` works on the two ISO date columns; then the hidden bookkeeping
-    columns (`_HIDDEN_COLUMNS`)."""
-    columns = [{"name": _COLUMN_LABELS.get(c, c.replace("_", " ").title()), "id": c, "type": "text"}
-               for c in visible]
+    """The visible columns typed (ui.tabs.ranking): rates and USD amounts numeric with a
+    display format, so they rank as numbers and the native filter compares `> 0`; dates
+    and text as text, so `>= 2026-09` works on the two ISO date columns and text matches
+    on "contains", case-insensitively. A cell carrying an illustrative "(sample)" value
+    is a string in its numeric column: shown as it is, ranked last. Then the hidden
+    bookkeeping columns (`_HIDDEN_COLUMNS`)."""
+    columns = []
+    for c in visible:
+        name = _COLUMN_LABELS.get(c, c.replace("_", " ").title())
+        if c in _RATE_COLS:
+            columns.append(rk.numeric(name, c, rk.rate(6)))
+        elif c in _USD_COLS:
+            columns.append(rk.numeric(name, c, rk.amount()))
+        else:
+            columns.append(rk.text(name, c))
     columns += [{"name": c, "id": c, "type": "text"} for c in _HIDDEN_TEXT_COLUMNS]
     columns += [{"name": c, "id": c, "type": "numeric"} for c in _HIDDEN_NUMERIC_COLUMNS]
     return columns
@@ -682,9 +721,10 @@ def table_columns(visible: List[str]) -> List[dict]:
 def fx_blotter_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
                       sample_mask: Optional[dict] = None) -> dash_table.DataTable:
     """The trade table. Native column filtering (2026-09-21): it is what "P&L by currency,
-    rows shown" follows. No native sort -- the fixed trade-date / pair order is kept. The
-    sub-tab is rebuilt whole on a data revision, so the typed filter is kept in the browser
-    session (`persistence`), as the Options table does."""
+    rows shown" follows. Native sort too (ui.tabs.ranking, 2026-09-22); the trade-date /
+    pair order is the order it opens in. The sub-tab is rebuilt whole on a data revision,
+    so the typed filter and the chosen order are kept in the browser session
+    (`persistence`), as the Options table does."""
     from ui.tabs.options import FILTER_ROW_CSS  # the legible filter row, verified in a browser there
 
     cols = [c for c in _DISPLAY_COLUMNS if c in df.columns] if not df.empty else list(_DISPLAY_COLUMNS)
@@ -697,7 +737,7 @@ def fx_blotter_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
         data=data_records,
         filter_action="native",
         filter_options={"case": "insensitive", "placeholder_text": "filter"},
-        persistence=True, persistence_type="session", persisted_props=["filter_query"],
+        **rk.sortable(table_id, persisted=("filter_query",)),
         css=[{"selector": ".show-hide", "rule": "display: none"},  # no "Toggle Columns" for bookkeeping fields
              *FILTER_ROW_CSS],
         style_table={"overflowX": "auto"},

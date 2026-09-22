@@ -1622,7 +1622,18 @@ def test_the_four_tables_are_redrawn_in_place_on_a_revision(tmp_path, ui_app_stu
     conn.commit()
     conn.close()
     after = refresh_fn("rev-2", "book-1", AS_OF)
-    assert len(after) == 4 and _cell_texts(after[0]) != _cell_texts(before[0])   # by pair: the new value is in it
+
+    def _breakdown_data(component):   # the ranked table's rows and its footer's (ui.tabs.ranking)
+        out, stack = [], [component]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dash.dash_table.DataTable):
+                out.append(node.data)
+            children = getattr(node, "children", None)
+            stack.extend(children if isinstance(children, list) else [children] if children is not None else [])
+        return out
+
+    assert len(after) == 4 and _breakdown_data(after[0]) != _breakdown_data(before[0])   # by pair: the new value is in it
     with pytest.raises(PreventUpdate):
         refresh_fn("rev-3", "book-1", None)
 

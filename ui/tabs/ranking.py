@@ -50,6 +50,11 @@ def percent(decimals: int = 1, nully: str = "n/a") -> dict:
     return fmt.symbol(Symbol.yes).symbol_suffix("%").to_plotly_json()
 
 
+def percentage(decimals: int = 4, nully: str = "n/a") -> dict:
+    """A rate stored as a fraction (0.0398) and printed as a per cent (3.9800%)."""
+    return Format(precision=decimals, scheme=Scheme.percentage, nully=nully).to_plotly_json()
+
+
 def count(nully: str = "") -> dict:
     return Format(precision=0, scheme=Scheme.fixed, group=Group.yes, nully=nully).to_plotly_json()
 
@@ -120,7 +125,9 @@ def display_length(v, fmt: Optional[dict] = None) -> int:
     if not spec:
         return len(f"{f:,.0f}")
     precision = int(spec.group("precision") or 0)
-    body = f"{abs(f):{',' if spec.group('group') else ''}.{precision}f}"
+    if spec.group("type") == "%":
+        f *= 100
+    body = f"{abs(f):{',' if spec.group('group') else ''}.{precision}f}" + ("%" if spec.group("type") == "%" else "")
     if spec.group("trim") and "." in body:
         body = body.rstrip("0").rstrip(".")
     sign = spec.group("sign")

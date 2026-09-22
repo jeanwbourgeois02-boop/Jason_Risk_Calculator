@@ -157,6 +157,7 @@ from dash import Input, Output, State, dash_table, dcc, html
 from dash.dash_table.Format import Format, Group, Scheme, Sign, Trim
 
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
+from ui.tabs import ranking as rk
 from ui.tabs.formatting import format_cell
 
 TABLE_ID = "options-datatable"
@@ -1464,16 +1465,42 @@ def _cell(value, kind: str = "money"):
     return html.Td(format_cell(value), className=cls)
 
 
+_KIND_FORMATS = {"count": rk.count(nully="n/a"), "money": rk.amount(nully="n/a"), "signed": rk.amount(nully="n/a"),
+                 "rate": rk.rate(4, nully="n/a", trim=True), "pct": rk.percent(1)}
+
+
 def _agg_table(title: str, kicker: str, first: str, columns: List[Tuple[str, str, str]], rows: List[dict]) -> html.Div:
-    """One compact table: `columns` = (heading, row key, kind); a row named 'Total' is the footer."""
-    def tr(r):
-        label = r["group"] + (f" ({r['unpriced']} unpriced)" if r.get("unpriced") else "")
-        return html.Tr([html.Td(label, className="fx-ccy-label")] + [_cell(r.get(key), kind) for _h, key, kind in columns])
-    head = html.Thead(html.Tr([html.Th(first, className="fx-ccy-label")] + [html.Th(h) for h, _k, _kind in columns]))
-    body, total = [r for r in rows if r["group"] != "Total"], [r for r in rows if r["group"] == "Total"]
-    inner = (html.Table(className="fx-ccy-table", children=[head, html.Tbody([tr(r) for r in body]),
-                                                             html.Tfoot([tr(r) for r in total])])
-             if rows else html.P("No options on file.", className="section-kicker"))
+    """One compact ranked table (ui.tabs.ranking): `columns` = (heading, row key, kind), the
+    numbers stored as numbers and formatted by kind; a row named 'Total' is the pinned
+    footer, never ranked with the rest."""
+    def record(r: dict) -> dict:
+        rec = {"group": r["group"] + (f" ({r['unpriced']} unpriced)" if r.get("unpriced") else "")}
+        for _heading, key, _kind in columns:
+            v = r.get(key)
+            rec[key] = None if _is_missing(v) else float(v)
+        return rec
+
+    body = [record(r) for r in rows if r["group"] != "Total"]
+    total = [record(r) for r in rows if r["group"] == "Total"]
+    if not rows:
+        inner = html.P("No options on file.", className="section-kicker")
+    else:
+        table_id = f"{BREAKDOWNS_ID}-{re.sub(r'[^a-z0-9]+', '-', first.lower())}"
+        table = dash_table.DataTable(
+            id=table_id,
+            columns=[rk.text(first, "group")] + [rk.numeric(h, key, _KIND_FORMATS[kind]) for h, key, kind in columns],
+            data=body,
+            **rk.sortable(table_id),
+            style_table={"overflowX": "auto"},
+            style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
+                        "padding": "4px 8px"},
+            style_cell_conditional=[{"if": {"column_id": "group"}, "textAlign": "left", "fontWeight": "600"}],
+            style_header={"fontWeight": "bold"},
+            style_data_conditional=rk.sign_styles([key for _h, key, kind in columns if kind in ("signed", "pct")],
+                                                  nil={"color": "var(--muted)", "fontStyle": "italic"}),
+        )
+        total_style = [{"if": {"filter_query": "{group} = 'Total'"}, "fontWeight": "700", "borderTop": "2px solid var(--muted)"}]
+        inner = rk.with_footer(table, total, footer_style=total_style)
     return html.Div(className="section fx-ccy-panel", children=[
         html.H4(title, className="fx-ccy-title"), html.P(kicker, className="section-kicker"),
         html.Div(className="fx-ccy-scroll", children=inner)])

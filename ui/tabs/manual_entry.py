@@ -30,7 +30,7 @@ from typing import Callable, List
 from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs import options as options_ui
-from ui.tabs.formatting import format_cell
+from ui.tabs import ranking as rk
 
 PRODUCT_ID = "manual-product"
 PAIR_ID = "manual-pair"
@@ -140,8 +140,8 @@ def _list_records(rows: List[dict]) -> List[dict]:
         records.append({
             "trade_id": r["trade_id"], "product": {"FX_OPTION": "Option", "FX_FWD": "Forward", "FX_SWAP": "Swap"}.get(r["product"], r["product"]),
             "instrument_id": r["instrument_id"], "trade_date": r["trade_date"],
-            "side": "Buy" if r["quantity"] >= 0 else "Sell", "amount": f"{abs(round(float(r['quantity']))):,}",
-            "price": format_cell(r["price"]) if r["product"] != "FX_OPTION" else f"{float(r['price']):g}",
+            "side": "Buy" if r["quantity"] >= 0 else "Sell", "amount": abs(round(float(r["quantity"]))),
+            "price": rk.value(r["price"]),   # numbers (ui.tabs.ranking): the table prints them
             "settle_date": r["settle_date"], "terms": terms, "counterparty": r["counterparty"],
         })
     return records
@@ -156,8 +156,11 @@ def manual_list(conn: sqlite3.Connection) -> html.Div:
     else:
         body = [dash_table.DataTable(
             id=TABLE_ID,
-            columns=[{"name": name, "id": col} for col, name in _LIST_COLUMNS],
+            columns=[rk.numeric(name, col, rk.count()) if col == "amount"
+                     else rk.numeric(name, col, rk.rate(6, trim=True)) if col == "price"
+                     else rk.text(name, col) for col, name in _LIST_COLUMNS],
             data=_list_records(rows),
+            **rk.sortable(TABLE_ID),
             style_table={"overflowX": "auto"},
             style_cell={"textAlign": "left", "fontFamily": "monospace", "padding": "4px 8px"},
             style_header={"fontWeight": "bold"},

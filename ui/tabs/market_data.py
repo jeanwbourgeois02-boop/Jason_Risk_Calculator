@@ -56,6 +56,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
+from ui.tabs import ranking as rk
 from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.feed_controls import PullGuard, click_outcome, pull_timings, safety_refresh_ms, seconds_words
@@ -271,9 +272,9 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
     failed = [i for i in items if i.get("status") == "FAILED"]
     rows = [{"status": i.get("status", ""), "instrument_id": i.get("instrument_id", ""),
              "mark_type": i.get("mark_type", ""), "settle_date": i.get("settle_date", ""),
-             "value": "" if i.get("value") is None else f"{float(i['value']):.8f}",
+             "value": rk.value(i.get("value")),
              "source": i.get("source", ""), "detail": i.get("detail", "")} for i in items]
-    rate_rows = [{"currency": c, "pair": v.get("pair", ""), "rate": f"{v['rate']:.8f}",
+    rate_rows = [{"currency": c, "pair": v.get("pair", ""), "rate": rk.value(v["rate"]),
                   "inverted": "1/rate" if v["inverted"] else "direct", "source": v["source"],
                   "timestamp": v["timestamp"], "stale": "STALE" if v["stale"] else "fresh"}
                  for c, v in sorted(rates.items())]
@@ -296,16 +297,11 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
         html.H4("Requested marks: pulled vs failed"),
         dash_table.DataTable(
             id="market-data-diag-table",
-            columns=[{"name": n, "id": i} for n, i in [("Status", "status"), ("Pair", "instrument_id"),
-                                                       ("Mark", "mark_type"), ("Settle date", "settle_date"),
-                                                       ("Value", "value"), ("Source", "source"), ("Detail", "detail")]],
-            # sort_action/filter_action="native" removed 2026-09-16: dash_table's native
-            # header filter/sort row does not work in the installed Dash version (see
-            # ui/tabs/blotter.py's module docstring for the verified repro) -- it was
-            # rendering here as dead, non-functional controls. This is a small debug
-            # panel (collapsed by default) rather than a primary blotter view, so it
-            # gets a plain sortable-by-click column header via style only, no fake
-            # interactive affordance.
+            columns=[rk.numeric(n, i, rk.rate(8, trim=True)) if i == "value" else rk.text(n, i)
+                     for n, i in [("Status", "status"), ("Pair", "instrument_id"),
+                                  ("Mark", "mark_type"), ("Settle date", "settle_date"),
+                                  ("Value", "value"), ("Source", "source"), ("Detail", "detail")]],
+            **rk.sortable("market-data-diag-table"),   # ranks on a header click (ui.tabs.ranking)
             data=rows, page_size=40,
             style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
             style_data_conditional=[
@@ -317,9 +313,11 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
         html.H4("Spot rates the ladder is using (latest official SPOT mark per currency)"),
         dash_table.DataTable(
             id="market-data-rates-table",
-            columns=[{"name": n, "id": i} for n, i in [("Currency", "currency"), ("Pair", "pair"), ("Rate", "rate"),
-                                                       ("USD per local", "inverted"), ("Source", "source"),
-                                                       ("Snapped at", "timestamp"), ("Freshness", "stale")]],
+            columns=[rk.numeric(n, i, rk.rate(8, trim=True)) if i == "rate" else rk.text(n, i)
+                     for n, i in [("Currency", "currency"), ("Pair", "pair"), ("Rate", "rate"),
+                                  ("USD per local", "inverted"), ("Source", "source"),
+                                  ("Snapped at", "timestamp"), ("Freshness", "stale")]],
+            **rk.sortable("market-data-rates-table"),
             data=rate_rows, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
             style_data_conditional=[{"if": {"filter_query": "{stale} = 'STALE'"}, "color": "#8a4b00",
                                      "backgroundColor": "#fff4e5"}]),
@@ -598,18 +596,18 @@ def forward_curve(conn: sqlite3.Connection, as_of: str, pair: str) -> pd.DataFra
 
 def curve_table(df: pd.DataFrame, pair: str) -> dash_table.DataTable:
     dp = decimals_for_pair(pair)
-    formatted = df.copy()
-    if "outright" in formatted.columns:
-        formatted["outright"] = formatted["outright"].map(lambda v: "" if pd.isna(v) else f"{float(v):.{dp}f}")
-    if "points" in formatted.columns:
-        formatted["points"] = formatted["points"].map(lambda v: "" if v is None or pd.isna(v) else f"{float(v):.{dp}f}")
-    columns = [{"name": n, "id": i} for n, i in [
+    formatted = df.copy().astype(object)
+    for col in ("outright", "points", "used_by_book"):
+        if col in formatted.columns:
+            formatted[col] = pd.Series([rk.value(v) for v in df[col].tolist()], dtype=object, index=formatted.index)
+    formats = {"outright": rk.rate(dp), "points": rk.rate(dp), "used_by_book": rk.count()}
+    columns = [rk.numeric(n, i, formats[i]) if i in formats else rk.text(n, i) for n, i in [
         ("Settle date", "settle_date"), ("Tenor", "tenor"), ("Outright", "outright"),
         ("Fwd points", "points"), ("Source", "source"), ("Status", "status"),
         ("Used by book", "used_by_book"),
     ]]
     return dash_table.DataTable(
-        id=CURVE_TABLE_ID, columns=columns, data=formatted.to_dict("records"),
+        id=CURVE_TABLE_ID, columns=columns, data=formatted.to_dict("records"), **rk.sortable(CURVE_TABLE_ID),
         page_size=25, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
         style_data_conditional=[
             {"if": {"filter_query": "{status} = 'official'", "column_id": "status"}, "color": "#1a7f4b", "fontWeight": "600"},
@@ -881,14 +879,27 @@ def _kicker(text: str) -> html.P:
     return html.P(text, className="section-kicker")
 
 
+_PANEL_FORMATS = {"value": rk.rate(8, trim=True), "previous": rk.rate(8, trim=True), "change_pct": rk.percent(2)}
+
+
 def _panel_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict], wide: Tuple[str, ...] = (),
                  numeric: Tuple[str, ...] = (), page_size: int = PANEL_PAGE_SIZE) -> dash_table.DataTable:
-    """The tab's DataTable look (`_MONO` / `_HEAD`). `wide` columns hold sentences and wrap;
-    a row whose `flag` is not empty is tinted. Colours are plain hex: inside a DataTable
-    var(--muted) and var(--accent) are dash-table's own, and border colours are forced grey
-    by style.css (see ui/tabs/options.py::table_styles)."""
+    """The tab's DataTable look (`_MONO` / `_HEAD`), ranked on a header click (ui.tabs.ranking).
+    `wide` columns hold sentences and wrap; `numeric` columns are right-aligned and, when
+    their rows carry numbers, typed numeric with a display format (`_PANEL_FORMATS`, else
+    a plain count / amount) so they rank as numbers; a row whose `flag` is not empty is
+    tinted. Colours are plain hex: inside a DataTable var(--muted) and var(--accent) are
+    dash-table's own, and border colours are forced grey by style.css (see
+    ui/tabs/options.py::table_styles)."""
+    def typed(name: str, col: str) -> dict:
+        values = [r.get(col) for r in rows if r.get(col) not in (None, "")]
+        if col in numeric and values and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+            return rk.numeric(name, col, _PANEL_FORMATS.get(col, rk.amount(2, trim=True)))
+        return rk.text(name, col)
+
     return dash_table.DataTable(
-        id=table_id, columns=[{"name": name, "id": col} for name, col in columns], data=rows,
+        id=table_id, columns=[typed(name, col) for name, col in columns], data=rows,
+        **rk.sortable(table_id),
         page_size=page_size, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
         style_cell_conditional=(
             [{"if": {"column_id": c}, "whiteSpace": "normal", "height": "auto",
@@ -1010,9 +1021,9 @@ def suspect_rows(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] =
                 flags.append(f"snapped {_age_words(age)} ago, older than {STALE_AFTER_SECONDS // 60} min")
         rows.append({
             "instrument_id": instrument_id, "mark_type": mark_type, "settle_date": settle,
-            "value": _fmt_mark(value), "previous": "" if before is None else _fmt_mark(before),
+            "value": rk.value(value), "previous": rk.value(before),
             "previous_date": "" if before is None else prev_day,
-            "change_pct": "" if change is None else f"{change:+.2f} %",
+            "change_pct": None if change is None else float(change),
             "snapped_at": str(snapped_at or "").replace("T", " "),
             "flag": "; ".join(flags), "note": note,
             "_order": (not flags, not value_flag, -abs(change or 0.0)),
