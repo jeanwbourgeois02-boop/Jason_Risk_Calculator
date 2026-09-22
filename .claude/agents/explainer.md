@@ -3,7 +3,7 @@ name: explainer
 description: Answers the user's conceptual and "how does this work" questions about the risk monitor (P&L, delta, ladder, blotter, marks, reconciliation) in plain language, read-only. Use while other agents are building so questions do not wait.
 tools: Read, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

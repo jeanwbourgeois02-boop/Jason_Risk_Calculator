@@ -3,7 +3,7 @@ name: ui-ladder
 description: Builds the Ladder tab (ui/tabs/exposure.py, ui/tabs/cash_ladder.py); the UI half of the Ladder feature pair with cash-ladder.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

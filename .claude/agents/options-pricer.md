@@ -3,7 +3,7 @@ name: options-pricer
 description: Prices FX (and later equity/commodity) options via the vendored options_calc QuantLib library into PREMIUM/DELTA (and later Greek) marks.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

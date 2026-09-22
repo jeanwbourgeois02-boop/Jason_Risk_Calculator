@@ -3,7 +3,7 @@ name: data-ingest
 description: Parses BNP CSV and xlsx inputs into the SQLite schema, including the FX swap package rule.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

@@ -3,7 +3,7 @@ name: bbg-diagnostics
 description: Read-only auditor of every Bloomberg touchpoint in the app (blpapi pulls, marks/marks_official, curves) that checks connectivity and correctness and reports plain-English results to the UI's diagnostics panel.
 tools: Read, Grep, Glob, Bash
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

@@ -3,7 +3,7 @@ name: ui-shell
 description: Builds the Dash shell the tab agents plug into: app assembly, launch, the refresh signal, upload, shared controls and formatting, and the pricing reader every screen shares.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

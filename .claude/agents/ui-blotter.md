@@ -3,7 +3,7 @@ name: ui-blotter
 description: Builds the Blotter tab's Total book, FX, Futures, Bundles and Manual entry sub-tabs (ui/tabs/blotter.py, blotter_fx.py, blotter_bundles.py, manual_entry.py); the UI half of the Blotter feature pair with pnl-engine and data-ingest.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

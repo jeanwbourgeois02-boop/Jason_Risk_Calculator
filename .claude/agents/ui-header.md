@@ -3,7 +3,7 @@ name: ui-header
 description: Builds the P&L header shown above every tab (ui/tabs/header.py); the UI half of the Header feature pair with pnl-engine.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

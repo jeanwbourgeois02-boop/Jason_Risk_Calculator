@@ -3,7 +3,7 @@ name: ui-market-data
 description: Builds the Market data tab and the Bloomberg feed controls (ui/tabs/market_data.py, ui/feed_controls.py); the UI half of the Market data feature pair with bbg-data.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

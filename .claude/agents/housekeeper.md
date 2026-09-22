@@ -3,7 +3,7 @@ name: housekeeper
 description: The starting point for every task; routes a request into feature pairs (function agent, then UI agent), delegates, runs the full suite once and reports. Never writes application code itself.
 tools: Agent, Read, Grep, Glob, Bash
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

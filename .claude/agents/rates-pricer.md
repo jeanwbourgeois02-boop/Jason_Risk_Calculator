@@ -3,7 +3,7 @@ name: rates-pricer
 description: Bootstraps discount/forwarding curves and prices interest rate swaps (QuantLib) into PV_USD/DV01_USD/PAR_RATE marks.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

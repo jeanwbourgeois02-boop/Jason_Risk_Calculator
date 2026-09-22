@@ -3,7 +3,7 @@ name: pnl-engine
 description: Computes per-trade LTD P&L and the daily, 5d, MTD and YTD series per the CLAUDE.md conventions.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

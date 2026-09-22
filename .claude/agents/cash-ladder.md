@@ -3,7 +3,7 @@ name: cash-ladder
 description: Builds the cash ladder and the delta-per-currency and per-pair delta queries.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

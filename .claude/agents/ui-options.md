@@ -3,7 +3,7 @@ name: ui-options
 description: Builds the Blotter's Options sub-tab (ui/tabs/options.py); the UI half of the Options feature pair with options-pricer.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

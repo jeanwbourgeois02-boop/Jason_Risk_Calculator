@@ -3,7 +3,7 @@ name: risk-metrics
 description: Computes the Risk tab's metrics (blended vol, 1y 95% VaR, worst day raw / ex shocks, scenario stress) for the book and per underlyer from the book's own delta and the nm-dashboard market history; the function half of the Risk feature pair with ui-risk.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

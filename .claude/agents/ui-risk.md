@@ -3,7 +3,7 @@ name: ui-risk
 description: Builds the Risk tab (ui/tabs/risk.py); the UI half of the Risk feature pair with risk-metrics.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 

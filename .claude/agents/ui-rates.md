@@ -3,7 +3,7 @@ name: ui-rates
 description: Builds the Blotter's Rates sub-tab (ui/tabs/rates.py); the UI half of the Rates feature pair with rates-pricer.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
-effort: xhigh
+effort: high
 memory: project
 ---
 
