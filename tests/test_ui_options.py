@@ -1652,3 +1652,87 @@ def test_a_cell_edit_releases_the_selection_so_the_refresh_gate_reopens(tmp_path
     assert release_fn("Saved") == (None, [])
     # with no selection the gate lets the waiting revision through
     assert options.refresh_gate(None, "rev-2", "book-1", "rev-1|book-1") == ("rev-2|book-1", "")
+
+
+# --------------------------------------------------------------------------- the pull's own failure
+
+_STEP_ERROR = ("RuntimeError('convergence not reached after 99 iterations; "
+               "last improvement 0.0178479, required accuracy 1e-12')")
+
+
+def _write_pull_status(db_path, options_block):
+    """The feed's status file as `data.bloomberg.live` writes it, `options` block given."""
+    from data.bloomberg.live import status_path
+    status_path(db_path).write_text(json.dumps({"options": options_block}), encoding="utf-8")
+
+
+def _defect_db(tmp_path):
+    """The 2026-09-22 picture: D1 has a strike, its PREMIUM of the previous close on file
+    and nothing on AS_OF, so the book carries the earlier premium under the near-marks
+    rule (an empty book reason) while the tab has no PREMIUM for AS_OF itself; plus E1,
+    a listed SPX put with Bloomberg's own price and no Greeks."""
+    db_path = _file_db(tmp_path, digital_strike=152.0)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO marks VALUES ('2026-06-19', 'USDJPY111926P-1', '2026-11-19', 'PREMIUM', 0.13, "
+                 "'QL_OPTIONS_PRICER', '2026-06-19T15:00:00-04:00')")
+    conn.execute("INSERT INTO marks VALUES ('2026-06-19', 'USDJPY', '2026-06-19', 'SPOT', 147.0, "
+                 "'BBG_BFXFORWARD', '2026-06-19T15:00:00-04:00')")
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('SPX US 10/16/26 P7615 Index', 'EQ_OPTION', 'SPX', 'USD', "
+                 "100, 0, 'SPX Index', '2026-10-16')")
+    conn.execute("INSERT INTO instrument_options VALUES ('SPX US 10/16/26 P7615 Index', 7615, 'PUT', 0, "
+                 "'9999-12-31', 'VANILLA')")
+    conn.execute("INSERT INTO trades VALUES ('E1', 'XLSX', 'SPX US 10/16/26 P7615 Index', 'EQ_OPTION', 'E1', "
+                 "'2026-06-01', 15, 121.5, 'ACC', 'CPTY', '', 'TR', 'spx put', '')")
+    conn.execute("INSERT INTO trade_legs VALUES ('E1', 1, 'NOTIONAL', 'USD', 15, '2026-06-01', '2026-10-16', 121.5, 0)")
+    conn.execute("INSERT INTO marks VALUES (?, 'SPX US 10/16/26 P7615 Index', '2026-10-16', 'FUTURE_PX', 130.0, "
+                 "'BBG_BDH', ?)", (AS_OF, f"{AS_OF}T17:00:00-04:00"))
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _note(db_path, group_key):
+    return next(r for r in _records(db_path, collapsed=["PKG1"]) if r["group_key"] == group_key)["note"]
+
+
+def test_a_failed_options_step_is_named_on_every_leg_it_left_unpriced(tmp_path, ui_app_stub):
+    db_path = _defect_db(tmp_path)
+    _write_pull_status(db_path, {"priced": 0, "skipped": [], "as_of_date": AS_OF, "error": _STEP_ERROR})
+    expected = f"the last Pull Bloomberg now ({AS_OF}) failed in its options step: {_STEP_ERROR}"
+    assert _note(db_path, "D1") == f"not priced: {expected}"
+    assert _note(db_path, "E1") == f"Greeks not calculated: {expected}"
+    # A leg the pull DID price keeps its marks and says nothing.
+    assert _note(db_path, "PKG1") == ""
+
+
+def test_a_legs_own_skip_reason_wins_over_the_steps_error(tmp_path, ui_app_stub):
+    db_path = _defect_db(tmp_path)
+    _write_pull_status(db_path, {
+        "priced": 0, "as_of_date": AS_OF, "error": _STEP_ERROR,
+        "skipped": [{"trade_id": "D1", "reason": "no curve/rate JPY"},
+                    {"trade_id": "E1", "reason": "no DIV_YIELD for SPX Index"}],
+    })
+    assert _note(db_path, "D1") == "not priced: no curve/rate JPY"
+    assert _note(db_path, "E1") == "Greeks not calculated: no DIV_YIELD for SPX Index"
+
+
+@pytest.mark.parametrize("block", [
+    {"priced": 0, "skipped": [], "as_of_date": "2026-06-19", "error": _STEP_ERROR},   # another day's pull
+    {"priced": 0, "skipped": [], "as_of_date": AS_OF, "error": ""},                    # no failure
+    {"priced": 0, "skipped": [], "as_of_date": AS_OF},
+])
+def test_a_status_for_another_day_or_without_an_error_leaves_the_notes_as_they_were(tmp_path, ui_app_stub, block):
+    db_path = _defect_db(tmp_path)
+    before = (_note(db_path, "D1"), _note(db_path, "E1"))
+    assert before == (f"no PREMIUM mark on {AS_OF}: priced the next time you press Pull Bloomberg now",
+                      "Greeks not calculated: they are the next time you press Pull Bloomberg now")
+    _write_pull_status(db_path, block)
+    assert (_note(db_path, "D1"), _note(db_path, "E1")) == before
+
+
+def test_an_unreadable_status_file_never_blanks_the_tab(tmp_path, ui_app_stub):
+    from data.bloomberg.live import status_path
+    db_path = _defect_db(tmp_path)
+    status_path(db_path).write_text("{not json", encoding="utf-8")
+    assert _note(db_path, "D1").startswith("no PREMIUM mark on")

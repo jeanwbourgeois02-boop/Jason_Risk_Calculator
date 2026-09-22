@@ -352,22 +352,40 @@ def _book_rows(conn: sqlite3.Connection, as_of: str) -> Dict[str, dict]:
     return {rec["trade_id"]: rec for rec in df.to_dict("records")}
 
 
-def _feed_skip_reasons(conn: sqlite3.Connection, as_of: str) -> Dict[str, str]:
-    """trade_id -> why the last Bloomberg cycle could not price it, from the feed's
-    status file (`data.bloomberg.live._options_step`), when that cycle priced `as_of`.
-    Read-only and best-effort: no file, another date or an unreadable file is {}."""
+def _feed_options_step(conn: sqlite3.Connection, as_of: str) -> dict:
+    """The `options` block of the feed's status file (`data.bloomberg.live._options_step`)
+    when the last Bloomberg cycle priced `as_of`; {} otherwise. Read-only and
+    best-effort: no file, another date or an unreadable file is {}."""
     key = _db_key(conn)
     if key is None:
         return {}
     try:
         from data.bloomberg.live import read_status
         step = (read_status(key) or {}).get("options") or {}
-        skipped = step.get("skipped")
-        if step.get("as_of_date") != as_of or not isinstance(skipped, list):
+        if not isinstance(step, dict) or step.get("as_of_date") != as_of:
             return {}
-        return {str(s.get("trade_id")): str(s.get("reason") or "") for s in skipped if isinstance(s, dict)}
+        return step
     except Exception:  # noqa: BLE001 -- a diagnostic nicety must never blank the tab
         return {}
+
+
+def _feed_skip_reasons(step: dict) -> Dict[str, str]:
+    """trade_id -> why the last Bloomberg cycle could not price it (its `skipped` list)."""
+    skipped = step.get("skipped")
+    if not isinstance(skipped, list):
+        return {}
+    return {str(s.get("trade_id")): str(s.get("reason") or "") for s in skipped if isinstance(s, dict)}
+
+
+def _feed_step_error(step: dict) -> str:
+    """Why the last Bloomberg cycle's options step failed as a whole (its `error`), in
+    plain words, or "" when it did not. Seen 2026-09-22: a QuantLib OIS bootstrap failure
+    stopped the step before any trade was priced, so `skipped` was empty and every leg
+    read "priced the next time you press Pull Bloomberg now" after the pull had run."""
+    error = step.get("error")
+    if not error:
+        return ""
+    return f"the last Pull Bloomberg now ({step.get('as_of_date')}) failed in its options step: {error}"
 
 
 def _usd_greeks(conn: sqlite3.Connection, as_of: str, rec: dict, marks: dict) -> Tuple[dict, str]:
@@ -397,8 +415,10 @@ def _usd_greeks(conn: sqlite3.Connection, as_of: str, rec: dict, marks: dict) ->
 
 
 def _leg_note(rec: dict, as_of: str, premium, book: Optional[dict], greeks_reason: str,
-              pending: Optional[dict], skip_reason: str) -> str:
-    """The stated reason for whatever is blank on this row ("" when nothing is)."""
+              pending: Optional[dict], skip_reason: str, step_error: str = "") -> str:
+    """The stated reason for whatever is blank on this row ("" when nothing is). A
+    trade's own skip reason wins over the pull's step-level error, which wins over the
+    generic "priced the next time you press Pull Bloomberg now"."""
     payoff = rec.get("payoff") or "VANILLA"
     if pending:
         chosen = " ".join(w for w in (PAYOFF_WORDS.get(pending.get("payoff") or payoff, ""),
@@ -415,12 +435,14 @@ def _leg_note(rec: dict, as_of: str, premium, book: Optional[dict], greeks_reaso
             return book_reason or f"expired {rec['expiry_date']}"
         if skip_reason:
             return f"not priced: {skip_reason}"
+        if step_error:
+            return f"not priced: {step_error}"
         return book_reason or f"no PREMIUM mark on {as_of}: priced the next time you press Pull Bloomberg now"
     return book_reason or greeks_reason
 
 
 def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dict] = None,
-             pending: Optional[dict] = None, skip_reason: str = "") -> dict:
+             pending: Optional[dict] = None, skip_reason: str = "", step_error: str = "") -> dict:
     """One priced (or partially/un-priced -- 'rows must always render') leg, built
     straight from `trades_official`/`instruments`/`instrument_options`/`marks_official`
     plus the book's own row for the P&L, no re-pricing. See the module docstring."""
@@ -438,7 +460,7 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         if marks.get("FUTURE_PX") is not None:
             premium = marks["FUTURE_PX"] * float(rec.get("multiplier") or 1.0)
         greeks_missing = "Greeks not calculated: " + (
-            skip_reason or "they are the next time you press Pull Bloomberg now")
+            skip_reason or step_error or "they are the next time you press Pull Bloomberg now")
         skip_reason = ""
 
     # USD per 1 unit of the premium (base) currency: the spot the BOOK used for this trade
@@ -511,7 +533,7 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         "instrument": rec["instrument_id"], "payoff_word": payoff_word,
         "side": "Buy" if quantity >= 0 else "Sell",
         "option_type": TYPE_WORDS.get(option_type, option_type.title()), "payoff": payoff_word,
-        "note": _leg_note(rec, as_of, premium, book, greeks_reason, pending, skip_reason),
+        "note": _leg_note(rec, as_of, premium, book, greeks_reason, pending, skip_reason, step_error),
         "priced": premium is not None,
         # Notional in DOLLARS (user, 2026-09-21: "everything in dollars"; 5,000 ounces of gold is
         # not $5,000): |quantity| x USD per base unit at spot; Position keeps the base units.
@@ -550,7 +572,8 @@ def _leg_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
         return []
     book = _book_rows(conn, as_of)
     db = _db_key(conn)
-    feed_reasons = _feed_skip_reasons(conn, as_of)
+    step = _feed_options_step(conn, as_of)
+    feed_reasons, step_error = _feed_skip_reasons(step), _feed_step_error(step)
     legs = []
     for rec in trades.to_dict("records"):
         trade_id = rec["trade_id"]
@@ -558,7 +581,7 @@ def _leg_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
         if pending and rec["strike"]:
             pending = None  # a strike reached the file some other way: the terms on file win
         skip_reason = (_LAST_SKIP.get((db, as_of, trade_id)) if db else None) or feed_reasons.get(trade_id, "")
-        legs.append(_leg_row(conn, as_of, rec, book.get(trade_id), pending, skip_reason))
+        legs.append(_leg_row(conn, as_of, rec, book.get(trade_id), pending, skip_reason, step_error))
     return legs
 
 

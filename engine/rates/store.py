@@ -257,9 +257,13 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     """Price every IRS trade in `trades_official` dealt on or before `as_of` that is not
     already frozen in `realised_pnl`, one curve bootstrap per currency. Never raises for
     a single trade: returns one dict per trade, `{trade_id, instrument_id, ccy, ok,
-    error}`, so a swap with a missing fixing or an unsupported currency reports its own
-    reason while the rest of the book still prices. A currency with no `curve_quotes`
-    fails every swap in that currency with the same reason."""
+    error, interpolation, note}`, so a swap with a missing fixing or an unsupported
+    currency reports its own reason while the rest of the book still prices. A currency
+    with no `curve_quotes` fails every swap in that currency with the same reason.
+    `interpolation` is the interpolation the currency's curve was actually built with
+    and `note` its `CurveSet.bootstrap_note` (2026-09-22: "" when the default
+    log-cubic converged, else the sentence naming the log-linear fallback, see
+    curves.py), both "" when no curve could be built; the pull's status shows them."""
     trades = conn.execute(
         "SELECT t.trade_id, t.instrument_id, i.base_ccy FROM trades_official t "
         "JOIN instruments i USING (instrument_id) "
@@ -270,12 +274,15 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     out: List[dict] = []
     curves: dict = {}
     for trade_id, instrument_id, ccy in trades:
-        entry = {"trade_id": trade_id, "instrument_id": instrument_id, "ccy": ccy, "ok": False, "error": ""}
+        entry = {"trade_id": trade_id, "instrument_id": instrument_id, "ccy": ccy, "ok": False, "error": "",
+                 "interpolation": "", "note": ""}
         try:
             if ccy not in curves:
                 cs = bootstrap_and_store(conn, as_of, ccy)
                 load_fixings(conn, cs)
                 curves[ccy] = cs
+            entry["interpolation"] = curves[ccy].interpolation
+            entry["note"] = curves[ccy].bootstrap_note
             price_and_store(conn, as_of, trade_id, curve_set=curves[ccy])
             entry["ok"] = True
         except Exception as exc:  # noqa: BLE001 - reported per trade, never swallowed silently

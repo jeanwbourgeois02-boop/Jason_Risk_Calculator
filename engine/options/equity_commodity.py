@@ -445,17 +445,47 @@ def price_and_store_commodity(conn: sqlite3.Connection, as_of: str, trade_id: st
     return _price_eq_cmdty_row(conn, as_of, row, "CMDTY_OPTION", curve_cache={})
 
 
-def price_all_and_store_equity(conn: sqlite3.Connection, as_of: str) -> List[EqCmdtyOutcome]:
+def _price_all_and_store(conn: sqlite3.Connection, as_of: str, asset_kind: str) -> List[EqCmdtyOutcome]:
+    """Price every `asset_kind` trade on file, one outcome per trade, never an exception.
+
+    Same per-trade guard as the FX loop (store.py::price_all_and_store): one trade's
+    pricer blowing up is that trade's own skip, reason ``"pricer error: <exc!r>"``, and
+    every other outcome is still returned. Before 2026-09-22 this was a bare list
+    comprehension: the day the USD SOFR bootstrap did not converge, the SPX options'
+    rate resolution raised, the RuntimeError escaped to live._options_step's step-level
+    catch, and the FX loop's outcomes (9 priced, 19 skipped with their real reasons)
+    were thrown away with it, the whole options step reporting priced 0 / skipped [].
+    A trade that cannot be read (None row) gets an outcome too. One `curve_cache` is
+    shared across the run (engine/options/rates.py) so N trades sharing a currency
+    build its OIS bootstrap once."""
     trade_ids = [r[0] for r in conn.execute(
-        "SELECT trade_id FROM trades_official WHERE product = 'EQ_OPTION' ORDER BY trade_id"
+        "SELECT trade_id FROM trades_official WHERE product = ? ORDER BY trade_id", (asset_kind,)
     ).fetchall()]
     curve_cache: dict = {}
-    return [_price_eq_cmdty_row(conn, as_of, _read_eq_cmdty_trade(conn, tid), "EQ_OPTION", curve_cache) for tid in trade_ids]
+    outcomes: List[EqCmdtyOutcome] = []
+    for trade_id in trade_ids:
+        row = None
+        try:
+            row = _read_eq_cmdty_trade(conn, trade_id)
+            if row is None:
+                outcomes.append(EqCmdtyOutcome(trade_id=trade_id, instrument_id="", package_id=trade_id,
+                                               quantity=0.0, priced=False,
+                                               reason="trade could not be read from trades_official"))
+                continue
+            outcomes.append(_price_eq_cmdty_row(conn, as_of, row, asset_kind, curve_cache))
+        except Exception as exc:  # noqa: BLE001 -- one trade's blow-up is its own skip, as in the FX loop
+            reason = f"pricer error: {exc!r}"
+            if row:
+                outcomes.append(_skip(row, reason))
+            else:
+                outcomes.append(EqCmdtyOutcome(trade_id=trade_id, instrument_id="", package_id=trade_id,
+                                               quantity=0.0, priced=False, reason=reason))
+    return outcomes
+
+
+def price_all_and_store_equity(conn: sqlite3.Connection, as_of: str) -> List[EqCmdtyOutcome]:
+    return _price_all_and_store(conn, as_of, "EQ_OPTION")
 
 
 def price_all_and_store_commodity(conn: sqlite3.Connection, as_of: str) -> List[EqCmdtyOutcome]:
-    trade_ids = [r[0] for r in conn.execute(
-        "SELECT trade_id FROM trades_official WHERE product = 'CMDTY_OPTION' ORDER BY trade_id"
-    ).fetchall()]
-    curve_cache: dict = {}
-    return [_price_eq_cmdty_row(conn, as_of, _read_eq_cmdty_trade(conn, tid), "CMDTY_OPTION", curve_cache) for tid in trade_ids]
+    return _price_all_and_store(conn, as_of, "CMDTY_OPTION")

@@ -329,6 +329,19 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   ``as_of`` -- for the pull button's no-terminal branch (``data/bloomberg/live.py``,
   bbg-data's to wire; the connected branch already re-prices after its pull). Tests:
   ``tests/test_options_close.py``.
+- Per-trade guard in the equity / commodity loops (options-pricer, landed 2026-09-22).
+  The Bloomberg PC's pull that day: the USD SOFR bootstrap did not converge (QuantLib's
+  log-cubic iteration, surfacing lazily at ``rates.zero_rate_to``), the SPX options' rate
+  resolution raised, and ``price_all_and_store_equity`` -- a bare list comprehension --
+  let the RuntimeError escape to ``live._options_step``'s step-level catch, which threw
+  the FX loop's 9 priced / 19 skipped outcomes away and reported priced 0 / skipped [].
+  Both loops now share ``equity_commodity._price_all_and_store``: the FX loop's guard
+  mirrored (one trade's exception = that trade's skip, reason ``"pricer error: <exc!r>"``;
+  an unreadable row an outcome too; one ``curve_cache`` per run). And
+  ``rates.resolve_ccy_rate_with_source`` appends a CurveSet's non-empty ``bootstrap_note``
+  (rates-pricer's log-linear fallback record, read with ``getattr``) to
+  ``RateInput.detail``, so a priced option's rate provenance names the fallback curve.
+  No pricing formula changed.
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

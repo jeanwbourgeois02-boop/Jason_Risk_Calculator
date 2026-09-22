@@ -14,7 +14,11 @@ Sign convention (must stay internally consistent with CLAUDE.md and
   - `dv01_parallel` is the PV change for a +1bp (`BUMP = 1e-4`) parallel bump of every
     curve quote, i.e. `NPV(bumped) - NPV(base)` -- consistent with the reference
     project's own DV01 sign (a positive-DV01 payer position loses value when rates
-    fall, since `NPV(bumped_up) - NPV(base) > 0` for a payer).
+    fall, since `NPV(bumped_up) - NPV(base) > 0` for a payer). The bump perturbs the
+    live `ql.SimpleQuote`s of the base `CurveSet`'s own curve object, so the bumped
+    re-bootstrap uses the interpolation the base curve ended up with (log-cubic, or
+    the log-linear fallback recorded in `CurveSet.interpolation`, see curves.py):
+    a bump never rebuilds through `build_curve_set` and can never flip interpolation.
   - `PnL_USD = PV_USD(t) - PV_USD(trade date)` per CLAUDE.md; nothing in this module
     computes P&L directly, `store.py`/the P&L engine layer does by differencing two
     `PV_USD` marks written here.

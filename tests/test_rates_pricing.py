@@ -384,7 +384,8 @@ def test_seasoned_swap_fails_without_fixings_and_prices_with_them():
     assert out[0]["ok"] is False and "fixing" in out[0]["error"]
     _seed_fixings(conn, "SOFR", datetime.date(2026, 8, 10), datetime.date(2026, 9, 17))
     out = price_all_and_store(conn, as_of)
-    assert out == [{"trade_id": "TEST-IRS-1", "instrument_id": "IRSOIS-USD-TEST-IRS-1", "ccy": "USD", "ok": True, "error": ""}]
+    assert out == [{"trade_id": "TEST-IRS-1", "instrument_id": "IRSOIS-USD-TEST-IRS-1", "ccy": "USD", "ok": True, "error": "",
+                    "interpolation": "LogCubicDiscount", "note": ""}]
     by_type = dict(conn.execute("SELECT mark_type, value FROM marks_official WHERE as_of_date = ?", (as_of,)).fetchall())
     assert set(by_type) == {"PV_USD", "DV01_USD", "CASHFLOW_USD", "PAR_RATE"}
     assert by_type["CASHFLOW_USD"] == 0.0    # single payment at maturity: nothing settled yet
@@ -440,3 +441,111 @@ def test_price_all_and_store_skips_realised_and_future_dated_swaps():
     from engine.rates.store import price_all_and_store
 
     assert price_all_and_store(conn, "2026-08-17") == []
+
+
+# --------------------------------------------------------------------------- log-linear fallback (2026-09-22)
+# The Bloomberg PC's USD SOFR quotes of 2026-09-22 (data/bbg_snapshot/curve_quotes.csv). At a
+# 2026-09-22 evaluation date QuantLib 1.43's log-cubic bootstrap does not converge on them
+# ("convergence not reached after 99 iterations; last improvement 0.0178479 ..."), which failed
+# every IRS and every FX option needing the USD curve on that day's pull; at 2026-09-21 it converges.
+USD_SOFR_2026_09_22 = [
+    ("1W", 0.03892), ("2W", 0.03895), ("3W", 0.038935), ("1M", 0.03899), ("2M", 0.03969), ("3M", 0.04036),
+    ("6M", 0.042117), ("9M", 0.043745), ("1Y", 0.045035), ("2Y", 0.046271), ("3Y", 0.046244), ("5Y", 0.045755),
+    ("7Y", 0.045485), ("10Y", 0.04571), ("15Y", 0.046584), ("20Y", 0.04695), ("30Y", 0.0461833),
+]
+
+
+def _discount_factors(cs, dates):
+    return [cs.discount_curve.discount(ql.Date(d.day, d.month, d.year)) for d in dates]
+
+
+@needs_quantlib
+def test_non_converging_log_cubic_falls_back_to_log_linear_and_says_so(caplog):
+    import logging
+    import math
+
+    from engine.rates.curves import build_curve_set
+
+    with caplog.at_level(logging.WARNING, logger="engine.rates.curves"):
+        cs = build_curve_set(USD_SOFR_2026_09_22, datetime.date(2026, 9, 22), "USD", "SOFR")
+    assert cs.interpolation == "LogLinear"
+    assert cs.bootstrap_note
+    assert "USD" in cs.bootstrap_note and "SOFR" in cs.bootstrap_note and "2026-09-22" in cs.bootstrap_note
+    assert "log-cubic did not converge" in cs.bootstrap_note and "log-linear used" in cs.bootstrap_note
+    assert "convergence not reached" in cs.bootstrap_note      # QuantLib's own message is carried
+    assert any("USD SOFR bootstrap 2026-09-22" in r.getMessage() for r in caplog.records)
+    dates = [datetime.date(2026 + n, 9, 24) for n in range(1, 31)]
+    dfs = _discount_factors(cs, dates)
+    assert all(math.isfinite(df) and 0.0 < df < 1.0 for df in dfs)
+    assert all(a > b for a, b in zip(dfs, dfs[1:]))
+    df_1y_from_as_of = _discount_factors(cs, [datetime.date(2027, 9, 22)])[0]
+    assert df_1y_from_as_of == pytest.approx(0.956377, abs=2e-6)   # the log-linear 1Y df of the repro
+    # The swap pricer (and its DV01 bump, on the same curve object) works on the fallback curve.
+    from engine.rates.valuation import price_swap
+
+    result = price_swap(cs, datetime.date(2026, 9, 24), datetime.date(2031, 9, 24), 0.0457, 10_000_000, True)
+    assert math.isfinite(result.npv) and result.dv01_parallel > 0 and result.par_rate is not None
+
+
+@needs_quantlib
+def test_converging_day_keeps_log_cubic_and_the_same_discount_factors():
+    """The same quotes at 2026-09-21 converge under log-cubic: nothing changes for such a
+    day. The pinned value is the current code's DF(2027-09-23) before the fallback existed."""
+    from engine.rates.curves import build_curve_set
+
+    cs = build_curve_set(USD_SOFR_2026_09_22, datetime.date(2026, 9, 21), "USD", "SOFR")
+    assert cs.interpolation == "LogCubicDiscount"
+    assert cs.bootstrap_note == ""
+    df_1y, df_5y = _discount_factors(cs, [datetime.date(2027, 9, 23), datetime.date(2031, 9, 23)])
+    assert df_1y == pytest.approx(0.9561267457564275, abs=1e-12)
+    assert df_5y == pytest.approx(0.796969896675867, abs=1e-12)
+    # An explicitly requested log-linear curve is reported as such, with no note.
+    ll = build_curve_set(USD_SOFR_2026_09_22, datetime.date(2026, 9, 21), "USD", "SOFR", interpolation="LogLinear")
+    assert ll.interpolation == "LogLinear" and ll.bootstrap_note == ""
+
+
+@needs_quantlib
+def test_curve_set_defaults_keep_existing_constructors_working():
+    from engine.rates.curves import CurveSet, build_curve_set
+
+    cs = build_curve_set(MOCK_USD_SOFR, datetime.date(2026, 8, 17), "USD")
+    bare = CurveSet(cs.valuation_date, cs.ccy, cs.index, cs.discount, cs.discount_curve, cs.ql_index)
+    assert bare.interpolation == "LogCubicDiscount" and bare.bootstrap_note == ""
+
+
+@needs_quantlib
+def test_log_linear_failure_raises_curve_build_error_never_a_silent_curve():
+    from engine.rates.curves import build_curve_set
+    from engine.rates.errors import CurveBuildError
+
+    # An impossible curve (a −500% 1Y rate) fails under both interpolations.
+    bad = [("1M", 0.04), ("1Y", -5.0), ("5Y", 0.04)]
+    with pytest.raises(CurveBuildError) as exc:
+        build_curve_set(bad, datetime.date(2026, 9, 22), "USD", "SOFR")
+    assert "fallback failed too" in str(exc.value)
+
+
+@needs_quantlib
+def test_price_all_and_store_reports_interpolation_and_note_per_trade():
+    from engine.rates.store import price_all_and_store
+
+    conn = sqlite3.connect(":memory:")
+    create_schema(conn)
+    as_of = "2026-09-22"
+    _seed_curve_quotes(conn, as_of, "USD", "SOFR", USD_SOFR_2026_09_22)
+    # trade_date = effective date in this helper, so the swap must start on or before as_of to be priced
+    _seed_manual_irs_trade(conn, effective="2026-09-22", maturity="2031-09-22", fixed_rate=0.0457)
+    out = price_all_and_store(conn, as_of)
+    assert len(out) == 1 and out[0]["ok"] is True, out
+    assert out[0]["interpolation"] == "LogLinear"
+    assert "USD SOFR bootstrap 2026-09-22" in out[0]["note"] and "log-linear used" in out[0]["note"]
+    # bootstrap_and_store wrote the same curves rows as before (no interpolation column).
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(curves)").fetchall()]
+    assert "interpolation" not in cols
+    n = conn.execute("SELECT COUNT(*) FROM curves WHERE curve_id = 'USD-SOFR-OIS' AND as_of_date = ?", (as_of,)).fetchone()[0]
+    assert n == len(USD_SOFR_2026_09_22)
+    assert conn.execute("SELECT COUNT(*) FROM marks_official WHERE as_of_date = ? AND mark_type = 'PV_USD'", (as_of,)).fetchone()[0] == 1
+    # A trade whose curve could not be built carries empty interpolation / note.
+    _seed_manual_irs_trade(conn, trade_id="TEST-IRS-EUR", ccy="EUR")
+    eur = [e for e in price_all_and_store(conn, as_of) if e["ccy"] == "EUR"][0]
+    assert eur["ok"] is False and eur["interpolation"] == "" and eur["note"] == ""

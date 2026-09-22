@@ -306,7 +306,16 @@ def resolve_ccy_rate_with_source(
         expiry_date = datetime.date.fromisoformat(expiry_iso)
         rate = zero_rate_to(curve_set, as_of_date, expiry_date)
         index = CCY_RFR.get(ccy, "OIS")
-        return RateInput(rate, OIS_CURVE, detail=f"{ccy} {index} curve"), ""
+        detail = f"{ccy} {index} curve"
+        # A CurveSet built by a fallback bootstrap (engine/rates/curves.py records it as
+        # `bootstrap_note`, e.g. "USD SOFR bootstrap 2026-09-22: log-cubic did not
+        # converge (...); log-linear used") names that fallback in the provenance, so a
+        # priced option's rate says which curve it really came from. getattr: works
+        # whether or not the CurveSet carries the attribute at all.
+        note = getattr(curve_set, "bootstrap_note", "") or ""
+        if note:
+            detail = f"{detail}; {note}"
+        return RateInput(rate, OIS_CURVE, detail=detail), ""
 
     manual_rate, source_kind = _get_manual_rate(conn, as_of, ccy, expiry_iso)
     if manual_rate is not None:

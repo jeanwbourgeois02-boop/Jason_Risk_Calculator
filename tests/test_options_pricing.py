@@ -1320,6 +1320,139 @@ def test_vol_surface_points_round_trip():
     assert surface.get_vol(5600, 90 / 365.0) == pytest.approx(0.15)
 
 
+@needs_quantlib
+def test_price_all_and_store_equity_isolates_one_trades_pricer_exception(monkeypatch):
+    """2026-09-22, the Bloomberg PC's pull: the USD SOFR bootstrap did not converge, the
+    SPX options' rate resolution raised, and because the equity loop had no per-trade
+    guard the RuntimeError escaped to live._options_step and the FX loop's outcomes were
+    thrown away with it. Now: one trade's failure is that trade's own skip, the other
+    outcome comes back untouched -- the FX loop's guard, mirrored."""
+    from engine.options import equity_commodity as ec
+    from engine.options.equity_commodity import price_all_and_store_equity, set_dividend_yield
+    from engine.options.inputs import set_manual_vol
+
+    conn = _new_db()
+    _seed_equity_underlying(conn)
+    _seed_eq_cmdty_option_trade(
+        conn, "EQ1", "SPX 5600 Call 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5600.0, "CALL",
+    )
+    _seed_eq_cmdty_option_trade(
+        conn, "EQ2", "SPX 5400 Put 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5400.0, "PUT",
+    )
+    set_dividend_yield(conn, AS_OF, "SPX Index", 0.015)
+    set_manual_vol(conn, AS_OF, "SPX Index", "2026-12-18", 0.18)
+    real = ec._price_eq_cmdty_row
+
+    def exploding(conn_, as_of, row, asset_kind, curve_cache=None):
+        if row["trade_id"] == "EQ1":
+            raise RuntimeError("convergence not reached after 99 iterations")
+        return real(conn_, as_of, row, asset_kind, curve_cache)
+
+    monkeypatch.setattr(ec, "_price_eq_cmdty_row", exploding)
+    outcomes = {o.trade_id: o for o in price_all_and_store_equity(conn, AS_OF)}
+    assert set(outcomes) == {"EQ1", "EQ2"}
+    assert not outcomes["EQ1"].priced
+    assert outcomes["EQ1"].reason.startswith("pricer error: RuntimeError")
+    assert "convergence not reached" in outcomes["EQ1"].reason
+    assert outcomes["EQ1"].instrument_id == "SPX 5600 Call 2026-12-18"
+    assert outcomes["EQ2"].priced, outcomes["EQ2"].reason
+    assert outcomes["EQ2"].result.premium > 0
+
+
+@needs_quantlib
+def test_price_all_and_store_commodity_isolates_one_trades_pricer_exception(monkeypatch):
+    """The commodity loop carries the same guard as the equity one."""
+    from engine.options import equity_commodity as ec
+    from engine.options.equity_commodity import price_all_and_store_commodity
+    from engine.options.inputs import set_manual_vol
+
+    conn = _new_db()
+    _seed_equity_underlying(conn, underlying="GC1 Comdty", spot=2400.0)
+    _seed_eq_cmdty_option_trade(
+        conn, "CM1", "GC 2500 Call 2026-12-18", "GC1 Comdty", "CMDTY_OPTION", "CMDTY_OPTION", 2500.0, "CALL",
+    )
+    _seed_eq_cmdty_option_trade(
+        conn, "CM2", "GC 2300 Put 2026-12-18", "GC1 Comdty", "CMDTY_OPTION", "CMDTY_OPTION", 2300.0, "PUT",
+    )
+    set_manual_vol(conn, AS_OF, "GC1 Comdty", "2026-12-18", 0.16)
+    real = ec._price_eq_cmdty_row
+
+    def exploding(conn_, as_of, row, asset_kind, curve_cache=None):
+        if row["trade_id"] == "CM2":
+            raise RuntimeError("boom")
+        return real(conn_, as_of, row, asset_kind, curve_cache)
+
+    monkeypatch.setattr(ec, "_price_eq_cmdty_row", exploding)
+    outcomes = {o.trade_id: o for o in price_all_and_store_commodity(conn, AS_OF)}
+    assert set(outcomes) == {"CM1", "CM2"}
+    assert outcomes["CM1"].priced, outcomes["CM1"].reason
+    assert not outcomes["CM2"].priced and outcomes["CM2"].reason.startswith("pricer error: RuntimeError")
+
+
+@needs_quantlib
+def test_price_all_and_store_equity_reports_an_unreadable_trade_as_an_outcome(monkeypatch):
+    """A row the reader returns None for (or raises on) is an outcome with its reason,
+    never an exception out of the loop."""
+    from engine.options import equity_commodity as ec
+
+    conn = _new_db()
+    _seed_equity_underlying(conn)
+    _seed_eq_cmdty_option_trade(
+        conn, "EQ1", "SPX 5600 Call 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5600.0, "CALL",
+    )
+    monkeypatch.setattr(ec, "_read_eq_cmdty_trade", lambda conn_, tid: None)
+    (outcome,) = ec.price_all_and_store_equity(conn, AS_OF)
+    assert outcome.trade_id == "EQ1" and not outcome.priced and "could not be read" in outcome.reason
+
+    def unreadable(conn_, tid):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ec, "_read_eq_cmdty_trade", unreadable)
+    (outcome,) = ec.price_all_and_store_equity(conn, AS_OF)
+    assert outcome.trade_id == "EQ1" and not outcome.priced
+    assert outcome.reason.startswith("pricer error: OperationalError")
+
+
+# --------------------------------------------------------------------------- 2026-09-22: bootstrap_note provenance
+
+@needs_quantlib
+@pytest.mark.parametrize("note, expect_suffix", [
+    ("x", "; x"),
+    ("", ""),
+])
+def test_resolve_ccy_rate_with_source_names_the_curves_bootstrap_note(monkeypatch, note, expect_suffix):
+    """A CurveSet built by a fallback bootstrap (rates-pricer records `bootstrap_note` on
+    it) has that note appended to RateInput.detail; an empty note leaves the detail as
+    it is today ("USD SOFR curve"). Read with getattr, so a CurveSet without the
+    attribute is the empty-note case."""
+    from engine.options import rates
+
+    class StubCurveSet:
+        bootstrap_note = note
+
+    monkeypatch.setattr(rates, "_get_curve", lambda conn, as_of, ccy, cache: (StubCurveSet(), ""))
+    monkeypatch.setattr(rates, "zero_rate_to", lambda curve_set, as_of_date, expiry_date: 0.04)
+
+    rate_input, reason = rates.resolve_ccy_rate_with_source(None, AS_OF, "USD", EXPIRY)
+    assert reason == "" and rate_input.rate == 0.04 and rate_input.source_kind == rates.OIS_CURVE
+    assert rate_input.detail == "USD SOFR curve" + expect_suffix
+    if note:
+        assert rate_input.detail.endswith(note)
+
+
+@needs_quantlib
+def test_resolve_ccy_rate_with_source_tolerates_a_curve_set_without_bootstrap_note(monkeypatch):
+    from engine.options import rates
+
+    class BareCurveSet:  # no bootstrap_note attribute at all (a CurveSet from before the field existed)
+        pass
+
+    monkeypatch.setattr(rates, "_get_curve", lambda conn, as_of, ccy, cache: (BareCurveSet(), ""))
+    monkeypatch.setattr(rates, "zero_rate_to", lambda curve_set, as_of_date, expiry_date: 0.04)
+    rate_input, _ = rates.resolve_ccy_rate_with_source(None, AS_OF, "USD", EXPIRY)
+    assert rate_input.detail == "USD SOFR curve"
+
+
 # --------------------------------------------------------------------------- Phase 7: portfolio.py
 
 @needs_quantlib
