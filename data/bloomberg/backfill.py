@@ -47,14 +47,18 @@ furthest open leg (`_tenors_needed`), since a forward is read between the two te
 either side of its date.
 
 The close (user decision 2026-09-21: "the EOD is 3pm New York time"; "for previous or any
-closes in FX, we need to use NY 3pm"). A past FX close -- SPOT, and the tenor series the
+closes in FX, we need to use NY 3pm"; 2026-09-22: "for futures, can use market close, for
+fx use new 3pm" -- for EVERY previous close, which replaced the 2026-09-21 cut-over that
+applied 15:00 from that day on only). A past FX close -- SPOT, and the tenor series the
 forwards are built from -- is Bloomberg's value at 15:00 America/New_York that day, read
 from intraday bars (pull_marks.fetch_intraday_close_series: two IntradayBarRequests per
 ticker per stretch, BID and ASK, the hourly bar ending 15:00 New York, mid of the two
-closes). The daily PX_LAST is the 17:00 close and is NOT used, not even when the 15:00
-bar is missing or the day is older than Bloomberg's intraday history (about 140 business
-days): that mark stays missing, with the reason. Futures keep PX_SETTLE. Rows are stamped
-`close_stamp` (15:00 New York on their date). UNVERIFIED on a terminal.
+closes), on every past day Bloomberg's intraday history still reaches (about 140 business
+days, `intraday_floor`). A 15:00 bar Bloomberg does not have stays missing, with the
+reason, never the daily PX_LAST instead. Only a day beyond the intraday history closes at
+Bloomberg's daily close (PX_LAST, 17:00 New York; `first_1500_day` is the floor). Futures
+keep PX_SETTLE (the market close). Rows are stamped `close_stamp` (15:00 New York on their
+date; 17:00 beyond the intraday history). UNVERIFIED on a terminal.
 
 A day counts as complete (skipped unless overwrite=True) only once ALL of the above are
 official for it -- `data.bloomberg.inventory.close_completeness`, the same "needed" set
@@ -63,10 +67,11 @@ apart. A row already official AT THE CLOSE for its (day, instrument, settle_date
 mark_type) is never rewritten, even when overwrite is False and the day is otherwise
 incomplete (e.g. a new trade added a settle_date this day never needed before). A past
 day's official FX row that is NOT stamped at the close -- that day's last live pull (say
-11:40), or a 17:00 PX_LAST row written before 2026-09-21 -- is not a close: the day counts
-as incomplete and the row is replaced once the 15:00 value is in hand (`is_close_row`,
-`_write_closes`). It is never deleted without its replacement, today's rows are never
-touched (intraday = live), and realised_pnl is never touched: frozen rows stay frozen.
+11:40), or a 17:00 PX_LAST row on a day the intraday history still reaches (written under
+the 2026-09-21 cut-over) -- is not a close: the day counts as incomplete and the row is
+replaced once the 15:00 value is in hand (`is_close_row`, `_write_closes`). It is never
+deleted without its replacement, today's rows are never touched (intraday = live), and
+realised_pnl is never touched: frozen rows stay frozen.
 
 Only if `engine.pnl.ledger.realise_settled` is importable, trades settled before a day are
 frozen once that day's marks are on file: every day's SPOT and FUTURE_PX (all a freeze
@@ -77,11 +82,13 @@ pnl-engine task, which recomputes `ltd(conn, date)` straight from `marks` instea
 Limits, stated plainly:
   - Trades are only those currently in the database (the blotter is the app's only trade
     source; a re-upload replaces the whole book -- see CLAUDE.md's schema notes).
-  - FX closes are Bloomberg's 15:00 New York intraday mid, futures the daily PX_SETTLE;
-    the live pull's rows are stored under the same official sources, and the snapped_at
-    timestamp tells them apart (backfill rows are stamped 15:00 America/New_York on
-    their date, a live row carries the time it was pulled).
-  - NDFs still realise at spot on the value date, not the fixing.
+  - FX closes are Bloomberg's 15:00 New York intraday mid (the 17:00 daily close only
+    beyond the intraday history), futures the daily PX_SETTLE; the live pull's rows are
+    stored under the same official sources, and the snapped_at timestamp tells them apart
+    (backfill rows are stamped at the close on their date, a live row carries the time it
+    was pulled).
+  - An NDF's fixing date gets its currency's official fixing (NDF_FIX, 2026-09-22) on the
+    pair, read from the Bloomberg library like a close (`_fetch_ndf_fix_history`).
   - Calendar is the trading calendar (Monday-Friday less config/holidays.txt, see
     `business_days`): a listed holiday is never asked of Bloomberg. A day Bloomberg
     returns nothing for is still reported as NO_CLOSES.
@@ -200,23 +207,29 @@ def spot_only_pair_names(conn: sqlite3.Connection, start: date, end: date) -> Li
                    if r["kind"] == "SPOT" and (r["role"] == library.ROLE_CONVERSION or r["product"] == "FX_OPTION")})
 
 
-# The 15:00 New York close applies FROM this day on (user decision 2026-09-21: "make it so
-# that from now on its 3pm new york but surely for like a month ago its not that
-# serious"). A day before it -- and any day Bloomberg's intraday history no longer reaches
-# -- closes at Bloomberg's daily close (PX_LAST, 17:00 New York), and what is already on
-# file for a day before it is kept as that day's close.
-CLOSE_1500_FROM = date(2026, 9, 21)
+# The 15:00 New York close applies to EVERY past day Bloomberg's intraday history still
+# reaches (user decision 2026-09-22: "I want to see the ltd line chart, which requires all
+# the previous closes, and fixes. For futures, can use market close, for fx use new 3pm";
+# it replaced the 2026-09-21 cut-over, `CLOSE_1500_FROM`, under which a day before
+# 2026-09-21 kept whatever it had). Only a day beyond the intraday history (about 140
+# business days, `intraday_floor`) closes at Bloomberg's daily close (PX_LAST, 17:00 New
+# York); no calendar date gates the rule any more.
 DAILY_CLOSE_HOUR_NY = 17
 
 
-def first_1500_day(today: Optional[date] = None) -> date:
-    """The first day whose FX close is the 15:00 New York value: the later of
-    CLOSE_1500_FROM and the oldest day Bloomberg's intraday history reaches from `today`
-    (default: the New York book date)."""
+def _as_date(today) -> date:
+    """`today` as a date: a date as is, an ISO string parsed, None = the New York book date."""
     if today is None:
         from data.bloomberg.live import book_today
-        today = book_today()
-    return max(CLOSE_1500_FROM, intraday_floor(today))
+        return book_today()
+    return today if isinstance(today, date) else date.fromisoformat(str(today))
+
+
+def first_1500_day(today: Optional[date] = None) -> date:
+    """The first day whose FX close is the 15:00 New York value: the oldest day Bloomberg's
+    intraday history reaches from `today` (default: the New York book date), `intraday_floor`.
+    Every day before it closes at the 17:00 daily close (2026-09-22: no fixed cut-over)."""
+    return intraday_floor(_as_date(today))
 
 
 def close_stamp(day: date, today: Optional[date] = None) -> str:
@@ -232,24 +245,27 @@ def close_stamp(day: date, today: Optional[date] = None) -> str:
 FX_CLOSE_MARK_TYPES = ("SPOT", "FWD_OUTRIGHT")
 
 
-def is_close_row(mark_type: str, as_of_date: str, snapped_at: str) -> bool:
-    """Is this official row of a PAST day a close? Other mark types always are, and so is
-    any FX row (SPOT / FWD_OUTRIGHT) of a day before CLOSE_1500_FROM: those days keep
-    what they have. From that day on an FX row is a close only when it is stamped at
-    15:00 New York of its own as_of_date, or at 17:00 (the daily close, which the backfill
-    only ever writes for a day Bloomberg's intraday history no longer reached); anything
-    else is that day's last live pull."""
+def is_close_row(mark_type: str, as_of_date: str, snapped_at: str, today=None) -> bool:
+    """Is this official row of a PAST day a close? Other mark types (FUTURE_PX, NDF_FIX)
+    always are, whatever their stamp. An FX row (SPOT / FWD_OUTRIGHT) is a close only when
+    it is stamped 15:00 New York of its own as_of_date -- on every past day, whichever side
+    of 2026-09-21 (user decision 2026-09-22) -- or, for a day before `first_1500_day(today)`
+    (beyond Bloomberg's intraday history, so the 15:00 value can no longer be asked for),
+    17:00 New York, the daily close the backfill writes there. Anything else -- a live
+    pull's last price on any day, a 17:00 row on a day still within intraday reach -- is
+    not a close, and the backfill asks for the 15:00 value and replaces it. `today` is a
+    date or ISO string (default: the New York book date)."""
     if mark_type not in FX_CLOSE_MARK_TYPES:
         return True
     try:
         day = date.fromisoformat(as_of_date)
-        if day < CLOSE_1500_FROM:
-            return True
         stamp = datetime.fromisoformat(snapped_at)
-        return any(stamp == datetime(day.year, day.month, day.day, hour, 0, tzinfo=NY)
-                   for hour in (CLOSE_HOUR_NY, DAILY_CLOSE_HOUR_NY))
     except (TypeError, ValueError):
         return False
+    if stamp == datetime(day.year, day.month, day.day, CLOSE_HOUR_NY, 0, tzinfo=NY):
+        return True
+    return (stamp == datetime(day.year, day.month, day.day, DAILY_CLOSE_HOUR_NY, 0, tzinfo=NY)
+            and day < first_1500_day(today))
 
 
 def intraday_floor(today: date) -> date:
@@ -564,9 +580,10 @@ def _drop_already_official(conn: sqlite3.Connection, rows: List[dict], today: Op
     day never needed before, but this day's SPOT was already official).
 
     2026-09-21: a PAST day's official FX row that is not stamped at the 15:00 New York
-    close (`is_close_row`) is that day's last live pull or an old 17:00 PX_LAST row, not a
-    close, so the new row is kept and `_write_closes` replaces the old one. A row dated
-    `today` (default: the New York book date) or later is live and is never replaced."""
+    close (`is_close_row`; on a day within Bloomberg's intraday reach a 17:00 PX_LAST row
+    is not one either, 2026-09-22) is that day's last live pull or an old daily-close row,
+    not a close, so the new row is kept and `_write_closes` replaces the old one. A row
+    dated `today` (default: the New York book date) or later is live and is never replaced."""
     if today is None:
         from data.bloomberg.live import book_today
         today = book_today().isoformat()
@@ -575,7 +592,7 @@ def _drop_already_official(conn: sqlite3.Connection, rows: List[dict], today: Op
         hit = conn.execute(
             "SELECT snapped_at FROM marks_official WHERE as_of_date=? AND instrument_id=? AND settle_date=? AND mark_type=?",
             (r["as_of_date"], r["instrument_id"], r["settle_date"], r["mark_type"])).fetchone()
-        if hit is None or (r["as_of_date"] < today and not is_close_row(r["mark_type"], r["as_of_date"], hit[0])):
+        if hit is None or (r["as_of_date"] < today and not is_close_row(r["mark_type"], r["as_of_date"], hit[0], today)):
             out.append(r)
     return out
 
@@ -604,7 +621,7 @@ def _write_closes(conn: sqlite3.Connection, rows: List[dict], overwrite: bool = 
                     "SELECT source, snapped_at FROM marks WHERE as_of_date=? AND instrument_id=? AND settle_date=? "
                     "AND mark_type=? AND source IN (?, ?)", key + (SRC_SPOT_FWD, SRC_INTERP)).fetchall()
                 for source, snapped in stale:
-                    if not is_close_row(r["mark_type"], r["as_of_date"], snapped):
+                    if not is_close_row(r["mark_type"], r["as_of_date"], snapped, today):
                         conn.execute("DELETE FROM marks WHERE as_of_date=? AND instrument_id=? AND settle_date=? "
                                      "AND mark_type=? AND source=?", key + (source,))
             conn.execute("INSERT OR REPLACE INTO marks VALUES (?,?,?,?,?,?,?)",
@@ -671,11 +688,11 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     whose own processing raised:
     it carries `error`, and the other days still run -- one bad day used to end the run.
 
-    The close (2026-09-21): FX closes are the 15:00 New York value from intraday bars, see
-    the module docstring. A day older than Bloomberg's intraday history
-    (`intraday_floor(today)`, `today` defaulting to the New York book date) is not asked
-    for at all when the default fetchers are in use: its FX marks are reported missing
-    with that reason (never the daily PX_LAST instead), and its futures still run.
+    The close (2026-09-21, every past day from 2026-09-22): FX closes are the 15:00 New
+    York value from intraday bars, see the module docstring. A day older than Bloomberg's
+    intraday history (`intraday_floor(today)`, `today` defaulting to the New York book
+    date) is the one case that takes Bloomberg's daily close (PX_LAST, stamped 17:00) when
+    the default fetchers are in use; its futures run as on any day.
 
     ONE session for the whole call, and one request per kind per stretch of days being
     worked (`_runs`), however many days it covers.
@@ -708,7 +725,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     realise_settled = _import_realise_settled()
     today = today or book_today()
     today_iso = today.isoformat()
-    first_1500 = first_1500_day(today)   # days before it close at Bloomberg's daily close
+    first_1500 = first_1500_day(today)   # the intraday floor: days before it close at Bloomberg's daily close
     conn = connect(Path(db_path))
     try:
         # A conversion pair or an option's pair may never have been traded outright, and
@@ -749,8 +766,9 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         fx_runs = runs
         n_daily = sum(1 for d in work if d < first_1500)
         if n_daily:
-            log(f"  {n_daily} day(s) before {first_1500} take Bloomberg's daily close (17:00 New York); "
-                f"the {CLOSE_HOUR_NY}:00 New York close applies from {first_1500} on.")
+            log(f"  {n_daily} day(s) before {first_1500} are beyond Bloomberg's intraday history and take "
+                f"Bloomberg's daily close (17:00 New York); the {CLOSE_HOUR_NY}:00 New York close applies from "
+                f"{first_1500} on.")
         session = service = None
         own_session = False  # did THIS call open the session itself (pm.open_session)?
         fwd_fields = None    # an injected fwd_fetch is asked for PX_LAST + SETTLE_DT, as before
@@ -1140,14 +1158,18 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     open_rows = completeness[(completeness["needed"] > 0) & ~completeness["complete"]]
     signatures = {row.as_of_date: _signature(row.missing) for row in open_rows.itertuples()}
     # Days that hold FX marks which are not the 15:00 New York close (that day's last live
-    # pull, or a 17:00 PX_LAST row from before 2026-09-21): said once in the log and in the
-    # status block, since the first run after the change asks for every past day again.
+    # pull, or a 17:00 PX_LAST row on a day still within Bloomberg's intraday reach, from
+    # the 2026-09-21 cut-over): said once in the log and in the status block, since the
+    # first run after the change asks for every past day again (2026-09-22: every past
+    # close is the 15:00 value; only days beyond the intraday history keep 17:00).
     restamp = sum(1 for row in open_rows.itertuples() if getattr(row, "not_closed", 0) > 0)
     note = ""
     if restamp:
-        note = (f"{restamp} past day(s) since {CLOSE_1500_FROM} hold FX marks that are that day's last pull, not its "
-                f"{CLOSE_HOUR_NY}:00 New York close; the close is asked of Bloomberg and replaces them. Days before "
-                f"{CLOSE_1500_FROM} keep the marks they have.")
+        floor = first_1500_day(today)
+        note = (f"{restamp} past day(s) hold FX marks that are not that day's {CLOSE_HOUR_NY}:00 New York close (a "
+                f"live pull's last price, or a 17:00 daily close); every past day from {floor} on, as far as "
+                f"Bloomberg's intraday history reaches, is asked for at {CLOSE_HOUR_NY}:00 New York and those rows "
+                f"replaced. A day before {floor} is beyond that history and closes at Bloomberg's 17:00 daily close.")
     _notes[key] = note
     if note:
         log("Auto-backfill: " + note)
@@ -1247,7 +1269,8 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                                 "missing_count": <int>, "missing": [<plain reason>, ... at most 5]}}
       "last_run": "<ISO timestamp>" of the end of the last run
       "note": "" or a sentence saying how many past days hold FX marks that are not the
-              15:00 New York close and are being asked for again (2026-09-21)
+              15:00 New York close and are being asked for again (2026-09-21; every past
+              day within Bloomberg's intraday reach from 2026-09-22, 17:00 only beyond it)
       "points_scale": {"<pair>": {"field": "FWD_POINTS_SCALE" | "FWD_SCALE" | "",
                                   "divisor": <float or null>, "raw": {...}, "errors": {...}}}
               -- which Bloomberg field gave each pair's forward-points divisor

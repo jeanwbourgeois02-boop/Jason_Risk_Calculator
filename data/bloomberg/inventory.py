@@ -16,8 +16,10 @@ build_requests), or MISSING (no row at all for as_of/instrument/settle/type).
 `close_completeness(conn, start, end)` is the calendar strip: one row per business day with
 the count of marks the book needed that day (SPOT + FWD_OUTRIGHT + FUTURE_PX per
 `_needed_marks`, 2026-09-18 -- SPOT alone used to leave every forward/future's LTD(t)
-unpriced on an otherwise "complete" day) versus how many are official, so the Market data tab
-can show holes in history at a glance.
+unpriced on an otherwise "complete" day; plus NDF_FIX on an NDF ticket's fixing date,
+2026-09-22) versus how many are official AT THE CLOSE (a past day's FX row counts only when
+stamped 15:00 New York, `backfill.is_close_row`), so the Market data tab can show holes in
+history at a glance and the backfill knows which days to ask for.
 """
 from __future__ import annotations
 
@@ -164,12 +166,19 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     not_closed (how many of those DO have an official row, only not the close).
 
     The close (user decision 2026-09-21: "for previous or any closes in FX, we need to use
-    NY 3pm"): on a day before `today` (default: the New York book date) an official FX row
-    -- SPOT or FWD_OUTRIGHT -- counts as present only when it is stamped at the 15:00 New
-    York close of its own date (`data.bloomberg.backfill.is_close_row`). A row stamped at
-    any other time is that day's last live pull (say 11:40) or a 17:00 PX_LAST row from
-    before the change: not a close, so the day is not complete and the backfill replaces
-    it. Today's rows are live and count as they are; a future keeps its PX_SETTLE.
+    NY 3pm"; 2026-09-22: every previous close, not only from 2026-09-21 on): on a day
+    before `today` (default: the New York book date) an official FX row -- SPOT or
+    FWD_OUTRIGHT -- counts as present only when it is stamped at the 15:00 New York close
+    of its own date (`data.bloomberg.backfill.is_close_row`, given `today` so it knows how
+    far back Bloomberg's intraday history reaches). A row stamped at any other time is
+    that day's last live pull (say 11:40) or a 17:00 PX_LAST row written under the old
+    cut-over: not a close, so the day is not complete (`not_closed` counts such rows) and
+    the backfill replaces it. Only on a day beyond the intraday history (about 140
+    business days back) does a 17:00 row count, since no 15:00 value can be asked for.
+    Today's rows are live and count as they are; a future keeps its PX_SETTLE, and an NDF
+    ticket's fixing date needs its NDF_FIX (in `_needed_marks` via the library's
+    MARK_KINDS), so a past fixing date with no official fixing is incomplete and the
+    backfill asks for it.
 
     2026-09-18 (BUILD_PLAN.md section 3 / CLAUDE.md "P&L conventions": Daily/5d/MTD/YTD
     all difference LTD(t) against LTD(t-1bd) etc., and every FX leg's LTD needs the
@@ -207,7 +216,7 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
                 "AND settle_date=:settle AND mark_type=:mark_type",
                 {"as_of": day, "instrument_id": item["instrument_id"], "settle": item["settle_date"],
                  "mark_type": item["mark_type"]}).fetchone()
-            if hit and (day >= today or is_close_row(item["mark_type"], day, hit[0])):
+            if hit and (day >= today or is_close_row(item["mark_type"], day, hit[0], today)):
                 present += 1
             else:
                 missing.append(item)

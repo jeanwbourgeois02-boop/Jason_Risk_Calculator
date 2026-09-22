@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from data.ingest import schema
-from engine.pnl.valuation import _business_days_between, _mark_at, value_book
+from engine.pnl.valuation import _business_days_between, _mark_at, _mark_near, value_book
 
 
 def _insert_instrument(conn, instrument_id, base_ccy, quote_ccy):
@@ -65,7 +67,6 @@ def _one_open_fx_trade(conn, settle_date="2026-09-17"):
 def test_value_book_has_no_marks_source_parameter_any_more():
     """The parameter itself is gone (2026-09-17 afternoon), not merely inert: passing it
     is a TypeError, same as any other unknown keyword argument."""
-    import pytest
     conn = schema.connect()
     with pytest.raises(TypeError):
         value_book(conn, "2026-09-17", marks_source="BNP_BVAL")
@@ -110,7 +111,6 @@ def test_mark_at_has_no_source_parameter_and_only_ever_reads_official():
     """Direct pin on `_mark_at` itself (other modules call it directly, e.g.
     `engine/ladder/futures_delta.py`): it takes no `source` argument at all any more,
     and a non-official mark on file for the exact key it looks up is never returned."""
-    import pytest
     conn = schema.connect()
     _insert_instrument(conn, "USDJPY", "USD", "JPY")
     _insert_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "SPOT", 149.0, "BBG_BFXFORWARD", "2026-09-17T17:00:00-04:00")
@@ -332,3 +332,100 @@ def test_settled_trade_whose_realised_row_is_unreadable_and_has_no_mark_names_th
     assert "settled trade old" in vb.loc["old", "reason"]
     assert "realised_pnl.pnl_usd is not a number ('2026-07-24')" in vb.loc["old", "reason"]
     assert list(vb.loc[["t1", "t2"], "reason"]) == ["", ""]
+
+
+# --------------------------------------------------------------------- NDF exit price (2026-09-22)
+# User: "the exit price is the fix on that day, as pulled from bbg", then "each ndf has a unique
+# fix". A fixed NDF's mark is the official NDF_FIX dated its fixing date exactly; a fix of another
+# day is never estimated into its place. With no fix for that date on file, the SPOT of the fixing
+# date (the near-marks estimate when that day's own is not on file), named as the substitute.
+# Seen 2026-09-22 on the imported snapshot: no marks that day, and the 21 USDIDR / USDBRL tickets
+# fixing that day took the 09-17 / 09-14 fixes through the time interpolation, moving Daily by
+# -126,820 although nothing had been priced.
+
+
+def _ndf_book(conn, settle="2026-09-24"):
+    """One USDIDR NDF ticket, n1: sold 1m USD at 17,900 for `settle` (Thu 2026-09-24, fixing
+    date = value date less 2 business days = Tue 2026-09-22)."""
+    conn.execute("INSERT INTO instruments VALUES ('USDIDR','FX','USD','IDR',1,1,'USDIDR Curncy','9999-12-31')")
+    _insert_trade(conn, "n1", "USDIDR", "FX_FWD", "2026-08-20", -1_000_000, 17_900.0)
+    _insert_legs(conn, [
+        ("n1", 1, "FX_NEAR", "USD", -1_000_000, "2026-08-20", settle, 17_900.0, 0),
+        ("n1", 2, "FX_NEAR", "IDR", 17_900_000_000, "2026-08-20", settle, 17_900.0, 0),
+    ])
+
+
+def _idr_mark(conn, day, mark_type, value):
+    source = "BBG_BDH" if mark_type == "NDF_FIX" else "BBG_BFXFORWARD"
+    _insert_mark(conn, day, "USDIDR", day, mark_type, value, source, f"{day}T15:00:00-04:00")
+
+
+def _n1(conn, day):
+    return value_book(conn, day).set_index("trade_id").loc["n1"]
+
+
+def test_a_fix_of_another_day_is_never_the_exit_price_the_spot_of_the_fixing_date_is():
+    """(a) fixes on file the day before and the day after the fixing date, none on it: the
+    ticket takes the SPOT of the fixing date -- not either fix, not a value between them --
+    and its note says so."""
+    conn = schema.connect()
+    _ndf_book(conn)
+    _idr_mark(conn, "2026-09-21", "NDF_FIX", 17_700.0)
+    _idr_mark(conn, "2026-09-23", "NDF_FIX", 17_800.0)
+    _idr_mark(conn, "2026-09-22", "SPOT", 17_850.0)
+    conn.commit()
+    row = _n1(conn, "2026-09-22")
+    assert (row["mark"], row["mark_source"], row["mark_date"]) == (17_850.0, "BBG_BFXFORWARD", "2026-09-22")
+    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (17_850.0 - 17_900.0) / 17_850.0)
+    assert row["note"] == ("NDF fixed 2026-09-22: no official fixing on file: at the spot of 2026-09-22 instead, "
+                           "no delta, no carry")
+    assert row["reason"] == ""
+    # and on a later valuation date still the fixing date's spot, still neither fix
+    later = _n1(conn, "2026-09-25")
+    assert later["mark"] == 17_850.0 and later["pnl_usd"] == pytest.approx(row["pnl_usd"])
+
+
+def test_the_fix_of_the_fixing_date_is_the_exit_price_once_on_file():
+    """(b) with the fixing date's own fix on file it is the mark, whatever the spot and the
+    other days' fixes say; converted at the fixing date's spot."""
+    conn = schema.connect()
+    _ndf_book(conn)
+    _idr_mark(conn, "2026-09-21", "NDF_FIX", 17_700.0)
+    _idr_mark(conn, "2026-09-22", "NDF_FIX", 17_820.0)
+    _idr_mark(conn, "2026-09-22", "SPOT", 17_850.0)
+    conn.commit()
+    row = _n1(conn, "2026-09-23")
+    assert (row["mark"], row["mark_source"], row["mark_date"]) == (17_820.0, "BBG_BDH", "2026-09-22")
+    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (17_820.0 - 17_900.0) / 17_850.0)
+    assert row["note"] == "NDF fixed 2026-09-22: at the official fixing of 2026-09-22, no delta, no carry"
+
+
+def test_a_fixing_date_with_no_marks_at_all_carries_the_previous_close_and_the_pnl_stands_still():
+    """(c) the 2026-09-22 case: no pull yet on the fixing date, the previous close on file and
+    an older fix. The ticket carries the previous close's spot (named as the estimate it is),
+    never the older fix, so its P&L is exactly what it was the day before."""
+    conn = schema.connect()
+    _ndf_book(conn)
+    _idr_mark(conn, "2026-09-17", "NDF_FIX", 17_753.0)
+    _idr_mark(conn, "2026-09-21", "SPOT", 17_880.0)
+    conn.commit()
+    before = _n1(conn, "2026-09-21")   # open: marked along the day's curve, spot alone being spot
+    assert before["status"] == "OPEN"
+    assert before["pnl_usd"] == pytest.approx(-1_000_000 * (17_880.0 - 17_900.0) / 17_880.0)
+    row = _n1(conn, "2026-09-22")
+    assert row["mark"] == 17_880.0 and row["mark_source"] == "INTERP: SPOT of 2026-09-21 (nearest earlier close)"
+    assert row["pnl_usd"] == before["pnl_usd"]
+    assert row["note"] == ("NDF fixed 2026-09-22: no official fixing on file: at the spot of 2026-09-22 instead "
+                           "(INTERP: SPOT of 2026-09-21 (nearest earlier close)), no delta, no carry")
+    assert row["reason"] == ""
+
+
+def test_mark_near_never_estimates_a_fixing():
+    """The near-marks rule stops at NDF_FIX: the exact row or nothing, whatever neighbours exist."""
+    conn = schema.connect()
+    _ndf_book(conn)
+    _idr_mark(conn, "2026-09-21", "NDF_FIX", 17_700.0)
+    _idr_mark(conn, "2026-09-23", "NDF_FIX", 17_800.0)
+    conn.commit()
+    assert _mark_near(conn, "USDIDR", "2026-09-22", "NDF_FIX", "2026-09-22") is None
+    assert _mark_near(conn, "USDIDR", "2026-09-21", "NDF_FIX", "2026-09-21") == (17_700.0, "BBG_BDH")

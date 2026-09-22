@@ -1181,7 +1181,7 @@ def test_build_chart_returns_graph():
         # date -- the fixture's single trade (2026-06-01) yields fewer than the full
         # lookback window, so just check the series is non-empty and within bounds.
         n_points = len(graph.figure["data"][0]["x"])
-        assert 1 <= n_points <= header._CHART_LOOKBACK_DAYS
+        assert n_points == len(header._chart_days(conn, "2026-06-20"))
     finally:
         conn.close()
 

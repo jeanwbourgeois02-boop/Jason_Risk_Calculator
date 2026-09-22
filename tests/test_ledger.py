@@ -350,3 +350,95 @@ def test_a_text_mark_makes_the_trades_that_need_it_unrealisable_and_names_the_ma
     reasons = {u["trade_id"]: u["reason"] for u in res["unrealisable"]}
     assert res["realised"] == 0
     assert reasons["a1"] == "trade a1: marks.value (SPOT for AUDUSD on 2026-09-09) is not a number ('24-Jul')"
+
+
+# --------------------------------------------------------------------------- NDF fixing (2026-09-22)
+# User: "the exit price is the fix on that day, as pulled from bbg"; "each ndf has a unique fix".
+# The freeze of an NDF ticket reads the official NDF_FIX dated its fixing date exactly, never the
+# last fix on or before it; with none, the last official SPOT on or before the fixing date. A row
+# frozen at a spot is dropped and frozen again once the exact-day fix lands ('refrozen'), and a
+# row frozen at a fix of another day is dropped and frozen again by the same rule.
+
+
+def _ndf_db():
+    """b1: an NDF, bought 1m USD against BRL at 5.20, value Wed 2026-09-16, fixing Mon 09-14;
+    j1: a deliverable USDJPY forward on the same dates. Spots on the fixing date and the value
+    date; no fix on file yet."""
+    conn = schema.connect()
+    _insert_instruments(conn, [
+        ("USDBRL", "FX", "USD", "BRL", 1, 1, "USDBRL Curncy", "9999-12-31"),
+        ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31"),
+    ])
+    for trade_id, pair, fill in (("b1", "USDBRL", 5.20), ("j1", "USDJPY", 150.0)):
+        _insert_trade(conn, trade_id, pair, "FX_FWD", "2026-08-14", 1e6, fill)
+        _insert_legs(conn, [
+            (trade_id, 1, "FX_NEAR", "USD", 1e6, "2026-08-14", "2026-09-16", fill, 0),
+            (trade_id, 2, "FX_NEAR", pair[3:], -1e6 * fill, "2026-08-14", "2026-09-16", fill, 0),
+        ])
+    _insert_marks(conn, [
+        ("2026-09-14", "USDBRL", "2026-09-14", "SPOT", 5.25, "BBG_BFXFORWARD", "t"),
+        ("2026-09-16", "USDBRL", "2026-09-16", "SPOT", 5.35, "BBG_BFXFORWARD", "t"),
+        ("2026-09-14", "USDJPY", "2026-09-14", "SPOT", 151.0, "BBG_BFXFORWARD", "t"),
+        ("2026-09-16", "USDJPY", "2026-09-16", "SPOT", 152.0, "BBG_BFXFORWARD", "t"),
+    ])
+    conn.commit()
+    return conn
+
+
+def _brl_fix(conn, day, value):
+    _insert_marks(conn, [(day, "USDBRL", day, "NDF_FIX", value, "BBG_BDH", "t")])
+    conn.commit()
+
+
+def _frozen_row(conn, trade_id):
+    return conn.execute("SELECT mark_type, spot_as_of_date, pnl_usd, note FROM realised_pnl WHERE trade_id = ?",
+                        (trade_id,)).fetchone()
+
+
+def test_ndf_freezes_at_the_fix_of_its_fixing_date_exactly_never_a_neighbouring_days():
+    conn = _ndf_db()
+    _brl_fix(conn, "2026-09-11", 5.30)   # the Friday before: not this ticket's fix
+    _brl_fix(conn, "2026-09-15", 5.40)   # the day after: not this ticket's fix either
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["realised"] == 2 and res["refrozen"] == [] and res["unrealisable"] == []
+    b1 = _frozen_row(conn, "b1")
+    assert b1[:2] == ("SPOT", "2026-09-14") and b1[2] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25)
+    assert b1[3] == "spot dated 2026-09-14 (NDF fixing)"
+    # the fixing date's own fix lands: the spot-frozen row is dropped and the ticket frozen at the fix
+    _brl_fix(conn, "2026-09-14", 5.22)
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    b1 = _frozen_row(conn, "b1")
+    assert b1[:2] == ("NDF_FIX", "2026-09-14") and b1[2] == pytest.approx(1e6 * (5.22 - 5.20) / 5.25)
+    assert b1[3] == "official fixing dated 2026-09-14 (NDF fixing)"
+    # and stays there: a further call drops and freezes nothing
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["refrozen"] == [] and res["realised"] == 0 and _frozen_row(conn, "b1") == b1
+
+
+def test_a_row_frozen_at_a_fix_of_another_day_is_dropped_and_frozen_again():
+    conn = _ndf_db()
+    _brl_fix(conn, "2026-09-11", 5.30)
+    ledger.realise_settled(conn, "2026-09-21")
+    # what the rule of a few hours on 2026-09-22 wrote: the last fix on or before the fixing date
+    conn.execute("UPDATE realised_pnl SET mark_type = 'NDF_FIX', spot_as_of_date = '2026-09-11', pnl_usd = 1.0, "
+                 "note = 'official fixing dated 2026-09-11 (last before fixing)' WHERE trade_id = 'b1'")
+    conn.commit()
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    b1 = _frozen_row(conn, "b1")
+    assert b1[:2] == ("SPOT", "2026-09-14") and b1[2] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25)
+    assert b1[3] == "spot dated 2026-09-14 (NDF fixing)"
+
+
+def test_a_deliverable_pairs_row_is_never_touched_by_the_ndf_guard():
+    conn = _ndf_db()
+    ledger.realise_settled(conn, "2026-09-21")
+    j1 = conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'j1'").fetchone()
+    assert _frozen_row(conn, "j1")[:2] == ("SPOT", "2026-09-16")
+    _brl_fix(conn, "2026-09-14", 5.22)
+    _insert_marks(conn, [("2026-09-16", "USDJPY", "2026-09-16", "NDF_FIX", 999.0, "BBG_BDH", "t")])   # a deliverable pair never reads one
+    conn.commit()
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    assert conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'j1'").fetchone() == j1

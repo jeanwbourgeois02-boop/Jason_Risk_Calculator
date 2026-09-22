@@ -259,14 +259,19 @@ def _mark_at(conn: sqlite3.Connection, instrument_id: str, settle_date: str, mar
 # that: the ladder's delta is never filled); the row builders and the USD conversion read
 # `_mark_near`. A pillar or neighbour whose stored value is not a number raises `_BadValue`
 # like any other mark, so the trade is reported, never priced off a guess.
+# One mark is never estimated: NDF_FIX (user, 2026-09-22: "each ndf has a unique fix"). A
+# fixing is that day's print, not a point on a curve, so a fix of another day is never an
+# NDF's exit price; `ndf_fix` reads the fixing date's own row and otherwise takes the SPOT
+# of that date (estimated, if need be), never a neighbouring fix.
 INTERP = "INTERP"
 
 
 def _mark_near(conn, instrument_id: str, settle_date: str, mark_type: str, as_of: str) -> Optional[tuple]:
     """(value, source) of the official mark for the key on `as_of`, or the nearest-marks
-    estimate described above, or None when there is nothing to work from."""
+    estimate described above, or None when there is nothing to work from. NDF_FIX is the
+    exact lookup only (above)."""
     hit = _mark_at(conn, instrument_id, settle_date, mark_type, as_of)
-    if hit is not None:
+    if hit is not None or mark_type == "NDF_FIX":
         return hit
     memo = getattr(conn, "near_memo", None)
     key = (instrument_id, settle_date, mark_type, as_of)
@@ -369,8 +374,9 @@ def _curve_interp(conn, pair: str, settle_date: str, as_of: str) -> Optional[tup
 def _neighbour(conn, instrument_id: str, settle_date: str, mark_type: str, as_of: str, later: bool):
     """(value, as_of_date, source) of the same mark on the nearest close after (`later`) or
     before `as_of`, or None. A SPOT / NDF_1M row is keyed on its own day (settle_date =
-    as_of_date), every other mark on its fixed settle_date."""
-    own_day = mark_type in ("SPOT", "NDF_1M", "NDF_FIX")
+    as_of_date), every other mark on its fixed settle_date. (NDF_FIX is keyed on its own
+    day too, but never reaches here: `_mark_near` does not estimate a fixing.)"""
+    own_day = mark_type in ("SPOT", "NDF_1M")
     row = conn.execute(
         "SELECT value, as_of_date, source FROM marks_official WHERE instrument_id = :i AND mark_type = :m "
         + ("AND settle_date = as_of_date " if own_day else "AND settle_date = :s ")
@@ -581,18 +587,23 @@ def ndf_fixing(r) -> str:
 
 def ndf_fix(conn, pair: str, fixed_on: str) -> tuple:
     """((value, source), how) of an NDF's exit price on its fixing date (user, 2026-09-22:
-    "the exit price is the fix on that day, as pulled from bbg"): the pair's official NDF_FIX
-    mark of that date (data/ingest/common.py::NDF_FIX_TICKERS, written by the pull and the
-    backfill), the near-marks estimate of it when that day's is not on file (a neighbouring
-    day's fix, named), and only with no fix on file at all the pair's SPOT of the fixing date,
-    named as the substitute it is. (None, reason) when there is nothing to work from."""
-    hit = _mark_near(conn, pair, fixed_on, "NDF_FIX", fixed_on)
+    "the exit price is the fix on that day, as pulled from bbg", then "each ndf has a unique
+    fix"): the pair's official NDF_FIX mark dated `fixed_on` exactly (data/ingest/common.py::
+    NDF_FIX_TICKERS, written by the pull and the backfill) and never another day's fix -- a
+    fixing is that day's print, so the near-marks rule does not apply to it. With no fix for
+    that date on file, the pair's SPOT of the fixing date, named as the substitute it is,
+    until the fix lands; that SPOT is the near-marks estimate when the day's own is not on
+    file (named after INTERP), so on a day with no pull yet the ticket carries the previous
+    close's spot and its P&L stands where it was. (None, reason) with nothing to work from."""
+    hit = _mark_at(conn, pair, fixed_on, "NDF_FIX", fixed_on)
     if hit is not None:
-        exact = str(hit[1]).startswith(INTERP) is False
-        return hit, (f"at the official fixing of {fixed_on}" if exact else f"at the fixing estimated from near marks ({hit[1]})")
+        return hit, f"at the official fixing of {fixed_on}"
     hit = _mark_near(conn, pair, fixed_on, "SPOT", fixed_on)
     if hit is not None:
-        return hit, f"no official fixing on file: at the spot of {fixed_on} instead"
+        how = f"no official fixing on file: at the spot of {fixed_on} instead"
+        if str(hit[1]).startswith(INTERP):
+            how += f" ({hit[1]})"
+        return hit, how
     return None, "no official fixing and no spot on file"
 
 
@@ -600,10 +611,11 @@ def _ndf_fixed_on(r, as_of: str) -> str:
     """The fixing date when this open FX ticket is an NDF that has fixed on or before
     `as_of`, else ''. From its fixing an NDF is done (user, 2026-09-22: "NDFs - once they
     expire, they should disappear ... 0 delta and 0 carry, they just disappears as they
-    expired", reversing the 2026-09-21 "like settled cash" rule): its P&L is `Q x (S_fix - f)`
-    at the pair's official SPOT of the fixing date, converted at that date's spot, and does
-    not move again; the ledger freezes it at the same spot after the value date
-    (`engine.pnl.ledger`). Before the fixing it is marked at its value date's forward like
+    expired", reversing the 2026-09-21 "like settled cash" rule): its P&L is `Q x (FIX - f)`
+    at the pair's official NDF_FIX of the fixing date (`ndf_fix`; the SPOT of that date as the
+    named substitute until the fix is on file, never a fix of another day), converted at that
+    date's spot, and does not move again; the ledger freezes the same figure after the value
+    date (`engine.pnl.ledger`). Before the fixing it is marked at its value date's forward like
     any leg (with none on file, the near-marks rule: along the day's curve, spot alone being
     spot -- which is what the 2026-09-21/22 NDF and metal "no forward" cases now are)."""
     fixed_on = ndf_fixing(r)

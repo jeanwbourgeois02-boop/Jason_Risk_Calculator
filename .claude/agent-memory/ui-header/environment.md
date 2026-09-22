@@ -21,3 +21,8 @@ metadata:
   test (bypassing dash's `_initialize_context`/`outputs_list` machinery, which only works via the
   dispatcher) use `app.callback_map["<id>.<prop>"]["callback"].__wrapped__(*args)`. Calling the
   entry directly raises `KeyError: 'outputs_list'`.
+- Mac clone (2026-09-22): no `py` launcher; run `.venv/bin/python -m pytest tests/test_header.py -q`
+  (Python 3.12, dash installed in the venv). The `py -3` lines above are the Windows PC only.
+  A PostToolUse hook runs ruff on every edited file and reports pre-existing findings too
+  (unused `dash.State` in header.py, unused `sqlite3` in test_header.py as of 2026-09-22):
+  not a regression, list them as found-not-done unless asked to clean up.

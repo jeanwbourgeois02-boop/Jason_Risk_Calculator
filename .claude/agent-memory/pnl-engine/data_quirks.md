@@ -100,9 +100,13 @@ metadata:
   `value_book`) so `ui.tabs.blotter_pricing.priced_value_book` (BNP_BVAL-fallback
   wrapper) can be swapped in without this module importing anything from `ui/`.
 
-- Line endings differ inside my own lane (checked 2026-09-21 with `file`): `tests/test_pnl.py`
-  is CRLF, every `engine/pnl/*.py` is LF. Append to the test file in binary mode with
-  `\n` -> `\r\n` and confirm zero bare LFs afterwards; new engine modules stay LF.
+- Line endings (re-checked 2026-09-22 with `file` and `grep -c $'\r'`): every file in the lane,
+  `tests/test_pnl.py` included, is LF now (it was CRLF on 2026-09-21; infra normalised it).
+  Still check before appending: `grep -c $'\r' <file>` must stay what it was.
+
+- Never `git stash` / `git stash pop` in this working tree: several sessions share it and
+  their uncommitted edits (ui/, data/, CLAUDE.md) travel with the stash. To prove a ruff
+  finding pre-exists, read `git diff -- <file>` for the lines instead (2026-09-22).
 
 - pandas gotcha: `Series.where(cond, None)` on a `float64` column silently coerces the
   replacement `None` back to `np.nan` (dtype-driven), so a check like `row.x is None`

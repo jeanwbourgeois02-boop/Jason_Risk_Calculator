@@ -697,6 +697,87 @@ def test_build_chart_plots_partially_priced_days_with_hover_note():
     assert "%{text}" in trace["hovertemplate"]
 
 
+# ------------------------------------------------- the whole history (2026-09-22)
+# User decision 2026-09-22: "yes I want to see the ltd line chart, which requires all the
+# previous closes". The chart used to show the last 20 business days; it now runs from the
+# book's first trade date to as_of, one `_cached_ltd` evaluation per business day.
+
+
+def test_build_chart_spans_every_business_day_from_the_first_trade(tmp_path, monkeypatch):
+    import datetime as dt
+    from engine.pnl.calendar import _is_business_day, _n_business_days_back, load_holidays
+
+    as_of = "2026-09-17"
+    holidays = load_holidays()
+    first = _n_business_days_back(dt.date.fromisoformat(as_of), 60, holidays)  # over the 2026-09-07 holiday
+    db = tmp_path / "risk.db"
+    conn = schema.connect(db)
+    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
+    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", first.isoformat(), 1_000_000, 147.0)
+    _insert_trade(conn, "t2", "USDJPY", "FX_FWD", "2026-09-01", 1_000_000, 147.0)  # later: not the start
+    _insert_legs(conn, [
+        ("t1", 1, "FX_NEAR", "USD", 1_000_000, first.isoformat(), "2026-09-30", 147.0, 1),
+        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, first.isoformat(), "2026-09-30", 147.0, 1),
+        ("t2", 1, "FX_NEAR", "USD", 1_000_000, "2026-09-01", "2026-09-30", 147.0, 1),
+        ("t2", 2, "FX_NEAR", "JPY", -147_000_000, "2026-09-01", "2026-09-30", 147.0, 1),
+    ])
+    conn.commit()
+
+    evaluated = []
+
+    def cheap(db_path, _mtime, day):                    # stands in for the per-day value_book run
+        evaluated.append(day)
+        if day == "2026-09-01":
+            return (None, 2, 2, 0)                      # nothing priced that day: a gap, kept
+        return (float(len(evaluated)), 0, 2, 1 if day == as_of else 0)
+
+    monkeypatch.setattr(header, "_cached_ltd", cheap)
+    try:
+        graph = header._build_chart(conn, as_of, db_path=db)
+    finally:
+        conn.close()
+    trace = graph.figure["data"][0]
+    xs = trace["x"]
+    assert len(xs) == 61                                # 60 business days back, as_of included
+    assert xs[0] == first.isoformat() and xs[-1] == as_of
+    assert xs == sorted(xs)                             # oldest first
+    assert all(_is_business_day(dt.date.fromisoformat(x), holidays) for x in xs)
+    assert "2026-09-07" not in xs                       # Labor Day
+    assert evaluated == xs                              # one evaluation per day, none outside the span
+    gap = xs.index("2026-09-01")
+    assert trace["y"][gap] is None and trace["text"][gap] == "nothing priced (2 trades)"
+    assert trace["text"][-1] == "1 valued at an earlier close"
+    layout = graph.figure["layout"]
+    assert layout["xaxis"] == {"type": "date", "tickformat": "%d %b"}   # months of days read as dates
+    assert layout["height"] == 260
+    assert not hasattr(header, "_CHART_LOOKBACK_DAYS")  # the 20-day window is gone
+
+
+def test_build_chart_with_no_trades_has_no_points_and_says_so(monkeypatch):
+    """Nothing to chart before the book exists: no day is evaluated, and the reader sees a
+    sentence, never a blank graph (CLAUDE.md: no figure is blank without its reason)."""
+    from ui.tabs import blotter_pricing
+
+    def never(*_args, **_kwargs):
+        raise AssertionError("no day should be valued for an empty book")
+
+    monkeypatch.setattr(header, "_cached_ltd", never)
+    monkeypatch.setattr(blotter_pricing, "priced_value_book", never)
+    conn = schema.connect()
+    assert header._chart_days(conn, "2026-09-17") == []
+    out = header._build_chart(conn, "2026-09-17")
+    assert not hasattr(out, "figure")
+    assert out.children == "No trades dated on or before 2026-09-17: nothing to chart."
+
+    # a book whose first trade is after as_of is the same: nothing existed yet
+    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
+    _insert_trade(conn, "t1", "USDJPY", "FX_SPOT", "2026-09-18", 1_000_000, 147.0)
+    conn.commit()
+    assert header._chart_days(conn, "2026-09-17") == []
+    import datetime as dt
+    assert header._chart_days(conn, "2026-09-18") == [dt.date(2026, 9, 18)]
+
+
 # --------------------------------------------------------------------- one bad stored value
 # 2026-09-18, Bloomberg PC: "none of the top headlines of the app work" -- one stored value
 # that was not a number raised out of `value_book`, so `_build_figures` raised and the

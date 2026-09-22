@@ -25,6 +25,9 @@ Follows [[historical-backfill-no-settle-dt-2026-09-21]]. Three user decisions, a
   live pull (already on file as official tenor rows); not built, offered to the user.
 
 ## C. Official close = 15:00 New York (was 17:00)
+SUPERSEDED 2026-09-22 for the cut-over part: the 15:00 close now applies to every past day within
+intraday reach and `CLOSE_1500_FROM` is gone, see [[close-1500-every-past-day-2026-09-22]]. The
+IntradayBarRequest shape, the traps and the fixture note below still hold.
 - One constant: `pull_marks.CLOSE_HOUR_NY`. `backfill.close_stamp` and `pull_marks.snapped_at` read it.
   NOT covered (other lanes): `engine/rates/store.py::snapped_at` still stamps 17:00, and vol_quotes /
   rate_vol_quotes and every pricer mark take their stamp from it.

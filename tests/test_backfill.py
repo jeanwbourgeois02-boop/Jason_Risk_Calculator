@@ -15,12 +15,11 @@ REAL_HOLIDAYS = _calendar._DEFAULT_HOLIDAYS_PATH   # config/holidays.txt, before
 
 @pytest.fixture(autouse=True)
 def _close_1500_on_every_date(monkeypatch):
-    """The 15:00 New York close applies from backfill.CLOSE_1500_FROM (2026-09-21) and inside
-    Bloomberg's intraday history counted from today. These tests exercise it on earlier dates,
-    so the cutover is moved back and 'today' is pinned (a test that needs another today
-    passes it or patches live.book_today itself). The real cutover has its own tests."""
+    """The 15:00 New York close applies to every past day inside Bloomberg's intraday history
+    counted from today (2026-09-22; the 2026-09-21 cut-over is gone). These tests work days
+    around 2026-09-07, so 'today' is pinned to keep them within reach (a test that needs
+    another today passes it or patches live.book_today itself)."""
     from data.bloomberg import live as _live
-    monkeypatch.setattr(backfill, "CLOSE_1500_FROM", date(2000, 1, 1))
     monkeypatch.setattr(_live, "book_today", lambda: date(2026, 9, 21))
 
 
@@ -1032,22 +1031,45 @@ def test_a_day_older_than_bloombergs_intraday_history_takes_the_daily_close(tmp_
     assert [m["mark_type"] for m in done["missing"].iloc[0]] == ["FWD_OUTRIGHT"] and done["not_closed"].iloc[0] == 0
 
 
-def test_the_1500_close_applies_from_2026_09_21_and_older_days_keep_what_they_have(monkeypatch):
-    """User decision 2026-09-21: "from now on its 3pm new york but surely for like a month ago
-    its not that serious"."""
+def test_every_past_day_within_bloombergs_intraday_history_closes_at_1500_new_york(monkeypatch):
+    """User decision 2026-09-22 ("I want to see the ltd line chart, which requires all the
+    previous closes, and fixes. For futures, can use market close, for fx use new 3pm"): the
+    15:00 close applies to every past day Bloomberg's intraday history reaches, on either
+    side of 2026-09-21 -- the cut-over of 2026-09-21 ("surely for like a month ago its not
+    that serious") is gone. Only a day beyond that history keeps the 17:00 daily close."""
     from data.bloomberg import pull_marks as pm
-    monkeypatch.setattr(backfill, "CLOSE_1500_FROM", date(2026, 9, 21))      # the real cutover, not the fixture's
-    assert backfill.first_1500_day(date(2026, 9, 23)) == date(2026, 9, 21)
-    # before the cutover: whatever is on file is that day's close (a live pull's row, an old 17:00 row)
-    assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T11:40:12-04:00") is True
-    assert backfill.is_close_row("FWD_OUTRIGHT", "2026-09-14", "2026-09-14T17:00:00-04:00") is True
-    assert backfill.close_stamp(date(2026, 9, 18), today=date(2026, 9, 23)) == "2026-09-18T17:00:00-04:00"
-    # from the cutover on: only the 15:00 row (or the daily close of a day beyond the intraday window)
-    assert backfill.is_close_row("SPOT", "2026-09-21", "2026-09-21T11:40:12-04:00") is False
-    assert backfill.is_close_row("SPOT", "2026-09-21", "2026-09-21T15:00:00-04:00") is True
-    assert backfill.close_stamp(date(2026, 9, 22), today=date(2026, 9, 23)) == "2026-09-22T15:00:00-04:00"
-    assert backfill.is_close_row("FUTURE_PX", "2026-09-21", "2026-09-21T11:40:12-04:00") is True
-    # a stretch across the cutover is asked for in its two parts: daily before, 15:00 from it on
+    today = date(2026, 9, 22)
+    floor = backfill.intraday_floor(today)
+    assert backfill.first_1500_day(today) == floor == date(2026, 3, 10)          # no calendar cut-over any more
+    assert not hasattr(backfill, "CLOSE_1500_FROM")
+    # (a) a day before 2026-09-21 within reach: a live-stamped or a 17:00 row is NOT a close, 15:00 is
+    assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T11:40:12-04:00", today) is False
+    assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-19T10:31:12+08:00", today) is False   # a 22:31 NY press
+    assert backfill.is_close_row("FWD_OUTRIGHT", "2026-09-14", "2026-09-14T17:00:00-04:00", today) is False
+    assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T15:00:00-04:00", today) is True
+    assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-19T03:00:00+08:00", today) is True   # the same instant
+    assert backfill.is_close_row("FWD_OUTRIGHT", "2026-07-22", "2026-07-22T15:00:00-04:00", today) is True
+    assert backfill.is_close_row("SPOT", "2026-07-22", "2026-07-22T17:00:00-04:00", today) is False
+    # today given as an ISO string (close_completeness passes one), and defaulting to the book date
+    assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T17:00:00-04:00", "2026-09-22") is False
+    monkeypatch.setattr(__import__("data.bloomberg.live", fromlist=["x"]), "book_today", lambda: today)
+    assert backfill.is_close_row("SPOT", "2026-09-18", "2026-09-18T17:00:00-04:00") is False
+    # a future keeps its PX_SETTLE whatever the stamp (2026-09-22: "for futures, can use market close")
+    assert backfill.is_close_row("FUTURE_PX", "2026-09-18", "2026-09-18T11:40:12-04:00", today) is True
+    assert backfill.is_close_row("FUTURE_PX", "2026-09-18", "2026-09-18T17:00:00-04:00", today) is True
+    assert backfill.is_close_row("NDF_FIX", "2026-09-16", "2026-09-16T17:00:00-04:00", today) is True
+    # (b) beyond the intraday floor the 17:00 daily close counts (and so would a 15:00 row); a live press never
+    before = floor - timedelta(days=3)
+    assert backfill.is_close_row("SPOT", before.isoformat(), f"{before}T17:00:00-05:00", today) is True
+    assert backfill.is_close_row("SPOT", before.isoformat(), f"{before}T15:00:00-05:00", today) is True
+    assert backfill.is_close_row("SPOT", before.isoformat(), f"{before}T11:40:12-05:00", today) is False
+    assert backfill.is_close_row("SPOT", floor.isoformat(), f"{floor}T17:00:00-04:00", today) is False   # the floor itself is within reach
+    # (c) the stamp the backfill writes: 15:00 on any day within reach, 17:00 beyond it
+    assert backfill.close_stamp(date(2026, 9, 18), today=today) == "2026-09-18T15:00:00-04:00"
+    assert backfill.close_stamp(date(2026, 7, 22), today=today) == "2026-07-22T15:00:00-04:00"
+    assert backfill.close_stamp(floor, today=today) == f"{floor}T15:00:00-04:00"
+    assert backfill.close_stamp(before, today=today) == f"{before}T17:00:00-05:00"
+    # a stretch across the intraday floor is asked for in its two parts: daily before, 15:00 from it on
     asked = []
     monkeypatch.setattr(pm, "fetch_historical_series",
                         lambda s, v, tickers, fields, start, end, **kw: asked.append(("daily", start, end)) or {

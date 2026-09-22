@@ -104,3 +104,21 @@ def test_the_backfills_hook_is_what_freezes_it(tmp_path):
         assert set(_frozen(conn)) == {"b1"} and any("1 settled trade" in line for line in lines)
     finally:
         conn.close()
+
+
+def test_the_fix_of_the_fixing_date_replaces_the_present_spot_once_it_lands():
+    """The exact-day fix beats a present spot as it beats a past spot (user, 2026-09-22: "each
+    ndf has a unique fix"): the present-spot row is dropped and the ticket frozen again at the
+    fix, converted at the fixing date's spot -- the near-marks estimate, named, when that day's
+    own is not on file."""
+    conn = _load(schema.connect())
+    ledger.realise_settled(conn, AS_OF, ndf_present_spot=True)
+    assert PRESENT_SPOT_NOTE in _frozen(conn)["b1"][3]
+    conn.execute("INSERT INTO marks VALUES ('2026-09-14','USDBRL','2026-09-14','NDF_FIX',5.22,'BBG_BDH','2026-09-14T17:00:00-04:00')")
+    res = ledger.realise_settled(conn, "2026-09-22")
+    assert res["refrozen"] == ["b1"] and res["realised"] == 1
+    b1 = _frozen(conn)["b1"]
+    assert b1[1] == pytest.approx(1e6 * (5.22 - 5.20) / 5.30)   # the fix; USD at the nearest close's spot, none earlier
+    assert b1[2] == "2026-09-14" and b1[3] == "official fixing dated 2026-09-14 (NDF fixing)"
+    assert conn.execute("SELECT mark_type, spot_source FROM realised_pnl WHERE trade_id = 'b1'").fetchone() == ("NDF_FIX", "BBG_BDH")
+    assert ledger.realise_settled(conn, "2026-09-22", ndf_present_spot=True)["refrozen"] == []   # and it stays there

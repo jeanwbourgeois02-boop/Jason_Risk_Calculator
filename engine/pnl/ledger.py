@@ -36,6 +36,15 @@ date's premium was used. A closed-out option (bought and sold back in full,
 at the close-out date's spot (or the last official one before it), `mark_type='CLOSE_OUT'`:
 it needs no PREMIUM, and the row records the figure value_book has shown since the close-out.
 
+NDF (2026-09-22, user: "the exit price is the fix on that day, as pulled from bbg" and
+"each ndf has a unique fix"): an NDF ticket is done at its fixing date (value date less 2
+business days, `_freeze_day`), frozen at the pair's official NDF_FIX dated that day exactly
+(`mark_type='NDF_FIX'`, `spot_as_of_date` = the fixing date) and never at another day's fix;
+with no fix for that date on file, at the last official SPOT on or before the fixing date
+(`mark_type='SPOT'`), the figure value_book showed from the fixing on. A row frozen any other
+way while the exact-day fix is on file, or at a fix of another day, is dropped and frozen
+again by the same rule on the next call (`purge_superseded_ndf_fix`, 'refrozen' in the result).
+
 `ltd(conn, d)` = sum of value_book(d).pnl_usd, NaN if any row is NaN, 0.0 for an empty
 book (first trading day, not Unavailable). Periods subtract `ltd` at a reference
 business day from a Mon-Fri + `config/holidays.txt` calendar (engine/pnl/aggregate.py).
@@ -159,6 +168,38 @@ def purge_superseded_present_spot(conn: sqlite3.Connection) -> list:
     return ids
 
 
+def purge_superseded_ndf_fix(conn: sqlite3.Connection) -> list:
+    """Delete the `realised_pnl` rows of NDF tickets (`engine.ladder.ndf.is_ndf_pair`) whose
+    exit price is not the official fixing of their own fixing date (user, 2026-09-22: "each
+    ndf has a unique fix"), and return their trade ids: a row frozen at a SPOT or a present
+    spot while an official NDF_FIX dated the ticket's fixing date (`_freeze_day`) is now on
+    file (the fix landed after the freeze), and a row frozen at a fix of another day (the rule
+    of a few hours on 2026-09-22 read the last fix on or before the fixing date), whatever is
+    on file for it. Nothing is recomputed here: `realise_settled` freezes them afresh, by the
+    rule in the module docstring, in the same call. A fix that is not a number replaces
+    nothing (the trade that needs it is reported when it is read)."""
+    from engine.ladder.ndf import is_ndf_pair
+    ids = []
+    for trade_id, pair, settle, mark_type, spot_day, flag in conn.execute(
+            "SELECT r.trade_id, r.instrument_id, r.settle_date, r.mark_type, r.spot_as_of_date, "
+            "COALESCE(i.is_ndf, 0) FROM realised_pnl r LEFT JOIN instruments i USING (instrument_id) "
+            "WHERE r.mark_type IN ('SPOT', 'NDF_FIX')").fetchall():
+        if not is_ndf_pair(pair, int(flag or 0)):
+            continue
+        fix_day = _freeze_day(conn, pair, settle)
+        if mark_type == "NDF_FIX":
+            if spot_day != fix_day:
+                ids.append(trade_id)
+            continue
+        try:
+            if _fix_on_day(conn, pair, fix_day) is not None:
+                ids.append(trade_id)
+        except (TypeError, ValueError):
+            continue
+    conn.executemany("DELETE FROM realised_pnl WHERE trade_id = ?", [(t,) for t in ids])
+    return ids
+
+
 def _unrealisable(trade_id, exc: Exception) -> dict:
     """The `unrealisable` entry for a trade one of whose stored figures is not a number
     (`engine.pnl.valuation._BadValue` names the table.column and the value) or whose
@@ -172,7 +213,12 @@ def _unrealisable(trade_id, exc: Exception) -> dict:
 def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool = False) -> dict:
     """Freeze P&L for FX and future trades whose settle date is before `as_of` and are
     not yet in `realised_pnl`. Returns {'realised': n, 'unrealisable': [{trade_id, reason}],
-    'repaired': [trade_id, ...]}.
+    'repaired': [trade_id, ...], 'refrozen': [trade_id, ...]}.
+
+    `refrozen` (2026-09-22): NDF tickets whose row was not frozen at the official fixing of
+    their own fixing date although that fixing is now on file, or was frozen at a fix of
+    another day (`purge_superseded_ndf_fix`); their rows are dropped first and the trades
+    frozen again below, at the exact-day fix, in this same call.
 
     `ndf_present_spot` (user decision 2026-09-21: "we can use a present spot for the past
     fixes"): an NDF ticket whose pair has no official SPOT on or before its settlement is
@@ -192,18 +238,20 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
     realised, unrealisable = 0, []
     repaired = purge_unreadable_realised(conn)
     purge_superseded_present_spot(conn)
+    refrozen = purge_superseded_ndf_fix(conn)
 
     for trade_id, pair, product, quote_ccy, qty, fill, settle in conn.execute(_OPEN_FX_SQL, {"as_of": as_of}).fetchall():
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
             # An NDF is done at its fixing (user, 2026-09-22: "they just disappears as they
-            # expired"): frozen at the last official SPOT on or before the FIXING date, the same
-            # figure value_book shows from the fixing on, not the value date's spot two days later.
+            # expired"): frozen on the FIXING date, the same figure value_book shows from the
+            # fixing on, not at the value date's spot two days later.
             fix_day = _freeze_day(conn, pair, settle)
-            # An NDF settles against its currency's official fixing (NDF_FIX, 2026-09-22): that
-            # mark on or before the fixing date first, spot only when no fix is on file.
+            # An NDF settles against its currency's official fixing (NDF_FIX, 2026-09-22): the
+            # fix dated the fixing date exactly, never another day's ("each ndf has a unique
+            # fix"); with none on file, the last official SPOT on or before the fixing date.
             fix_type = "SPOT"
-            m_hit = _last_on_or_before(conn, pair, "NDF_FIX", fix_day) if fix_day != settle else None
+            m_hit = _fix_on_day(conn, pair, fix_day) if fix_day != settle else None
             if m_hit is not None:
                 fix_type = "NDF_FIX"
             else:
@@ -334,7 +382,7 @@ def realise_settled(conn: sqlite3.Connection, as_of: str, ndf_present_spot: bool
             unrealisable.append(_unrealisable(trade_id, exc))
 
     conn.commit()
-    return {"realised": realised, "unrealisable": unrealisable, "repaired": repaired}
+    return {"realised": realised, "unrealisable": unrealisable, "repaired": repaired, "refrozen": refrozen}
 
 
 def _freeze_day(conn: sqlite3.Connection, pair: str, settle: str) -> str:
@@ -356,6 +404,20 @@ def _last_on_or_before(conn: sqlite3.Connection, instrument_id: str, mark_type: 
     if row is None:
         return None
     return (_number(row[0], f"marks.value ({mark_type} for {instrument_id} on {row[1]})"), row[1], row[2])
+
+
+def _fix_on_day(conn: sqlite3.Connection, pair: str, day: str) -> Optional[tuple]:
+    """(value, as_of_date, source) of the pair's official NDF_FIX dated `day` exactly (the row
+    `engine.pnl.valuation.ndf_fix` reads: as_of_date = settle_date = the fixing date), or
+    None. Never the last fix on or before: a fix of another day is not this ticket's."""
+    row = conn.execute(
+        "SELECT value, as_of_date, source FROM marks_official WHERE instrument_id = :i "
+        "AND mark_type = 'NDF_FIX' AND as_of_date = :d AND settle_date = :d ORDER BY snapped_at DESC LIMIT 1",
+        {"i": pair, "d": day},
+    ).fetchone()
+    if row is None:
+        return None
+    return (_number(row[0], f"marks.value (NDF_FIX for {pair} on {row[1]})"), row[1], row[2])
 
 
 def realised_rows(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:

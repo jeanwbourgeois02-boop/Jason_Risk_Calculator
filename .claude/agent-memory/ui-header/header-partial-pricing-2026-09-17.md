@@ -46,5 +46,7 @@ own P&L strips go through `ui.tabs.blotter_pricing`'s `_sum_pnl`/`_priced_sum_fo
 `row_scoped_headline`, all of which still do `if df["pnl_usd"].isna().any(): return NaN`
 -- same poison rule, same fix shape needed (`_priced_single`/`_priced_diff`-equivalent)
 if the blotter agent wants parity. The header's own collapsible LTD line chart
-(`_build_chart`/`_cached_ltd`) also still poisons per-day -- explicitly out of scope
-("the headline cards" only).
+(`_build_chart`/`_cached_ltd`/`_priced_day`) followed the same rule the next day
+(2026-09-18): a day is plotted at the sum of its priced trades, the excluded count in
+the hover, a gap only when nothing priced. Since 2026-09-22 it spans the whole book,
+see [[header-ltd-chart-full-span-2026-09-22]].

@@ -12,10 +12,14 @@ Design choices (no one to ask, so noted here):
     separate `ltd(conn, as_of)` call (period_pnl does not return raw LTD).
   - The LTD line chart is a `dcc.Graph` inside a collapsible `html.Details`, defaulting
     to *closed* (`open=False`) to keep the header compact on tabs that do not need it.
-  - "Recent business days" for the chart = the calendar's own daily-period reference
-    walk is not reusable as a list, so the chart instead re-derives a simple list of the
-    last N calendar days (default 20) ending at `as_of` and calls `ltd` once per day.
-    This is O(N) value_book evaluations; fine for a header chart, not for a hot path.
+  - The chart spans every business day from the book's first trade date (MIN(trade_date)
+    in `trades`) to `as_of`, oldest first (user decision 2026-09-22: "yes I want to see
+    the ltd line chart, which requires all the previous closes"; it showed the last 20
+    business days before). One `_cached_ltd` evaluation per day, memoised on the database
+    path and mtime, and the Details is collapsed by default with the chart built only
+    while it is open, so the first open after a database change is the only time the
+    full span is evaluated. The cost grows with the book: one `priced_value_book` per
+    business day since the first trade (44 on the 2026-09-22 book), not a hot path.
   - Unavailable periods (NaN) keep the muted "n/a" value (existing behaviour/tests),
     but the engine's `reason` is now also a **visible** caption under the figure, not
     only an HTML `title` tooltip -- a hover-only reason is invisible on first glance,
@@ -139,8 +143,6 @@ _PERIOD_TITLES = {
     "daily": "Daily", "previous_day": "Previous day", "d5": "5d", "mtd": "MTD",
     "ytd": "YTD", "trading": "Trading",
 }
-
-_CHART_LOOKBACK_DAYS = 20
 
 
 def _figure_card(title: str, value_text: str, caption: str = "") -> html.Div:
@@ -712,8 +714,9 @@ def _filled_count(df) -> int:
 @lru_cache(maxsize=1024)
 def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> tuple:
     """`_priced_day` of that date's book, memoised on (db path, db mtime, as_of): a
-    header-chart render used to re-run 20 full `value_book` evaluations (~4s) on every
-    as-of change.
+    header-chart render used to re-run one full `value_book` evaluation per charted day
+    (~4s for 20 days) on every as-of change; the chart now spans the whole book, so a
+    day's value is worked out once per database revision (maxsize 1024 covers years).
     `_mtime` is part of the key purely to invalidate the cache when the file changes
     (a new upload / Bloomberg write) -- callers pass `os.path.getmtime(db_path)`, never
     a value this function computes itself, so a stale cache never outlives the file it
@@ -729,38 +732,42 @@ def _cached_ltd(db_path: str, _mtime: float, as_of: str) -> tuple:
         conn.close()
 
 
-def _business_days_back(conn: sqlite3.Connection, as_of: str, n: int):
-    """Up to `n` business days ending at `as_of` (inclusive), oldest first, skipping
-    weekends/holidays (engine.pnl.calendar's own calendar) and never going earlier than
-    the earliest trade_date on record (there is nothing to chart before the book
-    existed, and it wastes an evaluation)."""
+def _chart_days(conn: sqlite3.Connection, as_of: str) -> list:
+    """Every business day from the book's first trade date (MIN(trade_date) in `trades`)
+    to `as_of`, inclusive, oldest first, on engine.pnl.calendar's own calendar (user
+    decision 2026-09-22: the whole history, not a 20-day lookback). [] for a book with
+    no trades, or an `as_of` before its first trade: there is nothing to chart before the
+    book existed, and each day costs a `priced_value_book` evaluation."""
     from engine.pnl.calendar import _is_business_day, load_holidays
 
+    row = conn.execute("SELECT MIN(trade_date) FROM trades").fetchone()
+    if not row or not row[0]:
+        return []
     holidays = load_holidays()
     end = dt.date.fromisoformat(as_of)
-    earliest_row = conn.execute("SELECT MIN(trade_date) FROM trades").fetchone()
-    earliest = dt.date.fromisoformat(earliest_row[0]) if earliest_row and earliest_row[0] else None
-
+    d = dt.date.fromisoformat(str(row[0])[:10])
     days = []
-    d = end
-    while len(days) < n:
-        if earliest is not None and d < earliest:
-            break
+    while d <= end:
         if _is_business_day(d, holidays):
             days.append(d)
-        d -= dt.timedelta(days=1)
-    days.reverse()
+        d += dt.timedelta(days=1)
     return days
 
 
 def _build_chart(conn: sqlite3.Connection, as_of: str, db_path=None):
-    """`db_path` (optional) enables the `_cached_ltd` memoisation; omitted (e.g. direct
-    unit tests against an in-memory/temp connection with no path handy) falls back to
-    one `ltd(conn, ...)` call per day, same as before -- correctness is identical
-    either way, only the cost of repeated renders differs."""
-    from engine.pnl.ledger import ltd
+    """The LTD line over `_chart_days(conn, as_of)`: one point per business day from the
+    first trade to `as_of`, each the sum of that day's priced trades (`_priced_day`), a
+    gap where nothing priced, the excluded count and the fill in the hover text. A book
+    with no day to chart gets a sentence saying so, never a blank graph.
 
-    days = _business_days_back(conn, as_of, _CHART_LOOKBACK_DAYS)
+    `db_path` (optional) enables the `_cached_ltd` memoisation; omitted (e.g. direct
+    unit tests against an in-memory/temp connection with no path handy) falls back to
+    one `priced_value_book` call per day -- correctness is identical either way, only
+    the cost of repeated renders differs."""
+    days = _chart_days(conn, as_of)
+    if not days:
+        return html.P(f"No trades dated on or before {as_of}: nothing to chart.",
+                      className="header-figure-caption")
     xs, ys, texts = [], [], []
     mtime = os.path.getmtime(db_path) if db_path is not None else None
     for d in days:
@@ -783,6 +790,8 @@ def _build_chart(conn: sqlite3.Connection, as_of: str, db_path=None):
         "data": [{"x": xs, "y": ys, "type": "scatter", "mode": "lines+markers", "name": "LTD",
                   "text": texts, "hovertemplate": "%{x}<br>LTD %{y:$,.0f}<br>%{text}<extra></extra>"}],
         "layout": {"margin": {"l": 50, "r": 20, "t": 10, "b": 30}, "height": 260,
+                   # months of daily points: ticks read as dates ("22 Jul"), not one per day
+                   "xaxis": {"type": "date", "tickformat": "%d %b"},
                    "yaxis": {"title": "USD"}},
     }
     return dcc.Graph(id="header-ltd-graph", figure=figure)
@@ -803,7 +812,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     own `open` state, so it only runs when the user actually expands it (and again
     whenever as_of changes while it is already open). `_cached_ltd` further memoises
     each day's value on (db path, db mtime) so re-expanding after a figures-only render
-    is instant."""
+    is instant. Since the chart spans the whole book (2026-09-22), the first open after
+    a database change is the one render that evaluates every business day since the
+    first trade."""
 
     from ui import revision
     from ui.tabs.blotter_pricing import pricing_snapshot

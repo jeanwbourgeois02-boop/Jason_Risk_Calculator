@@ -17,12 +17,11 @@ from data.ingest import schema
 
 @pytest.fixture(autouse=True)
 def _close_1500_on_every_date(monkeypatch):
-    """The 15:00 New York close applies from backfill.CLOSE_1500_FROM (2026-09-21) and inside
-    Bloomberg's intraday history counted from today. These tests exercise it on earlier dates,
-    so the cutover is moved back and 'today' is pinned (a test that needs another today
-    passes it or patches live.book_today itself). The real cutover has its own tests."""
+    """The 15:00 New York close applies to every past day inside Bloomberg's intraday history
+    counted from today (2026-09-22; the 2026-09-21 cut-over is gone). 'today' is pinned so
+    the days these tests work stay within reach (a test that needs another today patches
+    live.book_today itself)."""
     from data.bloomberg import live as _live
-    monkeypatch.setattr(backfill, "CLOSE_1500_FROM", date(2000, 1, 1))
     monkeypatch.setattr(_live, "book_today", lambda: date(2026, 9, 21))
 
 
@@ -424,35 +423,56 @@ def test_start_auto_backfill_run_that_raises_says_failed_in_its_reason(tmp_path,
 
 # =========================================================================== 2026-09-21: the 15:00 New York close
 # A past day's FX row that is not stamped at the close (an earlier pull's last price, or a
-# 17:00 PX_LAST row from before the close moved) is not a close: the day is due again, the
-# run says so once, and the row is replaced.
+# 17:00 PX_LAST row written under the 2026-09-21 cut-over) is not a close: the day is due
+# again, the run says so once, and the row is replaced. 2026-09-22 (user: "for fx use new
+# 3pm" for every previous close): that holds for a day before 2026-09-21 too.
 def test_auto_backfill_says_that_past_days_not_stamped_at_the_close_are_requested_again_once(tmp_path):
     from zoneinfo import ZoneInfo
-    yesterday = _book_today() - timedelta(days=1)
+    yesterday = _book_today() - timedelta(days=1)          # Fri 2026-09-18
     while yesterday.weekday() >= 5:
         yesterday -= timedelta(days=1)
-    p, conn = _db(tmp_path, yesterday.isoformat())
-    day = yesterday.isoformat()
-    # yesterday's last live pull, not its close
+    before = date(2026, 9, 16)                              # Wed: before the retired cut-over, within intraday reach
+    assert before < date(2026, 9, 21) and backfill.intraday_floor(_book_today()) < before
+    p, conn = _db(tmp_path, before.isoformat())
+    day, old_day = yesterday.isoformat(), before.isoformat()
+    # yesterday's last live pull, not its close; the older day holds 17:00 rows the old rule wrote
     old_stamp = datetime(yesterday.year, yesterday.month, yesterday.day, 11, 40, 12,
                          tzinfo=ZoneInfo("America/New_York")).isoformat(timespec="seconds")
+    daily_stamp = f"{old_day}T17:00:00-04:00"
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
         (day, "AUDUSD", day, "SPOT", 0.9001, "BBG_BFXFORWARD", old_stamp),
         (day, "AUDUSD", _settle_date(), "FWD_OUTRIGHT", 0.9002, "BBG_BFXFORWARD", old_stamp),
+        (old_day, "AUDUSD", old_day, "SPOT", 0.9101, "BBG_BFXFORWARD", daily_stamp),
+        (old_day, "AUDUSD", _settle_date(), "FWD_OUTRIGHT", 0.9102, "BBG_INTERP", daily_stamp),
+        # the day between is already at its 15:00 close: never asked for again
+        ("2026-09-17", "AUDUSD", "2026-09-17", "SPOT", 0.9201, "BBG_BFXFORWARD", backfill.close_stamp(date(2026, 9, 17))),
+        ("2026-09-17", "AUDUSD", _settle_date(), "FWD_OUTRIGHT", 0.9202, "BBG_INTERP", backfill.close_stamp(date(2026, 9, 17))),
     ])
     conn.commit()
+    from data.bloomberg.inventory import close_completeness
+    strip = {r.as_of_date: r for r in close_completeness(conn, old_day, day).itertuples()}
+    assert (strip[old_day].not_closed, strip["2026-09-17"].not_closed, strip[day].not_closed) == (2, 0, 2)
     key = backfill._db_key(p)
     log = []
-    results = backfill.auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch,
-                                     log=log.append)
-    assert [r["status"] for r in results] == ["DONE"]
+    asked = []
+    results = backfill.auto_backfill(p, fetch=lambda s, v, tickers, field, d: asked.append(d) or _fake_fetch(s, v, tickers, field, d),
+                                     fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch, log=log.append)
+    assert sorted(r["day"] for r in results) == [old_day, day] and {r["status"] for r in results} == {"DONE"}
+    assert sorted(asked) == [before, yesterday]                                   # (d) the older day is re-requested
     note = backfill._notes[key]
-    assert "1 past day(s) since" in note and "last pull, not its 15:00 New York close" in note
-    assert "keep the marks they have" in note and any(note in line for line in log)
-    # both rows are now the close
-    assert conn.execute("SELECT mark_type, value, snapped_at FROM marks_official WHERE as_of_date = ? ORDER BY 1",
-                        (day,)).fetchall() == [("FWD_OUTRIGHT", 0.665, backfill.close_stamp(yesterday)),
-                                               ("SPOT", 0.61, backfill.close_stamp(yesterday))]
+    assert note.startswith("2 past day(s) hold FX marks that are not that day's 15:00 New York close")
+    assert f"every past day from {backfill.intraday_floor(_book_today())} on" in note
+    assert "is asked for at 15:00 New York and those rows replaced" in note
+    assert "closes at Bloomberg's 17:00 daily close" in note and "keep the marks they have" not in note
+    assert any(note in line for line in log)
+    # both days' rows are now the 15:00 close (the older day's 17:00 rows overwritten by the fake 15:00 series)
+    for d, iso in ((yesterday, day), (before, old_day)):
+        assert conn.execute("SELECT mark_type, value, snapped_at FROM marks_official WHERE as_of_date = ? ORDER BY 1",
+                            (iso,)).fetchall() == [("FWD_OUTRIGHT", 0.665, backfill.close_stamp(d)),
+                                                   ("SPOT", 0.61, backfill.close_stamp(d))]
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE snapped_at = ?", (daily_stamp,)).fetchone() == (0,)
+    assert conn.execute("SELECT value FROM marks_official WHERE as_of_date = '2026-09-17' AND mark_type = 'SPOT'"
+                        ).fetchone() == (0.9201,)                                # untouched
     # so a second run has nothing to ask for and nothing to say
     assert backfill.auto_backfill(p, fetch=_fake_fetch, fwd_fetch=_fake_fwd_fetch, fut_fetch=_fake_fwd_fetch,
                                   log=lambda *_: None) == []
@@ -463,3 +483,48 @@ def test_auto_backfill_says_that_past_days_not_stamped_at_the_close_are_requeste
     t.join(timeout=10)
     block = live.read_status(p)["backfill"]
     assert block["note"] == "" and "points_scale" in block
+
+
+# =========================================================================== 2026-09-22: past NDF fixes
+def test_auto_backfill_asks_for_a_past_fixing_dates_ndf_fix_when_that_is_all_the_day_lacks(tmp_path):
+    """The NDF's exit price is the official NDF_FIX of its own fixing date (pnl-engine,
+    2026-09-22), so every past fixing date's fix must be on file: a day whose closes are all
+    at 15:00 but whose NDF_FIX is missing is incomplete, and the run asks the fixing ticker's
+    history for that day and writes the fix; nothing else on the day is rewritten."""
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments VALUES ('USDBRL','FX','USD','BRL',1,1,'USDBRL Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('b1','XLSX','USDBRL','FX_FWD','b1','2026-09-14',1e6,5.2,'acc','cp','HAHY7','t','d','')")
+    settle, fixing = "2026-09-18", "2026-09-16"                     # Fri value date fixes Wed (T-2)
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("b1", 1, "FX_NEAR", "USD", 1e6, "2026-09-14", settle, 5.2, 0),
+        ("b1", 2, "FX_NEAR", "BRL", -5.2e6, "2026-09-14", settle, 5.2, 0)])
+    days = backfill.business_days(date(2026, 9, 14), date(2026, 9, 18))
+    for d in days:                                                  # every day's SPOT and forward already at the close
+        stamp = backfill.close_stamp(d)
+        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (d.isoformat(), "USDBRL", d.isoformat(), "SPOT", 5.30, "BBG_BFXFORWARD", stamp))
+        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (d.isoformat(), "USDBRL", settle, "FWD_OUTRIGHT", 5.31, "BBG_INTERP", stamp))
+    conn.commit()
+    from data.bloomberg.inventory import close_completeness
+    strip = {r.as_of_date: r for r in close_completeness(conn, "2026-09-14", "2026-09-18").itertuples()}
+    assert [d for d, r in strip.items() if not r.complete] == [fixing]
+    assert strip[fixing].missing == [{"instrument_id": "USDBRL", "settle_date": fixing, "mark_type": "NDF_FIX"}]
+    asked = []
+
+    def history(session, service, tickers, fields, start, end):
+        asked.append((sorted(tickers), list(fields), start, end))
+        if "BZFXPTAX Index" in tickers:
+            return {"BZFXPTAX Index": {fixing: {"PX_LAST": 5.3399}}}
+        return {t: {d.isoformat(): {"PX_LAST": 5.31, "SETTLE_DT": settle} for d in backfill.business_days(start, end)}
+                for t in tickers}
+
+    results = backfill.auto_backfill(p, fetch=lambda s, v, tickers, field, d: {"USDBRL Curncy": 5.30},
+                                     fwd_fetch=history, fut_fetch=history, log=lambda *_: None)
+    assert [(r["day"], r["status"]) for r in results] == [(fixing, "DONE")]      # (e) the fixing date alone is asked for
+    assert (["BZFXPTAX Index"], ["PX_LAST"], date(2026, 9, 16), date(2026, 9, 16)) in asked
+    assert conn.execute("SELECT as_of_date, settle_date, value, source FROM marks_official WHERE mark_type = 'NDF_FIX'"
+                        ).fetchall() == [(fixing, fixing, 5.3399, "BBG_BDH")]
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE mark_type IN ('SPOT', 'FWD_OUTRIGHT')").fetchone() == (2 * len(days),)
+    assert all(r.complete for r in close_completeness(conn, "2026-09-14", "2026-09-18").itertuples())
+    assert backfill.auto_backfill(p, fetch=lambda *a: {"USDBRL Curncy": 5.30}, fwd_fetch=history, fut_fetch=history,
+                                  log=lambda *_: None) == []
