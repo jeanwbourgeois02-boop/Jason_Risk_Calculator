@@ -1,4 +1,4 @@
-"""Tests for ui/tabs/rates.py (the Blotter "Rates" sub-tab). Owned by ui-shell.
+"""Tests for ui/tabs/rates.py (the Blotter "Rates" sub-tab). Owned by ui-rates.
 
 Builds a tiny synthetic DB via data.ingest.schema with an IRS trade + QL_PRICER marks,
 mirroring the shape engine/rates/store.py actually writes (one instrument per swap,

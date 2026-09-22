@@ -1,5 +1,5 @@
 """Tests for ui/tabs/header.py and ui/tabs/blotter.py (agent C2, then ui-shell 2026-09-15
-rebuild into sub-tabs). Owned by ui-shell.
+rebuild into sub-tabs). Owned by ui-blotter; header.py tests live in tests/test_header.py (ui-header).
 
 Builds a tiny synthetic DB via data.ingest.schema so pure helpers and the full Dash
 callback wiring can both be exercised without a real BNP/xlsx upload.

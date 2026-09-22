@@ -18,7 +18,7 @@ This file is the rulebook: what is true of the app now and what must not change 
 
 ## Working mode
 
-Default: lean. Work directly in this session on the model set by `/model`. Do not spawn the housekeeper, specialists or reviewer unless the user's message explicitly names them. Keep each task to one module and one test file. End every task with `py -3 -m pytest tests/ -q` and report the pass count. Full agent pipeline is reserved for changes to P&L arithmetic in `engine/` and is invoked only by the user.
+Default: the housekeeper procedure, run by the session itself (user decision 2026-09-22: "I want to have a house keeper agent as a starting point, and each feature and each tab has a specialist agent, for the function and UI respectively"; it replaced the lean default of 2026-09-18). The session coordinates and writes no application code: it names the feature pairs the request touches and the exact file list first (the table under "Repository layout and ownership"), then delegates to the owning agents. Within a pair the function agent goes first and the UI agent second, briefed with what the function agent changed, because the UI reads the engine's output shape; pairs whose files do not overlap run in parallel. A request that touches one file goes to that file's one owning agent and nobody else, with no reviewer: the fast path that keeps a small fix quick. Each agent runs only its own test files; the session runs `py -3 -m pytest tests/ -q` once at the end and reports the pass count. The reviewer runs only on changes to P&L arithmetic in `engine/`. `.claude/agents/housekeeper.md` is the same procedure for a detached run, when the user names it.
 
 **Do not overdo it (user rule, 2026-09-18: "you're doing way too many random things and checks instead of just fixing the problems").** Fix what the user asked for, run the full suite once, push, report in a few lines, and stop. Scope is the user's list. Anything else found on the way (a reviewer finding, a hardening idea, a cosmetic issue) goes in a short "found, not done" list for the user to choose from; it is not started, and a finished agent is not resumed with new items, without the user's yes. The one exception is a finding that makes the requested fix itself wrong: say so in one line and fix that. Brief an agent for the fix and the tests that prove it: no browser proofs, fuzzing or per-agent full-suite runs unless the user asks; whoever spawned the agents runs the full suite once at the end. The reviewer runs on P&L arithmetic changes, and its findings are relayed to the user, not dispatched. Give one time estimate and keep to it by cutting scope, not by extending. Status updates are a few lines: no tables, no re-listing of open questions each time.
 
@@ -364,7 +364,7 @@ Per-pair delta (the "Position" table) is the same union grouped by `t.instrument
 
 ## Repository layout and ownership
 
-Each directory has one owning agent. In the default lean mode the main session works across directories as the task needs; when agents or parallel sessions are in use, each stays inside its own directories (see "Working mode").
+Each directory has one owning agent, and inside `ui/` each tab has its own (user decision 2026-09-22: the feature pairs below). The session coordinates and writes no application code; every agent stays inside its own files, and so does every parallel session (see "Working mode").
 
 ```
 data/ingest/      blotter parser, upload, manual entry, SQLite schema,   -> data-ingest
@@ -381,12 +381,28 @@ engine/options/   FX / equity / commodity option pricing, vendored       -> opti
                   engine/options/__init__.py's scope ledger
 engine/rates_vol/ swaptions, caps / floors, SABR, Bermudan (vendored     -> rates-exotics
                   options_calc.rates)
-ui/               Dash app, one module per tab or sub-tab                -> ui-shell
+ui/               Dash app: the shell (app, launch, refresh signal,      -> ui-shell for the shell,
+                  upload, shared controls, the shared pricing reader)      one UI agent per tab
+                  and one module per tab or sub-tab, owned tab by tab      (feature pairs below)
 tests/            pytest, one file per module, owned by the module's agent
 config/           holidays.txt (trading calendar), stress.yaml
 tools/            Bloomberg diagnostics and terminal probe, setup script
 docs/             contract, build plan and open questions, owned by housekeeper
 ```
+
+**Feature pairs (user decision 2026-09-22).** Each feature has a function agent and a UI agent. The function agent goes first; the UI agent reads its output and never recomputes it. Inside `ui/` ownership is by file, since every tab lives in `ui/tabs/`.
+
+| Feature | Function agent | UI agent | UI files | UI tests |
+|---|---|---|---|---|
+| Header strip (above every tab) | pnl-engine | ui-header | `ui/tabs/header.py` | `tests/test_header.py` |
+| Ladder | cash-ladder | ui-ladder | `ui/tabs/exposure.py`, `ui/tabs/cash_ladder.py` | `tests/test_ui_ladder.py`, `tests/test_ui_ladder_view.py` |
+| Blotter: Total book, FX, Futures, Bundles, Manual entry | pnl-engine, data-ingest | ui-blotter | `ui/tabs/blotter.py`, `ui/tabs/blotter_fx.py`, `ui/tabs/blotter_bundles.py`, `ui/tabs/manual_entry.py` | `tests/test_ui_blotter.py`, `tests/test_ui_manual_entry.py` |
+| Blotter: Rates sub-tab | rates-pricer (rates-exotics once swaptions have an ingest path) | ui-rates | `ui/tabs/rates.py` | `tests/test_ui_rates.py` |
+| Blotter: Options sub-tab | options-pricer | ui-options | `ui/tabs/options.py` | `tests/test_ui_options.py` |
+| Market data | bbg-data (bbg-diagnostics for the connection check) | ui-market-data | `ui/tabs/market_data.py`, `ui/feed_controls.py` | `tests/test_ui_market_data.py` |
+| Shell: app assembly, launch, refresh signal, upload, shared controls and formatting, the shared pricing reader | none | ui-shell | `ui/app.py`, `ui/launch.py`, `ui/revision.py`, `ui/uploads.py`, `ui/__init__.py`, `ui/tabs/__init__.py`, `ui/tabs/controls.py`, `ui/tabs/formatting.py`, `ui/tabs/blotter_pricing.py`, `ui/assets/` | `tests/test_ui.py`, `tests/test_app.py`, `tests/test_ui_revision.py`, `tests/test_uploads.py` |
+
+`ui/tabs/blotter_pricing.py` is the reader every screen shares (`priced_value_book`), so it belongs to the shell, not the Blotter. A test file not listed here belongs to the module it tests (`tests/test_exposure.py` and `tests/test_ladder.py` are cash-ladder's). Each agent's memory lives in `.claude/agent-memory/<agent>/`; the six UI agents were split out of ui-shell on 2026-09-22 and took its per-tab notes with them.
 
 `engine/rates_vol/` writes `PV_USD` / `DV01_USD` under `QL_PRICER` and `VEGA` / `GAMMA` / `THETA` under `QL_OPTIONS_PRICER` (both already official for those mark types). No trade source carries swaptions or caps yet (`docs/open-questions.md` item 61).
 

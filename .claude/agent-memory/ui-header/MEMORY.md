@@ -1,0 +1,6 @@
+- [P&L tab](pnl-tab.md) — wired into "Overall book" (why), lazy engine.pnl imports, pairs/totals/period blocks, own component ids
+- [Header visible reasons + trade counts 2026-09-17](header-visible-reasons-and-trade-counts-2026-09-17.md) — "headline doesn't work" root cause was hover-only/generic reason text, not a callback bug; mark_inventory-based fix
+- [Header partial pricing 2026-09-17](header-partial-pricing-2026-09-17.md) — live-Bloomberg-PC follow-up: cards sum priced trades only + "excludes N of M" label, _priced_diff drops trades priced on only one of two dates, blotter strips still poison (reported)
+- [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
+- [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
+- [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable

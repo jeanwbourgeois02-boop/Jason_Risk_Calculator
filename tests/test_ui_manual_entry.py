@@ -1,5 +1,5 @@
 """Tests for ui/tabs/manual_entry.py (the Blotter's Manual entry sub-tab, 2026-09-18).
-Owned by ui-shell. Callbacks are exercised through their wrapped functions, the same
+Owned by ui-blotter. Callbacks are exercised through their wrapped functions, the same
 way tests/test_ui_options.py does it."""
 from __future__ import annotations
 

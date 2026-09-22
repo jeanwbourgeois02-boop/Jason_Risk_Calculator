@@ -1,0 +1,8 @@
+- [Cash ladder tab](cash-ladder-tab.md) — lazy import of ladder_table, transpose_ladder + usd_equivalent blank rule, shared controls/formatting factor-out
+- [Ladder simplification 2026-09-15](ladder-simplification-2026-09-15.md) — 3 headlines + 3 tables only, BNP_BVAL rate fallback, navy/gold CSS, working copy is risk-monitor not OneDrive
+- [Ladder reorder + headline 2026-09-15](ladder-reorder-headline-2026-09-15.md) — gross/net card layout, table order, scenario-order (not alpha), NDF marker removed, compact header strip w/ Net-Gross-Previous day
+- [Exposure vs grid settle_date split 2026-09-16](exposure-vs-grid-settle-date-split-2026-09-16.md) — exposure_section takes optional exposure_records for delta math (>), grid keeps records (>=); net_gross_usd switched fully; empty-records NaN gotcha in portfolio_totals
+- [Ladder transposed + NDF display 2026-09-21](ladder-transposed-and-ndf-display-2026-09-21.md) — currency rows / date columns / bottom USD-eq row, rate-delta block above; NDF label + KWN+1M cell; ISO-date column ids OK in filter_query; sticky label unverified; ladder test files outside my edit boundary
+- [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
+- [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
+- [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable

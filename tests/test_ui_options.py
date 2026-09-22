@@ -1,5 +1,5 @@
 """Tests for ui/tabs/options.py (the Blotter "Options" sub-tab, options_calc merge
-Phase 8). Owned by ui-shell.
+Phase 8). Owned by ui-options.
 
 Seeds a tiny synthetic DB via data.ingest.schema with a two-leg FX_OPTION structure
 sharing one package_id (a call + a put) and one standalone single-leg FX_OPTION,
