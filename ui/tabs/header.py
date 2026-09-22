@@ -107,6 +107,28 @@ HEADER_ID = "header-block"
 CHART_CONTAINER_ID = "header-ltd-chart-container"
 DETAILS_ID = "header-ltd-details"
 AS_OF_STORE_ID = "header-as-of-store"
+# True once a date picker (Blotter or Ladder) was set to a day other than today: the header
+# then stays on that day; otherwise it follows the New York calendar (user, 2026-09-22:
+# "by default, always price pnl as of today, so that the top bar numbers all reflect todays
+# numbers, unless changed specifically otherwise").
+AS_OF_PICKED_ID = "header-as-of-picked"
+
+
+def as_of_after_pick(date_value: Optional[str], today: str) -> tuple:
+    """(store value, picked) after a Blotter or Ladder date picker changed to `date_value`:
+    the header follows the picker; a pick of today itself (the Today buttons) is not a
+    departure from the default, so the day still rolls over at New York midnight."""
+    if not date_value:
+        return today, False
+    return date_value, date_value != today
+
+
+def as_of_after_tick(store: Optional[str], picked: bool, today: str) -> Optional[str]:
+    """The header's as-of after a poll tick: `today` when the store has fallen behind the New
+    York calendar and no date was picked, else None (nothing to change)."""
+    if picked or store == today:
+        return None
+    return today
 
 PERIOD_LABELS = (
     ("value" , None),

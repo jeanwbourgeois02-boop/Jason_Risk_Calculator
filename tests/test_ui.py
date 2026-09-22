@@ -23,7 +23,7 @@ from ui import app as uiapp  # noqa: E402
 from ui.tabs import blotter, blotter_fx, cash_ladder, header, market_data  # noqa: E402
 from ui.tabs.blotter_pricing import priced_value_book  # noqa: E402
 from ui.tabs.formatting import format_cell  # noqa: E402
-from ui import uploads  # noqa: E402
+from ui import revision, uploads  # noqa: E402
 
 
 def _seed(conn):
@@ -310,6 +310,31 @@ def test_ladder_date_picker_defaults_to_today_ny(tmp_path):
     assert store is not None and store.data == today
 
 
+def test_header_as_of_defaults_to_today_follows_a_pick_and_rolls_over_at_midnight(tmp_path):
+    """User, 2026-09-22: "by default, always price pnl as of today, so that the top bar
+    numbers all reflect todays numbers, unless changed specifically otherwise"."""
+    db_path = tmp_path / "risk.db"
+    _seeded_db(db_path)
+    app = uiapp.create_app(db_path=db_path, start_feed=False)
+    assert callable(app.layout)                                   # built on every page load: today is fresh
+    ids = _all_ids(app.layout())
+    assert header.AS_OF_STORE_ID in ids and header.AS_OF_PICKED_ID in ids
+    # both pickers feed the header; the poll rolls the header and both pickers to the new day
+    keys = list(app.callback_map)
+    follow = next(k for k in keys if k.startswith(f"..{header.AS_OF_STORE_ID}.data...{header.AS_OF_PICKED_ID}.data.."))
+    inputs = {d["id"] for d in app.callback_map[follow]["inputs"]}
+    assert inputs == {cash_ladder.DATE_PICKER_ID, blotter.DATE_PICKER_ID}
+    roll = next(k for k in keys if f"{blotter.DATE_PICKER_ID}.date@" in k and header.AS_OF_STORE_ID in k)
+    assert {d["id"] for d in app.callback_map[roll]["inputs"]} == {revision.POLL_ID}
+    # the rules themselves
+    assert header.as_of_after_pick("2026-09-15", "2026-09-22") == ("2026-09-15", True)
+    assert header.as_of_after_pick("2026-09-22", "2026-09-22") == ("2026-09-22", False)   # the Today button
+    assert header.as_of_after_pick(None, "2026-09-22") == ("2026-09-22", False)
+    assert header.as_of_after_tick("2026-09-21", False, "2026-09-22") == "2026-09-22"    # the day rolled
+    assert header.as_of_after_tick("2026-09-22", False, "2026-09-22") is None
+    assert header.as_of_after_tick("2026-09-15", True, "2026-09-22") is None             # picked: stays
+
+
 def test_ladder_heading_text_and_today_button(tmp_path):
     """Coordinator addition 2026-09-15: the bare date-picker card is replaced by a
     heading naming the as-of date, the picker, and a Today button."""
@@ -319,7 +344,7 @@ def test_ladder_heading_text_and_today_button(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     app = uiapp.create_app(db_path=db_path, start_feed=False)
-    ids = _all_ids(app.layout)
+    ids = _all_ids(app.layout())          # a callable layout since 2026-09-22: built per page load
     assert cash_ladder.TITLE_ID in ids
     assert cash_ladder.TODAY_BUTTON_ID in ids
     # Today button writes to the same date-picker property as the upload confirm
@@ -518,7 +543,7 @@ def test_every_static_callback_id_exists_in_layout(tmp_path):
                 walk(x)
         elif ch is not None and (hasattr(ch, "children") or hasattr(ch, "id")):
             walk(ch)
-    walk(app.layout)
+    walk(app.layout())
     # rendered inside blotter-table-container; options-datatable/-collapsed-packages
     # (ui.tabs.options, Phase 8 options_calc merge) only exist once the "options"
     # sub-tab is selected, same as the other blotter-* dynamic ids below.

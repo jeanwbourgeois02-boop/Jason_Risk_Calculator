@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Union
 
 import dash
-from dash import Input, Output, dcc, html
+from dash import Input, Output, State, dcc, html
 
 from ui.tabs import blotter, cash_ladder, header, market_data
 from ui import revision, uploads
@@ -207,6 +207,7 @@ def build_layout(data: dict, db_path=None) -> html.Div:
         header.layout(),
         html.Div(id="tab-bodies", children=bodies),
         dcc.Store(id=header.AS_OF_STORE_ID, data=ladder_default_date),
+        dcc.Store(id=header.AS_OF_PICKED_ID, data=False),
         # "The data changed" signal (ui/revision.py): every tab listens, so an upload or a
         # Bloomberg pull shows up without a browser reload.
         *revision.components(db_path if db_path is not None else get_db_path()),
@@ -229,7 +230,11 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     # fired in the browser because of this). See CLAUDE.md ownership: this is app-wide
     # config, not a per-tab fix.
     app = dash.Dash(__name__, suppress_callback_exceptions=True)
-    app.layout = build_layout(data, db_path=resolved)
+    # A callable layout: Dash builds it on EVERY page load, so the as-of defaults (today in
+    # New York) and the upload summary are fresh for a page opened days after `pnl`
+    # started, instead of frozen at start-up (user, 2026-09-22: "by default, always price
+    # pnl as of today"). `_layout_value()` is what tests walk.
+    app.layout = lambda: build_layout(load_summary(resolved), db_path=resolved)
 
     header.register_callbacks(app, get_db_path=lambda: resolved)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
@@ -238,12 +243,35 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     uploads.register(app, get_db_path=lambda: resolved)
     revision.register(app, get_db_path=lambda: resolved)
 
-    # Mirror the Ladder tab's date picker into the header's as-of store so the header
-    # figures track whichever date the user has selected there. The Ladder tab is the
-    # only date-picker on any tab that changes the book-wide as-of (Market data's own
-    # date picker only scopes that tab's inventory/completeness view).
-    app.callback(Output(header.AS_OF_STORE_ID, "data"),
-                 Input(cash_ladder.DATE_PICKER_ID, "date"))(lambda date_value: date_value)
+    # The header's as-of (user, 2026-09-22: "always price pnl as of today ... unless changed
+    # specifically otherwise"): today in New York on every page load (the callable layout
+    # above), following the Blotter's or the Ladder's date picker when the user changes one
+    # (the last change wins; Market data's own picker only scopes that tab), and rolling to
+    # the new day at New York midnight -- header and both pickers together -- unless a day
+    # other than today was picked. `prevent_initial_call`: the pickers' initial values are
+    # the same default and must not count as a pick.
+    @app.callback(Output(header.AS_OF_STORE_ID, "data"),
+                  Output(header.AS_OF_PICKED_ID, "data"),
+                  Input(cash_ladder.DATE_PICKER_ID, "date"),
+                  Input(blotter.DATE_PICKER_ID, "date"),
+                  prevent_initial_call=True)
+    def _follow_pickers(ladder_date, blotter_date):
+        triggered = dash.ctx.triggered_id
+        picked = blotter_date if triggered == blotter.DATE_PICKER_ID else ladder_date
+        return header.as_of_after_pick(picked, cash_ladder.today_ny())
+
+    @app.callback(Output(header.AS_OF_STORE_ID, "data", allow_duplicate=True),
+                  Output(cash_ladder.DATE_PICKER_ID, "date", allow_duplicate=True),
+                  Output(blotter.DATE_PICKER_ID, "date", allow_duplicate=True),
+                  Input(revision.POLL_ID, "n_intervals"),
+                  State(header.AS_OF_STORE_ID, "data"),
+                  State(header.AS_OF_PICKED_ID, "data"),
+                  prevent_initial_call=True)
+    def _roll_to_today(_n, store, picked):
+        today = header.as_of_after_tick(store, bool(picked), cash_ladder.today_ny())
+        if today is None:
+            return dash.no_update, dash.no_update, dash.no_update
+        return today, today, today
 
     # Show/hide the always-present tab bodies (see build_layout docstring) on the
     # dcc.Tabs' own `value`, rather than nesting bodies inside dcc.Tab.children.

@@ -481,7 +481,7 @@ def test_every_input_and_output_of_this_tabs_callbacks_exists_in_the_app_layout(
     for key, spec in probe.callback_map.items():
         wanted |= {part.rsplit(".", 1)[0] for part in key.strip(".").split("...")}
         wanted |= {i["id"] for i in spec["inputs"]} | {s["id"] for s in spec["state"]}
-    app_ids = _ids(ui_app.create_app(db_path=tmp_path / "layout.db").layout, set())
+    app_ids = _ids(ui_app.create_app(db_path=tmp_path / "layout.db").layout(), set())   # callable layout since 2026-09-22
     assert wanted <= app_ids, sorted(wanted - app_ids)
 
 
