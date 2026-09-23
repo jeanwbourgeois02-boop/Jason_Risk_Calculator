@@ -19,8 +19,8 @@ if not "%rc%"=="0" pause
 exit /b %rc%
 @POWERSHELL_SCRIPT@
 $ErrorActionPreference = 'Stop'
-$RepoUrl = 'https://github.com/jeanwbourgeois02-boop/Henry_Risk_Calculator.git'
-$DefaultClonePath = Join-Path $env:USERPROFILE 'risk-monitor'
+$RepoUrl = 'https://github.com/jeanwbourgeois02-boop/Jason_Risk_Calculator.git'
+$DefaultClonePath = Join-Path $env:USERPROFILE 'Jason Risk Monitor'
 
 function Say($m) { Write-Host $m }
 function Ok($step, $detail = '') { Say ("OK      {0}{1}" -f $step, $(if ($detail) { " -- $detail" } else { '' })) }
@@ -94,10 +94,47 @@ $here = $null
 if ($SetupCmdPath) { $here = Split-Path -Parent $SetupCmdPath }
 if (-not $here -and $MyInvocation.MyCommand.Path) { $here = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $here) { $here = (Get-Location).Path }
+
+function Normalize-RepoUrl($url) {
+    # One comparable form for a git remote URL: no scheme, no credentials, no trailing
+    # slash, no trailing .git, lower case, and the scp-like ssh form (git@host:path)
+    # rewritten as host/path, so the https and ssh forms of one repository compare equal.
+    if (-not $url) { return '' }
+    $u = "$url".Trim()
+    if (-not $u) { return '' }
+    $u = $u -replace '^(ssh|git\+ssh|git|https?)://', ''
+    $u = $u -replace '^[^/@]*@', ''
+    $u = $u -replace '^([^/:]+):', '$1/'
+    $u = $u.TrimEnd('/')
+    if ($u -match '\.git$') { $u = $u.Substring(0, $u.Length - 4) }
+    return $u.TrimEnd('/').ToLowerInvariant()
+}
+
+function Origin-Url($path) {
+    # The folder's origin remote, or '' when it is not a git clone or has no origin.
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $out = & git -C "$path" remote get-url origin 2>$null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $old
+    if ($code -ne 0 -or -not $out) { return '' }
+    return ("$out" -split "`n")[0].Trim()
+}
+
+function Assert-OwnRepo($path) {
+    # Two diverging projects can share a PC, so this installer only ever updates its own
+    # project's clone: a folder whose origin is another repository is left exactly as it
+    # is. A folder that is not a clone, or that has no origin, is not a mismatch.
+    $origin = Origin-Url $path
+    if (-not $origin) { return }
+    if ((Normalize-RepoUrl $origin) -eq (Normalize-RepoUrl $RepoUrl)) { return }
+    Failed 'repository' ("the folder $path belongs to a different project: its origin is $origin, but this 1_setup.cmd installs $RepoUrl. Run that project's own 1_setup.cmd instead, or install this project into a folder of its own.")
+}
+
 function Update-Clone($path) {
     # Same rule as 2_launcher.py's sync_with_github: local edits are set aside with
     # git stash (git stash pop restores them), then fast-forward to origin/main.
-    Push-Location $path
+    Push-Location -LiteralPath $path
     if (git status --porcelain) {
         git stash push --include-untracked -m "setup auto-stash $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
         Write-Host '  local edits were set aside with git stash (git stash pop restores them)' -ForegroundColor Yellow
@@ -109,28 +146,32 @@ function Update-Clone($path) {
     Pop-Location
 }
 
-if (Test-Path (Join-Path $here '.git')) {
+if (Test-Path -LiteralPath (Join-Path $here '.git')) {
     $RepoRoot = $here
+    Assert-OwnRepo $RepoRoot
     Update-Clone $RepoRoot
     Ok 'repository' "updated $RepoRoot"
 } else {
     $RepoRoot = $DefaultClonePath
-    if (Test-Path (Join-Path $RepoRoot '.git')) {
+    if (Test-Path -LiteralPath (Join-Path $RepoRoot '.git')) {
+        Assert-OwnRepo $RepoRoot
         Update-Clone $RepoRoot
         Ok 'repository' "updated existing clone at $RepoRoot"
     } else {
         Say "  cloning into $RepoRoot ..."
-        git clone $RepoUrl $RepoRoot
+        git clone $RepoUrl "$RepoRoot"
         if ($LASTEXITCODE -ne 0) { Failed 'repository' "git clone $RepoUrl into $RepoRoot failed. Check your network / GitHub access, then re-run 1_setup.cmd." }
         Ok 'repository' "cloned into $RepoRoot"
     }
 }
 
+Say ("  using {0} in {1}" -f $RepoUrl, $RepoRoot)
+
 # (d) py -3 2_launcher.py setup -- creates .venv, installs requirements, creates the database,
 #     installs the `pnl` PowerShell function (step (e) of the plan; 2_launcher.py setup does it),
 #     and runs the tests.
 Say '[4/7] py -3 2_launcher.py setup (venv, packages, database, pnl command, tests)'
-Push-Location $RepoRoot
+Push-Location -LiteralPath $RepoRoot
 py -3 2_launcher.py setup
 $setupCode = $LASTEXITCODE
 Pop-Location
@@ -139,7 +180,7 @@ Ok '2_launcher.py setup' 'venv, packages, database and tests are ready; pnl comm
 
 # (f) doctor
 Say '[5/7] py -3 2_launcher.py doctor'
-Push-Location $RepoRoot
+Push-Location -LiteralPath $RepoRoot
 py -3 2_launcher.py doctor
 $doctorCode = $LASTEXITCODE
 Pop-Location
