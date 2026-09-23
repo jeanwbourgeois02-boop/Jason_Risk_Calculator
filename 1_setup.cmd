@@ -3,13 +3,20 @@ rem 1_setup.cmd -- double-click this once. Takes a Windows PC from "nothing inst
 rem "ready to run": Python, Git, this repository, the app's own environment and tests,
 rem the `pnl` PowerShell command, and a final health check. Safe to run again any time.
 rem
-rem This file is a polyglot: cmd.exe runs only the three lines above "exit /b", then the
-rem embedded PowerShell script below the @POWERSHELL_SCRIPT@ marker runs everything else.
+rem This file is a polyglot: cmd.exe runs only the lines above "exit /b", then the
+rem embedded PowerShell script below the marker line (the line right after "exit /b";
+rem it must sit on a line of its own, with nothing else on it, because the wrapper
+rem looks for it as a whole line, never as a substring) runs everything else.
 rem That means it works even when this single file is downloaded on its own, before the
 rem repository has been cloned -- there is no tools\setup.ps1 to depend on yet at that
-rem point, so the clone-or-pull step lives here too.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$src = [IO.File]::ReadAllText('%~f0'); $marker = '@POWERSHELL_SCRIPT@'; $i = $src.IndexOf($marker); iex ($src.Substring($i + $marker.Length))"
-exit /b %errorlevel%
+rem point, so the clone-or-pull step lives here too. If the PowerShell part ends with
+rem a non-zero exit code, the window stays open until a key is pressed, so the error
+rem can be read.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$lines = [IO.File]::ReadAllLines('%~f0'); $i = [Array]::IndexOf($lines, '@POWERSHELL_SCRIPT@'); if ($i -lt 0) { throw '1_setup.cmd: marker line @POWERSHELL_SCRIPT@ not found' }; $SetupCmdPath = '%~f0'; iex (($lines[($i + 1)..($lines.Length - 1)]) -join [char]10)"
+set "rc=%errorlevel%"
+if not "%rc%"=="0" echo Setup did not finish (exit code %rc%). Read the message above, then press a key to close.
+if not "%rc%"=="0" pause
+exit /b %rc%
 @POWERSHELL_SCRIPT@
 $ErrorActionPreference = 'Stop'
 $RepoUrl = 'https://github.com/jeanwbourgeois02-boop/Henry_Risk_Calculator.git'
@@ -80,8 +87,12 @@ if (Have-Command 'git') {
 
 # (c) clone or update the repository
 Say '[3/7] Repository'
+# $SetupCmdPath is set by the cmd wrapper above (the full path of this file): under
+# iex, $MyInvocation.MyCommand.Path is null, and the current directory is System32
+# on "Run as administrator", so neither would find the folder this file sits in.
 $here = $null
-if ($MyInvocation.MyCommand.Path) { $here = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if ($SetupCmdPath) { $here = Split-Path -Parent $SetupCmdPath }
+if (-not $here -and $MyInvocation.MyCommand.Path) { $here = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $here) { $here = (Get-Location).Path }
 function Update-Clone($path) {
     # Same rule as 2_launcher.py's sync_with_github: local edits are set aside with
