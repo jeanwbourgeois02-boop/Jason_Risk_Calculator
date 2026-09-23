@@ -16,7 +16,7 @@ Everything else, including this file, lives in `docs/`.
 
 Double-click `1_setup.cmd` in the repository folder (or wherever you saved it, even before cloning). It takes a
 Windows PC from "nothing installed" to "ready to run": installs Python and Git if missing, clones or updates
-this repository into `C:\Users\<you>\risk-monitor`, creates `.venv`, installs every package, creates the
+this repository into `C:\Users\<you>\Jason Risk Monitor`, creates `.venv`, installs every package, creates the
 database, runs the test suite, installs the `pnl` command into your PowerShell profile, and runs `doctor`.
 Every step prints `OK` or `FAILED` with the reason. It is safe to run again any time (after a `git pull`, on a
 new PC, if something looks broken) — every step is idempotent and never changes an existing database.
@@ -65,7 +65,7 @@ same. Keep the terminal window open; **Ctrl+C** stops the app.
   writes (marks, OIS curves and quotes, fixings, FX and rates vol quotes, dividend yields) and the last
   pull's log (`pull_status.json`), which the import prints one line of.
 
-**Working copy**: the repository lives in `C:\Users\<you>\risk-monitor`, a plain local folder. GitHub is the
+**Working copy**: the repository lives in `C:\Users\<you>\Jason Risk Monitor`, a plain local folder. GitHub is the
 backup: commit and `git push` at the end of every session. Do not keep a clone inside OneDrive: OneDrive syncs
 git's internal files while git writes them, which can corrupt the repository, and a second clone means two
 versions of the app.

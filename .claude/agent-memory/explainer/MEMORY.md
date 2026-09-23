@@ -1,0 +1,1 @@
+- [In-flight status reports](inflight-status-reports.md) — saved diffs go stale in minutes; check the live file before calling work unwired; half-done signals; pending decisions seen 2026-09-18

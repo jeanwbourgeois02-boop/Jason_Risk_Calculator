@@ -9,8 +9,8 @@ metadata:
 - `dash` was NOT preinstalled as of 2026-09-14; installed via `py -3 -m pip install dash` -> dash 4.4.1
   (pulls in Flask, plotly, pydantic, etc). Tests must still `pytest.importorskip("dash", reason=...)` so
   the suite degrades gracefully in environments where install isn't possible/allowed.
-- Run ui tests: `py -3 -m pytest C:\Users\jeanw\risk-monitor\tests\test_ui.py -v`.
-- Run full suite: `py -3 -m pytest C:\Users\jeanw\risk-monitor\tests\ -v`.
+- Run ui tests: `py -3 -m pytest tests/test_ui.py -v`.
+- Run full suite: `py -3 -m pytest tests/ -v`.
 - As of 2026-09-14 (first ui/ session), `tests/test_bloomberg.py` had 13 pre-existing failures
   unrelated to ui/ (`NameError: name 'NY' is not defined` in `data/bloomberg/pull_marks.py`, owned
   by bbg-data). By the second session (same day, cash-ladder-tab + pnl-tab work), bbg-data had

@@ -5,7 +5,7 @@ metadata:
   type: project
 ---
 
-Working copy for this task was `C:\Users\jeanw\risk-monitor` (a plain git clone), NOT the
+Working copy for this task was `C:\Users\jeanw\Jason Risk Monitor` (a plain git clone), NOT the
 OneDrive project folder that holds CLAUDE.md/agent memory. Always check which working
 copy an invocation names before reading/editing.
 

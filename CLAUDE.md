@@ -29,7 +29,7 @@ Default: the housekeeper procedure, run by the session itself (user decision 202
 - **What was done**: what changed and where, what was verified and how (the pytest pass count goes here), and anything skipped or left unverified, said plainly.
 - **What needs your input**: only the decisions, approvals or facts the user alone can give, one bullet each, with a recommendation where there is one. If there is nothing, write "Nothing". A low-stakes, reversible choice is not input: take the recommended option and report it under "What was done" (user, 2026-09-18: "i dont have strong opinions i imagine your recs are the best"). Hard rule 7 still stands: P&L arithmetic and this contract always need the user's yes.
 
-The working copy is `C:\Users\jeanw\risk-monitor`; GitHub `main` is the backup, pushed at the end of each task.
+The working copy is `C:\Users\jeanw\Jason Risk Monitor`; GitHub `main` is the backup, pushed at the end of each task.
 
 When agents or several sessions work in parallel, the ownership table under "Repository layout" defines the lanes. State your file list to the other sessions first and keep to it; message the owner and wait before editing outside your lane; commit by explicit path only (the git index is shared: run `git diff --cached --stat` immediately before every commit, never `git add -A`); preserve each file's line endings.
 
