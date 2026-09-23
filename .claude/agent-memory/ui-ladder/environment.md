@@ -21,3 +21,10 @@ metadata:
   test (bypassing dash's `_initialize_context`/`outputs_list` machinery, which only works via the
   dispatcher) use `app.callback_map["<id>.<prop>"]["callback"].__wrapped__(*args)`. Calling the
   entry directly raises `KeyError: 'outputs_list'`.
+- 2026-09-23: a second working copy exists at `C:\Users\jeanw\Jason Risk Monitor` (spaces in the path: quote it).
+  There Python 3.14 is the only interpreter and `ruff` is NOT installed (`py -3 -m ruff` -> No module named
+  ruff; no venv, no `uvx`/`pipx`), so the ruff step of a brief cannot run: say so in the report, compile-check
+  with `py -3 -m py_compile` and eyeball F-rules (unused imports/names) by hand instead. Use `-p no:cacheprovider`.
+- `data/raw/new_sample_trades.csv` IS on disk here, so the skipif'd end-to-end ladder test
+  (`test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab`) runs on this PC but was skipped on the PC
+  that committed a9a2227; a test skipped where a commit was made can drift silently -- check both copies.

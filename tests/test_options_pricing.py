@@ -1853,7 +1853,12 @@ def test_sample_digitals_arrive_as_vanilla_with_no_strike_and_are_skipped_not_pr
     """Task 2: the blotter marks none of its three digitals as digital (`FxOption Type`
     is '0' on every option row; no payoff word in the Description), so they land as
     payoff VANILLA, strike 0 -- and with every market input on file they are still
-    SKIPPED "no strike", never priced at strike 0 or at spot."""
+    SKIPPED "no strike", never priced at strike 0 or at spot.
+
+    The 8 sample options split 3 / 3 / 2: 3 priced, the 3 digitals skipped "no strike",
+    and the 2 EURSEK 11.0584 puts (bought 197728105, sold back in full 197838147) a
+    closed-out group since 2026-09-22 (CLAUDE.md, "A closed-out option is not live"):
+    not priced, ``closed_out=True``, under their own head and never among the skips."""
     if not HAVE_QUANTLIB:
         pytest.skip("QuantLib not installed")
     from engine.options.store import price_all_and_store
@@ -1868,9 +1873,17 @@ def test_sample_digitals_arrive_as_vanilla_with_no_strike_and_are_skipped_not_pr
     assert len(outcomes) == 8
     for instrument_id in SAMPLE_DIGITAL_TERMS:
         assert not outcomes[instrument_id].priced
+        assert not outcomes[instrument_id].closed_out
         assert outcomes[instrument_id].reason.startswith("no strike")
         assert conn.execute("SELECT COUNT(*) FROM marks WHERE instrument_id = ?", (instrument_id,)).fetchone()[0] == 0
-    assert sum(1 for o in outcomes.values() if o.priced) == 5
+    closed_out_puts = {"EURSEK092326P-197728105", "EURSEK092326P-197838147"}
+    assert {i for i, o in outcomes.items() if o.closed_out} == closed_out_puts
+    for instrument_id in closed_out_puts:
+        assert not outcomes[instrument_id].priced
+        assert outcomes[instrument_id].reason.startswith("closed out 2026-08-24:")
+        assert conn.execute("SELECT COUNT(*) FROM marks WHERE instrument_id = ?", (instrument_id,)).fetchone()[0] == 0
+    assert {i for i, o in outcomes.items() if not o.priced and not o.closed_out} == set(SAMPLE_DIGITAL_TERMS)
+    assert sum(1 for o in outcomes.values() if o.priced) == 3
 
 
 @needs_quantlib
@@ -2605,8 +2618,11 @@ def test_expiry_week_end_to_end_the_five_tickets_freeze_at_their_intrinsic_in_do
     """The week as it will run, on the real book, engine/pnl/ledger.py READ-ONLY.
     Tue 22 Sep: the EURUSD straddle is marked at its payoff; the ledger does NOT freeze it
     that day (spot is still moving). Wed 23 Sep: it is frozen at Tuesday's intrinsic, in
-    dollars at Tuesday's EURUSD; the three EURSEK tickets are marked at their payoff. Thu
-    24 Sep: they are frozen, EUR P&L brought back to dollars at Wednesday's EURUSD."""
+    dollars at Tuesday's EURUSD; the EURSEK call is marked at its payoff, while the two
+    EURSEK puts (bought and sold back in full on 2026-08-24) are a closed-out group and
+    the bulk pass does not price them (since 2026-09-22, CLAUDE.md "A closed-out option
+    is not live"): ``closed_out=True``, no mark. Thu 24 Sep: the call is frozen, EUR P&L
+    brought back to dollars at Wednesday's EURUSD; the puts at their closing fill."""
     from engine.options.store import price_all_and_store
     from engine.pnl.ledger import realise_settled
 
@@ -2629,8 +2645,16 @@ def test_expiry_week_end_to_end_the_five_tickets_freeze_at_their_intrinsic_in_do
 
     _mark_spot(conn, wed, "EURUSD", eurusd_wed)
     _mark_spot(conn, wed, "EURSEK", eursek_wed)
-    priced = {o.instrument_id for o in price_all_and_store(conn, wed) if o.priced}
-    assert priced == {i for i, t in SEPT_TICKETS.items() if t[0] == "EURSEK"}
+    closed_out = {"EURSEK092326P-197728105", "EURSEK092326P-197838147"}   # bought and sold back in full
+    wed_outcomes = {o.instrument_id: o for o in price_all_and_store(conn, wed)}
+    priced = {i for i, o in wed_outcomes.items() if o.priced}
+    assert priced == {"EURSEK092326C-197727826"}   # the live EURSEK ticket only
+    for instrument_id in closed_out:   # the closed-out puts: their own head, not priced, not a skip
+        assert wed_outcomes[instrument_id].closed_out
+        assert not wed_outcomes[instrument_id].priced
+        assert wed_outcomes[instrument_id].reason.startswith(f"closed out {closed_on}:")
+        assert _official_mark(conn, wed, instrument_id, "PREMIUM") is None
+    assert {i for i, o in wed_outcomes.items() if not o.priced and not o.closed_out}.isdisjoint(closed_out)
     realise_settled(conn, wed)
     for instrument_id, (pair, expiry, strike, option_type, quantity, fill) in SEPT_TICKETS.items():
         row = frozen(instrument_id)
@@ -2642,7 +2666,6 @@ def test_expiry_week_end_to_end_the_five_tickets_freeze_at_their_intrinsic_in_do
         assert row[1:4] == (tue, "PREMIUM", "QL_OPTIONS_PRICER") and row[4] == f"premium dated {tue}"
 
     realise_settled(conn, thu)
-    closed_out = {"EURSEK092326P-197728105", "EURSEK092326P-197838147"}   # bought and sold back in full
     for instrument_id, (pair, expiry, strike, option_type, quantity, fill) in SEPT_TICKETS.items():
         if pair != "EURSEK":
             continue

@@ -272,7 +272,9 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     """The spec's worked example (section 6): from the sample file as of 17 Sep 2026,
     AUD = +23.77m settled cash from the 16 Sep value date, -21.11m on 24 Sep, +11.15m
     on 28 Sep, net long 13.81m -- reproduced end to end through the Ladder tab's own
-    callback, spot trades (CURRENCY rows) included, with the currency filter on."""
+    callback, spot trades (CURRENCY rows) included, with the currency filter on. The
+    grid's cells are numbers (ui.tabs.ranking, so they rank as numbers); the table
+    prints them through the column's format, 23,771,313 / (21,109,276)."""
     import sys
     import types
     from data.ingest import blotter
@@ -291,16 +293,25 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     body = callback("2026-09-17", 0, ["AUD", "USD", "CAD"], None, None, [], [])
     grid = _find_id(body, exposure.COMBINED_TABLE_ID)
     by_ccy = {r[exposure.CURRENCY_COL]: r for r in grid.data}
-    assert by_ccy["AUD"][SETTLED] == "23,771,313"
-    assert by_ccy["AUD"]["2026-09-24"] == "(21,109,276)"
-    assert by_ccy["AUD"]["2026-09-28"] == "11,146,505"
+    assert round(by_ccy["AUD"][SETTLED]) == 23_771_313   # the exact sample amount, 23,771,313.13
+    assert round(by_ccy["AUD"]["2026-09-24"]) == -21_109_276
+    assert round(by_ccy["AUD"]["2026-09-28"]) == 11_146_505
+    # displayed through the column's d3 format: whole units, grouped, a negative in parentheses
+    from ui.tabs import ranking as rk
+    fmt = {c["id"]: c["format"] for c in grid.columns if c["type"] == "numeric"}
+    assert fmt[SETTLED]["specifier"] == "(,.0f" and fmt["2026-09-24"] == fmt[SETTLED]
+    assert rk.display_length(by_ccy["AUD"][SETTLED], fmt[SETTLED]) == len("23,771,313")
+    assert rk.display_length(by_ccy["AUD"]["2026-09-24"], fmt["2026-09-24"]) == len("(21,109,276)")
     names = {c["id"]: c["name"] for c in grid.columns}
     assert names[SETTLED] == exposure.SETTLED_ROW_LABEL and names["2026-09-24"] == "24 Sep"
     assert round(by_ccy["AUD"]["local_delta"]) == 13_808_543  # exact sample amounts round up here
     # the 51 USDCAD spot fills (all settled by 17 Sep) sit in the settled CAD balance
     assert by_ccy["CAD"][SETTLED] not in (None, "")   # a number: not zero (None), not unmarked ('')
-    # filtered out of the grid and of the block above it by the currency control
-    assert set(by_ccy) == {"AUD", "USD", "CAD", ""}
+    # filtered out of the grid and of the block above it by the currency control; the
+    # USD equivalent row is the pinned footer under the grid, not a row of it
+    assert set(by_ccy) == {"AUD", "USD", "CAD"}
+    footer = _find_id(body, exposure.COMBINED_TABLE_ID + "-footer")
+    assert [r[exposure.ROW_LABEL_COL] for r in footer.data] == [exposure.USD_EQUIVALENT_ROW_LABEL]
 
     # the Ladder CSV download follows the display: a row per currency, the same view
     import io
@@ -309,7 +320,7 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     payload = download(1, "2026-09-17", ["AUD", "USD", "CAD"], None, None, [], [])
     assert payload["filename"] == "cash_ladder.csv"
     csv = pd.read_csv(io.StringIO(payload["content"]))
-    shown = [r[exposure.ROW_LABEL_COL] for r in grid.data]
+    shown = [r[exposure.ROW_LABEL_COL] for r in grid.data + footer.data]
     assert list(csv[exposure.CURRENCY_COL]) == shown and shown[-1] == exposure.USD_EQUIVALENT_ROW_LABEL
     assert list(csv.columns)[1] == exposure.SETTLED_ROW_LABEL and list(csv.columns)[-1] == "Total"
     aud = csv.set_index(exposure.CURRENCY_COL).loc["AUD"]
