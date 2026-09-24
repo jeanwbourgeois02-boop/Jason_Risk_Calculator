@@ -278,6 +278,12 @@ _PRODUCT_LABELS = {
 
 
 BAD_VALUE_TAG = "stored value is not a number"
+# A leftover trade of a product that left the app (rate swaps, NDFs, rate options) on an old
+# database: `engine.pnl.valuation` names it with this phrase ("rate swaps left the app on
+# 2026-09-24; this old trade is not valued ..."), so the breakdown reads "1 irs: product left
+# the app" rather than "unpriced".
+RETIRED_PRODUCT_MARKER = "left the app on 2026-09-24"
+RETIRED_PRODUCT_TAG = "product left the app"
 # How many full `value_book` reasons a breakdown spells out for bad-stored-value rows.
 _BAD_VALUE_EXAMPLES = 3
 
@@ -303,6 +309,8 @@ def _reason_tag(reason: str) -> str:
         return "no historical mark at settlement"
     if is_bad_value_reason(reason):
         return BAD_VALUE_TAG
+    if RETIRED_PRODUCT_MARKER in reason:
+        return RETIRED_PRODUCT_TAG
     if "SPOT for USD conversion" in reason:
         return "no SPOT (USD conversion)"
     m = _MISSING_TAG_RE.search(reason)

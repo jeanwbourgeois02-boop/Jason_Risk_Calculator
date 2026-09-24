@@ -1,6 +1,6 @@
 # risk-monitor
 
-FX, futures, rates and options risk monitor for the NMMF book: trade-blotter import, delta ladder by value date, live Bloomberg marks, one P&L. Choices, coverage and gaps for the PM: [PM_BRIEF.md](PM_BRIEF.md).
+Commodity relative-value risk monitor for Jason's book (futures and their spreads, options on futures, LME forwards, FX hedges): trade-blotter import, positions by contract month, spreads, expiries, a cash ladder, risk and stress, Bloomberg marks on request, one P&L. Choices, coverage and gaps for the PM: [PM_BRIEF.md](PM_BRIEF.md).
 
 **What it does and what the numbers mean: [HOW_IT_WORKS.md](HOW_IT_WORKS.md).**
 
@@ -134,7 +134,9 @@ py 2_launcher.py reprice                          re-price the FX options from t
 py 2_launcher.py bbg-check                        Bloomberg PC: check every contract root's ticker, currency, contract size and value per point
                                                   against config/contracts.csv; writes reports/bbg_check_<stamp>.txt / .csv and the worksheet
                                                   reports/contract_fixes_<stamp>.csv; exit 0 all OK, 1 needs attention, 2 Bloomberg unreachable
-                                                  (--dry-run, --root ROOT_ID ..., --sector S, --book, --db PATH, --search, --limit N, --host, --port, --out)
+                                                  (--dry-run, --lme, --options, --root ROOT_ID ..., --sector S, --book, --db PATH, --search, --limit N,
+                                                  --host, --port, --out; --lme / --options run only the LME curve tickers / the options on futures,
+                                                  a plain run does both as well as the roots)
 py 2_launcher.py contracts-apply <worksheet>      apply the worksheet rows marked apply=yes to config/contracts.csv (--dry-run); exit 1 if a row was refused
 py 2_launcher.py doctor --bloomberg               every prerequisite, the request-by-request probe, and the ticker check (202 securities, 5 requests)
 .venv\Scripts\python -m tests.golden_book --write   re-pin tests/golden/book.json: only on the user's yes, it defines what the book is worth
@@ -147,7 +149,9 @@ every valuation pinned in `tests/golden/book.json`, so a refactor that changes n
 configured in `pyproject.toml` (tool settings only, not a package), and a hook in `.claude/settings.json` that runs
 ruff on every Python file Claude edits. Provenance of rules moves from code comments to `decisions.md`.
 
-Environment variables: `RISK_DB` (database path), `RISK_LIVE=0` (disable the feed), `BLP_HOST`, `BLP_PORT`, `RISK_HISTORY_DIR` (the nm-dashboard market-history folder the Risk tab reads for its return history; default: `../nm-dashboard/fx_alpha/bbg_data` next to this repo, else `../bbg_data/bbg_data`; the tab names the folder it used or that none was found).
+Environment variables: `RISK_DB` (database path), `RISK_LIVE=0` (disable the feed), `BLP_HOST`, `BLP_PORT`, `RISK_HISTORY_DIR` (the nm-dashboard market-history folder the Risk tab reads for its return history; default: `../nm-dashboard/fx_alpha/bbg_data` next to this repo, else `../bbg_data/bbg_data`; the tab names the folder it used or that none was found). `COMMODITY_HISTORY_DB` (the research app's settlement history the Risk tab and the commodity stress read, read-only; default: `../Commodity Dashboard/var/rv.sqlite`).
+
+Settings Jason edits (plain YAML, each file documents itself): `config/risk.yaml` (vol target, shock days), `config/commodity_stress.yaml` (the commodity scenarios), `config/limits.yaml` (margin rates, spread credits, desk and exchange position limits; all placeholders or unset until he fills them in), `config/book.yaml` (the fund, trader and desk codes the upload takes).
 
 Dependencies are a single list, `PACKAGES`, in `2_launcher.py` (`py 2_launcher.py setup` installs it directly;
 there is no `requirements.txt` checked into the repo). Need one on disk for `pip install -r` or a

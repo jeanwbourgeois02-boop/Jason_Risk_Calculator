@@ -24,12 +24,15 @@ import numpy as np
 import pandas as pd
 
 from engine.pnl.calendar import _n_business_days_back, load_holidays
-from engine.pnl.valuation import value_book
+from engine.pnl.valuation import usd_per_quote, value_book
 
 OUTPUT_COLUMNS = [
     "trade_id", "trade_date", "instrument_id", "status", "quantity_usd_notional", "tenor", "fill",
-    "mark_t1", "mark_eod", "mark_t2", "pnl_t1", "pnl_eod", "pnl_t2", "reason",
+    "mark_t1", "mark_eod", "mark_t2", "pnl_t1", "pnl_eod", "pnl_t2", "reason", "notional_reason",
 ]
+# `quantity_usd_notional` is in USD for every row (a future's since 2026-09-24, converted at
+# spot of the valuation date); None where it cannot be, with the why in `notional_reason`
+# ('' when the notional is there). `reason` stays value_book's reason for the EOD P&L.
 
 ValueFn = Callable[[sqlite3.Connection, str], pd.DataFrame]
 
@@ -59,13 +62,18 @@ def _instrument_info(conn: sqlite3.Connection, instrument_ids: List[str]) -> pd.
     )
 
 
-def _quantity_usd_notional(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.Series:
-    """CLAUDE.md "Display notional": USD notional per trade, sign = direction of the base
-    currency. sign(quantity) * |USD leg amount| for pairs with a USD leg; raw base
-    quantity for crosses (no USD leg exists to invent); contracts * multiplier * fill for
-    futures (moved here unchanged from the retired xlsx_fx_replica module)."""
+def _quantity_usd_notional(conn: sqlite3.Connection, df: pd.DataFrame, as_of: str) -> tuple:
+    """(notional, reason): CLAUDE.md "Display notional", USD notional per trade, sign =
+    direction of the base currency. sign(quantity) * |USD leg amount| for pairs with a USD
+    leg; raw base quantity for crosses (no USD leg exists to invent). A future is
+    contracts * multiplier * fill in its quote currency, converted to USD at spot of `as_of`
+    through `valuation.usd_per_quote`, the lookup its P&L uses (2026-09-24: futures in CNY,
+    EUR, GBP and JPY had been shown as if that local figure were dollars); a USD contract
+    converts at 1, so it is unchanged. With no spot the notional is NaN and `reason` says
+    which currency had none on which date: never the local figure, never zero. A spot that
+    is not a number is a data error, named the same way."""
     if df.empty:
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float), pd.Series(dtype=object)
 
     trade_ids = df["trade_id"].tolist()
     instrument_ids = df["instrument_id"].unique().tolist()
@@ -80,9 +88,27 @@ def _quantity_usd_notional(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.Ser
     notional = np.sign(df["quantity"]) * usd_leg_abs
     cross = (base_ccy != "USD") & (quote_ccy != "USD")
     notional = notional.where(~cross, df["quantity"])
+    reason = pd.Series("", index=df.index, dtype=object)
+
     future = df["product"] == "FUTURE"
-    notional = notional.where(~future, df["quantity"] * multiplier * df["fill"])
-    return notional
+    if future.any():
+        spot, spot_reason = {}, {}
+        for ccy in quote_ccy[future].dropna().unique():
+            try:
+                s, s_pair, _src = usd_per_quote(conn, ccy, as_of)
+            except ValueError as exc:  # valuation._BadValue: a stored spot that is not a number
+                s, s_pair, spot_reason[ccy] = float("nan"), None, f"USD notional n/a: {exc}"
+            if s != s or s_pair is None:
+                spot[ccy] = float("nan")
+                spot_reason.setdefault(
+                    ccy, f"USD notional n/a: no SPOT for USD conversion of {ccy} on {as_of}")
+            else:
+                spot[ccy] = s
+        s_row = quote_ccy.map(spot)
+        local = df["quantity"] * multiplier * df["fill"]
+        notional = notional.where(~future, local * s_row)
+        reason = reason.where(~future, quote_ccy.map(spot_reason).fillna(""))
+    return notional, reason
 
 
 def _slim(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
@@ -125,7 +151,7 @@ def fx_blotter_rows(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = va
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
     eod = eod.copy()
-    eod["quantity_usd_notional"] = _quantity_usd_notional(conn, eod)
+    eod["quantity_usd_notional"], eod["notional_reason"] = _quantity_usd_notional(conn, eod, as_of)
     out = eod.rename(columns={"mark": "mark_eod", "pnl_usd": "pnl_eod", "settle_date": "tenor"})
 
     out = out.merge(_slim(t1_df, "t1"), on="trade_id", how="left")
@@ -133,7 +159,7 @@ def fx_blotter_rows(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = va
 
     out = out.sort_values(["trade_date", "instrument_id", "trade_id"]).reset_index(drop=True)
 
-    for col in ("mark_eod", "mark_t1", "mark_t2", "pnl_eod", "pnl_t1", "pnl_t2"):
+    for col in ("quantity_usd_notional", "mark_eod", "mark_t1", "mark_t2", "pnl_eod", "pnl_t1", "pnl_t2"):
         # .where(..., None) on a float64 Series silently converts None back to NaN
         # (pandas dtype coercion), so cast to object first to keep a real Python None
         # for missing cells rather than a float NaN.

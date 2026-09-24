@@ -36,6 +36,7 @@ Bloomberg check tells you, root by root, what is right and what to change.
    and never writes a file that would not load.
 7. Run `bbg-check` again until it exits 0 (or only warnings remain), then commit
    `config/contracts.csv` and push, so the dev PC gets the fixes.
+   The report also has three sections for the newer products (2026-09-24): "LME curve tickers" (per metal: cash, 3M and the first monthly, with Bloomberg's prompt date against ours), "Options on futures" (per root: the chain Bloomberg lists against our ticker form, exercise style and lead months), and at the end "For the housekeeper": findings that are code, not `config/contracts.csv`; paste that section back to the session. `--lme` / `--options` run only those parts.
 8. Once Jason's blotter is uploaded: `py 2_launcher.py bbg-check --book --db data\raw\risk.db`
    also checks the book's own contracts: each fill against Bloomberg's price (a fill 100x
    off Bloomberg's is flagged), the stored contract dates against Bloomberg's, and the USD

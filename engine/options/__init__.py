@@ -106,32 +106,17 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
     housekeeper**: `DELTA_PA` is not yet in `data/ingest/schema.py`'s
     `OFFICIAL_MARK_SOURCE` mapping (out of this package's ownership), so it is written to
     `marks` but does not surface via `marks_official` until that mapping is extended.
-  - `engine/options/pricer.py::price_equity_option` / `price_commodity_option` (new):
-    same `OptionPriceResult` dataclass, but `premium` is UNSCALED quote-ccy price per 1
-    unit of underlying (no FX base-notional-fraction conversion -- documented on the
-    dataclass itself). Commodity only supports VANILLA/AMERICAN/ASIAN (no barrier/
-    digital/one-touch commodity pricer exists upstream, per MODELS.md's "Planned"
-    section -- not a gap introduced here).
-  - `engine/options/equity_commodity.py` (new): read/dispatch/mark-write glue for two
-    NEW `instruments.asset_class` (and `trades.product`) values, `EQ_OPTION` and
-    `CMDTY_OPTION` -- **report to housekeeper for CLAUDE.md's "Tables" section**. No live
-    trade feed exists for either (tests seed synthetic trades). Underlying identity:
-    `instruments.bbg_ticker` on the OPTION's own row is repurposed to hold the
-    underlying's instrument_id (e.g. `'SPX Index'`, `'GC1 Comdty'`) -- SPOT is then read
-    from `marks_official` keyed by that id. **Known quirk, flagged for housekeeper**:
-    `marks_official`'s SPOT is only official under `source='BBG_BFXFORWARD'`
-    (schema.py has no equity/commodity-specific SPOT source yet), so an equity/commodity
-    underlying's SPOT mark currently has to be stamped that same (FX-flavored) source
-    string to be visible here. Two new manual tables: `equity_dividend_yields`
-    (defensive DDL, no default row -- every equity trade needs an explicit entry, even
-    0.0) and `vol_surface_points` (strike x tenor grid per underlying, built into an
-    `options_calc.vol_surface.VolSurface`; falls back to this package's own flat
-    `option_vols` table, keyed by underlying instead of an FX pair, when no surface is
-    staged). Rate is a single OIS zero rate off `instruments.quote_ccy` (no domestic/
-    foreign split -- FX-only concept). PREMIUM mark = pricer's unscaled premium x
-    `instruments.multiplier`.
+  - Equity / commodity pricers (landed 2026-09-17, SUPERSEDED on 2026-09-24; see the
+    "Options on commodity futures" entry at the end for what prices them now): a
+    `pricer.price_equity_option` / `price_commodity_option` pair and an
+    `equity_commodity.py` that read the underlying as a SPOT on the option's
+    `bbg_ticker` and took the vol from a hand-entered surface. The equity half, that
+    SPOT rule, the surface table and the ASIAN commodity payoff are gone;
+    `pricer.price_commodity_option` itself is still in `pricer.py` but has no caller.
+    Rate: one zero rate off `instruments.quote_ccy` (`rates.resolve_ccy_rate_with_source`,
+    no domestic / foreign split), which still holds.
   - `engine/options/portfolio.py` (new): builds vendored `Position`/`Portfolio` objects
-    from priced `PricingOutcome` (FX) / `CommodityOutcome` (listed commodity) outcomes,
+    from priced `PricingOutcome` (FX) / `CommodityOutcome` (option on a commodity future) outcomes,
     converting every Greek to USD via `quantity * multiplier * spot_to_usd` (spot_to_usd
     from `marks_official`'s official SPOT of `quote_ccy`, CLAUDE.md's "convert at spot,
     never the forward outright" rule extended uniformly to every asset class) -- the
@@ -142,10 +127,8 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
     "Portfolio Totals -> asset class -> package -> leg" for Phase 8's UI. A priced
     outcome whose `quote_ccy` has no official SPOT is excluded and reported in
     `skipped`, never defaulted to 1.0.
-  - What remains manual / out of scope this phase: equity/commodity dividend yields and
-    vol surfaces are hand-entered (no live feed, same as FX's Phase 2 `option_vols`
-    before Phase 5a/5b landed live vol); no data-ingest parser exists for EQ_OPTION/
-    CMDTY_OPTION trades; the 36 G10 cross pairs' premium-currency convention (feeding
+  - What remained manual / out of scope that phase (the equity / commodity half is
+    superseded, see the last entry): the 36 G10 cross pairs' premium-currency convention (feeding
     `delta_convention`) is `options_calc.fx.g10`'s own simplified "base" default, not
     individually verified per pair (MODELS.md's own caveat, unchanged here); non-G10
     pairs' calendar year fraction and delta_convention both fall back with 'UNKNOWN'
@@ -338,7 +321,7 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   resolution raised, and ``price_all_and_store_equity`` -- a bare list comprehension --
   let the RuntimeError escape to ``live._options_step``'s step-level catch, which threw
   the FX loop's 9 priced / 19 skipped outcomes away and reported priced 0 / skipped [].
-  Both loops now share ``equity_commodity._price_all_and_store``: the FX loop's guard
+  Both loops then shared one guarded helper in ``equity_commodity.py``: the FX loop's guard
   mirrored (one trade's exception = that trade's skip, reason ``"pricer error: <exc!r>"``;
   an unreadable row an outcome too; one ``curve_cache`` per run). And
   ``rates.resolve_ccy_rate_with_source`` appends a CurveSet's non-empty ``bootstrap_note``
@@ -346,7 +329,7 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   ``RateInput.detail``, so a priced option's rate provenance names the fallback curve.
   No pricing formula changed. (2026-09-24: the equity loop and the shared helper are
   deleted; the same guard now lives in ``equity_commodity.price_all_and_store_commodity``
-  alone, listed-options-pricer's.)
+  alone, listed-options-pricer's, and in options-store's bulk passes.)
 - Closed-out options are not priced (options-pricer, landed 2026-09-22; user: "we dont
   need to price all options, as some of them might be closed out already. If they are
   exactly the same, same strike / underlyer / expiry / type and closed out, we just
@@ -374,17 +357,37 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   FX options stay, dormant but kept). ``pricer.price_equity_option`` (and its
   ``_EQUITY_*_PAYOFFS`` sets) is deleted: its one caller, the equity branch of
   ``equity_commodity.py`` (``price_and_store_equity``, ``price_all_and_store_equity``,
-  the dividend yields), went the same day (listed-options-pricer), which also renamed
-  ``EqCmdtyMarketInputs`` / ``EqCmdtyInputsResult`` / ``EqCmdtyOutcome`` to
-  ``CommodityInputs`` / ``CommodityInputsResult`` / ``CommodityOutcome`` and now takes a
-  commodity option's underlying from its future's FUTURE_PX. ``price_commodity_option``
-  stays for Phase 5's options on futures. This package's own files held no NDF- or
+  the dividend yields), went the same day (listed-options-pricer); the commodity half was
+  rewritten for Phase 5 (next entry). This package's own files held no NDF- or
   IRS-only branch. FX option pricing is untouched: premium, Greeks, digitals on the
   smile, barriers, touches, Asians, the CIP rate fallback. The tests that read the macro
   trader's reference export (``data/raw/new_sample_trades.csv``) now seed the five FX
   options of the synthetic sample (``data/sample/blotter_sample.csv``) inline, and the
   equity / commodity tests left ``tests/test_options_pricing.py`` (commodity coverage is
   in ``tests/test_listed_options.py``).
+- Options on commodity futures (commodity conversion Phase 5, 2026-09-24; CLAUDE.md "P&L
+  conventions -> Options on commodity futures", user decision the same day). Product and
+  asset class ``CMDTY_OPTION``; instrument id contract-master's canonical option id
+  (``'CLZ26C 70 Comdty'``), ``base_ccy`` the root id, ``quote_ccy`` the contract's currency,
+  ``multiplier`` the underlying future's, ``bbg_ticker`` the option's OWN Bloomberg ticker.
+  No model enters the P&L (Bloomberg's price of the option, read by ``engine/pnl``). The
+  Greeks are priced by listed-options-pricer's
+  ``equity_commodity.price_listed_commodity_option`` (Black-76 for a European, Barone-Adesi-
+  Whaley for an American, on the underlying future's official FUTURE_PX, at the vol that
+  Bloomberg's own price implies; no surface, no manual vol, no ASIAN payoff), and wired
+  into the bulk passes by options-store (``store.price_listed_options``, run by
+  ``price_all_and_store`` / ``price_close``, outcomes ``product='CMDTY_OPTION'``). Its
+  rate: ``rates.resolve_ccy_rate_with_source`` on the contract currency; a currency with
+  no OIS set-up (CNY, MYR, SGD, ...) resolves ``(None, "no curve/rate <CCY>")`` without
+  raising unless a ``manual_rates`` row exists, and listed-options-pricer then discounts
+  on the USD SOFR curve and names it in ``rate_source`` (no change here). This lane's
+  part (fx-options-pricer): ``portfolio.build_positions`` puts a CMDTY_OPTION's delta and
+  gamma on a USD basis with its underlying future's official FUTURE_PX (the future
+  ``data.contracts.option_for`` names; the row at that future's own expiry, else the single
+  row on file), no longer with a SPOT on ``bbg_ticker`` (which skipped every listed
+  option); no underlying price -> ``skipped`` with the reason; nothing is recomputed. FX
+  options are unchanged. ``pricer.price_commodity_option`` has no caller left. Tests:
+  ``tests/test_options_pricing.py``'s "options on commodity futures" section.
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

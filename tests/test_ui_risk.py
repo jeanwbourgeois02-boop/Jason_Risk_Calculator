@@ -217,7 +217,8 @@ def test_caption_names_the_history_the_lag2_date_the_parameters_and_the_missing_
 # --------------------------------------------------------------------------- cards
 def test_every_card_shows_its_formatted_figure_with_the_definition_on_hover():
     cards = _cards(risk.body(_result()))
-    assert list(cards) == ["Net USD delta", "Gross USD delta", "Blended vol (annual)", "1y 95% VaR (1-day)",
+    assert list(cards) == ["Net USD delta", "Gross USD delta", "Commodity net USD", "Commodity gross USD",
+                           "Blended vol (annual)", "1y 95% VaR (1-day)",
                            "Worst day ex shocks", "Worst day raw"]
     assert cards["Net USD delta"][0] == "1,750,000"
     assert "header's FX net USD (+ = long USD): (1,550,000)" in cards["Net USD delta"][1]
@@ -321,7 +322,7 @@ def test_history_unavailable_shows_the_reason_and_every_metric_na():
         row.update(_nan_metrics("no market history: " + reason), reason="no market history: " + reason, carry=False)
     body = risk.body(r)
     text = _text(body)
-    assert f"Market history unavailable: {reason}. Every risk figure below is n/a" in text
+    assert f"Market history unavailable: {reason}. Every currency and metal risk figure below is n/a" in text
     cards = _cards(body)
     for label in ("Blended vol (annual)", "1y 95% VaR (1-day)", "Worst day ex shocks", "Worst day raw"):
         assert cards[label][0] == "n/a" and reason in cards[label][1], label
@@ -342,10 +343,10 @@ def test_table_rows_follow_the_engines_order_and_the_book_is_pinned_under_them()
     assert [rec["underlyer"] for rec in table.data] == ["CHF", "SEK", "XAU"]
     assert [rec["kind"] for rec in table.data] == ["FX", "FX", "Metal"]
     assert [c["id"] for c in table.columns] == [
-        "underlyer", "kind", "net_usd", "gross_usd", "vol_blended_ann_usd", "vol_trailing_ann_usd",
+        "underlyer", "kind", "sector", "net_usd", "gross_usd", "vol_blended_ann_usd", "vol_trailing_ann_usd",
         "vol_crisis_ann_usd", "var95_1d_usd", "worst_1d_ex_shocks_usd", "worst_1d_ex_shocks_date", "worst_1d_raw_usd",
         "worst_1d_raw_date", "worst_day_ex_vs_target_pct", "note"]
-    assert [c["name"] for c in table.columns][7:10] == ["VaR95 1d", "Worst ex shocks", "Date"]
+    assert [c["name"] for c in table.columns][8:11] == ["VaR95 1d", "Worst ex shocks", "Date"]
     chf = table.data[0]
     assert chf["net_usd"] == 1_250_000.0 and isinstance(chf["net_usd"], float)      # a number, so it ranks
     assert "dv01_usd" not in chf
@@ -354,11 +355,11 @@ def test_table_rows_follow_the_engines_order_and_the_book_is_pinned_under_them()
     assert chf["worst_day_ex_vs_target_pct"] == 0.8333 and chf["note"] == "carry included"
     xau = table.data[2]
     assert xau["net_usd"] == 200_000.0 and xau["gross_usd"] == 200_000.0 and xau["note"] == "metal, not in the FX net"
-    # a kind the tab has no label for yet (Phase 4's commodities) is shown as the engine names it, not dropped
+    # a kind the tab has no label for is shown as the engine names it, not dropped
     r = _result()
-    r["underlyers"].insert(1, _row("CL", "COMMODITY", 900_000.0, carry=False))
+    r["underlyers"].insert(1, _row("XX", "NEW_KIND", 900_000.0, carry=False))
     assert [(rec["underlyer"], rec["kind"]) for rec in _table(risk.body(r), risk.TABLE_ID).data][:2] == \
-        [("CHF", "FX"), ("CL", "COMMODITY")]
+        [("CHF", "FX"), ("XX", "NEW_KIND")]
     assert table.sort_action == "native" and table.persistence is True
     # the Book: a header-less second table under the first, same columns, never ranked with the rows
     footer = _table(body, f"{risk.TABLE_ID}-footer")
@@ -450,11 +451,360 @@ def test_definitions_block_states_the_formulas_and_the_config_values():
                    "config/stress.yaml"):
         assert needle in text, needle
     labels = [n.children for n in _walk(block) if type(n).__name__ == "Dt"]
-    assert labels == ["Daily $ P&L", "Net / Gross USD delta", "Blended vol", "VaR", "Worst day ex shocks",
-                      "Worst day raw", "Scenarios", "Parameters", "History"]
+    assert labels == ["Daily $ P&L", "Net / Gross USD delta", "Commodity net / gross USD", "Parts and views",
+                      "Blended vol", "Crisis-window fallback", "VaR", "Worst day ex shocks", "Shock days",
+                      "Worst day raw", "Scenarios", "Commodity scenarios", "Parameters", "History"]
+    # one line each for the part / view rule, the crisis-window fallback and the shock days
+    assert "never added to the Book" in text and "counted twice" in text
+    assert "crisis window not in history: trailing vol only" in text
+    assert "for every row alike (currencies, metals and commodities)" in text
     r = _result()
     r["config"].update(loaded=False, note="/repo/config/risk.yaml not found: defaults in use")
     assert "(not loaded: /repo/config/risk.yaml not found: defaults in use)" in _text(risk.definitions_block(r))
+
+
+# --------------------------------------------------------------------------- commodities (Phases 4 and 5)
+CRISIS = "crisis window not in history: trailing vol only"
+VOL_TARGET_NOTE = "placeholder: the macro fund's 4.5m, until Jason sets his own vol target (docs/open-questions.md C5)"
+
+
+def _cm_row(root, name, sector, net, **over) -> dict:
+    row = _row(root, "COMMODITY", net, carry=False, key=f"COMMODITY:{root}", role="part", parts=[], name=name,
+               sector=sector, net_delta_lots=net / 100_000.0, vol_note=CRISIS, reason=CRISIS,
+               note="research settlement history (risk input only)", contracts=[])
+    row.update(over)
+    return row
+
+
+def _commodity_result(**over) -> dict:
+    """A `book_risk` result with the commodity rows risk-metrics adds (Phase 4): three
+    commodities in two sectors (the engine's order by gross: CL, ZC, B), two SECTOR views
+    and a SPREAD view; the new book keys, the commodity history and commodity-stress's
+    scenarios (an outright with a position it could not value, a replay with no history,
+    an fx one)."""
+    r = _result()
+    r["config"].update(vol_target_placeholder=True, vol_target_note=VOL_TARGET_NOTE,
+                       shock_dates=r["config"]["shock_dates"] + [
+                           {"date": "2020-04-20", "name": "Negative WTI"}, {"date": "2022-03-07", "name": "LME nickel"}])
+    cl_contracts = [
+        {"contract_id": "CLZ26 Comdty", "product": "FUTURE", "history_contract": "CLZ26 Comdty", "delta_lots": 8.0,
+         "multiplier": 1000.0, "currency": "USD", "days": 1200, "in_series": True, "reason": "", "note": ""},
+        {"contract_id": "CLF27 Comdty", "product": "FUTURE", "history_contract": None, "delta_lots": 1.0,
+         "multiplier": 1000.0, "currency": "USD", "days": 0, "in_series": False,
+         "reason": "contract CLF27 Comdty: no history", "note": ""}]
+    cl = _cm_row("NYMEX:CL", "WTI crude", "energy", 900_000.0, contracts=cl_contracts,
+                 reason=f"excludes 1 of 2 contracts with no history: CLF27 Comdty: no history; {CRISIS}")
+    zc = _cm_row("CBOT:ZC", "Corn", "agriculture", -500_000.0)
+    brent = _cm_row("ICE:B", "Brent", "energy", 300_000.0, **_nan_metrics("no history: ICE:B not in the research database"),
+                    reason="no history: ICE:B not in the research database", vol_note="")
+    energy = _row("energy", "SECTOR", 1_200_000.0, carry=False, key="SECTOR:energy", role="view", name="energy",
+                  sector="energy", parts=["COMMODITY:NYMEX:CL"], vol_note=CRISIS, reason=CRISIS,
+                  note="view: the sum of its commodities' series (NYMEX:CL, ICE:B)")
+    ags = _row("agriculture", "SECTOR", -500_000.0, carry=False, key="SECTOR:agriculture", role="view",
+               name="agriculture", sector="agriculture", parts=["COMMODITY:CBOT:ZC"], vol_note=CRISIS, reason=CRISIS,
+               note="view: the sum of its commodities' series (CBOT:ZC)")
+    spread = _row("CL Z6/F7", "SPREAD", 100_000.0, carry=False, key="SPREAD:cal-1", role="view", name="CL Z6/F7",
+                  sector="", spread_id="cal-1", spread_kind="calendar", family="", vol_note=CRISIS, reason=CRISIS,
+                  parts=["CLZ26 Comdty", "CLF27 Comdty"],
+                  legs=[{"contract_id": "CLZ26 Comdty", "root_id": "NYMEX:CL", "product": "FUTURE", "open_lots": 1.0,
+                         "currency": "USD", "in_series": True, "days": 1200, "reason": ""},
+                        {"contract_id": "CLF27 Comdty", "root_id": "NYMEX:CL", "product": "FUTURE", "open_lots": -1.0,
+                         "currency": "USD", "in_series": False, "days": 0, "reason": "contract CLF27 Comdty: no history"}],
+                  note="view: its legs' series at their open lots; net / gross USD = its leftover outright")
+    for x in r["underlyers"]:
+        x.update(key=x["underlyer"], role="part", parts=[], vol_note="")
+    # the engine's order: the parts by gross (CL 0.9m, ZC 0.5m, B 0.3m among them), then sectors, then spreads
+    r["underlyers"] = [r["underlyers"][0], cl, zc, r["underlyers"][1], brent, r["underlyers"][2], r["underlyers"][3],
+                       r["underlyers"][4], energy, ags, spread]
+    r["book"].update(commodity_net_usd=700_000.0, commodity_gross_usd=1_700_000.0, commodity_reason="",
+                     views=["energy", "agriculture", "CL Z6/F7"], lag2_date="2026-09-18", vol_note=CRISIS,
+                     rows_in_series=["CHF", "XAU", "NYMEX:CL", "CBOT:ZC"])
+    r["commodity_history"] = {"available": True, "path": "/research/rvapp.db", "reason": "", "first_date": "2020-01-02",
+                              "last_date": "2026-09-21", "note": "", "candidates": [], "roots": 180, "contracts": 9000,
+                              "fx_pairs": ["USDCNH"], "used_to": "2026-09-21", "lag2_date": "2026-09-17",
+                              "positions_note": ""}
+    r["missing"] = r["missing"] + ["CLF27 Comdty: not in NYMEX:CL's series (contract CLF27 Comdty: no history)",
+                                   "ICE:B: not in the book series (no history: ICE:B not in the research database)"]
+    outright = {"name": "Energy -10%", "kind": "outright", "description": "crude and products down 10%", "basis": "delta",
+                "total_usd": -90_000.0, "by_sector": {"energy": -90_000.0},
+                "by_root": [{"root_id": "NYMEX:CL", "pnl_usd": -90_000.0}],
+                "by_contract": [{"contract_id": "CLZ26 Comdty", "instrument_id": "CLZ26 Comdty", "product": "FUTURE",
+                                 "root_id": "NYMEX:CL", "sector": "energy", "expiry": "2026-11-19", "lots": 10.0,
+                                 "delta_lots": 10.0, "delta_usd": 900_000.0, "move": -0.10, "pnl_usd": -90_000.0}],
+                "missing": [{"contract_id": "BZ1", "instrument_id": "COH7 Comdty", "product": "FUTURE", "root_id": "ICE:B",
+                             "currency": "USD", "reason": "no USD delta on the day"}],
+                "reason": "excludes 1 position(s) with no figure: BZ1: no USD delta on the day",
+                "by_spread": [{"spread_id": "cal-1", "name": "CL Z6/F7", "family": "", "template": "", "pnl_usd": None,
+                               "spread_pnl_usd": None, "leftover_pnl_usd": None, "legs": [], "leftover": [],
+                               "reason": "COH7 Comdty: no USD delta on the day"}]}
+    grains = {"name": "Grains +5%", "kind": "outright", "description": "", "basis": "delta", "total_usd": -25_000.0,
+              "by_sector": {"agriculture": -25_000.0}, "by_root": [{"root_id": "CBOT:ZC", "pnl_usd": -25_000.0}],
+              "by_contract": [], "missing": [], "reason": ""}
+    replay = {"name": "2020 Covid", "kind": "replay", "description": "", "basis": "delta", "total_usd": None,
+              "by_sector": {}, "by_root": [], "by_contract": [], "missing": [], "start": "2020-02-20", "end": "2020-04-21",
+              "reason": "the commodity settlement history is not available"}
+    cnh = {"name": "CNH -3%", "kind": "fx", "description": "", "basis": "delta", "total_usd": 1_500.0, "by_sector": {},
+           "by_root": [], "by_contract": [], "missing": [], "reason": "", "delta_usd_change": -6_000.0,
+           "by_currency": [{"currency": "CNY", "move": -0.03, "pnl_local": -350_000.0, "pnl_usd": -50_000.0,
+                            "pnl_change_usd": 1_500.0, "delta_usd": 200_000.0, "delta_usd_change": -6_000.0}]}
+    r["commodity_scenarios"] = {"as_of": AS_OF, "available": True, "basis": "delta", "config": "/repo/config/commodity_stress.yaml",
+                                "scenarios": [outright, grains, replay, cnh],
+                                "reasons": ["2020 Covid: n/a, the commodity settlement history is not available"]}
+    r.update(over)
+    return r
+
+
+def _margin() -> dict:
+    basis = "estimate (config/limits.yaml), not exchange SPAN"
+    roll = {"gross_charge_usd": 90_000.0, "spread_credit_usd": 10_000.0, "margin_usd": 80_000.0, "positions": 2,
+            "excluded": [], "excluded_count": 0, "caption": "", "reason": "", "basis": basis}
+    ags = {"gross_charge_usd": 0.0, "spread_credit_usd": 0.0, "margin_usd": 0.0, "positions": 1,
+           "excluded": ["CBOT:ZC 2026-12"], "excluded_count": 1,
+           "caption": "excludes 1 of 1 positions with no margin figure",
+           "reason": "CBOT:ZC 2026-12: no outright rate set for CBOT:ZC or agriculture in config/limits.yaml", "basis": basis}
+    book = {"gross_charge_usd": 90_000.0, "spread_credit_usd": 10_000.0, "margin_usd": 80_000.0, "positions": 3,
+            "excluded": ["CBOT:ZC 2026-12"], "excluded_count": 1,
+            "caption": "excludes 1 of 3 positions with no margin figure", "reason": ags["reason"], "basis": basis}
+    return {"as_of": AS_OF, "available": True, "basis": basis, "note": "Estimated initial margin: ...",
+            "config_file": "/repo/config/limits.yaml", "config_note": "", "rows": [],
+            "by_root": {"NYMEX:CL": {"name": "WTI crude", "sector": "energy", "rate_kind": "rate", "rate": 0.1,
+                                     "rate_source": "sector energy rate", **roll},
+                        "CBOT:ZC": {"name": "Corn", "sector": "agriculture", "rate_kind": "", "rate": None,
+                                    "rate_source": "no outright rate set", **ags}},
+            "by_sector": {"agriculture": ags, "energy": roll}, "book": book,
+            "spreads": [{"spread_id": "cal-1", "name": "CL Z6/F7", "kind": "calendar", "family": "", "credit_key": "calendar",
+                         "credit_pct": None, "legs": [], "charge_on_matched_usd": 20_000.0, "credit_usd": 0.0, "leftover": [],
+                         "leftover_charge_usd": 0.0, "excluded": [], "excluded_count": 0,
+                         "note": "no calendar credit set in config/limits.yaml: every lot at the outright rate", "basis": basis}],
+            "reasons": ["CBOT:ZC 2026-12: no outright rate set for CBOT:ZC or agriculture in config/limits.yaml"]}
+
+
+def _checks() -> list:
+    def c(limit, scope, level, value, limit_value, used, reason, source="desk", unit="lots"):
+        return {"limit": limit, "scope": scope, "source": source, "unit": unit, "value": value, "limit_value": limit_value,
+                "used_pct": used, "level": level, "reason": reason, "basis": f"basis of {limit}"}
+    return [c("gross_lots", "book", "BREACH", 120.0, 100.0, 120.0, "120% of the limit"),
+            c("gross_usd", "book", "WARN", 900_000.0, 1_000_000.0, 90.0, "90% of the limit (warn from 80%)", unit="USD"),
+            c("net_usd_commodity", "NYMEX:CL", "OK", 400_000.0, 1_000_000.0, 40.0, "", unit="USD"),
+            c("net_usd_sector", "energy", "NOT_SET", 1_200_000.0, None, None,
+              "no limit set in config/limits.yaml (desk_limits.net_usd_per_sector)", unit="USD"),
+            c("exchange_spot_month", "ICE:B", "N/A", None, 500.0, None, "COH7 Comdty: no delta", source="exchange")]
+
+
+def test_commodity_rows_are_grouped_by_sector_after_the_currencies_with_their_contracts_on_hover():
+    r = _commodity_result()
+    body = risk.body(r)
+    table = _table(body, risk.TABLE_ID)
+    # the parts only: currencies and metals in the engine's order, then the commodities by sector
+    assert [rec["underlyer"] for rec in table.data] == [
+        "CHF", "SEK", "XAU", "WTI crude (NYMEX:CL)", "Brent (ICE:B)", "Corn (CBOT:ZC)"]
+    assert [rec["kind"] for rec in table.data] == ["FX", "FX", "Metal", "Commodity", "Commodity", "Commodity"]
+    assert [rec["sector"] for rec in table.data] == [None, None, None, "energy", "energy", "agriculture"]
+    assert risk.part_rows(r)[3]["key"] == "COMMODITY:NYMEX:CL"
+    cl, brent = table.data[3], table.data[4]
+    assert cl["net_usd"] == 900_000.0 and cl["vol_blended_ann_usd"] == 1_234_567.8
+    # the contracts on the name's hover, the one left out with its reason
+    hover = table.tooltip_data[3]["underlyer"]["value"]
+    assert "WTI crude (NYMEX:CL), energy; net 9 delta lots" in hover
+    assert "CLZ26 Comdty (FUTURE): 8 delta lots, in the series, 1200 days" in hover
+    assert "CLF27 Comdty (FUTURE): 1 delta lots, not in the series: contract CLF27 Comdty: no history" in hover
+    # the crisis-window fallback on hover of the vols, and in the note
+    assert table.tooltip_data[3]["vol_blended_ann_usd"]["value"] == CRISIS
+    assert table.tooltip_data[3]["vol_crisis_ann_usd"]["value"] == CRISIS
+    assert cl["note"].startswith("excludes 1 of 2 contracts with no history") and CRISIS in cl["note"]
+    # a commodity with no history: n/a with its reason, never zero; its delta stands
+    assert brent["net_usd"] == 300_000.0 and brent["vol_blended_ann_usd"] == "n/a"
+    assert table.tooltip_data[4]["vol_blended_ann_usd"]["value"] == "no history: ICE:B not in the research database"
+    # the Book: the parts' series, its Net / Gross USD the currency and metal rows' with the commodities' on hover
+    footer = _table(body, f"{risk.TABLE_ID}-footer")
+    assert footer.data[0]["note"] == ("4 row(s)' daily P&L summed date by date, correlation embedded: CHF, XAU, NYMEX:CL, "
+                                      "CBOT:ZC; 3 view(s) below not added")
+    assert "commodity rows' net USD is 700,000" in footer.tooltip_data[0]["net_usd"]["value"]
+    assert "Commodity net USD card" in footer.tooltip_data[0]["net_usd"]["value"]
+
+
+def test_sector_and_spread_views_are_marked_and_kept_out_of_the_book_table():
+    r = _commodity_result()
+    body = risk.body(r)
+    main = _table(body, risk.TABLE_ID)
+    assert not any(rec["kind"].endswith("(view)") for rec in main.data)
+    views = _table(body, risk.VIEWS_TABLE_ID)
+    assert [(rec["underlyer"], rec["kind"]) for rec in views.data] == [
+        ("energy", "Sector (view)"), ("agriculture", "Sector (view)"), ("CL Z6/F7", "Spread (view)")]
+    assert views.data[0]["net_usd"] == 1_200_000.0 and views.data[2]["net_usd"] == 100_000.0
+    text = _text(body)
+    assert "Views (not added to the Book)" in text and "must never be summed" in text
+    # a view's parts and legs on its name's hover
+    assert "View, not added to the Book: the sum of COMMODITY:NYMEX:CL" in views.tooltip_data[0]["underlyer"]["value"]
+    spread_hover = views.tooltip_data[2]["underlyer"]["value"]
+    assert "spread cal-1 (calendar)" in spread_hover and "CLF27 Comdty (FUTURE): -1 open lots, not in the series" in spread_hover
+    # the view rows are styled apart (the page background, italic) on their label columns
+    assert {"if": {"column_id": "kind"}, "backgroundColor": "var(--page)", "fontStyle": "italic"} in views.style_data_conditional
+    # no views: no second table
+    r2 = _commodity_result()
+    r2["underlyers"] = [x for x in r2["underlyers"] if x["role"] == "part"]
+    assert not [n for n in _walk(risk.body(r2)) if getattr(n, "id", None) == risk.VIEWS_TABLE_ID]
+
+
+def test_cards_and_caption_carry_the_commodity_book_and_the_vol_target_note():
+    r = _commodity_result()
+    body = risk.body(r)
+    cards = _cards(body)
+    assert cards["Commodity net USD"][0] == "700,000" and cards["Commodity gross USD"][0] == "1,700,000"
+    assert "Kept apart from the currency and metal net" in cards["Commodity net USD"][2]
+    assert cards["Blended vol (annual)"][1] == f"27.4% of the 4,500,000 target (placeholder); {CRISIS}"
+    lines = risk.caption_lines(r)
+    assert ("Commodity history: /research/rvapp.db, settlements 2020-01-02 to 2026-09-21 (180 roots, 9000 contracts); "
+            "used to 2026-09-21, lag-2 date 2026-09-17.") in lines
+    assert f"Vol target 4,500,000: {VOL_TARGET_NOTE}." in lines
+    # a partial commodity delta: the figure with the reason as its note and hover
+    r["book"].update(commodity_reason="excludes 1 of 3 commodities with no USD delta: ICE:B: no spot for USDCNH")
+    cards = _cards(risk.body(r))
+    assert cards["Commodity net USD"][1] == "+ = long; excludes 1 of 3 commodities with no USD delta: ICE:B: no spot for USDCNH"
+    # no commodity delta at all: n/a with the engine's reason, never zero
+    r["book"].update(commodity_net_usd=NAN, commodity_gross_usd=NAN, commodity_reason="no open commodity positions on 2026-09-22")
+    cards = _cards(risk.body(r))
+    assert cards["Commodity net USD"][0] == "n/a" and cards["Commodity net USD"][1] == "no open commodity positions on 2026-09-22"
+    # the commodity rows' missing entries never stand in for the currency and metal delta's reason
+    r["book"]["net_usd"] = NAN
+    assert _cards(risk.body(r))["Net USD delta"][1] == "no currency or metal position with a USD delta"
+
+
+def test_commodity_scenarios_show_totals_by_sector_with_na_and_missing_on_hover():
+    body = risk.body(_commodity_result())
+    table = _table(body, risk.COMMODITY_SCENARIO_TABLE_ID)
+    assert [c["id"] for c in table.columns] == ["scenario", "kind", "dates", "total_usd", "sector_0", "sector_1", "note"]
+    assert [c["name"] for c in table.columns][4:6] == ["energy", "agriculture"]
+    energy, grains, replay, cnh = table.data
+    assert energy["total_usd"] == -90_000.0 and energy["sector_0"] == -90_000.0 and energy["sector_1"] is None
+    assert energy["kind"] == "Outright" and energy["dates"] is None
+    assert energy["note"] == "excludes 1 position(s) with no figure (on the total's hover)"
+    assert table.tooltip_data[0]["total_usd"]["value"] == ("excludes 1 position(s) with no figure: "
+                                                           "BZ1: no USD delta on the day")
+    assert table.tooltip_data[0]["scenario"]["value"] == "crude and products down 10%"
+    assert grains["sector_1"] == -25_000.0 and table.tooltip_data[1] == {}
+    # n/a with its reason, never 0; a replay names its dates
+    assert replay["total_usd"] == "n/a" and replay["kind"] == "Replay" and replay["dates"] == "2020-02-20 to 2020-04-21"
+    assert table.tooltip_data[2]["total_usd"]["value"] == "the commodity settlement history is not available"
+    assert cnh["kind"] == "FX" and cnh["total_usd"] == 1_500.0 and "no sector split" in cnh["note"]
+    text = _text(body)
+    assert "first order on delta" in text and "their gamma is not in it" in text
+    assert "Not valued:" in text and "2020 Covid: n/a, the commodity settlement history is not available" in text
+    # expandable: one collapsed block per scenario with its breakdowns
+    detail = next(n for n in _walk(body) if getattr(n, "id", None) == risk.COMMODITY_SCENARIO_DETAIL_ID)
+    blocks = [n for n in detail.children if type(n).__name__ == "Details"]
+    assert len(blocks) == 4 and all(b.open is False for b in blocks)
+    assert blocks[0].children[0].children == "Energy -10%: (90,000)"
+    first = _text(blocks[0])
+    assert "By commodity" in first and "By contract" in first and "By spread" in first
+    assert "Not in the total (1):" in first and "BZ1: no USD delta on the day" in first
+    tables = [n for n in _walk(blocks[0]) if isinstance(n, dash_table.DataTable)]
+    by_contract = next(t for t in tables if any(c["id"] == "move" for c in t.columns))
+    assert by_contract.data[0]["move"] == -0.10 and by_contract.data[0]["pnl_usd"] == -90_000.0
+    by_spread = next(t for t in tables if any(c["id"] == "spread_pnl_usd" for c in t.columns))
+    assert by_spread.data[0]["pnl_usd"] == "n/a"
+    assert by_spread.tooltip_data[0]["pnl_usd"]["value"] == "COH7 Comdty: no USD delta on the day"
+    assert blocks[2].children[0].children == "2020 Covid: n/a (the commodity settlement history is not available)"
+    by_ccy = next(t for t in (n for n in _walk(blocks[3]) if isinstance(n, dash_table.DataTable)))
+    assert by_ccy.data[0]["currency"] == "CNY" and by_ccy.data[0]["pnl_change_usd"] == 1_500.0
+    # unavailable stress: the reason, never an empty table
+    r = _commodity_result(commodity_scenarios={"as_of": AS_OF, "available": False, "config": "", "scenarios": [],
+                                               "reasons": ["the stress scenarios could not be read: bad kind"]})
+    assert "Commodity stress unavailable: the stress scenarios could not be read: bad kind." in _text(risk.body(r))
+
+
+def test_margin_is_labelled_an_estimate_with_credits_and_never_zero_for_a_missing_rate():
+    body = risk.body(_commodity_result(), _margin(), _checks())
+    section = next(n for n in _walk(body) if getattr(n, "id", None) == risk.MARGIN_LIMITS_ID)
+    text = _text(section)
+    assert "Margin (estimate, not exchange SPAN)" in text
+    assert "Basis: estimate (config/limits.yaml), not exchange SPAN." in text and "placeholders" in text
+    table = _table(section, risk.MARGIN_TABLE_ID)
+    assert [c["name"] for c in table.columns][1:4] == ["Gross charge USD", "Spread credit USD", "Margin USD (estimate)"]
+    ags, energy = table.data
+    assert energy["margin_usd"] == 80_000.0 and energy["spread_credit_usd"] == 10_000.0
+    # every position of the sector without a rate: n/a with the reason, not the engine's 0 over nothing
+    assert ags["gross_charge_usd"] == "n/a" and ags["margin_usd"] == "n/a"
+    assert "no outright rate set" in table.tooltip_data[0]["margin_usd"]["value"]
+    assert ags["note"] == "excludes 1 of 1 positions with no margin figure"
+    footer = _table(section, f"{risk.MARGIN_TABLE_ID}-footer")
+    assert footer.data[0]["label"] == "Book" and footer.data[0]["margin_usd"] == 80_000.0
+    assert footer.data[0]["note"] == "excludes 1 of 3 positions with no margin figure"
+    roots = _table(section, risk.MARGIN_ROOT_TABLE_ID)
+    assert roots.data[0]["label"] == "WTI crude (NYMEX:CL)" and roots.data[0]["rate"] == "10% of |delta USD|"
+    assert roots.data[1]["rate"] == "not set in config/limits.yaml"
+    spreads = _table(section, risk.MARGIN_SPREAD_TABLE_ID)
+    assert spreads.data[0]["credit_pct"] == "not set" and spreads.data[0]["charge_on_matched_usd"] == 20_000.0
+    # unavailable: the reason
+    out = _text(risk.margin_section({"available": False, "reasons": ["config/limits.yaml refused: bad rate"]}))
+    assert "Margin estimate unavailable: config/limits.yaml refused: bad rate." in out
+
+
+def test_limit_levels_are_coloured_and_not_set_says_so():
+    section = risk.limits_section(_checks())
+    table = _table(section, risk.LIMITS_TABLE_ID)
+    assert [rec["level"] for rec in table.data] == ["BREACH", "WARN", "OK", "not set in config/limits.yaml", "n/a"]
+    styles = table.style_data_conditional
+    assert {"if": {"column_id": "level", "filter_query": "{level} = 'BREACH'"}, **risk.LEVEL_STYLES["BREACH"]} in styles
+    assert risk.LEVEL_STYLES["BREACH"]["backgroundColor"] == "#c62828"                       # red
+    assert {"if": {"column_id": "level", "filter_query": "{level} = 'WARN'"}, **risk.LEVEL_STYLES["WARN"]} in styles
+    assert risk.LEVEL_STYLES["WARN"]["color"] == "#b26a00"                                   # amber
+    assert {"if": {"column_id": "level", "filter_query": "{level} = 'OK'"}, **risk.LEVEL_STYLES["OK"]} in styles
+    assert {"if": {"column_id": "level", "filter_query": "{level} = 'not set in config/limits.yaml'"},
+            **risk.LEVEL_STYLES["NOT_SET"]} in styles
+    assert risk.LEVEL_STYLES["NOT_SET"]["color"] == "#6b7280"                                # grey
+    breach, _warn, _ok, not_set, na = table.data
+    assert breach["value"] == 120.0 and breach["limit_value"] == 100.0 and breach["used_pct"] == 120.0
+    assert not_set["value"] == 1_200_000.0 and not_set["limit_value"] == "not set" and not_set["used_pct"] is None
+    assert not_set["reason"] == "no limit set in config/limits.yaml (desk_limits.net_usd_per_sector)"
+    assert na["value"] == "n/a" and table.tooltip_data[4]["value"]["value"] == "COH7 Comdty: no delta"
+    assert table.tooltip_data[0]["limit"]["value"] == "basis of gross_lots"
+    assert "1 BREACH, 1 WARN, 1 OK, 1 not set, 1 n/a" in _text(section)
+
+
+def test_the_tab_builds_when_the_commodity_history_is_unavailable():
+    from dash._utils import to_json
+    r = _commodity_result()
+    why = "no research database: tried /a/Commodity Dashboard/rvapp/data/rvapp.db"
+    r["commodity_history"] = {"available": False, "path": "", "reason": why, "first_date": None, "last_date": None,
+                              "note": "", "candidates": [], "roots": 0, "contracts": 0, "fx_pairs": [], "used_to": None,
+                              "lag2_date": None, "positions_note": ""}
+    for row in r["underlyers"]:
+        if row["kind"] in ("COMMODITY", "SECTOR", "SPREAD"):
+            row.update(_nan_metrics(f"no history: {why}"), reason=f"no history: {why}", vol_note="")
+    body = risk.body(r, None, None)
+    to_json(body)                                            # serialises: no NaN or numpy scalar left
+    text = _text(body)
+    assert f"Commodity history unavailable: {why}. The commodity rows' risk figures are n/a" in text
+    table = _table(body, risk.TABLE_ID)
+    cl = next(rec for rec in table.data if "NYMEX:CL" in rec["underlyer"])
+    assert cl["vol_blended_ann_usd"] == "n/a" and cl["net_usd"] == 900_000.0
+    assert "The margin estimate was not computed." in text and "The limit checks were not computed." in text
+    # an engine with no commodity blocks at all (an FX-only result) still builds
+    to_json(risk.body(_result()))
+    assert "The commodity scenarios were not computed" in _text(risk.body(_result()))
+
+
+def test_render_passes_the_margin_and_limits_to_the_body(tmp_path, monkeypatch):
+    stub = types.ModuleType("ui.app")
+    stub.connect_readonly = lambda path: schema.connect(str(path))
+    monkeypatch.setitem(sys.modules, "ui.app", stub)
+    monkeypatch.setattr(risk, "book_risk", lambda conn, as_of: _commodity_result())
+    monkeypatch.setattr(risk, "margin_and_limits", lambda conn, as_of: (_margin(), _checks()))
+    body = risk.render(AS_OF, tmp_path / "risk.db")
+    assert _table(body, risk.MARGIN_TABLE_ID).data[1]["margin_usd"] == 80_000.0
+    assert _table(body, risk.LIMITS_TABLE_ID).data[0]["level"] == "BREACH"
+
+
+def test_margin_and_limits_on_an_empty_book_read_the_engine_once_each():
+    conn = schema.connect(":memory:")
+    margin, checks = risk.margin_and_limits(conn, AS_OF)
+    conn.close()
+    assert margin["available"] is True and margin["basis"] == "estimate (config/limits.yaml), not exchange SPAN"
+    assert checks and all(c["level"] in ("NOT_SET", "OK", "WARN", "BREACH", "N/A") for c in checks)
+    section = risk.margin_limits_section(margin, checks)
+    footer = _table(section, f"{risk.MARGIN_TABLE_ID}-footer")
+    assert footer.data[0]["note"] == "no open commodity position"
 
 
 # --------------------------------------------------------------------------- end to end

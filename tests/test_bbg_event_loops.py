@@ -240,3 +240,43 @@ def test_vol_request_type_assumption_needs_a_real_per_security_answer():
          "status": "MISSING", "bbg_status": "SECURITY_ERROR", "detail": "Unknown/Invalid Security"}])
     rows = {r["assumption_id"]: r for r in assess_ticker_assumptions(rejected)}
     assert rows["request_type"]["outcome"] == "OK" and rows["on_tenor"]["outcome"] == "SECURITY_ERROR"
+
+
+# --------------------------------------------------------------------------- LME pillars (fwd_curve)
+def test_lme_pillars_request_parses_price_date_errors_and_ignores_stale_replies(fake_blpapi):
+    from data.bloomberg.fwd_curve import LME_PROMPT_DATE_FIELD, request_lme_pillars
+    session = _Session()
+    session.script = [
+        ([{"securityData": [{"security": "LMCADY Comdty", "fieldData": {"PX_LAST": 1.0}}]}], "RESPONSE", _Cid("old")),
+        ([{"securityData": [
+            {"security": "LMCADY Comdty",
+             "fieldData": {"PX_LAST": 9800.5, LME_PROMPT_DATE_FIELD: datetime.date(2026, 9, 28)}}]}],
+         "PARTIAL_RESPONSE", "own"),
+        ([{"securityData": [
+            {"security": "LMCADS03 Comdty", "fieldData": {"PX_LAST": 9900.0}},
+            {"security": "LPF7 Comdty", "fieldData": {},
+             "fieldExceptions": [{"fieldId": "PX_LAST", "errorInfo": {"message": "Field not applicable"}}]},
+            {"security": "LPZZ Comdty", "securityError": {"message": "Unknown/Invalid Security"}},
+        ]}], "RESPONSE", "own"),
+    ]
+    tickers = ["LMCADY Comdty", "LMCADS03 Comdty", "LPF7 Comdty", "LPZZ Comdty"]
+    out = request_lme_pillars(fake_blpapi, session, session, tickers, timeout_ms=10)
+    assert out["LMCADY Comdty"] == {"value": 9800.5, "prompt_date": "2026-09-28", "error": ""}
+    assert out["LMCADS03 Comdty"] == {"value": 9900.0, "prompt_date": None, "error": ""}
+    assert out["LPF7 Comdty"]["value"] is None and "Field not applicable" in out["LPF7 Comdty"]["error"]
+    assert out["LPZZ Comdty"]["value"] is None and "Unknown/Invalid Security" in out["LPZZ Comdty"]["error"]
+    req, cid = session.sent[-1]
+    assert cid is not None and req.lists["securities"].items == tickers
+    assert req.lists["fields"].items == ["PX_LAST", LME_PROMPT_DATE_FIELD]
+
+
+def test_lme_pillars_response_error_is_immediate_and_silence_is_a_timeout(fake_blpapi):
+    from data.bloomberg.fwd_curve import request_lme_pillars
+    session = _Session()
+    session.script = [([{"responseError": {"message": "Not entitled"}}], "RESPONSE", "own")]
+    out = request_lme_pillars(fake_blpapi, session, session, ["LMCADY Comdty"], timeout_ms=10)
+    assert out["LMCADY Comdty"]["value"] is None and "Not entitled" in out["LMCADY Comdty"]["error"]
+    assert session.next_calls == 1
+    session = _Session()
+    out = request_lme_pillars(fake_blpapi, session, session, ["LMCADY Comdty"], timeout_ms=10)
+    assert out["LMCADY Comdty"] == {"value": None, "prompt_date": None, "error": "TIMEOUT"}

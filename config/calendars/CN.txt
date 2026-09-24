@@ -1,16 +1,22 @@
 # CN: the Chinese futures exchanges (SHFE, INE, DCE, ZCE, GFEX): full-day closures for
-# 2026 and 2027, weekdays only. They close on the State Council's public holidays and
+# 2026 to 2028, weekdays only. They close on the State Council's public holidays and
 # NEVER open on the weekend make-up working days (tiaoxiu), so those are not listed.
 # The night session before each holiday is cancelled: that is not a full-day closure
 # and is not in this file.
 # Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
 # against the exchanges' published holiday notices before it is relied on.
 # 2026: the State Council notice of November 2025 as recalled.
-# 2027: the State Council announces it late in 2026; every 2027 date below is the likely
-# arrangement worked out from the lunar calendar and the 2025 holiday rules (Spring
-# Festival four legal days from the Eve, Labour Day two), marked unverified. Mid-week
-# festivals (Dragon Boat, Mid-Autumn 2027) may gain a bridge day.
-# coverage: 2026-01-01 to 2027-12-31
+# 2027 and 2028: the State Council announces each year's arrangement only late in the
+# year before, so every date from 2027 on is ESTIMATED, marked '# estimated' (and
+# unverified): worked out from the lunar calendar and the holiday rules in force since
+# 2025 (New Year's Day one legal day, Spring Festival four from the Eve, Qingming one,
+# Labour Day two, Dragon Boat one, Mid-Autumn one, National Day three; a legal day on a
+# weekend moved to a weekday; the Spring Festival, Labour Day and National Day breaks
+# stretched to eight or so days with make-up weekends, as in 2025 and 2026). Mid-week
+# festivals may gain a bridge day that is not listed (Qingming 2028 could add Monday 3
+# April). 2028 lunar dates: New Year 26 January, Dragon Boat 28 May (a Sunday), Mid-Autumn
+# 3 October (inside the National Day week); Qingming falls on 4 April.
+# coverage: 2026-01-01 to 2028-12-31
 
 2026-01-01  # New Year's Day
 2026-01-02  # New Year's Day holiday
@@ -32,21 +38,39 @@
 2026-10-06  # National Day holiday
 2026-10-07  # National Day holiday
 
-2027-01-01  # New Year's Day  # unverified
-2027-02-05  # Spring Festival (Eve)  # unverified
-2027-02-08  # Spring Festival  # unverified
-2027-02-09  # Spring Festival  # unverified
-2027-02-10  # Spring Festival  # unverified
-2027-02-11  # Spring Festival  # unverified
-2027-02-12  # Spring Festival  # unverified
-2027-04-05  # Qingming  # unverified
-2027-05-03  # Labour Day holiday (1 May is a Saturday)  # unverified
-2027-05-04  # Labour Day holiday  # unverified
-2027-05-05  # Labour Day holiday  # unverified
-2027-06-09  # Dragon Boat Festival  # unverified
-2027-09-15  # Mid-Autumn Festival  # unverified
-2027-10-01  # National Day  # unverified
-2027-10-04  # National Day holiday  # unverified
-2027-10-05  # National Day holiday  # unverified
-2027-10-06  # National Day holiday  # unverified
-2027-10-07  # National Day holiday  # unverified
+2027-01-01  # New Year's Day  # estimated  # unverified
+2027-02-05  # Spring Festival (Eve)  # estimated  # unverified
+2027-02-08  # Spring Festival  # estimated  # unverified
+2027-02-09  # Spring Festival  # estimated  # unverified
+2027-02-10  # Spring Festival  # estimated  # unverified
+2027-02-11  # Spring Festival  # estimated  # unverified
+2027-02-12  # Spring Festival  # estimated  # unverified
+2027-04-05  # Qingming  # estimated  # unverified
+2027-05-03  # Labour Day holiday (1 May is a Saturday)  # estimated  # unverified
+2027-05-04  # Labour Day holiday  # estimated  # unverified
+2027-05-05  # Labour Day holiday  # estimated  # unverified
+2027-06-09  # Dragon Boat Festival  # estimated  # unverified
+2027-09-15  # Mid-Autumn Festival  # estimated  # unverified
+2027-10-01  # National Day  # estimated  # unverified
+2027-10-04  # National Day holiday  # estimated  # unverified
+2027-10-05  # National Day holiday  # estimated  # unverified
+2027-10-06  # National Day holiday  # estimated  # unverified
+2027-10-07  # National Day holiday  # estimated  # unverified
+
+2028-01-03  # New Year's Day (in lieu; 1 January is a Saturday)  # estimated  # unverified
+2028-01-25  # Spring Festival (Eve)  # estimated  # unverified
+2028-01-26  # Spring Festival (Lunar New Year's Day)  # estimated  # unverified
+2028-01-27  # Spring Festival  # estimated  # unverified
+2028-01-28  # Spring Festival  # estimated  # unverified
+2028-01-31  # Spring Festival holiday  # estimated  # unverified
+2028-02-01  # Spring Festival holiday  # estimated  # unverified
+2028-04-04  # Qingming  # estimated  # unverified
+2028-05-01  # Labour Day  # estimated  # unverified
+2028-05-02  # Labour Day  # estimated  # unverified
+2028-05-03  # Labour Day holiday  # estimated  # unverified
+2028-05-29  # Dragon Boat Festival (in lieu; 28 May is a Sunday)  # estimated  # unverified
+2028-10-02  # National Day holiday (1 October is a Sunday)  # estimated  # unverified
+2028-10-03  # National Day and Mid-Autumn Festival  # estimated  # unverified
+2028-10-04  # National Day holiday  # estimated  # unverified
+2028-10-05  # National Day holiday  # estimated  # unverified
+2028-10-06  # National Day holiday  # estimated  # unverified

@@ -1,12 +1,13 @@
 # HK: Hong Kong Exchanges (HKEX derivatives, including its metals and CNH contracts):
-# full-day closures for 2026 and 2027, weekdays only: Hong Kong's general holidays,
+# full-day closures for 2026 to 2028, weekdays only: Hong Kong's general holidays,
 # with the next day in lieu of a Sunday holiday (a Saturday holiday gets none).
 # Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
 # against HKEX's published trading calendar before it is relied on. The Christmas Eve,
 # New Year's Eve and Lunar New Year's Eve half days are not full-day closures and are
 # not listed; typhoon and rainstorm closures cannot be listed ahead.
-# The lunar holidays for 2027 are worked out from the lunar calendar, marked unverified.
-# coverage: 2026-01-01 to 2027-12-31
+# The lunar holidays for 2027 and 2028 are worked out from the lunar calendar, marked
+# unverified (2028 ones also "# estimated"; 2028 has a leap fifth lunar month).
+# coverage: 2026-01-01 to 2028-12-31
 
 2026-01-01  # New Year's Day
 2026-02-17  # Lunar New Year's Day
@@ -39,3 +40,21 @@
 2027-10-01  # National Day
 2027-10-08  # Chung Yeung Festival  # unverified
 2027-12-27  # The first weekday after Christmas Day (25 December is a Saturday)
+
+2028-01-26  # Lunar New Year's Day  # estimated  # unverified
+2028-01-27  # Second day of Lunar New Year  # estimated  # unverified
+2028-01-28  # Third day of Lunar New Year  # estimated  # unverified
+2028-04-04  # Ching Ming Festival  # estimated  # unverified
+2028-04-14  # Good Friday
+# 15 April 2028, the day following Good Friday, is a Saturday
+2028-04-17  # Easter Monday
+2028-05-01  # Labour Day
+2028-05-02  # Birthday of the Buddha  # estimated  # unverified
+2028-05-29  # The day following Tuen Ng Festival (28 May is a Sunday)  # estimated  # unverified
+# 1 July 2028, HKSAR Establishment Day, is a Saturday
+2028-10-02  # The day following National Day (1 October is a Sunday)
+2028-10-04  # The day following Mid-Autumn Festival  # estimated  # unverified
+2028-10-26  # Chung Yeung Festival  # estimated  # unverified
+2028-12-25  # Christmas Day
+2028-12-26  # The first weekday after Christmas Day
+# 1 January 2028 is a Saturday

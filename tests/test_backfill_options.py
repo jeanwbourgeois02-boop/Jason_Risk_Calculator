@@ -293,8 +293,11 @@ def test_status_file_carries_an_options_block_per_worked_day(tmp_path, monkeypat
     assert set(block["options"]) == {"2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"}
     assert list(block["options"]) == sorted(block["options"], reverse=True)
     # a closed-out option is under its own head, never among the skipped (2026-09-22)
-    assert block["options"]["2026-09-18"] == {"priced": 0, "skipped": skipped, "note": "", "closed_out": ["o7", "o8"]}
-    assert block["options"]["2026-09-14"] == {"priced": None, "skipped": [], "note": "", "closed_out": []}
+    # (2026-09-24) the options on commodity futures among them: None where the pricer says nothing of them
+    assert block["options"]["2026-09-18"] == {"priced": 0, "skipped": skipped, "note": "", "closed_out": ["o7", "o8"],
+                                              "futures_options_priced": None}
+    assert block["options"]["2026-09-14"] == {"priced": None, "skipped": [], "note": "", "closed_out": [],
+                                              "futures_options_priced": None}
     # and an "inputs" block ("rates", with the swaps' pricing, until 2026-09-24): the day's smile /
     # curve rows from the history
     assert "rates" not in block and set(block["inputs"]) == set(block["options"])

@@ -1,0 +1,91 @@
+# Margin and limits (margin-limits lane: engine/limits/, read by engine/limits/config.py::load_limits).
+#
+# EVERY NUMBER IN THIS FILE IS THE USER'S TO SET. The app has no exchange margin feed (no SPAN
+# files) and no verified exchange position limits. The margin rates below are PLACEHOLDERS so the
+# machinery shows something; they are not the exchange's and not the clearer's. The margin the
+# Risk tab shows is labelled "estimate (config/limits.yaml), not exchange SPAN" everywhere.
+# Replace a placeholder with a real figure, or set it to null to have that commodity shown as n/a.
+#
+# The file is checked when it is read: a rate outside 0..1, a negative limit, a sector or contract
+# root that config/contracts.csv does not know, or a key this file does not document is refused
+# (the Risk tab then shows the error in place of the figures). Root ids are config/contracts.csv's
+# root_id ('NYMEX:CL', 'SHFE:CU'); sectors are its sector column (energy, metals, agriculture,
+# ferrous, chemicals, freight).
+
+# ---------------------------------------------------------------- initial margin (an estimate)
+# Margin follows exposure: each contract month is charged on its net delta (futures, LME
+# forwards, and options at their delta, netted within the month), never on the notional of
+# offsetting months netted together. Per contract month:
+#   |net delta USD| x outright rate            (a rate: a fraction of the USD delta), or
+#   |net delta lots| x USD per lot             (when usd_per_lot names the root: this wins).
+# Precedence: usd_per_lot[root], then outright_rate.roots[root], then outright_rate.sectors[sector];
+# a commodity with none of them is n/a with that reason, left out of the sums.
+# Where to find real figures: CME Group's margin pages (performance bonds per contract, outright
+# and spread), ICE Futures US / Europe margin rates (SPAN parameters), LME Clear's margin
+# parameters, and the Chinese exchanges' trading margin ratio per contract (a % of contract value,
+# which fits outright_rate.roots directly). The clearer's own figures, when Jason has them, beat all
+# of these.
+margin:
+  outright_rate:
+    sectors:
+      energy: 0.10        # placeholder, not the exchange's
+      metals: 0.08        # placeholder, not the exchange's
+      agriculture: 0.07   # placeholder, not the exchange's
+      ferrous: 0.10       # placeholder, not the exchange's
+      chemicals: 0.10     # placeholder, not the exchange's
+      freight: null       # not set: a freight position is n/a until a rate is given
+    roots: {}             # e.g. 'SHFE:CU: 0.09' (a fraction of the USD delta)
+  usd_per_lot: {}         # e.g. 'NYMEX:CL: 6500' (USD per lot of net delta)
+
+  # Spread credit: the share of the margin on a spread's matched lots that is taken off. A
+  # calendar (same root, two months) takes `calendar`; any other spread takes its template's
+  # family (config/spreads/: benchmark, processing, substitution). A bundle or hand-pinned spread
+  # takes the family of the calendar or template that sizes it, else no credit. The lots a spread
+  # leaves outright (its leftover) get no credit: they are charged at the outright rate.
+  spread_credit:
+    calendar: 0.70        # placeholder, not the exchange's
+    benchmark: 0.50       # placeholder, not the exchange's
+    processing: 0.40      # placeholder, not the exchange's
+    substitution: 0.30    # placeholder, not the exchange's
+
+# ---------------------------------------------------------------- limits
+# Every limit starts unset (null) and is shown as NOT_SET. Nothing here is pre-filled.
+# A limit is compared with the absolute value of the position; WARN from warn_fraction of it,
+# BREACH above it.
+warn_fraction: 0.8
+
+# The desk's own limits. Lots are futures-equivalent: a future or LME forward counts its lots,
+# an option its delta lots.
+desk_limits:
+  gross_lots: null            # book: sum of |lots| over every open contract position
+  gross_usd: null             # book: sum of |USD delta| over every open contract position
+  net_usd_per_commodity:      # |net USD delta| of one contract root, all months
+    default: null
+    roots: {}
+  net_usd_per_sector:         # |net USD delta| of one sector
+    default: null
+    sectors: {}
+  lots_per_contract_month:    # |net lots| of one root in one contract month
+    default: null
+    roots: {}
+
+# The exchanges' position limits, in lots, per contract root:
+#   spot_month   the contract month whose last trade date is the nearest after the as-of date,
+#                among the months the book holds (a nearer month the book does not hold has no
+#                position, so it cannot breach);
+#   single_month the largest |net lots| in any one contract month;
+#   all_months   |net lots| over all months of the root.
+# Options count at their delta lots (the exchanges aggregate futures-equivalent positions).
+# Where Jason finds the numbers (never filled in from memory here):
+#   CME / NYMEX / COMEX / CBOT: CME Rulebook Chapter 5, the Position Limit, Position
+#     Accountability and Reportable Level Table; the CFTC's federal spot-month limits (17 CFR
+#     Part 150) for the referenced agricultural, energy and metals contracts.
+#   ICE Futures US and ICE Futures Europe: each exchange's published position limits and
+#     accountability levels.
+#   LME: the position limits the LME publishes under MiFID II (per metal, spot and other months).
+#   SHFE / INE / DCE / ZCE / GFEX: each exchange's risk control rules; limits are per client and
+#     step down into the month before delivery and the delivery month, so the spot_month figure
+#     there is the tightest one that applies on the day.
+# Example (commented out, not a real limit):
+#   NYMEX:CL: {spot_month: null, single_month: null, all_months: null}
+exchange_limits: {}

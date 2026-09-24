@@ -1,13 +1,14 @@
 # JP: Osaka Exchange (OSE, Japan Exchange Group: gold, platinum, rubber and the other
-# commodity futures moved from TOCOM): full-day closures for 2026 and 2027, weekdays
+# commodity futures moved from TOCOM): full-day closures for 2026 to 2028, weekdays
 # only: Japan's national holidays (with substitute and in-between "citizens'" holidays)
 # plus the exchange's year-end and New Year closure (31 December to 3 January).
 # Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
 # against JPX's published market holidays before it is relied on.
 # OSE runs "holiday trading" in some derivatives on some national holidays; those trades
 # take the next business day's trade date, so the day is still not a business day here.
-# The equinox days are fixed by the National Astronomical Observatory a year ahead.
-# coverage: 2026-01-01 to 2027-12-31
+# The equinox days are fixed by the National Astronomical Observatory a year ahead; the
+# 2028 ones (20 March, 22 September) are the astronomical dates, marked unverified.
+# coverage: 2026-01-01 to 2028-12-31
 
 2026-01-01  # New Year's Day
 2026-01-02  # Year-end / New Year closure
@@ -46,3 +47,20 @@
 2027-11-03  # Culture Day
 2027-11-23  # Labour Thanksgiving Day
 2027-12-31  # Year-end closure
+
+2028-01-03  # Year-end / New Year closure (1 January is a Saturday)
+2028-01-10  # Coming of Age Day
+2028-02-11  # National Foundation Day
+2028-02-23  # Emperor's Birthday
+2028-03-20  # Vernal Equinox Day  # unverified
+2028-05-03  # Constitution Day
+2028-05-04  # Greenery Day
+2028-05-05  # Children's Day
+2028-07-17  # Marine Day
+2028-08-11  # Mountain Day
+2028-09-18  # Respect for the Aged Day
+2028-09-22  # Autumnal Equinox Day  # unverified
+2028-10-09  # Sports Day
+2028-11-03  # Culture Day
+2028-11-23  # Labour Thanksgiving Day
+# Showa Day (29 April) and 31 December 2028 fall on weekends

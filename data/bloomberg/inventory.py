@@ -104,6 +104,54 @@ def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False
     return out
 
 
+LME_CURVE = "LME_CURVE"     # data.bloomberg.library.LME_CURVE: an inventory item, not a mark_type
+
+
+def _lme_curve_items(conn: sqlite3.Connection, as_of: str, historical: bool = False,
+                     include_unrequestable: bool = False) -> List[dict]:
+    """One item per LME metal whose curve the book needs on `as_of` (library kind LME_CURVE,
+    2026-09-24): {instrument_id: the root id, settle_date: as_of, mark_type: 'LME_CURVE'},
+    with a `reason` key when it cannot be asked for (only with `include_unrequestable`)."""
+    from data.bloomberg import library
+    out, seen = [], set()
+    for r in library.needed_on(conn, as_of, historical=historical, include_unrequestable=include_unrequestable):
+        if r["kind"] != library.LME_CURVE or r["key"] in seen:
+            continue
+        seen.add(r["key"])
+        item = {"instrument_id": r["key"], "settle_date": as_of, "mark_type": LME_CURVE}
+        if not r.get("requestable", True):
+            item["reason"] = r["reason"]
+        out.append(item)
+    return sorted(out, key=lambda i: i["instrument_id"])
+
+
+def lme_curve_status(conn: sqlite3.Connection, day: str, root_id: str, today: Optional[str] = None) -> dict:
+    """Is `root_id`'s LME curve of `day` on file? The rule (2026-09-24): an LME curve is
+    complete when its two anchors are official that day -- the cash price (SPOT, settle_date
+    = day) and the 3-month outright (FWD_OUTRIGHT at the 3-month date of that day's curve,
+    engine.lme.lme_curve_tickers' '3M' pillar). The monthly prompts between and beyond them
+    refine it but are not required: every prompt up to three months lies between cash and 3M,
+    and the curve's shape there is what the valuation reads. On a day before `today` each
+    anchor counts only at the close (`backfill.is_close_row` given the root id: an LME row's
+    close is 17:00 New York, the daily close, not the FX 15:00). {complete, missing: ['cash' | '3M' ...], snapped_at (the later anchor's, ''
+    when missing)}."""
+    from data.bloomberg import library
+    from data.bloomberg.backfill import is_close_row
+    if today is None:
+        from data.bloomberg.live import book_today
+        today = book_today().isoformat()
+    three_m = next((p["settle_date"] for p in library.lme_curve_pillars(root_id, day) if p["kind"] == "3M"), None)
+    anchors = [("cash", "SPOT", day)] + ([("3M", "FWD_OUTRIGHT", three_m)] if three_m else [])
+    missing, snaps = ([] if three_m else ["3M"]), []
+    for name, mark_type, settle in anchors:
+        hit = _official_snap(conn, day, {"instrument_id": root_id, "settle_date": settle, "mark_type": mark_type})
+        if hit and (day >= today or is_close_row(mark_type, day, hit[0], today, instrument_id=root_id)):
+            snaps.append(hit[0])
+        else:
+            missing.append(name)
+    return {"complete": not missing, "missing": missing, "snapped_at": max(snaps) if snaps and not missing else ""}
+
+
 def mark_inventory(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     """One row per mark the book needs on `as_of`:
     instrument_id, settle_date, mark_type, value, source, snapped_at, status.
@@ -113,7 +161,12 @@ def mark_inventory(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
 
     2026-09-24: also a `reason` column, '' for a mark the pull asks for; for one it cannot
     ask for (no verified Bloomberg ticker for a placeholder root) the reason, the mark still
-    listed with its status so the gap is in sight."""
+    listed with its status so the gap is in sight.
+
+    Phase 5 (2026-09-24): an LME metal's curve is one more row, mark_type 'LME_CURVE',
+    settle_date = as_of, value None, status OFFICIAL when its cash and 3M are on file
+    (`lme_curve_status`), else MISSING with `source` naming the missing anchors. An option on
+    a future's underlying FUTURE_PX (its Greeks) is an ordinary FUTURE_PX row here."""
     needed = _needed_marks(conn, as_of, include_unrequestable=True)
     rows = []
     for item in needed:
@@ -138,6 +191,15 @@ def mark_inventory(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
                 value, source, snapped_at, status = None, None, None, STATUS_MISSING
         rows.append({"instrument_id": instrument_id, "settle_date": settle, "mark_type": mark_type,
                      "value": value, "source": source, "snapped_at": snapped_at, "status": status,
+                     "reason": item.get("reason", "")})
+    for item in _lme_curve_items(conn, as_of, include_unrequestable=True):
+        # An LME curve (2026-09-24): OFFICIAL when its cash and 3M are (lme_curve_status);
+        # `source` names the anchors still missing otherwise.
+        state = lme_curve_status(conn, as_of, item["instrument_id"], today=as_of)
+        rows.append({"instrument_id": item["instrument_id"], "settle_date": as_of, "mark_type": LME_CURVE,
+                     "value": None, "source": None if state["complete"] else "missing: " + ", ".join(state["missing"]),
+                     "snapped_at": state["snapped_at"] or None,
+                     "status": STATUS_OFFICIAL if state["complete"] else STATUS_MISSING,
                      "reason": item.get("reason", "")})
     return pd.DataFrame(rows, columns=["instrument_id", "settle_date", "mark_type", "value", "source",
                                        "snapped_at", "status", "reason"])
@@ -263,7 +325,16 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     can ask for, so a future with no verified Bloomberg ticker cannot keep a day incomplete
     and send the backfill back to it on every press; those marks are listed apart, in
     `not_requestable` ([{instrument_id, settle_date, mark_type, reason}] not on file as
-    official that day). A non-USD future's USD-conversion SPOT is an ordinary needed SPOT."""
+    official that day). A non-USD future's USD-conversion SPOT is an ordinary needed SPOT.
+
+    Phase 5 (2026-09-24): an LME forward's cash SPOT and its FWD_OUTRIGHT at the prompt are
+    ordinary needed marks, a close only at 17:00 New York (`is_close_row` is given each
+    item's instrument_id, and an LME root id takes the daily close), and each LME metal with a ticket open that day adds one item,
+    mark_type 'LME_CURVE' (instrument_id the root id, settle_date the day), present when its
+    cash and 3M are official at the close (`lme_curve_status`); a missing one carries
+    `detail` ("cash, 3M not on file"). An option on a future needs its own FUTURE_PX, its
+    underlying future's FUTURE_PX (its Greeks) and, when non-USD, its conversion SPOT on
+    every day it is open; its OIS curve is one of the day's `inputs_missing` until held."""
     from data.bloomberg.backfill import business_days, is_close_row
     from datetime import date as _date
     if today is None:
@@ -279,12 +350,24 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
         missing = []
         for item in needed_items:
             hit = _official_snap(conn, day, item)
-            if hit and (day >= today or is_close_row(item["mark_type"], day, hit[0], today)):
+            if hit and (day >= today or is_close_row(item["mark_type"], day, hit[0], today,
+                                                     instrument_id=item["instrument_id"])):
                 present += 1
             else:
                 missing.append(item)
                 not_closed += 1 if hit else 0
         unrequestable = [i for i in listed if "reason" in i and _official_snap(conn, day, i) is None]
+        for item in _lme_curve_items(conn, day, historical=True, include_unrequestable=True):
+            state = lme_curve_status(conn, day, item["instrument_id"], today=today)
+            if "reason" in item:
+                if not state["complete"]:
+                    unrequestable.append(item)
+                continue
+            needed_items.append(item)
+            if state["complete"]:
+                present += 1
+            else:
+                missing.append({**item, "detail": ", ".join(state["missing"]) + " not on file"})
         rows.append({"as_of_date": day, "needed": len(needed_items), "present": present,
                      "complete": len(needed_items) > 0 and present >= len(needed_items), "missing": missing,
                      "not_closed": not_closed, "inputs_missing": inputs_missing(conn, day) if day < today else [],

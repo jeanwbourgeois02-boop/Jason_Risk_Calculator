@@ -59,9 +59,22 @@ contract covers `multiplier` units of it.
 whose `quote_ccy` has no official SPOT on `as_of` (no `quote_ccy+USD` or
 `USD+quote_ccy` pair marked) is excluded from the Portfolio and reported
 separately in `skipped` -- never silently assumed 1.0. Likewise one whose
-own underlying has no official SPOT (FX: the pair `base_ccy+quote_ccy`;
-a listed option: the underlying named in `instruments.bbg_ticker`), which
-delta and gamma need.
+own underlying has no official price on `as_of`, which delta and gamma need:
+
+- FX_OPTION: the pair `base_ccy+quote_ccy`'s official SPOT;
+- CMDTY_OPTION (an option on a commodity future, 2026-09-24): its underlying
+  future's official FUTURE_PX. The underlying is the one contract-master names
+  (`data.contracts.option_for(base_ccy, instrument_id).underlying`; `base_ccy`
+  is the root id), and its price is the row at that future's own expiry, else
+  the single row on file (the same contract once its expiry moved to
+  Bloomberg's date) -- the rule `equity_commodity.py` prices the Greeks with.
+  `instruments.bbg_ticker` is the option's own Bloomberg ticker, never the
+  underlying. Nothing is recomputed here: no vol, no model. A CMDTY_OPTION's
+  DELTA is futures lots per option lot and its multiplier the future's, so
+  `delta * F * quantity * multiplier` is the USD-converted futures-equivalent
+  notional, the same meaning the FX delta has;
+- any other asset class: skipped with its reason (the generic EQ_OPTION path
+  has no ingest and no underlying rule here).
 
 **Grouping / UI hierarchy.** ``Position.label`` is set to `package_id`, so
 `Portfolio.by_label()` gives the "package" level of the "Portfolio Totals
@@ -75,6 +88,7 @@ converted) vendored `Position`.
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
@@ -109,6 +123,50 @@ def _quote_ccy_to_usd(conn: sqlite3.Connection, as_of: str, quote_ccy: str) -> T
     return None, f"no official SPOT to convert {quote_ccy} to USD"
 
 
+def _pair_spot(conn: sqlite3.Connection, as_of: str, pair: str) -> Tuple[Optional[float], str]:
+    """(the FX pair's official SPOT on `as_of`, '') or (None, reason)."""
+    row = conn.execute(
+        "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'SPOT'",
+        (as_of, pair),
+    ).fetchone()
+    if row is None or not row[0]:
+        return None, f"no official SPOT for {pair} to put delta and gamma on a USD basis"
+    return row[0], ""
+
+
+def _underlying_future_price(conn: sqlite3.Connection, as_of: str, root_id: str,
+                             instrument_id: str) -> Tuple[Optional[float], str]:
+    """(the underlying future's official FUTURE_PX on `as_of`, '') for an option on a
+    commodity future, or (None, reason). See the module docstring for the rule."""
+    from data.contracts import option_for   # lazy: engine.options stays importable on its own
+
+    try:
+        underlying = option_for(root_id, instrument_id, conn=conn).underlying.contract_id
+    except (KeyError, ValueError) as exc:        # UnknownContract is a ValueError
+        return None, f"underlying future of {instrument_id} not known to the contract master ({exc})"
+    inst = conn.execute("SELECT expiry_date FROM instruments WHERE instrument_id = ?", (underlying,)).fetchone()
+    rows = conn.execute(
+        "SELECT settle_date, value FROM marks_official "
+        "WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'FUTURE_PX'",
+        (as_of, underlying),
+    ).fetchall()
+    exact = [r for r in rows if inst is not None and r[0] == inst[0]]
+    picked = exact[0] if exact else (rows[0] if len(rows) == 1 else None)
+    if picked is None:
+        if rows:
+            return None, (f"{len(rows)} official prices of the underlying future {underlying} on {as_of}, "
+                          "none at its expiry: delta and gamma cannot be put on a USD basis")
+        return None, (f"no official price of the underlying future {underlying} on {as_of} "
+                      "to put delta and gamma on a USD basis")
+    try:
+        price = float(picked[1])
+    except (TypeError, ValueError):
+        price = None
+    if price is None or not math.isfinite(price) or price <= 0:
+        return None, f"the official price of the underlying future {underlying} on {as_of} is not usable ({picked[1]!r})"
+    return price, ""
+
+
 def build_positions(conn: sqlite3.Connection, as_of: str, outcomes: Iterable) -> Tuple[List[PortfolioLeg], List[dict]]:
     """Build one `PortfolioLeg` per priced outcome (unpriced/skipped
     outcomes are silently excluded here -- their own `reason` was already
@@ -125,31 +183,30 @@ def build_positions(conn: sqlite3.Connection, as_of: str, outcomes: Iterable) ->
         if not outcome.priced:
             continue
         row = conn.execute(
-            "SELECT asset_class, base_ccy, quote_ccy, multiplier, bbg_ticker FROM instruments WHERE instrument_id = ?",
+            "SELECT asset_class, base_ccy, quote_ccy, multiplier FROM instruments WHERE instrument_id = ?",
             (outcome.instrument_id,),
         ).fetchone()
         if row is None:
             skipped.append({"instrument_id": outcome.instrument_id, "reason": "no instruments row"})
             continue
-        asset_class, base_ccy, quote_ccy, multiplier, bbg_ticker = row
+        asset_class, base_ccy, quote_ccy, multiplier = row
 
         spot_to_usd, reason = _quote_ccy_to_usd(conn, as_of, quote_ccy)
         if spot_to_usd is None:
             skipped.append({"instrument_id": outcome.instrument_id, "reason": reason})
             continue
 
-        # The underlying's own spot, S: the pair for FX; for a listed option the
-        # underlying whose instrument_id `bbg_ticker` holds (equity_commodity.py).
-        underlying = base_ccy + quote_ccy if asset_class == "FX_OPTION" else bbg_ticker
-        spot_row = conn.execute(
-            "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'SPOT'",
-            (as_of, underlying),
-        ).fetchone()
-        if spot_row is None or not spot_row[0]:
-            skipped.append({"instrument_id": outcome.instrument_id,
-                            "reason": f"no official SPOT for {underlying} to put delta and gamma on a USD basis"})
+        # The underlying's own price, S: the pair's SPOT for FX; the underlying
+        # future's FUTURE_PX for an option on a commodity future (module docstring).
+        if asset_class == "FX_OPTION":
+            spot, reason = _pair_spot(conn, as_of, base_ccy + quote_ccy)
+        elif asset_class == "CMDTY_OPTION":
+            spot, reason = _underlying_future_price(conn, as_of, base_ccy, outcome.instrument_id)
+        else:
+            spot, reason = None, f"no underlying price rule for asset class {asset_class!r}"
+        if spot is None:
+            skipped.append({"instrument_id": outcome.instrument_id, "reason": reason})
             continue
-        spot = spot_row[0]
 
         result = outcome.result
         raw = {

@@ -18,6 +18,14 @@ Three entry points (the first two mirror engine/rates/store.py):
     (user: "pull bbg now should recalc options too, using log data if no bbg access, or
     pull new data for new calculation").
 
+**Options on commodity futures (2026-09-24, commodity conversion Phase 5).** All three bulk
+passes also write the Greeks of every CMDTY_OPTION open on the date priced
+(``price_listed_options``, from ``equity_commodity.price_listed_commodity_option``): each
+instrument once, a closed-out group skipped and reported as for FX, no expiry-day payoff (the
+P&L is Bloomberg's own price, frozen by the ledger). Their outcomes carry
+``product='CMDTY_OPTION'``; the dicts count them apart under ``"futures_options_priced"``. See
+"options on commodity futures" below.
+
 **Past closes and the stamp on a mark (2026-09-22).** The user: "options daily pnl 0,
 that cannot be right, everything is moving", then "even on the bbg machine, it seems the
 options are not priced live. I expect every time I pull bloomberg now, the options are
@@ -322,6 +330,12 @@ class PricingOutcome:
     # `reason` says so. A consumer counting skips should list these under their own head
     # ("N closed-out options not priced"), never among the trades that could not be priced.
     closed_out: bool = False
+    # Which product the outcome is for (2026-09-24, commodity conversion Phase 5): 'FX_OPTION'
+    # or 'CMDTY_OPTION' (an option on a commodity future, "Options on commodity futures"
+    # below), so a status line can count the options on futures apart. `implied_vol` is the
+    # vol Bloomberg's price of a CMDTY_OPTION implies (None for FX and for a skip).
+    product: str = "FX_OPTION"
+    implied_vol: Optional[float] = None
 
 
 # --------------------------------------------------------------------------- closed-out options (2026-09-22)
@@ -348,6 +362,23 @@ def closed_out_options(conn: sqlite3.Connection, as_of: str) -> dict:
     from engine.pnl.valuation import closed_out_options as _closed_out
 
     return _closed_out(conn, as_of)
+
+
+def closed_out_listed_options(conn: sqlite3.Connection, as_of: str) -> dict:
+    """trade_id -> CloseOut for every CMDTY_OPTION trade of a group closed out as of `as_of`,
+    by the same grouping rule (`engine.pnl.valuation.closed_out_from_rows`, imported, never a
+    second copy): same root, currency, expiry, call / put, payoff and strike, quantities
+    netting to zero over the trades dealt on or before `as_of`, strike 0 never matched, a part
+    sell-back still live. The P&L's own `closed_out_options` reads FX_OPTION rows only, so the
+    rows are selected here in the shape it feeds the rule (`_opt_sql`): the grouping is on the
+    terms, so a buy and its sell-back on one canonical id ('CLZ26C 80 Comdty') group exactly as
+    two FX ids do. The expiry is the NOTIONAL leg's settle date, else the instrument's."""
+    import pandas as pd
+
+    from engine.pnl.valuation import closed_out_from_rows
+
+    opt = pd.read_sql_query(_LISTED_TERMS_SQL, conn, params={"as_of": as_of, "product": LISTED_PRODUCT})
+    return closed_out_from_rows(opt)
 
 
 def _closed_out_skip(row: dict, closed) -> PricingOutcome:
@@ -966,6 +997,9 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str, snapped: Optional[
     neither priced nor caught up: it comes back ``priced=False, closed_out=True`` with
     its reason, its marks on file untouched.
 
+    Then the options on commodity futures open on ``as_of`` (``price_listed_options``), their
+    outcomes appended after the FX ones with ``product='CMDTY_OPTION'``.
+
     First of all, once per database: `purge_old_unit_cash_payoff_marks` (digital / touch
     marks written in the pre-2026-09-18 unit), so the first pull after a restart clears
     them and this same run rewrites today's in the right unit."""
@@ -1013,6 +1047,126 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str, snapped: Optional[
             else:
                 outcomes.append(PricingOutcome(trade_id=trade_id, instrument_id="", package_id=trade_id,
                                                quantity=0.0, priced=False, reason=reason))
+    outcomes.extend(price_listed_options(conn, as_of, snapped=snapped))
+    return outcomes
+
+
+# --------------------------------------------------------------------------- options on commodity futures (2026-09-24)
+# Commodity conversion Phase 5 (CLAUDE.md "P&L conventions -> Options on commodity futures"):
+# a CMDTY_OPTION's P&L is Bloomberg's own price of it (official FUTURE_PX, read by engine/pnl),
+# so no model enters it; what the bulk passes write for it are the Greeks, Black-76 or
+# Barone-Adesi-Whaley at the vol that price implies (`equity_commodity.
+# price_listed_commodity_option`, listed-options-pricer's), under QL_OPTIONS_PRICER at the
+# option's expiry key, stamped like the FX marks of the same pass (the pricing time live, the
+# day's 15:00 New York close for a past close). What differs from the FX options:
+#   * in the pass: a trade dealt on or before the date priced whose NOTIONAL leg (its expiry,
+#     else the instrument's) has not settled before it; an expired one is simply not listed;
+#   * each instrument is priced ONCE however many trades are on it (a buy and its sell-back
+#     sit on one canonical id), and each of its trades gets its own outcome;
+#   * no expiry-day payoff and no catch-up: the expiry-day rule is the FX PREMIUM's; a listed
+#     option's freeze is the ledger's, at Bloomberg's last price. On its expiry date the pricer
+#     leaves the Greeks blank with its reason ("expiry ... is not after as_of ...");
+#   * a closed-out group (`closed_out_listed_options`) is left unpriced and reported under
+#     `closed_out`, as for FX.
+
+LISTED_PRODUCT = "CMDTY_OPTION"
+
+# Terms rows in the shape `engine.pnl.valuation._opt_sql` feeds `closed_out_from_rows`.
+_LISTED_TERMS_SQL = """
+SELECT t.trade_id, t.instrument_id, t.product, '' AS strategy, '' AS theme,
+       t.trade_date, t.quantity, t.price AS fill, i.base_ccy, i.quote_ccy,
+       COALESCE(l.settle_date, i.expiry_date) AS settle_date,
+       COALESCE(o.strike, 0) AS strike, COALESCE(o.option_type, '') AS option_type,
+       COALESCE(o.payoff, 'VANILLA') AS payoff, COALESCE(o.barrier_level, 0) AS barrier_level,
+       COALESCE(o.avg_start_date, '9999-12-31') AS avg_start_date
+FROM trades_official t
+JOIN instruments i ON i.instrument_id = t.instrument_id
+LEFT JOIN trade_legs l ON l.trade_id = t.trade_id AND l.leg_no = 1
+LEFT JOIN instrument_options o ON o.instrument_id = t.instrument_id
+WHERE t.product = :product AND t.trade_date <= :as_of
+ORDER BY t.trade_id
+"""
+
+# The day's book of options on futures: dealt on or before `day`, expiry (the NOTIONAL leg's
+# settle date, else the instrument's) on or after it.
+_LISTED_BOOK_SQL = """
+SELECT t.trade_id, t.instrument_id, t.product, t.package_id, t.quantity
+FROM trades_official t
+JOIN instruments i ON i.instrument_id = t.instrument_id
+LEFT JOIN trade_legs l ON l.trade_id = t.trade_id AND l.leg_type = 'NOTIONAL'
+WHERE t.product = :product AND t.trade_date <= :day
+GROUP BY t.trade_id
+HAVING COALESCE(MAX(l.settle_date), MAX(i.expiry_date)) >= :day
+ORDER BY t.trade_id
+"""
+
+
+def _listed_outcome(row: dict, priced: dict, as_of: str) -> PricingOutcome:
+    """One trade's outcome from its instrument's `price_listed_commodity_option` dict."""
+    ok = bool(priced.get("marks"))
+    outcome = PricingOutcome(
+        trade_id=row["trade_id"], instrument_id=row["instrument_id"], package_id=row["package_id"],
+        quantity=row["quantity"], priced=ok, reason="" if ok else (priced.get("reason") or "not priced"),
+        result=priced.get("result") if ok else None, product=LISTED_PRODUCT,
+        implied_vol=priced.get("implied_vol") if ok else None,
+    )
+    if ok:
+        outcome.raw = _raw(outcome.result)
+        outcome.vol_source_kind = "IMPLIED"
+        outcome.vol_detail = (f"implied by Bloomberg's price {priced['option_price']:g} of {row['instrument_id']} "
+                              f"with {priced['underlying_id']} at {priced['underlying_price']:g} "
+                              f"({priced['model']})")
+        outcome.domestic_rate_detail = priced.get("rate_source") or ""
+        outcome.mark_basis, outcome.mark_date = "MODEL", as_of
+    return outcome
+
+
+def _listed_skip(row: dict, reason: str) -> PricingOutcome:
+    outcome = _skip(row, reason)
+    outcome.product = LISTED_PRODUCT
+    return outcome
+
+
+def price_listed_options(conn: sqlite3.Connection, as_of: str, snapped: Optional[str] = None
+                         ) -> List[PricingOutcome]:
+    """Greeks of every option on a commodity future open on `as_of` ("Options on commodity
+    futures" above), from `as_of`'s own marks, written under QL_OPTIONS_PRICER at each option's
+    expiry key stamped `snapped` (none = the pricing time, `live_stamp`). One PricingOutcome per
+    trade, `product='CMDTY_OPTION'`; each instrument priced once. A closed-out group is
+    `closed_out=True`, never priced; a missing input (no option price, no underlying price, a
+    price below intrinsic) is `priced=False` with the pricer's reason. Never raises: one
+    instrument's pricer error is its trades' skip, and a failure outside the loop skips every
+    trade not yet reported with the error."""
+    from .equity_commodity import price_listed_commodity_option, write_listed_marks
+
+    rows = [dict(zip(("trade_id", "instrument_id", "product", "package_id", "quantity"), r))
+            for r in conn.execute(_LISTED_BOOK_SQL, {"product": LISTED_PRODUCT, "day": as_of}).fetchall()]
+    if not rows:
+        return []
+    outcomes: List[PricingOutcome] = []
+    try:
+        closed = closed_out_listed_options(conn, as_of)
+        stamp = snapped or live_stamp()
+        curve_cache: dict = {}
+        done: Dict[str, dict] = {}
+        for row in rows:
+            if row["trade_id"] in closed:
+                outcome = _closed_out_skip(row, closed[row["trade_id"]])
+                outcome.product = LISTED_PRODUCT
+                outcomes.append(outcome)
+                continue
+            inst = row["instrument_id"]
+            if inst not in done:
+                try:
+                    priced = price_listed_commodity_option(conn, inst, as_of, curve_cache)
+                    write_listed_marks(conn, priced, snapped=stamp)
+                except Exception as exc:  # noqa: BLE001 -- one option's blow-up is its trades' skip
+                    priced = {"marks": {}, "reason": f"pricer error: {exc!r}"}
+                done[inst] = priced
+            outcomes.append(_listed_outcome(row, done[inst], as_of))
+    except Exception as exc:  # noqa: BLE001 -- never zero the sibling outcomes (2026-09-22 loop guard)
+        reported = {o.trade_id for o in outcomes}
+        outcomes.extend(_listed_skip(r, f"pricer error: {exc!r}") for r in rows if r["trade_id"] not in reported)
     return outcomes
 
 
@@ -1027,7 +1181,10 @@ ORDER BY t.trade_id
 """
 
 
-def price_close(conn: sqlite3.Connection, day: str) -> dict:
+ALL_PRODUCTS = ("FX_OPTION", LISTED_PRODUCT)
+
+
+def price_close(conn: sqlite3.Connection, day: str, products: tuple = ALL_PRODUCTS) -> dict:
     """Price `day`'s CLOSE for every FX_OPTION trade in that day's book -- dealt on or
     before `day` (``trades.trade_date <= day``) and not expired before it
     (``instruments.expiry_date >= day``) -- strictly from `day`'s own inputs on file, and
@@ -1065,16 +1222,26 @@ def price_close(conn: sqlite3.Connection, day: str) -> dict:
     A trade of an option closed out as of `day` ("Closed-out options" above) is not priced,
     expiry on `day` included, and is listed under ``"closed_out"``, never ``"skipped"``.
 
+    Options on commodity futures (2026-09-24, "Options on commodity futures" above): the
+    CMDTY_OPTION trades open on `day` get their Greeks from `day`'s own FUTURE_PX of the option
+    and of its underlying future (and `day`'s discount curve), stamped the same close, each
+    instrument once, a closed-out group under ``"closed_out"``, a missing input under
+    ``"skipped"`` with the day prefixed; no expiry-day payoff for them. `products` limits the
+    pass (``recalc_on_file`` visits a day only for the products it has data for); the
+    default is both.
+
     Never raises. Returns ``{"day": day, "priced": <int>, "skipped": [{"trade_id",
-    "reason"}, ...], "closed_out": [<trade_id>, ...]}``; an exception outside one trade's
-    pricing adds ``"error"`` (its repr) and the counts so far; one trade's pricer error is
-    its own skip."""
-    out: dict = {"day": day, "priced": 0, "skipped": [], "closed_out": []}
+    "reason"}, ...], "closed_out": [<trade_id>, ...], "futures_options_priced": <int>}``
+    (``priced`` counts both products, ``futures_options_priced`` the CMDTY_OPTION trades among
+    them); an exception outside one trade's pricing adds ``"error"`` (its repr) and the counts
+    so far; one trade's pricer error is its own skip."""
+    out: dict = {"day": day, "priced": 0, "skipped": [], "closed_out": [], "futures_options_priced": 0}
     try:
         datetime.date.fromisoformat(day)
         purge_old_unit_cash_payoff_marks(conn)
-        trade_ids = [r[0] for r in conn.execute(_CLOSE_BOOK_SQL, {"day": day}).fetchall()]
-        closed = closed_out_options(conn, day)
+        trade_ids = ([r[0] for r in conn.execute(_CLOSE_BOOK_SQL, {"day": day}).fetchall()]
+                     if "FX_OPTION" in products else [])
+        closed = closed_out_options(conn, day) if trade_ids else {}
         stamp = close_stamp(day)
         surface_cache: dict = {}
         curve_cache: dict = {}
@@ -1106,6 +1273,15 @@ def price_close(conn: sqlite3.Connection, day: str) -> dict:
                 out["priced"] += 1
             else:
                 out["skipped"].append({"trade_id": trade_id, "reason": f"{day} close: {outcome.reason}"})
+        if LISTED_PRODUCT in products:
+            for outcome in price_listed_options(conn, day, snapped=stamp):
+                if outcome.closed_out:
+                    out["closed_out"].append(outcome.trade_id)
+                elif outcome.priced:
+                    out["priced"] += 1
+                    out["futures_options_priced"] += 1
+                else:
+                    out["skipped"].append({"trade_id": outcome.trade_id, "reason": f"{day} close: {outcome.reason}"})
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{exc!r}"
     return out
@@ -1127,6 +1303,42 @@ WHERE m.mark_type = 'SPOT' AND m.as_of_date < :as_of AND m.as_of_date >= :since
 ORDER BY m.as_of_date
 """
 
+# The past days on which one option on a future has Bloomberg's own price on file.
+_DAYS_WITH_PRICE_SQL = """
+SELECT DISTINCT as_of_date FROM marks_official
+WHERE instrument_id = :instrument AND mark_type = 'FUTURE_PX' AND as_of_date < :as_of AND as_of_date >= :since
+"""
+
+
+def _listed_days_on_file(conn: sqlite3.Connection, as_of: str, since: str) -> List[str]:
+    """The past days (before `as_of`, from `since` on) on which some option on a future on
+    file has both its own FUTURE_PX and its underlying future's: the inputs its Greeks start
+    from (the discount curve of the day is then resolved, or the trade skips with its reason).
+    An option whose underlying the contract master cannot name is visited on its own price's
+    days, so the reason is reported rather than the option silently never priced."""
+    try:
+        from data.contracts import option_for   # lazy, as equity_commodity's own read
+    except ImportError:  # pragma: no cover -- no contract master: every option on its own price's days
+        option_for = None
+
+    days: set = set()
+    for inst, root in conn.execute(
+            "SELECT DISTINCT i.instrument_id, i.base_ccy FROM trades_official t "
+            "JOIN instruments i ON i.instrument_id = t.instrument_id WHERE t.product = ?",
+            (LISTED_PRODUCT,)).fetchall():
+        params = {"as_of": as_of, "since": since}
+        own = {r[0] for r in conn.execute(_DAYS_WITH_PRICE_SQL, {**params, "instrument": inst}).fetchall()}
+        try:
+            if option_for is None:
+                raise KeyError("no contract master")
+            underlying = option_for(root, inst, conn=conn).underlying.contract_id
+        except (KeyError, ValueError):
+            days |= own
+            continue
+        days |= own & {r[0] for r in conn.execute(_DAYS_WITH_PRICE_SQL,
+                                                   {**params, "instrument": underlying}).fetchall()}
+    return sorted(days)
+
 
 def recalc_on_file(conn: sqlite3.Connection, as_of: str, since: Optional[str] = None) -> dict:
     """Re-price every FX option from the data ON FILE, asking Bloomberg nothing (user,
@@ -1146,34 +1358,49 @@ def recalc_on_file(conn: sqlite3.Connection, as_of: str, since: Optional[str] = 
     from another day's data (hard rule 2 stays with ``engine/pnl/valuation.py``'s
     near-marks rule at read time). Idempotent: every day is INSERT OR REPLACE.
 
+    Options on commodity futures (2026-09-24): a past day is also visited when some
+    CMDTY_OPTION on file has that day's FUTURE_PX of the option and of its underlying future
+    (``_listed_days_on_file``); each day is priced only for the products it has data for
+    (``price_close(..., products=...)``), so an FX-only day does not list every option on a
+    future as "no price". `since` defaults to the earliest trade date of either product.
+
     Never raises. Returns ``{"as_of", "since", "days": [<price_close dict per day, the
-    last one as_of's own {"day", "priced", "skipped", "closed_out"}>], "priced": <total>,
-    "skipped": <total count>, "closed_out": <total count of closed-out trades not priced,
-    over every day>}``, plus ``"error"`` (repr) if something outside the per-day calls
+    last one as_of's own {"day", "priced", "skipped", "closed_out", "futures_options_priced"}>],
+    "priced": <total>, "skipped": <total count>, "closed_out": <total count of closed-out
+    trades not priced, over every day>, "futures_options_priced": <total, the CMDTY_OPTION
+    trades among "priced">}``, plus ``"error"`` (repr) if something outside the per-day calls
     raised, with the counts so far."""
-    out: dict = {"as_of": as_of, "since": since, "days": [], "priced": 0, "skipped": 0, "closed_out": 0}
+    out: dict = {"as_of": as_of, "since": since, "days": [], "priced": 0, "skipped": 0, "closed_out": 0,
+                 "futures_options_priced": 0}
     try:
         datetime.date.fromisoformat(as_of)
         if since is None:
-            row = conn.execute("SELECT MIN(trade_date) FROM trades_official WHERE product = 'FX_OPTION'").fetchone()
+            row = conn.execute("SELECT MIN(trade_date) FROM trades_official WHERE product IN (?, ?)",
+                               ALL_PRODUCTS).fetchone()
             since = row[0] if row and row[0] else as_of
             out["since"] = since
-        days = [r[0] for r in conn.execute(_DAYS_WITH_OPTION_SPOT_SQL, {"as_of": as_of, "since": since}).fetchall()]
-        for day in days:
-            result = price_close(conn, day)
+        fx_days = {r[0] for r in conn.execute(_DAYS_WITH_OPTION_SPOT_SQL, {"as_of": as_of, "since": since}).fetchall()}
+        listed_days = set(_listed_days_on_file(conn, as_of, since))
+        for day in sorted(fx_days | listed_days):
+            products = tuple(p for p, has in (("FX_OPTION", day in fx_days), (LISTED_PRODUCT, day in listed_days))
+                             if has)
+            result = price_close(conn, day, products=products)
             out["days"].append(result)
             out["priced"] += result["priced"]
             out["skipped"] += len(result["skipped"])
             out["closed_out"] += len(result.get("closed_out", []))
+            out["futures_options_priced"] += result.get("futures_options_priced", 0)
         outcomes = price_all_and_store(conn, as_of)
         today = {"day": as_of, "priced": sum(1 for o in outcomes if o.priced),
                  "skipped": [{"trade_id": o.trade_id, "reason": o.reason}
                              for o in outcomes if not o.priced and not o.closed_out],
-                 "closed_out": [o.trade_id for o in outcomes if o.closed_out]}
+                 "closed_out": [o.trade_id for o in outcomes if o.closed_out],
+                 "futures_options_priced": sum(1 for o in outcomes if o.priced and o.product == LISTED_PRODUCT)}
         out["days"].append(today)
         out["priced"] += today["priced"]
         out["skipped"] += len(today["skipped"])
         out["closed_out"] += len(today["closed_out"])
+        out["futures_options_priced"] += today["futures_options_priced"]
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{exc!r}"
     return out

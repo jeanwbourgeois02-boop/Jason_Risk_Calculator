@@ -407,3 +407,247 @@ def historical_curve(day: date, tenor_rows: Dict[str, Dict[str, object]], spot: 
     if not out["points"]:
         out["reason"] = f"no usable forward tenor for {label} on {day.isoformat()}"
     return out
+
+
+# --------------------------------------------------------------------------- LME curve (2026-09-24, Phase 5)
+# An LME base metal trades as a forward to a prompt date. Its curve of a day is the cash price
+# (Bloomberg's LME cash ticker, written as the metal's SPOT: the official SPOT source, because it
+# is Bloomberg's own quote, never interpolated into existence), the 3-month price and the
+# monthly third-Wednesday contracts (FWD_OUTRIGHT at their prompt dates). The pillars and
+# their tickers are lme-forwards' (`engine.lme.lme_curve_tickers`, trimmed by the library's
+# `lme_curve_pillars`); every ticker and the prompt-date field are unverified guesses until the
+# Bloomberg check confirms them. LME quotes are USD per tonne outright: nothing is converted.
+#
+# Sources, as for FX (CLAUDE.md "Official marks", FWD_OUTRIGHT row):
+#   * a pillar at Bloomberg's own delivery date -> BBG_BFXFORWARD (Bloomberg's quote, its date);
+#   * a pillar placed on our computed prompt (Bloomberg sent no date; always so on a past close,
+#     history serves no delivery date) -> BBG_INTERP;
+#   * an open prompt between two pillars -> BBG_INTERP, linear in calendar days; before the
+#     cash date -> the cash price, BBG_INTERP; beyond the last pillar -> nothing, a reason.
+
+LME_PRICE_FIELD = "PX_LAST"
+LME_PROMPT_DATE_FIELD = "FUT_DLV_DT_LAST"  # unverified: Bloomberg's delivery (prompt) date of an LME ticker
+LME_SOURCE_QUOTE = "BBG_BFXFORWARD"
+LME_SOURCE_INTERP = "BBG_INTERP"
+
+
+def _positive_number(v) -> Optional[float]:
+    """A usable LME price: a finite number above zero, else None (never a zero mark)."""
+    if isinstance(v, bool):
+        return None
+    try:
+        out = float(v)
+    except (TypeError, ValueError):
+        return None
+    if out != out or out in (float("inf"), float("-inf")) or out <= 0:
+        return None
+    return out
+
+
+def request_lme_pillars(blpapi, session, service, tickers: List[str], timeout_ms: int = 15000
+                        ) -> Dict[str, dict]:
+    """{ticker: {'value': float | None, 'prompt_date': 'YYYY-MM-DD' | None, 'error': str}} for
+    one ReferenceDataRequest of PX_LAST and LME_PROMPT_DATE_FIELD on the LME curve's tickers.
+    Plain Python out; no blpapi objects escape. `error` is '' whenever a value came back (a
+    missing prompt date alone is not an error: the pillar then sits on our computed date, see
+    `lme_curve_marks`). Same event loop as `request_fwd_curves`: its own CorrelationId, a
+    message tagged with another request's id is discarded, a whole-request responseError is
+    reported on every ticker, a TIMEOUT ends the wait."""
+    no_reply = "no response for ticker"
+    out: Dict[str, dict] = {t: {"value": None, "prompt_date": None, "error": no_reply} for t in tickers}
+    if not tickers:
+        return out
+    req = service.createRequest("ReferenceDataRequest")
+    for t in tickers:
+        req.getElement("securities").appendValue(t)
+    req.getElement("fields").appendValue(LME_PRICE_FIELD)
+    req.getElement("fields").appendValue(LME_PROMPT_DATE_FIELD)
+    correlation_id = blpapi.CorrelationId(id(req))
+    session.sendRequest(req, correlationId=correlation_id)
+    while True:
+        ev = session.nextEvent(timeout_ms)
+        if ev.eventType() == blpapi.Event.TIMEOUT:
+            for t in tickers:
+                if out[t]["error"] == no_reply:
+                    out[t]["error"] = "TIMEOUT"
+            break
+        event_is_ours = False
+        for msg in ev:
+            msg_cids = list(msg.correlationIds()) if hasattr(msg, "correlationIds") else []
+            if msg_cids and correlation_id not in msg_cids:
+                continue  # late reply to a previous (e.g. timed-out) request, not ours
+            event_is_ours = True
+            if not msg.hasElement("securityData"):
+                if msg.hasElement("responseError"):
+                    for t in tickers:
+                        out[t]["error"] = f"responseError: {msg.getElement('responseError')}"
+                continue
+            sec = msg.getElement("securityData")
+            for i in range(sec.numValues()):
+                sd = sec.getValueAsElement(i)
+                t = sd.getElementAsString("security")
+                if sd.hasElement("securityError"):
+                    out[t] = {"value": None, "prompt_date": None,
+                              "error": "securityError: " + sd.getElement("securityError").getElementAsString("message")}
+                    continue
+                exceptions = []
+                if sd.hasElement("fieldExceptions"):
+                    fx = sd.getElement("fieldExceptions")
+                    for k in range(fx.numValues()):
+                        x = fx.getValueAsElement(k)
+                        exceptions.append(f"{x.getElementAsString('fieldId')}: "
+                                          f"{x.getElement('errorInfo').getElementAsString('message')}")
+                fd = sd.getElement("fieldData") if sd.hasElement("fieldData") else None
+                raw_value = raw_date = None
+                if fd is not None and fd.hasElement(LME_PRICE_FIELD):
+                    try:
+                        raw_value = fd.getElement(LME_PRICE_FIELD).getValue()
+                    except Exception:  # noqa: BLE001 -- an unreadable element is no value
+                        raw_value = None
+                if fd is not None and fd.hasElement(LME_PROMPT_DATE_FIELD):
+                    try:
+                        raw_date = fd.getElement(LME_PROMPT_DATE_FIELD).getValue()
+                    except Exception:  # noqa: BLE001
+                        raw_date = None
+                value = _positive_number(raw_value)
+                prompt = _to_date(raw_date)
+                if value is not None:
+                    error = ""
+                elif raw_value is not None:
+                    error = f"{LME_PRICE_FIELD} {raw_value!r} is not a positive price"
+                else:
+                    error = ("fieldExceptions: " + "; ".join(exceptions)) if exceptions else f"{LME_PRICE_FIELD} absent"
+                out[t] = {"value": value, "prompt_date": prompt.isoformat() if prompt else None, "error": error}
+        if ev.eventType() == blpapi.Event.RESPONSE and event_is_ours:
+            break
+    return out
+
+
+def _lme_marks(root_id: str, day, pillars: List[dict], quotes: Dict[str, dict],
+               open_prompts: List[date], snapped_at: str, history: bool) -> Tuple[List[dict], List[str]]:
+    """The one rule behind `lme_curve_marks` and `lme_history_marks`. `quotes`:
+    {ticker: {'value', 'prompt_date', 'error'}} (history: prompt_date always None)."""
+    from engine.lme import cash_date
+
+    as_of = _to_date(day)
+    if as_of is None:
+        raise ValueError(f"LME curve of {root_id}: {day!r} is not a date")
+    as_of_iso = as_of.isoformat()
+    cash_day = cash_date(as_of)
+    when = f"close of {as_of_iso}" if history else as_of_iso
+    rows: List[dict] = []
+    reasons: List[str] = []
+    curve: Dict[date, float] = {}
+    computed: List[str] = []
+
+    def mark(settle: date, mark_type: str, value: float, source: str) -> None:
+        rows.append({"as_of_date": as_of_iso, "instrument_id": root_id, "settle_date": settle.isoformat(),
+                     "mark_type": mark_type, "value": float(value), "source": source, "snapped_at": snapped_at})
+
+    for p in sorted(pillars or [], key=lambda p: str(p.get("pillar_date", ""))):
+        ticker, kind = p.get("ticker", ""), str(p.get("kind", "")).upper()
+        label = f"{root_id} {kind} ({ticker})"
+        q = quotes.get(ticker) or {}
+        value = _positive_number(q.get("value"))
+        if value is None:
+            why = q.get("error") or ("no close" if history else "no quote")
+            reasons.append(f"{label}: no price on the {when} ({why}); skipped, never zero")
+            continue
+        bbg = _to_date(q.get("prompt_date"))
+        if kind == "CASH":
+            # The SPOT key is the day itself; the curve places the cash price at the cash date
+            # (engine.lme.curve.day_curve reads it there), whatever date Bloomberg sent.
+            mark(as_of, "SPOT", value, LME_SOURCE_QUOTE)
+            if bbg is not None and bbg != cash_day:
+                reasons.append(f"{label}: Bloomberg's prompt date {bbg} differs from the cash date {cash_day}; "
+                               f"the cash price is placed at the cash date")
+            curve.setdefault(cash_day, value)
+            continue
+        ours = _to_date(p.get("pillar_date"))
+        if ours is None:
+            reasons.append(f"{label}: pillar has no prompt date; skipped")
+            continue
+        if bbg is not None:
+            place, source = bbg, LME_SOURCE_QUOTE
+            if bbg != ours:
+                reasons.append(f"{label}: Bloomberg's prompt date {bbg} differs from the computed {ours}; "
+                               f"marked at Bloomberg's date")
+        else:
+            place, source = ours, LME_SOURCE_INTERP
+            computed.append(f"{kind} {ours}")
+        if place in curve:
+            reasons.append(f"{label}: a pillar already sits on {place}; skipped")
+            continue
+        mark(place, "FWD_OUTRIGHT", value, source)
+        curve[place] = value
+    if computed:
+        why = "history serves no delivery date" if history else f"Bloomberg sent no {LME_PROMPT_DATE_FIELD}"
+        reasons.append(f"{root_id}: {', '.join(computed)} placed on the computed prompt date as "
+                       f"{LME_SOURCE_INTERP} ({why})")
+
+    points = sorted(curve.items())
+    seen = set()
+    for raw in open_prompts or []:
+        prompt = _to_date(raw)
+        if prompt is None or prompt in seen:
+            continue
+        seen.add(prompt)
+        if prompt in curve:
+            continue  # a pillar already marks it
+        if not points:
+            reasons.append(f"{root_id} prompt {prompt}: no LME curve on the {when}; not marked")
+            continue
+        if prompt < cash_day:
+            if cash_day in curve:
+                mark(prompt, "FWD_OUTRIGHT", curve[cash_day], LME_SOURCE_INTERP)
+            else:
+                reasons.append(f"{root_id} prompt {prompt}: before the cash date {cash_day} and no cash price "
+                               f"on the {when}; not marked")
+            continue
+        before = [(d, v) for d, v in points if d < prompt]
+        after = [(d, v) for d, v in points if d > prompt]
+        if not after:
+            reasons.append(f"{root_id} prompt {prompt}: beyond the last pillar ({points[-1][0]}) of the {when}; "
+                           f"never extrapolated, not marked")
+            continue
+        if not before:
+            reasons.append(f"{root_id} prompt {prompt}: before the first pillar ({points[0][0]}) with no cash "
+                           f"price on the {when}; never extrapolated, not marked")
+            continue
+        (d0, v0), (d1, v1) = before[-1], after[0]
+        w = (prompt - d0).days / (d1 - d0).days
+        mark(prompt, "FWD_OUTRIGHT", v0 + w * (v1 - v0), LME_SOURCE_INTERP)
+    return rows, reasons
+
+
+def lme_curve_marks(root_id: str, as_of: date, pillars: List[dict], quotes: Dict[str, dict],
+                    open_prompts: List[date], snapped_at: str) -> Tuple[List[dict], List[str]]:
+    """(mark rows, reasons) of `root_id`'s LME curve on `as_of` from a live pull's
+    `request_lme_pillars` answer. Pure: no database, no Bloomberg.
+
+    `pillars`: `engine.lme.lme_curve_tickers(root_id, as_of)` entries ({ticker, pillar_date,
+    kind: CASH | 3M | MONTHLY, mark_type, settle_date}), as the library's `lme_curve_pillars`
+    trims them. Rows: {as_of_date, instrument_id: root_id, settle_date, mark_type, value,
+    source, snapped_at}.
+      * CASH -> SPOT at settle_date = as_of, BBG_BFXFORWARD (Bloomberg's own cash price, the
+        official SPOT source); on the curve it sits at `engine.lme.cash_date(as_of)`.
+      * 3M / MONTHLY -> FWD_OUTRIGHT at Bloomberg's own prompt date as BBG_BFXFORWARD (the
+        pillar date when the two agree; Bloomberg's date, with a reason, when they differ);
+        with no date from Bloomberg, at our computed pillar date as BBG_INTERP.
+      * each open prompt not on a pillar -> FWD_OUTRIGHT BBG_INTERP, linear in calendar days
+        between the bracketing pillars on file; before the cash date the cash price; beyond
+        the last pillar nothing, with a reason (never extrapolated).
+    A pillar with no value is skipped with its reason, never written as zero."""
+    return _lme_marks(root_id, as_of, pillars, quotes, open_prompts, snapped_at, history=False)
+
+
+def lme_history_marks(root_id: str, day: date, pillars: List[dict], closes: Dict[str, float],
+                      open_prompts: List[date], snapped_at: str) -> Tuple[List[dict], List[str]]:
+    """`lme_curve_marks` for a past close: `closes` is {ticker: that day's daily PX_LAST}.
+    History serves no delivery date, so the 3M and monthly pillars sit on their computed
+    prompt dates as BBG_INTERP; the cash price is still the SPOT as BBG_BFXFORWARD (it is
+    Bloomberg's own quote of that day, not an interpolation). `pillars` are that day's
+    (`lme_curve_tickers(root_id, day)`), since the 3M date moves with the day."""
+    quotes = {t: {"value": v, "prompt_date": None, "error": "" if v is not None else "no close"}
+              for t, v in (closes or {}).items()}
+    return _lme_marks(root_id, day, pillars, quotes, open_prompts, snapped_at, history=True)

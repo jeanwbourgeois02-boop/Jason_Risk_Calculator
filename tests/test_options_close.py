@@ -80,7 +80,7 @@ def test_price_close_prices_the_days_book_from_that_days_inputs_and_stamps_the_c
 
     out = store.price_close(conn, DAY)
 
-    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": []}
+    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": [], "futures_options_priced": 0}
     rows = _rows(conn, INSTRUMENT, DAY)
     assert {r[0] for r in rows} == SEVEN_TYPES
     assert {r[2] for r in rows} == {f"{DAY}T15:00:00-04:00"}          # the close, offset resolved for August
@@ -124,7 +124,7 @@ def test_price_close_reads_only_that_days_inputs_and_names_the_day_and_the_missi
 
     _seed_vol(conn, as_of=DAY)
     out = store.price_close(conn, DAY)
-    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": []}
+    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": [], "futures_options_priced": 0}
     # Nothing was ever written for LATER: price_close(DAY) touches DAY alone.
     assert _rows(conn, INSTRUMENT, LATER) == []
 
@@ -143,7 +143,7 @@ def test_price_close_leaves_out_a_trade_not_yet_dealt_and_one_already_expired():
 
     out = store.price_close(conn, DAY)
 
-    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": []}     # neither priced nor listed
+    assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": [], "futures_options_priced": 0}     # neither priced nor listed
     assert len(_rows(conn, INSTRUMENT, DAY)) == 7
     assert _rows(conn, dealt_later, DAY) == []
     assert _rows(conn, expired, DAY) == []
@@ -162,7 +162,7 @@ def test_price_close_on_the_expiry_day_writes_the_payoff_drops_a_stale_frozen_ro
 
     out = store.price_close(conn, EXPIRY)
 
-    assert out == {"day": EXPIRY, "priced": 1, "skipped": [], "closed_out": []}
+    assert out == {"day": EXPIRY, "priced": 1, "skipped": [], "closed_out": [], "futures_options_priced": 0}
     assert _official(conn, INSTRUMENT, EXPIRY, "PREMIUM") == pytest.approx((SPOT - STRIKE) / SPOT)
     assert _official(conn, INSTRUMENT, EXPIRY, "DELTA") == 1.0
     for greek in ("GAMMA", "THETA", "VEGA", "RHO"):
@@ -236,7 +236,7 @@ def test_price_close_is_importable_without_pricing_anything():
     from engine.options import store
 
     conn = _new_db()
-    assert store.price_close(conn, DAY) == {"day": DAY, "priced": 0, "skipped": [], "closed_out": []}
+    assert store.price_close(conn, DAY) == {"day": DAY, "priced": 0, "skipped": [], "closed_out": [], "futures_options_priced": 0}
 
 
 # --------------------------------------------------------------------------- recalc_on_file: no Bloomberg, the logged data
@@ -304,8 +304,8 @@ def test_recalc_on_file_never_raises_and_is_empty_on_an_empty_book(monkeypatch):
 
     conn = _new_db()
     out = store.recalc_on_file(conn, DAY)
-    assert out == {"as_of": DAY, "since": DAY, "days": [{"day": DAY, "priced": 0, "skipped": [], "closed_out": []}],
-                   "priced": 0, "skipped": 0, "closed_out": 0}
+    assert out == {"as_of": DAY, "since": DAY, "days": [{"day": DAY, "priced": 0, "skipped": [], "closed_out": [], "futures_options_priced": 0}],
+                   "priced": 0, "skipped": 0, "closed_out": 0, "futures_options_priced": 0}
 
     out = store.recalc_on_file(conn, "not-a-date")
     assert out["days"] == [] and "ValueError" in out["error"]
@@ -547,3 +547,269 @@ def test_the_expiry_day_catch_up_leaves_a_closed_out_option_alone():
     outcomes = store.price_all_and_store(conn, after_expiry)
     assert all(o.closed_out and not o.priced for o in outcomes)
     assert conn.execute("SELECT COUNT(*) FROM marks WHERE source = 'QL_OPTIONS_PRICER'").fetchone()[0] == 0
+
+
+# --------------------------------------------------------------------------- options on commodity futures (2026-09-24)
+# Commodity conversion Phase 5: the bulk passes write the Greeks of every CMDTY_OPTION open on
+# the date priced (engine.options.equity_commodity.price_listed_commodity_option, the vol that
+# Bloomberg's own price implies), each instrument once, closed-out groups skipped and reported,
+# no expiry-day payoff. The December 2026 WTI 80 call on the Dec future.
+
+CL_ROOT = "NYMEX:CL"
+CL_FUTURE = "CLZ26 Comdty"
+CL_FUTURE_EXPIRY = "2026-11-19"
+CL_OPTION = "CLZ26C 80 Comdty"
+CL_OPTION_EXPIRY = "2026-11-16"
+CL_MULT = 1000.0
+CL_DEALT = "2026-08-18"
+_INSTRUMENT_COLS = "(instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, bbg_ticker, expiry_date)"
+
+
+def _seed_cl_option(conn, strike=80.0, payoff="VANILLA"):
+    conn.execute(f"INSERT OR IGNORE INTO instruments {_INSTRUMENT_COLS} VALUES (?,?,?,?,?,?,?,?)",
+                 (CL_FUTURE, "FUTURE", CL_ROOT, "USD", CL_MULT, 0, "CLZ6 Comdty", CL_FUTURE_EXPIRY))
+    conn.execute(f"INSERT OR IGNORE INTO instruments {_INSTRUMENT_COLS} VALUES (?,?,?,?,?,?,?,?)",
+                 (CL_OPTION, "CMDTY_OPTION", CL_ROOT, "USD", CL_MULT, 0, "", CL_OPTION_EXPIRY))
+    conn.execute("INSERT OR REPLACE INTO instrument_options (instrument_id, strike, option_type, payoff) "
+                 "VALUES (?,?,?,?)", (CL_OPTION, strike, "CALL", payoff))
+    conn.commit()
+
+
+def _seed_cl_trade(conn, trade_id, quantity, fill=2.10, trade_date=CL_DEALT):
+    _seed_cl_option(conn)
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
+                 "price, account, counterparty, strategy, trader, description, theme) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (trade_id, "XLSX", CL_OPTION, "CMDTY_OPTION", trade_id, trade_date, quantity, fill,
+                  "acc", "cp", "", "t", "d", ""))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 (trade_id, 1, "NOTIONAL", "USD", quantity * CL_MULT * fill, trade_date, CL_OPTION_EXPIRY, fill, 0))
+    conn.commit()
+
+
+def _seed_cl_px(conn, day, instrument_id, value):
+    settle = CL_OPTION_EXPIRY if instrument_id == CL_OPTION else CL_FUTURE_EXPIRY
+    conn.execute("INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, "
+                 "snapped_at) VALUES (?,?,?,?,?,?,?)",
+                 (day, instrument_id, settle, "FUTURE_PX", value, "BBG_BDH", f"{day}T17:00:00-04:00"))
+    conn.commit()
+
+
+def _seed_cl_day(conn, day, future=78.0, option=2.50, curve=True, underlying=True):
+    """Bloomberg's price of the option and (unless `underlying` is False) of the Dec future on
+    `day`, and a flat USD SOFR curve for that day."""
+    from tests.test_options_pricing import _seed_ois_curve
+
+    _seed_cl_px(conn, day, CL_OPTION, option)
+    if underlying:
+        _seed_cl_px(conn, day, CL_FUTURE, future)
+    if curve:
+        _seed_ois_curve(conn, day, "USD")
+        conn.commit()
+
+
+def _cl_marks(conn, day):
+    return {mt: (v, settle, stamp) for mt, v, settle, stamp in conn.execute(
+        "SELECT mark_type, value, settle_date, snapped_at FROM marks WHERE instrument_id = ? AND as_of_date = ? "
+        "AND source = 'QL_OPTIONS_PRICER'", (CL_OPTION, day))}
+
+
+@needs_quantlib
+def test_the_live_pass_writes_an_option_on_a_futures_greeks_at_its_expiry_key(monkeypatch):
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_cl_trade(conn, "C1", 10)
+    _seed_cl_day(conn, DAY)
+    monkeypatch.setattr(store, "_now_ny", lambda: datetime.datetime(2026, 8, 21, 22, 31, 12, tzinfo=NY))
+
+    outcomes = store.price_all_and_store(conn, DAY)
+
+    assert [(o.trade_id, o.product, o.priced, o.closed_out) for o in outcomes] == [("C1", "CMDTY_OPTION", True, False)]
+    o = outcomes[0]
+    assert o.reason == "" and o.implied_vol and 0.05 < o.implied_vol < 1.0
+    assert o.vol_source_kind == "IMPLIED" and o.mark_basis == "MODEL" and o.mark_date == DAY
+    marks = _cl_marks(conn, DAY)
+    assert set(marks) == {"PREMIUM", "DELTA", "GAMMA", "THETA", "VEGA", "RHO"}
+    assert {settle for _v, settle, _s in marks.values()} == {CL_OPTION_EXPIRY}
+    assert {stamp for _v, _settle, stamp in marks.values()} == {"2026-08-21T22:31:12-04:00"}   # the pricing time
+    assert marks["PREMIUM"][0] == pytest.approx(2.50)            # Bloomberg's own price, as quoted
+    assert 0.0 < marks["DELTA"][0] < 1.0                         # futures lots per option lot, an OTM call
+    assert _official(conn, CL_OPTION, DAY, "DELTA") == marks["DELTA"][0]   # official under QL_OPTIONS_PRICER
+
+
+@needs_quantlib
+def test_one_option_with_two_trades_is_priced_once_and_each_trade_reported(monkeypatch):
+    from engine.options import equity_commodity, store
+
+    calls = []
+    real = equity_commodity.price_listed_commodity_option
+
+    def counting(conn, inst, as_of, curve_cache=None):
+        calls.append((inst, as_of))
+        return real(conn, inst, as_of, curve_cache)
+
+    monkeypatch.setattr(equity_commodity, "price_listed_commodity_option", counting)
+    conn = _new_db()
+    _seed_cl_trade(conn, "C1", 10)
+    _seed_cl_trade(conn, "C2", 5, fill=2.30)
+    _seed_cl_day(conn, DAY)
+
+    outcomes = store.price_all_and_store(conn, DAY)
+    assert calls == [(CL_OPTION, DAY)]
+    assert [(o.trade_id, o.priced) for o in outcomes] == [("C1", True), ("C2", True)]
+
+    calls.clear()
+    out = store.price_close(conn, DAY)
+    assert calls == [(CL_OPTION, DAY)]
+    assert out == {"day": DAY, "priced": 2, "skipped": [], "closed_out": [], "futures_options_priced": 2}
+
+
+@needs_quantlib
+def test_an_option_on_a_future_bought_and_sold_back_on_one_id_is_closed_out_and_not_priced():
+    """The buy and the sell-back sit on ONE canonical id here (unlike the FX export's two ids);
+    the P&L's grouping is on the terms, so they group all the same."""
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_cl_trade(conn, "C1", 10)
+    _seed_cl_trade(conn, "C2", -10, fill=2.60, trade_date=SELL_BACK_DAY)
+    _seed_cl_day(conn, DAY)
+    _seed_cl_day(conn, LATER, future=79.0, option=2.90)
+
+    before = store.price_close(conn, DAY)                        # C2 not dealt yet: C1 is live
+    assert before == {"day": DAY, "priced": 1, "skipped": [], "closed_out": [], "futures_options_priced": 1}
+
+    after = store.price_close(conn, LATER)
+    assert after == {"day": LATER, "priced": 0, "skipped": [], "closed_out": ["C1", "C2"],
+                     "futures_options_priced": 0}
+    assert _cl_marks(conn, LATER) == {}
+
+    outcomes = store.price_all_and_store(conn, LATER)
+    assert [(o.trade_id, o.closed_out, o.priced, o.product) for o in outcomes] == [
+        ("C1", True, False, "CMDTY_OPTION"), ("C2", True, False, "CMDTY_OPTION")]
+    assert outcomes[0].reason.startswith(f"closed out {SELL_BACK_DAY}: bought and sold back with C2")
+    assert _cl_marks(conn, LATER) == {}
+
+
+def test_closed_out_listed_options_leaves_a_part_sell_back_and_an_unknown_strike_live():
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_cl_trade(conn, "C1", 10)
+    _seed_cl_trade(conn, "C2", -4, trade_date=SELL_BACK_DAY)
+    assert store.closed_out_listed_options(conn, LATER) == {}
+    _seed_cl_trade(conn, "C3", -6, trade_date=SELL_BACK_DAY)
+    assert set(store.closed_out_listed_options(conn, LATER)) == {"C1", "C2", "C3"}
+    conn.execute("UPDATE instrument_options SET strike = 0 WHERE instrument_id = ?", (CL_OPTION,))
+    assert store.closed_out_listed_options(conn, LATER) == {}    # strike not known: never matched
+
+
+@needs_quantlib
+def test_an_option_on_a_future_with_no_underlying_price_is_reported_with_its_reason():
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_cl_trade(conn, "C1", 10)
+    _seed_cl_day(conn, DAY, underlying=False)
+
+    out = store.price_close(conn, DAY)
+    assert out["priced"] == 0 and out["closed_out"] == [] and out["futures_options_priced"] == 0
+    assert out["skipped"] == [{"trade_id": "C1", "reason": f"{DAY} close: no Bloomberg price of the underlying "
+                                                           f"future {CL_FUTURE} on {DAY}"}]
+    outcomes = store.price_all_and_store(conn, DAY)
+    assert [(o.priced, o.closed_out, o.product) for o in outcomes] == [(False, False, "CMDTY_OPTION")]
+    assert outcomes[0].reason == f"no Bloomberg price of the underlying future {CL_FUTURE} on {DAY}"
+    assert _cl_marks(conn, DAY) == {}
+
+
+@needs_quantlib
+def test_price_close_prices_an_option_on_a_future_from_that_days_marks_only():
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_cl_trade(conn, "C1", 10)
+    _seed_cl_day(conn, DAY, future=78.0, option=2.50)
+    _seed_cl_day(conn, LATER, future=82.0, option=4.40)
+
+    out = store.price_close(conn, DAY)
+    assert out["priced"] == 1 and out["futures_options_priced"] == 1
+    marks = _cl_marks(conn, DAY)
+    assert marks["PREMIUM"][0] == pytest.approx(2.50)
+    assert {stamp for _v, _settle, stamp in marks.values()} == {f"{DAY}T15:00:00-04:00"}   # the day's close
+    assert _cl_marks(conn, LATER) == {}                          # nothing written for another day
+    store.price_close(conn, LATER)
+    assert _cl_marks(conn, LATER)["DELTA"][0] > marks["DELTA"][0]   # the future up: the call's delta up
+
+    # DAY's underlying price gone: DAY is skipped with DAY's reason, never priced off LATER's.
+    conn.execute("DELETE FROM marks WHERE as_of_date = ? AND instrument_id = ?", (DAY, CL_FUTURE))
+    conn.execute("DELETE FROM marks WHERE as_of_date = ? AND source = 'QL_OPTIONS_PRICER'", (DAY,))
+    conn.commit()
+    out = store.price_close(conn, DAY)
+    assert out["priced"] == 0 and out["skipped"][0]["reason"].startswith(f"{DAY} close: no Bloomberg price")
+    assert _cl_marks(conn, DAY) == {}
+
+
+@needs_quantlib
+def test_no_expiry_day_payoff_for_an_option_on_a_future_and_an_expired_one_is_not_listed():
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_cl_trade(conn, "C1", 10)
+    _seed_cl_day(conn, CL_OPTION_EXPIRY)
+    out = store.price_close(conn, CL_OPTION_EXPIRY)              # open on its expiry date: the pricer's reason
+    assert out["priced"] == 0
+    assert out["skipped"] == [{"trade_id": "C1", "reason": f"{CL_OPTION_EXPIRY} close: expiry {CL_OPTION_EXPIRY} "
+                                                           f"is not after as_of {CL_OPTION_EXPIRY}"}]
+    assert _cl_marks(conn, CL_OPTION_EXPIRY) == {}               # no payoff written: its P&L is Bloomberg's price
+    assert store.price_all_and_store(conn, "2026-11-17") == []   # expired: not in the book
+    assert store.price_close(conn, "2026-11-17")["skipped"] == []
+
+
+@needs_quantlib
+def test_recalc_on_file_visits_the_days_with_the_options_and_the_underlyings_prices(monkeypatch):
+    from engine.options import store
+
+    conn = _new_db()
+    _seed_cl_trade(conn, "C1", 10)
+    _seed_cl_day(conn, DAY)
+    _seed_cl_day(conn, SELL_BACK_DAY, underlying=False)         # the option's price alone: not a day to visit
+    _seed_cl_day(conn, LATER, future=80.0, option=3.20)
+    as_of = "2026-08-25"
+    monkeypatch.setattr(store, "_now_ny", lambda: datetime.datetime(2026, 8, 25, 9, 30, 0, tzinfo=NY))
+
+    out = store.recalc_on_file(conn, as_of)
+    assert "error" not in out and out["since"] == CL_DEALT
+    assert [d["day"] for d in out["days"]] == [DAY, LATER, as_of]
+    assert [d["futures_options_priced"] for d in out["days"]] == [1, 1, 0]
+    assert out["priced"] == 2 and out["futures_options_priced"] == 2 and out["skipped"] == 1   # as_of: no price yet
+    assert {s for _v, _settle, s in _cl_marks(conn, LATER).values()} == {f"{LATER}T15:00:00-04:00"}
+    assert _cl_marks(conn, SELL_BACK_DAY) == {}
+
+
+@needs_quantlib
+def test_the_fx_options_are_unchanged_by_an_option_on_a_future_beside_them(monkeypatch):
+    from engine.options import store
+
+    monkeypatch.setattr(store, "_now_ny", lambda: datetime.datetime(2026, 8, 21, 22, 31, 12, tzinfo=NY))
+
+    def fx_run(with_listed):
+        conn = _new_db()
+        _seed_day(conn)                                          # EURUSD SPOT, USD + EUR curves, vol
+        _seed_option_trade(conn)
+        if with_listed:
+            _seed_cl_trade(conn, "C1", 10)
+            _seed_cl_day(conn, DAY, curve=False)                 # the USD curve is the FX seed's own
+        live = store.price_all_and_store(conn, DAY)
+        close = store.price_close(conn, DAY)
+        return conn, live, close
+
+    alone_conn, alone_live, alone_close = fx_run(False)
+    both_conn, both_live, both_close = fx_run(True)
+    assert [(o.trade_id, o.product, o.priced) for o in alone_live] == [("T1", "FX_OPTION", True)]
+    assert [(o.trade_id, o.product, o.priced) for o in both_live] == [("T1", "FX_OPTION", True),
+                                                                       ("C1", "CMDTY_OPTION", True)]
+    assert both_live[0].result == alone_live[0].result
+    assert _rows(both_conn, INSTRUMENT, DAY) == _rows(alone_conn, INSTRUMENT, DAY)
+    assert alone_close == {"day": DAY, "priced": 1, "skipped": [], "closed_out": [], "futures_options_priced": 0}
+    assert both_close == {"day": DAY, "priced": 2, "skipped": [], "closed_out": [], "futures_options_priced": 1}

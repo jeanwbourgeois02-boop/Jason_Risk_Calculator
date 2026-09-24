@@ -3,8 +3,10 @@ lane's own table, created defensively (``CREATE TABLE IF NOT EXISTS`` on first u
 
 This module never asks Bloomberg for anything: bbg-live fetches the dates on request and
 stores them through ``store_static_dates``. Rows are keyed by the canonical contract id
-(``'CLZ26 Comdty'``); a ticker in Bloomberg's one-digit form is stored under its canonical id,
-its year read from the last trade date it comes with.
+(``'CLZ26 Comdty'``), or for an option on a future by its canonical option id
+(``'CLZ26C 70 Comdty'``, its last trade date the option's own expiry, its first notice ''); a
+ticker in Bloomberg's one-digit form is stored under its canonical id, its year read from the
+last trade date it comes with.
 """
 
 from __future__ import annotations
@@ -13,7 +15,14 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Iterable, Mapping, Optional
 
-from data.contracts.tickers import canonical_from_ticker, make_contract_id, parse_bbg_ticker, to_date
+from data.contracts.tickers import (
+    canonical_from_ticker,
+    make_contract_id,
+    make_option_id,
+    parse_bbg_ticker,
+    parse_option_ticker,
+    to_date,
+)
 
 TABLE = "contract_static"
 
@@ -74,9 +83,13 @@ def static_dates(conn: sqlite3.Connection, contract_id: str) -> Optional[dict]:
         return None
     key = " ".join(str(contract_id).split())
     parts = parse_bbg_ticker(key)
+    opt = parse_option_ticker(key)
     if parts is not None and len(parts[2]) == 2:
         # the same contract however it is spelt: 'CZ26 comdty' -> 'C Z26 Comdty'
         key = make_contract_id(parts[0], parts[1], int(parts[2]), parts[3])
+    elif opt is not None and len(opt[2]) == 2:
+        # an option: 'clz26c 70.0 comdty' -> 'CLZ26C 70 Comdty'
+        key = make_option_id(opt[0], opt[1], int(opt[2]), opt[3], opt[4], opt[5])
     cur = conn.execute(
         f"SELECT contract_id, last_trade_date, first_notice_date, source, fetched_at FROM {TABLE} "
         "WHERE contract_id = ?", (key,))

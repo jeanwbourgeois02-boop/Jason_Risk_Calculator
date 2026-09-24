@@ -598,14 +598,16 @@ def test_sample_file_parses_with_only_its_two_deliberate_rejects():
     assert res.n_currency == 1
     assert res.n_future == 31
     assert res.n_option == 5
+    assert res.n_cmdty_option == 4 and res.n_lme_forward == 3        # Phase 5 (2026-09-24)
     assert res.n_skipped_other == 0 and res.n_skipped_retired == 0   # no macro product in the commodity book
     assert res.n_skipped_status_or_fund == 0
     # the two futures the contract master cannot resolve: an ambiguous bare code, an unknown root
     assert [r.symbol for r in res.rejects] == ["ZCZ6-USAA", "QQZ6-USAA"]
-    # 29 futures + 8 forwards + 1 spot (the CURRENCY row names two currencies) + 5 options
+    # 29 futures + 8 forwards + 1 spot (the CURRENCY row names two currencies) + 5 FX options
+    # + 4 options on futures + 3 LME forwards (two legs each)
     assert res.n_spot == 1
-    assert len(res.trades) == 29 + 8 + 1 + 5
-    assert len(res.legs) == 29 + (8 + 1) * 2 + 5
+    assert len(res.trades) == 29 + 8 + 1 + 5 + 4 + 3
+    assert len(res.legs) == 29 + (8 + 1) * 2 + 5 + 4 + 3 * 2
     spot = [t for t in res.trades if t.product == "FX_SPOT"]
     assert [(t.trade_id, t.instrument_id) for t in spot] == [("910000040", "EURUSD")]
     assert not res.warnings
@@ -841,8 +843,9 @@ def test_future_price_rebuilt_from_the_invoice_matches_every_sample_fill():
     fills = {r["Trade Id"]: blotter._num(r["Price"]) for _, r in futures.iterrows()}
     futures["Price"] = "24-Jul"
     res = blotter.parse(futures)
-    # the sample's two deliberate rejects stay rejects (contract not resolved, before any price)
-    assert [r.symbol for r in res.rejects] == ["ZCZ6-USAA", "QQZ6-USAA"] and len(res.trades) == 29
+    # the sample's two deliberate rejects stay rejects (contract not resolved, before any price);
+    # 29 futures and the LME aluminium row on a FUTURE Fin Type (an LME forward, same rebuild)
+    assert [r.symbol for r in res.rejects] == ["ZCZ6-USAA", "QQZ6-USAA"] and len(res.trades) == 30
     for t in res.trades:
         assert t.price == pytest.approx(fills[t.trade_id], rel=1e-9)   # NetInvoice = fill x size +/- fees
 
@@ -944,7 +947,8 @@ def test_option_netinvoice_mismatch_above_half_a_percent_warns_and_never_rejects
 def test_sample_option_terms_and_the_digital_with_no_strike():
     res = blotter.parse(SAMPLE)
     assert not res.warnings                                   # NetInvoice = |Quantity x Price| on all 5
-    terms = {k: (o.strike, o.option_type, res.instruments[k].expiry_date) for k, o in res.instrument_options.items()}
+    terms = {k: (o.strike, o.option_type, res.instruments[k].expiry_date) for k, o in res.instrument_options.items()
+             if res.instruments[k].asset_class == "FX_OPTION"}       # the options on futures: test_commodity_ingest
     assert terms == {
         "EURUSD111826C-500041": (pytest.approx(1.18), "CALL", "2026-11-18"),
         "USDJPY121626P-500042": (pytest.approx(142.5), "PUT", "2026-12-16"),
@@ -1066,15 +1070,16 @@ def test_spx_index_option_is_counted_and_skipped_never_rejected(tmp_csv):
     assert "SPX/E261016P7615" not in res.instruments and "SPX/E261016P7615" not in res.instrument_options
 
 
-def test_a_listed_option_on_another_underlying_is_skipped_not_yet_loaded(tmp_csv):
-    """A listed option that is not an index one (an option on a future, Phase 5) has no path yet:
-    counted and named, not retired, never rejected and never read as an FX option."""
+def test_a_listed_option_on_a_commodity_future_loads_since_phase_5(tmp_csv):
+    """A listed option that is not an index one is an option on a commodity future since Phase 5
+    (2026-09-24; it was skipped as "not loaded yet" before): never read as an FX option.
+    tests/test_commodity_ingest.py covers the path."""
     row = _option_row(Symbol="CL/A261116C75-USAA", **{"Currency Pair": ""}, Quantity="10", Price="1.25",
                       Description="WTI 75 STRIKE CALL 11/16/2026")
     res = blotter.parse(tmp_csv([row]))
-    assert not res.rejects and not res.trades
-    assert res.n_skipped_other == 1 and res.n_skipped_retired == 0
-    assert res.skipped_other_rows[0][2].startswith("listed option on CL: listed options are not loaded yet")
+    assert not res.rejects and res.n_skipped_other == 0 and res.n_option == 0 and res.n_cmdty_option == 1
+    (t,) = res.trades
+    assert (t.product, t.instrument_id, t.quantity, t.price) == ("CMDTY_OPTION", "CLZ26C 75 Comdty", 10.0, 1.25)
 
 
 def test_gold_option_premium_in_usd_per_ounce_is_not_flagged_as_above_the_notional(tmp_csv):

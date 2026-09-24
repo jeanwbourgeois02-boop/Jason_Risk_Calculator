@@ -21,7 +21,9 @@ they are gone -- they survive every upload and are removed only through
 function this module calls) keeps its own idempotent-by-``trade_id`` upsert behaviour
 unchanged, for callers that still want a merge (e.g. a script loading several files that
 together make up one book). Instruments, marks, curves, curve_quotes and index_fixings
-are untouched -- keyed by instrument/date, not by trade. Deletion only happens after the
+are untouched -- keyed by instrument/date, not by trade (so the underlying future the parser
+writes, with no trade, for an option on a future it does not trade itself stays on file across
+uploads, and the parser's INSERT OR IGNORE never overwrites it). Deletion only happens after the
 new file has parsed successfully (inside the same transaction as publishing its rows),
 so a parse failure leaves the existing book completely intact; see ``_stage_and_publish``.
 The one exception to "marks are untouched" (2026-09-24): once the book is published,
@@ -190,23 +192,32 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
 
 # The upload summary's breakdown, counted over the trades the file LOADED (ParseResult.trades),
 # never over the parser's per-kind row counters (n_future etc.), which also count rows that
-# were rejected: "31 futures" when 29 loaded (ui-shell, 2026-09-24). Always shown, zero included.
-_LOADED_KINDS = (("forwards", ("FX_FWD",)), ("spot", ("FX_SPOT",)), ("FX swaps", ("FX_SWAP",)),
-                 ("futures", ("FUTURE",)), ("options", ("FX_OPTION", "EQ_OPTION", "CMDTY_OPTION")))
+# were rejected: "31 futures" when 29 loaded (ui-shell, 2026-09-24). Plain labels, never a
+# product code (Phase 5, 2026-09-24: "3 LME_FWD" became "3 LME forwards"): Jason's commodity
+# book first, then the FX hedges. (label, products, always shown even at zero)
+_LOADED_KINDS = (("futures", ("FUTURE",), True),
+                 ("options on futures", ("CMDTY_OPTION",), True),
+                 ("LME forwards", ("LME_FWD",), True),
+                 ("listed options", ("EQ_OPTION",), False),
+                 ("FX forwards", ("FX_FWD",), True),
+                 ("FX spot", ("FX_SPOT",), True),
+                 ("FX swaps", ("FX_SWAP",), False),
+                 ("FX options", ("FX_OPTION",), True))
 
 
 def loaded_breakdown(trades) -> str:
-    """'8 forwards, 1 spot, 29 futures, 5 options': the loaded trades by kind. A kind with none
-    is left out, except forwards, spot, futures and options, which are always named; a product this
-    list does not know is named as it is stored, so no loaded trade goes uncounted."""
+    """'29 futures, 4 options on futures, 3 LME forwards, 8 FX forwards, 1 FX spot, 5 FX options':
+    the loaded trades by kind. Listed options (EQ_OPTION) and FX swaps are named only when there
+    are some, every other kind always; a product this list does not know is named as it is
+    stored, so no loaded trade goes uncounted."""
     counts: dict = {}
     for t in trades:
         counts[t.product] = counts.get(t.product, 0) + 1
     parts, known = [], set()
-    for label, products in _LOADED_KINDS:
+    for label, products, always in _LOADED_KINDS:
         known.update(products)
         n = sum(counts.get(p, 0) for p in products)
-        if n or label != "FX swaps":
+        if n or always:
             parts.append(f"{n} {label}")
     parts += [f"{n} {product}" for product, n in sorted(counts.items()) if product not in known]
     return ", ".join(parts)
@@ -320,6 +331,12 @@ def import_blotter_report(payload, filename, db_path) -> dict:
     n_trades, n_legs = len(result.trades), len(result.legs)
     parts = [f"Imported {filename}: {n_trades} trades -- {loaded_breakdown(result.trades)}; {n_legs} legs. "
              f"{result.n_currency} cash rows seen ({result.n_spot} of them spot fills)."]
+    underlying = sorted(getattr(result, "underlying_only", None) or ())
+    if underlying:
+        # An option on a future whose underlying the file does not trade: the future is written as
+        # an instrument with no trade, so its price can be kept for the option's Greeks.
+        parts.append(f"{len(underlying)} underlying future(s) of the options on futures written with no trade "
+                     f"of their own: {', '.join(underlying)}.")
     if replaced.get("trades"):
         parts.append(f"Replaced the previous book: {replaced['trades']} trade(s) and "
                      f"{replaced['trade_legs']} leg(s) removed.")

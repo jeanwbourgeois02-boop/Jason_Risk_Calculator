@@ -86,6 +86,24 @@ dated that day:
     (`_future_request_tickers`), and written on its own instrument_id; a future with no
     Bloomberg ticker (a placeholder root) is never asked: the library leaves it out of what
     a past close needs and lists the gap with its reason.
+  - Options on commodity futures (CMDTY_OPTION, commodity conversion Phase 5, 2026-09-24):
+    the option's own FUTURE_PX, asked like a future under its name on the request day
+    (`option_request_ticker`: the canonical two-digit id once expired), and its underlying
+    future's (library role UNDERLYING, asked even when the future itself is not traded),
+    both in pass 1; the OIS curve its Greeks discount on is one of the day's inputs (no vol
+    smile: its vol is implied from its own price). price_close then prices the day's
+    CMDTY_OPTIONs too (`_options_open_on`: open until the NOTIONAL leg's settle date), and the
+    count among them is `futures_options_priced`.
+  - LME curves (LME_FWD, Phase 5, 2026-09-24): for every metal with a ticket open that day,
+    the daily PX_LAST of its curve pillars (library.lme_curve_pillars: cash, 3M and the
+    monthly prompts up to the furthest open prompt), one request per stretch with the
+    futures' fetcher, turned into rows by fwd_curve.lme_history_marks (cash -> the metal's
+    SPOT, pillars and open prompts -> FWD_OUTRIGHT, BBG_INTERP on a computed date, never
+    extrapolated) and stamped `settle_stamp` (17:00 New York): a past LME close is the daily
+    close like a future's, never the FX 15:00 bar (`is_close_row` with the instrument id).
+    Written in pass 1, since an LME ticket freezes at the last cash price on or before its
+    prompt. The FX paths never see an LME row (library.needed_in_range leaves them out
+    unless include_lme).
 Only what is needed is asked for (user decision 2026-09-21: "only the data necessary for
 the pnl calcs of the trades ... also for the backfill"), all of it read from the Bloomberg
 library (data/bloomberg/library.py): the days being worked, as stretches of consecutive
@@ -318,7 +336,15 @@ def settle_stamp(day: date) -> str:
     return datetime(day.year, day.month, day.day, SETTLE_HOUR_NY, 0, tzinfo=NY).isoformat(timespec="seconds")
 
 
-def is_close_row(mark_type: str, as_of_date: str, snapped_at: str, today=None) -> bool:
+def is_lme_instrument(instrument_id: Optional[str]) -> bool:
+    """Is `instrument_id` an LME forward's instrument, the metal's contract root id ('LME:CA';
+    commodity conversion Phase 5, 2026-09-24)? A SPOT / FWD_OUTRIGHT on a contract root id is
+    only ever an LME metal's: an FX pair's id never carries the 'EXCHANGE:' prefix."""
+    from data.bloomberg.library import is_contract_root
+    return is_contract_root(instrument_id)
+
+
+def is_close_row(mark_type: str, as_of_date: str, snapped_at: str, today=None, instrument_id: str = "") -> bool:
     """Is this official row of a PAST day a close? An FX row (SPOT / FWD_OUTRIGHT) is a
     close only when it is stamped 15:00 New York of its own as_of_date -- on every past
     day, whichever side of 2026-09-21 (user decision 2026-09-22) -- or, for a day before
@@ -330,7 +356,14 @@ def is_close_row(mark_type: str, as_of_date: str, snapped_at: str, today=None) -
     else -- a live pull's last price on any day, a
     17:00 FX row on a day still within intraday reach -- is not a close, and the backfill
     asks for the close and replaces it. `today` is a date or ISO string (default: the New
-    York book date)."""
+    York book date).
+
+    An LME metal's SPOT (cash) or FWD_OUTRIGHT (3M, a monthly prompt, a ticket's prompt),
+    told by `instrument_id` being its root id ('LME:CA', `is_lme_instrument`; 2026-09-24,
+    Phase 5), follows the futures' rule, not the FX one: its past close is Bloomberg's daily
+    PX_LAST, stamped at the daily close (`settle_stamp`, 17:00 New York) on every past day,
+    and a 15:00 row or a live press's is not a close. Without `instrument_id` a SPOT /
+    FWD_OUTRIGHT row is read as FX, as before."""
     if mark_type not in FX_CLOSE_MARK_TYPES and mark_type != "FUTURE_PX":
         return True
     try:
@@ -338,7 +371,7 @@ def is_close_row(mark_type: str, as_of_date: str, snapped_at: str, today=None) -
         stamp = datetime.fromisoformat(snapped_at)
     except (TypeError, ValueError):
         return False
-    if mark_type == "FUTURE_PX":
+    if mark_type == "FUTURE_PX" or (instrument_id and is_lme_instrument(instrument_id)):
         return stamp == datetime(day.year, day.month, day.day, SETTLE_HOUR_NY, 0, tzinfo=NY)
     if stamp == datetime(day.year, day.month, day.day, CLOSE_HOUR_NY, 0, tzinfo=NY):
         return True
@@ -419,16 +452,24 @@ def _import_price_close():
         return None
 
 
+# An FX option is open from its trade date to its expiry; an option on a commodity future
+# (CMDTY_OPTION, Phase 5, 2026-09-24) from its trade date to its NOTIONAL leg's settle date
+# (its expiry as booked), the days options-store's price_close prices its Greeks for.
 _OPTIONS_OPEN_SQL = """
 SELECT 1 FROM trades_official t JOIN instruments i USING (instrument_id)
-WHERE t.product = 'FX_OPTION' AND t.trade_date <= :day AND i.expiry_date >= :day
+WHERE t.trade_date <= :day AND (
+      (t.product = 'FX_OPTION' AND i.expiry_date >= :day)
+   OR (t.product = 'CMDTY_OPTION' AND EXISTS (
+          SELECT 1 FROM trade_legs l
+          WHERE l.trade_id = t.trade_id AND l.leg_type = 'NOTIONAL' AND l.settle_date >= :day)))
 LIMIT 1
 """
 
 
 def _options_open_on(conn: sqlite3.Connection, day: str) -> bool:
-    """Is any FX_OPTION open on `day` (trade_date <= day <= expiry, the days price_close
-    prices)? A book with no option pays nothing for the options step."""
+    """Is any option open on `day`, the days price_close prices: an FX_OPTION with
+    trade_date <= day <= expiry, or (2026-09-24) a CMDTY_OPTION with trade_date <= day <= its
+    NOTIONAL leg's settle date? A book with no option pays nothing for the options step."""
     return conn.execute(_OPTIONS_OPEN_SQL, {"day": day}).fetchone() is not None
 
 
@@ -436,34 +477,41 @@ PRICE_CLOSE_UNAVAILABLE = "options not priced: engine.options.store.price_close 
 
 
 def _price_options_close(conn: sqlite3.Connection, day: str, price_close
-                         ) -> Tuple[Optional[int], List[dict], str, List[str]]:
-    """Price the FX options open on `day` from that day's own inputs on file, after its
-    closes are written and before the ledger's freeze (which reads the expiry day's
-    premium). Returns (options_priced, options_skipped, options_note, options_closed_out):
-      - no FX_OPTION open that day: (None, [], '', []) and `price_close` is never called;
-      - `price_close` is None (not importable): (None, [], PRICE_CLOSE_UNAVAILABLE, []);
-      - `price_close(conn, day)` raised: (None, [], 'price_close raised: ...', []);
+                         ) -> Tuple[Optional[int], List[dict], str, List[str], Optional[int]]:
+    """Price the options open on `day` from that day's own inputs on file, after its closes
+    are written (the FX closes, and pass 1's FUTURE_PX of an option on a future and of its
+    underlying future) and before the ledger's freeze (which reads the expiry day's
+    premium). Returns (options_priced, options_skipped, options_note, options_closed_out,
+    futures_options_priced):
+      - no option open that day: (None, [], '', [], None) and `price_close` is never called;
+      - `price_close` is None (not importable): (None, [], PRICE_CLOSE_UNAVAILABLE, [], None);
+      - `price_close(conn, day)` raised: (None, [], 'price_close raised: ...', [], None);
       - otherwise its own {'priced': int, 'skipped': [{'trade_id', 'reason'}], 'closed_out':
-        [trade_id, ...], 'error'?} as (priced, skipped, error or '', closed_out).
+        [trade_id, ...], 'futures_options_priced': int, 'error'?} as (priced, skipped, error
+        or '', closed_out, futures_options_priced). `priced` counts both products;
+        `futures_options_priced` (2026-09-24) the CMDTY_OPTION trades among them, None when
+        the pricer does not say.
     `closed_out` (2026-09-22) are the trades of an option closed out as of `day` (bought and
     sold back; CLAUDE.md "A closed-out option is not live"): not priced, no mark, and never
     counted among the skipped -- the pricer lists them under their own head and so does
     this. Nothing here asks Bloomberg for anything, and nothing raises out of it."""
     if not _options_open_on(conn, day):
-        return None, [], "", []
+        return None, [], "", [], None
     if price_close is None:
-        return None, [], PRICE_CLOSE_UNAVAILABLE, []
+        return None, [], PRICE_CLOSE_UNAVAILABLE, [], None
     try:
         out = price_close(conn, day) or {}
     except Exception as exc:  # noqa: BLE001 -- another agent's pricer: report it, keep the day's marks
-        return None, [], f"price_close raised: {exc!r}", []
-    try:
-        priced = int(out.get("priced"))
-    except (TypeError, ValueError):
-        priced = None
+        return None, [], f"price_close raised: {exc!r}", [], None
+    counts = []
+    for key in ("priced", "futures_options_priced"):
+        try:
+            counts.append(int(out.get(key)))
+        except (TypeError, ValueError):
+            counts.append(None)
     skipped = [dict(item) for item in (out.get("skipped") or [])]
     closed_out = [str(t) for t in (out.get("closed_out") or [])]
-    return priced, skipped, str(out.get("error") or ""), closed_out
+    return counts[0], skipped, str(out.get("error") or ""), closed_out, counts[1]
 
 
 def _lacking_inputs(conn: sqlite3.Connection, work: List[date]) -> Dict[str, Dict[str, set]]:
@@ -809,9 +857,16 @@ def _future_request_tickers(conn: sqlite3.Connection, library_rows: List[dict],
     booked with bbg_ticker '') never reaches this: the library flags it `requestable` False and
     `needed_in_range` leaves it out by default, the one filter, and lists the gap itself. A
     commodity id the contract universe cannot read back is not asked (never a guessed name)
-    and is named with its reason."""
+    and is named with its reason.
+
+    An option on a commodity future (instrument asset class CMDTY_OPTION on a contract root,
+    commodity conversion Phase 5, 2026-09-24) is asked the same way: its live one-digit form
+    while it trades ('CLZ6C 75 Comdty'), its canonical two-digit id once the request day is
+    past its last trade date (`data.contracts.option_request_ticker(option_for(root, id,
+    conn=conn), today)`). The underlying future an option's Greeks need (library role
+    UNDERLYING) is a FUTURE_PX row of a FUTURE instrument like any other, traded or not."""
     from data.bloomberg import library
-    from data.contracts import UnknownContract, contract_for, request_ticker
+    from data.contracts import UnknownContract, contract_for, option_for, option_request_ticker, request_ticker
     info = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT instrument_id, asset_class, base_ccy FROM instruments")}
     asked: Dict[str, str] = {}
     not_asked: Dict[str, str] = {}
@@ -820,11 +875,15 @@ def _future_request_tickers(conn: sqlite3.Connection, library_rows: List[dict],
             continue
         instrument_id, ticker = r["key"], r["bbg_ticker"]
         asset_class, root_id = info.get(instrument_id, ("", ""))
-        if asset_class == "FUTURE" and library.is_contract_root(root_id):
+        if asset_class in ("FUTURE", "CMDTY_OPTION") and library.is_contract_root(root_id):
             try:
-                ticker = request_ticker(contract_for(root_id, instrument_id, conn), today)
+                if asset_class == "FUTURE":
+                    ticker = request_ticker(contract_for(root_id, instrument_id, conn), today)
+                else:
+                    ticker = option_request_ticker(option_for(root_id, instrument_id, conn=conn), today)
             except (UnknownContract, ValueError) as exc:
-                not_asked[instrument_id] = (f"{instrument_id} is not a contract of {root_id} the contract universe "
+                what = "a contract" if asset_class == "FUTURE" else "an option"
+                not_asked[instrument_id] = (f"{instrument_id} is not {what} of {root_id} the contract universe "
                                             f"can read ({exc}); not asked of Bloomberg")
                 continue
         asked[ticker] = instrument_id
@@ -867,6 +926,131 @@ def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: L
     return out
 
 
+# --------------------------------------------------------------------------- LME curves (Phase 5, 2026-09-24)
+# A past LME close is Bloomberg's daily PX_LAST of the metal's curve pillars (cash, 3M, the
+# monthly prompts), stamped at the daily close (`settle_stamp`, 17:00 New York), like a
+# future's (housekeeper, 2026-09-24, on the user's own rule for listed instruments): not the
+# FX 15:00 bar. The rows are built by bbg-curves' pure helper, fwd_curve.lme_history_marks:
+# cash becomes the metal's SPOT, the pillars and the open prompts FWD_OUTRIGHT (BBG_INTERP on
+# a computed date), never extrapolated beyond the last pillar.
+LME_MARKS_UNAVAILABLE = ("LME curve not written: data.bloomberg.fwd_curve.lme_history_marks is not available "
+                         "in this checkout")
+
+
+def _lme_rows_in_range(conn: sqlite3.Connection, start: date, end: date) -> List[dict]:
+    """The LME forwards' library rows a past close in [start, end] needs (their cash SPOT, the
+    FWD_OUTRIGHT at each ticket's prompt, the LME_CURVE): `needed_in_range(...,
+    include_lme=True)` restricted to `is_lme_row`, the one place the backfill reads them."""
+    from data.bloomberg import library
+    return [r for r in library.needed_in_range(conn, start.isoformat(), end.isoformat(), include_lme=True)
+            if library.is_lme_row(r)]
+
+
+def _lme_plan(lme_rows: List[dict], day_iso: str) -> Dict[str, dict]:
+    """{root id: {'through': the metal's furthest prompt open that day, 'prompts': [the open
+    tickets' prompts, sorted], 'pillars': library.lme_curve_pillars(root, day, through)}}: the
+    LME curves `day_iso` needs and the pillars to ask for them, trimmed as today's pull trims
+    them (`library.lme_curves_needed`: cash and 3M always, the monthlies up to the first on or
+    after the furthest open prompt)."""
+    from data.bloomberg import library
+    found: Dict[str, dict] = {}
+    for r in lme_rows:
+        if not (r["needed_from"] <= day_iso <= r["needed_until"]):
+            continue
+        entry = found.setdefault(r["key"], {"through": "", "prompts": set()})
+        if r["kind"] == library.LME_CURVE:
+            entry["through"] = max(entry["through"], r["needed_until"])
+        elif r["kind"] == "FWD_OUTRIGHT":
+            entry["prompts"].add(r["settle_date"])
+    return {root: {"through": e["through"], "prompts": sorted(e["prompts"]),
+                   "pillars": library.lme_curve_pillars(root, day_iso, through=e["through"])}
+            for root, e in sorted(found.items()) if e["through"]}
+
+
+def _fetch_lme_history(session, service, runs: List[Tuple[date, date]], plans: Dict[str, Dict[str, dict]],
+                       lme_fetch: Callable) -> Dict[str, Dict[str, float]]:
+    """{ticker: {date_iso: PX_LAST}} -- one `lme_fetch` call (Bloomberg's daily history,
+    PX_LAST: the futures' fetcher) per stretch of `runs`, for every pillar ticker some day of
+    the stretch needs (`plans`: {day_iso: _lme_plan}). A stretch with no LME ticket open asks
+    for nothing."""
+    out: Dict[str, Dict[str, float]] = {}
+    for run_start, run_end in runs:
+        tickers = sorted({p["ticker"] for day_iso, plan in plans.items()
+                          if run_start <= date.fromisoformat(day_iso) <= run_end
+                          for entry in plan.values() for p in entry["pillars"] if p.get("ticker")})
+        if not tickers:
+            continue
+        series = lme_fetch(session, service, tickers, ["PX_LAST"], run_start, run_end) or {}
+        for ticker, per_day in series.items():
+            for day_iso, row in (per_day or {}).items():
+                if isinstance(row, dict) and row.get("PX_LAST") is not None:
+                    out.setdefault(ticker, {})[day_iso] = row["PX_LAST"]
+    return out
+
+
+def _reason_text(reason) -> str:
+    """A reason of lme_history_marks as a sentence: a string as is, a dict's 'reason'."""
+    if isinstance(reason, dict):
+        return str(reason.get("reason") or reason)
+    return str(reason)
+
+
+def _lme_day_rows(conn: sqlite3.Connection, d: date, plan: Dict[str, dict], series: Dict[str, Dict[str, float]],
+                  needed: List[dict], today: str) -> Tuple[List[dict], List[dict]]:
+    """(mark rows, missing_marks) of `d`'s LME curves: per metal of `plan`, the day's pillar
+    closes from `series` handed to fwd_curve.lme_history_marks(root_id, day: date, pillars,
+    closes {ticker: float}, open_prompts [date], snapped_at = settle_stamp(d)), which returns
+    (rows, reasons). The rows are written as the helper builds them, never re-sourced. Every LME mark `needed` names (the cash SPOT, a ticket's prompt
+    FWD_OUTRIGHT) that the helper did not produce, and that is not already official at the
+    close, is listed missing with the helper's reasons for that metal, or Bloomberg's silence
+    when it gave none: never dropped silently."""
+    day = d.isoformat()
+    helper = getattr(fc, "lme_history_marks", None)
+    rows: List[dict] = []
+    reasons_by_root: Dict[str, List[str]] = {}
+    for root_id, entry in plan.items():
+        closes = {}
+        for p in entry["pillars"]:
+            try:
+                closes[p["ticker"]] = float((series.get(p["ticker"]) or {})[day])
+            except (KeyError, TypeError, ValueError):
+                continue
+        if helper is None:
+            reasons_by_root[root_id] = [LME_MARKS_UNAVAILABLE]
+            continue
+        try:
+            # written as they come (the helper's sources and keys: cash SPOT BBG_BFXFORWARD keyed
+            # on the day, pillars and prompts FWD_OUTRIGHT; the P&L reads them only so), never re-sourced
+            made, reasons = helper(root_id, d, entry["pillars"], closes,
+                                   [date.fromisoformat(x) for x in entry["prompts"]], settle_stamp(d))
+        except Exception as exc:  # noqa: BLE001 -- another lane's helper: its failure is this metal's reason
+            made, reasons = [], [f"LME curve of {root_id} on {day}: fwd_curve.lme_history_marks raised {exc!r}"]
+        rows += [dict(r) for r in (made or [])]
+        reasons_by_root[root_id] = [_reason_text(x) for x in (reasons or [])]
+    made_keys = {(r["instrument_id"], r["settle_date"], r["mark_type"]) for r in rows}
+    missing: List[dict] = []
+    for item in needed:
+        root_id = item["instrument_id"]
+        if item["mark_type"] not in FX_CLOSE_MARK_TYPES or not is_lme_instrument(root_id):
+            continue
+        if (root_id, item["settle_date"], item["mark_type"]) in made_keys:
+            continue
+        hit = conn.execute("SELECT snapped_at FROM marks_official WHERE as_of_date=? AND instrument_id=? AND "
+                           "settle_date=? AND mark_type=?", (day, root_id, item["settle_date"], item["mark_type"])).fetchone()
+        if hit is not None and is_close_row(item["mark_type"], day, hit[0], today, instrument_id=root_id):
+            continue
+        said = reasons_by_root.get(root_id) or []
+        if root_id not in plan:
+            reason = f"no LME curve of {root_id} is needed on {day} by the Bloomberg library"
+        elif said:
+            reason = "; ".join(dict.fromkeys(said))
+        else:
+            asked = ", ".join(p["ticker"] for p in plan[root_id]["pillars"]) or "no pillar tickers"
+            reason = f"Bloomberg returned no PX_LAST for the LME curve of {root_id} on {day} (asked: {asked})"
+        missing.append({**item, "reason": reason})
+    return rows, missing
+
+
 def _drop_already_official(conn: sqlite3.Connection, rows: List[dict], today: Optional[str] = None) -> List[dict]:
     """Filter out any row whose (as_of_date, instrument_id, settle_date, mark_type)
     already has an OFFICIAL mark on file that is a close -- a backfill run must never
@@ -887,7 +1071,8 @@ def _drop_already_official(conn: sqlite3.Connection, rows: List[dict], today: Op
         hit = conn.execute(
             "SELECT snapped_at FROM marks_official WHERE as_of_date=? AND instrument_id=? AND settle_date=? AND mark_type=?",
             (r["as_of_date"], r["instrument_id"], r["settle_date"], r["mark_type"])).fetchone()
-        if hit is None or (r["as_of_date"] < today and not is_close_row(r["mark_type"], r["as_of_date"], hit[0], today)):
+        if hit is None or (r["as_of_date"] < today and not is_close_row(r["mark_type"], r["as_of_date"], hit[0], today,
+                                                                       instrument_id=r["instrument_id"])):
             out.append(r)
     return out
 
@@ -916,7 +1101,8 @@ def _write_closes(conn: sqlite3.Connection, rows: List[dict], overwrite: bool = 
                     "SELECT source, snapped_at FROM marks WHERE as_of_date=? AND instrument_id=? AND settle_date=? "
                     "AND mark_type=? AND source IN (?, ?)", key + (SRC_SPOT_FWD, SRC_INTERP)).fetchall()
                 for source, snapped in stale:
-                    if not is_close_row(r["mark_type"], r["as_of_date"], snapped, today):
+                    if not is_close_row(r["mark_type"], r["as_of_date"], snapped, today,
+                                        instrument_id=r["instrument_id"]):
                         conn.execute("DELETE FROM marks WHERE as_of_date=? AND instrument_id=? AND settle_date=? "
                                      "AND mark_type=? AND source=?", key + (source,))
             conn.execute("INSERT OR REPLACE INTO marks VALUES (?,?,?,?,?,?,?)",
@@ -957,8 +1143,11 @@ def _spot_fetch_from_series(series_fetch: Callable, conn: sqlite3.Connection, ru
 # The keys every day's result carries for the inputs and pricing steps (2026-09-22), whatever
 # its status: what price_close made of the day, and the smiles / curves written for it or
 # found missing. (The swaps' rates_priced / rates_failed / rates_note left 2026-09-24.)
+# 2026-09-24 (Phase 5): `futures_options_priced`, the options on commodity futures among
+# `options_priced`; `lme_marks`, the LME curve rows built for the day (cash, pillars, prompts).
 _STEP_KEYS = {"options_priced": None, "options_skipped": [], "options_note": "", "options_closed_out": [],
-              "vol_quotes": 0, "curve_quotes": 0, "missing_inputs": []}
+              "futures_options_priced": None, "vol_quotes": 0, "curve_quotes": 0, "missing_inputs": [],
+              "lme_marks": 0}
 
 
 def _step_keys() -> dict:
@@ -1064,12 +1253,13 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         in_range = library.needed_in_range(conn, start.isoformat(), end.isoformat())
         has_futures = any(r["kind"] == "FUTURE_PX" for r in in_range)
         has_inputs = any(r["kind"] in library.HISTORY_INPUT_KINDS for r in in_range)
-        if not pairs and not has_futures and not has_inputs:
+        lme_rows = _lme_rows_in_range(conn, start, end)     # LME forwards: their own step (2026-09-24)
+        if not pairs and not has_futures and not has_inputs and not lme_rows:
             # 2026-09-18: this used to bail out on `not pairs` alone, before traded_pairs
             # covered crosses -- a book with only futures and zero FX trades of any kind
             # would otherwise never reach the FUTURE_PX logic below at all. 2026-09-22: a
             # book whose only needs are its options' curves and smiles still has them to fetch.
-            log("No FX pairs, futures or options open in this range; nothing to backfill.")
+            log("No FX pairs, futures, options or LME forwards open in this range; nothing to backfill.")
             return []
         by_ticker = {t: p for p, t in pairs}
         ticker_of = {p: t for p, t in pairs}
@@ -1130,6 +1320,10 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             future_not_asked: Dict[str, str] = {}     # instrument_id -> why no history was asked for it
             future_px_by_instrument = _fetch_future_px_history(conn, session, service, runs, fut_fetch, today,
                                                                future_not_asked)
+            # LME curves (2026-09-24): each day's pillars, their daily PX_LAST one request per
+            # stretch with the futures' fetcher; the rows are built in pass 1 below.
+            lme_plans = {d.isoformat(): plan for d in work if (plan := _lme_plan(lme_rows, d.isoformat()))}
+            lme_series = _fetch_lme_history(session, service, runs, lme_plans, fut_fetch) if lme_plans else {}
             # The smiles and curves the days' FX options price from (2026-09-22):
             # only the pairs and currencies some day of the stretch lacks, one request per
             # kind per stretch, from Bloomberg's daily history.
@@ -1206,10 +1400,16 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     fut_rows.append({"as_of_date": day, "instrument_id": instrument_id, "settle_date": item["settle_date"],
                                      "mark_type": "FUTURE_PX", "value": settle_value, "source": SRC_FUTURE,
                                      "snapped_at": settle_stamp(d)})
+                # The LME curves (2026-09-24): cash SPOT, pillars and the open prompts, at the
+                # daily close. In this pass, with the futures, because an LME ticket freezes
+                # at the metal's last cash price on or before its prompt.
+                lme_day_rows, lme_missing = _lme_day_rows(conn, d, lme_plans.get(day, {}), lme_series, needed,
+                                                          today_iso)
+                missing_marks += lme_missing
                 prepared[d] = {"no_closes": False, "needed": needed, "spot_rows": spot_rows, "spot_by_pair": spot_by_pair,
                                "missing_pairs": missing_pairs, "pair_reasons": pair_reasons, "fut_rows": fut_rows,
-                               "missing_marks": missing_marks}
-                first_rows += spot_rows + fut_rows
+                               "lme_rows": lme_day_rows, "missing_marks": missing_marks}
+                first_rows += spot_rows + fut_rows + lme_day_rows
             # A row already official AT THE CLOSE is never rewritten; a past day's FX row
             # that is not the close is replaced (_write_closes).
             _write_closes(conn, first_rows, overwrite, today_iso)
@@ -1239,6 +1439,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                             # named under `missing_pairs`.
                             continue
                         instrument_id, settle = item["instrument_id"], item["settle_date"]
+                        if is_lme_instrument(instrument_id):
+                            continue    # an LME prompt: built with its metal's curve in pass 1, never an FX curve
                         target = date.fromisoformat(settle)
                         spot = spot_by_pair.get(instrument_id)
                         if target <= d:
@@ -1301,8 +1503,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     # day's premium.
                     vol_written, curve_written, missing_inputs = _write_day_inputs(conn, d, lacking, vol_history,
                                                                                    ois_history)
-                    options_priced, options_skipped, options_note, options_closed_out = _price_options_close(
-                        conn, day, price_close)
+                    (options_priced, options_skipped, options_note, options_closed_out,
+                     futures_options_priced) = _price_options_close(conn, day, price_close)
                     realised, unrealisable, flag = None, [], "realisation after the last day"
                     ledger = ledger_block(None)          # what the ledger did on this day, re-freeze included
                     if realise_settled is None:
@@ -1319,10 +1521,13 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                             # in-progress state stop marks from being written -- report and move on.
                             flag = f"realise_settled raised: {exc!r}"
                     log(f"  {day}  DONE  closes={len(p['spot_rows'])}  fwd_outrights={len(fwd_rows)}  "
-                        f"future_px={len(p['fut_rows'])}  missing={len(p['missing_pairs']) + len(missing_marks)}"
+                        f"future_px={len(p['fut_rows'])}"
+                        + (f"  lme={len(p['lme_rows'])}" if p["lme_rows"] else "")
+                        + f"  missing={len(p['missing_pairs']) + len(missing_marks)}"
                         f"  vol_quotes={vol_written}  curve_quotes={curve_written}"
                         + (f"  missing_inputs={len(missing_inputs)}" if missing_inputs else "")
                         + f"  options={options_priced}"
+                        + (f"  futures_options={futures_options_priced}" if futures_options_priced else "")
                         + (f"  options_skipped={len(options_skipped)}" if options_skipped else "")
                         + (f"  options_closed_out={len(options_closed_out)}" if options_closed_out else "")
                         + (f"  {options_note}" if options_note else "")
@@ -1336,15 +1541,17 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                   "refrozen_summary": ledger["refrozen_summary"],
                                   "options_priced": options_priced, "options_skipped": options_skipped,
                                   "options_note": options_note, "options_closed_out": options_closed_out,
+                                  "futures_options_priced": futures_options_priced,
                                   "vol_quotes": vol_written,
-                                  "curve_quotes": curve_written, "missing_inputs": missing_inputs}
+                                  "curve_quotes": curve_written, "missing_inputs": missing_inputs,
+                                  "lme_marks": len(p["lme_rows"])}
                 except Exception as exc:  # noqa: BLE001 -- one bad day must not end the run for the others
                     log(f"  {day}  ERROR  {exc!r}")
                     results[d] = {"day": day, "status": "ERROR", "closes": len(p["spot_rows"]), "fwd_outrights": 0,
                                   "future_px": len(p["fut_rows"]), "missing_pairs": p["missing_pairs"],
                                   "missing_pair_reasons": p["pair_reasons"],
                                   "missing_marks": p["missing_marks"], "realised": None, "unrealisable": [],
-                                  **_step_keys(), "error": repr(exc)}
+                                  **_step_keys(), "lme_marks": len(p["lme_rows"]), "error": repr(exc)}
                 if on_day:
                     on_day(results[d])
             if order is not None and realise_settled is not None:
@@ -1438,7 +1645,8 @@ def state_version() -> str:
     `pull_marks.STANDARD_TENORS` for a deliverable pair), the field the FUTURE_PX history
     is asked for (PX_LAST since 2026-09-22), the vol smile tickers
     (`vol_marketdata.vol_ticker`) and the OIS curve tickers (`rates_marketdata.ois_curve`).
-    (The NDF ticker tables left the digest with the NDF book, 2026-09-24.) A day's state
+    (The NDF ticker tables left the digest with the NDF book, 2026-09-24; the LME curve's
+    pillar tickers joined it the same day, Phase 5.) A day's state
     stamped by any other value counts as never tried, so a corrected ticker is asked for
     on the next press: the stamp resets when any of those constants or functions changes,
     and only then."""
@@ -1451,6 +1659,12 @@ def state_version() -> str:
              "future_px_field": "PX_LAST",
              "vol": [vm.vol_ticker("USDJPY", t, q) for t in vm.VOL_TENORS for q in vm.VOL_QUOTE_TYPES],
              "ois": {ccy: [(spec.ticker, spec.field) for spec in rm.ois_curve(ccy)] for ccy in sorted(rm.OIS_INDEX)}}
+    # 2026-09-24 (Phase 5): the LME curve's pillar tickers and the close they are asked at.
+    try:
+        from engine.lme import lme_curve_tickers
+        rules["lme"] = {"close": "PX_LAST 17:00", "LME:CA": [p["ticker"] for p in lme_curve_tickers("LME:CA", "2026-01-05")]}
+    except Exception:  # noqa: BLE001 -- no LME layer in this checkout: nothing of it is asked
+        rules["lme"] = {}
     digest = hashlib.sha1(json.dumps(rules, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
     return f"{LIBRARY_VERSION}+{digest}"
 
@@ -1865,7 +2079,8 @@ def _record_outcome(db_path, key: str, results: List[dict], signatures: Dict[str
         # close_completeness, not from these results, and their shape is pinned.
         options = {r["day"]: {"priced": r.get("options_priced"), "skipped": list(r.get("options_skipped") or []),
                               "note": r.get("options_note") or "",
-                              "closed_out": list(r.get("options_closed_out") or [])} for r in results}
+                              "closed_out": list(r.get("options_closed_out") or []),
+                              "futures_options_priced": r.get("futures_options_priced")} for r in results}
         _options_block[key] = dict(sorted(options.items(), reverse=True)[:MAX_STATUS_DAYS])
         # and the smile / curve rows each worked day got from the history (2026-09-22), or
         # could not; the block was "rates" and carried the swaps' pricing until 2026-09-24
@@ -1902,7 +2117,9 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
       "options": {"<YYYY-MM-DD>": {"priced": <int or null>, "skipped": [{"trade_id", "reason"}, ...],
                                    "note": "" | why the step did not run,
                                    "closed_out": [<trade_id>, ...] -- closed-out options, not priced
-                                   and not among the skipped (2026-09-22)}}
+                                   and not among the skipped (2026-09-22),
+                                   "futures_options_priced": <int or null> -- the options on
+                                   commodity futures among "priced" (2026-09-24)}}
               -- (2026-09-22) what engine.options.store.price_close made of each worked
               day's FX options from that day's own inputs on file, the days of the last run
               that worked any, newest first, MAX_STATUS_DAYS at most (see backfill())

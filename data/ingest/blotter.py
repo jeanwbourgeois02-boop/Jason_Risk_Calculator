@@ -56,6 +56,17 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     ``NetInvoice`` is |Quantity x Price| but its sign is unreliable, so it never gives
     direction: it rebuilds a Price / Quantity cell that is unusable, and is otherwise a
     cross-check that warns above 0.5 % and never rejects.
+  - OPTION on a commodity future (Phase 5, 2026-09-24): product CMDTY_OPTION, resolved
+    through ``data.contracts.resolve_option`` (``_is_commodity_option`` tells it from an FX
+    option; ``_parse_cmdty_option``). Instrument = the canonical option id ('CLZ26C 70
+    Comdty'), terms in ``instrument_options``, lots signed by Side, 1 NOTIONAL leg in the
+    contract's currency. The underlying future's instrument row is written too, with no
+    trade (``ParseResult.underlying_only``; ``load`` never overwrites a row on file with it).
+    An unknown or ambiguous root rejects, naming it.
+  - LME forwards (Phase 5, 2026-09-24): a FUTURE or FORWARD row on the LME (venue, Bloomberg's
+    LME ticker, or a symbol resolving to one of ``engine.lme.lme_roots()``) becomes product
+    LME_FWD on the metal's root id ('LME:CA'): tonnes signed, two FX_NEAR legs (metal, USD) on
+    the prompt date (``_parse_lme_forward``). The LME ferrous contracts stay FUTUREs.
 
 Tolerance rule (user instruction 2026-09-17, "as flexible as possible"): a blank,
 missing or oddly formatted field never rejects a row when the value can be recovered
@@ -111,7 +122,8 @@ from data.ingest.common import (
     Trade,
     TradeLeg,
 )
-from data.contracts import request_ticker, resolve_future
+from data.contracts import option_request_ticker, request_ticker, resolve_future, resolve_option
+from engine import lme as _lme
 
 log = logging.getLogger(__name__)
 
@@ -127,11 +139,30 @@ IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION")
 # booked from them, and a multiplier is never read from this list.
 RETIRED_REASON_IRS = "interest rate swap: rates left the app on 2026-09-24 (commodity conversion); not loaded"
 RETIRED_INDEX_FUTURE_ROOTS = frozenset({"ES", "NQ", "RTY", "YM"})
-RETIRED_INDEX_OPTION_ROOTS = frozenset({"SPX", "NDX", "RUT", "SX5E"})
+# listed index options, and options on the equity index futures (Phase 5, 2026-09-24: still skipped)
+RETIRED_INDEX_OPTION_ROOTS = frozenset({"SPX", "SPXW", "NDX", "RUT", "SX5E"}) | RETIRED_INDEX_FUTURE_ROOTS
 # 'ESU6-USAA' (the PB's equity index future form); 'SPX/E261016P7615-USAA' (a listed option:
 # underlying / European-or-American, expiry yymmdd, put-call, strike)
 _RETIRED_FUTURE_SYMBOL_RE = re.compile(r"^([A-Z]+)[FGHJKMNQUVXZ]\d-[A-Z]{4}$")
-_LISTED_OPTION_SYMBOL_RE = re.compile(r"^([A-Z0-9]{2,6})/[EA]\d{6}[CP]\d+(?:\.\d+)?(?:-.*)?$")
+_LISTED_OPTION_SYMBOL_RE = re.compile(r"^([A-Z0-9]{1,6})\s*/\s*[EA]?\d{6}(?:[CP]\d+(?:\.\d+)?)?(?:-.*)?$")
+# Options on commodity futures (CMDTY_OPTION, Phase 5, 2026-09-24): the shapes that say a row is
+# one (contract-master's resolve_option reads them), before the FX option path is tried.
+#   Bloomberg 'CLZ6C 70 Comdty' / 'C Z6P 450'; the Chinese exchanges' own codes 'CU2612C80000',
+#   'I2701-C-800', 'SR611C5000' (a guess: no Chinese option row has been seen); an exchange prefix.
+_BBG_OPTION_SHAPE_RE = re.compile(r"^([A-Z0-9]{1,6}?) ?[FGHJKMNQUVXZ]\d{1,2}[CP] -?\d+(?:\.\d+)?(?: [A-Z]+)?$")
+_CN_OPTION_RE = re.compile(r"^(?P<fut>[A-Z]{1,2}\d{3,4})-?(?P<cp>[CP])-?(?P<strike>\d+(?:\.\d+)?)$")
+_EXCHANGE_PREFIX_RE = re.compile(r"^(?P<exch>[A-Z][A-Z0-9_]*)\s*:\s*(?P<rest>.+)$")
+# '75 STRIKE' / '3,500.00 STRIKE' / 'STRIKE 75' in a commodity option's Description
+_CMDTY_STRIKE_RE = re.compile(r"(?<![\d.,])(\d[\d,]*(?:\.\d+)?)\s*STRIKE\b|\bSTRIKE\s*[:=]?\s*(\d[\d,]*(?:\.\d+)?)")
+# LME forwards (LME_FWD, Phase 5): the venue, Bloomberg's LME cash / 3-month tickers ('LMCADY',
+# 'LMCADS03'), a 3-month ticket's marks, and the date columns a prompt date may sit in.
+_LME_VENUE_RE = re.compile(r"\bLME\b|LONDON METAL")
+_LME_BBG_RE = re.compile(r"^LM([A-Z]{2})(DY|DS\d{2})?\b")
+_THREE_MONTH_RE = re.compile(r"\b3\s*-?\s*M(?:ONTHS?|THS?)?\b|\bTHREE[\s-]MONTHS?\b|DS03\b")
+LME_PROMPT_COLUMNS = ("Prompt Date", "Prompt", "Maturity", "Maturity Date")
+_TEXT_DATE_RES = (re.compile(r"\b(\d{4}-\d{2}-\d{2})\b"),
+                  re.compile(r"\b(\d{1,2}[-\s](?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*[-\s]\d{2,4})\b", re.I),
+                  re.compile(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b"))
 EXCLUDED_STATUS_WORDS = ("cancel", "reject", "void", "pend", "delet", "fail", "error", "draft")
 # Option / futures NetInvoice vs what Quantity x Price implies: a larger relative gap is a
 # warning, never a reject.
@@ -168,7 +199,7 @@ REFERENCE_HEADER = (
     "Sell Currency,BuyCurrency Amount,SellCurrency Amount,PayLegPmtFreq,"
     "RecvLegPmtFreq,PayLegDCF,RecvLeg DCF,FxOption Type,PM Name,CPI Factor"
 ).split(",")
-_CANONICAL_BY_KEY = {re.sub(r"[^a-z0-9]", "", c.casefold()): c for c in REFERENCE_HEADER}
+_CANONICAL_BY_KEY = {re.sub(r"[^a-z0-9]", "", c.casefold()): c for c in REFERENCE_HEADER + list(LME_PROMPT_COLUMNS)}
 # Columns whose presence identifies the header row / a blotter-shaped sheet.
 HEADER_MARKERS = ("symbol", "tradeid", "fintype", "product")
 
@@ -287,7 +318,15 @@ class ParseResult:
     n_currency: int = 0
     n_spot: int = 0         # CURRENCY rows that named two currencies and became FX_SPOT trades
     n_future: int = 0
-    n_option: int = 0
+    n_option: int = 0       # FX option rows
+    n_cmdty_option: int = 0     # option rows on a commodity future (CMDTY_OPTION), Phase 5
+    n_lme_forward: int = 0      # FUTURE / FORWARD rows that are LME prompt-date forwards (LME_FWD), Phase 5
+    # plain sentences: an LME ticket whose prompt date the file does not give and that took the
+    # 3-month date or its month's third Wednesday (information, not a warning)
+    lme_prompt_notes: List[str] = field(default_factory=list)
+    # instruments written only as the underlying future of an option on a future (no trade of
+    # their own in the file): load() inserts them without ever overwriting a row already on file
+    underlying_only: set = field(default_factory=set)
     n_skipped_other: int = 0
     # the rows behind n_skipped_other, named: (row_no, symbol, reason) -- a row of a type the
     # app does not load must never vanish without a trace (user, 2026-09-21)
@@ -322,6 +361,11 @@ class ParseResult:
         if self.options_missing_strike:
             out.append(f"{len(self.options_missing_strike)} option(s) have no strike in the file: "
                        f"{_some(self.options_missing_strike)}.")
+        if self.lme_prompt_notes:
+            out.append(f"{len(self.lme_prompt_notes)} LME ticket(s) carry no prompt date in the file: "
+                       + "; ".join(self.lme_prompt_notes[:5])
+                       + (f"; and {len(self.lme_prompt_notes) - 5} more" if len(self.lme_prompt_notes) > 5 else "")
+                       + ".")
         return out
 
     def warning_notes(self) -> List[str]:
@@ -875,7 +919,11 @@ def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
         res.n_skipped_retired += int(retired)
         res.skipped_other_rows.append((row_no, _s(row.get("Symbol")), reason))
         return
-    if kind == "FORWARD":
+    lme_match = _lme_match(row) if kind in ("FORWARD", "FUTURE") and not _is_fx_forward_shape(row) else None
+    if lme_match is not None:
+        res.n_lme_forward += 1
+        _parse_lme_forward(res, row, row_no, *lme_match)
+    elif kind == "FORWARD":
         res.n_forward += 1
         _parse_forward(res, row, row_no)
     elif kind == "CURRENCY":
@@ -884,6 +932,9 @@ def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
     elif kind == "FUTURE":
         res.n_future += 1
         _parse_future(res, row, row_no)
+    elif kind == "OPTION" and _is_commodity_option(row):
+        res.n_cmdty_option += 1
+        _parse_cmdty_option(res, row, row_no)
     elif kind == "OPTION":
         res.n_option += 1
         _parse_option(res, row, row_no)
@@ -898,10 +949,10 @@ def _not_loaded_reason(kind: Optional[str], row: pd.Series) -> Optional[Tuple[st
     """``(plain reason, retired)`` for a row of a product the parser does not book, or None
     for a row it does. ``retired`` = a product that left the app on 2026-09-24: interest rate
     swaps by their kind, equity index futures by the root of ``Symbol`` / ``Underlying
-    Symbol`` ('ESU6-USAA'), listed index options by their Symbol ('SPX/E261016P7615-USAA').
-    A listed option on any other underlying is not loaded yet (options on futures come in a
-    later phase): the FX option path cannot read one and would only reject it. The reason
-    names what the row is, never a fault in it."""
+    Symbol`` ('ESU6-USAA'), listed index options and options on the index futures by their
+    Symbol ('SPX/E261016P7615-USAA', 'ESZ6C 6000 Index') or an index Underlying Symbol. A
+    listed option on any other underlying is an option on a commodity future since Phase 5
+    (``_parse_cmdty_option``). The reason names what the row is, never a fault in it."""
     if kind == "INTEREST_RATE_SWAP":
         return RETIRED_REASON_IRS, True
     if kind == "FUTURE":
@@ -911,14 +962,32 @@ def _not_loaded_reason(kind: Optional[str], row: pd.Series) -> Optional[Tuple[st
                 return (f"equity index future ({m.group(1)}): the equity index left the app on 2026-09-24 "
                         "(commodity conversion); not loaded"), True
     if kind == "OPTION":
-        m = _LISTED_OPTION_SYMBOL_RE.match(_s(row.get("Symbol")).upper())
-        if m:
-            root = m.group(1)
-            if root in RETIRED_INDEX_OPTION_ROOTS:
-                return (f"listed index option on {root}: the equity index left the app on 2026-09-24 "
-                        "(commodity conversion); not loaded"), True
-            return (f"listed option on {root}: listed options are not loaded yet (options on futures "
-                    "come in a later phase); not loaded"), False
+        root = _retired_option_root(row)
+        if root is not None:
+            return (f"listed index option on {root}: the equity index left the app on 2026-09-24 "
+                    "(commodity conversion); not loaded"), True
+    return None
+
+
+def _retired_option_root(row: pd.Series) -> Optional[str]:
+    """The equity index an option row is on ('SPX', 'ES'), else None: the root of a listed
+    'ROOT/[EA]yymmdd..' or Bloomberg 'ESZ6C 6000 Index' Symbol, or an Underlying Symbol that is
+    an index future ('ESZ6-USAA') or carries Bloomberg's Index key ('SPX Index')."""
+    symbol = _s(row.get("Symbol")).upper()
+    for rx in (_LISTED_OPTION_SYMBOL_RE, _BBG_OPTION_SHAPE_RE):
+        m = rx.match(symbol)
+        if m and m.group(1).strip() in RETIRED_INDEX_OPTION_ROOTS:
+            return m.group(1).strip()
+    m = _BBG_OPTION_SHAPE_RE.match(symbol)
+    if m and symbol.endswith(" INDEX"):
+        return m.group(1).strip()
+    underlying = _s(row.get("Underlying Symbol")).upper()
+    m = _RETIRED_FUTURE_SYMBOL_RE.match(underlying)
+    if m and m.group(1) in RETIRED_INDEX_FUTURE_ROOTS:
+        return m.group(1)
+    first = re.split(r"[^A-Z0-9]+", underlying)[0] if underlying else ""
+    if first in RETIRED_INDEX_OPTION_ROOTS and (underlying.endswith(" INDEX") or underlying == first):
+        return first
     return None
 
 
@@ -1274,10 +1343,15 @@ def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbo
     instrument_id = contract.contract_id
     expiry_iso = contract.last_trade_date.isoformat()
     ticker = "" if root.bbg_placeholder else request_ticker(contract, date.fromisoformat(trade_date))
-    res.instruments.setdefault(instrument_id, Instrument(
+    future = Instrument(
         instrument_id=instrument_id, asset_class="FUTURE", base_ccy=root.root_id, quote_ccy=root.currency,
         multiplier=root.multiplier, is_ndf=0, bbg_ticker=ticker, expiry_date=expiry_iso,
-    ))
+    )
+    if instrument_id in res.underlying_only:      # first seen as an option's underlying: now traded itself
+        res.underlying_only.discard(instrument_id)
+        res.instruments[instrument_id] = future
+    else:
+        res.instruments.setdefault(instrument_id, future)
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="FUTURE",
         package_id=trade_id, trade_date=trade_date, quantity=signed_contracts, price=price, **_common(row),
@@ -1509,6 +1583,315 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
         trade_id, 1, "NOTIONAL", base_ccy, signed_notional, trade_date, expiry, premium, 0))
 
 
+# --------------------------------------------------------------------------- options on commodity futures
+def _is_commodity_option(row: pd.Series) -> bool:
+    """Whether an OPTION row is an option on a commodity future (CMDTY_OPTION) rather than an FX
+    option. The FX option's own Symbol ('EURUSD111826C-500041') always goes the FX way; a Symbol
+    in a listed / Bloomberg / Chinese option shape, with an exchange prefix or Bloomberg's Comdty
+    key goes the commodity way; otherwise a currency pair in ``Currency Pair`` / ``Underlying
+    Symbol`` says FX, and any other symbol is handed to the contract master, whose refusal
+    (naming the root) is the reject. A row with neither symbol nor pair stays on the FX path,
+    which rejects it for want of a pair, as before."""
+    symbol = _s(row.get("Symbol")).upper()
+    if OPTION_SYMBOL_RE.match(symbol):
+        return False
+    if (_LISTED_OPTION_SYMBOL_RE.match(symbol) or _BBG_OPTION_SHAPE_RE.match(symbol)
+            or _CN_OPTION_RE.match(symbol) or _EXCHANGE_PREFIX_RE.match(symbol) or symbol.endswith(" COMDTY")):
+        return True
+    if _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol")):
+        return False
+    return bool(symbol or _s(row.get("Underlying Symbol")))
+
+
+def _cmdty_option_type(row: pd.Series) -> str:
+    """'CALL' / 'PUT' from the ``FxOption Type`` cell or a whole word CALL(S) / PUT(S) in the
+    Description, '' when neither says or they say both. Single letters C / P in the Description
+    are not read (a counterparty code such as 'CPTY-C' would turn a put into a call)."""
+    cell = _s(row.get("FxOption Type")).upper()
+    from_cell = {"C": "CALL", "CALL": "CALL", "CALLS": "CALL", "P": "PUT", "PUT": "PUT", "PUTS": "PUT"}.get(cell)
+    words = set(re.sub(r"[^A-Z]+", " ", _s(row.get("Description")).upper()).split())
+    from_desc = {t for w, t in (("CALL", "CALL"), ("CALLS", "CALL"), ("PUT", "PUT"), ("PUTS", "PUT")) if w in words}
+    if from_cell and from_desc and from_desc != {from_cell}:
+        return ""          # the two disagree: left to the symbol (and a symbol without a type rejects)
+    if from_cell:
+        return from_cell
+    return next(iter(from_desc)) if len(from_desc) == 1 else ""
+
+
+def _cmdty_option_strike(row: pd.Series, symbol: str, row_no: int, res: ParseResult) -> Tuple[Optional[float], Optional[str]]:
+    """(strike, problem) from a strike column or the Description's '<n> STRIKE'; None when the row
+    gives none. Two populated strikes that disagree are the problem (a reject)."""
+    col_strike = None
+    for col in STRIKE_COLUMNS:
+        v = _num(row.get(col))
+        if not math.isnan(v) and v > 0:
+            col_strike = v
+            break
+        bad = _bad_cell(row, col)
+        if bad is not None:
+            _warn(res, row_no, symbol, f"{_not_a_number(col, bad)}; ignored")
+    desc_strike = None
+    m = _CMDTY_STRIKE_RE.search(_s(row.get("Description")).upper())
+    if m:
+        v = _num(m.group(1) or m.group(2))
+        desc_strike = None if math.isnan(v) or v <= 0 else v
+    if col_strike and desc_strike and abs(col_strike - desc_strike) > 1e-9 * max(col_strike, desc_strike):
+        return None, f"strike column {col_strike:g} disagrees with Description strike {desc_strike:g}"
+    return col_strike or desc_strike, None
+
+
+def _parse_cmdty_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
+    """An option on a commodity future (product CMDTY_OPTION, Phase 5, user decision 2026-09-24),
+    resolved through the contract master (``data.contracts.resolve_option``) from ``Symbol`` (else
+    ``Underlying Symbol``) with the row's ``Underlying Symbol``, ``Currency``, ``Execution Venue``,
+    ``Description``, the option type (``_cmdty_option_type``) and strike (``_cmdty_option_strike``).
+    The Chinese exchanges' own code ('CU2612C80000') is split into its future and type / strike
+    first. An unknown or ambiguous root, or a type / strike the row contradicts, rejects with the
+    resolver's reason: a multiplier is never guessed.
+
+    Instrument = the canonical option id ('CLZ26C 70 Comdty'): base_ccy the root id, quote_ccy
+    the contract's currency, multiplier the underlying future's, bbg_ticker Bloomberg's form at
+    the trade date ('' for a placeholder root), expiry = the option's last trade date: Bloomberg's
+    when stored, else the expiry a dated symbol states when it is earlier than the contract
+    master's estimate, else the estimate. instrument_options: strike, CALL / PUT, payoff AMERICAN
+    for an American option, VANILLA for a European one. Quantity = lots signed by Side, price =
+    the premium as quoted (the future's price scale), one NOTIONAL leg in the quote currency of
+    lots x multiplier x premium, settling on the expiry, settles_cash 0. The fill and lots are
+    read and cross-checked like a future's (``_future_fill``)."""
+    symbol = _s(row.get("Symbol"))
+    underlying = _s(row.get("Underlying Symbol"))
+    shown = symbol or underlying
+    trade_id = _s(row.get("Trade Id"))
+    if not trade_id:
+        res.rejects.append(Reject(row_no, shown, "blank Trade Id"))
+        return
+    trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
+    if trade_date is None:
+        res.rejects.append(Reject(row_no, shown, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
+        return
+    option_type = _cmdty_option_type(row)
+    strike, problem = _cmdty_option_strike(row, shown, row_no, res)
+    if problem:
+        res.rejects.append(Reject(row_no, shown, problem))
+        return
+    sym_arg, und_arg = (symbol, underlying) if symbol else (underlying, "")
+    text = re.sub(r"\s+", " ", sym_arg.upper()).strip()
+    prefix = ""
+    pm = _EXCHANGE_PREFIX_RE.match(text)
+    if pm:
+        prefix, text = pm.group("exch") + ":", pm.group("rest").strip()
+    cn = _CN_OPTION_RE.match(text)
+    if cn:
+        cn_type = "CALL" if cn.group("cp") == "C" else "PUT"
+        cn_strike = float(cn.group("strike"))
+        if option_type and option_type != cn_type:
+            res.rejects.append(Reject(row_no, shown, f"option symbol {sym_arg!r} says {cn_type} but the row says {option_type}"))
+            return
+        if strike and abs(strike - cn_strike) > 1e-9 * max(strike, cn_strike):
+            res.rejects.append(Reject(row_no, shown, f"option symbol {sym_arg!r} says strike {cn_strike:g} but the row "
+                                                     f"says {strike:g}"))
+            return
+        sym_arg, option_type, strike = prefix + cn.group("fut"), cn_type, cn_strike
+    try:
+        option = resolve_option(sym_arg, trade_date=trade_date, underlying=und_arg,
+                                description=_s(row.get("Description")), currency=_ccy(row.get("Currency")) or "",
+                                venue=_s(row.get("Execution Venue")), option_type=option_type, strike=strike,
+                                conn=_CONTRACT_CONN)
+    except ValueError as e:          # UnknownContract / AmbiguousContract, and any other refusal
+        res.rejects.append(Reject(row_no, shown, str(e)))
+        return
+    root = option.root
+    fill = _future_fill(res, row, row_no, shown, root.multiplier, quote_unit=root.quote_unit)
+    if fill is None:
+        return
+    lots, premium = fill
+    expiry = option.last_trade_date
+    if option.dates_source != "BLOOMBERG" and option.symbol_expiry is not None and option.symbol_expiry < expiry:
+        expiry = option.symbol_expiry     # the file states the option's own expiry; the estimate is its future's
+    expiry_iso = expiry.isoformat()
+    ticker = "" if root.bbg_placeholder else option_request_ticker(option, date.fromisoformat(trade_date))
+    instrument_id = option.contract_id
+    res.instruments.setdefault(instrument_id, Instrument(
+        instrument_id=instrument_id, asset_class="CMDTY_OPTION", base_ccy=root.root_id, quote_ccy=root.currency,
+        multiplier=root.multiplier, is_ndf=0, bbg_ticker=ticker, expiry_date=expiry_iso,
+    ))
+    res.instrument_options.setdefault(instrument_id, InstrumentOption(
+        instrument_id=instrument_id, strike=option.strike, option_type=option.option_type,
+        payoff="AMERICAN" if option.style == "AMERICAN" else "VANILLA",
+    ))
+    # The underlying future's own instrument, with no trade (as a CURRENCY row writes CASH-<ccy>):
+    # its official FUTURE_PX, which the option's Greeks need, must hang off an instruments row.
+    # Never replaces a future the file trades, nor (load) a row already on file.
+    und = option.underlying
+    if und.contract_id not in res.instruments:
+        res.instruments[und.contract_id] = Instrument(
+            instrument_id=und.contract_id, asset_class="FUTURE", base_ccy=root.root_id, quote_ccy=root.currency,
+            multiplier=root.multiplier, is_ndf=0,
+            bbg_ticker="" if root.bbg_placeholder else request_ticker(und, date.fromisoformat(trade_date)),
+            expiry_date=und.last_trade_date.isoformat())
+        res.underlying_only.add(und.contract_id)
+    res.trades.append(Trade(
+        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="CMDTY_OPTION",
+        package_id=trade_id, trade_date=trade_date, quantity=lots, price=premium, **_common(row),
+    ))
+    res.legs.append(TradeLeg(
+        trade_id, 1, "NOTIONAL", root.currency, lots * root.multiplier * premium, trade_date, expiry_iso, premium, 0))
+
+
+# --------------------------------------------------------------------------- LME forwards
+def _is_fx_forward_shape(row: pd.Series) -> bool:
+    """A FORWARD row in the FX export's own shape ('USDCNH111826-500030' Symbol or the 'TD .. VD
+    .. SELL x VS .BUY y' Description): never an LME forward."""
+    return bool(FORWARD_SYMBOL_RE.match(_s(row.get("Symbol"))) or DESCRIPTION_RE.match(_s(row.get("Description"))))
+
+
+def _lme_match(row: pd.Series):
+    """``(root_id, contract month or None)`` when a FUTURE / FORWARD row is an LME prompt-date
+    forward (LME_FWD, Phase 5), else None. Read, in order, from ``Symbol`` then ``Underlying
+    Symbol``: Bloomberg's LME cash / 3-month ticker ('LMCADS03 Comdty'); a futures symbol the
+    contract master resolves ('LPZ6 Comdty', 'CAZ6-USAA' with venue LME), which is an LME forward
+    only when its root is one of ``engine.lme.lme_roots()`` (the LME ferrous contracts are
+    monthly futures and stay FUTUREs, as does any other exchange's contract); and, when the
+    ``Execution Venue`` or the Description says LME, a bare code or metal name ('CA', 'LME:CA',
+    'Copper'), then a metal named in the Description ('LME COPPER 3M')."""
+    roots = _lme.lme_roots()
+    venue = _s(row.get("Execution Venue"))
+    desc = _s(row.get("Description")).upper()
+    hinted = bool(_LME_VENUE_RE.search(venue.upper()) or _LME_VENUE_RE.search(desc))
+    trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date")) or date.today().isoformat()
+    for col in ("Symbol", "Underlying Symbol"):
+        s = _s(row.get(col)).upper()
+        if not s:
+            continue
+        m = _LME_BBG_RE.match(s)
+        if m and f"LME:{m.group(1)}" in roots:
+            return f"LME:{m.group(1)}", None
+        try:
+            contract = resolve_future(s, trade_date=trade_date, description=desc,
+                                      currency=_ccy(row.get("Currency")) or "", venue=venue, conn=_CONTRACT_CONN)
+        except ValueError:
+            contract = None
+        if contract is not None:
+            return (contract.root_id, contract) if contract.root_id in roots else None
+        if hinted:
+            token = re.split(r"[^A-Z0-9:]+", s)[0]
+            try:
+                return _lme.lme_root(token), None
+            except ValueError:
+                pass
+    if hinted:
+        words = [w for w in re.findall(r"[A-Z]+", desc) if w != "LME"]
+        phrases = [" ".join(words[i:i + 2]) for i in range(len(words) - 1)]
+        for candidate in phrases + [w for w in words if len(w) > 2] + [w for w in words if len(w) == 2]:
+            try:
+                return _lme.lme_root(candidate), None
+            except ValueError:
+                continue
+    return None
+
+
+def _date_in_text(text: str) -> Optional[str]:
+    for rx in _TEXT_DATE_RES:
+        m = rx.search(text)
+        if m:
+            d = _date(m.group(1))
+            if d is not None:
+                return d
+    return None
+
+
+def _lme_prompt(res: ParseResult, row: pd.Series, row_no: int, symbol: str, trade_date: str,
+                contract) -> Tuple[Optional[str], str]:
+    """(prompt date, where it came from) of an LME ticket, or (None, '') when the file gives none
+    and nothing implies one. In order: a ``Prompt Date`` / ``Prompt`` / ``Maturity`` / ``Maturity
+    Date`` column; a date in the Description; ``Settle Date`` when it is after the trade date;
+    a 3-month ticket's (the Symbol or Description says 3M, or Bloomberg's 'DS03') 3-month date;
+    a monthly contract's third Wednesday ('LPZ6'); ``Settle Date`` whatever it is. The 3M and
+    monthly cases are said in the load report."""
+    settle = _date(row.get("Settle Date"))
+    for col in LME_PROMPT_COLUMNS:
+        d = _date(row.get(col))
+        if d is not None:
+            if settle and settle > trade_date and settle != d:
+                _warn(res, row_no, symbol, f"Settle Date {settle} differs from {col} {d}; the prompt is taken from {col}")
+            return d, col
+    d = _date_in_text(_s(row.get("Description")))
+    if d is not None:
+        return d, "Description"
+    if settle and settle > trade_date:
+        return settle, "Settle Date"
+    marks = f"{_s(row.get('Symbol'))} {_s(row.get('Underlying Symbol'))} {_s(row.get('Description'))}".upper()
+    if _THREE_MONTH_RE.search(marks):
+        return _lme.three_month_date(trade_date).isoformat(), "3M"
+    if contract is not None:
+        return _lme.monthly_prompt(contract.year, contract.month).isoformat(), "MONTH"
+    if settle:
+        return settle, "Settle Date"
+    return None, ""
+
+
+def _parse_lme_forward(res: ParseResult, row: pd.Series, row_no: int, root_id: str, contract) -> None:
+    """An LME prompt-date forward (product LME_FWD, Phase 5; P&L rule approved 2026-09-24: the FX
+    forward rule in tonnes). One instrument per metal, keyed by its root id ('LME:CA'): asset_class
+    LME_FWD, base_ccy the root id, quote_ccy USD, multiplier 1, bbg_ticker the metal's LME cash
+    ticker, expiry 9999-12-31 (like an FX pair). ``Quantity`` is lots (a guess: no LME row has
+    been seen) signed by Side, converted to tonnes with ``engine.lme.lot_tonnes``; price = USD per
+    tonne as quoted; NetInvoice is cross-checked against lots x tonnes x price like a future's.
+    Two FX_NEAR legs on the prompt date (``_lme_prompt``): the metal (ccy = the root id, tonnes,
+    settles_cash 0) and the USD (-tonnes x fill, settles_cash 1). A prompt that is not an LME
+    prompt date for the trade date (``engine.lme.is_valid_prompt``) is a warning only, never a
+    reject (hard rule 6); a populated Currency other than USD contradicts the contract and rejects."""
+    symbol = _s(row.get("Symbol")) or _s(row.get("Underlying Symbol"))
+    trade_id = _s(row.get("Trade Id"))
+    if not trade_id:
+        res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
+        return
+    trade_date = _date(row.get("TradeDate"))
+    if trade_date is None:
+        res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r} "
+                                                  "(an LME ticket's Settle Date is its prompt, never its trade date)"))
+        return
+    ccy = _ccy(row.get("Currency"))
+    if ccy and ccy != "USD":
+        res.rejects.append(Reject(row_no, symbol, f"Currency {ccy} contradicts {root_id}, an LME forward in USD"))
+        return
+    tonnes_per_lot = _lme.lot_tonnes(root_id)
+    fill = _future_fill(res, row, row_no, symbol, tonnes_per_lot, quote_unit="USD/t")
+    if fill is None:
+        return
+    lots, price = fill
+    prompt, source = _lme_prompt(res, row, row_no, symbol, trade_date, contract)
+    if prompt is None:
+        res.rejects.append(Reject(row_no, symbol, "LME ticket with no prompt date: none in Prompt Date / Maturity / "
+                                                  "Settle Date or the Description, and not a 3M or monthly ticket"))
+        return
+    if source == "3M":
+        res.lme_prompt_notes.append(f"row {row_no} {trade_id} ({root_id}) is a 3-month ticket and takes the 3-month "
+                                    f"date of {trade_date}, {prompt}")
+    elif source == "MONTH":
+        res.lme_prompt_notes.append(f"row {row_no} {trade_id} ({root_id}) names the {contract.contract_id} month and "
+                                    f"takes its third-Wednesday prompt, {prompt}")
+    try:
+        valid = _lme.is_valid_prompt(prompt, trade_date)
+    except ValueError:
+        valid = False
+    if not valid:
+        _warn(res, row_no, symbol, f"prompt {prompt} (from {source}) is not an LME prompt date for a ticket dealt on "
+                                   f"{trade_date} (cash to 3M daily, Wednesdays to 6M, third Wednesdays beyond); "
+                                   "loaded as given")
+    tonnes = lots * tonnes_per_lot
+    res.instruments.setdefault(root_id, Instrument(
+        instrument_id=root_id, asset_class="LME_FWD", base_ccy=root_id, quote_ccy="USD",
+        multiplier=1.0, is_ndf=0, bbg_ticker=_lme.cash_ticker(root_id), expiry_date=PERPETUAL,
+    ))
+    res.trades.append(Trade(
+        trade_id=trade_id, source=SOURCE, instrument_id=root_id, product="LME_FWD", package_id=trade_id,
+        trade_date=trade_date, quantity=tonnes, price=price, **_common(row),
+    ))
+    res.legs.append(TradeLeg(trade_id, 1, "FX_NEAR", root_id, tonnes, trade_date, prompt, price, 0))
+    res.legs.append(TradeLeg(trade_id, 2, "FX_NEAR", "USD", -tonnes * price, trade_date, prompt, price, 1))
+
+
 # --------------------------------------------------------------------------- load
 def _rows(objs) -> List[tuple]:
     return [tuple(vars(o).values()) for o in objs]
@@ -1550,10 +1933,13 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
         # before `instrument_options` existed), and a positional VALUES list of 8 then
         # failed the whole upload with "table instruments has 12 columns but 8 values
         # were supplied" -- an import error over nothing the file did wrong.
-        conn.executemany(
-            "INSERT OR REPLACE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, "
-            "is_ndf, bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
-            _rows(res.instruments.values()))
+        instrument_cols = ("(instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, bbg_ticker, "
+                           "expiry_date) VALUES (?,?,?,?,?,?,?,?)")
+        conn.executemany(f"INSERT OR REPLACE INTO instruments {instrument_cols}",
+                         _rows(i for k, i in res.instruments.items() if k not in res.underlying_only))
+        # an option's underlying future with no trade in the file: never overwrites a row on file
+        conn.executemany(f"INSERT OR IGNORE INTO instruments {instrument_cols}",
+                         _rows(i for k, i in res.instruments.items() if k in res.underlying_only))
         if res.trades:
             updates = ",".join(f"{c}=excluded.{c}" for c in trade_cols if c != "trade_id")
             conn.executemany(

@@ -3,7 +3,7 @@
 `engine/pnl/stress.py::load_scenarios` treats `config/stress.yaml`.
 
 Keys (see the yaml for the meaning of each):
-  vol_target_usd, stress_pct, blended {trail_window_bd, w_trail, w_stress, stress_start,
+  vol_target_usd, vol_target_placeholder, vol_target_note, stress_pct, blended {trail_window_bd, w_trail, w_stress, stress_start,
   stress_end, cutover}, var_window_bd, var_confidence, worst_day_start,
   shock_dates [{date, name}, ...].
 `load_config` returns a plain dict of those, dates as ISO strings, plus `file` (the path
@@ -22,6 +22,10 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "risk.yam
 
 DEFAULTS: Dict[str, Any] = {
     "vol_target_usd": 4_500_000.0,          # docs/open-questions.md item 15: vol allocation 4.5m on 35m capital
+    # the 4.5m is the macro fund's figure, kept until Jason sets his own (docs/open-questions.md C5)
+    "vol_target_placeholder": True,
+    "vol_target_note": "placeholder: the macro fund's 4.5m, until Jason sets his own vol target "
+                       "(docs/open-questions.md C5)",
     "stress_pct": 50.0,                     # core/risk.py STRESS_FRACTION = 0.50
     "blended": {
         "trail_window_bd": 500,             # BLENDED_TRAIL_WIN
@@ -37,6 +41,10 @@ DEFAULTS: Dict[str, Any] = {
     "shock_dates": [                        # core/risk.py STRESS_IGNORE_DATES
         {"date": "2015-01-15", "name": "SNB floor removal"},
         {"date": "2016-06-24", "name": "Brexit referendum result"},
+        {"date": "2020-04-20", "name": "Negative WTI: the May contract settles at -37.63"},
+        {"date": "2020-04-21", "name": "Negative WTI aftermath: the June contract falls 43 %"},
+        {"date": "2022-03-07", "name": "LME nickel squeeze: nickel +66 %"},
+        {"date": "2022-03-08", "name": "LME nickel squeeze: trading suspended, the day's trades cancelled"},
     ],
 }
 
@@ -65,6 +73,8 @@ def _merged(file_values: Dict[str, Any]) -> Dict[str, Any]:
     cfg["stress_pct"] = float(cfg["stress_pct"])
     cfg["var_window_bd"] = int(cfg["var_window_bd"])
     cfg["var_confidence"] = float(cfg["var_confidence"])
+    cfg["vol_target_placeholder"] = bool(cfg["vol_target_placeholder"])
+    cfg["vol_target_note"] = str(cfg["vol_target_note"] or "")
     b = cfg["blended"]
     b["trail_window_bd"] = int(b["trail_window_bd"])
     b["w_trail"] = float(b["w_trail"])

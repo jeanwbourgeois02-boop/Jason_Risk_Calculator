@@ -99,6 +99,13 @@ Design choices (no one to ask, so noted here):
   that date (no closes from Bloomberg, or the marks it could not fill and why), the
   terminal not being reachable, or that it has not reached the date yet. Text only: no
   figure changes.
+
+  Commodity strip (commodity conversion Phase 3, 2026-09-24), after the FX Net / Gross:
+  gross commodity notional and net outright by sector (book-positions' `commodities`
+  block), open spreads and groups waiting for review (spreads-engine's `book_spreads`,
+  memoised on the database's mtime, see `_spread_summary`), and the next first notice /
+  last trade (expiry-monitor's `expiry_schedule`, worst first). Rendered as given; a
+  book with no commodity futures gets one plain "Commodities: none" card with its reason.
 """
 from __future__ import annotations
 
@@ -109,7 +116,7 @@ import sqlite3
 from functools import lru_cache
 from typing import Callable, Optional
 
-from dash import Input, Output, State, dcc, html
+from dash import Input, Output, dcc, html
 
 HEADER_ID = "header-block"
 CHART_CONTAINER_ID = "header-ltd-chart-container"
@@ -443,12 +450,18 @@ def _reason_tag(reason: str) -> str:
     # match _MISSING_TAG_RE first and produce the much less informative tag "no official".
     if "cannot be frozen" in reason:
         return "no historical mark at settlement"
-    from ui.tabs.blotter_pricing import BAD_VALUE_TAG, is_bad_value_reason
+    from ui.tabs.blotter_pricing import (
+        BAD_VALUE_TAG, RETIRED_PRODUCT_MARKER, RETIRED_PRODUCT_TAG, is_bad_value_reason,
+    )
     if is_bad_value_reason(reason):
         # 2026-09-18: a trade `value_book` left unpriced because a STORED figure is not a
         # number ("trade <id>: trades.price is not a number ('24-Jul')"), not because a
         # mark is missing. `_unpriced_breakdown` repeats those reasons in full.
         return BAD_VALUE_TAG
+    if RETIRED_PRODUCT_MARKER in reason:
+        # A leftover of a product that left on 2026-09-24 (an old database's open swap):
+        # tagged as the Blotter tags it, so both "excludes" hovers say the same thing.
+        return RETIRED_PRODUCT_TAG
     if "SPOT for USD conversion" in reason:
         return "no SPOT (USD conversion)"
     m = _MISSING_TAG_RE.search(reason)
@@ -705,12 +718,279 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         cards.append(_pnl_card("Net USD delta", {"available": False, "reason": reason}))
         cards.append(_pnl_card("Gross USD delta", {"available": False, "reason": reason}, colour=False))
 
+    # The commodity strip (Phase 3, 2026-09-24): Jason's first glance, after the FX cards.
+    cards.append(_divider())
+    cards.extend(_commodity_cards(conn, as_of))
+
     # No "As of" / "Last updated" cards: the as-of date is already in the tab's own
     # title row (user decision 2026-09-15). The "N rows on BNP file rates" note that
     # used to sit here (CSS margin-left:auto) is retired along with the BNP_BVAL
     # fallback pass itself (2026-09-17, "no bnp fall back") -- there is no other source
     # a row can be priced from any more, so the note could only ever say "0 of N".
     return cards
+
+
+# ------------------------------------------------------------------ the commodity strip
+# Commodity conversion Phase 3 (2026-09-24): four whole-book figures after the FX cards,
+# each rendered from its engine's output as given, nothing recomputed:
+#   1. gross commodity notional (USD): book-positions' `commodities.gross_usd`;
+#   2. net outright by sector: its `net_usd` and each sector's `net_usd` (the Blotter's
+#      Positions table's figures), one short line, the detail on hover;
+#   3. open spreads: spreads-engine's `book_spreads` spreads with status 'open', and how many
+#      groups wait for review, the names on hover;
+#   4. the next first notice / last trade: expiry-monitor's worst-first first row, coloured
+#      by its level.
+# A book with no commodity futures gets one plain card saying so.
+
+COMMODITY_EMPTY_TITLE = "Commodities"
+GROSS_NOTIONAL_TITLE = "Gross commodity notional"
+NET_BY_SECTOR_TITLE = "Net outright by sector"
+OPEN_SPREADS_TITLE = "Open spreads"
+NEXT_EXPIRY_TITLE = "Next first notice / last trade"
+
+_SECTOR_LABELS = {"agriculture": "Ags"}
+# Level colours on the dark header (the Expiries tab's own palette is for a light table).
+_LEVEL_STYLES = {
+    "EXPIRED": {"color": "#ffffff", "backgroundColor": "#7f1d1d", "padding": "0 4px", "borderRadius": "3px"},
+    "RED": {"color": "#f87171"},
+    "AMBER": {"color": "#fbbf24"},
+    "GREEN": {"color": "#4ade80"},
+}
+_EXPIRY_ROWS_ON_HOVER = 5
+_SPREAD_NAMES_ON_HOVER = 30
+
+
+def _sector_label(sector: str) -> str:
+    return _SECTOR_LABELS.get(str(sector), str(sector).replace("_", " ").capitalize())
+
+
+def _fmt_compact(value) -> str:
+    """'+12.3m', '−4.1m', '+812k', 'n/a' for None / NaN: the sector line's short form."""
+    if value is None or value != value:
+        return "n/a"
+    a = abs(float(value))
+    sign = "+" if value > 0 else ("−" if value < 0 else "")
+    for div, suffix in ((1e9, "b"), (1e6, "m"), (1e3, "k")):
+        if round(a / div, 1) >= 1:
+            return f"{sign}{a / div:.1f}{suffix}"
+    return f"{sign}{a:.0f}"
+
+
+def _fmt_usd_or_na(value) -> str:
+    return "n/a" if value is None or value != value else _fmt_usd(float(value))
+
+
+def _short_reason(reason: str) -> str:
+    """The visible head of a book-positions reason: 'excludes 1 of 3 commodities with no USD
+    figure' out of '... : COMEX copper (COMEX:HG): <why>'. The whole sentence goes on hover."""
+    return str(reason or "").split(": ", 1)[0]
+
+
+def _commodity_detail(block: dict) -> str:
+    """Hover text: each sector's net and gross, then each commodity's lots and net USD, with the
+    reason of any figure that is n/a."""
+    lines = []
+    for s in block.get("sectors") or []:
+        line = (f"{_sector_label(s.get('sector'))}: net {_fmt_usd_or_na(s.get('net_usd'))}, "
+                f"gross {_fmt_usd_or_na(s.get('gross_usd'))}")
+        lines.append(line + (f" ({s['reason']})" if s.get("reason") else ""))
+        for c in s.get("commodities") or []:
+            lots = c.get("net_lots")
+            lots_text = f"{lots:+,.0f} lots" if lots is not None else "lots n/a"
+            text = f"  {c.get('name') or c.get('root_id')}: {lots_text}, net {_fmt_usd_or_na(c.get('net_usd'))}"
+            if c.get("net_usd") is None and c.get("reason"):
+                text += f" ({c['reason']})"
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def _gross_notional_card(block: dict) -> html.Div:
+    gross, reason = block.get("gross_usd"), str(block.get("reason") or "")
+    if not block.get("available") or gross is None:
+        return _pnl_card(GROSS_NOTIONAL_TITLE, {"available": False, "reason": reason or
+                                                "no commodity position has a USD figure"}, colour=False)
+    card = _pnl_card(GROSS_NOTIONAL_TITLE, {"value": float(gross), "available": True,
+                                            "excluded_summary": _short_reason(reason), "excluded_detail": reason},
+                     colour=False)
+    card.children[1].title = _commodity_detail(block)
+    return card
+
+
+def _net_by_sector_card(block: dict) -> html.Div:
+    net, reason = block.get("net_usd"), str(block.get("reason") or "")
+    if not block.get("available") or net is None:
+        return _pnl_card(NET_BY_SECTOR_TITLE, {"available": False, "reason": reason or
+                                               "no commodity position has a USD figure"})
+    card = _pnl_card(NET_BY_SECTOR_TITLE, {"value": float(net), "available": True,
+                                           "excluded_summary": _short_reason(reason), "excluded_detail": reason})
+    detail = _commodity_detail(block)
+    card.children[1].title = detail
+    line = " · ".join(f"{_sector_label(s.get('sector'))} {_fmt_compact(s.get('net_usd'))}"
+                      for s in block.get("sectors") or [])
+    card.children.insert(2, html.Div(line, className="header-figure-caption header-figure-caption--sectors",
+                                     title=detail))
+    return card
+
+
+def _db_revision(conn: sqlite3.Connection) -> Optional[tuple]:
+    """(path, mtime) of the connection's main database file, None for an in-memory one or when
+    it cannot be read (then nothing is memoised). The mtime changes on every write
+    (journal_mode=delete, CLAUDE.md "Guard rails"), as for `_cached_ltd`."""
+    try:
+        path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+        return (str(path), os.path.getmtime(path)) if path else None
+    except Exception:  # noqa: BLE001 -- no memo, never a failure
+        return None
+
+
+_SPREADS_MEMO: dict = {}
+_SPREADS_MEMO_MAX = 64
+
+
+def _spread_summary_uncached(conn: sqlite3.Connection, as_of: str) -> dict:
+    """{open: [label], review: [reason], reasons: [sentence], error: ''} from `book_spreads`,
+    valued through the header's own reader (`priced_value_book`, cached per date, so the
+    closes the P&L cards already read are not valued again). Only the counts and names are
+    shown; the spreads' P&L is the Spreads tab's."""
+    try:
+        from engine.spreads import book_spreads
+        from ui.tabs.blotter_pricing import priced_value_book
+        out = book_spreads(conn, as_of, value_fn=priced_value_book)
+    except Exception as exc:  # noqa: BLE001 -- the card says why, the other cards still show
+        import logging
+        logging.getLogger(__name__).exception("header open spreads failed for as_of=%s", as_of)
+        return {"open": [], "review": [], "reasons": [],
+                "error": _failure_reason("spreads could not be grouped", exc, conn)}
+    opened = []
+    for s in out.get("spreads") or []:
+        if s.get("status") != "open":
+            continue
+        where = ", ".join(s.get("trade_dates") or [])
+        opened.append(f"{s.get('name') or s.get('spread_id')}" + (f" (traded {where})" if where else ""))
+    return {"open": opened, "review": [str(r.get("reason") or r.get("review_id") or "") for r in out.get("review") or []],
+            "reasons": [str(r) for r in out.get("reasons") or []], "error": ""}
+
+
+def _spread_summary(conn: sqlite3.Connection, as_of: str) -> dict:
+    """`_spread_summary_uncached`, memoised on (database path, mtime, as_of) like the LTD chart's
+    `_cached_ltd`: `book_spreads` values every group's P&L periods, about 1 s on the synthetic
+    sample against 0.15 s for the whole header warm (measured 2026-09-24), so it runs once per
+    database revision and as-of, not on every render."""
+    key = _db_revision(conn)
+    if key is None:
+        return _spread_summary_uncached(conn, as_of)
+    memo_key = (*key, as_of)
+    hit = _SPREADS_MEMO.get(memo_key)
+    if hit is None:
+        if len(_SPREADS_MEMO) >= _SPREADS_MEMO_MAX:
+            _SPREADS_MEMO.clear()
+        hit = _SPREADS_MEMO[memo_key] = _spread_summary_uncached(conn, as_of)
+    return hit
+
+
+def _open_spreads_card(summary: dict) -> html.Div:
+    if summary.get("error"):
+        return _pnl_card(OPEN_SPREADS_TITLE, {"available": False, "reason": summary["error"]}, colour=False)
+    opened, review, reasons = summary.get("open") or [], summary.get("review") or [], summary.get("reasons") or []
+    lines = []
+    if opened:
+        shown = opened[:_SPREAD_NAMES_ON_HOVER]
+        lines += ["Open spreads:"] + [f"- {n}" for n in shown]
+        if len(opened) > len(shown):
+            lines.append(f"- and {len(opened) - len(shown)} more")
+    else:
+        lines.append("No open spread in the book.")
+    if review:
+        lines += ["Waiting for review (left as outrights until bundled):"] + [f"- {r}" for r in review]
+    lines += reasons
+    hover = "\n".join(lines)
+    children = [
+        html.Div(OPEN_SPREADS_TITLE, className="header-figure-title"),
+        html.Div(f"{len(opened):,}", className="header-figure-value header-figure-value--neutral", title=hover),
+    ]
+    if review:
+        children.append(html.Div(f"{_plural(len(review), 'group')} to review",
+                                 className="header-figure-caption header-figure-caption--partial", title=hover))
+    return html.Div(className="header-figure", children=children)
+
+
+def _contract_label(contract_id: str) -> str:
+    text = str(contract_id or "")
+    return text[:-len(" Comdty")] if text.endswith(" Comdty") else text
+
+
+def _business_days_words(row: dict) -> str:
+    """'in 8 business days', or 'alert 2026-10-01, in 8 business days' when expiry-monitor
+    counts to an alert date held earlier than the event (an estimated physical contract);
+    '' for EXPIRED, whose count runs to a date already past."""
+    n, alert, event_date = row.get("business_days"), row.get("alert_date"), row.get("next_event_date")
+    if row.get("level") == "EXPIRED":
+        return ""
+    if n is None:
+        return "business days not countable"
+    words = "today" if n == 0 else f"in {_plural(n, 'business day')}"
+    return f"alert {alert}, {words}" if alert and alert != event_date else words
+
+
+def _next_expiry_card(schedule: dict) -> html.Div:
+    rows = schedule.get("rows") or []
+    if not rows:
+        return _figure_card(NEXT_EXPIRY_TITLE, "none",
+                            schedule.get("note") or "no open commodity futures position")
+    r = rows[0]   # worst first: level, then fewest business days (expiry-monitor's order)
+    level = str(r.get("level") or "")
+    date_text = (r.get("next_event_date") or "date unknown") + (" (est.)" if r.get("estimated") else "")
+    caption = " · ".join(p for p in (date_text, _business_days_words(r), level) if p)
+    lines = [f"{r.get('contract_id')}: {r.get('next_event')} {r.get('next_event_date') or 'date unknown'}"
+             + (" (estimated)" if r.get("estimated") else "") + f", {level}"]
+    if r.get("alert_date"):
+        lines.append(f"counted to the alert date {r['alert_date']} ({r.get('alert_basis') or r.get('next_event')})")
+    if r.get("reason"):
+        lines.append(str(r["reason"]))
+    counts = schedule.get("counts") or {}
+    if counts:
+        lines.append("Open contracts by level: " + ", ".join(f"{n} {lvl}" for lvl, n in counts.items()))
+    later = rows[1:1 + _EXPIRY_ROWS_ON_HOVER]
+    if later:
+        lines.append("Next:")
+        lines += [f"- {x.get('contract_id')}: {x.get('next_event')} {x.get('next_event_date') or 'date unknown'}"
+                  + (" (est.)" if x.get("estimated") else "")
+                  + "".join(f", {p}" for p in (_business_days_words(x), x.get("level")) if p) for x in later]
+    settled = schedule.get("settled_expired") or []
+    if settled:
+        lines.append(f"{_plural(len(settled), 'expired contract')} settled by the ledger: not alerts")
+    hover = "\n".join(lines)
+    return html.Div(className="header-figure", children=[
+        html.Div(NEXT_EXPIRY_TITLE, className="header-figure-title"),
+        html.Div(f"{_contract_label(r.get('contract_id'))} {r.get('next_event') or ''}".strip(),
+                 className=f"header-figure-value header-figure-value--level-{level.lower() or 'unknown'}",
+                 style=_LEVEL_STYLES.get(level, {}), title=hover),
+        html.Div(caption, className="header-figure-caption", title=hover),
+    ])
+
+
+def _commodity_cards(conn: sqlite3.Connection, as_of: str) -> list:
+    """The commodity strip: the four cards, or one plain card when the book holds no
+    commodity futures. Each engine call that fails costs its own card only, with the reason."""
+    try:
+        from engine.ladder.positions import book_positions
+        block = book_positions(conn, as_of).get("commodities") or {}
+    except Exception as exc:  # noqa: BLE001
+        block = {"available": False, "reason": _failure_reason("commodity positions could not be computed", exc, conn)}
+    try:
+        from engine.expiry import expiry_schedule
+        schedule, schedule_error = expiry_schedule(conn, as_of), ""
+    except Exception as exc:  # noqa: BLE001
+        schedule, schedule_error = {}, _failure_reason("roll calendar could not be computed", exc, conn)
+
+    if block.get("available") and not block.get("sectors") and not schedule_error and not schedule.get("rows"):
+        return [_figure_card(COMMODITY_EMPTY_TITLE, "none",
+                             block.get("reason") or schedule.get("note") or f"no open commodity futures on {as_of}")]
+
+    expiry_card = (_pnl_card(NEXT_EXPIRY_TITLE, {"available": False, "reason": schedule_error}, colour=False)
+                   if schedule_error else _next_expiry_card(schedule))
+    return [_gross_notional_card(block), _net_by_sector_card(block),
+            _open_spreads_card(_spread_summary(conn, as_of)), expiry_card]
 
 
 def _priced_day(df) -> tuple:

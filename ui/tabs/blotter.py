@@ -58,16 +58,27 @@ reason. Every other scope's strip always shows every card.
 
 Total book (2026-09-17, user request "there should be P&L by asset type"): under the
 strip, `asset_class_pnl_table` shows one row per asset class present (FX, Futures,
-Options) plus Total, each with LTD / Daily / Previous day / 5d / MTD / YTD /
+LME forwards, Options) plus Total, each with LTD / Daily / Previous day / 5d / MTD / YTD /
 Trading computed by `row_scoped_period_pnl` over that class's trade ids -- the same
 arithmetic and reference dates as the strip, so the class rows always sum to the strip.
-Above it, the Positions table (`positions_table`): the currency rows, the FX net and gross
-and the FX options' delta of `engine.ladder.positions.book_positions`.
+Above it, the Positions block (`positions_table`), from one `engine.ladder.positions.
+book_positions` call: first the Commodities (Phase 3; `commodity_positions_section`: one
+line per sector, the sector's commodities under it, the Commodities total, then the P&L the
+non-USD futures hold in each currency), then the FX lines as before (the currency rows, the
+FX net and gross, the FX options' delta). Commodities are not in the FX net.
 
-Futures (2026-09-24, commodity conversion): Jason's commodity futures, each contract in its
-own currency. The table shows the contract's exchange (contract master, `data.contracts`),
-`value_book`'s `pnl_local` with its currency (the instrument's quote currency) beside the
-USD P&L, which the engine converted at spot; nothing is converted here.
+Futures (2026-09-24, commodity conversion; grouped in Phase 3): Jason's commodity futures,
+each contract in its own currency, grouped by sector, then commodity (`futures_grouped_rows`:
+a sector row and a commodity row carrying their trades' USD P&L summed, priced rows only,
+"excludes N of M unpriced" in sight). Each trade row shows the contract's exchange, sector
+and name (contract master, `data.contracts.load_roots`), `value_book`'s `pnl_local` with its
+currency (the instrument's quote currency) beside the USD P&L, which the engine converted at
+spot; nothing is converted here. Options on commodity futures (CMDTY_OPTION) are on the
+Options sub-tab, never here. Phase 5 (2026-09-24): the sub-tab is "Futures & LME" and also
+holds the LME prompt-date forwards (LME_FWD, instrument = the metal's root id 'LME:CA'),
+grouped under their metal like the futures; Product tells the two apart, Unit says the
+Quantity is lots or tonnes, and an LME ticket's local P&L is its USD P&L (USD-quoted). In the
+Total book's P&L by asset class they are their own class, "LME forwards".
 
 FX is `ui.tabs.blotter_fx.build_layout`: the legacy sheet's "All FX trades" column
 layout (trade / tenor / fill / t-1-EOD-t-2 mark and P&L), but priced by
@@ -161,13 +172,17 @@ _ALL = "All"
 # closes the row: it is a form, not a view of the book. Rates left on 2026-09-24 (the
 # macro trader's products are out of the app, CLAUDE.md "Commodity conversion plan").
 SCOPE_ORDER = ("total", "fx", "futures", "options", "bundles", "manual")
-SCOPE_LABELS = {"total": "Total book", "fx": "FX", "futures": "Futures",
+SCOPE_LABELS = {"total": "Total book", "fx": "FX", "futures": "Futures & LME",
                 "options": "Options", "bundles": "Bundles", "manual": "Manual entry"}
 SCOPE_PRODUCTS = {
     "total": None,
     "fx": ("FX_SPOT", "FX_FWD", "FX_SWAP"),
-    "futures": ("FUTURE",),
-    "options": ("FX_OPTION",),
+    # Futures and LME forwards (Phase 5, 2026-09-24: a commodity trader reads an LME ticket
+    # with the futures of its metal, so the sub-tab is "Futures & LME" and the LME tickets
+    # sit under their metal). An option on a commodity future (CMDTY_OPTION) belongs to the
+    # Options sub-tab (ui.tabs.options lists it in its own grid), never to this one.
+    "futures": ("FUTURE", "LME_FWD"),
+    "options": ("FX_OPTION", "CMDTY_OPTION"),
     "manual": None,
 }
 # Sub-tabs that are forms/lists of their own, not `priced_value_book`-shaped tables:
@@ -187,41 +202,61 @@ _SELF_REFRESHING_SCOPES = ("options",)
 # Kept (empty) so the placeholder path stays available for a future scope.
 PLACEHOLDER_SCOPES: dict = {}
 
-# Asset class per product for the Total book's per-class P&L table. A product not listed
-# here (CMDTY_OPTION has no ingest path yet) falls to "Other" in `asset_class_pnl_rows`,
-# still counted and summed, never dropped.
-ASSET_CLASS_OF = {"FX_SPOT": "FX", "FX_FWD": "FX", "FX_SWAP": "FX", "FUTURE": "Futures", "FX_OPTION": "Options"}
-ASSET_CLASS_ORDER = ("FX", "Futures", "Options")
+# Asset class per product for the Total book's per-class P&L table. An option on a
+# commodity future (CMDTY_OPTION) is an option; an LME prompt-date forward (LME_FWD, Phase 5)
+# is its own class, "LME forwards". A product not listed here (an IRS left on an
+# old database: `value_book` gives it blank P&L and its reason) falls to "Other" in
+# `asset_class_pnl_rows`, still counted, its reason on hover, never dropped.
+ASSET_CLASS_OF = {"FX_SPOT": "FX", "FX_FWD": "FX", "FX_SWAP": "FX", "FUTURE": "Futures", "FX_OPTION": "Options",
+                  "CMDTY_OPTION": "Options", "LME_FWD": "LME forwards"}
+ASSET_CLASS_ORDER = ("FX", "Futures", "LME forwards", "Options")
 ASSET_TABLE_ID = "blotter-asset-class-table"
 POSITIONS_TABLE_ID = "blotter-positions-table"
-# With no futures trades in the book for the date shown, the Futures strip reads "n/a"
-# with this reason rather than a hollow zero.
-FUTURES_NO_TRADES_REASON = "no futures trades in the book on this date"
+# With no futures or LME forwards in the book for the date shown, the Futures & LME strip
+# reads "n/a" with this reason rather than a hollow zero.
+FUTURES_NO_TRADES_REASON = "no futures or LME forwards in the book on this date"
+# The unit of the Quantity column on the Futures & LME sub-tab, per product: a future is
+# booked in contracts, an LME forward in tonnes (data/ingest/blotter.py::_parse_lme_forward).
+QUANTITY_UNIT_OF = {"FUTURE": "lots", "LME_FWD": "t"}
 
 # Columns offered as click-to-filter dropdowns (user decision 2026-09-15, replacing the
 # broken native filter row): every categorical column that exists in a scope's own
 # display columns. Date/amount/rate columns are not offered -- multi-select-from-values
 # only makes sense for the categorical ones; "pick USDJPY" is the request, not a range
 # filter.
-FILTERABLE_COLS = ["instrument_id", "side", "status", "product", "strategy", "theme"]
+FILTERABLE_COLS = ["sector", "commodity", "instrument_id", "side", "status", "product", "strategy", "theme"]
 
 
-# Futures columns (2026-09-15, then 2026-09-24 for the commodity book): Trade date |
-# Contract | Exchange | Side | Contracts | Fill | Expiry | Status | Settlement | P&L (local)
-# | Ccy | P&L (USD) | Strategy | Bundle | Trade id. A commodity future's P&L is struck in the
-# contract's own currency (`value_book`'s `pnl_local`, in the instrument's quote currency)
-# and converted to USD at spot by the engine; both are shown, side by side, as computed.
-# "Settlement" is `mark_date` (the date the price used for P&L was struck).
+# Futures & LME columns (2026-09-15, 2026-09-24 for the commodity book, then Phase 3 grouped
+# by sector and commodity, then Phase 5 with the LME forwards): Sector | Commodity | Contract
+# | Exchange | Product | Trade date | Side | Quantity | Unit | Fill | Mark | Expiry / prompt |
+# Status | Settlement | P&L (local) | Ccy | P&L (USD) | Strategy | Bundle | Trade id. A
+# commodity future's P&L is struck in the contract's own currency (`value_book`'s
+# `pnl_local`, in the instrument's quote currency) and converted to USD at spot by the
+# engine; both are shown, side by side, as computed. An LME forward is in USD, so its local
+# P&L is its USD P&L. Product tells a future ("Future") from an LME ticket ("LME forward");
+# Unit says what Quantity counts (lots, or tonnes for an LME ticket). "Settlement" is
+# `mark_date` (the date the price used for P&L was struck). Sector and Commodity are on every
+# row, so a click on either keeps the groups together (`futures_grouped_rows`).
 _FUTURES_DISPLAY_COLUMNS = [
-    "trade_date", "instrument_id", "exchange", "side", "quantity", "fill", "settle_date", "status",
-    "mark_date", "pnl_local", "pnl_ccy", "pnl_usd", "strategy", "theme", "trade_id",
+    "sector", "commodity", "instrument_id", "exchange", "product", "trade_date", "side", "quantity", "qty_unit",
+    "fill", "mark", "settle_date", "status", "mark_date", "pnl_local", "pnl_ccy", "pnl_usd", "strategy", "theme",
+    "trade_id",
 ]
 _FUTURES_COLUMN_LABELS = {
-    "trade_date": "Trade date", "instrument_id": "Contract", "exchange": "Exchange", "side": "Side",
-    "quantity": "Contracts", "fill": "Fill", "settle_date": "Expiry", "status": "Status",
+    "sector": "Sector", "commodity": "Commodity",
+    "trade_date": "Trade date", "instrument_id": "Contract", "exchange": "Exchange", "product": "Product",
+    "side": "Side", "quantity": "Quantity", "qty_unit": "Unit", "fill": "Fill", "mark": "Mark",
+    "settle_date": "Expiry / prompt", "status": "Status",
     "mark_date": "Settlement", "pnl_local": "P&L (local)", "pnl_ccy": "Ccy", "pnl_usd": "P&L (USD)",
     "strategy": "Strategy", "theme": "Bundle", "trade_id": "Trade id",
 }
+# A futures contract whose root the contract master does not know: its sector reads this,
+# and its commodity is the root id on file (a label, never a guess at the contract).
+UNCLASSIFIED_SECTOR = "Unclassified"
+# The P&L (local) cell of a sector or commodity subtotal row: the subtotals are in USD (a
+# sector mixes currencies, and a settled future's P&L is stored in USD only).
+SUBTOTAL_LOCAL_NOTE = "subtotals are in USD only: a sector mixes currencies and a settled future's P&L is stored in USD"
 # A settled future is the ledger's frozen row (`realised_pnl`), which holds its P&L in USD
 # only: `value_book` leaves `pnl_local` blank on it, and this is said where the number
 # would be (engine/pnl/valuation.py::_settled_future_row).
@@ -268,7 +303,8 @@ def _fmt_status(value) -> str:
     return {"OPEN": "Open", "SETTLED": "Settled", "CLOSED": "Closed out"}.get(value, value or "")
 
 
-_PRODUCT_LABELS = {"FX_SPOT": "Spot", "FX_FWD": "Forward", "FX_SWAP": "Swap", "FUTURE": "Future", "FX_OPTION": "Option"}
+_PRODUCT_LABELS = {"FX_SPOT": "Spot", "FX_FWD": "Forward", "FX_SWAP": "Swap", "FUTURE": "Future", "FX_OPTION": "Option",
+                   "LME_FWD": "LME forward"}
 
 
 def _fmt_product(value) -> str:
@@ -340,16 +376,18 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
 
 def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
                   display_columns: Optional[list] = None,
-                  column_labels: Optional[dict] = None) -> dash_table.DataTable:
+                  column_labels: Optional[dict] = None, scope: str = "") -> dash_table.DataTable:
     """Build the trade table. `display_columns`/`column_labels` default to the FX/Total
-    layout; the Futures sub-tab passes its own (Contract/Contracts/Expiry/Settlement
-    instead of Pair/Amount/Value date/Live rate). Filtering is the dropdown bar built by
-    `_filter_bar` (see module docstring); sorting is native (ui.tabs.ranking): the table
-    opens in `_sorted_scope_df`'s order and any header click re-ranks it."""
+    layout; the Futures & LME sub-tab passes its own (Contract/Quantity/Expiry/Settlement
+    instead of Pair/Amount/Value date/Live rate) and `scope="futures"`, which groups its
+    rows by sector and commodity (`futures_grouped_rows`). Filtering is the dropdown bar
+    built by `_filter_bar` (see module docstring); sorting is native (ui.tabs.ranking): the
+    table opens in `_sorted_scope_df`'s order (Futures: grouped) and any header click
+    re-ranks it."""
     display_columns = display_columns if display_columns is not None else _DISPLAY_COLUMNS
     column_labels = column_labels if column_labels is not None else _COLUMN_LABELS
     cols = [c for c in display_columns if c in df.columns]
-    data_records, tooltip_data, style_data_conditional = _format_rows(df, display_columns, column_labels)
+    data_records, tooltip_data, style_data_conditional = _table_rows(scope, df, display_columns, column_labels)
     return dash_table.DataTable(
         id=table_id,
         columns=[rk.numeric(column_labels.get(c, c.replace("_", " ").title()), c, _COLUMN_FORMATS[c])
@@ -567,18 +605,42 @@ def asset_class_pnl_rows(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame)
     `trades` (count) and the seven period figures from
     `ui.tabs.blotter_pricing.row_scoped_period_pnl` over that class's trade ids --
     each `{value, available, reason, ref_date}` as the strip uses. Missing marks make
-    that class's figure unavailable with the reason, never zero."""
+    that class's figure unavailable with the reason, never zero. `unpriced` (Phase 3): the
+    class's trades `df` shows unpriced on `as_of`, as "<trade id>: <value_book's own reason>"
+    (a leftover IRS's "rate swaps left the app ..."), which the table puts on hover."""
     from ui.tabs.blotter_pricing import row_scoped_period_pnl
     if df.empty:
         return []
     classes = df["product"].map(ASSET_CLASS_OF).fillna("Other")
+
+    def unpriced(mask) -> list:
+        if "pnl_usd" not in df.columns:
+            return []
+        rows_ = df[mask & pd.to_numeric(df["pnl_usd"], errors="coerce").isna()]
+        reasons = rows_["reason"] if "reason" in rows_.columns else pd.Series([""] * len(rows_), index=rows_.index)
+        return [f"{t}: {reasons.loc[i] or 'no P&L'}" for i, t in zip(rows_.index, rows_["trade_id"])]
+
     rows = []
     for cls in [c for c in ASSET_CLASS_ORDER if c in set(classes)] + (["Other"] if "Other" in set(classes) else []):
         ids = df.loc[classes == cls, "trade_id"].tolist()
-        rows.append({"asset_class": cls, "trades": len(ids), **row_scoped_period_pnl(conn, as_of, ids)})
+        rows.append({"asset_class": cls, "trades": len(ids), **row_scoped_period_pnl(conn, as_of, ids),
+                     "unpriced": unpriced(classes == cls)})
     all_ids = df["trade_id"].tolist()
-    rows.append({"asset_class": "Total", "trades": len(all_ids), **row_scoped_period_pnl(conn, as_of, all_ids)})
+    rows.append({"asset_class": "Total", "trades": len(all_ids), **row_scoped_period_pnl(conn, as_of, all_ids),
+                 "unpriced": unpriced(classes == classes)})
     return rows
+
+
+_UNPRICED_EXAMPLES = 3   # trades named on an asset-class row's hover; the rest counted
+
+
+def _unpriced_note(row: dict, as_of: str) -> str:
+    """"Unpriced on <as_of>: S1: rate swaps left the app ...; (+2 more)" -- '' when none."""
+    items = row.get("unpriced") or []
+    if not items:
+        return ""
+    more = f"; (+{len(items) - _UNPRICED_EXAMPLES} more)" if len(items) > _UNPRICED_EXAMPLES else ""
+    return f"Unpriced on {as_of}: " + "; ".join(items[:_UNPRICED_EXAMPLES]) + more
 
 
 _ASSET_PERIODS = ("ltd", "daily", "previous_day", "d5", "mtd", "ytd", "trading")
@@ -597,6 +659,7 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
     for r in rows:
         rec = {"asset_class": r["asset_class"], "trades": int(r["trades"])}
         tip = {}
+        why = _unpriced_note(r, as_of)   # each unpriced trade's own reason, not only its short tag
         for key in _ASSET_PERIODS:
             entry = r.get(key, {})
             if entry.get("available"):
@@ -604,14 +667,16 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
                 summary = entry.get("excluded_summary")
                 if summary:
                     detail = entry.get("excluded_detail", "")
-                    tip[key] = {"value": f"{summary}. {detail}" if detail else summary, "type": "text"}
+                    text = f"{summary}. {detail}" if detail else summary
+                    tip[key] = {"value": f"{text}. {why}" if why else text, "type": "text"}
                 ref_note = entry.get("ref_note")
                 if ref_note:  # measured from an earlier close (engine.pnl.reference)
                     rest = tip.get(key, {}).get("value", "")
                     tip[key] = {"value": f"{ref_note}. {rest}" if rest else ref_note, "type": "text"}
             else:
                 rec[key] = None
-                tip[key] = {"value": entry.get("reason", "") or "unavailable", "type": "text"}
+                reason = entry.get("reason", "") or "unavailable"
+                tip[key] = {"value": f"{reason}. {why}" if why else reason, "type": "text"}
         records.append(rec)
         tooltips.append(tip)
     is_total = [rec["asset_class"] == "Total" for rec in records]
@@ -665,21 +730,22 @@ def _pair_label(c: dict) -> str:
     return f"USD{c['ccy']}"
 
 
-def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
-    """(records, tooltips) of the Total book's Positions table (user, 2026-09-22: "I want
+def positions_rows(conn: sqlite3.Connection, as_of: str, pos: Optional[dict] = None) -> tuple:
+    """(records, tooltips) of the Total book's FX positions table (user, 2026-09-22: "I want
     to see the delta by currency ... this is the key table of the blotter"): the figures of
     `engine.ladder.positions.book_positions`. First one row per currency with delta (the
     Ladder's risk table: rate as quoted on its plain pair, local delta, USD delta; a metal
     row says it is not in the FX net), then the FX net and gross, then the FX options' delta
     by pair (already inside the currency rows). The equity-index line and the rates DV01
-    left on 2026-09-24 with the macro trader's products: `book_positions` may still return
-    its `equity_index` and `rates` blocks until the book-positions lane drops them, and
-    they are not read here. Commodity futures get their own lines in Phase 3; until then
-    the Futures sub-tab and the Curve tab show them. Columns: Position, Rate, Delta
-    (local), Delta (USD), Detail. A figure that could not be computed reads "n/a" with its
-    reason in the cell's tooltip. Cells are numbers (ui.tabs.ranking): a missing one is None."""
-    from engine.ladder.positions import book_positions
-    pos = book_positions(conn, as_of)
+    left on 2026-09-24 with the macro trader's products. The commodity futures are the
+    Positions block's own table above this one (`commodity_positions_rows`, Phase 3).
+    Columns: Position, Rate, Delta (local), Delta (USD), Detail. A figure that could not be
+    computed reads "n/a" with its reason in the cell's tooltip. Cells are numbers
+    (ui.tabs.ranking): a missing one is None. `pos`: `book_positions`' result when the
+    caller already has it (`positions_table` reads it once for both tables)."""
+    if pos is None:
+        from engine.ladder.positions import book_positions
+        pos = book_positions(conn, as_of)
     records, tips = [], []
 
     def add(label, units, usd, detail="", reason="", indent=False, rate="", kind=""):
@@ -712,12 +778,173 @@ def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
     return records, tips
 
 
+def _sector_label(sector) -> str:
+    """'Energy' for contract-master's 'energy'; `UNCLASSIFIED_SECTOR` for none."""
+    return str(sector).capitalize() if sector else UNCLASSIFIED_SECTOR
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+# The commodity block when `book_positions` did not return one at all.
+_NO_COMMODITY_BLOCK = {"available": False, "note": "", "sectors": [], "net_usd": None, "gross_usd": None,
+                       "missing": [], "currency_exposure": {},
+                       "reason": "commodity positions were not returned by the positions engine"}
+COMMODITY_POSITIONS_TABLE_ID = "blotter-commodity-positions-table"
+COMMODITY_CCY_TABLE_ID = "blotter-commodity-ccy-table"
+COMMODITY_TOTAL_LABEL = "Commodities total"
+COMMODITY_TOTAL_DETAIL = "not in the FX net below"
+
+
+def commodity_positions_rows(block: Optional[dict]) -> dict:
+    """The Positions block's Commodities section (commodity conversion Phase 3), from
+    `book_positions(...)["commodities"]` as the engine gives it, nothing recomputed:
+
+    {'records', 'tooltips' (the table's lines: one per sector, then one per commodity under
+    it), 'footer', 'footer_tooltips' (the Commodities total), 'ccy_records', 'ccy_tooltips'
+    (the P&L held in foreign currency, one line per currency), 'caption' (the block's own
+    `reason`, "excludes N of M ..." or why there is nothing to show; '' when every figure is
+    there)}.
+
+    A sector line carries its net and gross USD (lots and units are per commodity: a sector
+    mixes units, so its lot cells are left empty, and say so on hover); a commodity line
+    carries name, exchange, net and gross lots, net units with the unit, net and gross USD.
+    A None (curve-positions' n/a) is None here, printed "n/a" with the line's reason on
+    hover, never 0. A sector summed over only some of its commodities says so in its Detail
+    ("excludes N of M commodities with no USD figure", the engine's reason on hover)."""
+    block = block if block is not None else _NO_COMMODITY_BLOCK
+    records, tips = [], []
+
+    def tip_for(rec: dict, reason: str, cols=("net_lots", "gross_lots", "net_units", "net_usd", "gross_usd")) -> dict:
+        return {c: {"value": reason or "not computed", "type": "text"} for c in cols if rec.get(c) is None}
+
+    for s in block.get("sectors") or []:
+        comms = s.get("commodities") or []
+        missing = s.get("missing") or []
+        sector = _sector_label(s.get("sector"))
+        detail = _plural(len(comms), "commodity", "commodities")
+        if missing:
+            detail += f"; excludes {len(missing)} of {len(comms)} with no USD figure"
+        rec = {"kind": "sector", "position": sector, "sector": sector, "exchange": "", "net_lots": "",
+               "gross_lots": "", "net_units": "", "unit": "", "net_usd": _pos_num(s.get("net_usd")),
+               "gross_usd": _pos_num(s.get("gross_usd")), "detail": detail}
+        tip = tip_for(rec, s.get("reason", ""), ("net_usd", "gross_usd"))
+        if missing and s.get("reason"):
+            for col in ("net_usd", "gross_usd"):
+                tip.setdefault(col, {"value": s["reason"], "type": "text"})
+        tip["net_lots"] = {"value": "lots and units are per commodity: a sector mixes units", "type": "text"}
+        records.append(rec)
+        tips.append(tip)
+        for c in comms:
+            currency = c.get("currency") or ""
+            rec = {"kind": "commodity", "position": "    " + str(c.get("name") or c.get("root_id") or ""),
+                   "sector": sector, "exchange": c.get("exchange") or "", "net_lots": _pos_num(c.get("net_lots")),
+                   "gross_lots": _pos_num(c.get("gross_lots")), "net_units": _pos_num(c.get("net_units")),
+                   "unit": c.get("unit") or "", "net_usd": _pos_num(c.get("net_usd")),
+                   "gross_usd": _pos_num(c.get("gross_usd")),
+                   "detail": "" if currency in ("", "USD") else f"{currency} contract, in USD at the day's spot"}
+            records.append(rec)
+            tips.append(tip_for(rec, c.get("reason", "")))
+
+    footer, footer_tips = [], []
+    if records:
+        total = {"kind": "total", "position": COMMODITY_TOTAL_LABEL, "sector": "", "exchange": "", "net_lots": "",
+                 "gross_lots": "", "net_units": "", "unit": "", "net_usd": _pos_num(block.get("net_usd")),
+                 "gross_usd": _pos_num(block.get("gross_usd")), "detail": COMMODITY_TOTAL_DETAIL}
+        total_tip = tip_for(total, block.get("reason", ""), ("net_usd", "gross_usd"))
+        if block.get("missing") and block.get("reason"):
+            for col in ("net_usd", "gross_usd"):
+                total_tip.setdefault(col, {"value": block["reason"], "type": "text"})
+        footer, footer_tips = [total], [total_tip]
+
+    ccy_records, ccy_tips = [], []
+    for ccy, e in sorted((block.get("currency_exposure") or {}).items()):
+        rec = {"currency": ccy, "position": f"P&L held in {ccy}", "pnl_local": _pos_num(e.get("pnl_local")),
+               "pnl_usd": _pos_num(e.get("pnl_usd"))}
+        ccy_records.append(rec)
+        ccy_tips.append({c: {"value": e.get("reason") or "not computed", "type": "text"}
+                         for c in ("pnl_local", "pnl_usd") if rec[c] is None})
+
+    caption = block.get("reason") or ""
+    if not records and not caption:
+        caption = block.get("note") or "no open commodity futures"
+    return {"records": records, "tooltips": tips, "footer": footer, "footer_tooltips": footer_tips,
+            "ccy_records": ccy_records, "ccy_tooltips": ccy_tips, "caption": caption}
+
+
+_POSITIONS_CELL = {"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
+                   "padding": "4px 8px", "whiteSpace": "pre"}
+
+
+def commodity_positions_section(block: Optional[dict]) -> html.Div:
+    """The Commodities part of the Positions block (`commodity_positions_rows`): its
+    caption, the sector / commodity table with the Commodities total pinned under it, then
+    the P&L held in foreign currency. Ranked (ui.tabs.ranking): Sector is on every line, so
+    a click on it keeps each sector's commodities together; the total never moves."""
+    rows = commodity_positions_rows(block)
+    children = [html.H5("Commodities")]
+    if rows["caption"]:
+        children.append(html.P(rows["caption"], className="section-kicker", style={"fontStyle": "italic"}))
+    if rows["records"]:
+        lots = rk.amount(2, nully="n/a", trim=True)
+        table = dash_table.DataTable(
+            id=COMMODITY_POSITIONS_TABLE_ID,
+            columns=[rk.text("Position", "position"), rk.text("Sector", "sector"), rk.text("Exchange", "exchange"),
+                     rk.numeric("Net lots", "net_lots", lots), rk.numeric("Gross lots", "gross_lots", lots),
+                     rk.numeric("Net units", "net_units", rk.amount(nully="n/a")), rk.text("Unit", "unit"),
+                     rk.numeric("Net USD", "net_usd", rk.amount(nully="n/a")),
+                     rk.numeric("Gross USD", "gross_usd", rk.amount(nully="n/a")), rk.text("", "detail")],
+            data=rows["records"], tooltip_data=rows["tooltips"],
+            **rk.sortable(COMMODITY_POSITIONS_TABLE_ID),
+            style_table={"overflowX": "auto"},
+            style_cell=_POSITIONS_CELL,
+            style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"}
+                                    for c in ("position", "sector", "exchange", "unit", "detail")],
+            style_header={"fontWeight": "bold"},
+            style_data_conditional=[{"if": {"filter_query": "{kind} = 'sector'"}, "fontWeight": "700",
+                                     "backgroundColor": "#e8edf7"}]
+                                   + rk.sign_styles(["net_lots", "net_units"], pos="inherit")
+                                   + rk.sign_styles(["net_usd"], bold=True,
+                                                    nil={"color": "var(--muted)", "fontStyle": "italic"}),
+        )
+        total_style = [{"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700",
+                        "borderTop": "1px solid var(--muted)"}]
+        children.append(rk.with_footer(table, rows["footer"], footer_style=total_style,
+                                       footer_tooltips=rows["footer_tooltips"]))
+    if rows["ccy_records"]:
+        children.append(html.H5("P&L held in foreign currency"))
+        children.append(html.P("The P&L the non-USD futures have made, still held in the contract's currency, "
+                               "and its USD value at the day's spot, as the engine converted it.",
+                               className="section-kicker"))
+        children.append(dash_table.DataTable(
+            id=COMMODITY_CCY_TABLE_ID,
+            columns=[rk.text("Position", "position"), rk.text("Currency", "currency"),
+                     rk.numeric("P&L (local)", "pnl_local", rk.amount(nully="n/a")),
+                     rk.numeric("P&L (USD)", "pnl_usd", rk.amount(nully="n/a"))],
+            data=rows["ccy_records"], tooltip_data=rows["ccy_tooltips"],
+            **rk.sortable(COMMODITY_CCY_TABLE_ID),
+            style_table={"overflowX": "auto"},
+            style_cell=_POSITIONS_CELL,
+            style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("position", "currency")],
+            style_header={"fontWeight": "bold"},
+            style_data_conditional=rk.sign_styles(["pnl_local", "pnl_usd"], bold=True,
+                                                  nil={"color": "var(--muted)", "fontStyle": "italic"}),
+        ))
+    return html.Div(className="positions-commodities", children=children)
+
+
 def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """The Total book's Positions block (`positions_rows`), above the P&L by asset class.
-    Ranked (ui.tabs.ranking): a click on Delta (USD) puts the largest risk first; the
-    section totals (FX net and gross, FX options) are the pinned footer, in their own
-    order, never ranked with the lines."""
-    records, tips = positions_rows(conn, as_of)
+    """The Total book's Positions block, above the P&L by asset class: the Commodities first
+    (Jason's book is mostly commodities; `commodity_positions_section`), then the FX lines
+    (`positions_rows`), both from one `book_positions` call. The FX table is ranked
+    (ui.tabs.ranking): a click on Delta (USD) puts the largest risk first; the section
+    totals (FX net and gross, FX options) are the pinned footer, in their own order, never
+    ranked with the lines. Commodities are not in the FX net (CLAUDE.md "Net USD")."""
+    from engine.ladder.positions import book_positions
+    pos = book_positions(conn, as_of)
+    commodities = _safe_section("Commodity positions", lambda: commodity_positions_section(pos.get("commodities")))
+    records, tips = positions_rows(conn, as_of, pos=pos)
     body = [(r, t) for r, t in zip(records, tips) if r["kind"] != "total"]
     footer = [(r, t) for r, t in zip(records, tips) if r["kind"] == "total"]
     table = dash_table.DataTable(
@@ -728,8 +955,7 @@ def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
         data=[r for r, _ in body], tooltip_data=[t for _, t in body],
         **rk.sortable(POSITIONS_TABLE_ID),
         style_table={"overflowX": "auto"},
-        style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
-                    "padding": "4px 8px", "whiteSpace": "pre"},
+        style_cell=_POSITIONS_CELL,
         style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("position", "rate", "detail")],
         style_header={"fontWeight": "bold"},
         style_data_conditional=rk.sign_styles(["units"], pos="inherit")
@@ -738,9 +964,12 @@ def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
     total_style = [{"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700", "borderTop": "1px solid var(--muted)"}]
     return html.Div(className="section", children=[
         html.H4("Positions"),
-        html.P("Delta by currency at the day's official spot, FX options included. Futures positions are on the "
-               "Futures sub-tab and the Curve tab. A figure with no mark reads n/a with the reason on hover.",
-               className="section-kicker"),
+        html.P("Commodity futures by sector, then commodity, in lots, physical units and USD at the day's official "
+               "prices and spot (contract months on the Curve tab); they are not in the FX net. Then delta by "
+               "currency at the day's official spot, FX options included. A figure with no mark reads n/a with "
+               "the reason on hover.", className="section-kicker"),
+        commodities,
+        html.H5("FX"),
         rk.with_footer(table, [r for r, _ in footer], footer_style=total_style, footer_tooltips=[t for _, t in footer])])
 
 
@@ -817,28 +1046,133 @@ def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
 
 
 def add_future_fields(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
-    """The Futures table's two descriptive columns, looked up, never computed: `pnl_ccy`, the
+    """The Futures table's descriptive columns, looked up, never computed: `pnl_ccy`, the
     currency `value_book`'s `pnl_local` is in (the instrument's quote currency, CLAUDE.md
-    "P&L conventions -> Futures"), and `exchange`, the contract root's exchange in the
-    contract master (`data.contracts.get_root` on the instrument's `base_ccy`, which is the
-    root id, 'SHFE:CU'). A contract the master does not know shows a blank exchange; the
-    currency is always the instrument's own."""
-    from data.contracts import get_root
+    "P&L conventions -> Futures"); and from the contract master (`data.contracts.load_roots`,
+    keyed on the instrument's `base_ccy`, which is the root id, 'SHFE:CU'): `exchange`,
+    `sector` ('Energy') and `commodity` (the root's name). A contract the master does not know
+    shows a blank exchange, sector `UNCLASSIFIED_SECTOR` and its root id on file as the
+    commodity; the currency is always the instrument's own. An LME forward's instrument is
+    its metal's root id, so it takes that root's sector and name and sits with the metal.
+    `qty_unit` (`QUANTITY_UNIT_OF`): lots for a future, t for an LME forward. An LME
+    forward's blank `pnl_local` shows its `pnl_usd` (a USD figure in a USD column)."""
+    from data.contracts import load_roots
 
+    try:
+        roots = load_roots()
+    except (OSError, ValueError):   # an unreadable universe: labels blank, figures untouched
+        logging.getLogger(__name__).exception("contract universe unreadable for the Futures sub-tab")
+        roots = {}
     df = df.copy()
     info = {}
     for instrument_id in df["instrument_id"].unique():
         row = conn.execute("SELECT base_ccy, quote_ccy FROM instruments WHERE instrument_id = ?",
                            (instrument_id,)).fetchone()
         base, quote = (row[0], row[1]) if row else ("", "")
-        try:
-            exchange = get_root(base).exchange if base else ""
-        except KeyError:
-            exchange = ""
-        info[instrument_id] = (exchange, quote or "")
-    df["exchange"] = df["instrument_id"].map(lambda i: info.get(i, ("", ""))[0])
-    df["pnl_ccy"] = df["instrument_id"].map(lambda i: info.get(i, ("", ""))[1])
+        root = roots.get(base) if base else None
+        if root is not None:
+            info[instrument_id] = (root.exchange, quote or "", _sector_label(root.sector), root.name)
+        else:
+            info[instrument_id] = ("", quote or "", UNCLASSIFIED_SECTOR, base or instrument_id)
+    blank = ("", "", UNCLASSIFIED_SECTOR, "")
+    for n, col in enumerate(("exchange", "pnl_ccy", "sector", "commodity")):
+        df[col] = df["instrument_id"].map(lambda i, _n=n: info.get(i, blank)[_n])
+    df["qty_unit"] = df["product"].map(QUANTITY_UNIT_OF).fillna("")
+    # An LME forward is USD-quoted (S = 1): its local P&L IS its USD P&L. `value_book` leaves
+    # `pnl_local` blank on a settled one (the ledger's frozen row holds USD only), so the
+    # frozen USD figure is shown there too, as it is, never recomputed.
+    if "pnl_local" in df.columns and "pnl_usd" in df.columns:
+        lme_usd = (df["product"] == "LME_FWD") & (df["pnl_ccy"] == "USD")
+        df.loc[lme_usd, "pnl_local"] = df.loc[lme_usd, "pnl_local"].fillna(df.loc[lme_usd, "pnl_usd"])
     return df
+
+
+def _subtotal(rows: pd.DataFrame) -> tuple:
+    """(USD P&L summed over the priced rows or None when none is priced, the Contract cell's
+    visible label "3 trades" / "3 trades; excludes 1 of 3 unpriced", the P&L cell's hover:
+    each unpriced trade and its reason). The header's display rule: known figures summed,
+    an n/a never counted as 0 and always named."""
+    pnl = pd.to_numeric(rows["pnl_usd"], errors="coerce") if "pnl_usd" in rows.columns else pd.Series(dtype=float)
+    known = pnl.dropna()
+    n, k = len(rows), int(pnl.isna().sum())
+    label = _plural(n, "trade", "trades") + (f"; excludes {k} of {n} unpriced" if k else "")
+    why = ""
+    if k:
+        reasons = rows["reason"] if "reason" in rows.columns else pd.Series([""] * n, index=rows.index)
+        unpriced = rows[pnl.isna()]
+        why = f"excludes {k} of {n} trades unpriced: " + "; ".join(
+            f"{t}: {reasons.loc[i] or 'no P&L'}" for i, t in zip(unpriced.index, unpriced["trade_id"]))
+    return (float(known.sum()) if len(known) else None), label, why
+
+
+_GROUP_STYLES = [
+    {"if": {"filter_query": "{row_kind} = 'sector'"}, "fontWeight": "700", "backgroundColor": "#e8edf7"},
+    {"if": {"filter_query": "{row_kind} = 'commodity'"}, "fontWeight": "700", "backgroundColor": "#f4f6fb"},
+]
+
+
+def futures_grouped_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
+    """The Futures table grouped by sector, then commodity (commodity conversion Phase 3):
+    a sector row, then per commodity a commodity row and its contracts' trades. Each
+    trade row is `_format_rows`' own (exchange, contract, lots, fill, mark, P&L in the
+    contract's currency with the currency beside it, USD P&L, exactly as `value_book`
+    gives them; a settled future keeps its frozen USD). A sector and a commodity row carry
+    the USD P&L of their trades summed (`_subtotal`: priced rows only, "excludes N of M
+    unpriced" in sight, each unpriced trade's reason on hover) and no trade id, so the P&L
+    strip, which sums the rows' trade ids, never counts them. Every row carries `sector`
+    and `commodity`, so a header click on either keeps the groups together, and `row_kind`
+    ('sector' | 'commodity' | 'trade'), which styles them. Same return shape as
+    `_format_rows`: (records, tooltip_data, style_data_conditional)."""
+    if df.empty or "sector" not in df.columns:
+        records, tips, styles = _format_rows(df, display_columns, column_labels)
+        return records, tips, styles + _GROUP_STYLES
+    cols = [c for c in display_columns if c in df.columns]
+    order = df.assign(_unclassified=df["sector"] == UNCLASSIFIED_SECTOR).sort_values(
+        ["_unclassified", "sector", "commodity", "settle_date", "instrument_id", "trade_date"], kind="stable")
+    order = order.drop(columns="_unclassified").reset_index(drop=True)
+    trade_records, trade_tips, styles = _format_rows(order, display_columns, column_labels)
+    reasons = order["reason"].tolist() if "reason" in order.columns else [""] * len(order)
+    for rec, tip, reason in zip(trade_records, trade_tips, reasons):
+        rec["row_kind"] = "trade"
+        if reason and rec.get("mark") is None and "mark" in rec:
+            tip["mark"] = {"value": reason, "type": "text"}
+
+    def group_row(kind: str, rows: pd.DataFrame, sector: str, commodity: str) -> tuple:
+        value, label, why = _subtotal(rows)
+        rec = {c: "" for c in cols}
+        rec.update(row_kind=kind, sector=sector, commodity=commodity, instrument_id=label, trade_id="",
+                   pnl_usd=value)
+        if kind == "commodity" and "exchange" in cols:
+            rec["exchange"] = ", ".join(sorted({e for e in rows["exchange"] if e}))
+        tip = {"pnl_local": {"value": SUBTOTAL_LOCAL_NOTE, "type": "text"}} if "pnl_local" in cols else {}
+        if why:
+            tip["pnl_usd"] = {"value": why, "type": "text"}
+            tip["instrument_id"] = {"value": why, "type": "text"}
+        return rec, tip
+
+    records, tips = [], []
+    positions = {idx: n for n, idx in enumerate(order.index)}
+    for sector, s_rows in order.groupby("sector", sort=False):
+        rec, tip = group_row("sector", s_rows, sector, "")
+        records.append(rec)
+        tips.append(tip)
+        for commodity, c_rows in s_rows.groupby("commodity", sort=False):
+            rec, tip = group_row("commodity", c_rows, sector, commodity)
+            records.append(rec)
+            tips.append(tip)
+            for idx in c_rows.index:
+                records.append(trade_records[positions[idx]])
+                tips.append(trade_tips[positions[idx]])
+    return records, tips, styles + _GROUP_STYLES
+
+
+def _table_rows(scope: str, df: pd.DataFrame, display_columns: list, column_labels: dict):
+    """A scope's trade-table records: grouped for Futures (`futures_grouped_rows`), flat for
+    every other scope (`_format_rows`). One builder for the first render and the filter
+    callback's refresh."""
+    if scope == "futures":
+        return futures_grouped_rows(df, display_columns, column_labels)
+    return _format_rows(df, display_columns, column_labels)
 
 
 def _bad_values_text(conn: Optional[sqlite3.Connection]) -> str:
@@ -1052,7 +1386,7 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
         body.append(_safe_section(
             "Trade table",
             lambda: detail_table(df, table_id=table_id, display_columns=display_columns,
-                                  column_labels=column_labels), conn))
+                                  column_labels=column_labels, scope=scope), conn))
         body.append(html.Div(id=detail_id))
     return html.Div(body)
 
@@ -1247,7 +1581,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 with pricing_snapshot(conn, f"Blotter {_scope} P&L strip"):
                     if _scope == "futures" and not trade_ids:
                         df, _, _ = priced_value_book(conn, as_of_date)
-                        if df.empty or df[df["product"] == "FUTURE"].empty:
+                        if df.empty or df[df["product"].isin(SCOPE_PRODUCTS["futures"])].empty:
                             return render_placeholder_strip(FUTURES_NO_TRADES_REASON)
                     headline = row_scoped_headline(conn, as_of_date, trade_ids)
                     return render_headline_strip(headline)
@@ -1317,7 +1651,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             for col, picked in zip(_filter_cols, values):
                 if picked:
                     df = df[df[col].isin(picked)]
-            data_records, tooltip_data, _ = _format_rows(df, _display_columns, _column_labels)
+            data_records, tooltip_data, _ = _table_rows(_scope, df, _display_columns, _column_labels)
             return data_records, tooltip_data
 
         app.callback(

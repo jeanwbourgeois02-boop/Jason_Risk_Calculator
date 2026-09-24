@@ -596,7 +596,6 @@ class RatesBloombergSource:
         """ReferenceDataRequest for `tickers`/`fields` (live snapshot). Returns
         {ticker: {field: raw value}}; a field absent from the response for a
         given ticker is simply missing from that ticker's dict."""
-        blpapi = self._blpapi
         request = self._service.createRequest("ReferenceDataRequest")
         for t in tickers:
             request.getElement("securities").appendValue(t)
@@ -630,7 +629,6 @@ class RatesBloombergSource:
     def _fetch_historical_single(self, tickers: List[str], field: str, as_of: datetime.date) -> Dict[str, Any]:
         """HistoricalDataRequest for a single date (start = end = as_of), batched over
         `tickers`. Returns {ticker: raw value or None}."""
-        blpapi = self._blpapi
         request = self._service.createRequest("HistoricalDataRequest")
         for t in tickers:
             request.getElement("securities").appendValue(t)

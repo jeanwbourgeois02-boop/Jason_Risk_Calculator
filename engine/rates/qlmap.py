@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import datetime
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import QuantLib as ql
 

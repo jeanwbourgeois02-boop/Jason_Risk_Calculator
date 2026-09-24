@@ -168,12 +168,22 @@ def resolve_future(symbol: str, *, trade_date, underlying: str = "", description
         raise UnknownContract(f"futures symbol {symbol!r} is not a contract month such as 'CLZ6', "
                               f"'CLZ6 Comdty', 'CU2611' or 'SHFE:CU2611'")
     prefix, code, month, year, form, key = parsed
+    root = _pick_root(symbol, prefix, code, form, key, currency=currency, venue=venue,
+                      underlying=underlying, description=description, what="futures symbol")
+    return contract_month(root.root_id, month, year, conn=conn)
+
+
+def _pick_root(symbol: str, prefix: Optional[FrozenSet[str]], code: str, form: str, key: str, *,
+               currency: str = "", venue: str = "", underlying: str = "", description: str = "",
+               what: str = "futures symbol") -> ContractRoot:
+    """The one root a parsed code names, narrowed as the module docstring says; raises
+    ``UnknownContract`` / ``AmbiguousContract``. Shared with ``options.resolve_option``."""
     roots = list(load_roots().values())
     if prefix is not None:
         roots = [r for r in roots if r.exchange in prefix]
     cands = _candidates(roots, code, form, key)
     if not cands:
-        raise UnknownContract(f"futures symbol {symbol!r}: root {code!r} is not in config/contracts.csv"
+        raise UnknownContract(f"{what} {symbol!r}: root {code!r} is not in config/contracts.csv"
                               + (f" on {'/'.join(sorted(prefix))}" if prefix else ""))
 
     ccy = str(currency or "").strip().upper()
@@ -182,7 +192,7 @@ def resolve_future(symbol: str, *, trade_date, underlying: str = "", description
         kept = [r for r in cands if r.currency == ccy]
         if not kept:
             raise UnknownContract(
-                f"futures symbol {symbol!r} is {', '.join(f'{r.root_id} ({r.currency})' for r in cands)} "
+                f"{what} {symbol!r} is {', '.join(f'{r.root_id} ({r.currency})' for r in cands)} "
                 f"but the row's currency is {currency!r}")
         cands = kept
     venue_set = _venue_set(venue)
@@ -190,7 +200,7 @@ def resolve_future(symbol: str, *, trade_date, underlying: str = "", description
         kept = [r for r in cands if r.exchange in venue_set]
         if not kept:
             raise UnknownContract(
-                f"futures symbol {symbol!r} is {', '.join(r.root_id for r in cands)} "
+                f"{what} {symbol!r} is {', '.join(r.root_id for r in cands)} "
                 f"but the row's venue is {venue!r}")
         cands = kept
     if len(cands) > 1:
@@ -201,9 +211,9 @@ def resolve_future(symbol: str, *, trade_date, underlying: str = "", description
     if len(cands) > 1:
         ids = [r.root_id for r in cands]
         raise AmbiguousContract(
-            f"futures symbol {symbol!r} fits {len(ids)} contract roots: {', '.join(ids)}; "
+            f"{what} {symbol!r} fits {len(ids)} contract roots: {', '.join(ids)}; "
             "name the exchange as a prefix ('EXCHANGE:SYMBOL'), the currency or the venue", ids)
-    return contract_month(cands[0].root_id, month, year, conn=conn)
+    return cands[0]
 
 
 def contract_for(root_id: str, contract_id: str,

@@ -23,7 +23,8 @@ One record per trade LEG, not per trade: engine/ladder/exposure.py is a pure del
 (no P&L), so every leg, USD or not, is simply priced at spot -- a cross (e.g. EURSEK)
 contributes one record per leg like any other trade, with no invented USD leg.
 
-Excluded: CURRENCY balance rows (never reach `trades`), FUTURES (product != FX_*), and
+Excluded: CURRENCY balance rows (never reach `trades`), FUTURES (product not FX_* or
+LME_FWD), an LME forward's metal leg (below), and
 any leg whose trade has no instrument record. Each exclusion is reported in
 `unresolved`, never dropped silently.
 
@@ -34,7 +35,8 @@ sentinel `settlement_date = SETTLED`, which the grid shows first as "Settled cas
   - a deliverable FX leg (`settles_cash = 1`) is cash in its own currency from its value
     date on, and still carries that currency's delta (NOK received on a forward is NOK
     exposure until it is sold) -- so it is summed per (trade, currency) into the row;
-  - a ticket that never delivers (future, FX option) produces only its USD settlement,
+  - a ticket that never delivers (future, FX option, listed option -- CMDTY_OPTION /
+    EQ_OPTION, `engine.pnl.valuation.LISTED_OPTION_PRODUCTS`) produces only its USD settlement,
     which is exactly the realised P&L `engine.pnl.ledger.realise_settled` froze for it.
     That USD figure is read from `realised_pnl` -- never recomputed here -- and added to
     the row's USD column. A settled future or option with no realised row yet (no
@@ -49,6 +51,23 @@ own realisation rule (a settlement in transit carries no FX delta anyway).
 The settled row only covers tickets the uploaded blotter carries: it is settled cash
 from those tickets, not a bank balance (CLAUDE.md hard rule 5).
 
+LME forwards (product LME_FWD, Phase 5; CLAUDE.md "P&L conventions -> LME forwards": "the
+cash lands on the ladder on the prompt date"): a ticket is two legs on its prompt, the
+metal (ccy = the root id, 'LME:CA', tonnes, settles_cash 0) and the USD (-tonnes x fill,
+settles_cash 1). Only the USD leg is a record: on its prompt date while open, then settled
+USD cash, exactly like the USD leg of a deliverable FX forward (it lands in the USD row,
+which Net / Gross USD leave out, so it moves no FX figure). The metal leg is never a
+currency: never a record, never settled cash, never in unresolved either, since it is not
+dropped but shown where it belongs, as a position on the Curve tab (engine/curve).
+The ledger's realised P&L of an LME forward is never read here: its USD leg already is the
+cash, as for an FX forward.
+
+Listed options (CMDTY_OPTION, EQ_OPTION; Phase 5): an open one is not a record and is not
+named in `unresolved` either -- it is no currency exposure (its notional leg never settles
+cash, and its delta is a commodity position on the Curve tab), so calling it unresolved
+would only be noise on the Ladder. Once expired it settles like a future: its USD
+settlement from `realised_pnl`, or named while the ledger has not frozen it.
+
 Every FX leg sits on its own value date. The NDF rules (a ticket dated on its fixing
 date, gone from the ladder once fixed) left with the NDFs (user, 2026-09-24, commodity
 conversion Phase 2): the FX book is Jason's deliverable hedges. A leg is cash when its
@@ -60,7 +79,18 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+from engine.pnl.valuation import LISTED_OPTION_PRODUCTS
+
 FX_PRODUCTS = frozenset({"FX_SPOT", "FX_FWD", "FX_SWAP"})
+# Products whose cash legs (settles_cash = 1) are ladder records while a non-cash leg of
+# the same ticket is not: an LME forward's metal leg is a Curve-tab position, never a
+# currency (module docstring).
+CASH_LEG_ONLY_PRODUCTS = frozenset({"LME_FWD"})
+# Products that never deliver: once settled, their cash is the USD settlement the ledger
+# froze in realised_pnl (module docstring). Listed options come from pnl-valuation's own
+# constant, so a product it adds there is settled here too.
+REALISED_SETTLEMENT_PRODUCTS = ("FUTURE", "FX_OPTION") + tuple(LISTED_OPTION_PRODUCTS)
+_REALISED_IN = ",".join(f"'{p}'" for p in REALISED_SETTLEMENT_PRODUCTS)  # code constants only
 FUND = "NMMF"
 # Sentinel `settlement_date` of settled-cash records (module docstring). A plain word
 # rather than a date so it can never collide with a real value date; it sorts after
@@ -108,18 +138,21 @@ _DB_SQL = _DB_SQL_GRID
 # legs have both settled in the same currency is one record (the exposure engine's
 # natural key is (trade_id, currency, settlement_date), and both would share SETTLED).
 # {op} is '<' (grid) or '<=' (exposure) -- a constant chosen in code, never user input.
+# An LME forward contributes its USD leg only: its metal leg has settles_cash = 0, and
+# `l.ccy <> t.instrument_id` keeps a leg in the root id's own name out regardless.
 _DB_SQL_SETTLED_LEGS = """
 SELECT t.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
        t.strategy, t.account,
        l.ccy, SUM(l.amount) AS amount, MAX(l.settle_date) AS settled_on
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
-WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND l.settles_cash = 1
+WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP','LME_FWD') AND l.settles_cash = 1
+  AND l.ccy <> t.instrument_id
   AND t.trade_date <= :as_of AND l.settle_date {op} :as_of
 GROUP BY t.trade_id, l.ccy
 ORDER BY t.trade_id, l.ccy
 """
 
-# USD settlement of settled futures and FX options: the realised P&L the ledger froze
+# USD settlement of settled futures, FX options and listed options: the realised P&L the ledger froze
 # (engine/pnl/ledger.py), read back, never recomputed. Deliverable FX rows in
 # realised_pnl are NOT read: their legs above already are the cash, adding their P&L
 # too would double count.
@@ -128,20 +161,20 @@ SELECT r.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.pr
        t.strategy, t.account, r.settle_date, r.pnl_usd
 FROM realised_pnl r JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
 WHERE t.trade_date <= :as_of AND r.settle_date < :as_of
-  AND t.product IN ('FUTURE','FX_OPTION')
+  AND t.product IN ({_REALISED_IN})
 ORDER BY r.trade_id
-"""
+""".format(_REALISED_IN=_REALISED_IN)
 
-# Settled futures and FX options the ledger has NOT frozen yet: reported, never valued.
+# Settled futures, FX options and listed options the ledger has NOT frozen yet: reported, never valued.
 _DB_SQL_SETTLED_UNREALISED = """
 SELECT t.trade_id, t.instrument_id, t.product, MAX(l.settle_date) AS settled_on
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.trade_date <= :as_of AND l.settle_date < :as_of
-  AND t.product IN ('FUTURE','FX_OPTION')
+  AND t.product IN ({_REALISED_IN})
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
 GROUP BY t.trade_id
 ORDER BY t.trade_id
-"""
+""".format(_REALISED_IN=_REALISED_IN)
 
 
 def settled_records_from_db(conn, as_of_date: str,
@@ -151,7 +184,7 @@ def settled_records_from_db(conn, as_of_date: str,
     `settled_on` (the value date the cash arrived, or the last one for a fully settled
     swap). `for_exposure=False`: deliverable legs with settle_date < as_of (the grid keeps
     today's on its own row); `for_exposure=True`: settle_date <= as_of (cash by close,
-    still delta). Realised USD settlements of futures and FX options are `< as_of` in
+    still delta). Realised USD settlements of futures, FX options and listed options are `< as_of` in
     both modes. A missing `realised_pnl` table (database older than the ledger) simply
     contributes nothing -- the deliverable legs are still returned."""
     mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
@@ -215,7 +248,11 @@ def records_from_db(conn, as_of_date: str,
     "Settled cash" row instead of disappearing. False restores the open-legs-only view.
 
     Open FX options come from `option_records_from_db` (their delta, not their notional
-    leg); any other product (futures) is named in `unresolved`, never dropped silently.
+    leg). An LME forward (LME_FWD) gives its USD leg only, on its prompt date; its metal
+    leg is never a currency and is not a record (module docstring). An open listed option
+    (CMDTY_OPTION / EQ_OPTION) is neither a record nor unresolved: no currency exposure,
+    its delta is on the Curve tab. Any other product (futures) is named in `unresolved`,
+    never dropped silently.
     Every record is priced at spot downstream (no P&L, no usd_entry_amount)."""
     mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
     sql = _DB_SQL_EXPOSURE if for_exposure else _DB_SQL_GRID
@@ -226,13 +263,18 @@ def records_from_db(conn, as_of_date: str,
     unresolved: List[Unresolved] = []
     for trade_id, legs in by_trade.items():
         product, pair, desc, trade_date, price, strategy, account = legs[0][1:8]
+        if product in LISTED_OPTION_PRODUCTS:
+            continue  # no currency exposure: its delta is a Curve-tab position (module docstring)
         if product == "FX_OPTION":
             continue  # delta records built by option_records_from_db below, not from the notional leg
-        if product not in FX_PRODUCTS:
+        cash_legs_only = product in CASH_LEG_ONLY_PRODUCTS
+        if product not in FX_PRODUCTS and not cash_legs_only:
             unresolved.append(Unresolved(trade_id, pair, f"non-FX product {product} excluded"))
             continue
         for leg in legs:
             ccy, amount, settle_date, settles_cash = leg[8], leg[9], leg[10], leg[11]
+            if cash_legs_only and (int(settles_cash) != 1 or ccy == pair):
+                continue  # an LME forward's metal leg: a Curve-tab position, never a currency
             records.append({
                 "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
                 "symbol": f"{pair}-{trade_id}", "symbol_description": desc,

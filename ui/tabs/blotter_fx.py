@@ -78,7 +78,7 @@ _DISPLAY_COLUMNS = [
     "mark_t1", "mark_eod", "mark_t2", "pnl_t1", "pnl_eod", "pnl_t2",
 ]
 _COLUMN_LABELS = {
-    "trade_date": "Date", "instrument_id": "Instrument", "quantity_usd_notional": "Quantity",
+    "trade_date": "Date", "instrument_id": "Instrument", "quantity_usd_notional": "Quantity (USD)",
     "tenor": "Value date", "fill": "Fill",
     "mark_t1": "T-1 mark", "mark_eod": "EOD mark", "mark_t2": "T-2 mark",
     "pnl_t1": "LTD-1 P&L", "pnl_eod": "LTD P&L", "pnl_t2": "LTD-2 P&L",
@@ -501,6 +501,14 @@ UNPRICED_TEXT = "n/a"
 NO_VALUE_AT_CLOSE = "no value at this close"
 _CLOSE_COLS = {"eod": ("mark_eod", "pnl_eod"), "t1": ("mark_t1", "pnl_t1"), "t2": ("mark_t2", "pnl_t2")}
 _ON_BOOK_FLAG = {"t1": "on_book_t1", "t2": "on_book_t2"}
+# The USD notional (2026-09-24, pnl-series' handoff): `fx_blotter_rows` gives None where it
+# cannot be put in USD, with the why in `notional_reason`. Such a cell reads "n/a" with that
+# reason on hover (the generic line below when the engine gave none), never 0 and never the
+# local figure. The notional is display only: nothing in this module sums it, and "n/a" is
+# text, so the native filter's numeric comparisons never match it.
+NOTIONAL_COL = "quantity_usd_notional"
+NOTIONAL_REASON_COL = "notional_reason"
+NO_NOTIONAL = "USD notional n/a: not given for this trade"
 
 
 def _is_missing(value) -> bool:
@@ -537,6 +545,13 @@ def row_tooltips(df: pd.DataFrame) -> List[dict]:
             for i in range(len(df)):
                 if on_book[i] and _is_missing(values[i]):
                     tips[i][col] = {"value": reasons[i] or NO_VALUE_AT_CLOSE, "type": "text"}
+    if NOTIONAL_COL in df.columns:
+        notionals = _column(df, NOTIONAL_COL, None)
+        why = _column(df, NOTIONAL_REASON_COL, "")
+        for i in range(len(df)):
+            if _is_missing(notionals[i]):
+                text = "" if _is_missing(why[i]) else str(why[i]).strip()
+                tips[i][NOTIONAL_COL] = {"value": text or NO_NOTIONAL, "type": "text"}
     return tips
 
 
@@ -545,7 +560,8 @@ def format_rows(df: pd.DataFrame) -> list:
     Dash: rates and USD amounts as numbers, which the table formats (ui.tabs.ranking). A missing mark or P&L on a close
     the trade was on the book for is `UNPRICED_TEXT` ("n/a", its reason in `row_tooltips`),
     never 0 and never a made-up figure; one at a close the trade had not been dealt by is
-    None (blank). The hidden bookkeeping columns (`_hidden_values`) ride along."""
+    None (blank). A None USD notional is "n/a" too, with `notional_reason` on hover. The
+    hidden bookkeeping columns (`_hidden_values`) ride along."""
     cols = [c for c in _DISPLAY_COLUMNS if c in df.columns]
     formatted = df[cols].copy().astype(object) if not df.empty else pd.DataFrame(columns=cols)
     if not formatted.empty:
@@ -560,6 +576,10 @@ def format_rows(df: pd.DataFrame) -> list:
                 values = formatted[col].tolist()
                 formatted[col] = pd.Series([UNPRICED_TEXT if on_book[i] and _is_missing(values[i]) else values[i]
                                             for i in range(len(values))], dtype=object, index=formatted.index)
+        if NOTIONAL_COL in formatted.columns:   # "n/a", its reason in `row_tooltips`
+            formatted[NOTIONAL_COL] = pd.Series([UNPRICED_TEXT if _is_missing(v) else v
+                                                 for v in formatted[NOTIONAL_COL].tolist()],
+                                                dtype=object, index=formatted.index)
     records = formatted.to_dict("records")
     for rec, hidden in zip(records, _hidden_values(df)):
         rec.update(hidden)
@@ -612,13 +632,13 @@ def table_columns(visible: List[str]) -> List[dict]:
 
 
 def _unpriced_style_conditional() -> list:
-    """One `style_data_conditional` rule per mark / P&L column: an "n/a" cell muted italic,
+    """One `style_data_conditional` rule per mark / P&L column and the USD notional: an "n/a" cell muted italic,
     matching `.card-value--muted`/`.cell--unavailable` in `ui/assets/style.css`. Per column
     rather than per cell (`row_index`) on purpose: a full book is ~750 rows x 6 columns."""
     return [
         {"if": {"column_id": col, "filter_query": f'{{{col}}} contains "{UNPRICED_TEXT}"'},
          "color": "var(--muted)", "fontStyle": "italic"}
-        for cols in _CLOSE_COLS.values() for col in cols
+        for cols in [*_CLOSE_COLS.values(), (NOTIONAL_COL,)] for col in cols
     ]
 
 

@@ -1,6 +1,7 @@
 """The commodity contract universe (data/contracts/, config/contracts.csv): contract-master lane."""
 
 import csv
+import re
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -10,18 +11,25 @@ import yaml
 
 from data.contracts import (
     FIXABLE_FIELDS,
+    SYMBOL,
     WORKSHEET_COLUMNS,
     AmbiguousContract,
     ContractRoot,
     UnknownContract,
     apply_fixes,
+    averaging_period,
     contract_for,
     contract_month,
     estimated_last_trade_date,
+    format_strike,
     get_root,
     load_roots,
+    option_contract,
+    option_for,
+    option_request_ticker,
     request_ticker,
     resolve_future,
+    resolve_option,
     static_dates,
     store_static_dates,
 )
@@ -417,3 +425,255 @@ def test_a_worksheet_without_its_columns_raises(tmp_path):
     path.write_text("root_id,field,suggested\nNYMEX:CL,price_scale,1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="current"):
         apply_fixes(path, contracts_path=contracts)
+
+
+# --- monthly-average contracts --------------------------------------------------------------
+
+@pytest.mark.parametrize("root_id, settlement", [
+    ("SGX:FEF", "average"),     # Platts IODEX monthly average
+    ("CME:TIO", "average"),
+    ("CME:HRC", "average"),     # CRU monthly average
+    ("NYMEX:SG", "average"),    # Platts Singapore gasoil swap future
+    ("NYMEX:B0", "average"),    # Mont Belvieu propane swap
+    ("COMEX:AUP", "average"),   # aluminium Midwest premium
+    ("LME:SC", "average"),      # LME ferrous: monthly cash-settled on the index average
+    ("NYMEX:CL", ""),           # physical
+    ("ICE:B", ""),              # cash settled on the ICE Brent Index on one day, not an average
+    ("CME:HE", ""),             # the Lean Hog Index at expiry
+    ("ICE:JKM", ""),            # averages over a window outside its contract month: not flagged
+    ("NYMEX:9N", ""),           # the Saudi CP is one monthly posting
+])
+def test_settlement_flag_on_known_roots(root_id, settlement):
+    root = get_root(root_id)
+    assert root.settlement == settlement
+    assert root.averaging is (settlement == "average")
+
+
+def test_only_cash_settled_roots_are_averaging():
+    for root in load_roots().values():
+        if root.averaging:
+            assert root.delivery == "cash", root.root_id
+
+
+def test_averaging_period_skips_holidays_and_weekends():
+    # LME calendar: 1 Aug 2026 is a Saturday; 31 Aug 2026 is the summer bank holiday (a Monday)
+    assert averaging_period("LME:SC", 8, 2026) == (date(2026, 8, 3), date(2026, 8, 28))
+    # US calendar: New Year's Day 2027 is a Friday; 30-31 Jan are a weekend
+    assert averaging_period(get_root("CME:HRC"), 1, 27) == (date(2027, 1, 4), date(2027, 1, 29))
+    assert averaging_period("SGX:FEF", 10, 2026) == (date(2026, 10, 1), date(2026, 10, 30))
+
+
+def test_averaging_period_refuses_a_root_that_does_not_average():
+    with pytest.raises(ValueError, match="does not settle on a monthly average"):
+        averaging_period("NYMEX:CL", 12, 2026)
+
+
+def test_a_bad_settlement_or_option_column_does_not_load(tmp_path):
+    from data.contracts.universe import _load
+    text = CONTRACTS_CSV.read_text(encoding="utf-8")
+    path = tmp_path / "contracts.csv"
+    for cells, why in (("physical,monthly,american,1,active", "settlement 'monthly'"),
+                       ("physical,,bermudan,1,active", "option_style 'bermudan'"),
+                       ("physical,,american,x,active", "option_lead_months 'x'")):
+        path.write_text(text.replace("physical,,american,1,active", cells, 1), encoding="utf-8", newline="")
+        with pytest.raises(ValueError, match=why):
+            _load.__wrapped__(str(path))
+
+
+# --- options on futures -----------------------------------------------------------------------
+
+def test_option_canonical_id_and_request_ticker_for_a_one_character_root():
+    o = option_contract("CBOT:ZC", 12, 2026, "CALL", 450.0)
+    assert o.contract_id == "C Z26C 450 Comdty"
+    assert option_request_ticker(o, date(2026, 11, 2)) == "C Z6C 450 Comdty"
+    assert option_request_ticker(o, date(2027, 1, 4)) == "C Z26C 450 Comdty"   # past expiry
+    assert (o.option_type, o.strike, o.style, o.style_source) == ("CALL", 450.0, "AMERICAN", "CONTRACTS_CSV")
+    assert o.underlying.contract_id == "C Z26 Comdty" and o.root_id == "CBOT:ZC"
+    put = option_contract("NYMEX:CL", 12, 2026, "P", 65.50)
+    assert put.contract_id == "CLZ26P 65.5 Comdty"          # no trailing zeros
+    assert option_request_ticker(put, TRADE_DATE) == "CLZ6P 65.5 Comdty"
+    assert format_strike(3.250) == "3.25" and format_strike(70.0) == "70" and format_strike(-5) == "-5"
+
+
+@pytest.mark.parametrize("symbol, kwargs, contract_id, style, style_source", [
+    ("CLZ6C 70 Comdty", {}, "CLZ26C 70 Comdty", "AMERICAN", "CONTRACTS_CSV"),
+    ("CLZ26P 65.5 Comdty", {}, "CLZ26P 65.5 Comdty", "AMERICAN", "CONTRACTS_CSV"),
+    ("c z6c 450 comdty", {}, "C Z26C 450 Comdty", "AMERICAN", "CONTRACTS_CSV"),
+    ("CLZ6C 70", {}, "CLZ26C 70 Comdty", "AMERICAN", "CONTRACTS_CSV"),
+    ("NYMEX:CLZ6C 70 Comdty", {}, "CLZ26C 70 Comdty", "AMERICAN", "CONTRACTS_CSV"),
+    # prime-broker dated form: CL Dec 2026 options expire in November (option_lead_months 1)
+    ("CL/A261117C70-USAA", {}, "CLZ26C 70 Comdty", "AMERICAN", "SYMBOL"),
+    ("CL/E261117C70-USAA", {}, "CLZ26C 70 Comdty", "EUROPEAN", "SYMBOL"),
+    # the dated form and a futures form with the type and strike passed in
+    ("CL/A261117", {"option_type": "put", "strike": "72.50"}, "CLZ26P 72.5 Comdty", "AMERICAN", "SYMBOL"),
+    ("CLZ6-USAA", {"option_type": "C", "strike": 80}, "CLZ26C 80 Comdty", "AMERICAN", "CONTRACTS_CSV"),
+    ("SHFE:CU2611", {"option_type": "CALL", "strike": "80,000"}, "CUX26C 80000 Comdty", "AMERICAN",
+     "CONTRACTS_CSV"),
+    # an option code the universe does not carry, named by its underlying future
+    ("LO/A261117C70-USAA", {"underlying": "CLZ6"}, "CLZ26C 70 Comdty", "AMERICAN", "SYMBOL"),
+    # ICE Brent: Dec options expire in October (option_lead_months 2)
+    ("ICE:B/A261027C70", {}, "COZ26C 70 Comdty", "AMERICAN", "SYMBOL"),
+    # TTF: European in the CSV, Dec options expire in November
+    ("TFM/261126C30", {}, "TZTZ26C 30 Comdty", "EUROPEAN", "CONTRACTS_CSV"),
+])
+def test_each_option_symbol_form_resolves(symbol, kwargs, contract_id, style, style_source):
+    o = resolve_option(symbol, trade_date=TRADE_DATE, **kwargs)
+    assert o.contract_id == contract_id
+    assert (o.style, o.style_source) == (style, style_source)
+    assert option_for(o.root_id, o.contract_id).contract_id == contract_id
+
+
+def test_dated_form_keeps_the_expiry_it_states():
+    o = resolve_option("CL/A261117C70-USAA", trade_date=TRADE_DATE)
+    assert o.symbol_expiry == date(2026, 11, 17)
+    assert o.last_trade_date >= o.symbol_expiry
+
+
+def test_a_symbol_expiry_beats_the_estimate():
+    o = resolve_option("CL/A261117C70-USAA", trade_date=TRADE_DATE)
+    assert o.underlying.estimated and o.underlying.last_trade_date == date(2026, 12, 31)
+    assert (o.last_trade_date, o.dates_source, o.estimated) == (date(2026, 11, 17), SYMBOL, False)
+    assert "symbol" in o.dates_note and "CLZ26 Comdty" in o.dates_note
+    # also when the underlying's own date is Bloomberg's: the option's expiry is earlier still
+    conn = sqlite3.connect(":memory:")
+    store_static_dates(conn, [{"contract_id": "CLZ6 Comdty", "last_trade_date": "2026-11-19",
+                               "source": "BBG_BDP"}])
+    o = resolve_option("CL/A261117C70-USAA", trade_date=TRADE_DATE, conn=conn)
+    assert (o.last_trade_date, o.dates_source) == (date(2026, 11, 17), SYMBOL)
+    # a form that states no expiry keeps the estimate
+    o = resolve_option("CLZ6C 70 Comdty", trade_date=TRADE_DATE)
+    assert (o.symbol_expiry, o.dates_source) == (None, "ESTIMATED")
+
+
+def test_a_stored_bloomberg_option_date_beats_the_symbol_and_the_estimate():
+    conn = sqlite3.connect(":memory:")
+    store_static_dates(conn, [{"contract_id": "CLZ26C 70 Comdty", "last_trade_date": "2026-11-16",
+                               "source": "BBG_BDP"}])
+    o = resolve_option("CL/A261117C70-USAA", trade_date=TRADE_DATE, conn=conn)
+    assert (o.last_trade_date, o.dates_source, o.estimated) == (date(2026, 11, 16), "BLOOMBERG", False)
+    assert o.symbol_expiry == date(2026, 11, 17)
+    assert option_for("NYMEX:CL", "CLZ26C 70 Comdty", conn=conn).dates_source == "BLOOMBERG"
+
+
+def _instruments(conn, instrument_id, expiry_date):
+    conn.execute("CREATE TABLE IF NOT EXISTS instruments (instrument_id TEXT PRIMARY KEY, expiry_date TEXT)")
+    conn.execute("INSERT OR REPLACE INTO instruments (instrument_id, expiry_date) VALUES (?, ?)",
+                 (instrument_id, expiry_date))
+
+
+def test_option_for_with_conn_agrees_with_the_instrument_row():
+    resolved = resolve_option("CL/A261117C70-USAA", trade_date=TRADE_DATE)
+    conn = sqlite3.connect(":memory:")
+    # no instruments table at all: the estimate, never an error
+    assert option_for("NYMEX:CL", resolved.contract_id, conn=conn).dates_source == "ESTIMATED"
+    _instruments(conn, resolved.contract_id, "2026-11-17")
+    o = option_for("NYMEX:CL", resolved.contract_id, conn=conn)
+    assert (o.last_trade_date, o.dates_source) == (resolved.last_trade_date, resolved.dates_source)
+    assert "instruments.expiry_date" in o.dates_note
+    assert option_for("NYMEX:CL", resolved.contract_id).dates_source == "ESTIMATED"   # no conn
+    # a row at (or after) the estimate, the sentinel or a non-date leave the estimate
+    for stored in ("2026-12-31", "2027-01-15", "9999-12-31", "not a date", ""):
+        _instruments(conn, resolved.contract_id, stored)
+        o = option_for("NYMEX:CL", resolved.contract_id, conn=conn)
+        assert (o.last_trade_date, o.dates_source) == (date(2026, 12, 31), "ESTIMATED"), stored
+    # a stored Bloomberg date still wins over the row
+    _instruments(conn, resolved.contract_id, "2026-11-17")
+    store_static_dates(conn, [{"contract_id": "CLZ26C 70 Comdty", "last_trade_date": "2026-11-16",
+                               "source": "BBG_BDP"}])
+    assert option_for("NYMEX:CL", resolved.contract_id, conn=conn).last_trade_date == date(2026, 11, 16)
+
+
+def test_option_request_ticker_turns_canonical_after_the_symbol_expiry():
+    o = resolve_option("CL/A261117C70-USAA", trade_date=TRADE_DATE)
+    assert option_request_ticker(o, date(2026, 11, 17)) == "CLZ6C 70 Comdty"
+    assert option_request_ticker(o, date(2026, 11, 18)) == "CLZ26C 70 Comdty"   # before the estimate
+
+
+def test_quantity_factor_is_exported_by_the_package():
+    from data.contracts import quantity_factor as exported
+    assert exported is quantity_factor
+    assert exported("lb", "cwt") == pytest.approx(0.01)
+
+
+def test_option_style_blank_in_the_csv_is_read_as_american():
+    root = get_root("LME:CA")
+    assert root.option_style == ""
+    o = option_contract("LME:CA", 12, 2026, "CALL", 10000)
+    assert (o.style, o.style_source) == ("AMERICAN", "ASSUMED")
+
+
+def test_option_estimate_is_the_future_last_trade_date_never_earlier():
+    for root_id, month in (("NYMEX:CL", 12), ("CBOT:ZC", 3), ("SGX:FEF", 10), ("SHFE:CU", 11)):
+        o = option_contract(root_id, month, 2026 if month > 9 else 2027, "PUT", 100)
+        fut = o.underlying
+        assert o.dates_source == "ESTIMATED" and o.estimated
+        assert o.last_trade_date == fut.last_trade_date == estimated_last_trade_date(fut.month, fut.year)
+        assert "estimated" in o.dates_note and fut.contract_id in o.dates_note
+
+
+def test_option_estimate_follows_the_future_bloomberg_date_and_stored_option_dates_win():
+    conn = sqlite3.connect(":memory:")
+    store_static_dates(conn, [{"contract_id": "CLZ6 Comdty", "last_trade_date": "2026-11-19",
+                               "source": "BBG_BDP"}])
+    o = option_contract("NYMEX:CL", 12, 2026, "CALL", 70, conn=conn)
+    assert (o.last_trade_date, o.dates_source) == (date(2026, 11, 19), "ESTIMATED")
+    assert "Bloomberg's" in o.dates_note
+    # Bloomberg's own option date, stored in its one-digit form through the futures' function
+    store_static_dates(conn, [{"contract_id": "CLZ6C 70.00 Comdty", "last_trade_date": "2026-11-17",
+                               "source": "BBG_BDP"}])
+    assert static_dates(conn, "clz26c 70 comdty")["last_trade_date"] == "2026-11-17"
+    o = resolve_option("CLZ6C 70 Comdty", trade_date=TRADE_DATE, conn=conn)
+    assert (o.last_trade_date, o.dates_source, o.estimated) == (date(2026, 11, 17), "BLOOMBERG", False)
+    assert option_for("NYMEX:CL", "CLZ26C 70 Comdty", conn=conn).last_trade_date == date(2026, 11, 17)
+    assert option_request_ticker(o, date(2026, 11, 18)) == "CLZ26C 70 Comdty"
+
+
+def test_serial_option_takes_the_underlying_it_names():
+    o = resolve_option("C V6C 450 Comdty", trade_date=TRADE_DATE, underlying="C Z6 Comdty")
+    assert o.contract_id == "C V26C 450 Comdty"
+    assert o.underlying.contract_id == "C Z26 Comdty"
+    assert o.last_trade_date == o.underlying.last_trade_date
+    with pytest.raises(UnknownContract, match="not a CBOT:ZC future"):
+        resolve_option("C V6C 450 Comdty", trade_date=TRADE_DATE, underlying="CLZ6")
+
+
+def test_ambiguous_option_root_raises_with_candidates():
+    with pytest.raises(AmbiguousContract) as exc:
+        resolve_option("ZC/A261120C450", trade_date=TRADE_DATE)
+    assert set(exc.value.candidates) == {"CBOT:ZC", "ZCE:ZC"}
+    assert resolve_option("ZC/A261120C450", trade_date=TRADE_DATE, currency="USD").root_id == "CBOT:ZC"
+    assert resolve_option("ZC/A261120C450", trade_date=TRADE_DATE, venue="CBOT").root_id == "CBOT:ZC"
+
+
+def test_dated_form_with_no_known_option_month_raises_naming_the_months():
+    assert get_root("ICE:G").option_lead_months is None
+    with pytest.raises(AmbiguousContract) as exc:
+        resolve_option("G/A261110C700", trade_date=TRADE_DATE)
+    assert exc.value.candidates == ("QSX26 Comdty", "QSZ26 Comdty", "QSF27 Comdty")
+    o = resolve_option("G/A261110C700", trade_date=TRADE_DATE, underlying="QSZ6 Comdty")
+    assert o.contract_id == "QSZ26C 700 Comdty"
+
+
+@pytest.mark.parametrize("symbol, kwargs, why", [
+    ("QQZ6C 70 Comdty", {}, "not in config/contracts.csv"),
+    ("CLZ6C 70 Comdty", {"option_type": "PUT"}, "says option type C but the row says P"),
+    ("CLZ6C 70 Comdty", {"strike": 75}, "says strike 70.0 but the row says 75.0"),
+    ("CLZ6", {"option_type": "CALL"}, "no strike"),
+    ("CLZ6", {"strike": 70}, "no option type"),
+    ("CLZ6", {"option_type": "CALL", "strike": "0,5"}, "is not a number"),
+    ("CL/A261317C70", {}, "is not a date"),
+    ("CL/A270105C70", {"underlying": "CLZ6"}, "after its underlying CLZ26 Comdty"),
+    ("hello", {}, "is not an option"),
+])
+def test_bad_option_symbols_raise(symbol, kwargs, why):
+    with pytest.raises(UnknownContract, match=re.escape(why)):
+        resolve_option(symbol, trade_date=TRADE_DATE, **kwargs)
+
+
+def test_option_for_refuses_another_roots_id_or_a_one_digit_year():
+    with pytest.raises(UnknownContract):
+        option_for("NYMEX:CL", "CLZ6C 70 Comdty")
+    with pytest.raises(UnknownContract):
+        option_for("NYMEX:CL", "C Z26C 450 Comdty")
+    with pytest.raises(UnknownContract):
+        option_for("NYMEX:QQ", "CLZ26C 70 Comdty")

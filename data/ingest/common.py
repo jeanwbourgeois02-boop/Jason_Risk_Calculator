@@ -47,7 +47,9 @@ class Instrument:
 @dataclass(frozen=True)
 class InstrumentOption:
     """Option-specific attributes for an `instruments` row, written to the sibling
-    `instrument_options` table (see schema.py). Only produced for FX_OPTION rows."""
+    `instrument_options` table (see schema.py). Produced for FX_OPTION and CMDTY_OPTION rows
+    (an option on a commodity future: strike in the future's quoted scale, payoff AMERICAN or
+    VANILLA for a European one)."""
     instrument_id: str
     strike: float = 0.0
     option_type: str = ""

@@ -42,7 +42,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import sqlite3
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 from data.ingest.common import PERPETUAL
 

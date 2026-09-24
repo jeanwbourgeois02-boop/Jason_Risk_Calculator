@@ -274,7 +274,14 @@ def test_sample_book_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
     open ones on their own value dates (+10,713,750 on 18 Nov, -7,108,000 on 20 Jan 2027),
     the EURUSD spot of 11 Sep in Settled cash too (EUR -150,000). The grid's cells are
     numbers (ui.tabs.ranking); the table prints them through the column's format. The
-    dates span two years, so the headers name the year."""
+    dates span two years, so the headers name the year.
+
+    Re-pinned 2026-09-24 (Phase 5 sample: 4 options on futures, 3 LME forwards). An LME
+    ticket's USD leg sits in the USD row on its prompt date: the nickel bought for
+    prompt 16 Sep has settled (USD -185,040 in Settled cash), the copper 3M is -985,000
+    on 10 Dec and the aluminium Dec26 sold adds +198,000 on 16 Dec. The options on
+    futures are no currency exposure; the gold option that expired 28 Jul unrealised is
+    named under the grid beside the WTI Aug26 future."""
     import sys
     import types
     from data.ingest import blotter
@@ -299,7 +306,11 @@ def test_sample_book_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
     assert by_ccy["CNH"]["local_delta"] == -10_724_250
     assert by_ccy["EUR"][SETTLED] == -150_000 and by_ccy["EUR"]["2026-10-21"] == 250_000
     assert by_ccy["EUR"]["2026-12-16"] == -400_000
-    assert by_ccy["USD"][SETTLED] == 2_175_350         # 2,000,000 from the settled USDCNH + 175,350 from the spot
+    # 2,000,000 from the settled USDCNH + 175,350 from the spot - 185,040 for the LME nickel (2 lots x 6 t x 15,420)
+    assert by_ccy["USD"][SETTLED] == 1_990_310
+    assert by_ccy["USD"]["2026-12-10"] == -985_000     # LME copper 3M: 4 lots x 25 t x 9,850, paid on the prompt
+    assert by_ccy["USD"]["2026-12-16"] == 1_035_100    # 837,100 of FX legs + 198,000 for the LME aluminium sold
+    assert by_ccy["USD"]["local_delta"] == 1_540_410
     # no marks on file: no rate, blank with the reason, never zero
     assert by_ccy["CNH"]["fx_rate"] == "" and by_ccy["CNH"]["usd_delta"] == ""
     assert _find_id(body, exposure.RATE_REASONS_ID) is not None
@@ -313,8 +324,10 @@ def test_sample_book_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
     assert names["2027-01-20"] == "20 Jan 27"
     footer = _find_id(body, exposure.COMBINED_TABLE_ID + "-footer")
     assert [r[exposure.ROW_LABEL_COL] for r in footer.data] == [exposure.USD_EQUIVALENT_ROW_LABEL]
-    # the settled WTI Aug26 future the ledger has not realised is named under the grid, never valued
-    assert "CLQ26 Comdty (910000027)" in _render_text(_find_id(body, exposure.SETTLED_CAPTION_ID))
+    assert footer.data[0]["2026-12-10"] == -985_000    # a USD-only date needs no rate; the others stay blank
+    # the settled WTI Aug26 future and gold Aug26 call the ledger has not realised are named under the grid, never valued
+    settled_caption = _render_text(_find_id(body, exposure.SETTLED_CAPTION_ID))
+    assert "CLQ26 Comdty (910000027)" in settled_caption and "GCQ26C 3300 Comdty (910000048)" in settled_caption
     # the open futures table is the whole futures book, commodity contracts in their own currencies
     futures = _find_id(body, exposure.FUTURES_TABLE_ID)
     rows = {r["instrument"]: r for r in futures.data}
@@ -333,6 +346,22 @@ def test_sample_book_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
     assert list(csv.columns)[1] == exposure.SETTLED_ROW_LABEL and list(csv.columns)[-1] == "Total"
     cnh = csv.set_index(exposure.CURRENCY_COL).loc["CNH"]
     assert cnh[exposure.SETTLED_ROW_LABEL] == pytest.approx(-14_330_000.0) and cnh["2026-11-18"] == pytest.approx(10_713_750.0)
+
+    # the legs download names an LME ticket's pair by its contract, not its root id
+    legs_download = [v for k, v in app.callback_map.items() if cash_ladder.DOWNLOAD_LEGS_ID in k][0]["callback"].__wrapped__
+    legs = pd.read_csv(io.StringIO(legs_download(1, "2026-09-17", ["CNH", "USD", "EUR"], None, None, [], [])["content"]))
+    lme = legs.set_index("trade_id").loc[910000050]
+    assert lme["product_type"] == "LME_FWD" and lme["currency_pair"] == "LME copper" and lme["currency"] == "USD"
+    assert lme["usd_eq"] == pytest.approx(-985_000.0)
+
+
+def test_pair_label_names_an_lme_root_by_its_contract():
+    """An LME ticket's record carries its root id as `currency_pair` ('LME:CA', no USD
+    side); on screen and in the legs download it reads as the contract's name."""
+    assert exposure.pair_label("USDCNH") == "USDCNH"
+    assert exposure.pair_label("LME:CA") == "LME copper" and exposure.pair_label("LME:NI") == "LME nickel"
+    assert exposure.pair_label("LME:ZZ") == "LME:ZZ"      # unknown root: as it is, never blank
+    assert exposure.pair_label(None) is None
 
 
 def test_grid_headers_are_short_and_name_the_year_only_when_the_dates_span_two():

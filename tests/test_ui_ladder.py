@@ -212,7 +212,7 @@ def test_headline_numbers_present_in_order():
     result = build_exposure(RECORDS, RATES)
     headline = exposure.headline_numbers(result)
     labels = [c.children[0].children for c in headline.children]
-    assert labels == ["Delta (FX + futures)"]
+    assert labels == [exposure.HEADLINE_TITLE] == ["USD delta, FX only"]
 
 
 def test_headline_numbers_unavailable_without_rate():
@@ -223,15 +223,18 @@ def test_headline_numbers_unavailable_without_rate():
     assert card.children[1].children == "Unavailable"
 
 
-def test_headline_futures_unavailable_with_reason():
-    from engine.ladder.exposure import build_exposure
+def test_headline_is_fx_only_whatever_the_futures():
+    """Phase 3 (CLAUDE.md "Net USD"): the card no longer takes the futures at all, so a
+    future with no price cannot make it Unavailable, and a priced one is not summed in."""
+    from engine.ladder.exposure import build_exposure, portfolio_totals
     result = build_exposure(RECORDS, RATES)
+    totals = portfolio_totals(result)
     futures = {"value": float("nan"), "by_instrument": {}, "missing": ["CLZ26 Comdty"],
                "reason": "no FUTURE_PX on 2026-08-17 for CLZ26 Comdty"}
-    headline = exposure.headline_numbers(result, futures)
-    card = headline.children[0]
-    assert card.children[1].children == "Unavailable"
-    assert "no FUTURE_PX" in card.children[2].children
+    section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES, futures=futures)
+    card = _find_id(section, exposure.HEADLINE_ID).children[0]
+    assert card.children[1].children == exposure.format_amount(totals["gross_usd"])
+    assert card.children[2].children[1].children == exposure.format_amount(-totals["net_usd"])
 
 
 def test_exposure_section_has_headline_and_three_tables_only():
@@ -286,7 +289,7 @@ def test_combined_risk_frame_futures_row_unavailable_with_reason():
     assert "no FUTURE_PX" in inner.tooltip_data[i]["usd_delta"]["value"]
 
 
-def test_combined_risk_table_net_excludes_futures_gross_includes():
+def test_combined_risk_table_net_and_gross_exclude_futures():
     from engine.ladder.exposure import build_exposure, portfolio_totals
     result = build_exposure(RECORDS, RATES)
     totals = portfolio_totals(result)
@@ -297,7 +300,9 @@ def test_combined_risk_table_net_excludes_futures_gross_includes():
     rows = {r[exposure.RISK_LABEL_COL]: r for r in footer.data}
     # USD position: + = long USD, as the header
     assert rows["Net USD delta, FX only (+ = long USD)"]["usd_delta"] == pytest.approx(-totals["net_usd"])
-    assert rows["Gross delta (incl. |futures|)"]["usd_delta"] == pytest.approx(totals["gross_usd"] + 100_000.0)
+    assert rows["Gross USD delta, FX only"]["usd_delta"] == pytest.approx(totals["gross_usd"])
+    # the future is still a row of its own, with its own USD delta
+    assert next(r for r in inner.data if r[exposure.RISK_LABEL_COL] == "CLZ26 Comdty")["usd_delta"] == 100_000.0
 
 
 def test_combined_risk_table_marks_fallback_currency():
@@ -802,3 +807,59 @@ def test_today_ny_is_the_books_one_day_boundary():
     assert cash_ladder.today_ny(datetime(2026, 9, 23, 5, 0, tzinfo=hk)) == "2026-09-23"
     # no argument: the live clock, and still the same function's answer
     assert cash_ladder.today_ny() == live.book_today().isoformat()
+
+
+# --------------------------------------------------------------------------- Phase 3: Net / Gross USD are FX only
+
+def test_phase3_headline_and_risk_gross_leave_priced_futures_out_but_the_futures_table_lists_them():
+    """CLAUDE.md "Net USD": commodity futures are positions on the Curve tab, not in Net /
+    Gross USD. The headline card and the risk table's Gross are FX only; the open futures
+    table still shows each future with its USD delta, and the line under it says where the
+    commodity positions and scenarios are."""
+    from engine.ladder.exposure import build_exposure, portfolio_totals
+    futures = _futures_with_details()
+    futures["value"] = sum(futures["by_instrument"].values())      # a priced total, to be left out
+    totals = portfolio_totals(build_exposure(RECORDS, RATES))
+    section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES, futures=futures)
+
+    card = _find_id(section, exposure.HEADLINE_ID).children[0]
+    assert card.children[0].children == "USD delta, FX only"
+    assert card.children[1].children == exposure.format_amount(totals["gross_usd"])
+    assert card.children[2].children[1].children == exposure.format_amount(-totals["net_usd"])
+
+    footer = _find_id(section, exposure.RISK_TABLE_ID + "-footer")
+    rows = {r[exposure.RISK_LABEL_COL]: r for r in footer.data}
+    assert rows[exposure.GROSS_FOOTER_LABEL]["usd_delta"] == pytest.approx(totals["gross_usd"])
+    assert rows[exposure.NET_FOOTER_LABEL]["usd_delta"] == pytest.approx(-totals["net_usd"])
+
+    table = _find_id(section, exposure.FUTURES_TABLE_ID)
+    by_id = {r["instrument"]: r for r in table.data}
+    assert by_id["CLZ26 Comdty"]["usd_delta"] == pytest.approx(685_000.0)
+    assert by_id["CUX26 Comdty"]["usd_delta"] == pytest.approx(-30 * 5 * 78_450.0 / 7.10)
+
+    text = _render_text(section)
+    assert "Commodity positions by contract month: see the Curve tab." in text
+    assert "Commodity scenarios: see the Risk tab." in text
+    ids = _all_ids(section)
+    assert ids.index(exposure.FUTURES_TABLE_ID) < ids.index(exposure.FUTURES_NOTE_ID) < ids.index(exposure.RISK_TABLE_ID)
+
+
+def test_phase3_risk_gross_unavailable_names_only_the_missing_rate():
+    """A future with no price no longer blanks the Gross: only a missing FX rate does."""
+    from engine.ladder.exposure import build_exposure
+    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["CLZ26 Comdty"],
+               "reason": "no FUTURE_PX on 2026-08-17 for CLZ26 Comdty"}
+    table = exposure.combined_risk_table(build_exposure(RECORDS, RATES), futures, scenarios={})
+    footer = table.children[1].children[1]
+    gross = next(r for r in footer.data if r[exposure.RISK_LABEL_COL] == exposure.GROSS_FOOTER_LABEL)
+    assert gross["usd_delta"] != exposure.UNAVAILABLE
+    no_rate = exposure.combined_risk_table(build_exposure(RECORDS, {}), futures, scenarios={})
+    footer, tips = no_rate.children[1].children[1], no_rate.children[1].children[1].tooltip_data
+    i = next(i for i, r in enumerate(footer.data) if r[exposure.RISK_LABEL_COL] == exposure.GROSS_FOOTER_LABEL)
+    assert footer.data[i]["usd_delta"] == exposure.UNAVAILABLE
+    assert "no rate: " in tips[i]["usd_delta"]["value"] and "FUTURE_PX" not in tips[i]["usd_delta"]["value"]
+
+
+def test_phase3_futures_scenario_hover_points_to_the_risk_tab():
+    assert exposure.FUTURES_NO_SCENARIO.endswith("commodity scenarios: see the Risk tab")
+    assert "not built yet" not in exposure.FUTURES_NO_SCENARIO

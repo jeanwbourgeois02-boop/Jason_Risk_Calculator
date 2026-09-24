@@ -1,10 +1,10 @@
 # EURONEXT: Euronext commodity derivatives (MATIF milling wheat, rapeseed, corn):
-# full-day closures for 2026 and 2027, weekdays only. Euronext's fixed closing days are
+# full-day closures for 2026 to 2028, weekdays only. Euronext's fixed closing days are
 # New Year's Day, Good Friday, Easter Monday, 1 May, 25 and 26 December, with no
 # substitute when one falls on a weekend.
 # Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
 # against Euronext's published trading calendar before it is relied on.
-# coverage: 2026-01-01 to 2027-12-31
+# coverage: 2026-01-01 to 2028-12-31
 
 2026-01-01  # New Year's Day
 2026-04-03  # Good Friday
@@ -17,3 +17,10 @@
 2027-03-26  # Good Friday
 2027-03-29  # Easter Monday
 # 1 May, 25 and 26 December 2027 fall on weekends
+
+2028-04-14  # Good Friday
+2028-04-17  # Easter Monday
+2028-05-01  # Labour Day
+2028-12-25  # Christmas Day
+2028-12-26  # Boxing Day
+# 1 January 2028 is a Saturday

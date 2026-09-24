@@ -201,19 +201,20 @@ def _gross_net_card(title: str, gross_text: str, net_value: Optional[float] = No
     return html.Div(children, className="card")
 
 
-def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Optional[set] = None,
+HEADLINE_TITLE = "USD delta, FX only"
+
+
+def headline_numbers(result, fallback_ccys: Optional[set] = None,
                      forward_proxy_ccys: Optional[set] = None) -> html.Div:
-    """One merged headline card (user decision 2026-09-15, "Henry doesn't care about the
-    split, put it all together"): was three cards -- Delta combined / Delta non-forward
-    (futures) / Delta forward (FX) -- now just "Delta", currencies and futures already
-    summed together: gross = sum of |USD delta| over currencies + |futures|, net
-    (the USD position, CLAUDE.md sign: + = long USD) directly underneath with its
-    LONG USD / SHORT USD direction, same convention as the app header's Net USD delta
-    card. The FX-only and futures-only splits still exist -- per-currency in the risk
-    table below, futures alone in its own "Delta non-forward" total row there -- this
-    top card just no longer repeats them.
-    Unavailable with the engine's own reason only when a rate or a futures mark is
-    genuinely missing. `fallback_ccys`/`forward_proxy_ccys` are always empty in the live
+    """One headline card, FX only (commodity conversion Phase 3, 2026-09-24, CLAUDE.md
+    "Net USD": "commodity futures are positions on the Curve tab, not in Net / Gross
+    USD"): gross = sum of |USD delta| over the currencies, net (the USD position,
+    CLAUDE.md sign: + = long USD) directly underneath with its LONG USD / SHORT USD
+    direction, the same figures and convention as the app header's Net / Gross USD delta
+    card. It was "Delta (FX + futures)" from 2026-09-15 to Phase 3; the open futures are
+    in their own table below, each with its USD delta, and on the Curve tab.
+    Unavailable with the engine's own reason only when a rate is genuinely missing.
+    `fallback_ccys`/`forward_proxy_ccys` are always empty in the live
     app since 2026-09-17 ("no bnp fall back" -- `ui.tabs.cash_ladder`'s BNP_BVAL SPOT/
     forward-outright fallback was removed outright, not just left unused, so a caller
     there never populates these sets any more); the parameters and the '*'/caption
@@ -223,29 +224,18 @@ def headline_numbers(result, futures: Optional[dict] = None, fallback_ccys: Opti
     currencies are on fallback, once, so callers don't need to derive it from the risk
     table's '*' marks again."""
     from engine.ladder.exposure import portfolio_totals
-    futures = futures or DEFAULT_FUTURES
     fallback_ccys = fallback_ccys or set()
     forward_proxy_ccys = forward_proxy_ccys or set()
     totals = portfolio_totals(result)
-    fut_value = futures.get("value", float("nan"))
-    no_open_futures = not (futures.get("by_instrument") or futures.get("missing"))
-    if no_open_futures and pd.isna(fut_value):
-        fut_value = 0.0
-    rate_ok = not totals["missing"]
-    fut_ok = not pd.isna(fut_value)
 
-    if rate_ok and fut_ok:
-        gross = totals["gross_usd"] + abs(fut_value)
-        net = -(totals["net_usd"] + fut_value)  # USD position, same sign as the header
-        combined_card = _gross_net_card("Delta (FX + futures)", format_amount(gross), net_value=net, direction=True)
+    if not totals["missing"]:
+        net = -totals["net_usd"]  # USD position, same sign as the header
+        combined_card = _gross_net_card(HEADLINE_TITLE, format_amount(totals["gross_usd"]),
+                                        net_value=net, direction=True)
     else:
-        reasons = []
-        if not rate_ok:
-            # The same sentence the app header gets from `cash_ladder.net_gross_usd`.
-            reasons.append(missing_spot_reason(totals["missing"]))
-        if not fut_ok:
-            reasons.append(futures.get("reason") or "futures delta unavailable")
-        combined_card = _gross_net_card("Delta (FX + futures)", "Unavailable", note="; ".join(reasons), unavailable=True)
+        # The same sentence the app header gets from `cash_ladder.net_gross_usd`.
+        combined_card = _gross_net_card(HEADLINE_TITLE, "Unavailable",
+                                        note=missing_spot_reason(totals["missing"]), unavailable=True)
 
     cards = html.Div(id=HEADLINE_ID, className="cards cards--one", children=[combined_card])
     if not fallback_ccys and not forward_proxy_ccys:
@@ -991,6 +981,27 @@ LEGS_EXPORT_COLUMNS = ["trade_id", "product_type", "currency_pair", "currency", 
                        "local_amount", "entry_rate", "usd_per_unit", "mark_basis", "usd_eq", "book", "account"]
 
 
+def pair_label(pair):
+    """How a record's `currency_pair` reads on screen. An FX pair is itself ('USDCNH'); an
+    LME ticket's pair is its contract root id ('LME:CA', ladder-grid 2026-09-24), which has
+    no USD side, so it reads as the root's own name from `config/contracts.csv` with the
+    parenthetical dropped ('LME copper'). A root id the universe does not know stays as
+    it is, never blank; a missing pair stays missing."""
+    if pair is None:
+        return None
+    pair = str(pair)
+    if ":" not in pair:
+        return pair
+    try:
+        from data.contracts import load_roots
+        root = load_roots().get(pair.strip().upper())
+    except (ImportError, OSError, ValueError):
+        return pair
+    if root is None:
+        return pair
+    return root.name.split(" (")[0].strip() or pair
+
+
 def legs_export_frame(records: List[dict], rates: Optional[Dict[str, dict]] = None,
                       forward_rates: Optional[Mapping[tuple, dict]] = None) -> pd.DataFrame:
     """Every leg with its mark and USD equivalent (spec download `legs.csv`): the mark is
@@ -1012,7 +1023,7 @@ def legs_export_frame(records: List[dict], rates: Optional[Dict[str, dict]] = No
             mark, basis = float("nan"), "no rate"
         rows.append({
             "trade_id": r.get("trade_id"), "product_type": r.get("product_type"),
-            "currency_pair": r.get("currency_pair"), "currency": ccy, "settlement_date": day,
+            "currency_pair": pair_label(r.get("currency_pair")), "currency": ccy, "settlement_date": day,
             "settled_on": r.get("settled_on", ""), "local_amount": float(r["local_amount"]),
             "entry_rate": r.get("entry_rate"), "usd_per_unit": mark, "mark_basis": basis,
             "usd_eq": float(r["local_amount"]) * mark, "book": r.get("book"), "account": r.get("account"),
@@ -1126,19 +1137,23 @@ def _unavailable_label(reason: str) -> str:
 
 
 # A future's scenario cell with no move for it: blank with this reason on hover, never a
-# zero. config/stress.yaml's scenarios are FX moves; commodity scenarios come later.
+# zero. config/stress.yaml's scenarios are FX moves; commodity scenarios are on the Risk tab.
 FUTURES_SCENARIO_CAPTION_ID = "exposure-futures-scenario-caption"
 FUTURES_NO_SCENARIO = ("no commodity price move in these FX scenarios (config/stress.yaml); "
-                       "commodity scenarios are not built yet")
+                       "commodity scenarios: see the Risk tab")
+
+NET_FOOTER_LABEL = "Net USD delta, FX only (+ = long USD)"
+GROSS_FOOTER_LABEL = "Gross USD delta, FX only"
 
 
 def combined_risk_table(result, futures: Optional[dict] = None,
                         scenarios: Optional[Dict[str, Dict[str, float]]] = None,
                         fallback_ccys: Optional[set] = None) -> html.Div:
     """The combined risk table plus its Net USD / Gross USD totals (docs/BUILD_PLAN.md
-    "Reorder the Ladder tab", item 1). Net excludes futures; Gross adds |futures value|.
-    Either total is Unavailable (never a fabricated number) if any currency lacks a rate
-    or the futures total is NaN. Currencies priced from a non-official fallback rate
+    "Reorder the Ladder tab", item 1). Both totals are FX only (Phase 3, CLAUDE.md "Net
+    USD"): the futures rows are listed with their own USD delta but summed into neither.
+    Either total is Unavailable (never a fabricated number) if any currency lacks a
+    rate. Currencies priced from a non-official fallback rate
     (`fallback_ccys`, item D -- always empty from the live app since 2026-09-17, "no
     bnp fall back"; see `exposure_section`'s docstring) would be marked with a trailing
     '*' in the name column; see the caption this function's caller adds and the 'Rate
@@ -1176,29 +1191,24 @@ def combined_risk_table(result, futures: Optional[dict] = None,
         tooltips.append(tip)
 
     totals = portfolio_totals(result)
-    fut_value = futures.get("value", float("nan"))
     net_tip = gross_tip = ""
     if totals["missing"]:
-        net_value, net_tip = UNAVAILABLE, _unavailable_label("no rate: " + ", ".join(totals["missing"]))
+        missing_tip = _unavailable_label("no rate: " + ", ".join(totals["missing"]))
+        net_value, net_tip = UNAVAILABLE, missing_tip
+        gross_value, gross_tip = UNAVAILABLE, missing_tip
     else:
         # USD position, same sign as the header's "Net USD delta" (CLAUDE.md: + = long USD):
         # the engine's net_usd is the net non-USD delta, so it is negated here, exactly as
         # ui/tabs/header.py and headline_numbers above do. One figure, one sign, everywhere.
         net_value = grid_cell(-totals["net_usd"])
-    if totals["missing"] or pd.isna(fut_value):
-        reasons = []
-        if totals["missing"]:
-            reasons.append("no rate: " + ", ".join(totals["missing"]))
-        if pd.isna(fut_value):
-            reasons.append(futures.get("reason") or "futures delta unavailable")
-        gross_value, gross_tip = UNAVAILABLE, _unavailable_label("; ".join(reasons))
-    else:
-        gross_value = grid_cell(totals["gross_usd"] + abs(fut_value))
+        # FX only since Phase 3 (CLAUDE.md "Net USD": commodity futures are positions on
+        # the Curve tab, not in Net / Gross USD); it added |futures| before.
+        gross_value = grid_cell(totals["gross_usd"])
     # The two totals are the table's footer (ui.tabs.ranking.with_footer): pinned under the
     # rows, never ranked with them.
-    footer = [{RISK_LABEL_COL: "Net USD delta, FX only (+ = long USD)", "usd_delta": net_value,
+    footer = [{RISK_LABEL_COL: NET_FOOTER_LABEL, "usd_delta": net_value,
                "move_1pct": "", "kind": "total", **{name: "" for name in scenario_names}},
-              {RISK_LABEL_COL: "Gross delta (incl. |futures|)", "usd_delta": gross_value,
+              {RISK_LABEL_COL: GROSS_FOOTER_LABEL, "usd_delta": gross_value,
                "move_1pct": "", "kind": "total", **{name: "" for name in scenario_names}}]
     footer_tips = [{"usd_delta": {"value": net_tip, "type": "text"}} if net_tip else {},
                    {"usd_delta": {"value": gross_tip, "type": "text"}} if gross_tip else {}]
@@ -1293,6 +1303,18 @@ def futures_table_frame(futures: Optional[dict] = None, details: Optional[Dict[s
     rows = [row(i, usd, "") for i, usd in (futures.get("by_instrument") or {}).items()]
     rows += [row(i, None, (details.get(i) or {}).get("reason") or reason) for i in futures.get("missing") or []]
     return pd.DataFrame(rows, columns=FUTURES_COLUMNS + ["_unavailable"], dtype=object)
+
+
+FUTURES_NOTE_ID = "exposure-futures-note"
+FUTURES_CURVE_NOTE = ("Commodity positions by contract month: see the Curve tab. These futures are not in "
+                      "the Net / Gross USD delta above, which is FX only.")
+FUTURES_RISK_NOTE = "Commodity scenarios: see the Risk tab."
+
+
+def futures_note() -> html.P:
+    """The line under the open futures table (Phase 3): where the commodity positions and
+    their scenarios are shown, and that the headline Net / Gross leave the futures out."""
+    return html.P(FUTURES_CURVE_NOTE + " " + FUTURES_RISK_NOTE, id=FUTURES_NOTE_ID, className="section-kicker")
 
 
 def futures_table(futures: Optional[dict] = None, details: Optional[Dict[str, dict]] = None):
@@ -1497,7 +1519,12 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
 
     2026-09-24: the scenarios are FX moves only (the equity index's futures line left
     engine.pnl.stress); the futures rows are commodity contracts, their scenario cells
-    blank with FUTURES_NO_SCENARIO on hover."""
+    blank with FUTURES_NO_SCENARIO on hover.
+
+    Phase 3 (2026-09-24): the headline card and the risk table's Net / Gross are FX only
+    (CLAUDE.md "Net USD"); the futures keep their USD delta in the open futures table,
+    with a line under it (`futures_note`) pointing to the Curve tab for the commodity
+    positions and to the Risk tab for their scenarios."""
     from engine.ladder.exposure import build_exposure
     from engine.pnl.stress import load_scenarios
     rates = rates or {}
@@ -1524,7 +1551,7 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
         heat = ladder_heatmap(result, ccys, forward_rates, view)
         details = local_vs_usd_details(grid)
     return html.Div(className="section", children=[
-        headline_numbers(exposure_result, futures, fallback_ccys, forward_proxy_ccys),
+        headline_numbers(exposure_result, fallback_ccys=fallback_ccys, forward_proxy_ccys=forward_proxy_ccys),
         html.H4("Cash ladder: settled cash, spot, forwards, swaps and option deltas"),
         reasons,
         usd_basis_caption(forward_rates, view),
@@ -1534,6 +1561,7 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
         details,
         html.H4("Open futures"),
         futures_table(futures, futures_details),
+        futures_note(),
         combined_risk_table(exposure_result, futures, scenarios, all_fallback),
         pair_position_table(pair_positions),
     ])

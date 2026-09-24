@@ -2,13 +2,15 @@
 
 This is the behaviour-neutrality proof behind the infra lane (CLAUDE.md "Working mode"): a
 refactor anywhere may change nothing here. `data/sample/blotter_sample.csv` (the synthetic
-commodity book: futures, FX hedges and FX options) is loaded into an in-memory database,
-every mark the book can read is written with a deterministic value (a fixed base per pair or
-contract root, moved by a hash of the mark's key, so the numbers are stable across machines
-and Python versions), then for each as-of date in AS_OF_DATES, in order, the ledger realises
-what has settled and the book is valued: every value_book row, LTD, the period P&L, the cash
-ladder, the delta per currency, the per-pair delta, the spot table, the curve positions and
-the expiry schedule.
+commodity book: futures, options on futures, LME forwards, FX hedges and FX options) is
+loaded into an in-memory database, every mark the book can read is written with a
+deterministic value (a fixed base per pair, contract root or metal, moved by a hash of the
+mark's key, so the numbers are stable across machines and Python versions), then for each
+as-of date in AS_OF_DATES, in order, the ledger realises what has settled and the book is
+valued: every value_book row, LTD, the period P&L, the cash ladder, the delta per currency,
+the per-pair delta, the spot table, the curve positions and the expiry schedule (the
+ledger's wall-clock `frozen_at` replaced by a placeholder, so the file does not depend on
+the day it is built).
 
 The pinned file is regenerated ONLY in a commit the user has approved (CLAUDE.md hard rule
 7: a change to what the book is worth is a change to P&L arithmetic):
@@ -21,8 +23,16 @@ What is deliberately in the fixture: commodity futures in USD, CNY, EUR, GBP and
 converted at its own USD pair's spot, USDCNY included), one of them expired and frozen
 (CLQ26); open FX forwards and a cross (EURGBP), one USDCNH forward settled; an FX spot; a
 metal with spot but no forward curve (XAUUSD: the near-marks rule's spot-only case); FX
-options including a closed-out pair and one with no strike on file; and the sample's two
-rejected rows, which never reach the book.
+options including a closed-out pair and one with no strike on file; options on futures
+(CMDTY_OPTION: WTI, an expired COMEX gold call that freezes, SHFE copper in CNY) at a synthetic
+Bloomberg price of their own; LME forwards (LME_FWD: copper, aluminium sold, and a nickel
+prompt already past) on a synthetic LME curve, cash price and 3M / monthly pillars; and the
+sample's two rejected rows, which never reach the book.
+
+`python -m tests.golden_book --diff` is the report for a re-pin decision: the differences
+per top-level key and day, and the proof that every trade pinned in the golden file values
+exactly as before, with the new trades' LTD beside it (`golden_diff`, `format_diff`). It
+never writes the pinned file.
 """
 from __future__ import annotations
 
@@ -60,6 +70,9 @@ FUTURE_BASE = {
     "SHFE:CU": 78500.0, "DCE:I": 765.0, "SGX:FEF": 101.0,
     "ICE:TFM": 35.0, "ICE:M": 88.7, "OSE:JAU": 15400.0,
 }
+# An LME cash price per metal root, USD per tonne. A metal the sample gains without a line here
+# raises KeyError: add its base.
+LME_BASE = {"LME:CA": 9800.0, "LME:AH": 2620.0, "LME:NI": 15300.0}
 _QUOTED_AGAINST_USD = {"AUD", "EUR", "GBP", "NZD", "XAU", "XAG"}   # '<ccy>USD'; every other is 'USD<ccy>'
 
 
@@ -143,7 +156,51 @@ def build_book(conn: sqlite3.Connection = None) -> sqlite3.Connection:
             for instrument_id, expiry, fill in options:
                 _mark(conn, d, instrument_id, expiry, "PREMIUM", fill * (1 + _wobble(instrument_id, "PREM", d, width=0.2)), "QL_OPTIONS_PRICER")
                 _mark(conn, d, instrument_id, expiry, "DELTA", 0.45 + _wobble(instrument_id, "DELTA", d, width=0.2), "QL_OPTIONS_PRICER")
+    _mark_listed_options(conn)
+    _mark_lme_curves(conn)
     return conn
+
+
+def _mark_listed_options(conn: sqlite3.Connection) -> None:
+    """Bloomberg's own price of each option on a future (official FUTURE_PX, BBG_BDH, keyed on
+    the option's expiry) on every mark date, around its fill; an option that expired before the
+    last as-of date is also marked on its expiry day, on its own instrument only, so the ledger
+    has a price on or before expiry to freeze at. No Greeks: the P&L needs none."""
+    options = conn.execute(
+        "SELECT i.instrument_id, i.expiry_date, MIN(t.price) FROM trades t JOIN instruments i USING (instrument_id) "
+        "WHERE t.product = 'CMDTY_OPTION' GROUP BY i.instrument_id ORDER BY 1").fetchall()
+    with conn:
+        for instrument_id, expiry, fill in options:
+            days = set(mark_dates())
+            if expiry <= AS_OF_DATES[-1]:
+                days.add(expiry)
+            for d in sorted(days):
+                _mark(conn, d, instrument_id, expiry, "FUTURE_PX",
+                      fill * (1 + _wobble(instrument_id, "PX", d, width=0.2)), "BBG_BDH")
+
+
+def _mark_lme_curves(conn: sqlite3.Connection) -> None:
+    """Each LME metal's curve on every mark date, on the pillars `engine.lme.lme_curve_tickers`
+    gives that day: the cash price (SPOT, settle = as-of), the 3M prompt, and the monthly
+    prompts up to the first one on or after the metal's last ticket prompt (FWD_OUTRIGHT), all
+    BBG_BFXFORWARD, each pillar a small move off that day's cash price."""
+    from engine.lme import lme_curve_tickers
+
+    last_prompt = dict(conn.execute(
+        "SELECT t.instrument_id, MAX(l.settle_date) FROM trades t JOIN trade_legs l USING (trade_id) "
+        "WHERE t.product = 'LME_FWD' GROUP BY t.instrument_id ORDER BY 1").fetchall())
+    with conn:
+        for root_id in sorted(last_prompt):
+            for d in mark_dates():
+                cash = LME_BASE[root_id] * (1 + _wobble(root_id, "SPOT", d))
+                _mark(conn, d, root_id, d, "SPOT", cash, "BBG_BFXFORWARD")
+                pillars = [p for p in lme_curve_tickers(root_id, d) if p["mark_type"] == "FWD_OUTRIGHT"]
+                beyond = [p["settle_date"] for p in pillars if p["settle_date"] >= last_prompt[root_id]]
+                reach = min(beyond) if beyond else max(p["settle_date"] for p in pillars)
+                for p in pillars:
+                    if p["kind"] == "3M" or p["settle_date"] <= reach:
+                        _mark(conn, d, root_id, p["settle_date"], "FWD_OUTRIGHT",
+                              cash * (1 + _wobble(root_id, "FWD", p["settle_date"], d, width=0.005)), "BBG_BFXFORWARD")
 
 
 def _plain(value):
@@ -168,6 +225,19 @@ def _rows(df) -> List[dict]:
     return [{k: _plain(v) for k, v in rec.items()} for rec in df.to_dict("records")]
 
 
+def _without_wall_clock(schedule: dict) -> dict:
+    """The expiry schedule with the ledger's `frozen_at` (the wall-clock time the fixture ran)
+    replaced by a placeholder, in its own field and in the reason that quotes its date, so the
+    pinned file does not change with the day it is built."""
+    for entry in schedule.get("settled_expired") or []:
+        stamp = entry.get("frozen_at")
+        if stamp:
+            entry["frozen_at"] = "<frozen_at>"
+            if isinstance(entry.get("reason"), str):
+                entry["reason"] = entry["reason"].replace(f" (on {str(stamp)[:10]})", " (on <frozen_at>)")
+    return schedule
+
+
 def snapshot(conn: sqlite3.Connection) -> dict:
     from engine.curve import curve_positions
     from engine.expiry import expiry_schedule
@@ -190,7 +260,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
             "per_pair_delta": _rows(ladder.per_pair_delta(conn, d)),
             "spot_table": _rows(ladder.spot_table(conn, d)),
             "curve_positions": _plain(curve_positions(conn, d)),
-            "expiry_schedule": _plain(expiry_schedule(conn, d)),
+            "expiry_schedule": _without_wall_clock(_plain(expiry_schedule(conn, d))),
         }
     return out
 
@@ -222,6 +292,92 @@ def compare(expected, actual, path: str = "") -> List[str]:
     return diffs
 
 
+def _book_rows(snap: dict) -> Dict[str, Dict[str, dict]]:
+    """{as-of date: {trade_id: value_book row}} of a snapshot."""
+    return {d: {str(r["trade_id"]): r for r in day.get("value_book", [])} for d, day in snap.get("days", {}).items()}
+
+
+def golden_diff(expected: dict, actual: dict) -> dict:
+    """What re-pinning `expected` (the golden file) to `actual` (a fresh snapshot) would change.
+
+    - counts: {day: {top-level key: number of differences}} ('*' for the keys outside the days);
+    - changed: [(trade_id, day, [differences])] for every trade pinned in `expected` whose
+      value_book row is not identical on a pinned day (a missing row included): the proof is
+      that this list is empty;
+    - pinned: how many trades the golden file pins, and on how many (trade, day) pairs;
+    - new: [{trade_id, product, instrument_id, ltd: {day: pnl_usd}, status}] for the trades in
+      `actual` that `expected` does not pin."""
+    counts: Dict[str, Dict[str, int]] = {}
+    outside = {k for k in set(expected) | set(actual) if k != "days"}
+    for key in sorted(outside):
+        n = len(compare({key: expected.get(key)}, {key: actual.get(key)}))
+        if n:
+            counts.setdefault("*", {})[key] = n
+    e_days, a_days = expected.get("days", {}), actual.get("days", {})
+    for d in sorted(set(e_days) | set(a_days)):
+        e_day, a_day = e_days.get(d, {}), a_days.get(d, {})
+        for key in sorted(set(e_day) | set(a_day)):
+            if key not in e_day or key not in a_day:
+                n = 1
+            else:
+                n = len(compare(e_day[key], a_day[key]))
+            if n:
+                counts.setdefault(d, {})[key] = n
+
+    e_rows, a_rows = _book_rows(expected), _book_rows(actual)
+    changed: List[tuple] = []
+    pinned_ids, pairs = set(), 0
+    for d in sorted(e_rows):
+        for trade_id in sorted(e_rows[d]):
+            pinned_ids.add(trade_id)
+            pairs += 1
+            row = a_rows.get(d, {}).get(trade_id)
+            if row is None:
+                changed.append((trade_id, d, ["row missing from the new book"]))
+                continue
+            diffs = compare(e_rows[d][trade_id], row)
+            if diffs:
+                changed.append((trade_id, d, diffs))
+
+    new: Dict[str, dict] = {}
+    for d in sorted(a_rows):
+        for trade_id, row in sorted(a_rows[d].items()):
+            if trade_id in pinned_ids:
+                continue
+            entry = new.setdefault(trade_id, {"trade_id": trade_id, "product": row.get("product"),
+                                              "instrument_id": row.get("instrument_id"), "ltd": {}, "status": {}})
+            entry["ltd"][d] = row.get("pnl_usd")
+            entry["status"][d] = row.get("status")
+    return {"counts": counts, "changed": changed, "pinned": {"trades": len(pinned_ids), "rows": pairs},
+            "new": [new[k] for k in sorted(new)]}
+
+
+def format_diff(result: dict) -> str:
+    """The plain-text report of `golden_diff`: the summary, then the proof, then the new trades."""
+    lines = ["GOLDEN BOOK DIFF: a fresh snapshot against tests/golden/book.json (nothing is written)", "",
+             "Summary: differences per top-level key, per day"]
+    if not result["counts"]:
+        lines.append("  none: the fresh snapshot matches the golden")
+    for d, keys in result["counts"].items():
+        lines.append(f"  {d}: " + ", ".join(f"{k} {n}" for k, n in keys.items()))
+    lines.append(f"  total: {sum(sum(k.values()) for k in result['counts'].values())} "
+                 "(lists compare by position: a row added in the middle shifts every row after it)")
+    lines += ["", f"Proof: the {result['pinned']['trades']} trades pinned in the golden file, "
+                  f"on {result['pinned']['rows']} pinned (trade, day) rows"]
+    if not result["changed"]:
+        lines.append("  every pinned trade's value_book row is identical on every pinned date")
+    else:
+        lines.append(f"  {len(result['changed'])} pinned row(s) differ:")
+        for trade_id, d, diffs in result["changed"]:
+            lines.append(f"  {trade_id} on {d}:")
+            lines += [f"    {x}" for x in diffs]
+    lines += ["", f"New trades (in the new book, not pinned in the golden file): {len(result['new'])}"]
+    for t in result["new"]:
+        ltd = ", ".join(f"{d} {'n/a' if v is None else f'{v:,.2f}'} ({t['status'][d]})" for d, v in t["ltd"].items())
+        lines.append(f"  {t['trade_id']} {t['product']} {t['instrument_id']}: LTD USD {ltd}")
+    return "\n".join(lines) + "\n"
+
+
 def dumps(data: dict) -> str:
     """Standard JSON, laid out for diffs: dicts one key per line, a list of rows one compact
     row per line, so a re-pin shows exactly which trades moved."""
@@ -241,11 +397,26 @@ def dumps(data: dict) -> str:
 
 def main(argv: Iterable[str] = None) -> int:
     ap = argparse.ArgumentParser(description="the golden book: compare with, or (--write) re-pin, tests/golden/book.json")
-    ap.add_argument("--write", action="store_true", help="re-pin the golden file (needs the user's approval, CLAUDE.md hard rule 7)")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--write", action="store_true", help="re-pin the golden file (needs the user's approval, CLAUDE.md hard rule 7)")
+    mode.add_argument("--diff", action="store_true",
+                      help="report what a re-pin would change and prove the pinned trades unchanged "
+                           "(also saved under reports/); never writes the golden file")
     args = ap.parse_args(list(argv) if argv is not None else None)
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     actual = snapshot(build_book())
+    if args.diff:
+        if not GOLDEN.exists():
+            print(f"{GOLDEN.relative_to(ROOT).as_posix()} does not exist: nothing to compare with")
+            return 1
+        result = golden_diff(json.loads(GOLDEN.read_text(encoding="utf-8")), actual)
+        text = format_diff(result)
+        out = ROOT / "reports" / f"golden_diff_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8", newline="\n")
+        print(text + f"saved to {out.relative_to(ROOT).as_posix()}")
+        return 1 if result["changed"] else 0
     if args.write:
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
         GOLDEN.write_text(dumps(actual), encoding="utf-8", newline="\n")

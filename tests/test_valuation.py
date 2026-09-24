@@ -322,8 +322,9 @@ def test_settled_trade_whose_realised_row_is_unreadable_and_has_no_mark_names_th
 # User decision 2026-09-24, "Spot of valuation date" (CLAUDE.md "P&L conventions -> Futures"):
 # a future's P&L is `contracts x multiplier x (m - f)` in its quote currency, converted to USD
 # at spot of the valuation date like an FX row, so a CNY or EUR contract is never summed as
-# dollars; a settled one at spot of the date of the price it freezes at. A USD contract is
-# exactly what it was.
+# dollars; a settled one at the spot of its expiry date (user decision 2026-09-24, C9: the last
+# official spot on or before expiry, exact rows only), never of the date of the price it freezes
+# at. A USD contract is exactly what it was.
 
 
 def _commodity_future(conn, trade_id, instrument_id, quote_ccy, multiplier, expiry, quantity, fill):
@@ -392,37 +393,73 @@ def test_a_usd_future_is_exactly_what_it_was():
 
 
 def _settled_cny_future(conn):
-    """cu1 expired 2026-09-15, last price on file dated 2026-09-14; USDCNY 7.20 that day and
-    7.00 on the valuation date 2026-09-17."""
+    """cu1 expired 2026-09-15, last price on file dated 2026-09-11 (the reviewer's case); USDCNY
+    7.00 on that price date, 7.20 the day before expiry, 7.40 on the expiry date itself and 7.10
+    on the valuation date 2026-09-17."""
     _commodity_future(conn, "cu1", "CUZ6 Comdty", "CNY", 5, "2026-09-15", 10, 78_000.0)
     _insert_instrument(conn, "USDCNY", "USD", "CNY")
-    _insert_mark(conn, "2026-09-14", "CUZ6 Comdty", "2026-09-15", "FUTURE_PX", 78_400.0, "BBG_BDH",
-                 "2026-09-14T17:00:00-04:00")
-    _insert_mark(conn, "2026-09-14", "USDCNY", "2026-09-14", "SPOT", 7.20, "BBG_BFXFORWARD", "2026-09-14T15:00:00-04:00")
-    _insert_mark(conn, "2026-09-17", "USDCNY", "2026-09-17", "SPOT", 7.00, "BBG_BFXFORWARD", _CLOSE)
+    _insert_mark(conn, "2026-09-11", "CUZ6 Comdty", "2026-09-15", "FUTURE_PX", 78_400.0, "BBG_BDH",
+                 "2026-09-11T17:00:00-04:00")
+    for day, spot in (("2026-09-11", 7.00), ("2026-09-14", 7.20), ("2026-09-15", 7.40), ("2026-09-17", 7.10)):
+        _insert_mark(conn, day, "USDCNY", day, "SPOT", spot, "BBG_BFXFORWARD", f"{day}T15:00:00-04:00")
     conn.commit()
 
 
-def test_a_settled_cny_future_not_yet_frozen_converts_at_spot_of_its_prices_date_not_of_as_of():
+def test_a_settled_cny_future_not_yet_frozen_converts_at_the_spot_of_its_expiry_date():
+    """User decision 2026-09-24 (C9): the provisional row converts at 09-15's 7.40, never at the
+    price date's 7.00, the day before's 7.20 or the valuation date's 7.10."""
     conn = schema.connect()
     _settled_cny_future(conn)
     cu = _by_id(conn).loc["cu1"]
     assert cu["status"] == "SETTLED" and cu["reason"] == ""
     assert cu["pnl_local"] == 10 * 5 * (78_400.0 - 78_000.0) == 20_000.0
-    assert cu["pnl_usd"] == pytest.approx(20_000.0 / 7.20, rel=1e-15)           # 09-14's spot, never 09-17's 7.00
-    assert (cu["mark"], cu["mark_date"]) == (78_400.0, "2026-09-14")
-    assert (cu["spot"], cu["spot_source"]) == (pytest.approx(1 / 7.20, rel=1e-15), "BBG_BFXFORWARD")
-    assert cu["note"] == ("frozen at settlement price dated 2026-09-14 (last before settlement); "
+    assert cu["pnl_usd"] == 20_000.0 * (1.0 / 7.40) == cu["pnl_spot_usd"] and cu["pnl_carry_usd"] == 0.0
+    assert (cu["mark"], cu["mark_date"], cu["mark_source"]) == (78_400.0, "2026-09-11", "BBG_BDH")
+    assert (cu["spot"], cu["spot_source"]) == (1.0 / 7.40, "BBG_BFXFORWARD")
+    assert cu["note"] == ("frozen at settlement price dated 2026-09-11 (last before settlement); "
                           "not yet recorded in realised_pnl")
-    # with no USDCNY spot on file at all it cannot be frozen: blank, never at 1, and the reason
-    # names the real gap, the conversion, as the ledger does (reviewer W-3)
-    conn.execute("DELETE FROM marks WHERE instrument_id = 'USDCNY'")
+
+
+def test_a_settled_cny_future_with_no_spot_on_its_expiry_date_takes_the_last_one_before_it():
+    conn = schema.connect()
+    _settled_cny_future(conn)
+    conn.execute("DELETE FROM marks WHERE instrument_id = 'USDCNY' AND as_of_date = '2026-09-15'")
     conn.commit()
     cu = _by_id(conn).loc["cu1"]
-    assert cu["pnl_usd"] != cu["pnl_usd"] and cu["spot"] != cu["spot"]
-    assert cu["reason"] == ("settled trade cu1: no SPOT for USD conversion of CNY on 2026-09-14, "
-                            "so it cannot be frozen")
-    assert (cu["mark"], cu["mark_date"], cu["pnl_local"]) == (78_400.0, "2026-09-14", 20_000.0)
+    assert cu["pnl_usd"] == 20_000.0 * (1.0 / 7.20) and cu["spot"] == 1.0 / 7.20       # 09-14, the last before expiry
+    assert cu["note"] == ("frozen at settlement price dated 2026-09-11 (last before settlement); converted at "
+                          "USDCNY spot dated 2026-09-14 (last before expiry); not yet recorded in realised_pnl")
+
+
+def test_a_settled_cny_future_with_no_spot_on_or_before_its_expiry_is_blank_with_the_reason():
+    """Exact rows only: the spots after expiry (09-17's 7.10, and a 09-16 one the near-marks rule
+    would carry back) are never used; blank, never at 1, the price and local P&L still shown."""
+    conn = schema.connect()
+    _settled_cny_future(conn)
+    conn.execute("DELETE FROM marks WHERE instrument_id = 'USDCNY' AND as_of_date <= '2026-09-15'")
+    _insert_mark(conn, "2026-09-16", "USDCNY", "2026-09-16", "SPOT", 7.30, "BBG_BFXFORWARD",
+                 "2026-09-16T15:00:00-04:00")
+    conn.commit()
+    cu = _by_id(conn).loc["cu1"]
+    assert cu["pnl_usd"] != cu["pnl_usd"] and cu["spot"] != cu["spot"] and cu["spot_source"] == ""
+    assert cu["reason"] == ("settled trade cu1: no SPOT for USD conversion of CNY on or before its expiry "
+                            "2026-09-15, so it cannot be frozen")
+    assert (cu["mark"], cu["mark_date"], cu["pnl_local"]) == (78_400.0, "2026-09-11", 20_000.0)
+
+
+def test_a_settled_usd_future_is_frozen_exactly_as_before():
+    conn = schema.connect()
+    _future(conn)
+    conn.execute("UPDATE trade_legs SET settle_date = '2026-09-15' WHERE trade_id = 'f1'")
+    conn.execute("UPDATE marks SET as_of_date = '2026-09-11', settle_date = '2026-09-15'")
+    conn.commit()
+    es = _by_id(conn).loc["f1"]
+    pnl = 3 * 50 * (6100.0 - 6000.0)
+    assert es["status"] == "SETTLED" and es["reason"] == ""
+    assert (es["pnl_local"], es["pnl_usd"], es["pnl_spot_usd"], es["pnl_carry_usd"]) == (pnl, pnl, pnl, 0.0)
+    assert (es["spot"], es["spot_source"], es["mark_date"]) == (1.0, "identity", "2026-09-11")
+    assert es["note"] == ("frozen at settlement price dated 2026-09-11 (last before settlement); "
+                          "not yet recorded in realised_pnl")
 
 
 def test_a_cny_future_priced_on_its_expiry_date_is_one_figure_open_provisional_and_frozen():
@@ -454,17 +491,17 @@ def test_a_cny_future_priced_on_its_expiry_date_is_one_figure_open_provisional_a
 
 def test_a_settled_future_shows_the_conversion_its_realised_row_was_frozen_in():
     """The P&L is the stored figure, never recomputed; a row frozen in CNY shows the spot of
-    the date it was frozen at, a USD row spot 1 / identity as always."""
+    its expiry date (C9), a USD row spot 1 / identity as always."""
     conn = schema.connect()
     _settled_cny_future(conn)
     _future(conn)
     conn.execute("UPDATE trade_legs SET settle_date = '2026-09-15' WHERE trade_id = 'f1'")
     columns = ("trade_id, instrument_id, product, currency, settle_date, local_amount, usd_entry_amount, "
                "mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, note")
-    s = 1 / 7.20
+    s = 1 / 7.40
     conn.executemany(f"INSERT INTO realised_pnl ({columns}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
         ("cu1", "CUZ6 Comdty", "FUTURE", "CNY", "2026-09-15", 10, 10 * 5 * 78_000.0 * s, "FUTURE_PX",
-         5 * 78_400.0 * s, "2026-09-14", "BBG_BDH", 20_000.0 * s, "2026-09-16T00:00:00", "stored note"),
+         5 * 78_400.0 * s, "2026-09-11", "BBG_BDH", 20_000.0 * s, "2026-09-16T00:00:00", "stored note"),
         ("f1", "ESZ6 Index", "FUTURE", "USD", "2026-09-15", 3, 3 * 50 * 6000.0, "FUTURE_PX",
          50 * 6100.0, "2026-09-15", "BBG_BDH", 15_000.0, "2026-09-16T00:00:00", ""),
     ])
@@ -578,7 +615,8 @@ def test_the_products_that_stay_price_to_the_bit_what_they_did_before_the_irs_an
 def test_a_forward_flagged_non_deliverable_is_valued_as_a_deliverable_forward_and_a_swap_is_not_valued():
     """After the removal a forward on an `is_ndf = 1` instrument, looked at past what used to be
     its fixing date, is marked at its own value date's outright and converted at spot like any
-    FX forward (no fixing, no NDF_FIX read), and a leftover IRS trade gets no row at all."""
+    FX forward (no fixing, no NDF_FIX read), and a leftover IRS trade is not valued: its row is
+    blank with its reason, whatever PV_USD is on file (user decision 2026-09-24, C10)."""
     conn = schema.connect()
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                  "bbg_ticker, expiry_date) VALUES ('USDIDR','FX','USD','IDR',1,1,'USDIDR Curncy','9999-12-31')")
@@ -597,9 +635,302 @@ def test_a_forward_flagged_non_deliverable_is_valued_as_a_deliverable_forward_an
     _insert_mark(conn, "2026-09-23", "IRSOIS-USD-1", "2031-06-01", "PV_USD", 12_500.0, "QL_PRICER", stamp)
     conn.commit()
     vb = _by_id(conn, "2026-09-23")
-    assert list(vb.index) == ["n1"]
+    assert sorted(vb.index) == ["n1", "s1"]
+    assert vb.loc["s1", "pnl_usd"] != vb.loc["s1", "pnl_usd"] and vb.loc["s1", "reason"] == _SWAP_GONE
     n1 = vb.loc["n1"]
     assert (n1["status"], n1["mark"], n1["mark_date"], n1["mark_source"]) == ("OPEN", 17_860.0, "2026-09-24", "BBG_BFXFORWARD")
     assert (n1["spot"], n1["spot_source"]) == (1 / 17_850.0, "BBG_BFXFORWARD")
     assert n1["pnl_usd"] == -1_000_000 * (17_860.0 - 17_900.0) * (1 / 17_850.0)
     assert n1["note"] == "" and n1["reason"] == ""
+
+
+# --------------------------------------------------------------------- leftover retired products (C10)
+# User decision 2026-09-24 (C10): an old database's leftover trade of a retired product is never
+# valued and never dropped: blank P&L with its reason, status as its dates say; one the ledger
+# froze before the removal keeps showing its frozen figure.
+_SWAP_GONE = "rate swaps left the app on 2026-09-24; this old trade is not valued and leaves at the next upload"
+
+
+def _leftover_swap(conn, trade_id, maturity, product="IRS"):
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES (?, 'IRS', 'USD', 'USD', 1, 0, '', ?)", (f"IRS-{trade_id}", maturity))
+    _insert_trade(conn, trade_id, f"IRS-{trade_id}", product, "2026-06-01", 10_000_000, 3.85)
+    _insert_legs(conn, [(trade_id, 1, "FIXED", "USD", -10_000_000, "2026-06-03", maturity, 3.85, 1),
+                        (trade_id, 2, "FLOAT", "USD", 10_000_000, "2026-06-03", maturity, 0.0, 1)])
+    _insert_mark(conn, "2026-09-17", f"IRS-{trade_id}", maturity, "PV_USD", 12_500.0, "QL_PRICER", _CLOSE)
+
+
+def _is_blank(row):
+    return all(row[c] != row[c] for c in ("mark", "spot", "pnl_local", "pnl_usd", "pnl_spot_usd", "pnl_carry_usd"))
+
+
+def test_a_leftover_open_swap_has_a_blank_row_with_its_reason_never_a_figure():
+    conn = schema.connect()
+    _two_pairs(conn)
+    _leftover_swap(conn, "s1", "2031-06-01")
+    conn.commit()
+    vb = _by_id(conn)
+    s1 = vb.loc["s1"]
+    assert (s1["status"], s1["product"], s1["settle_date"], s1["quantity"], s1["fill"]) == (
+        "OPEN", "IRS", "2031-06-01", 10_000_000, 3.85)
+    assert _is_blank(s1) and s1["reason"] == _SWAP_GONE and s1["note"] == ""
+    assert list(vb.loc[["t1", "t2"], "reason"]) == ["", ""]                # the rest of the book prices as before
+    assert list(value_book(conn, "2026-09-17", trade_ids=["s1"])["trade_id"]) == ["s1"]
+    assert "s1" not in set(value_book(conn, "2026-05-29")["trade_id"])     # before its trade date, like any trade
+
+
+def test_a_leftover_matured_swap_shows_its_frozen_figure_or_else_a_blank_row():
+    conn = schema.connect()
+    _leftover_swap(conn, "s1", "2026-09-10")
+    _leftover_swap(conn, "s2", "2026-09-11")
+    _leftover_swap(conn, "w1", "2031-06-01", product="SWAPTION")
+    columns = ("trade_id, instrument_id, product, currency, settle_date, local_amount, usd_entry_amount, "
+               "mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, note")
+    conn.execute(f"INSERT INTO realised_pnl ({columns}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("s1", "IRS-s1", "IRS", "USD", "2026-09-10", 10_000_000, 0.0, "PV_USD", 1.0, "2026-09-10",
+                  "QL_PRICER", -8_250.5, "2026-09-11T00:00:00", "frozen at PV + cashflows"))
+    conn.commit()
+    vb = _by_id(conn)
+    s1, s2, w1 = vb.loc["s1"], vb.loc["s2"], vb.loc["w1"]
+    assert (s1["status"], s1["pnl_usd"], s1["pnl_spot_usd"], s1["spot"], s1["spot_source"], s1["reason"]) == (
+        "SETTLED", -8_250.5, -8_250.5, 1.0, "identity", "")
+    assert (s1["mark_date"], s1["mark_source"], s1["note"]) == ("2026-09-10", "QL_PRICER", "frozen at PV + cashflows")
+    assert s2["status"] == "SETTLED" and _is_blank(s2) and s2["reason"] == _SWAP_GONE
+    assert w1["status"] == "OPEN" and _is_blank(w1)
+    assert w1["reason"] == ("rate options left the app on 2026-09-24; this old trade is not valued and "
+                            "leaves at the next upload")
+    # a frozen row that is unreadable is no frozen figure: blank, the reason naming both
+    conn.execute("UPDATE realised_pnl SET pnl_usd = '10-Sep' WHERE trade_id = 's1'")
+    conn.commit()
+    s1 = _by_id(conn).loc["s1"]
+    assert _is_blank(s1)
+    assert s1["reason"] == _SWAP_GONE + "; its realised_pnl row is unreadable (realised_pnl.pnl_usd is not a number ('10-Sep'))"
+
+
+# --------------------------------------------------------------------- options on commodity futures (C12)
+# User decision 2026-09-24 (C12): product CMDTY_OPTION joins the listed path, `contracts x
+# multiplier x (m - f)` at Bloomberg's own option price, in the quote currency, converted at spot
+# of the valuation date; frozen after expiry at the last price on or before it, converted at the
+# spot of its expiry date.
+
+
+def _commodity_option(conn, trade_id, instrument_id, quote_ccy, multiplier, expiry, quantity, fill):
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+        "bbg_ticker, expiry_date) VALUES (?, 'CMDTY_OPTION', ?, ?, ?, 0, ?, ?)",
+        (instrument_id, instrument_id[:2], quote_ccy, multiplier, instrument_id, expiry))
+    _insert_trade(conn, trade_id, instrument_id, "CMDTY_OPTION", "2026-08-03", quantity, fill)
+    _insert_legs(conn, [(trade_id, 1, "NOTIONAL", quote_ccy, quantity * multiplier, "2026-08-03", expiry, fill, 0)])
+
+
+def test_an_open_option_on_a_cny_future_and_on_a_usd_future_are_valued_like_futures():
+    conn = schema.connect()
+    _commodity_option(conn, "co1", "CU2611C80000 Comdty", "CNY", 5, "2026-10-26", 2, 1_000.0)
+    _commodity_option(conn, "co2", "CLZ6C75 Comdty", "USD", 1000, "2026-11-17", -3, 3.10)
+    _insert_instrument(conn, "USDCNY", "USD", "CNY")
+    _insert_mark(conn, "2026-09-17", "CU2611C80000 Comdty", "2026-10-26", "FUTURE_PX", 1_250.0, "BBG_BDH", _CLOSE)
+    _insert_mark(conn, "2026-09-17", "CLZ6C75 Comdty", "2026-11-17", "FUTURE_PX", 2.85, "BBG_BDH", _CLOSE)
+    _insert_mark(conn, "2026-09-17", "USDCNY", "2026-09-17", "SPOT", 7.10, "BBG_BFXFORWARD", _CLOSE)
+    conn.commit()
+    vb = _by_id(conn)
+    co1, co2 = vb.loc["co1"], vb.loc["co2"]
+    assert (co1["product"], co1["status"], co1["reason"]) == ("CMDTY_OPTION", "OPEN", "")
+    assert co1["pnl_local"] == 2 * 5 * (1_250.0 - 1_000.0) == 2_500.0                        # CNY
+    assert co1["pnl_usd"] == 2_500.0 * (1.0 / 7.10) == co1["pnl_spot_usd"] and co1["pnl_carry_usd"] == 0.0
+    assert (co1["mark"], co1["mark_source"], co1["spot"], co1["spot_source"]) == (
+        1_250.0, "BBG_BDH", 1.0 / 7.10, "BBG_BFXFORWARD")
+    pnl = -3 * 1000 * (2.85 - 3.10)
+    assert (co2["pnl_local"], co2["pnl_usd"], co2["pnl_spot_usd"], co2["pnl_carry_usd"]) == (pnl, pnl, pnl, 0.0)
+    assert (co2["spot"], co2["spot_source"], co2["reason"]) == (1.0, "identity", "")
+    # no price: blank with the listed option's reason, never a model value
+    conn.execute("DELETE FROM marks WHERE instrument_id = 'CLZ6C75 Comdty'")
+    conn.commit()
+    co2 = _by_id(conn).loc["co2"]
+    assert co2["pnl_usd"] != co2["pnl_usd"]
+    assert co2["reason"] == "no Bloomberg price for the listed option CLZ6C75 Comdty on 2026-09-17"
+
+
+def test_an_expired_option_on_a_cny_future_freezes_at_its_last_price_and_the_spot_of_its_expiry_date():
+    conn = schema.connect()
+    _commodity_option(conn, "co1", "CU2609C80000 Comdty", "CNY", 5, "2026-09-15", 2, 1_000.0)
+    _insert_instrument(conn, "USDCNY", "USD", "CNY")
+    _insert_mark(conn, "2026-09-11", "CU2609C80000 Comdty", "2026-09-15", "FUTURE_PX", 1_400.0, "BBG_BDH",
+                 "2026-09-11T17:00:00-04:00")
+    _insert_mark(conn, "2026-09-17", "CU2609C80000 Comdty", "2026-09-15", "FUTURE_PX", 9_999.0, "BBG_BDH", _CLOSE)
+    for day, spot in (("2026-09-11", 7.00), ("2026-09-14", 7.20), ("2026-09-15", 7.40), ("2026-09-17", 7.10)):
+        _insert_mark(conn, day, "USDCNY", day, "SPOT", spot, "BBG_BFXFORWARD", f"{day}T15:00:00-04:00")
+    conn.commit()
+    co1 = _by_id(conn).loc["co1"]                                     # provisional: no realised row yet
+    assert (co1["status"], co1["reason"], co1["mark"], co1["mark_date"]) == ("SETTLED", "", 1_400.0, "2026-09-11")
+    assert co1["pnl_local"] == 2 * 5 * (1_400.0 - 1_000.0) == 4_000.0
+    assert co1["pnl_usd"] == 4_000.0 * (1.0 / 7.40) and co1["spot"] == 1.0 / 7.40
+    # frozen by the ledger: the stored figure, shown with its expiry date's spot
+    s = 1.0 / 7.40
+    columns = ("trade_id, instrument_id, product, currency, settle_date, local_amount, usd_entry_amount, "
+               "mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, note")
+    conn.execute(f"INSERT INTO realised_pnl ({columns}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("co1", "CU2609C80000 Comdty", "CMDTY_OPTION", "CNY", "2026-09-15", 2, 2 * 5 * 1_000.0 * s,
+                  "FUTURE_PX", 5 * 1_400.0 * s, "2026-09-11", "BBG_BDH", 4_000.0 * s, "2026-09-16T00:00:00", "stored"))
+    conn.commit()
+    co1 = _by_id(conn).loc["co1"]
+    assert (co1["pnl_usd"], co1["note"], co1["reason"]) == (4_000.0 * s, "stored", "")
+    assert (co1["spot"], co1["spot_source"]) == (s, "BBG_BFXFORWARD")
+
+
+# --------------------------------------------------------------------- usd_per_quote_on_or_before (C9)
+
+def test_usd_per_quote_on_or_before_reads_the_last_exact_official_spot_on_or_before_the_date():
+    from engine.pnl.valuation import usd_per_quote_on_or_before
+    conn = schema.connect()
+    for pair, base, quote in (("USDCNY", "USD", "CNY"), ("EURUSD", "EUR", "USD"), ("USDJPY", "USD", "JPY")):
+        _insert_instrument(conn, pair, base, quote)
+    _insert_mark(conn, "2026-09-14", "USDCNY", "2026-09-14", "SPOT", 7.20, "BBG_BFXFORWARD", _CLOSE)
+    _insert_mark(conn, "2026-09-16", "USDCNY", "2026-09-16", "SPOT", 7.30, "BBG_BFXFORWARD", _CLOSE)
+    _insert_mark(conn, "2026-09-15", "USDCNY", "2026-09-15", "SPOT", 9.99, "MANUAL", _CLOSE)       # not official
+    _insert_mark(conn, "2026-09-10", "EURUSD", "2026-09-10", "SPOT", 1.10, "BBG_BFXFORWARD", _CLOSE)
+    _insert_mark(conn, "2026-09-16", "USDJPY", "2026-09-16", "SPOT", 147.0, "BBG_BFXFORWARD", _CLOSE)  # after only
+    conn.commit()
+    assert usd_per_quote_on_or_before(conn, "USD", "2026-09-15") == (1.0, "USD", "identity", "2026-09-15")
+    assert usd_per_quote_on_or_before(conn, "CNY", "2026-09-15") == (1.0 / 7.20, "USDCNY", "BBG_BFXFORWARD", "2026-09-14")
+    assert usd_per_quote_on_or_before(conn, "EUR", "2026-09-15") == (1.10, "EURUSD", "BBG_BFXFORWARD", "2026-09-10")
+    s, pair, source, day = usd_per_quote_on_or_before(conn, "JPY", "2026-09-15")
+    assert s != s and (pair, source, day) == (None, None, None)
+    s, pair, source, day = usd_per_quote_on_or_before(conn, "GBP", "2026-09-15")
+    assert s != s and (pair, source, day) == (None, None, None)
+
+
+# --------------------------------------------------------------------- LME forwards (Phase 5)
+# User decision 2026-09-24, CLAUDE.md "P&L conventions -> LME forwards": the FX-forward rule on the
+# metal's root id, PnL_USD = tonnes x (m - f), S = 1; the curve's cash price sits at the LME cash
+# date; settled, frozen at the last official cash price on or before the prompt date.
+
+def _lme_ticket(conn, tid, tonnes, fill, prompt, trade_date="2026-08-20", root="LME:CA"):
+    """An LME ticket as ingest-parser writes it: the root instrument, product LME_FWD, two FX_NEAR
+    legs on the prompt (the metal leg, then the USD leg)."""
+    conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, "
+                 "is_ndf, bbg_ticker, expiry_date) VALUES (?, 'LME_FWD', ?, 'USD', 1, 0, 'LMCADY Comdty', "
+                 "'9999-12-31')", (root, root))
+    _insert_trade(conn, tid, root, "LME_FWD", trade_date, tonnes, fill)
+    _insert_legs(conn, [(tid, 1, "FX_NEAR", root, tonnes, trade_date, prompt, fill, 0),
+                        (tid, 2, "FX_NEAR", "USD", -tonnes * fill, trade_date, prompt, fill, 1)])
+
+
+def _lme_curve(conn, as_of, cash, points, root="LME:CA"):
+    """The day's official LME curve: the cash price (SPOT, keyed on its own day) and the given
+    {prompt: outright} FWD_OUTRIGHT pillars."""
+    stamp = f"{as_of}T17:00:00-04:00"
+    if cash is not None:
+        _insert_mark(conn, as_of, root, as_of, "SPOT", cash, "BBG_BFXFORWARD", stamp)
+    for prompt, value in points.items():
+        _insert_mark(conn, as_of, root, prompt, "FWD_OUTRIGHT", value, "BBG_BFXFORWARD", stamp)
+
+
+def test_an_open_lme_three_month_ticket_is_marked_at_its_own_pillar_in_usd():
+    from engine.lme import three_month_date
+    conn = schema.connect()
+    three_m = three_month_date("2026-09-15").isoformat()                  # 2026-12-15
+    _lme_ticket(conn, "lme1", 100.0, 9_800.0, three_m)
+    _lme_curve(conn, "2026-09-15", 9_850.0, {three_m: 9_900.0})
+    conn.commit()
+    r = _by_id(conn, "2026-09-15").loc["lme1"]
+    assert (r["status"], r["product"], r["reason"]) == ("OPEN", "LME_FWD", "")     # never relabelled FX_SPOT
+    assert (r["mark"], r["mark_date"], r["mark_source"]) == (9_900.0, three_m, "BBG_BFXFORWARD")
+    assert (r["spot"], r["spot_source"]) == (1.0, "identity")
+    assert r["pnl_local"] == r["pnl_usd"] == 100.0 * (9_900.0 - 9_800.0) == 10_000.0
+    assert r["pnl_carry_usd"] == 100.0 * (9_900.0 - 9_850.0)            # against the cash price
+    assert r["pnl_spot_usd"] == r["pnl_usd"] - r["pnl_carry_usd"]
+
+
+def test_a_broken_lme_prompt_is_read_between_the_cash_date_and_the_next_pillar():
+    """2026-08-27: the FX spot date is Monday 31 August, a London bank holiday, so the LME cash
+    date is Tuesday 1 September; the cash price is placed there, and a broken prompt is linear in
+    calendar days from it to the next pillar, the source naming both marks."""
+    from engine.lme import cash_date
+    from engine.pnl.calendar import spot_date
+    as_of = "2026-08-27"
+    cash_day = cash_date(as_of)
+    assert cash_day.isoformat() == "2026-09-01" and spot_date(as_of, "LME:CA").isoformat() == "2026-08-31"
+    conn = schema.connect()
+    _lme_ticket(conn, "lme2", -50.0, 9_700.0, "2026-10-21", trade_date="2026-08-26")
+    _lme_curve(conn, as_of, 9_600.0, {"2026-11-27": 9_690.0})
+    conn.commit()
+    r = _by_id(conn, as_of).loc["lme2"]
+    w = (dt.date(2026, 10, 21) - cash_day).days / (dt.date(2026, 11, 27) - cash_day).days
+    m = 9_600.0 + w * (9_690.0 - 9_600.0)
+    assert r["mark"] == m and r["reason"] == ""
+    assert r["mark_source"] == "INTERP: between LME:CA 2026-09-01 and 2026-11-27 marks of 2026-08-27"
+    assert r["pnl_usd"] == -50.0 * (m - 9_700.0) and r["spot"] == 1.0
+
+
+def test_an_lme_prompt_before_the_cash_date_is_marked_at_the_cash_price():
+    from engine.lme import cash_date
+    conn = schema.connect()
+    _lme_ticket(conn, "lme3", 25.0, 9_800.0, "2026-09-16", trade_date="2026-09-14")   # tom; cash is the 17th
+    _lme_curve(conn, "2026-09-15", 9_850.0, {"2026-12-15": 9_900.0})
+    conn.commit()
+    r = _by_id(conn, "2026-09-15").loc["lme3"]
+    assert cash_date("2026-09-15").isoformat() == "2026-09-17"
+    assert r["mark"] == 9_850.0 and r["pnl_usd"] == 25.0 * 50.0
+    assert r["mark_source"] == "INTERP: LME:CA 2026-09-17 mark of 2026-09-15 (nearest, no earlier pillar)"
+
+
+def test_a_settled_unfrozen_lme_ticket_shows_the_settlement_price_the_ledger_freezes():
+    from engine.lme import settlement_price
+    from engine.pnl import ledger
+    conn = schema.connect()
+    _lme_ticket(conn, "lme4", 100.0, 9_800.0, "2026-09-16")
+    _lme_ticket(conn, "lme5", -25.0, 9_800.0, "2026-09-13")              # a Sunday: the Friday cash price
+    for day, cash in (("2026-09-11", 9_760.0), ("2026-09-15", 9_700.0), ("2026-09-16", 9_720.0),
+                      ("2026-09-17", 9_990.0)):
+        _lme_curve(conn, day, cash, {})
+    conn.commit()
+    vb = _by_id(conn, "2026-09-18")
+    r4, r5 = vb.loc["lme4"], vb.loc["lme5"]
+    assert settlement_price(conn, "LME:CA", "2026-09-16") == (9_720.0, "2026-09-16", "BBG_BFXFORWARD")
+    assert (r4["status"], r4["reason"], r4["mark"], r4["mark_date"]) == ("SETTLED", "", 9_720.0, "2026-09-16")
+    assert r4["pnl_usd"] == 100.0 * (9_720.0 - 9_800.0) and r4["spot"] == 1.0
+    assert r4["note"] == "frozen at cash price; not yet recorded in realised_pnl"
+    assert (r5["mark"], r5["mark_date"], r5["pnl_usd"]) == (9_760.0, "2026-09-11", -25.0 * (9_760.0 - 9_800.0))
+    assert r5["note"].startswith("frozen at cash price dated 2026-09-11 (last before settlement)")
+    # the ledger freezes the same figures (its FX path, which LME_FWD joins through FX_PRODUCTS)
+    ledger.realise_settled(conn, "2026-09-18")
+    frozen = _by_id(conn, "2026-09-18")
+    assert frozen.loc["lme4", "note"] != r4["note"]                      # read back from realised_pnl now
+    assert frozen.loc["lme4", "pnl_usd"] == pytest.approx(r4["pnl_usd"], rel=1e-12)
+    assert frozen.loc["lme5", "pnl_usd"] == pytest.approx(r5["pnl_usd"], rel=1e-12)
+
+
+def test_an_lme_ticket_with_no_curve_at_all_is_blank_with_its_reason():
+    conn = schema.connect()
+    _lme_ticket(conn, "lme6", 100.0, 9_800.0, "2026-12-15")
+    conn.commit()
+    r = _by_id(conn, "2026-09-15").loc["lme6"]
+    assert r["status"] == "OPEN" and r["pnl_usd"] != r["pnl_usd"] and r["mark"] != r["mark"]
+    assert r["reason"] == ("no LME price of LME:CA for prompt 2026-12-15 on 2026-09-15: no cash price or forward "
+                           "of the metal on file on that day or any other close")
+
+
+def test_an_fx_forward_is_unchanged_beside_an_lme_ticket():
+    """The FX pillar stays at the FX spot date (2026-08-31 here, a London holiday the LME skips),
+    and the FX row is the same with or without an LME ticket in the book."""
+    as_of = "2026-08-27"
+    conn = schema.connect()
+    _insert_instrument(conn, "USDJPY", "USD", "JPY")
+    _insert_trade(conn, "fx1", "USDJPY", "FX_FWD", "2026-08-20", 1_000_000, 147.0)
+    _insert_legs(conn, [("fx1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-20", "2026-10-21", 147.0, 1),
+                        ("fx1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-08-20", "2026-10-21", 147.0, 1)])
+    _insert_mark(conn, as_of, "USDJPY", as_of, "SPOT", 146.0, "BBG_BFXFORWARD", _CLOSE)
+    _insert_mark(conn, as_of, "USDJPY", "2026-11-30", "FWD_OUTRIGHT", 145.0, "BBG_BFXFORWARD", _CLOSE)
+    conn.commit()
+    before = _by_id(conn, as_of).loc["fx1"]
+    w = (dt.date(2026, 10, 21) - dt.date(2026, 8, 31)).days / (dt.date(2026, 11, 30) - dt.date(2026, 8, 31)).days
+    m = 146.0 + w * (145.0 - 146.0)
+    assert before["mark"] == m and before["product"] == "FX_FWD"
+    assert before["mark_source"] == "INTERP: between USDJPY 2026-08-31 and 2026-11-30 marks of 2026-08-27"
+    assert before["pnl_usd"] == 1_000_000 * (m - 147.0) * (1.0 / 146.0)
+    _lme_ticket(conn, "lme7", 100.0, 9_800.0, "2026-10-21")
+    _lme_curve(conn, as_of, 9_600.0, {"2026-11-27": 9_690.0})
+    conn.commit()
+    after = _by_id(conn, as_of)
+    assert sorted(after.index) == ["fx1", "lme7"]
+    assert after.loc["fx1"].to_dict() == before.to_dict()

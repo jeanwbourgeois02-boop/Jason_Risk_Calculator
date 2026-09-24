@@ -152,8 +152,8 @@ def main(argv=None):
     args = parse_args([] if argv is None else argv)
     try:
         from ui.app import create_app, get_db_path
-        import openpyxl
-        import xlrd
+        import openpyxl  # noqa: F401  (availability check: the upload reads .xlsx with it)
+        import xlrd  # noqa: F401  (availability check: the upload reads .xls with it)
     except ImportError as exc:
         print(f'Missing dependency: {exc.name}. Run: py -3 2_launcher.py setup')
         return 1

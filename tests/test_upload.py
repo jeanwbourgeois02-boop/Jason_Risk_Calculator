@@ -12,12 +12,13 @@ from data.ingest import blotter
 from data.ingest.upload import import_blotter, preview_frame, validate_blotter_shape
 
 # The synthetic commodity, FX-hedge and FX-option book (commodity conversion Phase 2,
-# 2026-09-24): 45 rows, 31 of them futures, two of which the parser rejects on purpose
-# (ZCZ6: two exchanges list a ZC root; QQZ6: a root not in config/contracts.csv).
+# 2026-09-24; Phase 5 added 4 options on futures and 3 LME forwards): 52 rows, 31 of them
+# futures, two of which the parser rejects on purpose (ZCZ6: two exchanges list a ZC root;
+# QQZ6: a root not in config/contracts.csv).
 RAW_BLOTTER = Path(__file__).resolve().parents[1] / 'data/sample/blotter_sample.csv'
-EXPECTED_TRADES, EXPECTED_LEGS = 43, 52  # 29 fut (1 leg) + 8 fwd (2) + 1 spot (2) + 5 opt (1)
+EXPECTED_TRADES, EXPECTED_LEGS = 50, 62  # 29 fut (1 leg) + 4 opt on fut (1) + 3 LME (2) + 8 fwd (2) + 1 spot (2) + 5 FX opt (1)
 SAMPLE_REJECTS = 2
-SAMPLE_BREAKDOWN = '8 forwards, 1 spot, 29 futures, 5 options'
+SAMPLE_BREAKDOWN = '29 futures, 4 options on futures, 3 LME forwards, 8 FX forwards, 1 FX spot, 5 FX options'
 
 
 def trade_count(db):
@@ -75,9 +76,11 @@ def test_summary_counts_the_trades_loaded_not_the_rows_seen_and_names_no_rate_sw
         def __init__(self, product):
             self.product = product
 
-    assert upload.loaded_breakdown([]) == '0 forwards, 0 spot, 0 futures, 0 options'
+    assert upload.loaded_breakdown([]) == ('0 futures, 0 options on futures, 0 LME forwards, 0 FX forwards, '
+                                           '0 FX spot, 0 FX options')
     assert upload.loaded_breakdown([T('FX_SWAP'), T('FX_SWAP'), T('EQ_OPTION'), T('FX_OPTION'), T('IRS')]) == (
-        '0 forwards, 0 spot, 2 FX swaps, 0 futures, 2 options, 1 IRS')  # nothing loaded goes uncounted
+        '0 futures, 0 options on futures, 0 LME forwards, 1 listed options, 0 FX forwards, 0 FX spot, '
+        '2 FX swaps, 1 FX options, 1 IRS')  # nothing loaded goes uncounted
 
 
 def test_an_upload_no_longer_packages_forwards_into_fx_swaps(tmp_path):
@@ -244,10 +247,12 @@ def test_report_for_the_sample_counts_its_two_rejects_and_no_warnings_only_infor
     assert isinstance(report['message'], str) and isinstance(report['notes'], list)
     assert f'{SAMPLE_REJECTS} row(s) could not be read' in report['message']
     # information: the one option with no strike -- present, short, and not a warning
-    assert report['notes'] == ['1 option(s) have no strike in the file: USDJPY111926P-500043.']
+    assert report['notes'][0] == '1 option(s) have no strike in the file: USDJPY111926P-500043.'
+    # information too: the LME ticket with no prompt date in the file (Phase 5)
+    assert len(report['notes']) == 2 and report['notes'][1].startswith('1 LME ticket(s) carry no prompt date')
     assert all(note in report['message'] for note in report['notes'])
     assert report['message'].startswith(f'Imported {RAW_BLOTTER.name}: {EXPECTED_TRADES} trades')
-    assert len(report['message']) < 900                       # a paragraph, not a line per row
+    assert len(report['message']) < 1200                      # a paragraph, not a line per row
 
 
 def test_import_blotter_is_the_reports_message_and_still_a_plain_string(tmp_path):
@@ -375,3 +380,48 @@ def test_summary_breaks_the_excluded_rows_down_by_the_book_filter(tmp_path):
     assert 'Book filter (' in message
     assert 'Rows excluded: 1 status, 1 fund.' in message
     assert 'other funds or cancelled' not in message
+
+
+# --------------------------------------------------------------------------- Phase 5: options on futures, LME forwards
+
+def test_summary_names_options_on_futures_lme_forwards_and_the_underlying_futures_in_plain_words(tmp_path):
+    """Phase 5 (2026-09-24): the sample's 4 options on futures and 3 LME forwards reach the
+    summary under plain labels, never a product code ('3 LME_FWD'), and the two underlying
+    futures written with no trade of their own are named."""
+    from data.ingest.upload import import_blotter_report
+
+    db = tmp_path / 'risk.db'
+    report = import_blotter_report(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, db)
+    message = report['message']
+    assert '4 options on futures' in message and '3 LME forwards' in message and '5 FX options' in message
+    assert 'LME_FWD' not in message and 'CMDTY_OPTION' not in message
+    assert ('2 underlying future(s) of the options on futures written with no trade of their own: '
+            'CUZ26 Comdty, GCQ26 Comdty.') in message
+    # the LME prompt note is information: in the message, never a warning
+    assert report['warnings'] == 0
+    assert any(n.startswith('1 LME ticket(s) carry no prompt date') and n in message for n in report['notes'])
+    with sqlite3.connect(db) as conn:
+        products = dict(conn.execute('SELECT product, COUNT(*) FROM trades GROUP BY product').fetchall())
+        assert products['CMDTY_OPTION'] == 4 and products['LME_FWD'] == 3
+        assert conn.execute("SELECT instrument_id, asset_class FROM instruments WHERE instrument_id IN "
+                            "('GCQ26 Comdty', 'CUZ26 Comdty') ORDER BY 1").fetchall() == [
+            ('CUZ26 Comdty', 'FUTURE'), ('GCQ26 Comdty', 'FUTURE')]
+
+
+def test_underlying_only_futures_survive_a_re_upload_and_are_never_overwritten(tmp_path):
+    """Instruments are never deleted by an upload, and the parser writes an option's
+    underlying future with INSERT OR IGNORE: a row on file (here with Bloomberg's date
+    already applied) keeps what it has across a re-upload, and no trade hangs off it."""
+    db = tmp_path / 'risk.db'
+    payload = RAW_BLOTTER.read_bytes()
+    import_blotter(payload, RAW_BLOTTER.name, db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE instruments SET expiry_date = '2026-07-29' WHERE instrument_id = 'GCQ26 Comdty'")
+    message = import_blotter(payload, RAW_BLOTTER.name, db)
+    assert f'Replaced the previous book: {EXPECTED_TRADES} trade(s)' in message
+    assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT asset_class, expiry_date FROM instruments WHERE instrument_id = 'GCQ26 Comdty'"
+                            ).fetchone() == ('FUTURE', '2026-07-29')
+        assert conn.execute("SELECT COUNT(*) FROM trades WHERE instrument_id IN ('GCQ26 Comdty', 'CUZ26 Comdty')"
+                            ).fetchone()[0] == 0

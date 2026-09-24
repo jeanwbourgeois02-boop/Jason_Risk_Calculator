@@ -1,5 +1,5 @@
 # MY: Bursa Malaysia Derivatives (crude palm oil FCPO and the other Bursa commodity
-# futures): full-day closures for 2026 and 2027, weekdays only: the federal public
+# futures): full-day closures for 2026 to 2028, weekdays only: the federal public
 # holidays and the Federal Territory (Kuala Lumpur) ones Bursa observes, with a Monday
 # in lieu of a Sunday holiday (a Saturday holiday gets none). Good Friday is NOT a
 # Kuala Lumpur holiday and Bursa trades on it.
@@ -7,7 +7,10 @@
 # against Bursa Malaysia's published trading holidays before it is relied on. The
 # Islamic, lunar and Hindu holidays move each year and depend on moon sightings; every
 # one of them below is marked unverified, and Bursa sometimes adds a day at short notice.
-# coverage: 2026-01-01 to 2027-12-31
+# 2028 (gazetted in 2027) is worked out from the lunar, Islamic and Hindu calendars, its
+# moving holidays also marked "# estimated"; Islamic dates follow the Southeast Asian
+# sighting, usually a day after the Saudi date.
+# coverage: 2026-01-01 to 2028-12-31
 
 2026-01-01  # New Year's Day
 2026-02-02  # Federal Territory Day and Thaipusam (in lieu; 1 February is a Sunday)  # unverified
@@ -42,3 +45,22 @@
 2027-09-16  # Malaysia Day
 2027-10-28  # Deepavali (could be 29 October)  # unverified
 # 1 May and 25 December 2027 fall on Saturdays: no weekday closure
+
+# New Year's Day 2028 falls on a Saturday: no weekday closure
+2028-01-26  # Chinese New Year  # estimated  # unverified
+2028-01-27  # Chinese New Year (second day)  # estimated  # unverified
+2028-02-01  # Federal Territory Day
+2028-02-10  # Thaipusam (could be 11 February)  # estimated  # unverified
+2028-02-14  # Nuzul Al-Quran (in lieu; 13 February is a Sunday)  # estimated  # unverified
+2028-02-28  # Hari Raya Aidilfitri (second day; the first is Sunday 27 February)  # estimated  # unverified
+2028-02-29  # Hari Raya Aidilfitri (in lieu of Sunday 27 February; none if Raya is 26-27 February)  # estimated  # unverified
+2028-05-01  # Labour Day
+2028-05-05  # Hari Raya Haji (could be Saturday 6 May: then no weekday closure)  # estimated  # unverified
+2028-05-09  # Wesak Day  # estimated  # unverified
+2028-05-26  # Awal Muharram  # estimated  # unverified
+2028-06-05  # Agong's Birthday (first Monday of June)
+2028-08-04  # Maulidur Rasul  # estimated  # unverified
+2028-08-31  # National Day
+# Malaysia Day 2028 (16 September) falls on a Saturday: no weekday closure
+2028-10-17  # Deepavali (could be 16 October)  # estimated  # unverified
+2028-12-25  # Christmas Day

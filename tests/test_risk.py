@@ -2,19 +2,25 @@
 positions), on synthetic parquet history written to tmp_path; never on the sibling repo.
 The macro trader's rates (DV01) and equity-index (ES + SPX) underlyers left in Phase 2
 (user approval 2026-09-24): `book_positions`' `rates` and `equity_index` blocks are not read."""
+import json
 import math
 import os
+import sqlite3
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from data.contracts import get_root
 from data.ingest import schema
 from engine.pnl import stress
 from engine.risk import book_risk, load_config, load_history
+from engine.risk import commodity_history as ch_mod
 from engine.risk import history as history_mod
+from engine.risk.commodity_history import load_commodity_history
 from engine.risk.config import DEFAULTS
-from engine.risk.metrics import DELTA_KINDS, KIND_FX, KIND_METAL, rows_from_positions, unit_moves
+from engine.risk.history import History
+from engine.risk.metrics import CRISIS_FALLBACK, DELTA_KINDS, KIND_FX, KIND_METAL, rows_from_positions, unit_moves
 
 AS_OF = "2026-09-22"
 SNAP = f"{AS_OF}T15:00:00-04:00"
@@ -218,7 +224,9 @@ def test_config_defaults_are_the_dashboards_constants_and_a_file_overrides_them(
                               "stress_end": "2010-12-31", "cutover": "2011-01-01"}
     assert (cfg["vol_target_usd"], cfg["stress_pct"], cfg["var_window_bd"], cfg["var_confidence"]) == (4.5e6, 50.0, 252, 0.95)
     assert cfg["worst_day_start"] == "2008-01-01"
-    assert [d["date"] for d in cfg["shock_dates"]] == ["2015-01-15", "2016-06-24"]
+    # the dashboard's two, then the commodity one-offs of the research history (Phase 4)
+    assert [d["date"] for d in cfg["shock_dates"]] == ["2015-01-15", "2016-06-24", "2020-04-20", "2020-04-21",
+                                                       "2022-03-07", "2022-03-08"]
     p = tmp_path / "risk.yaml"
     p.write_text("vol_target_usd: 6.0e7\nstress_pct: 35\nblended: {trail_window_bd: 100, cutover: 2099-01-01}\n"
                  "shock_dates:\n  - {date: 2020-03-16, name: covid}\n", encoding="utf-8")
@@ -229,7 +237,8 @@ def test_config_defaults_are_the_dashboards_constants_and_a_file_overrides_them(
     # the shipped file agrees with the defaults on every number
     shipped = load_config()
     assert shipped["loaded"]
-    for key in ("vol_target_usd", "stress_pct", "var_window_bd", "var_confidence", "worst_day_start", "shock_dates"):
+    for key in ("vol_target_usd", "vol_target_placeholder", "vol_target_note", "stress_pct", "var_window_bd",
+                "var_confidence", "worst_day_start", "shock_dates"):
         assert shipped[key] == DEFAULTS[key], key
     for key, value in DEFAULTS["blended"].items():
         assert shipped["blended"][key] == pytest.approx(value), key
@@ -454,3 +463,409 @@ def test_book_risk_writes_nothing(history):
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == before and conn.total_changes == changes
     assert conn.execute("SELECT COUNT(*) FROM marks WHERE source != 'BBG_BFXFORWARD'").fetchone()[0] == 0
     assert len(out["underlyers"]) == len(ROWS)
+
+
+# ======================================================================================
+# Commodity underlyers (Phase 4): COMMODITY per root, SECTOR, SPREAD, on a tiny synthetic
+# copy of the research app's database written to tmp_path (never the sibling repo).
+# ======================================================================================
+C_AS_OF = "2026-09-15"
+C_DATES = pd.bdate_range("2019-01-02", C_AS_OF)
+CLZ6, CLF7, NGX6, CUZ6 = "CLZ26 Comdty", "CLF27 Comdty", "NGX26 Comdty", "CUZ26 Comdty"
+WTI_NEG, WTI_AFTER, WORST_CL = "2020-04-20", "2020-04-21", "2021-03-18"
+SPREAD_DAY = "2021-06-01"                 # the one day CLF27 does not move with CLZ26
+USDCNY_SPOT = 7.1                          # our official spot (curve-positions' USD delta)
+MONTH_CODES = "FGHJKMNQUVXZ"
+
+_CM_DDL = """
+CREATE TABLE instrument (
+    instrument_id TEXT PRIMARY KEY, name TEXT NOT NULL, sector TEXT NOT NULL, subsector TEXT NOT NULL,
+    exchange TEXT NOT NULL, country TEXT NOT NULL, exchange_code TEXT NOT NULL, bbg_root TEXT NOT NULL,
+    bbg_yellow_key TEXT NOT NULL, bbg_verified INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL,
+    contract_size REAL NOT NULL, size_unit TEXT NOT NULL, quote_unit TEXT NOT NULL,
+    price_scale REAL NOT NULL DEFAULT 1.0, vat_rate REAL NOT NULL DEFAULT 0.0,
+    active_months TEXT NOT NULL DEFAULT '', calendar_depth INTEGER NOT NULL DEFAULT 12,
+    foreign_access TEXT NOT NULL, status TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+    in_universe INTEGER NOT NULL DEFAULT 1, loaded_at TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE contract (
+    contract_id TEXT PRIMARY KEY, instrument_id TEXT NOT NULL, bbg_ticker TEXT NOT NULL,
+    month_code TEXT NOT NULL, year INTEGER NOT NULL, month INTEGER NOT NULL, first_trade_date TEXT,
+    last_trade_date TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (instrument_id, year, month)
+) WITHOUT ROWID;
+CREATE TABLE price_daily (
+    contract_id TEXT NOT NULL, date TEXT NOT NULL, settle REAL NOT NULL, open_interest REAL, volume REAL,
+    PRIMARY KEY (contract_id, date)
+) WITHOUT ROWID;
+CREATE TABLE fx_daily (pair TEXT NOT NULL, date TEXT NOT NULL, rate REAL NOT NULL,
+                       PRIMARY KEY (pair, date)) WITHOUT ROWID;
+"""
+# (contract, root, year, month, last trade date = our expiry)
+_CM_CONTRACTS = [
+    (CLZ6, "NYMEX:CL", 2026, 12, "2026-11-20"),
+    (CLF7, "NYMEX:CL", 2027, 1, "2026-12-18"),
+    (NGX6, "NYMEX:NG", 2026, 11, "2026-10-28"),
+    (CUZ6, "SHFE:CU", 2026, 12, "2026-12-15"),
+]
+_CM_ROOTS = [("NYMEX:CL", "CL", "USD"), ("NYMEX:NG", "NG", "USD"), ("SHFE:CU", "CU", "CNY")]
+
+
+def _contract(cid):
+    return next(c for c in _CM_CONTRACTS if c[0] == cid)
+
+
+def _changes(base: float, special: dict) -> pd.Series:
+    """Daily raw price changes on C_DATES (the first is the level's start, not a change)."""
+    c = pd.Series(base, index=C_DATES)
+    for d, v in special.items():
+        c.loc[pd.Timestamp(d)] = v
+    for k in range(15, 160, 10):                       # small dips inside the VaR window
+        c.iloc[len(C_DATES) - k] = -abs(base) * 3
+    c.iloc[0] = 0.0
+    return c
+
+
+def _commodity_prices() -> dict:
+    z = _changes(0.01, {WTI_NEG: -30.0, WTI_AFTER: -8.0, WORST_CL: -5.0})
+    f = z.copy()
+    f.loc[pd.Timestamp(SPREAD_DAY)] = 0.0             # z moves +0.01 that day, f does not: the spread moves
+    f.loc[pd.Timestamp(WTI_NEG)] = -20.0              # the far month falls less on the negative-WTI day
+    ng = _changes(-0.002, {"2022-03-07": 0.9, "2021-02-16": -0.6})
+    cu = _changes(5.0, {"2022-03-08": -2000.0, "2020-03-16": -900.0})
+    return {CLZ6: 60.0 + z.cumsum(), CLF7: 59.0 + f.cumsum(), NGX6: 3.0 + ng.cumsum(), CUZ6: 60000.0 + cu.cumsum()}
+
+
+def _usdcnh() -> pd.Series:
+    return pd.Series(7.0 + 0.2 * np.sin(np.arange(len(C_DATES)) / 50.0), index=C_DATES)
+
+
+def write_research_db(path):
+    conn = sqlite3.connect(path)
+    conn.executescript(_CM_DDL)
+    for iid, code, ccy in _CM_ROOTS:
+        conn.execute("INSERT INTO instrument (instrument_id, name, sector, subsector, exchange, country, exchange_code, "
+                     "bbg_root, bbg_yellow_key, currency, contract_size, size_unit, quote_unit, price_scale, "
+                     "foreign_access, status, loaded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (iid, iid, "s", "ss", iid.split(":")[0], "US", code, code, "Comdty", ccy, 1.0, "t", f"{ccy}/t",
+                      1.0, "international", "active", "2026-01-01T00:00:00Z"))
+    for cid, iid, year, month, ltd in _CM_CONTRACTS:
+        conn.execute("INSERT INTO contract VALUES (?,?,?,?,?,?,?,?,?)",
+                     (cid, iid, cid, MONTH_CODES[month - 1], year, month, None, ltd, "2026-01-01T00:00:00Z"))
+    for cid, px in _commodity_prices().items():
+        conn.executemany("INSERT INTO price_daily VALUES (?,?,?,?,?)",
+                         [(cid, d.strftime("%Y-%m-%d"), float(v), 1.0, 1.0) for d, v in px.items()])
+    conn.executemany("INSERT INTO fx_daily VALUES (?,?,?)",
+                     [("USDCNH", d.strftime("%Y-%m-%d"), float(v)) for d, v in _usdcnh().items()])
+    conn.commit()
+    conn.close()
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _no_sibling_research_db(tmp_path, monkeypatch):
+    """Every test here reads only what it writes: the research database defaults to a path that
+    does not exist unless a test names its own."""
+    monkeypatch.setenv(ch_mod.ENV_VAR, str(tmp_path / "no-research-db.sqlite"))
+    ch_mod._CACHE.clear()
+
+
+@pytest.fixture
+def research(tmp_path):
+    return load_commodity_history(write_research_db(tmp_path / "rv.sqlite"))
+
+
+def _insert_future(conn, tid, cid, contracts, fill, trade_date, account="A"):
+    _, root_id, _, _, expiry = _contract(cid)
+    root = get_root(root_id)
+    conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, "
+                 "is_ndf, bbg_ticker, expiry_date) VALUES (?,'FUTURE',?,?,?,0,?,?)",
+                 (cid, root_id, root.currency, root.multiplier, cid, expiry))
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
+                 "price, account, counterparty, strategy, trader, description, theme) "
+                 "VALUES (?,'XLSX',?,'FUTURE',?,?,?,?,?,'cp','','t','d','')",
+                 (tid, cid, tid, trade_date, contracts, fill, account))
+    conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,?,?,?,0)",
+                 (tid, root.currency, contracts * root.multiplier * fill, trade_date, expiry, fill))
+
+
+def _fx_chf(conn):
+    """A USDCHF forward long 0.8m CHF, marked at 0.64: $1.25m of CHF."""
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('USDCHF','FX','USD','CHF',1,0,'USDCHF Curncy','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("c1", "XLSX", "USDCHF", "FX_FWD", "c1", "2026-09-01", -1_000_000.0, 0.8, "acc", "cp", "", "t", "d", ""))
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("c1", 1, "FX_NEAR", "USD", -1_000_000.0, "2026-09-01", "2026-10-20", 0.8, 1),
+        ("c1", 2, "FX_NEAR", "CHF", 800_000.0, "2026-09-01", "2026-10-20", 0.8, 1)])
+    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                 (C_AS_OF, "USDCHF", C_AS_OF, "SPOT", 0.64, "BBG_BFXFORWARD", f"{C_AS_OF}T15:00:00-04:00"))
+
+
+def _fx_only_chf():
+    conn = schema.connect()
+    _fx_chf(conn)
+    conn.commit()
+    return conn
+
+
+def _commodity_book(*, fx: bool = False):
+    """+2 CLZ26 / -2 CLF27 on one day and account (a calendar spread), +1 CLZ26 another day
+    (an outright), -1 NGX26 (energy), +3 SHFE CUZ26 (metals, CNY); `fx` adds the USDCHF forward."""
+    conn = schema.connect()
+    _insert_future(conn, "W1", CLZ6, 2, 70.0, "2026-09-01")
+    _insert_future(conn, "W2", CLF7, -2, 69.5, "2026-09-01")
+    _insert_future(conn, "W3", CLZ6, 1, 71.0, "2026-09-02")
+    _insert_future(conn, "N1", NGX6, -1, 3.1, "2026-09-03")
+    _insert_future(conn, "C1", CUZ6, 3, 80000.0, "2026-09-04")
+    marks = [(CLZ6, "2026-11-20", "FUTURE_PX", 72.0, "BBG_BDH"), (CLF7, "2026-12-18", "FUTURE_PX", 71.0, "BBG_BDH"),
+             (NGX6, "2026-10-28", "FUTURE_PX", 3.0, "BBG_BDH"), (CUZ6, "2026-12-15", "FUTURE_PX", 80500.0, "BBG_BDH"),
+             ("USDCNY", C_AS_OF, "SPOT", USDCNY_SPOT, "BBG_BFXFORWARD")]
+    conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, "
+                 "is_ndf, bbg_ticker, expiry_date) VALUES ('USDCNY','FX','USD','CNY',1,0,'USDCNY Curncy','9999-12-31')")
+    for inst, settle, mt, value, source in marks:
+        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
+                     (C_AS_OF, inst, settle, mt, value, source, f"{C_AS_OF}T15:00:00-04:00"))
+    if fx:
+        _fx_chf(conn)
+    conn.commit()
+    return conn
+
+
+def _hand_pnl(cid: str, lots: float) -> pd.Series:
+    """lots x our multiplier x raw settle change x USD per quote unit (USDCNH for CNY), by hand."""
+    root = get_root(_contract(cid)[1])
+    s = _commodity_prices()[cid].diff().iloc[1:] * root.multiplier * lots
+    if root.currency == "CNY":
+        s = s / _usdcnh().reindex(s.index)
+    return s
+
+
+def _book_hand() -> pd.Series:
+    return _hand_pnl(CLZ6, 3) + _hand_pnl(CLF7, -2) + _hand_pnl(NGX6, -1) + _hand_pnl(CUZ6, 3)
+
+
+def _no_fx_history(tmp_path):
+    return load_history(tmp_path / "no-fx-history")
+
+
+def _by_key(out):
+    return {r["key"]: r for r in out["underlyers"]}
+
+
+def _run(research, tmp_path, conn=None, **kw):
+    return book_risk(conn or _commodity_book(), C_AS_OF, history=kw.pop("history", None) or _no_fx_history(tmp_path),
+                     commodity_history=research, **kw)
+
+
+def test_a_commodity_underlyer_is_its_contracts_at_their_delta_lots(research, tmp_path):
+    out = _run(research, tmp_path)
+    cl = _by_key(out)["COMMODITY:NYMEX:CL"]
+    assert (cl["kind"], cl["role"], cl["underlyer"], cl["sector"]) == ("COMMODITY", "part", "NYMEX:CL", "energy")
+    assert [(c["contract_id"], c["delta_lots"], c["in_series"]) for c in cl["contracts"]] == \
+        [(CLZ6, 3.0, True), (CLF7, -2.0, True)]
+    hand = _hand_pnl(CLZ6, 3) + _hand_pnl(CLF7, -2)
+    assert hand.min() == pytest.approx(3 * 1000 * -30.0 - 2 * 1000 * -20.0)
+    assert (cl["worst_1d_raw_usd"], cl["worst_1d_raw_date"]) == (pytest.approx(hand.min()), WTI_NEG)
+    lag2 = pd.Timestamp(C_AS_OF) - pd.offsets.BusinessDay(2)
+    trailing = hand.loc[:lag2].iloc[-500:].std() * math.sqrt(252)
+    assert cl["vol_trailing_ann_usd"] == pytest.approx(trailing, rel=1e-9)
+    assert cl["var95_1d_usd"] == pytest.approx(-np.percentile(hand.iloc[-252:].to_numpy(), 5))
+    assert cl["days"] == len(C_DATES) - 1 and cl["last_date"] == C_AS_OF
+    # the USD delta is curve-positions' own, never recomputed: 3 x 1000 x 72 - 2 x 1000 x 71
+    assert cl["net_usd"] == pytest.approx(3 * 1000 * 72.0 - 2 * 1000 * 71.0)
+    assert cl["gross_usd"] == pytest.approx(3 * 1000 * 72.0 + 2 * 1000 * 71.0)
+    assert out["commodity_history"]["available"] and out["commodity_history"]["used_to"] == C_AS_OF
+    assert out["commodity_history"]["lag2_date"] == lag2.strftime("%Y-%m-%d")
+
+
+def test_a_cny_contract_converts_at_the_research_usdcnh(research, tmp_path):
+    cu = _by_key(_run(research, tmp_path))["COMMODITY:SHFE:CU"]
+    detail = cu["contracts"][0]
+    assert (detail["contract_id"], detail["currency"], detail["fx_pair"], detail["fx_missing_days"]) == \
+        (CUZ6, "CNY", "USDCNH", 0)
+    hand = _hand_pnl(CUZ6, 3)
+    assert hand.loc["2022-03-08"] == pytest.approx(3 * 5 * -2000.0 / _usdcnh().loc["2022-03-08"])
+    assert (cu["worst_1d_raw_usd"], cu["worst_1d_raw_date"]) == (pytest.approx(hand.min()), "2022-03-08")
+    # the delta in USD is at our official USDCNY spot (curve-positions), the history at USDCNH
+    assert cu["net_usd"] == pytest.approx(3 * 5 * 80500.0 / USDCNY_SPOT)
+
+
+def test_a_spread_underlyer_is_its_legs_at_their_open_lots(research, tmp_path):
+    out = _run(research, tmp_path)
+    spreads = [r for r in out["underlyers"] if r["kind"] == "SPREAD"]
+    assert len(spreads) == 1
+    sp = spreads[0]
+    assert sp["role"] == "view" and sp["spread_kind"] == "calendar" and sp["key"].startswith("SPREAD:")
+    assert sorted((leg["contract_id"], leg["open_lots"]) for leg in sp["legs"]) == [(CLF7, -2.0), (CLZ6, 2.0)]
+    hand = _hand_pnl(CLZ6, 2) + _hand_pnl(CLF7, -2)
+    assert hand.loc[SPREAD_DAY] == pytest.approx(2 * 1000 * 0.01)
+    assert (sp["worst_1d_raw_usd"], sp["worst_1d_raw_date"]) == (pytest.approx(hand.min()), WTI_NEG)
+    assert sp["var95_1d_usd"] == pytest.approx(-np.percentile(hand.iloc[-252:].to_numpy(), 5))
+    # a clean 1:1 calendar leaves no outright: its net / gross USD are the leftover's, zero
+    assert sp["net_usd"] == pytest.approx(0.0) and sp["gross_usd"] == pytest.approx(0.0)
+
+
+def test_a_sector_is_the_sum_of_its_commodities(research, tmp_path):
+    out = _run(research, tmp_path)
+    rows = _by_key(out)
+    energy, metals = rows["SECTOR:energy"], rows["SECTOR:metals"]
+    assert (energy["kind"], energy["role"]) == ("SECTOR", "view")
+    assert energy["parts"] == ["COMMODITY:NYMEX:CL", "COMMODITY:NYMEX:NG"] and metals["parts"] == ["COMMODITY:SHFE:CU"]
+    hand = _hand_pnl(CLZ6, 3) + _hand_pnl(CLF7, -2) + _hand_pnl(NGX6, -1)
+    assert (energy["worst_1d_raw_usd"], energy["worst_1d_raw_date"]) == (pytest.approx(hand.min()), WTI_NEG)
+    assert energy["var95_1d_usd"] == pytest.approx(-np.percentile(hand.iloc[-252:].to_numpy(), 5))
+    assert energy["net_usd"] == pytest.approx(rows["COMMODITY:NYMEX:CL"]["net_usd"] + rows["COMMODITY:NYMEX:NG"]["net_usd"])
+    assert metals["worst_1d_raw_usd"] == pytest.approx(rows["COMMODITY:SHFE:CU"]["worst_1d_raw_usd"])
+    # the parts first, then the sectors, then the spreads
+    kinds = [r["kind"] for r in out["underlyers"]]
+    assert kinds == sorted(kinds, key=lambda k: {"SECTOR": 1, "SPREAD": 2}.get(k, 0))
+
+
+def test_the_book_is_the_parts_alone_with_no_double_count(research, tmp_path):
+    out = _run(research, tmp_path)
+    book = out["book"]
+    assert book["rows_in_series"] == ["NYMEX:CL", "SHFE:CU", "NYMEX:NG"]          # by gross USD
+    spread_names = {r["underlyer"] for r in out["underlyers"] if r["kind"] == "SPREAD"}
+    assert set(book["views"]) == {"energy", "metals"} | spread_names
+    hand = _book_hand()
+    assert (book["worst_1d_raw_usd"], book["worst_1d_raw_date"]) == (pytest.approx(hand.min()), WTI_NEG)
+    assert book["var_window"]["pnl_usd"] == pytest.approx(list(hand.iloc[-252:]))
+    assert book["lag2_date"] == out["commodity_history"]["lag2_date"]
+    # the FX figures are the dashboard's FX-legs net (none here); the commodity delta is apart
+    assert math.isnan(book["net_usd"]) and math.isnan(book["gross_usd"])
+    rows = _by_key(out)
+    parts = [rows[k] for k in ("COMMODITY:NYMEX:CL", "COMMODITY:NYMEX:NG", "COMMODITY:SHFE:CU")]
+    assert book["commodity_net_usd"] == pytest.approx(sum(r["net_usd"] for r in parts))
+    assert book["commodity_gross_usd"] == pytest.approx(sum(r["gross_usd"] for r in parts))
+    assert book["commodity_reason"] == ""
+
+
+def test_shock_days_are_zeroed_in_the_worst_day_ex_shocks(research, tmp_path):
+    cfg = load_config()
+    names = {d["date"] for d in cfg["shock_dates"]}
+    assert {"2015-01-15", "2016-06-24", WTI_NEG, WTI_AFTER, "2022-03-07", "2022-03-08"} <= names
+    rows = _by_key(_run(research, tmp_path, config=cfg))
+    cl, cu = rows["COMMODITY:NYMEX:CL"], rows["COMMODITY:SHFE:CU"]
+    hand = _hand_pnl(CLZ6, 3) + _hand_pnl(CLF7, -2)
+    assert (cl["worst_1d_ex_shocks_usd"], cl["worst_1d_ex_shocks_date"]) == (pytest.approx(hand.loc[WORST_CL]), WORST_CL)
+    assert cl["worst_1d_raw_date"] == WTI_NEG                                     # the raw figure keeps it
+    assert cu["worst_1d_ex_shocks_date"] == "2020-03-16" and cu["worst_1d_raw_date"] == "2022-03-08"
+    cfg["shock_dates"] = [d for d in cfg["shock_dates"] if d["date"] < "2020-01-01"]
+    cl = _by_key(_run(research, tmp_path, config=cfg))["COMMODITY:NYMEX:CL"]
+    assert cl["worst_1d_ex_shocks_date"] == WTI_NEG
+
+
+def test_no_crisis_window_in_the_research_history_is_trailing_vol_with_its_reason(research, tmp_path):
+    out = _run(research, tmp_path)
+    for r in [*out["underlyers"], out["book"]]:
+        assert r["vol_note"] == CRISIS_FALLBACK == "crisis window not in history: trailing vol only"
+        assert CRISIS_FALLBACK in r["reason"]
+        assert r["vol_crisis_ann_usd"] == r["vol_trailing_ann_usd"]
+        assert r["vol_blended_ann_usd"] == pytest.approx(r["vol_trailing_ann_usd"])
+
+
+def test_no_research_database_is_na_with_the_reason_and_keeps_the_positions(tmp_path):
+    out = _run(load_commodity_history(tmp_path / "absent.sqlite"), tmp_path)
+    ch = out["commodity_history"]
+    assert not ch["available"] and "no commodity history database" in ch["reason"]
+    rows = [r for r in out["underlyers"] if r["kind"] in ("COMMODITY", "SECTOR", "SPREAD")]
+    assert {r["kind"] for r in rows} == {"COMMODITY", "SECTOR", "SPREAD"}
+    for r in rows:
+        assert math.isnan(r["vol_blended_ann_usd"]) and math.isnan(r["worst_1d_raw_usd"]) and r["days"] == 0
+        assert "no commodity history database" in r["reason"] and r["reasons"]["all"]
+    cl = _by_key(out)["COMMODITY:NYMEX:CL"]
+    assert cl["net_usd"] == pytest.approx(3 * 1000 * 72.0 - 2 * 1000 * 71.0)       # the delta stays
+    assert math.isnan(out["book"]["vol_blended_ann_usd"]) and "commodities: " in out["book"]["reason"]
+    assert any(m.startswith("NYMEX:CL: not in the book series (") for m in out["missing"])
+
+
+def _memory_fx_history() -> History:
+    """An in-memory nm-dashboard history (no parquet): CHF, spot alone, 2007 to C_AS_OF."""
+    dates = pd.bdate_range("2007-01-01", C_AS_OF)
+    r = pd.Series(BASE, index=dates)
+    r.loc[pd.Timestamp(SNB)] = -0.15
+    r.loc[pd.Timestamp("2020-03-16")] = -0.03
+    spot = pd.DataFrame({"CHF": 1.1 * np.exp(r.cumsum())}, index=dates)
+    spot.index.name = "date"
+    files = {"spot": {"file": history_mod.SPOT_FILE, "path": "memory", "loaded": True, "rows": len(spot),
+                      "columns": ["CHF"], "first_date": "2007-01-01", "last_date": C_AS_OF, "reason": ""},
+             "yields": {"file": history_mod.YIELDS_FILE, "path": "memory", "loaded": False, "rows": 0, "columns": [],
+                        "first_date": None, "last_date": None, "reason": "not in this test"}}
+    return History(True, "memory", spot=spot, yields=pd.DataFrame(), last_date=C_AS_OF, files=files)
+
+
+def test_the_fx_part_is_unchanged_by_the_commodity_rows(research, tmp_path):
+    fx_hist = _memory_fx_history()
+    fx_only = _run(research, tmp_path, conn=_fx_only_chf(), history=fx_hist)
+    both = _run(research, tmp_path, conn=_commodity_book(fx=True), history=fx_hist)
+    a, b = _by_key(fx_only)["CHF"], _by_key(both)["CHF"]
+    for k in ("net_usd", "gross_usd", "vol_blended_ann_usd", "vol_trailing_ann_usd", "vol_crisis_ann_usd",
+              "var95_1d_usd", "worst_1d_raw_usd", "worst_1d_raw_date", "worst_1d_ex_shocks_usd",
+              "worst_1d_ex_shocks_date", "days", "reason", "kind", "role"):
+        assert a[k] == b[k], k
+    assert a["net_usd"] == pytest.approx(1_250_000.0) and a["kind"] == KIND_FX and a["vol_note"] == ""
+    assert (a["worst_1d_raw_date"], a["worst_1d_ex_shocks_date"]) == (SNB, "2020-03-16")
+    for k in ("net_usd", "gross_usd", "fx_net_usd", "fx_gross_usd"):
+        assert fx_only["book"][k] == pytest.approx(both["book"][k]), k
+    assert fx_only["scenarios"] == both["scenarios"]
+    assert fx_only["history"] == both["history"]
+    assert both["book"]["rows_in_series"] == ["CHF", "NYMEX:CL", "SHFE:CU", "NYMEX:NG"]   # the parts by gross
+    # the book is FX + commodities on the union of their dates, summed where both have a day
+    fx_pnl = pd.Series(1_250_000.0 * np.log(fx_hist.spot["CHF"]).diff().iloc[1:].to_numpy(),
+                       index=fx_hist.spot.index[1:])
+    total = pd.concat([fx_pnl, _book_hand()], axis=1).sum(axis=1, min_count=1)
+    assert both["book"]["worst_1d_raw_usd"] == pytest.approx(total.min())
+    assert both["book"]["worst_1d_raw_date"] == SNB
+
+
+def test_commodity_scenarios_are_engine_stress_passed_through(research, tmp_path, monkeypatch):
+    import engine.stress as stress_pkg
+    conn = _commodity_book()
+    cs = _run(research, tmp_path, conn=conn)["commodity_scenarios"]
+    assert {"as_of", "available", "config", "scenarios", "reasons"} <= set(cs)
+    direct = stress_pkg.commodity_stress(conn, C_AS_OF, history=research.window_move)
+    assert [s["name"] for s in cs["scenarios"]] == [s["name"] for s in direct["scenarios"]]
+    for got, exp in zip(cs["scenarios"], direct["scenarios"]):
+        assert (got["total_usd"] is None) == (exp["total_usd"] is None)
+        if exp["total_usd"] is not None:
+            assert got["total_usd"] == pytest.approx(exp["total_usd"])
+
+    def boom(*a, **k):
+        raise RuntimeError("scenario file broken")
+    monkeypatch.setattr(stress_pkg, "commodity_stress", boom)     # an error there is a reason, never a crash
+    cs = _run(research, tmp_path, conn=conn)["commodity_scenarios"]
+    assert cs["available"] is False and cs["scenarios"] == [] and "scenario file broken" in cs["reasons"][0]
+
+
+def test_the_vol_target_is_the_placeholder_and_says_so():
+    cfg = load_config()
+    assert cfg["vol_target_usd"] == 4.5e6 and cfg["vol_target_placeholder"] is True
+    assert "docs/open-questions.md C5" in cfg["vol_target_note"]
+
+
+def test_book_risk_with_commodities_writes_nothing_and_is_json_friendly(research, tmp_path):
+    conn = _commodity_book()
+    changes = conn.total_changes
+    out = _run(research, tmp_path, conn=conn)
+    assert conn.total_changes == changes
+    json.dumps(out)
+
+
+def test_an_option_reads_its_underlying_and_an_lme_forward_its_prompt_month(research):
+    from engine.risk.commodity import _PerLot, contract_series, lme_history_contract
+    per_lot = _PerLot(research, C_AS_OF)
+    option = {"product": "CMDTY_OPTION", "root_id": "NYMEX:CL", "contract_id": "CLZ6C 75 Comdty",
+              "underlying_id": CLZ6, "delta_lots": 0.5, "multiplier": 1000.0, "currency": "USD", "reason": ""}
+    detail, s = contract_series(option, per_lot, C_AS_OF)
+    assert detail["history_contract"] == CLZ6 and "underlying" in detail["note"]
+    assert s.to_numpy() == pytest.approx(_hand_pnl(CLZ6, 0.5).to_numpy())
+    # an option with no delta mark is left out with curve-positions' reason
+    detail, s = contract_series({**option, "delta_lots": None, "reason": "no DELTA mark"}, per_lot, C_AS_OF)
+    assert s is None and detail["reason"] == "no DELTA mark" and not detail["in_series"]
+    # an LME forward: its prompt month's contract when the research app has it, else the nearest listed one
+    cid, note, why = lme_history_contract(research, "NYMEX:CL", 2026, 12, "2026-12-16", C_AS_OF)
+    assert (cid, why) == (CLZ6, "") and "prompt month" in note
+    cid, note, why = lme_history_contract(research, "NYMEX:CL", 2027, 3, "2027-03-17", C_AS_OF)
+    assert (cid, why) == (CLF7, "") and "nearest" in note
+    cid, note, why = lme_history_contract(research, "LME:CA", 2026, 12, "2026-12-16", C_AS_OF)
+    assert cid is None and "LME:CA is not in the research database" in why

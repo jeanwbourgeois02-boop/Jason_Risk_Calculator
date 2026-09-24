@@ -359,14 +359,14 @@ def test_option_rows_zero_strike_is_none():
         conn.close()
 
 
-def test_option_rows_commodity_group_present_and_empty_and_no_equity_group():
-    """The equity index left the app (2026-09-24): FX and Commodity are the two groups."""
+def test_option_rows_futures_options_group_present_and_empty_and_no_equity_group():
+    """The equity index left the app (2026-09-24): FX and Options on futures are the two groups."""
     conn = _make_db()
     try:
         df = options.option_rows(conn, AS_OF)
         classes = df[df["level"] == "ASSET_CLASS"]
-        assert list(classes["group_key"]) == ["FX", "Commodity"]
-        row = classes[classes["group_key"] == "Commodity"].iloc[0]
+        assert list(classes["group_key"]) == ["FX", "Options on futures"]
+        row = classes[classes["group_key"] == "Options on futures"].iloc[0]
         assert row["leg_count"] == 0
         assert row["notional"] is None or math.isnan(row["notional"])
         assert row["mktval"] is None or math.isnan(row["mktval"])
@@ -378,7 +378,7 @@ def test_option_rows_empty_db_still_has_total_and_both_groups():
     conn = _make_db_empty()
     try:
         df = options.option_rows(conn, AS_OF)
-        assert set(df.loc[df["level"] == "ASSET_CLASS", "group_key"]) == {"FX", "Commodity"}
+        assert set(df.loc[df["level"] == "ASSET_CLASS", "group_key"]) == {"FX", "Options on futures"}
         total = df[df["level"] == "TOTAL"].iloc[0]
         assert total["leg_count"] == 0
         assert total["mktval"] is None
@@ -525,7 +525,7 @@ def test_build_layout_no_trades_still_renders_groups():
         table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
         labels = [r["label"] for r in table.data]
         assert "Portfolio Totals" in labels
-        assert "FX" in labels and "Commodity" in labels and "Equity" not in labels
+        assert "FX" in labels and "Options on futures" in labels and "Equity" not in labels
     finally:
         conn.close()
 
@@ -1361,11 +1361,13 @@ def test_only_the_three_term_cells_are_editable_and_only_on_an_options_own_row()
     assert columns["option_type"]["presentation"] == "dropdown" and columns["payoff"]["presentation"] == "dropdown"
     assert columns["strike"]["type"] == "numeric" and columns["strike"]["on_change"]["action"] == "coerce"
     for rule in table.dropdown_conditional:
-        assert rule["if"]["filter_query"] == "{is_leg} = 1"            # no dropdown on a group row
+        assert rule["if"]["filter_query"] == options.OWN_ROW_QUERY       # no dropdown on a group row
+    assert options.OWN_ROW_QUERY == "{is_leg} = 1 && {terms_fixed} = 0"   # nor on an option on a future
     payoff_words = [o["value"] for o in table.dropdown_conditional[1]["options"]]
     assert "Vanilla" in payoff_words and "Digital" in payoff_words
     fenced = [s for s in table.style_data_conditional
-              if s.get("pointerEvents") == "none" and s["if"].get("filter_query") == "{is_leg} = 0"]
+              if s.get("pointerEvents") == "none" and s["if"].get("filter_query") == options.READ_ONLY_TERMS_QUERY]
+    assert options.READ_ONLY_TERMS_QUERY == "{is_leg} = 0 || {terms_fixed} = 1"
     assert {s["if"]["column_id"] for s in fenced} == set(options.EDITABLE_COLUMNS)
     assert {r["group_key"] for r in table.data if r["is_leg"]} == {"O1", "O2", "O3"}
 
@@ -1398,7 +1400,7 @@ def test_editable_cells_are_cued_by_a_gold_outline_never_a_border():
     assert all(s["outline"] == "1px dashed var(--gold)" for s in quiet.values())
 
     strong = [s for s in cued if s["if"]["filter_query"] == options.NEEDS_STRIKE_QUERY]
-    assert options.NEEDS_STRIKE_QUERY == "{is_leg} = 1 && {note} contains 'no strike'"
+    assert options.NEEDS_STRIKE_QUERY == "{is_leg} = 1 && {terms_fixed} = 0 && {note} contains 'no strike'"
     strike = next(s for s in strong if s["if"]["column_id"] == "strike")
     assert strike["outline"] == "2px solid var(--gold)" and "0.30" in strike["backgroundColor"]
     assert next(s for s in strong if s["if"]["column_id"] == "payoff")["outline"] == "2px dashed var(--gold)"
@@ -1792,28 +1794,17 @@ def _write_pull_status(db_path, options_block):
     status_path(db_path).write_text(json.dumps({"options": options_block}), encoding="utf-8")
 
 
-# A listed option on a commodity future (Phase 5's product, not booked by any ingest path
-# yet): the product code is the test's own stand-in for whatever that phase names.
+# An option on a commodity future (CMDTY_OPTION, Phase 5): valued by the book like a future at
+# Bloomberg's own price of it, its Greeks options-store's marks.
 _LISTED = "CMDTY_OPTION"
-_LISTED_ID = "CLZ6C 70 Comdty"
-
-
-@pytest.fixture
-def listed_option_path(monkeypatch):
-    """The listed-option path switched on for `_LISTED`, and the book's row for E1 left out:
-    no engine lane values such an option yet, so these tests pin this module's own display
-    of a listed option (Bloomberg's price, Greeks named when blank) and nothing of the book."""
-    monkeypatch.setattr(options, "LISTED_OPTION_PRODUCTS", (_LISTED,))
-    real = options._book_rows
-    monkeypatch.setattr(options, "_book_rows", lambda conn, as_of: {
-        k: v for k, v in real(conn, as_of).items() if k != "E1"})
+_LISTED_ID = "CLZ26C 70 Comdty"
 
 
 def _defect_db(tmp_path):
     """The 2026-09-22 picture: D1 has a strike, its PREMIUM of the previous close on file
     and nothing on AS_OF, so the book carries the earlier premium under the near-marks
     rule (an empty book reason) while the tab has no PREMIUM for AS_OF itself; plus E1,
-    a listed call on a crude future with Bloomberg's own price and no Greeks."""
+    a call on the Dec 26 crude future with Bloomberg's own price and no Greeks."""
     db_path = _file_db(tmp_path, digital_strike=152.0)
     conn = sqlite3.connect(str(db_path))
     conn.execute("INSERT INTO marks VALUES ('2026-06-19', 'USDJPY111926P-1', '2026-11-19', 'PREMIUM', 0.13, "
@@ -1821,12 +1812,12 @@ def _defect_db(tmp_path):
     conn.execute("INSERT INTO marks VALUES ('2026-06-19', 'USDJPY', '2026-06-19', 'SPOT', 147.0, "
                  "'BBG_BFXFORWARD', '2026-06-19T15:00:00-04:00')")
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
-                 "bbg_ticker, expiry_date) VALUES (?, ?, 'CL', 'USD', 1000, 0, 'CLZ6 Comdty', '2026-11-17')",
+                 "bbg_ticker, expiry_date) VALUES (?, ?, 'NYMEX:CL', 'USD', 1000, 0, 'CLZ6C 70 Comdty', '2026-11-17')",
                  (_LISTED_ID, _LISTED))
-    conn.execute("INSERT INTO instrument_options VALUES (?, 70, 'CALL', 0, '9999-12-31', 'VANILLA')", (_LISTED_ID,))
+    conn.execute("INSERT INTO instrument_options VALUES (?, 70, 'CALL', 0, '9999-12-31', 'AMERICAN')", (_LISTED_ID,))
     conn.execute("INSERT INTO trades VALUES ('E1', 'XLSX', ?, ?, 'E1', "
                  "'2026-06-01', 15, 2.5, 'ACC', 'CPTY', '', 'TR', 'crude call', '')", (_LISTED_ID, _LISTED))
-    conn.execute("INSERT INTO trade_legs VALUES ('E1', 1, 'NOTIONAL', 'USD', 15, '2026-06-01', '2026-11-17', 2.5, 0)")
+    conn.execute("INSERT INTO trade_legs VALUES ('E1', 1, 'NOTIONAL', 'USD', 37500, '2026-06-01', '2026-11-17', 2.5, 0)")
     conn.execute("INSERT INTO marks VALUES (?, ?, '2026-11-17', 'FUTURE_PX', 3.1, 'BBG_BDH', ?)",
                  (AS_OF, _LISTED_ID, f"{AS_OF}T17:00:00-04:00"))
     conn.commit()
@@ -1834,38 +1825,38 @@ def _defect_db(tmp_path):
     return db_path
 
 
-def test_a_listed_option_is_valued_at_bloombergs_price_under_commodity(tmp_path, ui_app_stub, listed_option_path):
-    """The listed path kept for Phase 5: Bloomberg's own price of the option (FUTURE_PX on its
-    instrument) x the multiplier is its value per contract, no model; blank Greeks say why."""
+def test_a_listed_option_is_valued_at_bloombergs_price_under_options_on_futures(tmp_path, ui_app_stub):
+    """Bloomberg's own price of the option (FUTURE_PX on its instrument, as quoted) is its MktPx;
+    x lots x multiplier its value, no model; blank Greeks say why; the P&L is the book's."""
     db_path = _defect_db(tmp_path)
     conn = sqlite3.connect(str(db_path))
     try:
         (leg,) = [l for l in options._leg_rows(conn, AS_OF) if l["trade_id"] == "E1"]
-        assert leg["asset_class"] == "Commodity" and leg["underlying"] == "CLZ6"
-        assert leg["priced"] and leg["mktpx"] == pytest.approx(3.1 * 1000)
+        assert leg["asset_class"] == "Options on futures" and leg["underlying"] == "CLZ26 Comdty"
+        assert leg["priced"] and leg["mktpx"] == pytest.approx(3.1)
         assert leg["mktval"] == pytest.approx(15 * 3.1 * 1000)            # $46,500
         assert leg["start_value_usd"] == pytest.approx(15 * 2.5 * 1000)   # $37,500
+        assert leg["pnl_usd"] == pytest.approx(15 * 1000 * (3.1 - 2.5))   # the book's own figure
         assert leg["delta"] is None and leg["note"].startswith("Greeks not calculated")
         classes = options.option_rows(conn, AS_OF)
-        commodity = classes[(classes["level"] == "ASSET_CLASS") & (classes["group_key"] == "Commodity")].iloc[0]
-        assert commodity["leg_count"] == 1
+        group = classes[(classes["level"] == "ASSET_CLASS") & (classes["group_key"] == "Options on futures")].iloc[0]
+        assert group["leg_count"] == 1
     finally:
         conn.close()
 
 
-def test_the_listed_path_is_off_until_a_product_is_named(tmp_path, ui_app_stub):
-    """Empty since the SPX options left (2026-09-24): an option of another product is not
-    read at Bloomberg's price, and a product nothing lists never reaches the tab."""
-    assert options.LISTED_OPTION_PRODUCTS == ()
+def test_the_listed_path_is_options_on_futures_only(tmp_path, ui_app_stub):
+    """CMDTY_OPTION is the listed path; EQ_OPTION left with the SPX options and never reaches the
+    tab; an option on a future is never offered by the Option-terms editor."""
+    assert options.LISTED_OPTION_PRODUCTS == ("CMDTY_OPTION",)
     assert set(options.option_products()) == {"FX_OPTION", "CMDTY_OPTION"}
     db_path = _defect_db(tmp_path)
     conn = sqlite3.connect(str(db_path))
     try:
-        (leg,) = [l for l in options._leg_rows(conn, AS_OF) if l["trade_id"] == "E1"]
-        assert leg["mktpx"] is None and not leg["priced"]        # a PREMIUM-marked option: none on file
+        assert _LISTED_ID not in {i["instrument_id"] for i in options.option_instruments(conn)}
+        assert options.futures_option_instruments(conn) == [_LISTED_ID]
         conn.execute("UPDATE trades SET product = 'EQ_OPTION' WHERE trade_id = 'E1'")
         assert "E1" not in {l["trade_id"] for l in options._leg_rows(conn, AS_OF)}
-        assert _LISTED_ID not in {i["instrument_id"] for i in options.option_instruments(conn)}
     finally:
         conn.close()
 
@@ -1874,7 +1865,7 @@ def _note(db_path, group_key):
     return next(r for r in _records(db_path, collapsed=["PKG1"]) if r["group_key"] == group_key)["note"]
 
 
-def test_a_failed_options_step_is_named_on_every_leg_it_left_unpriced(tmp_path, ui_app_stub, listed_option_path):
+def test_a_failed_options_step_is_named_on_every_leg_it_left_unpriced(tmp_path, ui_app_stub):
     db_path = _defect_db(tmp_path)
     _write_pull_status(db_path, {"priced": 0, "skipped": [], "as_of_date": AS_OF, "error": _STEP_ERROR})
     expected = f"the last Pull Bloomberg now ({AS_OF}) failed in its options step: {_STEP_ERROR}"
@@ -1884,7 +1875,7 @@ def test_a_failed_options_step_is_named_on_every_leg_it_left_unpriced(tmp_path, 
     assert _note(db_path, "PKG1") == ""
 
 
-def test_a_legs_own_skip_reason_wins_over_the_steps_error(tmp_path, ui_app_stub, listed_option_path):
+def test_a_legs_own_skip_reason_wins_over_the_steps_error(tmp_path, ui_app_stub):
     db_path = _defect_db(tmp_path)
     _write_pull_status(db_path, {
         "priced": 0, "as_of_date": AS_OF, "error": _STEP_ERROR,
@@ -1900,8 +1891,7 @@ def test_a_legs_own_skip_reason_wins_over_the_steps_error(tmp_path, ui_app_stub,
     {"priced": 0, "skipped": [], "as_of_date": AS_OF, "error": ""},                    # no failure
     {"priced": 0, "skipped": [], "as_of_date": AS_OF},
 ])
-def test_a_status_for_another_day_or_without_an_error_leaves_the_notes_as_they_were(tmp_path, ui_app_stub, block,
-                                                                                   listed_option_path):
+def test_a_status_for_another_day_or_without_an_error_leaves_the_notes_as_they_were(tmp_path, ui_app_stub, block):
     db_path = _defect_db(tmp_path)
     before = (_note(db_path, "D1"), _note(db_path, "E1"))
     assert before == (f"no PREMIUM mark on {AS_OF}: priced the next time you press Pull Bloomberg now",
@@ -1915,3 +1905,242 @@ def test_an_unreadable_status_file_never_blanks_the_tab(tmp_path, ui_app_stub):
     db_path = _defect_db(tmp_path)
     status_path(db_path).write_text("{not json", encoding="utf-8")
     assert _note(db_path, "D1").startswith("no PREMIUM mark on")
+
+
+# --------------------------------------------------------------------------- options on commodity futures (Phase 5)
+
+_FUT_GREEKS = {"DELTA": 0.45, "GAMMA": 0.05, "VEGA": 0.12, "THETA": -0.02, "RHO": 0.01}
+
+
+def _add_futures_option(conn, trade_id, root_id, strike, option_type, lots, fill, price, und_price,
+                        greeks=True, payoff="AMERICAN", month=12, year=2026):
+    """An option on a commodity future as ingest-parser writes it (contract-master's canonical
+    ids, the underlying future's own instruments row), Bloomberg's price of the option and of the
+    future on AS_OF, and -- with `greeks` -- options-store's marks at the option's expiry."""
+    from data.contracts import get_root, option_contract
+
+    root = get_root(root_id)
+    opt = option_contract(root_id, month, year, option_type, strike)
+    oid, fid = opt.contract_id, opt.underlying.contract_id
+    expiry, f_expiry = opt.last_trade_date.isoformat(), opt.underlying.last_trade_date.isoformat()
+    stamp = f"{AS_OF}T17:00:00-04:00"
+    cols = "(instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, bbg_ticker, expiry_date)"
+    conn.execute(f"INSERT OR IGNORE INTO instruments {cols} VALUES (?, 'CMDTY_OPTION', ?, ?, ?, 0, '', ?)",
+                 (oid, root.root_id, root.currency, root.multiplier, expiry))
+    conn.execute(f"INSERT OR IGNORE INTO instruments {cols} VALUES (?, 'FUTURE', ?, ?, ?, 0, '', ?)",
+                 (fid, root.root_id, root.currency, root.multiplier, f_expiry))
+    conn.execute("INSERT OR IGNORE INTO instrument_options VALUES (?, ?, ?, 0, '9999-12-31', ?)",
+                 (oid, strike, option_type, payoff))
+    conn.execute("INSERT INTO trades VALUES (?, 'XLSX', ?, 'CMDTY_OPTION', ?, '2026-06-01', ?, ?, "
+                 "'ACC', 'CPTY', '', 'TR', 'option on a future', '')", (trade_id, oid, trade_id, lots, fill))
+    conn.execute("INSERT INTO trade_legs VALUES (?, 1, 'NOTIONAL', ?, ?, '2026-06-01', ?, ?, 0)",
+                 (trade_id, root.currency, lots * root.multiplier * fill, expiry, fill))
+    conn.execute("INSERT OR IGNORE INTO marks VALUES (?, ?, ?, 'FUTURE_PX', ?, 'BBG_BDH', ?)",
+                 (AS_OF, oid, expiry, price, stamp))
+    conn.execute("INSERT OR IGNORE INTO marks VALUES (?, ?, ?, 'FUTURE_PX', ?, 'BBG_BDH', ?)",
+                 (AS_OF, fid, f_expiry, und_price, stamp))
+    if greeks:
+        for mt, value in _FUT_GREEKS.items():
+            conn.execute("INSERT OR IGNORE INTO marks VALUES (?, ?, ?, ?, ?, 'QL_OPTIONS_PRICER', ?)",
+                         (AS_OF, oid, expiry, mt, value, stamp))
+    return oid, fid
+
+
+def _futures_db(with_greeks=True):
+    """The FX book of `_make_db` plus C1, 10 lots of a Dec 26 WTI 75 call (bought at 2.15,
+    Bloomberg at 3.00, the future at 72.50), and C2, 5 lots sold of the Dec 26 WTI 62 put."""
+    conn = _make_db()
+    _add_futures_option(conn, "C1", "NYMEX:CL", 75, "CALL", 10.0, 2.15, 3.0, 72.5, greeks=with_greeks)
+    _add_futures_option(conn, "C2", "NYMEX:CL", 62, "PUT", -5.0, 1.40, 1.10, 72.5, greeks=with_greeks)
+    conn.commit()
+    return conn
+
+
+def _leg(conn, trade_id):
+    return next(l for l in options._leg_rows(conn, AS_OF) if l["trade_id"] == trade_id)
+
+
+def test_an_option_on_a_future_shows_the_books_value_and_its_greeks_in_lots_and_its_currency():
+    conn = _futures_db()
+    try:
+        leg = _leg(conn, "C1")
+        book = _book(conn)["C1"]
+    finally:
+        conn.close()
+    assert leg["asset_class"] == "Options on futures"
+    assert leg["underlying"] == "CLZ26 Comdty" and leg["undfwdpx"] == pytest.approx(72.5)
+    assert (leg["side"], leg["option_type"], leg["payoff"], leg["strike"]) == ("Buy", "Call", "American", 75.0)
+    assert leg["position"] == 10.0                                              # lots
+    assert leg["mktpx"] == pytest.approx(3.0) and leg["premium_paid"] == pytest.approx(2.15)   # as quoted
+    assert leg["current_value"] == pytest.approx(10 * 1000 * 3.0)                # lots x multiplier x price
+    assert leg["mktval"] == pytest.approx(30_000.0) and leg["start_value_usd"] == pytest.approx(21_500.0)
+    assert leg["pnl_usd"] == pytest.approx(book["pnl_usd"]) and leg["pnl_usd"] == pytest.approx(8_500.0)
+    assert leg["mktval"] - leg["start_value_usd"] == pytest.approx(leg["pnl_usd"])
+    assert leg["pnl_ccy"] == pytest.approx(book["pnl_local"])
+    assert leg["notional_ccy"] == pytest.approx(10 * 1000 * 72.5) and leg["notional"] == pytest.approx(725_000.0)
+    assert leg["delta"] == pytest.approx(0.45 * 10)                              # futures lots
+    for greek in ("gamma", "vega", "theta", "rho"):                              # mark x lots x multiplier
+        assert leg[greek] == pytest.approx(_FUT_GREEKS[greek.upper()] * 10 * 1000), greek
+    assert leg["delta_unit"] == "NYMEX:CL futures lots" and leg["theta_unit"] == "USD per calendar day"
+    assert leg["note"] == "" and leg["priced"] and leg["terms_fixed"] == 1
+    assert "futures lots" in leg["greeks_hover"] and "Barone-Adesi-Whaley" in leg["greeks_hover"]
+
+
+def test_an_option_on_a_future_without_greeks_keeps_its_pnl_and_says_why_on_hover():
+    conn = _futures_db(with_greeks=False)
+    try:
+        leg = _leg(conn, "C1")
+        records, _ = options.format_rows(options.option_rows(conn, AS_OF, flat=True))
+        table = options.options_table(options.option_rows(conn, AS_OF, flat=True))
+    finally:
+        conn.close()
+    assert leg["pnl_usd"] == pytest.approx(8_500.0) and leg["mktval"] == pytest.approx(30_000.0)
+    assert all(leg[g] is None for g in options.GREEK_FIELDS)                     # blank, never zero
+    reason = "Greeks not calculated: they are the next time you press Pull Bloomberg now"
+    assert leg["note"] == reason
+    tips = options.tooltip_rows(records)
+    assert len(tips) == len(records)
+    (row_tip,) = [t for r, t in zip(records, tips) if r["trade_id"] == "C1"]
+    assert set(row_tip) >= set(options.GREEK_FIELDS)
+    assert row_tip["delta"]["value"] == reason
+    assert table.tooltip_data == tips
+    assert "futures lots" in table.tooltip_header["delta"]["value"]              # the unit, on the header
+
+
+def test_a_cny_option_on_a_future_notional_and_usd_at_the_books_spot():
+    conn = _make_db()
+    try:
+        _insert_pair_spot(conn, "USDCNY", "USD", "CNY", spot=7.2)
+        _add_futures_option(conn, "S1", "SHFE:CU", 80000, "CALL", 4.0, 1850.0, 2000.0, 81000.0)
+        conn.commit()
+        leg = _leg(conn, "S1")
+        book = _book(conn)["S1"]
+        df = options.option_rows(conn, AS_OF)
+    finally:
+        conn.close()
+    assert leg["premium_ccy"] == "CNY" and leg["underlying"].startswith("CU")
+    assert leg["notional_ccy"] == pytest.approx(4 * 5 * 81000.0)                 # 1,620,000 CNY
+    assert leg["notional"] == pytest.approx(4 * 5 * 81000.0 / 7.2)               # USD at spot: 225,000
+    assert leg["start_value"] == pytest.approx(4 * 5 * 1850.0)
+    assert leg["current_value"] == pytest.approx(4 * 5 * 2000.0)
+    assert leg["mktval"] == pytest.approx(4 * 5 * 2000.0 / 7.2)
+    assert leg["pnl_ccy"] == pytest.approx(3_000.0)
+    assert leg["pnl_usd"] == pytest.approx(book["pnl_usd"]) and leg["pnl_usd"] == pytest.approx(3_000.0 / 7.2)
+    assert leg["theta"] == pytest.approx(-0.02 * 4 * 5) and leg["theta_unit"] == "CNY per calendar day"
+    # A CNY theta and the FX options' USD theta are never added together.
+    total = df[df["level"] == "TOTAL"].iloc[0]
+    assert options._is_missing(total["theta"]) and total["theta_unit"] == options.MIXED_UNITS
+    assert "Theta" in total["note"] and "different units" in total["note"]
+    assert total["mktval"] == pytest.approx(df[df["level"] == "ASSET_CLASS"]["mktval"].sum())   # USD still adds
+
+
+def test_greeks_add_up_only_within_one_unit_in_the_grid_and_the_headline():
+    conn = _futures_db()
+    try:
+        df = options.option_rows(conn, AS_OF)
+        collapsed, _ = options.format_rows(df, ["PKG1"])
+    finally:
+        conn.close()
+    classes = df[df["level"] == "ASSET_CLASS"].set_index("group_key")
+    fut = classes.loc["Options on futures"]
+    assert fut["delta"] == pytest.approx(0.45 * 10 + 0.45 * -5)                  # one root: lots add up
+    assert fut["delta_unit"] == "NYMEX:CL futures lots"
+    total = df[df["level"] == "TOTAL"].iloc[0]
+    assert options._is_missing(total["delta"]) and "Delta" in total["note"]     # USD delta + lots: not added
+    # USD per day is USD per day: an FX option's theta and a USD contract's theta add up.
+    assert total["theta"] == pytest.approx(classes.loc["FX", "theta"] + fut["theta"])
+    totals = options.headline_totals(collapsed)
+    assert totals["delta"] is None
+    assert totals["delta_by_unit"]["NYMEX:CL futures lots"] == pytest.approx(fut["delta"])
+    assert totals["delta_by_unit"]["USD delta notional"] == pytest.approx(classes.loc["FX", "delta"])
+    text = json.dumps(options.headline_strip(totals).to_plotly_json(), default=lambda o: o.to_plotly_json())
+    assert "NYMEX:CL futures lots" in text and "not added" in text
+
+
+def test_the_four_tables_group_options_on_futures_under_their_root():
+    conn = _futures_db()
+    try:
+        legs = options.option_rows(conn, AS_OF, flat=True)
+        rows = options.grouped_rows(legs, legs["risk_group"])
+        in_play = options.in_play_rows(conn, AS_OF, legs)
+        children = options.breakdown_children(conn, AS_OF)
+    finally:
+        conn.close()
+    by_name = {r["group"]: r for r in rows}
+    cl = by_name["NYMEX:CL options on futures"]
+    assert cl["options"] == 2 and cl["delta"] == pytest.approx(0.45 * 5)
+    assert cl["greeks_in"] == "NYMEX:CL lots; USD"
+    assert "EURUSD" in by_name
+    assert by_name["Total"]["delta"] is None and by_name["Total"]["greeks_in"].startswith("mixed")
+    (call,) = [r for r in in_play if r["group"].startswith("CLZ26 Comdty Buy Call")]
+    assert call["spot"] == pytest.approx(72.5)                                  # the future's price
+    assert call["away_pct"] == pytest.approx((75 - 72.5) / 72.5 * 100.0)
+    text = json.dumps([c.to_plotly_json() for c in children], default=lambda o: o.to_plotly_json())
+    assert "By pair or underlying: where the risk is" in text and "Pair / underlying" in text
+    assert "Greeks in" in text and "Spot / future" in text
+
+
+def test_fx_options_are_unchanged_beside_options_on_futures():
+    fx_only = _make_db()
+    try:
+        before = {l["trade_id"]: l for l in options._leg_rows(fx_only, AS_OF)}
+        fx_text = json.dumps([c.to_plotly_json() for c in options.breakdown_children(fx_only, AS_OF)],
+                             default=lambda o: o.to_plotly_json())
+        fx_classes = options.option_rows(fx_only, AS_OF)
+    finally:
+        fx_only.close()
+    conn = _futures_db()
+    try:
+        after = {l["trade_id"]: l for l in options._leg_rows(conn, AS_OF)}
+        classes = options.option_rows(conn, AS_OF)
+    finally:
+        conn.close()
+    for trade_id, leg in before.items():
+        assert after[trade_id] == leg, trade_id
+
+    def fx_row(df):
+        return df[(df["level"] == "ASSET_CLASS") & (df["group_key"] == "FX")].iloc[0]
+
+    for field in ("delta", "gamma", "vega", "theta", "mktval", "pnl_usd", "notional"):
+        assert fx_row(classes)[field] == pytest.approx(fx_row(fx_classes)[field]), field
+    # An FX-only book keeps its headings.
+    assert "By pair: where the risk is" in fx_text and "Delta USD" in fx_text and "Greeks in" not in fx_text
+
+
+def test_the_terms_of_an_option_on_a_future_are_read_only(tmp_path, ui_app_stub, fake_pricer):
+    db_path = _file_db(tmp_path)
+    conn = sqlite3.connect(str(db_path))
+    oid, _fid = _add_futures_option(conn, "C1", "NYMEX:CL", 75, "CALL", 10.0, 2.15, 3.0, 72.5)
+    conn.commit()
+    try:
+        assert oid not in {i["instrument_id"] for i in options.option_instruments(conn)}
+        editor = json.dumps(options.terms_editor(conn).to_plotly_json(), default=lambda o: o.to_plotly_json())
+    finally:
+        conn.close()
+    assert "Options on futures (1)" in editor and "read-only" in editor
+    row = next(r for r in _records(db_path) if r["trade_id"] == "C1")
+    assert row["is_leg"] == 1 and row["terms_fixed"] == 1                        # no cue, no dropdown, no typing
+    for column, value in (("strike", 80.0), ("option_type", "Put"), ("payoff", "Vanilla")):
+        result = options.apply_edit(str(db_path), AS_OF, {"row": row, "column": column, "value": value})
+        assert not result.ok and "read-only" in result.message, column
+    result = options.save_and_price(str(db_path), AS_OF, "C1", oid,
+                                    {"strike": 80.0, "option_type": "PUT", "payoff": "VANILLA"})
+    assert not result.ok and "read-only" in result.message
+    assert _terms(db_path, oid) == (75.0, "CALL", "AMERICAN")                    # nothing written
+    assert not fake_pricer.calls                                                 # nothing priced
+    # An FX option's own row is still typed into.
+    assert next(r for r in _records(db_path) if r["trade_id"] == "O1")["terms_fixed"] == 0
+
+
+def test_the_tooltips_follow_the_rows_without_writing_the_table(tmp_path):
+    """The hover texts have their own callback on `data`; it writes `tooltip_data` only, so it
+    never puts the table in the loading state that wipes a cell being typed into."""
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    options.register_callbacks(app, get_db_path=lambda: str(tmp_path / "unused.db"))
+    spec, fn = _callback(app, f"{options.TABLE_ID}.tooltip_data")
+    assert _table_outputs(f"{options.TABLE_ID}.tooltip_data") == {"tooltip_data"}
+    assert {(d["id"], d["property"]) for d in spec["inputs"]} == {(options.TABLE_ID, "data")}
+    rows = [{"greeks_hover": "why", "underlying_hover": ""}, {"greeks_hover": "", "underlying_hover": "no future"}]
+    tips = fn(rows)
+    assert tips[0]["delta"]["value"] == "why" and "notional" not in tips[0]
+    assert tips[1]["undfwdpx"]["value"] == "no future" and "delta" not in tips[1]

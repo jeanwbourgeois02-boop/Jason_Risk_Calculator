@@ -3,7 +3,6 @@ the tracked synthetic book, `data/sample/blotter_sample.csv`."""
 from __future__ import annotations
 
 import math
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -87,14 +86,34 @@ def test_ladder_usd_leg_amount_matches_trade_legs(real_conn):
 
 @needs_raw
 def test_sample_ladder_is_the_fx_hedges_on_their_value_dates(real_conn):
-    """The sample's open FX legs, each on its own value date: futures and FX option
-    notional legs never settle cash, and the USDCNH forward settled 2026-08-19 and the
-    EURUSD spot settled 2026-09-11 are past."""
+    """The sample's open FX legs, each on its own value date: futures, FX option and
+    CMDTY_OPTION notional legs never settle cash, and the USDCNH forward settled
+    2026-08-19 and the EURUSD spot settled 2026-09-11 are past. The three LME forwards
+    (Phase 5) put their USD leg on the grid on their prompt (nickel 2026-09-16, copper
+    3M 2026-12-10, aluminium 2026-12-16); their metal legs are never a row."""
     ladder = cash_ladder(real_conn, SAMPLE_AS_OF)
     assert set(ladder["ccy"]) == {"USD", "CNH", "EUR", "GBP", "JPY", "XAU"}
-    assert set(ladder["settle_date"]) == {"2026-10-21", "2026-11-18", "2026-12-16", "2027-01-20"}
+    assert set(ladder["settle_date"]) == {"2026-09-16", "2026-10-21", "2026-11-18", "2026-12-10",
+                                          "2026-12-16", "2027-01-20"}
     cnh = ladder[ladder["ccy"] == "CNH"].set_index("settle_date")["amount"]
     assert cnh.to_dict() == {"2026-11-18": 10_713_750.0, "2027-01-20": -7_108_000.0}
+    usd = ladder[ladder["ccy"] == "USD"].set_index("settle_date")["amount"]
+    assert usd["2026-09-16"] == -185_040.0 and usd["2026-12-10"] == -985_000.0
+
+
+@needs_raw
+def test_sample_lme_forwards_give_only_their_usd_leg_to_the_records(real_conn):
+    """Each sample LME forward is one USD record on its prompt; no record is in a metal's
+    root id and none of them is named unresolved."""
+    from engine.ladder.exposure_adapter import records_from_db
+    records, unresolved = records_from_db(real_conn, SAMPLE_AS_OF)
+    lme = sorted((r["trade_id"], r["currency"], r["settlement_date"], r["local_amount"])
+                 for r in records if r["product_type"] == "LME_FWD")
+    assert lme == [("910000050", "USD", "2026-12-10", -985_000.0),
+                   ("910000051", "USD", "2026-12-16", 198_000.0),
+                   ("910000052", "USD", "2026-09-16", -185_040.0)]
+    assert not any(str(r["currency"]).startswith("LME:") for r in records)
+    assert not any("LME_FWD" in u.reason for u in unresolved)
 
 
 @needs_raw

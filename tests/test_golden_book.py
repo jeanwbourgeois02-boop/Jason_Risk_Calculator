@@ -28,15 +28,38 @@ def test_the_book_values_exactly_as_the_golden_says(actual):
           "`python -m tests.golden_book --write` re-pins it.")
 
 
+def test_every_pinned_trade_values_exactly_as_pinned(actual):
+    """The proof behind a re-pin: whatever the book gains, no trade the golden file pins moves."""
+    result = gb.golden_diff(json.loads(gb.GOLDEN.read_text(encoding="utf-8")), actual)
+    assert result["pinned"]["trades"] > 0
+    assert not result["changed"], gb.format_diff(result)
+
+
+def test_golden_diff_reports_moved_missing_and_new_trades():
+    row = {"trade_id": "1", "pnl_usd": 10.0, "product": "FUTURE", "instrument_id": "X", "status": "OPEN"}
+    expected = {"sample": "s", "days": {"d1": {"value_book": [row, dict(row, trade_id="2")], "ltd": 20.0}}}
+    actual = {"sample": "s", "days": {"d1": {"value_book": [dict(row, pnl_usd=11.0), dict(row, trade_id="3")],
+                                             "ltd": 21.0}}}
+    result = gb.golden_diff(expected, actual)
+    assert result["counts"] == {"d1": {"ltd": 1, "value_book": 2}}
+    assert result["changed"] == [("1", "d1", ["pnl_usd: 10.0 != 11.0"]), ("2", "d1", ["row missing from the new book"])]
+    assert result["pinned"] == {"trades": 2, "rows": 2}
+    assert [t["trade_id"] for t in result["new"]] == ["3"] and result["new"][0]["ltd"] == {"d1": 10.0}
+    text = gb.format_diff(result)
+    assert "2 pinned row(s) differ" in text and "3 FUTURE X: LTD USD d1 10.00 (OPEN)" in text
+
+
 def test_the_fixture_still_covers_every_product_and_both_statuses(actual):
     last_day = actual["days"][gb.AS_OF_DATES[-1]]
     last = last_day["value_book"]
     products = {r["product"] for r in last}
     statuses = {(r["product"], r["status"]) for r in last}
-    assert {"FX_FWD", "FX_SPOT", "FUTURE", "FX_OPTION"} <= products, products
-    # an expired future, a settled FX forward and a closed-out option pair, beside the open book
+    assert {"FX_FWD", "FX_SPOT", "FUTURE", "FX_OPTION", "CMDTY_OPTION", "LME_FWD"} <= products, products
+    # an expired future, a settled FX forward, a closed-out option pair, an expired option on a future
+    # and an LME forward past its prompt, beside the open book
     assert {("FUTURE", "OPEN"), ("FUTURE", "SETTLED"), ("FX_FWD", "OPEN"), ("FX_FWD", "SETTLED"),
-            ("FX_OPTION", "OPEN"), ("FX_OPTION", "CLOSED")} <= statuses, statuses
+            ("FX_OPTION", "OPEN"), ("FX_OPTION", "CLOSED"), ("CMDTY_OPTION", "OPEN"), ("CMDTY_OPTION", "SETTLED"),
+            ("LME_FWD", "OPEN"), ("LME_FWD", "SETTLED")} <= statuses, statuses
     by_id = {r["trade_id"]: r for r in last}
     assert by_id["910000027"]["instrument_id"] == "CLQ26 Comdty" and by_id["910000027"]["status"] == "SETTLED"
     # futures in every currency of the sample, each converted at its own USD pair

@@ -271,7 +271,8 @@ def test_full_replace_upload_keeps_manual_trades(tmp_path):
         by_source = dict(conn.execute("SELECT source, COUNT(*) FROM trades GROUP BY source").fetchall())
         manual_legs = conn.execute("SELECT COUNT(*) FROM trade_legs WHERE trade_id IN (?, ?)", (opt, fwd)).fetchone()[0]
         terms = conn.execute("SELECT strike FROM instrument_options WHERE instrument_id LIKE '%MANUAL%'").fetchone()
-    assert by_source == {"MANUAL": 2, "XLSX": 43}  # the synthetic sample: 29 futures, 8 forwards, 5 options, 1 spot
+    # the synthetic sample: 29 futures, 4 options on futures, 3 LME forwards, 8 FX forwards, 1 spot, 5 FX options
+    assert by_source == {"MANUAL": 2, "XLSX": 50}
     assert manual_legs == 3
     assert terms == (147.0,)
-    assert "Replaced the previous book: 43 trade(s)" in message  # the count never includes the manual ones
+    assert "Replaced the previous book: 50 trade(s)" in message  # the count never includes the manual ones

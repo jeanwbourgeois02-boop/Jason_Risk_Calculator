@@ -45,6 +45,10 @@ def cash_ladder(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
     'LEG', only because `tests/test_trades_official.py` (data-ingest's lane, off-limits
     here) still filters on it; safe for a future pass to drop once that test is updated
     -- flagged, not done here to avoid breaking a lane this agent cannot edit.
+
+    LME forwards (LME_FWD, Phase 5): the USD leg (settles_cash 1) is cash on its prompt
+    date like any FX leg; the metal leg (ccy = the root id, 'LME:CA') has settles_cash 0
+    and is never a row here -- the metal is a Curve-tab position, not a currency.
     """
     legs = pd.read_sql_query(_LEG_SQL, conn, params={"as_of": as_of_date})
     legs["kind"] = "LEG"
@@ -69,6 +73,13 @@ def cash_ladder(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
 # instruments.base_ccy || instruments.quote_ccy (CLAUDE.md's own suggested alternative),
 # which is well-defined for every FX_OPTION instrument regardless of its own instrument_id
 # shape. CLAUDE.md's literal SQL should be corrected the same way (flagged to housekeeper).
+#
+# LME forwards (LME_FWD, Phase 5) are not in the first branch's product list, so an LME
+# ticket contributes nothing here: its metal leg is never a currency, and its USD leg is
+# left out with it (the ladder's own records carry that leg in the USD row, which adds
+# nothing to the non-USD net). The FUTURE in that list counts a future's NOTIONAL leg
+# (contracts x multiplier x fill) as delta in its quote currency; both are CLAUDE.md's
+# contract SQL and change only on the user's yes. No screen calls delta_per_ccy.
 _DELTA_SQL = """
 WITH d AS (
   SELECT l.ccy, l.amount AS delta

@@ -344,7 +344,7 @@ def test_headline_keeps_whatever_the_list_does_not_reproduce():
 
 
 SAMPLE_BLOTTER = __import__("pathlib").Path(__file__).resolve().parents[1] / "data" / "sample" / "blotter_sample.csv"
-# The synthetic commodity sample (45 rows, 43 trades) carries two rows the parser must refuse
+# The synthetic commodity sample (52 rows, 50 trades) carries two rows the parser must refuse
 # on purpose: a corn future whose root fits two exchanges, and a root not in the contract list.
 SAMPLE_REJECT_IDS = ("910000032", "910000033")
 
@@ -372,7 +372,7 @@ def test_real_ingest_report_on_the_sample_names_its_two_rejects_and_stays_open(t
     report = uploads.run_import(SAMPLE_BLOTTER.read_bytes(), SAMPLE_BLOTTER.name, tmp_path / "risk.db")
     assert report["structured"] is True
     assert report["rejects"] == 2 and uploads.is_sticky(report)
-    assert report["message"].startswith(f"Imported {SAMPLE_BLOTTER.name}: 43 trades")
+    assert report["message"].startswith(f"Imported {SAMPLE_BLOTTER.name}: 50 trades")
     result = uploads.report_result(report)
     assert result.className == "source-result--warning"                      # never dismissed from under the user
     rendered = str(result)
@@ -389,7 +389,7 @@ def test_real_ingest_report_on_the_clean_sample_is_structured_clean_and_lists_it
     assert result.className == "source-result--info"                         # a clean import: dismisses itself
     if report["notes"]:                                                      # information-only notes, per ingest
         headline, notes_list = result.children
-        assert headline.children.startswith("Imported clean.csv: 43 trades")
+        assert headline.children.startswith("Imported clean.csv: 50 trades")
         assert [li.children for li in notes_list.children] == report["notes"]
         assert not any(note in headline.children for note in report["notes"])   # stripped from the run-on line
         assert all(str(result).count(note[:60]) == 1 for note in report["notes"])

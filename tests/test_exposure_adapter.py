@@ -231,3 +231,157 @@ def test_option_on_or_after_expiry_carries_no_delta():
     conn = _option_db(as_of="2026-11-19", expiry="2026-11-19")
     assert records_from_db(conn, "2026-11-19") == ([], [])
     assert exposure_records_from_db(conn, "2026-11-19") == ([], [])
+
+
+# ------------------------------------------------------------------ LME forwards (Phase 5)
+def _lme_db(with_fx=True, with_lme=True):
+    """A bought copper LME forward (100 t at 9,850, prompt Wed 2026-12-16) in the shape
+    ingest-parser writes: the metal leg in the root id's name, settles_cash 0, and the
+    USD leg -tonnes x fill, settles_cash 1. Beside it a USDJPY forward on the same date."""
+    conn = _fresh()
+    if with_lme:
+        conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf,"
+                     " bbg_ticker, expiry_date) VALUES ('LME:CA','LME_FWD','LME:CA','USD',1,0,'LMCADY Comdty',"
+                     "'9999-12-31')")
+        _trade(conn, "L1", "LME:CA", "LME_FWD", 100.0, 9_850.0, trade_date="2026-09-10")
+        _leg(conn, "L1", 1, "FX_NEAR", "LME:CA", 100.0, "2026-12-16", 9_850.0, 0)
+        _leg(conn, "L1", 2, "FX_NEAR", "USD", -985_000.0, "2026-12-16", 9_850.0, 1)
+    if with_fx:
+        conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
+        _trade(conn, "F1", "USDJPY", "FX_FWD", 1_000_000.0, 147.0, trade_date="2026-09-10")
+        _leg(conn, "F1", 1, "FX_NEAR", "USD", 1_000_000.0, "2026-12-16", 147.0, 1)
+        _leg(conn, "F1", 2, "FX_NEAR", "JPY", -147_000_000.0, "2026-12-16", 147.0, 1)
+    conn.commit()
+    return conn
+
+
+def _lme_rows(records):
+    return sorted((r["currency"], r["settlement_date"], r["local_amount"])
+                  for r in records if r["trade_id"] == "L1")
+
+
+def test_lme_usd_leg_is_cash_on_its_prompt_and_the_metal_leg_is_never_a_currency():
+    """CLAUDE.md "LME forwards": the cash lands on the ladder on the prompt date. The USD
+    leg is on the grid under the prompt (up to and including it) and is an open record
+    under both rules before it; the metal leg is on neither and is not called unresolved
+    either (it is a Curve-tab position, not a dropped trade)."""
+    from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
+    from engine.ladder.ladder import cash_ladder
+    conn = _lme_db()
+    for day in ("2026-09-14", "2026-12-15", "2026-12-16"):
+        grid = cash_ladder(conn, day)
+        assert "LME:CA" not in set(grid["ccy"])
+        usd = grid[grid["ccy"] == "USD"].set_index("settle_date")["amount"].to_dict()
+        assert usd == {"2026-12-16": 1_000_000.0 - 985_000.0}
+        records, named = records_from_db(conn, day)
+        assert named == []
+        assert _lme_rows(records) == [("USD", "2026-12-16", -985_000.0)]
+        assert all(r["settles_cash"] == 1 and r["product_type"] == "LME_FWD"
+                   for r in records if r["trade_id"] == "L1")
+        assert "LME:CA" not in {r["currency"] for r in records}
+    exposure, named = exposure_records_from_db(conn, "2026-12-15")
+    assert named == [] and _lme_rows(exposure) == [("USD", "2026-12-16", -985_000.0)]
+
+
+def test_lme_usd_leg_after_the_prompt_is_settled_usd_cash_not_its_realised_pnl():
+    """From the day after the prompt (grid) or by the prompt's close (exposure) the USD
+    leg is settled cash in USD, like a deliverable FX leg; the metal leg is not settled
+    cash, and the ledger's realised P&L of the ticket is never added on top (the USD leg
+    already is the cash), nor is the ticket named as an unknown settlement."""
+    from engine.ladder.exposure_adapter import SETTLED, records_from_db, exposure_records_from_db
+    from engine.ladder.ladder import cash_ladder
+    conn = _lme_db()
+    conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount,"
+                 " usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd,"
+                 " frozen_at, note) VALUES ('L1','LME:CA','LME_FWD','USD','2026-12-16',15_000.0,-985_000.0,"
+                 "'FWD_OUTRIGHT',1.0,'2026-12-16','BBG_BFXFORWARD',15_000.0,'2026-12-17T00:00:00+00:00','')")
+    conn.commit()
+    exposure_on_prompt, named = exposure_records_from_db(conn, "2026-12-16")
+    assert named == [] and _lme_rows(exposure_on_prompt) == [("USD", SETTLED, -985_000.0)]
+    for fn in (records_from_db, exposure_records_from_db):
+        settled, named = fn(conn, "2026-12-17")
+        assert named == []
+        assert _lme_rows(settled) == [("USD", SETTLED, -985_000.0)]
+        assert [r["settled_on"] for r in settled if r["trade_id"] == "L1"] == ["2026-12-16"]
+        assert "LME:CA" not in {r["currency"] for r in settled}
+    assert cash_ladder(conn, "2026-12-17").empty
+
+
+def test_lme_forward_adds_nothing_to_currency_delta_or_fx_net_gross():
+    """The metal leg is never currency delta: not in delta_per_ccy (LME_FWD is not in the
+    contract SQL's product list, so its USD leg is left out there too), not a row of the
+    exposure summary. The USD leg sits in the USD row, which Net / Gross USD leave out,
+    so FX Net / Gross are exactly the FX forward's."""
+    from engine.ladder.exposure import build_exposure, portfolio_totals
+    from engine.ladder.exposure_adapter import exposure_records_from_db
+    from engine.ladder.ladder import delta_per_ccy
+    rate = {"JPY": {"rate": 150.0, "inverted": True, "source": "TEST", "timestamp": "", "stale": False}}
+    with_lme, only_fx = _lme_db(), _lme_db(with_lme=False)
+    delta = delta_per_ccy(with_lme, "2026-09-14").set_index("ccy")["delta"].to_dict()
+    assert delta == delta_per_ccy(only_fx, "2026-09-14").set_index("ccy")["delta"].to_dict()
+    assert delta == {"JPY": -147_000_000.0, "USD": 1_000_000.0}
+    records, _ = exposure_records_from_db(with_lme, "2026-09-14")
+    result = build_exposure(records, rate)
+    summary = result.summary.set_index("currency")
+    assert set(summary.index) == {"USD", "JPY"}
+    assert summary.loc["USD", "local_delta"] == 1_000_000.0 - 985_000.0
+    fx_records, _ = exposure_records_from_db(only_fx, "2026-09-14")
+    totals, fx_totals = portfolio_totals(result), portfolio_totals(build_exposure(fx_records, rate))
+    assert (totals["net_usd"], totals["gross_usd"]) == (fx_totals["net_usd"], fx_totals["gross_usd"])
+
+
+def test_fx_forward_records_unchanged_by_an_lme_ticket_beside_it():
+    from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
+
+    def fx(records):
+        return [r for r in records if r["trade_id"] == "F1"]
+    for day in ("2026-09-14", "2026-12-16", "2026-12-17"):
+        for fn in (records_from_db, exposure_records_from_db):
+            assert fx(fn(_lme_db(), day)[0]) == fx(fn(_lme_db(with_lme=False), day)[0])
+
+
+# ------------------------------------------------------------ listed options (Phase 5)
+def _cmdty_option_db():
+    """A long SHFE-style copper call on a commodity future (CMDTY_OPTION, the shape
+    ingest-parser writes): one NOTIONAL leg in the quote currency on its expiry,
+    settles_cash 0."""
+    conn = _fresh()
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf,"
+                 " bbg_ticker, expiry_date) VALUES ('HGZ6C 450 Comdty','CMDTY_OPTION','COMEX:HG','USD',25000,0,"
+                 "'HGZ6C 450 Comdty','2026-11-24')")
+    _trade(conn, "O1", "HGZ6C 450 Comdty", "CMDTY_OPTION", 2.0, 0.12)
+    _leg(conn, "O1", 1, "NOTIONAL", "USD", 6_000.0, "2026-11-24", 0.12, 0)
+    conn.commit()
+    return conn
+
+
+def test_open_cmdty_option_is_no_currency_record_and_not_named():
+    """An open listed option is no currency exposure (its delta is on the Curve tab): no
+    record, and no "non-FX product excluded" line under either rule."""
+    from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
+    conn = _cmdty_option_db()
+    for fn in (records_from_db, exposure_records_from_db):
+        assert fn(conn, "2026-10-01") == ([], [])
+
+
+def test_settled_cmdty_option_brings_its_realised_usd_or_is_named():
+    """Once expired a listed option settles like a future: named while the ledger has not
+    frozen it, then its USD settlement read from realised_pnl as it stands."""
+    from engine.ladder.exposure_adapter import SETTLED, records_from_db, exposure_records_from_db
+    conn = _cmdty_option_db()
+    for fn in (records_from_db, exposure_records_from_db):
+        records, named = fn(conn, "2026-11-25")
+        assert records == [] and len(named) == 1
+        assert named[0].trade_id == "O1"
+        assert named[0].reason.startswith("settled 2026-11-24 (CMDTY_OPTION), USD settlement unknown")
+
+    conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount,"
+                 " usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd,"
+                 " frozen_at, note) VALUES ('O1','HGZ6C 450 Comdty','CMDTY_OPTION','USD','2026-11-24',4_250.0,"
+                 "6_000.0,'FUTURE_PX',1.0,'2026-11-24','BBG_BDH',4_250.0,'2026-11-25T00:00:00+00:00','')")
+    conn.commit()
+    for fn in (records_from_db, exposure_records_from_db):
+        records, named = fn(conn, "2026-11-25")
+        assert named == []
+        assert [(r["currency"], r["settlement_date"], r["local_amount"], r["product_type"], r["settled_on"])
+                for r in records] == [("USD", SETTLED, 4_250.0, "CMDTY_OPTION", "2026-11-24")]

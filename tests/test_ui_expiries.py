@@ -71,6 +71,17 @@ def _trade(conn, contract_id, root_id, lots, trade_date="2026-09-01"):
         "VALUES (?, 'XLSX', ?, 'FUTURE', ?, ?, ?, 100, 'ACC', 'CP', '', 'JB', '')",
         (tid, contract_id, tid, trade_date, lots))
     conn.commit()
+    return tid
+
+
+def _freeze(conn, trade_id, contract_id, settle_date, frozen_at):
+    """A realised_pnl row as the ledger writes it: the trade has left the book."""
+    conn.execute(
+        "INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
+        "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, note) "
+        "VALUES (?, ?, 'FUTURE', 'USD', ?, 0, 0, 'FUTURE_PX', 1, ?, 'BBG_BDH', 0, ?, '')",
+        (trade_id, contract_id, settle_date, settle_date, frozen_at))
+    conn.commit()
 
 
 def _book(path, *, empty=False):
@@ -108,9 +119,21 @@ def _row(**over) -> dict:
     return base
 
 
-def _result(rows, note=""):
+def _result(rows, note="", settled=None):
     counts = {lvl: sum(1 for r in rows if r["level"] == lvl) for lvl in ("EXPIRED", "RED", "AMBER", "GREEN")}
-    return {"as_of": AS_OF, "rows": rows, "counts": counts, "thresholds": {"RED": 3, "AMBER": 10}, "note": note}
+    return {"as_of": AS_OF, "rows": rows, "counts": counts, "thresholds": {"RED": 3, "AMBER": 10}, "note": note,
+            "settled_expired": settled or []}
+
+
+def _settled(body):
+    return next((n for n in _walk(body) if getattr(n, "id", None) == expiries.SETTLED_ID), None)
+
+
+def _settled_table(body) -> dash_table.DataTable:
+    found = [n for n in _walk(body) if isinstance(n, dash_table.DataTable)
+             and getattr(n, "id", None) == expiries.SETTLED_TABLE_ID]
+    assert len(found) == 1, f"{len(found)} settled tables"
+    return found[0]
 
 
 # --------------------------------------------------------------------------- end to end
@@ -181,6 +204,143 @@ def test_the_empty_book_shows_the_engines_note(tmp_path, stub_app):
     assert "No commodity futures position is open as of 2026-09-24." in _text(body)
     assert not [n for n in _walk(body) if isinstance(n, dash_table.DataTable)]
     assert _counts(body) == {"EXPIRED": "0", "RED": "0", "AMBER": "0", "GREEN": "0"}
+
+
+def test_a_frozen_contract_leaves_the_alert_table_for_the_settled_section(tmp_path, stub_app):
+    db = _book(tmp_path / "risk.db")
+    conn = schema.connect(str(db))
+    tid = _trade(conn, "CLN26 Comdty", "NYMEX:CL", 3, trade_date="2026-05-01")
+    store_static_dates(conn, [{"contract_id": "CLN26 Comdty", "last_trade_date": "2026-06-22",
+                               "first_notice_date": "2026-06-23", "source": "BBG_BDP"}])
+    _freeze(conn, tid, "CLN26 Comdty", "2026-06-22", "2026-06-23T09:00:00+00:00")
+    engine = expiry_schedule(conn, AS_OF)
+    conn.close()
+    assert [e["contract_id"] for e in engine["settled_expired"]] == ["CLN26 Comdty"]
+
+    body = expiries.render(AS_OF, db)
+    assert "CLN26 Comdty" not in [r["contract"] for r in _table(body).data]
+    assert _counts(body) == {"EXPIRED": "1", "RED": "0", "AMBER": "1", "GREEN": "1"}   # never counted
+    section = _settled(body)
+    assert section is not None and section.open is False
+    assert "Expired and settled (1)" in _text(section)
+    table = _settled_table(body)
+    assert [c["id"] for c in table.columns] == ["contract", "name", "lots", "last_trade_date", "frozen_at", "reason"]
+    rec = table.data[0]
+    assert rec["contract"] == "CLN26 Comdty" and rec["lots"] == 3.0
+    assert rec["last_trade_date"] == "2026-06-22" and rec["frozen_at"] == "2026-06-23T09:00:00+00:00"
+    assert rec["reason"] == engine["settled_expired"][0]["reason"]
+    assert "level" not in rec
+    assert not any(r["if"].get("column_id") == "level" for r in table.style_data_conditional)
+
+
+def test_the_settled_section_is_absent_when_the_list_is_empty(tmp_path, stub_app):
+    assert _settled(expiries.body(_result([_row()]))) is None
+    assert _settled(expiries.render(AS_OF, _book(tmp_path / "risk.db"))) is None
+    assert "Expired and settled" not in _text(expiries.body(_result([_row()])))
+
+
+def test_an_estimated_settled_date_is_marked_est():
+    entry = {"product": "FUTURE", "contract_id": "CLF26 Comdty", "root_id": "NYMEX:CL", "name": "WTI Crude",
+             "lots": -1.0, "last_trade_date": "2026-01-30", "dates_source": "ESTIMATED", "estimated": True,
+             "frozen_at": None, "reason": "Expired 2026-01-30 with -1 lot held; the ledger has frozen all 1 trade."}
+    body = expiries.body(_result([], note="No commodity futures position is open as of 2026-09-24.", settled=[entry]))
+    rec = _settled_table(body).data[0]
+    assert rec["last_trade_date"] == "2026-01-30 (est.)" and rec["frozen_at"] == "n/a"
+    assert "Expired and settled (1)" in _text(body)
+
+
+def test_the_product_column_shows_only_when_more_than_one_product_is_present():
+    one = _table(expiries.body(_result([_row(product="FUTURE"), _row(product="FUTURE", contract_id="CLZ26 Comdty")])))
+    assert "product" not in [c["id"] for c in one.columns]
+    two = _table(expiries.body(_result([_row(product="FUTURE"),
+                                        _row(product="CMDTY_OPTION", contract_id="CLZ26C 70 Comdty"),
+                                        _row(product="LME_FWD", contract_id="LMCADS 2026-12-16")])))
+    ids = [c["id"] for c in two.columns]
+    assert ids.index("product") == ids.index("level") + 1
+    assert [r["product"] for r in two.data] == ["Future", "Option", "LME prompt"]
+
+
+# --------------------------------------------------------------------------- Phase 5: options and LME prompts
+def _option_row(**over) -> dict:
+    return _row(product="CMDTY_OPTION", contract_id="CLZ26C 70 Comdty", last_trade_date="2026-11-17",
+                first_notice_date=None, next_event="option expiry", next_event_date="2026-11-17",
+                alert_date="2026-11-17", alert_basis="option expiry", business_days=38,
+                option_type="CALL", strike=70.0, style="AMERICAN", underlying_id="CLZ26 Comdty",
+                underlying_event="first notice", underlying_event_date="2026-11-20", underlying_estimated=True,
+                reason="Option expiry in 38 business days on the US calendar, +1 lot held.", **over)
+
+
+def _lme_row(**over) -> dict:
+    base = dict(product="LME_FWD", root_id="LME:CA", name="LME Copper", exchange="LME", calendar="LME",
+                contract_id="LME:CA 2026-12-16", lots=2.0, tonnes=50.0, prompt_date="2026-12-16",
+                instrument_id="LME:CA", last_trade_date=None, first_notice_date=None, dates_source="TICKET",
+                estimated=False, next_event="LME prompt", next_event_date="2026-12-16", alert_date="2026-12-14",
+                alert_basis="cash date: prompt less 2 LME business days", business_days=55,
+                reason="The 2026-12-16 prompt becomes the cash date in 55 business days, +50 t (+2 lots) held.")
+    base.update(over)
+    return _row(**base)
+
+
+def test_an_option_row_and_an_lme_row_render():
+    table = _table(expiries.body(_result([_row(product="FUTURE"), _option_row(), _lme_row()])))
+    by = {r["contract"]: (r, t) for r, t in zip(table.data, table.tooltip_data)}
+    assert "product" in [c["id"] for c in table.columns]
+
+    opt, opt_tip = by["CLZ26C 70 Comdty"]
+    assert opt["product"] == "Option" and opt["next_event"] == "option expiry"
+    assert opt["last_trade_date"] == "2026-11-17" and opt["dates_source"] == "Bloomberg"
+    hover = opt_tip["next_event"]["value"]
+    assert "Call" in hover and "strike 70" in hover and "American" in hover
+    assert "CLZ26 Comdty" in hover and "first notice 2026-11-20 (est.)" in hover
+
+    lme, lme_tip = by["LME:CA 2026-12-16"]
+    assert lme["product"] == "LME prompt" and lme["next_event"] == "LME prompt"
+    assert lme["lots"] == 2.0 and lme_tip["lots"]["value"].startswith("50 tonnes")
+    assert lme["next_event_date"] == "2026-12-16" and lme["alert_date"] == "2026-12-14"
+    assert lme["alert_basis"] == "cash date: prompt less 2 LME business days"
+
+
+def test_a_first_notice_that_does_not_apply_reads_a_dash_never_missing():
+    table = _table(expiries.body(_result([_option_row(), _lme_row()])))
+    (opt, opt_tip), (lme, lme_tip) = zip(table.data, table.tooltip_data)
+    assert opt["first_notice_date"] == lme["first_notice_date"] == "\u2014"
+    assert opt_tip["first_notice_date"]["value"] == "First notice is not applicable to an option."
+    assert lme_tip["first_notice_date"]["value"].startswith("First notice is not applicable to an LME prompt")
+    assert lme["last_trade_date"] == "\u2014" and "not applicable to an LME prompt" in lme_tip["last_trade_date"]["value"]
+    assert opt["last_trade_date"] == "2026-11-17"     # an option's expiry applies: shown as a date
+    for rec in (opt, lme):
+        assert "missing" not in str(rec).lower() and "none on file" not in rec.values()
+
+
+def test_ticket_is_labelled_as_the_tickets_prompt():
+    rec = _table(expiries.body(_result([_lme_row()]))).data[0]
+    assert rec["dates_source"] == "Ticket's prompt"
+    assert expiries.SOURCE_LABELS["TICKET"] == "Ticket's prompt"
+    assert "(est.)" not in rec["next_event_date"]
+
+
+def test_an_lme_row_whose_lots_could_not_be_counted_reads_na_with_its_reason():
+    why = "+30 t held, but lots not counted: no lot size for LME:XX."
+    rec, tip = (lambda t: (t.data[0], t.tooltip_data[0]))(
+        _table(expiries.body(_result([_lme_row(lots=None, tonnes=30.0, reason=why)]))))
+    assert rec["lots"] == "n/a"
+    assert "30 tonnes" in tip["lots"]["value"] and why in tip["lots"]["value"]
+
+
+def test_an_lme_entry_in_the_settled_section():
+    entry = {"product": "LME_FWD", "contract_id": "LME:CA 2026-08-19", "root_id": "LME:CA", "name": "LME Copper",
+             "lots": None, "tonnes": -25.0, "last_trade_date": "2026-08-19", "prompt_date": "2026-08-19",
+             "dates_source": "TICKET", "estimated": False, "frozen_at": "2026-08-20T09:00:00+00:00",
+             "reason": "Prompt 2026-08-19 passed with -25 t held; the ledger has frozen all 1 trade."}
+    body = expiries.body(_result([_row()], settled=[entry]))
+    table = _settled_table(body)
+    assert next(c for c in table.columns if c["id"] == "last_trade_date")["name"] == "Last trade / prompt"
+    rec, tip = table.data[0], table.tooltip_data[0]
+    assert rec["contract"] == "LME:CA 2026-08-19" and rec["last_trade_date"] == "2026-08-19"
+    assert rec["lots"] == "n/a" and tip["lots"]["value"] == "-25 tonnes"
+    assert rec["frozen_at"] == "2026-08-20T09:00:00+00:00"
+    assert "Expired and settled (1)" in _text(body)
+    assert _counts(body) == {"EXPIRED": "0", "RED": "0", "AMBER": "0", "GREEN": "1"}
 
 
 # --------------------------------------------------------------------------- synthetic rows

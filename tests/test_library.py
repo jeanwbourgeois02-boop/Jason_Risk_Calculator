@@ -269,8 +269,14 @@ def test_the_sample_book_lists_only_what_its_trades_call_for(tmp_path):
     found = library.rows(conn)
     assert found
     assert {r["kind"] for r in found} <= {"SPOT", "FWD_OUTRIGHT", "FUTURE_PX", library.CONTRACT_DATES,
-                                          "OIS_CURVE", "VOL_SMILE"}
-    assert {r["product"] for r in found} >= {"FUTURE", "FX_FWD", "FX_OPTION"}
+                                          "OIS_CURVE", "VOL_SMILE", library.LME_CURVE}
+    assert {r["product"] for r in found} >= {"FUTURE", "FX_FWD", "FX_OPTION", "CMDTY_OPTION", "LME_FWD"}
+    # Phase 5: the options on futures and the LME forwards the sample carries (2026-09-24)
+    assert {r["key"] for r in found if r["role"] == library.ROLE_UNDERLYING} >= {"CLZ26 Comdty", "CUZ26 Comdty"}
+    assert {r["key"] for r in found if r["kind"] == library.LME_CURVE} == {"LME:CA", "LME:AH", "LME:NI"}
+    # no retired kind is produced any more
+    assert not {r["kind"] for r in found} & {"NDF_1M", "NDF_FIX", "FIXINGS", "DIV_YIELD"}
+    assert not [r for r in found if r["role"] == library.ROLE_UNDERLYING and r["kind"] != "FUTURE_PX"]
     conversions = {r["key"] for r in found if r["product"] == "FUTURE" and r["role"] == library.ROLE_CONVERSION}
     assert conversions >= {"USDCNY", "EURUSD", "GBPUSD", "USDJPY"}
     asked_any = False

@@ -189,15 +189,15 @@ def _find_tab_bodies(layout):
     return None
 
 
-def test_six_tabs_present_in_order(tmp_path):
+def test_seven_tabs_present_in_order(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     layout = uiapp.build_layout(uiapp.load_summary(db_path))
-    # user, 2026-09-22: Blotter first, the cash Ladder second; Curve and Expiries next
+    # user, 2026-09-22: Blotter first, the cash Ladder second; Curve, Spreads and Expiries next
     # (2026-09-24, commodity conversion), then Risk (2026-09-22) and Market data
-    six = ["Blotter", "Ladder", "Curve", "Expiries", "Risk", "Market data"]
-    assert _tab_labels(layout) == six
-    assert uiapp.VISIBLE_TABS == six
+    seven = ["Blotter", "Ladder", "Curve", "Spreads", "Expiries", "Risk", "Market data"]
+    assert _tab_labels(layout) == seven
+    assert uiapp.VISIBLE_TABS == seven
 
 
 def test_no_overall_book_or_placeholder_tabs(tmp_path):
@@ -258,7 +258,7 @@ def test_header_present_above_tabs(tmp_path):
 
 def test_tab_bodies_always_present_and_tabs_have_no_children(tmp_path):
     """2026-09-15 structure fix: dcc.Tab objects carry no `children` of their own (that
-    nesting pushed the navy top-bar around the whole page); all six bodies live in one
+    nesting pushed the navy top-bar around the whole page); all seven bodies live in one
     always-present `html.Div(id="tab-bodies")` sibling of the top-bar/header."""
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
@@ -269,7 +269,7 @@ def test_tab_bodies_always_present_and_tabs_have_no_children(tmp_path):
     bodies = _find_tab_bodies(layout)
     assert bodies is not None
     slugs = {getattr(b, "id", None) for b in bodies.children}
-    assert slugs == {"tab-body-ladder", "tab-body-blotter", "tab-body-curve", "tab-body-expiries",
+    assert slugs == {"tab-body-ladder", "tab-body-blotter", "tab-body-curve", "tab-body-spreads", "tab-body-expiries",
                      "tab-body-risk", "tab-body-market-data"}
 
 
@@ -365,7 +365,7 @@ def test_ladder_heading_text_and_today_button(tmp_path):
     assert cash_ladder.TODAY_BUTTON_ID in ids
     # Today button writes to the same date-picker property as the upload confirm
     # callback, so both Outputs must declare allow_duplicate.
-    today_key = [k for k in app.callback_map if cash_ladder.TODAY_BUTTON_ID in k or "today" in k.lower()]
+    assert any(any(d["id"] == cash_ladder.TODAY_BUTTON_ID for d in cb["inputs"]) for cb in app.callback_map.values())
     assert any(cash_ladder.DATE_PICKER_ID in k for k in app.callback_map)
 
 
@@ -1165,7 +1165,7 @@ def test_blotter_fx_unpriced_cells_read_n_a_with_the_reason_and_real_cells_stay_
     table = blotter_fx.fx_blotter_table(df)
     rules = [r for r in table.style_data_conditional if r["if"].get("column_id") == "mark_t1"]
     assert len(rules) == 1 and rules[0]["fontStyle"] == "italic" and '"n/a"' in rules[0]["if"]["filter_query"]
-    assert len(table.style_data_conditional) == 6
+    assert len(table.style_data_conditional) == 7   # six mark / P&L columns and the USD notional (2026-09-24)
     assert table.tooltip_data == blotter_fx.row_tooltips(df)
     assert "(sample)" not in str(table)
 
@@ -1650,3 +1650,15 @@ def test_unpriced_breakdown_labels_have_no_irs_but_keep_the_manual_fx_swap():
                              "reason": ["no FWD_OUTRIGHT mark for EURUSD", "no FUTURE_PX mark for CLZ26 Comdty"]})
     assert bp._unpriced_breakdown(unpriced) in ("1 swap: no FWD_OUTRIGHT; 1 future: no FUTURE_PX",
                                                  "1 future: no FUTURE_PX; 1 swap: no FWD_OUTRIGHT")
+
+
+def test_reason_tag_names_a_retired_product_instead_of_unpriced():
+    """A leftover IRS / swaption / cap on an old database carries value_book's own "left the app"
+    reason: the "excludes" summary says so rather than "unpriced"."""
+    from engine.pnl.valuation import RETIRED_PRODUCTS
+    from ui.tabs import blotter_pricing as bp
+    for reason in RETIRED_PRODUCTS.values():                     # the engine's real wording
+        assert bp._reason_tag(reason) == bp.RETIRED_PRODUCT_TAG == "product left the app"
+    unpriced = pd.DataFrame({"trade_id": ["I1"], "product": ["IRS"], "reason": [RETIRED_PRODUCTS["IRS"]]})
+    assert bp._unpriced_breakdown(unpriced) == "1 irs: product left the app"
+    assert bp._reason_tag("something unrecognised entirely") == "unpriced"   # the fallback is unchanged

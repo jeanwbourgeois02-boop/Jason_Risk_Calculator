@@ -1069,7 +1069,7 @@ def test_pricer_uses_plain_calendar_days_regardless_of_pair_or_flag():
 
 @needs_quantlib
 def test_non_g10_pair_falls_back_to_plain_days_and_unknown_convention():
-    from engine.options.pricer import price_fx_vanilla, year_fraction
+    from engine.options.pricer import price_fx_vanilla
 
     as_of = datetime.date(2026, 8, 21)
     expiry = datetime.date(2026, 9, 23)
@@ -1203,6 +1203,164 @@ def test_portfolio_sums_two_packages_and_skips_missing_quote_ccy_spot():
     grand_total = portfolio.total()
     summed_delta = sum(totals[k]["delta"] for k in totals)
     assert grand_total["delta"] == pytest.approx(summed_delta)
+
+
+# --------------------------------------------------------------------------- 2026-09-24: options on commodity futures
+#
+# A CMDTY_OPTION's `bbg_ticker` is its own Bloomberg ticker, so portfolio.py reads the
+# underlying future's official FUTURE_PX (the future contract-master names), never a SPOT.
+# The outcomes are built by hand: the Greeks come from equity_commodity.py
+# (listed-options-pricer's tests), and this module only converts them.
+
+CMDTY_AS_OF = "2026-09-24"
+CL_OPTION, CL_FUTURE, CL_FUTURE_EXPIRY, CL_OPTION_EXPIRY = "CLZ26C 80 Comdty", "CLZ26 Comdty", "2026-11-19", "2026-11-16"
+CU_OPTION, CU_FUTURE, CU_FUTURE_EXPIRY, CU_OPTION_EXPIRY = "CUZ26C 80000 Comdty", "CUZ26 Comdty", "2026-12-15", "2026-11-24"
+_INST_COLS = "(instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, bbg_ticker, expiry_date)"
+
+
+def _seed_cmdty_option(conn, option_id, future_id, root, ccy, multiplier, option_expiry, future_expiry,
+                       future_price=None, as_of=CMDTY_AS_OF):
+    conn.execute(f"INSERT INTO instruments {_INST_COLS} VALUES (?,?,?,?,?,?,?,?)",
+                 (future_id, "FUTURE", root, ccy, multiplier, 0, future_id.replace("Z26", "Z6"), future_expiry))
+    conn.execute(f"INSERT INTO instruments {_INST_COLS} VALUES (?,?,?,?,?,?,?,?)",
+                 (option_id, "CMDTY_OPTION", root, ccy, multiplier, 0, option_id.replace("Z26", "Z6"),
+                  option_expiry))
+    conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type, payoff) VALUES (?,?,?,?)",
+                 (option_id, float(option_id.split()[1]), "CALL", "AMERICAN"))
+    if future_price is not None:
+        conn.execute("INSERT INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+                     "VALUES (?,?,?,?,?,?,?)",
+                     (as_of, future_id, future_expiry, "FUTURE_PX", future_price, "BBG_BDH",
+                      f"{as_of}T17:00:00-04:00"))
+    conn.commit()
+
+
+def _cmdty_outcome(option_id, quantity, delta=0.45, gamma=0.03, theta=-0.02, vega=0.15, rho=-0.01, price=3.2):
+    from engine.options.equity_commodity import CommodityOutcome
+    from engine.options.pricer import OptionPriceResult
+
+    result = OptionPriceResult(premium=price, delta=delta, gamma=gamma, theta=theta, vega=vega, rho=rho,
+                               quote_price=price, delta_premium_adjusted=0.0, delta_convention="N/A")
+    return CommodityOutcome(trade_id="C1", instrument_id=option_id, package_id="PKG-CL", quantity=quantity,
+                            priced=True, result=result, vol_source="IMPLIED", implied_vol=0.35)
+
+
+@needs_quantlib
+def test_cmdty_option_takes_its_underlying_futures_price_not_a_spot_on_its_ticker():
+    from engine.options.portfolio import portfolio_summary
+
+    conn = _new_db()
+    future, lots, mult = 78.0, 10.0, 1000.0
+    _seed_cmdty_option(conn, CL_OPTION, CL_FUTURE, "NYMEX:CL", "USD", mult, CL_OPTION_EXPIRY, CL_FUTURE_EXPIRY,
+                       future_price=future)
+    outcome = _cmdty_outcome(CL_OPTION, lots)
+
+    portfolio, legs, skipped = portfolio_summary(conn, CMDTY_AS_OF, [outcome])
+    assert skipped == [] and [leg.instrument_id for leg in legs] == [CL_OPTION]
+    assert legs[0].asset_class == "CMDTY_OPTION"
+    total, r, size = portfolio.total(), outcome.result, lots * mult
+    assert total["delta"] == pytest.approx(size * r.delta * future)                 # futures-equivalent USD
+    assert total["gamma"] == pytest.approx(size * r.gamma * future * future / 100.0)
+    assert total["price"] == pytest.approx(size * r.quote_price)
+    for greek in ("vega", "theta", "rho"):
+        assert total[greek] == pytest.approx(size * getattr(r, greek))
+
+
+@needs_quantlib
+def test_cmdty_option_in_a_non_usd_contract_converts_at_the_currencys_spot():
+    from engine.options.portfolio import portfolio_summary
+
+    conn = _new_db()
+    future, lots, mult, usdcny = 79_500.0, -4.0, 5.0, 7.10
+    _seed_cmdty_option(conn, CU_OPTION, CU_FUTURE, "SHFE:CU", "CNY", mult, CU_OPTION_EXPIRY, CU_FUTURE_EXPIRY,
+                       future_price=future)
+    conn.execute(f"INSERT INTO instruments {_INST_COLS} VALUES (?,?,?,?,?,?,?,?)",
+                 ("USDCNY", "FX", "USD", "CNY", 1.0, 0, "USDCNY Curncy", "9999-12-31"))
+    conn.execute("INSERT INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
+                 "VALUES (?,?,?,?,?,?,?)",
+                 (CMDTY_AS_OF, "USDCNY", CMDTY_AS_OF, "SPOT", usdcny, "BBG_BFXFORWARD", f"{CMDTY_AS_OF}T15:00:00-04:00"))
+    outcome = _cmdty_outcome(CU_OPTION, lots, delta=0.4, price=1500.0)
+
+    portfolio, legs, skipped = portfolio_summary(conn, CMDTY_AS_OF, [outcome])
+    assert skipped == [] and len(legs) == 1
+    total = portfolio.total()
+    assert total["delta"] == pytest.approx(lots * mult * 0.4 * future / usdcny)
+    assert total["price"] == pytest.approx(lots * mult * 1500.0 / usdcny)
+
+
+@needs_quantlib
+@pytest.mark.parametrize("case", ["no price", "spot on the ticker only", "unknown underlying"])
+def test_cmdty_option_without_its_underlying_futures_price_is_skipped_with_the_reason(case):
+    from engine.options.portfolio import build_positions
+
+    conn = _new_db()
+    _seed_cmdty_option(conn, CL_OPTION, CL_FUTURE, "NYMEX:CL", "USD", 1000.0, CL_OPTION_EXPIRY, CL_FUTURE_EXPIRY)
+    if case == "spot on the ticker only":      # the old rule's input: never read any more
+        conn.execute(f"INSERT INTO instruments {_INST_COLS} VALUES (?,?,?,?,?,?,?,?)",
+                     ("CLZ6C 80 Comdty", "CMDTY_OPTION", "NYMEX:CL", "USD", 1000.0, 0, "", CL_OPTION_EXPIRY))
+        conn.execute("INSERT INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, "
+                     "snapped_at) VALUES (?,?,?,?,?,?,?)",
+                     (CMDTY_AS_OF, "CLZ6C 80 Comdty", CMDTY_AS_OF, "SPOT", 78.0, "BBG_BFXFORWARD",
+                      f"{CMDTY_AS_OF}T15:00:00-04:00"))
+    if case == "unknown underlying":
+        conn.execute("UPDATE instruments SET base_ccy = 'NOPE:XX' WHERE instrument_id = ?", (CL_OPTION,))
+    conn.commit()
+
+    legs, skipped = build_positions(conn, CMDTY_AS_OF, [_cmdty_outcome(CL_OPTION, 10.0)])
+    assert legs == []
+    assert [s["instrument_id"] for s in skipped] == [CL_OPTION]
+    if case == "unknown underlying":
+        assert "not known to the contract master" in skipped[0]["reason"]
+    else:
+        assert skipped[0]["reason"] == (f"no official price of the underlying future {CL_FUTURE} on {CMDTY_AS_OF} "
+                                        "to put delta and gamma on a USD basis")
+
+
+@needs_quantlib
+def test_fx_and_cmdty_options_sum_side_by_side_and_fx_still_reads_the_pair_spot():
+    from engine.options.portfolio import portfolio_summary
+    from engine.options.store import price_and_store
+
+    conn = _new_db()
+    _seed_pair_spot(conn)
+    _seed_vol(conn)
+    _seed_option_trade(conn)
+    fx = price_and_store(conn, AS_OF, "T1")
+    assert fx.priced, fx.reason
+    _seed_cmdty_option(conn, CL_OPTION, CL_FUTURE, "NYMEX:CL", "USD", 1000.0, CL_OPTION_EXPIRY, CL_FUTURE_EXPIRY,
+                       future_price=78.0, as_of=AS_OF)
+    cmdty = _cmdty_outcome(CL_OPTION, 10.0)
+
+    portfolio, legs, skipped = portfolio_summary(conn, AS_OF, [fx, cmdty])
+    assert skipped == []
+    by_class = portfolio.by_asset_class()
+    assert set(by_class) == {"FX_OPTION", "CMDTY_OPTION"}
+    assert by_class["FX_OPTION"]["delta"] == pytest.approx(NOTIONAL * fx.result.delta * SPOT)   # EURUSD: USD quote
+    assert by_class["CMDTY_OPTION"]["delta"] == pytest.approx(10.0 * 1000.0 * 0.45 * 78.0)
+    assert portfolio.total()["delta"] == pytest.approx(by_class["FX_OPTION"]["delta"]
+                                                       + by_class["CMDTY_OPTION"]["delta"])
+
+
+@needs_quantlib
+@pytest.mark.parametrize("ccy", ["CNY", "MYR", "SGD"])
+def test_currency_with_no_ois_set_up_resolves_none_with_its_reason_and_a_manual_rate_still_wins(ccy):
+    """listed-options-pricer discounts a CNY / MYR / SGD contract on the USD curve when its own
+    currency resolves nothing: `resolve_ccy_rate_with_source` must return (None, reason) for
+    it, never raise, and still honour a manual rate; USD itself resolves off its curve."""
+    from engine.options.rates import MANUAL_FLAT, OIS_CURVE, resolve_ccy_rate_with_source, set_manual_rate
+
+    conn = _new_db()
+    _seed_ois_curve(conn, CMDTY_AS_OF, "USD")
+    cache: dict = {}
+    rate, reason = resolve_ccy_rate_with_source(conn, CMDTY_AS_OF, ccy, CU_OPTION_EXPIRY, cache)
+    assert rate is None and reason == f"no curve/rate {ccy}"
+    usd, usd_reason = resolve_ccy_rate_with_source(conn, CMDTY_AS_OF, "USD", CU_OPTION_EXPIRY, cache)
+    assert usd is not None and usd.source_kind == OIS_CURVE, usd_reason
+    assert usd.detail.startswith("USD SOFR curve")
+
+    set_manual_rate(conn, CMDTY_AS_OF, ccy, 0.018)
+    manual, _ = resolve_ccy_rate_with_source(conn, CMDTY_AS_OF, ccy, CU_OPTION_EXPIRY, cache)
+    assert manual is not None and manual.source_kind == MANUAL_FLAT and manual.rate == pytest.approx(0.018)
 
 
 def test_price_all_and_store_isolates_one_trades_pricer_exception(monkeypatch):

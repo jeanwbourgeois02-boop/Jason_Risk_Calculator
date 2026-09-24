@@ -109,3 +109,72 @@ def test_malformed_date_in_a_file_is_reported(tmp_path, monkeypatch):
     monkeypatch.setattr(cals, "CALENDAR_DIR", tmp_path)
     with pytest.raises(ValueError, match="BAD.txt line 2"):
         holidays("BAD")
+
+
+# --------------------------------------------------------------------------- coverage to 2028 / 2029
+
+# LME to the end of 2029 (lme-forwards: 27 monthly pillars reach 2028-12), every other
+# calendar to the end of 2028.
+COVERAGE_TARGET = {cal: D(2028, 12, 31) for cal in EXPECTED_IDS}
+COVERAGE_TARGET["LME"] = D(2029, 12, 31)
+
+
+def test_coverage_reaches_the_target_and_every_covered_year_has_dates():
+    for cal, target in COVERAGE_TARGET.items():
+        first, last = coverage(cal)
+        assert last >= target, (cal, last)
+        # a coverage line pushed forward without the year's dates is a silent gap
+        years = {h.year for h in holidays(cal)}
+        assert set(range(first.year, last.year + 1)) <= years, (cal, sorted(years))
+
+
+def test_uk_holidays_2028_and_2029_on_lme():
+    closed = [
+        D(2028, 1, 3),  # New Year's Day substitute (1 January is a Saturday)
+        D(2028, 4, 14), D(2028, 4, 17),  # Good Friday, Easter Monday
+        D(2028, 5, 1), D(2028, 5, 29), D(2028, 8, 28),
+        D(2028, 12, 25), D(2028, 12, 26),
+        D(2029, 1, 1), D(2029, 3, 30), D(2029, 4, 2),
+        D(2029, 5, 7), D(2029, 5, 28), D(2029, 8, 27),
+        D(2029, 12, 25), D(2029, 12, 26),
+    ]
+    for d in closed:
+        assert not is_business_day("LME", d), d
+    assert is_business_day("LME", D(2028, 12, 27))
+    assert is_business_day("LME", D(2029, 12, 31))
+    assert add_business_days("LME", D(2029, 12, 24), 1) == D(2029, 12, 27)
+    assert last_business_day_of_month("LME", 2029, 8) == D(2029, 8, 31)
+
+
+def test_us_holidays_2028():
+    for cal in ("US", "ICE_US"):
+        for d in (D(2028, 1, 17), D(2028, 4, 14), D(2028, 6, 19), D(2028, 7, 4),
+                  D(2028, 11, 23), D(2028, 12, 25)):
+            assert not is_business_day(cal, d), (cal, d)
+        # 1 January 2028 is a Saturday: no Friday or Monday closure either side
+        assert is_business_day(cal, D(2027, 12, 31)), cal
+        assert is_business_day(cal, D(2028, 1, 3)), cal
+        assert add_business_days(cal, D(2028, 11, 22), 1) == D(2028, 11, 24), cal
+
+
+def test_other_2028_closures():
+    assert not is_business_day("ICE_EU", D(2028, 12, 26))
+    assert not is_business_day("EURONEXT", D(2028, 4, 17))
+    assert not is_business_day("EEX", D(2028, 5, 1))
+    assert not is_business_day("JP", D(2028, 1, 3))
+    assert not is_business_day("SG", D(2028, 8, 9))
+    assert not is_business_day("MY", D(2028, 6, 5))
+    assert not is_business_day("HK", D(2028, 10, 2))  # National Day on a Sunday
+    # China's estimated 2028 Spring Festival and National Day week
+    for d in (D(2028, 1, 26), D(2028, 2, 1), D(2028, 10, 2), D(2028, 10, 6)):
+        assert not is_business_day("CN", d), d
+    assert next_business_day("CN", D(2028, 9, 29)) == D(2028, 10, 9)
+
+
+def test_china_2027_and_later_is_marked_estimated():
+    lines = (cals.CALENDAR_DIR / "CN.txt").read_text(encoding="utf-8").splitlines()
+    dated = [ln for ln in lines if ln[:4].isdigit()]
+    assert dated
+    for ln in dated:
+        if ln[:4] >= "2027":
+            assert "# estimated" in ln, ln

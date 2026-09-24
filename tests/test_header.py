@@ -177,6 +177,15 @@ def test_reason_tag_spot_conversion_and_settled_and_fallback():
     assert header._reason_tag("something unrecognised entirely") == "unpriced"
 
 
+def test_reason_tag_names_a_retired_product_as_the_blotter_does():
+    from ui.tabs.blotter_pricing import RETIRED_PRODUCT_MARKER, RETIRED_PRODUCT_TAG
+    from ui.tabs.blotter_pricing import _reason_tag as blotter_tag
+    reason = f"trade S1: an interest rate swap, a product that {RETIRED_PRODUCT_MARKER}; no mark is read for it"
+    assert header._reason_tag(reason) == RETIRED_PRODUCT_TAG == blotter_tag(reason)
+    frame = _vb_frame([("S1", "IRS", reason, float("nan"))])
+    assert header._unpriced_breakdown(frame) == f"1 irs: {RETIRED_PRODUCT_TAG}"
+
+
 def test_unpriced_breakdown_groups_by_product_and_reason():
     unpriced = _vb_frame([
         ("o1", "FX_OPTION", "no PREMIUM mark for A expiry B on C", float("nan")),
@@ -938,3 +947,228 @@ def test_chart_callback_says_why_when_the_chart_cannot_be_built(tmp_path, monkey
     # collapsed, or no date yet: nothing computed and nothing raised, as before
     assert type(raw(False, "2026-09-17", None)).__name__ == "NoUpdate"
     assert type(raw(True, None, None)).__name__ == "NoUpdate"
+
+
+# --------------------------------------------------------------------- the commodity strip
+# Commodity conversion Phase 3 (2026-09-24): gross commodity notional, net outright by sector,
+# open spreads, the next first notice / last trade, after the FX Net / Gross cards. Rendered
+# from book-positions, spreads-engine and expiry-monitor as given, nothing recomputed.
+
+_CMDTY_AS_OF = "2026-11-18"          # a Wednesday: COMEX copper's first notice (Fri 20th) is 2 business days away
+_CMDTY_EXPIRY = {"CLZ26 Comdty": "2026-12-18", "CLF27 Comdty": "2027-01-20", "COZ26 Comdty": "2026-12-30",
+                 "HGZ26 Comdty": "2026-12-29", "CUZ26 Comdty": "2026-12-15"}
+_CMDTY_ROOT = {"CLZ26 Comdty": "NYMEX:CL", "CLF27 Comdty": "NYMEX:CL", "COZ26 Comdty": "ICE:B",
+               "HGZ26 Comdty": "COMEX:HG", "CUZ26 Comdty": "SHFE:CU"}
+_CMDTY_PX = {"CLZ26 Comdty": 71.0, "CLF27 Comdty": 70.2, "COZ26 Comdty": 74.5, "HGZ26 Comdty": 4.6,
+             "CUZ26 Comdty": 80_000.0}
+
+
+def _future(conn, tid, inst, lots, fill, account="ACC", trade_date="2026-09-01", price=True):
+    from data.contracts import get_root
+    root = get_root(_CMDTY_ROOT[inst])
+    expiry = _CMDTY_EXPIRY[inst]
+    conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, "
+                 "is_ndf, bbg_ticker, expiry_date) VALUES (?,'FUTURE',?,?,?,0,?,?)",
+                 (inst, root.root_id, root.currency, root.multiplier, inst, expiry))
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
+                 "price, account, counterparty, strategy, trader, description) "
+                 "VALUES (?, 'XLSX', ?, 'FUTURE', ?, ?, ?, ?, ?, 'C', '', 'JB', 'd')",
+                 (tid, inst, tid, trade_date, lots, fill, account))
+    conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,?,?,?,0)",
+                 (tid, root.currency, lots * root.multiplier * fill, trade_date, expiry, fill))
+    if price:
+        conn.execute("INSERT OR IGNORE INTO marks VALUES (?,?,?,'FUTURE_PX',?,'BBG_BDH',?)",
+                     (_CMDTY_AS_OF, inst, expiry, _CMDTY_PX[inst], f"{_CMDTY_AS_OF}T17:00:00-05:00"))
+
+
+def _bloomberg_dates(conn, inst, first_notice=""):
+    from data.contracts import store_static_dates
+    store_static_dates(conn, [{"contract_id": inst, "last_trade_date": _CMDTY_EXPIRY[inst],
+                               "first_notice_date": first_notice, "source": "BBG_BDP"}])
+
+
+def _commodity_book():
+    """Two sectors (energy: a WTI calendar and a Brent / WTI pair on two accounts, which the
+    rule sends to review; metals: COMEX copper two business days from its first notice), every
+    contract priced on the day and on Bloomberg's dates."""
+    conn = schema.connect()
+    _future(conn, "W1", "CLZ26 Comdty", 2, 70.0)
+    _future(conn, "W2", "CLF27 Comdty", -2, 69.5)
+    _future(conn, "B1", "COZ26 Comdty", 5, 72.3, account="ONSHORE", trade_date="2026-09-02")
+    _future(conn, "C1", "CLZ26 Comdty", -5, 68.6, account="OFFSHORE", trade_date="2026-09-02")
+    _future(conn, "H1", "HGZ26 Comdty", 4, 4.5, trade_date="2026-09-03")
+    for inst in ("CLZ26 Comdty", "CLF27 Comdty", "COZ26 Comdty"):
+        _bloomberg_dates(conn, inst)
+    _bloomberg_dates(conn, "HGZ26 Comdty", first_notice="2026-11-20")
+    conn.commit()
+    return conn
+
+
+def _texts(card):
+    return [getattr(ch, "children", None) for ch in card.children]
+
+
+def test_commodity_strip_shows_the_four_engine_figures_as_given():
+    from engine.expiry import expiry_schedule
+    from engine.ladder.positions import book_positions
+    from engine.spreads import book_spreads
+    conn = _commodity_book()
+    try:
+        block = book_positions(conn, _CMDTY_AS_OF)["commodities"]
+        assert {s["sector"] for s in block["sectors"]} == {"energy", "metals"} and block["reason"] == ""
+        cards = header._build_figures(conn, _CMDTY_AS_OF)
+
+        gross = _card(cards, header.GROSS_NOTIONAL_TITLE)
+        assert _texts(gross)[1] == header._fmt_usd(block["gross_usd"]) and len(gross.children) == 2
+        assert "Energy: net" in gross.children[1].title and "Metals: net" in gross.children[1].title
+
+        net = _card(cards, header.NET_BY_SECTOR_TITLE)
+        assert _texts(net)[1] == header._fmt_usd(block["net_usd"])
+        expected_line = " · ".join(f"{header._sector_label(s['sector'])} {header._fmt_compact(s['net_usd'])}"
+                                   for s in block["sectors"])   # each sector's own net_usd, in book-positions' order
+        assert _texts(net)[2] == expected_line
+
+        spreads = book_spreads(conn, _CMDTY_AS_OF)
+        assert sum(1 for s in spreads["spreads"] if s["status"] == "open") == 1 and len(spreads["review"]) == 1
+        card = _card(cards, header.OPEN_SPREADS_TITLE)
+        assert _texts(card)[1:] == ["1", "1 group to review"]
+        hover = card.children[1].title
+        assert "CL Z26/F27" in hover and "Waiting for review" in hover and "Brent" in hover
+
+        first = expiry_schedule(conn, _CMDTY_AS_OF)["rows"][0]
+        assert (first["contract_id"], first["next_event"], first["level"], first["business_days"]) == \
+            ("HGZ26 Comdty", "first notice", "RED", 2)
+        card = _card(cards, header.NEXT_EXPIRY_TITLE)
+        assert _texts(card)[1:] == ["HGZ26 first notice", "2026-11-20 · in 2 business days · RED"]
+        assert card.children[1].style == header._LEVEL_STYLES["RED"]
+    finally:
+        conn.close()
+
+
+def test_commodity_strip_comes_after_the_fx_cards_and_leaves_the_pnl_cards_unchanged():
+    conn = _db_two_priced_forwards()
+    try:
+        cards = header._build_figures(conn, "2026-09-17")
+    finally:
+        conn.close()
+    titles = [c.children[0].children if getattr(c, "className", "") != "header-divider" else "|" for c in cards]
+    assert titles == ["LTD", "Daily", "Previous day", "5d", "MTD", "YTD", "Trading", "Trades", "|",
+                      "Net USD delta", "Gross USD delta", "|", header.COMMODITY_EMPTY_TITLE]
+
+
+def test_a_book_with_no_commodity_futures_shows_one_plain_line_with_its_reason():
+    conn = _db_two_priced_forwards()
+    try:
+        strip = header._commodity_cards(conn, "2026-09-17")
+    finally:
+        conn.close()
+    assert len(strip) == 1
+    assert _texts(strip[0]) == [header.COMMODITY_EMPTY_TITLE, "none", "no open commodity futures on 2026-09-17"]
+
+
+def test_unpriced_commodities_read_na_with_the_reason_and_the_other_cards_still_show():
+    conn = schema.connect()
+    _future(conn, "H1", "HGZ26 Comdty", 4, 4.5, price=False)       # no FUTURE_PX on the day
+    _bloomberg_dates(conn, "HGZ26 Comdty", first_notice="2026-11-20")
+    conn.commit()
+    try:
+        cards = header._commodity_cards(conn, _CMDTY_AS_OF)
+    finally:
+        conn.close()
+    by_title = {c.children[0].children: c for c in cards}
+    for title in (header.GROSS_NOTIONAL_TITLE, header.NET_BY_SECTOR_TITLE):
+        value, caption = by_title[title].children[1], by_title[title].children[2]
+        assert value.children == "n/a" and value.title                 # never a zero standing for a missing price
+        assert caption.children == value.title and "HG" in value.title
+    assert _texts(by_title[header.OPEN_SPREADS_TITLE])[1] == "0"
+    assert _texts(by_title[header.NEXT_EXPIRY_TITLE])[1] == "HGZ26 first notice"
+
+
+def test_a_partly_priced_book_sums_the_known_figures_and_says_what_it_excludes():
+    from engine.ladder.positions import book_positions
+    conn = schema.connect()
+    _future(conn, "H1", "HGZ26 Comdty", 4, 4.5)
+    _future(conn, "S1", "CUZ26 Comdty", 1, 79_000.0)                 # a CNY future with no USDCNY spot on file
+    conn.commit()
+    try:
+        block = book_positions(conn, _CMDTY_AS_OF)["commodities"]
+        cards = header._commodity_cards(conn, _CMDTY_AS_OF)
+    finally:
+        conn.close()
+    assert block["missing"] == ["SHFE:CU"] and block["gross_usd"] is not None
+    gross = cards[0]
+    assert _texts(gross)[1] == header._fmt_usd(block["gross_usd"])
+    assert _texts(gross)[2] == "excludes 1 of 2 commodities with no USD figure"
+    assert gross.children[2].title == block["reason"]
+    assert _texts(cards[1])[2] == f"Metals {header._fmt_compact(block['net_usd'])}"   # one sector, CU out of it
+
+
+def test_open_spreads_that_cannot_be_grouped_say_why_and_cost_only_their_card(monkeypatch):
+    import engine.spreads
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("template file unreadable")
+
+    monkeypatch.setattr(engine.spreads, "book_spreads", boom)
+    conn = _commodity_book()
+    try:
+        cards = header._commodity_cards(conn, _CMDTY_AS_OF)
+    finally:
+        conn.close()
+    by_title = {c.children[0].children: c for c in cards}
+    card = by_title[header.OPEN_SPREADS_TITLE]
+    assert card.children[1].children == "n/a"
+    assert card.children[2].children.startswith("spreads could not be grouped (RuntimeError: template file unreadable)")
+    assert _texts(by_title[header.NEXT_EXPIRY_TITLE])[1] == "HGZ26 first notice"
+
+
+def test_open_spreads_are_worked_out_once_per_database_revision(tmp_path, monkeypatch):
+    import os
+
+    import engine.spreads
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    calls = []
+
+    def counting(conn, as_of, **_kwargs):
+        calls.append(as_of)
+        return {"spreads": [], "review": [], "reasons": []}
+
+    monkeypatch.setattr(engine.spreads, "book_spreads", counting)
+    monkeypatch.setattr(header, "_SPREADS_MEMO", {})
+    conn = sqlite3.connect(db)
+    try:
+        header._spread_summary(conn, _CMDTY_AS_OF)
+        header._spread_summary(conn, _CMDTY_AS_OF)
+        assert calls == [_CMDTY_AS_OF]                                # the second render reads the memo
+        stat = os.stat(db)
+        os.utime(db, (stat.st_atime, stat.st_mtime + 5))              # the database changed
+        header._spread_summary(conn, _CMDTY_AS_OF)
+        assert len(calls) == 2
+    finally:
+        conn.close()
+
+
+def test_next_expiry_card_shows_expired_and_estimated_dates():
+    row = {"contract_id": "CLQ26 Comdty", "next_event": "last trade", "next_event_date": "2026-08-31",
+           "alert_date": "2026-07-01", "alert_basis": "estimated: first business day of Jul 2026",
+           "business_days": -55, "estimated": True, "level": "EXPIRED", "reason": "delivery risk, close now"}
+    later = {"contract_id": "CUX26 Comdty", "next_event": "last trade", "next_event_date": "2026-11-30",
+             "alert_date": "2026-10-01", "business_days": 9, "estimated": True, "level": "AMBER", "reason": ""}
+    card = header._next_expiry_card({"rows": [row, later], "counts": {"EXPIRED": 1, "RED": 0, "AMBER": 1, "GREEN": 0},
+                                     "settled_expired": [{"contract_id": "CLN26 Comdty"}]})
+    assert _texts(card) == [header.NEXT_EXPIRY_TITLE, "CLQ26 last trade", "2026-08-31 (est.) · EXPIRED"]
+    assert card.children[1].style == header._LEVEL_STYLES["EXPIRED"]
+    hover = card.children[1].title
+    assert "delivery risk, close now" in hover and "1 EXPIRED" in hover
+    assert "CUX26 Comdty: last trade 2026-11-30 (est.), alert 2026-10-01, in 9 business days, AMBER" in hover
+    assert "1 expired contract settled by the ledger: not alerts" in hover
+
+
+def test_compact_money_and_sector_labels():
+    assert header._fmt_compact(12_345_678) == "+12.3m"
+    assert header._fmt_compact(-4_100_000) == "−4.1m"
+    assert header._fmt_compact(999_960) == "+1.0m"
+    assert header._fmt_compact(812.4) == "+812"
+    assert header._fmt_compact(None) == "n/a" and header._fmt_compact(float("nan")) == "n/a"
+    assert header._sector_label("agriculture") == "Ags" and header._sector_label("energy") == "Energy"

@@ -9,9 +9,20 @@ Layout, top to bottom (`body`):
   2. `counts_strip`: one card per level (`counts`, worst first: EXPIRED and RED strong, AMBER
      warm, GREEN quiet) and the thresholds sentence from `thresholds`.
   3. `schedule_section`: one row per open position in the engine's order (worst first), or
-     the engine's `note` when there is nothing to show. Columns: #, Level, Contract, Name,
-     Exchange, Lots, Next event, Event date, Last trade, First notice, Alert date, Alert basis,
-     Business days to alert date, Calendar, Delivery, Dates source, Reason.
+     the engine's `note` when there is nothing to show. Columns: #, Level, (Product, only when
+     more than one product is present), Contract, Name, Exchange, Lots, Next event, Event date,
+     Last trade, First notice, Alert date, Alert basis, Business days to alert date, Calendar,
+     Delivery, Dates source, Reason.
+  4. `settled_section`: the engine's `settled_expired`, the contracts the ledger has frozen in
+     full, in a collapsed "Expired and settled (N)" section (contract, name, lots, last trade,
+     frozen at, reason). They never alert: no level colour, never in the counts. Absent when
+     the list is empty.
+
+Options on futures (CMDTY_OPTION) and LME prompts (LME_FWD) are rows like any future: an
+option's type, strike and its underlying future's event are on hover of its Next event cell;
+an LME row's tonnes are on hover of its Lots (a lot count the engine could not make reads
+"n/a" with the reason); a date that does not apply to the product (an option's or a prompt's
+first notice, a prompt's last trade) reads "—" with why on hover, never "missing".
 
 An estimated date (`estimated`) is always shown as estimated: every date of that row carries
 "(est.)" and Dates source reads "Estimated, not Bloomberg's". A row whose count reaches past
@@ -43,14 +54,20 @@ BODY_ID = "expiries-body"
 REFRESH_ID = "expiries-refresh"
 COUNTS_ID = "expiries-counts"
 TABLE_ID = "expiries-table"
+SETTLED_ID = "expiries-settled"
+SETTLED_TABLE_ID = "expiries-settled-table"
 
 NA = "n/a"
 EST = " (est.)"
 BEYOND = " (beyond coverage)"
 BUSINESS_DAYS_LABEL = "Business days to alert date"
 ESTIMATED_SOURCE = "Estimated, not Bloomberg's"
-SOURCE_LABELS = {"BLOOMBERG": "Bloomberg", "ESTIMATED": ESTIMATED_SOURCE, "": "unknown"}
+SOURCE_LABELS = {"BLOOMBERG": "Bloomberg", "ESTIMATED": ESTIMATED_SOURCE, "TICKET": "Ticket's prompt",
+                 "": "unknown"}
 LEVEL_LABELS = {EXPIRED: "Expired", RED: "Red", AMBER: "Amber", GREEN: "Green"}
+PRODUCT_LABELS = {"FUTURE": "Future", "CMDTY_OPTION": "Option", "LME_FWD": "LME prompt"}
+NOT_APPLICABLE = "—"
+NOT_APPLICABLE_TO = {"CMDTY_OPTION": "an option", "LME_FWD": "an LME prompt"}
 
 # Strong for EXPIRED and RED, warm for AMBER, quiet for GREEN.
 LEVEL_STYLES: Dict[str, dict] = {
@@ -89,6 +106,8 @@ def caption_block(result: Dict[str, Any]) -> html.Div:
         "contract, else last trade); while a physical contract's dates are estimated it is held early, "
         "at the first business day of the month before the contract month (its Alert basis says so).",
         f"A date marked{EST} is contract-master's estimate, not Bloomberg's: the real date may be earlier.",
+        "An option on a future alerts on its own expiry; an LME prompt alerts from the day it becomes the cash "
+        "date (the prompt less 2 LME business days), and its date is the ticket's own.",
     ]
     return html.Div(className="meta-line", children=[html.Span(line) for line in lines])
 
@@ -137,9 +156,51 @@ def _delivery(row: Dict[str, Any]) -> str:
     return delivery or NA
 
 
+def _number(v) -> str:
+    """A figure as the engine gave it, for a hover: thousands separated, no trailing zeros."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v) if v not in (None, "") else NA
+    return f"{f:,.0f}" if f.is_integer() else f"{f:,.4f}".rstrip("0")
+
+
+def _tonnes_tip(row: Dict[str, Any]) -> str:
+    """The tonnes of an LME row, as the engine gives them."""
+    tonnes = row.get("tonnes")
+    return f"{_number(tonnes)} tonnes" if tonnes is not None else "tonnes not on file"
+
+
+def _option_tip(row: Dict[str, Any]) -> str:
+    """An option row's type, strike, style and its underlying future's event."""
+    kind = (row.get("option_type") or "").title() or "Option"
+    style = (row.get("style") or "").title()
+    head = f"{kind}, strike {_number(row.get('strike'))}" + (f", {style}" if style else "")
+    und = row.get("underlying_id") or "underlying not on file"
+    event = row.get("underlying_event")
+    if event:
+        when = _dated(row.get("underlying_event_date"), bool(row.get("underlying_estimated")))
+        tail = f"underlying {und}: {event} {when}"
+    else:
+        tail = f"underlying {und}"
+    return f"{head}; {tail}."
+
+
+def _not_applicable(row: Dict[str, Any], what: str) -> Optional[str]:
+    """The hover of a date that does not apply to this row's product; None when it applies
+    (first notice: not to an option or a prompt; last trade: not to a prompt)."""
+    product = row.get("product") or ""
+    who = NOT_APPLICABLE_TO.get(product)
+    if who is None or (what == "last trade" and product != "LME_FWD"):
+        return None
+    extra = ": the prompt date is the event" if product == "LME_FWD" else ""
+    return f"{what.capitalize()} is not applicable to {who}{extra}."
+
+
 def schedule_record(row: Dict[str, Any], position: int) -> Tuple[dict, dict]:
     """(record, tooltips) of one table row, the engine's figures as they are: a date or a
-    count the engine left empty is "n/a" with the row's reason as its tooltip."""
+    count the engine left empty is "n/a" with the row's reason as its tooltip, or "—"
+    with why on hover when it does not apply to the product."""
     reason = row.get("reason") or ""
     est = bool(row.get("estimated"))
     tip: Dict[str, dict] = {}
@@ -148,9 +209,13 @@ def schedule_record(row: Dict[str, Any], position: int) -> Tuple[dict, dict]:
         if reason:
             tip[col] = {"value": reason, "type": "text"}
 
+    def hover(col: str, text: str) -> None:
+        tip[col] = {"value": text, "type": "text"}
+
     rec: Dict[str, Any] = {
         "rank": position,
         "level": row.get("level") or NA,
+        "product": product_label(row.get("product")),
         "contract": row.get("contract_id") or "",
         "name": row.get("name") or "",
         "exchange": row.get("exchange") or "",
@@ -171,14 +236,35 @@ def schedule_record(row: Dict[str, Any], position: int) -> Tuple[dict, dict]:
         rec["business_days"] = NA
     for col in ("contract", "level", "business_days", "calendar", "next_event_date", "alert_date", "alert_basis"):
         why(col)
+    for col, what in (("first_notice_date", "first notice"), ("last_trade_date", "last trade")):
+        na_text = _not_applicable(row, what)
+        if na_text and not row.get(col):
+            rec[col] = NOT_APPLICABLE
+            hover(col, na_text)
     if rec["lots"] is None:
         rec["lots"] = NA
+        why("lots")
+    if row.get("product") == "LME_FWD" or "tonnes" in row:
+        hover("lots", _tonnes_tip(row) + (f". {reason}" if rec["lots"] == NA and reason else ""))
+    if row.get("product") == "CMDTY_OPTION":
+        hover("next_event", _option_tip(row))
     return rec, tip
 
 
-def _columns() -> List[dict]:
+def product_label(product: Optional[str]) -> str:
+    """The product as the tab names it: "Future", "Option", "LME prompt"; anything else as given."""
+    return PRODUCT_LABELS.get(product or "", product or NA)
+
+
+def show_product(rows: List[Dict[str, Any]]) -> bool:
+    """The Product column is shown only when the rows hold more than one product."""
+    return len({r.get("product") or "" for r in rows}) > 1
+
+
+def _columns(with_product: bool = False) -> List[dict]:
     lots = rk.amount(2, nully="", trim=True)
-    return [rk.numeric("#", "rank", rk.count()), rk.text("Level", "level"), rk.text("Contract", "contract"),
+    product = [rk.text("Product", "product")] if with_product else []
+    return [rk.numeric("#", "rank", rk.count()), rk.text("Level", "level"), *product, rk.text("Contract", "contract"),
             rk.text("Name", "name"), rk.text("Exchange", "exchange"), rk.numeric("Lots", "lots", lots),
             rk.text("Next event", "next_event"), rk.text("Event date", "next_event_date"),
             rk.text("Last trade", "last_trade_date"), rk.text("First notice", "first_notice_date"),
@@ -212,7 +298,7 @@ def schedule_section(result: Dict[str, Any]) -> html.Div:
         return html.Div(className="section", children=[
             heading, html.P(result.get("note") or "No open position to show.", className="section-kicker")])
     recs = [schedule_record(r, i) for i, r in enumerate(rows, start=1)]
-    columns = _columns()
+    columns = _columns(show_product(rows))
     left = [c["id"] for c in columns if c["type"] == "text"]
     table = dash_table.DataTable(
         id=TABLE_ID,
@@ -237,19 +323,83 @@ def schedule_section(result: Dict[str, Any]) -> html.Div:
                                   {"if": {"column_id": "calendar", "filter_query": '{calendar} contains "beyond coverage"'},
                                    **_EST_STYLE}]
                                + [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{NA}'"}, **_NA_STYLE}
-                                  for c in ("business_days", "next_event_date", "alert_date", "last_trade_date", "lots")],
+                                  for c in ("business_days", "next_event_date", "alert_date", "last_trade_date", "lots")]
+                               + [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{NOT_APPLICABLE}'"},
+                                   "color": "var(--muted)"} for c in ("first_notice_date", "last_trade_date")],
         page_action="none",
     )
-    caption = ("One row per open commodity futures position, worst first. The level, the dates and the count are "
+    caption = ("One row per open commodity position (future, option on a future or LME prompt), worst first. The level, the dates and the count are "
                "expiry-monitor's; the reason on each row says why, and is on hover of its contract, level and count.")
     return html.Div(className="section", children=[heading, html.P(caption, className="section-kicker"), table])
+
+
+# --------------------------------------------------------------------------- 4. expired and settled
+def settled_record(entry: Dict[str, Any]) -> Tuple[dict, dict]:
+    """(record, tooltips) of one settled contract, the engine's entry as it is."""
+    reason = entry.get("reason") or ""
+    lots = rk.value(entry.get("lots"))
+    tip: Dict[str, dict] = {"contract": {"value": reason, "type": "text"}} if reason else {}
+    if entry.get("product") == "LME_FWD" or "tonnes" in entry:
+        tip["lots"] = {"value": _tonnes_tip(entry), "type": "text"}
+        tip["last_trade_date"] = {"value": "The LME prompt date.", "type": "text"}
+    rec = {
+        "contract": entry.get("contract_id") or "",
+        "name": entry.get("name") or "",
+        "lots": NA if lots is None else lots,
+        "last_trade_date": _dated(entry.get("last_trade_date"), bool(entry.get("estimated"))),
+        "frozen_at": entry.get("frozen_at") or NA,
+        "reason": reason,
+    }
+    return rec, tip
+
+
+def settled_section(result: Dict[str, Any]) -> Optional[html.Details]:
+    """The contracts the ledger has frozen in full, collapsed below the roll calendar; None
+    when there are none. No level and no colour: they never alert and are not counted."""
+    entries = result.get("settled_expired") or []
+    if not entries:
+        return None
+    recs = [settled_record(e) for e in entries]
+    any_prompt = any(e.get("product") == "LME_FWD" or "tonnes" in e for e in entries)
+    columns = [rk.text("Contract", "contract"), rk.text("Name", "name"),
+               rk.numeric("Lots", "lots", rk.amount(2, nully="", trim=True)),
+               rk.text("Last trade / prompt" if any_prompt else "Last trade", "last_trade_date"), rk.text("Frozen at", "frozen_at"),
+               rk.text("Reason", "reason")]
+    left = [c["id"] for c in columns if c["type"] == "text"]
+    table = dash_table.DataTable(
+        id=SETTLED_TABLE_ID,
+        columns=columns,
+        data=[r for r, _ in recs],
+        tooltip_data=[t for _, t in recs],
+        tooltip_delay=0, tooltip_duration=None,
+        **rk.sortable(SETTLED_TABLE_ID),
+        style_table={"overflowX": "auto"},
+        style_cell=_MONO,
+        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in left]
+                               + [{"if": {"column_id": "reason"}, "whiteSpace": "normal",
+                                   "minWidth": "320px", "maxWidth": "560px"}],
+        style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
+        style_data_conditional=[{"if": {"column_id": "last_trade_date", "filter_query": '{last_trade_date} contains "(est.)"'},
+                                 **_EST_STYLE}]
+                               + [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{NA}'"}, **_NA_STYLE}
+                                  for c in ("last_trade_date", "frozen_at", "lots")],
+        page_action="none",
+    )
+    caption = ("Contracts past their last trade whose every trade the ledger has frozen: they have left the book, "
+               "raise no alert and are not in the counts above. Listed here so none disappears unseen.")
+    return html.Details(id=SETTLED_ID, className="section", open=False, children=[
+        html.Summary(f"Expired and settled ({len(entries)})"),
+        html.P(caption, className="section-kicker"), table])
 
 
 # --------------------------------------------------------------------------- body and shell
 def body(result: Dict[str, Any]) -> html.Div:
     """The whole tab body from one `expiry_schedule` result."""
-    return html.Div(className="expiries-body", children=[
-        caption_block(result), counts_strip(result), schedule_section(result)])
+    parts = [caption_block(result), counts_strip(result), schedule_section(result)]
+    settled = settled_section(result)
+    if settled is not None:
+        parts.append(settled)
+    return html.Div(className="expiries-body", children=parts)
 
 
 def render(as_of: Optional[str], db_path) -> Any:

@@ -4,8 +4,11 @@
 
 # The fund's annualised vol allocation in USD (docs/open-questions.md item 15: capital 35m,
 # vol allocation 4.5m; the nm-dashboard's model book used 60m). The book's blended vol is
-# shown against it (vol_vs_target_pct).
+# shown against it (vol_vs_target_pct). The 4.5m is the macro fund's figure, a placeholder
+# until Jason sets his own (docs/open-questions.md C5): the tab says so from the two keys below.
 vol_target_usd: 4500000
+vol_target_placeholder: true
+vol_target_note: "placeholder: the macro fund's 4.5m, until Jason sets his own vol target (docs/open-questions.md C5)"
 
 # The stress cap as a percentage of the vol target (core/risk.py STRESS_FRACTION = 0.50):
 # the book's worst day ex shocks must stay under stress_cap_usd = vol_target_usd x stress_pct / 100.
@@ -34,7 +37,14 @@ worst_day_start: 2008-01-01
 
 # One-off shocks set to 0 in the worst-day-ex-shocks figure only (core/risk.py
 # STRESS_IGNORE_DATES); they stay in the vol, the VaR and the raw worst day. Add a line per
-# shock to exclude.
+# shock to exclude. One list for every row (FX, metal and commodity alike). The commodity
+# shock days (Phase 4, 2026-09-24) are the one-offs of the research history (from 2020):
+# the WTI May 2020 contract settling below zero and the June contract's fall the next day,
+# and the LME nickel squeeze (the 7th's +66 %, the 8th's suspension and cancelled trades).
 shock_dates:
   - {date: 2015-01-15, name: SNB floor removal}
   - {date: 2016-06-24, name: Brexit referendum result}
+  - {date: 2020-04-20, name: "Negative WTI: the May contract settles at -37.63"}
+  - {date: 2020-04-21, name: "Negative WTI aftermath: the June contract falls 43 %"}
+  - {date: 2022-03-07, name: "LME nickel squeeze: nickel +66 %"}
+  - {date: 2022-03-08, name: "LME nickel squeeze: trading suspended, the day's trades cancelled"}

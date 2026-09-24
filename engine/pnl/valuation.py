@@ -44,16 +44,32 @@ Total book strip and the bundles all include them.
     "Bloomberg's option price"): valued exactly like a future, `contracts * multiplier *
     (m - fill)`, with `m` Bloomberg's own price of the option (the official FUTURE_PX mark on
     the option's instrument at its expiry date, in the same price units as the fill). No
-    model is involved. Kept as the generic listed-option path for options on futures.
-  - FUTURE and EQ_OPTION in another currency (user decision 2026-09-24, "Spot of valuation
-    date"): that figure is `pnl_local`, in the instrument's `quote_ccy`, and `pnl_usd =
-    pnl_local * S` at spot of `as_of` like an FX row (a settled one at spot of its price's
-    date); S = 1 for a USD contract, so a USD future comes out exactly as before.
+    model is involved. Kept as the generic listed-option path.
+  - CMDTY_OPTION, an option on a commodity future (user decision 2026-09-24, C12): the same
+    listed path as EQ_OPTION (`LISTED_OPTION_PRODUCTS`), Bloomberg's own option price, no model.
+  - FUTURE and the listed options in another currency (user decision 2026-09-24, "Spot of
+    valuation date"): that figure is `pnl_local`, in the instrument's `quote_ccy`, and
+    `pnl_usd = pnl_local * S` at spot of `as_of` like an FX row; S = 1 for a USD contract, so
+    a USD future comes out exactly as before. A settled one converts at the spot of its expiry
+    date (user decision 2026-09-24, C9): the last official SPOT on or before expiry, exact rows
+    only (`usd_per_quote_on_or_before`), never the spot of its last price's date.
 
 Rates and NDFs left the app on 2026-09-24 (user, CLAUDE.md "Commodity conversion plan",
-Phase 2): `value_book` returns no IRS row (an old database's leftover swaps are simply not
-valued), and a forward on any currency is a deliverable FX forward, marked at its own value
-date's outright and converted at spot, whatever `instruments.is_ndf` says.
+Phase 2): a forward on any currency is a deliverable FX forward, marked at its own value
+date's outright and converted at spot, whatever `instruments.is_ndf` says. An old database's
+leftover trade of a retired product (`RETIRED_PRODUCTS`: IRS, SWAPTION, CAP_FLOOR) is never
+valued and never dropped (user decision 2026-09-24, C10): its row has blank P&L and a reason
+saying why, status as its dates say; one the ledger froze before the removal keeps showing its
+frozen `realised_pnl` figure.
+
+LME forwards (user decision 2026-09-24, CLAUDE.md "P&L conventions -> LME forwards", Phase 5):
+product LME_FWD on the metal's root id ('LME:CA', base_ccy = the root id, quote_ccy USD) is an
+FX forward in every respect (`FX_PRODUCTS`): `PnL_USD = tonnes x (m - f)`, `m` the official
+FWD_OUTRIGHT at the ticket's own prompt date, else the near-marks estimate along the day's LME
+curve, whose first pillar is the cash price (the metal's SPOT) placed at the LME cash date
+(`engine.lme.cash_date`, not the FX spot date); USD-quoted, so S = 1 (`usd_per_quote('USD')`).
+Settled, it is frozen at the metal's last official cash price on or before the prompt date
+(`engine.lme.settlement_price`). It is never relabelled FX_SPOT (`_reported_product`).
 
 One bad value, one trade (2026-09-18, guards only -- no formula changed): every stored
 figure a formula uses (`trades.quantity`, `trades.price`, `instruments.multiplier`, each
@@ -75,6 +91,9 @@ from typing import Optional
 
 import pandas as pd
 
+from engine.lme import cash_date as lme_cash_date
+from engine.lme import is_lme_instrument
+from engine.lme import settlement_price as lme_settlement_price
 from engine.pnl.calendar import _is_business_day, load_holidays, spot_date
 
 COLUMNS = [
@@ -84,7 +103,23 @@ COLUMNS = [
     "reason", "note",
 ]
 
-FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")
+# LME forwards (user decision 2026-09-24): the FX-forward rule on the metal's root id, S = 1.
+LME_PRODUCTS = ("LME_FWD",)
+FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP") + LME_PRODUCTS
+# Listed options valued at Bloomberg's own price like a future (`_open_future_row`): EQ_OPTION,
+# the generic path, and CMDTY_OPTION, an option on a commodity future (user decision 2026-09-24, C12).
+LISTED_OPTION_PRODUCTS = ("EQ_OPTION", "CMDTY_OPTION")
+FUTURE_PRODUCTS = ("FUTURE",) + LISTED_OPTION_PRODUCTS
+
+# Products that left the app on 2026-09-24 (CLAUDE.md "Commodity conversion plan", Phase 2), with
+# the reason an old database's leftover trade of one shows (user decision 2026-09-24, C10).
+_RATES_OPTIONS_GONE = ("rate options left the app on 2026-09-24; this old trade is not valued and "
+                       "leaves at the next upload")
+RETIRED_PRODUCTS = {
+    "IRS": "rate swaps left the app on 2026-09-24; this old trade is not valued and leaves at the next upload",
+    "SWAPTION": _RATES_OPTIONS_GONE,
+    "CAP_FLOOR": _RATES_OPTIONS_GONE,
+}
 
 _NAN = float("nan")
 
@@ -185,7 +220,22 @@ def _fut_sql(theme: bool) -> str:
         SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
                t.trade_date, t.quantity, t.price AS fill, i.multiplier, i.quote_ccy, l.settle_date
         FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
-        WHERE t.product IN ('FUTURE', 'EQ_OPTION') AND t.trade_date <= :as_of AND l.leg_no = 1
+        WHERE t.product IN ({", ".join(f"'{p}'" for p in FUTURE_PRODUCTS)}) AND t.trade_date <= :as_of
+          AND l.leg_no = 1
+    """
+
+
+def _retired_sql(theme: bool) -> str:
+    """Trades of a retired product: no instrument or leg is required (a swap's legs share its
+    maturity; the latest leg date is its settle date, '' when it has no leg)."""
+    theme_col = "COALESCE(t.theme, '')" if theme else "''"
+    return f"""
+        SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
+               t.trade_date, t.quantity, t.price AS fill,
+               COALESCE((SELECT MAX(l.settle_date) FROM trade_legs l WHERE l.trade_id = t.trade_id), '')
+                   AS settle_date
+        FROM trades_official t
+        WHERE t.product IN ({", ".join(f"'{p}'" for p in RETIRED_PRODUCTS)}) AND t.trade_date <= :as_of
     """
 
 
@@ -311,12 +361,20 @@ def _neighbour_curves(conn, pair: str, settle_date: str, as_of: str) -> Optional
     return v0, f"{INTERP}: FWD_OUTRIGHT from the {d0} curve of {pair} ({when})"
 
 
+def _is_lme(instrument_id: str) -> bool:
+    """An LME forward's instrument, the metal's root id ('LME:CA'; `engine.lme.is_lme_instrument`)."""
+    return str(instrument_id).startswith("LME:") and is_lme_instrument(instrument_id)
+
+
 def _day_pillars(conn, pair: str, as_of: str) -> list:
     """[(settle_date, value, source)] of the pair's official curve on `as_of`: its SPOT at
     the pair's spot date (engine.pnl.calendar.spot_date, the app's one spot-date rule since
     2026-09-22: T+2 weekdays, T+1 for USDCAD / USDTRY / USDPHP / USDRUB, rolled off a holiday;
     the historical curve builder places its tenors from the same date) and every
-    FWD_OUTRIGHT row of the pair dated `as_of`, sorted by date, one per date."""
+    FWD_OUTRIGHT row of the pair dated `as_of`, sorted by date, one per date. An LME forward's
+    curve (`_is_lme`, user decision 2026-09-24) has its cash price (the metal's SPOT) at the LME
+    cash date (`engine.lme.cash_date`: T+2 on the LME calendar), where the 3M and monthly prompts
+    are measured from."""
     cache = getattr(conn, "official_marks", None)
     if cache is not None and conn.as_of == as_of:
         rows = [(s, v, src) for (i, s, mt), (v, src) in cache.items() if i == pair and mt == "FWD_OUTRIGHT"]
@@ -328,7 +386,8 @@ def _day_pillars(conn, pair: str, as_of: str) -> list:
     by_date = {str(s): (v, src) for s, v, src in rows}
     spot = _mark_at(conn, pair, as_of, "SPOT", as_of)
     if spot is not None:
-        by_date.setdefault(spot_date(as_of, pair).isoformat(), (spot[0], spot[1]))
+        pillar = lme_cash_date(as_of) if _is_lme(pair) else spot_date(as_of, pair)
+        by_date.setdefault(pillar.isoformat(), (spot[0], spot[1]))
     return [(d, _number(v, f"marks.value (curve pillar {pair} {d} on {as_of})"), src)
             for d, (v, src) in sorted(by_date.items())]
 
@@ -418,6 +477,27 @@ def usd_per_quote(conn: sqlite3.Connection, quote_ccy: str, as_of: str) -> tuple
     return out
 
 
+def usd_per_quote_on_or_before(conn: sqlite3.Connection, quote_ccy: str, date: str) -> tuple:
+    """(S, pair, source, spot_date): USD per unit of `quote_ccy` at the last official SPOT on or
+    before `date`, the conversion a settled future or listed option freezes at, `date` being its
+    expiry (user decision 2026-09-24, C9: "the spot of its expiry date ... the last spot on or
+    before expiry, as FX"). Exact `marks_official` rows only, never the near-marks estimate:
+    USD<ccy> inverted first, then <ccy>USD, as `usd_per_quote`. USD is (1.0, 'USD', 'identity',
+    `date`); with no spot on or before `date` it is (NaN, None, None, None). A spot whose stored
+    value is not a number raises `_BadValue`, so the trade that needs it is reported."""
+    if quote_ccy == "USD":
+        return 1.0, "USD", "identity", date
+    inv_pair = f"USD{quote_ccy}"
+    hit = _last_official_on_or_before(conn, inv_pair, "SPOT", date)
+    if hit is not None and hit[0]:
+        return 1.0 / hit[0], inv_pair, hit[2], str(hit[1])
+    direct_pair = f"{quote_ccy}USD"
+    hit = _last_official_on_or_before(conn, direct_pair, "SPOT", date)
+    if hit is not None:
+        return hit[0], direct_pair, hit[2], str(hit[1])
+    return _NAN, None, None, None
+
+
 def _realised_row(conn: sqlite3.Connection, trade_id: str) -> Optional[pd.Series]:
     realised = getattr(conn, "realised", None)
     if realised is not None:
@@ -475,11 +555,12 @@ def value_book(conn: sqlite3.Connection, as_of: str, trade_ids=None) -> pd.DataF
     fx = pd.read_sql_query(_fx_sql(theme), conn, params=(*FX_PRODUCTS, as_of))
     fut = pd.read_sql_query(_fut_sql(theme), conn, params={"as_of": as_of})
     opt = pd.read_sql_query(_opt_sql(theme, _has_option_terms(conn)), conn, params={"as_of": as_of})
+    retired = pd.read_sql_query(_retired_sql(theme), conn, params={"as_of": as_of})
     conn = _BookConn(conn, as_of)  # one load of the day's marks and realised rows for every row below
     conn.closed_out = closed_out_from_rows(opt)
     if trade_ids is not None:
         wanted = set(trade_ids)
-        fx, fut, opt = (f[f["trade_id"].isin(wanted)] for f in (fx, fut, opt))
+        fx, fut, opt, retired = (f[f["trade_id"].isin(wanted)] for f in (fx, fut, opt, retired))
 
     for r in fx.itertuples(index=False):
         rows.append(_guarded_row(conn, r, as_of, _open_fx_row, _settled_fx_row, _TRADE_NUMBERS, holidays))
@@ -487,6 +568,8 @@ def value_book(conn: sqlite3.Connection, as_of: str, trade_ids=None) -> pd.DataF
         rows.append(_guarded_row(conn, r, as_of, _open_future_row, _settled_future_row, _FUTURE_NUMBERS))
     for r in opt.itertuples(index=False):
         rows.append(_guarded_row(conn, r, as_of, _open_option_row, _settled_option_row, _TRADE_NUMBERS))
+    for r in retired.itertuples(index=False):
+        rows.append(_retired_row(conn, r, as_of))
 
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
@@ -550,12 +633,44 @@ def _guarded_row(conn, r, as_of, open_builder, settled_builder, numbers, holiday
         return {**base, **_unpriced(f"trade {r.trade_id}: could not be valued ({type(exc).__name__}: {exc})")}
 
 
+def _retired_row(conn, r, as_of) -> dict:
+    """A leftover trade of a retired product (`RETIRED_PRODUCTS`) on an old database (user
+    decision 2026-09-24, C10: "for a leftover open swap, as a blank row with its reason, never
+    dropped"): no formula, no mark read. Status as its dates say; blank P&L with the product's
+    reason, except a settled trade the ledger froze before the removal, which shows its frozen
+    `realised_pnl` figure as it was (a swap's in USD already: spot 1 / identity)."""
+    base = {
+        "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": r.product,
+        "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
+        "settle_date": r.settle_date, "quantity": _NAN, "fill": _NAN,
+        "status": "SETTLED" if r.settle_date and str(r.settle_date) < as_of else "OPEN",
+    }
+    for attr, column in _TRADE_NUMBERS:   # shown when they are numbers; nothing is computed from them
+        try:
+            base[attr] = _number(getattr(r, attr), column)
+        except _BadValue:
+            pass
+    reason = RETIRED_PRODUCTS[r.product]
+    if base["status"] == "SETTLED":
+        row, pnl, unreadable = _readable_realised(conn, r.trade_id)
+        if row is not None:
+            return {**base, **dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
+                                   spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=pnl,
+                                   pnl_spot_usd=pnl, pnl_carry_usd=0.0, reason="", note=row["note"])}
+        if unreadable:
+            reason += f"; its realised_pnl row is unreadable ({unreadable})"
+    return {**base, **_unpriced(reason)}
+
+
 def _open_fx_row(conn, r, as_of) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="", note="")
     m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
     if m_hit is None:
-        out["reason"] = f"no FWD_OUTRIGHT mark for {r.instrument_id} settle {r.settle_date} on {as_of}"
+        out["reason"] = (f"no LME price of {r.instrument_id} for prompt {r.settle_date} on {as_of}: no cash price "
+                         f"or forward of the metal on file on that day or any other close"
+                         if r.product in LME_PRODUCTS else
+                         f"no FWD_OUTRIGHT mark for {r.instrument_id} settle {r.settle_date} on {as_of}")
         return out
     m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
@@ -619,13 +734,28 @@ def _frozen_row(conn, r) -> Optional[dict]:
     and runs on read-only connections). Returns None when that mark is not on file, so the
     caller reports Unavailable; a future or listed option whose price is on file but whose
     USD conversion is not comes back unpriced with that reason instead (reviewer W-3,
-    2026-09-24). Added 2026-09-17: before this, realise_settled was only
+    2026-09-24). A future or listed option converts at the spot of its expiry date
+    (`usd_per_quote_on_or_before`, user decision 2026-09-24, C9). Added 2026-09-17: before this, realise_settled was only
     ever called from the Bloomberg feed, so on any PC without a live session every
     settled trade stayed Unavailable forever and took the headline LTD with it, even with
     every official mark loaded. The arithmetic here and in realise_settled must stay
     identical; realise_settled remains the path that persists the frozen figure."""
     product, settle = r.product, r.settle_date
-    if product in FX_PRODUCTS:
+    conversion = ""
+    if product in LME_PRODUCTS:
+        # the metal's last official cash price on or before the prompt date (user decision
+        # 2026-09-24, "P&L conventions -> LME forwards"); USD-quoted, so S = 1
+        hit = lme_settlement_price(conn, r.instrument_id, settle)
+        if hit is None:
+            return None
+        m, m_day, m_src = hit
+        s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, m_day)
+        if s != s or s_pair is None:
+            return None
+        pnl_local = r.quantity * (m - r.fill)
+        pnl_usd = pnl_local * s
+        spot, spot_src, mark_label = s, s_src, "cash price"
+    elif product in FX_PRODUCTS:
         hit = _last_official_on_or_before(conn, r.instrument_id, "SPOT", settle)
         if hit is None:
             return None
@@ -636,22 +766,25 @@ def _frozen_row(conn, r) -> Optional[dict]:
         pnl_local = r.quantity * (m - r.fill)
         pnl_usd = pnl_local * s
         spot, spot_src, mark_label = s, s_src, "spot"
-    elif product in ("FUTURE", "EQ_OPTION"):
+    elif product in FUTURE_PRODUCTS:
         hit = _last_official_on_or_before(conn, r.instrument_id, "FUTURE_PX", settle)
         if hit is None:
             return None
         m, m_day, m_src = hit
-        # converted at spot of the price's own date, as the FX branch (`_open_future_row`)
-        s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, m_day)
+        # converted at the spot of its expiry date, the last official SPOT on or before it, exact
+        # rows only (user decision 2026-09-24, C9), never the spot of the price's own date
+        s, s_pair, s_src, s_day = usd_per_quote_on_or_before(conn, r.quote_ccy, settle)
         pnl_local = r.quantity * r.multiplier * (m - r.fill)
         if s != s or s_pair is None:
             # the price is on file, the conversion is not: name that gap, as the ledger does
             # (reviewer W-3, 2026-09-24), with the price and local P&L shown like the open row
             return dict(_unpriced(f"settled trade {r.trade_id}: no SPOT for USD conversion of {r.quote_ccy} "
-                                  f"on {m_day}, so it cannot be frozen"),
+                                  f"on or before its expiry {settle}, so it cannot be frozen"),
                         mark=m, mark_date=m_day, mark_source=m_src, pnl_local=pnl_local)
         pnl_usd = pnl_local * s
         spot, spot_src, mark_label = s, s_src, "settlement price"
+        if s_day != settle:
+            conversion = f"; converted at {s_pair} spot dated {s_day} (last before expiry)"
     elif product == "FX_OPTION":
         closed = getattr(conn, "closed_out", {}).get(r.trade_id)
         if closed is not None:   # bought and sold back in full: the closing fill, never a PREMIUM mark
@@ -671,7 +804,7 @@ def _frozen_row(conn, r) -> Optional[dict]:
     when = "" if m_day == settle else f" dated {m_day} (last before settlement)"
     return dict(mark=m, mark_date=m_day, mark_source=m_src, spot=spot, spot_source=spot_src,
                 pnl_local=pnl_local, pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd, pnl_carry_usd=0.0, reason="",
-                note=f"frozen at {mark_label}{when}; not yet recorded in realised_pnl")
+                note=f"frozen at {mark_label}{when}{conversion}; not yet recorded in realised_pnl")
 
 
 def _provisional(conn, r, as_of, unreadable: str = "") -> dict:
@@ -758,7 +891,7 @@ def _open_future_row(conn, r, as_of) -> dict:
     m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FUTURE_PX", as_of)
     if m_hit is None:
         out["reason"] = (f"no Bloomberg price for the listed option {r.instrument_id} on {as_of}"
-                         if r.product == "EQ_OPTION" else
+                         if r.product in LISTED_OPTION_PRODUCTS else
                          f"no FUTURE_PX mark for {r.instrument_id} expiry {r.settle_date} on {as_of}")
         return out
     m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FUTURE_PX", as_of), m_hit[1]
@@ -779,10 +912,10 @@ def _open_future_row(conn, r, as_of) -> dict:
 def _settled_future_row(conn, r, as_of) -> dict:
     """The frozen row from `realised_pnl`, never recomputed. A USD contract shows spot 1 /
     identity as always; a contract the ledger froze in another currency (`realised_pnl.currency`
-    = the quote currency, converted at spot of the price's date) shows that conversion: S of
-    `spot_as_of_date`, the date the ledger froze at (`usd_per_quote`, the ledger's own lookup),
-    blank when no spot is on file any more. Only the `spot` column comes from that lookup; the
-    P&L is the stored figure."""
+    = the quote currency, converted at the spot of its expiry date, user decision 2026-09-24,
+    C9) shows that conversion: the last official SPOT on or before the expiry
+    (`usd_per_quote_on_or_before`, the freeze's own lookup), blank when no spot is on file any
+    more. Only the `spot` column comes from that lookup; the P&L is the stored figure."""
     row, pnl, unreadable = _readable_realised(conn, r.trade_id)
     if row is None:
         return _provisional(conn, r, as_of, unreadable)
@@ -790,7 +923,7 @@ def _settled_future_row(conn, r, as_of) -> dict:
     ccy = str(row.get("currency") or "USD")
     if ccy != "USD":
         try:
-            s, s_pair, s_src = usd_per_quote(conn, ccy, str(row["spot_as_of_date"]))
+            s, s_pair, s_src, _s_day = usd_per_quote_on_or_before(conn, ccy, r.settle_date)
         except _BadValue:   # a display column: a bad spot never blanks the frozen P&L
             s, s_pair, s_src = _NAN, None, ""
         spot, spot_src = (s, s_src) if s == s and s_pair is not None else (_NAN, "")
@@ -896,13 +1029,10 @@ def close_out_ccy(base_ccy: str, quote_ccy: str, fill: float) -> str:
 
 def last_usd_conversion(conn, ccy: str, day: str) -> Optional[tuple]:
     """(S, as_of_date, source): USD per unit of `ccy` at the last official SPOT on or before
-    `day`, tried in `usd_per_quote`'s order; None when neither USD pair has one."""
-    if ccy == "USD":
-        return 1.0, day, "identity"
-    hit = _last_official_on_or_before(conn, f"USD{ccy}", "SPOT", day)
-    if hit is not None and hit[0]:
-        return 1.0 / hit[0], hit[1], hit[2]
-    return _last_official_on_or_before(conn, f"{ccy}USD", "SPOT", day)
+    `day`, tried in `usd_per_quote`'s order; None when neither USD pair has one. The same
+    lookup as `usd_per_quote_on_or_before`, in the shape the close-out callers read."""
+    s, pair, source, spot_day = usd_per_quote_on_or_before(conn, ccy, day)
+    return None if pair is None else (s, spot_day, source)
 
 
 def _close_out_note(closed: CloseOut) -> str:

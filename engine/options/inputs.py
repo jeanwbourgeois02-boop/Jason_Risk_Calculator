@@ -78,7 +78,10 @@ from __future__ import annotations
 import datetime
 import sqlite3
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:  # annotations only; the run-time import of rates.py stays local to its caller below
+    from engine.options.rates import RateInput
 
 # ------------------------------------------------------------------- vol store
 

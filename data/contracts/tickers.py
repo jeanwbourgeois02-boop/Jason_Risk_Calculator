@@ -81,18 +81,70 @@ def parse_bbg_ticker(ticker: str) -> Optional[Tuple[str, str, str, str]]:
     return m.group("root"), m.group("code"), m.group("year"), YELLOW_KEYS[m.group("key").lower()]
 
 
-def canonical_from_ticker(ticker: str, near: date) -> str:
-    """A contract ticker in either year form as its canonical id; a one-digit year is read as
-    the year nearest ``near`` (a date in the contract's life, such as its last trade date).
+def format_strike(strike) -> str:
+    """A strike as Bloomberg writes it in an option ticker: the quoted scale, no trailing zeros.
 
-    ``('CLZ6 Comdty', date(2026, 11, 19))`` -> ``'CLZ26 Comdty'``. Raises ValueError when the
-    string is not a contract ticker.
+    ``70.0`` -> ``'70'``, ``65.5`` -> ``'65.5'``, ``'3.250'`` -> ``'3.25'``. Raises ValueError
+    for a strike that is not a finite number.
+    """
+    x = float(strike)
+    if x != x or x in (float("inf"), float("-inf")):
+        raise ValueError(f"strike {strike!r} is not a finite number")
+    text = f"{x:.10f}".rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
+def cp_letter(option_type: str) -> str:
+    """``'CALL'`` / ``'C'`` -> ``'C'``, ``'PUT'`` / ``'P'`` -> ``'P'`` (any case)."""
+    t = str(option_type or "").strip().upper()
+    if t in ("C", "CALL"):
+        return "C"
+    if t in ("P", "PUT"):
+        return "P"
+    raise ValueError(f"option type {option_type!r} is not CALL or PUT")
+
+
+def make_option_id(bbg_root: str, code: str, year: int, option_type: str, strike,
+                   yellow_key: str = "Comdty") -> str:
+    """Canonical option id, Bloomberg's commodity option form with a two-digit year:
+    ``('CL', 'Z', 2026, 'CALL', 70)`` -> ``'CLZ26C 70 Comdty'``; ``('C', 'Z', 2026, 'P', 450)``
+    -> ``'C Z26P 450 Comdty'``."""
+    month_from_code(code)
+    return (f"{padded_root(bbg_root)}{code.upper()}{int(year) % 100:02d}{cp_letter(option_type)} "
+            f"{format_strike(strike)} {yellow_key}")
+
+
+_OPT_RE = re.compile(r"^(?P<root>[A-Z0-9]{1,6}?)(?P<pad>\s*)(?P<code>[FGHJKMNQUVXZ])(?P<year>\d{1,2})"
+                     r"(?P<cp>[CP])\s+(?P<strike>-?\d+(?:\.\d+)?)\s+(?P<key>COMDTY|INDEX|CURNCY)$")
+
+
+def parse_option_ticker(ticker: str) -> Optional[Tuple[str, str, str, str, str, str]]:
+    """``'CLZ6C 70 Comdty'`` -> ``('CL', 'Z', '6', 'C', '70', 'Comdty')``; None when it is not a
+    commodity option ticker."""
+    m = _OPT_RE.match(re.sub(r"\s+", " ", str(ticker or "").strip().upper()))
+    if not m:
+        return None
+    return (m.group("root"), m.group("code"), m.group("year"), m.group("cp"), m.group("strike"),
+            YELLOW_KEYS[m.group("key").lower()])
+
+
+def canonical_from_ticker(ticker: str, near: date) -> str:
+    """A contract or option ticker in either year form as its canonical id; a one-digit year is
+    read as the year nearest ``near`` (a date in the contract's life, such as its last trade date).
+
+    ``('CLZ6 Comdty', date(2026, 11, 19))`` -> ``'CLZ26 Comdty'``; ``('CLZ6C 70 Comdty', ...)``
+    -> ``'CLZ26C 70 Comdty'``. Raises ValueError when the string is neither.
     """
     parts = parse_bbg_ticker(ticker)
-    if parts is None:
-        raise ValueError(f"{ticker!r} is not a contract ticker such as 'CLZ26 Comdty'")
-    root, code, year, key = parts
-    return make_contract_id(root, code, expand_year(year, near.year), key)
+    if parts is not None:
+        root, code, year, key = parts
+        return make_contract_id(root, code, expand_year(year, near.year), key)
+    opt = parse_option_ticker(ticker)
+    if opt is not None:
+        root, code, year, cp, strike, key = opt
+        return make_option_id(root, code, expand_year(year, near.year), cp, strike, key)
+    raise ValueError(f"{ticker!r} is not a contract ticker such as 'CLZ26 Comdty' "
+                     f"or an option ticker such as 'CLZ26C 70 Comdty'")
 
 
 def to_date(value) -> date:

@@ -6,13 +6,16 @@ One place for everything the blotter export does not carry:
      flagged red under Options) -- the same `ui.tabs.options.terms_editor` component,
      shown here as well as under Options (only one sub-tab body is rendered at a time,
      so the shared component ids never coexist).
-  2. **Book an OTC trade by hand** -- an FX option (vanilla, digital, barrier, touch ...)
-     or an FX forward/spot the export does not list at all, written through
+  2. **Book an OTC trade by hand** -- an FX option (vanilla, digital, barrier, touch ...),
+     an FX forward/spot or an FX swap (a hedge roll: one amount, a near and a far date,
+     each with its own rate; `data.ingest.manual.book_fx_swap` writes it as two MANUAL
+     trades sharing a `SWAP-` package) the export does not list at all, written through
      `data.ingest.manual` as `trades.source = 'MANUAL'` with the same instrument /
      trade / leg shape the blotter parser produces, so it prices, hedges and shows in
      every view like any other trade. A blotter re-upload never removes it.
   3. **Manual trades on file** -- the list, with a delete control (the only way a
-     MANUAL trade leaves the book).
+     MANUAL trade leaves the book). A swap's two trades are listed with their package, and
+     deleting either removes both (`delete_manual_trade` returns every id it removed).
 
 Writes go through `data.ingest.schema.connect` (writable), never the read-only handle
 the view callbacks use. A booking asks nothing of Bloomberg (2026-09-21: pulls are on
@@ -49,6 +52,12 @@ PREMIUM_ID = "manual-premium"
 AMOUNT_ID = "manual-amount"
 RATE_ID = "manual-rate"
 VALUE_DATE_ID = "manual-value-date"
+OUTRIGHT_FIELDS_ID = "manual-outright-fields"
+SWAP_FIELDS_ID = "manual-swap-fields"
+NEAR_DATE_ID = "manual-near-date"
+NEAR_RATE_ID = "manual-near-rate"
+FAR_DATE_ID = "manual-far-date"
+FAR_RATE_ID = "manual-far-rate"
 BOOK_ID = "manual-book"
 BOOK_STATUS_ID = "manual-book-status"
 LIST_ID = "manual-list"
@@ -58,12 +67,20 @@ DELETE_ID = "manual-delete"
 DELETE_STATUS_ID = "manual-delete-status"
 
 PRODUCT_OPTIONS = [{"label": "FX option", "value": "FX_OPTION"},
-                   {"label": "FX forward / spot", "value": "FX_FWD"}]
+                   {"label": "FX forward / spot", "value": "FX_FWD"},
+                   {"label": "FX swap", "value": "FX_SWAP"}]
+# The products that use the base-amount group (FORWARD_FIELDS_ID): the forward's outright
+# fields or the swap's near / far fields sit inside it, switched by `_toggle_swap_fields`.
+_AMOUNT_PRODUCTS = ("FX_FWD", "FX_SWAP")
+_SHOWN_INLINE = {"display": "contents"}   # the inner group's fields flow in the parent toolbar
+_HIDDEN = {"display": "none"}
 SIDE_OPTIONS = [{"label": "Buy", "value": "BUY"}, {"label": "Sell", "value": "SELL"}]
 
 _LIST_COLUMNS = [("trade_id", "Trade id"), ("product", "Product"), ("instrument_id", "Instrument"),
                  ("trade_date", "Trade date"), ("side", "Side"), ("amount", "Amount"), ("price", "Fill"),
-                 ("settle_date", "Settle / expiry"), ("terms", "Terms"), ("counterparty", "Counterparty")]
+                 ("settle_date", "Settle / expiry"), ("terms", "Terms"), ("package", "Package"),
+                 ("counterparty", "Counterparty")]
+_PRODUCT_WORDS = {"FX_OPTION": "Option", "FX_FWD": "Forward", "FX_SWAP": "Swap"}
 
 
 def _today_ny() -> str:
@@ -114,10 +131,23 @@ def booking_form() -> html.Div:
         html.Div(id=FORWARD_FIELDS_ID, className="toolbar", style={"display": "none"}, children=[
             _field("Amount (base ccy)", dcc.Input(id=AMOUNT_ID, type="number", step="any",
                                                   placeholder="1000000", style={"width": "130px"})),
-            _field("Rate (outright)", dcc.Input(id=RATE_ID, type="number", step="any",
-                                                placeholder="147.25", style={"width": "120px"})),
-            _field("Value date", dcc.Input(id=VALUE_DATE_ID, type="text", placeholder="YYYY-MM-DD",
-                                           style={"width": "120px"})),
+            html.Div(id=OUTRIGHT_FIELDS_ID, style=_SHOWN_INLINE, children=[
+                _field("Rate (outright)", dcc.Input(id=RATE_ID, type="number", step="any",
+                                                    placeholder="147.25", style={"width": "120px"})),
+                _field("Value date", dcc.Input(id=VALUE_DATE_ID, type="text", placeholder="YYYY-MM-DD",
+                                               style={"width": "120px"})),
+            ]),
+            # FX swap: Side is the base currency on the near date, reversed on the far date.
+            html.Div(id=SWAP_FIELDS_ID, style=_HIDDEN, children=[
+                _field("Near date", dcc.Input(id=NEAR_DATE_ID, type="text", placeholder="YYYY-MM-DD",
+                                              style={"width": "120px"})),
+                _field("Near rate", dcc.Input(id=NEAR_RATE_ID, type="number", step="any",
+                                              placeholder="147.10", style={"width": "120px"})),
+                _field("Far date", dcc.Input(id=FAR_DATE_ID, type="text", placeholder="YYYY-MM-DD",
+                                             style={"width": "120px"})),
+                _field("Far rate", dcc.Input(id=FAR_RATE_ID, type="number", step="any",
+                                             placeholder="146.40", style={"width": "120px"})),
+            ]),
         ]),
         html.Div(className="toolbar", children=[
             html.Button("Book trade", id=BOOK_ID, n_clicks=0, className="btn"),
@@ -126,10 +156,34 @@ def booking_form() -> html.Div:
     ])
 
 
+def _swap_dates(rows: List[dict]) -> dict:
+    """trade_id -> 'Near date' / 'Far date' for the FX swaps listed: within a package the
+    trade settling first is the near date (manual_trades gives each trade's first-leg date)."""
+    packages: dict = {}
+    for r in rows:
+        if r["product"] == "FX_SWAP" and r.get("package_id"):
+            packages.setdefault(r["package_id"], []).append(r)
+    out = {}
+    for members in packages.values():
+        members = sorted(members, key=lambda r: (r["settle_date"], r["trade_id"]))
+        for i, r in enumerate(members):
+            out[r["trade_id"]] = "Near date" if i == 0 else "Far date"
+    return out
+
+
+def _package(r: dict) -> str:
+    """The package a trade belongs to; '' for a trade that is its own package."""
+    package_id = r.get("package_id") or ""
+    return package_id if package_id != r["trade_id"] else ""
+
+
 def _list_records(rows: List[dict]) -> List[dict]:
     records = []
+    swap_dates = _swap_dates(rows)
     for r in rows:
-        if r["product"] == "FX_OPTION":
+        if r["product"] == "FX_SWAP":
+            terms = swap_dates.get(r["trade_id"], "")
+        elif r["product"] == "FX_OPTION":
             terms = f"{(r['payoff'] or 'VANILLA').title()} {(r['option_type'] or '').title()}"
             if r["strike"]:
                 terms += f" strike {r['strike']:g}"
@@ -138,13 +192,20 @@ def _list_records(rows: List[dict]) -> List[dict]:
         else:
             terms = ""
         records.append({
-            "trade_id": r["trade_id"], "product": {"FX_OPTION": "Option", "FX_FWD": "Forward", "FX_SWAP": "Swap"}.get(r["product"], r["product"]),
+            "trade_id": r["trade_id"], "product": _PRODUCT_WORDS.get(r["product"], r["product"]),
             "instrument_id": r["instrument_id"], "trade_date": r["trade_date"],
             "side": "Buy" if r["quantity"] >= 0 else "Sell", "amount": abs(round(float(r["quantity"]))),
             "price": rk.value(r["price"]),   # numbers (ui.tabs.ranking): the table prints them
-            "settle_date": r["settle_date"], "terms": terms, "counterparty": r["counterparty"],
+            "settle_date": r["settle_date"], "terms": terms, "package": _package(r),
+            "counterparty": r["counterparty"],
         })
     return records
+
+
+def _delete_label(r: dict) -> str:
+    label = f"{r['trade_id']}  {r['instrument_id']}"
+    package = _package(r)
+    return f"{label}  (swap {package}: both dates go)" if package else label
 
 
 def manual_list(conn: sqlite3.Connection) -> html.Div:
@@ -168,7 +229,7 @@ def manual_list(conn: sqlite3.Connection) -> html.Div:
     body.append(html.Div(className="toolbar", children=[
         _field("Delete a manual trade", dcc.Dropdown(
             id=DELETE_PICK_ID, style={"width": "260px"},
-            options=[{"label": f"{r['trade_id']}  {r['instrument_id']}", "value": r["trade_id"]} for r in rows],
+            options=[{"label": _delete_label(r), "value": r["trade_id"]} for r in rows],
             value=rows[0]["trade_id"] if rows else None, clearable=False, disabled=not rows)),
         html.Button("Delete", id=DELETE_ID, n_clicks=0, className="btn btn--ghost", disabled=not rows),
         html.Span(id=DELETE_STATUS_ID, className="status-line", role="status"),
@@ -196,9 +257,19 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Input(PRODUCT_ID, "value"),
     )
     def _toggle_fields(product):
-        if product == "FX_FWD":
+        if product in _AMOUNT_PRODUCTS:
             return {"display": "none"}, {}
         return {}, {"display": "none"}
+
+    @app.callback(
+        Output(OUTRIGHT_FIELDS_ID, "style"),
+        Output(SWAP_FIELDS_ID, "style"),
+        Input(PRODUCT_ID, "value"),
+    )
+    def _toggle_swap_fields(product):
+        if product == "FX_SWAP":
+            return _HIDDEN, _SHOWN_INLINE
+        return _SHOWN_INLINE, _HIDDEN
 
     def _writable():
         from data.ingest.schema import connect
@@ -214,17 +285,33 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         State(BARRIER_ID, "value"), State(EXPIRY_ID, "value"), State(NOTIONAL_ID, "value"),
         State(PREMIUM_ID, "value"),
         State(AMOUNT_ID, "value"), State(RATE_ID, "value"), State(VALUE_DATE_ID, "value"),
+        State(NEAR_DATE_ID, "value"), State(NEAR_RATE_ID, "value"),
+        State(FAR_DATE_ID, "value"), State(FAR_RATE_ID, "value"),
         prevent_initial_call=True,
     )
     def _book(n_clicks, product, pair, side, trade_date, counterparty, option_type, payoff, strike,
-              barrier, expiry, notional, premium, amount, rate, value_date):
+              barrier, expiry, notional, premium, amount, rate, value_date,
+              near_date=None, near_rate=None, far_date=None, far_rate=None):
         if not n_clicks:
             return no_update, no_update
         from data.ingest import manual
+        if product == "FX_SWAP":
+            blank = _blank_swap_fields(amount, near_date, near_rate, far_date, far_rate)
+            if blank:
+                verb = "are" if " and " in blank else "is"
+                return (html.Span(f"Not booked: the {blank} {verb} blank.", className="source-result--error"),
+                        no_update)
         try:
             conn = _writable()
             try:
-                if product == "FX_FWD":
+                if product == "FX_SWAP":
+                    near_id, far_id = manual.book_fx_swap(
+                        conn, pair=pair, side=side, base_amount=amount, near_rate=near_rate, far_rate=far_rate,
+                        near_date=near_date, far_date=far_date, trade_date=trade_date, counterparty=counterparty)
+                    package = conn.execute("SELECT package_id FROM trades WHERE trade_id = ?",
+                                           (near_id,)).fetchone()[0]   # ingest's package, never rebuilt here
+                    trade_id = f"FX swap {package} (near date {near_id}, far date {far_id})"
+                elif product == "FX_FWD":
                     trade_id = manual.book_fx_forward(
                         conn, pair=pair, side=side, base_amount=amount, rate=rate, value_date=value_date,
                         trade_date=trade_date, counterparty=counterparty)
@@ -257,10 +344,31 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         try:
             conn = _writable()
             try:
-                manual.delete_manual_trade(conn, trade_id)
+                removed = manual.delete_manual_trade(conn, trade_id)
                 listing = manual_list(conn)
             finally:
                 conn.close()
         except (ValueError, sqlite3.Error) as exc:
             return html.Span(f"Not deleted: {exc}", className="source-result--error"), no_update
-        return html.Span(f"Deleted {trade_id}.", className="source-result--info"), listing
+        return html.Span(_deleted_words(trade_id, removed), className="source-result--info"), listing
+
+
+def _blank_swap_fields(amount, near_date, near_rate, far_date, far_rate) -> str:
+    """The swap fields left empty, in words ('near rate and far date'); '' when all are
+    typed. Only emptiness is caught here; every other check is book_fx_swap's own."""
+    named = (("amount", amount), ("near date", near_date), ("near rate", near_rate),
+             ("far date", far_date), ("far rate", far_rate))
+    blank = [name for name, value in named if value is None or str(value).strip() == ""]
+    if len(blank) <= 1:
+        return "".join(blank)
+    return ", ".join(blank[:-1]) + " and " + blank[-1]
+
+
+def _deleted_words(trade_id: str, removed) -> str:
+    """'Deleted MANUAL-1.' or, for a swap, both trades named: deleting one date of a swap
+    removes the other (data.ingest.manual.delete_manual_trade)."""
+    removed = list(removed or [trade_id])
+    if len(removed) == 1:
+        return f"Deleted {removed[0]}."
+    others = [t for t in removed if t != trade_id]
+    return f"Deleted {trade_id} and {', '.join(others)}: both dates of the FX swap go together."

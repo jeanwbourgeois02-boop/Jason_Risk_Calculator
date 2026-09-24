@@ -14,9 +14,10 @@ import calendar
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 from data.contracts.static import static_dates
+from engine import calendars
 from data.contracts.tickers import make_contract_id, month_code, padded_root, to_date
 from data.contracts.universe import ContractRoot, get_root
 
@@ -78,6 +79,28 @@ def contract_month(root_id: str, month: int, year: int,
                              to_date(fnd) if fnd else None, BLOOMBERG)
     return ContractMonth(root, month, year, code, contract_id, estimated_last_trade_date(month, year),
                          None, ESTIMATED)
+
+
+def averaging_period(root: Union[str, ContractRoot], month: int, year: int) -> Tuple[date, date]:
+    """(first, last) business day of the contract month on the root's exchange calendar
+    (``engine.calendars``): the days an averaging contract (``settlement = 'average'``) prices over.
+
+    ``root`` is a root id (``'SGX:FEF'``) or a ``ContractRoot``; ``year`` has four digits (two are
+    read as 20YY). Raises ValueError for a root that does not settle on an average: an ordinary
+    future has no averaging period, and ``''`` in ``settlement`` also means "not known", which is
+    never taken for an average. Beyond the calendar file's coverage only weekends are known to be
+    closed (``engine.calendars.coverage``).
+    """
+    r = root if isinstance(root, ContractRoot) else get_root(root)
+    if not r.averaging:
+        raise ValueError(f"{r.root_id} does not settle on a monthly average (settlement "
+                         f"{r.settlement!r} in config/contracts.csv): it has no averaging period")
+    month, year = int(month), int(year)
+    if year < 100:
+        year += 2000
+    last = calendars.last_business_day_of_month(r.calendar, year, month)
+    first = calendars.next_business_day(r.calendar, date(year, month, 1) - timedelta(days=1))
+    return first, last
 
 
 def request_ticker(contract: ContractMonth, as_of: date) -> str:

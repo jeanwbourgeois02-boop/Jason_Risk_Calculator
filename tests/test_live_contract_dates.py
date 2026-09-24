@@ -9,7 +9,7 @@ from datetime import date
 
 import pytest
 
-from data.bloomberg import library, live
+from data.bloomberg import live
 from data.bloomberg import pull_marks as pm, fwd_curve
 from data.ingest import schema
 
@@ -49,7 +49,7 @@ def fake_apply(monkeypatch):
         calls.append(True)
         out = {"checked": 0, "updated": [], "missing_dates": []}
         for iid, expiry in conn.execute("SELECT instrument_id, expiry_date FROM instruments "
-                                        "WHERE asset_class = 'FUTURE'").fetchall():
+                                        "WHERE asset_class IN ('FUTURE', 'CMDTY_OPTION')").fetchall():
             out["checked"] += 1
             got = static_dates(conn, iid)
             if got is None:
@@ -231,3 +231,81 @@ def test_contract_dates_summary_wording():
     assert live.contract_dates_summary({"requested": 1, "stored": 1, "failed": [],
                                         "applied": {"error": "boom"}}) == \
         "1 contract date stored, 0 futures moved to Bloomberg's expiry; moving the futures stopped (boom)"
+
+
+# --------------------------------------------------------------------------- options on futures (Phase 5)
+OPTION_ID, OPTION_TICKER = "CLZ26C 75 Comdty", "CLZ6C 75 Comdty"
+OPTION_ESTIMATE = "2026-11-30"
+BBG_OPT_EXPIRE = "2026-11-17"
+
+
+def _option_db(tmp_path):
+    """The CL December future (its trade) and a long call on it, both on estimated dates."""
+    p, conn = _db(tmp_path)
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
+                 (OPTION_ID, "CMDTY_OPTION", "NYMEX:CL", "USD", 1000.0, 0, OPTION_TICKER, OPTION_ESTIMATE))
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("o1", "XLSX", OPTION_ID, "CMDTY_OPTION", "o1", "2026-09-10", 3, 1.25, "acc", "cp", "", "t", "d", ""))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("o1", 1, "NOTIONAL", "USD", 3 * 1000 * 1.25, "2026-09-10", OPTION_ESTIMATE, 1.25, 0))
+    conn.commit()
+    return p, conn
+
+
+def test_an_option_on_a_future_has_its_dates_asked_with_the_option_fields_and_stored_as_its_last_trade(
+        tmp_path, monkeypatch, fake_apply):
+    """bbg-library lists an option on a future under CONTRACT_DATES with the options' own
+    fields (OPT_EXPIRE_DT, LAST_TRADEABLE_DT): asked in a request of their own, the expiry
+    stored as the option's last trade date with no first notice, and the option moved."""
+    p, conn = _option_db(tmp_path)
+    dates = {"CLZ6 Comdty": {"FUT_LAST_TRADE_DT": date(2026, 11, 19), "FUT_NOTICE_FIRST": date(2026, 11, 20)},
+             OPTION_TICKER: {"OPT_EXPIRE_DT": None, "LAST_TRADEABLE_DT": date(2026, 11, 17)}}
+    log = _fake_bloomberg(monkeypatch, dates=dates)
+    status = _pull(p)
+    asks = [(tickers, fields) for purpose, tickers, fields in log if purpose == live.CONTRACT_DATES]
+    assert sorted(asks) == sorted([(["CLZ6 Comdty"], ["FUT_LAST_TRADE_DT", "FUT_NOTICE_FIRST"]),
+                                   ([OPTION_TICKER], ["OPT_EXPIRE_DT", "LAST_TRADEABLE_DT"])])
+    from data.contracts import static_dates
+    got = static_dates(conn, OPTION_ID)
+    assert got["last_trade_date"] == BBG_OPT_EXPIRE and got["first_notice_date"] == "" and got["source"] == "BBG_BDP"
+    assert static_dates(conn, "CLZ26 Comdty")["first_notice_date"] == BBG_FIRST_NOTICE
+    block = status["contract_dates"]
+    assert block["requested"] == 2 and block["stored"] == 2 and block["failed"] == []
+    assert block["summary"] == "2 contract dates stored, 1 future and 1 option on futures moved to Bloomberg's expiry"
+    # the option's price asked after its dates, at Bloomberg's expiry
+    assert conn.execute("SELECT settle_date FROM marks WHERE instrument_id = ? AND mark_type = 'FUTURE_PX'",
+                        (OPTION_ID,)).fetchall() == [(BBG_OPT_EXPIRE,)]
+
+
+def test_an_option_bloomberg_gives_no_expiry_for_is_listed_with_both_fields_named(tmp_path, monkeypatch, fake_apply):
+    p, conn = _option_db(tmp_path)
+    dates = {"CLZ6 Comdty": {"FUT_LAST_TRADE_DT": date(2026, 11, 19)}, OPTION_TICKER: {}}
+    _fake_bloomberg(monkeypatch, dates=dates)
+    block = _pull(p)["contract_dates"]
+    assert block["stored"] == 1
+    assert block["failed"] == [{"ticker": OPTION_TICKER,
+                                "reason": "Bloomberg returned no OPT_EXPIRE_DT or LAST_TRADEABLE_DT"}]
+
+
+def test_an_option_on_a_future_is_priced_live_at_bloombergs_mid(tmp_path, monkeypatch, fake_apply):
+    """CMDTY_OPTION goes through the futures' price request like EQ_OPTION: PX_MID when
+    Bloomberg has one, since the last trade of one strike can be hours old."""
+    p, conn = _option_db(tmp_path)
+    _fake_bloomberg(monkeypatch)
+
+    def fetch_reference(session, service, tickers, fields, overrides=None, diag=None, tag=None):
+        if (tag or {}).get("purpose") == live.CONTRACT_DATES:
+            return {}
+        assert "PX_MID" in fields
+        return {t: ({"PX_LAST": 1.10, "PX_MID": 1.42} if t == OPTION_TICKER else {"PX_LAST": 71.5}) for t in tickers}
+
+    monkeypatch.setattr(pm, "fetch_reference", fetch_reference)
+    status = _pull(p)
+    item = next(i for i in status["items"] if i["instrument_id"] == OPTION_ID)
+    assert item["status"] == "OK" and item["value"] == 1.42 and item["detail"] == "live PX_MID"
+    assert conn.execute("SELECT value, source FROM marks WHERE instrument_id = ? AND mark_type = 'FUTURE_PX'",
+                        (OPTION_ID,)).fetchall() == [(1.42, "BBG_BDH")]
+    fut = next(i for i in status["items"] if i["instrument_id"] == "CLZ26 Comdty")
+    assert fut["value"] == 71.5 and fut["detail"] == "live PX_LAST"
+    assert OPTION_ID in live._listed_option_ids(conn) and "CLZ26 Comdty" not in live._listed_option_ids(conn)

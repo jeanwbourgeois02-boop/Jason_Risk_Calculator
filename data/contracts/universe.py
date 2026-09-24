@@ -31,6 +31,8 @@ COLUMNS = (
     "quote_unit", "price_scale", "multiplier", "active_months", "calendar", "delivery",
     "status", "notes",
 )
+# Added 2026-09-24 (Phases 3-5): read as '' when a file does not carry them.
+OPTIONAL_COLUMNS = ("settlement", "option_style", "option_lead_months")
 
 # Exchange-calendar ids (engine/calendars, the exchange-calendars lane) by exchange.
 EXCHANGE_CALENDAR = {
@@ -49,6 +51,8 @@ EXCHANGE_CALENDAR = {
 }
 CALENDAR_IDS = frozenset(EXCHANGE_CALENDAR.values())
 DELIVERY = ("physical", "cash", "")
+SETTLEMENTS = ("average", "")
+OPTION_STYLES = ("american", "european", "")
 STATUSES = ("active", "illiquid", "suspended")
 
 # The research app's quant/units.py factors: kilograms, litres, megajoules per unit.
@@ -95,6 +99,22 @@ class ContractRoot:
     delivery: str            # 'physical' | 'cash' | '' (not known)
     status: str              # active | illiquid | suspended
     notes: str
+    # 'average': settles on the average of an index over the contract month (the Platts / Argus /
+    # Fastmarkets / CRU swap futures, SGX iron ore, the aluminium premiums, month power);
+    # '' otherwise or not known (never guessed; read as an ordinary future)
+    settlement: str = ""
+    # style of the exchange's options on this root: 'american' | 'european' | '' (not known,
+    # read as American by data/contracts/options.py)
+    option_style: str = ""
+    # how many months before its contract month an option on this root expires (1: the month
+    # before, CME's usual; 0: in the contract month, LME-style and averaging contracts; 2: ICE
+    # Brent); None when not known. Only the prime-broker dated option form needs it.
+    option_lead_months: Optional[int] = None
+
+    @property
+    def averaging(self) -> bool:
+        """True when the contract settles on an average over its contract month."""
+        return self.settlement == "average"
 
     @property
     def bbg_placeholder(self) -> bool:
@@ -148,6 +168,16 @@ def _root_from_row(raw: Dict[str, str], line: int) -> ContractRoot:
     status = raw["status"].strip()
     if status not in STATUSES:
         raise ValueError(f"{where}: status {status!r} is not one of {STATUSES}")
+    settlement = (raw.get("settlement") or "").strip().lower()
+    if settlement not in SETTLEMENTS:
+        raise ValueError(f"{where}: settlement {settlement!r} is not 'average' or blank")
+    option_style = (raw.get("option_style") or "").strip().lower()
+    if option_style not in OPTION_STYLES:
+        raise ValueError(f"{where}: option_style {option_style!r} is not american, european or blank")
+    lead_text = (raw.get("option_lead_months") or "").strip()
+    if lead_text and not (lead_text.isdigit() and int(lead_text) <= 3):
+        raise ValueError(f"{where}: option_lead_months {lead_text!r} is not 0-3 or blank")
+    lead = int(lead_text) if lead_text else None
     return ContractRoot(
         root_id=root_id, name=raw["name"].strip(), sector=raw["sector"].strip(),
         subsector=raw["subsector"].strip(), exchange=exchange, country=raw["country"].strip(),
@@ -157,6 +187,7 @@ def _root_from_row(raw: Dict[str, str], line: int) -> ContractRoot:
         contract_size=size, size_unit=raw["size_unit"].strip(), quote_unit=raw["quote_unit"].strip(),
         price_scale=scale, multiplier=multiplier, active_months=_months(raw["active_months"], where),
         calendar=calendar, delivery=delivery, status=status, notes=raw["notes"].strip(),
+        settlement=settlement, option_style=option_style, option_lead_months=lead,
     )
 
 

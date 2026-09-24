@@ -135,7 +135,6 @@ def test_filter_bar_lists_distinct_values_and_clear_button():
     df.loc[1, "instrument_id"] = "USDJPY"
     df.loc[1, "trade_id"] = "T2"
     bar = blotter._filter_bar(df, "blotter-datatable-total", blotter._DISPLAY_COLUMNS, blotter._COLUMN_LABELS)
-    dropdowns = {c.id: c for c in bar.children if getattr(c, "id", None) is None for c in []}
     # dropdowns live one level down, inside each .blotter-filter wrapper
     pair_dropdown = next(
         wrap.children[1] for wrap in bar.children
@@ -250,7 +249,7 @@ def test_subtab_presence_and_order():
     layout = blotter.build_layout(default_date="2026-06-20")
     tabs = next(c for c in layout.children if getattr(c, "id", None) == blotter.SUBTABS_ID)
     labels = [t.label for t in tabs.children]
-    assert labels == ["Total book", "FX", "Futures", "Options", "Bundles", "Manual entry"]
+    assert labels == ["Total book", "FX", "Futures & LME", "Options", "Bundles", "Manual entry"]
     assert tabs.className == "subtabs"
     assert all(t.className == "subtab" for t in tabs.children)
     assert all(t.selected_className == "subtab--selected" for t in tabs.children)
@@ -261,12 +260,17 @@ def test_scope_products_covers_task_products():
     4-leg swap), only the blotter's package rule left."""
     assert blotter.SCOPE_PRODUCTS["total"] is None
     assert set(blotter.SCOPE_PRODUCTS["fx"]) == {"FX_SPOT", "FX_FWD", "FX_SWAP"}
-    assert blotter.SCOPE_PRODUCTS["futures"] == ("FUTURE",)
+    # Phase 5: the LME forwards sit with the futures ("Futures & LME")
+    assert blotter.SCOPE_PRODUCTS["futures"] == ("FUTURE", "LME_FWD")
     assert "rates" not in blotter.SCOPE_PRODUCTS and "rates" not in blotter.SCOPE_ORDER
-    assert blotter.SCOPE_PRODUCTS["options"] == ("FX_OPTION",)
-    assert set(blotter.ASSET_CLASS_OF) == {"FX_SPOT", "FX_FWD", "FX_SWAP", "FUTURE", "FX_OPTION"}
+    # Phase 3: an option on a commodity future is an option (the Options sub-tab lists it), never a future
+    assert blotter.SCOPE_PRODUCTS["options"] == ("FX_OPTION", "CMDTY_OPTION")
+    assert set(blotter.ASSET_CLASS_OF) == {"FX_SPOT", "FX_FWD", "FX_SWAP", "FUTURE", "FX_OPTION", "CMDTY_OPTION",
+                                           "LME_FWD"}
+    assert blotter.ASSET_CLASS_OF["CMDTY_OPTION"] == "Options"
+    assert blotter.ASSET_CLASS_OF["LME_FWD"] == "LME forwards"
     assert blotter.ASSET_CLASS_OF["FX_SWAP"] == "FX" and blotter._fmt_product("FX_SWAP") == "Swap"
-    assert blotter.ASSET_CLASS_ORDER == ("FX", "Futures", "Options")
+    assert blotter.ASSET_CLASS_ORDER == ("FX", "Futures", "LME forwards", "Options")
     assert not hasattr(blotter, "rates_ui")
 
 
@@ -284,7 +288,7 @@ def test_futures_scope_no_trades_shows_reason_and_empty_table():
         ids = [c["id"] for c in table.columns]
         assert ids == blotter._FUTURES_DISPLAY_COLUMNS
         names = [c["name"] for c in table.columns]
-        assert "Contract" in names and "Contracts" in names and "Expiry" in names
+        assert "Contract" in names and "Quantity" in names and "Unit" in names and "Expiry / prompt" in names
         assert "Exchange" in names and "P&L (local)" in names and "Ccy" in names
     finally:
         conn.close()
@@ -1966,7 +1970,7 @@ def test_futures_sub_tab_shows_local_pnl_with_its_currency_beside_usd_and_the_ex
         settled, settled_tip = rows["Q1"]
         assert settled["pnl_usd"] == pytest.approx(1_234) and settled["pnl_local"] is None   # printed n/a, never 0
         assert settled_tip["pnl_local"]["value"] == blotter.SETTLED_LOCAL_REASON
-        styled = {s["if"]["column_id"] for s in table.style_data_conditional}
+        styled = {s["if"].get("column_id") for s in table.style_data_conditional}
         assert {"pnl_local", "pnl_usd"} <= styled
     finally:
         conn.close()
@@ -1978,7 +1982,8 @@ def test_futures_sub_tab_unpriced_local_pnl_carries_the_row_reason(strict_marks)
         _add_future(conn, price_mark=None)
         table = next(t for t in _find_tables(blotter.scope_layout("futures", conn, "2026-06-20"))
                      if t.id == "blotter-datatable-futures")
-        row, tip = table.data[0], table.tooltip_data[0]
+        trade_rows = [(r, t) for r, t in zip(table.data, table.tooltip_data) if r["row_kind"] == "trade"]
+        row, tip = trade_rows[0]
         assert row["pnl_local"] is None and row["pnl_usd"] is None
         assert "no FUTURE_PX mark for CLZ26 Comdty" in tip["pnl_local"]["value"]
         assert tip["pnl_local"]["value"] == tip["pnl_usd"]["value"]
@@ -1988,8 +1993,10 @@ def test_futures_sub_tab_unpriced_local_pnl_carries_the_row_reason(strict_marks)
 
 def test_futures_sub_tab_on_the_synthetic_sample_book():
     """The new sample (data/sample/blotter_sample.csv, a synthetic Jason book): every
-    future is on the Futures sub-tab with its exchange and its own currency, and no macro
-    product is anywhere in the Total book."""
+    future and LME forward is on the Futures & LME sub-tab with its exchange and its own
+    currency, the options on futures are not, no macro product is anywhere in the Total book,
+    and nothing falls to "Other". Re-pinned 2026-09-24 (Phase 5) when the sample gained 4
+    CMDTY_OPTION and 3 LME_FWD trades (50 in all); the 29 futures rows were checked unchanged."""
     from pathlib import Path
 
     from data.ingest import blotter as blotter_parser
@@ -1999,16 +2006,23 @@ def test_futures_sub_tab_on_the_synthetic_sample_book():
     try:
         blotter_parser.load(str(sample), conn)
         as_of = "2026-09-24"
-        n_futures = conn.execute("SELECT COUNT(*) FROM trades WHERE product = 'FUTURE' AND trade_date <= ?",
-                                 (as_of,)).fetchone()[0]
+        counts = dict(conn.execute("SELECT product, COUNT(*) FROM trades WHERE trade_date <= ? GROUP BY product",
+                                   (as_of,)).fetchall())
+        assert (counts["FUTURE"], counts["LME_FWD"], counts["CMDTY_OPTION"]) == (29, 3, 4)
         df = blotter.scope_df(conn, "futures", as_of)
-        assert len(df) == n_futures > 0
+        assert len(df) == counts["FUTURE"] + counts["LME_FWD"]
+        assert set(df["product"]) == {"FUTURE", "LME_FWD"}
         assert set(df["pnl_ccy"]) == {"USD", "CNY", "EUR", "GBP", "JPY"}
         assert (df["exchange"] != "").all()
+        lme = df[df["product"] == "LME_FWD"]
+        assert set(lme["instrument_id"]) == {"LME:CA", "LME:AH", "LME:NI"} and set(lme["pnl_ccy"]) == {"USD"}
+        assert set(lme["qty_unit"]) == {"t"} and set(lme["sector"]) == {"Metals"}
         total = blotter.scope_df(conn, "total", as_of)
+        assert len(total) == sum(counts.values())
         assert not set(total["product"]) & {"IRS", "EQ_OPTION"}
-        classes = {r["asset_class"] for r in blotter.asset_class_pnl_rows(conn, as_of, total)}
-        assert classes == {"FX", "Futures", "Options", "Total"}
+        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, as_of, total)}
+        assert set(rows) == {"FX", "Futures", "LME forwards", "Options", "Total"}
+        assert rows["LME forwards"]["trades"] == 3 and rows["Futures"]["trades"] == 29
     finally:
         conn.close()
 

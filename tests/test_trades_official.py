@@ -17,8 +17,6 @@ the same columns as `trades`.
 """
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 
 from data.ingest import schema

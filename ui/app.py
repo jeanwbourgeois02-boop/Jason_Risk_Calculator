@@ -31,17 +31,17 @@ from typing import Union
 import dash
 from dash import Input, Output, State, dcc, html
 
-from ui.tabs import blotter, cash_ladder, curve, expiries, header, market_data, risk
+from ui.tabs import blotter, cash_ladder, curve, expiries, header, market_data, risk, spreads
 from ui import revision, uploads
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
 
 # Order per user decision 2026-09-22 ("I want the first tab to be blotter, and the second to
-# be cash ladder"); the app opens on the first. The commodity tabs Curve (ui/tabs/curve.py)
-# and Expiries (ui/tabs/expiries.py), 2026-09-24 (commodity conversion), come next, then
-# Risk (ui/tabs/risk.py, 2026-09-22) and Market data.
-VISIBLE_TABS = ["Blotter", "Ladder", "Curve", "Expiries", "Risk", "Market data"]
+# be cash ladder"); the app opens on the first. The commodity tabs Curve (ui/tabs/curve.py),
+# Spreads (ui/tabs/spreads.py, Phase 3) and Expiries (ui/tabs/expiries.py), 2026-09-24
+# (commodity conversion), come next, then Risk (ui/tabs/risk.py, 2026-09-22) and Market data.
+VISIBLE_TABS = ["Blotter", "Ladder", "Curve", "Spreads", "Expiries", "Risk", "Market data"]
 
 
 def get_db_path() -> Path:
@@ -188,6 +188,7 @@ def build_layout(data: dict, db_path=None) -> html.Div:
         "Ladder": cash_ladder.build_layout,
         "Blotter": blotter.build_layout,
         "Curve": curve.build_layout,
+        "Spreads": spreads.build_layout,
         "Expiries": expiries.build_layout,
         "Risk": risk.build_layout,
         "Market data": market_data.build_layout,
@@ -195,10 +196,11 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     tab_defaults = {
         "Ladder": ladder_default_date,
         "Blotter": snapshot_date,
-        # Curve, Expiries and Risk have no picker of their own: they follow the header's
+        # Curve, Spreads, Expiries and Risk have no picker of their own: they follow the header's
         # as-of store, whose default is the Ladder's (today in New York), so their titles
         # name the same date.
         "Curve": ladder_default_date,
+        "Spreads": ladder_default_date,
         "Expiries": ladder_default_date,
         "Risk": ladder_default_date,
         "Market data": ladder_default_date,
@@ -231,7 +233,6 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     start_feed=True (the launcher) starts the Bloomberg live feed thread when available."""
     resolved = Path(db_path) if db_path is not None else get_db_path()
     ensure_schema(resolved)
-    data = load_summary(resolved)
     # suppress_callback_exceptions: the Blotter sub-tabs render their tables, filter
     # dropdowns and row-detail panels dynamically inside the `_update` callback's own
     # Output (blotter.CONTENT_ID children), not in the static app.layout tree -- Dash's
@@ -252,6 +253,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
     blotter.register_callbacks(app, get_db_path=lambda: resolved)
     curve.register_callbacks(app, get_db_path=lambda: resolved)
+    spreads.register_callbacks(app, get_db_path=lambda: resolved)
     expiries.register_callbacks(app, get_db_path=lambda: resolved)
     risk.register_callbacks(app, get_db_path=lambda: resolved)
     market_data.register_callbacks(app, get_db_path=lambda: resolved)

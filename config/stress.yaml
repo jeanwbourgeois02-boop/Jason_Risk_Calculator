@@ -9,14 +9,11 @@
 #
 # Commodity conversion Phase 2 (2026-09-24):
 # - CNH, the biggest FX hedge currency of Jason's book, moves in every scenario that moves
-#   the whole dollar or Asian / EM FX, sized like the Asian EM currencies it replaced here
-#   (KRW, TWD, IDR, INR): the dollar moves, -8 % risk-off, +5 % risk-on, -10 % / -12 % EM,
-#   -5 % Asia. It does not move in "Europe -3%" or "Commodity FX +5%", which move neither.
-#   The recommendation taken; a smaller, managed-currency size like SGD's (-4 % / +3 %)
-#   is the alternative.
-# - The equity index left the app: no EQUITY key, no equity-only scenario.
-# - The NDF currencies (KRW, TWD, IDR, INR, BRL) left with the NDFs: no trade and no
-#   contract of the universe is in them, so their moves are gone.
+#   the whole dollar or Asian / EM FX, at the Asian-EM size: the dollar moves, -8 % risk-off,
+#   +5 % risk-on, -10 % EM, -5 % Asia. It does not move in "Europe -3%" or
+#   "Commodity FX +5%", which move neither. The recommendation taken; a smaller,
+#   managed-currency size like SGD's (-4 % / +3 %) is the alternative.
+# - A scenario moves currencies only: no index or rates key.
 # The book's FX currencies (the sample blotter's FX hedges and options: EUR, GBP, JPY, CNH,
 # XAU) each have a move in at least one scenario.
 

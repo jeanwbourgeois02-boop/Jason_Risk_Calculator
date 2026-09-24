@@ -17,8 +17,13 @@ localhost:8194 by default), each requested pull of `LiveFeed` fetches:
     FUT_NOTICE_FIRST) of the futures the library lists under CONTRACT_DATES, stored in
     contract_static and applied to the futures, so that expiry is Bloomberg's
     (`contract_dates_step`); a future with no Bloomberg ticker is never asked for.
-Then the OIS curve quotes the FX options need, bootstrapped into `curves` (`_curves_step`),
-the FX vol smiles (`_vol_step`), the options' pricing (`_options_step`) and the ledger.
+  * (2026-09-24, Phase 5) an option on a commodity future's price (FUTURE_PX, live mid) and
+    its underlying future's, its contract dates (OPT_EXPIRE_DT / LAST_TRADEABLE_DT), and the
+    LME curves of the open LME forwards (`_lme_step`: cash as SPOT, pillars and prompts as
+    FWD_OUTRIGHT).
+Then the OIS curve quotes the options need, bootstrapped into `curves` (`_curves_step`),
+the FX vol smiles (`_vol_step`), the options' pricing (`_options_step`, FX options and
+options on futures) and the ledger.
 The macro trader's NDF prices (NDF_1M, NDF_FIX), overnight fixings, swap pricing, index
 levels and dividend yields left the pull on 2026-09-24 (commodity conversion Phase 2).
 Rows are written to `marks` with INSERT OR REPLACE (same primary key each cycle, new
@@ -489,10 +494,19 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     (data/bloomberg/library.py, `bbg_library`), which is written when trades come in, not
     worked out from the trades here. Same rules, same order; what is not in the library is
     not asked for. Only the library's mark kinds (SPOT, FWD_OUTRIGHT, FUTURE_PX) become
-    requests; the NDF_1M / NDF_FIX requests left on 2026-09-24."""
+    requests; the NDF_1M / NDF_FIX requests left on 2026-09-24.
+
+    2026-09-24 (Phase 5): an LME forward's rows (`library.is_lme_row`: the metal's cash SPOT,
+    the FWD_OUTRIGHT at its prompt, its LME_CURVE) are left out: the LME step (`_lme_step`)
+    asks the metal's curve pillars, cash included, and writes the cash as SPOT and the
+    prompts off that curve, so nothing here asks the cash a second time or reads 'LME:CA'
+    as a currency pair. An option on a commodity future's rows are the futures' own shape
+    (FUTURE_PX on the option, and on its underlying future, role UNDERLYING) and are asked
+    for with the futures."""
     from data.bloomberg import library
     from data.bloomberg.pull_marks import RequestRow
-    needed = library.needed_on(conn, as_of_date)
+    is_lme = getattr(library, "is_lme_row", lambda r: False)
+    needed = [r for r in library.needed_on(conn, as_of_date) if not is_lme(r)]
     _ensure_fx_instruments(conn, [r["key"] for r in needed if r["kind"] in ("SPOT", "FWD_OUTRIGHT")])
     out, seen = [], set()
 
@@ -531,6 +545,10 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
 # Asked once per press, before any futures price, for the library's CONTRACT_DATES rows only.
 CONTRACT_DATES = "CONTRACT_DATES"          # the library kind (data/bloomberg/library.py)
 CONTRACT_DATE_FIELDS = ("FUT_LAST_TRADE_DT", "FUT_NOTICE_FIRST")
+# An option on a commodity future's expiry (2026-09-24, Phase 5; bbg-library's
+# OPTION_CONTRACT_DATES_FIELDS, unverified on a terminal): OPT_EXPIRE_DT, else
+# LAST_TRADEABLE_DT, stored as its last trade date, with no first notice.
+OPTION_CONTRACT_DATE_FIELDS = ("OPT_EXPIRE_DT", "LAST_TRADEABLE_DT")
 SRC_CONTRACT_DATES = "BBG_BDP"             # contract_static.source of a date Bloomberg gave
 
 
@@ -543,33 +561,48 @@ def _contract_dates_kind() -> str:
 
 
 def _bloomberg_said_for(diag, ticker: str, purpose: str) -> str:
-    """Bloomberg's own words for `ticker` in the last request recorded in `diag` with this
-    `purpose` (its security error, else its field exceptions); '' when it said nothing."""
-    rec = (getattr(diag, "requests", None) or [{}])[-1]
-    if rec.get("purpose") != purpose:
-        return ""
-    for sec in rec.get("raw_response") or []:
-        if sec.get("security") != ticker:
-            continue
-        if sec.get("securityError"):
-            return str(sec["securityError"].get("message") or "security error")
-        return "; ".join(f"{fx.get('fieldId')}: {fx.get('message')}" for fx in sec.get("fieldExceptions") or [])
+    """Bloomberg's own words for `ticker` in the latest run of requests recorded in `diag`
+    with this `purpose` (its security error, else its field exceptions); '' when it said
+    nothing. The run is the requests at the end of the log that carry the purpose (the
+    contract dates are asked in one request per set of fields since 2026-09-24), the most
+    recent that answered for `ticker` first."""
+    for rec in reversed(getattr(diag, "requests", None) or []):
+        if rec.get("purpose") != purpose:
+            return ""
+        for sec in rec.get("raw_response") or []:
+            if sec.get("security") != ticker:
+                continue
+            if sec.get("securityError"):
+                return str(sec["securityError"].get("message") or "security error")
+            return "; ".join(f"{fx.get('fieldId')}: {fx.get('message')}" for fx in sec.get("fieldExceptions") or [])
     return ""
 
 
 def contract_dates_summary(block: dict) -> str:
     """The one sentence the feed status shows for `status["contract_dates"]`: 'N contract
     dates stored, M futures moved to Bloomberg's expiry', with the tickers that gave no date
-    counted after it. '' when nothing was asked and nothing moved."""
+    counted after it. '' when nothing was asked and nothing moved. Options on futures moved
+    are counted apart from the futures (2026-09-24, Phase 5: '..., 2 futures and 1 option on
+    futures moved to Bloomberg's expiry'), an option told by its canonical option id."""
     requested = int(block.get("requested") or 0)
     stored = int(block.get("stored") or 0)
     applied = block.get("applied") if isinstance(block.get("applied"), dict) else {}
-    moved = len(applied.get("updated") or [])
+    updated = applied.get("updated") or []
+    try:
+        from data.contracts.tickers import parse_option_ticker
+    except Exception:  # noqa: BLE001
+        parse_option_ticker = lambda _t: None                              # noqa: E731
+    options = sum(1 for u in updated if isinstance(u, dict)
+                  and parse_option_ticker(str(u.get("instrument_id") or "")) is not None)
+    moved = len(updated) - options
     failed = len(block.get("failed") or [])
-    if not (requested or stored or moved or failed):
+    if not (requested or stored or moved or options or failed):
         return ""
+    what = f"{moved} future{'' if moved == 1 else 's'}"
+    if options:
+        what = (what + " and " if moved else "") + f"{options} option{'' if options == 1 else 's'} on futures"
     text = (f"{stored} contract date{'' if stored == 1 else 's'} stored, "
-            f"{moved} future{'' if moved == 1 else 's'} moved to Bloomberg's expiry")
+            f"{what} moved to Bloomberg's expiry")
     if failed:
         text += f"; {failed} ticker{'' if failed == 1 else 's'} gave no date"
     if applied.get("error"):
@@ -577,22 +610,41 @@ def contract_dates_summary(block: dict) -> str:
     return text
 
 
-def _contract_dates_entries(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[str, str], bool]:
-    """({contract id: ticker} the library lists for today's pull, whether any open future
-    needs contract dates at all, met or not). The list is the library's own
+def _is_option_entry(entry: dict) -> bool:
+    """Is this contract-dates entry an option on a commodity future (2026-09-24, Phase 5)?
+    Told by the library's `product` (CMDTY_OPTION, or any listed option product), else by
+    its fields being the options' own."""
+    try:
+        from engine.pnl.valuation import LISTED_OPTION_PRODUCTS
+    except Exception:  # noqa: BLE001
+        LISTED_OPTION_PRODUCTS = ("EQ_OPTION", "CMDTY_OPTION")
+    return entry.get("product") in LISTED_OPTION_PRODUCTS or tuple(entry.get("fields") or ()) == OPTION_CONTRACT_DATE_FIELDS
+
+
+def _contract_dates_entries(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[str, dict], bool]:
+    """({contract id: {ticker, fields, option}} the library lists for today's pull, whether
+    any open contract needs contract dates at all, met or not). The list is the library's own
     (`library.contract_dates_needed`: open, of a contract root, a verified ticker, no dates
-    on file yet); the flag decides whether apply_contract_dates runs, so a book with no
-    commodity future pays nothing and one whose dates are all on file is still applied."""
+    on file yet), each with the fields it is asked under: a future's CONTRACT_DATE_FIELDS,
+    an option on a future's OPTION_CONTRACT_DATE_FIELDS (2026-09-24, Phase 5); the flag
+    decides whether apply_contract_dates runs, so a book with no commodity future pays
+    nothing and one whose dates are all on file is still applied."""
     from data.bloomberg import library
     kind = _contract_dates_kind()
+
+    def _entry(ticker, fields, product) -> dict:
+        option = _is_option_entry({"product": product, "fields": fields})
+        fields = tuple(fields or ()) or (OPTION_CONTRACT_DATE_FIELDS if option else CONTRACT_DATE_FIELDS)
+        return {"ticker": str(ticker or "").strip(), "fields": fields, "option": option}
+
     if hasattr(library, "contract_dates_needed"):
-        entries = {e["contract_id"]: str(e.get("bbg_ticker") or "").strip()
+        entries = {e["contract_id"]: _entry(e.get("bbg_ticker"), e.get("fields"), e.get("product"))
                    for e in library.contract_dates_needed(conn, as_of)}
     else:                                   # an older library: its CONTRACT_DATES rows, if any
         entries = {}
         for r in library.needed_on(conn, as_of):
             if r.get("kind") == kind:
-                entries.setdefault(r["key"], str(r.get("bbg_ticker") or "").strip())
+                entries.setdefault(r["key"], _entry(r.get("bbg_ticker"), None, r.get("product")))
     in_force = entries or any(r.get("kind") == kind and r["needed_from"] <= as_of <= r["needed_until"]
                               for r in library.rows(conn))
     return entries, bool(in_force)
@@ -618,7 +670,13 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
     missing_dates; {} when it did not run, {"error"} when it failed), summary (the one
     sentence, `contract_dates_summary`)}, plus "error" when the library could not be read.
     A ticker Bloomberg rejects or answers without a last trade date is listed under `failed`
-    with Bloomberg's own reason; the pull carries on."""
+    with Bloomberg's own reason; the pull carries on.
+
+    Options on commodity futures (2026-09-24, Phase 5): the library lists them too, with the
+    options' own fields (OPTION_CONTRACT_DATE_FIELDS), asked in a request of their own; an
+    option's OPT_EXPIRE_DT, else its LAST_TRADEABLE_DT, is stored as its last trade date,
+    first notice '' (data.contracts.store_static_dates takes option ids), and the apply
+    moves the option onto it like a future."""
     block: dict = {"requested": 0, "stored": 0, "failed": [], "applied": {}}
 
     def _done() -> dict:
@@ -632,39 +690,59 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
         return _done()
     if not in_force:
         return _done()
-    for key, ticker in sorted(entries.items()):
-        if not ticker:              # the library leaves these out; never sent to Bloomberg regardless
+    for key, entry in sorted(entries.items()):
+        if not entry["ticker"]:     # the library leaves these out; never sent to Bloomberg regardless
             block["failed"].append({"ticker": key, "reason": f"no Bloomberg ticker for {key}"})
-    ask = {k: t for k, t in entries.items() if t}
+    ask = {k: e for k, e in entries.items() if e["ticker"]}
     if ask:
         from data.bloomberg.pull_marks import fetch_reference, _to_date
-        tickers = sorted(set(ask.values()))
-        block["requested"] = len(tickers)
+        block["requested"] = len({e["ticker"] for e in ask.values()})
+        # One ReferenceDataRequest per set of fields: the futures' (FUT_LAST_TRADE_DT,
+        # FUT_NOTICE_FIRST), and the options' on futures (OPT_EXPIRE_DT, LAST_TRADEABLE_DT).
+        by_fields: Dict[tuple, List[str]] = {}
+        for entry in ask.values():
+            by_fields.setdefault(entry["fields"], [])
+            if entry["ticker"] not in by_fields[entry["fields"]]:
+                by_fields[entry["fields"]].append(entry["ticker"])
         data: Dict[str, dict] = {}
-        try:
-            session, service = get_session()
-            data = fetch_reference(session, service, tickers, list(CONTRACT_DATE_FIELDS), diag=diag,
-                                   tag={"purpose": CONTRACT_DATES}) or {}
-        except Exception as exc:  # noqa: BLE001 -- every ticker fails with the reason, the pull goes on
-            block["failed"] += [{"ticker": t, "reason": f"request failed: {exc}"} for t in tickers]
-            ask = {}
+        asked_ok = set()
+        for fields, tickers in sorted(by_fields.items()):
+            tickers = sorted(tickers)
+            try:
+                session, service = get_session()
+                got = fetch_reference(session, service, tickers, list(fields), diag=diag,
+                                      tag={"purpose": CONTRACT_DATES}) or {}
+                for t in tickers:
+                    data[t] = got.get(t) or {}
+                asked_ok |= set(tickers)
+            except Exception as exc:  # noqa: BLE001 -- every ticker fails with the reason, the pull goes on
+                block["failed"] += [{"ticker": t, "reason": f"request failed: {exc}"} for t in tickers]
+        ask = {k: e for k, e in ask.items() if e["ticker"] in asked_ok}
         store_static_dates = None
         if ask:
             try:
                 from data.contracts import store_static_dates
             except Exception as exc:  # noqa: BLE001
                 block["error"] = f"data.contracts.store_static_dates not importable: {exc!r}"
-        for key, ticker in sorted(ask.items()):
+        for key, entry in sorted(ask.items()):
+            ticker = entry["ticker"]
             got = data.get(ticker) or {}
-            last_trade = _to_date(got.get("FUT_LAST_TRADE_DT"))
+            if entry["option"]:
+                # An option's expiry is its last trade date; it has no first notice.
+                last_trade = next((d for d in (_to_date(got.get(f)) for f in entry["fields"]) if d is not None), None)
+                notice = None
+                wanted = " or ".join(entry["fields"])
+            else:
+                last_trade = _to_date(got.get("FUT_LAST_TRADE_DT"))
+                notice = _to_date(got.get("FUT_NOTICE_FIRST"))
+                wanted = "FUT_LAST_TRADE_DT"
             if last_trade is None:
                 said = _bloomberg_said_for(diag, ticker, CONTRACT_DATES)
-                block["failed"].append({"ticker": ticker, "reason": said or "Bloomberg returned no FUT_LAST_TRADE_DT"})
+                block["failed"].append({"ticker": ticker, "reason": said or f"Bloomberg returned no {wanted}"})
                 continue
             if store_static_dates is None:
                 block["failed"].append({"ticker": ticker, "reason": "not stored: " + block.get("error", "")})
                 continue
-            notice = _to_date(got.get("FUT_NOTICE_FIRST"))
             try:        # one contract per call: a row contract-master refuses fails alone
                 store_static_dates(conn, [{"contract_id": key, "last_trade_date": last_trade.isoformat(),
                                            "first_notice_date": notice.isoformat() if notice else "",
@@ -1075,22 +1153,66 @@ def _enrich_no_vol_reason(conn: sqlite3.Connection, trade_id: str, reason: str, 
             "py -3 -m data.bloomberg.vol_marketdata --probe on the Bloomberg PC to check these tickers.")
 
 
+def _listed_option_products() -> tuple:
+    """The listed option products (pnl-valuation's LISTED_OPTION_PRODUCTS: EQ_OPTION, the
+    generic listed path, and CMDTY_OPTION, an option on a commodity future)."""
+    try:
+        from engine.pnl.valuation import LISTED_OPTION_PRODUCTS
+        return tuple(LISTED_OPTION_PRODUCTS)
+    except Exception:  # noqa: BLE001
+        return ("EQ_OPTION", "CMDTY_OPTION")
+
+
+def _listed_option_ids(conn: sqlite3.Connection) -> set:
+    """The instruments whose live price is Bloomberg's mid (PX_MID, else PX_LAST): every
+    listed option, told by its asset class (EQ_OPTION, CMDTY_OPTION, the products' own
+    names) or by the product of a trade on it."""
+    products = _listed_option_products()
+    marks = ", ".join("?" for _ in products)
+    return {r[0] for r in conn.execute(
+        f"SELECT instrument_id FROM instruments WHERE asset_class IN ({marks}) "
+        f"UNION SELECT instrument_id FROM trades WHERE product IN ({marks})", products + products)}
+
+
+# The products the options step prices (2026-09-24, Phase 5): the FX options and the options
+# on commodity futures (options-store's price_all_and_store prices both).
+PRICED_OPTION_PRODUCTS = ("FX_OPTION", "CMDTY_OPTION")
+
+
+def futures_options_sentence(n: int) -> str:
+    """'N option(s) on futures priced', the options step's line for the options on commodity
+    futures (2026-09-24); '' for none."""
+    return f"{n} option{'s' if n != 1 else ''} on futures priced" if n else ""
+
+
 def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Optional[List[dict]] = None) -> dict:
-    """Price every FX option through engine/options (PREMIUM + Greeks). Never raises. The
+    """Price every FX option and every option on a commodity future through engine/options
+    (PREMIUM + Greeks; options-store's price_all_and_store prices both). Never raises. The
     listed index options' Greeks left with the equity index on 2026-09-24 (their P&L is
     Bloomberg's price of them, the FUTURE_PX this pull writes, and needs no pricing).
     `vol_diagnostics` (see _vol_step) is used only to enrich a "no vol" skip reason with
-    the specific failing Bloomberg ticker(s) for that trade's pair (item 3c, 2026-09-17)."""
-    out: dict = {"priced": 0, "skipped": [], "closed_out": [], "as_of_date": today.isoformat()}
-    n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product = 'FX_OPTION' "
-                     "AND trade_date <= ?", (today.isoformat(),)).fetchone()[0]
+    the specific failing Bloomberg ticker(s) for that trade's pair (item 3c, 2026-09-17).
+
+    2026-09-24 (Phase 5): a book with options on commodity futures and no FX option is
+    priced too (it returned "no FX_OPTION trades to price" before). `priced` counts both
+    products; `futures_options_priced` the CMDTY_OPTION outcomes priced, with its sentence
+    under `futures_options_summary` ("N options on futures priced") when there are any."""
+    out: dict = {"priced": 0, "skipped": [], "closed_out": [], "as_of_date": today.isoformat(),
+                 "futures_options_priced": 0}
+    n = conn.execute(f"SELECT COUNT(*) FROM trades_official WHERE product IN "
+                     f"({', '.join('?' for _ in PRICED_OPTION_PRODUCTS)}) AND trade_date <= ?",
+                     PRICED_OPTION_PRODUCTS + (today.isoformat(),)).fetchone()[0]
     if not n:
-        out["skipped"] = "no FX_OPTION trades to price"
+        out["skipped"] = "no option trades to price"
         return out
     try:
         from engine.options.store import price_all_and_store
         outcomes = list(price_all_and_store(conn, today.isoformat()))
         out["priced"] = sum(1 for o in outcomes if getattr(o, "priced", False))
+        out["futures_options_priced"] = sum(1 for o in outcomes if getattr(o, "priced", False)
+                                            and getattr(o, "product", "") == "CMDTY_OPTION")
+        if out["futures_options_priced"]:
+            out["futures_options_summary"] = futures_options_sentence(out["futures_options_priced"])
         skipped, closed_out = [], []
         for o in outcomes:
             if getattr(o, "priced", False):
@@ -1111,6 +1233,119 @@ def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Option
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{exc!r}"
     return out
+
+
+# --------------------------------------------------------------------------- LME curves
+def lme_summary(block: dict) -> str:
+    """The one sentence the feed status shows for `status["lme"]`: 'LME curves: N mark(s)
+    written for M metal(s), K interpolated', with the pillars or prompts left without a mark
+    counted after it and an error named. '' when the book has no LME forward."""
+    roots = list(block.get("roots") or [])
+    if not roots and not block.get("error"):
+        return ""
+    written, interp = int(block.get("written") or 0), int(block.get("interp_written") or 0)
+    missing = len(block.get("missing") or [])
+    text = (f"LME curves: {written} mark{'' if written == 1 else 's'} written for {len(roots)} "
+            f"metal{'' if len(roots) == 1 else 's'}, {interp} interpolated")
+    if missing:
+        text += f"; {missing} pillar{'' if missing == 1 else 's'} or prompt{'' if missing == 1 else 's'} without a mark"
+    if block.get("error"):
+        text += f"; stopped ({block['error']})"
+    return text
+
+
+def _lme_open_prompts(conn: sqlite3.Connection, today: str) -> Dict[str, List[str]]:
+    """{root id: its open LME forwards' prompt dates, sorted}, from the library's in-force
+    FWD_OUTRIGHT rows of the LME product (each ticket's own prompt)."""
+    from data.bloomberg import library
+    lme_products = tuple(getattr(library, "LME_PRODUCTS", ("LME_FWD",)))
+    out: Dict[str, set] = {}
+    for r in library.needed_on(conn, today):
+        if r.get("product") in lme_products and r.get("kind") == "FWD_OUTRIGHT":
+            out.setdefault(r["key"], set()).add(r["settle_date"])
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snapped: Optional[str] = None) -> dict:
+    """The LME curves of the book's open LME forwards (2026-09-24, commodity conversion
+    Phase 5): for each metal the library lists (`library.lme_curves_needed`: in force,
+    requestable, its pillars trimmed to the furthest open prompt), Bloomberg's PX_LAST and
+    prompt date of each pillar ticker (cash, 3M, the monthly prompts; bbg-curves'
+    `fwd_curve.request_lme_pillars`, one request for every metal's pillars), turned into
+    mark rows by `fwd_curve.lme_curve_marks` (cash as SPOT, pillars and the open prompts as
+    FWD_OUTRIGHT, BBG_BFXFORWARD where Bloomberg quotes that date, BBG_INTERP between
+    pillars, never extrapolated) and written to `marks` stamped at the pull's time
+    (`snapped`). `get_session()` returns (session, service) and is called only when a metal
+    is to be asked. Never raises.
+
+    The rows are written exactly as `lme_curve_marks` builds them, never re-sourced or
+    re-keyed (reviewer, 2026-09-24): the P&L reads a metal's cash price only as SPOT under
+    BBG_BFXFORWARD keyed settle_date = as_of_date, and its pillars and prompts only as
+    FWD_OUTRIGHT under BBG_BFXFORWARD, else BBG_INTERP; a cash price under BBG_BDH (the
+    futures' habit) or keyed on the cash date would blank every LME ticket.
+
+    Returns the status file's `lme` block: {roots (the metals asked, sorted), written (mark
+    rows written), interp_written (of which BBG_INTERP), missing ([{root_id, ticker,
+    settle_date, reason}]: a pillar Bloomberg gave no price for, ticker '' for an open
+    prompt left without a forward), reasons (lme_curve_marks' own reasons, each opened by
+    its metal), summary (`lme_summary`)}, plus "error" when the step stopped."""
+    block: dict = {"roots": [], "written": 0, "interp_written": 0, "missing": [], "reasons": []}
+
+    def _done() -> dict:
+        block["summary"] = lme_summary(block)
+        return block
+
+    today_iso = today.isoformat()
+    try:
+        from data.bloomberg import library
+        needs = list(library.lme_curves_needed(conn, today_iso)) if hasattr(library, "lme_curves_needed") else []
+        open_prompts = _lme_open_prompts(conn, today_iso) if needs else {}
+    except Exception as exc:  # noqa: BLE001
+        block["error"] = f"LME curves not read from the library: {exc!r}"
+        return _done()
+    needs = [e for e in needs if e.get("pillars")]
+    if not needs:
+        return _done()
+    block["roots"] = sorted(e["root_id"] for e in needs)
+    try:
+        from data.bloomberg.fwd_curve import lme_curve_marks, request_lme_pillars
+    except ImportError as exc:
+        block["error"] = f"data.bloomberg.fwd_curve LME helpers not importable: {exc!r}"
+        return _done()
+    tickers = sorted({p["ticker"] for e in needs for p in e["pillars"] if p.get("ticker")})
+    try:
+        from data.bloomberg.pull_marks import _get_blpapi
+        session, service = get_session()
+        quotes = request_lme_pillars(_get_blpapi(), session, service, tickers) or {}
+    except Exception as exc:  # noqa: BLE001 -- the pull goes on without the LME marks
+        block["error"] = f"LME pillar request failed: {exc}"
+        return _done()
+    snapped = snapped or _now_iso()
+    for entry in needs:
+        root = entry["root_id"]
+        for p in entry["pillars"]:
+            got = quotes.get(p["ticker"]) or {}
+            if got.get("value") is None:
+                block["missing"].append({"root_id": root, "ticker": p["ticker"], "settle_date": p.get("settle_date", ""),
+                                         "reason": str(got.get("error") or "Bloomberg returned no PX_LAST")})
+        prompts = open_prompts.get(root, [])
+        try:        # its rows are written as they come: never re-sourced or re-keyed here
+            rows, reasons = lme_curve_marks(root, today, entry["pillars"], quotes,
+                                            [date.fromisoformat(d) for d in prompts], snapped)
+        except Exception as exc:  # noqa: BLE001 -- one metal fails alone
+            block["reasons"].append(f"{root}: marks not built ({exc!r})")
+            rows, reasons = [], []
+        rows = list(rows or [])
+        block["reasons"] += [str(r) for r in reasons or []]      # each already names its metal
+        known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
+        block["written"] += write_marks(conn, rows)             # an unknown instrument is skipped there
+        block["interp_written"] += sum(1 for r in rows if r.get("source") == SRC_INTERP and r["instrument_id"] in known)
+        marked = {r["settle_date"] for r in rows if r.get("mark_type") == "FWD_OUTRIGHT"}
+        for prompt in prompts:
+            if prompt not in marked:
+                block["missing"].append({"root_id": root, "ticker": "", "settle_date": prompt,
+                                         "reason": f"no forward for the {prompt} prompt on the {today_iso} curve"})
+    return _done()
 
 
 def closed_out_sentence(n: int) -> str:
@@ -1135,7 +1370,8 @@ def recalc_options_on_file(db_path, today: date) -> dict:
     the connected cycle's own options step and the backfill's price_close cover this, so
     `pull_once` calls it only when no session was opened."""
     as_of = today.isoformat()
-    empty = {"as_of": as_of, "since": None, "days": [], "priced": 0, "skipped": 0, "closed_out": 0}
+    empty = {"as_of": as_of, "since": None, "days": [], "priced": 0, "skipped": 0, "closed_out": 0,
+             "futures_options_priced": 0}
     try:
         from engine.options.store import recalc_on_file
     except ImportError as exc:
@@ -1154,18 +1390,22 @@ def recalc_options_on_file(db_path, today: date) -> dict:
 def recalc_summary(result: dict) -> str:
     """One plain sentence about `recalc_options_on_file`'s result, for the status line and
     the Market data tab (status["recalc_summary"]; status["reason"] stays the connection
-    reason)."""
+    reason). Since 2026-09-24 (Phase 5) the options on commodity futures among the priced
+    are said after it ("; N options on futures priced", recalc_on_file's
+    `futures_options_priced`), and an empty book is "no option on file"."""
     priced, skipped = int(result.get("priced") or 0), int(result.get("skipped") or 0)
     closed_out = result.get("closed_out") or 0
     closed_out = len(closed_out) if isinstance(closed_out, (list, tuple)) else int(closed_out)
+    futures_options = int(result.get("futures_options_priced") or 0)
     days, as_of = len(result.get("days") or []), result.get("as_of")
     head = "no Bloomberg on this machine: "
-    tail = f"; {closed_out_sentence(closed_out)}" if closed_out else ""      # never counted as skipped
+    tail = f"; {futures_options_sentence(futures_options)}" if futures_options else ""
+    tail += f"; {closed_out_sentence(closed_out)}" if closed_out else ""      # never counted as skipped
     if result.get("error"):
         return head + (f"re-pricing the options from the marks on file stopped ({result['error']}); "
                        f"{priced} priced, {skipped} skipped before that") + tail
     if priced == 0 and skipped == 0:
-        return head + f"no FX option on file to re-price as of {as_of}" + tail
+        return head + f"no option on file to re-price as of {as_of}" + tail
     return head + (f"options re-priced from the marks on file as of {as_of}, "
                    f"{priced} priced, {skipped} skipped over {days} day(s)") + tail
 
@@ -1203,7 +1443,14 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     futures, stores them and moves those futures onto Bloomberg's expiry, so their FUTURE_PX
     is asked for and written at it; its block is status["contract_dates"] (time under
     "futures"). A future the library lists with no Bloomberg ticker is never asked for and
-    is listed under status["not_requestable"] with its reason."""
+    is listed under status["not_requestable"] with its reason.
+
+    Phase 5 (2026-09-24): the contract dates cover the options on commodity futures too
+    (their own fields); an option on a future is priced live at Bloomberg's mid like any
+    listed option, its underlying future asked with the futures; the LME curves of the open
+    LME forwards are pulled after the futures prices (`_lme_step`, status["lme"], time
+    under "forwards"); the options step prices the options on futures as well
+    (status["options"]["futures_options_priced"])."""
     from data.ingest.schema import connect
     clock_started = time.perf_counter()
     started = _now_iso()
@@ -1276,7 +1523,9 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 status["warnings"].append(f"FUTURE_PX {entry['instrument_id']} not requested: {entry['reason']}")
             if not requests:
                 # Nothing FX-shaped to price, but options may still need a curve /
-                # premium refresh (2026-09-17) before the FX-only early return.
+                # premium refresh (2026-09-17) before the FX-only early return; an LME-only
+                # book its curves (2026-09-24).
+                status["lme"] = _timed(timings, "forwards", _lme_step, conn, today, _open_session)
                 status["curves"] = _timed(timings, "curves", _curves_step, conn, today, host, port, rates_source,
                                           shared=shared)
                 status["vol"] = _timed(timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
@@ -1306,9 +1555,10 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # found MISSING every cycle before the close). Historical backfill
             # (data.bloomberg.backfill.py) always requests a past, already-closed date and
             # keeps calling this with the default live=False.
-            # A listed option (EQ_OPTION, 2026-09-21) is asked for like a future, but its
-            # live price is Bloomberg's mid: the last trade of one strike can be hours old.
-            listed = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments WHERE asset_class = 'EQ_OPTION'")}
+            # A listed option (EQ_OPTION, 2026-09-21; an option on a commodity future,
+            # CMDTY_OPTION, since 2026-09-24) is asked for like a future, but its live price
+            # is Bloomberg's mid: the last trade of one strike can be hours old.
+            listed = _listed_option_ids(conn)
             fut_rows, fut_warnings, fut_fail = _timed(
                 timings, "futures", pm.build_future_rows, session, service, fut_reqs, today, diag, live=True,
                 mid_first={r.bbg_ticker for r in fut_reqs if r.instrument_id in listed}) \
@@ -1327,7 +1577,16 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 other, "write_marks", write_marks,
                 conn, [r for r in curve_rows
                        if (r["instrument_id"], r["mark_type"], r["settle_date"]) not in requested_keys])
-            # Curves: the OIS curve quotes of every open FX_OPTION's pair currencies into
+            # LME curves (2026-09-24, Phase 5): after the futures prices, before the ledger,
+            # so an LME forward whose prompt is today freezes at today's cash price. Its
+            # marks are reported in status["lme"], not among the requested items.
+            status["lme"] = _timed(timings, "forwards", _lme_step, conn, today, _open_session, snapped)
+            if status["lme"].get("summary"):
+                warnings += [f"LME {m['root_id']} {m['ticker'] or 'prompt'} {m['settle_date']}: {m['reason']}"
+                             for m in status["lme"]["missing"]]
+                if status["lme"].get("error"):
+                    warnings.append(f"LME curves: {status['lme']['error']}")
+            # Curves:the OIS curve quotes of every open FX_OPTION's pair currencies into
             # curve_quotes, bootstrapped into `curves` (no swap is priced since 2026-09-24).
             # Vol (2026-09-17): the FX vol smile (ATM/RR/BF) into vol_quotes for every open
             # option's pair. Then every option priced (PREMIUM and Greeks, source
@@ -1514,6 +1773,12 @@ def _print_status(status: Optional[dict]) -> None:
         val = "" if it.get("value") is None else f"{it['value']:.8f}"
         print(f"  {it['status']:6s} {it['instrument_id']:8s} {it['mark_type']:12s} {it['settle_date']}  {val:>16s}  "
               f"{it.get('source', '')}  {it.get('detail', '')}")
+    # The steps' own sentences (2026-09-24): contract dates, LME curves, options on futures.
+    for line in ((status.get("contract_dates") or {}).get("summary"), (status.get("lme") or {}).get("summary"),
+                 (status.get("options") or {}).get("futures_options_summary") if isinstance(status.get("options"), dict)
+                 else None):
+        if line:
+            print("  " + line)
     for w in status.get("warnings", []):
         print("  warning:", w)
 

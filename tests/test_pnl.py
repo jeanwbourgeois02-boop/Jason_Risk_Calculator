@@ -147,6 +147,65 @@ def test_fx_blotter_futures_no_mark_divisor():
     assert row.pnl_eod == pytest.approx(10 * 1000.0 * (72.10 - 70.25))
 
 
+def _insert_cny_future(conn, trade_id="SC1", instrument_id="SCZ6 Comdty", contracts=10, fill=560.0,
+                       multiplier=1000.0, expiry="2026-11-30"):
+    """A CNY-quoted future (Shanghai crude, 1,000 bbl a contract, price in CNY per bbl)."""
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 (instrument_id, "FUTURE", "SC", "CNY", multiplier, 0, instrument_id, expiry))
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
+                 ("USDCNY", "FX", "USD", "CNY", 1.0, 0, "USDCNY Curncy", "9999-12-31"))
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (trade_id, "XLSX", instrument_id, "FUTURE", trade_id, "2026-08-01", contracts, fill,
+                  "ACC", "CPTY", "STRAT", "TRADER", "test CNY future", ""))
+    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                 (trade_id, 1, "NOTIONAL", "CNY", contracts * multiplier * fill, "2026-08-01", expiry, 0, 0))
+    conn.commit()
+
+
+def test_fx_blotter_usd_future_notional_is_unchanged_and_has_no_reason():
+    conn = _make_conn()
+    _insert_future_instrument(conn)
+    _insert_future_trade(conn, "F1", "CLZ6 Comdty", -3, 70.25, "2026-11-19")
+    _insert_mark(conn, "CLZ6 Comdty", "2026-11-19", "FUTURE_PX", 72.10, source="BBG_BDH", as_of=AS_OF)
+    row = fx_blotter_rows(conn, AS_OF).iloc[0]
+    assert row.quantity_usd_notional == pytest.approx(-3 * 1000.0 * 70.25)
+    assert row.notional_reason == ""
+
+
+def test_fx_blotter_cny_future_notional_is_in_usd_at_usdcny_spot():
+    """2026-09-24: a future's notional is contracts x multiplier x fill in its quote currency,
+    converted to USD at spot of the valuation date, the lookup its P&L uses."""
+    conn = _make_conn()
+    _insert_cny_future(conn)
+    _insert_mark(conn, "SCZ6 Comdty", "2026-11-30", "FUTURE_PX", 570.0, source="BBG_BDH", as_of=AS_OF)
+    _insert_mark(conn, "USDCNY", AS_OF, "SPOT", 7.10, as_of=AS_OF)
+    row = fx_blotter_rows(conn, AS_OF).iloc[0]
+    assert row.quantity_usd_notional == pytest.approx(10 * 1000.0 * 560.0 / 7.10)
+    assert row.quantity_usd_notional != pytest.approx(10 * 1000.0 * 560.0)  # never the CNY figure
+    assert row.notional_reason == ""
+    assert row.pnl_eod == pytest.approx(10 * 1000.0 * (570.0 - 560.0) / 7.10)
+
+
+def test_fx_blotter_future_notional_without_spot_is_none_with_its_reason():
+    conn = _make_conn()
+    _insert_cny_future(conn)
+    _insert_mark(conn, "SCZ6 Comdty", "2026-11-30", "FUTURE_PX", 570.0, source="BBG_BDH", as_of=AS_OF)
+    row = fx_blotter_rows(conn, AS_OF).iloc[0]
+    assert row.quantity_usd_notional is None  # never the local 5,600,000, never zero
+    assert "CNY" in row.notional_reason and AS_OF in row.notional_reason
+    assert row.notional_reason.startswith("USD notional n/a")
+
+
+def test_fx_blotter_future_notional_with_a_text_spot_names_the_data_error():
+    conn = _make_conn()
+    _insert_cny_future(conn)
+    _insert_mark(conn, "SCZ6 Comdty", "2026-11-30", "FUTURE_PX", 570.0, source="BBG_BDH", as_of=AS_OF)
+    _insert_mark(conn, "USDCNY", AS_OF, "SPOT", "seven", as_of=AS_OF)
+    row = fx_blotter_rows(conn, AS_OF).iloc[0]
+    assert row.quantity_usd_notional is None
+    assert "not a number" in row.notional_reason
+
+
 def test_fx_blotter_fx_swap_is_one_row_per_trade_marked_on_its_own_value_dates():
     """FX_SWAP stays a product after the blotter's package rule left (2026-09-24): manual
     entry books one, 4 legs under one trade_id. It is one row carrying value_book's P&L."""

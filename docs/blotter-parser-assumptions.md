@@ -96,3 +96,36 @@ The macro trader's rate swaps, NDFs, equity index futures and listed index optio
 3. Every FX pair is loaded as deliverable (`is_ndf` 0, legs `settles_cash` 1): the NDF list is gone.
 4. The synthetic sample's dates are read day-first (rows such as 17/8/2026 settle it); every
    ambiguous cell (1/9, 10/8, 8/9, 3/9, 12/8, 10/9) lands on the intended date.
+
+## Options on futures and LME forwards (Phase 5, 2026-09-24)
+
+No real commodity export has been seen, so every rule below is a guess (hard rule 6: none rejects
+a row over formatting).
+
+1. An OPTION row is an option on a commodity future when its Symbol has a listed
+   (`ROOT/[EA]yymmdd[CP]strike`), Bloomberg (`CLZ6C 75`), Chinese, exchange-prefix or `Comdty`
+   shape, or when it carries no currency pair. A `Currency Pair` sends it to the FX option path.
+   The "not loaded yet" skip of Phase 2 is gone; an equity-index option (SPX, NDX, ES, ...) is
+   still counted and skipped as retired.
+2. The Chinese exchanges' option codes are `<future><C|P><strike>`, with optional hyphens
+   (`CU2612C80000`, `I2701-C-800`).
+3. A commodity option's type comes only from `FxOption Type` or the words CALL / PUT in the
+   Description, never a lone C / P letter (a counterparty code such as 'CPTY-C' must not turn a
+   put into a call); its strike from a strike column or '<n> STRIKE' / 'STRIKE <n>'. Two
+   strikes that disagree reject the row.
+4. A dated prime-broker symbol's yymmdd is the option's expiry, and it beats contract-master's
+   estimate (the underlying future's last trade) until Bloomberg's own date is stored.
+5. The premium is in the future's quoted scale; lots are rebuilt from NetInvoice / (multiplier ×
+   price) when Quantity is blank.
+6. An LME row is recognised by Bloomberg's LM..DY / LM..DS03 tickers, a root of
+   `engine.lme.lme_roots()`, or venue / Description LME plus a metal. It becomes LME_FWD, never
+   a FUTURE; the LME ferrous contracts stay futures.
+7. LME `Quantity` is lots, converted to tonnes with the metal's lot size.
+8. The prompt date, in order: a `Prompt Date` / `Prompt` / `Maturity` / `Maturity Date` column;
+   a date in the Description; `Settle Date` when after the trade date; for a 3M ticket its 3M
+   date (`engine.lme.three_month_date`, said in the load report); for a monthly symbol that
+   month's third Wednesday (said too); `Settle Date` whatever it is.
+9. A `Prompt Date` wins over a different `Settle Date`, with a warning. A prompt that is not a
+   valid LME prompt date is a warning only.
+10. An LME ticket's trade date never falls back to `Settle Date`; a non-USD `Currency` rejects
+    as a contradiction.

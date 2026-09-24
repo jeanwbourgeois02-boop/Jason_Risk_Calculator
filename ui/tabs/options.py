@@ -1,10 +1,24 @@
 """Options view inside the Blotter tab (options_calc merge Phase 8, 2026-09-17):
 a grouped, collapsible MARS-style risk grid -- Portfolio Totals -> asset class (FX;
-Commodity present-but-empty until options on commodity futures land, CLAUDE.md
-"Commodity conversion plan" Phase 5) -> structure/package (one row per
-`trades.package_id`) -> leg. The equity index (SPX listed options) left the app on
-2026-09-24; the listed-option path it used is kept, generic, for Phase 5
-(`LISTED_OPTION_PRODUCTS`).
+Options on futures) -> structure/package (one row per `trades.package_id`) -> leg. The
+equity index (SPX listed options) left the app on 2026-09-24.
+
+**Options on commodity futures (CLAUDE.md "Commodity conversion plan" Phase 5, 2026-09-24).**
+Product CMDTY_OPTION (`LISTED_OPTION_PRODUCTS`), grouped under "Options on futures"
+(`_futures_option_leg`). The book values one like a future at Bloomberg's own price of it (no
+model); this tab shows that: Position = lots, MktPx = Bloomberg's price as quoted (the book's
+own mark), Premium paid USD / Current value USD = lots x multiplier x fill / price at the spot
+the book used, so their difference is the book's P&L USD; Notional = |lots| x multiplier x the
+underlying future's official price, in the contract's currency and in USD; Underlying = the
+future's contract id (contract-master's `option_for`), UndFwdPx = its official price. Its
+Greeks are options-store's marks: Delta = DELTA x lots in futures lots, Gamma / Vega / Theta /
+Rho = the mark x lots x multiplier in the contract's currency. Those units are not the FX
+options' USD ones, so every row carries its units (`<greek>_unit`, "Greeks in") and a Greek is
+summed only over rows in one unit (`_unit_sum`); the headline shows one line per unit when they
+mix. Hovers say the units, and why a Greek or the underlying's price is blank (`tooltip_rows`).
+Its strike, call / put and style (European / American) come from its symbol: read-only here,
+never offered by the Option-terms editor. The four tables group it under its root. The implied
+vol is not shown: it has no mark type, and this tab never prices an option itself.
 
 **Rendering only reads.** Every number in the grid comes off `marks_official`
 (`PREMIUM`/`DELTA`/`GAMMA`/`THETA`/`VEGA`/`RHO`, `source='QL_OPTIONS_PRICER'`, official
@@ -193,7 +207,15 @@ DISPLAY_COLUMNS = [
     "delta", "gamma", "vega", "theta",
 ]
 LESS_USED_COLUMNS = ["premium_ccy", "premium_paid", "start_value", "mktpx", "current_value", "pnl_ccy",
-                     "underlying", "undfwdpx", "rho", "instrument"]
+                     "underlying", "undfwdpx", "rho", "instrument", "notional_ccy"]
+# Options on futures (Phase 5, 2026-09-24) carry Greeks in other units than the FX options'
+# (futures lots, the contract's currency), so every row says what its Greeks are in, and a sum
+# is only ever taken over rows in one unit (`_unit_sum`). The hover texts are the reasons and
+# units shown over a row's cells (`tooltip_rows`). `terms_fixed` = 1 on an option whose terms
+# come from its symbol (an option on a future): its Strike / Type / Payoff are read-only.
+GREEK_FIELDS = ("delta", "gamma", "vega", "theta", "rho")
+UNIT_FIELDS = tuple(f"{g}_unit" for g in GREEK_FIELDS)
+META_TEXT_COLUMNS = ("asset_class", "risk_group", "greeks_in", "greeks_hover", "underlying_hover") + UNIT_FIELDS
 # Carried in every row's data so filter_query / the callbacks can key off them, but not
 # shown -- `hidden_columns`, not omitted from `columns`, so filter_query can still
 # reference them (Dash evaluates filter_query against defined columns). `is_leg` = 1 on a
@@ -203,7 +225,7 @@ LESS_USED_COLUMNS = ["premium_ccy", "premium_paid", "start_value", "mktpx", "cur
 # value and P&L it must cover the same options, or an unpriced ticket's premium reads as
 # a loss (Start of 8 options against the Current value of 7).
 HIDDEN_COLUMNS = ["level", "group_key", "parent_key", "leg_count", "priced_count", "is_leg", "trade_id",
-                  "start_priced_usd"] + LESS_USED_COLUMNS
+                  "start_priced_usd", "terms_fixed"] + LESS_USED_COLUMNS + list(META_TEXT_COLUMNS)
 PAYOFF_WORDS = {"VANILLA": "Vanilla", "DIGITAL": "Digital", "AMERICAN": "American", "ASIAN": "Asian",
                 "BARRIER_KI": "Knock-in", "BARRIER_KO": "Knock-out", "ONE_TOUCH": "One-touch",
                 "NO_TOUCH": "No-touch"}
@@ -223,35 +245,69 @@ COLUMN_LABELS = {
     "mktpx": "MktPx (current premium)", "current_value": "Current value", "pnl_ccy": "P&L (ccy)",
     "pnl_usd": "P&L USD", "delta": "Delta", "theta": "Theta", "gamma": "Gamma", "vega": "Vega",
     "expiry": "Expiry", "underlying": "Underlying", "strike": "Strike", "undfwdpx": "UndFwdPx", "rho": "Rho",
-    "instrument": "Instrument",
+    "instrument": "Instrument", "notional_ccy": "Notional (ccy)",
+}
+
+# What each column holds, said on its header (`tooltip_header`): the FX options' and the
+# options on futures' figures share a column, in their own units.
+COLUMN_TOOLTIPS = {
+    "position": "FX option: notional in the base currency. Option on a future: lots.",
+    "notional": ("FX option: |notional| in USD at spot. Option on a future: |lots| x multiplier x the "
+                 "underlying future's price, in USD at the spot the book used."),
+    "notional_ccy": "Option on a future: |lots| x multiplier x the underlying future's price, in its currency.",
+    "start_value_usd": "What was paid: quantity x fill (x multiplier for an option on a future), in USD.",
+    "mktval": ("What it is worth: FX option: notional x the PREMIUM mark, in USD. Option on a future: "
+               "lots x multiplier x Bloomberg's price of the option, in USD at the spot the book used."),
+    "mktpx": "FX option: the PREMIUM mark (fraction of base notional). Option on a future: Bloomberg's price, as quoted.",
+    "pnl_usd": "The book's own per-trade P&L (value_book), never recomputed here.",
+    "delta": "FX option: USD delta notional. Option on a future: DELTA x lots, in futures lots.",
+    "gamma": ("FX option: USD delta change per 1% spot move. Option on a future: GAMMA x lots x "
+              "multiplier, the change in the contract-currency delta per 1.0 of the future's price."),
+    "vega": "FX option: USD per vol point. Option on a future: VEGA x lots x multiplier, contract currency per vol point.",
+    "theta": ("FX option: USD per calendar day. Option on a future: THETA x lots x multiplier, contract "
+              "currency per calendar day."),
+    "rho": ("FX option: USD per 1% of the quote-ccy rate. Option on a future: RHO x lots x multiplier, "
+            "contract currency per 1% of the discount rate."),
+    "underlying": "FX option: the pair. Option on a future: the underlying future's contract id.",
+    "undfwdpx": "FX option: the official forward at expiry. Option on a future: the underlying future's official price.",
 }
 
 # Summed at every group level.
 SUM_FIELDS = ("position", "notional", "start_value_usd", "start_priced_usd", "mktval", "pnl_usd",
               "delta", "theta", "gamma", "vega", "rho")
 # In the premium currency: summed only where the group's legs all share that currency.
-CCY_SUM_FIELDS = ("start_value", "current_value", "pnl_ccy")
+CCY_SUM_FIELDS = ("start_value", "current_value", "pnl_ccy", "notional_ccy")
 NUMERIC_FIELDS = SUM_FIELDS + CCY_SUM_FIELDS
 PASSTHROUGH_FIELDS = ("mktpx", "premium_paid", "expiry", "underlying", "strike", "undfwdpx",
-                      "side", "option_type", "payoff", "instrument")
+                      "side", "option_type", "payoff", "instrument", "asset_class", "risk_group")
 # The three cells a user can type into, on an option's own row only.
 EDITABLE_COLUMNS = ("strike", "option_type", "payoff")
 # Coloured by sign in the grid and in the headline.
 SIGNED_FIELDS = ("pnl_ccy", "pnl_usd", "mktval", "delta", "theta", "gamma", "vega", "rho")
 
-# trades.product -> the grid's asset-class group. No ingest path books a CMDTY_OPTION yet,
-# so the Commodity group renders present-but-empty today -- by design ("rows must always
-# render"). The equity index group left with the SPX options (2026-09-24).
-ASSET_CLASS_BY_PRODUCT = {"FX_OPTION": "FX", "CMDTY_OPTION": "Commodity"}
-ASSET_CLASS_ORDER = ("FX", "Commodity")
-# The listed-option path (`_leg_row`): an option the book values at Bloomberg's own price of
-# it -- the official FUTURE_PX on the option's own instrument, in the underlying's points, x
-# the contract multiplier per contract -- with no model in its value, and the Greeks the
-# pricing step adds at the vol that price implies ("Greeks not calculated: <why>" when it did
-# not). Empty since the SPX options, its only user, left the app (2026-09-24); kept for
-# Phase 5's options on commodity futures, whose product code goes here (grouped under
-# Commodity) once the listed-options-pricer and pnl-valuation lanes name it.
-LISTED_OPTION_PRODUCTS: Tuple[str, ...] = ()
+# trades.product -> the grid's asset-class group. Both groups always render, empty or not
+# ("rows must always render"). The equity index group left with the SPX options (2026-09-24).
+FUTURES_OPTIONS_CLASS = "Options on futures"
+ASSET_CLASS_BY_PRODUCT = {"FX_OPTION": "FX", "CMDTY_OPTION": FUTURES_OPTIONS_CLASS}
+ASSET_CLASS_ORDER = ("FX", FUTURES_OPTIONS_CLASS)
+# The listed-option path (`_futures_option_leg`): an option on a commodity future (CLAUDE.md
+# "P&L conventions -> Options on commodity futures", Phase 5, 2026-09-24), valued by the book
+# like a future at Bloomberg's own price of it (the official FUTURE_PX on the option's own
+# instrument, as quoted, x the underlying future's multiplier per lot), no model in its value;
+# the Greeks are options-store's marks at the vol that price implies ("Greeks not calculated:
+# <why>" when there are none). Its terms come from its symbol: read-only here. EQ_OPTION, the
+# other product engine.pnl.valuation.LISTED_OPTION_PRODUCTS names, left the app with the SPX
+# options and is not listed.
+LISTED_OPTION_PRODUCTS: Tuple[str, ...] = ("CMDTY_OPTION",)
+# How a futures option's payoff reads (the table stores VANILLA for a European one) and the model
+# its Greeks were taken under (engine/options/equity_commodity.py::MODEL_BY_PAYOFF, in words).
+FUTURES_PAYOFF_WORDS = {"VANILLA": "European", "AMERICAN": "American"}
+FUTURES_MODEL_WORDS = {"VANILLA": "Black-76", "AMERICAN": "Barone-Adesi-Whaley (American)"}
+MIXED_UNITS = "mixed"
+# The units of an FX option's Greeks (engine.options.portfolio's, 2026-09-18 audit).
+FX_GREEK_UNITS = {"delta": "USD delta notional", "gamma": "USD delta change per 1% spot move",
+                  "vega": "USD per vol point", "theta": "USD per calendar day",
+                  "rho": "USD per 1% of the quote-ccy rate"}
 
 
 def option_products() -> Tuple[str, ...]:
@@ -267,9 +323,15 @@ def _products_in(column: str = "t.product") -> Tuple[str, Tuple[str, ...]]:
 
 
 def _asset_class_of(product: str) -> str:
-    if product in ASSET_CLASS_BY_PRODUCT:
-        return ASSET_CLASS_BY_PRODUCT[product]
-    return "Commodity" if product in LISTED_OPTION_PRODUCTS else "FX"
+    if product in LISTED_OPTION_PRODUCTS:
+        return FUTURES_OPTIONS_CLASS
+    return ASSET_CLASS_BY_PRODUCT.get(product, "FX")
+
+
+def terms_are_typed(product: str) -> bool:
+    """True for an option whose Strike / Type / Payoff are typed on this screen (an FX option);
+    False for an option on a future, whose terms come from its symbol and are shown read-only."""
+    return product not in LISTED_OPTION_PRODUCTS
 
 _GREEK_MARK_TYPES = (("delta", "DELTA"), ("theta", "THETA"), ("gamma", "GAMMA"),
                      ("vega", "VEGA"), ("rho", "RHO"))
@@ -367,8 +429,8 @@ def _db_key(conn: sqlite3.Connection) -> Optional[str]:
 
 
 def _book_rows(conn: sqlite3.Connection, as_of: str) -> Dict[str, dict]:
-    """trade_id -> the book's own row (`priced_value_book`, i.e. `value_book`), FX
-    options only. `P&L USD` on this tab is read from here and never recomputed."""
+    """trade_id -> the book's own row (`priced_value_book`, i.e. `value_book`), options
+    only. `P&L USD` on this tab is read from here and never recomputed."""
     from ui.tabs.blotter_pricing import priced_value_book
 
     df, _n_fallback, _n_total = priced_value_book(conn, as_of)
@@ -477,30 +539,20 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
     straight from `trades_official`/`instruments`/`instrument_options`/`marks_official`
     plus the book's own row for the P&L, no re-pricing. See the module docstring."""
     asset_class = _asset_class_of(rec["product"])
-    listed = rec["product"] in LISTED_OPTION_PRODUCTS
-    quantity = rec["quantity"]
-    fill = rec.get("fill")
-
     marks = _official_marks(conn, as_of, rec["instrument_id"], rec["expiry_date"],
                              ("PREMIUM", "FUTURE_PX") + tuple(mt for _, mt in _GREEK_MARK_TYPES))
+    if rec["product"] in LISTED_OPTION_PRODUCTS:
+        return _futures_option_leg(conn, as_of, rec, book, marks, skip_reason, step_error)
+    quantity = rec["quantity"]
+    fill = rec.get("fill")
     premium = marks.get("PREMIUM")
     # Closed out (the book's status, never a mark or a value: user, 2026-09-22, "I only want
     # to see live options"): the trade's price is its closing fill, the book's own mark, so
     # MktVal - Start value is the book's P&L; the pricer writes it no marks, and any left on
     # file from before are not its risk.
     closed = (book or {}).get("status") == "CLOSED"
-    if closed and asset_class == "FX" and not _is_missing((book or {}).get("mark")):
+    if closed and not _is_missing((book or {}).get("mark")):
         premium = float(book["mark"])
-    if listed:
-        # A listed option (user decision 2026-09-21, "Bloomberg's option price") is marked at
-        # Bloomberg's own price of it, the FUTURE_PX the book's P&L reads, in the underlying's
-        # points: x multiplier = per contract. The pricing step only adds the Greeks, so its
-        # skip reason is about them, never the value.
-        if marks.get("FUTURE_PX") is not None:
-            premium = marks["FUTURE_PX"] * float(rec.get("multiplier") or 1.0)
-        greeks_missing = "Greeks not calculated: " + (
-            skip_reason or step_error or "they are the next time you press Pull Bloomberg now")
-        skip_reason = ""
 
     # USD per 1 unit of the premium (base) currency: the spot the BOOK used for this trade
     # when it priced it, so MktVal - Start value USD equals the book's P&L USD exactly;
@@ -523,18 +575,6 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         start_value_usd = start_value * usd_per_quote_ccy if usd_per_quote_ccy is not None else None
         # the current value in the same (quote) currency, so Current value - Start value reads across
         current_value = mktval / usd_per_quote_ccy if mktval is not None and usd_per_quote_ccy else None
-    elif asset_class != "FX":
-        # A non-FX (commodity or listed) option: contracts x premium in the underlying's points
-        # x the contract multiplier, in the QUOTE currency (15 x 121.5 x 100 = $182,250).
-        # Its PREMIUM mark is already per contract (engine/options writes it x multiplier).
-        multiplier = float(rec.get("multiplier") or 1.0)
-        usd_per_quote_ccy = _spot_to_usd(conn, as_of, rec["quote_ccy"])
-        start_value = quantity * fill * multiplier if not _is_missing(fill) else None
-        start_value_usd = (start_value * usd_per_quote_ccy
-                           if start_value is not None and usd_per_quote_ccy is not None else None)
-        mktval = current_value * usd_per_quote_ccy if current_value is not None and usd_per_quote_ccy is not None else None
-        usd_per_base = (float(rec.get("strike") or 0.0) * multiplier * usd_per_quote_ccy
-                        if usd_per_quote_ccy is not None and rec.get("strike") else None)   # notional = contracts x multiplier x strike
     else:
         start_value_usd = start_value * usd_per_base if start_value is not None and usd_per_base is not None else None
     pnl_ccy = current_value - start_value if current_value is not None and start_value is not None else None
@@ -548,25 +588,19 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         greeks, greeks_reason = {col: None for col, _mt in _GREEK_MARK_TYPES}, ""
     else:
         greeks, greeks_reason = _usd_greeks(conn, as_of, rec, marks)
-    if listed and premium is not None and marks.get("DELTA") is None:
-        greeks_reason = greeks_reason or greeks_missing
 
-    if asset_class == "FX":
-        underlying = rec["base_ccy"] + rec["quote_ccy"]
-        fwd = _official_marks(conn, as_of, underlying, rec["expiry_date"], ("FWD_OUTRIGHT",))
-        undfwdpx = fwd.get("FWD_OUTRIGHT")
-    else:
-        # Commodity / listed: the bbg_ticker's first word -- no live trades exercise this
-        # branch today (module docstring); a forward outright has no meaning here.
-        ticker = rec["bbg_ticker"] or ""
-        underlying = ticker.split()[0] if ticker else ""
-        undfwdpx = None
+    underlying = rec["base_ccy"] + rec["quote_ccy"]
+    fwd = _official_marks(conn, as_of, underlying, rec["expiry_date"], ("FWD_OUTRIGHT",))
+    undfwdpx = fwd.get("FWD_OUTRIGHT")
 
     strike = rec["strike"] if rec["strike"] else None  # 0 = not known (schema.py sentinel) -> blank
     # What the row SHOWS: terms on file, overlaid with a choice waiting for its strike.
     payoff = (pending or {}).get("payoff") or rec.get("payoff") or "VANILLA"
     option_type = (pending or {}).get("option_type") or rec.get("option_type") or ""
     payoff_word = PAYOFF_WORDS.get(payoff, payoff.title())
+    note = _leg_note(rec, as_of, premium, book, greeks_reason, pending, skip_reason, step_error)
+    premium_ccy = rec["quote_ccy"] if per_ounce else rec["base_ccy"]
+    greeks_blank = all(greeks[g] is None for g in GREEK_FIELDS)
 
     return {
         "trade_id": rec["trade_id"], "package_id": rec["package_id"], "asset_class": asset_class,
@@ -574,13 +608,15 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         "instrument": rec["instrument_id"], "payoff_word": payoff_word,
         "side": "Buy" if quantity >= 0 else "Sell",
         "option_type": TYPE_WORDS.get(option_type, option_type.title()), "payoff": payoff_word,
-        "note": _leg_note(rec, as_of, premium, book, greeks_reason, pending, skip_reason, step_error),
+        "note": note,
         "priced": premium is not None,
         "closed_out": closed,
         # Notional in DOLLARS (user, 2026-09-21: "everything in dollars"; 5,000 ounces of gold is
         # not $5,000): |quantity| x USD per base unit at spot; Position keeps the base units.
         "position": quantity, "notional": abs(quantity) * usd_per_base if usd_per_base is not None else None,
-        "premium_ccy": rec["quote_ccy"] if (per_ounce or asset_class != "FX") else rec["base_ccy"],
+        # In the premium currency only where that is the base currency the notional is counted in.
+        "notional_ccy": abs(quantity) if premium_ccy == rec["base_ccy"] else None,
+        "premium_ccy": premium_ccy,
         "premium_paid": None if _is_missing(fill) else fill,
         "start_value": start_value, "start_value_usd": start_value_usd,
         "start_priced_usd": start_value_usd if pnl_usd is not None else None,
@@ -590,6 +626,174 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         "vega": greeks["vega"], "rho": greeks["rho"],
         "expiry": rec["expiry_date"], "underlying": underlying, "strike": strike,
         "undfwdpx": undfwdpx,
+        "terms_fixed": 0, "risk_group": underlying, "greeks_in": "USD",
+        **{f"{g}_unit": FX_GREEK_UNITS[g] for g in GREEK_FIELDS},
+        "greeks_hover": (note or "no Greeks on file") if greeks_blank else "",
+        "underlying_hover": "",
+    }
+
+
+# --------------------------------------------------------------------------- options on futures
+
+def _underlying_future(conn: sqlite3.Connection, rec: dict) -> Tuple[str, str]:
+    """(the underlying future's canonical id, '') -- contract-master's reading of the option's
+    own canonical id, the one the pricer uses -- or ('', why not)."""
+    try:
+        from data.contracts import option_for
+        return option_for(rec["base_ccy"], rec["instrument_id"], conn=conn).underlying.contract_id, ""
+    except Exception as exc:  # noqa: BLE001 -- UnknownContract, a bad root: say so, never 500
+        return "", f"underlying future of {rec['instrument_id']} not known to the contract master ({exc})"
+
+
+def _underlying_price(conn: sqlite3.Connection, as_of: str, future_id: str) -> Tuple[Optional[float], str]:
+    """(the underlying future's official FUTURE_PX on `as_of`, '') or (None, why not). Read the
+    way the Greeks' pricer reads it (engine/options/equity_commodity.py::_future_price): the row
+    at the future's own expiry, or its only row when Bloomberg's date moved the expiry."""
+    inst = conn.execute("SELECT expiry_date FROM instruments WHERE instrument_id = ?", (future_id,)).fetchone()
+    rows = conn.execute(
+        "SELECT settle_date, value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? "
+        "AND mark_type = 'FUTURE_PX'", (as_of, future_id)).fetchall()
+    exact = [v for d, v in rows if inst is not None and d == inst[0]]
+    picked = exact[0] if exact else (rows[0][1] if len(rows) == 1 else None)
+    if picked is None:
+        return None, f"no Bloomberg price of the underlying future {future_id} on {as_of}"
+    price = _num(picked)
+    if price is None:
+        return None, f"Bloomberg's price of the underlying future {future_id} on {as_of} is not a number ({picked!r})"
+    return price, ""
+
+
+def futures_greek_units(root: str, ccy: str) -> Dict[str, str]:
+    """The unit of each Greek of an option on a future of `root`, quoted in `ccy`."""
+    return {"delta": f"{root} futures lots", "gamma": f"{ccy} delta change per 1.0 of the {root} price",
+            "vega": f"{ccy} per vol point", "theta": f"{ccy} per calendar day", "rho": f"{ccy} per 1% rate"}
+
+
+def _futures_option_leg(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dict], marks: dict,
+                        skip_reason: str, step_error: str) -> dict:
+    """One option on a commodity future (CLAUDE.md "P&L conventions -> Options on commodity
+    futures"), from the book's own row and the marks on file, nothing priced here:
+
+    - Position = lots; MktPx = Bloomberg's price of the option as quoted (the book's own mark
+      `m`, the official FUTURE_PX on the option's instrument); Premium paid = the fill;
+    - Start value / Current value = lots x multiplier x fill / m, in the contract's currency, and
+      in USD at the spot the book used (so Current value USD - Premium paid USD = the book's
+      P&L USD); P&L (ccy) = the book's `pnl_local`, P&L USD = the book's `pnl_usd`;
+    - Notional = |lots| x multiplier x the underlying future's official price, in the contract's
+      currency (`notional_ccy`) and in USD at that same spot (`notional`);
+    - Delta = the DELTA mark x lots, in futures lots; Gamma / Vega / Theta / Rho = the mark x lots
+      x multiplier, in the contract's currency (`futures_greek_units`); none when the option is
+      closed out or settled;
+    - Underlying = the future's contract id, UndFwdPx = its official price;
+    - its terms come from its symbol: Strike / Type / Payoff (European or American) read-only."""
+    book = book or {}
+    status = book.get("status") or ""
+    closed, settled = status == "CLOSED", status == "SETTLED"
+    quantity = float(rec["quantity"])
+    fill = _num(rec.get("fill"))
+    multiplier = _num(rec.get("multiplier"))
+    root, ccy, inst = rec["base_ccy"], rec["quote_ccy"], rec["instrument_id"]
+
+    # m: the book's own price of the option (its near-marks rule and the fill included); with no
+    # book figure, the official price on file for the day. Settled: frozen by the ledger, no price.
+    book_mark = _num(book.get("mark"))
+    if settled:
+        price = None
+    elif status in ("OPEN", "CLOSED") and book_mark is not None:
+        price = book_mark
+    else:
+        price = _num(marks.get("FUTURE_PX"))
+    # S: USD per unit of the contract's currency, the spot the book used for this trade.
+    book_spot = _num(book.get("spot"))
+    s = book_spot if status in ("OPEN", "CLOSED") and book_spot else _spot_to_usd(conn, as_of, ccy)
+
+    def per_lots(px: Optional[float]) -> Optional[float]:
+        return quantity * multiplier * px if px is not None and multiplier is not None else None
+
+    def usd(amount: Optional[float]) -> Optional[float]:
+        return amount * s if amount is not None and s is not None else None
+
+    start_value, current_value = per_lots(fill), per_lots(price)
+    pnl_ccy = _num(book.get("pnl_local"))
+    if pnl_ccy is None and current_value is not None and start_value is not None:
+        pnl_ccy = current_value - start_value
+    pnl_usd = None
+    if book and not book.get("reason") and not _is_missing(book.get("pnl_usd")):
+        pnl_usd = float(book["pnl_usd"])
+
+    future_id, und_reason = _underlying_future(conn, rec)
+    und_px, px_reason = _underlying_price(conn, as_of, future_id) if future_id else (None, und_reason)
+    notional_ccy = (abs(quantity) * multiplier * und_px
+                    if und_px is not None and multiplier is not None else None)
+    underlying_hover = ""
+    if und_px is None:
+        underlying_hover = f"Notional and UndFwdPx blank: {px_reason}"
+    elif multiplier is None:
+        underlying_hover = f"Notional blank: the multiplier of {inst} is not a number ({rec.get('multiplier')!r})"
+    elif s is None:
+        underlying_hover = f"Notional USD blank: no USD conversion of {ccy} on {as_of}"
+
+    raw = {col: _num(marks.get(mt)) for col, mt in _GREEK_MARK_TYPES}
+    greeks = {g: None for g in GREEK_FIELDS}
+    if not (closed or settled):
+        greeks["delta"] = raw["delta"] * quantity if raw["delta"] is not None else None
+        for g in ("gamma", "vega", "theta", "rho"):
+            greeks[g] = raw[g] * quantity * multiplier if raw[g] is not None and multiplier is not None else None
+
+    # The row's note: why anything on it is blank, the book's own reason first.
+    book_reason = book.get("reason") or ""
+    parts: List[str] = []
+    if settled:
+        parts.append(book_reason or book.get("note") or f"expired {rec['expiry_date']}: P&L frozen by the ledger")
+    elif closed:
+        parts.append(book_reason or book.get("note") or "closed out: bought and sold back in full")
+    else:
+        if book_reason:
+            parts.append(book_reason)
+        elif price is None:
+            parts.append(f"no Bloomberg price of the option {inst} on {as_of}")
+        if greeks["delta"] is None:
+            why = skip_reason or step_error or "they are the next time you press Pull Bloomberg now"
+            if "no strike" in why:   # the pricer's wording sends the user to a form that does not apply here
+                why = "the option's strike is not on file (it comes from the option's symbol in the blotter)"
+            parts.append("Greeks not calculated: " + why)
+    note = "; ".join(parts)
+
+    payoff = (rec.get("payoff") or "VANILLA").upper()
+    payoff_word = FUTURES_PAYOFF_WORDS.get(payoff, payoff.title())
+    option_type = rec.get("option_type") or ""
+    units = futures_greek_units(root, ccy)
+    if greeks["delta"] is not None:
+        greeks_hover = (f"Option on {future_id or root}: Delta = DELTA {raw['delta']:.4g} x {quantity:g} lots, in "
+                        f"{root} futures lots; Gamma, Vega, Theta, Rho = the mark x lots x multiplier "
+                        f"{multiplier:g}, in {ccy} (Gamma: {units['gamma']}; Vega {units['vega']}; Theta "
+                        f"{units['theta']}; Rho {units['rho']}). Taken under "
+                        f"{FUTURES_MODEL_WORDS.get(payoff, payoff)} at the vol Bloomberg's price implies.")
+    else:
+        greeks_hover = note or "no Greeks on file"
+    strike = _num(rec.get("strike")) or None
+
+    return {
+        "trade_id": rec["trade_id"], "package_id": rec["package_id"], "asset_class": FUTURES_OPTIONS_CLASS,
+        "label": f"{future_id or inst} - {payoff_word}",
+        "instrument": inst, "payoff_word": payoff_word,
+        "side": "Buy" if quantity >= 0 else "Sell",
+        "option_type": TYPE_WORDS.get(option_type, option_type.title()), "payoff": payoff_word,
+        "note": note,
+        "priced": price is not None,
+        "closed_out": closed,
+        "position": quantity, "notional": usd(notional_ccy), "notional_ccy": notional_ccy,
+        "premium_ccy": ccy, "premium_paid": fill,
+        "start_value": start_value, "start_value_usd": usd(start_value),
+        "start_priced_usd": usd(start_value) if pnl_usd is not None else None,
+        "mktval": usd(current_value), "mktpx": price, "current_value": current_value,
+        "pnl_ccy": pnl_ccy, "pnl_usd": pnl_usd,
+        **greeks,
+        "expiry": rec["expiry_date"], "underlying": future_id, "strike": strike, "undfwdpx": und_px,
+        "terms_fixed": 1, "risk_group": f"{root} options on futures",
+        "greeks_in": f"{root} lots; {ccy}",
+        **{f"{g}_unit": units[g] for g in GREEK_FIELDS},
+        "greeks_hover": greeks_hover, "underlying_hover": underlying_hover,
     }
 
 
@@ -656,16 +860,55 @@ def _common_ccy(group_legs: List[dict]) -> str:
     return ccys.pop() if len(ccys) == 1 else "mixed"
 
 
+def _unit_sum(rows: Iterable[dict], field: str) -> Tuple[Optional[float], str]:
+    """(sum, unit) of a Greek over `rows`, skipping missing values: a sum only over values in
+    ONE unit. Values in several units (USD delta beside futures lots, a CNY theta beside a USD
+    one) are not added: (None, MIXED_UNITS). With no value at all, the rows' shared unit, if
+    any. Futures lots of two different roots are two units, so they are not added either."""
+    rows = [r for r in rows if isinstance(r, dict)]
+    vals = [(_num(r.get(field)), _text(r.get(f"{field}_unit"))) for r in rows]
+    vals = [(v, u) for v, u in vals if v is not None]
+    if not vals:
+        units = {_text(r.get(f"{field}_unit")) for r in rows}
+        return None, (units.pop() if len(units) == 1 else "")
+    units = {u for _v, u in vals}
+    if len(units) > 1:
+        return None, MIXED_UNITS
+    return sum(v for v, _u in vals), units.pop()
+
+
+def _mixed_fields(numeric: dict) -> List[str]:
+    return [g for g in GREEK_FIELDS if numeric.get(f"{g}_unit") == MIXED_UNITS]
+
+
+def _mixed_note(numeric: dict) -> str:
+    """Why a group's Greek is blank although its options have one: they are in different units."""
+    mixed = _mixed_fields(numeric)
+    if not mixed:
+        return ""
+    return (f"{', '.join(m.title() for m in mixed)} not added: these options' Greeks are in different units "
+            "(FX options in USD, options on futures in futures lots and the contract's currency); "
+            "see each option's row")
+
+
 def _group_numeric(group_legs: List[dict]) -> dict:
-    out = {f: _agg(l[f] for l in group_legs) for f in SUM_FIELDS}
-    # Position is in the pair's own units (EUR, USD, ounces of gold): it only adds up inside
-    # one underlying. Across pairs it is blank; Notional USD is the figure that adds up.
+    out = {f: _agg(l[f] for l in group_legs) for f in SUM_FIELDS if f not in GREEK_FIELDS}
+    for g in GREEK_FIELDS:
+        out[g], out[f"{g}_unit"] = _unit_sum(group_legs, g)
+    # Position is in the pair's own units (EUR, USD, ounces of gold, lots): it only adds up
+    # inside one underlying. Across them it is blank; Notional USD is the figure that adds up.
     if len({l.get("underlying") for l in group_legs}) > 1:
         out["position"] = None
     same_ccy = _common_ccy(group_legs) not in ("", "mixed")
     for f in CCY_SUM_FIELDS:  # EUR and USD premiums do not add up: blank unless one currency
         out[f] = _agg(l[f] for l in group_legs) if same_ccy else None
     return out
+
+
+def _greeks_in(group_legs: List[dict]) -> str:
+    """What the group's Greeks are in: its options' one label, or MIXED_UNITS."""
+    labels = {l.get("greeks_in") or "" for l in group_legs} - {""}
+    return labels.pop() if len(labels) == 1 else (MIXED_UNITS if labels else "")
 
 
 def _group_note(group_legs: List[dict], with_reasons: bool = False) -> str:
@@ -682,26 +925,32 @@ def _group_note(group_legs: List[dict], with_reasons: bool = False) -> str:
 
 
 def _row(level: str, group_key: str, parent_key: str, label: str, group_legs: List[dict],
-         numeric: dict, passthrough: dict, note: str, trade_id: str = "") -> dict:
+         numeric: dict, passthrough: dict, note: str, trade_id: str = "", meta: Optional[dict] = None) -> dict:
+    mixed = _mixed_note(numeric)
     row = {"level": level, "group_key": group_key, "parent_key": parent_key, "label": label,
            "leg_count": len(group_legs), "priced_count": sum(1 for l in group_legs if l["priced"]),
            "is_leg": 1 if trade_id else 0, "trade_id": trade_id,
            "closed_count": sum(1 for l in group_legs if l.get("closed_out")),
-           "premium_ccy": _common_ccy(group_legs), "note": note}
+           "premium_ccy": _common_ccy(group_legs),
+           "note": "; ".join(t for t in (note, mixed) if t),
+           "terms_fixed": 1 if trade_id and all(l.get("terms_fixed") for l in group_legs) else 0,
+           "greeks_in": _greeks_in(group_legs), "greeks_hover": mixed, "underlying_hover": ""}
     row.update(numeric)
     row.update(passthrough)
+    row.update(meta or {})
     return row
 
 
 def _own_row(level: str, group_key: str, parent_key: str, label: str, leg: dict) -> dict:
     """The row of ONE trade: a LEG row, or the PACKAGE row of a single-leg package."""
     return _row(level, group_key, parent_key, label, [leg],
-                {f: leg[f] for f in NUMERIC_FIELDS}, {f: leg[f] for f in PASSTHROUGH_FIELDS},
-                leg["note"], trade_id=leg["trade_id"])
+                {f: leg[f] for f in NUMERIC_FIELDS + UNIT_FIELDS}, {f: leg[f] for f in PASSTHROUGH_FIELDS},
+                leg["note"], trade_id=leg["trade_id"],
+                meta={k: leg[k] for k in ("greeks_hover", "underlying_hover")})
 
 
 def option_rows(conn: sqlite3.Connection, as_of: str, flat: bool = False) -> pd.DataFrame:
-    """TOTAL -> ASSET_CLASS (FX always; Commodity present-but-empty) ->
+    """TOTAL -> ASSET_CLASS (FX and Options on futures, always, empty or not) ->
     PACKAGE (one per `trades.package_id`, flat when it has exactly one leg) -> LEG
     (only emitted for a package with >1 leg).
 
@@ -750,7 +999,8 @@ def option_rows(conn: sqlite3.Connection, as_of: str, flat: bool = False) -> pd.
 
 
 _FRAME_COLUMNS = ["level", "group_key", "parent_key", "label", "leg_count", "priced_count", "is_leg",
-                  "trade_id", "closed_count", "premium_ccy", "note", *NUMERIC_FIELDS, *PASSTHROUGH_FIELDS]
+                  "trade_id", "closed_count", "premium_ccy", "note", "terms_fixed", "greeks_in", "greeks_hover",
+                  "underlying_hover", *NUMERIC_FIELDS, *UNIT_FIELDS, *PASSTHROUGH_FIELDS]
 
 
 # --------------------------------------------------------------------------- formatting
@@ -761,11 +1011,14 @@ _FRAME_COLUMNS = ["level", "group_key", "parent_key", "label", "leg_count", "pri
 # premiums and rates, so a fill reads as the blotter wrote it (0.00579, 0.121, 152).
 AMOUNT_FORMAT = Format(precision=0, scheme=Scheme.fixed, group=Group.yes, sign=Sign.parantheses)
 RATE_FORMAT = Format(precision=6, scheme=Scheme.fixed, group=Group.yes, trim=Trim.yes)
+# The Greeks: up to two decimals, trailing zeros trimmed -- an option on a future's delta is a
+# few futures lots (5.5 lots must not read as 6), an FX option's a USD amount.
+GREEK_FORMAT = Format(precision=2, scheme=Scheme.fixed, group=Group.yes, sign=Sign.parantheses, trim=Trim.yes)
 RATE_FIELDS = ("premium_paid", "mktpx", "strike", "undfwdpx")
 AMOUNT_FIELDS = NUMERIC_FIELDS
 NUMERIC_COLUMNS = AMOUNT_FIELDS + RATE_FIELDS
 TEXT_COLUMNS = ("label", "side", "option_type", "payoff", "note", "premium_ccy", "expiry",
-                "underlying", "instrument")
+                "underlying", "instrument") + META_TEXT_COLUMNS
 
 # The hint shown in each column's filter box.
 _FILTER_HINTS = {
@@ -839,6 +1092,7 @@ def format_rows(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None) -> 
             "priced_count": int(_num(rec.get("priced_count")) or 0),
             "is_leg": int(_num(rec.get("is_leg")) or 0),
             "trade_id": _text(rec.get("trade_id")),
+            "terms_fixed": int(_num(rec.get("terms_fixed")) or 0),
             "label": _fmt_label(rec, collapsed_set),
         }
         for col in TEXT_COLUMNS:
@@ -866,9 +1120,11 @@ FILTER_ROW_CSS = [
      "rule": "color: var(--text) !important; opacity: 0.55 !important; font-style: italic;"},
 ]
 
-# Rows whose Strike / Type / Payoff cells take input, and the ones still waiting for a strike.
-OWN_ROW_QUERY = "{is_leg} = 1"
-NEEDS_STRIKE_QUERY = "{is_leg} = 1 && {note} contains 'no strike'"
+# Rows whose Strike / Type / Payoff cells take input -- an FX option's own row; an option on a
+# future's terms come from its symbol (`terms_fixed`) -- and the ones still waiting for a strike.
+OWN_ROW_QUERY = "{is_leg} = 1 && {terms_fixed} = 0"
+READ_ONLY_TERMS_QUERY = "{is_leg} = 0 || {terms_fixed} = 1"
+NEEDS_STRIKE_QUERY = "{is_leg} = 1 && {terms_fixed} = 0 && {note} contains 'no strike'"
 
 
 def table_styles() -> List[dict]:
@@ -897,7 +1153,7 @@ def table_styles() -> List[dict]:
     # An option with no strike on file cannot be priced: the whole row is flagged so it
     # is impossible to miss (user request 2026-09-18). The strike is typed in its cell.
     styles.append(
-        {"if": {"filter_query": "{note} contains 'no strike'"},
+        {"if": {"filter_query": "{terms_fixed} = 0 && {note} contains 'no strike'"},
          "backgroundColor": "rgba(178, 59, 59, 0.14)", "color": "var(--neg)", "fontWeight": "700"})
     for key in SIGNED_FIELDS:
         styles += [
@@ -911,7 +1167,8 @@ def table_styles() -> List[dict]:
             {"if": {"filter_query": OWN_ROW_QUERY, "column_id": col},
              "outline": "1px dashed var(--gold)", "outlineOffset": "-3px",
              "backgroundColor": "rgba(201, 162, 39, 0.06)", "cursor": "text" if col == "strike" else "pointer"},
-            {"if": {"filter_query": "{is_leg} = 0", "column_id": col}, "pointerEvents": "none"},
+            # A group row, or an option on a future (its terms come from its symbol): no typing.
+            {"if": {"filter_query": READ_ONLY_TERMS_QUERY, "column_id": col}, "pointerEvents": "none"},
         ]
     # Strongest where the user has to act (later rules win): the empty Strike cell of an
     # option that cannot be priced without it is a solid gold box on a gold ground, and
@@ -935,10 +1192,11 @@ def table_columns() -> List[dict]:
     columns = []
     for col in ALL_COLUMNS:
         spec = {"name": COLUMN_LABELS.get(col, col.replace("_", " ").title()), "id": col}
-        if col in NUMERIC_COLUMNS or col in ("leg_count", "priced_count", "is_leg"):
+        if col in NUMERIC_COLUMNS or col in ("leg_count", "priced_count", "is_leg", "terms_fixed"):
             spec["type"] = "numeric"
             if col in NUMERIC_COLUMNS:
-                spec["format"] = (RATE_FORMAT if col in RATE_FIELDS else AMOUNT_FORMAT).to_plotly_json()
+                fmt = RATE_FORMAT if col in RATE_FIELDS else GREEK_FORMAT if col in GREEK_FIELDS else AMOUNT_FORMAT
+                spec["format"] = fmt.to_plotly_json()
             hint = _FILTER_HINTS.get(col, "> 0, < 0")
         else:
             spec["type"] = "text"
@@ -968,6 +1226,26 @@ def _dropdowns() -> List[dict]:
     ]
 
 
+UNDERLYING_HOVER_COLUMNS = ("notional", "undfwdpx", "underlying")
+
+
+def tooltip_rows(records: Optional[Iterable[dict]]) -> List[dict]:
+    """`tooltip_data` for the table's rows, one dict per record in the same order: over the
+    Greek cells, what they are in (an option on a future) or why they are blank; over Notional /
+    UndFwdPx / Underlying, why the underlying's price is missing. Built from the records alone."""
+    out = []
+    for rec in records or []:
+        tip = {}
+        greeks = _text((rec or {}).get("greeks_hover"))
+        if greeks:
+            tip.update({col: {"value": greeks, "type": "text"} for col in GREEK_FIELDS})
+        underlying = _text((rec or {}).get("underlying_hover"))
+        if underlying:
+            tip.update({col: {"value": underlying, "type": "text"} for col in UNDERLYING_HOVER_COLUMNS})
+        out.append(tip)
+    return out
+
+
 def options_table(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None,
                    table_id: str = TABLE_ID) -> dash_table.DataTable:
     records, style_data_conditional = format_rows(df, collapsed)
@@ -976,6 +1254,11 @@ def options_table(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None,
         columns=table_columns(),
         hidden_columns=list(HIDDEN_COLUMNS),
         data=records,
+        # Units and reasons on hover (`tooltip_rows`, kept in step with `data` by `_tooltips`).
+        tooltip_data=tooltip_rows(records),
+        tooltip_header={col: {"value": text, "type": "text"} for col, text in COLUMN_TOOLTIPS.items()},
+        tooltip_delay=300,
+        tooltip_duration=None,
         editable=False,  # per column: Strike / Type / Payoff only (`table_columns`)
         dropdown_conditional=_dropdowns(),
         filter_action="native",
@@ -1081,12 +1364,32 @@ def headline_totals(rows: Optional[Iterable[dict]]) -> dict:
     rows = [r for r in (rows or []) if isinstance(r, dict)]
     basis = [r for r in rows if r.get("level") == "PACKAGE"] or [r for r in rows if r.get("level") == "LEG"]
     out = {field: _agg(_num(r.get(field)) for r in basis) for field, _title, _unit in HEADLINE_FIELDS}
+    # A Greek is one figure only over rows in one unit (`_unit_sum`); otherwise `<field>_by_unit`
+    # holds one sum per unit and the card shows each on its own line, never added together.
+    for field in GREEK_FIELDS:
+        by_unit: Dict[str, float] = {}
+        for r in basis:
+            value = _num(r.get(field))
+            if value is not None:
+                unit = _text(r.get(f"{field}_unit"))
+                by_unit[unit] = by_unit.get(unit, 0.0) + value
+        out[field] = next(iter(by_unit.values())) if len(by_unit) == 1 else None
+        out[f"{field}_by_unit"] = by_unit
     out["options"] = sum(int(_num(r.get("leg_count")) or 0) for r in basis)
     out["priced"] = sum(int(_num(r.get("priced_count")) or 0) for r in basis)
     out["unpriced"] = [f"{r.get('instrument') or r.get('label')}: {r.get('note') or 'no PREMIUM mark'}"
                        for r in basis
                        if int(_num(r.get("priced_count")) or 0) < int(_num(r.get("leg_count")) or 0)]
     return out
+
+
+def _fmt_greek(value: float, unit: str) -> str:
+    """An FX option's USD Greek in whole units (`format_cell`, as ever); an option on a future's
+    in up to two decimals, since its delta is a few futures lots (5.5 lots must not read 6)."""
+    if unit in FX_GREEK_UNITS.values() or abs(value) >= 1000:
+        return format_cell(value)
+    text = f"{abs(value):,.2f}".rstrip("0").rstrip(".")
+    return f"({text})" if value < 0 and text != "0" else text
 
 
 def headline_strip(totals: dict, filtered: bool = False) -> html.Div:
@@ -1096,18 +1399,32 @@ def headline_strip(totals: dict, filtered: bool = False) -> html.Div:
     if m == 0:
         why = "no option matches the filter" if filtered else "no option trades on file"
     elif n == 0:
-        why = "none of these options has an official PREMIUM mark on this date"
+        why = ("none of these options has a price on this date (a PREMIUM mark, or Bloomberg's price of an "
+               "option on a future)")
     else:
         why = ""
     cards = []
     for field, title, unit in HEADLINE_FIELDS:
         value = totals.get(field)
+        by_unit = totals.get(f"{field}_by_unit") or {}
+        if len(by_unit) > 1:
+            # FX options' USD Greeks beside options on futures' lots / contract currency: one line
+            # per unit, never a sum of the two.
+            lines = [html.Div(f"{_fmt_greek(v, u)} {u}".strip(), style={"fontSize": "0.8em", "color":
+                              "var(--pos)" if v >= 0 else "var(--neg)"}) for u, v in by_unit.items()]
+            cards.append(html.Div(className="card", children=[
+                html.Div(title, className="card-label"), html.Div(lines, className="card-value"),
+                html.Small("by unit: options in different units are not added", className="card-note")]))
+            continue
+        if len(by_unit) == 1:
+            unit = next(iter(by_unit)) or unit
         if value is None:
             value_div = html.Div("n/a", className="card-value card-value--muted",
                                  title=why or "no priced option carries this figure")
         else:
             style = {"color": "var(--pos)" if value >= 0 else "var(--neg)"} if field in SIGNED_FIELDS else {}
-            value_div = html.Div(format_cell(value), className="card-value", style=style)
+            text = _fmt_greek(value, unit) if field in GREEK_FIELDS else format_cell(value)
+            value_div = html.Div(text, className="card-value", style=style)
         cards.append(html.Div(className="card", children=[
             html.Div(title, className="card-label"), value_div, html.Small(unit, className="card-note")]))
     unpriced = totals.get("unpriced") or []
@@ -1196,10 +1513,12 @@ def _terms_on_file(conn: sqlite3.Connection, trade_id: str) -> Optional[dict]:
     is only for a database whose `instrument_options` predates a column."""
     products_sql, products = _products_in("product")
     hit = conn.execute(
-        f"SELECT instrument_id FROM trades_official WHERE trade_id = ? AND {products_sql}",
+        f"SELECT instrument_id, product FROM trades_official WHERE trade_id = ? AND {products_sql}",
         (trade_id, *products)).fetchone()
     if hit is None:
         return None
+    if not terms_are_typed(hit[1]):
+        return {"instrument_id": hit[0], "product": hit[1], "read_only": True}
     try:
         from engine.options.store import on_file_terms
         terms = on_file_terms(conn, hit[0])
@@ -1214,6 +1533,19 @@ def _terms_on_file(conn: sqlite3.Connection, trade_id: str) -> Optional[dict]:
             "option_type": (terms.get("option_type") or "").upper(),
             "payoff": (terms.get("payoff") or "VANILLA").upper(),
             "barrier_level": float(terms.get("barrier_level") or 0.0)}
+
+
+READ_ONLY_TERMS_MESSAGE = ("Not saved: {instrument} is an option on a future, whose strike, call / put and "
+                           "style come from its symbol in the blotter; they are shown read-only.")
+
+
+def _is_futures_option(conn: sqlite3.Connection, instrument_id: str) -> bool:
+    """True when `instrument_id` is an option whose terms come from its symbol."""
+    try:
+        hit = conn.execute("SELECT asset_class FROM instruments WHERE instrument_id = ?", (instrument_id,)).fetchone()
+    except sqlite3.Error:
+        return False
+    return hit is not None and not terms_are_typed(str(hit[0]))
 
 
 def _describe(terms: dict) -> str:
@@ -1243,6 +1575,8 @@ def save_and_price(db_path, as_of: Optional[str], trade_id: Optional[str], instr
     try:
         conn = connect(db_path)
         try:
+            if _is_futures_option(conn, instrument_id):
+                return EditResult(False, READ_ONLY_TERMS_MESSAGE.format(instrument=instrument_id))
             set_option_terms(conn, instrument_id, terms["strike"], terms["option_type"], terms["payoff"],
                              terms.get("barrier_level") or 0.0)
             _PENDING_TERMS.pop((db, instrument_id), None)
@@ -1298,8 +1632,10 @@ def apply_edit(db_path, as_of: Optional[str], edit: dict,
         conn.close()
     if on_file is None:
         return EditResult(False, f"Not saved: trade {trade_id} is not an option on file.")
+    if on_file.get("read_only"):
+        return EditResult(False, READ_ONLY_TERMS_MESSAGE.format(instrument=on_file["instrument_id"]))
 
-    key = (_norm_path(db_path), on_file["instrument_id"])
+    key =(_norm_path(db_path), on_file["instrument_id"])
     if on_file["strike"]:
         _PENDING_TERMS.pop(key, None)  # a strike is on file: nothing is waiting for one any more
     terms = {**on_file, **_PENDING_TERMS.get(key, {})}
@@ -1367,8 +1703,10 @@ TERMS_STATUS_ID = "options-terms-status"
 
 
 def option_instruments(conn: sqlite3.Connection) -> List[dict]:
-    """Every option instrument with a trade on file, with its current terms; options
-    with no strike first so the ones that block pricing are at the top of the list.
+    """Every option instrument with a trade on file whose terms are typed here (an FX
+    option), with its current terms; options with no strike first so the ones that block
+    pricing are at the top of the list. An option on a future is not listed: its terms come
+    from its symbol and are shown read-only in the table (`futures_option_instruments`).
     Same missing-column defence as `_leg_rows` (`_instrument_options_columns`) -- this
     query hits the same pre-`payoff`-column dev DB via `terms_editor`."""
     opt_cols = _instrument_options_columns(conn)
@@ -1376,7 +1714,8 @@ def option_instruments(conn: sqlite3.Connection) -> List[dict]:
     option_type_expr = "COALESCE(o.option_type, '')" if "option_type" in opt_cols else "''"
     payoff_expr = "COALESCE(o.payoff, 'VANILLA')" if "payoff" in opt_cols else "'VANILLA'"
     barrier_expr = "COALESCE(o.barrier_level, 0)" if "barrier_level" in opt_cols else "0"
-    products_sql, products = _products_in()
+    typed = tuple(p for p in option_products() if terms_are_typed(p))
+    products_sql, products = f"t.product IN ({','.join('?' * len(typed))})", typed
     rows = conn.execute(
         f"SELECT DISTINCT i.instrument_id, i.expiry_date, {strike_expr}, {option_type_expr}, "
         f"{payoff_expr}, {barrier_expr} "
@@ -1386,6 +1725,20 @@ def option_instruments(conn: sqlite3.Connection) -> List[dict]:
         f"ORDER BY ({strike_expr} = 0) DESC, i.expiry_date, i.instrument_id", products).fetchall()
     return [{"instrument_id": r[0], "expiry": r[1], "strike": r[2], "option_type": r[3],
              "payoff": r[4], "barrier_level": r[5]} for r in rows]
+
+
+def futures_option_instruments(conn: sqlite3.Connection) -> List[str]:
+    """The options on futures with a trade on file: their terms are read-only (the editor says so)."""
+    listed = tuple(p for p in option_products() if not terms_are_typed(p))
+    if not listed:
+        return []
+    try:
+        rows = conn.execute(
+            f"SELECT DISTINCT instrument_id FROM trades_official WHERE product IN ({','.join('?' * len(listed))}) "
+            "ORDER BY instrument_id", listed).fetchall()
+    except sqlite3.Error:
+        return []
+    return [r[0] for r in rows]
 
 
 def _terms_dropdown_options(insts: List[dict]) -> List[dict]:
@@ -1402,6 +1755,7 @@ def terms_editor(conn: sqlite3.Connection) -> html.Details:
     Embedded both under Options and under Manual entry (`ui.tabs.manual_entry`), so it
     must not depend on any component outside itself."""
     insts = option_instruments(conn)
+    fixed = futures_option_instruments(conn)
     missing = [i for i in insts if not i["strike"]]
     summary_text = "Option terms" + (f" -- {len(missing)} option(s) cannot be priced until their strike is entered"
                                       if missing else "")
@@ -1415,6 +1769,9 @@ def terms_editor(conn: sqlite3.Connection) -> html.Details:
                "(typically digitals). Strike, Type and Payoff can be typed straight into the Options "
                "table; a barrier / touch level is entered here. Terms survive re-uploads and the "
                "option is priced as soon as they are saved.", className="section-kicker"),
+        *([html.P(f"Options on futures ({len(fixed)}) are not listed here: their strike, call / put and "
+                  "style (European or American) come from the option's symbol in the blotter and are shown "
+                  "read-only in the table.", className="section-kicker")] if fixed else []),
         html.Div(className="toolbar", children=[
             html.Div(className="toolbar-group", children=[
                 html.Label("Option"),
@@ -1475,7 +1832,14 @@ def _sum_group(name: str, g: pd.DataFrame) -> dict:
     out = {"group": name, "options": len(g), "unpriced": len(g) - len(priced),
            "closed": int((~_live(g)).sum()),
            "paid": _agg(priced["start_priced_usd"]), "value": _agg(priced["mktval"]), "pnl": _agg(priced["pnl_usd"])}
-    out.update({k: _agg(g[k]) for k in ("delta", "gamma", "vega", "theta")})
+    # A Greek sums only over options in one unit (`_unit_sum`): USD delta and futures lots, or two
+    # roots' lots, are never added; "Greeks in" says what the row's Greeks are in, or that they mix.
+    records = g.to_dict("records")
+    for k in ("delta", "gamma", "vega", "theta"):
+        out[k], _unit = _unit_sum(records, k)
+    labels = {_text(r.get("greeks_in")) for r in records} - {""}
+    out["greeks_in"] = (labels.pop() if len(labels) == 1 else
+                        "mixed: Greeks in different units are not added" if labels else "")
     out["pnl_pct"] = (out["pnl"] / abs(out["paid"]) * 100.0) if out["pnl"] is not None and out["paid"] else None
     return out
 
@@ -1515,19 +1879,24 @@ def expiry_bucket(expiry, as_of: str) -> str:
 
 def in_play_rows(conn: sqlite3.Connection, as_of: str, legs: pd.DataFrame) -> List[dict]:
     """Per open option: spot against strike (how far, in per cent of spot), days left, delta and
-    value, nearest to the strike first. Spot is the pair's official SPOT on `as_of`."""
+    value, nearest to the strike first. Spot is the pair's official SPOT on `as_of`; for an option
+    on a future it is the underlying future's official price, the row's own UndFwdPx."""
     rows = []
     # A closed-out option (the book's status) is no position: not in play.
     for leg in legs[_live(legs)].to_dict("records"):
         days = days_to_expiry(leg.get("expiry"), as_of)
         if days is None or days < 0:
             continue
-        spot = _official_marks(conn, as_of, leg.get("underlying") or "", as_of, ("SPOT",)).get("SPOT")
+        if leg.get("asset_class") == FUTURES_OPTIONS_CLASS:
+            spot = _num(leg.get("undfwdpx"))
+        else:
+            spot = _official_marks(conn, as_of, leg.get("underlying") or "", as_of, ("SPOT",)).get("SPOT")
         strike = leg.get("strike")
         away = ((strike - spot) / spot * 100.0) if spot and not _is_missing(strike) and strike else None
         name = " ".join(str(leg.get(k) or "") for k in ("underlying", "side", "option_type", "payoff")).strip()
         rows.append({"group": name, "strike": strike, "spot": spot, "away_pct": away, "days": days,
-                     "delta": leg.get("delta"), "value": leg.get("mktval")})
+                     "delta": leg.get("delta"), "value": leg.get("mktval"),
+                     "greeks_in": _text(leg.get("delta_unit"))})
     return sorted(rows, key=lambda r: (abs(r["away_pct"]) if r["away_pct"] is not None else 1e9, r["days"]))
 
 
@@ -1548,16 +1917,18 @@ _KIND_FORMATS = {"count": rk.count(nully="n/a"), "money": rk.amount(nully="n/a")
                  "rate": rk.rate(4, nully="n/a", trim=True), "pct": rk.percent(1)}
 
 
-def _agg_table(title: str, kicker: str, first: str, columns: List[Tuple[str, str, str]], rows: List[dict]) -> html.Div:
+def _agg_table(title: str, kicker: str, first: str, columns: List[Tuple[str, str, str]], rows: List[dict],
+               key: str = "") -> html.Div:
     """One compact ranked table (ui.tabs.ranking): `columns` = (heading, row key, kind), the
-    numbers stored as numbers and formatted by kind; a row named 'Total' is the pinned
-    footer, never ranked with the rest."""
+    numbers stored as numbers and formatted by kind (kind "text": a text column, as is); a row
+    named 'Total' is the pinned footer, never ranked with the rest. `key` names the table's id
+    (default: from `first`), so a heading that changes with the book keeps its sort state."""
     def record(r: dict) -> dict:
         rec = {"group": r["group"] + (f" ({r['unpriced']} unpriced)" if r.get("unpriced") else "")
                + (f" (incl. {r['closed']} closed out)" if r.get("closed") else "")}
-        for _heading, key, _kind in columns:
-            v = r.get(key)
-            rec[key] = None if _is_missing(v) else float(v)
+        for _heading, col, kind in columns:
+            v = r.get(col)
+            rec[col] = _text(v) if kind == "text" else (None if _is_missing(v) else float(v))
         return rec
 
     body = [record(r) for r in rows if r["group"] != "Total"]
@@ -1565,18 +1936,21 @@ def _agg_table(title: str, kicker: str, first: str, columns: List[Tuple[str, str
     if not rows:
         inner = html.P("No options on file.", className="section-kicker")
     else:
-        table_id = f"{BREAKDOWNS_ID}-{re.sub(r'[^a-z0-9]+', '-', first.lower())}"
+        table_id = f"{BREAKDOWNS_ID}-{re.sub(r'[^a-z0-9]+', '-', (key or first).lower())}"
         table = dash_table.DataTable(
             id=table_id,
-            columns=[rk.text(first, "group")] + [rk.numeric(h, key, _KIND_FORMATS[kind]) for h, key, kind in columns],
+            columns=[rk.text(first, "group")] + [rk.text(h, col) if kind == "text" else
+                                                 rk.numeric(h, col, _KIND_FORMATS[kind]) for h, col, kind in columns],
             data=body,
             **rk.sortable(table_id),
             style_table={"overflowX": "auto"},
             style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
                         "padding": "4px 8px"},
-            style_cell_conditional=[{"if": {"column_id": "group"}, "textAlign": "left", "fontWeight": "600"}],
+            style_cell_conditional=[{"if": {"column_id": "group"}, "textAlign": "left", "fontWeight": "600"},
+                                    *[{"if": {"column_id": col}, "textAlign": "left", "whiteSpace": "normal"}
+                                      for _h, col, kind in columns if kind == "text"]],
             style_header={"fontWeight": "bold"},
-            style_data_conditional=rk.sign_styles([key for _h, key, kind in columns if kind in ("signed", "pct")],
+            style_data_conditional=rk.sign_styles([col for _h, col, kind in columns if kind in ("signed", "pct")],
                                                   nil={"color": "var(--muted)", "fontStyle": "italic"}),
         )
         total_style = [{"if": {"filter_query": "{group} = 'Total'"}, "fontWeight": "700", "borderTop": "2px solid var(--muted)"}]
@@ -1601,28 +1975,46 @@ def breakdown_tables(conn: sqlite3.Connection, as_of: str) -> html.Div:
 
 def breakdown_children(conn: sqlite3.Connection, as_of: str) -> List[html.Div]:
     """The four tables themselves: what `build_layout` puts in `BREAKDOWNS_ID` and what
-    `_refresh_breakdowns` replaces there on a revision."""
+    `_refresh_breakdowns` replaces there on a revision. An option on a future is grouped under
+    its root ("NYMEX:CL options on futures"), beside the FX pairs; with any on file the tables
+    say "pair or underlying", drop "USD" from the Greeks' headings and add a "Greeks in" column,
+    since those options' Greeks are in futures lots and the contract's currency."""
     legs = option_rows(conn, as_of, flat=True)
     empty = legs is None or legs.empty
+    futures = not empty and "asset_class" in legs.columns and (legs["asset_class"] == FUTURES_OPTIONS_CLASS).any()
     money = [("Options", "options", "count"), ("Premium paid USD", "paid", "money"),
              ("Current value USD", "value", "money"), ("P&L USD", "pnl", "signed")]
-    greeks = [("Delta USD", "delta", "signed"), ("Gamma", "gamma", "signed"), ("Vega", "vega", "signed"),
+    delta_heading = "Delta" if futures else "Delta USD"
+    greeks = [(delta_heading, "delta", "signed"), ("Gamma", "gamma", "signed"), ("Vega", "vega", "signed"),
               ("Theta / day", "theta", "signed")]
-    by_pair = [] if empty else grouped_rows(legs, legs["underlying"].fillna(""))
+    greeks_in = [("Greeks in", "greeks_in", "text")] if futures else []
+    by_key = legs["risk_group"].fillna("") if not empty and "risk_group" in legs.columns else (
+        None if empty else legs["underlying"].fillna(""))
+    by_pair = [] if empty else grouped_rows(legs, by_key)
     ladder = [] if empty else grouped_rows(legs, legs["expiry"].map(lambda e: expiry_bucket(e, as_of)),
                                            ["Expired"] + [label for _l, label in EXPIRY_BUCKETS] + ["No expiry on file"])
     structures = [] if empty else grouped_rows(legs, structure_names(conn, as_of, legs))
+    if futures:
+        pair_title, pair_first = "By pair or underlying: where the risk is", "Pair / underlying"
+        pair_kicker = ("Dollars paid, worth and made, with the net Greeks, per FX pair and per futures root "
+                       "(options on futures: delta in futures lots, the other Greeks in the contract's currency).")
+    else:
+        pair_title, pair_first = "By pair: where the risk is", "Pair"
+        pair_kicker = "Dollars paid, worth and made, with the net Greeks, per underlying."
     return [
-        _agg_table("By pair: where the risk is", "Dollars paid, worth and made, with the net Greeks, per underlying.",
-                   "Pair", money + greeks, by_pair),
+        _agg_table(pair_title, pair_kicker, pair_first, money + greeks + greeks_in, by_pair, key="pair"),
         _agg_table("Expiry ladder: what decays when", "Current value is what is lost if these expire worthless.",
-                   "Expires", [money[0], money[2], greeks[3], greeks[1], greeks[2], money[3]], ladder),
+                   "Expires", [money[0], money[2], greeks[3], greeks[1], greeks[2], money[3]] + greeks_in, ladder),
         _agg_table("By structure: which ideas are working", "P&L as a per cent of the premium paid.",
                    "Structure", money + [("P&L % of premium", "pnl_pct", "pct")], structures),
-        _agg_table("Spot against strike: what is in play", "Open options, nearest to their strike first.",
-                   "Option", [("Strike", "strike", "rate"), ("Spot", "spot", "rate"), ("Strike vs spot", "away_pct", "pct"),
-                              ("Days left", "days", "count"), ("Delta USD", "delta", "signed"),
-                              ("Current value USD", "value", "money")],
+        _agg_table("Spot against strike: what is in play",
+                   "Open options, nearest to their strike first." + (
+                       " For an option on a future, the spot is the underlying future's price." if futures else ""),
+                   "Option", [("Strike", "strike", "rate"), ("Spot / future" if futures else "Spot", "spot", "rate"),
+                              ("Strike vs spot", "away_pct", "pct"),
+                              ("Days left", "days", "count"), (delta_heading, "delta", "signed"),
+                              ("Current value USD", "value", "money")] + (
+                       [("Delta in", "greeks_in", "text")] if futures else []),
                    [] if empty else in_play_rows(conn, as_of, legs)),
     ]
 
@@ -1659,9 +2051,10 @@ def build_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
 
 def register_callbacks(app, get_db_path: Callable[[], object],
                         date_picker_id: str = DEFAULT_DATE_PICKER_ID) -> None:
-    """Six callbacks on the table -- expand/collapse, the refresh gate (revisions, held
+    """Seven callbacks on the table -- expand/collapse, the refresh gate (revisions, held
     while a term cell is selected), render (collapse, filter/sort view, cell edits, the
-    revisions the gate lets through), the selection released after a cell edit, headline,
+    revisions the gate lets through), the selection released after a cell edit, the hover
+    texts that follow the rows, headline,
     clear filters -- one on the four tables above it (redrawn on every revision) and two on
     the Option-terms editor (prefill, save). See the module docstring for each mechanism."""
     from dash import ctx, no_update
@@ -1765,6 +2158,16 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         i dont have to refresh"). `allow_duplicate`, so these two props are no second route
         from `_render` back to the gate in Dash's callback graph."""
         return None, []
+
+    @app.callback(
+        Output(TABLE_ID, "tooltip_data"),
+        Input(TABLE_ID, "data"),
+    )
+    def _tooltips(rows):
+        """The hover texts follow the rows (`tooltip_rows`): one entry per row of `data`, in
+        its order. No database access, and no `Output(table, "data")`: dash-table turns the cell
+        being typed into into a label only while a callback writing `data` is in flight."""
+        return tooltip_rows(rows)
 
     @app.callback(
         Output(BREAKDOWNS_ID, "children"),

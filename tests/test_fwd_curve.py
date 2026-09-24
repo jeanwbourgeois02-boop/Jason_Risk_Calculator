@@ -126,3 +126,127 @@ def test_historical_curve_gives_a_reason_and_no_points_rather_than_a_guess():
     no_scale = historical_curve(day, points_rows, 1.17, None, "EURUSD")
     # 2026-09-21: the divisor is FWD_POINTS_SCALE, else 10 ** FWD_SCALE; with neither, the reason names both
     assert no_scale["points"] == [] and "neither FWD_POINTS_SCALE nor FWD_SCALE" in no_scale["reason"]
+
+
+# --------------------------------------------------------------------------- LME curve (Phase 5)
+from data.bloomberg.fwd_curve import lme_curve_marks, lme_history_marks  # noqa: E402
+
+LME_DAY = date(2026, 9, 24)          # cash date 2026-09-28, 3M 2026-12-24
+SNAP = "2026-09-24T10:00:00-04:00"
+
+
+def _lme_pillars():
+    """Cash, 3M and the two monthlies after it (January and February 2027) of copper's
+    curve on LME_DAY, as lme-forwards lists them."""
+    from engine.lme import lme_curve_tickers
+    return [p for p in lme_curve_tickers("LME:CA", LME_DAY)
+            if p["kind"] in ("CASH", "3M") or p["pillar_date"] in ("2027-01-20", "2027-02-17")]
+
+
+def _quotes(pillars, dated=True, **override):
+    prices = {"CASH": 9800.0, "3M": 9900.0, "2027-01-20": 9930.0, "2027-02-17": 9960.0}
+    out = {}
+    for p in pillars:
+        key = p["kind"] if p["kind"] != "MONTHLY" else p["pillar_date"]
+        out[p["ticker"]] = {"value": prices[key], "prompt_date": p["pillar_date"] if dated else None, "error": ""}
+    out.update(override)
+    return out
+
+
+def _by_key(rows):
+    return {(r["mark_type"], r["settle_date"]): r for r in rows}
+
+
+def test_lme_curve_cash_3m_monthlies_and_an_interpolated_prompt():
+    pillars = _lme_pillars()
+    assert [p["kind"] for p in pillars] == ["CASH", "3M", "MONTHLY", "MONTHLY"]
+    rows, reasons = lme_curve_marks("LME:CA", LME_DAY, pillars, _quotes(pillars), [date(2027, 1, 6)], SNAP)
+    got = _by_key(rows)
+    cash = got[("SPOT", "2026-09-24")]
+    assert cash["value"] == 9800.0 and cash["source"] == "BBG_BFXFORWARD"
+    assert cash["instrument_id"] == "LME:CA" and cash["as_of_date"] == "2026-09-24" and cash["snapped_at"] == SNAP
+    for d, v in (("2026-12-24", 9900.0), ("2027-01-20", 9930.0), ("2027-02-17", 9960.0)):
+        assert got[("FWD_OUTRIGHT", d)]["value"] == v and got[("FWD_OUTRIGHT", d)]["source"] == "BBG_BFXFORWARD"
+    interp = got[("FWD_OUTRIGHT", "2027-01-06")]
+    # 13 of the 27 calendar days from 3M (Dec 24) to the January prompt (Jan 20)
+    assert interp["source"] == "BBG_INTERP" and interp["value"] == pytest.approx(9900.0 + 13 / 27 * 30.0)
+    assert len(rows) == 5 and reasons == []
+
+
+def test_lme_prompt_on_a_pillar_is_not_duplicated_and_before_cash_is_the_cash_price():
+    pillars = _lme_pillars()
+    rows, _ = lme_curve_marks("LME:CA", LME_DAY, pillars, _quotes(pillars),
+                              [date(2027, 1, 20), date(2026, 9, 25), "2026-10-14"], SNAP)
+    got = _by_key(rows)
+    assert [r for r in rows if r["settle_date"] == "2027-01-20"] == [got[("FWD_OUTRIGHT", "2027-01-20")]]
+    tom = got[("FWD_OUTRIGHT", "2026-09-25")]
+    assert tom["value"] == 9800.0 and tom["source"] == "BBG_INTERP"
+    # cash (Sep 28) to 3M (Dec 24): 16 of 87 days
+    assert got[("FWD_OUTRIGHT", "2026-10-14")]["value"] == pytest.approx(9800.0 + 16 / 87 * 100.0)
+
+
+def test_lme_pillar_with_a_different_bloomberg_date_is_marked_at_bloombergs_date():
+    pillars = _lme_pillars()
+    three_m = next(p for p in pillars if p["kind"] == "3M")
+    quotes = _quotes(pillars, **{three_m["ticker"]: {"value": 9900.0, "prompt_date": "2026-12-23", "error": ""}})
+    rows, reasons = lme_curve_marks("LME:CA", LME_DAY, pillars, quotes, [], SNAP)
+    got = _by_key(rows)
+    assert ("FWD_OUTRIGHT", "2026-12-24") not in got
+    assert got[("FWD_OUTRIGHT", "2026-12-23")]["source"] == "BBG_BFXFORWARD"
+    assert any("2026-12-23" in r and "differs" in r and "2026-12-24" in r for r in reasons)
+
+
+def test_lme_pillar_without_a_bloomberg_date_sits_on_our_date_as_interp():
+    pillars = _lme_pillars()
+    rows, reasons = lme_curve_marks("LME:CA", LME_DAY, pillars, _quotes(pillars, dated=False), [], SNAP)
+    got = _by_key(rows)
+    assert got[("SPOT", "2026-09-24")]["source"] == "BBG_BFXFORWARD"
+    assert {got[("FWD_OUTRIGHT", d)]["source"] for d in ("2026-12-24", "2027-01-20", "2027-02-17")} == {"BBG_INTERP"}
+    assert any("computed prompt date" in r for r in reasons)
+
+
+def test_lme_prompt_beyond_the_last_pillar_gets_no_mark_and_a_reason():
+    pillars = _lme_pillars()
+    rows, reasons = lme_curve_marks("LME:CA", LME_DAY, pillars, _quotes(pillars), [date(2027, 3, 3)], SNAP)
+    assert ("FWD_OUTRIGHT", "2027-03-03") not in _by_key(rows)
+    assert any("2027-03-03" in r and "beyond the last pillar" in r for r in reasons)
+
+
+def test_lme_missing_quote_is_skipped_never_zero_and_the_neighbours_bracket():
+    pillars = _lme_pillars()
+    jan = next(p for p in pillars if p["pillar_date"] == "2027-01-20")
+    quotes = _quotes(pillars, **{jan["ticker"]: {"value": None, "prompt_date": None, "error": "TIMEOUT"}})
+    rows, reasons = lme_curve_marks("LME:CA", LME_DAY, pillars, quotes, [date(2027, 1, 20)], SNAP)
+    got = _by_key(rows)
+    assert all(r["value"] > 0 for r in rows)
+    # the January prompt is no pillar now: between 3M (Dec 24, 9900) and February (Feb 17, 9960)
+    jan_row = got[("FWD_OUTRIGHT", "2027-01-20")]
+    assert jan_row["source"] == "BBG_INTERP" and jan_row["value"] == pytest.approx(9900.0 + 27 / 55 * 60.0)
+    assert any(jan["ticker"] in r and "TIMEOUT" in r for r in reasons)
+
+
+def test_lme_no_cash_price_leaves_a_prompt_before_the_first_pillar_unmarked():
+    pillars = _lme_pillars()
+    cash = next(p for p in pillars if p["kind"] == "CASH")
+    quotes = _quotes(pillars, **{cash["ticker"]: {"value": 0.0, "prompt_date": None, "error": ""}})
+    rows, reasons = lme_curve_marks("LME:CA", LME_DAY, pillars, quotes, [date(2026, 10, 14), date(2026, 9, 25)], SNAP)
+    got = _by_key(rows)
+    assert ("SPOT", "2026-09-24") not in got
+    assert ("FWD_OUTRIGHT", "2026-10-14") not in got and ("FWD_OUTRIGHT", "2026-09-25") not in got
+    assert any(cash["ticker"] in r and "never zero" in r for r in reasons)
+    assert any("2026-10-14" in r for r in reasons) and any("2026-09-25" in r for r in reasons)
+
+
+def test_lme_history_closes_only_pillars_interp_cash_spot_official():
+    pillars = _lme_pillars()
+    closes = {p["ticker"]: v for p, v in zip(pillars, (9800.0, 9900.0, 9930.0, None))}  # February missing
+    rows, reasons = lme_history_marks("LME:CA", LME_DAY, pillars, closes, [date(2027, 1, 6), date(2027, 2, 3)],
+                                      "2026-09-24T17:00:00-04:00")
+    got = _by_key(rows)
+    assert got[("SPOT", "2026-09-24")]["source"] == "BBG_BFXFORWARD"
+    assert got[("FWD_OUTRIGHT", "2026-12-24")]["source"] == "BBG_INTERP"
+    assert got[("FWD_OUTRIGHT", "2027-01-20")]["source"] == "BBG_INTERP"
+    assert got[("FWD_OUTRIGHT", "2027-01-06")]["value"] == pytest.approx(9900.0 + 13 / 27 * 30.0)
+    assert ("FWD_OUTRIGHT", "2027-02-17") not in got and ("FWD_OUTRIGHT", "2027-02-03") not in got
+    assert any("history serves no delivery date" in r for r in reasons)
+    assert any("2027-02-03" in r and "beyond the last pillar" in r for r in reasons)

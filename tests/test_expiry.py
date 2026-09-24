@@ -28,14 +28,26 @@ def _instrument(conn, contract_id, base_ccy, asset_class="FUTURE", expiry="2026-
         (contract_id, asset_class, base_ccy, expiry))
 
 
-def _trade(conn, contract_id, root_id, lots, trade_date="2026-09-01"):
-    _instrument(conn, contract_id, root_id)
+def _trade(conn, contract_id, root_id, lots, trade_date="2026-09-01", product="FUTURE",
+           asset_class="FUTURE", expiry="2026-12-31"):
+    _instrument(conn, contract_id, root_id, asset_class=asset_class, expiry=expiry)
     tid = f"T{next(_ids)}"
     conn.execute(
         "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
         "price, account, counterparty, strategy, trader, description) "
-        "VALUES (?, 'XLSX', ?, 'FUTURE', ?, ?, ?, 100, 'ACC', 'CP', '', 'JB', '')",
-        (tid, contract_id, tid, trade_date, lots))
+        "VALUES (?, 'XLSX', ?, ?, ?, ?, ?, 100, 'ACC', 'CP', '', 'JB', '')",
+        (tid, contract_id, product, tid, trade_date, lots))
+    conn.commit()
+    return tid
+
+
+def _freeze(conn, trade_id, contract_id, settle_date, frozen_at="2026-09-01T17:00:00-04:00"):
+    """A ledger row as engine/pnl/ledger.realise_settled writes one for a future."""
+    conn.execute(
+        "INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
+        "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, frozen_at, "
+        "note) VALUES (?, ?, 'FUTURE', 'USD', ?, 0, 0, 'FUTURE_PX', 1, ?, 'BBG_BDH', 0, ?, '')",
+        (trade_id, contract_id, settle_date, settle_date, frozen_at))
     conn.commit()
 
 
@@ -135,6 +147,245 @@ def test_a_contract_still_held_past_its_last_trade_date_is_expired(conn):
     assert "still held" in row["reason"]
     res = expiry_schedule(conn, "2026-09-24")
     assert res["counts"] == {"EXPIRED": 1, "RED": 0, "AMBER": 0, "GREEN": 0}
+    assert res["settled_expired"] == []   # not frozen by the ledger: a real gap, still alerted
+
+
+def test_a_contract_the_ledger_has_frozen_leaves_the_schedule_and_is_listed_once(conn):
+    # The golden book's CLQ26: expired 2026-08-31 with no closing trade, frozen SETTLED.
+    t1 = _trade(conn, "CLQ26 Comdty", "NYMEX:CL", 1, trade_date="2026-06-01")
+    t2 = _trade(conn, "CLQ26 Comdty", "NYMEX:CL", 1, trade_date="2026-06-02")
+    _dates(conn, "CLQ26 Comdty", "2026-08-31")
+    _freeze(conn, t1, "CLQ26 Comdty", "2026-08-31", "2026-09-01T17:00:00-04:00")
+    _freeze(conn, t2, "CLQ26 Comdty", "2026-08-31", "2026-09-02T17:00:00-04:00")
+    res = expiry_schedule(conn, "2026-09-24")
+    assert res["rows"] == [] and res["note"]
+    assert res["counts"] == {"EXPIRED": 0, "RED": 0, "AMBER": 0, "GREEN": 0}
+    [entry] = res["settled_expired"]
+    assert (entry["contract_id"], entry["lots"], entry["last_trade_date"], entry["frozen_at"]) == \
+        ("CLQ26 Comdty", 2.0, "2026-08-31", "2026-09-02T17:00:00-04:00")
+    assert (entry["product"], entry["root_id"], entry["dates_source"], entry["estimated"]) == \
+        ("FUTURE", "NYMEX:CL", "BLOOMBERG", False)
+    assert "frozen all 2 trades" in entry["reason"] and "no alert" in entry["reason"]
+    assert "level" not in entry
+
+
+def test_a_contract_only_partly_frozen_stays_expired(conn):
+    t1 = _trade(conn, "CLQ26 Comdty", "NYMEX:CL", 1, trade_date="2026-06-01")
+    _trade(conn, "CLQ26 Comdty", "NYMEX:CL", 1, trade_date="2026-06-02")
+    _dates(conn, "CLQ26 Comdty", "2026-08-31")
+    _freeze(conn, t1, "CLQ26 Comdty", "2026-08-31")
+    res = expiry_schedule(conn, "2026-09-24")
+    assert _only(res)["level"] == "EXPIRED" and res["settled_expired"] == []
+
+
+def test_a_freeze_dated_after_the_day_viewed_does_not_hide_the_contract(conn):
+    # Viewing a past day before the settlement: the ledger's later freeze is not yet in force.
+    t1 = _trade(conn, "CLQ26 Comdty", "NYMEX:CL", 1, trade_date="2026-06-01")
+    _dates(conn, "CLQ26 Comdty", "2026-08-31")
+    _freeze(conn, t1, "CLQ26 Comdty", "2026-08-31")
+    res = expiry_schedule(conn, "2026-08-27")
+    assert _only(res)["level"] == "RED" and res["settled_expired"] == []
+    assert _only(expiry_schedule(conn, "2026-08-31"))["business_days"] == 0
+    assert [e["contract_id"] for e in expiry_schedule(conn, "2026-09-01")["settled_expired"]] == ["CLQ26 Comdty"]
+
+
+def test_a_frozen_contract_master_cannot_place_takes_the_ledger_settle_date(conn):
+    t1 = _trade(conn, "ZZQ26 Comdty", "NYMEX:ZZNOPE", 1, trade_date="2026-06-01")
+    _freeze(conn, t1, "ZZQ26 Comdty", "2026-08-28")
+    res = expiry_schedule(conn, "2026-09-24")
+    assert res["rows"] == []
+    assert res["settled_expired"][0]["last_trade_date"] == "2026-08-28"
+
+
+def test_rows_carry_their_product_and_a_product_joins_through_one_builder(conn, monkeypatch):
+    _trade(conn, "CLZ26 Comdty", "NYMEX:CL", 1)
+    _trade(conn, "WIDGET-1", "TEST:W", 25, product="TEST_PRODUCT", asset_class="TEST")
+    assert [r["product"] for r in expiry_schedule(conn, "2026-09-24")["rows"]] == ["FUTURE"]
+
+    seen = []
+
+    def test_row(c, pos, as_of):
+        seen.append((pos.product, pos.instrument_id, pos.lots))
+        return {**schedule._unresolved_row(pos, pos.base_ccy, "test builder"), "level": "GREEN",
+                "business_days": 60, "next_event_date": "2026-12-16"}
+
+    monkeypatch.setitem(schedule._BUILDERS, "TEST_PRODUCT", test_row)
+    rows = expiry_schedule(conn, "2026-09-24")["rows"]
+    assert seen == [("TEST_PRODUCT", "WIDGET-1", 25.0)]
+    assert {r["product"] for r in rows} == {"FUTURE", "TEST_PRODUCT"}
+
+
+# --- options on futures (CMDTY_OPTION, Phase 5) -------------------------------------------
+
+def _option(conn, option_id, root_id, lots, trade_date="2026-09-01", expiry="2026-12-31"):
+    """An option trade; ``expiry`` is its instruments.expiry_date, which contract-master's
+    option_for reads as the broker's own date (SYMBOL) when earlier than the estimate."""
+    return _trade(conn, option_id, root_id, lots, trade_date=trade_date, product="CMDTY_OPTION",
+                  asset_class="CMDTY_OPTION", expiry=expiry)
+
+
+def test_an_estimated_option_expiry_is_held_early_and_says_it_is_estimated(conn):
+    _option(conn, "CLZ26C 70 Comdty", "NYMEX:CL", 3)
+    row = _only(expiry_schedule(conn, "2026-10-20"))
+    assert (row["product"], row["contract_id"], row["lots"]) == ("CMDTY_OPTION", "CLZ26C 70 Comdty", 3.0)
+    assert (row["next_event"], row["dates_source"], row["estimated"]) == ("option expiry", "ESTIMATED", True)
+    # the estimate is the underlying's own estimated last trade date, never earlier than the real expiry
+    assert row["last_trade_date"] == row["next_event_date"] == "2026-12-31"
+    # held early like a future: first business day of the month before the option's contract month
+    assert (row["alert_date"], row["alert_basis"]) == ("2026-11-02", "estimated: first business day of Nov 2026")
+    assert (row["business_days"], row["level"]) == (9, "AMBER")   # Oct 21-23, 26-30, Nov 2 on US
+    assert "not Bloomberg's" in row["reason"] and "held early" in row["reason"]
+    assert (row["option_type"], row["strike"], row["underlying_id"]) == ("CALL", 70.0, "CLZ26 Comdty")
+
+
+def test_an_option_with_bloombergs_date_counts_to_its_own_expiry(conn):
+    _option(conn, "CLZ26C 70 Comdty", "NYMEX:CL", -2)
+    _dates(conn, "CLZ26C 70 Comdty", "2026-11-17")
+    row = _only(expiry_schedule(conn, "2026-11-12"))
+    assert (row["dates_source"], row["estimated"]) == ("BLOOMBERG", False)
+    assert (row["next_event_date"], row["alert_date"], row["alert_basis"]) == \
+        ("2026-11-17", "2026-11-17", "option expiry")
+    assert (row["business_days"], row["level"]) == (3, "RED")
+    assert "held early" not in row["reason"]
+    assert _only(expiry_schedule(conn, "2026-11-18"))["level"] == "EXPIRED"
+
+
+def test_a_physical_underlying_is_named_in_the_option_reason(conn):
+    _option(conn, "CLZ26P 65 Comdty", "NYMEX:CL", 1)
+    _dates(conn, "CLZ26P 65 Comdty", "2026-11-17")
+    _dates(conn, "CLZ26 Comdty", "2026-11-19", "2026-11-20")
+    row = _only(expiry_schedule(conn, "2026-10-01"))
+    assert (row["delivery_assumed"], row["underlying_event"], row["underlying_event_date"]) == \
+        ("physical", "last trade", "2026-11-19")
+    assert "becomes the future CLZ26 Comdty, physically delivered" in row["reason"]
+    assert "last trade is 2026-11-19" in row["reason"]
+    assert row["underlying_estimated"] is False
+
+
+def test_a_cash_settled_underlying_is_not_called_physical_and_a_two_month_lead_is_held_earlier(conn):
+    from data.contracts import option_contract
+    estimate = option_contract("ICE:B", 1, 2027, "C", 80)
+    # booked at the estimate itself (no earlier date on file), so the estimated path is exercised
+    _option(conn, estimate.contract_id, "ICE:B", 1, expiry=estimate.last_trade_date.isoformat())
+    row = _only(expiry_schedule(conn, "2026-09-24"))
+    assert (row["dates_source"], row["estimated"]) == ("ESTIMATED", True)
+    assert row["delivery_assumed"] == "cash" and "physically delivered" not in row["reason"]
+    # ICE Brent options expire two months ahead (option_lead_months 2): alerted from Nov 2026
+    assert row["alert_basis"] == "estimated: first business day of Nov 2026"
+
+
+def test_an_option_booked_with_an_earlier_expiry_alerts_on_that_date_not_estimated(conn):
+    from data.contracts import option_contract
+    estimate = option_contract("ICE:B", 1, 2027, "C", 80)
+    assert estimate.last_trade_date.isoformat() > "2026-11-25"
+    _option(conn, estimate.contract_id, "ICE:B", 1, expiry="2026-11-25")
+    row = _only(expiry_schedule(conn, "2026-09-24"))
+    assert (row["dates_source"], row["estimated"]) == ("SYMBOL", False)
+    assert (row["last_trade_date"], row["next_event_date"], row["alert_date"], row["alert_basis"]) == \
+        ("2026-11-25", "2026-11-25", "2026-11-25", "option expiry")
+    assert row["next_event"] == "option expiry"
+    assert "not Bloomberg's" not in row["reason"] and "held early" not in row["reason"]
+
+
+def test_an_option_contract_master_cannot_read_is_listed_red(conn):
+    _option(conn, "NOT AN OPTION", "NYMEX:CL", 1)
+    row = _only(expiry_schedule(conn, "2026-09-24"))
+    assert (row["product"], row["level"], row["business_days"]) == ("CMDTY_OPTION", "RED", None)
+
+
+def test_an_option_the_ledger_has_frozen_leaves_the_schedule(conn):
+    t = _option(conn, "CLZ26C 70 Comdty", "NYMEX:CL", 1)
+    _dates(conn, "CLZ26C 70 Comdty", "2026-11-17")
+    _freeze(conn, t, "CLZ26C 70 Comdty", "2026-11-17")
+    res = expiry_schedule(conn, "2026-11-20")
+    assert res["rows"] == []
+    [entry] = res["settled_expired"]
+    assert (entry["product"], entry["contract_id"], entry["last_trade_date"]) == \
+        ("CMDTY_OPTION", "CLZ26C 70 Comdty", "2026-11-17")
+
+
+# --- LME forwards (LME_FWD, Phase 5) ------------------------------------------------------
+
+def _lme(conn, root_id, tonnes, prompt, trade_date="2026-08-03"):
+    tid = _trade(conn, root_id, root_id, tonnes, trade_date=trade_date, product="LME_FWD",
+                 asset_class="LME_FWD")
+    for n, (ccy, amount) in enumerate(((root_id, tonnes), ("USD", -tonnes * 9000.0)), start=1):
+        conn.execute("INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, "
+                     "rate, settles_cash) VALUES (?, ?, 'FX_NEAR', ?, ?, ?, ?, 9000, 1)",
+                     (tid, n, ccy, amount, trade_date, prompt))
+    conn.commit()
+    return tid
+
+
+def test_an_lme_prompt_is_alerted_from_its_cash_date_across_a_uk_holiday(conn):
+    from engine import calendars, lme
+    # 2026-08-31 is the summer bank holiday in London (a New York business day): the 2026-09-02
+    # prompt becomes the cash date on Friday 2026-08-28, not Monday 2026-08-31.
+    _lme(conn, "LME:CA", 50, "2026-09-02")
+    row = _only(expiry_schedule(conn, "2026-08-26"))
+    assert (row["product"], row["contract_id"], row["instrument_id"]) == \
+        ("LME_FWD", "LME:CA 2026-09-02", "LME:CA")
+    assert (row["next_event"], row["next_event_date"], row["prompt_date"]) == \
+        ("LME prompt", "2026-09-02", "2026-09-02")
+    assert row["alert_date"] == "2026-08-28" and lme.cash_date("2026-08-28").isoformat() == "2026-09-02"
+    assert calendars.business_days_between("US", "2026-08-28", "2026-09-02") == 3   # the US would say Monday
+    assert (row["calendar"], row["business_days"], row["level"]) == ("LME", 2, "RED")
+    assert (row["tonnes"], row["lots"]) == (50.0, 2.0)
+    assert (row["dates_source"], row["estimated"]) == ("TICKET", False)
+    assert "cash date" in row["reason"] and "2026-08-28" in row["reason"]
+    # on the cash date and between it and the prompt: RED; after the prompt: EXPIRED
+    assert _only(expiry_schedule(conn, "2026-08-28"))["level"] == "RED"
+    assert _only(expiry_schedule(conn, "2026-09-01"))["level"] == "RED"
+    assert _only(expiry_schedule(conn, "2026-09-03"))["level"] == "EXPIRED"
+
+
+def test_lme_positions_are_one_row_per_prompt_and_a_flat_prompt_is_not_a_row(conn):
+    _lme(conn, "LME:CA", 50, "2026-12-16")
+    _lme(conn, "LME:CA", -25, "2026-12-16")
+    _lme(conn, "LME:CA", 75, "2027-01-20")
+    _lme(conn, "LME:CA", -75, "2027-01-20")     # flat prompt
+    _lme(conn, "LME:NI", -12, "2026-12-16")     # nickel: 6 t lots
+    rows = {r["contract_id"]: r for r in expiry_schedule(conn, "2026-09-24")["rows"]}
+    assert set(rows) == {"LME:CA 2026-12-16", "LME:NI 2026-12-16"}
+    assert (rows["LME:CA 2026-12-16"]["tonnes"], rows["LME:CA 2026-12-16"]["lots"]) == (25.0, 1.0)
+    assert (rows["LME:NI 2026-12-16"]["tonnes"], rows["LME:NI 2026-12-16"]["lots"]) == (-12.0, -2.0)
+    assert all(r["level"] == "GREEN" for r in rows.values())
+
+
+def test_a_frozen_lme_prompt_moves_to_settled_expired(conn):
+    t1 = _lme(conn, "LME:CA", 50, "2026-09-02")
+    t2 = _lme(conn, "LME:CA", 25, "2026-12-16")
+    _freeze(conn, t1, "LME:CA", "2026-09-02")
+    res = expiry_schedule(conn, "2026-09-24")
+    assert [r["contract_id"] for r in res["rows"]] == ["LME:CA 2026-12-16"]
+    [entry] = res["settled_expired"]
+    assert (entry["product"], entry["contract_id"], entry["tonnes"], entry["lots"], entry["prompt_date"]) == \
+        ("LME_FWD", "LME:CA 2026-09-02", 50.0, 2.0, "2026-09-02")
+    assert "no alert" in entry["reason"]
+    # a prompt past its date and not frozen stays EXPIRED: a real gap
+    _freeze(conn, t2, "LME:CA", "2026-12-16")
+    _lme(conn, "LME:ZS", 25, "2026-09-16")
+    rows = expiry_schedule(conn, "2026-09-24")["rows"]
+    assert [(r["contract_id"], r["level"]) for r in rows] == [("LME:ZS 2026-09-16", "EXPIRED"),
+                                                              ("LME:CA 2026-12-16", "GREEN")]
+
+
+def test_an_lme_forward_with_no_prompt_or_unknown_metal_is_listed_red(conn):
+    _trade(conn, "LME:CA", "LME:CA", 25, product="LME_FWD", asset_class="LME_FWD")  # no legs
+    _lme(conn, "LME:XX", 10, "2026-12-16")
+    rows = expiry_schedule(conn, "2026-09-24")["rows"]
+    assert len(rows) == 2 and all(r["level"] == "RED" and r["business_days"] is None for r in rows)
+    assert all("cannot be placed" in r["reason"] for r in rows)
+
+
+def test_futures_rows_carry_no_phase_5_keys(conn):
+    _trade(conn, "CLZ26 Comdty", "NYMEX:CL", 1)
+    row = _only(expiry_schedule(conn, "2026-09-24"))
+    assert set(row) == {
+        "product", "root_id", "name", "sector", "exchange", "calendar", "delivery", "delivery_assumed",
+        "contract_id", "lots", "last_trade_date", "first_notice_date", "dates_source", "estimated",
+        "next_event", "next_event_date", "alert_date", "alert_basis", "business_days", "level", "reason",
+        "beyond_calendar_coverage"}
 
 
 def test_a_first_notice_after_the_last_trade_date_leaves_last_trade_as_the_event(conn):
@@ -172,7 +423,7 @@ def test_a_flat_contract_is_not_listed_and_later_trades_do_not_count(conn):
 
 
 def test_a_count_reaching_past_calendar_coverage_is_flagged(conn):
-    _trade(conn, "CLZ28 Comdty", "NYMEX:CL", 1)
+    _trade(conn, "CLZ29 Comdty", "NYMEX:CL", 1)  # US coverage ends 2028-12-31
     row = _only(expiry_schedule(conn, "2026-09-24"))
     assert row["beyond_calendar_coverage"] is True
     assert "coverage" in row["reason"]

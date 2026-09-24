@@ -609,7 +609,7 @@ def test_options_step_lists_closed_out_options_under_their_own_head_never_as_ski
         "no Bloomberg on this machine: options re-priced from the marks on file as of 2026-09-23, 3 priced, "
         "1 skipped over 2 day(s); 2 closed-out options not priced")
     assert live.recalc_summary({"as_of": "2026-09-23", "priced": 0, "skipped": 0, "closed_out": ["o2"], "days": []}) == (
-        "no Bloomberg on this machine: no FX option on file to re-price as of 2026-09-23; 1 closed-out option not priced")
+        "no Bloomberg on this machine: no option on file to re-price as of 2026-09-23; 1 closed-out option not priced")
     assert live.recalc_summary({"as_of": "2026-09-23", "priced": 0, "skipped": 0, "days": []}).endswith("as of 2026-09-23")
     assert live.recalc_options_on_file(tmp_path / "absent-dir" / "x.db", _date(2026, 9, 23))["closed_out"] == 0
 
@@ -1122,9 +1122,12 @@ _OPEN_FUTURES_SQL = ("SELECT DISTINCT i.instrument_id FROM trade_legs l JOIN tra
 
 
 def test_sample_book_asks_only_for_spots_forwards_and_futures_each_once(tmp_path):
-    """The synthetic sample (commodity futures, FX hedges, FX options; 2026-09-24): the
-    request list holds only the library's mark kinds, nothing twice, never a blank ticker,
-    and none of the macro book's NDF, swap or index requests."""
+    """The synthetic sample (commodity futures, FX hedges, FX options; 2026-09-24; Phase 5
+    added options on futures and LME forwards): the request list holds only the library's
+    mark kinds, nothing twice, never a blank ticker, and none of the macro book's NDF, swap
+    or index requests. The options on futures are asked as FUTURE_PX on their own tickers,
+    their underlying futures with them (CUZ26, which no trade holds, included); the LME
+    forwards are asked by the LME step, never here."""
     from data.ingest.upload import import_blotter
     p = tmp_path / "risk.db"
     import_blotter(_SAMPLE_CSV.read_bytes(), _SAMPLE_CSV.name, p)
@@ -1140,10 +1143,25 @@ def test_sample_book_asks_only_for_spots_forwards_and_futures_each_once(tmp_path
     assert all(r.settle_date == "2026-09-18" for r in reqs if r.mark_type == "SPOT")
     # every open future is either asked for or listed as not requestable with its reason, never lost
     open_futures = {r[0] for r in conn.execute(_OPEN_FUTURES_SQL, ("2026-09-18", "2026-09-18"))}
+    open_options = {r[0] for r in conn.execute(
+        "SELECT DISTINCT instrument_id FROM trades WHERE product = 'CMDTY_OPTION' AND instrument_id IN "
+        "(SELECT instrument_id FROM instruments WHERE expiry_date >= '2026-09-18')")}
+    assert open_options == {"CLZ26C 75 Comdty", "CLZ26P 62 Comdty", "CUZ26C 80000 Comdty"}   # GCQ26C expired
+    underlyings = {"CLZ26 Comdty", "CUZ26 Comdty"}
     asked = {r.instrument_id for r in reqs if r.mark_type == "FUTURE_PX"}
     unasked = {e["instrument_id"]: e["reason"] for e in live.not_requestable_futures(conn, "2026-09-18")}
-    assert open_futures and asked | set(unasked) == open_futures and not asked & set(unasked)
-    assert all(unasked.values())
+    assert open_futures and asked | set(unasked) == open_futures | open_options | underlyings
+    assert not asked & set(unasked) and all(unasked.values())
+    # an option on a future at its own expiry, under its own live ticker
+    by_id = {r.instrument_id: r for r in reqs if r.mark_type == "FUTURE_PX"}
+    assert (by_id["CLZ26C 75 Comdty"].bbg_ticker, by_id["CLZ26C 75 Comdty"].settle_date) == ("CLZ6C 75 Comdty",
+                                                                                           "2026-11-17")
+    assert by_id["CUZ26 Comdty"].bbg_ticker == "CUZ6 Comdty"
+    assert "USDCNY" in spots                                   # the SHFE option's (and futures') conversion
+    # no LME name reaches the FX or futures requests, and no FX instrument is made of one
+    assert not any(r.instrument_id.startswith("LME:") or r.bbg_ticker.startswith("LM") for r in reqs)
+    assert conn.execute("SELECT COUNT(*) FROM instruments WHERE instrument_id LIKE 'LME:%' AND asset_class = 'FX'"
+                        ).fetchone()[0] == 0
 
 
 # --------------------------------------------------------------------------- cadence, one session per cycle, timings (2026-09-21)
@@ -1698,7 +1716,7 @@ def test_pull_without_bloomberg_reprices_the_options_from_the_marks_on_file_as_o
         "as_of": "2026-09-23", "since": "2026-09-23", "priced": 0, "skipped": 0}
     assert [{k: d[k] for k in ("day", "priced", "skipped")} for d in got["days"]] == [
         {"day": "2026-09-23", "priced": 0, "skipped": []}]
-    assert failed["recalc_summary"] == "no Bloomberg on this machine: no FX option on file to re-price as of 2026-09-23"
+    assert failed["recalc_summary"] == "no Bloomberg on this machine: no option on file to re-price as of 2026-09-23"
     # a pull that fails AFTER its session opened is Bloomberg's failure, not a machine without Bloomberg
     from data.bloomberg import pull_marks as pm
     monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -1789,3 +1807,182 @@ def test_pull_status_ledger_tolerates_an_older_ledger_returning_bare_ids(tmp_pat
     assert led["refrozen"] == [{"trade_id": "b2"}, {"trade_id": "a1"}] and led["kept"] == []
     assert led["refrozen_count"] == 2 and led["refrozen_summary"] == "2 settled trades re-frozen at the close"
     assert "error" not in led
+
+
+# --------------------------------------------------------------------------- Phase 5: options on futures, LME curves (2026-09-24)
+def test_options_step_prices_a_book_of_options_on_futures_with_no_fx_option(tmp_path, monkeypatch):
+    """options-store prices CMDTY_OPTION too: a book with no FX_OPTION is still priced, the
+    options on futures counted apart with their own line."""
+    from datetime import date as _date
+    p = tmp_path / "risk.db"
+    conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('CLZ26C 75 Comdty','CMDTY_OPTION','NYMEX:CL','USD',1000,0,"
+                 "'CLZ6C 75 Comdty','2026-11-17')")
+    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','CLZ26C 75 Comdty','CMDTY_OPTION','o1','2026-09-10',3,1.25,"
+                 "'acc','cp','','t','d','')")
+    conn.commit()
+
+    def outcome(trade_id, product, priced=True, reason=""):
+        return type("O", (), {"priced": priced, "closed_out": False, "trade_id": trade_id, "product": product,
+                              "reason": reason})()
+
+    monkeypatch.setattr("engine.options.store.price_all_and_store", lambda conn_, as_of: [
+        outcome("o1", "CMDTY_OPTION"), outcome("o2", "CMDTY_OPTION", priced=False, reason="no underlying price"),
+        outcome("f1", "FX_OPTION")])
+    out = live._options_step(conn, _date(2026, 9, 18))
+    assert out["priced"] == 2 and out["futures_options_priced"] == 1
+    assert out["futures_options_summary"] == "1 option on futures priced"
+    assert out["skipped"] == [{"trade_id": "o2", "reason": "no underlying price"}]
+    # nothing at all to price: said plainly, the pricer never called
+    empty = schema.connect(tmp_path / "empty.db")
+    monkeypatch.setattr("engine.options.store.price_all_and_store", lambda *a: pytest.fail("not called"))
+    assert live._options_step(empty, _date(2026, 9, 18))["skipped"] == "no option trades to price"
+    assert live.futures_options_sentence(2) == "2 options on futures priced" and live.futures_options_sentence(0) == ""
+    # the no-Bloomberg recalc carries recalc_on_file's futures_options_priced into its sentence
+    assert live.recalc_summary({"as_of": "2026-09-23", "priced": 3, "skipped": 0, "days": [{}],
+                                "futures_options_priced": 2}) == (
+        "no Bloomberg on this machine: options re-priced from the marks on file as of 2026-09-23, 3 priced, "
+        "0 skipped over 1 day(s); 2 options on futures priced")
+
+
+_LME_TODAY = "2026-09-18"
+_LME_PROMPT = "2026-12-10"          # between the November and December third Wednesdays
+
+
+def _lme_db(tmp_path, with_fx=False):
+    """A long 25 t LME copper forward to the 10 December prompt (the parser's shape: the
+    metal's root id as instrument, two FX_NEAR legs on the prompt); with `with_fx`, _db's
+    AUDUSD / USDJPY forwards too, so the pull runs its main path."""
+    if with_fx:
+        p, conn = _db(tmp_path)
+    else:
+        p = tmp_path / "risk.db"
+        conn = schema.connect(p)
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('LME:CA','LME_FWD','LME:CA','USD',1.0,0,'LMCADY Comdty','9999-12-31')")
+    conn.execute("INSERT INTO trades VALUES ('l1','XLSX','LME:CA','LME_FWD','l1','2026-09-10',25.0,9700.0,"
+                 "'acc','cp','','t','d','')")
+    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
+        ("l1", 1, "FX_NEAR", "LME:CA", 25.0, "2026-09-10", _LME_PROMPT, 9700.0, 0),
+        ("l1", 2, "FX_NEAR", "USD", -25.0 * 9700.0, "2026-09-10", _LME_PROMPT, 9700.0, 1)])
+    conn.commit()
+    return p, conn
+
+
+def _fake_lme_pillars(monkeypatch, drop=(), log=None):
+    """bbg-curves' request_lme_pillars answered from the day's own pillar list: cash 9800,
+    each later pillar 10 USD/t higher by date, Bloomberg's prompt date = our pillar date;
+    tickers in `drop` come back with no price."""
+    from data.bloomberg import fwd_curve, pull_marks as pm
+    from engine.lme import lme_curve_tickers
+    pillars = {p["ticker"]: p for p in lme_curve_tickers("LME:CA", _LME_TODAY)}
+    by_date = sorted(pillars.values(), key=lambda p: p["pillar_date"])
+
+    def request_lme_pillars(blpapi, session, service, tickers, timeout_ms=15000):
+        if log is not None:
+            log.append(("LME", list(tickers)))
+        out = {}
+        for t in tickers:
+            if t in drop:
+                out[t] = {"value": None, "prompt_date": None, "error": "securityError: Unknown/Invalid Security"}
+                continue
+            k = by_date.index(pillars[t])
+            out[t] = {"value": 9800.0 + 10 * k, "prompt_date": pillars[t]["pillar_date"], "error": ""}
+        return out
+
+    monkeypatch.setattr(fwd_curve, "request_lme_pillars", request_lme_pillars, raising=False)
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    return pillars
+
+
+def test_lme_step_writes_the_cash_as_spot_and_the_pillars_and_prompt_as_forwards(tmp_path, monkeypatch):
+    from datetime import date as _date
+    p, conn = _lme_db(tmp_path)
+    _fake_lme_pillars(monkeypatch)
+    from data.bloomberg import library
+    asked = [p["ticker"] for p in library.lme_curves_needed(
+        conn, _LME_TODAY)[0]["pillars"]]
+    opened = []
+    block = live._lme_step(conn, _date(2026, 9, 18), lambda: opened.append(1) or (object(), object()),
+                           "2026-09-18T10:00:00-04:00")
+    assert opened == [1]
+    rows = conn.execute("SELECT as_of_date, settle_date, mark_type, value, source, snapped_at FROM marks "
+                        "WHERE instrument_id = 'LME:CA' ORDER BY mark_type, settle_date").fetchall()
+    # The cash price: SPOT, BBG_BFXFORWARD, keyed settle_date = as_of_date (what the P&L reads;
+    # a BBG_BDH row, or one keyed on the cash date, would blank every LME ticket).
+    spot = [r for r in rows if r[2] == "SPOT"]
+    assert spot == [(_LME_TODAY, _LME_TODAY, "SPOT", 9800.0, "BBG_BFXFORWARD", "2026-09-18T10:00:00-04:00")]
+    assert conn.execute("SELECT value, source FROM marks_official WHERE instrument_id = 'LME:CA' "
+                        "AND mark_type = 'SPOT' AND as_of_date = settle_date AND as_of_date = ?",
+                        (_LME_TODAY,)).fetchall() == [(9800.0, "BBG_BFXFORWARD")]
+    fwd = {r[1]: (r[3], r[4]) for r in rows if r[2] == "FWD_OUTRIGHT"}
+    assert len(asked) == len(fwd)                # cash + the non-cash pillars asked, + the open prompt
+    assert fwd.pop(_LME_PROMPT)[1] == "BBG_INTERP"      # the open prompt, between the Nov and Dec pillars
+    assert all(source == "BBG_BFXFORWARD" for _v, source in fwd.values())
+    lo, hi = fwd["2026-11-18"][0], fwd["2026-12-16"][0]
+    assert lo < conn.execute("SELECT value FROM marks WHERE settle_date = ?", (_LME_PROMPT,)).fetchone()[0] < hi
+    assert all(r[5] == "2026-09-18T10:00:00-04:00" for r in rows)
+    assert block["roots"] == ["LME:CA"] and block["written"] == len(rows)
+    assert block["interp_written"] == 1 and block["missing"] == [] and "error" not in block
+    assert block["summary"] == f"LME curves: {len(rows)} marks written for 1 metal, 1 interpolated"
+    # the official view reads the prompt's forward (the interpolated fallback: no direct quote there)
+    assert conn.execute("SELECT source FROM marks_official WHERE instrument_id = 'LME:CA' AND "
+                        "mark_type = 'FWD_OUTRIGHT' AND settle_date = ?", (_LME_PROMPT,)).fetchone() == ("BBG_INTERP",)
+
+
+def test_lme_step_lists_a_pillar_bloomberg_gave_no_price_for_and_a_prompt_left_unmarked(tmp_path, monkeypatch):
+    from datetime import date as _date
+    p, conn = _lme_db(tmp_path)
+    _fake_lme_pillars(monkeypatch, drop={"LPZ6 Comdty", "LMCADS03 Comdty"})
+    block = live._lme_step(conn, _date(2026, 9, 18), lambda: (object(), object()))
+    missing = {(m["ticker"], m["settle_date"]): m["reason"] for m in block["missing"]}
+    assert missing[("LPZ6 Comdty", "2026-12-16")] == "securityError: Unknown/Invalid Security"
+    assert ("", _LME_PROMPT) in missing          # nothing past November to interpolate to: never extrapolated
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE settle_date = ?", (_LME_PROMPT,)).fetchone()[0] == 0
+    assert any("never extrapolated" in r for r in block["reasons"])
+    assert block["summary"].endswith("; 3 pillars or prompts without a mark")
+
+
+def test_lme_step_asks_nothing_for_a_book_with_no_lme_forward(tmp_path):
+    from datetime import date as _date
+    p, conn = _db(tmp_path)
+    block = live._lme_step(conn, _date(2026, 9, 18), lambda: pytest.fail("no session for a book with no LME forward"))
+    assert block == {"roots": [], "written": 0, "interp_written": 0, "missing": [], "reasons": [], "summary": ""}
+
+
+def test_pull_asks_the_lme_curve_after_the_futures_and_before_the_ledger_and_never_as_an_fx_spot(tmp_path, monkeypatch):
+    from datetime import date as _date
+    from data.bloomberg import pull_marks as pm, fwd_curve
+    import engine.pnl.ledger as ledger
+    p, conn = _lme_db(tmp_path, with_fx=True)
+    log = []
+    _fake_lme_pillars(monkeypatch, log=log)
+
+    def fetch_reference(session, service, tickers, fields, overrides=None, diag=None, tag=None):
+        log.append(((tag or {}).get("purpose"), list(tickers)))
+        return {t: {"PX_LAST": 1.0} for t in tickers}
+
+    monkeypatch.setattr(pm, "fetch_reference", fetch_reference)
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
+    real = ledger.realise_settled
+    monkeypatch.setattr(ledger, "realise_settled", lambda *a, **k: log.append(("LEDGER", [])) or real(*a, **k))
+    status = live.pull_once(p, session_factory=lambda: (object(), object()), today=_date(2026, 9, 18))
+    assert status["connected"] is True
+    order = [what for what, _t in log]
+    assert order.index("LIVE_SPOT") < order.index("LME") < order.index("LEDGER")
+    assert not any(t.startswith("LM") for what, tickers in log if what != "LME" for t in tickers)
+    assert not any(i["instrument_id"] == "LME:CA" for i in status["items"])
+    assert status["lme"]["roots"] == ["LME:CA"] and status["lme"]["written"] > 0
+    assert live.read_status(p)["lme"] == status["lme"]
+    assert set(status["timings"]) == set(live.TIMING_KEYS)
+
+
+def test_pull_of_an_lme_only_book_still_asks_its_curve(tmp_path, monkeypatch):
+    from datetime import date as _date
+    p, conn = _lme_db(tmp_path)
+    _fake_lme_pillars(monkeypatch)
+    status = live.pull_once(p, session_factory=lambda: (object(), object()), today=_date(2026, 9, 18))
+    assert status["requested"] == 0 and status["lme"]["roots"] == ["LME:CA"]
+    assert conn.execute("SELECT source, settle_date FROM marks WHERE instrument_id = 'LME:CA' AND mark_type = 'SPOT'"
+                        ).fetchall() == [("BBG_BFXFORWARD", "2026-09-18")]

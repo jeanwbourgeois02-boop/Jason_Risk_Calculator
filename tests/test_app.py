@@ -99,18 +99,19 @@ def _ids(component):
     return found
 
 
-SIX_TABS = ["Blotter", "Ladder", "Curve", "Expiries", "Risk", "Market data"]
+SEVEN_TABS = ["Blotter", "Ladder", "Curve", "Spreads", "Expiries", "Risk", "Market data"]
 
 
-def test_six_tabs_in_order_and_the_app_still_opens_on_the_blotter():
-    """Blotter first and the cash Ladder second (user, 2026-09-22), the commodity tabs Curve
-    and Expiries next (2026-09-24, commodity conversion), then Risk and Market data."""
+def test_seven_tabs_in_order_and_the_app_still_opens_on_the_blotter():
+    """Blotter first and the cash Ladder second (user, 2026-09-22), the commodity tabs Curve,
+    Spreads (Phase 3) and Expiries next (2026-09-24, commodity conversion), then Risk and
+    Market data."""
     from dash import dcc
-    assert uiapp.VISIBLE_TABS == SIX_TABS
+    assert uiapp.VISIBLE_TABS == SEVEN_TABS
     layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
     tabs = layout.children[0].children[0]
     assert isinstance(tabs, dcc.Tabs)
-    assert [t.label for t in tabs.children] == SIX_TABS
+    assert [t.label for t in tabs.children] == SEVEN_TABS
     assert tabs.value == "Blotter"
 
 
@@ -119,9 +120,9 @@ def test_layout_carries_the_risk_body_and_its_container():
     layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
     bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
     body_ids = [getattr(b, "id", None) for b in bodies.children]
-    assert body_ids == ["tab-body-blotter", "tab-body-ladder", "tab-body-curve", "tab-body-expiries",
-                        "tab-body-risk", "tab-body-market-data"]
-    risk_body = bodies.children[SIX_TABS.index("Risk")]
+    assert body_ids == ["tab-body-blotter", "tab-body-ladder", "tab-body-curve", "tab-body-spreads",
+                        "tab-body-expiries", "tab-body-risk", "tab-body-market-data"]
+    risk_body = bodies.children[SEVEN_TABS.index("Risk")]
     assert risk_body.className == "tab-body"
     inside = _ids(risk_body)
     assert risk.BODY_ID in inside                # "risk-body": the container the callback fills
@@ -135,7 +136,7 @@ def test_risk_tab_title_names_the_ladders_default_date(monkeypatch):
     monkeypatch.setattr(cash_ladder, "today_ny", lambda: "2026-09-22")
     layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
     bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
-    texts = [c.children for c in _walk(bodies.children[SIX_TABS.index("Risk")]) if isinstance(getattr(c, "children", None), str)]
+    texts = [c.children for c in _walk(bodies.children[SEVEN_TABS.index("Risk")]) if isinstance(getattr(c, "children", None), str)]
     assert any("2026-09-22" in t and "as-of" in t for t in texts)
 
 
@@ -148,12 +149,12 @@ def test_create_app_registers_the_risk_callback_and_the_show_hide_covers_its_bod
     inputs = {(d["id"], d["property"]) for d in app.callback_map[key]["inputs"]}
     assert inputs == {(header.AS_OF_STORE_ID, "data"), (revision.DATA_REVISION_ID, "data"),
                       (risk.REFRESH_ID, "n_intervals")}
-    # The one show/hide callback toggles all six bodies, the Risk one included.
+    # The one show/hide callback toggles all seven bodies, the Risk one included.
     style_key = [k for k in app.callback_map if k.startswith("..tab-body-blotter.style")]
     assert style_key and "tab-body-risk.style" in style_key[0]
     wrapped = app.callback_map[style_key[0]]["callback"]
     toggle = getattr(wrapped, "__wrapped__", wrapped)    # the raw function, not Dash's context wrapper
-    assert toggle("Risk") == [{} if label == "Risk" else {"display": "none"} for label in SIX_TABS]
+    assert toggle("Risk") == [{} if label == "Risk" else {"display": "none"} for label in SEVEN_TABS]
 
 
 def test_curve_and_expiries_bodies_carry_their_containers_and_todays_date(monkeypatch):
@@ -165,7 +166,7 @@ def test_curve_and_expiries_bodies_carry_their_containers_and_todays_date(monkey
     layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
     bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
     for label, module in (("Curve", curve), ("Expiries", expiries)):
-        body = bodies.children[SIX_TABS.index(label)]
+        body = bodies.children[SEVEN_TABS.index(label)]
         assert body.id == f"tab-body-{label.lower()}" and body.className == "tab-body"
         inside = _ids(body)
         assert module.BODY_ID in inside and module.REFRESH_ID in inside
@@ -191,5 +192,59 @@ def test_create_app_registers_curve_and_expiries_with_no_duplicate_outputs(tmp_p
     assert "tab-body-curve.style" in style_key and "tab-body-expiries.style" in style_key
     wrapped = app.callback_map[style_key]["callback"]
     toggle = getattr(wrapped, "__wrapped__", wrapped)
-    for label in SIX_TABS:
-        assert toggle(label) == [{} if other == label else {"display": "none"} for other in SIX_TABS]
+    for label in SEVEN_TABS:
+        assert toggle(label) == [{} if other == label else {"display": "none"} for other in SEVEN_TABS]
+
+
+# ------------------------------------------------------------ the Spreads tab (Phase 3, 2026-09-24)
+# ui/tabs/spreads.py is ui-spreads'; the shell places it after Curve, gives it the Ladder's
+# default date (no picker: it follows the header's as-of store, like Curve and Expiries) and
+# registers its callbacks next to the other tabs'. Written against the interface ui-spreads
+# shares with ui/tabs/expiries.py: build_layout, register_callbacks(app, get_db_path), BODY_ID.
+
+def test_spreads_tab_sits_after_curve_and_its_body_carries_its_container(monkeypatch):
+    from ui.tabs import cash_ladder, spreads
+    monkeypatch.setattr(cash_ladder, "today_ny", lambda: "2026-09-24")
+    assert SEVEN_TABS.index("Spreads") == SEVEN_TABS.index("Curve") + 1
+    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
+    bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
+    body = bodies.children[SEVEN_TABS.index("Spreads")]
+    assert body.id == "tab-body-spreads" and body.className == "tab-body"
+    assert spreads.BODY_ID in _ids(body)
+    assert spreads.BODY_ID.startswith("spreads-")
+
+
+def test_create_app_registers_the_spreads_tab_once_with_the_header_as_of(tmp_path, monkeypatch):
+    from ui import revision
+    from ui.tabs import header, spreads
+    calls = []
+    original = spreads.register_callbacks
+
+    def _counted(app, get_db_path):
+        calls.append(get_db_path())
+        return original(app, get_db_path)
+
+    monkeypatch.setattr(spreads, "register_callbacks", _counted)
+    app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)
+    assert calls == [tmp_path / "risk.db"]
+    key = f"{spreads.BODY_ID}.children"
+    assert key in app.callback_map, "spreads.register_callbacks did not wire the body"
+    inputs = {(d["id"], d["property"]) for d in app.callback_map[key]["inputs"]}
+    assert {(header.AS_OF_STORE_ID, "data"), (revision.DATA_REVISION_ID, "data")} <= inputs
+    style_key = next(k for k in app.callback_map if k.startswith("..tab-body-blotter.style"))
+    assert "tab-body-spreads.style" in style_key
+    outputs = [o for k in app.callback_map for o in k.strip(".").split("...") if "@" not in o]
+    assert len(outputs) == len(set(outputs))
+
+
+# ------------------------------------------------ shared controls: no retired mark source (2026-09-24)
+
+def test_source_options_offer_official_only_never_bnp_or_the_workbook():
+    from ui.tabs import controls
+    values = [o["value"] for o in controls.SOURCE_OPTIONS]
+    labels = " ".join(o["label"] for o in controls.SOURCE_OPTIONS)
+    assert values == [controls.SOURCE_OFFICIAL]
+    assert "BNP" not in labels and "Workbook" not in labels
+    dropdown = controls.build_source_dropdown("x-source").children[1]
+    assert dropdown.value == controls.SOURCE_OFFICIAL
+    assert controls.source_value_to_param(dropdown.value) is None

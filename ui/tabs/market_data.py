@@ -54,10 +54,16 @@ every value is read straight from `marks` / `marks_official` / `trade_legs` /
 helpers) so `import ui.app` and `import ui.tabs.market_data` always succeed even if
 those modules are mid-edit.
 
-Quirk recorded for memory: the DB on this machine has only BNP_BVAL marks (never
-official for any mark_type per CLAUDE.md), so every row here renders with source
-label "BNP file" and status "reconciliation only" rather than "official" -- this is
-expected, not a bug, until a live Bloomberg pull lands BBG_BFXFORWARD rows.
+Commodity conversion, Phase 3 (2026-09-24): a "Futures curves" section under the pair
+section (`futures_curves_panel`): one block per commodity root with an open future, grouped
+by sector, each contract month with its official FUTURE_PX, source, snap time, the previous
+official close and the change, open positions first (lots from `engine.curve.curve_positions`),
+a missing price named "missing" with its reason, and a small price-by-month chart per root.
+Absent when no commodity future is open.
+
+Rows of a retired source (BNP_BVAL) are purged from the database at every startup
+(`data.ingest.schema.purge_retired_sources`); the "BNP file" label is kept only so an old
+row read before the purge is never shown under a bare code.
 """
 from __future__ import annotations
 
@@ -96,6 +102,10 @@ CONTRACT_DATES_BLOCK_ID = "market-data-contract-dates-status"   # the pull's con
 CONTRACT_DATES_FAILED_ID = "market-data-contract-dates-failed"
 NOT_REQUESTABLE_ID = "market-data-not-requestable"              # futures never asked for (2026-09-24)
 CURVES_BLOCK_ID = "market-data-curves-status"                   # the pull's OIS curve step (2026-09-24)
+LME_BLOCK_ID = "market-data-lme-status"                         # the pull's LME step (Phase 5)
+LME_MISSING_ID = "market-data-lme-missing"
+FUTURES_OPTIONS_LINE_ID = "market-data-futures-options-status"  # options on futures priced (Phase 5)
+BACKFILL_OPTIONS_ID = "market-data-backfill-options"            # the backfill's per-day option count
 # Safety-net timer only: one feed cycle, read from data.bloomberg.live.INTERVAL_SECONDS
 # (ui.feed_controls.safety_refresh_ms), never a number typed in here. A data change
 # redraws the tab within seconds through ui/revision.py's DATA_REVISION_ID.
@@ -146,8 +156,8 @@ _TENORS: List[Tuple[str, int, int]] = [
     ("3M", 91, 5), ("6M", 182, 6), ("9M", 273, 7), ("1Y", 365, 8),
 ]
 
-_SOURCE_LABELS = {"BNP_BVAL": "BNP file", "BBG_BFXFORWARD": "Bloomberg", "BBG_INTERP": "Interpolated",
-                  "MANUAL": "Manual"}
+_SOURCE_LABELS = {"BNP_BVAL": "BNP file", "BBG_BFXFORWARD": "Bloomberg", "BBG_BDH": "Bloomberg (BDH)",
+                  "BBG_INTERP": "Interpolated", "MANUAL": "Manual"}
 
 
 def source_label(source: Optional[str]) -> str:
@@ -572,6 +582,121 @@ def not_requestable_block(status: Optional[dict]) -> Optional[html.Div]:
     ])
 
 
+def _lme_missing_line(entry, with_root: bool = True) -> str:
+    """"LME:CA LMCADS03 Comdty 2026-12-24: reason" for one `status["lme"]["missing"]` item; an
+    open prompt (ticker '') reads "open prompt". `with_root=False` leaves the metal off."""
+    if not isinstance(entry, dict):
+        return str(entry)
+    what = str(entry.get("ticker") or "").strip() or "open prompt"
+    root = str(entry.get("root_id") or "?") if with_root else ""
+    head = " ".join(b for b in (root, what, str(entry.get("settle_date") or "")) if b)
+    return f"{head}: {str(entry.get('reason') or '').strip() or 'no reason given'}"
+
+
+def lme_block(status: Optional[dict]) -> Optional[html.Div]:
+    """The pull's LME step (Phase 5, 2026-09-24, bbg-live's `status["lme"]`: {roots, written,
+    interp_written, missing: [{root_id, ticker, settle_date, reason}], reasons: [str],
+    summary, error?}): the pull's own sentence, its error in red, and the pillars or open
+    prompts left without a mark in a collapsed list with each reason, then the step's other
+    reasons. Read from the status file only. None when the key is absent (no terminal) or the
+    block says nothing (the book has no LME forward)."""
+    block = (status or {}).get("lme")
+    if not isinstance(block, dict):
+        return None
+    summary = block.get("summary")
+    summary = summary.strip() if isinstance(summary, str) else ""
+    missing = block.get("missing")
+    missing = [_lme_missing_line(e) for e in missing] if isinstance(missing, (list, tuple)) else []
+    reasons = block.get("reasons")
+    reasons = [str(r) for r in reasons if str(r).strip()] if isinstance(reasons, (list, tuple)) else []
+    error = str(block.get("error") or "").strip()
+    if not (summary or missing or error):
+        return None
+    children: list = []
+    if summary:
+        children.append(html.Div(summary if summary.startswith("LME") else f"LME curves: {summary}",
+                                 className="status-line"))
+    if error and error not in summary:
+        children.append(html.Div(f"LME curves: {error}", className="status-line status-line--bad"))
+    if missing or reasons:
+        children.append(html.Details(className="status-line", children=[
+            html.Summary(f"LME pillars or prompts without a mark: {len(missing)}"),
+            html.Ul([html.Li(line) for line in missing] + [html.Li(line) for line in reasons],
+                    id=LME_MISSING_ID, style={"margin": "2px 0 0 16px", "padding": 0}),
+        ]))
+    return html.Div(children, id=LME_BLOCK_ID, className="status-line")
+
+
+def futures_options_block(status: Optional[dict]) -> Optional[html.Div]:
+    """The options step's line for the options on commodity futures (Phase 5,
+    `status["options"]["futures_options_summary"]`, "N options on futures priced"; the
+    count `futures_options_priced` when the sentence is missing). None when neither says
+    anything: an older status file, or no option on a future priced."""
+    options = (status or {}).get("options")
+    if not isinstance(options, dict):
+        return None
+    sentence = options.get("futures_options_summary")
+    sentence = sentence.strip() if isinstance(sentence, str) else ""
+    if not sentence:
+        n = options.get("futures_options_priced")
+        n = 0 if isinstance(n, bool) else _count(n)
+        sentence = f"{n} option{'s' if n != 1 else ''} on futures priced" if n else ""
+    if not sentence:
+        return None
+    return html.Div(f"Options on futures: {sentence}", id=FUTURES_OPTIONS_LINE_ID, className="status-line")
+
+
+def backfill_option_rows(status: Optional[dict]) -> List[dict]:
+    """One row per day of `status["backfill"]["options"]` (what the backfill's past-close
+    option pricing made of each worked day, newest first): {"day", "priced" (None when the
+    step did not run), "futures" (the options on futures among them, None when the file does
+    not say), "skipped", "closed_out", "note"}. Read defensively; the counts are the pricer's."""
+    backfill = (status or {}).get("backfill")
+    days = backfill.get("options") if isinstance(backfill, dict) else None
+    if not isinstance(days, dict):
+        return []
+    rows = []
+    for day, entry in sorted(days.items(), reverse=True):
+        if not isinstance(entry, dict):
+            continue
+        priced, futures = entry.get("priced"), entry.get("futures_options_priced")
+        skipped = entry.get("skipped")
+        rows.append({"day": str(day),
+                     "priced": None if priced is None or isinstance(priced, bool) else _count(priced),
+                     "futures": None if futures is None or isinstance(futures, bool) else _count(futures),
+                     "skipped": len(skipped) if isinstance(skipped, (list, tuple)) else _count(skipped),
+                     "closed_out": closed_out_count(entry), "note": str(entry.get("note") or "").strip()})
+    return rows
+
+
+def backfill_options_block(status: Optional[dict]) -> Optional[html.Details]:
+    """The backfill's per-day option count, collapsed: "2026-09-18: 4 options priced (1 on
+    futures), 0 skipped". A day whose step did not run says why (its note). None when the
+    status file has no such block."""
+    rows = backfill_option_rows(status)
+    if not rows:
+        return None
+    items = []
+    for r in rows:
+        if r["priced"] is None:
+            text = f"{r['day']}: not priced" + (f" ({r['note']})" if r["note"] else " (no reason recorded)")
+        else:
+            text = f"{r['day']}: {r['priced']} option{'s' if r['priced'] != 1 else ''} priced"
+            if r["futures"]:
+                text += f" ({r['futures']} on futures)"
+            text += f", {r['skipped']} skipped"
+            closed = closed_out_words(r["closed_out"])
+            if closed:
+                text += f", {closed}"
+            if r["note"]:
+                text += f" · {r['note']}"
+        items.append(html.Li(text))
+    return html.Details(id=BACKFILL_OPTIONS_ID, className="status-line", children=[
+        html.Summary(f"Past-close option pricing: {len(rows)} day(s)"),
+        html.Ul(items, style={"margin": "2px 0 0 16px", "padding": 0}),
+    ])
+
+
 def status_block(status: Optional[dict]):
     """What the tab's feed-status block shows: the one-line status, plus the last pull's
     per-step timings on a second compact line when the status file has them, plus what the
@@ -585,9 +710,13 @@ def status_block(status: Optional[dict]):
     dates = contract_dates_block(status)
     unasked = not_requestable_block(status)
     curves = curves_block(status)
+    lme = lme_block(status)
+    futures_options = futures_options_block(status)
+    backfill_options = backfill_options_block(status)
     line = top_bar_status(status, say_recalc=recalc is None)
     timings = pull_timings_line(status)
-    extras = [block for block in (dates, unasked, curves, recalc, ledger) if block is not None]
+    extras = [block for block in (dates, unasked, curves, lme, futures_options, recalc, ledger, backfill_options)
+              if block is not None]
     if not timings and not extras:
         return line
     parts: list = [line]
@@ -885,7 +1014,7 @@ def pair_options(conn: sqlite3.Connection, as_of: str) -> Tuple[List[dict], Opti
 # --------------------------------------------------------------------------- spot + curve
 def spot_info(conn: sqlite3.Connection, as_of: str, pair: str) -> Optional[dict]:
     """Official SPOT mark for the pair on `as_of`, falling back to the latest row of
-    any source (labelled with that source, e.g. "BNP file" for BNP_BVAL-only DBs)."""
+    any source, labelled with that source (a MANUAL row is never official)."""
     row = conn.execute(
         "SELECT value, source, snapped_at FROM marks_official WHERE as_of_date=? "
         "AND instrument_id=? AND mark_type='SPOT'", (as_of, pair)).fetchone()
@@ -990,7 +1119,7 @@ def curve_chart(df: pd.DataFrame, spot: Optional[dict], pair: str, as_of: str):
     other_y = [v for v, o in zip(df["outright"], official_mask) if not o]
     if other_x:
         fig.add_trace(go.Scatter(x=other_x, y=other_y, mode="markers",
-                                 marker_symbol="diamond", name="manual/BNP (not official)"))
+                                 marker_symbol="diamond", name="not official"))
     used_dates = list(df.loc[df["used_by_book"] != "", "settle_date"])
     fig.update_layout(
         title=f"{pair} forward curve, {as_of}",
@@ -1014,6 +1143,400 @@ def pair_body(conn: sqlite3.Connection, as_of: str, pair: str) -> html.Div:
     return html.Div([spot_line, curve_table(df, pair), curve_chart(df, spot, pair, as_of)])
 
 
+# --------------------------------------------------------------------------- futures curves (Phase 3, 2026-09-24)
+# The commodity book's own curves: one block per contract root with an open future on the
+# as-of date, grouped by sector. Each row is a contract month on file for that root, open
+# positions first, with the official FUTURE_PX of the day (its source and snap time), the
+# previous official close and the change between the two. Lots are the engine's
+# (`engine.curve.curve_positions`), names the contract master's (`data.contracts.load_roots`),
+# prices `marks_official` read the way the rest of the tab reads marks. Nothing is estimated.
+FUTURES_CURVES_TITLE = "Futures curves"
+FUTURES_CURVES_PANEL_ID = "market-data-futures-curves"
+FUTURES_CURVE_TABLE_ID_PREFIX = "market-data-futures-curve-"
+MISSING_PRICE = "missing"
+
+_FUTURE_CONTRACTS_SQL = """
+SELECT instrument_id, base_ccy, expiry_date, bbg_ticker FROM instruments
+WHERE asset_class = 'FUTURE' ORDER BY expiry_date, instrument_id
+"""
+
+_FUTURE_PX_ON_SQL = """
+SELECT value, source, snapped_at FROM marks_official
+WHERE as_of_date = ? AND instrument_id = ? AND settle_date = ? AND mark_type = 'FUTURE_PX'
+"""
+
+_FUTURE_PX_BEFORE_SQL = """
+SELECT as_of_date, value FROM marks_official
+WHERE as_of_date < ? AND instrument_id = ? AND settle_date = ? AND mark_type = 'FUTURE_PX'
+ORDER BY as_of_date DESC LIMIT 1
+"""
+
+# anything on file for the key that is not official (a MANUAL row): shown as "on file instead"
+_FUTURE_PX_OTHER_SQL = """
+SELECT value, source FROM marks
+WHERE as_of_date = ? AND instrument_id = ? AND settle_date = ? AND mark_type = 'FUTURE_PX'
+ORDER BY snapped_at DESC LIMIT 1
+"""
+
+
+def _root_key(base_ccy) -> str:
+    return re.sub(r"\s+", "", str(base_ccy or "")).upper()
+
+
+def _number_or_none(value) -> Optional[float]:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v and v not in (float("inf"), float("-inf")) else None
+
+
+def _change_words(price: Optional[float], previous: Optional[float]) -> str:
+    """'+0.7500' / '-12.00': today's official price less the previous official close, with
+    as many digits as the price itself shows (`_fmt_mark`'s rule) and a sign. 'n/a' when
+    either is missing: never a zero."""
+    if price is None or previous is None:
+        return "n/a"
+    digits = 2 if abs(price) >= 1000 else 4 if abs(price) >= 10 else 6
+    return f"{price - previous:+,.{digits}f}"
+
+
+def _lots_words(lots, flat: bool) -> str:
+    if flat:
+        return "flat"
+    value = _number_or_none(lots)
+    if value is None:
+        return "no position"
+    return f"{value:+,.0f}" if value == int(value) else f"{value:+,.2f}"
+
+
+def _missing_price_reason(key: MarkKey, has_ticker: bool, library_need: Optional[dict], reasons: Dict[MarkKey, str],
+                          asked_today: bool, is_past: bool, past_sentence: Callable[[], str], as_of: str) -> str:
+    """Why a contract has no official FUTURE_PX on `as_of`, in the order that decides it: the
+    library says it cannot be asked (no verified ticker); no trade needs it, so no pull asks;
+    Bloomberg's own word from the last pull of that date; on a past date the backfill's
+    sentence; else not pulled yet."""
+    if library_need is not None and not library_need.get("requestable", True):
+        return str(library_need.get("reason") or "no Bloomberg ticker to ask with")
+    if library_need is None:
+        if not has_ticker:
+            return "no Bloomberg ticker for this contract yet, and no trade on file needs it"
+        return f"no trade on file needs it on {as_of}, so no pull asks Bloomberg for it"
+    if key in reasons:
+        return reasons[key]
+    if is_past:
+        return f"a past close arrives only through the Bloomberg backfill: {past_sentence()}"
+    if asked_today:
+        return "not requested by the last pull"
+    return f"not pulled for {as_of} yet: the next Pull Bloomberg now asks for it"
+
+
+def futures_curve_rows(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
+                       today: Optional[str] = None) -> List[dict]:
+    """One block per commodity root with an open future on `as_of`, sectors then roots in
+    order: [{root_id, name, sector, exchange, currency, rows: [...], open, missing}].
+
+    A root is in when `curve_positions` lists an open contract of it (a position or a flat
+    one). Its rows are every contract of that root on file in `instruments` that has not
+    expired by `as_of`, or that has a mark that day, plus the open ones: open positions first
+    (by expiry), then the rest by expiry. Each row: contract_id, month, expiry (with "(est.)"
+    while the contract master still carries its estimate), lots (the engine's net; "flat" /
+    "no position"), price (the official FUTURE_PX of `as_of` at the contract's expiry, or
+    "missing"), source, snapped_at, previous (the latest official FUTURE_PX before `as_of`,
+    with its date), change (price less previous; "n/a" with either missing), why (the
+    reason a price is missing, '' otherwise), and the raw `_price` / `_previous` numbers
+    for the chart. No price is estimated or filled.
+
+    Phase 5 (2026-09-24): a metal with an open LME forward (curve_positions' LME_FWD rows)
+    gets a block of its own, `lme_curve_block`, sorted with the other roots of its sector.
+    The options on futures are not listed here: their underlying's month is."""
+    from data.contracts import UnknownContract, contract_for, load_roots
+    from engine.curve import curve_positions
+    curve = curve_positions(conn, as_of)
+    is_future = lambda r: r.get("product", "FUTURE") == "FUTURE"   # noqa: E731 -- rows before Phase 5 carry no product
+    positions = {r["contract_id"]: r for r in curve.get("rows") or [] if is_future(r)}
+    flat = {f["contract_id"]: f for f in curve.get("flat_contracts") or [] if is_future(f)}
+    lme_prompts: Dict[str, Dict[str, float]] = {}
+    for r in list(curve.get("rows") or []) + list(curve.get("flat_contracts") or []):
+        if r.get("product") in _LME_PRODUCTS:
+            prompts = lme_prompts.setdefault(_root_key(r.get("root_id")), {})
+            prompts[str(r.get("expiry") or "")] = prompts.get(str(r.get("expiry") or ""), 0.0) + \
+                (_number_or_none(r.get("lots")) or 0.0)
+    wanted_roots = {_root_key(r.get("root_id")) for r in positions.values()} | \
+        {_root_key(f.get("root_id")) for f in flat.values()}
+    if not wanted_roots and not lme_prompts:
+        return []
+    roots = load_roots()
+
+    from data.bloomberg import library
+    in_force = library.needed_on(conn, as_of, include_unrequestable=True)
+    needs = {(r["key"], r["settle_date"]): r for r in in_force if r["kind"] == "FUTURE_PX"}
+    reasons = last_pull_reasons(status, as_of)
+    asked_today = _pull_date(status) == as_of and bool((status or {}).get("connected"))
+    is_past = as_of < (today or _book_today_iso())
+    past_cache: Dict[str, str] = {}
+
+    def past_sentence() -> str:
+        if "s" not in past_cache:
+            from ui.tabs.header import backfill_status, past_close_explanation
+            past_cache["s"] = past_close_explanation(backfill_status(conn), as_of)
+        return past_cache["s"]
+
+    marked_today = {row[0] for row in conn.execute(
+        "SELECT DISTINCT instrument_id FROM marks WHERE as_of_date = ? AND mark_type = 'FUTURE_PX'", (as_of,))}
+    contracts: Dict[str, List[tuple]] = {}
+    for instrument_id, base, expiry, ticker in conn.execute(_FUTURE_CONTRACTS_SQL):
+        root_id = _root_key(base)
+        if root_id not in wanted_roots:
+            continue
+        if instrument_id in positions or instrument_id in flat or (expiry or "") >= as_of \
+                or instrument_id in marked_today:
+            contracts.setdefault(root_id, []).append((instrument_id, expiry, ticker))
+
+    blocks = []
+    for root_id in wanted_roots:
+        root = roots.get(root_id)
+        out = []
+        for instrument_id, expiry_on_file, ticker in contracts.get(root_id, []):
+            pos = positions.get(instrument_id)
+            flat_row = flat.get(instrument_id)
+            expiry = (pos or flat_row or {}).get("expiry") or expiry_on_file
+            month, estimated = "", False
+            try:
+                cm = contract_for(root_id, instrument_id, conn=conn)
+                month, estimated = f"{cm.year:04d}-{cm.month:02d}", cm.estimated
+            except (UnknownContract, KeyError, ValueError):
+                pass
+            key = (instrument_id, "FUTURE_PX", expiry)
+            hit = conn.execute(_FUTURE_PX_ON_SQL, (as_of, instrument_id, expiry)).fetchone()
+            price = _number_or_none(hit[0]) if hit else None
+            before = conn.execute(_FUTURE_PX_BEFORE_SQL, (as_of, instrument_id, expiry)).fetchone()
+            previous = _number_or_none(before[1]) if before else None
+            if hit is None:
+                why = _missing_price_reason(key, bool(ticker), needs.get((instrument_id, expiry)), reasons,
+                                            asked_today, is_past, past_sentence, as_of)
+                other = conn.execute(_FUTURE_PX_OTHER_SQL, (as_of, instrument_id, expiry)).fetchone()
+                if other is not None:
+                    why += f"; on file instead: {source_label(other[1]).lower()} {_fmt_mark(other[0])} (not official)"
+            elif price is None:
+                why = f"the official FUTURE_PX on file is not a number ({hit[0]!r}): a data error, never filled"
+            else:
+                why = ""
+            is_open = pos is not None and abs(_number_or_none(pos.get("lots")) or 0.0) > 0
+            out.append({
+                "contract_id": instrument_id, "month": month,
+                "expiry": f"{expiry} (est.)" if estimated else str(expiry or ""),
+                "lots": _lots_words(pos.get("lots") if pos else None, flat_row is not None and pos is None),
+                "price": _fmt_mark(price) if price is not None else MISSING_PRICE,
+                "source": source_label(hit[1]) if hit else "",
+                "snapped_at": str(hit[2] or "").replace("T", " ") if hit else "",
+                "previous": (f"{_fmt_mark(previous)} ({before[0]})" if previous is not None
+                             else "no earlier close on file" if before is None
+                             else f"not a number ({before[1]!r})"),
+                "change": _change_words(price, previous),
+                "why": why, "flag": "missing" if price is None else "",
+                "_open": is_open, "_expiry": str(expiry or ""), "_price": price, "_previous": previous,
+            })
+        out.sort(key=lambda r: (not r["_open"], r["_expiry"], r["contract_id"]))
+        blocks.append({
+            "root_id": root_id, "name": root.name if root else root_id,
+            "sector": root.sector if root else "", "exchange": root.exchange if root else "",
+            "currency": root.currency if root else "", "rows": out,
+            "open": sum(1 for r in out if r["_open"]), "missing": sum(1 for r in out if r["flag"]),
+        })
+    for root_id, prompts in lme_prompts.items():
+        blocks.append(lme_curve_block(conn, root_id, roots.get(root_id), prompts, as_of, status, in_force,
+                                      asked_today, is_past, past_sentence))
+    blocks.sort(key=lambda b: (b["sector"], b["name"], b["root_id"]))
+    return blocks
+
+
+_LME_PILLAR_WORDS = {"CASH": "cash", "3M": "3M", "MONTHLY": "monthly prompt"}
+_LME_COLUMNS = [
+    ("Pillar", "pillar"), ("Ticker", "ticker"), ("Prompt date", "expiry"), ("Lots", "lots"),
+    ("Price", "price"), ("Source", "source"), ("Snapped at", "snapped_at"),
+    ("Previous close", "previous"), ("Change", "change"), ("Why missing", "why"),
+]
+
+
+def _official_value(conn: sqlite3.Connection, day: str, root_id: str, mark_type: str, settle: str):
+    return conn.execute(
+        "SELECT value, source, snapped_at FROM marks_official WHERE as_of_date = ? AND instrument_id = ? "
+        "AND mark_type = ? AND settle_date = ? ORDER BY snapped_at DESC LIMIT 1",
+        (day, root_id, mark_type, settle)).fetchone()
+
+
+def lme_curve_block(conn: sqlite3.Connection, root_id: str, root, prompts: Dict[str, float], as_of: str,
+                    status: Optional[dict], in_force: List[dict], asked_today: bool, is_past: bool,
+                    past_sentence: Callable[[], str]) -> dict:
+    """An LME metal's curve on `as_of` (Phase 5), as a Futures curves block: the pillars the
+    library asks for (`library.lme_curve_pillars`, trimmed to the furthest open prompt: cash,
+    3M, the monthly prompts) and each open prompt's own outright, by date. Each row's price is
+    the official mark (the cash SPOT keyed on `as_of`, a FWD_OUTRIGHT at its prompt date; an
+    open prompt between pillars is BBG_INTERP, the official fallback) with its source and snap
+    time; the previous close is the same pillar on the latest earlier day with the metal's
+    marks on file (the cash and the 3M of that day, which sit on other dates; a monthly prompt
+    or an open prompt at the same date); a missing one says why: the last pull's own reason
+    (`status["lme"]["missing"]`), the library's when it cannot be asked, the backfill's on a
+    past date, else not pulled yet. Nothing is read off the curve here."""
+    from data.bloomberg import library
+    through = max(prompts) if prompts else None
+    pillars = library.lme_curve_pillars(root_id, as_of, through=through)
+    lme_status = (status or {}).get("lme") if _pull_date(status) == as_of else None
+    pulled_missing = [m for m in ((lme_status or {}).get("missing") or []) if isinstance(m, dict)
+                      and _root_key(m.get("root_id")) == root_id]
+    curve_need = next((r for r in in_force if r["kind"] == "LME_CURVE" and _root_key(r["key"]) == root_id), None)
+    prev_row = conn.execute(
+        "SELECT MAX(as_of_date) FROM marks_official WHERE instrument_id = ? AND as_of_date < ? "
+        "AND mark_type IN ('SPOT', 'FWD_OUTRIGHT')", (root_id, as_of)).fetchone()
+    prev_day = prev_row[0] if prev_row else None
+    prev_anchor = {}
+    if prev_day:
+        for p in library.lme_curve_pillars(root_id, prev_day):
+            if p["kind"] in ("CASH", "3M"):
+                prev_anchor[p["kind"]] = p["settle_date"]
+
+    items: Dict[Tuple[str, str], dict] = {}
+    for p in pillars:
+        items[(p["mark_type"], p["settle_date"])] = {"kind": p["kind"], "ticker": p["ticker"],
+                                                     "date": p["pillar_date"]}
+    for prompt in prompts:
+        items.setdefault(("FWD_OUTRIGHT", prompt), {"kind": "PROMPT", "ticker": "", "date": prompt})
+
+    def why_missing(mark_type: str, settle: str, ticker: str) -> str:
+        for m in pulled_missing:
+            if (ticker and m.get("ticker") == ticker) or (not m.get("ticker") and m.get("settle_date") == settle):
+                return str(m.get("reason") or "").strip() or "the last pull wrote no mark for it"
+        if curve_need is not None and not curve_need.get("requestable", True):
+            return str(curve_need.get("reason") or "no Bloomberg ticker to ask with")
+        if is_past:
+            return f"a past close arrives only through the Bloomberg backfill: {past_sentence()}"
+        if asked_today:
+            return "the last pull wrote no mark for it"
+        return f"not pulled for {as_of} yet: the next Pull Bloomberg now asks for it"
+
+    out = []
+    for (mark_type, settle), item in items.items():
+        hit = _official_value(conn, as_of, root_id, mark_type, settle)
+        price = _number_or_none(hit[0]) if hit else None
+        before, before_day = None, None
+        if prev_day:
+            prev_settle = prev_day if item["kind"] == "CASH" else prev_anchor.get("3M") if item["kind"] == "3M" else settle
+            if prev_settle:
+                before = _official_value(conn, prev_day, root_id, mark_type, prev_settle)
+                before_day = prev_day
+        previous = _number_or_none(before[0]) if before else None
+        if hit is None:
+            why = why_missing(mark_type, settle, item["ticker"])
+        elif price is None:
+            why = f"the official {mark_type} on file is not a number ({hit[0]!r}): a data error, never filled"
+        else:
+            why = ""
+        lots = prompts.get(settle) if item["kind"] != "CASH" else None
+        is_open = lots is not None and abs(lots) > 0
+        label = _LME_PILLAR_WORDS.get(item["kind"], "open prompt")
+        if item["kind"] != "PROMPT" and settle in prompts:
+            label += " (an open prompt)"
+        out.append({
+            "pillar": label, "ticker": item["ticker"] or "none: an open prompt, read off the curve",
+            "expiry": item["date"],
+            "lots": _lots_words(lots, lots is not None and not is_open),
+            "price": _fmt_mark(price) if price is not None else MISSING_PRICE,
+            "source": source_label(hit[1]) if hit else "",
+            "snapped_at": str(hit[2] or "").replace("T", " ") if hit else "",
+            "previous": (f"{_fmt_mark(previous)} ({before_day})" if previous is not None
+                         else "no earlier close on file" if before is None
+                         else f"not a number ({before[0]!r})"),
+            "change": _change_words(price, previous),
+            "why": why, "flag": "missing" if price is None else "",
+            "contract_id": f"{root_id} {item['date']}",
+            "_open": is_open, "_expiry": item["date"], "_price": price, "_previous": previous,
+        })
+    out.sort(key=lambda r: (r["_expiry"], r["pillar"]))
+    return {"root_id": root_id, "name": root.name if root else root_id, "sector": root.sector if root else "metals",
+            "exchange": root.exchange if root else "LME", "currency": root.currency if root else "USD",
+            "rows": out, "open": sum(1 for r in out if r["_open"]), "missing": sum(1 for r in out if r["flag"]),
+            "lme": True, "columns": _LME_COLUMNS}
+
+
+_FUTURES_COLUMNS = [
+    ("Contract", "contract_id"), ("Month", "month"), ("Expiry", "expiry"), ("Lots", "lots"),
+    ("Price", "price"), ("Source", "source"), ("Snapped at", "snapped_at"),
+    ("Previous close", "previous"), ("Change", "change"), ("Why missing", "why"),
+]
+
+
+def _futures_curve_chart(block: dict):
+    """A small chart of the root's official prices against contract month (expiry), open
+    positions as larger markers. None with fewer than two priced contracts (one point is not a
+    curve; the table says why the others have no price)."""
+    priced = [r for r in block["rows"] if r["_price"] is not None]
+    if len(priced) < 2:
+        return None
+    import plotly.graph_objects as go
+    priced.sort(key=lambda r: r["_expiry"])
+    fig = go.Figure(go.Scatter(
+        x=[r["_expiry"] for r in priced], y=[r["_price"] for r in priced], mode="lines+markers",
+        text=[r["contract_id"] for r in priced], hovertemplate="%{text}<br>%{y}<extra></extra>",
+        marker=dict(size=[9 if r["_open"] else 5 for r in priced]), name="official"))
+    fig.update_layout(height=180, margin=dict(t=10, b=30, l=50, r=10), showlegend=False,
+                      xaxis=dict(showgrid=False), yaxis=dict(showgrid=False))
+    return dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"maxWidth": "640px"})
+
+
+def _futures_block(block: dict) -> html.Details:
+    rows = [{k: v for k, v in r.items() if not k.startswith("_")} for r in block["rows"]]
+    if block.get("lme"):
+        summary = (f"{block['name']} ({block['root_id']}) · LME curve · {block['currency']} · "
+                   f"{len(rows)} pillar(s) and prompt(s), {block['open']} open prompt(s)")
+    else:
+        summary = (f"{block['name']} ({block['root_id']}) · {block['exchange']} · {block['currency']} · "
+                   f"{len(rows)} contract(s), {block['open']} with a position")
+    if block["missing"]:
+        summary += f" · {block['missing']} without a price"
+    table_id = (FUTURES_CURVE_TABLE_ID_PREFIX + ("lme-" if block.get("lme") else "")
+                + re.sub(r"[^A-Za-z0-9]+", "-", block["root_id"]).strip("-").lower())
+    table = dash_table.DataTable(
+        id=table_id, columns=[{"name": n, "id": i} for n, i in block.get("columns", _FUTURES_COLUMNS)],
+        data=rows,
+        page_size=24, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
+        style_cell_conditional=(
+            [{"if": {"column_id": "why"}, "whiteSpace": "normal", "height": "auto",
+              "minWidth": "240px", "maxWidth": "520px"}]
+            + [{"if": {"column_id": c}, "textAlign": "right"} for c in ("lots", "price", "previous", "change")]),
+        style_data_conditional=[
+            {"if": {"filter_query": "{flag} != ''"}, "backgroundColor": "#fff4f2"},
+            {"if": {"filter_query": "{flag} != ''", "column_id": "price"}, "color": "#b42318", "fontWeight": "600"},
+            {"if": {"filter_query": "{lots} != 'no position' && {lots} != 'flat'"}, "backgroundColor": "#eef4ff"},
+        ])
+    chart = _futures_curve_chart(block)
+    return html.Details(open=True, className="details", children=[
+        html.Summary(summary), table, *([chart] if chart is not None else [])])
+
+
+def futures_curves_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
+                         today: Optional[str] = None):
+    """The Futures curves section: sector headings, one collapsible block per root. None when
+    no commodity future is open on `as_of`, so the section is absent from the tab."""
+    blocks = futures_curve_rows(conn, as_of, status, today=today)
+    if not blocks:
+        return None
+    children: list = [_kicker(
+        f"The official FUTURE_PX of each contract on {as_of} (Bloomberg's price; on a past date its daily "
+        "PX_LAST close) with its source and snap time, against the latest earlier official close. Open "
+        "positions first, lots from the book. A contract with no official price shows \"missing\" and why; "
+        "nothing is estimated here. Expiry \"(est.)\" = the contract master's estimate until Bloomberg's "
+        "date is on file. An LME metal is its curve instead: the cash price, the 3-month and the monthly "
+        "prompts the book needs, and each open prompt's outright, by date.")]
+    sector = None
+    for block in blocks:
+        if block["sector"] != sector:
+            sector = block["sector"]
+            children.append(html.H5((sector or "no sector").capitalize(), style={"margin": "10px 0 4px"}))
+        children.append(_futures_block(block))
+    return _panel(FUTURES_CURVES_TITLE, children)
+
+
 def _unrequestable_words(value) -> str:
     """'; 2 more with no Bloomberg ticker, not counted' from a close_completeness
     `not_requestable` cell (a list of {instrument_id, settle_date, mark_type, reason},
@@ -1024,6 +1547,17 @@ def _unrequestable_words(value) -> str:
     shown = ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
     return (f"; {len(value)} more with no Bloomberg ticker, never asked for and not counted"
             + (f" ({shown})" if shown else ""))
+
+
+def _lme_curve_words(missing) -> str:
+    """'; LME curve LME:CA: cash, 3M not on file' for each LME curve among a close's missing
+    items (close_completeness, Phase 5: one LME_CURVE item per metal, its `detail` naming the
+    anchors missing), '' when none is missing."""
+    if not isinstance(missing, (list, tuple)):
+        return ""
+    parts = [f"LME curve {m.get('instrument_id') or '?'}: {m.get('detail') or 'not on file'}"
+             for m in missing if isinstance(m, dict) and m.get("mark_type") == "LME_CURVE"]
+    return "".join(f"; {p}" for p in parts)
 
 
 def completeness_strip(df: pd.DataFrame) -> html.Div:
@@ -1037,6 +1571,7 @@ def completeness_strip(df: pd.DataFrame) -> html.Div:
     for _, row in df.iterrows():
         complete = bool(row.get("complete"))
         title = (f"{row['as_of_date']}: {row['present']}/{row['needed']} needed marks on file as official closes"
+                 + _lme_curve_words(row.get("missing"))
                  + _unrequestable_words(row.get("not_requestable")))
         squares.append(html.Div(title=title, className="completeness-square",
                                 style={"display": "inline-block", "width": "14px", "height": "14px",
@@ -1051,15 +1586,24 @@ def completeness_strip(df: pd.DataFrame) -> html.Div:
 MarkKey = Tuple[str, str, str]   # (instrument_id, mark_type, settle_date)
 
 _OPEN_LEGS_SQL = """
-SELECT t.trade_id, t.instrument_id, i.asset_class, i.base_ccy, i.quote_ccy, l.ccy, l.amount, l.settle_date
+SELECT t.trade_id, t.product, t.instrument_id, i.asset_class, i.base_ccy, i.quote_ccy, l.ccy, l.amount, l.settle_date
 FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
-WHERE i.asset_class IN ('FX', 'FUTURE') AND t.trade_date <= :as_of AND l.settle_date >= :as_of
+WHERE (i.asset_class IN ('FX', 'FUTURE') OR t.product = 'LME_FWD') AND t.trade_date <= :as_of AND l.settle_date >= :as_of
 """
 
 _OPEN_OPTIONS_SQL = """
 SELECT t.trade_id, i.base_ccy, i.quote_ccy, i.expiry_date, t.quantity
 FROM trades_official t JOIN instruments i USING (instrument_id)
 WHERE t.product = 'FX_OPTION' AND t.trade_date <= :as_of AND i.expiry_date >= :as_of
+"""
+
+# A listed option (the generic listed path, product EQ_OPTION; CMDTY_OPTION for Phase 5) reads
+# Bloomberg's own price of the option (FUTURE_PX at its expiry) and, when not in USD, the SPOT of
+# its currency's USD pair: the two rows the library lists for it (library.compute).
+_OPEN_LISTED_OPTIONS_SQL = """
+SELECT t.trade_id, t.instrument_id, i.quote_ccy, i.expiry_date
+FROM trades_official t JOIN instruments i USING (instrument_id)
+WHERE t.product IN ('EQ_OPTION', 'CMDTY_OPTION') AND t.trade_date <= :as_of AND i.expiry_date >= :as_of
 """
 
 _UNOFFICIAL_ON_FILE_SQL = """
@@ -1127,7 +1671,12 @@ def blocked_by_mark(conn: sqlite3.Connection, as_of: str) -> Dict[MarkKey, dict]
         and for a cross the SPOT of each currency's USD pair (EURSEK reads EURUSD and USDSEK);
       - a futures leg reads the FUTURE_PX at its expiry and, for a contract not in USD, the SPOT
         of its currency's USD pair (`live._usd_pair_name`, the name the library keys it by);
-      - an FX option reads its pair's SPOT, the forward at its expiry and the same USD pairs.
+      - an FX option reads its pair's SPOT, the forward at its expiry and the same USD pairs;
+      - a listed option reads its own FUTURE_PX at expiry and, when not in USD, its currency's
+        USD-pair SPOT (counted, no notional: its face is contracts), and an option on a future
+        its underlying future's FUTURE_PX (the library's role UNDERLYING rows);
+      - an LME forward reads its metal's cash SPOT, the FWD_OUTRIGHT at its prompt and the
+        day's LME curve (an inventory item, mark_type 'LME_CURVE'), all on the root id.
     The pair names come from `data.bloomberg.live.option_spot_pair_names`, the function the
     needs list itself is built from, so a row here matches a row of the inventory.
 
@@ -1144,8 +1693,16 @@ def blocked_by_mark(conn: sqlite3.Connection, as_of: str) -> Dict[MarkKey, dict]
         if ccy and amount:
             entry["notional"][ccy] = entry["notional"].get(ccy, 0.0) + amount
 
-    for trade_id, instrument_id, asset_class, base, quote, ccy, amount, settle in conn.execute(
+    for trade_id, product, instrument_id, asset_class, base, quote, ccy, amount, settle in conn.execute(
             _OPEN_LEGS_SQL, {"as_of": as_of}):
+        if product in _LME_PRODUCTS:
+            # an LME forward (Phase 5) reads the metal's cash price, its outright at its own prompt
+            # and the day's LME curve, all keyed on the root id; its notional is the USD leg
+            shown_ccy, shown = ("USD", _abs_amount(amount)) if ccy == "USD" else ("", 0.0)
+            for key in ((instrument_id, "SPOT", as_of), (instrument_id, "FWD_OUTRIGHT", settle),
+                        (instrument_id, "LME_CURVE", as_of)):
+                add(key, trade_id, shown_ccy, shown)
+            continue
         if asset_class == "FUTURE":
             # the NOTIONAL leg is in the contract's own currency: shown under it, never converted.
             # A non-USD future also reads the SPOT of its currency's USD pair (2026-09-24: its P&L
@@ -1165,6 +1722,17 @@ def blocked_by_mark(conn: sqlite3.Connection, as_of: str) -> Dict[MarkKey, dict]
         add((names[0], "FWD_OUTRIGHT", expiry), trade_id, base, _abs_amount(quantity))
         for name in names:
             add((name, "SPOT", as_of), trade_id, base, _abs_amount(quantity))
+    for trade_id, instrument_id, quote, expiry in conn.execute(_OPEN_LISTED_OPTIONS_SQL, {"as_of": as_of}):
+        # counted, with no notional: a listed option's face is contracts, not an amount of money
+        add((instrument_id, "FUTURE_PX", expiry), trade_id, "", 0.0)
+        if quote and quote != "USD":
+            add((_usd_pair_name(quote), "SPOT", as_of), trade_id, "", 0.0)
+    # an option on a future also reads its underlying future's price (its Greeks; Phase 5): the
+    # library's role UNDERLYING rows name which future, the one rule for it (library.compute)
+    from data.bloomberg import library
+    for r in library.needed_on(conn, as_of, include_unrequestable=True):
+        if r.get("role") == getattr(library, "ROLE_UNDERLYING", "UNDERLYING") and r["kind"] == "FUTURE_PX":
+            add((r["key"], "FUTURE_PX", r["settle_date"]), r["trade_id"], "", 0.0)
     return out
 
 
@@ -1215,6 +1783,33 @@ def pull_note(status: Optional[dict], as_of: str, is_past: bool, backfill: Optio
     return ""
 
 
+def lme_missing_reasons(status: Optional[dict], as_of: str) -> Dict[str, List[str]]:
+    """{root id: ["LMCADS03 Comdty 2026-12-24: reason", ...]} from the last pull's
+    `status["lme"]["missing"]`, only when that pull was for `as_of` (as `last_pull_reasons`)."""
+    if _pull_date(status) != as_of:
+        return {}
+    block = status.get("lme") if isinstance(status, dict) else None
+    items = block.get("missing") if isinstance(block, dict) else None
+    out: Dict[str, List[str]] = {}
+    for item in items if isinstance(items, (list, tuple)) else []:
+        if isinstance(item, dict) and item.get("root_id"):
+            out.setdefault(str(item["root_id"]), []).append(_lme_missing_line(item, with_root=False))
+    return out
+
+
+def lme_curve_gap_words(conn: sqlite3.Connection, root_id: str, as_of: str, detail: Optional[str] = None) -> str:
+    """What an incomplete LME curve lacks: the close's own `detail` ("cash, 3M not on file")
+    when it has one, else `inventory.lme_curve_status` read now ("3M not on file")."""
+    if detail:
+        return str(detail)
+    try:
+        from data.bloomberg.inventory import lme_curve_status
+        state = lme_curve_status(conn, as_of, root_id, today=max(as_of, _book_today_iso()))
+    except Exception:  # noqa: BLE001 -- say it cannot be told rather than take the panel down
+        return "curve not complete (which pillar could not be read)"
+    return (", ".join(state["missing"]) + " not on file") if state.get("missing") else "curve not complete"
+
+
 def missing_rows(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None) -> Tuple[int, List[dict]]:
     """(marks the book needs on `as_of`, one row per needed mark with no OFFICIAL mark),
     rows sorted by trades blocked, largest first. The needs list is `ui.tabs.header
@@ -1228,17 +1823,24 @@ def missing_rows(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = 
     reasons = last_pull_reasons(status, as_of)
     asked = _pull_date(status) == as_of and bool((status or {}).get("connected"))
     rows = []
+    lme_reasons = lme_missing_reasons(status, as_of)
     for m in missing:
         key = (m["instrument_id"], m["mark_type"], m["settle_date"])
         entry = blocked.get(key, {"trades": set(), "notional": {}})
         instead = on_file.get(key)
+        on_file_words = ("nothing" if instead is None else
+                         f"{source_label(instead[1]).lower()} {_fmt_mark(instead[0])} (not official)")
+        reason = reasons.get(key, "not requested by the last pull" if asked else "")
+        if key[1] == "LME_CURVE":
+            # one item per metal (Phase 5): complete when its cash and 3M are official
+            on_file_words = lme_curve_gap_words(conn, key[0], as_of, m.get("detail"))
+            reason = "; ".join(lme_reasons.get(key[0], [])) or reason
         rows.append({
             "instrument_id": key[0], "mark_type": key[1], "settle_date": key[2],
-            "on_file": "nothing" if instead is None else
-                       f"{source_label(instead[1]).lower()} {_fmt_mark(instead[0])} (not official)",
+            "on_file": on_file_words,
             "trades_blocked": len(entry["trades"]),
             "notional_blocked": notional_words(entry["notional"]),
-            "reason": reasons.get(key, "not requested by the last pull" if asked else ""),
+            "reason": reason,
         })
     rows.sort(key=lambda r: (-r["trades_blocked"], r["instrument_id"], r["mark_type"], r["settle_date"]))
     return needed, rows
@@ -1534,6 +2136,54 @@ def library_rows(conn: sqlite3.Connection, as_of: str) -> Tuple[List[dict], List
     return asked, gaps
 
 
+LIBRARY_KINDS_TABLE_ID = "market-data-library-kinds-table"
+_LME_PRODUCTS = ("LME_FWD",)
+_OPTION_PRODUCTS = ("EQ_OPTION", "CMDTY_OPTION")
+
+
+def library_need_words(row: dict) -> str:
+    """What a library row is for, in plain words, from its kind, role and product (the
+    library's own fields; Phase 5 adds LME_CURVE and the role UNDERLYING)."""
+    kind, role, product = row.get("kind"), row.get("role"), row.get("product")
+    if kind == "LME_CURVE":
+        return "LME curve (cash, 3M, monthlies)"
+    if kind == "SPOT":
+        if product in _LME_PRODUCTS:
+            return "LME cash price"
+        return "USD conversion spot" if role == "CONVERSION" else "FX spot"
+    if kind == "FWD_OUTRIGHT":
+        return "LME prompt outright (read off the LME curve)" if product in _LME_PRODUCTS else "FX forward outright"
+    if kind == "FUTURE_PX":
+        if role == "UNDERLYING":
+            return "option's underlying future"
+        return "option price" if product in _OPTION_PRODUCTS else "futures price"
+    if kind == "CONTRACT_DATES":
+        return "option expiry date" if product in _OPTION_PRODUCTS else "contract dates (last trade, first notice)"
+    if kind == "OIS_CURVE":
+        return "OIS discount curve (option Greeks)"
+    if kind == "VOL_SMILE":
+        return "FX vol smile"
+    return str(kind or "?")
+
+
+def library_kind_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+    """The library's needs in force on `as_of` counted by what they are for: [{what, items
+    (distinct keys), trades, gaps (items with no ticker to ask with)}], largest first. Every
+    row the library lists, requestable or not."""
+    from data.bloomberg import library
+    groups: Dict[str, dict] = {}
+    for r in library.needed_on(conn, as_of, include_unrequestable=True):
+        g = groups.setdefault(library_need_words(r), {"items": set(), "trades": set(), "gaps": set()})
+        item = (r.get("key"), r.get("settle_date"))
+        g["items"].add(item)
+        g["trades"].add(r.get("trade_id"))
+        if not r.get("requestable", True):
+            g["gaps"].add(item)
+    rows = [{"what": what, "items": len(g["items"]), "trades": len(g["trades"]), "gaps": len(g["gaps"]),
+             "flag": "gap" if g["gaps"] else ""} for what, g in groups.items()]
+    return sorted(rows, key=lambda r: (-r["items"], r["what"]))
+
+
 def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     """The Bloomberg library (data/bloomberg/library.py, user decision 2026-09-21): every
     Bloomberg security a pull on `as_of` asks for, what it is for, how many trades need it
@@ -1557,6 +2207,10 @@ def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
             kicker += (f" The {len(gaps)} flagged row(s) at the top are gaps: the book needs them but has no "
                        "verified Bloomberg ticker to ask with, so nothing is asked and the reason is under Used for.")
         body = [_kicker(kicker),
+                _panel_table(LIBRARY_KINDS_TABLE_ID,
+                             [("What it is for", "what"), ("Items", "items"), ("Trades", "trades"),
+                              ("With no ticker", "gaps")],
+                             library_kind_rows(conn, as_of), numeric=("items", "trades", "gaps")),
                 _panel_table(LIBRARY_TABLE_ID,
                              [("Ticker", "ticker"), ("Field", "field"), ("Used for", "used_for"),
                               ("Trades", "trades"), ("Needed until", "needed_until"), ("In the library since", "added_at")],
@@ -1820,6 +2474,9 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         html.Div(id=SUSPECT_PANEL_ID),
         html.H4("Spot and forward curve for the selected pair"),
         html.Div(id=BODY_ID),
+        # the commodity book's futures curves (Phase 3): filled by `_update_body`, empty when
+        # no commodity future is open on the date
+        html.Div(id=FUTURES_CURVES_PANEL_ID, style={"marginTop": "16px"}),
         html.H4("Close completeness"),
         html.Div(id="market-data-completeness-container"),
         html.Div(id=PAST_CLOSES_PANEL_ID, style={"marginTop": "16px"}),
@@ -1886,6 +2543,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(MISSING_PANEL_ID, "children"),
         Output(SUSPECT_PANEL_ID, "children"),
         Output(PAST_CLOSES_PANEL_ID, "children"),
+        Output(FUTURES_CURVES_PANEL_ID, "children"),
         Input(DATE_PICKER_ID, "date"),
         Input(PAIR_DROPDOWN_ID, "value"),
         Input(REFRESH_ID, "n_intervals"),
@@ -1902,14 +2560,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         blank = html.Div()
         if not as_of_date:
             return (message_box("No as-of date available."), blank, "Bloomberg: status unknown", pair,
-                    blank, blank, blank)
+                    blank, blank, blank, blank)
 
         db_path = get_db_path()
         try:
             conn = _connect_readonly(db_path)
         except sqlite3.OperationalError as exc:
             return (message_box(f"Database not available ({exc})."), blank, "Bloomberg: status unknown", pair,
-                    blank, blank, blank)
+                    blank, blank, blank, blank)
 
         try:
             try:
@@ -1933,10 +2591,12 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 strip = message_box(f"Completeness not available yet ({exc}).")
 
             missing, suspect, past_closes = whole_book_panels(conn, as_of_date, feed_status, header_as_of)
+            futures = safe_panel(FUTURES_CURVES_TITLE,
+                                 lambda: futures_curves_panel(conn, as_of_date, feed_status)) or blank
         finally:
             conn.close()
 
-        return body, strip, status_block(feed_status), pair, missing, suspect, past_closes
+        return body, strip, status_block(feed_status), pair, missing, suspect, past_closes, futures
 
     guard = PullGuard()
 

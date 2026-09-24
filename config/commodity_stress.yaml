@@ -1,0 +1,172 @@
+# Commodity stress scenarios for Jason's relative-value book (commodity-stress lane,
+# engine/stress/, read by engine/stress/scenarios.py::load_scenarios). Plain data: edit,
+# add or delete scenarios freely; the Risk tab shows them in the order written here.
+#
+# Every move is a FRACTION: -0.05 = -5 %, 0.10 = +10 %. A commodity move is a move in the
+# futures price; an FX move is the currency against the USD (+ = the currency strengthens).
+# The stress is first order, on each position's own delta from curve-positions, never re-marked:
+#     delta lots x multiplier x price x move x S   (= the position's USD delta x move)
+# delta lots = lots for a future or an LME forward, lots x the share still to price for a
+# monthly-average contract inside its pricing month, lots x the option's official DELTA for an
+# option on a future (priced at its underlying future). Options' gamma is not in it.
+# A position the scenario touches that has no USD delta (no price, no spot or an unpriced
+# option on the day) is named under "missing" with its reason and left out of the total,
+# never counted as zero. A move of exactly 0 needs no price: it is zero whatever the price.
+#
+# Names used below must be in config/contracts.csv (the loader refuses a typo, because a
+# misspelt sector would otherwise move nothing):
+#   sector     energy, metals, agriculture, ferrous, chemicals, freight
+#   subsector  crude_oil, gasoline, gasoil, jet_kero, fuel_oil, natural_gas, copper, nickel,
+#              iron_ore, soybean, soymeal, soyoil, palm_oil, corn, wheat, ... (column "subsector")
+#   root       the contract root, e.g. NYMEX:CL, ICE:B, SHFE:CU, LME:NI, ICE:TFM
+#   exchange   SHFE, INE, DCE, ZCE, GFEX, LME, COMEX, NYMEX, ICE, CBOT, ...
+# A spread leg or a curve's select can also name the book's own spreads (spreads-engine, open
+# spreads only; the move applies to each named contract's whole position on the curve):
+#   spread     a spread id as the Spreads tab shows it, e.g. SPREAD-T123, BUNDLE-<name>
+#   template   a template id of config/spreads/, e.g. proc.us.crack_321
+#   family     calendar, processing, substitution, benchmark
+#
+# Kinds:
+#   outright  per-level maps of moves: root, subsector, exchange, sector, and "all" for the
+#             whole book. When several levels name the same position the most specific wins:
+#             spread > root > template > subsector > family > exchange > sector > all.
+#   curve     front and back moves, linear in months to expiry between front_months and
+#             back_months (months = calendar days / 30.4375 from the as-of date to the
+#             contract's expiry): a contract at or inside front_months takes "front", at or
+#             beyond back_months takes "back". Optional "select" limits it to part of the book.
+#   spread    two or more legs, each a "select" (keys spread / template / family / root /
+#             subsector / exchange / sector, each a list; several keys on one leg must all
+#             match) and a "move". A position
+#             matched by two legs takes the more specific leg; two legs equally specific with
+#             different moves leave it under "missing" as ambiguous.
+#   fx        currency moves against the USD, applied to the non-USD positions: the P&L they
+#             hold in that currency (curve-positions' currency_exposure, options included) is
+#             the scenario's P&L; the change in their USD delta is reported beside it (it moves
+#             the exposure, not the P&L, since a margined future holds no notional cash). A CNH move
+#             applies to the CNY futures when no CNY move is given (onshore and offshore
+#             treated as one for the futures' conversion).
+#   replay    a past window, start close to end close: each position takes the historical %
+#             move of the contract that was at the same distance to expiry on the start close,
+#             held to the end close without a roll, from the research app's settlement history
+#             (risk-history; COMMODITY_HISTORY_DB, else ../Commodity Dashboard/var/rv.sqlite). With no history for a
+#             commodity it is named under "missing"; with no history at all the scenario is
+#             n/a with the reason. Nothing is typed in here: the moves are the history's.
+
+curve_defaults:
+  front_months: 1     # contracts expiring within a month take the full front move
+  back_months: 12     # a year out and beyond take the full back move
+
+scenarios:
+
+  # ---- Whole book, every sector at once ------------------------------------------------
+  - name: All commodities -5%
+    kind: outright
+    all: -0.05
+    description: Every commodity future down 5 %. A broad risk-off day; a well-hedged RV book should lose little.
+
+  - name: All commodities +5%
+    kind: outright
+    all: 0.05
+    description: Every commodity future up 5 %. A broad reflation / dollar-down day.
+
+  - name: All commodities -10%
+    kind: outright
+    all: -0.10
+    description: Every commodity future down 10 %. A demand shock of the March 2020 kind in a few days.
+
+  - name: All commodities +10%
+    kind: outright
+    all: 0.10
+    description: Every commodity future up 10 %. A supply shock across the complex (early March 2022).
+
+  # ---- Sector shocks ----------------------------------------------------------------------
+  - name: Energy -20%
+    kind: outright
+    sector:
+      energy: -0.20
+    description: Crude, products, gas, coal and power down 20 %. An OPEC price war or a demand collapse (March 2020, late 2014).
+
+  - name: Metals -10%
+    kind: outright
+    sector:
+      metals: -0.10
+    description: Base and precious metals down 10 %. A China growth scare or a dollar spike.
+
+  - name: Agriculture -8%
+    kind: outright
+    sector:
+      agriculture: -0.08
+    description: Grains, oilseeds, softs and livestock down 8 %. A big crop or a WASDE surprise.
+
+  # ---- Curve shape --------------------------------------------------------------------------
+  - name: Curve steepen (front -5%)
+    kind: curve
+    front: -0.05
+    back: 0.0
+    description: Contango deepens. Front months down 5 %, a year out unchanged, linear between. Hurts a long-front / short-back calendar spread.
+
+  - name: Curve flatten (front +5%)
+    kind: curve
+    front: 0.05
+    back: 0.0
+    description: Backwardation / a squeeze in the prompt. Front months up 5 %, a year out unchanged, linear between. Hurts a short-front / long-back calendar spread.
+
+  # ---- Spreads --------------------------------------------------------------------------------
+  - name: Crack collapse (products -15%)
+    kind: spread
+    legs:
+      - select: {subsector: [gasoline, gasoil, jet_kero, naphtha, fuel_oil]}
+        move: -0.15
+      - select: {subsector: [crude_oil]}
+        move: 0.0
+    description: Refined products down 15 % with crude unchanged. Refining margins collapse (the 2020 demand shock, the late-2023 diesel unwind).
+
+  - name: Crush collapse (meal and oil -8%)
+    kind: spread
+    legs:
+      - select: {subsector: [soymeal, soyoil]}
+        move: -0.08
+      - select: {subsector: [soybean]}
+        move: 0.0
+    description: Soymeal and soyoil down 8 % with soybeans unchanged. The crush margin collapses (over-crushing, a meal glut).
+
+  - name: China against West (China -5%)
+    kind: spread
+    legs:
+      - select: {exchange: [SHFE, INE, DCE, ZCE, GFEX]}
+        move: -0.05
+      - select: {exchange: [LME, COMEX, NYMEX, ICE, ICEUS, CBOT, CME, MGEX, SGX, EEX, EURONEXT, GME, BMD, OSE, TOCOM, HKEX]}
+        move: 0.0
+    description: Chinese exchanges down 5 % in their own currency, Western exchanges unchanged. The SHFE / LME arbitrage and every China-against-West spread dislocate (a stimulus disappointment, an import quota or VAT change).
+
+  # ---- FX on the non-USD futures ---------------------------------------------------------------
+  - name: CNY -5%
+    kind: fx
+    moves:
+      CNY: -0.05
+    description: The renminbi 5 % weaker against the dollar. Revalues the P&L the SHFE / INE / DCE / ZCE / GFEX futures hold in CNY.
+
+  - name: MYR -5%
+    kind: fx
+    moves:
+      MYR: -0.05
+    description: The ringgit 5 % weaker against the dollar. Revalues the P&L the Bursa palm oil futures hold in MYR.
+
+  # ---- Historical replays ----------------------------------------------------------------------
+  - name: Negative WTI (2020-04-20)
+    kind: replay
+    start: 2020-04-17
+    end: 2020-04-20
+    description: The May 2020 WTI contract settled at -37.63 on its second-to-last day, from 18.27 the Friday before, with Cushing storage full. Replays the Friday-to-Monday move of every commodity at the same distance to expiry.
+
+  - name: LME nickel squeeze (2022-03-07/08)
+    kind: replay
+    start: 2022-03-04
+    end: 2022-03-08
+    description: LME nickel more than doubled over two days on a short squeeze after Russia's invasion of Ukraine; the LME suspended trading and cancelled the 8 March trades. Replays the 4-to-8 March move (the history's own settlements, so the cancelled trades are whatever the exchange published).
+
+  - name: TTF August 2022
+    kind: replay
+    start: 2022-07-29
+    end: 2022-08-26
+    description: Dutch TTF gas roughly doubled to its record above 300 EUR/MWh as Russian pipeline flows fell and Europe raced to fill storage. Replays the end-July to 26 August move.

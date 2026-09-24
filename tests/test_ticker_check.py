@@ -12,6 +12,7 @@ import pytest
 
 from data.bloomberg import ticker_check as tc
 from data.contracts import load_roots
+from engine import lme as _lme
 
 NOW = datetime(2026, 9, 24, 10, 0, 0)
 AS_OF = date(2026, 9, 24)
@@ -22,7 +23,8 @@ def _root(**kw):
     which roots the file holds or on its current guesses."""
     base = next(iter(load_roots().values()))
     defaults = dict(sector="energy", subsector="", country="US", bbg_yellow_key="Comdty", bbg_verified=False,
-                    active_months=tuple(range(1, 13)), delivery="physical", status="active", notes="")
+                    active_months=tuple(range(1, 13)), delivery="physical", status="active", notes="",
+                    option_style="", option_lead_months=None)
     defaults.update(kw)
     return dataclasses.replace(base, **defaults)
 
@@ -519,3 +521,337 @@ def test_a_root_starting_with_a_digit_is_its_own_front_contract():
                              "FUT_VAL_PT": 1000.0, "FUT_CUR_GEN_TICKER": "7HZ6", "PX_LAST": 700.0}}
     assert _one(_check([root], FakeClient(canned=canned)), "NYMEX:7H").verdict == tc.OK
     assert tc.parse_search_security("7H1<cmdty>", "Generic 1st '7H' Future") == ("7H", "generic")
+
+
+# --------------------------------------------------------------------------- Phase 5: LME curve tickers
+
+CA = load_roots()["LME:CA"]                                       # a real LME forward metal (engine.lme checks it)
+CA_3M = _lme.three_month_date(AS_OF).isoformat()                 # 2026-12-24
+CA_MONTHLY = _lme.monthly_prompt(2026, 10).isoformat()           # 2026-10-21, the first third Wednesday after cash
+LME_CANNED = {
+    "LMCADY Comdty": {"NAME": "LME COPPER SPOT ($)", "CRNCY": "USD", "PX_LAST": 9800.0,
+                      "FUT_DLV_DT_LAST": _lme.cash_date(AS_OF)},
+    "LMCADS03 Comdty": {"NAME": "LME COPPER 3MO ($)", "CRNCY": "USD", "PX_LAST": 9850.0, "FUT_DLV_DT_LAST": CA_3M},
+    "LPV6 Comdty": {"NAME": "LME COPPER FUTURE Oct26", "CRNCY": "USD", "PX_LAST": 9820.0,
+                    "FUT_DLV_DT_LAST": CA_MONTHLY},
+}
+
+
+def _lme_check(canned=None, security_errors=None):
+    client = FakeClient(canned=dict(LME_CANNED if canned is None else canned), security_errors=security_errors or {},
+                        field_errors={})
+    return tc.run_check(client, tc.plan([CA], parts=["lme"], today=AS_OF)), client
+
+
+def test_lme_curve_tickers_ok_in_one_request():
+    result, client = _lme_check()
+    assert client.reference_calls == [(["LMCADY Comdty", "LMCADS03 Comdty", "LPV6 Comdty"], list(tc.lme_fields()))]
+    assert "FUT_DLV_DT_LAST" in tc.lme_fields()
+    metal = result.lme[0]
+    assert metal.verdict == tc.OK, [(p.label, p.findings) for p in metal.pillars]
+    assert [p.bbg_date for p in metal.pillars] == ["2026-09-28", CA_3M, CA_MONTHLY]
+    assert result.roots == [] and tc.worksheet_rows(result) == []      # --lme alone: no root check, no rows
+    assert not result.needs_attention
+
+
+def test_lme_ticker_bloomberg_does_not_know_is_not_found_for_the_housekeeper():
+    result, _client = _lme_check(security_errors={"LMCADS03 Comdty": "Unknown/Invalid security [nid:231]"})
+    metal = result.lme[0]
+    three = next(p for p in metal.pillars if p.kind == "3M")
+    assert metal.verdict == three.verdict == tc.NOT_FOUND
+    assert "Unknown/Invalid security [nid:231]" in three.findings[0].evidence          # Bloomberg's own words
+    assert three.findings[0].owner == "lme-forwards" and "three_month_ticker" in three.findings[0].action
+    assert tc.worksheet_rows(result) == []                                              # code, not the CSV
+    text = tc.render_text(result, now=NOW, paths={})
+    assert "For the housekeeper" in text and "lme-forwards: LME:CA 3M [LMCADS03 Comdty]" in text
+
+
+def test_lme_monthly_prompt_off_our_third_wednesday_is_a_date_mismatch():
+    canned = dict(LME_CANNED)
+    canned["LPV6 Comdty"] = dict(LME_CANNED["LPV6 Comdty"], FUT_DLV_DT_LAST="2026-10-22")
+    result, _client = _lme_check(canned=canned)
+    monthly = next(p for p in result.lme[0].pillars if p.kind == "MONTHLY")
+    assert monthly.verdict == tc.DATE_MISMATCH
+    assert "2026-10-22" in monthly.findings[0].evidence and CA_MONTHLY in monthly.findings[0].evidence
+    assert "monthly_prompt" in monthly.findings[0].action
+
+
+def test_lme_3m_not_rolled_yet_is_a_note_and_a_non_usd_answer_is_a_currency_mismatch():
+    canned = dict(LME_CANNED)
+    canned["LMCADS03 Comdty"] = dict(LME_CANNED["LMCADS03 Comdty"], FUT_DLV_DT_LAST="2026-12-23")   # yesterday's 3M
+    canned["LMCADY Comdty"] = dict(LME_CANNED["LMCADY Comdty"], CRNCY="GBP")
+    result, _client = _lme_check(canned=canned)
+    pillars = {p.kind: p for p in result.lme[0].pillars}
+    assert pillars["3M"].verdict == tc.OK and "not rolled" in pillars["3M"].notes[0]
+    assert pillars["CASH"].verdict == tc.CURRENCY_MISMATCH
+
+
+# --------------------------------------------------------------------------- Phase 5: options on futures
+
+CL_OPT = dataclasses.replace(CL, option_style="american", option_lead_months=1)
+OPTION_CANNED = {
+    "CLX6C 70 Comdty": {"NAME": "CLX6C 70", "CRNCY": "USD", "PX_LAST": 3.2, "OPT_EXPIRE_DT": date(2026, 10, 15),
+                        "OPT_EXER_TYP": "American", "OPT_STRIKE_PX": 70.0, "OPT_UNDL_TICKER": "CLX6 Comdty",
+                        "OPT_UNDL_PX": 72.15},
+}
+CHAIN_OURS = ["CLX6C 60 Comdty", "CLX6C 70 Comdty", "CLX6C 80 Comdty", "CLX6P 70 Comdty", "CLZ6C 70 Comdty"]
+
+
+class ChainClient(FakeClient):
+    """FakeClient with the bulk OPT_CHAIN request: ``chains`` maps a generic to its option tickers."""
+
+    def __init__(self, chains, **kw):
+        super().__init__(**kw)
+        self.chains = chains
+        self.bulk_calls = []
+
+    def bulk(self, securities, field_name):
+        self.bulk_calls.append((list(securities), field_name))
+        out = {}
+        for s in securities:
+            if s in self.security_errors:
+                out[s] = tc.Answer(s, {}, security_error=self.security_errors[s])
+            elif s in self.chains:
+                rows = [{"Security Description": t} for t in self.chains[s]]
+                out[s] = tc.Answer(s, {field_name: rows} if rows else {},
+                                   field_errors={} if rows else {field_name: "Field not applicable to security"})
+        return out
+
+
+def _options_check(chain, canned, root=CL_OPT, security_errors=None):
+    client = ChainClient({"CL1 Comdty": chain}, canned=canned, security_errors=security_errors or {},
+                         field_errors={})
+    result = tc.run_check(client, tc.plan([root], parts=["options"], today=AS_OF))
+    return result.options[0], result, client
+
+
+def test_option_chain_in_our_form_is_ok():
+    o, result, client = _options_check(CHAIN_OURS, OPTION_CANNED)
+    assert client.bulk_calls == [(["CL1 Comdty"], "OPT_CHAIN")]
+    assert o.picked == "CLX6C 70 Comdty" and o.ours == ""        # nearest month, calls, middle strike; same form
+    assert client.reference_calls == [(["CLX6C 70 Comdty"], list(tc.OPTION_FIELDS))]
+    assert o.verdict == tc.OK, [f.evidence for f in o.findings]
+    assert (o.bbg_style, o.bbg_lead, o.canonical) == ("AMERICAN", 1, "CLX26C 70 Comdty")
+    assert o.our_expiry and o.bbg_expiry == "2026-10-15"
+    assert tc.worksheet_rows(result) == []
+
+
+def test_option_chain_in_another_form_that_bloomberg_refuses_in_ours_is_a_form_mismatch():
+    chain = ["CLX6C 60.00 Comdty", "CLX6C 70.00 Comdty", "CLX6C 80.00 Comdty"]
+    canned = {"CLX6C 70.00 Comdty": OPTION_CANNED["CLX6C 70 Comdty"]}
+    o, result, client = _options_check(chain, canned,
+                                       security_errors={"CLX6C 70 Comdty": "Unknown/Invalid security [nid:231]"})
+    assert (o.picked, o.ours) == ("CLX6C 70.00 Comdty", "CLX6C 70 Comdty")
+    assert client.reference_calls == [(["CLX6C 70.00 Comdty", "CLX6C 70 Comdty"], list(tc.OPTION_FIELDS))]
+    assert o.verdict == tc.FORM_MISMATCH
+    f = next(f for f in o.findings if f.verdict == tc.FORM_MISMATCH)
+    assert "Unknown/Invalid security [nid:231]" in f.evidence and f.owner == "contract-master"
+    assert tc.worksheet_rows(result) == []                        # a form is code: a housekeeper line instead
+    assert any(owner == "contract-master" for owner, _s, _f in result.code_findings())
+
+
+def test_option_form_that_differs_but_resolves_to_the_same_option_is_a_note():
+    canned = {"CLX6C 70.00 Comdty": OPTION_CANNED["CLX6C 70 Comdty"],
+              "CLX6C 70 Comdty": OPTION_CANNED["CLX6C 70 Comdty"]}
+    o, _result, _client = _options_check(["CLX6C 70.00 Comdty"], canned)
+    assert o.verdict == tc.OK and "resolves to the same option" in " ".join(o.notes)
+
+
+def test_option_style_and_lead_mismatches_are_worksheet_rows():
+    canned = {"CLX6C 70 Comdty": dict(OPTION_CANNED["CLX6C 70 Comdty"], OPT_EXER_TYP="European",
+                                      OPT_EXPIRE_DT=date(2026, 9, 17))}      # two months before the Nov future
+    o, result, _client = _options_check(CHAIN_OURS, canned)
+    assert {f.verdict for f in o.findings} == {tc.STYLE_MISMATCH, tc.LEAD_MISMATCH}
+    rows = {(w["field"], w["current"], w["suggested"], w["apply"]) for w in tc.worksheet_rows(result)}
+    assert rows == {("option_style", "american", "european", ""), ("option_lead_months", "1", "2", "")}
+
+
+def test_no_option_chain_is_no_options_with_bloombergs_words():
+    o, _result, client = _options_check([], OPTION_CANNED)
+    assert o.verdict == tc.NO_OPTIONS and "Field not applicable to security" in o.findings[0].evidence
+    assert client.reference_calls == []                            # no option to ask
+
+
+# --------------------------------------------------------------------------- Phase 5: the book's options and LME
+
+def _phase5_db(tmp_path):
+    from data.ingest.schema import connect, create_schema
+    path = tmp_path / "risk.db"
+    conn = connect(path)
+    create_schema(conn)
+    instrument = ("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                  "bbg_ticker, expiry_date) VALUES (?, ?, ?, 'USD', ?, 0, ?, ?)")
+    conn.execute(instrument, ("CLX26C 70 Comdty", "CMDTY_OPTION", "NYMEX:CL", 1000, "CLX6C 70 Comdty", "2026-11-30"))
+    conn.execute(instrument, ("LME:CA", "LME_FWD", "LME:CA", 1, "LMCADY Comdty", "9999-12-31"))
+    trade = ("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, "
+             "account, counterparty, strategy, trader, description) VALUES (?, 'XLSX', ?, ?, ?, ?, ?, ?, 'A', 'C', '', "
+             "'J', '')")
+    leg = ("INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, rate, "
+           "settles_cash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    conn.execute(trade, ("O1", "CLX26C 70 Comdty", "CMDTY_OPTION", "O1", "2026-09-01", 2.0, 320.0))   # 100x off
+    conn.execute(leg, ("O1", 1, "NOTIONAL", "USD", 640000.0, "2026-09-01", "2026-11-30", 320.0, 0))
+    for tid, prompt in (("L1", CA_MONTHLY), ("L2", "2026-11-04"), ("L3", "2031-12-17"), ("L4", "2026-10-24")):
+        conn.execute(trade, (tid, "LME:CA", "LME_FWD", tid, "2026-09-22", 50.0, 9750.0))
+        conn.execute(leg, (tid, 1, "FX_NEAR", "LME:CA", 50.0, "2026-09-22", prompt, 9750.0, 0))
+        conn.execute(leg, (tid, 2, "FX_NEAR", "USD", -487500.0, "2026-09-22", prompt, 9750.0, 1))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_book_mode_checks_the_books_options_and_places_its_lme_tickets(tmp_path):
+    db = _phase5_db(tmp_path)
+    before = db.read_bytes()
+    book = tc.load_book(db, AS_OF, {CL_OPT.root_id: CL_OPT, CA.root_id: CA})
+    assert [o.instrument_id for o in book.options] == ["CLX26C 70 Comdty"] and book.options[0].kind == "CMDTY_OPTION"
+    assert [t.trade_id for t in book.lme] == ["L1", "L4", "L2", "L3"]            # by prompt
+    client = FakeClient(canned={**LME_CANNED, **OPTION_CANNED}, security_errors={}, field_errors={})
+    the_plan = tc.plan([CL_OPT, CA], book=book, book_only=True, parts=["lme"], today=AS_OF)
+    assert the_plan.book_option_tickers == ["CLX6C 70 Comdty"] and [m.root.root_id for m in the_plan.lme] == ["LME:CA"]
+    result = tc.run_check(client, the_plan)
+    assert (["CLX6C 70 Comdty"], list(tc.BOOK_OPTION_FIELDS)) in client.reference_calls
+    opt = result.book_options[0]
+    assert {f.verdict for f in opt.findings} == {tc.SCALE_FLAG, tc.DATE_MISMATCH}
+    assert "about 100 times" in next(f.evidence for f in opt.findings if f.verdict == tc.SCALE_FLAG)
+    assert "2026-11-30" in next(f.evidence for f in opt.findings if f.verdict == tc.DATE_MISMATCH)
+    tickets = {t.ticket.trade_id: t for t in result.book_lme}
+    assert tickets["L1"].verdict == tc.OK and "on the 2026-10 pillar" in tickets["L1"].position
+    assert tickets["L2"].verdict == tc.OK and "interpolated" in tickets["L2"].position
+    assert tickets["L3"].verdict == tc.OFF_CURVE
+    assert tickets["L4"].verdict == tc.NOT_A_PROMPT                  # a Saturday
+    text = tc.render_text(result, now=NOW, paths={})
+    assert "Options on futures: 1 open, 1 flagged" in text and "LME tickets: 4 open, 2 flagged" in text
+    assert db.read_bytes() == before                                 # read-only
+
+
+def test_book_lme_ticket_without_a_priced_curve_is_no_curve(tmp_path):
+    db = _phase5_db(tmp_path)
+    book = tc.load_book(db, AS_OF, {CL_OPT.root_id: CL_OPT, CA.root_id: CA})
+    refused = {"LMCADY Comdty": "Security not authorized", "LMCADS03 Comdty": "Security not authorized"}
+    client = ChainClient({"CL1 Comdty": CHAIN_OURS}, canned=OPTION_CANNED, security_errors=refused, field_errors={})
+    result = tc.run_check(client, tc.plan([CL_OPT, CA], book=book, book_only=True, parts=["options"], today=AS_OF))
+    assert [m.root.root_id for m in result.lme] == ["LME:CA"]        # asked for the book's tickets whatever the parts
+    assert tc.NO_CURVE in {t.verdict for t in result.book_lme}
+
+
+# --------------------------------------------------------------------------- Phase 5: counts and the command line
+
+def test_dry_run_counts_the_lme_and_option_asks(tmp_path, capsys):
+    factory = _factory(FakeClient())
+    code = tc.main(["--dry-run", "--lme", "--options", "--out", str(tmp_path)], client_factory=factory, now=NOW,
+                   as_of=AS_OF, roots=[CL_OPT, CA, CORN_BAD])
+    out = capsys.readouterr().out
+    assert code == 0 and factory.calls == []
+    assert "contract root" not in out                                 # the root check is not run
+    assert "LME curve on 2026-09-24: 1 metal, 3 tickers (cash, 3M and the monthly 2026-10 of each)" in out
+    assert "1 option chain (OPT_CHAIN on the generic front future) in 1 request of up to 10" in out
+    assert "4 securities in 2 ReferenceDataRequests (up to 50 each), then up to 2 option tickers in up to 1 more" in out
+    code = tc.main(["--dry-run", "--out", str(tmp_path)], client_factory=factory, now=NOW, as_of=AS_OF,
+                   roots=[CL_OPT, CA, CORN_BAD])
+    out = capsys.readouterr().out
+    assert "3 contract roots selected" in out                          # a plain run: every part
+    assert "7 securities in 3 ReferenceDataRequests" in out            # 3 generics + 3 LME + 1 chain
+
+
+def test_plan_refuses_an_unknown_part():
+    with pytest.raises(ValueError, match="unknown part"):
+        tc.plan([CL], parts=["rates"])
+
+
+def test_full_run_writes_option_rows_and_housekeeper_lines(tmp_path, capsys):
+    canned = {**CANNED, **LME_CANNED,
+              "CLX6C 70 Comdty": dict(OPTION_CANNED["CLX6C 70 Comdty"], OPT_EXER_TYP="European")}
+    client = ChainClient({"CL1 Comdty": CHAIN_OURS}, canned=canned,
+                         security_errors={"LMCADS03 Comdty": "Unknown/Invalid security"})
+    out_dir = tmp_path / "reports"
+    code = tc.main(["--out", str(out_dir)], client_factory=_factory(client), now=NOW, as_of=AS_OF, roots=[CL_OPT, CA])
+    assert code == 1
+    printed = capsys.readouterr().out
+    assert "Option roots: 1 STYLE_MISMATCH." in printed and "LME metals: 1 NOT_FOUND." in printed
+    assert "For the housekeeper: 1 finding" in printed
+    with open(out_dir / "contract_fixes_20260924_100000.csv", encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert ("NYMEX:CL", "option_style", "european") in {(r["root_id"], r["field"], r["suggested"]) for r in rows}
+    with open(out_dir / "bbg_check_20260924_100000.csv", encoding="utf-8", newline="") as fh:
+        fields = list(csv.DictReader(fh))
+    assert next(f for f in fields if f["part"] == "option_chain")["OPT_CHAIN"] == "5 rows"
+    assert {f["part"] for f in fields} >= {"root", "lme_cash", "lme_3m", "lme_monthly", "option"}
+
+
+# --------------------------------------------------------------------------- the real client's bulk request
+
+class _Arr:
+    """A blpapi bulk field: an array of sequences."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def numValues(self):
+        return len(self.rows)
+
+    def getValueAsElement(self, i):
+        return _Row(self.rows[i])
+
+
+class _Sub:
+    def __init__(self, name, value):
+        self._n, self._v = name, value
+
+    def name(self):
+        return self._n
+
+    def getValue(self):
+        return self._v
+
+
+class _Row:
+    def __init__(self, d):
+        self.items = list(d.items())
+
+    def numElements(self):
+        return len(self.items)
+
+    def getElement(self, j):
+        return _Sub(*self.items[j])
+
+
+class _BulkEl(_El):
+    def getElement(self, name):
+        v = self._v[name]
+        return v if isinstance(v, _Arr) else _BulkEl(v)
+
+    def getValueAsElement(self, i):
+        return _BulkEl(self._v[i])
+
+
+class _BulkMsg(_BulkEl):
+    def __init__(self, data, cid):
+        super().__init__(data)
+        self._cid = cid
+
+    def correlationIds(self):
+        return [self._cid]
+
+
+class _BulkSession(_Session):
+    def nextEvent(self, timeout=None):
+        _request, cid = self.sent[-1]
+        chain = _Arr([{"Security Description": "CLX6C 70 Comdty"}, {"Security Description": "CLX6P 70 Comdty"}])
+        data = {"securityData": [
+            {"security": "CL1 Comdty", "fieldData": {"OPT_CHAIN": chain}},
+            {"security": "ZZ1 Comdty", "securityError": {"message": "Unknown/Invalid security"}},
+        ]}
+        return _Event([_BulkMsg(data, cid)], "RESPONSE")
+
+
+def test_blpapi_client_reads_a_bulk_field(monkeypatch):
+    mod = _fake_blpapi()
+    mod.Session = _BulkSession
+    monkeypatch.setitem(sys.modules, "blpapi", mod)
+    from data.bloomberg import live
+    monkeypatch.setattr(live, "availability", lambda host, port, timeout=0.5: (True, ""))
+    client = tc.BlpapiClient("localhost", 8194)
+    got = client.bulk(["CL1 Comdty", "ZZ1 Comdty"], "OPT_CHAIN")
+    assert tc.chain_tickers(got["CL1 Comdty"].fields["OPT_CHAIN"]) == ["CLX6C 70 Comdty", "CLX6P 70 Comdty"]
+    assert got["ZZ1 Comdty"].security_error == "Unknown/Invalid security"
+    assert client.session.sent[-1][0].lists["fields"].items == ["OPT_CHAIN"]
