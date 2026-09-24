@@ -134,30 +134,31 @@ def reexec_in_venv(argv: list) -> int:
     return subprocess.call([str(VENV_PY), str(ROOT / "2_launcher.py"), *argv], cwd=str(ROOT), env=env)
 
 
-PNL_MARKER = "# --- risk-monitor pnl function (installed by `setup`) ---"
-PNL_END_MARKER = "# --- end risk-monitor pnl function ---"
-# Neither marker names the launcher file: they must stay byte-for-byte stable across a
-# rename of this file (e.g. risk.py -> 2_launcher.py, 2026-09-16) so install_pnl_function()
-# still recognises and replaces a block written by an older version of this script, instead
-# of leaving a stale copy behind and appending a second one.
-# A profile installed before 2026-09-16 carries this exact older marker instead; kept here
-# so install_pnl_function() still finds and replaces it rather than duplicating the block.
-LEGACY_PNL_MARKER = "# --- risk-monitor pnl function (installed by risk.py setup) ---"
+CHELSEA_MARKER = "# --- Jason Risk Monitor: chelsea command (installed by setup) ---"
+CHELSEA_END_MARKER = "# --- end Jason Risk Monitor chelsea command ---"
+# Neither marker names the launcher file, so they stay byte-for-byte stable across a rename
+# of it and install_pnl_function() still finds and replaces its own earlier block.
+# This project was forked from Henry's risk monitor, whose setup writes a `pnl` function
+# into the same PowerShell profiles. This launcher installs `chelsea` (user, 2026-09-24)
+# under its own markers and never reads, replaces or removes a `pnl` block, so running
+# either project's setup leaves the other project's command exactly as it was.
 
 
-def pnl_function_block() -> str:
-    """The `pnl` PowerShell function, pinned to this clone's actual path. It only changes
-    directory and calls `start`: the GitHub sync (fetch, stash local edits, fast-forward,
-    reinstall packages if the code changed) lives in `sync_with_github` below so it runs
-    identically from `pnl`, from `py 2_launcher.py start` and from an old profile."""
-    return (
-        f"{PNL_MARKER}\n"
-        "function pnl {\n"
-        f"    Set-Location '{ROOT}'\n"
-        "    py -3 2_launcher.py start\n"
-        "}\n"
-        f"{PNL_END_MARKER}\n"
-    )
+def pnl_function_block(newline: str = "\n") -> str:
+    """The `chelsea` PowerShell function (the name of this helper is historical), pinned to
+    this clone's actual path. It only changes directory and calls `start`: the GitHub sync
+    (fetch, stash local edits, fast-forward, reinstall packages if the code changed) lives in
+    `sync_with_github` below so it runs identically from `chelsea` and from
+    `py 2_launcher.py start`."""
+    lines = [
+        CHELSEA_MARKER,
+        "function chelsea {",
+        f"    Set-Location '{ROOT}'",
+        "    py -3 2_launcher.py start",
+        "}",
+        CHELSEA_END_MARKER,
+    ]
+    return newline.join(lines) + newline
 
 
 def _git(*args, timeout: int = 90) -> tuple:
@@ -234,27 +235,33 @@ def _profile_paths() -> list:
 
 
 def install_pnl_function() -> list:
-    """Add the `pnl` function to every PowerShell profile, replacing a previous copy of
-    the block if present so repeat runs never duplicate it. Returns the profile paths
-    written. Standard library only (ctypes), so this also runs before `setup` installs
-    anything into .venv."""
-    block = pnl_function_block()
+    """Add the `chelsea` function to every PowerShell profile (the name of this function is
+    historical), replacing this launcher's own earlier block if present so repeat runs never
+    duplicate it. Every other byte of the profile (BOM, line endings, another project's
+    `pnl` block) is written back exactly as it was read. Returns the profile paths written.
+    Standard library only (ctypes), so this also runs before `setup` installs anything into
+    .venv."""
     written = []
     for profile in _profile_paths():
         profile.parent.mkdir(parents=True, exist_ok=True)
-        text = profile.read_text(encoding="utf-8") if profile.exists() else ""
-        marker = PNL_MARKER if PNL_MARKER in text else (
-            LEGACY_PNL_MARKER if LEGACY_PNL_MARKER in text else None)
-        if marker is not None:
-            start = text.index(marker)
-            end = text.index(PNL_END_MARKER) + len(PNL_END_MARKER)
-            # consume one trailing newline so re-writes don't grow blank lines
-            after = end + 1 if text[end:end + 1] == "\n" else end
-            text = text[:start] + block + text[after:]
+        raw = profile.read_bytes() if profile.exists() else b""
+        # surrogateescape round-trips any byte, so a profile that is not UTF-8 is untouched
+        text = raw.decode("utf-8", "surrogateescape")
+        newline = "\r\n" if "\r\n" in text or (not text and os.name == "nt") else "\n"
+        block = pnl_function_block(newline)
+        end = text.find(CHELSEA_END_MARKER)
+        start = text.rfind(CHELSEA_MARKER, 0, end) if end >= 0 else -1
+        if start >= 0:
+            end += len(CHELSEA_END_MARKER)
+            # consume the block's own line ending so re-writes don't grow blank lines
+            end += 2 if text.startswith("\r\n", end) else 1 if text.startswith("\n", end) else 0
+            text = text[:start] + block + text[end:]
         else:
-            sep = "\n" if text and not text.endswith("\n") else ""
+            sep = newline if text and not text.endswith(("\n", "\r")) else ""
             text = text + sep + block
-        profile.write_text(text, encoding="utf-8")
+        new = text.encode("utf-8", "surrogateescape")
+        if new != raw:
+            profile.write_bytes(new)
         written.append(str(profile))
     return written
 
@@ -382,8 +389,8 @@ def cmd_setup(args) -> int:
         else:
             run([VENV_PY, str(ROOT / "2_launcher.py"), "_load_sample"])
 
-    # 6. pnl PowerShell function
-    say("[6/7] 'pnl' PowerShell command")
+    # 6. chelsea PowerShell function
+    say("[6/7] 'chelsea' PowerShell command")
     try:
         for profile in install_pnl_function():
             say(f"  OK: {profile}")
@@ -423,7 +430,7 @@ def _packages_fingerprint() -> str:
     """Hash of PACKAGES + DEV_PACKAGES + IMPORT_CHECKS + this interpreter's python version
     (major.minor): changes when a `pip install` would need to do something, and when what
     counts as "the packages import" changes -- so a PC whose stamp was written under a
-    weaker check re-verifies once on its next `pnl` instead of trusting that stamp forever."""
+    weaker check re-verifies once on its next `chelsea` instead of trusting that stamp forever."""
     import hashlib
     v = sys.version_info
     payload = ("\n".join(sorted(PACKAGES + DEV_PACKAGES)) + "|" + ",".join(IMPORT_CHECKS)

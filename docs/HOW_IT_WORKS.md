@@ -9,7 +9,7 @@ Rewritten 2026-09-17 against the committed code (711 tests). Every statement her
 
 ## 1. The one-minute version
 
-The app is a local web page (Python + Dash) that replaced the `HA-portfolio vJean.xlsx` calculator for the NMMF fund. Start it with `py 2_launcher.py start` (or the `pnl` shortcut); it opens at `http://127.0.0.1:8050`. One PC, no server, no login.
+The app is a local web page (Python + Dash) that replaced the `HA-portfolio vJean.xlsx` calculator for the NMMF fund. Start it with `py 2_launcher.py start` (or the `chelsea` shortcut); it opens at `http://127.0.0.1:8050`. One PC, no server, no login.
 
 It does three things:
 

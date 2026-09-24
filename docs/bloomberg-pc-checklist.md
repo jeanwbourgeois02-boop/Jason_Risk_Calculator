@@ -2,7 +2,7 @@
 
 Follow this on the PC that has the Bloomberg Terminal, every time you start the app.
 
-1. Launch with `pnl`. A browser tab opens on the risk monitor.
+1. Launch with `chelsea`. A browser tab opens on the risk monitor.
 2. Upload the trade blotter (top of the page, "Upload trade file") and press Confirm.
    Uploading replaces every trade already in the database, so there are never
    duplicates from an older file or from sample data.

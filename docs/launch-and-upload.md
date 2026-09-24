@@ -1,8 +1,8 @@
 # Launch and upload
 
-Start the app by typing `pnl` in a PowerShell terminal (installed by `1_setup.cmd`), or
+Start the app by typing `chelsea` in a PowerShell terminal (installed by `1_setup.cmd`), or
 `py 2_launcher.py start` in the project folder. The browser opens at
-`http://127.0.0.1:8050`. Keep the terminal open; Ctrl+C stops the app. Running `pnl`
+`http://127.0.0.1:8050`. Keep the terminal open; Ctrl+C stops the app. Running `chelsea`
 again while the app is running just reopens the browser tab.
 
 ## Upload

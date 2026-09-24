@@ -11,7 +11,7 @@ Trading, Net and Gross USD), a Ladder (delta by currency and value date, futures
 stress scenarios), and a Blotter (every trade with its P&L, by asset class, with
 filters). A Market data screen shows which marks are on file and runs the Bloomberg
 diagnostics. Setup, launch and troubleshooting are three files at the repo root
-(`1_setup.cmd`, `2_launcher.py`, `3_diagnostic.py`) and one command, `pnl`.
+(`1_setup.cmd`, `2_launcher.py`, `3_diagnostic.py`) and one command, `chelsea`.
 
 ## 2. Choices made, and why
 
@@ -54,7 +54,7 @@ diagnostics. Setup, launch and troubleshooting are three files at the repo root
   and how many Bloomberg vol tickers are still unverified.
 - Setup from a bare Windows PC: `1_setup.cmd` installs Python and Git if missing,
   clones or updates the repo, builds the environment, creates the database, runs the
-  tests, installs `pnl`, and runs the doctor.
+  tests, installs `chelsea`, and runs the doctor.
 
 ## 4. What is missing or still to confirm
 

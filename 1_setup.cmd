@@ -1,7 +1,7 @@
 @echo off
 rem 1_setup.cmd -- double-click this once. Takes a Windows PC from "nothing installed" to
 rem "ready to run": Python, Git, this repository, the app's own environment and tests,
-rem the `pnl` PowerShell command, and a final health check. Safe to run again any time.
+rem the `chelsea` PowerShell command, and a final health check. Safe to run again any time.
 rem
 rem This file is a polyglot: cmd.exe runs only the lines above "exit /b", then the
 rem embedded PowerShell script below the marker line (the line right after "exit /b";
@@ -168,15 +168,15 @@ if (Test-Path -LiteralPath (Join-Path $here '.git')) {
 Say ("  using {0} in {1}" -f $RepoUrl, $RepoRoot)
 
 # (d) py -3 2_launcher.py setup -- creates .venv, installs requirements, creates the database,
-#     installs the `pnl` PowerShell function (step (e) of the plan; 2_launcher.py setup does it),
+#     installs the `chelsea` PowerShell function (step (e) of the plan; 2_launcher.py setup does it),
 #     and runs the tests.
-Say '[4/7] py -3 2_launcher.py setup (venv, packages, database, pnl command, tests)'
+Say '[4/7] py -3 2_launcher.py setup (venv, packages, database, chelsea command, tests)'
 Push-Location -LiteralPath $RepoRoot
 py -3 2_launcher.py setup
 $setupCode = $LASTEXITCODE
 Pop-Location
 if ($setupCode -ne 0) { Failed '2_launcher.py setup' "exit code $setupCode -- see the output above for which step failed." }
-Ok '2_launcher.py setup' 'venv, packages, database and tests are ready; pnl command installed'
+Ok '2_launcher.py setup' 'venv, packages, database and tests are ready; chelsea command installed'
 
 # (f) doctor
 Say '[5/7] py -3 2_launcher.py doctor'
@@ -190,11 +190,11 @@ if ($doctorCode -ne 0) {
     Ok 'doctor' 'everything checks out'
 }
 
-Say '[6/7] pnl command'
-Ok 'pnl' 'installed into your PowerShell profile(s) by 2_launcher.py setup'
+Say '[6/7] chelsea command'
+Ok 'chelsea' 'installed into your PowerShell profile(s) by 2_launcher.py setup'
 
 Say '[7/7] Done'
 Write-Host '======================================================================'
-Write-Host ' Ready. Open a PowerShell terminal and type: pnl'
+Write-Host ' Ready. Open a PowerShell terminal and type: chelsea'
 Write-Host '======================================================================'
 Read-Host 'Press Enter to close'
