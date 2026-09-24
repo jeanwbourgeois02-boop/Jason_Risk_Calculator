@@ -130,7 +130,13 @@ Everything else lives under `2_launcher.py` too, but the raw commands are:
 .venv\Scripts\python 3_diagnostic.py              Bloomberg diagnostics (same checks as the Market data button)
 py 2_launcher.py health                           code-health audit: ruff, dead code, duplicate helpers, dated comments, layering, line endings
 py 2_launcher.py health --baseline                the same, failing when a measure is worse than config/health_baseline.json
-py 2_launcher.py reprice                          re-price the swaps, then the FX options, from the marks on file, day by day; asks Bloomberg nothing (--as-of, --since)
+py 2_launcher.py reprice                          re-price the FX options from the marks on file, day by day; asks Bloomberg nothing (--as-of, --since)
+py 2_launcher.py bbg-check                        Bloomberg PC: check every contract root's ticker, currency, contract size and value per point
+                                                  against config/contracts.csv; writes reports/bbg_check_<stamp>.txt / .csv and the worksheet
+                                                  reports/contract_fixes_<stamp>.csv; exit 0 all OK, 1 needs attention, 2 Bloomberg unreachable
+                                                  (--dry-run, --root ROOT_ID ..., --sector S, --book, --db PATH, --search, --limit N, --host, --port, --out)
+py 2_launcher.py contracts-apply <worksheet>      apply the worksheet rows marked apply=yes to config/contracts.csv (--dry-run); exit 1 if a row was refused
+py 2_launcher.py doctor --bloomberg               every prerequisite, the request-by-request probe, and the ticker check (202 securities, 5 requests)
 .venv\Scripts\python -m tests.golden_book --write   re-pin tests/golden/book.json: only on the user's yes, it defines what the book is worth
 ```
 

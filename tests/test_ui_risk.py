@@ -102,7 +102,10 @@ def _row(underlyer, kind, net, **over) -> dict:
 
 
 def _result(**over) -> dict:
-    """A `book_risk`-shaped result: CHF (full metrics), SEK (no history), SPX, USD rates."""
+    """A `book_risk`-shaped result: CHF (full metrics), SEK (no history), XAU (a metal),
+    and the two retired macro rows the engine may still return until risk-metrics drops
+    them (SPX, USD rates), with their `missing` entries and the scenarios' equity line:
+    the tab must render none of those."""
     config = {"vol_target_usd": VOL_TARGET, "stress_pct": 50.0, "stress_cap_usd": CAP,
               "blended": {"trail_window_bd": 500, "w_trail": 2 / 3, "w_stress": 1 / 3, "stress_start": "2008-01-01",
                           "stress_end": "2010-12-31", "cutover": "2011-01-01"},
@@ -115,13 +118,17 @@ def _result(**over) -> dict:
                                   "loaded": True, "rows": 5000, "columns": ["CHF"], "first_date": "2007-01-01",
                                   "last_date": AS_OF, "reason": ""},
                          "yields": {"file": "bbg_raw_fx_yields.parquet", "path": "/hist/y", "loaded": False, "rows": 0,
-                                    "columns": [], "first_date": None, "last_date": None, "reason": "/hist/y not found"}}}
+                                    "columns": [], "first_date": None, "last_date": None, "reason": "/hist/y not found"},
+                         "swap_rates": {"file": "bbg_raw_rates.parquet", "path": "/hist/r", "loaded": True, "rows": 5000,
+                                        "columns": ["USD_SWAP10Y"], "first_date": "2007-01-01", "last_date": AS_OF,
+                                        "reason": ""}}}
     rows = [_row("CHF", "FX", 1_250_000.0),
-            _row("SEK", "FX", 300_000.0, carry=False, reason="no history for SEK", **_nan_metrics("no history for SEK")),
             _row("SPX", "EQUITY_INDEX", 700_000.0, carry=True, note="ES futures + SPX options as one line"),
+            _row("SEK", "FX", 300_000.0, carry=False, reason="no history for SEK", **_nan_metrics("no history for SEK")),
+            _row("XAU", "METAL", 200_000.0, carry=False, note="metal, not in the FX net"),
             _row("USD rates", "RATES", 4_200.0, carry=False, note="the 10Y par swap rate stands in")]
-    book = {"net_usd": 2_250_000.0, "gross_usd": 2_250_000.0, "dv01_usd": 4_200.0, "fx_net_usd": -1_550_000.0,
-            "fx_gross_usd": 1_550_000.0, "rows_in_series": ["CHF", "SPX", "USD rates"], "reason": "",
+    book = {"net_usd": 1_750_000.0, "gross_usd": 1_750_000.0, "dv01_usd": 4_200.0, "fx_net_usd": -1_550_000.0,
+            "fx_gross_usd": 1_550_000.0, "rows_in_series": ["CHF", "XAU"], "reason": "",
             "vol_vs_target_pct": 27.4, "worst_day_ex_vs_cap_pct": 1.7, "over_cap": False, "over_vol_target": False,
             "var_window": {"dates": [AS_OF], "pnl_usd": [1.0]}}
     book.update(_metrics())
@@ -130,11 +137,13 @@ def _result(**over) -> dict:
                         "futures_pnl": -28_000.0, "equity_pct": -0.04},
         "Europe -3%": {"total": -46_500.0, "fx_pnl": {"CHF": -37_500.0, "SEK": -9_000.0}, "fx_total": -46_500.0,
                        "futures_pnl": 0.0, "equity_pct": None},
-        "Equities -10%": {"total": NAN, "fx_pnl": {}, "fx_total": 0.0, "futures_pnl": NAN, "equity_pct": -0.10,
-                          "reason": "no USD delta for SPX (no ES price on 2026-09-22)"},
+        "Metals -10%": {"total": NAN, "fx_pnl": {}, "fx_total": 0.0, "futures_pnl": NAN, "equity_pct": None,
+                        "reason": "no USD delta for XAU (no XAUUSD spot on 2026-09-22)"},
     }
+    missing = ["NOK: not in the scenarios (no rate for NOK)", "rates: IRSOIS-USD-1: no DV01_USD on 2026-09-22",
+               "equity index: ESZ6 Index: no FUTURE_PX on 2026-09-22", "SPX: not in the book series (no ES price)"]
     result = {"as_of": AS_OF, "history": history, "config": config, "book": book, "underlyers": rows,
-              "scenarios": scenarios, "missing": ["NOK: not in the scenarios (no rate for NOK)"]}
+              "scenarios": scenarios, "missing": missing}
     result.update(over)
     return result
 
@@ -208,12 +217,12 @@ def test_caption_names_the_history_the_lag2_date_the_parameters_and_the_missing_
 # --------------------------------------------------------------------------- cards
 def test_every_card_shows_its_formatted_figure_with_the_definition_on_hover():
     cards = _cards(risk.body(_result()))
-    assert list(cards) == ["Net USD delta", "Gross USD delta", "DV01 (USD/bp)", "Blended vol (annual)", "1y 95% VaR (1-day)",
+    assert list(cards) == ["Net USD delta", "Gross USD delta", "Blended vol (annual)", "1y 95% VaR (1-day)",
                            "Worst day ex shocks", "Worst day raw"]
-    assert cards["Net USD delta"][0] == "2,250,000"
+    assert cards["Net USD delta"][0] == "1,750,000"
     assert "header's FX net USD (+ = long USD): (1,550,000)" in cards["Net USD delta"][1]
-    assert cards["Gross USD delta"][0] == "2,250,000" and "header's FX gross: 1,550,000" in cards["Gross USD delta"][1]
-    assert cards["DV01 (USD/bp)"][0] == "4,200"
+    assert cards["Gross USD delta"][0] == "1,750,000" and "header's FX gross: 1,550,000" in cards["Gross USD delta"][1]
+    assert "currency and metal rows" in cards["Net USD delta"][2] and "equity" not in cards["Net USD delta"][2]
     assert cards["Blended vol (annual)"][0] == "1,234,568" and cards["Blended vol (annual)"][1] == "27.4% of the 4,500,000 target"
     assert cards["1y 95% VaR (1-day)"][0] == "25,000" and "positive = loss" in cards["1y 95% VaR (1-day)"][1]
     assert cards["Worst day ex shocks"][0] == "(37,500)"
@@ -249,13 +258,13 @@ def test_a_nan_figure_reads_na_with_its_reason_never_zero():
     r = _result()
     why = "needs 500 daily observations to 2026-09-18: 297 on file"
     r["book"].update(vol_blended_ann_usd=NAN, vol_trailing_ann_usd=NAN, vol_crisis_ann_usd=NAN, vol_vs_target_pct=NAN,
-                     reasons={"vol_blended_ann_usd": why}, dv01_usd=NAN)
-    r["missing"] = ["rates: IRSOIS-USD-1: no DV01_USD on 2026-09-22"]
+                     reasons={"vol_blended_ann_usd": why}, net_usd=NAN)
+    r["missing"] = ["FX positions: no SPOT for USDNOK on 2026-09-22"]
     cards = _cards(risk.body(r))
     value, note, _, span = cards["Blended vol (annual)"]
     assert value == "n/a" and note == why and span.title == why and "card-value--muted" in span.className
-    assert cards["DV01 (USD/bp)"][0] == "n/a" and cards["DV01 (USD/bp)"][1] == "rates: IRSOIS-USD-1: no DV01_USD on 2026-09-22"
-    assert "0" not in (cards["Blended vol (annual)"][0], cards["DV01 (USD/bp)"][0])
+    assert cards["Net USD delta"][0] == "n/a" and cards["Net USD delta"][1] == "FX positions: no SPOT for USDNOK on 2026-09-22"
+    assert "0" not in (cards["Blended vol (annual)"][0], cards["Net USD delta"][0])
     # the table: the SEK row has no history, so every metric cell says n/a with the reason on hover
     table = _table(risk.body(r), risk.TABLE_ID)
     sek = next(i for i, rec in enumerate(table.data) if rec["underlyer"] == "SEK")
@@ -271,28 +280,33 @@ def test_a_nan_figure_reads_na_with_its_reason_never_zero():
     r["underlyers"][0].update(net_usd=NAN, gross_usd=NAN, reason="no rate for CHF", **_nan_metrics("no rate for CHF"))
     table = _table(risk.body(r), risk.TABLE_ID)
     assert table.data[0]["net_usd"] == "n/a" and table.tooltip_data[0]["net_usd"]["value"] == "no rate for CHF"
-    # a row the engine flags `carry` but could not size (the SPX line without a price) does not claim carry
+    # a row the engine flags `carry` but could not size (a metal without a spot) does not claim carry
     r = _result()
-    r["underlyers"][2].update(net_usd=NAN, gross_usd=NAN, reason="ESZ6 Index: no FUTURE_PX on 2026-09-22", carry=True,
-                              **_nan_metrics("ESZ6 Index: no FUTURE_PX on 2026-09-22"))
-    spx = _table(risk.body(r), risk.TABLE_ID).data[2]
-    assert spx["net_usd"] == "n/a" and spx["note"] == "ESZ6 Index: no FUTURE_PX on 2026-09-22; ES futures + SPX options as one line"
+    r["underlyers"][3].update(net_usd=NAN, gross_usd=NAN, reason="no SPOT for XAUUSD on 2026-09-22", carry=True,
+                              **_nan_metrics("no SPOT for XAUUSD on 2026-09-22"))
+    xau = _table(risk.body(r), risk.TABLE_ID).data[2]
+    assert xau["net_usd"] == "n/a" and xau["note"] == "no SPOT for XAUUSD on 2026-09-22; metal, not in the FX net"
     # many reasons behind one card: the first with a count as the note, the whole list on hover
     r = _result()
-    r["book"]["dv01_usd"] = NAN
-    r["missing"] = [f"rates: IRSOIS-USD-{i}: no DV01_USD on 2026-09-22" for i in range(1, 19)]
+    r["book"]["net_usd"] = NAN
+    r["missing"] = [f"FX option: USDJPY-{i}: no DELTA on 2026-09-22" for i in range(1, 19)]
     body = risk.body(r)
-    value, note, _, span = _cards(body)["DV01 (USD/bp)"]
-    assert value == "n/a" and note == "rates: IRSOIS-USD-1: no DV01_USD on 2026-09-22 (+17 more on hover)"
-    assert span.title.count("no DV01_USD") == 18
+    value, note, _, span = _cards(body)["Net USD delta"]
+    assert value == "n/a" and note == "FX option: USDJPY-1: no DELTA on 2026-09-22 (+17 more on hover)"
+    assert span.title.count("no DELTA") == 18
     footer = _table(body, f"{risk.TABLE_ID}-footer")
-    assert footer.data[0]["dv01_usd"] == "n/a" and footer.tooltip_data[0]["dv01_usd"]["value"].count("no DV01_USD") == 18
-    # no swaps at all: the Book's DV01 says so
+    assert footer.data[0]["net_usd"] == "n/a" and footer.tooltip_data[0]["net_usd"]["value"].count("no DELTA") == 18
+    # nothing on the missing list at all: the Book's delta still says why
     r = _result(missing=[])
-    r["book"]["dv01_usd"] = NAN
+    r["book"]["net_usd"] = NAN
     body = risk.body(r)
-    assert _cards(body)["DV01 (USD/bp)"][1] == "no open swap with a DV01 mark"
-    assert _table(body, f"{risk.TABLE_ID}-footer").tooltip_data[0]["dv01_usd"]["value"] == "no open swap with a DV01 mark"
+    assert _cards(body)["Net USD delta"][1] == "no currency or metal position with a USD delta"
+    assert _table(body, f"{risk.TABLE_ID}-footer").tooltip_data[0]["net_usd"]["value"] == \
+        "no currency or metal position with a USD delta"
+    # the retired rows' reasons never stand in for a missing delta
+    r = _result(missing=["rates: IRSOIS-USD-1: no DV01_USD on 2026-09-22", "SPX: not in the book series (no ES price)"])
+    r["book"]["net_usd"] = NAN
+    assert _cards(risk.body(r))["Net USD delta"][1] == "no currency or metal position with a USD delta"
 
 
 def test_history_unavailable_shows_the_reason_and_every_metric_na():
@@ -311,11 +325,11 @@ def test_history_unavailable_shows_the_reason_and_every_metric_na():
     cards = _cards(body)
     for label in ("Blended vol (annual)", "1y 95% VaR (1-day)", "Worst day ex shocks", "Worst day raw"):
         assert cards[label][0] == "n/a" and reason in cards[label][1], label
-    assert cards["Net USD delta"][0] == "2,250,000"          # the positions stand
+    assert cards["Net USD delta"][0] == "1,750,000"          # the positions stand
     table = _table(body, risk.TABLE_ID)
     assert all(rec["vol_blended_ann_usd"] == "n/a" for rec in table.data)
     footer = _table(body, f"{risk.TABLE_ID}-footer")
-    assert footer.data[0]["worst_1d_raw_usd"] == "n/a" and footer.data[0]["net_usd"] == 2_250_000.0
+    assert footer.data[0]["worst_1d_raw_usd"] == "n/a" and footer.data[0]["net_usd"] == 1_750_000.0
     # the definitions still read, without a lag-2 date to name
     assert "the history's last date less 2 business days" in _text(body)
 
@@ -324,22 +338,27 @@ def test_history_unavailable_shows_the_reason_and_every_metric_na():
 def test_table_rows_follow_the_engines_order_and_the_book_is_pinned_under_them():
     body = risk.body(_result())
     table = _table(body, risk.TABLE_ID)
-    assert [rec["underlyer"] for rec in table.data] == ["CHF", "SEK", "SPX", "USD rates"]
-    assert [rec["kind"] for rec in table.data] == ["FX", "FX", "Equity index", "Rates"]
+    # the engine's order, less the retired SPX and USD rates rows
+    assert [rec["underlyer"] for rec in table.data] == ["CHF", "SEK", "XAU"]
+    assert [rec["kind"] for rec in table.data] == ["FX", "FX", "Metal"]
     assert [c["id"] for c in table.columns] == [
-        "underlyer", "kind", "net_usd", "gross_usd", "dv01_usd", "vol_blended_ann_usd", "vol_trailing_ann_usd",
+        "underlyer", "kind", "net_usd", "gross_usd", "vol_blended_ann_usd", "vol_trailing_ann_usd",
         "vol_crisis_ann_usd", "var95_1d_usd", "worst_1d_ex_shocks_usd", "worst_1d_ex_shocks_date", "worst_1d_raw_usd",
         "worst_1d_raw_date", "worst_day_ex_vs_target_pct", "note"]
-    assert [c["name"] for c in table.columns][8:11] == ["VaR95 1d", "Worst ex shocks", "Date"]
+    assert [c["name"] for c in table.columns][7:10] == ["VaR95 1d", "Worst ex shocks", "Date"]
     chf = table.data[0]
     assert chf["net_usd"] == 1_250_000.0 and isinstance(chf["net_usd"], float)      # a number, so it ranks
-    assert chf["dv01_usd"] is None                                                   # does not apply: blank
+    assert "dv01_usd" not in chf
     assert chf["vol_blended_ann_usd"] == 1_234_567.8 and chf["worst_1d_raw_usd"] == -187_500.0
     assert chf["worst_1d_raw_date"] == SNB and chf["worst_1d_ex_shocks_date"] == WORST_EX
     assert chf["worst_day_ex_vs_target_pct"] == 0.8333 and chf["note"] == "carry included"
-    rates = table.data[3]
-    assert rates["net_usd"] is None and rates["gross_usd"] is None and rates["dv01_usd"] == 4_200.0
-    assert rates["note"] == "the 10Y par swap rate stands in"
+    xau = table.data[2]
+    assert xau["net_usd"] == 200_000.0 and xau["gross_usd"] == 200_000.0 and xau["note"] == "metal, not in the FX net"
+    # a kind the tab has no label for yet (Phase 4's commodities) is shown as the engine names it, not dropped
+    r = _result()
+    r["underlyers"].insert(1, _row("CL", "COMMODITY", 900_000.0, carry=False))
+    assert [(rec["underlyer"], rec["kind"]) for rec in _table(risk.body(r), risk.TABLE_ID).data][:2] == \
+        [("CHF", "FX"), ("CL", "COMMODITY")]
     assert table.sort_action == "native" and table.persistence is True
     # the Book: a header-less second table under the first, same columns, never ranked with the rows
     footer = _table(body, f"{risk.TABLE_ID}-footer")
@@ -347,12 +366,12 @@ def test_table_rows_follow_the_engines_order_and_the_book_is_pinned_under_them()
     assert [c["id"] for c in footer.columns] == [c["id"] for c in table.columns]
     book = footer.data[0]
     assert (book["underlyer"], book["kind"]) == ("Book", "Book")
-    assert book["net_usd"] == 2_250_000.0 and book["gross_usd"] == 2_250_000.0 and book["dv01_usd"] == 4_200.0
+    assert book["net_usd"] == 1_750_000.0 and book["gross_usd"] == 1_750_000.0 and "dv01_usd" not in book
     assert book["worst_1d_raw_usd"] == -187_500.0 and book["worst_1d_raw_date"] == SNB
     assert book["worst_day_ex_vs_target_pct"] is None
     assert footer.tooltip_data[0]["worst_day_ex_vs_target_pct"]["value"] == \
         "the Book is measured against the stress cap: 1.7% of the cap (the card above)"
-    assert book["note"] == "3 row(s)' daily P&L summed date by date, correlation embedded: CHF, SPX, USD rates"
+    assert book["note"] == "2 row(s)' daily P&L summed date by date, correlation embedded: CHF, XAU"
     # losses colour red, deltas by sign; the definitions are the header hovers
     styles = table.style_data_conditional
     assert {"if": {"column_id": "worst_1d_raw_usd", "filter_query": "{worst_1d_raw_usd} < 0"}, "color": "var(--neg)"} in styles
@@ -361,34 +380,49 @@ def test_table_rows_follow_the_engines_order_and_the_book_is_pinned_under_them()
     assert "Blended annual vol" in table.tooltip_header["vol_blended_ann_usd"]
 
 
+def test_no_retired_macro_output_reaches_the_screen():
+    """The rates and equity-index rows, their DV01, their `missing` entries and the
+    scenarios' equity line (removed 2026-09-24) are rendered nowhere: not in a table, a
+    card, a hover or the definitions, even while the engine still returns them."""
+    from dash._utils import to_json
+    r = _result()
+    body = risk.body(r)
+    rendered = to_json(body).lower()
+    for needle in ("dv01", "swap", "spx", "es futures", "equity", "usd rates", "rates:", "irsois", "futures_pnl"):
+        assert needle not in rendered, needle
+    # the currency and metal rows' own missing entry stays
+    assert "NOK: not in the scenarios (no rate for NOK)" in _text(body)
+    assert risk.shown_missing(r) == ["NOK: not in the scenarios (no rate for NOK)"]
+    assert [x["underlyer"] for x in risk.shown_underlyers(r)] == ["CHF", "SEK", "XAU"]
+    # a book with only currency and metal rows (the shape once risk-metrics drops the rest) reads the same
+    r2 = _result()
+    r2["underlyers"] = risk.shown_underlyers(r2)
+    r2["missing"] = risk.shown_missing(r2)
+    assert _table(risk.body(r2), risk.TABLE_ID).data == _table(body, risk.TABLE_ID).data
+
+
 # --------------------------------------------------------------------------- scenarios
-def test_scenario_table_equity_cell_is_blank_or_na_or_a_number_as_the_engine_says():
+def test_scenario_table_shows_the_engines_totals_and_no_equity_line():
     body = risk.body(_result())
     table = _table(body, risk.SCENARIO_TABLE_ID)
-    assert [rec["scenario"] for rec in table.data] == ["USD +2% all", "Europe -3%", "Equities -10%"]
-    usd2, europe, equities = table.data
-    assert usd2["total"] == -68_000.0 and usd2["fx_total"] == -31_000.0
-    assert usd2["equity_pct"] == -0.04 and usd2["equity_pnl"] == -28_000.0           # a number
-    assert europe["equity_pct"] is None and europe["equity_pnl"] is None              # blank: no EQUITY move
-    assert europe["total"] == -46_500.0
-    assert equities["equity_pnl"] == "n/a" and equities["total"] == "n/a"             # n/a with the reason
-    assert equities["equity_pct"] == -0.10
-    tip = table.tooltip_data[2]
-    assert tip["equity_pnl"]["value"] == "no USD delta for SPX (no ES price on 2026-09-22)"
-    assert tip["total"]["value"] == "no USD delta for SPX (no ES price on 2026-09-22)"
+    assert [c["id"] for c in table.columns] == ["scenario", "total", "fx_total"]     # the equity line is retired
+    assert [rec["scenario"] for rec in table.data] == ["USD +2% all", "Europe -3%", "Metals -10%"]
+    usd2, europe, metals = table.data
+    assert usd2 == {"scenario": "USD +2% all", "total": -68_000.0, "fx_total": -31_000.0}
+    assert europe["total"] == -46_500.0 and europe["fx_total"] == -46_500.0
+    assert metals["total"] == "n/a" and metals["fx_total"] == 0.0                     # n/a with the reason, a real 0 stays 0
+    assert table.tooltip_data[2] == {"total": {"value": "no USD delta for XAU (no XAUUSD spot on 2026-09-22)", "type": "text"}}
     assert table.tooltip_data[1] == {}
-    pct = next(c for c in table.columns if c["id"] == "equity_pct")["format"]
-    assert pct["specifier"].endswith("%")                                             # -0.04 prints as -4.0%
     assert "config/stress.yaml" in _text(body) and "the same scenarios as the Ladder's" in _text(body)
     # the matrix: underlyer order first, then the rest alphabetically; a currency a scenario does not move is blank
     matrix = _table(body, risk.MATRIX_TABLE_ID)
-    assert [c["id"] for c in matrix.columns] == ["ccy", "USD +2% all", "Europe -3%", "Equities -10%"]
+    assert [c["id"] for c in matrix.columns] == ["ccy", "USD +2% all", "Europe -3%", "Metals -10%"]
     assert [rec["ccy"] for rec in matrix.data] == ["CHF", "SEK", "JPY"]
     chf, sek, jpy = matrix.data
-    assert chf["USD +2% all"] == -25_000.0 and chf["Europe -3%"] == -37_500.0 and chf["Equities -10%"] is None
+    assert chf["USD +2% all"] == -25_000.0 and chf["Europe -3%"] == -37_500.0 and chf["Metals -10%"] is None
     assert jpy["USD +2% all"] == 0.0 and jpy["Europe -3%"] is None
     footer = _table(body, f"{risk.MATRIX_TABLE_ID}-footer")
-    assert footer.data == [{"ccy": "FX total", "USD +2% all": -31_000.0, "Europe -3%": -46_500.0, "Equities -10%": 0.0}]
+    assert footer.data == [{"ccy": "FX total", "USD +2% all": -31_000.0, "Europe -3%": -46_500.0, "Metals -10%": 0.0}]
     # the matrix is collapsed by default
     details = next(n for n in _walk(body) if type(n).__name__ == "Details" and "matrix" in _text(n).lower())
     assert details.open is False
@@ -403,7 +437,7 @@ def test_definitions_block_states_the_formulas_and_the_config_values():
     block = next(n for n in _walk(body) if getattr(n, "id", None) == risk.DEFINITIONS_ID)
     assert block.open is False and type(block).__name__ == "Details"
     text = _text(block)
-    for needle in ("Definitions", "USD delta x its daily move", "DV01 x the change of the currency's 10Y par swap rate",
+    for needle in ("Definitions", "each currency or metal row's USD delta x its daily move",
                    "Blended annual vol = 2/3 x trailing 500-day vol + 1/3 x crisis vol (2008-01-01 to 2010-12-31)",
                    "minus the 5th percentile of the last 252 daily", "positive = loss",
                    "SNB floor removal 2015-01-15, Brexit referendum result 2016-06-24", "set to 0",
@@ -415,6 +449,9 @@ def test_definitions_block_states_the_formulas_and_the_config_values():
                    "yields: bbg_raw_fx_yields.parquet (not loaded (/hist/y not found))",
                    "config/stress.yaml"):
         assert needle in text, needle
+    labels = [n.children for n in _walk(block) if type(n).__name__ == "Dt"]
+    assert labels == ["Daily $ P&L", "Net / Gross USD delta", "Blended vol", "VaR", "Worst day ex shocks",
+                      "Worst day raw", "Scenarios", "Parameters", "History"]
     r = _result()
     r["config"].update(loaded=False, note="/repo/config/risk.yaml not found: defaults in use")
     assert "(not loaded: /repo/config/risk.yaml not found: defaults in use)" in _text(risk.definitions_block(r))
@@ -426,7 +463,8 @@ SNAP = f"{AS_OF}T15:00:00-04:00"
 
 
 def _write_history(folder):
-    """CHF with the SNB day and a 2020 bad day, JPY flat, yields flat, USD 10Y with one step."""
+    """CHF with the SNB day and a 2020 bad day, JPY flat, yields flat (no rates file: the
+    rates underlyer is retired)."""
     folder.mkdir(parents=True, exist_ok=True)
     r = pd.Series(0.0005, index=DATES)
     r.loc[pd.Timestamp(SNB)] = -0.15
@@ -439,11 +477,6 @@ def _write_history(folder):
     y = pd.DataFrame({"USD": 3.0, "CHF": 3.0, "JPY": 3.0}, index=DATES)
     y.index.name = "date"
     y.to_parquet(folder / history_mod.YIELDS_FILE)
-    level = pd.Series(4.0, index=DATES)
-    level.loc[pd.Timestamp("2008-10-15"):] -= 0.30
-    rt = pd.DataFrame({"USD_SWAP10Y": level}, index=DATES)
-    rt.index.name = "date"
-    rt.to_parquet(folder / history_mod.RATES_FILE)
     return folder
 
 
@@ -452,8 +485,7 @@ def _write_book(db_path):
     conn.executemany("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                      "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)", [
         ("USDCHF", "FX", "USD", "CHF", 1, 0, "USDCHF Curncy", "9999-12-31"),
-        ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31"),
-        ("IRSOIS-USD-1", "IRS", "USD", "USD", 1, 0, "", "2031-09-01")])
+        ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31")])
     for tid, pair, (bccy, bamt), (qccy, qamt), px in [
             ("c1", "USDCHF", ("USD", -1_000_000.0), ("CHF", 800_000.0), 0.80),       # long 0.8m CHF at USDCHF 0.64 = $1.25m
             ("j1", "USDJPY", ("USD", 1_000_000.0), ("JPY", -150_000_000.0), 150.0)]:
@@ -462,15 +494,9 @@ def _write_book(db_path):
         conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
             (tid, 1, "FX_NEAR", bccy, bamt, "2026-09-01", "2026-10-20", px, 1),
             (tid, 2, "FX_NEAR", qccy, qamt, "2026-09-01", "2026-10-20", px, 1)])
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 ("r1", "XLSX", "IRSOIS-USD-1", "IRS", "r1", "2026-09-01", 1e7, 0.035, "acc", "cp", "", "t", "d", ""))
-    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        ("r1", 1, "FIXED", "USD", -1e7, "2026-09-01", "2031-09-01", 0.035, 1),
-        ("r1", 2, "FLOAT", "USD", 1e7, "2026-09-01", "2031-09-01", 0.0, 1)])
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
         (AS_OF, "USDCHF", AS_OF, "SPOT", 0.64, "BBG_BFXFORWARD", SNAP),
-        (AS_OF, "USDJPY", AS_OF, "SPOT", 150.0, "BBG_BFXFORWARD", SNAP),
-        (AS_OF, "IRSOIS-USD-1", "2031-09-01", "DV01_USD", 4200.0, "QL_PRICER", SNAP)])
+        (AS_OF, "USDJPY", AS_OF, "SPOT", 150.0, "BBG_BFXFORWARD", SNAP)])
     conn.commit()
     conn.close()
 
@@ -502,28 +528,26 @@ def test_the_rendered_tab_shows_the_engines_numbers_end_to_end(tmp_path, monkeyp
     assert f"History: {tmp_path / 'hist'}, last close {AS_OF}; used to {AS_OF}, lag-2 date 2026-09-18." in text
     cards = _cards(body)
     assert cards["Net USD delta"][0] == format_cell(engine["book"]["net_usd"]) == "250,000"
-    assert cards["DV01 (USD/bp)"][0] == "4,200"
+    assert "DV01 (USD/bp)" not in cards
     assert cards["Blended vol (annual)"][0] == format_cell(engine["book"]["vol_blended_ann_usd"])
     assert cards["Worst day raw"][0] == format_cell(engine["book"]["worst_1d_raw_usd"]) and SNB in cards["Worst day raw"][1]
-    # the book's worst day ex shocks is the rates step (DV01 x -30bp = -126,000), not CHF's 2020 day: the engine's call
-    assert engine["book"]["worst_1d_ex_shocks_date"] == "2008-10-15"
+    # the book's worst day ex shocks is CHF's 2020 day (JPY never moves), the SNB day being a shock date
+    assert engine["book"]["worst_1d_ex_shocks_date"] == WORST_EX
     assert cards["Worst day ex shocks"][0] == format_cell(engine["book"]["worst_1d_ex_shocks_usd"])
     assert engine["book"]["worst_1d_ex_shocks_date"] in cards["Worst day ex shocks"][1]
     table = _table(body, risk.TABLE_ID)
-    assert [rec["underlyer"] for rec in table.data] == [r["underlyer"] for r in engine["underlyers"]] == ["CHF", "JPY", "USD rates"]
+    assert [rec["underlyer"] for rec in table.data] == [r["underlyer"] for r in engine["underlyers"]] == ["CHF", "JPY"]
     chf = table.data[0]
     assert chf["net_usd"] == pytest.approx(1_250_000.0) and chf["worst_1d_raw_usd"] == pytest.approx(rows["CHF"]["worst_1d_raw_usd"])
     assert chf["worst_1d_raw_date"] == SNB and chf["worst_1d_ex_shocks_date"] == WORST_EX
     assert chf["vol_blended_ann_usd"] == pytest.approx(rows["CHF"]["vol_blended_ann_usd"]) and chf["note"] == "carry included"
-    rates = table.data[2]
-    assert rates["dv01_usd"] == 4200.0 and rates["worst_1d_raw_usd"] == pytest.approx(rows["USD rates"]["worst_1d_raw_usd"])
-    assert rates["worst_1d_raw_date"] == "2008-10-15" and rates["net_usd"] is None
+    assert "dv01_usd" not in chf
     footer = _table(body, f"{risk.TABLE_ID}-footer")
     assert footer.data[0]["worst_1d_raw_usd"] == pytest.approx(engine["book"]["worst_1d_raw_usd"])
     scen = _table(body, risk.SCENARIO_TABLE_ID)
     assert [rec["scenario"] for rec in scen.data] == list(engine["scenarios"])
     europe = next(rec for rec in scen.data if rec["scenario"].startswith("Europe"))
     assert europe["fx_total"] == pytest.approx(engine["scenarios"][europe["scenario"]]["fx_total"]) == pytest.approx(-37_500.0)
-    assert europe["equity_pnl"] is None
+    assert set(europe) == {"scenario", "total", "fx_total"}
     # a JPY that never moves: its vol is a real zero from the engine, shown as 0, not n/a
     assert table.data[1]["vol_blended_ann_usd"] == 0.0

@@ -97,9 +97,10 @@ def test_book_signature_is_blank_when_the_database_cannot_be_read(tmp_path):
 
 
 def test_trade_set_signature_moves_on_a_trade_added_or_resized_but_not_on_a_sign_or_on_option_terms(tmp_path):
-    """What the Blotter rebuilds a sub-tab on (2026-09-18). A flipped sign is a swap's
-    pay/receive set under Rates; option terms are a strike typed under Options: the user
-    makes several of each in a row and none may tear down the sub-tab he is editing in."""
+    """What the Blotter rebuilds a sub-tab on (2026-09-18). Option terms are a strike typed
+    under Options: the user types several in a row and none may tear down the sub-tab he is
+    editing in. A sign alone is not a new trade either (it was the retired IRS direction
+    flip's case, 2026-09-24; the blindness stays, a flipped sign still being no new trade)."""
     path = _db(tmp_path)
     before = revision.trade_set_signature(path)
     assert before
@@ -148,10 +149,10 @@ def test_every_view_listens_to_the_revision_signal(tmp_path):
     for output in (f"{header.HEADER_ID}-figures", "cash-ladder-table-container", "blotter-content",
                    "market-data-body", "blotter-datatable-total",
                    # refreshed IN PLACE rather than by a rebuild of their sub-tab (2026-09-18):
-                   "blotter-notices", "blotter-strip-options", "blotter-strip-rates",
+                   "blotter-notices", "blotter-strip-options",
                    # the Options table hears it through its refresh gate, which holds a
                    # revision while a Strike / Type / Payoff cell is being typed (2026-09-21):
-                   options.REFRESH_ID, "rates-datatable"):
+                   options.REFRESH_ID):
         assert output in joined, f"{output} does not listen to the revision signal"
     gated = [key for key, spec in app.callback_map.items()
              if options.REFRESH_ID in {i["id"] for i in spec["inputs"]}]

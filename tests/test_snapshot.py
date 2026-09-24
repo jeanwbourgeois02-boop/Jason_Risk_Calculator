@@ -41,20 +41,12 @@ def _bloomberg_pc(path):
                  (AWKWARD / 3,))
     conn.execute("INSERT INTO curve_quotes VALUES ('2026-09-14','USD','SOFR','1Y','USOSFR1 Curncy',"
                  "4.05,'OIS','PX_LAST','BBG_BDP')")
-    conn.execute("INSERT INTO index_fixings VALUES ('SOFR','2026-09-11',0.0405,'BBG_BDH')")
-    # the tables a pull creates itself (not in data/ingest/schema.py), as the pull leaves them
+    # the table a pull creates itself (not in data/ingest/schema.py), as the pull leaves it
     from data.bloomberg.vol_marketdata import ensure_vol_quotes_table
-    from data.bloomberg.rates_vol_marketdata import ensure_rate_vol_quotes_table
-    from engine.options.equity_commodity import ensure_tables, set_dividend_yield
     ensure_vol_quotes_table(conn)
-    ensure_rate_vol_quotes_table(conn)
-    ensure_tables(conn)
     conn.execute("INSERT INTO vol_quotes (as_of_date, pair, tenor, quote_type, value, ticker, field, source, "
                  "snapped_at) VALUES ('2026-09-14','USDKRW','1M','ATM',9.25,'USDKRWV1M Curncy','PX_LAST',"
                  "'BBG_BDP',?)", (SNAP,))
-    conn.execute("INSERT INTO rate_vol_quotes VALUES ('2026-09-14','USD','SOFR','SWAPTION','1Y','10Y','ATM',0.0,"
-                 "0.85,'NORMAL','USSN0110 Curncy','PX_LAST','BBG_BDP',?)", (SNAP,))
-    set_dividend_yield(conn, "2026-09-14", "SPX Index", 0.0125, source="BBG_BDP")
     # Bloomberg's commodity contract dates, as the pull stores them (contract-master's table)
     from data.contracts import store_static_dates
     store_static_dates(conn, [{"contract_id": "CLZ26 Comdty", "last_trade_date": "2026-11-19",
@@ -74,8 +66,7 @@ def test_round_trip_gives_the_other_pc_identical_market_data(tmp_path):
     pc = _bloomberg_pc(tmp_path / "pc.db")
     manifest = snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
     assert manifest["rows"] == {"instruments": 2, "marks": 5, "curves": 1, "curve_quotes": 1,
-                                "index_fixings": 1, "vol_quotes": 1, "rate_vol_quotes": 1,
-                                "equity_dividend_yields": 1, "contract_static": 1}
+                                "vol_quotes": 1, "contract_static": 1}
     assert (manifest["marks_from"], manifest["marks_through"]) == ("2026-09-09", "2026-09-14")
     assert set(manifest["ddl"]) == set(snapshot.MARKET_TABLES)
     assert manifest["ddl"]["vol_quotes"].startswith("CREATE TABLE vol_quotes")
@@ -84,13 +75,13 @@ def test_round_trip_gives_the_other_pc_identical_market_data(tmp_path):
                                      "requested": 9, "written": 8, "failed": 1}
     assert (tmp_path / "snap" / snapshot.PULL_STATUS).exists()
 
-    # the other PC's database has never created the pull's own tables: a fresh
-    # schema.connect() has no vol_quotes / rate_vol_quotes / equity_dividend_yields
+    # the other PC's database has never created the pull's own table: a fresh
+    # schema.connect() has no vol_quotes
     schema.connect(tmp_path / "mac.db").close()
     assert not snapshot._table_info(sqlite3.connect(tmp_path / "mac.db"), "vol_quotes")
     out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-09-14")
     assert out["rows"]["marks"] == 5 and out["instruments_added"] == 2 and out["skipped_marks"] == 0
-    assert out["rows"]["vol_quotes"] == 1 and out["rows"]["equity_dividend_yields"] == 1
+    assert out["rows"]["vol_quotes"] == 1
     assert out["rows"]["contract_static"] == 1
     # no commodity future on this PC: the contract dates are looked at and change nothing
     assert out["contract_dates"] == {"checked": 0, "updated": [], "missing_dates": []}
@@ -99,8 +90,8 @@ def test_round_trip_gives_the_other_pc_identical_market_data(tmp_path):
     mac = sqlite3.connect(tmp_path / "mac.db")
     for table in snapshot.MARKET_TABLES:
         assert _dump(mac, table) == _dump(pc, table)  # exact floats, sources and snap times
-    # the tables it created match the source's own columns
-    assert [c[1] for c in snapshot._table_info(mac, "rate_vol_quotes")] == [c[1] for c in snapshot._table_info(pc, "rate_vol_quotes")]
+    # the table it created matches the source's own columns
+    assert [c[1] for c in snapshot._table_info(mac, "vol_quotes")] == [c[1] for c in snapshot._table_info(pc, "vol_quotes")]
     # this PC's own pull status is not touched: the log is read from the snapshot folder only
     assert not (tmp_path / "mac.db.bloomberg_status.json").exists()
     assert [r[0] for r in mac.execute("SELECT instrument_id FROM instruments ORDER BY 1")] == ["AUDUSD", "USDKRW"]
@@ -144,7 +135,7 @@ def test_import_mirrors_the_bloomberg_pc_but_keeps_manual_marks_and_local_instru
 
     out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-09-14")
     assert out["dropped"]["marks"] == 1 and out["instruments_added"] == 1
-    assert out["dropped"]["equity_dividend_yields"] == 0  # the table did not exist here: created, nothing dropped
+    assert out["dropped"]["vol_quotes"] == 0  # the table did not exist here: created, nothing dropped
 
     mac = sqlite3.connect(tmp_path / "mac.db")
     official = mac.execute("SELECT value, source FROM marks_official WHERE mark_type='FWD_OUTRIGHT'").fetchall()
@@ -443,3 +434,78 @@ def test_the_import_writes_bloombergs_expiry_onto_this_pcs_future_before_the_fre
     # frozen at Bloomberg's expiry: 2 x 1000 x (72 - 70)
     assert out["ledger"]["realised"] == 1
     assert mac.execute("SELECT pnl_usd FROM realised_pnl WHERE trade_id = 'c1'").fetchone() == (pytest.approx(4000.0),)
+
+
+# =========================================================================== 2026-09-24: the macro trader's tables leave
+REMOVED = ("index_fixings", "rate_vol_quotes", "equity_dividend_yields")
+LEGACY_DDL = {
+    "rate_vol_quotes": "CREATE TABLE rate_vol_quotes (as_of_date TEXT, ccy TEXT, tenor TEXT, value REAL, "
+                       "source TEXT, PRIMARY KEY (as_of_date, ccy, tenor, source))",
+    "equity_dividend_yields": "CREATE TABLE equity_dividend_yields (as_of_date TEXT, ticker TEXT, value REAL, "
+                              "source TEXT, PRIMARY KEY (as_of_date, ticker, source))",
+}
+
+
+def test_the_market_tables_are_jasons_only():
+    """Commodity conversion Phase 2 (user yes, 2026-09-24): swap fixings, swaption / cap vols
+    and the SPX dividend yield leave the app; the OIS curves (they discount options), the FX
+    vol quotes and Bloomberg's contract dates stay."""
+    assert snapshot.MARKET_TABLES == ("marks", "curves", "curve_quotes", "vol_quotes", "contract_static")
+    assert not set(REMOVED) & set(snapshot.MARKET_TABLES)
+
+
+def _create_removed_tables(conn):
+    if not snapshot._table_info(conn, "index_fixings"):
+        conn.execute("CREATE TABLE index_fixings (\"index\" TEXT, fixing_date TEXT, value REAL, source TEXT, "
+                     "PRIMARY KEY (\"index\", fixing_date, source))")
+    for ddl in LEGACY_DDL.values():
+        conn.execute(ddl)
+
+
+def test_a_database_that_still_holds_the_removed_tables_exports_them_not(tmp_path):
+    pc = _bloomberg_pc(tmp_path / "pc.db")
+    _create_removed_tables(pc)
+    pc.execute("INSERT INTO index_fixings VALUES ('SOFR','2026-09-11',0.0405,'BBG_BDH')")
+    pc.execute("INSERT INTO rate_vol_quotes VALUES ('2026-09-14','USD','1Y',0.85,'BBG_BDP')")
+    pc.execute("INSERT INTO equity_dividend_yields VALUES ('2026-09-14','SPX Index',0.0125,'BBG_BDP')")
+    pc.commit()
+    manifest = snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
+    for table in REMOVED:
+        assert table not in manifest["rows"] and table not in manifest["ddl"]
+        assert not (tmp_path / "snap" / f"{table}.csv").exists()
+
+
+def test_an_older_snapshot_carrying_the_removed_tables_imports_without_them(tmp_path):
+    """A snapshot exported before 2026-09-24 still holds index_fixings.csv, rate_vol_quotes.csv
+    and equity_dividend_yields.csv, with their DDL in the manifest: the import loads the
+    tables it knows, never fails on the rest, creates none of them and leaves this PC's own
+    rows in them untouched."""
+    import json
+    _bloomberg_pc(tmp_path / "pc.db")
+    snap = tmp_path / "snap"
+    snapshot.export_snapshot(tmp_path / "pc.db", snap)
+    legacy = {"index_fixings": ["index,fixing_date,value,source", "SOFR,2026-09-11,0.0405,BBG_BDH"],
+              "rate_vol_quotes": ["as_of_date,ccy,tenor,value,source", "2026-09-14,USD,1Y,0.85,BBG_BDP"],
+              "equity_dividend_yields": ["as_of_date,ticker,value,source", "2026-09-14,SPX Index,0.0125,BBG_BDP"]}
+    for table, lines in legacy.items():
+        (snap / f"{table}.csv").write_text("".join(line + chr(10) for line in lines))
+    manifest = json.loads((snap / snapshot.MANIFEST).read_text())
+    manifest["ddl"].update(LEGACY_DDL)
+    manifest["rows"].update({t: 1 for t in REMOVED})
+    (snap / snapshot.MANIFEST).write_text(json.dumps(manifest))
+
+    mac = schema.connect(tmp_path / "mac.db")
+    has_fixings = bool(snapshot._table_info(mac, "index_fixings"))
+    if has_fixings:   # this PC's own fixing, of a source the import would otherwise drop
+        mac.execute("INSERT INTO index_fixings VALUES ('ESTR','2026-09-10',0.02,'BBG_BDH')")
+        mac.commit()
+    mac.close()
+
+    out = snapshot.import_snapshot(tmp_path / "mac.db", snap, as_of="2026-09-14")
+    assert set(out["rows"]) == set(snapshot.MARKET_TABLES) and out["rows"]["marks"] == 5
+    assert not set(REMOVED) & set(out["dropped"])
+    mac = sqlite3.connect(tmp_path / "mac.db")
+    assert not snapshot._table_info(mac, "rate_vol_quotes")
+    assert not snapshot._table_info(mac, "equity_dividend_yields")
+    if has_fixings:
+        assert mac.execute("SELECT * FROM index_fixings").fetchall() == [("ESTR", "2026-09-10", 0.02, "BBG_BDH")]

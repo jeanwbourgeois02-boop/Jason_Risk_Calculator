@@ -30,7 +30,7 @@ Rules:
 - Write tests alongside code, in your own test files, and run only those (`py -3 -m pytest tests/test_exposure.py tests/test_usd_marks.py tests/test_ladder.py -q -p no:cacheprovider`). The housekeeper runs the full suite once at the end. A red test in a file you do not own goes in your Handoff; you never edit it.
 - `portfolio_totals` returns the net non-USD delta (+ = long foreign). Every view that shows Net USD negates it exactly once, itself. Gross USD = Σ |net USD notional per pair|.
 - USD equivalent: spot on or before the pair's spot date; else the official FWD_OUTRIGHT for that exact date; else linear between the bracketing outrights with spot as the first pillar, flat beyond the last tenor; spot when the pair has no curve (named). Undiscounted.
-- Delta rows are at spot, with an NDF currency at its 1M NDF price. Gold keeps its own sign.
+- Delta rows are at official spot. Gold keeps its own sign.
 - Record anything learned (data quirks, conventions, the user's preferences for your part) in agent memory.
 - Never replicate the items in the "Must not replicate" list in CLAUDE.md.
 

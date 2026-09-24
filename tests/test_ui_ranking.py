@@ -47,13 +47,13 @@ def test_display_length_matches_what_the_table_prints():
     assert rk.display_length(1234.5, rk.amount(2, trim=True)) == len("1,234.5")
     assert rk.display_length(None, rk.amount(nully="n/a")) == 3
     assert rk.display_length(-3.25, rk.percent()) == len("-3.3%") or rk.display_length(-3.25, rk.percent()) == len("-3.2%")
-    assert rk.display_length("KRW (NDF)") == 9
+    assert rk.display_length("XAU metal") == 9
     assert rk.display_length(1.108750, rk.rate()) == len("1.108750")
 
 
 def test_column_widths_span_body_and_footer():
     cols = [rk.text("Currency", "ccy"), rk.numeric("USD delta", "usd")]
-    body = [{"ccy": "KRW (NDF)", "usd": -12.0}]
+    body = [{"ccy": "XAU metal", "usd": -12.0}]
     footer = [{"ccy": "Net", "usd": -123456789.0}]
     rules = rk.column_widths(cols, body, footer)
     assert rules[0] == {"if": {"column_id": "ccy"}, "width": "11ch", "minWidth": "11ch", "maxWidth": "11ch"}

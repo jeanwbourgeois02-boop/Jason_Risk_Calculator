@@ -32,4 +32,4 @@ Commodity conversion Phase 1 (housekeeper brief 2026-09-24). Follows the bbg-dat
   `spot_only_pair_names` / `traded_pairs` with no backfill change.
 - Traps: test_backfill.py pins `library.LIVE_ONLY_KINDS` (bbg-library added CONTRACT_DATES).
   The machine is slow: the four backfill test files take ~1.5-3 min.
-  New test file `tests/test_backfill_commodity.py` (brief allowed it; not yet in the lane table).
+  `tests/test_backfill_commodity.py` is this lane's (in the CLAUDE.md lane table since 2026-09-24).

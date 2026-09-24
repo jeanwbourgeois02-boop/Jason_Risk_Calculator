@@ -109,8 +109,7 @@ Diagnostics:
 //blp/refdata; EURUSD PX_LAST via ReferenceDataRequest and HistoricalDataRequest; the
 direct broken-date FWD_OUTRIGHT request plus two alternative candidates; the EURUSD1M
 and EURUSD3M tenor tickers; FWD_POINTS_SCALE and FWD_SCALE together on EURUSD and USDJPY;
-one IntradayBarRequest for the 15:00 New York close bar of EURUSD, BID side; PX_SETTLE /
-PX_LAST on ESU6 Index) and
+one IntradayBarRequest for the 15:00 New York close bar of EURUSD, BID side) and
 records every result in the same diagnostics JSON, tagged with a probe_name and (where
 relevant) which numbered open-questions item it answers. Each step failing never aborts
 the remaining steps. No marks CSV is written or needed in probe mode.
@@ -164,31 +163,10 @@ def _ny() -> ZoneInfo:
 # docstring "FWD_OUTRIGHT fallback".
 STANDARD_TENORS = ["SP", "1W", "2W", "1M", "2M", "3M", "6M", "1Y"]
 
-# 2026-09-22: Bloomberg rejects the '<pair><tenor> Curncy' spelling for the non-deliverable
-# pairs ('USDBRLSP Curncy', 'USDBRL1M Curncy' ...: "Unknown/Invalid security"), so no past
-# forward could be built for BRL, IDR or TWD. Their forward POINTS live on the NDF ticker
-# families (user, 2026-09-22: "for the ones that dont have, we need to use forward points
-# to get the forward. I checked bcn1m works for points, and similarly for ihn and ntn"):
-# 'BCN1M Curncy' etc. for the standard tenors 1W..1Y. The families carry no SP ticker: the
-# pair's own SPOT of the day is the first pillar (fwd_curve.historical_curve already puts
-# spot at the spot date when the tenors are points). The outright is spot + points at
-# Bloomberg's own divisor for the pair ticker (fetch_points_scales on 'USDBRL Curncy':
-# FWD_POINTS_SCALE, else 10 ** FWD_SCALE), exactly as for a deliverable pair. KRW and INR
-# keep the pair spelling (USDKRW's history works). A tenor a family lacks is simply missing
-# for that pair, as any rejected tenor is. The live FWD_CURVE bulk request on the pair is
-# untouched (it works for these pairs). The 1M of each family is verified on the terminal;
-# the other tenors' spellings are UNVERIFIED.
-NDF_TENOR_FAMILIES = {"BRL": "BCN", "IDR": "IHN", "TWD": "NTN"}
-
-
 def tenor_ticker(pair: str, tenor: str) -> str:
     """The ticker of `pair`'s standard forward tenor in Bloomberg's history: '<pair><tenor>
-    Curncy', or for a USD pair of NDF_TENOR_FAMILIES '<family><tenor> Curncy'; '' for a
-    tenor that family has no ticker for (SP), which is then not asked for."""
-    ccy = pair[3:] if pair.startswith("USD") and len(pair) == 6 else ""
-    family = NDF_TENOR_FAMILIES.get(ccy)
-    if family:
-        return "" if tenor.upper() == "SP" else f"{family}{tenor} Curncy"
+    Curncy'. The NDF ticker families (BCN / IHN / NTN for BRL / IDR / TWD) left with the
+    NDFs on 2026-09-24 (commodity conversion Phase 2)."""
     return f"{pair}{tenor} Curncy"
 
 # nextEvent() timeout so a stalled/unreachable session doesn't hang forever.
@@ -770,10 +748,8 @@ def fetch_historical_series(session, service, tickers: Sequence[str], fields: Se
     FWD_OUTRIGHT and FUTURE_PX history, not SPOT alone).
 
     Returns {ticker: {date_iso: {field: value}}}. Each historical point carries its own
-    "date" element (confirmed real Bloomberg behaviour -- see
-    data/bloomberg/rates_marketdata.py::RatesBloombergSource._fetch_historical_series,
-    which this mirrors); a point with no "date" element is skipped (never guessed which
-    day it belongs to), and a field absent from a given day's point is simply absent from
+    "date" element (confirmed real Bloomberg behaviour on the Bloomberg PC); a point with
+    no "date" element is skipped (never guessed which day it belongs to), and a field absent from a given day's point is simply absent from
     that day's dict rather than defaulted. Same diagnostics/TIMEOUT/correlation-id
     behaviour as fetch_reference (see its docstring)."""
     request = service.createRequest("HistoricalDataRequest")
@@ -1750,14 +1726,6 @@ def run_probe(args, diag: Diagnostics) -> int:
          f"business day before --as-of, {CLOSE_HOUR_NY - 1}:00-{CLOSE_HOUR_NY}:00 New York (the official close bar)",
          _intraday_step)
 
-    step("es_settle_px_settle", "PX_SETTLE on ESU6 Index via HistoricalDataRequest for --as-of",
-         lambda tag: fetch_historical(session, service, ["ESU6 Index"], "PX_SETTLE", as_of, diag=diag, tag=tag),
-         answers_question=31)
-
-    step("es_settle_px_last", "PX_LAST on ESU6 Index via HistoricalDataRequest for --as-of",
-         lambda tag: fetch_historical(session, service, ["ESU6 Index"], "PX_LAST", as_of, diag=diag, tag=tag),
-         answers_question=31)
-
     session.stop()
 
     probe_requests = [r for r in diag.requests if r.get("probe_name")]
@@ -1769,7 +1737,7 @@ def run_probe(args, diag: Diagnostics) -> int:
     # C-B: candidate steps (the fwd_outright_direct_* alternatives) are exploratory --
     # trying several field/override guesses is expected to leave some failing, so those
     # don't make the probe run itself look failed. A non-candidate step failing (spot,
-    # tenor, ES settle probes -- things we're fairly confident about the field names for)
+    # tenor probes -- things we're fairly confident about the field names for)
     # does, and outcome must say so explicitly rather than default to "OK" just because
     # exit_code is 0 (probe mode always exits 0 once the session opens).
     non_candidate_failures = [f for f in failures if not f["candidate"]]

@@ -1,6 +1,6 @@
 ---
 name: bbg-backfill
-description: Layer 2, market data: the backfill of past closes (data/bloomberg/backfill.py): 15:00 New York FX bars, daily PX_LAST for futures and listed options, NDF fixings, past vol smiles and OIS quotes, and re-pricing each past day from its own inputs. Speaks to other lanes only through the housekeeper.
+description: Layer 2, market data: the backfill of past closes (data/bloomberg/backfill.py): 15:00 New York FX bars, daily PX_LAST for futures (commodity contracts under their request ticker) and listed options, the FX options' past vol smiles and OIS quotes, and re-pricing each past day's options from its own inputs. Speaks to other lanes only through the housekeeper.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
 effort: high

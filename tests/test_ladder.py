@@ -1,5 +1,5 @@
-"""Tests for engine/ladder (cash ladder + delta-per-currency). Real-file tests skip if
-the raw blotter CSV is absent."""
+"""Tests for engine/ladder (cash ladder + delta-per-currency). The sample-file tests load
+the tracked synthetic book, `data/sample/blotter_sample.csv`."""
 from __future__ import annotations
 
 import math
@@ -16,24 +16,22 @@ from engine.ladder import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-# 2026-09-17 ("no bnp fall back", docs/bnp-excel-removal.md): the real-file fixtures
-# below used to load data/raw/HA_PNL_20260818.csv via the retired data/ingest/bnp.py.
-# BNP is no longer a trade source at all, so they now load the blotter's own reference
-# sample (the app's only trade source) via data/ingest/blotter.py instead.
-RAW = REPO / "data" / "raw" / "new_sample_trades.csv"
-AS_OF = "2026-08-17"
+# The tracked synthetic sample (commodity conversion Phase 2, 2026-09-24): USDCNH forwards
+# (one settled 2026-08-19), EURUSD / USDJPY / GBPUSD on 2026-12-16, EURGBP, XAUUSD, one
+# EURUSD spot, commodity futures and FX options; no NDF, IRS or equity index. The macro
+# trader's `data/raw/new_sample_trades.csv` is untracked and no longer read here.
+RAW = REPO / "data" / "sample" / "blotter_sample.csv"
+AS_OF = "2026-08-17"          # the synthetic tests' date
+SAMPLE_AS_OF = "2026-09-14"   # the sample's last trade date: every ticket is booked by then
 
-needs_raw = pytest.mark.skipif(not RAW.exists(), reason=f"raw file absent: {RAW}")
+needs_raw = pytest.mark.skipif(not RAW.exists(), reason=f"sample file absent: {RAW}")
 
-from data.ingest.common import NDF_CCYS  # the user's NDF list (INR joined it 2026-09-21)
-
-# A handful of the real file's pairs, marked with synthetic non-official SPOT values so
+# A few of the sample's pairs, marked with synthetic non-official SPOT values so
 # `ladder_table(..., source=...)`'s reconciliation-only spot-source filter (still live,
 # generic functionality -- see `spot_table`'s docstring) has some priced and some
-# unpriced currencies to exercise, without depending on the retired BNP_BVAL extractor.
-MARKED_PAIRS = {"USDJPY": 150.0, "USDCAD": 1.35, "USDCHF": 0.88, "USDMXN": 18.5,
-                "USDTRY": 34.0, "USDSEK": 10.5}
-MARKED_CCYS = {"JPY", "CAD", "CHF", "MXN", "TRY", "SEK"}
+# unpriced currencies to exercise.
+MARKED_PAIRS = {"USDJPY": 150.0, "USDCNH": 7.12, "EURUSD": 1.17}
+MARKED_CCYS = {"JPY", "CNH", "EUR"}
 RECON_SOURCE = "MANUAL"
 
 
@@ -48,17 +46,15 @@ def real_conn():
 
 @pytest.fixture(scope="module")
 def real_conn_marks():
-    """Real blotter file (source already 'XLSX', trades_official-visible with no
-    relabelling needed) plus a small set of synthetic reconciliation-only SPOT marks
-    (source='MANUAL') for `ladder_table(..., source='MANUAL')`'s spot-source filter
-    (never `marks_official`). Replaces the pre-2026-09-17 fixture that loaded the
-    retired BNP file's own BNP_BVAL marks via data/bloomberg/bnp_marks.py."""
+    """The sample blotter (source 'XLSX', trades_official-visible) plus a small set of
+    synthetic reconciliation-only SPOT marks (source='MANUAL') for
+    `ladder_table(..., source='MANUAL')`'s spot-source filter (never `marks_official`)."""
     conn = schema.connect(":memory:")
     blotter.load(RAW, conn, strict=False)
     for pair, value in MARKED_PAIRS.items():
         conn.execute(
             "INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-            (AS_OF, pair, AS_OF, "SPOT", value, RECON_SOURCE, AS_OF + "T17:00:00-04:00"),
+            (SAMPLE_AS_OF, pair, SAMPLE_AS_OF, "SPOT", value, RECON_SOURCE, SAMPLE_AS_OF + "T17:00:00-04:00"),
         )
     conn.commit()
     yield conn
@@ -72,48 +68,51 @@ def test_ladder_ccys_come_from_legs(real_conn):
     # 2026-09-17: the ladder's CASH/`positions` column is gone (see
     # test_cash_ladder_never_reads_positions_table below); every ccy in the ladder must
     # be traceable to a trade_legs row.
-    ladder = cash_ladder(real_conn, AS_OF)
+    ladder = cash_ladder(real_conn, SAMPLE_AS_OF)
     leg_ccys = {r[0] for r in real_conn.execute("SELECT DISTINCT ccy FROM trade_legs")}
     assert set(ladder["ccy"]) <= leg_ccys
 
 
 @needs_raw
 def test_ladder_usd_leg_amount_matches_trade_legs(real_conn):
-    ladder = cash_ladder(real_conn, AS_OF)
+    ladder = cash_ladder(real_conn, SAMPLE_AS_OF)
     ladder_usd_legs = ladder[(ladder["ccy"] == "USD") & (ladder["kind"] == "LEG")]["amount"].sum()
     expected = real_conn.execute(
         "SELECT SUM(l.amount) FROM trade_legs l JOIN trades_official t USING (trade_id) "
         "WHERE l.ccy = 'USD' AND l.settles_cash = 1 AND l.settle_date >= :as_of AND t.trade_date <= :as_of",
-        {"as_of": AS_OF},
+        {"as_of": SAMPLE_AS_OF},
     ).fetchone()[0]
     assert math.isclose(ladder_usd_legs, expected, abs_tol=1e-6)
 
 
 @needs_raw
-def test_ladder_excludes_ndf_ccys_includes_try(real_conn):
-    ladder = cash_ladder(real_conn, AS_OF)
-    ccys = set(ladder["ccy"])
-    assert ccys.isdisjoint(NDF_CCYS)
-    assert "TRY" in ccys
+def test_sample_ladder_is_the_fx_hedges_on_their_value_dates(real_conn):
+    """The sample's open FX legs, each on its own value date: futures and FX option
+    notional legs never settle cash, and the USDCNH forward settled 2026-08-19 and the
+    EURUSD spot settled 2026-09-11 are past."""
+    ladder = cash_ladder(real_conn, SAMPLE_AS_OF)
+    assert set(ladder["ccy"]) == {"USD", "CNH", "EUR", "GBP", "JPY", "XAU"}
+    assert set(ladder["settle_date"]) == {"2026-10-21", "2026-11-18", "2026-12-16", "2027-01-20"}
+    cnh = ladder[ladder["ccy"] == "CNH"].set_index("settle_date")["amount"]
+    assert cnh.to_dict() == {"2026-11-18": 10_713_750.0, "2027-01-20": -7_108_000.0}
 
 
 @needs_raw
 def test_ladder_no_settle_date_before_as_of(real_conn):
-    # Vacuous on the real file (every leg settles 2026-09-08..09-21); kept as a sanity
-    # check, but the real boundary behaviour is pinned by
+    # Sanity check on the sample; the real boundary behaviour is pinned by
     # test_ladder_settle_date_boundary_is_inclusive below (synthetic).
-    ladder = cash_ladder(real_conn, AS_OF)
-    assert (ladder["settle_date"] >= AS_OF).all()
+    ladder = cash_ladder(real_conn, SAMPLE_AS_OF)
+    assert (ladder["settle_date"] >= SAMPLE_AS_OF).all()
 
 
 @needs_raw
 def test_delta_per_ccy_real_file_marks_official_empty(real_conn):
-    # No marks are loaded for the real file, so marks_official is empty: only the
-    # forward-leg UNION branch of the delta SQL contributes.
+    # No marks are loaded for the sample, so marks_official is empty: only the
+    # forward / futures leg UNION branch of the delta SQL contributes.
     n_marks = real_conn.execute("SELECT COUNT(*) FROM marks_official").fetchone()[0]
     assert n_marks == 0
 
-    delta = delta_per_ccy(real_conn, AS_OF)
+    delta = delta_per_ccy(real_conn, SAMPLE_AS_OF)
     # delta_usd is NaN for every non-USD ccy (no SPOT marks available)
     non_usd = delta[delta["ccy"] != "USD"]
     assert non_usd["delta_usd"].isna().all()
@@ -124,7 +123,7 @@ def test_delta_per_ccy_real_file_marks_official_empty(real_conn):
     expected = real_conn.execute(
         "SELECT SUM(l.amount) FROM trade_legs l JOIN trades t USING (trade_id) "
         "WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP','FUTURE') AND l.ccy = 'USD' AND l.settle_date > :as_of",
-        {"as_of": AS_OF},
+        {"as_of": SAMPLE_AS_OF},
     ).fetchone()[0]
     assert math.isclose(usd_row["delta"].iloc[0], expected, abs_tol=1e-6)
     assert math.isclose(usd_row["delta_usd"].iloc[0], expected, abs_tol=1e-6)
@@ -249,14 +248,11 @@ def test_cash_ladder_columns_are_leg_only():
 
 
 def test_records_from_db_settle_on_as_of_grid_vs_exposure_boundary():
-    """CLAUDE.md 'Six tabs as views': the grid keeps settle_date >= as_of (a leg
-    settling today is cash that moves today, shown on today's date row). For the
-    delta/exposure path the rule depends on deliverability (2026-09-18, settled cash):
-    a DELIVERABLE leg settling on as_of is cash by close and still carries its
-    currency's delta, so it reaches portfolio_totals through the settled records; an
-    NDF leg settling on as_of delivers nothing and carries no delta by close, so it is
-    excluded from the exposure path -- and that exclusion must actually reach
-    portfolio_totals, not just the raw record list."""
+    """CLAUDE.md 'Tabs as views': the grid keeps settle_date >= as_of (a leg settling
+    today is cash that moves today, shown on today's date row). On the delta/exposure
+    path (2026-09-18, settled cash) a deliverable leg settling on as_of is cash by close
+    and still carries its currency's delta, so it reaches portfolio_totals through the
+    settled records, counted once."""
     from engine.ladder.exposure import build_exposure, portfolio_totals
     from engine.ladder.exposure_adapter import SETTLED, exposure_records_from_db, records_from_db
 
@@ -280,29 +276,6 @@ def test_records_from_db_settle_on_as_of_grid_vs_exposure_boundary():
     totals = portfolio_totals(build_exposure(exposure_records, rate))
     assert math.isclose(totals["net_usd"], 100.0 * 0.6)
     assert totals["missing"] == []
-
-    # NDF leg FIXING on as_of (2026-09-21: NDFs are dated on fixing dates, value date
-    # less 2 business days -- here value date Wed 2026-08-19, fixing Mon 2026-08-17 =
-    # as_of): on the grid under its fixing date; by close it is gone (user, 2026-09-22:
-    # "0 delta and 0 carry, they just disappears as they expired"): nothing in the
-    # exposure records, nothing in Settled cash, zero exposure a real 0.0, never NaN.
-    ndf = _mk_conn()
-    ndf.execute("INSERT INTO instruments VALUES ('USDKRW','FX','USD','KRW',1,1,'USDKRW Curncy','9999-12-31')")
-    _insert_trade(ndf, "n1", "USDKRW", "FX_FWD", 100.0)
-    ndf.execute("INSERT INTO trade_legs VALUES ('n1',1,'FX_NEAR','USD',100.0,'2026-08-01','2026-08-19',1400.0,0)")
-    ndf.execute("INSERT INTO trade_legs VALUES ('n1',2,'FX_NEAR','KRW',-140000.0,'2026-08-01','2026-08-19',1400.0,0)")
-    ndf.execute("UPDATE trades SET price = 1400.0 WHERE trade_id = 'n1'")  # a fill the rate check accepts
-    ndf.commit()
-    ndf_grid, ndf_named = records_from_db(ndf, AS_OF)
-    assert any(r["currency"] == "KRW" and r["settlement_date"] == AS_OF and r["value_date"] == "2026-08-19"
-               for r in ndf_grid)
-    assert ndf_named == []
-    assert not any(r["settlement_date"] == SETTLED for r in ndf_grid)
-    ndf_exposure, ndf_named = exposure_records_from_db(ndf, AS_OF)
-    assert ndf_exposure == [] and ndf_named == []
-    totals = portfolio_totals(build_exposure(ndf_exposure, rate))
-    assert totals["net_usd"] == 0.0 and totals["gross_usd"] == 0.0
-    assert totals["missing"] == [] and totals["currencies"] == 0
 
     # A leg settling one day later than as_of must still be included on both paths.
     _insert_trade(conn, "t2", "AUDUSD", "FX_FWD", 50.0)
@@ -332,14 +305,16 @@ def test_portfolio_totals_empty_record_set_returns_zero_not_nan():
 
 
 def test_settles_cash_zero_excluded():
+    """A leg that never settles cash (a future's or an FX option's notional) is not on
+    the grid."""
     conn = _mk_conn()
-    _insert_instrument(conn, "USDBRL", "USD", "BRL")
-    _insert_trade(conn, "t1", "USDBRL", "FX_FWD", 100.0)
-    _insert_leg(conn, "t1", 1, "FX_NEAR", "BRL", -500.0, "2026-08-20", settles_cash=0)
+    _insert_instrument(conn, "CUZ6 Comdty", "CU", "CNY", asset_class="FUTURE")
+    _insert_trade(conn, "t1", "CUZ6 Comdty", "FUTURE", 5.0)
+    _insert_leg(conn, "t1", 1, "NOTIONAL", "CNY", 1_950_000.0, "2026-12-15", settles_cash=0)
     conn.commit()
 
     ladder = cash_ladder(conn, AS_OF)
-    assert "BRL" not in set(ladder["ccy"])
+    assert ladder.empty
 
 
 def test_convert_to_usd_ignores_non_official_source():
@@ -504,8 +479,8 @@ def test_delta_per_ccy_fx_option_non_official_delta_mark_ignored():
 
 
 # --------------------------------------------------------------------------- ladder_table
-# 2026-09-17 ("no bnp fall back"): these four tests run against `real_conn_marks`, which
-# loads the live blotter parser's real sample data plus a small synthetic set of
+# 2026-09-17 ("no bnp fall back"): these tests run against `real_conn_marks`, which
+# loads the synthetic sample blotter through the live parser plus a small set of
 # reconciliation-only SPOT marks (`MARKED_PAIRS`/`MARKED_CCYS` above) -- `ladder_table`'s
 # own `source=` parameter is untouched (still a valid, generic reconciliation lookup
 # into the raw `marks` table, unrelated to the live app's rate path -- see
@@ -515,16 +490,16 @@ def test_delta_per_ccy_fx_option_non_official_delta_mark_ignored():
 
 @needs_raw
 def test_ladder_table_each_ccy_appears_once(real_conn_marks):
-    ladder = cash_ladder(real_conn_marks, AS_OF)
-    table = ladder_table(real_conn_marks, AS_OF, source=RECON_SOURCE)
+    ladder = cash_ladder(real_conn_marks, SAMPLE_AS_OF)
+    table = ladder_table(real_conn_marks, SAMPLE_AS_OF, source=RECON_SOURCE)
     assert set(table["ccy"]) == set(ladder["ccy"])
     assert table["ccy"].is_unique
 
 
 @needs_raw
 def test_ladder_table_total_matches_ladder_sum_per_ccy(real_conn_marks):
-    ladder = cash_ladder(real_conn_marks, AS_OF)
-    table = ladder_table(real_conn_marks, AS_OF, source=RECON_SOURCE)
+    ladder = cash_ladder(real_conn_marks, SAMPLE_AS_OF)
+    table = ladder_table(real_conn_marks, SAMPLE_AS_OF, source=RECON_SOURCE)
     expected_totals = ladder.groupby("ccy")["amount"].sum()
     for _, row in table.iterrows():
         assert math.isclose(row["total"], expected_totals[row["ccy"]], abs_tol=1e-6), row["ccy"]
@@ -532,7 +507,7 @@ def test_ladder_table_total_matches_ladder_sum_per_ccy(real_conn_marks):
 
 @needs_raw
 def test_ladder_table_usd_nan_exactly_for_ccys_without_bnp_spot(real_conn_marks):
-    table = ladder_table(real_conn_marks, AS_OF, source=RECON_SOURCE)
+    table = ladder_table(real_conn_marks, SAMPLE_AS_OF, source=RECON_SOURCE)
     nan_ccys = set(table.loc[table["usd"].isna(), "ccy"])
     # USD itself always converts at 1.0, never NaN.
     assert "USD" not in nan_ccys
@@ -544,7 +519,7 @@ def test_ladder_table_usd_nan_exactly_for_ccys_without_bnp_spot(real_conn_marks)
 
 @needs_raw
 def test_ladder_table_rows_with_usd_come_first_sorted_by_abs_usd_desc(real_conn_marks):
-    table = ladder_table(real_conn_marks, AS_OF, source=RECON_SOURCE)
+    table = ladder_table(real_conn_marks, SAMPLE_AS_OF, source=RECON_SOURCE)
     has_usd = table["usd"].notna()
     n_with = has_usd.sum()
     # all "with usd" rows precede all "without usd" rows
@@ -559,11 +534,11 @@ def test_ladder_table_has_no_cash_only_currency(real_conn_marks):
     """No currency should appear in `ladder_table` solely because of a `positions` CASH
     row any more -- every ccy present must be traceable to at least one `trade_legs`
     row (the removed CASH column had no such backing)."""
-    ladder = cash_ladder(real_conn_marks, AS_OF)
+    ladder = cash_ladder(real_conn_marks, SAMPLE_AS_OF)
     leg_ccys = {r[0] for r in real_conn_marks.execute(
         "SELECT DISTINCT l.ccy FROM trade_legs l JOIN trades_official t USING (trade_id) "
         "WHERE l.settles_cash = 1 AND l.settle_date >= :as_of AND t.trade_date <= :as_of",
-        {"as_of": AS_OF},
+        {"as_of": SAMPLE_AS_OF},
     )}
     assert set(ladder["ccy"]) == leg_ccys
 
@@ -1017,260 +992,3 @@ def test_net_gross_usd_passes_through_commodities(tmp_path):
     assert result["commodities"][0]["currency"] == "XAU"
     assert math.isclose(result["commodities"][0]["usd_delta"], 1_750_000.0)
 
-
-
-# --------------------------------------------------------------------------- NDFs (user decisions 2026-09-21)
-# "NDFs, show fixing dates instead" and "always show 1m forward date price, not spot":
-# engine/ladder/ndf.py, and what exposure_adapter / usd_marks / exposure do with it.
-@pytest.fixture
-def weekdays_only(monkeypatch, tmp_path):
-    """Monday-to-Friday calendar, so the dates below do not move with config/holidays.txt."""
-    import engine.pnl.calendar as cal
-    monkeypatch.setattr(cal, "_DEFAULT_HOLIDAYS_PATH", tmp_path / "no-holidays.txt")
-
-
-def test_ndf_fixing_date_is_value_date_less_two_business_days():
-    from engine.ladder.ndf import FIXING_CAPTION, fixing_date
-
-    none = frozenset()
-    assert fixing_date("2026-09-18", none) == "2026-09-16"   # Fri -> Wed
-    assert fixing_date("2026-09-21", none) == "2026-09-17"   # Mon -> Thu, over the weekend
-    assert fixing_date("2026-09-22", none) == "2026-09-18"   # Tue -> Fri
-    # the app's only calendar: a holiday is not a business day (Labor Day 2026-09-07)
-    assert fixing_date("2026-09-08", {"2026-09-07"}) == "2026-09-03"
-    assert fixing_date("2026-09-08", none) == "2026-09-04"
-    # without an override it reads config/holidays.txt through engine/pnl/calendar.py
-    from engine.pnl.calendar import load_holidays
-    assert fixing_date("2026-09-08") == fixing_date("2026-09-08", load_holidays())
-    # never guessed at: the settled-cash sentinel or a bad cell comes back unchanged
-    assert fixing_date("settled", none) == "settled"
-    assert "value date less 2 business days" in FIXING_CAPTION
-
-
-def test_ndf_ticket_is_decided_by_currency_not_only_by_the_stored_flag():
-    from engine.ladder.ndf import currency_label, is_ndf_pair
-
-    for pair in ("USDKRW", "USDIDR", "USDINR", "USDTWD", "USDBRL"):
-        assert is_ndf_pair(pair, 0)            # INR joined 2026-09-21: an old row still says is_ndf = 0
-    assert is_ndf_pair("EURBRL", 0)
-    assert not is_ndf_pair("USDJPY", 0) and not is_ndf_pair("USDTRY", 0) and not is_ndf_pair("USDMXN", 0)
-    assert is_ndf_pair("USDJPY", 1)            # the stored flag still counts
-    assert not is_ndf_pair("ESU6 Index", 0) and not is_ndf_pair("", 0)
-    assert currency_label("KRW") == "KRW (NDF)" and currency_label("JPY") == "JPY"
-
-
-def _ndf_book(is_ndf=1, settles_cash=0, pair="USDKRW", ccy="KRW"):
-    """One NDF (value date Mon 2026-09-21 -> fixing Thu 2026-09-17) and one deliverable
-    USDJPY forward with the same value date."""
-    conn = _mk_conn()
-    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
-                 (pair, "FX", "USD", ccy, 1.0, is_ndf, f"{pair} Curncy", "9999-12-31"))
-    _insert_instrument(conn, "USDJPY", "USD", "JPY")
-    _insert_trade(conn, "n1", pair, "FX_FWD", -1_000_000.0)
-    _insert_leg(conn, "n1", 1, "FX_NEAR", "USD", -1_000_000.0, "2026-09-21", settles_cash, rate=1400.0)
-    _insert_leg(conn, "n1", 2, "FX_NEAR", ccy, 1_400_000_000.0, "2026-09-21", settles_cash, rate=1400.0)
-    _insert_trade(conn, "j1", "USDJPY", "FX_FWD", 1_000_000.0)
-    _insert_leg(conn, "j1", 1, "FX_NEAR", "USD", 1_000_000.0, "2026-09-21", rate=150.0)
-    _insert_leg(conn, "j1", 2, "FX_NEAR", "JPY", -150_000_000.0, "2026-09-21", rate=150.0)
-    conn.commit()
-    return conn
-
-
-def _realise(conn, trade_id, pair, ccy, settle_date, pnl_usd):
-    conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount,"
-                 " usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd,"
-                 " frozen_at, note) VALUES (?,?,'FX_FWD',?,?,0.0,0.0,'SPOT',0.000714,?,'BBG_BFXFORWARD',?,"
-                 " '2026-09-22T00:00:00+00:00','')", (trade_id, pair, ccy, settle_date, settle_date, pnl_usd))
-    conn.commit()
-
-
-def test_ndf_records_sit_under_their_fixing_date_and_the_rules_read_it(weekdays_only):
-    from engine.ladder.exposure_adapter import SETTLED, exposure_records_from_db, records_from_db
-
-    conn = _ndf_book()
-    # before the fixing: on the grid and in the delta, under the FIXING date
-    for fn in (records_from_db, exposure_records_from_db):
-        records, unresolved = fn(conn, "2026-09-16")
-        assert unresolved == []
-        ndf = [r for r in records if r["trade_id"] == "n1"]
-        assert {r["currency"] for r in ndf} == {"USD", "KRW"}      # every record of the ticket, USD leg too
-        assert all((r["settlement_date"], r["fixing_date"], r["value_date"]) ==
-                   ("2026-09-17", "2026-09-17", "2026-09-21") for r in ndf)
-        assert all(r["is_ndf"] == 1 and r["settles_cash"] == 0 for r in ndf)
-        # a deliverable ticket is untouched: its own value date, no fixing date
-        jpy = [r for r in records if r["trade_id"] == "j1"]
-        assert all((r["settlement_date"], r["fixing_date"], r["value_date"]) ==
-                   ("2026-09-21", "", "2026-09-21") for r in jpy)
-
-    # on the fixing date: the grid still shows it under that date (fixing >= as_of); by
-    # close it is gone (fixing <= as_of): no delta, nothing in Settled cash, nothing named
-    grid, named = records_from_db(conn, "2026-09-17")
-    assert {r["settlement_date"] for r in grid if r["trade_id"] == "n1"} == {"2026-09-17"} and named == []
-    exposure, named = exposure_records_from_db(conn, "2026-09-17")
-    assert [r for r in exposure if r["trade_id"] == "n1"] == [] and named == []
-    assert {r["trade_id"] for r in exposure} == {"j1"}
-
-    # fixed (user, 2026-09-22: "once they expire, they should disappear, not become setteld
-    # cash ... 0 delta and 0 carry"): nowhere on the ladder from the day after the fixing,
-    # through the value date and beyond, realised or not
-    for day in ("2026-09-18", "2026-09-21", "2026-09-22"):
-        for fn in (records_from_db, exposure_records_from_db):
-            records, named = fn(conn, day)
-            assert [r for r in records if r["trade_id"] == "n1"] == [] and named == []
-
-    # realised by the ledger: still nothing on the ladder (its USD settlement is P&L, shown
-    # in the Blotter, not settled cash), and the deliverable forward next to it settles as
-    # its legs
-    _realise(conn, "n1", "USDKRW", "KRW", "2026-09-21", 4_321.0)
-    for fn in (records_from_db, exposure_records_from_db):
-        records, named = fn(conn, "2026-09-22")
-        assert named == [] and [r for r in records if r["trade_id"] == "n1"] == []
-        assert {(r["trade_id"], r["currency"], r["settlement_date"]) for r in records} == {("j1", "USD", SETTLED), ("j1", "JPY", SETTLED)}
-
-
-def test_usdinr_row_stored_as_deliverable_is_still_treated_as_the_ndf_it_is(weekdays_only):
-    """INR joined NDF_CCYS on 2026-09-21: a database loaded before that carries
-    is_ndf = 0 / settles_cash = 1 on USDINR until the next upload."""
-    from engine.ladder.exposure_adapter import SETTLED, exposure_records_from_db, records_from_db
-
-    conn = _ndf_book(is_ndf=0, settles_cash=1, pair="USDINR", ccy="INR")
-    records, named = records_from_db(conn, "2026-09-16")
-    inr = [r for r in records if r["trade_id"] == "n1"]
-    assert named == [] and len(inr) == 2
-    assert all(r["settlement_date"] == "2026-09-17" and r["is_ndf"] == 1 and r["settles_cash"] == 0 for r in inr)
-
-    # after the fixing no INR is "delivered" into Settled cash in either mode, and the
-    # ticket is gone, realised or not (2026-09-22); the deliverable JPY forward next to it
-    # still settles as its legs
-    _realise(conn, "n1", "USDINR", "INR", "2026-09-21", -250.0)
-    for fn in (records_from_db, exposure_records_from_db):
-        records, named = fn(conn, "2026-09-23")
-        assert named == [] and not any(r["trade_id"] == "n1" for r in records)
-        assert {(r["currency"], r["settlement_date"]) for r in records} == {("USD", SETTLED), ("JPY", SETTLED)}
-
-
-def test_ndf_legs_sharing_one_fixing_date_become_one_record(weekdays_only):
-    """Value dates Sat 2026-09-19 and Mon 2026-09-21 both fix on Thu 2026-09-17: one
-    record per currency, or build_exposure's (trade, currency, date) key would clash."""
-    from engine.ladder.exposure import build_exposure
-    from engine.ladder.exposure_adapter import records_from_db
-
-    conn = _mk_conn()
-    _insert_instrument(conn, "USDKRW", "USD", "KRW")
-    _insert_trade(conn, "s1", "USDKRW", "FX_SWAP", 1_000_000.0)
-    _insert_leg(conn, "s1", 1, "FX_NEAR", "KRW", -1_400_000_000.0, "2026-09-19", 0)
-    _insert_leg(conn, "s1", 2, "FX_FAR", "KRW", 1_401_000_000.0, "2026-09-21", 0)
-    conn.commit()
-    records, _ = records_from_db(conn, "2026-09-16")
-    assert [(r["currency"], r["settlement_date"], r["local_amount"]) for r in records] == \
-        [("KRW", "2026-09-17", 1_000_000.0)]
-    assert build_exposure(records, {}).ladder.loc["2026-09-17", "KRW"] == 1_000_000.0
-
-
-def _ndf_marks_conn():
-    conn = _mk_conn()
-    for pair, quote in (("USDKRW", "KRW"), ("USDBRL", "BRL"), ("USDJPY", "JPY")):
-        _insert_instrument(conn, pair, "USD", quote)
-    for pair, value in (("USDKRW", 1380.0), ("USDBRL", 5.4), ("USDJPY", 150.0)):
-        _insert_mark(conn, AS_OF, pair, AS_OF, "SPOT", value, "BBG_BFXFORWARD")
-    # NDF_1M as the Bloomberg pull writes it: on the USD pair, settle_date = as_of_date,
-    # value as quoted, official source. Latest as_of_date, then latest snapped_at, wins.
-    _insert_mark(conn, "2026-08-14", "USDKRW", "2026-08-14", "NDF_1M", 1390.0, "BBG_BFXFORWARD",
-                 snapped_at="2026-08-14T17:00:00-04:00")
-    _insert_mark(conn, AS_OF, "USDKRW", AS_OF, "NDF_1M", 1394.5, "BBG_BFXFORWARD")
-    # never official: a hand-typed 1M price for BRL does not make BRL priced
-    _insert_mark(conn, AS_OF, "USDBRL", AS_OF, "NDF_1M", 5.45, "MANUAL")
-    conn.commit()
-    return conn
-
-
-def test_ndf_currencies_are_priced_at_the_1m_ndf_mark_never_spot():
-    import datetime as dt
-    from data.bloomberg.live import rates_from_marks
-    from engine.ladder.exposure import RATE_FIELDS, build_exposure, portfolio_totals
-    from engine.ladder.ndf import apply_ndf_1m_rates, missing_rate_reason
-
-    conn = _ndf_marks_conn()
-    now = dt.datetime(2026, 8, 17, 19, 1, tzinfo=dt.timezone.utc)   # one minute after the snap
-    spot = rates_from_marks(conn, now=now)
-    assert spot["KRW"]["rate"] == 1380.0 and "BRL" in spot           # what the tab used before
-    rates = apply_ndf_1m_rates(conn, spot, now=now)
-
-    krw = rates["KRW"]
-    assert krw["rate"] == 1394.5 and krw["inverted"] is True and krw["pair"] == "USDKRW"
-    assert (krw["mark_type"], krw["ticker"], krw["label"]) == ("NDF_1M", "KWN+1M Curncy", "KWN+1M")
-    assert krw["source"] == "BBG_BFXFORWARD" and krw["as_of_date"] == AS_OF and krw["stale"] is False
-    assert all(f in krw for f in RATE_FIELDS)                        # the shape build_exposure validates
-    assert apply_ndf_1m_rates(conn, spot, now=now + dt.timedelta(days=3))["KRW"]["stale"] is True
-    # no official NDF_1M mark: NO rate, although an official SPOT is on file
-    assert "BRL" not in rates
-    # every other currency passes through, and the caller's dict is not touched
-    assert rates["JPY"] == spot["JPY"] and spot["KRW"]["rate"] == 1380.0
-
-    records = [
-        {"trade_id": "k", "settlement_date": "2026-09-17", "book": "B", "currency": "KRW", "local_amount": 1_394_500.0},
-        {"trade_id": "b", "settlement_date": "2026-09-17", "book": "B", "currency": "BRL", "local_amount": 5_400.0},
-        {"trade_id": "j", "settlement_date": "2026-09-21", "book": "B", "currency": "JPY", "local_amount": 150_000.0},
-    ]
-    result = build_exposure(records, rates)
-    summary = result.summary.set_index("currency")
-    assert math.isclose(summary.loc["KRW", "usd_delta"], 1_000.0)    # 1,394,500 / 1,394.5, not / 1,380
-    assert summary.loc["BRL", "status"] == "MISSING_RATE" and math.isnan(summary.loc["BRL", "usd_delta"])
-    message = result.status.set_index("currency").loc["BRL", "message"]
-    assert "1M NDF price for BRL (BCN+1M) is missing" in message and '"Pull Bloomberg now"' in message
-    assert "SPOT" not in message
-    totals = portfolio_totals(result)
-    assert totals["missing"] == ["BRL"] and math.isnan(totals["net_usd"])
-    # the sentence for the header / headline: NDF and spot currencies named apart
-    assert missing_rate_reason(["BRL"], AS_OF) == (
-        'the 1M NDF price is missing for BRL (BCN+1M): press "Pull Bloomberg now" to fetch it '
-        "(NDF currencies are never valued at spot)")
-    assert missing_rate_reason(["BRL", "NOK"], AS_OF).startswith(f"no official SPOT for {AS_OF}: NOK; the 1M NDF")
-    assert missing_rate_reason([]) == ""
-
-
-def test_a_mis_scaled_1m_ndf_mark_is_named_as_such_not_as_a_spot():
-    from engine.ladder.exposure import build_exposure
-
-    records = [{"trade_id": "k1", "settlement_date": "2026-09-17", "book": "HA", "currency": "KRW",
-                "local_amount": 1_413_138_000.0, "currency_pair": "USDKRW", "entry_rate": 1413.138,
-                "product_type": "FX_FWD"}]
-    rates = {"KRW": {"rate": 1.3945, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "t",
-                     "stale": False, "pair": "USDKRW", "mark_type": "NDF_1M", "label": "KWN+1M"}}
-    result = build_exposure(records, rates)
-    assert result.summary.set_index("currency").loc["KRW", "status"] == "SUSPECT_RATE"
-    assert result.status.set_index("currency").loc["KRW", "message"].startswith(
-        "official NDF 1M KWN+1M 1.3945 is 1,013x away")
-
-
-def test_usd_equivalent_of_an_ndf_currency_is_the_1m_ndf_rate_on_every_date():
-    from data.bloomberg.live import rates_from_marks
-    from engine.ladder.exposure import build_exposure, ladder_usd_cells
-    from engine.ladder.exposure_adapter import SETTLED
-    from engine.ladder.ndf import apply_ndf_1m_rates
-    from engine.ladder.usd_marks import BASIS_NDF_1M, forward_usd_rates
-
-    conn = _ndf_marks_conn()
-    # forward pillars on file for both pairs: JPY uses its own, KRW must ignore them
-    _insert_mark(conn, AS_OF, "USDKRW", "2026-11-19", "FWD_OUTRIGHT", 1401.0, "BBG_BFXFORWARD")
-    _insert_mark(conn, AS_OF, "USDJPY", "2026-11-19", "FWD_OUTRIGHT", 148.0, "BBG_BFXFORWARD")
-    conn.commit()
-    rates = apply_ndf_1m_rates(conn, rates_from_marks(conn))
-    days = [AS_OF, "2026-09-17", "2026-11-19", "2027-03-01", SETTLED]
-    marks = forward_usd_rates(conn, rates, [(c, d) for c in ("KRW", "BRL", "JPY") for d in days])
-
-    for day in days:
-        entry = marks[("KRW", day)]
-        assert math.isclose(entry["rate"], 1 / 1394.5) and entry["quoted"] == 1394.5
-        assert (entry["basis"], entry["pair"], entry["ticker"]) == (BASIS_NDF_1M, "USDKRW", "KWN+1M Curncy")
-        assert ("BRL", day) not in marks                  # 1M price missing: blank, never spot
-    assert BASIS_NDF_1M == "NDF 1M"
-    assert marks[("JPY", "2026-11-19")]["basis"] == "outright" and marks[("JPY", AS_OF)]["basis"] == "spot"
-
-    records = [
-        {"trade_id": "k", "settlement_date": "2026-11-19", "book": "B", "currency": "KRW", "local_amount": 1_394_500.0},
-        {"trade_id": "b", "settlement_date": "2026-11-19", "book": "B", "currency": "BRL", "local_amount": 5_400.0},
-    ]
-    cells = ladder_usd_cells(build_exposure(records, rates), marks)
-    assert math.isclose(cells.loc["2026-11-19", "KRW"], 1_000.0)
-    assert math.isnan(cells.loc["2026-11-19", "BRL"])

@@ -222,8 +222,8 @@ def test_informational_probes_print_both_scale_fields_and_the_1500_close_bar(cap
 
 class _AnswerAllSession(_Session):
     """Every ReferenceDataRequest security gets a number for every field asked, except
-    'RBACOR Index' (a securityError) and PX_MID on the option (a field exception); the
-    HistoricalDataRequest answers two days, one carrying SETTLE_DT."""
+    'ADSO1 Curncy' (a securityError); the HistoricalDataRequest answers two days, one
+    carrying SETTLE_DT."""
 
     def sendRequest(self, request):
         self.sent.append(request)
@@ -231,14 +231,10 @@ class _AnswerAllSession(_Session):
             fields = request.getElement("fields").items
             rows = []
             for t in request.getElement("securities").items:
-                if t == "RBACOR Index":
+                if t == "ADSO1 Curncy":
                     rows.append({"security": t, "securityError": {"message": "Unknown/Invalid Security"}})
                     continue
-                answered = {f: 1.2345 for f in fields if not (f == "PX_MID" and t.endswith("Index"))}
-                row = {"security": t, "fieldData": answered}
-                if "PX_MID" in fields and t.endswith("Index"):
-                    row["fieldExceptions"] = [{"fieldId": "PX_MID", "errorInfo": {"message": "Not applicable"}}]
-                rows.append(row)
+                rows.append({"security": t, "fieldData": {f: 1.2345 for f in fields}})
             self._next = {"securityData": rows}
         elif request.kind == "HistoricalDataRequest":
             self._next = {"securityData": {"security": "EURUSD1M Curncy", "fieldData": [
@@ -248,41 +244,40 @@ class _AnswerAllSession(_Session):
             super().sendRequest(request)
 
 
-def test_unverified_ticker_probes_ask_the_apps_own_tickers_and_print_what_came_back(tmp_path, capsys):
+def test_unverified_ticker_probes_ask_the_apps_own_tickers_and_print_what_came_back(capsys):
     tool = _load_tool()
     rep, session = tool.Report(), _AnswerAllSession()
-    db = tmp_path / "risk.db"
-    _seed_db(db)                                                   # no bbg_library rows: the sample option ticker is tried
-    tool.check_ndf_1m(rep, _Blpapi, session, session)
     tool.check_tenor_history(rep, _Blpapi, session, session)
-    tool.check_listed_option(rep, _Blpapi, session, session, db)
     tool.check_ois_tickers(rep, _Blpapi, session, session)
     tool.check_vol_tickers(rep, _Blpapi, session, session)
 
     sent = {r.kind: [] for r in session.sent}
     for r in session.sent:
         sent[r.kind].append(r.getElement("securities").items)
-    assert sent["ReferenceDataRequest"][0] == ["KWN+1M Curncy", "IHN+1M Curncy", "IRN+1M Curncy", "NTN+1M Curncy", "BCN+1M Curncy"]
-    assert sent["ReferenceDataRequest"][1] == ["SPX US 10/16/26 P7615 Index"]
-    assert sent["ReferenceDataRequest"][2] == ["SPX Index"]
-    assert "EESWE1 Curncy" in sent["ReferenceDataRequest"][3] and "RBACOR Index" in sent["ReferenceDataRequest"][3]
-    assert sent["ReferenceDataRequest"][4][:5] == ["EURUSDV1M BGN Curncy", "EURUSD25R1M BGN Curncy", "EURUSD25B1M BGN Curncy",
+    assert sent["ReferenceDataRequest"][0] == ["EESWE1 Curncy", "BPSWS1 Curncy", "JYSO1 Curncy",
+                                               "SFSNT1 Curncy", "CDSO1 Curncy", "ADSO1 Curncy"]
+    assert sent["ReferenceDataRequest"][1][:5] == ["EURUSDV1M BGN Curncy", "EURUSD25R1M BGN Curncy", "EURUSD25B1M BGN Curncy",
                                                    "EURUSD10R1M BGN Curncy", "EURUSD10B1M BGN Curncy"]
-    hist = session.sent[1]
+    hist = session.sent[0]
     assert hist.kind == "HistoricalDataRequest" and hist.getElement("securities").items == ["EURUSD1M Curncy"]
     assert hist.getElement("fields").items == ["PX_LAST", "SETTLE_DT"] and len(hist.scalars["startDate"]) == 8
 
-    for name in ("ndf1m", "tenorhist", "spxopt", "ois", "vol"):
+    for name in ("tenorhist", "ois", "vol"):
         assert rep.checks[name]["required"] is False
-    assert rep.checks["ndf1m"]["ok"] is True and "5/5 answered PX_LAST" in rep.checks["ndf1m"]["detail"]
     assert rep.checks["vol"]["ok"] is True and "10/10 answered PX_LAST" in rep.checks["vol"]["detail"]
     assert rep.checks["ois"]["ok"] is False                                   # one securityError, in Bloomberg's words
-    assert "RBACOR Index: nothing [securityError: Unknown/Invalid Security]" in rep.checks["ois"]["detail"]
-    opt = rep.checks["spxopt"]
-    assert opt["ok"] is True and opt["dividend_field"] == "IDX_EST_DVD_YLD"
-    assert "PX_MID: Not applicable" in opt["detail"]                           # the field exception is shown, not hidden
+    assert "ADSO1 Curncy: nothing [securityError: Unknown/Invalid Security]" in rep.checks["ois"]["detail"]
     ten = rep.checks["tenorhist"]
     assert ten["ok"] is True and ten["rows_with_settle_dt"] == 1 and "2 row(s), 1 with SETTLE_DT" in ten["detail"]
     assert rep.all_required_ok is False                                       # still informational only
     out = capsys.readouterr().out
-    assert "[CHECK ] ois" in out and "[OK    ] ndf1m" in out
+    assert "[CHECK ] ois" in out and "[OK    ] vol" in out
+
+
+def test_the_macro_probes_are_gone():
+    """Phase 2 of the commodity conversion (user, 2026-09-24): no NDF, listed index option or
+    overnight fixing step is asked of Bloomberg any more."""
+    tool = _load_tool()
+    for name in ("check_ndf_1m", "check_listed_option", "listed_option_tickers", "NDF_1M_TICKERS"):
+        assert not hasattr(tool, name), name
+    assert not any(t.endswith(" Index") for t in tool.OIS_PROBE_TICKERS)

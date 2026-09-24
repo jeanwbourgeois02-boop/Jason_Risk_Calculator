@@ -21,11 +21,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Union
 
 MARKS_COLUMNS = ["as_of_date", "instrument_id", "settle_date", "mark_type", "value", "source", "snapped_at"]
 
-# CLAUDE.md "Data contract -> Tables" (marks.mark_type comment).
-MARK_TYPES = {
-    "SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "PAR_RATE", "PV_USD", "DV01_USD", "PREMIUM", "DELTA",
-    "NDF_1M", "NDF_FIX",
-}
+# CLAUDE.md "Data contract -> Tables" (marks.mark_type comment). The swap marks (PAR_RATE,
+# PV_USD, DV01_USD) and the NDF prices (NDF_1M, NDF_FIX) left on 2026-09-24 (commodity
+# conversion Phase 2): a CSV row carrying one is rejected with its reason.
+MARK_TYPES = {"SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "PREMIUM", "DELTA"}
 
 # CLAUDE.md "Data contract -> Tables" (marks.source comment) plus BBG_INTERP: a new
 # non-official source for FWD_OUTRIGHT rows produced by linear interpolation of forward

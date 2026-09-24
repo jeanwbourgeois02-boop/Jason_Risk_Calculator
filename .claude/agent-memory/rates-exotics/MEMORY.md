@@ -1,1 +1,2 @@
-- [Phase 6 rates_vol conventions](conventions.md) — sign convention, curve-input pricing (flat approx removed), DV01 curve-bump, SABR/HW calibration, book.py CLI, Bermudan model risk
+- [Lane retired 2026-09-24](lane_retired_2026_09_24.md) — engine/rates_vol deleted in commodity Phase 2; old tables left on DBs; code only in git history
+- [Phase 6 rates_vol conventions (historical)](conventions.md) — describes the deleted package: sign, curve inputs, DV01 bump, SABR/HW calibration, Bermudan model risk

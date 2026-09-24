@@ -1,2 +1,3 @@
 - [Risk tab layout decisions](risk-tab-layout-decisions.md) — n/a-vs-blank cell rule, pinned Book row, card hovers, flags, no date picker; built 2026-09-22
 - [Dash component behaviour](dash-component-behaviour.md) — unset props are absent attrs, title hovers, DataTable tooltip props, _setup_server validation, zsh =word gotcha
+- [Retired macro underlyers](retired-macro-underlyers.md) — rates / SPX rows, DV01, equity scenario line not rendered since 2026-09-24; filters removable later

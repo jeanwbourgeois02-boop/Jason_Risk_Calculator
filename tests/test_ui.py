@@ -568,8 +568,7 @@ def test_every_static_callback_id_exists_in_layout(tmp_path):
     dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
                         "blotter-row-detail-", "options-terms-",
                         "blotter-fx-",  # the FX sub-tab's trade table and its "rows shown" currency table (2026-09-21)
-                        "manual-",  # per-sub-tab, rendered by callback (manual-*: Manual entry sub-tab, 2026-09-18)
-                        "rates-")   # rendered inside the Blotter's Rates sub-tab (ui.tabs.rates.build_layout), like the Options ids
+                        "manual-")  # per-sub-tab, rendered by callback (manual-*: Manual entry sub-tab, 2026-09-18)
     missing = []
     for key, cb in app.callback_map.items():
         for kind in ("inputs", "state"):
@@ -835,10 +834,9 @@ def test_blotter_confirm_shows_loader_summary_on_page(tmp_path, monkeypatch):
     app = uiapp.create_app(db_path=db_path, start_feed=False)
     fn = _report_confirm_callback(app)
 
-    summary = ("Imported blotter.csv: 2 trades (1 forwards, 1 futures, 0 options, 0 rate swaps), "
+    summary = ("Imported blotter.csv: 2 trades (1 forwards, 1 futures, 0 options), "
                "4 legs. 0 currency rows seen (no position snapshot -- this file has no EOD balance "
-               "grain). Excluded: 0 rows from other funds/status, 0 malformed IRS rows, "
-               "0 other unsupported rows.")
+               "grain). Excluded: 0 rows from other funds/status, 0 other unsupported rows.")
     monkeypatch.setattr("ui.uploads.import_blotter", lambda *a, **k: summary)
     monkeypatch.setattr("ui.uploads.decode", lambda contents: b"irrelevant")
     monkeypatch.setattr("ui.app.load_summary", lambda db_path: {"as_of_date": "none", "trades": 2})
@@ -1040,7 +1038,7 @@ def test_blotter_fx_scope_empty_still_renders_table(tmp_path):
 
 
 def test_blotter_fx_scope_has_no_reactive_strip_filter_or_detail_callback(tmp_path):
-    """FX (like Rates) is excluded from the generic strip/filter/detail callback loop --
+    """FX is excluded from the generic strip/filter/detail callback loop --
     its rows aren't value_book-shaped (module docstrings). It still shows a P&L strip
     (2026-09-17), but that strip is built statically inside `blotter_fx.build_layout`
     on every render of the sub-tab, not re-scoped by any reactive callback of its own.
@@ -1064,9 +1062,9 @@ def test_blotter_fx_scoped_trade_ids_is_fx_only():
     them (it disagreed with the Total book's FX row when it did)."""
     df = pd.DataFrame({
         "trade_id": ["A", "B", "C", "D", "E"],
-        "product": ["FX_FWD", "FUTURE", "IRS", "FX_OPTION", "FX_SWAP"],
+        "product": ["FX_FWD", "FUTURE", "FX_SPOT", "FX_OPTION", "FX_SWAP"],
     })
-    assert blotter_fx._scoped_trade_ids(df) == ["A", "E"]
+    assert blotter_fx._scoped_trade_ids(df) == ["A", "C", "E"]
     assert blotter_fx._scoped_trade_ids(pd.DataFrame(columns=["trade_id", "product"])) == []
 
 
@@ -1279,7 +1277,7 @@ def _currency_book(db_path, aud_history=True):
             "bbg_ticker, expiry_date) VALUES (?,'FX',?,?,1,0,?,'9999-12-31')", (pair, base, quote, pair + " Curncy"))
     conn.execute(
         "INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
-        "bbg_ticker, expiry_date) VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
+        "bbg_ticker, expiry_date) VALUES ('CLZ26 Comdty','FUTURE','NYMEX:CL','USD',1000,0,'CLZ6 Comdty','2026-11-20')")
     _ccy_trade(conn, "J1", "USDJPY", "USD", "JPY", 1_000_000, 150.0)
     _ccy_trade(conn, "J2", "USDJPY", "USD", "JPY", -500_000, 151.0)
     _ccy_trade(conn, "J3", "USDJPY", "USD", "JPY", 1_000_000, 149.0, trade_date=_CCY_AS_OF)
@@ -1290,10 +1288,10 @@ def _currency_book(db_path, aud_history=True):
     conn.execute(
         "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, "
         "price, account, counterparty, strategy, trader, description, theme) "
-        "VALUES ('F1','XLSX','ESU6 Index','FUTURE','F1','2026-06-15',2,5000,'ACC','CPTY','','TR','fut','')")
+        "VALUES ('F1','XLSX','CLZ26 Comdty','FUTURE','F1','2026-06-15',2,68.0,'ACC','CPTY','','TR','fut','')")
     conn.execute(
         "INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, rate, "
-        "settles_cash) VALUES ('F1',1,'NOTIONAL','USD',500000,'2026-06-15','2026-09-18',5000,0)")
+        "settles_cash) VALUES ('F1',1,'NOTIONAL','USD',136000,'2026-06-15','2026-11-20',68.0,0)")
 
     def three(today, t1, t2):
         return {_CCY_AS_OF: today, _CCY_T1: t1, _CCY_T2: t2}
@@ -1383,7 +1381,7 @@ def test_blotter_fx_currency_label_is_the_non_usd_side_and_a_cross_keeps_its_pai
     assert blotter_fx.currency_label("USDTRY") == "TRY"
     assert blotter_fx.currency_label("NZDUSD") == "NZD"
     assert blotter_fx.currency_label("EURNOK") == "EURNOK"
-    assert blotter_fx.currency_label("ESU6 Index") == "ESU6 Index"
+    assert blotter_fx.currency_label("CLZ26 Comdty") == "CLZ26 Comdty"
 
 
 def test_blotter_fx_by_currency_groups_the_whole_fx_book_including_a_cross(tmp_path):
@@ -1639,3 +1637,16 @@ def test_blotter_fx_by_currency_is_reworked_only_when_the_figures_can_have_moved
     finally:
         conn.close()
         blotter_fx._BY_CURRENCY_CACHE.clear()
+
+
+# --------------------------------------------------------- commodity conversion Phase 2 (2026-09-24)
+def test_unpriced_breakdown_labels_have_no_irs_but_keep_the_manual_fx_swap():
+    """IRS left the app; an FX swap booked on Manual entry is an FX hedge and stays."""
+    from ui.tabs import blotter_pricing as bp
+    assert "IRS" not in bp._PRODUCT_LABELS
+    assert bp._product_label("FX_SWAP", 2) == "swaps" and bp._product_label("FUTURE", 1) == "future"
+    assert "FX_SWAP" in bp.FX_PRODUCTS_FOR_T1_RATE
+    unpriced = pd.DataFrame({"trade_id": ["S1", "F1"], "product": ["FX_SWAP", "FUTURE"],
+                             "reason": ["no FWD_OUTRIGHT mark for EURUSD", "no FUTURE_PX mark for CLZ26 Comdty"]})
+    assert bp._unpriced_breakdown(unpriced) in ("1 swap: no FWD_OUTRIGHT; 1 future: no FUTURE_PX",
+                                                 "1 future: no FUTURE_PX; 1 swap: no FWD_OUTRIGHT")

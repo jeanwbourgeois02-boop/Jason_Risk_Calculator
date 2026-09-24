@@ -1,5 +1,7 @@
 """engine/risk: the Risk tab's metrics (the nm-dashboard's definitions on the book's own
-positions), on synthetic parquet history written to tmp_path; never on the sibling repo."""
+positions), on synthetic parquet history written to tmp_path; never on the sibling repo.
+The macro trader's rates (DV01) and equity-index (ES + SPX) underlyers left in Phase 2
+(user approval 2026-09-24): `book_positions`' `rates` and `equity_index` blocks are not read."""
 import math
 import os
 
@@ -12,7 +14,7 @@ from engine.pnl import stress
 from engine.risk import book_risk, load_config, load_history
 from engine.risk import history as history_mod
 from engine.risk.config import DEFAULTS
-from engine.risk.metrics import KIND_EQUITY, KIND_FX, KIND_METAL, KIND_RATES, unit_moves
+from engine.risk.metrics import DELTA_KINDS, KIND_FX, KIND_METAL, rows_from_positions, unit_moves
 
 AS_OF = "2026-09-22"
 SNAP = f"{AS_OF}T15:00:00-04:00"
@@ -20,13 +22,12 @@ DATES = pd.bdate_range("2007-01-01", AS_OF)        # ends on as_of: lag-2 = 2026
 BASE = 0.0005                                        # the everyday log return of every synthetic series
 SNB, CRISIS_DAY, WORST_EX_DAY, LAST = "2015-01-15", "2009-03-02", "2020-03-16", AS_OF
 VAR_DIP_OFFSETS = tuple(range(20, 170, 10))         # 15 days of -1 % inside the last 252 observations
-RATES_CRISIS, RATES_FALL, RATES_RISE = "2008-10-15", "2025-11-03", "2026-06-01"
 USD_YIELD, MXN_YIELD = 3.0, 10.0
 
 # the book: currency -> (quoted USD pair rate, local delta) giving the USD delta on the right
-CHF_USD, JPY_USD, XAU_USD, MXN_USD, SEK_USD, PLN_USD, CZK_USD, ES_USD = \
-    1_250_000.0, -1_000_000.0, 400_000.0, 500_000.0, 300_000.0, 250_000.0, 80_000.0, 700_000.0
-DV01 = 4200.0
+CHF_USD, JPY_USD, XAU_USD, MXN_USD, SEK_USD, PLN_USD, CZK_USD = \
+    1_250_000.0, -1_000_000.0, 400_000.0, 500_000.0, 300_000.0, 250_000.0, 80_000.0
+ROWS = ["CHF", "JPY", "MXN", "XAU", "SEK", "PLN", "CZK", "NOK"]     # by gross USD, NOK (no rate) last
 
 
 def _returns(special: dict) -> np.ndarray:
@@ -49,9 +50,10 @@ def chf_returns():
     return r
 
 
-def write_history(folder, *, yields=True, rates=True, end=None):
-    """The synthetic history: spot (USD per unit), yields (percent) and swap rates (percent);
-    `end` truncates every file to that date (a stale copy)."""
+def write_history(folder, *, yields=True, end=None):
+    """The synthetic history: spot (USD per unit) and yields (percent); `end` truncates
+    every file to that date (a stale copy). The SPX column is the nm-dashboard's own, kept
+    to show that a column with no underlyer in the book is loaded and never asked for."""
     folder.mkdir(parents=True, exist_ok=True)
     spot = pd.DataFrame(index=DATES)
     spot.index.name = "date"
@@ -75,16 +77,6 @@ def write_history(folder, *, yields=True, rates=True, end=None):
         y.loc[pd.Timestamp(LAST), "MXN"] = 20.0          # a jump on the last day: the carry of that day is the lagged rate
         y["CZK"] = USD_YIELD                              # PLN deliberately absent
         y.loc[:end].to_parquet(folder / history_mod.YIELDS_FILE)
-    if rates:
-        rt = pd.DataFrame(index=DATES)
-        rt.index.name = "date"
-        level = pd.Series(4.0, index=DATES)
-        level.loc[pd.Timestamp(RATES_CRISIS):] -= 0.30
-        level.loc[pd.Timestamp(RATES_FALL):] -= 0.20
-        level.loc[pd.Timestamp(RATES_RISE):] += 0.40
-        rt["USD_SWAP10Y"] = level
-        rt["EUR_SWAP10Y"] = 3.0
-        rt.loc[:end].to_parquet(folder / history_mod.RATES_FILE)
     return folder
 
 
@@ -93,7 +85,7 @@ def history(tmp_path):
     return load_history(write_history(tmp_path / "hist"))
 
 
-def _book(*, swap_sign=1.0, settle="2026-10-20"):
+def _book(*, settle="2026-10-20"):
     conn = schema.connect()
     conn.executemany("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                      "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)", [
@@ -105,8 +97,6 @@ def _book(*, swap_sign=1.0, settle="2026-10-20"):
         ("USDNOK", "FX", "USD", "NOK", 1, 0, "USDNOK Curncy", "9999-12-31"),
         ("USDPLN", "FX", "USD", "PLN", 1, 0, "USDPLN Curncy", "9999-12-31"),
         ("USDCZK", "FX", "USD", "CZK", 1, 0, "USDCZK Curncy", "9999-12-31"),
-        ("ESZ6 Index", "FUTURE", "ES", "USD", 50, 0, "ESZ6 Index", "2026-12-18"),
-        ("IRSOIS-USD-1", "IRS", "USD", "USD", 1, 0, "", "2031-09-01"),
     ])
     fx = [  # trade, pair, base leg ccy/amount, quote leg ccy/amount, fill; the USD deltas come from the SPOT marks below
         ("c1", "USDCHF", ("USD", -1_000_000.0), ("CHF", 800_000.0), 0.80),      # long 0.8m CHF, marked at USDCHF 0.64 = $1.25m
@@ -124,23 +114,11 @@ def _book(*, swap_sign=1.0, settle="2026-10-20"):
         conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
             (tid, 1, "FX_NEAR", bccy, bamt, "2026-09-01", settle, px, 1),
             (tid, 2, "FX_NEAR", qccy, qamt, "2026-09-01", settle, px, 1)])
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 ("f1", "XLSX", "ESZ6 Index", "FUTURE", "f1", "2026-09-01", 2.0, 6900.0, "acc", "cp", "", "t", "d", ""))
-    conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
-                 ("f1", 1, "NOTIONAL", "USD", 2 * 50 * 6900.0, "2026-09-01", "2026-12-18", 0, 0))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 ("r1", "XLSX", "IRSOIS-USD-1", "IRS", "r1", "2026-09-01", swap_sign * 1e7, 0.035, "acc", "cp", "", "t", "d", ""))
-    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        ("r1", 1, "FIXED", "USD", -swap_sign * 1e7, "2026-09-01", "2031-09-01", 0.035, 1),
-        ("r1", 2, "FLOAT", "USD", swap_sign * 1e7, "2026-09-01", "2031-09-01", 0.0, 1)])
     marks = [("USDCHF", AS_OF, "SPOT", 0.64), ("USDJPY", AS_OF, "SPOT", 150.0), ("XAUUSD", AS_OF, "SPOT", 4000.0),
              ("USDMXN", AS_OF, "SPOT", 20.0), ("USDSEK", AS_OF, "SPOT", 10.0), ("USDPLN", AS_OF, "SPOT", 4.0),
              ("USDCZK", AS_OF, "SPOT", 25.0)]          # NOK: no rate on purpose
     for inst, settle_d, mt, value in marks:
         conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (AS_OF, inst, settle_d, mt, value, "BBG_BFXFORWARD", SNAP))
-    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (AS_OF, "ESZ6 Index", "2026-12-18", "FUTURE_PX", 7000.0, "BBG_BDH", SNAP))
-    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-                 (AS_OF, "IRSOIS-USD-1", "2031-09-01", "DV01_USD", swap_sign * DV01, "QL_PRICER", SNAP))
     conn.commit()
     return conn
 
@@ -214,10 +192,11 @@ def test_the_freshest_copy_wins_whatever_its_position_and_the_note_lists_every_c
 
 
 def test_history_loads_the_files_names_a_missing_one_and_caches_by_mtime(tmp_path):
-    folder = write_history(tmp_path / "h", rates=False)
+    folder = write_history(tmp_path / "h")
+    (folder / "bbg_raw_rates.parquet").write_bytes(b"not read")   # the retired swap-rate file: never opened
     h = load_history(folder)
     assert h.available and h.files["spot"]["loaded"] and h.files["yields"]["loaded"]
-    assert not h.files["swap_rates"]["loaded"] and "bbg_raw_rates.parquet not found" in h.files["swap_rates"]["reason"]
+    assert set(h.files) == {"spot", "yields"}
     assert list(h.spot.columns) == ["CHF", "JPY", "XAU", "SPX", "MXN", "PLN", "CZK"] and h.spot.index.name == "date"
     assert h.files["spot"]["first_date"] == "2007-01-01" and h.files["spot"]["last_date"] == AS_OF
     assert load_history(folder) is h                      # cached
@@ -260,19 +239,16 @@ def test_config_defaults_are_the_dashboards_constants_and_a_file_overrides_them(
 def test_positions_become_rows_with_the_right_kinds_sizes_and_order(history):
     out = book_risk(_book(), AS_OF, history=history)
     rows = _rows(out)
-    assert [r["underlyer"] for r in out["underlyers"]] == ["CHF", "JPY", "SPX", "MXN", "XAU", "SEK", "PLN", "CZK", "NOK", "USD rates"]
-    assert (rows["CHF"]["kind"], rows["XAU"]["kind"], rows["SPX"]["kind"], rows["USD rates"]["kind"]) == \
-        (KIND_FX, KIND_METAL, KIND_EQUITY, KIND_RATES)
+    assert [r["underlyer"] for r in out["underlyers"]] == ROWS
+    assert (rows["CHF"]["kind"], rows["XAU"]["kind"]) == (KIND_FX, KIND_METAL)
+    assert {r["kind"] for r in out["underlyers"]} <= set(DELTA_KINDS)
     assert rows["CHF"]["net_usd"] == pytest.approx(CHF_USD) and rows["CHF"]["gross_usd"] == pytest.approx(CHF_USD)
     assert rows["JPY"]["net_usd"] == pytest.approx(JPY_USD) and rows["JPY"]["gross_usd"] == pytest.approx(-JPY_USD)
-    assert rows["SPX"]["net_usd"] == pytest.approx(ES_USD) and rows["SPX"]["series"] == "SPX"
-    assert rows["USD rates"]["dv01_usd"] == DV01 and math.isnan(rows["USD rates"]["net_usd"]) and \
-        rows["USD rates"]["series"] == "USD_SWAP10Y" and "10Y" in rows["USD rates"]["note"]
-    assert math.isnan(rows["CHF"]["dv01_usd"])
+    assert all("dv01_usd" not in r for r in out["underlyers"])
     book = out["book"]
-    assert book["net_usd"] == pytest.approx(CHF_USD + JPY_USD + XAU_USD + MXN_USD + SEK_USD + PLN_USD + CZK_USD + ES_USD)
-    assert book["gross_usd"] == pytest.approx(CHF_USD - JPY_USD + XAU_USD + MXN_USD + SEK_USD + PLN_USD + CZK_USD + ES_USD)
-    assert book["dv01_usd"] == DV01
+    assert book["net_usd"] == pytest.approx(CHF_USD + JPY_USD + XAU_USD + MXN_USD + SEK_USD + PLN_USD + CZK_USD)
+    assert book["gross_usd"] == pytest.approx(CHF_USD - JPY_USD + XAU_USD + MXN_USD + SEK_USD + PLN_USD + CZK_USD)
+    assert "dv01_usd" not in book
     # the header's FX net is the positions module's own: NaN while NOK has no rate, named in `missing`
     assert math.isnan(book["fx_net_usd"]) and any(m.startswith("FX positions: ") and "NOK" in m for m in out["missing"])
     assert out["config"]["stress_cap_usd"] == 2_250_000.0 and out["as_of"] == AS_OF
@@ -292,15 +268,22 @@ def test_long_chf_loses_when_chf_falls_and_short_jpy_loses_when_jpy_rises(histor
     assert chf["carry"] and jpy["carry"] and chf["reason"] == "" and chf["reasons"] == {}
 
 
-def test_rates_row_uses_the_projects_dv01_sign_payer_loses_when_yields_fall(history):
-    payer = _rows(book_risk(_book(swap_sign=1.0), AS_OF, history=history))["USD rates"]
-    assert payer["dv01_usd"] == DV01
-    assert payer["worst_1d_raw_usd"] == pytest.approx(DV01 * -30.0) and payer["worst_1d_raw_date"] == RATES_CRISIS
-    assert payer["worst_1d_ex_shocks_usd"] == pytest.approx(DV01 * -30.0)
-    assert not payer["carry"]
-    receiver = _rows(book_risk(_book(swap_sign=-1.0), AS_OF, history=history))["USD rates"]
-    assert receiver["dv01_usd"] == -DV01
-    assert receiver["worst_1d_raw_usd"] == pytest.approx(-DV01 * 40.0) and receiver["worst_1d_raw_date"] == RATES_RISE
+def test_the_retired_equity_index_and_rates_blocks_are_not_read():
+    """`book_positions` may still carry the ES + SPX line and the DV01 lines while the lanes
+    below remove them: no row, no `missing` entry and nothing in the book comes from them."""
+    positions = {
+        "fx": {"available": True, "by_ccy": [{"ccy": "CHF", "usd_delta": CHF_USD},
+                                              {"ccy": "XAU", "usd_delta": XAU_USD, "metal": True},
+                                              {"ccy": "USD", "usd_delta": -CHF_USD}]},
+        "equity_index": {"lines": [{"instrument_id": "ESZ6 Index"}], "usd_delta": 700_000.0,
+                         "missing": ["SPX option o1: no DELTA"], "reason": "one option unpriced"},
+        "rates": {"by_ccy": {"USD": 4200.0}, "missing": ["IRS r2: no DV01_USD"], "reason": "one swap unpriced"},
+        "fx_options": {},
+    }
+    rows, missing = rows_from_positions(positions)
+    assert [(r["underlyer"], r["kind"]) for r in rows] == [("CHF", KIND_FX), ("XAU", KIND_METAL)]
+    assert missing == []
+    assert all(set(r) == {"underlyer", "kind", "series", "net_usd", "gross_usd", "carry", "reason", "note"} for r in rows)
 
 
 def test_blended_vol_is_two_thirds_trailing_plus_one_third_crisis_on_the_lag2_series(history):
@@ -388,13 +371,13 @@ def test_carry_is_the_lagged_yield_differential_per_calendar_day(history, tmp_pa
 def test_book_series_is_the_sum_of_the_rows_series(history):
     out = book_risk(_book(), AS_OF, history=history)
     book = out["book"]
-    assert book["rows_in_series"] == ["CHF", "JPY", "SPX", "MXN", "XAU", "PLN", "CZK", "USD rates"]
-    usd_c, mxn_c, xau_c = 0.0, (MXN_YIELD - USD_YIELD) / 36500, (0.0 - USD_YIELD) / 36500
+    assert book["rows_in_series"] == ["CHF", "JPY", "MXN", "XAU", "PLN", "CZK"]
+    mxn_c, xau_c = (MXN_YIELD - USD_YIELD) / 36500, (0.0 - USD_YIELD) / 36500
     # the SNB day: CHF's -15 % plus every other row's ordinary day (PLN and CZK have no data yet: left out, not zero)
-    snb = CHF_USD * -0.15 + JPY_USD * BASE + XAU_USD * (BASE + xau_c) + MXN_USD * mxn_c + ES_USD * (BASE + usd_c) + DV01 * 0.0
+    snb = CHF_USD * -0.15 + JPY_USD * BASE + XAU_USD * (BASE + xau_c) + MXN_USD * mxn_c
     assert (book["worst_1d_raw_usd"], book["worst_1d_raw_date"]) == (pytest.approx(snb), SNB)
     # the last day: CHF's -4 %, PLN and CZK now in
-    last = CHF_USD * -0.04 + JPY_USD * BASE + XAU_USD * (BASE + xau_c) + MXN_USD * mxn_c + ES_USD * BASE + \
+    last = CHF_USD * -0.04 + JPY_USD * BASE + XAU_USD * (BASE + xau_c) + MXN_USD * mxn_c + \
         PLN_USD * BASE + CZK_USD * BASE
     window = book["var_window"]
     assert window["dates"][-1] == AS_OF and len(window["dates"]) == 252 and window["pnl_usd"][-1] == pytest.approx(last)
@@ -410,7 +393,7 @@ def test_book_caps_and_limit_flags(history):
     assert book["worst_day_ex_vs_cap_pct"] == pytest.approx(-book["worst_1d_ex_shocks_usd"] / 2.25e6 * 100)
     assert book["over_cap"] is False and book["over_vol_target"] is False
     cfg = load_config(history.path + "/absent.yaml")
-    cfg["vol_target_usd"] = 50_000.0                        # a tiny target: both flags trip
+    cfg["vol_target_usd"] = 20_000.0                        # a tiny target (book vol ~30k): both flags trip
     book = book_risk(_book(), AS_OF, history=history, config=cfg)["book"]
     assert book["over_cap"] is True and book["over_vol_target"] is True and book["worst_day_ex_vs_cap_pct"] > 100
 
@@ -419,13 +402,13 @@ def test_scenarios_are_engine_pnl_stress_passed_through(history):
     out = book_risk(_book(), AS_OF, history=history)
     delta = {"CHF": CHF_USD, "JPY": JPY_USD, "XAU": XAU_USD, "MXN": MXN_USD, "SEK": SEK_USD, "PLN": PLN_USD, "CZK": CZK_USD}
     scenarios = stress.load_scenarios()
-    expected = stress.run_scenarios(delta, scenarios, ES_USD, stress.futures_pct_by_scenario(scenarios))
+    expected = stress.run_scenarios(delta, scenarios)
     assert list(out["scenarios"]) == list(scenarios)
     for name, exp in expected.items():
         got = out["scenarios"][name]
-        assert got["total"] == pytest.approx(exp["total"]) and got["fx_pnl"] == pytest.approx(exp["fx_pnl"])
-        assert got["futures_pnl"] == pytest.approx(exp["futures_pnl"])
-        assert got["equity_pct"] == stress.futures_pct_by_scenario(scenarios).get(name)
+        assert set(got) == {"total", "fx_pnl", "fx_total"}          # no futures line, no equity move
+        assert got["fx_pnl"] == pytest.approx(exp["fx_pnl"]) and got["fx_total"] == pytest.approx(exp["fx_total"])
+        assert got["total"] == got["fx_total"]
     assert any(m.startswith("NOK: not in the scenarios (") for m in out["missing"])
 
 
@@ -459,8 +442,8 @@ def test_no_history_folder_keeps_the_positions_and_the_scenarios(tmp_path):
     rows = _rows(out)
     assert rows["CHF"]["net_usd"] == pytest.approx(CHF_USD) and rows["CHF"]["reason"].startswith("no market history")
     assert math.isnan(out["book"]["vol_blended_ann_usd"]) and out["book"]["reason"].startswith("no market history")
-    assert out["book"]["net_usd"] == pytest.approx(CHF_USD + JPY_USD + XAU_USD + MXN_USD + SEK_USD + PLN_USD + CZK_USD + ES_USD)
-    assert out["scenarios"]["Equities -10%"]["futures_pnl"] == pytest.approx(ES_USD * -0.10)
+    assert out["book"]["net_usd"] == pytest.approx(CHF_USD + JPY_USD + XAU_USD + MXN_USD + SEK_USD + PLN_USD + CZK_USD)
+    assert out["scenarios"] and all(s["total"] == s["fx_total"] for s in out["scenarios"].values())
 
 
 def test_book_risk_writes_nothing(history):
@@ -469,5 +452,5 @@ def test_book_risk_writes_nothing(history):
     changes = conn.total_changes
     out = book_risk(conn, AS_OF, history=history)
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == before and conn.total_changes == changes
-    assert conn.execute("SELECT COUNT(*) FROM marks WHERE source NOT IN ('BBG_BFXFORWARD', 'BBG_BDH', 'QL_PRICER')").fetchone()[0] == 0
-    assert len(out["underlyers"]) == 10
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE source != 'BBG_BFXFORWARD'").fetchone()[0] == 0
+    assert len(out["underlyers"]) == len(ROWS)

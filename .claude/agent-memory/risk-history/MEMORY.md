@@ -1,0 +1,1 @@
+- [Dev PC parquet gap and package init](dev-pc-parquet-and-package-init.md) — no pyarrow here; engine/risk/__init__ imports metrics, so a removed name breaks collection

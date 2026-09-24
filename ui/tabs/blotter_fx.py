@@ -6,8 +6,8 @@ History (2026-09-17, one day): this sub-tab was first built as a literal replica
 old sheet (`engine.pnl.xlsx_fx_replica`, since deleted), deliberately reproducing its
 "must not replicate" bugs; the user withdrew that authorisation the same day and asked
 for the sheet's column *shape* only, priced correctly. Rows now come from
-`engine.pnl.fx_blotter.fx_blotter_rows`, which prices the FX_SPOT/FX_FWD/FX_SWAP/FUTURE
-trade book three times (as_of, t-1bd, t-2bd) via `engine.pnl.valuation.value_book` --
+`engine.pnl.fx_blotter.fx_blotter_rows`, which prices the FX trade book (`FX_PRODUCTS`)
+three times (as_of, t-1bd, t-2bd) via `engine.pnl.valuation.value_book` --
 each FX leg at its own settle_date's FWD_OUTRIGHT, quote P&L converted at spot, futures
 contracts x multiplier x (mark - fill), settled trades frozen -- and lays the results out
 as one row per trade. `fx_blotter_rows` is called with `value_fn=priced_value_book` (via
@@ -107,18 +107,19 @@ def _priced_value_fn(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------ P&L strip (2026-09-17)
-# The strip's trade universe is the FX sub-tab's own row scope: the three FX products
-# only. Futures have their own sub-tab; counting them here too made this strip's LTD
-# disagree with the Total book's "FX" row (2026-09-17 audit).
+# The strip's trade universe is the FX sub-tab's own row scope: the FX products only.
+# Futures have their own sub-tab; counting them here too made this strip's LTD
+# disagree with the Total book's "FX" row (2026-09-17 audit). "FX_SWAP" is kept, the same
+# as the Total book's FX scope and the engine's: the package rule that writes it leaves in
+# Phase 2, but a database may still hold packaged trades, and dropping the tag here alone
+# would hide them from this sub-tab while the Total book still counts them.
 FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")
 
 
 def _scoped_trade_ids(df_priced: pd.DataFrame) -> list:
-    """`trade_id`s in a `priced_value_book` frame that belong to the FX+FUTURE universe
-    this sub-tab covers. `value_book` (and so `priced_value_book`) only ever builds FX/
-    FUTURE rows in the first place, so this filter is a no-op today, but it is explicit
-    rather than assumed in case that scope ever widens (e.g. once IRS/FX_OPTION are
-    added to `value_book`)."""
+    """`trade_id`s in a `priced_value_book` frame that belong to this sub-tab's FX
+    universe (`FX_PRODUCTS`). `value_book` prices every product (futures, FX options,
+    ...), so this filter is what keeps them out of the strip and the currency tables."""
     if df_priced.empty:
         return []
     return df_priced[df_priced["product"].isin(FX_PRODUCTS)]["trade_id"].tolist()
@@ -541,8 +542,7 @@ def row_tooltips(df: pd.DataFrame) -> List[dict]:
 
 def format_rows(df: pd.DataFrame) -> list:
     """`data` records for `fx_blotter_table`, split out so it can be unit-tested without
-    Dash, matching `ui.tabs.rates.format_rows`'s convention: rates and USD amounts as
-    numbers, which the table formats (ui.tabs.ranking). A missing mark or P&L on a close
+    Dash: rates and USD amounts as numbers, which the table formats (ui.tabs.ranking). A missing mark or P&L on a close
     the trade was on the book for is `UNPRICED_TEXT` ("n/a", its reason in `row_tooltips`),
     never 0 and never a made-up figure; one at a close the trade had not been dealt by is
     None (blank). The hidden bookkeeping columns (`_hidden_values`) ride along."""

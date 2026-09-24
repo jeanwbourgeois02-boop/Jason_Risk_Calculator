@@ -1,8 +1,10 @@
 """Options view inside the Blotter tab (options_calc merge Phase 8, 2026-09-17):
 a grouped, collapsible MARS-style risk grid -- Portfolio Totals -> asset class (FX;
-Equity/Commodity present-but-empty until a live feed exists for them, per
-`engine/options/__init__.py`'s own note that no data-ingest parser exists yet for
-EQ_OPTION/CMDTY_OPTION) -> structure/package (one row per `trades.package_id`) -> leg.
+Commodity present-but-empty until options on commodity futures land, CLAUDE.md
+"Commodity conversion plan" Phase 5) -> structure/package (one row per
+`trades.package_id`) -> leg. The equity index (SPX listed options) left the app on
+2026-09-24; the listed-option path it used is kept, generic, for Phase 5
+(`LISTED_OPTION_PRODUCTS`).
 
 **Rendering only reads.** Every number in the grid comes off `marks_official`
 (`PREMIUM`/`DELTA`/`GAMMA`/`THETA`/`VEGA`/`RHO`, `source='QL_OPTIONS_PRICER'`, official
@@ -237,13 +239,37 @@ EDITABLE_COLUMNS = ("strike", "option_type", "payoff")
 # Coloured by sign in the grid and in the headline.
 SIGNED_FIELDS = ("pnl_ccy", "pnl_usd", "mktval", "delta", "theta", "gamma", "vega", "rho")
 
-# instruments.asset_class / trades.product values (engine/options/equity_commodity.py
-# docstring: "New instruments.asset_class values introduced here: 'EQ_OPTION',
-# 'CMDTY_OPTION'"). No data-ingest parser exists yet for either (that module's own
-# docstring), so these groups render present-but-empty on this app today -- by
-# design, not a bug, per the task's "rows must always render" instruction.
-ASSET_CLASS_BY_PRODUCT = {"FX_OPTION": "FX", "EQ_OPTION": "Equity", "CMDTY_OPTION": "Commodity"}
-ASSET_CLASS_ORDER = ("FX", "Equity", "Commodity")
+# trades.product -> the grid's asset-class group. No ingest path books a CMDTY_OPTION yet,
+# so the Commodity group renders present-but-empty today -- by design ("rows must always
+# render"). The equity index group left with the SPX options (2026-09-24).
+ASSET_CLASS_BY_PRODUCT = {"FX_OPTION": "FX", "CMDTY_OPTION": "Commodity"}
+ASSET_CLASS_ORDER = ("FX", "Commodity")
+# The listed-option path (`_leg_row`): an option the book values at Bloomberg's own price of
+# it -- the official FUTURE_PX on the option's own instrument, in the underlying's points, x
+# the contract multiplier per contract -- with no model in its value, and the Greeks the
+# pricing step adds at the vol that price implies ("Greeks not calculated: <why>" when it did
+# not). Empty since the SPX options, its only user, left the app (2026-09-24); kept for
+# Phase 5's options on commodity futures, whose product code goes here (grouped under
+# Commodity) once the listed-options-pricer and pnl-valuation lanes name it.
+LISTED_OPTION_PRODUCTS: Tuple[str, ...] = ()
+
+
+def option_products() -> Tuple[str, ...]:
+    """Every trades.product this sub-tab lists. Read at call time, so a product added to
+    `LISTED_OPTION_PRODUCTS` reaches every query here."""
+    return tuple(dict.fromkeys((*ASSET_CLASS_BY_PRODUCT, *LISTED_OPTION_PRODUCTS)))
+
+
+def _products_in(column: str = "t.product") -> Tuple[str, Tuple[str, ...]]:
+    """(`<column> IN (?, ...)`, its parameters) over `option_products()`."""
+    products = option_products()
+    return f"{column} IN ({','.join('?' * len(products))})", products
+
+
+def _asset_class_of(product: str) -> str:
+    if product in ASSET_CLASS_BY_PRODUCT:
+        return ASSET_CLASS_BY_PRODUCT[product]
+    return "Commodity" if product in LISTED_OPTION_PRODUCTS else "FX"
 
 _GREEK_MARK_TYPES = (("delta", "DELTA"), ("theta", "THETA"), ("gamma", "GAMMA"),
                      ("vega", "VEGA"), ("rho", "RHO"))
@@ -348,7 +374,7 @@ def _book_rows(conn: sqlite3.Connection, as_of: str) -> Dict[str, dict]:
     df, _n_fallback, _n_total = priced_value_book(conn, as_of)
     if df.empty:
         return {}
-    df = df[df["product"].isin(tuple(ASSET_CLASS_BY_PRODUCT))]
+    df = df[df["product"].isin(option_products())]
     return {rec["trade_id"]: rec for rec in df.to_dict("records")}
 
 
@@ -450,7 +476,8 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
     """One priced (or partially/un-priced -- 'rows must always render') leg, built
     straight from `trades_official`/`instruments`/`instrument_options`/`marks_official`
     plus the book's own row for the P&L, no re-pricing. See the module docstring."""
-    asset_class = ASSET_CLASS_BY_PRODUCT.get(rec["product"], "FX")
+    asset_class = _asset_class_of(rec["product"])
+    listed = rec["product"] in LISTED_OPTION_PRODUCTS
     quantity = rec["quantity"]
     fill = rec.get("fill")
 
@@ -464,10 +491,11 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
     closed = (book or {}).get("status") == "CLOSED"
     if closed and asset_class == "FX" and not _is_missing((book or {}).get("mark")):
         premium = float(book["mark"])
-    if rec["product"] == "EQ_OPTION":
-        # A listed option (SPX, user decision 2026-09-21) is marked at Bloomberg's own price of
-        # it, the FUTURE_PX the book's P&L reads, in index points: x multiplier = per contract.
-        # The pricing step only adds the Greeks, so its skip reason is about them, never the value.
+    if listed:
+        # A listed option (user decision 2026-09-21, "Bloomberg's option price") is marked at
+        # Bloomberg's own price of it, the FUTURE_PX the book's P&L reads, in the underlying's
+        # points: x multiplier = per contract. The pricing step only adds the Greeks, so its
+        # skip reason is about them, never the value.
         if marks.get("FUTURE_PX") is not None:
             premium = marks["FUTURE_PX"] * float(rec.get("multiplier") or 1.0)
         greeks_missing = "Greeks not calculated: " + (
@@ -496,8 +524,8 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         # the current value in the same (quote) currency, so Current value - Start value reads across
         current_value = mktval / usd_per_quote_ccy if mktval is not None and usd_per_quote_ccy else None
     elif asset_class != "FX":
-        # An index / equity / commodity option (SPX, 2026-09-21): contracts x premium in index
-        # points x the contract multiplier, in the QUOTE currency (15 x 121.5 x 100 = $182,250).
+        # A non-FX (commodity or listed) option: contracts x premium in the underlying's points
+        # x the contract multiplier, in the QUOTE currency (15 x 121.5 x 100 = $182,250).
         # Its PREMIUM mark is already per contract (engine/options writes it x multiplier).
         multiplier = float(rec.get("multiplier") or 1.0)
         usd_per_quote_ccy = _spot_to_usd(conn, as_of, rec["quote_ccy"])
@@ -520,7 +548,7 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         greeks, greeks_reason = {col: None for col, _mt in _GREEK_MARK_TYPES}, ""
     else:
         greeks, greeks_reason = _usd_greeks(conn, as_of, rec, marks)
-    if rec["product"] == "EQ_OPTION" and premium is not None and marks.get("DELTA") is None:
+    if listed and premium is not None and marks.get("DELTA") is None:
         greeks_reason = greeks_reason or greeks_missing
 
     if asset_class == "FX":
@@ -528,9 +556,8 @@ def _leg_row(conn: sqlite3.Connection, as_of: str, rec: dict, book: Optional[dic
         fwd = _official_marks(conn, as_of, underlying, rec["expiry_date"], ("FWD_OUTRIGHT",))
         undfwdpx = fwd.get("FWD_OUTRIGHT")
     else:
-        # Equity/commodity: bbg_ticker root (task mapping) -- no live trades to
-        # exercise this branch today (module docstring); a forward outright has no
-        # meaning for a single-underlying equity/commodity option.
+        # Commodity / listed: the bbg_ticker's first word -- no live trades exercise this
+        # branch today (module docstring); a forward outright has no meaning here.
         ticker = rec["bbg_ticker"] or ""
         underlying = ticker.split()[0] if ticker else ""
         undfwdpx = None
@@ -572,6 +599,7 @@ def _leg_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     option_type_expr = "COALESCE(o.option_type, '')" if "option_type" in opt_cols else "''"
     payoff_expr = "COALESCE(o.payoff, 'VANILLA')" if "payoff" in opt_cols else "'VANILLA'"
     barrier_expr = "COALESCE(o.barrier_level, 0)" if "barrier_level" in opt_cols else "0"
+    products_sql, products = _products_in()
     trades = pd.read_sql_query(
         "SELECT t.trade_id, t.package_id, t.instrument_id, t.quantity, t.price AS fill, t.product, "
         "i.base_ccy, i.quote_ccy, i.multiplier, i.expiry_date, i.bbg_ticker, "
@@ -579,9 +607,9 @@ def _leg_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
         f"{payoff_expr} AS payoff, {barrier_expr} AS barrier_level "
         "FROM trades_official t JOIN instruments i ON i.instrument_id = t.instrument_id "
         "LEFT JOIN instrument_options o ON o.instrument_id = t.instrument_id "
-        "WHERE t.product IN ('FX_OPTION','EQ_OPTION','CMDTY_OPTION') "
+        f"WHERE {products_sql} "
         "ORDER BY t.package_id, t.trade_id",
-        conn,
+        conn, params=products,
     )
     if trades.empty:
         return []
@@ -673,7 +701,7 @@ def _own_row(level: str, group_key: str, parent_key: str, label: str, leg: dict)
 
 
 def option_rows(conn: sqlite3.Connection, as_of: str, flat: bool = False) -> pd.DataFrame:
-    """TOTAL -> ASSET_CLASS (FX always; Equity/Commodity present-but-empty) ->
+    """TOTAL -> ASSET_CLASS (FX always; Commodity present-but-empty) ->
     PACKAGE (one per `trades.package_id`, flat when it has exactly one leg) -> LEG
     (only emitted for a package with >1 leg).
 
@@ -1166,9 +1194,10 @@ def _terms_on_file(conn: sqlite3.Connection, trade_id: str) -> Optional[dict]:
     of one cell must hand the other terms back unchanged: a strike typed onto a DIGITAL
     must leave it a DIGITAL. Read with the engine's own `on_file_terms`; the guarded query
     is only for a database whose `instrument_options` predates a column."""
+    products_sql, products = _products_in("product")
     hit = conn.execute(
-        "SELECT instrument_id FROM trades_official WHERE trade_id = ? "
-        "AND product IN ('FX_OPTION','EQ_OPTION','CMDTY_OPTION')", (trade_id,)).fetchone()
+        f"SELECT instrument_id FROM trades_official WHERE trade_id = ? AND {products_sql}",
+        (trade_id, *products)).fetchone()
     if hit is None:
         return None
     try:
@@ -1347,13 +1376,14 @@ def option_instruments(conn: sqlite3.Connection) -> List[dict]:
     option_type_expr = "COALESCE(o.option_type, '')" if "option_type" in opt_cols else "''"
     payoff_expr = "COALESCE(o.payoff, 'VANILLA')" if "payoff" in opt_cols else "'VANILLA'"
     barrier_expr = "COALESCE(o.barrier_level, 0)" if "barrier_level" in opt_cols else "0"
+    products_sql, products = _products_in()
     rows = conn.execute(
         f"SELECT DISTINCT i.instrument_id, i.expiry_date, {strike_expr}, {option_type_expr}, "
         f"{payoff_expr}, {barrier_expr} "
         "FROM trades_official t JOIN instruments i USING (instrument_id) "
         "LEFT JOIN instrument_options o USING (instrument_id) "
-        "WHERE t.product IN ('FX_OPTION','EQ_OPTION','CMDTY_OPTION') "
-        f"ORDER BY ({strike_expr} = 0) DESC, i.expiry_date, i.instrument_id").fetchall()
+        f"WHERE {products_sql} "
+        f"ORDER BY ({strike_expr} = 0) DESC, i.expiry_date, i.instrument_id", products).fetchall()
     return [{"instrument_id": r[0], "expiry": r[1], "strike": r[2], "option_type": r[3],
              "payoff": r[4], "barrier_level": r[5]} for r in rows]
 

@@ -27,7 +27,6 @@ def _db():
             SELECT * FROM marks WHERE
             (mark_type IN ('SPOT','FWD_OUTRIGHT') AND source='BBG_BFXFORWARD') OR
             (mark_type='FUTURE_PX' AND source='BBG_BDH') OR
-            (mark_type IN ('PAR_RATE','PV_USD','DV01_USD') AND source='BBG_BDH') OR
             (mark_type IN ('DELTA','PREMIUM') AND source='MANUAL');
         """
     )
@@ -160,14 +159,14 @@ def test_feed_headline_and_backfill_headline_and_top_bar_status():
 
 
 def test_pull_timings_line_lists_the_steps_slowest_first_and_is_absent_without_timings():
-    timings = {"session": 1.2, "spot": 3.14, "forwards": 21.4, "futures": 0.9, "rates": 8.0, "vol": 0.8,
+    timings = {"session": 1.2, "spot": 3.14, "forwards": 21.4, "futures": 0.9, "curves": 8.0, "vol": 0.8,
                "options": 12.0, "ledger": 0.4, "total": 48.3}
     status = {"connected": True, "time": "t", "written": 5, "failed": 0, "timings": timings}
     assert md.pull_timings_line(status) == (
-        "Last pull took 48 s: forwards 21 s · options 12 s · rates 8.0 s · spot 3.1 s · session 1.2 s · "
+        "Last pull took 48 s: forwards 21 s · options 12 s · curves 8.0 s · spot 3.1 s · session 1.2 s · "
         "futures 0.9 s · vol 0.8 s · ledger 0.4 s")
     # a value that is not a number is left out, never shown as one; "total" alone still reads
-    assert md.pull_timings_line({"timings": {"spot": 2.0, "rates": None, "vol": "n/a"}}) == "Last pull by step: spot 2.0 s"
+    assert md.pull_timings_line({"timings": {"spot": 2.0, "curves": None, "vol": "n/a"}}) == "Last pull by step: spot 2.0 s"
     assert md.pull_timings_line({"timings": {"total": 12}}) == "Last pull took 12 s"
     for absent in (None, {}, {"connected": True}, {"timings": None}, {"timings": {}}, {"timings": "48"}):
         assert md.pull_timings_line(absent) == ""
@@ -211,11 +210,12 @@ def book_is_today(monkeypatch):
     monkeypatch.setattr(live, "book_today", lambda: dt.date(2026, 9, 21))
 
 
-def _instrument(conn, instrument_id, asset_class, base, quote, multiplier=1, expiry="9999-12-31"):
+def _instrument(conn, instrument_id, asset_class, base, quote, multiplier=1, expiry="9999-12-31", ticker=None):
     conn.execute(
         "INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
         "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,0,?,?)",
-        (instrument_id, asset_class, base, quote, multiplier, f"{instrument_id} Curncy", expiry))
+        (instrument_id, asset_class, base, quote, multiplier,
+         f"{instrument_id} Curncy" if ticker is None else ticker, expiry))
 
 
 def _trade(conn, trade_id, instrument_id, product, trade_date, quantity, price, legs):
@@ -234,7 +234,7 @@ def _mark(conn, as_of, instrument_id, settle, mark_type, value, source="BBG_BFXF
 
 
 def _book():
-    """Two USDJPY forwards on one value date, a EURSEK cross, an ES future and a USDJPY option,
+    """Two USDJPY forwards on one value date, a EURSEK cross, a WTI crude future and a USDJPY option,
     all dealt 2026-09-01 and open on TODAY. No marks."""
     conn = schema.connect()
     _instrument(conn, "USDJPY", "FX", "USD", "JPY")
@@ -242,7 +242,8 @@ def _book():
     # the cross's USD-conversion pairs, never traded: the pull creates these rows before it writes their SPOT
     _instrument(conn, "EURUSD", "FX", "EUR", "USD")
     _instrument(conn, "USDSEK", "FX", "USD", "SEK")
-    _instrument(conn, "ESZ6 Index", "FUTURE", "ES", "USD", multiplier=50, expiry="2026-12-18")
+    _instrument(conn, "CLZ26 Comdty", "FUTURE", "NYMEX:CL", "USD", multiplier=1000, expiry="2026-12-18",
+                ticker="CLZ26 Comdty")
     _instrument(conn, "USDJPY111926P-1", "FX_OPTION", "USD", "JPY", expiry="2026-11-19")
     _trade(conn, "T1", "USDJPY", "FX_FWD", "2026-09-01", 1_000_000, 147.0,
            [("FX_NEAR", "USD", 1_000_000, "2026-10-15", 1), ("FX_NEAR", "JPY", -147_000_000, "2026-10-15", 1)])
@@ -250,8 +251,8 @@ def _book():
            [("FX_NEAR", "USD", -2_000_000, "2026-10-15", 1), ("FX_NEAR", "JPY", 295_000_000, "2026-10-15", 1)])
     _trade(conn, "T3", "EURSEK", "FX_FWD", "2026-09-01", 5_000_000, 11.2,
            [("FX_NEAR", "EUR", 5_000_000, "2026-11-02", 1), ("FX_NEAR", "SEK", -56_000_000, "2026-11-02", 1)])
-    _trade(conn, "F1", "ESZ6 Index", "FUTURE", "2026-09-01", 2, 6000.0,
-           [("NOTIONAL", "USD", 600_000, "2026-12-18", 0)])
+    _trade(conn, "F1", "CLZ26 Comdty", "FUTURE", "2026-09-01", 2, 68.0,
+           [("NOTIONAL", "USD", 136_000, "2026-12-18", 0)])
     _trade(conn, "O1", "USDJPY111926P-1", "FX_OPTION", "2026-09-01", 3_000_000, 0.01,
            [("NOTIONAL", "USD", 3_000_000, "2026-11-19", 0)])
     conn.commit()
@@ -293,7 +294,7 @@ def test_missing_rows_lists_every_unofficial_mark_with_trades_and_notional_block
     fwd = by_key[("USDJPY", "FWD_OUTRIGHT", "2026-10-15")]
     assert fwd["trades_blocked"] == 2 and fwd["notional_blocked"] == "USD 3,000,000"   # |USD leg|, gross
     assert by_key[("USDJPY", "FWD_OUTRIGHT", "2026-11-19")]["trades_blocked"] == 1     # the option's expiry
-    assert by_key[("ESZ6 Index", "FUTURE_PX", "2026-12-18")]["notional_blocked"] == "USD 600,000"
+    assert by_key[("CLZ26 Comdty", "FUTURE_PX", "2026-12-18")]["notional_blocked"] == "USD 136,000"
     # a cross has no USD leg: the base amount under its own currency, never converted; its USD
     # conversion spots are blocked by the same trade
     for key in (("EURSEK", "FWD_OUTRIGHT", "2026-11-02"), ("EURSEK", "SPOT", TODAY),
@@ -351,8 +352,8 @@ def _marked_book():
         _mark(conn, day, "EURUSD", day, "SPOT", 1.1)                      # exactly unchanged
         _mark(conn, day, "USDJPY", "2026-12-21", "FWD_OUTRIGHT", 148.0)   # a tenor row no open leg reads
     _mark(conn, TODAY, "EURSEK", "2026-11-02", "FWD_OUTRIGHT", 11.3)       # no mark for this date on PREV
-    _mark(conn, TODAY, "ESZ6 Index", "2026-12-18", "FUTURE_PX", 6100.0, source="BBG_BDH")
-    _mark(conn, PREV, "ESZ6 Index", "2026-12-18", "FUTURE_PX", 6050.0, source="BBG_BDH")
+    _mark(conn, TODAY, "CLZ26 Comdty", "2026-12-18", "FUTURE_PX", 68.56, source="BBG_BDH")
+    _mark(conn, PREV, "CLZ26 Comdty", "2026-12-18", "FUTURE_PX", 68.0, source="BBG_BDH")
     conn.commit()
     return conn
 
@@ -375,7 +376,7 @@ def test_suspect_rows_flag_a_big_move_and_an_exactly_unchanged_mark_flagged_firs
 
     fwd = by_key[("USDJPY", "FWD_OUTRIGHT", "2026-10-15")]
     assert fwd["change_pct"] == pytest.approx(0.336, abs=1e-3) and fwd["flag"] == ""
-    assert by_key[("ESZ6 Index", "FUTURE_PX", "2026-12-18")]["change_pct"] == pytest.approx(0.826, abs=1e-3)
+    assert by_key[("CLZ26 Comdty", "FUTURE_PX", "2026-12-18")]["change_pct"] == pytest.approx(0.824, abs=1e-3)
     broken = by_key[("EURSEK", "FWD_OUTRIGHT", "2026-11-02")]          # never interpolated, and it says so
     assert broken["previous"] is None and broken["change_pct"] is None and broken["flag"] == ""
     assert f"no {PREV} mark for this settle date" in broken["note"] and "SPOT" in broken["note"]
@@ -674,20 +675,20 @@ def test_status_block_without_a_recalc_block_renders_as_before_and_a_connected_p
 
 # =========================================================================== 2026-09-22: what the ledger's re-freeze did
 # What bbg-data writes on status["ledger"] (and on each backfill day's ledger block and the closing
-# step's) when realise_settled drops a row frozen at a spot or an older fix and freezes it again.
+# step's) when realise_settled drops a row frozen at a live press and freezes it again at the close.
 LEDGER_STATUS = dict(CONNECTED_STATUS, ledger={
     "as_of_date": "2026-09-22", "realised": 2, "unrealisable": [],
     "refrozen": [
-        {"trade_id": "F1", "product": "FX_FWD", "mark_type": "NDF_FIX", "spot_as_of_date": "2026-09-19",
-         "pnl_from": -1234.4, "pnl_to": 2000.6, "why": "the 2026-09-19 fix landed"},
+        {"trade_id": "F1", "product": "FX_FWD", "mark_type": "SPOT", "spot_as_of_date": "2026-09-19",
+         "pnl_from": -1234.4, "pnl_to": 2000.6, "why": "the 2026-09-19 close landed"},
         "F9",                                                             # a bare string: its id alone
         {"trade_id": "O2", "product": "FX_OPTION", "pnl_from": None, "pnl_to": 15000, "why": ""},
     ],
-    "kept": [{"trade_id": "F3", "product": "FX_FWD", "reason": "already frozen at the fix"}, "F4"],
+    "kept": [{"trade_id": "F3", "product": "FX_FWD", "reason": "already frozen at the close"}, "F4"],
     "refrozen_count": 3, "refrozen_summary": "3 settled trades re-frozen at the close",
 }, backfill={"running": False, "remaining": 0, "days": {"2026-09-19": {"status": "DONE", "missing_count": 0, "missing": [],
              "ledger": {"refrozen": [{"trade_id": "F1", "product": "FX_FWD", "pnl_from": -1234.4, "pnl_to": 2000.6,
-                                      "why": "the 2026-09-19 fix landed"}], "kept": [], "refrozen_count": 1,
+                                      "why": "the 2026-09-19 close landed"}], "kept": [], "refrozen_count": 1,
                         "refrozen_summary": "1 settled trade re-frozen at the close"}}},
              "ledger": {"refrozen": [], "kept": [{"trade_id": "F5", "product": "FUTURE", "reason": "no close on file yet"}]}})
 
@@ -701,9 +702,9 @@ def test_status_block_shows_what_the_ledger_refroze_with_money_the_tabs_way_and_
     text = str(block)
     # the pull's own sentence, then one line per trade, money as the tab writes it elsewhere
     assert "Ledger: 3 settled trades re-frozen at the close" in text
-    assert "F1 FX_FWD: USD -1,234 -> USD 2,001 (the 2026-09-19 fix landed)" in text
+    assert "F1 FX_FWD: USD -1,234 -> USD 2,001 (the 2026-09-19 close landed)" in text
     assert "O2 FX_OPTION: n/a -> USD 15,000" in text and "O2 FX_OPTION: n/a -> USD 15,000 (" not in text
-    assert "kept: F3 FX_FWD: already frozen at the fix" in text and "kept: F4" in text
+    assert "kept: F3 FX_FWD: already frozen at the close" in text and "kept: F4" in text
     # each backfill block under its own label, the day's and the closing step's
     assert "Backfill 2026-09-19 ledger: 1 settled trade re-frozen at the close" in text
     assert "Backfill closing step: 1 settled trade(s) kept as frozen" in text
@@ -714,8 +715,8 @@ def test_status_block_shows_what_the_ledger_refroze_with_money_the_tabs_way_and_
     first = details[0]
     assert first.children[0].children == "Re-frozen: 3 trade(s), kept: 2"
     items = first.children[1].children
-    assert [li.children for li in items][:2] == ["F1 FX_FWD: USD -1,234 -> USD 2,001 (the 2026-09-19 fix landed)", "F9"]
-    assert items[0].title == "NDF_FIX 2026-09-19" and getattr(items[1], "title", None) is None
+    assert [li.children for li in items][:2] == ["F1 FX_FWD: USD -1,234 -> USD 2,001 (the 2026-09-19 close landed)", "F9"]
+    assert items[0].title == "SPOT 2026-09-19" and getattr(items[1], "title", None) is None
     assert details[1].children[0].children == "Re-frozen: 0 trade(s), kept: 1"       # the closing step
     assert details[2].children[0].children == "Re-frozen: 1 trade(s)"                # the backfill day
     rows = md.refrozen_rows(LEDGER_STATUS["ledger"])
@@ -745,3 +746,183 @@ def test_a_status_file_without_the_ledger_keys_renders_exactly_as_before():
     # a ragged block never raises and says only what it can read
     ragged = md.refrozen_rows({"refrozen": "F1", "kept": [None, {"reason": "r"}], "refrozen_count": True})
     assert ragged == {"summary": "", "count": 0, "refrozen": [], "kept": ["None", "?: r"]}
+
+
+# =========================================================================== 2026-09-24: commodity conversion, Phase 2
+# The macro trader's products left the app (user approval 2026-09-24): the tab no longer shows the
+# rates step or the swap marks in the manual form; the pull's OIS step is status["curves"].
+# Added: the futures' contract dates, the futures never asked for, and the library's gaps.
+def test_the_manual_form_offers_no_swap_marks_and_says_a_manual_mark_is_never_official():
+    offered = {o["value"] for o in md.MANUAL_MARK_TYPE_OPTIONS}
+    assert offered == {"SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "DELTA", "PREMIUM"}
+    text = str(md.manual_entry_form("EURUSD"))
+    assert "never official" in text and "PAR_RATE" not in text and "DV01" not in text
+
+
+def test_the_rates_step_of_the_status_file_is_not_rendered():
+    status = {"connected": True, "time": "t", "written": 1, "failed": 0,
+              "rates": {"currencies": {"USD": {"quotes": 12, "fixings": 30}}, "failed": [{"trade_id": "S1", "error": "x"}]},
+              "options": {"priced": 2, "skipped": []}}
+    text = str(md.diagnostics_panel(status, {}))
+    assert "Rates" not in text and "fixing" not in text and "S1" not in text
+    assert "Options: 2 option(s) priced this cycle." in text
+    assert not hasattr(md, "_rates_step_lines")
+    assert "Rates" not in str(md.status_block(status))
+    # the old block's name, and the gone dividends block, are read by nothing
+    assert "OIS curves" not in str(md.status_block(dict(status, dividends={"SPX Index": 0.013})))
+
+
+def test_the_curves_block_says_in_brief_which_currencies_have_a_curve_and_why_not():
+    status = dict(CONNECTED_STATUS, curves={
+        "as_of_date": "2026-09-24", "bootstrapped": 2, "seconds": {"bloomberg": 2.1, "bootstrap": 0.4},
+        "currencies": {"USD": {"quotes": 18, "nodes": 18, "error": ""},
+                       "EUR": {"quotes": 15, "nodes": 1, "error": ""},
+                       "SEK": {"quotes": 0, "nodes": 0, "error": "SEK has no OIS index in scope"},
+                       "JPY": {"quotes": 9, "nodes": 0, "error": ""}}})
+    parts = md.status_block(status)
+    block = next(p for p in parts[1:] if getattr(p, "id", None) == md.CURVES_BLOCK_ID)
+    assert block.children[0].children == "OIS curves: EUR 1 node, USD 18 nodes; 2 currencies without a curve"
+    details = block.children[1]
+    assert not getattr(details, "open", False) and details.children[0].children == "Without a curve: 2"
+    assert [li.children for li in details.children[1].children] == [
+        "JPY: 9 quote(s), no curve built", "SEK: SEK has no OIS index in scope"]
+    skipped = md.curves_block({"curves": {"currencies": {}, "bootstrapped": 0, "skipped": "no FX_OPTION needs an OIS curve"}})
+    assert str(skipped.children[0].children) == "OIS curves: not pulled, no FX_OPTION needs an OIS curve"
+    errored = md.curves_block({"curves": {"currencies": {}, "error": "RatesBloombergSource unavailable: x"}})
+    assert errored.children[0].children == "OIS curves: RatesBloombergSource unavailable: x"
+    for absent in (None, {}, CONNECTED_STATUS, {"curves": "junk"}, {"curves": {"currencies": {}}}):
+        assert md.curves_block(absent) is None
+
+
+def test_missing_rows_link_a_non_usd_futures_conversion_spot_to_its_trades(book_is_today):
+    conn = _book()
+    _instrument(conn, "COZ26 Comdty", "FUTURE", "ICE:CO", "EUR", multiplier=1000, expiry="2026-10-30",
+                ticker="COZ26 Comdty")
+    _trade(conn, "F3", "COZ26 Comdty", "FUTURE", "2026-09-01", -4, 60.0,
+           [("NOTIONAL", "EUR", -240_000, "2026-10-30", 0)])
+    conn.commit()
+    blocked = md.blocked_by_mark(conn, TODAY)
+    assert blocked[("EURUSD", "SPOT", TODAY)]["trades"] == {"T3", "F3"}
+    assert blocked[("COZ26 Comdty", "FUTURE_PX", "2026-10-30")]["notional"] == {"EUR": 240_000}
+    by_key = _keyed(md.missing_rows(conn, TODAY)[1])
+    spot = by_key[("EURUSD", "SPOT", TODAY)]
+    assert spot["trades_blocked"] == 2 and spot["notional_blocked"] == "EUR 5,240,000"
+    # a USD future reads no conversion spot
+    assert not any(k[0] == "USDUSD" for k in blocked)
+
+
+CONTRACT_DATES_STATUS = dict(CONNECTED_STATUS, contract_dates={
+    "requested": 3, "stored": 2, "applied": {"checked": 5, "updated": ["CLZ26 Comdty"], "missing_dates": []},
+    "failed": [{"ticker": "COZ6 Comdty", "reason": "Unknown/Invalid security"}, "HGZ6 Comdty", {"ticker": "NGZ6 Comdty"}],
+    "summary": "2 contract dates stored, 1 future moved to Bloomberg's expiry; 3 tickers gave no date"},
+    not_requestable=[
+        {"instrument_id": "LAZ26 Comdty", "settle_date": "2026-12-16", "trade_ids": ["910000020", "910000021"],
+         "reason": "no verified Bloomberg ticker for LME:LA"},
+        {"instrument_id": "SCZ26 Comdty", "settle_date": "", "trade_ids": [], "reason": ""},
+        "RBZ26 Comdty"])
+
+
+def test_status_block_shows_the_contract_dates_sentence_and_the_failures_collapsed():
+    parts = md.status_block(CONTRACT_DATES_STATUS)
+    assert [getattr(p, "id", None) for p in parts[1:]] == [md.PULL_TIMINGS_ID, md.CONTRACT_DATES_BLOCK_ID,
+                                                           md.NOT_REQUESTABLE_ID]
+    block = parts[2]
+    assert block.children[0].children == ("Contract dates: 2 contract dates stored, 1 future moved to Bloomberg's "
+                                          "expiry; 3 tickers gave no date")
+    details = block.children[1]
+    assert type(details).__name__ == "Details" and not getattr(details, "open", False)
+    assert details.children[0].children == "Tickers that gave no contract date: 3"
+    assert [li.children for li in details.children[1].children] == [
+        "COZ6 Comdty: Unknown/Invalid security", "HGZ6 Comdty", "NGZ6 Comdty: no reason given"]
+    # the block's error is said, in red; nothing to say gives nothing
+    errored = md.contract_dates_block({"contract_dates": {"failed": [], "summary": "", "error": "library not read"}})
+    assert "Contract dates: library not read" in str(errored)
+    for absent in (None, {}, CONNECTED_STATUS, {"contract_dates": "junk"},
+                   {"contract_dates": {"requested": 0, "stored": 0, "failed": [], "applied": {}, "summary": ""}}):
+        assert md.contract_dates_block(absent) is None
+    assert md.CONTRACT_DATES_BLOCK_ID not in str(md.status_block(CONNECTED_STATUS))
+
+
+def test_status_block_lists_the_futures_never_asked_for_with_their_reason_and_trades_on_hover():
+    block = md.not_requestable_block(CONTRACT_DATES_STATUS)
+    assert block.id == md.NOT_REQUESTABLE_ID
+    assert block.children[0].children.startswith("Not asked of Bloomberg: 3 futures with no verified Bloomberg ticker")
+    items = block.children[1].children
+    assert items[0].children == "LAZ26 Comdty (2026-12-16, 2 trades): no verified Bloomberg ticker for LME:LA"
+    assert items[0].title == "910000020, 910000021"
+    assert items[1].children == "SCZ26 Comdty: no reason given" and getattr(items[1], "title", None) is None
+    assert items[2].children == "RBZ26 Comdty"
+    for absent in (None, {}, {"not_requestable": []}, {"not_requestable": "junk"}):
+        assert md.not_requestable_block(absent) is None
+    assert md.status_block(CONNECTED_STATUS)[-1].id == md.PULL_TIMINGS_ID
+
+
+def _commodity_book():
+    """The fixture book plus a future of a root with no verified ticker (bbg_ticker ''), as the
+    contract master writes one."""
+    conn = _book()
+    _instrument(conn, "LAZ26 Comdty", "FUTURE", "LME:LA", "USD", multiplier=25, expiry="2026-12-16", ticker="")
+    _trade(conn, "F2", "LAZ26 Comdty", "FUTURE", "2026-09-01", 3, 2600.0,
+           [("NOTIONAL", "USD", 195_000, "2026-12-16", 0)])
+    conn.commit()
+    return conn
+
+
+def test_library_lists_a_need_with_no_ticker_as_a_gap_not_as_a_ticker(book_is_today):
+    conn = _commodity_book()
+    asked, gaps = md.library_rows(conn, TODAY)
+    assert "" not in {r["ticker"] for r in asked} and all(r["requestable"] for r in asked)
+    assert gaps and {r["ticker"] for r in gaps} == {md.LIBRARY_GAP_TICKER} and all(r["flag"] == "gap" for r in gaps)
+    assert any("LAZ26 Comdty" in r["used_for"] and "no verified Bloomberg ticker for LME:LA" in r["used_for"]
+               for r in gaps)
+    dates = [r for r in asked if r["field"] == "FUT_LAST_TRADE_DT, FUT_NOTICE_FIRST"]
+    assert [r["ticker"] for r in dates] == ["CLZ26 Comdty"]
+    panel = md.library_panel(conn, TODAY)
+    summary = panel.children[0].children
+    assert f"{len(asked)} ticker(s)" in summary and f"{len(gaps)} need(s) with no Bloomberg ticker, not asked" in summary
+    table = panel.children[2]
+    assert table.data[:len(gaps)] == gaps                                        # the gaps first, flagged
+    assert "gaps" in panel.children[1].children
+
+
+def test_contract_dates_panel_shows_on_file_and_missing_with_the_reason(book_is_today):
+    from data.contracts.static import store_static_dates
+    conn = _commodity_book()
+    rows = md.contract_date_rows(conn, TODAY)
+    by_id = {r["contract_id"]: r for r in rows}
+    assert set(by_id) == {"CLZ26 Comdty", "LAZ26 Comdty"}
+    assert by_id["CLZ26 Comdty"]["status"] == "missing" and by_id["CLZ26 Comdty"]["why"].startswith("not on file yet")
+    la = by_id["LAZ26 Comdty"]
+    assert la["status"] == "missing" and la["bbg_ticker"] == "no ticker" and "LME:LA" in la["why"]
+    summary = md.contract_dates_panel(conn, TODAY).children[0].children
+    assert summary == (f"Contract dates · 0 of 2 contract(s) on file on {TODAY} · 2 missing, "
+                       "1 with no Bloomberg ticker to ask with")
+
+    store_static_dates(conn, [{"contract_id": "CLZ26 Comdty", "last_trade_date": "2026-11-19",
+                               "first_notice_date": "2026-11-20", "source": "BBG_BDP"}])
+    rows = md.contract_date_rows(conn, TODAY)
+    assert [r["contract_id"] for r in rows] == ["LAZ26 Comdty", "CLZ26 Comdty"]     # missing first
+    cl = rows[1]
+    assert (cl["status"], cl["last_trade_date"], cl["first_notice_date"], cl["source"], cl["why"], cl["flag"]) == \
+        ("on file", "2026-11-19", "2026-11-20", "BBG_BDP", "", "")
+    panel = md.contract_dates_panel(conn, TODAY)
+    assert "1 of 2 contract(s) on file" in panel.children[0].children
+    assert md.CONTRACT_DATES_TABLE_ID in str(panel)
+    # no commodity future open: one line, no table
+    empty = md.contract_dates_panel(schema.connect(), TODAY)
+    assert "none needed" in empty.children[0].children and md.CONTRACT_DATES_TABLE_ID not in str(empty)
+    assert md.CONTRACT_DATES_TITLE in str(md.whole_book_panels(conn, TODAY)[0])
+
+
+def test_completeness_strip_hover_counts_the_needs_with_no_ticker_apart():
+    import pandas as pd
+    df = pd.DataFrame([
+        {"as_of_date": PREV, "needed": 8, "present": 8, "complete": True, "not_requestable": [
+            {"instrument_id": "LAZ26 Comdty", "settle_date": "2026-12-16", "mark_type": "FUTURE_PX", "reason": "r"}]},
+        {"as_of_date": TODAY, "needed": 8, "present": 5, "complete": False, "not_requestable": []}])
+    squares = md.completeness_strip(df).children
+    assert squares[0].title == (f"{PREV}: 8/8 needed marks on file as official closes; 1 more with no Bloomberg ticker, "
+                                "never asked for and not counted (LAZ26 Comdty)")
+    assert squares[1].title == f"{TODAY}: 5/8 needed marks on file as official closes"
+    older = pd.DataFrame([{"as_of_date": TODAY, "needed": 1, "present": 1, "complete": True}])   # no column at all
+    assert md.completeness_strip(older).children[0].title == f"{TODAY}: 1/1 needed marks on file as official closes"

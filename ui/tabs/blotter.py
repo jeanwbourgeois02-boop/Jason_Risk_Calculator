@@ -1,5 +1,8 @@
-"""Blotter tab: docs/BUILD_PLAN.md section 5 "Blotter", rebuilt 2026-09-15 into five
-sub-tabs (user decision): Total book, FX, Rates, Options, Bundles. Rows come from
+"""Blotter tab: docs/BUILD_PLAN.md section 5 "Blotter", rebuilt 2026-09-15 into sub-tabs
+(user decision): Total book, FX, Futures, Options, Bundles, Manual entry. The Rates
+sub-tab left on 2026-09-24 with the macro trader's products (CLAUDE.md "Commodity
+conversion plan", Phase 2: rates, NDFs, the FX-swap package rule and the equity index are
+out of the app). Rows come from
 `engine.pnl.valuation.value_book(as_of)` (via `ui.tabs.blotter_pricing.priced_value_book`,
 a thin memoisation layer -- see that module's docstring), filtered per sub-tab by
 `product`. A row with no official mark shows its `reason` and blank P&L; it is never
@@ -19,7 +22,7 @@ both the rows and every LTD/Daily/.../Trading figure to just those trades. Sorti
 native (`ui.tabs.ranking`, user 2026-09-22: every table ranks on a header click, numbers
 stored as numbers); the settle-date / pair order is only the order a table opens in.
 
-Sub-tab layout, each (Total book / FX / Rates / Options):
+Sub-tab layout, each (Total book / FX / Futures / Options):
   (a) a P&L strip: LTD, Daily, Previous day, 5d, MTD, YTD, Trading -- recomputed for
       exactly the rows currently visible in that sub-tab's table AFTER native header
       filtering (`derived_virtual_data`), per the 2026-09-15 coordinator addition, via
@@ -34,17 +37,16 @@ FX_OPTION rows (premium mark minus fill, in base currency, converted at spot), s
 Options sub-tab is the same strip + filter bar + table as Total book, scoped to
 `FX_OPTION`. `PLACEHOLDER_SCOPES` is kept (empty) for the placeholder rendering path.
 
-Options and Rates wiring (2026-09-18). `ui.tabs.options` and `ui.tabs.rates` each bring
-their own callbacks, both registered from `register_callbacks` here (Rates' Direction
-dropdown did nothing until it was). Both refresh their own table in place from the
-revision stores, so `_update` no longer rebuilds those sub-tabs on a marks-only revision
-(`_SELF_REFRESHING_SCOPES`); the P&L strip above each table, built here, follows through
+Options wiring (2026-09-18). `ui.tabs.options` brings its own callbacks, registered from
+`register_callbacks` here. It refreshes its own table in place from the revision stores,
+so `_update` does not rebuild that sub-tab on a marks-only revision
+(`_SELF_REFRESHING_SCOPES`); the P&L strip above the table, built here, follows through
 `_register_strip_refresh`. A genuine book change (an upload, a manual trade booked or
-deleted), a date change and a sub-tab change still rebuild them; a saved option term or a
-flipped swap direction does not, although both are published as book revisions:
-`_update` compares `ui.revision.trade_set_signature` with the one the content on screen
-was built from (`BUILT_TRADE_SET_ID`), so typing three strikes or flipping three swaps in
-a row is never interrupted by a rebuild. The banners (missing option terms, stored values
+deleted), a date change and a sub-tab change still rebuild it; a saved option term does
+not, although it is published as a book revision: `_update` compares
+`ui.revision.trade_set_signature` with the one the content on screen was built from
+(`BUILT_TRADE_SET_ID`), so typing three strikes in a row is never interrupted by a
+rebuild. The banners (missing option terms, stored values
 that are not numbers) sit in `NOTICES_ID`, always in the page and refreshed in place on
 every revision (`_refresh_notices`), and a saved Options cell publishes the data revision
 at once (`_publish_option_cell_edit`), so the banner drops an option the moment its strike
@@ -52,13 +54,20 @@ is saved. The Options strip (`options_strip`) shows only the cards that have a v
 a card waiting for an EARLIER close's option marks -- which exist only for the days the
 app ran with Bloomberg -- is left out and named in one caption line under the row
 (`options_hidden_cards`); a card that is "n/a" for any other reason stays, with its
-reason. The Rates strip, like every other scope's, always shows every card.
+reason. Every other scope's strip always shows every card.
 
 Total book (2026-09-17, user request "there should be P&L by asset type"): under the
 strip, `asset_class_pnl_table` shows one row per asset class present (FX, Futures,
-Rates, Options) plus Total, each with LTD / Daily / Previous day / 5d / MTD / YTD /
+Options) plus Total, each with LTD / Daily / Previous day / 5d / MTD / YTD /
 Trading computed by `row_scoped_period_pnl` over that class's trade ids -- the same
 arithmetic and reference dates as the strip, so the class rows always sum to the strip.
+Above it, the Positions table (`positions_table`): the currency rows, the FX net and gross
+and the FX options' delta of `engine.ladder.positions.book_positions`.
+
+Futures (2026-09-24, commodity conversion): Jason's commodity futures, each contract in its
+own currency. The table shows the contract's exchange (contract master, `data.contracts`),
+`value_book`'s `pnl_local` with its currency (the instrument's quote currency) beside the
+USD P&L, which the engine converted at spot; nothing is converted here.
 
 FX is `ui.tabs.blotter_fx.build_layout`: the legacy sheet's "All FX trades" column
 layout (trade / tenor / fill / t-1-EOD-t-2 mark and P&L), but priced by
@@ -78,16 +87,6 @@ table uses -- so the strip and the table now agree exactly on any priced trade (
 the retired replica table, which deliberately differed). The whole sub-tab is a single
 always-current block, rebuilt on the same top-level `_update` callback as every other
 sub-tab.
-
-Rates (added 2026-09-15; strip added 2026-09-17) is `ui.tabs.rates.build_layout`, an
-IRS blotter read straight off `trades`/`instruments`/`marks_official` (PV, DV01, settled
-cashflows, P&L, recon status -- see that module's docstring), preceded by the same P&L
-strip as the other sub-tabs, scoped to the IRS trade ids through `row_scoped_headline`
-(so it agrees with the Total book's Rates row). Since 2026-09-17 `value_book` builds
-IRS rows too (`PV_USD + CASHFLOW_USD`), which is what the strip and the Total book
-price; the Rates table itself keeps its swap-specific columns and has no filter bar or
-row-click panel (its rows are not value_book-shaped). Rebuilt whenever the as-of date
-or sub-tab selection changes via the same top-level `_update` callback.
 
 Bundles sub-tab (item 4): `ui.tabs.blotter_bundles` renders a list of bundles (from
 `data.ingest.themes.list_bundles`) with LTD/Daily/MTD/YTD via
@@ -114,7 +113,6 @@ from ui.tabs import blotter_bundles as bundles_ui
 from ui.tabs import blotter_fx as blotter_fx_ui
 from ui.tabs import manual_entry as manual_entry_ui
 from ui.tabs import options as options_ui
-from ui.tabs import rates as rates_ui
 from ui.tabs.blotter_pricing import (
     HEADLINE_ORDER,
     HEADLINE_TITLES,
@@ -144,7 +142,7 @@ TODAY_BUTTON_ID = "blotter-today-button"
 # Always in the page (`build_layout`), never inside the rebuilt content (2026-09-18):
 # the banners, so they refresh in place on every revision instead of only when a sub-tab
 # is rebuilt, and the trade-set signature the content on screen was built from, which
-# `_update` reads back to tell a genuine book change from a saved term or flipped swap.
+# `_update` reads back to tell a genuine book change from a saved option term.
 NOTICES_ID = "blotter-notices"
 BUILT_TRADE_SET_ID = "blotter-built-trade-set"
 
@@ -157,58 +155,48 @@ DETAIL_PANEL_ID = "blotter-datatable"  # "-{scope}-detail" suffix keeps the id u
 _ALL = "All"
 
 # --------------------------------------------------------------------------- sub-tabs
-# Order per user decision 2026-09-15: Total book | FX | Futures | Rates | Options |
-# Bundles. "FX" scope is FX_SPOT/FX_FWD/FX_SWAP only (FUTURE moved to its own sub-tab).
-# "Manual entry" (2026-09-18) closes the row: it is a form, not a view of the book.
-SCOPE_ORDER = ("total", "fx", "futures", "rates", "options", "bundles", "manual")
-SCOPE_LABELS = {"total": "Total book", "fx": "FX", "futures": "Futures", "rates": "Rates",
+# Order per user decision 2026-09-15: Total book | FX | Futures | Options | Bundles. "FX"
+# scope is FX_SPOT/FX_FWD/FX_SWAP (FUTURE has its own sub-tab). FX_SWAP stays (2026-09-24):
+# manual entry books a swap as one 4-leg trade; only the blotter's package rule left. "Manual entry" (2026-09-18)
+# closes the row: it is a form, not a view of the book. Rates left on 2026-09-24 (the
+# macro trader's products are out of the app, CLAUDE.md "Commodity conversion plan").
+SCOPE_ORDER = ("total", "fx", "futures", "options", "bundles", "manual")
+SCOPE_LABELS = {"total": "Total book", "fx": "FX", "futures": "Futures",
                 "options": "Options", "bundles": "Bundles", "manual": "Manual entry"}
 SCOPE_PRODUCTS = {
     "total": None,
     "fx": ("FX_SPOT", "FX_FWD", "FX_SWAP"),
     "futures": ("FUTURE",),
-    "rates": ("IRS",),
-    # EQ_OPTION (the SPX listed index options the parser books) joined 2026-09-22 so the
-    # options scope sees the same trades the Options sub-tab's own grouped table queries.
-    "options": ("FX_OPTION", "EQ_OPTION"),
+    "options": ("FX_OPTION",),
     "manual": None,
 }
 # Sub-tabs that are forms/lists of their own, not `priced_value_book`-shaped tables:
 # no strip / row-detail / filter callbacks are registered for them.
-_NON_TABLE_SCOPES = ("bundles", "rates", "fx", "options", "manual")
+_NON_TABLE_SCOPES = ("bundles", "fx", "options", "manual")
 # Views rebuilt whole when only marks changed (ui/revision.py); see `_update`.
 _MARKS_REBUILD_SCOPES = ("bundles", "fx")
 # Sub-tabs whose own module refreshes its table IN PLACE from the revision stores
-# (`ui.tabs.options._render` / `_headline`, `ui.tabs.rates._refresh`), so they left the
-# list above on 2026-09-18: a wholesale rebuild on every 2-minute Bloomberg pull reset the
-# Options terms editor's dropdown, could wipe a strike being typed into a cell and closed a
-# Direction dropdown the user had open. A genuine book change (an upload, a manual trade
-# booked or deleted -- `_update` compares `revision.trade_set_signature`) and a date or
-# sub-tab change still rebuild them; a saved term or a flipped direction does NOT, although
-# it is published as a book revision too. The one piece of those sub-tabs built HERE, the
-# P&L strip above the table, follows new marks through `_register_strip_refresh`.
-_SELF_REFRESHING_SCOPES = ("options", "rates")
-# "rates" (2026-09-15) and "options" (2026-09-17) are both real views now -- see
-# scope_layout and the module docstring. Kept (empty) so the placeholder path stays
-# available for a future scope.
+# (`ui.tabs.options._render` / `_headline`), so it left the list above on 2026-09-18: a
+# wholesale rebuild on every Bloomberg pull reset the Options terms editor's dropdown and
+# could wipe a strike being typed into a cell. A genuine book change (an upload, a manual
+# trade booked or deleted -- `_update` compares `revision.trade_set_signature`) and a date
+# or sub-tab change still rebuild it; a saved term does NOT, although it is published as a
+# book revision too. The one piece of the sub-tab built HERE, the P&L strip above the
+# table, follows new marks through `_register_strip_refresh`.
+_SELF_REFRESHING_SCOPES = ("options",)
+# Kept (empty) so the placeholder path stays available for a future scope.
 PLACEHOLDER_SCOPES: dict = {}
 
-# Asset class per product for the Total book's per-class P&L table.
-# A listed index option (EQ_OPTION) sits on the "Options" line with the FX options (user,
-# 2026-09-22: "just add that to options"); a product not listed here (SWAPTION / CAP_FLOOR /
-# CMDTY_OPTION have no ingest path yet) still falls to "Other" in `asset_class_pnl_rows`.
-ASSET_CLASS_OF = {"FX_SPOT": "FX", "FX_FWD": "FX", "FX_SWAP": "FX", "FUTURE": "Futures",
-                  "IRS": "Rates", "FX_OPTION": "Options", "EQ_OPTION": "Options"}
-ASSET_CLASS_ORDER = ("FX", "Futures", "Rates", "Options")
+# Asset class per product for the Total book's per-class P&L table. A product not listed
+# here (CMDTY_OPTION has no ingest path yet) falls to "Other" in `asset_class_pnl_rows`,
+# still counted and summed, never dropped.
+ASSET_CLASS_OF = {"FX_SPOT": "FX", "FX_FWD": "FX", "FX_SWAP": "FX", "FUTURE": "Futures", "FX_OPTION": "Options"}
+ASSET_CLASS_ORDER = ("FX", "Futures", "Options")
 ASSET_TABLE_ID = "blotter-asset-class-table"
 POSITIONS_TABLE_ID = "blotter-positions-table"
-# Futures is a real view (not a "not built yet" placeholder like Rates/Options), but on
-# this PC no futures trades are loaded -- BNP gives one netted position row per contract
-# with no fill/trade_date, and fills only arrive via the workbook import on the
-# Reconciliation tab (user decision 2026-09-15, item 1). When its scope is genuinely
-# empty the strip must read "n/a" with this reason rather than a hollow zero.
-FUTURES_NO_TRADES_REASON = ("no futures trades loaded (BNP gives a netted position, "
-                             "fills come from the workbook import on the Reconciliation tab)")
+# With no futures trades in the book for the date shown, the Futures strip reads "n/a"
+# with this reason rather than a hollow zero.
+FUTURES_NO_TRADES_REASON = "no futures trades in the book on this date"
 
 # Columns offered as click-to-filter dropdowns (user decision 2026-09-15, replacing the
 # broken native filter row): every categorical column that exists in a scope's own
@@ -218,22 +206,26 @@ FUTURES_NO_TRADES_REASON = ("no futures trades loaded (BNP gives a netted positi
 FILTERABLE_COLS = ["instrument_id", "side", "status", "product", "strategy", "theme"]
 
 
-# Futures columns per the 2026-09-15 decision: Trade date | Contract | Side | Contracts |
-# Fill | Expiry | Status | Settlement | P&L (USD) | Strategy | Bundle | Trade id.
-# "Settlement" has no dedicated field in value_book's output yet (no futures trade exists
-# to observe one on this PC); mapped to `mark_date` (the date the price used for P&L was
-# struck) as the closest existing column -- a default pick, noted here since nobody was
-# available to confirm it.
+# Futures columns (2026-09-15, then 2026-09-24 for the commodity book): Trade date |
+# Contract | Exchange | Side | Contracts | Fill | Expiry | Status | Settlement | P&L (local)
+# | Ccy | P&L (USD) | Strategy | Bundle | Trade id. A commodity future's P&L is struck in the
+# contract's own currency (`value_book`'s `pnl_local`, in the instrument's quote currency)
+# and converted to USD at spot by the engine; both are shown, side by side, as computed.
+# "Settlement" is `mark_date` (the date the price used for P&L was struck).
 _FUTURES_DISPLAY_COLUMNS = [
-    "trade_date", "instrument_id", "side", "quantity", "fill", "settle_date", "status",
-    "mark_date", "pnl_usd", "strategy", "theme", "trade_id",
+    "trade_date", "instrument_id", "exchange", "side", "quantity", "fill", "settle_date", "status",
+    "mark_date", "pnl_local", "pnl_ccy", "pnl_usd", "strategy", "theme", "trade_id",
 ]
 _FUTURES_COLUMN_LABELS = {
-    "trade_date": "Trade date", "instrument_id": "Contract", "side": "Side",
+    "trade_date": "Trade date", "instrument_id": "Contract", "exchange": "Exchange", "side": "Side",
     "quantity": "Contracts", "fill": "Fill", "settle_date": "Expiry", "status": "Status",
-    "mark_date": "Settlement", "pnl_usd": "P&L (USD)", "strategy": "Strategy",
-    "theme": "Bundle", "trade_id": "Trade id",
+    "mark_date": "Settlement", "pnl_local": "P&L (local)", "pnl_ccy": "Ccy", "pnl_usd": "P&L (USD)",
+    "strategy": "Strategy", "theme": "Bundle", "trade_id": "Trade id",
 }
+# A settled future is the ledger's frozen row (`realised_pnl`), which holds its P&L in USD
+# only: `value_book` leaves `pnl_local` blank on it, and this is said where the number
+# would be (engine/pnl/valuation.py::_settled_future_row).
+SETTLED_LOCAL_REASON = "settled: the ledger froze this trade's P&L in USD; its local-currency P&L is not stored"
 
 # Display order and headers per the 2026-09-15 rebuild + coordinator's headline note:
 # Mark is renamed "Live rate" and grouped with the two new per-pair columns (Notional,
@@ -276,8 +268,7 @@ def _fmt_status(value) -> str:
     return {"OPEN": "Open", "SETTLED": "Settled", "CLOSED": "Closed out"}.get(value, value or "")
 
 
-_PRODUCT_LABELS = {"FX_SPOT": "Spot", "FX_FWD": "Forward", "FX_SWAP": "Swap", "FUTURE": "Future",
-                   "IRS": "Swap (IRS)", "FX_OPTION": "Option"}
+_PRODUCT_LABELS = {"FX_SPOT": "Spot", "FX_FWD": "Forward", "FX_SWAP": "Swap", "FUTURE": "Future", "FX_OPTION": "Option"}
 
 
 def _fmt_product(value) -> str:
@@ -295,6 +286,7 @@ def _sorted_scope_df(df: pd.DataFrame) -> pd.DataFrame:
 _COLUMN_FORMATS = {   # the numeric columns of the trade table (ui.tabs.ranking); every other column is text
     "quantity": rk.count(),                 # unsigned: direction is carried by `side`
     "notional_usd": rk.amount(),
+    "pnl_local": rk.amount(nully="n/a"),     # the Futures sub-tab: P&L in the contract's own currency
     "pnl_usd": rk.amount(nully="n/a"),
     "fill": rk.rate(6, nully="n/a"),
     "mark": rk.rate(6, nully="n/a"),
@@ -313,6 +305,7 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
     cols = [c for c in display_columns if c in df.columns]
     formatted = df[cols].copy() if not df.empty else pd.DataFrame(columns=cols)
     reasons = df["reason"] if "reason" in df.columns else pd.Series([""] * len(df))
+    statuses = df["status"] if "status" in df.columns else pd.Series([""] * len(df))
     for col in cols:
         if col == "status":
             formatted[col] = formatted[col].map(_fmt_status)
@@ -330,11 +323,17 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
         if "trade_id" in df.columns:
             rec.setdefault("trade_id", df["trade_id"].iloc[i])
         reason = reasons.iloc[i] if i < len(reasons) else ""
+        tip = {}
         if reason and rec.get("pnl_usd") is None:
-            tooltip_data.append({"pnl_usd": {"value": reason, "type": "text"}})
-        else:
-            tooltip_data.append({})
-    style_data_conditional = rk.sign_styles(["pnl_usd"], bold=True,
+            tip["pnl_usd"] = {"value": reason, "type": "text"}
+        if "pnl_local" in rec and rec["pnl_local"] is None:
+            # Unpriced: the row's own reason. Priced but settled: the frozen row holds USD only.
+            settled = (statuses.iloc[i] if i < len(statuses) else "") == "SETTLED"
+            why = reason or (SETTLED_LOCAL_REASON if settled else "no local-currency P&L on this row")
+            tip["pnl_local"] = {"value": why, "type": "text"}
+        tooltip_data.append(tip)
+    pnl_cols = [c for c in ("pnl_local", "pnl_usd") if c in cols] or ["pnl_usd"]
+    style_data_conditional = rk.sign_styles(pnl_cols, bold=True,
                                             nil={"color": "var(--muted)", "fontStyle": "italic"})
     return data_records, tooltip_data, style_data_conditional
 
@@ -553,9 +552,9 @@ def options_strip(conn: sqlite3.Connection, as_of: str) -> html.Div:
 
 def scope_strip(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     """The whole-scope P&L strip of a sub-tab whose table belongs to another module
-    (`_SELF_REFRESHING_SCOPES`): Options gets `options_strip`; Rates the full generic row
-    over its swaps, every card shown. One builder for the sub-tab's first render and for
-    its in-place refresh on new marks."""
+    (`_SELF_REFRESHING_SCOPES`): Options gets `options_strip`; any other scope the full
+    generic row over its trades, every card shown. One builder for the sub-tab's first
+    render and for its in-place refresh on new marks."""
     if scope == "options":
         return options_strip(conn, as_of)
     df = scope_df(conn, scope, as_of)
@@ -647,30 +646,38 @@ def _pos_num(value, _digits: int = 0):
     return rk.value(value)
 
 
-def _pos_text(value, digits: int = 0) -> str:
-    """A number inside the Detail sentence."""
-    if value is None or (isinstance(value, float) and value != value):
-        return "n/a"
-    return format_cell(value) if digits == 0 else f"{value:,.{digits}f}"
-
-
 def _quoted(value) -> str:
     if value is None or (isinstance(value, float) and value != value):
         return ""
     return f"{value:,.4f}" if abs(value) < 100 else f"{value:,.2f}"
 
 
+def _pair_label(c: dict) -> str:
+    """The plain pair a currency row's rate is quoted on ('USDJPY', 'EURUSD', 'XAUUSD').
+    `book_positions` labels a row with its rate's own label, which for a currency the old
+    NDF rule priced was a 1M NDF ticker ('KWN+1M'); NDFs left the app on 2026-09-24, so a
+    label that is not a pair is shown as the plain USD pair of the currency instead (every
+    NDF currency is quoted USDXXX). No label (no rate on file) stays blank: the row's USD
+    delta is then n/a with its reason."""
+    label = str(c.get("label") or "")
+    if not label or (len(label) == 6 and label.isalpha()):
+        return label
+    return f"USD{c['ccy']}"
+
+
 def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
     """(records, tooltips) of the Total book's Positions table (user, 2026-09-22: "I want
-    to see the delta by currency, futures and rates dv01 in the blotter tab. this is the
-    key table of the blotter"): the figures of `engine.ladder.positions.book_positions`.
-    First one row per currency with delta (the Ladder's risk table: rate as quoted, local
-    delta, USD delta; a metal row says it is not in the FX net), then the FX net and gross,
-    then the ES futures and SPX options with their equity-index total, then DV01 by
-    currency, then the FX options' delta by pair (already inside the currency rows). Columns:
-    Position, Rate, Delta (local), Delta (USD), Detail. A figure that could not be computed
-    reads "n/a" with its reason in the cell's tooltip. Cells are numbers (ui.tabs.ranking):
-    a missing one is None."""
+    to see the delta by currency ... this is the key table of the blotter"): the figures of
+    `engine.ladder.positions.book_positions`. First one row per currency with delta (the
+    Ladder's risk table: rate as quoted on its plain pair, local delta, USD delta; a metal
+    row says it is not in the FX net), then the FX net and gross, then the FX options' delta
+    by pair (already inside the currency rows). The equity-index line and the rates DV01
+    left on 2026-09-24 with the macro trader's products: `book_positions` may still return
+    its `equity_index` and `rates` blocks until the book-positions lane drops them, and
+    they are not read here. Commodity futures get their own lines in Phase 3; until then
+    the Futures sub-tab and the Curve tab show them. Columns: Position, Rate, Delta
+    (local), Delta (USD), Detail. A figure that could not be computed reads "n/a" with its
+    reason in the cell's tooltip. Cells are numbers (ui.tabs.ranking): a missing one is None."""
     from engine.ladder.positions import book_positions
     pos = book_positions(conn, as_of)
     records, tips = [], []
@@ -690,32 +697,11 @@ def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
     for c in fx.get("by_ccy", []):
         detail = "metal, not in the FX net" if c["metal"] else ("" if c["ccy"] != "USD" else "USD legs")
         add(f"{c['ccy']}", _pos_num(c["local_delta"]), _pos_num(c["usd_delta"]), detail, c["reason"],
-            rate=(f"{c['label']} {_quoted(c['quoted'])}".strip() if c["ccy"] != "USD" else ""), kind="ccy")
+            rate=(f"{_pair_label(c)} {_quoted(c['quoted'])}".strip() if c["ccy"] != "USD" else ""), kind="ccy")
     if not fx.get("by_ccy") and fx.get("reason"):
         add("Delta by currency", "", None, "", fx["reason"], kind="ccy")
     add("FX net USD delta (+ = long USD)", "", _pos_num(fx["net_usd"]), "the header's Net USD; FX options' delta included", fx["reason"], kind="total")
     add("FX gross USD delta", "", _pos_num(fx["gross_usd"]), "sum of |per-pair USD delta|", fx["reason"], kind="total")
-
-    eq = pos["equity_index"]
-    if eq["lines"]:
-        es = eq.get("es_contracts")
-        detail = (f"{_pos_text(es, 2)} ES-contract equivalents" if es == es else "") + \
-                 (f"; {len(eq['missing'])} not priced (see the sub-lines)" if eq["missing"] else "")
-        for line in eq["lines"]:
-            what = f"{_pos_text(line['contracts'], 0)} contracts"
-            add(line["label"], _pos_num(line["index_units"], 2), _pos_num(line["usd_delta"]), what, line["reason"],
-                rate=(f"{line['level']:,.2f}" if line["level"] else ""), kind="future")
-        add("Equity index delta (ES futures + SPX options)", _pos_num(eq["index_units"], 2), _pos_num(eq["usd_delta"]),
-            detail, eq["reason"] or (eq["missing"][0] if eq["missing"] and eq["usd_delta"] != eq["usd_delta"] else ""), kind="total")
-    else:
-        add("Equity index delta (ES futures + SPX options)", "", None, "", eq["reason"], kind="total")
-
-    rates = pos["rates"]
-    for ccy, dv01 in sorted(rates["by_ccy"].items()):
-        add(f"{ccy} swaps DV01", "", _pos_num(dv01), "USD per +1bp parallel", kind="rates")
-    add("Rates DV01 (USD, +1bp parallel)", "", _pos_num(rates["dv01_usd"]),
-        f"{rates['swaps']} open swap(s)" + (f"; {len(rates['missing'])} without a DV01 mark" if rates["missing"] else ""),
-        rates["reason"] or (rates["missing"][0] if rates["missing"] else ""), kind="total")
 
     opt = pos["fx_options"]
     for pair, usd in sorted(opt["by_pair"].items()):
@@ -729,8 +715,8 @@ def positions_rows(conn: sqlite3.Connection, as_of: str) -> tuple:
 def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
     """The Total book's Positions block (`positions_rows`), above the P&L by asset class.
     Ranked (ui.tabs.ranking): a click on Delta (USD) puts the largest risk first; the
-    section totals (FX net and gross, equity index, rates DV01, FX options) are the
-    pinned footer, in their own order, never ranked with the lines."""
+    section totals (FX net and gross, FX options) are the pinned footer, in their own
+    order, never ranked with the lines."""
     records, tips = positions_rows(conn, as_of)
     body = [(r, t) for r, t in zip(records, tips) if r["kind"] != "total"]
     footer = [(r, t) for r, t in zip(records, tips) if r["kind"] == "total"]
@@ -752,9 +738,8 @@ def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
     total_style = [{"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700", "borderTop": "1px solid var(--muted)"}]
     return html.Div(className="section", children=[
         html.H4("Positions"),
-        html.P("Delta by currency at the day's official rates (spot; an NDF currency at its 1M NDF price), FX options "
-               "included; ES futures at their price and SPX options at the index level, added up in index units "
-               "($ per point) and in USD; swaps as DV01 per +1bp. A figure with no mark reads n/a with the reason on hover.",
+        html.P("Delta by currency at the day's official spot, FX options included. Futures positions are on the "
+               "Futures sub-tab and the Curve tab. A figure with no mark reads n/a with the reason on hover.",
                className="section-kicker"),
         rk.with_footer(table, [r for r, _ in footer], footer_style=total_style, footer_tooltips=[t for _, t in footer])])
 
@@ -794,33 +779,9 @@ def row_expand_panel(conn: sqlite3.Connection, trade_id: str, row: pd.Series) ->
     ])
 
 
-def _package_ids(conn: sqlite3.Connection) -> dict:
-    """trade_id -> package_id for trades actually part of a swap package."""
-    try:
-        rows = conn.execute(
-            "SELECT trade_id, package_id FROM trades "
-            "WHERE package_id IS NOT NULL AND package_id != '' AND package_id != trade_id"
-        ).fetchall()
-        return {tid: pkg for tid, pkg in rows}
-    except sqlite3.OperationalError:
-        return {}
-
-
 def row_detail_panel(conn: sqlite3.Connection, trade_id: str, df: pd.DataFrame) -> html.Div:
-    """The compact panel shown below the table when a row is clicked: swap packages
-    show all their legs' trades, an ordinary trade shows just itself."""
-    packages = _package_ids(conn)
-    pkg = packages.get(trade_id)
-    if pkg:
-        pkg_ids = [tid for tid, p in packages.items() if p == pkg]
-        pkg_rows = df[df["trade_id"].isin(pkg_ids)]
-        if pkg_rows.empty:
-            pkg_rows = df[df["trade_id"] == trade_id]
-        return html.Div(className="section section--secondary", children=[
-            html.H5(f"Swap package {pkg} ({len(pkg_rows)} legs)"),
-            html.Div([row_expand_panel(conn, r["trade_id"], pd.Series(r))
-                      for r in pkg_rows.to_dict("records")]),
-        ])
+    """The compact panel shown below the table when a row is clicked: the trade, its legs
+    and the marks used. (The FX-swap package view left on 2026-09-24 with the package rule.)"""
     row = df[df["trade_id"] == trade_id]
     if row.empty:
         return message_box("Trade not found in the visible rows.")
@@ -850,7 +811,34 @@ def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
     if df.empty:
         return df
     df = add_row_display_fields(conn, df, as_of)
+    if scope == "futures":
+        df = add_future_fields(conn, df)
     return _sorted_scope_df(df)
+
+
+def add_future_fields(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
+    """The Futures table's two descriptive columns, looked up, never computed: `pnl_ccy`, the
+    currency `value_book`'s `pnl_local` is in (the instrument's quote currency, CLAUDE.md
+    "P&L conventions -> Futures"), and `exchange`, the contract root's exchange in the
+    contract master (`data.contracts.get_root` on the instrument's `base_ccy`, which is the
+    root id, 'SHFE:CU'). A contract the master does not know shows a blank exchange; the
+    currency is always the instrument's own."""
+    from data.contracts import get_root
+
+    df = df.copy()
+    info = {}
+    for instrument_id in df["instrument_id"].unique():
+        row = conn.execute("SELECT base_ccy, quote_ccy FROM instruments WHERE instrument_id = ?",
+                           (instrument_id,)).fetchone()
+        base, quote = (row[0], row[1]) if row else ("", "")
+        try:
+            exchange = get_root(base).exchange if base else ""
+        except KeyError:
+            exchange = ""
+        info[instrument_id] = (exchange, quote or "")
+    df["exchange"] = df["instrument_id"].map(lambda i: info.get(i, ("", ""))[0])
+    df["pnl_ccy"] = df["instrument_id"].map(lambda i: info.get(i, ("", ""))[1])
+    return df
 
 
 def _bad_values_text(conn: Optional[sqlite3.Connection]) -> str:
@@ -897,7 +885,7 @@ def _safe_section(label: str, builder: Callable[[], html.Div],
     `scope_layout`'s returned structure keeps working unchanged; only the failure path
     is new. This means one broken piece of a scope's layout (e.g. the asset-class
     rollup) no longer blanks the rest of that same sub-tab (e.g. its P&L strip and
-    trade table), and one sub-tab's delegated build (FX/Futures/Rates/Options/Bundles)
+    trade table), and one sub-tab's delegated build (FX/Options/Bundles)
     failing no longer prevents switching to a different sub-tab, since `_update`
     (this module's top-level callback) still returns successfully either way. Logged
     server-side (`logging.exception`) so the full traceback is still available even
@@ -989,23 +977,15 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str, with_notices:
 def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     """Build one sub-tab's content: headline strip (initial, whole-scope) + filter
     dropdown bar + trade table + an (empty until a row is clicked) detail container
-    below it. Rates/Options are placeholders per module docstring.
+    below it. FX / Options / Manual entry delegate to their own modules.
 
-    Every sub-section (P&L strip / delegated FX-Rates-Options table / the Total book's
+    Every sub-section (P&L strip / delegated FX-Options table / the Total book's
     asset-class breakdown / the filter bar + trade table) is wrapped in `_safe_section`
     so a failure in one doesn't blank the others -- see that helper's docstring."""
     strip_id = f"blotter-strip-{scope}"
     table_id = f"blotter-datatable-{scope}"
     detail_id = f"{DETAIL_PANEL_ID}-{scope}-detail"
     display_columns, column_labels = scope_columns(scope)
-
-    if scope == "rates":
-        def _strip():
-            return html.Div(id=strip_id, children=scope_strip(scope, conn, as_of))
-        return html.Div([
-            _safe_section("P&L strip", _strip, conn),
-            _safe_section("Rates", lambda: rates_ui.build_layout(conn, as_of), conn),
-        ])
 
     if scope == "options":
         def _strip():
@@ -1172,15 +1152,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         manual trade booked or deleted) rebuilds whatever sub-tab is showing. A marks-only
         change rebuilds the views that are one static block (FX, Bundles); the Total book
         and Futures tables instead refresh their rows in place through `_apply_filters`,
-        so a Bloomberg pull never resets the user's filters, sort or page, and Options and
-        Rates refresh their own table and their strip in place
-        (`_SELF_REFRESHING_SCOPES`). The Manual entry form is never rebuilt under the
-        user's hands.
+        so a Bloomberg pull never resets the user's filters, sort or page, and Options
+        refreshes its own table and its strip in place (`_SELF_REFRESHING_SCOPES`). The
+        Manual entry form is never rebuilt under the user's hands.
 
         A BOOK revision is not taken at its word. It also fires when a strike, type or
-        payoff is saved and when a swap's direction is flipped (`revision.book_signature`
-        sums strikes and signed quantities, and those two publishers send it at once) --
-        exactly the edits the user makes several of in a row, each of which used to tear
+        payoff is saved (`revision.book_signature` sums strikes and signed quantities, and
+        that publisher sends it at once) -- the edit the user makes several of in a row,
+        each of which used to tear
         down the sub-tab he was typing the next one into. So on a revision the trade set
         is compared with the one this content was built from (`BUILT_TRADE_SET_ID`, held
         in the page, so it is right per browser tab): unchanged means the revision is, for
@@ -1360,15 +1339,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         )(_clear_filters)
 
     options_ui.register_callbacks(app, get_db_path)
-    # Rates (2026-09-18): the Direction column is a Pay fixed / Receive fixed dropdown and
-    # the notice has a "confirm the rest" button; those, and the table's in-place refresh,
-    # are `ui.tabs.rates`' own callbacks, which were never hooked up here, so an edited
-    # cell did nothing. Its date picker defaults to this tab's
-    # (`rates.DEFAULT_DATE_PICKER_ID == DATE_PICKER_ID`). Its Outputs (`rates-datatable`,
-    # the notice, the status line, and the two revision stores with `allow_duplicate`) are
-    # registered nowhere else: Rates is in `_NON_TABLE_SCOPES`, so the generic strip /
-    # detail / filter callbacks below skip it.
-    rates_ui.register_callbacks(app, get_db_path)
     manual_entry_ui.register_callbacks(app, get_db_path)
     # FX (2026-09-21): "P&L by currency, rows shown" follows the FX trade table's native
     # column filter; that one callback is `ui.tabs.blotter_fx`' own.
@@ -1382,9 +1352,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             prevent_initial_call=True,
         )
         def _refresh_strip(_data_rev, as_of_date, _scope=scope):
-            """New marks: redraw the P&L strip above an Options / Rates table in place.
-            Those sub-tabs are no longer rebuilt whole on a data revision
-            (`_SELF_REFRESHING_SCOPES`) and their modules refresh only their OWN table, so
+            """New marks: redraw the P&L strip above the Options table in place. That
+            sub-tab is not rebuilt whole on a data revision (`_SELF_REFRESHING_SCOPES`) and
+            its module refreshes only its OWN table, so
             without this the strip would keep the figures of the last rebuild next to a
             table that has moved on. The strip exists only while its sub-tab is showing;
             Dash does not call this otherwise. A failure leaves the strip as it is rather
@@ -1453,7 +1423,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         sub-tab being opened): Dash would fire every listener even for an unchanged value."""
         return publish_if_changed(file_signature(get_db_path()), current_data_rev)
 
-    # "rates" (ui.tabs.rates), "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17),
+    # "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17),
     # "options" (ui.tabs.options, Phase 8) and "manual" (ui.tabs.manual_entry) have no
     # strip/detail/filter of their own (module docstring above) -- none is a
     # priced_value_book-shaped table, so the generic callbacks below (which assume

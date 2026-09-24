@@ -7,7 +7,7 @@ cross-currency curves from the reference project are deliberately NOT ported
 (out of scope; see the task that created this module).
 
 Two source implementations, both satisfying the same informal interface
-(get_curve_quotes / get_fixings / get_bbg_curve):
+(get_curve_quotes / get_bbg_curve):
   - RatesBloombergSource: live blpapi wrapper. Requires the `blpapi` package
     (raises MarketDataError with an install hint if it is missing) and a
     running Bloomberg Terminal / B-PIPE.
@@ -33,6 +33,10 @@ already exists: write_curve_quotes() creates it defensively with
 CREATE TABLE IF NOT EXISTS using the exact shape described in the task, so it
 works whether or not data-ingest's migration has landed yet, and is a no-op
 once it has (assuming the same column set).
+
+No overnight fixings (removed 2026-09-24, commodity conversion Phase 2: the rates / IRS
+book left the app, and fixings only ever served a seasoned swap). The OIS quotes stay:
+the option pricers discount on the OIS curves bootstrapped from them.
 """
 from __future__ import annotations
 
@@ -43,7 +47,7 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -195,19 +199,6 @@ class CurveQuote:
 
 
 @dataclass
-class Fixing:
-    date: datetime.date
-    value: decimal.Decimal
-
-    def to_dict(self) -> dict:
-        return {"date": _date_to_str(self.date), "value": _decimal_to_str(self.value)}
-
-    @staticmethod
-    def from_dict(data: dict) -> "Fixing":
-        return Fixing(date=_str_to_date(data["date"]), value=_str_to_decimal(data["value"]))
-
-
-@dataclass
 class CurveSnapshot:
     currency: str
     index: str
@@ -309,7 +300,6 @@ OIS_CURVES: Dict[str, dict] = {
     "USD": {
         "index": "SOFR",
         "bbg_curve_id": "YCSW0490 Index",  # S490 - reasonable confidence
-        "fixing_ticker": "SOFRRATE Index",
         "quotes": [
             TickerSpec("1W", "USOSFR1Z Curncy"),
             TickerSpec("2W", "USOSFR2Z Curncy"),
@@ -333,7 +323,6 @@ OIS_CURVES: Dict[str, dict] = {
     "EUR": {
         "index": "ESTR",
         "bbg_curve_id": "YCSW0514 Index",  # UNVERIFIED
-        "fixing_ticker": "ESTRON Index",  # UNVERIFIED
         "quotes": [
             TickerSpec("1W", "EESWE1Z Curncy"),  # UNVERIFIED
             TickerSpec("1M", "EESWEA Curncy"),  # UNVERIFIED
@@ -352,7 +341,6 @@ OIS_CURVES: Dict[str, dict] = {
     "GBP": {
         "index": "SONIA",
         "bbg_curve_id": "YCSW0141 Index",  # UNVERIFIED
-        "fixing_ticker": "SONIO/N Index",  # UNVERIFIED
         "quotes": [
             TickerSpec("1W", "BPSWS1Z Curncy"),  # UNVERIFIED
             TickerSpec("1M", "BPSWSA Curncy"),  # UNVERIFIED
@@ -368,7 +356,6 @@ OIS_CURVES: Dict[str, dict] = {
     "JPY": {
         "index": "TONA",
         "bbg_curve_id": "YCSW0195 Index",  # UNVERIFIED
-        "fixing_ticker": "MUTKCALM Index",  # UNVERIFIED
         "quotes": [
             TickerSpec("1W", "JYSO1Z Curncy"),  # UNVERIFIED
             TickerSpec("1M", "JYSOA Curncy"),  # UNVERIFIED
@@ -384,7 +371,6 @@ OIS_CURVES: Dict[str, dict] = {
     "CHF": {
         "index": "SARON",
         "bbg_curve_id": "YCSW0234 Index",  # UNVERIFIED
-        "fixing_ticker": "SSARON Index",  # UNVERIFIED
         "quotes": [
             TickerSpec("1W", "SFSNT1Z Curncy"),  # UNVERIFIED
             TickerSpec("1M", "SFSNTA Curncy"),  # UNVERIFIED
@@ -399,7 +385,6 @@ OIS_CURVES: Dict[str, dict] = {
     "CAD": {
         "index": "CORRA",
         "bbg_curve_id": "YCSW0147 Index",  # UNVERIFIED
-        "fixing_ticker": "CAONREPO Index",  # UNVERIFIED
         "quotes": [
             TickerSpec("1W", "CDSO1Z Curncy"),  # UNVERIFIED
             TickerSpec("1M", "CDSOA Curncy"),  # UNVERIFIED
@@ -414,7 +399,6 @@ OIS_CURVES: Dict[str, dict] = {
     "AUD": {
         "index": "AONIA",
         "bbg_curve_id": "YCSW0305 Index",  # UNVERIFIED
-        "fixing_ticker": "RBACOR Index",  # UNVERIFIED
         "quotes": [
             TickerSpec("1W", "ADSO1Z Curncy"),  # UNVERIFIED
             TickerSpec("1M", "ADSOA Curncy"),  # UNVERIFIED
@@ -445,15 +429,6 @@ def ois_curve(currency: str) -> List[TickerSpec]:
 def ois_bbg_curve_id(currency: str) -> Optional[str]:
     entry = OIS_CURVES.get(currency.upper())
     return entry.get("bbg_curve_id") if entry else None
-
-
-def ois_fixing_ticker(currency: str) -> str:
-    entry = OIS_CURVES.get(currency.upper())
-    if entry is None:
-        raise TickerMapError(
-            f"No OIS fixing ticker for {currency}. Available: {', '.join(sorted(OIS_CURVES))}"
-        )
-    return entry["fixing_ticker"]
 
 
 # --------------------------------------------------------------------------- wire format
@@ -507,7 +482,7 @@ def build_histdata_spec(
 
 
 class RatesBloombergSource:
-    """Live blpapi wrapper for OIS curve quotes, fixings and Bloomberg's own
+    """Live blpapi wrapper for OIS curve quotes and Bloomberg's own
     reconciliation curve. Opens its own blpapi.Session -- see module docstring -- unless
     it is handed one: `session` / `service` (2026-09-21) are an already started session and
     its opened //blp/refdata service, as data/bloomberg/live.py's pull cycle passes so the
@@ -681,33 +656,6 @@ class RatesBloombergSource:
             out[ticker] = value
         return out
 
-    def _fetch_historical_series(self, ticker: str, field: str, start: datetime.date, end: datetime.date) -> List[tuple]:
-        """HistoricalDataRequest for [start, end] on a single ticker. Returns a list of
-        (raw date, raw value) pairs, one per publication day in the response."""
-        blpapi = self._blpapi
-        request = self._service.createRequest("HistoricalDataRequest")
-        request.getElement("securities").appendValue(ticker)
-        request.getElement("fields").appendValue(field)
-        request.set("startDate", start.strftime("%Y%m%d"))
-        request.set("endDate", end.strftime("%Y%m%d"))
-
-        logger.debug("Sending HistoricalDataRequest: %s, field=%s, %s to %s", ticker, field, start, end)
-        points: List[tuple] = []
-        for sec_data in self._send_and_collect(request, "HistoricalDataRequest"):
-            sec_error = _security_error_text(sec_data)
-            if sec_error is not None:
-                logger.warning("Bloomberg securityError on %s: %s", ticker, sec_error)
-                continue
-            if sec_data.hasElement("fieldData"):
-                fd = sec_data.getElement("fieldData")
-                for i in range(fd.numValues()):
-                    point = fd.getValueAsElement(i)
-                    if point.hasElement(field):
-                        d = point.getElement("date").getValue() if point.hasElement("date") else None
-                        v = point.getElement(field).getValue()
-                        points.append((d, v))
-        return points
-
     # -- public API -----------------------------------------------------------------------
 
     def get_curve_quotes(self, currency: str, as_of: datetime.date) -> CurveSnapshot:
@@ -743,24 +691,6 @@ class RatesBloombergSource:
             )
         index = OIS_CURVES[currency.upper()]["index"]
         return CurveSnapshot(currency=currency.upper(), index=index, as_of=as_of, quotes=quotes)
-
-    def get_fixings(self, currency: str, start: datetime.date, end: datetime.date) -> List[Fixing]:
-        ticker = ois_fixing_ticker(currency)
-        logger.debug("Fetching OIS fixings for %s: %s to %s", currency, start, end)
-        points = self._fetch_historical_series(ticker, "PX_LAST", start, end)
-        fixings = []
-        for date_value, px in points:
-            if date_value is None or px is None:
-                continue
-            if isinstance(date_value, datetime.date):
-                d = date_value
-            elif hasattr(date_value, "date"):
-                d = date_value.date()
-            else:
-                d = datetime.date.fromisoformat(str(date_value))
-            fixings.append(Fixing(date=d, value=scale_quote(decimal.Decimal(str(px)))))
-        fixings.sort(key=lambda f: f.date)
-        return fixings
 
     def get_bbg_curve(self, currency: str, as_of: datetime.date) -> Optional[BbgCurve]:
         """Bloomberg's own OIS curve, for reconciliation only. Never raises --
@@ -806,7 +736,6 @@ class OisSnapshot:
     as_of: datetime.date
     source: str
     curves: Dict[str, CurveSnapshot] = field(default_factory=dict)
-    fixings: Dict[str, List[Fixing]] = field(default_factory=dict)
     bbg_curves: Dict[str, BbgCurve] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -814,7 +743,6 @@ class OisSnapshot:
             "as_of": _date_to_str(self.as_of),
             "source": self.source,
             "curves": {k: v.to_dict() for k, v in self.curves.items()},
-            "fixings": {k: [f.to_dict() for f in v] for k, v in self.fixings.items()},
             "bbg_curves": {k: v.to_dict() for k, v in self.bbg_curves.items()},
         }
 
@@ -824,7 +752,6 @@ class OisSnapshot:
             as_of=_str_to_date(data["as_of"]),
             source=data["source"],
             curves={k: CurveSnapshot.from_dict(v) for k, v in data.get("curves", {}).items()},
-            fixings={k: [Fixing.from_dict(f) for f in v] for k, v in data.get("fixings", {}).items()},
             bbg_curves={k: BbgCurve.from_dict(v) for k, v in data.get("bbg_curves", {}).items()},
         )
 
@@ -864,14 +791,6 @@ class RatesFileSource:
                 f"No OIS curve for {currency} in snapshot. Available: {', '.join(sorted(self._snapshot.curves))}"
             )
         return curve
-
-    def get_fixings(self, currency: str, start: datetime.date, end: datetime.date) -> List[Fixing]:
-        history = self._snapshot.fixings.get(currency.upper())
-        if history is None:
-            raise MarketDataUnavailable(
-                f"No OIS fixings for {currency} in snapshot. Available: {', '.join(sorted(self._snapshot.fixings))}"
-            )
-        return [f for f in history if start <= f.date <= end]
 
     def get_bbg_curve(self, currency: str, as_of: datetime.date) -> Optional[BbgCurve]:
         return self._snapshot.bbg_curves.get(currency.upper())
@@ -931,30 +850,3 @@ def write_curve_quotes(
         )
     return len(rows)
 
-
-_FIXINGS_DDL = """
-CREATE TABLE IF NOT EXISTS index_fixings (
-  "index"         TEXT NOT NULL,
-  fixing_date     TEXT NOT NULL,
-  value           REAL NOT NULL,
-  source          TEXT NOT NULL,
-  PRIMARY KEY ("index", fixing_date, source)
-)
-"""
-
-
-def write_fixings(conn: sqlite3.Connection, currency: str, fixings: Sequence[Fixing],
-                  source: str = "BBG_BDH") -> int:
-    """Insert one `index_fixings` row per fixing for the currency's OIS index (decimal
-    values, e.g. 0.0405), INSERT OR REPLACE keyed on (index, date, source). Creates the
-    table defensively like `write_curve_quotes` does for `curve_quotes`. engine/rates
-    loads these into QuantLib before pricing a seasoned swap. Returns rows written."""
-    conn.execute(_FIXINGS_DDL)
-    index = OIS_INDEX[currency.upper()]
-    rows = [(index, f.date.isoformat(), float(f.value), source) for f in fixings]
-    with conn:
-        conn.executemany(
-            'INSERT OR REPLACE INTO index_fixings ("index", fixing_date, value, source) VALUES (?,?,?,?)',
-            rows,
-        )
-    return len(rows)

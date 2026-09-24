@@ -99,12 +99,19 @@ def test_book_fx_forward_writes_two_legs_like_the_blotter_parser():
                     (2, "FX_NEAR", "SEK", 22_100_000.0, "2026-12-15", 1)]
 
 
-def test_book_fx_forward_ndf_legs_settle_no_cash():
+def test_book_fx_forward_every_pair_is_deliverable_and_settles_cash():
+    """The NDF rules left the app (2026-09-24): a pair once treated as non-deliverable is
+    booked like any other, is_ndf 0 and both legs settling cash, as the parser writes it."""
     conn = _db()
     trade_id = manual.book_fx_forward(conn, pair="USDBRL", side="Buy", base_amount=1_000_000, rate=5.4,
                                       value_date="2026-12-15", trade_date="2026-09-18")
-    assert conn.execute("SELECT is_ndf FROM instruments WHERE instrument_id = 'USDBRL'").fetchone()[0] == 1
-    assert {r[0] for r in conn.execute("SELECT settles_cash FROM trade_legs WHERE trade_id = ?", (trade_id,))} == {0}
+    assert conn.execute("SELECT is_ndf FROM instruments WHERE instrument_id = 'USDBRL'").fetchone()[0] == 0
+    assert {r[0] for r in conn.execute("SELECT settles_cash FROM trade_legs WHERE trade_id = ?", (trade_id,))} == {1}
+    near, far = manual.book_fx_swap(conn, pair="USDKRW", side="Buy", base_amount=1e6, near_rate=1380, far_rate=1375,
+                                    near_date="2026-10-01", far_date="2026-12-01", trade_date="2026-09-18")
+    assert {r[0] for r in conn.execute("SELECT settles_cash FROM trade_legs WHERE trade_id IN (?, ?)", (near, far))} == {1}
+    assert conn.execute("SELECT is_ndf FROM instruments WHERE instrument_id = 'USDKRW'").fetchone()[0] == 0
+    assert "NDF_CCYS" not in vars(manual)
 
 
 def test_book_fx_forward_rejects_value_date_before_trade_date():
@@ -165,20 +172,87 @@ def test_delete_refuses_blotter_trades_and_unknown_ids():
         manual.delete_manual_trade(conn, "MANUAL-99")
 
 
-def test_delete_dissolves_a_swap_package_the_trade_was_part_of():
+# --------------------------------------------------------------------------- FX swaps
+# The package rule (swaps.py) left the app on 2026-09-24; an FX swap is booked in one go.
+def test_book_fx_swap_writes_two_packaged_trades_in_the_shape_the_engine_values():
     conn = _db()
-    # CLAUDE.md package rule: same source/account/pair/trade date, opposite signs, equal
-    # |USD leg| within 0.01 %, different value dates -- a USD-base pair keeps the USD leg
-    # equal to the base amount on both legs.
+    near, far = manual.book_fx_swap(conn, pair="usd/jpy", side="Buy", base_amount="1,000,000", near_rate=147.0,
+                                    far_rate="147.5", near_date="1/10/2026", far_date="2026-12-01",
+                                    trade_date="2026-09-18", counterparty="HSBC")
+    assert (near, far) == ("MANUAL-1", "MANUAL-2")
+    trades = conn.execute("SELECT trade_id, source, instrument_id, product, package_id, quantity, price, counterparty "
+                          "FROM trades ORDER BY trade_id").fetchall()
+    assert trades == [(near, "MANUAL", "USDJPY", "FX_SWAP", "SWAP-MANUAL-1", 1e6, 147.0, "HSBC"),
+                      (far, "MANUAL", "USDJPY", "FX_SWAP", "SWAP-MANUAL-1", -1e6, 147.5, "HSBC")]
+    legs = conn.execute("SELECT trade_id, leg_no, leg_type, ccy, amount, settle_date, settles_cash FROM trade_legs "
+                        "ORDER BY trade_id, leg_no").fetchall()
+    assert legs == [(near, 1, "FX_NEAR", "USD", 1e6, "2026-10-01", 1), (near, 2, "FX_NEAR", "JPY", -147e6, "2026-10-01", 1),
+                    (far, 1, "FX_FAR", "USD", -1e6, "2026-12-01", 1), (far, 2, "FX_FAR", "JPY", 147.5e6, "2026-12-01", 1)]
+    # Visible to every engine query, and the package id is 'SWAP-' || min(trade_id) even past 9.
+    assert conn.execute("SELECT COUNT(*) FROM trades_official WHERE product = 'FX_SWAP'").fetchone()[0] == 2
+    for _ in range(3):
+        manual.book_fx_forward(conn, pair="EURUSD", side="Buy", base_amount=1e6, rate=1.1,
+                               value_date="2026-12-15", trade_date="2026-09-18")
+    assert manual.book_fx_swap(conn, pair="EURUSD", side="Sell", base_amount=1e6, near_rate=1.1, far_rate=1.11,
+                               near_date="2026-10-01", far_date="2027-01-04", trade_date="2026-09-18") == ["MANUAL-6", "MANUAL-7"]
+    manual.book_fx_forward(conn, pair="EURUSD", side="Buy", base_amount=1e6, rate=1.1,
+                           value_date="2026-12-15", trade_date="2026-09-18")
+    assert manual.book_fx_swap(conn, pair="EURUSD", side="Buy", base_amount=1e6, near_rate=1.1, far_rate=1.11,
+                               near_date="2026-10-01", far_date="2027-01-04", trade_date="2026-09-18") == ["MANUAL-9", "MANUAL-10"]
+    assert {r[0] for r in conn.execute("SELECT package_id FROM trades WHERE trade_id IN ('MANUAL-9', 'MANUAL-10')")} == {"SWAP-MANUAL-10"}
+
+
+def test_book_fx_swap_rejects_dates_out_of_order_and_writes_nothing():
+    conn = _db()
+    with pytest.raises(ValueError, match="far date"):
+        manual.book_fx_swap(conn, pair="USDJPY", side="Buy", base_amount=1e6, near_rate=147, far_rate=147.5,
+                            near_date="2026-12-01", far_date="2026-12-01", trade_date="2026-09-18")
+    with pytest.raises(ValueError, match="near date"):
+        manual.book_fx_swap(conn, pair="USDJPY", side="Buy", base_amount=1e6, near_rate=147, far_rate=147.5,
+                            near_date="2026-09-01", far_date="2026-12-01", trade_date="2026-09-18")
+    with pytest.raises(ValueError, match="far rate"):
+        manual.book_fx_swap(conn, pair="USDJPY", side="Buy", base_amount=1e6, near_rate=147, far_rate="n/a",
+                            near_date="2026-10-01", far_date="2026-12-01", trade_date="2026-09-18")
+    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+
+
+def test_two_forwards_typed_one_by_one_stay_two_forwards():
+    conn = _db()
     a = manual.book_fx_forward(conn, pair="USDJPY", side="Buy", base_amount=1e6, rate=147.0,
                                value_date="2026-10-01", trade_date="2026-09-18")
     b = manual.book_fx_forward(conn, pair="USDJPY", side="Sell", base_amount=1e6, rate=147.5,
                                value_date="2026-12-01", trade_date="2026-09-18")
-    from data.ingest.swaps import package_swaps
-    assert package_swaps(conn) == 2
-    assert conn.execute("SELECT product FROM trades WHERE trade_id = ?", (a,)).fetchone()[0] == "FX_SWAP"
-    manual.delete_manual_trade(conn, a)
-    assert conn.execute("SELECT product, package_id FROM trades WHERE trade_id = ?", (b,)).fetchone() == ("FX_FWD", b)
+    rows = conn.execute("SELECT trade_id, product, package_id FROM trades ORDER BY trade_id").fetchall()
+    assert rows == [(a, "FX_FWD", a), (b, "FX_FWD", b)]
+
+
+def test_deleting_either_date_of_a_swap_removes_the_whole_swap_and_nothing_else():
+    conn = _db()
+    keep = manual.book_fx_forward(conn, pair="USDJPY", side="Buy", base_amount=1e6, rate=147.0,
+                                  value_date="2026-10-01", trade_date="2026-09-18")
+    near, far = manual.book_fx_swap(conn, pair="USDJPY", side="Sell", base_amount=1e6, near_rate=147.0,
+                                    far_rate=147.5, near_date="2026-10-01", far_date="2026-12-01",
+                                    trade_date="2026-09-18")
+    assert manual.delete_manual_trade(conn, far) == [far, near]
+    assert [r[0] for r in conn.execute("SELECT trade_id FROM trades")] == [keep]
+    assert {r[0] for r in conn.execute("SELECT DISTINCT trade_id FROM trade_legs")} == {keep}
+    assert manual.delete_manual_trade(conn, keep) == [keep]
+
+
+def test_delete_clears_a_retired_swap_review_row_and_works_without_the_table():
+    conn = _db()
+    conn.execute("CREATE TABLE IF NOT EXISTS swap_review (candidate_group TEXT NOT NULL, "
+                 "trade_id TEXT NOT NULL REFERENCES trades, reason TEXT NOT NULL, PRIMARY KEY (candidate_group, trade_id))")
+    a = manual.book_fx_forward(conn, pair="USDJPY", side="Buy", base_amount=1e6, rate=147.0,
+                               value_date="2026-10-01", trade_date="2026-09-18")
+    conn.execute("INSERT INTO swap_review VALUES ('g', ?, 'old')", (a,))  # left by the retired package rule
+    conn.commit()
+    manual.delete_manual_trade(conn, a)                                   # the foreign key does not block it
+    assert conn.execute("SELECT COUNT(*) FROM swap_review").fetchone()[0] == 0
+    conn.execute("DROP TABLE swap_review")
+    b = manual.book_fx_forward(conn, pair="USDJPY", side="Buy", base_amount=1e6, rate=147.0,
+                               value_date="2026-10-01", trade_date="2026-09-18")
+    assert manual.delete_manual_trade(conn, b) == [b]
 
 
 # --------------------------------------------------------------------------- upload exemption
@@ -197,7 +271,7 @@ def test_full_replace_upload_keeps_manual_trades(tmp_path):
         by_source = dict(conn.execute("SELECT source, COUNT(*) FROM trades GROUP BY source").fetchall())
         manual_legs = conn.execute("SELECT COUNT(*) FROM trade_legs WHERE trade_id IN (?, ?)", (opt, fwd)).fetchone()[0]
         terms = conn.execute("SELECT strike FROM instrument_options WHERE instrument_id LIKE '%MANUAL%'").fetchone()
-    assert by_source == {"MANUAL": 2, "XLSX": 857}  # 85 spot trades since 2026-09-18
+    assert by_source == {"MANUAL": 2, "XLSX": 43}  # the synthetic sample: 29 futures, 8 forwards, 5 options, 1 spot
     assert manual_legs == 3
     assert terms == (147.0,)
-    assert "Replaced the previous book: 857 trade(s)" in message  # the count never includes the manual ones
+    assert "Replaced the previous book: 43 trade(s)" in message  # the count never includes the manual ones

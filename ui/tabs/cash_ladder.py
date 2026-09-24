@@ -199,11 +199,9 @@ def net_gross_usd(conn: sqlite3.Connection, as_of_date: str) -> dict:
     source. `fallback_ccys`/`forward_proxy_ccys` are kept in the return shape as always-
     empty sets purely so a caller still destructuring those keys doesn't KeyError.
 
-    2026-09-21 (user decision, "always show 1m forward date price, not spot"): an NDF
-    currency's rate is Bloomberg's official 1M NDF mark (`engine.ladder.ndf.
-    apply_ndf_1m_rates`), the same rates `load_inputs` gives the Ladder tab. One whose 1M
-    price is missing has no rate, never spot, and `reason` names it apart
-    (`ndf.missing_rate_reason`); other currencies keep the exact wording above.
+    2026-09-24 (commodity conversion, the NDFs left): every currency is at its official
+    SPOT, the same rates `load_inputs` gives the Ladder tab; no 1M NDF rate is read.
+    `reason` is `ui.tabs.exposure.missing_spot_reason`'s sentence, the wording above.
 
     Sign convention (unchanged 2026-09-17 audit -- verified correct, not touched): `net`
     is `engine.ladder.exposure.portfolio_totals`'s own `net_usd`, i.e. the net NON-USD
@@ -221,22 +219,18 @@ def net_gross_usd(conn: sqlite3.Connection, as_of_date: str) -> dict:
     branches."""
     from engine.ladder.exposure_adapter import exposure_records_from_db
     from engine.ladder.exposure import build_exposure, portfolio_totals
-    from engine.ladder.ndf import apply_ndf_1m_rates, missing_rate_reason
     from data.bloomberg.live import rates_from_marks
+    from ui.tabs.exposure import missing_spot_reason
 
     records, _unresolved = exposure_records_from_db(conn, as_of_date)
-    # Same rates as `load_inputs`, so the header and the Ladder tab agree: official SPOT,
-    # and for an NDF currency Bloomberg's 1M NDF price, never spot (user decision
-    # 2026-09-21; engine.ladder.ndf). One with no 1M price on file has no rate at all.
-    rates = apply_ndf_1m_rates(conn, rates_from_marks(conn))
+    # Same rates as `load_inputs`, so the header and the Ladder tab agree: official SPOT.
+    rates = rates_from_marks(conn)
     result = build_exposure(records, rates)
     totals = portfolio_totals(result)
     commodities = totals.get("commodities", [])
     if totals["missing"]:
-        # "no official SPOT for <as_of_date>: <ccy, ...>" for ordinary currencies (the
-        # wording tests/test_header.py asserts); an NDF currency is named apart, with the
-        # 1M NDF price it is missing and the pull button that fetches it.
-        reason = missing_rate_reason(totals["missing"], as_of_date)
+        # "no official SPOT for <as_of_date>: <ccy, ...>" (the wording tests/test_header.py asserts).
+        reason = missing_spot_reason(totals["missing"], as_of_date)
         return {"available": False, "reason": reason,
                 "fallback_ccys": set(), "forward_proxy_ccys": set(), "commodities": commodities}
     return {"available": True, "net": totals["net_usd"], "gross": totals["gross_usd"],
@@ -369,15 +363,15 @@ def view_from_controls(ccys=None, start=None, end=None, settled=None, usd=None):
 def load_inputs(conn: sqlite3.Connection, as_of_date: str) -> dict:
     """Everything the Ladder tab body needs for one as-of date, read once: grid records
     (`>=` rule) and exposure records (`>` rule) with their merged unresolved list,
-    official SPOT rates (the 1M NDF price for NDF currencies, engine.ladder.ndf,
-    2026-09-21), the per-(currency, value date) forward USD marks
+    official SPOT rates, the per-(currency, value date) forward USD marks
     (engine.ladder.usd_marks, spec 2026-09-18), the futures delta dict and the per-pair
-    Position frame. Raises ImportError if an engine module is missing (the caller
+    Position frame. The futures dict is engine.ladder.futures_delta.futures_usd_delta's
+    whole (commodity contracts included; its `details` carry each future's currency and
+    conversion). Raises ImportError if an engine module is missing (the caller
     reports it); everything else is the engine's own reasons/blanks, never a substitute."""
     from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
     from engine.ladder.futures_delta import futures_usd_delta
     from engine.ladder.ladder import per_pair_delta
-    from engine.ladder.ndf import apply_ndf_1m_rates
     from engine.ladder.usd_marks import forward_usd_rates
     from data.bloomberg.live import rates_from_marks
     from ui.tabs.exposure import BOOK_DISPLAY
@@ -395,11 +389,8 @@ def load_inputs(conn: sqlite3.Connection, as_of_date: str) -> dict:
     unresolved = list(unresolved) + [u for u in exposure_unresolved if u.trade_id not in seen_trade_ids]
     # Rates: latest official SPOT marks written by the Bloomberg pull -- the ONLY
     # source (2026-09-17, "no bnp fall back"). A currency with no official SPOT stays
-    # missing, never substituted. NDF currencies (user decision 2026-09-21, "always show
-    # 1m forward date price, not spot") are priced at Bloomberg's official 1M NDF mark
-    # instead; one with no 1M price on file has NO entry, so it shows blank with the
-    # engine's reason and is never valued at spot. `net_gross_usd` uses the same rates.
-    rates = apply_ndf_1m_rates(conn, rates_from_marks(conn))
+    # missing, never substituted. `net_gross_usd` uses the same rates.
+    rates = rates_from_marks(conn)
     # USD-equivalent marks per (currency, value date): spot up to the spot date, then
     # each date's own official forward outright (user's cash-ladder spec, 2026-09-18).
     needed = {(r["currency"], r["settlement_date"]) for r in records}

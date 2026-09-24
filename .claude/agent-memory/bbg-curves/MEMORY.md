@@ -1,0 +1,2 @@
+- [Phase 2 rates removal (2026-09-24)](phase2_rates_removal_2026_09_24.md) — rate vols + OIS fixings gone; OIS quotes, FX fwd curves, FX smiles kept
+- Older notes on these modules (pre-split, 2026-09-24): `.claude/agent-memory/bbg-data/` (rates_marketdata_ois, vol_marketdata_fx_vol_feed)

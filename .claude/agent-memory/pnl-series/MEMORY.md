@@ -1,0 +1,2 @@
+- [Lane inheritance](lane-inheritance.md) — split from pnl-engine 2026-09-24; which tests in shared test_pnl.py are mine vs pnl-valuation's
+- [Stress API 2026-09-24](stress-api-2026-09-24.md) — EQUITY move and futures line removed; load_scenarios drops EQUITY and equity-only scenarios

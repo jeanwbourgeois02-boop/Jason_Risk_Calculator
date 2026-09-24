@@ -13,10 +13,14 @@ multiplier, unit, Bloomberg ticker or expiry asks here.
   its contract month for a known root (``resolve.py``).
 - ``ensure_static_table`` / ``store_static_dates`` / ``static_dates``: Bloomberg's own contract
   dates in this lane's ``contract_static`` table (``static.py``).
+- ``apply_fixes``: the Bloomberg check's fixes worksheet (columns ``WORKSHEET_COLUMNS``) applied
+  to ``config/contracts.csv``, only the ``FIXABLE_FIELDS``, the multiplier recomputed, the whole
+  file validated by the loader before it is written (``fixes.py``).
 
 Nothing here asks Bloomberg for anything or writes ``marks``.
 """
 
+from data.contracts.fixes import FIXABLE_FIELDS, WORKSHEET_COLUMNS, apply_fixes
 from data.contracts.months import (
     BLOOMBERG,
     ESTIMATED,
@@ -32,7 +36,8 @@ from data.contracts.universe import CONTRACTS_CSV, ContractRoot, get_root, load_
 
 __all__ = [
     "AmbiguousContract", "BLOOMBERG", "CONTRACTS_CSV", "ContractMonth", "ContractRoot", "ESTIMATED",
-    "MONTH_CODES", "UnknownContract", "contract_for", "contract_month", "ensure_static_table",
-    "estimated_last_trade_date", "get_root", "load_roots", "make_contract_id", "request_ticker",
-    "resolve_future", "static_dates", "store_static_dates",
+    "FIXABLE_FIELDS", "MONTH_CODES", "UnknownContract", "WORKSHEET_COLUMNS", "apply_fixes",
+    "contract_for", "contract_month", "ensure_static_table", "estimated_last_trade_date", "get_root",
+    "load_roots", "make_contract_id", "request_ticker", "resolve_future", "static_dates",
+    "store_static_dates",
 ]

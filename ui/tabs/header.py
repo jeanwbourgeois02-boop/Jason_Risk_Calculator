@@ -426,7 +426,7 @@ _MISSING_TAG_RE = re.compile(r"no (\S+) mark")
 
 _PRODUCT_LABELS = {
     "FX_SPOT": "spot", "FX_FWD": "forward", "FX_SWAP": "swap",
-    "FUTURE": "future", "IRS": "swap (IRS)", "FX_OPTION": "option",
+    "FUTURE": "future", "FX_OPTION": "option",
 }
 
 

@@ -2,21 +2,21 @@
 
 The nm-dashboard (the user's other project, its `fx_alpha` package) keeps a Bloomberg
 cache of daily closes as parquet files, one column per series on a `DatetimeIndex`
-named `date`. `load_history` finds that folder and loads the three files the risk
+named `date`. `load_history` finds that folder and loads the two files the risk
 metrics use:
 
   * `bbg_raw_fx_marks.parquet` (`History.spot`): USD per ONE unit of the series
-    (AUD 0.71, CHF 1.22, JPY 0.0064, BRL 0.19), `SPX` the S&P 500 level and `XAU` USD
-    per ounce; for the NDF currencies (KRW, IDR, INR, TWD, BRL) the column is the 1M NDF
-    outright, not spot (it equals 1 / `<CCY>_NDF1M` of the dashboard's NDF file), which
-    is also what the Ladder prices those currencies at.
+    (AUD 0.71, CHF 1.22, JPY 0.0064) and `XAU` USD per ounce. Columns the book no longer
+    has an underlyer for are loaded as they stand and never asked for.
   * `bbg_raw_fx_yields.parquet` (`History.yields`): short rates in percent per series,
-    `USD` included, `XAU` pinned to 0 and `SPX` equal to `USD`; the carry term of the
-    daily P&L (`engine.risk.metrics`). Optional: without it the metrics run on the
-    spot move alone and say so.
-  * `bbg_raw_rates.parquet` (`History.swap_rates`): par swap rates in percent,
-    columns `<CCY>_SWAP<tenor>` (`USD_SWAP10Y` = 4.589). Optional: without it the
-    rates rows have no history and say so.
+    `USD` included, `XAU` pinned to 0; the carry term of the daily P&L
+    (`engine.risk.metrics`). Optional: without it the metrics run on the spot move alone
+    and say so.
+
+The par swap rate file (`bbg_raw_rates.parquet`) is no longer read: the rates rows left
+the Risk tab in Phase 2 (user approval 2026-09-24). This reader serves the currency and
+metal underlyers until the commodity history (`engine.risk.commodity_history`, Phase 4)
+replaces it.
 
 Where the folder is: the environment variable `RISK_HISTORY_DIR` when set (that path
 and no other), else the freshest of the `DEFAULT_DIRS` that exist, siblings of this
@@ -57,8 +57,7 @@ DEFAULT_DIRS: Tuple[Path, ...] = (
 )
 SPOT_FILE = "bbg_raw_fx_marks.parquet"
 YIELDS_FILE = "bbg_raw_fx_yields.parquet"
-RATES_FILE = "bbg_raw_rates.parquet"
-FILES: Dict[str, str] = {"spot": SPOT_FILE, "yields": YIELDS_FILE, "swap_rates": RATES_FILE}
+FILES: Dict[str, str] = {"spot": SPOT_FILE, "yields": YIELDS_FILE}
 
 
 @dataclass
@@ -71,7 +70,6 @@ class History:
     reason: str = ""
     spot: pd.DataFrame = field(default_factory=pd.DataFrame)
     yields: pd.DataFrame = field(default_factory=pd.DataFrame)
-    swap_rates: pd.DataFrame = field(default_factory=pd.DataFrame)
     last_date: Optional[str] = None
     files: Dict[str, dict] = field(default_factory=dict)
     note: str = ""                                   # which copies were seen, and how far each runs
@@ -192,7 +190,6 @@ def _load(folder: Path) -> History:
         return History(False, str(folder), f"spot history {folder / SPOT_FILE} is empty", files=files, spot=spot)
     return History(True, str(folder), "", spot=spot,
                    yields=frames["yields"] if frames["yields"] is not None else pd.DataFrame(),
-                   swap_rates=frames["swap_rates"] if frames["swap_rates"] is not None else pd.DataFrame(),
                    last_date=spot.index[-1].strftime("%Y-%m-%d"), files=files)
 
 

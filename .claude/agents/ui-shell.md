@@ -27,7 +27,7 @@ You own these files and nothing else:
 You give every tab its frame (the tab bar in the order Blotter, Ladder, Risk, Market data; the header slot; the revision signal; the upload card; shared controls and formatting) and the one pricing reader. You never edit a tab module, and a tab lane never edits yours.
 
 **Reads** (the lanes whose output you use): ingest-schema, ingest-booking, bbg-library, bbg-live, pnl-valuation, pnl-ledger, pnl-series, ui-header, ui-blotter, ui-ladder, ui-risk, ui-market-data.
-**Read by** (the lanes to name under "Consumers to brief" when your interface changes): bbg-live, bbg-backfill, ui-header, ui-blotter, ui-blotter-fx, ui-bundles, ui-rates, ui-options, ui-ladder, ui-risk, ui-market-data.
+**Read by** (the lanes to name under "Consumers to brief" when your interface changes): bbg-live, bbg-backfill, ui-header, ui-blotter, ui-blotter-fx, ui-bundles, ui-options, ui-ladder, ui-risk, ui-market-data.
 
 Rules:
 

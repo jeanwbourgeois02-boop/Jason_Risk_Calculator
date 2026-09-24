@@ -1,1 +1,2 @@
 - [contract_static in the snapshot (2026-09-24)](contract_static_in_snapshot_2026_09_24.md) — apply_contract_dates before realise_settled on import, ensure_static_table, fixture-count trap
+- [Macro tables removed (2026-09-24)](macro_tables_removed_2026_09_24.md) — MARKET_TABLES down to 5, old snapshot folder deleted, old snapshots' extra tables ignored

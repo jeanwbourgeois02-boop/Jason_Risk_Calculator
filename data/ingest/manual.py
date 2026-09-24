@@ -30,6 +30,12 @@ Rules:
   - Premium convention matches `trades.price` for blotter options: a fraction of the
     base notional (0.121 on 1,000,000 EUR = 121,000 EUR), see docs/open-questions.md
     item 61d.
+  - An FX swap (a hedge roll) is booked in one go by `book_fx_swap`, in the shape the
+    engine values (engine/pnl/valuation.py): two MANUAL trades, near and far, each with its
+    own two legs, product FX_SWAP, sharing `package_id = 'SWAP-' || min(trade_id)`. Since
+    2026-09-24 nothing else makes an FX swap: the package rule that grouped two forwards
+    (swaps.py) left the app with the macro book, so two forwards typed one by one stay two
+    forwards.
 """
 from __future__ import annotations
 
@@ -38,7 +44,7 @@ import re
 import sqlite3
 from typing import Dict, List, Optional, Union
 
-from data.ingest.common import NDF_CCYS, PERPETUAL
+from data.ingest.common import PERPETUAL
 
 SOURCE = "MANUAL"
 TRADE_ID_PREFIX = "MANUAL-"
@@ -146,11 +152,12 @@ def _next_number(conn: sqlite3.Connection) -> int:
 
 
 def _ensure_pair_instrument(conn: sqlite3.Connection, pair: str) -> None:
+    """The plain pair instrument, deliverable (is_ndf 0) like every pair the parser writes
+    since the NDF rules left the app (commodity conversion Phase 2, 2026-09-24)."""
     base, quote = pair[:3], pair[3:]
-    is_ndf = 1 if (base in NDF_CCYS or quote in NDF_CCYS) else 0
     conn.execute(
-        f"INSERT OR IGNORE INTO instruments ({_INSTRUMENT_COLS}) VALUES (?, 'FX', ?, ?, 1, ?, ?, ?)",
-        (pair, base, quote, is_ndf, f"{pair} Curncy", PERPETUAL))
+        f"INSERT OR IGNORE INTO instruments ({_INSTRUMENT_COLS}) VALUES (?, 'FX', ?, ?, 1, 0, ?, ?)",
+        (pair, base, quote, f"{pair} Curncy", PERPETUAL))
 
 
 def _pair_theme(conn: sqlite3.Connection, pair: str) -> str:
@@ -162,11 +169,11 @@ def _pair_theme(conn: sqlite3.Connection, pair: str) -> str:
 
 def _insert_trade(conn: sqlite3.Connection, *, trade_id: str, instrument_id: str, product: str,
                   trade_date: str, quantity: float, price: float, account: str, counterparty: str,
-                  trader: str, description: str, theme: str) -> None:
+                  trader: str, description: str, theme: str, package_id: Optional[str] = None) -> None:
     conn.execute(
         "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, "
         "account, counterparty, strategy, trader, description, theme) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (trade_id, SOURCE, instrument_id, product, trade_id, trade_date, quantity, price,
+        (trade_id, SOURCE, instrument_id, product, package_id or trade_id, trade_date, quantity, price,
          account, counterparty, "", trader, description, theme))
 
 
@@ -242,9 +249,8 @@ def book_fx_forward(conn: sqlite3.Connection, *, pair, side, base_amount, rate, 
     """Book an FX forward (or spot) by hand: `side` Buy/Sell of the BASE currency,
     `base_amount` positive, `rate` the outright fill (quote per base). Two FX_NEAR legs
     like `data/ingest/blotter.py::_parse_forward` (base leg = signed base amount, quote
-    leg = the opposite sign x rate; NDF currencies settle no cash). Returns the trade id.
-    A manual forward pairs into an FX_SWAP package with another manual forward under
-    CLAUDE.md's package rule (same source), never with a blotter trade."""
+    leg = the opposite sign x rate; both legs settle cash). Returns the trade id.
+    It stays an outright forward: an FX swap is booked with `book_fx_swap`."""
     pair = _pair(pair)
     side = _side(side)
     trade_date = _iso(trade_date, "trade date") if trade_date else _today_ny()
@@ -255,8 +261,7 @@ def book_fx_forward(conn: sqlite3.Connection, *, pair, side, base_amount, rate, 
     rate = _number(rate, "rate")
     base, quote = pair[:3], pair[3:]
     quantity = base_amount if side == "BUY" else -base_amount
-    is_ndf = 1 if (base in NDF_CCYS or quote in NDF_CCYS) else 0
-    settles_cash = 0 if is_ndf else 1
+    settles_cash = 1  # every pair is deliverable (NDF rules left the app 2026-09-24)
     with conn:
         n = _next_number(conn)
         trade_id = f"{TRADE_ID_PREFIX}{n}"
@@ -272,6 +277,57 @@ def book_fx_forward(conn: sqlite3.Connection, *, pair, side, base_amount, rate, 
         conn.execute(f"INSERT INTO trade_legs ({_LEG_COLS}) VALUES (?, 2, 'FX_NEAR', ?, ?, ?, ?, ?, ?)",
                      (trade_id, quote, -quantity * rate, trade_date, value_date, rate, settles_cash))
     return trade_id
+
+
+def book_fx_swap(conn: sqlite3.Connection, *, pair, side, base_amount, near_rate, far_rate, near_date, far_date,
+                 trade_date=None, counterparty: str = "", account: str = "", trader: str = "",
+                 description: str = "") -> List[str]:
+    """Book an FX swap by hand: `side` Buy/Sell of the BASE currency on the NEAR date, the
+    opposite on the FAR date, `base_amount` positive and the same on both dates, `near_rate`
+    / `far_rate` the two outright fills (quote per base). Returns `[near_id, far_id]`.
+
+    Written as two MANUAL trades of product FX_SWAP sharing `package_id = 'SWAP-' ||
+    min(trade_id)`, the shape engine/pnl/valuation.py values (each date is marked at its own
+    forward): the near trade with two FX_NEAR legs, the far trade with two FX_FAR legs, each
+    pair exactly `book_fx_forward`'s (base leg = signed base amount, quote leg = the opposite
+    sign x rate; every leg settles cash). All in one transaction. Raises ValueError
+    with a plain sentence on an impossible swap (far date not after the near date, a date
+    before the trade date)."""
+    pair = _pair(pair)
+    side = _side(side)
+    trade_date = _iso(trade_date, "trade date") if trade_date else _today_ny()
+    near_date = _iso(near_date, "near date")
+    far_date = _iso(far_date, "far date")
+    if near_date < trade_date:
+        raise ValueError(f"near date {near_date} is before the trade date {trade_date}")
+    if far_date <= near_date:
+        raise ValueError(f"far date {far_date} must be after the near date {near_date}")
+    base_amount = _number(base_amount, "amount")
+    near_rate = _number(near_rate, "near rate")
+    far_rate = _number(far_rate, "far rate")
+    base, quote = pair[:3], pair[3:]
+    near_qty = base_amount if side == "BUY" else -base_amount
+    settles_cash = 1  # every pair is deliverable
+    with conn:
+        n = _next_number(conn)
+        near_id, far_id = f"{TRADE_ID_PREFIX}{n}", f"{TRADE_ID_PREFIX}{n + 1}"
+        package_id = "SWAP-" + min(near_id, far_id)
+        _ensure_pair_instrument(conn, pair)
+        theme = _pair_theme(conn, pair)
+        near_verb, far_verb = ("BUY", "SELL") if side == "BUY" else ("SELL", "BUY")
+        text = description or (f"MANUAL FX SWAP TD {trade_date} {near_verb}/{far_verb} {base} VS {quote} "
+                               f"{near_date} @ {near_rate:g} / {far_date} @ {far_rate:g}")
+        for trade_id, leg_type, quantity, rate, value_date in (
+                (near_id, "FX_NEAR", near_qty, near_rate, near_date),
+                (far_id, "FX_FAR", -near_qty, far_rate, far_date)):
+            _insert_trade(conn, trade_id=trade_id, instrument_id=pair, product="FX_SWAP", trade_date=trade_date,
+                          quantity=quantity, price=rate, account=_text(account), counterparty=_text(counterparty),
+                          trader=_text(trader), description=text, theme=theme, package_id=package_id)
+            conn.execute(f"INSERT INTO trade_legs ({_LEG_COLS}) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)",
+                         (trade_id, leg_type, base, quantity, trade_date, value_date, rate, settles_cash))
+            conn.execute(f"INSERT INTO trade_legs ({_LEG_COLS}) VALUES (?, 2, ?, ?, ?, ?, ?, ?, ?)",
+                         (trade_id, leg_type, quote, -quantity * rate, trade_date, value_date, rate, settles_cash))
+    return [near_id, far_id]
 
 
 # --------------------------------------------------------------------------- listing and removal
@@ -297,29 +353,42 @@ def manual_trades(conn: sqlite3.Connection) -> List[Dict[str, object]]:
     return out
 
 
-def delete_manual_trade(conn: sqlite3.Connection, trade_id: str) -> None:
-    """Remove one MANUAL trade with everything keyed to it (legs, realised row, swap
-    review row); an option's own instrument, terms and marks go with it once no other
-    trade references it. A swap package it was part of is dissolved back into outright
-    forwards (the same rule `blotter.load` applies when a packaged trade is replaced).
-    Refuses (ValueError) anything that is not a MANUAL trade -- blotter trades are only
-    ever replaced by the next upload."""
+# A retired table that still references trades on a database made before 2026-09-24
+# (swap_review, the retired package rule's). Cleared when present so its foreign key never
+# blocks a delete; never written.
+_RETIRED_CHILD_TABLES = ("swap_review",)
+
+
+def delete_manual_trade(conn: sqlite3.Connection, trade_id: str) -> List[str]:
+    """Remove one MANUAL trade with everything keyed to it (legs, realised row); an
+    option's own instrument, terms and marks go with it once no other trade references
+    it. An FX swap is one ticket: deleting either date of a `book_fx_swap` package removes
+    both of its MANUAL trades. Returns the trade ids removed. Refuses (ValueError) anything
+    that is not a MANUAL trade -- blotter trades are only ever replaced by the next upload."""
     row = conn.execute("SELECT source, instrument_id, package_id FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
     if row is None:
         raise ValueError(f"no trade {trade_id!r} on file")
     source, instrument_id, package_id = row
     if source != SOURCE:
         raise ValueError(f"{trade_id} was loaded from the blotter (source {source}); only MANUAL trades can be deleted here")
+    trade_ids = [trade_id]
+    if package_id and package_id != trade_id:
+        trade_ids += [r[0] for r in conn.execute(
+            "SELECT trade_id FROM trades WHERE package_id = ? AND source = ? AND trade_id != ? ORDER BY trade_id",
+            (package_id, SOURCE, trade_id))]
+    retired = [t for t in _RETIRED_CHILD_TABLES if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (t,)).fetchone()]
     with conn:
-        if package_id and package_id != trade_id:
-            conn.execute("UPDATE trades SET product = 'FX_FWD', package_id = trade_id WHERE package_id = ?", (package_id,))
-        conn.execute("DELETE FROM realised_pnl WHERE trade_id = ?", (trade_id,))
-        conn.execute("DELETE FROM swap_review WHERE trade_id = ?", (trade_id,))
-        conn.execute("DELETE FROM trade_legs WHERE trade_id = ?", (trade_id,))
-        conn.execute("DELETE FROM trades WHERE trade_id = ?", (trade_id,))
+        for tid in trade_ids:
+            for table in retired:
+                conn.execute(f"DELETE FROM {table} WHERE trade_id = ?", (tid,))
+            conn.execute("DELETE FROM realised_pnl WHERE trade_id = ?", (tid,))
+            conn.execute("DELETE FROM trade_legs WHERE trade_id = ?", (tid,))
+            conn.execute("DELETE FROM trades WHERE trade_id = ?", (tid,))
         asset_class = conn.execute("SELECT asset_class FROM instruments WHERE instrument_id = ?", (instrument_id,)).fetchone()
         still_used = conn.execute("SELECT 1 FROM trades WHERE instrument_id = ? LIMIT 1", (instrument_id,)).fetchone()
         if asset_class and asset_class[0] == "FX_OPTION" and not still_used:
             conn.execute("DELETE FROM marks WHERE instrument_id = ?", (instrument_id,))
             conn.execute("DELETE FROM instrument_options WHERE instrument_id = ?", (instrument_id,))
             conn.execute("DELETE FROM instruments WHERE instrument_id = ?", (instrument_id,))
+    return trade_ids

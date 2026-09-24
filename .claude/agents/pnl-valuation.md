@@ -1,6 +1,6 @@
 ---
 name: pnl-valuation
-description: Layer 4, P&L: per-trade valuation (engine/pnl/valuation.py: value_book, the near-marks estimate, the NDF fix, closed-out options, the frozen-row read) and the trading calendar (calendar.py: business days, spot_date). Speaks to other lanes only through the housekeeper.
+description: Layer 4, P&L: per-trade valuation (engine/pnl/valuation.py: value_book, the near-marks estimate, futures converted at spot, closed-out options, the frozen-row read) and the trading calendar (calendar.py: business days, spot_date). Speaks to other lanes only through the housekeeper.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
 effort: high
@@ -18,8 +18,8 @@ You own these files and nothing else:
 
 `value_book(as_of)` is every trade's P&L, one row per trade, open or settled. Every screen and the ledger stand on it.
 
-**Reads** (the lanes whose output you use): ladder-grid, bbg-live, bbg-backfill, rates-pricer, rates-exotics, options-store.
-**Read by** (the lanes to name under "Consumers to brief" when your interface changes): bbg-backfill, bbg-curves, rates-pricer, rates-exotics, options-store, pnl-ledger, pnl-series, ladder-grid, ladder-exposure, book-positions, ui-shell, ui-header, ui-options.
+**Reads** (the lanes whose output you use): ladder-grid, bbg-live, bbg-backfill, rates-pricer, options-store.
+**Read by** (the lanes to name under "Consumers to brief" when your interface changes): bbg-backfill, bbg-curves, rates-pricer, options-store, pnl-ledger, pnl-series, ladder-grid, ladder-exposure, book-positions, ui-shell, ui-header, ui-options.
 
 Your lane was split out of `pnl-engine` on 2026-09-24. Read `.claude/agent-memory/pnl-engine/MEMORY.md` and the notes on your files before starting; write new notes to your own memory.
 

@@ -35,16 +35,10 @@ Informational (2026-09-21, not required for exit 0; each prints what came back):
                      day, 14:00-15:00 New York): the 15:00 New York close the app now uses
 Informational (2026-09-22): the tickers and fields the app asks for that nobody has yet
 seen answered on a terminal, one request per group, printed exactly as they came back:
-    ndf1m            the five 1M NDF outrights the ladder prices NDF currencies at
-                     (KWN+1M, IHN+1M, IRN+1M, NTN+1M, BCN+1M Curncy)
     tenorhist        HistoricalDataRequest on EURUSD1M Curncy, PX_LAST + SETTLE_DT, last
                      week: whether history carries the tenor's own settle date at all
-    spxopt           the listed option tickers in the Bloomberg library ('SPX US 10/16/26
-                     P7615 Index', or that sample when the library has none): PX_LAST,
-                     PX_MID, PX_BID, PX_ASK, PX_SETTLE; and SPX Index: PX_LAST and the two
-                     dividend-yield fields
-    ois              one 1Y OIS quote and the overnight fixing ticker per non-USD currency
-                     (EUR, GBP, JPY, CHF, CAD, AUD), all marked UNVERIFIED in
+    ois              one 1Y OIS quote per non-USD currency (EUR, GBP, JPY, CHF, CAD, AUD),
+                     the discount curves the FX options price off, all marked UNVERIFIED in
                      data/bloomberg/rates_marketdata.py
     vol              the 1M vol-smile tickers on EURUSD and USDJPY (ATM, 25d RR / BF,
                      10d RR / BF, '<PAIR>V1M BGN Curncy' style), UNVERIFIED in
@@ -425,39 +419,16 @@ def check_intraday_close(rep: Report, blpapi, session, service) -> None:
 # Tickers and fields the app asks for that nobody has seen answered on a terminal. Each is
 # one request; the check prints per ticker exactly what came back (values, field
 # exceptions, security errors) so a paste settles it. Copies of the app's own lists: the
-# NDF tickers from data/ingest/common.py::NDF_1M_TICKERS, the OIS and fixing tickers from
-# data/bloomberg/rates_marketdata.py::OIS_CURVES, the vol ticker shape from
-# data/bloomberg/vol_marketdata.py, the dividend fields from data/bloomberg/library.py.
-NDF_1M_TICKERS = ["KWN+1M Curncy", "IHN+1M Curncy", "IRN+1M Curncy", "NTN+1M Curncy", "BCN+1M Curncy"]
-OIS_PROBE_TICKERS = ["EESWE1 Curncy", "ESTRON Index",        # EUR ESTR 1Y, fixing
-                     "BPSWS1 Curncy", "SONIO/N Index",       # GBP SONIA
-                     "JYSO1 Curncy", "MUTKCALM Index",       # JPY TONA
-                     "SFSNT1 Curncy", "SSARON Index",        # CHF SARON
-                     "CDSO1 Curncy", "CAONREPO Index",       # CAD CORRA
-                     "ADSO1 Curncy", "RBACOR Index"]         # AUD AONIA
+# 1Y OIS tickers from data/bloomberg/rates_marketdata.py::OIS_CURVES, the vol ticker shape
+# from data/bloomberg/vol_marketdata.py.
+OIS_PROBE_TICKERS = ["EESWE1 Curncy",                        # EUR ESTR 1Y
+                     "BPSWS1 Curncy",                        # GBP SONIA
+                     "JYSO1 Curncy",                         # JPY TONA
+                     "SFSNT1 Curncy",                        # CHF SARON
+                     "CDSO1 Curncy",                         # CAD CORRA
+                     "ADSO1 Curncy"]                         # AUD AONIA
 VOL_PROBE_TICKERS = [f"{pair}{infix}1M BGN Curncy" for pair in ("EURUSD", "USDJPY")
                      for infix in ("V", "25R", "25B", "10R", "10B")]
-LISTED_OPTION_FIELDS = ["PX_LAST", "PX_MID", "PX_BID", "PX_ASK", "PX_SETTLE"]
-INDEX_FIELDS = ["PX_LAST", "IDX_EST_DVD_YLD", "EQY_DVD_YLD_12M"]
-SAMPLE_LISTED_OPTION = "SPX US 10/16/26 P7615 Index"        # the reference sample's SPX/E261016P7615-USAA
-
-
-def listed_option_tickers(db_path: Path) -> list:
-    """The listed option tickers the Bloomberg library asks for (kind FUTURE_PX on an
-    EQ_OPTION), read-only; the sample ticker when the database has none, so the ticker
-    format is tried either way."""
-    tickers = []
-    try:
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-        try:
-            tickers = [r[0] for r in conn.execute(
-                "SELECT DISTINCT bbg_ticker FROM bbg_library WHERE product = 'EQ_OPTION' AND kind = 'FUTURE_PX' "
-                "AND bbg_ticker <> '' ORDER BY bbg_ticker")]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        pass
-    return tickers[:5] or [SAMPLE_LISTED_OPTION]
 
 
 def _describe(tickers, fields, data, errors) -> tuple:
@@ -481,36 +452,12 @@ def _reference_probe(rep: Report, name: str, blpapi, session, service, tickers, 
     rep.check(name, ok, detail, required=False, fields=fields, values={t: data.get(t, {}) for t in tickers}, errors=errors)
 
 
-def check_ndf_1m(rep: Report, blpapi, session, service) -> None:
-    _reference_probe(rep, "ndf1m", blpapi, session, service, NDF_1M_TICKERS, ["PX_LAST", "SETTLE_DT"])
-
-
 def check_ois_tickers(rep: Report, blpapi, session, service) -> None:
     _reference_probe(rep, "ois", blpapi, session, service, OIS_PROBE_TICKERS, ["PX_LAST"])
 
 
 def check_vol_tickers(rep: Report, blpapi, session, service) -> None:
     _reference_probe(rep, "vol", blpapi, session, service, VOL_PROBE_TICKERS, ["PX_LAST"])
-
-
-def check_listed_option(rep: Report, blpapi, session, service, db_path: Path) -> None:
-    """The option's own price fields, then the index level and dividend yield: two
-    requests, one check."""
-    options = listed_option_tickers(db_path)
-    try:
-        opt_data, opt_errors = reference_request(blpapi, session, service, options, LISTED_OPTION_FIELDS)
-        idx_data, idx_errors = reference_request(blpapi, session, service, ["SPX Index"], INDEX_FIELDS)
-    except Exception as exc:
-        rep.check("spxopt", False, f"request raised: {exc!r}", required=False)
-        return
-    opt_ok, opt_detail = _describe(options, LISTED_OPTION_FIELDS, opt_data, opt_errors)
-    idx_ok, idx_detail = _describe(["SPX Index"], INDEX_FIELDS, idx_data, idx_errors)
-    idx_vals = idx_data.get("SPX Index", {})
-    dividend = next((f for f in INDEX_FIELDS[1:] if isinstance(idx_vals.get(f), float)), None)
-    rep.check("spxopt", opt_ok and idx_ok and dividend is not None,
-              f"option {opt_detail} | index {idx_detail} -> dividend yield from {dividend or 'NEITHER field'}",
-              required=False, option_tickers=options, option_values=opt_data, option_errors=opt_errors,
-              index_values=idx_vals, index_errors=idx_errors, dividend_field=dividend)
 
 
 def historical_request(blpapi, session, service, ticker, fields, start: date, end: date, timeout_ms=15000):
@@ -819,9 +766,7 @@ def main(argv=None) -> int:
         informational = [
             ("fwdscale", lambda: check_fwd_scale(rep, blpapi, session, service)),
             ("intraday", lambda: check_intraday_close(rep, blpapi, session, service)),
-            ("ndf1m", lambda: check_ndf_1m(rep, blpapi, session, service)),
             ("tenorhist", lambda: check_tenor_history(rep, blpapi, session, service)),
-            ("spxopt", lambda: check_listed_option(rep, blpapi, session, service, db_path)),
             ("ois", lambda: check_ois_tickers(rep, blpapi, session, service)),
             ("vol", lambda: check_vol_tickers(rep, blpapi, session, service)),
         ]

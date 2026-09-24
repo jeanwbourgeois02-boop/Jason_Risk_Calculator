@@ -18,8 +18,8 @@ vat_rate, calendar_depth, foreign_access. Added: multiplier, calendar, delivery.
   `quant/units.py` factors and refuses a CSV whose multiplier column disagrees.
 - **price_scale unverified** where notes say "if Bloomberg shows cents, price_scale must become
   0.01": NYMEX:B0, NYMEX:C0, NYMEX:MBE, NYMEX:PGP, COMEX:AUP, COMEX:SI. A wrong scale = a 100x P&L.
-- **bbg_root 'ZZ...' is a placeholder** (unknown ticker): `ContractRoot.bbg_placeholder`. Never ask
-  Bloomberg for one.
+- **bbg_root 'ZZ...' was a placeholder** (102 rows): all replaced by best guesses on 2026-09-24
+  (Phase 2), see [[bbg-root-guesses]]. `ContractRoot.bbg_placeholder` still exists (blotter.py reads it).
 - **Code collisions**: exchange codes repeat across exchanges (ZC, SI, SC, SR, NI, PB, SN, HC, JM,
   RB, PL, PS, B, M, ZS, RS) and a code in one namespace can be another root's Bloomberg root
   (CO: LME cobalt code / ICE Brent bbg; C: DCE corn + ICE cocoa codes / CBOT corn bbg; W, LC, LH,

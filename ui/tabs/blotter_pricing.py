@@ -269,9 +269,11 @@ PERIOD_TITLES = {"ltd": "LTD", "daily": "Daily", "previous_day": "Previous day",
 
 _MISSING_TAG_RE = re.compile(r"no (\S+) mark")
 
+# FX_SWAP stays: a manual FX swap is an FX hedge (only the blotter's package rule and IRS
+# left the app, commodity conversion Phase 2, 2026-09-24).
 _PRODUCT_LABELS = {
     "FX_SPOT": "spot", "FX_FWD": "forward", "FX_SWAP": "swap",
-    "FUTURE": "future", "IRS": "swap (IRS)", "FX_OPTION": "option",
+    "FUTURE": "future", "FX_OPTION": "option",
 }
 
 

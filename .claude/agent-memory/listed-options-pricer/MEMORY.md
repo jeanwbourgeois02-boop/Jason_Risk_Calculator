@@ -1,0 +1,2 @@
+- [Equity branch removed 2026-09-24](equity-branch-removed-2026-09-24.md) — commodity-only pricer, FUTURE_PX underlying, implied vol; Phase 5 seams (EQ_OPTION vs CMDTY_OPTION, portfolio SPOT)
+- Older notes on this file (loop guard, vendor quirks, units) live in `.claude/agent-memory/options-pricer/`, the lane this one split from.

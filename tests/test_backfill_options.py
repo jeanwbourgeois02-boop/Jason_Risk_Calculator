@@ -68,7 +68,7 @@ def fwd_fetch(session, service, tickers, fields, start, end):
 
 
 def _never_called(*a, **k):
-    raise AssertionError("no future / fixing history may be requested for this book")
+    raise AssertionError("no future history may be requested for this book")
 
 
 QUOTES_ASKED = []
@@ -251,9 +251,9 @@ def test_skipped_no_closes_and_error_days_carry_the_option_keys(tmp_path, monkey
     events = []
     _fakes(monkeypatch, events)
     keys = {"options_priced": None, "options_skipped": [], "options_note": "", "options_closed_out": [],
-            "vol_quotes": 0, "curve_quotes": 0,
-            "missing_inputs": [], "rates_priced": None, "rates_failed": [], "rates_note": ""}
+            "vol_quotes": 0, "curve_quotes": 0, "missing_inputs": []}
     assert {k: backfill._skipped("2026-09-17")[k] for k in keys} == keys
+    assert not any(k.startswith("rates_") for k in backfill._skipped("2026-09-17"))   # the swaps' keys left 2026-09-24
 
     # NO_CLOSES: Bloomberg returned nothing that day
     results = backfill.backfill(p, date(2026, 9, 17), date(2026, 9, 17), fetch=lambda *a, **k: {}, fwd_fetch=fwd_fetch,
@@ -295,12 +295,11 @@ def test_status_file_carries_an_options_block_per_worked_day(tmp_path, monkeypat
     # a closed-out option is under its own head, never among the skipped (2026-09-22)
     assert block["options"]["2026-09-18"] == {"priced": 0, "skipped": skipped, "note": "", "closed_out": ["o7", "o8"]}
     assert block["options"]["2026-09-14"] == {"priced": None, "skipped": [], "note": "", "closed_out": []}
-    # and a "rates" block of the same shape, with the day's smile / curve rows from the history
-    assert set(block["rates"]) == set(block["options"])
-    assert block["rates"]["2026-09-18"] == {"priced": None, "failed": [], "note": "", "vol_quotes": 45, "curve_quotes": 26,
-                                            "missing_inputs": []}
-    assert block["rates"]["2026-09-14"] == {"priced": None, "failed": [], "note": "", "vol_quotes": 0, "curve_quotes": 0,
-                                            "missing_inputs": []}
+    # and an "inputs" block ("rates", with the swaps' pricing, until 2026-09-24): the day's smile /
+    # curve rows from the history
+    assert "rates" not in block and set(block["inputs"]) == set(block["options"])
+    assert block["inputs"]["2026-09-18"] == {"vol_quotes": 45, "curve_quotes": 26, "missing_inputs": []}
+    assert block["inputs"]["2026-09-14"] == {"vol_quotes": 0, "curve_quotes": 0, "missing_inputs": []}
     # the "days" block keeps its own pinned shape, untouched by the options step
     assert all(set(v) == {"status", "missing_count", "missing"} for v in block["days"].values())
     assert all(v["status"] == "DONE" for v in block["days"].values())

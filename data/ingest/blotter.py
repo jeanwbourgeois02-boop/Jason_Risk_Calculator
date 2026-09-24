@@ -6,14 +6,21 @@ files), the app's only trade source. Shared dataclasses/regexes live in
 ``data/ingest/irs.py`` -- the retired BNP CSV parser -- were deleted).
 
 Row kind is decided by ``Fin Type`` (``Product`` is the fallback when Fin Type is blank
-or unrecognised): FORWARD, CURRENCY, FUTURE, OPTION, INTEREST_RATE_SWAP -- matched by
-keyword after normalisation, so 'Futures', 'FX Forward', 'Interest Rate Swap', 'fx
-option' all resolve. A label with 'swap' is a rate swap only when it also carries a
-rates word (interest, rate, IRS, OIS); with an FX word (FX, currency, forward, foreign
-exchange) it is FORWARD, because an FX swap's rows are forward fills with their own
-value dates (the package rule pairs them); 'Swap' alone is counted and skipped, never
-coerced (reviewer finding 2026-09-22: bare 'swap' used to book as an interest rate
-swap). Rows whose Status says cancelled/rejected/pending/void are filtered out and
+or unrecognised): FORWARD, CURRENCY, FUTURE, OPTION -- matched by keyword after
+normalisation, so 'Futures', 'FX Forward', 'fx option' all resolve. A label with 'swap'
+is FORWARD with an FX word (FX, currency, forward, foreign exchange), because an FX
+swap's rows are forward fills with their own value dates; with a rates word (interest,
+rate, IRS, OIS) it is an interest rate swap, which is no longer loaded; 'Swap' alone is
+counted and skipped, never coerced (reviewer finding 2026-09-22).
+
+Products that left the app with the commodity conversion (Phase 2, user 2026-09-24):
+interest rate swaps, the equity index futures (ES, NQ, RTY, YM) and the listed index
+options ('SPX/E261016P7615-USAA'). A row of one of them is counted under
+``n_skipped_other`` (and ``n_skipped_retired``) and named on ``skipped_other_rows`` with
+a plain reason: never a reject, never coerced into another product (hard rule 6). NDFs
+left too: every FX pair is written deliverable (``is_ndf`` 0, legs ``settles_cash`` 1).
+
+Rows whose Status says cancelled/rejected/pending/void are filtered out and
 counted; so are rows that ``config/book.yaml`` says are not the book's (its ``funds``,
 ``traders`` and ``desks`` lists, read by ``load_book_filter``: a non-empty list keeps only
 rows whose populated cell is in it, case-insensitive; an empty list takes every value;
@@ -31,10 +38,8 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     user's cash-ladder spec) a row naming two currencies is a SPOT FX fill: a trade
     (product FX_SPOT) + 2 FX_NEAR legs on ``Settle Date``, exactly like a forward. A
     single-currency row stays instrument-only. See ``_parse_spot_from_currency_row``.
-  - FUTURE: a trade + 1 NOTIONAL leg (``Quantity`` = contracts signed by ``Side``). The
-    equity index roots of ``KNOWN_FUTURE_ROOTS`` (ES, NQ, RTY, YM) keep their own path
-    (instrument '<code> Index', leg in USD; Phase 2 of the commodity conversion removes
-    it). Every other future (2026-09-24) is resolved through the contract master
+  - FUTURE: a trade + 1 NOTIONAL leg (``Quantity`` = contracts signed by ``Side``). Every
+    future (2026-09-24) is resolved through the contract master
     (``data.contracts.resolve_future``, from ``Symbol`` / ``Underlying Symbol`` narrowed by
     the ``Currency``, ``Execution Venue`` and ``Description`` cells): instrument id = the
     canonical contract id ('CLZ26 Comdty'), base_ccy = the root id ('NYMEX:CL'), quote_ccy
@@ -51,17 +56,6 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     ``NetInvoice`` is |Quantity x Price| but its sign is unreliable, so it never gives
     direction: it rebuilds a Price / Quantity cell that is unusable, and is otherwise a
     cross-check that warns above 0.5 % and never rejects.
-  - INTEREST_RATE_SWAP: + = pay fixed, - = receive fixed (user-confirmed 2026-09-16), in
-    full notional units. Direction, in order: the user's stored override
-    (``data/ingest/irs_direction.py`` -- the PRIMARY source, since neither the reference
-    export nor the user's own carries any direction marker); else every EXPLICIT signal
-    in the row (brackets / minus on Notional, Quantity, Current Face, Original Face --
-    not NetInvoice or Gross Amnt/Principal, which on a swap are upfront cash amounts; a
-    sell-type ``Side``; pay / receive wording in Description, Notes, Swap Type,
-    RollSide, Tran Type), two of which contradicting each other reject the row; else
-    pay fixed BY DEFAULT, recorded as such per swap on ``ParseResult.irs_directions``.
-    ``Side`` = Buy and an unsigned amount are NOT signals (both sit on every reference
-    row, receivers included), and direction is never inferred from anything else.
 
 Tolerance rule (user instruction 2026-09-17, "as flexible as possible"): a blank,
 missing or oddly formatted field never rejects a row when the value can be recovered
@@ -76,8 +70,8 @@ text may ever reach a numeric column. Excel turns a number such as 7.24 into the
 became 24.0 and '7/24/2026' 7242026.0), a cell that is not a number is rebuilt from
 another column (forward / spot rate and amounts from each other, Quantity and
 NetInvoice; option Price and Quantity from |NetInvoice|; futures price from NetInvoice
-and fees, contracts from Notional / multiplier; swap notional from Quantity x 1e6,
-fixed rate from Yield / Description) with a ``ParseWarning``, and only when nothing can
+and fees, contracts from NetInvoice / (multiplier x Price)) with a ``ParseWarning``, and
+only when nothing can
 rebuild it is that ONE row rejected, naming the column and the cell. ``_enforce_numeric``
 is the last gate: only finite numbers reach a REAL column (NaN binds as NULL and used to
 fail the whole upload). ``non_numeric_cells`` lists text already sitting in a database.
@@ -111,20 +105,11 @@ from data.ingest.common import (
     FORWARD_SYMBOL_RE,
     Instrument,
     InstrumentOption,
-    IrsDirection,
-    IRS_DESCRIPTION_RE,
-    IRS_SYMBOL_RE,
-    NDF_CCYS,
-    NO_DIRECTION_SIGNAL,
     ParseWarning,
     PERPETUAL,
     Reject,
     Trade,
     TradeLeg,
-    future_expiry,
-    FUTURE_MULTIPLIERS,
-    FUTURE_SYMBOL_RE,
-    KNOWN_FUTURE_ROOTS,
 )
 from data.contracts import request_ticker, resolve_future
 
@@ -135,7 +120,18 @@ SOURCE = "XLSX"  # closest value in CLAUDE.md's trades.source enum ('BNP | XLSX 
 # filter is the one the app had before it existed: Fund NMMF, any trader, any desk.
 BOOK_YAML = Path(__file__).resolve().parents[2] / "config" / "book.yaml"
 DEFAULT_FUNDS = ("NMMF",)
-IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION", "INTEREST_RATE_SWAP")
+IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION")
+# Products that left the app with the commodity conversion (Phase 2, user 2026-09-24). A row
+# of one of them is counted and skipped with a plain reason, never rejected and never coerced
+# into another product (hard rule 6). The roots are recognised only to say so: nothing is
+# booked from them, and a multiplier is never read from this list.
+RETIRED_REASON_IRS = "interest rate swap: rates left the app on 2026-09-24 (commodity conversion); not loaded"
+RETIRED_INDEX_FUTURE_ROOTS = frozenset({"ES", "NQ", "RTY", "YM"})
+RETIRED_INDEX_OPTION_ROOTS = frozenset({"SPX", "NDX", "RUT", "SX5E"})
+# 'ESU6-USAA' (the PB's equity index future form); 'SPX/E261016P7615-USAA' (a listed option:
+# underlying / European-or-American, expiry yymmdd, put-call, strike)
+_RETIRED_FUTURE_SYMBOL_RE = re.compile(r"^([A-Z]+)[FGHJKMNQUVXZ]\d-[A-Z]{4}$")
+_LISTED_OPTION_SYMBOL_RE = re.compile(r"^([A-Z0-9]{2,6})/[EA]\d{6}[CP]\d+(?:\.\d+)?(?:-.*)?$")
 EXCLUDED_STATUS_WORDS = ("cancel", "reject", "void", "pend", "delet", "fail", "error", "draft")
 # Option / futures NetInvoice vs what Quantity x Price implies: a larger relative gap is a
 # warning, never a reject.
@@ -292,12 +288,13 @@ class ParseResult:
     n_spot: int = 0         # CURRENCY rows that named two currencies and became FX_SPOT trades
     n_future: int = 0
     n_option: int = 0
-    n_irs: int = 0
-    n_skipped_irs: int = 0
     n_skipped_other: int = 0
     # the rows behind n_skipped_other, named: (row_no, symbol, reason) -- a row of a type the
     # app does not load must never vanish without a trace (user, 2026-09-21)
     skipped_other_rows: list = field(default_factory=list)
+    # of n_skipped_other: rows of a product that left the app on 2026-09-24 (interest rate
+    # swaps, equity index futures, listed index options), each named on skipped_other_rows
+    n_skipped_retired: int = 0
     n_skipped_status_or_fund: int = 0   # every excluded row: the four counts below summed
     n_excluded_status: int = 0          # Status cancelled / rejected / pending / ...
     n_excluded_fund: int = 0            # config/book.yaml's funds (a row counts under its first filter)
@@ -312,35 +309,16 @@ class ParseResult:
     # as a date and was rebuilt from the amounts, an option NetInvoice that disagrees
     # with Quantity x Price, ...). Never rejects.
     warnings: List[ParseWarning] = field(default_factory=list)
-    # trade_id -> which way each swap was read and which signal decided it (or
-    # NO_DIRECTION_SIGNAL when the file carries none and pay fixed was assumed).
-    irs_directions: Dict[str, IrsDirection] = field(default_factory=dict)
     # Option instruments the file gives no strike for (stored as the schema's 0 = "not
     # known" sentinel, never a real strike of 0), so the UI can ask for them by name.
     options_missing_strike: List[str] = field(default_factory=list)
     trade_rows: Dict[str, int] = field(default_factory=dict)   # trade_id -> file row number
-    # Input, not output: the user's stored pay/receive overrides (load() passes
-    # irs_direction.get_overrides). An override always wins over a file signal.
-    direction_overrides: Dict[str, str] = field(default_factory=dict)
-    n_direction_overrides: int = 0   # set by load(): swaps on file facing the way the user set
 
     def information_notes(self) -> List[str]:
-        """Things the app also shows persistently elsewhere (the Rates notice, the
-        Blotter's missing-terms banner), so they inform and never count as warnings:
-        overrides kept, swaps defaulted to pay fixed, swaps that took their direction
-        from a marker in the file, options with no strike. Counts and names only."""
+        """Things the app also shows persistently elsewhere (the Blotter's missing-terms
+        banner), so they inform and never count as warnings: options with no strike.
+        Counts and names only."""
         out: List[str] = []
-        if self.n_direction_overrides:
-            n = self.n_direction_overrides
-            out.append(f"{n} rate swap direction{'s' if n != 1 else ''} set by you kept (your setting wins over the file).")
-        defaulted = sorted(t for t, d in self.irs_directions.items() if d.defaulted)
-        if defaulted:
-            out.append(f"{len(defaulted)} rate swap(s) carry no pay/receive marker in the file and were read as pay "
-                       f"fixed: {_some(defaulted)}. Set Pay or Receive in the Rates table.")
-        signalled = sorted(f"{t} {_DIRECTION_WORDS[d.direction]}" for t, d in self.irs_directions.items()
-                           if not d.defaulted and not d.decided_by.startswith("user override"))
-        if signalled:
-            out.append(f"{len(signalled)} rate swap(s) took their direction from a marker in the file: {_some(signalled)}.")
         if self.options_missing_strike:
             out.append(f"{len(self.options_missing_strike)} option(s) have no strike in the file: "
                        f"{_some(self.options_missing_strike)}.")
@@ -389,8 +367,8 @@ _MONTH_WORDS = frozenset(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG"
 _CURRENCY_MARKS_RE = re.compile(r"[$€£¥]")
 # What a '%' sign in a numeric cell means is decided per column, never silently (`_num`'s
 # `percent` argument). The columns, as decided 2026-09-18:
-#   'keep'      FixedRate, Yield (INTEREST_RATE_SWAP): the file writes 3.98 for 3.98 %, so
-#               '3.98%' is that same 3.98 -- the sign adds nothing and nothing is scaled.
+#   'keep'      a column written in percent units, where '3.98%' is that same 3.98 (the
+#               swap FixedRate / Yield used it until rates left the app on 2026-09-24).
 #   'fraction'  Price, Premium on an OPTION row: the value is a fraction of the notional
 #               (0.00579), so '0.58%' means 0.0058 -- divided by 100, and warned about,
 #               because stripping the sign (the old behaviour) read it 100 times too big.
@@ -661,7 +639,8 @@ def _status_excluded(v) -> bool:
 
 
 # The words that decide what a label carrying "swap" is (see _kind_of): a rates word
-# makes it an interest rate swap, an FX word a forward fill; neither = not loaded.
+# makes it an interest rate swap (recognised only to be skipped with its reason since
+# 2026-09-24), an FX word a forward fill; neither = not loaded.
 SWAP_RATES_WORDS = frozenset({"IRS", "OIS", "INTEREST", "RATE", "RATES"})
 SWAP_FX_WORDS = frozenset({"FX", "CURRENCY", "CURRENCIES", "FOREIGN", "EXCHANGE",
                            "FORWARD", "FORWARDS", "FWD"})
@@ -675,8 +654,8 @@ def _kind_of(label: str) -> Optional[str]:
     if words & {"IRS", "OIS", "INTEREST"} or "INTEREST RATE" in s:
         return "INTEREST_RATE_SWAP"
     if words & {"SWAP", "SWAPS"}:
-        # 'FX Swap' is two forward fills with their own value dates (the package rule
-        # groups them), never a rate swap; a bare 'Swap' says too little to book at all.
+        # 'FX Swap' is two forward fills with their own value dates, each loaded as an
+        # outright, never a rate swap; a bare 'Swap' says too little to book at all.
         if words & SWAP_RATES_WORDS:
             return "INTEREST_RATE_SWAP"
         if words & SWAP_FX_WORDS:
@@ -789,19 +768,16 @@ def _dedupe_versions(df: pd.DataFrame) -> tuple:
 
 
 # --------------------------------------------------------------------------- parse
-def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str] = None,
-          direction_overrides: Optional[Dict[str, str]] = None, *,
+def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str] = None, *,
           book: Optional[Union[BookFilter, str, Path]] = None,
           conn: Optional[sqlite3.Connection] = None) -> ParseResult:
     """Pure parse of a blotter (path, bytes or an already-read DataFrame). Never writes;
-    never coerces a contradictory row. ``direction_overrides`` ({trade_id: 'PAY' |
-    'RECEIVE'}, from ``irs_direction.get_overrides``) is the user's own swap direction,
-    which wins over anything the file says. ``book`` is the row filter: a ``BookFilter``,
-    a path to a book.yaml, or None for ``config/book.yaml``. ``conn`` (read only) lets a
-    future's stored Bloomberg contract dates replace the estimated expiry."""
+    never coerces a contradictory row. ``book`` is the row filter: a ``BookFilter``, a path
+    to a book.yaml, or None for ``config/book.yaml``. ``conn`` (read only) lets a future's
+    stored Bloomberg contract dates replace the estimated expiry."""
     df = source if isinstance(source, pd.DataFrame) else read_table(source, filename)
     df = canonicalize_columns(df).reset_index(drop=True)
-    res = ParseResult(direction_overrides=dict(direction_overrides or {}))
+    res = ParseResult()
     res.book_filter = book if isinstance(book, BookFilter) else load_book_filter(book)
     df, res.n_superseded = _dedupe_versions(df)
     global _DAY_FIRST, _CONTRACT_CONN
@@ -862,7 +838,6 @@ def _enforce_numeric(res: "ParseResult") -> None:
         if t.trade_id in bad_trades:
             res.rejects.append(Reject(res.trade_rows.get(t.trade_id, 0), t.instrument_id,
                                       f"not a finite number: {bad_trades[t.trade_id]}; row not loaded"))
-            res.irs_directions.pop(t.trade_id, None)
     res.trades = [t for t in res.trades if t.trade_id not in bad_trades]
     res.legs = [l for l in res.legs if l.trade_id not in bad_trades]
     for iid in bad_instruments:
@@ -893,6 +868,13 @@ def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
     trader = _s(row.get("Trader"))
     res.kept_by_trader[trader] = res.kept_by_trader.get(trader, 0) + 1
     kind = _row_kind(row)
+    not_loaded = _not_loaded_reason(kind, row)
+    if not_loaded is not None:
+        reason, retired = not_loaded
+        res.n_skipped_other += 1
+        res.n_skipped_retired += int(retired)
+        res.skipped_other_rows.append((row_no, _s(row.get("Symbol")), reason))
+        return
     if kind == "FORWARD":
         res.n_forward += 1
         _parse_forward(res, row, row_no)
@@ -905,17 +887,39 @@ def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
     elif kind == "OPTION":
         res.n_option += 1
         _parse_option(res, row, row_no)
-    elif kind == "INTEREST_RATE_SWAP":
-        res.n_irs += 1
-        n_rejects_before = len(res.rejects)
-        _parse_irs(res, row, row_no)
-        if len(res.rejects) > n_rejects_before:
-            res.n_skipped_irs += 1
     else:
         res.n_skipped_other += 1
         res.skipped_other_rows.append((row_no, _s(row.get("Symbol")),
                                        f"type not loaded by the app: Fin Type {_s(row.get('Fin Type'))!r}, "
                                        f"Product {_s(row.get('Product'))!r}"))
+
+
+def _not_loaded_reason(kind: Optional[str], row: pd.Series) -> Optional[Tuple[str, bool]]:
+    """``(plain reason, retired)`` for a row of a product the parser does not book, or None
+    for a row it does. ``retired`` = a product that left the app on 2026-09-24: interest rate
+    swaps by their kind, equity index futures by the root of ``Symbol`` / ``Underlying
+    Symbol`` ('ESU6-USAA'), listed index options by their Symbol ('SPX/E261016P7615-USAA').
+    A listed option on any other underlying is not loaded yet (options on futures come in a
+    later phase): the FX option path cannot read one and would only reject it. The reason
+    names what the row is, never a fault in it."""
+    if kind == "INTEREST_RATE_SWAP":
+        return RETIRED_REASON_IRS, True
+    if kind == "FUTURE":
+        for col in ("Symbol", "Underlying Symbol"):
+            m = _RETIRED_FUTURE_SYMBOL_RE.match(_s(row.get(col)).upper())
+            if m and m.group(1) in RETIRED_INDEX_FUTURE_ROOTS:
+                return (f"equity index future ({m.group(1)}): the equity index left the app on 2026-09-24 "
+                        "(commodity conversion); not loaded"), True
+    if kind == "OPTION":
+        m = _LISTED_OPTION_SYMBOL_RE.match(_s(row.get("Symbol")).upper())
+        if m:
+            root = m.group(1)
+            if root in RETIRED_INDEX_OPTION_ROOTS:
+                return (f"listed index option on {root}: the equity index left the app on 2026-09-24 "
+                        "(commodity conversion); not loaded"), True
+            return (f"listed option on {root}: listed options are not loaded yet (options on futures "
+                    "come in a later phase); not loaded"), False
+    return None
 
 
 def _common(row: pd.Series) -> dict:
@@ -1092,18 +1096,17 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
         _warn(res, row_no, symbol, message)
     base_amount, quote_amount = (base_amt, -quote_amt) if buy_is_base else (-base_amt, quote_amt)
 
-    is_ndf = 1 if (quote_ccy in NDF_CCYS or base_ccy in NDF_CCYS) else 0
+    # NDFs left the app on 2026-09-24: every FX pair is written deliverable, both legs settling.
     res.instruments.setdefault(pair, Instrument(
         instrument_id=pair, asset_class="FX", base_ccy=base_ccy, quote_ccy=quote_ccy,
-        multiplier=1.0, is_ndf=is_ndf, bbg_ticker=f"{pair} Curncy", expiry_date=PERPETUAL,
+        multiplier=1.0, is_ndf=0, bbg_ticker=f"{pair} Curncy", expiry_date=PERPETUAL,
     ))
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=pair, product="FX_FWD", package_id=trade_id,
         trade_date=trade_date, quantity=base_amount, price=rate, **_common(row),
     ))
-    settles_cash = 0 if is_ndf else 1
-    res.legs.append(TradeLeg(trade_id, 1, "FX_NEAR", base_ccy, base_amount, trade_date, value_date, rate, settles_cash))
-    res.legs.append(TradeLeg(trade_id, 2, "FX_NEAR", quote_ccy, quote_amount, trade_date, value_date, rate, settles_cash))
+    res.legs.append(TradeLeg(trade_id, 1, "FX_NEAR", base_ccy, base_amount, trade_date, value_date, rate, 1))
+    res.legs.append(TradeLeg(trade_id, 2, "FX_NEAR", quote_ccy, quote_amount, trade_date, value_date, rate, 1))
 
 
 def _parse_currency(res: ParseResult, row: pd.Series, row_no: int) -> None:
@@ -1184,18 +1187,16 @@ def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int,
     for message in repairs:
         _warn(res, row_no, symbol, message)
     base_amount, quote_amount = (base_amt, -quote_amt) if buy_is_base else (-base_amt, quote_amt)
-    is_ndf = 1 if (quote_ccy in NDF_CCYS or base_ccy in NDF_CCYS) else 0
     res.instruments.setdefault(pair, Instrument(
         instrument_id=pair, asset_class="FX", base_ccy=base_ccy, quote_ccy=quote_ccy,
-        multiplier=1.0, is_ndf=is_ndf, bbg_ticker=f"{pair} Curncy", expiry_date=PERPETUAL,
+        multiplier=1.0, is_ndf=0, bbg_ticker=f"{pair} Curncy", expiry_date=PERPETUAL,
     ))
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=pair, product="FX_SPOT", package_id=trade_id,
         trade_date=trade_date, quantity=base_amount, price=rate, **_common(row),
     ))
-    settles_cash = 0 if is_ndf else 1
-    res.legs.append(TradeLeg(trade_id, 1, "FX_NEAR", base_ccy, base_amount, trade_date, value_date, rate, settles_cash))
-    res.legs.append(TradeLeg(trade_id, 2, "FX_NEAR", quote_ccy, quote_amount, trade_date, value_date, rate, settles_cash))
+    res.legs.append(TradeLeg(trade_id, 1, "FX_NEAR", base_ccy, base_amount, trade_date, value_date, rate, 1))
+    res.legs.append(TradeLeg(trade_id, 2, "FX_NEAR", quote_ccy, quote_amount, trade_date, value_date, rate, 1))
     res.n_spot += 1
 
 
@@ -1235,47 +1236,14 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
     if trade_date is None:
         res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
         return
-    m = FUTURE_SYMBOL_RE.match(symbol)
-    if m and m.group(1) in KNOWN_FUTURE_ROOTS:
-        _parse_index_future(res, row, row_no, symbol, trade_id, trade_date)
-    else:
-        _parse_commodity_future(res, row, row_no, symbol, trade_id, trade_date)
-
-
-def _parse_index_future(res: ParseResult, row: pd.Series, row_no: int, symbol: str, trade_id: str,
-                        trade_date: str) -> None:
-    """An equity index future (ES, NQ, RTY, YM): instrument '<code> Index', leg in USD. The
-    macro book's path, unchanged; Phase 2 of the commodity conversion removes it."""
-    try:
-        root, code, expiry = future_expiry(symbol, date.fromisoformat(trade_date))
-    except ValueError as e:
-        res.rejects.append(Reject(row_no, symbol, str(e)))
-        return
-    instrument_id = f"{code} Index"
-    multiplier = FUTURE_MULTIPLIERS[root]  # root already validated by future_expiry
-    fill = _future_fill(res, row, row_no, symbol, multiplier, notional_rebuild=True)
-    if fill is None:
-        return
-    signed_contracts, price = fill
-    expiry_iso = expiry.isoformat()
-
-    res.instruments.setdefault(instrument_id, Instrument(
-        instrument_id=instrument_id, asset_class="FUTURE", base_ccy=root, quote_ccy="USD",
-        multiplier=multiplier, is_ndf=0, bbg_ticker=instrument_id, expiry_date=expiry_iso,
-    ))
-    res.trades.append(Trade(
-        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="FUTURE",
-        package_id=trade_id, trade_date=trade_date, quantity=signed_contracts, price=price, **_common(row),
-    ))
-    res.legs.append(TradeLeg(
-        trade_id, 1, "NOTIONAL", "USD", signed_contracts * multiplier * price,
-        trade_date, expiry_iso, price, 0))
+    _parse_commodity_future(res, row, row_no, symbol, trade_id, trade_date)
 
 
 def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbol: str, trade_id: str,
                             trade_date: str) -> None:
-    """Any future that is not an equity index root, resolved through the contract master
-    (``data.contracts.resolve_future``, 2026-09-24). The symbol comes from ``Symbol``, else
+    """A future, resolved through the contract master (``data.contracts.resolve_future``,
+    2026-09-24; the equity index roots are skipped before this, ``_not_loaded_reason``).
+    The symbol comes from ``Symbol``, else
     ``Underlying Symbol``; a bare code shared by several roots is narrowed by the row's
     ``Currency`` (read like any currency cell: 'DOL.C-USAA' or 'USD'; blank or unreadable =
     not given), ``Execution Venue`` and an exchange named in ``Description``. A symbol the
@@ -1299,8 +1267,7 @@ def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbo
         res.rejects.append(Reject(row_no, symbol, str(e)))
         return
     root = contract.root
-    fill = _future_fill(res, row, row_no, symbol, root.multiplier, notional_rebuild=False,
-                        quote_unit=root.quote_unit)
+    fill = _future_fill(res, row, row_no, symbol, root.multiplier, quote_unit=root.quote_unit)
     if fill is None:
         return
     signed_contracts, price = fill
@@ -1321,26 +1288,22 @@ def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbo
 
 
 def _future_fill(res: ParseResult, row: pd.Series, row_no: int, symbol: str, multiplier: float,
-                 notional_rebuild: bool, quote_unit: str = "") -> Optional[Tuple[float, float]]:
+                 quote_unit: str = "") -> Optional[Tuple[float, float]]:
     """(signed contracts, fill price) of a futures row, or None when the row was rejected.
 
-    ``Quantity`` signed by ``Side``; an unusable Quantity is rebuilt from ``Notional /
-    multiplier`` (only with ``notional_rebuild``: the export's Notional is contracts x
-    multiplier on all 11 reference ES rows, but what a commodity row's Notional holds is not
-    known, and a Notional in gallons or bushels divided by a cents-scaled multiplier would be
-    a whole number 100 times too big) or else from ``NetInvoice / (multiplier x Price)``. An
-    unusable Price is rebuilt from NetInvoice and fees. With every cell there, NetInvoice (in
-    the contract's currency) is cross-checked against contracts x multiplier x Price: a gap
-    above NET_INVOICE_TOLERANCE warns and never rejects; one of about 100 times says the fill
-    looks quoted in another unit than ``quote_unit``."""
+    ``Quantity`` signed by ``Side``; an unusable Quantity is rebuilt from ``NetInvoice /
+    (multiplier x Price)``, never from ``Notional`` (what a commodity row's Notional holds is
+    not known, and a Notional in gallons or bushels divided by a cents-scaled multiplier would
+    be a whole number 100 times too big). An unusable Price is rebuilt from NetInvoice and
+    fees. With every cell there, NetInvoice (in the contract's currency) is cross-checked
+    against contracts x multiplier x Price: a gap above NET_INVOICE_TOLERANCE warns and never
+    rejects; one of about 100 times says the fill looks quoted in another unit than
+    ``quote_unit``."""
     price = _num(row.get("Price"))
     net = abs(_num(row.get("NetInvoice")))
     rebuilt, rebuilt_from = math.nan, ""
     if math.isnan(_num(row.get("Quantity"))):
-        lots = abs(_num(row.get("Notional"))) / multiplier if notional_rebuild else math.nan
-        if not math.isnan(lots) and round(lots) >= 1 and abs(lots - round(lots)) < 1e-6:
-            rebuilt, rebuilt_from = float(round(lots)), f"Notional / {multiplier:g}"
-        elif not math.isnan(net) and not math.isnan(price) and price > 0:
+        if not math.isnan(net) and not math.isnan(price) and price > 0:
             lots = net / (multiplier * price)
             if round(lots) >= 1 and abs(lots - round(lots)) <= 0.01:
                 rebuilt, rebuilt_from = float(round(lots)), f"NetInvoice / ({multiplier:g} x Price)"
@@ -1390,55 +1353,10 @@ def _future_fill(res: ParseResult, row: pd.Series, row_no: int, symbol: str, mul
 
 
 DELIVERY_LAG_DAYS = 7   # expiry + 2 business days, over a long weekend
-# 'SPX/E261016P7615-USAA': underlying / European-or-American, expiry yymmdd, put-call, strike
-INDEX_OPTION_SYMBOL_RE = re.compile(r"^([A-Z0-9]{2,6})/([EA])(\d{6})([CP])(\d+(?:\.\d+)?)(?:-.*)?$")
-INDEX_OPTION_MULTIPLIER = {"SPX": 100.0, "NDX": 100.0, "RUT": 100.0, "SX5E": 10.0}
 
 
 def _days_between(earlier_iso: str, later_iso: str) -> int:
     return (datetime.fromisoformat(later_iso) - datetime.fromisoformat(earlier_iso)).days
-
-
-def _parse_index_option(res: ParseResult, row: pd.Series, row_no: int, m) -> None:
-    """An equity index option (the user's live export, 2026-09-21: 'SPX/E261016P7615-USAA',
-    Quantity 15 contracts, Price 121.5 index points, NetInvoice 182,272.50 = 15 x 121.5 x 100
-    plus fees). Product EQ_OPTION, quantity = contracts signed by Side, price = the premium in
-    index points, instruments.multiplier = the contract multiplier, one NOTIONAL leg in the
-    quote currency at contracts x multiplier x strike (settles_cash 0), like a future's."""
-    symbol, trade_id = _s(row.get("Symbol")), _s(row.get("Trade Id"))
-    root, _style, yymmdd, cp, strike_s = m.groups()
-    try:
-        expiry = datetime.strptime(yymmdd, "%y%m%d").date().isoformat()
-    except ValueError:
-        res.rejects.append(Reject(row_no, symbol, f"unparseable expiry {yymmdd!r} in Symbol"))
-        return
-    multiplier = INDEX_OPTION_MULTIPLIER.get(root)
-    if multiplier is None:
-        res.rejects.append(Reject(row_no, symbol, f"index option on {root}: contract multiplier not known to the app"))
-        return
-    trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
-    premium = _num(row.get("Price"))
-    if trade_date is None or math.isnan(premium):
-        res.rejects.append(Reject(row_no, symbol, "blank or unreadable TradeDate / Price"))
-        return
-    contracts = _signed_quantity(row, symbol, row_no, res, "contracts", math.nan, "")
-    if contracts is None:
-        return
-    instrument_id = symbol.split("-")[0]            # one instrument per series: 'SPX/E261016P7615'
-    strike = float(strike_s)
-    res.instruments.setdefault(instrument_id, Instrument(
-        instrument_id=instrument_id, asset_class="EQ_OPTION", base_ccy=root, quote_ccy="USD",
-        multiplier=multiplier, is_ndf=0, bbg_ticker=f"{root} Index", expiry_date=expiry,
-    ))
-    res.instrument_options.setdefault(instrument_id, InstrumentOption(
-        instrument_id=instrument_id, strike=strike, option_type="CALL" if cp == "C" else "PUT", payoff="VANILLA",
-    ))
-    res.trades.append(Trade(
-        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="EQ_OPTION",
-        package_id=trade_id, trade_date=trade_date, quantity=contracts, price=premium, **_common(row),
-    ))
-    res.legs.append(TradeLeg(
-        trade_id, 1, "NOTIONAL", "USD", contracts * multiplier * strike, trade_date, expiry, premium, 0))
 
 
 def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
@@ -1447,10 +1365,6 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     trade_id = _s(row.get("Trade Id"))
     if not trade_id:
         res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
-        return
-    index_m = INDEX_OPTION_SYMBOL_RE.match(symbol)
-    if index_m and trade_id:
-        _parse_index_option(res, row, row_no, index_m)
         return
     om = OPTION_SYMBOL_RE.match(symbol)
     col_pair = _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol"))
@@ -1595,217 +1509,27 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
         trade_id, 1, "NOTIONAL", base_ccy, signed_notional, trade_date, expiry, premium, 0))
 
 
-# ------------------------------------------------------------------- IRS direction signals
-_DIRECTION_WORDS = {"PAY": "pay fixed", "RECEIVE": "receive fixed"}
-# Size columns on which brackets or a minus sign mark a short = receive fixed (user,
-# 2026-09-18: "if the book has brackets or a negative sign that's a short"). NetInvoice
-# and 'Gross Amnt/Principal' are deliberately NOT among them: on a swap both are CASH
-# amounts (an upfront payment), so their sign says which way cash moved, not which way
-# the swap faces -- a payer with a negative upfront would load as RECEIVE, tagged as
-# decided by the file, and never be flagged for the user's choice.
-IRS_SIGN_COLUMNS = ("Notional", "Quantity", "Current Face", "Original Face")
-# Free-text columns searched for pay / receive wording.
-IRS_TEXT_COLUMNS = ("Description", "Notes", "Swap Type", "RollSide", "Tran Type")
-_PAY_WORDS = frozenset(("PAY", "PAYS", "PAYER", "PAYING"))
-_RECEIVE_WORDS = frozenset(("REC", "RCV", "RECV", "RECEIVE", "RECEIVES", "RECEIVER", "RECEIVING"))
-# 'Pay Float' / 'Rec SOFR' describes the floating leg: the fixed leg faces the other way.
-_FLOAT_LEG_WORDS = frozenset(("FLOAT", "FLOATING", "FLT", "FLTG", "VARIABLE", "OIS", "SOFR", "ESTR", "SONIA",
-                              "TONA", "TONAR", "SARON", "CORRA", "AONIA", "LIBOR", "EURIBOR"))
-# 'Pay date', 'Pay freq', 'Rec leg DCF': schedule wording, not a direction.
-_NOT_A_DIRECTION_NEXT = frozenset(("DATE", "DATES", "FREQ", "FREQUENCY", "LEG", "LEGS", "DAY", "DAYS", "LAG",
-                                   "DELAY", "CALENDAR", "DCF", "BASIS", "CONVENTION", "SCHEDULE"))
-
-
-def _direction_in_text(text: str) -> set:
-    """{'PAY'}, {'RECEIVE'}, both (the text contradicts itself) or empty, from whole
-    words only: REC / RCV / RECEIVE / RECEIVER / 'Rec Fixed' = receive fixed; PAY /
-    PAYER / 'Pay Fixed' = pay fixed; the same word followed by a floating-leg word
-    ('Pay Float', 'Rec SOFR') names the other leg, so the fixed leg is the opposite."""
-    tokens = re.sub(r"[^A-Z0-9]+", " ", text.upper()).split()
-    found = set()
-    for i, token in enumerate(tokens):
-        if token not in _PAY_WORDS and token not in _RECEIVE_WORDS:
-            continue
-        following = tokens[i + 1] if i + 1 < len(tokens) else ""
-        if following in _NOT_A_DIRECTION_NEXT:
-            continue
-        pays = token in _PAY_WORDS
-        if following in _FLOAT_LEG_WORDS:
-            pays = not pays
-        found.add("PAY" if pays else "RECEIVE")
-    return found
-
-
-def _irs_direction_signals(row: pd.Series) -> tuple:
-    """Every EXPLICIT pay/receive signal a swap row carries -> ``(signals, ambiguous)``,
-    ``signals`` a list of (direction, 'Column 'cell'' it came from).
-
-      - brackets or a minus sign on any of IRS_SIGN_COLUMNS  -> RECEIVE (a short)
-      - ``Side`` in the sell-synonym set (`_side`)             -> RECEIVE
-      - pay / receive wording in any of IRS_TEXT_COLUMNS       -> PAY or RECEIVE
-
-    What is deliberately NOT a signal: ``Side`` = Buy and an unsigned amount. Both are
-    on every one of the 10 reference swap rows, the three the desk holds as receivers
-    included, so they say nothing about direction; only an explicit sell / short /
-    receive marker counts. ``ambiguous`` lists text cells naming both directions at
-    once, which are reported and ignored rather than allowed to decide anything."""
-    signals: List[tuple] = []
-    ambiguous: List[str] = []
-    for col in IRS_SIGN_COLUMNS:
-        v = _num(row.get(col))
-        if not math.isnan(v) and v < 0:
-            signals.append(("RECEIVE", f"{col} {_s(row.get(col))!r} (brackets / minus = short)"))
-    if _side(row.get("Side")) == "Sell":
-        signals.append(("RECEIVE", f"Side {_s(row.get('Side'))!r}"))
-    for col in IRS_TEXT_COLUMNS:
-        text = _s(row.get(col))
-        found = _direction_in_text(text) if text else set()
-        if len(found) == 1:
-            signals.append((next(iter(found)), f"{col} {text!r}"))
-        elif len(found) > 1:
-            ambiguous.append(f"{col} {text!r}")
-    return signals, ambiguous
-
-
-def _parse_irs(res: ParseResult, row: pd.Series, row_no: int) -> None:
-    """Magnitude from ``Notional`` (else ``Quantity`` x 1e6); direction from the user's
-    stored override, else the row's explicit signals (`_irs_direction_signals`), else
-    pay fixed -- recorded on ``res.irs_directions`` either way. Two explicit signals that
-    contradict each other reject the row. Legs: FIXED = -quantity, FLOAT = +quantity."""
-    symbol = _s(row.get("Symbol"))
-    desc = _s(row.get("Description"))
-    trade_id = _s(row.get("Trade Id"))
-    if not trade_id:
-        res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
-        return
-    sm = IRS_SYMBOL_RE.match(symbol)
-    dm = IRS_DESCRIPTION_RE.match(desc)
-    ccy = (sm.group(1) if sm else None) or (dm.group(5) if dm else None) or _ccy(row.get("Currency"))
-    if ccy is None:
-        res.rejects.append(Reject(row_no, symbol, "cannot tell the swap currency from Symbol, Description or Currency"))
-        return
-    effective_date = _date(row.get("Effective Date")) or (_us_date(dm.group(2)) if dm else None)
-    maturity_date = _date(row.get("Termination")) or (_us_date(dm.group(3)) if dm else None)
-    if effective_date is None or maturity_date is None:
-        res.rejects.append(Reject(row_no, symbol, "no Effective Date / Termination (nor in Description)"))
-        return
-    if maturity_date <= effective_date:
-        res.rejects.append(Reject(row_no, symbol, f"maturity {maturity_date} is not after effective date {effective_date}"))
-        return
-    notional = _num(row.get("Notional"))
-    qty_mm = _num(row.get("Quantity"))
-    if not math.isnan(notional) and not math.isnan(qty_mm) and notional != 0:
-        # Both cells are there (Quantity is the notional in millions on all 10 reference
-        # rows, exactly): a gap means one of them is mangled. Warned, kept as read.
-        if abs(abs(qty_mm) * 1e6 - abs(notional)) / abs(notional) > FX_CONSISTENCY_TOLERANCE:
-            _warn(res, row_no, symbol, f"Notional {abs(notional):,.0f} differs from Quantity x 1,000,000 = "
-                                       f"{abs(qty_mm) * 1e6:,.0f}; the Notional is kept as read, check both cells")
-    if math.isnan(notional):
-        notional = qty_mm * 1e6 if not math.isnan(qty_mm) else math.nan  # Quantity is in millions
-        if math.isnan(notional):
-            bad_cells = [_not_a_number(c, t) for c in ("Notional", "Quantity") if (t := _bad_cell(row, c)) is not None]
-            res.rejects.append(Reject(row_no, symbol, "blank Notional (and no Quantity)" if not bad_cells else
-                                      "; ".join(bad_cells) + "; the notional cannot be rebuilt"))
-            return
-        # A fallback, so always said (blank or not): the swap's size now rests on the
-        # millions-scaled Quantity column.
-        _warn(res, row_no, symbol, f"{_unusable(row, 'Notional')}; rebuilt {abs(notional):,.0f} from Quantity x 1,000,000")
-    if notional == 0.0:
-        res.rejects.append(Reject(row_no, symbol, "Notional is zero; cannot infer pay/receive direction"))
-        return
-    # FixedRate / Yield are already in percent units (3.98 = 3.98 %), so '3.98%' is the
-    # same number: the sign is accepted and nothing is scaled (PERCENT_KEEP).
-    fixed_rate_pct, rate_from = _num(row.get("FixedRate"), PERCENT_KEEP), "FixedRate"
-    if math.isnan(fixed_rate_pct):
-        fixed_rate_pct, rate_from = _num(row.get("Yield"), PERCENT_KEEP), "Yield"
-    if math.isnan(fixed_rate_pct) and dm:
-        fixed_rate_pct, rate_from = float(dm.group(4)), "the Description"
-    bad_rate = _bad_cell(row, "FixedRate", PERCENT_KEEP)
-    if math.isnan(fixed_rate_pct):
-        res.rejects.append(Reject(row_no, symbol, "blank FixedRate (and no Yield / rate in Description)" if bad_rate is None else
-                                  f"{_not_a_number('FixedRate', bad_rate)}; no Yield / rate in Description to rebuild it from"))
-        return
-    if rate_from != "FixedRate":
-        _warn(res, row_no, symbol, f"{_unusable(row, 'FixedRate', PERCENT_KEEP)}; rebuilt {fixed_rate_pct:.10g} from {rate_from}")
-    # Signed, full units: + = pay fixed, - = receive fixed; the magnitude comes from
-    # ``Notional``. The user's stored override decides when there is one; otherwise every
-    # explicit signal in the row (`_irs_direction_signals`); otherwise pay fixed, recorded
-    # as defaulted so the Rates table can ask. Never inferred from anything else.
-    signals, ambiguous = _irs_direction_signals(row)
-    for cell in ambiguous:
-        _warn(res, row_no, symbol, f"{cell} names both pay and receive; not used as a direction signal")
-    said = {d for d, _ in signals}
-    override = res.direction_overrides.get(trade_id)
-    if override in ("PAY", "RECEIVE"):
-        direction = override
-        file_view = "; ".join(f"{why} says {_DIRECTION_WORDS[d]}" for d, why in signals)
-        decided = IrsDirection(trade_id, direction, f"user override ({_DIRECTION_WORDS[direction]})"
-                               + (f"; the file: {file_view}" if file_view else ""))
-    elif len(said) > 1:
-        res.rejects.append(Reject(row_no, symbol, "direction signals contradict: "
-                                  + "; ".join(f"{why} says {_DIRECTION_WORDS[d]}" for d, why in signals)
-                                  + ". The row is not loaded until the file agrees with itself"))
-        return
-    elif said:
-        direction = said.pop()
-        decided = IrsDirection(trade_id, direction, "; ".join(why for _, why in signals))
-    else:
-        direction = "PAY"
-        decided = IrsDirection(trade_id, direction, NO_DIRECTION_SIGNAL, defaulted=True)
-    res.irs_directions[trade_id] = decided
-    quantity = abs(notional) if direction == "PAY" else -abs(notional)
-    fixed_rate = fixed_rate_pct / 100.0
-    trade_date = _date(row.get("TradeDate")) or effective_date
-    instrument_id = symbol or f"IRS-{ccy}-{trade_id}"
-
-    res.instruments.setdefault(instrument_id, Instrument(
-        instrument_id=instrument_id, asset_class="IRS", base_ccy=ccy, quote_ccy=ccy,
-        multiplier=1.0, is_ndf=0, bbg_ticker=instrument_id, expiry_date=maturity_date,
-    ))
-    res.trades.append(Trade(
-        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="IRS", package_id=trade_id,
-        trade_date=trade_date, quantity=quantity, price=fixed_rate, **_common(row),
-    ))
-    res.legs.append(TradeLeg(trade_id, 1, "FIXED", ccy, -quantity, effective_date, maturity_date, fixed_rate, 0))
-    res.legs.append(TradeLeg(trade_id, 2, "FLOAT", ccy, quantity, effective_date, maturity_date, 0.0, 0))
-
-
 # --------------------------------------------------------------------------- load
 def _rows(objs) -> List[tuple]:
     return [tuple(vars(o).values()) for o in objs]
 
 
 def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection,
-         strict: bool = False, filename: Optional[str] = None, turn_swap_marks: bool = True,
+         strict: bool = False, filename: Optional[str] = None,
          book: Optional[Union[BookFilter, str, Path]] = None) -> ParseResult:
-    """Parse and upsert. Re-loading a trade id replaces its trade and legs; a swap
-    package containing a replaced trade is dissolved so the packaging rule can re-run on
-    the new data. With ``strict=True`` any reject raises ValueError before anything is
-    written; otherwise rejected rows are skipped and the rest is loaded. ``book`` is the
-    row filter, as ``parse`` takes it (None = ``config/book.yaml``); ``conn`` is also handed
-    to ``parse`` so a future's stored Bloomberg contract dates replace the estimated expiry.
-
-    Swap direction: the user's stored overrides (``data/ingest/irs_direction.py``) are
-    handed to the parser, so an overridden swap is written the way the user set it
-    whatever the file says, and the overrides are re-applied once more at the end as the
-    guarantee (``irs_direction.reapply_after_load``); ``res.n_direction_overrides`` is
-    how many swaps on file carry one. A swap that was already on file and comes back
-    facing the other way (the file changed its mind, no override) has its priced history
-    turned round with it, by sign reversal, never deleted (``irs_direction.reverse_flipped``).
-    ``turn_swap_marks=False`` leaves that last step to the caller: the app's upload loads
-    into a staging copy and publishes it by upsert, so it reverses ONCE on the live
-    database itself (``upload._stage_and_publish``) -- reversing here as well would carry
-    the reversed values across and the live step would then put the old signs back.
+    """Parse and upsert. Re-loading a trade id replaces its trade and legs. With
+    ``strict=True`` any reject raises ValueError before anything is written; otherwise
+    rejected rows are skipped and the rest is loaded. ``book`` is the row filter, as
+    ``parse`` takes it (None = ``config/book.yaml``); ``conn`` is also handed to ``parse`` so
+    a future's stored Bloomberg contract dates replace the estimated expiry.
 
     Numbers: everything written to a REAL column has passed ``_enforce_numeric`` (finite
     numbers only), so neither text nor NaN can reach ``trades.quantity`` / ``price``,
     ``trade_legs.amount`` / ``rate``, ``instruments.multiplier`` or the option strike."""
-    from data.ingest import irs_direction
     from data.ingest.schema import create_schema
 
     create_schema(conn)
-    signs_before = irs_direction.irs_signs(conn)
-    res = parse(source, filename, direction_overrides=irs_direction.get_overrides(conn), book=book, conn=conn)
+    res = parse(source, filename, book=book, conn=conn)
     name = filename or (Path(source).name if isinstance(source, (str, Path)) else "blotter")
     for rj in res.rejects:
         log.warning("%s row %d %s: REJECT %s", name, rj.row_no, rj.symbol, rj.reason)
@@ -1820,13 +1544,6 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
         conn.executemany("INSERT OR IGNORE INTO _incoming VALUES (?)", [(t.trade_id,) for t in res.trades])
         res.n_updated = conn.execute(
             "SELECT COUNT(*) FROM trades WHERE trade_id IN (SELECT trade_id FROM _incoming)").fetchone()[0]
-        conn.execute(
-            "DELETE FROM swap_review WHERE trade_id IN (SELECT trade_id FROM _incoming) OR trade_id IN ("
-            "SELECT trade_id FROM trades WHERE package_id IN ("
-            "SELECT package_id FROM trades WHERE trade_id IN (SELECT trade_id FROM _incoming) AND package_id != trade_id))")
-        conn.execute(
-            "UPDATE trades SET product = 'FX_FWD', package_id = trade_id WHERE product = 'FX_SWAP' AND package_id IN ("
-            "SELECT package_id FROM trades WHERE trade_id IN (SELECT trade_id FROM _incoming) AND package_id != trade_id)")
         conn.execute("DELETE FROM trade_legs WHERE trade_id IN (SELECT trade_id FROM _incoming)")
         # Column lists are explicit (2026-09-18): a database created by a transient
         # schema variant carries extra `instruments` columns (strike/option_type/...,
@@ -1857,11 +1574,6 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
             "payoff = CASE WHEN excluded.payoff != 'VANILLA' THEN excluded.payoff ELSE payoff END",
             _rows(res.instrument_options.values()))
         conn.execute("DROP TABLE _incoming")
-    # Overrides first (trades and legs only), then ONE decision per swap on its priced
-    # history: direction before this load against direction after it.
-    res.n_direction_overrides = irs_direction.reapply_after_load(conn)
-    if turn_swap_marks:
-        irs_direction.reverse_flipped(conn, signs_before)
     for note in res.notes():
         log.info("%s: %s", name, note)
     return res

@@ -2,22 +2,20 @@
 dashboard.py` "Portfolio risk, held-constant book") on this book's own positions.
 
 `book_risk(conn, as_of)` takes the book's delta from `engine.ladder.positions.book_positions`
-(each currency's USD delta with the FX options' delta in it, the metals, the ES futures +
-SPX options line, DV01 per currency: the app's official marks, nothing recomputed here)
-and applies the nm-dashboard market history (`engine.risk.history`) to it, held constant,
-the way the dashboard does, with its definitions:
+(each currency's USD delta with the FX options' delta in it, and the metals: the app's
+official marks, nothing recomputed here) and applies the nm-dashboard market history
+(`engine.risk.history`) to it, held constant, the way the dashboard does, with its
+definitions. The macro trader's rates (DV01) and equity-index (ES + SPX) underlyers left
+in Phase 2 (user approval 2026-09-24): `book_positions`' `rates` and `equity_index`
+blocks are not read. Commodity underlyers join in Phase 4 as kinds of their own
+(`DELTA_KINDS`).
 
   Daily $ P&L series of a row, today's position held constant across history
-    FX / METAL / EQUITY_INDEX: usd_delta x (dln(series) + carry[t]), the log-diff of the
-      USD-per-unit close plus carry[t] = (yield_ccy[t-1] - yield_USD[t-1]) / 100 / 365
+    FX / METAL: usd_delta x (dln(series) + carry[t]), the log-diff of the USD-per-unit
+      close plus carry[t] = (yield_ccy[t-1] - yield_USD[t-1]) / 100 / 365
       (`core/bbg_loader.py::daily_moves_and_carry`: yields in percent, lagged one day,
       forward-filled onto the spot dates); with no yields on file the spot term alone,
       said in the row's note.
-    RATES: dv01_usd x drate_bp with drate_bp = 100 x d(par swap rate in %) of the
-      currency's 10Y swap (`<CCY>_SWAP10Y`, standing in for the swaps' own maturities).
-      DV01_USD is the app's own (engine/rates: NPV(+1bp) - NPV, positive for a payer), so
-      yields up -> P&L up for a payer, the dashboard's convention; mark-to-market only
-      (the dashboard adds the payer's coupon accrual; we do not).
   lag2_date = the history's last date on or before as_of, less 2 business days
     (`pd.offsets.BusinessDay(2)`); s_hist = the series up to it, what the dashboard's
     sizer saw.
@@ -36,15 +34,15 @@ the way the dashboard does, with its definitions:
     2016-06-24) set to 0.
   Book: the rows' series summed date by date (correlation embedded; a row with no series
     is left out and named in `missing`), then the same four figures on the sum.
-    net_usd = the sum of the currency, metal and equity-index rows' USD delta (+ = long
-    the underlyer, the dashboard's FX-legs net; NOT the header's FX net USD, which is the
-    USD position with the metals out: that one is passed through as `fx_net_usd`),
-    gross_usd = the sum of their absolute values, dv01_usd = net DV01. The cap:
+    net_usd = the sum of the rows' USD delta (+ = long the underlyer, the dashboard's
+    FX-legs net; NOT the header's FX net USD, which is the USD position with the metals
+    out: that one is passed through as `fx_net_usd`), gross_usd = the sum of their
+    absolute values. The cap:
     stress_cap_usd = vol_target_usd x stress_pct / 100; vol_vs_target_pct,
     worst_day_ex_vs_cap_pct and over_cap (the worst ex-shocks day's loss over the cap)
     against them, over_vol_target beside it.
-  Scenarios: `engine.pnl.stress` on {ccy: usd_delta} of the currency and metal rows with
-    the equity-index row's USD delta as the futures line, passed through unchanged.
+  Scenarios: `engine.pnl.stress` on {ccy: usd_delta} of the currency and metal rows,
+    passed through unchanged; no futures line, so a scenario's total is its FX total.
 
 Every figure is a plain number or NaN with its reason (`reason` for the row, `reasons`
 per metric), never zero for something missing. Nothing here reads `marks`, writes
@@ -59,11 +57,11 @@ lists; the UI renders it and recomputes nothing):
                 as_of), "lag2_date", "reason", "note" (the copies seen with their last dates,
                 then the coverage for as_of, then whether carry is in), "carry" (bool: yields
                 on file), "candidates": [{path, exists, last_date}],
-                "files": {spot | yields | swap_rates: {file, path, loaded, rows, columns,
-                first_date, last_date, reason}}},
+                "files": {spot | yields: {file, path, loaded, rows, columns, first_date,
+                last_date, reason}}},
     "config": {vol_target_usd, stress_pct, stress_cap_usd, blended {...}, var_window_bd,
                var_confidence, worst_day_start, shock_dates [{date, name}], file, loaded, note},
-    "book": {"net_usd", "gross_usd", "dv01_usd", "fx_net_usd", "fx_gross_usd",
+    "book": {"net_usd", "gross_usd", "fx_net_usd", "fx_gross_usd",
              "vol_blended_ann_usd", "vol_trailing_ann_usd", "vol_crisis_ann_usd",
              "var95_1d_usd", "worst_1d_raw_usd", "worst_1d_raw_date",
              "worst_1d_ex_shocks_usd", "worst_1d_ex_shocks_date",
@@ -72,15 +70,13 @@ lists; the UI renders it and recomputes nothing):
              "reason", "reasons": {metric: why NaN},
              "var_window": {"dates": [...], "pnl_usd": [...]}   (the last var_window_bd days
                             of the book series, for a chart)},
-    "underlyers": [{"underlyer" ('CHF', 'XAU', 'SPX', 'USD rates'), "kind" (FX | METAL |
-                    EQUITY_INDEX | RATES), "series" (the history column), "net_usd",
-                    "gross_usd" (NaN on a RATES row), "dv01_usd" (NaN elsewhere), "carry"
-                    (bool), the same vol / VaR / worst-day keys as the book,
-                    "worst_day_ex_vs_target_pct", "days", "first_date", "last_date",
-                    "reason", "reasons", "note"}, ...]
-                  ordered by gross USD, largest first, the RATES rows last in insertion order,
-    "scenarios": {name: {"total", "fx_pnl": {ccy: pnl}, "fx_total", "futures_pnl",
-                         "equity_pct" (None when the scenario has no EQUITY move)}},
+    "underlyers": [{"underlyer" ('CHF', 'XAU'), "kind" (FX | METAL), "series" (the
+                    history column), "net_usd", "gross_usd", "carry" (bool), the same
+                    vol / VaR / worst-day keys as the book, "worst_day_ex_vs_target_pct",
+                    "days", "first_date", "last_date", "reason", "reasons", "note"}, ...]
+                  ordered by gross USD, largest first (a row with no delta sorts as
+                  zero, insertion order kept),
+    "scenarios": {name: {"total" (= fx_total), "fx_pnl": {ccy: pnl}, "fx_total"}},
                   in config/stress.yaml order,
     "missing": [plain-language reasons: rows left out of the book series or the
                 scenarios, positions the Blotter could not price, ...]
@@ -98,20 +94,17 @@ import pandas as pd
 from engine.ladder.positions import book_positions
 from engine.pnl import stress as stress_scenarios
 from engine.risk.config import load_config
-from engine.risk.history import RATES_FILE, YIELDS_FILE, History, load_history
+from engine.risk.history import YIELDS_FILE, History, load_history
 
 ANNUAL_SCALER = math.sqrt(252.0)
 NAN = float("nan")
 
 KIND_FX = "FX"
 KIND_METAL = "METAL"
-KIND_EQUITY = "EQUITY_INDEX"
-KIND_RATES = "RATES"
-EQUITY_UNDERLYER = "SPX"            # the history's S&P 500 column
-RATES_TENOR = "10Y"
-RATES_NOTE = ("the 10Y par swap rate stands in for the swaps' own maturities; mark-to-market only, "
-              "no coupon accrual")
-EQUITY_NOTE = "ES futures + SPX options as one line: USD delta (futures at their price, options at the index level)"
+# the kinds whose USD delta makes the book's net / gross; the commodity kinds join in Phase 4
+DELTA_KINDS = (KIND_FX, KIND_METAL)
+# the kinds config/stress.yaml's scenarios move (a currency or metal -> pct move against USD)
+SCENARIO_KINDS = (KIND_FX, KIND_METAL)
 
 METRIC_KEYS = ("vol_blended_ann_usd", "vol_trailing_ann_usd", "vol_crisis_ann_usd", "var95_1d_usd",
                "worst_1d_raw_usd", "worst_1d_raw_date", "worst_1d_ex_shocks_usd", "worst_1d_ex_shocks_date")
@@ -137,22 +130,11 @@ def _iso(ts: Any) -> Optional[str]:
 
 # --------------------------------------------------------------------------- series
 def unit_moves(history: History, kind: str, series: str, as_of: str) -> Tuple[Optional[pd.Series], str, str]:
-    """(the daily move per unit of exposure on or before `as_of`, a note, a reason). The
-    move is dln(close) + carry for FX / METAL / EQUITY_INDEX (module docstring) and
-    100 x d(par rate %) for RATES. A missing series gives (None, '', reason)."""
+    """(the daily move per unit of USD exposure on or before `as_of`, a note, a reason):
+    dln(close) + carry (module docstring), the same for FX and METAL; `kind` stays in the
+    signature for the Phase 4 commodity kinds. A missing series gives (None, '', reason)."""
     if not history.available:
         return None, "", f"no market history: {history.reason}"
-    if kind == KIND_RATES:
-        frame = history.swap_rates
-        if frame is None or frame.empty:
-            why = history.files.get("swap_rates", {}).get("reason") or f"{RATES_FILE} not loaded"
-            return None, "", f"no history for {series} ({why})"
-        if series not in frame.columns:
-            return None, "", f"no history for {series}"
-        rate = frame[series].loc[:as_of].dropna()
-        if len(rate) < 2:
-            return None, "", f"no history for {series} on or before {as_of} ({len(rate)} observation(s))"
-        return (rate.diff() * 100.0).dropna(), "", ""
     frame = history.spot
     if series not in frame.columns:
         return None, "", f"no history for {series}"
@@ -245,15 +227,14 @@ def _nan_metrics(reason: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- rows
 def _row(underlyer: str, kind: str, series: str, exposure: float, reason: str, note: str = "") -> Dict[str, Any]:
     exposure = _finite(exposure)
-    is_rates = kind == KIND_RATES
-    return {"underlyer": underlyer, "kind": kind, "series": series,
-            "net_usd": NAN if is_rates else exposure, "gross_usd": NAN if is_rates else abs(exposure),
-            "dv01_usd": exposure if is_rates else NAN, "carry": False, "reason": reason, "note": note}
+    return {"underlyer": underlyer, "kind": kind, "series": series, "net_usd": exposure,
+            "gross_usd": abs(exposure), "carry": False, "reason": reason, "note": note}
 
 
 def rows_from_positions(positions: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """One row per underlyer from `book_positions`' output (module docstring), plus the
-    plain-language reasons for anything the positions could not price."""
+    plain-language reasons for anything the positions could not price. Only the `fx` and
+    `fx_options` blocks are read; `equity_index` and `rates` are retired (Phase 2)."""
     rows: List[Dict[str, Any]] = []
     missing: List[str] = []
     fx = positions.get("fx", {})
@@ -267,21 +248,6 @@ def rows_from_positions(positions: Dict[str, Any]) -> Tuple[List[Dict[str, Any]]
                          note="metal, not in the FX net" if r.get("metal") else ""))
     if fx.get("reason") and not fx.get("available", False):
         missing.append(f"FX positions: {fx['reason']}")
-    eq = positions.get("equity_index", {})
-    if eq.get("lines"):
-        usd = _finite(eq.get("usd_delta"))
-        reason = "" if not _isnan(usd) else ("; ".join(eq.get("missing", [])) or eq.get("reason") or "no USD delta")
-        rows.append(_row(EQUITY_UNDERLYER, KIND_EQUITY, EQUITY_UNDERLYER, usd, reason, note=EQUITY_NOTE))
-        if not _isnan(usd):
-            missing.extend(f"equity index: {m} (left out of its delta)" for m in eq.get("missing", []))
-    elif eq.get("reason") and eq["reason"] != "no open ES futures or SPX options":
-        missing.append(f"equity index: {eq['reason']}")
-    rates = positions.get("rates", {})
-    for ccy, dv01 in (rates.get("by_ccy") or {}).items():
-        rows.append(_row(f"{ccy} rates", KIND_RATES, f"{ccy}_SWAP{RATES_TENOR}", dv01, "", note=RATES_NOTE))
-    missing.extend(f"rates: {m}" for m in rates.get("missing", []))
-    if rates.get("reason") and rates["reason"] != "no open swaps":
-        missing.append(f"rates: {rates['reason']}")
     opts = positions.get("fx_options", {})
     missing.extend(f"FX option: {m}" for m in opts.get("missing", []))
     if opts.get("reason") and opts["reason"] != "no open FX options":
@@ -290,45 +256,29 @@ def rows_from_positions(positions: Dict[str, Any]) -> Tuple[List[Dict[str, Any]]
 
 
 def _sort_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Gross USD, largest first; the RATES rows last, in insertion order (a stable sort)."""
+    """Gross USD, largest first; a row with no delta sorts as zero (a stable sort)."""
     def key(r: Dict[str, Any]):
         gross = r["gross_usd"]
-        return (r["kind"] == KIND_RATES, -(gross if not _isnan(gross) else 0.0))
+        return -(gross if not _isnan(gross) else 0.0)
     return sorted(rows, key=key)
 
 
 # --------------------------------------------------------------------------- scenarios
 def _scenarios(rows: List[Dict[str, Any]], scenarios_path=None) -> Tuple[Dict[str, dict], List[str]]:
-    """`engine.pnl.stress` on the currency and metal rows' USD delta, the equity-index
-    row's as the futures line; a row with no delta is left out and named."""
+    """`engine.pnl.stress` on the currency and metal rows' USD delta; a row with no delta
+    is left out and named. No futures line: a scenario's total is its FX total."""
     missing: List[str] = []
     delta: Dict[str, float] = {}
-    equity_delta = 0.0
-    equity_reason = ""
     for r in rows:
-        if r["kind"] in (KIND_FX, KIND_METAL):
+        if r["kind"] in SCENARIO_KINDS:
             if _isnan(r["net_usd"]):
                 missing.append(f"{r['underlyer']}: not in the scenarios ({r['reason']})")
             else:
                 delta[r["underlyer"]] = r["net_usd"]
-        elif r["kind"] == KIND_EQUITY:
-            if _isnan(r["net_usd"]):
-                equity_reason = r["reason"]
-                missing.append(f"{r['underlyer']}: not in the scenarios ({r['reason']})")
-            else:
-                equity_delta = r["net_usd"]
     scenarios = stress_scenarios.load_scenarios(scenarios_path)
-    equity_pct = stress_scenarios.futures_pct_by_scenario(scenarios)
-    run = stress_scenarios.run_scenarios(delta, scenarios, equity_delta, equity_pct)
-    out: Dict[str, dict] = {}
-    for name, result in run.items():
-        entry = dict(result)
-        entry["equity_pct"] = equity_pct.get(name)
-        if equity_reason and name in equity_pct:      # an equity move with no equity delta: not zero
-            entry["futures_pnl"] = NAN
-            entry["total"] = NAN
-            entry["reason"] = equity_reason
-        out[name] = entry
+    run = stress_scenarios.run_scenarios(delta, scenarios)
+    out: Dict[str, dict] = {name: {"total": float(result["fx_total"]), "fx_pnl": dict(result["fx_pnl"]),
+                                   "fx_total": float(result["fx_total"])} for name, result in run.items()}
     return out, missing
 
 
@@ -370,13 +320,13 @@ def book_risk(conn: sqlite3.Connection, as_of: str, *, history: Optional[History
     # per-row series and metrics
     series: Dict[str, pd.Series] = {}
     for r in rows:
-        exposure = r["dv01_usd"] if r["kind"] == KIND_RATES else r["net_usd"]
+        exposure = r["net_usd"]
         moves, note, why = (None, "", "") if lag2_date is None else unit_moves(history, r["kind"], r["series"], as_of)
         if lag2_date is None:
             why = coverage or f"no market history: {history.reason}"
         if note:
             r["note"] = (r["note"] + "; " if r["note"] else "") + note
-        r["carry"] = moves is not None and not note and r["kind"] != KIND_RATES
+        r["carry"] = moves is not None and not note
         if moves is None:
             r["reason"] = r["reason"] or why
             r.update(_nan_metrics(r["reason"]))
@@ -397,10 +347,9 @@ def book_risk(conn: sqlite3.Connection, as_of: str, *, history: Optional[History
     # the book
     rows = _sort_rows(rows)
     fx = positions.get("fx", {})
-    fx_like = [r for r in rows if r["kind"] in (KIND_FX, KIND_METAL, KIND_EQUITY)]
+    delta_rows = [r for r in rows if r["kind"] in DELTA_KINDS]
     book: Dict[str, Any] = {
-        "net_usd": _sum(r["net_usd"] for r in fx_like), "gross_usd": _sum(r["gross_usd"] for r in fx_like),
-        "dv01_usd": _sum(r["dv01_usd"] for r in rows if r["kind"] == KIND_RATES),
+        "net_usd": _sum(r["net_usd"] for r in delta_rows), "gross_usd": _sum(r["gross_usd"] for r in delta_rows),
         "fx_net_usd": _finite(fx.get("net_usd")), "fx_gross_usd": _finite(fx.get("gross_usd")),
         "rows_in_series": [r["underlyer"] for r in rows if r["underlyer"] in series], "reason": "",
     }

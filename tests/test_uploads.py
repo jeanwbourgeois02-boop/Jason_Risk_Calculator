@@ -100,7 +100,7 @@ def test_uploads_has_no_way_to_pull_bloomberg():
 # (2026-09-18, user: "it's always there, it won't go, it needs to go"). A clean import
 # dismisses itself; rejects and errors stay until closed; x and a new selection clear it.
 
-CLEAN = ("Imported blotter.csv: 2 trades -- 1 forwards, 0 spot, 1 futures, 0 options, 0 rate swaps; "
+CLEAN = ("Imported blotter.csv: 2 trades -- 1 forwards, 0 spot, 1 futures, 0 options; "
          "4 legs. 0 cash rows seen (0 of them spot fills).")
 WITH_REJECTS = CLEAN + " 1 row(s) could not be read and were skipped: row 7 EURUSD: no value date."
 
@@ -235,7 +235,7 @@ def test_cancel_and_a_good_import_release_the_staged_file_and_hide_the_confirm_r
 # "warnings", "notes"}. It may or may not exist yet on the ingest side, so every test here
 # installs or removes it explicitly, with raising=False.)
 
-NOTES = ["10 swaps have no pay/receive in the file: assumed pay fixed",
+NOTES = ["10 futures named no exchange in the symbol: taken from the venue",
          "3 options have no strike on file",
          "2 prices looked like dates ('24-Jul') and were rebuilt from NetInvoice / Quantity",
          "1 forward has no value date in the Description: taken from Settle Date"]
@@ -333,9 +333,9 @@ def test_notes_render_as_a_list_under_the_headline_with_nothing_lost_or_doubled(
 
 def test_headline_keeps_whatever_the_list_does_not_reproduce():
     # a note the sentence words differently stays in the sentence: nothing is ever dropped
-    message = CLEAN + " Ten swaps were assumed pay fixed. 3 options have no strike on file."
+    message = CLEAN + " Ten futures took their exchange from the venue. 3 options have no strike on file."
     headline = uploads.headline_without_notes(message, NOTES[:2])
-    assert headline == CLEAN + " Ten swaps were assumed pay fixed."
+    assert headline == CLEAN + " Ten futures took their exchange from the venue."
     # a sentence that is nothing BUT its notes is shown whole rather than as an empty headline
     assert uploads.headline_without_notes(NOTES[1] + ".", [NOTES[1]]) == NOTES[1] + "."
     # notes joined with semicolons leave no "; ; ." debris behind
@@ -344,6 +344,9 @@ def test_headline_keeps_whatever_the_list_does_not_reproduce():
 
 
 SAMPLE_BLOTTER = __import__("pathlib").Path(__file__).resolve().parents[1] / "data" / "sample" / "blotter_sample.csv"
+# The synthetic commodity sample (45 rows, 43 trades) carries two rows the parser must refuse
+# on purpose: a corn future whose root fits two exchanges, and a root not in the contract list.
+SAMPLE_REJECT_IDS = ("910000032", "910000033")
 
 
 def _real_report_function_or_skip():
@@ -355,27 +358,46 @@ def _real_report_function_or_skip():
     return ingest
 
 
-def test_real_ingest_report_on_the_clean_sample_is_structured_clean_and_lists_its_notes(tmp_path):
+def _clean_sample_frame():
+    """The sample less its two deliberate rejects: every row loads."""
+    from data.ingest import blotter
+    frame = blotter.read_table(SAMPLE_BLOTTER)
+    return frame[~frame["Trade Id"].astype(str).isin(SAMPLE_REJECT_IDS)].reset_index(drop=True)
+
+
+def test_real_ingest_report_on_the_sample_names_its_two_rejects_and_stays_open(tmp_path):
     """Against the REAL ingest function, not a fake: the contract as it actually landed."""
     ingest = _real_report_function_or_skip()
     assert uploads.REJECTS_PHRASE == ingest.REJECTS_PHRASE.lower()          # one phrase, owned by ingest
     report = uploads.run_import(SAMPLE_BLOTTER.read_bytes(), SAMPLE_BLOTTER.name, tmp_path / "risk.db")
+    assert report["structured"] is True
+    assert report["rejects"] == 2 and uploads.is_sticky(report)
+    assert report["message"].startswith(f"Imported {SAMPLE_BLOTTER.name}: 43 trades")
+    result = uploads.report_result(report)
+    assert result.className == "source-result--warning"                      # never dismissed from under the user
+    rendered = str(result)
+    assert uploads.REJECTS_PHRASE in rendered.lower()
+    assert "ZCZ6-USAA" in rendered and "QQZ6-USAA" in rendered                # which rows failed is on the page
+
+
+def test_real_ingest_report_on_the_clean_sample_is_structured_clean_and_lists_its_notes(tmp_path):
+    _real_report_function_or_skip()
+    report = uploads.run_import(_clean_sample_frame().to_csv(index=False).encode(), "clean.csv", tmp_path / "risk.db")
     assert report["structured"] is True
     assert (report["rejects"], report["warnings"]) == (0, 0) and not uploads.is_sticky(report)
     result = uploads.report_result(report)
     assert result.className == "source-result--info"                         # a clean import: dismisses itself
     if report["notes"]:                                                      # information-only notes, per ingest
         headline, notes_list = result.children
-        assert headline.children.startswith(f"Imported {SAMPLE_BLOTTER.name}:")
+        assert headline.children.startswith("Imported clean.csv: 43 trades")
         assert [li.children for li in notes_list.children] == report["notes"]
         assert not any(note in headline.children for note in report["notes"])   # stripped from the run-on line
         assert all(str(result).count(note[:60]) == 1 for note in report["notes"])
 
 
 def test_real_ingest_report_with_one_unreadable_row_is_sticky(tmp_path):
-    ingest = _real_report_function_or_skip()
-    from data.ingest import blotter
-    frame = blotter.read_table(SAMPLE_BLOTTER)
+    _real_report_function_or_skip()
+    frame = _clean_sample_frame()
     first_forward = frame[frame["Fin Type"] == "FORWARD"].index[0]
     frame.loc[first_forward, "Buy Currency"] = "EUR.C-EUAA"                  # contradicts the row's own description
     report = uploads.run_import(frame.to_csv(index=False).encode(), "x.csv", tmp_path / "risk.db")

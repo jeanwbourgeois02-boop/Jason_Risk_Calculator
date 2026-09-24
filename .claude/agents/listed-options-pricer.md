@@ -1,6 +1,6 @@
 ---
 name: listed-options-pricer
-description: Layer 3, pricers: listed index and commodity options (engine/options/equity_commodity.py): an SPX option's Greeks at the vol Bloomberg's own price implies, from the index level, the USD OIS curve and the index's dividend yield. Speaks to other lanes only through the housekeeper.
+description: Layer 3, pricers: listed options on commodity futures (engine/options/equity_commodity.py): Black-76 / American Greeks at the vol Bloomberg's own option price implies, on the underlying future's price and the OIS discount curve (Phase 5 wires them in). Speaks to other lanes only through the housekeeper.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
 effort: high
@@ -14,7 +14,7 @@ You own these files and nothing else:
 - `engine/options/equity_commodity.py`
 - Tests: `tests/test_listed_options.py`
 
-A listed option's P&L needs no model. Your output is its Greeks, which feed the Blotter's Positions table (the equity index line) and the Options sub-tab.
+A listed option's P&L needs no model. Your output is its Greeks, which feed the Options sub-tab and, from Phase 5, the commodity positions.
 
 **Reads** (the lanes whose output you use): rates-pricer, fx-options-pricer.
 **Read by** (the lanes to name under "Consumers to brief" when your interface changes): bbg-live, options-store.

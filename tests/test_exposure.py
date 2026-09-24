@@ -320,3 +320,24 @@ def test_sane_usdkrw_quote_passes_the_guard():
     res = build_exposure(_krw_records(), _krw_rate(1394.5))
     s = _row(res, "KRW")
     assert s["status"] == "OK" and s["usd_delta"] == pytest.approx(1_413_138_000.0 / 1394.5)
+
+
+# --------------------------------------------------------------------------- NDFs out (2026-09-24, Phase 2)
+def test_a_former_ndf_currency_is_an_ordinary_spot_currency():
+    """NDFs left the app (user yes 2026-09-24): KRW / BRL are priced at their official
+    spot like any currency, and a missing rate names the SPOT, never a 1M NDF price."""
+    res = build_exposure([rec("K1", "2026-10-01", "KRW", 1_394_500.0), rec("B1", "2026-10-01", "BRL", 5_400.0)],
+                         {"KRW": rate(1394.5, inverted=True)})
+    assert _row(res, "KRW")["usd_delta"] == pytest.approx(1_000.0)
+    msg = res.status.set_index("currency").loc["BRL", "message"]
+    assert msg == "no official SPOT for BRL; USD delta not computed"
+    assert "NDF" not in msg
+
+
+def test_a_suspect_rate_is_always_named_as_a_spot():
+    """A rate entry still tagged NDF_1M (an old caller) is refused and named as the SPOT
+    it is now; the 1M NDF wording is gone."""
+    entry = {**_krw_rate(1.3945)["KRW"], "mark_type": "NDF_1M", "label": "KWN+1M"}
+    res = build_exposure(_krw_records(), {"KRW": entry})
+    msg = res.status.set_index("currency").loc["KRW", "message"]
+    assert msg.startswith("official SPOT USDKRW 1.3945 is 1,013x away") and "NDF" not in msg

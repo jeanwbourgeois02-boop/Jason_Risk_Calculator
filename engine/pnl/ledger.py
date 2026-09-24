@@ -18,8 +18,7 @@ the same call (`purge_superseded`; 'refrozen' in the result says, per trade, wha
 the figure before and after, 'kept' names a row the rule could not recompute). That is how a trade frozen at a
 live press (the last pull before the day roll) takes the day's 15:00 close once the backfill
 lands it; a future or listed option frozen at a live PX_LAST takes that day's PX_SETTLE; an
-NDF frozen at a spot takes the fix once it lands; a matured swap takes a re-run PV; an option
-frozen at a PREMIUM takes its close-out once the other side's strike is typed. A row whose
+option frozen at a PREMIUM takes its close-out once the other side's strike is typed. A row whose
 inputs did not change is untouched and keeps its `frozen_at`, so settlement still does not
 move LTD except by this re-freeze; a row the rule cannot compute today (a mark since gone)
 keeps its figure. Only rows with `settle_date < as_of` are looked at, the ones this call
@@ -35,8 +34,7 @@ pairs, JPY-style USD-base pairs, crosses and futures:
     pnl_usd              = local_amount * spot_usd_per_local - usd_entry_amount
 This is algebraically identical to `quantity * (mark - fill) * S` and, when the quote
 currency is USD (S = 1), identical to the original USD-pair-only formula, so it stays
-compatible with a plain "spot dated / last before settlement" note. An NDF row (below)
-is the one departure: `spot_usd_per_local` is S itself, USD per quote unit at the fix.
+compatible with a plain "spot dated / last before settlement" note.
 
 Futures and listed options (user decision 2026-09-24, "Spot of valuation date"): S is USD per
 unit of the contract's quote currency at spot of the FUTURE_PX's own date (`usd_per_quote`,
@@ -46,12 +44,7 @@ the conversion pair and date. With no spot to convert it stays unfrozen with the
 conversion spot of that date that changes (the backfill's close replacing a live press) moves
 both `usd_entry_amount` and `spot_usd_per_local`, so the row is re-frozen like any other.
 
-IRS (2026-09-17, closes docs/open-questions.md item 52): a swap whose maturity is before
-`as_of` is frozen at the last official `PV_USD + CASHFLOW_USD` on or before maturity
-(PV_USD is 0 on the maturity date itself once the pricer has run, so the frozen value is
-the swap's settled coupons). Stored with `mark_type='PV_USD'`, `local_amount` = the
-frozen USD P&L, `spot_usd_per_local = 1.0`, `usd_entry_amount = 0.0`, so the generic
-identity above still holds. FX_OPTION: frozen at the last official `PREMIUM` on or before
+FX_OPTION: frozen at the last official `PREMIUM` on or before
 expiry, converted at that day's spot, same columns as an FX trade (`local_amount` =
 base notional, `mark_type='PREMIUM'`). An expiry-day intrinsic-value mark would be more
 exact than the last premium; until the options pricer writes one, the note says which
@@ -60,17 +53,11 @@ date's premium was used. A closed-out option (bought and sold back in full,
 at the close-out date's spot (or the last official one before it), `mark_type='CLOSE_OUT'`:
 it needs no PREMIUM, and the row records the figure value_book has shown since the close-out.
 
-NDF (2026-09-22, user: "the exit price is the fix on that day, as pulled from bbg" and
-"each ndf has a unique fix"): an NDF ticket is done at its fixing date (value date less 2
-business days, `_ndf_fixing_day`) and is recorded at the very figure the Blotter has shown
-since (`valuation.ndf_fixed_valuation`, one function for both): the pair's official NDF_FIX
-dated that day exactly (`mark_type='NDF_FIX'`) and never another day's fix, else the fixing
-date's SPOT as the Blotter's own near-marks estimate (`mark_type='SPOT'`, the note naming the
-estimate); `spot_as_of_date` is the fixing date either way, `spot_usd_per_local` = 1 / FIX
-(the P&L converts at the fix itself, user decision 2026-09-22) and `spot_source` the fix's
-source. With no close of the pair on file at all it is unrealisable like a deliverable trade:
-the "present spot" rule of 2026-09-21 was retired on 2026-09-22 (user decision), and a row it
-froze on an existing database is re-frozen by the rule above like any other superseded row.
+Rates swaps and NDFs left the app on 2026-09-24 (user decision, "Commodity conversion plan",
+Phase 2): the ledger freezes neither any more. A row an older database still holds for one
+(`product = 'IRS'`, or `mark_type = 'NDF_FIX'`) is left exactly as it is, never recomputed and
+never dropped, and named under 'kept' with that reason (`_retired_row`); the next upload
+replaces the book and clears it.
 
 `ltd(conn, d)` = sum of value_book(d).pnl_usd, NaN if any row is NaN, 0.0 for an empty
 book (first trading day, not Unavailable). Periods subtract `ltd` at a reference
@@ -90,8 +77,7 @@ import pandas as pd
 from engine.pnl.aggregate import (_last_business_day_of_prev_month, _last_business_day_of_prev_year,
                                   _n_business_days_back, _prev_business_day, load_holidays)
 from engine.pnl.valuation import (INTERP, _BadValue, _number, close_out_ccy, closed_out_options,
-                                  last_usd_conversion, ndf_fixed_valuation, option_fill_is_per_ounce,
-                                  usd_per_quote, value_book)
+                                  last_usd_conversion, option_fill_is_per_ounce, usd_per_quote, value_book)
 
 GROUP_KEYS = ("instrument_id", "product", "strategy", "theme")
 
@@ -106,14 +92,6 @@ _OPEN_FUTURE_SQL = """
 SELECT t.trade_id, t.instrument_id, t.product, i.multiplier, t.quantity, t.price, l.settle_date, i.quote_ccy
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product IN ('FUTURE', 'EQ_OPTION') AND l.leg_no = 1 AND l.settle_date < :as_of
-  AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
-"""
-
-
-_OPEN_IRS_SQL = """
-SELECT t.trade_id, t.instrument_id, t.product, i.base_ccy, t.quantity, t.price, l.settle_date
-FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
-WHERE t.product = 'IRS' AND l.leg_no = 1 AND l.settle_date < :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
 """
 
@@ -195,24 +173,6 @@ class _Unrealisable(Exception):
 
 
 def _fx_freeze(conn, pair: str, quote_ccy: str, qty: float, fill: float, settle: str) -> _Freeze:
-    fix_day = _ndf_fixing_day(conn, pair, settle)
-    if fix_day:
-        # An NDF is done at its fixing (user, 2026-09-22: "they just disappears as they expired";
-        # "each ndf has a unique fix"): recorded at the figure the Blotter has shown since the
-        # fixing date (`valuation.ndf_fixed_valuation`: the exact-day NDF_FIX, else the fixing
-        # date's SPOT as the near-marks estimate, the P&L converted at that exit price itself),
-        # never the value date's spot, so settlement does not move LTD.
-        row, how, fix_used = ndf_fixed_valuation(conn, pair, quote_ccy, qty, fill, fix_day)
-        if row["reason"]:
-            raise _Unrealisable(row["reason"])
-        m_src, s = row["mark_source"], row["spot"]
-        if fix_used:
-            mark_type, note = "NDF_FIX", f"official fixing dated {fix_day} (NDF fixing), converted at the fixing"
-        else:
-            mark_type, note = "SPOT", f"spot dated {fix_day} (NDF fixing), converted at that spot"
-            if str(m_src).startswith(INTERP):
-                note += f"; {how}"
-        return _Freeze(quote_ccy, qty, qty * fill * s, mark_type, s, fix_day, m_src, row["pnl_usd"], note)
     m_hit = _last_on_or_before(conn, pair, "SPOT", settle)
     if m_hit is None:
         raise _Unrealisable(f"no official SPOT for {pair} on or before {settle}")
@@ -249,21 +209,6 @@ def _future_freeze(conn, pair: str, multiplier: float, qty: float, fill: float, 
         how = f" ({s_src})" if str(s_src).startswith(INTERP) else ""
         notes.append(f"{quote_ccy} P&L converted at {s_pair} spot of {m_day}{how}")
     return _Freeze(quote_ccy, qty, entry, "FUTURE_PX", combined, m_day, m_src, qty * combined - entry, "; ".join(notes))
-
-
-def _irs_freeze(conn, inst: str, ccy: str, settle: str) -> _Freeze:
-    pv_hit = _last_on_or_before(conn, inst, "PV_USD", settle)
-    if pv_hit is None:
-        raise _Unrealisable(f"no official PV_USD for {inst} on or before {settle}")
-    pv, m_day, m_src = pv_hit
-    cf_row = conn.execute(
-        "SELECT value FROM marks_official WHERE instrument_id = :i AND mark_type = 'CASHFLOW_USD' "
-        "AND as_of_date = :d ORDER BY snapped_at DESC LIMIT 1", {"i": inst, "d": m_day}).fetchone()
-    if cf_row is None:
-        raise _Unrealisable(f"no official CASHFLOW_USD for {inst} on {m_day}")
-    pnl = pv + _number(cf_row[0], f"marks.value (CASHFLOW_USD for {inst} on {m_day})")
-    note = "" if m_day == settle else f"PV + cashflows dated {m_day} (last before maturity)"
-    return _Freeze(ccy, pnl, 0.0, "PV_USD", 1.0, m_day, m_src, pnl, note)
 
 
 def _option_freeze(conn, inst: str, base_ccy: str, quote_ccy: str, qty: float, fill: float, settle: str,
@@ -311,8 +256,6 @@ def _freeze_for(conn, product, pair, base_ccy, quote_ccy, multiplier, qty, fill,
         return _fx_freeze(conn, pair, quote_ccy, qty, fill, settle)
     if product in ("FUTURE", "EQ_OPTION"):
         return _future_freeze(conn, pair, _number(multiplier, "instruments.multiplier"), qty, fill, settle, quote_ccy)
-    if product == "IRS":
-        return _irs_freeze(conn, pair, base_ccy, settle)
     if product == "FX_OPTION":
         return _option_freeze(conn, pair, base_ccy, quote_ccy, qty, fill, settle, closed)
     raise _Unrealisable(f"product {product} is not frozen by the ledger")
@@ -331,12 +274,11 @@ def _same_freeze(stored: tuple, fresh: _Freeze) -> bool:
 
 def _why_refrozen(stored: tuple, fresh: _Freeze) -> str:
     """The `why` of a `refrozen` entry: one sentence naming what changed between the stored row
-    and the fresh freeze. The mark type ("NDF_FIX replaced SPOT"), else the mark date, else which
-    stored figures moved for the same mark and date: `mark` is `spot_usd_per_local` (USD per unit
-    of `local_amount`: the pair SPOT times its USD conversion, multiplier x FUTURE_PX times its
+    and the fresh freeze. The mark type ("CLOSE_OUT replaced PREMIUM"), else the mark date, else
+    which stored figures moved for the same mark and date: `mark` is `spot_usd_per_local` (USD per
+    unit of `local_amount`: the pair SPOT times its USD conversion, multiplier x FUTURE_PX times its
     USD conversion for a future), `entry` is `usd_entry_amount` (for a non-USD future it moves
-    with the conversion spot alone), `amount` is `local_amount` (the frozen P&L itself for a
-    swap)."""
+    with the conversion spot alone), `amount` is `local_amount`."""
     mark_type, spot_day, local_amount, entry, combined, pnl = stored
     fresh_day = str(fresh.spot_as_of_date)
     if mark_type != fresh.mark_type:
@@ -356,6 +298,21 @@ def _why_refrozen(stored: tuple, fresh: _Freeze) -> str:
 
 _Purge = namedtuple("_Purge", "refrozen kept")
 
+# Frozen rows of the kinds that left the app on 2026-09-24 (user decision, rates swaps and NDFs):
+# an older database may still hold them until its next upload replaces the book.
+_RETIRED_PRODUCTS = ("IRS",)
+_RETIRED_MARK_TYPES = ("NDF_FIX", "PV_USD")
+
+
+def _retired_row(product, mark_type) -> str:
+    """The `kept` reason for a frozen row of a retired kind (a swap, or an NDF frozen at its fix),
+    '' for any other row. Such a row is never recomputed and never dropped: the rule that froze it
+    is gone, so recomputing it by another product's rule would move a figure nobody approved."""
+    if product in _RETIRED_PRODUCTS or mark_type in _RETIRED_MARK_TYPES:
+        return (f"{product} row frozen at {mark_type}: rates swaps and NDFs left the app on 2026-09-24, "
+                "so it is left as frozen until the next upload replaces the book")
+    return ""
+
 
 def purge_superseded(conn: sqlite3.Connection, as_of: str, closed_out: dict) -> _Purge:
     """Delete every `realised_pnl` row whose frozen figure is no longer what the official marks
@@ -367,9 +324,10 @@ def purge_superseded(conn: sqlite3.Connection, as_of: str, closed_out: dict) -> 
                   fresh freeze's), pnl_from (the dropped row's pnl_usd), pnl_to (the fresh
                   freeze's), why (`_why_refrozen`: what changed, in one sentence)}
         kept:     one dict per row the rule could not recompute today (a mark since gone, a
-                  figure that is not a number), {trade_id, product, reason}; the row keeps its
-                  figure, a trade that has one is never left blank by this (reviewer m-2,
-                  2026-09-22: it was silent before).
+                  figure that is not a number, a row of a kind that left the app: a swap or an
+                  NDF frozen at its fix, `_retired_row`), {trade_id, product, reason}; the row
+                  keeps its figure, a trade that has one is never left blank by this (reviewer
+                  m-2, 2026-09-22: it was silent before).
     Nothing is recomputed into the table here: `realise_settled` freezes the dropped rows afresh,
     by the same rule, in the same call -- which is why only tickets with `settle_date < as_of` are
     looked at (reviewer, 2026-09-22): the refreeze covers those alone, so a past-day call from
@@ -377,6 +335,10 @@ def purge_superseded(conn: sqlite3.Connection, as_of: str, closed_out: dict) -> 
     refrozen, kept = [], []
     for (trade_id, pair, product, base_ccy, quote_ccy, multiplier, qty, fill, settle,
          mark_type, spot_day, local_amount, entry, combined, pnl) in conn.execute(_FROZEN_SQL, {"as_of": as_of}).fetchall():
+        retired = _retired_row(product, mark_type)
+        if retired:
+            kept.append({"trade_id": trade_id, "product": product, "reason": retired})
+            continue
         try:
             fresh = _freeze_for(conn, product, pair, base_ccy, quote_ccy, multiplier, qty, fill, settle,
                                 closed_out.get(trade_id))
@@ -415,13 +377,14 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
 
     `refrozen` (2026-09-22): the rows `purge_superseded` dropped because their frozen mark or
     spot is no longer what the official marks give for the same date and mark type (a live
-    press replaced by the day's 15:00 close, a PX_LAST by PX_SETTLE, a spot by the fix, a
-    PREMIUM by a close-out, a re-run PV); they are frozen again below, in this same call. Each
+    press replaced by the day's 15:00 close, a PX_LAST by PX_SETTLE, a PREMIUM by a close-out);
+    they are frozen again below, in this same call. Each
     entry records the figure the trade had (`pnl_from`), the one it takes (`pnl_to`, with the
     new row's `mark_type` and `spot_as_of_date`) and `why`, one sentence naming what changed
     (reviewer M-2, user yes 2026-09-22; the status file and the Market data tab show them),
     sorted by trade_id. `kept`: the frozen rows the rule could not recompute today (a mark since
-    gone, a stored figure that is not a number), with the reason; each keeps its figure.
+    gone, a stored figure that is not a number, a swap or NDF row of an older database), with the
+    reason; each keeps its figure.
     Only rows with `settle_date < as_of` are looked at, the ones this call re-freezes.
 
     `repaired` (2026-09-18): rows an earlier, positional INSERT misaligned
@@ -429,11 +392,7 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
     they belonged to are frozen afresh below like any trade not yet realised -- a
     database the old INSERT corrupted heals itself on the next Bloomberg pull, no manual
     step. One trade with a stored figure that is not a number is reported as
-    unrealisable (`_unrealisable`) instead of aborting the step for the whole book.
-
-    The `ndf_present_spot` flag of 2026-09-21 is gone (user decision 2026-09-22): an NDF with
-    no close on or before its fixing takes what `valuation.ndf_fix` gives, else stays
-    unrealisable like a deliverable trade."""
+    unrealisable (`_unrealisable`) instead of aborting the step for the whole book."""
     realised, unrealisable = 0, []
     repaired = purge_unreadable_realised(conn)
     closed_out = closed_out_options(conn, as_of)
@@ -462,13 +421,6 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
         except (_Unrealisable, TypeError, ValueError, ArithmeticError) as exc:
             unrealisable.append(_unrealisable(trade_id, exc))
 
-    for trade_id, inst, product, ccy, _qty, _fill, settle in conn.execute(_OPEN_IRS_SQL, {"as_of": as_of}).fetchall():
-        try:
-            freeze(trade_id, inst, product, _irs_freeze(conn, inst, ccy, settle), settle)
-            realised += 1
-        except (_Unrealisable, TypeError, ValueError, ArithmeticError) as exc:
-            unrealisable.append(_unrealisable(trade_id, exc))
-
     for trade_id, inst, product, base_ccy, qty, fill, settle, quote_ccy in conn.execute(_OPEN_OPTION_SQL, {"as_of": as_of}).fetchall():
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
@@ -481,17 +433,6 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
     conn.commit()
     return {"realised": realised, "unrealisable": unrealisable, "repaired": repaired, "refrozen": refrozen,
             "kept": kept}
-
-
-def _ndf_fixing_day(conn: sqlite3.Connection, pair: str, settle: str) -> str:
-    """The fixing date (value date less 2 business days, the Ladder's rule) when `pair` is an
-    NDF pair (`engine.ladder.ndf.is_ndf_pair`), '' for a deliverable one: the day an NDF
-    ticket's freeze reads its fix or spot on."""
-    from engine.ladder.ndf import fixing_date, is_ndf_pair
-    row = conn.execute("SELECT is_ndf FROM instruments WHERE instrument_id = ?", (pair,)).fetchone()
-    if is_ndf_pair(pair, int((row[0] if row else 0) or 0)):
-        return fixing_date(settle)
-    return ""
 
 
 def _last_on_or_before(conn: sqlite3.Connection, instrument_id: str, mark_type: str, day: str) -> Optional[tuple]:

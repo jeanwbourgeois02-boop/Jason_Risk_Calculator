@@ -31,52 +31,34 @@ Settled cash (user decision 2026-09-18, "there should be a settled cash row towa
 top" / "expired tickets must settle not disappear"): a ticket whose value date has
 passed no longer vanishes from the ladder. Its legs land in ONE extra row, keyed by the
 sentinel `settlement_date = SETTLED`, which the grid shows first as "Settled cash":
-  - a deliverable leg (`settles_cash = 1`) is cash in its own currency from its value
+  - a deliverable FX leg (`settles_cash = 1`) is cash in its own currency from its value
     date on, and still carries that currency's delta (NOK received on a forward is NOK
     exposure until it is sold) -- so it is summed per (trade, currency) into the row;
-  - a non-deliverable ticket (NDF leg pair, future, FX option -- `settles_cash = 0`)
-    never delivers its local currency; the only cash it produces is its USD settlement,
-    which is exactly the realised P&L `engine.pnl.ledger.realise_settled` froze for it
-    (NDF: quantity x (fixing - fill) converted at that spot). That USD figure is read
-    from `realised_pnl` -- never recomputed here -- and added to the row's USD column.
-    A settled non-deliverable ticket with no realised row yet (no official mark on or
-    before its value date) is listed in `unresolved` with a "settled ... USD settlement
-    unknown" reason, never valued at a substitute.
+  - a ticket that never delivers (future, FX option) produces only its USD settlement,
+    which is exactly the realised P&L `engine.pnl.ledger.realise_settled` froze for it.
+    That USD figure is read from `realised_pnl` -- never recomputed here -- and added to
+    the row's USD column. A settled future or option with no realised row yet (no
+    official mark on or before its settlement) is listed in `unresolved` with a
+    "settled ... USD settlement unknown" reason, never valued at a substitute.
 Boundary: the grid keeps a leg settling exactly on as_of on its own date row (cash
 that moves today), so its settled rule is `settle_date < as_of`; the exposure/delta
 records use `settle_date <= as_of` for deliverable legs (by close it is cash, and cash
 carries delta) and `> as_of` for open legs, so a deliverable leg is counted exactly
-once either way. Non-deliverable USD settlements use `<` in both modes, matching the
-ledger's own realisation rule (a settlement in transit carries no FX delta anyway).
+once either way. Realised USD settlements use `<` in both modes, matching the ledger's
+own realisation rule (a settlement in transit carries no FX delta anyway).
 The settled row only covers tickets the uploaded blotter carries: it is settled cash
-from those tickets, not a bank balance.
+from those tickets, not a bank balance (CLAUDE.md hard rule 5).
 
-NDF tickets are dated on their FIXING date (user decision 2026-09-21, "NDFs, show fixing
-dates instead"; the rule and its one assumption live in engine/ladder/ndf.py): every leg
-record of an NDF ticket carries `settlement_date` = fixing date (value date less 2
-business days), with the real value date kept in `value_date` and the fixing repeated
-in `fixing_date`. The Ladder tab's own rules read that date: the grid shows an NDF leg
-while fixing date >= as_of, the tab's delta / exposure counts it while fixing date >
-as_of. Once fixed an NDF is gone from the ladder altogether (user, 2026-09-22: "NDFs -
-once they expire, they should disappear, not become setteld cash. I was wrong. 0 delta
-and 0 carry, they just disappears as they expired", reversing the 2026-09-21 rule that
-put a fixed NDF's legs in Settled cash): no leg on the grid, no delta, nothing in Settled
-cash, neither its local legs nor its USD settlement, and nothing named under the grid for
-it. engine/pnl freezes its P&L at the fixing date's spot (`engine.pnl.valuation`,
-`engine.pnl.ledger`); the ladder shows nothing. Futures and FX options still bring their
-realised USD settlement to Settled cash. "Is this an NDF ticket" is decided by
-`ndf.is_ndf_pair`: the stored flag OR the pair's currencies against NDF_CCYS, so a
-USDINR row stored as deliverable before INR joined the list is still treated as the NDF
-it is (no deliverable INR cash in the settled row). engine/ladder/ladder.py's contract
-SQL (delta_per_ccy, per_pair_delta) is untouched and stays value-date based.
+Every FX leg sits on its own value date. The NDF rules (a ticket dated on its fixing
+date, gone from the ladder once fixed) left with the NDFs (user, 2026-09-24, commodity
+conversion Phase 2): the FX book is Jason's deliverable hedges. A leg is cash when its
+stored `settles_cash` says so, nothing else decides it.
 """
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
-
-from engine.ladder.ndf import fixing_date, is_ndf_pair
 
 FX_PRODUCTS = frozenset({"FX_SPOT", "FX_FWD", "FX_SWAP"})
 FUND = "NMMF"
@@ -98,7 +80,7 @@ DEFAULT_BOOK_MAPPING: Dict[str, str] = {}  # identity: book == NM Strategy sourc
 
 _DB_SQL_GRID = """
 SELECT t.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
-       t.strategy, t.account, i.is_ndf,
+       t.strategy, t.account,
        l.ccy, l.amount, l.settle_date, l.settles_cash
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.trade_date <= :as_of AND l.settle_date >= :as_of
@@ -112,7 +94,7 @@ ORDER BY t.trade_id, l.leg_no
 # matching BNP dropping settled forwards -- mirrors engine/ladder/futures_delta.py).
 _DB_SQL_EXPOSURE = """
 SELECT t.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
-       t.strategy, t.account, i.is_ndf,
+       t.strategy, t.account,
        l.ccy, l.amount, l.settle_date, l.settles_cash
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.trade_date <= :as_of AND l.settle_date > :as_of
@@ -128,7 +110,7 @@ _DB_SQL = _DB_SQL_GRID
 # {op} is '<' (grid) or '<=' (exposure) -- a constant chosen in code, never user input.
 _DB_SQL_SETTLED_LEGS = """
 SELECT t.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
-       t.strategy, t.account, i.is_ndf,
+       t.strategy, t.account,
        l.ccy, SUM(l.amount) AS amount, MAX(l.settle_date) AS settled_on
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND l.settles_cash = 1
@@ -137,61 +119,29 @@ GROUP BY t.trade_id, l.ccy
 ORDER BY t.trade_id, l.ccy
 """
 
-# USD settlement of settled non-deliverable tickets: the realised P&L the ledger froze
-# (engine/pnl/ledger.py), read back, never recomputed. NDF forwards plus futures and FX
-# options; deliverable FX rows in realised_pnl are NOT read here -- their legs above
-# already are the cash, adding their P&L too would double count. Which FX rows are NDF
-# is decided in code by ndf.is_ndf_pair (stored flag OR the pair's currencies), not by
-# `i.is_ndf` alone, so the query returns every FX row and the caller keeps the NDF ones.
+# USD settlement of settled futures and FX options: the realised P&L the ledger froze
+# (engine/pnl/ledger.py), read back, never recomputed. Deliverable FX rows in
+# realised_pnl are NOT read: their legs above already are the cash, adding their P&L
+# too would double count.
 _DB_SQL_SETTLED_REALISED = """
 SELECT r.trade_id, t.product, t.instrument_id, t.description, t.trade_date, t.price,
-       t.strategy, t.account, i.is_ndf, r.settle_date, r.pnl_usd
+       t.strategy, t.account, r.settle_date, r.pnl_usd
 FROM realised_pnl r JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
 WHERE t.trade_date <= :as_of AND r.settle_date < :as_of
-  AND t.product IN ('FX_SPOT','FX_FWD','FX_SWAP','FUTURE','FX_OPTION')
+  AND t.product IN ('FUTURE','FX_OPTION')
 ORDER BY r.trade_id
 """
 
-# Settled non-deliverable tickets the ledger has NOT frozen yet: reported, never valued.
-# Same NDF decision in code as above.
+# Settled futures and FX options the ledger has NOT frozen yet: reported, never valued.
 _DB_SQL_SETTLED_UNREALISED = """
-SELECT t.trade_id, t.instrument_id, t.product, i.is_ndf, MAX(l.settle_date) AS settled_on
+SELECT t.trade_id, t.instrument_id, t.product, MAX(l.settle_date) AS settled_on
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.trade_date <= :as_of AND l.settle_date < :as_of
-  AND t.product IN ('FX_SPOT','FX_FWD','FX_SWAP','FUTURE','FX_OPTION')
+  AND t.product IN ('FUTURE','FX_OPTION')
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
 GROUP BY t.trade_id
 ORDER BY t.trade_id
 """
-
-# How an `Unresolved.reason` for an NDF that had fixed but not settled began, while such a
-# ticket was named instead of valued (until 2026-09-21). Nothing writes it since: a fixed
-# NDF is simply gone (module docstring); kept for ui/tabs/exposure.py, which still reads it.
-NDF_FIXED_REASON_PREFIX = "settled at its fixing"
-
-
-def _is_non_deliverable(product: str, pair: str, stored_flag) -> bool:
-    """Futures and FX options never deliver; an FX ticket only when its pair is NDF."""
-    return product not in FX_PRODUCTS or is_ndf_pair(pair, int(stored_flag or 0))
-
-
-def _fixings(holidays=None):
-    """value date -> fixing date, memoised for one read of the book."""
-    if holidays is None:
-        from engine.pnl.calendar import load_holidays
-        holidays = load_holidays()
-    cache: Dict[str, str] = {}
-
-    def fix(value_date: str) -> str:
-        if value_date not in cache:
-            cache[value_date] = fixing_date(value_date, holidays)
-        return cache[value_date]
-    return fix
-
-
-def _is_ndf_ticket(product: str, pair: str, stored_flag) -> bool:
-    """An FX ticket on an NDF pair: gone from the ladder once fixed (module docstring)."""
-    return product in FX_PRODUCTS and is_ndf_pair(pair, int(stored_flag or 0))
 
 
 def settled_records_from_db(conn, as_of_date: str,
@@ -201,30 +151,23 @@ def settled_records_from_db(conn, as_of_date: str,
     `settled_on` (the value date the cash arrived, or the last one for a fully settled
     swap). `for_exposure=False`: deliverable legs with settle_date < as_of (the grid keeps
     today's on its own row); `for_exposure=True`: settle_date <= as_of (cash by close,
-    still delta). Non-deliverable USD settlements are `< as_of` in both modes. A missing
-    `realised_pnl` table (database older than the ledger) simply contributes nothing --
-    the deliverable legs are still returned.
-
-    NDF tickets (ndf.is_ndf_pair: stored flag OR the pair's currencies) never count as
-    deliverable legs, whatever `settles_cash` an old database stored for them, and bring
-    nothing here at all (module docstring: once fixed they disappear)."""
+    still delta). Realised USD settlements of futures and FX options are `< as_of` in
+    both modes. A missing `realised_pnl` table (database older than the ledger) simply
+    contributes nothing -- the deliverable legs are still returned."""
     mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
     op = "<=" if for_exposure else "<"
     records: List[dict] = []
     unresolved: List[Unresolved] = []
     for r in conn.execute(_DB_SQL_SETTLED_LEGS.format(op=op), {"as_of": as_of_date}).fetchall():
-        (trade_id, product, pair, desc, trade_date, price, strategy, account, is_ndf,
+        (trade_id, product, pair, desc, trade_date, price, strategy, account,
          ccy, amount, settled_on) = r
-        if is_ndf_pair(pair, int(is_ndf or 0)):
-            continue  # an NDF delivers no local currency: its cash is the USD settlement below
         records.append({
             "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
             "symbol": f"{pair}-{trade_id}", "symbol_description": desc,
             "trade_date": trade_date, "settlement_date": SETTLED, "settled_on": settled_on,
             "currency_pair": pair, "currency": ccy, "local_amount": float(amount),
             "entry_rate": float(price), "book_source": strategy, "book": mapping.get(strategy, strategy),
-            "account": account, "fund": FUND, "strategy": strategy,
-            "is_ndf": int(is_ndf), "settles_cash": 1,
+            "account": account, "fund": FUND, "strategy": strategy, "settles_cash": 1,
         })
     try:
         realised = conn.execute(_DB_SQL_SETTLED_REALISED, {"as_of": as_of_date}).fetchall()
@@ -232,22 +175,17 @@ def settled_records_from_db(conn, as_of_date: str,
     except sqlite3.OperationalError:  # no realised_pnl table: ledger never created here
         return records, unresolved
     for r in realised:
-        (trade_id, product, inst, desc, trade_date, price, strategy, account, is_ndf,
+        (trade_id, product, inst, desc, trade_date, price, strategy, account,
          settled_on, pnl_usd) = r
-        if not _is_non_deliverable(product, inst, is_ndf) or _is_ndf_ticket(product, inst, is_ndf):
-            continue  # deliverable FX: its legs above already are the cash; an NDF: gone once fixed
         records.append({
             "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
             "symbol": f"{inst}-{trade_id}", "symbol_description": desc,
             "trade_date": trade_date, "settlement_date": SETTLED, "settled_on": settled_on,
             "currency_pair": inst, "currency": "USD", "local_amount": float(pnl_usd),
             "entry_rate": float(price), "book_source": strategy, "book": mapping.get(strategy, strategy),
-            "account": account, "fund": FUND, "strategy": strategy,
-            "is_ndf": int(is_ndf), "settles_cash": 1,
+            "account": account, "fund": FUND, "strategy": strategy, "settles_cash": 1,
         })
-    for trade_id, inst, product, is_ndf, settled_on in unrealised:
-        if not _is_non_deliverable(product, inst, is_ndf) or _is_ndf_ticket(product, inst, is_ndf):
-            continue
+    for trade_id, inst, product, settled_on in unrealised:
         unresolved.append(Unresolved(
             trade_id, inst,
             f"settled {settled_on} ({product}), USD settlement unknown: not realised yet -- "
@@ -259,8 +197,8 @@ def records_from_db(conn, as_of_date: str,
                     book_mapping: Dict[str, str] | None = None, *,
                     for_exposure: bool = False,
                     include_settled: bool = True) -> Tuple[List[dict], List[Unresolved]]:
-    """Same records as records_from_parse, read back from the SQLite tables the upload
-    flow populates (trades / trade_legs / instruments). Read-only; no schema change.
+    """One record per open FX leg, read from the SQLite tables the upload flow populates
+    (trades / trade_legs / instruments), dated on the leg's own value date. Read-only.
 
     ``for_exposure=False`` (default): grid rule, trade_date <= as_of and
     settle_date >= as_of (matches the cash ladder grid's `>=` rule) -- use this for the
@@ -268,24 +206,17 @@ def records_from_db(conn, as_of_date: str,
 
     ``for_exposure=True``: delta rule, trade_date <= as_of and settle_date > as_of for
     open legs. Use this for anything that feeds engine.ladder.exposure.build_exposure /
-    portfolio_totals / summary (Net USD, Gross USD, per-currency delta): an NDF leg
-    settling exactly on as_of carries no delta by close of that day, and a deliverable
-    one is counted through the settled-cash records instead (below), never twice.
+    portfolio_totals / summary (Net USD, Gross USD, per-currency delta): a deliverable
+    leg settling exactly on as_of is counted through the settled-cash records instead
+    (below), never twice.
 
     ``include_settled`` (default True, 2026-09-18): append `settled_records_from_db`'s
     settled-cash records (module docstring) so expired tickets settle into the
     "Settled cash" row instead of disappearing. False restores the open-legs-only view.
 
-    Field derivations are identical to records_from_parse either way: one record per
-    leg, priced at spot only (no P&L, no usd_entry_amount).
-
-    NDF tickets (2026-09-21, module docstring): each leg record is dated on its fixing
-    date (`settlement_date` = `fixing_date`, the real value date in `value_date`), and
-    the two rules above read that date -- grid: fixing date >= as_of; exposure: fixing
-    date > as_of. The SQL's value-date filter is a superset (a fixing is never after its
-    value date), so the fixing rule is applied here, leg by leg. Such a record always
-    carries is_ndf = 1 and settles_cash = 0, whatever an old database stored. Every
-    other leg record carries `value_date` = `settlement_date` and `fixing_date` = ''."""
+    Open FX options come from `option_records_from_db` (their delta, not their notional
+    leg); any other product (futures) is named in `unresolved`, never dropped silently.
+    Every record is priced at spot downstream (no P&L, no usd_entry_amount)."""
     mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
     sql = _DB_SQL_EXPOSURE if for_exposure else _DB_SQL_GRID
     by_trade: Dict[str, list] = {}
@@ -293,42 +224,24 @@ def records_from_db(conn, as_of_date: str,
         by_trade.setdefault(r[0], []).append(r)
     records: List[dict] = []
     unresolved: List[Unresolved] = []
-    fix = _fixings()
     for trade_id, legs in by_trade.items():
-        product, pair, desc, trade_date, price, strategy, account, is_ndf = legs[0][1:9]
+        product, pair, desc, trade_date, price, strategy, account = legs[0][1:8]
         if product == "FX_OPTION":
             continue  # delta records built by option_records_from_db below, not from the notional leg
         if product not in FX_PRODUCTS:
             unresolved.append(Unresolved(trade_id, pair, f"non-FX product {product} excluded"))
             continue
-        ndf_ticket = is_ndf_pair(pair, int(is_ndf or 0))
-        dated: Dict[tuple, dict] = {}  # NDF only: (ccy, fixing date) -> record
         for leg in legs:
-            ccy, amount, settle_date, settles_cash = leg[9], leg[10], leg[11], leg[12]
-            fixed_on = ""
-            if ndf_ticket:
-                fixed_on = fix(settle_date)
-                if fixed_on < as_of_date or (for_exposure and fixed_on == as_of_date):
-                    continue  # fixed: gone from the ladder (module docstring)
-                if (ccy, fixed_on) in dated:
-                    # Two value dates sharing one fixing date (a weekend value date): one
-                    # record, or build_exposure's (trade, currency, date) key would clash.
-                    dated[(ccy, fixed_on)]["local_amount"] += float(amount)
-                    continue
-            record = {
+            ccy, amount, settle_date, settles_cash = leg[8], leg[9], leg[10], leg[11]
+            records.append({
                 "trade_id": trade_id, "source_row_id": trade_id, "product_type": product,
                 "symbol": f"{pair}-{trade_id}", "symbol_description": desc,
-                "trade_date": trade_date, "settlement_date": fixed_on or settle_date,
-                "value_date": settle_date, "fixing_date": fixed_on, "currency_pair": pair,
+                "trade_date": trade_date, "settlement_date": settle_date, "currency_pair": pair,
                 "currency": ccy, "local_amount": float(amount), "entry_rate": float(price),
                 "book_source": strategy, "book": mapping.get(strategy, strategy),
                 "account": account, "fund": FUND, "strategy": strategy,
-                "is_ndf": 1 if ndf_ticket else int(is_ndf),
-                "settles_cash": 0 if ndf_ticket else int(settles_cash),
-            }
-            if ndf_ticket:
-                dated[(ccy, fixed_on)] = record
-            records.append(record)
+                "settles_cash": int(settles_cash),
+            })
     opt_records, opt_unresolved = option_records_from_db(conn, as_of_date, mapping)
     records, unresolved = records + opt_records, unresolved + opt_unresolved
     if include_settled:
@@ -349,7 +262,7 @@ def records_from_db(conn, as_of_date: str,
 # leg is not cash either (settles_cash = 0), so the grid has nothing to show for it.
 _DB_SQL_OPTIONS = """
 SELECT t.trade_id, t.instrument_id, t.description, t.trade_date, t.price, t.strategy, t.account,
-       t.quantity, i.base_ccy, i.quote_ccy, i.is_ndf, l.settle_date,
+       t.quantity, i.base_ccy, i.quote_ccy, l.settle_date,
        m.value AS delta, s.value AS spot
 FROM trades_official t JOIN instruments i USING (instrument_id)
 JOIN trade_legs l ON l.trade_id = t.trade_id AND l.leg_no = 1
@@ -377,7 +290,7 @@ def option_records_from_db(conn, as_of_date: str,
     seen: set = set()
     for row in conn.execute(_DB_SQL_OPTIONS, {"as_of": as_of_date}).fetchall():
         (trade_id, instrument_id, desc, trade_date, price, strategy, account,
-         quantity, base_ccy, quote_ccy, is_ndf, expiry, delta, spot) = row
+         quantity, base_ccy, quote_ccy, expiry, delta, spot) = row
         if trade_id in seen:
             continue  # latest official mark per trade wins (ORDER BY snapped_at DESC)
         seen.add(trade_id)
@@ -395,8 +308,7 @@ def option_records_from_db(conn, as_of_date: str,
             "symbol": f"{pair}-{trade_id}", "symbol_description": desc,
             "trade_date": trade_date, "settlement_date": expiry, "currency_pair": pair,
             "entry_rate": float(price), "book_source": strategy, "book": mapping.get(strategy, strategy),
-            "account": account, "fund": FUND, "strategy": strategy,
-            "is_ndf": int(is_ndf), "settles_cash": 0,
+            "account": account, "fund": FUND, "strategy": strategy, "settles_cash": 0,
         }
         records.append({**common, "currency": base_ccy, "local_amount": float(quantity) * float(delta)})
         records.append({**common, "currency": quote_ccy,

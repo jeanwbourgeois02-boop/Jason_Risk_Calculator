@@ -1,0 +1,2 @@
+- [NDF removal 2026-09-24](ndf_removal_2026_09_24.md) — adapter has no NDF rules; ndf.py deleted the same day; sample-file test date; all my files LF.
+- Older notes on these files live in `.claude/agent-memory/cash-ladder/` (grid vs exposure `>=`/`>`, dollar convention and gold, lane discipline); the NDF note there is obsolete.

@@ -1,2 +1,3 @@
 - [Non-USD future freeze](non-usd-future-freeze.md) — 2026-09-24: futures freeze in quote ccy at usd_per_quote of the FUTURE_PX date; column meanings; golden book has no settled future
-- Older notes on this file live in `.claude/agent-memory/pnl-engine/` (ledger-refreeze-rule, ndf-fix-exact-day, data_quirks)
+- [IRS and NDF removed](irs-ndf-removed.md) — 2026-09-24 Phase 2: no IRS / NDF freeze; old rows kept as frozen under `kept`; HEAD pin fixture in test_ledger
+- Older notes on this file live in `.claude/agent-memory/pnl-engine/` (ledger-refreeze-rule, data_quirks; ndf-fix-exact-day is obsolete for this lane since 2026-09-24)

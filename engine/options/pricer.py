@@ -160,28 +160,26 @@ class OptionPriceResult:
     premium: for FX (price_fx_*), base-ccy fraction of notional -- of the
         base-ccy PAYOUT for a digital / touch (see module docstring's "Cash
         payoffs" section) -- the number directly comparable to
-        ``trades.price`` / marks_official's PREMIUM value. For equity/
-        commodity (price_equity_option / price_commodity_option), this is
-        instead the UNSCALED quote-ccy price per 1 unit of underlying (no
-        base-fraction conversion -- there is no "base notional" concept
-        for a single-underlying equity/commodity option the way there is
-        for an FX pair) -- store.py multiplies by ``instruments.
-        multiplier`` when writing the PREMIUM mark for those asset
-        classes. See store.py's equity/commodity section for the full
-        unit contrast with FX.
+        ``trades.price`` / marks_official's PREMIUM value. For a listed
+        commodity option (price_commodity_option), this is instead the
+        UNSCALED quote-ccy price per 1 unit of underlying (no base-fraction
+        conversion -- there is no "base notional" concept for a
+        single-underlying option the way there is for an FX pair) --
+        equity_commodity.py multiplies by ``instruments.multiplier`` when
+        writing the PREMIUM mark.
     delta, gamma, theta, vega, rho: the vendored pricer's own fields,
         passed through unmodified (see module docstring on sign / units).
     quote_price: the vendored pricer's raw ``price`` field (quote ccy per
         1 unit of base notional/underlying) before the premium conversion
         above -- kept for callers (e.g. engine/options/structures.py) that
         need the pre-conversion quote-ccy value. Equal to `premium` for
-        equity/commodity results (no conversion applied there).
+        commodity results (no conversion applied there).
     delta_premium_adjusted: FX only -- ``delta - price/S`` (always present
-        on an FX result; 0.0 for equity/commodity, which have no such
+        on an FX result; 0.0 for a commodity result, which has no such
         concept). See module docstring's "delta_convention / DELTA_PA"
         section.
     delta_convention: FX only -- 'RAW' | 'PREMIUM_ADJUSTED' | 'UNKNOWN'.
-        'N/A' for equity/commodity results.
+        'N/A' for commodity results.
     """
 
     premium: float
@@ -239,7 +237,7 @@ def _to_result(raw: Dict[str, float], spot: float, pair: Optional[str] = None) -
 
 
 def _to_result_plain(raw: Dict[str, float]) -> OptionPriceResult:
-    """Equity/commodity result builder -- no spot-fraction premium
+    """Commodity result builder -- no spot-fraction premium
     conversion, no delta convention (FX-only concept). See
     OptionPriceResult's own docstring for the unit contrast."""
     return OptionPriceResult(
@@ -679,66 +677,6 @@ def price_fx_at_expiry(
     return _to_result(raw, spot, pair)
 
 
-# --------------------------------------------------------------------------- equity (Phase 7)
-
-_EQUITY_STRIKE_PAYOFFS = {"VANILLA", "DIGITAL", "AMERICAN", "ASIAN", "BARRIER_KI", "BARRIER_KO"}
-_EQUITY_BARRIER_PAYOFFS = {"BARRIER_KI", "BARRIER_KO", "ONE_TOUCH", "NO_TOUCH"}
-
-
-def price_equity_option(
-    payoff: str,
-    spot: float,
-    strike: Optional[float],
-    expiry: datetime.date,
-    as_of: datetime.date,
-    r: float,
-    vol: float,
-    option_type: Optional[str] = None,
-    dividend_yield: float = 0.0,
-    barrier: Optional[float] = None,
-    barrier_type: Optional[str] = None,
-    rebate: float = 0.0,
-    cash_payout: float = 1.0,
-    direction: Optional[str] = None,
-    n_fixings: int = 12,
-) -> OptionPriceResult:
-    """Dispatch to the vendored equity/*.py pricer matching `payoff`
-    (same payoff vocabulary as store.py's FX dispatch: VANILLA, DIGITAL,
-    AMERICAN, ASIAN, BARRIER_KI, BARRIER_KO, ONE_TOUCH, NO_TOUCH).
-    `premium` on the returned result is UNSCALED quote-ccy price per 1
-    unit of the underlying (see OptionPriceResult's own docstring) --
-    store.py multiplies by `instruments.multiplier` when writing the
-    PREMIUM mark."""
-    from .vendor.options_calc import equity
-
-    T = year_fraction(as_of, expiry)
-
-    if payoff == "VANILLA":
-        raw = equity.price_european(spot, strike, T, r, vol, option_type.lower(), dividend_yield)
-    elif payoff == "AMERICAN":
-        raw = equity.price_american(spot, strike, T, r, vol, option_type.lower(), dividend_yield)
-    elif payoff == "ASIAN":
-        raw = equity.price_asian(spot, strike, T, r, vol, option_type.lower(), dividend_yield, n_fixings)
-    elif payoff in ("BARRIER_KI", "BARRIER_KO"):
-        raw = equity.price_barrier(
-            spot, strike, barrier, T, r, vol, option_type.lower(), barrier_type, rebate, dividend_yield,
-        )
-    elif payoff == "DIGITAL":
-        raw = equity.price_digital(spot, strike, T, r, vol, option_type.lower(), cash_payout, dividend_yield)
-    elif payoff in ("ONE_TOUCH", "NO_TOUCH"):
-        # Same fx/__init__.py-style submodule/function name shadow as
-        # price_fx_one_touch/price_fx_no_touch above -- equity/__init__.py
-        # also does `from .one_touch import one_touch, no_touch`.
-        from .vendor.options_calc.equity import one_touch as _one_touch_fn, no_touch as _no_touch_fn
-
-        fn = _one_touch_fn if payoff == "ONE_TOUCH" else _no_touch_fn
-        raw = fn(spot, barrier, T, r, vol, cash_payout=cash_payout, direction=direction, dividend_yield=dividend_yield)
-    else:
-        raise ValueError(f"unsupported equity payoff {payoff!r}")
-
-    return _to_result_plain(raw)
-
-
 # --------------------------------------------------------------------------- commodity (Phase 7)
 
 def price_commodity_option(
@@ -759,8 +697,8 @@ def price_commodity_option(
     no barrier/digital/one-touch commodity pricer exists in
     options_calc/commodity/ (MODELS.md's "Planned" section notes this as
     a known gap, not something skipped here). `premium` is UNSCALED
-    quote-ccy price per 1 unit of underlying, same as price_equity_option
-    -- see OptionPriceResult's docstring."""
+    quote-ccy price per 1 unit of underlying -- see OptionPriceResult's
+    docstring."""
     from .vendor.options_calc import commodity
 
     T = year_fraction(as_of, expiry)

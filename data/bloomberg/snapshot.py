@@ -17,8 +17,8 @@ other PC's side. Nothing here asks Bloomberg anything (hard rule 8).
 What travels: `marks` whole, every source, exactly as Bloomberg and the app's own pricers
 wrote it on the Bloomberg PC (values, sources and `snapped_at` untouched, so
 `marks_official` decides the official row here the way it does there), plus every other
-table a pull writes (MARKET_TABLES: the OIS curves and their quotes, the fixings, the FX
-and rates vol quotes, the dividend yields, Bloomberg's commodity contract dates), the `instruments` rows those marks hang off,
+table a pull writes (MARKET_TABLES: the OIS curves and their quotes, the FX vol quotes,
+Bloomberg's commodity contract dates), the `instruments` rows those marks hang off,
 only so a mark's foreign key holds before the blotter is uploaded here, each table's DDL
 (so a table this database has never created still lands), and the pull's own log, the
 status JSON the live feed writes next to the database (`live.status_path`), copied as
@@ -57,8 +57,13 @@ MANIFEST = "snapshot.json"
 # `source` column so the MANUAL rule below applies to all of them alike; a table the
 # source database has not created yet is simply not in the snapshot.
 INSTRUMENTS = "instruments"
-MARKET_TABLES = ("marks", "curves", "curve_quotes", "index_fixings",
-                 "vol_quotes", "rate_vol_quotes", "equity_dividend_yields", "contract_static")
+MARKET_TABLES = ("marks", "curves", "curve_quotes", "vol_quotes", "contract_static")
+# Left out since 2026-09-24 (commodity conversion Phase 2, user yes: the macro trader's
+# products leave the app): index_fixings (swap fixings), rate_vol_quotes (swaption and cap
+# vols) and equity_dividend_yields (SPX). An older snapshot that still carries them is read
+# without them: their CSV files and DDL are ignored, and this PC's own rows in those tables,
+# if it has the tables at all, are left as they are. curve_quotes and curves stay: the OIS
+# curves still discount options.
 # contract_static (2026-09-24, commodity conversion): Bloomberg's FUT_LAST_TRADE_DT /
 # FUT_NOTICE_FIRST per commodity futures contract, written by the pull through
 # data.contracts.store_static_dates; created on the importing PC with contract-master's own

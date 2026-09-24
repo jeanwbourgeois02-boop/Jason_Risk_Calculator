@@ -19,11 +19,7 @@ Euronext / TTF in EUR, NBP in GBP) converts at spot of the valuation date.
   only prices are missing) then "no SPOT for CNY on <d> (<ids>)".
 - `details[id]` gained `currency`, `usd_per_unit` (None when no spot) and `reason` ('' when the
   future is in by_instrument). `price` stays in the quote currency.
-- positions.equity_index_positions reads `fut["by_instrument"][id]` for the future's USD, and
-  `details[id]["reason"]` for a future that is not in it; `level` = the quote-ccy price.
-- Reviewer N-3 (2026-09-24): a commodity future is NOT on the equity index line. Test: its
-  `instruments.base_ccy` is a contract root (`data.contracts.load_roots()` key, 'SHFE:CU';
-  whitespace stripped, upper-cased). Its positions belong to curve-positions. `futures_usd_delta`
-  itself still takes every future (the Ladder's futures table and the stress line read it whole).
-  The line still takes the first remaining future's multiplier as the ES multiplier.
+- The equity index line that read `by_instrument` / `details[id]["reason"]` was removed in
+  Phase 2 ([[phase2-fx-only-2026-09-24]]). `futures_usd_delta` still takes every future (the
+  Ladder's futures table and the stress line read it whole). Commodity positions are curve-positions'.
 - All four lane files are LF (measured with Python bytes).

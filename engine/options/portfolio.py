@@ -1,11 +1,12 @@
-"""Book-level Greek aggregation across FX/equity/commodity option
+"""Book-level Greek aggregation across FX and listed (commodity) option
 positions (Phase 7, options_calc merge).
 
 Builds vendored ``options_calc.portfolio.Position`` objects from already-
 priced outcomes (``store.py``'s ``PricingOutcome`` for FX_OPTION,
-``equity_commodity.py``'s ``EqCmdtyOutcome`` for EQ_OPTION/CMDTY_OPTION --
-both expose ``.instrument_id``, ``.package_id``, ``.quantity``, ``.priced``,
-``.result``, so either feeds this module interchangeably), aggregates via
+``equity_commodity.py``'s ``CommodityOutcome`` for CMDTY_OPTION -- both
+expose ``.instrument_id``, ``.package_id``, ``.quantity``, ``.priced``,
+``.result``, so either feeds this module interchangeably; the equity-index
+branch left the app on 2026-09-24), aggregates via
 ``Portfolio.total()`` / ``by_asset_class()`` / ``by_label()``, and converts
 every Greek to a USD-equivalent number before summing.
 
@@ -14,7 +15,7 @@ The vendored ``portfolio.py`` will happily sum Greeks across positions on
 entirely different underlyings once ``fx_rate_to_base`` currency-converts
 them, but that's as far as it goes: "portfolio delta/gamma/vega" beyond
 that point is each leg's own NATIVE-unit Greek added together (FX pips,
-index points, commodity dollars) -- not one coherent number. This module
+commodity price points) -- not one coherent number. This module
 is the "real desk normalizes to a common basis" step MODELS.md says the
 vendored package deliberately leaves to the caller.
 
@@ -49,17 +50,17 @@ quote-ccy-denominated the same way). `quantity * multiplier` is this
 package's own scaling: FX's `multiplier` is always 1.0 (schema.py), so FX
 positions scale by `quantity` (base-ccy notional) alone, unchanged from
 how `store.py`'s DELTA mark is already meant to be read
-(`t.quantity * m.value`, per CLAUDE.md's delta query); equity/commodity
-positions additionally multiply by `instruments.multiplier` (e.g. 100
-shares/contract), since their Greeks are per 1 unit of the UNDERLYING,
-and one contract covers `multiplier` units of it.
+(`t.quantity * m.value`, per CLAUDE.md's delta query); listed-option
+positions additionally multiply by `instruments.multiplier` (the contract
+size), since their Greeks are per 1 unit of the UNDERLYING, and one
+contract covers `multiplier` units of it.
 
 **Missing conversion rate -> skipped, not defaulted.** A priced outcome
 whose `quote_ccy` has no official SPOT on `as_of` (no `quote_ccy+USD` or
 `USD+quote_ccy` pair marked) is excluded from the Portfolio and reported
 separately in `skipped` -- never silently assumed 1.0. Likewise one whose
 own underlying has no official SPOT (FX: the pair `base_ccy+quote_ccy`;
-equity/commodity: the underlying named in `instruments.bbg_ticker`), which
+a listed option: the underlying named in `instruments.bbg_ticker`), which
 delta and gamma need.
 
 **Grouping / UI hierarchy.** ``Position.label`` is set to `package_id`, so
@@ -113,8 +114,8 @@ def build_positions(conn: sqlite3.Connection, as_of: str, outcomes: Iterable) ->
     outcomes are silently excluded here -- their own `reason` was already
     surfaced by store.py/equity_commodity.py; this module's `skipped` list
     is only for a PRICED outcome that then can't be USD-converted).
-    `outcomes`: PricingOutcome (FX) or EqCmdtyOutcome (equity/commodity)
-    instances, or any object exposing the same `.instrument_id` /
+    `outcomes`: PricingOutcome (FX) or CommodityOutcome (listed commodity
+    option) instances, or any object exposing the same `.instrument_id` /
     `.package_id` / `.quantity` / `.priced` / `.result` shape."""
     from .vendor.options_calc.portfolio import Position
 
@@ -137,7 +138,7 @@ def build_positions(conn: sqlite3.Connection, as_of: str, outcomes: Iterable) ->
             skipped.append({"instrument_id": outcome.instrument_id, "reason": reason})
             continue
 
-        # The underlying's own spot, S: the pair for FX; for equity/commodity the
+        # The underlying's own spot, S: the pair for FX; for a listed option the
         # underlying whose instrument_id `bbg_ticker` holds (equity_commodity.py).
         underlying = base_ccy + quote_ccy if asset_class == "FX_OPTION" else bbg_ticker
         spot_row = conn.execute(

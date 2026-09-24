@@ -24,8 +24,8 @@ the body-refresh callback).
 The old flat `mark_inventory` DataTable and its `INVENTORY_TABLE_ID` are gone from
 this tab entirely — `data.bloomberg.inventory.mark_inventory` is no longer called
 here (only `close_completeness` still is). `diagnostics_panel` / `feed_headline` /
-`backfill_headline` stay defined at module scope, unrendered by this tab's own body,
-because `ui/tabs/cash_ladder.py` still imports them from here; do not delete them.
+`backfill_headline` stay defined at module scope. As of 2026-09-24 `cash_ladder.py` no
+longer imports `diagnostics_panel` (no caller left; flagged to infra as dead code).
 
 Public surface C5/others call: `build_layout(default_date)`, `register_callbacks(app,
 get_db_path)`, plus `diagnostics_panel`, `feed_headline`, `message_box` (unchanged

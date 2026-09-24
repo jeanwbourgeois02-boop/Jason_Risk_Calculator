@@ -81,15 +81,16 @@ def _t1_t2(as_of=AS_OF):
     return _n_business_days_back(d, 1).isoformat(), _n_business_days_back(d, 2).isoformat()
 
 
-def _insert_future_instrument(conn, instrument_id="ESU6 Index", multiplier=50.0):
+def _insert_future_instrument(conn, instrument_id="CLZ6 Comdty", multiplier=1000.0):
     conn.execute(
         "INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
-        (instrument_id, "FUTURE", "ES", "USD", multiplier, 0, instrument_id, "2026-09-18"),
+        (instrument_id, "FUTURE", "CL", "USD", multiplier, 0, instrument_id, "2026-11-19"),
     )
     conn.commit()
 
 
-def _insert_future_trade(conn, trade_id, instrument_id, contracts, fill, settle_date, trade_date="2026-08-01"):
+def _insert_future_trade(conn, trade_id, instrument_id, contracts, fill, settle_date, trade_date="2026-08-01",
+                         multiplier=1000.0):
     conn.execute(
         "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "XLSX", instrument_id, "FUTURE", trade_id, trade_date, contracts, fill,
@@ -97,7 +98,7 @@ def _insert_future_trade(conn, trade_id, instrument_id, contracts, fill, settle_
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
-        (trade_id, 1, "NOTIONAL", "USD", contracts * 50.0 * fill, trade_date, settle_date, 0, 0),
+        (trade_id, 1, "NOTIONAL", "USD", contracts * multiplier * fill, trade_date, settle_date, 0, 0),
     )
     conn.commit()
 
@@ -132,18 +133,44 @@ def test_fx_blotter_open_forward_uses_market_convention_not_workbook():
 
 
 def test_fx_blotter_futures_no_mark_divisor():
+    """A commodity future (WTI, 1,000 bbl a contract): contracts x multiplier x (m - f)."""
     conn = _make_conn()
     _insert_future_instrument(conn)
-    _insert_future_trade(conn, "F1", "ESU6 Index", 10, 4500, "2026-09-18")
-    _insert_mark(conn, "ESU6 Index", "2026-09-18", "FUTURE_PX", 4600, source="BBG_BDH", as_of=AS_OF)
+    _insert_future_trade(conn, "F1", "CLZ6 Comdty", 10, 70.25, "2026-11-19")
+    _insert_mark(conn, "CLZ6 Comdty", "2026-11-19", "FUTURE_PX", 72.10, source="BBG_BDH", as_of=AS_OF)
     out = fx_blotter_rows(conn, AS_OF)
     row = out.iloc[0]
-    notional = 10 * 50.0 * 4500
-    assert row.quantity_usd_notional == pytest.approx(notional)
-    assert row.mark_eod == 4600
+    assert row.quantity_usd_notional == pytest.approx(10 * 1000.0 * 70.25)
+    assert row.mark_eod == 72.10
     # market-standard futures P&L: contracts * multiplier * (m - f), never divided by m
     # (must-not-replicate item 1).
-    assert row.pnl_eod == pytest.approx(10 * 50.0 * (4600 - 4500))
+    assert row.pnl_eod == pytest.approx(10 * 1000.0 * (72.10 - 70.25))
+
+
+def test_fx_blotter_fx_swap_is_one_row_per_trade_marked_on_its_own_value_dates():
+    """FX_SWAP stays a product after the blotter's package rule left (2026-09-24): manual
+    entry books one, 4 legs under one trade_id. It is one row carrying value_book's P&L."""
+    conn = _make_conn()
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("SW1", "MANUAL", "USDJPY", "FX_SWAP", "SW1", "2026-08-01", 1_000_000, 147,
+                  "ACC", "CPTY", "STRAT", "TRADER", "manual swap", ""))
+    for leg_no, leg_type, ccy, amount, settle, rate in (
+            (1, "FX_NEAR", "USD", 1_000_000, "2026-09-01", 147.0),
+            (2, "FX_NEAR", "JPY", -147_000_000, "2026-09-01", 147.0),
+            (3, "FX_FAR", "USD", -1_000_000, "2026-12-01", 146.0),
+            (4, "FX_FAR", "JPY", 146_000_000, "2026-12-01", 146.0)):
+        conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("SW1", leg_no, leg_type, ccy, amount, "2026-08-01", settle, rate, 1))
+    conn.commit()
+    for day in (AS_OF, *_t1_t2()):
+        _insert_mark(conn, "USDJPY", "2026-09-01", "FWD_OUTRIGHT", 148.0, as_of=day)
+        _insert_mark(conn, "USDJPY", "2026-12-01", "FWD_OUTRIGHT", 146.5, as_of=day)
+        _insert_mark(conn, "USDJPY", day, "SPOT", 150.0, as_of=day)
+    out = fx_blotter_rows(conn, AS_OF)
+    assert out["trade_id"].tolist() == ["SW1"]
+    row = out.iloc[0]
+    expected = value_book(conn, AS_OF).set_index("trade_id").loc["SW1", "pnl_usd"]
+    assert row.pnl_eod == pytest.approx(expected) and row.pnl_t1 == pytest.approx(expected)
 
 
 def test_fx_blotter_missing_t2_marks_take_the_nearest_close(strict_marks):
@@ -213,7 +240,7 @@ def _vb_conn():
             ("USDJPY", "FX", "USD", "JPY", 1.0, 0, "USDJPY Curncy", "9999-12-31"),
             ("EURSEK", "FX", "EUR", "SEK", 1.0, 0, "EURSEK Curncy", "9999-12-31"),
             ("USDSEK", "FX", "USD", "SEK", 1.0, 0, "USDSEK Curncy", "9999-12-31"),
-            ("ESU6 Index", "FUTURE", "ES", "USD", 50.0, 0, "ESU6 Index", "2026-09-18"),
+            ("CLU6 Comdty", "FUTURE", "CL", "USD", 1000.0, 0, "CLU6 Comdty", "2026-08-20"),
         ],
     )
     conn.commit()
@@ -285,72 +312,6 @@ def _vb_brl(conn):
     conn.execute("INSERT INTO instruments VALUES ('USDBRL','FX','USD','BRL',1.0,1,'USDBRL Curncy','9999-12-31')")
     conn.commit()
     return conn
-
-
-def test_value_book_ndf_that_has_fixed_is_frozen_at_the_fixing_dates_spot():
-    """User, 2026-09-22: "NDFs - once they expire, they should disappear ... 0 delta and 0
-    carry" (reversing 2026-09-21's "like settled cash"). Value date Wed 2026-06-03 -> fixing
-    Mon 2026-06-01: from the fixing on the P&L is Q x (S_fix - f) at the fixing date's SPOT,
-    converted at that date, and does not move with later spots; the ledger then freezes the
-    same figure after the value date, at the fixing date's spot, not the value date's."""
-    from engine.pnl import ledger
-    conn = _vb_brl(_vb_conn())
-    _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-03")
-    _vb_mark(conn, "USDBRL", "2026-06-03", "FWD_OUTRIGHT", 5.30)  # on file, but no longer the mark
-    _vb_mark(conn, "USDBRL", VB_AS_OF, "SPOT", 5.10)
-    for day, spot in (("2026-06-02", 5.00), ("2026-06-03", 4.90), ("2026-06-04", 4.80)):
-        _vb_mark(conn, "USDBRL", day, "SPOT", spot, as_of=day)
-    expected = 100_000 / 5.10
-    for day in (VB_AS_OF, "2026-06-02", "2026-06-03"):          # fixing day, then open until the value date
-        row = value_book(conn, day).iloc[0]
-        assert (row["status"], row["mark"], row["mark_date"]) == ("OPEN", 5.10, VB_AS_OF)
-        assert row["pnl_usd"] == pytest.approx(expected) and row["spot"] == pytest.approx(1 / 5.10)
-        assert row["pnl_spot_usd"] == pytest.approx(expected) and row["pnl_carry_usd"] == 0.0
-        assert row["reason"] == "" and row["note"] == ("NDF fixed 2026-06-01: no official fixing on file: at the spot of "
-                                                       "2026-06-01 instead, converted at that spot, no delta, no carry")
-    assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
-    frozen = conn.execute("SELECT pnl_usd, spot_as_of_date, note, mark_type FROM realised_pnl WHERE trade_id='N1'").fetchone()
-    assert frozen[0] == pytest.approx(expected) and frozen[1] == VB_AS_OF
-    assert frozen[2] == "spot dated 2026-06-01 (NDF fixing), converted at that spot" and frozen[3] == "SPOT"
-    row = value_book(conn, "2026-06-04").iloc[0]
-    assert row["status"] == "SETTLED" and row["pnl_usd"] == pytest.approx(expected)
-
-
-def test_value_book_ndf_exit_price_is_the_official_fixing_of_the_fixing_date():
-    """User, 2026-09-22: "the entry price is where we traded, and the exit price is the fix
-    on that day, as pulled from bbg". The NDF_FIX mark of the fixing date beats the spot;
-    the ledger records it as the freeze (mark_type NDF_FIX); a fix from a neighbouring day
-    is never used ("each ndf has a unique fix"): the fixing date's spot stands in until the
-    fix lands."""
-    from engine.pnl import ledger
-    conn = _vb_brl(_vb_conn())
-    _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-03")   # fixes 06-01
-    _vb_mark(conn, "USDBRL", VB_AS_OF, "SPOT", 5.10)
-    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (VB_AS_OF, "USDBRL", VB_AS_OF, "NDF_FIX", 5.15, "BBG_BDH", f"{VB_AS_OF}T15:00:00-04:00"))
-    conn.commit()
-    row = value_book(conn, "2026-06-02").iloc[0]
-    assert (row["mark"], row["mark_source"], row["mark_date"]) == (5.15, "BBG_BDH", VB_AS_OF)
-    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (5.15 - 5.20) / 5.15)   # exit = fix, converted at the fix itself (2026-09-22)
-    assert row["spot"] == pytest.approx(1 / 5.15) and row["spot_source"] == "BBG_BDH"
-    assert row["note"] == "NDF fixed 2026-06-01: at the official fixing of 2026-06-01, converted at the fixing, no delta, no carry"
-    assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
-    frozen = conn.execute("SELECT pnl_usd, spot_as_of_date, mark_type, note FROM realised_pnl WHERE trade_id='N1'").fetchone()
-    assert frozen[0] == pytest.approx(row["pnl_usd"]) and frozen[1:] == (
-        VB_AS_OF, "NDF_FIX", "official fixing dated 2026-06-01 (NDF fixing), converted at the fixing")
-
-    # the fixing day's own fix not on file, a neighbour's is: the neighbour is never the exit
-    # price (user, 2026-09-22: "each ndf has a unique fix"); the fixing date's spot is, named
-    conn.execute("DELETE FROM realised_pnl")
-    conn.execute("UPDATE marks SET as_of_date = '2026-05-29', settle_date = '2026-05-29' WHERE mark_type = 'NDF_FIX'")
-    conn.commit()
-    row = value_book(conn, "2026-06-02").iloc[0]
-    assert (row["mark"], row["mark_source"], row["mark_date"]) == (5.10, "BBG_BFXFORWARD", VB_AS_OF)
-    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (5.10 - 5.20) / 5.10)
-    assert row["note"] == ("NDF fixed 2026-06-01: no official fixing on file: at the spot of 2026-06-01 instead, "
-                           "converted at that spot, no delta, no carry")
-    assert ledger.realise_settled(conn, "2026-06-04")["realised"] == 1
-    assert conn.execute("SELECT mark_type, spot_as_of_date, note FROM realised_pnl WHERE trade_id='N1'").fetchone() == (
-        "SPOT", VB_AS_OF, "spot dated 2026-06-01 (NDF fixing), converted at that spot")
 
 
 def test_value_book_any_pair_with_no_forward_takes_the_days_curve_spot_alone_being_spot():
@@ -443,25 +404,6 @@ def test_value_book_forward_on_a_day_with_no_marks_is_read_off_the_nearest_close
     assert row["mark"] == 149.5 and row["mark_source"] == "INTERP: FWD_OUTRIGHT of 2026-06-03 (nearest later close, none earlier)"
 
 
-def test_value_book_swap_pv_is_interpolated_in_time_and_settled_coupons_take_the_earlier_close():
-    conn = _vb_conn()
-    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1.0,0,'','2030-06-01')")
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 ("S1", "MANUAL", "IRSOIS-USD-1", "IRS", "S1", "2026-05-01", 10_000_000, 0.04,
-                  "ACC", "CPTY", "STRAT", "TRADER", "test", ""))
-    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        ("S1", 1, "FIXED", "USD", -10_000_000, "2026-05-01", "2030-06-01", 0.04, 1),
-        ("S1", 2, "FLOAT", "USD", 10_000_000, "2026-05-01", "2030-06-01", 0.0, 1)])
-    for day, pv, cf in (("2026-05-29", 1000.0, 0.0), ("2026-06-04", 4000.0, 500.0)):
-        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (day, "IRSOIS-USD-1", "2030-06-01", "PV_USD", pv, "QL_PRICER", f"{day}T15:00:00-04:00"))
-        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (day, "IRSOIS-USD-1", "2030-06-01", "CASHFLOW_USD", cf, "QL_PRICER", f"{day}T15:00:00-04:00"))
-    conn.commit()
-    row = value_book(conn, "2026-06-01").iloc[0]
-    assert row["pnl_usd"] == pytest.approx(2500.0 + 0.0)   # PV halfway, coupons as of the earlier close
-    assert "PV_USD between the 2026-05-29 and 2026-06-04 closes" in row["mark_source"]
-    assert value_book(conn, "2026-05-20").iloc[0]["pnl_usd"] == pytest.approx(1000.0)   # carried back
-
-
 def test_near_marks_never_price_off_a_stored_value_that_is_not_a_number_and_the_ladder_stays_exact():
     from engine.pnl.valuation import _mark_at, _mark_near
     conn = _vb_conn()
@@ -497,28 +439,19 @@ def test_value_book_gold_with_no_forward_takes_spot_as_the_only_pillar():
     assert row["pnl_usd"] == pytest.approx(482.474 * (4210.0 - 4145.30))
 
 
-def test_value_book_fixed_ndf_with_no_spot_is_blank_and_says_why():
-    conn = _vb_brl(_vb_conn())
-    _vb_fx_trade(conn, "N1", "USDBRL", "USD", "BRL", -1_000_000, 5.20, settle="2026-06-03")
-    _vb_mark(conn, "USDBRL", "2026-06-03", "FWD_OUTRIGHT", 5.30)
-    row = value_book(conn, VB_AS_OF).iloc[0]
-    assert math.isnan(row["pnl_usd"])
-    assert row["reason"] == "no official fixing and no SPOT mark for USDBRL on 2026-06-01 (NDF fixed that day)"
-
-
 def test_value_book_future():
     conn = _vb_conn()
     conn.execute(
         "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("T4", "MANUAL", "ESU6 Index", "FUTURE", "T4", "2026-05-01", 6, 7528.25,
+        ("T4", "MANUAL", "CLU6 Comdty", "FUTURE", "T4", "2026-05-01", 6, 71.25,
          "ACC", "CPTY", "STRAT", "TRADER", "test", ""),
     )
     conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
-                 ("T4", 1, "NOTIONAL", "USD", 6 * 50 * 7528.25, "2026-05-01", "2026-09-18", 7528.25, 0))
+                 ("T4", 1, "NOTIONAL", "USD", 6 * 1000 * 71.25, "2026-05-01", "2026-08-20", 71.25, 0))
     conn.commit()
-    _vb_mark(conn, "ESU6 Index", "2026-09-18", "FUTURE_PX", 7598.50, as_of=VB_AS_OF)
+    _vb_mark(conn, "CLU6 Comdty", "2026-08-20", "FUTURE_PX", 72.10, as_of=VB_AS_OF)
     row = value_book(conn, VB_AS_OF).iloc[0]
-    assert row["pnl_usd"] == pytest.approx(21_075)
+    assert row["pnl_usd"] == pytest.approx(6 * 1000 * (72.10 - 71.25))   # 5,100: contracts x multiplier x (m - f)
 
 
 VB_OPT = "EURUSD092226C-1"
@@ -742,13 +675,13 @@ def test_value_book_settled_but_not_yet_realised_is_unavailable():
 
 # --------------------------------------------------------------------------- stress
 def test_stress_move_1pct_and_scenario_arithmetic():
-    delta = {"BRL": -1_000_000.0, "EUR": 2_000_000.0}
+    delta = {"AUD": -1_000_000.0, "EUR": 2_000_000.0}
     moves = stress.move_1pct(delta)
-    assert moves["BRL"] == pytest.approx(-10_000.0)
-    result = stress.apply_scenario(delta, {"BRL": -0.10}, futures_usd_delta=500_000.0, futures_pct=0.02)
+    assert moves["AUD"] == pytest.approx(-10_000.0)
+    result = stress.apply_scenario(delta, {"AUD": -0.10})
+    assert set(result) == {"fx_pnl", "fx_total", "total"}
     assert result["fx_total"] == pytest.approx(100_000.0)
-    assert result["futures_pnl"] == pytest.approx(10_000.0)
-    assert result["total"] == pytest.approx(110_000.0)
+    assert result["total"] == pytest.approx(100_000.0)
 
 
 def test_stress_scenario_missing_currency_contributes_zero():
@@ -756,78 +689,38 @@ def test_stress_scenario_missing_currency_contributes_zero():
     assert result["fx_pnl"]["TRY"] == 0.0
 
 
-# --------------------------------------------------------------------- value_book: IRS
-VB_IRS = "IRSOIS-USD-77"
-VB_IRS_MATURITY = "2027-06-20"
+def test_stress_futures_line_is_gone():
+    """2026-09-24 (Phase 2, user yes): the equity index left the app with its futures line."""
+    with pytest.raises(TypeError):
+        stress.apply_scenario({"EUR": 1.0}, {"EUR": 0.01}, futures_usd_delta=1.0, futures_pct=0.1)
+    with pytest.raises(TypeError):
+        stress.run_scenarios({"EUR": 1.0}, {"s": {"EUR": 0.01}}, futures_pct_by_scenario={"s": 0.1})
+    assert not hasattr(stress, "futures_pct_by_scenario") and not hasattr(stress, "EQUITY_KEY")
 
 
-def _vb_irs(conn, trade_id="S1", quantity=10_000_000.0, fixed=0.04, maturity=VB_IRS_MATURITY):
-    conn.execute("INSERT OR IGNORE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
-                 (VB_IRS, "IRS", "USD", "USD", 1.0, 0, VB_IRS, maturity))
-    conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (trade_id, "MANUAL", VB_IRS, "IRS", trade_id, "2026-05-01", quantity, fixed,
-         "ACC", "CPTY", "STRAT", "TRADER", "irs", ""))
-    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        (trade_id, 1, "FIXED", "USD", -quantity, "2026-05-05", maturity, fixed, 0),
-        (trade_id, 2, "FLOAT", "USD", quantity, "2026-05-05", maturity, 0.0, 0),
-    ])
-    conn.commit()
+def test_stress_load_scenarios_ignores_an_equity_key_and_keeps_the_files_order(tmp_path):
+    p = tmp_path / "stress.yaml"
+    p.write_text("Z first:\n  EQUITY: -0.10\n  EUR: -0.02\n"
+                 "Equities -10%:\n  EQUITY: -0.10\n"
+                 "A last:\n  JPY: 0.05\n")
+    scenarios = stress.load_scenarios(p)
+    assert list(scenarios) == ["Z first", "A last"]          # the equity-only scenario is left out
+    assert scenarios["Z first"] == {"EUR": -0.02}
+    run = stress.run_scenarios({"EUR": 1_000_000.0, "JPY": -2_000_000.0}, scenarios)
+    assert run["Z first"] == {"fx_pnl": {"EUR": pytest.approx(-20_000.0)}, "fx_total": pytest.approx(-20_000.0),
+                              "total": pytest.approx(-20_000.0)}
+    assert run["A last"]["total"] == pytest.approx(-100_000.0)
+    # an EQUITY key handed straight to apply_scenario is ignored too, never read as a currency
+    assert stress.apply_scenario({"EUR": 1.0}, {"EQUITY": -0.1, "EUR": 0.5})["fx_pnl"] == {"EUR": 0.5}
 
 
-def _vb_irs_mark(conn, mark_type, value, as_of=VB_AS_OF, maturity=VB_IRS_MATURITY):
-    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-                 (as_of, VB_IRS, maturity, mark_type, value, "QL_PRICER", f"{as_of}T17:00:00-04:00"))
-    conn.commit()
+def test_stress_load_scenarios_missing_file_is_no_scenarios(tmp_path):
+    assert stress.load_scenarios(tmp_path / "none.yaml") == {}
 
 
-def test_value_book_irs_is_pv_plus_settled_cashflows():
-    """CLAUDE.md P&L conventions, IRS (2026-09-17): pnl_usd = PV_USD + CASHFLOW_USD from
-    marks_official at the swap's maturity; spot is identity (already USD)."""
-    conn = _vb_conn()
-    _vb_irs(conn)
-    _vb_irs_mark(conn, "PV_USD", 123_456.0)
-    _vb_irs_mark(conn, "CASHFLOW_USD", 10_000.0)
-    row = value_book(conn, VB_AS_OF).iloc[0]
-    assert row["product"] == "IRS" and row["status"] == "OPEN"
-    assert row["mark"] == pytest.approx(123_456.0) and row["mark_source"] == "QL_PRICER"
-    assert row["pnl_usd"] == pytest.approx(133_456.0) and row["spot"] == 1.0
-    assert row["reason"] == "" and "10,000.00" in row["note"]
-
-
-def test_value_book_irs_missing_cashflow_mark_is_nan_with_reason():
-    conn = _vb_conn()
-    _vb_irs(conn)
-    _vb_irs_mark(conn, "PV_USD", 123_456.0)
-    row = value_book(conn, VB_AS_OF).iloc[0]
-    assert math.isnan(row["pnl_usd"]) and "CASHFLOW_USD" in row["reason"]
-
-
-def test_value_book_irs_never_reads_reconciliation_only_bbg_pv():
-    """BBG_BDH PV_USD is reconciliation-only (CLAUDE.md official marks): a swap with only
-    a SWPM PV on file is Unavailable, not priced off it."""
-    conn = _vb_conn()
-    _vb_irs(conn)
-    conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-                 (VB_AS_OF, VB_IRS, VB_IRS_MATURITY, "PV_USD", 999.0, "BBG_BDH", "t"))
-    conn.commit()
-    row = value_book(conn, VB_AS_OF).iloc[0]
-    assert math.isnan(row["pnl_usd"]) and "PV_USD" in row["reason"]
-
-
-def test_value_book_matured_swap_reads_realised_row_only():
-    conn = _vb_conn()
-    _vb_irs(conn, maturity="2026-05-20")
-    _vb_irs_mark(conn, "PV_USD", 1.0, maturity="2026-05-20")   # a live mark that must NOT be used
-    _vb_irs_mark(conn, "CASHFLOW_USD", 1.0, maturity="2026-05-20")
-    row = value_book(conn, VB_AS_OF).iloc[0]
-    assert row["status"] == "SETTLED" and math.isnan(row["pnl_usd"]) and "cannot be frozen" in row["reason"]
-    conn.execute("INSERT INTO realised_pnl VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 ("S1", VB_IRS, "IRS", "USD", "2026-05-20", 7_500.0, 0.0, "PV_USD", 1.0,
-                  "2026-05-20", "QL_PRICER", 7_500.0, "t", ""))
-    conn.commit()
-    row = value_book(conn, VB_AS_OF).iloc[0]
-    assert row["status"] == "SETTLED" and row["pnl_usd"] == pytest.approx(7_500.0) and row["reason"] == ""
+def test_stress_config_file_loads_with_currency_moves_only():
+    scenarios = stress.load_scenarios()
+    assert scenarios and all(moves and "EQUITY" not in moves for moves in scenarios.values())
 
 
 # =========================================================================================

@@ -226,8 +226,8 @@ def test_headline_numbers_unavailable_without_rate():
 def test_headline_futures_unavailable_with_reason():
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, RATES)
-    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["ESU6 Index"],
-               "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
+    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["CLZ26 Comdty"],
+               "reason": "no FUTURE_PX on 2026-08-17 for CLZ26 Comdty"}
     headline = exposure.headline_numbers(result, futures)
     card = headline.children[0]
     assert card.children[1].children == "Unavailable"
@@ -235,7 +235,7 @@ def test_headline_futures_unavailable_with_reason():
 
 
 def test_exposure_section_has_headline_and_three_tables_only():
-    futures = {"value": 1.0, "by_instrument": {"ESU6 Index": 1.0}, "missing": [], "reason": ""}
+    futures = {"value": 1.0, "by_instrument": {"CLZ26 Comdty": 1.0}, "missing": [], "reason": ""}
     section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES, futures=futures)
     ids = _all_ids(section)
     assert exposure.HEADLINE_ID in ids
@@ -252,7 +252,7 @@ def test_exposure_section_has_headline_and_three_tables_only():
 def test_table_order_ladder_then_futures_then_risk():
     """User decision 2026-09-15 ("Reorder the Ladder tab", item 2): headline cards, then
     the currency ladder grid, then open futures, then the risk/scenario table."""
-    futures = {"value": 1.0, "by_instrument": {"ESU6 Index": 1.0}, "missing": [], "reason": ""}
+    futures = {"value": 1.0, "by_instrument": {"CLZ26 Comdty": 1.0}, "missing": [], "reason": ""}
     section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES, futures=futures)
     ids = _all_ids(section)
     assert ids.index(exposure.HEADLINE_ID) < ids.index(exposure.COMBINED_TABLE_ID)
@@ -263,9 +263,9 @@ def test_table_order_ladder_then_futures_then_risk():
 def test_combined_risk_frame_futures_row_present_with_mark():
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, RATES)
-    futures = {"value": 100_000.0, "by_instrument": {"ESU6 Index": 100_000.0}, "missing": [], "reason": ""}
+    futures = {"value": 100_000.0, "by_instrument": {"CLZ26 Comdty": 100_000.0}, "missing": [], "reason": ""}
     frame = exposure.combined_risk_frame(result, futures, scenarios={})
-    row = frame[frame[exposure.RISK_LABEL_COL] == "ESU6 Index"].iloc[0]
+    row = frame[frame[exposure.RISK_LABEL_COL] == "CLZ26 Comdty"].iloc[0]
     assert row["usd_delta"] == 100_000.0
     assert row["_unavailable"] == ""
 
@@ -273,15 +273,15 @@ def test_combined_risk_frame_futures_row_present_with_mark():
 def test_combined_risk_frame_futures_row_unavailable_with_reason():
     from engine.ladder.exposure import build_exposure
     result = build_exposure(RECORDS, RATES)
-    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["ESU6 Index"],
-               "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
+    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["CLZ26 Comdty"],
+               "reason": "no FUTURE_PX on 2026-08-17 for CLZ26 Comdty"}
     frame = exposure.combined_risk_frame(result, futures, scenarios={})
-    row = frame[frame[exposure.RISK_LABEL_COL] == "ESU6 Index"].iloc[0]
+    row = frame[frame[exposure.RISK_LABEL_COL] == "CLZ26 Comdty"].iloc[0]
     assert pd.isna(row["usd_delta"])
     assert "no FUTURE_PX" in row["_unavailable"]
     table = exposure.combined_risk_table(result, futures, scenarios={})
     inner = table.children[1].children[0]          # the ranked table; its pinned footer is children[1]
-    i, row = next((i, r) for i, r in enumerate(inner.data) if r[exposure.RISK_LABEL_COL] == "ESU6 Index")
+    i, row = next((i, r) for i, r in enumerate(inner.data) if r[exposure.RISK_LABEL_COL] == "CLZ26 Comdty")
     assert row["usd_delta"] == exposure.UNAVAILABLE   # the cell; the reason is its tooltip
     assert "no FUTURE_PX" in inner.tooltip_data[i]["usd_delta"]["value"]
 
@@ -290,7 +290,7 @@ def test_combined_risk_table_net_excludes_futures_gross_includes():
     from engine.ladder.exposure import build_exposure, portfolio_totals
     result = build_exposure(RECORDS, RATES)
     totals = portfolio_totals(result)
-    futures = {"value": 100_000.0, "by_instrument": {"ESU6 Index": 100_000.0}, "missing": [], "reason": ""}
+    futures = {"value": 100_000.0, "by_instrument": {"CLZ26 Comdty": 100_000.0}, "missing": [], "reason": ""}
     table = exposure.combined_risk_table(result, futures, scenarios={})
     inner, footer = table.children[1].children       # the totals are the pinned footer, never ranked
     assert all(r["kind"] != "total" for r in inner.data)
@@ -324,15 +324,15 @@ def test_summary_block_table_has_rate_source_row():
 
 
 def test_futures_table_present_with_mark():
-    futures = {"value": 100_000.0, "by_instrument": {"ESU6 Index": 100_000.0}, "missing": [], "reason": ""}
+    futures = {"value": 100_000.0, "by_instrument": {"CLZ26 Comdty": 100_000.0}, "missing": [], "reason": ""}
     table = exposure.futures_table(futures)
     assert table.id == exposure.FUTURES_TABLE_ID
-    assert table.data[0]["instrument"] == "ESU6 Index"
+    assert table.data[0]["instrument"] == "CLZ26 Comdty"
 
 
 def test_futures_table_unavailable_with_reason_when_no_mark():
-    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["ESU6 Index"],
-               "reason": "no FUTURE_PX on 2026-08-17 for ESU6 Index"}
+    futures = {"value": float("nan"), "by_instrument": {}, "missing": ["CLZ26 Comdty"],
+               "reason": "no FUTURE_PX on 2026-08-17 for CLZ26 Comdty"}
     table = exposure.futures_table(futures)
     assert table.data[0]["usd_delta"] == exposure.UNAVAILABLE
     assert "no FUTURE_PX" in table.tooltip_data[0]["usd_delta"]["value"]
@@ -421,8 +421,7 @@ def test_combined_frame_settled_column_first_then_dates_then_total():
 def test_summary_block_rate_row_shows_rate_as_quoted():
     """The rate is shown the way Bloomberg quotes it ('USDJPY 150'), not as a
     USD-per-local fraction ('0.006667'): a KRW mark stored at the wrong scale must be
-    visible at a glance (2026-09-18, 'krw is wrong by a factor of 1000'). The row is
-    'FX rate (as quoted)' since 2026-09-21: for an NDF currency it is not a spot."""
+    visible at a glance (2026-09-18, 'krw is wrong by a factor of 1000')."""
     from engine.ladder.exposure import build_exposure
     records = [_rec("o1", "JPY", -147_000_000.0, "2026-09-25"), _rec("o1", "USD", 1_000_000.0, "2026-09-25")]
     result = build_exposure(records, _jpy_rate(147.25))
@@ -445,34 +444,32 @@ def test_summary_block_names_suspect_rate_in_rate_source_row():
     """A spot 1,000x away from the book's fills is not used: the USD delta cell is
     blank and the 'Rate source' row carries the engine's reason instead of 'Bloomberg'."""
     from engine.ladder.exposure import build_exposure
-    records = [_rec("k1", "KRW", 1_413_138_000.0, "2026-09-21", pair="USDKRW", fill=1413.138),
-               _rec("k1", "USD", -1_000_000.0, "2026-09-21", pair="USDKRW", fill=1413.138)]
-    bad = {"KRW": {"rate": 1.3945, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "",
-                   "stale": False, "pair": "USDKRW"}}
+    records = [_rec("c1", "CNH", 7_142_500.0, "2026-11-18", pair="USDCNH", fill=7.1425),
+               _rec("c1", "USD", -1_000_000.0, "2026-11-18", pair="USDCNH", fill=7.1425)]
+    bad = {"CNH": {"rate": 7142.5, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "",
+                   "stale": False, "pair": "USDCNH"}}
     result = build_exposure(records, bad)
     frame, _ = exposure.summary_block_frame(result, records, rates=bad)
     by_label = frame.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc["USD delta", "KRW"] == ""
-    assert by_label.loc["Rate source", "KRW"].startswith("SUSPECT: official SPOT USDKRW 1.3945 is 1,013x away")
-    assert by_label.loc["FX rate (as quoted)", "KRW"] == "USDKRW 1.3945"
+    assert by_label.loc["USD delta", "CNH"] == ""
+    assert by_label.loc["Rate source", "CNH"].startswith("SUSPECT: official SPOT USDCNH 7,142.5 is 1,000x away")
+    assert by_label.loc["FX rate (as quoted)", "CNH"] == "USDCNH 7,142.5"
     # the full sentence is repeated under the block, where a table cell cannot cut it short
-    assert "KRW: official SPOT USDKRW 1.3945 is 1,013x away" in exposure.rate_reasons_caption(result).children
+    assert "CNH: official SPOT USDCNH 7,142.5 is 1,000x away" in exposure.rate_reasons_caption(result).children
 
 
 def test_settled_unknown_caption_lists_only_settlement_reasons():
     from engine.ladder.exposure_adapter import Unresolved
-    none = exposure.settled_unknown_caption([Unresolved("f1", "ESU6 Index", "non-FX product FUTURE excluded")])
+    none = exposure.settled_unknown_caption([Unresolved("f1", "CLZ26 Comdty", "non-FX product FUTURE excluded")])
     assert none is None
-    cap = exposure.settled_unknown_caption([
-        Unresolved("n1", "USDKRW", "settled 2026-09-16 (FX_FWD), USD settlement unknown: not realised yet"),
-        Unresolved("f1", "ESU6 Index", "non-FX product FUTURE excluded"),
-    ])
+    settled = Unresolved("f2", "CLQ26 Comdty", "settled 2026-08-31 (FUTURE), USD settlement unknown: not "
+                                               "realised yet -- no official mark on or before 2026-08-31")
+    cap = exposure.settled_unknown_caption([settled, Unresolved("f1", "CLZ26 Comdty", "non-FX product FUTURE excluded")])
+    assert cap.id == exposure.SETTLED_CAPTION_ID and len(cap.children) == 1
     text = _render_text(cap)
-    assert "1 settled non-deliverable ticket not yet in Settled cash" in text
-    assert "USDKRW (n1)" in text and "ESU6" not in text
-    section = exposure.exposure_section(RECORDS, [
-        Unresolved("n1", "USDKRW", "settled 2026-09-16 (FX_FWD), USD settlement unknown: not realised yet")],
-        "2026-08-17", rates=RATES)
+    assert "1 settled non-deliverable ticket not yet in Settled cash" in text and 'press "Pull Bloomberg now"' in text
+    assert "CLQ26 Comdty (f2)" in text and "CLZ26" not in text
+    section = exposure.exposure_section(RECORDS, [settled], "2026-08-17", rates=RATES)
     assert exposure.SETTLED_CAPTION_ID in _all_ids(section)
 
 
@@ -509,7 +506,7 @@ def test_render_shows_settled_cash_row_for_expired_ticket(tmp_path, monkeypatch)
     assert by_label["JPY"]["local_delta"] == -147_100_000
 
 
-# --------------------------------------------------------------------------- 2026-09-21: one table, NDF display
+# --------------------------------------------------------------------------- 2026-09-21: one table
 def test_exposure_section_folds_the_rate_delta_figures_into_the_grid_as_its_first_columns():
     """User, 2026-09-21: the rate / delta block as a table of its own above the grid was
     "super clunky with the other stuff above and scrolling odd". One table: FX rate, Local
@@ -542,163 +539,169 @@ def test_exposure_section_folds_the_rate_delta_figures_into_the_grid_as_its_firs
     assert usd_row["fx_rate"] == "" and usd_row["local_delta"] == ""
 
 
-def _ndf_records():
-    return [_rec("k1", "KRW", -1_394_500_000.0, "2026-09-17", pair="USDKRW", fill=1394.5),
-            _rec("k1", "USD", 1_000_000.0, "2026-09-17", pair="USDKRW", fill=1394.5),
+def _cnh_records():
+    return [_rec("c1", "CNH", 10_713_750.0, "2026-11-18", pair="USDCNH", fill=7.1425),
+            _rec("c1", "USD", -1_500_000.0, "2026-11-18", pair="USDCNH", fill=7.1425),
             _rec("o1", "JPY", -147_000_000.0, "2026-09-25"), _rec("o1", "USD", 1_000_000.0, "2026-09-25")]
 
 
-def _ndf_rates():
-    """The shape engine.ladder.ndf.apply_ndf_1m_rates gives an NDF currency."""
-    return {**_jpy_rate(),
-            "KRW": {"rate": 1394.5, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "", "stale": False,
-                    "pair": "USDKRW", "mark_type": "NDF_1M", "ticker": "KWN+1M Curncy", "label": "KWN+1M"}}
+def _cnh_rate(rate=7.1425):
+    return {"CNH": {"rate": rate, "inverted": True, "source": "BBG_BFXFORWARD", "timestamp": "", "stale": False,
+                    "pair": "USDCNH"}}
 
 
-def test_ndf_currency_row_label_rate_cell_and_fixing_caption():
+def test_every_currency_is_at_its_official_spot_under_its_plain_code():
+    """2026-09-24 (the NDFs left the app): no row label, rate cell, caption or legend line
+    speaks of NDFs or a 1M NDF price; every currency's rate is its official SPOT as quoted,
+    under the plain currency code."""
     from engine.ladder.exposure import build_exposure
-    from engine.ladder.ndf import FIXING_CAPTION
-    from engine.ladder.usd_marks import BASIS_NDF_1M
-    records, rates = _ndf_records(), _ndf_rates()
+    records, rates = _cnh_records(), {**_jpy_rate(), **_cnh_rate()}
     result = build_exposure(records, rates)
     frame, ccys = exposure.combined_frame(result, records)
-    labels = dict(zip(frame[exposure.CURRENCY_COL], frame[exposure.ROW_LABEL_COL]))
-    assert labels["KRW"] == "KRW (NDF)" and labels["JPY"] == "JPY" and labels["USD"] == "USD"
-    # the label never reaches an id or the filter: block columns and the currency filter use the plain code
-    block, block_ccys = exposure.summary_block_frame(result, records, rates=rates)
-    assert "KRW" in block.columns and block_ccys == ccys
+    assert list(frame[exposure.ROW_LABEL_COL])[:-1] == list(frame[exposure.CURRENCY_COL])[:-1] == ccys
+    block, _ = exposure.summary_block_frame(result, records, rates=rates)
     by_label = block.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc["FX rate (as quoted)", "KRW"] == "KWN+1M 1,394.5"
-    assert by_label.loc["FX rate (as quoted)", "JPY"] == "USDJPY 150"
-    assert by_label.loc["USD delta", "KRW"] == pytest.approx(-1_000_000)   # / 1,394.5, the 1M NDF price
-    assert by_label.loc["Rate source", "KRW"] == "Bloomberg 1M NDF"
-    only_krw = exposure.grid_records(records, exposure.LadderView(currencies=frozenset({"KRW"})))
-    assert {r["currency"] for r in only_krw} == {"KRW"}
-    filtered, _ = exposure.combined_frame(build_exposure(only_krw, rates), only_krw)
-    assert list(filtered[exposure.CURRENCY_COL]) == ["KRW", ""]
-    # the one-line caption under the grid, only when the book holds an NDF currency
-    section = exposure.exposure_section(records, [], "2026-08-17", rates=rates)
-    ids = _all_ids(section)
-    assert ids.index(exposure.COMBINED_TABLE_ID) < ids.index(exposure.NDF_CAPTION_ID)
-    assert _find_id(section, exposure.NDF_CAPTION_ID).children == FIXING_CAPTION
-    assert exposure.NDF_CAPTION_ID not in _all_ids(exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES))
-    # the USD-basis line names the currencies valued on the 1M NDF price
-    fwd = {("KRW", "2026-09-17"): {"rate": 1 / 1394.5, "basis": BASIS_NDF_1M},
-           ("JPY", "2026-09-25"): {"rate": 1 / 149.0, "basis": "outright"}}
-    text = exposure.usd_basis_caption(fwd).children
-    assert "valued at Bloomberg's 1M NDF price on every date" in text and text.rstrip(".").endswith("never at spot: KRW")
-    assert "1M NDF" not in exposure.usd_basis_caption({("JPY", "2026-09-25"): {"rate": 1 / 149.0, "basis": "outright"}}).children
-    legend = _render_text(exposure.legend())
-    assert "an NDF currency uses Bloomberg's 1M NDF price instead, never spot" in legend and "KRW KWN+1M" in legend
+    assert by_label.loc["FX rate (as quoted)", "CNH"] == "USDCNH 7.1425"
+    assert by_label.loc["USD delta", "CNH"] == pytest.approx(1_500_000)
+    assert by_label.loc["Rate source", "CNH"] == "Bloomberg"
+    section = exposure.exposure_section(records, [], "2026-09-17", rates=rates)
+    text = _render_text(section) + _render_text(exposure.legend())
+    assert "NDF" not in text and "1M" not in text and "fixing" not in text
+    assert not hasattr(exposure, "ndf_fixing_caption") and not hasattr(exposure, "NDF_BADGE")
+    assert "1M NDF" not in exposure.usd_basis_caption({("CNH", "2026-11-18"): {"rate": 0.14, "basis": "outright"}}).children
 
 
-def test_ndf_currency_with_no_1m_price_is_blank_with_its_reason_never_spot():
-    """CLAUDE.md hard rule 2: engine.ladder.ndf.apply_ndf_1m_rates gives an NDF currency
-    with no 1M NDF mark NO rate entry, even with an official SPOT on file. The tab shows
-    blanks and the engine's reason, never a spot-valued number."""
+def test_a_currency_with_no_spot_is_blank_with_its_reason():
     from engine.ladder.exposure import build_exposure
-    records = _ndf_records()
-    rates = _jpy_rate()                                     # no KRW entry: its 1M price is missing
+    records = _cnh_records()
+    rates = _jpy_rate()                                     # no CNH spot on file
     result = build_exposure(records, rates)
     block, _ = exposure.summary_block_frame(result, records, rates=rates)
     by_label = block.set_index(exposure.ROW_LABEL_COL)
-    assert by_label.loc["FX rate (as quoted)", "KRW"] == ""
-    assert by_label.loc["USD delta", "KRW"] == "" and by_label.loc["USD delta", exposure.TOTAL_COL] == ""
-    assert by_label.loc["Local delta", "KRW"] == -1_394_500_000      # the position itself is still shown
-    assert by_label.loc["Rate source", "KRW"].startswith("MISSING: the 1M NDF price for KRW (KWN+1M) is missing")
-    reasons = exposure.rate_reasons_caption(result).children
-    assert 'KRW: the 1M NDF price for KRW (KWN+1M) is missing: press "Pull Bloomberg now"' in reasons
-    assert "never valued at spot" in reasons and "JPY" not in reasons
-    assert exposure.rate_reasons_caption(build_exposure(records, _ndf_rates())) is None
-    frame, _ = exposure.combined_frame(result, records)
-    usd_row = frame.set_index(exposure.ROW_LABEL_COL).loc[exposure.USD_EQUIVALENT_ROW_LABEL]
-    assert usd_row["2026-09-17"] == "" and usd_row[exposure.TOTAL_COL] == ""   # blank, never a partial sum
-    assert round(usd_row["2026-09-25"]) == 20_000                                # -147m / 150 + 1m: JPY is priced
+    assert by_label.loc["FX rate (as quoted)", "CNH"] == ""
+    assert by_label.loc["USD delta", "CNH"] == "" and by_label.loc["USD delta", exposure.TOTAL_COL] == ""
+    assert by_label.loc["Local delta", "CNH"] == 10_713_750      # the position itself is still shown
+    assert by_label.loc["Rate source", "CNH"].startswith("MISSING: ")
+    assert "CNH: " in exposure.rate_reasons_caption(result).children
     card = exposure.headline_numbers(result).children[0]
     assert card.children[1].children == "Unavailable"
-    assert "the 1M NDF price is missing for KRW (KWN+1M)" in card.children[2].children
-    section = exposure.exposure_section(records, [], "2026-08-17", rates=rates)
-    ids = _all_ids(section)
-    assert ids.index(exposure.RATE_REASONS_ID) < ids.index(exposure.COMBINED_TABLE_ID)
-    krw = next(r for r in _find_id(section, exposure.COMBINED_TABLE_ID).data if r[exposure.CURRENCY_COL] == "KRW")
-    assert krw["fx_rate"] == "" and krw["usd_delta"] == ""                       # blank in the grid too, never spot
+    assert card.children[2].children == "no official SPOT: CNH"
+    assert exposure.missing_spot_reason([]) == ""
+    assert exposure.missing_spot_reason(["JPY", "CNH", "JPY"], "2026-08-17") == "no official SPOT for 2026-08-17: CNH, JPY"
 
 
-def _seed_ndf(conn, with_1m_price: bool):
+def _seed_cnh(conn, with_spot: bool):
     conn.execute(
         "INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, bbg_ticker, "
-        "expiry_date) VALUES ('USDKRW','FX','USD','KRW',1,1,'USDKRW Curncy','9999-12-31')")
+        "expiry_date) VALUES ('USDCNH','FX','USD','CNH',1,0,'USDCNH Curncy','9999-12-31')")
     conn.execute(
-        "INSERT INTO trades VALUES ('k1','XLSX','USDKRW','FX_FWD','k1','2026-08-03',1000000,1394.5,"
-        "'BNPP-IPBFX-NMMF','BNP','','trader','desc','')")
+        "INSERT INTO trades VALUES ('c1','XLSX','USDCNH','FX_FWD','c1','2026-08-03',1500000,7.1425,"
+        "'PB-FX-NMMF','CPTY-B','','trader','desc','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        ("k1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-03", "2026-09-21", 1394.5, 1),
-        ("k1", 2, "FX_NEAR", "KRW", -1_394_500_000, "2026-08-03", "2026-09-21", 1394.5, 0)])
-    stamp = "2026-08-17T17:00:00-04:00"
-    conn.execute("INSERT INTO marks VALUES ('2026-08-17','USDKRW','2026-08-17','SPOT',1380.0,'BBG_BFXFORWARD',?)", (stamp,))
-    if with_1m_price:
-        conn.execute("INSERT INTO marks VALUES ('2026-08-17','USDKRW','2026-08-17','NDF_1M',1394.5,'BBG_BFXFORWARD',?)",
-                     (stamp,))
+        ("c1", 1, "FX_NEAR", "USD", -1_500_000, "2026-08-03", "2026-11-18", 7.1425, 1),
+        ("c1", 2, "FX_NEAR", "CNH", 10_713_750, "2026-08-03", "2026-11-18", 7.1425, 1)])
+    if with_spot:
+        conn.execute("INSERT INTO marks VALUES ('2026-08-17','USDCNH','2026-08-17','SPOT',7.15,'BBG_BFXFORWARD',"
+                     "'2026-08-17T15:00:00-04:00')")
     conn.commit()
 
 
-def test_load_inputs_and_net_gross_usd_price_ndf_currencies_at_the_1m_ndf_mark(conn):
-    """ui/tabs/cash_ladder.py: the Ladder tab's inputs and the header's Net / Gross USD
-    delta read the SAME rates, apply_ndf_1m_rates(rates_from_marks), so they agree: KRW at
-    KWN+1M 1,394.5, not at the 1,380 spot that is also on file."""
-    from engine.ladder.ndf import fixing_date
-    from engine.ladder.usd_marks import BASIS_NDF_1M
-    _seed_ndf(conn, with_1m_price=True)
+def test_load_inputs_and_net_gross_usd_read_the_same_spot_rates(conn):
+    """The Ladder tab's inputs and the header's Net / Gross USD delta read the SAME rates,
+    rates_from_marks (official SPOT), so they agree; the grid dates each leg on its value date."""
+    _seed_cnh(conn, with_spot=True)
     inputs = cash_ladder.load_inputs(conn, "2026-08-17")
-    krw = inputs["rates"]["KRW"]
-    assert (krw["rate"], krw["mark_type"], krw["label"]) == (1394.5, "NDF_1M", "KWN+1M")
-    fixing = fixing_date("2026-09-21")
-    assert {r["settlement_date"] for r in inputs["records"] if r["currency"] == "KRW"} == {fixing}
-    assert inputs["forward_rates"][("KRW", fixing)]["basis"] == BASIS_NDF_1M
+    cnh = inputs["rates"]["CNH"]
+    assert (cnh["rate"], cnh["pair"]) == (7.15, "USDCNH") and "mark_type" not in cnh
+    assert {r["settlement_date"] for r in inputs["records"] if r["currency"] == "CNH"} == {"2026-11-18"}
     section = exposure.exposure_section(inputs["records"], inputs["unresolved"], "2026-08-17", rates=inputs["rates"],
                                         exposure_records=inputs["exposure_records"],
                                         forward_rates=inputs["forward_rates"])
-    grid = _find_id(section, exposure.COMBINED_TABLE_ID)
-    row = next(r for r in grid.data if r[exposure.CURRENCY_COL] == "KRW")
-    assert row[exposure.ROW_LABEL_COL] == "KRW (NDF)" and row[fixing] == -1_394_500_000
-    assert row["fx_rate"] == "KWN+1M 1,394.5"
+    row = next(r for r in _find_id(section, exposure.COMBINED_TABLE_ID).data if r[exposure.CURRENCY_COL] == "CNH")
+    assert row[exposure.ROW_LABEL_COL] == "CNH" and row["2026-11-18"] == 10_713_750
+    assert row["fx_rate"] == "USDCNH 7.15"
     totals = cash_ladder.net_gross_usd(conn, "2026-08-17")
     assert totals["available"] is True
-    # KRW -1,394,500,000 / 1,394.5 = -1,000,000 (at the 1,380 spot it would be -1,010,507); JPY from the seed
-    assert totals["net"] == pytest.approx(-1_000_000.0 - 147_100_000.0 / 147.12)
+    # CNH +10,713,750 / 7.15 ; JPY -147,100,000 / 147.12 from the seed
+    assert totals["net"] == pytest.approx(10_713_750 / 7.15 - 147_100_000.0 / 147.12)
 
 
-def test_net_gross_usd_names_a_missing_1m_ndf_price_and_keeps_the_spot_wording(conn):
-    _seed_ndf(conn, with_1m_price=False)                     # an official USDKRW SPOT is on file; it must not be used
-    assert "KRW" not in cash_ladder.load_inputs(conn, "2026-08-17")["rates"]
+def test_net_gross_usd_names_a_missing_spot(conn):
+    _seed_cnh(conn, with_spot=False)
+    assert "CNH" not in cash_ladder.load_inputs(conn, "2026-08-17")["rates"]
     totals = cash_ladder.net_gross_usd(conn, "2026-08-17")
     assert totals["available"] is False
-    assert totals["reason"] == ('the 1M NDF price is missing for KRW (KWN+1M): press "Pull Bloomberg now" to fetch '
-                                "it (NDF currencies are never valued at spot)")
+    assert totals["reason"] == "no official SPOT for 2026-08-17: CNH"
     conn.execute("DELETE FROM marks WHERE instrument_id = 'USDJPY'")
     conn.commit()
-    reason = cash_ladder.net_gross_usd(conn, "2026-08-17")["reason"]
-    assert reason.startswith("no official SPOT for 2026-08-17: JPY; the 1M NDF price is missing for KRW")
+    assert cash_ladder.net_gross_usd(conn, "2026-08-17")["reason"] == "no official SPOT for 2026-08-17: CNH, JPY"
 
 
-def test_settled_unknown_caption_words_a_fixed_ndf_apart_from_an_unmarked_settlement():
-    """An NDF that has fixed is waiting for its value date, not for a Bloomberg pull."""
-    from engine.ladder.exposure_adapter import NDF_FIXED_REASON_PREFIX, Unresolved
-    fixed = Unresolved("n1", "USDKRW", f"{NDF_FIXED_REASON_PREFIX} on 2026-09-17 (FX_FWD NDF, value date 2026-09-21), "
-                                       "USD settlement unknown: not realised yet")
-    text = _render_text(exposure.settled_unknown_caption([fixed]))
-    assert "1 NDF ticket has fixed and is waiting for the value date" in text
-    assert "no Bloomberg pull is needed" in text and "USDKRW (n1, value date 21 Sep 2026)" in text
-    assert "not yet in Settled cash" not in text
-    unmarked = Unresolved("n2", "USDTWD", "settled 2026-09-16 (FX_FWD), USD settlement unknown: not realised yet")
-    cap = exposure.settled_unknown_caption([fixed, unmarked])
-    assert cap.id == exposure.SETTLED_CAPTION_ID and len(cap.children) == 2
-    text = _render_text(cap)
-    assert "1 settled non-deliverable ticket not yet in Settled cash" in text and "USDTWD (n2)" in text
-    assert 'press "Pull Bloomberg now"' in text and "1 NDF ticket has fixed" in text
-    # a fixed NDF named under an empty grid still gets the fixing-dates line
-    section = exposure.exposure_section([], [fixed], "2026-09-18", rates={})
-    assert exposure.NDF_CAPTION_ID in _all_ids(section)
+def _futures_with_details():
+    """engine.ladder.futures_delta.futures_usd_delta's shape (book-positions, 2026-09-24): a
+    USD future, a CNY future at the USDCNY spot, and a JPY future with a price but no spot."""
+    s_cny = 1 / 7.10
+    details = {
+        "CLZ26 Comdty": {"contracts": 10.0, "multiplier": 1000.0, "price": 68.5, "expiry": "2026-11-20",
+                         "source": "BBG_BDH", "currency": "USD", "usd_per_unit": 1.0, "reason": ""},
+        "CUX26 Comdty": {"contracts": -30.0, "multiplier": 5.0, "price": 78_450.0, "expiry": "2026-11-16",
+                         "source": "BBG_BDH", "currency": "CNY", "usd_per_unit": s_cny, "reason": ""},
+        "JGZ26 Comdty": {"contracts": 3.0, "multiplier": 1000.0, "price": 15_420.0, "expiry": "2026-12-24",
+                         "source": "BBG_BDH", "currency": "JPY", "usd_per_unit": None,
+                         "reason": "no SPOT for JPY on 2026-09-17"},
+    }
+    return {"value": float("nan"),
+            "by_instrument": {"CLZ26 Comdty": 685_000.0, "CUX26 Comdty": -30 * 5 * 78_450.0 * s_cny},
+            "missing": ["JGZ26 Comdty"], "reason": "no SPOT for JPY on 2026-09-17 (JGZ26 Comdty)", "details": details}
+
+
+def test_futures_table_shows_each_futures_currency_beside_its_price_and_its_conversion():
+    futures = _futures_with_details()
+    table = exposure.futures_table(futures)       # details read from the dict itself
+    names = [c["name"] for c in table.columns]
+    assert names == ["Instrument", "Contracts", "Multiplier", "Settlement price", "Currency",
+                     "USD per unit (spot)", "USD delta"]
+    rows = {r["instrument"]: r for r in table.data}
+    assert (rows["CLZ26 Comdty"]["currency"], rows["CLZ26 Comdty"]["usd_per_unit"]) == ("USD", 1.0)
+    cu = rows["CUX26 Comdty"]
+    assert cu["settlement_price"] == 78_450.0 and cu["currency"] == "CNY"
+    assert cu["usd_per_unit"] == pytest.approx(1 / 7.10)
+    assert cu["usd_delta"] == pytest.approx(-30 * 5 * 78_450.0 / 7.10)     # the engine's figure, as it stands
+    # a price but no conversion spot: the price and currency shown, the conversion n/a with the reason
+    i = next(i for i, r in enumerate(table.data) if r["instrument"] == "JGZ26 Comdty")
+    jg = table.data[i]
+    assert jg["settlement_price"] == 15_420.0 and jg["currency"] == "JPY"
+    assert jg["usd_per_unit"] is None and jg["usd_delta"] == exposure.UNAVAILABLE
+    assert table.tooltip_data[i]["usd_per_unit"]["value"] == "no SPOT for JPY on 2026-09-17"
+    assert "no SPOT for JPY" in table.tooltip_data[i]["usd_delta"]["value"]
+    assert "settlement_price" not in table.tooltip_data[i]              # the price is there: nothing to explain
+    fmt = {c["id"]: c.get("format", {}) for c in table.columns}
+    assert fmt["usd_per_unit"]["nully"] == "n/a"                        # a missing conversion is never shown as zero
+
+
+def test_risk_table_names_each_futures_own_reason_and_applies_no_equity_move():
+    """The scenarios are FX moves (the equity index's futures line left engine.pnl.stress,
+    2026-09-24): a commodity future's scenario cells are blank with the reason on hover,
+    whatever other key a scenario carries."""
+    from engine.ladder.exposure import build_exposure
+    futures = _futures_with_details()
+    scenarios = {"Risk off": {"JPY": 0.05, "EQUITY": -0.10}}
+    result = build_exposure(RECORDS, RATES)
+    frame = exposure.combined_risk_frame(result, futures, scenarios=scenarios)
+    jg = frame[frame[exposure.RISK_LABEL_COL] == "JGZ26 Comdty"].iloc[0]
+    assert jg["_unavailable"] == "no SPOT for JPY on 2026-09-17"          # its own reason, not the total's
+    section = exposure.exposure_section(RECORDS, [], "2026-08-17", rates=RATES, futures=futures)
+    table = _find_id(section, exposure.RISK_TABLE_ID)
+    i = next(i for i, r in enumerate(table.data) if r[exposure.RISK_LABEL_COL] == "CLZ26 Comdty")
+    names = [c["id"] for c in table.columns][3:]
+    assert names, "config/stress.yaml has scenarios"
+    for name in names:
+        assert table.data[i][name] == ""
+        assert table.tooltip_data[i][name]["value"] == exposure.FUTURES_NO_SCENARIO
+    assert _find_id(section, exposure.FUTURES_SCENARIO_CAPTION_ID) is not None
+    # a currency row is still moved by the scenarios exactly as before
+    jpy = next(r for r in table.data if r[exposure.RISK_LABEL_COL] == "JPY")
+    assert any(jpy[n] not in ("", None) for n in names)
 
 
 def test_scenario_columns_follow_config_order_not_alphabetical():
@@ -733,16 +736,24 @@ def test_headline_merges_currencies_and_futures_with_no_open_futures():
     assert card.children[1].children == exposure.format_amount(totals["gross_usd"])
 
 
-def test_stress_yaml_covers_every_book_currency():
+def _stress_covered_currencies():
     from engine.pnl.stress import load_scenarios
-    scenarios = load_scenarios()
     covered = set()
-    for moves in scenarios.values():
-        covered.update(ccy for ccy in moves if ccy != "EQUITY")
-    book_currencies = {"AUD", "CAD", "CHF", "EUR", "GBP", "HKD", "IDR", "INR", "JPY",
-                       "KRW", "MXN", "NOK", "NZD", "SEK", "SGD", "TRY", "TWD", "XAU", "ZAR"}
-    missing = book_currencies - covered
+    for moves in load_scenarios().values():
+        covered.update(moves)
+    return covered
+
+
+def test_stress_yaml_covers_every_book_currency():
+    """The FX currencies of Jason's book (the sample blotter's FX hedges and FX options,
+    2026-09-24) each have a move in config/stress.yaml; CNH is pinned on its own below."""
+    book_currencies = {"EUR", "GBP", "JPY", "XAU"}
+    missing = book_currencies - _stress_covered_currencies()
     assert not missing, f"currencies with no scenario coverage: {missing}"
+
+
+def test_stress_yaml_covers_cnh():
+    assert "CNH" in _stress_covered_currencies()
 
 
 def test_ledger_tab_module_removed():

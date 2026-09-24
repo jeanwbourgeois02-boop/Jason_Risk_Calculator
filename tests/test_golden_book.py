@@ -1,6 +1,6 @@
 """The golden book (tests/golden_book.py): the sample blotter at synthetic marks must value
 exactly as tests/golden/book.json says. This is the infra agent's proof that a refactor
-changed no behaviour (CLAUDE.md "Infra agent"). A difference here is either a bug or a
+changed no behaviour (CLAUDE.md "Working mode"). A difference here is either a bug or a
 P&L change, and a P&L change needs the user's yes (hard rule 7) before the file is re-pinned
 with `python -m tests.golden_book --write`."""
 import json
@@ -29,11 +29,19 @@ def test_the_book_values_exactly_as_the_golden_says(actual):
 
 
 def test_the_fixture_still_covers_every_product_and_both_statuses(actual):
-    last = actual["days"][gb.AS_OF_DATES[-1]]["value_book"]
+    last_day = actual["days"][gb.AS_OF_DATES[-1]]
+    last = last_day["value_book"]
     products = {r["product"] for r in last}
-    statuses = {r["status"] for r in last}
-    assert {"FX_FWD", "FX_SPOT", "FUTURE", "IRS", "FX_OPTION"} <= products, products
-    assert {"OPEN", "SETTLED"} <= statuses, statuses
+    statuses = {(r["product"], r["status"]) for r in last}
+    assert {"FX_FWD", "FX_SPOT", "FUTURE", "FX_OPTION"} <= products, products
+    # an expired future, a settled FX forward and a closed-out option pair, beside the open book
+    assert {("FUTURE", "OPEN"), ("FUTURE", "SETTLED"), ("FX_FWD", "OPEN"), ("FX_FWD", "SETTLED"),
+            ("FX_OPTION", "OPEN"), ("FX_OPTION", "CLOSED")} <= statuses, statuses
+    by_id = {r["trade_id"]: r for r in last}
+    assert by_id["910000027"]["instrument_id"] == "CLQ26 Comdty" and by_id["910000027"]["status"] == "SETTLED"
+    # futures in every currency of the sample, each converted at its own USD pair
+    assert {r["currency"] for r in last_day["curve_positions"]["rows"]} >= {"USD", "CNY", "EUR", "GBP", "JPY"}
+    assert last_day["expiry_schedule"]["rows"], "the expiry schedule lists no contract"
 
 
 def test_the_synthetic_marks_still_price_the_book(actual):

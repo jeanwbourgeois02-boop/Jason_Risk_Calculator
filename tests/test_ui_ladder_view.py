@@ -13,7 +13,7 @@ from data.ingest import schema  # noqa: E402
 from tests.test_ui_ladder import _all_ids, _find_id, _rec, _render_text  # noqa: E402
 from ui.tabs import cash_ladder, exposure  # noqa: E402
 
-RAW_SAMPLE = Path(__file__).resolve().parents[1] / "data" / "raw" / "new_sample_trades.csv"
+SAMPLE = Path(__file__).resolve().parents[1] / "data" / "sample" / "blotter_sample.csv"
 
 
 def _spec_records():
@@ -244,12 +244,12 @@ def test_ladder_csv_is_the_displayed_grid_number_for_number_under_every_view():
         for i in range(len(frame)):
             for col in shown:
                 assert exposure.grid_cell(csv.iloc[i][names.get(col, col)]) == frame.iloc[i][col]
-    # an NDF row keeps its on-screen label in the file; an unmarked total is empty, never a partial sum
-    ndf = [_rec("k1", "KRW", -1_394_500_000.0, "2026-09-17", pair="USDKRW", fill=1394.5),
-           _rec("k1", "USD", 1_000_000.0, "2026-09-17", pair="USDKRW", fill=1394.5)]
-    csv = exposure.ladder_export_frame(build_exposure(ndf, {}), None, ccys=["KRW", "USD"])
-    assert list(csv[exposure.CURRENCY_COL]) == ["KRW (NDF)", "USD", exposure.USD_EQUIVALENT_ROW_LABEL]
-    assert csv.iloc[-1].isna()["Total"] and csv.iloc[0]["Total"] == pytest.approx(-1_394_500_000.0)
+    # every row carries its plain currency code; an unmarked total is empty, never a partial sum
+    cnh = [_rec("c1", "CNH", 10_713_750.0, "2026-11-18", pair="USDCNH", fill=7.1425),
+           _rec("c1", "USD", -1_500_000.0, "2026-11-18", pair="USDCNH", fill=7.1425)]
+    csv = exposure.ladder_export_frame(build_exposure(cnh, {}), None, ccys=["CNH", "USD"])
+    assert list(csv[exposure.CURRENCY_COL]) == ["CNH", "USD", exposure.USD_EQUIVALENT_ROW_LABEL]
+    assert csv.iloc[-1].isna()["Total"] and csv.iloc[0]["Total"] == pytest.approx(10_713_750.0)
 
 
 def test_exposure_section_renders_heatmap_caption_and_details_after_the_grid():
@@ -267,14 +267,14 @@ def test_exposure_section_renders_heatmap_caption_and_details_after_the_grid():
     assert _render_text(_find_id(filtered, exposure.HEADLINE_ID)) == _render_text(_find_id(unfiltered, exposure.HEADLINE_ID))
 
 
-@pytest.mark.skipif(not RAW_SAMPLE.exists(), reason="reference blotter sample not on disk")
-def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
-    """The spec's worked example (section 6): from the sample file as of 17 Sep 2026,
-    AUD = +23.77m settled cash from the 16 Sep value date, -21.11m on 24 Sep, +11.15m
-    on 28 Sep, net long 13.81m -- reproduced end to end through the Ladder tab's own
-    callback, spot trades (CURRENCY rows) included, with the currency filter on. The
-    grid's cells are numbers (ui.tabs.ranking, so they rank as numbers); the table
-    prints them through the column's format, 23,771,313 / (21,109,276)."""
+def test_sample_book_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
+    """The synthetic sample book (data/sample/blotter_sample.csv, 2026-09-24) end to end
+    through the Ladder tab's own callback as of 17 Sep 2026, with the currency filter on:
+    the USDCNH forward that settled 19 Aug sits in Settled cash (CNH -14,330,000), the two
+    open ones on their own value dates (+10,713,750 on 18 Nov, -7,108,000 on 20 Jan 2027),
+    the EURUSD spot of 11 Sep in Settled cash too (EUR -150,000). The grid's cells are
+    numbers (ui.tabs.ranking); the table prints them through the column's format. The
+    dates span two years, so the headers name the year."""
     import sys
     import types
     from data.ingest import blotter
@@ -283,48 +283,56 @@ def test_spec_worked_example_aud_as_of_2026_09_17_through_the_tab(tmp_path, monk
     monkeypatch.setitem(sys.modules, "ui.app", stub)
     db_path = tmp_path / "risk.db"
     conn = schema.connect(str(db_path))
-    res = blotter.load(str(RAW_SAMPLE), conn, strict=False)
+    res = blotter.load(str(SAMPLE), conn, strict=False)
     conn.close()
-    assert res.n_spot == 85
+    assert (res.n_forward, res.n_spot) == (8, 1)
     app = dash.Dash(__name__)
     cash_ladder.register_callbacks(app, get_db_path=lambda: str(db_path))
     callback = [v for k, v in app.callback_map.items() if "cash-ladder-table-container" in k][0]["callback"].__wrapped__
     from engine.ladder.exposure_adapter import SETTLED
-    body = callback("2026-09-17", 0, ["AUD", "USD", "CAD"], None, None, [], [])
+    body = callback("2026-09-17", 0, ["CNH", "USD", "EUR"], None, None, [], [])
     grid = _find_id(body, exposure.COMBINED_TABLE_ID)
     by_ccy = {r[exposure.CURRENCY_COL]: r for r in grid.data}
-    assert round(by_ccy["AUD"][SETTLED]) == 23_771_313   # the exact sample amount, 23,771,313.13
-    assert round(by_ccy["AUD"]["2026-09-24"]) == -21_109_276
-    assert round(by_ccy["AUD"]["2026-09-28"]) == 11_146_505
+    assert set(by_ccy) == {"CNH", "USD", "EUR"}          # the currency control shapes the grid
+    assert by_ccy["CNH"][SETTLED] == -14_330_000
+    assert by_ccy["CNH"]["2026-11-18"] == 10_713_750 and by_ccy["CNH"]["2027-01-20"] == -7_108_000
+    assert by_ccy["CNH"]["local_delta"] == -10_724_250
+    assert by_ccy["EUR"][SETTLED] == -150_000 and by_ccy["EUR"]["2026-10-21"] == 250_000
+    assert by_ccy["EUR"]["2026-12-16"] == -400_000
+    assert by_ccy["USD"][SETTLED] == 2_175_350         # 2,000,000 from the settled USDCNH + 175,350 from the spot
+    # no marks on file: no rate, blank with the reason, never zero
+    assert by_ccy["CNH"]["fx_rate"] == "" and by_ccy["CNH"]["usd_delta"] == ""
+    assert _find_id(body, exposure.RATE_REASONS_ID) is not None
     # displayed through the column's d3 format: whole units, grouped, a negative in parentheses
     from ui.tabs import ranking as rk
     fmt = {c["id"]: c["format"] for c in grid.columns if c["type"] == "numeric"}
-    assert fmt[SETTLED]["specifier"] == "(,.0f" and fmt["2026-09-24"] == fmt[SETTLED]
-    assert rk.display_length(by_ccy["AUD"][SETTLED], fmt[SETTLED]) == len("23,771,313")
-    assert rk.display_length(by_ccy["AUD"]["2026-09-24"], fmt["2026-09-24"]) == len("(21,109,276)")
+    assert fmt[SETTLED]["specifier"] == "(,.0f" and fmt["2026-11-18"] == fmt[SETTLED]
+    assert rk.display_length(by_ccy["CNH"][SETTLED], fmt[SETTLED]) == len("(14,330,000)")
     names = {c["id"]: c["name"] for c in grid.columns}
-    assert names[SETTLED] == exposure.SETTLED_ROW_LABEL and names["2026-09-24"] == "24 Sep"
-    assert round(by_ccy["AUD"]["local_delta"]) == 13_808_543  # exact sample amounts round up here
-    # the 51 USDCAD spot fills (all settled by 17 Sep) sit in the settled CAD balance
-    assert by_ccy["CAD"][SETTLED] not in (None, "")   # a number: not zero (None), not unmarked ('')
-    # filtered out of the grid and of the block above it by the currency control; the
-    # USD equivalent row is the pinned footer under the grid, not a row of it
-    assert set(by_ccy) == {"AUD", "USD", "CAD"}
+    assert names[SETTLED] == exposure.SETTLED_ROW_LABEL and names["2026-11-18"] == "18 Nov 26"
+    assert names["2027-01-20"] == "20 Jan 27"
     footer = _find_id(body, exposure.COMBINED_TABLE_ID + "-footer")
     assert [r[exposure.ROW_LABEL_COL] for r in footer.data] == [exposure.USD_EQUIVALENT_ROW_LABEL]
+    # the settled WTI Aug26 future the ledger has not realised is named under the grid, never valued
+    assert "CLQ26 Comdty (910000027)" in _render_text(_find_id(body, exposure.SETTLED_CAPTION_ID))
+    # the open futures table is the whole futures book, commodity contracts in their own currencies
+    futures = _find_id(body, exposure.FUTURES_TABLE_ID)
+    rows = {r["instrument"]: r for r in futures.data}
+    assert rows["CUX26 Comdty"]["currency"] == "CNY" and rows["JGZ26 Comdty"]["currency"] == "JPY"
+    assert rows["CUX26 Comdty"]["usd_delta"] == exposure.UNAVAILABLE    # no price on file: the reason on hover
 
     # the Ladder CSV download follows the display: a row per currency, the same view
     import io
     import pandas as pd
     download = [v for k, v in app.callback_map.items() if cash_ladder.DOWNLOAD_LADDER_ID in k][0]["callback"].__wrapped__
-    payload = download(1, "2026-09-17", ["AUD", "USD", "CAD"], None, None, [], [])
+    payload = download(1, "2026-09-17", ["CNH", "USD", "EUR"], None, None, [], [])
     assert payload["filename"] == "cash_ladder.csv"
     csv = pd.read_csv(io.StringIO(payload["content"]))
     shown = [r[exposure.ROW_LABEL_COL] for r in grid.data + footer.data]
     assert list(csv[exposure.CURRENCY_COL]) == shown and shown[-1] == exposure.USD_EQUIVALENT_ROW_LABEL
     assert list(csv.columns)[1] == exposure.SETTLED_ROW_LABEL and list(csv.columns)[-1] == "Total"
-    aud = csv.set_index(exposure.CURRENCY_COL).loc["AUD"]
-    assert aud[exposure.SETTLED_ROW_LABEL] == pytest.approx(23_771_313.0, abs=1) and aud["2026-09-24"] == pytest.approx(-21_109_276.0, abs=1)
+    cnh = csv.set_index(exposure.CURRENCY_COL).loc["CNH"]
+    assert cnh[exposure.SETTLED_ROW_LABEL] == pytest.approx(-14_330_000.0) and cnh["2026-11-18"] == pytest.approx(10_713_750.0)
 
 
 def test_grid_headers_are_short_and_name_the_year_only_when_the_dates_span_two():

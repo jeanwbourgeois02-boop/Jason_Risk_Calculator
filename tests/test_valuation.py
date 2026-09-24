@@ -25,7 +25,7 @@ import datetime as dt
 import pytest
 
 from data.ingest import schema
-from engine.pnl.valuation import _business_days_between, _mark_at, _mark_near, value_book
+from engine.pnl.valuation import _business_days_between, _mark_at, value_book
 
 
 def _insert_instrument(conn, instrument_id, base_ccy, quote_ccy):
@@ -282,22 +282,6 @@ def test_text_in_a_futures_multiplier_unprices_the_future_only():
     assert list(vb.loc[["t1", "t2"], "reason"]) == ["", ""]
 
 
-def test_a_swap_with_a_text_fixed_rate_still_prices_because_its_pnl_is_marks_only():
-    conn = schema.connect()
-    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','2031-06-01')")
-    _insert_trade(conn, "s1", "IRSOIS-USD-1", "IRS", "2026-06-01", 10_000_000, 3.85)
-    _insert_legs(conn, [("s1", 1, "FIXED", "USD", -10_000_000, "2026-06-03", "2031-06-01", 3.85, 1),
-                        ("s1", 2, "FLOAT", "USD", 10_000_000, "2026-06-03", "2031-06-01", 0.0, 1)])
-    for mark_type, value in (("PV_USD", 12_500.0), ("CASHFLOW_USD", 500.0)):
-        _insert_mark(conn, "2026-09-17", "IRSOIS-USD-1", "2031-06-01", mark_type, value, "QL_PRICER", "t")
-    conn.execute("UPDATE trades SET price = '24-Jul' WHERE trade_id = 's1'")
-    conn.commit()
-    vb = _by_id(conn)
-    assert vb.loc["s1", "reason"] == "" and vb.loc["s1", "pnl_usd"] == 13_000.0
-    assert vb.loc["s1", "fill"] != vb.loc["s1", "fill"]  # the cell is blank, never the raw text
-    assert "trades.price is not a number ('24-Jul')" in vb.loc["s1", "note"]
-
-
 def test_a_malformed_trade_date_unprices_that_trade_instead_of_raising():
     conn = schema.connect()
     _two_pairs(conn)
@@ -332,145 +316,6 @@ def test_settled_trade_whose_realised_row_is_unreadable_and_has_no_mark_names_th
     assert "settled trade old" in vb.loc["old", "reason"]
     assert "realised_pnl.pnl_usd is not a number ('2026-07-24')" in vb.loc["old", "reason"]
     assert list(vb.loc[["t1", "t2"], "reason"]) == ["", ""]
-
-
-# --------------------------------------------------------------------- NDF exit price (2026-09-22)
-# User: "the exit price is the fix on that day, as pulled from bbg", then "each ndf has a unique
-# fix". A fixed NDF's mark is the official NDF_FIX dated its fixing date exactly; a fix of another
-# day is never estimated into its place. With no fix for that date on file, the SPOT of the fixing
-# date (the near-marks estimate when that day's own is not on file), named as the substitute.
-# Seen 2026-09-22 on the imported snapshot: no marks that day, and the 21 USDIDR / USDBRL tickets
-# fixing that day took the 09-17 / 09-14 fixes through the time interpolation, moving Daily by
-# -126,820 although nothing had been priced.
-
-
-def _ndf_book(conn, settle="2026-09-24"):
-    """One USDIDR NDF ticket, n1: sold 1m USD at 17,900 for `settle` (Thu 2026-09-24, fixing
-    date = value date less 2 business days = Tue 2026-09-22)."""
-    conn.execute("INSERT INTO instruments VALUES ('USDIDR','FX','USD','IDR',1,1,'USDIDR Curncy','9999-12-31')")
-    _insert_trade(conn, "n1", "USDIDR", "FX_FWD", "2026-08-20", -1_000_000, 17_900.0)
-    _insert_legs(conn, [
-        ("n1", 1, "FX_NEAR", "USD", -1_000_000, "2026-08-20", settle, 17_900.0, 0),
-        ("n1", 2, "FX_NEAR", "IDR", 17_900_000_000, "2026-08-20", settle, 17_900.0, 0),
-    ])
-
-
-def _idr_mark(conn, day, mark_type, value):
-    source = "BBG_BDH" if mark_type == "NDF_FIX" else "BBG_BFXFORWARD"
-    _insert_mark(conn, day, "USDIDR", day, mark_type, value, source, f"{day}T15:00:00-04:00")
-
-
-def _n1(conn, day):
-    return value_book(conn, day).set_index("trade_id").loc["n1"]
-
-
-def test_a_fix_of_another_day_is_never_the_exit_price_the_spot_of_the_fixing_date_is():
-    """(a) fixes on file the day before and the day after the fixing date, none on it: the
-    ticket takes the SPOT of the fixing date -- not either fix, not a value between them --
-    and its note says so."""
-    conn = schema.connect()
-    _ndf_book(conn)
-    _idr_mark(conn, "2026-09-21", "NDF_FIX", 17_700.0)
-    _idr_mark(conn, "2026-09-23", "NDF_FIX", 17_800.0)
-    _idr_mark(conn, "2026-09-22", "SPOT", 17_850.0)
-    conn.commit()
-    row = _n1(conn, "2026-09-22")
-    assert (row["mark"], row["mark_source"], row["mark_date"]) == (17_850.0, "BBG_BFXFORWARD", "2026-09-22")
-    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (17_850.0 - 17_900.0) / 17_850.0)
-    assert row["note"] == ("NDF fixed 2026-09-22: no official fixing on file: at the spot of 2026-09-22 instead, "
-                           "converted at that spot, no delta, no carry")
-    assert row["reason"] == ""
-    # and on a later valuation date still the fixing date's spot, still neither fix
-    later = _n1(conn, "2026-09-25")
-    assert later["mark"] == 17_850.0 and later["pnl_usd"] == pytest.approx(row["pnl_usd"])
-
-
-def test_the_fix_of_the_fixing_date_is_the_exit_price_once_on_file():
-    """(b) with the fixing date's own fix on file it is the mark, whatever the spot and the
-    other days' fixes say; converted to USD at the fix itself (user decision 2026-09-22: a
-    USDXXX NDF settles its quote-currency difference at the fix), never at the spot."""
-    conn = schema.connect()
-    _ndf_book(conn)
-    _idr_mark(conn, "2026-09-21", "NDF_FIX", 17_700.0)
-    _idr_mark(conn, "2026-09-22", "NDF_FIX", 17_820.0)
-    _idr_mark(conn, "2026-09-22", "SPOT", 17_850.0)
-    conn.commit()
-    row = _n1(conn, "2026-09-23")
-    assert (row["mark"], row["mark_source"], row["mark_date"]) == (17_820.0, "BBG_BDH", "2026-09-22")
-    assert row["pnl_usd"] == pytest.approx(-1_000_000 * (17_820.0 - 17_900.0) / 17_820.0)
-    assert (row["spot"], row["spot_source"]) == (pytest.approx(1 / 17_820.0), "BBG_BDH")
-    assert row["note"] == "NDF fixed 2026-09-22: at the official fixing of 2026-09-22, converted at the fixing, no delta, no carry"
-
-
-def test_a_fixing_date_with_no_marks_at_all_carries_the_previous_close_and_the_pnl_stands_still():
-    """(c) the 2026-09-22 case: no pull yet on the fixing date, the previous close on file and
-    an older fix. The ticket carries the previous close's spot (named as the estimate it is),
-    never the older fix, so its P&L is exactly what it was the day before."""
-    conn = schema.connect()
-    _ndf_book(conn)
-    _idr_mark(conn, "2026-09-17", "NDF_FIX", 17_753.0)
-    _idr_mark(conn, "2026-09-21", "SPOT", 17_880.0)
-    conn.commit()
-    before = _n1(conn, "2026-09-21")   # open: marked along the day's curve, spot alone being spot
-    assert before["status"] == "OPEN"
-    assert before["pnl_usd"] == pytest.approx(-1_000_000 * (17_880.0 - 17_900.0) / 17_880.0)
-    row = _n1(conn, "2026-09-22")
-    assert row["mark"] == 17_880.0 and row["mark_source"] == "INTERP: SPOT of 2026-09-21 (nearest earlier close)"
-    assert row["pnl_usd"] == before["pnl_usd"]
-    assert row["note"] == ("NDF fixed 2026-09-22: no official fixing on file: at the spot of 2026-09-22 instead "
-                           "(INTERP: SPOT of 2026-09-21 (nearest earlier close)), converted at that spot, no delta, no carry")
-    assert row["reason"] == ""
-
-
-def test_mark_near_never_estimates_a_fixing():
-    """The near-marks rule stops at NDF_FIX: the exact row or nothing, whatever neighbours exist."""
-    conn = schema.connect()
-    _ndf_book(conn)
-    _idr_mark(conn, "2026-09-21", "NDF_FIX", 17_700.0)
-    _idr_mark(conn, "2026-09-23", "NDF_FIX", 17_800.0)
-    conn.commit()
-    assert _mark_near(conn, "USDIDR", "2026-09-22", "NDF_FIX", "2026-09-22") is None
-    assert _mark_near(conn, "USDIDR", "2026-09-21", "NDF_FIX", "2026-09-21") == (17_700.0, "BBG_BDH")
-
-
-def test_a_settled_ndf_with_no_realised_row_is_the_fixed_branch_figure_never_the_value_dates_spot():
-    """Reviewer, 2026-09-22 (critical): `_frozen_row` had no NDF branch, so a settled NDF with
-    no realised_pnl row (every settled NDF after an upload, until the next realise_settled) was
-    valued at the last SPOT on or before the VALUE date -- 28,037 before the ledger ran, 3,810
-    after, on this probe. One rule, one function: the provisional figure is exactly what the
-    open fixed branch gives at the fixing date, before and after the ledger runs."""
-    from engine.pnl import ledger
-    conn = schema.connect()
-    conn.execute("INSERT INTO instruments VALUES ('USDBRL','FX','USD','BRL',1,1,'USDBRL Curncy','9999-12-31')")
-    _insert_trade(conn, "b1", "USDBRL", "FX_FWD", "2026-08-14", 1_000_000, 5.20)   # value Wed 09-16, fixing Mon 09-14
-    _insert_legs(conn, [("b1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-14", "2026-09-16", 5.20, 0),
-                        ("b1", 2, "FX_NEAR", "BRL", -5_200_000, "2026-08-14", "2026-09-16", 5.20, 0)])
-    _insert_mark(conn, "2026-09-14", "USDBRL", "2026-09-14", "SPOT", 5.25, "BBG_BFXFORWARD", "2026-09-14T15:00:00-04:00")
-    _insert_mark(conn, "2026-09-16", "USDBRL", "2026-09-16", "SPOT", 5.35, "BBG_BFXFORWARD", "2026-09-16T15:00:00-04:00")
-    conn.commit()
-
-    def b1(day):
-        return value_book(conn, day).set_index("trade_id").loc["b1"]
-
-    # no fix yet: the fixing date's spot stands in, on the fixing date (open) and after the value
-    # date (settled, not yet frozen) alike; the value date's 5.35 never enters
-    open_row, settled_row = b1("2026-09-15"), b1("2026-09-21")
-    assert (open_row["status"], settled_row["status"]) == ("OPEN", "SETTLED")
-    assert open_row["pnl_usd"] == pytest.approx(1_000_000 * (5.25 - 5.20) / 5.25)
-    assert settled_row["pnl_usd"] == open_row["pnl_usd"]
-    assert settled_row["note"] == ("NDF fixed 2026-09-14: no official fixing on file: at the spot of 2026-09-14 instead, "
-                                   "converted at that spot, no delta, no carry; not yet recorded in realised_pnl")
-    # the fix lands: the same 3,810 on every screen, before the ledger runs and after
-    _insert_mark(conn, "2026-09-14", "USDBRL", "2026-09-14", "NDF_FIX", 5.22, "BBG_BDH", "2026-09-14T17:00:00-04:00")
-    conn.commit()
-    open_row, settled_row = b1("2026-09-15"), b1("2026-09-21")
-    assert open_row["pnl_usd"] == pytest.approx(1_000_000 * (5.22 - 5.20) / 5.22)   # converted at the fix itself
-    assert settled_row["pnl_usd"] == open_row["pnl_usd"]
-    assert (settled_row["mark"], settled_row["mark_date"], settled_row["mark_source"]) == (5.22, "2026-09-14", "BBG_BDH")
-    assert settled_row["note"] == ("NDF fixed 2026-09-14: at the official fixing of 2026-09-14, converted at the fixing, "
-                                   "no delta, no carry; not yet recorded in realised_pnl")
-    assert ledger.realise_settled(conn, "2026-09-21")["realised"] == 1
-    assert b1("2026-09-21")["pnl_usd"] == settled_row["pnl_usd"]
 
 
 # --------------------------------------------------------------------- non-USD futures
@@ -629,3 +474,132 @@ def test_a_settled_future_shows_the_conversion_its_realised_row_was_frozen_in():
     assert cu["pnl_usd"] == 20_000.0 * s and cu["note"] == "stored note"
     assert (cu["spot"], cu["spot_source"]) == (pytest.approx(s, rel=1e-15), "BBG_BFXFORWARD")
     assert (es["pnl_usd"], es["spot"], es["spot_source"]) == (15_000.0, 1.0, "identity")
+
+
+# --------------------------------------------------------------------- Phase 2 removal pin (2026-09-24)
+# The user approved on 2026-09-24 that IRS and NDF valuation leave the app (CLAUDE.md "Commodity
+# conversion plan", Phase 2). No P&L of a product that stays may move: every figure below was
+# computed with the code at HEAD e660974, before the removal, on this very book, and is pinned
+# to the bit.
+PIN_AS_OF = "2026-09-17"
+
+
+def _pin_book(conn):
+    """An FX forward (EURUSD, exact outright), a cross (EURGBP, outright interpolated along the
+    day's curve, converted at GBPUSD), XAUUSD with spot alone on file, a CNY future converted at a
+    USDCNY spot of the previous close (near marks in time), an open FX option, a closed-out FX
+    option pair, and a settled USDCNH forward with no realised row yet."""
+    def inst(iid, asset, base, quote, mult=1.0, expiry="9999-12-31"):
+        conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                     "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,0,?,?)", (iid, asset, base, quote, mult, iid, expiry))
+
+    def fx(tid, pair, base, quote, qty, fill, settle, trade_date="2026-08-03"):
+        _insert_trade(conn, tid, pair, "FX_FWD", trade_date, qty, fill)
+        _insert_legs(conn, [(tid, 1, "FX_NEAR", base, qty, trade_date, settle, fill, 1),
+                            (tid, 2, "FX_NEAR", quote, -qty * fill, trade_date, settle, fill, 1)])
+
+    def mark(day, iid, settle, mark_type, value, source):
+        _insert_mark(conn, day, iid, settle, mark_type, value, source, f"{day}T15:00:00-04:00")
+
+    for pair, base, quote in (("EURUSD", "EUR", "USD"), ("EURGBP", "EUR", "GBP"), ("GBPUSD", "GBP", "USD"),
+                              ("XAUUSD", "XAU", "USD"), ("USDCNY", "USD", "CNY"), ("USDCNH", "USD", "CNH")):
+        inst(pair, "FX", base, quote)
+    fx("fx1", "EURUSD", "EUR", "USD", 2_000_000, 1.10, "2026-10-20")
+    fx("cr1", "EURGBP", "EUR", "GBP", -1_500_000, 0.8450, "2026-11-18")
+    fx("au1", "XAUUSD", "XAU", "USD", 482.474, 4145.30, "2026-10-26")
+    fx("st1", "USDCNH", "USD", "CNH", 1_000_000, 7.18, "2026-08-19", trade_date="2026-07-15")
+    inst("CUZ6 Comdty", "FUTURE", "CU", "CNY", 5.0, "2026-12-15")
+    _insert_trade(conn, "cu1", "CUZ6 Comdty", "FUTURE", "2026-08-03", 10, 78_000.0)
+    _insert_legs(conn, [("cu1", 1, "NOTIONAL", "CNY", 3_900_000, "2026-08-03", "2026-12-15", 78_000.0, 0)])
+    for iid, tid, qty, fill, strike, typ, trade_date in (
+            ("EURUSD111926C-1", "op1", 5_000_000, 0.0123, 1.12, "CALL", "2026-08-03"),
+            ("EURUSD120126P-2", "cl1", 1_000_000, 0.0100, 1.08, "PUT", "2026-08-03"),
+            ("EURUSD120126P-3", "cl2", -1_000_000, 0.0130, 1.08, "PUT", "2026-09-01")):
+        expiry = "2026-11-19" if tid == "op1" else "2026-12-01"
+        inst(iid, "FX_OPTION", "EUR", "USD", 1.0, expiry)
+        conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type) VALUES (?,?,?)",
+                     (iid, strike, typ))
+        _insert_trade(conn, tid, iid, "FX_OPTION", trade_date, qty, fill)
+        _insert_legs(conn, [(tid, 1, "NOTIONAL", "EUR", qty, trade_date, expiry, fill, 0)])
+    mark(PIN_AS_OF, "EURUSD", "2026-10-20", "FWD_OUTRIGHT", 1.1234, "BBG_BFXFORWARD")
+    mark(PIN_AS_OF, "EURUSD", PIN_AS_OF, "SPOT", 1.1150, "BBG_BFXFORWARD")
+    mark(PIN_AS_OF, "EURGBP", "2026-10-19", "FWD_OUTRIGHT", 0.8470, "BBG_BFXFORWARD")
+    mark(PIN_AS_OF, "EURGBP", "2026-12-18", "FWD_OUTRIGHT", 0.8490, "BBG_BFXFORWARD")
+    mark(PIN_AS_OF, "EURGBP", PIN_AS_OF, "SPOT", 0.8460, "BBG_BFXFORWARD")
+    mark(PIN_AS_OF, "GBPUSD", PIN_AS_OF, "SPOT", 1.3310, "BBG_BFXFORWARD")
+    mark(PIN_AS_OF, "XAUUSD", PIN_AS_OF, "SPOT", 4201.75, "BBG_BFXFORWARD")
+    mark(PIN_AS_OF, "CUZ6 Comdty", "2026-12-15", "FUTURE_PX", 78_650.0, "BBG_BDH")
+    mark("2026-09-16", "USDCNY", "2026-09-16", "SPOT", 7.1234, "BBG_BFXFORWARD")
+    mark(PIN_AS_OF, "EURUSD111926C-1", "2026-11-19", "PREMIUM", 0.0150, "QL_OPTIONS_PRICER")
+    mark("2026-09-01", "EURUSD", "2026-09-01", "SPOT", 1.1050, "BBG_BFXFORWARD")
+    mark("2026-08-19", "USDCNH", "2026-08-19", "SPOT", 7.1650, "BBG_BFXFORWARD")
+    conn.commit()
+
+
+_PIN_FIELDS = ("status", "product", "mark", "mark_date", "mark_source", "spot", "spot_source", "pnl_local",
+               "pnl_usd", "pnl_spot_usd", "pnl_carry_usd", "reason", "note")
+
+_PIN_AT_HEAD = {
+    "fx1": ("OPEN", "FX_FWD", 1.1234, "2026-10-20", "BBG_BFXFORWARD", 1.0, "identity", 46799.99999999973,
+            46799.99999999973, 29999.999999999804, 16799.999999999927, "", ""),
+    "cr1": ("OPEN", "FX_FWD", 0.848, "2026-11-18", "INTERP: between EURGBP 2026-10-19 and 2026-12-18 marks of 2026-09-17",
+            1.331, "BBG_BFXFORWARD", -4500.000000000004, -5989.500000000005, -1996.500000000001,
+            -3993.0000000000036, "", ""),
+    "au1": ("OPEN", "FX_FWD", 4201.75, "2026-10-26", "INTERP: XAUUSD 2026-09-21 mark of 2026-09-17 (the only pillar)",
+            1.0, "identity", 27235.65729999991, 27235.65729999991, 27235.65729999991, 0.0, "", ""),
+    "st1": ("SETTLED", "FX_FWD", 7.165, "2026-08-19", "BBG_BFXFORWARD", 0.13956734124214934, "BBG_BFXFORWARD",
+            -14999.99999999968, -2093.5101186321954, -2093.5101186321954, 0.0, "",
+            "frozen at spot; not yet recorded in realised_pnl"),
+    "cu1": ("OPEN", "FUTURE", 78650.0, "2026-12-15", "BBG_BDH", 0.14038240166212762,
+            "INTERP: SPOT of 2026-09-16 (nearest earlier close)", 32500.0, 4562.428054019148, 4562.428054019148,
+            0.0, "", ""),
+    "op1": ("OPEN", "FX_OPTION", 0.015, "2026-11-19", "QL_OPTIONS_PRICER", 1.115, "BBG_BFXFORWARD",
+            13499.999999999996, 15052.499999999996, 15052.499999999996, 0.0, "", ""),
+    "cl1": ("CLOSED", "FX_OPTION", 0.013, "2026-09-01", "CLOSE_OUT_FILL", 1.105, "BBG_BFXFORWARD",
+            2999.999999999999, 3314.999999999999, 3314.999999999999, 0.0, "",
+            "closed out 2026-09-01: bought and sold back in full (trades cl1, cl2); realised at the closing fill "
+            "0.013, no PREMIUM mark needed"),
+    "cl2": ("CLOSED", "FX_OPTION", 0.013, "2026-09-01", "CLOSE_OUT_FILL", 1.105, "BBG_BFXFORWARD",
+            0.0, 0.0, 0.0, 0.0, "",
+            "closed out 2026-09-01: bought and sold back in full (trades cl1, cl2); realised at the closing fill "
+            "0.013, no PREMIUM mark needed"),
+}
+
+
+@pytest.mark.parametrize("trade_id", sorted(_PIN_AT_HEAD))
+def test_the_products_that_stay_price_to_the_bit_what_they_did_before_the_irs_and_ndf_removal(trade_id):
+    conn = schema.connect()
+    _pin_book(conn)
+    vb = _by_id(conn, PIN_AS_OF)
+    assert sorted(vb.index) == sorted(_PIN_AT_HEAD)
+    assert tuple(vb.loc[trade_id, f] for f in _PIN_FIELDS) == _PIN_AT_HEAD[trade_id]
+
+
+def test_a_forward_flagged_non_deliverable_is_valued_as_a_deliverable_forward_and_a_swap_is_not_valued():
+    """After the removal a forward on an `is_ndf = 1` instrument, looked at past what used to be
+    its fixing date, is marked at its own value date's outright and converted at spot like any
+    FX forward (no fixing, no NDF_FIX read), and a leftover IRS trade gets no row at all."""
+    conn = schema.connect()
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('USDIDR','FX','USD','IDR',1,1,'USDIDR Curncy','9999-12-31')")
+    _insert_trade(conn, "n1", "USDIDR", "FX_FWD", "2026-08-20", -1_000_000, 17_900.0)
+    _insert_legs(conn, [("n1", 1, "FX_NEAR", "USD", -1_000_000, "2026-08-20", "2026-09-24", 17_900.0, 0),
+                        ("n1", 2, "FX_NEAR", "IDR", 17_900_000_000, "2026-08-20", "2026-09-24", 17_900.0, 0)])
+    stamp = "2026-09-23T15:00:00-04:00"
+    _insert_mark(conn, "2026-09-23", "USDIDR", "2026-09-24", "FWD_OUTRIGHT", 17_860.0, "BBG_BFXFORWARD", stamp)
+    _insert_mark(conn, "2026-09-23", "USDIDR", "2026-09-23", "SPOT", 17_850.0, "BBG_BFXFORWARD", stamp)
+    _insert_mark(conn, "2026-09-22", "USDIDR", "2026-09-22", "NDF_FIX", 17_820.0, "BBG_BDH", stamp)
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'','2031-06-01')")
+    _insert_trade(conn, "s1", "IRSOIS-USD-1", "IRS", "2026-06-01", 10_000_000, 3.85)
+    _insert_legs(conn, [("s1", 1, "FIXED", "USD", -10_000_000, "2026-06-03", "2031-06-01", 3.85, 1),
+                        ("s1", 2, "FLOAT", "USD", 10_000_000, "2026-06-03", "2031-06-01", 0.0, 1)])
+    _insert_mark(conn, "2026-09-23", "IRSOIS-USD-1", "2031-06-01", "PV_USD", 12_500.0, "QL_PRICER", stamp)
+    conn.commit()
+    vb = _by_id(conn, "2026-09-23")
+    assert list(vb.index) == ["n1"]
+    n1 = vb.loc["n1"]
+    assert (n1["status"], n1["mark"], n1["mark_date"], n1["mark_source"]) == ("OPEN", 17_860.0, "2026-09-24", "BBG_BFXFORWARD")
+    assert (n1["spot"], n1["spot_source"]) == (1 / 17_850.0, "BBG_BFXFORWARD")
+    assert n1["pnl_usd"] == -1_000_000 * (17_860.0 - 17_900.0) * (1 / 17_850.0)
+    assert n1["note"] == "" and n1["reason"] == ""

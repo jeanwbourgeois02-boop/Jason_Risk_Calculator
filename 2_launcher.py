@@ -10,7 +10,9 @@ diagnostics).
                                  or CI that doesn't go through this file
     py 2_launcher.py marks-export   Bloomberg PC: write the marks on file to data/bbg_snapshot/ and commit it
     py 2_launcher.py marks-import   PC with no Terminal: load data/bbg_snapshot/ (after a git pull)
-    py 2_launcher.py reprice        re-price the swaps, then the FX options, from the marks on file (no Bloomberg)
+    py 2_launcher.py reprice        re-price the FX options from the marks on file, day by day (no Bloomberg)
+    py 2_launcher.py bbg-check      Bloomberg PC: check every contract root's ticker against config/contracts.csv
+    py 2_launcher.py contracts-apply <worksheet>   apply the check's fixes worksheet to config/contracts.csv
 
 Backfilling P&L history from Bloomberg daily closes is part of every "Pull Bloomberg now"
 in the app (data/bloomberg/live.py runs data/bloomberg/backfill.py straight after
@@ -674,6 +676,26 @@ def doctor_checks(d: Doctor, bloomberg: bool, git: bool = True) -> None:
             d.add("git", None, "git not available")
 
 
+TICKER_CHECK = "data.bloomberg.ticker_check"
+
+
+def doctor_ticker_check(d: Doctor) -> int:
+    """`doctor --bloomberg`'s run of the ticker check (every contract root, no book check:
+    202 securities in 5 requests on today's universe). Exit 2, Bloomberg unreachable or
+    silent, is a doctor failure; exit 1, roots needing attention, is information: the
+    report and the fixes worksheet under reports/ say what to change. Returns the exit code."""
+    code = run([sys.executable, "-m", TICKER_CHECK], check=False)
+    if code == 0:
+        d.add("bbg tickers", True, "every contract root's ticker agrees with config/contracts.csv")
+    elif code == 2:
+        d.add("bbg tickers", False, "Bloomberg could not be reached or did not answer the ticker check",
+              "log in to the Bloomberg Terminal on this PC, then  py 2_launcher.py bbg-check")
+    else:
+        d.add("bbg tickers", None, "some contract roots need attention: read reports/bbg_check_*.txt, set 'apply' "
+                                   "in reports/contract_fixes_*.csv, then  py 2_launcher.py contracts-apply <worksheet>")
+    return code
+
+
 def cmd_doctor(args) -> int:
     if not in_venv() and VENV_PY.exists():
         return reexec_in_venv(sys.argv[1:])
@@ -689,6 +711,9 @@ def cmd_doctor(args) -> int:
         code = run([sys.executable, str(ROOT / "tools" / "bloomberg_terminal_probe.py"), "--once"], check=False)
         d.add("bbg requests", code == 0, "every spot/forward request answered" if code == 0 else "see FAILED lines above",
               "read the Bloomberg error text above; reports/bloomberg_diagnostic_*.txt has the detail")
+        say()
+        say("Bloomberg ticker check of every contract root (read-only, reports under reports/):")
+        doctor_ticker_check(d)
     # Code health, informational: the audit the infra agent works from (tools/health.py).
     # Never fails doctor; `py 2_launcher.py health` is the command that exits 1 on a breach.
     try:
@@ -784,11 +809,9 @@ def cmd_marks_import(args) -> int:
 # ----------------------------------------------------------------------------- reprice
 
 def cmd_reprice(args) -> int:
-    """Re-price the swaps and then the FX options from the marks on file, day by day, asking
-    Bloomberg nothing (user decision 2026-09-22: the OIS curve bootstrap moved to flat
-    forwards, so the past days on file are re-run). Rates first, because the options price
-    off the same OIS curves. Runs inside .venv (QuantLib). Exit 1 when either recalc reports
-    an error, or when the swaps failed on every trade of a day that had quotes."""
+    """Re-price the FX options from the marks on file, day by day, asking Bloomberg nothing
+    (engine/options/store.py::recalc_on_file): how the past days are re-run after a pricer
+    change. Runs inside .venv (QuantLib). Exit 1 when the recalc reports an error."""
     if not in_venv() and VENV_PY.exists():
         return reexec_in_venv(sys.argv[1:])
     if not db_path().exists():
@@ -797,26 +820,14 @@ def cmd_reprice(args) -> int:
     from data.bloomberg.live import book_today
     from data.ingest.schema import connect
     from engine.options import store as options_store
-    from engine.rates import store as rates_store
     as_of = args.as_of or book_today().isoformat()
     say(f"  reprice: as of {as_of}, since {args.since or 'the earliest data on file'}, from the marks on file")
     conn = connect(db_path())
     try:
-        rates = rates_store.recalc_on_file(conn, as_of, since=args.since)
         options = options_store.recalc_on_file(conn, as_of, since=args.since)
     finally:
         conn.close()
     code = 0
-    for day in rates.get("days", []):
-        say(f"  rates    {day['day']}  priced {day['priced']}  failed {len(day.get('failed', []))}")
-    say(f"  rates: {rates.get('priced', 0)} priced, {rates.get('failed', 0)} failed over {len(rates.get('days', []))} day(s)")
-    if rates.get("error"):
-        say(f"  rates: error {rates['error']}")
-        code = 1
-    dead_days = [d["day"] for d in rates.get("days", []) if not d["priced"] and d.get("failed")]
-    if dead_days:
-        say(f"  rates: nothing priced on {', '.join(dead_days)} (every swap failed on a day with quotes)")
-        code = 1
     for day in options.get("days", []):
         say(f"  options  {day['day']}  priced {day['priced']}  skipped {len(day.get('skipped', []))}")
     say(f"  options: {options.get('priced', 0)} priced, {options.get('skipped', 0)} skipped over {len(options.get('days', []))} day(s)")
@@ -824,6 +835,76 @@ def cmd_reprice(args) -> int:
         say(f"  options: error {options['error']}")
         code = 1
     return code
+
+
+# ----------------------------------------------------------------------------- bbg-check
+
+# The ticker check's own flags, passed through as given (data/bloomberg/ticker_check.py::_parser).
+BBG_CHECK_FLAGS = (("dry_run", "--dry-run"), ("book", "--book"), ("search", "--search"))
+BBG_CHECK_OPTIONS = (("sector", "--sector"), ("db", "--db"), ("host", "--host"), ("port", "--port"),
+                     ("out", "--out"), ("limit", "--limit"))
+
+
+def bbg_check_argv(args) -> list:
+    """The ticker check's command line rebuilt from this parser's namespace, flag for flag."""
+    argv = [flag for dest, flag in BBG_CHECK_FLAGS if getattr(args, dest)]
+    for root in args.root or []:
+        argv += ["--root", root]
+    for dest, flag in BBG_CHECK_OPTIONS:
+        value = getattr(args, dest)
+        if value is not None:
+            argv += [flag, str(value)]
+    return argv
+
+
+def cmd_bbg_check(args) -> int:
+    """Bloomberg PC, on request (hard rule 8): ask Bloomberg what each contract root's ticker
+    really is and compare it with config/contracts.csv (data/bloomberg/ticker_check.py). Runs
+    `python -m data.bloomberg.ticker_check` inside .venv (blpapi) and returns its exit code:
+    0 all OK, 1 something needs attention, 2 Bloomberg unreachable."""
+    if not in_venv() and VENV_PY.exists():
+        return reexec_in_venv(sys.argv[1:])
+    return run([sys.executable, "-m", TICKER_CHECK, *bbg_check_argv(args)], check=False)
+
+
+# ----------------------------------------------------------------------------- contracts-apply
+
+def cmd_contracts_apply(args) -> int:
+    """Apply the ticker check's fixes worksheet (reports/contract_fixes_*.csv, the rows whose
+    `apply` is yes) to config/contracts.csv through data.contracts.apply_fixes, which
+    validates the whole file before writing it. Exit 0 when no row was refused, else 1."""
+    if not in_venv() and VENV_PY.exists():
+        return reexec_in_venv(sys.argv[1:])
+    from data.contracts import apply_fixes
+    path = Path(args.worksheet)
+    if not path.exists():
+        say(f"  contracts-apply: no worksheet at {path}")
+        return 1
+    try:
+        r = apply_fixes(path, dry_run=args.dry_run)
+    except (ValueError, OSError) as exc:
+        say(f"  contracts-apply: the worksheet could not be read: {exc}")
+        return 1
+    for e in r["applied"]:
+        line = f"  applied  row {e['row']}: {e['root_id']} {e['field']} {e['before']!r} -> {e['after']!r}"
+        if e.get("quote_unit_before") is not None:
+            line += f", quote unit {e['quote_unit_before']!r} -> {e['quote_unit_after']!r}"
+        if e.get("multiplier_before") != e.get("multiplier_after"):
+            line += f", multiplier {e.get('multiplier_before')} -> {e.get('multiplier_after')}"
+        say(line)
+    for e in r["skipped"]:
+        say(f"  skipped  row {e['row']}: {e['root_id']} {e['field']} (apply is {e['apply']!r}, not yes)")
+    for e in r["refused"]:
+        say(f"  refused  row {e['row']}: {e['root_id']} {e['field']}: {e['why']}")
+    n_applied, n_skipped, n_refused = len(r["applied"]), len(r["skipped"]), len(r["refused"])
+    say(f"  contracts-apply: {n_applied} applied, {n_skipped} skipped, {n_refused} refused")
+    if r["written"]:
+        say("  config/contracts.csv rewritten. Run the check again to confirm:  py 2_launcher.py bbg-check")
+    elif args.dry_run and n_applied:
+        say("  dry run: config/contracts.csv not written")
+    else:
+        say("  config/contracts.csv not written")
+    return 0 if not n_refused else 1
 
 
 # ----------------------------------------------------------------------------- health
@@ -884,11 +965,35 @@ def build_parser() -> argparse.ArgumentParser:
     mi.add_argument("--force", action="store_true", help="import even on a PC that has Bloomberg")
     mi.set_defaults(func=cmd_marks_import)
 
-    rp = sub.add_parser("reprice", help="re-price the swaps, then the FX options, from the marks on file, day by day "
+    rp = sub.add_parser("reprice", help="re-price the FX options from the marks on file, day by day "
                                         "(asks Bloomberg nothing)")
     rp.add_argument("--as-of", dest="as_of", metavar="YYYY-MM-DD", help="the last day to price (default: the book date)")
     rp.add_argument("--since", metavar="YYYY-MM-DD", help="the first day to price (default: the earliest data on file)")
     rp.set_defaults(func=cmd_reprice)
+
+    bc = sub.add_parser("bbg-check", help="Bloomberg PC: check every contract root's ticker, currency and scale "
+                                          "against config/contracts.csv and write a fixes worksheet under reports/ "
+                                          "(exit 0 all OK, 1 attention, 2 Bloomberg unreachable)")
+    bc.add_argument("--dry-run", action="store_true", help="print what would be asked; ask nothing, write nothing")
+    bc.add_argument("--root", action="append", default=[], metavar="ROOT_ID",
+                    help="one contract root, e.g. NYMEX:CL (repeatable)")
+    bc.add_argument("--sector", help="only the roots of this sector (energy, metals, ...)")
+    bc.add_argument("--book", action="store_true",
+                    help="only the roots the book holds; reads --db, else the app's database")
+    bc.add_argument("--db", help="the app's database, for the book check (opened read-only)")
+    bc.add_argument("--search", action="store_true",
+                    help="search Bloomberg for candidates for every root it does not know")
+    bc.add_argument("--host", help="Bloomberg API host (default localhost)")
+    bc.add_argument("--port", type=int, help="Bloomberg API port (default 8194)")
+    bc.add_argument("--out", help="folder for the reports (default reports/)")
+    bc.add_argument("--limit", type=int, help="only the first N roots")
+    bc.set_defaults(func=cmd_bbg_check)
+
+    ca = sub.add_parser("contracts-apply", help="apply the rows marked apply=yes of the bbg-check fixes worksheet "
+                                                "to config/contracts.csv (exit 1 when a row was refused)")
+    ca.add_argument("worksheet", help="the worksheet, reports/contract_fixes_<stamp>.csv")
+    ca.add_argument("--dry-run", action="store_true", help="say what would change; write nothing")
+    ca.set_defaults(func=cmd_contracts_apply)
 
     sub.add_parser("_load_sample", help=argparse.SUPPRESS).set_defaults(func=cmd_load_sample)
 

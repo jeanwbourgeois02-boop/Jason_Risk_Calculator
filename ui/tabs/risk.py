@@ -9,18 +9,25 @@ Layout, top to bottom (`body`):
   1. `caption_block`: as-of, the history folder used with its last close and the lag-2
      date (or, with no history, its reason and every figure below n/a), the parameters
      in one line, the config and history notes, and the engine's `missing` list.
-  2. `book_cards`: Net USD, Gross USD, DV01, Blended vol (% of target, flagged when
+  2. `book_cards`: Net USD, Gross USD, Blended vol (% of target, flagged when
      `over_vol_target`), 1y 95 % VaR (1-day), Worst day ex shocks (its date, % of cap,
      flagged when `over_cap`), Worst day raw (its date). The definition is the card's
      hover; a NaN figure reads "n/a" with its reason as the hover and as the note.
   3. `underlyer_section`: the key table, one row per underlyer in the engine's order
-     (gross USD desc, rates last) and the Book pinned under it (`ranking.with_footer`).
-     Ranked (`ui.tabs.ranking`): numbers stored as numbers; a missing figure is the
-     string "n/a" (ranks last) with its reason as the cell's tooltip; a figure that does
-     not apply to the row (Net USD on a rates row, DV01 on a currency) is None, blank.
-  4. `scenario_section`: one row per scenario of config/stress.yaml (Total, FX total,
-     Equity move, Equity P&L) and a collapsible currency x scenario matrix from `fx_pnl`.
+     (gross USD desc) and the Book pinned under it (`ranking.with_footer`). Ranked
+     (`ui.tabs.ranking`): numbers stored as numbers; a missing figure is the string
+     "n/a" (ranks last) with its reason as the cell's tooltip; a figure that does not
+     apply to the row is None, blank.
+  4. `scenario_section`: one row per scenario of config/stress.yaml (Total, FX total)
+     and a collapsible currency x scenario matrix from `fx_pnl`.
   5. `definitions_block`: the formulas and the parameters used.
+
+The macro trader's rates (DV01, par swap rates) and equity-index (ES futures + SPX
+options) underlyers left the app with the commodity conversion (user, 2026-09-24,
+CLAUDE.md "Commodity conversion plan", Phase 2): the tab shows the currency and metal
+rows, and any other kind the engine adds (Phase 4's commodities), but never a
+`RETIRED_KINDS` row, its DV01, its scenario equity line or its `missing` entries, even
+while `book_risk` still returns them.
 
 The tab has no date picker: it follows the header's as-of store
 (`ui.tabs.header.AS_OF_STORE_ID`) and re-renders in place on the data revision
@@ -54,7 +61,11 @@ MATRIX_TABLE_ID = "risk-scenario-matrix"
 DEFINITIONS_ID = "risk-definitions"
 
 NA = "n/a"
-KIND_LABELS = {"FX": "FX", "METAL": "Metal", "EQUITY_INDEX": "Equity index", "RATES": "Rates", "BOOK": "Book"}
+KIND_LABELS = {"FX": "FX", "METAL": "Metal", "BOOK": "Book"}
+# underlyer kinds of the macro book, removed 2026-09-24: never rendered, nor their `missing` entries
+RETIRED_KINDS = ("RATES", "EQUITY_INDEX")
+RETIRED_MISSING_PREFIXES = ("rates:", "equity index:")
+RETIRED_HISTORY_FILES = ("swap_rates",)      # the rates rows' par swap rate history
 METRICS = ("vol_blended_ann_usd", "vol_trailing_ann_usd", "vol_crisis_ann_usd", "var95_1d_usd",
            "worst_1d_ex_shocks_usd", "worst_1d_raw_usd")
 _MONO = {"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
@@ -101,17 +112,26 @@ def _pct_format(decimals: int = 1, nully: str = "") -> dict:
     return Format(precision=decimals, scheme=Scheme.fixed, nully=nully).symbol(Symbol.yes).symbol_suffix("%").to_plotly_json()
 
 
-def _fraction_format(decimals: int = 1, nully: str = "") -> dict:
-    """A move stored as a fraction (-0.10) printed as a per cent (-10.0%)."""
-    return Format(precision=decimals, scheme=Scheme.percentage, nully=nully).to_plotly_json()
-
-
 def _na_styles(columns) -> List[dict]:
     return [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{NA}'"}, **_NA_STYLE} for c in columns]
 
 
 def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
+
+
+def shown_underlyers(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The engine's underlyer rows, in its order, less the retired kinds."""
+    return [r for r in (result.get("underlyers") or []) if r.get("kind") not in RETIRED_KINDS]
+
+
+def shown_missing(result: Dict[str, Any]) -> List[str]:
+    """The engine's `missing` list less the retired rows' entries: those with a retired
+    prefix, and those naming a retired underlyer ("SPX: not in the scenarios (...)")."""
+    retired = tuple(f"{r.get('underlyer')}:" for r in (result.get("underlyers") or [])
+                    if r.get("kind") in RETIRED_KINDS and r.get("underlyer"))
+    return [m for m in (result.get("missing") or [])
+            if m and not m.startswith(RETIRED_MISSING_PREFIXES) and not (retired and m.startswith(retired))]
 
 
 # --------------------------------------------------------------------------- definitions
@@ -128,18 +148,14 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
     shocks = ", ".join(f"{d.get('name', '')} {d.get('date', '')}".strip() for d in (config.get("shock_dates") or [])) or "none"
     lag2 = history.get("lag2_date") or "the history's last date less 2 business days"
     return {
-        "daily_pnl": ("Daily $ P&L of the book held constant across the history: each currency, metal or equity-index "
-                      "row's USD delta x its daily move (the log change of the USD-per-unit close plus carry, the "
-                      "lagged yield differential per calendar day); a rates row DV01 x the change of the currency's "
-                      "10Y par swap rate in bp. The book is the rows' series summed date by date, so correlation is "
-                      "embedded; the per-underlyer figures are standalone."),
-        "net_usd": ("Net USD delta: the sum of the currency, metal and equity-index rows' USD delta, + = long the "
-                    "underlyer (the nm-dashboard's FX-legs net). The header's FX net USD (+ = long USD, metals out) "
-                    "is the note underneath."),
-        "gross_usd": "Gross USD delta: the sum of |USD delta| over the currency, metal and equity-index rows.",
-        "dv01_usd": ("DV01: USD per +1bp parallel shift, the day's official DV01_USD marks summed (positive for a "
-                     "payer). Mark-to-market only, no coupon accrual; the 10Y par swap rate stands in for the swaps' "
-                     "own maturities in the history."),
+        "daily_pnl": ("Daily $ P&L of the book held constant across the history: each currency or metal row's USD "
+                      "delta x its daily move (the log change of the USD-per-unit close plus carry, the lagged yield "
+                      "differential per calendar day). The book is the rows' series summed date by date, so "
+                      "correlation is embedded; the per-underlyer figures are standalone."),
+        "net_usd": ("Net USD delta: the sum of the currency and metal rows' USD delta, + = long the underlyer (the "
+                    "nm-dashboard's FX-legs net). The header's FX net USD (+ = long USD, metals out) is the note "
+                    "underneath."),
+        "gross_usd": "Gross USD delta: the sum of |USD delta| over the currency and metal rows.",
         "vol_blended_ann_usd": (f"Blended annual vol = {_weight(b.get('w_trail'))} x trailing {b.get('trail_window_bd')}-day vol "
                                 f"+ {_weight(b.get('w_stress'))} x crisis vol ({b.get('stress_start')} to {b.get('stress_end')}), "
                                 f"each the daily $ P&L's standard deviation x sqrt(252), evaluated at the lag-2 date ({lag2}); "
@@ -157,9 +173,7 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
         "worst_1d_raw_usd": "Worst day raw = the worst daily $ P&L over all history, nothing excluded.",
         "worst_day_ex_vs_target_pct": f"Worst ex vs target: the worst day ex shocks as a share of the vol target ({_usd(target)}); for the Book, the card measures it against the cap.",
         "scenarios": ("Scenario stress: delta x move, the scenarios of config/stress.yaml on the book's USD delta by "
-                      "currency (metals included) with the equity index (ES futures + SPX options) as the futures "
-                      "line, the same scenarios as the Ladder's. No correlation, no vol. A scenario without an EQUITY "
-                      "move leaves its Equity cells blank."),
+                      "currency (metals included), the same scenarios as the Ladder's. No correlation, no vol."),
     }
 
 
@@ -203,7 +217,7 @@ def caption_lines(result: Dict[str, Any]) -> List[str]:
 
 def caption_block(result: Dict[str, Any]) -> html.Div:
     children: List[Any] = [html.Div(className="meta-line", children=[html.Span(line) for line in caption_lines(result)])]
-    missing = [m for m in (result.get("missing") or []) if m]
+    missing = shown_missing(result)
     if missing:
         children.append(html.Div(className="section-kicker", children=[
             html.Span("Not included: "),
@@ -250,13 +264,12 @@ def book_cards(result: Dict[str, Any]) -> html.Div:
     book = result.get("book") or {}
     config = result.get("config") or {}
     defs = definitions(config, result.get("history") or {})
-    missing = result.get("missing") or []
+    missing = shown_missing(result)
     conf = float(config.get("var_confidence") or 0.95) * 100
     fx_net = _num(book.get("fx_net_usd"))
     fx_gross = _num(book.get("fx_gross_usd"))
     fx_why = "; ".join(m for m in missing if m.startswith("FX positions")) or "no FX position priced"
-    delta_short, delta_full = _summarise(missing, "no currency, metal or equity-index position with a USD delta")
-    dv01_short, dv01_full = _summarise([m for m in missing if m.startswith("rates")], "no open swap with a DV01 mark")
+    delta_short, delta_full = _summarise(missing, "no currency or metal position with a USD delta")
 
     cards = [
         _card("Net USD delta", book.get("net_usd"), definition=defs["net_usd"], reason=delta_full, short=delta_short,
@@ -266,8 +279,6 @@ def book_cards(result: Dict[str, Any]) -> html.Div:
               reason=delta_full, short=delta_short,
               note="sum of |USD delta|; header's FX gross: "
                    + (format_cell(fx_gross) if fx_gross is not None else f"n/a ({fx_why})")),
-        _card("DV01 (USD/bp)", book.get("dv01_usd"), definition=defs["dv01_usd"], reason=dv01_full, short=dv01_short,
-              note="net, +1bp parallel; positive for a payer"),
         _card("Blended vol (annual)", book.get("vol_blended_ann_usd"), definition=defs["vol_blended_ann_usd"],
               reason=_why(book, "vol_blended_ann_usd"), colour=False,
               note=f"{_pct(book.get('vol_vs_target_pct'))} of the {_usd(config.get('vol_target_usd'))} target",
@@ -293,7 +304,6 @@ def _columns(config: Dict[str, Any]) -> List[dict]:
     usd = rk.amount(nully="")
     return [rk.text("Underlyer", "underlyer"), rk.text("Kind", "kind"),
             rk.numeric("Net USD", "net_usd", usd), rk.numeric("Gross USD", "gross_usd", usd),
-            rk.numeric("DV01 (USD/bp)", "dv01_usd", usd),
             rk.numeric("Blended vol", "vol_blended_ann_usd", usd), rk.numeric("Trailing vol", "vol_trailing_ann_usd", usd),
             rk.numeric("Crisis vol", "vol_crisis_ann_usd", usd), rk.numeric(f"VaR{conf} 1d", "var95_1d_usd", usd),
             rk.numeric("Worst ex shocks", "worst_1d_ex_shocks_usd", usd), rk.text("Date", "worst_1d_ex_shocks_date"),
@@ -305,8 +315,8 @@ def _columns(config: Dict[str, Any]) -> List[dict]:
 def underlyer_record(row: Dict[str, Any], *, book: bool = False, missing: Optional[List[str]] = None) -> Tuple[dict, dict]:
     """(record, tooltips) of one table row. A number is stored as a number; a missing one
     is the string "n/a" with its reason in the tooltip; one that does not apply to the
-    row is None (blank). For the Book row (`book`), `missing` (the engine's list) is the
-    reason behind a missing delta or DV01."""
+    row is None (blank). For the Book row (`book`), `missing` (the engine's list less the
+    retired rows', `shown_missing`) is the reason behind a missing delta."""
     rec: Dict[str, Any] = {}
     tip: Dict[str, dict] = {}
     missing = missing or []
@@ -324,17 +334,14 @@ def underlyer_record(row: Dict[str, Any], *, book: bool = False, missing: Option
             rec[col] = v
 
     kind = "BOOK" if book else (row.get("kind") or "")
-    is_rates = kind == "RATES"
     rec["underlyer"] = "Book" if book else row.get("underlyer", "")
     rec["kind"] = KIND_LABELS.get(kind, kind)
     if book:
-        delta_why = "; ".join(missing) or "no currency, metal or equity-index position with a USD delta"
-        dv01_why = "; ".join(m for m in missing if m.startswith("rates")) or "no open swap with a DV01 mark"
+        delta_why = "; ".join(missing) or "no currency or metal position with a USD delta"
     else:
-        delta_why = dv01_why = row.get("reason", "")
-    put("net_usd", row.get("net_usd"), delta_why, applicable=not is_rates)
-    put("gross_usd", row.get("gross_usd"), delta_why, applicable=not is_rates)
-    put("dv01_usd", row.get("dv01_usd"), dv01_why, applicable=is_rates or book)
+        delta_why = row.get("reason", "")
+    put("net_usd", row.get("net_usd"), delta_why)
+    put("gross_usd", row.get("gross_usd"), delta_why)
     for metric in METRICS:
         put(metric, row.get(metric), _why(row, metric))
     put("worst_1d_ex_shocks_date", row.get("worst_1d_ex_shocks_date"), _why(row, "worst_1d_ex_shocks_usd"))
@@ -362,12 +369,12 @@ def underlyer_record(row: Dict[str, Any], *, book: bool = False, missing: Option
 def underlyer_section(result: Dict[str, Any]) -> html.Div:
     config = result.get("config") or {}
     defs = definitions(config, result.get("history") or {})
-    rows = result.get("underlyers") or []
+    rows = shown_underlyers(result)
     body_recs = [underlyer_record(r) for r in rows]
-    book_rec, book_tip = underlyer_record(result.get("book") or {}, book=True, missing=result.get("missing"))
+    book_rec, book_tip = underlyer_record(result.get("book") or {}, book=True, missing=shown_missing(result))
     columns = _columns(config)
     left = ("underlyer", "kind", "worst_1d_ex_shocks_date", "worst_1d_raw_date", "note")
-    signed = ["net_usd", "dv01_usd"]
+    signed = ["net_usd"]
     losses = ["worst_1d_ex_shocks_usd", "worst_1d_raw_usd"]
     numeric_cols = [c["id"] for c in columns if c["type"] == "numeric"]
     table = dash_table.DataTable(
@@ -387,7 +394,7 @@ def underlyer_section(result: Dict[str, Any]) -> html.Div:
                                + _na_styles(numeric_cols + ["worst_1d_ex_shocks_date", "worst_1d_raw_date"]),
     )
     footer_style = [{"if": {"filter_query": "{kind} = 'Book'"}, "fontWeight": "700", "borderTop": "2px solid #1f2933"}]
-    caption = ("One row per underlyer, largest gross USD first, rates last; the Book, pinned underneath, is the rows' "
+    caption = ("One row per underlyer, largest gross USD first; the Book, pinned underneath, is the rows' "
                "daily P&L summed date by date (correlation embedded), the per-underlyer figures standalone. A figure "
                "the engine could not compute reads n/a with its reason on hover; a blank cell does not apply to that "
                "row. Column headers carry the definitions on hover.")
@@ -400,9 +407,9 @@ def underlyer_section(result: Dict[str, Any]) -> html.Div:
 
 # --------------------------------------------------------------------------- 4. scenarios
 def scenario_records(scenarios: Dict[str, dict]) -> Tuple[List[dict], List[dict]]:
-    """(records, tooltips) of the scenario table: Total, FX total, the equity move and the
-    equity P&L. The equity cells are None (blank) when the scenario has no EQUITY move,
-    "n/a" with the reason when the engine could not value it, else numbers."""
+    """(records, tooltips) of the scenario table: Total and FX total as the engine gives
+    them, "n/a" with the reason when it could not value one. The engine's equity-index
+    line (`futures_pnl`, `equity_pct`) is retired and not shown."""
     records, tips = [], []
     for name, s in (scenarios or {}).items():
         rec: Dict[str, Any] = {"scenario": name}
@@ -413,15 +420,6 @@ def scenario_records(scenarios: Dict[str, dict]) -> Tuple[List[dict], List[dict]
             rec[col] = NA if v is None else v
             if v is None:
                 tip[col] = {"value": reason or "not computed", "type": "text"}
-        if s.get("equity_pct") is None:
-            rec["equity_pct"] = None
-            rec["equity_pnl"] = None
-        else:
-            rec["equity_pct"] = rk.value(s.get("equity_pct"))
-            v = rk.value(s.get("futures_pnl"))
-            rec["equity_pnl"] = NA if v is None else v
-            if v is None:
-                tip["equity_pnl"] = {"value": reason or "not computed", "type": "text"}
         records.append(rec)
         tips.append(tip)
     return records, tips
@@ -462,17 +460,16 @@ def scenario_section(result: Dict[str, Any]) -> html.Div:
     usd = rk.amount(nully="")
     table = dash_table.DataTable(
         id=SCENARIO_TABLE_ID,
-        columns=[rk.text("Scenario", "scenario"), rk.numeric("Total", "total", usd), rk.numeric("FX total", "fx_total", usd),
-                 rk.numeric("Equity move", "equity_pct", _fraction_format()), rk.numeric("Equity P&L", "equity_pnl", usd)],
+        columns=[rk.text("Scenario", "scenario"), rk.numeric("Total", "total", usd), rk.numeric("FX total", "fx_total", usd)],
         data=records, tooltip_data=tips, tooltip_delay=0, tooltip_duration=None,
         **rk.sortable(SCENARIO_TABLE_ID),
         style_table={"overflowX": "auto"},
         style_cell=_MONO,
         style_cell_conditional=[{"if": {"column_id": "scenario"}, "textAlign": "left"}],
         style_header={"fontWeight": "bold"},
-        style_data_conditional=rk.sign_styles(["total", "fx_total", "equity_pnl"]) + _na_styles(["total", "fx_total", "equity_pnl"]),
+        style_data_conditional=rk.sign_styles(["total", "fx_total"]) + _na_styles(["total", "fx_total"]),
     )
-    order = [r.get("underlyer") for r in (result.get("underlyers") or [])]
+    order = [r.get("underlyer") for r in shown_underlyers(result)]
     m_records, m_footer = matrix_records(scenarios, order)
     names = list(scenarios)
     matrix = dash_table.DataTable(
@@ -505,7 +502,7 @@ def definitions_block(result: Dict[str, Any]) -> html.Details:
     b = config.get("blended") or {}
     defs = definitions(config, history)
     items = [("Daily $ P&L", defs["daily_pnl"]), ("Net / Gross USD delta", defs["net_usd"] + " " + defs["gross_usd"]),
-             ("DV01", defs["dv01_usd"]), ("Blended vol", defs["vol_blended_ann_usd"]),
+             ("Blended vol", defs["vol_blended_ann_usd"]),
              ("VaR", defs["var95_1d_usd"]), ("Worst day ex shocks", defs["worst_1d_ex_shocks_usd"]),
              ("Worst day raw", defs["worst_1d_raw_usd"]), ("Scenarios", defs["scenarios"])]
     shocks = "; ".join(f"{d.get('date', '')} {d.get('name', '')}".strip() for d in (config.get("shock_dates") or [])) or "none"
@@ -518,6 +515,8 @@ def definitions_block(result: Dict[str, Any]) -> html.Details:
               + (" (loaded)" if config.get("loaded") else f" (not loaded: {config.get('note') or 'defaults in use'})") + ".")
     files = []
     for key, f in (history.get("files") or {}).items():
+        if key in RETIRED_HISTORY_FILES:
+            continue
         state = (f"{f.get('first_date')} to {f.get('last_date')}, {f.get('rows')} rows" if f.get("loaded")
                  else f"not loaded ({f.get('reason') or 'no reason given'})")
         files.append(f"{key}: {f.get('file')} ({state})")

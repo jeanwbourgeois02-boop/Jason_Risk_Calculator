@@ -282,3 +282,66 @@ def test_check_clock_passes_for_the_next_date_after_1700_new_york():
     assert tool.check_clock("2026-09-22", now=afternoon)[0]["status"] == "pass"
     # the run's default as-of is the same date the check compares against
     assert tool._today_ny(evening) == "2026-09-23" and tool._today_ny(afternoon) == "2026-09-22"
+
+
+# --------------------------------------------------------------------------- commodity conversion Phase 2
+# The rates book left the app (user, 2026-09-24): no swap mark type is official any more, no
+# fixings check runs, and the OIS curves are checked only for the currencies the open FX
+# options price off.
+
+def test_official_source_mapping_agrees_with_the_schema_after_the_rates_removal(tmp_path):
+    tool = _load_tool()
+    assert not {"PAR_RATE", "PV_USD", "DV01_USD", "CASHFLOW_USD"} & set(tool._EXPECTED_OFFICIAL)
+    checks = tool.check_official_source_mapping(None)
+    assert checks[0]["name"] == "Official-source mapping matches CLAUDE.md"
+    assert checks[0]["status"] == "pass", checks[0]["message"]
+
+
+def test_the_swap_and_fixings_checks_are_gone():
+    tool = _load_tool()
+    for name in ("check_irs_curve_coverage", "check_index_fixings"):
+        assert not hasattr(tool, name), name
+
+
+def test_ois_curve_coverage_asks_only_for_the_open_fx_options_currencies(tmp_path):
+    tool = _load_tool()
+    db = tmp_path / "risk.db"
+    _option_db(db)                                                  # one open EURSEK call
+    conn = schema.connect(db)
+    conn.execute("INSERT INTO curve_quotes VALUES (?,?,?,?,?,?,?,?,?)",
+                 (AS_OF, "EUR", "ESTR", "1Y", "EESWE1 Curncy", 2.1, "PAR_RATE", "PX_LAST", "BBG_BDP"))
+    conn.commit()
+    try:
+        checks = tool.check_ois_curve_coverage(conn, AS_OF)
+    finally:
+        conn.close()
+    by_name = {c["name"]: c for c in checks}
+    assert by_name[f"EUR-ESTR curve quotes for {AS_OF}"]["status"] == "pass"
+    assert "SEK has no OIS index in scope" in by_name["OIS curve coverage (FX options)"]["message"]
+    assert by_name["OIS curve coverage (FX options)"]["status"] == "pass"
+    assert not any("USD" in name for name in by_name)               # no USD leg on EURSEK: nothing asked
+
+
+def test_ois_curve_coverage_fails_when_an_option_currency_has_no_quotes(tmp_path):
+    tool = _load_tool()
+    db = tmp_path / "risk.db"
+    _option_db(db)
+    conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    try:
+        checks = tool.check_ois_curve_coverage(conn, AS_OF)
+    finally:
+        conn.close()
+    fails = {c["name"]: c["message"] for c in checks if c["status"] == "fail"}
+    assert "open FX option" in fails[f"EUR-ESTR curve quotes for {AS_OF}"]
+
+
+def test_ois_curve_coverage_passes_with_no_open_fx_option(tmp_path):
+    tool = _load_tool()
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    try:
+        checks = tool.check_ois_curve_coverage(conn, AS_OF)
+    finally:
+        conn.close()
+    assert [c["status"] for c in checks] == ["pass"]

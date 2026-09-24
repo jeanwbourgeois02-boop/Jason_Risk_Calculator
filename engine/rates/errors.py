@@ -1,5 +1,7 @@
 """Pricing errors, ported near-verbatim from the reference project's
-``swapcalc/pricing/errors.py`` (Rates Swap Calculator)."""
+``swapcalc/pricing/errors.py`` (Rates Swap Calculator). ``FixingMissingError`` was
+removed on 2026-09-24 with the swaps and the ``index_fixings`` loader (nothing raised or
+caught it)."""
 from __future__ import annotations
 
 from typing import List
@@ -24,10 +26,3 @@ class CurveBuildError(PricingError):
         self.key = key
         self.reason = reason
         super().__init__("Failed to build curve {0!r}: {1}".format(key, reason))
-
-
-class FixingMissingError(PricingError):
-    def __init__(self, index_name: str, date: object) -> None:
-        self.index_name = index_name
-        self.date = date
-        super().__init__("Missing fixing for index {0!r} on {1}".format(index_name, date))

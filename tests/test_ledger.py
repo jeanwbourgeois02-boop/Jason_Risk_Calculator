@@ -142,18 +142,12 @@ def test_period_pnl_by_groups_rows():
         ledger.period_pnl_by(conn, "2026-09-14", "not_a_key")
 
 
-# --------------------------------------------------------------------------- IRS / options (2026-09-17)
-def _irs_db():
+# --------------------------------------------------------------------------- options (2026-09-17)
+def _option_db():
     conn = schema.connect()
     _insert_instruments(conn, [
-        ("IRSOIS-USD-1", "IRS", "USD", "USD", 1, 0, "IRSOIS-USD-1", "2026-09-10"),
         ("EURUSD", "FX", "EUR", "USD", 1, 0, "EURUSD Curncy", "9999-12-31"),
         ("EURUSD091026C", "FX_OPTION", "EUR", "USD", 1, 0, "", "2026-09-10"),
-    ])
-    _insert_trade(conn, "s1", "IRSOIS-USD-1", "IRS", "2026-03-01", 10e6, 0.04)
-    _insert_legs(conn, [
-        ("s1", 1, "FIXED", "USD", -10e6, "2026-03-03", "2026-09-10", 0.04, 0),
-        ("s1", 2, "FLOAT", "USD", 10e6, "2026-03-03", "2026-09-10", 0.0, 0),
     ])
     _insert_trade(conn, "o1", "EURUSD091026C", "FX_OPTION", "2026-03-01", 1e6, 0.0050)
     _insert_legs(conn, [("o1", 1, "NOTIONAL", "EUR", 1e6, "2026-03-01", "2026-09-10", 0.0050, 0)])
@@ -161,38 +155,8 @@ def _irs_db():
     return conn
 
 
-def test_realise_settled_freezes_matured_swap_at_pv_plus_cashflows():
-    """Item 52: a swap past maturity freezes at the last official PV_USD + CASHFLOW_USD on
-    or before maturity (here PV is 0 on the maturity date, the coupons are the result)."""
-    conn = _irs_db()
-    _insert_marks(conn, [
-        ("2026-09-09", "IRSOIS-USD-1", "2026-09-10", "PV_USD", 2_000.0, "QL_PRICER", "t"),
-        ("2026-09-09", "IRSOIS-USD-1", "2026-09-10", "CASHFLOW_USD", 0.0, "QL_PRICER", "t"),
-        ("2026-09-10", "IRSOIS-USD-1", "2026-09-10", "PV_USD", 0.0, "QL_PRICER", "t"),
-        ("2026-09-10", "IRSOIS-USD-1", "2026-09-10", "CASHFLOW_USD", 2_100.0, "QL_PRICER", "t"),
-    ])
-    out = ledger.realise_settled(conn, "2026-09-14")
-    assert any(u["trade_id"] == "o1" for u in out["unrealisable"])   # no PREMIUM on file
-    row = conn.execute("SELECT product, mark_type, pnl_usd, spot_usd_per_local, note FROM realised_pnl "
-                       "WHERE trade_id = 's1'").fetchone()
-    assert row == ("IRS", "PV_USD", 2_100.0, 1.0, "")
-    vb = ledger.value_book(conn, "2026-09-14")
-    assert vb.loc[vb["trade_id"] == "s1", "pnl_usd"].iloc[0] == 2_100.0
-    # a re-run never re-freezes
-    assert ledger.realise_settled(conn, "2026-09-14")["realised"] == 0
-
-
-def test_realise_settled_swap_without_cashflow_mark_is_unrealisable():
-    conn = _irs_db()
-    _insert_marks(conn, [("2026-09-10", "IRSOIS-USD-1", "2026-09-10", "PV_USD", 0.0, "QL_PRICER", "t")])
-    out = ledger.realise_settled(conn, "2026-09-14")
-    reasons = {u["trade_id"]: u["reason"] for u in out["unrealisable"]}
-    assert "CASHFLOW_USD" in reasons["s1"]
-    assert conn.execute("SELECT COUNT(*) FROM realised_pnl").fetchone()[0] == 0
-
-
 def test_realise_settled_freezes_expired_option_at_last_premium_and_spot():
-    conn = _irs_db()
+    conn = _option_db()
     _insert_marks(conn, [
         ("2026-09-09", "EURUSD091026C", "2026-09-10", "PREMIUM", 0.0080, "QL_OPTIONS_PRICER", "t"),
         ("2026-09-09", "EURUSD", "2026-09-09", "SPOT", 1.20, "BBG_BFXFORWARD", "t"),
@@ -208,7 +172,7 @@ def test_realise_settled_freezes_every_trade_of_a_closed_out_option_at_the_closi
     """An option bought and sold back in full needs no PREMIUM (user, 2026-09-21: "for options
     closed out theyre not live"). The purchase here was frozen at a PREMIUM while the sale's
     strike was not on file yet; once it is, both are frozen alike or the total would be wrong."""
-    conn = _irs_db()
+    conn = _option_db()
     _insert_instruments(conn, [("EURUSD091026C-2", "FX_OPTION", "EUR", "USD", 1, 0, "", "2026-09-10")])
     _insert_trade(conn, "o2", "EURUSD091026C-2", "FX_OPTION", "2026-04-01", -1e6, 0.0070)
     _insert_legs(conn, [("o2", 1, "NOTIONAL", "EUR", -1e6, "2026-04-01", "2026-09-10", 0.0070, 0)])
@@ -220,7 +184,7 @@ def test_realise_settled_freezes_every_trade_of_a_closed_out_option_at_the_closi
         ("2026-04-01", "EURUSD", "2026-04-01", "SPOT", 1.10, "BBG_BFXFORWARD", "t"),   # the close-out date's spot
     ])
     out = ledger.realise_settled(conn, "2026-09-14")
-    assert out["realised"] == 1 and [u["trade_id"] for u in out["unrealisable"]] == ["s1", "o2"]   # the swap has no marks
+    assert out["realised"] == 1 and [u["trade_id"] for u in out["unrealisable"]] == ["o2"]   # no strike for o2 yet
     assert conn.execute("SELECT mark_type FROM realised_pnl WHERE trade_id = 'o1'").fetchone() == ("PREMIUM",)
 
     conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type, payoff) "
@@ -352,155 +316,6 @@ def test_a_text_mark_makes_the_trades_that_need_it_unrealisable_and_names_the_ma
     assert reasons["a1"] == "trade a1: marks.value (SPOT for AUDUSD on 2026-09-09) is not a number ('24-Jul')"
 
 
-# --------------------------------------------------------------------------- NDF fixing (2026-09-22)
-# User: "the exit price is the fix on that day, as pulled from bbg"; "each ndf has a unique fix".
-# The freeze of an NDF ticket reads the official NDF_FIX dated its fixing date exactly, never the
-# last fix on or before it; with none, the last official SPOT on or before the fixing date. A row
-# frozen at a spot is dropped and frozen again once the exact-day fix lands ('refrozen'), and a
-# row frozen at a fix of another day is dropped and frozen again by the same rule.
-
-
-def _ndf_db():
-    """b1: an NDF, bought 1m USD against BRL at 5.20, value Wed 2026-09-16, fixing Mon 09-14;
-    j1: a deliverable USDJPY forward on the same dates. Spots on the fixing date and the value
-    date; no fix on file yet."""
-    conn = schema.connect()
-    _insert_instruments(conn, [
-        ("USDBRL", "FX", "USD", "BRL", 1, 1, "USDBRL Curncy", "9999-12-31"),
-        ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31"),
-    ])
-    for trade_id, pair, fill in (("b1", "USDBRL", 5.20), ("j1", "USDJPY", 150.0)):
-        _insert_trade(conn, trade_id, pair, "FX_FWD", "2026-08-14", 1e6, fill)
-        _insert_legs(conn, [
-            (trade_id, 1, "FX_NEAR", "USD", 1e6, "2026-08-14", "2026-09-16", fill, 0),
-            (trade_id, 2, "FX_NEAR", pair[3:], -1e6 * fill, "2026-08-14", "2026-09-16", fill, 0),
-        ])
-    _insert_marks(conn, [
-        ("2026-09-14", "USDBRL", "2026-09-14", "SPOT", 5.25, "BBG_BFXFORWARD", "t"),
-        ("2026-09-16", "USDBRL", "2026-09-16", "SPOT", 5.35, "BBG_BFXFORWARD", "t"),
-        ("2026-09-14", "USDJPY", "2026-09-14", "SPOT", 151.0, "BBG_BFXFORWARD", "t"),
-        ("2026-09-16", "USDJPY", "2026-09-16", "SPOT", 152.0, "BBG_BFXFORWARD", "t"),
-    ])
-    conn.commit()
-    return conn
-
-
-def _brl_fix(conn, day, value):
-    _insert_marks(conn, [(day, "USDBRL", day, "NDF_FIX", value, "BBG_BDH", "t")])
-    conn.commit()
-
-
-def _frozen_row(conn, trade_id):
-    return conn.execute("SELECT mark_type, spot_as_of_date, pnl_usd, note FROM realised_pnl WHERE trade_id = ?",
-                        (trade_id,)).fetchone()
-
-
-def _refrozen_ids(res):
-    return [e["trade_id"] for e in res["refrozen"]]
-
-
-def test_ndf_freezes_at_the_fix_of_its_fixing_date_exactly_never_a_neighbouring_days():
-    conn = _ndf_db()
-    _brl_fix(conn, "2026-09-11", 5.30)   # the Friday before: not this ticket's fix
-    _brl_fix(conn, "2026-09-15", 5.40)   # the day after: not this ticket's fix either
-    res = ledger.realise_settled(conn, "2026-09-21")
-    assert res["realised"] == 2 and res["refrozen"] == [] and res["unrealisable"] == []
-    b1 = _frozen_row(conn, "b1")
-    assert b1[:2] == ("SPOT", "2026-09-14") and b1[2] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25)
-    assert b1[3] == "spot dated 2026-09-14 (NDF fixing), converted at that spot"
-    # the fixing date's own fix lands: the spot-frozen row is dropped and the ticket frozen at the fix,
-    # the P&L converted at the fix itself (user decision 2026-09-22), spot_usd_per_local = 1 / FIX
-    _brl_fix(conn, "2026-09-14", 5.22)
-    res = ledger.realise_settled(conn, "2026-09-21")
-    assert res["realised"] == 1 and res["kept"] == []
-    # the entry records what the re-freeze did to the figure (reviewer M-2, 2026-09-22)
-    assert res["refrozen"] == [{"trade_id": "b1", "product": "FX_FWD", "mark_type": "NDF_FIX",
-                                "spot_as_of_date": "2026-09-14", "pnl_from": pytest.approx(1e6 * (5.25 - 5.20) / 5.25),
-                                "pnl_to": pytest.approx(1e6 * (5.22 - 5.20) / 5.22), "why": "NDF_FIX replaced SPOT"}]
-    b1 = _frozen_row(conn, "b1")
-    assert b1[:2] == ("NDF_FIX", "2026-09-14") and b1[2] == pytest.approx(1e6 * (5.22 - 5.20) / 5.22)
-    assert b1[3] == "official fixing dated 2026-09-14 (NDF fixing), converted at the fixing"
-    assert conn.execute("SELECT spot_usd_per_local, spot_source FROM realised_pnl WHERE trade_id = 'b1'").fetchone() == (
-        pytest.approx(1 / 5.22), "BBG_BDH")
-    # and stays there: a further call drops and freezes nothing
-    res = ledger.realise_settled(conn, "2026-09-21")
-    assert res["refrozen"] == [] and res["realised"] == 0 and _frozen_row(conn, "b1") == b1
-
-
-def test_a_row_frozen_at_a_fix_of_another_day_is_dropped_and_frozen_again():
-    conn = _ndf_db()
-    _brl_fix(conn, "2026-09-11", 5.30)
-    ledger.realise_settled(conn, "2026-09-21")
-    # what the rule of a few hours on 2026-09-22 wrote: the last fix on or before the fixing date
-    conn.execute("UPDATE realised_pnl SET mark_type = 'NDF_FIX', spot_as_of_date = '2026-09-11', pnl_usd = 1.0, "
-                 "note = 'official fixing dated 2026-09-11 (last before fixing)' WHERE trade_id = 'b1'")
-    conn.commit()
-    res = ledger.realise_settled(conn, "2026-09-21")
-    assert _refrozen_ids(res) == ["b1"] and res["realised"] == 1
-    e = res["refrozen"][0]
-    assert (e["mark_type"], e["spot_as_of_date"], e["pnl_from"]) == ("SPOT", "2026-09-14", 1.0)
-    assert e["pnl_to"] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25) and e["why"] == "SPOT replaced NDF_FIX (2026-09-11 -> 2026-09-14)"
-    b1 = _frozen_row(conn, "b1")
-    assert b1[:2] == ("SPOT", "2026-09-14") and b1[2] == pytest.approx(1e6 * (5.25 - 5.20) / 5.25)
-    assert b1[3] == "spot dated 2026-09-14 (NDF fixing), converted at that spot"
-
-
-def test_a_deliverable_pairs_row_is_never_touched_by_the_ndf_guard():
-    conn = _ndf_db()
-    ledger.realise_settled(conn, "2026-09-21")
-    j1 = conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'j1'").fetchone()
-    assert _frozen_row(conn, "j1")[:2] == ("SPOT", "2026-09-16")
-    _brl_fix(conn, "2026-09-14", 5.22)
-    _insert_marks(conn, [("2026-09-16", "USDJPY", "2026-09-16", "NDF_FIX", 999.0, "BBG_BDH", "t")])   # a deliverable pair never reads one
-    conn.commit()
-    res = ledger.realise_settled(conn, "2026-09-21")
-    assert _refrozen_ids(res) == ["b1"] and res["realised"] == 1 and res["kept"] == []
-    assert conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'j1'").fetchone() == j1
-
-
-def test_a_past_day_call_never_drops_a_row_it_cannot_freeze_again():
-    """Reviewer W1, 2026-09-22: the purges had no as_of gate while the refreeze covers
-    settle_date < as_of only, so realise_settled(<past day>) from the backfill dropped a row
-    and froze nothing (refrozen=['b1'], realised=0, no row). A row is dropped only by a call
-    whose as_of is past the value date, the one that re-freezes it."""
-    conn = _ndf_db()
-    ledger.realise_settled(conn, "2026-09-21")
-    before = _frozen_row(conn, "b1")
-    assert before[:2] == ("SPOT", "2026-09-14")
-    _brl_fix(conn, "2026-09-14", 5.22)                                  # lands in a backfill span ending 09-15
-    res = ledger.realise_settled(conn, "2026-09-15")                    # b1's value date 09-16 is not before as_of
-    assert res["refrozen"] == [] and res["realised"] == 0 and _frozen_row(conn, "b1") == before
-    res = ledger.realise_settled(conn, "2026-09-21")
-    assert _refrozen_ids(res) == ["b1"] and res["realised"] == 1
-    assert _frozen_row(conn, "b1")[:2] == ("NDF_FIX", "2026-09-14")
-
-
-def test_the_frozen_row_is_the_blotters_own_estimate_when_the_fixing_date_has_no_close():
-    """Reviewer W2, 2026-09-22: closes either side of the fixing date and none on it -- the
-    Blotter showed the near-marks estimate (between the closes) from the fixing on while the
-    ledger froze at the earlier close alone. The ledger now records the Blotter's figure: the
-    same number, the estimate named."""
-    conn = _ndf_db()
-    conn.execute("DELETE FROM marks WHERE instrument_id = 'USDBRL'")
-    _insert_marks(conn, [
-        ("2026-09-11", "USDBRL", "2026-09-11", "SPOT", 5.20, "BBG_BFXFORWARD", "t"),
-        ("2026-09-15", "USDBRL", "2026-09-15", "SPOT", 5.40, "BBG_BFXFORWARD", "t"),
-    ])
-    conn.commit()
-    est = 5.20 + 0.75 * (5.40 - 5.20)      # 3 of the 4 calendar days from 09-11 to 09-15
-    shown = ledger.value_book(conn, "2026-09-15").set_index("trade_id").loc["b1"]
-    assert shown["status"] == "OPEN" and shown["mark"] == pytest.approx(est)
-    assert shown["pnl_usd"] == pytest.approx(1e6 * (est - 5.20) / est)
-    assert ledger.realise_settled(conn, "2026-09-21")["realised"] == 2
-    b1 = conn.execute("SELECT mark_type, spot_as_of_date, spot_source, pnl_usd, note FROM realised_pnl "
-                      "WHERE trade_id = 'b1'").fetchone()
-    assert b1[:3] == ("SPOT", "2026-09-14", "INTERP: SPOT between the 2026-09-11 and 2026-09-15 closes")
-    assert b1[3] == shown["pnl_usd"]       # the very number the Blotter showed, not 1e6 * (5.20 - 5.20) / 5.20
-    assert b1[4] == ("spot dated 2026-09-14 (NDF fixing), converted at that spot; no official fixing on file: "
-                     "at the spot of 2026-09-14 instead (INTERP: SPOT between the 2026-09-11 and 2026-09-15 closes)")
-    assert ledger.value_book(conn, "2026-09-21").set_index("trade_id").loc["b1", "pnl_usd"] == shown["pnl_usd"]
-
-
 # --------------------------------------------------------------------------- re-freeze at the close (2026-09-22)
 # User decision: a frozen row is what the official marks on file give for its date and mark
 # type, or it is dropped and frozen again by the same rule in the same call (`purge_superseded`).
@@ -510,6 +325,10 @@ def test_the_frozen_row_is_the_blotters_own_estimate_when_the_fixing_date_has_no
 def _a1(conn):
     return conn.execute("SELECT spot_usd_per_local, spot_as_of_date, pnl_usd, frozen_at FROM realised_pnl "
                         "WHERE trade_id = 'a1'").fetchone()
+
+
+def _refrozen_ids(res):
+    return [e["trade_id"] for e in res["refrozen"]]
 
 
 def test_a_row_frozen_at_a_live_press_is_frozen_again_once_the_close_replaces_that_mark():
@@ -576,22 +395,6 @@ def test_a_future_frozen_at_a_live_px_last_is_frozen_again_at_that_days_settleme
                                 "why": "FUTURE_PX 2026-09-18 mark 322500 -> 323000 (the marks of that date changed)"}]
     assert conn.execute("SELECT pnl_usd, spot_usd_per_local FROM realised_pnl WHERE trade_id = 'f1'").fetchone() == (
         pytest.approx(2 * 50 * 60.0), pytest.approx(50 * 6460.0))
-
-
-def test_a_matured_swap_is_frozen_again_when_its_maturity_pv_is_re_run():
-    conn = _irs_db()
-    _insert_marks(conn, [
-        ("2026-09-10", "IRSOIS-USD-1", "2026-09-10", "PV_USD", 0.0, "QL_PRICER", "t"),
-        ("2026-09-10", "IRSOIS-USD-1", "2026-09-10", "CASHFLOW_USD", 2_100.0, "QL_PRICER", "t"),
-    ])
-    ledger.realise_settled(conn, "2026-09-14")
-    conn.execute("UPDATE marks SET value = 2_150.0 WHERE mark_type = 'CASHFLOW_USD'")   # engine/rates re-ran the day
-    conn.commit()
-    res = ledger.realise_settled(conn, "2026-09-14")
-    assert res["refrozen"] == [{"trade_id": "s1", "product": "IRS", "mark_type": "PV_USD", "spot_as_of_date": "2026-09-10",
-                                "pnl_from": 2_100.0, "pnl_to": 2_150.0,
-                                "why": "PV_USD 2026-09-10 amount 2100 -> 2150 (the marks of that date changed)"}]
-    assert conn.execute("SELECT pnl_usd, local_amount FROM realised_pnl WHERE trade_id = 's1'").fetchone() == (2_150.0, 2_150.0)
 
 
 def test_kept_names_every_row_the_rule_cannot_recompute_and_refrozen_is_sorted_by_trade_id():
@@ -728,3 +531,160 @@ def test_a_cny_future_is_frozen_again_when_the_conversion_spot_of_its_marks_date
     assert conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'f1'").fetchone() == es_before
     res = ledger.realise_settled(conn, "2026-09-21")
     assert res["refrozen"] == [] and res["realised"] == 0
+
+
+# --------------------------------------------------------------------------- Phase 2 removal (2026-09-24)
+# Rates swaps and NDFs left the app (user decision 2026-09-24). The frozen figure of every product
+# that remains must not move: the book below was frozen by the ledger at HEAD before the removal
+# (e660974) and each row is pinned bit for bit, frozen_at aside. An older database's swap row, or an
+# NDF row frozen at its fix, is left exactly as it is and named under 'kept'.
+
+_PIN_INSTRUMENTS = [
+    ("USDCNH", "FX", "USD", "CNH", 1, 0, "USDCNH Curncy", "9999-12-31"),
+    ("EURGBP", "FX", "EUR", "GBP", 1, 0, "EURGBP Curncy", "9999-12-31"),
+    ("GBPUSD", "FX", "GBP", "USD", 1, 0, "GBPUSD Curncy", "9999-12-31"),
+    ("XAUUSD", "FX", "XAU", "USD", 1, 0, "XAUUSD Curncy", "9999-12-31"),
+    ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31"),
+    ("EURUSD", "FX", "EUR", "USD", 1, 0, "EURUSD Curncy", "9999-12-31"),
+    ("USDCNY", "FX", "USD", "CNY", 1, 0, "USDCNY Curncy", "9999-12-31"),
+    ("CUV6 Comdty", "FUTURE", "CU", "CNY", 5, 0, "CUV6 Comdty", "2026-09-15"),
+    ("CLQ6 Comdty", "FUTURE", "CL", "USD", 1000, 0, "CLQ6 Comdty", "2026-07-21"),
+    ("EURUSD091026C-1", "FX_OPTION", "EUR", "USD", 1, 0, "", "2026-09-10"),
+    ("EURUSD090926P-2", "FX_OPTION", "EUR", "USD", 1, 0, "", "2026-09-09"),
+    ("EURUSD090926P-3", "FX_OPTION", "EUR", "USD", 1, 0, "", "2026-09-09"),
+]
+# trade_id, instrument, product, trade_date, quantity, fill, legs (leg_type, ccy, amount, settle, settles_cash)
+_PIN_TRADES = [
+    ("h1", "USDCNH", "FX_FWD", "2026-07-20", 1.5e6, 7.1834,
+     [("FX_NEAR", "USD", 1.5e6, "2026-08-19", 1), ("FX_NEAR", "CNH", -1.5e6 * 7.1834, "2026-08-19", 1)]),
+    ("x1", "EURGBP", "FX_FWD", "2026-08-03", -2.3e6, 0.84713,
+     [("FX_NEAR", "EUR", -2.3e6, "2026-09-10", 1), ("FX_NEAR", "GBP", 2.3e6 * 0.84713, "2026-09-10", 1)]),
+    ("g1", "XAUUSD", "FX_FWD", "2026-08-05", 250.0, 3341.27,
+     [("FX_NEAR", "XAU", 250.0, "2026-09-11", 1), ("FX_NEAR", "USD", -250.0 * 3341.27, "2026-09-11", 1)]),
+    ("j1", "USDJPY", "FX_SPOT", "2026-09-09", -1e6, 147.382,
+     [("FX_NEAR", "USD", -1e6, "2026-09-11", 1), ("FX_NEAR", "JPY", 1e6 * 147.382, "2026-09-11", 1)]),
+    ("c1", "CUV6 Comdty", "FUTURE", "2026-08-10", -3, 80123.4, [("NOTIONAL", "CNY", -3 * 5 * 80123.4, "2026-09-15", 0)]),
+    ("q1", "CLQ6 Comdty", "FUTURE", "2026-06-11", 4, 67.83, [("NOTIONAL", "USD", 4 * 1000 * 67.83, "2026-07-21", 0)]),
+    ("o1", "EURUSD091026C-1", "FX_OPTION", "2026-06-01", 1.7e6, 0.00613, [("NOTIONAL", "EUR", 1.7e6, "2026-09-10", 0)]),
+    ("o2", "EURUSD090926P-2", "FX_OPTION", "2026-06-02", 2e6, 0.00421, [("NOTIONAL", "EUR", 2e6, "2026-09-09", 0)]),
+    ("o3", "EURUSD090926P-3", "FX_OPTION", "2026-07-15", -2e6, 0.00537, [("NOTIONAL", "EUR", -2e6, "2026-09-09", 0)]),
+]
+_PIN_MARKS = [
+    ("2026-08-19", "USDCNH", "2026-08-19", "SPOT", 7.1592),
+    ("2026-09-09", "EURGBP", "2026-09-09", "SPOT", 0.85291),            # last before the 09-10 value date
+    ("2026-09-09", "GBPUSD", "2026-09-09", "SPOT", 1.33427),
+    ("2026-09-11", "XAUUSD", "2026-09-11", "SPOT", 3372.64),
+    ("2026-09-11", "USDJPY", "2026-09-11", "SPOT", 146.917),
+    ("2026-09-15", "CUV6 Comdty", "2026-09-15", "FUTURE_PX", 79876.5),
+    ("2026-09-15", "USDCNY", "2026-09-15", "SPOT", 7.1043),
+    ("2026-07-20", "CLQ6 Comdty", "2026-07-21", "FUTURE_PX", 66.91),    # last before expiry
+    ("2026-09-10", "EURUSD091026C-1", "2026-09-10", "PREMIUM", 0.00887),
+    ("2026-09-10", "EURUSD", "2026-09-10", "SPOT", 1.17364),
+    ("2026-07-14", "EURUSD", "2026-07-14", "SPOT", 1.16482),            # last before the 07-15 close-out
+]
+_PIN_SOURCE = {"SPOT": "BBG_BFXFORWARD", "FUTURE_PX": "BBG_BDH", "PREMIUM": "QL_OPTIONS_PRICER"}
+
+# Every realised_pnl column but frozen_at, exactly as the ledger at e660974 wrote them.
+_PIN_ROWS = [
+    ('c1', 'CUV6 Comdty', 'FUTURE', 'CNY', '2026-09-15', -3.0, -169172.33224948272, 'FUTURE_PX', 56217.00941683206,
+     '2026-09-15', 'BBG_BDH', 521.3039989865501, 'CNY P&L converted at USDCNY spot of 2026-09-15'),
+    ('g1', 'XAUUSD', 'FX_FWD', 'USD', '2026-09-11', 250.0, 835317.5, 'SPOT', 3372.64, '2026-09-11', 'BBG_BFXFORWARD',
+     7842.5, ''),
+    ('h1', 'USDCNH', 'FX_FWD', 'CNH', '2026-08-19', 1500000.0, 1505070.3989272546, 'SPOT', 1.0, '2026-08-19',
+     'BBG_BFXFORWARD', -5070.398927254602, ''),
+    ('j1', 'USDJPY', 'FX_SPOT', 'JPY', '2026-09-11', -1000000.0, -1003165.0523765119, 'SPOT', 1.0, '2026-09-11',
+     'BBG_BFXFORWARD', 3165.052376511856, ''),
+    ('o1', 'EURUSD091026C-1', 'FX_OPTION', 'EUR', '2026-09-10', 1700000.0, 12230.50244, 'PREMIUM', 0.010410186799999999,
+     '2026-09-10', 'QL_OPTIONS_PRICER', 5466.815119999996, 'premium dated 2026-09-10'),
+    ('o2', 'EURUSD090926P-2', 'FX_OPTION', 'EUR', '2026-09-09', 2000000.0, 9807.7844, 'CLOSE_OUT', 0.0062550834,
+     '2026-07-14', 'BBG_BFXFORWARD', 2702.3823999999986,
+     'closed out 2026-07-15 at the closing fill 0.00537; spot dated 2026-07-14 (last before the close-out)'),
+    ('o3', 'EURUSD090926P-3', 'FX_OPTION', 'EUR', '2026-09-09', -2000000.0, -12510.166799999999, 'CLOSE_OUT',
+     0.0062550834, '2026-07-14', 'BBG_BFXFORWARD', 0.0,
+     'closed out 2026-07-15 at the closing fill 0.00537; spot dated 2026-07-14 (last before the close-out)'),
+    ('q1', 'CLQ6 Comdty', 'FUTURE', 'USD', '2026-07-21', 4.0, 271320.0, 'FUTURE_PX', 66910.0, '2026-07-20', 'BBG_BDH',
+     -3680.0, 'settlement price dated 2026-07-20 (last before expiry)'),
+    ('x1', 'EURGBP', 'FX_FWD', 'GBP', '2026-09-10', -2300000.0, -2599690.33373, 'SPOT', 1.1380122257, '2026-09-09',
+     'BBG_BFXFORWARD', -17737.78538000025, 'spot dated 2026-09-09 (last before settlement)'),
+]
+_PIN_LTD = -6790.1304117564505
+
+
+def _pin_db():
+    conn = schema.connect()
+    _insert_instruments(conn, _PIN_INSTRUMENTS)
+    for trade_id, inst, product, trade_date, qty, fill, legs in _PIN_TRADES:
+        _insert_trade(conn, trade_id, inst, product, trade_date, qty, fill, strategy="")
+        _insert_legs(conn, [(trade_id, n, leg_type, ccy, amount, trade_date, settle, fill, cash)
+                            for n, (leg_type, ccy, amount, settle, cash) in enumerate(legs, 1)])
+    for inst in ("EURUSD090926P-2", "EURUSD090926P-3"):
+        conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type, payoff) "
+                     "VALUES (?, 1.15, 'PUT', 'VANILLA')", (inst,))
+    _insert_marks(conn, [(d, i, s, mt, v, _PIN_SOURCE[mt], f"{d}T15:00:00-04:00") for d, i, s, mt, v in _PIN_MARKS])
+    conn.commit()
+    return conn
+
+
+def _pin_rows(conn):
+    cols = [c for c in ledger._REALISED_COLUMNS if c != "frozen_at"]
+    return conn.execute(f"SELECT {', '.join(cols)} FROM realised_pnl ORDER BY trade_id").fetchall()
+
+
+def test_every_remaining_product_freezes_bit_for_bit_as_before_the_removal():
+    """A USDCNH forward, a cross (EURGBP, converted through GBPUSD), XAUUSD, a USDJPY spot, a CNY
+    future, a USD future frozen at the last price before expiry, an FX option at its PREMIUM and a
+    closed-out option pair at CLOSE_OUT: every stored figure is the one HEAD wrote, exactly."""
+    conn = _pin_db()
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert (res["realised"], res["unrealisable"], res["refrozen"], res["kept"]) == (9, [], [], [])
+    assert _pin_rows(conn) == _PIN_ROWS
+    assert ledger.ltd(conn, "2026-09-21") == _PIN_LTD
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert (res["realised"], res["refrozen"], res["kept"]) == (0, [], [])
+    assert _pin_rows(conn) == _PIN_ROWS
+
+
+def test_an_older_databases_swap_and_ndf_fix_rows_are_left_as_they_are_and_named_under_kept():
+    """Rates swaps and NDFs left the app on 2026-09-24: the ledger freezes neither, and a row an
+    older database still holds for one is never recomputed (by the FX rule it would move) and never
+    dropped; it is named under 'kept' until the next upload replaces the book."""
+    conn = _pin_db()
+    _insert_instruments(conn, [
+        ("IRSOIS-USD-1", "IRS", "USD", "USD", 1, 0, "IRSOIS-USD-1", "2026-09-10"),
+        ("IRSOIS-USD-2", "IRS", "USD", "USD", 1, 0, "IRSOIS-USD-2", "2026-09-10"),
+        ("USDBRL", "FX", "USD", "BRL", 1, 1, "USDBRL Curncy", "9999-12-31"),
+    ])
+    for trade_id, inst in (("s1", "IRSOIS-USD-1"), ("s2", "IRSOIS-USD-2")):
+        _insert_trade(conn, trade_id, inst, "IRS", "2026-03-01", 10e6, 0.04)
+        _insert_legs(conn, [(trade_id, 1, "FIXED", "USD", -10e6, "2026-03-03", "2026-09-10", 0.04, 0),
+                            (trade_id, 2, "FLOAT", "USD", 10e6, "2026-03-03", "2026-09-10", 0.0, 0)])
+    _insert_trade(conn, "b1", "USDBRL", "FX_FWD", "2026-08-14", 1e6, 5.20)
+    _insert_legs(conn, [("b1", 1, "FX_NEAR", "USD", 1e6, "2026-08-14", "2026-09-16", 5.20, 0),
+                        ("b1", 2, "FX_NEAR", "BRL", -5.2e6, "2026-08-14", "2026-09-16", 5.20, 0)])
+    _insert_marks(conn, [
+        ("2026-09-16", "USDBRL", "2026-09-16", "SPOT", 5.35, "BBG_BFXFORWARD", "t"),
+        ("2026-09-10", "IRSOIS-USD-2", "2026-09-10", "PV_USD", 0.0, "QL_PRICER", "t"),
+        ("2026-09-10", "IRSOIS-USD-2", "2026-09-10", "CASHFLOW_USD", 2_100.0, "QL_PRICER", "t"),
+    ])
+    old_rows = [
+        ("s1", "IRSOIS-USD-1", "IRS", "USD", "2026-09-10", 2_100.0, 0.0, "PV_USD", 1.0, "2026-09-10", "QL_PRICER",
+         2_100.0, "2026-09-11T17:00:00-04:00", ""),
+        ("b1", "USDBRL", "FX_FWD", "BRL", "2026-09-16", 1e6, 1e6 * 5.20 / 5.22, "NDF_FIX", 1 / 5.22, "2026-09-14",
+         "BBG_BDH", 1e6 * (5.22 - 5.20) / 5.22, "2026-09-15T17:00:00-04:00",
+         "official fixing dated 2026-09-14 (NDF fixing), converted at the fixing"),
+    ]
+    conn.executemany(f"INSERT INTO realised_pnl ({', '.join(ledger._REALISED_COLUMNS)}) VALUES ({','.join('?' * 14)})",
+                     old_rows)
+    conn.commit()
+    res = ledger.realise_settled(conn, "2026-09-21")
+    reason = ("{} row frozen at {}: rates swaps and NDFs left the app on 2026-09-24, "
+              "so it is left as frozen until the next upload replaces the book")
+    assert res["kept"] == [{"trade_id": "b1", "product": "FX_FWD", "reason": reason.format("FX_FWD", "NDF_FIX")},
+                           {"trade_id": "s1", "product": "IRS", "reason": reason.format("IRS", "PV_USD")}]
+    assert res["refrozen"] == [] and res["unrealisable"] == []
+    # the matured swap s2 is not frozen at its PV + cashflows any more, and nothing else moved
+    assert res["realised"] == 9
+    stored = conn.execute(f"SELECT {', '.join(ledger._REALISED_COLUMNS)} FROM realised_pnl "
+                          "WHERE trade_id IN ('s1', 'b1', 's2') ORDER BY trade_id DESC").fetchall()
+    assert stored == old_rows
+    assert [r for r in _pin_rows(conn) if r[0] not in ("s1", "b1")] == _PIN_ROWS

@@ -1,6 +1,6 @@
 ---
 name: ingest-parser
-description: Layer 1, trades in: the blotter export parser (data/ingest/blotter.py) and the shared ingest constants (data/ingest/common.py: the NDF list, the fixing and 1M NDF tickers, shared dataclasses and regexes). Speaks to other lanes only through the housekeeper.
+description: Layer 1, trades in: the blotter export parser (data/ingest/blotter.py) and the shared ingest constants (data/ingest/common.py: shared dataclasses and helpers); commodity futures resolved through contract-master. Speaks to other lanes only through the housekeeper.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
 effort: high
@@ -34,8 +34,8 @@ Rules:
 - Write tests alongside code, in your own test files, and run only those (`py -3 -m pytest tests/test_blotter.py tests/test_ingest_common.py tests/test_ingest.py -q -p no:cacheprovider`). The housekeeper runs the full suite once at the end. A red test in a file you do not own goes in your Handoff; you never edit it.
 - One trade source (hard rule 1): never add a second parser, file type or feed.
 - Imports are tolerant (hard rule 6). No file or row is rejected over formatting, and only a contradiction between two populated fields rejects. Every new parser guess goes to `docs/blotter-parser-assumptions.md`, which you ask for as a Request, because docs/ is the housekeeper's.
-- The row kind comes from `Fin Type`, then `Product`. The IRS sign is + = pay fixed, a bracket or minus on `Notional` or `Quantity` is a short, and `Side` is ignored.
-- `common.py`'s NDF lists and tickers are read by the Bloomberg library, the ladder and the P&L, so any change to them is a Changed interface for all of those lanes.
+- The row kind comes from `Fin Type`, then `Product`. A row of a product that left the app (rate swap, equity-index future, listed index option) is counted and skipped with a plain reason, never rejected. Every FX pair is deliverable.
+- A commodity future's multiplier, currency and Bloomberg ticker come from contract-master only; an unknown or ambiguous root rejects, never a guessed multiplier.
 - Record anything learned (data quirks, conventions, the user's preferences for your part) in agent memory.
 - Never replicate the items in the "Must not replicate" list in CLAUDE.md.
 
@@ -54,5 +54,5 @@ CLAUDE.md sections most relevant to you:
 
 - Data contract → Blotter → tables
 - Data contract → Tables (leg layouts)
-- Data contract → Bloomberg library (the NDF_FIX and NDF_1M tickers)
+- Data contract → Bloomberg library (commodity futures)
 - Hard rules 1 and 6

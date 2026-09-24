@@ -1,2 +1,3 @@
 - [Commodity futures in the library (2026-09-24)](commodity_futures_library_2026_09_24.md) — conversion SPOT, CONTRACT_DATES met at read time, requestable filter default in needed_on
+- [Macro needs retired (2026-09-24)](macro_needs_retired_2026_09_24.md) — NDF/IRS/fixings/index level out of compute; retired names deleted after live/backfill
 - Older notes on these files: `.claude/agent-memory/bbg-data/` (library/inventory history before the 2026-09-24 split)

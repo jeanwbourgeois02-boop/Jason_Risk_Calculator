@@ -13,7 +13,15 @@ Each has the default the build assumes until the user answers.
 - **C8. Exchange holiday dates** (`config/calendars/`, written from memory on 2026-09-24): every `# unverified` line, all of CN 2027 (the State Council publishes late 2026) and the whole AE (GME) file need checking against each exchange's published calendar. ICE_EU is one file for energy and softs (the London softs also close on the UK May and August bank holidays); ICE_US does not cover canola's Canadian holidays. Past 2027 only weekends count as closed (`engine.calendars.coverage`).
 - **C7. Which calendar defines Daily** for a book spread over US, UK, Chinese and other exchanges. Default: the existing US calendar (`config/holidays.txt`).
 
+- **C9. Freezing a future whose last price predates expiry** (P&L rule, needs the user's yes): convert at the expiry date's spot (recommended: settlement then never moves LTD, as FX freezes at the last spot on or before settlement) or at the spot of the price's own date (what the code does now).
+- **C10. Leftovers of the retired products on an old database** (P&L rule): an NDF frozen at the fixing-date spot substitute is re-frozen as a deliverable forward (recommended instead: keep its figure, like an NDF frozen at its fix); a leftover open IRS disappears from `value_book` with no row (recommended: a blank row with its reason, hard rule 2). Only a database that still holds the macro trader's trades is affected.
+- **C11. FX swaps on the Manual entry screen.** `data/ingest/manual.py::book_fx_swap` exists (backend, tested) because the package rule that used to create FX swaps left the app; nothing on screen calls it yet. Recommended: add an "FX swap" choice (near and far dates, two rates), since rolling a USDCNH hedge is typically done as a swap.
+- **C12. Options on futures, Phase 5:** the listed P&L path in `engine/pnl/valuation.py` reads product `EQ_OPTION`, the commodity option pricer prices `CMDTY_OPTION`. Recommended: one code, `CMDTY_OPTION`, with the listed P&L path extended to read it (P&L contract, needs the user's yes). The pricer also needs a USD discount curve rule for listed options (the library no longer pulls one for them) and `engine/options/portfolio.py` must read the underlying future's FUTURE_PX.
+- **C13. Stress moves for CNY and MYR** (the Chinese and Bursa futures' currencies) are not in `config/stress.yaml`; commodity-stress (Phase 4) or a line on request. CNH moves were added at the Asian-EM size (−8 % risk-off / +5 % risk-on); the managed SGD-style size (−4 % / +3 %) is the alternative.
+
 ## Macro book (inherited; retired with Phase 2)
+
+Everything below concerns the macro trader's book, whose rate swaps, NDFs, FX-swap package rule and equity-index products left the app on 2026-09-24 (item 61, swaptions and caps, is closed with them). Kept as history.
 
 **2026-09-14 user decision:** HA-portfolio vJean is authoritative. Prior proposed defaults that alter its arithmetic are superseded. See `excel-parity-audit.md` and the correction at the top of CLAUDE.md. Full live FX numerical parity awaits valid rates; the supplied workbook caches have Bloomberg/Excel errors.
 

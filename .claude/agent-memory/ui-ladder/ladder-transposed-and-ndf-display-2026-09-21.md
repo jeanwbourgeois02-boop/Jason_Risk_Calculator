@@ -5,6 +5,10 @@ metadata:
   type: project
 ---
 
+SUPERSEDED IN PART (2026-09-24): every NDF rule, label, 1M rate and caption below was removed
+from the tab, and the test-file boundary note is stale; see [[phase2-macro-removal-2026-09-24]].
+The grid-shape and DataTable facts still hold.
+
 2026-09-21, user decisions recorded in CLAUDE.md "Ladder". `ui/tabs/exposure.py`:
 `summary_block_frame/_table` (id `SUMMARY_BLOCK_TABLE_ID`, currencies across, rows FX rate
 (as quoted) / Local delta / USD delta / Rate source, net USD delta total in `TOTAL_COL`)

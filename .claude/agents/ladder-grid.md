@@ -1,6 +1,6 @@
 ---
 name: ladder-grid
-description: Layer 5, exposure: the cash ladder grid and the delta-per-currency SQL (engine/ladder/ladder.py, views.py), the ladder records and settled cash (exposure_adapter.py), and the NDF fixing-date rule (ndf.py). Speaks to other lanes only through the housekeeper.
+description: Layer 5, exposure: the cash ladder grid and the delta-per-currency SQL (engine/ladder/ladder.py, views.py), the ladder records and settled cash (exposure_adapter.py). Speaks to other lanes only through the housekeeper.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
 effort: high
@@ -32,8 +32,8 @@ Rules:
 - Write tests alongside code, in your own test files, and run only those (`py -3 -m pytest tests/test_ladder.py tests/test_exposure_adapter.py -q -p no:cacheprovider`). The housekeeper runs the full suite once at the end. A red test in a file you do not own goes in your Handoff; you never edit it.
 - The ladder holds no bank balance (hard rule 5): delta exposure, cashflow timing, settled cash from the tickets on file, and stress.
 - The grid is `trade_legs` with `settles_cash = 1 AND settle_date ≥ as_of`, and the delta query uses `>`. The SQL is CLAUDE.md's, with the option SPOT LEFT JOIN on the pair and the NULL check before aggregating.
-- An NDF sits on its fixing date (value date less 2 business days), and its rate is the official NDF_1M. From the day after its fixing it is nowhere on the ladder.
-- Settled cash: deliverable legs past their value date sit there at face value. Non-deliverable tickets other than NDFs show the USD settlement read from `realised_pnl`, never recomputed. One not realised yet is named.
+- Every FX leg sits on its own value date (NDFs left the app on 2026-09-24; `ndf.py` is deleted).
+- Settled cash: deliverable legs past their value date sit there at face value. Futures and FX options show the USD settlement read from `realised_pnl`, never recomputed. One not realised yet is named.
 - pnl-valuation, pnl-ledger and bbg-library read `ndf.py` too, so a change to the fixing rule is a Changed interface for all of them.
 - Record anything learned (data quirks, conventions, the user's preferences for your part) in agent memory.
 - Never replicate the items in the "Must not replicate" list in CLAUDE.md.

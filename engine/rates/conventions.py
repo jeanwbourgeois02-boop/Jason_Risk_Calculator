@@ -83,7 +83,11 @@ _OIS_CONVENTIONS: Dict[CcyIndex, dict] = {
 class Conventions:
     """Minimal stand-in for the reference project's yaml-driven `Conventions` class,
     exposing the same `.get(ccy, index)` -> attribute-access object interface used by
-    `curves.py`/`instruments.py` (`conv.calendar`, `conv.fixed_day_count`, ...)."""
+    `curves.py`/`qlmap.py`/`store.py` (`conv.calendar`, `conv.spot_lag`, ...). The
+    fixed-leg fields (`fixed_day_count`, `short_swap_single_payment`) are kept as
+    transcribed convention data; the OIS rate helpers read `fixed_frequency`,
+    `payment_lag` and the calendar, and the swap pricer that read the rest left the app
+    on 2026-09-24."""
 
     def get(self, ccy: str, index: str) -> SimpleNamespace:
         entry = _OIS_CONVENTIONS.get((ccy, index))

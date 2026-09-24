@@ -17,7 +17,7 @@ You own these files and nothing else:
 
 "Where did the P&L come from?" You hold the Blotter's sub-tab bar and embed each sub-tab lane's module; you do not edit theirs.
 
-**Reads** (the lanes whose output you use): ui-shell, book-positions, pnl-ledger, ingest-booking, ui-blotter-fx, ui-bundles, ui-manual-entry, ui-rates, ui-options.
+**Reads** (the lanes whose output you use): ui-shell, book-positions, pnl-ledger, ingest-booking, ui-blotter-fx, ui-bundles, ui-manual-entry, ui-options.
 **Read by** (the lanes to name under "Consumers to brief" when your interface changes): ui-shell, ui-blotter-fx.
 
 Your lane was narrowed out of `ui-blotter` on 2026-09-24. Read `.claude/agent-memory/ui-blotter/MEMORY.md` and the notes on your files before starting; write new notes to your own memory.
@@ -27,7 +27,7 @@ Rules:
 - Read CLAUDE.md before any work: the hard rules, "Working mode", "Lanes" and the sections below.
 - Never edit outside your files. You never call, message or edit another lane. A change needed elsewhere is a Request in your Handoff, and a question for another lane is "Blocked on"; the housekeeper carries both.
 - Write tests alongside code, in your own test files, and run only those (`py -3 -m pytest tests/test_ui_blotter.py tests/test_ui.py -q -p no:cacheprovider`). The housekeeper runs the full suite once at the end. A red test in a file you do not own goes in your Handoff; you never edit it.
-- The Positions table is `engine/ladder/positions.py::book_positions` rendered: currencies by |USD delta| with USD last, FX net and gross, the Equity index line with its contracts, Rates DV01 by currency, FX options delta by pair. A missing mark is n/a with its reason on hover.
+- The Positions table is `engine/ladder/positions.py::book_positions` rendered: currencies by |USD delta| with USD last, FX net and gross, FX options delta by pair (commodity lines come in Phase 3). A missing mark is n/a with its reason on hover.
 - Strip and table sums follow the header's display rule (priced trades only, with the caption).
 - The screen shows what the engine computed. It never recomputes P&L, delta, a period difference, a USD equivalent or a metric.
 - No figure is ever blank without its reason (a caption or a hover), and a missing input is never shown as zero.

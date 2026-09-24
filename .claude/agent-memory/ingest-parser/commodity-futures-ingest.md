@@ -5,8 +5,9 @@ metadata:
   type: project
 ---
 
-Phase 1 step 2 of the commodity conversion (2026-09-24). Non-index futures resolve through
-contract-master's `resolve_future`; ES/NQ/RTY/YM keep the old path until Phase 2.
+Phase 1 step 2 of the commodity conversion (2026-09-24). Every future resolves through
+contract-master's `resolve_future`; ES/NQ/RTY/YM rows are skipped since Phase 2 (same day,
+see [[phase2-macro-removal]]).
 
 **Why:** Jason's book is commodity RV; no real commodity export exists yet (gate C1 in
 docs/open-questions.md), so everything rests on a synthetic sample and on guesses.

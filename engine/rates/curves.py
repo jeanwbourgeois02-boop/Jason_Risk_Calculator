@@ -22,14 +22,14 @@ USD curve (16 of 25) went unpriced. The cause is the evaluation date, not the qu
 with the 1W / 2W / 3W pillars QuantLib 1.43's non-local log-cubic iteration oscillates
 at the short end on the 22 and 23 September evaluation dates (the same quotes converge
 on 09-18, 09-21, 09-24, 09-25; dropping any one week pillar also converges), and
-log-linear converges on every date. On 2026-09-21 the 18-swap book's PV moved
+log-linear converges on every date. On 2026-09-21 the then 18-swap book's PV moved
 9,895,018 -> 10,019,751 and DV01 318,568 -> 318,663 under the switch; the user accepted
-that. Every path that builds a curve (``store.bootstrap_and_store``, hence
-``price_and_store`` / ``price_all_and_store`` / ``recalc_on_file``, and the callers in
-``engine/options/rates.py`` and ``engine/rates_vol/``) calls ``build_curve_set`` with
-no interpolation argument and so follows the default. DV01 (``valuation.py``) bumps the
-live quotes of the same curve object, so a bumped re-bootstrap always uses the
-interpolation the base curve was built with.
+that. Every path that builds a curve (``store.bootstrap_and_store``, called by the live
+pull's curves step, and ``engine/options/rates.py``, which builds the option pricers'
+curves in memory from ``curve_quotes``) calls ``build_curve_set`` with no interpolation
+argument and so follows the default. Swap pricing, the swap DV01 and
+``engine/rates_vol/`` left the app on 2026-09-24 (commodity conversion Phase 2); the
+curve is now only the option pricers' discount curve.
 
 QuantLib's bootstrap is lazy: a non-converging iteration only surfaces on the first
 ``discount()`` / ``zeroRate()`` call, which is why the 2026-09-22 failure appeared
@@ -39,9 +39,8 @@ QuantLib's own message) when it does not converge: never a silent curve, and no
 fallback to another interpolation (the explicit log-cubic request fails on those dates
 rather than being quietly replaced; the log-linear fallback that existed for one day,
 2026-09-22, was retired with the switch). ``CurveSet.interpolation`` records what was
-built; ``CurveSet.bootstrap_note`` stays for the readers that show it
-(``store.price_all_and_store``'s ``note``, the pull status, ``engine/options``) and is
-always "" now.
+built; ``CurveSet.bootstrap_note`` stays for ``engine/options`` (which reads it via
+getattr) and is always "" now.
 """
 from __future__ import annotations
 
@@ -68,8 +67,8 @@ log = logging.getLogger(__name__)
 @dataclass
 class CurveSet:
     """Single-currency OIS curve set. `quotes` stores the live `ql.SimpleQuote`
-    objects behind the bootstrapped curve so DV01 bucket bumping (`valuation.py`) can
-    perturb one pillar at a time and rebuild.
+    objects behind the bootstrapped curve, `(tenor, quote)` in input order; setting one
+    re-bootstraps the same curve object under the interpolation it was built with.
     """
 
     valuation_date: datetime.date
@@ -84,8 +83,7 @@ class CurveSet:
     # default since 2026-09-22; "LogCubicDiscount" only when asked for explicitly).
     interpolation: str = DEFAULT_INTERPOLATION
     # Always "" since the log-linear fallback was retired (2026-09-22): a curve that does
-    # not converge raises instead. Kept because store.price_all_and_store's `note`, the
-    # pull status and engine/options (via getattr) read it.
+    # not converge raises instead. Kept because engine/options reads it (via getattr).
     bootstrap_note: str = ""
 
     def get_discount(self) -> ql.YieldTermStructureHandle:

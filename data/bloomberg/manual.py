@@ -1,23 +1,31 @@
 """Manual mark entry for the Market data tab.
 
-MANUAL is official only for DELTA and PREMIUM (CLAUDE.md "Official marks" table). For
-SPOT / FWD_OUTRIGHT / FUTURE_PX / PAR_RATE / PV_USD / DV01_USD a MANUAL row is visible on
-the Market data tab (see data/bloomberg/inventory.py::mark_inventory, STATUS_MANUAL) but is
-never picked up by `marks_official` and never feeds valuation at all for those mark_types
--- `engine/pnl/valuation.py::value_book` reads `marks_official` unconditionally (2026-09-17,
+MANUAL is never an official source (CLAUDE.md "Official marks" table): a MANUAL row is
+visible on the Market data tab (see data/bloomberg/inventory.py::mark_inventory,
+STATUS_MANUAL) but is never picked up by `marks_official` and never feeds valuation --
+`engine/pnl/valuation.py::value_book` reads `marks_official` unconditionally (2026-09-17,
 "no bnp fall back" removed the `marks_source` parameter that used to let a caller retry a
 non-official source; docs/bnp-excel-removal.md). Do not change `marks_official`
-(data/ingest/schema.py) to make MANUAL win for those mark_types.
+(data/ingest/schema.py) to make MANUAL win.
+
+The mark types a manual row may carry are `MANUAL_MARK_TYPES`. PAR_RATE, PV_USD and
+DV01_USD left with the swaps on 2026-09-24 (commodity conversion Phase 2): a manual mark of
+another type is refused with the reason, never written.
 """
 from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
 
+MANUAL_MARK_TYPES = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "DELTA", "PREMIUM")
+
 
 def write_manual_mark(conn: sqlite3.Connection, as_of: str, instrument_id: str, settle_date: str,
                       mark_type: str, value: float) -> None:
-    """Insert/replace one MANUAL mark row, snapped_at = now (resolved local offset)."""
+    """Insert/replace one MANUAL mark row, snapped_at = now (resolved local offset).
+    Raises ValueError for a mark type outside MANUAL_MARK_TYPES."""
+    if mark_type not in MANUAL_MARK_TYPES:
+        raise ValueError(f"{mark_type!r} is not a manual mark type (only {', '.join(MANUAL_MARK_TYPES)})")
     snapped_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     conn.execute("INSERT OR REPLACE INTO marks VALUES (?,?,?,?,?,?,?)",
                  (as_of, instrument_id, settle_date, mark_type, float(value), "MANUAL", snapped_at))

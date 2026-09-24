@@ -1,4 +1,5 @@
-"""Tests for data/ingest/blotter.py. Real-file tests skip if the raw sample is absent."""
+"""Tests for data/ingest/blotter.py. The sample-file tests read data/sample/blotter_sample.csv, the
+synthetic commodity and FX-hedge book (every value made up; 2026-09-24)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,12 +10,10 @@ import math
 import pandas as pd
 import pytest
 
-from data.ingest import blotter, schema, swaps
+from data.ingest import blotter, schema
 
 REPO = Path(__file__).resolve().parents[1]
-RAW = REPO / "data" / "raw" / "new_sample_trades.csv"
-
-needs_raw = pytest.mark.skipif(not RAW.exists(), reason=f"raw file absent: {RAW}")
+SAMPLE = REPO / "data" / "sample" / "blotter_sample.csv"
 
 # Minimal header covering every column blotter.py reads by name, so synthetic single-row
 # CSVs below don't depend on column order (mirrors bnp.py test style: name lookups only).
@@ -79,7 +78,7 @@ def test_parse_forward_row_produces_trade_and_two_legs(tmp_csv):
     assert usd_leg.amount == pytest.approx(1_137_580.00)
     assert jpy_leg.amount == pytest.approx(-180_042_000.00)
     assert usd_leg.settle_date == "2026-09-16"
-    assert usd_leg.settles_cash == 1  # neither ccy is in NDF_CCYS
+    assert usd_leg.settles_cash == 1  # every FX leg settles (NDFs left the app, 2026-09-24)
 
 
 def test_parse_forward_sell_base_ccy_gives_negative_quantity(tmp_csv):
@@ -135,7 +134,9 @@ def test_forward_rejects_symbol_currency_pair_disagreement_with_buy_sell_columns
     assert "Buy/Sell Currency columns" in res.rejects[0].reason
 
 
-def test_forward_ndf_currency_sets_settles_cash_zero(tmp_csv):
+def test_forward_in_a_former_ndf_currency_is_written_deliverable(tmp_csv):
+    """NDFs left the app on 2026-09-24 (commodity conversion, Phase 2): a USDBRL forward is an
+    ordinary deliverable forward now, is_ndf 0 and both legs settling cash."""
     row = _forward_row(
         Description="TD 08/20/2026 VD 09/16/2026 SELL BRL VS .BUY USD @ 5.30000000",
         Symbol="USDBRL091626-997",
@@ -144,8 +145,8 @@ def test_forward_ndf_currency_sets_settles_cash_zero(tmp_csv):
     )
     res = blotter.parse(tmp_csv([row]))
     assert not res.rejects
-    assert all(l.settles_cash == 0 for l in res.legs)
-    assert res.instruments["USDBRL"].is_ndf == 1
+    assert all(l.settles_cash == 1 for l in res.legs)
+    assert res.instruments["USDBRL"].is_ndf == 0
 
 
 # --------------------------------------------------------------------------- CURRENCY
@@ -248,10 +249,11 @@ def test_currency_row_blank_symbol_and_side_is_rejected_not_guessed(tmp_csv):
 
 # --------------------------------------------------------------------------- FUTURE
 def _future_row(**overrides) -> dict:
+    # WTI Dec26 (NYMEX:CL, 1,000 bbl, USD); the ES row this was until 2026-09-24 is now skipped
     row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "FUTURE"},
-               **{"Trade Id": "400"}, Symbol="ESU6-USAA", Side="Sell", Quantity="1",
-               Price="7,716.00", TradeDate="20/8/2026", ExtAccount="GSIL-FUT-NMMF",
-               Counterparty="GSILUK", Trader="HA", Description="S&P500 EMINI FUT  Sep26")
+               **{"Trade Id": "400"}, Symbol="CLZ6-USAA", Side="Sell", Quantity="1",
+               Price="68.45", TradeDate="20/8/2026", ExtAccount="GSIL-FUT-NMMF",
+               Counterparty="GSILUK", Trader="HA", Description="WTI CRUDE FUT Dec26")
     row.update(overrides)
     return row
 
@@ -262,14 +264,31 @@ def test_future_row_produces_trade_with_signed_contracts(tmp_csv):
     assert not res.rejects
     t = res.trades[0]
     assert t.product == "FUTURE"
-    assert t.instrument_id == "ESU6 Index"
+    assert t.instrument_id == "CLZ26 Comdty"
     assert t.quantity == pytest.approx(-1.0)  # Sell -> negative
-    assert t.price == pytest.approx(7716.00)
+    assert t.price == pytest.approx(68.45)
     leg = res.legs[0]
     assert leg.leg_type == "NOTIONAL"
     assert leg.ccy == "USD"
-    assert leg.amount == pytest.approx(-1 * 50 * 7716.00)
+    assert leg.amount == pytest.approx(-1 * 1000 * 68.45)
     assert leg.settles_cash == 0
+
+
+@pytest.mark.parametrize("overrides", [
+    {"Symbol": "ESU6-USAA", "Price": "7,716.00", "Description": "S&P500 EMINI FUT  Sep26"},
+    {"Symbol": "NQZ6-USAA", "Price": "21,000.00"},
+    {"Symbol": "", "Underlying Symbol": "RTYU6-USAA", "Price": "2,300.00"},
+    {"Symbol": "YMZ6-USAA", "Price": "45,000", "Quantity": "24-Jul"},    # skipped before any cell is read
+])
+def test_an_equity_index_future_is_counted_and_skipped_never_rejected(tmp_csv, overrides):
+    """The equity index left the app on 2026-09-24 (commodity conversion, Phase 2): an ES / NQ /
+    RTY / YM row is counted and named with a plain reason, never rejected, never coerced."""
+    res = blotter.parse(tmp_csv([_future_row(**overrides), _future_row(**{"Trade Id": "401"})]))
+    assert not res.rejects and [t.trade_id for t in res.trades] == ["401"]
+    assert res.n_skipped_other == 1 and res.n_skipped_retired == 1 and res.n_future == 1
+    (row_no, _symbol, reason), = res.skipped_other_rows
+    assert row_no == 2 and reason.startswith("equity index future (") and "left the app on 2026-09-24" in reason
+    assert not [i for i in res.instruments if i.endswith(" Index")]
 
 
 def test_future_row_buy_side_gives_positive_quantity(tmp_csv):
@@ -367,7 +386,7 @@ def test_option_row_fallback_reads_expiry_and_call_put_from_description(tmp_csv)
     assert res.instrument_options[t.instrument_id].option_type == "PUT"
 
 
-# --------------------------------------------------------------------------- IRS
+# --------------------------------------------------------------------------- IRS (left the app 2026-09-24)
 def _irs_row(**overrides) -> dict:
     row = dict(Status="Completed", Fund="NMMF", **{"Fin Type": "INTEREST_RATE_SWAP"},
                **{"Trade Id": "600"}, Symbol="IRSOIS-USD-22860996", Side="Buy",
@@ -379,78 +398,22 @@ def _irs_row(**overrides) -> dict:
     return row
 
 
-def test_irs_row_positive_notional_is_payer(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row()]))
-    assert not res.rejects
-    assert res.n_skipped_irs == 0
-    t = res.trades[0]
-    assert t.product == "IRS"
-    assert t.instrument_id == "IRSOIS-USD-22860996"
-    assert t.quantity == pytest.approx(625_000_000.0)  # signed Notional, full units (matches irs.py)
-    assert t.price == pytest.approx(0.0398)
-    fixed = next(l for l in res.legs if l.leg_type == "FIXED")
-    floating = next(l for l in res.legs if l.leg_type == "FLOAT")
-    assert fixed.amount == pytest.approx(-625_000_000.0)  # payer: negative FIXED leg
-    assert floating.amount == pytest.approx(625_000_000.0)  # positive FLOAT leg
-    assert fixed.rate == pytest.approx(0.0398)
-    assert floating.rate == 0.0
-    assert fixed.settle_date == "2027-02-11"
-    assert fixed.settles_cash == 0 and floating.settles_cash == 0
-
-
-def test_irs_row_negative_notional_is_receiver(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row(**{"Trade Id": "601", "Notional": "-625,000,000"})]))
-    assert not res.rejects
-    t = res.trades[0]
-    assert t.quantity == pytest.approx(-625_000_000.0)
-    fixed = next(l for l in res.legs if l.leg_type == "FIXED")
-    floating = next(l for l in res.legs if l.leg_type == "FLOAT")
-    assert fixed.amount == pytest.approx(625_000_000.0)  # receiver: positive FIXED leg
-    assert floating.amount == pytest.approx(-625_000_000.0)
-
-
 @pytest.mark.parametrize("overrides", [
-    {"Notional": "(625,000,000)"},                     # brackets on Notional
-    {"Notional": "625,000,000", "Quantity": "(625)"},  # Notional unsigned, brackets on Quantity
-    {"Notional": "625,000,000", "Quantity": "-625"},   # Notional unsigned, minus on Quantity
-    {"Notional": "", "Quantity": "(625)"},             # Quantity only (millions), in brackets
-    {"Notional": "-625,000,000", "Quantity": "-625"},  # both signed: still one short, not a double flip
+    {},
+    {"Notional": "(625,000,000)", "Notes": "Pay Fixed"},    # contradictory directions: a reject until 2026-09-24
+    {"Notional": "0"},                                       # likewise
+    {"Symbol": "IRS-1", "Description": "", "Currency": ""},  # likewise (no currency anywhere)
+    {"Notional": "24-Jul", "FixedRate": "24-Jul"},           # mangled cells are never even read
 ])
-def test_irs_row_brackets_or_minus_on_either_column_is_short(tmp_csv, overrides):
-    res = blotter.parse(tmp_csv([_irs_row(**{"Trade Id": "603", **overrides})]))
-    assert not res.rejects
-    assert res.trades[0].quantity == pytest.approx(-625_000_000.0)
-    fixed = next(l for l in res.legs if l.leg_type == "FIXED")
-    assert fixed.amount == pytest.approx(625_000_000.0)  # receiver: positive FIXED leg
-
-
-def test_irs_row_positive_quantity_column_stays_payer(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row(**{"Trade Id": "604", "Quantity": "625"})]))
-    assert not res.rejects
-    assert res.trades[0].quantity == pytest.approx(625_000_000.0)
-
-
-def test_irs_row_rejects_zero_notional(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row(**{"Trade Id": "602", "Notional": "0"})]))
-    assert len(res.rejects) == 1
-    assert res.n_skipped_irs == 1
-    assert "Notional is zero" in res.rejects[0].reason
-
-
-def test_irs_row_with_unrecognised_symbol_falls_back_to_description_and_columns(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row(Symbol="IRS-USD-1")]))
-    assert not res.rejects
-    t = res.trades[0]
-    assert t.instrument_id == "IRS-USD-1"
-    assert res.instruments["IRS-USD-1"].base_ccy == "USD"
-    assert t.quantity == pytest.approx(625_000_000.0)
-
-
-def test_irs_row_with_no_currency_anywhere_is_rejected(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row(Symbol="IRS-1", Description="", Currency="")]))
-    assert len(res.rejects) == 1
-    assert res.n_skipped_irs == 1
-    assert "currency" in res.rejects[0].reason
+def test_an_interest_rate_swap_is_counted_and_skipped_never_rejected(tmp_csv, overrides):
+    """Rates left the app on 2026-09-24 (commodity conversion, Phase 2): a swap row is counted
+    and named with a plain reason, never rejected and never booked as anything else."""
+    res = blotter.parse(tmp_csv([_irs_row(**overrides), _forward_row()]))
+    assert not res.rejects and not res.warnings
+    assert [t.product for t in res.trades] == ["FX_FWD"]
+    assert res.n_skipped_other == 1 and res.n_skipped_retired == 1
+    assert res.skipped_other_rows == [(2, _irs_row(**overrides)["Symbol"], blotter.RETIRED_REASON_IRS)]
+    assert not [i for i in res.instruments if i.startswith("IRS")]
 
 
 # --------------------------------------------------------------------------- de-dupe
@@ -458,20 +421,20 @@ def test_repeated_trade_id_keeps_highest_version(tmp_csv):
     # Documented in CLAUDE.md ("a repeated Trade Id within a file keeps the highest
     # Version"), but unexercised by the reference sample (0/857 rows share a Trade Id) --
     # covered here directly instead.
-    row_v1 = _future_row(Version="3", Price="7,700.00")
-    row_v2 = _future_row(Version="11", Price="7,750.00")
+    row_v1 = _future_row(Version="3", Price="68.40")
+    row_v2 = _future_row(Version="11", Price="68.50")
     res = blotter.parse(tmp_csv([row_v1, row_v2]))
     assert res.n_superseded == 1
     assert len(res.trades) == 1
-    assert res.trades[0].price == pytest.approx(7750.00)
+    assert res.trades[0].price == pytest.approx(68.50)
 
 
 def test_repeated_trade_id_keeps_last_row_when_version_column_absent(tmp_csv):
     # HEADER (the fixture's column set) carries no Version column at all -- the
     # documented "else the last occurrence" half of the same rule.
-    res = blotter.parse(tmp_csv([_future_row(Price="7,700.00"), _future_row(Price="7,750.00")]))
+    res = blotter.parse(tmp_csv([_future_row(Price="68.40"), _future_row(Price="68.50")]))
     assert len(res.trades) == 1
-    assert res.trades[0].price == pytest.approx(7750.00)
+    assert res.trades[0].price == pytest.approx(68.50)
 
 
 # --------------------------------------------------------------------------- filters
@@ -510,7 +473,8 @@ def test_reference_sample_labels_resolve_as_before():
 
 @pytest.mark.parametrize("label", ["Interest Rate Swap", "INTEREST_RATE_SWAP", "IRS", "irs", "OIS Swap",
                                    "Rate Swap", "Rates Swap", "Interest rate swaps"])
-def test_swap_label_with_a_rates_word_is_an_interest_rate_swap(label):
+def test_swap_label_with_a_rates_word_is_recognised_as_an_interest_rate_swap(label):
+    # recognised so that it is skipped with its own reason, never read as an FX swap's fill
     assert blotter._kind_of(label) == "INTEREST_RATE_SWAP"
 
 
@@ -528,13 +492,15 @@ def test_swap_label_with_neither_word_is_not_loaded(label):
 def test_fx_swap_fin_type_books_the_row_as_a_forward_fill(tmp_csv):
     row = _forward_row(**{"Fin Type": "FX Swap"})
     res = blotter.parse(tmp_csv([row]))
-    assert not res.rejects and res.n_forward == 1 and res.n_irs == 0
+    assert not res.rejects and res.n_forward == 1 and res.n_skipped_other == 0
     t = res.trades[0]
     assert t.product == "FX_FWD" and t.instrument_id == "USDJPY"
     assert {(l.leg_type, l.ccy) for l in res.legs} == {("FX_NEAR", "USD"), ("FX_NEAR", "JPY")}
 
 
-def test_fx_swap_fin_type_pair_is_packaged_by_the_swap_rule(tmp_csv):
+def test_fx_swap_fin_type_pair_loads_as_two_outrights(tmp_csv):
+    """The FX-swap package rule left the app on 2026-09-24: an FX swap's two fills load as two
+    FX_FWD outrights, each its own package, each at its own value date."""
     conn = schema.connect()
     near = _forward_row(**{"Fin Type": "FX Swap", "Trade Id": "801"}, Symbol="USDJPY091626-1")
     far = _forward_row(**{"Fin Type": "FX Swap", "Trade Id": "802"}, Symbol="USDJPY101626-2", Side="Sell",
@@ -542,34 +508,54 @@ def test_fx_swap_fin_type_pair_is_packaged_by_the_swap_rule(tmp_csv):
                        **{"Buy Currency": "JPY.C-JPAA", "Sell Currency": "DOL.C-USAA",
                           "BuyCurrency Amount": "180,875,000.00", "SellCurrency Amount": "1,137,580.00"})
     blotter.load(tmp_csv([near, far]), conn)
-    assert swaps.package_swaps(conn) == 2
     rows = conn.execute("SELECT trade_id, product, package_id FROM trades ORDER BY trade_id").fetchall()
-    assert rows == [("801", "FX_SWAP", "SWAP-801"), ("802", "FX_SWAP", "SWAP-801")]
+    assert rows == [("801", "FX_FWD", "801"), ("802", "FX_FWD", "802")]
+    assert {r[0] for r in conn.execute("SELECT DISTINCT settle_date FROM trade_legs")} == {"2026-09-16", "2026-10-16"}
 
 
-def test_irs_fin_type_spelled_out_parses_as_a_rate_swap(tmp_csv):
+def test_irs_fin_type_spelled_out_is_skipped_as_a_rate_swap(tmp_csv):
     for label in ("Interest Rate Swap", "IRS"):
         res = blotter.parse(tmp_csv([_irs_row(**{"Fin Type": label})]))
-        assert not res.rejects and res.n_irs == 1 and res.n_forward == 0, label
-        assert res.trades[0].product == "IRS"
+        assert not res.rejects and not res.trades and res.n_forward == 0, label
+        assert res.skipped_other_rows[0][2] == blotter.RETIRED_REASON_IRS
 
 
 def test_bare_swap_fin_type_is_counted_and_skipped_not_coerced(tmp_csv):
     row = _irs_row(**{"Fin Type": "Swap"}, Product="")
     res = blotter.parse(tmp_csv([row]))
     assert not res.trades and not res.rejects
-    assert res.n_irs == 0 and res.n_forward == 0 and res.n_skipped_other == 1
+    assert res.n_forward == 0 and res.n_skipped_other == 1 and res.n_skipped_retired == 0
     assert res.skipped_other_rows[0][2] == "type not loaded by the app: Fin Type 'Swap', Product ''"
 
 
 def test_bare_swap_fin_type_still_falls_back_to_product(tmp_csv):
     row = _irs_row(**{"Fin Type": "Swap"}, Product="Interest Rate Swap")
     res = blotter.parse(tmp_csv([row]))
-    assert not res.rejects and res.n_irs == 1 and res.trades[0].product == "IRS"
+    assert not res.rejects and not res.trades and res.n_skipped_retired == 1
+    assert res.skipped_other_rows[0][2] == blotter.RETIRED_REASON_IRS
 
 
 # --------------------------------------------------------------------------- load()
-def test_load_writes_to_db_and_swap_packaging_still_works(tmp_csv):
+def test_parse_and_load_take_no_swap_direction_arguments_any_more():
+    import inspect
+
+    assert "direction_overrides" not in inspect.signature(blotter.parse).parameters
+    assert "turn_swap_marks" not in inspect.signature(blotter.load).parameters
+    for gone in ("irs_directions", "direction_overrides", "n_direction_overrides", "n_irs", "n_skipped_irs"):
+        assert not hasattr(blotter.ParseResult(), gone), gone
+
+
+def test_load_needs_no_swap_review_table(tmp_csv):
+    """The swap_review table left with the package rule: a load on a database without one
+    writes the trades (it used to delete from it and dissolve FX_SWAP packages)."""
+    conn = schema.connect()
+    conn.execute("DROP TABLE IF EXISTS swap_review")
+    res = blotter.load(tmp_csv([_forward_row()]), conn)
+    assert len(res.trades) == 1
+    assert blotter.load(tmp_csv([_forward_row()]), conn).n_updated == 1
+
+
+def test_load_writes_to_db(tmp_csv):
     conn = schema.connect()
     row1 = _forward_row(**{"Trade Id": "700"}, Symbol="USDJPY091626-1",
                         Description="TD 08/20/2026 VD 09/16/2026 SELL JPY VS .BUY USD @ 158.00000000",
@@ -583,10 +569,8 @@ def test_load_writes_to_db_and_swap_packaging_still_works(tmp_csv):
     assert len(res.trades) == 2
     assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0] == 4
-    packaged = swaps.package_swaps(conn)
-    assert packaged == 2
     products = {r[0] for r in conn.execute("SELECT product FROM trades")}
-    assert products == {"FX_SWAP"}
+    assert products == {"FX_FWD"}
 
 
 def test_load_strict_raises_on_reject(tmp_csv):
@@ -608,35 +592,28 @@ def test_load_non_strict_inserts_valid_rows_and_skips_rejects(tmp_csv):
 
 
 # --------------------------------------------------------------------------- real file
-@needs_raw
-def test_real_sample_file_parses_with_no_rejects():
-    res = blotter.parse(RAW)
-    assert res.n_forward == 743
-    assert res.n_currency == 85
-    assert res.n_future == 11
-    assert res.n_option == 8
-    assert res.n_irs == 10         # the swap-label rule (2026-09-22) moves none of the sample's rows
-    assert res.n_skipped_irs == 0  # all 10 IRS rows have positive Notional -> payer, parsed
-    assert res.n_skipped_other == 0
+def test_sample_file_parses_with_only_its_two_deliberate_rejects():
+    res = blotter.parse(SAMPLE)
+    assert res.n_forward == 8
+    assert res.n_currency == 1
+    assert res.n_future == 31
+    assert res.n_option == 5
+    assert res.n_skipped_other == 0 and res.n_skipped_retired == 0   # no macro product in the commodity book
     assert res.n_skipped_status_or_fund == 0
-    assert not res.rejects
-    # 743 forward + 85 spot (every CURRENCY row names two currencies) + 11 future
-    # + 8 option + 10 IRS trades (2026-09-18: CURRENCY rows are spot fills)
-    assert res.n_spot == 85
-    assert len(res.trades) == 743 + 85 + 11 + 8 + 10
-    assert len(res.legs) == (743 + 85) * 2 + 11 + 8 + 10 * 2
+    # the two futures the contract master cannot resolve: an ambiguous bare code, an unknown root
+    assert [r.symbol for r in res.rejects] == ["ZCZ6-USAA", "QQZ6-USAA"]
+    # 29 futures + 8 forwards + 1 spot (the CURRENCY row names two currencies) + 5 options
+    assert res.n_spot == 1
+    assert len(res.trades) == 29 + 8 + 1 + 5
+    assert len(res.legs) == 29 + (8 + 1) * 2 + 5
     spot = [t for t in res.trades if t.product == "FX_SPOT"]
-    assert len(spot) == 85 and all(t.trade_id for t in spot)
-    assert {t.instrument_id for t in spot} == {"EURSEK", "EURUSD", "USDCAD", "USDHKD", "USDJPY", "XAUUSD"}
-    irs_trades = [t for t in res.trades if t.product == "IRS"]
-    assert len(irs_trades) == 10
-    assert all(t.quantity > 0 for t in irs_trades)  # every reference-sample Notional is positive
+    assert [(t.trade_id, t.instrument_id) for t in spot] == [("910000040", "EURUSD")]
+    assert not res.warnings
 
 
-@needs_raw
-def test_real_sample_file_loads_into_db(tmp_csv):
+def test_sample_file_loads_into_db(tmp_csv):
     conn = schema.connect()
-    res = blotter.load(RAW, conn, strict=False)
+    res = blotter.load(SAMPLE, conn, strict=False)
     assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == len(res.trades)
     assert conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0] == len(res.legs)
     # instrument foreign keys all resolve (schema has FKs on and they're enforced above)
@@ -832,20 +809,23 @@ def test_option_with_an_unrecoverable_date_cell_rejects_that_one_row_and_the_res
     _assert_db_numeric(conn)
 
 
-# ---- FUTURE, spot, IRS
-def test_future_price_and_quantity_as_dates_are_rebuilt_from_the_invoice_and_notional(tmp_csv):
-    # reference row 934530554: Sell 10 @ 7,715.65, NetInvoice 3,857,806.60, fees 18.4, Notional 500
-    price_bad = _future_row(Quantity="10", Price="24-Jul", NetInvoice="3,857,806.60", **{"Total Fees": "18.4"})
+# ---- FUTURE, spot
+def test_future_price_and_quantity_as_dates_are_rebuilt_from_the_invoice(tmp_csv):
+    # Sell 10 WTI @ 68.45 with 21.00 of fees: NetInvoice = 10 x 1,000 x 68.45 - 21 = 684,479.00
+    price_bad = _future_row(Quantity="10", Price="24-Jul", NetInvoice="684,479.00", **{"Total Fees": "21"})
     res = blotter.parse(tmp_csv([price_bad]))
     assert not res.rejects
-    assert res.trades[0].price == pytest.approx(7715.65) and res.trades[0].quantity == -10.0
-    qty_bad = _future_row(Quantity="24-Jul", Price="7,715.65", Notional="500")
+    assert res.trades[0].price == pytest.approx(68.45) and res.trades[0].quantity == -10.0
+    qty_bad = _future_row(Quantity="24-Jul", Price="68.45", NetInvoice="684,479.00")
     res = blotter.parse(tmp_csv([qty_bad]))
     assert not res.rejects and res.trades[0].quantity == -10.0
-    assert "Notional / 50" in res.warnings[0].message
-    # a buy carries the fees the other way round (reference row 896367187)
-    buy = _future_row(Side="Buy", Quantity="6", Price="24-Jul", NetInvoice="2,258,486.10", **{"Total Fees": "11.1"})
-    assert blotter.parse(tmp_csv([buy])).trades[0].price == pytest.approx(7528.25)
+    assert "NetInvoice / (1000 x Price)" in res.warnings[0].message
+    # Notional is never a source of contracts (the ES-only rebuild left with the equity index)
+    res = blotter.parse(tmp_csv([_future_row(Quantity="24-Jul", Price="68.45", Notional="10,000")]))
+    assert "Quantity '24-Jul' is not a number" in res.rejects[0].reason and not res.trades
+    # a buy carries the fees the other way round: 6 x 1,000 x 68.72 + 12.60
+    buy = _future_row(Side="Buy", Quantity="6", Price="24-Jul", NetInvoice="412,332.60", **{"Total Fees": "12.6"})
+    assert blotter.parse(tmp_csv([buy])).trades[0].price == pytest.approx(68.72)
 
 
 def test_future_with_an_unrecoverable_date_cell_is_rejected_by_name(tmp_csv):
@@ -855,16 +835,16 @@ def test_future_with_an_unrecoverable_date_cell_is_rejected_by_name(tmp_csv):
     assert [t.trade_id for t in res.trades] == ["401"]
 
 
-@needs_raw
-def test_future_price_rebuilt_from_the_invoice_matches_every_reference_fill():
-    df = blotter.read_table(RAW)
+def test_future_price_rebuilt_from_the_invoice_matches_every_sample_fill():
+    df = blotter.read_table(SAMPLE)
     futures = df[df["Fin Type"] == "FUTURE"].copy()
     fills = {r["Trade Id"]: blotter._num(r["Price"]) for _, r in futures.iterrows()}
     futures["Price"] = "24-Jul"
     res = blotter.parse(futures)
-    assert not res.rejects and len(res.trades) == 11
+    # the sample's two deliberate rejects stay rejects (contract not resolved, before any price)
+    assert [r.symbol for r in res.rejects] == ["ZCZ6-USAA", "QQZ6-USAA"] and len(res.trades) == 29
     for t in res.trades:
-        assert t.price == pytest.approx(fills[t.trade_id], abs=0.005)   # the Price column is 2-decimal
+        assert t.price == pytest.approx(fills[t.trade_id], rel=1e-9)   # NetInvoice = fill x size +/- fees
 
 
 def test_spot_row_price_as_a_date_is_rebuilt_and_an_unrecoverable_amount_is_rejected(tmp_csv):
@@ -877,17 +857,6 @@ def test_spot_row_price_as_a_date_is_rebuilt_and_an_unrecoverable_amount_is_reje
     (rj,) = res.rejects
     assert "BuyCurrency Amount '24-Jul' is not a number" in rj.reason
     assert [t.trade_id for t in res.trades] == ["938038061"]
-
-
-def test_irs_notional_and_rate_as_dates_are_rebuilt_or_rejected_by_name(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row(Notional="24-Jul", Quantity="625", FixedRate="24-Jul")]))
-    assert not res.rejects
-    assert res.trades[0].quantity == pytest.approx(625_000_000.0) and res.trades[0].price == pytest.approx(0.0398)
-    assert {w.message.split(" ")[0] for w in res.warnings} == {"Notional", "FixedRate"}
-    res = blotter.parse(tmp_csv([_irs_row(Notional="24-Jul")]))
-    assert "Notional '24-Jul' is not a number" in res.rejects[0].reason
-    res = blotter.parse(tmp_csv([_irs_row(FixedRate="24-Jul", Description="")]))
-    assert "FixedRate '24-Jul' is not a number" in res.rejects[0].reason
 
 
 # ---- the gate and the diagnostics
@@ -923,12 +892,11 @@ def test_a_file_full_of_mangled_cells_never_puts_text_in_a_numeric_column(tmp_xl
                         Description="EURSEK-XXAA EUR Call 11/25/2026 SBILUK"),             # strike cell is a date
             _future_row(Price=datetime.time(5, 45, 36)),                                   # unrecoverable
             _future_row(**{"Trade Id": "402"}),
-            _irs_row(Notional=DATE_CELL, Quantity="625"),
             _currency_spot_row(Price="24/07/2026")]
     conn = schema.connect()
     res = blotter.load(tmp_xlsx(rows), conn)
     assert sorted(r.row_no for r in res.rejects) == [5, 7]
-    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 7
+    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 6
     assert conn.execute("SELECT strike FROM instrument_options WHERE instrument_id='EURSEK112526C-197906813'").fetchone()[0] == 0
     assert res.options_missing_strike == ["EURSEK112526C-197906813"]
     _assert_db_numeric(conn)
@@ -973,98 +941,65 @@ def test_option_netinvoice_mismatch_above_half_a_percent_warns_and_never_rejects
     assert "NetInvoice" in w.message and "0.67%" in w.message
 
 
-@needs_raw
-def test_real_sample_option_terms_and_the_three_digitals_with_no_strike():
-    res = blotter.parse(RAW)
-    assert not res.warnings                                   # NetInvoice = |Quantity x Price| on all 8
+def test_sample_option_terms_and_the_digital_with_no_strike():
+    res = blotter.parse(SAMPLE)
+    assert not res.warnings                                   # NetInvoice = |Quantity x Price| on all 5
     terms = {k: (o.strike, o.option_type, res.instruments[k].expiry_date) for k, o in res.instrument_options.items()}
     assert terms == {
-        "EURSEK092326C-197727826": (pytest.approx(11.0584), "CALL", "2026-09-23"),
-        "EURSEK092326P-197728105": (pytest.approx(11.0584), "PUT", "2026-09-23"),
-        "EURUSD092226P-197728065": (pytest.approx(1.1698), "PUT", "2026-09-22"),
-        "EURUSD092226C-197728066": (pytest.approx(1.1698), "CALL", "2026-09-22"),
-        "EURSEK092326P-197838147": (pytest.approx(11.0584), "PUT", "2026-09-23"),
+        "EURUSD111826C-500041": (pytest.approx(1.18), "CALL", "2026-11-18"),
+        "USDJPY121626P-500042": (pytest.approx(142.5), "PUT", "2026-12-16"),
         # no "<n> STRIKE" in the Description and no strike column in the export: the
         # schema's 0 = "not known" sentinel (never a real strike), and named for the UI
-        "EURSEK112526C-197906813": (0.0, "CALL", "2026-11-25"),
-        "USDJPY111926P-197957397": (0.0, "PUT", "2026-11-19"),
-        "USDJPY111926P-197571137": (0.0, "PUT", "2026-11-19"),
+        "USDJPY111926P-500043": (0.0, "PUT", "2026-11-19"),
+        "EURUSD102126P-500044": (pytest.approx(1.15), "PUT", "2026-10-21"),
+        "EURUSD102126P-500045": (pytest.approx(1.15), "PUT", "2026-10-21"),
     }
-    assert res.options_missing_strike == ["EURSEK112526C-197906813", "USDJPY111926P-197571137",
-                                          "USDJPY111926P-197957397"]
-    assert any("3 option(s) have no strike" in n for n in res.notes())
+    assert res.options_missing_strike == ["USDJPY111926P-500043"]
+    assert any("1 option(s) have no strike" in n for n in res.notes())
     signs = {t.trade_id: t.quantity for t in res.trades if t.product == "FX_OPTION"}
-    assert signs["934168029"] == pytest.approx(1_000_000.0)   # Side Buy, NetInvoice negative
-    assert signs["938795946"] == pytest.approx(-35_000_000.0)  # the one Sell
-    assert sum(1 for q in signs.values() if q > 0) == 7
+    assert signs["910000045"] == pytest.approx(-5_000_000.0)  # the one Sell: the closed-out pair's sell-back
+    assert sum(1 for q in signs.values() if q > 0) == 4
 
 
-@needs_raw
 def test_a_strike_entered_in_the_app_survives_a_re_upload_of_the_same_file(tmp_path):
     from data.ingest import upload
 
+    digital = "USDJPY111926P-500043"
     # library path (merge)
     conn = schema.connect()
-    blotter.load(RAW, conn)
-    conn.execute("UPDATE instrument_options SET strike = 152, payoff = 'DIGITAL' WHERE instrument_id = 'USDJPY111926P-197571137'")
+    blotter.load(SAMPLE, conn)
+    conn.execute("UPDATE instrument_options SET strike = 152, payoff = 'DIGITAL' WHERE instrument_id = ?", (digital,))
     conn.commit()
-    res = blotter.load(RAW, conn)
-    assert conn.execute("SELECT strike, payoff FROM instrument_options WHERE instrument_id = 'USDJPY111926P-197571137'"
+    res = blotter.load(SAMPLE, conn)
+    assert conn.execute("SELECT strike, payoff FROM instrument_options WHERE instrument_id = ?", (digital,)
                         ).fetchone() == (152.0, "DIGITAL")
-    assert "USDJPY111926P-197571137" in res.options_missing_strike   # the FILE still has none
+    assert digital in res.options_missing_strike   # the FILE still has none
     # the app's upload path (full replace of the book)
     db = tmp_path / "risk.db"
-    upload.import_blotter(RAW.read_bytes(), RAW.name, db)
+    upload.import_blotter(SAMPLE.read_bytes(), SAMPLE.name, db)
     live = schema.connect(db)
-    live.execute("UPDATE instrument_options SET strike = 11.4 WHERE instrument_id = 'EURSEK112526C-197906813'")
+    live.execute("UPDATE instrument_options SET strike = 150.5 WHERE instrument_id = ?", (digital,))
     live.commit()
     live.close()
-    upload.import_blotter(RAW.read_bytes(), RAW.name, db)
+    upload.import_blotter(SAMPLE.read_bytes(), SAMPLE.name, db)
     live = schema.connect(db)
-    assert live.execute("SELECT strike FROM instrument_options WHERE instrument_id = 'EURSEK112526C-197906813'"
-                        ).fetchone()[0] == 11.4
+    assert live.execute("SELECT strike FROM instrument_options WHERE instrument_id = ?", (digital,)).fetchone()[0] == 150.5
     live.close()
 
 
 # =========================================================================== TASK A
-@pytest.mark.parametrize("overrides,decided_by", [
-    ({"Notional": "(625,000,000)"}, "Notional '(625,000,000)'"),
-    ({"Quantity": "-625"}, "Quantity '-625'"),
-    ({"Current Face": "(625,000,000)"}, "Current Face '(625,000,000)'"),
-    ({"Original Face": "625,000,000-"}, "Original Face '625,000,000-'"),
-    ({"Side": "Sell"}, "Side 'Sell'"),
-    ({"Side": "short"}, "Side 'short'"),
-    ({"Notes": "Rec Fixed vs SOFR"}, "Notes 'Rec Fixed vs SOFR'"),
-    ({"Swap Type": "RECEIVER"}, "Swap Type 'RECEIVER'"),
-    ({"RollSide": "RCV"}, "RollSide 'RCV'"),
-    ({"Tran Type": "NEW - receive"}, "Tran Type 'NEW - receive'"),
-    ({"Description": "IRS REC 11/11/2026 02/11/2027 3.98000000 USD"}, "Description 'IRS REC"),
-    ({"Notes": "Pay Float"}, "Notes 'Pay Float'"),             # paying the float leg = receiving fixed
-])
-def test_irs_every_explicit_short_signal_reads_as_receive_fixed(tmp_csv, overrides, decided_by):
-    res = blotter.parse(tmp_csv([_irs_row(**overrides)]))
-    assert not res.rejects
-    assert res.trades[0].quantity == pytest.approx(-625_000_000.0)
-    fixed = next(l for l in res.legs if l.leg_type == "FIXED")
-    assert fixed.amount == pytest.approx(625_000_000.0)
-    d = res.irs_directions["600"]
-    assert d.direction == "RECEIVE" and not d.defaulted and decided_by in d.decided_by
-
-
 def test_percent_sign_is_handled_per_column_never_silently(tmp_csv):
-    """S-4: '%' used to be stripped everywhere. FixedRate keeps its meaning (3.98 = 3.98 %),
-    an option Price is a fraction so '0.58%' = 0.0058 with a warning, anywhere else it is
-    not a number."""
+    """S-4: '%' used to be stripped everywhere. A percent-unit column keeps its meaning
+    (3.98 = 3.98 %), an option Price is a fraction so '0.58%' = 0.0058 with a warning,
+    anywhere else it is not a number."""
     assert math.isnan(blotter._num("3.98%"))
     assert blotter._num("3.98%", blotter.PERCENT_KEEP) == pytest.approx(3.98)
     assert blotter._num("0.58%", blotter.PERCENT_FRACTION) == pytest.approx(0.0058)
-    res = blotter.parse(tmp_csv([_irs_row(FixedRate="3.98%")]))
-    assert not res.rejects and not res.warnings and res.trades[0].price == pytest.approx(0.0398)
     res = blotter.parse(tmp_csv([_option_row(Price="0.579%")]))
     assert not res.rejects and res.trades[0].price == pytest.approx(0.00579)
     assert "percent sign" in res.warnings[0].message
-    res = blotter.parse(tmp_csv([_future_row(Price="7716%")]))
-    assert "Price '7716%' is not a number" in res.rejects[0].reason
+    res = blotter.parse(tmp_csv([_future_row(Price="68.45%")]))
+    assert "Price '68.45%' is not a number" in res.rejects[0].reason
 
 
 def test_every_rebuild_warns_blank_or_not_and_a_date_serial_price_is_caught(tmp_csv):
@@ -1073,12 +1008,10 @@ def test_every_rebuild_warns_blank_or_not_and_a_date_serial_price_is_caught(tmp_
     res = blotter.parse(tmp_csv([_option_row(Quantity="", NetInvoice="204,150.00")]))
     assert res.trades[0].quantity == pytest.approx(204_150 / 0.00579)
     assert "Quantity is blank" in res.warnings[0].message and "NetInvoice" in res.warnings[0].message
-    res = blotter.parse(tmp_csv([_future_row(Quantity="", Notional="50")]))
-    assert "Quantity is blank" in res.warnings[0].message and "Notional / 50" in res.warnings[0].message
+    res = blotter.parse(tmp_csv([_future_row(Quantity="", NetInvoice="68,450.00")]))
+    assert "Quantity is blank" in res.warnings[0].message and "NetInvoice / (1000 x Price)" in res.warnings[0].message
     res = blotter.parse(tmp_csv([_forward_row(**{"BuyCurrency Amount": ""}, Quantity="1,137,580.00")]))
     assert "BuyCurrency Amount is blank" in res.warnings[0].message and "Quantity" in res.warnings[0].message
-    res = blotter.parse(tmp_csv([_irs_row(Notional="", Quantity="625")]))
-    assert "Notional is blank" in res.warnings[0].message
     assert not blotter.parse(tmp_csv([_forward_row()])).warnings          # the normal path stays quiet
     # an Excel date serial in Price is a fine float: only the consistency check sees it
     serial = _currency_spot_row(Price="46227", NetInvoice="376,879.45")
@@ -1089,177 +1022,20 @@ def test_every_rebuild_warns_blank_or_not_and_a_date_serial_price_is_caught(tmp_
     assert res.trades[0].price == 46227.0 and "kept as read" in res.warnings[0].message
 
 
-@pytest.mark.parametrize("net_invoice", ["(1,250.00)", "-1,250.00", "1,250.00-"])
-def test_irs_negative_netinvoice_is_an_upfront_cash_amount_not_a_direction(tmp_csv, net_invoice):
-    """Coordinator decision 2026-09-18: on a swap NetInvoice is cash paid or received up
-    front, so its sign says nothing about pay/receive fixed. A payer who paid a fee stays
-    a (defaulted) payer, and never collides with explicit 'Pay Fixed' wording."""
-    assert blotter.IRS_SIGN_COLUMNS == ("Notional", "Quantity", "Current Face", "Original Face")
-    gross = blotter.parse(tmp_csv([_irs_row(**{"Gross Amnt/Principal": net_invoice})]))   # W-6: cash too
-    assert gross.trades[0].quantity == pytest.approx(625_000_000.0) and gross.irs_directions["600"].defaulted
-    res = blotter.parse(tmp_csv([_irs_row(NetInvoice=net_invoice)]))
-    assert not res.rejects and res.trades[0].quantity == pytest.approx(625_000_000.0)
-    assert res.irs_directions["600"].defaulted
-    res = blotter.parse(tmp_csv([_irs_row(NetInvoice=net_invoice, Notes="Pay Fixed")]))
-    assert not res.rejects and res.trades[0].quantity == pytest.approx(625_000_000.0)
-    assert res.irs_directions["600"].decided_by == "Notes 'Pay Fixed'"
-
-
-@pytest.mark.parametrize("overrides", [{"Notes": "PAY"}, {"Swap Type": "Payer"}, {"Notes": "we pay fixed 3.98"},
-                                       {"Notes": "Rec SOFR"}, {"Notes": "Pay Fixed", "Swap Type": "PAYER"}])
-def test_irs_explicit_pay_wording_reads_as_pay_fixed_and_is_not_a_default(tmp_csv, overrides):
-    res = blotter.parse(tmp_csv([_irs_row(**overrides)]))
-    assert not res.rejects and res.trades[0].quantity == pytest.approx(625_000_000.0)
-    assert res.irs_directions["600"].direction == "PAY" and not res.irs_directions["600"].defaulted
-
-
-@pytest.mark.parametrize("overrides", [{}, {"Side": "Buy"}, {"Side": "Buy", "Quantity": "625", "NetInvoice": "0"},
-                                       {"Notes": "Pay date 11/2/2027, rec leg DCF 3"}, {"Tran Type": "NEW"}])
-def test_irs_side_buy_and_unsigned_amounts_are_no_signal_defaulted_to_pay_fixed_and_said_so(tmp_csv, overrides):
-    """Side = Buy is on every reference row, the three receivers included, so it is NOT
-    evidence of pay fixed: the swap is read as pay fixed only by default, and the parse
-    result says so per swap so the Rates table can ask the user."""
-    from data.ingest.common import NO_DIRECTION_SIGNAL
-
-    res = blotter.parse(tmp_csv([_irs_row(**overrides)]))
-    assert not res.rejects and res.trades[0].quantity == pytest.approx(625_000_000.0)
-    d = res.irs_directions["600"]
-    assert (d.direction, d.decided_by, d.defaulted) == ("PAY", NO_DIRECTION_SIGNAL, True)
-    assert NO_DIRECTION_SIGNAL == "no direction signal in file: defaulted to pay fixed"
-    assert any("600" in n and "pay fixed" in n for n in res.notes())
-
-
-def test_irs_two_explicit_signals_that_contradict_reject_the_row_with_a_named_reason(tmp_csv):
-    bad = _irs_row(Notional="(625,000,000)", Notes="Pay Fixed")
-    good = _irs_row(**{"Trade Id": "601"}, Symbol="IRSOIS-USD-22870318")
-    res = blotter.parse(tmp_csv([bad, good]))
-    (rj,) = res.rejects
-    assert res.n_skipped_irs == 1 and [t.trade_id for t in res.trades] == ["601"]
-    assert "direction signals contradict" in rj.reason
-    assert "Notional '(625,000,000)'" in rj.reason and "says receive fixed" in rj.reason
-    assert "Notes 'Pay Fixed' says pay fixed" in rj.reason
-    assert "600" not in res.irs_directions
-
-
-def test_irs_a_cell_naming_both_directions_is_reported_and_ignored(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row(Notes="payer or receiver tbc")]))
-    assert not res.rejects and res.irs_directions["600"].defaulted
-    assert "names both pay and receive" in res.warnings[0].message
-
-
-def test_irs_user_override_wins_over_the_file_even_a_contradictory_one(tmp_csv):
-    res = blotter.parse(tmp_csv([_irs_row()]), direction_overrides={"600": "RECEIVE"})
-    assert res.trades[0].quantity == pytest.approx(-625_000_000.0)
-    d = res.irs_directions["600"]
-    assert d.direction == "RECEIVE" and not d.defaulted and d.decided_by.startswith("user override (receive fixed)")
-    # the file says receive, the user said pay
-    res = blotter.parse(tmp_csv([_irs_row(Notional="(625,000,000)")]), direction_overrides={"600": "PAY"})
-    assert res.trades[0].quantity == pytest.approx(625_000_000.0)
-    assert "Notional '(625,000,000)'" in res.irs_directions["600"].decided_by
-    # a row whose own signals contradict each other still loads, the user's way
-    res = blotter.parse(tmp_csv([_irs_row(Notional="(625,000,000)", Notes="Pay Fixed")]), direction_overrides={"600": "RECEIVE"})
-    assert not res.rejects and res.trades[0].quantity == pytest.approx(-625_000_000.0)
-
-
-def _seed_swap_marks(conn, instrument_id="IRSOIS-USD-22860996"):
-    rows = [("2026-09-17", instrument_id, "2027-02-11", mt, 1.0, "QL_PRICER", "t")
-            for mt in ("PV_USD", "DV01_USD", "PAR_RATE", "CASHFLOW_USD")]
-    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", rows)
-    conn.commit()
-
-
-def _swap_marks(conn):
-    return dict(conn.execute("SELECT mark_type, value FROM marks WHERE source = 'QL_PRICER'"))
-
-
-AS_SEEDED = {"PV_USD": 1.0, "DV01_USD": 1.0, "PAR_RATE": 1.0, "CASHFLOW_USD": 1.0}
-TURNED_ROUND = {"PV_USD": -1.0, "DV01_USD": -1.0, "PAR_RATE": 1.0, "CASHFLOW_USD": -1.0}
-
-
-def test_load_keeps_the_users_direction_on_re_upload_and_reports_the_count(tmp_csv):
-    from data.ingest import irs_direction
-
-    conn = schema.connect()
-    path = tmp_csv([_irs_row(), _irs_row(**{"Trade Id": "601"}, Symbol="IRSOIS-USD-22870318")])
-    first = blotter.load(path, conn)
-    assert first.n_direction_overrides == 0
-    irs_direction.set_direction(conn, "600", "RECEIVE")
-    _seed_swap_marks(conn)                                   # priced after the flip, i.e. for RECEIVE
-    again = blotter.load(path, conn)
-    assert again.n_direction_overrides == 1
-    assert dict(conn.execute("SELECT trade_id, quantity FROM trades")) == {"600": -625e6, "601": 625e6}
-    assert dict(conn.execute("SELECT leg_type, amount FROM trade_legs WHERE trade_id='600'")) == {"FIXED": 625e6, "FLOAT": -625e6}
-    assert again.irs_directions["600"].decided_by.startswith("user override")
-    assert again.irs_directions["601"].defaulted
-    assert any("1 rate swap direction set by you kept" in n for n in again.notes())
-    # the marks were priced for the direction that is still on file: a re-upload leaves
-    # them exactly as they are (the file's momentary "pay fixed" is not a flip)
-    assert _swap_marks(conn) == AS_SEEDED
-    blotter.load(path, conn)
-    assert _swap_marks(conn) == AS_SEEDED
-
-
-def test_load_turns_a_swaps_priced_history_round_when_the_file_itself_flips_it(tmp_csv):
-    """Swaps are priced for today only, so a flip must not delete history: the pricer's
-    PV / DV01 / cashflow marks are reversed in place, PAR_RATE is left alone."""
-    conn = schema.connect()
-    blotter.load(tmp_csv([_irs_row()]), conn)
-    _seed_swap_marks(conn)
-    blotter.load(tmp_csv([_irs_row()]), conn)                          # same direction: untouched
-    assert _swap_marks(conn) == AS_SEEDED
-    blotter.load(tmp_csv([_irs_row(Notional="(625,000,000)")]), conn)  # the export now marks it short
-    assert conn.execute("SELECT quantity FROM trades").fetchone()[0] == -625e6
-    assert _swap_marks(conn) == TURNED_ROUND
-    blotter.load(tmp_csv([_irs_row(Notional="(625,000,000)")]), conn)  # still short: not reversed again
-    assert _swap_marks(conn) == TURNED_ROUND
-    # turn_swap_marks=False leaves that step to the caller (the app's upload does it on live)
-    blotter.load(tmp_csv([_irs_row()]), conn, turn_swap_marks=False)
-    assert conn.execute("SELECT quantity FROM trades").fetchone()[0] == 625e6
-    assert _swap_marks(conn) == TURNED_ROUND
-
-
 def test_notes_are_counts_and_names_and_split_information_from_warnings(tmp_csv):
     assert blotter._some(["a", "b", "c"]) == "a, b, c"
     assert blotter._some([str(i) for i in range(8)]) == "0, 1, 2, 3, 4, 5, 6, 7"
     assert blotter._some([str(i) for i in range(9)]) == "0, 1, 2, 3, 4 and 4 more"
-    swaps = [_irs_row(**{"Trade Id": str(600 + i)}, Symbol=f"IRSOIS-USD-{i}") for i in range(10)]
-    res = blotter.parse(tmp_csv(swaps + [_option_row(Price="24-Jul", NetInvoice="202,650.00"),
-                                         _irs_row(**{"Trade Id": "700"}, Symbol="IRSOIS-USD-700", Notional="(625,000,000)")]))
+    no_strike = [_option_row(**{"Trade Id": str(510 + i)}, Symbol=f"EURSEK112526C-{i}",
+                             Description="EURSEK-XXAA EUR Call 11/25/2026 SBILUK") for i in range(10)]
+    res = blotter.parse(tmp_csv(no_strike + [_option_row(Price="24-Jul", NetInvoice="202,650.00")]))
     info, warn = res.information_notes(), res.warning_notes()
     assert res.notes() == info + warn
-    assert any(n.startswith("10 rate swap(s) carry no pay/receive marker") and "600, 601, 602, 603, 604 and 5 more" in n
-               for n in info)
-    assert any("1 rate swap(s) took their direction from a marker in the file: 700 receive fixed" in n for n in info)
+    (i,) = info                                              # the one kind of information left: missing strikes
+    assert i.startswith("10 option(s) have no strike in the file:") and "and 5 more" in i
     assert not any("24-Jul" in n for n in info)             # a rebuilt cell is a warning, not information
     (w,) = warn
     assert w.startswith("1 cell(s) in 1 row(s) were doubtful") and "rows 12" in w and "Price '24-Jul'" in w
-
-
-@needs_raw
-def test_real_sample_swaps_all_default_to_pay_and_the_three_receivers_stick_once_set(tmp_path):
-    """Nothing in the export separates the three swaps the desk holds as receivers
-    (918421481 625M, 920118423 995M, 932385416 158.22M) from the payers, so all ten are
-    read as pay fixed BY DEFAULT and flagged; once the user sets them they survive the
-    app's full-replace upload."""
-    from data.ingest import irs_direction, upload
-
-    res = blotter.parse(RAW)
-    assert len(res.irs_directions) == 10 and all(d.defaulted for d in res.irs_directions.values())
-    db = tmp_path / "risk.db"
-    upload.import_blotter(RAW.read_bytes(), RAW.name, db)
-    conn = schema.connect(db)
-    assert len(irs_direction.needs_user_choice(conn)) == 10
-    receivers = {"918421481": -625e6, "920118423": -995e6, "932385416": -158.22e6}
-    for trade_id in receivers:
-        irs_direction.set_direction(conn, trade_id, "RECEIVE")
-    conn.close()
-    upload.import_blotter(RAW.read_bytes(), RAW.name, db)
-    conn = schema.connect(db)
-    got = dict(conn.execute("SELECT trade_id, quantity FROM trades WHERE product='IRS'"))
-    assert {k: got[k] for k in receivers} == pytest.approx(receivers)
-    assert sum(1 for q in got.values() if q > 0) == 7
-    assert sorted(irs_direction.needs_user_choice(conn)) == sorted(set(got) - set(receivers))
-    conn.close()
 
 
 # --------------------------------------------------------------------------- the user's live options export, 2026-09-21
@@ -1277,18 +1053,28 @@ def test_option_symbol_carrying_the_delivery_date_loads_with_the_descriptions_ex
     assert any("delivery date" in str(w) for w in res.warnings)
 
 
-def test_spx_index_option_loads_as_an_equity_option_in_contracts(tmp_csv):
+def test_spx_index_option_is_counted_and_skipped_never_rejected(tmp_csv):
+    """The listed index options left the app with the equity index on 2026-09-24."""
     row = _option_row(Symbol="SPX/E261016P7615-USAA", **{"Currency Pair": ""}, Quantity="15", Price="121.5",
                       Description="SPX 7615 STRIKE EUR PUT 10/16/2026")
+    res = blotter.parse(tmp_csv([row, _option_row(**{"Trade Id": "501"})]))
+    assert res.rejects == [] and [t.trade_id for t in res.trades] == ["501"]
+    assert res.n_skipped_other == 1 and res.n_skipped_retired == 1
+    (row_no, symbol, reason), = res.skipped_other_rows
+    assert (row_no, symbol) == (2, "SPX/E261016P7615-USAA")
+    assert reason.startswith("listed index option on SPX:") and "left the app on 2026-09-24" in reason
+    assert "SPX/E261016P7615" not in res.instruments and "SPX/E261016P7615" not in res.instrument_options
+
+
+def test_a_listed_option_on_another_underlying_is_skipped_not_yet_loaded(tmp_csv):
+    """A listed option that is not an index one (an option on a future, Phase 5) has no path yet:
+    counted and named, not retired, never rejected and never read as an FX option."""
+    row = _option_row(Symbol="CL/A261116C75-USAA", **{"Currency Pair": ""}, Quantity="10", Price="1.25",
+                      Description="WTI 75 STRIKE CALL 11/16/2026")
     res = blotter.parse(tmp_csv([row]))
-    assert res.rejects == [] and len(res.trades) == 1
-    trade, inst = res.trades[0], res.instruments["SPX/E261016P7615"]
-    assert (trade.product, trade.quantity, trade.price) == ("EQ_OPTION", 15.0, 121.5)
-    assert (inst.asset_class, inst.base_ccy, inst.quote_ccy, inst.multiplier, inst.expiry_date) == (
-        "EQ_OPTION", "SPX", "USD", 100.0, "2026-10-16")
-    opt = res.instrument_options["SPX/E261016P7615"]
-    assert (opt.strike, opt.option_type) == (7615.0, "PUT")
-    assert res.legs[0].amount == 15 * 100 * 7615 and res.legs[0].settles_cash == 0
+    assert not res.rejects and not res.trades
+    assert res.n_skipped_other == 1 and res.n_skipped_retired == 0
+    assert res.skipped_other_rows[0][2].startswith("listed option on CL: listed options are not loaded yet")
 
 
 def test_gold_option_premium_in_usd_per_ounce_is_not_flagged_as_above_the_notional(tmp_csv):

@@ -16,12 +16,12 @@ project's own `docs/` tree, which was never ported.
 conventions notes to go there. It does not exist here, and per that task's own
 correction, no such file is being added -- the conventions record instead lives in
 `engine/rates/__init__.py`'s module docstring plus each ported module's own docstring
-(`curves.py`, `instruments.py`, `valuation.py`, `store.py`).
+(`curves.py`, `conventions.py`, `store.py`; the swap modules were removed 2026-09-24).
 
 **How to apply**: if a future task or another agent's docstring references
 `docs/pricing_conventions.md` as if it's a real file in this repo, don't chase it --
 it's a leftover mental model from the reference project. Point instead to
-`engine/rates/__init__.py` (sign convention, DV01 definition, official-marks mapping)
+`engine/rates/__init__.py` (module map, curve convention)
 and the individual module docstrings. If genuine cross-currency/term-rate/basis scope
 is ever added to `engine/rates/`, that would be the moment to consider adding a real
 `docs/pricing_conventions.md` here -- but that's outside this agent's directory

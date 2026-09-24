@@ -29,7 +29,7 @@ from data.ingest import schema
 from ui.tabs import options
 
 AS_OF = "2026-06-20"
-SAMPLE_CSV = Path(__file__).resolve().parents[1] / "data" / "raw" / "new_sample_trades.csv"
+SAMPLE_CSV = Path(__file__).resolve().parents[1] / "data" / "sample" / "blotter_sample.csv"
 _GREEKS = ("DELTA", "GAMMA", "THETA", "VEGA", "RHO")
 _GREEK_VALUES = {"DELTA": 0.55, "GAMMA": 0.02, "THETA": -0.0004, "VEGA": 0.0018, "RHO": 0.0006}
 
@@ -359,26 +359,26 @@ def test_option_rows_zero_strike_is_none():
         conn.close()
 
 
-def test_option_rows_equity_and_commodity_groups_present_and_empty():
+def test_option_rows_commodity_group_present_and_empty_and_no_equity_group():
+    """The equity index left the app (2026-09-24): FX and Commodity are the two groups."""
     conn = _make_db()
     try:
         df = options.option_rows(conn, AS_OF)
         classes = df[df["level"] == "ASSET_CLASS"]
-        assert set(classes["group_key"]) == {"FX", "Equity", "Commodity"}
-        for cls in ("Equity", "Commodity"):
-            row = classes[classes["group_key"] == cls].iloc[0]
-            assert row["leg_count"] == 0
-            assert row["notional"] is None or math.isnan(row["notional"])
-            assert row["mktval"] is None or math.isnan(row["mktval"])
+        assert list(classes["group_key"]) == ["FX", "Commodity"]
+        row = classes[classes["group_key"] == "Commodity"].iloc[0]
+        assert row["leg_count"] == 0
+        assert row["notional"] is None or math.isnan(row["notional"])
+        assert row["mktval"] is None or math.isnan(row["mktval"])
     finally:
         conn.close()
 
 
-def test_option_rows_empty_db_still_has_total_and_all_three_groups():
+def test_option_rows_empty_db_still_has_total_and_both_groups():
     conn = _make_db_empty()
     try:
         df = options.option_rows(conn, AS_OF)
-        assert set(df.loc[df["level"] == "ASSET_CLASS", "group_key"]) == {"FX", "Equity", "Commodity"}
+        assert set(df.loc[df["level"] == "ASSET_CLASS", "group_key"]) == {"FX", "Commodity"}
         total = df[df["level"] == "TOTAL"].iloc[0]
         assert total["leg_count"] == 0
         assert total["mktval"] is None
@@ -525,7 +525,7 @@ def test_build_layout_no_trades_still_renders_groups():
         table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
         labels = [r["label"] for r in table.data]
         assert "Portfolio Totals" in labels
-        assert "FX" in labels and "Equity" in labels and "Commodity" in labels
+        assert "FX" in labels and "Commodity" in labels and "Equity" not in labels
     finally:
         conn.close()
 
@@ -1444,22 +1444,25 @@ def test_flat_view_of_an_empty_book_is_an_empty_table():
         conn.close()
 
 
-# --------------------------------------------------------------------------- the book's eight sample options
+# --------------------------------------------------------------------------- the sample book's five options
 
 _OPTION_SYMBOL = re.compile(r"^[A-Z]{6}\d{6}[CP]-\d+$")
-DIGITALS = {"EURSEK112526C-197906813": ("Call", 11.4), "USDJPY111926P-197957397": ("Put", 152.0),
-            "USDJPY111926P-197571137": ("Put", 152.0)}
+# The one option of the synthetic sample (data/sample/blotter_sample.csv) the export leaves
+# without a strike, the way the macro blotter delivered its digitals: VANILLA, strike 0.
+DIGITALS = {"USDJPY111926P-500043": ("Put", 145.0)}
+DIGITAL_TRADE_ID = "910000043"
+# Bought +5m @ 0.0042 on 2026-08-10 and sold back -5m @ 0.0031 on 2026-09-08: closed out.
+CLOSED_PAIR = {"910000044": "EURUSD102126P-500044", "910000045": "EURUSD102126P-500045"}
+SAMPLE_AS_OF = "2026-09-18"
 
 
 @pytest.fixture(scope="module")
 def sample_options_csv():
-    """Header + the eight option rows of the reference blotter export, as bytes."""
-    if not SAMPLE_CSV.exists():
-        pytest.skip("data/raw/new_sample_trades.csv is not on this machine (data/raw is gitignored)")
+    """Header + the five option rows of the synthetic sample blotter, as bytes."""
     text = SAMPLE_CSV.read_bytes().decode("utf-8-sig")
     rows = list(csv.DictReader(io.StringIO(text)))
     option_rows = [r for r in rows if _OPTION_SYMBOL.match((r.get("Symbol") or "").strip())]
-    assert len(option_rows) == 8
+    assert len(option_rows) == 5
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=list(rows[0].keys()))
     writer.writeheader()
@@ -1482,42 +1485,42 @@ def test_sample_start_value_equals_net_invoice(sample_db, ui_app_stub):
     side = {r["Trade Id"].strip(): r["Side"].strip() for r in option_rows}
     conn = sqlite3.connect(str(db_path))
     try:
-        legs = options._leg_rows(conn, "2026-09-18")
+        legs = options._leg_rows(conn, SAMPLE_AS_OF)
     finally:
         conn.close()
-    assert len(legs) == 8
+    assert len(legs) == 5
     for leg in legs:
         assert abs(leg["start_value"]) == pytest.approx(invoice[leg["trade_id"]], abs=0.005), leg["instrument"]
         assert leg["side"] == side[leg["trade_id"]]
         assert (leg["start_value"] > 0) == (leg["side"] == "Buy")      # a sold option is a negative cost
-    sold = next(l for l in legs if l["side"] == "Sell")
-    assert sold["instrument"] == "EURSEK092326P-197838147" and sold["start_value"] == pytest.approx(-197_575.0)
+    (sold,) = [l for l in legs if l["side"] == "Sell"]
+    assert sold["instrument"] == "EURUSD102126P-500045" and sold["start_value"] == pytest.approx(-15_500.0)
 
 
-def test_the_three_digitals_accept_terms_in_the_table(sample_db, ui_app_stub, fake_pricer):
-    """They arrive as VANILLA with no strike (the export marks none of them as digital):
-    Payoff, then the strike from the user's old Excel book, typed in the grid."""
+def test_the_digital_accepts_terms_in_the_table(sample_db, ui_app_stub, fake_pricer):
+    """It arrives as VANILLA with no strike (the export marks it as neither): Payoff, then
+    the strike, typed in the grid."""
     db_path, _option_rows = sample_db
-    as_of = "2026-09-18"
 
     def records():
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
-            return options.table_records(conn, as_of, [], "", [])
+            return options.table_records(conn, SAMPLE_AS_OF, [], "", [])
         finally:
             conn.close()
 
     start = {r["instrument"]: r for r in records() if r["is_leg"]}
-    assert len(start) == 8
-    for instrument in DIGITALS:                                  # each is its own editable row, flagged
+    assert len(start) == 5
+    for instrument in DIGITALS:                                  # its own editable row, flagged
         assert start[instrument]["strike"] is None and "no strike on file" in start[instrument]["note"]
+    assert all(r["strike"] is not None for i, r in start.items() if i not in DIGITALS)
 
     for instrument, (call_put, strike) in DIGITALS.items():
         for column, value in (("payoff", "Digital"), ("strike", strike)):
             previous = records()
             rows = copy.deepcopy(previous)
             next(r for r in rows if r["instrument"] == instrument)[column] = value
-            _data, status = options.handle_table_event(str(db_path), as_of, [], "", [], rows, previous, True)
+            _data, status = options.handle_table_event(str(db_path), SAMPLE_AS_OF, [], "", [], rows, previous, True)
             assert status.className == "source-result--info", status.children
         assert _terms(db_path, instrument) == (strike, call_put.upper(), "DIGITAL")
 
@@ -1526,24 +1529,24 @@ def test_the_three_digitals_accept_terms_in_the_table(sample_db, ui_app_stub, fa
         assert (done[instrument]["payoff"], done[instrument]["option_type"], done[instrument]["strike"]) == \
                ("Digital", call_put, strike)
         assert "no strike" not in done[instrument]["note"]
-    assert len(fake_pricer.calls) == 3                            # each priced once, as a digital
-    # The five vanillas were not touched.
-    assert sum(1 for i, r in done.items() if i not in DIGITALS and r["payoff"] == "Vanilla") == 5
+    assert fake_pricer.calls == [(SAMPLE_AS_OF, DIGITAL_TRADE_ID)]   # priced once, as a digital
+    # The four vanillas were not touched.
+    assert sum(1 for i, r in done.items() if i not in DIGITALS and r["payoff"] == "Vanilla") == 4
 
 
-def test_the_three_digitals_accept_terms_in_the_editor(sample_db, ui_app_stub, fake_pricer):
+def test_the_digital_accepts_terms_in_the_editor(sample_db, ui_app_stub, fake_pricer):
     db_path, _option_rows = sample_db
     conn = sqlite3.connect(str(db_path))
     try:
         listed = [i["instrument_id"] for i in options.option_instruments(conn)]
     finally:
         conn.close()
-    assert set(listed[:3]) == set(DIGITALS)                       # in the dropdown, first
+    assert len(listed) == 5 and set(listed[:1]) == set(DIGITALS)   # in the dropdown, first
     app = dash.Dash(__name__, suppress_callback_exceptions=True)
     options.register_callbacks(app, get_db_path=lambda: str(db_path))
     _spec, save_fn = _callback(app, f"{options.TERMS_STATUS_ID}.children")
     for n, (instrument, (call_put, strike)) in enumerate(DIGITALS.items(), start=1):
-        status = save_fn(n, instrument, "DIGITAL", call_put.upper(), strike, None, "2026-09-18")[0]
+        status = save_fn(n, instrument, "DIGITAL", call_put.upper(), strike, None, SAMPLE_AS_OF)[0]
         assert status.className == "source-result--info", status.children
         assert _terms(db_path, instrument) == (strike, call_put.upper(), "DIGITAL")
 
@@ -1551,12 +1554,35 @@ def test_the_three_digitals_accept_terms_in_the_editor(sample_db, ui_app_stub, f
 def test_digital_terms_survive_a_re_upload(sample_db, ui_app_stub, fake_pricer, sample_options_csv):
     from data.ingest.upload import import_blotter
     db_path, _option_rows = sample_db
-    instrument = "USDJPY111926P-197957397"
-    trade_id = "943920760"
-    options.save_and_price(str(db_path), "2026-09-18", trade_id, instrument,
-                           {"strike": 152.0, "option_type": "PUT", "payoff": "DIGITAL", "barrier_level": 0.0})
+    (instrument,) = DIGITALS
+    options.save_and_price(str(db_path), SAMPLE_AS_OF, DIGITAL_TRADE_ID, instrument,
+                           {"strike": 145.0, "option_type": "PUT", "payoff": "DIGITAL", "barrier_level": 0.0})
     import_blotter(sample_options_csv[0], "sample_options.csv", str(db_path))
-    assert _terms(db_path, instrument) == (152.0, "PUT", "DIGITAL")
+    assert _terms(db_path, instrument) == (145.0, "PUT", "DIGITAL")
+
+
+def test_the_samples_closed_out_pair_is_labelled_and_left_out_of_the_live_tables(sample_db, ui_app_stub):
+    """The sample's EURUSD 1.15 put, bought and sold back in full under two ids: status
+    CLOSED in the book, so both legs carry the "(closed out)" label in the trade summary
+    and stay out of By pair, while the pair's live call is still in it."""
+    db_path, _option_rows = sample_db
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    try:
+        legs = options.option_rows(conn, SAMPLE_AS_OF, flat=True)
+        by_id = {r["trade_id"]: r for r in legs.to_dict("records")}
+        assert {t for t, r in by_id.items() if r["closed_count"]} == set(CLOSED_PAIR)
+        for trade_id in CLOSED_PAIR:
+            assert options._is_missing(by_id[trade_id]["delta"])      # no position left: no Greeks
+        by_pair = options.grouped_rows(legs, legs["underlying"].fillna(""))
+        eur = next(r for r in by_pair if r["group"] == "EURUSD")
+        assert eur["options"] == 1 and eur["closed"] == 0                 # the live 1.18 call alone
+        assert by_pair[-1]["options"] == 5 and by_pair[-1]["closed"] == 2
+        records, _styles = options.format_rows(options.option_rows(conn, SAMPLE_AS_OF))
+    finally:
+        conn.close()
+    labels = {r["trade_id"]: r["label"] for r in records if r["is_leg"]}
+    assert all(labels[t].endswith(options.CLOSED_OUT_TAG) for t in CLOSED_PAIR)
+    assert not any(label.endswith(options.CLOSED_OUT_TAG) for t, label in labels.items() if t not in CLOSED_PAIR)
 
 
 def test_four_portfolio_tables_sit_above_the_table_and_add_up_in_usd():
@@ -1766,11 +1792,28 @@ def _write_pull_status(db_path, options_block):
     status_path(db_path).write_text(json.dumps({"options": options_block}), encoding="utf-8")
 
 
+# A listed option on a commodity future (Phase 5's product, not booked by any ingest path
+# yet): the product code is the test's own stand-in for whatever that phase names.
+_LISTED = "CMDTY_OPTION"
+_LISTED_ID = "CLZ6C 70 Comdty"
+
+
+@pytest.fixture
+def listed_option_path(monkeypatch):
+    """The listed-option path switched on for `_LISTED`, and the book's row for E1 left out:
+    no engine lane values such an option yet, so these tests pin this module's own display
+    of a listed option (Bloomberg's price, Greeks named when blank) and nothing of the book."""
+    monkeypatch.setattr(options, "LISTED_OPTION_PRODUCTS", (_LISTED,))
+    real = options._book_rows
+    monkeypatch.setattr(options, "_book_rows", lambda conn, as_of: {
+        k: v for k, v in real(conn, as_of).items() if k != "E1"})
+
+
 def _defect_db(tmp_path):
     """The 2026-09-22 picture: D1 has a strike, its PREMIUM of the previous close on file
     and nothing on AS_OF, so the book carries the earlier premium under the near-marks
     rule (an empty book reason) while the tab has no PREMIUM for AS_OF itself; plus E1,
-    a listed SPX put with Bloomberg's own price and no Greeks."""
+    a listed call on a crude future with Bloomberg's own price and no Greeks."""
     db_path = _file_db(tmp_path, digital_strike=152.0)
     conn = sqlite3.connect(str(db_path))
     conn.execute("INSERT INTO marks VALUES ('2026-06-19', 'USDJPY111926P-1', '2026-11-19', 'PREMIUM', 0.13, "
@@ -1778,25 +1821,60 @@ def _defect_db(tmp_path):
     conn.execute("INSERT INTO marks VALUES ('2026-06-19', 'USDJPY', '2026-06-19', 'SPOT', 147.0, "
                  "'BBG_BFXFORWARD', '2026-06-19T15:00:00-04:00')")
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
-                 "bbg_ticker, expiry_date) VALUES ('SPX US 10/16/26 P7615 Index', 'EQ_OPTION', 'SPX', 'USD', "
-                 "100, 0, 'SPX Index', '2026-10-16')")
-    conn.execute("INSERT INTO instrument_options VALUES ('SPX US 10/16/26 P7615 Index', 7615, 'PUT', 0, "
-                 "'9999-12-31', 'VANILLA')")
-    conn.execute("INSERT INTO trades VALUES ('E1', 'XLSX', 'SPX US 10/16/26 P7615 Index', 'EQ_OPTION', 'E1', "
-                 "'2026-06-01', 15, 121.5, 'ACC', 'CPTY', '', 'TR', 'spx put', '')")
-    conn.execute("INSERT INTO trade_legs VALUES ('E1', 1, 'NOTIONAL', 'USD', 15, '2026-06-01', '2026-10-16', 121.5, 0)")
-    conn.execute("INSERT INTO marks VALUES (?, 'SPX US 10/16/26 P7615 Index', '2026-10-16', 'FUTURE_PX', 130.0, "
-                 "'BBG_BDH', ?)", (AS_OF, f"{AS_OF}T17:00:00-04:00"))
+                 "bbg_ticker, expiry_date) VALUES (?, ?, 'CL', 'USD', 1000, 0, 'CLZ6 Comdty', '2026-11-17')",
+                 (_LISTED_ID, _LISTED))
+    conn.execute("INSERT INTO instrument_options VALUES (?, 70, 'CALL', 0, '9999-12-31', 'VANILLA')", (_LISTED_ID,))
+    conn.execute("INSERT INTO trades VALUES ('E1', 'XLSX', ?, ?, 'E1', "
+                 "'2026-06-01', 15, 2.5, 'ACC', 'CPTY', '', 'TR', 'crude call', '')", (_LISTED_ID, _LISTED))
+    conn.execute("INSERT INTO trade_legs VALUES ('E1', 1, 'NOTIONAL', 'USD', 15, '2026-06-01', '2026-11-17', 2.5, 0)")
+    conn.execute("INSERT INTO marks VALUES (?, ?, '2026-11-17', 'FUTURE_PX', 3.1, 'BBG_BDH', ?)",
+                 (AS_OF, _LISTED_ID, f"{AS_OF}T17:00:00-04:00"))
     conn.commit()
     conn.close()
     return db_path
+
+
+def test_a_listed_option_is_valued_at_bloombergs_price_under_commodity(tmp_path, ui_app_stub, listed_option_path):
+    """The listed path kept for Phase 5: Bloomberg's own price of the option (FUTURE_PX on its
+    instrument) x the multiplier is its value per contract, no model; blank Greeks say why."""
+    db_path = _defect_db(tmp_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        (leg,) = [l for l in options._leg_rows(conn, AS_OF) if l["trade_id"] == "E1"]
+        assert leg["asset_class"] == "Commodity" and leg["underlying"] == "CLZ6"
+        assert leg["priced"] and leg["mktpx"] == pytest.approx(3.1 * 1000)
+        assert leg["mktval"] == pytest.approx(15 * 3.1 * 1000)            # $46,500
+        assert leg["start_value_usd"] == pytest.approx(15 * 2.5 * 1000)   # $37,500
+        assert leg["delta"] is None and leg["note"].startswith("Greeks not calculated")
+        classes = options.option_rows(conn, AS_OF)
+        commodity = classes[(classes["level"] == "ASSET_CLASS") & (classes["group_key"] == "Commodity")].iloc[0]
+        assert commodity["leg_count"] == 1
+    finally:
+        conn.close()
+
+
+def test_the_listed_path_is_off_until_a_product_is_named(tmp_path, ui_app_stub):
+    """Empty since the SPX options left (2026-09-24): an option of another product is not
+    read at Bloomberg's price, and a product nothing lists never reaches the tab."""
+    assert options.LISTED_OPTION_PRODUCTS == ()
+    assert set(options.option_products()) == {"FX_OPTION", "CMDTY_OPTION"}
+    db_path = _defect_db(tmp_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        (leg,) = [l for l in options._leg_rows(conn, AS_OF) if l["trade_id"] == "E1"]
+        assert leg["mktpx"] is None and not leg["priced"]        # a PREMIUM-marked option: none on file
+        conn.execute("UPDATE trades SET product = 'EQ_OPTION' WHERE trade_id = 'E1'")
+        assert "E1" not in {l["trade_id"] for l in options._leg_rows(conn, AS_OF)}
+        assert _LISTED_ID not in {i["instrument_id"] for i in options.option_instruments(conn)}
+    finally:
+        conn.close()
 
 
 def _note(db_path, group_key):
     return next(r for r in _records(db_path, collapsed=["PKG1"]) if r["group_key"] == group_key)["note"]
 
 
-def test_a_failed_options_step_is_named_on_every_leg_it_left_unpriced(tmp_path, ui_app_stub):
+def test_a_failed_options_step_is_named_on_every_leg_it_left_unpriced(tmp_path, ui_app_stub, listed_option_path):
     db_path = _defect_db(tmp_path)
     _write_pull_status(db_path, {"priced": 0, "skipped": [], "as_of_date": AS_OF, "error": _STEP_ERROR})
     expected = f"the last Pull Bloomberg now ({AS_OF}) failed in its options step: {_STEP_ERROR}"
@@ -1806,15 +1884,15 @@ def test_a_failed_options_step_is_named_on_every_leg_it_left_unpriced(tmp_path, 
     assert _note(db_path, "PKG1") == ""
 
 
-def test_a_legs_own_skip_reason_wins_over_the_steps_error(tmp_path, ui_app_stub):
+def test_a_legs_own_skip_reason_wins_over_the_steps_error(tmp_path, ui_app_stub, listed_option_path):
     db_path = _defect_db(tmp_path)
     _write_pull_status(db_path, {
         "priced": 0, "as_of_date": AS_OF, "error": _STEP_ERROR,
         "skipped": [{"trade_id": "D1", "reason": "no curve/rate JPY"},
-                    {"trade_id": "E1", "reason": "no DIV_YIELD for SPX Index"}],
+                    {"trade_id": "E1", "reason": "no implied vol for CLZ6C 70 Comdty"}],
     })
     assert _note(db_path, "D1") == "not priced: no curve/rate JPY"
-    assert _note(db_path, "E1") == "Greeks not calculated: no DIV_YIELD for SPX Index"
+    assert _note(db_path, "E1") == "Greeks not calculated: no implied vol for CLZ6C 70 Comdty"
 
 
 @pytest.mark.parametrize("block", [
@@ -1822,7 +1900,8 @@ def test_a_legs_own_skip_reason_wins_over_the_steps_error(tmp_path, ui_app_stub)
     {"priced": 0, "skipped": [], "as_of_date": AS_OF, "error": ""},                    # no failure
     {"priced": 0, "skipped": [], "as_of_date": AS_OF},
 ])
-def test_a_status_for_another_day_or_without_an_error_leaves_the_notes_as_they_were(tmp_path, ui_app_stub, block):
+def test_a_status_for_another_day_or_without_an_error_leaves_the_notes_as_they_were(tmp_path, ui_app_stub, block,
+                                                                                   listed_option_path):
     db_path = _defect_db(tmp_path)
     before = (_note(db_path, "D1"), _note(db_path, "E1"))
     assert before == (f"no PREMIUM mark on {AS_OF}: priced the next time you press Pull Bloomberg now",

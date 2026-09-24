@@ -1,0 +1,2 @@
+- [NDF removal 2026-09-24](ndf_removal_2026_09_24.md) — BASIS_NDF_1M / NDF_1M branch and the ndf.py import gone; every currency at spot; what stays
+- Older notes on these files live in `.claude/agent-memory/cash-ladder/` (dollar convention and gold, line endings: exposure.py / usd_marks.py are LF)

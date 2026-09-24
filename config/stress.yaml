@@ -1,129 +1,112 @@
 # Named stress scenarios: scenario -> {currency: pct move against USD}. A currency
 # strengthening against USD is a positive pct. Loaded by engine/pnl/stress.py::load_scenarios.
-# docs/BUILD_PLAN.md section 4.
-# EQUITY is the move applied to every open equity future (ES): -0.10 = index down 10 %.
-# Scenarios without EQUITY leave the futures cells blank.
+# docs/BUILD_PLAN.md section 4. A scenario is currency moves only.
 #
 # User decision 2026-09-15 ("Reorder the Ladder tab", item 3): a fuller, serious set the
-# user can edit later. Every currency in the book (AUD, CAD, CHF, EUR, GBP, HKD, IDR,
-# INR, JPY, KRW, MXN, NOK, NZD, SEK, SGD, TRY, TWD, XAU, ZAR) is covered by at least one
-# scenario below. Scenario dict order here is preserved as the risk table's column
+# user can edit later. Scenario dict order here is preserved as the risk table's column
 # order (engine/pnl/stress.py::load_scenarios keeps insertion order; do not alphabetise
 # when editing).
+#
+# Commodity conversion Phase 2 (2026-09-24):
+# - CNH, the biggest FX hedge currency of Jason's book, moves in every scenario that moves
+#   the whole dollar or Asian / EM FX, sized like the Asian EM currencies it replaced here
+#   (KRW, TWD, IDR, INR): the dollar moves, -8 % risk-off, +5 % risk-on, -10 % / -12 % EM,
+#   -5 % Asia. It does not move in "Europe -3%" or "Commodity FX +5%", which move neither.
+#   The recommendation taken; a smaller, managed-currency size like SGD's (-4 % / +3 %)
+#   is the alternative.
+# - The equity index left the app: no EQUITY key, no equity-only scenario.
+# - The NDF currencies (KRW, TWD, IDR, INR, BRL) left with the NDFs: no trade and no
+#   contract of the universe is in them, so their moves are gone.
+# The book's FX currencies (the sample blotter's FX hedges and options: EUR, GBP, JPY, CNH,
+# XAU) each have a move in at least one scenario.
 
 USD +2% all:
-  EQUITY: -0.04
   AUD: -0.02
   CAD: -0.02
   CHF: -0.02
+  CNH: -0.02
   EUR: -0.02
   GBP: -0.02
   HKD: -0.02
-  IDR: -0.02
-  INR: -0.02
   JPY: -0.02
-  KRW: -0.02
   MXN: -0.02
   NOK: -0.02
   NZD: -0.02
   SEK: -0.02
   SGD: -0.02
   TRY: -0.02
-  TWD: -0.02
   XAU: -0.02
   ZAR: -0.02
 
 USD -2% all:
-  EQUITY: 0.04
   AUD: 0.02
   CAD: 0.02
   CHF: 0.02
+  CNH: 0.02
   EUR: 0.02
   GBP: 0.02
   HKD: 0.02
-  IDR: 0.02
-  INR: 0.02
   JPY: 0.02
-  KRW: 0.02
   MXN: 0.02
   NOK: 0.02
   NZD: 0.02
   SEK: 0.02
   SGD: 0.02
   TRY: 0.02
-  TWD: 0.02
   XAU: 0.02
   ZAR: 0.02
 
 USD +5% all:
-  EQUITY: -0.10
   AUD: -0.05
   CAD: -0.05
   CHF: -0.05
+  CNH: -0.05
   EUR: -0.05
   GBP: -0.05
   HKD: -0.05
-  IDR: -0.05
-  INR: -0.05
   JPY: -0.05
-  KRW: -0.05
   MXN: -0.05
   NOK: -0.05
   NZD: -0.05
   SEK: -0.05
   SGD: -0.05
   TRY: -0.05
-  TWD: -0.05
   XAU: -0.05
   ZAR: -0.05
 
 USD -5% all:
-  EQUITY: 0.10
   AUD: 0.05
   CAD: 0.05
   CHF: 0.05
+  CNH: 0.05
   EUR: 0.05
   GBP: 0.05
   HKD: 0.05
-  IDR: 0.05
-  INR: 0.05
   JPY: 0.05
-  KRW: 0.05
   MXN: 0.05
   NOK: 0.05
   NZD: 0.05
   SEK: 0.05
   SGD: 0.05
   TRY: 0.05
-  TWD: 0.05
   XAU: 0.05
   ZAR: 0.05
 
-Risk-off (JPY/CHF up, EM/equities down):
-  EQUITY: -0.10
+Risk-off (JPY/CHF up, EM down):
   JPY: 0.05
   CHF: 0.03
-  BRL: -0.08
   MXN: -0.08
   TRY: -0.08
   ZAR: -0.08
-  IDR: -0.08
-  KRW: -0.08
-  TWD: -0.08
-  INR: -0.08
+  CNH: -0.08
   SGD: -0.04   # Asia, but managed against a basket: roughly half the EM move (added 2026-09-15)
   HKD: -0.01   # pegged; a token move at the weak side of the band (added 2026-09-15)
 
-Risk-on (EM/AUD/NZD up, JPY down, equities up):
-  EQUITY: 0.05
-  BRL: 0.05
+Risk-on (EM/AUD/NZD up, JPY down):
   MXN: 0.05
   TRY: 0.05
   ZAR: 0.05
-  IDR: 0.05
-  KRW: 0.05
-  TWD: 0.05
-  INR: 0.05
+  CNH: 0.05
   AUD: 0.03
   NZD: 0.03
   JPY: -0.03
@@ -131,22 +114,15 @@ Risk-on (EM/AUD/NZD up, JPY down, equities up):
   HKD: 0.01    # added 2026-09-15, see Risk-off
 
 EM -10%:
-  BRL: -0.10
   MXN: -0.10
   TRY: -0.10
   ZAR: -0.10
-  IDR: -0.10
-  KRW: -0.10
-  TWD: -0.10
-  INR: -0.10
+  CNH: -0.10
 
-Asia -5% (JPY, KRW, TWD, SGD, IDR, INR, HKD):
+Asia -5% (JPY, CNH, SGD, HKD):
   JPY: -0.05
-  KRW: -0.05
-  TWD: -0.05
+  CNH: -0.05
   SGD: -0.05
-  IDR: -0.05
-  INR: -0.05
   HKD: -0.05
 
 Europe -3% (EUR, GBP, CHF, SEK, NOK):
@@ -156,24 +132,15 @@ Europe -3% (EUR, GBP, CHF, SEK, NOK):
   SEK: -0.03
   NOK: -0.03
 
-Commodity FX +5% (AUD, CAD, NOK, BRL, ZAR, MXN):
+Commodity FX +5% (AUD, CAD, NOK, ZAR, MXN):
   AUD: 0.05
   CAD: 0.05
   NOK: 0.05
-  BRL: 0.05
   ZAR: 0.05
   MXN: 0.05
 
-Equities -10%:
-  EQUITY: -0.10
-
-Equities -20%, EM -12%:
-  EQUITY: -0.20
-  BRL: -0.12
+EM -12%:
   MXN: -0.12
   TRY: -0.12
   ZAR: -0.12
-  IDR: -0.12
-  KRW: -0.12
-  TWD: -0.12
-  INR: -0.12
+  CNH: -0.12

@@ -1,4 +1,4 @@
-"""FX/equity/commodity/rates-vol option pricing, vendored from the standalone
+"""FX and listed (commodity) option pricing, vendored from the standalone
 ``options_calc`` project (``C:\\Users\\jeanw\\Jean Bourgeois``) and wired into this app's
 schema. Full merge plan: ``docs/open-questions.md`` item 61 and the housekeeper's
 2026-09-17 phased plan (agent memory ``options-calc-merge-2026-09-17``).
@@ -68,9 +68,12 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
 - Phase 6 (rates-exotics): swaptions / cap-floor / SABR / Bermudan
   (`options_calc.rates`) as an extension alongside `engine/rates/`'s existing OIS-NPV
   scope -- a genuinely separate Black-76 / Hull-White model family, not folded into
-  `engine/rates/` itself.
+  `engine/rates/` itself. Retired 2026-09-24 with the rest of the rates book (see the
+  last entry); the vendored `options_calc.rates` stays in `vendor/`, untouched.
 - Phase 7 (options-pricer, landed 2026-09-17): real rates, calendars, equity/commodity
-  pricers, and Position/Portfolio aggregation.
+  pricers, and Position/Portfolio aggregation. (The equity half -- `price_equity_option`,
+  the dividend yields, the SPX options -- was removed on 2026-09-24; see the last entry.
+  What follows is the record as it landed.)
   - `engine/options/rates.py` (new): `resolve_fx_rates` / `resolve_ccy_rate` replace
     `options_calc.fx.rate_curves`' illustrative placeholder as `inputs.py`'s rate source
     with continuously-compounded OIS zero rates to the option's own expiry (exact for
@@ -128,7 +131,7 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
     foreign split -- FX-only concept). PREMIUM mark = pricer's unscaled premium x
     `instruments.multiplier`.
   - `engine/options/portfolio.py` (new): builds vendored `Position`/`Portfolio` objects
-    from priced `PricingOutcome` (FX) / `EqCmdtyOutcome` (equity/commodity) outcomes,
+    from priced `PricingOutcome` (FX) / `CommodityOutcome` (listed commodity) outcomes,
     converting every Greek to USD via `quantity * multiplier * spot_to_usd` (spot_to_usd
     from `marks_official`'s official SPOT of `quote_ccy`, CLAUDE.md's "convert at spot,
     never the forward outright" rule extended uniformly to every asset class) -- the
@@ -253,7 +256,7 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   premium priced under the wrong terms is not a realised P&L. The ledger's next pass
   freezes the trade afresh from the corrected marks, or names it unrealisable until a
   corrected PREMIUM dated on or before expiry exists. No ``realised_pnl`` table -> skipped
-  silently (never created from here); mirrors ``data/ingest/irs_direction.py``.
+  silently (never created from here).
 - Expiry-day intrinsic mark (options-pricer, approved by the user and landed 2026-09-18,
   ahead of five tickets expiring 22 / 23 Sep 2026): ``store.py`` used to skip ``expiry <=
   as_of``, so the ledger -- which freezes an option the day AFTER expiry, at the last
@@ -341,7 +344,9 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   ``rates.resolve_ccy_rate_with_source`` appends a CurveSet's non-empty ``bootstrap_note``
   (rates-pricer's log-linear fallback record, read with ``getattr``) to
   ``RateInput.detail``, so a priced option's rate provenance names the fallback curve.
-  No pricing formula changed.
+  No pricing formula changed. (2026-09-24: the equity loop and the shared helper are
+  deleted; the same guard now lives in ``equity_commodity.price_all_and_store_commodity``
+  alone, listed-options-pricer's.)
 - Closed-out options are not priced (options-pricer, landed 2026-09-22; user: "we dont
   need to price all options, as some of them might be closed out already. If they are
   exactly the same, same strike / underlyer / expiry / type and closed out, we just
@@ -364,6 +369,22 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   under ``skipped`` (it reads ``priced`` / ``reason`` only): bbg-data's to split on
   ``closed_out`` so the status line can say "N closed-out options not priced". Tests:
   ``tests/test_options_close.py``.
+- Macro removal (fx-options-pricer, landed 2026-09-24; CLAUDE.md "Commodity conversion
+  plan", Phase 2, user yes the same day: the equity index, rates and NDFs leave the app,
+  FX options stay, dormant but kept). ``pricer.price_equity_option`` (and its
+  ``_EQUITY_*_PAYOFFS`` sets) is deleted: its one caller, the equity branch of
+  ``equity_commodity.py`` (``price_and_store_equity``, ``price_all_and_store_equity``,
+  the dividend yields), went the same day (listed-options-pricer), which also renamed
+  ``EqCmdtyMarketInputs`` / ``EqCmdtyInputsResult`` / ``EqCmdtyOutcome`` to
+  ``CommodityInputs`` / ``CommodityInputsResult`` / ``CommodityOutcome`` and now takes a
+  commodity option's underlying from its future's FUTURE_PX. ``price_commodity_option``
+  stays for Phase 5's options on futures. This package's own files held no NDF- or
+  IRS-only branch. FX option pricing is untouched: premium, Greeks, digitals on the
+  smile, barriers, touches, Asians, the CIP rate fallback. The tests that read the macro
+  trader's reference export (``data/raw/new_sample_trades.csv``) now seed the five FX
+  options of the synthetic sample (``data/sample/blotter_sample.csv``) inline, and the
+  equity / commodity tests left ``tests/test_options_pricing.py`` (commodity coverage is
+  in ``tests/test_listed_options.py``).
 
 Nothing above is silently dropped scope -- every `options_calc` module has a named
 phase. Sign convention, once Phase 2 lands, will follow CLAUDE.md's existing rule:

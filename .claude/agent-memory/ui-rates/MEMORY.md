@@ -1,3 +1,4 @@
+- [Lane retired 2026-09-24](lane-retired-2026-09-24.md) — rates.py and its tests deleted (Phase 2 removal); the notes below are history only
 - [Rates tab 2026-09-15](rates-tab-2026-09-15.md) — real IRS blotter (ui/tabs/rates.py) off QL_PRICER marks_official, bypasses value_book, own recon-status tolerance, excluded from generic scope callback loop
 - [Rates direction dropdown 2026-09-18](rates-direction-dropdown-2026-09-18.md) — Pay/Receive set by hand (export has no marker); style.css greys any inline cell border (use box-shadow/outline), DataTable cell dropdown is react-select v1, same-value pick fires nothing, real pick recipe, _refresh in place
 - [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/

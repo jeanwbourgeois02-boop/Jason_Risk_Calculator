@@ -6,3 +6,4 @@
 - [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
 - [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable
 - [Dash Details open never synced 2026-09-22](dash-details-open-never-synced-2026-09-22.md) — a callback on Details.open never fires from a click; clientside mirror from Summary.n_clicks (default 0, not null); how to test clientside callbacks; ui.launch never reloads
+- [Commodity Phase 2 removal 2026-09-24](commodity-phase2-removal-2026-09-24.md) — IRS/NDF/swap/ES left; header's NDF path is ui-ladder's net_gross_usd; Phase 3 reworks header

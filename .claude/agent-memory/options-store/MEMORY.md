@@ -1,0 +1,1 @@
+- [Phase 2 removal 2026-09-24](phase2-removal-2026-09-24.md) — IRS/NDF/swap/SPX removal left store.py code untouched; package_id, snapped_at import, EQ/CMDTY kept and why

@@ -69,16 +69,16 @@ def test_build_requests_spot_per_pair_and_forward_per_open_date(tmp_path):
 
 def test_build_requests_includes_open_futures(tmp_path):
     p, conn = _db(tmp_path)
-    conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO instruments VALUES ('CLV6 Comdty','FUTURE','CL','USD',1000,0,'CLV6 Comdty','2026-09-18')")
+    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','')")
-    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*50*7528.25,'2026-08-10','2026-09-18',0,0)")
+    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*1000*7528.25,'2026-08-10','2026-09-18',0,0)")
     conn.commit()
     reqs = live.build_requests(conn, "2026-08-17")
     keys = {(r.instrument_id, r.mark_type, r.settle_date) for r in reqs}
-    assert ("ESU6 Index", "FUTURE_PX", "2026-09-18") in keys
+    assert ("CLV6 Comdty", "FUTURE_PX", "2026-09-18") in keys
     later_keys = {(r.instrument_id, r.mark_type) for r in live.build_requests(conn, "2026-09-19")}
-    assert ("ESU6 Index", "FUTURE_PX") not in later_keys       # expired future drops out
+    assert ("CLV6 Comdty", "FUTURE_PX") not in later_keys       # expired future drops out
 
 
 # --------------------------------------------------------------------------- cross USD-leg SPOT requests (2026-09-17)
@@ -355,10 +355,10 @@ def test_pull_once_includes_future_px_via_px_settle_fallback_when_no_live_px_las
     cycle (fetch_reference -> {}), it must fall back to the latest PX_SETTLE, not just
     report MISSING (2026-09-17 fix)."""
     p, conn = _db(tmp_path)
-    conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO instruments VALUES ('CLV6 Comdty','FUTURE','CL','USD',1000,0,'CLV6 Comdty','2026-09-18')")
+    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','')")
-    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*50*7528.25,'2026-08-10','2026-09-18',0,0)")
+    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*1000*7528.25,'2026-08-10','2026-09-18',0,0)")
     conn.commit()
     from data.bloomberg import pull_marks as pm
     from datetime import date as _date
@@ -366,16 +366,16 @@ def test_pull_once_includes_future_px_via_px_settle_fallback_when_no_live_px_las
     monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: {})
     monkeypatch.setattr(pm, "fetch_historical",
                         lambda session, service, tickers, field, as_of, diag=None, tag=None, start=None:
-                        {"ESU6 Index": 7598.5})
+                        {"CLV6 Comdty": 7598.5})
     monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
     from data.bloomberg import fwd_curve
     monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
     status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=_date(2026, 8, 20))
     by = {(i["instrument_id"], i["mark_type"], i["settle_date"]): i for i in status["items"]}
-    fut = by[("ESU6 Index", "FUTURE_PX", "2026-09-18")]
+    fut = by[("CLV6 Comdty", "FUTURE_PX", "2026-09-18")]
     assert fut["status"] == "OK" and fut["value"] == 7598.5 and fut["source"] == "BBG_BDH"
     assert "PX_SETTLE" in fut["detail"] and "no live PX_LAST" in fut["detail"]
-    row = conn.execute("SELECT value, source FROM marks WHERE instrument_id='ESU6 Index'").fetchone()
+    row = conn.execute("SELECT value, source FROM marks WHERE instrument_id='CLV6 Comdty'").fetchone()
     assert row == (7598.5, "BBG_BDH")
 
 
@@ -383,15 +383,15 @@ def test_pull_once_future_px_uses_live_px_last_when_available(tmp_path, monkeypa
     """The normal case (intraday, after the future has traded today): PX_LAST is used
     directly, never falling back to a historical request at all."""
     p, conn = _db(tmp_path)
-    conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO instruments VALUES ('CLV6 Comdty','FUTURE','CL','USD',1000,0,'CLV6 Comdty','2026-09-18')")
+    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','')")
-    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*50*7528.25,'2026-08-10','2026-09-18',0,0)")
+    conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*1000*7528.25,'2026-08-10','2026-09-18',0,0)")
     conn.commit()
     from data.bloomberg import pull_marks as pm
     from datetime import date as _date
 
-    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: {"ESU6 Index": {"PX_LAST": 7601.0}})
+    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: {"CLV6 Comdty": {"PX_LAST": 7601.0}})
 
     def boom(*a, **k):
         raise AssertionError("fetch_historical must not be called when live PX_LAST is available")
@@ -402,7 +402,7 @@ def test_pull_once_future_px_uses_live_px_last_when_available(tmp_path, monkeypa
     monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
     status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()), today=_date(2026, 8, 20))
     by = {(i["instrument_id"], i["mark_type"], i["settle_date"]): i for i in status["items"]}
-    fut = by[("ESU6 Index", "FUTURE_PX", "2026-09-18")]
+    fut = by[("CLV6 Comdty", "FUTURE_PX", "2026-09-18")]
     assert fut["status"] == "OK" and fut["value"] == 7601.0 and fut["source"] == "BBG_BDH"
     assert fut["detail"] == "live PX_LAST"
 
@@ -427,59 +427,32 @@ def test_cli_status_exit_code(tmp_path, capsys):
     assert live.main(["--db", str(p), "--status"]) == 1
 
 
-# --------------------------------------------------------------------------- rates step (2026-09-17)
-def test_pull_once_prices_irs_from_injected_rates_source(tmp_path):
-    """With only an IRS on the book (no FX requests) pull_once still pulls the OIS curve
-    and fixings through the injected source, prices the swap and writes QL_PRICER marks."""
-    from pathlib import Path
-    from data.bloomberg.rates_marketdata import RatesFileSource
+# --------------------------------------------------------------------------- curves step (was the rates step)
+def test_pull_once_curves_step_reports_per_currency_failure_not_raise(tmp_path, monkeypatch):
+    """A curve source that fails for a currency is reported per currency, the pull goes on,
+    and nothing is bootstrapped or priced: no swap is priced since 2026-09-24."""
     from datetime import date as _date
-
-    p = tmp_path / "risk.db"
-    conn = schema.connect(p)
-    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'IRSOIS-USD-1','2031-08-19')")
-    conn.execute("INSERT INTO trades VALUES ('s1','XLSX','IRSOIS-USD-1','IRS','s1','2026-08-14',10000000,0.041,"
-                 "'acc','cp','HAHY7','t','d','')")
-    conn.execute("INSERT INTO trade_legs VALUES ('s1',1,'FIXED','USD',-10000000,'2026-08-14','2031-08-19',0.041,0)")
-    conn.execute("INSERT INTO trade_legs VALUES ('s1',2,'FLOAT','USD',10000000,'2026-08-14','2031-08-19',0.0,0)")
-    conn.commit()
-    fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "ois_snapshot_v1.json"
-    source = RatesFileSource(fixture)
-    status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()),
-                            today=_date(2026, 8, 17), rates_source=source)
-    assert status["connected"] is True
-    rates = status["rates"]
-    assert rates["currencies"]["USD"]["quotes"] >= 4 and rates["currencies"]["USD"]["fixings"] == 2
-    assert rates["priced"] == 1 and rates["failed"] == []
-    assert status["options"]["skipped"] == "no FX_OPTION trades to price"
-    marks = dict(conn.execute("SELECT mark_type, source FROM marks WHERE instrument_id = 'IRSOIS-USD-1'").fetchall())
-    assert marks == {"PV_USD": "QL_PRICER", "DV01_USD": "QL_PRICER", "CASHFLOW_USD": "QL_PRICER", "PAR_RATE": "QL_PRICER"}
-    assert conn.execute('SELECT COUNT(*) FROM index_fixings WHERE "index" = \'SOFR\'').fetchone()[0] == 2
-
-
-def test_pull_once_rates_step_reports_per_currency_failure_not_raise(tmp_path):
-    from datetime import date as _date
+    from data.bloomberg import pull_marks as pm, fwd_curve
 
     class Broken:
         def get_curve_quotes(self, ccy, as_of):
             raise RuntimeError("terminal down")
 
-        def get_fixings(self, ccy, start, end):
-            return []
-
-    p = tmp_path / "risk.db"
-    conn = schema.connect(p)
-    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'IRSOIS-USD-1','2031-08-19')")
-    conn.execute("INSERT INTO trades VALUES ('s1','XLSX','IRSOIS-USD-1','IRS','s1','2026-08-14',10000000,0.041,"
-                 "'acc','cp','HAHY7','t','d','')")
-    conn.execute("INSERT INTO trade_legs VALUES ('s1',1,'FIXED','USD',-10000000,'2026-08-14','2031-08-19',0.041,0)")
-    conn.commit()
+    p, conn = _option_db(tmp_path, base="EUR", quote="USD", option_id="EURUSD091826C-1", pair_ticker="EURUSD Curncy")
+    monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: {"EURUSD Curncy": {"PX_LAST": 1.17}})
+    monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
+    monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
+    monkeypatch.setattr(live, "_vol_step", lambda *a, **k: {"skipped": "not under test"})
+    monkeypatch.setattr(live, "_options_step", lambda *a, **k: {"skipped": "not under test"})
     status = live.pull_once(p, "2026-08-17", session_factory=lambda: (object(), object()),
                             today=_date(2026, 8, 17), rates_source=Broken())
-    assert status["connected"] is True
-    assert "terminal down" in status["rates"]["currencies"]["USD"]["error"]
-    assert status["rates"]["priced"] == 0 and status["rates"]["failed"][0]["trade_id"] == "s1"
-    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0
+    assert status["connected"] is True and "rates" not in status
+    curves = status["curves"]
+    assert set(curves["currencies"]) == {"EUR", "USD"}
+    assert all("terminal down" in c["error"] and c["quotes"] == c["nodes"] == 0 for c in curves["currencies"].values())
+    assert curves["bootstrapped"] == 0 and "priced" not in curves and "failed" not in curves
+    assert conn.execute("SELECT COUNT(*) FROM curves").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM marks WHERE source = 'QL_PRICER'").fetchone()[0] == 0
 
 
 # --------------------------------------------------------------------------- rates/vol for FX_OPTION currencies (2026-09-17)
@@ -496,29 +469,37 @@ def _option_db(tmp_path, base="EUR", quote="SEK", option_id="EURSEK091826C-1", p
     return p, conn
 
 
-def test_rates_step_pulls_curves_for_option_currencies_with_no_irs_at_all(tmp_path):
-    """2026-09-17 fix: an FX_OPTION-only book (no IRS trade anywhere) must still get its
-    pair's currencies' OIS curves pulled -- engine/options/inputs.py needs a domestic AND
-    a foreign discount curve per option (resolve_fx_rates)."""
+def test_curves_step_pulls_and_bootstraps_the_option_currencies_curves_and_prices_no_swap(tmp_path):
+    """2026-09-17 fix, kept: an FX_OPTION-only book gets its pair's currencies' OIS curves
+    pulled (engine/options/inputs.py needs a domestic AND a foreign discount curve per
+    option, resolve_fx_rates), and since 2026-09-24 each one in scope is bootstrapped into
+    `curves` (QL_PRICER) with no swap priced and no fixings asked for."""
     from data.bloomberg.rates_marketdata import RatesFileSource
     from pathlib import Path
     from datetime import date as _date
 
-    p, conn = _option_db(tmp_path)  # EUR/SEK: EUR in Phase 1 OIS scope, SEK is not
+    p, conn = _option_db(tmp_path)  # EUR/SEK: EUR in the OIS scope, SEK is not
     fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "ois_snapshot_v1.json"
-    out = live._rates_step(conn, _date(2026, 8, 17), "localhost", 8194, rates_source=RatesFileSource(fixture))
-    assert out["currencies"]["EUR"]["quotes"] > 0 and out["currencies"]["EUR"]["error"] == ""
-    assert out["currencies"]["SEK"]["quotes"] == 0
-    assert "no OIS index in Phase 1 scope" in out["currencies"]["SEK"]["error"]
+    out = live._curves_step(conn, _date(2026, 8, 17), "localhost", 8194, rates_source=RatesFileSource(fixture))
+    assert out["as_of_date"] == "2026-08-17" and set(out) == {"currencies", "bootstrapped", "as_of_date", "seconds"}
+    eur = out["currencies"]["EUR"]
+    assert eur["quotes"] > 0 and eur["error"] == "" and eur["nodes"] > 0 and out["bootstrapped"] == 1
+    assert set(eur) == {"quotes", "nodes", "error"}
+    assert out["currencies"]["SEK"]["quotes"] == out["currencies"]["SEK"]["nodes"] == 0
+    assert "has no OIS index in scope" in out["currencies"]["SEK"]["error"]
     assert conn.execute("SELECT COUNT(*) FROM curve_quotes WHERE ccy = 'EUR'").fetchone()[0] > 0
     assert conn.execute("SELECT COUNT(*) FROM curve_quotes WHERE ccy = 'SEK'").fetchone()[0] == 0
+    nodes = conn.execute("SELECT COUNT(*), MIN(source), MAX(source) FROM curves WHERE curve_id LIKE 'EUR-%' "
+                         "AND as_of_date = '2026-08-17'").fetchone()
+    assert nodes == (eur["nodes"], "QL_PRICER", "QL_PRICER")
+    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0          # nothing priced, no swap marks
 
 
-def test_rates_step_skipped_message_when_neither_irs_nor_option(tmp_path):
+def test_curves_step_skipped_message_when_no_option_needs_a_curve(tmp_path):
     from datetime import date as _date
-    p, conn = _db(tmp_path)  # AUDUSD/USDJPY forwards only, no IRS, no FX_OPTION
-    out = live._rates_step(conn, _date(2026, 8, 17), "localhost", 8194, rates_source=object())
-    assert out["skipped"] == "no IRS or FX_OPTION trades to price"
+    p, conn = _db(tmp_path)  # AUDUSD/USDJPY forwards only, no FX_OPTION
+    out = live._curves_step(conn, _date(2026, 8, 17), "localhost", 8194, rates_source=object())
+    assert out["skipped"] == "no FX_OPTION needs an OIS curve" and out["currencies"] == {}
 
 
 def test_vol_step_writes_vol_quotes_for_option_pairs_via_injected_source(tmp_path):
@@ -659,7 +640,7 @@ def test_pull_once_option_only_book_requests_its_pair_and_pulls_curves_and_vol(t
     assert ("EURUSD", "SPOT", "2026-08-17") in keys and ("EURUSD", "FWD_OUTRIGHT", "2026-09-18") in keys
     assert conn.execute("SELECT value FROM marks_official WHERE instrument_id='EURUSD' AND mark_type='SPOT'"
                         ).fetchone()[0] == 1.17
-    assert status["rates"]["currencies"]["EUR"]["quotes"] > 0
+    assert status["curves"]["currencies"]["EUR"]["quotes"] > 0 and "rates" not in status
     assert status["vol"]["pairs"].get("EURUSD", 0) > 0
     assert conn.execute("SELECT COUNT(*) FROM curve_quotes WHERE ccy='EUR'").fetchone()[0] > 0
     assert conn.execute("SELECT COUNT(*) FROM vol_quotes WHERE pair='EURUSD'").fetchone()[0] > 0
@@ -829,12 +810,13 @@ def test_build_requests_includes_option_pair_spot_and_expiry_forward(tmp_path):
     assert ("USDJPY", "SPOT", "2026-10-01") in keys and ("USDJPY", "FWD_OUTRIGHT", "2026-11-19") in keys
     assert ("USDMXN", "SPOT", "2026-10-01") in keys and ("USDMXN", "FWD_OUTRIGHT", "2026-12-01") in keys
     assert ("USDBRL", "SPOT", "2026-10-01") in keys
-    # the USDMXN / USDBRL pair rows did not exist: created as plain FX instruments, NDF flag per currency
+    # the USDMXN / USDBRL pair rows did not exist: created as plain FX instruments, never flagged
+    # NDF (NDFs left the app on 2026-09-24)
     rows = {r[0]: r for r in conn.execute(
         "SELECT instrument_id, asset_class, base_ccy, quote_ccy, is_ndf, bbg_ticker FROM instruments "
         "WHERE instrument_id IN ('USDMXN', 'USDBRL')")}
     assert rows["USDMXN"][1:] == ("FX", "USD", "MXN", 0, "USDMXN Curncy")
-    assert rows["USDBRL"][4] == 1
+    assert rows["USDBRL"][1:] == ("FX", "USD", "BRL", 0, "USDBRL Curncy")
     # an expired option drives nothing
     later = {r.instrument_id for r in live.build_requests(conn, "2026-11-20")}
     assert "USDJPY" not in later and {"USDMXN", "USDBRL"} <= later
@@ -1117,7 +1099,7 @@ def test_pull_once_writes_option_conversion_spots_where_valuation_and_portfolio_
     monkeypatch.setattr(pm, "fetch_reference", fake_fetch_reference)
     monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
     monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda *a, **k: {})
-    monkeypatch.setattr(live, "_rates_step", lambda *a, **k: {"skipped": "not under test"})
+    monkeypatch.setattr(live, "_curves_step", lambda *a, **k: {"skipped": "not under test"})
     monkeypatch.setattr(live, "_vol_step", lambda *a, **k: {"skipped": "not under test"})
     monkeypatch.setattr(live, "_options_step", lambda *a, **k: {"skipped": "not under test"})
     status = live.pull_once(p, "2026-09-18", session_factory=lambda: (object(), object()), today=_date(2026, 9, 18))
@@ -1133,56 +1115,35 @@ def test_pull_once_writes_option_conversion_spots_where_valuation_and_portfolio_
     assert reason == "" and sek_to_usd == pytest.approx(1 / 9.44 if usd_sek == "USDSEK" else 9.44)
 
 
-_SAMPLE_CSV = __import__("pathlib").Path(__file__).resolve().parents[1] / "data" / "raw" / "new_sample_trades.csv"
+_SAMPLE_CSV = __import__("pathlib").Path(__file__).resolve().parents[1] / "data" / "sample" / "blotter_sample.csv"
+_OPEN_FUTURES_SQL = ("SELECT DISTINCT i.instrument_id FROM trade_legs l JOIN trades t USING (trade_id) "
+                     "JOIN instruments i USING (instrument_id) WHERE i.asset_class = 'FUTURE' "
+                     "AND t.trade_date <= ? AND l.settle_date >= ?")
 
 
-@pytest.mark.skipif(not _SAMPLE_CSV.exists(), reason="data/raw/new_sample_trades.csv is not on this machine")
-def test_sample_book_request_list_is_unchanged_except_for_deduplicated_conversion_spots(tmp_path, monkeypatch):
-    """Before/after on the real reference book. 'Before' is build_requests with the new
-    options' conversion legs switched off -- the only thing this change adds."""
+def test_sample_book_asks_only_for_spots_forwards_and_futures_each_once(tmp_path):
+    """The synthetic sample (commodity futures, FX hedges, FX options; 2026-09-24): the
+    request list holds only the library's mark kinds, nothing twice, never a blank ticker,
+    and none of the macro book's NDF, swap or index requests."""
     from data.ingest.upload import import_blotter
     p = tmp_path / "risk.db"
     import_blotter(_SAMPLE_CSV.read_bytes(), _SAMPLE_CSV.name, p)
     conn = schema.connect(p)
-    eur_usd, usd_sek = live._usd_pair_name("EUR"), live._usd_pair_name("SEK")
-
-    def before_and_after(as_of):
-        # 'before': the list with the options' conversion rows left out. build_requests
-        # reads the Bloomberg library (2026-09-21), so they are left out of what it reads.
-        from data.bloomberg import library
-        full = library.needed_on
-
-        def without_option_conversions(conn_, as_of_date, historical=False):
-            return [r for r in full(conn_, as_of_date, historical)
-                    if not (r["product"] == "FX_OPTION" and r["role"] == library.ROLE_CONVERSION)]
-
-        with monkeypatch.context() as m:
-            m.setattr(library, "needed_on", without_option_conversions)
-            before = [(r.instrument_id, r.mark_type, r.settle_date, r.bbg_ticker) for r in live.build_requests(conn, as_of)]
-        after = [(r.instrument_id, r.mark_type, r.settle_date, r.bbg_ticker) for r in live.build_requests(conn, as_of)]
-        assert len(after) == len(set(after))                            # nothing requested twice
-        added = [k for k in after if k not in before]
-        assert [k for k in after if k in before] == before              # everything else: same rows, same order
-        return before, added
-
-    # Today's book: every option's conversion pair is already asked for by an open forward
-    # (EURUSD), by the EURSEK forwards' cross legs (USDSEK) or is the option's own pair
-    # (USDJPY) -- so the difference is exactly nothing, on every date checked.
-    for as_of in ("2026-08-24", "2026-09-18", "2026-09-23", "2026-10-15", "2026-11-25"):
-        before, added = before_and_after(as_of)
-        assert before and added == [], (as_of, added)
-    # The day the EUR forwards are gone (here: removed), the EURSEK digital keeps its own
-    # conversion spots alive. EURUSD is still asked for by the EURUSD options' own pair, so
-    # the one addition on 2026-09-18 is the quote->USD spot; after those expire, both.
-    conn.execute("DELETE FROM trade_legs WHERE trade_id IN (SELECT trade_id FROM trades "
-                 "WHERE instrument_id IN ('EURSEK', 'EURUSD'))")
-    conn.execute("DELETE FROM trades WHERE instrument_id IN ('EURSEK', 'EURUSD')")
-    conn.commit()
-    _, added = before_and_after("2026-09-18")
-    assert added == [(usd_sek, "SPOT", "2026-09-18", f"{usd_sek} Curncy")]
-    _, added = before_and_after("2026-10-15")
-    assert added == [(eur_usd, "SPOT", "2026-10-15", f"{eur_usd} Curncy"),
-                     (usd_sek, "SPOT", "2026-10-15", f"{usd_sek} Curncy")]
+    reqs = live.build_requests(conn, "2026-09-18")
+    keys = [(r.instrument_id, r.mark_type, r.settle_date) for r in reqs]
+    assert reqs and len(keys) == len(set(keys))
+    assert {r.mark_type for r in reqs} <= {"SPOT", "FWD_OUTRIGHT", "FUTURE_PX"}
+    assert all(r.bbg_ticker.strip() for r in reqs)
+    assert not any(r.bbg_ticker.endswith(" Index") for r in reqs)
+    spots = {r.instrument_id for r in reqs if r.mark_type == "SPOT"}
+    assert {"USDCNH", "EURUSD", "USDJPY", "GBPUSD", "EURGBP", "XAUUSD"} <= spots
+    assert all(r.settle_date == "2026-09-18" for r in reqs if r.mark_type == "SPOT")
+    # every open future is either asked for or listed as not requestable with its reason, never lost
+    open_futures = {r[0] for r in conn.execute(_OPEN_FUTURES_SQL, ("2026-09-18", "2026-09-18"))}
+    asked = {r.instrument_id for r in reqs if r.mark_type == "FUTURE_PX"}
+    unasked = {e["instrument_id"]: e["reason"] for e in live.not_requestable_futures(conn, "2026-09-18")}
+    assert open_futures and asked | set(unasked) == open_futures and not asked & set(unasked)
+    assert all(unasked.values())
 
 
 # --------------------------------------------------------------------------- cadence, one session per cycle, timings (2026-09-21)
@@ -1384,16 +1345,11 @@ def _install_answering_blpapi(monkeypatch, today):
     return log
 
 
-def _fx_irs_option_db(tmp_path):
-    """Forwards (AUDUSD, USDJPY), a seasoned USD swap and a USDJPY put with its strike on
-    file: every step of a cycle has something to ask Bloomberg for and something to price."""
+def _fx_option_db(tmp_path):
+    """Forwards (AUDUSD, USDJPY) and a USDJPY put with its strike on file: every step of a
+    cycle has something to ask Bloomberg for and something to price."""
     from engine.options.store import set_option_terms
     p, conn = _db(tmp_path)
-    conn.execute("INSERT INTO instruments VALUES ('IRSOIS-USD-1','IRS','USD','USD',1,0,'IRSOIS-USD-1','2031-08-19')")
-    conn.execute("INSERT INTO trades VALUES ('s1','XLSX','IRSOIS-USD-1','IRS','s1','2026-08-14',10000000,0.041,"
-                 "'acc','cp','HAHY7','t','d','')")
-    conn.execute("INSERT INTO trade_legs VALUES ('s1',1,'FIXED','USD',-10000000,'2026-08-14','2031-08-19',0.041,0)")
-    conn.execute("INSERT INTO trade_legs VALUES ('s1',2,'FLOAT','USD',10000000,'2026-08-14','2031-08-19',0.0,0)")
     conn.execute("INSERT INTO instruments VALUES ('USDJPY111926P-1','FX_OPTION','USD','JPY',1,0,'USDJPY Curncy','2026-11-19')")
     conn.execute("INSERT INTO trades VALUES ('o1','XLSX','USDJPY111926P-1','FX_OPTION','o1','2026-08-14',1000000,0.01,"
                  "'acc','cp','HAHY7','t','d','')")
@@ -1407,7 +1363,7 @@ def _written_tables(conn):
     """Everything a cycle writes, minus the wall-clock stamps (the live SPOT / forward
     snapped_at and the vol ticker checks' last_checked)."""
     out = {}
-    for table, wall_clock in (("marks", "snapped_at"), ("curves", ""), ("curve_quotes", ""), ("index_fixings", ""),
+    for table, wall_clock in (("marks", "snapped_at"), ("curves", ""), ("curve_quotes", ""),
                               ("vol_quotes", ""), ("vol_ticker_checks", "last_checked"), ("realised_pnl", "frozen_at"),
                               ("instruments", "")):
         cur = conn.execute(f"SELECT * FROM {table}")
@@ -1423,9 +1379,9 @@ def _written_tables(conn):
 
 
 def test_pull_once_opens_one_session_per_cycle_and_writes_what_three_sessions_wrote(tmp_path, monkeypatch):
-    """One blpapi session per cycle, shared by the FX marks, the OIS quotes / fixings and
+    """One blpapi session per cycle, shared by the FX marks, the OIS quotes and
     the vol quotes (it used to be three), and not one written row differs. 'Before' is the
-    old arrangement rebuilt by hand: the rates and vol sources injected with a session of
+    old arrangement rebuilt by hand: the curves and vol sources injected with a session of
     their own each. Same fake Bloomberg answers for both books."""
     from datetime import date as _date
     from data.bloomberg import rates_marketdata as rm, vol_marketdata as vm
@@ -1441,42 +1397,41 @@ def test_pull_once_opens_one_session_per_cycle_and_writes_what_three_sessions_wr
     monkeypatch.setattr(store, "_now_ny", lambda: datetime(2026, 8, 17, 11, 40, tzinfo=ZoneInfo("America/New_York")))
 
     log = _install_answering_blpapi(monkeypatch, today)
-    p_before, conn_before = _fx_irs_option_db(tmp_path / "before")
+    p_before, conn_before = _fx_option_db(tmp_path / "before")
     before = live.pull_once(p_before, today=today, rates_source=rm.RatesBloombergSource("localhost", 8194),
                             vol_source=vm.VolBloombergSource("localhost", 8194))
     assert (log["started"], log["stopped"]) == (3, 3)
 
     log = _install_answering_blpapi(monkeypatch, today)
-    p_after, conn_after = _fx_irs_option_db(tmp_path / "after")
+    p_after, conn_after = _fx_option_db(tmp_path / "after")
     after = live.pull_once(p_after, today=today)
     assert (log["started"], log["stopped"]) == (1, 1)                # one session opened, and stopped
     kinds = [(kind, fields) for _n, _cid, kind, fields in log["sent"]]
     assert kinds == [("ReferenceDataRequest", ("PX_LAST",)),          # SPOT, every pair at once
                      ("ReferenceDataRequest", ("FWD_CURVE",)),        # forwards, every pair at once
                      ("ReferenceDataRequest", ("PX_LAST",)),          # OIS quotes JPY
-                     ("ReferenceDataRequest", ("PX_LAST",)),          # OIS quotes USD
-                     ("HistoricalDataRequest", ("PX_LAST",)),         # SOFR fixings for the seasoned swap
+                     ("ReferenceDataRequest", ("PX_LAST",)),          # OIS quotes USD (no fixings any more)
                      ("ReferenceDataRequest", ("PX_LAST",))]          # vol quotes, every ticker at once
     assert {n for n, *_ in log["sent"]} == {1}                        # all of them on that one session
     cids = [cid for _n, cid, *_ in log["sent"]]
     assert len(set(cids)) == len(cids)                                # no CorrelationId sent twice on it
 
-    # every step really ran: marks pulled, swap and option priced
+    # every step really ran: marks pulled, both curves bootstrapped, the option priced; no swap
     assert after["connected"] is True and after["failed"] == 0 and after["written"] == after["requested"] == 5
-    assert after["rates"]["currencies"]["USD"]["quotes"] == 17 and after["rates"]["currencies"]["USD"]["fixings"] == 2
-    assert after["rates"]["priced"] == 1 and after["rates"]["failed"] == []
+    assert after["curves"]["currencies"]["USD"]["quotes"] == 17 and after["curves"]["currencies"]["USD"]["nodes"] > 0
+    assert after["curves"]["bootstrapped"] == 2 and "rates" not in after
     assert after["vol"]["written"] == 45 and after["options"]["priced"] == 1
     sources = {r[0] for r in conn_after.execute("SELECT DISTINCT source FROM marks")}
-    assert {"BBG_BFXFORWARD", "QL_PRICER", "QL_OPTIONS_PRICER"} <= sources
+    assert {"BBG_BFXFORWARD", "QL_OPTIONS_PRICER"} <= sources and "QL_PRICER" not in sources
 
     # and what was written is what three sessions wrote: same keys, same values, same sources
     written_before, written_after = _written_tables(conn_before), _written_tables(conn_after)
-    assert written_after["marks"] and written_after["curve_quotes"] and written_after["vol_quotes"]
+    assert written_after["marks"] and written_after["curve_quotes"] and written_after["curves"] and written_after["vol_quotes"]
     assert written_after == written_before
     for key in ("requested", "written", "failed", "curve_points_written", "items", "warnings", "vol", "options", "ledger"):
         assert after[key] == before[key], key
-    assert {k: v for k, v in after["rates"].items() if k != "seconds"} == \
-           {k: v for k, v in before["rates"].items() if k != "seconds"}
+    assert {k: v for k, v in after["curves"].items() if k != "seconds"} == \
+           {k: v for k, v in before["curves"].items() if k != "seconds"}
 
 
 def test_borrowed_session_is_not_stopped_by_the_source_and_an_own_session_is(monkeypatch):
@@ -1497,7 +1452,7 @@ def test_borrowed_session_is_not_stopped_by_the_source_and_an_own_session_is(mon
 
 def _assert_timings_shape(status):
     timings = status["timings"]
-    assert list(timings) == ["session", "spot", "forwards", "futures", "rates", "vol", "options", "ledger", "total"]
+    assert list(timings) == ["session", "spot", "forwards", "futures", "curves", "vol", "options", "ledger", "total"]
     assert list(timings) == list(live.TIMING_KEYS)
     for key, seconds in timings.items():
         assert isinstance(seconds, float) and seconds >= 0 and seconds == round(seconds, 1), (key, seconds)
@@ -1525,20 +1480,20 @@ def test_pull_once_status_timings_say_where_the_cycle_went(tmp_path, monkeypatch
     monkeypatch.setattr(pm, "fetch_reference", slow(0.06, {"AUDUSD Curncy": {"PX_LAST": 0.6612}}))
     monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
     monkeypatch.setattr(fwd_curve, "request_fwd_curves", slow(0.16, {}))
-    monkeypatch.setattr(live, "_rates_step", slow(0.26, {"skipped": "not under test"}))
+    monkeypatch.setattr(live, "_curves_step", slow(0.26, {"skipped": "not under test"}))
     status = live.pull_once(p, "2026-08-17", session_factory=slow_session, today=_date(2026, 8, 20))
     assert status["connected"] is True
     _assert_timings_shape(status)
     timings = status["timings"]
     assert timings["session"] >= 0.1 and timings["spot"] >= 0.1 and timings["forwards"] >= 0.2
-    assert timings["rates"] >= 0.3 and timings["futures"] == 0.0           # no future in this book: step not run
-    assert timings["total"] >= timings["session"] + timings["spot"] + timings["forwards"] + timings["rates"] - 0.2
+    assert timings["curves"] >= 0.3 and timings["futures"] == 0.0          # no future in this book: step not run
+    assert timings["total"] >= timings["session"] + timings["spot"] + timings["forwards"] + timings["curves"] - 0.2
     assert set(status["timings_other"]) == {"build_requests", "write_marks"}
     assert live.read_status(p)["timings"] == timings                       # and it is in the status file
 
     # the same keys when nothing FX-shaped is open (early return), when the pull fails, and with no Bloomberg
     early = live.pull_once(p, "2026-10-01", session_factory=slow_session, today=_date(2026, 10, 1))
-    assert early["reason"] == "no open FX legs or futures to price" and early["timings"]["rates"] >= 0.3
+    assert early["reason"] == "no open FX legs or futures to price" and early["timings"]["curves"] >= 0.3
     _assert_timings_shape(early)
     assert early["timings"]["session"] == 0.0                              # nothing needed a session: none opened
     monkeypatch.setattr(pm, "fetch_reference", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -1551,125 +1506,15 @@ def test_pull_once_status_timings_say_where_the_cycle_went(tmp_path, monkeypatch
     _assert_timings_shape(down)
 
 
-def test_rates_step_reports_bloomberg_and_pricing_seconds_apart(tmp_path):
+def test_curves_step_reports_bloomberg_and_bootstrap_seconds_apart(tmp_path):
     from pathlib import Path
     from datetime import date as _date
     from data.bloomberg.rates_marketdata import RatesFileSource
     p, conn = _option_db(tmp_path)
     fixture = Path(__file__).resolve().parents[1] / "data" / "bloomberg" / "fixtures" / "ois_snapshot_v1.json"
-    out = live._rates_step(conn, _date(2026, 8, 17), "localhost", 8194, rates_source=RatesFileSource(fixture))
-    assert set(out["seconds"]) == {"bloomberg", "pricing"}
+    out = live._curves_step(conn, _date(2026, 8, 17), "localhost", 8194, rates_source=RatesFileSource(fixture))
+    assert set(out["seconds"]) == {"bloomberg", "bootstrap"}
     assert all(isinstance(v, float) and v >= 0 for v in out["seconds"].values())
-
-
-# --------------------------------------------------------------------------- NDF 1-month price (2026-09-21)
-# User: "NDFs - always show 1m forward date price, not spot ... based off the monthly not
-# the spot". On "Pull Bloomberg now" each needed 1M NDF ticker is asked for as a spot is,
-# and written on the currency's USD pair dated today under mark_type NDF_1M, as quoted.
-def _ndf_live_db(tmp_path):
-    p = tmp_path / "ndf.db"
-    conn = schema.connect(p)
-    conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)", [
-        ("USDKRW", "FX", "USD", "KRW", 1, 1, "USDKRW Curncy", "9999-12-31"),
-        ("USDIDR", "FX", "USD", "IDR", 1, 1, "USDIDR Curncy", "9999-12-31"),
-    ])
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-        ("k1", "XLSX", "USDKRW", "FX_FWD", "k1", "2026-08-10", 1e6, 1390.0, "acc", "cp", "", "t", "d", ""),
-        ("d1", "XLSX", "USDIDR", "FX_FWD", "d1", "2026-08-10", 1e6, 16400.0, "acc", "cp", "", "t", "d", ""),
-    ])
-    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        ("k1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", "2026-09-21", 1390.0, 0),       # settles on the pull date
-        ("k1", 2, "FX_NEAR", "KRW", -1390e6, "2026-08-10", "2026-09-21", 1390.0, 0),
-        ("d1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", "2026-09-21", 16400.0, 0),
-        ("d1", 2, "FX_NEAR", "IDR", -16400e6, "2026-08-10", "2026-09-21", 16400.0, 0),
-    ])
-    conn.commit()
-    return p, conn
-
-
-def test_pull_once_writes_the_ndf_1m_price_on_the_usd_pair_and_counts_it_like_any_requested_mark(tmp_path, monkeypatch):
-    from datetime import date as _date
-    from data.bloomberg import pull_marks as pm
-    p, conn = _ndf_live_db(tmp_path)
-    asked = []
-
-    def fake_fetch_reference(session, service, tickers, fields, overrides=None, diag=None, tag=None):
-        asked.append((sorted(tickers), list(fields)))
-        rec = diag.new_request("ReferenceDataRequest", tickers, fields, overrides, tag)
-        rec["raw_response"] = [{"security": "IHN+1M Curncy", "fieldData": {}, "fieldExceptions": [],
-                                "securityError": {"message": "Unknown/Invalid Security [nid:123]"}}]
-        return {"USDKRW Curncy": {"PX_LAST": 1389.2}, "KWN+1M Curncy": {"PX_LAST": 1394.5},
-                "USDIDR Curncy": {"PX_LAST": 16500.0}}
-
-    monkeypatch.setattr(pm, "fetch_reference", fake_fetch_reference)
-    today = _date(2026, 9, 21)
-    status = live.pull_once(p, session_factory=lambda: (object(), object()), today=today)
-
-    # ONE request, the same field, for the spots and the 1M NDF tickers alike -- and nothing else
-    assert asked == [(["IHN+1M Curncy", "KWN+1M Curncy", "USDIDR Curncy", "USDKRW Curncy"], ["PX_LAST"])]
-    # counted like the other requested marks: 2 SPOT + 2 FWD_OUTRIGHT + 2 NDF_1M
-    assert status["connected"] is True and status["requested"] == 6
-    by = {(i["instrument_id"], i["mark_type"]): i for i in status["items"]}
-    krw = by[("USDKRW", "NDF_1M")]
-    assert krw["status"] == "OK" and krw["value"] == 1394.5 and krw["source"] == "BBG_BFXFORWARD"
-    assert krw["settle_date"] == "2026-09-21"
-    # a ticker Bloomberg refuses fails with Bloomberg's own reason, and nothing is put in its place
-    idr = by[("USDIDR", "NDF_1M")]
-    assert idr["status"] == "FAILED" and "IHN+1M Curncy" in idr["detail"] and "Unknown/Invalid Security" in idr["detail"]
-    assert status["failed"] == 1 and status["written"] == 5
-
-    rows = {(r[0], r[1]): r[2:] for r in conn.execute(
-        "SELECT instrument_id, mark_type, as_of_date, settle_date, value, source, snapped_at FROM marks_official")}
-    assert rows[("USDKRW", "NDF_1M")][:4] == ("2026-09-21", "2026-09-21", 1394.5, "BBG_BFXFORWARD")   # as quoted
-    assert rows[("USDKRW", "NDF_1M")][4] == rows[("USDKRW", "SPOT")][4]                  # stamped like the spot
-    assert ("USDIDR", "NDF_1M") not in rows
-    # the 1M price never stands in for the pair's spot: the leg settling today is marked at SPOT
-    assert rows[("USDKRW", "SPOT")][2] == 1389.2 and rows[("USDKRW", "FWD_OUTRIGHT")][2] == 1389.2
-    # and the ladder's spot rates are still the spots
-    assert live.rates_from_marks(conn)["KRW"]["rate"] == 1389.2
-
-
-# =========================================================================== 2026-09-22: NDF_FIX
-def test_ndf_fix_rows_are_the_fixing_dates_history_value_on_the_pair():
-    """The fix is asked of Bloomberg's daily history for exactly the fixing date (a reference
-    request would hand back yesterday's fix before today's is published) and written as
-    NDF_FIX on the pair, source BBG_BDH, the official source; a ticker with no value that day
-    is reported failed with the reason and nothing is written for it."""
-    from datetime import date as _date
-    from data.bloomberg.live import ndf_fix_rows
-    from data.bloomberg.pull_marks import RequestRow
-    reqs = [RequestRow("USDBRL", "BZFXPTAX Index", "2026-09-22", "NDF_FIX"),
-            RequestRow("USDKRW", "KOBRUSD Index", "2026-09-22", "NDF_FIX")]
-    asked = {}
-
-    def fetch(session, service, tickers, fields, start, end):
-        asked["call"] = (sorted(tickers), list(fields), start, end)
-        return {"BZFXPTAX Index": {"2026-09-22": {"PX_LAST": 5.3412}}, "KOBRUSD Index": {}}
-
-    rows, warnings, failed = ndf_fix_rows(None, None, reqs, _date(2026, 9, 22), fetch=fetch, snapped_at="2026-09-22T15:00:00-04:00")
-    assert asked["call"] == (["BZFXPTAX Index", "KOBRUSD Index"], ["PX_LAST"], _date(2026, 9, 22), _date(2026, 9, 22))
-    assert rows == [{"as_of_date": "2026-09-22", "instrument_id": "USDBRL", "settle_date": "2026-09-22", "mark_type": "NDF_FIX",
-                     "value": 5.3412, "source": "BBG_BDH", "snapped_at": "2026-09-22T15:00:00-04:00"}]
-    assert warnings == [] and [f["instrument_id"] for f in failed] == ["USDKRW"]
-    assert failed[0]["reason"] == "Bloomberg returned no PX_LAST for KOBRUSD Index on 2026-09-22 (the fixing)"
-    assert ndf_fix_rows(None, None, [], _date(2026, 9, 22), fetch=fetch) == ([], [], [])
-
-
-def test_build_requests_asks_for_the_fix_on_the_fixing_date_and_never_as_a_spot(tmp_path):
-    from data.ingest import schema
-    p = tmp_path / "risk.db"
-    conn = schema.connect(p)
-    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, bbg_ticker, "
-                 "expiry_date) VALUES ('USDBRL','FX','USD','BRL',1,1,'USDBRL Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('b1','XLSX','USDBRL','FX_FWD','b1','2026-09-01',1e6,5.2,'a','c','','t','d','')")
-    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        ("b1", 1, "FX_NEAR", "USD", 1e6, "2026-09-01", "2026-09-24", 5.2, 0),
-        ("b1", 2, "FX_NEAR", "BRL", -5.2e6, "2026-09-01", "2026-09-24", 5.2, 0)])
-    conn.commit()
-    on_fixing = live.build_requests(conn, "2026-09-22")            # Thu 09-24 fixes Tue 09-22
-    assert [(r.bbg_ticker, r.settle_date, r.mark_type) for r in on_fixing][-1] == ("BZFXPTAX Index", "2026-09-22", "NDF_FIX")
-    assert [r.mark_type for r in on_fixing if r.bbg_ticker == "BZFXPTAX Index"] == ["NDF_FIX"]   # not in the SPOT group
-    assert "NDF_FIX" not in {r.mark_type for r in live.build_requests(conn, "2026-09-21")}
 
 
 # =========================================================================== 2026-09-22: one day boundary
@@ -1701,25 +1546,25 @@ def test_book_today_rolls_to_the_next_date_at_1700_new_york():
 
 def _rollover_db(tmp_path):
     """AUDUSD forwards: a1 open to 2026-10-16 (a tenor date of the fake FWD_CURVE below), a2
-    settling Tue 2026-09-22 (D); an ESZ6 future to 2026-12-18. D's SPOT on file is D's 16:00
+    settling Tue 2026-09-22 (D); a CLZ6 future to 2026-12-18. D's SPOT on file is D's 16:00
     press, the last before the 17:00 roll."""
     p = tmp_path / "risk.db"
     conn = schema.connect(p)
     conn.executemany("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)", [
         ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"),
-        ("ESZ6 Index", "FUTURE", "ES", "USD", 50, 0, "ESZ6 Index", "2026-12-18"),
+        ("CLZ6 Comdty", "FUTURE", "CL", "USD", 1000, 0, "CLZ6 Comdty", "2026-12-18"),
     ])
     conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
         ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-09-10", -1e6, 0.65, "acc", "cp", "", "t", "d", ""),
         ("a2", "XLSX", "AUDUSD", "FX_FWD", "a2", "2026-09-10", 2e6, 0.66, "acc", "cp", "", "t", "d", ""),
-        ("f1", "XLSX", "ESZ6 Index", "FUTURE", "f1", "2026-09-10", 2, 7500.0, "acc", "cp", "", "t", "d", ""),
+        ("f1", "XLSX", "CLZ6 Comdty", "FUTURE", "f1", "2026-09-10", 2, 7500.0, "acc", "cp", "", "t", "d", ""),
     ])
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-09-10", "2026-10-16", 0.65, 1),
         ("a1", 2, "FX_NEAR", "USD", 650000, "2026-09-10", "2026-10-16", 0.65, 1),
         ("a2", 1, "FX_NEAR", "AUD", 2e6, "2026-09-10", "2026-09-22", 0.66, 1),
         ("a2", 2, "FX_NEAR", "USD", -1320000, "2026-09-10", "2026-09-22", 0.66, 1),
-        ("f1", 1, "NOTIONAL", "USD", 2 * 50 * 7500.0, "2026-09-10", "2026-12-18", 7500.0, 0),
+        ("f1", 1, "NOTIONAL", "USD", 2 * 1000 * 7500.0, "2026-09-10", "2026-12-18", 7500.0, 0),
     ])
     conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
                  ("2026-09-22", "AUDUSD", "2026-09-22", "SPOT", 0.66, "BBG_BFXFORWARD", "2026-09-22T16:00:00-04:00"))
@@ -1734,7 +1579,7 @@ def _fake_bloomberg(monkeypatch):
     from data.bloomberg import pull_marks as pm, fwd_curve
     monkeypatch.setattr(pm, "fetch_reference",
                         lambda session, service, tickers, fields, overrides=None, diag=None, tag=None:
-                        {"AUDUSD Curncy": {"PX_LAST": 0.6612}, "ESZ6 Index": {"PX_LAST": 7601.0}})
+                        {"AUDUSD Curncy": {"PX_LAST": 0.6612}, "CLZ6 Comdty": {"PX_LAST": 7601.0}})
     monkeypatch.setattr(pm, "_get_blpapi", lambda: object())
     monkeypatch.setattr(fwd_curve, "request_fwd_curves", lambda blpapi, session, service, tickers, timeout_ms=15000: {
         "AUDUSD Curncy": {"points": [(_date(2026, 10, 16), 0.6620), (_date(2026, 11, 16), 0.6630)],
@@ -1763,7 +1608,7 @@ def test_pull_at_1800_new_york_writes_the_next_days_marks_and_runs_every_step_fo
     # a2, settled as of the 23rd, is not asked for; the 23rd's SPOT is
     assert {(i["instrument_id"], i["mark_type"], i["settle_date"], i["status"]) for i in status["items"]} == {
         ("AUDUSD", "SPOT", "2026-09-23", "OK"), ("AUDUSD", "FWD_OUTRIGHT", "2026-10-16", "OK"),
-        ("ESZ6 Index", "FUTURE_PX", "2026-12-18", "OK")}
+        ("CLZ6 Comdty", "FUTURE_PX", "2026-12-18", "OK")}
     fx = conn.execute("SELECT instrument_id, settle_date, mark_type, value, snapped_at FROM marks "
                       "WHERE as_of_date = '2026-09-23' AND instrument_id = 'AUDUSD' ORDER BY mark_type, settle_date").fetchall()
     assert fx == [("AUDUSD", "2026-10-16", "FWD_OUTRIGHT", 0.6620, "2026-09-22T18:00:00-04:00"),
@@ -1773,9 +1618,9 @@ def test_pull_at_1800_new_york_writes_the_next_days_marks_and_runs_every_step_fo
     # the 22nd keeps its 16:00 press untouched: the day just ended is not this pull's
     assert conn.execute("SELECT value, snapped_at FROM marks WHERE as_of_date = '2026-09-22'").fetchall() == [
         (0.66, "2026-09-22T16:00:00-04:00")]
-    # the rates / vol / options steps and realise_settled all ran as of the 23rd: a2 (value date the
+    # the curves / vol / options steps and realise_settled all ran as of the 23rd: a2 (value date the
     # 22nd) is frozen by this cycle, at the 22nd's row on file at that moment
-    assert status["rates"]["as_of_date"] == status["vol"]["as_of_date"] == status["options"]["as_of_date"] == "2026-09-23"
+    assert status["curves"]["as_of_date"] == status["vol"]["as_of_date"] == status["options"]["as_of_date"] == "2026-09-23"
     assert status["ledger"]["as_of_date"] == "2026-09-23" and status["ledger"]["realised"] == 1
     assert conn.execute("SELECT spot_as_of_date FROM realised_pnl WHERE trade_id = 'a2'").fetchone() == ("2026-09-22",)
     assert live.read_status(p)["as_of_date"] == "2026-09-23"
@@ -1888,8 +1733,8 @@ def test_recalc_summary_and_the_helper_never_raise(tmp_path, monkeypatch):
 NEW_LEDGER = {"realised": 1, "unrealisable": [], "repaired": [],
               "refrozen": [{"trade_id": "b2", "product": "FX_FWD", "mark_type": "SPOT", "spot_as_of_date": "2026-09-21",
                             "pnl_from": 100.0, "pnl_to": 120.0, "why": "frozen at a live row; the 15:00 close replaced it"},
-                           {"trade_id": "a1", "product": "FX_FWD", "mark_type": "NDF_FIX", "spot_as_of_date": "2026-09-18",
-                            "pnl_from": -5.0, "pnl_to": -7.5, "why": "the fixing landed"}],
+                           {"trade_id": "a1", "product": "FUTURE", "mark_type": "FUTURE_PX", "spot_as_of_date": "2026-09-18",
+                            "pnl_from": -5.0, "pnl_to": -7.5, "why": "the day's PX_LAST replaced a live press"}],
               "kept": [{"trade_id": "c3", "product": "FX_OPTION", "reason": "no close-out spot on file yet"}]}
 
 

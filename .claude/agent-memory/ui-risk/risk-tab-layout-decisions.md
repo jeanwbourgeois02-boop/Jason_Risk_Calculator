@@ -16,17 +16,17 @@ rule that no figure is blank without its reason and never zero for a missing inp
 **How to apply (decisions taken, keep them unless the user says otherwise):**
 - Cell rule in the key table: a number is stored as a number (ranking); a MISSING figure is
   the string "n/a" (ranks last via `ranking.NULL_TEXTS`) with its reason as the cell
-  tooltip; a figure that DOES NOT APPLY to the row (Net USD on a rates row, DV01 on a
-  currency) is None, blank. Column formats use `nully=""` so the two cases look different.
+  tooltip; a figure that DOES NOT APPLY to the row is None, blank (the old example, DV01
+  on a currency, left with the rates rows on 2026-09-24: [[retired-macro-underlyers]]). Column formats use `nully=""` so the two cases look different.
 - The Book is the pinned footer (`ranking.with_footer`), kind "Book"; its "Worst ex vs
   target %" cell is blank on purpose (the engine measures the book against the CAP, the
   card shows "x % of cap"), with a tooltip saying so.
 - "carry included" goes in the Note only on a row with figures (`days > 0`): the engine's
-  `carry` flag is true whenever a carry series exists, even for an unsized row (SPX with
-  no ES price), which would read as nonsense.
+  `carry` flag is true whenever a carry series exists, even for an unsized row (e.g. a metal with
+  no spot), which would read as nonsense.
 - Cards: the definition is the card's `title` (hover); a NaN card shows "n/a" + the reason
   as the note AND as the hover (the header's lesson: hover-only reasons were reported as
-  "not working"). A long list of reasons (18 swaps without DV01 on the sample book) is
+  "not working"). A long list of reasons (e.g. 18 FX options without DELTA) is
   summarised "first (+17 more on hover)" with the full list in the hover.
 - Flags: `over_cap` / `over_vol_target` add the words "over cap" / "over vol target" as a
   tag plus the negative colour inline (`var(--neg)`): ui-shell owns the CSS, so no new
@@ -38,7 +38,6 @@ rule that no figure is blank without its reason and never zero for a missing inp
   the parquet history lives outside the database and a fresh nm-dashboard pull moves no
   revision.
 - Percent formats: "Worst ex vs target %" is unsigned (a share of a target), built with
-  dash `Format` directly (`_pct_format`) rather than `ranking.percent`, which is signed;
-  the scenario "Equity move" is a fraction (-0.10) printed with `Scheme.percentage`.
+  dash `Format` directly (`_pct_format`) rather than `ranking.percent`, which is signed.
 
 Related: [[dash-component-behaviour]].

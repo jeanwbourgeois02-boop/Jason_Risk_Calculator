@@ -32,10 +32,19 @@ old detailed Bloomberg diagnostics panel (still reachable via `2_launcher.py doc
 from `ui/tabs/header.py` on 2026-09-16 (user decision: it belongs on this tab only,
 not shown above every tab) -- see `BBG_CHECK_BUTTON_ID` / `BBG_RESULTS_ID` below.
 `feed_headline`
-and `backfill_headline` are kept -- and now folded into the single top-bar status
-line -- because `ui/tabs/cash_ladder.py` still imports `diagnostics_panel` /
-`feed_headline` from this module; both stay defined for that caller even though this
-tab's body no longer renders `diagnostics_panel` itself.
+and `backfill_headline` are folded into the single top-bar status line.
+`diagnostics_panel` is still defined but no screen renders it any more (no caller left).
+
+Commodity conversion, Phase 2 (user approval 2026-09-24): the macro trader's products left
+the app, so this tab no longer shows the swap pricing, the fixings or the swap marks in the
+manual form (PAR_RATE / PV_USD / DV01_USD). The pull's OIS step is now `status["curves"]`
+(the option pricers still discount on those curves), shown in brief by `curves_block`.
+Added the same day: Bloomberg's
+contract dates of the commodity futures (`contract_dates_panel`, and the pull's
+`status["contract_dates"]` block in the feed status), the futures never asked of Bloomberg
+for want of a verified ticker (`status["not_requestable"]`), the library's gaps (a need with
+no ticker, listed as a gap, not as a ticker) and the needs with no ticker in the
+completeness strip's hover.
 
 No calculation happens in this module beyond plain display formatting (tenor
 labelling from calendar-day distance, forward points as an outright/spot difference):
@@ -83,6 +92,10 @@ PULL_TIMINGS_ID = "market-data-pull-timings"
 RECALC_BLOCK_ID = "market-data-recalc"          # what a press did on a machine with no Bloomberg (2026-09-22)
 RECALC_DAYS_ID = "market-data-recalc-days"
 LEDGER_BLOCK_ID = "market-data-ledger"          # what the ledger's re-freeze did (2026-09-22)
+CONTRACT_DATES_BLOCK_ID = "market-data-contract-dates-status"   # the pull's contract-dates block (2026-09-24)
+CONTRACT_DATES_FAILED_ID = "market-data-contract-dates-failed"
+NOT_REQUESTABLE_ID = "market-data-not-requestable"              # futures never asked for (2026-09-24)
+CURVES_BLOCK_ID = "market-data-curves-status"                   # the pull's OIS curve step (2026-09-24)
 # Safety-net timer only: one feed cycle, read from data.bloomberg.live.INTERVAL_SECONDS
 # (ui.feed_controls.safety_refresh_ms), never a number typed in here. A data change
 # redraws the tab within seconds through ui/revision.py's DATA_REVISION_ID.
@@ -123,7 +136,7 @@ _HEAD = {"fontWeight": "600", "backgroundColor": "#f0f2f5", "borderBottom": "1px
 
 MANUAL_MARK_TYPE_OPTIONS = [
     {"label": t, "value": t}
-    for t in ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "PAR_RATE", "PV_USD", "DV01_USD", "DELTA", "PREMIUM")
+    for t in ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "DELTA", "PREMIUM")
 ]
 
 # Standard tenor buckets: label -> (approx calendar days, tolerance). Anything outside
@@ -171,8 +184,7 @@ def forward_points(outright: Optional[float], spot: Optional[float], pair: str) 
     return round(float(outright) - float(spot), decimals_for_pair(pair))
 
 
-# --------------------------------------------------------------------------- diagnostics panel (unchanged, kept for
-# ui/tabs/cash_ladder.py, which still imports feed_headline / diagnostics_panel from here; not rendered by this tab)
+# --------------------------------------------------------------------------- feed status pieces
 def backfill_headline(status: Optional[dict]) -> Optional[str]:
     """'Backfill: n days remaining' from the "backfill" key data.bloomberg.backfill's
     start_auto_backfill writes into the status file; None when there is nothing to say
@@ -426,7 +438,7 @@ def ledger_block(status: Optional[dict]) -> Optional[html.Div]:
 
 
 def pull_timings_line(status: Optional[dict]) -> str:
-    """'Last pull took 48 s: forwards 21 s · options 12 s · rates 8.0 s · ...', the steps
+    """'Last pull took 48 s: forwards 21 s · options 12 s · curves 8.0 s · ...', the steps
     of the last pull slowest first, from `status["timings"]` (seconds per step, written by
     data.bloomberg.live's pull; "total" is the whole pull and heads the line). "" when the
     status file carries no timings (an older file, or no pull yet), so nothing is shown."""
@@ -441,50 +453,147 @@ def pull_timings_line(status: Optional[dict]) -> str:
     return f"Last pull by step: {parts}" if parts else ""
 
 
+def _failure_line(entry) -> str:
+    """"ticker: reason" for one `failed` entry of the contract-dates block; a bare string is
+    its ticker alone, a dict with a key missing shows what it has."""
+    if not isinstance(entry, dict):
+        return str(entry)
+    ticker = str(entry.get("ticker") or "?")
+    reason = str(entry.get("reason") or "").strip()
+    return f"{ticker}: {reason}" if reason else f"{ticker}: no reason given"
+
+
+def contract_dates_block(status: Optional[dict]) -> Optional[html.Div]:
+    """What the last pull did with Bloomberg's contract dates of the commodity futures
+    (2026-09-24, bbg-live's `status["contract_dates"]`: {requested, stored, failed:
+    [{ticker, reason}], applied, summary}): the pull's own sentence ("N contract date(s)
+    stored, M future(s) moved to Bloomberg's expiry"), its error when the library could not
+    be read, and the tickers that gave no date in a collapsed list with Bloomberg's reason
+    for each. Read from the status file only. None when the key is absent (an older status
+    file) or the block says nothing (no commodity future asked, nothing moved)."""
+    block = (status or {}).get("contract_dates")
+    if not isinstance(block, dict):
+        return None
+    summary = block.get("summary")
+    summary = summary.strip() if isinstance(summary, str) else ""
+    failed = block.get("failed")
+    failed = [_failure_line(e) for e in failed] if isinstance(failed, (list, tuple)) else []
+    error = str(block.get("error") or "").strip()
+    if not (summary or failed or error):
+        return None
+    children: list = []
+    if summary:
+        children.append(html.Div(f"Contract dates: {summary}", className="status-line"))
+    if error:
+        children.append(html.Div(f"Contract dates: {error}", className="status-line status-line--bad"))
+    if failed:
+        children.append(html.Details(className="status-line", children=[
+            html.Summary(f"Tickers that gave no contract date: {len(failed)}"),
+            html.Ul([html.Li(line) for line in failed], id=CONTRACT_DATES_FAILED_ID,
+                    style={"margin": "2px 0 0 16px", "padding": 0}),
+        ]))
+    return html.Div(children, id=CONTRACT_DATES_BLOCK_ID, className="status-line")
+
+
+def curves_block(status: Optional[dict]) -> Optional[html.Div]:
+    """The pull's OIS curve step in brief (2026-09-24, bbg-live's `status["curves"]`:
+    {as_of_date, currencies: {ccy: {quotes, nodes, error}}, bootstrapped, seconds}, plus
+    `skipped` or `error`): one line naming each currency with its curve nodes ("USD 18
+    nodes"), or the step's skip reason, or its error in red; the currencies that got no
+    curve, each with its reason, in a collapsed list. Counts are the pull's own. None when
+    the key is absent (an older status file)."""
+    block = (status or {}).get("curves")
+    if not isinstance(block, dict):
+        return None
+    skipped = str(block.get("skipped") or "").strip()
+    error = str(block.get("error") or "").strip()
+    currencies = block.get("currencies")
+    currencies = currencies if isinstance(currencies, dict) else {}
+    built, failed = [], []
+    for ccy, entry in sorted(currencies.items()):
+        entry = entry if isinstance(entry, dict) else {}
+        nodes, quotes = _count(entry.get("nodes")), _count(entry.get("quotes"))
+        why = str(entry.get("error") or "").strip()
+        if nodes and not why:
+            built.append(f"{ccy} {nodes} node{'s' if nodes != 1 else ''}")
+        else:
+            failed.append(f"{ccy}: {why or f'{quotes} quote(s), no curve built'}")
+    children: list = []
+    if skipped and not currencies:
+        children.append(html.Div(f"OIS curves: not pulled, {skipped}", className="status-line"))
+    elif currencies:
+        line = f"OIS curves: {', '.join(built) if built else 'none built'}"
+        if failed:
+            line += f"; {len(failed)} currenc{'ies' if len(failed) != 1 else 'y'} without a curve"
+        children.append(html.Div(line, className="status-line"))
+    if error:
+        children.append(html.Div(f"OIS curves: {error}", className="status-line status-line--bad"))
+    if failed:
+        children.append(html.Details(className="status-line", children=[
+            html.Summary(f"Without a curve: {len(failed)}"),
+            html.Ul([html.Li(line) for line in failed], style={"margin": "2px 0 0 16px", "padding": 0}),
+        ]))
+    if not children:
+        return None
+    return html.Div(children, id=CURVES_BLOCK_ID, className="status-line")
+
+
+def _not_requestable_line(entry) -> Tuple[str, str]:
+    """(line, hover) for one `not_requestable` entry: "CLZ26 Comdty (2026-11-19, 2 trades):
+    reason", the trade ids on hover. A bare string is its id alone."""
+    if not isinstance(entry, dict):
+        return (str(entry), "")
+    instrument = str(entry.get("instrument_id") or "?")
+    trade_ids = entry.get("trade_ids")
+    trade_ids = [str(t) for t in trade_ids] if isinstance(trade_ids, (list, tuple)) else []
+    bits = [b for b in (str(entry.get("settle_date") or ""),
+                        f"{len(trade_ids)} trade{'s' if len(trade_ids) != 1 else ''}" if trade_ids else "") if b]
+    head = f"{instrument} ({', '.join(bits)})" if bits else instrument
+    reason = str(entry.get("reason") or "").strip() or "no reason given"
+    return (f"{head}: {reason}", ", ".join(trade_ids))
+
+
+def not_requestable_block(status: Optional[dict]) -> Optional[html.Div]:
+    """The futures the last pull never asked Bloomberg for, for want of a verified
+    Bloomberg ticker (2026-09-24, bbg-live's `status["not_requestable"]`: [{instrument_id,
+    settle_date, trade_ids, reason}]): one sentence and a short list, each with the
+    library's own reason and its trade ids on hover. They have no price from Bloomberg
+    until the root is verified. None when the key is absent or the list is empty."""
+    entries = (status or {}).get("not_requestable")
+    if not isinstance(entries, (list, tuple)) or not entries:
+        return None
+    lines = [_not_requestable_line(e) for e in entries]
+    n = len(lines)
+    return html.Div(id=NOT_REQUESTABLE_ID, className="status-line", children=[
+        html.Div(f"Not asked of Bloomberg: {n} future{'s' if n != 1 else ''} with no verified Bloomberg ticker, "
+                 "so no price from Bloomberg until the ticker is checked", className="status-line status-line--bad"),
+        html.Ul([html.Li(line, title=hover or None) for line, hover in lines],
+                style={"margin": "2px 0 0 16px", "padding": 0}),
+    ])
+
+
 def status_block(status: Optional[dict]):
     """What the tab's feed-status block shows: the one-line status, plus the last pull's
-    per-step timings on a second compact line when the status file has them, plus what a
-    press did on a machine with no Bloomberg (`recalc_block`) when the last status says
-    so; that sentence is then kept off the first line, so it is read once; and what the
-    ledger's re-freeze did (`ledger_block`) when the status carries it."""
+    per-step timings on a second compact line when the status file has them, plus what the
+    pull did with the futures' contract dates (`contract_dates_block`) and the futures it
+    could not ask for (`not_requestable_block`), plus what a press did on a machine with no
+    Bloomberg (`recalc_block`) when the last status says so; that sentence is then kept off
+    the first line, so it is read once; and what the ledger's re-freeze did
+    (`ledger_block`) when the status carries it."""
     recalc = recalc_block(status)
     ledger = ledger_block(status)
+    dates = contract_dates_block(status)
+    unasked = not_requestable_block(status)
+    curves = curves_block(status)
     line = top_bar_status(status, say_recalc=recalc is None)
     timings = pull_timings_line(status)
-    if not timings and recalc is None and ledger is None:
+    extras = [block for block in (dates, unasked, curves, recalc, ledger) if block is not None]
+    if not timings and not extras:
         return line
     parts: list = [line]
     if timings:
         parts.append(html.Div(timings, id=PULL_TIMINGS_ID, className="status-line"))
-    if recalc is not None:
-        parts.append(recalc)
-    if ledger is not None:
-        parts.append(ledger)
-    return parts
-
-
-def _rates_step_lines(rates_status: Optional[dict]) -> List[str]:
-    """Plain-English line per currency from data.bloomberg.live._rates_step's output
-    (part of the pull_once status dict under "rates"), so a currency that priced nothing
-    this cycle says *why* -- a broken RatesBloombergSource, a curve-quote request that
-    came back empty, a pricing exception -- rather than the diagnostics only being able to
-    say curve_quotes/marks are missing without explaining the live feed's own attempt."""
-    if not rates_status:
-        return []
-    if rates_status.get("skipped"):
-        return [f"Rates: {rates_status['skipped']}."]
-    lines: List[str] = []
-    if rates_status.get("error"):
-        lines.append(f"Rates: {rates_status['error']}")
-    for ccy, entry in sorted(rates_status.get("currencies", {}).items()):
-        if entry.get("error"):
-            lines.append(f"Rates {ccy}: FAILED to pull curve/fixings -- {entry['error']}")
-        else:
-            lines.append(f"Rates {ccy}: {entry.get('quotes', 0)} curve quote(s), "
-                          f"{entry.get('fixings', 0)} fixing(s) written this cycle.")
-    for f in rates_status.get("failed", []):
-        lines.append(f"Rates pricing {f.get('trade_id', '')}: FAILED -- {f.get('error', '')}")
-    return lines
+    return parts + extras
 
 
 def _options_step_lines(options_status: Optional[dict]) -> List[str]:
@@ -565,9 +674,9 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
             style_data_conditional=[{"if": {"filter_query": "{stale} = 'STALE'"}, "color": "#8a4b00",
                                      "backgroundColor": "#fff4e5"}]),
     ]
-    pricing_lines = _rates_step_lines((status or {}).get("rates")) + _options_step_lines((status or {}).get("options"))
+    pricing_lines = _options_step_lines((status or {}).get("options"))
     if pricing_lines:
-        children += [html.H4("Rates and options pricing (this pull's cycle)"),
+        children += [html.H4("Options pricing (this pull's cycle)"),
                      html.Ul([html.Li(ln, className="status-line") for ln in pricing_lines])]
     if status and status.get("warnings"):
         children += [html.H4("Pull warnings"), html.Ul([html.Li(w, className="status-line") for w in status["warnings"]])]
@@ -905,15 +1014,30 @@ def pair_body(conn: sqlite3.Connection, as_of: str, pair: str) -> html.Div:
     return html.Div([spot_line, curve_table(df, pair), curve_chart(df, spot, pair, as_of)])
 
 
+def _unrequestable_words(value) -> str:
+    """'; 2 more with no Bloomberg ticker, not counted' from a close_completeness
+    `not_requestable` cell (a list of {instrument_id, settle_date, mark_type, reason},
+    2026-09-24; absent on an older inventory), '' when there are none."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return ""
+    names = sorted({str(i.get("instrument_id") or "?") for i in value if isinstance(i, dict)})
+    shown = ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
+    return (f"; {len(value)} more with no Bloomberg ticker, never asked for and not counted"
+            + (f" ({shown})" if shown else ""))
+
+
 def completeness_strip(df: pd.DataFrame) -> html.Div:
     """Compact row of small squares, one per business day, coloured by completeness,
-    with a tooltip (title attribute) giving the counts for that day."""
+    with a tooltip (title attribute) giving the counts for that day: the marks the book
+    needed that a pull can ask for, and apart from them the needs with no Bloomberg ticker
+    (`not_requestable`, which never make a day incomplete)."""
     if df.empty:
         return message_box("No completeness data.")
     squares = []
     for _, row in df.iterrows():
         complete = bool(row.get("complete"))
-        title = f"{row['as_of_date']}: {row['present']}/{row['needed']} official SPOT marks"
+        title = (f"{row['as_of_date']}: {row['present']}/{row['needed']} needed marks on file as official closes"
+                 + _unrequestable_words(row.get("not_requestable")))
         squares.append(html.Div(title=title, className="completeness-square",
                                 style={"display": "inline-block", "width": "14px", "height": "14px",
                                        "margin": "1px", "backgroundColor": "#1a7f4b" if complete else "#b42318"}))
@@ -1001,15 +1125,17 @@ def blocked_by_mark(conn: sqlite3.Connection, as_of: str) -> Dict[MarkKey, dict]
     Two queries for the whole book (open FX / futures legs, open FX options), folded here:
       - an FX leg reads the FWD_OUTRIGHT of its pair at its own settle date, the pair's SPOT,
         and for a cross the SPOT of each currency's USD pair (EURSEK reads EURUSD and USDSEK);
-      - a futures leg reads the FUTURE_PX at its expiry;
+      - a futures leg reads the FUTURE_PX at its expiry and, for a contract not in USD, the SPOT
+        of its currency's USD pair (`live._usd_pair_name`, the name the library keys it by);
       - an FX option reads its pair's SPOT, the forward at its expiry and the same USD pairs.
     The pair names come from `data.bloomberg.live.option_spot_pair_names`, the function the
     needs list itself is built from, so a row here matches a row of the inventory.
 
     Notional is a face amount straight from the ticket: the leg's absolute USD amount where
-    the pair has a USD leg, otherwise the base amount under its own currency; an option's
-    is its base-currency notional. It is never converted with a mark."""
-    from data.bloomberg.live import option_spot_pair_names
+    the pair has a USD leg, otherwise the base amount under its own currency; a future's is
+    its NOTIONAL leg in the contract's currency; an option's is its base-currency notional.
+    It is never converted with a mark."""
+    from data.bloomberg.live import _usd_pair_name, option_spot_pair_names
     out: Dict[MarkKey, dict] = {}
 
     def add(key: MarkKey, trade_id: str, ccy: str, amount: float) -> None:
@@ -1020,11 +1146,16 @@ def blocked_by_mark(conn: sqlite3.Connection, as_of: str) -> Dict[MarkKey, dict]
 
     for trade_id, instrument_id, asset_class, base, quote, ccy, amount, settle in conn.execute(
             _OPEN_LEGS_SQL, {"as_of": as_of}):
+        if asset_class == "FUTURE":
+            # the NOTIONAL leg is in the contract's own currency: shown under it, never converted.
+            # A non-USD future also reads the SPOT of its currency's USD pair (2026-09-24: its P&L
+            # converts at spot of the valuation date), the same pair name the library lists.
+            add((instrument_id, "FUTURE_PX", settle), trade_id, ccy, _abs_amount(amount))
+            if quote and quote != "USD":
+                add((_usd_pair_name(quote), "SPOT", as_of), trade_id, ccy, _abs_amount(amount))
+            continue
         wanted = "USD" if "USD" in (base, quote) else base
         shown_ccy, shown = (ccy, _abs_amount(amount)) if ccy == wanted else ("", 0.0)
-        if asset_class == "FUTURE":
-            add((instrument_id, "FUTURE_PX", settle), trade_id, shown_ccy, shown)
-            continue
         add((instrument_id, "FWD_OUTRIGHT", settle), trade_id, shown_ccy, shown)
         add((instrument_id, "SPOT", as_of), trade_id, shown_ccy, shown)
         for usd_pair in option_spot_pair_names(base, quote)[1:]:
@@ -1158,8 +1289,8 @@ def missing_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] =
     """Panel 1: every mark the book needs on `as_of` that has no official mark."""
     from ui.tabs.header import backfill_status
     needed, rows = missing_rows(conn, as_of, status)
-    scope = ("Covers the marks requested from Bloomberg (spot, forwards, futures prices); swap and option "
-             "values are computed by the app from these.")
+    scope = ("Covers the marks requested from Bloomberg (spot, forwards, futures prices); option values are "
+             "computed by the app from these.")
     if not needed:
         return _panel(MISSING_TITLE, [html.P(f"The book needs no marks on {as_of}: no FX, futures or option "
                                              f"trade is open that day."), _kicker(scope)])
@@ -1385,26 +1516,108 @@ LIBRARY_TITLE = "Bloomberg library"
 LIBRARY_TABLE_ID = "market-data-library-table"
 
 
+LIBRARY_GAP_TICKER = "no ticker: not asked"
+
+
+def library_rows(conn: sqlite3.Connection, as_of: str) -> Tuple[List[dict], List[dict]]:
+    """(tickers a pull on `as_of` asks for, gaps: needs with no Bloomberg ticker to ask
+    for), from `library.tickers`, every row shown. A gap (2026-09-24: `requestable` False,
+    ticker '', the library's reason in `used_for`) is never shown as a ticker: its ticker
+    cell says it is not asked, and its row is flagged."""
+    from data.bloomberg import library
+    asked, gaps = [], []
+    for r in library.tickers(conn, as_of):
+        if r.get("requestable", True):
+            asked.append({**r, "flag": ""})
+        else:
+            gaps.append({**r, "ticker": LIBRARY_GAP_TICKER, "flag": "gap"})
+    return asked, gaps
+
+
 def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     """The Bloomberg library (data/bloomberg/library.py, user decision 2026-09-21): every
     Bloomberg security a pull on `as_of` asks for, what it is for, how many trades need it
-    and until when. It changes only when trades come in; nothing outside it is pulled.
-    Collapsed by default: the summary line is the monitor, the table is the detail."""
+    and until when, and, flagged at the top, every need with no Bloomberg ticker to ask for
+    (a future of an unverified root, 2026-09-24). It changes only when trades come in;
+    nothing outside it is pulled. Collapsed by default: the summary line is the monitor,
+    the table is the detail."""
     from data.bloomberg import library
-    rows = library.tickers(conn, as_of)
+    asked, gaps = library_rows(conn, as_of)
     trades = len({r["trade_id"] for r in library.needed_on(conn, as_of)})
-    summary = (f"{LIBRARY_TITLE} · {len(rows)} ticker(s) for {trades} trade(s) on {as_of} · "
-               "changes only when trades come in · pulled only on request")
-    if not rows:
+    summary = f"{LIBRARY_TITLE} · {len(asked)} ticker(s) for {trades} trade(s) on {as_of}"
+    if gaps:
+        summary += f" · {len(gaps)} need(s) with no Bloomberg ticker, not asked"
+    summary += " · changes only when trades come in · pulled only on request"
+    if not asked and not gaps:
         body = [_kicker("No trade on file needs anything from Bloomberg on this date.")]
     else:
-        body = [_kicker("Everything \"Pull Bloomberg now\" asks for, and nothing else. A forward curve is one "
-                        "request per pair; a vol smile and an OIS curve are one ticker per point."),
+        kicker = ("Everything \"Pull Bloomberg now\" asks for, and nothing else. A forward curve is one "
+                  "request per pair; a vol smile and an OIS curve are one ticker per point.")
+        if gaps:
+            kicker += (f" The {len(gaps)} flagged row(s) at the top are gaps: the book needs them but has no "
+                       "verified Bloomberg ticker to ask with, so nothing is asked and the reason is under Used for.")
+        body = [_kicker(kicker),
                 _panel_table(LIBRARY_TABLE_ID,
                              [("Ticker", "ticker"), ("Field", "field"), ("Used for", "used_for"),
                               ("Trades", "trades"), ("Needed until", "needed_until"), ("In the library since", "added_at")],
-                             [{**r, "flag": ""} for r in rows], numeric=("trades",))]
+                             gaps + asked, wide=("used_for",) if gaps else (), numeric=("trades",))]
     return html.Details(className="details", children=[html.Summary(summary), *body])
+
+
+CONTRACT_DATES_TITLE = "Contract dates"
+CONTRACT_DATES_TABLE_ID = "market-data-contract-dates-table"
+
+
+def contract_date_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+    """One row per open commodity future whose Bloomberg contract dates the book needs on
+    `as_of`, from `data.bloomberg.inventory.contract_dates_inventory` (2026-09-24): ON_FILE
+    with the stored last trade and first notice dates and their source, or MISSING with why:
+    the inventory's own reason when the pull cannot ask (no verified ticker), else that the
+    next "Pull Bloomberg now" asks for them. Missing rows first; nothing is estimated here."""
+    from data.bloomberg.inventory import contract_dates_inventory
+    df = contract_dates_inventory(conn, as_of)
+    rows = []
+    for r in df.to_dict("records"):
+        on_file = str(r.get("status") or "") == "ON_FILE"
+        reason = str(r.get("reason") or "").strip()
+        why = "" if on_file else (reason or "not on file yet: the next Pull Bloomberg now asks for them")
+        rows.append({"contract_id": r.get("contract_id", ""),
+                     "bbg_ticker": str(r.get("bbg_ticker") or "") or "no ticker",
+                     "status": "on file" if on_file else "missing",
+                     "last_trade_date": r.get("last_trade_date") or "", "first_notice_date": r.get("first_notice_date") or "",
+                     "source": r.get("source") or "", "trades": r.get("trades"), "needed_until": r.get("needed_until", ""),
+                     "why": why, "flag": "" if on_file else "missing"})
+    rows.sort(key=lambda r: (r["flag"] == "", r["contract_id"]))
+    return rows
+
+
+def contract_dates_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
+    """Bloomberg's own last trade and first notice dates of the open commodity futures
+    (2026-09-24): until they are on file a future carries the contract master's
+    conservative expiry. Collapsed, like the library: the summary line counts on file and
+    missing, the table lists each contract, missing first."""
+    rows = contract_date_rows(conn, as_of)
+    if not rows:
+        return html.Details(className="details", children=[
+            html.Summary(f"{CONTRACT_DATES_TITLE} · none needed on {as_of}"),
+            _kicker("No open commodity future needs Bloomberg's contract dates on this date.")])
+    missing = [r for r in rows if r["flag"]]
+    unaskable = sum(1 for r in missing if not r["why"].startswith("not on file yet"))
+    summary = f"{CONTRACT_DATES_TITLE} · {len(rows) - len(missing)} of {len(rows)} contract(s) on file on {as_of}"
+    if missing:
+        summary += f" · {len(missing)} missing"
+        if unaskable:
+            summary += f", {unaskable} with no Bloomberg ticker to ask with"
+    return html.Details(className="details", children=[
+        html.Summary(summary),
+        _kicker("FUT_LAST_TRADE_DT and FUT_NOTICE_FIRST, asked of Bloomberg on request, once per contract. Until a "
+                "contract's dates are on file its future carries the contract master's conservative expiry."),
+        _panel_table(CONTRACT_DATES_TABLE_ID,
+                     [("Contract", "contract_id"), ("Ticker", "bbg_ticker"), ("Status", "status"),
+                      ("Last trade", "last_trade_date"), ("First notice", "first_notice_date"), ("Source", "source"),
+                      ("Trades", "trades"), ("Needed until", "needed_until"), ("Why missing", "why")],
+                     rows, wide=("why",), numeric=("trades",)),
+    ])
 
 
 UNPRICED_TITLE = "Trades left out of the headline P&L"
@@ -1540,7 +1753,8 @@ def whole_book_panels(conn: sqlite3.Connection, as_of: str, status: Optional[dic
     return (html.Div([safe_panel(UPLOAD_ISSUES_TITLE, lambda: upload_issues_panel(conn)),
                       safe_panel(UNPRICED_TITLE, lambda: unpriced_trades_panel(conn, header_day)),
                       safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status)),
-                      safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of))]),
+                      safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)),
+                      safe_panel(CONTRACT_DATES_TITLE, lambda: contract_dates_panel(conn, as_of))]),
             safe_panel(SUSPECT_TITLE, lambda: suspect_panel(conn, as_of)),
             safe_panel(PAST_CLOSES_TITLE, lambda: past_closes_panel(conn, header_day)))
 
@@ -1550,9 +1764,8 @@ def manual_entry_form(default_pair: Optional[str] = None) -> html.Div:
     with the pair currently selected at the top of the tab."""
     return html.Div(className="market-data-manual-entry", children=[
         html.H4("Manual mark entry"),
-        html.P("MANUAL is official only for DELTA and PREMIUM; for SPOT / FWD_OUTRIGHT / FUTURE_PX / "
-               "PAR_RATE / PV_USD / DV01_USD a manual row is visible here (see the table below) but is "
-               "never used by valuation -- only an official mark prices a trade."),
+        html.P("A MANUAL mark is never official: it is kept on file and shown on this tab as \"on file "
+               "instead\", but no valuation uses it -- only an official mark prices a trade."),
         html.Div(className="toolbar", children=[
             html.Div([html.Label("Instrument"), dcc.Input(id=MANUAL_INSTRUMENT_ID, type="text", value=default_pair)]),
             html.Div([html.Label("Settle date"), dcc.Input(id=MANUAL_SETTLE_ID, type="text", placeholder="YYYY-MM-DD")]),

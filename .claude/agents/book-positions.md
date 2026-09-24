@@ -1,6 +1,6 @@
 ---
 name: book-positions
-description: Layer 5, exposure: the book's positions (engine/ladder/positions.py::book_positions: delta by currency, FX net and gross, the equity index line, rates DV01, FX options delta by pair) and the futures delta (futures_delta.py). Read by the Blotter's Positions table and the Risk tab. Speaks to other lanes only through the housekeeper.
+description: Layer 5, exposure: the book's positions (engine/ladder/positions.py::book_positions: delta by currency at official spot, FX net and gross, FX options delta by pair; commodity lines from curve-positions in Phase 3) and the futures delta (futures_delta.py). Read by the Blotter's Positions table and the Risk tab. Speaks to other lanes only through the housekeeper.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: fable
 effort: high
@@ -27,8 +27,8 @@ Rules:
 - Read CLAUDE.md before any work: the hard rules, "Working mode", "Lanes" and the sections below.
 - Never edit outside your files. You never call, message or edit another lane. A change needed elsewhere is a Request in your Handoff, and a question for another lane is "Blocked on"; the housekeeper carries both.
 - Write tests alongside code, in your own test files, and run only those (`py -3 -m pytest tests/test_positions.py tests/test_futures_delta.py -q -p no:cacheprovider`). The housekeeper runs the full suite once at the end. A red test in a file you do not own goes in your Handoff; you never edit it.
-- Every figure is the owning module's output summed, nothing recomputed: the Ladder's exposure path, `futures_delta`, the option DELTA marks, the day's official DV01_USD.
-- The equity index line counts a future as contracts × 50 and a listed option as contracts × DELTA × 100, in index units, ES-contract equivalents and USD.
+- Every figure is the owning module's output summed, nothing recomputed: the Ladder's exposure path, `futures_delta`, the option DELTA marks.
+- The equity index and rates DV01 lines left with the macro products on 2026-09-24. `futures_usd_delta` converts every future at the exact official spot, never estimated.
 - A missing mark leaves its line n/a with the reason and out of the sum, never zero.
 - ui-blotter and risk-metrics read its shape, so any change to it is a Changed interface.
 - Record anything learned (data quirks, conventions, the user's preferences for your part) in agent memory.

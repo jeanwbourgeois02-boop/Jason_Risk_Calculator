@@ -1,6 +1,7 @@
 """Commodity futures through the blotter parser (ingest-parser, 2026-09-24): contract-master
 resolution, the leg in the contract's own currency, the config/book.yaml row filter, and the
-synthetic commodity sample (data/sample/commodity_blotter_sample.csv)."""
+synthetic sample book (data/sample/blotter_sample.csv: Jason's commodity futures and FX hedges,
+every value made up; it replaced the macro trader's blotter on 2026-09-24)."""
 from __future__ import annotations
 
 import sqlite3
@@ -13,8 +14,7 @@ from data.contracts import store_static_dates
 from data.ingest import blotter
 
 REPO = Path(__file__).resolve().parents[1]
-SAMPLE = REPO / "data" / "sample" / "commodity_blotter_sample.csv"
-MACRO_SAMPLE = REPO / "data" / "sample" / "blotter_sample.csv"
+SAMPLE = REPO / "data" / "sample" / "blotter_sample.csv"
 
 HEADER = ["Status", "Fund", "Desk", "Fin Type", "Trade Id", "Description", "Side", "Symbol",
           "Underlying Symbol", "Quantity", "Price", "Total Fees", "Currency", "Execution Venue",
@@ -58,23 +58,43 @@ def _instrument_of(res, trade_id):
 
 
 # --------------------------------------------------------------------------- the sample
+SAMPLE_FUTURES = {
+    "CLZ26 Comdty", "CLF27 Comdty", "COZ26 Comdty", "CLX26 Comdty", "XBX26 Comdty", "HOX26 Comdty",
+    "S X26 Comdty", "SMZ26 Comdty", "BOZ26 Comdty", "C Z26 Comdty", "GCZ26 Comdty", "SIZ26 Comdty",
+    "HGZ26 Comdty", "CUX26 Comdty", "IOEF27 Comdty", "SCOF27 Comdty", "TZTX26 Comdty", "FNX26 Comdty",
+    "JGZ26 Comdty", "CLQ26 Comdty", "CLV26 Comdty"}
+SAMPLE_OPTIONS = {"EURUSD111826C-500041", "USDJPY121626P-500042", "USDJPY111926P-500043",
+                  "EURUSD102126P-500044", "EURUSD102126P-500045"}
+
+
 def test_sample_parses_with_the_expected_trades_and_rejects(sample):
-    assert sample.n_future == 31 and sample.n_forward == 2     # 33 rows: 29 futures, 2 FX, 2 bad
-    assert len(sample.trades) == 31
-    assert sum(t.product == "FUTURE" for t in sample.trades) == 29
-    assert sum(t.product == "FX_FWD" for t in sample.trades) == 2
-    assert not sample.warnings                     # every NetInvoice agrees with contracts x multiplier x Price
-    assert sample.n_skipped_status_or_fund == 0 and sample.kept_by_trader == {"JB": 33}
+    # 45 rows: 31 futures (29 trades + 2 deliberate rejects), 8 FX forwards, 1 spot, 5 FX options
+    assert (sample.n_future, sample.n_forward, sample.n_currency, sample.n_spot, sample.n_option,
+            sample.n_skipped_retired) == (31, 8, 1, 1, 5, 0)
+    assert len(sample.trades) == 43 and len(sample.legs) == 29 + 8 * 2 + 2 + 5
+    assert {p: sum(t.product == p for t in sample.trades) for p in ("FUTURE", "FX_FWD", "FX_SPOT", "FX_OPTION")} == \
+        {"FUTURE": 29, "FX_FWD": 8, "FX_SPOT": 1, "FX_OPTION": 5}
+    assert not sample.warnings                     # every NetInvoice agrees with its fill
+    assert sample.n_skipped_status_or_fund == 0 and sample.n_skipped_other == 0 and sample.kept_by_trader == {"JB": 45}
     ambiguous, unknown = sample.rejects
     assert ambiguous.symbol == "ZCZ6-USAA" and "CBOT:ZC" in ambiguous.reason and "ZCE:ZC" in ambiguous.reason
     assert unknown.symbol == "QQZ6-USAA" and "'QQ' is not in config/contracts.csv" in unknown.reason
-    assert set(sample.instruments) == {
-        "CLZ26 Comdty", "CLF27 Comdty", "COZ26 Comdty", "CLX26 Comdty", "XBX26 Comdty", "HOX26 Comdty",
-        "S X26 Comdty", "SMZ26 Comdty", "BOZ26 Comdty", "C Z26 Comdty", "GCZ26 Comdty", "SIZ26 Comdty",
-        "HGZ26 Comdty", "CUX26 Comdty", "IOEF27 Comdty", "SCOF27 Comdty", "TZTX26 Comdty", "FNX26 Comdty",
-        "JGZ26 Comdty", "CLQ26 Comdty", "CLV26 Comdty", "USDCNH"}
-    assert all(t.trader == "JB" and t.trade_id.startswith("9") for t in sample.trades)
+    assert set(sample.instruments) == SAMPLE_FUTURES | SAMPLE_OPTIONS | {
+        "USDCNH", "EURUSD", "USDJPY", "GBPUSD", "EURGBP", "XAUUSD", "CASH-EUR"}
+    assert {k for k, i in sample.instruments.items() if i.asset_class == "FUTURE"} == SAMPLE_FUTURES
+    assert all(t.trader == "JB" and t.trade_id.startswith("9100000") for t in sample.trades)
+    assert all(t.counterparty in ("CPTY-A", "CPTY-B", "CPTY-C") for t in sample.trades)
     assert all("2026-07-01" <= t.trade_date <= "2026-09-18" for t in sample.trades)
+
+
+def test_the_sample_carries_no_macro_product(sample):
+    """The macro trader's products leave in Phase 2: no rate swap, no NDF currency, no equity
+    index future or listed index option (all left the app on 2026-09-24; tests/test_blotter.py
+    shows such rows are skipped with their reason)."""
+    assert {t.product for t in sample.trades} == {"FUTURE", "FX_FWD", "FX_SPOT", "FX_OPTION"}
+    assert not any(i.is_ndf for i in sample.instruments.values())
+    assert not {l.ccy for l in sample.legs} & {"BRL", "TWD", "KRW", "IDR", "INR"}
+    assert not [k for k in sample.instruments if k.endswith(" Index") or "/" in k]
 
 
 @pytest.mark.parametrize("contract_id, root_id, ccy, multiplier, ticker", [
@@ -113,24 +133,105 @@ def test_expired_contract_and_round_trip_are_in_the_sample(sample):
     assert len(rt) == 2 and sum(t.quantity for t in rt) == 0
 
 
-def test_the_fx_hedges_load_as_usdcnh_forwards(sample):
-    fx = [t for t in sample.trades if t.product == "FX_FWD"]
-    assert {t.instrument_id for t in fx} == {"USDCNH"} and sorted(t.quantity for t in fx) == [-1_500_000.0, 1_000_000.0]
+def _fx_legs(res, trade_id):
+    return [(l.leg_type, l.ccy, l.amount, l.settle_date, l.settles_cash) for l in res.legs if l.trade_id == trade_id]
+
+
+def test_the_usdcnh_hedges_are_three_forwards_one_already_settled(sample):
+    cnh = {t.trade_id: t for t in sample.trades if t.instrument_id == "USDCNH"}
+    assert {k: (t.product, t.quantity, t.price) for k, t in cnh.items()} == {
+        "910000030": ("FX_FWD", -1_500_000.0, 7.1425), "910000031": ("FX_FWD", 1_000_000.0, 7.108),
+        "910000034": ("FX_FWD", 2_000_000.0, 7.165)}
     assert sample.instruments["USDCNH"].is_ndf == 0
+    assert _fx_legs(sample, "910000034") == [("FX_NEAR", "USD", 2_000_000.0, "2026-08-19", 1),
+                                             ("FX_NEAR", "CNH", -14_330_000.0, "2026-08-19", 1)]   # settled
+    assert {l.settle_date for l in sample.legs if l.trade_id in ("910000030", "910000031")} == \
+        {"2026-11-18", "2027-01-20"}
+
+
+@pytest.mark.parametrize("trade_id, pair, quantity, price, base_leg, quote_leg", [
+    ("910000035", "EURUSD", -400_000.0, 1.1745, ("EUR", -400_000.0), ("USD", 469_800.0)),
+    ("910000036", "USDJPY", 300_000.0, 145.62, ("USD", 300_000.0), ("JPY", -43_686_000.0)),
+    ("910000037", "GBPUSD", 200_000.0, 1.3462, ("GBP", 200_000.0), ("USD", -269_240.0)),
+    ("910000038", "EURGBP", 250_000.0, 0.8655, ("EUR", 250_000.0), ("GBP", -216_375.0)),     # the cross
+    ("910000039", "XAUUSD", -100.0, 3365.4, ("XAU", -100.0), ("USD", 336_540.0)),           # the metal
+])
+def test_the_g10_cross_and_metal_forwards(sample, trade_id, pair, quantity, price, base_leg, quote_leg):
+    t = next(t for t in sample.trades if t.trade_id == trade_id)
+    assert (t.product, t.instrument_id, t.quantity, t.price) == ("FX_FWD", pair, quantity, price)
+    legs = _fx_legs(sample, trade_id)
+    assert [(ccy, amount) for _, ccy, amount, _, _ in legs] == [base_leg, quote_leg]
+    assert all(leg_type == "FX_NEAR" and cash == 1 for leg_type, _, _, _, cash in legs)
+    inst = sample.instruments[pair]
+    assert (inst.asset_class, inst.base_ccy, inst.quote_ccy, inst.bbg_ticker, inst.is_ndf) == \
+        ("FX", pair[:3], pair[3:], f"{pair} Curncy", 0)
+
+
+def test_the_spot_trade_is_a_currency_row_naming_both_currencies(sample):
+    (spot,) = [t for t in sample.trades if t.product == "FX_SPOT"]
+    assert (spot.trade_id, spot.instrument_id, spot.quantity, spot.price, spot.trade_date) == \
+        ("910000040", "EURUSD", -150_000.0, 1.169, "2026-09-09")
+    assert _fx_legs(sample, "910000040") == [("FX_NEAR", "EUR", -150_000.0, "2026-09-11", 1),
+                                             ("FX_NEAR", "USD", 175_350.0, "2026-09-11", 1)]
+    assert sample.instruments["CASH-EUR"].asset_class == "CASH"
+
+
+def test_the_fx_options_vanillas_digital_and_closed_out_pair(sample):
+    terms = {k: (o.strike, o.option_type, o.payoff, sample.instruments[k].expiry_date)
+             for k, o in sample.instrument_options.items()}
+    assert terms == {
+        "EURUSD111826C-500041": (1.18, "CALL", "VANILLA", "2026-11-18"),
+        "USDJPY121626P-500042": (142.5, "PUT", "VANILLA", "2026-12-16"),
+        # the digital: the export names neither its strike nor its payoff; both are typed in the app
+        "USDJPY111926P-500043": (0.0, "PUT", "VANILLA", "2026-11-19"),
+        "EURUSD102126P-500044": (1.15, "PUT", "VANILLA", "2026-10-21"),
+        "EURUSD102126P-500045": (1.15, "PUT", "VANILLA", "2026-10-21"),
+    }
+    assert sample.options_missing_strike == ["USDJPY111926P-500043"]
+    opts = {t.trade_id: (t.instrument_id, t.quantity, t.price, t.trade_date)
+            for t in sample.trades if t.product == "FX_OPTION"}
+    assert opts["910000041"] == ("EURUSD111826C-500041", 10_000_000.0, 0.0098, "2026-08-19")
+    # the closed-out pair: the same put bought, then sold back, under two instrument ids
+    assert opts["910000044"] == ("EURUSD102126P-500044", 5_000_000.0, 0.0042, "2026-08-10")
+    assert opts["910000045"] == ("EURUSD102126P-500045", -5_000_000.0, 0.0031, "2026-09-08")
+    legs = {l.trade_id: (l.leg_type, l.ccy, l.amount, l.settles_cash) for l in sample.legs if l.trade_id in opts}
+    assert legs["910000042"] == ("NOTIONAL", "USD", 5_000_000.0, 0) and legs["910000045"][1:3] == ("EUR", -5_000_000.0)
 
 
 def test_sample_loads_into_a_database():
     conn = sqlite3.connect(":memory:")
     res = blotter.load(SAMPLE, conn)
     assert len(res.rejects) == 2
-    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 31
+    assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 43
+    assert conn.execute("SELECT COUNT(*) FROM trade_legs").fetchone()[0] == 52
+    assert conn.execute("SELECT COUNT(*) FROM instrument_options").fetchone()[0] == 5
     row = conn.execute("SELECT base_ccy, quote_ccy, multiplier, bbg_ticker FROM instruments "
                        "WHERE instrument_id = 'CUX26 Comdty'").fetchone()
     assert row == ("SHFE:CU", "CNY", 5.0, "CUX6 Comdty")
 
 
 # --------------------------------------------------------------------------- single rows
-def test_placeholder_root_gets_no_bloomberg_ticker(tmp_csv):
+def test_placeholder_root_gets_no_bloomberg_ticker(tmp_csv, tmp_path, monkeypatch):
+    """A root whose Bloomberg root is still the research app's 'ZZ' placeholder is never given a
+    ticker. Every root of config/contracts.csv carries a best guess since 2026-09-24, so the rule
+    is shown on a copy of the contract list in which SHFE:SS is put back to a placeholder."""
+    import csv
+
+    from data.contracts import universe
+
+    with open(universe.CONTRACTS_CSV, encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert any(r["root_id"] == "SHFE:SS" for r in rows)
+    for r in rows:
+        if r["root_id"] == "SHFE:SS":
+            r["bbg_root"] = "ZZSS"
+    placeholder_csv = tmp_path / "contracts.csv"
+    with open(placeholder_csv, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    monkeypatch.setattr(universe, "CONTRACTS_CSV", placeholder_csv)
+    assert universe.get_root("SHFE:SS").bbg_placeholder
     res = blotter.parse(tmp_csv([_row(Symbol="SS2611", Currency="CNY.C-CNAA", **{"Execution Venue": "SHFE"},
                                       Price="13,250", Description="SHFE STAINLESS SS2611")]))
     assert not res.rejects
@@ -179,26 +280,6 @@ def test_stored_bloomberg_dates_replace_the_estimate(tmp_csv):
     res = blotter.parse(path, conn=conn)
     assert res.instruments["CLZ26 Comdty"].expiry_date == "2026-11-19"
     assert res.legs[0].settle_date == "2026-11-19"
-
-
-# --------------------------------------------------------------------------- equity index path
-def test_es_still_parses_exactly_as_before(tmp_csv):
-    res = blotter.parse(tmp_csv([_row(Symbol="ESU6-USAA", Side="Sell", Quantity="1", Price="7,716.00",
-                                      TradeDate="20/8/2026", Description="S&P500 EMINI FUT  Sep26",
-                                      **{"Execution Venue": ""})]))
-    assert not res.rejects
-    inst = res.instruments["ESU6 Index"]
-    assert (inst.base_ccy, inst.quote_ccy, inst.multiplier, inst.bbg_ticker, inst.expiry_date) == \
-        ("ES", "USD", 50.0, "ESU6 Index", "2026-09-18")
-    (leg,) = res.legs
-    assert (leg.ccy, leg.amount, leg.settle_date) == ("USD", -1 * 50 * 7716.0, "2026-09-18")
-
-
-def test_the_macro_sample_is_unchanged_by_the_book_filter():
-    res = blotter.parse(MACRO_SAMPLE)
-    assert len(res.trades) == 857 and not res.rejects and res.n_skipped_status_or_fund == 0
-    es = [t for t in res.trades if t.product == "FUTURE"]
-    assert len(es) == 11 and {t.instrument_id for t in es} == {"ESU6 Index"}
 
 
 # --------------------------------------------------------------------------- config/book.yaml

@@ -14,4 +14,4 @@ Commodity conversion Phase 1 step 2 (2026-09-24), LIBRARY_VERSION "2026-09-24.1"
 - Rows carry `requestable` / `reason`, computed on read in `rows()` (`_annotate`), never stored. `needed_on` and `needed_in_range` drop unrequestable rows unless `include_unrequestable=True`, so the pull and backfill cannot ask for '' tickers by default. `tickers()`, `mark_inventory` and `close_completeness.not_requestable` include them to show the gap.
   **Why:** hard rule 8 is safest enforced at the source, not in every consumer.
 - `close_completeness` counts only requestable marks in needed/complete. Otherwise a placeholder future would keep every day incomplete and the backfill would go back to it on every press.
-- SET_KINDS (OIS_CURVE, FIXINGS, VOL_SMILE) have '' ticker by design and are always requestable.
+- SET_KINDS (OIS_CURVE, VOL_SMILE; FIXINGS retired 2026-09-24) have '' ticker by design and are always requestable.

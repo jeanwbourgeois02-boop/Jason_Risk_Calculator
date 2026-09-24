@@ -1,5 +1,5 @@
 """Bloomberg's own contract dates (``FUT_LAST_TRADE_DT``, ``FUT_NOTICE_FIRST``), kept in this
-lane's own table, created defensively the way ``engine/rates_vol/`` keeps its tables.
+lane's own table, created defensively (``CREATE TABLE IF NOT EXISTS`` on first use) by this module.
 
 This module never asks Bloomberg for anything: bbg-live fetches the dates on request and
 stores them through ``store_static_dates``. Rows are keyed by the canonical contract id
@@ -43,7 +43,7 @@ def store_static_dates(conn: sqlite3.Connection, rows: Iterable[Mapping]) -> int
 
     Dates may be ``date`` objects or ISO text; a blank or missing ``first_notice_date`` is
     stored as ''. A row without a readable last trade date or a source raises ValueError before
-    anything is written; the rest are committed together (``with conn``, as engine/rates_vol does).
+    anything is written; the rest are committed together in one transaction (``with conn``).
     """
     ensure_static_table(conn)
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()

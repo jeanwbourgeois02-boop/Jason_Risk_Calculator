@@ -1,12 +1,15 @@
-"""engine/options/ tests, owned by options-pricer.
+"""engine/options/ tests, owned by fx-options-pricer (other lanes keep their own
+older tests here).
 
 Phase 0: the vendored library is in place but nothing is wired to the schema
 yet, so those tests only check the vendor copy imports cleanly. Phase 2
 lands FX vanilla/digital pricing + PREMIUM/DELTA marks; Phase 4 lands
 American/Asian/barrier/one-touch/no-touch payoffs plus multi-leg structure
 combination; Phase 5b lands smile-vol resolution; Phase 7 lands real OIS
-rates, calendar-aware year fractions/delta conventions, equity/commodity
-pricing and Position/Portfolio aggregation. Follows test_rates_pricing.py's
+rates, calendar-aware year fractions/delta conventions and Position/Portfolio
+aggregation (its equity / commodity tests left this file on 2026-09-24 with the
+equity index; commodity options are tested in tests/test_listed_options.py).
+Follows test_rates_pricing.py's
 skip-if-QuantLib-absent convention: every test that needs QuantLib is
 marked @needs_quantlib rather than failing outright when it's not
 installed.
@@ -1121,298 +1124,6 @@ def test_delta_pa_not_written_for_raw_convention_pair():
     assert count == 0
 
 
-# --------------------------------------------------------------------------- Phase 7: equity / commodity pricing
-
-def _seed_equity_underlying(conn, as_of=AS_OF, underlying="SPX Index", spot=5500.0, quote_ccy="USD"):
-    conn.execute(
-        "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
-        (underlying, "EQUITY_INDEX", quote_ccy, quote_ccy, 1.0, 0, underlying, "9999-12-31"),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (as_of, underlying, as_of, "SPOT", spot, "BBG_BFXFORWARD", f"{as_of}T17:00:00-04:00"),
-    )
-    _seed_ois_curve(conn, as_of, quote_ccy)
-    conn.commit()
-
-
-def _seed_eq_cmdty_option_trade(
-    conn, trade_id, instrument_id, underlying, asset_class, product, strike, option_type,
-    payoff="VANILLA", barrier_level=0.0, expiry="2026-12-18", quantity=100.0, price=50.0,
-    quote_ccy="USD", multiplier=100.0, package_id=None,
-):
-    conn.execute(
-        "INSERT OR REPLACE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
-        (instrument_id, asset_class, quote_ccy, quote_ccy, multiplier, 0, underlying, expiry),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO instrument_options VALUES (?,?,?,?,?,?)",
-        (instrument_id, strike, option_type, barrier_level, "9999-12-31", payoff),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO trades "
-        "(trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, "
-        "account, counterparty, strategy, trader, description, theme) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (trade_id, "MANUAL", instrument_id, product, package_id or trade_id, AS_OF, quantity, price,
-         "TEST", "TEST", "", "JB", "", ""),
-    )
-    conn.commit()
-    return instrument_id
-
-
-@needs_quantlib
-def test_equity_european_prices_and_stores():
-    from engine.options.equity_commodity import price_and_store_equity, set_dividend_yield
-    from engine.options.inputs import set_manual_vol
-
-    conn = _new_db()
-    _seed_equity_underlying(conn)
-    instrument_id = _seed_eq_cmdty_option_trade(
-        conn, "EQ1", "SPX 5600 Call 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5600.0, "CALL",
-    )
-    set_dividend_yield(conn, AS_OF, "SPX Index", 0.015)
-    set_manual_vol(conn, AS_OF, "SPX Index", "2026-12-18", 0.18)
-
-    outcome = price_and_store_equity(conn, AS_OF, "EQ1")
-    assert outcome.priced, outcome.reason
-    assert outcome.result.premium > 0
-
-    premium_mark = conn.execute(
-        "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'PREMIUM'",
-        (AS_OF, instrument_id),
-    ).fetchone()[0]
-    # PREMIUM mark = pricer's unscaled per-unit price x multiplier (100) --
-    # NOT the FX base-notional-fraction conversion.
-    assert premium_mark == pytest.approx(outcome.result.premium * 100.0)
-
-
-@needs_quantlib
-def test_listed_index_option_greeks_come_from_the_vol_bloombergs_price_implies():
-    """User decision 2026-09-21: an SPX option is marked at Bloomberg's own price of it; the
-    Greeks are the pricer's at the vol that price implies -- no manual vol, no vol surface."""
-    from engine.options.equity_commodity import price_all_and_store_equity, set_dividend_yield
-
-    conn = _new_db()
-    _seed_equity_underlying(conn, spot=7700.0)
-    instrument_id = _seed_eq_cmdty_option_trade(
-        conn, "SPX1", "SPX/E261016P7615", "SPX Index", "EQ_OPTION", "EQ_OPTION", 7615.0, "PUT",
-        expiry="2026-10-16", quantity=15.0, price=121.5,
-    )
-    set_dividend_yield(conn, AS_OF, "SPX Index", 0.0125, source="BBG_BDP")   # what the pull writes
-    conn.execute(
-        "INSERT INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (AS_OF, instrument_id, "2026-10-16", "FUTURE_PX", 140.0, "BBG_BDH", f"{AS_OF}T15:00:00-04:00"),
-    )
-    conn.commit()
-
-    (outcome,) = price_all_and_store_equity(conn, AS_OF)
-    assert outcome.priced, outcome.reason
-    assert outcome.vol_source == "IMPLIED"
-    marks = dict(conn.execute(
-        "SELECT mark_type, value FROM marks_official WHERE as_of_date = ? AND instrument_id = ?", (AS_OF, instrument_id)))
-    assert marks["PREMIUM"] == pytest.approx(140.0 * 100.0, rel=1e-4)   # Bloomberg's price x multiplier, by construction
-    assert -1.0 < marks["DELTA"] < 0.0                                   # a put
-    assert marks["GAMMA"] > 0 and marks["VEGA"] > 0
-
-
-@needs_quantlib
-def test_listed_index_option_with_no_dividend_yield_says_so_and_writes_no_greeks():
-    from engine.options.equity_commodity import price_all_and_store_equity
-
-    conn = _new_db()
-    _seed_equity_underlying(conn, spot=7700.0)
-    instrument_id = _seed_eq_cmdty_option_trade(
-        conn, "SPX1", "SPX/E261016P7615", "SPX Index", "EQ_OPTION", "EQ_OPTION", 7615.0, "PUT",
-        expiry="2026-10-16", quantity=15.0, price=121.5,
-    )
-    conn.execute(
-        "INSERT INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (AS_OF, instrument_id, "2026-10-16", "FUTURE_PX", 140.0, "BBG_BDH", f"{AS_OF}T15:00:00-04:00"),
-    )
-    conn.commit()
-
-    (outcome,) = price_all_and_store_equity(conn, AS_OF)
-    assert not outcome.priced and outcome.reason == "no dividend yield"
-    assert conn.execute("SELECT COUNT(*) FROM marks WHERE mark_type = 'DELTA'").fetchone()[0] == 0
-
-
-@needs_quantlib
-def test_equity_missing_dividend_yield_skips():
-    from engine.options.equity_commodity import price_and_store_equity
-    from engine.options.inputs import set_manual_vol
-
-    conn = _new_db()
-    _seed_equity_underlying(conn)
-    _seed_eq_cmdty_option_trade(
-        conn, "EQ1", "SPX 5600 Call 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5600.0, "CALL",
-    )
-    set_manual_vol(conn, AS_OF, "SPX Index", "2026-12-18", 0.18)
-    # No set_dividend_yield call.
-
-    outcome = price_and_store_equity(conn, AS_OF, "EQ1")
-    assert not outcome.priced
-    assert outcome.reason == "no dividend yield"
-
-
-@needs_quantlib
-def test_commodity_black76_prices_and_stores():
-    from engine.options.equity_commodity import price_and_store_commodity
-    from engine.options.inputs import set_manual_vol
-
-    conn = _new_db()
-    _seed_equity_underlying(conn, underlying="GC1 Comdty", spot=2000.0)  # reused helper: underlying + curve
-    instrument_id = _seed_eq_cmdty_option_trade(
-        conn, "CM1", "GC 2050 Call 2026-12-18", "GC1 Comdty", "CMDTY_OPTION", "CMDTY_OPTION",
-        2050.0, "CALL", quantity=10.0, price=30.0,
-    )
-    set_manual_vol(conn, AS_OF, "GC1 Comdty", "2026-12-18", 0.20)
-
-    outcome = price_and_store_commodity(conn, AS_OF, "CM1")
-    assert outcome.priced, outcome.reason
-    assert outcome.result.premium > 0
-
-    premium_mark = conn.execute(
-        "SELECT value FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND mark_type = 'PREMIUM'",
-        (AS_OF, instrument_id),
-    ).fetchone()[0]
-    assert premium_mark == pytest.approx(outcome.result.premium * 100.0)
-
-
-@needs_quantlib
-def test_commodity_unsupported_payoff_skipped_not_approximated():
-    """No barrier/digital/one-touch commodity pricer exists upstream
-    (MODELS.md's own documented gap) -- a BARRIER_KO instrument_options row
-    is skipped, never silently priced some other way."""
-    from engine.options.equity_commodity import price_and_store_commodity
-    from engine.options.inputs import set_manual_vol
-
-    conn = _new_db()
-    _seed_equity_underlying(conn, underlying="GC1 Comdty", spot=2000.0)
-    _seed_eq_cmdty_option_trade(
-        conn, "CM1", "GC 2050 KO 2026-12-18", "GC1 Comdty", "CMDTY_OPTION", "CMDTY_OPTION",
-        2050.0, "CALL", payoff="BARRIER_KO", barrier_level=2200.0,
-    )
-    set_manual_vol(conn, AS_OF, "GC1 Comdty", "2026-12-18", 0.20)
-
-    outcome = price_and_store_commodity(conn, AS_OF, "CM1")
-    assert not outcome.priced
-    assert "not supported" in outcome.reason
-
-
-@needs_quantlib
-def test_vol_surface_points_round_trip():
-    from engine.options.equity_commodity import write_vol_surface_points, _build_vol_surface
-
-    conn = _new_db()
-    points = [
-        (30, 5400, 0.16), (30, 5600, 0.14),
-        (90, 5400, 0.17), (90, 5600, 0.15),
-    ]
-    write_vol_surface_points(conn, AS_OF, "SPX Index", points)
-
-    surface = _build_vol_surface(conn, AS_OF, "SPX Index")
-    assert surface is not None
-    assert surface.get_vol(5400, 30 / 365.0) == pytest.approx(0.16)
-    assert surface.get_vol(5600, 90 / 365.0) == pytest.approx(0.15)
-
-
-@needs_quantlib
-def test_price_all_and_store_equity_isolates_one_trades_pricer_exception(monkeypatch):
-    """2026-09-22, the Bloomberg PC's pull: the USD SOFR bootstrap did not converge, the
-    SPX options' rate resolution raised, and because the equity loop had no per-trade
-    guard the RuntimeError escaped to live._options_step and the FX loop's outcomes were
-    thrown away with it. Now: one trade's failure is that trade's own skip, the other
-    outcome comes back untouched -- the FX loop's guard, mirrored."""
-    from engine.options import equity_commodity as ec
-    from engine.options.equity_commodity import price_all_and_store_equity, set_dividend_yield
-    from engine.options.inputs import set_manual_vol
-
-    conn = _new_db()
-    _seed_equity_underlying(conn)
-    _seed_eq_cmdty_option_trade(
-        conn, "EQ1", "SPX 5600 Call 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5600.0, "CALL",
-    )
-    _seed_eq_cmdty_option_trade(
-        conn, "EQ2", "SPX 5400 Put 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5400.0, "PUT",
-    )
-    set_dividend_yield(conn, AS_OF, "SPX Index", 0.015)
-    set_manual_vol(conn, AS_OF, "SPX Index", "2026-12-18", 0.18)
-    real = ec._price_eq_cmdty_row
-
-    def exploding(conn_, as_of, row, asset_kind, curve_cache=None):
-        if row["trade_id"] == "EQ1":
-            raise RuntimeError("convergence not reached after 99 iterations")
-        return real(conn_, as_of, row, asset_kind, curve_cache)
-
-    monkeypatch.setattr(ec, "_price_eq_cmdty_row", exploding)
-    outcomes = {o.trade_id: o for o in price_all_and_store_equity(conn, AS_OF)}
-    assert set(outcomes) == {"EQ1", "EQ2"}
-    assert not outcomes["EQ1"].priced
-    assert outcomes["EQ1"].reason.startswith("pricer error: RuntimeError")
-    assert "convergence not reached" in outcomes["EQ1"].reason
-    assert outcomes["EQ1"].instrument_id == "SPX 5600 Call 2026-12-18"
-    assert outcomes["EQ2"].priced, outcomes["EQ2"].reason
-    assert outcomes["EQ2"].result.premium > 0
-
-
-@needs_quantlib
-def test_price_all_and_store_commodity_isolates_one_trades_pricer_exception(monkeypatch):
-    """The commodity loop carries the same guard as the equity one."""
-    from engine.options import equity_commodity as ec
-    from engine.options.equity_commodity import price_all_and_store_commodity
-    from engine.options.inputs import set_manual_vol
-
-    conn = _new_db()
-    _seed_equity_underlying(conn, underlying="GC1 Comdty", spot=2400.0)
-    _seed_eq_cmdty_option_trade(
-        conn, "CM1", "GC 2500 Call 2026-12-18", "GC1 Comdty", "CMDTY_OPTION", "CMDTY_OPTION", 2500.0, "CALL",
-    )
-    _seed_eq_cmdty_option_trade(
-        conn, "CM2", "GC 2300 Put 2026-12-18", "GC1 Comdty", "CMDTY_OPTION", "CMDTY_OPTION", 2300.0, "PUT",
-    )
-    set_manual_vol(conn, AS_OF, "GC1 Comdty", "2026-12-18", 0.16)
-    real = ec._price_eq_cmdty_row
-
-    def exploding(conn_, as_of, row, asset_kind, curve_cache=None):
-        if row["trade_id"] == "CM2":
-            raise RuntimeError("boom")
-        return real(conn_, as_of, row, asset_kind, curve_cache)
-
-    monkeypatch.setattr(ec, "_price_eq_cmdty_row", exploding)
-    outcomes = {o.trade_id: o for o in price_all_and_store_commodity(conn, AS_OF)}
-    assert set(outcomes) == {"CM1", "CM2"}
-    assert outcomes["CM1"].priced, outcomes["CM1"].reason
-    assert not outcomes["CM2"].priced and outcomes["CM2"].reason.startswith("pricer error: RuntimeError")
-
-
-@needs_quantlib
-def test_price_all_and_store_equity_reports_an_unreadable_trade_as_an_outcome(monkeypatch):
-    """A row the reader returns None for (or raises on) is an outcome with its reason,
-    never an exception out of the loop."""
-    from engine.options import equity_commodity as ec
-
-    conn = _new_db()
-    _seed_equity_underlying(conn)
-    _seed_eq_cmdty_option_trade(
-        conn, "EQ1", "SPX 5600 Call 2026-12-18", "SPX Index", "EQ_OPTION", "EQ_OPTION", 5600.0, "CALL",
-    )
-    monkeypatch.setattr(ec, "_read_eq_cmdty_trade", lambda conn_, tid: None)
-    (outcome,) = ec.price_all_and_store_equity(conn, AS_OF)
-    assert outcome.trade_id == "EQ1" and not outcome.priced and "could not be read" in outcome.reason
-
-    def unreadable(conn_, tid):
-        raise sqlite3.OperationalError("database is locked")
-
-    monkeypatch.setattr(ec, "_read_eq_cmdty_trade", unreadable)
-    (outcome,) = ec.price_all_and_store_equity(conn, AS_OF)
-    assert outcome.trade_id == "EQ1" and not outcome.priced
-    assert outcome.reason.startswith("pricer error: OperationalError")
-
-
 # --------------------------------------------------------------------------- 2026-09-22: bootstrap_note provenance
 
 @needs_quantlib
@@ -1521,50 +1232,73 @@ def test_price_all_and_store_isolates_one_trades_pricer_exception(monkeypatch):
 # --------------------------------------------------------------------------- 2026-09-18 units audit
 #
 # The book's P&L line is quantity x (PREMIUM_mark - premium_fill) x S, which is only right
-# if the PREMIUM mark is in the blotter fill's own unit. From the reference export
+# if the PREMIUM mark is in the blotter fill's own unit. From the export
 # (columns Side / Quantity / Price / Currency / NetInvoice):
 #   vanillas  Quantity = BASE notional, Price = premium per 1 unit of it, invoiced in the
-#             BASE currency (EURSEK 35,000,000 @ 0.00579 -> EUR 202,650).
+#             BASE currency (EURUSD111826C 10,000,000 @ 0.0098 -> EUR 98,000).
 #   digitals  Quantity = PAYOUT notional, Price = a fraction of that payout, invoiced in
 #             the BASE currency (USDJPY111926P 2,000,000 @ 0.124 -> USD 248,000).
 # PAYOUT CURRENCY ASSUMPTION for a digital (and a touch), stated once for every test
 # below: the payout is `trades.quantity` units of the pair's BASE currency
-# (store.CASH_PAYOUT_CCY = 'BASE') -- USD for USDJPY, EUR for EURSEK. The export has no
-# payout-currency column; this follows from the invoice currency and from a premium that
-# size being impossible against a payout of the same number of JPY or SEK. CONFIRMED BY
-# THE USER 2026-09-18: USD on the USDJPY digitals, EUR on the EURSEK one.
-
-SAMPLE_CSV = Path(__file__).resolve().parent.parent / "data" / "raw" / "new_sample_trades.csv"
-AUDIT_AS_OF = "2026-09-15"  # a week before the four 22/23 September expiries
-# The dev DB has no marks: a synthetic but plausible market. Spot sits on the ATM
-# straddles' strikes (EURSEK 11.0584, EURUSD 1.1698); vols are ordinary for each pair.
-AUDIT_SPOT = {"EURSEK": 11.06, "EURUSD": 1.17, "USDJPY": 150.0}
-AUDIT_VOL = {"EURSEK": 0.055, "EURUSD": 0.065, "USDJPY": 0.10}
-AUDIT_SEK_RATE = 0.021  # SEK has no OIS convention in this codebase -> manual_rates
-# Strikes the blotter export does not carry (the old Excel book had them).
+# (store.CASH_PAYOUT_CCY = 'BASE') -- USD for USDJPY, EUR for EURUSD / EURSEK. The export
+# has no payout-currency column; this follows from the invoice currency and from a premium
+# that size being impossible against a payout of the same number of JPY. CONFIRMED BY THE
+# USER 2026-09-18: USD on the USDJPY digitals, EUR on the EURSEK one.
+#
+# The book: the five FX options of the synthetic sample blotter, data/sample/blotter_sample.csv
+# (2026-09-24: the macro trader's reference export left the app, CLAUDE.md "Commodity
+# conversion plan", Phase 2), seeded inline in the shape data/ingest/blotter.py writes an
+# option (FX_OPTION instrument keyed by the Symbol, its instrument_options row, the trade,
+# one NOTIONAL leg in the base currency from trade date to expiry, settles_cash 0), so these
+# tests stand on this lane's code alone. The sample's dates are day first (19/8/2026).
+SAMPLE_OPTIONS = {  # instrument_id: (trade_id, trade_date, pair, expiry, strike, call/put, signed quantity, fill, NetInvoice)
+    "EURUSD111826C-500041": ("910000041", "2026-08-19", "EURUSD", "2026-11-18", 1.18, "CALL", 10_000_000.0, 0.0098, 98_000.0),
+    "USDJPY121626P-500042": ("910000042", "2026-09-01", "USDJPY", "2026-12-16", 142.5, "PUT", 5_000_000.0, 0.0115, 57_500.0),
+    # A digital the export does not mark as one: no strike in its Description, FxOption Type '0'.
+    "USDJPY111926P-500043": ("910000043", "2026-08-26", "USDJPY", "2026-11-19", 0.0, "PUT", 2_000_000.0, 0.124, 248_000.0),
+    # Bought, then sold back in full: a closed-out group from 2026-09-08 (CLAUDE.md "A closed-out option is not live").
+    "EURUSD102126P-500044": ("910000044", "2026-08-10", "EURUSD", "2026-10-21", 1.15, "PUT", 5_000_000.0, 0.0042, 21_000.0),
+    "EURUSD102126P-500045": ("910000045", "2026-09-08", "EURUSD", "2026-10-21", 1.15, "PUT", -5_000_000.0, 0.0031, 15_500.0),
+}
+SAMPLE_CLOSED_OUT = {"EURUSD102126P-500044", "EURUSD102126P-500045"}
+SAMPLE_CLOSED_ON = "2026-09-08"   # the sell-back's trade date
+AUDIT_AS_OF = "2026-09-15"  # after the close-out, five weeks before the first expiry
+# A synthetic but plausible market. Spot sits near the strikes; vols are ordinary for each pair.
+AUDIT_SPOT = {"EURUSD": 1.17, "USDJPY": 145.0}
+AUDIT_VOL = {"EURUSD": 0.065, "USDJPY": 0.10}
+# The strike the export does not carry, typed once on the app (the digital's terms).
 SAMPLE_DIGITAL_TERMS = {
-    "USDJPY111926P-197571137": (152.0, "PUT"),
-    "USDJPY111926P-197957397": (152.0, "PUT"),
-    "EURSEK112526C-197906813": (11.4, "CALL"),
+    "USDJPY111926P-500043": (152.0, "PUT"),
 }
 
 
-def _sample_book(tmp_path):
-    """The reference blotter, imported the way the app imports it (upload path), into a
-    throwaway database. Skips when data/raw/ (gitignored) is not in this checkout."""
-    if not SAMPLE_CSV.exists():
-        pytest.skip("reference blotter CSV not present in this checkout")
-    from data.ingest.schema import connect
-    from data.ingest.upload import import_blotter
+def _sample_book(tmp_path=None):
+    """The sample blotter's five FX options, in a throwaway database (see the section note)."""
+    conn = _new_db()
+    for instrument_id, (trade_id, trade_date, pair, expiry, strike, option_type, quantity, fill, _) in \
+            SAMPLE_OPTIONS.items():
+        conn.execute(
+            "INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+            "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
+            (instrument_id, "FX_OPTION", pair[:3], pair[3:], 1.0, 0, instrument_id, expiry))
+        conn.execute(
+            "INSERT INTO instrument_options (instrument_id, strike, option_type, barrier_level, avg_start_date, "
+            "payoff) VALUES (?,?,?,?,?,?)", (instrument_id, strike, option_type, 0.0, "9999-12-31", "VANILLA"))
+        conn.execute(
+            "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, "
+            "account, counterparty, strategy, trader, description, theme) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (trade_id, "XLSX", instrument_id, "FX_OPTION", trade_id, trade_date, quantity, fill,
+             "PB-FX-NMMF", "CPTY-C", "", "JB", "", ""))
+        conn.execute(
+            "INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, rate, "
+            "settles_cash) VALUES (?,?,?,?,?,?,?,?,?)",
+            (trade_id, 1, "NOTIONAL", pair[:3], quantity, trade_date, expiry, fill, 0))
+    conn.commit()
+    return conn
 
-    db_path = tmp_path / "options_audit.db"
-    import_blotter(SAMPLE_CSV.read_bytes(), SAMPLE_CSV.name, db_path)
-    return connect(db_path)
 
-
-def _seed_audit_market(conn, as_of=AUDIT_AS_OF, spot=True, vol=True, sek_rate=True):
+def _seed_audit_market(conn, as_of=AUDIT_AS_OF, spot=True, vol=True):
     from engine.options.inputs import FLAT_TENOR, set_manual_vol
-    from engine.options.rates import set_manual_rate
 
     for pair in AUDIT_SPOT:
         conn.execute(
@@ -1581,8 +1315,6 @@ def _seed_audit_market(conn, as_of=AUDIT_AS_OF, spot=True, vol=True, sek_rate=Tr
         _seed_ois_curves_for_pair(conn, as_of, pair)
         if vol:
             set_manual_vol(conn, as_of, pair, FLAT_TENOR, AUDIT_VOL[pair])
-    if sek_rate:
-        set_manual_rate(conn, as_of, "SEK", AUDIT_SEK_RATE)
     conn.commit()
 
 
@@ -1616,12 +1348,11 @@ def _base_payout_digital_closed_form(S, K, T, domestic_rate, foreign_rate, vol, 
 
 @needs_quantlib
 def test_sample_vanilla_premium_marks_are_in_the_blotter_fill_unit(tmp_path):
-    """Task 1. With spot on the strike, an ordinary vol and a week to expiry, the model
-    premium of each of the book's five vanillas lands within a small multiple of its fill
-    (time decay since a 33-day-old ATM fill accounts for ~half) -- which a pips-vs-
-    fraction or a base-vs-quote unit error (x11 on EURSEK, x10,000 for pips) cannot do.
-    The exact unit statement follows: PREMIUM x spot is the vendored Garman-Kohlhagen
-    price (quote ccy per 1 base unit), for the EURSEK cross and for EURUSD alike."""
+    """Task 1. With spot near the strike and an ordinary vol, the model premium of each of
+    the book's four struck vanillas lands within a small multiple of its fill -- which a
+    pips-vs-fraction or a base-vs-quote unit error (x145 on USDJPY, x10,000 for pips)
+    cannot do. The exact unit statement follows: PREMIUM x spot is the vendored
+    Garman-Kohlhagen price (quote ccy per 1 base unit), for EURUSD and USDJPY alike."""
     from engine.options.inputs import resolve_market_inputs
     from engine.options.store import price_and_store
     from engine.options.vendor.options_calc.fx import european
@@ -1629,8 +1360,8 @@ def test_sample_vanilla_premium_marks_are_in_the_blotter_fill_unit(tmp_path):
     conn = _sample_book(tmp_path)
     _seed_audit_market(conn)
     vanillas = [r for r in _sample_option_trades(conn) if r[6] > 0]
-    assert len(vanillas) == 5
-    assert {r[4] for r in vanillas} == {"EURSEK", "EURUSD"}
+    assert len(vanillas) == 4
+    assert {r[4] for r in vanillas} == {"EURUSD", "USDJPY"}
 
     as_of_date = datetime.date.fromisoformat(AUDIT_AS_OF)
     for trade_id, instrument_id, quantity, fill, pair, expiry, strike, option_type, payoff in vanillas:
@@ -1651,24 +1382,20 @@ def test_sample_vanilla_premium_marks_are_in_the_blotter_fill_unit(tmp_path):
                                   cut_vol, option_type.lower())
         assert premium * inputs.spot == pytest.approx(vendored["price"], rel=1e-12)
 
-        # The book's own arithmetic, in the BASE currency (EUR for all five): starting cost
-        # = quantity x fill (NetInvoice), value = quantity x PREMIUM, P&L = the difference.
+        # The book's own arithmetic, in the BASE currency (EUR on EURUSD, USD on USDJPY):
+        # starting cost = quantity x fill (the row's NetInvoice), value = quantity x PREMIUM,
+        # P&L = the difference. A sold option is a liability.
         cost, value = quantity * fill, quantity * premium
-        assert abs(cost) == pytest.approx(35_000_000 * fill)
-        if quantity < 0:  # the sold EURSEK put: premium received, decay is a gain
-            assert cost < 0 and (value - cost) > 0
-        else:
-            assert cost > 0 and (value - cost) < 0
+        assert abs(cost) == pytest.approx(SAMPLE_OPTIONS[instrument_id][8])
+        assert (cost > 0) == (value > 0) == (quantity > 0)
 
 
 @needs_quantlib
 def test_sample_digitals_price_as_a_fraction_of_a_base_currency_payout(tmp_path):
     """Task 1, digitals. PAYOUT CURRENCY ASSUMPTION (section comment above): BASE currency
-    -- USD 2,000,000 / USD 1,000,000 on the USDJPY 152 puts, EUR 1,000,000 on the EURSEK
-    11.4 call. PREMIUM is then a fraction of that payout, in (0, base-ccy discount
-    factor), equal to exp(-r_f T) N(+-d1) -- the same unit as the fills 0.124 / 0.1425 /
-    0.121. Before the audit the mark was exp(-r_d T) N(+-d2) / spot: 1/150 of this for
-    USDJPY, 1/11 for EURSEK."""
+    -- USD 2,000,000 on the USDJPY 152 put. PREMIUM is then a fraction of that payout, in
+    (0, base-ccy discount factor), equal to exp(-r_f T) N(+-d1) -- the same unit as the
+    fill 0.124. Before the audit the mark was exp(-r_d T) N(+-d2) / spot: 1/145 of this."""
     import math
 
     from engine.options.inputs import resolve_market_inputs
@@ -1850,15 +1577,15 @@ def test_payoff_dispatch_digital_reaches_price_fx_digital_vanilla_reaches_price_
 
 
 def test_sample_digitals_arrive_as_vanilla_with_no_strike_and_are_skipped_not_priced(tmp_path):
-    """Task 2: the blotter marks none of its three digitals as digital (`FxOption Type`
-    is '0' on every option row; no payoff word in the Description), so they land as
-    payoff VANILLA, strike 0 -- and with every market input on file they are still
-    SKIPPED "no strike", never priced at strike 0 or at spot.
+    """Task 2: the export does not mark its digital as digital (`FxOption Type` is '0';
+    no payoff word or strike in the Description), so it lands as payoff VANILLA, strike
+    0 -- and with every market input on file it is still SKIPPED "no strike", never
+    priced at strike 0 or at spot.
 
-    The 8 sample options split 3 / 3 / 2: 3 priced, the 3 digitals skipped "no strike",
-    and the 2 EURSEK 11.0584 puts (bought 197728105, sold back in full 197838147) a
-    closed-out group since 2026-09-22 (CLAUDE.md, "A closed-out option is not live"):
-    not priced, ``closed_out=True``, under their own head and never among the skips."""
+    The 5 sample options split 2 / 1 / 2: 2 priced, the digital skipped "no strike",
+    and the 2 EURUSD 1.15 puts (bought 910000044, sold back in full 910000045) a
+    closed-out group (CLAUDE.md, "A closed-out option is not live"): not priced,
+    ``closed_out=True``, under their own head and never among the skips."""
     if not HAVE_QUANTLIB:
         pytest.skip("QuantLib not installed")
     from engine.options.store import price_all_and_store
@@ -1870,20 +1597,19 @@ def test_sample_digitals_arrive_as_vanilla_with_no_strike_and_are_skipped_not_pr
         assert on_file[instrument_id] == (0.0, "VANILLA")
 
     outcomes = {o.instrument_id: o for o in price_all_and_store(conn, AUDIT_AS_OF)}
-    assert len(outcomes) == 8
+    assert len(outcomes) == 5
     for instrument_id in SAMPLE_DIGITAL_TERMS:
         assert not outcomes[instrument_id].priced
         assert not outcomes[instrument_id].closed_out
         assert outcomes[instrument_id].reason.startswith("no strike")
         assert conn.execute("SELECT COUNT(*) FROM marks WHERE instrument_id = ?", (instrument_id,)).fetchone()[0] == 0
-    closed_out_puts = {"EURSEK092326P-197728105", "EURSEK092326P-197838147"}
-    assert {i for i, o in outcomes.items() if o.closed_out} == closed_out_puts
-    for instrument_id in closed_out_puts:
+    assert {i for i, o in outcomes.items() if o.closed_out} == SAMPLE_CLOSED_OUT
+    for instrument_id in SAMPLE_CLOSED_OUT:
         assert not outcomes[instrument_id].priced
-        assert outcomes[instrument_id].reason.startswith("closed out 2026-08-24:")
+        assert outcomes[instrument_id].reason.startswith(f"closed out {SAMPLE_CLOSED_ON}:")
         assert conn.execute("SELECT COUNT(*) FROM marks WHERE instrument_id = ?", (instrument_id,)).fetchone()[0] == 0
     assert {i for i, o in outcomes.items() if not o.priced and not o.closed_out} == set(SAMPLE_DIGITAL_TERMS)
-    assert sum(1 for o in outcomes.values() if o.priced) == 3
+    assert {i for i, o in outcomes.items() if o.priced} == {"EURUSD111826C-500041", "USDJPY121626P-500042"}
 
 
 @needs_quantlib
@@ -1925,20 +1651,19 @@ def test_set_option_terms_default_payoff_is_vanilla_and_misprices_a_digital_sile
 def test_strike_cell_sequence_on_the_sample_book_and_skip_reasons_name_the_missing_input(tmp_path):
     """Task 4: the UI's editable strike cell calls `set_option_terms(conn, instrument_id,
     strike, option_type, ...)` then `price_and_store(conn, as_of, trade_id)`. End to end
-    on the imported sample for the USDJPY 152 digital put, and every way it can still be
-    skipped comes back as a `reason` naming the one missing input."""
-    from engine.options.rates import set_manual_rate
+    on the sample book for the USDJPY 152 digital put, and every way it can still be
+    skipped comes back as a `reason` naming the one missing input (a currency with no
+    rate at all: test_no_curve_skip_reason_for_currency_without_ois_convention)."""
     from engine.options.inputs import FLAT_TENOR, set_manual_vol
     from engine.options.store import price_and_store, set_option_terms
 
     conn = _sample_book(tmp_path)
-    _seed_audit_market(conn, spot=False, vol=False, sek_rate=False)  # curves only
+    _seed_audit_market(conn, spot=False, vol=False)  # curves only
     trades = {r[1]: r[0] for r in _sample_option_trades(conn)}
-    usdjpy, eursek = "USDJPY111926P-197957397", "EURSEK112526C-197906813"
+    usdjpy = "USDJPY111926P-500043"
 
     assert price_and_store(conn, AUDIT_AS_OF, trades[usdjpy]).reason.startswith("no strike")
     set_option_terms(conn, usdjpy, 152.0, "PUT", "DIGITAL")
-    set_option_terms(conn, eursek, 11.4, "CALL", "DIGITAL")
 
     def mark_spot(pair):
         conn.execute(
@@ -1961,13 +1686,6 @@ def test_strike_cell_sequence_on_the_sample_book_and_skip_reasons_name_the_missi
     assert 0.0 < _official_mark(conn, AUDIT_AS_OF, usdjpy, "PREMIUM") < 1.0
     for greek in ("DELTA", "GAMMA", "THETA", "VEGA", "RHO"):
         assert _official_mark(conn, AUDIT_AS_OF, usdjpy, greek) is not None
-
-    # EURSEK: SEK has no OIS curve, no manual rate and no forward to imply one from.
-    mark_spot("EURSEK")
-    set_manual_vol(conn, AUDIT_AS_OF, "EURSEK", FLAT_TENOR, AUDIT_VOL["EURSEK"])
-    assert price_and_store(conn, AUDIT_AS_OF, trades[eursek]).reason == "no curve/rate SEK"
-    set_manual_rate(conn, AUDIT_AS_OF, "SEK", AUDIT_SEK_RATE)
-    assert price_and_store(conn, AUDIT_AS_OF, trades[eursek]).priced
 
     with pytest.raises(ValueError):
         price_and_store(conn, AUDIT_AS_OF, "no-such-trade")
@@ -2320,16 +2038,16 @@ def test_expired_option_is_frozen_again_from_the_corrected_premium_end_to_end():
 # On its expiry date an option is marked at its PAYOFF at the pair's official SPOT for
 # that date -- same unit as every other PREMIUM -- so the ledger, which freezes an option
 # the day AFTER expiry at the last official PREMIUM on or before expiry, freezes the
-# payoff and not a T-1 model premium. Five real tickets expire Tue 22 and Wed 23 Sep 2026.
+# payoff and not a T-1 model premium. The sample book's four struck tickets (the digital
+# has no strike on file) expire 21 Oct, 18 Nov and 16 Dec 2026.
 
-SEPT_TICKETS = {  # instrument_id: (pair, expiry, strike, call/put, signed quantity, fill)
-    "EURUSD092226P-197728065": ("EURUSD", "2026-09-22", 1.1698, "PUT", 35_000_000.0, 0.00652),
-    "EURUSD092226C-197728066": ("EURUSD", "2026-09-22", 1.1698, "CALL", 35_000_000.0, 0.00669),
-    "EURSEK092326C-197727826": ("EURSEK", "2026-09-23", 11.0584, "CALL", 35_000_000.0, 0.00579),
-    "EURSEK092326P-197728105": ("EURSEK", "2026-09-23", 11.0584, "PUT", 35_000_000.0, 0.0057),
-    "EURSEK092326P-197838147": ("EURSEK", "2026-09-23", 11.0584, "PUT", -35_000_000.0, 0.005645),  # the SOLD put
+STRUCK_TICKETS = {  # instrument_id: (pair, expiry, strike, call/put, signed quantity, fill)
+    instrument_id: (pair, expiry, strike, option_type, quantity, fill)
+    for instrument_id, (_, _, pair, expiry, strike, option_type, quantity, fill, _) in SAMPLE_OPTIONS.items()
+    if strike > 0
 }
-EXPIRY_SPOTS = {"above": {"EURUSD": 1.1800, "EURSEK": 11.20}, "below": {"EURUSD": 1.1600, "EURSEK": 10.95}}
+SOLD_PUT = "EURUSD102126P-500045"
+EXPIRY_SPOTS = {"above": {"EURUSD": 1.2000, "USDJPY": 147.0}, "below": {"EURUSD": 1.1300, "USDJPY": 140.0}}
 ZERO_GREEKS = ("GAMMA", "THETA", "VEGA", "RHO")
 
 
@@ -2359,16 +2077,16 @@ def _payoff_fraction(option_type, S, K):
 
 @needs_quantlib
 @pytest.mark.parametrize("where", ["above", "below"])
-def test_expiry_day_mark_is_the_payoff_for_each_of_the_five_september_tickets(tmp_path, where):
-    """The five real tickets, spot above and below the strike. PREMIUM is the
-    hand-computed payoff as a fraction of base notional (EUR), and quantity x PREMIUM x S
-    is (S-K) x notional in the QUOTE currency. There is no vol and no curve anywhere in
+def test_expiry_day_mark_is_the_payoff_for_each_of_the_sample_books_struck_tickets(tmp_path, where):
+    """The four struck tickets, spot above and below the strike. PREMIUM is the
+    hand-computed payoff as a fraction of base notional (EUR / USD), and quantity x
+    PREMIUM x S is (S-K) x notional in the QUOTE currency. There is no vol and no curve anywhere in
     this database: nothing but the day's SPOT is needed, and no model is involved."""
     from engine.options.store import price_and_store
 
     conn = _sample_book(tmp_path)
     trades = {r[1]: r for r in _sample_option_trades(conn)}
-    for instrument_id, (pair, expiry, strike, option_type, quantity, fill) in SEPT_TICKETS.items():
+    for instrument_id, (pair, expiry, strike, option_type, quantity, fill) in STRUCK_TICKETS.items():
         trade_id, _, qty_on_file, fill_on_file, pair_on_file, expiry_on_file, strike_on_file, type_on_file, _ = trades[instrument_id]
         assert (qty_on_file, fill_on_file, pair_on_file, expiry_on_file, strike_on_file, type_on_file) == \
                (quantity, fill, pair, expiry, strike, option_type)
@@ -2389,7 +2107,7 @@ def test_expiry_day_mark_is_the_payoff_for_each_of_the_five_september_tickets(tm
         assert _official_mark(conn, expiry, instrument_id, "PREMIUM") == today["PREMIUM"]
         intrinsic_quote_ccy = (S - strike) if option_type == "CALL" else (strike - S)
         expected_value = quantity * intrinsic_quote_ccy if in_the_money else 0.0
-        assert quantity * today["PREMIUM"] * S == pytest.approx(expected_value, abs=1e-3)  # USD / SEK
+        assert quantity * today["PREMIUM"] * S == pytest.approx(expected_value, abs=1e-3)  # USD / JPY
 
         assert today["DELTA"] == ((1.0 if option_type == "CALL" else -1.0) if in_the_money else 0.0)
         for greek in ZERO_GREEKS:
@@ -2399,17 +2117,17 @@ def test_expiry_day_mark_is_the_payoff_for_each_of_the_five_september_tickets(tm
         else:
             assert "DELTA_PA" not in today
 
-        # The book's line, base ccy (EUR): quantity x (PREMIUM - fill). The SOLD put keeps
-        # its whole premium when it dies out of the money and owes the payoff when not.
-        pnl_eur = quantity * (today["PREMIUM"] - fill)
-        if instrument_id == "EURSEK092326P-197838147":
+        # The book's line, base ccy: quantity x (PREMIUM - fill). The SOLD put keeps its
+        # whole premium when it dies out of the money and owes the payoff when not.
+        pnl_base = quantity * (today["PREMIUM"] - fill)
+        if instrument_id == SOLD_PUT:
             assert quantity < 0 and quantity * today["PREMIUM"] <= 0.0
-            if where == "above":   # out of the money: +EUR 197,575, the premium received
-                assert pnl_eur == pytest.approx(35_000_000 * 0.005645)
+            if where == "above":   # out of the money: +EUR 15,500, the premium received
+                assert pnl_base == pytest.approx(5_000_000 * 0.0031)
             else:                  # in the money: premium received minus the payoff owed
-                assert pnl_eur == pytest.approx(35_000_000 * 0.005645 - 35_000_000 * (strike - S) / S)
+                assert pnl_base == pytest.approx(5_000_000 * 0.0031 - 5_000_000 * (strike - S) / S)
         elif not in_the_money:
-            assert pnl_eur == pytest.approx(-quantity * fill)  # a bought option that dies worthless loses its premium
+            assert pnl_base == pytest.approx(-quantity * fill)  # a bought option that dies worthless loses its premium
 
 
 @needs_quantlib
@@ -2614,72 +2332,51 @@ def test_catch_up_writes_the_expiry_mark_once_only_with_a_spot_and_clears_a_stal
 
 
 @needs_quantlib
-def test_expiry_week_end_to_end_the_five_tickets_freeze_at_their_intrinsic_in_dollars(tmp_path):
-    """The week as it will run, on the real book, engine/pnl/ledger.py READ-ONLY.
-    Tue 22 Sep: the EURUSD straddle is marked at its payoff; the ledger does NOT freeze it
-    that day (spot is still moving). Wed 23 Sep: it is frozen at Tuesday's intrinsic, in
-    dollars at Tuesday's EURUSD; the EURSEK call is marked at its payoff, while the two
-    EURSEK puts (bought and sold back in full on 2026-08-24) are a closed-out group and
-    the bulk pass does not price them (since 2026-09-22, CLAUDE.md "A closed-out option
-    is not live"): ``closed_out=True``, no mark. Thu 24 Sep: the call is frozen, EUR P&L
-    brought back to dollars at Wednesday's EURUSD; the puts at their closing fill."""
+def test_expiry_week_end_to_end_the_sample_tickets_freeze_at_their_intrinsic_in_dollars(tmp_path):
+    """The EURUSD call's expiry week on the sample book, engine/pnl/ledger.py READ-ONLY.
+    Wed 18 Nov: the call is marked at its payoff; the ledger does NOT freeze it that day
+    (spot is still moving). The two EURUSD 1.15 puts (bought, then sold back in full on
+    2026-09-08) are a closed-out group: the bulk pass does not price them (CLAUDE.md "A
+    closed-out option is not live"), and having expired on 21 Oct they are already frozen
+    at their closing fill, in dollars at the close-out date's EURUSD. Thu 19 Nov: the call
+    is frozen at Wednesday's intrinsic, EUR P&L brought back to dollars at Wednesday's
+    EURUSD."""
     from engine.options.store import price_all_and_store
     from engine.pnl.ledger import realise_settled
 
     conn = _sample_book(tmp_path)
     ids = {r[1]: r[0] for r in _sample_option_trades(conn)}
-    tue, wed, thu = "2026-09-22", "2026-09-23", "2026-09-24"
+    call = "EURUSD111826C-500041"
+    wed, thu = "2026-11-18", "2026-11-19"
 
     def frozen(instrument_id):
         return conn.execute("SELECT pnl_usd, spot_as_of_date, mark_type, spot_source, note FROM realised_pnl "
                             "WHERE trade_id = ?", (ids[instrument_id],)).fetchone()
 
-    eurusd_tue, eurusd_wed, eursek_wed = 1.1800, 1.1750, 10.95
-    closed_on, eurusd_closed = "2026-08-24", 1.1600   # the EURSEK put's sell-back date and that day's EURUSD
-    _mark_spot(conn, closed_on, "EURUSD", eurusd_closed)
-    _mark_spot(conn, tue, "EURUSD", eurusd_tue)
-    priced = {o.instrument_id for o in price_all_and_store(conn, tue) if o.priced}
-    assert priced == {"EURUSD092226P-197728065", "EURUSD092226C-197728066"}
-    realise_settled(conn, tue)
-    assert all(frozen(i) is None for i in SEPT_TICKETS)  # expiry day is not over: nothing frozen
-
+    eurusd_wed, eurusd_closed = 1.1900, 1.1600   # expiry day's EURUSD and the sell-back day's
+    _mark_spot(conn, SAMPLE_CLOSED_ON, "EURUSD", eurusd_closed)
     _mark_spot(conn, wed, "EURUSD", eurusd_wed)
-    _mark_spot(conn, wed, "EURSEK", eursek_wed)
-    closed_out = {"EURSEK092326P-197728105", "EURSEK092326P-197838147"}   # bought and sold back in full
     wed_outcomes = {o.instrument_id: o for o in price_all_and_store(conn, wed)}
-    priced = {i for i, o in wed_outcomes.items() if o.priced}
-    assert priced == {"EURSEK092326C-197727826"}   # the live EURSEK ticket only
-    for instrument_id in closed_out:   # the closed-out puts: their own head, not priced, not a skip
-        assert wed_outcomes[instrument_id].closed_out
-        assert not wed_outcomes[instrument_id].priced
-        assert wed_outcomes[instrument_id].reason.startswith(f"closed out {closed_on}:")
-        assert _official_mark(conn, wed, instrument_id, "PREMIUM") is None
-    assert {i for i, o in wed_outcomes.items() if not o.priced and not o.closed_out}.isdisjoint(closed_out)
+    assert {i for i, o in wed_outcomes.items() if o.priced} == {call}   # no USDJPY spot, the digital no strike
+    assert (wed_outcomes[call].mark_basis, wed_outcomes[call].mark_date) == ("INTRINSIC", wed)
+    for instrument_id in SAMPLE_CLOSED_OUT:   # never priced, whatever the date
+        assert instrument_id not in wed_outcomes or not wed_outcomes[instrument_id].priced
+        assert _pricer_marks(conn, instrument_id) == []
     realise_settled(conn, wed)
-    for instrument_id, (pair, expiry, strike, option_type, quantity, fill) in SEPT_TICKETS.items():
-        row = frozen(instrument_id)
-        if pair == "EURSEK":
-            assert row is None
-            continue
-        intrinsic = _payoff_fraction(option_type, eurusd_tue, strike)
-        assert row[0] == pytest.approx(quantity * (intrinsic - fill) * eurusd_tue)  # USD
-        assert row[1:4] == (tue, "PREMIUM", "QL_OPTIONS_PRICER") and row[4] == f"premium dated {tue}"
+    assert frozen(call) is None  # expiry day is not over: not frozen
+    for instrument_id in SAMPLE_CLOSED_OUT:   # not live: the closing fill and the close-out date's spot
+        assert frozen(instrument_id)[1:3] == (SAMPLE_CLOSED_ON, "CLOSE_OUT")
 
     realise_settled(conn, thu)
-    for instrument_id, (pair, expiry, strike, option_type, quantity, fill) in SEPT_TICKETS.items():
-        if pair != "EURSEK":
-            continue
-        row = frozen(instrument_id)
-        if instrument_id in closed_out:   # not live: the closing fill and the close-out date's spot (2026-09-21)
-            assert row[1:3] == (closed_on, "CLOSE_OUT")
-            continue
-        intrinsic = _payoff_fraction(option_type, eursek_wed, strike)
-        assert row[0] == pytest.approx(quantity * (intrinsic - fill) * eurusd_wed)  # EUR -> USD at that day's EURUSD
-        assert row[1] == wed
-    # The bought and the sold EURSEK put are the same option: what is left is the premium difference, in
+    _, _, strike, option_type, quantity, fill = STRUCK_TICKETS[call]
+    intrinsic = _payoff_fraction(option_type, eurusd_wed, strike)
+    row = frozen(call)
+    assert row[0] == pytest.approx(quantity * (intrinsic - fill) * eurusd_wed)  # EUR -> USD at that day's EURUSD
+    assert row[1:4] == (wed, "PREMIUM", "QL_OPTIONS_PRICER") and row[4] == f"premium dated {wed}"
+    # The bought and the sold put are the same option: what is left is the premium difference, in
     # dollars at the EURUSD of the day it was sold back (user, 2026-09-21: "of course you freeze the usd converstion").
-    net = frozen("EURSEK092326P-197728105")[0] + frozen("EURSEK092326P-197838147")[0]
-    assert net == pytest.approx(35_000_000 * (0.005645 - 0.0057) * eurusd_closed)
+    net = sum(frozen(i)[0] for i in SAMPLE_CLOSED_OUT)
+    assert net == pytest.approx(5_000_000 * (0.0031 - 0.0042) * eurusd_closed)
 
 
 # --------------------------------------------------------------------------- reviewer W-2: expiry mark vs the official SPOT on file
@@ -2876,20 +2573,25 @@ def test_one_time_purge_reports_what_it_did_and_tolerates_a_missing_realised_pnl
                                  option_type="PUT", payoff="DIGITAL", expiry="2026-11-19")
     lower = _seed_option_trade(conn, trade_id="NT", pair="USDJPY", instrument_id="USDJPY111926-NT", strike=0.0,
                                option_type="CALL", payoff="no_touch", barrier_level=140.0, expiry="2026-11-19")
-    # An EQUITY digital's premium never went through the FX spot division: not the purge's business.
-    equity = _seed_eq_cmdty_option_trade(conn, "EQ1", "SPX 5600 Digital 2026-12-18", "SPX Index", "EQ_OPTION",
-                                         "EQ_OPTION", 5600.0, "CALL", payoff="DIGITAL")
+    # A listed option's digital-payoff row (not FX_OPTION) never went through the FX spot
+    # division: not the purge's business.
+    listed = "GCZ6C 2600 Digital 2026-12-18"
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
+                 (listed, "CMDTY_OPTION", "USD", "USD", 100.0, 0, "GCZ6 Comdty", "2026-12-18"))
+    conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type, barrier_level, avg_start_date, "
+                 "payoff) VALUES (?,?,?,?,?,?)", (listed, 2600.0, "CALL", 0.0, "9999-12-31", "DIGITAL"))
     for as_of in ("2026-09-16", "2026-09-17"):
         _insert_mark_rows(conn, _old_unit_rows(digital, as_of, "2026-11-19", 0.0057)
                           + _old_unit_rows(lower, as_of, "2026-11-19", 0.004)
-                          + _old_unit_rows(equity, as_of, "2026-12-18", 41.0))
+                          + _old_unit_rows(listed, as_of, "2026-12-18", 41.0))
     conn.execute("DROP TABLE realised_pnl")
     conn.commit()
 
     first = purge_old_unit_cash_payoff_marks(conn)
     assert first == {"ran": True, "instruments": sorted([digital, lower]), "marks_deleted": 28, "realised_deleted": 0}
     assert _pricer_marks(conn, digital) == [] and _pricer_marks(conn, lower) == []
-    assert len(_pricer_marks(conn, equity)) == 14
+    assert len(_pricer_marks(conn, listed)) == 14
     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'realised_pnl'").fetchone()[0] == 0
 
     # Idempotent: rows that appear later are not the purge's business.

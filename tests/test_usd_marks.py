@@ -144,3 +144,19 @@ def test_only_the_spot_entrys_own_day_curve_is_read(conn):
     out = forward_usd_rates(conn, rates, [("JPY", "2026-10-21")])
     assert out[("JPY", "2026-10-21")]["basis"] == BASIS_NO_CURVE
     assert usd_marks._FWD_SQL.count(":as_of") == 1
+
+
+def test_a_former_ndf_currency_follows_its_own_curve(conn):
+    """NDFs left the app (2026-09-24): KRW is an ordinary currency, spot up to the spot
+    date and its official outrights after, even if a caller's entry still carries the
+    retired NDF_1M tag; there is no 1M NDF basis any more."""
+    conn.execute("INSERT INTO instruments VALUES (?,?,?,?,1,0,?,'9999-12-31')", ("USDKRW", "FX", "USD", "KRW", "USDKRW Curncy"))
+    _mark(conn, "USDKRW", AS_OF, "SPOT", 1380.0)
+    _mark(conn, "USDKRW", "2026-10-21", "FWD_OUTRIGHT", 1376.0)
+    conn.commit()
+    rates = {"KRW": {**_entry(1380.0, True, "USDKRW"), "mark_type": "NDF_1M"}}
+    out = forward_usd_rates(conn, rates, [("KRW", AS_OF), ("KRW", "2026-10-21"), ("KRW", "2027-03-01")])
+    assert out[("KRW", AS_OF)] == {"rate": pytest.approx(1 / 1380.0), "quoted": 1380.0, "basis": BASIS_SPOT, "pair": "USDKRW"}
+    assert out[("KRW", "2026-10-21")]["basis"] == BASIS_OUTRIGHT and out[("KRW", "2026-10-21")]["quoted"] == 1376.0
+    assert out[("KRW", "2027-03-01")]["basis"] == BASIS_FLAT
+    assert not hasattr(usd_marks, "BASIS_NDF_1M")

@@ -1,5 +1,6 @@
 """The commodity contract universe (data/contracts/, config/contracts.csv): contract-master lane."""
 
+import csv
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -8,9 +9,12 @@ import pytest
 import yaml
 
 from data.contracts import (
+    FIXABLE_FIELDS,
+    WORKSHEET_COLUMNS,
     AmbiguousContract,
     ContractRoot,
     UnknownContract,
+    apply_fixes,
     contract_for,
     contract_month,
     estimated_last_trade_date,
@@ -21,7 +25,7 @@ from data.contracts import (
     static_dates,
     store_static_dates,
 )
-from data.contracts.universe import quantity_factor
+from data.contracts.universe import CONTRACTS_CSV, quantity_factor
 
 TRADE_DATE = date(2026, 9, 24)
 
@@ -230,3 +234,186 @@ def test_contract_for_takes_bloomberg_dates_when_stored():
 def test_contract_for_refuses_an_id_that_is_not_that_roots(root_id, contract_id):
     with pytest.raises(UnknownContract):
         contract_for(root_id, contract_id)
+
+
+# --- Bloomberg roots (Phase 2: best guesses until the Bloomberg check) ----------------------
+
+def test_no_placeholder_bloomberg_root_is_left():
+    roots = load_roots()
+    left = sorted(r.root_id for r in roots.values() if r.bbg_placeholder or r.bbg_root.startswith("ZZ"))
+    assert left == []
+    # a best guess is never marked verified: the 11 terminal-checked roots stay the only ones
+    assert sum(r.bbg_verified for r in roots.values()) == 11
+    guesses = [r for r in roots.values() if "is a best guess: the" in r.notes]
+    assert len(guesses) == 102
+    for r in guesses:
+        assert "(low confidence)" in r.notes and not r.bbg_verified, r.root_id
+
+
+def test_no_two_rows_share_a_bloomberg_root_and_key():
+    seen = {}
+    for r in load_roots().values():
+        key = (r.bbg_root, r.bbg_yellow_key)
+        assert key not in seen, (key, seen.get(key), r.root_id)
+        seen[key] = r.root_id
+
+
+@pytest.mark.parametrize("root_id, bbg_root", [
+    ("NYMEX:JA", "NJA"),    # bare JA is OSE platinum's root
+    ("ZCE:SH", "ZSH"),      # bare SH is DCE soybean oil's root
+    ("DCE:LH", "DLH"),      # bare LH is CME lean hogs' root
+    ("LME:CO", "LCO"),      # bare CO is ICE Brent's root
+    ("SHFE:SS", "SS"),
+    ("NYMEX:7H", "7H"),     # a root that starts with a digit
+])
+def test_guessed_roots_avoid_other_roots_and_resolve_back(root_id, bbg_root):
+    root = get_root(root_id)
+    assert root.bbg_root == bbg_root and not root.bbg_verified
+    c = contract_month(root_id, 12, 2026)
+    assert c.contract_id == f"{bbg_root}Z26 Comdty"
+    assert contract_for(root_id, c.contract_id) == c
+    assert resolve_future(f"{bbg_root}Z6 Comdty", trade_date=TRADE_DATE).root_id == root_id
+
+
+# --- the fixes worksheet --------------------------------------------------------------------
+
+def _contracts_copy(tmp_path):
+    path = tmp_path / "contracts.csv"
+    path.write_bytes(CONTRACTS_CSV.read_bytes())
+    return path
+
+
+def _worksheet(tmp_path, rows, name="fixes.csv"):
+    path = tmp_path / name
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(WORKSHEET_COLUMNS)
+        for r in rows:
+            w.writerow([r.get(c, "") for c in WORKSHEET_COLUMNS])
+    return path
+
+
+def _fix(root_id, field, current, suggested, apply="yes"):
+    return {"root_id": root_id, "field": field, "current": current, "suggested": suggested,
+            "verdict": "WRONG", "reason": "Bloomberg says so", "apply": apply}
+
+
+def test_the_worksheet_columns_and_fields_are_the_agreed_ones():
+    assert WORKSHEET_COLUMNS == ("root_id", "field", "current", "suggested", "verdict", "reason", "apply")
+    assert set(FIXABLE_FIELDS) == {"bbg_root", "bbg_yellow_key", "bbg_verified", "currency",
+                                   "contract_size", "size_unit", "quote_unit", "price_scale", "delivery"}
+
+
+def test_a_price_scale_fix_is_applied_and_the_multiplier_recomputed(tmp_path):
+    contracts = _contracts_copy(tmp_path)
+    before = contracts.read_bytes()
+    assert load_roots(contracts)["NYMEX:B0"].multiplier == 42000.0
+    ws = _worksheet(tmp_path, [
+        _fix("NYMEX:B0", "price_scale", "1.0", "0.01"),              # '1.0' is the file's '1'
+        _fix("NYMEX:B0", "bbg_verified", "False", "TRUE", apply="Y"),
+        _fix("NYMEX:CL", "bbg_root", "CL", "CL", apply=""),          # not marked: skipped
+    ])
+    out = apply_fixes(ws, contracts_path=contracts)
+    assert out["written"] is True and out["refused"] == []
+    assert [(a["root_id"], a["field"], a["before"], a["after"]) for a in out["applied"]] == [
+        ("NYMEX:B0", "price_scale", "1", "0.01"), ("NYMEX:B0", "bbg_verified", "false", "true")]
+    assert out["applied"][0]["multiplier_before"] == "42000"
+    assert out["applied"][0]["multiplier_after"] == "420"
+    assert [(s["row"], s["root_id"]) for s in out["skipped"]] == [(4, "NYMEX:CL")]
+    b0 = load_roots(contracts)["NYMEX:B0"]             # the cache was cleared: the new file is read
+    assert (b0.price_scale, b0.multiplier, b0.bbg_verified) == (0.01, 420.0, True)
+    # only that row changed; column order, row order and LF endings kept
+    after = contracts.read_bytes()
+    assert b"\r" not in after
+    old_lines, new_lines = before.split(b"\n"), after.split(b"\n")
+    assert len(old_lines) == len(new_lines) and old_lines[0] == new_lines[0]
+    changed = [i for i, (a, b) in enumerate(zip(old_lines, new_lines)) if a != b]
+    assert len(changed) == 1 and new_lines[changed[0]].startswith(b"NYMEX:B0,")
+    assert b",0.01,420," in new_lines[changed[0]]
+    assert list(tmp_path.glob(".contracts-*")) == []
+
+
+@pytest.mark.parametrize("row, why", [
+    (_fix("NYMEX:CL", "price_scale", "0.01", "1"), "stale worksheet"),       # the file has 1
+    (_fix("NYMEX:CL", "multiplier", "1000", "100"), "cannot be fixed"),     # never from the worksheet
+    (_fix("NYMEX:CL", "name", "x", "y"), "cannot be fixed"),
+    (_fix("NYMEX:CLL", "price_scale", "1", "0.01"), "unknown contract root"),
+    (_fix("ICE:M", "currency", "GBP", "GBp"), "minor unit"),                  # pence: a price_scale fix
+    (_fix("NYMEX:CL", "contract_size", "1000", "-5"), "positive"),
+    (_fix("NYMEX:B0", "price_scale", "1", "0,01"), "decimal point"),         # never read as 1
+])
+def test_a_row_is_refused_and_nothing_is_written(tmp_path, row, why):
+    contracts = _contracts_copy(tmp_path)
+    before = contracts.read_bytes()
+    out = apply_fixes(_worksheet(tmp_path, [row]), contracts_path=contracts)
+    assert out["applied"] == [] and out["written"] is False
+    (refused,) = out["refused"]
+    assert refused["row"] == 2 and refused["root_id"] == row["root_id"] and why in refused["why"]
+    assert contracts.read_bytes() == before
+
+
+def test_a_result_that_would_not_load_writes_nothing(tmp_path):
+    contracts = _contracts_copy(tmp_path)
+    before = contracts.read_bytes()
+    ws = _worksheet(tmp_path, [
+        _fix("NYMEX:B0", "price_scale", "1", "0.01"),     # fine on its own
+        _fix("ICE:B", "bbg_root", "CO", "CL"),            # WTI's root: two rows would share it
+    ])
+    out = apply_fixes(ws, contracts_path=contracts)
+    assert out["applied"] == [] and out["written"] is False
+    assert [r["row"] for r in out["refused"]] == [2, 3]
+    assert all("would not load" in r["why"] and "'CL'" in r["why"] for r in out["refused"])
+    assert str(contracts) in out["refused"][0]["why"]             # the file named, not a temp copy
+    assert contracts.read_bytes() == before
+    assert list(tmp_path.glob(".contracts-*")) == []
+
+
+def test_a_currency_fix_carries_the_quote_unit(tmp_path):
+    contracts = _contracts_copy(tmp_path)
+    out = apply_fixes(_worksheet(tmp_path, [_fix("ICEUS:CC", "currency", "USD", "gbp")]),
+                      contracts_path=contracts)
+    (a,) = out["applied"]
+    assert (a["after"], a["quote_unit_before"], a["quote_unit_after"]) == ("GBP", "USD/t", "GBP/t")
+    cc = load_roots(contracts)["ICEUS:CC"]
+    assert (cc.currency, cc.quote_unit, cc.multiplier) == ("GBP", "GBP/t", 10.0)
+
+
+def test_dry_run_reports_and_writes_nothing(tmp_path):
+    contracts = _contracts_copy(tmp_path)
+    before = contracts.read_bytes()
+    load_roots(contracts)                                         # cached
+    out = apply_fixes(_worksheet(tmp_path, [_fix("NYMEX:B0", "price_scale", "1", "0.01")]),
+                      contracts_path=contracts, dry_run=True)
+    assert out["written"] is False and out["refused"] == []
+    assert out["applied"][0]["multiplier_after"] == "420"
+    assert contracts.read_bytes() == before
+    assert load_roots(contracts)["NYMEX:B0"].multiplier == 42000.0
+    assert list(tmp_path.glob(".contracts-*")) == []
+
+
+def test_the_cache_is_cleared_after_a_write(tmp_path):
+    contracts = _contracts_copy(tmp_path)
+    assert get_root("SHFE:SS", contracts).bbg_root == "SS"              # read and cached
+    out = apply_fixes(_worksheet(tmp_path, [_fix("shfe:ss", "bbg_root", "SS", "sss")]),
+                      contracts_path=contracts)
+    assert out["written"] is True
+    assert get_root("SHFE:SS", contracts).bbg_root == "SSS"
+
+
+def test_a_semicolon_worksheet_saved_by_excel_is_read(tmp_path):
+    contracts = _contracts_copy(tmp_path)
+    path = tmp_path / "fixes_excel.csv"
+    lines = [";".join(c.upper() for c in WORKSHEET_COLUMNS),
+             "NYMEX:B0;price_scale;1;0.01;WRONG;Bloomberg quotes cents;Yes"]
+    path.write_bytes(("﻿" + "\r\n".join(lines) + "\r\n").encode("utf-8"))
+    out = apply_fixes(path, contracts_path=contracts)
+    assert out["refused"] == [] and out["applied"][0]["multiplier_after"] == "420"
+    assert b"\r" not in contracts.read_bytes()
+
+
+def test_a_worksheet_without_its_columns_raises(tmp_path):
+    contracts = _contracts_copy(tmp_path)
+    path = tmp_path / "bad.csv"
+    path.write_text("root_id,field,suggested\nNYMEX:CL,price_scale,1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="current"):
+        apply_fixes(path, contracts_path=contracts)

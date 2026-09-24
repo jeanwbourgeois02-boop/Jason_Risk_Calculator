@@ -16,12 +16,11 @@ localhost:8194 by default), each requested pull of `LiveFeed` fetches:
     (settle_date); first (2026-09-24), Bloomberg's contract dates (FUT_LAST_TRADE_DT,
     FUT_NOTICE_FIRST) of the futures the library lists under CONTRACT_DATES, stored in
     contract_static and applied to the futures, so that expiry is Bloomberg's
-    (`contract_dates_step`); a future with no Bloomberg ticker is never asked for;
-  * NDF_1M (2026-09-21, user: "NDFs - always show 1m forward date price, not spot") for
-    every NDF currency the open FX trades and options touch: PX_LAST of the user's own 1M
-    ticker (data.ingest.common.NDF_1M_TICKERS, 'KWN+1M Curncy'), asked for in the same
-    request as the spots and written on the currency's USD pair ('USDKRW') dated today, as
-    quoted, source BBG_BFXFORWARD. The ladder reads it; no P&L query does.
+    (`contract_dates_step`); a future with no Bloomberg ticker is never asked for.
+Then the OIS curve quotes the FX options need, bootstrapped into `curves` (`_curves_step`),
+the FX vol smiles (`_vol_step`), the options' pricing (`_options_step`) and the ledger.
+The macro trader's NDF prices (NDF_1M, NDF_FIX), overnight fixings, swap pricing, index
+levels and dividend yields left the pull on 2026-09-24 (commodity conversion Phase 2).
 Rows are written to `marks` with INSERT OR REPLACE (same primary key each cycle, new
 `snapped_at`), sources BBG_BFXFORWARD (official) / BBG_INTERP (fallback, never official).
 
@@ -39,7 +38,7 @@ day: "make it only pull the bloomberg info on request - no automatic"): a cycle 
 or after an upload, a manual trade or an edit. What a cycle asks for is READ from the
 Bloomberg library (data/bloomberg/library.py, table `bbg_library`): what the trades on
 file need for their P&L, written when trades come in. A cycle opens ONE blpapi session
-and shares it between the FX marks, the OIS quotes / fixings and the vol quotes
+and shares it between the FX marks, the OIS quotes and the vol quotes
 (`_SharedSession`), and records where its time went in `status["timings"]` (see
 `pull_once`).
 """
@@ -67,11 +66,9 @@ INTERVAL_SECONDS = 900
 STALE_AFTER_SECONDS = 2 * INTERVAL_SECONDS + 300
 SRC_SPOT_FWD = "BBG_BFXFORWARD"
 SRC_INTERP = "BBG_INTERP"
-# Marks asked for as one live PX_LAST and written on their pair dated today: a pair's SPOT,
-# and an NDF currency's 1M outright (NDF_1M, the ladder's rate for it, 2026-09-21).
-SPOT_LIKE_MARK_TYPES = ("SPOT", "NDF_1M")
-# Keys of status["timings"], seconds per step of one cycle (see pull_once).
-TIMING_KEYS = ("session", "spot", "forwards", "futures", "rates", "vol", "options", "ledger", "total")
+# Keys of status["timings"], seconds per step of one cycle (see pull_once). "curves" was
+# "rates" until 2026-09-24, when the step stopped pricing swaps.
+TIMING_KEYS = ("session", "spot", "forwards", "futures", "curves", "vol", "options", "ledger", "total")
 
 
 # --------------------------------------------------------------------------- ledger result
@@ -195,7 +192,7 @@ def read_status(db_path) -> Optional[dict]:
 
 
 # The book's day turns at 17:00 New York (05:00 Hong Kong), the FX day roll -- for every
-# date the app works with: the marks a pull stamps, the rates / vol / options steps, the
+# date the app works with: the marks a pull stamps, the curves / vol / options steps, the
 # ledger's freeze date, the backfill's "past", the screens' as-of (ui/tabs/cash_ladder.py::
 # today_ny delegates to book_today and re-exports this constant). The one rule; nothing else
 # decides the day.
@@ -219,7 +216,7 @@ def book_today(now: Optional[datetime] = None) -> date:
     user's morning -- the screen valued D+1, a pull wrote D's marks, D was not yet "past"
     for the backfill (its row on file stayed the last live press instead of the 15:00
     close), D+1 had no marks of its own and was carried from D, and Daily read 0 for the
-    whole book. With the pull, the rates / vol / options steps, realise_settled, the
+    whole book. With the pull, the curves / vol / options steps, realise_settled, the
     backfill's "past" and the screens all on this one date, a pull at 18:00 New York on the
     22nd writes marks dated the 23rd, the 22nd is a past day whose 15:00 close the same
     button press fetches, and Daily is live against it. A live row dated D+1 that was
@@ -449,21 +446,16 @@ def option_needed_marks(conn: sqlite3.Connection, as_of_date: str, historical: b
 def _ensure_fx_instruments(conn: sqlite3.Connection, pairs) -> List[str]:
     """Insert the plain FX `instruments` row for each 6-char pair that has none yet --
     the same conventional reference-data row the blotter parser writes for a traded pair
-    (multiplier 1, is_ndf from data.ingest.common.NDF_CCYS, '<pair> Curncy', perpetual).
-    `write_marks` can only persist a SPOT / FWD_OUTRIGHT for a known instrument, and an
-    option-only pair or a cross's USD-conversion pair may never have been traded
-    outright, so without this row the mark Bloomberg returned vanished silently
-    (2026-09-18). Returns the pairs created. A read-only connection is left alone."""
+    (multiplier 1, is_ndf 0, '<pair> Curncy', perpetual). `write_marks` can only persist a
+    SPOT / FWD_OUTRIGHT for a known instrument, and an option-only pair or a USD-conversion
+    pair may never have been traded outright, so without this row the mark Bloomberg
+    returned vanished silently (2026-09-18). Returns the pairs created. A read-only
+    connection is left alone. is_ndf is always 0 since NDFs left the app (2026-09-24)."""
     created: List[str] = []
-    try:
-        from data.ingest.common import NDF_CCYS
-    except Exception:  # noqa: BLE001
-        NDF_CCYS = frozenset()
     for pair in sorted({p for p in pairs if isinstance(p, str) and len(p) == 6}):
         if conn.execute("SELECT 1 FROM instruments WHERE instrument_id = ?", (pair,)).fetchone():
             continue
         base, quote = pair[:3], pair[3:]
-        is_ndf = 1 if (base in NDF_CCYS or quote in NDF_CCYS) else 0
         try:
             with conn:
                 # Column-explicit: a live database can carry extra instrument columns from
@@ -471,34 +463,12 @@ def _ensure_fx_instruments(conn: sqlite3.Connection, pairs) -> List[str]:
                 # insert fails there with "table instruments has 12 columns but 8 values".
                 conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, "
                              "multiplier, is_ndf, bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
-                             (pair, "FX", base, quote, 1.0, is_ndf, f"{pair} Curncy", "9999-12-31"))
+                             (pair, "FX", base, quote, 1.0, 0, f"{pair} Curncy", "9999-12-31"))
         except sqlite3.OperationalError as exc:
             if "readonly" in str(exc).lower() or "read-only" in str(exc).lower():
                 break  # read-only connection (diagnostics): nothing to create here
             raise
         created.append(pair)
-    return created
-
-
-def _ensure_index_instruments(conn: sqlite3.Connection, tickers) -> List[str]:
-    """Insert the `instruments` row of each listed option's underlying index that has none
-    yet ('SPX Index': asset_class INDEX, its own Bloomberg ticker, perpetual), for the same
-    reason `_ensure_fx_instruments` exists: `write_marks` only persists a mark for a known
-    instrument. Returns the rows created. A read-only connection is left alone."""
-    created: List[str] = []
-    for ticker in sorted({t for t in tickers if isinstance(t, str) and t}):
-        if conn.execute("SELECT 1 FROM instruments WHERE instrument_id = ?", (ticker,)).fetchone():
-            continue
-        try:
-            with conn:
-                conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, "
-                             "multiplier, is_ndf, bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
-                             (ticker, "INDEX", ticker.split()[0], "USD", 1.0, 0, ticker, "9999-12-31"))
-        except sqlite3.OperationalError as exc:
-            if "readonly" in str(exc).lower() or "read-only" in str(exc).lower():
-                break
-            raise
-        created.append(ticker)
     return created
 
 
@@ -518,12 +488,12 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     ... they will be in this cache"): the list is READ from the Bloomberg library
     (data/bloomberg/library.py, `bbg_library`), which is written when trades come in, not
     worked out from the trades here. Same rules, same order; what is not in the library is
-    not asked for."""
+    not asked for. Only the library's mark kinds (SPOT, FWD_OUTRIGHT, FUTURE_PX) become
+    requests; the NDF_1M / NDF_FIX requests left on 2026-09-24."""
     from data.bloomberg import library
     from data.bloomberg.pull_marks import RequestRow
     needed = library.needed_on(conn, as_of_date)
-    _ensure_fx_instruments(conn, [r["key"] for r in needed if r["kind"] in ("SPOT", "FWD_OUTRIGHT", library.NDF_1M)])
-    _ensure_index_instruments(conn, [r["key"] for r in needed if r["role"] == library.ROLE_UNDERLYING])
+    _ensure_fx_instruments(conn, [r["key"] for r in needed if r["kind"] in ("SPOT", "FWD_OUTRIGHT")])
     out, seen = [], set()
 
     def _add(r: dict) -> None:
@@ -535,67 +505,23 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
         if key not in seen:
             seen.add(key)
             out.append(RequestRow(r["key"], r["bbg_ticker"],
-                                  as_of_date if r["kind"] in SPOT_LIKE_MARK_TYPES else r["settle_date"], r["kind"]))
+                                  as_of_date if r["kind"] == "SPOT" else r["settle_date"], r["kind"]))
 
     is_option = lambda r: r["product"] == "FX_OPTION"                     # noqa: E731
     is_conversion = lambda r: r["role"] == library.ROLE_CONVERSION        # noqa: E731
     marks = sorted((r for r in needed if r["kind"] in library.MARK_KINDS),
                    key=lambda r: (r["key"], r["kind"] != "SPOT", r["settle_date"]))
-    fx = [r for r in marks if r["kind"] not in ("FUTURE_PX", library.NDF_FIX) and not is_option(r)]
-    options = [r for r in marks if is_option(r) and r["kind"] != library.NDF_FIX]
-    # Forwards' own pairs (SPOT, then each leg date), crosses' conversion pairs, options'
-    # own pairs, options' conversion pairs, futures: the order the list always had.
-    # Last (2026-09-21, user: "NDFs - always show 1m forward date price, not spot"): one
-    # NDF_1M per NDF currency's USD pair, asked of the user's own 1M ticker (KWN+1M Curncy
-    # for USDKRW) exactly as a SPOT is, and written on that pair dated today.
+    fx = [r for r in marks if r["kind"] != "FUTURE_PX" and not is_option(r)]
+    options = [r for r in marks if is_option(r)]
+    # Forwards' own pairs (SPOT, then each leg date), crosses' and futures' conversion
+    # pairs, options' own pairs, options' conversion pairs, futures: the order the list
+    # always had.
     for group in ([r for r in fx if not is_conversion(r)], [r for r in fx if is_conversion(r)],
                   [r for r in options if not is_conversion(r)], [r for r in options if is_conversion(r)],
-                  [r for r in marks if r["kind"] == "FUTURE_PX"],
-                  sorted((r for r in needed if r["kind"] == library.NDF_1M), key=lambda r: r["key"]),
-                  # NDF_FIX (2026-09-22): the currency's official fixing, on a ticket's fixing
-                  # date only (the library lists it for that date alone), the NDF's exit price.
-                  [r for r in marks if r["kind"] == library.NDF_FIX]):
+                  [r for r in marks if r["kind"] == "FUTURE_PX"]):
         for r in group:
             _add(r)
     return out
-
-
-def ndf_fix_rows(session, service, requests: list, day, fetch=None, snapped_at: str = "") -> tuple:
-    """(rows, warnings, failed) for the NDF_FIX requests of `day`: PX_LAST of each fixing
-    ticker for exactly that date, from Bloomberg's daily history (a ReferenceDataRequest
-    would return the latest fix published, which before the day's publication is
-    yesterday's, so the history request is asked for the one date). Written as mark_type
-    NDF_FIX on the pair, settle_date = the fixing date, source BBG_BDH (the official source,
-    data/ingest/schema.py). A ticker with no value that day is reported failed with the
-    reason and nothing is written for it."""
-    from data.bloomberg import library
-    if not requests:
-        return [], [], []
-    if fetch is None:
-        from data.bloomberg.pull_marks import fetch_historical_series
-        fetch = fetch_historical_series
-    from data.bloomberg.pull_marks import SRC_FUTURE
-    day_iso = day.isoformat() if hasattr(day, "isoformat") else str(day)
-    tickers = sorted({r.bbg_ticker for r in requests})
-    try:
-        series = fetch(session, service, tickers, ["PX_LAST"], day, day) or {}
-    except Exception as exc:  # noqa: BLE001 -- reported per ticker, never raised into the cycle
-        return [], [f"NDF fix request failed: {exc!r}"], [
-            {"instrument_id": r.instrument_id, "settle_date": r.settle_date, "mark_type": r.mark_type,
-             "bbg_ticker": r.bbg_ticker, "reason": f"request failed: {exc!r}"} for r in requests]
-    rows, failed = [], []
-    for r in requests:
-        try:
-            value = float((series.get(r.bbg_ticker) or {}).get(day_iso, {}).get("PX_LAST"))
-        except (TypeError, ValueError):
-            failed.append({"instrument_id": r.instrument_id, "settle_date": r.settle_date, "mark_type": r.mark_type,
-                           "bbg_ticker": r.bbg_ticker,
-                           "reason": f"Bloomberg returned no PX_LAST for {r.bbg_ticker} on {day_iso} (the fixing)"})
-            continue
-        rows.append({"as_of_date": day_iso, "instrument_id": r.instrument_id, "settle_date": r.settle_date,
-                     "mark_type": library.NDF_FIX, "value": value, "source": SRC_FUTURE,
-                     "snapped_at": snapped_at or _now_iso()})
-    return rows, [], failed
 
 
 # --------------------------------------------------------------------------- contract dates
@@ -833,13 +759,10 @@ def _bloomberg_said(diag, ticker: str) -> str:
 
 def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str):
     """Live PX_LAST via ReferenceDataRequest (intraday), unlike pull_marks' close-of-day
-    historical path, for every SPOT and every NDF_1M request (SPOT_LIKE_MARK_TYPES) in ONE
-    request: an NDF currency's 1M outright (2026-09-21) is asked of its own ticker
-    ('KWN+1M Curncy') with the same field, and written on its USD pair dated `as_of` under
-    mark_type NDF_1M, the value as quoted. A failure carries Bloomberg's own reason when
-    it gave one. Returns (rows, failures)."""
+    historical path, for every SPOT request in ONE request. A failure carries Bloomberg's
+    own reason when it gave one. Returns (rows, failures)."""
     from data.bloomberg.pull_marks import fetch_reference, BloombergRequestError
-    spot_reqs = [r for r in requests if r.mark_type in SPOT_LIKE_MARK_TYPES]
+    spot_reqs = [r for r in requests if r.mark_type == "SPOT"]
     if not spot_reqs:
         return [], []
     tickers = sorted({r.bbg_ticker for r in spot_reqs})
@@ -853,9 +776,8 @@ def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str)
         value = data.get(r.bbg_ticker, {}).get("PX_LAST")
         if value is None:
             said = _bloomberg_said(diag, r.bbg_ticker)
-            asked = "" if r.mark_type == "SPOT" else f" for {r.bbg_ticker}"
             failures.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
-                             "detail": f"no PX_LAST returned{asked}" + (f" (Bloomberg: {said})" if said else "")})
+                             "detail": "no PX_LAST returned" + (f" (Bloomberg: {said})" if said else "")})
             continue
         try:
             fvalue = float(value)
@@ -972,43 +894,35 @@ def write_marks(conn: sqlite3.Connection, rows: List[dict]) -> int:
     return n
 
 
-def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rates_source=None,
-                shared: Optional[_SharedSession] = None) -> dict:
-    """Pull OIS quotes and fixings for every currency with an un-matured IRS trade, PLUS
-    every currency of an open FX_OPTION's underlying pair (2026-09-17 fix): each option
-    needs a domestic AND a foreign discount curve
-    (engine/options/inputs.py::resolve_market_inputs -> .rates.resolve_fx_rates), and
-    before this fix nothing ever pulled curve_quotes for an option-only currency, so any
-    option in a currency with no IRS trade in the book fell straight to "no curve/rate
-    <CCY>" -- found live on the Bloomberg PC (EUR/SEK/JPY options, no IRS at all). Then
-    prices every IRS. `rates_source` (anything with `get_curve_quotes` / `get_fixings`,
-    e.g. `RatesFileSource`) is injectable for tests; default is a live
-    `RatesBloombergSource` on `host:port`. Never raises: per-currency and per-trade
-    failures are reported in the returned dict (`{skipped}` when there is neither an IRS
-    nor an FX_OPTION).
+def _curves_step(conn: sqlite3.Connection, today: date, host: str, port: int, rates_source=None,
+                 shared: Optional[_SharedSession] = None) -> dict:
+    """Pull the OIS curve quotes of every currency the Bloomberg library lists under
+    OIS_CURVE today (both currencies of every open FX option: engine/options needs a
+    domestic AND a foreign discount curve, engine/options/inputs.py::resolve_market_inputs)
+    into `curve_quotes`, then bootstrap each currency's curve into `curves`
+    (engine.rates.store.bootstrap_and_store, source QL_PRICER). No swap is priced: the
+    swaps, their fixings and the swap pricing left the pull on 2026-09-24 (commodity
+    conversion Phase 2); this step was `_rates_step` and its block status["rates"].
 
-    A currency outside the Phase 1 OIS set (`rates_marketdata.OIS_INDEX` --
-    USD/EUR/GBP/JPY/CHF/CAD/AUD) is never sent to Bloomberg at all (there is no curve to
-    ask for -- SEK, for one, has no OIS index in scope per CLAUDE.md); it is recorded
-    directly with a plain-English reason instead, so a per-option "no curve/rate" skip
-    (engine/options always falls back to a manual rate for these) can name the missing
-    curve rather than a bare currency code.
+    `rates_source` (anything with `get_curve_quotes`, e.g.
+    data.bloomberg.rates_marketdata.RatesFileSource) is injectable for tests; default is a
+    live `RatesBloombergSource` on `host:port`, borrowing the cycle's one session (`shared`).
 
-    `shared` (2026-09-21): the cycle's one blpapi session; the live source borrows it
-    instead of opening its own. `seconds` in the result splits the step between Bloomberg
-    (quotes and fixings, written as they arrive) and QuantLib (the IRS pricing), so a
-    pasted status says which of the two a slow rates step was."""
-    out: dict = {"currencies": {}, "priced": 0, "failed": [], "as_of_date": today.isoformat()}
+    A currency outside the OIS set (`rates_marketdata.OIS_INDEX`) is never sent to
+    Bloomberg; it is recorded with a plain-English reason, so an option's "no curve/rate"
+    skip can name the missing curve. Never raises.
+
+    Returns the status file's `curves` block: {as_of_date, currencies: {ccy: {quotes (rows
+    written to curve_quotes), nodes (curve nodes bootstrapped into `curves`, 0 when not
+    bootstrapped), error ('' when none)}}, bootstrapped (how many currencies have a curve
+    today), seconds: {bloomberg, bootstrap}}, plus "skipped" (no FX option needs a curve)
+    or "error" (the step could not run at all)."""
+    out: dict = {"currencies": {}, "bootstrapped": 0, "as_of_date": today.isoformat()}
     step_started = time.perf_counter()
-    # Which currencies: read from the Bloomberg library (2026-09-21), never worked out
-    # here. OIS_CURVE = every live swap's currency and both currencies of every open
-    # option; FIXINGS = the swaps' currencies only (see below).
     from data.bloomberg import library
-    needed = library.needed_on(conn, today.isoformat())
-    irs_ccys = {r["key"] for r in needed if r["kind"] == "FIXINGS"}
-    ccys = sorted({r["key"] for r in needed if r["kind"] == "OIS_CURVE"} | irs_ccys)
+    ccys = sorted(library.keys(conn, today.isoformat(), "OIS_CURVE"))
     if not ccys:
-        out["skipped"] = "no IRS or FX_OPTION trades to price"
+        out["skipped"] = "no FX_OPTION needs an OIS curve"
         return out
     try:
         from data.bloomberg import rates_marketdata as rm
@@ -1016,11 +930,10 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
         out["error"] = f"rates_marketdata not importable: {exc!r}"
         return out
     in_scope = [c for c in ccys if c in rm.OIS_INDEX]
-    out_of_scope = [c for c in ccys if c not in rm.OIS_INDEX]
-    for ccy in out_of_scope:
+    for ccy in (c for c in ccys if c not in rm.OIS_INDEX):
         out["currencies"][ccy] = {
-            "quotes": 0, "fixings": 0,
-            "error": f"{ccy} has no OIS index in Phase 1 scope ({', '.join(sorted(rm.OIS_INDEX))} only); "
+            "quotes": 0, "nodes": 0,
+            "error": f"{ccy} has no OIS index in scope ({', '.join(sorted(rm.OIS_INDEX))} only); "
                      "an option in this currency gets its rate implied from the pair's forward curve and "
                      "the other currency's OIS curve (engine/options/rates.py, IMPLIED_FORWARD); a manual "
                      "rate (engine/options/rates.py::set_manual_rate) is only needed if that forward curve "
@@ -1038,26 +951,10 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
                 out["error"] = f"RatesBloombergSource unavailable: {exc!r}"
                 return out
         for ccy in in_scope:
-            entry = {"quotes": 0, "fixings": 0, "error": ""}
+            entry = {"quotes": 0, "nodes": 0, "error": ""}
             try:
                 snap = rates_source.get_curve_quotes(ccy, today)
                 entry["quotes"] = rm.write_curve_quotes(conn, snap, today.isoformat())
-                # Fixings value a seasoned IRS's current float period; an FX_OPTION needs
-                # a discount curve only, never an overnight fixing history, so an
-                # option-only currency here (2026-09-17) must not attempt this call --
-                # RatesFileSource/RatesBloombergSource routinely have no fixings staged
-                # for a currency that was only ever added for its curve, and that would
-                # otherwise overwrite this entry's error with an unrelated fixings failure
-                # even though the curve pull above succeeded fine.
-                if ccy in irs_ccys:
-                    swap_ids = sorted({r["trade_id"] for r in needed if r["kind"] == "FIXINGS" and r["key"] == ccy})
-                    first = conn.execute(
-                        f"SELECT MIN(start_date) FROM trade_legs WHERE trade_id IN ({','.join('?' * len(swap_ids))})",
-                        swap_ids).fetchone()[0]
-                    start = date.fromisoformat(first) if first else today
-                    if start <= today:
-                        fixings = rates_source.get_fixings(ccy, start, today)
-                        entry["fixings"] = rm.write_fixings(conn, ccy, fixings)
             except Exception as exc:  # noqa: BLE001
                 entry["error"] = f"{type(exc).__name__}: {exc}"
             out["currencies"][ccy] = entry
@@ -1067,16 +964,26 @@ def _rates_step(conn: sqlite3.Connection, today: date, host: str, port: int, rat
                 close()
             except Exception:  # noqa: BLE001
                 pass
-    pricing_started = time.perf_counter()
-    try:
-        from engine.rates.store import price_all_and_store
-        results = price_all_and_store(conn, today.isoformat())
-        out["priced"] = sum(1 for r in results if r["ok"])
-        out["failed"] = [{"trade_id": r["trade_id"], "error": r["error"]} for r in results if not r["ok"]]
-    except Exception as exc:  # noqa: BLE001
-        out["error"] = f"pricing failed: {exc!r}"
-    out["seconds"] = {"bloomberg": round(pricing_started - step_started, 1),
-                      "pricing": round(time.perf_counter() - pricing_started, 1)}
+    bootstrap_started = time.perf_counter()
+    to_build = [c for c in in_scope if out["currencies"][c]["quotes"]]
+    if to_build:
+        try:
+            from engine.rates.store import bootstrap_and_store
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = f"engine.rates.store.bootstrap_and_store not importable: {exc!r}"
+            to_build = []
+        for ccy in to_build:
+            entry = out["currencies"][ccy]
+            try:
+                bootstrap_and_store(conn, today.isoformat(), ccy)
+                entry["nodes"] = conn.execute(
+                    "SELECT COUNT(*) FROM curves WHERE as_of_date = ? AND source = 'QL_PRICER' AND curve_id LIKE ?",
+                    (today.isoformat(), f"{ccy}-%")).fetchone()[0]
+                out["bootstrapped"] += 1
+            except Exception as exc:  # noqa: BLE001 -- a curve that does not converge raises with its reason
+                entry["error"] = f"bootstrap failed: {type(exc).__name__}: {exc}"
+    out["seconds"] = {"bloomberg": round(bootstrap_started - step_started, 1),
+                      "bootstrap": round(time.perf_counter() - bootstrap_started, 1)}
     return out
 
 
@@ -1131,7 +1038,7 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
         # tools/bbg_diagnostics.py can report a real PASS/FAIL instead of always pointing
         # the user at --probe. Isolated in its own try/except so a bookkeeping failure
         # here never masks a vol_quotes write that otherwise succeeded (same discipline as
-        # the fixings-vs-curve-quotes gotcha in _rates_step above).
+        # step).
         try:
             out["ticker_checks_recorded"] = vm.record_vol_ticker_checks(conn, result)
         except Exception as exc2:  # noqa: BLE001
@@ -1168,50 +1075,21 @@ def _enrich_no_vol_reason(conn: sqlite3.Connection, trade_id: str, reason: str, 
             "py -3 -m data.bloomberg.vol_marketdata --probe on the Bloomberg PC to check these tickers.")
 
 
-def _dividend_step(conn: sqlite3.Connection, session, service, today: date, diag=None) -> dict:
-    """The dividend yield of every index a listed option on file is written on (the
-    Bloomberg library's DIV_YIELD rows), into `equity_dividend_yields` under BBG_BDP: an
-    input of that option's Greeks only, never of its P&L. Bloomberg quotes it in per cent;
-    the first of `library.DIV_YIELD_FIELDS` it answers is taken. Never raises."""
-    from data.bloomberg import library
-    out: dict = {"written": 0, "missing": []}
-    try:
-        tickers = library.keys(conn, today.isoformat(), library.DIV_YIELD)
-        if not tickers:
-            return out
-        from data.bloomberg.pull_marks import fetch_reference
-        from engine.options.equity_commodity import set_dividend_yield
-        data = fetch_reference(session, service, tickers, list(library.DIV_YIELD_FIELDS), diag=diag,
-                               tag={"purpose": "DIV_YIELD"})
-        for ticker in tickers:
-            got = data.get(ticker, {})
-            value = next((got[f] for f in library.DIV_YIELD_FIELDS if got.get(f) is not None), None)
-            try:
-                set_dividend_yield(conn, today.isoformat(), ticker, float(value) / 100.0, source="BBG_BDP")
-                out["written"] += 1
-            except (TypeError, ValueError):
-                out["missing"].append(f"{ticker}: Bloomberg returned no {' or '.join(library.DIV_YIELD_FIELDS)}")
-    except Exception as exc:  # noqa: BLE001
-        out["error"] = f"{exc!r}"
-    return out
-
-
 def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Optional[List[dict]] = None) -> dict:
-    """Price every FX option through engine/options (PREMIUM + Greeks), and work out the
-    Greeks of every listed index option from Bloomberg's price of it. Never raises.
+    """Price every FX option through engine/options (PREMIUM + Greeks). Never raises. The
+    listed index options' Greeks left with the equity index on 2026-09-24 (their P&L is
+    Bloomberg's price of them, the FUTURE_PX this pull writes, and needs no pricing).
     `vol_diagnostics` (see _vol_step) is used only to enrich a "no vol" skip reason with
     the specific failing Bloomberg ticker(s) for that trade's pair (item 3c, 2026-09-17)."""
     out: dict = {"priced": 0, "skipped": [], "closed_out": [], "as_of_date": today.isoformat()}
-    n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product IN ('FX_OPTION','EQ_OPTION') "
+    n = conn.execute("SELECT COUNT(*) FROM trades_official WHERE product = 'FX_OPTION' "
                      "AND trade_date <= ?", (today.isoformat(),)).fetchone()[0]
     if not n:
         out["skipped"] = "no FX_OPTION trades to price"
         return out
     try:
         from engine.options.store import price_all_and_store
-        from engine.options.equity_commodity import price_all_and_store_equity
         outcomes = list(price_all_and_store(conn, today.isoformat()))
-        outcomes += price_all_and_store_equity(conn, today.isoformat())
         out["priced"] = sum(1 for o in outcomes if getattr(o, "priced", False))
         skipped, closed_out = [], []
         for o in outcomes:
@@ -1297,7 +1175,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
               rates_source=None, vol_source=None) -> dict:
     """One full cycle. Returns and writes the status dict. Never raises: any exception
     becomes connected=False with the traceback in `reason`. `today` (the date every mark of
-    this cycle is stamped with, the rates / vol / options steps price and realise_settled
+    this cycle is stamped with, the curves / vol / options steps price and realise_settled
     freezes as of) defaults to the book date, `book_today`: the New York date, rolled at
     17:00 New York (user decision 2026-09-22); injectable for tests. `vol_source` mirrors
     `rates_source`'s injection for _vol_step (data.bloomberg.vol_marketdata's live/file
@@ -1313,7 +1191,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     to 0.1, always with the same keys (TIMING_KEYS; 0.0 for a step that did not run):
     `session` opening the one shared blpapi session; `spot`, `forwards` (the FWD_CURVE
     request and the interpolation) and `futures` the three FX-side Bloomberg requests;
-    `rates` OIS quotes + fixings + IRS pricing (split again in status["rates"]["seconds"]);
+    `curves` the OIS quotes and their bootstrap (split again in status["curves"]["seconds"];
+    "rates" until 2026-09-24, when the swap pricing and fixings left the step);
     `vol` the vol quotes; `options` the option pricing; `ledger` realise_settled; `total`
     the whole cycle. What the steps do not cover is in `status["timings_other"]`: building
     the request list and writing the FX marks, which is where a wait for the SQLite write
@@ -1396,23 +1275,22 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             for entry in status["not_requestable"]:
                 status["warnings"].append(f"FUTURE_PX {entry['instrument_id']} not requested: {entry['reason']}")
             if not requests:
-                # Nothing FX-shaped to price, but swaps and options may still need a
-                # curve / premium refresh (2026-09-17) before the FX-only early return.
-                status["rates"] = _timed(timings, "rates", _rates_step, conn, today, host, port, rates_source,
-                                         shared=shared)
+                # Nothing FX-shaped to price, but options may still need a curve /
+                # premium refresh (2026-09-17) before the FX-only early return.
+                status["curves"] = _timed(timings, "curves", _curves_step, conn, today, host, port, rates_source,
+                                          shared=shared)
                 status["vol"] = _timed(timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
                 status["options"] = _timed(timings, "options", _options_step, conn, today,
                                            status["vol"].get("diagnostics"))
                 status.update(connected=True, reason="no open FX legs or futures to price")
                 return _finish()
-            # One session for the whole cycle (2026-09-21): the rates and vol steps below
+            # One session for the whole cycle (2026-09-21): the curves and vol steps below
             # borrow this one instead of each opening their own.
             session, service = shared.get()
             session_opened = True
             snapped = _now_iso()  # live pull: real wall-clock time, not the 15:00 NY convention
             spot_rows, spot_fail = _timed(timings, "spot", _live_spot_rows, session, service, requests, today, diag,
                                           snapped)
-            # SPOT only: an NDF_1M row sits on the same pair (USDKRW) and is not its spot.
             spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows if r["mark_type"] == "SPOT"}
             # A forward whose settle date is already past (trade settled since the snapshot)
             # has nothing to price: reported SKIPPED, never FAILED, never counted as missing.
@@ -1435,16 +1313,12 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 timings, "futures", pm.build_future_rows, session, service, fut_reqs, today, diag, live=True,
                 mid_first={r.bbg_ticker for r in fut_reqs if r.instrument_id in listed}) \
                 if fut_reqs else ([], [], [])
-            status["dividends"] = _timed(timings, "futures", _dividend_step, conn, session, service, today, diag)
             # A cross's USD-conversion pair or an option's own pair with no instrument row
             # on file used to be requested but never written (write_marks skips unknown
             # instruments); build_requests now creates that row first
             # (_ensure_fx_instruments), so the mark lands (2026-09-18).
-            fix_reqs = [r for r in requests if r.mark_type == "NDF_FIX"]
-            fix_rows, fix_warnings, fix_fail = _timed(timings, "futures", ndf_fix_rows, session, service, fix_reqs,
-                                                      today, snapped_at=snapped) if fix_reqs else ([], [], [])
-            warnings = list(status["warnings"]) + fwd_warnings + fut_warnings + fix_warnings
-            rows = spot_rows + fwd_rows + fut_rows + fix_rows
+            warnings = list(status["warnings"]) + fwd_warnings + fut_warnings
+            rows = spot_rows + fwd_rows + fut_rows
             written = _timed(other, "write_marks", write_marks, conn, rows)
             # Bloomberg's own FWD_CURVE tenor points, at their own dates, as official
             # forwards -- kept out of `written` so "wrote N of M requested" stays exact.
@@ -1453,16 +1327,15 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 other, "write_marks", write_marks,
                 conn, [r for r in curve_rows
                        if (r["instrument_id"], r["mark_type"], r["settle_date"]) not in requested_keys])
-            # Rates (2026-09-17): OIS curve quotes + fixings per swap currency AND per open
-            # FX_OPTION's pair currencies into curve_quotes / index_fixings, then every IRS
-            # priced (PV_USD / DV01_USD / CASHFLOW_USD / PAR_RATE, source QL_PRICER). Vol
-            # (2026-09-17): the FX vol smile (ATM/RR/BF) into vol_quotes for every open
-            # option's pair. Then every FX option priced (PREMIUM and Greeks, source
+            # Curves: the OIS curve quotes of every open FX_OPTION's pair currencies into
+            # curve_quotes, bootstrapped into `curves` (no swap is priced since 2026-09-24).
+            # Vol (2026-09-17): the FX vol smile (ATM/RR/BF) into vol_quotes for every open
+            # option's pair. Then every option priced (PREMIUM and Greeks, source
             # QL_OPTIONS_PRICER), with the vol step's per-ticker diagnostics available to
-            # enrich a "no vol" skip reason. All three before realise_settled so a swap
-            # maturing today or an option expiring today freezes at today's mark.
-            status["rates"] = _timed(timings, "rates", _rates_step, conn, today, host, port, rates_source,
-                                     shared=shared)
+            # enrich a "no vol" skip reason. All three before realise_settled so an option
+            # expiring today freezes at today's mark.
+            status["curves"] = _timed(timings, "curves", _curves_step, conn, today, host, port, rates_source,
+                                      shared=shared)
             status["vol"] = _timed(timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
             status["options"] = _timed(timings, "options", _options_step, conn, today,
                                        status["vol"].get("diagnostics"))
@@ -1485,7 +1358,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             ok_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]): r for r in rows}
             items = []
             for r in requests:
-                settle = today.isoformat() if r.mark_type in SPOT_LIKE_MARK_TYPES else r.settle_date
+                settle = today.isoformat() if r.mark_type == "SPOT" else r.settle_date
                 if (r.instrument_id, r.settle_date) in past and r.mark_type == "FWD_OUTRIGHT":
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
                                   "status": "SKIPPED", "value": None, "source": "",
@@ -1497,9 +1370,9 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                                   "status": "OK", "value": hit["value"], "source": hit["source"],
                                   "detail": hit.get("detail", "")})
                 else:
-                    detail = next((f.get("detail", "") or f.get("reason", "") for f in spot_fail + fwd_fail + fut_fail + fix_fail
+                    detail = next((f.get("detail", "") or f.get("reason", "") for f in spot_fail + fwd_fail + fut_fail
                                    if f.get("instrument_id") == r.instrument_id and f.get("mark_type") == r.mark_type
-                                   and (r.mark_type in SPOT_LIKE_MARK_TYPES or f.get("settle_date") == r.settle_date)),
+                                   and (r.mark_type == "SPOT" or f.get("settle_date") == r.settle_date)),
                                   "not returned")
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
                                   "status": "FAILED", "value": None, "source": "", "detail": detail})
@@ -1510,7 +1383,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             conn.close()
             # The blpapi session this cycle opened must be stopped here, not left to
             # garbage collection: one leaked session per cycle (and per "Pull now" click)
-            # was the 2026-09-18 audit's top resource finding. The rates and vol sources
+            # was the 2026-09-18 audit's top resource finding. The curves and vol sources
             # only borrow it (their close() leaves a borrowed session alone).
             shared.stop()
     except Exception:

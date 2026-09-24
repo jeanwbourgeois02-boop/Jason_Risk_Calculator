@@ -10,8 +10,8 @@ Full replace, not merge (user decision 2026-09-17): "when a new excel is put in 
 the only input for the trades - all of the old stuff gets deleted - sample data and
 previous excels - so there are no duplicates or fake things." A successful
 ``import_blotter`` call deletes every existing row of ``trades`` and its trade-keyed
-dependents (``trade_legs``, ``realised_pnl``, ``swap_review`` -- see
-``FULL_REPLACE_CHILD_TABLES``) for EVERY source, including legacy ``source='BNP'`` rows
+dependents (``trade_legs``, ``realised_pnl`` -- see ``FULL_REPLACE_CHILD_TABLES``) for
+EVERY source, including legacy ``source='BNP'`` rows
 and a previous upload's (or the launcher sample's) rows, before writing the new file's
 own trades. The one exception (2026-09-18) is ``source='MANUAL'``: trades booked by hand
 on the Blotter's Manual entry sub-tab (``data/ingest/manual.py``) exist precisely
@@ -24,13 +24,16 @@ together make up one book). Instruments, marks, curves, curve_quotes and index_f
 are untouched -- keyed by instrument/date, not by trade. Deletion only happens after the
 new file has parsed successfully (inside the same transaction as publishing its rows),
 so a parse failure leaves the existing book completely intact; see ``_stage_and_publish``.
-The one exception to "marks are untouched" (2026-09-18): an interest rate swap that the
-new file turns round has its priced history reversed in place, never deleted, because
-swaps are priced for today only (``data/ingest/irs_direction.py``). The user's own
-pay/receive overrides live in ``irs_direction_overrides``, which no upload ever clears.
-The other exception (2026-09-24): once the book is published, Bloomberg's stored contract
-dates are put back onto the commodity futures (``data/ingest/contract_dates.py``), which
-moves a future's expiry, its NOTIONAL legs and the key of its FUTURE_PX marks, never a value.
+The one exception to "marks are untouched" (2026-09-24): once the book is published,
+Bloomberg's stored contract dates are put back onto the commodity futures
+(``data/ingest/contract_dates.py``), which moves a future's expiry, its NOTIONAL legs and
+the key of its FUTURE_PX marks, never a value.
+
+Retired 2026-09-24 (commodity conversion Phase 2, user yes): the FX-swap package rule
+(``swaps.py``) no longer runs after an upload, so two blotter forwards stay two outright
+forwards; and the upload no longer turns an interest rate swap's priced history round
+(``irs_direction.py``), since rates left the app. An FX swap is still booked by hand
+(``manual.book_fx_swap``).
 
 ``import_blotter_report`` returns the outcome as data (message, rejects, warnings,
 notes) so the UI decides from counts, not from prose; ``import_blotter`` is its message.
@@ -44,7 +47,7 @@ import sqlite3
 
 import pandas as pd
 
-from data.ingest import blotter, irs_direction, schema, swaps
+from data.ingest import blotter, schema
 
 MAX_BYTES = 25 * 1024 * 1024
 # The words the rejects sentence always carries. ui/uploads.py used to decide from this
@@ -59,24 +62,35 @@ BLOTTER_REQUIRED = {"Symbol", "Trade Id"}
 BLOTTER_KIND_COLUMNS = {"Fin Type", "Product"}
 
 # Tables keyed by trade_id (data/ingest/schema.py -- grepped for every "REFERENCES
-# trades" / "trade_id ... PRIMARY KEY"): trade_legs and realised_pnl and swap_review all
-# reference trades and must be cleared before trades itself (FK-safe child-then-parent
-# order) on a full-replace upload. Neither realised_pnl nor swap_review is in
-# schema.TABLES (the generic per-table merge loop below never touches them), so they are
-# deleted explicitly rather than through that loop. Nothing outside data/ingest/schema.py
-# keys a table off trade_id: engine/rates_vol's instrument_rate_options / rate_vols /
-# rate_model_params and engine/options' equivalents are all keyed by instrument_id, not
-# trade_id (checked 2026-09-17), so they are untouched by a trade replace.
-FULL_REPLACE_CHILD_TABLES = ("trade_legs", "realised_pnl", "swap_review")
+# trades" / "trade_id ... PRIMARY KEY"): trade_legs and realised_pnl reference trades and
+# must be cleared before trades itself (FK-safe child-then-parent order) on a full-replace
+# upload. realised_pnl is not in schema.TABLES (the generic per-table merge loop below
+# never touches it), so it is deleted explicitly rather than through that loop. Nothing
+# outside data/ingest/schema.py keys a table off trade_id: engine/options' tables are
+# keyed by instrument_id, not trade_id (checked 2026-09-17), so they are untouched by a
+# trade replace.
+FULL_REPLACE_CHILD_TABLES = ("trade_legs", "realised_pnl")
 FULL_REPLACE_TABLES = FULL_REPLACE_CHILD_TABLES + ("trades",)
+# Retired tables that still reference trades on a database made before 2026-09-24
+# (swap_review: the retired FX-swap package rule's ambiguous candidates). Cleared with the
+# book when the table is there, so its foreign key never blocks the delete; nothing is
+# written to it any more, and a database without it is fine.
+RETIRED_CHILD_TABLES = ("swap_review",)
 # Rows a full replace removes: every trade NOT booked by hand (see the module docstring
 # on ``source='MANUAL'``). Child tables are filtered through this subquery, so it must
 # run before the ``trades`` delete itself.
 _REPLACED_TRADES_SQL = "SELECT trade_id FROM trades WHERE source != 'MANUAL'"
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone() is not None
+
+
 def _delete_replaced_book(conn: sqlite3.Connection) -> None:
     """Delete every non-MANUAL trade and its trade-keyed dependents, children first."""
+    for table in RETIRED_CHILD_TABLES:
+        if _table_exists(conn, table):
+            conn.execute(f"DELETE FROM {table} WHERE trade_id IN ({_REPLACED_TRADES_SQL})")
     for table in FULL_REPLACE_CHILD_TABLES:
         conn.execute(f"DELETE FROM {table} WHERE trade_id IN ({_REPLACED_TRADES_SQL})")
     conn.execute("DELETE FROM trades WHERE source != 'MANUAL'")
@@ -117,7 +131,7 @@ def decode(contents):
 def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
     """Hold a writer lock on `db_path` while staging against a snapshot of it in an
     in-memory DB, call `load_fn(staged_conn)`, then publish staged's rows into the live
-    DB in one transaction and run swap packaging. `load_fn` raises `ValueError` (or lets
+    DB in one transaction. `load_fn` raises `ValueError` (or lets
     a `sqlite3.Error` propagate) on any failure before the publish step runs, and before
     anything is written to `live` -- so a parse/load failure leaves `live` untouched.
 
@@ -144,9 +158,6 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
                 with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as reader:
                     reader.backup(staged)
                 replaced = {}
-                # Which way every swap faces in the book about to be replaced: the marks
-                # on file were priced for exactly these directions (see below).
-                swap_signs_before = irs_direction.irs_signs(live)
                 if full_replace:
                     # staged is a snapshot of live at this instant, so counting on
                     # either connection gives the same pre-delete totals.
@@ -170,23 +181,35 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
                     live.executemany(
                         f"INSERT INTO {table} ({names}) VALUES ({placeholders}) ON CONFLICT DO UPDATE SET {updates}",
                         staged.execute(f"SELECT {names} FROM {table}"))
-                # A swap the new file turned round (no user override holding it) keeps its
-                # priced history: the pricer's PV / DV01 / cashflow marks are reversed in
-                # place, ONCE, here on live -- which is why `import_blotter` loads into
-                # staged with turn_swap_marks=False. Staged could not do it properly
-                # anyway: on a full replace its book is emptied before the load, so the
-                # load sees no "before"; and the merge above only upserts, so the deletes
-                # a flip also needs (other sources' swap marks, the realised_pnl row) would
-                # never reach live. Swaps are priced for today only, so deleting the
-                # history instead would blank the swap's Daily / 5d / MTD / YTD for good
-                # (data/ingest/irs_direction.py docstring).
-                irs_direction.reverse_flipped(live, swap_signs_before)
                 live.commit()
-                swaps.package_swaps(live)
         except Exception:
             live.rollback()
             raise
     return result, replaced
+
+
+# The upload summary's breakdown, counted over the trades the file LOADED (ParseResult.trades),
+# never over the parser's per-kind row counters (n_future etc.), which also count rows that
+# were rejected: "31 futures" when 29 loaded (ui-shell, 2026-09-24). Always shown, zero included.
+_LOADED_KINDS = (("forwards", ("FX_FWD",)), ("spot", ("FX_SPOT",)), ("FX swaps", ("FX_SWAP",)),
+                 ("futures", ("FUTURE",)), ("options", ("FX_OPTION", "EQ_OPTION", "CMDTY_OPTION")))
+
+
+def loaded_breakdown(trades) -> str:
+    """'8 forwards, 1 spot, 29 futures, 5 options': the loaded trades by kind. A kind with none
+    is left out, except forwards, spot, futures and options, which are always named; a product this
+    list does not know is named as it is stored, so no loaded trade goes uncounted."""
+    counts: dict = {}
+    for t in trades:
+        counts[t.product] = counts.get(t.product, 0) + 1
+    parts, known = [], set()
+    for label, products in _LOADED_KINDS:
+        known.update(products)
+        n = sum(counts.get(p, 0) for p in products)
+        if n or label != "FX swaps":
+            parts.append(f"{n} {label}")
+    parts += [f"{n} {product}" for product, n in sorted(counts.items()) if product not in known]
+    return ", ".join(parts)
 
 
 def _library_sentence(db_path) -> str:
@@ -272,31 +295,30 @@ def import_blotter_report(payload, filename, db_path) -> dict:
       warnings  int        things the user should read: a cell that was not a number and
                            was rebuilt from other columns, a NetInvoice that disagrees
                            with Quantity x Price beyond tolerance, a non-numeric strike
-                           cell that was ignored, a cell naming both pay and receive --
-                           anywhere the file's content was doubtful and the parser had
-                           to rebuild, ignore or distrust a cell
+                           cell that was ignored -- anywhere the file's content was
+                           doubtful and the parser had to rebuild, ignore or distrust a cell
       notes     list[str]  the individual note sentences (information first, then the
                            warnings sentence, which names the rows)
 
-    INFORMATION is in `notes` and `message` but never raises `warnings`: a swap read as
-    pay fixed by default, a user direction override kept, an option with no strike in
-    the file. The app shows each of those persistently elsewhere (the Rates notice, the
-    Blotter's missing-terms banner), so an import that only has those is a clean one."""
+    INFORMATION is in `notes` and `message` but never raises `warnings`: an option with
+    no strike in the file, which the Blotter's missing-terms banner shows persistently, so
+    an import that only has that is a clean one.
+
+    The first sentence counts the trades the file loaded, by kind (`loaded_breakdown`), so
+    a rejected row is never in it; the rejects have their own sentence."""
     frame = blotter.read_table(payload, filename)
     validate_blotter_shape(frame)
 
     def _load(staged):
         try:
-            return blotter.load(frame, staged, strict=False, filename=filename, turn_swap_marks=False)
+            return blotter.load(frame, staged, strict=False, filename=filename)
         except sqlite3.Error as e:
             raise ValueError(f"Nothing imported. Database error: {e}") from e
 
     result, replaced = _stage_and_publish(db_path, _load, full_replace=True)
     record_upload_issues(db_path, filename, result)
     n_trades, n_legs = len(result.trades), len(result.legs)
-    parts = [f"Imported {filename}: {n_trades} trades -- "
-             f"{result.n_forward} forwards, {result.n_spot} spot, {result.n_future} futures, "
-             f"{result.n_option} options, {result.n_irs} rate swaps; {n_legs} legs. "
+    parts = [f"Imported {filename}: {n_trades} trades -- {loaded_breakdown(result.trades)}; {n_legs} legs. "
              f"{result.n_currency} cash rows seen ({result.n_spot} of them spot fills)."]
     if replaced.get("trades"):
         parts.append(f"Replaced the previous book: {replaced['trades']} trade(s) and "

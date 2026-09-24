@@ -23,7 +23,7 @@ You own these files and nothing else:
 You are the model: given one day's spot, forwards, OIS curves and smile, you give an option's premium and Greeks. options-store runs you over the book and writes the marks.
 
 **Reads** (the lanes whose output you use): bbg-curves, rates-pricer.
-**Read by** (the lanes to name under "Consumers to brief" when your interface changes): rates-exotics, listed-options-pricer, options-store, ui-options.
+**Read by** (the lanes to name under "Consumers to brief" when your interface changes): listed-options-pricer, options-store, ui-options.
 
 Your lane was split out of `options-pricer` on 2026-09-24. Read `.claude/agent-memory/options-pricer/MEMORY.md` and the notes on your files before starting; write new notes to your own memory.
 

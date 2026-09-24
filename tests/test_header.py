@@ -165,7 +165,7 @@ def test_needed_marks_keeps_the_live_list_for_a_past_date_that_has_no_close_row(
 def test_reason_tag_extracts_the_missing_mark_type():
     assert header._reason_tag("no PREMIUM mark for USDJPY111926P-1 expiry 2026-11-19 on 2026-09-17") == "no PREMIUM"
     assert header._reason_tag("no FWD_OUTRIGHT mark for USDJPY settle 2026-10-01 on 2026-09-17") == "no FWD_OUTRIGHT"
-    assert header._reason_tag("no FUTURE_PX mark for ESU6 Index expiry 2026-12-18 on 2026-09-17") == "no FUTURE_PX"
+    assert header._reason_tag("no FUTURE_PX mark for CLZ6 Comdty expiry 2026-11-19 on 2026-09-17") == "no FUTURE_PX"
 
 
 def test_reason_tag_spot_conversion_and_settled_and_fallback():
@@ -525,7 +525,7 @@ def test_past_close_says_what_the_backfill_recorded_for_that_date():
     assert header.past_close_explanation(no_closes, DAY) == \
         f"Bloomberg returned no closes for {DAY} (a holiday, or no data for that date)"
 
-    reasons = ["no forward-curve history for USDTWD", "no PX_SETTLE history for ESU6 Index on 2026-09-14",
+    reasons = ["no forward-curve history for USDCAD", "no PX_LAST history for CLZ6 Comdty on 2026-09-14",
                "2027-03-17 outside curve for EURSEK"]
     incomplete = {"days": {DAY: {"status": "INCOMPLETE", "missing_count": 37, "missing": reasons}},
                   "last_run": "2026-09-21T09:15:00"}

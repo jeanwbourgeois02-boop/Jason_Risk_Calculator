@@ -28,9 +28,9 @@ CORRA, AUD AONIA -- seven currencies, NOT the full G10 set
 any ``manual_rates`` row for that currency is ignored -- the curve always
 wins when it exists (Phase 7.1, 2026-09-17).
 
-**manual_rates fallback (Phase 7.1, 2026-09-17).** The book's biggest FX
-option positions are in pairs like EURSEK, USDTWD and USDZAR -- SEK/TWD/ZAR
-have no OIS convention anywhere in this codebase, so deleting the
+**manual_rates fallback (Phase 7.1, 2026-09-17).** The macro book this app
+was forked from held its biggest FX option positions in pairs like EURSEK,
+USDTWD and USDZAR -- SEK/TWD/ZAR have no OIS convention anywhere in this codebase, so deleting the
 illustrative placeholder (see below) without a fallback would silently skip
 every one of those real positions, not just an illustrative test fixture.
 ``manual_rates`` (this module's own small DDL, same shape as ``inputs.py``'s
@@ -116,7 +116,7 @@ the REAL system date on every pricer call (see pricer.py's own "Time-to-
 expiry" docstring section) -- so a curve's ``zeroRate()`` read AFTER any
 vendored pricer has run in between can silently use the wrong date unless
 reset first. ``zero_rate_to`` resets it to ``as_of`` immediately before
-reading, mirroring ``engine/rates_vol/inputs.py::_set_eval_date``.
+reading.
 """
 from __future__ import annotations
 
@@ -297,7 +297,7 @@ def resolve_ccy_rate_with_source(
 ) -> Tuple[Optional[RateInput], str]:
     """Single-currency rate resolution with provenance -- the shared
     implementation behind both `resolve_fx_rates` (per FX leg) and
-    `resolve_ccy_rate` (single-rate equity/commodity callers). See module
+    `resolve_ccy_rate` (single-rate listed-option callers). See module
     docstring's numbered resolution order. Returns (RateInput, "") or
     (None, "no curve/rate <CCY>") -- never a placeholder."""
     curve_set, _reason = _get_curve(conn, as_of, ccy, curve_cache)
@@ -506,9 +506,9 @@ def resolve_ccy_rate(
     expiry_iso: str,
     curve_cache: Optional[dict] = None,
 ) -> Tuple[Optional[float], str]:
-    """Single-currency zero rate to `expiry_iso` -- used by the equity/
-    commodity pricers (one discount rate, `instruments.quote_ccy`, rather
-    than a domestic/foreign pair). Public signature unchanged (still a
+    """Single-currency zero rate to `expiry_iso` -- used by the listed
+    (commodity) option pricer (one discount rate, `instruments.quote_ccy`,
+    rather than a domestic/foreign pair). Public signature unchanged (still a
     plain float, not RateInput) -- `equity_commodity.py` consumes the
     return value directly as a number; use
     `resolve_ccy_rate_with_source` for provenance."""

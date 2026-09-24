@@ -1,0 +1,1 @@
+- [FX_SWAP tag kept in Phase 2](fx-swap-tag-kept-phase2-2026-09-24.md) — why FX_PRODUCTS still has FX_SWAP; drop only with ui-blotter + engine; tests use inline fixtures

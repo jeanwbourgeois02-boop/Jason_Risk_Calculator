@@ -81,3 +81,18 @@ each tested against the synthetic sample `data/sample/commodity_blotter_sample.c
    not given.
 8. Which rows are the book's is `config/book.yaml` (fund, trader, desk). The sample's Trader
    'JB' and Desk 'JBRV' are made up; Jason's real codes are open question C1.
+
+## Retired products (Phase 2, 2026-09-24)
+
+The macro trader's rate swaps, NDFs, equity index futures and listed index options left the app
+(CLAUDE.md "Commodity conversion plan"). The parser's guesses for them:
+
+1. A row of a removed kind (a rate swap by `Fin Type` / `Product`, an ES / NQ / RTY / YM future,
+   an SPX / NDX / RUT / SX5E option) is counted and skipped with a plain reason, shown under
+   "NOT LOADED" in the upload box; it is never rejected and never read as another product.
+2. Any other listed-option Symbol of the shape `ROOT/[EA]yymmdd[CP]strike` is skipped as "not
+   loaded yet", on the guess that Phase 5's options on commodity futures will arrive in that
+   shape.
+3. Every FX pair is loaded as deliverable (`is_ndf` 0, legs `settles_cash` 1): the NDF list is gone.
+4. The synthetic sample's dates are read day-first (rows such as 17/8/2026 settle it); every
+   ambiguous cell (1/9, 10/8, 8/9, 3/9, 12/8, 10/9) lands on the intended date.

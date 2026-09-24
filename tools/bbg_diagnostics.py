@@ -26,17 +26,14 @@ Checks (each becomes one or more result rows):
                                    match CLAUDE.md's table exactly, and marks_official
                                    never serves BNP_BVAL, nor BBG_INTERP outside its one
                                    official role (the FWD_OUTRIGHT fallback, user decision
-                                   2026-09-18), nor BBG_BDH for the three IRS mark_types
+                                   2026-09-18)
   3. FX marks coverage         -- every open FX pair/leg's SPOT and FWD_OUTRIGHT is
                                    OFFICIAL (not MISSING/INTERP/MANUAL fallback) as of
                                    the given date, via data.bloomberg.inventory
   4. Futures marks coverage    -- every open future's FUTURE_PX is OFFICIAL
-  5. IRS / OIS curve coverage  -- curve_quotes has today's quotes for every OIS index in
-                                   scope that a live IRS trade needs, and PAR_RATE/PV_USD/
-                                   DV01_USD marks (where present) are QL_PRICER, never
-                                   BBG_BDH, as official
-  5b. Overnight index fixings  -- a seasoned swap has its index's fixings on file from
-                                   its effective date to as_of (engine/rates needs them)
+  5. OIS curve coverage       -- curve_quotes has today's quotes for every OIS index in
+                                   scope that an open FX option's pair needs (the
+                                   options price off those discount curves)
   5c. FX option coverage       -- every open option has a strike on file (else it can
                                    never be priced) and an official PREMIUM and DELTA
   5d. Clock                    -- local time vs New York, and whether as_of is the book
@@ -137,15 +134,11 @@ def check_session(host: str, port: int) -> List[Check]:
 _EXPECTED_OFFICIAL = {
     # CLAUDE.md "Official marks" table, restated here on purpose (not imported from
     # data/ingest/schema.py) so that a drift between the schema and the contract is
-    # reported instead of silently agreed with. Updated 2026-09-17: DELTA/PREMIUM and the
-    # Greeks moved from MANUAL to QL_OPTIONS_PRICER; CASHFLOW_USD added under QL_PRICER.
+    # reported instead of silently agreed with. DELTA/PREMIUM and the Greeks are the options
+    # pricer's (QL_OPTIONS_PRICER); the swap mark types left with the rates book.
     "SPOT": "BBG_BFXFORWARD",
     "FWD_OUTRIGHT": "BBG_BFXFORWARD",
     "FUTURE_PX": "BBG_BDH",
-    "PAR_RATE": "QL_PRICER",
-    "PV_USD": "QL_PRICER",
-    "DV01_USD": "QL_PRICER",
-    "CASHFLOW_USD": "QL_PRICER",
     "DELTA": "QL_OPTIONS_PRICER",
     "DELTA_PA": "QL_OPTIONS_PRICER",
     "PREMIUM": "QL_OPTIONS_PRICER",
@@ -183,7 +176,6 @@ def check_official_source_mapping(conn: Optional[sqlite3.Connection]) -> List[Ch
         out.append(_row("Official-source mapping matches CLAUDE.md", "pass",
                          "SPOT/FWD_OUTRIGHT->BBG_BFXFORWARD (FWD_OUTRIGHT falls back to BBG_INTERP where "
                          "Bloomberg has no direct quote for that date), FUTURE_PX->BBG_BDH, "
-                         "PAR_RATE/PV_USD/DV01_USD/CASHFLOW_USD->QL_PRICER, "
                          "PREMIUM/DELTA/Greeks->QL_OPTIONS_PRICER, as specified."))
 
     if conn is None:
@@ -257,71 +249,55 @@ def check_fx_and_future_coverage(conn: sqlite3.Connection, as_of: str) -> List[C
     return out
 
 
-# --------------------------------------------------------------------------- 5. IRS / OIS curves
+# --------------------------------------------------------------------------- 5. OIS curves for the FX options
 _OIS_INDEX = {"USD": "SOFR", "EUR": "ESTR", "GBP": "SONIA", "JPY": "TONA",
               "CHF": "SARON", "CAD": "CORRA", "AUD": "AONIA"}
 
 
-def check_irs_curve_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+def check_ois_curve_coverage(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """The OIS discount curves the open FX options price off (engine/options/rates.py):
+    each currency of an open option's pair with an OIS index in scope needs that day's
+    quotes in curve_quotes. A currency with no OIS index takes its rate another way
+    (engine/options/rates.py) and is named, not failed."""
     out: List[Check] = []
     try:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
     except sqlite3.Error as exc:
-        return [_row("IRS / OIS curve coverage", "fail", f"Could not read the schema ({exc}).")]
-
+        return [_row("OIS curve coverage (FX options)", "fail", f"Could not read the schema ({exc}).")]
     if "trades" not in tables:
-        return [_row("IRS / OIS curve coverage", "warning", "No trades table found; skipping.")]
-
+        return [_row("OIS curve coverage (FX options)", "warning", "No trades table found; skipping.")]
     try:
-        irs_ccys = {r[0] for r in conn.execute(
-            "SELECT DISTINCT i.base_ccy FROM trades t JOIN instruments i USING (instrument_id) "
-            "WHERE t.product = 'IRS'")}
+        pairs = conn.execute(
+            "SELECT DISTINCT i.base_ccy, i.quote_ccy FROM trades t JOIN instruments i USING (instrument_id) "
+            "WHERE t.product = 'FX_OPTION' AND i.expiry_date >= ?", (as_of,)).fetchall()
     except sqlite3.Error as exc:
-        return [_row("IRS / OIS curve coverage", "fail", f"Could not read IRS trades ({exc}).")]
+        return [_row("OIS curve coverage (FX options)", "fail", f"Could not read FX option trades ({exc}).")]
+    ccys = {c for pair in pairs for c in pair if c}
+    if not ccys:
+        return [_row("OIS curve coverage (FX options)", "pass", "No open FX options; no OIS curve is required today.")]
 
-    if not irs_ccys:
-        out.append(_row("IRS / OIS curve coverage", "pass", "No live IRS trades; no curve is required today."))
+    no_index = sorted(ccys - _OIS_INDEX.keys())
+    if no_index:
+        out.append(_row("OIS curve coverage (FX options)", "pass",
+                         f"{', '.join(no_index)} has no OIS index in scope (USD/EUR/GBP/JPY/CHF/CAD/AUD only); "
+                         "the options pricer takes its rate another way (engine/options/rates.py)."))
+    in_scope = sorted(ccys & _OIS_INDEX.keys())
+    if in_scope and "curve_quotes" not in tables:
+        out.append(_row("OIS curve coverage (FX options)", "fail",
+                         "curve_quotes table does not exist, but open FX options need an OIS curve in "
+                         f"{', '.join(in_scope)}."))
         return out
-
-    if "curve_quotes" not in tables:
-        out.append(_row("IRS / OIS curve coverage", "fail",
-                         "curve_quotes table does not exist, but live IRS trades exist that need an OIS curve."))
-        return out
-
-    missing_idx = [c for c in irs_ccys if c not in _OIS_INDEX]
-    if missing_idx:
-        out.append(_row("IRS / OIS curve coverage", "warning",
-                         f"IRS trades exist in {', '.join(sorted(missing_idx))}, which has no OIS index mapped "
-                         "in Phase 1 scope (USD/EUR/GBP/JPY/CHF/CAD/AUD only)."))
-
-    for ccy in sorted(irs_ccys & _OIS_INDEX.keys()):
+    for ccy in in_scope:
         idx = _OIS_INDEX[ccy]
         n = conn.execute("SELECT COUNT(*) FROM curve_quotes WHERE as_of_date = ? AND ccy = ? AND \"index\" = ?",
                           (as_of, ccy, idx)).fetchone()[0]
         if n == 0:
             out.append(_row(f"{ccy}-{idx} curve quotes for {as_of}", "fail",
-                             f"No {idx} curve quotes found for {as_of} in curve_quotes, but a live {ccy} IRS "
-                             "trade needs one -- the Bloomberg curve pull may not have run."))
+                             f"No {idx} curve quotes found for {as_of} in curve_quotes, but an open FX option on a "
+                             f"{ccy} pair needs one -- the Bloomberg curve pull may not have run."))
         else:
             out.append(_row(f"{ccy}-{idx} curve quotes for {as_of}", "pass",
                              f"{n} {idx} curve quote(s) present for {as_of}."))
-
-    for mark_type in ("PAR_RATE", "PV_USD", "DV01_USD"):
-        bad = conn.execute(
-            "SELECT COUNT(*) FROM marks WHERE mark_type = ? AND source = 'BBG_BDH' AND as_of_date = ? "
-            "AND instrument_id IN (SELECT instrument_id FROM marks_official WHERE mark_type = ? AND source = 'BBG_BDH')",
-            (mark_type, as_of, mark_type)).fetchone()[0]
-        official_source = conn.execute(
-            "SELECT DISTINCT source FROM marks_official WHERE mark_type = ? AND as_of_date = ?",
-            (mark_type, as_of)).fetchall()
-        wrong = [s for (s,) in official_source if s != "QL_PRICER"]
-        if wrong:
-            out.append(_row(f"{mark_type} official source", "fail",
-                             f"marks_official resolves {mark_type} to {wrong} for {as_of}, not QL_PRICER; "
-                             "BBG_BDH (Bloomberg SWPM) is reconciliation-only for IRS per the 2026-09-15 decision."))
-        elif official_source:
-            out.append(_row(f"{mark_type} official source", "pass",
-                             f"{mark_type} resolves to QL_PRICER for {as_of}, as required."))
     return out
 
 
@@ -412,40 +388,6 @@ def check_option_coverage(conn: sqlite3.Connection, as_of: str, db_path: Optiona
         else:
             out.append(_row(f"FX option {mark_type} coverage", "pass",
                              f"All {len(priceable)} priceable open option(s) have an official {mark_type} for {as_of}."))
-    return out
-
-
-# --------------------------------------------------------------------------- 5c. index fixings
-def check_index_fixings(conn: sqlite3.Connection, as_of: str) -> List[Check]:
-    """A seasoned swap (effective date already passed) needs the overnight fixings of its
-    index from its effective date to as_of to value the current float period. Reports,
-    per index, whether any fixings are on file over that window."""
-    out: List[Check] = []
-    try:
-        rows = conn.execute(
-            "SELECT i.base_ccy, MIN(l.start_date) FROM trades_official t "
-            "JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id) "
-            "WHERE t.product = 'IRS' AND l.leg_type = 'FLOAT' AND l.start_date <= ? AND l.settle_date >= ? "
-            "GROUP BY i.base_ccy", (as_of, as_of)).fetchall()
-    except sqlite3.Error as exc:
-        return [_row("Overnight index fixings", "fail", f"Could not read IRS legs ({exc}).")]
-    if not rows:
-        return [_row("Overnight index fixings", "pass", "No seasoned IRS trades; no fixings are required today.")]
-    for ccy, first_start in rows:
-        idx = _OIS_INDEX.get(ccy)
-        if idx is None:
-            out.append(_row(f"{ccy} overnight fixings", "warning", f"{ccy} has no OIS index in scope; fixings cannot be checked."))
-            continue
-        n, last = conn.execute(
-            'SELECT COUNT(*), MAX(fixing_date) FROM index_fixings WHERE "index" = ? AND fixing_date BETWEEN ? AND ?',
-            (idx, first_start, as_of)).fetchone()
-        if n == 0:
-            out.append(_row(f"{idx} fixings since {first_start}", "fail",
-                             f"No {idx} fixings on file between {first_start} and {as_of}, but a seasoned {ccy} swap "
-                             "needs them to value its current float period -- the rates step of the live feed writes "
-                             "them (data/bloomberg/rates_marketdata.py::write_fixings)."))
-        else:
-            out.append(_row(f"{idx} fixings since {first_start}", "pass", f"{n} {idx} fixing(s) on file, latest {last}."))
     return out
 
 
@@ -667,7 +609,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
                               host: Optional[str] = None, port: Optional[int] = None) -> List[Check]:
     """Runs every check and returns a flat list of {name, status, message} dicts, newest
     to CLAUDE.md's own ordering (session, official-source mapping, FX/futures coverage,
-    IRS/curve coverage, snapped_at, last pull). Never raises: any single check that blows
+    OIS curve coverage for the FX options, snapped_at, last pull). Never raises: any single check that blows
     up is caught and turned into one 'fail' row for that check rather than aborting the
     rest, since a partial report is far more useful than none on a page a non-technical
     user clicks."""
@@ -702,8 +644,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
     if conn is not None:
         resolved_as_of = as_of or _latest_as_of(conn)
         _safe("FX/futures marks coverage", check_fx_and_future_coverage, conn, resolved_as_of)
-        _safe("IRS / OIS curve coverage", check_irs_curve_coverage, conn, resolved_as_of)
-        _safe("Overnight index fixings", check_index_fixings, conn, resolved_as_of)
+        _safe("OIS curve coverage (FX options)", check_ois_curve_coverage, conn, resolved_as_of)
         _safe("FX option marks coverage", check_option_coverage, conn, resolved_as_of, resolved_db)
         _safe("snapped_at carries a resolved offset", check_snapped_at_offset, conn, resolved_as_of)
         conn.close()

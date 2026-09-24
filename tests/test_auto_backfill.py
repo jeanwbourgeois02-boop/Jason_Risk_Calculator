@@ -506,51 +506,6 @@ def test_auto_backfill_says_that_past_days_not_stamped_at_the_close_are_requeste
     assert block["note"] == "" and "points_scale" in block
 
 
-# =========================================================================== 2026-09-22: past NDF fixes
-def test_auto_backfill_asks_for_a_past_fixing_dates_ndf_fix_when_that_is_all_the_day_lacks(tmp_path):
-    """The NDF's exit price is the official NDF_FIX of its own fixing date (pnl-engine,
-    2026-09-22), so every past fixing date's fix must be on file: a day whose closes are all
-    at 15:00 but whose NDF_FIX is missing is incomplete, and the run asks the fixing ticker's
-    history for that day and writes the fix; nothing else on the day is rewritten."""
-    p = tmp_path / "risk.db"
-    conn = schema.connect(p)
-    conn.execute("INSERT INTO instruments VALUES ('USDBRL','FX','USD','BRL',1,1,'USDBRL Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('b1','XLSX','USDBRL','FX_FWD','b1','2026-09-14',1e6,5.2,'acc','cp','HAHY7','t','d','')")
-    settle, fixing = "2026-09-18", "2026-09-16"                     # Fri value date fixes Wed (T-2)
-    conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-        ("b1", 1, "FX_NEAR", "USD", 1e6, "2026-09-14", settle, 5.2, 0),
-        ("b1", 2, "FX_NEAR", "BRL", -5.2e6, "2026-09-14", settle, 5.2, 0)])
-    days = backfill.business_days(date(2026, 9, 14), date(2026, 9, 18))
-    for d in days:                                                  # every day's SPOT and forward already at the close
-        stamp = backfill.close_stamp(d)
-        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (d.isoformat(), "USDBRL", d.isoformat(), "SPOT", 5.30, "BBG_BFXFORWARD", stamp))
-        conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", (d.isoformat(), "USDBRL", settle, "FWD_OUTRIGHT", 5.31, "BBG_INTERP", stamp))
-    conn.commit()
-    from data.bloomberg.inventory import close_completeness
-    strip = {r.as_of_date: r for r in close_completeness(conn, "2026-09-14", "2026-09-18").itertuples()}
-    assert [d for d, r in strip.items() if not r.complete] == [fixing]
-    assert strip[fixing].missing == [{"instrument_id": "USDBRL", "settle_date": fixing, "mark_type": "NDF_FIX"}]
-    asked = []
-
-    def history(session, service, tickers, fields, start, end):
-        asked.append((sorted(tickers), list(fields), start, end))
-        if "BZFXPTAX Index" in tickers:
-            return {"BZFXPTAX Index": {fixing: {"PX_LAST": 5.3399}}}
-        return {t: {d.isoformat(): {"PX_LAST": 5.31, "SETTLE_DT": settle} for d in backfill.business_days(start, end)}
-                for t in tickers}
-
-    results = backfill.auto_backfill(p, fetch=lambda s, v, tickers, field, d: {"USDBRL Curncy": 5.30},
-                                     fwd_fetch=history, fut_fetch=history, log=lambda *_: None)
-    assert [(r["day"], r["status"]) for r in results] == [(fixing, "DONE")]      # (e) the fixing date alone is asked for
-    assert (["BZFXPTAX Index"], ["PX_LAST"], date(2026, 9, 16), date(2026, 9, 16)) in asked
-    assert conn.execute("SELECT as_of_date, settle_date, value, source FROM marks_official WHERE mark_type = 'NDF_FIX'"
-                        ).fetchall() == [(fixing, fixing, 5.3399, "BBG_BDH")]
-    assert conn.execute("SELECT COUNT(*) FROM marks WHERE mark_type IN ('SPOT', 'FWD_OUTRIGHT')").fetchone() == (2 * len(days),)
-    assert all(r.complete for r in close_completeness(conn, "2026-09-14", "2026-09-18").itertuples())
-    assert backfill.auto_backfill(p, fetch=lambda *a: {"USDBRL Curncy": 5.30}, fwd_fetch=history, fut_fetch=history,
-                                  log=lambda *_: None) == []
-
-
 # =========================================================================== 2026-09-22: one day boundary
 def test_after_the_1700_roll_the_day_just_ended_is_past_for_the_backfill_and_the_new_days_live_rows_stay(tmp_path, monkeypatch):
     """User decision 2026-09-22 (a Hong Kong user: "all date rollover at hkt 5am", 17:00 New
@@ -675,9 +630,9 @@ def test_auto_backfill_works_a_day_whose_closes_are_complete_but_whose_inputs_ar
     days_block = backfill._days_block[key]
     assert days_block["2026-09-18"] == {"status": "INCOMPLETE", "missing_count": 1,
                                         "missing": [backfill._day_state[(key, "2026-09-18")]["missing"][0]]}
-    rates_block = backfill._rates_block[key]
-    assert rates_block["2026-09-18"] == {"priced": None, "failed": [], "note": "", "vol_quotes": 45, "curve_quotes": 17,
-                                         "missing_inputs": results[0]["missing_inputs"]}
+    inputs_block = backfill._inputs_block[key]                                    # "rates" until 2026-09-24
+    assert inputs_block["2026-09-18"] == {"vol_quotes": 45, "curve_quotes": 17,
+                                          "missing_inputs": results[0]["missing_inputs"]}
     # within the hour: nothing is asked again; after it, JPY's curve alone is asked for once more
     asked.clear()
     now[0] += 60
@@ -884,7 +839,6 @@ def test_rejection_texts_and_ticker_labels():
     assert not backfill.is_rejection("Bloomberg returned no forward tenor prices for USDBRL on 2026-09-18")
     assert backfill._reason_label("Bloomberg answered the intraday request for USDBRLSP Curncy with: Unknown/Invalid security") == "USDBRLSP Curncy"
     assert backfill._reason_label("Bloomberg returned no PX_LAST for SPX/E261016C7615 on 2026-09-21") == "PX_LAST of SPX/E261016C7615"
-    assert backfill._reason_label("Bloomberg returned no fixing (PX_LAST) for USDKRW on 2026-09-17") == "fixing (PX_LAST) of USDKRW"
     assert backfill.recent_business_days(date(2026, 9, 21)) == ["2026-09-16", "2026-09-17", "2026-09-18"]
     assert backfill.recent_business_days(date(2026, 9, 8)) == ["2026-09-02", "2026-09-03", "2026-09-04"]   # Labor Day 09-07 skipped
     assert backfill.state_version().startswith(__import__("data.bloomberg.library", fromlist=["x"]).LIBRARY_VERSION + "+")

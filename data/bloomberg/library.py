@@ -20,26 +20,12 @@ cycle until 2026-09-21; the rules did not change, only where they are kept):
     OIS curve of both currencies and the pair's vol smile (on every day it is open: live
     today, and from Bloomberg's daily history for a past close, 2026-09-22, so a past day
     prices the option from its own inputs), and -- today only -- a FWD_OUTRIGHT at the
-    expiry (the past day's curve is built from the tenor history instead).
-  * IRS, until maturity: the currency's OIS curve on every day it is open (live today,
-    history for a past close), and -- today only -- its overnight fixings (the live rates
-    step pulls the fixing history from the swap's start, so no past day asks for them).
-  * NDF currencies (user decision 2026-09-21: "NDFs - always show 1m forward date price,
-    not spot ... based off the monthly not the spot"): every FX spot / forward / swap and
-    every FX option with a currency in data.ingest.common.NDF_1M_TICKERS (KRW, IDR, INR,
-    TWD, BRL) also needs that currency's 1M NDF outright -- kind NDF_1M, key = the
-    currency's USD pair ('USDKRW', for a cross such as EURKRW too), bbg_ticker = the
-    user's own ticker ('KWN+1M Curncy'), from trade date until the last leg settles (the
-    expiry for an option). Today's pull only: no P&L query reads it (the ladder does), so
-    the backfill never asks for it.
-
-  * Listed index option (EQ_OPTION, user decision 2026-09-21: "Bloomberg's option price"),
-    until expiry: FUTURE_PX on the option's OWN Bloomberg ticker ('SPX US 10/16/26 P7615
-    Index', `listed_option_ticker`) -- a listed option is priced exactly like a future,
-    Bloomberg's own quote today and its settlement price on a past close -- which is all
-    its P&L needs. For today's Greeks only: the SPOT of its underlying index ('SPX Index',
-    role UNDERLYING, never asked of Bloomberg's history), the quote currency's OIS curve
-    and the index's dividend yield (kind DIV_YIELD).
+    expiry (the past day's curve is built from the tenor history instead). Dormant in the
+    commodity book (2026-09-24) but kept.
+  * Listed option (EQ_OPTION), until expiry: FUTURE_PX on the option's OWN Bloomberg
+    ticker (`listed_option_ticker`) -- a listed option is priced exactly like a future --
+    which is all its P&L needs; kept for the options on futures of the commodity
+    conversion plan's Phase 5.
 
   * Commodity futures (2026-09-24, commodity conversion Phase 1): a future or a listed
     option quoted in a currency other than USD (CNY, EUR, GBP, JPY, MYR, CAD) also needs
@@ -51,6 +37,12 @@ cycle until 2026-09-21; the rules did not change, only where they are kept):
     the need is met once data.contracts.static_dates holds them, and a met need is never
     asked for (`needed_on`, `contract_dates_needed`).
 
+Retired (2026-09-24, commodity conversion Phase 2, user approval of the same day): the
+macro book's needs are no longer listed -- a swap's OIS curve and overnight fixings, an NDF
+currency's 1M outright (NDF_1M) and fixing (NDF_FIX), a listed index option's index level
+(SPOT, role UNDERLYING) and dividend yield (DIV_YIELD). An older library holding such rows
+drops them at its next sync (LIBRARY_VERSION).
+
 Not requestable (2026-09-24): a row of a kind that names one security but carries no
 ticker -- a future of a root whose Bloomberg ticker is an unverified placeholder
 (instruments.bbg_ticker = '') -- stays in the library so the gap is listed, but every row
@@ -58,12 +50,12 @@ dict carries `requestable` (False) and `reason` ("no verified Bloomberg ticker f
 <root_id>"), and `needed_on` / `needed_in_range` leave it out unless asked to include it,
 so no pull and no backfill can ask Bloomberg for it.
 
-`kind` is the mark_type for what lands in `marks` (SPOT, FWD_OUTRIGHT, FUTURE_PX, and
-NDF_1M) and OIS_CURVE / FIXINGS / VOL_SMILE / DIV_YIELD for what lands in `curve_quotes` /
-`index_fixings` / `vol_quotes` / `equity_dividend_yields`; the first three stand for a set
-of Bloomberg securities (`tickers` lists them). What a PAST close needs (`needed_on(...,
-historical=True)`, `needed_in_range`) is the MARK_KINDS plus, for an FX option or a swap,
-its HISTORY_INPUT_KINDS (the OIS curve, the vol smile); the LIVE_ONLY_KINDS are today's.
+`kind` is the mark_type for what lands in `marks` (SPOT, FWD_OUTRIGHT, FUTURE_PX),
+OIS_CURVE / VOL_SMILE for what lands in `curve_quotes` / `vol_quotes` (each stands for a
+set of Bloomberg securities, `tickers` lists them), and CONTRACT_DATES for a future's
+contract dates. What a PAST close needs (`needed_on(..., historical=True)`,
+`needed_in_range`) is the MARK_KINDS plus, for an FX option, its HISTORY_INPUT_KINDS (the
+OIS curve, the vol smile); the LIVE_ONLY_KINDS are today's.
 """
 from __future__ import annotations
 
@@ -75,27 +67,18 @@ from typing import Dict, List, Optional
 SENTINEL = "9999-12-31"
 ROLE_PAIR = "PAIR"                 # the traded pair / contract / currency itself
 ROLE_CONVERSION = "CONVERSION"     # a USD-conversion pair's SPOT
-ROLE_UNDERLYING = "UNDERLYING"     # a listed option's underlying index level: today's Greeks only
-# NDF_FIX (2026-09-22): an NDF currency's own official fixing, asked for on the ticket's
-# fixing date only (needed_from = needed_until = the fixing date), key = the USD pair,
-# settle_date = that date; the NDF's exit price in P&L (user: "the exit price is the fix on
-# that day, as pulled from bbg"). In MARK_KINDS because a past fixing date's fix is what the
-# backfill fills, like a past close.
-NDF_FIX = "NDF_FIX"
-MARK_KINDS = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX", NDF_FIX)
+MARK_KINDS = ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX")
 
-# Bump whenever `compute` learns a new need (a kind, a ticker rule): a library synced by
-# older code is then out of date although no trade changed, and the next reader resyncs it
-# (2026-09-22: NDF_FIX had been added to `compute`, but every existing database kept the
-# library its last upload wrote, so no pull asked for a fixing until the next upload).
-# 2026-09-22.2: data/ingest/common.py::NDF_FIX_TICKERS changed (KRW -> 'KOBRUSD Index', TWD ->
-# 'TRY11 Index'), so an existing database re-syncs its NDF_FIX rows before the next pull.
-# 2026-09-24: commodity futures -- the USD-conversion SPOT of a non-USD future or listed
+# Bump whenever `compute` learns a new need (a kind, a ticker rule) or drops one: a library
+# synced by older code is then out of date although no trade changed, and the next reader
+# resyncs it (2026-09-22: NDF_FIX had been added to `compute`, but every existing database
+# kept the library its last upload wrote, so no pull asked for a fixing until the next upload).
+# 2026-09-24.1: commodity futures -- the USD-conversion SPOT of a non-USD future or listed
 # option, the CONTRACT_DATES kind, and the not-requestable flag on a row with no ticker.
-LIBRARY_VERSION = "2026-09-24.1"
-NDF_1M = "NDF_1M"                  # an NDF currency's 1M outright, on its USD pair (the ladder's rate)
-DIV_YIELD = "DIV_YIELD"            # an index's dividend yield, for a listed option's Greeks
-DIV_YIELD_FIELDS = ("IDX_EST_DVD_YLD", "EQY_DVD_YLD_12M")   # per cent; the first Bloomberg answers
+# 2026-09-24.2: the macro needs retired (NDF_1M, NDF_FIX, FIXINGS, a swap's OIS curve, a
+# listed option's UNDERLYING index level, DIV_YIELD and its OIS curve), so an existing
+# database drops those rows before the next pull.
+LIBRARY_VERSION = "2026-09-24.2"
 # CONTRACT_DATES (2026-09-24): Bloomberg's own last trade and first notice dates of a
 # commodity future, asked by today's pull (bbg-live) and stored through
 # data.contracts.store_static_dates. Key = the canonical contract id, settle_date SENTINEL.
@@ -103,26 +86,22 @@ CONTRACT_DATES = "CONTRACT_DATES"
 CONTRACT_DATES_FIELDS = ("FUT_LAST_TRADE_DT", "FUT_NOTICE_FIRST")
 # Kinds that stand for a set of securities and so carry no ticker of their own; every other
 # kind names one security, and a row of it with bbg_ticker '' cannot be asked for.
-SET_KINDS = ("OIS_CURVE", "FIXINGS", "VOL_SMILE")
+SET_KINDS = ("OIS_CURVE", "VOL_SMILE")
 _ROOT_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*:[A-Z0-9]+$")    # 'NYMEX:CL': a contract root id
-# Asked for by today's pull only, never of Bloomberg's history: FIXINGS because the live
-# rates step pulls the fixing history from the swap's start; NDF_1M because no P&L query
-# reads it (it lands in `marks` like the MARK_KINDS do, but is kept out of them -- which is
-# what a past close needs and the backfill fills); DIV_YIELD because a listed option's Greeks
-# are today's only.
-LIVE_ONLY_KINDS = ("FIXINGS", NDF_1M, DIV_YIELD, CONTRACT_DATES)
-# The inputs a past close prices its options and swaps from (2026-09-22; until then the
-# backfill wrote a past day's closes and price_close skipped every option whose smile or
-# curve that day lacked, so options had no true 5d / MTD / YTD): the OIS curve of every
-# currency an FX option or a swap needs that day, the vol smile of every pair with an FX
-# option open that day -- the same tickers the live rates and vol steps ask for, from
-# Bloomberg's daily history, into the same tables. A listed option's OIS_CURVE row is for
-# its Greeks today and is not asked of the history (`HISTORY_INPUT_PRODUCTS`).
+# Asked for by today's pull only, never of Bloomberg's history.
+LIVE_ONLY_KINDS = (CONTRACT_DATES,)
+# The inputs a past close prices its FX options from (2026-09-22; until then the backfill
+# wrote a past day's closes and price_close skipped every option whose smile or curve that
+# day lacked, so options had no true 5d / MTD / YTD): the OIS curve of every currency an FX
+# option needs that day, the vol smile of every pair with an FX option open that day -- the
+# same tickers the live rates and vol steps ask for, from Bloomberg's daily history, into
+# the same tables.
 HISTORY_INPUT_KINDS = ("OIS_CURVE", "VOL_SMILE")
-HISTORY_INPUT_PRODUCTS = ("FX_OPTION", "IRS")
+HISTORY_INPUT_PRODUCTS = ("FX_OPTION",)
 # Products whose rows stop being asked for once the ledger has realised the trade (the
-# pull's own rule for options and swaps; an FX leg or a future simply runs to its date).
-_REALISED_FILTER_PRODUCTS = ("FX_OPTION", "IRS")
+# pull's own rule for options; an FX leg or a future simply runs to its date).
+_REALISED_FILTER_PRODUCTS = ("FX_OPTION",)
+
 COLUMNS = ("trade_id", "kind", "key", "settle_date", "bbg_ticker", "role", "product",
            "needed_from", "needed_until", "added_at")
 
@@ -156,15 +135,6 @@ LEFT JOIN instrument_options o USING (instrument_id)
 WHERE t.product = 'EQ_OPTION'
 ORDER BY i.instrument_id, t.trade_id
 """
-
-_IRS_SQL = """
-SELECT t.trade_id, t.product, t.trade_date, i.base_ccy, COALESCE(MAX(l.settle_date), '9999-12-31')
-FROM trades_official t JOIN instruments i USING (instrument_id) LEFT JOIN trade_legs l USING (trade_id)
-WHERE t.product = 'IRS'
-GROUP BY t.trade_id
-ORDER BY i.base_ccy, t.trade_id
-"""
-
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -269,40 +239,11 @@ def compute(conn: sqlite3.Connection) -> List[dict]:
                 add(trade_id, product, "SPOT", instrument_id, SENTINEL, ticker, needed_from, needed_until,
                     role=ROLE_CONVERSION)
 
-    def add_ndf_1m(trade_id, product, ccys, needed_from, needed_until) -> None:
-        # The 1M NDF outright of each NDF currency, on that currency's USD pair (a cross
-        # such as EURKRW is keyed USDKRW as well): `add` keeps the latest needed_until, so
-        # it runs until the trade's last leg settles.
-        for ccy in ccys:
-            if ccy in ndf_tickers:
-                instrument_id, _ticker = _pair_row(conn, _usd_pair_name(ccy))
-                add(trade_id, product, NDF_1M, instrument_id, SENTINEL, ndf_tickers[ccy], needed_from, needed_until)
-
-    try:
-        from data.ingest.common import NDF_1M_TICKERS as ndf_tickers
-    except ImportError:            # an older data/ingest: no NDF list, nothing extra is asked for
-        ndf_tickers = {}
-    try:
-        from data.ingest.common import NDF_FIX_TICKERS as fix_tickers
-        from engine.ladder.ndf import fixing_date
-    except ImportError:
-        fix_tickers, fixing_date = {}, None
-
-    def add_ndf_fix(trade_id, product, instrument_id, base, quote, settle) -> None:
-        # The fix of the ticket's own USD pair, on its fixing date only. A cross NDF (EURBRL)
-        # has no single fix to settle against here and is left to the spot rule.
-        ccy = quote if base == "USD" else base if quote == "USD" else None
-        if ccy in fix_tickers and fixing_date is not None and fix_tickers[ccy]:
-            fixed_on = fixing_date(settle)
-            add(trade_id, product, NDF_FIX, instrument_id, fixed_on, fix_tickers[ccy], fixed_on, fixed_on)
-
     for trade_id, product, trade_date, instrument_id, ticker, base, quote, settle in conn.execute(_FX_LEGS_SQL):
         add(trade_id, product, "SPOT", instrument_id, SENTINEL, ticker, trade_date, settle)
         add(trade_id, product, "FWD_OUTRIGHT", instrument_id, settle, ticker, trade_date, settle)
         if base != "USD" and quote != "USD":
             add_conversions(trade_id, product, (base, quote), trade_date, settle)
-        add_ndf_1m(trade_id, product, (base, quote), trade_date, settle)
-        add_ndf_fix(trade_id, product, instrument_id, base, quote, settle)
     for (trade_id, product, trade_date, instrument_id, ticker, settle,
          root, quote, expiry) in conn.execute(_FUTURE_LEGS_SQL):
         ticker = ticker or ""
@@ -322,20 +263,15 @@ def compute(conn: sqlite3.Connection) -> List[dict]:
         for ccy in (base, quote):
             add(trade_id, product, "OIS_CURVE", ccy, SENTINEL, "", trade_date, expiry)
         add(trade_id, product, "VOL_SMILE", pair, SENTINEL, "", trade_date, expiry)
-        add_ndf_1m(trade_id, product, (base, quote), trade_date, expiry)
-    for (trade_id, product, trade_date, instrument_id, root, quote, underlying, expiry,
+    for (trade_id, product, trade_date, instrument_id, root, quote, _underlying, expiry,
          option_type, strike) in conn.execute(_LISTED_OPTIONS_SQL):
+        # Bloomberg's own price of the option is all its P&L needs; the Greeks' index level,
+        # dividend yield and OIS curve were retired with the equity index (2026-09-24).
         ticker = listed_option_ticker(root, expiry, option_type, strike)
         if ticker:
             add(trade_id, product, "FUTURE_PX", instrument_id, expiry, ticker, trade_date, expiry)
-        if underlying:       # instruments.bbg_ticker of a listed option names its underlying ('SPX Index')
-            add(trade_id, product, "SPOT", underlying, SENTINEL, underlying, trade_date, expiry, role=ROLE_UNDERLYING)
-            add(trade_id, product, DIV_YIELD, underlying, SENTINEL, underlying, trade_date, expiry)
-        add(trade_id, product, "OIS_CURVE", quote, SENTINEL, "", trade_date, expiry)
         add_conversions(trade_id, product, (quote,), trade_date, expiry)    # 2026-09-24: non-USD listed option
-    for trade_id, product, trade_date, ccy, maturity in conn.execute(_IRS_SQL):
-        add(trade_id, product, "OIS_CURVE", ccy, SENTINEL, "", trade_date, maturity)
-        add(trade_id, product, "FIXINGS", ccy, SENTINEL, "", trade_date, maturity)
+    # IRS (retired 2026-09-24): a swap needs nothing from the library any more.
     return list(rows.values())
 
 
@@ -351,10 +287,9 @@ def sync(conn: sqlite3.Connection) -> dict:
     whose dates moved is updated, everything else is left as it was. Also creates the
     plain pair `instruments` row a conversion pair or an option's pair needs before a
     mark can be written for it. Returns {added, removed, total}."""
-    from data.bloomberg.live import _ensure_fx_instruments, _ensure_index_instruments
+    from data.bloomberg.live import _ensure_fx_instruments
     wanted = {(r["trade_id"], r["kind"], r["key"], r["settle_date"]): r for r in compute(conn)}
-    _ensure_fx_instruments(conn, [r["key"] for r in wanted.values() if r["kind"] in ("SPOT", "FWD_OUTRIGHT", NDF_1M)])
-    _ensure_index_instruments(conn, [r["key"] for r in wanted.values() if r["role"] == ROLE_UNDERLYING])
+    _ensure_fx_instruments(conn, [r["key"] for r in wanted.values() if r["kind"] in ("SPOT", "FWD_OUTRIGHT")])
     have = {(r[0], r[1], r[2], r[3]): r for r in conn.execute(
         "SELECT trade_id, kind, key, settle_date, bbg_ticker, role, product, needed_from, needed_until FROM bbg_library")}
     now = _now_iso()
@@ -404,22 +339,21 @@ def _realised_ids(conn: sqlite3.Connection) -> set:
 
 def _is_historical_need(r: dict) -> bool:
     """Is this library row something a PAST close needed? The marks (SPOT, FWD_OUTRIGHT,
-    FUTURE_PX, NDF_FIX) less a forward at an option's expiry and a listed option's index
-    level, plus (2026-09-22) an FX option's or a swap's OIS curve and vol smile
-    (HISTORY_INPUT_KINDS): what the backfill asks Bloomberg's history for."""
+    FUTURE_PX) less a forward at an option's expiry, plus (2026-09-22) an FX option's OIS
+    curve and vol smile (HISTORY_INPUT_KINDS): what the backfill asks Bloomberg's history
+    for."""
     if r["kind"] in HISTORY_INPUT_KINDS:
         return r["product"] in HISTORY_INPUT_PRODUCTS
-    return (r["kind"] in MARK_KINDS and not (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION")
-            and r["role"] != ROLE_UNDERLYING)
+    return r["kind"] in MARK_KINDS and not (r["kind"] == "FWD_OUTRIGHT" and r["product"] == "FX_OPTION")
 
 
 def needed_on(conn: sqlite3.Connection, as_of: str, historical: bool = False,
               include_unrequestable: bool = False) -> List[dict]:
     """The library rows in force on `as_of` (needed_from <= as_of <= needed_until), one
-    per trade. Live (the default): an option or a swap the ledger has realised is left
-    out. `historical=True` is what a PAST close needed (`_is_historical_need`): the marks
-    (SPOT, FWD_OUTRIGHT, FUTURE_PX, NDF_FIX), no forward at an option's expiry, plus the
-    OIS curve and vol smile an FX option or a swap needs that day (2026-09-22), and
+    per trade. Live (the default): an FX option the ledger has realised is left out.
+    `historical=True` is what a PAST close needed (`_is_historical_need`): the marks
+    (SPOT, FWD_OUTRIGHT, FUTURE_PX), no forward at an option's expiry, plus the OIS
+    curve and vol smile an FX option needs that day (2026-09-22), and
     realised or not -- the expiry-day catch-up needs the expiry date's closing SPOT for an
     option already frozen (data.bloomberg.live.option_needed_marks says why).
 
@@ -448,7 +382,7 @@ def needed_in_range(conn: sqlite3.Connection, start: str, end: str,
                     include_unrequestable: bool = False) -> List[dict]:
     """`needed_on(historical=True)` for a span: every row a past close needs
     (`_is_historical_need`: the marks, and since 2026-09-22 the OIS_CURVE / VOL_SMILE rows
-    of the FX options and swaps) in force on at least one day of [start, end]. What the
+    of the FX options) in force on at least one day of [start, end]. What the
     backfill asks Bloomberg's history for; readers filter by `kind`. A row that is not
     requestable is left out unless `include_unrequestable` (2026-09-24)."""
     return [r for r in rows(conn)
@@ -478,8 +412,7 @@ def contract_dates_needed(conn: sqlite3.Connection, as_of: str) -> List[dict]:
 
 
 def history_inputs_needed(conn: sqlite3.Connection, as_of: str) -> List[dict]:
-    """The OIS curves and vol smiles a past close on `as_of` prices its options and swaps
-    from: [{kind: OIS_CURVE | VOL_SMILE, key: currency | pair}], sorted, one per key. Only
+    """The OIS curves and vol smiles a past close on `as_of` prices its FX options from: [{kind: OIS_CURVE | VOL_SMILE, key: currency | pair}], sorted, one per key. Only
     a currency with an OIS curve in scope (rates_marketdata.OIS_INDEX) is listed: SEK has
     none to ask for, and its option's rate is implied from the pair's forward curve."""
     try:
@@ -495,7 +428,8 @@ def history_inputs_needed(conn: sqlite3.Connection, as_of: str) -> List[dict]:
 
 def keys(conn: sqlite3.Connection, as_of: str, kind: str) -> List[str]:
     """Sorted distinct `key`s of one kind in force on `as_of` (live): the currencies whose
-    OIS curve or fixings the pull asks for, the pairs whose vol smile it asks for."""
+    OIS curve the pull asks for, the pairs whose vol smile it asks for. A retired kind
+    (FIXINGS, DIV_YIELD, 2026-09-24) has none."""
     return sorted({r["key"] for r in needed_on(conn, as_of) if r["kind"] == kind})
 
 
@@ -526,10 +460,7 @@ def tickers(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     for r in needed_on(conn, as_of, include_unrequestable=True):
         kind, key = r["kind"], r["key"]
         if kind == "SPOT":
-            if r["role"] == ROLE_UNDERLYING:
-                put(r["bbg_ticker"], "PX_LAST", f"{key} level, for the Greeks of the options on it", r)
-            else:
-                put(r["bbg_ticker"], "PX_LAST", f"{key} spot" + (" (USD conversion)" if r["role"] == ROLE_CONVERSION else ""), r)
+            put(r["bbg_ticker"], "PX_LAST", f"{key} spot" + (" (USD conversion)" if r["role"] == ROLE_CONVERSION else ""), r)
         elif kind == "FWD_OUTRIGHT":
             if r["settle_date"] > as_of:     # a leg settling today is marked at spot: no curve request
                 put(r["bbg_ticker"], "FWD_CURVE", f"{key} forward curve", r)
@@ -540,22 +471,11 @@ def tickers(conn: sqlite3.Connection, as_of: str) -> List[dict]:
                 put(r["bbg_ticker"], "PX_LAST", f"{key} futures price", r)
         elif kind == CONTRACT_DATES:
             put(r["bbg_ticker"], ", ".join(CONTRACT_DATES_FIELDS), f"{key} contract dates (expiry and first notice)", r)
-        elif kind == DIV_YIELD:
-            put(r["bbg_ticker"], DIV_YIELD_FIELDS[0], f"{key} dividend yield, for the Greeks of the options on it", r)
-        elif kind == NDF_1M:
-            ccy = key[3:] if key.startswith("USD") else key[:3]
-            put(r["bbg_ticker"], "PX_LAST", f"1M NDF price, the ladder's rate for {ccy}", r)
-        elif kind == NDF_FIX:
-            ccy = key[3:] if key.startswith("USD") else key[:3]
-            put(r["bbg_ticker"], "PX_LAST", f"{ccy} official fixing on {r['settle_date']}, the NDF's exit price", r)
-        elif kind in ("OIS_CURVE", "FIXINGS"):
+        elif kind == "OIS_CURVE":
             try:
                 from data.bloomberg import rates_marketdata as rm
-                if kind == "FIXINGS":
-                    put(rm.ois_fixing_ticker(key), "PX_LAST", f"{key} overnight fixings", r)
-                else:
-                    for spec in rm.ois_curve(key):
-                        put(spec.ticker, spec.field, f"{key} OIS curve {spec.tenor}", r)
+                for spec in rm.ois_curve(key):
+                    put(spec.ticker, spec.field, f"{key} OIS curve {spec.tenor}", r)
             except Exception:  # noqa: BLE001 -- no curve in scope for this currency: nothing is asked for
                 continue
         elif kind == "VOL_SMILE":

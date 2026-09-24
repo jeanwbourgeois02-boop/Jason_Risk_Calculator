@@ -11,7 +11,7 @@
 #
 # Jason's own trader code and desk are not known yet (docs/open-questions.md C1): until
 # the user gives them, traders and desks stay empty and the fund is the one the app has
-# always taken. The synthetic commodity sample (data/sample/commodity_blotter_sample.csv)
+# always taken. The synthetic commodity sample (data/sample/blotter_sample.csv)
 # books every row as Trader 'JB', Fund 'NMMF'; 'JB' is made up, not Jason's real code.
 
 funds: [NMMF]

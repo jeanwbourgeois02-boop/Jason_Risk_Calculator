@@ -2,7 +2,7 @@
 FX_OPTION trades from ``trades_official`` / ``instruments`` /
 ``instrument_options``, writes ``PREMIUM`` / ``DELTA`` / ``GAMMA`` / ``THETA``
 / ``VEGA`` / ``RHO`` marks (``source='QL_OPTIONS_PRICER'``) -- the same shape
-of glue ``engine/rates/store.py`` provides for IRS.
+of glue ``engine/rates/store.py`` provides for the rates pricer.
 
 Three entry points (the first two mirror engine/rates/store.py):
   - ``price_and_store(conn, as_of, trade_id)``: price one FX_OPTION trade,
@@ -279,7 +279,7 @@ def live_stamp() -> str:
 def close_stamp(day: str) -> str:
     """`snapped_at` of a mark that stands for `day`'s official close: 15:00 America/New_York
     on that date, offset resolved for the date (`engine.rates.store.snapped_at`, the stamp
-    the IRS pricer uses for the same purpose)."""
+    the rates pricer uses for the same purpose)."""
     return snapped_at(datetime.date.fromisoformat(day))
 
 
@@ -815,8 +815,7 @@ def set_option_terms(conn: sqlite3.Connection, instrument_id: str, strike: float
     that have no row yet). With the row gone, the ledger's next pass freezes the trade
     afresh from the corrected marks -- or names it as unrealisable ("no official PREMIUM
     ... on or before <expiry>") until a corrected PREMIUM dated on or before expiry is on
-    file, which is the truth in the meantime. Mirrors what
-    `data/ingest/irs_direction.py` does for a swap whose direction flips. An identical
+    file, which is the truth in the meantime. An identical
     re-save and a refused write delete nothing here either; another instrument's rows
     are never touched; a database with no `realised_pnl` table is skipped silently."""
     row = conn.execute("SELECT asset_class FROM instruments WHERE instrument_id = ?", (instrument_id,)).fetchone()
@@ -856,7 +855,7 @@ def set_option_terms(conn: sqlite3.Connection, instrument_id: str, strike: float
             # transaction (docstring: "frozen realised P&L"). `realised_pnl` comes from
             # data/ingest/schema.py::create_schema; a database without it (one that has
             # never been through the app's startup) simply has nothing frozen to drop --
-            # same guard as data/ingest/irs_direction.py, never a CREATE from here.
+            # never a CREATE from here.
             if _table_exists(conn, "realised_pnl"):
                 conn.execute("DELETE FROM realised_pnl WHERE instrument_id = ?", (instrument_id,))
 

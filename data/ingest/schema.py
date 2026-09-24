@@ -11,29 +11,23 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
 TABLES = ("instruments", "trades", "trade_legs", "marks", "curves", "instrument_theme",
-          "curve_quotes", "instrument_options", "index_fixings")
+          "curve_quotes", "instrument_options")
 VIEWS = ("marks_official", "trades_official")
 
 # Official source per mark_type (CLAUDE.md "Official marks"). BNP_BVAL is never official.
-# PAR_RATE / PV_USD / DV01_USD: changed from BBG_BDH to QL_PRICER per housekeeper
-# authorization 2026-09-15 (rates-pricer's own bootstrap becomes official for these three
-# mark_types; BBG_BDH becomes reconciliation-only for IRS, mirroring how BNP_BVAL is
-# reconciliation-only for FX). No other mark_type mapping changed.
+# 2026-09-24 (commodity conversion Phase 2, user decision recorded in CLAUDE.md "Commodity
+# conversion plan": rates, NDFs, the FX-swap package rule and the equity index leave the
+# app): PAR_RATE / PV_USD / DV01_USD / CASHFLOW_USD (the swap pricer's marks) and NDF_1M /
+# NDF_FIX (the NDF rate and fixing) are no longer mark types. Nothing writes or reads them;
+# the view is recreated on every startup, so an old database's rows of those types simply
+# stop being official (a mark_type with no branch here matches no source).
 OFFICIAL_MARK_SOURCE = {
     "SPOT": "BBG_BFXFORWARD",
     "FWD_OUTRIGHT": "BBG_BFXFORWARD",
     "FUTURE_PX": "BBG_BDH",
-    "PAR_RATE": "QL_PRICER",
-    "PV_USD": "QL_PRICER",
-    "DV01_USD": "QL_PRICER",
-    # CASHFLOW_USD (2026-09-17): cumulative net swap cashflows already settled through
-    # as_of_date, USD, written by engine/rates alongside PV_USD so that swap LTD P&L =
-    # PV_USD + CASHFLOW_USD stays continuous across a coupon payment and at maturity.
-    "CASHFLOW_USD": "QL_PRICER",
     # DELTA / PREMIUM: changed from MANUAL to QL_OPTIONS_PRICER 2026-09-17 (options_calc
-    # merge Phase 2, housekeeper authorization) -- engine/options writes these from the
-    # vendored QuantLib pricers; hand-typed MANUAL marks become reconciliation-only,
-    # mirroring how QL_PRICER demoted BBG_BDH for IRS.
+    # merge Phase 2) -- engine/options writes these from the vendored QuantLib pricers;
+    # hand-typed MANUAL marks are reconciliation-only.
     "DELTA": "QL_OPTIONS_PRICER",
     "PREMIUM": "QL_OPTIONS_PRICER",
     "GAMMA": "QL_OPTIONS_PRICER",
@@ -44,13 +38,6 @@ OFFICIAL_MARK_SOURCE = {
     # whose G10 convention is premium-adjusted; DELTA itself is unchanged and stays
     # what the ladder reads. Same pricer, same official source as the other Greeks.
     "DELTA_PA": "QL_OPTIONS_PRICER",
-    # NDF_1M (2026-09-21, user: NDF currencies show the 1M forward price, not spot):
-    # Bloomberg's 1M NDF outright (data.ingest.common.NDF_1M_TICKERS), on the USD pair,
-    # as quoted. Read by the ladder only; no P&L query reads it.
-    "NDF_1M": "BBG_BFXFORWARD",
-    # NDF_FIX (2026-09-22): the currency's own official fixing on the fixing date, Bloomberg's
-    # history value (PX_LAST of data/ingest/common.py::NDF_FIX_TICKERS), the NDF's exit price.
-    "NDF_FIX": "BBG_BDH",
 }
 
 _DDL = """
@@ -65,8 +52,11 @@ CREATE TABLE IF NOT EXISTS instruments (
   expiry_date     TEXT NOT NULL
 );
 
+-- instruments.is_ndf is kept for old databases and old INSERTs (NDFs left the app
+-- 2026-09-24); nothing writes 1 there any more.
+--
 -- Option-specific attributes, kept out of `instruments` itself so every non-option row
--- (FX/FUTURE/IRS -- the overwhelming majority) doesn't carry sentinel columns it never
+-- (FX/FUTURE -- the overwhelming majority) doesn't carry sentinel columns it never
 -- uses, and so the ~70 existing test fixtures that INSERT INTO instruments with the
 -- original 8-column shape keep working unchanged (housekeeper decision, 2026-09-17,
 -- options_calc merge Phase 1).
@@ -136,10 +126,10 @@ CREATE TABLE IF NOT EXISTS curves (
   PRIMARY KEY (curve_id, as_of_date, node_date, source)
 );
 
--- Raw curve-quote staging table, written by data/bloomberg (bbg-data), consumed by the
--- IRS pricer bootstrap (rates-pricer) to build `curves`. This is NOT `curves` itself:
--- `curves` holds bootstrapped discount factors / par rates per node; this table holds the
--- unprocessed Bloomberg quotes (deposit / swap ticks) the bootstrap reads to build them.
+-- Raw curve-quote staging table, written by data/bloomberg (bbg-curves), consumed by the
+-- OIS curve bootstrap (rates-pricer) to build `curves`, the discount curves the option
+-- pricers read. This is NOT `curves` itself: `curves` holds bootstrapped discount factors /
+-- par rates per node; this table holds the unprocessed Bloomberg OIS quotes.
 CREATE TABLE IF NOT EXISTS curve_quotes (
   as_of_date      TEXT NOT NULL,
   ccy             TEXT NOT NULL,
@@ -153,18 +143,14 @@ CREATE TABLE IF NOT EXISTS curve_quotes (
   PRIMARY KEY (as_of_date, ccy, "index", tenor, source)
 );
 
--- Overnight index fixings (2026-09-17): the float leg of a seasoned OIS swap needs every
--- past fixing of its index to value; engine/rates loads these into QuantLib before
--- pricing. Written by data/bloomberg/rates_marketdata.py::write_fixings. Decimal (0.0405).
-CREATE TABLE IF NOT EXISTS index_fixings (
-  "index"         TEXT NOT NULL,      -- 'SOFR', 'ESTR', ...
-  fixing_date     TEXT NOT NULL,
-  value           REAL NOT NULL,
-  source          TEXT NOT NULL,      -- BBG_BDH | MANUAL
-  PRIMARY KEY ("index", fixing_date, source)
-);
-
 """
+# Retired 2026-09-24 with the swaps (commodity conversion Phase 2): `index_fixings` (a
+# seasoned OIS swap's past fixings), `irs_direction_overrides` (the user's pay / receive
+# per swap) and `swap_review` (the FX-swap package rule's ambiguous candidates) are no
+# longer created on a new database. An old database keeps `index_fixings` and
+# `irs_direction_overrides` untouched (nothing reads or writes them; harmless);
+# `purge_retired_sources` drops `swap_review`, whose foreign key to `trades` could
+# otherwise block deleting a trade it names.
 # `positions` (one row per PB position per day, BNP grain) was dropped from the schema
 # 2026-09-17 ("no bnp fall back", docs/bnp-excel-removal.md): its only writer was the
 # retired BNP CSV parser, and its only readers (engine/pnl/reconcile.py, the ladder's
@@ -256,31 +242,19 @@ _LEDGER_DDL = """
 CREATE TABLE IF NOT EXISTS realised_pnl (
   trade_id            TEXT PRIMARY KEY REFERENCES trades,
   instrument_id       TEXT NOT NULL,
-  product             TEXT NOT NULL DEFAULT 'FX_FWD',   -- FX_FWD | FX_SWAP | FUTURE | FX_OPTION | IRS
+  product             TEXT NOT NULL DEFAULT 'FX_FWD',   -- the trade's trades.product
   currency            TEXT NOT NULL,
   settle_date         TEXT NOT NULL,
   local_amount        REAL NOT NULL,
   usd_entry_amount    REAL NOT NULL,      -- nullable-by-sentinel 0.0: crosses/futures have no single USD
                                           -- entry leg, so 0.0 here means "not applicable", not "zero P&L"
-  mark_type           TEXT NOT NULL DEFAULT 'SPOT',      -- SPOT | FUTURE_PX: which mark_type froze this row
+  mark_type           TEXT NOT NULL DEFAULT 'SPOT',      -- which mark_type froze this row (SPOT, FUTURE_PX, ...)
   spot_usd_per_local  REAL NOT NULL,
   spot_as_of_date     TEXT NOT NULL,      -- date of the mark used to freeze (settle date, or last prior)
   spot_source         TEXT NOT NULL,
   pnl_usd             REAL NOT NULL,
   frozen_at           TEXT NOT NULL,
   note                TEXT NOT NULL       -- '' or 'spot dated <d> (last before settlement)'
-);
-"""
-
-# Ambiguous FX-swap package candidates (CLAUDE.md "package_id rule"): groups with more
-# than one candidate on a side are never auto-grouped and land here for manual review
-# instead. Populated by data/ingest/swaps.py::package_swaps.
-_SWAP_REVIEW_DDL = """
-CREATE TABLE IF NOT EXISTS swap_review (
-  candidate_group     TEXT NOT NULL,      -- 'source|account|instrument_id|trade_date'
-  trade_id            TEXT NOT NULL REFERENCES trades,
-  reason              TEXT NOT NULL,
-  PRIMARY KEY (candidate_group, trade_id)
 );
 """
 
@@ -300,23 +274,6 @@ CREATE TABLE IF NOT EXISTS bundles (
 """
 
 
-# --------------------------------------------------------------------------- IRS direction
-# The user's own pay/receive decision per swap (data/ingest/irs_direction.py, 2026-09-18).
-# The blotter export can carry no direction at all (Side = 'Buy' and unsigned Notional on
-# every reference row, receivers included), so the direction typed in the app is the only
-# source for those swaps and must outlive every re-upload. Deliberately NO foreign key to
-# `trades`: an upload deletes and rewrites the whole book, and the override has to be
-# there to be re-applied when the trade comes back.
-IRS_DIRECTION_TABLES = ("irs_direction_overrides",)
-IRS_DIRECTION_DDL = """
-CREATE TABLE IF NOT EXISTS irs_direction_overrides (
-  trade_id        TEXT PRIMARY KEY,
-  direction       TEXT NOT NULL CHECK(direction IN ('PAY','RECEIVE')),
-  set_at          TEXT NOT NULL
-);
-"""
-
-
 # --------------------------------------------------------------------------- Bloomberg library
 # What the trades on file need from Bloomberg for their P&L (data/bloomberg/library.py,
 # user decision 2026-09-21): a pull asks for what is in here and nothing else. It changes
@@ -327,8 +284,8 @@ BBG_LIBRARY_TABLES = ("bbg_library", "bbg_library_state")
 _BBG_LIBRARY_DDL = """
 CREATE TABLE IF NOT EXISTS bbg_library (
   trade_id        TEXT NOT NULL,
-  kind            TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | OIS_CURVE | FIXINGS | VOL_SMILE | NDF_1M
-  key             TEXT NOT NULL,      -- pair / future instrument_id; currency for OIS_CURVE and FIXINGS
+  kind            TEXT NOT NULL,      -- SPOT | FWD_OUTRIGHT | FUTURE_PX | OIS_CURVE | VOL_SMILE
+  key             TEXT NOT NULL,      -- pair / future instrument_id; currency for OIS_CURVE
   settle_date     TEXT NOT NULL,      -- FWD_OUTRIGHT, FUTURE_PX: the date marked; '9999-12-31' otherwise
   bbg_ticker      TEXT NOT NULL,      -- the security asked for; '' where the kind stands for a set of them
   role            TEXT NOT NULL,      -- PAIR | CONVERSION (a USD-conversion pair's SPOT)
@@ -430,7 +387,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     an existing table (each has a documented sentinel: '' / 0 / 'VANILLA' / ...)."""
     # Every DDL block, the library's included (2026-09-22: bbg_library_state.code_version was
     # added and never reached an existing database while this list stopped at the bundles).
-    ddl_tables = _parse_ddl_columns(_DDL + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL)
+    ddl_tables = _parse_ddl_columns(_DDL + _LEDGER_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL)
     for table, columns in ddl_tables.items():
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if not existing:
@@ -445,8 +402,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
     unconditionally (see `_views_ddl`'s docstring for why); enable foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
     try:
-        conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _SWAP_REVIEW_DDL + _BUNDLES_DDL
-                           + IRS_DIRECTION_DDL + _BBG_LIBRARY_DDL)
+        conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL)
         _migrate_columns(conn)
         conn.commit()
     except sqlite3.OperationalError as exc:
@@ -482,7 +438,8 @@ def purge_retired_sources(conn: sqlite3.Connection) -> Dict[str, int]:
     """One-off, idempotent clean-up for a database created before the 2026-09-17 "no bnp
     fall back" removal (docs/bnp-excel-removal.md): deletes anything the retired BNP
     parser / workbook wrote, FK-safe (children before parents, since `connect` turns on
-    `PRAGMA foreign_keys`). Safe to call on a database that already has none of this --
+    `PRAGMA foreign_keys`), and drops the retired FX-swap rule's `swap_review` table
+    (2026-09-24). Never deletes BBG_INTERP. Safe to call on a database that already has none of this --
     every step is a no-op then, and the counts returned are all zero.
 
     Called once per app startup from `ui/app.py::ensure_schema`. Does not touch
@@ -511,4 +468,14 @@ def purge_retired_sources(conn: sqlite3.Connection) -> Dict[str, int]:
             conn.execute("DROP TABLE IF EXISTS positions")
         else:
             counts["positions_table_dropped"] = 0
+        # swap_review (2026-09-24): the retired FX-swap package rule's ambiguous candidates.
+        # Its foreign key to `trades` would block deleting a trade it names, and nothing
+        # writes or reads it any more. The only table dropped on an existing database for
+        # that removal; index_fixings / irs_direction_overrides are left as they are.
+        had_swap_review = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='swap_review'"
+        ).fetchone()[0]
+        counts["swap_review_table_dropped"] = 1 if had_swap_review else 0
+        if had_swap_review:
+            conn.execute("DROP TABLE IF EXISTS swap_review")
     return counts

@@ -1,4 +1,4 @@
-- [Market data tab](market-data-tab.md) — 2026-09-15 rewrite: per-pair layout (pair dropdown, spot+curve+chart, completeness strip, manual form); diagnostics panel removed from body but kept defined for cash_ladder's import; BNP_BVAL-only DB renders "BNP file"/"reconciliation only"
+- [Market data tab](market-data-tab.md) — 2026-09-15 rewrite: per-pair layout (pair dropdown, spot+curve+chart, completeness strip, manual form); diagnostics_panel defined but no caller left (2026-09-24); BNP_BVAL-only DB renders "BNP file"/"reconciliation only"
 - [Bloomberg diagnostics button 2026-09-16](bloomberg-diagnostics-button-2026-09-16.md) — header "Check Bloomberg connection" button, placeholder vs expected data.bloomberg.bbg_diagnostics interface
 - [Bloomberg check button moved to Market Data 2026-09-16](bloomberg-check-button-moved-to-market-data-2026-09-16.md) — button/panel/diagnostics fns relocated header.py -> market_data.py, new ids, CSS retheme
 - [Missing-close reason + feed cadence 2026-09-21](missing-close-reason-and-feed-cadence-2026-09-21.md) — no screen can run the backfill; caption reads status["backfill"]; 900 s cadence, timers follow it, status line capped 60 s
@@ -9,3 +9,4 @@
 - [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable
 - [Closed-out count + future close stamp 2026-09-22](closed-out-count-and-future-close-stamp-2026-09-22.md) — status "closed_out" key shown as a count beside priced/skipped (absent = silent); FUTURE_PX close rows stamp settle_stamp 17:00, _marked_book keeps 15:00 on purpose
 - [Ledger re-freeze block 2026-09-22](ledger-refreeze-block-2026-09-22.md) — status ledger keys shown on feed status; backfill block locations guessed, verify; Dash components never == equal
+- [Phase 2 removal + contract dates 2026-09-24](phase2-removal-and-contract-dates-2026-09-24.md) — macro displays out; status["curves"] block; gaps; contract dates; conversion spot blocked; MANUAL never official
