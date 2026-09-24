@@ -1,6 +1,8 @@
-# risk-monitor
+# risk-monitor (Jason)
 
-FX, futures, rates and options risk monitor for fund NMMF, base currency USD. Python, SQLite, Dash. It shows one P&L (per-trade valuation, an LTD line, Daily / 5d / MTD / YTD / trading), a cash ladder (delta exposure, cashflow timing, settled cash, stress) and a blotter (every trade with its P&L and Greeks).
+Commodity relative-value risk monitor for Jason, a paper trader in metals, energy and agriculture: listed futures and their calendar and inter-commodity spreads, options on futures, LME forwards and FX hedges (user, 2026-09-24), base currency USD. Python, SQLite, Dash. It shows one P&L (per-trade valuation, an LTD line, Daily / 5d / MTD / YTD / trading), the positions by commodity and contract month, a cash ladder (delta exposure, cashflow timing, settled cash, stress) and a blotter (every trade with its P&L and Greeks).
+
+The app was forked on 2026-09-23 from a macro FX / rates risk monitor (another trader, fund NMMF) and is being converted under "Commodity conversion plan" below. Until a phase lands, the sections it names still describe the macro app as it is; the plan's decisions already bind.
 
 This file is the rulebook: what is true of the app now and what must not change without the user's say-so. It is not a changelog. History lives in git and `docs/bnp-excel-removal.md`; open items live in `docs/open-questions.md`, not here; the valuation spec is `docs/BUILD_PLAN.md` sections 2 to 4, which agree with "P&L conventions" below. Reference input: `data/raw/new_sample_trades.csv`.
 
@@ -41,6 +43,32 @@ Clean-up is a lane of its own, by kind of change rather than by file: `infra` (`
 The working copy is `C:\Users\jeanw\Ninemasts\Dashboards\Jason Risk Monitor`; GitHub `main` is the backup, pushed at the end of each task.
 
 When agents or several sessions work in parallel, the tables under "Lanes" define the lanes. State your file list to the other sessions first and keep to it; message the owner and wait before editing outside your lane; commit by explicit path only (the git index is shared: run `git diff --cached --stat` immediately before every commit, never `git add -A`); preserve each file's line endings.
+
+## Commodity conversion plan
+
+User, 2026-09-24: "make a plan and build as many specific agents that will own a specific section of the calculations and UI - and then I want you to get started on this plan and coordinate the agents". The housekeeper runs it through the lanes (the commodity lanes are marked ◆ under "Lanes"), phase by phase, bottom-up by layer inside each phase; a phase is committed and pushed when its full suite is green against the baseline of known environmental failures.
+
+**Decisions (user, 2026-09-24).**
+- Products in scope: listed futures and their spreads (calendar, inter-commodity, China against the West), options on futures, LME forwards, FX hedges.
+- Futures close: Bloomberg's daily `PX_LAST`, as today (not the exchange settlement, not one snapshot time). Past closes stay stamped 17:00 New York; the day still turns at 17:00 New York / 05:00 Hong Kong, which falls after the Chinese night session and before the day session.
+- Non-USD futures and listed options: P&L in the quote currency, converted at spot of the valuation date ("P&L conventions → Futures").
+- The macro trader's code and data leave the working tree: rates (IRS, swaptions, caps), NDFs, the FX-swap package rule, equity index futures and options, the macro sample blotter, its Bloomberg snapshot. The golden book is regenerated on a synthetic commodity sample (this is the user's yes under hard rule 7). Git history keeps them; nothing is force-pushed.
+- The contract universe is seeded from the sibling research app `../Commodity Dashboard/rvapp/universe/` (202 contracts, 264 spreads), assumed to be Jason's until he says otherwise. Only 11 of its Bloomberg roots are verified on a terminal.
+
+**Phase 1: Jason's futures load and price correctly.**
+1. contract-master: `config/contracts.csv` (the universe: exchange, currency, contract size, unit, price scale, multiplier, Bloomberg root and key, month cycle) and `data/contracts/` (symbol → contract, canonical id `CLZ26 Comdty`, Bloomberg request ticker, a conservative expiry until Bloomberg's own dates are on file). exchange-calendars: `config/calendars/`, `engine/calendars/`. pnl-valuation, pnl-ledger: non-USD conversion (reviewer). book-positions: futures delta in USD at spot. These four run in parallel.
+2. ingest-parser: commodity futures resolved through contract-master, the fund filter from `config/book.yaml`, a synthetic commodity sample. bbg-library: the USD conversion SPOT of a non-USD future. bbg-live: Bloomberg's contract dates (`FUT_LAST_TRADE_DT`, `FUT_NOTICE_FIRST`) on request, stored through contract-master.
+3. curve-positions, then ui-curve and ui-shell: a Curve tab with the positions by commodity × contract month. expiry-monitor, then ui-expiries: first notice, last trade and option expiry alerts.
+
+**Phase 2: the macro trader's code and data out.** Each owning lane removes its own part: rates-exotics and ui-rates delete theirs and retire; rates-pricer keeps only the discount curves the option pricers read; the ingest, Bloomberg, P&L and ladder lanes drop IRS, NDF, the FX-swap rule and the equity index; ingest-parser replaces `data/sample/blotter_sample.csv` with a synthetic commodity and FX-hedge book; bbg-snapshot empties `data/bbg_snapshot/`; infra regenerates the golden book; the session rewrites the macro sections of this file and `docs/`. FX options are not in scope but were not approved for removal: they stay dormant until the user decides.
+
+**Phase 3: relative value.** spreads-engine, then ui-spreads: spreads found in the book (calendar legs, inter-commodity legs with their ratios from `config/spreads/`), P&L and leftover outright per spread. ui-header: gross notional, net outright by sector, open spreads, the next first notice. ui-blotter: the Futures sub-tab by commodity. ui-market-data: the futures curve per commodity. book-positions: commodity lines in place of the equity index line.
+
+**Phase 4: risk.** risk-history: commodity settlement history per contract month from the research app's `price_daily` (read-only, like the old nm-dashboard cache). risk-metrics: per commodity, spread and sector, commodity shock days, Jason's vol target. commodity-stress: outright, curve-shape, spread and CNH scenarios and historical replays. ui-risk renders both.
+
+**Phase 5: the other products.** listed-options-pricer, options-store, ui-options: options on futures (P&L from Bloomberg's option price, Greeks from its implied vol, Black-76 or American). lme-forwards with bbg-curves: prompt-date forwards (its P&L formula needs the user's yes first). FX hedges on the existing FX forward path. The declining delta of monthly-average contracts in curve-positions. margin-limits: initial margin with spread credits, exchange position limits.
+
+**Gates the user holds** (tracked in `docs/open-questions.md`): a real blotter sample and Jason's fund code (Phase 1 is built on a synthetic sample until then); the LME forward P&L formula (Phase 5); Jason's vol target and stress scenarios (Phase 4); the Bloomberg roots and price scales checked on the Bloomberg PC.
 
 ## Data contract
 
@@ -363,7 +391,7 @@ Per-pair delta (the "Position" table) is the same union grouped by `t.instrument
 - **USD conversion**: quote-currency P&L converts to USD at **spot** of the same `as_of_date`, never at the forward outright.
 - **Per-trade LTD P&L (USD)**, with `Q` = base amount, `f` = fill, `m` = outright mark for the leg's value date, `S` = spot (quote→USD):
   - FX, any pair: `PnL_quote = Q × (m − f)`; `PnL_USD = PnL_quote × S` (`S = 1` when quote is USD). Crosses: `S` = USD per quote unit from that currency's own USD pair; never invent a USD leg.
-  - Futures: `PnL_USD = contracts × multiplier × (m − f)`.
+  - Futures: `PnL_local = contracts × multiplier × (m − f)` in the contract's quote currency, `multiplier` = quote-currency amount per 1.0 of quoted price per contract (contract size × price scale: 50 USD per cent on CBOT corn, 300 GBP per penny on ICE NBP); `PnL_USD = PnL_local × S`, `S` = USD per quote unit at spot of the same `as_of_date` (`S = 1` for USD contracts; user decision 2026-09-24, "Spot of valuation date", the FX rule above applied to futures, so SHFE / DCE / ZCE / INE / GFEX in CNY, OSE in JPY, Euronext and TTF in EUR, NBP in GBP are never summed as dollars). A settled future freezes at the last official price on or before expiry, converted at spot of that same date.
   - Listed index option (EQ_OPTION, user decision 2026-09-21: "Bloomberg's option price"): the futures formula, `PnL_USD = contracts × multiplier × (m − f)`, with `m` Bloomberg's own price of the option (official `FUTURE_PX` on the option's instrument: its mid on a live pull, else last, else the latest settlement price; `PX_LAST` on a past close, the listed instrument's daily close like a future's, since Bloomberg served no `PX_SETTLE` history for the option tickers; user decision 2026-09-22: "use px last like all other futures. its a listed option") and `f` the fill, both in index points. No model enters the P&L. Frozen after expiry at the last official price on or before it, like a future. Its Greeks are `engine/options`' at the vol that price implies (index level, USD OIS curve and Bloomberg's dividend yield for the index); a missing input blanks the Greeks with its reason, never the P&L.
   - IRS: `PnL_USD = PV_USD(t) + CASHFLOW_USD(t)`, both official marks from `engine/rates` at the swap's maturity date. A swap dealt at its fixed rate with no upfront is worth zero at the fill by construction, so this is the mark-minus-fill analogue of the FX formula; `CASHFLOW_USD` is the net of coupons already settled on or before `t` (0 for a forward-starting swap), which keeps LTD continuous across a coupon payment and at maturity, when PV goes to 0. Both are computed in the swap's currency and converted at that day's SPOT by the pricer. Realised at maturity by `engine/pnl/ledger.realise_settled` at the last official PV + cashflows on or before maturity.
   - FX option: `PnL_USD = quantity × (PREMIUM_mark − premium_fill) × S`, premium in base-ccy fraction, `S` = USD per base unit at spot; realised at expiry at the last official PREMIUM on or before expiry (since 2026-09-18, user-approved, that PREMIUM is the expiry-day payoff: on the expiry date `engine/options` writes the payoff at the pair's official SPOT of that date — call max(S−K,0)/S, put max(K−S,0)/S, a BASE-payout digital 1 in the money else 0, nothing at S = K — following the official SPOT on file for that date until the first freeze; if the app did not run that day it is written on a later pull, dated the expiry date; the ledger freezes the trade the day after expiry; the payoff is taken at the day's official spot, not at the option's cut time. Digitals pay the BASE currency: USD on USDJPY, EUR on EURSEK, confirmed by the user). Before expiry a digital's PREMIUM is priced on the smile (user decision 2026-09-21: "yes, price off the smile"): a tight call / put spread, each leg at its own smile vol, so the slope of the smile is in the price; with no smile on file (an ATM-interpolated or a manual vol) it is the single-vol closed form.
@@ -380,14 +408,16 @@ Per-pair delta (the "Position" table) is the same union grouped by `t.instrument
 
 ## Lanes
 
-Every file has exactly one owning lane, and each lane is one agent, `.claude/agents/<lane>.md` (user decision 2026-09-24, see "Working mode"). The layers run in the order the numbers flow: trades in, market data, pricers, P&L, exposure, risk, screens. "Reads" lists the lanes whose output a lane uses (from the code's own imports and the tables it reads); its consumers are the lanes whose "Reads" names it, which is how the housekeeper finds whom to brief when an interface changes. Paths are relative to the repo root; `tests/` files are named without the folder.
+Every file has exactly one owning lane, and each lane is one agent, `.claude/agents/<lane>.md` (user decision 2026-09-24, see "Working mode"). ◆ marks the commodity lanes added for "Commodity conversion plan" (user, 2026-09-24); a ◆ lane whose files do not exist yet creates them. The layers run in the order the numbers flow: trades in, market data, pricers, P&L, exposure, risk, screens. "Reads" lists the lanes whose output a lane uses (from the code's own imports and the tables it reads); its consumers are the lanes whose "Reads" names it, which is how the housekeeper finds whom to brief when an interface changes. Paths are relative to the repo root; `tests/` files are named without the folder.
 
 **1 Trades in (`data/ingest/`)**
 
 | Lane | Files | Tests | Reads |
 |---|---|---|---|
 | ingest-schema | `schema.py`: DDL, migrations, the `marks_official` / `trades_official` views, official sources, retired-source purge | `test_ingest.py`†, `test_trades_official.py` | none |
-| ingest-parser | `blotter.py`, `common.py` (NDF lists, fixing and 1M tickers, shared dataclasses) | `test_blotter.py`, `test_ingest_common.py` | ingest-schema, ingest-booking |
+| ◆ contract-master | `data/contracts/` (the contract universe: symbol → contract, canonical id and Bloomberg ticker, currency, multiplier, units, month cycle, expiry and first notice, Bloomberg's contract dates in its own table), `config/contracts.csv`, `config/spreads/` (spread templates from the research app) | `test_contracts.py` | ingest-schema, exchange-calendars |
+| ◆ exchange-calendars | `engine/calendars/` (business days per exchange), `config/calendars/` (one holiday file per exchange) | `test_exchange_calendars.py` | none |
+| ingest-parser | `blotter.py`, `common.py` (NDF lists, fixing and 1M tickers, shared dataclasses), `config/book.yaml` (the fund codes the book takes), `data/sample/` (the synthetic sample blotters) | `test_blotter.py`, `test_ingest_common.py`, `test_commodity_ingest.py` | ingest-schema, ingest-booking, contract-master |
 | ingest-booking | `upload.py`, `manual.py`, `swaps.py` (package rule), `themes.py`, `irs_direction.py` | `test_upload.py`, `test_manual.py`, `test_swaps.py` | ingest-schema, ingest-parser, bbg-library, rates-pricer, options-store |
 
 **2 Market data (`data/bloomberg/`)**
@@ -409,6 +439,7 @@ Every file has exactly one owning lane, and each lane is one agent, `.claude/age
 | fx-options-pricer | `engine/options/` except `store.py` and `equity_commodity.py`: `pricer.py`, `inputs.py`, `rates.py`, `calendars.py`, `structures.py`, `portfolio.py`, `__init__.py` (the scope ledger); `vendor/` is never edited | `test_options_pricing.py`†, `test_options_digital_smile.py` | bbg-curves, rates-pricer |
 | listed-options-pricer | `engine/options/equity_commodity.py` (listed index and commodity options, implied vol from Bloomberg's price) | `test_listed_options.py` | rates-pricer, fx-options-pricer |
 | options-store | `engine/options/store.py` (the bulk passes that write PREMIUM and Greeks, expiry payoff, close-out skip, `price_close`, `recalc_on_file`) | `test_options_close.py` | fx-options-pricer, listed-options-pricer, rates-pricer, bbg-curves, pnl-valuation |
+| ◆ lme-forwards | `engine/lme/` (LME prompt dates, the forward at a prompt date from the cash / 3M / monthly curve, the prompt-date settlement) | `test_lme.py` | contract-master, exchange-calendars, bbg-curves, pnl-valuation |
 
 **4 P&L (`engine/pnl/`)**
 
@@ -417,6 +448,7 @@ Every file has exactly one owning lane, and each lane is one agent, `.claude/age
 | pnl-valuation | `valuation.py` (`value_book`, near marks, NDF fix, closed-out options), `calendar.py` (business days, `spot_date`) | `test_valuation.py`, `test_calendar.py` | ladder-grid; the marks of bbg-live, bbg-backfill, rates-pricer, rates-exotics, options-store |
 | pnl-ledger | `ledger.py` (`realise_settled`, re-freeze, `ltd`) | `test_ledger.py`, `test_ndf_present_spot.py` | pnl-valuation, pnl-series, ladder-grid |
 | pnl-series | `reference.py` (periods, reference closes, the fill), `aggregate.py`, `fx_blotter.py` (P&L by currency), `stress.py` | `test_pnl.py`†, `test_aggregate.py` | pnl-valuation |
+| ◆ spreads-engine | `engine/spreads/` (spreads found in the book: calendar legs, inter-commodity legs with their ratios; spread-level P&L summed from `value_book` rows, leftover outright; its own tables) | `test_spreads.py` | contract-master, pnl-valuation, pnl-series, ingest-booking |
 
 **5 Exposure (`engine/ladder/`)**
 
@@ -425,12 +457,17 @@ Every file has exactly one owning lane, and each lane is one agent, `.claude/age
 | ladder-grid | `ladder.py` (the grid and the delta-per-currency SQL), `views.py`, `exposure_adapter.py` (records, settled cash), `ndf.py` (fixing dates, read by P&L and the library too), `__init__.py` | `test_ladder.py`†, `test_exposure_adapter.py` | ladder-exposure, ingest-parser, bbg-live, options-store, pnl-valuation |
 | ladder-exposure | `exposure.py` (`build_exposure`, `portfolio_totals`, USD equivalents), `usd_marks.py` | `test_exposure.py`, `test_usd_marks.py` | ladder-grid, pnl-valuation |
 | book-positions | `positions.py` (`book_positions`), `futures_delta.py` | `test_positions.py`, `test_futures_delta.py` | ladder-grid, ladder-exposure, bbg-live, rates-pricer, options-store, pnl-valuation |
+| ◆ curve-positions | `engine/curve/` (positions by commodity × contract month in lots, physical units and USD; net outright per commodity and sector; the currency exposure of non-USD futures) | `test_curve.py` | contract-master, pnl-valuation, book-positions |
+| ◆ expiry-monitor | `engine/expiry/` (first notice, last trade, option expiry and prompt dates of the open positions, business days to each on the exchange's calendar, alert levels) | `test_expiry.py` | contract-master, exchange-calendars, curve-positions |
 
 **6 Risk**
 
 | Lane | Files | Tests | Reads |
 |---|---|---|---|
-| risk-metrics | `engine/risk/`, `config/risk.yaml` | `test_risk.py` | book-positions, pnl-series |
+| risk-metrics | `engine/risk/` except `history.py` and `commodity_history.py`, `config/risk.yaml` | `test_risk.py` | book-positions, pnl-series, risk-history, curve-positions, spreads-engine |
+| ◆ risk-history | `engine/risk/history.py`, `engine/risk/commodity_history.py` (daily settlement history per contract month, read-only from the research app's database; never a mark) | `test_risk_history.py` | contract-master |
+| ◆ commodity-stress | `engine/stress/`, `config/commodity_stress.yaml` (outright, curve-shape, spread, CNH and historical-replay scenarios) | `test_commodity_stress.py` | curve-positions, spreads-engine, risk-history |
+| ◆ margin-limits | `engine/limits/`, `config/limits.yaml` (initial margin with spread credits, exchange position limits, gross lots) | `test_limits.py` | contract-master, curve-positions, spreads-engine |
 
 **7 Screens (`ui/`; the UI reads the engine's output and never recomputes P&L or delta)**
 
@@ -447,6 +484,9 @@ Every file has exactly one owning lane, and each lane is one agent, `.claude/age
 | ui-ladder | `ui/tabs/cash_ladder.py`, `ui/tabs/exposure.py` (the Ladder tab) | `test_ui_ladder.py`, `test_ui_ladder_view.py` | ui-shell, ladder-grid, ladder-exposure, book-positions, pnl-series, bbg-live |
 | ui-risk | `ui/tabs/risk.py` (the Risk tab) | `test_ui_risk.py` | ui-shell, ui-header, risk-metrics |
 | ui-market-data | `ui/tabs/market_data.py`, `ui/feed_controls.py` (the Market data tab and the "Pull Bloomberg now" control) | `test_ui_market_data.py` | ui-shell, ui-header, bbg-live, bbg-backfill, bbg-library, bbg-diagnostics, pnl-ledger, pnl-series |
+| ◆ ui-curve | `ui/tabs/curve.py` (the Curve tab: commodity × contract month grid, net outright by commodity and sector, currency exposure) | `test_ui_curve.py` | ui-shell, curve-positions, contract-master |
+| ◆ ui-spreads | `ui/tabs/spreads.py` (the Spreads tab: P&L and leftover outright per spread) | `test_ui_spreads.py` | ui-shell, spreads-engine, pnl-series |
+| ◆ ui-expiries | `ui/tabs/expiries.py` (the Expiries tab: the roll calendar and its alerts) | `test_ui_expiries.py` | ui-shell, expiry-monitor |
 
 **Across the layers**
 
@@ -454,7 +494,7 @@ Every file has exactly one owning lane, and each lane is one agent, `.claude/age
 |---|---|---|
 | housekeeper | `docs/` | The hub: classifies, routes, briefs, carries every Handoff, runs the full suite, commits and reports. The session runs its procedure by default. |
 | reviewer | nothing (read-only) | Reviews P&L arithmetic changes in `engine/` against the conventions and the must-not-replicate list. |
-| infra | `1_setup.cmd`, `2_launcher.py`, `3_diagnostic.py`, `requirements.txt`, `pyproject.toml`, `.gitignore`, `.gitattributes`, `.claude/settings.json`, `config/` except `risk.yaml`, `tools/`, `tests/conftest.py`, `tests/golden/`, `tests/golden_book.py`, `test_golden_book.py`, `test_health.py`, `test_risk_cli.py`, `test_bloomberg_diagnostic.py` | Clean-up by kind of change, anywhere (see "Working mode"). |
+| infra | `1_setup.cmd`, `2_launcher.py`, `3_diagnostic.py`, `requirements.txt`, `pyproject.toml`, `.gitignore`, `.gitattributes`, `.claude/settings.json`, `config/` except the files the lanes above own (`risk.yaml`, `contracts.csv`, `spreads/`, `calendars/`, `book.yaml`, `commodity_stress.yaml`, `limits.yaml`), `tools/`, `tests/conftest.py`, `tests/golden/`, `tests/golden_book.py`, `test_golden_book.py`, `test_health.py`, `test_risk_cli.py`, `test_bloomberg_diagnostic.py` | Clean-up by kind of change, anywhere (see "Working mode"). |
 | bbg-diagnostics | nothing (read-only) | Audits every Bloomberg touchpoint; its findings go to bbg-live, bbg-curves or ui-market-data through the housekeeper. |
 | explainer | nothing (read-only) | Answers the user's "how does this work" questions while other lanes build. |
 

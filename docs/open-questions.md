@@ -1,5 +1,19 @@
 # Open questions
 
+## Jason's commodity book (2026-09-24, CLAUDE.md "Commodity conversion plan")
+
+Each has the default the build assumes until the user answers.
+
+- **C1. A real blotter sample and Jason's fund code.** Default: a synthetic commodity sample in the macro export's column layout (`data/sample/`); the fund filter reads `config/book.yaml`. The futures symbol formats the parser accepts are guesses until a real file is seen.
+- **C2. Is the research app's universe Jason's?** Default: yes; `config/contracts.csv` is seeded from `../Commodity Dashboard/rvapp/universe/instruments.csv` (202 contracts).
+- **C3. Bloomberg roots and price scales.** Only 11 of the 202 roots are verified on a terminal. The blotter's price and Bloomberg's `PX_LAST` must be in the same unit (cents per bushel against dollars per bushel is a 100x P&L error); to be checked on the Bloomberg PC.
+- **C4. LME forward P&L formula** (Phase 5). Proposed: the FX forward rule, `tonnes × (outright at the prompt date − fill)`, converted at spot, frozen on the prompt date. Needs the user's yes.
+- **C5. Risk parameters** (Phase 4): Jason's vol target (the 4.5m in `config/risk.yaml` is the macro fund's), the stress scenarios he wants, the commodity shock days to exclude.
+- **C6. FX options.** Not in the product list, not approved for removal: dormant until decided.
+- **C7. Which calendar defines Daily** for a book spread over US, UK, Chinese and other exchanges. Default: the existing US calendar (`config/holidays.txt`).
+
+## Macro book (inherited; retired with Phase 2)
+
 **2026-09-14 user decision:** HA-portfolio vJean is authoritative. Prior proposed defaults that alter its arithmetic are superseded. See `excel-parity-audit.md` and the correction at the top of CLAUDE.md. Full live FX numerical parity awaits valid rates; the supplied workbook caches have Bloomberg/Excel errors.
 
 Unresolved items from the data-contract review of `data/raw/HA_PNL_20260818.csv` and `data/raw/HA-portfolio vJean.xlsx` (2026-09-13). Each has a proposed default; the default is what the app assumes until the question is closed. Settled decisions live in `CLAUDE.md`.

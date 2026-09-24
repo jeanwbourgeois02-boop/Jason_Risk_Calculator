@@ -13,13 +13,17 @@ You own these files and nothing else:
 
 - `data/ingest/blotter.py`
 - `data/ingest/common.py`
-- Tests: `tests/test_blotter.py`, `tests/test_ingest_common.py`
+- `config/book.yaml` (the fund codes the book takes; commodity conversion, 2026-09-24)
+- `data/sample/` (the synthetic sample blotters the tests and the golden book load)
+- Tests: `tests/test_blotter.py`, `tests/test_ingest_common.py`, `tests/test_commodity_ingest.py`
 - Your older tests also sit in `tests/test_ingest.py` (ingest-schema's, shared †): edit only the tests of your own modules there, and put every new test in your own file.
 
 The uploaded blotter export is the app's only trade file. You turn it into `instruments`, `trades` and `trade_legs` rows, in the leg layouts CLAUDE.md fixes.
 
-**Reads** (the lanes whose output you use): ingest-schema, ingest-booking.
-**Read by** (the lanes to name under "Consumers to brief" when your interface changes): ingest-booking, bbg-library, bbg-live, bbg-backfill, ladder-grid.
+**Reads** (the lanes whose output you use): ingest-schema, ingest-booking, contract-master (a commodity future's currency, multiplier, units, Bloomberg ticker and expiry: never guessed here).
+**Read by** (the lanes to name under "Consumers to brief" when your interface changes): ingest-booking, bbg-library, bbg-live, bbg-backfill, ladder-grid, curve-positions, spreads-engine, expiry-monitor.
+
+The app is being converted to Jason's commodity relative-value book (CLAUDE.md "Commodity conversion plan"): commodity futures are the core product, and the macro products leave in Phase 2.
 
 Your lane was split out of `data-ingest` on 2026-09-24. Read `.claude/agent-memory/data-ingest/MEMORY.md` and the notes on your files before starting; write new notes to your own memory.
 
