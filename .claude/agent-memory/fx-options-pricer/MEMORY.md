@@ -1,2 +1,3 @@
 - Older notes on these files: `.claude/agent-memory/options-pricer/MEMORY.md` (lane split 2026-09-24)
-- [Macro removal 2026-09-24](macro-removal-2026-09-24.md) — equity pricer gone; sample-book tests seed the synthetic sample's 5 FX options inline (why); portfolio FUTURE_PX gap
+- [Macro removal 2026-09-24](macro-removal-2026-09-24.md) — equity pricer gone; sample-book tests seed the synthetic sample's 5 FX options inline (why); portfolio FUTURE_PX gap (closed, see below)
+- [Commodity options in portfolio 2026-09-24](cmdty-options-portfolio-2026-09-24.md) — CMDTY_OPTION underlying = contract-master future's FUTURE_PX (rule duplicated from equity_commodity); CNY/MYR/SGD rate contract

@@ -13,4 +13,6 @@
 - [NDF reviews 2026-09-22, 2 passes](review-findings-ndf-fix-2026-09-22.md) — pass 2 (spot_date pillar, present-spot retired, 1/FIX, purge_superseded): no criticals; open: CLAUDE.md drift, refrozen has no before/after, cross conversion via _mark_near
 - [Non-USD futures review 2026-09-24](review-findings-nonusd-futures-2026-09-24.md) — no criticals; S(m_day) vs S(expiry) LTD jump, settled cash as USD, equity line sums commodities
 - [Phase 2 P&L removal review 2026-09-24](review-findings-phase2-pnl-removal-2026-09-24.md) — IRS/NDF/equity-stress out of engine/pnl: no criticals, pins proven vs HEAD; NDF SPOT-substitute row re-valued
+- [C9/C10/C12 review 2026-09-24](review-findings-c9-c10-c12-2026-09-24.md) — expiry-date spot freeze, retired leftovers, CMDTY_OPTION: no criticals; isolated-copy recipe
 - [Flat-forwards OIS review 2026-09-22](review-findings-flat-forwards-2026-09-22.md) — no criticals; rerun skips matured swaps and keeps old marks on failed days; options/rates.py has no except (CurveBuildError skips, never CIP)
+- [LME forwards review 2026-09-24](review-findings-lme-forwards-2026-09-24.md) — LME_FWD on FX path, cash-date pillar, settlement_price freeze: no criticals; doc drift, bad-value test gap, no LME mark writer

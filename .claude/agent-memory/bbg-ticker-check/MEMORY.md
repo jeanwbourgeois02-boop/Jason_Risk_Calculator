@@ -1,0 +1,2 @@
+- [Bloomberg field assumptions](bloomberg_field_assumptions.md): unverified guesses for OPT_CHAIN, option ticker form and LME tickers/dates; check these first against a real report
+- [Worksheet fixable fields](worksheet_fixable_fields.md): option_style / option_lead_months not in apply_fixes yet (requested 2026-09-24); LME findings go to the housekeeper, not the worksheet

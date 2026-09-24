@@ -22,10 +22,10 @@ Deliberately NOT replicated (told the user): the NDF-implied carry override; the
 and the EQUITY_INDEX row (ES + SPX as "SPX") are gone, with `dv01_usd` (row and book), the scenarios'
 `futures_pnl` / `equity_pct` / equity `reason`; a scenario is now `{total (= fx_total), fx_pnl, fx_total}`.
 `rows_from_positions` reads only `fx` and `fx_options` of `book_positions`, so it stays right while
-book-positions still returns `equity_index` / `rates` blocks. Commodity kinds are meant to join `DELTA_KINDS` /
-`SCENARIO_KINDS` in Phase 4 (see CLAUDE.md "Commodity conversion plan").
+book-positions still returns `equity_index` / `rates` blocks. Commodity kinds did NOT join `DELTA_KINDS` /
+`SCENARIO_KINDS` in Phase 4: they are separate (see [[commodity-phase4-2026-09-24]]).
 **Why:** Jason's commodity book has no swaps or equity index. **How to apply:** do not reintroduce a rates or
-equity kind; new underlyer kinds go through those two tuples.
+equity kind; new kinds declare part or view (PART_KINDS / VIEW_KINDS).
 
 Tests: synthetic history 2007-01-01..2026-09-22 built from designed log returns (CHF: -15 % SNB day, -3 % on
 2020-03-16, -4 % on the last day past the lag-2 cut, fifteen -1 % days in the VaR window so q05 = -1 % exactly);

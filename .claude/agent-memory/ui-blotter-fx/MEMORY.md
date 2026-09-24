@@ -1,1 +1,2 @@
 - [FX_SWAP tag kept in Phase 2](fx-swap-tag-kept-phase2-2026-09-24.md) — why FX_PRODUCTS still has FX_SWAP; drop only with ui-blotter + engine; tests use inline fixtures
+- [USD notional can be None](usd-notional-can-be-none-2026-09-24.md) — n/a + notional_reason hover, "Quantity (USD)", never summed; no futures on this sub-tab

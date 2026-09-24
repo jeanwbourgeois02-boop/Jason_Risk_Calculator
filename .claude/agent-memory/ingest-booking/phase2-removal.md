@@ -27,6 +27,6 @@ never blocks a replace on an old database, before or after ingest-schema drops t
 The upload summary counts loaded trades by product (`upload.loaded_breakdown(result.trades)`),
 never ParseResult's n_future etc., which count rejected rows too.
 
-The synthetic `data/sample/blotter_sample.csv` loads 43 trades / 52 legs with 2 deliberate rejects
+The synthetic `data/sample/blotter_sample.csv` loaded 43 trades / 52 legs in Phase 2 (50 / 62 since Phase 5, [[phase5-options-lme]]) with 2 deliberate rejects
 (ZCZ6 ambiguous root, QQZ6 unknown), and it holds CLZ6, so a contract-dates test that needs
 a MANUAL-only future must use a month the sample does not trade. Related: [[contract-dates]].

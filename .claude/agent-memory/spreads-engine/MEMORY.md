@@ -1,0 +1,2 @@
+- [Grouping rule decisions](grouping-rule-decisions.md) — review kinds stay outrights, label tie-breaks, leftover on open lots; China-vs-West may span two accounts (decided 2026-09-24)
+- [Template units](template-units.md) — qty_factor semantics, generic unit conversion, oz-for-oz gold/silver and crush ratios that will not fit

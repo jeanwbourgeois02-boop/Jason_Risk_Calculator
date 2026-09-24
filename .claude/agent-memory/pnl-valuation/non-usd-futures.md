@@ -13,7 +13,8 @@ metadata:
 - Open row with no S: mark and pnl_local shown, pnl_usd / pnl_spot_usd NaN, spot NaN / '', reason
   "no SPOT for USD conversion of <ccy> on <as_of>" (the FX rows' wording). A non-USD future with no price
   also starts at spot NaN / '' (never 1 / identity); a USD one keeps 1.0 / identity as before.
-- `_frozen_row` (settled, no realised row): S at the FUTURE_PX's own date m_day, None when no S (like FX).
+- SUPERSEDED same day by C9 (see [[phase3-5-freeze-retired-cmdty]]): settled rows now convert at the
+  expiry-date spot, not at m_day. Original: `_frozen_row` S at the FUTURE_PX's own date m_day.
 - `_settled_future_row`: pnl is the stored figure; `spot` is 1.0 / identity when `realised_pnl.currency`
   is USD, else `usd_per_quote(currency, spot_as_of_date)` (display only; `_BadValue` there gives NaN spot,
   never blanks the frozen P&L). pnl-ledger's `_future_freeze` (same day) stores currency = quote_ccy,

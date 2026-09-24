@@ -1,1 +1,3 @@
 - [Dev PC parquet gap and package init](dev-pc-parquet-and-package-init.md) — no pyarrow here; engine/risk/__init__ imports metrics, so a removed name breaks collection
+- [Research db quirks](research-db-quirks.md) — rv.sqlite: 102 roots' ids differ (ZZ placeholders), raw x multiplier, WAL side files, depth, starts 2020-09-21
+- [No python stdin heredocs](feedback-no-python-stdin-heredoc.md) — `py -3 -` heredocs hang and cannot be killed here; use scratchpad scripts

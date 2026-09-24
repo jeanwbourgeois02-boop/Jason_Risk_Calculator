@@ -13,3 +13,7 @@ Expiries tab (built 2026-09-24, Phase 1 step 3) shows every date of an `estimate
 - Level colours are inline styles in `ui/tabs/expiries.py` (`LEVEL_STYLES`), because `ui/assets/` is ui-shell's; a CSS class would be a Request.
 - Level text sorts alphabetically under native sort, so the "#" column (engine order, worst first) exists to restore that order; never re-derive the order from level + days.
 - The engine may return RED with a future event date (estimated physical past its alert date): render as given, never "fix" it.
+- Frozen contracts (engine `settled_expired`, user's recommended option 2026-09-24) sit in a collapsed html.Details "Expired and settled (N)" below the alert table, no level colour, never counted; the section is omitted when the list is empty.
+- The Product column ("Future" / "Option" / "LME prompt") shows only when rows hold more than one product; futures-only book hides it.
+- Phase 5 (2026-09-24): a date that does not apply to the product (option/LME first notice, LME last trade) reads an em dash with "not applicable to ..." on hover, never "missing"/"n/a" (housekeeper brief). LME tonnes go on hover of Lots; option type/strike/style/underlying event on hover of Next event (the Contract hover stays the reason, tests pin it). dates_source 'TICKET' reads "Ticket's prompt".
+- The Bash tool's heredoc choked on a long quoted script with apostrophes; write edit scripts with the Write tool into the scratchpad and run them with py -3.

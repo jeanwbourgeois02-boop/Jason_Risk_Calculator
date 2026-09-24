@@ -1,3 +1,5 @@
 - Older notes on these files live in `.claude/agent-memory/pnl-engine/` (lane split 2026-09-24): read its MEMORY.md first.
 - [Non-USD futures](non-usd-futures.md) — 2026-09-24: futures / EQ_OPTION in quote_ccy converted at usd_per_quote; open, provisional and settled rows; USD bit for bit
+- [Wave A: expiry spot, retired, CMDTY_OPTION](phase3-5-freeze-retired-cmdty.md) — 2026-09-24: C9 helper, C10 blank rows, C12 listed path; golden proof on a HEAD copy
+- [LME forwards](lme-forwards.md) — 2026-09-24: LME_FWD in FX_PRODUCTS (ledger inherits), cash pillar at LME cash date, settlement_price freeze
 - [Phase 2 IRS/NDF removal](phase2-irs-ndf-removal.md) — 2026-09-24: IRS and NDF valuation gone, is_ndf ignored, EQ_OPTION / FX options stay; HEAD pin via git archive

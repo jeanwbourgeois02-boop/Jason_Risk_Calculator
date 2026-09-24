@@ -14,7 +14,7 @@ file; no DV01 card or column; scenario table is Total + FX total only.
 
 **Why:** the screen stopped reading those outputs before the engine stopped producing them.
 **How to apply:** the filters are safe to delete once `book_risk` no longer returns them.
-Any other kind (Phase 4's commodity kinds) renders as the engine names it (KIND_LABELS
-fallback), so add a label when risk-metrics names the new kinds. The Book row's note and
+Any other kind renders as the engine names it (KIND_LABELS
+fallback); COMMODITY, SECTOR, SPREAD got labels on 2026-09-24 ([[commodity-sections-2026-09-24]]). The Book row's note and
 figures stay the engine's (rows_in_series unfiltered), so they stay honest about what is summed.
 Related: [[risk-tab-layout-decisions]].

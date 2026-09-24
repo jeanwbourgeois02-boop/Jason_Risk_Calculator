@@ -1,6 +1,6 @@
 ---
 name: dash-component-behaviour
-description: Dash facts learned building the Risk tab (unset props are absent attributes, title hovers, DataTable tooltip props, numeric columns carrying strings) and the zsh "=word" gotcha in Bash
+description: Dash facts learned building the Risk tab (unset props are absent attributes, title hovers, DataTable tooltip props, numeric columns carrying strings), the zsh "=word" gotcha and the Windows `py -3 -` heredoc hang
 metadata:
   type: project
 ---
@@ -28,5 +28,9 @@ Dash behaviour worth remembering when writing or testing a tab:
   (zsh expands a leading `=word`); quote the separator, and quote `--include='*.py'` for
   grep -r.
 
-**Why:** each cost a failed run on 2026-09-22 while building ui/tabs/risk.py.
+- Bash on the Windows PC (Git Bash): `py -3 -` with a heredoc or piped stdin hangs until the
+  120 s timeout and leaves a stray python process (the housekeeper forbids it). Use `py -3 -c "..."`
+  or a test; to clean up, match the PID through `/proc/<pid>/cmdline` and kill only your own.
+
+**Why:** each cost a failed run (2026-09-22 building ui/tabs/risk.py; the py heredoc twice on 2026-09-24).
 **How to apply:** when writing tests over Dash trees or eyeballing a render from a script.

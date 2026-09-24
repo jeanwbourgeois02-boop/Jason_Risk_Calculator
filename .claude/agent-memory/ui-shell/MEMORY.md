@@ -13,3 +13,4 @@
 - [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable
 - [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
 - [Phase 2 removal 2026-09-24](commodity-phase2-removal-2026-09-24.md) — IRS/NDF/ES-SPX out, FX_SWAP stays, sample's 2 deliberate rejects, parallel-lane import breaks
+- [Parallel tab wiring](parallel-tab-wiring.md): wire a tab another lane is still writing; stub it from the scratchpad; the lint-hook cwd noise

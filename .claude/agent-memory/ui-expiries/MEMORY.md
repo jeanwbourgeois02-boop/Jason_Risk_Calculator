@@ -1,1 +1,1 @@
-- [Expiries tab conventions](expiries-tab-conventions.md) — (est.) marker, inline level colours, "#" engine-order column, RED with future event is valid
+- [Expiries tab conventions](expiries-tab-conventions.md) — (est.) marker, inline level colours, "#" engine-order column, RED with future event is valid, settled section, product column, option/LME rendering

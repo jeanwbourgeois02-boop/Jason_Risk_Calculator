@@ -1,2 +1,3 @@
-- [Equity branch removed 2026-09-24](equity-branch-removed-2026-09-24.md) — commodity-only pricer, FUTURE_PX underlying, implied vol; Phase 5 seams (EQ_OPTION vs CMDTY_OPTION, portfolio SPOT)
+- [Phase 5 CMDTY_OPTION Greeks 2026-09-24](phase5-cmdty-greeks-2026-09-24.md) — entry point, option_for underlying, BAW vol by Brent, CNY on USD curve, mark units, open seams
+- [Equity branch removed 2026-09-24](equity-branch-removed-2026-09-24.md) — history; its Phase 5 seams are superseded by the note above
 - Older notes on this file (loop guard, vendor quirks, units) live in `.claude/agent-memory/options-pricer/`, the lane this one split from.

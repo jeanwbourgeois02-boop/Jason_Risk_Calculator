@@ -13,7 +13,7 @@ On 2026-09-24 (Phase 2 wave 0) the user had the macro trader's REAL blotter remo
 about a dozen lanes' tests load that path, so the replacement kept the path.
 
 **How to apply:**
-- Composition (45 rows -> 43 trades, 52 legs, 33 instruments, 2 rejects, 0 warnings):
+- Composition (45 rows until Phase 5; 52 rows since, see [[phase5-options-and-lme]]):
   31 FUTURE rows (29 trades; rejects ZCZ6-USAA ambiguous, QQZ6-USAA unknown), 8 FORWARD
   (USDCNH x3 incl. 910000034 settled 2026-08-19; EURUSD, USDJPY, GBPUSD, EURGBP cross,
   XAUUSD), 1 CURRENCY spot (910000040 EURUSD), 5 OPTION (EURUSD call 500041, USDJPY put

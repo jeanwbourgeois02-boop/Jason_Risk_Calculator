@@ -19,9 +19,9 @@ must still leave a visible trace and must not fail the file.
   skipped with `RETIRED_REASON_IRS` and never mistaken for an FX swap fill. Keep that.
 - ES/NQ/RTY/YM: detected by root on Symbol / Underlying Symbol before the contract master
   (which would otherwise reject 'unknown root'). No contracts.csv root collides (checked).
-- Listed options ('ROOT/[EA]yymmdd[CP]strike'): SPX/NDX/RUT/SX5E are retired; ANY other root
-  (e.g. 'CL/A...') is skipped as "not loaded yet" (retired=False) -- a guess about Phase 5's
-  symbol shape; revisit when options on futures get a path.
+- Listed options ('ROOT/[EA]yymmdd[CP]strike'): SPX/SPXW/NDX/RUT/SX5E and ES/NQ/RTY/YM are
+  retired; since Phase 5 (same day) any other root is an option on a commodity future, see
+  [[phase5-options-and-lme]] (the "not loaded yet" skip is gone).
 - NDFs: every FX pair is written is_ndf 0, settles_cash 1. `NDF_CCYS` and `NDF_1M_TICKERS` were
   kept retired for a few hours, then deleted the same day once manual.py and
   engine/ladder/ndf.py stopped importing them: common.py carries no NDF name at all now.

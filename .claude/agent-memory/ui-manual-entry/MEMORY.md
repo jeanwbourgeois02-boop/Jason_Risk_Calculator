@@ -1,0 +1,2 @@
+- [Manual entry FX swap 2026-09-24](manual-entry-fx-swap-2026-09-24.md) — swap fields/toggles, blank-field check in UI, package column, both-dates delete wording, test recipe
+- Environment and older Blotter notes: `.claude/agent-memory/ui-blotter/MEMORY.md` (py -3, dash callback `__wrapped__` recipe)

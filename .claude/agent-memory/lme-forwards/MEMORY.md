@@ -1,0 +1,1 @@
+- [LME open points](project_lme_open_points.md) — unverified prompt rules, ticker guesses, freeze-date question, calendar coverage (2026-09-24)

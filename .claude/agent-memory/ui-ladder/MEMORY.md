@@ -8,3 +8,5 @@
 - [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
 - [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable
 - [Day boundary: today_ny delegates to live.book_today 2026-09-22](day-boundary-book-today-2026-09-22.md) — one 17:00 NY roll for screens+marks+backfill+ledger; calendar_today_ny (manual entry) unrolled, open question
+- [Phase 3 FX-only Net/Gross 2026-09-24](phase3-fx-only-net-gross-2026-09-24.md) — headline card + risk footer FX only, headline_numbers lost futures arg, Curve/Risk tab pointers
+- [Phase 5 LME + listed options 2026-09-24](phase5-lme-and-listed-options-2026-09-24.md) — LME USD leg in USD row, pair_label 'LME copper', new sample pins (USD settled 1,990,310)

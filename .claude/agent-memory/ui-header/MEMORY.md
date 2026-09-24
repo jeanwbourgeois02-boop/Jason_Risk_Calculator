@@ -7,3 +7,4 @@
 - [Feedback: no reconciliation-only source feeding P&L](feedback-no-reconciliation-only-source-feeding-pnl.md) — flag it, don't just optimise it, when code treats BNP_BVAL/BBG_INTERP as priceable
 - [Dash Details open never synced 2026-09-22](dash-details-open-never-synced-2026-09-22.md) — a callback on Details.open never fires from a click; clientside mirror from Summary.n_clicks (default 0, not null); how to test clientside callbacks; ui.launch never reloads
 - [Commodity Phase 2 removal 2026-09-24](commodity-phase2-removal-2026-09-24.md) — IRS/NDF/swap/ES left; header's NDF path is ui-ladder's net_gross_usd; Phase 3 reworks header
+- [Commodity strip Phase 3 2026-09-24](commodity-strip-phase3-2026-09-24.md) — 4 cards after FX net/gross; book_spreads ~1s so mtime memo; expiry business_days count to alert_date

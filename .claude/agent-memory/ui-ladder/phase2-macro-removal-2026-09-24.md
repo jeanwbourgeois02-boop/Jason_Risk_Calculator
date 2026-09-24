@@ -27,7 +27,7 @@ then the engine lanes remove them.
 - Open futures table columns: instrument, contracts, multiplier, settlement price,
   currency, "USD per unit (spot)", USD delta, all from `futures_usd_delta`'s `details`
   (book-positions); a missing price/conversion is "n/a" with the detail's own `reason` on hover.
-- The tab's tests now pin the synthetic sample `data/sample/blotter_sample.csv` (as of
+- (Pins superseded by [[phase5-lme-and-listed-options-2026-09-24]] for USD.) The tab's tests now pin the synthetic sample `data/sample/blotter_sample.csv` (as of
   2026-09-17: CNH settled -14,330,000, 18 Nov +10,713,750, 20 Jan 27 -7,108,000; EUR settled
   -150,000; USD settled 2,175,350; CLQ26 Comdty named as settled-unrealised).
 - `config/stress.yaml` now has CNH moves and no EQUITY key (infra, 2026-09-24);

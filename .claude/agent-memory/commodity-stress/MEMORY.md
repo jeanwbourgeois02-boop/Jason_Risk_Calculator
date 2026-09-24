@@ -1,0 +1,1 @@
+- [Stress conventions](project_stress_conventions.md) — delta basis, move units, selector order, FX as exposure, spread leftover rule, replay history source

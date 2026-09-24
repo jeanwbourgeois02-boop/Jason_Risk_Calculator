@@ -1,3 +1,4 @@
 - [Research universe quirks](research-universe-quirks.md) — 4 rows need a unit conversion in the multiplier (HE/LE/GF lb->cwt, SGX:TF t->kg); former ZZ placeholders; code collisions; delivery from notes
 - [Resolve rules](resolve-rules.md) — Bloomberg forms by bbg_root, Chinese forms by CN exchange code, others by the union of both; narrowing order; estimated expiry keeps the one-digit ticker past the real expiry
 - [Bloomberg root guesses](bbg-root-guesses.md) — how the 102 ZZ roots were guessed (exchange code, L/Z/N/D prefixes), collision rules, fixes worksheet rules
+- [Settlement and option flags](settlement-and-option-flags.md) — which roots are 'average' / blank and why (JKM, 9N, DCE LF), option style, lead months, option date order (BLOOMBERG > SYMBOL > ESTIMATED)

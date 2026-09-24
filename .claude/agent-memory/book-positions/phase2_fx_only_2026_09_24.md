@@ -8,7 +8,8 @@ metadata:
 User approval 2026-09-24 (commodity conversion Phase 2): the equity index line (ES + SPX),
 the rates DV01 block and the 1M NDF rates left `engine/ladder/positions.py`.
 
-- `book_positions` returns exactly `{"fx", "fx_options"}`. Blocks are listed in `_BLOCKS` with
+- (Superseded by Phase 3: a third block `commodities`, see [[phase3-commodities-block-2026-09-24]].)
+- `book_positions` returned exactly `{"fx", "fx_options"}` after Phase 2. Blocks are listed in `_BLOCKS` with
   their fallback shape in `_EMPTY`; Phase 3's commodity lines (from curve-positions) are one
   more entry in each, built only when the housekeeper briefs Phase 3.
 - Rates are `rates_from_marks` alone (latest official SPOT), the same as

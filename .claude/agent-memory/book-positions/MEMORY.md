@@ -1,2 +1,3 @@
 - [Futures delta in USD at spot 2026-09-24](futures_usd_at_spot_2026_09_24.md) — futures_usd_delta converts at the exact official SPOT of as_of (never near marks); details gained currency / usd_per_unit / reason; all four lane files are LF.
-- [Phase 2: FX only 2026-09-24](phase2_fx_only_2026_09_24.md) — book_positions = {fx, fx_options}; equity index, DV01 and 1M NDF rates gone; all at official spot; Phase 3 commodity blocks slot into _BLOCKS / _EMPTY.
+- [Phase 2: FX only 2026-09-24](phase2_fx_only_2026_09_24.md) — equity index, DV01 and 1M NDF rates gone; every currency at official spot.
+- [Phase 3 commodities block 2026-09-24](phase3_commodities_block_2026_09_24.md) — "commodities" block from curve_positions: None not NaN, partial sums "excludes N of M", futures still in the Ladder card.

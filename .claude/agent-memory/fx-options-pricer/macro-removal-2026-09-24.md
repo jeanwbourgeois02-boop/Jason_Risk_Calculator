@@ -13,4 +13,4 @@ The units-audit / expiry-day / expiry-week tests used to import `data/raw/new_sa
 
 **How to apply:** if ingest-parser changes the sample's options, update `SAMPLE_OPTIONS` by hand to match. The sample's dates are day-first and some are ambiguous (1/9/2026, 10/8/2026, 8/9/2026). I read them as D/M, which was not checked against the parser. Related: [[closed-out-options-not-priced-2026-09-22]] (options-pricer memory).
 
-`portfolio.build_positions` still reads a listed option's underlying as the SPOT of `bbg_ticker`. A commodity future has only FUTURE_PX, so a commodity leg would be skipped. That fix belongs to Phase 5, and nobody feeds it commodity outcomes today.
+The portfolio FUTURE_PX gap noted here was closed the same day: see [[cmdty-options-portfolio-2026-09-24]].

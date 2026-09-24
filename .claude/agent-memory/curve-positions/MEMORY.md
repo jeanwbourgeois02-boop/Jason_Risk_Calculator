@@ -1,1 +1,1 @@
-- [curve_positions conventions](curve_positions_conventions.md) — exact spot (not usd_per_quote), gross_lots, flat contracts, multiplier check, FX exposure scope
+- [curve_positions conventions](curve_positions_conventions.md) — exact spot, gross_lots, flat contracts, multiplier check; Phase 5 delta (options, LME, averaging); golden pin

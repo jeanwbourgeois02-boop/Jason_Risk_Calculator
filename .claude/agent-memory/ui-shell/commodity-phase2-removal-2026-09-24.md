@@ -26,3 +26,9 @@ breaks collection of test_ui / test_app / test_uploads / test_ui_revision and ma
 `launch.main` return 1 (its ImportError branch).
 **How to apply:** a collection ImportError from another lane's module is not our failure: report
 it in the Handoff, re-run once the other lane lands.
+
+**Retired-product tag (2026-09-24, Phase 5 follow-up):** `blotter_pricing._reason_tag` maps any
+reason containing `RETIRED_PRODUCT_MARKER` ("left the app on 2026-09-24", the wording of
+`engine.pnl.valuation.RETIRED_PRODUCTS`) to "product left the app". `ui/tabs/header.py::_reason_tag`
+is a duplicate copy owned by ui-header; keep the two in step through the housekeeper. Pin upload
+headline tests to "Imported <file>: N trades" only; ingest-booking reworded the breakdown after it.

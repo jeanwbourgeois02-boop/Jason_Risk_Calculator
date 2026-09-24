@@ -1,0 +1,1 @@
+- [Margin and limits conventions](margin_limits_conventions.md) — cells, credit budget, spot-month rule, placeholder-rate policy (2026-09-24)

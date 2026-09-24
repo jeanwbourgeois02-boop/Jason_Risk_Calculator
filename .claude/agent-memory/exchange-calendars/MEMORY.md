@@ -1,1 +1,1 @@
-- [Calendars built, Phase 1 step 1](calendars_phase1.md) — 12 ids, file format, API semantics (between is antisymmetric, n=0 unchanged, coverage), which dates are guesses, health-audit traps.
+- [Exchange calendars](calendars_phase1.md) — 12 ids, format, API semantics, coverage (LME 2029, others 2028), estimated dates, audit traps.
