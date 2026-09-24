@@ -18,7 +18,16 @@ This file is the rulebook: what is true of the app now and what must not change 
 
 ## Working mode
 
-Default: the housekeeper procedure, run by the session itself (user decision 2026-09-22: "I want to have a house keeper agent as a starting point, and each feature and each tab has a specialist agent, for the function and UI respectively"; it replaced the lean default of 2026-09-18). The session coordinates and writes no application code: it names the feature pairs the request touches and the exact file list first (the table under "Repository layout and ownership"), then delegates to the owning agents. Within a pair the function agent goes first and the UI agent second, briefed with what the function agent changed, because the UI reads the engine's output shape; pairs whose files do not overlap run in parallel. A request that touches one file goes to that file's one owning agent and nobody else, with no reviewer: the fast path that keeps a small fix quick. Each agent runs only its own test files; the session runs `py -3 -m pytest tests/ -q` once at the end and reports the pass count. The reviewer runs only on changes to P&L arithmetic in `engine/`. Clean-up is a lane of its own, by kind of change rather than by file: `infra` (`.claude/agents/infra.md`; user, 2026-09-22: "make sure the housekeeper can trigger that too") makes the mechanical, behaviour-neutral changes anywhere (dead code, unused imports, duplicate helpers, stale docstrings and references, module splits with every caller updated, ruff / pytest / git configuration, the `.claude/` tooling) and owns the root scripts, `config/`, `tools/`, the shared test fixtures, the golden book (`tests/golden/`, `tests/golden_book.py`, `tests/test_golden_book.py`, `tests/test_health.py`), `pyproject.toml`, `.gitattributes`, `.gitignore` and `.claude/settings.json` outright; formulas and SQL in `engine/`, pricing, official mark sources, schema DDL, CLAUDE.md and any test's expected value are out of its lane and come back as findings. It works from the health audit (`py 2_launcher.py health`) and proves every change with the golden book and the full suite. The golden book's pinned file, `tests/golden/book.json` (the sample blotter at synthetic marks, every valuation pinned), is regenerated only on the user's explicit yes, never by an agent (user decision 2026-09-22): a regeneration that made a P&L change disappear would defeat the proof, so hard rule 7 covers it. The session spawns it only when the user asks (after a feature lands, or as a weekly full pass), never on its own, after the feature commit, on a clean tree with no other agent running. `.claude/agents/housekeeper.md` is the same procedure for a detached run, when the user names it.
+Default: the housekeeper procedure, run by the session itself (user decision 2026-09-22: "I want to have a house keeper agent as a starting point, and each feature and each tab has a specialist agent"; extended 2026-09-24: "set up the most extensive agent system - every layer of calculation and then every tab etc. that all speak together through the housekeeper"). The app is built in seven layers, each split into lanes, one agent per lane (the tables under "Lanes"); the housekeeper is the hub every lane speaks through.
+
+- **The session coordinates and writes no application code.** It names the lanes the request touches and the exact file list first, then delegates to the owning agents.
+- **Hub and spoke.** Only the housekeeper spawns, briefs and resumes agents. A lane agent has no Agent or SendMessage tool and never calls, messages or edits another lane: what it needs from another lane, and what another lane must know about its change, go in its report's Handoff, and the housekeeper carries them.
+- **Handoff.** Every lane agent's report ends with a Handoff block before the two closing sections: *Changed interface* (every function, argument, return shape, column, mark type or source, table or status-file key another lane reads, before → after; or "None"), *Consumers to brief* (the lanes whose "Reads" column names this one), *Requests* (file, change, why and owning lane for each change needed outside its files; or "None"), *Blocked on* (what it needs from which lane before it can finish; or "Nothing").
+- **Routing.** Work runs bottom-up by layer: the lowest layer the request touches goes first. Each changed interface is walked downstream through the "Reads" column and every consumer is briefed with the producer's Handoff verbatim; that is how the lanes speak to each other. Requests go to the owning lane, never done by the asker. Lanes whose files do not overlap and that do not read each other run in parallel; a blocked lane is resumed with the answer once the lane it waits on reports. Within a layer the same holds, and the screens (layer 7) always come last, because they read the engine's output shape.
+- **Fast path.** A request that touches one file goes to that file's one owning lane and nobody else, with no reviewer: the path that keeps a small fix quick.
+- **Tests.** Each lane runs only its own test files; the session runs `py -3 -m pytest tests/ -q` once at the end and reports the pass count. The reviewer runs only on changes to P&L arithmetic in `engine/`.
+
+Clean-up is a lane of its own, by kind of change rather than by file: `infra` (`.claude/agents/infra.md`; user, 2026-09-22: "make sure the housekeeper can trigger that too") makes the mechanical, behaviour-neutral changes anywhere (dead code, unused imports, duplicate helpers, stale docstrings and references, module splits with every caller updated, ruff / pytest / git configuration, the `.claude/` tooling) and owns the root scripts, `config/`, `tools/`, the shared test fixtures, the golden book (`tests/golden/`, `tests/golden_book.py`, `tests/test_golden_book.py`, `tests/test_health.py`), `pyproject.toml`, `.gitattributes`, `.gitignore` and `.claude/settings.json` outright; formulas and SQL in `engine/`, pricing, official mark sources, schema DDL, CLAUDE.md and any test's expected value are out of its lane and come back as findings. It works from the health audit (`py 2_launcher.py health`) and proves every change with the golden book and the full suite. The golden book's pinned file, `tests/golden/book.json` (the sample blotter at synthetic marks, every valuation pinned), is regenerated only on the user's explicit yes, never by an agent (user decision 2026-09-22): a regeneration that made a P&L change disappear would defeat the proof, so hard rule 7 covers it. The session spawns it only when the user asks (after a feature lands, or as a weekly full pass), never on its own, after the feature commit, on a clean tree with no other agent running. `.claude/agents/housekeeper.md` is the same procedure for a detached run, when the user names it.
 
 **Do not overdo it (user rule, 2026-09-18: "you're doing way too many random things and checks instead of just fixing the problems").** Fix what the user asked for, run the full suite once, push, report in a few lines, and stop. Scope is the user's list. Anything else found on the way (a reviewer finding, a hardening idea, a cosmetic issue) goes in a short "found, not done" list for the user to choose from; it is not started, and a finished agent is not resumed with new items, without the user's yes. The one exception is a finding that makes the requested fix itself wrong: say so in one line and fix that. Brief an agent for the fix and the tests that prove it: no browser proofs, fuzzing or per-agent full-suite runs unless the user asks; whoever spawned the agents runs the full suite once at the end. The reviewer runs on P&L arithmetic changes, and its findings are relayed to the user, not dispatched. Give one time estimate and keep to it by cutting scope, not by extending. Status updates are a few lines: no tables, no re-listing of open questions each time.
 
@@ -29,9 +38,9 @@ Default: the housekeeper procedure, run by the session itself (user decision 202
 - **What was done**: what changed and where, what was verified and how (the pytest pass count goes here), and anything skipped or left unverified, said plainly.
 - **What needs your input**: only the decisions, approvals or facts the user alone can give, one bullet each, with a recommendation where there is one. If there is nothing, write "Nothing". A low-stakes, reversible choice is not input: take the recommended option and report it under "What was done" (user, 2026-09-18: "i dont have strong opinions i imagine your recs are the best"). Hard rule 7 still stands: P&L arithmetic and this contract always need the user's yes.
 
-The working copy is `C:\Users\jeanw\Jason Risk Monitor`; GitHub `main` is the backup, pushed at the end of each task.
+The working copy is `C:\Users\jeanw\Ninemasts\Dashboards\Jason Risk Monitor`; GitHub `main` is the backup, pushed at the end of each task.
 
-When agents or several sessions work in parallel, the ownership table under "Repository layout" defines the lanes. State your file list to the other sessions first and keep to it; message the owner and wait before editing outside your lane; commit by explicit path only (the git index is shared: run `git diff --cached --stat` immediately before every commit, never `git add -A`); preserve each file's line endings.
+When agents or several sessions work in parallel, the tables under "Lanes" define the lanes. State your file list to the other sessions first and keep to it; message the owner and wait before editing outside your lane; commit by explicit path only (the git index is shared: run `git diff --cached --stat` immediately before every commit, never `git add -A`); preserve each file's line endings.
 
 ## Data contract
 
@@ -142,7 +151,7 @@ curves (                               -- curve nodes so the IRS pricer can be r
   PRIMARY KEY (curve_id, as_of_date, node_date, source)
 );
 
-curve_quotes (                         -- raw OIS quote staging (bbg-data writes, engine/rates reads)
+curve_quotes (                         -- raw OIS quote staging (bbg-curves writes, engine/rates reads)
   as_of_date      TEXT NOT NULL,
   ccy             TEXT NOT NULL,
   index           TEXT NOT NULL,      -- 'SOFR', 'ESTR', 'SONIA', 'TONA', 'SARON', 'CORRA', 'AONIA' (Phase 1: OIS only)
@@ -369,57 +378,91 @@ Per-pair delta (the "Position" table) is the same union grouped by `t.instrument
   3. Marking every pair at one shared date regardless of each leg's own value date, and marking matured trades forever instead of freezing settled trades.
   4. Hard-coded ranges or cell references in place of a real query over `trades` / `trade_legs` / `marks_official`.
 
-## Repository layout and ownership
+## Lanes
 
-Each directory has one owning agent, and inside `ui/` each tab has its own (user decision 2026-09-22: the feature pairs below). The session coordinates and writes no application code; every agent stays inside its own files, and so does every parallel session (see "Working mode").
+Every file has exactly one owning lane, and each lane is one agent, `.claude/agents/<lane>.md` (user decision 2026-09-24, see "Working mode"). The layers run in the order the numbers flow: trades in, market data, pricers, P&L, exposure, risk, screens. "Reads" lists the lanes whose output a lane uses (from the code's own imports and the tables it reads); its consumers are the lanes whose "Reads" names it, which is how the housekeeper finds whom to brief when an interface changes. Paths are relative to the repo root; `tests/` files are named without the folder.
 
-```
-data/ingest/      blotter parser, upload, manual entry, SQLite schema,   -> data-ingest
-                  swap package rule
-data/bloomberg/   blpapi pulls (live, backfill), marks, inventory,       -> bbg-data
-                  manual marks, diagnostics
-engine/pnl/       value_book, realised ledger, LTD / daily / 5d / MTD /  -> pnl-engine
-                  YTD, stress
-engine/ladder/    cash ladder, settled cash, USD equivalents, delta      -> cash-ladder
-                  per currency and per pair
-engine/rates/     OIS curve bootstrap + swap valuation (QuantLib)        -> rates-pricer
-engine/options/   FX / equity / commodity option pricing, vendored       -> options-pricer
-                  options_calc (QuantLib); phase status in
-                  engine/options/__init__.py's scope ledger
-engine/rates_vol/ swaptions, caps / floors, SABR, Bermudan (vendored     -> rates-exotics
-                  options_calc.rates)
-engine/risk/      the Risk tab's metrics (blended vol, VaR, worst days,     -> risk-metrics
-                  scenario pass-through) and the nm-dashboard history reader
-ui/               Dash app: the shell (app, launch, refresh signal,      -> ui-shell for the shell,
-                  upload, shared controls, the shared pricing reader)      one UI agent per tab
-                  and one module per tab or sub-tab, owned tab by tab      (feature pairs below)
-tests/            pytest, one file per module, owned by the module's agent;
-                  tests/conftest.py (shared fixtures), tests/golden/ and the
-                  golden-book and health tests are infra's
-config/           holidays.txt (trading calendar), stress.yaml               -> infra
-                  (risk.yaml is risk-metrics')
-tools/            Bloomberg diagnostics and terminal probe, setup script     -> infra
-1_setup.cmd, 2_launcher.py, 3_diagnostic.py, .gitignore, .gitattributes,     -> infra (clean-up / infra:
-                  pyproject.toml, .claude/settings.json: the root scripts
-                  and ignore rules (hard rule 9); mechanical, behaviour-         also the mechanical
-                  neutral clean-up anywhere, see "Working mode"                  clean-up anywhere)
-docs/             contract, build plan and open questions, owned by housekeeper
-```
+**1 Trades in (`data/ingest/`)**
 
-**Feature pairs (user decision 2026-09-22).** Each feature has a function agent and a UI agent. The function agent goes first; the UI agent reads its output and never recomputes it. Inside `ui/` ownership is by file, since every tab lives in `ui/tabs/`.
+| Lane | Files | Tests | Reads |
+|---|---|---|---|
+| ingest-schema | `schema.py`: DDL, migrations, the `marks_official` / `trades_official` views, official sources, retired-source purge | `test_ingest.py`†, `test_trades_official.py` | none |
+| ingest-parser | `blotter.py`, `common.py` (NDF lists, fixing and 1M tickers, shared dataclasses) | `test_blotter.py`, `test_ingest_common.py` | ingest-schema, ingest-booking |
+| ingest-booking | `upload.py`, `manual.py`, `swaps.py` (package rule), `themes.py`, `irs_direction.py` | `test_upload.py`, `test_manual.py`, `test_swaps.py` | ingest-schema, ingest-parser, bbg-library, rates-pricer, options-store |
 
-| Feature | Function agent | UI agent | UI files | UI tests |
-|---|---|---|---|---|
-| Header strip (above every tab) | pnl-engine | ui-header | `ui/tabs/header.py` | `tests/test_header.py` |
-| Ladder | cash-ladder | ui-ladder | `ui/tabs/exposure.py`, `ui/tabs/cash_ladder.py` | `tests/test_ui_ladder.py`, `tests/test_ui_ladder_view.py` |
-| Blotter: Total book, FX, Futures, Bundles, Manual entry | pnl-engine, data-ingest | ui-blotter | `ui/tabs/blotter.py`, `ui/tabs/blotter_fx.py`, `ui/tabs/blotter_bundles.py`, `ui/tabs/manual_entry.py` | `tests/test_ui_blotter.py`, `tests/test_ui_manual_entry.py` |
-| Blotter: Rates sub-tab | rates-pricer (rates-exotics once swaptions have an ingest path) | ui-rates | `ui/tabs/rates.py` | `tests/test_ui_rates.py` |
-| Blotter: Options sub-tab | options-pricer | ui-options | `ui/tabs/options.py` | `tests/test_ui_options.py` |
-| Market data | bbg-data (bbg-diagnostics for the connection check) | ui-market-data | `ui/tabs/market_data.py`, `ui/feed_controls.py` | `tests/test_ui_market_data.py` |
-| Risk | risk-metrics (`engine/risk/`, `tests/test_risk.py`, `config/risk.yaml`) | ui-risk | `ui/tabs/risk.py` | `tests/test_ui_risk.py` |
-| Shell: app assembly, launch, refresh signal, upload, shared controls and formatting, the shared pricing reader | none | ui-shell | `ui/app.py`, `ui/launch.py`, `ui/revision.py`, `ui/uploads.py`, `ui/__init__.py`, `ui/tabs/__init__.py`, `ui/tabs/controls.py`, `ui/tabs/formatting.py`, `ui/tabs/blotter_pricing.py`, `ui/assets/` | `tests/test_ui.py`, `tests/test_app.py`, `tests/test_ui_revision.py`, `tests/test_uploads.py` |
+**2 Market data (`data/bloomberg/`)**
 
-`ui/tabs/blotter_pricing.py` is the reader every screen shares (`priced_value_book`), so it belongs to the shell, not the Blotter. A test file not listed here belongs to the module it tests (`tests/test_exposure.py` and `tests/test_ladder.py` are cash-ladder's). Each agent's memory lives in `.claude/agent-memory/<agent>/`; the six UI agents were split out of ui-shell on 2026-09-22 and took its per-tab notes with them.
+| Lane | Files | Tests | Reads |
+|---|---|---|---|
+| bbg-library | `library.py`, `inventory.py` (what the book needs, what is on file, close completeness) | `test_library.py` | ingest-parser, bbg-live, bbg-curves, bbg-backfill, ladder-grid |
+| bbg-live | `live.py` (feed, pull cycle, `book_today`, status file), `pull_marks.py`, `pull_report.py`, `manual.py`, `marks_csv.py`, `bbg_diagnostics.py` | `test_live.py`, `test_bloomberg.py`† | ingest-schema, ingest-parser, bbg-library, bbg-curves, bbg-backfill, rates-pricer, listed-options-pricer, options-store, pnl-ledger, ui-shell |
+| bbg-backfill | `backfill.py` (past closes, history of vols and OIS quotes, re-pricing past days) | `test_backfill.py`, `test_auto_backfill.py`, `test_backfill_options.py` | ingest-schema, ingest-parser, bbg-library, bbg-live, bbg-curves, bbg-snapshot, rates-pricer, options-store, pnl-valuation, pnl-ledger, pnl-series, ui-shell |
+| bbg-curves | `fwd_curve.py`, `rates_marketdata.py` (OIS quotes, fixings), `vol_marketdata.py` (FX smiles), `rates_vol_marketdata.py` | `test_fwd_curve.py`, `test_bbg_event_loops.py`, `test_bbg_diagnostics.py` | bbg-live, rates-pricer, pnl-valuation |
+| bbg-snapshot | `snapshot.py` (marks export / import) | `test_snapshot.py` | ingest-schema, bbg-live, pnl-ledger |
+
+**3 Pricers**
+
+| Lane | Files | Tests | Reads |
+|---|---|---|---|
+| rates-pricer | `engine/rates/` (OIS bootstrap, swap PV / DV01 / par / cashflows) | `test_rates_pricing.py` | bbg-curves, pnl-valuation |
+| rates-exotics | `engine/rates_vol/` (swaptions, caps / floors, SABR, Bermudan) | `test_rates_vol.py` | ingest-schema, bbg-curves, rates-pricer, fx-options-pricer, pnl-valuation |
+| fx-options-pricer | `engine/options/` except `store.py` and `equity_commodity.py`: `pricer.py`, `inputs.py`, `rates.py`, `calendars.py`, `structures.py`, `portfolio.py`, `__init__.py` (the scope ledger); `vendor/` is never edited | `test_options_pricing.py`†, `test_options_digital_smile.py` | bbg-curves, rates-pricer |
+| listed-options-pricer | `engine/options/equity_commodity.py` (listed index and commodity options, implied vol from Bloomberg's price) | `test_listed_options.py` | rates-pricer, fx-options-pricer |
+| options-store | `engine/options/store.py` (the bulk passes that write PREMIUM and Greeks, expiry payoff, close-out skip, `price_close`, `recalc_on_file`) | `test_options_close.py` | fx-options-pricer, listed-options-pricer, rates-pricer, bbg-curves, pnl-valuation |
+
+**4 P&L (`engine/pnl/`)**
+
+| Lane | Files | Tests | Reads |
+|---|---|---|---|
+| pnl-valuation | `valuation.py` (`value_book`, near marks, NDF fix, closed-out options), `calendar.py` (business days, `spot_date`) | `test_valuation.py`, `test_calendar.py` | ladder-grid; the marks of bbg-live, bbg-backfill, rates-pricer, rates-exotics, options-store |
+| pnl-ledger | `ledger.py` (`realise_settled`, re-freeze, `ltd`) | `test_ledger.py`, `test_ndf_present_spot.py` | pnl-valuation, pnl-series, ladder-grid |
+| pnl-series | `reference.py` (periods, reference closes, the fill), `aggregate.py`, `fx_blotter.py` (P&L by currency), `stress.py` | `test_pnl.py`†, `test_aggregate.py` | pnl-valuation |
+
+**5 Exposure (`engine/ladder/`)**
+
+| Lane | Files | Tests | Reads |
+|---|---|---|---|
+| ladder-grid | `ladder.py` (the grid and the delta-per-currency SQL), `views.py`, `exposure_adapter.py` (records, settled cash), `ndf.py` (fixing dates, read by P&L and the library too), `__init__.py` | `test_ladder.py`†, `test_exposure_adapter.py` | ladder-exposure, ingest-parser, bbg-live, options-store, pnl-valuation |
+| ladder-exposure | `exposure.py` (`build_exposure`, `portfolio_totals`, USD equivalents), `usd_marks.py` | `test_exposure.py`, `test_usd_marks.py` | ladder-grid, pnl-valuation |
+| book-positions | `positions.py` (`book_positions`), `futures_delta.py` | `test_positions.py`, `test_futures_delta.py` | ladder-grid, ladder-exposure, bbg-live, rates-pricer, options-store, pnl-valuation |
+
+**6 Risk**
+
+| Lane | Files | Tests | Reads |
+|---|---|---|---|
+| risk-metrics | `engine/risk/`, `config/risk.yaml` | `test_risk.py` | book-positions, pnl-series |
+
+**7 Screens (`ui/`; the UI reads the engine's output and never recomputes P&L or delta)**
+
+| Lane | Files | Tests | Reads |
+|---|---|---|---|
+| ui-shell | `ui/app.py`, `ui/launch.py`, `ui/revision.py`, `ui/uploads.py`, `ui/__init__.py`, `ui/assets/`, `ui/tabs/__init__.py`, `ui/tabs/controls.py`, `ui/tabs/formatting.py`, `ui/tabs/ranking.py`, `ui/tabs/blotter_pricing.py` (`priced_value_book`, the reader every screen shares, which applies the fill) | `test_ui.py`†, `test_app.py`, `test_ui_revision.py`, `test_uploads.py`, `test_launch.py`, `test_ui_ranking.py` | ingest-schema, ingest-booking, bbg-library, bbg-live, pnl-valuation, pnl-ledger, pnl-series, every tab it assembles |
+| ui-header | `ui/tabs/header.py` (the strip above every tab, the LTD chart) | `test_header.py` | ui-shell, bbg-live, bbg-library, pnl-valuation, pnl-series, ui-ladder |
+| ui-blotter | `ui/tabs/blotter.py`: the Blotter tab's frame, the Total book sub-tab (Positions table, P&L by asset class) and the Futures sub-tab | `test_ui_blotter.py`† | ui-shell, book-positions, pnl-ledger, ingest-booking, and the sub-tab lanes it embeds |
+| ui-blotter-fx | `ui/tabs/blotter_fx.py` (the FX sub-tab and its two P&L-by-currency tables) | `test_ui_blotter_fx.py` (new tests) | ui-shell, pnl-series, pnl-ledger, ui-blotter, ui-options |
+| ui-bundles | `ui/tabs/blotter_bundles.py` (the Bundles sub-tab) | `test_ui_bundles.py` (new tests) | ui-shell, ingest-booking |
+| ui-manual-entry | `ui/tabs/manual_entry.py` (the Manual entry sub-tab) | `test_ui_manual_entry.py` | ingest-booking, ingest-schema, ui-ladder, ui-options |
+| ui-rates | `ui/tabs/rates.py` (the Rates sub-tab) | `test_ui_rates.py` | ui-shell, rates-pricer, ingest-booking, ingest-schema |
+| ui-options | `ui/tabs/options.py` (the Options sub-tab) | `test_ui_options.py` | ui-shell, options-store, fx-options-pricer, pnl-valuation, bbg-live |
+| ui-ladder | `ui/tabs/cash_ladder.py`, `ui/tabs/exposure.py` (the Ladder tab) | `test_ui_ladder.py`, `test_ui_ladder_view.py` | ui-shell, ladder-grid, ladder-exposure, book-positions, pnl-series, bbg-live |
+| ui-risk | `ui/tabs/risk.py` (the Risk tab) | `test_ui_risk.py` | ui-shell, ui-header, risk-metrics |
+| ui-market-data | `ui/tabs/market_data.py`, `ui/feed_controls.py` (the Market data tab and the "Pull Bloomberg now" control) | `test_ui_market_data.py` | ui-shell, ui-header, bbg-live, bbg-backfill, bbg-library, bbg-diagnostics, pnl-ledger, pnl-series |
+
+**Across the layers**
+
+| Agent | Owns | Role |
+|---|---|---|
+| housekeeper | `docs/` | The hub: classifies, routes, briefs, carries every Handoff, runs the full suite, commits and reports. The session runs its procedure by default. |
+| reviewer | nothing (read-only) | Reviews P&L arithmetic changes in `engine/` against the conventions and the must-not-replicate list. |
+| infra | `1_setup.cmd`, `2_launcher.py`, `3_diagnostic.py`, `requirements.txt`, `pyproject.toml`, `.gitignore`, `.gitattributes`, `.claude/settings.json`, `config/` except `risk.yaml`, `tools/`, `tests/conftest.py`, `tests/golden/`, `tests/golden_book.py`, `test_golden_book.py`, `test_health.py`, `test_risk_cli.py`, `test_bloomberg_diagnostic.py` | Clean-up by kind of change, anywhere (see "Working mode"). |
+| bbg-diagnostics | nothing (read-only) | Audits every Bloomberg touchpoint; its findings go to bbg-live, bbg-curves or ui-market-data through the housekeeper. |
+| explainer | nothing (read-only) | Answers the user's "how does this work" questions while other lanes build. |
+
+CLAUDE.md and `.claude/agents/*.md` change only on the user's say-so, written by the session.
+
+† A shared test file: it still holds older tests of other lanes' modules. A lane edits only the tests of its own modules in it and puts every new test in its own file; the housekeeper never runs two lanes that touch the same shared file at once.
+
+Each agent's memory lives in `.claude/agent-memory/<agent>/`. The lanes split on 2026-09-24 read their predecessor's notes too: `data-ingest` (the ingest lanes), `bbg-data` (the bbg lanes but diagnostics), `options-pricer` (the three option lanes), `pnl-engine` (the P&L lanes), `cash-ladder` (the exposure lanes), `ui-blotter` (ui-blotter-fx, ui-bundles, ui-manual-entry). Those five retired names, and ui-blotter's wider old scope, still appear in `docs/` and in older notes and commits; read them as the lanes above.
 
 `engine/rates_vol/` writes `PV_USD` / `DV01_USD` under `QL_PRICER` and `VEGA` / `GAMMA` / `THETA` under `QL_OPTIONS_PRICER` (both already official for those mark types). No trade source carries swaptions or caps yet (`docs/open-questions.md` item 61).
 

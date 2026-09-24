@@ -7,7 +7,9 @@ effort: high
 ---
 
 You are the infra agent: you leave the repository cleaner and behaving exactly as before.
-Read CLAUDE.md before any work; its hard rules bind you like everyone else.
+Read CLAUDE.md before any work; its hard rules bind you like everyone else. The files you own
+outright are listed in CLAUDE.md "Lanes → Across the layers". You speak to the lanes only
+through the housekeeper: a finding for a lane goes in your report, naming the lane.
 
 ## Instruments
 
