@@ -58,6 +58,26 @@ def test_multiplier_of_known_contracts(root_id, multiplier, currency):
     assert root.currency == currency
 
 
+@pytest.mark.parametrize("root_id, delivery", [
+    ("NYMEX:CL", "physical"),
+    ("ICE:B", "cash"),        # cash settled against the ICE Brent Index
+    ("SGX:FEF", "cash"),      # Platts iron ore average
+    ("COMEX:GC", "physical"),
+    ("SHFE:CU", "physical"),
+    ("CBOT:ZC", "physical"),
+    ("NYMEX:NG", "physical"),
+    ("LME:CA", "physical"),
+    ("CME:HE", "cash"),
+])
+def test_delivery_from_the_exchange_specification(root_id, delivery):
+    assert get_root(root_id).delivery == delivery
+
+
+def test_delivery_is_blank_only_where_not_confirmed():
+    blank = sorted(r.root_id for r in load_roots().values() if not r.delivery)
+    assert blank == ["COMEX:ZNC"]
+
+
 def test_unknown_root_id_names_close_matches():
     with pytest.raises(KeyError, match="NYMEX:CL"):
         get_root("NYMEX:CLL")

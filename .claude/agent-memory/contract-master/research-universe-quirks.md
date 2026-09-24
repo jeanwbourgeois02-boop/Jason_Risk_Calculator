@@ -26,10 +26,13 @@ vat_rate, calendar_depth, foreign_access. Added: multiplier, calendar, delivery.
   SH, PT, AA, JA, CA, SM). bbg_root + yellow key IS unique across the file.
 - **One-letter Bloomberg roots**: CBOT:ZS 'S', CBOT:ZC 'C', CBOT:ZW 'W', CBOT:ZO 'O' (padded 'C Z26').
 - **ICE** in research ids means ICE Futures Europe (calendar ICE_EU); ICEUS is ICE Futures US.
-- **delivery** read from notes only: "physically delivered/settled", "bonded delivery",
-  "delivered ARA/Rouen/Saskatchewan/in/at", "delivers", "deliverable" -> physical; "cash settled",
-  "swap", "FFA", "Financial;" -> cash; both or neither -> ''. LME:CO forced '' (its "cash-settled"
-  is about the CME contract). Result: 23 physical, 53 cash, 126 blank.
+- **delivery**: first pass from the research notes (23 physical, 53 cash); second pass on the
+  housekeeper's follow-up from the exchange specifications: CME Group energy / metals / grains,
+  ICE softs (US and London), TTF, NBP, EUA, Matif, LME warrant metals (LME:CO too: its note's
+  "cash-settled" is CME's cobalt), OSE gold / platinum / rubber, SGX SICOM rubber and every
+  Chinese exchange contract physical; Platts / Argus / Fastmarkets / TSI / globalCOAL / PCW / PJM
+  index and average-price contracts cash. Result 126 physical, 75 cash, 1 blank (COMEX:ZNC,
+  not confirmed; noted in its row). expiry-monitor treats blank as physical.
 - active_months is the MAIN-contract cycle, not the listed months (HG lists every month; cycle
   H K N U Z), so resolve never rejects a month outside it.
 - Spread YAMLs: 269 hand-written spreads over 5 files (the plan's "264" is not this count);

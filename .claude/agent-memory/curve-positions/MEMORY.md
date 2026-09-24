@@ -1,0 +1,1 @@
+- [curve_positions conventions](curve_positions_conventions.md) — exact spot (not usd_per_quote), gross_lots, flat contracts, multiplier check, FX exposure scope

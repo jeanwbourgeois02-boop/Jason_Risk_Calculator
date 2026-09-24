@@ -1,16 +1,17 @@
 ---
 name: wiring-c5
-description: ui/app.py assembly pattern for the tab layout (Blotter, Ladder, Risk, Market data + header as of 2026-09-22), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
+description: ui/app.py assembly pattern for the tab layout (Blotter, Ladder, Curve, Expiries, Risk, Market data + header as of 2026-09-24), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
 metadata:
   type: project
 ---
 
-`ui/app.py` assembles `ui/tabs/{header,blotter,cash_ladder,risk,market_data}.py`, each
-exposing `build_layout(default_date)` / `register_callbacks(app, get_db_path)` (header
-also has a no-arg `layout()`). `VISIBLE_TABS = ["Blotter", "Ladder", "Risk", "Market
-data"]`; the app opens on the first. Reconciliation was removed 2026-09-16; Risk
-(`ui/tabs/risk.py`, ui-risk's, engine/risk's output) was added 2026-09-22 between Ladder
-and Market data.
+`ui/app.py` assembles `ui/tabs/{header,blotter,cash_ladder,curve,expiries,risk,market_data}.py`,
+each exposing `build_layout(default_date)` / `register_callbacks(app, get_db_path)` (header
+also has a no-arg `layout()`). `VISIBLE_TABS = ["Blotter", "Ladder", "Curve", "Expiries",
+"Risk", "Market data"]`; the app opens on the first. Reconciliation was removed 2026-09-16;
+Risk (`ui/tabs/risk.py`) added 2026-09-22; Curve and Expiries (ui-curve / ui-expiries,
+commodity conversion) added 2026-09-24 after the Ladder, same no-picker pattern as Risk.
+Tests pin the order via `SIX_TABS` in tests/test_app.py; index bodies by label, not number.
 
 **Wiring a new tab (2026-09-22, Risk):** import it in `from ui.tabs import ...`, add the
 label to `VISIBLE_TABS`, an entry in `tab_builders` and `tab_defaults` inside

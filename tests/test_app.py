@@ -99,14 +99,18 @@ def _ids(component):
     return found
 
 
-def test_risk_tab_is_third_and_the_app_still_opens_on_the_blotter():
+SIX_TABS = ["Blotter", "Ladder", "Curve", "Expiries", "Risk", "Market data"]
+
+
+def test_six_tabs_in_order_and_the_app_still_opens_on_the_blotter():
+    """Blotter first and the cash Ladder second (user, 2026-09-22), the commodity tabs Curve
+    and Expiries next (2026-09-24, commodity conversion), then Risk and Market data."""
     from dash import dcc
-    assert uiapp.VISIBLE_TABS == ["Blotter", "Ladder", "Risk", "Market data"]
-    assert uiapp.VISIBLE_TABS.index("Risk") == 2
+    assert uiapp.VISIBLE_TABS == SIX_TABS
     layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
     tabs = layout.children[0].children[0]
     assert isinstance(tabs, dcc.Tabs)
-    assert [t.label for t in tabs.children] == ["Blotter", "Ladder", "Risk", "Market data"]
+    assert [t.label for t in tabs.children] == SIX_TABS
     assert tabs.value == "Blotter"
 
 
@@ -115,8 +119,9 @@ def test_layout_carries_the_risk_body_and_its_container():
     layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
     bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
     body_ids = [getattr(b, "id", None) for b in bodies.children]
-    assert body_ids == ["tab-body-blotter", "tab-body-ladder", "tab-body-risk", "tab-body-market-data"]
-    risk_body = bodies.children[2]
+    assert body_ids == ["tab-body-blotter", "tab-body-ladder", "tab-body-curve", "tab-body-expiries",
+                        "tab-body-risk", "tab-body-market-data"]
+    risk_body = bodies.children[SIX_TABS.index("Risk")]
     assert risk_body.className == "tab-body"
     inside = _ids(risk_body)
     assert risk.BODY_ID in inside                # "risk-body": the container the callback fills
@@ -130,7 +135,7 @@ def test_risk_tab_title_names_the_ladders_default_date(monkeypatch):
     monkeypatch.setattr(cash_ladder, "today_ny", lambda: "2026-09-22")
     layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
     bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
-    texts = [c.children for c in _walk(bodies.children[2]) if isinstance(getattr(c, "children", None), str)]
+    texts = [c.children for c in _walk(bodies.children[SIX_TABS.index("Risk")]) if isinstance(getattr(c, "children", None), str)]
     assert any("2026-09-22" in t and "as-of" in t for t in texts)
 
 
@@ -143,9 +148,48 @@ def test_create_app_registers_the_risk_callback_and_the_show_hide_covers_its_bod
     inputs = {(d["id"], d["property"]) for d in app.callback_map[key]["inputs"]}
     assert inputs == {(header.AS_OF_STORE_ID, "data"), (revision.DATA_REVISION_ID, "data"),
                       (risk.REFRESH_ID, "n_intervals")}
-    # The one show/hide callback now toggles four bodies, the Risk one included.
+    # The one show/hide callback toggles all six bodies, the Risk one included.
     style_key = [k for k in app.callback_map if k.startswith("..tab-body-blotter.style")]
     assert style_key and "tab-body-risk.style" in style_key[0]
     wrapped = app.callback_map[style_key[0]]["callback"]
     toggle = getattr(wrapped, "__wrapped__", wrapped)    # the raw function, not Dash's context wrapper
-    assert toggle("Risk") == [{"display": "none"}, {"display": "none"}, {}, {"display": "none"}]
+    assert toggle("Risk") == [{} if label == "Risk" else {"display": "none"} for label in SIX_TABS]
+
+
+def test_curve_and_expiries_bodies_carry_their_containers_and_todays_date(monkeypatch):
+    """Both commodity tabs follow the header's as-of like Risk: no picker, the Ladder's
+    default date (today in New York) in their titles, their body and safety interval
+    inside their own always-present tab body."""
+    from ui.tabs import cash_ladder, curve, expiries
+    monkeypatch.setattr(cash_ladder, "today_ny", lambda: "2026-09-24")
+    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
+    bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
+    for label, module in (("Curve", curve), ("Expiries", expiries)):
+        body = bodies.children[SIX_TABS.index(label)]
+        assert body.id == f"tab-body-{label.lower()}" and body.className == "tab-body"
+        inside = _ids(body)
+        assert module.BODY_ID in inside and module.REFRESH_ID in inside
+        texts = [c.children for c in _walk(body) if isinstance(getattr(c, "children", None), str)]
+        assert any("2026-09-24" in t and "as-of" in t for t in texts)
+
+
+def test_create_app_registers_curve_and_expiries_with_no_duplicate_outputs(tmp_path):
+    from ui import revision
+    from ui.tabs import curve, expiries, header
+    app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)
+    for module, own_inputs in ((curve, {(curve.REFRESH_ID, "n_intervals"), (curve.UNIT_ID, "value")}),
+                               (expiries, {(expiries.REFRESH_ID, "n_intervals")})):
+        key = f"{module.BODY_ID}.children"
+        assert key in app.callback_map, f"{module.__name__}.register_callbacks was not called"
+        inputs = {(d["id"], d["property"]) for d in app.callback_map[key]["inputs"]}
+        assert inputs == {(header.AS_OF_STORE_ID, "data"), (revision.DATA_REVISION_ID, "data")} | own_inputs
+    # Every output is claimed by one callback only (allow_duplicate outputs carry a hash suffix
+    # in their key, so a plain output repeated across two callbacks would collapse here).
+    outputs = [o for k in app.callback_map for o in k.strip(".").split("...") if "@" not in o]
+    assert len(outputs) == len(set(outputs))
+    style_key = next(k for k in app.callback_map if k.startswith("..tab-body-blotter.style"))
+    assert "tab-body-curve.style" in style_key and "tab-body-expiries.style" in style_key
+    wrapped = app.callback_map[style_key]["callback"]
+    toggle = getattr(wrapped, "__wrapped__", wrapped)
+    for label in SIX_TABS:
+        assert toggle(label) == [{} if other == label else {"display": "none"} for other in SIX_TABS]
