@@ -6,7 +6,8 @@ the workbook reconciliation view in `engine/pnl/pnl.py` / `aggregate.py`.
 Realisation: a trade whose last leg settles before `as_of` and is not yet in
 `realised_pnl` is frozen at the SPOT observed on its settle date (or the last official
 SPOT/FUTURE_PX before it, noted) -- FX and futures alike, including crosses with no USD
-leg (conversion to USD uses `valuation.usd_per_quote`, never an invented leg). If no such
+leg and non-USD futures (conversion to USD uses `valuation.usd_per_quote` at the mark's own
+date, never an invented leg). If no such
 mark exists the trade is "unrealisable" and every LTD from that date on is Unavailable
 with the trade id in the reason (surfaced via value_book's reason column, since
 value_book reads settled rows straight from realised_pnl).
@@ -29,13 +30,21 @@ it cannot freeze again).
 data-ingest); the columns are repurposed slightly to stay generic across USD-quote
 pairs, JPY-style USD-base pairs, crosses and futures:
     local_amount        = trades.quantity (signed base amount, or contracts for a future)
-    usd_entry_amount     = local_amount * fill * S   (S = 1 for futures)
-    spot_usd_per_local   = mark * S                  (mark = pair SPOT, or FUTURE_PX)
+    usd_entry_amount     = local_amount * fill * S   (x multiplier for a future)
+    spot_usd_per_local   = mark * S                  (mark = pair SPOT, or multiplier x FUTURE_PX)
     pnl_usd              = local_amount * spot_usd_per_local - usd_entry_amount
 This is algebraically identical to `quantity * (mark - fill) * S` and, when the quote
 currency is USD (S = 1), identical to the original USD-pair-only formula, so it stays
 compatible with a plain "spot dated / last before settlement" note. An NDF row (below)
 is the one departure: `spot_usd_per_local` is S itself, USD per quote unit at the fix.
+
+Futures and listed options (user decision 2026-09-24, "Spot of valuation date"): S is USD per
+unit of the contract's quote currency at spot of the FUTURE_PX's own date (`usd_per_quote`,
+1.0 for a USD contract), so a CNY / JPY / EUR / GBP contract freezes at
+`contracts x multiplier x (m - fill) x S`, `currency` = its quote currency, and the note names
+the conversion pair and date. With no spot to convert it stays unfrozen with the reason. A
+conversion spot of that date that changes (the backfill's close replacing a live press) moves
+both `usd_entry_amount` and `spot_usd_per_local`, so the row is re-frozen like any other.
 
 IRS (2026-09-17, closes docs/open-questions.md item 52): a swap whose maturity is before
 `as_of` is frozen at the last official `PV_USD + CASHFLOW_USD` on or before maturity
@@ -94,7 +103,7 @@ WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') AND l.leg_no = 1 AND l.settle_
 """
 
 _OPEN_FUTURE_SQL = """
-SELECT t.trade_id, t.instrument_id, t.product, i.multiplier, t.quantity, t.price, l.settle_date
+SELECT t.trade_id, t.instrument_id, t.product, i.multiplier, t.quantity, t.price, l.settle_date, i.quote_ccy
 FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
 WHERE t.product IN ('FUTURE', 'EQ_OPTION') AND l.leg_no = 1 AND l.settle_date < :as_of
   AND t.trade_id NOT IN (SELECT trade_id FROM realised_pnl)
@@ -217,15 +226,29 @@ def _fx_freeze(conn, pair: str, quote_ccy: str, qty: float, fill: float, settle:
     return _Freeze(quote_ccy, qty, entry, "SPOT", combined, m_day, m_src, qty * combined - entry, note)
 
 
-def _future_freeze(conn, pair: str, multiplier: float, qty: float, fill: float, settle: str) -> _Freeze:
+def _future_freeze(conn, pair: str, multiplier: float, qty: float, fill: float, settle: str,
+                   quote_ccy: str) -> _Freeze:
+    """A future or listed option past expiry: the last official FUTURE_PX on or before expiry
+    (`m`, dated `m_day`), the P&L in the contract's quote currency converted to USD at spot of
+    that same `m_day` (user decision 2026-09-24, "Spot of valuation date": a CNY, JPY, EUR or GBP
+    contract is never frozen as dollars). `S` is `valuation.usd_per_quote` of `m_day`, the
+    Blotter's own conversion (1.0 exactly for a USD contract, so a USD future freezes bit for bit
+    as before); with no S the trade stays unfrozen with the reason, never frozen at 1. Entry and
+    mark are both converted at that one S, so `pnl_usd = qty x multiplier x (m - fill) x S`."""
     m_hit = _last_on_or_before(conn, pair, "FUTURE_PX", settle)
     if m_hit is None:
         raise _Unrealisable(f"no official FUTURE_PX for {pair} on or before {settle}")
     m, m_day, m_src = m_hit
-    combined = multiplier * m
-    entry = qty * multiplier * fill
-    note = "" if m_day == settle else f"settlement price dated {m_day} (last before expiry)"
-    return _Freeze("USD", qty, entry, "FUTURE_PX", combined, m_day, m_src, qty * combined - entry, note)
+    s, s_pair, s_src = usd_per_quote(conn, quote_ccy, m_day)
+    if s != s or s_pair is None:
+        raise _Unrealisable(f"no SPOT for USD conversion of {quote_ccy} on {m_day}")
+    combined = multiplier * m * s
+    entry = qty * multiplier * fill * s
+    notes = [] if m_day == settle else [f"settlement price dated {m_day} (last before expiry)"]
+    if quote_ccy != "USD":
+        how = f" ({s_src})" if str(s_src).startswith(INTERP) else ""
+        notes.append(f"{quote_ccy} P&L converted at {s_pair} spot of {m_day}{how}")
+    return _Freeze(quote_ccy, qty, entry, "FUTURE_PX", combined, m_day, m_src, qty * combined - entry, "; ".join(notes))
 
 
 def _irs_freeze(conn, inst: str, ccy: str, settle: str) -> _Freeze:
@@ -287,7 +310,7 @@ def _freeze_for(conn, product, pair, base_ccy, quote_ccy, multiplier, qty, fill,
     if product in ("FX_SPOT", "FX_FWD", "FX_SWAP"):
         return _fx_freeze(conn, pair, quote_ccy, qty, fill, settle)
     if product in ("FUTURE", "EQ_OPTION"):
-        return _future_freeze(conn, pair, _number(multiplier, "instruments.multiplier"), qty, fill, settle)
+        return _future_freeze(conn, pair, _number(multiplier, "instruments.multiplier"), qty, fill, settle, quote_ccy)
     if product == "IRS":
         return _irs_freeze(conn, pair, base_ccy, settle)
     if product == "FX_OPTION":
@@ -310,9 +333,10 @@ def _why_refrozen(stored: tuple, fresh: _Freeze) -> str:
     """The `why` of a `refrozen` entry: one sentence naming what changed between the stored row
     and the fresh freeze. The mark type ("NDF_FIX replaced SPOT"), else the mark date, else which
     stored figures moved for the same mark and date: `mark` is `spot_usd_per_local` (USD per unit
-    of `local_amount`: the pair SPOT times its USD conversion, multiplier x FUTURE_PX for a
-    future), `entry` is `usd_entry_amount`, `amount` is `local_amount` (the frozen P&L itself
-    for a swap)."""
+    of `local_amount`: the pair SPOT times its USD conversion, multiplier x FUTURE_PX times its
+    USD conversion for a future), `entry` is `usd_entry_amount` (for a non-USD future it moves
+    with the conversion spot alone), `amount` is `local_amount` (the frozen P&L itself for a
+    swap)."""
     mark_type, spot_day, local_amount, entry, combined, pnl = stored
     fresh_day = str(fresh.spot_as_of_date)
     if mark_type != fresh.mark_type:
@@ -428,11 +452,12 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
         except (_Unrealisable, TypeError, ValueError, ArithmeticError) as exc:
             unrealisable.append(_unrealisable(trade_id, exc))
 
-    for trade_id, pair, product, multiplier, qty, fill, settle in conn.execute(_OPEN_FUTURE_SQL, {"as_of": as_of}).fetchall():
+    for trade_id, pair, product, multiplier, qty, fill, settle, quote_ccy in conn.execute(
+            _OPEN_FUTURE_SQL, {"as_of": as_of}).fetchall():
         try:
             qty, fill = _number(qty, "trades.quantity"), _number(fill, "trades.price")
             multiplier = _number(multiplier, "instruments.multiplier")
-            freeze(trade_id, pair, product, _future_freeze(conn, pair, multiplier, qty, fill, settle), settle)
+            freeze(trade_id, pair, product, _future_freeze(conn, pair, multiplier, qty, fill, settle, quote_ccy), settle)
             realised += 1
         except (_Unrealisable, TypeError, ValueError, ArithmeticError) as exc:
             unrealisable.append(_unrealisable(trade_id, exc))

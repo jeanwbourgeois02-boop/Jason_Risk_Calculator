@@ -1,0 +1,1153 @@
+# Copied unchanged (apart from this header) on 2026-09-24 by the contract-master lane from the
+# research app: Commodity Dashboard/rvapp/universe/spreads/chemicals.yaml. A template only: nothing in
+# the app reads it yet (spreads-engine, Phase 3). Leg `instrument` values are contract roots
+# (config/contracts.csv root_id).
+# Housekeeper, at merge: sub.cn.psf_vs_cotton, sub.cn.br_vs_ru and sub.cn.br_vs_nr were removed.
+# They mirrored agriculture's sub.cn.cotton_vs_psf, sub.cn.ru_vs_br and sub.cn.nr_vs_br leg for leg.
+# Chemicals spreads. One entry per spread; calendars come from calendar_rules.yaml.
+# Destination: rvapp/universe/spreads/chemicals.yaml.
+# Format: rvapp/universe/validate.py. Extensions inside `params` follow research/ferrous/NOTES.md
+# (vat_basis, tenor_anchor, arb_bound, conversion_cost(+_range), desk_convention) plus
+# `physical_yields` (context only) and arb_bound type `location_arb` as used by energy.
+# Every stored series is the straight paper spread. Freight, duty, VAT and conversion cost sit in
+# params as context and are never subtracted. Nothing here has been reviewed by a human.
+#
+# Tenor rules used throughout:
+#   - Two Chinese 1/5/9 legs: `main` on each leg (same month in practice).
+#   - A monthly-rolling Chinese leg (EB, BZ, PF, PR, PL, BR) against a 1/5/9 leg: tenor_anchor on
+#     the monthly roller where the other leg's off-cycle months still price (TA, EG); otherwise
+#     each leg's own main contract, which is the domestic desk convention.
+#   - A Chinese leg against a liquid offshore monthly curve (Brent, MOPJ naphtha, AFEI propane):
+#     tenor_anchor on the Chinese leg.
+#   - Two monthly cash-settled swaps: `m+1` (the front month is the part-priced averaging month).
+#   - Domestic CNY pairs are left as quoted (VAT in), the way desks chart them, even where the two
+#     VAT rates differ (LPG, urea, rubber, cotton are 9%); the note says so.
+#   - Crude legs in per-tonne spreads: qty_factor 0.13643 t per bbl = 1 / 7.33 bbl per t, the
+#     generic crude factor energy uses (Energy Institute approximate conversion; Brent itself
+#     is nearer 7.53).
+
+# =====================================================================
+# BENCHMARK - thin by nature: almost all of this sector trades only in China.
+# The only offshore paper with real open interest is CME fertiliser and Mont Belvieu olefins.
+# =====================================================================
+
+- id: bench.urea.zce_vs_fob_middle_east
+  family: benchmark
+  name: ZCE urea vs urea FOB Middle East (China export parity)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:UR,   weight: 1.0}
+    - {instrument: CBOT:UME, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [urea_export_window, china_export_policy, fertiliser_global]
+  verified: false
+  params:
+    vat_basis: inc_vat         # no export VAT rebate on urea: the VAT-inclusive price is the export cost base
+    arb_bound:
+      type: export_parity
+      onshore_leg: ZCE:UR
+      offshore_leg: CBOT:UME
+      export_vat_rebate: 0.0
+      export_duty: 0.0
+      export_cost_cny_t: 200   # inland freight plant to port, port charges, inspection
+      freight_usd_t: 0         # both FOB; China has a 5-15 USD/t freight edge into East India and SE Asia
+      formula: "fob_china_usd_t = (onshore_cny_t + export_cost_cny_t) / USDCNH; exports pay when fob_china_usd_t < offshore_usd_t, but only while the inspection and quota window is open"
+  notes: >-
+    The one real China-to-world link in this sector, and it is a policy switch. Since Oct 2021
+    urea exports need customs inspection and, in practice, a quota. Window open: ZCE converges to
+    Middle East FOB less about 200 CNY/t of export cost. Window shut: China trades 50-150 USD/t
+    under the world and the spread is SIGNAL ONLY (no arbitrage can close it). Each leg uses its
+    own main contract: the swap curve is not marked far enough out to anchor to ZCE's 1/5/9 month,
+    and urea is seasonal, so part of the level is calendar. CBOT:UME liquidity confidence: low.
+
+- id: bench.urea.zce_vs_us_gulf
+  family: benchmark
+  name: ZCE urea vs urea FOB US Gulf (NOLA)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:UR,   weight: 1.0}
+    - {instrument: CBOT:UFV, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [urea_export_window, fertiliser_global]
+  verified: false
+  params:
+    vat_basis: inc_vat
+  notes: >-
+    SIGNAL ONLY. China does not ship urea to the US Gulf, so nothing bounds this. It is here
+    because NOLA is the liquid urea swap: if the Middle East contract turns out not to be marked
+    daily, this is the usable China-vs-world urea series. NOLA is quoted per short ton; the engine
+    converts to USD/t (x 1.10231). NOLA carries its own spring-application seasonality.
+
+- id: bench.urea.us_gulf_vs_middle_east
+  family: benchmark
+  name: Urea FOB US Gulf (NOLA) vs FOB Middle East
+  sector: chemicals
+  legs:
+    - {instrument: CBOT:UFV, weight: 1.0}
+    - {instrument: CBOT:UME, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [urea_atlantic_arb, fertiliser_global]
+  verified: false
+  params:
+    arb_bound:
+      type: location_arb
+      from_leg: CBOT:UME
+      to_leg: CBOT:UFV
+      cost_items: {freight_ag_to_nola: 45.0}
+      total_cost: 45.0
+      formula: "Middle East cargoes flow to the US Gulf when UFV - UME > total_cost (USD/t, NOLA barge vs FOB AG; ignores the barge-vs-vessel discount)"
+  notes: >-
+    The main offshore urea location spread. NOLA must pull Arab Gulf tonnes in Jan-Apr, so the
+    spread approaches freight (35-55 USD/t) in spring and goes to zero or negative in the summer
+    fill season. Freight number confidence: low. Short tons converted by the engine.
+
+- id: bench.urea.brazil_vs_middle_east
+  family: benchmark
+  name: Urea CFR Brazil vs FOB Middle East
+  sector: chemicals
+  legs:
+    - {instrument: CBOT:UFB, weight: 1.0}
+    - {instrument: CBOT:UME, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [urea_atlantic_arb, fertiliser_global]
+  verified: false
+  params:
+    arb_bound:
+      type: location_arb
+      from_leg: CBOT:UME
+      to_leg: CBOT:UFB
+      cost_items: {freight_ag_to_brazil: 35.0}
+      total_cost: 35.0
+      formula: "CFR Brazil - FOB Middle East should sit near freight; above it Brazil is pulling, below it Brazil is supplied from elsewhere (Nigeria, Russia)"
+  notes: >-
+    A delivered price minus an origin price: essentially a freight and regional-demand spread,
+    widest ahead of the Brazilian safrinha corn season (Q3-Q4 buying). Both legs thin;
+    confidence: low on liquidity and on the freight number.
+
+- id: bench.urea.egypt_vs_middle_east
+  family: benchmark
+  name: Urea FOB Egypt vs FOB Middle East (European premium)
+  sector: chemicals
+  legs:
+    - {instrument: CBOT:UFE, weight: 1.0}
+    - {instrument: CBOT:UME, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [urea_europe_premium, european_gas]
+  verified: false
+  notes: >-
+    Egypt is the duty-free supplier to Europe, so its premium over the Arab Gulf tracks European
+    nitrogen economics (TTF gas, CBAM). CBOT:UFE is marked illiquid, so this row has no data
+    unless the terminal shows real open interest and the status is changed.
+
+- id: bench.meg.dce_vs_sgx_cfr_china
+  family: benchmark
+  name: DCE ethylene glycol vs SGX MEG CFR China
+  sector: chemicals
+  legs:
+    - {instrument: DCE:EG,   weight: 1.0}
+    - {instrument: SGX:MEGF, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_import_arb, meg_import]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:EG
+      offshore_leg: SGX:MEGF
+      freight_usd_t: 0         # SGX is already CFR China
+      import_duty: 0.055
+      vat_rate: 0.13
+      port_charges_cny_t: 50
+      formula: "parity_cny_t = offshore_usd_t * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when onshore_cny_t > parity_cny_t"
+  notes: >-
+    The right like-for-like pair (the user's Appendix B pairs PTA with SGX MEG, which is wrong).
+    China imports about a third of its MEG, so parity is a real bound in the physical market, but
+    SGX:MEGF has no open interest: the row has NO DATA until that changes. Kept so the structure
+    and the parity arithmetic are on file; an ICIS CFR China index series would be the better leg.
+
+- id: bench.methanol.zce_vs_sgx_cfr_china
+  family: benchmark
+  name: ZCE methanol vs SGX methanol CFR China
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:MA,  weight: 1.0}
+    - {instrument: SGX:MTF, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_import_arb, methanol_import, iran_supply]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    arb_bound:
+      type: import_parity
+      onshore_leg: ZCE:MA
+      offshore_leg: SGX:MTF
+      freight_usd_t: 0
+      import_duty: 0.055       # MFN, paid by Iranian cargoes (the marginal import); 0% for most other origins
+      vat_rate: 0.13
+      port_charges_cny_t: 50
+      formula: "parity_cny_t = offshore_usd_t * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when onshore_cny_t > parity_cny_t"
+  notes: >-
+    Appendix B #21 in the user's list. Imports (mostly Iranian, winter gas cuts matter) set the
+    East China coastal price, so the bound is real, but SGX:MTF has no open interest: NO DATA
+    until that changes. ZCE delivery is priced in East China, so no inland basis is involved.
+
+- id: bench.px.zce_vs_sgx_cfr
+  family: benchmark
+  name: ZCE paraxylene vs SGX PX CFR Taiwan/China
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:PX,  weight: 1.0}
+    - {instrument: SGX:PXF, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_import_arb, polyester_chain]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    arb_bound:
+      type: import_parity
+      onshore_leg: ZCE:PX
+      offshore_leg: SGX:PXF
+      freight_usd_t: 0
+      import_duty: 0.02
+      vat_rate: 0.13
+      port_charges_cny_t: 50
+      formula: "parity_cny_t = offshore_usd_t * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when onshore_cny_t > parity_cny_t"
+  notes: >-
+    ZCE PX converges on CFR import parity because Chinese PX contracts are priced off the Platts
+    CFR assessment. SGX:PXF has no open interest: NO DATA until that changes. The tradable
+    expression of offshore PX is PXN against MOPJ naphtha (proc.cn.px_vs_naphtha).
+
+- id: bench.propylene.zce_vs_mont_belvieu_pgp
+  family: benchmark
+  name: ZCE propylene vs Mont Belvieu polymer grade propylene
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:PL,    weight: 1.0}
+    - {instrument: NYMEX:PGP, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [olefins_east_west, us_ngl_advantage]
+  verified: false
+  params:
+    vat_basis: ex_vat
+  notes: >-
+    SIGNAL ONLY: propylene barely moves between the US Gulf and China (pressurised shipping, 1%
+    duty plus tariffs), so nothing bounds it. It measures the US shale-feedstock advantage against
+    the Chinese PDH/MTO cost curve. PGP is cents per lb, the same dimension as tonnes, so the
+    engine converts (x 2204.62). Both legs young or thin; confidence: low.
+
+# =====================================================================
+# PROCESSING - the polyester chain
+# =====================================================================
+
+- id: proc.cn.px_vs_naphtha
+  family: processing
+  name: PX minus naphtha (PXN)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:PX,   weight: 1.0}
+    - {instrument: NYMEX:JA, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [polyester_chain, aromatics_margin, gasoline_blending]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: ZCE:PX
+    import_duty: 0.02          # context: CFR-equivalent PX = ZCE / 1.13 / 1.02 / USDCNH
+    conversion_cost: 280
+    conversion_cost_range: [250, 350]
+    desk_convention: "PXN = Platts PX CFR Taiwan/China minus MOPJ naphtha, USD/t, plain 1:1"
+  notes: >-
+    The headline aromatics margin. Quoted 1:1 by convention although a reformer and PX unit
+    needs well over 1 t of naphtha per t of PX: the co-products (benzene, raffinate, hydrogen,
+    LPG) are credited implicitly, so the level is judged against history, about 250-350 USD/t
+    being breakeven for a standalone complex. Summer gasoline blending pulls toluene and mixed
+    xylenes away from PX and widens it. The ZCE leg is taken ex-VAT; it still holds the 2% duty
+    (about 17 USD/t), which is left in. Needs NYMEX:JA at depth 7 (energy has 4).
+
+- id: proc.cn.pta_processing_fee
+  family: processing
+  name: PTA processing fee (PTA minus 0.655 PX)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:TA, weight: 1.0}
+    - {instrument: ZCE:PX, weight: -0.655}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [polyester_chain, pta_overcapacity]
+  verified: false
+  params:
+    conversion_cost: 400
+    conversion_cost_range: [300, 500]
+    desk_convention: "PTA processing fee = TA - 0.655 x PX, CNY/t, same month"
+  notes: >-
+    Yield: PX C8H10 = 106.17, PTA C8H6O4 = 166.13, so stoichiometry is 106.17 / 166.13 =
+    0.639 t PX per t PTA; at about 97.5% yield 0.639 / 0.975 = 0.655, the number every desk uses.
+    The fee must also cover about 0.035 t acetic acid, catalyst, energy and depreciation: cash
+    cost about 300 CNY/t for the newest 2.5-3 Mt lines, 450-500 for old ones. Chronic
+    overcapacity keeps it between 200 and 600; below 300 plants cut runs. Both legs are ZCE,
+    same cycle, VAT in on both, so VAT cancels.
+
+- id: proc.cn.psf_margin
+  family: processing
+  name: Polyester staple fibre processing fee (PF minus 0.855 PTA minus 0.335 EG)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:PF, weight: 1.0}
+    - {instrument: ZCE:TA, weight: -0.855}
+    - {instrument: DCE:EG, weight: -0.335}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [polyester_chain, textile_demand]
+  verified: false
+  params:
+    tenor_anchor: ZCE:PF       # PF rolls monthly; TA and EG are taken in PF's main month
+    conversion_cost: 1000
+    conversion_cost_range: [800, 1200]
+  notes: >-
+    Yield: PET repeat unit C10H8O4 = 192.17. PTA 166.13 / 192.17 = 0.865 and MEG 62.07 / 192.17
+    = 0.323 by stoichiometry; the trade uses 0.855 and 0.335 (MEG losses and DEG formation push
+    MEG up, PTA is rounded down). Polymerisation cost = 0.855 TA + 0.335 EG; spinning and
+    overheads for staple are about 800-1200 CNY/t on top. EG's off-cycle months are thin, so the
+    anchored EG price can be stale; if that shows, drop the anchor and accept the calendar noise.
+
+- id: proc.cn.bottle_chip_margin
+  family: processing
+  name: PET bottle chip processing fee (PR minus 0.855 PTA minus 0.335 EG)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:PR, weight: 1.0}
+    - {instrument: ZCE:TA, weight: -0.855}
+    - {instrument: DCE:EG, weight: -0.335}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [polyester_chain, pet_export, beverage_season]
+  verified: false
+  params:
+    tenor_anchor: ZCE:PR
+    conversion_cost: 550
+    conversion_cost_range: [450, 700]
+  notes: >-
+    Same 0.855 / 0.335 arithmetic as staple fibre (bottle grade also carries about 2% isophthalic
+    acid, ignored). The quoted processing fee has been crushed to 300-600 CNY/t by the 2023-25
+    capacity wave; about 500-600 is cash breakeven (confidence: low). China exports a third of
+    its bottle chip, so anti-dumping cases and freight matter. Summer beverage season is the
+    seasonal high.
+
+- id: proc.cn.pta_vs_brent
+  family: processing
+  name: PTA vs Brent (polyester chain vs crude)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:TA, weight: 1.0}
+    - {instrument: ICE:B,  weight: -1.0, qty_factor: 0.13643}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [chemicals_vs_crude, polyester_chain]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: ZCE:TA
+  notes: >-
+    qty_factor 0.13643 t per bbl = 1 / 7.33, so Brent becomes USD/t (Brent x 7.33). Tonne for
+    tonne by convention, not a yield: the chain is crude -> naphtha -> PX (PXN) -> PTA (0.655),
+    so this is PXN plus the PTA fee plus the naphtha crack in one number. PTA is the Chinese
+    chemical most correlated with crude and the usual vehicle for "chemicals vs oil".
+
+- id: proc.cn.pta_vs_sc
+  family: processing
+  name: PTA vs INE crude (domestic chemicals vs crude)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:TA, weight: 1.0}
+    - {instrument: INE:SC, weight: -1.0, qty_factor: 0.13643}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [chemicals_vs_crude, polyester_chain]
+  verified: false
+  notes: >-
+    The onshore version: no FX leg, both legs tradable in one account. SC x 7.33 = CNY/t of
+    crude. Prices as quoted: TA includes 13% VAT, SC is bonded (no duty or VAT), so about 11.5%
+    of the TA price is tax. Each leg uses its own main contract (SC rolls monthly, TA is 1/5/9),
+    so the SC curve shape is inside the number.
+
+# =====================================================================
+# PROCESSING - olefins: methanol, propane, naphtha and crude routes
+# =====================================================================
+
+- id: proc.cn.mto_pp_margin
+  family: processing
+  name: MTO margin, polypropylene (PP minus 3 methanol)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:PP, weight: 1.0}
+    - {instrument: ZCE:MA, weight: -3.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [mto_margin, methanol_demand, olefins_cost_curve]
+  verified: false
+  params:
+    conversion_cost: 900
+    conversion_cost_range: [600, 1200]
+    desk_convention: "PP - 3 x MA, same 1/5/9 month; desks trade it 3 MA lots (10 t) per 2 PP lots (5 t)"
+  notes: >-
+    Yield: methanol CH3OH = 32.04 gives one CH2 unit (14.03), so 2.28 t methanol per t olefin at
+    100% selectivity; at about 78-80% selectivity to ethylene plus propylene it is 2.85-3.0.
+    Desks use 3. Coastal MTO plants buy methanol and are about half of marginal methanol demand:
+    when PP - 3MA falls below roughly 600-900 CNY/t they shut, which caps methanol. The most
+    traded cross-exchange chemical spread in China.
+
+- id: proc.cn.mto_lldpe_margin
+  family: processing
+  name: MTO margin, LLDPE (L minus 3 methanol)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:L,  weight: 1.0}
+    - {instrument: ZCE:MA, weight: -3.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [mto_margin, methanol_demand, olefins_cost_curve]
+  verified: false
+  params:
+    conversion_cost: 900
+    conversion_cost_range: [600, 1200]
+  notes: >-
+    Same 3:1 arithmetic as the PP row: an MTO unit makes ethylene and propylene in roughly equal
+    parts, so the plant's true margin is the average of the two rows.
+
+- id: proc.cn.pdh_pp_margin
+  family: processing
+  name: PDH margin, polypropylene (PP minus 1.2 LPG)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:PP, weight: 1.0}
+    - {instrument: DCE:PG, weight: -1.2}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [pdh_margin, propane_cost, olefins_cost_curve]
+  verified: false
+  params:
+    conversion_cost: 1500
+    conversion_cost_range: [1200, 1800]
+    desk_convention: "PP - 1.2 x PG, each leg's main contract"
+  notes: >-
+    Yield: propane C3H8 44.10 -> propylene C3H6 42.08 is 1.048 by stoichiometry; at 87-90%
+    selectivity 1.16-1.20 t propane per t propylene, times about 1.01 t propylene per t PP =
+    1.2. Dehydrogenation costs about 800-1000 CNY/t and polymerisation 500-700 (confidence: low).
+    Caveats: DCE:PG delivers mixed LPG and prices the cheapest deliverable, so it is a proxy for
+    import propane; PG carries 9% VAT against PP's 13% (about 190 CNY/t of the level); PG rolls
+    monthly and is strongly seasonal, so PP main vs PG main embeds the winter LPG premium.
+
+- id: proc.cn.pdh_pp_margin_afei
+  family: processing
+  name: PDH margin on import propane (PP minus 1.2 AFEI propane)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:PP,   weight: 1.0}
+    - {instrument: NYMEX:7E, weight: -1.2}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [pdh_margin, propane_cost, us_china_tariffs]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:PP
+    propane_import_duty: 0.01  # context; US-origin cargoes have carried extra tariffs on and off since 2018
+    conversion_cost: 210
+    conversion_cost_range: [170, 250]
+  notes: >-
+    The cleaner PDH margin: Chinese PDH plants run on imported propane priced off CP and the
+    Argus Far East Index, not on DCE's mixed LPG. Same 1.2 yield as proc.cn.pdh_pp_margin. PP is
+    taken ex-VAT so both legs are tax-free. Needs NYMEX:7E at depth 7 (energy has 5).
+
+- id: proc.cn.pdh_propylene_margin
+  family: processing
+  name: PDH margin, propylene (PL minus 1.2 LPG)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:PL, weight: 1.0}
+    - {instrument: DCE:PG, weight: -1.2}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [pdh_margin, propane_cost]
+  verified: false
+  params:
+    tenor_anchor: ZCE:PL
+    conversion_cost: 900
+    conversion_cost_range: [700, 1100]
+  notes: >-
+    Propylene is the actual PDH product, so this strips the polymerisation step out of the PP
+    row: 1.16-1.20 t propane per t propylene, taken as 1.2. ZCE:PL only listed in Jul 2025, so
+    history is short. VAT mismatch as in proc.cn.pdh_pp_margin.
+
+- id: proc.cn.pp_vs_propylene
+  family: processing
+  name: Polymerisation spread (PP minus propylene)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:PP, weight: 1.0}
+    - {instrument: ZCE:PL, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [pp_polymerisation, propylene_balance]
+  verified: false
+  params:
+    conversion_cost: 550
+    conversion_cost_range: [400, 700]
+    physical_yields: {propylene_t_per_t_pp: 1.01}
+  notes: >-
+    Propylene consumption is 1.00-1.02 t per t of pellet PP (1.03-1.05 for powder), so the desk
+    quotes the plain difference. Below about 400-500 CNY/t powder plants stop and sell propylene
+    instead. Each leg's own main contract; PL's cycle is still settling, confidence: low.
+
+- id: proc.cn.lldpe_vs_naphtha
+  family: processing
+  name: LLDPE minus naphtha (naphtha cracker chain)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:L,    weight: 1.0}
+    - {instrument: NYMEX:JA, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [cracker_margin, olefins_cost_curve]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:L
+    import_duty: 0.065         # context: CFR-equivalent PE = DCE / 1.13 / 1.065 / USDCNH
+    conversion_cost: 420
+    conversion_cost_range: [350, 500]
+  notes: >-
+    Quoted 1:1 by convention. A naphtha cracker needs about 3.2 t naphtha per t ethylene but
+    propylene, butadiene, pygas and fuel credits pay for most of it, so the rule of thumb is
+    ethylene = naphtha + 250-300 USD/t and PE = ethylene + 150: breakeven about 400-450 USD/t
+    (confidence: low). Below that Asian crackers cut runs. Needs NYMEX:JA at depth 7.
+
+- id: proc.cn.pp_vs_naphtha
+  family: processing
+  name: Polypropylene minus naphtha
+  sector: chemicals
+  legs:
+    - {instrument: DCE:PP,   weight: 1.0}
+    - {instrument: NYMEX:JA, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [cracker_margin, olefins_cost_curve]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:PP
+    import_duty: 0.065
+    conversion_cost: 420
+    conversion_cost_range: [350, 500]
+  notes: >-
+    Companion to the LLDPE row; same convention and caveats. Oil-route PP is about half of
+    Chinese capacity, so this, PP - 3MA and PP - 1.2PG together locate PP on its cost curve.
+
+- id: proc.cn.lldpe_vs_brent
+  family: processing
+  name: LLDPE vs Brent
+  sector: chemicals
+  legs:
+    - {instrument: DCE:L, weight: 1.0}
+    - {instrument: ICE:B, weight: -1.0, qty_factor: 0.13643}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [chemicals_vs_crude, olefins_cost_curve]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:L
+  notes: >-
+    Brent x 7.33 = USD/t of crude (qty_factor 0.13643 t per bbl). Tonne for tonne by convention:
+    it is the naphtha crack plus the cracker chain in one number, for a trader who wants the
+    chemical against liquid crude rather than against a naphtha swap.
+
+- id: proc.cn.pp_vs_brent
+  family: processing
+  name: Polypropylene vs Brent
+  sector: chemicals
+  legs:
+    - {instrument: DCE:PP, weight: 1.0}
+    - {instrument: ICE:B,  weight: -1.0, qty_factor: 0.13643}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [chemicals_vs_crude, olefins_cost_curve]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:PP
+  notes: >-
+    As proc.cn.lldpe_vs_brent. Brent x 7.33 = USD/t.
+
+- id: proc.cn.lldpe_vs_sc
+  family: processing
+  name: LLDPE vs INE crude
+  sector: chemicals
+  legs:
+    - {instrument: DCE:L,  weight: 1.0}
+    - {instrument: INE:SC, weight: -1.0, qty_factor: 0.13643}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [chemicals_vs_crude, olefins_cost_curve]
+  verified: false
+  notes: >-
+    Onshore version, no FX. SC x 7.33 = CNY/t. Prices as quoted: L includes 13% VAT, SC is
+    bonded. Each leg's own main contract (SC rolls monthly), so the SC curve is inside the number.
+
+- id: proc.cn.meg_vs_brent
+  family: processing
+  name: Ethylene glycol vs Brent
+  sector: chemicals
+  legs:
+    - {instrument: DCE:EG, weight: 1.0}
+    - {instrument: ICE:B,  weight: -1.0, qty_factor: 0.13643}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [chemicals_vs_crude, meg_cost_curve]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:EG
+    physical_yields: {ethylene_t_per_t_meg: 0.6}
+  notes: >-
+    Brent x 7.33 = USD/t. MEG takes about 0.6 t ethylene per t (ethylene 28.05 x 1 / MEG 62.07 =
+    0.452 by stoichiometry, about 0.58-0.62 after EO selectivity of 80-90%), but there is no
+    ethylene contract in Asia, so crude stands in. About 40% of Chinese MEG is coal-based, which
+    weakens the link: confidence: low as a margin, useful as a relative-value signal.
+
+# =====================================================================
+# PROCESSING - aromatics
+# =====================================================================
+
+- id: proc.cn.styrene_vs_benzene
+  family: processing
+  name: Styrene minus pure benzene (EB-BZ)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:EB, weight: 1.0}
+    - {instrument: DCE:BZ, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [styrene_margin, aromatics_margin]
+  verified: false
+  params:
+    tenor_anchor: DCE:EB
+    physical_yields: {benzene: 0.79, ethylene: 0.29}
+    conversion_cost: 1500          # breakeven of the plain 1:1 spread, see notes
+    conversion_cost_range: [1300, 1800]
+    desk_convention: "EB - BZ plain difference, tonne for tonne: 6 EB lots (5 t) against 1 BZ lot (30 t)"
+  notes: >-
+    Full margin = EB - 0.79 benzene - 0.29 ethylene - about 1100 CNY/t. Yields: styrene C8H8 =
+    104.15; benzene 78.11 / 104.15 = 0.750 and ethylene 28.05 / 104.15 = 0.269 by stoichiometry,
+    0.79 and 0.29 after losses. China has no ethylene future, so the desk trades the plain
+    EB - BZ difference. Its breakeven: 0.29 x ethylene (about 6200) + 1100 - 0.21 x benzene
+    (about 5800) = roughly 1500-1700 CNY/t. BZ only listed in Jul 2025 (first contract BZ2603),
+    so history is short.
+
+- id: proc.cn.benzene_vs_naphtha
+  family: processing
+  name: Pure benzene minus naphtha (BZN)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:BZ,   weight: 1.0}
+    - {instrument: NYMEX:JA, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [aromatics_margin]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:BZ
+    import_duty: 0.02
+  notes: >-
+    Benzene is a co-product (reformers, crackers, toluene disproportionation), so there is no
+    single conversion cost; the spread is read against its history, typically 100-300 USD/t.
+    With PXN it splits the aromatics complex margin. JA depth 4 is enough here (BZ rolls monthly).
+
+# =====================================================================
+# PROCESSING - glass, coal chemicals, US gas and NGL chains
+# =====================================================================
+
+- id: proc.cn.glass_vs_soda_ash
+  family: processing
+  name: Float glass margin over soda ash (FG minus 0.2 SA)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:FG, weight: 1.0}
+    - {instrument: ZCE:SA, weight: -0.2}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [glass_margin, property_completions]
+  verified: false
+  params:
+    conversion_cost: 800
+    conversion_cost_range: [650, 950]
+  notes: >-
+    Yield: soda-lime glass is 13-14% Na2O; Na2CO3 -> Na2O is 62 / 106 = 0.585, so 0.135 / 0.585
+    = 0.23 t soda ash per t of fresh melt, about 0.2 t per t of glass after 15-20% cullet (10 kg
+    per 50 kg weight case). Fuel (natural gas, petcoke or coal gas, 350-500 CNY/t) is the larger
+    cost and has no paper leg; sand and the rest bring non-soda cost to about 650-950 CNY/t
+    (confidence: low). Float lines cannot be idled cheaply, so the margin goes deeply negative
+    before supply responds.
+
+- id: proc.cn.glass_vs_soda_ash_1to1
+  family: processing
+  name: Glass vs soda ash, desk pair (FG minus SA, lot for lot)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:FG, weight: 1.0}
+    - {instrument: ZCE:SA, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [glass_margin, soda_ash_supply]
+  verified: false
+  params:
+    desk_convention: "1 FG lot against 1 SA lot (both 20 t); usually quoted the other way round, SA - FG"
+  notes: >-
+    What the desks actually trade: with a 0.2 weight the margin row is 80% glass price, so the
+    lot-for-lot pair is used to express "soda ash oversupply vs glass" views. Not a yield.
+
+- id: proc.cn.coal_to_methanol
+  family: processing
+  name: Coal-to-methanol margin (MA minus 2.0 thermal coal)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:MA, weight: 1.0}
+    - {instrument: ZCE:ZC, weight: -2.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [coal_chemicals, methanol_cost_curve]
+  verified: false
+  params:
+    conversion_cost: 700
+    conversion_cost_range: [500, 900]
+  notes: >-
+    NO DATA: ZCE:ZC is suspended in all but name (no volume since 2021-22), and China has no
+    other paper thermal coal. Kept so the structure is on file. Yield: about 1.5 t feed coal plus
+    0.5 t fuel coal (5,500 kcal) per t methanol = 2.0; other costs 500-900 CNY/t. About three
+    quarters of Chinese methanol is coal-based, so this is the floor of the methanol curve.
+    A spot-coal index series (CCI 5500) would make the row live: see NOTES contract requests.
+
+- id: proc.cn.coal_to_urea
+  family: processing
+  name: Coal-to-urea margin (UR minus 1.3 thermal coal)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:UR, weight: 1.0}
+    - {instrument: ZCE:ZC, weight: -1.3}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [coal_chemicals, urea_cost_curve]
+  verified: false
+  params:
+    conversion_cost: 550
+    conversion_cost_range: [400, 700]
+  notes: >-
+    NO DATA, same reason as proc.cn.coal_to_methanol. Yield, entrained-flow gasification on
+    bituminous coal: about 1.5 t coal per t ammonia x 0.58 t ammonia per t urea = 0.9 t feed,
+    plus 0.3-0.4 t fuel coal = 1.2-1.4, taken as 1.3 (confidence: low; fixed-bed plants use about
+    0.7 t anthracite lump plus 0.4 t fuel coal instead). UR carries 9% VAT, coal 13%.
+
+- id: proc.us.urea_vs_henry_hub
+  family: processing
+  name: US Gulf urea margin over natural gas
+  sector: chemicals
+  legs:
+    - {instrument: CBOT:UFV, weight: 1.0}
+    - {instrument: NYMEX:NG, weight: -1.0, qty_factor: 0.043478}
+  unit: USD/st
+  tenor: main
+  constant: 0
+  driver_tags: [nitrogen_margin, us_gas]
+  verified: false
+  params:
+    tenor_anchor: CBOT:UFV
+    conversion_cost: 90
+    conversion_cost_range: [70, 120]
+  notes: >-
+    qty_factor 0.043478 = 1 / 23: one mmBtu of gas makes 1/23 short ton of urea, so the gas leg
+    becomes 23 x Henry Hub per short ton. Arithmetic: about 33 mmBtu per st ammonia x 0.575 st
+    ammonia per st urea = 19, plus 3-4 for urea synthesis and granulation = 22-24 (confidence:
+    low). The factor is a process intensity, not a unit conversion: mass and energy have no
+    other link (energy's spark spreads do the same). US producers sit at the bottom of the cost
+    curve, so this is a margin-capture measure, not a bound.
+
+- id: proc.us.ethane_cracker_margin
+  family: processing
+  name: US ethane cracker margin (Mont Belvieu ethylene minus 1.28 ethane)
+  sector: chemicals
+  legs:
+    - {instrument: NYMEX:MBE, weight: 1.0}
+    - {instrument: NYMEX:C0,  weight: -1.28, qty_factor: 2.97}
+  unit: USD/lb
+  tenor: m+1
+  constant: 0
+  driver_tags: [cracker_margin, us_ngl_advantage]
+  verified: false
+  params:
+    conversion_cost: 0.06
+    conversion_cost_range: [0.04, 0.08]
+    desk_convention: "ethylene cash cost in c/lb = ethane c/gal x 0.43 + about 5-7 c/lb"
+  notes: >-
+    qty_factor 2.97 lb per gal (liquid ethane, specific gravity 0.3562 x 8.337 lb per gal of
+    water), so ethane becomes USD/lb. Yield: ethane cracking with recycle gives about 0.78 lb
+    ethylene per lb ethane = 1.28 lb ethane per lb ethylene; 1.28 / 2.97 = 0.43 gal per lb, the
+    desk shorthand. Both legs are thin cleared swaps; NYMEX:C0 is not yet in the energy
+    universe. confidence: low on liquidity.
+
+- id: proc.us.pdh_margin
+  family: processing
+  name: US PDH margin (polymer grade propylene minus 1.2 propane)
+  sector: chemicals
+  legs:
+    - {instrument: NYMEX:PGP, weight: 1.0}
+    - {instrument: NYMEX:B0,  weight: -1.2, qty_factor: 4.2315}
+  unit: USD/lb
+  tenor: m+1
+  constant: 0
+  driver_tags: [pdh_margin, us_ngl_advantage]
+  verified: false
+  params:
+    conversion_cost: 0.08
+    conversion_cost_range: [0.06, 0.10]
+  notes: >-
+    qty_factor 4.2315 lb per gal = 2204.62 lb per t / 521 gal per t (energy's propane factor),
+    so propane becomes USD/lb. Same 1.2 yield as the Chinese PDH rows. Example: propane 0.75
+    USD/gal = 0.177 USD/lb, x 1.2 = 0.213; PGP 0.38 gives 0.167 USD/lb gross. Thin cleared swaps;
+    conversion cost confidence: low.
+
+# =====================================================================
+# SUBSTITUTION
+# =====================================================================
+
+- id: sub.cn.lldpe_vs_pp
+  family: substitution
+  name: LLDPE vs polypropylene (L-PP)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:L,  weight: 1.0}
+    - {instrument: DCE:PP, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [polyolefin_substitution, pp_capacity_wave, agricultural_film_season]
+  verified: false
+  notes: >-
+    The flagship plastics pair: same exchange, same lot, same cycle. Substitution is real in
+    injection moulding and packaging film but slow; the driver is relative capacity growth
+    (PP has had the bigger PDH-led wave, so L - PP has trended positive since 2022) and the
+    Q3-Q4 agricultural film season for LLDPE. Both sit on the same crude and methanol cost base.
+
+- id: sub.cn.lldpe_vs_pvc
+  family: substitution
+  name: LLDPE vs PVC (L-V)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:L, weight: 1.0}
+    - {instrument: DCE:V, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [oil_vs_coal_chemicals, property_completions]
+  verified: false
+  notes: >-
+    Little physical substitution (some pipe and film); it is traded as oil-based vs coal-based
+    chemicals and as consumer packaging vs property. PVC is carbide-route (coal, power) and sells
+    into pipes and profiles, so L - V widens when crude is strong and Chinese property is weak.
+
+- id: sub.cn.pp_vs_pvc
+  family: substitution
+  name: Polypropylene vs PVC (PP-V)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:PP, weight: 1.0}
+    - {instrument: DCE:V,  weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [oil_vs_coal_chemicals, property_completions]
+  verified: false
+  notes: >-
+    Same logic as L - V. PP-R pipe against PVC pipe is the one direct substitution channel.
+
+- id: sub.cn.pta_vs_meg
+  family: substitution
+  name: PTA vs ethylene glycol (TA-EG)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:TA, weight: 1.0}
+    - {instrument: DCE:EG, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [polyester_chain, polyester_feedstock_pair]
+  verified: false
+  notes: >-
+    Complements rather than substitutes: polyester takes them in fixed proportion (0.855 : 0.335),
+    so polyester demand cancels and what is left is relative supply - PTA/PX capacity and crude
+    against MEG port inventory, coal-based MEG run rates and imports. The standard polyester
+    feedstock pair. Desks trade it 2 TA lots (5 t) to 1 EG lot (10 t), i.e. tonne for tonne.
+
+- id: sub.cn.urea_vs_methanol
+  family: substitution
+  name: Urea vs methanol (UR-MA)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:UR, weight: 1.0}
+    - {instrument: ZCE:MA, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [coal_chemicals, syngas_allocation]
+  verified: false
+  notes: >-
+    Supply-side substitution: both are made from coal syngas, often in the same complex
+    (ammonia-methanol co-production), so producers tilt output toward the better margin and both
+    share the coal cost floor. Demand differs entirely (fertiliser season and export policy vs
+    MTO and imports), which is what makes the pair move. UR includes 9% VAT, MA 13%.
+
+- id: sub.cn.methanol_vs_lpg
+  family: substitution
+  name: Methanol vs LPG as propylene feedstock (3 MA minus 1.2 PG)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:MA, weight: 3.0}
+    - {instrument: DCE:PG, weight: -1.2}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [olefins_cost_curve, mto_margin, pdh_margin]
+  verified: false
+  params:
+    desk_convention: "feed cost per tonne of olefin: MTO route (3 t methanol) minus PDH route (1.2 t propane)"
+  notes: >-
+    Equals proc.cn.pdh_pp_margin minus proc.cn.mto_pp_margin: which marginal route to propylene
+    is cheaper. Positive means MTO feed is dearer, so MTO plants cut first and methanol demand
+    is the casualty. PG is a proxy for propane and carries 9% VAT; each leg's own main contract.
+
+- id: sub.cn.bottle_chip_vs_psf
+  family: substitution
+  name: PET bottle chip vs staple fibre (PR-PF)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:PR, weight: 1.0}
+    - {instrument: ZCE:PF, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [polyester_chain, polyester_product_mix]
+  verified: false
+  params:
+    tenor_anchor: ZCE:PF
+  notes: >-
+    Same melt, different product: the raw-material term (0.855 TA + 0.335 EG) cancels, leaving
+    the difference of the two processing fees. Bottle chip is export- and beverage-driven, staple
+    is textile-driven. Both legs young and rolling monthly; confidence: low on liquidity.
+
+- id: sub.cn.pvc_vs_caustic_soda
+  family: substitution
+  name: PVC vs caustic soda (chlor-alkali pair)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:V,  weight: 1.0}
+    - {instrument: ZCE:SH, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [chlor_alkali_balance, property_completions, alumina_demand]
+  verified: false
+  params:
+    physical_yields: {caustic_t_per_t_pvc: 0.75, chlorine_t_per_t_pvc: 0.6}
+    desk_convention: "integrated chlor-alkali revenue = 1 t PVC + 0.75 t caustic (100%); traded as long one, short the other"
+  notes: >-
+    Co-products, not substitutes. Electrolysis makes 1 t chlorine with 1.13 t caustic; 1 t PVC
+    absorbs about 0.6 t chlorine (Cl 35.45 / VCM 62.50 = 0.567, plus losses), so each t of PVC
+    comes with 0.6 x 1.13 x about 1.1 = 0.75 t caustic. When caustic is strong (alumina demand)
+    plants run hard and the chlorine must go somewhere - into PVC, which is then oversupplied:
+    the two are negatively linked through the chlorine balance. The integrated revenue
+    V + 0.75 SH cannot be written as a spread (all weights positive): see NOTES contract
+    requests. SH is priced per tonne of 100% NaOH.
+
+- id: sub.cn.soda_ash_vs_caustic_soda
+  family: substitution
+  name: Soda ash vs caustic soda (the two alkalis)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:SA, weight: 1.325}
+    - {instrument: ZCE:SH, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [alkali_substitution, alumina_demand]
+  verified: false
+  notes: >-
+    Alkali-equivalent basis: 2 NaOH (80.0) does the work of 1 Na2CO3 (106.0), so 1 t of 100%
+    caustic = 1.325 t soda ash. Real substitution in alumina refining (some), pulp, water
+    treatment and chemicals when the gap is wide; small in practice and slow. Low priority;
+    confidence: low that anyone trades it in size.
+
+- id: sub.cn.glass_vs_pvc
+  family: substitution
+  name: Glass vs PVC (property completion pair)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:FG, weight: 1.0}
+    - {instrument: DCE:V,  weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [property_completions]
+  verified: false
+  notes: >-
+    Not substitutes: both are late-cycle property materials (windows; pipes and profiles), so
+    completions demand cancels and relative supply is left - float line cold repairs against
+    chlor-alkali run rates and PVC exports to India. A macro pair for a trader who wants
+    property exposure hedged. Glass prices are about a quarter of PVC's, so read the ratio.
+
+- id: sub.cn.px_vs_benzene
+  family: substitution
+  name: Paraxylene vs pure benzene (aromatics co-products)
+  sector: chemicals
+  legs:
+    - {instrument: ZCE:PX, weight: 1.0}
+    - {instrument: DCE:BZ, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [aromatics_margin, polyester_chain]
+  verified: false
+  notes: >-
+    Both come off the same reformer and aromatics complex, so feedstock cost cancels: polyester
+    demand (PX) against styrene, phenol and caprolactam demand (benzene). Toluene
+    disproportionation makes both, tying them together. Each leg's own main contract (BZ rolls
+    monthly). BZ history is short.
+
+- id: sub.cn.lldpe_vs_meg
+  family: substitution
+  name: LLDPE vs ethylene glycol (ethylene derivatives)
+  sector: chemicals
+  legs:
+    - {instrument: DCE:L,  weight: 1.0}
+    - {instrument: DCE:EG, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [ethylene_derivatives]
+  verified: false
+  notes: >-
+    Crackers with both PE and EO/EG units swing ethylene toward the better netback, and many
+    Chinese EG units have been switched to EO or idled for that reason. Low priority.
+
+- id: sub.us.ethylene_vs_propylene
+  family: substitution
+  name: Mont Belvieu ethylene vs polymer grade propylene
+  sector: chemicals
+  legs:
+    - {instrument: NYMEX:MBE, weight: 1.0}
+    - {instrument: NYMEX:PGP, weight: -1.0}
+  unit: USD/lb
+  tenor: m+1
+  driver_tags: [us_olefins_balance, us_ngl_advantage]
+  verified: false
+  notes: >-
+    Ethane cracking makes almost no propylene, so the US is structurally long ethylene and short
+    propylene: PGP normally trades well above ethylene and the gap widens when crackers run
+    lighter feeds or PDH units are down. Thin cleared swaps.
+
+- id: sub.us.uan_vs_urea
+  family: substitution
+  name: UAN vs urea at NOLA, per unit of nitrogen
+  sector: chemicals
+  legs:
+    - {instrument: CBOT:UFN, weight: 1.0}
+    - {instrument: CBOT:UFV, weight: -0.696}
+  unit: USD/st
+  tenor: m+1
+  driver_tags: [nitrogen_substitution, us_planting]
+  verified: false
+  notes: >-
+    Nitrogen-equivalent: UAN is 32% N, urea 46% N, so 1 st UAN = 32 / 46 = 0.696 st urea. Farmers
+    and blenders switch between the two on cost per unit N. UAN normally carries a premium per
+    unit N (liquid handling, application timing). Both thin; UAN exchange code confidence: low.
+
+- id: sub.us.dap_vs_urea
+  family: substitution
+  name: DAP vs urea at NOLA (phosphate vs nitrogen)
+  sector: chemicals
+  legs:
+    - {instrument: CBOT:DFL, weight: 1.0}
+    - {instrument: CBOT:UFV, weight: -1.0}
+  unit: USD/st
+  tenor: m+1
+  driver_tags: [fertiliser_global, china_export_policy]
+  verified: false
+  notes: >-
+    Weak substitution (DAP is 18% N, 46% P2O5); it is the phosphate-vs-nitrogen relative value
+    that fertiliser desks watch. Phosphate is driven by Chinese export quotas, sulphur and
+    ammonia costs and US countervailing duties; nitrogen by gas. DAP exchange code
+    confidence: low.

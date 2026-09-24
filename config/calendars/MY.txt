@@ -1,0 +1,44 @@
+# MY: Bursa Malaysia Derivatives (crude palm oil FCPO and the other Bursa commodity
+# futures): full-day closures for 2026 and 2027, weekdays only: the federal public
+# holidays and the Federal Territory (Kuala Lumpur) ones Bursa observes, with a Monday
+# in lieu of a Sunday holiday (a Saturday holiday gets none). Good Friday is NOT a
+# Kuala Lumpur holiday and Bursa trades on it.
+# Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
+# against Bursa Malaysia's published trading holidays before it is relied on. The
+# Islamic, lunar and Hindu holidays move each year and depend on moon sightings; every
+# one of them below is marked unverified, and Bursa sometimes adds a day at short notice.
+# coverage: 2026-01-01 to 2027-12-31
+
+2026-01-01  # New Year's Day
+2026-02-02  # Federal Territory Day and Thaipusam (in lieu; 1 February is a Sunday)  # unverified
+2026-02-17  # Chinese New Year
+2026-02-18  # Chinese New Year (second day)
+2026-03-20  # Hari Raya Aidilfitri (if it falls on Friday 20 March)  # unverified
+2026-03-23  # Hari Raya Aidilfitri (in lieu, if it falls on 21-22 March)  # unverified
+2026-05-01  # Labour Day
+2026-05-27  # Hari Raya Haji  # unverified
+2026-06-01  # Agong's Birthday (first Monday of June)
+2026-06-02  # Wesak Day (in lieu; 31 May is a Sunday and 1 June is taken)  # unverified
+2026-06-17  # Awal Muharram  # unverified
+2026-08-25  # Maulidur Rasul  # unverified
+2026-08-31  # National Day
+2026-09-16  # Malaysia Day
+2026-11-09  # Deepavali (in lieu; 8 November is a Sunday)  # unverified
+2026-12-25  # Christmas Day
+
+2027-01-01  # New Year's Day
+2027-01-22  # Thaipusam  # unverified
+2027-02-01  # Federal Territory Day
+2027-02-08  # Chinese New Year (in lieu; 6 and 7 February are the weekend)  # unverified
+2027-02-25  # Nuzul Al-Quran  # unverified
+2027-03-10  # Hari Raya Aidilfitri  # unverified
+2027-03-11  # Hari Raya Aidilfitri (second day)  # unverified
+2027-05-17  # Hari Raya Haji  # unverified
+2027-05-20  # Wesak Day  # unverified
+2027-06-07  # Agong's Birthday (first Monday of June)
+2027-06-08  # Awal Muharram (in lieu; 6 June is a Sunday and 7 June is taken)  # unverified
+2027-08-16  # Maulidur Rasul (in lieu; 15 August is a Sunday)  # unverified
+2027-08-31  # National Day
+2027-09-16  # Malaysia Day
+2027-10-28  # Deepavali (could be 29 October)  # unverified
+# 1 May and 25 December 2027 fall on Saturdays: no weekday closure

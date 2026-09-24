@@ -1,0 +1,19 @@
+# Which rows of the uploaded blotter export are the book's (read by
+# data/ingest/blotter.py::load_book_filter; owned by the ingest-parser lane).
+#
+# Each list keeps only the rows whose cell in that column is one of its names, compared
+# without regard to case. An empty list takes every value. A blank cell, or an export
+# with no such column, never excludes a row (hard rule 6). A row is counted under the
+# first filter that excludes it, in the order funds, traders, desks; the upload summary
+# counts them, with the rows kept per trader.
+#
+# Columns: funds -> 'Fund', traders -> 'Trader', desks -> 'Desk'.
+#
+# Jason's own trader code and desk are not known yet (docs/open-questions.md C1): until
+# the user gives them, traders and desks stay empty and the fund is the one the app has
+# always taken. The synthetic commodity sample (data/sample/commodity_blotter_sample.csv)
+# books every row as Trader 'JB', Fund 'NMMF'; 'JB' is made up, not Jason's real code.
+
+funds: [NMMF]
+traders: []
+desks: []

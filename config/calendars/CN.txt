@@ -1,0 +1,52 @@
+# CN: the Chinese futures exchanges (SHFE, INE, DCE, ZCE, GFEX): full-day closures for
+# 2026 and 2027, weekdays only. They close on the State Council's public holidays and
+# NEVER open on the weekend make-up working days (tiaoxiu), so those are not listed.
+# The night session before each holiday is cancelled: that is not a full-day closure
+# and is not in this file.
+# Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
+# against the exchanges' published holiday notices before it is relied on.
+# 2026: the State Council notice of November 2025 as recalled.
+# 2027: the State Council announces it late in 2026; every 2027 date below is the likely
+# arrangement worked out from the lunar calendar and the 2025 holiday rules (Spring
+# Festival four legal days from the Eve, Labour Day two), marked unverified. Mid-week
+# festivals (Dragon Boat, Mid-Autumn 2027) may gain a bridge day.
+# coverage: 2026-01-01 to 2027-12-31
+
+2026-01-01  # New Year's Day
+2026-01-02  # New Year's Day holiday
+2026-02-16  # Spring Festival (Eve)
+2026-02-17  # Spring Festival (Lunar New Year's Day)
+2026-02-18  # Spring Festival
+2026-02-19  # Spring Festival
+2026-02-20  # Spring Festival
+2026-02-23  # Spring Festival
+2026-04-06  # Qingming (5 April is a Sunday)
+2026-05-01  # Labour Day
+2026-05-04  # Labour Day holiday
+2026-05-05  # Labour Day holiday
+2026-06-19  # Dragon Boat Festival
+2026-09-25  # Mid-Autumn Festival
+2026-10-01  # National Day
+2026-10-02  # National Day holiday
+2026-10-05  # National Day holiday
+2026-10-06  # National Day holiday
+2026-10-07  # National Day holiday
+
+2027-01-01  # New Year's Day  # unverified
+2027-02-05  # Spring Festival (Eve)  # unverified
+2027-02-08  # Spring Festival  # unverified
+2027-02-09  # Spring Festival  # unverified
+2027-02-10  # Spring Festival  # unverified
+2027-02-11  # Spring Festival  # unverified
+2027-02-12  # Spring Festival  # unverified
+2027-04-05  # Qingming  # unverified
+2027-05-03  # Labour Day holiday (1 May is a Saturday)  # unverified
+2027-05-04  # Labour Day holiday  # unverified
+2027-05-05  # Labour Day holiday  # unverified
+2027-06-09  # Dragon Boat Festival  # unverified
+2027-09-15  # Mid-Autumn Festival  # unverified
+2027-10-01  # National Day  # unverified
+2027-10-04  # National Day holiday  # unverified
+2027-10-05  # National Day holiday  # unverified
+2027-10-06  # National Day holiday  # unverified
+2027-10-07  # National Day holiday  # unverified

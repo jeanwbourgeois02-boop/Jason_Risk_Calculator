@@ -1461,7 +1461,8 @@ def test_the_library_lists_a_past_days_curve_and_smile_for_options_and_swaps_onl
                  "'acc','cp','','t','d','')")
     conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','EUR',1e6,'2026-09-01','2026-10-15',0,0)")
     conn.commit()
-    assert library.LIVE_ONLY_KINDS == ("FIXINGS", library.NDF_1M, library.DIV_YIELD)
+    # 2026-09-24: a commodity future's Bloomberg contract dates are asked by today's pull only
+    assert library.LIVE_ONLY_KINDS == ("FIXINGS", library.NDF_1M, library.DIV_YIELD, library.CONTRACT_DATES)
     assert library.HISTORY_INPUT_KINDS == ("OIS_CURVE", "VOL_SMILE")
     past = {(r["kind"], r["key"], r["product"]) for r in library.needed_on(conn, "2026-09-08", historical=True)
             if r["kind"] in library.HISTORY_INPUT_KINDS}

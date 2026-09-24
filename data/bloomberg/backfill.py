@@ -80,7 +80,12 @@ dated that day:
     (`settle_stamp`: 17:00 New York; 2026-09-22). A past day's FUTURE_PX row that a live
     press wrote (PX_LAST or PX_MID, stamped at the press or at 15:00 of the book date) is
     not a close: once the day is past the backfill asks that day's daily PX_LAST and
-    replaces it, as it replaces an FX row that is not the 15:00 close.
+    replaces it, as it replaces an FX row that is not the 15:00 close. A commodity future
+    (2026-09-24) is asked under the name Bloomberg gives it on the day of the request, the
+    one-digit year while it trades and the two-digit canonical id once expired
+    (`_future_request_tickers`), and written on its own instrument_id; a future with no
+    Bloomberg ticker (a placeholder root) is never asked: the library leaves it out of what
+    a past close needs and lists the gap with its reason.
 Only what is needed is asked for (user decision 2026-09-21: "only the data necessary for
 the pnl calcs of the trades ... also for the backfill"), all of it read from the Bloomberg
 library (data/bloomberg/library.py): the days being worked, as stretches of consecutive
@@ -842,20 +847,68 @@ def _infer_points_scale(conn: sqlite3.Connection, pair: str, rows_by_day: Dict[s
             "errors": {}}
 
 
+def _future_request_tickers(conn: sqlite3.Connection, library_rows: List[dict],
+                            today: date) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """({security to ask -> instrument_id}, {instrument_id -> why it is not asked}) for the
+    FUTURE_PX rows of the Bloomberg library in `library_rows`.
+
+    A commodity future (asset class FUTURE, base_ccy a contract root of config/contracts.csv,
+    instrument_id its canonical two-digit-year id 'CLZ26 Comdty') is asked under the form
+    Bloomberg knows it by ON THE DAY OF THE REQUEST (`today`), whatever historical day is
+    being worked (2026-09-24, commodity conversion plan): the one-digit-year form while the
+    contract trades ('CLZ6 Comdty'), the two-digit canonical id once it has expired
+    (`data.contracts.request_ticker(contract_for(root, id, conn), today)`), because
+    Bloomberg reuses the one-digit name for the contract ten years on and asking the history
+    of an expired contract under its stored `bbg_ticker` returns nothing. The mark is still
+    written on the instrument's own instrument_id and expiry. Every other future (ES, the
+    macro futures) and every listed option is asked under its library ticker, as before.
+    A future with no Bloomberg ticker (a placeholder root, 'ZZ...' in config/contracts.csv, is
+    booked with bbg_ticker '') never reaches this: the library flags it `requestable` False and
+    `needed_in_range` leaves it out by default, the one filter, and lists the gap itself. A
+    commodity id the contract universe cannot read back is not asked (never a guessed name)
+    and is named with its reason."""
+    from data.bloomberg import library
+    from data.contracts import UnknownContract, contract_for, request_ticker
+    info = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT instrument_id, asset_class, base_ccy FROM instruments")}
+    asked: Dict[str, str] = {}
+    not_asked: Dict[str, str] = {}
+    for r in library_rows:
+        if r["kind"] != "FUTURE_PX":
+            continue
+        instrument_id, ticker = r["key"], r["bbg_ticker"]
+        asset_class, root_id = info.get(instrument_id, ("", ""))
+        if asset_class == "FUTURE" and library.is_contract_root(root_id):
+            try:
+                ticker = request_ticker(contract_for(root_id, instrument_id, conn), today)
+            except (UnknownContract, ValueError) as exc:
+                not_asked[instrument_id] = (f"{instrument_id} is not a contract of {root_id} the contract universe "
+                                            f"can read ({exc}); not asked of Bloomberg")
+                continue
+        asked[ticker] = instrument_id
+    return asked, not_asked
+
+
 def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
-                             fut_fetch: Optional[Callable] = None) -> Dict[str, Dict[str, float]]:
+                             fut_fetch: Optional[Callable] = None, today: Optional[date] = None,
+                             not_asked: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, float]]:
     """{instrument_id: {date_iso: PX_LAST}} -- one HistoricalDataRequest per stretch of
     `runs`, for the futures and listed options open inside it (the Bloomberg library's
     FUTURE_PX rows), asked for the daily PX_LAST (user, 2026-09-22: "all futures for past
     date pnl calculation, use px last"; it was PX_SETTLE, which Bloomberg served no history
-    of for the listed SPX options). `fut_fetch` mirrors `_fetch_fwd_outright_history`'s
-    `fwd_fetch`; defaults to pull_marks.fetch_historical_series."""
+    of for the listed SPX options; user, 2026-09-24: a commodity future's close stays
+    PX_LAST). The security asked is `_future_request_tickers`' (a commodity contract under
+    its name on `today`, the request day); a row it will not ask for is added to
+    `not_asked` {instrument_id: reason} when given. `fut_fetch` mirrors
+    `_fetch_fwd_outright_history`'s `fwd_fetch`; defaults to
+    pull_marks.fetch_historical_series."""
     from data.bloomberg import library
+    today = today or _as_date(None)
     out: Dict[str, Dict[str, float]] = {}
     for run_start, run_end in runs:
-        ticker_to_instrument = {r["bbg_ticker"]: r["key"]
-                                for r in library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat())
-                                if r["kind"] == "FUTURE_PX"}
+        ticker_to_instrument, skipped = _future_request_tickers(
+            conn, library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat()), today)
+        if not_asked is not None:
+            not_asked.update(skipped)
         if not ticker_to_instrument:
             continue
         if fut_fetch is None:
@@ -1163,7 +1216,9 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             holidays = load_holidays()
             tenor_rows_by_pair = _fetch_fwd_outright_history(conn, session, service, fx_runs, fwd_fetch, holidays,
                                                              fields=fwd_fields)
-            future_px_by_instrument = _fetch_future_px_history(conn, session, service, runs, fut_fetch)
+            future_not_asked: Dict[str, str] = {}     # instrument_id -> why no history was asked for it
+            future_px_by_instrument = _fetch_future_px_history(conn, session, service, runs, fut_fetch, today,
+                                                               future_not_asked)
             ndf_fix_by_pair = _fetch_ndf_fix_history(conn, session, service, runs, fut_fetch)
             # The smiles and curves the days' options and swaps price from (2026-09-22):
             # only the pairs and currencies some day of the stretch lacks, one request per
@@ -1246,7 +1301,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     try:
                         settle_value = float(future_px_by_instrument.get(instrument_id, {}).get(day))
                     except (TypeError, ValueError):
-                        missing_marks.append({**item, "reason": f"Bloomberg returned no PX_LAST for {instrument_id} on {day}"})
+                        missing_marks.append({**item, "reason": future_not_asked.get(instrument_id)
+                                              or f"Bloomberg returned no PX_LAST for {instrument_id} on {day}"})
                         continue
                     fut_rows.append({"as_of_date": day, "instrument_id": instrument_id, "settle_date": item["settle_date"],
                                      "mark_type": "FUTURE_PX", "value": settle_value, "source": SRC_FUTURE,

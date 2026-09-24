@@ -1,0 +1,2 @@
+- [Commodity futures ingest](commodity-futures-ingest.md) — resolve_future path, sample symbol-format guesses, bare-code collisions, price-scale and Notional hazards
+- Older blotter notes (field quirks, IRS direction, NDF tickers) are in `.claude/agent-memory/data-ingest/` (the lane before the 2026-09-24 split)

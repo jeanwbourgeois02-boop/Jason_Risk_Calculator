@@ -15,10 +15,13 @@ from the module that owns it, and adds nothing of its own except the sums:
     unit of the underlying per contract unit, engine/options/portfolio.py), a future's is
     contracts x multiplier (ES: 50 index units per contract). The line shows the sum in
     index units ($ per index point), in ES-contract equivalents (index units / 50) and in
-    USD (futures at their own price, options at the index level, both official marks of
-    the day), with the futures and the options as sub-lines. A future with no price, or
-    an option with no DELTA or no index level, is named in `missing` and left out of the
-    sum, never taken as zero.
+    USD (futures at their own price converted at the day's spot, `futures_usd_delta`'s own
+    figure, options at the index level, all official marks of the day), with the futures
+    and the options as sub-lines. A future with no price or no conversion spot, or an
+    option with no DELTA or no index level, is named in `missing` and left out of the
+    sum, never taken as zero. A commodity future (its `base_ccy` a contract root of
+    `config/contracts.csv`, 'SHFE:CU') is not on this line at all: its positions are the
+    curve-positions lane's (reviewer N-3, 2026-09-24).
   * Rates: DV01 (USD) of the open swaps, the official DV01_USD marks of the day summed,
     per currency; a swap with no mark is named.
   * FX options: delta in USD by pair (the Ladder's own option delta records: base-ccy
@@ -30,6 +33,7 @@ missing mark (hard rule 2), and `marks_official` is the only marks source.
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 from typing import Dict, List, Optional
 
@@ -105,23 +109,37 @@ def fx_positions(conn: sqlite3.Connection, as_of: str) -> dict:
             "reason": "", "by_ccy": by_ccy, "metals": metals}
 
 
+def _commodity_futures(conn: sqlite3.Connection) -> set:
+    """Instrument ids of the futures whose `base_ccy` is a contract root of the commodity
+    universe (`data.contracts.load_roots`, 'SHFE:CU'): these are not on the equity index line."""
+    from data.contracts import load_roots
+    roots = load_roots()
+    return {instrument_id for instrument_id, base in conn.execute(
+                "SELECT instrument_id, base_ccy FROM instruments WHERE asset_class = 'FUTURE'")
+            if re.sub(r"\s+", "", str(base or "")).upper() in roots}
+
+
 def equity_index_positions(conn: sqlite3.Connection, as_of: str) -> dict:
     """The ES futures and the SPX options as one delta (module docstring)."""
     from engine.ladder.futures_delta import futures_usd_delta
     lines: List[dict] = []
     missing: List[str] = []
     fut = futures_usd_delta(conn, as_of)
+    commodity = _commodity_futures(conn)
     es_multiplier = None
     for instrument_id, d in sorted(fut["details"].items()):
+        if instrument_id in commodity:
+            continue    # a commodity contract is not an index future (its positions are curve-positions')
         units = d["contracts"] * d["multiplier"]
         es_multiplier = es_multiplier or d["multiplier"]
-        if d["price"] is None:
-            missing.append(f"{instrument_id}: no FUTURE_PX on {as_of}")
+        if instrument_id not in fut["by_instrument"]:
+            # no price, or a price with no spot to convert it (futures_delta names which)
+            missing.append(f"{instrument_id}: {d['reason']}")
             lines.append({"label": instrument_id, "kind": "future", "contracts": d["contracts"], "index_units": units,
-                          "usd_delta": float("nan"), "level": None, "reason": f"no FUTURE_PX on {as_of}"})
+                          "usd_delta": float("nan"), "level": d["price"], "reason": d["reason"]})
             continue
         lines.append({"label": instrument_id, "kind": "future", "contracts": d["contracts"], "index_units": units,
-                      "usd_delta": units * d["price"], "level": d["price"], "reason": ""})
+                      "usd_delta": fut["by_instrument"][instrument_id], "level": d["price"], "reason": ""})
     for instrument_id, contracts, multiplier, underlying, expiry in conn.execute(_OPEN_LISTED_OPTIONS_SQL, {"as_of": as_of}):
         delta = _official(conn, instrument_id, expiry, "DELTA", as_of)
         level = _official(conn, underlying, as_of, "SPOT", as_of) if underlying else None

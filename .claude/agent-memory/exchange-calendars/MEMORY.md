@@ -1,0 +1,1 @@
+- [Calendars built, Phase 1 step 1](calendars_phase1.md) — 12 ids, file format, API semantics (between is antisymmetric, n=0 unchanged, coverage), which dates are guesses, health-audit traps.

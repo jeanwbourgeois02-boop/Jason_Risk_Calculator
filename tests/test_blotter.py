@@ -278,9 +278,11 @@ def test_future_row_buy_side_gives_positive_quantity(tmp_csv):
 
 
 def test_future_row_rejects_unknown_root(tmp_csv):
-    res = blotter.parse(tmp_csv([_future_row(Symbol="CLU6-USAA")]))
+    # CLU6 was the unknown root here until 2026-09-24; it is now a commodity future resolved
+    # through the contract master (tests/test_commodity_ingest.py), so a made-up root stands in.
+    res = blotter.parse(tmp_csv([_future_row(Symbol="QQU6-USAA")]))
     assert len(res.rejects) == 1
-    assert "unknown futures root" in res.rejects[0].reason
+    assert "not in config/contracts.csv" in res.rejects[0].reason
 
 
 # --------------------------------------------------------------------------- OPTION

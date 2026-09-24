@@ -1,0 +1,48 @@
+# JP: Osaka Exchange (OSE, Japan Exchange Group: gold, platinum, rubber and the other
+# commodity futures moved from TOCOM): full-day closures for 2026 and 2027, weekdays
+# only: Japan's national holidays (with substitute and in-between "citizens'" holidays)
+# plus the exchange's year-end and New Year closure (31 December to 3 January).
+# Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
+# against JPX's published market holidays before it is relied on.
+# OSE runs "holiday trading" in some derivatives on some national holidays; those trades
+# take the next business day's trade date, so the day is still not a business day here.
+# The equinox days are fixed by the National Astronomical Observatory a year ahead.
+# coverage: 2026-01-01 to 2027-12-31
+
+2026-01-01  # New Year's Day
+2026-01-02  # Year-end / New Year closure
+2026-01-12  # Coming of Age Day
+2026-02-11  # National Foundation Day
+2026-02-23  # Emperor's Birthday
+2026-03-20  # Vernal Equinox Day
+2026-04-29  # Showa Day
+2026-05-04  # Greenery Day
+2026-05-05  # Children's Day
+2026-05-06  # Substitute holiday (Constitution Day, 3 May, is a Sunday)
+2026-07-20  # Marine Day
+2026-08-11  # Mountain Day
+2026-09-21  # Respect for the Aged Day
+2026-09-22  # Citizens' holiday (between two holidays)
+2026-09-23  # Autumnal Equinox Day
+2026-10-12  # Sports Day
+2026-11-03  # Culture Day
+2026-11-23  # Labour Thanksgiving Day
+2026-12-31  # Year-end closure
+
+2027-01-01  # New Year's Day
+2027-01-11  # Coming of Age Day
+2027-02-11  # National Foundation Day
+2027-02-23  # Emperor's Birthday
+2027-03-22  # Substitute holiday (Vernal Equinox Day, 21 March, is a Sunday)  # unverified
+2027-04-29  # Showa Day
+2027-05-03  # Constitution Day
+2027-05-04  # Greenery Day
+2027-05-05  # Children's Day
+2027-07-19  # Marine Day
+2027-08-11  # Mountain Day
+2027-09-20  # Respect for the Aged Day
+2027-09-23  # Autumnal Equinox Day  # unverified
+2027-10-11  # Sports Day
+2027-11-03  # Culture Day
+2027-11-23  # Labour Thanksgiving Day
+2027-12-31  # Year-end closure

@@ -1,0 +1,1251 @@
+# Copied unchanged (apart from this header) on 2026-09-24 by the contract-master lane from the
+# research app: Commodity Dashboard/rvapp/universe/spreads/agriculture.yaml. A template only: nothing in
+# the app reads it yet (spreads-engine, Phase 3). Leg `instrument` values are contract roots
+# (config/contracts.csv root_id).
+# Agriculture spreads. One entry per spread; calendars come from calendar_rules.yaml.
+# Destination: rvapp/universe/spreads/agriculture.yaml.
+# Format: rvapp/universe/validate.py. `params` extensions are the ferrous ones (research/ferrous/NOTES.md):
+#   vat_basis, tenor_anchor, arb_bound, conversion_cost(+_range), desk_convention; plus `tradable: signal_only`.
+# Nothing here has been reviewed by a human: verified is false everywhere.
+#
+# Bushel legs: the validator treats `bu` as its own dimension, so a bushel leg inside a mass-unit
+# spread (or a mass leg inside a USD/bu spread) carries qty_factor even though units.py could convert
+# it from BUSHEL_LB. Factors used (all from the standard bushel weights):
+#   t per bu  soybeans, wheat (60 lb) = 60 * 0.45359237 / 1000 = 0.0272155
+#   t per bu  corn (56 lb)            = 56 * 0.45359237 / 1000 = 0.0254012
+#   cwt per bu corn                   = 56 / 100               = 0.56
+#   bu (60 lb) per short ton          = 2000 / 60              = 33.3333
+#   bu (60 lb) per lb                 = 1 / 60                 = 0.0166667
+
+# =====================================================================
+# BENCHMARK - same commodity, different venue, grade or location
+# =====================================================================
+
+- id: bench.soy.dce_b_vs_cbot
+  family: benchmark
+  name: DCE No.2 soybeans vs CBOT soybeans
+  sector: agriculture
+  legs:
+    - {instrument: DCE:B,   weight: 1.0}
+    - {instrument: CBOT:ZS, weight: -1.0, qty_factor: 0.0272155}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [soy_import_arb, china_import_arb, us_china_trade]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:B
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:B
+      offshore_leg: CBOT:ZS
+      freight_usd_t: 45          # US Gulf-China Panamax; Brazil Santos-China about 35-40
+      other_usd_t: 35            # FOB basis over futures, about 1 USD/bu; swings -0.3 to +2.5
+      import_duty: 0.03          # MFN. US origin carries an extra retaliatory tariff (10% after the Nov 2025 truce; confidence: low)
+      vat_rate: 0.09
+      port_charges_cny_t: 120
+      formula: "parity_cny_t = (offshore_usd_bu / 0.0272155 + other_usd_t + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    Imported-bean parity. 1 bu = 60 lb = 0.0272155 t, so USD/t = USD/bu x 36.74. China buys
+    mostly Brazilian beans priced as CBOT + basis, so the real arb variable is the basis, which
+    has no futures; this row shows how much of it the board already pays. DCE:B is thin:
+    treat big moves with suspicion. US-origin tariff changes (2018, 2025) shift the level.
+
+- id: bench.soy.dce_a_vs_cbot
+  family: benchmark
+  name: DCE No.1 soybeans vs CBOT soybeans (signal only)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:A,   weight: 1.0}
+    - {instrument: CBOT:ZS, weight: -1.0, qty_factor: 0.0272155}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [soy_onshore_offshore, china_food_security]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tradable: signal_only
+  notes: >-
+    NOT an arbitrage: No.1 is domestic non-GMO food beans, supported by state reserve buying
+    and subsidies; GMO imports cannot be delivered. The pair the user's list implies, kept as a
+    signal of Chinese policy support. Each leg on its own main contract.
+
+- id: bench.soy.dce_a_vs_dce_b
+  family: benchmark
+  name: DCE No.1 vs No.2 soybeans (non-GMO premium)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:A, weight: 1.0}
+    - {instrument: DCE:B, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [soy_gmo_premium, china_food_security]
+  verified: false
+  notes: >-
+    Food bean over crushing bean. Moves with Heilongjiang crop size and reserve auctions on
+    one side and the import cost on the other. Different main months (A odd months, B monthly).
+
+- id: bench.meal.dce_vs_cbot
+  family: benchmark
+  name: DCE soybean meal vs CBOT soybean meal (signal only)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:M,   weight: 1.0}
+    - {instrument: CBOT:ZM, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [meal_onshore_offshore, china_hog_cycle]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:M
+    tradable: signal_only
+  notes: >-
+    China imports beans, not meal, so there is no direct arb; the link runs through the crush
+    (see proc.cn.import_crush_cbot). Grade differs too: DCE 43% protein, CBOT 48%. USD/st is
+    converted to USD/t by the engine (x 1.10231). Shows Chinese feed demand against the
+    Argentine/US meal balance.
+
+- id: bench.soyoil.dce_vs_cbot
+  family: benchmark
+  name: DCE soybean oil vs CBOT soybean oil
+  sector: agriculture
+  legs:
+    - {instrument: DCE:Y,   weight: 1.0}
+    - {instrument: CBOT:ZL, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [vegoil_onshore_offshore, us_biofuel_policy]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:Y
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:Y
+      offshore_leg: CBOT:ZL
+      freight_usd_t: 60
+      import_duty: 0.09
+      vat_rate: 0.09
+      formula: "parity_cny_t = (offshore_usd_lb * 2204.62 + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate)"
+  notes: >-
+    USD/lb x 2204.62 = USD/t (engine converts). Since the US renewable-diesel build-out CBOT oil
+    trades far above world prices, so China imports Argentine and Brazilian oil, not US: the
+    arb bound is loose and the spread is mostly a US biofuel policy (RVO, 45Z) gauge.
+
+- id: bench.soyoil.bmd_fsoy_vs_dce
+  family: benchmark
+  name: Bursa FSOY vs DCE soybean oil (access proxy)
+  sector: agriculture
+  legs:
+    - {instrument: BMD:FSOY, weight: 1.0}
+    - {instrument: DCE:Y,    weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [access_proxy]
+  verified: false
+  params:
+    vat_basis: inc_vat
+    tenor_anchor: DCE:Y
+    tradable: signal_only
+  notes: >-
+    FSOY cash-settles against the DCE:Y settlement price in USD, so this is about zero by
+    construction: a data check and an access route, not an RV pair (the user's list, appendix
+    row 24, gives it FX and tariff drivers; it has neither). FSOY is marked illiquid, so the
+    row has no data until its status changes.
+
+- id: bench.corn.dce_vs_cbot
+  family: benchmark
+  name: DCE corn vs CBOT corn
+  sector: agriculture
+  legs:
+    - {instrument: DCE:C,   weight: 1.0}
+    - {instrument: CBOT:ZC, weight: -1.0, qty_factor: 0.0254012}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [corn_import_arb, china_import_arb, china_food_security]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:C
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:C
+      offshore_leg: CBOT:ZC
+      freight_usd_t: 45
+      other_usd_t: 30            # Gulf FOB basis
+      import_duty: 0.01          # inside the 7.2 Mt tariff-rate quota; 65% outside it
+      vat_rate: 0.09
+      port_charges_cny_t: 100
+      formula: "parity_cny_t = (offshore_usd_bu / 0.0254012 + other_usd_t + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    1 bu corn = 56 lb = 0.0254012 t, so USD/t = USD/bu x 39.37. The quota (7.2 Mt at 1%, mostly
+    held by state firms) makes the window a policy variable: DCE usually sits far above
+    in-quota parity and far below out-of-quota parity. Trade the deviation, not the level.
+
+- id: bench.corn.matif_vs_cbot
+  family: benchmark
+  name: Matif corn vs CBOT corn
+  sector: agriculture
+  legs:
+    - {instrument: EURONEXT:EMA, weight: 1.0}
+    - {instrument: CBOT:ZC,      weight: -1.0, qty_factor: 0.0254012}
+  unit: USD/t
+  fx: USDEUR
+  tenor: main
+  driver_tags: [corn_atlantic_arb, eurusd, black_sea_supply]
+  verified: false
+  params:
+    tenor_anchor: EURONEXT:EMA
+  notes: >-
+    Matif months (Mar, Jun, Aug, Nov) map to the next CBOT month (Mar, Jul, Sep, Dec). The EU
+    is a net corn importer (Ukraine, Brazil), so Matif is an import-parity price. Thin leg.
+
+- id: bench.wheat.kc_vs_chicago
+  family: benchmark
+  name: KC hard red winter vs Chicago soft red winter wheat
+  sector: agriculture
+  legs:
+    - {instrument: CBOT:KE, weight: 1.0}
+    - {instrument: CBOT:ZW, weight: -1.0}
+  unit: USD/bu
+  tenor: main
+  driver_tags: [wheat_protein_premium, us_plains_weather]
+  verified: false
+  params:
+    tenor_anchor: CBOT:ZW
+  notes: >-
+    Protein premium. Normally positive (HRW is the higher-protein bread wheat); spent long
+    stretches negative in 2019-2021 and again since 2023 on index-fund length in Chicago and
+    big HRW carry-in. Drought in Kansas/Oklahoma widens it. Same month on both legs.
+
+- id: bench.wheat.mpls_vs_kc
+  family: benchmark
+  name: Minneapolis hard red spring vs KC hard red winter wheat
+  sector: agriculture
+  legs:
+    - {instrument: MGEX:MWE, weight: 1.0}
+    - {instrument: CBOT:KE,  weight: -1.0}
+  unit: USD/bu
+  tenor: main
+  driver_tags: [wheat_protein_premium, northern_plains_weather]
+  verified: false
+  params:
+    tenor_anchor: CBOT:KE
+  notes: >-
+    High-protein spring wheat (13-14%) over winter wheat (11-12%). Driven by Dakotas and
+    Canadian Prairie weather and by the protein level of the HRW crop. MWE liquidity after
+    the 2025 platform move is confidence: low.
+
+- id: bench.wheat.mpls_vs_chicago
+  family: benchmark
+  name: Minneapolis hard red spring vs Chicago wheat
+  sector: agriculture
+  legs:
+    - {instrument: MGEX:MWE, weight: 1.0}
+    - {instrument: CBOT:ZW,  weight: -1.0}
+  unit: USD/bu
+  tenor: main
+  driver_tags: [wheat_protein_premium]
+  verified: false
+  params:
+    tenor_anchor: CBOT:ZW
+  notes: >-
+    The full quality spread, top to bottom of the US protein ladder. Sum of the two above.
+
+- id: bench.wheat.matif_vs_chicago
+  family: benchmark
+  name: Matif milling wheat vs Chicago wheat
+  sector: agriculture
+  legs:
+    - {instrument: EURONEXT:EBM, weight: 1.0}
+    - {instrument: CBOT:ZW,      weight: -1.0, qty_factor: 0.0272155}
+  unit: USD/t
+  fx: USDEUR
+  tenor: main
+  driver_tags: [wheat_atlantic_arb, eurusd, black_sea_supply]
+  verified: false
+  params:
+    tenor_anchor: EURONEXT:EBM
+  notes: >-
+    1 bu wheat = 60 lb = 0.0272155 t, so USD/t = USD/bu x 36.74. Matif lists Mar, May, Sep, Dec,
+    all of which exist in Chicago. Europe prices against Russian FOB and competes into North
+    Africa; Chicago carries fund positioning. EURUSD is half the move: check fx attribution.
+
+- id: bench.palm.dce_vs_bmd
+  family: benchmark
+  name: DCE palm olein vs Bursa crude palm oil
+  sector: agriculture
+  legs:
+    - {instrument: DCE:P,    weight: 1.0}
+    - {instrument: BMD:FCPO, weight: -1.0}
+  unit: USD/t
+  fx: [USDCNH, USDMYR]
+  tenor: main
+  driver_tags: [palm_import_arb, china_import_arb]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:P
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:P
+      offshore_leg: BMD:FCPO
+      freight_usd_t: 30
+      grade_adjustment_usd_t: 25   # RBD olein FOB over CPO futures: refining margin plus Malaysian CPO export tax pass-through; -10 to +60
+      import_duty: 0.09
+      vat_rate: 0.09
+      port_charges_cny_t: 100
+      formula: "parity_cny_t = (offshore_myr_t / USDMYR + grade_adjustment_usd_t + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    The palm import margin, the most watched number on Chinese vegoil desks. Grades differ
+    (refined olein against crude), hence the grade adjustment. Chinese importers hedge by
+    buying FCPO and selling DCE:P, so the spread mean-reverts around parity with a short
+    half-life. Indonesian export levies move the olein-CPO premium without touching FCPO.
+
+- id: bench.rapeseed.ice_canola_vs_matif
+  family: benchmark
+  name: ICE canola vs Matif rapeseed
+  sector: agriculture
+  legs:
+    - {instrument: ICEUS:RS,     weight: 1.0}
+    - {instrument: EURONEXT:ECO, weight: -1.0}
+  unit: USD/t
+  fx: [USDCAD, USDEUR]
+  tenor: main
+  driver_tags: [rapeseed_atlantic_arb, eu_biodiesel, canada_china_trade]
+  verified: false
+  notes: >-
+    Same oilseed (canola is GM, which limits EU crush to biodiesel-certified plants). The EU
+    imports Canadian, Australian and Ukrainian seed when Matif is rich. Month cycles barely
+    overlap (F,H,K,N,X against G,K,Q,X), so each leg is on its own main contract. Chinese
+    duties on Canadian canola (2025) push ICE down against Matif.
+
+- id: bench.cotton.zce_vs_ice
+  family: benchmark
+  name: ZCE cotton vs ICE cotton No.2
+  sector: agriculture
+  legs:
+    - {instrument: ZCE:CF,   weight: 1.0}
+    - {instrument: ICEUS:CT, weight: -1.0}
+  unit: USD/lb
+  fx: USDCNH
+  tenor: main
+  driver_tags: [cotton_import_arb, china_import_arb, xinjiang_cotton]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    desk_convention: "China quotes the gap in CNY/t: CF minus the 1%-duty landed cost of ICE"
+    arb_bound:
+      type: import_parity
+      onshore_leg: ZCE:CF
+      offshore_leg: ICEUS:CT
+      freight_usd_t: 0           # inside the CFR basis below
+      other_usd_t: 250           # CFR Far East basis over ICE, about 11 c/lb for US/Brazilian M 1-1/8
+      import_duty: 0.01          # inside the 894 kt quota; sliding-scale duty (up to 40%) outside
+      vat_rate: 0.09
+      port_charges_cny_t: 200
+      formula: "parity_cny_t = (offshore_usd_lb * 2204.62 + other_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t  (freight is inside the CFR basis)"
+  notes: >-
+    USD/lb: CNY/t / FX / 2204.62 (engine converts). Quota-bound like corn and sugar, so the
+    gap can stay open for months. Since the 2021 Xinjiang import bans the two markets serve
+    different textile chains (CF clothes China, CT clothes exports to the West), which weakens
+    cointegration. Each leg on its own main contract, as the desk quotes it. The basis number
+    is confidence: low; freight_usd_t is not added separately.
+
+- id: bench.sugar.zce_vs_ice11
+  family: benchmark
+  name: ZCE white sugar vs ICE raw sugar No.11
+  sector: agriculture
+  legs:
+    - {instrument: ZCE:SR,   weight: 1.0}
+    - {instrument: ICEUS:SB, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [sugar_import_arb, china_import_arb]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    arb_bound:
+      type: import_parity
+      onshore_leg: ZCE:SR
+      offshore_leg: ICEUS:SB
+      freight_usd_t: 45
+      other_usd_t: 10            # polarisation premium and Brazil FOB basis
+      import_duty: 0.15          # inside the 1.945 Mt quota; 50% outside
+      vat_rate: 0.13
+      port_charges_cny_t: 450    # discharge plus refining raws into whites, about 350-400
+      formula: "parity_cny_t = (offshore_usd_lb * 2204.62 + other_usd_t + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    Raw against refined, so the refining cost sits in the bound. Desks track both the 15% and
+    the 50% parity; ZCE normally trades between them, and out-of-quota imports open only when
+    it reaches the upper one. Syrup and premix imports (Thailand) are the leak; the 2025
+    curbs on them tightened the link. Each leg on its own main contract.
+
+- id: bench.rubber.ru_vs_nr
+  family: benchmark
+  name: SHFE natural rubber vs INE TSR 20
+  sector: agriculture
+  legs:
+    - {instrument: SHFE:RU, weight: 1.0}
+    - {instrument: INE:NR,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [rubber_grade_spread, rubber_warrant_cycle]
+  verified: false
+  params:
+    desk_convention: "RU main (01/05/09) minus NR main (monthly); quoted as the RU-NR spread"
+  notes: >-
+    Whole-field latex / RSS3 (duty and VAT paid) against bonded TSR 20 (no duty, no VAT), so
+    about 1,500-2,000 CNY/t of the level is tax. The rest is the grade premium and the RU
+    warrant cycle: RU warrants die every November, so RU09 converges down to spot while RU01
+    carries a premium. The classic trade is short RU / long NR into September delivery.
+    Tyre makers use TSR 20, so NR follows demand; RU follows Yunnan/Hainan supply and stocks.
+
+- id: bench.rubber.nr_vs_sgx_tsr20
+  family: benchmark
+  name: INE TSR 20 vs SGX TSR 20
+  sector: agriculture
+  legs:
+    - {instrument: INE:NR, weight: 1.0}
+    - {instrument: SGX:TF, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [rubber_venue_basis, cnh]
+  verified: false
+  params:
+    vat_basis: inc_vat           # NR is bonded: nothing to strip
+    tenor_anchor: INE:NR
+    arb_bound:
+      type: import_parity
+      onshore_leg: INE:NR
+      offshore_leg: SGX:TF
+      freight_usd_t: 25          # Thai/Indonesian port to Qingdao bonded warehouse; SGX is FOB
+      import_duty: 0.0
+      vat_rate: 0.0
+      formula: "parity_cny_t = (offshore_usd_kg * 1000 + freight_usd_t) * USDCNH"
+  notes: >-
+    Same grade, both free of Chinese tax: the cleanest cross-border arb in the book, and both
+    legs are open to foreigners. USD/kg x 1000 = USD/t (engine converts). Deviation is
+    freight, CNH and Qingdao bonded stocks. Same delivery month on both legs.
+
+- id: bench.rubber.ru_vs_sgx_tsr20
+  family: benchmark
+  name: SHFE natural rubber vs SGX TSR 20
+  sector: agriculture
+  legs:
+    - {instrument: SHFE:RU, weight: 1.0}
+    - {instrument: SGX:TF,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [rubber_onshore_offshore, rubber_grade_spread]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:RU
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:RU
+      offshore_leg: SGX:TF
+      freight_usd_t: 25
+      import_duty: 0.0           # mixed/compound rubber route, the one actually used; TSR itself pays 20% or 1500 CNY/t
+      vat_rate: 0.09             # confidence: low (9% or 13% depending on the customs heading)
+      formula: "parity_cny_t = (offshore_usd_kg * 1000 + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate)"
+  notes: >-
+    The offshore version of RU-NR for an account that cannot trade INE. Not deliverable
+    against each other (TSR 20 cannot be delivered into RU), so it is a grade spread with a
+    tax wedge, not an arb.
+
+- id: bench.rubber.ru_vs_ose_rss3
+  family: benchmark
+  name: SHFE natural rubber vs OSE RSS3
+  sector: agriculture
+  legs:
+    - {instrument: SHFE:RU, weight: 1.0}
+    - {instrument: OSE:JRU, weight: -1.0}
+  unit: USD/t
+  fx: [USDCNH, USDJPY]
+  tenor: main
+  driver_tags: [rubber_onshore_offshore, jpy]
+  verified: false
+  params:
+    vat_basis: ex_vat
+  notes: >-
+    RSS3 is deliverable into RU, so this is the historical cross-border rubber pair (the
+    user's list has it as RU against TOCOM JRU; the contract moved to OSE in 2020). JPY/kg x
+    1000 / USDJPY = USD/t. OSE liquidity sits in the far month and has shrunk; the yen drives
+    much of it. Each leg on its own main contract.
+
+- id: bench.rubber.ose_rss3_vs_sgx_tsr20
+  family: benchmark
+  name: OSE RSS3 vs SGX TSR 20 (sheet over block)
+  sector: agriculture
+  legs:
+    - {instrument: OSE:JRU, weight: 1.0}
+    - {instrument: SGX:TF,  weight: -1.0}
+  unit: USD/t
+  fx: USDJPY
+  tenor: main
+  driver_tags: [rubber_grade_spread, jpy]
+  verified: false
+  notes: >-
+    Offshore sheet-over-block premium. Sheet supply is seasonal and Thai; block is
+    Indonesian and tyre-driven. Main contracts differ in tenor (OSE far month, SGX 2-3 months
+    out), so some curve is embedded.
+
+- id: bench.cocoa.ny_vs_london
+  family: benchmark
+  name: New York cocoa vs London cocoa
+  sector: agriculture
+  legs:
+    - {instrument: ICEUS:CC, weight: 1.0}
+    - {instrument: ICE:C,    weight: -1.0}
+  unit: USD/t
+  fx: USDGBP
+  tenor: main
+  driver_tags: [cocoa_arb, gbpusd, cocoa_origin_mix]
+  verified: false
+  params:
+    tenor_anchor: ICEUS:CC
+  notes: >-
+    The cocoa arbitrage. Same months on both exchanges. London delivers mostly West African
+    beans (and historically Cameroon discounts), New York more Ecuador/Asia plus a West
+    African premium; certified stock quality on each side drives the gap, GBPUSD the rest.
+
+- id: bench.hogs.dce_vs_cme
+  family: benchmark
+  name: DCE live hogs vs CME lean hogs (signal only)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:LH, weight: 1.0}
+    - {instrument: CME:HE, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [hog_cycle_divergence]
+  verified: false
+  params:
+    tradable: signal_only
+  notes: >-
+    Not an arb: live weight against carcass weight (a live hog yields about 74-75% carcass),
+    two separate herd cycles, and pork trade is small next to either market. USD/cwt x 22.0462
+    = USD/t (engine converts). Kept because the user's list pairs them; useful only as a
+    picture of the two hog cycles.
+
+# =====================================================================
+# PROCESSING ("Crack" tab) - raw material vs product
+# =====================================================================
+
+- id: proc.us.board_crush
+  family: processing
+  name: CBOT soybean board crush
+  sector: agriculture
+  legs:
+    - {instrument: CBOT:ZM, weight: 0.733333, qty_factor: 33.3333}
+    - {instrument: CBOT:ZL, weight: 0.183333, qty_factor: 0.0166667}
+    - {instrument: CBOT:ZS, weight: -1.0}
+  unit: USD/bu
+  tenor: main
+  constant: 0
+  driver_tags: [soy_crush_margin, us_biofuel_policy]
+  verified: false
+  params:
+    tenor_anchor: CBOT:ZS
+    conversion_cost: 0.55
+    conversion_cost_range: [0.40, 0.70]
+    desk_convention: "crush USD/bu = ZM x 0.022 + ZL(cents/lb) x 0.11 - ZS; CME trades it as a package of 10 ZS : 11 ZM : 9 ZL"
+  notes: >-
+    Per 60 lb bushel: 44 lb of 48% meal + 11 lb of oil (+ 4 lb hulls, 1 lb loss). Meal:
+    USD/st / 33.3333 bu-weights per st x 44/60 = ZM x 0.022. Oil: USD/lb / (1/60) x 11/60 =
+    ZL x 11. Check at ZM 300, ZL 0.50, ZS 10.50: 6.60 + 5.50 - 10.50 = 1.60 USD/bu. Products
+    use the bean month, or the next listed one (November beans against December products).
+    Record highs in 2022-23 on renewable diesel; new crush capacity since.
+
+- id: proc.us.oil_share
+  family: processing
+  name: CBOT soybean oil vs meal product value (oil share)
+  sector: agriculture
+  legs:
+    - {instrument: CBOT:ZL, weight: 0.183333, qty_factor: 0.0166667}
+    - {instrument: CBOT:ZM, weight: -0.733333, qty_factor: 33.3333}
+  unit: USD/bu
+  tenor: main
+  driver_tags: [oil_share, us_biofuel_policy]
+  verified: false
+  params:
+    tenor_anchor: CBOT:ZL
+    desk_convention: "oil share = oil value / (oil value + meal value) = ratio / (1 + ratio); 30-35% was normal before 2021, 40-50% since"
+  notes: >-
+    Value is oil revenue minus meal revenue per bushel crushed (ZL x 11 - ZM x 0.022). The
+    stored ratio is oil value / meal value; oil share = ratio / (1 + ratio). The purest
+    paper expression of US biofuel policy against the feed economy.
+
+- id: proc.cn.import_crush_cbot
+  family: processing
+  name: China import crush (DCE meal and oil vs CBOT soybeans)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:M,   weight: 0.785}
+    - {instrument: DCE:Y,   weight: 0.185}
+    - {instrument: CBOT:ZS, weight: -1.0, qty_factor: 0.0272155}
+  unit: CNY/t
+  fx: USDCNH
+  tenor: main
+  constant: 0
+  driver_tags: [soy_crush_margin, china_import_arb, china_hog_cycle]
+  verified: false
+  params:
+    conversion_cost: 130
+    conversion_cost_range: [100, 180]
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:M
+      offshore_leg: CBOT:ZS
+      freight_usd_t: 40
+      other_usd_t: 35            # FOB basis; Brazil and US Gulf differ and swing widely
+      import_duty: 0.03
+      vat_rate: 0.09
+      port_charges_cny_t: 120
+      formula: "bean_cost_cny_t = (ZS_usd_bu / 0.0272155 + other_usd_t + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; margin = 0.785 * M + 0.185 * Y - bean_cost - conversion_cost"
+  notes: >-
+    Per tonne of imported beans: 78.5% meal, 18.5% oil, 3% loss (Chinese desk standard). This
+    is the hedge every Chinese crusher runs (long CBOT, short DCE products), so it is the
+    real Dalian crush. Level check at M 3000, Y 8000, ZS 10.50, FX 7.10: 2355 + 1480 - 2739 =
+    1096 CNY/t gross, which basis, freight, 3% duty, 9% VAT and 130 crushing cost take to
+    about zero. Each DCE leg on its own main contract; CBOT on its main. Bean shipments
+    arrive 2-3 months later, so desks pair CBOT with a later DCE month: not expressible here.
+
+- id: proc.cn.dalian_crush
+  family: processing
+  name: Dalian board crush (DCE meal and oil vs DCE No.2 soybeans)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:M, weight: 0.785}
+    - {instrument: DCE:Y, weight: 0.185}
+    - {instrument: DCE:B, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  constant: 0
+  driver_tags: [soy_crush_margin, china_hog_cycle]
+  verified: false
+  params:
+    conversion_cost: 130
+    conversion_cost_range: [100, 180]
+  notes: >-
+    All-Dalian version, per tonne of beans: 0.785 M + 0.185 Y - B. VAT (9% on all three)
+    cancels. DCE:B is the right bean (imported GMO) but it is thin and its main month differs
+    from the products' 1/5/9, so this row is noisier than the CBOT one. Never use DCE:A here.
+
+- id: proc.cn.oil_share
+  family: processing
+  name: DCE soybean oil vs meal product value (oil share)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:Y, weight: 0.185}
+    - {instrument: DCE:M, weight: -0.785}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [oil_share, china_hog_cycle]
+  verified: false
+  params:
+    desk_convention: "China quotes the plain price ratio Y/M (you-po bi); ratio here / (0.185/0.785) gives it"
+  notes: >-
+    Oil revenue minus meal revenue per tonne of beans. Meal leads when hog margins are good,
+    oil when palm is tight. Oil share = ratio / (1 + ratio).
+
+- id: proc.cn.canola_import_crush
+  family: processing
+  name: China canola import crush (ZCE rapeseed oil and meal vs ICE canola)
+  sector: agriculture
+  legs:
+    - {instrument: ZCE:OI,   weight: 0.42}
+    - {instrument: ZCE:RM,   weight: 0.56}
+    - {instrument: ICEUS:RS, weight: -1.0}
+  unit: CNY/t
+  fx: [USDCNH, USDCAD]
+  tenor: main
+  constant: 0
+  driver_tags: [rapeseed_crush_margin, canada_china_trade]
+  verified: false
+  params:
+    conversion_cost: 200
+    conversion_cost_range: [150, 250]
+    arb_bound:
+      type: import_parity
+      onshore_leg: ZCE:OI
+      offshore_leg: ICEUS:RS
+      freight_usd_t: 55          # Vancouver-China plus FOB basis
+      import_duty: 0.09          # MFN; plus anti-dumping deposit on Canadian seed from Aug 2025 (75.8%), reportedly cut in early 2026 - confidence: low
+      vat_rate: 0.09
+      formula: "seed_cost_cny_t = (canola_cad_t / USDCAD + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate)"
+  notes: >-
+    Per tonne of canola: about 42% oil and 56% meal. ZCE rapeseed (RS) is dead, so ICE canola
+    is the only paper seed leg. Since China's 2025 duties on Canadian canola oil, meal (100%)
+    and seed, the physical arb is shut and the row is a measure of that dislocation: a large
+    positive value is tariff, not margin. Yields confidence: medium.
+
+- id: proc.cn.corn_starch_spread
+  family: processing
+  name: DCE corn starch vs corn (desk spread)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:CS, weight: 1.0}
+    - {instrument: DCE:C,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [corn_starch_margin]
+  verified: false
+  params:
+    desk_convention: "CS - C one for one, same month; about 300-450 CNY/t is breakeven"
+    tenor_anchor: DCE:C
+  notes: >-
+    The way the desk quotes it. Same month on both legs (both list odd months only).
+
+- id: proc.cn.corn_starch_margin
+  family: processing
+  name: DCE corn starch processing margin (per tonne of corn)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:CS, weight: 0.70}
+    - {instrument: DCE:C,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  constant: 0
+  driver_tags: [corn_starch_margin]
+  verified: false
+  params:
+    tenor_anchor: DCE:C
+    conversion_cost: -250
+    conversion_cost_range: [-400, -100]
+    by_product_credit_cny_t: 650
+    processing_fee_cny_t: 400
+  notes: >-
+    1 t of corn gives about 0.70 t starch plus about 0.25 t of by-products (gluten meal,
+    fibre, germ) worth roughly 600-700 CNY per t of corn; processing costs about 400. Net
+    cost to subtract is therefore NEGATIVE (the credit exceeds the fee): margin = value + 250.
+    By-products have no futures, so they stay out of the series. Starch carries 13% VAT,
+    corn 9%; both are left in, as the desk does. Yields confidence: medium.
+
+- id: proc.cn.hog_feeding_margin
+  family: processing
+  name: China hog feeding margin (live hogs vs corn and soymeal)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:LH, weight: 1.0}
+    - {instrument: DCE:C,  weight: -1.95}
+    - {instrument: DCE:M,  weight: -0.60}
+  unit: CNY/t
+  tenor: main
+  constant: 0
+  driver_tags: [china_hog_cycle, feed_cost]
+  verified: false
+  params:
+    conversion_cost: 5500
+    conversion_cost_range: [4500, 7000]
+  notes: >-
+    Per tonne of live hog: whole-herd feed conversion about 3.0 t feed per t of gain, feed
+    about 65% corn and 20% soymeal, so 1.95 t corn + 0.60 t meal (the rest - bran, premix -
+    has no futures). conversion_cost is everything else: piglet or sow cost, labour,
+    medication, depreciation; it is most of the non-feed cost and varies a lot by farm.
+    Check: LH 13500 - 4485 - 1800 = 7215. Feed ratios confidence: medium.
+
+- id: proc.cn.hog_corn_ratio
+  family: processing
+  name: China hog-to-corn price ratio
+  sector: agriculture
+  legs:
+    - {instrument: DCE:LH, weight: 1.0}
+    - {instrument: DCE:C,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_hog_cycle, china_reserve_policy]
+  verified: false
+  params:
+    desk_convention: "zhu-liang bi: read the RATIO, not the value. Official warning bands: below 6:1 (5:1 triggers state pork reserve buying), above 9:1 triggers reserve sales"
+  notes: >-
+    The government's own profitability gauge (NDRC publishes the spot version weekly), and
+    the trigger for state pork stockpiling, so it is a policy reaction function on paper.
+
+- id: proc.cn.egg_feeding_margin
+  family: processing
+  name: China egg feeding margin (eggs vs corn and soymeal)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:JD, weight: 1.0}
+    - {instrument: DCE:C,  weight: -1.36}
+    - {instrument: DCE:M,  weight: -0.48}
+  unit: CNY/t
+  tenor: main
+  constant: 0
+  driver_tags: [egg_margin, feed_cost]
+  verified: false
+  params:
+    conversion_cost: 1300
+    conversion_cost_range: [1000, 1600]
+  notes: >-
+    Per tonne of eggs: layers convert about 2.2 kg of feed per kg of eggs; feed is about 62%
+    corn and 22% soymeal, so 1.36 t corn + 0.48 t meal. JD is quoted per 500 kg; price_scale 2
+    makes it CNY/t. Check: 6600 - 3128 - 1440 = 2032. conversion_cost covers pullet
+    depreciation, labour and the unhedgeable feed (limestone, premix). Strongly seasonal:
+    use the seasonal statistic, not the plain z-score.
+
+- id: proc.us.cattle_crush
+  family: processing
+  name: US cattle crush (live cattle vs feeder cattle and corn)
+  sector: agriculture
+  legs:
+    - {instrument: CME:LE,  weight: 1.0}
+    - {instrument: CME:GF,  weight: -0.6}
+    - {instrument: CBOT:ZC, weight: -2.24, qty_factor: 0.56}
+  unit: USD/cwt
+  tenor: main
+  constant: 0
+  driver_tags: [cattle_feeding_margin, feed_cost, us_cattle_cycle]
+  verified: false
+  params:
+    desk_convention: "CME package 6 LE : 3 GF : 2 ZC (192 : 200 : 200 head). Proper timing is LE month = GF month + 5-6 and corn in between; the engine cannot offset months per leg, so every leg is on its own main contract"
+    conversion_cost: 12
+    conversion_cost_range: [8, 18]
+  notes: >-
+    Per cwt of finished steer: a 750 lb feeder is fed about 50 bu of corn to 1250 lb. Feeder:
+    7.5 / 12.5 = 0.6 cwt per cwt sold. Corn: 50 bu x 56 lb = 28 cwt per 12.5 cwt = 2.24; one
+    bushel is 0.56 cwt, so corn price per cwt = USD/bu / 0.56 and 2.24 x that = 4 x USD/bu.
+    Check: 230 - 0.6 x 340 - 4 x 4.30 = 8.8 USD/cwt. conversion_cost is yardage, interest,
+    death loss and other feed, per cwt sold; confidence: low.
+
+- id: proc.us.hog_feeding_margin
+  family: processing
+  name: US hog feeding margin (lean hogs vs corn and soymeal)
+  sector: agriculture
+  legs:
+    - {instrument: CME:HE,  weight: 1.0}
+    - {instrument: CBOT:ZC, weight: -2.667, qty_factor: 0.56}
+    - {instrument: CBOT:ZM, weight: -0.714}
+  unit: USD/cwt
+  tenor: main
+  constant: 0
+  driver_tags: [us_hog_margin, feed_cost]
+  verified: false
+  params:
+    conversion_cost: 45
+    conversion_cost_range: [35, 55]
+  notes: >-
+    Per cwt of carcass: a 280 lb hog gives about 210 lb carcass (2.1 cwt) and eats about 10 bu
+    corn and 150 lb meal wean-to-finish. Corn: 560 lb / 210 lb = 2.667 (x USD/bu / 0.56 =
+    4.76 x USD/bu). Meal: 150 / 210 = 0.714 (USD/st / 20 = USD/cwt, engine converts). Check:
+    90 - 20.5 - 10.7 = 58.8. conversion_cost is the weaned pig and all non-feed cost.
+    Ratios confidence: low.
+
+- id: proc.sugar.white_premium
+  family: processing
+  name: White sugar premium (London No.5 vs New York No.11)
+  sector: agriculture
+  legs:
+    - {instrument: ICE:W,    weight: 1.0}
+    - {instrument: ICEUS:SB, weight: -1.0}
+  unit: USD/t
+  tenor: main
+  constant: 0
+  driver_tags: [sugar_refining_margin, white_premium]
+  verified: false
+  params:
+    tenor_anchor: ICEUS:SB
+    conversion_cost: 80
+    conversion_cost_range: [65, 110]
+    desk_convention: "whites minus raws x 22.0462; pairs H/H, K/K, Q/N, V/V, Z/H. The anchor gives N raws against Q whites; Z whites never pair"
+  notes: >-
+    Refining margin of the toll refiners (Dubai, Algeria, India). USD/lb x 2204.62 = USD/t
+    (engine converts; the desk uses cents/lb x 22.0462). Above about 100 USD/t refiners run
+    flat out and buy raws; below about 70 they cut. Indian export policy is the main shock.
+
+- id: proc.cn.yarn_vs_cotton
+  family: processing
+  name: ZCE cotton yarn vs cotton (spinning margin)
+  sector: agriculture
+  legs:
+    - {instrument: ZCE:CY, weight: 1.0}
+    - {instrument: ZCE:CF, weight: -1.1}
+  unit: CNY/t
+  tenor: main
+  constant: 0
+  driver_tags: [spinning_margin, china_textile_demand]
+  verified: false
+  params:
+    conversion_cost: 5500
+    conversion_cost_range: [4500, 6500]
+    desk_convention: "desk also quotes plain CY - CF"
+  notes: >-
+    1 t of carded 32s yarn uses about 1.1 t of lint (8-10% waste). Yarn carries 13% VAT, lint
+    9%; both left in. The yarn leg is thin, so the series is jumpy: a signal of downstream
+    textile demand more than a trade.
+
+# =====================================================================
+# SUBSTITUTION - different commodities that replace one another
+# =====================================================================
+
+- id: sub.us.soy_vs_corn
+  family: substitution
+  name: CBOT soybeans vs corn (acreage ratio)
+  sector: agriculture
+  legs:
+    - {instrument: CBOT:ZS, weight: 1.0}
+    - {instrument: CBOT:ZC, weight: -1.0}
+  unit: USD/bu
+  tenor: main
+  driver_tags: [us_acreage_battle, soy_corn_ratio]
+  verified: false
+  params:
+    desk_convention: "read the RATIO. The acreage version is November beans / December corn, Feb-April: above 2.5 favours beans, below 2.2 favours corn. tenor main gives the nearby ratio; a named-month tenor is a contract request"
+  notes: >-
+    Both legs in USD/bu (different bushel weights, as the desk quotes it). The ratio decides
+    US and Brazilian safrinha planting, then reverts as acres respond.
+
+- id: sub.us.wheat_vs_corn
+  family: substitution
+  name: CBOT wheat vs corn
+  sector: agriculture
+  legs:
+    - {instrument: CBOT:ZW, weight: 1.0}
+    - {instrument: CBOT:ZC, weight: -1.0}
+  unit: USD/bu
+  tenor: main
+  driver_tags: [feed_grain_substitution, wheat_feeding]
+  verified: false
+  params:
+    tenor_anchor: CBOT:ZC
+  notes: >-
+    Same month cycle on both. When the premium falls below about 0.50-1.00 USD/bu, soft red
+    wheat goes into feed rations in summer and the spread finds a floor. Fund positioning
+    (wheat is the structural short) drives the rest.
+
+- id: sub.eu.wheat_vs_corn
+  family: substitution
+  name: Matif milling wheat vs Matif corn
+  sector: agriculture
+  legs:
+    - {instrument: EURONEXT:EBM, weight: 1.0}
+    - {instrument: EURONEXT:EMA, weight: -1.0}
+  unit: EUR/t
+  tenor: main
+  driver_tags: [feed_grain_substitution]
+  verified: false
+  notes: >-
+    European feed substitution. Corn has at times traded over wheat (2022-23 droughts).
+    Month cycles differ (wheat H,K,U,Z; corn H,M,Q,X); each leg on its own main contract.
+
+- id: sub.cn.soy_vs_corn
+  family: substitution
+  name: DCE No.1 soybeans vs corn (north-east planting ratio)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:A, weight: 1.0}
+    - {instrument: DCE:C, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_acreage_battle, china_food_security]
+  verified: false
+  params:
+    desk_convention: "read the RATIO; subsidies are set so that beans compete at roughly 2.3-2.6"
+  notes: >-
+    Heilongjiang farmers choose between the two each spring; Beijing tilts the choice with
+    producer subsidies and reserve buying, so reversion is policy-driven and slow.
+
+- id: sub.cn.soymeal_vs_corn
+  family: substitution
+  name: DCE soybean meal vs corn (protein vs energy feed)
+  sector: agriculture
+  legs:
+    - {instrument: DCE:M, weight: 1.0}
+    - {instrument: DCE:C, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [feed_ration, china_hog_cycle]
+  verified: false
+  notes: >-
+    Feed mills shift rations between protein and energy only at the margin (and the
+    government's low-protein-diet campaign pushes meal inclusion down), so this is a loose
+    ratio trade on imported beans against the domestic crop.
+
+- id: sub.cn.soymeal_vs_rapemeal
+  family: substitution
+  name: DCE soybean meal vs ZCE rapeseed meal
+  sector: agriculture
+  legs:
+    - {instrument: DCE:M,  weight: 1.0}
+    - {instrument: ZCE:RM, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [protein_meal_substitution, canada_china_trade]
+  verified: false
+  params:
+    desk_convention: "per protein point: M/43 against RM/36; below about 400 CNY/t soymeal displaces rapeseed meal in aqua feed, above about 700-800 the reverse"
+  notes: >-
+    The most traded cross-exchange agricultural spread in China. Seasonal: rapeseed meal
+    demand peaks with aquaculture in May-September, so the spread narrows into the 09
+    contract. Canadian tariffs (2025) cut rapeseed meal supply and compressed it.
+
+- id: sub.cn.soyoil_vs_palm
+  family: substitution
+  name: DCE soybean oil vs palm olein
+  sector: agriculture
+  legs:
+    - {instrument: DCE:Y, weight: 1.0}
+    - {instrument: DCE:P, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [vegoil_substitution, palm_supply]
+  verified: false
+  notes: >-
+    Y - P (dou-zong cha). Palm solidifies in winter, so blending demand is seasonal: the
+    spread normally widens into the 01 contract and narrows into 05/09. Normal 500-1500
+    CNY/t; it went NEGATIVE in 2024-25 on Indonesian B40 and weak Malaysian output, which
+    rationed palm out of Chinese blending. Same 1/5/9 cycle on both legs.
+
+- id: sub.cn.rapeoil_vs_soyoil
+  family: substitution
+  name: ZCE rapeseed oil vs DCE soybean oil
+  sector: agriculture
+  legs:
+    - {instrument: ZCE:OI, weight: 1.0}
+    - {instrument: DCE:Y,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [vegoil_substitution, canada_china_trade]
+  verified: false
+  notes: >-
+    OI - Y (cai-dou cha). Rapeseed oil is the premium cooking oil in Sichuan and the Yangtze
+    basin; below about 800-1000 CNY/t consumers trade up. Driven by Canadian canola and
+    Russian/UAE rapeseed oil import flows. Same 1/5/9 cycle.
+
+- id: sub.cn.rapeoil_vs_palm
+  family: substitution
+  name: ZCE rapeseed oil vs DCE palm olein
+  sector: agriculture
+  legs:
+    - {instrument: ZCE:OI, weight: 1.0}
+    - {instrument: DCE:P,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [vegoil_substitution]
+  verified: false
+  notes: >-
+    Top against bottom of the Chinese vegoil ladder. The sum of the two spreads above; kept
+    because desks quote it and it isolates the soy leg out.
+
+- id: sub.global.soyoil_vs_palm
+  family: substitution
+  name: CBOT soybean oil vs Bursa crude palm oil
+  sector: agriculture
+  legs:
+    - {instrument: CBOT:ZL,  weight: 1.0}
+    - {instrument: BMD:FCPO, weight: -1.0}
+  unit: USD/t
+  fx: USDMYR
+  tenor: main
+  driver_tags: [vegoil_substitution, us_biofuel_policy, palm_supply]
+  verified: false
+  params:
+    tenor_anchor: BMD:FCPO
+  notes: >-
+    The global soyoil-palm spread (desks also use Argentine FOB, which has no future). India
+    switches its import mix on it. USD/lb x 2204.62 and MYR/t / USDMYR (engine converts).
+    FCPO main is the third month; ZL uses the same or next listed month.
+
+- id: sub.global.pogo
+  family: substitution
+  name: POGO - Bursa crude palm oil vs ICE gasoil
+  sector: agriculture
+  legs:
+    - {instrument: BMD:FCPO, weight: 1.0}
+    - {instrument: ICE:G,    weight: -1.0}
+  unit: USD/t
+  fx: USDMYR
+  tenor: main
+  driver_tags: [pogo, biodiesel_economics, energy_link]
+  verified: false
+  params:
+    tenor_anchor: BMD:FCPO
+  notes: >-
+    Both in USD per tonne, no yield. Negative POGO means discretionary palm biodiesel
+    blending pays and puts a floor under palm; strongly positive (as through most of 2024-26)
+    means blending runs only on mandates (Indonesia B35/B40), funded by export levies. The
+    gasoil leg belongs to the energy sector.
+
+- id: sub.us.boho
+  family: substitution
+  name: BOHO - CBOT soybean oil vs NYMEX heating oil
+  sector: agriculture
+  legs:
+    - {instrument: CBOT:ZL,  weight: 1.0, qty_factor: 0.131579}
+    - {instrument: NYMEX:HO, weight: -1.0}
+  unit: USD/gal
+  tenor: main
+  driver_tags: [boho, biodiesel_economics, us_biofuel_policy, energy_link]
+  verified: false
+  params:
+    tenor_anchor: CBOT:ZL
+  notes: >-
+    Feedstock cost of a gallon of biodiesel against the diesel it replaces. About 7.6 lb of
+    soybean oil per gallon, so qty_factor = 1 / 7.6 = 0.131579 gal per lb and oil in USD/gal =
+    USD/lb x 7.6 (some desks use 7.35: confidence: low). The gap is what RINs (D4), the
+    blenders/45Z credit and LCFS have to pay; it prices US biofuel policy directly.
+
+- id: sub.global.canola_vs_soybeans
+  family: substitution
+  name: ICE canola vs CBOT soybeans
+  sector: agriculture
+  legs:
+    - {instrument: ICEUS:RS, weight: 1.0}
+    - {instrument: CBOT:ZS,  weight: -1.0, qty_factor: 0.0272155}
+  unit: USD/t
+  fx: USDCAD
+  tenor: main
+  driver_tags: [oilseed_substitution, canada_china_trade, cad]
+  verified: false
+  notes: >-
+    Canola is about 42% oil against 18.5% for beans, so it follows vegoil more than meal; the
+    spread is an oil-share trade with a Prairie weather and Chinese tariff overlay.
+
+- id: sub.cn.cotton_vs_psf
+  family: substitution
+  name: ZCE cotton vs polyester staple fibre
+  sector: agriculture
+  legs:
+    - {instrument: ZCE:CF, weight: 1.0}
+    - {instrument: ZCE:PF, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [fibre_substitution, energy_link]
+  verified: false
+  notes: >-
+    Natural against synthetic fibre; spinners shift blends when cotton is more than about
+    6,000-7,000 CNY/t over PSF. PSF follows crude through PX and PTA, so this is cotton
+    against oil. The PSF leg belongs to the chemicals sector.
+
+- id: sub.cn.ru_vs_br
+  family: substitution
+  name: SHFE natural rubber vs butadiene rubber
+  sector: agriculture
+  legs:
+    - {instrument: SHFE:RU, weight: 1.0}
+    - {instrument: SHFE:BR, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [rubber_substitution, energy_link]
+  verified: false
+  notes: >-
+    Natural against synthetic. Tyre compounds allow only a few percent of substitution, so
+    the range is wide; BR follows butadiene and crude, RU follows weather and stocks. BR
+    rolls monthly, RU on 1/5/9. The BR leg belongs to the chemicals sector.
+
+- id: sub.cn.nr_vs_br
+  family: substitution
+  name: INE TSR 20 vs SHFE butadiene rubber
+  sector: agriculture
+  legs:
+    - {instrument: INE:NR,  weight: 1.0}
+    - {instrument: SHFE:BR, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [rubber_substitution, energy_link]
+  verified: false
+  notes: >-
+    The cleaner version for tyre demand: TSR 20 is what tyre plants actually swap against
+    BR, and both main contracts roll monthly. NR is bonded (no VAT), BR carries 13% VAT.
+
+- id: sub.cn.sugar_vs_corn_starch
+  family: substitution
+  name: ZCE white sugar vs DCE corn starch (starch-sugar substitution)
+  sector: agriculture
+  legs:
+    - {instrument: ZCE:SR, weight: 1.0}
+    - {instrument: DCE:CS, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [sweetener_substitution]
+  verified: false
+  notes: >-
+    Beverage makers switch to high-fructose syrup (made from starch) when sugar is more than
+    about 2,000-2,500 CNY/t over starch. Slow-moving; a regime indicator more than a trade.
+
+- id: sub.coffee.arabica_vs_robusta
+  family: substitution
+  name: Arabica vs robusta coffee
+  sector: agriculture
+  legs:
+    - {instrument: ICEUS:KC, weight: 1.0}
+    - {instrument: ICE:RC,   weight: -1.0}
+  unit: USD/lb
+  tenor: main
+  driver_tags: [coffee_blend_substitution, brazil_weather, vietnam_supply]
+  verified: false
+  params:
+    tenor_anchor: ICEUS:KC
+    desk_convention: "cents/lb: KC - RC / 22.0462"
+  notes: >-
+    The coffee arbitrage. USD/t / 2204.62 = USD/lb (engine converts). Roasters move blends
+    by a few points of robusta when the gap is wide. Brazil frost/drought widens it, Vietnam
+    shortfalls (2023-25) narrowed it to multi-decade lows. KC months H,K,N,U,Z against RC
+    F,H,K,N,U,X: December arabica pairs with January robusta.
+
+- id: sub.us.cattle_vs_hogs
+  family: substitution
+  name: CME live cattle vs lean hogs
+  sector: agriculture
+  legs:
+    - {instrument: CME:LE, weight: 1.0}
+    - {instrument: CME:HE, weight: -1.0}
+  unit: USD/cwt
+  tenor: main
+  driver_tags: [protein_substitution, us_cattle_cycle]
+  verified: false
+  notes: >-
+    Beef against pork (live against carcass weight, as the desk quotes it). At record highs
+    in 2024-26 because the US cattle herd is the smallest since the 1950s; hog seasonality
+    (summer high, autumn low) gives it a seasonal shape. Read the ratio as well.
+
+- id: proc.cn.offset_paper_vs_pulp
+  family: processing
+  name: SHFE offset paper vs pulp (paper mill margin)
+  sector: agriculture
+  legs:
+    - {instrument: SHFE:OP, weight: 1.0}
+    - {instrument: SHFE:SP, weight: -0.75}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_paper_margin]
+  verified: false
+  params:
+    tenor_anchor: SHFE:SP
+    conversion_cost: 1200
+    conversion_cost_range: [900, 1500]
+  notes: >-
+    About 0.75 t of pulp per tonne of uncoated woodfree paper, the rest is filler and starch.
+    Mills use mostly HARDWOOD pulp and SHFE:SP is softwood (NBSK), so this is a proxy margin.
+    History starts September 2025. Added by the housekeeper at merge; yield and cost
+    confidence: low.
+
+- id: sub.us.oats_vs_corn
+  family: substitution
+  name: CBOT oats vs corn (feed grains)
+  sector: agriculture
+  legs:
+    - {instrument: CBOT:ZO, weight: 1.0}
+    - {instrument: CBOT:ZC, weight: -1.0}
+  unit: USD/bu
+  tenor: front
+  driver_tags: [us_feed_grains]
+  verified: false
+  notes: >-
+    The old feed-grain pair, quoted per bushel although an oat bushel weighs 32 lb against 56 lb
+    for corn; the ratio is what the desk watches. Oats are thin, so treat a signal as a size-limited
+    trade. Added by the housekeeper after the coverage check.

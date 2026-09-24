@@ -1,0 +1,3 @@
+- [Contract dates](contract-dates.md) — Bloomberg last trade dates onto commodity futures; FUTURE_PX re-key is key-only; upload re-applies
+- Older notes on upload / manual / swaps / irs_direction: `.claude/agent-memory/data-ingest/` (lane split 2026-09-24)
+- Test runs on this PC can take many minutes of wall time (the sample-blotter upload tests); run them in the background

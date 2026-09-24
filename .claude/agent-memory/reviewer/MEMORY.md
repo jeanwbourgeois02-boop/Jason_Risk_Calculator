@@ -11,4 +11,5 @@
 - [Rates-vol review](review-findings-rates-vol.md) — 2026-09-17 swaption/cap/SABR/Bermudan HW pricer (Phase 6 options_calc merge): no criticals, sign/DV01/marks_official all clean
 - [Guards, digitals, expiry mark, IRS direction](review-findings-2026-09-18-guards-digitals-expiry-irs.md) — 2026-09-18 commit 184d56d: no criticals; 6 open follow-ups (stale pre-fix digital marks, silent blank rebuilds, expiry-day delta drift)
 - [NDF reviews 2026-09-22, 2 passes](review-findings-ndf-fix-2026-09-22.md) — pass 2 (spot_date pillar, present-spot retired, 1/FIX, purge_superseded): no criticals; open: CLAUDE.md drift, refrozen has no before/after, cross conversion via _mark_near
+- [Non-USD futures review 2026-09-24](review-findings-nonusd-futures-2026-09-24.md) — no criticals; S(m_day) vs S(expiry) LTD jump, settled cash as USD, equity line sums commodities
 - [Flat-forwards OIS review 2026-09-22](review-findings-flat-forwards-2026-09-22.md) — no criticals; rerun skips matured swaps and keeps old marks on failed days; options/rates.py has no except (CurveBuildError skips, never CIP)

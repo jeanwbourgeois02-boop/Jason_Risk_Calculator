@@ -13,9 +13,12 @@ rates word (interest, rate, IRS, OIS); with an FX word (FX, currency, forward, f
 exchange) it is FORWARD, because an FX swap's rows are forward fills with their own
 value dates (the package rule pairs them); 'Swap' alone is counted and skipped, never
 coerced (reviewer finding 2026-09-22: bare 'swap' used to book as an interest rate
-swap). Rows whose Status says cancelled/rejected/pending/void, or whose
-Fund is populated and is not NMMF, are filtered out and counted. A missing Status or
-Fund column (or a blank cell) never excludes a row.
+swap). Rows whose Status says cancelled/rejected/pending/void are filtered out and
+counted; so are rows that ``config/book.yaml`` says are not the book's (its ``funds``,
+``traders`` and ``desks`` lists, read by ``load_book_filter``: a non-empty list keeps only
+rows whose populated cell is in it, case-insensitive; an empty list takes every value;
+until 2026-09-24 this was a hard-coded Fund = NMMF). A missing Status / Fund / Trader /
+Desk column (or a blank cell) never excludes a row.
 
 This file is transaction-level (one row per fill), unlike the BNP snapshot:
   - FORWARD: a trade + 2 FX_NEAR legs. The ``Description`` (``TD .. VD .. SELL/BUY ..
@@ -28,7 +31,16 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     user's cash-ladder spec) a row naming two currencies is a SPOT FX fill: a trade
     (product FX_SPOT) + 2 FX_NEAR legs on ``Settle Date``, exactly like a forward. A
     single-currency row stays instrument-only. See ``_parse_spot_from_currency_row``.
-  - FUTURE: a trade + 1 NOTIONAL leg (``Quantity`` = contracts signed by ``Side``).
+  - FUTURE: a trade + 1 NOTIONAL leg (``Quantity`` = contracts signed by ``Side``). The
+    equity index roots of ``KNOWN_FUTURE_ROOTS`` (ES, NQ, RTY, YM) keep their own path
+    (instrument '<code> Index', leg in USD; Phase 2 of the commodity conversion removes
+    it). Every other future (2026-09-24) is resolved through the contract master
+    (``data.contracts.resolve_future``, from ``Symbol`` / ``Underlying Symbol`` narrowed by
+    the ``Currency``, ``Execution Venue`` and ``Description`` cells): instrument id = the
+    canonical contract id ('CLZ26 Comdty'), base_ccy = the root id ('NYMEX:CL'), quote_ccy
+    / multiplier from ``config/contracts.csv``, the NOTIONAL leg in the contract's own
+    currency. A symbol the universe does not know, or that fits more than one root,
+    rejects that row naming the candidates: a multiplier is never guessed.
   - OPTION: product FX_OPTION, 1 NOTIONAL leg in the pair's base currency, quantity
     signed by ``Side``, price = premium fill. Strike from the Description when present
     (genuinely absent from the file for some rows -- 0.0 "not known" sentinel, never
@@ -89,7 +101,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -111,12 +123,18 @@ from data.ingest.common import (
     TradeLeg,
     future_expiry,
     FUTURE_MULTIPLIERS,
+    FUTURE_SYMBOL_RE,
+    KNOWN_FUTURE_ROOTS,
 )
+from data.contracts import request_ticker, resolve_future
 
 log = logging.getLogger(__name__)
 
 SOURCE = "XLSX"  # closest value in CLAUDE.md's trades.source enum ('BNP | XLSX | MANUAL')
-FUND = "NMMF"
+# Which rows are the book's: config/book.yaml (see load_book_filter). With no such file the
+# filter is the one the app had before it existed: Fund NMMF, any trader, any desk.
+BOOK_YAML = Path(__file__).resolve().parents[2] / "config" / "book.yaml"
+DEFAULT_FUNDS = ("NMMF",)
 IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION", "INTEREST_RATE_SWAP")
 EXCLUDED_STATUS_WORDS = ("cancel", "reject", "void", "pend", "delet", "fail", "error", "draft")
 # Option / futures NetInvoice vs what Quantity x Price implies: a larger relative gap is a
@@ -179,6 +197,9 @@ _DATE_ORDER_COLUMNS = ("TradeDate", "Settle Date", "Effective Date", "Terminatio
 _NUMERIC_DMY_RE = re.compile(r"^\s*(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})")
 # Set by parse() for the duration of one file; True = the export writes day before month.
 _DAY_FIRST = True
+# Set by parse() for the duration of one file: the connection whose stored Bloomberg contract
+# dates (data.contracts' contract_static) replace the estimated expiry, or None.
+_CONTRACT_CONN: Optional[sqlite3.Connection] = None
 # Free-text markers of a non-vanilla payoff, matched as whole words on the Description /
 # FxOption Type / Notes text. Order matters: the first hit wins.
 _PAYOFF_KEYWORDS = (
@@ -194,6 +215,68 @@ EXCEL_EPOCH = date(1899, 12, 30)
 # Payoffs that cannot be priced without a strike (touch options use the barrier level
 # instead) -- the same set data/ingest/manual.py and engine/options enforce.
 STRIKE_PAYOFFS = ("VANILLA", "DIGITAL", "AMERICAN", "ASIAN", "BARRIER_KI", "BARRIER_KO")
+
+
+@dataclass(frozen=True)
+class BookFilter:
+    """Which rows of the export are the book's (``config/book.yaml``). Each list keeps only
+    rows whose populated cell is in it, compared case-insensitively; an empty list takes every
+    value; a blank cell or a missing column never excludes (hard rule 6). ``source`` names the
+    file it was read from, '' for the built-in default (no file)."""
+    funds: Tuple[str, ...] = DEFAULT_FUNDS
+    traders: Tuple[str, ...] = ()
+    desks: Tuple[str, ...] = ()
+    source: str = ""
+
+    # (filter name, list attribute, blotter column), in the order a row is tested
+    FILTERS = (("fund", "funds", "Fund"), ("trader", "traders", "Trader"), ("desk", "desks", "Desk"))
+
+    def excluded_by(self, row) -> Optional[str]:
+        """'fund' / 'trader' / 'desk': the first filter that excludes the row, else None."""
+        for name, attr, column in self.FILTERS:
+            allowed = getattr(self, attr)
+            cell = _s(row.get(column)).casefold()
+            if allowed and cell and cell not in {a.casefold() for a in allowed}:
+                return name
+        return None
+
+    def describe(self) -> str:
+        """'funds NMMF; traders any; desks any'."""
+        return "; ".join(f"{attr} {', '.join(getattr(self, attr)) or 'any'}" for _, attr, _ in self.FILTERS)
+
+
+def _as_names(value, key: str, where: str) -> Tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, int, float)):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{where}: '{key}' must be a list of names, not {value!r}")
+    return tuple(str(v).strip() for v in value if v is not None and str(v).strip())
+
+
+def load_book_filter(path: Optional[Union[str, Path]] = None) -> BookFilter:
+    """``config/book.yaml`` (or ``path``) as a ``BookFilter``. No file: the built-in default
+    (Fund NMMF, any trader, any desk), the filter the parser had before the file existed. A
+    key left out, or left empty, takes every value. A file that is not valid YAML, or a key
+    that is not a list of names, raises ValueError naming the file: a broken config is never
+    read as 'take everything'."""
+    import yaml
+
+    p = Path(path) if path is not None else BOOK_YAML
+    if not p.exists():
+        if path is not None:
+            raise ValueError(f"book filter file not found: {p}")
+        return BookFilter()
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"{p}: not valid YAML ({e})") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{p}: expected the keys funds / traders / desks, found {type(data).__name__}")
+    return BookFilter(funds=_as_names(data.get("funds"), "funds", str(p)),
+                      traders=_as_names(data.get("traders"), "traders", str(p)),
+                      desks=_as_names(data.get("desks"), "desks", str(p)), source=str(p))
 
 
 @dataclass
@@ -215,7 +298,14 @@ class ParseResult:
     # the rows behind n_skipped_other, named: (row_no, symbol, reason) -- a row of a type the
     # app does not load must never vanish without a trace (user, 2026-09-21)
     skipped_other_rows: list = field(default_factory=list)
-    n_skipped_status_or_fund: int = 0
+    n_skipped_status_or_fund: int = 0   # every excluded row: the four counts below summed
+    n_excluded_status: int = 0          # Status cancelled / rejected / pending / ...
+    n_excluded_fund: int = 0            # config/book.yaml's funds (a row counts under its first filter)
+    n_excluded_trader: int = 0          # config/book.yaml's traders
+    n_excluded_desk: int = 0            # config/book.yaml's desks
+    # rows that passed the status and book filters, by their Trader cell ('' = blank)
+    kept_by_trader: Dict[str, int] = field(default_factory=dict)
+    book_filter: Optional[BookFilter] = None   # the filter this parse applied
     n_superseded: int = 0   # earlier versions of a Trade Id repeated within the file
     n_updated: int = 0      # set by load(): trades that already existed and were replaced
     # Rows that loaded but needed a repair or failed a cross-check (a Price that arrived
@@ -267,6 +357,18 @@ class ParseResult:
         more = f"; and {len(self.warnings) - 3} more" if len(self.warnings) > 3 else ""
         return [f"{len(self.warnings)} cell(s) in {len(rows)} row(s) were doubtful and were rebuilt or ignored "
                 f"(rows {_some([str(r) for r in rows])}): {shown}{more}."]
+
+    def filter_summary(self) -> str:
+        """One sentence: the filter applied, the rows it excluded by reason and the rows kept
+        per trader. Not part of ``notes()`` (the upload summary already counts the excluded
+        rows); for a caller that wants the breakdown."""
+        book = self.book_filter or BookFilter()
+        where = Path(book.source).name if book.source else "built-in default, no config/book.yaml"
+        excluded = ", ".join(f"{n} {what}" for what, n in (
+            ("status", self.n_excluded_status), ("fund", self.n_excluded_fund),
+            ("trader", self.n_excluded_trader), ("desk", self.n_excluded_desk)) if n) or "none"
+        kept = ", ".join(f"{t or '(blank)'} {n}" for t, n in sorted(self.kept_by_trader.items())) or "none"
+        return f"Book filter ({where}): {book.describe()}. Rows excluded: {excluded}. Rows kept by trader: {kept}."
 
     def notes(self) -> List[str]:
         """Plain sentences for the upload summary: `information_notes` then `warning_notes`."""
@@ -558,11 +660,6 @@ def _status_excluded(v) -> bool:
     return any(w in s for w in EXCLUDED_STATUS_WORDS)
 
 
-def _fund_excluded(v) -> bool:
-    s = _s(v).casefold()
-    return bool(s) and s != FUND.casefold()
-
-
 # The words that decide what a label carrying "swap" is (see _kind_of): a rates word
 # makes it an interest rate swap, an FX word a forward fill; neither = not loaded.
 SWAP_RATES_WORDS = frozenset({"IRS", "OIS", "INTEREST", "RATE", "RATES"})
@@ -693,22 +790,29 @@ def _dedupe_versions(df: pd.DataFrame) -> tuple:
 
 # --------------------------------------------------------------------------- parse
 def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str] = None,
-          direction_overrides: Optional[Dict[str, str]] = None) -> ParseResult:
+          direction_overrides: Optional[Dict[str, str]] = None, *,
+          book: Optional[Union[BookFilter, str, Path]] = None,
+          conn: Optional[sqlite3.Connection] = None) -> ParseResult:
     """Pure parse of a blotter (path, bytes or an already-read DataFrame). Never writes;
     never coerces a contradictory row. ``direction_overrides`` ({trade_id: 'PAY' |
     'RECEIVE'}, from ``irs_direction.get_overrides``) is the user's own swap direction,
-    which wins over anything the file says."""
+    which wins over anything the file says. ``book`` is the row filter: a ``BookFilter``,
+    a path to a book.yaml, or None for ``config/book.yaml``. ``conn`` (read only) lets a
+    future's stored Bloomberg contract dates replace the estimated expiry."""
     df = source if isinstance(source, pd.DataFrame) else read_table(source, filename)
     df = canonicalize_columns(df).reset_index(drop=True)
     res = ParseResult(direction_overrides=dict(direction_overrides or {}))
+    res.book_filter = book if isinstance(book, BookFilter) else load_book_filter(book)
     df, res.n_superseded = _dedupe_versions(df)
-    global _DAY_FIRST
+    global _DAY_FIRST, _CONTRACT_CONN
     previous, _DAY_FIRST = _DAY_FIRST, detect_day_first(df)
+    previous_conn, _CONTRACT_CONN = _CONTRACT_CONN, conn
     res.day_first = _DAY_FIRST
     try:
         _parse_rows(df, res)
     finally:
         _DAY_FIRST = previous
+        _CONTRACT_CONN = previous_conn
     _enforce_numeric(res)
     res.options_missing_strike = sorted(
         k for k, o in res.instrument_options.items() if o.strike == 0 and o.payoff in STRIKE_PAYOFFS)
@@ -776,9 +880,18 @@ def _parse_rows(df: pd.DataFrame, res: "ParseResult") -> None:
 
 
 def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
-    if _status_excluded(row.get("Status")) or _fund_excluded(row.get("Fund")):
+    if _status_excluded(row.get("Status")):
+        res.n_excluded_status += 1
         res.n_skipped_status_or_fund += 1
         return
+    excluded_by = (res.book_filter or BookFilter()).excluded_by(row)
+    if excluded_by is not None:
+        attr = f"n_excluded_{excluded_by}"
+        setattr(res, attr, getattr(res, attr) + 1)
+        res.n_skipped_status_or_fund += 1
+        return
+    trader = _s(row.get("Trader"))
+    res.kept_by_trader[trader] = res.kept_by_trader.get(trader, 0) + 1
     kind = _row_kind(row)
     if kind == "FORWARD":
         res.n_forward += 1
@@ -1122,6 +1235,17 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
     if trade_date is None:
         res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
         return
+    m = FUTURE_SYMBOL_RE.match(symbol)
+    if m and m.group(1) in KNOWN_FUTURE_ROOTS:
+        _parse_index_future(res, row, row_no, symbol, trade_id, trade_date)
+    else:
+        _parse_commodity_future(res, row, row_no, symbol, trade_id, trade_date)
+
+
+def _parse_index_future(res: ParseResult, row: pd.Series, row_no: int, symbol: str, trade_id: str,
+                        trade_date: str) -> None:
+    """An equity index future (ES, NQ, RTY, YM): instrument '<code> Index', leg in USD. The
+    macro book's path, unchanged; Phase 2 of the commodity conversion removes it."""
     try:
         root, code, expiry = future_expiry(symbol, date.fromisoformat(trade_date))
     except ValueError as e:
@@ -1129,14 +1253,91 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
         return
     instrument_id = f"{code} Index"
     multiplier = FUTURE_MULTIPLIERS[root]  # root already validated by future_expiry
+    fill = _future_fill(res, row, row_no, symbol, multiplier, notional_rebuild=True)
+    if fill is None:
+        return
+    signed_contracts, price = fill
+    expiry_iso = expiry.isoformat()
+
+    res.instruments.setdefault(instrument_id, Instrument(
+        instrument_id=instrument_id, asset_class="FUTURE", base_ccy=root, quote_ccy="USD",
+        multiplier=multiplier, is_ndf=0, bbg_ticker=instrument_id, expiry_date=expiry_iso,
+    ))
+    res.trades.append(Trade(
+        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="FUTURE",
+        package_id=trade_id, trade_date=trade_date, quantity=signed_contracts, price=price, **_common(row),
+    ))
+    res.legs.append(TradeLeg(
+        trade_id, 1, "NOTIONAL", "USD", signed_contracts * multiplier * price,
+        trade_date, expiry_iso, price, 0))
+
+
+def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbol: str, trade_id: str,
+                            trade_date: str) -> None:
+    """Any future that is not an equity index root, resolved through the contract master
+    (``data.contracts.resolve_future``, 2026-09-24). The symbol comes from ``Symbol``, else
+    ``Underlying Symbol``; a bare code shared by several roots is narrowed by the row's
+    ``Currency`` (read like any currency cell: 'DOL.C-USAA' or 'USD'; blank or unreadable =
+    not given), ``Execution Venue`` and an exchange named in ``Description``. A symbol the
+    universe does not know, one that fits more than one root, or a populated currency / venue
+    that fits no candidate rejects the row with the resolver's own reason (it names the
+    candidates): the multiplier and currency are never guessed.
+
+    The instrument is the contract month, keyed by its canonical id ('CLZ26 Comdty', stable
+    for the contract's life): base_ccy = the root id ('NYMEX:CL'), quote_ccy = the root's
+    currency, multiplier = quote-currency amount per 1.0 of quoted price per contract,
+    bbg_ticker = Bloomberg's request form at the trade date ('' for a placeholder root that
+    must never be requested), expiry = the last trade date (Bloomberg's when stored, else the
+    contract master's conservative estimate). One NOTIONAL leg in the contract's currency,
+    contracts x multiplier x fill, settles_cash 0. The fill is kept as quoted."""
+    try:
+        contract = resolve_future(
+            _s(row.get("Symbol")), trade_date=trade_date, underlying=_s(row.get("Underlying Symbol")),
+            description=_s(row.get("Description")), currency=_ccy(row.get("Currency")) or "",
+            venue=_s(row.get("Execution Venue")), conn=_CONTRACT_CONN)
+    except ValueError as e:          # UnknownContract / AmbiguousContract, and any other refusal
+        res.rejects.append(Reject(row_no, symbol, str(e)))
+        return
+    root = contract.root
+    fill = _future_fill(res, row, row_no, symbol, root.multiplier, notional_rebuild=False,
+                        quote_unit=root.quote_unit)
+    if fill is None:
+        return
+    signed_contracts, price = fill
+    instrument_id = contract.contract_id
+    expiry_iso = contract.last_trade_date.isoformat()
+    ticker = "" if root.bbg_placeholder else request_ticker(contract, date.fromisoformat(trade_date))
+    res.instruments.setdefault(instrument_id, Instrument(
+        instrument_id=instrument_id, asset_class="FUTURE", base_ccy=root.root_id, quote_ccy=root.currency,
+        multiplier=root.multiplier, is_ndf=0, bbg_ticker=ticker, expiry_date=expiry_iso,
+    ))
+    res.trades.append(Trade(
+        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="FUTURE",
+        package_id=trade_id, trade_date=trade_date, quantity=signed_contracts, price=price, **_common(row),
+    ))
+    res.legs.append(TradeLeg(
+        trade_id, 1, "NOTIONAL", root.currency, signed_contracts * root.multiplier * price,
+        trade_date, expiry_iso, price, 0))
+
+
+def _future_fill(res: ParseResult, row: pd.Series, row_no: int, symbol: str, multiplier: float,
+                 notional_rebuild: bool, quote_unit: str = "") -> Optional[Tuple[float, float]]:
+    """(signed contracts, fill price) of a futures row, or None when the row was rejected.
+
+    ``Quantity`` signed by ``Side``; an unusable Quantity is rebuilt from ``Notional /
+    multiplier`` (only with ``notional_rebuild``: the export's Notional is contracts x
+    multiplier on all 11 reference ES rows, but what a commodity row's Notional holds is not
+    known, and a Notional in gallons or bushels divided by a cents-scaled multiplier would be
+    a whole number 100 times too big) or else from ``NetInvoice / (multiplier x Price)``. An
+    unusable Price is rebuilt from NetInvoice and fees. With every cell there, NetInvoice (in
+    the contract's currency) is cross-checked against contracts x multiplier x Price: a gap
+    above NET_INVOICE_TOLERANCE warns and never rejects; one of about 100 times says the fill
+    looks quoted in another unit than ``quote_unit``."""
     price = _num(row.get("Price"))
     net = abs(_num(row.get("NetInvoice")))
-    # Contracts, when the Quantity cell is unusable: Notional / multiplier (the export's
-    # Notional is contracts x multiplier on all 11 reference FUTURE rows), else
-    # NetInvoice / (multiplier x Price), which is whole contracts to within the fees.
     rebuilt, rebuilt_from = math.nan, ""
     if math.isnan(_num(row.get("Quantity"))):
-        lots = abs(_num(row.get("Notional"))) / multiplier
+        lots = abs(_num(row.get("Notional"))) / multiplier if notional_rebuild else math.nan
         if not math.isnan(lots) and round(lots) >= 1 and abs(lots - round(lots)) < 1e-6:
             rebuilt, rebuilt_from = float(round(lots)), f"Notional / {multiplier:g}"
         elif not math.isnan(net) and not math.isnan(price) and price > 0:
@@ -1145,7 +1346,7 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
                 rebuilt, rebuilt_from = float(round(lots)), f"NetInvoice / ({multiplier:g} x Price)"
     signed_contracts = _signed_quantity(row, symbol, row_no, res, "contracts", rebuilt, rebuilt_from)
     if signed_contracts is None:
-        return
+        return None
     if math.isnan(price):
         # Fill price from the invoice: NetInvoice = contracts x multiplier x price, plus
         # the fees on a buy, less them on a sell (exact on 10 of the 11 reference rows,
@@ -1161,7 +1362,7 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
         if math.isnan(price) or price <= 0:
             res.rejects.append(Reject(row_no, symbol, "blank Price" if bad is None else
                                       f"{_not_a_number('Price', bad)}; cannot be rebuilt (needs NetInvoice and Quantity)"))
-            return
+            return None
         _warn(res, row_no, symbol,
               (f"{_not_a_number('Price', bad)}" if bad is not None else "Price is blank")
               + f"; rebuilt {price:.10g} from NetInvoice / (contracts x {multiplier:g}){fee_note}")
@@ -1174,23 +1375,18 @@ def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
         fees = 0.0 if math.isnan(fees) else fees
         expected = abs(signed_contracts) * multiplier * price + (fees if signed_contracts > 0 else -fees)
         if abs(expected - net) / net > NET_INVOICE_TOLERANCE:
+            scale = ""
+            if expected > 0:
+                ratio = net / expected
+                if abs(ratio / 100.0 - 1.0) < 0.02 or abs(ratio * 100.0 - 1.0) < 0.02:
+                    unit = f" ({quote_unit} after the contract list's price scale)" if quote_unit else ""
+                    scale = (f"; the invoice is about {ratio:.4g} times that, so the Price looks quoted in "
+                             f"another unit than the contract's{unit}")
             _warn(res, row_no, symbol,
                   f"NetInvoice {net:,.2f} differs from contracts x {multiplier:g} x Price = {expected:,.2f} by "
-                  f"{abs(expected - net) / net:.2%} (tolerance {NET_INVOICE_TOLERANCE:.1%}); the cells are kept "
-                  "as read, check the Price")
-    expiry_iso = expiry.isoformat()
-
-    res.instruments.setdefault(instrument_id, Instrument(
-        instrument_id=instrument_id, asset_class="FUTURE", base_ccy=root, quote_ccy="USD",
-        multiplier=multiplier, is_ndf=0, bbg_ticker=instrument_id, expiry_date=expiry_iso,
-    ))
-    res.trades.append(Trade(
-        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product="FUTURE",
-        package_id=trade_id, trade_date=trade_date, quantity=signed_contracts, price=price, **_common(row),
-    ))
-    res.legs.append(TradeLeg(
-        trade_id, 1, "NOTIONAL", "USD", signed_contracts * multiplier * price,
-        trade_date, expiry_iso, price, 0))
+                  f"{abs(expected - net) / net:.2%} (tolerance {NET_INVOICE_TOLERANCE:.1%}){scale}; the cells are "
+                  "kept as read, check the Price")
+    return signed_contracts, price
 
 
 DELIVERY_LAG_DAYS = 7   # expiry + 2 business days, over a long weekend
@@ -1580,11 +1776,14 @@ def _rows(objs) -> List[tuple]:
 
 
 def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection,
-         strict: bool = False, filename: Optional[str] = None, turn_swap_marks: bool = True) -> ParseResult:
+         strict: bool = False, filename: Optional[str] = None, turn_swap_marks: bool = True,
+         book: Optional[Union[BookFilter, str, Path]] = None) -> ParseResult:
     """Parse and upsert. Re-loading a trade id replaces its trade and legs; a swap
     package containing a replaced trade is dissolved so the packaging rule can re-run on
     the new data. With ``strict=True`` any reject raises ValueError before anything is
-    written; otherwise rejected rows are skipped and the rest is loaded.
+    written; otherwise rejected rows are skipped and the rest is loaded. ``book`` is the
+    row filter, as ``parse`` takes it (None = ``config/book.yaml``); ``conn`` is also handed
+    to ``parse`` so a future's stored Bloomberg contract dates replace the estimated expiry.
 
     Swap direction: the user's stored overrides (``data/ingest/irs_direction.py``) are
     handed to the parser, so an overridden swap is written the way the user set it
@@ -1606,7 +1805,7 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
 
     create_schema(conn)
     signs_before = irs_direction.irs_signs(conn)
-    res = parse(source, filename, direction_overrides=irs_direction.get_overrides(conn))
+    res = parse(source, filename, direction_overrides=irs_direction.get_overrides(conn), book=book, conn=conn)
     name = filename or (Path(source).name if isinstance(source, (str, Path)) else "blotter")
     for rj in res.rejects:
         log.warning("%s row %d %s: REJECT %s", name, rj.row_no, rj.symbol, rj.reason)

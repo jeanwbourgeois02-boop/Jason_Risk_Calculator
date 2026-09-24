@@ -4,12 +4,13 @@
 
 Each has the default the build assumes until the user answers.
 
-- **C1. A real blotter sample and Jason's fund code.** Default: a synthetic commodity sample in the macro export's column layout (`data/sample/`); the fund filter reads `config/book.yaml`. The futures symbol formats the parser accepts are guesses until a real file is seen.
+- **C1. A real blotter sample and Jason's fund code.** Parked by the user on 2026-09-24 ("leave the blotter format empty for now we will cross that bridge when we get to it"): build on the synthetic sample until then. Default: a synthetic commodity sample in the macro export's column layout (`data/sample/`); the fund filter reads `config/book.yaml`. The futures symbol formats the parser accepts are guesses until a real file is seen.
 - **C2. Is the research app's universe Jason's?** Default: yes; `config/contracts.csv` is seeded from `../Commodity Dashboard/rvapp/universe/instruments.csv` (202 contracts).
 - **C3. Bloomberg roots and price scales.** Only 11 of the 202 roots are verified on a terminal. The blotter's price and Bloomberg's `PX_LAST` must be in the same unit (cents per bushel against dollars per bushel is a 100x P&L error); to be checked on the Bloomberg PC.
 - **C4. LME forward P&L formula** (Phase 5). Proposed: the FX forward rule, `tonnes × (outright at the prompt date − fill)`, converted at spot, frozen on the prompt date. Needs the user's yes.
 - **C5. Risk parameters** (Phase 4): Jason's vol target (the 4.5m in `config/risk.yaml` is the macro fund's), the stress scenarios he wants, the commodity shock days to exclude.
 - **C6. FX options.** Not in the product list, not approved for removal: dormant until decided.
+- **C8. Exchange holiday dates** (`config/calendars/`, written from memory on 2026-09-24): every `# unverified` line, all of CN 2027 (the State Council publishes late 2026) and the whole AE (GME) file need checking against each exchange's published calendar. ICE_EU is one file for energy and softs (the London softs also close on the UK May and August bank holidays); ICE_US does not cover canola's Canadian holidays. Past 2027 only weekends count as closed (`engine.calendars.coverage`).
 - **C7. Which calendar defines Daily** for a book spread over US, UK, Chinese and other exchanges. Default: the existing US calendar (`config/holidays.txt`).
 
 ## Macro book (inherited; retired with Phase 2)

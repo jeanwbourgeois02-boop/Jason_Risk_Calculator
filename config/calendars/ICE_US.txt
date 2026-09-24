@@ -1,0 +1,29 @@
+# ICE_US: ICE Futures U.S. (sugar No. 11, coffee C, cocoa, cotton No. 2, FCOJ and the
+# other US softs): full-day closures for 2026 and 2027, weekdays only.
+# Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
+# against ICE Futures U.S.'s published holiday calendar before it is relied on.
+# The softs close on the US market holidays; Columbus Day and Veterans Day are open.
+# Canola (ICE, Winnipeg) follows Canadian holidays and is NOT covered by this file.
+# coverage: 2026-01-01 to 2027-12-31
+
+2026-01-01  # New Year's Day
+2026-01-19  # Martin Luther King Jr. Day
+2026-02-16  # Presidents' Day
+2026-04-03  # Good Friday
+2026-05-25  # Memorial Day
+2026-06-19  # Juneteenth
+2026-07-03  # Independence Day (observed; 4 July is a Saturday)
+2026-09-07  # Labor Day
+2026-11-26  # Thanksgiving
+2026-12-25  # Christmas Day
+
+2027-01-01  # New Year's Day
+2027-01-18  # Martin Luther King Jr. Day
+2027-02-15  # Presidents' Day
+2027-03-26  # Good Friday
+2027-05-31  # Memorial Day
+2027-06-18  # Juneteenth (observed; 19 June is a Saturday)  # unverified
+2027-07-05  # Independence Day (observed; 4 July is a Sunday)
+2027-09-06  # Labor Day
+2027-11-25  # Thanksgiving
+2027-12-24  # Christmas Day (observed; 25 December is a Saturday)

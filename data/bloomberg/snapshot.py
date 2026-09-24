@@ -18,7 +18,7 @@ What travels: `marks` whole, every source, exactly as Bloomberg and the app's ow
 wrote it on the Bloomberg PC (values, sources and `snapped_at` untouched, so
 `marks_official` decides the official row here the way it does there), plus every other
 table a pull writes (MARKET_TABLES: the OIS curves and their quotes, the fixings, the FX
-and rates vol quotes, the dividend yields), the `instruments` rows those marks hang off,
+and rates vol quotes, the dividend yields, Bloomberg's commodity contract dates), the `instruments` rows those marks hang off,
 only so a mark's foreign key holds before the blotter is uploaded here, each table's DDL
 (so a table this database has never created still lands), and the pull's own log, the
 status JSON the live feed writes next to the database (`live.status_path`), copied as
@@ -31,7 +31,10 @@ replaced on the Bloomberg PC (a last live press replaced by the 15:00 close, und
 source) would otherwise stay on and win. A MANUAL row typed here is kept, and an
 instrument already on file here is never overwritten. It then freezes the settled trades
 the way the backfill's closing step does (`engine.pnl.ledger.realise_settled`), since no
-pull ever runs here to do it.
+pull ever runs here to do it. Just before that freeze it writes Bloomberg's contract dates
+onto this PC's own commodity futures (`data.ingest.contract_dates.apply_contract_dates`,
+2026-09-24), as a pull does on the Bloomberg PC: an upload here books each future at
+contract-master's estimated expiry, and the freeze must see Bloomberg's date.
 """
 from __future__ import annotations
 
@@ -55,7 +58,12 @@ MANIFEST = "snapshot.json"
 # source database has not created yet is simply not in the snapshot.
 INSTRUMENTS = "instruments"
 MARKET_TABLES = ("marks", "curves", "curve_quotes", "index_fixings",
-                 "vol_quotes", "rate_vol_quotes", "equity_dividend_yields")
+                 "vol_quotes", "rate_vol_quotes", "equity_dividend_yields", "contract_static")
+# contract_static (2026-09-24, commodity conversion): Bloomberg's FUT_LAST_TRADE_DT /
+# FUT_NOTICE_FIRST per commodity futures contract, written by the pull through
+# data.contracts.store_static_dates; created on the importing PC with contract-master's own
+# ensure_static_table, so its DDL is that lane's and not a copy.
+CONTRACT_STATIC = "contract_static"
 KEPT_SOURCE = "MANUAL"
 PULL_STATUS = "pull_status.json"
 
@@ -214,8 +222,11 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
     """Load the snapshot in `in_dir` into `db_path` (created with the schema if absent), in
     one transaction, then freeze the settled trades as of `as_of` (today by default).
     Returns {'manifest', 'rows': {table: loaded}, 'dropped': {table: rows removed first},
-    'instruments_added', 'skipped_marks', 'ledger'}. Raises SnapshotError, touching
-    nothing, when `in_dir` holds no marks.csv."""
+    'instruments_added', 'skipped_marks', 'contract_dates', 'ledger'}; 'contract_dates' is
+    `apply_contract_dates`' own result ({'checked', 'updated', 'missing_dates'}), run after
+    the load and before the freeze so the ledger sees Bloomberg's expiries (None if that
+    module cannot be imported). Raises SnapshotError, touching nothing, when `in_dir` holds
+    no marks.csv."""
     from data.ingest.schema import connect
 
     in_dir = Path(in_dir)
@@ -223,7 +234,7 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
         raise SnapshotError(f"no snapshot in {in_dir} (git pull first; it is written on the "
                             f"Bloomberg PC by marks-export)")
     out = {"manifest": read_manifest(in_dir), "rows": {}, "dropped": {}, "instruments_added": 0,
-           "skipped_marks": 0, "ledger": None}
+           "skipped_marks": 0, "contract_dates": None, "ledger": None}
     conn = connect(Path(db_path))
     try:
         with conn:
@@ -235,6 +246,8 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
             ddl = (out["manifest"] or {}).get("ddl") or {}
             for table in MARKET_TABLES:
                 path = in_dir / f"{table}.csv"
+                if path.exists() and not _table_info(conn, table) and table == CONTRACT_STATIC:
+                    _ensure_contract_static(conn)
                 if path.exists() and not _table_info(conn, table) and ddl.get(table):
                     conn.execute(ddl[table])  # a table this database never created: the source's own DDL
                 info = _table_info(conn, table)
@@ -256,6 +269,10 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
             # the same day every screen and every pull is on.
             from data.bloomberg.live import book_today
             as_of = book_today().isoformat()
+        # Before the freeze, not after: a commodity future booked here at the estimated
+        # expiry would otherwise be frozen (or left open) against the wrong date, and its
+        # imported FUTURE_PX rows, keyed at Bloomberg's date, would not meet its leg.
+        out["contract_dates"] = _apply_contract_dates(conn)
         out["ledger"] = _realise(conn, as_of)
     finally:
         conn.close()
@@ -334,6 +351,27 @@ def save_after_pull(db_path: Union[str, Path], repo_root: Union[str, Path] = REP
     out = {"exported": True, **result, "message": f"{head}; {result['message']}"}
     log(out["message"])
     return out
+
+
+def _ensure_contract_static(conn: sqlite3.Connection) -> None:
+    """contract-master's own DDL for contract_static; the snapshot's copy only if that
+    package cannot be imported here."""
+    try:
+        from data.contracts import ensure_static_table
+    except ImportError:
+        return
+    ensure_static_table(conn)
+
+
+def _apply_contract_dates(conn: sqlite3.Connection) -> Optional[dict]:
+    """Bloomberg's stored contract dates onto this PC's commodity futures (instrument expiry,
+    NOTIONAL legs, FUTURE_PX mark keys), as the pull does on the Bloomberg PC. Imported at
+    call time and guarded like `_realise`. Returns its result unchanged."""
+    try:
+        from data.ingest.contract_dates import apply_contract_dates
+    except ImportError:
+        return None
+    return apply_contract_dates(conn)
 
 
 def _realise(conn: sqlite3.Connection, as_of: str) -> Optional[dict]:

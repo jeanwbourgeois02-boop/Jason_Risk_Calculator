@@ -1,0 +1,1 @@
+- [Futures delta in USD at spot 2026-09-24](futures_usd_at_spot_2026_09_24.md) — futures_usd_delta converts at the exact official SPOT of as_of (never near marks); details gained currency / usd_per_unit / reason; equity line reads by_instrument and leaves out commodity futures (base_ccy = contract root); all four lane files are LF.

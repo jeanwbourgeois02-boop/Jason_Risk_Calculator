@@ -28,6 +28,9 @@ The one exception to "marks are untouched" (2026-09-18): an interest rate swap t
 new file turns round has its priced history reversed in place, never deleted, because
 swaps are priced for today only (``data/ingest/irs_direction.py``). The user's own
 pay/receive overrides live in ``irs_direction_overrides``, which no upload ever clears.
+The other exception (2026-09-24): once the book is published, Bloomberg's stored contract
+dates are put back onto the commodity futures (``data/ingest/contract_dates.py``), which
+moves a future's expiry, its NOTIONAL legs and the key of its FUTURE_PX marks, never a value.
 
 ``import_blotter_report`` returns the outcome as data (message, rejects, warnings,
 notes) so the UI decides from counts, not from prose; ``import_blotter`` is its message.
@@ -136,6 +139,8 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
         live.execute("BEGIN IMMEDIATE")
         try:
             with closing(sqlite3.connect(":memory:")) as staged:
+                # A whole-database backup: staged carries contract_static too, so the parse
+                # sees Bloomberg's stored contract dates (and apply_contract_dates re-applies them after publish).
                 with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as reader:
                     reader.backup(staged)
                 replaced = {}
@@ -198,6 +203,20 @@ def _library_sentence(db_path) -> str:
         return f"Bloomberg library not updated here ({exc}); it updates itself on the next pull."
     return (f"Bloomberg library: {tickers} ticker(s) needed today, {changed['added']} item(s) added, "
             f"{changed['removed']} removed. Nothing was pulled; press Pull Bloomberg now to price the book.")
+
+
+def _contract_dates_sentence(db_path) -> str:
+    """Put Bloomberg's stored contract dates back onto the commodity futures just published
+    (``contract_dates.apply_contract_dates``): the parser books a contract month at its
+    estimated last trade date, so without this a re-upload would undo the dates the last
+    pull stored. Asks Bloomberg nothing. '' when nothing changed; never fails an upload
+    (the book is already published, and the next pull applies the dates again)."""
+    try:
+        from data.ingest import contract_dates
+        with closing(schema.connect(Path(db_path).resolve())) as conn:
+            return contract_dates.summary_sentence(contract_dates.apply_contract_dates(conn))
+    except Exception as exc:  # noqa: BLE001 -- the book is already published
+        return f"Contract dates not applied here ({exc}); the next Bloomberg pull applies them."
 
 
 def import_blotter(payload, filename, db_path):
@@ -283,18 +302,23 @@ def import_blotter_report(payload, filename, db_path) -> dict:
         parts.append(f"Replaced the previous book: {replaced['trades']} trade(s) and "
                      f"{replaced['trade_legs']} leg(s) removed.")
     excluded = []
-    if result.n_skipped_status_or_fund:
-        excluded.append(f"{result.n_skipped_status_or_fund} rows from other funds or cancelled/pending status")
     if result.n_skipped_other:
         excluded.append(f"{result.n_skipped_other} rows of unsupported type")
     if result.n_superseded:
         excluded.append(f"{result.n_superseded} earlier versions of repeated trade ids")
     if excluded:
         parts.append("Excluded: " + ", ".join(excluded) + ".")
+    # The book filter (config/book.yaml: funds, traders, desks) and what it excluded, by
+    # reason; n_skipped_status_or_fund is only their total, so it no longer gets a sentence.
+    parts.append(result.filter_summary())
     if result.rejects:
         head = "; ".join(f"row {rj.row_no} {rj.symbol}: {rj.reason}" for rj in result.rejects[:5])
         more = f" (+{len(result.rejects) - 5} more)" if len(result.rejects) > 5 else ""
         parts.append(f"{len(result.rejects)} row(s) {REJECTS_PHRASE} and were skipped: {head}{more}.")
+    # Before the library sync, so the library lists each future's price at Bloomberg's date.
+    dates_sentence = _contract_dates_sentence(db_path)
+    if dates_sentence:
+        parts.append(dates_sentence)
     parts.append(_library_sentence(db_path))
     notes = result.notes()
     return {"message": " ".join(parts + notes), "rejects": len(result.rejects),

@@ -50,6 +50,10 @@ Total book strip and the bundles all include them.
     price"): valued exactly like a future, `contracts * multiplier * (m - fill)`, with `m`
     Bloomberg's own price of the option (the official FUTURE_PX mark on the option's
     instrument at its expiry date, in index points like the fill). No model is involved.
+  - FUTURE and EQ_OPTION in another currency (user decision 2026-09-24, "Spot of valuation
+    date"): that figure is `pnl_local`, in the instrument's `quote_ccy`, and `pnl_usd =
+    pnl_local * S` at spot of `as_of` like an FX row (a settled one at spot of its price's
+    date); S = 1 for a USD contract, so a USD future comes out exactly as before.
 
 One bad value, one trade (2026-09-18, guards only -- no formula changed): every stored
 figure a formula uses (`trades.quantity`, `trades.price`, `instruments.multiplier`, each
@@ -179,7 +183,7 @@ def _fut_sql(theme: bool) -> str:
     theme_col = "COALESCE(t.theme, '')" if theme else "''"
     return f"""
         SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
-               t.trade_date, t.quantity, t.price AS fill, i.multiplier, l.settle_date
+               t.trade_date, t.quantity, t.price AS fill, i.multiplier, i.quote_ccy, l.settle_date
         FROM trades_official t JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id)
         WHERE t.product IN ('FUTURE', 'EQ_OPTION') AND t.trade_date <= :as_of AND l.leg_no = 1
     """
@@ -750,7 +754,9 @@ def _frozen_row(conn, r) -> Optional[dict]:
     `engine.pnl.ledger.realise_settled` would freeze it -- the last official mark on or
     before its settlement date -- but without writing anything (value_book is read-only
     and runs on read-only connections). Returns None when that mark is not on file, so the
-    caller reports Unavailable. Added 2026-09-17: before this, realise_settled was only
+    caller reports Unavailable; a future or listed option whose price is on file but whose
+    USD conversion is not comes back unpriced with that reason instead (reviewer W-3,
+    2026-09-24). Added 2026-09-17: before this, realise_settled was only
     ever called from the Bloomberg feed, so on any PC without a live session every
     settled trade stayed Unavailable forever and took the headline LTD with it, even with
     every official mark loaded. The arithmetic here and in realise_settled must stay
@@ -788,8 +794,17 @@ def _frozen_row(conn, r) -> Optional[dict]:
         if hit is None:
             return None
         m, m_day, m_src = hit
-        pnl_local = pnl_usd = r.quantity * r.multiplier * (m - r.fill)
-        spot, spot_src, mark_label = 1.0, "identity", "settlement price"
+        # converted at spot of the price's own date, as the FX branch (`_open_future_row`)
+        s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, m_day)
+        pnl_local = r.quantity * r.multiplier * (m - r.fill)
+        if s != s or s_pair is None:
+            # the price is on file, the conversion is not: name that gap, as the ledger does
+            # (reviewer W-3, 2026-09-24), with the price and local P&L shown like the open row
+            return dict(_unpriced(f"settled trade {r.trade_id}: no SPOT for USD conversion of {r.quote_ccy} "
+                                  f"on {m_day}, so it cannot be frozen"),
+                        mark=m, mark_date=m_day, mark_source=m_src, pnl_local=pnl_local)
+        pnl_usd = pnl_local * s
+        spot, spot_src, mark_label = s, s_src, "settlement price"
     elif product == "IRS":
         hit = _last_official_on_or_before(conn, r.instrument_id, "PV_USD", settle)
         if hit is None:
@@ -842,7 +857,9 @@ def _provisional(conn, r, as_of, unreadable: str = "") -> dict:
     trade_id = r.trade_id
     frozen = _frozen_row(conn, r)
     if frozen is not None:
-        if unreadable:
+        if unreadable and frozen["reason"]:   # unpriced with its own reason (a future's missing conversion)
+            frozen["reason"] += f"; its realised_pnl row is unreadable ({unreadable})"
+        elif unreadable:
             frozen["note"] = frozen["note"].replace(
                 "not yet recorded in realised_pnl",
                 f"its stored realised_pnl row is unreadable ({unreadable}) and is rebuilt by the next Bloomberg pull")
@@ -894,8 +911,16 @@ def _settled_fx_row(conn, r, as_of) -> dict:
 
 
 def _open_future_row(conn, r, as_of) -> dict:
-    out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=1.0, spot_source="identity",
-               pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=0.0, reason="", note="")
+    """A future or a listed option (CLAUDE.md "P&L conventions -> Futures", user decision
+    2026-09-24, "Spot of valuation date"): `pnl_local = contracts x multiplier x (m - f)` in
+    the instrument's quote currency, `pnl_usd = pnl_local x S`, S = USD per quote unit at spot
+    of `as_of` (`usd_per_quote`, identity for a USD contract), exactly the FX rule, so a CNY or
+    EUR contract is never summed as dollars. With no S the price and the local P&L still show
+    and the USD figures are blank with the FX rows' reason: never 1, never zero."""
+    usd = r.quote_ccy == "USD"
+    out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=1.0 if usd else _NAN,
+               spot_source="identity" if usd else "", pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN,
+               pnl_carry_usd=0.0, reason="", note="")
     m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FUTURE_PX", as_of)
     if m_hit is None:
         out["reason"] = (f"no Bloomberg price for the listed option {r.instrument_id} on {as_of}"
@@ -904,17 +929,39 @@ def _open_future_row(conn, r, as_of) -> dict:
         return out
     m, m_src = _mark_number(m_hit, r.instrument_id, r.settle_date, "FUTURE_PX", as_of), m_hit[1]
     out["mark"], out["mark_source"] = m, m_src
-    pnl = r.quantity * r.multiplier * (m - r.fill)
-    out["pnl_local"], out["pnl_usd"], out["pnl_spot_usd"] = pnl, pnl, pnl
+    pnl_local = r.quantity * r.multiplier * (m - r.fill)
+    out["pnl_local"] = pnl_local
+    s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, as_of)
+    if s != s or s_pair is None:
+        out["spot"], out["spot_source"], out["pnl_carry_usd"] = _NAN, "", _NAN
+        out["reason"] = f"no SPOT for USD conversion of {r.quote_ccy} on {as_of}"
+        return out
+    pnl_usd = pnl_local * s
+    out["spot"], out["spot_source"] = s, s_src
+    out["pnl_usd"], out["pnl_spot_usd"] = pnl_usd, pnl_usd
     return out
 
 
 def _settled_future_row(conn, r, as_of) -> dict:
+    """The frozen row from `realised_pnl`, never recomputed. A USD contract shows spot 1 /
+    identity as always; a contract the ledger froze in another currency (`realised_pnl.currency`
+    = the quote currency, converted at spot of the price's date) shows that conversion: S of
+    `spot_as_of_date`, the date the ledger froze at (`usd_per_quote`, the ledger's own lookup),
+    blank when no spot is on file any more. Only the `spot` column comes from that lookup; the
+    P&L is the stored figure."""
     row, pnl, unreadable = _readable_realised(conn, r.trade_id)
     if row is None:
         return _provisional(conn, r, as_of, unreadable)
+    spot, spot_src = 1.0, "identity"
+    ccy = str(row.get("currency") or "USD")
+    if ccy != "USD":
+        try:
+            s, s_pair, s_src = usd_per_quote(conn, ccy, str(row["spot_as_of_date"]))
+        except _BadValue:   # a display column: a bad spot never blanks the frozen P&L
+            s, s_pair, s_src = _NAN, None, ""
+        spot, spot_src = (s, s_src) if s == s and s_pair is not None else (_NAN, "")
     return dict(mark=_NAN, mark_date=row["spot_as_of_date"], mark_source=row["spot_source"],
-                spot=1.0, spot_source="identity", pnl_local=_NAN, pnl_usd=pnl,
+                spot=spot, spot_source=spot_src, pnl_local=_NAN, pnl_usd=pnl,
                 pnl_spot_usd=pnl, pnl_carry_usd=0.0, reason="", note=row["note"])
 
 

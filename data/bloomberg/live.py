@@ -13,7 +13,10 @@ localhost:8194 by default), each requested pull of `LiveFeed` fetches:
     tab (see data/bloomberg/marks_csv.py::export_request, which still emits that request
     for the workbook comparison and is unchanged);
   * FUTURE_PX for every FUTURE instrument with an open leg, at the contract's own expiry
-    (settle_date);
+    (settle_date); first (2026-09-24), Bloomberg's contract dates (FUT_LAST_TRADE_DT,
+    FUT_NOTICE_FIRST) of the futures the library lists under CONTRACT_DATES, stored in
+    contract_static and applied to the futures, so that expiry is Bloomberg's
+    (`contract_dates_step`); a future with no Bloomberg ticker is never asked for;
   * NDF_1M (2026-09-21, user: "NDFs - always show 1m forward date price, not spot") for
     every NDF currency the open FX trades and options touch: PX_LAST of the user's own 1M
     ticker (data.ingest.common.NDF_1M_TICKERS, 'KWN+1M Curncy'), asked for in the same
@@ -524,6 +527,10 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     out, seen = [], set()
 
     def _add(r: dict) -> None:
+        if not str(r.get("bbg_ticker") or "").strip():
+            # Not requestable (2026-09-24): a contract with no Bloomberg ticker is never asked
+            # for; pull_once lists it with its reason (not_requestable_futures).
+            return
         key = (r["key"], "SPOT") if r["kind"] == "SPOT" else (r["key"], r["kind"], r["settle_date"])
         if key not in seen:
             seen.add(key)
@@ -591,6 +598,191 @@ def ndf_fix_rows(session, service, requests: list, day, fetch=None, snapped_at: 
     return rows, [], failed
 
 
+# --------------------------------------------------------------------------- contract dates
+# Bloomberg's own dates of a commodity future (2026-09-24, commodity conversion Phase 1): the
+# instrument carries an estimated last trade date (the last weekday of the contract month,
+# data/contracts) until these are on file, and its FUTURE_PX marks are keyed on that expiry.
+# Asked once per press, before any futures price, for the library's CONTRACT_DATES rows only.
+CONTRACT_DATES = "CONTRACT_DATES"          # the library kind (data/bloomberg/library.py)
+CONTRACT_DATE_FIELDS = ("FUT_LAST_TRADE_DT", "FUT_NOTICE_FIRST")
+SRC_CONTRACT_DATES = "BBG_BDP"             # contract_static.source of a date Bloomberg gave
+
+
+def _contract_dates_kind() -> str:
+    try:
+        from data.bloomberg import library
+        return getattr(library, "CONTRACT_DATES", CONTRACT_DATES)
+    except Exception:  # noqa: BLE001
+        return CONTRACT_DATES
+
+
+def _bloomberg_said_for(diag, ticker: str, purpose: str) -> str:
+    """Bloomberg's own words for `ticker` in the last request recorded in `diag` with this
+    `purpose` (its security error, else its field exceptions); '' when it said nothing."""
+    rec = (getattr(diag, "requests", None) or [{}])[-1]
+    if rec.get("purpose") != purpose:
+        return ""
+    for sec in rec.get("raw_response") or []:
+        if sec.get("security") != ticker:
+            continue
+        if sec.get("securityError"):
+            return str(sec["securityError"].get("message") or "security error")
+        return "; ".join(f"{fx.get('fieldId')}: {fx.get('message')}" for fx in sec.get("fieldExceptions") or [])
+    return ""
+
+
+def contract_dates_summary(block: dict) -> str:
+    """The one sentence the feed status shows for `status["contract_dates"]`: 'N contract
+    dates stored, M futures moved to Bloomberg's expiry', with the tickers that gave no date
+    counted after it. '' when nothing was asked and nothing moved."""
+    requested = int(block.get("requested") or 0)
+    stored = int(block.get("stored") or 0)
+    applied = block.get("applied") if isinstance(block.get("applied"), dict) else {}
+    moved = len(applied.get("updated") or [])
+    failed = len(block.get("failed") or [])
+    if not (requested or stored or moved or failed):
+        return ""
+    text = (f"{stored} contract date{'' if stored == 1 else 's'} stored, "
+            f"{moved} future{'' if moved == 1 else 's'} moved to Bloomberg's expiry")
+    if failed:
+        text += f"; {failed} ticker{'' if failed == 1 else 's'} gave no date"
+    if applied.get("error"):
+        text += f"; moving the futures stopped ({applied['error']})"
+    return text
+
+
+def _contract_dates_entries(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[str, str], bool]:
+    """({contract id: ticker} the library lists for today's pull, whether any open future
+    needs contract dates at all, met or not). The list is the library's own
+    (`library.contract_dates_needed`: open, of a contract root, a verified ticker, no dates
+    on file yet); the flag decides whether apply_contract_dates runs, so a book with no
+    commodity future pays nothing and one whose dates are all on file is still applied."""
+    from data.bloomberg import library
+    kind = _contract_dates_kind()
+    if hasattr(library, "contract_dates_needed"):
+        entries = {e["contract_id"]: str(e.get("bbg_ticker") or "").strip()
+                   for e in library.contract_dates_needed(conn, as_of)}
+    else:                                   # an older library: its CONTRACT_DATES rows, if any
+        entries = {}
+        for r in library.needed_on(conn, as_of):
+            if r.get("kind") == kind:
+                entries.setdefault(r["key"], str(r.get("bbg_ticker") or "").strip())
+    in_force = entries or any(r.get("kind") == kind and r["needed_from"] <= as_of <= r["needed_until"]
+                              for r in library.rows(conn))
+    return entries, bool(in_force)
+
+
+def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Callable, diag=None) -> dict:
+    """Bloomberg's contract dates for every future the library lists for today's pull
+    (`library.contract_dates_needed`: CONTRACT_DATES, open, a verified ticker, no dates on
+    file yet): one ReferenceDataRequest of FUT_LAST_TRADE_DT and FUT_NOTICE_FIRST for all
+    their tickers, each answer stored in contract_static under BBG_BDP
+    (data.contracts.store_static_dates), then data.ingest.contract_dates.apply_contract_dates
+    (conn), which moves each future's instrument, legs and FUTURE_PX marks onto Bloomberg's
+    last trade date. `pull_once` runs it before the request list is built, so the futures'
+    prices are asked for, and land, under Bloomberg's expiry. `get_session()` returns
+    (session, service) and is only called when there is something to ask. Never raises.
+
+    The apply runs whenever an open future needs contract dates at all, met or not, so a
+    future whose dates were stored by an earlier press but not applied is still moved; a
+    book with no commodity future neither asks nor applies.
+
+    Returns the status file's `contract_dates` block: {requested (tickers asked), stored,
+    failed: [{ticker, reason}], applied (apply_contract_dates' own dict: checked, updated,
+    missing_dates; {} when it did not run, {"error"} when it failed), summary (the one
+    sentence, `contract_dates_summary`)}, plus "error" when the library could not be read.
+    A ticker Bloomberg rejects or answers without a last trade date is listed under `failed`
+    with Bloomberg's own reason; the pull carries on."""
+    block: dict = {"requested": 0, "stored": 0, "failed": [], "applied": {}}
+
+    def _done() -> dict:
+        block["summary"] = contract_dates_summary(block)
+        return block
+
+    try:
+        entries, in_force = _contract_dates_entries(conn, today.isoformat())
+    except Exception as exc:  # noqa: BLE001
+        block["error"] = f"contract dates not read from the library: {exc!r}"
+        return _done()
+    if not in_force:
+        return _done()
+    for key, ticker in sorted(entries.items()):
+        if not ticker:              # the library leaves these out; never sent to Bloomberg regardless
+            block["failed"].append({"ticker": key, "reason": f"no Bloomberg ticker for {key}"})
+    ask = {k: t for k, t in entries.items() if t}
+    if ask:
+        from data.bloomberg.pull_marks import fetch_reference, _to_date
+        tickers = sorted(set(ask.values()))
+        block["requested"] = len(tickers)
+        data: Dict[str, dict] = {}
+        try:
+            session, service = get_session()
+            data = fetch_reference(session, service, tickers, list(CONTRACT_DATE_FIELDS), diag=diag,
+                                   tag={"purpose": CONTRACT_DATES}) or {}
+        except Exception as exc:  # noqa: BLE001 -- every ticker fails with the reason, the pull goes on
+            block["failed"] += [{"ticker": t, "reason": f"request failed: {exc}"} for t in tickers]
+            ask = {}
+        store_static_dates = None
+        if ask:
+            try:
+                from data.contracts import store_static_dates
+            except Exception as exc:  # noqa: BLE001
+                block["error"] = f"data.contracts.store_static_dates not importable: {exc!r}"
+        for key, ticker in sorted(ask.items()):
+            got = data.get(ticker) or {}
+            last_trade = _to_date(got.get("FUT_LAST_TRADE_DT"))
+            if last_trade is None:
+                said = _bloomberg_said_for(diag, ticker, CONTRACT_DATES)
+                block["failed"].append({"ticker": ticker, "reason": said or "Bloomberg returned no FUT_LAST_TRADE_DT"})
+                continue
+            if store_static_dates is None:
+                block["failed"].append({"ticker": ticker, "reason": "not stored: " + block.get("error", "")})
+                continue
+            notice = _to_date(got.get("FUT_NOTICE_FIRST"))
+            try:        # one contract per call: a row contract-master refuses fails alone
+                store_static_dates(conn, [{"contract_id": key, "last_trade_date": last_trade.isoformat(),
+                                           "first_notice_date": notice.isoformat() if notice else "",
+                                           "source": SRC_CONTRACT_DATES}])
+                block["stored"] += 1
+            except Exception as exc:  # noqa: BLE001
+                block["failed"].append({"ticker": ticker, "reason": f"not stored: {exc}"})
+    try:
+        from data.ingest.contract_dates import apply_contract_dates
+    except ImportError as exc:
+        block["applied"] = {"error": f"data.ingest.contract_dates.apply_contract_dates not importable: {exc!r}"}
+        return _done()
+    try:
+        applied = apply_contract_dates(conn)
+        block["applied"] = dict(applied) if isinstance(applied, dict) else {"result": applied}
+    except Exception as exc:  # noqa: BLE001
+        block["applied"] = {"error": f"{exc!r}"}
+    return _done()
+
+
+def not_requestable_futures(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+    """The futures the library lists on `as_of_date` that it marks not requestable (no
+    verified Bloomberg ticker): never asked for, and listed here instead, one entry per
+    contract, {instrument_id, settle_date, trade_ids, reason}, the reason the library's own.
+    Never raises: a library that cannot say gives []."""
+    from data.bloomberg import library
+    try:
+        needed = library.needed_on(conn, as_of_date, include_unrequestable=True)
+    except TypeError:                       # an older library: every row it gives is asked for
+        return []
+    except Exception:  # noqa: BLE001
+        return []
+    out: Dict[str, dict] = {}
+    for r in needed:
+        if r.get("kind") != "FUTURE_PX" or r.get("requestable", bool(r.get("bbg_ticker"))):
+            continue
+        entry = out.setdefault(r["key"], {
+            "instrument_id": r["key"], "settle_date": r.get("settle_date", ""), "trade_ids": [],
+            "reason": r.get("reason") or f"no Bloomberg ticker for {r['key']}"})
+        if r.get("trade_id") and r["trade_id"] not in entry["trade_ids"]:
+            entry["trade_ids"].append(r["trade_id"])
+    return [out[k] for k in sorted(out)]
+
+
 # --------------------------------------------------------------------------- one pull
 class _SharedSession:
     """The one blpapi session of a pull cycle (2026-09-21). Opened on first use, handed to
@@ -636,16 +828,7 @@ class _SharedSession:
 def _bloomberg_said(diag, ticker: str) -> str:
     """Bloomberg's own words for `ticker` in the LIVE_SPOT request just recorded in `diag`
     (its security error, else its field exceptions); '' when it said nothing."""
-    rec = (getattr(diag, "requests", None) or [{}])[-1]
-    if rec.get("purpose") != "LIVE_SPOT":
-        return ""
-    for sec in rec.get("raw_response") or []:
-        if sec.get("security") != ticker:
-            continue
-        if sec.get("securityError"):
-            return str(sec["securityError"].get("message") or "security error")
-        return "; ".join(f"{fx.get('fieldId')}: {fx.get('message')}" for fx in sec.get("fieldExceptions") or [])
-    return ""
+    return _bloomberg_said_for(diag, ticker, "LIVE_SPOT")
 
 
 def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str):
@@ -1134,7 +1317,14 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     `vol` the vol quotes; `options` the option pricing; `ledger` realise_settled; `total`
     the whole cycle. What the steps do not cover is in `status["timings_other"]`: building
     the request list and writing the FX marks, which is where a wait for the SQLite write
-    lock (an upload, the backfill) would show."""
+    lock (an upload, the backfill) would show.
+
+    Contract dates (2026-09-24): before the request list is built, `contract_dates_step`
+    asks Bloomberg for FUT_LAST_TRADE_DT / FUT_NOTICE_FIRST of the library's CONTRACT_DATES
+    futures, stores them and moves those futures onto Bloomberg's expiry, so their FUTURE_PX
+    is asked for and written at it; its block is status["contract_dates"] (time under
+    "futures"). A future the library lists with no Bloomberg ticker is never asked for and
+    is listed under status["not_requestable"] with its reason."""
     from data.ingest.schema import connect
     clock_started = time.perf_counter()
     started = _now_iso()
@@ -1184,8 +1374,27 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             if as_of_date is None:
                 as_of_date = today.isoformat()
             status["as_of_date"] = as_of_date
+            # Bloomberg's contract dates FIRST (2026-09-24): a commodity future carries an
+            # estimated expiry until they are stored, and apply_contract_dates moves its
+            # instrument, legs and marks onto Bloomberg's; the legs' change marks the
+            # library out of date, so build_requests below reads the futures as moved and
+            # their FUTURE_PX lands under Bloomberg's expiry.
+
+            def _open_session():
+                nonlocal session_opened
+                pair = shared.get()
+                session_opened = True
+                return pair
+
+            status["contract_dates"] = _timed(timings, "futures", contract_dates_step, conn, today,
+                                              _open_session, diag)
             requests = _timed(other, "build_requests", build_requests, conn, as_of_date)
             status["requested"] = len(requests)
+            # A future the library lists with no Bloomberg ticker is never asked for; it is
+            # listed here with its reason (2026-09-24).
+            status["not_requestable"] = not_requestable_futures(conn, as_of_date)
+            for entry in status["not_requestable"]:
+                status["warnings"].append(f"FUTURE_PX {entry['instrument_id']} not requested: {entry['reason']}")
             if not requests:
                 # Nothing FX-shaped to price, but swaps and options may still need a
                 # curve / premium refresh (2026-09-17) before the FX-only early return.
@@ -1234,7 +1443,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             fix_reqs = [r for r in requests if r.mark_type == "NDF_FIX"]
             fix_rows, fix_warnings, fix_fail = _timed(timings, "futures", ndf_fix_rows, session, service, fix_reqs,
                                                       today, snapped_at=snapped) if fix_reqs else ([], [], [])
-            warnings = fwd_warnings + fut_warnings + fix_warnings
+            warnings = list(status["warnings"]) + fwd_warnings + fut_warnings + fix_warnings
             rows = spot_rows + fwd_rows + fut_rows + fix_rows
             written = _timed(other, "write_marks", write_marks, conn, rows)
             # Bloomberg's own FWD_CURVE tenor points, at their own dates, as official

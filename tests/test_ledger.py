@@ -620,3 +620,111 @@ def test_kept_names_every_row_the_rule_cannot_recompute_and_refrozen_is_sorted_b
         ("a0", pytest.approx(2e6 * (0.62 - 0.60)), pytest.approx(2e6 * (0.63 - 0.60))),
         ("a1", pytest.approx(30000), pytest.approx(20000))]
     assert {e["why"] for e in res["refrozen"]} == {"SPOT 2026-09-09 mark 0.62 -> 0.63 (the marks of that date changed)"}
+
+
+# --------------------------------------------------------------------------- non-USD futures (2026-09-24)
+# User decision "Spot of valuation date": a settled future freezes at the last official FUTURE_PX on
+# or before expiry, its quote-currency P&L converted to USD at spot of that same date; a CNY
+# contract is never frozen as dollars, and a USD one freezes exactly as before.
+
+
+_ES_FILL, _ES_MARK = 6_400.75, 6_450.37   # not exact in binary, so a changed operation order would show
+
+
+def _cny_future_db(usdcny=7.10):
+    """c1: long 2 SHFE copper (CNY, 5 t per contract) at 80,000, expiry 09-15, marked 80,500 that day;
+    f1: long 2 ES (USD, 50) at 6,400.75, expiry 09-18, marked 6,450.37 that day. USDCNY on 09-15 unless None."""
+    conn = schema.connect()
+    _insert_instruments(conn, [
+        ("CUV6 Comdty", "FUTURE", "CU", "CNY", 5, 0, "CUV6 Comdty", "2026-09-15"),
+        ("ESU6 Index", "FUTURE", "ES", "USD", 50, 0, "ESU6 Index", "2026-09-18"),
+        ("USDCNY", "FX", "USD", "CNY", 1, 0, "USDCNY Curncy", "9999-12-31"),
+    ])
+    _insert_trade(conn, "c1", "CUV6 Comdty", "FUTURE", "2026-08-10", 2, 80_000.0)
+    _insert_trade(conn, "f1", "ESU6 Index", "FUTURE", "2026-08-10", 2, _ES_FILL)
+    _insert_legs(conn, [
+        ("c1", 1, "NOTIONAL", "CNY", 2 * 5 * 80_000.0, "2026-08-10", "2026-09-15", 80_000.0, 0),
+        ("f1", 1, "NOTIONAL", "USD", 2 * 50 * _ES_FILL, "2026-08-10", "2026-09-18", _ES_FILL, 0),
+    ])
+    _insert_marks(conn, [
+        ("2026-09-15", "CUV6 Comdty", "2026-09-15", "FUTURE_PX", 80_500.0, "BBG_BDH", "t"),
+        ("2026-09-18", "ESU6 Index", "2026-09-18", "FUTURE_PX", _ES_MARK, "BBG_BDH", "t"),
+    ])
+    if usdcny is not None:
+        _insert_marks(conn, [("2026-09-15", "USDCNY", "2026-09-15", "SPOT", usdcny, "BBG_BFXFORWARD", "t")])
+    conn.commit()
+    return conn
+
+
+_REALISED_FIELDS = ("currency, local_amount, usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, "
+                    "spot_source, pnl_usd, note")
+
+
+def _realised(conn, trade_id):
+    return conn.execute(f"SELECT {_REALISED_FIELDS} FROM realised_pnl WHERE trade_id = ?", (trade_id,)).fetchone()
+
+
+def _es_row_as_before():
+    """What the ledger froze a USD future at before 2026-09-24, bit for bit: the old
+    `_future_freeze`'s own expressions (combined = multiplier x m, entry = qty x multiplier x fill)."""
+    qty, multiplier = 2.0, 50.0
+    combined, entry = multiplier * _ES_MARK, qty * multiplier * _ES_FILL
+    return ("USD", qty, entry, "FUTURE_PX", combined, "2026-09-18", "BBG_BDH", qty * combined - entry, "")
+
+
+def test_a_cny_future_freezes_at_its_cny_pnl_converted_at_the_spot_of_its_marks_date():
+    conn = _cny_future_db()
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["realised"] == 2 and res["unrealisable"] == [] and res["refrozen"] == []
+    s = 1 / 7.10
+    c1 = _realised(conn, "c1")
+    assert c1[0] == "CNY" and c1[1] == 2.0 and c1[3] == "FUTURE_PX" and c1[5:7] == ("2026-09-15", "BBG_BDH")
+    assert c1[2] == pytest.approx(2 * 5 * 80_000.0 * s)          # usd_entry_amount: the entry in USD at S
+    assert c1[4] == pytest.approx(5 * 80_500.0 * s)              # spot_usd_per_local: multiplier x mark x S
+    assert c1[7] == pytest.approx(2 * 5 * (80_500.0 - 80_000.0) / 7.10) == pytest.approx(704.2253521)
+    assert c1[7] == pytest.approx(c1[1] * c1[4] - c1[2], rel=1e-12)
+    assert c1[8] == "CNY P&L converted at USDCNY spot of 2026-09-15"
+    # the USD contract is frozen exactly as before 2026-09-24
+    assert _realised(conn, "f1") == _es_row_as_before()
+    # and nothing moves on the next call
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["realised"] == 0 and res["refrozen"] == [] and res["kept"] == []
+
+
+def test_a_cny_future_with_no_usdcny_on_file_stays_unfrozen_with_the_reason_never_frozen_as_dollars():
+    conn = _cny_future_db(usdcny=None)
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["realised"] == 1
+    assert res["unrealisable"] == [{"trade_id": "c1", "reason": "no SPOT for USD conversion of CNY on 2026-09-15"}]
+    assert _realised(conn, "c1") is None
+    assert _realised(conn, "f1") == _es_row_as_before()
+    # once the conversion spot lands, the next call freezes it
+    _insert_marks(conn, [("2026-09-15", "USDCNY", "2026-09-15", "SPOT", 7.10, "BBG_BFXFORWARD", "t")])
+    conn.commit()
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["realised"] == 1 and res["unrealisable"] == []
+    assert _realised(conn, "c1")[7] == pytest.approx(5_000.0 / 7.10)
+
+
+def test_a_cny_future_is_frozen_again_when_the_conversion_spot_of_its_marks_date_changes():
+    """The backfill replaces the live USDCNY press of 09-15 with that day's 15:00 close: the
+    FUTURE_PX is unchanged, the conversion is not, so the row is re-frozen and reported."""
+    conn = _cny_future_db(usdcny=7.10)
+    ledger.realise_settled(conn, "2026-09-21")
+    es_before = conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'f1'").fetchone()
+    conn.execute("UPDATE marks SET value = 7.12, snapped_at = '2026-09-15T15:00:00-04:00' "
+                 "WHERE instrument_id = 'USDCNY' AND as_of_date = '2026-09-15'")
+    conn.commit()
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["realised"] == 1 and res["kept"] == []
+    assert res["refrozen"] == [{
+        "trade_id": "c1", "product": "FUTURE", "mark_type": "FUTURE_PX", "spot_as_of_date": "2026-09-15",
+        "pnl_from": pytest.approx(5_000.0 / 7.10), "pnl_to": pytest.approx(5_000.0 / 7.12),
+        "why": (f"FUTURE_PX 2026-09-15 mark {5 * 80_500.0 / 7.10:.10g} -> {5 * 80_500.0 / 7.12:.10g}, "
+                f"entry {2 * 5 * 80_000.0 / 7.10:.10g} -> {2 * 5 * 80_000.0 / 7.12:.10g} (the marks of that date changed)")}]
+    c1 = _realised(conn, "c1")
+    assert c1[0] == "CNY" and c1[7] == pytest.approx(5_000.0 / 7.12)
+    # the USD future is untouched, frozen_at included
+    assert conn.execute("SELECT * FROM realised_pnl WHERE trade_id = 'f1'").fetchone() == es_before
+    res = ledger.realise_settled(conn, "2026-09-21")
+    assert res["refrozen"] == [] and res["realised"] == 0

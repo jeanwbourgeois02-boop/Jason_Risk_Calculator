@@ -1,0 +1,2 @@
+- [Research universe quirks](research-universe-quirks.md) — 4 rows need a unit conversion in the multiplier (HE/LE/GF lb->cwt, SGX:TF t->kg); ZZ placeholder roots; code collisions; delivery from notes
+- [Resolve rules](resolve-rules.md) — Bloomberg forms by bbg_root, Chinese forms by CN exchange code, others by the union of both; narrowing order; estimated expiry keeps the one-digit ticker past the real expiry

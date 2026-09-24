@@ -55,7 +55,8 @@ def _option_needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool 
     return list(fn(conn, as_of, historical=historical))
 
 
-def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False) -> List[dict]:
+def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False,
+                  include_unrequestable: bool = False) -> List[dict]:
     """Same (instrument_id, settle_date, mark_type) set as live.build_requests, without
     requiring blpapi (RequestRow construction there is Bloomberg-request specific).
 
@@ -79,9 +80,17 @@ def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False
     why). The default is the live request list, unchanged.
 
     2026-09-21: read from the Bloomberg library (data/bloomberg/library.py), the one
-    record of what the trades need; build_requests and the backfill read the same rows."""
+    record of what the trades need; build_requests and the backfill read the same rows.
+
+    2026-09-24: a mark with no ticker to ask for (a future of a placeholder root,
+    library.unrequestable_reason) is left out -- nothing can fill it -- unless
+    `include_unrequestable`, when it is listed with a `reason` key (the other items carry
+    none), so a listing can show the gap. A non-USD future's USD-conversion SPOT is a SPOT
+    like any other and is in the list."""
     from data.bloomberg import library
-    needed = [r for r in library.needed_on(conn, as_of, historical=historical) if r["kind"] in library.MARK_KINDS]
+    needed = [r for r in library.needed_on(conn, as_of, historical=historical,
+                                           include_unrequestable=include_unrequestable)
+              if r["kind"] in library.MARK_KINDS]
     needed.sort(key=lambda r: (r["kind"] == "FUTURE_PX", r["product"] == "FX_OPTION", r["key"],
                                r["kind"] != "SPOT", r["settle_date"]))
     out, seen = [], set()
@@ -89,7 +98,10 @@ def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False
         settle = as_of if r["kind"] == "SPOT" else r["settle_date"]
         if (r["key"], settle, r["kind"]) not in seen:
             seen.add((r["key"], settle, r["kind"]))
-            out.append({"instrument_id": r["key"], "settle_date": settle, "mark_type": r["kind"]})
+            item = {"instrument_id": r["key"], "settle_date": settle, "mark_type": r["kind"]}
+            if not r.get("requestable", True):
+                item["reason"] = r["reason"]
+            out.append(item)
     return out
 
 
@@ -98,8 +110,12 @@ def mark_inventory(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     instrument_id, settle_date, mark_type, value, source, snapped_at, status.
     status is OFFICIAL (from marks_official) | INTERP (BBG_INTERP present, official absent) |
     MANUAL (MANUAL present, official absent) | MISSING (nothing at all). `value`/`source`/
-    `snapped_at` are the row backing that status, or None when MISSING."""
-    needed = _needed_marks(conn, as_of)
+    `snapped_at` are the row backing that status, or None when MISSING.
+
+    2026-09-24: also a `reason` column, '' for a mark the pull asks for; for one it cannot
+    ask for (no verified Bloomberg ticker for a placeholder root) the reason, the mark still
+    listed with its status so the gap is in sight."""
+    needed = _needed_marks(conn, as_of, include_unrequestable=True)
     rows = []
     for item in needed:
         instrument_id, settle, mark_type = item["instrument_id"], item["settle_date"], item["mark_type"]
@@ -122,9 +138,10 @@ def mark_inventory(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
             else:
                 value, source, snapped_at, status = None, None, None, STATUS_MISSING
         rows.append({"instrument_id": instrument_id, "settle_date": settle, "mark_type": mark_type,
-                     "value": value, "source": source, "snapped_at": snapped_at, "status": status})
+                     "value": value, "source": source, "snapped_at": snapped_at, "status": status,
+                     "reason": item.get("reason", "")})
     return pd.DataFrame(rows, columns=["instrument_id", "settle_date", "mark_type", "value", "source",
-                                       "snapped_at", "status"])
+                                       "snapped_at", "status", "reason"])
 
 
 def stale_empty_pull_reason(conn: sqlite3.Connection, status: Optional[dict], as_of: str) -> Optional[str]:
@@ -242,7 +259,13 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     `_needed_marks(..., historical=True)`, the set `backfill.backfill` fills. It does not
     need a forward at the option's expiry: nothing prices an option on a past date, and
     the backfill cannot build one for a pair held only through options, so requiring it
-    left every such day incomplete (and re-requested from Bloomberg) forever."""
+    left every such day incomplete (and re-requested from Bloomberg) forever.
+
+    2026-09-24: `needed` / `present` / `complete` / `missing` count only the marks a pull
+    can ask for, so a future with no verified Bloomberg ticker cannot keep a day incomplete
+    and send the backfill back to it on every press; those marks are listed apart, in
+    `not_requestable` ([{instrument_id, settle_date, mark_type, reason}] not on file as
+    official that day). A non-USD future's USD-conversion SPOT is an ordinary needed SPOT."""
     from data.bloomberg.backfill import business_days, is_close_row
     from datetime import date as _date
     if today is None:
@@ -252,22 +275,68 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     rows = []
     for d in days:
         day = d.isoformat()
-        needed_items = _needed_marks(conn, day, historical=True)
+        listed = _needed_marks(conn, day, historical=True, include_unrequestable=True)
+        needed_items = [i for i in listed if "reason" not in i]
         present = not_closed = 0
         missing = []
         for item in needed_items:
-            hit = conn.execute(
-                "SELECT snapped_at FROM marks_official WHERE as_of_date=:as_of AND instrument_id=:instrument_id "
-                "AND settle_date=:settle AND mark_type=:mark_type",
-                {"as_of": day, "instrument_id": item["instrument_id"], "settle": item["settle_date"],
-                 "mark_type": item["mark_type"]}).fetchone()
+            hit = _official_snap(conn, day, item)
             if hit and (day >= today or is_close_row(item["mark_type"], day, hit[0], today)):
                 present += 1
             else:
                 missing.append(item)
                 not_closed += 1 if hit else 0
+        unrequestable = [i for i in listed if "reason" in i and _official_snap(conn, day, i) is None]
         rows.append({"as_of_date": day, "needed": len(needed_items), "present": present,
                      "complete": len(needed_items) > 0 and present >= len(needed_items), "missing": missing,
-                     "not_closed": not_closed, "inputs_missing": inputs_missing(conn, day) if day < today else []})
+                     "not_closed": not_closed, "inputs_missing": inputs_missing(conn, day) if day < today else [],
+                     "not_requestable": unrequestable})
     return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete", "missing", "not_closed",
-                                       "inputs_missing"])
+                                       "inputs_missing", "not_requestable"])
+
+
+def _official_snap(conn: sqlite3.Connection, day: str, item: dict):
+    """(snapped_at,) of the official mark `item` names on `day`, or None."""
+    return conn.execute(
+        "SELECT snapped_at FROM marks_official WHERE as_of_date=:as_of AND instrument_id=:instrument_id "
+        "AND settle_date=:settle AND mark_type=:mark_type",
+        {"as_of": day, "instrument_id": item["instrument_id"], "settle": item["settle_date"],
+         "mark_type": item["mark_type"]}).fetchone()
+
+
+STATUS_ON_FILE = "ON_FILE"
+
+
+def contract_dates_inventory(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
+    """The commodity futures open on `as_of` whose Bloomberg contract dates the book needs
+    (library kind CONTRACT_DATES, 2026-09-24), one row per contract: contract_id,
+    bbg_ticker, needed_until, trades, status (ON_FILE when data.contracts.static_dates holds
+    them, else MISSING), last_trade_date, first_notice_date, source ('' when missing),
+    reason ('' when the pull can ask for them; why not otherwise). Only a MISSING row with
+    no reason is what today's pull asks for (library.contract_dates_needed)."""
+    from data.bloomberg import library
+    columns = ["contract_id", "bbg_ticker", "needed_until", "trades", "status", "last_trade_date",
+               "first_notice_date", "source", "reason"]
+    found = {}
+    for r in library.rows(conn):
+        if r["kind"] != library.CONTRACT_DATES or not (r["needed_from"] <= as_of <= r["needed_until"]):
+            continue
+        entry = found.setdefault(r["key"], {"contract_id": r["key"], "bbg_ticker": r["bbg_ticker"],
+                                            "needed_until": r["needed_until"], "trade_ids": set(),
+                                            "reason": r["reason"]})
+        entry["trade_ids"].add(r["trade_id"])
+        entry["needed_until"] = max(entry["needed_until"], r["needed_until"])
+    try:
+        from data.contracts import static_dates
+    except ImportError:
+        static_dates = None
+    out = []
+    for key in sorted(found):
+        entry = found[key]
+        stored = static_dates(conn, key) if static_dates is not None else None
+        out.append({"contract_id": key, "bbg_ticker": entry["bbg_ticker"], "needed_until": entry["needed_until"],
+                    "trades": len(entry["trade_ids"]), "status": STATUS_ON_FILE if stored else STATUS_MISSING,
+                    "last_trade_date": (stored or {}).get("last_trade_date", ""),
+                    "first_notice_date": (stored or {}).get("first_notice_date", ""),
+                    "source": (stored or {}).get("source", ""), "reason": entry["reason"]})
+    return pd.DataFrame(out, columns=columns)

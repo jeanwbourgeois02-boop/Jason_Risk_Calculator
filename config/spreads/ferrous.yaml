@@ -1,0 +1,854 @@
+# Copied unchanged (apart from this header) on 2026-09-24 by the contract-master lane from the
+# research app: Commodity Dashboard/rvapp/universe/spreads/ferrous.yaml. A template only: nothing in
+# the app reads it yet (spreads-engine, Phase 3). Leg `instrument` values are contract roots
+# (config/contracts.csv root_id).
+# Ferrous spreads. One entry per spread; calendars come from calendar_rules.yaml.
+# Destination: rvapp/universe/spreads/ferrous.yaml (the three Phase 0 seed ids are kept).
+# Format: rvapp/universe/validate.py. Extensions used inside `params` are defined in NOTES.md:
+#   vat_basis, tenor_anchor, arb_bound, conversion_cost(+_range), desk_convention, legacy_crosscheck.
+# Nothing here has been reviewed by a human: verified is false everywhere.
+
+# =====================================================================
+# BENCHMARK - same commodity, different venue, grade or location
+# =====================================================================
+
+- id: bench.ore.dce_vs_sgx62
+  family: benchmark
+  name: DCE iron ore vs SGX 62% iron ore
+  sector: ferrous
+  legs:
+    - {instrument: DCE:I,   weight: 1.0}
+    - {instrument: SGX:FEF, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [ore_onshore_offshore, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    level_breaks: [{date: "2025-08-29", shift: 1.8}]   # SGX 62% -> 61% Fe from the Jan-26 contract; size is an estimate, measure it on real data
+    vat_basis: ex_vat          # DCE price / 1.13 before FX; SGX carries no VAT
+    tenor_anchor: DCE:I        # SGX leg uses the same delivery month as DCE's main contract
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:I
+      offshore_leg: SGX:FEF
+      freight_usd_t: 0         # SGX is already CFR China
+      import_duty: 0.0
+      vat_rate: 0.13
+      port_charges_cny_t: 30   # discharge, port construction fee, agency; ~25-35 per wet t
+      grade_adjustment_usd_t: 0
+      formula: "parity_cny_t = (offshore_usd_t + freight_usd_t + grade_adjustment_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when onshore_cny_t > parity_cny_t"
+  notes: >-
+    The core ferrous benchmark. Both legs are per dry tonne, so no moisture term.
+    Import parity = SGX x FX x 1.13 VAT + about 30 CNY/t port charges; duty is zero.
+    DCE delivers 61% Fe and prices the cheapest deliverable brand, so it sits structurally
+    below parity; trade the deviation from its own history, not the raw level.
+    grade_adjustment is 0 for 2026+ contracts (SGX moved to 61% Fe); for older history
+    SGX was 62% Fe, worth roughly 1.5-2 USD/t more - the series has a break at the
+    Jan-26 contract. Without tenor_anchor the spread would embed 1-4 months of SGX
+    backwardation, which is often several USD/t.
+
+- id: bench.ore.dce_vs_sgx65
+  family: benchmark
+  name: DCE iron ore vs SGX 65% iron ore
+  sector: ferrous
+  legs:
+    - {instrument: DCE:I,    weight: 1.0}
+    - {instrument: SGX:M65F, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [ore_onshore_offshore, ore_grade_premium, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat          # DCE price / 1.13 before FX; SGX carries no VAT
+    tenor_anchor: DCE:I        # SGX leg uses the same delivery month as DCE's main contract
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:I
+      offshore_leg: SGX:M65F
+      freight_usd_t: 0         # SGX is already CFR China
+      import_duty: 0.0
+      vat_rate: 0.13
+      port_charges_cny_t: 30
+      grade_adjustment_usd_t: 0   # 65% Brazilian fines against DCE's 61% deliverable: the premium is the signal, so no adjustment
+      formula: "parity_cny_t = (offshore_usd_t + freight_usd_t + grade_adjustment_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; DCE prices the cheapest 61% brand, so it sits well below this parity"
+  notes: >-
+    DCE against the high-grade seaborne index: bench.ore.dce_vs_sgx62 plus the 65/62
+    premium, so the ratio falls when mills pay up for productivity (high margins, output
+    curbs) and rises when they chase cheap units. No level break: the MB 65% index did not
+    change specification. SGX:M65F liquidity sits in the first 3-4 months; with the DCE
+    anchor the SGX leg is often 4-7 months out, so expect thin settlements there
+    (calendar_depth raised to 7 for this row). Added 2026-09-22 for the metals ratio screen.
+
+- id: bench.ore.dce_vs_cme
+  family: benchmark
+  name: DCE iron ore vs CME 62% iron ore
+  sector: ferrous
+  legs:
+    - {instrument: DCE:I,   weight: 1.0}
+    - {instrument: CME:TIO, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [ore_onshore_offshore, ore_venue_basis, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    level_breaks: [{date: "2025-08-29", shift: 1.8}]   # as bench.ore.dce_vs_sgx62: the Jan-26 contracts settle on the 61% Fe index; measure it on real data
+    vat_basis: ex_vat
+    tenor_anchor: DCE:I
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:I
+      offshore_leg: CME:TIO
+      freight_usd_t: 0
+      import_duty: 0.0
+      vat_rate: 0.13
+      port_charges_cny_t: 30
+      grade_adjustment_usd_t: 0
+      formula: "as bench.ore.dce_vs_sgx62"
+  notes: >-
+    The CME twin of bench.ore.dce_vs_sgx62: same Platts index as SGX:FEF, so the two rows
+    should differ only by settlement-time noise and the CME leg's thinner back months. In
+    the screen because the China list names CME TIO; if the allowance is tight this row
+    and CME:TIO are the first to drop (calendar_depth raised to 7 so the DCE anchor month
+    is inside the generics). Added 2026-09-22 for the metals ratio screen.
+
+- id: bench.ore.sgx65_vs_sgx62
+  family: benchmark
+  name: SGX 65% vs SGX 62% iron ore (high-grade premium)
+  sector: ferrous
+  legs:
+    - {instrument: SGX:M65F, weight: 1.0}
+    - {instrument: SGX:FEF,  weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [ore_grade_premium, china_steel_margin]
+  verified: false
+  params:
+    level_breaks: [{date: "2025-12-01", shift: 1.8}]   # SGX 62% -> 61% Fe from the Jan-26 contract; size is an estimate, measure it on real data
+  notes: >-
+    Premium for Brazilian high-grade fines. Widens when mill margins and coke prices are
+    high (mills pay for productivity) and under output curbs; collapses when margins are
+    negative. m+1 on both legs guarantees the same month; the front month is the
+    part-priced averaging month. From the Jan-26 contract the base leg is 61% Fe, so the
+    premium steps up by about 1.5-2 USD/t - a break, not a signal.
+
+- id: bench.ore.sgx62_vs_sgx58
+  family: benchmark
+  name: SGX 62% vs SGX 58% iron ore (low-grade discount)
+  sector: ferrous
+  legs:
+    - {instrument: SGX:FEF,  weight: 1.0}
+    - {instrument: SGX:M58F, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [ore_grade_premium, china_steel_margin]
+  verified: false
+  params:
+    level_breaks: [{date: "2025-12-01", shift: -1.8}]   # SGX 62% -> 61% Fe from the Jan-26 contract; size is an estimate, measure it on real data
+  notes: >-
+    Low-grade discount; narrows when mills are losing money and chase cheap units.
+    SGX:M58F is marked illiquid, so this row will have no data unless the terminal shows
+    real open interest and the status is changed. confidence: low on the 58% leg.
+
+- id: bench.ore.cme_vs_sgx62
+  family: benchmark
+  name: CME iron ore vs SGX 62% iron ore (venue basis)
+  sector: ferrous
+  legs:
+    - {instrument: CME:TIO, weight: 1.0}
+    - {instrument: SGX:FEF, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [ore_venue_basis]
+  verified: false
+  notes: >-
+    Same index, same month: should be zero bar settlement-time noise. Not a trade; a data
+    and ticker sanity check. If the allowance is tight, drop CME:TIO and this row first.
+
+- id: bench.coal.dce_vs_sgx_fob_aus
+  family: benchmark
+  name: DCE coking coal vs SGX premium HCC FOB Australia
+  sector: ferrous
+  legs:
+    - {instrument: DCE:JM,  weight: 1.0}
+    - {instrument: SGX:ACF, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [coking_coal_import_arb, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: DCE:JM
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:JM
+      offshore_leg: SGX:ACF
+      freight_usd_t: 15        # Queensland-North China, Panamax/Cape; moves 10-25
+      import_duty: 0.0         # Australia under ChAFTA; 3% MFN for other origins since 2024
+      vat_rate: 0.13
+      port_charges_cny_t: 40
+      grade_adjustment_usd_t: 0
+      formula: "parity_cny_t = (offshore_usd_t + freight_usd_t + grade_adjustment_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when onshore_cny_t > parity_cny_t"
+  notes: >-
+    Loose link. SGX is premium low-vol FOB Queensland; DCE delivers domestic and Mongolian
+    grade main coking coal, usually worth less, so the level is not a clean arb and
+    grade_adjustment is left at 0 rather than guessed. Useful as onshore-vs-seaborne
+    direction. Expect weak cointegration; the health score should down-weight it.
+    Freight and port numbers are confidence: low.
+
+- id: bench.hrc.cme_vs_shfe
+  family: benchmark
+  name: SHFE HRC vs CME HRC (China discount to the US)
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:HC, weight: 1.0}
+    - {instrument: CME:HRC, weight: -1.0}
+  unit: USD/st
+  fx: USDCNH
+  tenor: main
+  driver_tags: [hrc_arb, us_steel_premium]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: inc_vat         # China's HRC export VAT rebate is zero since Aug 2021
+    tenor_anchor: SHFE:HC
+    desk_convention: "the desk and the legacy Steel pulse quote US / China; this row is China / US, the reciprocal"
+  notes: >-
+    China first (ratio SHFE / CME), same delivery month: the stored value is the Chinese
+    discount to the US Midwest, normally negative. SHFE is converted CNY/t to USD/st
+    (divide by FX and by 1.10231). VAT stays in because exporters get no rebate, so the
+    VAT-inclusive domestic price is the export cost base. The arb is shut by Section 232
+    and AD/CVD duties, so this is a regional premium that mean-reverts slowly, not a
+    bound. Re-ordered China-first on 2026-09-22 (id kept; the history changes sign). See
+    bench.hrc.cme_vs_shfe_delivered for the legacy Steel pulse form, which stays US-first.
+
+- id: bench.hrc.cme_vs_shfe_delivered
+  family: benchmark
+  name: CME HRC less 300 delivery cost vs SHFE HRC (legacy Steel pulse)
+  sector: ferrous
+  legs:
+    - {instrument: CME:HRC, weight: 1.0}
+    - {instrument: SHFE:HC, weight: -1.0}
+  unit: USD/st
+  fx: USDCNH
+  tenor: front
+  constant: -300
+  driver_tags: [hrc_arb, us_steel_premium]
+  verified: false
+  params:
+    vat_basis: inc_vat
+    legacy_crosscheck: true
+    desk_convention: "ratio = (CME_HRC + constant) / SHFE_HC_in_USD_per_st"
+  notes: >-
+    PLAN.md section 8 cross-check. Legacy computes (HRC1 - 300) / (ROC1 in USD per short
+    ton) on generic front contracts, VAT left in. This row's RATIO with the constant
+    applied to the first leg must match it, apart from the legacy fixed FX of 7.16 and
+    its 0.91 rounding of 1/1.10231. The 300 USD/st is the user's delivered-cost allowance.
+
+- id: bench.hrc.lme_fob_china_vs_shfe
+  family: benchmark
+  name: SHFE HRC vs LME HRC FOB China (export parity)
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:HC, weight: 1.0}
+    - {instrument: LME:HC,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_steel_export, hrc_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: inc_vat
+    tenor_anchor: SHFE:HC
+    desk_convention: "stored value = SHFE (VAT in, USD/t) minus FOB China; positive when export coil trades below the domestic price"
+    arb_bound:
+      type: export_parity
+      onshore_leg: SHFE:HC
+      offshore_leg: LME:HC
+      export_vat_rebate: 0.0
+      vat_rate: 0.13
+      export_cost_cny_t: 80    # inland freight to port plus FOB charges
+      formula: "fob_parity_usd_t = (onshore_cny_t * (1 - export_vat_rebate / (1 + vat_rate)) + export_cost_cny_t) / USDCNH; exports pay when offshore_usd_t > fob_parity_usd_t, i.e. when the stored value is below -export_cost_cny_t / USDCNH"
+  notes: >-
+    The tightest China-to-world steel link, China first (ratio SHFE / FOB). With a zero
+    rebate the FOB price should sit near the VAT-inclusive Shanghai price plus about
+    80 CNY/t of export cost, so the stored value should be slightly negative. FOB often
+    trades below the domestic price because of untaxed 'buy-order' exports: a rising
+    positive value flags export pressure. export_cost is confidence: low. Re-ordered
+    China-first on 2026-09-22 (id kept; the history changes sign). When LME Steel HRC
+    Shanghai lists (27 Oct 2026) it will be a cleaner offshore proxy for the SHFE leg.
+
+- id: bench.hrc.cme_vs_lme_fob_china
+  family: benchmark
+  name: CME HRC vs LME HRC FOB China
+  sector: ferrous
+  legs:
+    - {instrument: CME:HRC, weight: 1.0}
+    - {instrument: LME:HC,  weight: -1.0}
+  unit: USD/st
+  tenor: m+1
+  driver_tags: [hrc_arb, us_steel_premium]
+  verified: false
+  params:
+    arb_bound:
+      type: import_parity
+      onshore_leg: CME:HRC
+      offshore_leg: LME:HC
+      freight_usd_t: 70
+      import_duty: 0.50        # Section 232, raised to 50% in June 2025; levied on FOB value
+      other_usd_t: 40          # US port, inland freight to the Midwest
+      formula: "parity_usd_st = (offshore_usd_t * (1 + import_duty) + freight_usd_t + other_usd_t) / 1.10231; imports pay when onshore_usd_st > parity_usd_st"
+  notes: >-
+    All-USD, all-offshore version of the US premium: no FX, no VAT, no China access
+    needed. Chinese HRC itself is kept out by AD/CVD, so read the bound as the price at
+    which generic Asian-priced coil reaches the Midwest. Freight and other costs are
+    confidence: low.
+
+- id: bench.hrc.cme_us_vs_cme_nwe
+  family: benchmark
+  name: CME US Midwest HRC vs CME North European HRC
+  sector: ferrous
+  legs:
+    - {instrument: CME:HRC, weight: 1.0}
+    - {instrument: CME:EHR, weight: -1.0}
+  unit: USD/st
+  fx: USDEUR
+  tenor: m+1
+  driver_tags: [us_steel_premium, eu_steel_premium]
+  verified: false
+  notes: >-
+    Transatlantic HRC. EUR/t to USD/st: divide by USDEUR (or multiply by EURUSD) and by
+    1.10231. Driven by Section 232 on one side and EU safeguards/CBAM on the other.
+
+- id: bench.hrc.cme_nwe_vs_lme_fob_china
+  family: benchmark
+  name: CME North European HRC vs LME HRC FOB China
+  sector: ferrous
+  legs:
+    - {instrument: CME:EHR, weight: 1.0}
+    - {instrument: LME:HC,  weight: -1.0}
+  unit: USD/t
+  fx: USDEUR
+  tenor: m+1
+  driver_tags: [eu_steel_premium, china_steel_export]
+  verified: false
+  notes: >-
+    European premium over Asian export coil. Bounded in practice by freight (roughly
+    50-70 USD/t), EU safeguard quotas and out-of-quota duty, AD duties on China and CBAM
+    from 2026. No arb_bound given: the duty stack changes too often to hard-code.
+
+- id: bench.rebar.lme_turkey_vs_shfe
+  family: benchmark
+  name: SHFE rebar vs LME rebar FOB Turkey
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:RB, weight: 1.0}
+    - {instrument: LME:SR,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_steel_export, global_rebar]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: inc_vat         # rebar export rebate is also zero
+    tenor_anchor: SHFE:RB
+  notes: >-
+    The two rebar futures that exist, China first (ratio SHFE / Turkey FOB, SHFE VAT in).
+    They compete in the Middle East, North Africa and Southeast Asia rather than
+    arbitraging directly, so the link is loose: BF ore-and-coke economics (China) against
+    EAF scrap economics (Turkey). A high ratio means Chinese rebar is expensive next to
+    the export market. Re-ordered China-first on 2026-09-22 (id kept; the history changes
+    sign).
+
+- id: bench.scrap.cme_bus_vs_lme_turkey
+  family: benchmark
+  name: CME Chicago busheling vs LME scrap CFR Turkey
+  sector: ferrous
+  legs:
+    - {instrument: CME:BUS, weight: 1.0}
+    - {instrument: LME:SC,  weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [scrap_global]
+  verified: false
+  notes: >-
+    US prime scrap against the world's marginal obsolete-scrap import price. Busheling is
+    USD per gross ton: divide by 1.01605 to get USD/t. Grade (prime vs HMS 80:20) and
+    location both differ, so it is a premium, not an arb. US East Coast HMS exports to
+    Turkey are the physical link.
+
+# =====================================================================
+# PROCESSING ("Crack") - product minus raw materials at physical yields
+# Gross material spreads: constant stays 0. The conversion cost is a range that drifts,
+# so its central estimate sits in params.conversion_cost for the engine's cost line.
+# =====================================================================
+
+- id: proc.cn.rebar_mill_margin
+  family: processing
+  name: China rebar mill margin
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:RB, weight: 1.0}
+    - {instrument: DCE:I,   weight: -1.6}
+    - {instrument: DCE:J,   weight: -0.5}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  constant: 0
+  driver_tags: [china_steel_margin]
+  verified: false
+  params:
+    conversion_cost: 1000
+    conversion_cost_range: [800, 1200]
+  notes: >-
+    Blast-furnace route, per tonne of steel. Ore: hot metal is about 94.5% Fe, so 1 t
+    needs 0.945 / 0.615 = 1.54 t of dry ore, about 1.6 t after sinter and furnace losses.
+    Coke: BF coke rate is 0.35-0.40 t plus about 0.15 t of injected PCI coal, which has
+    no future, so desks load it onto coke: 0.5 t. About 10% scrap charge offsets BOF and
+    rolling losses, so hot metal to rebar is taken as 1:1. All legs are CNY/t with VAT
+    in, so VAT cancels. Each leg uses its own main contract: the desk pairs RB 01/05/10
+    with I and J 01/05/09. Value is the gross material spread; subtract roughly
+    800-1200 CNY/t (alloys, power, labour, depreciation, rolling) for a margin.
+
+- id: proc.cn.hrc_mill_margin
+  family: processing
+  name: China HRC mill margin
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:HC, weight: 1.0}
+    - {instrument: DCE:I,   weight: -1.6}
+    - {instrument: DCE:J,   weight: -0.5}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_steel_margin]
+  verified: false
+  params:
+    conversion_cost: 1100
+    conversion_cost_range: [900, 1300]
+  notes: >-
+    Same arithmetic as proc.cn.rebar_mill_margin: 1.6 t ore + 0.5 t coke per tonne.
+    Hot-strip rolling costs a little more than a bar mill, hence the higher cost line.
+
+- id: proc.cn.rebar_mill_margin_coal
+  family: processing
+  name: China rebar mill margin, coking-coal basis
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:RB, weight: 1.0}
+    - {instrument: DCE:I,   weight: -1.6}
+    - {instrument: DCE:JM,  weight: -0.65}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_steel_margin]
+  verified: false
+  params:
+    conversion_cost: 1150
+    conversion_cost_range: [950, 1350]
+  notes: >-
+    Integrated mill with its own coke ovens. 0.5 t coke x 1.3 t coal per t coke = 0.65 t
+    coking coal. Cost line is the rebar one plus about 150 CNY/t of coking cost net of
+    by-products. Preferable to the coke version when DCE:J is too thin to trade.
+
+- id: proc.cn.hrc_mill_margin_coal
+  family: processing
+  name: China HRC mill margin, coking-coal basis
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:HC, weight: 1.0}
+    - {instrument: DCE:I,   weight: -1.6}
+    - {instrument: DCE:JM,  weight: -0.65}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_steel_margin]
+  verified: false
+  params:
+    conversion_cost: 1250
+    conversion_cost_range: [1050, 1450]
+  notes: 1.6 t ore + 0.65 t coking coal (0.5 t coke x 1.3). See proc.cn.rebar_mill_margin_coal.
+
+- id: proc.cn.coking_margin
+  family: processing
+  name: China coking margin (coke minus coking coal)
+  sector: ferrous
+  legs:
+    - {instrument: DCE:J,  weight: 1.0}
+    - {instrument: DCE:JM, weight: -1.3}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_coking_margin]
+  verified: false
+  params:
+    conversion_cost: 150
+    conversion_cost_range: [50, 250]
+    desk_convention: "also watched as the plain price ratio J / JM"
+  notes: >-
+    Coke yield from a dry coal blend is 75-77%, so 1 t coke needs 1 / 0.76 = 1.3 t coal.
+    Desks use 1.3 to 1.4; 1.3 is the common one. DCE:JM is prime hard coking coal while a
+    real blend includes cheaper fat, lean and gas coals, so the level understates the true
+    margin; use z-scores. By-product credits (tar, benzol, gas) offset much of the
+    conversion cost, hence the low cost line.
+
+- id: proc.cn.rebar_vs_ore
+  family: processing
+  name: China rebar vs iron ore (ore-only margin)
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:RB, weight: 1.0}
+    - {instrument: DCE:I,   weight: -1.6}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_steel_margin]
+  verified: false
+  params:
+    desk_convention: "watched as the plain price ratio RB / I (luo-kuang bi)"
+  notes: >-
+    1.6 t ore per tonne of steel (see proc.cn.rebar_mill_margin). The most traded
+    steel-vs-raw-material pair in China; the z-score of RB - 1.6 x I and of RB / I tell
+    the same story.
+
+- id: proc.cn.rebar_vs_coke
+  family: processing
+  name: China rebar vs coke (coke-only margin)
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:RB, weight: 1.0}
+    - {instrument: DCE:J,   weight: -0.5}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_steel_margin]
+  verified: false
+  params:
+    desk_convention: "watched as the plain price ratio RB / J (luo-jiao bi)"
+  notes: 0.5 t coke per tonne of steel (see proc.cn.rebar_mill_margin).
+
+- id: proc.cn.hrc_vs_ore
+  family: processing
+  name: China HRC vs iron ore (ore-only margin)
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:HC, weight: 1.0}
+    - {instrument: DCE:I,   weight: -1.6}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_steel_margin]
+  verified: false
+  notes: 1.6 t ore per tonne of steel. Manufacturing-and-export-led version of rebar vs ore.
+
+- id: proc.cn.hrc_vs_coke
+  family: processing
+  name: China HRC vs coke (coke-only margin)
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:HC, weight: 1.0}
+    - {instrument: DCE:J,   weight: -0.5}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_steel_margin]
+  verified: false
+  notes: 0.5 t coke per tonne of steel.
+
+- id: proc.global.hrc_fob_china_margin
+  family: processing
+  name: Offshore China steel margin (LME HRC FOB China vs SGX ore and coking coal)
+  sector: ferrous
+  legs:
+    - {instrument: LME:HC,  weight: 1.0}
+    - {instrument: SGX:FEF, weight: -1.6}
+    - {instrument: SGX:ACF, weight: -0.7}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [china_steel_margin, offshore_steel_margin]
+  verified: false
+  params:
+    level_breaks: [{date: "2025-12-01", shift: 2.88}]   # SGX 62% -> 61% Fe from the Jan-26 contract; size is an estimate, measure it on real data
+    conversion_cost: 150
+    conversion_cost_range: [120, 190]
+  notes: >-
+    The China mill margin built only from contracts an offshore account can trade.
+    1.6 t ore + 0.7 t coking coal (0.5 t coke x 1.4 t seaborne coal per t coke; worldsteel
+    gives 0.78 t met coal including PCI). The onshore rows use 1.3; the difference does
+    not move z-scores. Caveats: coal is FOB Australia (add about 15 USD/t x 0.7 freight),
+    and the FOB steel price carries unrebated Chinese VAT while the raw materials are
+    VAT-free, so the level overstates the true margin. confidence: medium on 0.7.
+
+- id: proc.us.eaf_hrc_vs_busheling
+  family: processing
+  name: US EAF metal spread (CME HRC minus busheling scrap)
+  sector: ferrous
+  legs:
+    - {instrument: CME:HRC, weight: 1.0}
+    - {instrument: CME:BUS, weight: -1.12}
+  unit: USD/st
+  tenor: m+1
+  driver_tags: [us_eaf_margin, us_steel_premium]
+  verified: false
+  params:
+    conversion_cost: 250
+    conversion_cost_range: [200, 300]
+    desk_convention: "quoted as HRC in USD/st minus busheling in USD/gross ton, unconverted"
+  notes: >-
+    Busheling is USD per gross ton (2240 lb): the engine first converts it to USD/st by
+    dividing by 1.12. An EAF flat-rolled mill charges 1.07-1.15 st of scrap per st of
+    coil (melt yield about 91%, casting and hot rolling about 97%). Weight 1.12 is
+    inside that range AND makes the value identical to the industry's quoted 'metal
+    spread' (HRC $/st minus busheling $/gt), because 1.12 x (BUS / 1.12) = BUS.
+    Real charges mix busheling with shred, HMS, pig iron and DRI; busheling is the
+    prime-grade marker. conversion_cost is confidence: low.
+
+- id: proc.tr.rebar_scrap_spread
+  family: processing
+  name: Turkey rebar minus scrap (market-convention 1:1 spread)
+  sector: ferrous
+  legs:
+    - {instrument: LME:SR, weight: 1.0}
+    - {instrument: LME:SC, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [turkey_eaf_margin]
+  verified: false
+  params:
+    conversion_cost: 180
+    conversion_cost_range: [160, 210]
+    desk_convention: "the published Turkish rebar-scrap spread is 1:1"
+  notes: >-
+    The number every price reporter publishes. It is NOT yield-adjusted: the 1:1 spread
+    has to cover yield loss (about 13% of the scrap price) as well as conversion, which
+    is why the break-even quoted for it is about 160-210 USD/t. The yield-adjusted
+    margin is proc.tr.rebar_eaf_margin. Note FOB steel against CFR scrap: no freight term.
+
+- id: proc.tr.rebar_eaf_margin
+  family: processing
+  name: Turkey EAF rebar margin (yield-adjusted)
+  sector: ferrous
+  legs:
+    - {instrument: LME:SR, weight: 1.0}
+    - {instrument: LME:SC, weight: -1.13}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [turkey_eaf_margin]
+  verified: false
+  params:
+    conversion_cost: 130
+    conversion_cost_range: [110, 160]
+  notes: >-
+    HMS 80:20 melts at about 90% metallic yield; casting and bar rolling keep about 98%:
+    1 / (0.90 x 0.98) = 1.13 t scrap per tonne of rebar. conversion_cost (power,
+    electrodes, alloys, labour) is confidence: low.
+
+- id: proc.cn.stainless_vs_nickel
+  family: processing
+  name: SHFE stainless minus nickel content
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:SS, weight: 1.0}
+    - {instrument: SHFE:NI, weight: -0.08}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [stainless_nickel]
+  verified: false
+  notes: >-
+    304 stainless is 8% nickel and 18% chromium: 0.08 t Ni per tonne. The value is what
+    is left for chrome units (about 0.36 t of 50% Cr ferrochrome), iron units and
+    conversion including cold rolling (the deliverable is 2B cold-rolled coil). Chinese
+    mills buy nickel units mostly as NPI at a moving discount to refined nickel, so the
+    SHFE:NI leg overstates cost and the residual is a relative-value signal, not a P&L.
+    External leg: SHFE:NI (base metals).
+
+- id: proc.ore.fob_netback_c5
+  family: processing
+  name: Iron ore FOB Australia netback (SGX 62% minus C5 freight)
+  sector: ferrous
+  legs:
+    - {instrument: SGX:FEF, weight: 1.0}
+    - {instrument: SGX:C5,  weight: -1.087}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [ore_freight]
+  verified: false
+  params:
+    level_breaks: [{date: "2025-12-01", shift: -1.8}]   # SGX 62% -> 61% Fe from the Jan-26 contract; size is an estimate, measure it on real data
+  notes: >-
+    Ore is priced per dry tonne, freight is paid per wet tonne. At about 8% moisture,
+    1 dry tonne ships as 1 / 0.92 = 1.087 wet tonnes, hence the weight. The value is the
+    miner's FOB Pilbara netback; long ore / short freight is the classic expression.
+    External leg: SGX:C5, every attribute of which is confidence: low.
+
+# =====================================================================
+# SUBSTITUTION - different commodities traded against each other (log-ratio stats)
+# =====================================================================
+
+- id: sub.cn.rebar_vs_hrc
+  family: substitution
+  name: SHFE rebar vs SHFE HRC
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:RB, weight: 1.0}
+    - {instrument: SHFE:HC, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_long_vs_flat]
+  verified: false
+  params:
+    desk_convention: "China quotes it the other way round: juan-luo cha = HC - RB"
+  notes: >-
+    Construction steel against manufacturing and export steel; property and
+    infrastructure against autos, appliances and machinery. Mills swing hot metal between
+    the two, which caps the spread at a few hundred CNY/t. Both legs share the 01/05/10
+    cycle. Sign kept as in the Phase 0 seed (RB - HC).
+
+- id: sub.ore.sgx65_vs_sgx62
+  family: substitution
+  name: SGX 65% / SGX 62% iron ore ratio
+  sector: ferrous
+  legs:
+    - {instrument: SGX:M65F, weight: 1.0}
+    - {instrument: SGX:FEF,  weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [ore_grade_premium, china_steel_margin]
+  verified: false
+  params:
+    level_breaks: [{date: "2025-12-01", shift: 1.8}]   # SGX 62% -> 61% Fe from the Jan-26 contract; size is an estimate, measure it on real data
+  notes: >-
+    Same legs as bench.ore.sgx65_vs_sgx62, listed here as PLAN.md section 8 asks, for the
+    log-ratio view: the percentage premium is more stable than the dollar premium when
+    flat price moves. Shares a driver tag so only one of the two can reach the top 10.
+
+- id: sub.cn.sm_vs_sf
+  family: substitution
+  name: ZCE manganese silicon vs ferrosilicon
+  sector: ferrous
+  legs:
+    - {instrument: ZCE:SM, weight: 1.0}
+    - {instrument: ZCE:SF, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [ferroalloy_relative]
+  verified: false
+  notes: >-
+    The 'double silicon' spread. Both are steel deoxidisers with the same demand driver
+    (crude steel output) but different costs: SM follows manganese ore and coke, SF follows
+    power and semi-coke prices in Inner Mongolia, Ningxia and Qinghai. Trades on supply
+    shocks (power rationing, manganese ore disruptions).
+
+- id: sub.cn.coke_vs_ore
+  family: substitution
+  name: DCE coke vs DCE iron ore
+  sector: ferrous
+  legs:
+    - {instrument: DCE:J, weight: 1.0}
+    - {instrument: DCE:I, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [raw_material_relative]
+  verified: false
+  notes: >-
+    Complements, not substitutes, but the families force a home: the two blast-furnace
+    inputs share one demand driver (hot metal output), so the ratio isolates relative
+    supply - Chinese coal policy and safety checks against Australian and Brazilian
+    shipments.
+
+- id: sub.cn.coking_coal_vs_ore
+  family: substitution
+  name: DCE coking coal vs DCE iron ore
+  sector: ferrous
+  legs:
+    - {instrument: DCE:JM, weight: 1.0}
+    - {instrument: DCE:I,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [raw_material_relative]
+  verified: false
+  notes: >-
+    Liquid version of sub.cn.coke_vs_ore now that DCE:JM carries far more open interest
+    than DCE:J. Domestic-supply commodity against import-supply commodity.
+
+- id: sub.global.hcc_vs_ore
+  family: substitution
+  name: SGX coking coal FOB Australia vs SGX 62% iron ore
+  sector: ferrous
+  legs:
+    - {instrument: SGX:ACF, weight: 1.0}
+    - {instrument: SGX:FEF, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [raw_material_relative]
+  verified: false
+  params:
+    level_breaks: [{date: "2025-12-01", shift: 1.8}]   # SGX 62% -> 61% Fe from the Jan-26 contract; size is an estimate, measure it on real data
+  notes: >-
+    Seaborne, all-USD version of the raw-material ratio. Queensland weather and Indian
+    demand on the coal side against Pilbara and Brazil supply on the ore side.
+
+- id: sub.global.scrap_vs_ore
+  family: substitution
+  name: LME scrap CFR Turkey vs SGX 62% iron ore
+  sector: ferrous
+  legs:
+    - {instrument: LME:SC,  weight: 1.0}
+    - {instrument: SGX:FEF, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [scrap_global, raw_material_relative]
+  verified: false
+  params:
+    level_breaks: [{date: "2025-12-01", shift: 1.8}]   # SGX 62% -> 61% Fe from the Jan-26 contract; size is an estimate, measure it on real data
+  notes: >-
+    EAF iron units against BF iron units. BOF shops vary their scrap charge (10-25%) with
+    this ratio, which is the physical substitution. A true comparison is scrap against
+    hot-metal cost (1.6 ore + 0.5 coke), but substitution rows take two legs.
+
+- id: sub.coal.hcc_vs_newcastle_thermal
+  family: substitution
+  name: SGX coking coal FOB Australia vs ICE Newcastle thermal coal
+  sector: ferrous
+  legs:
+    - {instrument: SGX:ACF, weight: 1.0}
+    - {instrument: ICE:NCF, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [met_vs_thermal_coal]
+  verified: false
+  notes: >-
+    The met-thermal spread. When thermal approaches semi-soft coking prices, miners sell
+    coking coal into the thermal market (2022), which floors the ratio. External leg:
+    ICE:NCF (energy). ZCE thermal coal would be the onshore leg but it is suspended.
+
+- id: sub.cn.rebar_vs_glass
+  family: substitution
+  name: SHFE rebar vs ZCE flat glass
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:RB, weight: 1.0}
+    - {instrument: ZCE:FG,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_property_chain]
+  verified: false
+  notes: >-
+    Property-cycle pair: rebar goes in at new starts, glass at completions. The standard
+    onshore way to trade starts against completions. External leg: ZCE:FG.
+
+- id: sub.cn.copper_vs_iron_ore
+  family: substitution
+  name: SHFE copper vs DCE iron ore
+  sector: ferrous
+  legs:
+    - {instrument: SHFE:CU, weight: 1.0}
+    - {instrument: DCE:I,   weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [china_macro_old_vs_new]
+  verified: false
+  notes: >-
+    Macro ratio: electrification and global manufacturing against Chinese property and
+    infrastructure. External leg: SHFE:CU (base metals may prefer to own this row).

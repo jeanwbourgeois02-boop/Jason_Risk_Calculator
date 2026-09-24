@@ -1,0 +1,34 @@
+# SG: Singapore Exchange (SGX derivatives: iron ore, rubber, freight, the other
+# commodity contracts): full-day closures for 2026 and 2027, weekdays only: Singapore's
+# public holidays, with the Monday in lieu of a Sunday holiday (a Saturday holiday
+# gets none).
+# Written from memory on 2026-09-24 by the exchange-calendars lane: MUST be checked
+# against SGX's published trading calendar before it is relied on. SGX runs some
+# derivatives on some public holidays; the Chinese New Year's Eve half day is not a
+# full-day closure and is not listed.
+# The lunar and Islamic holidays move each year: 2027's are set by the Ministry of
+# Manpower in mid-2026 and are worked out here from the calendars, marked unverified.
+# coverage: 2026-01-01 to 2027-12-31
+
+2026-01-01  # New Year's Day
+2026-02-17  # Chinese New Year
+2026-02-18  # Chinese New Year (second day)
+# Hari Raya Puasa 2026 falls on Saturday 21 March: no weekday closure  # unverified
+2026-04-03  # Good Friday
+2026-05-01  # Labour Day
+2026-05-27  # Hari Raya Haji  # unverified
+2026-06-01  # Vesak Day (in lieu; 31 May is a Sunday)  # unverified
+2026-08-10  # National Day (in lieu; 9 August is a Sunday)
+2026-11-09  # Deepavali (in lieu; 8 November is a Sunday)  # unverified
+2026-12-25  # Christmas Day
+
+2027-01-01  # New Year's Day
+2027-02-08  # Chinese New Year (in lieu; 6 and 7 February are the weekend)  # unverified
+2027-03-10  # Hari Raya Puasa  # unverified
+2027-03-26  # Good Friday
+# Labour Day 2027 falls on Saturday 1 May: no weekday closure
+2027-05-17  # Hari Raya Haji  # unverified
+2027-05-20  # Vesak Day  # unverified
+2027-08-09  # National Day
+2027-10-28  # Deepavali (could be 29 October)  # unverified
+# Christmas Day 2027 falls on a Saturday: no weekday closure

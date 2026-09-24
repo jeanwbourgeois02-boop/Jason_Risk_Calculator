@@ -1,0 +1,1447 @@
+# Copied unchanged (apart from this header) on 2026-09-24 by the contract-master lane from the
+# research app: Commodity Dashboard/rvapp/universe/spreads/energy.yaml. A template only: nothing in
+# the app reads it yet (spreads-engine, Phase 3). Leg `instrument` values are contract roots
+# (config/contracts.csv root_id).
+# Energy spreads. One entry per spread; calendars come from calendar_rules.yaml.
+# Destination: rvapp/universe/spreads/energy.yaml.
+# Format: rvapp/universe/validate.py. Extensions are defined in NOTES.md:
+#   leg key  qty_factor  (cross-dimension legs: spread-quantity units per one leg-quantity unit;
+#                          price per spread unit = leg price / qty_factor)
+#   params   tenor_anchor, arb_bound (types import_parity and location_arb), vat_basis,
+#            conversion_cost(+_range), desk_convention.
+# Every stored series is the straight paper spread. Freight, tolls, tax and opex sit in params
+# as context and are never subtracted. Nothing here has been reviewed by a human.
+#
+# Tenor rules used throughout:
+#   - futures vs futures with different expiry calendars: tenor main + tenor_anchor on the leg
+#     that expires FIRST, so the same delivery month exists on every other leg.
+#   - monthly-average swap vs swap: m+1 on both (generic 1 is the part-priced current month).
+#   - European gas, power, coal: open interest cascades from year and quarter contracts, so
+#     `main` does not identify a month. Those rows use front or m+1, and where they carry a
+#     tenor_anchor the anchor leg resolves by the row's own tenor (engine requirement, NOTES.md).
+# Standard conversions: 42 gal/bbl; gasoil 7.45, gasoline 8.33, naphtha 8.9, fuel oil 6.35 bbl/t;
+#   propane 521 gal/t; crude 5.8 mmBtu/bbl and 7.33 bbl/t; coal 6,000 kcal/kg = 6.978 MWh/t
+#   = 23.81 mmBtu/t; 1 MWh = 3.412 mmBtu.
+
+# =====================================================================
+# BENCHMARK - crude
+# =====================================================================
+
+- id: bench.crude.brent_vs_wti
+  family: benchmark
+  name: Brent vs WTI
+  sector: energy
+  legs:
+    - {instrument: ICE:B,    weight: 1.0}
+    - {instrument: NYMEX:CL, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [crude_atlantic_arb, us_crude_exports]
+  verified: false
+  params:
+    tenor_anchor: ICE:B        # Brent M expires end of M-2, WTI M about the 20th of M-1
+    arb_bound:
+      type: location_arb
+      from_leg: NYMEX:CL
+      to_leg: ICE:B
+      cost_items: {pipeline_cushing_to_gulf: 1.0, terminal_and_loading: 0.5, freight_usgc_to_rotterdam: 2.5}
+      total_cost: 4.0
+      formula: "US export arb to Europe is open when brent - wti > total_cost (USD/bbl)"
+  notes: >-
+    The transatlantic arb. Same delivery month on both legs (front-vs-front mixes months for
+    three weeks out of four). WTI Midland has been in the Dated Brent basket since 2023, so
+    the spread is anchored near export cost, 3-5 USD/bbl; it blows out on Cushing or Gulf
+    Coast congestion and narrows when US exports must be shut in. Cost numbers are desk
+    estimates, confidence: low.
+
+- id: bench.crude.brent_vs_dubai
+  family: benchmark
+  name: Brent futures vs Dubai swap (EFS)
+  sector: energy
+  legs:
+    - {instrument: ICE:B,    weight: 1.0}
+    - {instrument: NYMEX:DC, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [crude_sweet_sour, crude_east_west, opec_supply]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+    desk_convention: "EFS for month M = Brent futures M minus Dubai swap M"
+  notes: >-
+    The Brent-Dubai exchange of futures for swaps, quoted exactly this way. Wide EFS makes
+    Atlantic basin crude expensive in Asia and pulls Asian buyers to Gulf sour grades;
+    narrow or negative EFS (OPEC+ cuts fall on sour barrels) opens the west-to-east arb.
+    Also the cleanest sweet-sour gauge on paper.
+
+- id: bench.crude.sc_vs_brent
+  family: benchmark
+  name: INE SC vs Brent
+  sector: energy
+  legs:
+    - {instrument: INE:SC, weight: 1.0}
+    - {instrument: ICE:B,  weight: -1.0}
+  unit: USD/bbl
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_crude_arb, china_import_arb, crude_east_west]
+  verified: false
+  params:
+    desk_convention: "SC main minus Brent main, each leg on its own main contract"
+    arb_bound:
+      type: import_parity
+      onshore_leg: INE:SC
+      offshore_leg: ICE:B
+      freight_usd_bbl: 2.0       # Gulf to China VLCC, 1.5-3.0; spikes with tanker rates
+      other_usd_bbl: 0.7         # insurance, port, bonded storage, financing
+      import_duty: 0.0           # bonded delivery
+      vat_rate: 0.0
+      formula: "parity = delivered-grade FOB (about Dubai/Oman) + freight + other; SC rich when sc_usd > parity"
+  notes: >-
+    No tenor_anchor on purpose: Brent month M expires a month before SC month M, so the
+    same month is missing on Brent for about ten trading days in every cycle. Main vs main
+    embeds one month of Brent curve (usually under 1 USD/bbl). SC is bonded, ex duty and
+    VAT. It settles at 15:00 Shanghai, Brent's settlement is London evening: use the same
+    snapshot where possible or expect noise of a day's move. Drivers: tanker freight,
+    INE warehouse receipts, CNH, Chinese import quotas.
+
+- id: bench.crude.sc_vs_oman
+  family: benchmark
+  name: INE SC vs GME Oman
+  sector: energy
+  legs:
+    - {instrument: INE:SC,  weight: 1.0}
+    - {instrument: GME:OQD, weight: -1.0}
+  unit: USD/bbl
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_crude_arb, china_import_arb]
+  verified: false
+  params:
+    arb_bound:
+      type: import_parity
+      onshore_leg: INE:SC
+      offshore_leg: GME:OQD
+      freight_usd_bbl: 2.0
+      other_usd_bbl: 0.7
+      import_duty: 0.0
+      vat_rate: 0.0
+      formula: "parity = oman_fob + freight + other; delivery into INE pays when sc_usd > parity"
+  notes: >-
+    The true physical arb: Oman is deliverable into SC at par and both are medium sour.
+    Main vs main for the reason given on bench.crude.sc_vs_brent (Oman also expires end of
+    M-2). Oman futures liquidity is concentrated in the Singapore 16:30 settlement window.
+
+- id: bench.crude.sc_vs_dubai
+  family: benchmark
+  name: INE SC vs Dubai swap
+  sector: energy
+  legs:
+    - {instrument: INE:SC,   weight: 1.0}
+    - {instrument: NYMEX:DC, weight: -1.0}
+  unit: USD/bbl
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_crude_arb, china_import_arb]
+  verified: false
+  params:
+    tenor_anchor: INE:SC       # the swap for the same month is always listed and not yet pricing
+  notes: >-
+    Same idea as SC vs Oman on the more liquid sour marker, and the only SC benchmark row
+    with a clean same-month match.
+
+- id: bench.crude.sc_vs_wti
+  family: benchmark
+  name: INE SC vs WTI
+  sector: energy
+  legs:
+    - {instrument: INE:SC,   weight: 1.0}
+    - {instrument: NYMEX:CL, weight: -1.0}
+  unit: USD/bbl
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_crude_arb, us_crude_exports]
+  verified: false
+  notes: >-
+    Main vs main. Widest of the SC spreads because it stacks sweet-sour, Brent-WTI and the
+    long-haul freight from the US Gulf (5-8 USD/bbl VLCC, confidence: low). Popular with
+    Chinese retail and CTA flow because both legs are liquid in Asian hours.
+
+- id: bench.crude.oman_vs_dubai
+  family: benchmark
+  name: GME Oman vs Dubai swap
+  sector: energy
+  legs:
+    - {instrument: GME:OQD,  weight: 1.0}
+    - {instrument: NYMEX:DC, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [crude_gulf_sour]
+  verified: false
+  params:
+    tenor_anchor: GME:OQD
+  notes: >-
+    Two Gulf sour markers that set most Asian term prices (Saudi, Kuwait: average of Oman
+    and Dubai). Normally within 1 USD/bbl; moves on Chinese buying of Oman and on Platts
+    window play in Dubai partials. Same month label on both legs; confidence: low on
+    whether desks lag the swap by two months instead.
+
+- id: bench.crude.murban_vs_brent
+  family: benchmark
+  name: ICE Murban vs Brent
+  sector: energy
+  legs:
+    - {instrument: ICE:ADM, weight: 1.0}
+    - {instrument: ICE:B,   weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [crude_east_west, crude_light_sweet]
+  verified: false
+  params:
+    tenor_anchor: ICE:B        # identical expiry calendar
+  notes: >-
+    Light sweet East of Suez against light sweet Atlantic. Both expire end of M-2, so the
+    match is exact. Rises when Asian demand for light grades is strong or WTI arbitrage to
+    Asia is shut.
+
+- id: bench.crude.murban_vs_dubai
+  family: benchmark
+  name: ICE Murban vs Dubai swap
+  sector: energy
+  legs:
+    - {instrument: ICE:ADM,  weight: 1.0}
+    - {instrument: NYMEX:DC, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [crude_sweet_sour, crude_gulf_sour]
+  verified: false
+  params:
+    tenor_anchor: ICE:ADM
+  notes: >-
+    Sweet-sour inside the Gulf, free of Atlantic noise. Tracks Asian naphtha and gasoline
+    cracks (Murban is naphtha-rich) against fuel oil cracks (Dubai is residue-rich).
+
+- id: bench.crude.wti_houston_vs_cushing
+  family: benchmark
+  name: ICE Midland WTI (Houston) vs NYMEX WTI (Cushing)
+  sector: energy
+  legs:
+    - {instrument: ICE:HOU,  weight: 1.0}
+    - {instrument: NYMEX:CL, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [us_crude_exports, us_pipeline_basis]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:CL
+  notes: >-
+    Pipeline basis Cushing to the export dock, normally +0.5 to +1.5 USD/bbl. Most of this
+    market trades as differential swaps (WTI Houston, Midland, Mars, LLS, WCS), which are
+    not expressible here because the price is already a spread. confidence: low on HOU
+    liquidity and expiry rule.
+
+# =====================================================================
+# BENCHMARK - refined products
+# =====================================================================
+
+- id: bench.distillate.ho_vs_gasoil
+  family: benchmark
+  name: NYMEX heating oil vs ICE gasoil (HOGO)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:HO, weight: 1.0}
+    - {instrument: ICE:G,    weight: -1.0, qty_factor: 7.45}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [distillate_atlantic_arb]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:HO     # HO M expires end of M-1, gasoil M on about the 12th of M
+    desk_convention: "HOGO is quoted in US cents per gallon: divide this value by 0.42"
+    arb_bound:
+      type: location_arb
+      from_leg: NYMEX:HO
+      to_leg: ICE:G
+      cost_items: {freight_usgc_to_ara: 3.0}
+      total_cost: 3.0
+      formula: "US diesel flows to Europe when gasoil - ho > freight; HOGO below about -3 USD/bbl opens it"
+  notes: >-
+    Transatlantic diesel arb. HO is USD/gal (x42, same dimension, engine converts); gasoil is
+    USD/t divided by 7.45 bbl/t, the market-standard gasoil factor. Europe is structurally
+    short diesel, so HOGO is usually negative; it turns positive on US East Coast tightness
+    (cold snaps, refinery outages).
+
+- id: bench.distillate.sing_gasoil_vs_ice_gasoil
+  family: benchmark
+  name: Singapore gasoil vs ICE gasoil (gasoil East-West)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:SG, weight: 1.0, qty_factor: 0.13423}
+    - {instrument: ICE:G,    weight: -1.0}
+  unit: USD/t
+  tenor: main
+  driver_tags: [distillate_east_west]
+  verified: false
+  params:
+    tenor_anchor: ICE:G
+    desk_convention: "EW = Singapore gasoil swap x 7.45 minus ICE gasoil, USD/t, same month"
+    arb_bound:
+      type: location_arb
+      from_leg: NYMEX:SG
+      to_leg: ICE:G
+      cost_items: {freight_east_to_nwe: 45.0}
+      total_cost: 45.0
+      formula: "East-to-West diesel arb open when EW < -total_cost (USD/t)"
+  notes: >-
+    qty_factor 0.13423 t per bbl = 1 / 7.45, so the Singapore leg becomes USD/t the way the
+    market quotes the EW. Normally negative (-10 to -40); below roughly -45 Indian and Gulf
+    barrels go west. Freight number confidence: low; it doubled with Red Sea diversions.
+
+- id: bench.gasoline.rbob_vs_eurobob
+  family: benchmark
+  name: RBOB vs Eurobob gasoline (transatlantic gasoline arb)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:RB, weight: 1.0}
+    - {instrument: NYMEX:7H, weight: -1.0, qty_factor: 8.33}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [gasoline_atlantic_arb]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:RB
+    desk_convention: "quoted in US cents per gallon: divide by 0.42"
+    arb_bound:
+      type: location_arb
+      from_leg: NYMEX:7H
+      to_leg: NYMEX:RB
+      cost_items: {freight_ara_to_nyh: 3.0, rvo_and_blending: 3.0}
+      total_cost: 6.0
+      formula: "Europe-to-New-York gasoline arb open when rbob - eurobob > total_cost (USD/bbl)"
+  notes: >-
+    Eurobob USD/t divided by 8.33 bbl/t. Europe's gasoline surplus clears into the US East
+    Coast, so this sits near freight plus blending and RIN cost and widens into driving
+    season. RBOB's April grade change (summer RVP) lifts it by several USD/bbl: seasonal,
+    not a signal. Cost numbers confidence: low.
+
+- id: bench.gasoline.sing92_vs_eurobob
+  family: benchmark
+  name: Singapore Mogas 92 vs Eurobob (gasoline East-West)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:1N, weight: 1.0}
+    - {instrument: NYMEX:7H, weight: -1.0, qty_factor: 8.33}
+  unit: USD/bbl
+  tenor: m+1
+  driver_tags: [gasoline_east_west]
+  verified: false
+  notes: >-
+    Eurobob USD/t divided by 8.33. Both are monthly-average swaps; m+1 is the first
+    unpriced month on both. Driven by Chinese and Indian export quotas on the east side.
+
+- id: bench.naphtha.mopj_vs_nwe
+  family: benchmark
+  name: Japan naphtha (MOPJ) vs NWE naphtha (naphtha East-West)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:JA, weight: 1.0}
+    - {instrument: NYMEX:UN, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [naphtha_east_west, asia_petchem_demand]
+  verified: false
+  params:
+    arb_bound:
+      type: location_arb
+      from_leg: NYMEX:UN
+      to_leg: NYMEX:JA
+      cost_items: {freight_nwe_med_to_japan: 30.0}
+      total_cost: 30.0
+      formula: "West-to-East naphtha arb open when mopj - nwe > total_cost (USD/t)"
+  notes: >-
+    Asia is short naphtha, so the EW is positive and the arb is usually marginally open.
+    A clean read on Asian cracker run rates. Freight confidence: low.
+
+- id: bench.fueloil.sing380_vs_rdam35
+  family: benchmark
+  name: Singapore 380 vs Rotterdam 3.5% barges (HSFO East-West)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:SE, weight: 1.0}
+    - {instrument: NYMEX:UV, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [fueloil_east_west]
+  verified: false
+  notes: >-
+    Residue flows west to east; the arb needs about 25-35 USD/t (VLCC or Suezmax,
+    confidence: low). Summer Middle East power burn and Russian flows move it.
+
+- id: bench.fueloil.sing05_vs_rdam05
+  family: benchmark
+  name: Singapore 0.5% vs Rotterdam 0.5% marine fuel (VLSFO East-West)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:S5F, weight: 1.0}
+    - {instrument: NYMEX:R5F, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [fueloil_east_west, bunker_demand]
+  verified: false
+  notes: "Same logic as the HSFO East-West on the low-sulphur grade. confidence: low on both exchange codes."
+
+- id: bench.fueloil.hi5_sing
+  family: benchmark
+  name: Singapore Hi-5 (VLSFO 0.5% minus HSFO 380)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:S5F, weight: 1.0}
+    - {instrument: NYMEX:SE,  weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [hi5_sulphur_spread, bunker_demand]
+  verified: false
+  notes: >-
+    The sulphur spread and the scrubber payback variable: above about 100 USD/t scrubbers
+    pay back in under two years. Falls when sour crude is scarce (OPEC+ cuts lift HSFO) and
+    rises with diesel cracks, because VLSFO blends compete with gasoil for low-sulphur
+    components.
+
+- id: bench.fueloil.hi5_rdam
+  family: benchmark
+  name: Rotterdam Hi-5 (0.5% barges minus 3.5% barges)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:R5F, weight: 1.0}
+    - {instrument: NYMEX:UV,  weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [hi5_sulphur_spread]
+  verified: false
+  notes: "European sulphur spread; box it against bench.fueloil.hi5_sing."
+
+- id: bench.fueloil.shfe_fu_vs_sing380
+  family: benchmark
+  name: SHFE fuel oil vs Singapore 380
+  sector: energy
+  legs:
+    - {instrument: SHFE:FU,  weight: 1.0}
+    - {instrument: NYMEX:SE, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_fueloil_arb, china_import_arb]
+  verified: false
+  params:
+    tenor_anchor: SHFE:FU
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:FU
+      offshore_leg: NYMEX:SE
+      freight_usd_t: 15          # Singapore to Zhoushan, 10-20
+      other_usd_t: 8             # bonded storage in, inspection, financing
+      import_duty: 0.0           # bonded
+      vat_rate: 0.0
+      formula: "parity_usd_t = sing380 + freight + other; delivery into SHFE pays when fu_usd_t > parity"
+  notes: >-
+    The correct comparator for FU (the user's list had ICE gasoil, a distillate). Both legs
+    are 380 cst 3.5% sulphur and both exclude duty and VAT, so it is a clean freight-plus-
+    storage arb. FU carries a persistent retail-flow premium and warehouse-receipt
+    squeezes. Cost numbers confidence: low.
+
+- id: bench.fueloil.ine_lu_vs_sing05
+  family: benchmark
+  name: INE low sulphur fuel oil vs Singapore 0.5%
+  sector: energy
+  legs:
+    - {instrument: INE:LU,    weight: 1.0}
+    - {instrument: NYMEX:S5F, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_fueloil_arb, bunker_demand]
+  verified: false
+  params:
+    tenor_anchor: INE:LU
+  notes: >-
+    The correct comparator for LU. China makes its own VLSFO under export quotas with a tax
+    rebate, so LU prices Zhoushan bunkers against Singapore; it goes to a discount when
+    quotas are generous and to freight parity (about +15 USD/t) when they run out.
+
+- id: bench.fueloil.ine_lu_vs_shfe_fu
+  family: benchmark
+  name: INE LU vs SHFE FU (China Hi-5)
+  sector: energy
+  legs:
+    - {instrument: INE:LU,  weight: 1.0}
+    - {instrument: SHFE:FU, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [hi5_sulphur_spread, china_fueloil_arb]
+  verified: false
+  notes: >-
+    The onshore sulphur spread, a favourite of Chinese desks; trade it against
+    bench.fueloil.hi5_sing. Each leg on its own main contract (the two main months often
+    differ by one). Both bonded, no VAT.
+
+# =====================================================================
+# BENCHMARK - LPG
+# =====================================================================
+
+- id: bench.lpg.dce_pg_vs_afei
+  family: benchmark
+  name: DCE LPG vs Argus Far East propane (AFEI)
+  sector: energy
+  legs:
+    - {instrument: DCE:PG,   weight: 1.0}
+    - {instrument: NYMEX:7E, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_lpg_arb, china_import_arb]
+  verified: false
+  params:
+    vat_basis: ex_vat            # DCE price / 1.09 before FX; AFEI carries no VAT
+    tenor_anchor: DCE:PG
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:PG
+      offshore_leg: NYMEX:7E
+      freight_usd_t: 0           # AFEI is already CFR Far East
+      import_duty: 0.01          # MFN 1%; US-origin cargoes carry an extra retaliatory tariff, check
+      vat_rate: 0.09
+      port_charges_cny_t: 150    # terminal, storage, delivery-point discount; confidence: low
+      formula: "parity_cny_t = afei_usd_t * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when pg_cny_t > parity_cny_t"
+  notes: >-
+    Import parity for Chinese propane. PG delivers the cheapest of propane, butane or mix at
+    the cheapest delivery point, so it sits below parity out of season and squeezes above
+    it into winter delivery months. The stored paper spread keeps VAT in; vat_basis is
+    context for the parity line.
+
+- id: bench.lpg.dce_pg_vs_cp
+  family: benchmark
+  name: DCE LPG vs Saudi CP propane
+  sector: energy
+  legs:
+    - {instrument: DCE:PG,   weight: 1.0}
+    - {instrument: NYMEX:9N, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [china_lpg_arb, china_import_arb]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: DCE:PG
+    arb_bound:
+      type: import_parity
+      onshore_leg: DCE:PG
+      offshore_leg: NYMEX:9N
+      freight_usd_t: 70          # Gulf to South China VLGC, 40-120
+      import_duty: 0.01
+      vat_rate: 0.09
+      port_charges_cny_t: 150
+      formula: "parity_cny_t = (cp_usd_t + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    Chinese importers price term cargoes off CP, so this is the spread domestic desks
+    quote. It embeds VLGC freight; use the AFEI row for a freight-free read.
+
+- id: bench.lpg.afei_vs_cp
+  family: benchmark
+  name: AFEI propane vs Saudi CP propane
+  sector: energy
+  legs:
+    - {instrument: NYMEX:7E, weight: 1.0}
+    - {instrument: NYMEX:9N, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [lpg_freight, lpg_east_west]
+  verified: false
+  notes: >-
+    CFR Far East minus FOB Gulf: a paper proxy for VLGC freight Gulf to Japan plus Asian
+    demand pull. CP is one number fixed for the month, so after the announcement the CP
+    leg of the front month stops moving: m+1 avoids that.
+
+- id: bench.lpg.afei_vs_mont_belvieu
+  family: benchmark
+  name: AFEI propane vs Mont Belvieu propane (US-Asia LPG arb)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:7E, weight: 1.0}
+    - {instrument: NYMEX:B0, weight: -1.0, qty_factor: 0.0019194}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [lpg_us_export_arb, lpg_freight]
+  verified: false
+  params:
+    arb_bound:
+      type: location_arb
+      from_leg: NYMEX:B0
+      to_leg: NYMEX:7E
+      cost_items: {terminal_fee: 40.0, freight_houston_to_chiba: 130.0}
+      total_cost: 170.0
+      formula: "US-to-Asia propane arb open when afei - mont_belvieu > total_cost (USD/t)"
+  notes: >-
+    qty_factor 0.0019194 t per gal = 1 / 521 gal per tonne (propane at 60F), so USD/gal x 521
+    = USD/t. The most important LPG spread: the US is the marginal supplier. It pays the
+    terminal fee (5-10 c/gal) plus VLGC freight via Panama (80-250 USD/t); both are
+    confidence: low and very volatile. Both legs are monthly-average swaps: m+1.
+
+- id: bench.lpg.ara_vs_mont_belvieu
+  family: benchmark
+  name: European propane CIF ARA vs Mont Belvieu (transatlantic LPG arb)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:PS, weight: 1.0}
+    - {instrument: NYMEX:B0, weight: -1.0, qty_factor: 0.0019194}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [lpg_us_export_arb]
+  verified: false
+  notes: >-
+    Mont Belvieu USD/gal x 521 gal/t. Needs terminal fee plus 60-100 USD/t freight to
+    Europe. Compare with the AFEI row to see which way US cargoes point.
+
+- id: bench.lpg.afei_vs_ara
+  family: benchmark
+  name: AFEI propane vs European propane CIF ARA (LPG East-West)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:7E, weight: 1.0}
+    - {instrument: NYMEX:PS, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [lpg_east_west]
+  verified: false
+  notes: "Destination choice for US cargoes; roughly the freight differential (Panama congestion lifts it)."
+
+# =====================================================================
+# BENCHMARK - natural gas and LNG
+# =====================================================================
+
+- id: bench.gas.jkm_vs_ttf
+  family: benchmark
+  name: JKM LNG vs TTF
+  sector: energy
+  legs:
+    - {instrument: ICE:JKM, weight: 1.0}
+    - {instrument: ICE:TFM, weight: -1.0}
+  unit: USD/mmbtu
+  fx: USDEUR
+  tenor: main
+  driver_tags: [lng_basin_arb, lng_freight]
+  verified: false
+  params:
+    tenor_anchor: ICE:JKM        # JKM M stops trading mid M-1, TTF M at the end of M-1
+    arb_bound:
+      type: location_arb
+      from_leg: ICE:TFM
+      to_leg: ICE:JKM
+      cost_items: {extra_shipping_usgc_to_asia_vs_europe: 1.3}
+      total_cost: 1.3
+      formula: "US cargoes point to Asia when jkm - ttf > extra shipping cost (USD/mmBtu), to Europe below it"
+  notes: >-
+    Which basin wins the marginal LNG cargo. TTF is EUR/MWh: divided by 3.412 mmBtu/MWh
+    (same dimension, engine converts) and by EURUSD. Since 2022 Europe is the sink, so the
+    spread has lived near or below the freight differential. Shipping number moves 0.5-3.0
+    with charter rates and Panama or Suez routing; confidence: low.
+
+- id: bench.gas.ttf_vs_henry_hub
+  family: benchmark
+  name: TTF vs Henry Hub
+  sector: energy
+  legs:
+    - {instrument: ICE:TFM,  weight: 1.0}
+    - {instrument: NYMEX:NG, weight: -1.0}
+  unit: USD/mmbtu
+  fx: USDEUR
+  tenor: main
+  driver_tags: [lng_us_export_arb]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:NG
+    arb_bound:
+      type: location_arb
+      from_leg: NYMEX:NG
+      to_leg: ICE:TFM
+      cost_items: {feedgas_uplift_15pct_of_hh: 0.5, liquefaction_toll_sunk: 2.75, shipping_usgc_to_nwe: 0.9, regas: 0.4}
+      total_cost: 4.55
+      variable_cost: 1.8
+      formula: "full-cost arb: ttf > 1.15 * hh + toll + shipping + regas; cargoes are cancelled only when ttf < 1.15 * hh + shipping + regas (toll is sunk)"
+  notes: >-
+    The US LNG export arb and the main transmission line between the two gas markets.
+    Floor is the variable-cost shut-in level (summer 2020); there is no ceiling while
+    export capacity is full. feedgas_uplift is shown at HH 3.3. Cost numbers are desk
+    estimates, confidence: low.
+
+- id: bench.gas.jkm_vs_henry_hub
+  family: benchmark
+  name: JKM LNG vs Henry Hub
+  sector: energy
+  legs:
+    - {instrument: ICE:JKM,  weight: 1.0}
+    - {instrument: NYMEX:NG, weight: -1.0}
+  unit: USD/mmbtu
+  tenor: main
+  driver_tags: [lng_us_export_arb, lng_freight]
+  verified: false
+  params:
+    tenor_anchor: ICE:JKM
+    arb_bound:
+      type: location_arb
+      from_leg: NYMEX:NG
+      to_leg: ICE:JKM
+      cost_items: {feedgas_uplift_15pct_of_hh: 0.5, liquefaction_toll_sunk: 2.75, shipping_usgc_to_japan: 2.2}
+      total_cost: 5.45
+      formula: "jkm > 1.15 * hh + toll + shipping"
+  notes: "Netback of US LNG into Asia. Same structure as the TTF row with longer shipping. confidence: low on costs."
+
+- id: bench.gas.nbp_vs_ttf
+  family: benchmark
+  name: NBP vs TTF
+  sector: energy
+  legs:
+    - {instrument: ICE:M,   weight: 1.0}
+    - {instrument: ICE:TFM, weight: -1.0}
+  unit: EUR/mwh
+  fx: [USDGBP, USDEUR]
+  tenor: front
+  driver_tags: [europe_gas_basis]
+  verified: false
+  params:
+    desk_convention: "usually quoted in pence per therm; 1 therm = 0.029307 MWh"
+  notes: >-
+    Bounded by the interconnector tariffs (IUK, BBL). NBP trades at a discount in summer
+    (the UK has LNG terminals but almost no storage, so it exports) and a premium in cold
+    winters. Pence per therm to GBP by price_scale, therm to MWh by the engine, then FX.
+    tenor front, not main: both expire two business days before the delivery month, and
+    open interest on cascading European contracts does not identify a main month.
+
+# =====================================================================
+# BENCHMARK - thermal coal
+# =====================================================================
+
+- id: bench.coal.newcastle_vs_api2
+  family: benchmark
+  name: Newcastle vs API 2 Rotterdam coal
+  sector: energy
+  legs:
+    - {instrument: ICE:NCF, weight: 1.0}
+    - {instrument: ICE:ATW, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [coal_pacific_atlantic]
+  verified: false
+  notes: >-
+    Pacific against Atlantic basin, both 6,000 kcal/kg NAR. Note the bases differ: Newcastle
+    is FOB, API 2 is CIF, so parity is not zero. Newcastle premium exploded after the 2022
+    Russian coal ban (Japan, Korea and Taiwan need high-CV Australian coal); normal range
+    is -10 to +20 USD/t. The front month is the pricing month on both: m+1.
+
+- id: bench.coal.api2_vs_api4
+  family: benchmark
+  name: API 2 Rotterdam vs API 4 Richards Bay coal
+  sector: energy
+  legs:
+    - {instrument: ICE:ATW, weight: 1.0}
+    - {instrument: ICE:AFR, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [coal_freight, coal_pacific_atlantic]
+  verified: false
+  notes: >-
+    CIF ARA minus FOB Richards Bay: a paper proxy for Capesize/Panamax freight South Africa
+    to Rotterdam (8-15 USD/t). Goes below freight when India and Asia outbid Europe for
+    South African coal. API 4 liquidity confidence: low.
+
+# =====================================================================
+# PROCESSING - refinery cracks. Value is the gross crack; refinery opex sits in
+# params.conversion_cost and is never subtracted.
+# =====================================================================
+
+- id: proc.us.crack_321
+  family: processing
+  name: US 3-2-1 crack (RBOB, heating oil, WTI)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:RB, weight: 0.666667}
+    - {instrument: NYMEX:HO, weight: 0.333333}
+    - {instrument: NYMEX:CL, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [us_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:CL       # CL M expires about the 20th of M-1, products at the end of M-1
+    conversion_cost: 5.0
+    conversion_cost_range: [4.0, 7.0]
+  notes: >-
+    Three barrels of crude make two of gasoline and one of distillate:
+    (2 x RB x 42 + 1 x HO x 42 - 3 x CL) / 3 = 0.6667 RB + 0.3333 HO - CL, per barrel of
+    crude. RB and HO are USD/gal; 42 gal/bbl is a same-dimension conversion the engine does.
+    Real yields add about 10% residue and gases, so this overstates a real margin; it is
+    the benchmark hedge ratio, not a P&L. Same delivery month on all three legs. Opex
+    4-7 USD/bbl incl. RINs for context.
+
+- id: proc.us.crack_211
+  family: processing
+  name: US 2-1-1 crack (RBOB, heating oil, WTI)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:RB, weight: 0.5}
+    - {instrument: NYMEX:HO, weight: 0.5}
+    - {instrument: NYMEX:CL, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [us_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:CL
+    conversion_cost: 5.0
+    conversion_cost_range: [4.0, 7.0]
+  notes: >-
+    (1 x RB x 42 + 1 x HO x 42 - 2 x CL) / 2. Closer to a distillate-heavy (Gulf Coast or
+    European) yield than the 3-2-1.
+
+- id: proc.us.rbob_crack_wti
+  family: processing
+  name: RBOB crack vs WTI
+  sector: energy
+  legs:
+    - {instrument: NYMEX:RB, weight: 1.0}
+    - {instrument: NYMEX:CL, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [gasoline_crack, us_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:CL
+  notes: >-
+    RB x 42 - CL. Strongly seasonal: the April contract switches to summer-grade RVP and
+    the October contract back, a step of several USD/bbl that is not a signal. Compare
+    like months year on year.
+
+- id: proc.us.ho_crack_wti
+  family: processing
+  name: Heating oil (ULSD) crack vs WTI
+  sector: energy
+  legs:
+    - {instrument: NYMEX:HO, weight: 1.0}
+    - {instrument: NYMEX:CL, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [distillate_crack, us_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:CL
+  notes: "HO x 42 - CL. The industrial-cycle and winter crack; leads freight and manufacturing data."
+
+- id: proc.atl.rbob_crack_brent
+  family: processing
+  name: RBOB crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: NYMEX:RB, weight: 1.0}
+    - {instrument: ICE:B,    weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [gasoline_crack, atlantic_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: >-
+    RB x 42 - Brent, same delivery month. The margin of the East Coast and European
+    refiners that actually supply New York Harbor; strips the Brent-WTI spread out of the
+    WTI crack.
+
+- id: proc.atl.ho_crack_brent
+  family: processing
+  name: Heating oil (ULSD) crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: NYMEX:HO, weight: 1.0}
+    - {instrument: ICE:B,    weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [distillate_crack, atlantic_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: "HO x 42 - Brent, same delivery month."
+
+- id: proc.eu.gasoil_crack_brent
+  family: processing
+  name: ICE gasoil crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: ICE:G, weight: 1.0, qty_factor: 7.45}
+    - {instrument: ICE:B, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [distillate_crack, europe_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: >-
+    Gasoil USD/t / 7.45 bbl/t - Brent, the way ICE lists the crack. The single most watched
+    refining indicator in Europe: 10-20 USD/bbl is normal, 30+ is a diesel shortage (2022).
+    Same delivery month (gasoil M is generic 2 or 3 when Brent M is the main contract).
+
+- id: proc.eu.eurobob_crack_brent
+  family: processing
+  name: Eurobob gasoline crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: NYMEX:7H, weight: 1.0, qty_factor: 8.33}
+    - {instrument: ICE:B,    weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [gasoline_crack, europe_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: "Eurobob USD/t / 8.33 bbl/t - Brent. Seasonal (summer grade April to September)."
+
+- id: proc.eu.naphtha_crack_brent
+  family: processing
+  name: NWE naphtha crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: NYMEX:UN, weight: 1.0, qty_factor: 8.9}
+    - {instrument: ICE:B,    weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [naphtha_crack, petchem_demand]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: >-
+    Naphtha USD/t / 8.9 bbl/t - Brent. Usually negative (-2 to -12): naphtha is a by-product.
+    A read on petrochemical demand and on gasoline blending pull.
+
+- id: proc.eu.hsfo_crack_brent
+  family: processing
+  name: Rotterdam 3.5% fuel oil crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: NYMEX:UV, weight: 1.0, qty_factor: 6.35}
+    - {instrument: ICE:B,    weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [fueloil_crack, crude_sweet_sour]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: >-
+    Fuel oil USD/t / 6.35 bbl/t - Brent. Always negative; it narrows toward zero when sour
+    crude is cut (HSFO is the substitute feedstock for cokers) and collapses when OPEC+
+    adds sour barrels.
+
+- id: proc.eu.vlsfo_crack_brent
+  family: processing
+  name: Rotterdam 0.5% marine fuel crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: NYMEX:R5F, weight: 1.0, qty_factor: 6.35}
+    - {instrument: ICE:B,     weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [fueloil_crack, bunker_demand]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: "0.5% USD/t / 6.35 bbl/t - Brent (CME uses 6.35 for its 0.5% cracks; actual density is nearer 6.5). confidence: low on the exchange code."
+
+- id: proc.sg.gasoil_crack_dubai
+  family: processing
+  name: Singapore gasoil crack vs Dubai
+  sector: energy
+  legs:
+    - {instrument: NYMEX:SG, weight: 1.0}
+    - {instrument: NYMEX:DC, weight: -1.0}
+  unit: USD/bbl
+  tenor: m+1
+  driver_tags: [distillate_crack, asia_refining_margin]
+  verified: false
+  notes: >-
+    Both legs are USD/bbl monthly-average swaps, so no conversion at all. The core Asian
+    margin; driven by Chinese and Indian export volumes.
+
+- id: proc.sg.jet_crack_dubai
+  family: processing
+  name: Singapore jet kerosene crack vs Dubai
+  sector: energy
+  legs:
+    - {instrument: NYMEX:KS, weight: 1.0}
+    - {instrument: NYMEX:DC, weight: -1.0}
+  unit: USD/bbl
+  tenor: m+1
+  driver_tags: [jet_crack, asia_refining_margin]
+  verified: false
+  notes: "Both USD/bbl swaps. Aviation demand plus Northeast Asian winter kerosene heating."
+
+- id: proc.sg.mogas92_crack_brent
+  family: processing
+  name: Singapore Mogas 92 crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: NYMEX:1N, weight: 1.0}
+    - {instrument: ICE:B,    weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [gasoline_crack, asia_refining_margin]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: >-
+    Asian gasoline cracks are quoted against Brent by convention (the listed CME crack is
+    92 RON vs Brent), unlike gasoil and fuel oil which are quoted against Dubai.
+
+- id: proc.sg.naphtha_crack_brent
+  family: processing
+  name: Japan naphtha (MOPJ) crack vs Brent
+  sector: energy
+  legs:
+    - {instrument: NYMEX:JA, weight: 1.0, qty_factor: 8.9}
+    - {instrument: ICE:B,    weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [naphtha_crack, asia_petchem_demand]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+    desk_convention: "also quoted in USD/t as MOPJ minus Brent x 7.45 (sic: desks use 7.45, not 8.9, for that version)"
+  notes: >-
+    MOPJ USD/t / 8.9 bbl/t - Brent. The Asian cracker feedstock margin; chemicals
+    researchers will pair it with olefin prices.
+
+- id: proc.sg.hsfo380_crack_dubai
+  family: processing
+  name: Singapore 380 fuel oil crack vs Dubai
+  sector: energy
+  legs:
+    - {instrument: NYMEX:SE, weight: 1.0, qty_factor: 6.35}
+    - {instrument: NYMEX:DC, weight: -1.0}
+  unit: USD/bbl
+  tenor: m+1
+  driver_tags: [fueloil_crack, crude_sweet_sour]
+  verified: false
+  notes: >-
+    380 cst USD/t / 6.35 bbl/t - Dubai. Peaks in the Middle East and South Asian summer
+    power burn; has traded above zero when sour crude was scarce.
+
+- id: proc.sg.vlsfo_crack_dubai
+  family: processing
+  name: Singapore 0.5% marine fuel crack vs Dubai
+  sector: energy
+  legs:
+    - {instrument: NYMEX:S5F, weight: 1.0, qty_factor: 6.35}
+    - {instrument: NYMEX:DC,  weight: -1.0}
+  unit: USD/bbl
+  tenor: m+1
+  driver_tags: [fueloil_crack, bunker_demand]
+  verified: false
+  notes: "0.5% USD/t / 6.35 bbl/t - Dubai. A read on container and bulk shipping activity."
+
+- id: proc.cn.fu_crack_sc
+  family: processing
+  name: SHFE fuel oil crack vs INE SC
+  sector: energy
+  legs:
+    - {instrument: SHFE:FU, weight: 1.0, qty_factor: 6.35}
+    - {instrument: INE:SC,  weight: -1.0}
+  unit: USD/bbl
+  fx: USDCNH
+  tenor: main
+  driver_tags: [fueloil_crack, china_fueloil_arb]
+  verified: false
+  notes: >-
+    FU CNY/t / 6.35 bbl/t - SC CNY/bbl, shown in USD/bbl so it lines up with
+    proc.sg.hsfo380_crack_dubai. Both legs bonded, no VAT. Each leg on its own main
+    contract, the Chinese desk convention.
+
+- id: proc.cn.lu_crack_sc
+  family: processing
+  name: INE low sulphur fuel oil crack vs INE SC
+  sector: energy
+  legs:
+    - {instrument: INE:LU, weight: 1.0, qty_factor: 6.35}
+    - {instrument: INE:SC, weight: -1.0}
+  unit: USD/bbl
+  fx: USDCNH
+  tenor: main
+  driver_tags: [fueloil_crack, bunker_demand]
+  verified: false
+  notes: "LU CNY/t / 6.35 bbl/t - SC. Same exchange, same margin account, both bonded. Compare with proc.sg.vlsfo_crack_dubai."
+
+- id: proc.cn.bu_crack_sc
+  family: processing
+  name: SHFE bitumen crack vs INE SC
+  sector: energy
+  legs:
+    - {instrument: SHFE:BU, weight: 1.0}
+    - {instrument: INE:SC,  weight: -1.0, qty_factor: 0.13643}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [bitumen_crack, china_infrastructure, china_teapot_margin]
+  verified: false
+  params:
+    vat_basis: inc_vat
+    desk_convention: "BU - SC x 7.33 in CNY/t; some desks use 6.6 bbl/t (Merey-type heavy feedstock)"
+    conversion_cost: 400
+    conversion_cost_range: [300, 600]
+  notes: >-
+    Tonne against tonne: qty_factor 0.13643 t per bbl = 1 / 7.33 bbl/t for medium crude, so
+    SC becomes CNY/t. BU includes 13% VAT and consumption tax effects, SC is bonded, so the
+    level is not a margin; trade the deviation. The real feedstock of Shandong bitumen
+    plants is discounted heavy crude (Merey, diluted bitumen), so the crack looks worst
+    when those discounts are widest. confidence: low on the desk factor.
+
+# =====================================================================
+# PROCESSING - power generation and gas processing
+# =====================================================================
+
+- id: proc.eu.clean_spark_de
+  family: processing
+  name: German clean spark spread (base power, TTF, EUA)
+  sector: energy
+  legs:
+    - {instrument: EEX:DEBM, weight: 1.0}
+    - {instrument: ICE:TFM,  weight: -2.0354}
+    - {instrument: ICE:ECF,  weight: -1.0, qty_factor: 2.6695}
+  unit: EUR/mwh
+  fx: null
+  tenor: front
+  driver_tags: [europe_power_margin, gas_coal_switching]
+  verified: false
+  params:
+    tenor_anchor: ICE:TFM        # TTF front = month ahead; power follows it; EUA falls back to the next December (NOTES.md, engine requirements)
+    conversion_cost: 3.0
+    conversion_cost_range: [2.0, 4.0]
+  notes: >-
+    Power - gas / 0.4913 - EUA x 0.3746. Heat rate: a CCGT at 49.13% HHV efficiency burns
+    1 / 0.4913 = 2.0354 MWh of gas per MWh of power. Carbon: 0.18404 t CO2 per MWh of gas
+    / 0.4913 = 0.3746 t per MWh of power, so qty_factor = 1 / 0.3746 = 2.6695 MWh of power
+    per tonne of CO2. These are the standard published clean-spark parameters; modern
+    plants reach 55-60% LHV. TTF stands in for the German THE hub (basis under 1 EUR/MWh).
+
+- id: proc.eu.clean_dark_de
+  family: processing
+  name: German clean dark spread (base power, API 2, EUA)
+  sector: energy
+  legs:
+    - {instrument: EEX:DEBM, weight: 1.0}
+    - {instrument: ICE:ATW,  weight: -2.857143, qty_factor: 6.978}
+    - {instrument: ICE:ECF,  weight: -1.0, qty_factor: 1.0277}
+  unit: EUR/mwh
+  fx: USDEUR
+  tenor: m+1
+  driver_tags: [europe_power_margin, gas_coal_switching]
+  verified: false
+  params:
+    tenor_anchor: ICE:ATW        # API 2 m+1 = month ahead (its current month stays listed); power follows; EUA = next December
+    conversion_cost: 4.0
+    conversion_cost_range: [3.0, 6.0]
+  notes: >-
+    Power - coal / 6.978 / 0.35 - EUA x 0.973. Coal: 6,000 kcal/kg NAR = 6.978 MWh per tonne
+    (qty_factor), and a 35% efficient plant burns 1 / 0.35 = 2.8571 MWh of coal per MWh of
+    power. Carbon: 0.34056 t CO2 per MWh of coal / 0.35 = 0.973 t per MWh of power, so
+    qty_factor = 1 / 0.973 = 1.0277. API 2 is USD/t: FX to EUR. Excludes about 5 EUR/t of
+    Rhine barge freight to the plant.
+
+- id: proc.us.spark_pjm
+  family: processing
+  name: PJM West spark spread (peak power vs Henry Hub, 7 heat rate)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:JM, weight: 1.0}
+    - {instrument: NYMEX:NG, weight: -2.0516}
+  unit: USD/mwh
+  tenor: main
+  driver_tags: [us_power_margin]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:NG
+    desk_convention: "power - 7.0 x gas, heat rate 7 mmBtu/MWh"
+    conversion_cost: 3.0
+  notes: >-
+    Heat rate 7 mmBtu per MWh. The engine converts NG to USD/MWh thermal by x 3.412
+    mmBtu/MWh (same dimension), so weight = 7 / 3.412 = 2.0516 (an efficiency of 48.7%).
+    Henry Hub stands in for the plant's delivered gas (Tetco M3 or Dominion South trade as
+    basis swaps, not expressible here), so winter values overstate the margin. No carbon
+    cost outside RGGI states. confidence: low on the power leg's code and liquidity.
+
+- id: proc.us.propane_frac_spread
+  family: processing
+  name: US propane frac spread (Mont Belvieu propane vs Henry Hub)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:B0, weight: 1.0, qty_factor: 0.091502}
+    - {instrument: NYMEX:NG, weight: -1.0}
+  unit: USD/mmbtu
+  tenor: main
+  driver_tags: [ngl_frac_spread, us_gas_processing]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:NG
+  notes: >-
+    Value of propane extracted from the gas stream against leaving it in as methane.
+    qty_factor 0.091502 mmBtu per gal (propane 91,502 Btu/gal), so USD/gal / 0.091502 =
+    USD/mmBtu. Processors reject ethane and, in extremis, propane when this nears zero.
+
+# =====================================================================
+# SUBSTITUTION
+# =====================================================================
+
+- id: sub.lpg.afei_vs_mopj
+  family: substitution
+  name: Propane vs naphtha, Asia (AFEI vs MOPJ)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:7E, weight: 1.0}
+    - {instrument: NYMEX:JA, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [propane_naphtha_switch, asia_petchem_demand]
+  verified: false
+  params:
+    desk_convention: "also watched as a ratio: crackers switch to propane below about 90-95% of naphtha, i.e. a spread under roughly -50 USD/t"
+  notes: >-
+    Flexible steam crackers in Korea, Japan and China swap up to 10-15% of naphtha feed for
+    propane when it is cheap enough. Summer spreads go deeply negative (propane glut),
+    winter ones positive (heating demand). Mean-reverting with a hard economic trigger.
+
+- id: sub.lpg.ara_propane_vs_nwe_naphtha
+  family: substitution
+  name: Propane vs naphtha, Europe (CIF ARA propane vs NWE naphtha)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:PS, weight: 1.0}
+    - {instrument: NYMEX:UN, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [propane_naphtha_switch, petchem_demand]
+  verified: false
+  notes: "European version; crackers there have more LPG flexibility, so the trigger is nearer -30 USD/t. confidence: low on the trigger."
+
+- id: sub.lpg.mont_belvieu_vs_wti
+  family: substitution
+  name: Mont Belvieu propane vs WTI (propane-crude)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:B0, weight: 1.0}
+    - {instrument: NYMEX:CL, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [propane_crude_ratio, us_ngl_supply]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:CL
+    desk_convention: "quoted as a percentage: propane x 42 / WTI; this row's ratio. 35-70% is the usual range"
+  notes: >-
+    Propane USD/gal x 42 against WTI, both volume, engine converts. Low ratios mean US
+    inventories are heavy (associated-gas NGL supply outruns exports and heating demand).
+    Watch the ratio, not the difference.
+
+- id: sub.lpg.dce_pg_vs_sc
+  family: substitution
+  name: DCE LPG vs INE SC (China propane-crude)
+  sector: energy
+  legs:
+    - {instrument: DCE:PG, weight: 1.0}
+    - {instrument: INE:SC, weight: -1.0, qty_factor: 0.13643}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [propane_crude_ratio, china_lpg_arb]
+  verified: false
+  notes: >-
+    Tonne against tonne: SC CNY/bbl / 0.13643 t per bbl (= x 7.33 bbl/t). PG includes 9%
+    VAT, SC is bonded, so watch the ratio. Chinese desks trade it as the oil-to-LPG
+    relative value; CP is set with reference to crude so the link is real but loose.
+    confidence: low on the 7.33 convention.
+
+- id: sub.sg.jet_vs_gasoil
+  family: substitution
+  name: Singapore jet vs gasoil (regrade)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:KS, weight: 1.0}
+    - {instrument: NYMEX:SG, weight: -1.0}
+  unit: USD/bbl
+  tenor: m+1
+  driver_tags: [regrade, aviation_demand]
+  verified: false
+  notes: >-
+    Refiners swing a few percent of yield between jet and diesel, which bounds the regrade
+    to roughly -4 to +4 USD/bbl. Negative means aviation is the weak link (2020-22);
+    positive in cold Northeast Asian winters.
+
+- id: sub.us.ho_vs_rbob
+  family: substitution
+  name: Heating oil vs RBOB (distillate vs gasoline)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:HO, weight: 1.0}
+    - {instrument: NYMEX:RB, weight: -1.0}
+  unit: USD/bbl
+  tenor: main
+  driver_tags: [diesel_gasoline_spread]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:RB
+    desk_convention: "quoted in US cents per gallon: divide by 0.42"
+  notes: >-
+    Refinery yield switch between max-distillate and max-gasoline mode. Seasonal: distillate
+    rich in winter, gasoline rich in spring. The industrial economy against the consumer.
+
+- id: sub.eu.eurobob_vs_naphtha
+  family: substitution
+  name: Eurobob gasoline vs NWE naphtha (gas-nap)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:7H, weight: 1.0}
+    - {instrument: NYMEX:UN, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [gasoline_blending, reforming_margin]
+  verified: false
+  notes: >-
+    Naphtha goes either to the gasoline pool (via reformers and direct blending) or to
+    crackers. A wide gas-nap pulls naphtha into gasoline and tightens petrochemical feed.
+    Typical 50-200 USD/t, widest in summer.
+
+- id: sub.sg.vlsfo_vs_gasoil
+  family: substitution
+  name: Singapore 0.5% marine fuel vs Singapore gasoil
+  sector: energy
+  legs:
+    - {instrument: NYMEX:S5F, weight: 1.0}
+    - {instrument: NYMEX:SG,  weight: -1.0, qty_factor: 0.13423}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [bunker_demand, distillate_crack]
+  verified: false
+  notes: >-
+    qty_factor 0.13423 t per bbl = 1 / 7.45, so gasoil becomes USD/t. VLSFO is blended from
+    vacuum gasoil and low-sulphur residue that could otherwise go to diesel, and ships can
+    burn marine gasoil instead: gasoil caps VLSFO. Usually -100 to -250 USD/t.
+
+- id: sub.cn.bu_vs_fu
+  family: substitution
+  name: SHFE bitumen vs SHFE fuel oil
+  sector: energy
+  legs:
+    - {instrument: SHFE:BU, weight: 1.0}
+    - {instrument: SHFE:FU, weight: -1.0}
+  unit: CNY/t
+  fx: null
+  tenor: main
+  driver_tags: [china_heavy_products, china_infrastructure]
+  verified: false
+  notes: >-
+    Two outlets for the bottom of the barrel: Chinese refiners shift heavy residue between
+    bitumen and coker or bunker feed. BU is domestic with 13% VAT, FU is bonded without, so
+    the level is not an arb; a popular onshore pair because both trade on SHFE. Each leg on
+    its own main contract.
+
+- id: sub.eu.gas_vs_coal_power
+  family: substitution
+  name: European gas vs coal for power (fuel cost per MWh of electricity)
+  sector: energy
+  legs:
+    - {instrument: ICE:TFM, weight: 2.0354}
+    - {instrument: ICE:ATW, weight: -2.857143, qty_factor: 6.978}
+  unit: EUR/mwh
+  fx: USDEUR
+  tenor: front
+  driver_tags: [gas_coal_switching, europe_power_margin]
+  verified: false
+  params:
+    tenor_anchor: ICE:TFM        # month ahead on both legs
+    desk_convention: "equals dark spread minus spark spread before carbon. With carbon, gas wins when this value < EUA x (0.973 - 0.3746) = EUA x 0.598"
+  notes: >-
+    Gas-coal switching, the two-leg version: TTF / 0.4913 minus API 2 / 6.978 MWh per t /
+    0.35. A substitution row takes exactly two legs, so the EUA term is left in
+    desk_convention: compare this value with 0.598 x EUA (about 42 EUR/MWh at EUA 70).
+    Below that line gas displaces coal and gas demand rises; it is the demand-side anchor
+    for TTF. The difference of the clean dark and clean spark rows gives the full version.
+
+- id: sub.asia.jkm_vs_newcastle
+  family: substitution
+  name: JKM LNG vs Newcastle coal (Asian gas-coal, energy parity)
+  sector: energy
+  legs:
+    - {instrument: ICE:JKM, weight: 1.0}
+    - {instrument: ICE:NCF, weight: -1.0, qty_factor: 23.81}
+  unit: USD/mmbtu
+  tenor: main
+  driver_tags: [gas_coal_switching, asia_power_demand]
+  verified: false
+  params:
+    tenor_anchor: ICE:JKM
+  notes: >-
+    qty_factor 23.81 mmBtu per tonne: 6,000 kcal/kg x 1,000 kg x 3.9683 Btu/kcal. Plain
+    energy parity, no efficiency adjustment (gas plants 50-55%, coal 38-42%, so gas is
+    competitive in Japan and Korea up to about 1.3x coal's energy price, there being no
+    meaningful carbon price). Switching capacity in Asia is limited, so this is a slow
+    anchor, not a hard bound.
+
+- id: sub.gas.jkm_vs_brent
+  family: substitution
+  name: JKM LNG vs Brent (spot LNG vs oil-indexed contracts)
+  sector: energy
+  legs:
+    - {instrument: ICE:JKM, weight: 1.0}
+    - {instrument: ICE:B,   weight: -1.0, qty_factor: 5.8}
+  unit: USD/mmbtu
+  tenor: main
+  driver_tags: [oil_gas_ratio, lng_contract_slope]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+    desk_convention: "slope = JKM / Brent (0.10-0.17 is contract territory) = this row's ratio / 5.8"
+  notes: >-
+    qty_factor 5.8 mmBtu per barrel of crude: Brent / 5.8 is oil at energy parity. Most
+    Asian term LNG is priced at 11-14% of Brent, so when spot JKM is above that slope
+    buyers maximise contract volumes, below it they take the minimum and buy spot.
+
+- id: sub.gas.ttf_vs_brent
+  family: substitution
+  name: TTF vs Brent (European gas vs oil, energy parity)
+  sector: energy
+  legs:
+    - {instrument: ICE:TFM, weight: 1.0}
+    - {instrument: ICE:B,   weight: -1.0, qty_factor: 5.8}
+  unit: USD/mmbtu
+  fx: USDEUR
+  tenor: main
+  driver_tags: [oil_gas_ratio]
+  verified: false
+  params:
+    tenor_anchor: ICE:B
+  notes: >-
+    Brent / 5.8 mmBtu per bbl. Above oil parity (2022) industry and power switch to gasoil
+    and fuel oil where they still can; residual oil-indexed pipeline contracts also
+    arbitrage against the hub.
+
+- id: sub.us.wti_vs_henry_hub
+  family: substitution
+  name: WTI vs Henry Hub (oil-gas, energy parity)
+  sector: energy
+  legs:
+    - {instrument: NYMEX:CL, weight: 1.0, qty_factor: 5.8}
+    - {instrument: NYMEX:NG, weight: -1.0}
+  unit: USD/mmbtu
+  tenor: main
+  driver_tags: [oil_gas_ratio, us_associated_gas]
+  verified: false
+  params:
+    tenor_anchor: NYMEX:CL
+    desk_convention: "quoted as the plain ratio WTI / NG (6 = energy parity, 15-40 is normal since shale) = this row's ratio x 5.8"
+  notes: >-
+    WTI / 5.8 mmBtu per bbl minus Henry Hub. Little direct switching is left in the US; the
+    link is supply-side: high oil prices bring associated gas and depress Henry Hub. A
+    macro regime indicator more than a mean-reverting pair.

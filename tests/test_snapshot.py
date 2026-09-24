@@ -55,6 +55,11 @@ def _bloomberg_pc(path):
     conn.execute("INSERT INTO rate_vol_quotes VALUES ('2026-09-14','USD','SOFR','SWAPTION','1Y','10Y','ATM',0.0,"
                  "0.85,'NORMAL','USSN0110 Curncy','PX_LAST','BBG_BDP',?)", (SNAP,))
     set_dividend_yield(conn, "2026-09-14", "SPX Index", 0.0125, source="BBG_BDP")
+    # Bloomberg's commodity contract dates, as the pull stores them (contract-master's table)
+    from data.contracts import store_static_dates
+    store_static_dates(conn, [{"contract_id": "CLZ26 Comdty", "last_trade_date": "2026-11-19",
+                               "first_notice_date": "2026-11-20", "source": "BBG_BDP",
+                               "fetched_at": "2026-09-14T19:00:00+00:00"}])
     conn.commit()
     (path.parent / (path.name + ".bloomberg_status.json")).write_text(
         '{"time": "2026-09-14T15:01:00-04:00", "connected": true, "requested": 9, "written": 8, "failed": 1}')
@@ -70,7 +75,7 @@ def test_round_trip_gives_the_other_pc_identical_market_data(tmp_path):
     manifest = snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
     assert manifest["rows"] == {"instruments": 2, "marks": 5, "curves": 1, "curve_quotes": 1,
                                 "index_fixings": 1, "vol_quotes": 1, "rate_vol_quotes": 1,
-                                "equity_dividend_yields": 1}
+                                "equity_dividend_yields": 1, "contract_static": 1}
     assert (manifest["marks_from"], manifest["marks_through"]) == ("2026-09-09", "2026-09-14")
     assert set(manifest["ddl"]) == set(snapshot.MARKET_TABLES)
     assert manifest["ddl"]["vol_quotes"].startswith("CREATE TABLE vol_quotes")
@@ -86,6 +91,9 @@ def test_round_trip_gives_the_other_pc_identical_market_data(tmp_path):
     out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-09-14")
     assert out["rows"]["marks"] == 5 and out["instruments_added"] == 2 and out["skipped_marks"] == 0
     assert out["rows"]["vol_quotes"] == 1 and out["rows"]["equity_dividend_yields"] == 1
+    assert out["rows"]["contract_static"] == 1
+    # no commodity future on this PC: the contract dates are looked at and change nothing
+    assert out["contract_dates"] == {"checked": 0, "updated": [], "missing_dates": []}
     assert out["manifest"] == manifest
 
     mac = sqlite3.connect(tmp_path / "mac.db")
@@ -354,3 +362,84 @@ def test_import_returns_the_ledgers_refrozen_and_kept(tmp_path, monkeypatch):
     monkeypatch.setattr(ledger_mod, "realise_settled", lambda c, as_of, **kw: {"realised": 0, "unrealisable": [], "refrozen": ["a1"]})
     led = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-09-14")["ledger"]
     assert led["refrozen"] == [{"trade_id": "a1"}] and led["kept"] == [] and led["refrozen_count"] == 1
+
+
+# =========================================================================== 2026-09-24: Bloomberg's contract dates travel
+CL, ESTIMATE, BBG = "CLZ26 Comdty", "2026-12-31", "2026-11-19"
+
+
+def _cl_future(conn, expiry, with_trade):
+    _instruments(conn, [(CL, "FUTURE", "NYMEX:CL", "USD", 1000, 0, CL, expiry)])
+    if with_trade:   # long 2 CLZ26 @70, booked at contract-master's estimated expiry
+        conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, "
+                     "quantity, price, account, counterparty, strategy, trader, description) VALUES "
+                     "('c1', 'XLSX', ?, 'FUTURE', 'c1', '2026-09-01', 2, 70.0, 'ACC', '', '', '', '')", (CL,))
+        conn.execute("INSERT INTO trade_legs VALUES ('c1', 1, 'NOTIONAL', 'USD', 140000, '2026-09-01', ?, 70.0, 0)",
+                     (expiry,))
+    conn.commit()
+
+
+def test_contract_static_round_trips_and_a_manual_row_here_is_kept(tmp_path):
+    pc = _bloomberg_pc(tmp_path / "pc.db")
+    snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
+    assert (tmp_path / "snap" / "contract_static.csv").read_text().splitlines() == [
+        "contract_id,last_trade_date,first_notice_date,source,fetched_at",
+        "CLZ26 Comdty,2026-11-19,2026-11-20,BBG_BDP,2026-09-14T19:00:00+00:00"]
+
+    # the other PC: a stale Bloomberg row (replaced on the Bloomberg PC) and a MANUAL one
+    from data.contracts import store_static_dates
+    mac = schema.connect(tmp_path / "mac.db")
+    store_static_dates(mac, [
+        {"contract_id": "CLZ26 Comdty", "last_trade_date": "2026-12-31", "source": "BBG_BDP"},
+        {"contract_id": "COF27 Comdty", "last_trade_date": "2026-11-30", "source": "MANUAL"},
+    ])
+    mac.close()
+    out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-09-14")
+    assert out["dropped"]["contract_static"] == 1 and out["rows"]["contract_static"] == 1
+    mac = sqlite3.connect(tmp_path / "mac.db")
+    assert _dump(mac, "contract_static") == sorted(
+        _dump(pc, "contract_static") + [mac.execute(
+            "SELECT * FROM contract_static WHERE source = 'MANUAL'").fetchone()], key=repr)
+    assert len(_dump(mac, "contract_static")) == 2
+
+
+def test_an_exporting_pc_without_contract_static_exports_it_not_and_the_import_still_works(tmp_path):
+    pc = _bloomberg_pc(tmp_path / "pc.db")
+    pc.execute("DROP TABLE contract_static")
+    pc.commit()
+    pc.close()
+    manifest = snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
+    assert "contract_static" not in manifest["rows"] and "contract_static" not in manifest["ddl"]
+    assert not (tmp_path / "snap" / "contract_static.csv").exists()
+    out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-09-14")
+    assert "contract_static" not in out["rows"] and out["rows"]["marks"] == 5
+    assert not snapshot._table_info(sqlite3.connect(tmp_path / "mac.db"), "contract_static")
+    assert out["contract_dates"] == {"checked": 0, "updated": [], "missing_dates": []}
+
+
+def test_the_import_writes_bloombergs_expiry_onto_this_pcs_future_before_the_freeze(tmp_path):
+    """The Bloomberg PC's future already carries Bloomberg's last trade date and its prices are
+    keyed there; the upload on this PC booked it at the estimated expiry. The import moves the
+    instrument and its leg to Bloomberg's date, and does so before realise_settled: as of
+    11-25 the future has expired at Bloomberg's 11-19 but not at the estimate's 12-31, so it is
+    frozen only if the dates were applied first."""
+    pc = _bloomberg_pc(tmp_path / "pc.db")
+    _cl_future(pc, BBG, with_trade=False)
+    _marks(pc, [("2026-11-19", CL, BBG, "FUTURE_PX", 72.0, "BBG_BDH", "2026-11-19T17:00:00-05:00")])
+    pc.commit()
+    snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
+
+    mac = schema.connect(tmp_path / "mac.db")
+    _cl_future(mac, ESTIMATE, with_trade=True)
+    mac.close()
+    out = snapshot.import_snapshot(tmp_path / "mac.db", tmp_path / "snap", as_of="2026-11-25")
+    assert out["instruments_added"] == 2                     # the local CLZ26 row is not overwritten ...
+    assert out["contract_dates"] == {"checked": 1, "missing_dates": [], "updated": [{
+        "instrument_id": CL, "expiry_before": ESTIMATE, "expiry_after": BBG,
+        "legs": 1, "marks_rekeyed": 0, "marks_dropped": 0}]}  # ... the contract dates move it
+    mac = sqlite3.connect(tmp_path / "mac.db")
+    assert mac.execute("SELECT expiry_date FROM instruments WHERE instrument_id = ?", (CL,)).fetchone() == (BBG,)
+    assert mac.execute("SELECT settle_date FROM trade_legs WHERE trade_id = 'c1'").fetchone() == (BBG,)
+    # frozen at Bloomberg's expiry: 2 x 1000 x (72 - 70)
+    assert out["ledger"]["realised"] == 1
+    assert mac.execute("SELECT pnl_usd FROM realised_pnl WHERE trade_id = 'c1'").fetchone() == (pytest.approx(4000.0),)

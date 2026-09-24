@@ -1,0 +1,2 @@
+- Older notes on these files live in `.claude/agent-memory/pnl-engine/` (lane split 2026-09-24): read its MEMORY.md first.
+- [Non-USD futures](non-usd-futures.md) — 2026-09-24: futures / EQ_OPTION in quote_ccy converted at usd_per_quote; open, provisional and settled rows; USD bit for bit

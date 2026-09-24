@@ -56,3 +56,28 @@ Status meaning:
 
 Items 1, 2 and 8 are the ones worth confirming with the desk; the rest only matter if a
 future export is shaped differently from the reference file.
+
+## Commodity futures (Jason's book, 2026-09-24)
+
+No real commodity export has been seen yet (`docs/open-questions.md` C1). The parser resolves
+every non-equity FUTURE row through `data/contracts/` (`resolve_future`); these are its guesses,
+each tested against the synthetic sample `data/sample/commodity_blotter_sample.csv`:
+
+1. The prime-broker symbol for a Western commodity future is `<exchange code><month><1-digit
+   year>-<4 letters>`, like the ES rows: `CLZ6-USAA`, Brent `BZ6-USAA`, NBP `MX6-GBAA`, TTF
+   `TFMX6-EUAA`, OSE gold `JAUZ6-JPAA`, SGX iron ore `FEFF7-USAA`.
+2. A Chinese contract comes in its exchange's own form with no suffix: `CU2611`, `I2701`
+   (ZCE's three-digit `SR611` is accepted too).
+3. The fill is in the contract list's quoted scale (cents for RBOB, heating oil, soybeans,
+   soybean oil, corn, copper; pence for NBP). A NetInvoice about 100 times off contracts ×
+   multiplier × Price only warns, naming the quote unit; it never rejects.
+4. The `Currency` cell and `Execution Venue` are the only fields that separate codes shared by
+   two exchanges (ZS, SI, ZC, CO). With both blank such a row rejects as ambiguous, naming the
+   candidates; a populated one that fits no candidate rejects as a contradiction.
+5. NetInvoice and Total Fees are in the contract's own currency.
+6. A commodity row's Notional is never used to rebuild Quantity (gallons or bushels over a
+   multiplier scaled for cents is 100x off); Quantity is rebuilt only from NetInvoice.
+7. The `Currency` cell is read as `'DOL.C-USAA'` or a bare ISO code; anything else counts as
+   not given.
+8. Which rows are the book's is `config/book.yaml` (fund, trader, desk). The sample's Trader
+   'JB' and Desk 'JBRV' are made up; Jason's real codes are open question C1.

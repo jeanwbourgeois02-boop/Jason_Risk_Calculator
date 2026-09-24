@@ -134,3 +134,53 @@ def test_positions_table_renders_the_lines_with_reasons_on_hover():
     assert by_label["Rates DV01 (USD, +1bp parallel)"]["usd"] is None
     tip = tips[[r["position"].strip() for r in records].index("Rates DV01 (USD, +1bp parallel)")]
     assert tip["usd"]["value"] == "IRSOIS-USD-1: no DV01_USD on 2026-09-22"
+
+
+def _cny_future(conn):
+    """A SHFE copper future: base_ccy is its contract root, so it is a commodity contract."""
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('CUZ6 Comdty','FUTURE','SHFE:CU','CNY',5,0,'CUZ6 Comdty','2026-12-15')")
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("c1", "XLSX", "CUZ6 Comdty", "FUTURE", "c1", "2026-09-01", 3.0, 80000.0, "acc", "cp", "", "t", "d", ""))
+    conn.execute("INSERT INTO trade_legs VALUES ('c1',1,'NOTIONAL','CNY',1200000.0,'2026-09-01','2026-12-15',80000.0,0)")
+    _mark(conn, "CUZ6 Comdty", "2026-12-15", "FUTURE_PX", 81000.0, "BBG_BDH")
+    _mark(conn, "ESZ6 Index", "2026-12-18", "FUTURE_PX", 7700.0, "BBG_BDH")
+
+
+def _es_alone(eq):
+    assert [l["label"] for l in eq["lines"] if l["kind"] == "future"] == ["ESZ6 Index"]
+    assert eq["index_units"] == -1450.0 and eq["usd_delta"] == -1450.0 * 7700.0     # ES unchanged
+    assert eq["es_contracts"] == -1450.0 / 50 and eq["es_multiplier"] == 50.0
+    assert not any("CUZ6" in m for m in eq["missing"])
+
+
+def test_a_commodity_future_is_not_on_the_equity_index_line():
+    conn = _book()
+    _cny_future(conn)
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('USDCNY','FX','USD','CNY',1,0,'USDCNY Curncy','9999-12-31')")
+    _mark(conn, "USDCNY", AS_OF, "SPOT", 7.10, "BBG_BFXFORWARD")
+    _es_alone(positions.book_positions(conn, AS_OF)["equity_index"])
+
+
+def test_a_commodity_future_with_no_spot_is_not_on_the_equity_index_line_either():
+    conn = _book()
+    _cny_future(conn)
+    _es_alone(positions.book_positions(conn, AS_OF)["equity_index"])
+
+
+def test_a_non_usd_index_future_on_the_line_is_in_usd_at_the_day_s_spot():
+    conn = _book()
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('VGZ6 Index','FUTURE','VG','EUR',10,0,'VGZ6 Index','2026-12-18')")
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("v1", "XLSX", "VGZ6 Index", "FUTURE", "v1", "2026-09-01", 4.0, 5500.0, "acc", "cp", "", "t", "d", ""))
+    conn.execute("INSERT INTO trade_legs VALUES ('v1',1,'NOTIONAL','EUR',220000.0,'2026-09-01','2026-12-18',5500.0,0)")
+    _mark(conn, "VGZ6 Index", "2026-12-18", "FUTURE_PX", 5600.0, "BBG_BDH")
+    _mark(conn, "ESZ6 Index", "2026-12-18", "FUTURE_PX", 7700.0, "BBG_BDH")
+    _mark(conn, "EURUSD", AS_OF, "SPOT", 1.10, "BBG_BFXFORWARD")
+    eq = positions.book_positions(conn, AS_OF)["equity_index"]
+    vg = next(l for l in eq["lines"] if l["label"] == "VGZ6 Index")
+    assert vg["usd_delta"] == 4.0 * 10.0 * 5600.0 * 1.10 and vg["reason"] == "" and vg["level"] == 5600.0
+    es = next(l for l in eq["lines"] if l["label"] == "ESZ6 Index")
+    assert es["usd_delta"] == -1450.0 * 7700.0                             # the USD future unchanged

@@ -1,0 +1,1104 @@
+# Copied unchanged (apart from this header) on 2026-09-24 by the contract-master lane from the
+# research app: Commodity Dashboard/rvapp/universe/spreads/metals.yaml. A template only: nothing in
+# the app reads it yet (spreads-engine, Phase 3). Leg `instrument` values are contract roots
+# (config/contracts.csv root_id).
+# Non-ferrous metals spreads (base, precious, battery). Calendars come from calendar_rules.yaml.
+# Destination: rvapp/universe/spreads/metals.yaml.
+# Format: rvapp/universe/validate.py. `params` extensions are the ferrous ones (research/ferrous/NOTES.md):
+#   vat_basis, tenor_anchor, arb_bound, conversion_cost(+_range), desk_convention.
+#   One new arb_bound field: physical_premium_usd_t (CIF Shanghai / Yangshan premium; treat like other_usd_t).
+# All of them are CONTEXT. The stored series is the straight paper spread (PLAN.md section 2, "Paper only").
+# LME legs are the third-Wednesday monthly chain, never `tenor: main` on their own: see NOTES.md section 1.
+# Nothing here has been reviewed by a human: verified is false everywhere.
+
+# =====================================================================
+# BENCHMARK - same metal, different venue, grade or location
+# =====================================================================
+
+# ---- copper ----
+- id: bench.cu.shfe_vs_lme
+  family: benchmark
+  name: SHFE copper vs LME copper (import arb)
+  sector: metals
+  legs:
+    - {instrument: SHFE:CU, weight: 1.0}
+    - {instrument: LME:CA,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [cu_onshore_offshore, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:CU      # LME leg = the third-Wednesday prompt of SHFE's main delivery month
+    desk_convention: "quoted as the plain ratio SHFE / LME (hu-lun bi), VAT left in; break-even is about USDCNH x 1.13 plus premium, 8.0-8.3 at FX 7.1-7.3"
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:CU
+      offshore_leg: LME:CA
+      physical_premium_usd_t: 60     # Yangshan CIF premium; ranges 20-150
+      import_duty: 0.0               # refined cathode, provisional rate; confidence: low
+      vat_rate: 0.13
+      port_charges_cny_t: 150        # port, customs, financing, delivery to warehouse
+      formula: "parity_cny_t = (lme_usd_t + physical_premium_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when shfe_cny_t > parity_cny_t"
+  notes: >-
+    The core base-metal benchmark. China is a structural importer of cathode, so the spread
+    lives just below import parity and opens in bursts that pull bonded stock onshore.
+    SHFE expires on the 15th and the LME third Wednesday falls on the 15th-21st, so anchoring
+    the LME leg to SHFE's main month compares the same delivery date; the rolling 3-month
+    price would embed up to two months of LME backwardation. Settlements are 10 hours apart
+    (15:00 Shanghai vs 17:00 London): read lead-lag correlations, not one-day moves.
+    VAT was 17% to Apr-2018, 16% to Mar-2019, 13% since: ex_vat history needs the old rates.
+
+- id: bench.cu.shfe_vs_comex
+  family: benchmark
+  name: SHFE copper vs COMEX copper
+  sector: metals
+  legs:
+    - {instrument: SHFE:CU,  weight: 1.0}
+    - {instrument: COMEX:HG, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [cu_onshore_offshore, us_copper_tariff]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: COMEX:HG     # HG trades H K N U Z; SHFE lists every month, so SHFE follows HG
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:CU
+      offshore_leg: COMEX:HG
+      physical_premium_usd_t: 60
+      import_duty: 0.0
+      vat_rate: 0.13
+      port_charges_cny_t: 150
+      formula: "as bench.cu.shfe_vs_lme with COMEX in USD/t (USD/lb x 2204.62). Not a physical arb in practice: US cathode does not flow to China"
+  notes: >-
+    Not a physical arb: it is bench.cu.shfe_vs_lme plus the COMEX-LME tariff spread. Kept because
+    Shanghai night-session traders hedge on COMEX, and because in 2025 the US premium drained
+    metal from China's supply chain, so this leg showed the stress first. Same-day comparison is
+    cleaner than against the LME (the SHFE night session overlaps COMEX hours).
+
+- id: bench.cu.comex_vs_lme
+  family: benchmark
+  name: COMEX copper vs LME copper (US tariff arb)
+  sector: metals
+  legs:
+    - {instrument: COMEX:HG, weight: 1.0}
+    - {instrument: LME:CA,   weight: -1.0}
+  unit: USD/t
+  tenor: main
+  driver_tags: [us_copper_tariff, cu_venue_arb]
+  verified: false
+  params:
+    tenor_anchor: COMEX:HG     # LME leg = third-Wednesday prompt of HG's main month
+    desk_convention: "quoted in USD/t, or as a percentage of LME (the implied tariff probability x rate)"
+    arb_bound:
+      type: import_parity
+      onshore_leg: COMEX:HG
+      offshore_leg: LME:CA
+      freight_usd_t: 100             # LME warehouse or Chile to US delivery points, incl. insurance and finance; 60-150
+      import_duty: 0.0               # refined cathode was EXEMPTED from the 50% Section 232 copper tariff of 1 Aug 2025
+      formula: "parity_usd_t = lme_usd_t * (1 + import_duty) + freight_usd_t; arb open when comex_usd_t > parity_usd_t"
+  notes: >-
+    The defining metals RV trade of 2025: the spread went from near zero to about 3000 USD/t
+    (pricing a 50% tariff on cathode) and collapsed on 31 Jul 2025 when cathode was exempted.
+    It still prices the proposed phased tariff on refined copper (15% from 2027, 30% from 2028
+    in the Commerce recommendation; status confidence: low - check before trusting import_duty).
+    Feb-Aug 2025 is a regime, not a distribution: z-scores whose window spans it mean little.
+    COMEX delivers only US-located, mostly American-brand cathode, so the arb is one-way.
+
+- id: bench.cu.shfe_vs_ine_bc
+  family: benchmark
+  name: SHFE copper vs INE bonded copper (VAT and bonded basis)
+  sector: metals
+  legs:
+    - {instrument: SHFE:CU, weight: 1.0}
+    - {instrument: INE:BC,  weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [cu_onshore_offshore, china_import_arb, cu_bonded_basis]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:CU      # same months, same expiry day
+    desk_convention: "ratio CU / BC; pure tax would be 1.13"
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:CU
+      offshore_leg: INE:BC
+      import_duty: 0.0
+      vat_rate: 0.13
+      port_charges_cny_t: 150        # customs clearance and moving metal from bonded to domestic warehouse
+      formula: "parity_cny_t = bc_cny_t * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; customs-clearing arb open when cu_cny_t > parity_cny_t"
+  notes: >-
+    Same metal, same city, same currency, same expiry: the spread is VAT (13%) plus the value of
+    having cleared customs. No FX and no time-zone gap, so it is the cleanest read of the import
+    window. CU / 1.13 - BC above clearing cost means bonded metal gets declared and the window
+    is open. INE:BC is thin; expect stale settlements in back months.
+
+- id: bench.cu.ine_bc_vs_lme
+  family: benchmark
+  name: INE bonded copper vs LME copper (implied Yangshan premium)
+  sector: metals
+  legs:
+    - {instrument: INE:BC, weight: 1.0}
+    - {instrument: LME:CA, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [cu_bonded_basis, cu_onshore_offshore]
+  verified: false
+  params:
+    ratio_screen: true
+    tenor_anchor: INE:BC
+  notes: >-
+    Both legs are tax-free, so the difference is the paper equivalent of the Yangshan CIF
+    premium (metal in Shanghai bonded warehouse vs LME warrant) plus any CNH basis. Both legs
+    are open to foreign traders, which makes it the only China copper basis an offshore account
+    can trade directly. Typical range -50 to +150 USD/t. Noisy: BC is thin and the settlements
+    are 10 hours apart.
+
+# ---- aluminium ----
+- id: bench.al.shfe_vs_lme
+  family: benchmark
+  name: SHFE aluminium vs LME aluminium
+  sector: metals
+  legs:
+    - {instrument: SHFE:AL, weight: 1.0}
+    - {instrument: LME:AH,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [al_onshore_offshore, china_import_arb, china_export_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:AL
+    desk_convention: "plain ratio SHFE / LME, VAT left in"
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:AL
+      offshore_leg: LME:AH
+      physical_premium_usd_t: 130    # CIF main Chinese ports; tracks the Japan premium
+      import_duty: 0.0               # provisional rate on unwrought non-alloy aluminium; confidence: low
+      vat_rate: 0.13
+      port_charges_cny_t: 150
+      export_tax: 0.15               # on primary ingot, which is why China exports semis, not metal
+      export_vat_rebate: 0.0         # the 13% rebate on semis was removed on 1 Dec 2024
+      formula: "parity_cny_t = (lme_usd_t + physical_premium_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when shfe_cny_t > parity_cny_t. Export side: semis leave when shfe_cny_t plus fabrication is below lme_usd_t * USDCNH with no rebate"
+  notes: >-
+    Two-sided band. China's 45 Mt capacity cap makes it a marginal importer (mostly Russian
+    metal) when the ratio is high, and a semis exporter when it is low; removal of the semis
+    rebate in Dec 2024 widened the band by about 13%. Stored series is the straight spread.
+
+- id: bench.al.shfe_vs_comex
+  family: benchmark
+  name: SHFE aluminium vs COMEX aluminium
+  sector: metals
+  legs:
+    - {instrument: SHFE:AL,   weight: 1.0}
+    - {instrument: COMEX:ALI, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [al_onshore_offshore, al_venue_arb, us_aluminium_tariff]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:AL      # COMEX lists every month, so the SHFE main month always exists
+    desk_convention: "ratio SHFE / COMEX; not a physical arb, read it as bench.al.shfe_vs_lme plus the COMEX-LME basis"
+  notes: >-
+    Not a physical arb: US-delivered P1020A does not flow to China. It is
+    bench.al.shfe_vs_lme plus the COMEX-LME basis, kept because the China list names
+    COMEX ALI as a counterpart and because the COMEX leg may carry part of the Section 232
+    Midwest premium (duty status not checked, confidence: low). COMEX:ALI is thin (a few
+    thousand lots), so back-month settlements can be stale. Added 2026-09-22 for the
+    metals ratio screen.
+
+- id: bench.al.comex_vs_lme
+  family: benchmark
+  name: COMEX aluminium vs LME aluminium
+  sector: metals
+  legs:
+    - {instrument: COMEX:ALI, weight: 1.0}
+    - {instrument: LME:AH,    weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [al_venue_arb, us_aluminium_tariff]
+  verified: false
+  notes: >-
+    Second-nearest month on both legs. COMEX delivers in US and other approved warehouses; how
+    much of the 50% Section 232 tariff the contract prices depends on its duty status, which I
+    have not checked (confidence: low). If it proves to sit flat to the LME it is a ticker
+    sanity check; if it carries part of the Midwest premium it is a second tariff gauge.
+
+- id: bench.al.mwp_vs_tariff_implied
+  family: benchmark
+  name: US Midwest premium vs half of LME aluminium (Section 232 pass-through)
+  sector: metals
+  legs:
+    - {instrument: COMEX:AUP, weight: 1.0}
+    - {instrument: LME:AH,    weight: -0.5}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [us_aluminium_tariff, al_premium]
+  verified: false
+  params:
+    desk_convention: "MWP in US cents per lb; full pass-through premium = tariff x (LME + logistics) + logistics"
+    arb_bound:
+      type: import_parity
+      onshore_leg: COMEX:AUP
+      offshore_leg: LME:AH
+      import_duty: 0.5               # Section 232: 10% 2018, 25% from 12 Mar 2025, 50% from 4 Jun 2025
+      freight_usd_t: 300             # pre-tariff logistics premium, Canada or Middle East to Midwest; 250-400
+      formula: "full_pass_through_usd_t = import_duty * lme_usd_t + freight_usd_t; the stored value (MWP - 0.5 x LME) is the premium left after the tariff: near 300 means fully priced, well below means the market doubts the tariff or Canada gets a carve-out"
+  notes: >-
+    The weight of 0.5 is the tariff rate, so the row is only meaningful from 4 Jun 2025; before
+    that read the ratio. If the rate changes, change the weight and add a level break. AUP is
+    cash settled on the monthly average, so m+1 avoids the part-priced front month; the LME leg
+    is the second third-Wednesday prompt.
+
+- id: bench.al.mwp_vs_europe_dp
+  family: benchmark
+  name: US Midwest premium vs European duty-paid premium
+  sector: metals
+  legs:
+    - {instrument: COMEX:AUP, weight: 1.0}
+    - {instrument: COMEX:AEP, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [al_premium, us_aluminium_tariff]
+  verified: false
+  notes: >-
+    Transatlantic premium spread: where the marginal tonne of Middle East and Indian metal goes.
+    Dominated since 2025 by the US tariff; Europe adds CBAM cost from 2026 and the phase-out of
+    Russian metal. AUP converts from USD/lb.
+
+- id: bench.al.europe_dp_vs_du
+  family: benchmark
+  name: European aluminium premium, duty-paid vs duty-unpaid
+  sector: metals
+  legs:
+    - {instrument: COMEX:AEP, weight: 1.0}
+    - {instrument: COMEX:EDP, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [al_premium, eu_duty]
+  verified: false
+  notes: >-
+    In theory the EU import duty (3% on unalloyed ingot) times the LME price, i.e. 70-90 USD/t;
+    in practice it compresses when duty-free origins dominate supply. EDP is thin:
+    confidence: low that it settles on real trades every day.
+
+- id: bench.al.europe_du_vs_japan
+  family: benchmark
+  name: European duty-unpaid premium vs Japan premium (west-east)
+  sector: metals
+  legs:
+    - {instrument: COMEX:EDP, weight: 1.0}
+    - {instrument: COMEX:MJP, weight: -1.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [al_premium]
+  verified: false
+  notes: >-
+    West vs East pull on Middle East and Australian metal. The Japan premium is negotiated
+    quarterly, so the MJP leg steps. Both legs thin; lowest priority of the premium rows.
+
+# ---- alumina ----
+- id: bench.alumina.shfe_vs_fob_aus
+  family: benchmark
+  name: SHFE alumina vs alumina FOB Australia
+  sector: metals
+  legs:
+    - {instrument: SHFE:AO,   weight: 1.0}
+    - {instrument: COMEX:ALA, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [alumina_onshore_offshore, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:AO
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:AO
+      offshore_leg: COMEX:ALA
+      freight_usd_t: 30              # Western Australia to north China, Handysize/Supramax; 20-45
+      import_duty: 0.0
+      vat_rate: 0.13
+      port_charges_cny_t: 40
+      formula: "parity_cny_t = (fob_aus_usd_t + freight_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when shfe_cny_t > parity_cny_t"
+  notes: >-
+    China swings between alumina importer and exporter, so the spread crosses both parities: it
+    exported through the late-2024 spike (FOB Australia above 800 USD/t) and the window flipped
+    in 2025 as new Chinese and Indonesian refineries ramped. COMEX:ALA is thin; its settlement
+    follows the Platts index with little independent trading. Freight and port: confidence: low.
+
+# ---- zinc, lead, nickel, tin ----
+- id: bench.zn.shfe_vs_lme
+  family: benchmark
+  name: SHFE zinc vs LME zinc (import arb)
+  sector: metals
+  legs:
+    - {instrument: SHFE:ZN, weight: 1.0}
+    - {instrument: LME:ZS,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [zn_onshore_offshore, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:ZN
+    desk_convention: "plain ratio SHFE / LME, VAT left in"
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:ZN
+      offshore_leg: LME:ZS
+      physical_premium_usd_t: 120
+      import_duty: 0.01
+      vat_rate: 0.13
+      port_charges_cny_t: 150
+      formula: "parity_cny_t = (lme_usd_t + physical_premium_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t; import arb open when shfe_cny_t > parity_cny_t"
+  notes: >-
+    China imports refined zinc only when the window opens, so the ratio mean-reverts more
+    cleanly than copper's. The same ratio drives concentrate imports and treatment charges
+    (smelter margin), which have no futures.
+
+- id: bench.pb.shfe_vs_lme
+  family: benchmark
+  name: SHFE lead vs LME lead
+  sector: metals
+  legs:
+    - {instrument: SHFE:PB, weight: 1.0}
+    - {instrument: LME:PB,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [pb_onshore_offshore, china_import_arb, china_export_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:PB
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:PB
+      offshore_leg: LME:PB
+      physical_premium_usd_t: 100
+      import_duty: 0.03              # confidence: low
+      vat_rate: 0.13
+      port_charges_cny_t: 150
+      export_vat_rebate: 0.0
+      formula: "parity_cny_t = (lme_usd_t + physical_premium_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    China is self-sufficient in lead (large secondary sector), so the spread wanders in a wide
+    band: imports at the top, occasional exports at the bottom (2021-22). Least traded of the
+    six arbs.
+
+- id: bench.ni.shfe_vs_lme
+  family: benchmark
+  name: SHFE nickel vs LME nickel
+  sector: metals
+  legs:
+    - {instrument: SHFE:NI, weight: 1.0}
+    - {instrument: LME:NI,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [ni_onshore_offshore, china_import_arb, china_export_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:NI
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:NI
+      offshore_leg: LME:NI
+      physical_premium_usd_t: 150
+      import_duty: 0.02              # MFN; zero for ASEAN origin. confidence: low
+      vat_rate: 0.13
+      port_charges_cny_t: 200
+      formula: "parity_cny_t = (lme_usd_t + physical_premium_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    The direction of the physical flow has reversed: since 2023-24 China converts Indonesian
+    intermediates into cathode and delivers Chinese brands to the LME, so export parity now
+    matters as much as import parity and the ratio sits lower than its pre-2022 history.
+    History around 8-16 March 2022 (LME suspension) is unusable. Both legs are open to foreign
+    traders since April 2026.
+
+- id: bench.sn.shfe_vs_lme
+  family: benchmark
+  name: SHFE tin vs LME tin
+  sector: metals
+  legs:
+    - {instrument: SHFE:SN, weight: 1.0}
+    - {instrument: LME:SN,  weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [sn_onshore_offshore, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: SHFE:SN
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:SN
+      offshore_leg: LME:SN
+      physical_premium_usd_t: 300
+      import_duty: 0.0               # Indonesian metal enters at zero under ACFTA (MFN 3%). confidence: low
+      vat_rate: 0.13
+      port_charges_cny_t: 500
+      formula: "parity_cny_t = (lme_usd_t + physical_premium_usd_t) * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    Driven by Indonesian export licensing and Myanmar (Wa State) concentrate supply. Both legs
+    are thin and the LME leg is squeeze-prone; wide noise band.
+
+# ---- precious ----
+- id: bench.au.shfe_vs_comex
+  family: benchmark
+  name: SHFE gold vs COMEX gold (Shanghai premium)
+  sector: metals
+  legs:
+    - {instrument: SHFE:AU,  weight: 1.0}
+    - {instrument: COMEX:GC, weight: -1.0}
+  unit: USD/oz
+  fx: USDCNH
+  tenor: main
+  driver_tags: [gold_china_premium, fx_cnh]
+  verified: false
+  params:
+    ratio_screen: true
+    tenor_anchor: SHFE:AU      # COMEX lists every even month, so the same month always exists
+    desk_convention: "quoted in USD/oz, or in CNY/g as SHFE minus COMEX x USDCNH / 31.1035"
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:AU
+      offshore_leg: COMEX:GC
+      freight_usd_t: 0
+      other_usd_oz: 3                # air freight, insurance, refining to 1 kg 9999 bars
+      import_duty: 0.0
+      vat_rate: 0.0                  # exchange-traded standard gold is VAT-exempt
+      formula: "parity_cny_g = (comex_usd_oz + other_usd_oz) * USDCNH / 31.1035; the window is only usable by banks holding a PBOC import licence and quota, so the premium can persist"
+  notes: >-
+    The paper version of the Shanghai gold premium (SGE spot is not a future). Positive when
+    Chinese demand is strong and the PBOC withholds import quotas (2023: above 100 USD/oz);
+    negative when demand is weak. It is also a CNH view: the PBOC has used quotas to manage
+    the currency. CNY/g to USD/oz multiplies by 31.1035.
+
+- id: bench.au.shfe_vs_ose
+  family: benchmark
+  name: SHFE gold vs OSE gold
+  sector: metals
+  legs:
+    - {instrument: SHFE:AU, weight: 1.0}
+    - {instrument: OSE:JAU, weight: -1.0}
+  unit: USD/oz
+  fx: [USDCNH, USDJPY]
+  tenor: main
+  driver_tags: [gold_china_premium, gold_location_arb, fx_cnh]
+  verified: false
+  params:
+    ratio_screen: true
+    tenor_anchor: SHFE:AU      # both list even months; without it OSE main is a year out and SHFE main about six months
+    desk_convention: "ratio SHFE / OSE with both legs in USD/oz; CNY/g and JPY/g both x 31.1035"
+  notes: >-
+    Shanghai against Tokyo gold, both converted to USD/oz through the daily CNH and JPY
+    rates, same delivery month on both legs through the anchor. Gold is VAT-exempt on
+    SHFE and OSE quotes exclude consumption tax, so no vat_basis. It is the Shanghai
+    premium seen from Asia rather than New York: Tokyo and Shanghai settle within an
+    hour of each other, so the closes are nearly synchronous, unlike the COMEX pair.
+    Added 2026-09-22 for the metals ratio screen.
+
+- id: bench.ag.shfe_vs_comex
+  family: benchmark
+  name: SHFE silver vs COMEX silver
+  sector: metals
+  legs:
+    - {instrument: SHFE:AG,  weight: 1.0}
+    - {instrument: COMEX:SI, weight: -1.0}
+  unit: USD/oz
+  fx: USDCNH
+  tenor: main
+  driver_tags: [silver_china_premium, china_export_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    desk_convention: "SHFE in CNY/kg / 1.13 / USDCNH / 32.1507 minus COMEX"
+    arb_bound:
+      type: import_parity
+      onshore_leg: SHFE:AG
+      offshore_leg: COMEX:SI
+      import_duty: 0.0
+      vat_rate: 0.13
+      other_usd_oz: 0.3
+      export_vat_rebate: 0.0
+      formula: "parity_cny_kg = (comex_usd_oz + other_usd_oz) * 32.1507 * USDCNH * (1 + vat_rate). China is normally a net silver exporter, so the ex-VAT spread sits at or below zero; exports need a licence"
+  notes: >-
+    No tenor_anchor: SHFE's main months are even, COMEX's are H K N U Z, and COMEX lists other
+    months only when they are nearby. Main vs main is what is traded; it embeds 0-3 months of
+    contango (about 0.4% a month). The stored series has 13% VAT inside the SHFE leg, so its
+    level is about 11% of price above the economic premium: trust the ratio z-score, not the
+    level. CNY/kg to USD/oz divides by 32.1507; the legacy dashboard used 31.1035 and was 3.4%
+    out (PLAN.md section 10), so do not expect the two to match.
+
+- id: bench.pt.gfex_vs_nymex
+  family: benchmark
+  name: GFEX platinum vs NYMEX platinum
+  sector: metals
+  legs:
+    - {instrument: GFEX:PT,  weight: 1.0}
+    - {instrument: NYMEX:PL, weight: -1.0}
+  unit: USD/oz
+  fx: USDCNH
+  tenor: main
+  driver_tags: [pgm_china_premium, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    arb_bound:
+      type: import_parity
+      onshore_leg: GFEX:PT
+      offshore_leg: NYMEX:PL
+      import_duty: 0.0               # confidence: low
+      vat_rate: 0.13                 # since 1 Nov 2025, when the platinum import VAT exemption ended
+      other_usd_oz: 5
+      formula: "parity_cny_g = (nymex_usd_oz + other_usd_oz) * USDCNH / 31.1035 * (1 + import_duty) * (1 + vat_rate)"
+  notes: >-
+    China takes about a third of world platinum. History starts 27 Nov 2025, so long-window
+    statistics are empty until 2027. No tenor_anchor: GFEX lists even months, NYMEX trades
+    F J N V; only Apr and Oct coincide. Platinum forwards swung between contango and steep
+    backwardation in 2025 (lease rates above 10%), so the month mismatch can matter.
+
+- id: bench.pt.gfex_vs_ose
+  family: benchmark
+  name: GFEX platinum vs OSE platinum
+  sector: metals
+  legs:
+    - {instrument: GFEX:PT, weight: 1.0}
+    - {instrument: OSE:JPL, weight: -1.0}
+  unit: USD/oz
+  fx: [USDCNH, USDJPY]
+  tenor: main
+  driver_tags: [pgm_china_premium, platinum_location_arb, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: GFEX:PT      # both list even months, so the same delivery month exists on OSE (unlike NYMEX F J N V)
+    arb_bound:
+      type: import_parity
+      onshore_leg: GFEX:PT
+      offshore_leg: OSE:JPL
+      import_duty: 0.0               # confidence: low
+      vat_rate: 0.13                 # since 1 Nov 2025, when the platinum import VAT exemption ended
+      other_usd_oz: 5
+      formula: "parity_cny_g = (ose_jpy_g / USDJPY + other_usd_oz / 31.1035) * USDCNH * (1 + import_duty) * (1 + vat_rate)"
+  notes: >-
+    The Asian platinum pair: same delivery month on both legs and closes within an hour
+    of each other, so a cleaner read of the Chinese premium than the NYMEX row, which
+    mixes months and time zones. OSE quotes exclude consumption tax. History starts
+    27 Nov 2025 (GFEX), so long-window statistics are empty until 2027. Added 2026-09-22
+    for the metals ratio screen.
+
+- id: bench.pd.gfex_vs_nymex
+  family: benchmark
+  name: GFEX palladium vs NYMEX palladium
+  sector: metals
+  legs:
+    - {instrument: GFEX:PD,  weight: 1.0}
+    - {instrument: NYMEX:PA, weight: -1.0}
+  unit: USD/oz
+  fx: USDCNH
+  tenor: main
+  driver_tags: [pgm_china_premium, china_import_arb]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    arb_bound:
+      type: import_parity
+      onshore_leg: GFEX:PD
+      offshore_leg: NYMEX:PA
+      import_duty: 0.0               # confidence: low
+      vat_rate: 0.13
+      other_usd_oz: 5
+      formula: "parity_cny_g = (nymex_usd_oz + other_usd_oz) * USDCNH / 31.1035 * (1 + import_duty) * (1 + vat_rate)"
+  notes: >-
+    As platinum, thinner on both legs. GFEX even months vs NYMEX H M U Z: only Jun and Dec
+    coincide. History starts 27 Nov 2025.
+
+# ---- lithium ----
+- id: bench.li.gfex_vs_cme_carbonate
+  family: benchmark
+  name: GFEX lithium carbonate vs CME lithium carbonate CIF CJK
+  sector: metals
+  legs:
+    - {instrument: GFEX:LC,   weight: 1.0}
+    - {instrument: COMEX:LTC, weight: -1.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [lithium_onshore_offshore, china_import_arb, lithium_chain]
+  verified: false
+  params:
+    ratio_screen: true
+    vat_basis: ex_vat
+    tenor_anchor: GFEX:LC
+    arb_bound:
+      type: import_parity
+      onshore_leg: GFEX:LC
+      offshore_leg: COMEX:LTC
+      freight_usd_t: 0               # the index is already CIF China, Japan, Korea
+      import_duty: 0.0               # Chile and Australia under FTAs; MFN 5%. Argentina pays MFN: confidence: low
+      vat_rate: 0.13
+      port_charges_cny_t: 500
+      formula: "parity_cny_t = cif_usd_kg * 1000 * USDCNH * (1 + import_duty) * (1 + vat_rate) + port_charges_cny_t"
+  notes: >-
+    GFEX is where lithium is priced: open interest is tens of times CME's, and the Fastmarkets
+    CIF CJK index behind the CME leg lags Chinese spot by one to three weeks. So the spread is
+    a lead-lag trade as much as an arb: GFEX moves first, CME converges. CME quotes USD/kg,
+    converted to USD/t by the engine. COMEX:LTC is thin; settlements are broker curves.
+
+# =====================================================================
+# PROCESSING - raw material vs product
+# =====================================================================
+
+- id: proc.cn.aluminium_smelter
+  family: processing
+  name: China aluminium smelter margin (SHFE aluminium minus alumina)
+  sector: metals
+  legs:
+    - {instrument: SHFE:AL, weight: 1.0}
+    - {instrument: SHFE:AO, weight: -1.92}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [al_smelter_margin, alumina_chain]
+  verified: false
+  params:
+    tenor_anchor: SHFE:AO      # AL lists every month with open interest along the curve; AO is 1/5/9
+    conversion_cost: 10000
+    conversion_cost_range: [9000, 11500]
+    desk_convention: "also watched as the price ratio AO / AL: alumina at 17-19% of the metal price is normal, above 25% is a squeeze (late 2024)"
+  notes: >-
+    1.92 t alumina per tonne of metal. The rest of the cost has no future: power about 13500 kWh
+    (5500-6000 CNY), carbon anode 0.46 t (about 2300), fluorides, labour, depreciation (about
+    2000): hence conversion_cost 10000, left out of `constant` as in ferrous. Both legs include
+    13% VAT, which cancels. With output capped at 45 Mt the metal price cannot be arbitraged
+    down by new capacity, so the margin is driven by the alumina leg.
+
+- id: proc.global.aluminium_smelter
+  family: processing
+  name: Western aluminium smelter margin (LME aluminium minus alumina FOB Australia)
+  sector: metals
+  legs:
+    - {instrument: LME:AH,    weight: 1.0}
+    - {instrument: COMEX:ALA, weight: -1.92}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [al_smelter_margin, alumina_chain]
+  verified: false
+  params:
+    conversion_cost: 1100
+    conversion_cost_range: [900, 1400]
+    desk_convention: "alumina price as a percentage of LME (the linkage rate of legacy contracts, 13-16%); index-priced alumina broke away from it after 2010"
+  notes: >-
+    Excludes the regional premium, which the smelter also earns: add COMEX:AUP or COMEX:AEP by
+    hand for a US or European smelter. conversion_cost (power 14 MWh at about 40 USD, carbon,
+    other) is confidence: low. COMEX:ALA is thin.
+
+- id: proc.cn.adc12_primary_blend
+  family: processing
+  name: SHFE cast alloy minus primary-metal blend cost (ADC12 ceiling)
+  sector: metals
+  legs:
+    - {instrument: SHFE:AD, weight: 1.0}
+    - {instrument: SHFE:AL, weight: -0.865}
+    - {instrument: GFEX:SI, weight: -0.11}
+    - {instrument: SHFE:CU, weight: -0.025}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [al_alloy_chain, al_scrap_discount]
+  verified: false
+  params:
+    conversion_cost: 600
+    conversion_cost_range: [400, 900]
+  notes: >-
+    ADC12 is about 10.5-11% silicon and 1.5-3.5% copper, the rest aluminium. It is normally
+    made from scrap, so the alloy trades BELOW this primary blend and the value is negative;
+    the blend cost is the ceiling (above it, alloy can be made from primary metal). How far
+    below measures scrap availability. Weights are mid-spec: confidence: medium. History from
+    June 2025 only.
+
+- id: proc.cn.polysilicon_vs_silicon
+  family: processing
+  name: GFEX polysilicon minus silicon metal
+  sector: metals
+  legs:
+    - {instrument: GFEX:PS, weight: 1.0}
+    - {instrument: GFEX:SI, weight: -1.1}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [solar_chain]
+  verified: false
+  params:
+    conversion_cost: 28000
+    conversion_cost_range: [24000, 34000]
+  notes: >-
+    About 1.1 t of silicon metal powder per tonne of polysilicon, but silicon is only a quarter
+    of cash cost; power (55-60 MWh per tonne) dominates and has no future. So this is a
+    relative-value signal along the solar chain rather than a margin. Since mid-2025 the
+    polysilicon leg is driven by the anti-involution capacity buy-out plan, not by cost.
+    conversion_cost is confidence: low. History from Dec 2024; GFEX:SI has a grade break at
+    the SI2412 contract.
+
+- id: proc.li.carbonate_vs_spodumene
+  family: processing
+  name: Lithium converter margin (GFEX carbonate minus CME spodumene)
+  sector: metals
+  legs:
+    - {instrument: GFEX:LC,   weight: 1.0}
+    - {instrument: COMEX:SPO, weight: -8.0}
+  unit: USD/t
+  fx: USDCNH
+  tenor: main
+  driver_tags: [lithium_chain, lithium_converter_margin]
+  verified: false
+  params:
+    vat_basis: ex_vat
+    conversion_cost: 2800
+    conversion_cost_range: [2200, 3500]
+  notes: >-
+    About 8 t of 6% spodumene concentrate per tonne of carbonate (7.8-8.2 at typical recovery).
+    Chinese converters buy CIF China concentrate and sell at GFEX-linked prices, so this is
+    their real margin; it has been near or below zero for most of 2024-25. The stored series
+    keeps VAT inside the GFEX leg: read it with vat_basis. COMEX:SPO is marked illiquid, so no
+    data until that status changes. confidence: low on the spodumene leg throughout.
+
+- id: proc.li.cme_carbonate_vs_spodumene
+  family: processing
+  name: Lithium converter margin, all CME (carbonate CIF CJK minus spodumene)
+  sector: metals
+  legs:
+    - {instrument: COMEX:LTC, weight: 1.0}
+    - {instrument: COMEX:SPO, weight: -8.0}
+  unit: USD/t
+  tenor: m+1
+  driver_tags: [lithium_chain, lithium_converter_margin]
+  verified: false
+  params:
+    conversion_cost: 2800
+    conversion_cost_range: [2200, 3500]
+  notes: >-
+    Same margin with no VAT or FX in it, both legs Fastmarkets indices in USD. Both legs thin;
+    no data while COMEX:SPO is illiquid.
+
+# =====================================================================
+# SUBSTITUTION - different metals that replace one another, and macro ratios
+# =====================================================================
+
+# ---- precious ----
+- id: sub.pm.gold_vs_silver_comex
+  family: substitution
+  name: Gold / silver ratio (COMEX)
+  sector: metals
+  legs:
+    - {instrument: COMEX:GC, weight: 1.0}
+    - {instrument: COMEX:SI, weight: -1.0}
+  unit: USD/oz
+  tenor: main
+  driver_tags: [precious_ratio, macro_haven_vs_industrial]
+  verified: false
+  params:
+    desk_convention: "the ratio GC / SI; the difference is meaningless"
+  notes: >-
+    The most watched ratio in metals. Rises in risk-off and deflation scares (above 100 in
+    2020 and April 2025), falls when silver's industrial half (solar, electronics) leads.
+    Main vs main: GC and SI share only the Dec month, so it carries up to two months of carry.
+
+- id: sub.pm.gold_vs_silver_shfe
+  family: substitution
+  name: Gold / silver ratio (SHFE)
+  sector: metals
+  legs:
+    - {instrument: SHFE:AU, weight: 1.0}
+    - {instrument: SHFE:AG, weight: -1.0}
+  unit: CNY/g
+  tenor: main
+  driver_tags: [precious_ratio]
+  verified: false
+  params:
+    desk_convention: "AU in CNY/g x 1000 / AG in CNY/kg. About 11.5% below the COMEX ratio because SHFE silver includes 13% VAT and gold does not"
+  notes: >-
+    The onshore version, same even-month cycle on both legs. Against the COMEX ratio it
+    isolates the Chinese silver premium from the gold premium.
+
+- id: sub.pm.platinum_vs_palladium_nymex
+  family: substitution
+  name: Platinum / palladium ratio (NYMEX)
+  sector: metals
+  legs:
+    - {instrument: NYMEX:PL, weight: 1.0}
+    - {instrument: NYMEX:PA, weight: -1.0}
+  unit: USD/oz
+  tenor: main
+  driver_tags: [pgm_ratio, autocatalyst_substitution]
+  verified: false
+  notes: >-
+    True substitution: autocatalyst makers swap platinum into gasoline catalysts when palladium
+    is dear, with a 2-3 year lag. Palladium went from half of platinum (2016) to 2.5x (2021)
+    and back below par (2024-25). EV share and Russian supply (40% of palladium) drive it.
+
+- id: sub.pm.platinum_vs_palladium_gfex
+  family: substitution
+  name: Platinum / palladium ratio (GFEX)
+  sector: metals
+  legs:
+    - {instrument: GFEX:PT, weight: 1.0}
+    - {instrument: GFEX:PD, weight: -1.0}
+  unit: CNY/g
+  tenor: main
+  driver_tags: [pgm_ratio, autocatalyst_substitution]
+  verified: false
+  notes: >-
+    Onshore mirror, same months and same VAT on both legs. History from 27 Nov 2025.
+
+- id: sub.pm.platinum_vs_gold
+  family: substitution
+  name: Platinum / gold ratio
+  sector: metals
+  legs:
+    - {instrument: NYMEX:PL, weight: 1.0}
+    - {instrument: COMEX:GC, weight: -1.0}
+  unit: USD/oz
+  tenor: main
+  driver_tags: [precious_ratio, macro_haven_vs_industrial]
+  verified: false
+  notes: >-
+    Industrial precious vs monetary precious; jewellery buyers switch when the gap is extreme.
+    Above 1 before 2015, a record low near 0.3 in early 2025, then platinum's 2025 rally.
+
+- id: sub.pm.platinum_vs_gold_cn
+  family: substitution
+  name: Platinum / gold ratio (GFEX vs SHFE)
+  sector: metals
+  legs:
+    - {instrument: GFEX:PT, weight: 1.0}
+    - {instrument: SHFE:AU, weight: -1.0}
+  unit: CNY/g
+  tenor: main
+  driver_tags: [precious_ratio, china_jewellery]
+  verified: false
+  notes: >-
+    Chinese jewellery fabricators and retail buyers moved into platinum in 2025 as gold became
+    unaffordable; this is where that substitution is priced. Platinum leg includes 13% VAT,
+    gold does not. History from 27 Nov 2025.
+
+# ---- base ----
+- id: sub.lme.copper_vs_aluminium
+  family: substitution
+  name: Copper / aluminium ratio (LME)
+  sector: metals
+  legs:
+    - {instrument: LME:CA, weight: 1.0}
+    - {instrument: LME:AH, weight: -1.0}
+  unit: USD/t
+  tenor: m+2
+  driver_tags: [base_ratio, cu_al_substitution]
+  verified: false
+  params:
+    desk_convention: "the ratio Cu / Al on LME 3-month prices; m+2 (third third-Wednesday prompt) is the monthly prompt nearest the 3-month date"
+  notes: >-
+    Real substitution in cable, busbar, air-conditioning tubing and heat exchangers; the trade
+    rule of thumb is that switching accelerates above 3.5 and the ratio has held near 4 since
+    2024. Also a supply story: mine-constrained copper vs energy-constrained aluminium.
+
+- id: sub.cn.copper_vs_aluminium
+  family: substitution
+  name: Copper / aluminium ratio (SHFE)
+  sector: metals
+  legs:
+    - {instrument: SHFE:CU, weight: 1.0}
+    - {instrument: SHFE:AL, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [base_ratio, cu_al_substitution]
+  verified: false
+  notes: >-
+    Onshore mirror; both legs carry the same VAT. China's appliance makers are the marginal
+    switchers, so this is the ratio they act on.
+
+- id: sub.lme.zinc_vs_lead
+  family: substitution
+  name: Zinc / lead ratio (LME)
+  sector: metals
+  legs:
+    - {instrument: LME:ZS, weight: 1.0}
+    - {instrument: LME:PB, weight: -1.0}
+  unit: USD/t
+  tenor: m+2
+  driver_tags: [base_ratio, sister_metals]
+  verified: false
+  notes: >-
+    Sister metals: mined together, so mine supply shocks are shared and the ratio isolates
+    demand (galvanised steel vs batteries) and smelter bottlenecks. Not substitutes in use.
+    Classic pair for LME RV desks; range 1.0-1.6 over the last decade.
+
+- id: sub.cn.zinc_vs_lead
+  family: substitution
+  name: Zinc / lead ratio (SHFE)
+  sector: metals
+  legs:
+    - {instrument: SHFE:ZN, weight: 1.0}
+    - {instrument: SHFE:PB, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [base_ratio, sister_metals]
+  verified: false
+  notes: >-
+    Onshore mirror. SHFE lead is thin and moves with secondary-smelter environmental curbs.
+
+- id: sub.lme.aluminium_vs_zinc
+  family: substitution
+  name: Aluminium / zinc ratio (LME)
+  sector: metals
+  legs:
+    - {instrument: LME:AH, weight: 1.0}
+    - {instrument: LME:ZS, weight: -1.0}
+  unit: USD/t
+  tenor: m+2
+  driver_tags: [base_ratio, energy_intensive_metals]
+  verified: false
+  notes: >-
+    The two power-hungry smelted metals: they rallied together in the 2021-22 European energy
+    crisis, then diverged on mine supply (zinc) vs the Chinese capacity cap (aluminium). Some
+    real substitution in die casting and coatings. Lower priority.
+
+- id: sub.cn.alloy_vs_aluminium
+  family: substitution
+  name: SHFE cast alloy vs primary aluminium (secondary discount)
+  sector: metals
+  legs:
+    - {instrument: SHFE:AD, weight: 1.0}
+    - {instrument: SHFE:AL, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [al_alloy_chain, al_scrap_discount]
+  verified: false
+  params:
+    desk_convention: "quoted as AD - AL in CNY/t, normally negative"
+  notes: >-
+    The liquid way to trade scrap tightness: die casters switch between ADC12 and primary-based
+    alloy. Typically -300 to -1500 CNY/t; narrows when scrap is short (the US and EU keeping
+    scrap at home) and in the autumn auto peak. History from June 2025.
+
+- id: sub.cn.nickel_vs_stainless
+  family: substitution
+  name: Nickel / stainless ratio (SHFE)
+  sector: metals
+  legs:
+    - {instrument: SHFE:NI, weight: 1.0}
+    - {instrument: SHFE:SS, weight: -1.0}
+  unit: CNY/t
+  tenor: main
+  driver_tags: [stainless_nickel]
+  verified: false
+  params:
+    desk_convention: "the ratio NI / SS (about 9-10). Ferrous owns the margin form, proc.cn.stainless_vs_nickel = SS - 0.08 x NI"
+  notes: >-
+    External leg: SHFE:SS (ferrous). Same two instruments as the ferrous margin row; kept here
+    because the nickel desk quotes the ratio. Refined nickel is no longer what stainless mills
+    buy (they buy NPI at a moving discount), so a falling ratio means Indonesian NPI and
+    converted cathode are cheapening nickel units faster than stainless. If the housekeeper
+    wants one row per pair, keep the ferrous one and drop this.
+
+# ---- battery ----
+- id: sub.li.hydroxide_vs_carbonate
+  family: substitution
+  name: Lithium hydroxide vs carbonate (CME, CIF CJK)
+  sector: metals
+  legs:
+    - {instrument: COMEX:LTH, weight: 1.0}
+    - {instrument: COMEX:LTC, weight: -1.0}
+  unit: USD/kg
+  tenor: m+1
+  driver_tags: [lithium_chain, cathode_chemistry]
+  verified: false
+  params:
+    conversion_cost: 1.0
+    conversion_cost_range: [0.6, 1.5]
+    desk_convention: "quoted as hydroxide minus carbonate in USD/kg"
+  notes: >-
+    Hydroxide feeds high-nickel NMC cathodes, carbonate feeds LFP. LFP's rise to over 70% of
+    Chinese cells turned the hydroxide premium (5+ USD/kg in 2022) into a discount at times.
+    Carbonate can be causticised into hydroxide for about 1 USD/kg, which caps the premium:
+    that is the conversion_cost here. Same index provider and location on both legs.
+
+# ---- macro ----
+- id: sub.macro.copper_vs_gold
+  family: substitution
+  name: Copper / gold ratio (COMEX)
+  sector: metals
+  legs:
+    - {instrument: COMEX:HG, weight: 1.0}
+    - {instrument: COMEX:GC, weight: -1.0}
+  unit: USD/lb
+  tenor: main
+  driver_tags: [macro_growth_vs_haven, rates_proxy]
+  verified: false
+  params:
+    desk_convention: "HG in USD/lb divided by GC in USD/oz, unconverted (often x 1000). Ours converts gold to USD/lb, so it differs by the constant 14.5833 troy oz per lb; the log-ratio z-score is identical"
+  notes: >-
+    Growth vs fear. Tracked the US 10-year yield closely for a decade until 2022; the gap since
+    (central-bank gold buying) is itself the signal. At record lows in 2025. The COMEX copper
+    leg carries the US tariff premium from Feb 2025: use LME copper by hand to check a signal.
+
+- id: bench.pt.ose_vs_nymex
+  family: benchmark
+  name: OSE platinum vs NYMEX platinum
+  sector: metals
+  legs:
+    - {instrument: OSE:JPL, weight: 1.0}
+    - {instrument: NYMEX:PL, weight: -1.0}
+  unit: USD/oz
+  fx: USDJPY
+  tenor: main
+  driver_tags: [platinum_location_arb]
+  verified: false
+  notes: >-
+    Tokyo against New York platinum. The OSE main contract is about a year out and NYMEX main is
+    the nearby, so the level carries roughly a year of platinum forward (USD rates minus lease
+    rates) as well as the location basis: read the z-score, not the level. Time-zone gap of about
+    14 hours. Added by the housekeeper after the coverage check; confidence: medium.
+
+- id: bench.au.ose_vs_comex
+  family: benchmark
+  name: OSE gold vs COMEX gold
+  sector: metals
+  legs:
+    - {instrument: OSE:JAU, weight: 1.0}
+    - {instrument: COMEX:GC, weight: -1.0}
+  unit: USD/oz
+  fx: USDJPY
+  tenor: main
+  driver_tags: [gold_location_arb]
+  verified: false
+  notes: >-
+    Mostly a USDJPY and carry position, as the metals notes say: the OSE main contract is about a
+    year out. Useful as a gauge of Japanese retail and fund flow in gold. Added by the housekeeper
+    after the coverage check; confidence: medium.

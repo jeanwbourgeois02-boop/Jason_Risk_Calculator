@@ -381,3 +381,20 @@ def test_options_leg_rows_query_runs_against_a_migrated_old_instrument_options_t
     rows = _leg_rows(conn, '2026-08-19')  # must not raise sqlite3.OperationalError: no such column: o.payoff
     assert len(rows) == 1
     assert rows[0]['trade_id'] == 'T1'
+
+
+# --------------------------------------------------------------------------- book filter sentence
+
+def test_summary_breaks_the_excluded_rows_down_by_the_book_filter(tmp_path):
+    frame = blotter.read_table(Path(__file__).resolve().parents[1] / 'data/sample/commodity_blotter_sample.csv')
+    frame = frame.astype({'Status': object, 'Fund': object})
+    frame.loc[frame.index[0], 'Status'] = 'Cancelled'
+    frame.loc[frame.index[1], 'Fund'] = 'OTHERFUND'
+    payload = frame.to_csv(index=False).encode('utf-8')
+
+    from data.ingest.upload import import_blotter_report
+    message = import_blotter_report(payload, 'filtered.csv', tmp_path / 'risk.db')['message']
+
+    assert 'Book filter (' in message
+    assert 'Rows excluded: 1 status, 1 fund.' in message
+    assert 'other funds or cancelled' not in message
