@@ -50,20 +50,28 @@ notional. Zero for a clean spread; the whole remaining leg once the other leg ha
 bundle or a pin it is sized by the calendar or template that uses all its futures legs (closest
 ratio), else it is the net lots per root.
 
+Levels (Phase B, 2026-09-25; ``levels.py``): each spread's level at entry, at the previous close
+and now, in its quote unit, by the research app's formula (sum weight x leg price converted to the
+template's unit + constant; a calendar near - far), the USD a 1.0 move is worth on the open lots,
+and the research app's spread_id / instance for it. ``positions``: the same spread put on over
+several trade dates as one position, entries averaged by size. Display only: no P&L figure moves.
+
 Tables: ``spread_overrides`` (``overrides.py``), created defensively here. Its read is wired into
 the rule; nothing writes it yet.
 """
 
 from engine.spreads.book import (
     KIND_BUNDLE, KIND_PINNED, PERIODS, REVIEW_ACCOUNTS, REVIEW_AMBIGUOUS, REVIEW_RATIO, SPREAD_PRODUCTS,
-    book_spreads,
+    book_spreads, positions_from,
 )
 from engine.spreads.grouping import CALENDAR, TOLERANCE
+from engine.spreads.levels import research_key
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
 from engine.spreads.templates import Template, TemplateLeg, load_templates
 
 __all__ = [
     "CALENDAR", "KIND_BUNDLE", "KIND_PINNED", "PERIODS", "PIN", "REVIEW_ACCOUNTS", "REVIEW_AMBIGUOUS",
     "REVIEW_RATIO", "SPLIT", "SPREAD_PRODUCTS", "TOLERANCE", "Template", "TemplateLeg", "book_spreads",
-    "ensure_overrides_table", "load_templates", "override_problems", "read_overrides",
+    "ensure_overrides_table", "load_templates", "override_problems", "positions_from", "read_overrides",
+    "research_key",
 ]

@@ -11,6 +11,11 @@ unpriced has no figure, with that leg's reason, never a partial sum.
 The one number computed here that ``value_book`` does not give is the leftover's USD notional:
 leftover lots x ``instruments.multiplier`` x that contract's mark x its spot, both read off the
 leg's own ``value_book`` row (the mark and conversion its P&L used); no mark is looked up.
+
+Beside the P&L (Phase B, 2026-09-25), and never part of it: each spread's *level* in its own
+quote unit and the USD a 1.0 move of it is worth (``levels.py`` holds the formula, the research
+app's, and says which marks each level reads), one *position* per spread across trade dates
+(``positions_from``) and the research app's key for it.
 """
 
 from __future__ import annotations
@@ -26,9 +31,12 @@ from data.contracts import UnknownContract, contract_for, load_roots
 from engine.pnl.calendar import load_holidays
 from engine.pnl.ledger import period_reference_dates
 from engine.pnl.reference import resolve_reference
-from engine.pnl.valuation import value_book
+from engine.pnl.valuation import usd_per_quote, value_book
 from engine.spreads import grouping
 from engine.spreads.grouping import CALENDAR, Leg, Match, Shape
+from engine.spreads.levels import (
+    LevelLeg, LevelSpec, converted, level, research_key, spec_for, usd_per_level_unit,
+)
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
 from engine.spreads.templates import Template, load_templates
 
@@ -79,8 +87,11 @@ def _why(row) -> str:
     return str(row.get("reason", "") or "") or "no USD P&L on its row"
 
 
-def _period_pnl(ids: Sequence[str], as_of: str, frames: _Frames, refs: Dict[str, str], holidays) -> dict:
-    """{pnl_usd: {period: value | None}, pnl_reasons: {period: ''|why}, pnl_notes, ref_dates}."""
+def _period_pnl(ids: Sequence[str], as_of: str, frames: _Frames, refs: Dict[str, str], holidays,
+                daily_out: Optional[dict] = None) -> dict:
+    """{pnl_usd: {period: value | None}, pnl_reasons: {period: ''|why}, pnl_notes, ref_dates}.
+    ``daily_out``, when given, receives the frame the Daily figure is measured from and its date
+    (``frame``, ``date``): the close ``level_prev`` reads, so the level and the P&L agree."""
     ids = frozenset(ids)
     values = {p: None for p in PERIODS}
     reasons = {p: "" for p in PERIODS}
@@ -109,6 +120,8 @@ def _period_pnl(ids: Sequence[str], as_of: str, frames: _Frames, refs: Dict[str,
             continue
         frame = choice.frame
         ref_used[p], notes[p] = choice.ref_date_used, choice.note
+        if p == "daily" and daily_out is not None and choice.found:
+            daily_out.update(frame=frame, date=choice.ref_date_used)
         if not choice.found or choice.split.blocked_ids:
             blocked = choice.split.blocked_ids
             fr = {r["trade_id"]: r for r in frame.to_dict("records")} if not frame.empty else {}
@@ -132,12 +145,12 @@ def _read_trades(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     theme = "COALESCE(NULLIF(t.theme, ''), it.theme, '')" if _has_column(conn, "trades", "theme") \
         else "COALESCE(it.theme, '')"
     sql = f"""
-        SELECT t.trade_id, t.instrument_id, t.product, t.trade_date, t.quantity, t.account,
+        SELECT t.trade_id, t.instrument_id, t.product, t.trade_date, t.quantity, t.price, t.account,
                {theme} AS theme, i.base_ccy, i.quote_ccy, i.multiplier, i.expiry_date
         FROM trades_official t JOIN instruments i USING (instrument_id)
         LEFT JOIN instrument_theme it ON it.instrument_id = t.instrument_id
         WHERE t.trade_date <= :as_of ORDER BY t.trade_id"""
-    cols = ("trade_id", "instrument_id", "product", "trade_date", "quantity", "account", "theme",
+    cols = ("trade_id", "instrument_id", "product", "trade_date", "quantity", "price", "account", "theme",
             "base_ccy", "quote_ccy", "multiplier", "expiry_date")
     return [dict(zip(cols, r)) for r in conn.execute(sql, {"as_of": as_of})]
 
@@ -161,6 +174,7 @@ class _Book:
         self.reasons: List[str] = []
         templates, problems = load_templates(templates_dir)
         self.reasons += list(problems)
+        self.templates = {t.template_id: t for t in templates}
         self.by_root: Dict[str, List[Template]] = defaultdict(list)
         for t in templates:
             for r in dict.fromkeys(t.roots):
@@ -180,6 +194,7 @@ class _Book:
         self.refs = period_reference_dates(as_of)
         self.holidays = load_holidays()
         self.problem_set: Dict[str, None] = {}
+        self.daily: Dict[str, dict] = {}      # spread_id -> the Daily reference {frame, date}
 
     # ---- helpers
     def lots(self, tid: str) -> Optional[float]:
@@ -373,7 +388,8 @@ class _Book:
             "trade_dates": sorted({str(self.by_id[t]["trade_date"]) for t in tids}),
             "status": "open" if any(self.is_open(t) for t in tids) else "closed",
         }
-        out.update(_period_pnl(tids, self.as_of, self.frames, self.refs, self.holidays))
+        daily = self.daily.setdefault(spread_id, {})
+        out.update(_period_pnl(tids, self.as_of, self.frames, self.refs, self.holidays, daily))
         return out
 
     def auto(self, m: Match) -> dict:
@@ -384,6 +400,7 @@ class _Book:
         for row, w in zip(out["legs"], m.shape.weights):
             row["weight"] = w
         out["leftover"], out["leftover_basis"] = self.leftover(m.legs, m.shape)
+        self.add_levels(out, m)
         return out
 
     def hand_made(self, spread_id: str, name: str, kind: str, tids: Sequence[str]) -> dict:
@@ -400,6 +417,7 @@ class _Book:
             for row in out["legs"]:
                 row["weight"] = weights.get(row["instrument_id"])
         out["leftover"], out["leftover_basis"] = self.leftover(legs, m.shape if m else None)
+        self.add_levels(out, m)
         return out
 
     @staticmethod
@@ -407,6 +425,198 @@ class _Book:
         out.update(template="" if m.shape.kind == CALENDAR else m.shape.kind, family=m.shape.family,
                    unit=m.shape.unit, size=m.size, size_unit=m.shape.quantity_unit, deviation=m.deviation,
                    also_matches=[s.kind for s in m.also])
+
+    # ---- levels (engine/spreads/levels.py: the research app's formula, display only)
+    def add_levels(self, out: dict, m: Optional[Match]) -> None:
+        if m is None:
+            spec, why = None, ("no calendar or template uses all of this group's futures legs, "
+                               "so it has no level")
+        else:
+            spec, why = spec_for(m.shape, m.legs, self.roots, self.templates)
+        out.update(self.level_fields(spec, why, self.daily.get(out["spread_id"], {})))
+
+    def level_fields(self, spec: Optional[LevelSpec], why: str, daily: dict) -> dict:
+        research_id, research_instance, research_why = research_key(spec)
+        if spec is None:
+            research_why = why
+        prev_day = daily.get("date") or self.refs["daily"]
+        out = {
+            "level_unit": spec.unit if spec is not None else "",
+            "level_entry": None, "level_entry_reason": "",
+            "level_prev": None, "level_prev_reason": "", "level_prev_date": prev_day,
+            "level_now": None, "level_now_reason": "",
+            "level_change": None, "level_change_reason": "",
+            "level_sources": {"entry": "", "prev": "", "now": "", "usd_per_unit": ""},
+            "level_legs": [],
+            "usd_per_unit": None, "usd_per_unit_reason": "",
+            "research_id": research_id, "research_instance": research_instance, "research_reason": research_why,
+        }
+        if spec is None:
+            for k in ("level_entry", "level_prev", "level_now", "level_change", "usd_per_unit"):
+                out[f"{k}_reason"] = why
+            return out
+        entry, entry_why, entry_src, entry_px = self.entry_level(spec)
+        now_rows = self.today
+        now, now_why, now_src, now_px = self.level_on(spec, self.as_of, now_rows, fallback=False)
+        frame = daily.get("frame")
+        if frame is None:
+            frame = self.frames(prev_day)
+        prev_rows = {r["trade_id"]: r for r in frame.to_dict("records")} if not frame.empty else {}
+        prev, prev_why, prev_src, prev_px = self.level_on(spec, prev_day, prev_rows, fallback=True)
+        out.update(level_entry=entry, level_entry_reason=entry_why, level_now=now, level_now_reason=now_why,
+                   level_prev=prev, level_prev_reason=prev_why)
+        if now is not None and prev is not None:
+            out["level_change"] = now - prev
+        else:
+            out["level_change_reason"] = "; ".join(
+                f"{label}: {w}" for label, w in (("now", now_why), (f"the {prev_day} close", prev_why)) if w)
+        upu, upu_why, upu_src = self.usd_per_unit(spec)
+        out.update(usd_per_unit=upu, usd_per_unit_reason=upu_why)
+        out["level_sources"] = {"entry": entry_src, "prev": prev_src, "now": now_src, "usd_per_unit": upu_src}
+        out["level_legs"] = [{
+            "instrument_id": leg.instrument_id, "root_id": leg.root_id, "weight": leg.weight,
+            "currency": leg.currency, "price_scale": leg.price_scale, "qty_factor": leg.qty_factor,
+            "conversion": leg.qty_conv, "entry_price": entry_px[n], "prev_price": prev_px[n],
+            "now_price": now_px[n],
+        } for n, leg in enumerate(spec.legs)]
+        return out
+
+    def official_spot(self, ccy: str, day: str) -> Optional[float]:
+        """USD per unit of ``ccy`` at the exact official SPOT dated ``day`` (USD<ccy> inverted
+        first, then <ccy>USD, the order ``usd_per_quote`` tries), or None. No estimate."""
+        if ccy == "USD":
+            return 1.0
+        for pair, inverted in ((f"USD{ccy}", True), (f"{ccy}USD", False)):
+            row = self.conn.execute(
+                "SELECT value FROM marks_official WHERE instrument_id = ? AND mark_type = 'SPOT' "
+                "AND as_of_date = ? ORDER BY snapped_at DESC LIMIT 1", (pair, day)).fetchone()
+            v = _num(row[0]) if row else None
+            if v:
+                return 1.0 / v if inverted else v
+        return None
+
+    def unit_spot(self, spec: LevelSpec, day: str, exact: bool) -> Tuple[Optional[float], str]:
+        """(USD per unit of the level's currency on ``day``, why when None): exact official for an
+        entry, the valuation's own ``usd_per_quote`` otherwise."""
+        if spec.currency == "USD":
+            return 1.0, ""
+        if exact:
+            s = self.official_spot(spec.currency, day)
+            return s, "" if s else f"no official {spec.currency} SPOT on {day} to express the level in {spec.unit}"
+        try:
+            s = _num(usd_per_quote(self.conn, spec.currency, day)[0])
+        except Exception as exc:  # noqa: BLE001 -- a stored spot that is not a number: named, not raised
+            return None, f"the {spec.currency} SPOT of {day} could not be read ({exc})"
+        return (s, "") if s else (None, f"no SPOT for USD conversion of {spec.currency} on {day}")
+
+    def official_price(self, leg: LevelLeg, day: str) -> Optional[Tuple[float, str]]:
+        expiry = str(self.by_id[leg.trade_ids[0]]["expiry_date"])
+        row = self.conn.execute(
+            "SELECT value, source FROM marks_official WHERE instrument_id = ? AND mark_type = 'FUTURE_PX' "
+            "AND as_of_date = ? ORDER BY (settle_date = ?) DESC, snapped_at DESC LIMIT 1",
+            (leg.instrument_id, day, expiry)).fetchone()
+        v = _num(row[0]) if row else None
+        return None if v is None else (v, str(row[1]))
+
+    def level_on(self, spec: LevelSpec, day: str, rows: Dict[str, dict], fallback: bool
+                 ) -> Tuple[Optional[float], str, str, List[Optional[float]]]:
+        """(level, why when None, sources, quoted price per leg) on ``day`` from the ``value_book``
+        rows given: each leg's ``mark`` and, across currencies, its row's ``spot``. With
+        ``fallback`` a leg with no row on that close (put on after it) reads the exact official
+        FUTURE_PX and SPOT of the day instead."""
+        prices: List[Optional[float]] = [None] * len(spec.legs)
+        conv, sources = [], []
+        s_unit, unit_why = self.unit_spot(spec, day, exact=False)
+        for n, leg in enumerate(spec.legs):
+            leg_rows = [rows[t] for t in leg.trade_ids if t in rows]
+            if leg_rows:
+                status = next((str(r.get("status") or "") for r in leg_rows
+                               if str(r.get("status") or "") not in ("OPEN", "")), "")
+                if status:
+                    return None, (f"{leg.instrument_id} is {status.lower()} on {day}: a spread has no level "
+                                  f"once a leg has expired"), "", prices
+                r = next((r for r in leg_rows if _num(r.get("mark")) is not None), None)
+                if r is None:
+                    return None, f"{leg.instrument_id} has no price on {day} ({_why(leg_rows[0])})", "", prices
+                px, s_leg = float(r["mark"]), _num(r.get("spot"))
+                src = f"{leg.instrument_id} {r.get('mark_source') or 'value_book'}"
+                note = str(r.get("note") or "")
+                if note.startswith("no price on"):
+                    src += f" ({note})"
+            elif fallback:
+                hit = self.official_price(leg, day)
+                if hit is None:
+                    return None, (f"{leg.instrument_id} was not yet held on the {day} close and has no official "
+                                  f"FUTURE_PX that day"), "", prices
+                px = hit[0]
+                s_leg = self.official_spot(leg.currency, day) if spec.needs_fx(leg) else None
+                src = f"{leg.instrument_id} {hit[1]} (official FUTURE_PX of the {day} close: not yet held then)"
+            else:
+                return None, f"{leg.instrument_id} is not valued by value_book on {day}", "", prices
+            if spec.needs_fx(leg):
+                if not s_leg:
+                    return None, (f"no USD conversion of {leg.currency} on {day} for {leg.instrument_id}, "
+                                  f"so it cannot be expressed in {spec.unit}"), "", prices
+                if s_unit is None:
+                    return None, unit_why, "", prices
+                src += f", {leg.currency} at its USD spot {s_leg:.6g}"
+            prices[n] = px
+            conv.append(converted(px, leg, spec, s_leg, s_unit))
+            sources.append(src)
+        return level(conv, spec), "", "; ".join(sources), prices
+
+    def entry_level(self, spec: LevelSpec) -> Tuple[Optional[float], str, str, List[Optional[float]]]:
+        """(level at entry, why when None, source, average fill per leg): each leg's lots-weighted
+        average fill, a cross-currency leg converted at the exact official SPOT of each trade's date."""
+        prices: List[Optional[float]] = [None] * len(spec.legs)
+        conv = []
+        fx_days: Dict[str, set] = defaultdict(set)
+        for n, leg in enumerate(spec.legs):
+            num = qp = den = 0.0
+            for tid in leg.trade_ids:
+                t = self.by_id[tid]
+                q, f = self.lots(tid), _num(t["price"])
+                if q is None or f is None:
+                    return None, f"{tid}: its quantity or fill is not a number, so the entry has no level", "", prices
+                s_leg = s_unit = None
+                if spec.needs_fx(leg):
+                    day = str(t["trade_date"])
+                    s_leg = self.official_spot(leg.currency, day)
+                    if not s_leg:
+                        return None, (f"the entry of {tid} needs the official {leg.currency} SPOT of its trade "
+                                      f"date {day}, which is not on file"), "", prices
+                    s_unit, unit_why = self.unit_spot(spec, day, exact=True)
+                    if s_unit is None:
+                        return None, f"the entry of {tid}: {unit_why}", "", prices
+                    fx_days[leg.currency].add(day)
+                num += q * converted(f, leg, spec, s_leg, s_unit)
+                qp += q * f
+                den += q
+            if abs(den) < 1e-12:
+                return None, f"{leg.instrument_id}: its trades net to zero lots, so it has no average fill", "", prices
+            prices[n] = qp / den
+            conv.append(num / den)
+        src = "the fills, each leg's lots-weighted average"
+        if fx_days:
+            src += "; " + "; ".join(f"{ccy} at the official USD spot of {', '.join(sorted(days))}"
+                                    for ccy, days in sorted(fx_days.items()))
+        return level(conv, spec), "", src, prices
+
+    def usd_per_unit(self, spec: LevelSpec) -> Tuple[Optional[float], str, str]:
+        """(USD per 1.0 of the level for the open lots, why when None, source)."""
+        open_lots = [sum((self.lots(t) or 0.0) for t in leg.trade_ids if self.is_open(t)) for leg in spec.legs]
+        flat = [leg.instrument_id for leg, q in zip(spec.legs, open_lots) if abs(q) < 1e-9]
+        if flat:
+            return None, (f"{', '.join(flat)} has no open lots on {self.as_of}, so the spread has no value "
+                          f"per unit"), ""
+        fitted = grouping.fit(open_lots, spec.weights, spec.units_per_lot)
+        if fitted is None:
+            return None, "the open lots no longer fit the spread's weights, so it has no value per unit", ""
+        s, why = self.unit_spot(spec, self.as_of, exact=False)
+        if s is None:
+            return None, why, ""
+        src = "" if spec.currency == "USD" else f"{spec.currency} at the {self.as_of} USD spot {s:.6g}"
+        return usd_per_level_unit(fitted[0], spec, s), "", src
 
     def review_entry(self, kind: str, matches: Sequence[Match]) -> dict:
         tids = sorted({t for m in matches for leg in m.legs for t in leg.trade_ids})
@@ -453,11 +663,132 @@ class _Book:
         return out
 
 
+# ------------------------------------------------------------------ one position per spread
+def _position_key(s: dict) -> tuple:
+    """A spread's identity across trade dates: the same kind (calendar or template), the same leg
+    contracts with the same weights, the same direction. A bundle or a pin is a position of its own."""
+    if s["kind"] in (KIND_BUNDLE, KIND_PINNED):
+        return ("hand", s["spread_id"])
+    legs = tuple((leg["instrument_id"], leg.get("weight")) for leg in s["legs"])
+    return (s["kind"], legs, _direction(s))
+
+
+def _direction(s: dict) -> str:
+    size = _num(s.get("size"))
+    return "" if size is None else ("long" if size >= 0 else "short")
+
+
+def _sum_or_none(values: Sequence[Optional[float]]) -> Optional[float]:
+    return None if any(v is None for v in values) else float(sum(values))
+
+
+def _position(members: List[dict]) -> dict:
+    first = members[0]
+    key = _position_key(first)
+    pid = (f"POSITION-{first['spread_id']}" if key[0] == "hand" else
+           f"POSITION-{first['kind']}|{'/'.join(i for i, _w in key[1])}|{key[2]}")
+    tids = sorted({t for m in members for t in m["trade_ids"]})
+    out = {
+        "position_id": pid, "spread_ids": [m["spread_id"] for m in members],
+        "name": first["name"], "kind": first["kind"], "template": first["template"], "family": first["family"],
+        "unit": first["unit"], "direction": _direction(first),
+        "size": _sum_or_none([_num(m.get("size")) for m in members]), "size_unit": first["size_unit"],
+        "trade_ids": tids,
+        "accounts": sorted({a for m in members for a in m["accounts"]}),
+        "trade_dates": sorted({d for m in members for d in m["trade_dates"]}),
+        "status": "open" if any(m["status"] == "open" for m in members) else "closed",
+    }
+    # legs: per contract, the members' legs summed
+    legs: Dict[str, dict] = {}
+    for m in members:
+        for leg in m["legs"]:
+            row = legs.setdefault(leg["instrument_id"], {**leg, "trade_ids": [], "lots": 0.0, "open_lots": 0.0,
+                                                          "pnl_local": 0.0, "pnl_usd": 0.0, "reason": "",
+                                                          "status": "closed"})
+            row["trade_ids"] = sorted(set(row["trade_ids"]) | set(leg["trade_ids"]))
+            row["lots"] += leg["lots"]
+            row["open_lots"] += leg["open_lots"]
+            for k in ("pnl_local", "pnl_usd"):
+                row[k] = None if row[k] is None or leg[k] is None else row[k] + leg[k]
+            row["reason"] = "; ".join(x for x in (row["reason"], leg["reason"]) if x)
+            if leg["status"] == "open":
+                row["status"] = "open"
+    out["legs"] = list(legs.values())
+    # period P&L: the members' figures summed, priced ones only, the others counted (the header's rule)
+    out["pnl_usd"], out["pnl_excluded"], out["pnl_reasons"] = {}, {}, {}
+    for p in PERIODS:
+        priced = [m["pnl_usd"][p] for m in members if m["pnl_usd"][p] is not None]
+        left = [m for m in members if m["pnl_usd"][p] is None]
+        out["pnl_usd"][p] = float(sum(priced)) if priced else None
+        out["pnl_excluded"][p] = len(left)
+        out["pnl_reasons"][p] = "; ".join(f"{m['spread_id']}: {m['pnl_reasons'][p]}" for m in left)
+    out["pnl_notes"] = {p: "; ".join(dict.fromkeys(m["pnl_notes"][p] for m in members if m["pnl_notes"][p]))
+                        for p in PERIODS}
+    out["ref_dates"] = dict(first["ref_dates"])
+    # leftover: per root, the members' summed
+    left: Dict[str, dict] = {}
+    for m in members:
+        for e in m["leftover"]:
+            row = left.setdefault(e["root_id"], {"root_id": e["root_id"], "lots": 0.0, "usd_notional": 0.0,
+                                                 "reason": ""})
+            row["lots"] = round(row["lots"] + e["lots"], 9)
+            row["usd_notional"] = (None if row["usd_notional"] is None or e["usd_notional"] is None
+                                   else row["usd_notional"] + e["usd_notional"])
+            row["reason"] = "; ".join(x for x in (row["reason"], e["reason"]) if x)
+    out["leftover"] = sorted(left.values(), key=lambda e: e["root_id"])
+    # levels: the same contracts, so the same level now and at the previous close; the entry is
+    # the members' entries weighted by their size
+    for k in ("level_unit", "level_prev", "level_prev_reason", "level_prev_date", "level_now", "level_now_reason",
+              "level_change", "level_change_reason", "research_id", "research_instance", "research_reason"):
+        out[k] = first[k]
+    out["level_sources"] = dict(first["level_sources"])
+    out["level_legs"] = [dict(leg) for leg in first["level_legs"]]
+    sized = [(abs(_num(m.get("size")) or 0.0), m) for m in members]
+    missing = [m for m in members if m["level_entry"] is None]
+    total = sum(w for w, _m in sized)
+    if missing:
+        out["level_entry"] = None
+        out["level_entry_reason"] = "; ".join(f"{m['spread_id']}: {m['level_entry_reason']}" for m in missing)
+    elif total <= 0:
+        out["level_entry"] = None
+        out["level_entry_reason"] = "the spreads have no size to weight their entries by"
+    else:
+        out["level_entry"] = sum(w * m["level_entry"] for w, m in sized) / total
+        out["level_entry_reason"] = ""
+    if len(members) > 1:
+        out["level_sources"]["entry"] = (f"{len(members)} entries weighted by size ("
+                                         + ", ".join(f"{m['spread_id']} {m['level_entry']:.6g} x {w:g}"
+                                                     for w, m in sized if m["level_entry"] is not None)
+                                         + f"); each from {first['level_sources']['entry']}")
+        for n, leg in enumerate(out["level_legs"]):
+            # the leg's average fill over every entry, weighted by that entry's lots on the leg
+            parts = []
+            for m in members:
+                lots = next((x["lots"] for x in m["legs"] if x["instrument_id"] == leg["instrument_id"]), None)
+                px = m["level_legs"][n]["entry_price"] if len(m["level_legs"]) > n else None
+                parts.append(None if lots is None or px is None else (lots, px))
+            den = sum(q for q, _px in parts) if None not in parts else 0.0
+            leg["entry_price"] = (sum(q * px for q, px in parts) / den) if None not in parts and den else None
+    upu = [m["usd_per_unit"] for m in members]
+    out["usd_per_unit"] = _sum_or_none(upu)
+    out["usd_per_unit_reason"] = "; ".join(f"{m['spread_id']}: {m['usd_per_unit_reason']}"
+                                           for m in members if m["usd_per_unit"] is None)
+    return out
+
+
+def positions_from(spreads: Sequence[dict]) -> List[dict]:
+    """One position per distinct spread (``_position_key``), in the order the spreads come."""
+    groups: Dict[tuple, List[dict]] = {}
+    for s in spreads:
+        groups.setdefault(_position_key(s), []).append(s)
+    return [_position(members) for members in groups.values()]
+
+
 def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value_book,
                  templates_dir=None) -> dict:
     """The book's futures grouped into spreads by the rule of ``engine/spreads/__init__.py``.
 
-    Returns ``{as_of, spreads, outrights, review, reasons}``:
+    Returns ``{as_of, spreads, outrights, review, positions, reasons}``:
 
     - ``spreads``: one dict per spread, bundles first, then hand pins, then the rule's, by first
       trade id: ``spread_id`` ('BUNDLE-<name>', 'PIN-<name>', 'SPREAD-<min trade id>'), ``name``,
@@ -473,7 +804,25 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
       step-back or fill caption), ``ref_dates`` (the close each period is measured from),
       ``leftover`` ([{root_id, lots, usd_notional, reason}] on the open lots: 0 for a clean
       spread; ``usd_notional`` None with its reason when the leg's price or spot is missing) and
-      ``leftover_basis``.
+      ``leftover_basis``. Added 2026-09-25 (Phase B, display arithmetic beside the P&L, which
+      is unchanged; the formula and the marks each level reads are in ``levels.py``):
+      ``level_unit`` ('' when no calendar or template fits), ``level_entry`` / ``level_prev`` /
+      ``level_now`` / ``level_change`` (a figure or None, each with ``<key>_reason``),
+      ``level_prev_date`` (the close ``level_prev`` is read from: the Daily's), ``level_sources``
+      ({entry, prev, now, usd_per_unit}: what was read), ``level_legs`` ([{instrument_id,
+      root_id, weight, currency, price_scale, qty_factor, conversion, entry_price, prev_price,
+      now_price}], prices as quoted), ``usd_per_unit`` (USD P&L of a 1.0 rise of the level on
+      the open lots, signed, with ``usd_per_unit_reason``), ``research_id`` /
+      ``research_instance`` / ``research_reason`` (the research app's spread_id and instance,
+      which risk-history looks up; '' with the reason when there is none).
+    - ``positions``: one per distinct spread (``_position_key``: the same kind, leg contracts,
+      weights and direction; a bundle or pin is its own), the same spread put on over several
+      trade dates as one: ``position_id``, ``spread_ids`` (the member spreads), ``direction``
+      ('long' | 'short'), ``size`` and ``legs`` summed, ``pnl_usd`` the members' figures summed
+      over the priced ones with ``pnl_excluded`` ({period: members left out}) and
+      ``pnl_reasons``, ``leftover`` summed per root, ``level_entry`` the members' entries
+      weighted by |size|, ``usd_per_unit`` summed, and the other level and research keys as a
+      spread's. The ``spreads`` list is unchanged beside it.
     - ``outrights``: every futures trade the rule left alone: trade_id, instrument_id, root_id,
       contract_month, account, trade_date, lots, currency, status, pnl_local, ``why_outright``
       ('' = no spread fits), ``review_ids`` (the review entries naming it), and the same
@@ -490,4 +839,4 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
     """
     book = _Book(conn, as_of, value_fn, templates_dir)
     out = book.group()
-    return {"as_of": as_of, **out, "reasons": book.reasons}
+    return {"as_of": as_of, **out, "positions": positions_from(out["spreads"]), "reasons": book.reasons}

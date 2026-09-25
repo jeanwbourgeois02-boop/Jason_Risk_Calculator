@@ -1094,7 +1094,7 @@ def test_commodity_strip_shows_the_four_engine_figures_as_given():
         assert net.children[1].title.split("\n")[:2] == [header._fmt_usd(block["net_usd"]), expected_line]
 
         spreads = book_spreads(conn, _CMDTY_AS_OF)
-        assert sum(1 for s in spreads["spreads"] if s["status"] == "open") == 1 and len(spreads["review"]) == 1
+        assert sum(1 for s in spreads["positions"] if s["status"] == "open") == 1 and len(spreads["review"]) == 1
         card = _card(cards, header.OPEN_SPREADS_TITLE)
         assert _texts(card)[1] == "1"
         [(short, review_hover)] = _markers(card)
@@ -1122,7 +1122,7 @@ def test_the_slim_header_order_has_no_fx_cards_and_ends_with_the_data_chip():
         conn.close()
     titles = [c.children[0].children if getattr(c, "className", "") != "header-divider" else "|" for c in cards]
     assert titles == ["LTD", "Daily", "Previous day", "5d", "MTD", "YTD", "Trading", "Trades", "|",
-                      header.COMMODITY_EMPTY_TITLE, header.MARKS_TITLE]
+                      header.COMMODITY_EMPTY_TITLE, header.MARKS_TITLE, header.RISK_TITLE]
     for card in cards:
         if getattr(card, "className", "") == "header-divider":
             continue
@@ -1210,7 +1210,7 @@ def test_open_spreads_are_worked_out_once_per_database_revision(tmp_path, monkey
 
     def counting(conn, as_of, **_kwargs):
         calls.append(as_of)
-        return {"spreads": [], "review": [], "reasons": []}
+        return {"spreads": [], "positions": [], "review": [], "reasons": []}
 
     monkeypatch.setattr(engine.spreads, "book_spreads", counting)
     monkeypatch.setattr(header, "_SPREADS_MEMO", {})
@@ -1332,3 +1332,273 @@ def test_the_needed_marks_are_read_once_per_database_revision(tmp_path, monkeypa
         assert as_of_reads() == 2
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------- the risk chip (Phase B)
+# Screens redesign plan, Phase B (user, 2026-09-25): the book's VaR against the vol target,
+# risk-metrics' `book_risk` as given, worked out off the figures' render and memoised.
+
+_NAN = float("nan")
+
+
+def _risk_result(var=33_571.03, vol=301_988.63, pct=6.7108, over=False, reasons=None, parts=None,
+                 in_series=("NYMEX:CL",), placeholder=True):
+    """A `book_risk`-shaped result carrying the keys the chip reads."""
+    parts = parts if parts is not None else [
+        {"underlyer": "NYMEX:CL", "kind": "COMMODITY", "role": "part", "reason": "",
+         "contracts": [{"contract_id": "CLZ26 Comdty", "in_series": True},
+                       {"contract_id": "CLZ26C 75 Comdty", "in_series": False,
+                        "reason": "no DELTA mark: the option has not been priced"}]},
+        {"underlyer": "EUR", "kind": "FX", "role": "part", "reason": "no market history: no folder"},
+        {"underlyer": "JPY", "kind": "FX", "role": "part", "reason": "no market history: no folder"},
+        {"underlyer": "energy", "kind": "SECTOR", "role": "view", "reason": ""},
+    ]
+    return {
+        "as_of": "2026-09-18",
+        "book": {"var95_1d_usd": var, "vol_blended_ann_usd": vol, "vol_trailing_ann_usd": vol,
+                 "vol_crisis_ann_usd": vol, "vol_vs_target_pct": pct, "over_vol_target": over,
+                 "vol_note": "crisis window not in history: trailing vol only", "lag2_date": "2026-09-16",
+                 "reason": "", "reasons": reasons or {}, "rows_in_series": list(in_series)},
+        "config": {"vol_target_usd": 4_500_000.0, "vol_target_placeholder": placeholder,
+                   "vol_target_note": "placeholder: the macro fund's 4.5m, until Jason sets his own vol target",
+                   "var_window_bd": 252, "var_confidence": 0.95,
+                   "blended": {"trail_window_bd": 500, "w_trail": 0.6666666667, "w_stress": 0.3333333333,
+                               "stress_start": "2008-01-01", "stress_end": "2010-12-31"}},
+        "underlyers": parts,
+    }
+
+
+def _chip(result):
+    return header._risk_card(header._slim_risk(result))
+
+
+def test_risk_chip_shows_the_var_and_the_vol_share_of_target_as_risk_metrics_gives_them():
+    card = _chip(_risk_result())
+    assert card.id == header.VAR_CHIP_ID
+    assert card.children[0].children == header.RISK_TITLE
+    value = card.children[1]
+    assert value.children == "VaR " + header.short_money(33_571.03, "$") == "VaR $33.6k"
+    marks = dict(_markers(card))
+    assert list(marks) == ["excl. 3", "6.7% of target"]
+    assert marks["6.7% of target"].startswith("blended annual vol $301,989 is 6.7% of the vol target ($4,500,000")
+    assert not getattr(card.children[2].children[1], "style", None)   # not over: a plain marker
+    # the definitions and the target on hover, the target said to be a placeholder
+    assert "1y 95% VaR (1-day): $33,571." in value.title
+    assert "5th percentile of the book's last 252 daily $ P&Ls" in value.title
+    assert "2/3 x trailing 500-day vol + 1/3 x crisis vol (2008-01-01 to 2010-12-31)" in value.title
+    assert "crisis window not in history: trailing vol only" in value.title
+    assert "Vol target: $4,500,000, a placeholder: the macro fund's 4.5m" in value.title
+    assert _no_visible_sentences(card)
+
+
+def test_risk_chip_says_what_the_book_series_leaves_out():
+    card = _chip(_risk_result())
+    hover = dict(_markers(card))["excl. 3"]
+    assert hover.startswith("The VaR and the vol sum the positions that have a history series: they exclude "
+                            "2 underlyers and 1 contract with none.")
+    assert "- EUR, JPY: no market history: no folder" in hover                      # one line per reason
+    assert "- CLZ26C 75 Comdty: no DELTA mark: the option has not been priced" in hover
+    assert "energy" not in hover                                                    # a view is never a part
+    clean = _chip(_risk_result(parts=[{"underlyer": "NYMEX:CL", "kind": "COMMODITY", "role": "part",
+                                       "contracts": [{"contract_id": "CLZ26 Comdty", "in_series": True}]}]))
+    assert [m for m, _ in _markers(clean)] == ["6.7% of target"]
+
+
+def test_risk_chip_colours_the_vol_marker_when_over_the_target():
+    card = _chip(_risk_result(vol=5_400_000.0, pct=120.0, over=True))
+    marker_span = card.children[2].children[1]
+    assert marker_span.children == "120% of target"
+    assert marker_span.style == header._OVER_TARGET_MARKER
+    assert marker_span.title.endswith(": over the target")
+    assert "(over the target)" in card.children[1].title
+
+
+def test_risk_chip_without_a_placeholder_target_does_not_call_it_one():
+    card = _chip(_risk_result(placeholder=False))
+    assert "Vol target: $4,500,000." in card.children[1].title
+    assert "placeholder" not in card.children[1].title
+
+
+def test_risk_chip_with_no_var_reads_na_with_its_reason_never_zero():
+    why = "no market history: no market history folder: tried a, b"
+    card = _chip(_risk_result(var=_NAN, vol=_NAN, pct=_NAN, reasons={"all": why}, in_series=()))
+    value = card.children[1]
+    assert value.children == "VaR n/a"
+    assert value.title.startswith(f"1y VaR n/a: {why}")
+    assert "Vol target: $4,500,000, a placeholder" in value.title
+    assert len(card.children) == 2                                     # no excl. and no % beside an n/a
+
+
+def test_risk_chip_with_a_var_but_no_vol_says_so():
+    card = _chip(_risk_result(vol=_NAN, pct=_NAN,
+                              reasons={"vol_blended_ann_usd": "fewer than 500 observations (300)"}))
+    marks = dict(_markers(card))
+    assert marks["vol n/a"] == "blended annual vol n/a: fewer than 500 observations (300)"
+    assert card.children[1].children == "VaR $33.6k"
+
+
+def test_risk_chip_pending_and_error_states_carry_their_reason():
+    pending = header._risk_card(None)
+    assert pending.id == header.VAR_CHIP_ID
+    assert pending.children[1].children == "VaR …"
+    assert "being worked out" in pending.children[1].title
+    failed = header._risk_card({"error": "the book's risk could not be computed (RuntimeError: boom)"})
+    assert failed.children[1].children == "VaR n/a"
+    assert failed.children[1].title == "the book's risk could not be computed (RuntimeError: boom)"
+
+
+def _risk_db(tmp_path):
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    return db
+
+
+def _count_book_risk(monkeypatch, result=None, exc=None):
+    import engine.risk
+
+    calls = []
+
+    def fake(conn, as_of, **kwargs):
+        calls.append((as_of, sorted(kwargs)))
+        if exc is not None:
+            raise exc
+        return result if result is not None else _risk_result()
+
+    monkeypatch.setattr(engine.risk, "book_risk", fake)
+    monkeypatch.setattr(header, "_RISK_MEMO", {})
+    monkeypatch.setattr(header, "_RISK_LATEST", {})
+    return calls
+
+
+def test_build_figures_never_works_the_risk_out_and_shows_it_once_it_is_memoised(tmp_path, monkeypatch):
+    calls = _count_book_risk(monkeypatch)
+    db = _risk_db(tmp_path)
+    conn = sqlite3.connect(db)
+    try:
+        chip = header._build_figures(conn, "2026-09-18")[-1]
+        assert chip.children[1].children == "VaR …" and calls == []     # the first paint never waits
+        header.risk_summary(conn, "2026-09-18")                                # what the chip's callback runs
+        assert calls == [("2026-09-18", ["commodity_history", "config", "history"])]
+        chip = header._build_figures(conn, "2026-09-18")[-1]
+        assert chip.children[1].children == "VaR $33.6k" and len(calls) == 1  # the memo, no second run
+        assert header._build_figures(conn, "2026-09-19")[-1].children[1].children == "VaR …"  # another as-of
+    finally:
+        conn.close()
+
+
+def test_risk_summary_is_memoised_on_the_database_revision(tmp_path, monkeypatch):
+    import os
+
+    calls = _count_book_risk(monkeypatch)
+    db = _risk_db(tmp_path)
+    conn = sqlite3.connect(db)
+    try:
+        first = header.risk_summary(conn, "2026-09-18")
+        assert header.risk_summary(conn, "2026-09-18") is first and len(calls) == 1
+        stat = os.stat(db)
+        os.utime(db, (stat.st_atime, stat.st_mtime + 5))                       # the database changed
+        header.risk_summary(conn, "2026-09-18")
+        assert len(calls) == 2
+    finally:
+        conn.close()
+
+
+def test_the_public_risk_summary_if_ready_is_the_private_one_for_other_screens(tmp_path, monkeypatch):
+    calls = _count_book_risk(monkeypatch)
+    conn = sqlite3.connect(_risk_db(tmp_path))
+    try:
+        assert header.risk_summary_if_ready(conn, "2026-09-18") is None and calls == []   # never computes
+        done = header.risk_summary(conn, "2026-09-18")
+        assert header.risk_summary_if_ready(conn, "2026-09-18") is done is header._risk_summary_if_ready(conn, "2026-09-18")
+    finally:
+        conn.close()
+
+
+def test_risk_summary_failure_says_why_and_is_tried_again(tmp_path, monkeypatch):
+    calls = _count_book_risk(monkeypatch, exc=RuntimeError("history unreadable"))
+    db = _risk_db(tmp_path)
+    conn = sqlite3.connect(db)
+    try:
+        out = header.risk_summary(conn, "2026-09-18")
+        assert out["error"].startswith("the book's risk could not be computed (RuntimeError: history unreadable)")
+        chip = header._risk_card(out)
+        assert chip.children[1].children == "VaR n/a" and "history unreadable" in chip.children[1].title
+        header.risk_summary(conn, "2026-09-18")
+        assert len(calls) == 2                                                  # a failure is not memoised
+        assert header._risk_summary_if_ready(conn, "2026-09-18") is None
+    finally:
+        conn.close()
+
+
+def test_the_risk_chip_callback_runs_after_the_figures_and_fills_the_chip(tmp_path, monkeypatch):
+    calls = _count_book_risk(monkeypatch)
+    app, _db = _app_with_header(tmp_path)
+    key = f"{header.VAR_CHIP_ID}.children"
+    spec = app.callback_map[key]
+    assert [(d["id"], d["property"]) for d in spec["inputs"]] == [(f"{header.HEADER_ID}-figures", "children")]
+    assert [(d["id"], d["property"]) for d in spec["state"]] == [(header.AS_OF_STORE_ID, "data")]
+    entry = next(c for c in app._callback_list if c["output"] == key)
+    assert entry["prevent_initial_call"] is True                               # only ever after the figures
+    update = spec["callback"].__wrapped__
+    children = update([], "2026-09-18")
+    assert children[1].children == "VaR $33.6k" and len(calls) == 1
+    from dash import no_update
+    assert update([], None) is no_update
+
+
+def test_open_spreads_count_positions_not_trade_dates_on_the_sample_book(monkeypatch):
+    """The sample's CL Z26/F27 calendar was put on twice (two trade dates): one position, so the
+    card reads the positions' count (5), not the spreads' (6), with each position's name on
+    hover (screens redesign plan, "One place per number": the Spreads tab shows positions)."""
+    from engine.spreads import book_spreads
+    from tests.golden_book import build_book
+    from ui.tabs.blotter_pricing import priced_value_book
+    monkeypatch.setattr(header, "_SPREADS_MEMO", {})
+    conn = schema.connect()
+    try:
+        build_book(conn)
+        as_of = "2026-09-18"
+        out = book_spreads(conn, as_of, value_fn=priced_value_book)
+        open_positions = [p for p in out["positions"] if p["status"] == "open"]
+        assert len(open_positions) == 5
+        assert sum(1 for s in out["spreads"] if s["status"] == "open") == 6
+        card = header._open_spreads_card(header._spread_summary(conn, as_of))
+    finally:
+        conn.close()
+    assert _texts(card)[1] == "5"
+    hover = card.children[1].title
+    for p in open_positions:
+        assert p["name"] in hover
+    cl = next(p for p in open_positions if p["kind"] == "calendar")
+    assert f"{cl['name']} {cl['direction']} (2 entries, traded {', '.join(cl['trade_dates'])})" in hover
+    assert [short for short, _h in _markers(card)] == ([f"review {len(out['review'])}"] if out["review"] else [])
+
+
+def test_open_spreads_leave_closed_positions_out_and_label_each_open_one(monkeypatch):
+    import engine.spreads
+
+    def fake(conn, as_of, **_kwargs):
+        return {"spreads": [{"status": "open"}] * 4,               # the per-trade-date list is not counted
+                "positions": [
+                    {"position_id": "P1", "name": "CL Z26/F27", "direction": "long", "status": "open",
+                     "spread_ids": ["S1", "S2"], "trade_dates": ["2026-09-01", "2026-09-02"]},
+                    {"position_id": "P2", "name": "Brent/WTI", "direction": "short", "status": "open",
+                     "spread_ids": ["S3"], "trade_dates": ["2026-09-03"]},
+                    {"position_id": "P3", "name": "Crack 3-2-1", "direction": "long", "status": "closed",
+                     "spread_ids": ["S4"], "trade_dates": ["2026-09-04"]}],
+                "review": [{"reason": "ratio 55 % off"}], "reasons": []}
+
+    monkeypatch.setattr(engine.spreads, "book_spreads", fake)
+    monkeypatch.setattr(header, "_SPREADS_MEMO", {})
+    conn = schema.connect()
+    try:
+        summary = header._spread_summary(conn, _CMDTY_AS_OF)
+    finally:
+        conn.close()
+    assert summary["open"] == ["CL Z26/F27 long (2 entries, traded 2026-09-01, 2026-09-02)",
+                               "Brent/WTI short (traded 2026-09-03)"]
+    card = header._open_spreads_card(summary)
+    assert _texts(card)[1] == "2"
+    assert "Crack 3-2-1" not in card.children[1].title
+    [(short, review_hover)] = _markers(card)
+    assert short == "review 1" and "ratio 55 % off" in review_hover

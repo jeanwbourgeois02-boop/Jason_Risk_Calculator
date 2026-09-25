@@ -210,6 +210,7 @@ def column_widths(columns: List[dict], *record_sets: Iterable[dict], pad: int = 
     return rules
 
 
+FOOTER_HIDE_HEADER_CSS = {"selector": "tr:has(> th)", "rule": "display: none;"}
 _FOOTER_COPIED = ("columns", "hidden_columns", "css", "style_table", "style_cell", "style_cell_conditional",
                   "style_data_conditional", "tooltip_delay", "tooltip_duration")
 
@@ -228,6 +229,12 @@ def with_footer(table: dash_table.DataTable, footer: List[dict], *, widths: bool
         props["style_cell_conditional"] = list(props.get("style_cell_conditional") or []) + rules
         table.style_cell_conditional = props["style_cell_conditional"]
     props["style_data_conditional"] = list(props.get("style_data_conditional") or []) + list(footer_style or [])
+    # `style_header={"display": "none"}` hides the header cells, but under Dash 4.4 each header
+    # row keeps about 30 px of height: a blank band above every Total line. Drop the rows too.
+    css = list(props.get("css") or [])
+    if FOOTER_HIDE_HEADER_CSS not in css:
+        css.append(FOOTER_HIDE_HEADER_CSS)
+    props["css"] = css
     table_id = getattr(table, "id", None)
     footer_table = dash_table.DataTable(
         **({"id": f"{table_id}-footer"} if table_id else {}),

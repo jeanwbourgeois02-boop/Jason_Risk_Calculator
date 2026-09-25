@@ -110,3 +110,17 @@ def test_si_text_mirrors_d3_for_column_widths():
     assert rk.display_length(-51018.0, f) == len("(51k)")
     assert rk.display_length(1650590.0, f) == len("1.65M")
     assert rk.display_length(None, rk.amount_short("n/a")) == 3
+
+
+def test_footer_table_drops_its_hidden_header_rows_and_keeps_the_tables_own_css():
+    """Dash 4.4 keeps ~30 px per hidden header row: the footer also hides the rows themselves,
+    merged with the table's own css, which stays untouched on the ranked table."""
+    own = {"selector": ".dash-spreadsheet td", "rule": "padding: 2px;"}
+    table = dash_table.DataTable(id="t", columns=[rk.numeric("USD", "usd")], data=[{"usd": 1.0}], css=[own])
+    div = rk.with_footer(table, [{"usd": 1.0}])
+    footer = div.children[1]
+    assert footer.css == [own, rk.FOOTER_HIDE_HEADER_CSS]
+    assert rk.FOOTER_HIDE_HEADER_CSS == {"selector": "tr:has(> th)", "rule": "display: none;"}
+    assert table.css == [own]
+    plain = rk.with_footer(dash_table.DataTable(columns=[rk.numeric("USD", "usd")], data=[]), [])
+    assert plain.children[1].css == [rk.FOOTER_HIDE_HEADER_CSS]

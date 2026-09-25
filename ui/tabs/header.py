@@ -118,17 +118,29 @@ Design choices (no one to ask, so noted here):
   groups left for review, "est." for an estimated expiry date; an n/a carries its reason on
   hover. FX Net / Gross USD delta left the header for the FX & cash tab's headline card
   ("one place per number"), so the header no longer negates the engine's net non-USD delta.
+
+  Risk chip (screens redesign plan, Phase B, 2026-09-25): after the Data chip, the book's 1y 95%
+  VaR (1-day) in k / m ("VaR $33.6k") with its blended vol as a share of the vol target beside it
+  ("6.7% of target", red when over), "excl. N" when the book's series leaves positions with no
+  history out, the definitions and the target (a placeholder while config/risk.yaml holds the
+  macro fund's figure) on hover; "VaR n/a" with the reason on hover when risk-metrics has none.
+  Every figure is `book_risk(conn, as_of)["book"]` as given. `book_risk` takes seconds, so it is
+  worked out by the chip's own callback, after the figures, memoised on the database revision,
+  the as-of and the history's identity (`risk_summary`); the figures show "VaR …" until then.
 """
 from __future__ import annotations
 
 import datetime as dt
+import json
+import logging
 import os
 import re
 import sqlite3
+import threading
 from functools import lru_cache
 from typing import Callable, Optional
 
-from dash import Input, Output, dcc, html
+from dash import Input, Output, State, dcc, html
 
 from ui.tabs.formatting import marker, short_money
 
@@ -202,9 +214,18 @@ _SMALL_VALUE_STYLE = {"fontSize": "13px"}
 MARKERS_CLASS = "header-markers"
 
 
+def _styled_marker(short: str, sentence: str, style: Optional[dict] = None):
+    m = marker(short, sentence)
+    if style:
+        m.style = style
+    return m
+
+
 def _header_card(title: str, value, value_class: str = "header-figure-value", hover: str = "",
-                 value_style: Optional[dict] = None, markers=()) -> html.Div:
-    """One header card. `markers` are (short, sentence) pairs; empty shorts are dropped."""
+                 value_style: Optional[dict] = None, markers=(), card_id: Optional[str] = None) -> html.Div:
+    """One header card. `markers` are (short, sentence) pairs, or (short, sentence, style) for a
+    marker coloured by what it says; empty shorts are dropped. `card_id` gives the card an id (the
+    risk chip, whose children its own callback fills)."""
     value_props = {"className": value_class}
     if hover:
         value_props["title"] = hover
@@ -212,10 +233,11 @@ def _header_card(title: str, value, value_class: str = "header-figure-value", ho
         value_props["style"] = value_style
     children = [html.Div(title, className="header-figure-title", style=_TITLE_STYLE),
                 html.Div(value, **value_props)]
-    shown = [marker(short, sentence) for short, sentence in markers if short]
+    shown = [_styled_marker(*m) for m in markers if m[0]]
     if shown:
         children.append(html.Span(shown, className=MARKERS_CLASS))
-    return html.Div(className="header-figure", style=_CARD_STYLE, children=children)
+    props = {"id": card_id} if card_id else {}
+    return html.Div(className="header-figure", style=_CARD_STYLE, children=children, **props)
 
 
 def _figure_card(title: str, value_text: str, caption: str = "") -> html.Div:
@@ -772,6 +794,10 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     marks = _marks_card(conn, as_of, needs_today)
     if marks is not None:
         cards.append(marks)
+    # The risk chip (screens redesign Phase B): never worked out here, since `book_risk` reads the
+    # history (seconds): the memoised result when this database revision and as-of already have
+    # one, else "VaR …" until the chip's own callback, chained after this one, fills it in.
+    cards.append(_risk_card(_risk_summary_if_ready(conn, as_of)))
     return cards
 
 
@@ -825,7 +851,7 @@ def _reference_markers(entry: dict, choice) -> list:
 #   1. gross commodity notional (USD): book-positions' `commodities.gross_usd`;
 #   2. net outright: its `net_usd`, each sector's `net_usd` (the Blotter's Positions table's
 #      figures) and each commodity's on hover;
-#   3. open spreads: spreads-engine's `book_spreads` spreads with status 'open', with "review N"
+#   3. open spreads: spreads-engine's `book_spreads` positions with status 'open', with "review N"
 #      for the groups waiting for review, the names on hover;
 #   4. a chip for the next first notice / last trade: expiry-monitor's worst-first first row,
 #      coloured by its level.
@@ -955,7 +981,8 @@ _SPREADS_MEMO_MAX = 64
 
 
 def _spread_summary_uncached(conn: sqlite3.Connection, as_of: str) -> dict:
-    """{open: [label], review: [reason], reasons: [sentence], error: ''} from `book_spreads`,
+    """{open: [label], review: [reason], reasons: [sentence], error: ''} from `book_spreads`:
+    `open` is one label per open *position* (its `positions` list, 2026-09-25), not per spread,
     valued through the header's own reader (`priced_value_book`, cached per date, so the
     closes the P&L cards already read are not valued again). Only the counts and names are
     shown; the spreads' P&L is the Spreads tab's."""
@@ -969,11 +996,20 @@ def _spread_summary_uncached(conn: sqlite3.Connection, as_of: str) -> dict:
         return {"open": [], "review": [], "reasons": [],
                 "error": _failure_reason("spreads could not be grouped", exc, conn)}
     opened = []
-    for s in out.get("spreads") or []:
-        if s.get("status") != "open":
+    for p in out.get("positions") or []:
+        # one per position (the same spread put on over several trade dates is one), as the
+        # Spreads tab's main table shows them (screens redesign plan, "One place per number")
+        if p.get("status") != "open":
             continue
-        where = ", ".join(s.get("trade_dates") or [])
-        opened.append(f"{s.get('name') or s.get('spread_id')}" + (f" (traded {where})" if where else ""))
+        label = f"{p.get('name') or p.get('position_id')}"
+        if p.get("direction"):
+            label += f" {p['direction']}"
+        members = len(p.get("spread_ids") or [])
+        where = ", ".join(p.get("trade_dates") or [])
+        detail = [f"{members} entries"] if members > 1 else []
+        if where:
+            detail.append(f"traded {where}")
+        opened.append(label + (f" ({', '.join(detail)})" if detail else ""))
     return {"open": opened, "review": [str(r.get("reason") or r.get("review_id") or "") for r in out.get("review") or []],
             "reasons": [str(r) for r in out.get("reasons") or []], "error": ""}
 
@@ -996,7 +1032,7 @@ def _spread_summary(conn: sqlite3.Connection, as_of: str) -> dict:
 
 
 def _open_spreads_card(summary: dict) -> html.Div:
-    """The count of open spreads, the names on hover, and "review N" for the groups the rule
+    """The count of open spread positions, the names on hover, and "review N" for the groups the rule
     left for review (their reasons on hover)."""
     if summary.get("error"):
         return _pnl_card(OPEN_SPREADS_TITLE, {"available": False, "reason": summary["error"]}, colour=False)
@@ -1122,6 +1158,259 @@ def _marks_card(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple]) ->
     return _header_card(MARKS_TITLE, f"{len(missing):,} {'mark' if len(missing) == 1 else 'marks'} missing",
                         "header-figure-value", value_style=_chip_style(_LEVEL_STYLES["AMBER"]),
                         hover="\n".join(lines))
+
+
+# ------------------------------------------------------------------ the risk chip (Phase B)
+# Screens redesign plan, Phase B (user, 2026-09-25): "chips for ... (Phase B) VaR against the vol
+# target". The book's 1y VaR (1-day) and its blended vol as a share of the vol target, exactly as
+# risk-metrics' `book_risk(conn, as_of)["book"]` gives them (the Risk tab's own cards); nothing
+# here computes a metric. `book_risk` reads the history files and takes seconds (about 7 s on the
+# golden book, mostly the research history's constant-maturity series), so:
+#   - `_build_figures` never calls it: it shows the memoised result when there is one for this
+#     database revision, as-of and history, else "VaR …" (pending, the reason on hover);
+#   - the chip's own callback (`register_callbacks`), chained on the figures' output so it runs
+#     after them and never competes with their first paint, works it out once per key and fills
+#     the chip in place (`VAR_CHIP_ID`).
+
+RISK_TITLE = "Risk"
+VAR_CHIP_ID = "header-var-chip"
+_RISK_MEMO: dict = {}
+_RISK_MEMO_MAX = 16
+# (path, mtime, as_of) -> the last summary worked out for it, whatever the history's identity:
+# what `_build_figures` shows without touching the history files (its first load is ~0.4 s), the
+# chained callback then checking it against the history as it is now.
+_RISK_LATEST: dict = {}
+_RISK_LOCK = threading.Lock()   # one `book_risk` at a time: a second request for the same key waits, then hits
+_NEUTRAL_CHIP = {"color": "#ffffff"}
+_OVER_TARGET_MARKER = {"color": "#ffffff", "background": "#b91c1c", "fontWeight": 700}
+_LEFT_OUT_ON_HOVER = 12
+_BOOK_KEYS = ("var95_1d_usd", "vol_blended_ann_usd", "vol_trailing_ann_usd", "vol_crisis_ann_usd",
+              "vol_vs_target_pct", "over_vol_target", "vol_note", "lag2_date", "reason", "reasons",
+              "rows_in_series", "first_date", "last_date", "days")
+_CONFIG_KEYS = ("vol_target_usd", "vol_target_placeholder", "vol_target_note", "var_window_bd",
+                "var_confidence", "blended")
+
+
+def _risk_inputs() -> tuple:
+    """(history, commodity history, config, identity): risk-metrics' own loaders (each cached on
+    its files' mtimes, about 10 ms warm), so the memo key moves when the history or
+    config/risk.yaml changes, not only when the book does."""
+    from engine.risk.commodity_history import load_commodity_history
+    from engine.risk.config import load_config
+    from engine.risk.history import load_history
+    history, commodity, config = load_history(), load_commodity_history(), load_config()
+    ident = (history.path, history.last_date, commodity.path, commodity.first_date, commodity.last_date,
+             json.dumps(config, sort_keys=True, default=str))
+    return history, commodity, config, ident
+
+
+def _slim_risk(result: dict) -> dict:
+    """What the chip reads of `book_risk`'s result, as given: the book's figures, the config's
+    target and definitions, and the positions its series leaves out (the parts with no history
+    series, and the contracts left out of a commodity's series), read off the engine's own flags."""
+    book = result.get("book") or {}
+    in_series = set(book.get("rows_in_series") or [])
+    parts = [u for u in result.get("underlyers") or [] if u.get("role") == "part"]
+    left_out = [(str(u.get("underlyer")), str(u.get("reason") or "no history series"))
+                for u in parts if u.get("underlyer") not in in_series]
+    contracts_out = [(str(c.get("contract_id")), str(c.get("reason") or "no history series"))
+                     for u in parts if u.get("kind") == "COMMODITY" and u.get("underlyer") in in_series
+                     for c in u.get("contracts") or [] if not c.get("in_series", True)]
+    config = result.get("config") or {}
+    return {"as_of": result.get("as_of"), "book": {k: book.get(k) for k in _BOOK_KEYS},
+            "config": {k: config.get(k) for k in _CONFIG_KEYS},
+            "left_out": left_out, "contracts_out": contracts_out, "error": ""}
+
+
+def _risk_summary_uncached(conn: sqlite3.Connection, as_of: str, inputs: tuple) -> dict:
+    history, commodity, config, _ident = inputs
+    try:
+        from engine.risk import book_risk
+        from ui.tabs.blotter_pricing import pricing_snapshot
+        with pricing_snapshot(conn, "Header risk chip"):   # one view of the marks for the whole result
+            result = book_risk(conn, as_of, history=history, commodity_history=commodity, config=config)
+    except Exception as exc:  # noqa: BLE001 -- the chip says why, the other cards still show
+        logging.getLogger(__name__).exception("header risk chip failed for as_of=%s", as_of)
+        return {"error": _failure_reason("the book's risk could not be computed", exc, conn)}
+    return _slim_risk(result)
+
+
+def _risk_key(conn: sqlite3.Connection, as_of: str) -> tuple:
+    """(memo key or None for an in-memory database, the inputs)."""
+    inputs = _risk_inputs()
+    rev = _db_revision(conn)
+    return ((*rev, as_of, inputs[3]) if rev is not None else None), inputs
+
+
+def risk_summary(conn: sqlite3.Connection, as_of: str) -> dict:
+    """The chip's reading of `book_risk(conn, as_of)` (`_slim_risk`), memoised on (database path,
+    mtime, as_of, the history's and config's identity). A failure is returned as {"error":
+    sentence} and not memoised, so the next render tries again."""
+    try:
+        key, inputs = _risk_key(conn, as_of)
+    except Exception as exc:  # noqa: BLE001 -- an unreadable config or history is a reason
+        return {"error": _failure_reason("the risk history or config/risk.yaml could not be read", exc, conn)}
+    if key is None:
+        return _risk_summary_uncached(conn, as_of, inputs)
+    hit = _RISK_MEMO.get(key)
+    if hit is not None:
+        return hit
+    with _RISK_LOCK:
+        hit = _RISK_MEMO.get(key)
+        if hit is None:
+            hit = _risk_summary_uncached(conn, as_of, inputs)
+            if not hit.get("error"):
+                if len(_RISK_MEMO) >= _RISK_MEMO_MAX:
+                    _RISK_MEMO.clear()
+                    _RISK_LATEST.clear()
+                _RISK_MEMO[key] = hit
+                _RISK_LATEST[key[:3]] = hit
+    return hit
+
+
+def _risk_summary_if_ready(conn: sqlite3.Connection, as_of: str) -> Optional[dict]:
+    """The last `risk_summary` worked out for this database revision and as-of, or None when
+    there is none yet. Never computes and never reads the history files (a stat of the database
+    only), so the figures' render costs nothing more; the chip's callback, which runs next,
+    refreshes it if the history or the config changed since."""
+    rev = _db_revision(conn)
+    return _RISK_LATEST.get((*rev, as_of)) if rev is not None else None
+
+
+def risk_summary_if_ready(conn: sqlite3.Connection, as_of: str) -> Optional[dict]:
+    """Public name of `_risk_summary_if_ready` for other screens (the Book tab): the header's
+    last risk summary for this database revision and as-of, or None; never computes. Delegates
+    at call time, so a patch of the private name is followed."""
+    return _risk_summary_if_ready(conn, as_of)
+
+
+def _num(value) -> Optional[float]:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
+
+
+def _pct_text(pct: float) -> str:
+    return f"{pct:.1f}%" if abs(pct) < 100 else f"{pct:,.0f}%"
+
+
+def _weight_text(w) -> str:
+    from fractions import Fraction
+    f = _num(w)
+    if f is None:
+        return "?"
+    frac = Fraction(f).limit_denominator(12)
+    return f"{frac.numerator}/{frac.denominator}" if abs(float(frac) - f) < 1e-6 else f"{f:.2f}"
+
+
+def _target_words(config: dict) -> str:
+    """'$4,500,000, a placeholder: the macro fund's 4.5m, until ...' while config/risk.yaml
+    marks it a placeholder."""
+    target = _num(config.get("vol_target_usd"))
+    words = _fmt_usd(target) if target is not None else "not set"
+    if config.get("vol_target_placeholder"):
+        note = str(config.get("vol_target_note") or "").strip()
+        words += (f", a {note}" if note.lower().startswith("placeholder") else
+                  ", a placeholder while config/risk.yaml holds the macro fund's figure" + (f" ({note})" if note else ""))
+    return words
+
+
+def _grouped_reasons(items: list) -> list:
+    """'EUR, JPY, CNH: <reason>' lines, one per distinct reason, in first-seen order."""
+    by_reason: dict = {}
+    for name, why in items:
+        by_reason.setdefault(why, []).append(name)
+    return [f"- {', '.join(names)}: {why}" for why, names in by_reason.items()]
+
+
+def _left_out_sentence(summary: dict) -> tuple:
+    """(count, sentence) of the positions the book's series leaves out: the underlyers with no
+    history series and the contracts left out of a commodity's series."""
+    left_out, contracts_out = summary.get("left_out") or [], summary.get("contracts_out") or []
+    n = len(left_out) + len(contracts_out)
+    if not n:
+        return 0, ""
+    what = " and ".join(p for p in (_plural(len(left_out), "underlyer") if left_out else "",
+                                    _plural(len(contracts_out), "contract") if contracts_out else "") if p)
+    lines = [f"The VaR and the vol sum the positions that have a history series: they exclude {what} "
+             "with none."]
+    grouped = _grouped_reasons(left_out + contracts_out)
+    lines += grouped[:_LEFT_OUT_ON_HOVER]
+    if len(grouped) > _LEFT_OUT_ON_HOVER:
+        lines.append(f"- and {len(grouped) - _LEFT_OUT_ON_HOVER} more")
+    return n, "\n".join(lines)
+
+
+def _risk_definitions(summary: dict) -> list:
+    """The chip's hover: each figure with its definition, then the target (and that it is a
+    placeholder). Text only: every number is the engine's."""
+    book, config = summary.get("book") or {}, summary.get("config") or {}
+    conf = (_num(config.get("var_confidence")) or 0.95) * 100
+    window = config.get("var_window_bd") or 252
+    b = config.get("blended") or {}
+    var, vol, pct = _num(book.get("var95_1d_usd")), _num(book.get("vol_blended_ann_usd")), _num(book.get("vol_vs_target_pct"))
+    var_words = _fmt_usd(var) if var is not None else "n/a"
+    vol_words = _fmt_usd(vol) if vol is not None else f"n/a ({_metric_reason(book, 'vol_blended_ann_usd')})"
+    lines = [
+        f"1y {conf:g}% VaR (1-day): {var_words}. Minus the {100 - conf:g}th percentile of the book's last "
+        f"{window} daily $ P&Ls, today's positions held constant over the history: a typical bad day, "
+        "positive = a loss.",
+        f"Blended annual vol: {vol_words}" + (f", {_pct_text(pct)} of the vol target" if pct is not None else "")
+        + (" (over the target)" if book.get("over_vol_target") else "") + ". "
+        f"{_weight_text(b.get('w_trail'))} x trailing {b.get('trail_window_bd', 500)}-day vol + "
+        f"{_weight_text(b.get('w_stress'))} x crisis vol ({b.get('stress_start', '2008-01-01')} to "
+        f"{b.get('stress_end', '2010-12-31')}), each the daily $ P&L's standard deviation x sqrt(252), "
+        f"at the lag-2 date {book.get('lag2_date') or 'n/a'}"
+        + (f"; {book['vol_note']}" if book.get("vol_note") else "") + ".",
+        f"Vol target: {_target_words(config)}.",
+        "The Risk tab shows each figure by underlyer.",
+    ]
+    return lines
+
+
+def _metric_reason(book: dict, key: str) -> str:
+    reasons = book.get("reasons") or {}
+    return str(reasons.get(key) or reasons.get("all") or book.get("reason") or "not available")
+
+
+def _risk_card(summary: Optional[dict]) -> html.Div:
+    """The risk chip, after the Data chip: "VaR $33.6k" with "6.7% of target" beside it (red when
+    the blended vol is over the target) and "excl. N" when the book's series leaves positions
+    out; the definitions and the target on hover. "VaR n/a" with its reason on hover when
+    risk-metrics has no VaR (never a zero); "VaR …" while it is being worked out."""
+    if summary is None:
+        return _header_card(RISK_TITLE, "VaR …", "header-figure-value", card_id=VAR_CHIP_ID,
+                            value_style=_chip_style(_MUTED_CHIP),
+                            hover="The book's VaR and vol against the target are being worked out from the risk "
+                                  "history; they show here in a few seconds.")
+    if summary.get("error"):
+        return _header_card(RISK_TITLE, "VaR n/a", "header-figure-value header-figure-value--muted",
+                            card_id=VAR_CHIP_ID, value_style=_chip_style(_MUTED_CHIP), hover=summary["error"])
+    book, config = summary.get("book") or {}, summary.get("config") or {}
+    var, vol, pct = _num(book.get("var95_1d_usd")), _num(book.get("vol_blended_ann_usd")), _num(book.get("vol_vs_target_pct"))
+    definitions = _risk_definitions(summary)
+    markers = []
+    n_out, out_sentence = _left_out_sentence(summary)
+    if var is not None and n_out:
+        markers.append((f"excl. {n_out}", out_sentence))
+    target = _target_words(config)
+    if pct is not None:
+        over = bool(book.get("over_vol_target"))
+        sentence = (f"blended annual vol {_fmt_usd(vol) if vol is not None else 'n/a'} is {_pct_text(pct)} of the "
+                    f"vol target ({target})" + (": over the target" if over else ""))
+        markers.append((f"{_pct_text(pct)} of target", sentence, _OVER_TARGET_MARKER if over else None))
+    elif var is not None:
+        markers.append(("vol n/a", f"blended annual vol n/a: {_metric_reason(book, 'vol_blended_ann_usd')}"))
+    if var is None:
+        why = _metric_reason(book, "var95_1d_usd")
+        return _header_card(RISK_TITLE, "VaR n/a", "header-figure-value header-figure-value--muted",
+                            card_id=VAR_CHIP_ID, value_style=_chip_style(_MUTED_CHIP),
+                            hover=_joined(f"1y VaR n/a: {why}", *definitions[1:]), markers=markers)
+    hover = _joined(*definitions[:3], out_sentence, definitions[3])
+    return _header_card(RISK_TITLE, f"VaR {short_money(var, '$')}", "header-figure-value", card_id=VAR_CHIP_ID,
+                        value_style=_chip_style(_NEUTRAL_CHIP), hover=hover, markers=markers)
 
 
 def _commodity_cards(conn: sqlite3.Connection, as_of: str) -> list:
@@ -1319,6 +1608,34 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             logging.getLogger(__name__).exception("header figures failed for as_of=%s", as_of)
             return [_pnl_card("LTD", {"available": False,
                                       "reason": _failure_reason("headline could not be computed", exc, conn)})]
+        finally:
+            conn.close()
+
+    # The risk chip (screens redesign Phase B): chained on the figures' output, so it runs after
+    # them (every as-of or data-revision change reaches it through them) and the header's first
+    # paint never waits on `book_risk`. It fills the chip's own children in place; the figures
+    # render the memoised result directly once there is one, so a warm re-render never flashes.
+    @app.callback(
+        Output(VAR_CHIP_ID, "children"),
+        Input(f"{HEADER_ID}-figures", "children"),
+        State(AS_OF_STORE_ID, "data"),
+        prevent_initial_call=True,
+    )
+    def _update_risk_chip(_figures, as_of: Optional[str]):
+        if not as_of:
+            from dash import no_update
+            return no_update
+        from ui.app import connect_readonly
+        db_path = get_db_path()
+        try:
+            conn = connect_readonly(db_path)
+        except sqlite3.OperationalError as exc:
+            return _risk_card({"error": f"Database not available ({exc})."}).children
+        try:
+            return _risk_card(risk_summary(conn, as_of)).children
+        except Exception as exc:  # noqa: BLE001 -- as in _update_figures: say why, never a 500
+            logging.getLogger(__name__).exception("header risk chip failed for as_of=%s", as_of)
+            return _risk_card({"error": _failure_reason("the book's risk could not be shown", exc, conn)}).children
         finally:
             conn.close()
 

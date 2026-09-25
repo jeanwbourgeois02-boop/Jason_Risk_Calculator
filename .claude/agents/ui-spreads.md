@@ -16,7 +16,7 @@ You own these files and nothing else (create them if they do not exist yet):
 
 Renders spreads-engine: one row per spread with its legs nested underneath, its P&L over the header's periods and any leftover outright, and the legs the engine could not group, listed for review.
 
-**Reads** (the lanes whose output you use): ui-shell, spreads-engine, pnl-series.
+**Reads** (the lanes whose output you use): ui-shell, spreads-engine, pnl-series, risk-history.
 **Read by** (the lanes to name under "Consumers to brief" when your interface changes): ui-shell (which assembles the tab).
 
 Rules:

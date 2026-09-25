@@ -17,8 +17,8 @@ You own these files and nothing else:
 
 The header is always the whole book, as of today in New York by default, rolled at 17:00 New York.
 
-**Reads** (the lanes whose output you use): ui-shell, bbg-live, bbg-library, pnl-valuation, pnl-series, ui-ladder.
-**Read by** (the lanes to name under "Consumers to brief" when your interface changes): ui-shell, ui-risk, ui-market-data.
+**Reads** (the lanes whose output you use): ui-shell, bbg-live, bbg-library, pnl-valuation, pnl-series, ui-ladder, book-positions, spreads-engine, expiry-monitor, risk-metrics.
+**Read by** (the lanes to name under "Consumers to brief" when your interface changes): ui-shell, ui-risk, ui-market-data, ui-book.
 
 Rules:
 

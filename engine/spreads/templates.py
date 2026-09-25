@@ -51,6 +51,13 @@ class Template:
     legs: Tuple[TemplateLeg, ...]
     source: str                    # 'energy.yaml'
     order: int                     # position over every file, files in name order: the label tie-break
+    fx: Tuple[str, ...] = ()       # the template's fx pairs ('USDCNH'): the research app's conversion
+    constant: float = 0.0          # added to the weighted sum of the level, in `unit` (levels.py)
+
+    @property
+    def currency(self) -> str:
+        """'USD' for 'USD/bbl': the currency the spread's level is quoted in."""
+        return self.unit.partition("/")[0].strip().upper()
 
     @property
     def roots(self) -> Tuple[str, ...]:
@@ -95,6 +102,16 @@ def _leg(raw: dict, spread_qty: str, roots: Dict[str, ContractRoot], where: str)
     return TemplateLeg(root_id, weight, qf, per_lot)
 
 
+def _fx_pairs(raw, where: str) -> Tuple[str, ...]:
+    """The template's ``fx``: null, one pair or a list (the research app's validator's forms)."""
+    if raw is None:
+        return ()
+    pairs = [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, list) else None
+    if pairs is None or not all(isinstance(x, str) and len(x.strip()) == 6 for x in pairs):
+        raise ValueError(f"{where}: fx {raw!r} must be a six-letter pair such as USDCNH, a list of them, or null")
+    return tuple(x.strip().upper() for x in pairs)
+
+
 @functools.lru_cache(maxsize=4)
 def _load(folder: str, stamp: Tuple[Tuple[str, float], ...]) -> Tuple[Tuple[Template, ...], Tuple[str, ...]]:
     roots = load_roots()
@@ -119,7 +136,8 @@ def _load(folder: str, stamp: Tuple[Tuple[str, float], ...]) -> Tuple[Tuple[Temp
                 templates.append(Template(
                     template_id=str(raw["id"]), name=str(raw.get("name", raw["id"])),
                     family=str(raw.get("family", "")), sector=str(raw.get("sector", "")),
-                    unit=unit, quantity_unit=spread_qty, legs=legs, source=name, order=order))
+                    unit=unit, quantity_unit=spread_qty, legs=legs, source=name, order=order,
+                    fx=_fx_pairs(raw.get("fx"), where), constant=float(raw.get("constant") or 0.0)))
                 order += 1
             except (KeyError, TypeError, ValueError) as exc:
                 problems.append(f"{exc if isinstance(exc, ValueError) else f'{where}: missing or bad field {exc}'}; "

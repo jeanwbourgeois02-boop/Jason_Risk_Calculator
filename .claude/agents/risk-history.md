@@ -13,12 +13,13 @@ You own these files and nothing else (create them if they do not exist yet):
 
 - `engine/risk/history.py`
 - `engine/risk/commodity_history.py`
-- Tests: `tests/test_risk_history.py`
+- `engine/risk/research_spreads.py` (the research app's spread statistics and history, read-only: context for the Spreads and Book tabs, never a mark; Screens redesign Phase B)
+- Tests: `tests/test_risk_history.py`, `tests/test_research_spreads.py`
 
 The risk metrics need years of daily prices. For commodities that is the settlement history of each contract month, which the research app (`../Commodity Dashboard`, table `price_daily`: contract, date, settle, open interest, volume; `fx_daily` for USDCNH / USDCNY) already stores on the Bloomberg PC. You read it and serve per-contract, and per months-to-expiry, return series.
 
 **Reads** (the lanes whose output you use): contract-master.
-**Read by** (the lanes to name under "Consumers to brief" when your interface changes): risk-metrics, commodity-stress.
+**Read by** (the lanes to name under "Consumers to brief" when your interface changes): risk-metrics, commodity-stress, ui-spreads, ui-book.
 
 Rules:
 

@@ -189,15 +189,15 @@ def _find_tab_bodies(layout):
     return None
 
 
-def test_seven_tabs_present_in_order(tmp_path):
+def test_eight_tabs_present_in_order(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     layout = uiapp.build_layout(uiapp.load_summary(db_path))
-    # Screens redesign (user, 2026-09-25): Spreads first; FX & cash is the former Ladder and
-    # Data the former Market data
-    seven = ["Spreads", "Curve", "Risk", "Expiries", "Blotter", "FX & cash", "Data"]
-    assert _tab_labels(layout) == seven
-    assert uiapp.VISIBLE_TABS == seven
+    # Screens redesign (user, 2026-09-25): Book first (Phase B), then Spreads; FX & cash is the
+    # former Ladder and Data the former Market data
+    eight = ["Book", "Spreads", "Curve", "Risk", "Expiries", "Blotter", "FX & cash", "Data"]
+    assert _tab_labels(layout) == eight
+    assert uiapp.VISIBLE_TABS == eight
 
 
 def test_no_overall_book_or_placeholder_tabs(tmp_path):
@@ -258,7 +258,7 @@ def test_header_present_above_tabs(tmp_path):
 
 def test_tab_bodies_always_present_and_tabs_have_no_children(tmp_path):
     """2026-09-15 structure fix: dcc.Tab objects carry no `children` of their own (that
-    nesting pushed the navy top-bar around the whole page); all seven bodies live in one
+    nesting pushed the navy top-bar around the whole page); all eight bodies live in one
     always-present `html.Div(id="tab-bodies")` sibling of the top-bar/header."""
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
@@ -269,7 +269,7 @@ def test_tab_bodies_always_present_and_tabs_have_no_children(tmp_path):
     bodies = _find_tab_bodies(layout)
     assert bodies is not None
     slugs = {getattr(b, "id", None) for b in bodies.children}
-    assert slugs == {"tab-body-ladder", "tab-body-blotter", "tab-body-curve", "tab-body-spreads", "tab-body-expiries",
+    assert slugs == {"tab-body-book", "tab-body-ladder", "tab-body-blotter", "tab-body-curve", "tab-body-spreads", "tab-body-expiries",
                      "tab-body-risk", "tab-body-market-data"}
 
 
@@ -566,7 +566,13 @@ def test_every_static_callback_id_exists_in_layout(tmp_path):
     # (ui.tabs.options, Phase 8 options_calc merge) only exist once the "options"
     # sub-tab is selected, same as the other blotter-* dynamic ids below.
     dynamic_ok = {"blotter-datatable", "blotter-subtotal",
-                  "options-datatable", "options-collapsed-packages"}
+                  "options-datatable", "options-collapsed-packages",
+                  # Screens redesign Phase B (2026-09-25), each rendered inside another callback's
+                  # output and filled in place once it is there: the header's VaR chip (inside
+                  # header-figures), the Book's alerts (inside book-body, after the VaR pass),
+                  # and the Spreads positions table with its drill-down (inside spreads-body).
+                  "header-var-chip", "book-alerts",
+                  "spreads-table", "spreads-detail-store", "spreads-detail"}
     dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
                         "blotter-row-detail-", "options-terms-",
                         "blotter-fx-",  # the FX sub-tab's trade table and its "rows shown" currency table (2026-09-21)
