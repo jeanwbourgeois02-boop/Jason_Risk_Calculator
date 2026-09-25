@@ -32,5 +32,10 @@ Dash behaviour worth remembering when writing or testing a tab:
   120 s timeout and leaves a stray python process (the housekeeper forbids it). Use `py -3 -c "..."`
   or a test; to clean up, match the PID through `/proc/<pid>/cmdline` and kill only your own.
 
+- A test walker over a Dash tree yields plain strings too, and `"text".title` is the str
+  METHOD (truthy): filter `isinstance(n, str)` before reading `title` off nodes.
+- Bash tool: backticks inside a double-quoted `py -3 -c "..."` run as commands and silently
+  eat text (a docstring lost `_walk`). Put edit scripts in a scratchpad .py file instead.
+
 **Why:** each cost a failed run (2026-09-22 building ui/tabs/risk.py; the py heredoc twice on 2026-09-24).
 **How to apply:** when writing tests over Dash trees or eyeballing a render from a script.

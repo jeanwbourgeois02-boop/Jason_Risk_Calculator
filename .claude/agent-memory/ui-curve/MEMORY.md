@@ -1,1 +1,1 @@
-- [Curve tab choices](project_curve_tab_choices.md) — unconfirmed defaults (Book line, no subtotals, five-view switch, delta USD only per sector) 2026-09-24
+- [Curve tab choices](project_curve_tab_choices.md) — unconfirmed defaults (Book line, no subtotals, five-view switch, Phase A hover/k-m/Toggle Columns) 2026-09-25

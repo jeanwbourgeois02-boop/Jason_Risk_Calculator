@@ -1,5 +1,5 @@
 - [P&L tab](pnl-tab.md) — wired into "Overall book" (why), lazy engine.pnl imports, pairs/totals/period blocks, own component ids
-- [Header visible reasons + trade counts 2026-09-17](header-visible-reasons-and-trade-counts-2026-09-17.md) — "headline doesn't work" root cause was hover-only/generic reason text, not a callback bug; mark_inventory-based fix
+- [Header visible reasons + trade counts 2026-09-17](header-visible-reasons-and-trade-counts-2026-09-17.md) — (captions superseded by markers 2026-09-25) "headline doesn't work" root cause was hover-only/generic reason text, not a callback bug; mark_inventory-based fix
 - [Header partial pricing 2026-09-17](header-partial-pricing-2026-09-17.md) — live-Bloomberg-PC follow-up: cards sum priced trades only + "excludes N of M" label, _priced_diff drops trades priced on only one of two dates, blotter strips still poison (reported)
 - [Header LTD chart full span 2026-09-22](header-ltd-chart-full-span-2026-09-22.md) — user wants every close on the chart; first trade → as_of, cost grows with the book; grep other lanes' tests before removing a header name; shared-file drift
 - [Environment](environment.md) — Windows: py -3; Mac clone: .venv/bin/python; dash status; ruff hook reports pre-existing unused imports
@@ -8,3 +8,4 @@
 - [Dash Details open never synced 2026-09-22](dash-details-open-never-synced-2026-09-22.md) — a callback on Details.open never fires from a click; clientside mirror from Summary.n_clicks (default 0, not null); how to test clientside callbacks; ui.launch never reloads
 - [Commodity Phase 2 removal 2026-09-24](commodity-phase2-removal-2026-09-24.md) — IRS/NDF/swap/ES left; header's NDF path is ui-ladder's net_gross_usd; Phase 3 reworks header
 - [Commodity strip Phase 3 2026-09-24](commodity-strip-phase3-2026-09-24.md) — 4 cards after FX net/gross; book_spreads ~1s so mtime memo; expiry business_days count to alert_date
+- [Slim header 2026-09-25](slim-header-2026-09-25.md) — one row, markers as 3rd child in a grid (other lanes' tests need [title,value]), Data chip memo, width budget

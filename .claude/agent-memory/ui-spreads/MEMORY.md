@@ -1,1 +1,1 @@
-- [Spreads tab conventions](spreads-tab-conventions.md) — shell interface, filled reader, legs as collapsed blocks, Total-line rule
+- [Spreads tab conventions](spreads-tab-conventions.md) — shell interface, filled reader, legs as collapsed blocks, Total-line rule, Phase A hover/drawer/k-m rules

@@ -18,5 +18,12 @@ Phase 5 (same day, options on futures, LME prompts, averaging contracts) added:
 - The sector table and Book line gained net/gross delta USD only, not delta lots (lots of different commodities do not add up, same reasoning as above), though the engine gives sector net_delta_lots.
 - An option's notional cells read "option: see delta" (added to the detail table's sort_as_null so it ranks last).
 
+Screens redesign Phase A (2026-09-25, Opus 5.5 stand-in for Fable) added:
+
+- "More columns" on the Contracts table is Dash's native `hideable` + `hidden_columns` (its built-in "Toggle Columns" button, choice persisted via `persisted_props`), not a checklist: no new callback input, so the shell's callback-input test for Curve stays unchanged. The hidden figures are also on hover of the visible cells.
+- The Contracts table keeps full figures (it is per-contract rows, like trade rows); only the grid's USD columns and the sector table went to k / m. The currency-exposure table also kept full figures.
+- Grid Notes markers: "options", "avg", "no USD N", "no delta N", "no month N", joined by a middle dot; sentences on hover.
+- Visible Contracts columns keep Unit and Ccy (narrow) beside the brief's list: units and price are meaningless without them.
+
 **Why:** the housekeeper's briefs fixed the sections but not these details; each is reversible.
 **How to apply:** if the user asks for subtotals, a book lot total or a different switch behaviour, these were defaults, not his decisions; change freely. If he confirms one, record it as feedback.

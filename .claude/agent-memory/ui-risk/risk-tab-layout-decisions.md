@@ -1,43 +1,42 @@
 ---
 name: risk-tab-layout-decisions
-description: How the Risk tab (ui/tabs/risk.py) is laid out and why; the n/a-vs-blank cell rule, the pinned Book row, card hovers; built 2026-09-22 for the PM's nm-dashboard metrics
+description: How the Risk tab (ui/tabs/risk.py) is laid out and why; caption line + Data issues drawer, k/m cards with markers, commodities-first single-line table, n/a-vs-blank rule, pinned Book row; built 2026-09-22, redesigned 2026-09-25 (Phase A)
 metadata:
   type: project
 ---
 
-The Risk tab was built 2026-09-22 from the housekeeper's brief: the PM wants the risk
-metrics of his nm-dashboard project (blended vol, 1y 95 % VaR, worst day ex shocks /
-raw, scenario stress) on this book, whole book and per underlyer. Everything on it is
-`engine.risk.book_risk`'s dict rendered; the tab computes nothing.
+Built 2026-09-22 (the PM's nm-dashboard metrics on this book); redesigned 2026-09-25 under
+CLAUDE.md "Screens redesign plan" Phase A (user: numbers first, definitions on hover of the
+titles, every reason in one collapsed "Data issues (N)" drawer). The tab renders
+`engine.risk.book_risk` and margin-limits' results and computes nothing.
 
-**Why:** CLAUDE.md "Tabs as views" (a UI file never recomputes a metric) and the user's
-rule that no figure is blank without its reason and never zero for a missing input.
+**Why:** "Tabs as views" (no UI recompute) and the rule that no figure is blank without its
+reason and never zero for a missing input. The 2026-09-24 tab was ~10,000 px tall: 25 lines
+of folder paths before the first figure, 20-line card notes, 100 px FX rows, 160 px Book row.
 
-**How to apply (decisions taken, keep them unless the user says otherwise):**
-- Cell rule in the key table: a number is stored as a number (ranking); a MISSING figure is
-  the string "n/a" (ranks last via `ranking.NULL_TEXTS`) with its reason as the cell
-  tooltip; a figure that DOES NOT APPLY to the row is None, blank (the old example, DV01
-  on a currency, left with the rates rows on 2026-09-24: [[retired-macro-underlyers]]). Column formats use `nully=""` so the two cases look different.
-- The Book is the pinned footer (`ranking.with_footer`), kind "Book"; its "Worst ex vs
-  target %" cell is blank on purpose (the engine measures the book against the CAP, the
-  card shows "x % of cap"), with a tooltip saying so.
-- "carry included" goes in the Note only on a row with figures (`days > 0`): the engine's
-  `carry` flag is true whenever a carry series exists, even for an unsized row (e.g. a metal with
-  no spot), which would read as nonsense.
-- Cards: the definition is the card's `title` (hover); a NaN card shows "n/a" + the reason
-  as the note AND as the hover (the header's lesson: hover-only reasons were reported as
-  "not working"). A long list of reasons (e.g. 18 FX options without DELTA) is
-  summarised "first (+17 more on hover)" with the full list in the hover.
-- Flags: `over_cap` / `over_vol_target` add the words "over cap" / "over vol target" as a
-  tag plus the negative colour inline (`var(--neg)`): ui-shell owns the CSS, so no new
-  class; the words make the flag readable without the colour.
-- The currency x scenario matrix is collapsed by default (`html.Details`), the scenario
-  table above it open; header wrap on the long scenario names as exposure.py does.
-- No date picker: the tab follows `header.AS_OF_STORE_ID`, re-renders on
-  `revision.DATA_REVISION_ID` and on its own `dcc.Interval` (`safety_refresh_ms`) because
-  the parquet history lives outside the database and a fresh nm-dashboard pull moves no
-  revision.
-- Percent formats: "Worst ex vs target %" is unsigned (a share of a target), built with
-  dash `Format` directly (`_pct_format`) rather than `ranking.percent`, which is signed.
+**How to apply (decisions in force, keep unless the user says otherwise):**
+- Top: `caption_parts` = one nowrap line (as-of, FX history to X, commodity history to Y,
+  vol target in k/m + "placeholder" marker), each part's full sentence as its hover. Then
+  `issues_drawer(issue_items(result, margin), id=ISSUES_ID)`: history (or folders tried) with
+  its files, commodity history, parameters, config/history notes, `shown_missing`,
+  commodity-stress `reasons`, margin `reasons`. No other reason lists on the tab.
+- Cards: exactly 3 children (label, figure line, one clipped note line). Figure via
+  `short_money(v, parens=True)`, full figure as the value's hover; markers on the figure line
+  ("excl. N" from `delta_missing` / the engine's "excludes N" sentence, "trailing only" for
+  vol_note); flag tag beside the figure. A NaN card: "n/a" + reason as hover AND as the
+  clipped note (the header's old lesson: hover-only reasons were reported as "not working").
+  The FX & cash tab's FX net/gross USD is on the Net/Gross card hover (left the header).
+- Key table: commodities grouped by sector FIRST, then FX/metal in engine order, Book pinned
+  (`ranking.with_footer`, skip_widths underlyer+note). Money columns `rk.amount_short` over
+  `rk.whole_units` (records keep raw values; the table data is rounded). Underlyer and note
+  clipped (`_clip`: nowrap + ellipsis at fixed ch), note's full text as its tooltip.
+- Cell rule unchanged: missing = "n/a" string + tooltip reason; not applicable = None blank;
+  Book "Worst ex vs target %" blank with a tooltip (measured against the cap on the card).
+- Definitions: `about(title, hover)` on every section title; no Definitions block, no kicker
+  paragraphs outside collapsed blocks except the limits' one-line count.
+- Order: cards, underlyers, views, commodity scenarios (detail in one outer collapsed
+  Details), FX scenarios ("FX & cash tab's" scenarios), margin, limits.
+- "carry included" only on rows with figures; flags carry words + `var(--neg)`; no date
+  picker (header as-of store, revision, own safety interval).
 
-Related: [[dash-component-behaviour]].
+Related: [[commodity-sections-2026-09-24]], [[dash-component-behaviour]].

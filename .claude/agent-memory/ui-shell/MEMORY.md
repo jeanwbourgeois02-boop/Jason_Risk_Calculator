@@ -1,6 +1,6 @@
 - [Environment](environment.md) — py -3 launcher, dash install status/version, pre-existing test_bloomberg.py failures unrelated to ui/
 - [App structure](app-structure.md) — retired 2026-09-15; see [wiring-c5](wiring-c5.md) for the current four-tab layout
-- [Wiring C5](wiring-c5.md) — ui/app.py assembly (six tabs incl. Curve/Expiries + header, 2026-09-24), how to wire a new tab, _walk skips dcc.Interval
+- [Wiring C5](wiring-c5.md) — ui/app.py assembly (seven tabs, Spreads first, stable TAB_KEYS 2026-09-25), how to wire a new tab, _walk skips dcc.Interval
 - [Top-bar restructure 2026-09-15](top-bar-restructure-2026-09-15.md) — no-children dcc.Tab + always-present tab-bodies, header perf split, Ladder today/title/forward-proxy rate, upload date-picker removal
 - [Futures upload diagnostics 2026-09-16](futures-upload-diagnostics-2026-09-16.md) — ImportResult.messages warning panel, never show raw exceptions, __wrapped__ trick to unit-test Dash callbacks
 - [Reconciliation upload declutter 2026-09-16](reconciliation-upload-declutter-2026-09-16.md) — date picker moved off the futures-import card into its own toolbar; upload card is standalone .upload-card
@@ -14,3 +14,4 @@
 - [Real-browser verification 2026-09-18](real-browser-verification-2026-09-18.md) — click-test via Edge DevTools + websocket-client (nothing to install), NEVER taskkill Edge by name, screenshot timing trap, top-bar reserve, size UI from real strings not contract examples, optional-function vs patched-name trap
 - [Phase 2 removal 2026-09-24](commodity-phase2-removal-2026-09-24.md) — IRS/NDF/ES-SPX out, FX_SWAP stays, sample's 2 deliberate rejects, parallel-lane import breaks
 - [Parallel tab wiring](parallel-tab-wiring.md): wire a tab another lane is still writing; stub it from the scratchpad; the lint-hook cwd noise
+- [Display helpers 2026-09-25](display-helpers-2026-09-25.md) — short_money/about/marker/issues_drawer, amount_short+whole_units; why tables print M/G not m/bn

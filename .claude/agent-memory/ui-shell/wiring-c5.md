@@ -1,20 +1,23 @@
 ---
 name: wiring-c5
-description: ui/app.py assembly pattern for the tab layout (Blotter, Ladder, Curve, Expiries, Risk, Market data + header as of 2026-09-24), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
+description: ui/app.py assembly pattern for the tab layout (seven tabs, Spreads first, stable TAB_KEYS since 2026-09-25), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
 metadata:
   type: project
 ---
 
-`ui/app.py` assembles `ui/tabs/{header,blotter,cash_ladder,curve,expiries,risk,market_data}.py`,
+`ui/app.py` assembles `ui/tabs/{header,spreads,curve,risk,expiries,blotter,cash_ladder,market_data}.py`,
 each exposing `build_layout(default_date)` / `register_callbacks(app, get_db_path)` (header
-also has a no-arg `layout()`). `VISIBLE_TABS = ["Blotter", "Ladder", "Curve", "Expiries",
-"Risk", "Market data"]`; the app opens on the first. Reconciliation was removed 2026-09-16;
-Risk (`ui/tabs/risk.py`) added 2026-09-22; Curve and Expiries (ui-curve / ui-expiries,
-commodity conversion) added 2026-09-24 after the Ladder, same no-picker pattern as Risk.
-Tests pin the order via `SIX_TABS` in tests/test_app.py; index bodies by label, not number.
+also has a no-arg `layout()`). Since the screens redesign (2026-09-25) the order is
+Spreads, Curve, Risk, Expiries, Blotter, FX & cash, Data (Book joins first in Phase B) and
+`TAB_KEYS` maps each label to a stable key: the dcc.Tab `value` AND the body id
+`tab-body-<key>` (`tab_body_id(label)`). Renamed tabs kept their keys ("FX & cash" ->
+`ladder`, "Data" -> `market-data`), so a label may hold '&' or spaces but an id never does.
+The show/hide callback compares `TAB_KEYS[label]` with the selected value, so tests call
+the toggle with a key ("risk"), not a label. `_slug` was removed. Tests pin the order via
+`SEVEN_TABS` / `SEVEN_KEYS` in tests/test_app.py; index bodies by label, not number.
 
 **Wiring a new tab (2026-09-22, Risk):** import it in `from ui.tabs import ...`, add the
-label to `VISIBLE_TABS`, an entry in `tab_builders` and `tab_defaults` inside
+label and its key to `TAB_KEYS`, an entry in `tab_builders` (keyed by key) inside
 `build_layout`, and one `x.register_callbacks(app, get_db_path=lambda: resolved)` line in
 `create_app`. The tab bodies and the show/hide callback derive from `VISIBLE_TABS`, so
 nothing else changes. A tab with no date picker of its own (Risk) follows

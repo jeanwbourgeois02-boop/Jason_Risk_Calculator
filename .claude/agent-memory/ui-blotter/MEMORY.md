@@ -18,3 +18,4 @@
 - [Blotter FX sample cells removed 2026-09-22](blotter-fx-sample-cells-removed-2026-09-22.md) — unpriced cell = "n/a" + reason tooltip, hidden _num columns kept, strict_marks needed, scratch-copy test recipe when another lane's engine file is mid-edit
 - [Blotter Phase 3 commodities 2026-09-24](blotter-phase3-commodities-2026-09-24.md) — Commodities tables above FX in Positions, grouped Futures table (row_kind, trade_id ""), CMDTY_OPTION = Options, cwd/lint-hook trap
 - [Blotter LME forwards 2026-09-24](blotter-lme-forwards-2026-09-24.md) — "LME forwards" asset class, "Futures & LME" sub-tab, Quantity+Unit+Product columns, LME local = USD
+- [Blotter screens redesign Phase A 2026-09-25](blotter-screens-redesign-phase-a-2026-09-25.md) — Total book no strip, commodity-terms table, prev close via value_book, compact strip shared with FX, bash backtick trap
