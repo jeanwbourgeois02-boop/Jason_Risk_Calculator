@@ -1,4 +1,5 @@
 - [Data tab Phase A 2026-09-25](data-tab-phase-a-2026-09-25.md) — tab renamed "Data", section order, _quiet lines, about() hover, Data issues drawer, 10-output body callback
+- [Market data by commodity Phase C 2026-09-25](market-data-by-commodity-phase-c-2026-09-25.md) — strip, static sector-grouped selector, chart + research line, 11-output body, "estimated" = BBG_INTERP
 - [Market data tab](market-data-tab.md) — 2026-09-15 rewrite: per-pair layout (pair dropdown, spot+curve+chart, completeness strip, manual form); diagnostics_panel has no caller (2026-09-24)
 - [Bloomberg diagnostics button 2026-09-16](bloomberg-diagnostics-button-2026-09-16.md) — header "Check Bloomberg connection" button, placeholder vs expected data.bloomberg.bbg_diagnostics interface
 - [Bloomberg check button moved to Market Data 2026-09-16](bloomberg-check-button-moved-to-market-data-2026-09-16.md) — button/panel/diagnostics fns relocated header.py -> market_data.py, new ids, CSS retheme

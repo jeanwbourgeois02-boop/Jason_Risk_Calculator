@@ -24,5 +24,10 @@ Built 2026-09-25 (Screens redesign Phase B), confirmed by risk-history against t
 - Position identity includes direction (brief): a calendar bought then sold on a later date shows
   as a long and a short position, not netted. **How to apply:** if the user wants them netted, it is
   a change to `_position_key` only.
+- Phase C (2026-09-25) `history.position_history`: LTD per date excludes a whole member spread
+  when one of its trades is unpriced (the positions' period rule, so LTD(a)-LTD(ref) == period P&L);
+  the identity breaks only where the period stepped back or filled a trade on its reference close.
+  The level reads every member's trades per leg (position `level_spec`), not the first member's.
+  Cost is one whole-book valuation per date: ui-spreads should pass the memoised filled reader.
 - Golden book mark dates skip most trade dates, so cross-currency entries there are n/a (no spot on
   the trade date): expected, not a bug. See [[template-units]], [[grouping-rule-decisions]].

@@ -15,3 +15,4 @@
 - [Phase 2 removal 2026-09-24](commodity-phase2-removal-2026-09-24.md) — IRS/NDF/ES-SPX out, FX_SWAP stays, sample's 2 deliberate rejects, parallel-lane import breaks
 - [Parallel tab wiring](parallel-tab-wiring.md): wire a tab another lane is still writing; stub it from the scratchpad; the lint-hook cwd noise
 - [Display helpers 2026-09-25](display-helpers-2026-09-25.md) — short_money/about/marker/issues_drawer, amount_short+whole_units; why tables print M/G not m/bn
+- [Tab links 2026-09-25](tab-links-2026-09-25.md) — tab_link helper + one ALL-pattern callback on main-tabs.value, idx rule, Dash 4 test gotchas

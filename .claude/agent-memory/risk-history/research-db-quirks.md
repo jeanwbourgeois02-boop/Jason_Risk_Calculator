@@ -12,6 +12,7 @@ Facts about `../Commodity Dashboard/var/rv.sqlite`, checked 2026-09-24 on the de
 - **WAL side files.** A `mode=ro` open of this WAL database leaves an empty `-wal` and a `-shm` beside it (a read-only connection cannot clean up). The database is untouched. An empty WAL is left out of the cache key so the first read does not invalidate its own entry.
 - **Depth.** `calendar_depth` varies (SHFE:WR 1, LME:NI 5, NYMEX:CL 24), so a deferred contract often has no history of its own and no constant-maturity series at its rank. The reason says so.
 - **Range.** Dev copy: 2020-09-21 to 2026-09-22. So the negative-WTI replay (2020-04-17..20) is not covered here. Whether the Bloomberg PC's copy goes back further is unknown.
+- **Curve units.** `research_curve` gives `settle` in quote units (raw x price_scale) and `raw_settle` as stored; our FUTURE_PX marks are Bloomberg's raw quoted price, so a screen comparing with our marks must use `raw_settle` (or scale ours). Dev mock expiries are not real (CLU26 on 2026-09-30).
 - The FX pairs stored are all USD-base (USDCNH, USDCNY, USDEUR, USDGBP, USDJPY, USDMYR, USDCAD). CNY goes through USDCNH by default (the research app's rule).
 
 **Why:** these facts decide whether a position's risk history is right or silently empty.

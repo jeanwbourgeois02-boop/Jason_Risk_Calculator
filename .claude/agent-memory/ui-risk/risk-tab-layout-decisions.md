@@ -36,6 +36,12 @@ of folder paths before the first figure, 20-line card notes, 100 px FX rows, 160
   paragraphs outside collapsed blocks except the limits' one-line count.
 - Order: cards, underlyers, views, commodity scenarios (detail in one outer collapsed
   Details), FX scenarios ("FX & cash tab's" scenarios), margin, limits.
+- Limits (user yes 2026-09-25, "can you apply these"): the table holds only the checks that
+  are set (OK / WARN / BREACH / N/A); every NOT_SET check is collapsed under it into one
+  `issues-drawer` line "Not set (N)" (`not_set_drawer`, id `risk-limits-not-set`), grouped
+  Desk (Book, Net USD by sector, each root) then Exchange (each root), each check one inline
+  item with its position, basis + config key on hover. Nothing set: one quiet kicker line
+  + the drawer, no table. ~104 of ~110 checks are NOT_SET on the placeholder config.
 - "carry included" only on rows with figures; flags carry words + `var(--neg)`; no date
   picker (header as-of store, revision, own safety interval).
 

@@ -24,7 +24,9 @@ another lane's; one place per number.
   so the mtime moves and every render is cold). Patch `book._open`, not `ui.app`.
 - On the golden book at 2026-09-18 the research db on this PC has no stats before 2026-09-21, so every
   sigma is n/a; test sigma with a synthetic stats entry.
-- Tab navigation from a "-> Curve" link is only a named pointer: a clickable jump would need ui-shell's
-  MAIN_TABS_ID callback (not requested yet).
+- Tab pointers are clickable since 2026-09-25 (user approved): `book.pointer(label, idx)` wraps
+  `formatting.tab_link`; `book.TAB_KEYS` copies `ui.app.TAB_KEYS` (ui.app imports the tabs, so no import)
+  and a test pins the two equal. idx rule: "book-<spot>", alerts "book-alert-<n>". Hover text sits on the
+  alert's words, not the Li, so the link keeps its own "Open the X tab" hover.
 
 Related: [[ui-spreads conventions in .claude/agent-memory/ui-spreads]]
