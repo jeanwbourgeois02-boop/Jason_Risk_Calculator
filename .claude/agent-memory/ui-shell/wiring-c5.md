@@ -1,20 +1,20 @@
 ---
 name: wiring-c5
-description: ui/app.py assembly pattern for the tab layout (seven tabs, Spreads first, stable TAB_KEYS since 2026-09-25), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
+description: ui/app.py assembly pattern for the tab layout (eight tabs, Book first, stable TAB_KEYS since 2026-09-25), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
 metadata:
   type: project
 ---
 
-`ui/app.py` assembles `ui/tabs/{header,spreads,curve,risk,expiries,blotter,cash_ladder,market_data}.py`,
+`ui/app.py` assembles `ui/tabs/{header,book,spreads,curve,risk,expiries,blotter,cash_ladder,market_data}.py`,
 each exposing `build_layout(default_date)` / `register_callbacks(app, get_db_path)` (header
 also has a no-arg `layout()`). Since the screens redesign (2026-09-25) the order is
-Spreads, Curve, Risk, Expiries, Blotter, FX & cash, Data (Book joins first in Phase B) and
+Book (the app's home, Phase B), Spreads, Curve, Risk, Expiries, Blotter, FX & cash, Data and
 `TAB_KEYS` maps each label to a stable key: the dcc.Tab `value` AND the body id
 `tab-body-<key>` (`tab_body_id(label)`). Renamed tabs kept their keys ("FX & cash" ->
 `ladder`, "Data" -> `market-data`), so a label may hold '&' or spaces but an id never does.
 The show/hide callback compares `TAB_KEYS[label]` with the selected value, so tests call
 the toggle with a key ("risk"), not a label. `_slug` was removed. Tests pin the order via
-`SEVEN_TABS` / `SEVEN_KEYS` in tests/test_app.py; index bodies by label, not number.
+`EIGHT_TABS` / `EIGHT_KEYS` in tests/test_app.py; index bodies by label, not number.
 
 **Wiring a new tab (2026-09-22, Risk):** import it in `from ui.tabs import ...`, add the
 label and its key to `TAB_KEYS`, an entry in `tab_builders` (keyed by key) inside
@@ -45,3 +45,8 @@ interval's id.
 this agent ran the suite, so a `NameError` inside a file you don't own may be their
 in-progress state; re-run before reporting it as broken. If you must stash, `git stash
 push -- <only your files>`, never a bare `git stash` (it scoops their dirty files too).
+
+**Dynamic callback ids:** `tests/test_ui.py::test_every_static_callback_id_exists_in_layout`
+fails whenever a tab lane adds a callback on an id rendered inside another callback's
+output. It is mine to update: add the id to `dynamic_ok` with its reason, after checking it
+really is rendered dynamically (seen 2026-09-25 with header-var-chip, book-alerts, spreads-*).

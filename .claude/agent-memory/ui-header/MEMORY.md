@@ -9,3 +9,5 @@
 - [Commodity Phase 2 removal 2026-09-24](commodity-phase2-removal-2026-09-24.md) — IRS/NDF/swap/ES left; header's NDF path is ui-ladder's net_gross_usd; Phase 3 reworks header
 - [Commodity strip Phase 3 2026-09-24](commodity-strip-phase3-2026-09-24.md) — 4 cards after FX net/gross; book_spreads ~1s so mtime memo; expiry business_days count to alert_date
 - [Slim header 2026-09-25](slim-header-2026-09-25.md) — one row, markers as 3rd child in a grid (other lanes' tests need [title,value]), Data chip memo, width budget
+- [Risk chip Phase B 2026-09-25](risk-chip-phase-b-2026-09-25.md) — book_risk 7-18 s: chained callback + _RISK_LATEST, never in _build_figures; PIL Segoe width check
+- [Open spreads = positions 2026-09-25](open-spreads-positions-2026-09-25.md) — card counts book_spreads positions (sample 5, not 6 spreads); stubs need a positions key

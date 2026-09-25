@@ -1,0 +1,1 @@
+- [Book tab conventions](book-tab-conventions.md) — gather/body split, memo, chained VaR callback, golden-book test pitfalls (read-only URI)
