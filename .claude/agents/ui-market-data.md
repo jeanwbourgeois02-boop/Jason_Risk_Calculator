@@ -18,7 +18,7 @@ You own these files and nothing else:
 
 "Can I trust the numbers?" The tab shows what is on file and what the book needs. It never asks Bloomberg for anything itself.
 
-**Reads** (the lanes whose output you use): ui-shell, ui-header, bbg-live, bbg-backfill, bbg-library, bbg-diagnostics, pnl-ledger, pnl-series.
+**Reads** (the lanes whose output you use): ui-shell, ui-header, bbg-live, bbg-backfill, bbg-library, bbg-diagnostics, pnl-ledger, pnl-series, curve-positions, contract-master, risk-history (the research curve, context only).
 **Read by** (the lanes to name under "Consumers to brief" when your interface changes): ui-shell.
 
 Rules:

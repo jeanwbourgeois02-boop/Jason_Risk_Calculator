@@ -454,6 +454,85 @@ def test_open_detail_opens_the_clicked_position_and_ignores_a_rebuilt_table():
             spreads.open_detail(cell, payloads, AS_OF)
 
 
+# --------------------------------------------------------------------------- the position's own history
+POS_A = "POSITION-calendar|CLZ26 Comdty/CLF27 Comdty|long"
+
+
+def test_opening_a_position_asks_for_its_history_but_the_render_never_values_it(monkeypatch):
+    def refuse(*_a, **_k):
+        raise AssertionError("the tab's render must not work out a position's history")
+    monkeypatch.setattr(spreads, "position_history", refuse)
+    monkeypatch.setattr(spreads, "history_dates", refuse)
+    body = spreads.body(_result(), _research(), selected=POS_A, history_fn=_history)
+    request = _by_id(body, spreads.HISTORY_REQUEST_ID)
+    assert isinstance(request, dcc.Store)
+    assert request.data["as_of"] == AS_OF and request.data["position"]["position_id"] == POS_A
+    assert request.data["level_entry"] == 0.34 and request.data["unit"] == "USD/bbl"
+    loading = next(n for n in _walk(body) if isinstance(n, dcc.Loading))
+    assert _has(loading, spreads.HISTORY_ID) and "Working out the daily history" in _text(loading)
+    # the research chart and ours sit side by side
+    assert _has(body, spreads.DETAIL_GRAPH_ID)
+
+
+def _pt(day, ltd, level, **extra):
+    pt = {"date": day, "ltd_usd": ltd, "ltd_excluded": 0, "ltd_reasons": "", "ltd_filled": 0, "ltd_notes": "",
+          "members_on": 1, "level": level, "level_reason": "", "level_source": "CLZ26 Comdty BBG_BDH"}
+    pt.update(extra)
+    return pt
+
+
+def _own_history():
+    return {"position_id": POS_A, "level_unit": "USD/bbl", "first_trade_date": "2026-09-09", "dates_left_out": [],
+            "points": [
+                _pt("2026-09-09", None, None, ltd_excluded=1,
+                    ltd_reasons="SPREAD-A: unpriced on 2026-09-09: W1 (no FUTURE_PX mark)",
+                    level_reason="CLZ26 Comdty has no price on 2026-09-09"),
+                _pt("2026-09-10", 120.0, 0.40),
+                _pt("2026-09-11", 150.0, 0.45, ltd_filled=2,
+                    ltd_notes="W1: no price on 2026-09-11: value of the 2026-09-10 close"),
+                _pt("2026-09-14", -80.0, 0.20, ltd_excluded=1, ltd_reasons="SPREAD-A2: unpriced on 2026-09-14: W3"),
+                _pt("2026-09-15", 0.0, 0.34)]}
+
+
+def test_own_history_chart_gaps_with_reasons_filled_marked_entry_dashed_our_marks():
+    request = spreads.history_request(spreads.detail_payloads(_result(), _research())[POS_A], AS_OF)
+    figure, note = spreads.own_history_figure(_own_history(), request)
+    assert note == ""
+    ltd, level, entry, gaps = figure["data"]
+    # a missing figure is a gap (None), never 0; a real 0 stays 0
+    assert ltd["y"] == [None, 120.0, 150.0, -80.0, 0.0] and ltd["type"] == "bar" and ltd["yaxis"] == "y"
+    assert level["y"] == [None, 0.40, 0.45, 0.20, 0.34] and level["yaxis"] == "y2" and level["connectgaps"] is False
+    assert level["type"] == "scatter" and "lines" in level["mode"]
+    assert "our marks" in level["name"] and "USD/bbl" in level["name"]
+    assert "our marks" in level["text"][1] and "BBG_BDH" in level["text"][1]
+    # a filled day is a hatched bar and an open circle, its note on hover
+    assert ltd["marker"]["pattern"]["shape"] == ["", "", "/", "", ""]
+    assert level["marker"]["symbol"] == ["circle", "circle", "circle-open", "circle", "circle"]
+    assert ltd["marker"]["color"][3] == "#c0392b" and ltd["marker"]["color"][1] == "#1a7f4b"
+    assert "no price on 2026-09-11" in ltd["text"][2]
+    # a partial sum says what it leaves out
+    assert "excludes 1: SPREAD-A2" in ltd["text"][3]
+    # the entry level, dashed, on the level's axis
+    assert entry["y"] == [0.34, 0.34] and entry["line"]["dash"] == "dash" and entry["yaxis"] == "y2"
+    # the n/a day: a grey x on a hidden axis along the bottom, both reasons on hover
+    assert gaps["x"] == ["2026-09-09"] and gaps["yaxis"] == "y3"
+    assert "LTD n/a: SPREAD-A: unpriced on 2026-09-09" in gaps["text"][0]
+    assert "level n/a: CLZ26 Comdty has no price" in gaps["text"][0]
+    assert figure["layout"]["yaxis3"]["visible"] is False and figure["layout"]["yaxis2"]["overlaying"] == "y"
+
+
+def test_own_history_without_a_level_or_points_says_why():
+    hist = _own_history()
+    for pt in hist["points"]:
+        pt.update(level=None, level_reason="no level: this position has no calendar or template formula")
+    figure, note = spreads.own_history_figure(hist, {"as_of": AS_OF, "unit": ""})
+    assert [d["name"] for d in figure["data"]] == ["LTD USD", "n/a (hover for why)"]
+    assert "no level line: no level: this position has no calendar" in note
+    assert spreads.own_history_figure({"points": [], "first_trade_date": ""}, {"as_of": AS_OF})[0] is None
+    assert "no request" not in _text(spreads.history_block(None, "x.db"))
+    assert "No position or as-of date" in _text(spreads.history_block({}, "x.db"))
+
+
 # --------------------------------------------------------------------------- drawer, closed, outrights, review
 def test_reasons_are_gathered_in_one_collapsed_data_issues_drawer():
     body = spreads.body(_result(), _research())
@@ -661,6 +740,21 @@ def test_render_on_a_real_book_with_a_research_database(tmp_path, stub_app, monk
     # the kept selection reopens after a re-render
     again = spreads.render(AS_OF, tmp_path / "spreads.db", selected=row["id"])
     assert _has(again, spreads.DETAIL_GRAPH_ID)
+    # the position's own history, from our marks, once opened
+    request = _by_id(panel, spreads.HISTORY_REQUEST_ID).data
+    block = spreads.history_block(request, tmp_path / "spreads.db")
+    own = _by_id(block, spreads.HISTORY_GRAPH_ID).figure
+    ltd_trace, level_trace = own["data"][0], own["data"][1]
+    assert ltd_trace["x"][0] == "2026-09-01" and ltd_trace["x"][-1] == AS_OF      # first trade to the as-of
+    assert ltd_trace["y"][-1] == pytest.approx(ltd) and ltd_trace["y"][-2] == pytest.approx(prev)
+    assert level_trace["y"][-1] == pytest.approx(0.8) and level_trace["y"][-2] == pytest.approx(0.7)
+    assert own["data"][2]["y"] == [0.5, 0.5]                                       # the entry, dashed
+    assert "our marks" in _text(block)
+    # a history that cannot be worked out is a sentence, never a broken panel
+    def boom(*_a, **_k):
+        raise RuntimeError("disk gone")
+    assert "could not be worked out (RuntimeError: disk gone)" in _text(
+        spreads.history_block(request, tmp_path / "spreads.db", history_fn=boom))
 
 
 def test_render_on_the_sample_book_every_position_has_its_levels(tmp_path, stub_app, monkeypatch):
@@ -677,6 +771,15 @@ def test_render_on_the_sample_book_every_position_has_its_levels(tmp_path, stub_
     assert all(r["now"] != "n/a" and r["unit"] != "n/a" for r in table.data)
     assert all(r["sigma"] == "n/a" for r in table.data)
     assert "no research database" in _text(_by_id(body, spreads.ISSUES_ID))
+    # the WTI calendar's own history: every business day from its first trade (2026-08-03) to the as-of
+    payloads = _by_id(body, spreads.DETAIL_STORE_ID).data
+    panel, _pid = spreads.open_detail({"row_id": table.data[0]["id"]}, payloads, "2026-09-18")
+    request = _by_id(panel, spreads.HISTORY_REQUEST_ID).data
+    import json
+    request = json.loads(json.dumps(request))                          # as through the dcc.Store
+    own = _by_id(spreads.history_block(request, path), spreads.HISTORY_GRAPH_ID).figure
+    assert len(own["data"][0]["x"]) == 34 and own["data"][0]["x"][0] == "2026-08-03"
+    assert own["data"][0]["y"][-1] == pytest.approx(table.data[0]["ltd"], abs=0.5)   # the table's LTD, rounded
 
 
 def test_render_on_an_empty_book_and_without_a_date_or_database(tmp_path, stub_app):
@@ -706,5 +809,9 @@ def test_register_callbacks_the_body_and_the_drilldown(tmp_path, stub_app):
     assert len(drill) == 1 and spreads.SELECTED_STORE_ID + ".data" in drill[0]
     assert {(i["id"], i["property"]) for i in app.callback_map[drill[0]]["inputs"]} == {(spreads.TABLE_ID,
                                                                                           "active_cell")}
+    hist = [k for k in app.callback_map if k == f"{spreads.HISTORY_ID}.children"]
+    assert len(hist) == 1
+    assert [(i["id"], i["property"]) for i in app.callback_map[hist[0]]["inputs"]] == [
+        (spreads.HISTORY_REQUEST_ID, "data")]
     outputs = [o for k in app.callback_map for o in k.strip(".").split("...")]
     assert len(outputs) == len(set(outputs))

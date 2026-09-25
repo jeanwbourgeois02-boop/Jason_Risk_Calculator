@@ -572,7 +572,13 @@ def test_every_static_callback_id_exists_in_layout(tmp_path):
                   # header-figures), the Book's alerts (inside book-body, after the VaR pass),
                   # and the Spreads positions table with its drill-down (inside spreads-body).
                   "header-var-chip", "book-alerts",
-                  "spreads-table", "spreads-detail-store", "spreads-detail"}
+                  "spreads-table", "spreads-detail-store", "spreads-detail",
+                  # Phase C (2026-09-25): the Curve grid, its commodity selector, chart panel and
+                  # chart-data store are built by ui.tabs.curve.body() inside curve-body; the
+                  # Spreads drill-down's history store and slot by history_slot() inside
+                  # spreads-detail (itself inside spreads-body), both filled in place.
+                  "curve-grid", "curve-select", "curve-chart", "curve-chart-data",
+                  "spreads-history-request", "spreads-history"}
     dynamic_prefixes = ("blotter-datatable-", "blotter-strip-", "blotter-bundle-",
                         "blotter-row-detail-", "options-terms-",
                         "blotter-fx-",  # the FX sub-tab's trade table and its "rows shown" currency table (2026-09-21)
@@ -581,6 +587,10 @@ def test_every_static_callback_id_exists_in_layout(tmp_path):
     for key, cb in app.callback_map.items():
         for kind in ("inputs", "state"):
             for d in cb.get(kind, []):
+                # Pattern-matching ids (e.g. tab-link, ui/app.py, 2026-09-25) match components
+                # rendered anywhere, possibly later; not a static id.
+                if d["id"].startswith("{"):
+                    continue
                 if d["id"] not in ids and d["id"] not in dynamic_ok and not d["id"].startswith(dynamic_prefixes):
                     missing.append((kind, d["id"]))
         for out in key.strip(".").split("..."):
@@ -1331,11 +1341,13 @@ def _nodes(component):
 
 
 class _CellView:
-    """A currency-table cell read the way the old html cells were: `.children` is the text
-    the table prints, `.className` the old class words (sign, unavailable, partial) and
-    `.title` the tooltip."""
+    """A currency-table cell read the way the old html cells were: `.value` is the number the
+    cell carries (rounded to whole units; the table prints it in k / M), `.children` that
+    figure in full ("n/a" when unavailable), `.className` the old class words (sign,
+    unavailable, partial) and `.title` the tooltip (the full figure, then any note)."""
 
     def __init__(self, value, tooltip: str, partial: bool, is_count: bool):
+        self.value = value
         if value is None:
             self.children, self.className = "n/a", "fx-ccy-num cell--unavailable"
         elif is_count:
@@ -1417,6 +1429,7 @@ def test_blotter_fx_by_currency_groups_the_whole_fx_book_including_a_cross(tmp_p
 
 
 def test_blotter_fx_fixed_table_total_is_the_strip_and_rows_shown_start_equal_to_it(tmp_path):
+    from ui.tabs import ranking
     from ui.tabs.blotter_pricing import row_scoped_headline
 
     db_path = tmp_path / "risk.db"
@@ -1426,37 +1439,47 @@ def test_blotter_fx_fixed_table_total_is_the_strip_and_rows_shown_start_equal_to
     assert fixed["Currency"] == ["Currency", "Trades", "LTD", "Daily", "Previous day", "5d", "MTD", "YTD"]
     assert shown["Currency"] == ["Currency", "Trades shown", "LTD", "LTD-1", "LTD-2", "Daily", "Previous day"]
 
-    # The Total row reads exactly what the strip's cards read, figure for figure. The compact
-    # strip prints k / m on the card; its full figure is the value's hover, "<figure> USD, <ref date>".
-    cards = {n.children[0].children: n.children[1]
-             for n in _nodes(layout) if getattr(n, "className", "") == "card"}
-    for card, column in [("LTD P&L", "LTD"), ("Daily P&L", "Daily"), ("Previous day P&L", "Previous day"),
-                         ("5d", "5d"), ("MTD", "MTD"), ("YTD", "YTD")]:
-        value_div = cards[card]
-        full, sep, _ref = value_div.title.partition(" USD")
-        assert sep and full, (column, value_div.title)   # a priced card, its full figure on hover
-        assert _cell(fixed, "Total", column).children == full, column
-    assert _cell(fixed, "Total", "Trades").children == cards["Trades"].children
-    assert _cell(fixed, "Total", "LTD").children == format_cell(_JPY_LTD + 35_000.0)
+    # Money prints in k / M (the summary-table rule, "Natural units"), the count as a count.
+    fixed_table = next(n for n in _nodes(layout) if getattr(n, "id", None) == blotter_fx.FIXED_TABLE_ID)
+    formats = {c["id"]: c.get("format") for c in fixed_table.columns}
+    assert all(formats[key] == ranking.amount_short(nully="n/a") for key, _l in blotter_fx.FIXED_PERIODS)
+    assert formats["trades"] == ranking.count()
 
-    # ... and is the pricing path's own figure, not a sum made here.
+    # The Total row is the strip, compared as NUMBERS: the pricing path's own figures, not a
+    # sum made here, each Total cell carrying that number (to whole units, what k / M prints).
     conn = sqlite3.connect(db_path)
     try:
         headline = row_scoped_headline(conn, _CCY_AS_OF, ["J1", "J2", "J3", "A1", "X1", "E1", "M1"])
         _rows, total = blotter_fx.by_currency_rows(conn, _CCY_AS_OF)
     finally:
         conn.close()
-    for key, _label in blotter_fx.FIXED_PERIODS:
+    strip_numbers = {}
+    for key, label in blotter_fx.FIXED_PERIODS:
         assert total["figures"][key]["available"] == headline[key]["available"], key
-        if headline[key]["available"]:
-            assert total["figures"][key]["value"] == pytest.approx(headline[key]["value"]), key
+        assert headline[key]["available"], key          # every period of this book has a figure
+        strip = float(headline[key]["value"])
+        strip_numbers[label] = strip
+        assert total["figures"][key]["value"] == pytest.approx(strip), key
+        assert _cell(fixed, "Total", label).value == float(round(strip)), key
+    assert _cell(fixed, "Total", "LTD").value == pytest.approx(round(_JPY_LTD + 35_000.0))
+
+    # The strip's cards show those same numbers: each card's full figure (its hover,
+    # "<figure> USD, <ref date>") is the number's own, and so is the Total cell's hover.
+    cards = {n.children[0].children: n.children[1]
+             for n in _nodes(layout) if getattr(n, "className", "") == "card"}
+    for card, column in [("LTD P&L", "LTD"), ("Daily P&L", "Daily"), ("Previous day P&L", "Previous day"),
+                         ("5d", "5d"), ("MTD", "MTD"), ("YTD", "YTD")]:
+        full, sep, _ref = cards[card].title.partition(" USD")
+        assert sep and full == format_cell(strip_numbers[column]), (column, cards[card].title)
+        assert _cell(fixed, "Total", column).title.startswith(f"{full} USD"), column
+    assert _cell(fixed, "Total", "Trades").value == int(cards["Trades"].children) == 7
 
     # With no filter typed the rows-shown table opens on the same LTD column, row for row.
     assert [k for k in shown if k != "Currency"] == [k for k in fixed if k != "Currency"]
     for currency in fixed:
         if currency != "Currency":
-            assert _cell(shown, currency, "LTD").children == _cell(fixed, currency, "LTD").children, currency
-            assert _cell(shown, currency, "Trades shown").children == _cell(fixed, currency, "Trades").children
+            assert _cell(shown, currency, "LTD").value == _cell(fixed, currency, "LTD").value, currency
+            assert _cell(shown, currency, "Trades shown").value == _cell(fixed, currency, "Trades").value
 
 
 def test_blotter_fx_currency_tables_sit_between_the_strip_and_the_trade_table(tmp_path):
@@ -1562,12 +1585,12 @@ def test_blotter_fx_rows_shown_callback_follows_the_filtered_rows(tmp_path):
     (shown,) = _currency_tables(update(jpy_rows))
     assert [k for k in shown if k != "Currency"] == ["JPY", "Total"]
     assert _cell(shown, "Total", "Trades shown").children == "3"
-    assert _cell(shown, "Total", "LTD").children == format_cell(_JPY_LTD)
+    assert _cell(shown, "Total", "LTD").value == pytest.approx(round(_JPY_LTD))
     assert _cell(shown, "JPY", "LTD").className.endswith("fx-ccy-num--pos")
 
     (everything,) = _currency_tables(update(table.data))
     assert _cell(everything, "Total", "Trades shown").children == "7"
-    assert _cell(everything, "Total", "LTD").children == format_cell(_JPY_LTD + 35_000.0)
+    assert _cell(everything, "Total", "LTD").value == pytest.approx(round(_JPY_LTD + 35_000.0))
 
     (nothing,) = _currency_tables(update([]))   # a filter that matches no row
     assert [k for k in nothing if k != "Currency"] == ["Total"]
@@ -1597,7 +1620,8 @@ def test_blotter_fx_unavailable_and_partial_figures_say_why(tmp_path):
 
     # A sum of the priced trades only: flagged, the count on hover, and said in a visible line.
     cell = _cell(fixed, "Total", "LTD")
-    assert "fx-ccy-num--partial" in cell.className and cell.title.startswith("excludes 1 of 7 trades unpriced")
+    assert "fx-ccy-num--partial" in cell.className
+    assert cell.title.startswith(f"{format_cell(cell.value)} USD\nexcludes 1 of 7 trades unpriced")
     notes = [n.children for n in _nodes(layout) if getattr(n, "className", "") == "fx-ccy-note"]
     assert len(notes) == 2
     assert "Total LTD excludes 1 of 7 trades unpriced." in notes[0] and "n/a: hover it for the reason." in notes[0]

@@ -69,6 +69,27 @@ def stub_app(monkeypatch):
     return stub
 
 
+NO_RESEARCH = "root is not in the research database (test)"
+
+
+@pytest.fixture(autouse=True)
+def research(monkeypatch):
+    """The research curve the tab reads, faked: no research curve unless a test sets one in
+    `curves`, so no test depends on the research app's database on this PC. Records every call."""
+    state = {"calls": [], "curves": {}}
+
+    def fake(root_id, as_of, db_path=None):
+        state["calls"].append((root_id, as_of))
+        if root_id in state["curves"]:
+            return state["curves"][root_id]
+        return {"root_id": root_id, "research_root": None, "available": True, "label": "research", "as_of": as_of,
+                "date": None, "stale_days": None, "unit": "", "currency": "", "price_scale": None,
+                "reason": NO_RESEARCH, "note": "", "source": "", "rows": []}
+
+    monkeypatch.setattr(curve, "research_curve", fake)
+    return state
+
+
 @pytest.fixture
 def book(tmp_path):
     return _write_book(tmp_path / "curve.db")
@@ -503,8 +524,8 @@ def test_no_kicker_paragraphs_every_section_title_carries_its_definitions(book, 
     assert not [n for n in _walk(body) if getattr(n, "className", None) == "section-kicker"]
     titles = [n for n in _walk(body) if "about-title" in (getattr(n, "className", None) or "")]
     heads = {n.children[0]: n.title for n in titles}
-    assert set(heads) == {"Positions by contract month (lots)", "Net outright by sector (USD)", "Contracts",
-                          "Currency exposure of non-USD futures"}
+    assert set(heads) == {"Positions by contract month (lots)", "Curve and positions", "Net outright by sector (USD)",
+                          "Contracts", "Currency exposure of non-USD futures"}
     assert all(heads.values())
     assert "calendar spread nets" in heads["Net outright by sector (USD)"]
     assert "Toggle Columns" in heads["Contracts"]
@@ -621,3 +642,231 @@ def test_title_row_is_compact():
     assert len(marks) == 1 and marks[0].children == f"header's as-of {AS_OF}"
     assert "no date picker" in marks[0].title
     assert curve.layout().children[0].children[1].children[0].children == "header's as-of"
+
+
+# --------------------------------------------------------------------------- Phase C: the heatmap
+def _heat_rules(table):
+    return [r for r in table.style_data_conditional if "backgroundColor" in r and "column_id" in r["if"]
+            and r["if"]["column_id"].startswith(curve.MONTH_PREFIX)]
+
+
+def _alpha(colour):
+    return float(colour.rsplit(",", 1)[1].rstrip(") "))
+
+
+def test_heat_styles_shade_by_sign_and_rank_and_leave_na_zero_and_blank_alone():
+    records = [{"m_a": 10.0, "m_b": -3.0}, {"m_a": 1.0, "m_b": curve.NA}, {"m_a": None, "m_b": 0.0}]
+    rules = curve.heat_styles(records, ["m_a", "m_b"])
+    by_query = {r["if"]["filter_query"]: r for r in rules}
+    assert set(by_query) == {"{m_a} = 10.0", "{m_b} = -3.0", "{m_a} = 1.0"}
+    assert all(r["color"] == curve.HEAT_INK for r in rules)
+    long_big, short_mid, long_small = by_query["{m_a} = 10.0"], by_query["{m_b} = -3.0"], by_query["{m_a} = 1.0"]
+    assert long_big["backgroundColor"].startswith("rgba(26, 127, 75,")      # long: --pos green
+    assert short_mid["backgroundColor"].startswith("rgba(192, 57, 43,")     # short: --neg red
+    assert long_small["backgroundColor"].startswith("rgba(26, 127, 75,")
+    assert _alpha(long_big["backgroundColor"]) == pytest.approx(curve.HEAT_MAX)
+    assert _alpha(long_small["backgroundColor"]) < _alpha(short_mid["backgroundColor"]) < _alpha(long_big["backgroundColor"])
+
+
+def test_heat_is_by_rank_so_one_huge_cell_does_not_wash_the_rest_out():
+    mags = sorted([1_000_000.0, 1.0, 2.0])
+    assert curve.heat_level(2.0, mags) == pytest.approx(2 / 3)
+    assert curve.heat_level(-1.0, mags) == pytest.approx(1 / 3)
+    assert curve.heat_colour(0.0, mags) is None                                # white at zero
+    assert _alpha(curve.heat_colour(2.0, mags)) > curve.HEAT_MIN + 0.3         # not washed out by the 1m cell
+
+
+def test_grid_month_cells_are_shaded_the_calendar_spread_a_green_red_pair(book, stub_app):
+    grid = _table(curve.render(AS_OF, book), curve.GRID_ID)
+    rules = {(r["if"]["column_id"], r["if"]["filter_query"]): r["backgroundColor"] for r in _heat_rules(grid)}
+    assert rules[("m_2026-12", "{m_2026-12} = 1.0")].startswith("rgba(26, 127, 75,")    # CLZ26 long 1
+    assert rules[("m_2027-01", "{m_2027-01} = -1.0")].startswith("rgba(192, 57, 43,")   # CLF27 short 1
+    # only month columns are shaded, never the totals; the numbers and the sort stay
+    assert all(r["if"]["column_id"].startswith(curve.MONTH_PREFIX)
+               for r in grid.style_data_conditional if r.get("color") == curve.HEAT_INK)
+    assert grid.sort_action == "native"
+    _, cl = _grid_row(grid, "NYMEX:CL", _engine(book))
+    assert (cl["m_2026-12"], cl["m_2027-01"]) == (1.0, -1.0)
+    # the heat rules come after the sign colours, so the shade wins
+    styles = grid.style_data_conditional
+    heat = [i for i, r in enumerate(styles) if r.get("color") == curve.HEAT_INK]
+    sign = [i for i, r in enumerate(styles) if r.get("color") == "var(--pos)"]
+    assert heat and min(heat) > max(sign)
+
+
+def test_grid_heat_in_the_usd_view_matches_the_values_shown_and_skips_na(book, stub_app):
+    grid = _table(curve.render(AS_OF, book, "usd"), curve.GRID_ID)
+    rules = _heat_rules(grid)
+    shown = {(c, r[c]) for r in grid.data for c in r if c.startswith(curve.MONTH_PREFIX) and isinstance(r[c], float)}
+    queried = {(r["if"]["column_id"], float(r["if"]["filter_query"].split(" = ")[1])) for r in rules}
+    assert queried == {(c, v) for c, v in shown if v != 0}
+    _, cu = _grid_row(grid, "SHFE:CU", _engine(book))
+    assert cu["m_2026-12"] == curve.NA                  # no USDCNY spot: n/a, and no rule reaches it
+    assert not any("n/a" in r["if"]["filter_query"] for r in rules)
+
+
+def test_grid_records_carry_the_root_as_row_id(book, stub_app):
+    grid = _table(curve.render(AS_OF, book), curve.GRID_ID)
+    assert {r["id"] for r in grid.data} == {"NYMEX:CL", "SHFE:CU", "CBOT:ZC"}
+    assert "id" not in [c["id"] for c in grid.columns]
+
+
+# --------------------------------------------------------------------------- Phase C: the curve panel
+def _research(root_id, rows, date="2026-09-15", unit="USD/bbl", scale=1.0, note=""):
+    return {"root_id": root_id, "research_root": root_id, "available": True, "label": "research", "as_of": AS_OF,
+            "date": date, "stale_days": 0, "unit": unit, "currency": "USD", "price_scale": scale, "reason": "",
+            "note": note, "source": f"research app database x, {root_id} settlements of {date}", "rows": rows}
+
+
+CL_RESEARCH = [
+    {"contract_id": "CLX26 Comdty", "month": "2026-11", "year": 2026, "month_no": 11, "expiry": "2026-10-20",
+     "settle": 72.1, "raw_settle": 72.1},
+    {"contract_id": "CLZ26 Comdty", "month": "2026-12", "year": 2026, "month_no": 12, "expiry": "2026-11-19",
+     "settle": 71.4, "raw_settle": 71.4},
+    {"contract_id": "CLF27 Comdty", "month": "2027-01", "year": 2027, "month_no": 1, "expiry": "2026-12-17",
+     "settle": 70.9, "raw_settle": 70.9},
+]
+CORN_RESEARCH = [
+    {"contract_id": "C Z26 Comdty", "month": "2026-12", "year": 2026, "month_no": 12, "expiry": "2026-12-14",
+     "settle": 4.4825, "raw_settle": 448.25},
+    {"contract_id": "C H27 Comdty", "month": "2027-03", "year": 2027, "month_no": 3, "expiry": "2027-03-12",
+     "settle": 4.61, "raw_settle": 461.0},
+]
+
+
+def _traces(fig):
+    return {t.name: t for t in fig.data}
+
+
+def test_default_commodity_is_the_largest_gross_usd(book):
+    result = _engine(book)
+    grosses = {k: c["gross_usd"] for k, c in result["by_commodity"].items() if c["gross_usd"] is not None}
+    assert curve.default_root(result) == max(grosses, key=grosses.get) == "NYMEX:CL"
+    fake = {"by_commodity": {"A": {"gross_usd": None, "gross_delta_usd": 9e9}, "B": {"gross_usd": 5.0},
+                             "C": {"gross_usd": 7.0}}}
+    assert curve.default_root(fake) == "C"          # an n/a gross ranks after every known one
+    assert curve.default_root({"by_commodity": {}}) is None
+
+
+def test_curve_traces_are_the_two_sources_figures_exactly(book, research):
+    result = _engine(book)
+    research["curves"]["NYMEX:CL"] = _research("NYMEX:CL", CL_RESEARCH)
+    payload = curve.chart_store(result)["roots"]["NYMEX:CL"]
+    fig = curve.curve_figure(payload, curve.research_curve("NYMEX:CL", AS_OF))
+    t = _traces(fig)
+    assert set(t) == {"research curve (2026-09-15)", curve.MARKS_TRACE, curve.LOTS_TRACE}
+    line = t["research curve (2026-09-15)"]
+    assert list(line.x) == ["2026-11-01", "2026-12-01", "2027-01-01"]
+    assert list(line.y) == [r["raw_settle"] for r in CL_RESEARCH]
+    rows = {r["contract_id"]: r for r in result["rows"]}
+    marks = t[curve.MARKS_TRACE]
+    assert list(marks.y) == [rows[CLZ6]["price"], rows[CLF7]["price"]] == [71.0, 70.2]
+    assert list(marks.x) == ["2026-12-01", "2027-01-01"]
+    bars = t[curve.LOTS_TRACE]
+    months = result["by_commodity"]["NYMEX:CL"]["months"]
+    assert list(bars.y) == [months["2026-12"], months["2027-01"]] == [1.0, -1.0]
+    assert list(bars.marker.color) == ["#1a7f4b", "#c0392b"]      # long green, short red
+    assert line.yaxis == marks.yaxis == "y" and bars.yaxis == "y2" and bars.xaxis == "x2"   # two rows
+    assert fig.layout.xaxis.matches == "x2" or fig.layout.xaxis2.matches == "x"              # one shared x
+
+
+def test_research_curve_is_drawn_at_raw_settle_on_our_marks_scale(book, research):
+    result = _engine(book)
+    research["curves"]["CBOT:ZC"] = _research("CBOT:ZC", CORN_RESEARCH, unit="USD/bu", scale=0.01)
+    payload = curve.chart_store(result)["roots"]["CBOT:ZC"]
+    rc = curve.research_curve("CBOT:ZC", AS_OF)
+    fig = curve.curve_figure(payload, rc)
+    t = _traces(fig)
+    assert list(t["research curve (2026-09-15)"].y) == [448.25, 461.0]          # raw, not 4.4825
+    assert list(t[curve.MARKS_TRACE].y) == [450.25]                              # our mark, cents as quoted
+    assert fig.layout.yaxis.title.text == "quoted price (x 0.01 = USD/bu)"
+    assert curve.curve_notes(payload, rc) == []
+
+
+def test_no_research_curve_draws_marks_and_bars_alone_and_says_why(book, stub_app, research):
+    body = curve.render(AS_OF, book)
+    panel = _table(body, curve.CURVE_SECTION_ID)
+    graph = _table(panel, curve.GRAPH_ID)
+    assert {t.name for t in graph.figure.data} == {curve.MARKS_TRACE, curve.LOTS_TRACE}
+    notes = [n.children for n in _walk(panel) if getattr(n, "className", None) == "curve-note"]
+    assert len(notes) == 1 and NO_RESEARCH in notes[0] and notes[0].startswith("No research curve")
+
+
+def test_research_curve_is_read_for_the_commodity_shown_only(book, stub_app, research):
+    curve.render(AS_OF, book)
+    assert research["calls"] == [("NYMEX:CL", AS_OF)]
+    research["calls"].clear()
+    curve.render(AS_OF, book, "lots", "CBOT:ZC")
+    assert research["calls"] == [("CBOT:ZC", AS_OF)]
+    research["calls"].clear()
+    curve.render(AS_OF, book, "lots", "ICE:GONE")          # a kept pick no longer in the book: the default
+    assert research["calls"] == [("NYMEX:CL", AS_OF)]
+
+
+def test_a_contract_without_a_price_is_named_not_drawn(book, research):
+    result = _engine(book)
+    payload = curve.chart_store(result)["roots"]["SHFE:CU"]
+    assert [m["contract_id"] for m in payload["marks"]] == [CUZ6]      # the price is on file; only USD is n/a
+    result["rows"] = [dict(r, price=None, reason="no FUTURE_PX on 2026-09-15") if r["contract_id"] == CUZ6 else r
+                      for r in result["rows"]]
+    payload = curve.chart_payload(result, "SHFE:CU")
+    assert payload["marks"] == []
+    notes = curve.curve_notes(payload, curve.research_curve("SHFE:CU", AS_OF))
+    assert f"Not drawn: {CUZ6}: no FUTURE_PX on 2026-09-15." in notes
+    fig = curve.curve_figure(payload, {})
+    assert {t.name for t in fig.data} == {curve.LOTS_TRACE}
+
+
+def test_options_add_their_underlying_once_and_the_delta_bars(research):
+    result = _fake()
+    payload = curve.chart_payload(result, "NYMEX:CL")
+    ids = [m["contract_id"] for m in payload["marks"]]
+    assert len(ids) == len(set(ids))
+    held = {m["contract_id"]: m["held"] for m in payload["marks"]}
+    for r in result["rows"]:
+        if r["root_id"] == "NYMEX:CL" and r["product"] != "CMDTY_OPTION" and r.get("price") is not None:
+            assert held[r["contract_id"]] is True
+    c = result["by_commodity"]["NYMEX:CL"]
+    assert payload["show_delta"] == (c["delta_months"] != c["months"])
+    t = _traces(curve.curve_figure(payload, {}))
+    assert list(t[curve.LOTS_TRACE].y) == [v for _, v in sorted(c["months"].items()) if v is not None]
+    if payload["show_delta"]:
+        assert list(t[curve.DELTA_TRACE].y) == [v for _, v in sorted(c["delta_months"].items()) if v is not None]
+
+
+def test_click_and_selector_wiring(book, stub_app, research):
+    app = dash.Dash(__name__)
+    curve.register_callbacks(app, get_db_path=lambda: str(book))
+    body_key = f"{curve.BODY_ID}.children"
+    assert app.callback_map[body_key]["state"] == [{"id": curve.SELECTED_ID, "property": "data"}]
+    pick_key = f"{curve.SELECT_ID}.value"
+    assert [(i["id"], i["property"]) for i in app.callback_map[pick_key]["inputs"]] == [(curve.GRID_ID, "active_cell")]
+    show_key = next(k for k in app.callback_map if f"{curve.CHART_ID}.children" in k)
+    assert f"{curve.SELECTED_ID}.data" in show_key
+    assert [(i["id"], i["property"]) for i in app.callback_map[show_key]["inputs"]] == [(curve.SELECT_ID, "value")]
+    assert app.callback_map[show_key]["state"] == [{"id": curve.CHART_STORE_ID, "property": "data"}]
+
+    pick = app.callback_map[pick_key]["callback"].__wrapped__
+    assert pick({"row": 2, "column": 5, "column_id": "m_2026-12", "row_id": "CBOT:ZC"}) == "CBOT:ZC"
+    assert pick(None) is dash.no_update
+
+    body = app.callback_map[body_key]["callback"].__wrapped__(AS_OF, "rev", 0, "lots", "CBOT:ZC")
+    assert _table(body, curve.SELECT_ID).value == "CBOT:ZC"
+    store = _table(body, curve.CHART_STORE_ID).data
+    research["curves"]["CBOT:ZC"] = _research("CBOT:ZC", CORN_RESEARCH, unit="USD/bu", scale=0.01)
+    show = app.callback_map[show_key]["callback"].__wrapped__
+    children, kept = show("CBOT:ZC", store)
+    assert kept == "CBOT:ZC"
+    graph = _table(dash.html.Div(children), curve.GRAPH_ID)
+    assert list(_traces(graph.figure)[curve.MARKS_TRACE].y) == [450.25]
+    assert show(None, store) == (dash.no_update, dash.no_update)
+
+
+def test_selector_lists_every_commodity_and_the_panel_sits_under_the_grid(book, stub_app):
+    body = curve.render(AS_OF, book)
+    select = _table(body, curve.SELECT_ID)
+    assert [o["value"] for o in select.options] == list(_engine(book)["by_commodity"])
+    assert select.value == "NYMEX:CL" and select.clearable is False
+    ids = [getattr(n, "id", None) for n in _walk(body) if getattr(n, "id", None)]
+    assert ids.index(curve.GRID_ID) < ids.index(curve.CURVE_SECTION_ID) < ids.index(curve.SECTOR_TABLE_ID)
+    assert curve.SELECTED_ID in [getattr(n, "id", None) for n in _walk(curve.layout(AS_OF))]

@@ -109,3 +109,33 @@ def test_issues_drawer_passes_a_component_through():
 def test_existing_format_cell_unchanged():
     assert fmt.format_cell(-1234.4) == "(1,234)"
     assert fmt.format_cell(math.nan) == ""
+
+
+# ----------------------------------------------------------------------------- tab_link
+# A tab's name as a link that switches tab (user, 2026-09-25); ui/app.py's one callback
+# listens on every id of type TAB_LINK_TYPE.
+def test_tab_link_is_a_quiet_button_with_a_pattern_matching_id():
+    link = fmt.tab_link("\u2192 Curve", "curve", "book-metals")
+    assert isinstance(link, html.Button)
+    assert link.children == "\u2192 Curve"
+    assert link.id == {"type": fmt.TAB_LINK_TYPE, "tab": "curve", "idx": "book-metals"}
+    assert fmt.TAB_LINK_TYPE == "tab-link"
+    assert link.className == "tab-link" and link.type == "button"
+    assert link.n_clicks == 0                      # never a click on the first render
+    assert link.title == "Open the Curve tab"      # the arrow is not the tab's name
+
+
+def test_tab_link_title_class_and_component_label():
+    link = fmt.tab_link("Risk", "risk", "curve-caption", title="Per-underlyer figures", className="x")
+    assert link.title == "Per-underlyer figures" and link.className == "tab-link x"
+    comp = fmt.tab_link(html.B("Data"), "market-data", "book-marks")
+    assert comp.title == "Open the market-data tab"
+    assert fmt.tab_link_id("ladder", 3) == {"type": "tab-link", "tab": "ladder", "idx": "3"}
+
+
+def test_tab_links_differ_by_idx_and_by_tab():
+    a = fmt.tab_link("Curve", "curve", "book-metals")
+    b = fmt.tab_link("Curve", "curve", "book-energy")
+    c = fmt.tab_link("Risk", "risk", "book-metals")
+    ids = [tuple(sorted(x.id.items())) for x in (a, b, c)]
+    assert len(set(ids)) == 3

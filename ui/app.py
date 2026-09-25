@@ -17,15 +17,17 @@ collapsible trade summary (ui/tabs/options.py; docs/open-questions.md item 61).
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
 from typing import Union
 
 import dash
-from dash import Input, Output, State, dcc, html
+from dash import ALL, Input, Output, State, dcc, html
 
 from ui.tabs import blotter, book, cash_ladder, curve, expiries, header, market_data, risk, spreads
+from ui.tabs.formatting import TAB_LINK_TYPE
 from ui import revision, uploads
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -162,6 +164,35 @@ def load_summary(db_path: Union[str, Path]) -> dict:
 MAIN_TABS_ID = "main-tabs"
 
 
+def tab_from_link_click(triggered) -> Union[str, None]:
+    """The tab key a tab-link click asks for (`ui.tabs.formatting.tab_link`), or None.
+
+    `triggered` is Dash's `ctx.triggered`: a list of {"prop_id": '<json id>.n_clicks',
+    "value": n_clicks}. Only a real click counts: an entry whose `n_clicks` is None or 0 (a
+    link's first render, or a body re-rendered with fresh links) is ignored, and so is any
+    id that is not a tab link or names a key not in `TAB_KEYS` -- a stale or mistyped link
+    does nothing, it never breaks the app. The first entry that passes wins."""
+    known = set(TAB_KEYS.values())
+    for entry in triggered or ():
+        try:
+            prop_id, value = entry.get("prop_id", ""), entry.get("value")
+        except AttributeError:
+            continue
+        if not value or not isinstance(prop_id, str):
+            continue
+        raw_id = prop_id.rsplit(".", 1)[0]      # the id's own dots (an idx "a.b") stay in the JSON
+        try:
+            link_id = json.loads(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(link_id, dict) or link_id.get("type") != TAB_LINK_TYPE:
+            continue
+        key = link_id.get("tab")
+        if key in known:
+            return key
+    return None
+
+
 def build_layout(data: dict, db_path=None) -> html.Div:
     """Top-level layout (user decision 2026-09-15, item A, revised 2026-09-15): the tab
     bar (`dcc.Tabs`, holding plain `dcc.Tab(label=..., value=<key>)` objects with NO
@@ -294,6 +325,18 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     app.callback(*body_outputs, Input(MAIN_TABS_ID, "value"))(
         lambda selected: [{} if TAB_KEYS[label] == selected else {"display": "none"} for label in VISIBLE_TABS]
     )
+
+    # A tab's name on another screen is a link (user, 2026-09-25: "make tab names in the
+    # screens clickable links"): one callback on every tab link, by pattern, so a link a
+    # tab's own callback renders later works too. It writes the tab bar's value, and the
+    # show/hide callback above follows. `prevent_initial_call` plus the n_clicks check in
+    # `tab_from_link_click`: neither the page load nor a re-rendered body switches tabs.
+    @app.callback(Output(MAIN_TABS_ID, "value"),
+                  Input({"type": TAB_LINK_TYPE, "tab": ALL, "idx": ALL}, "n_clicks"),
+                  prevent_initial_call=True)
+    def _follow_tab_link(_clicks):
+        key = tab_from_link_click(dash.ctx.triggered)
+        return dash.no_update if key is None else key
 
     # `bloomberg_feed_reason` is why there is no feed ("" when there is one), kept so the
     # top bar's "Pull Bloomberg now" button (ui/feed_controls.py) can say it in plain

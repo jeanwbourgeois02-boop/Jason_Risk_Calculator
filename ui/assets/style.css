@@ -479,3 +479,12 @@ p { margin: 8px 0; }
 .issue-label { font-weight: 600; }
 .header-block .issues-drawer > summary { color: rgba(255,255,255,.65); }
 .header-block .issues-drawer[open] > summary { color: var(--navy); }
+
+/* A tab's name as a link (ui/tabs/formatting.py::tab_link, 2026-09-25): quiet, in the text's
+   own size, underlined only on hover; a <button> so it takes the keyboard without a URL. */
+.tab-link { display: inline; margin: 0; padding: 0; border: none; background: none;
+  font: inherit; font-size: .92em; line-height: inherit; color: var(--navy); opacity: .75;
+  cursor: pointer; text-decoration: none; white-space: nowrap; vertical-align: baseline; }
+.tab-link:hover, .tab-link:focus-visible { opacity: 1; text-decoration: underline; outline: none; }
+.header-block .tab-link, .top-bar .tab-link { color: rgba(255,255,255,.8); }
+.header-block .tab-link:hover, .top-bar .tab-link:hover { color: #fff; }

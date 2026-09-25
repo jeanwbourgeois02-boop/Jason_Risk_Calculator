@@ -53,7 +53,7 @@ from dash.dash_table.Format import Format, Scheme, Sign
 from dash.exceptions import PreventUpdate
 
 from engine.risk.research_spreads import research_spread_history, research_spread_stats, sigma_move
-from engine.spreads import book_spreads
+from engine.spreads import book_spreads, history_dates, position_history
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
@@ -69,6 +69,9 @@ DETAIL_ID = "spreads-detail"                 # the drill-down panel under the po
 DETAIL_GRAPH_ID = "spreads-detail-graph"
 DETAIL_MEMBERS_ID = "spreads-detail-members"
 DETAIL_LEGS_ID = "spreads-detail-legs"
+HISTORY_ID = "spreads-history"               # the position's own daily history (Phase C), filled on open
+HISTORY_REQUEST_ID = "spreads-history-request"   # what that callback computes: the opened position and date
+HISTORY_GRAPH_ID = "spreads-history-graph"
 CLOSED_ID = "spreads-closed"
 CLOSED_TABLE_ID = "spreads-closed-table"
 CLOSED_LEGS_ID = "spreads-closed-legs"
@@ -852,6 +855,8 @@ def detail_payloads(result: Dict[str, Any], research: Dict[str, Any]) -> Dict[st
             "research_run": (entry or {}).get("asof") or research.get("run_asof"),
             "research_name": (entry or {}).get("name") or "",
             "members": members, "legs": legs,
+            "history_position": {k: p.get(k) for k in ("position_id", "member_trade_ids", "level_spec",
+                                                       "level_now_reason", "trade_ids")},
         }
     return out
 
@@ -977,6 +982,152 @@ def detail_legs_table(payload: Dict[str, Any]) -> dash_table.DataTable:
         page_action="none")
 
 
+_CHART_BOX = {"flex": "1 1 520px", "minWidth": "0"}
+HISTORY_LABEL = "our marks"
+HISTORY_ABOUT = ("The position's own daily history from the book's official marks (not the research app's): its "
+                 "LTD P&L in USD on each business day from its first trade to the as-of (left axis) and its level "
+                 "on the same days (right axis), with the entry level dashed. A day with no figure is a gap, its "
+                 "reason on the grey x under it; a hatched bar and an open circle are a value of an earlier close "
+                 "(no price that day). Worked out when the position is opened.")
+
+
+def history_request(payload: Dict[str, Any], as_of: Optional[str]) -> Dict[str, Any]:
+    """What the history callback needs, JSON-safe: the position as `position_history` reads it,
+    the as-of, and the entry level and unit the chart draws."""
+    return {"position": payload.get("history_position") or {}, "as_of": as_of, "name": payload.get("name") or "",
+            "unit": payload.get("unit") or "", "level_entry": payload.get("level_entry"),
+            "level_entry_reason": payload.get("level_entry_reason") or ""}
+
+
+def history_slot(payload: Dict[str, Any], as_of: Optional[str]) -> html.Div:
+    """The place of the position's own history in the drill-down: a loading state that the
+    history callback fills (`history_block`), and the request it reads. Nothing is computed
+    here, so the tab's render never values the past closes."""
+    return html.Div(style=_CHART_BOX, children=[
+        dcc.Store(id=HISTORY_REQUEST_ID, data=history_request(payload, as_of)),
+        dcc.Loading(type="dot", children=html.Div(id=HISTORY_ID, children=html.Div(
+            f"Working out the daily history from {HISTORY_LABEL}...", className="section-kicker")))])
+
+
+def _point_text(pt: Dict[str, Any], unit: str) -> Tuple[str, str, List[str], bool]:
+    """(LTD hover, level hover, n/a sentences, filled?) of one history point."""
+    day = pt.get("date") or ""
+    filled = bool(_num(pt.get("ltd_filled")))
+    fill_words = f"<br>filled: {pt.get('ltd_notes')}" if filled and pt.get("ltd_notes") else (
+        "<br>filled from an earlier close" if filled else "")
+    ltd = _num(pt.get("ltd_usd"))
+    n_out = int(_num(pt.get("ltd_excluded")) or 0)
+    na: List[str] = []
+    if ltd is None:
+        na.append(f"LTD n/a: {pt.get('ltd_reasons') or 'no member priced and no reason given'}")
+        ltd_text = ""
+    else:
+        ltd_text = (f"{day}<br>LTD {full_usd(ltd)}"
+                    + (f"<br>excludes {n_out}: {pt.get('ltd_reasons') or 'no reason given'}" if n_out else "")
+                    + fill_words)
+    level = _num(pt.get("level"))
+    if level is None:
+        na.append(f"level n/a: {pt.get('level_reason') or 'no level and no reason given'}")
+        level_text_ = ""
+    else:
+        level_text_ = (f"{day}<br>level {level_text(level, unit)} {unit} ({HISTORY_LABEL})"
+                       + (f"<br>{pt.get('level_source')}" if pt.get("level_source") else "") + fill_words)
+    return ltd_text, level_text_, na, filled
+
+
+def own_history_figure(history: Dict[str, Any], request: Dict[str, Any]) -> Tuple[Optional[dict], str]:
+    """(figure, note) of the position's own history: LTD USD as bars on the left axis, the level
+    ("our marks") as a line on the right with the entry level dashed, a missing figure a gap (None,
+    never 0) with its reason on a grey x along the bottom, a filled day a hatched bar and an open
+    circle. (None, reason) when there is no point."""
+    points = history.get("points") or []
+    if not points:
+        return None, (f"no trade of this position on or before {request.get('as_of')}"
+                      if not history.get("first_trade_date") else "no business day to show")
+    unit = history.get("level_unit") or request.get("unit") or ""
+    xs = [pt.get("date") for pt in points]
+    texts = [_point_text(pt, unit) for pt in points]
+    symbols = ["circle-open" if filled else "circle" for _l, _v, _n, filled in texts]
+    ltd = [_num(pt.get("ltd_usd")) for pt in points]
+    # LTD as bars and the level as a line: on a clean spread LTD is USD per point x (level - entry),
+    # so two lines would lie on top of each other (seen 2026-09-25). A filled day's bar is hatched.
+    data: List[dict] = [
+        {"x": xs, "y": ltd, "type": "bar", "name": "LTD USD", "yaxis": "y",
+         "marker": {"color": ["#1a7f4b" if v is not None and v >= 0 else "#c0392b" for v in ltd], "opacity": 0.45,
+                    "pattern": {"shape": ["/" if t[3] else "" for t in texts]}},
+         "text": [t[0] for t in texts], "textposition": "none", "hovertemplate": "%{text}<extra></extra>"}]
+    has_level = any(_num(pt.get("level")) is not None for pt in points)
+    if has_level:
+        data.append({"x": xs, "y": [_num(pt.get("level")) for pt in points], "type": "scatter",
+                     "mode": "lines+markers", "name": f"level ({HISTORY_LABEL}, {unit})", "yaxis": "y2",
+                     "connectgaps": False, "line": {"color": "#c9a227", "width": 1.5},
+                     "marker": {"size": 5, "symbol": symbols}, "text": [t[1] for t in texts],
+                     "hovertemplate": "%{text}<extra></extra>"})
+    notes: List[str] = []
+    entry = _num(request.get("level_entry"))
+    if has_level and entry is not None:
+        data.append({"x": [xs[0], xs[-1]], "y": [entry, entry], "type": "scatter", "mode": "lines", "yaxis": "y2",
+                     "name": f"entry {level_text(entry, unit)}", "hoverinfo": "skip",
+                     "line": {"color": "#c9a227", "dash": "dash", "width": 1}})
+    elif has_level:
+        notes.append(f"no entry line: {request.get('level_entry_reason') or 'no entry level'}")
+    else:
+        why = next((pt.get("level_reason") for pt in points if pt.get("level_reason")), "") or "no level"
+        notes.append(f"no level line: {why}")
+    gaps = [(x, "<br>".join(t[2])) for x, t in zip(xs, texts) if t[2]]
+    if gaps:
+        data.append({"x": [g[0] for g in gaps], "y": [0.04] * len(gaps), "type": "scatter", "mode": "markers",
+                     "yaxis": "y3", "name": "n/a (hover for why)", "text": [f"{x}<br>{w}" for x, w in gaps],
+                     "hovertemplate": "%{text}<extra></extra>",
+                     "marker": {"symbol": "x-thin", "size": 8, "color": "#9ca3af", "line": {"width": 1.5,
+                                                                                            "color": "#9ca3af"}}})
+    layout = {"margin": {"l": 55, "r": 55, "t": 10, "b": 30}, "height": 260, "hovermode": "closest",
+              "xaxis": {"type": "date"}, "yaxis": {"title": "LTD USD", "zeroline": True},
+              "yaxis2": {"title": unit, "overlaying": "y", "side": "right", "showgrid": False, "zeroline": False},
+              "bargap": 0.3,
+              "yaxis3": {"overlaying": "y", "range": [0, 1], "visible": False, "fixedrange": True},
+              "legend": {"orientation": "h", "y": -0.2}, "showlegend": True}
+    return {"data": data, "layout": layout}, "; ".join(notes)
+
+
+def history_block(request: Optional[Dict[str, Any]], db_path, history_fn: Callable = position_history,
+                  dates_fn: Callable = history_dates) -> Any:
+    """The position's own daily history, worked out now (the drill-down was opened): the business
+    days from its first trade to the as-of, each through the screens' memoised filled reader, so a
+    close the header or an earlier opening already valued costs nothing. A problem is its sentence
+    where the chart would be."""
+    request = request or {}
+    as_of = request.get("as_of")
+    position = request.get("position") or {}
+    if not as_of or not position:
+        return html.Div("No position or as-of date to chart.", className="section-kicker")
+    from ui.app import connect_readonly       # local: ui.app imports the tabs
+    from ui.tabs.blotter_pricing import priced_value_book, pricing_snapshot
+    try:
+        conn = connect_readonly(db_path)
+    except sqlite3.OperationalError as exc:
+        return html.Div(f"No daily history: database not available ({exc}).", className="section-kicker")
+    try:
+        with pricing_snapshot(conn, "Spreads history"):
+            history = history_fn(conn, position, dates_fn(conn, position, as_of), value_fn=priced_value_book)
+    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a broken panel
+        return html.Div(f"No daily history: it could not be worked out ({type(exc).__name__}: {exc}).",
+                        className="section-kicker")
+    finally:
+        conn.close()
+    figure, note = own_history_figure(history, request)
+    if figure is None:
+        return html.Div(f"No daily history from {HISTORY_LABEL}: {note}", className="section-kicker")
+    points = history.get("points") or []
+    first = history.get("first_trade_date") or (points[0].get("date") if points else "")
+    caption = (f"daily history ({HISTORY_LABEL}, the book's official prices): LTD USD and the level in "
+               f"{history.get('level_unit') or request.get('unit') or 'no unit'}, {first} to {as_of}")
+    return html.Div([
+        html.Div(caption, className="section-kicker about-title", title=HISTORY_ABOUT),
+        dcc.Graph(id=HISTORY_GRAPH_ID, figure=figure, config={"displayModeBar": False}),
+        *([html.Div(note, className="section-kicker")] if note else [])])
+
+
 def detail_panel(payload: Dict[str, Any], as_of: Optional[str],
                  history_fn: Callable = research_spread_history) -> html.Details:
     """The drill-down of one position: the research history chart (or its reason), then the
@@ -1018,9 +1169,11 @@ def detail_panel(payload: Dict[str, Any], as_of: Optional[str],
                 *([html.Div(note, className="section-kicker")] if note else [])])
     summary = (f"{name}: {payload.get('size_text') or ''}, entry {level_text(_num(payload.get('level_entry')), unit)}"
                f", now {level_text(_num(payload.get('level_now')), unit)} {unit}").strip()
+    charts = html.Div(style={"display": "flex", "flexWrap": "wrap", "gap": "16px", "alignItems": "flex-start"},
+                      children=[html.Div(chart, style=_CHART_BOX), history_slot(payload, as_of)])
     return html.Details(className="details spreads-detail-panel", open=True, children=[
         html.Summary(summary, title=DETAIL_ABOUT, className="about-title"),
-        chart,
+        charts,
         about("Entries", "The spreads found on each trade date that make this position, with their own entry "
                          "level.", level="div", className="section-kicker"),
         members_table(payload),
@@ -1412,9 +1565,10 @@ def open_detail(active_cell: Optional[dict], payloads: Optional[dict], as_of: Op
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Two callbacks: the body re-renders on the header's as-of, on every data revision and on
+    """Three callbacks: the body re-renders on the header's as-of, on every data revision and on
     the safety interval (reopening the drill-down that was open); a click on a position row
-    opens its drill-down and remembers it."""
+    opens its drill-down and remembers it; an opened drill-down's request works out the
+    position's own daily history (fired when the request appears, under a loading state)."""
 
     @app.callback(
         Output(BODY_ID, "children"),
@@ -1436,3 +1590,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     )
     def _drill(active_cell, payloads, as_of):
         return open_detail(active_cell, payloads, as_of)
+
+    @app.callback(
+        Output(HISTORY_ID, "children"),
+        Input(HISTORY_REQUEST_ID, "data"),
+    )
+    def _history(request):
+        return history_block(request, get_db_path())

@@ -37,7 +37,8 @@ definitions on hover of the titles, every reason in one "Data issues (N)" drawer
      (Total, FX total) and a collapsible currency x scenario matrix from `fx_pnl`.
   6. `margin_limits_section`: margin-limits' estimate by sector with the Book pinned, by
      commodity and the spread credits (titled "estimate, not exchange SPAN"), and the
-     limit checks with their levels coloured.
+     limits that are set with their levels coloured; every limit not set collapsed under
+     them into one "Not set (N)" line (user, 2026-09-25), nothing dropped.
 
 The macro trader's rates (DV01, par swap rates) and equity-index underlyers left the app
 with the commodity conversion (user, 2026-09-24, CLAUDE.md "Commodity conversion plan",
@@ -82,6 +83,7 @@ MARGIN_ROOT_TABLE_ID = "risk-margin-root-table"
 MARGIN_SPREAD_TABLE_ID = "risk-margin-spread-table"
 LIMITS_TABLE_ID = "risk-limits-table"
 MARGIN_LIMITS_ID = "risk-margin-limits"
+LIMITS_NOT_SET_ID = "risk-limits-not-set"
 ISSUES_ID = "risk-issues"
 
 NA = "n/a"
@@ -1214,7 +1216,97 @@ LIMITS_HOVER = ("The book against the desk's own limits and the exchanges' posit
                 "delta; the definition of each limit is on its name's hover.")
 
 
+# the not-set drawer's item labels, by the engine's limit names (engine/limits/checks.py)
+_NOT_SET_LABEL = {"gross_lots": "gross lots", "gross_usd": "gross USD", "net_usd_commodity": "net USD",
+                  "exchange_spot_month": "spot month", "exchange_single_month": "single month",
+                  "exchange_all_months": "all months"}
+_NOT_SET_SOURCES = (("desk", "Desk limits"), ("exchange", "Exchange limits"))
+NOT_SET_HOVER = ("Limits left empty in config/limits.yaml: the position is measured but not checked. Each item "
+                 "shows the position; its hover names the definition and the config key that sets it.")
+
+
+def _is_not_set(check: Dict[str, Any]) -> bool:
+    return (check.get("level") or "N/A") == "NOT_SET"
+
+
+def _not_set_value(check: Dict[str, Any]) -> Tuple[str, str]:
+    """(short, full) text of a not-set check's measured position: k / m for USD, lots to 2 dp;
+    n/a when the engine has no figure (never zero)."""
+    v, unit = _num(check.get("value")), check.get("unit") or ""
+    if v is None:
+        return NA, "n/a (the position has no figure)"
+    if unit == "USD":
+        return f"{short_money(v)} USD", f"{format_cell(v)} USD"
+    return f"{_lots(v)} {unit}".strip(), f"{_lots(v)} {unit}".strip()
+
+
+def _not_set_item(check: Dict[str, Any], rest: str) -> html.Span:
+    """One not-set check as a short inline item ("spot month Z26 5 lots"), its definition,
+    scope, full position and config key on hover."""
+    limit = str(check.get("limit") or "")
+    short, full = _not_set_value(check)
+    rest = re.sub(r"\s*\(.*\)\s*$", "", rest or "").strip()      # "(last trade ...)" goes to the hover
+    label = _NOT_SET_LABEL.get(limit, "" if limit in ("net_usd_sector", "lots_per_contract_month")
+                               else limit.replace("_", " "))
+    text = " ".join(p for p in (label, rest, short) if p)
+    hover = " ".join(p for p in (
+        f"{limit.replace('_', ' ')}: {check['basis']}." if check.get("basis") else "",
+        f"Scope: {check.get('scope') or 'book'}.", f"Position: {full}.",
+        (check.get("reason") or "no limit set in config/limits.yaml") + ".") if p)
+    return html.Span(text, className="limit-not-set-item", title=hover)
+
+
+def _not_set_groups(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, List[html.Span]]]:
+    """source -> group label -> items, in the engine's order: the desk's book, sector and per
+    root (net USD, then the contract months), the exchange's per root. Only regrouped: every
+    not-set check is one item."""
+    groups: Dict[str, Dict[str, List[html.Span]]] = {}
+    for c in rows:
+        limit, scope = str(c.get("limit") or ""), str(c.get("scope") or "")
+        source = c.get("source") or "other"
+        if limit in ("gross_lots", "gross_usd"):
+            group, rest = "Book", ""
+        elif limit == "net_usd_sector":
+            group, rest = "Net USD by sector", scope
+        elif limit in ("net_usd_commodity", "lots_per_contract_month") or source == "exchange":
+            group, _, rest = scope.partition(" ")
+            group = group or "no root"
+        else:
+            group, rest = "Other", scope
+        groups.setdefault(source, {}).setdefault(group, []).append(_not_set_item(c, rest))
+    return groups
+
+
+def not_set_drawer(checks: Optional[List[Dict[str, Any]]]) -> Optional[html.Details]:
+    """Every NOT_SET check, collapsed into one line "Not set (N)" (the Phase A drawers' style);
+    opened, one compact line per group (desk: book, sectors, each root; exchange: each root),
+    each check an inline item with its position. None when every limit is set."""
+    rows = [c for c in checks or [] if _is_not_set(c)]
+    if not rows:
+        return None
+    groups = _not_set_groups(rows)
+    order = [s for s, _ in _NOT_SET_SOURCES] + [s for s in groups if s not in dict(_NOT_SET_SOURCES)]
+    body: List[Any] = []
+    for source in order:
+        if source not in groups:
+            continue
+        lines = []
+        for group, items in groups[source].items():
+            joined: List[Any] = []
+            for i, item in enumerate(items):
+                joined += ([_SEP] if i else []) + [item]
+            lines.append(html.Li([html.Span(group, className="issue-label"), " "] + joined))
+        n = sum(len(items) for items in groups[source].values())
+        body += [html.Div(f"{dict(_NOT_SET_SOURCES).get(source, source.capitalize())} ({n})", className="issue-label"),
+                 html.Ul(lines, className="issues-list")]
+    return html.Details([html.Summary(f"Not set ({len(rows)})", title=NOT_SET_HOVER)] + body,
+                        className="issues-drawer", open=False, id=LIMITS_NOT_SET_ID)
+
+
 def limits_section(checks: Optional[List[Dict[str, Any]]]) -> html.Div:
+    """The limits that are set (usage, breach or warning, or n/a with the reason) as the
+    table; every limit left empty in config/limits.yaml collapsed under it into "Not set (N)".
+    While none is set, one quiet line says so above the collapsed list."""
     head = [about("Limits", LIMITS_HOVER)]
     if checks is None:
         return html.Div(className="section", children=head + [
@@ -1222,9 +1314,15 @@ def limits_section(checks: Optional[List[Dict[str, Any]]]) -> html.Div:
     if not checks:
         return html.Div(className="section", children=head + [
             html.P("No limit checks: no open commodity position to measure.", className="section-kicker")])
+    drawer = not_set_drawer(checks)
+    checks = [c for c in checks if not _is_not_set(c)]
+    if not checks:
+        return html.Div(className="section", children=head + [
+            html.P("No limit is set in config/limits.yaml yet: the positions are measured, not checked.",
+                   className="section-kicker"), drawer])
     records, tips = limit_records(checks)
     counts = {lvl: sum(1 for c in checks if (c.get("level") or "N/A") == lvl) for lvl in LEVEL_TEXT}
-    summary = ", ".join(f"{n} {LEVEL_TEXT[lvl] if lvl != 'NOT_SET' else 'not set'}" for lvl, n in counts.items() if n)
+    summary = ", ".join(f"{n} {LEVEL_TEXT[lvl]}" for lvl, n in counts.items() if n)
     columns = [rk.text("Level", "level"), rk.text("Limit", "limit"), rk.text("Scope", "scope"), rk.text("Source", "source"),
                rk.numeric("Position", "value", rk.amount(2, nully="", trim=True)),
                rk.numeric("Limit", "limit_value", rk.amount(2, nully="", trim=True)), rk.text("Unit", "unit"),
@@ -1243,7 +1341,8 @@ def limits_section(checks: Optional[List[Dict[str, Any]]]) -> html.Div:
                                + [{"if": {"column_id": "limit_value", "filter_query": "{limit_value} = 'not set'"}, **_NA_STYLE}],
     )
     return html.Div(className="section", children=head + [
-        html.P(f"From config/limits.yaml: {summary}.", className="section-kicker"), table])
+        html.P(f"From config/limits.yaml: {summary}.", className="section-kicker"), table]
+        + ([drawer] if drawer is not None else []))
 
 
 def margin_limits_section(margin: Optional[Dict[str, Any]], checks: Optional[List[Dict[str, Any]]]) -> html.Div:

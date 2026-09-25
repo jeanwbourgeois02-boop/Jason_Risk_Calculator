@@ -44,6 +44,10 @@ compact tables sit between the strip and the trade table, side by side on a wide
   there, counts as unpriced and is named in the "excludes N" note. Grouping and summing
   only, under the header's display rule (`shown_currency_rows`).
 
+Both print money in k / M (2026-09-25, user yes, "Natural units": `rk.amount_short` on
+`rk.whole_units`-rounded cells), the full figure on each cell's hover; the trade table keeps
+full figures.
+
 **An unpriced row shows its reason, never a made-up number (2026-09-22, reviewer finding,
 user yes).** A mark or P&L cell the engine could not value reads "n/a" with the row's own
 `reason` (`value_book`'s, carried by `fx_blotter_rows`) as the cell's tooltip, the way the
@@ -66,6 +70,7 @@ from dash import Input, Output, dash_table, html
 from engine.pnl.fx_blotter import fx_blotter_rows
 from ui.tabs.blotter_pricing import _render_cache_key, priced_value_book, row_scoped_headline
 from ui.tabs import ranking as rk
+from ui.tabs.formatting import format_cell
 
 DATATABLE_ID = "blotter-fx-datatable"
 # The two per-currency tables above the trade table (module docstring). The second id is
@@ -412,19 +417,42 @@ def _currency_notes(rows: List[dict], total: dict, periods: tuple) -> Optional[h
     return html.P(" ".join(parts), className="fx-ccy-note") if parts else None
 
 
+def _with_full_figures(records: List[dict], tips: List[dict], keys: List[str]) -> List[dict]:
+    """Copies of `tips` with the full figure on hover of every money cell (the table prints
+    it in k / M, CLAUDE.md "Screens redesign plan", "Natural units"): "1,650,590 USD", and
+    under it the cell's own note when it has one (trades left out, an earlier close used).
+    An "n/a" cell keeps its reason alone. `records` are the raw ones, before `whole_units`."""
+    out = []
+    for rec, tip in zip(records, tips):
+        tip = dict(tip)
+        for key in keys:
+            v = rec.get(key)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+                continue
+            full = f"{format_cell(v)} USD"
+            note = (tip.get(key) or {}).get("value") or ""
+            tip[key] = {"value": f"{full}\n{note}" if note else full, "type": "text"}
+        out.append(tip)
+    return out
+
+
 def currency_table(rows: List[dict], total: dict, periods: tuple, trades_label: str = "Trades",
                    table_id: Optional[str] = None) -> list:
     """`[table, note]` (the note only when there is something to say): one row per currency,
     ranked on a header click (ui.tabs.ranking), and the Total pinned under them as the
-    table's footer, so it stays put whatever the order."""
+    table's footer, so it stays put whatever the order. Money prints in k / M
+    (`rk.amount_short`, a number still, so it ranks), the cells rounded to whole units by
+    `rk.whole_units` so float noise never prints as milli; the full figure is on every
+    cell's hover (`_with_full_figures`). Display only: the figures are the engine's."""
     body = [_currency_record(r, periods) for r in rows]
     total_rec, total_tip = _currency_record(total, periods)
     keys = [key for key, _label in periods]
+    raw = [r for r, _ in body]
     table = dash_table.DataTable(
         **({"id": table_id} if table_id else {}),
         columns=[rk.text("Currency", "currency"), rk.numeric(trades_label, "trades", rk.count())]
-                + [rk.numeric(label, key, rk.amount(nully="n/a")) for key, label in periods],
-        data=[r for r, _ in body], tooltip_data=[t for _, t in body],
+                + [rk.numeric(label, key, rk.amount_short(nully="n/a")) for key, label in periods],
+        data=rk.whole_units(raw, keys), tooltip_data=_with_full_figures(raw, [t for _, t in body], keys),
         **rk.sortable(table_id),
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
@@ -438,7 +466,8 @@ def currency_table(rows: List[dict], total: dict, periods: tuple, trades_label: 
     total_style = [{"if": {"filter_query": "{currency} = '" + TOTAL_LABEL + "'"}, "fontWeight": "700",
                     "borderTop": "2px solid var(--muted)"}]
     note = _currency_notes(rows, total, periods)
-    ranked = rk.with_footer(table, [total_rec], footer_style=total_style, footer_tooltips=[total_tip])
+    ranked = rk.with_footer(table, rk.whole_units([total_rec], keys), footer_style=total_style,
+                            footer_tooltips=_with_full_figures([total_rec], [total_tip], keys))
     return [html.Div(ranked, className="fx-ccy-scroll"), *([note] if note is not None else [])]
 
 

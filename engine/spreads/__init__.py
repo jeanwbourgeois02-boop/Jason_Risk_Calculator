@@ -56,6 +56,10 @@ template's unit + constant; a calendar near - far), the USD a 1.0 move is worth 
 and the research app's spread_id / instance for it. ``positions``: the same spread put on over
 several trade dates as one position, entries averaged by size. Display only: no P&L figure moves.
 
+History (Phase C, 2026-09-25; ``history.py``): ``position_history`` gives one position's LTD USD
+(its members' ``value_book`` figures summed, as the periods are) and its level on each date asked,
+for the Spreads tab's drill-down chart; ``history_dates`` the business days from its first trade.
+
 Tables: ``spread_overrides`` (``overrides.py``), created defensively here. Its read is wired into
 the rule; nothing writes it yet.
 """
@@ -65,6 +69,7 @@ from engine.spreads.book import (
     book_spreads, positions_from,
 )
 from engine.spreads.grouping import CALENDAR, TOLERANCE
+from engine.spreads.history import history_dates, position_history
 from engine.spreads.levels import research_key
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
 from engine.spreads.templates import Template, TemplateLeg, load_templates
@@ -72,6 +77,6 @@ from engine.spreads.templates import Template, TemplateLeg, load_templates
 __all__ = [
     "CALENDAR", "KIND_BUNDLE", "KIND_PINNED", "PERIODS", "PIN", "REVIEW_ACCOUNTS", "REVIEW_AMBIGUOUS",
     "REVIEW_RATIO", "SPLIT", "SPREAD_PRODUCTS", "TOLERANCE", "Template", "TemplateLeg", "book_spreads",
-    "ensure_overrides_table", "load_templates", "override_problems", "positions_from", "read_overrides",
-    "research_key",
+    "ensure_overrides_table", "history_dates", "load_templates", "override_problems", "position_history",
+    "positions_from", "read_overrides", "research_key",
 ]

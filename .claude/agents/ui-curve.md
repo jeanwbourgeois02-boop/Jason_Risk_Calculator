@@ -16,7 +16,7 @@ You own these files and nothing else (create them if they do not exist yet):
 
 Renders curve-positions: one row per commodity grouped by sector, contract months across, a unit switch (lots, physical units, USD), net outright per commodity and per sector, and the currency exposure the non-USD futures create.
 
-**Reads** (the lanes whose output you use): ui-shell, curve-positions, contract-master.
+**Reads** (the lanes whose output you use): ui-shell, curve-positions, contract-master, risk-history (the research curve, context only).
 **Read by** (the lanes to name under "Consumers to brief" when your interface changes): ui-shell (which assembles the tab).
 
 Rules:

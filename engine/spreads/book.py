@@ -35,7 +35,7 @@ from engine.pnl.valuation import usd_per_quote, value_book
 from engine.spreads import grouping
 from engine.spreads.grouping import CALENDAR, Leg, Match, Shape
 from engine.spreads.levels import (
-    LevelLeg, LevelSpec, converted, level, research_key, spec_for, usd_per_level_unit,
+    LevelLeg, LevelSpec, converted, level, research_key, spec_for, spec_to_dict, usd_per_level_unit,
 )
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
 from engine.spreads.templates import Template, load_templates
@@ -165,6 +165,95 @@ def _month_key(trade: dict, roots) -> str:
         except (UnknownContract, ValueError):
             pass
     return ""
+
+
+# ------------------------------------------------------------------ the level's reads
+def official_spot(conn: sqlite3.Connection, ccy: str, day: str) -> Optional[float]:
+    """USD per unit of ``ccy`` at the exact official SPOT dated ``day`` (USD<ccy> inverted
+    first, then <ccy>USD, the order ``usd_per_quote`` tries), or None. No estimate."""
+    if ccy == "USD":
+        return 1.0
+    for pair, inverted in ((f"USD{ccy}", True), (f"{ccy}USD", False)):
+        row = conn.execute(
+            "SELECT value FROM marks_official WHERE instrument_id = ? AND mark_type = 'SPOT' "
+            "AND as_of_date = ? ORDER BY snapped_at DESC LIMIT 1", (pair, day)).fetchone()
+        v = _num(row[0]) if row else None
+        if v:
+            return 1.0 / v if inverted else v
+    return None
+
+
+def unit_spot(conn: sqlite3.Connection, spec: LevelSpec, day: str, exact: bool) -> Tuple[Optional[float], str]:
+    """(USD per unit of the level's currency on ``day``, why when None): exact official for an
+    entry, the valuation's own ``usd_per_quote`` otherwise."""
+    if spec.currency == "USD":
+        return 1.0, ""
+    if exact:
+        s = official_spot(conn, spec.currency, day)
+        return s, "" if s else f"no official {spec.currency} SPOT on {day} to express the level in {spec.unit}"
+    try:
+        s = _num(usd_per_quote(conn, spec.currency, day)[0])
+    except Exception as exc:  # noqa: BLE001 -- a stored spot that is not a number: named, not raised
+        return None, f"the {spec.currency} SPOT of {day} could not be read ({exc})"
+    return (s, "") if s else (None, f"no SPOT for USD conversion of {spec.currency} on {day}")
+
+
+def official_price(conn: sqlite3.Connection, leg: LevelLeg, day: str, expiry: str) -> Optional[Tuple[float, str]]:
+    row = conn.execute(
+        "SELECT value, source FROM marks_official WHERE instrument_id = ? AND mark_type = 'FUTURE_PX' "
+        "AND as_of_date = ? ORDER BY (settle_date = ?) DESC, snapped_at DESC LIMIT 1",
+        (leg.instrument_id, day, expiry)).fetchone()
+    v = _num(row[0]) if row else None
+    return None if v is None else (v, str(row[1]))
+
+
+def level_on(conn: sqlite3.Connection, spec: LevelSpec, day: str, rows: Dict[str, dict], fallback: bool,
+             expiry_of: Callable[[LevelLeg], str]) -> Tuple[Optional[float], str, str, List[Optional[float]]]:
+    """(level, why when None, sources, quoted price per leg) on ``day`` from the ``value_book``
+    rows given: each leg's ``mark`` and, across currencies, its row's ``spot``. With
+    ``fallback`` a leg with no row on that close (put on after it) reads the exact official
+    FUTURE_PX (keyed on ``expiry_of(leg)``) and SPOT of the day instead. The one level rule:
+    ``level_now``, ``level_prev`` and ``history.position_history`` all read it."""
+    prices: List[Optional[float]] = [None] * len(spec.legs)
+    conv, sources = [], []
+    s_unit, unit_why = unit_spot(conn, spec, day, exact=False)
+    for n, leg in enumerate(spec.legs):
+        leg_rows = [rows[t] for t in leg.trade_ids if t in rows]
+        if leg_rows:
+            status = next((str(r.get("status") or "") for r in leg_rows
+                           if str(r.get("status") or "") not in ("OPEN", "")), "")
+            if status:
+                return None, (f"{leg.instrument_id} is {status.lower()} on {day}: a spread has no level "
+                              f"once a leg has expired"), "", prices
+            r = next((r for r in leg_rows if _num(r.get("mark")) is not None), None)
+            if r is None:
+                return None, f"{leg.instrument_id} has no price on {day} ({_why(leg_rows[0])})", "", prices
+            px, s_leg = float(r["mark"]), _num(r.get("spot"))
+            src = f"{leg.instrument_id} {r.get('mark_source') or 'value_book'}"
+            note = str(r.get("note") or "")
+            if note.startswith("no price on"):
+                src += f" ({note})"
+        elif fallback:
+            hit = official_price(conn, leg, day, expiry_of(leg))
+            if hit is None:
+                return None, (f"{leg.instrument_id} was not yet held on the {day} close and has no official "
+                              f"FUTURE_PX that day"), "", prices
+            px = hit[0]
+            s_leg = official_spot(conn, leg.currency, day) if spec.needs_fx(leg) else None
+            src = f"{leg.instrument_id} {hit[1]} (official FUTURE_PX of the {day} close: not yet held then)"
+        else:
+            return None, f"{leg.instrument_id} is not valued by value_book on {day}", "", prices
+        if spec.needs_fx(leg):
+            if not s_leg:
+                return None, (f"no USD conversion of {leg.currency} on {day} for {leg.instrument_id}, "
+                              f"so it cannot be expressed in {spec.unit}"), "", prices
+            if s_unit is None:
+                return None, unit_why, "", prices
+            src += f", {leg.currency} at its USD spot {s_leg:.6g}"
+        prices[n] = px
+        conv.append(converted(px, leg, spec, s_leg, s_unit))
+        sources.append(src)
+    return level(conv, spec), "", "; ".join(sources), prices
 
 
 # ------------------------------------------------------------------ the rule
@@ -450,6 +539,7 @@ class _Book:
             "level_legs": [],
             "usd_per_unit": None, "usd_per_unit_reason": "",
             "research_id": research_id, "research_instance": research_instance, "research_reason": research_why,
+            "level_spec": spec_to_dict(spec),
         }
         if spec is None:
             for k in ("level_entry", "level_prev", "level_now", "level_change", "usd_per_unit"):
@@ -482,88 +572,15 @@ class _Book:
         return out
 
     def official_spot(self, ccy: str, day: str) -> Optional[float]:
-        """USD per unit of ``ccy`` at the exact official SPOT dated ``day`` (USD<ccy> inverted
-        first, then <ccy>USD, the order ``usd_per_quote`` tries), or None. No estimate."""
-        if ccy == "USD":
-            return 1.0
-        for pair, inverted in ((f"USD{ccy}", True), (f"{ccy}USD", False)):
-            row = self.conn.execute(
-                "SELECT value FROM marks_official WHERE instrument_id = ? AND mark_type = 'SPOT' "
-                "AND as_of_date = ? ORDER BY snapped_at DESC LIMIT 1", (pair, day)).fetchone()
-            v = _num(row[0]) if row else None
-            if v:
-                return 1.0 / v if inverted else v
-        return None
+        return official_spot(self.conn, ccy, day)
 
     def unit_spot(self, spec: LevelSpec, day: str, exact: bool) -> Tuple[Optional[float], str]:
-        """(USD per unit of the level's currency on ``day``, why when None): exact official for an
-        entry, the valuation's own ``usd_per_quote`` otherwise."""
-        if spec.currency == "USD":
-            return 1.0, ""
-        if exact:
-            s = self.official_spot(spec.currency, day)
-            return s, "" if s else f"no official {spec.currency} SPOT on {day} to express the level in {spec.unit}"
-        try:
-            s = _num(usd_per_quote(self.conn, spec.currency, day)[0])
-        except Exception as exc:  # noqa: BLE001 -- a stored spot that is not a number: named, not raised
-            return None, f"the {spec.currency} SPOT of {day} could not be read ({exc})"
-        return (s, "") if s else (None, f"no SPOT for USD conversion of {spec.currency} on {day}")
-
-    def official_price(self, leg: LevelLeg, day: str) -> Optional[Tuple[float, str]]:
-        expiry = str(self.by_id[leg.trade_ids[0]]["expiry_date"])
-        row = self.conn.execute(
-            "SELECT value, source FROM marks_official WHERE instrument_id = ? AND mark_type = 'FUTURE_PX' "
-            "AND as_of_date = ? ORDER BY (settle_date = ?) DESC, snapped_at DESC LIMIT 1",
-            (leg.instrument_id, day, expiry)).fetchone()
-        v = _num(row[0]) if row else None
-        return None if v is None else (v, str(row[1]))
+        return unit_spot(self.conn, spec, day, exact)
 
     def level_on(self, spec: LevelSpec, day: str, rows: Dict[str, dict], fallback: bool
                  ) -> Tuple[Optional[float], str, str, List[Optional[float]]]:
-        """(level, why when None, sources, quoted price per leg) on ``day`` from the ``value_book``
-        rows given: each leg's ``mark`` and, across currencies, its row's ``spot``. With
-        ``fallback`` a leg with no row on that close (put on after it) reads the exact official
-        FUTURE_PX and SPOT of the day instead."""
-        prices: List[Optional[float]] = [None] * len(spec.legs)
-        conv, sources = [], []
-        s_unit, unit_why = self.unit_spot(spec, day, exact=False)
-        for n, leg in enumerate(spec.legs):
-            leg_rows = [rows[t] for t in leg.trade_ids if t in rows]
-            if leg_rows:
-                status = next((str(r.get("status") or "") for r in leg_rows
-                               if str(r.get("status") or "") not in ("OPEN", "")), "")
-                if status:
-                    return None, (f"{leg.instrument_id} is {status.lower()} on {day}: a spread has no level "
-                                  f"once a leg has expired"), "", prices
-                r = next((r for r in leg_rows if _num(r.get("mark")) is not None), None)
-                if r is None:
-                    return None, f"{leg.instrument_id} has no price on {day} ({_why(leg_rows[0])})", "", prices
-                px, s_leg = float(r["mark"]), _num(r.get("spot"))
-                src = f"{leg.instrument_id} {r.get('mark_source') or 'value_book'}"
-                note = str(r.get("note") or "")
-                if note.startswith("no price on"):
-                    src += f" ({note})"
-            elif fallback:
-                hit = self.official_price(leg, day)
-                if hit is None:
-                    return None, (f"{leg.instrument_id} was not yet held on the {day} close and has no official "
-                                  f"FUTURE_PX that day"), "", prices
-                px = hit[0]
-                s_leg = self.official_spot(leg.currency, day) if spec.needs_fx(leg) else None
-                src = f"{leg.instrument_id} {hit[1]} (official FUTURE_PX of the {day} close: not yet held then)"
-            else:
-                return None, f"{leg.instrument_id} is not valued by value_book on {day}", "", prices
-            if spec.needs_fx(leg):
-                if not s_leg:
-                    return None, (f"no USD conversion of {leg.currency} on {day} for {leg.instrument_id}, "
-                                  f"so it cannot be expressed in {spec.unit}"), "", prices
-                if s_unit is None:
-                    return None, unit_why, "", prices
-                src += f", {leg.currency} at its USD spot {s_leg:.6g}"
-            prices[n] = px
-            conv.append(converted(px, leg, spec, s_leg, s_unit))
-            sources.append(src)
-        return level(conv, spec), "", "; ".join(sources), prices
+        return level_on(self.conn, spec, day, rows, fallback,
+                        lambda leg: str(self.by_id[leg.trade_ids[0]]["expiry_date"]))
 
     def entry_level(self, spec: LevelSpec) -> Tuple[Optional[float], str, str, List[Optional[float]]]:
         """(level at entry, why when None, source, average fill per leg): each leg's lots-weighted
@@ -694,6 +711,7 @@ def _position(members: List[dict]) -> dict:
         "unit": first["unit"], "direction": _direction(first),
         "size": _sum_or_none([_num(m.get("size")) for m in members]), "size_unit": first["size_unit"],
         "trade_ids": tids,
+        "member_trade_ids": {m["spread_id"]: list(m["trade_ids"]) for m in members},
         "accounts": sorted({a for m in members for a in m["accounts"]}),
         "trade_dates": sorted({d for m in members for d in m["trade_dates"]}),
         "status": "open" if any(m["status"] == "open" for m in members) else "closed",
@@ -743,6 +761,13 @@ def _position(members: List[dict]) -> dict:
         out[k] = first[k]
     out["level_sources"] = dict(first["level_sources"])
     out["level_legs"] = [dict(leg) for leg in first["level_legs"]]
+    spec = first.get("level_spec")
+    if spec is not None:
+        # the level reads each leg's rows: every member's trades on that contract, not the first's only
+        by_inst = {leg["instrument_id"]: leg["trade_ids"] for leg in out["legs"]}
+        spec = {**spec, "legs": [{**leg, "trade_ids": list(by_inst.get(leg["instrument_id"], leg["trade_ids"]))}
+                                 for leg in spec["legs"]]}
+    out["level_spec"] = spec
     sized = [(abs(_num(m.get("size")) or 0.0), m) for m in members]
     missing = [m for m in members if m["level_entry"] is None]
     total = sum(w for w, _m in sized)
@@ -814,7 +839,9 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
       now_price}], prices as quoted), ``usd_per_unit`` (USD P&L of a 1.0 rise of the level on
       the open lots, signed, with ``usd_per_unit_reason``), ``research_id`` /
       ``research_instance`` / ``research_reason`` (the research app's spread_id and instance,
-      which risk-history looks up; '' with the reason when there is none).
+      which risk-history looks up; '' with the reason when there is none). Added 2026-09-25
+      (Phase C): ``level_spec`` (``levels.spec_to_dict``: the level's formula as plain data, None
+      when there is no level), which ``history.position_history`` reads.
     - ``positions``: one per distinct spread (``_position_key``: the same kind, leg contracts,
       weights and direction; a bundle or pin is its own), the same spread put on over several
       trade dates as one: ``position_id``, ``spread_ids`` (the member spreads), ``direction``
@@ -822,7 +849,10 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
       over the priced ones with ``pnl_excluded`` ({period: members left out}) and
       ``pnl_reasons``, ``leftover`` summed per root, ``level_entry`` the members' entries
       weighted by |size|, ``usd_per_unit`` summed, and the other level and research keys as a
-      spread's. The ``spreads`` list is unchanged beside it.
+      spread's. The ``spreads`` list is unchanged beside it. Phase C adds
+      ``member_trade_ids`` ({spread_id: [trade_id]}) and ``level_spec`` (the first member's,
+      each leg's trade ids widened to every member's on that contract), both read by
+      ``history.position_history``.
     - ``outrights``: every futures trade the rule left alone: trade_id, instrument_id, root_id,
       contract_month, account, trade_date, lots, currency, status, pnl_local, ``why_outright``
       ('' = no spread fits), ``review_ids`` (the review entries naming it), and the same

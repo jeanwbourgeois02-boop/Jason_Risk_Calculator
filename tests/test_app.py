@@ -261,3 +261,62 @@ def test_source_options_offer_official_only_never_bnp_or_the_workbook():
     dropdown = controls.build_source_dropdown("x-source").children[1]
     assert dropdown.value == controls.SOURCE_OFFICIAL
     assert controls.source_value_to_param(dropdown.value) is None
+
+
+# ------------------------------------------------------------ tab links (user, 2026-09-25)
+# A tab's name on another screen is a link (ui/tabs/formatting.py::tab_link); one callback
+# here sets main-tabs to the clicked link's key.
+def _link_prop(key, idx="book-x"):
+    import json
+    return json.dumps({"idx": idx, "tab": key, "type": "tab-link"}, separators=(",", ":")) + ".n_clicks"
+
+
+def test_tab_from_link_click_takes_a_real_click_to_a_known_key():
+    assert uiapp.tab_from_link_click([{"prop_id": _link_prop("curve"), "value": 1}]) == "curve"
+    assert uiapp.tab_from_link_click([{"prop_id": _link_prop("market-data"), "value": 4}]) == "market-data"
+
+
+def test_tab_from_link_click_ignores_first_render_unknown_keys_and_other_ids():
+    assert uiapp.tab_from_link_click([{"prop_id": _link_prop("curve"), "value": None}]) is None
+    assert uiapp.tab_from_link_click([{"prop_id": _link_prop("curve"), "value": 0}]) is None
+    assert uiapp.tab_from_link_click([{"prop_id": _link_prop("Curve"), "value": 1}]) is None   # a label, not a key
+    assert uiapp.tab_from_link_click([{"prop_id": _link_prop("nowhere"), "value": 1}]) is None
+    assert uiapp.tab_from_link_click([{"prop_id": "main-tabs.value", "value": "risk"}]) is None
+    assert uiapp.tab_from_link_click([{"prop_id": ".", "value": None}]) is None
+    assert uiapp.tab_from_link_click([{"prop_id": '{"type":"other","tab":"risk"}.n_clicks', "value": 1}]) is None
+    assert uiapp.tab_from_link_click([]) is None and uiapp.tab_from_link_click(None) is None
+    assert uiapp.tab_from_link_click(["junk"]) is None
+    # A fresh link rendered with 0 beside a real click: the click wins.
+    assert uiapp.tab_from_link_click([{"prop_id": _link_prop("risk", "a"), "value": 0},
+                                      {"prop_id": _link_prop("spreads", "b"), "value": 2}]) == "spreads"
+
+
+def test_every_tab_key_is_reachable_by_a_link():
+    for key in EIGHT_KEYS:
+        assert uiapp.tab_from_link_click([{"prop_id": _link_prop(key), "value": 1}]) == key
+
+
+def test_create_app_registers_the_tab_link_callback(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from ui.tabs import formatting as fmt
+    app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)
+    key = f"{uiapp.MAIN_TABS_ID}.value"
+    assert key in app.callback_map, "the tab-link callback is not registered"
+    cb = app.callback_map[key]
+    listed = [c for c in app._callback_list if c["output"] == key]
+    assert len(listed) == 1 and listed[0]["prevent_initial_call"] is True    # never on page load
+    (inp,) = cb["inputs"]
+    assert inp["property"] == "n_clicks"
+    import json
+    assert json.loads(inp["id"]) == {"type": fmt.TAB_LINK_TYPE, "tab": ["ALL"], "idx": ["ALL"]}
+    wrapped = cb["callback"]
+    follow = getattr(wrapped, "__wrapped__", wrapped)
+    link = fmt.tab_link("\u2192 Risk", "risk", "book-var")
+    prop = json.dumps(link.id, separators=(",", ":")) + ".n_clicks"
+    monkeypatch.setattr(dash, "ctx", SimpleNamespace(triggered=[{"prop_id": prop, "value": 1}]))
+    assert follow([1]) == "risk"
+    monkeypatch.setattr(dash, "ctx", SimpleNamespace(triggered=[{"prop_id": prop, "value": None}]))
+    assert follow([None]) is dash.no_update
+    bad = json.dumps(fmt.tab_link_id("nowhere", "x")) + ".n_clicks"
+    monkeypatch.setattr(dash, "ctx", SimpleNamespace(triggered=[{"prop_id": bad, "value": 1}]))
+    assert follow([1]) is dash.no_update

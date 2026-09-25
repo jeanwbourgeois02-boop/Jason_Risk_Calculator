@@ -19,7 +19,7 @@ You own these files and nothing else (create them if they do not exist yet):
 The risk metrics need years of daily prices. For commodities that is the settlement history of each contract month, which the research app (`../Commodity Dashboard`, table `price_daily`: contract, date, settle, open interest, volume; `fx_daily` for USDCNH / USDCNY) already stores on the Bloomberg PC. You read it and serve per-contract, and per months-to-expiry, return series.
 
 **Reads** (the lanes whose output you use): contract-master.
-**Read by** (the lanes to name under "Consumers to brief" when your interface changes): risk-metrics, commodity-stress, ui-spreads, ui-book.
+**Read by** (the lanes to name under "Consumers to brief" when your interface changes): risk-metrics, commodity-stress, ui-spreads, ui-book, ui-curve, ui-market-data.
 
 Rules:
 

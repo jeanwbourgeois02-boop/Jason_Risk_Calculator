@@ -399,3 +399,179 @@ def test_the_cache_is_kept_until_the_database_or_its_wal_changes(rv):
     finally:
         writer.close()
     assert not math.isnan(first.settle_series("C K26 Comdty").iloc[-1])
+
+
+# --------------------------------------------------------------------------------------
+# the kept constant-maturity frames and position P&L (2026-09-25: book_risk rebuilt them per call)
+# --------------------------------------------------------------------------------------
+
+def _cm_frame_per_date(h, root, months_ahead):
+    """The per-date build the kept frame replaced (the code before 2026-09-25), as the reference."""
+    row = h.instruments.loc[root]
+    wide = h._root_prices(root)
+    diffs = wide.diff()
+    ranked = h._ranked(root, months_ahead, wide.index)
+    level, change = [], []
+    for d, cid in zip(wide.index, ranked):
+        if cid is None or cid not in wide.columns:
+            level.append(float("nan"))
+            change.append(float("nan"))
+        else:
+            level.append(wide.at[d, cid])
+            change.append(diffs.at[d, cid])
+    frame = pd.DataFrame({"contract_id": ranked, "raw": level, "raw_change": change}, index=wide.index)
+    frame["settle"] = frame["raw"] * float(row["price_scale"])
+    frame["change"] = frame["raw_change"] * float(row["price_scale"])
+    return frame
+
+
+def _build_long(path):
+    """The fixture plus one root of ten contracts over a year of weekdays with gaps (seeded):
+    rolls, holes, a contract with no settlement at all, and ranks beyond the strip."""
+    import random
+    rnd = random.Random(7)
+    _build(path, wal=True)
+    conn = sqlite3.connect(path)
+    days = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2025-01-01", "2025-12-31")]
+    conn.execute("INSERT INTO instrument (instrument_id, name, sector, subsector, exchange, country, exchange_code, "
+                 "bbg_root, bbg_yellow_key, currency, contract_size, size_unit, quote_unit, price_scale, "
+                 "calendar_depth, foreign_access, status, loaded_at) VALUES "
+                 "('NYMEX:CL', 'CL', 's', 'ss', 'NYMEX', 'US', 'CL', 'CL', 'Comdty', 'USD', 1000, 'bbl', 'USD/bbl', "
+                 "1.0, 4, 'international', 'active', 'x')")
+    for k in range(10):
+        year, month = 2025 + (k + 1) // 12, (k + 1) % 12 + 1
+        ltd = (pd.Timestamp(year, month, 1) - pd.offsets.BDay(3)).strftime("%Y-%m-%d")
+        cid = f"CL{MONTHS[month - 1]}{year % 100:02d} Comdty"
+        conn.execute("INSERT INTO contract VALUES (?,?,?,?,?,?,?,?,?)",
+                     (cid, "NYMEX:CL", cid, MONTHS[month - 1], year, month, None, ltd, "x"))
+        if k == 6:
+            continue                                        # listed, never settled
+        rows = [(cid, d, 70 + k + rnd.uniform(-3, 3), 1.0, 1.0) for d in days
+                if d <= ltd and rnd.random() > 0.15]
+        conn.executemany("INSERT INTO price_daily VALUES (?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_the_kept_constant_maturity_frame_is_the_per_date_build(tmp_path):
+    h = load_commodity_history(_build_long(tmp_path / "long.sqlite"))
+    for root, depth in (("NYMEX:CL", 12), ("CBOT:ZC", 5), ("SHFE:RB", 2)):
+        for n in range(1, depth + 1):
+            frame, why = h._cm_frame(root, n)
+            assert why == ""
+            pd.testing.assert_frame_equal(frame, _cm_frame_per_date(h, root, n), check_exact=True)
+
+
+def test_a_second_call_is_served_from_memory_and_is_identical(rv, monkeypatch):
+    h = load_commodity_history(rv)
+    builds, reads, windows = [], [], []
+    real_build, real_query, real_window = h._build_cm_frame, ch_mod._query, h._window_move_detail
+    monkeypatch.setattr(h, "_build_cm_frame", lambda *a: builds.append(a[:2]) or real_build(*a))
+    monkeypatch.setattr(ch_mod, "_query", lambda *a: reads.append(a) or real_query(*a))
+    monkeypatch.setattr(h, "_window_move_detail", lambda *a: windows.append(a) or real_window(*a))
+    calls = [("CBOT:ZC", "C N26 Comdty", 2, 50, "USD"), ("SHFE:RB", "RBTF27 Comdty", -3, 10, "CNY"),
+             ("CBOT:ZC", "C U26 Comdty", 1, 50, "USD"),          # an empty series with its reason
+             ("NYMEX:CL", "CLZ26 Comdty", 1, 1000, "USD")]       # a root not on file
+    first = [h.daily_pnl_series_for_position(*c, as_of=D9) for c in calls]
+    n_builds, n_reads = len(builds), len(reads)
+    assert n_builds and n_reads
+    second = [h.daily_pnl_series_for_position(*c, as_of=D9) for c in calls]
+    assert (len(builds), len(reads)) == (n_builds, n_reads)             # nothing rebuilt, nothing read
+    for a, b in zip(first, second):
+        pd.testing.assert_series_equal(a, b, check_exact=True)
+        assert a.attrs == b.attrs and a is not b
+    first[0].iloc[0] = -1.0                                              # a caller's edit does not reach the kept copy
+    first[0].attrs["reason"] = "edited"
+    third = h.daily_pnl_series_for_position(*calls[0], as_of=D9)
+    assert third.iloc[0] == 100.0 and third.attrs["reason"] == ""
+    assert h.constant_maturity_changes("CBOT:ZC", 2, raw=True).tolist() == [1.0, 3.0, 7.0]
+    assert len(builds) == n_builds                                       # the #2 frame was kept too
+    w1 = h.window_move_detail("CBOT:ZC", 1, D5, D9)
+    w1["move"] = None
+    assert h.window_move_detail("CBOT:ZC", 1, D5, D9)["move"] == pytest.approx(418 / 410 - 1)
+    assert len(windows) == 1
+    assert load_commodity_history(rv) is h                               # the same history object serves the next call
+
+
+def test_a_changed_database_is_read_afresh(rv):
+    before = load_commodity_history(rv).daily_pnl_series_for_position("CBOT:ZC", "C K26 Comdty", 1, 50, "USD", as_of=D9)
+    writer = sqlite3.connect(rv)
+    try:
+        writer.execute("UPDATE price_daily SET settle = 500 WHERE contract_id = 'C K26 Comdty' AND date = ?", (D9,))
+        writer.commit()
+    finally:
+        writer.close()
+    after = load_commodity_history(rv).daily_pnl_series_for_position("CBOT:ZC", "C K26 Comdty", 1, 50, "USD", as_of=D9)
+    assert before.loc[pd.Timestamp(D9)] == -100.0 and after.loc[pd.Timestamp(D9)] == 4000.0
+
+
+# --------------------------------------------------------------------------------------
+# research_curve: the research app's futures curve, context only
+# --------------------------------------------------------------------------------------
+
+CURVE_KEYS = {"root_id", "research_root", "available", "label", "path", "candidates", "as_of", "date", "stale_days",
+              "unit", "currency", "price_scale", "reason", "note", "source", "rows"}
+ROW_KEYS = {"contract_id", "month", "year", "month_no", "expiry", "settle", "raw_settle"}
+
+
+def test_research_curve_on_a_settlement_day(rv):
+    c = ch_mod.research_curve("CBOT:ZC", D6, db_path=rv)
+    assert set(c) == CURVE_KEYS and c["reason"] == "" and c["available"] and c["label"] == "research"
+    assert (c["research_root"], c["as_of"], c["date"], c["stale_days"]) == ("CBOT:ZC", D6, D6, 0)
+    assert (c["unit"], c["currency"], c["price_scale"], c["path"]) == ("USD/t", "USD", 0.01, str(rv))
+    assert [set(r) for r in c["rows"]] == [ROW_KEYS, ROW_KEYS]
+    assert [(r["contract_id"], r["month"], r["expiry"], r["raw_settle"]) for r in c["rows"]] == [
+        ("C H26 Comdty", "2026-03", D7, 402.0), ("C K26 Comdty", "2026-05", "2026-02-06", 411.0)]
+    assert [r["settle"] for r in c["rows"]] == pytest.approx([4.02, 4.11])      # quote units: raw x price_scale
+    assert (c["rows"][0]["year"], c["rows"][0]["month_no"]) == (2026, 3)
+    assert c["note"] == ("2 of the 4 contracts listed on 2026-01-06 have no settlement that day, "
+                         "the research app keeps the nearest 12")
+    assert c["source"] == (f"research app database {rv}, CBOT:ZC settlements of {D6} (latest on or before {D6}), "
+                           "in USD/t")
+    json.dumps(c)
+
+
+def test_research_curve_takes_the_latest_date_on_or_before_the_as_of(rv):
+    c = ch_mod.research_curve("CBOT:ZC", "2026-01-10", db_path=rv)              # a Saturday
+    assert (c["date"], c["stale_days"]) == (D9, 1)
+    assert [(r["month"], r["raw_settle"]) for r in c["rows"]] == [("2026-05", 418.0), ("2026-07", 440.0)]
+    assert c["note"].endswith(f"settlements of {D9}, 1 day(s) before 2026-01-10")
+    assert ch_mod.research_curve("CBOT:ZC", pd.Timestamp(D7), db_path=rv)["date"] == D7
+    assert ch_mod.research_curve("CBOT:ZC", None, db_path=rv)["date"] == D9     # None: the database's last date
+    # our root id where the research app keeps its placeholder Bloomberg root
+    wr = ch_mod.research_curve("SHFE:WR", D9, db_path=rv)
+    assert (wr["research_root"], wr["date"], wr["unit"]) == ("SHFE:WR", D6, "CNY/t")
+    assert [(r["contract_id"], r["month"], r["settle"]) for r in wr["rows"]] == [("ZZWRF27 Comdty", "2027-01", 101.0)]
+
+
+def test_research_curve_reasons_never_exceptions(rv, tmp_path):
+    absent = tmp_path / "none.sqlite"
+    c = ch_mod.research_curve("CBOT:ZC", D9, db_path=absent)
+    assert (c["available"], c["rows"], c["reason"]) == (False, [], f"no commodity history database: tried {absent}")
+    assert c["candidates"] == [{"path": str(absent), "exists": False}]
+    json.dumps(c)
+    assert ch_mod.research_curve("NYMEX:CL", D9, db_path=rv)["reason"] == \
+        f"root NYMEX:CL is not in the research database ({rv})"
+    early = ch_mod.research_curve("CBOT:ZC", "2026-01-02", db_path=rv)
+    assert (early["rows"], early["date"]) == ([], None)
+    assert early["reason"] == \
+        f"root CBOT:ZC has no settlement on or before 2026-01-02 in the research database (it starts {D5})"
+    assert ch_mod.research_curve("CBOT:ZC", "not a date", db_path=rv)["reason"].startswith(
+        "as-of 'not a date' is not a date")
+    plain = tmp_path / "other.sqlite"
+    sqlite3.connect(plain).execute("CREATE TABLE t (x)").connection.close()
+    assert ch_mod.research_curve("CBOT:ZC", D9, db_path=plain)["reason"] == \
+        f"{plain} is not the research app's database (no instrument, contract, price_daily, fx_daily table)"
+
+
+def test_research_curve_reads_only(rv):
+    before = (_digest(rv), rv.stat().st_mtime_ns)
+    ch_mod.research_curve("CBOT:ZC", D9, db_path=rv)
+    assert (_digest(rv), rv.stat().st_mtime_ns) == before
+    writer = sqlite3.connect(rv, timeout=0)
+    try:
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.rollback()
+    finally:
+        writer.close()

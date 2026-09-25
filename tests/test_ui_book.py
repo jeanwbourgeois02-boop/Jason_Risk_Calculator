@@ -408,6 +408,25 @@ def test_render_alerts_fills_the_var_from_the_headers_reading(golden_path, monke
     assert book.render_alerts(None, golden_path) is dash.no_update
 
 
+# --------------------------------------------------------------------------- tab links
+def test_every_pointer_is_a_tab_link_with_a_valid_key_and_a_unique_id(golden):
+    from ui.app import TAB_KEYS
+    from ui.tabs.formatting import TAB_LINK_TYPE
+    body = book.body(golden)
+    links = [n for n in _walk(body) if isinstance(getattr(n, "id", None), dict)
+             and n.id.get("type") == TAB_LINK_TYPE]
+    arrows = [n for n in _walk(body) if isinstance(n, str) and n.startswith("→ ")]
+    assert links and len(links) == len(arrows)            # no plain "-> Tab" left anywhere
+    assert book.TAB_KEYS == TAB_KEYS                      # the tab's own copy of the shell's keys
+    for link in links:
+        assert isinstance(link, html.Button) and link.id["tab"] in TAB_KEYS.values()
+        assert link.id["idx"].startswith("book-") and link.n_clicks == 0
+        assert link.children == f"→ {next(k for k, v in TAB_KEYS.items() if v == link.id['tab'])}"
+    ids = [(link.id["tab"], link.id["idx"]) for link in links]
+    assert len(ids) == len(set(ids))
+    assert {link.id["tab"] for link in links} >= {"spreads", "curve", "expiries", "market-data", "risk"}
+
+
 # --------------------------------------------------------------------------- shell
 def test_layout_follows_the_header_and_all_ids_are_prefixed(golden):
     layout = book.layout(AS_OF)
@@ -416,7 +435,8 @@ def test_layout_follows_the_header_and_all_ids_are_prefixed(golden):
     assert not any(type(n).__name__ == "DatePickerSingle" for n in _walk(layout))
     assert book.build_layout is book.layout
     body_ids = [getattr(n, "id", None) for n in _walk(book.body(golden)) if getattr(n, "id", None)]
-    assert all(i.startswith("book-") for i in ids + body_ids), ids + body_ids
+    flat = [i["idx"] if isinstance(i, dict) else i for i in ids + body_ids]
+    assert all(i.startswith("book-") for i in flat), flat
     assert MINUS in book.signed_money(-1500.0)
 
 

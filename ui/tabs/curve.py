@@ -33,6 +33,22 @@ Layout, top to bottom (`body`):
      cell with a position lists its contracts on hover (and, in the delta views, each one's
      note: the averaging days left, say). The Notes column holds short markers ("options",
      "avg", "no USD 1") with their sentences on hover.
+     The month cells are a diverging heatmap (Screens redesign plan, Phase C; `heat_styles`):
+     long green, short red, white at zero, the shade by the cell's quantile of |value| among
+     the view's month cells (so one huge cell does not wash the rest out); an n/a cell is left
+     unshaded. A calendar spread reads as a green / red pair.
+  2b. `curve_section`: one commodity's curve with its positions under it. A selector
+     (`SELECT_ID`, defaulting to the commodity with the largest gross USD) and a click on a
+     grid row pick the commodity; one figure, two rows on a shared contract-month axis: the
+     research app's settlement curve for the root (`engine.risk.commodity_history.
+     research_curve`, `raw_settle`, Bloomberg's quoted scale, so it sits on our marks' scale)
+     as a thin line labelled "research curve (<date>)", our official prices of the contracts
+     held (the engine rows' `price`) as markers labelled "our official marks", and under them
+     the engine's lots per month as bars (long green, short red), with its delta lots per
+     month beside them when options or averaging contracts make the two differ. Every point is
+     a figure from one of the two sources, nothing computed; the research curve is context,
+     never a mark. With no research curve the marks and bars are drawn alone and one quiet line
+     says why.
   3. `sector_section`: net and gross USD notional and net and gross USD delta per sector
      (`by_sector`), the book's sum pinned under it (n/a with the reasons when any sector is n/a).
   4. `detail_section`: the engine's `rows`, one per position, in the columns a trader reads
@@ -54,14 +70,17 @@ on the data revision and on its safety interval. `layout(default_date)` and
 """
 from __future__ import annotations
 
+import bisect
 import calendar
 import datetime as dt
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from dash import Input, Output, dash_table, dcc, html
+from dash import Input, Output, State, dash_table, dcc, html, no_update
 
+from data.contracts import get_root
 from engine.curve import curve_positions
+from engine.risk.commodity_history import research_curve
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
@@ -77,6 +96,12 @@ DETAIL_TABLE_ID = "curve-detail-table"
 CURRENCY_TABLE_ID = "curve-currency-table"
 FLAT_ID = "curve-flat"
 FLAT_TABLE_ID = "curve-flat-table"
+CURVE_SECTION_ID = "curve-commodity"     # the one-commodity curve panel under the grid
+SELECT_ID = "curve-select"               # its commodity selector (a grid row click sets it)
+CHART_ID = "curve-chart"                 # the container the selector's callback refills
+GRAPH_ID = "curve-chart-graph"
+CHART_STORE_ID = "curve-chart-data"      # every commodity's chart figures from the engine, in the body
+SELECTED_ID = "curve-selected"           # the commodity picked, kept across re-renders (session)
 
 NA = "n/a"
 ESTIMATED = "ESTIMATED"     # contract-master's dates_source for a date it estimated
@@ -331,8 +356,9 @@ def grid_records(result: Dict[str, Any], unit: str) -> Tuple[List[dict], List[di
     rows = result.get("rows") or []
     delta_view = unit in DELTA_UNITS
     for root_id, c in (result.get("by_commodity") or {}).items():
-        rec: Dict[str, Any] = {"sector": _sector_label(c.get("sector")), "commodity": c.get("name") or root_id,
-                               "root_id": root_id, "exchange": c.get("exchange") or "", "currency": c.get("currency") or ""}
+        # "id" is the DataTable's row id: a click on the row names its commodity whatever the sort
+        rec: Dict[str, Any] = {"id": root_id, "sector": _sector_label(c.get("sector")),
+                               "commodity": c.get("name") or root_id, "root_id": root_id, "exchange": c.get("exchange") or "", "currency": c.get("currency") or ""}
         tip: Dict[str, dict] = {}
         cells, cell_tips = month_cells(result, root_id, unit)
         rec.update(cells)
@@ -438,8 +464,55 @@ def grid_caption(result: Dict[str, Any], unit: str) -> str:
         caption += (" Lots, units and USD notional are futures and LME prompts only, as the engine gives them: "
                     "an option is not a lot of the future, and shows in the delta views. Net and gross lots, "
                     "units and USD at the end are the engine's per-commodity totals.")
-    caption += " USD in k / m, the full figure on hover. Notes are short markers, their sentences on hover."
+    caption += (" USD in k / m, the full figure on hover. Notes are short markers, their sentences on hover."
+                " The month cells are shaded green for long and red for short, deeper for a larger position "
+                "(by its rank among the month cells of this view), white at zero; n/a is not shaded. Click a "
+                "row to chart that commodity's curve below.")
     return caption
+
+
+HEAT_POS = (26, 127, 75)       # --pos of ui/assets/style.css
+HEAT_NEG = (192, 57, 43)       # --neg
+HEAT_MIN, HEAT_MAX = 0.10, 0.60  # the shade's opacity at the smallest and the largest |value|
+HEAT_INK = "#1b2333"           # --text: a shaded cell's figure stays dark, the shade carries the sign
+ACTIVE_STYLE = {"if": {"state": "active"}, "backgroundColor": "rgba(15, 31, 61, 0.06)",
+                "border": "1px solid #0f1f3d"}
+
+
+def heat_level(v: float, magnitudes: List[float]) -> float:
+    """The quantile of |v| among `magnitudes` (sorted): the share of cells whose |value| is at
+    most |v|, in (0, 1]. By rank, not by size, so one huge cell does not wash the rest out."""
+    if not magnitudes:
+        return 1.0
+    return bisect.bisect_right(magnitudes, abs(v)) / len(magnitudes)
+
+
+def heat_colour(v: float, magnitudes: List[float]) -> Optional[str]:
+    """The cell's background: green for long, red for short, the opacity by `heat_level`; None
+    (white) at zero."""
+    if not v:
+        return None
+    alpha = HEAT_MIN + (HEAT_MAX - HEAT_MIN) * heat_level(v, magnitudes)
+    r, g, b = HEAT_POS if v > 0 else HEAT_NEG
+    return f"rgba({r}, {g}, {b}, {alpha:.3f})"
+
+
+def heat_styles(records: List[dict], columns: List[str]) -> List[dict]:
+    """`style_data_conditional` rules shading the month cells as a diverging heatmap over the
+    view shown: one rule per distinct (column, value), matched on the value itself so the shade
+    follows the cell through any sort. Only numbers are shaded: an empty cell, a zero and an
+    "n/a" (a string) are left as they are. Display only: the figures are the records'."""
+    cells = [(c, r[c]) for r in records for c in columns if isinstance(r.get(c), float) and r[c] != 0]
+    magnitudes = sorted(abs(v) for _, v in cells)
+    out: List[dict] = []
+    seen = set()
+    for col, v in cells:
+        if (col, v) in seen:
+            continue
+        seen.add((col, v))
+        out.append({"if": {"column_id": col, "filter_query": f"{{{col}}} = {v!r}"},
+                    "backgroundColor": heat_colour(v, magnitudes), "color": HEAT_INK})
+    return out
 
 
 def grid_section(result: Dict[str, Any], unit: str) -> html.Div:
@@ -469,11 +542,248 @@ def grid_section(result: Dict[str, Any], unit: str) -> html.Div:
                                 for c in ("sector", "commodity", "exchange", "currency", "unit", "note")]
                                + [{"if": {"column_id": "note"}, "color": "var(--muted)"}],
         style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
-        style_data_conditional=rk.sign_styles(signed) + _na_styles(signed + other),
+        # later rules win: the heat shade over the sign colour and over the active-cell tint
+        style_data_conditional=([ACTIVE_STYLE] + rk.sign_styles(signed) + _na_styles(signed + other)
+                                + heat_styles(records, month_ids)),
     )
     return html.Div(className="section", children=[
         about(f"Positions by contract month ({UNIT_WORDS[unit]})", grid_caption(result, unit)),
         table])
+
+
+# --------------------------------------------------------------------------- 2b. one commodity's curve
+RESEARCH_TRACE = "research curve"        # + " (<settlement date>)"
+MARKS_TRACE = "our official marks"
+LOTS_TRACE = "position (lots)"
+DELTA_TRACE = "delta lots"
+_POS_COLOUR, _NEG_COLOUR = "#1a7f4b", "#c0392b"   # --pos / --neg
+_NAVY, _GOLD, _MUTED = "#0f1f3d", "#c9a227", "#6b7280"
+_NOTE_STYLE = {"color": "var(--muted)", "fontSize": "12px", "margin": "2px 0"}   # a quiet line under the chart
+CURVE_ABOUT = (
+    "One commodity at a time: pick it here or click its row in the grid (the default is the commodity with the "
+    "largest gross USD). The line is the research app's settlement curve for the root on its latest settlement "
+    "on or before the as-of, as Bloomberg quotes it (raw_settle), so it sits on the same scale as our marks; it "
+    "is research context, never a mark and never in P&L or delta. The markers are our official prices of the "
+    "contracts we hold, the engine's figures (an option's is its underlying future's). The bars under them are "
+    "our net lots per contract month (futures and LME prompts), long green, short red; where options or "
+    "averaging contracts are held the delta lots per month stand beside them, outlined. Nothing is computed "
+    "here: every point is a figure from one of the two sources.")
+
+
+def default_root(result: Dict[str, Any]) -> Optional[str]:
+    """The commodity the panel opens on: the largest gross USD notional (the engine's), a
+    commodity with none after those that have one (then by gross delta USD), else the first."""
+    by = result.get("by_commodity") or {}
+    if not by:
+        return None
+
+    def rank(item):
+        i, (_root, c) = item
+        gross, gross_delta = _num(c.get("gross_usd")), _num(c.get("gross_delta_usd"))
+        return (gross is not None, gross or 0.0, gross_delta or 0.0, -i)
+
+    return max(enumerate(by.items()), key=rank)[1][0]
+
+
+def _root_terms(root_id: str) -> Dict[str, Any]:
+    """contract-master's quote unit and price scale of a root, {} when it has none."""
+    try:
+        root = get_root(root_id)
+    except (KeyError, OSError, ValueError):
+        return {}
+    return {"quote_unit": root.quote_unit or "", "price_scale": float(root.price_scale)}
+
+
+def chart_payload(result: Dict[str, Any], root_id: str) -> Dict[str, Any]:
+    """What the chart of one commodity draws from the engine, as given: its contracts' official
+    prices (a future's or LME prompt's own; an option's is its underlying future's, drawn once,
+    and only when that future is not held itself), its lots per month (`months`) and, when they
+    differ, its delta lots per month (`delta_months`). A contract with no price or no month is
+    not drawn and is named with its reason."""
+    c = (result.get("by_commodity") or {}).get(root_id, {})
+    rows = [r for r in (result.get("rows") or []) if r.get("root_id") == root_id]
+    marks: List[dict] = []
+    missing: List[str] = []
+    seen = set()
+    for r in [r for r in rows if _product(r) != OPTION] + [r for r in rows if _product(r) == OPTION]:
+        option = _product(r) == OPTION
+        cid = (r.get("underlying_id") if option else r.get("contract_id")) or r.get("contract_id") or ""
+        if cid in seen:
+            continue
+        seen.add(cid)
+        month, price = _row_month(r), _num(r.get("price"))
+        if month is None or price is None:
+            why = r.get("reason") or ("no contract month" if month is None else "no official price")
+            missing.append(f"{cid}: {why}")
+            continue
+        marks.append({"contract_id": cid, "month": month, "price": price, "source": r.get("price_source") or "",
+                      "product": _product(r), "held": not option})
+    lots = {k: _num(v) for k, v in sorted((c.get("months") or {}).items())}
+    delta = {k: _num(v) for k, v in sorted((c.get("delta_months") or {}).items())}
+    return {"root_id": root_id, "name": c.get("name") or root_id, "exchange": c.get("exchange") or "",
+            "currency": c.get("currency") or "", "unit": c.get("unit") or "", **_root_terms(root_id),
+            "marks": marks, "missing": missing, "lots": lots, "delta": delta,
+            "show_delta": bool(delta) and delta != lots, "delta_reason": c.get("delta_reason") or ""}
+
+
+def chart_store(result: Dict[str, Any]) -> Dict[str, Any]:
+    """The body's store: every commodity's chart payload (engine figures only, cheap) and the
+    as-of; the research curve is read only for the commodity shown."""
+    return {"as_of": result.get("as_of"),
+            "roots": {root: chart_payload(result, root) for root in (result.get("by_commodity") or {})}}
+
+
+def _month_x(key: str) -> str:
+    """'2026-12' -> '2026-12-01', a contract month on the chart's date axis."""
+    return f"{key}-01"
+
+
+def price_axis_title(payload: Dict[str, Any], research: Dict[str, Any]) -> str:
+    """The price axis's unit: Bloomberg's quoted price, named through the quote unit and price
+    scale (contract-master's, else the research app's)."""
+    unit = payload.get("quote_unit") or research.get("unit") or payload.get("currency") or ""
+    scale = payload.get("price_scale") if payload.get("price_scale") is not None else research.get("price_scale")
+    if scale is None or float(scale) == 1.0:
+        return f"{unit}, as quoted" if unit else "price as Bloomberg quotes it"
+    return f"quoted price (x {float(scale):g} = {unit})"
+
+
+def research_points(research: Dict[str, Any]) -> List[dict]:
+    """The research rows that carry a month and a raw settlement, in the research app's order."""
+    return [r for r in (research.get("rows") or [])
+            if r.get("month") and isinstance(r.get("raw_settle"), (int, float))]
+
+
+def curve_figure(payload: Dict[str, Any], research: Dict[str, Any]):
+    """One figure, two rows on a shared contract-month axis: the research curve (line, `raw_settle`)
+    and our official marks (markers) above; our lots per month (bars, long green, short red) and,
+    when they differ, the delta lots per month (outlined bars) below. Every y is a source's figure."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.66, 0.34], vertical_spacing=0.06)
+    points = research_points(research)
+    if points:
+        unit = research.get("unit") or ""
+        fig.add_trace(go.Scatter(
+            x=[_month_x(r["month"]) for r in points], y=[r["raw_settle"] for r in points],
+            mode="lines+markers", name=f"{RESEARCH_TRACE} ({research.get('date') or 'no date'})",
+            line={"color": _MUTED, "width": 1.2}, marker={"size": 3, "color": _MUTED},
+            customdata=[[r.get("contract_id") or "", r.get("expiry") or NA, r.get("settle")] for r in points],
+            hovertemplate=("%{customdata[0]} (research)<br>%{x|%b %Y}: %{y:,.6g}"
+                           + (f"<br>= %{{customdata[2]:,.6g}} {unit}" if unit else "")
+                           + "<br>last trade %{customdata[1]}<extra></extra>")), row=1, col=1)
+    marks = payload.get("marks") or []
+    if marks:
+        fig.add_trace(go.Scatter(
+            x=[_month_x(m["month"]) for m in marks], y=[m["price"] for m in marks],
+            mode="markers", name=MARKS_TRACE,
+            marker={"size": 10, "symbol": "diamond", "color": _GOLD, "line": {"color": _NAVY, "width": 1.5}},
+            customdata=[[m["contract_id"], m.get("source") or "", "" if m.get("held") else " (underlying of options held)"]
+                        for m in marks],
+            hovertemplate="%{customdata[0]}%{customdata[2]}<br>%{x|%b %Y}: %{y:,.6g}<br>%{customdata[1]}<extra></extra>"),
+            row=1, col=1)
+    lots = [(k, v) for k, v in (payload.get("lots") or {}).items() if v is not None]
+    if lots:
+        fig.add_trace(go.Bar(
+            x=[_month_x(k) for k, _ in lots], y=[v for _, v in lots], name=LOTS_TRACE,
+            marker_color=[_POS_COLOUR if v >= 0 else _NEG_COLOUR for _, v in lots],
+            hovertemplate="%{x|%b %Y}: %{y:,.4g} lot(s)<extra></extra>"), row=2, col=1)
+    if payload.get("show_delta"):
+        delta = [(k, v) for k, v in (payload.get("delta") or {}).items() if v is not None]
+        if delta:
+            fig.add_trace(go.Bar(
+                x=[_month_x(k) for k, _ in delta], y=[v for _, v in delta], name=DELTA_TRACE,
+                marker={"color": "rgba(0,0,0,0)",
+                        "line": {"color": [_POS_COLOUR if v >= 0 else _NEG_COLOUR for _, v in delta], "width": 1.5}},
+                hovertemplate="%{x|%b %Y}: %{y:,.4g} delta lot(s)<extra></extra>"), row=2, col=1)
+    fig.update_layout(
+        height=440, margin={"l": 8, "r": 16, "t": 28, "b": 24}, barmode="group", bargap=0.35,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"size": 11.5, "color": HEAT_INK}, hovermode="closest",
+        legend={"orientation": "h", "x": 0, "y": 1.08, "font": {"size": 11}},
+    )
+    fig.update_xaxes(type="date", tickformat="%b %y", showgrid=False, fixedrange=True,
+                     tickfont={"size": 10.5, "color": _MUTED})
+    fig.update_yaxes(title_text=price_axis_title(payload, research), row=1, col=1, automargin=True, fixedrange=True,
+                     gridcolor="#eef0f4", tickformat=",.6~g", tickfont={"size": 10.5, "color": _MUTED})
+    fig.update_yaxes(title_text="lots", row=2, col=1, automargin=True, fixedrange=True, zeroline=True,
+                     zerolinecolor="#9aa3b2", gridcolor="#eef0f4", tickfont={"size": 10.5, "color": _MUTED})
+    return fig
+
+
+def curve_notes(payload: Dict[str, Any], research: Dict[str, Any]) -> List[str]:
+    """The quiet lines under the chart: why there is no research curve, what the research app left
+    out, a price scale the two sources disagree on, the contracts not drawn and the months with no
+    lots. Each is a sentence from its source."""
+    notes: List[str] = []
+    if not research_points(research):
+        notes.append(f"No research curve: {research.get('reason') or 'the research app has no settlements for it'}. "
+                     "Our official marks and positions only.")
+    elif research.get("note"):
+        notes.append(f"Research curve: {research['note']}.")
+    ours, theirs = payload.get("price_scale"), research.get("price_scale")
+    if research_points(research) and ours is not None and theirs is not None and float(ours) != float(theirs):
+        notes.append(f"The research app's price scale ({float(theirs):g}) differs from contract-master's "
+                     f"({float(ours):g}): its curve may not sit on our marks' scale.")
+    if payload.get("missing"):
+        notes.append(f"Not drawn: {'; '.join(payload['missing'])}.")
+    no_lots = [k for k, v in (payload.get("lots") or {}).items() if v is None]
+    if no_lots:
+        notes.append(f"No lots for {', '.join(month_label(k) for k in no_lots)}: see the grid's n/a cells.")
+    if payload.get("show_delta"):
+        no_delta = [k for k, v in (payload.get("delta") or {}).items() if v is None]
+        if no_delta:
+            notes.append(f"No delta lots for {', '.join(month_label(k) for k in no_delta)}: "
+                         f"{payload.get('delta_reason') or 'a contract has no delta'}.")
+    return notes
+
+
+def curve_children(payload: Optional[Dict[str, Any]], as_of: Optional[str]) -> List[Any]:
+    """The chart of one commodity and its quiet lines. The research curve is read here, for this
+    commodity only (the history behind it is cached); its failure is a line, never a broken panel."""
+    if not payload:
+        return [message_box("No commodity to chart.")]
+    try:
+        research = research_curve(payload["root_id"], as_of)
+    except Exception as exc:  # noqa: BLE001 -- research_curve never raises; a reason on screen if it did
+        research = {"rows": [], "reason": f"the research curve could not be read ({type(exc).__name__}: {exc})"}
+    research = research or {}
+    # the research source (database, root, settlement date) on hover of the chart
+    children: List[Any] = [html.Div(title=research.get("source") or "", children=[
+        dcc.Graph(id=GRAPH_ID, figure=curve_figure(payload, research), config={"displayModeBar": False})])]
+    children += [html.P(line, className="curve-note", style=_NOTE_STYLE) for line in curve_notes(payload, research)]
+    return children
+
+
+def curve_section(result: Dict[str, Any], selected: Optional[str] = None) -> html.Div:
+    """The panel under the grid: the selector (the kept pick when it is still in the book, else
+    `default_root`), the store of every commodity's engine figures, and the chart."""
+    by = result.get("by_commodity") or {}
+    chosen = selected if selected in by else default_root(result)
+    store = chart_store(result)
+    options = [{"label": f"{c.get('name') or root}" + (f" ({c['exchange']})" if c.get("exchange") else ""),
+                "value": root} for root, c in by.items()]
+    return html.Div(id=CURVE_SECTION_ID, className="section", children=[
+        html.Div(style={"display": "flex", "alignItems": "center", "gap": "12px", "flexWrap": "wrap"}, children=[
+            about("Curve and positions", CURVE_ABOUT),
+            dcc.Dropdown(id=SELECT_ID, options=options, value=chosen, clearable=False, searchable=True,
+                         style={"minWidth": "340px", "fontSize": "12.5px"})]),
+        dcc.Store(id=CHART_STORE_ID, data=store),
+        html.Div(id=CHART_ID, children=curve_children(store["roots"].get(chosen), store.get("as_of")))])
+
+
+def root_from_cell(active_cell: Optional[dict]) -> Optional[str]:
+    """The commodity of a clicked grid cell: its row id (the record's "id", the root)."""
+    return (active_cell or {}).get("row_id") or None
+
+
+def show_curve(root_id: Optional[str], store: Optional[dict]) -> Tuple[Any, Any]:
+    """(chart children, the pick to keep) for the selector's `root_id`."""
+    if not root_id:
+        return no_update, no_update
+    store = store or {}
+    return curve_children((store.get("roots") or {}).get(root_id), store.get("as_of")), root_id
 
 
 # --------------------------------------------------------------------------- 3. sectors
@@ -798,11 +1108,13 @@ def flat_section(result: Dict[str, Any]) -> html.Details:
 
 
 # --------------------------------------------------------------------------- body and shell
-def body(result: Dict[str, Any], unit: str = DEFAULT_UNIT) -> html.Div:
-    """The whole tab body from one `curve_positions` result, month cells in `unit`."""
+def body(result: Dict[str, Any], unit: str = DEFAULT_UNIT, selected: Optional[str] = None) -> html.Div:
+    """The whole tab body from one `curve_positions` result, month cells in `unit`, the curve
+    panel on `selected` (the kept pick) or the default commodity."""
     children: List[Any] = [caption_block(result)]
     if result.get("by_commodity"):
-        children += [grid_section(result, unit), sector_section(result), detail_section(result)]
+        children += [grid_section(result, unit), curve_section(result, selected), sector_section(result),
+                     detail_section(result)]
     else:
         children.append(message_box(
             f"No commodity position to show: {result.get('note') or 'see the gaps above'}."))
@@ -810,7 +1122,7 @@ def body(result: Dict[str, Any], unit: str = DEFAULT_UNIT) -> html.Div:
     return html.Div(className="curve-body", children=children)
 
 
-def render(as_of: Optional[str], db_path, unit: str = DEFAULT_UNIT) -> Any:
+def render(as_of: Optional[str], db_path, unit: str = DEFAULT_UNIT, selected: Optional[str] = None) -> Any:
     """The body for `as_of` from the database at `db_path`: one `curve_positions` call on a
     read-only connection, closed straight after. A problem is a message where the body would
     be, never an empty tab."""
@@ -829,7 +1141,7 @@ def render(as_of: Optional[str], db_path, unit: str = DEFAULT_UNIT) -> Any:
                    className="status-line status-line--bad")])
     finally:
         conn.close()
-    return body(result, unit)
+    return body(result, unit, selected)
 
 
 AS_OF_HOVER = ("The tab follows the header's as-of date (the Blotter's and the FX & cash tab's date pickers "
@@ -850,6 +1162,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
                            value=DEFAULT_UNIT, inline=True, persistence=True, persistence_type="session",
                            inputStyle={"marginRight": "4px", "marginLeft": "10px"})]),
         html.Div(id=BODY_ID, children=[message_box("Loading the curve positions...")]),
+        dcc.Store(id=SELECTED_ID, storage_type="session"),
         dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])
 
@@ -858,8 +1171,10 @@ build_layout = layout
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """One callback: the body re-renders on the header's as-of, on every data revision, on
-    the safety interval and on the view switch."""
+    """Three callbacks: the body re-renders on the header's as-of, on every data revision, on
+    the safety interval and on the view switch (the curve panel on the commodity kept in
+    `SELECTED_ID`); a click on a grid row sets the curve selector to its commodity; the
+    selector redraws the chart and keeps its pick."""
 
     @app.callback(
         Output(BODY_ID, "children"),
@@ -867,6 +1182,25 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Input(DATA_REVISION_ID, "data"),
         Input(REFRESH_ID, "n_intervals"),
         Input(UNIT_ID, "value"),
+        State(SELECTED_ID, "data"),
     )
-    def _update(as_of, _data_rev=None, _n_intervals=0, unit=DEFAULT_UNIT):
-        return render(as_of, get_db_path(), unit or DEFAULT_UNIT)
+    def _update(as_of, _data_rev=None, _n_intervals=0, unit=DEFAULT_UNIT, selected=None):
+        return render(as_of, get_db_path(), unit or DEFAULT_UNIT, selected)
+
+    @app.callback(
+        Output(SELECT_ID, "value"),
+        Input(GRID_ID, "active_cell"),
+        prevent_initial_call=True,
+    )
+    def _pick_row(active_cell):
+        return root_from_cell(active_cell) or no_update
+
+    @app.callback(
+        Output(CHART_ID, "children"),
+        Output(SELECTED_ID, "data"),
+        Input(SELECT_ID, "value"),
+        State(CHART_STORE_ID, "data"),
+        prevent_initial_call=True,
+    )
+    def _show_curve(root_id, store):
+        return show_curve(root_id, store)

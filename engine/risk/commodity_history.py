@@ -63,9 +63,18 @@ this repository. With none found, or a file that is not the research app's datab
 series is empty with that reason in `series.attrs["reason"]`: never an exception to the
 caller. Every series carries `attrs["reason"]` ('' when it has data).
 
+  * `research_curve(root_id, as_of, db_path=None)` (module function): the research app's
+    settlement of every contract of the root on its latest date on or before `as_of`, in
+    quote units, one row per contract with its month as 'YYYY-MM'. Context for the Curve
+    and Data tabs beside our own official marks, labelled 'research': never a mark.
+
 The result is cached per (path, the database's and its WAL file's mtime and size): in
 WAL mode the main file's mtime does not move on a write until a checkpoint, so the WAL
-file is part of the key. Series read per root are memoised inside that cached object.
+file is part of the key. Inside that cached object, and so per database identity, are
+kept: the settlements read per root, the constant-maturity frame per (root, months ahead)
+and each position's P&L per argument set (2026-09-25: the Risk tab and the header's VaR
+chip rebuilt them on every call, about 11 s of a 14 s `book_risk`). A changed database
+is a new object, so nothing kept outlives the data it was built from.
 """
 from __future__ import annotations
 
@@ -76,12 +85,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import pandas as pd
 
 from data.contracts.tickers import month_from_code, parse_bbg_ticker
 
-__all__ = ["CommodityHistory", "DEFAULT_FX_PAIR", "DEFAULT_PATH", "ENV_VAR", "candidates",
-           "load_commodity_history", "window_move"]
+__all__ = ["CommodityHistory", "DEFAULT_FX_PAIR", "DEFAULT_PATH", "ENV_VAR", "LABEL", "candidates",
+           "load_commodity_history", "research_curve", "window_move"]
+
+LABEL = "research"
 
 ENV_VAR = "COMMODITY_HISTORY_DB"
 _REPO = Path(__file__).resolve().parents[2]
@@ -98,6 +110,13 @@ def _empty(reason: str, name: Optional[str] = None) -> pd.Series:
     s = pd.Series([], index=pd.DatetimeIndex([], name="date"), dtype=float, name=name)
     s.attrs["reason"] = reason
     return s
+
+
+def _copy(s: pd.Series) -> pd.Series:
+    """A copy of a kept series with its own attrs (a caller may set attrs on what it gets)."""
+    out = s.copy()
+    out.attrs = {k: (dict(v) if isinstance(v, dict) else v) for k, v in s.attrs.items()}
+    return out
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -132,6 +151,8 @@ class CommodityHistory:
     candidates: List[dict] = field(default_factory=list)              # [{path, exists}]
     _roots: Dict[str, pd.DataFrame] = field(default_factory=dict, repr=False)
     _lookup: Dict[str, dict] = field(default_factory=dict, repr=False)
+    _cm: Dict[tuple, pd.DataFrame] = field(default_factory=dict, repr=False)      # (root, months_ahead) -> frame
+    _pnl: Dict[tuple, pd.Series] = field(default_factory=dict, repr=False)        # position P&L per argument set
 
     # ----------------------------------------------------------------- summary
     def status(self) -> dict:
@@ -229,47 +250,65 @@ class CommodityHistory:
 
     # ------------------------------------------------------- constant maturity
     def _strip(self, root: str) -> Tuple[List[str], List[str]]:
-        """The root's contracts in last-trade order and their last trade dates (ISO)."""
-        c = self.contracts[self.contracts["instrument_id"] == root]
-        c = c.sort_values(["last_trade_date", "year", "month"])
-        return list(c.index), list(c["last_trade_date"])
+        """The root's contracts in last-trade order and their last trade dates (ISO), kept per
+        root on this object. Callers never modify the lists returned."""
+        strips = self._lookup.setdefault("strips", {})
+        if root not in strips:
+            c = self.contracts[self.contracts["instrument_id"] == root]
+            c = c.sort_values(["last_trade_date", "year", "month"])
+            strips[root] = (list(c.index), list(c["last_trade_date"]))
+        return strips[root]
 
     def _ranked(self, root: str, months_ahead: int, dates: pd.DatetimeIndex) -> List[Optional[str]]:
         """For each date, the `months_ahead`-th contract (1 = front) whose last trade date is
         after the date; None beyond the strip."""
         ids, ltds = self._strip(root)
         out: List[Optional[str]] = []
-        for d in dates:
-            i = bisect.bisect_right(ltds, d.strftime("%Y-%m-%d")) + months_ahead - 1
+        for d in dates.strftime("%Y-%m-%d"):
+            i = bisect.bisect_right(ltds, d) + months_ahead - 1
             out.append(ids[i] if i < len(ids) else None)
         return out
 
     def _cm_frame(self, root_id: str, months_ahead: int, start=None) -> Tuple[Optional[pd.DataFrame], str]:
+        """The constant-maturity frame (date x contract_id, raw, raw_change, settle, change),
+        built once per (root, months_ahead) and kept on this object, which is itself cached per
+        database identity (`load_commodity_history`), so a changed database builds it afresh.
+        Callers never modify the frame returned."""
         row, why = self._root_row(root_id)
         if row is None:
             return None, why
         if int(months_ahead) < 1:
             return None, f"months_ahead must be 1 or more (1 = the front contract), not {months_ahead}"
         root = row.name
-        wide = self._root_prices(root)
-        if wide.empty:
-            return None, wide.attrs.get("reason") or f"root {root_id} has no settlements in the research database ({self.path})"
-        diffs = wide.diff()                       # day-on-day on the root's own trading days
-        ranked = self._ranked(root, int(months_ahead), wide.index)
-        level, change = [], []
-        for d, cid in zip(wide.index, ranked):
-            if cid is None or cid not in wide.columns:
-                level.append(float("nan"))
-                change.append(float("nan"))
-            else:
-                level.append(wide.at[d, cid])
-                change.append(diffs.at[d, cid])
-        frame = pd.DataFrame({"contract_id": ranked, "raw": level, "raw_change": change}, index=wide.index)
-        frame["settle"] = frame["raw"] * float(row["price_scale"])
-        frame["change"] = frame["raw_change"] * float(row["price_scale"])
+        key = (root, int(months_ahead))
+        frame = self._cm.get(key)
+        if frame is None:
+            wide = self._root_prices(root)
+            if wide.empty:
+                return None, wide.attrs.get("reason") or f"root {root_id} has no settlements in the research database ({self.path})"
+            frame = self._build_cm_frame(root, int(months_ahead), wide, float(row["price_scale"]))
+            self._cm[key] = frame
         if start is not None:
             frame = frame[frame.index >= pd.Timestamp(start)]
         return frame, ""
+
+    def _build_cm_frame(self, root: str, months_ahead: int, wide: pd.DataFrame, scale: float) -> pd.DataFrame:
+        """On each date, the ranked contract's raw settle and its day-on-day change (both on that
+        contract), NaN where the contract is beyond the strip or has no settlement. Positional
+        numpy picks, the same values the per-date lookups gave."""
+        diffs = wide.diff()                       # day-on-day on the root's own trading days
+        ranked = self._ranked(root, months_ahead, wide.index)
+        pos = wide.columns.get_indexer(pd.Index(ranked, dtype=object))
+        ok = pos >= 0
+        rows = np.arange(len(wide))
+        level = np.full(len(wide), np.nan)
+        change = np.full(len(wide), np.nan)
+        level[ok] = wide.to_numpy(dtype=float)[rows[ok], pos[ok]]
+        change[ok] = diffs.to_numpy(dtype=float)[rows[ok], pos[ok]]
+        frame = pd.DataFrame({"contract_id": ranked, "raw": level, "raw_change": change}, index=wide.index)
+        frame["settle"] = frame["raw"] * scale
+        frame["change"] = frame["raw_change"] * scale
+        return frame
 
     def constant_maturity_series(self, root_id: str, months_ahead: int, start=None) -> pd.Series:
         """The settlement (quote units) of the `months_ahead`-th listed contract on each date,
@@ -327,7 +366,21 @@ class CommodityHistory:
         nearer one on a tie), and it must have settled on the start close. No roll: the end
         close is that contract's last settlement on or before `end`, so a contract that
         expires inside the window keeps its own last settle. `move` is None with a reason
-        when there is no history, or the start settle is not above zero."""
+        when there is no history, or the start settle is not above zero. Kept on this object
+        per argument set (each call gets its own copy); a result whose read failed is not kept."""
+        try:
+            key = ("window", str(root_id), float(months_to_expiry), str(start), str(end))
+        except (TypeError, ValueError):
+            key = None
+        memo = self._lookup.setdefault("windows", {})
+        if key is not None and key in memo:
+            return dict(memo[key])
+        out = self._window_move_detail(root_id, months_to_expiry, start, end)
+        if key is not None and "could not be read" not in out["reason"]:
+            memo[key] = dict(out)
+        return out
+
+    def _window_move_detail(self, root_id: str, months_to_expiry: float, start, end) -> dict:
         out = {"move": None, "reason": "", "contract_id": None, "start_date": None, "end_date": None,
                "start_settle": None, "end_settle": None}
         row, why = self._root_row(root_id)
@@ -386,6 +439,82 @@ class CommodityHistory:
         d = self.window_move_detail(root_id, months_to_expiry, start, end)
         return d["move"], d["reason"]
 
+    # -------------------------------------------------------------------- curve
+    def research_curve(self, root_id: str, as_of) -> dict:
+        """The root's futures curve in the research app on its latest settlement date on or
+        before `as_of` (None = the database's last date). See the module function
+        `research_curve` for the shape. Never raises."""
+        out = {"root_id": root_id, "research_root": None, "available": bool(self.available), "label": LABEL,
+               "path": self.path, "candidates": [dict(c) for c in self.candidates], "as_of": None, "date": None,
+               "stale_days": None, "unit": "", "currency": "", "price_scale": None, "reason": "", "note": "",
+               "source": "", "rows": []}
+        if not self.available:
+            out["reason"] = self.reason
+            return out
+        if as_of is None:
+            as_of = self.last_date
+        try:
+            ts = pd.Timestamp(as_of)
+        except (TypeError, ValueError) as exc:
+            out["reason"] = f"as-of {as_of!r} is not a date ({exc})"
+            return out
+        if pd.isna(ts):
+            out["reason"] = f"as-of {as_of!r} is not a date"
+            return out
+        ts = ts.normalize()
+        out["as_of"] = ts.strftime("%Y-%m-%d")
+        row, why = self._root_row(root_id)
+        if row is None:
+            out["reason"] = why
+            return out
+        root = row.name
+        unit = row.get("quote_unit")
+        out.update(research_root=root, unit=str(unit) if isinstance(unit, str) else "",
+                   currency=str(row["currency"]), price_scale=float(row["price_scale"]))
+        wide = self._root_prices(root)
+        if wide.attrs.get("reason"):
+            out["reason"] = wide.attrs["reason"]
+            return out
+        if wide.empty:
+            out["reason"] = f"root {root_id} has no settlements in the research database ({self.path})"
+            return out
+        before = wide.index[wide.index <= ts]
+        if before.empty:
+            out["reason"] = (f"root {root_id} has no settlement on or before {out['as_of']} in the research database "
+                             f"(it starts {wide.index[0]:%Y-%m-%d})")
+            return out
+        day = before[-1]
+        settles = wide.loc[day].dropna()
+        scale = float(row["price_scale"])
+        info = self.contracts.loc[[c for c in settles.index if c in self.contracts.index]]
+        rows = []
+        for cid, raw in settles.items():
+            if cid not in info.index:
+                continue
+            year, month = int(info.at[cid, "year"]), int(info.at[cid, "month"])
+            ltd = info.at[cid, "last_trade_date"]
+            rows.append({"contract_id": str(cid), "month": f"{year:04d}-{month:02d}", "year": year,
+                         "month_no": month, "expiry": str(ltd) if isinstance(ltd, str) and ltd else None,
+                         "settle": float(raw) * scale, "raw_settle": float(raw)})
+        rows.sort(key=lambda r: (r["month"], r["contract_id"]))
+        out["date"] = day.strftime("%Y-%m-%d")
+        out["stale_days"] = int((ts - day).days)
+        out["rows"] = rows
+        mine = self.contracts[self.contracts["instrument_id"] == root]
+        listed = int((mine["last_trade_date"].astype(str) >= out["date"]).sum())
+        notes = []
+        if listed > len(rows):
+            depth = row.get("calendar_depth")
+            kept = f", the research app keeps the nearest {int(depth)}" if pd.notna(depth) else ""
+            notes.append(f"{listed - len(rows)} of the {listed} contracts listed on {out['date']} have no settlement "
+                         f"that day{kept}")
+        if out["stale_days"]:
+            notes.append(f"settlements of {out['date']}, {out['stale_days']} day(s) before {out['as_of']}")
+        out["note"] = "; ".join(notes)
+        out["source"] = (f"research app database {self.path}, {root} settlements of {out['date']} "
+                         f"(latest on or before {out['as_of']}), in {out['unit'] or 'quote units'}")
+        return out
+
     # ---------------------------------------------------------------------- fx
     def fx_series(self, pair: str) -> pd.Series:
         """The pair's daily rate as the research app stores it (second currency per one of the first)."""
@@ -436,7 +565,31 @@ class CommodityHistory:
         rank the contract holds on `as_of` (default: the database's last date). `fx`: None =
         the default pair for `currency`, a pair name, or a Series of USD per quote unit.
         attrs: reason, research_contract_id, months_ahead, own_from, fallback_days, fx_pair,
-        fx_missing_days."""
+        fx_missing_days.
+
+        Kept on this object per argument set (a given `fx` Series is never kept), so a second
+        call with the same arguments on the same database is served from memory; each call
+        gets its own copy. A result whose read failed is not kept."""
+        key = None
+        if not isinstance(fx, pd.Series):
+            try:
+                key = (str(root_id), str(contract_id), float(lots), float(multiplier), str(currency),
+                       None if fx is None else str(fx), None if as_of is None else str(as_of),
+                       None if start is None else str(start))
+            except (TypeError, ValueError):
+                key = None                   # not a number: computed as it stands, never kept
+        if key is not None:
+            hit = self._pnl.get(key)
+            if hit is not None:
+                return _copy(hit)
+        out = self._position_pnl(root_id, contract_id, lots, multiplier, currency, fx, as_of, start)
+        if key is not None and "could not be read" not in str(out.attrs.get("reason", "")):
+            self._pnl[key] = out
+            return _copy(out)
+        return out
+
+    def _position_pnl(self, root_id: str, contract_id: str, lots: float, multiplier: float,
+                      currency: str, fx, as_of, start) -> pd.Series:
         name = contract_id
         row, why = self._root_row(root_id)
         if row is None:
@@ -527,8 +680,11 @@ def _load(path: Path) -> CommodityHistory:
             if missing:
                 return CommodityHistory(False, str(path), f"{path} is not the research app's database "
                                         f"(no {', '.join(missing)} table)")
+            inst_cols = {r[1] for r in conn.execute("PRAGMA table_info(instrument)")}
+            unit_col = "quote_unit" if "quote_unit" in inst_cols else "'' AS quote_unit"
             instruments = pd.read_sql_query(
-                "SELECT instrument_id, name, sector, currency, price_scale, bbg_root, calendar_depth FROM instrument", conn)
+                "SELECT instrument_id, name, sector, currency, price_scale, bbg_root, calendar_depth, "
+                f"{unit_col} FROM instrument", conn)
             contracts = pd.read_sql_query(
                 "SELECT contract_id, instrument_id, year, month, last_trade_date FROM contract", conn)
             fx = pd.read_sql_query("SELECT pair, date, rate FROM fx_daily", conn)
@@ -580,6 +736,37 @@ def load_commodity_history(path: Union[str, Path, None] = None) -> CommodityHist
     hit.note = (f"{ENV_VAR} = {db}" if os.environ.get(ENV_VAR, "").strip() and path is None else f"using {db}") + (
         f" (settlements {hit.first_date} to {hit.last_date})" if hit.last_date else "")
     return hit
+
+
+def research_curve(root_id: str, as_of, db_path: Union[str, Path, None] = None) -> dict:
+    """The research app's futures curve of one root: the settlement of every contract of
+    `root_id` (our `config/contracts.csv` root_id, 'NYMEX:CL', the research app's
+    instrument_id) on the root's latest settlement date on or before `as_of`. Read-only from
+    `price_daily` and `contract` through the cached `load_commodity_history(db_path)`.
+
+    CONTEXT only, labelled 'research': never a mark, never written anywhere, never in P&L or
+    delta (hard rule 2), and nothing asks Bloomberg (hard rule 8). Never raises.
+
+    Returns {root_id, research_root, available, label, path, candidates, as_of, date,
+    stale_days, unit, currency, price_scale, reason, note, source, rows}:
+      root_id      as given; research_root: the research instrument_id matched (None if none);
+      available    True when the research database was found and read;
+      label        'research'; path: the database ('' or the first path tried when none);
+      candidates   [{path, exists}] tried;
+      as_of        ISO; date: the settlement date used (None when no rows);
+      stale_days   calendar days from `date` to `as_of` (None when no rows);
+      unit         the research quote_unit ('USD/bbl', 'USD/bu', 'CNY/t'); currency;
+      price_scale  settle = raw_settle x price_scale;
+      reason       '' when there are rows, else why not, in plain words;
+      note         '' or what is left out (contracts listed with no settlement that day, a stale date);
+      source       one line naming the database, root and date, for a hover;
+      rows         sorted by month: {contract_id (the research app's id, e.g. 'CLZ26 Comdty'; a
+                   placeholder root reads 'ZZWRF27 Comdty'), month 'YYYY-MM', year, month_no,
+                   expiry (the research last_trade_date, ISO; the research app estimates it
+                   when Bloomberg has none; None if blank), settle (quote units, float),
+                   raw_settle (Bloomberg's quoted price as stored, the unit of our FUTURE_PX
+                   marks)}."""
+    return load_commodity_history(db_path).research_curve(root_id, as_of)
 
 
 def window_move(root_id: str, months_to_expiry: float, start, end,

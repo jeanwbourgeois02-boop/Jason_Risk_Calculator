@@ -262,22 +262,36 @@ FILTERABLE_COLS = ["sector", "commodity", "instrument_id", "side", "status", "pr
 # `pnl_local`, in the instrument's quote currency) and converted to USD at spot by the
 # engine; both are shown, side by side, as computed. An LME forward is in USD, so its local
 # P&L is its USD P&L. Product tells a future ("Future") from an LME ticket ("LME forward");
-# Unit says what Quantity counts (lots, or tonnes for an LME ticket). "Settlement" is
-# `mark_date` (the date the price used for P&L was struck). Sector and Commodity are on every
-# row, so a click on either keeps the groups together (`futures_grouped_rows`).
+# Unit says what Quantity counts (lots, or tonnes for an LME ticket). The key date is
+# `value_book`'s `settle_date`: a future's expiry, an LME ticket's prompt date. Its header
+# names what the table holds ("Expiry" for futures alone, "Prompt" for LME tickets alone,
+# "Expiry / prompt" for both; `futures_key_date_label`), with the date per product on hover
+# (`FUTURES_KEY_DATE_TIP`). The column once labelled "Settlement" was `mark_date`, the date the
+# mark is keyed on: on an open row that is the same expiry or prompt again, so it is gone
+# (ui-blotter, 2026-09-25); on a settled row it is the date of the price the ledger
+# froze, which the key-date cell now says on hover (`_key_date_tip`). Sector and Commodity are
+# on every row, so a click on either keeps the groups together (`futures_grouped_rows`).
 _FUTURES_DISPLAY_COLUMNS = [
     "sector", "commodity", "instrument_id", "exchange", "product", "trade_date", "side", "quantity", "qty_unit",
-    "fill", "mark", "settle_date", "status", "mark_date", "pnl_local", "pnl_ccy", "pnl_usd", "strategy", "theme",
+    "fill", "mark", "settle_date", "status", "pnl_local", "pnl_ccy", "pnl_usd", "strategy", "theme",
     "trade_id",
 ]
+FUTURES_KEY_DATE_LABELS = {"FUTURE": "Expiry", "LME_FWD": "Prompt"}
+FUTURES_KEY_DATE_BOTH = "Expiry / prompt"
 _FUTURES_COLUMN_LABELS = {
     "sector": "Sector", "commodity": "Commodity",
     "trade_date": "Trade date", "instrument_id": "Contract", "exchange": "Exchange", "product": "Product",
     "side": "Side", "quantity": "Quantity", "qty_unit": "Unit", "fill": "Fill", "mark": "Mark",
-    "settle_date": "Expiry / prompt", "status": "Status",
-    "mark_date": "Settlement", "pnl_local": "P&L (local)", "pnl_ccy": "Ccy", "pnl_usd": "P&L (USD)",
+    "settle_date": FUTURES_KEY_DATE_BOTH, "status": "Status",
+    "pnl_local": "P&L (local)", "pnl_ccy": "Ccy", "pnl_usd": "P&L (USD)",
     "strategy": "Strategy", "theme": "Bundle", "trade_id": "Trade id",
 }
+# The key-date column's header hover: what the date is, per product.
+FUTURES_KEY_DATE_TIP = (
+    "Future: the contract's last trade date (Bloomberg's once stored, else the contract master's "
+    "conservative estimate); its price is keyed on it and it is frozen at the last official price on or "
+    "before it. LME forward: the prompt date, when the metal and the USD change hands; the ticket is marked "
+    "at the outright for that date and frozen at the last official cash price on or before it.")
 # A futures contract whose root the contract master does not know: its sector reads this,
 # and its commodity is the root id on file (a label, never a guess at the contract).
 UNCLASSIFIED_SECTOR = "Unclassified"
@@ -453,8 +467,9 @@ def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
                   column_labels: Optional[dict] = None, scope: str = "") -> dash_table.DataTable:
     """Build the trade table. `display_columns`/`column_labels` default to the Total book's
     commodity-terms layout (`_DISPLAY_COLUMNS`; a column the frame lacks is left out); the
-    Futures & LME sub-tab passes its own (Sector/Contract/Settlement...) and `scope="futures"`, which groups its
-    rows by sector and commodity (`futures_grouped_rows`). Filtering is the dropdown bar
+    Futures & LME sub-tab passes its own (Sector/Contract/Expiry...) and `scope="futures"`, which groups its
+    rows by sector and commodity (`futures_grouped_rows`) and puts `scope_header_tips` on its headers.
+    Filtering is the dropdown bar
     built by `_filter_bar` (see module docstring); sorting is native (ui.tabs.ranking): the
     table opens in `_sorted_scope_df`'s order (Futures: grouped) and any header click
     re-ranks it."""
@@ -469,6 +484,7 @@ def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
                  for c in cols],
         data=data_records,
         tooltip_data=tooltip_data,
+        tooltip_header={c: t for c, t in scope_header_tips(scope).items() if c in cols},
         **rk.sortable(table_id),
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
@@ -1152,13 +1168,41 @@ def _legs_table(legs: pd.DataFrame) -> dash_table.DataTable:
     )
 
 
+# What a row's key date is, per product, for the row-click panel's "keyed on the <...>".
+_KEY_DATE_NAMES = {"FUTURE": "expiry", "LME_FWD": "prompt", "CMDTY_OPTION": "expiry", "FX_OPTION": "expiry",
+                   "EQ_OPTION": "expiry"}
+
+
+def mark_used_text(row) -> str:
+    """The row-click panel's mark, worded for what `value_book`'s `mark_date` is. On an open row
+    it is the date the mark is keyed on (a future's expiry, an LME ticket's prompt, an FX leg's
+    value date), not the close the price came from, so it reads "keyed on the expiry <d>". On a
+    settled row it is the date of the price the ledger froze the trade at; on a closed-out
+    option, the close-out date. With no mark, the row's reason, never a bare "nan"."""
+    mark, source = row.get("mark"), _text(row.get("mark_source"))
+    day, status = _text(row.get("mark_date")), _text(row.get("status"))
+    if mark is None or (isinstance(mark, float) and mark != mark):
+        why = _text(row.get("reason")) or (SETTLED_MARK_REASON if status == "SETTLED" else "no mark on this row")
+        if status == "SETTLED" and day and not _text(row.get("reason")):
+            why += f"; frozen at the official price of {day}"
+        return f"n/a ({why})"
+    if status == "SETTLED":
+        when = f"frozen at the official price of {day}" if day else "frozen"
+    elif status == "CLOSED":
+        when = f"closed out on {day}" if day else "closed out"
+    else:
+        name = _KEY_DATE_NAMES.get(_text(row.get("product")), "value date")
+        when = f"keyed on the {name} {day}" if day else ""
+    return f"{mark} ({'; '.join(t for t in (source, when) if t)})" if (source or when) else f"{mark}"
+
+
 def row_expand_panel(conn: sqlite3.Connection, trade_id: str, row: pd.Series) -> html.Div:
     """Legs (from `trade_legs`) + the marks-used columns already on the value_book row."""
     legs = pd.read_sql_query(
         "SELECT leg_no, leg_type, ccy, amount, start_date, settle_date, rate, settles_cash "
         "FROM trade_legs WHERE trade_id = ? ORDER BY leg_no", conn, params=(trade_id,))
     marks_used = html.P(
-        f"Mark: {row.get('mark')} ({row.get('mark_source')}, dated {row.get('mark_date')}) · "
+        f"Mark: {mark_used_text(row)} · "
         f"Spot: {row.get('spot')} ({row.get('spot_source')})",
         className="blotter-row-marks", style={"fontSize": "12px", "margin": "2px 0"},
     )
@@ -1179,13 +1223,31 @@ def row_detail_panel(conn: sqlite3.Connection, trade_id: str, df: pd.DataFrame) 
                      children=[row_expand_panel(conn, trade_id, row.iloc[0])])
 
 
-def scope_columns(scope: str) -> tuple:
+def futures_key_date_label(df: Optional[pd.DataFrame]) -> str:
+    """The Futures & LME key-date header for the trades the sub-tab holds: "Expiry" when they
+    are futures only, "Prompt" when LME tickets only, "Expiry / prompt" otherwise (both, none,
+    or no frame). Read from the whole scope, so a filter never makes it wrong."""
+    if df is None or df.empty or "product" not in df.columns:
+        return FUTURES_KEY_DATE_BOTH
+    products = {p for p in df["product"].tolist() if p}
+    if len(products) == 1:
+        return FUTURES_KEY_DATE_LABELS.get(next(iter(products)), FUTURES_KEY_DATE_BOTH)
+    return FUTURES_KEY_DATE_BOTH
+
+
+def scope_columns(scope: str, df: Optional[pd.DataFrame] = None) -> tuple:
     """(display_columns, column_labels) for a sub-tab -- Futures has its own layout,
     every other scope shares the FX/Total one. Factored out so both `scope_layout` and
-    the filter-dropdown callback build the identical column set."""
+    the filter-dropdown callback build the identical column set. With the scope's frame,
+    the Futures key date is labelled for what it holds (`futures_key_date_label`)."""
     if scope == "futures":
-        return _FUTURES_DISPLAY_COLUMNS, _FUTURES_COLUMN_LABELS
+        return _FUTURES_DISPLAY_COLUMNS, {**_FUTURES_COLUMN_LABELS, "settle_date": futures_key_date_label(df)}
     return _DISPLAY_COLUMNS, _COLUMN_LABELS
+
+
+def scope_header_tips(scope: str) -> dict:
+    """Header hovers of a sub-tab's trade table: the Futures key date says what it is per product."""
+    return {"settle_date": FUTURES_KEY_DATE_TIP} if scope == "futures" else {}
 
 
 def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
@@ -1338,6 +1400,16 @@ _GROUP_STYLES = [
 ]
 
 
+def _key_date_tip(status, mark_date) -> str:
+    """The Futures key-date cell's hover on a settled row: the date of the price the ledger froze
+    it at (`value_book`'s `mark_date` on a frozen row). '' on an open row, whose `mark_date` is
+    the key date itself, and on a settled row with no price date on file."""
+    mark_date = _text(mark_date)
+    if status != "SETTLED" or not mark_date:
+        return ""
+    return f"settled: frozen at the official price of {mark_date}, the last on or before this date"
+
+
 def futures_grouped_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
     """The Futures table grouped by sector, then commodity (commodity conversion Phase 3):
     a sector row, then per commodity a commodity row and its contracts' trades. Each
@@ -1359,10 +1431,15 @@ def futures_grouped_rows(df: pd.DataFrame, display_columns: list, column_labels:
     order = order.drop(columns="_unclassified").reset_index(drop=True)
     trade_records, trade_tips, styles = _format_rows(order, display_columns, column_labels)
     reasons = order["reason"].tolist() if "reason" in order.columns else [""] * len(order)
-    for rec, tip, reason in zip(trade_records, trade_tips, reasons):
+    statuses = order["status"].tolist() if "status" in order.columns else [""] * len(order)
+    mark_dates = order["mark_date"].tolist() if "mark_date" in order.columns else [""] * len(order)
+    for rec, tip, reason, status, mark_date in zip(trade_records, trade_tips, reasons, statuses, mark_dates):
         rec["row_kind"] = "trade"
         if reason and rec.get("mark") is None and "mark" in rec:
             tip["mark"] = {"value": reason, "type": "text"}
+        key_tip = _key_date_tip(status, mark_date)
+        if key_tip and "settle_date" in rec:
+            tip["settle_date"] = {"value": key_tip, "type": "text"}
 
     def group_row(kind: str, rows: pd.DataFrame, sector: str, commodity: str) -> tuple:
         value, label, why = _subtotal(rows)
@@ -1608,6 +1685,7 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
         import logging
         logging.getLogger(__name__).exception("Blotter section %r failed to render", "Pricing")
         return html.Div([_error_card("Pricing", exc, conn), html.Div(id=detail_id)])
+    display_columns, column_labels = scope_columns(scope, df)
 
     if scope == "futures" and df.empty:
         empty = pd.DataFrame(columns=display_columns)

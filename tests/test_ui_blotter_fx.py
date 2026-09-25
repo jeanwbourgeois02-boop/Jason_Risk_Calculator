@@ -75,3 +75,48 @@ def test_a_total_over_rows_with_one_none_skips_it_never_as_zero():
 def test_the_notional_column_is_labelled_usd():
     columns = blotter_fx.table_columns(["quantity_usd_notional"])
     assert columns[0]["name"] == "Quantity (USD)"
+
+
+# ------------------------------------------------ k / m on the currency tables (2026-09-25, "Natural units")
+def _ccy_row(currency, trades, **figures):
+    return {"currency": currency, "trades": trades, "figures": figures}
+
+
+def test_the_currency_tables_print_k_m_with_the_full_figure_on_hover():
+    from ui.tabs import ranking as rk
+
+    periods = (("ltd", "LTD"), ("daily", "Daily"))
+    rows = [_ccy_row("JPY", 3, ltd={"value": 1_650_590.4, "available": True},
+                     daily={"value": 0.4, "available": True}),
+            _ccy_row("MXN", 1, ltd={"value": float("nan"), "available": False, "reason": "no SPOT for MXN"},
+                     daily={"value": -2_400.0, "available": True, "excluded_summary": "excludes 1 of 2 trades unpriced"})]
+    total = _ccy_row("Total", 4, ltd={"value": 1_650_590.4, "available": True},
+                     daily={"value": -2_399.6, "available": True})
+    scroll, *_note = blotter_fx.currency_table(rows, total, periods, table_id=blotter_fx.FIXED_TABLE_ID)
+    table, footer = scroll.children.children          # the scroll box > ranked table + pinned Total
+    formats = {c["id"]: c.get("format") for c in table.columns}
+    assert formats["ltd"] == formats["daily"] == rk.amount_short(nully="n/a")
+    assert formats["trades"] == rk.count()            # a count, not money
+
+    # Whole units behind the k / M format: 0.4 never prints as "400m"; still numbers, so they rank.
+    jpy, mxn = table.data
+    assert jpy["ltd"] == 1_650_590.0 and jpy["daily"] == 0.0 and isinstance(jpy["daily"], float)
+    assert mxn["ltd"] is None and mxn["daily"] == -2_400.0      # unavailable: "n/a", never 0
+    assert footer.data[0]["ltd"] == 1_650_590.0 and footer.data[0]["daily"] == -2_400.0
+
+    # The full figure on each cell's hover; a note under it; an n/a keeps its reason alone.
+    jpy_tip, mxn_tip = table.tooltip_data
+    assert jpy_tip["ltd"]["value"] == "1,650,590 USD" and jpy_tip["daily"]["value"] == "0 USD"
+    assert mxn_tip["ltd"]["value"] == "no SPOT for MXN"
+    assert mxn_tip["daily"]["value"] == "(2,400) USD\nexcludes 1 of 2 trades unpriced"
+    assert footer.tooltip_data[0]["daily"]["value"] == "(2,400) USD"
+    assert "trades" not in jpy_tip
+
+
+def test_the_trade_table_keeps_full_figures():
+    from ui.tabs import ranking as rk
+
+    columns = {c["id"]: c for c in blotter_fx.table_columns(["pnl_eod", "quantity_usd_notional"])}
+    assert columns["pnl_eod"]["format"] == rk.amount() == columns["quantity_usd_notional"]["format"]
+    records = blotter_fx.format_rows(_notional_df())
+    assert records[0]["pnl_eod"] == 2_800.0 and records[0]["pnl_eod_num"] == 2_800.0

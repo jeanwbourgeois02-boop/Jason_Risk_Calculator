@@ -9,6 +9,8 @@ recomputes P&L or delta itself"), storage/precision stay in engine/ and data/.
   user 2026-09-25: "never as a paragraph above the table").
 - `marker`: a short visible marker ("excl. 3", "n/a", "filled 2") with its sentence on hover.
 - `issues_drawer`: the tab's one collapsed "Data issues (N)" drawer of reasons.
+- `tab_link`: a tab's name as a quiet link that switches to that tab (user, 2026-09-25);
+  the one callback that switches is `ui/app.py`'s, keyed on `TAB_LINK_TYPE`.
 """
 from __future__ import annotations
 
@@ -162,3 +164,43 @@ def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issue
     extra = {"id": id} if id else {}
     return html.Details([html.Summary(f"{title} ({len(rows)})"), html.Ul(rows, className="issues-list")],
                         className="issues-drawer", open=open, **extra)
+
+
+# ----------------------------------------------------------------------------- tab links
+# A tab's name written on another screen ("-> Curve", "on the Risk tab") as a link that
+# switches the tab bar to it (user, 2026-09-25: "make tab names in the screens clickable
+# links"). The link is a Dash pattern-matching id, so it works inside a body a callback
+# renders later; `ui/app.py` holds the one callback, on every id of type `TAB_LINK_TYPE`,
+# that sets `main-tabs` to the link's `tab` (a stable key of `ui.app.TAB_KEYS`, e.g. "curve",
+# "ladder", "market-data"; never the label). An unknown key does nothing when clicked.
+TAB_LINK_TYPE = "tab-link"
+
+
+def tab_link_id(tab_key: str, idx: str) -> dict:
+    """The pattern-matching id of a tab link: {"type": "tab-link", "tab": <key>, "idx": <idx>}."""
+    return {"type": TAB_LINK_TYPE, "tab": str(tab_key), "idx": str(idx)}
+
+
+def tab_link(label, tab_key: str, idx: str, title: Optional[str] = None, className: str = ""):
+    """A small, quiet link that switches to the tab `tab_key` when clicked:
+    `tab_link("\u2192 Curve", "curve", "book-metals")`. `label` is shown as it is (text or
+    components); `tab_key` is the tab's stable key (`ui.app.TAB_KEYS` values: "book",
+    "spreads", "curve", "risk", "expiries", "blotter", "ladder", "market-data").
+
+    The `idx` rule: the ids of all links on the page must differ, so `idx` names the spot
+    the link sits in, as "<the tab it sits on>-<the spot>" ("book-metals", "risk-caption"),
+    with a row's own key added when the link repeats per row ("book-spread-CLZ6-CLH7"). Two
+    links to the same tab on one page never share an `idx`; links to different tabs may.
+
+    Rendered as a `type="button"` element (keyboard-focusable, no URL change), styled as a
+    link by `.tab-link` in `ui/assets/style.css`; its hover says which tab it opens unless
+    `title` is given."""
+    classes = " ".join(c for c in ("tab-link", className) if c)
+    if title:
+        hover = title
+    else:
+        # "-> Curve" hovers "Open the Curve tab": the leading arrow or symbol is not the name.
+        name = label.lstrip(" \u2192\u2190>-:") if isinstance(label, str) else ""
+        hover = f"Open the {name or tab_key} tab"
+    return html.Button(label, id=tab_link_id(tab_key, idx), n_clicks=0, type="button",
+                       className=classes, title=hover)

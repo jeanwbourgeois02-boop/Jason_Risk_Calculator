@@ -554,7 +554,7 @@ def test_definitions_sit_on_hover_of_the_titles_never_as_paragraphs():
     # no paragraph of explanation left on screen (outside the collapsed blocks): the only
     # kicker is the limits' one-line count
     kickers = [_text(n) for n in _walk_open(body) if getattr(n, "className", "") == "section-kicker"]
-    assert kickers == ["From config/limits.yaml: 1 BREACH, 1 WARN, 1 OK, 1 not set, 1 n/a."]
+    assert kickers == ["From config/limits.yaml: 1 BREACH, 1 WARN, 1 OK, 1 n/a."]
 
 
 # --------------------------------------------------------------------------- commodities (Phases 4 and 5)
@@ -869,27 +869,91 @@ def test_margin_is_labelled_an_estimate_with_credits_and_never_zero_for_a_missin
 def test_limit_levels_are_coloured_and_not_set_says_so():
     section = risk.limits_section(_checks())
     table = _table(section, risk.LIMITS_TABLE_ID)
-    assert [rec["level"] for rec in table.data] == ["BREACH", "WARN", "OK", "not set in config/limits.yaml", "n/a"]
+    # the table holds the limits that are set; the one not set is collapsed under it
+    assert [rec["level"] for rec in table.data] == ["BREACH", "WARN", "OK", "n/a"]
     styles = table.style_data_conditional
     assert {"if": {"column_id": "level", "filter_query": "{level} = 'BREACH'"}, **risk.LEVEL_STYLES["BREACH"]} in styles
     assert risk.LEVEL_STYLES["BREACH"]["backgroundColor"] == "#c62828"                       # red
     assert {"if": {"column_id": "level", "filter_query": "{level} = 'WARN'"}, **risk.LEVEL_STYLES["WARN"]} in styles
     assert risk.LEVEL_STYLES["WARN"]["color"] == "#b26a00"                                   # amber
     assert {"if": {"column_id": "level", "filter_query": "{level} = 'OK'"}, **risk.LEVEL_STYLES["OK"]} in styles
-    assert {"if": {"column_id": "level", "filter_query": "{level} = 'not set in config/limits.yaml'"},
-            **risk.LEVEL_STYLES["NOT_SET"]} in styles
-    assert risk.LEVEL_STYLES["NOT_SET"]["color"] == "#6b7280"                                # grey
-    breach, _warn, _ok, not_set, na = table.data
+    breach, _warn, _ok, na = table.data
     assert breach["value"] == 120.0 and breach["limit_value"] == 100.0 and breach["used_pct"] == 120.0
-    assert not_set["value"] == 1_200_000.0 and not_set["limit_value"] == "not set" and not_set["used_pct"] is None
-    assert not_set["reason"] == "no limit set in config/limits.yaml (desk_limits.net_usd_per_sector)"
-    assert na["value"] == "n/a" and table.tooltip_data[4]["value"]["value"] == "COH7 Comdty: no delta"
+    assert na["value"] == "n/a" and table.tooltip_data[3]["value"]["value"] == "COH7 Comdty: no delta"
     assert table.tooltip_data[0]["limit"]["value"] == "basis of gross_lots"
-    assert "1 BREACH, 1 WARN, 1 OK, 1 not set, 1 n/a" in _text(section)
+    assert "From config/limits.yaml: 1 BREACH, 1 WARN, 1 OK, 1 n/a." in _text(section)
+    # the not-set limit: one collapsed line, its position and config key one click away
+    drawer = next(n for n in _walk(section) if getattr(n, "id", None) == risk.LIMITS_NOT_SET_ID)
+    assert type(drawer).__name__ == "Details" and drawer.open is False
+    assert _text(drawer.children[0]) == "Not set (1)"
+    item = next(n for n in _walk(drawer) if getattr(n, "className", "") == "limit-not-set-item")
+    assert item.children == "energy 1.20m USD"
+    assert "Position: 1,200,000 USD." in item.title and "(desk_limits.net_usd_per_sector)" in item.title
+    assert "basis of net_usd_sector" in item.title
     # single-line rows: the reason clipped, whole on hover; the explanation is the title's hover
-    assert table.tooltip_data[3]["reason"]["value"] == "no limit set in config/limits.yaml (desk_limits.net_usd_per_sector)"
+    assert table.tooltip_data[1]["reason"]["value"] == "90% of the limit (warn from 80%)"
     assert any(r.get("textOverflow") == "ellipsis" and r["if"]["column_id"] == "reason" for r in table.style_cell_conditional)
     assert any("BREACH above the limit" in t for t in _titles(section))
+
+
+def _not_set_checks() -> list:
+    """The shape limit_checks returns on a fresh config/limits.yaml: every limit NOT_SET."""
+    def c(limit, scope, value, source="desk", unit="lots", key="desk_limits.x"):
+        return {"limit": limit, "scope": scope, "source": source, "unit": unit, "value": value, "limit_value": None,
+                "used_pct": None, "level": "NOT_SET", "reason": f"no limit set in config/limits.yaml ({key})",
+                "basis": f"basis of {limit}"}
+    return [c("gross_lots", "book", 42.5), c("gross_usd", "book", 3_400_000.0, unit="USD"),
+            c("net_usd_sector", "energy", -1_200_000.0, unit="USD"), c("net_usd_sector", "metals", None, unit="USD"),
+            c("net_usd_commodity", "NYMEX:CL", -900_000.0, unit="USD"),
+            c("net_usd_commodity", "LME:CA", 300_000.0, unit="USD"),
+            c("exchange_spot_month", "NYMEX:CL 2026-12 (last trade 2026-11-19, estimated)", 5.0, source="exchange"),
+            c("exchange_single_month", "NYMEX:CL 2027-01", -8.0, source="exchange"),
+            c("exchange_all_months", "NYMEX:CL", -3.0, source="exchange"),
+            c("exchange_spot_month", "LME:CA 2026-12 (last trade 2026-12-14)", 2.0, source="exchange"),
+            c("lots_per_contract_month", "NYMEX:CL 2026-12", 5.0),
+            c("lots_per_contract_month", "NYMEX:CL 2027-01", -8.0),
+            c("lots_per_contract_month", "LME:CA 2026-12", 2.0)]
+
+
+def test_nothing_set_reads_one_quiet_line_with_every_limit_collapsed_under_it():
+    from dash._utils import to_json
+    checks = _not_set_checks()
+    section = risk.limits_section(checks)
+    to_json(section)                                         # serialises
+    # no table, one quiet line on screen and one collapsed line
+    assert not [n for n in _walk(section) if isinstance(n, dash_table.DataTable)]
+    shown = [_text(n) for n in _walk_open(section) if getattr(n, "className", "") == "section-kicker"]
+    assert shown == ["No limit is set in config/limits.yaml yet: the positions are measured, not checked."]
+    drawer = next(n for n in _walk(section) if getattr(n, "id", None) == risk.LIMITS_NOT_SET_ID)
+    assert drawer.open is False and _text(drawer.children[0]) == f"Not set ({len(checks)})"
+    assert "measured but not checked" in drawer.children[0].title
+    # nothing dropped: one item per check, each with its config key on hover
+    items = [n for n in _walk(drawer) if getattr(n, "className", "") == "limit-not-set-item"]
+    assert len(items) == len(checks)
+    assert all("no limit set in config/limits.yaml" in i.title for i in items)
+    # grouped: the desk first (book, sectors, each root), then the exchange by root
+    heads = [_text(n) for n in drawer.children[1:] if type(n).__name__ == "Div"]
+    assert heads == ["Desk limits (9)", "Exchange limits (4)"]
+    lines = [" ".join(_texts(li)) for li in _walk(drawer) if type(li).__name__ == "Li"]
+    assert lines == [
+        "Book   gross lots 42.5 lots  ·  gross USD 3.40m USD",
+        "Net USD by sector   energy −1.20m USD  ·  metals n/a",
+        "NYMEX:CL   net USD −900k USD  ·  2026-12 5 lots  ·  2027-01 -8 lots",
+        "LME:CA   net USD 300k USD  ·  2026-12 2 lots",
+        "NYMEX:CL   spot month 2026-12 5 lots  ·  single month 2027-01 -8 lots  ·  all months -3 lots",
+        "LME:CA   spot month 2026-12 2 lots"]
+    # a missing position is n/a with its reason, never zero; the spot month's last trade is on hover
+    metals = next(i for i in items if i.children.startswith("metals"))
+    assert "Position: n/a (the position has no figure)." in metals.title
+    spot = next(i for i in items if i.children.startswith("spot month 2026-12 5"))
+    assert "last trade 2026-11-19, estimated" in spot.title
+
+
+def test_the_not_set_drawer_is_absent_when_every_limit_is_set():
+    checks = [c for c in _checks() if c["level"] != "NOT_SET"]
+    section = risk.limits_section(checks)
+    assert risk.LIMITS_NOT_SET_ID not in _ids(section) and risk.not_set_drawer(checks) is None
+    assert len(_table(section, risk.LIMITS_TABLE_ID).data) == len(checks)
 
 
 def test_sections_run_commodities_first_then_fx_then_margin_and_limits():

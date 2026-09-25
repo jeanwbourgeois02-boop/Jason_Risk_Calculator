@@ -50,7 +50,7 @@ from dash.dash_table.Format import Format, Scheme, Sign
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import MINUS, about, issues_drawer, marker, short_money
+from ui.tabs.formatting import MINUS, about, issues_drawer, marker, short_money, tab_link
 from ui.tabs.header import AS_OF_STORE_ID
 
 log = logging.getLogger(__name__)
@@ -120,7 +120,11 @@ _SECTION = {"background": "var(--card)", "border": "1px solid var(--line)", "bor
             "padding": "10px 12px", "minWidth": 0}
 _LIST = {"listStyle": "none", "margin": 0, "padding": 0, "fontSize": "12.5px"}
 _LINE = {"padding": "3px 0", "borderBottom": "1px solid #eef0f4", **_ONE_LINE}
-_TAB_LINK = {"color": NAVY, "fontWeight": 600, "marginLeft": "6px", "fontSize": "11.5px"}
+_TAB_LINK = {"marginLeft": "6px", "fontSize": "11.5px"}
+# The tabs a pointer can open: the label the user reads -> its stable key (ui.app.TAB_KEYS; not
+# imported from ui.app, which imports the tabs).
+TAB_KEYS = {"Book": "book", "Spreads": "spreads", "Curve": "curve", "Risk": "risk", "Expiries": "expiries",
+            "Blotter": "blotter", "FX & cash": "ladder", "Data": "market-data"}
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -181,9 +185,11 @@ def short_label(text: str, n: int = LABEL_CHARS) -> str:
     return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
-def tab_link(tab: str) -> html.Span:
-    """The name of the tab that holds the detail (named, not a navigation control)."""
-    return html.Span(f"→ {tab}", style=_TAB_LINK, title=f"The detail is on the {tab} tab.")
+def pointer(tab: str, idx: str) -> html.Span:
+    """The tab that holds the detail, as a link that opens it (`formatting.tab_link`): `tab` is
+    the label the user reads ("Curve", "Data"), `idx` the spot it sits in, "book-<spot>", unique
+    on the page for links to the same tab."""
+    return html.Span(tab_link(f"→ {tab}", TAB_KEYS[tab], idx), style=_TAB_LINK)
 
 
 # --------------------------------------------------------------------------- memo
@@ -568,7 +574,7 @@ def pnl_table(rows: Sequence[dict]) -> html.Div:
 def pnl_section(data: dict, rows: Sequence[dict]) -> html.Div:
     heading = html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
         about("P&L by spread today", PNL_ABOUT, level="h4", style={"margin": "0 0 6px"}),
-        marker("futures only", SCOPE_NOTE), tab_link("Spreads")])
+        marker("futures only", SCOPE_NOTE), pointer("Spreads", "book-pnl")])
     if data.get("spreads_error"):
         return html.Div(id=PNL_ID, style=_SECTION, children=[heading, message_box(data["spreads_error"])])
     if not rows:
@@ -650,7 +656,7 @@ def sector_totals(rows: Sequence[dict]) -> html.Div:
 
 def sector_section(data: dict) -> html.Div:
     heading = html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
-        about("Net outright by sector", SECTOR_ABOUT, level="h4", style={"margin": "0 0 6px"}), tab_link("Curve")])
+        about("Net outright by sector", SECTOR_ABOUT, level="h4", style={"margin": "0 0 6px"}), pointer("Curve", "book-sector")])
     if data.get("curve_error"):
         return html.Div(id=SECTOR_ID, style=_SECTION, children=[heading, message_box(data["curve_error"])])
     rows = sector_rows(data.get("curve"))
@@ -809,14 +815,18 @@ def alerts(data: dict) -> List[dict]:
     return [a for _n, a in sorted(enumerate(items), key=lambda pair: (pair[1]["severity"], pair[0]))]
 
 
-def alert_line(a: dict) -> html.Li:
-    return html.Li(title=a["hover"], style={**_LINE, "cursor": "help"}, children=[
+def alert_line(a: dict, n: int) -> html.Li:
+    """One alert: its chip, its words (the detail on hover) and a link to its tab, idx
+    "book-alert-<n>" (n = its place in the list, so no two share one)."""
+    return html.Li(style=_LINE, children=[
         html.Span(a["chip"], style={**_CHIP, **_CHIP_COLOURS[a["severity"]]}),
-        html.Span(a["text"], style={"color": MUTED} if a["severity"] == INFO else {}), tab_link(a["tab"])])
+        html.Span(a["text"], title=a["hover"], style={"cursor": "help", **({"color": MUTED}
+                                                                           if a["severity"] == INFO else {})}),
+        pointer(a["tab"], f"book-alert-{n}")])
 
 
 def alerts_list(data: dict) -> html.Ul:
-    return html.Ul([alert_line(a) for a in alerts(data)], style=_LIST)
+    return html.Ul([alert_line(a, n) for n, a in enumerate(alerts(data), start=1)], style=_LIST)
 
 
 def alerts_section(data: dict) -> html.Div:

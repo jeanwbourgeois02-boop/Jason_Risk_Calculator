@@ -134,6 +134,33 @@ def spec_for(shape: Shape, legs: Sequence[Leg], roots: Dict[str, ContractRoot],
                      tuple(shape.units_per_lot)), ""
 
 
+def spec_to_dict(spec: Optional[LevelSpec]) -> Optional[dict]:
+    """The spec as plain JSON-safe data (a screen may keep a position in a dcc.Store), or None."""
+    if spec is None:
+        return None
+    return {
+        "kind": spec.kind, "unit": spec.unit, "currency": spec.currency, "constant": spec.constant,
+        "weights": list(spec.weights), "units_per_lot": list(spec.units_per_lot),
+        "legs": [{"instrument_id": leg.instrument_id, "root_id": leg.root_id, "weight": leg.weight,
+                  "currency": leg.currency, "price_scale": leg.price_scale, "qty_conv": leg.qty_conv,
+                  "qty_factor": leg.qty_factor, "lot_units": leg.lot_units, "trade_ids": list(leg.trade_ids),
+                  "month_key": leg.month_key} for leg in spec.legs],
+    }
+
+
+def spec_from_dict(data: Optional[dict]) -> Optional[LevelSpec]:
+    """``spec_to_dict``'s inverse; None for None."""
+    if not data:
+        return None
+    legs = tuple(LevelLeg(str(x["instrument_id"]), str(x["root_id"]), float(x["weight"]), str(x["currency"]),
+                          float(x["price_scale"]), float(x["qty_conv"]),
+                          None if x.get("qty_factor") is None else float(x["qty_factor"]),
+                          float(x["lot_units"]), tuple(x.get("trade_ids") or ()), str(x.get("month_key") or ""))
+                 for x in data["legs"])
+    return LevelSpec(str(data["kind"]), str(data["unit"]), str(data["currency"]), float(data["constant"]), legs,
+                     tuple(float(w) for w in data["weights"]), tuple(float(u) for u in data["units_per_lot"]))
+
+
 def converted(price: float, leg: LevelLeg, spec: LevelSpec, s_leg: Optional[float] = None,
               s_unit: Optional[float] = None) -> float:
     """One leg's quoted price in the spread's unit (the research app's ``conversion_factor``).

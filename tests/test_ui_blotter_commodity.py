@@ -627,3 +627,97 @@ def test_positions_definitions_sit_on_hover_of_the_titles_and_summary_usd_is_k_m
     net = next(i for i, r in enumerate(footer.data) if r["position"].startswith("FX net"))
     assert footer.data[net]["detail"] == "incl. options" and "FX options' delta included" in footer.tooltip_data[net]["detail"]["value"]
     assert footer.tooltip_data[net]["usd"]["value"] == "1,000,000 USD"                      # the full figure on hover
+
+
+# --------------------------------------------------------------------------- the key date's label
+# The Futures & LME sub-tab's key date is value_book's settle_date: a future's expiry, an LME
+# ticket's prompt. Its header says which (user yes, 2026-09-25, to the "Settlement" label found
+# wrong); the old "Settlement" column (mark_date, the same date again on an open row) is gone.
+def _names(table) -> list:
+    return [c["name"] for c in table.columns]
+
+
+def test_the_key_date_reads_expiry_for_futures_alone_with_the_date_per_product_on_hover(strict_marks):
+    conn = _book()
+    try:
+        table = _futures_table(conn)
+        names = _names(table)
+        assert "Expiry" in names and "Settlement" not in names and "Expiry / prompt" not in names
+        assert "mark_date" not in [c["id"] for c in table.columns]
+        tip = table.tooltip_header["settle_date"]
+        assert "Future: the contract's last trade date" in tip and "LME forward: the prompt date" in tip
+        f1 = next(r for r in table.data if r["trade_id"] == "F1")
+        assert f1["settle_date"] == "2026-11-19"                     # the expiry, as value_book gives it
+        # every figure and id stays in sight
+        assert {"Fill", "Mark", "P&L (local)", "P&L (USD)", "Contract", "Trade id"} <= set(names)
+    finally:
+        conn.close()
+
+
+def test_the_key_date_reads_prompt_for_lme_alone_and_expiry_prompt_for_both(strict_marks):
+    conn = _db()
+    try:
+        _lme(conn, "L1", "LME:CA", 100.0, 9_800.0, "2026-09-16", 9_900.0)
+        assert "Prompt" in _names(_futures_table(conn))
+    finally:
+        conn.close()
+    conn = _lme_book()
+    try:
+        assert "Expiry / prompt" in _names(_futures_table(conn))
+    finally:
+        conn.close()
+    assert blotter.futures_key_date_label(None) == "Expiry / prompt"
+    # the filter refresh and the empty table keep the both-products label, never a stale one
+    assert blotter.scope_columns("futures")[1]["settle_date"] == "Expiry / prompt"
+    assert blotter.scope_columns("total")[1]["settle_date"] == "Expiry / value date"
+    assert blotter.scope_header_tips("total") == {}
+
+
+def test_a_settled_ticket_says_on_hover_the_date_of_the_price_it_was_frozen_at():
+    conn = _db()
+    try:
+        _lme(conn, "L9", "LME:NI", 12.0, 15_420.0, "2026-06-17")
+        conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
+                     "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, "
+                     "frozen_at, note) VALUES ('L9','LME:NI','LME_FWD','USD','2026-06-17',-1200,0,'SPOT',1,"
+                     "'2026-06-16','BBG_BDH',-1200,'2026-06-18T00:00:00','')")
+        conn.commit()
+        table = _futures_table(conn)
+        rec, tip = next((r, t) for r, t in zip(table.data, table.tooltip_data) if r["trade_id"] == "L9")
+        assert rec["settle_date"] == "2026-06-17"
+        assert tip["settle_date"]["value"] == ("settled: frozen at the official price of 2026-06-16, "
+                                               "the last on or before this date")
+    finally:
+        conn.close()
+    assert blotter._key_date_tip("OPEN", "2026-12-16") == ""        # an open row's mark_date is the key date itself
+    assert blotter._key_date_tip("SETTLED", "") == ""
+
+
+def test_the_row_panel_words_the_mark_date_for_what_it_is():
+    """value_book's mark_date on an open row is the key the mark is read at, never the close it
+    came from; on a settled row it is the frozen price's date; with no mark, the reason."""
+    fut = {"mark": 70.0, "mark_source": "BBG_BDH", "mark_date": "2026-11-19", "status": "OPEN", "product": "FUTURE"}
+    assert blotter.mark_used_text(fut) == "70.0 (BBG_BDH; keyed on the expiry 2026-11-19)"
+    lme = {**fut, "product": "LME_FWD", "mark_date": "2026-09-16", "mark_source": "BBG_BFXFORWARD"}
+    assert blotter.mark_used_text(lme) == "70.0 (BBG_BFXFORWARD; keyed on the prompt 2026-09-16)"
+    fwd = {**fut, "product": "FX_FWD", "mark_date": "2026-09-20"}
+    assert "keyed on the value date 2026-09-20" in blotter.mark_used_text(fwd)
+    settled = {**fut, "status": "SETTLED", "mark_date": "2026-06-16"}
+    assert blotter.mark_used_text(settled) == "70.0 (BBG_BDH; frozen at the official price of 2026-06-16)"
+    frozen = {**settled, "mark": float("nan"), "reason": ""}
+    assert blotter.mark_used_text(frozen) == (f"n/a ({blotter.SETTLED_MARK_REASON}; "
+                                              "frozen at the official price of 2026-06-16)")
+    unpriced = {**fut, "mark": float("nan"), "mark_date": "", "reason": "no official FUTURE_PX"}
+    assert blotter.mark_used_text(unpriced) == "n/a (no official FUTURE_PX)"
+    assert "dated" not in blotter.mark_used_text(fut)
+
+
+def test_the_row_panel_on_a_real_future_reads_keyed_on_the_expiry(strict_marks):
+    conn = _book()
+    try:
+        df = blotter.scope_df(conn, "futures", AS_OF)
+        panel = blotter.row_expand_panel(conn, "F1", df[df["trade_id"] == "F1"].iloc[0])
+        text = next(n.children for n in _walk(panel) if getattr(n, "className", "") == "blotter-row-marks")
+        assert "keyed on the expiry 2026-11-19" in text and "dated" not in text
+    finally:
+        conn.close()
