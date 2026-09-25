@@ -25,7 +25,7 @@ Rules:
 - Read CLAUDE.md before any work: the hard rules, "Working mode", "Lanes" and the sections below.
 - Never edit outside your files. You never call, message or edit another lane. A change needed elsewhere is a Request in your Handoff, and a question for another lane is "Blocked on"; the housekeeper carries both.
 - Write tests alongside code, in your own test files, and run only those (`py -3 -m pytest tests/test_header.py tests/test_ui.py -q -p no:cacheprovider`). The housekeeper runs the full suite once at the end. A red test in a file you do not own goes in your Handoff; you never edit it.
-- A figure that sums priced trades only says so in a visible caption, with the breakdown on hover. A period's step-back and the fill are named in their captions.
+- A figure that sums priced trades only says so in a short visible marker (`excl. 3`), the sentence and the breakdown on hover; a period's step-back and the fill likewise (`filled 2`, the date used on hover) (CLAUDE.md "Screens redesign plan", user 2026-09-25).
 - Net USD negates the engine's net non-USD delta exactly once, here.
 - The screen shows what the engine computed. It never recomputes P&L, delta, a period difference, a USD equivalent or a metric.
 - No figure is ever blank without its reason (a caption or a hover), and a missing input is never shown as zero.

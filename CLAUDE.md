@@ -2,7 +2,7 @@
 
 Commodity relative-value risk monitor for Jason, a paper trader in metals, energy and agriculture: listed futures and their calendar and inter-commodity spreads, options on futures, LME forwards and FX hedges (user, 2026-09-24), base currency USD. Python, SQLite, Dash. It shows one P&L (per-trade valuation, an LTD line, Daily / 5d / MTD / YTD / trading), the positions by commodity and contract month, a cash ladder (delta exposure, cashflow timing, settled cash, stress) and a blotter (every trade with its P&L and Greeks).
 
-The app was forked on 2026-09-23 from a macro FX / rates risk monitor (another trader, fund NMMF) and is being converted under "Commodity conversion plan" below. Until a phase lands, the sections it names still describe the macro app as it is; the plan's decisions already bind.
+The app was forked on 2026-09-23 from a macro FX / rates risk monitor (another trader, fund NMMF) and is being converted under "Commodity conversion plan" below; its screens are being rebuilt for relative value under "Screens redesign plan". Until a phase lands, the sections it names still describe the macro app as it is; the plan's decisions already bind.
 
 This file is the rulebook: what is true of the app now and what must not change without the user's say-so. It is not a changelog. History lives in git and `docs/bnp-excel-removal.md`; open items live in `docs/open-questions.md`, not here; the valuation spec is `docs/BUILD_PLAN.md` sections 2 to 4, which agree with "P&L conventions" below. Reference input: the synthetic Jason book `data/sample/blotter_sample.csv` (a real commodity export has not been seen yet).
 
@@ -85,6 +85,42 @@ The generic listed-option path (P&L from Bloomberg's option price, Greeks from i
 **Phases 3-5: built 2026-09-24**, the rules approved the same day (Decisions above) and described in the sections below. The golden book's re-pin on the grown sample (4 options on futures and 3 LME forwards added) waits on the user's yes. Everything Bloomberg-linked (the tickers, fields and price scales confirmed at a terminal) and the import of Jason's real blotter are parked (user, 2026-09-24: "everything bloomberg linked and excel imported will come but not now"): the code for them is built on best guesses and runs on request only.
 
 **Gates the user holds** (tracked in `docs/open-questions.md`): a real blotter sample and Jason's fund code (Phase 1 is built on a synthetic sample until then); Jason's vol target, stress scenarios, margin rates and desk / exchange limits (placeholders or unset until then: `config/risk.yaml`, `config/commodity_stress.yaml`, `config/limits.yaml`); the Bloomberg roots and price scales checked on the Bloomberg PC.
+
+## Screens redesign plan
+
+User, 2026-09-25: "i feel like the calculations are good but the ui here is not good - go for a deep think about the ui how it should be for commodities rv", then, on the proposal made that day, "ok lets make a plan - get the agents going - and get started". The screens are rebuilt for a commodity relative-value book. The engine's numbers do not change (hard rule 7 untouched): what changes is what the screens show, where, and how. Until a phase lands, "Tabs as views" still describes the screens as they are; the decisions below already bind. The housekeeper runs it through the screen lanes (and, for Phase B, spreads-engine and risk-history), phase by phase, committed and pushed when the full suite is green against the environmental baseline.
+
+**Decisions (user, 2026-09-25: the proposal's recommended options, taken on "ok").**
+- **The spread is the unit.** P&L, exposure and risk read spread → sector → book.
+- **One place per number.** A figure is shown on one screen; the others link to it.
+- **Numbers first.** A figure the engine could not give, or a sum that leaves something out, shows a short visible marker (`n/a`, `excl. 3`, `filled 2`) with its sentence on hover, and each tab gathers its reasons in one collapsed "Data issues (N)" drawer. A section's definitions sit on hover of its title, never as a paragraph above the table. Nothing is silent (hard rule 2 stands). This replaces the visible caption sentences described under "Header".
+- **Natural units.** Spreads in their quote unit ($/bbl, ¢/bu, a ratio), exposure in lots and USD per 1-unit move, money on summary screens in k / m (the full figure in every CSV). Trade rows keep full figures.
+- **Tabs, in this order:** Book (Phase B; the app opens on it), Spreads, Curve, Risk, Expiries, Blotter, FX & cash (today's Ladder), Data (today's Market data). Until Book lands the app opens on Spreads. This replaces the macro book's order of 2026-09-22 (Blotter first, Ladder second).
+- **Header:** one slim row. The P&L figures, gross commodity notional, net outright, open spreads, and chips for the next expiry event, the marks missing and (Phase B) VaR against the vol target. FX Net / Gross USD delta leave the header for FX & cash.
+- **Research context.** The research app's spread statistics (z-score, 5-year percentile, half-life, the day's move in σ: `spread_stats` in `../Commodity Dashboard/var/rv.sqlite`, whose spread ids are the `config/spreads/` template ids) are shown beside the book's spreads, read-only and labelled "research". They are context: never a mark, never in P&L or delta (hard rule 2 untouched), and they ask Bloomberg nothing.
+- **Reader.** Built for Jason as the daily reader (levels, entries and moves first), with the overseer's view on Book and Risk.
+
+**Phase A: clean-up, screens only.** ui-shell first: the tab order and names, and the shared helpers (a title with its definitions on hover, the Data issues drawer, the marker, the k / m formats). Then the tabs in parallel, each in its own files:
+- ui-header: the slim header; FX Net / Gross out.
+- ui-blotter: no P&L cards on Total book (the header is the total book); the trade table in commodity terms (commodity, exchange, contract, lots or tonnes, fill, mark, P&L in the contract's currency and in USD, plain product names).
+- ui-risk: commodities before currencies, commodity scenarios before FX scenarios, the history-folder and "not included" lists in the drawer, single-line rows.
+- ui-expiries: single-line rows, every column in sight at 1680 px, business days to the alert beside the level.
+- ui-ladder: the tab becomes FX & cash; the open futures table and the futures rows of its scenario table leave (they are on Curve and Risk).
+- ui-market-data: the tab becomes Data; data health first, the futures curves before the FX pair.
+- ui-curve, ui-spreads: definitions to hover, reasons to the drawer, k / m.
+In the parallel wave no lane edits the shared `tests/test_ui.py` or `tests/test_app.py`; each hands its changes to them to the housekeeper, who runs those fixes one lane at a time.
+
+**Phase B: the RV core.**
+- spreads-engine: a spread's identity across trade dates (one open position per spread, entries averaged); its level at entry, at the previous close and now, in its quote unit, from the fills and the official marks (the research app's spread formula, so the levels compare with its statistics); USD per 1-unit move of the spread.
+- risk-history: the research app's spread statistics, read-only.
+- Then ui-spreads: one row per spread grouped by family, with entry, now, the day's move, σ, z-score, percentile and P&L, and a drill-down with the spread's history.
+- A new ui-book lane (`ui/tabs/book.py`): today's P&L by spread, net outright by sector, alerts, top movers.
+- ui-header: the VaR chip.
+
+**Phase C: charts.**
+- ui-curve: the commodity × month heatmap, and each commodity's curve with the positions under it.
+- spreads-engine then ui-spreads: the P&L history per spread.
+- ui-market-data: market data by commodity.
 
 ## Data contract
 

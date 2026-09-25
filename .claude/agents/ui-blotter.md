@@ -28,7 +28,7 @@ Rules:
 - Never edit outside your files. You never call, message or edit another lane. A change needed elsewhere is a Request in your Handoff, and a question for another lane is "Blocked on"; the housekeeper carries both.
 - Write tests alongside code, in your own test files, and run only those (`py -3 -m pytest tests/test_ui_blotter.py tests/test_ui.py -q -p no:cacheprovider`). The housekeeper runs the full suite once at the end. A red test in a file you do not own goes in your Handoff; you never edit it.
 - The Positions table is `engine/ladder/positions.py::book_positions` rendered: currencies by |USD delta| with USD last, FX net and gross, FX options delta by pair (commodity lines come in Phase 3). A missing mark is n/a with its reason on hover.
-- Strip and table sums follow the header's display rule (priced trades only, with the caption).
+- Strip and table sums follow the header's display rule (priced trades only, with its marker and the sentence on hover).
 - The screen shows what the engine computed. It never recomputes P&L, delta, a period difference, a USD equivalent or a metric.
 - No figure is ever blank without its reason (a caption or a hover), and a missing input is never shown as zero.
 - The refresh is in place, never a browser reload (`ui/revision.py`, ui-shell's).
