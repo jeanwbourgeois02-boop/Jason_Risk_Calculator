@@ -125,6 +125,16 @@ def _result(rows, note="", settled=None):
             "settled_expired": settled or []}
 
 
+def _about(body):
+    """The "Roll calendar" title, its definitions on hover."""
+    return next(n for n in _walk(body) if "about-title" in (getattr(n, "className", "") or "")
+                and "Roll calendar" in _text(n))
+
+
+def _issues(body):
+    return next((n for n in _walk(body) if getattr(n, "id", None) == expiries.ISSUES_ID), None)
+
+
 def _settled(body):
     return next((n for n in _walk(body) if getattr(n, "id", None) == expiries.SETTLED_ID), None)
 
@@ -166,8 +176,13 @@ def test_render_shows_the_engines_rows_worst_first(tmp_path, stub_app):
 def test_render_counts_strip_matches_the_engines_counts(tmp_path, stub_app):
     body = expiries.render(AS_OF, _book(tmp_path / "risk.db"))
     assert _counts(body) == {"EXPIRED": "1", "RED": "0", "AMBER": "1", "GREEN": "1"}
-    text = _text(body)
-    assert "RED: 3 business days or fewer to the alert date; AMBER: 10 or fewer" in text
+    # the thresholds are definitions: on hover of the title, never a paragraph
+    title = _about(body)
+    assert "RED: 3 business days or fewer to the alert date; AMBER: 10 or fewer" in title.title
+    assert "RED: 3 business days" not in _text(body)
+    # one compact row of chips, each with its threshold on hover
+    red = next(n for n in _walk(body) if getattr(n, "id", None) == "expiries-count-red")
+    assert isinstance(red, dash.html.Span) and "3 business days or fewer" in red.title
 
 
 def test_an_estimated_date_is_marked_est_and_never_as_bloombergs(tmp_path, stub_app):
@@ -184,19 +199,51 @@ def test_an_estimated_date_is_marked_est_and_never_as_bloombergs(tmp_path, stub_
 def test_business_days_column_is_labelled_as_days_to_the_alert_date():
     table = _table(expiries.body(_result([_row()])))
     col = next(c for c in table.columns if c["id"] == "business_days")
-    assert col["name"] == "Business days to alert date" and col["type"] == "numeric"
+    assert col["name"] == "Business days to alert" and col["type"] == "numeric"
     assert "alert date" in table.tooltip_header["business_days"]
     assert all("to event" not in c["name"].lower() for c in table.columns)
 
 
-def test_the_reason_is_a_column_and_on_hover(tmp_path, stub_app):
+def test_the_reason_is_on_hover_not_a_column(tmp_path, stub_app):
     body = expiries.render(AS_OF, _book(tmp_path / "risk.db"))
     table = _table(body)
+    ids = [c["id"] for c in table.columns]
+    for gone in ("reason", "alert_basis", "calendar", "delivery", "dates_source"):
+        assert gone not in ids
     for rec, tip in zip(table.data, table.tooltip_data):
         assert rec["reason"]
-        assert tip["contract"]["value"] == rec["reason"] == tip["business_days"]["value"]
+        assert tip["contract"]["value"] == rec["reason"] == tip["business_days"]["value"] == tip["level"]["value"]
+        assert tip["alert_date"]["value"].startswith(f"Alert basis: {rec['alert_basis']}.")
+        assert f"Calendar: {rec['calendar']}. Delivery: {rec['delivery']}." in tip["exchange"]["value"]
     expired = table.data[0]
     assert "still held" in expired["reason"]
+
+
+def test_columns_lead_with_what_a_trader_acts_on_and_fit_at_1680_px():
+    rows = [_row(product="FUTURE"), _option_row(), _lme_row()]
+    table = _table(expiries.body(_result(rows)))
+    ids = [c["id"] for c in table.columns]
+    assert ids == ["rank", "level", "business_days", "alert_date", "contract", "name", "exchange", "lots",
+                   "next_event", "next_event_date", "last_trade_date", "first_notice_date", "product"]
+    widths = {r["if"]["column_id"]: int(r["width"].rstrip("px"))
+              for r in table.style_cell_conditional if "width" in r}
+    assert set(widths) == set(ids)
+    assert sum(widths.values()) <= expiries.WIDTH_BUDGET_PX <= 1680 - 80
+    # single-line rows: nothing wraps, a cut cell ends in an ellipsis
+    assert table.style_cell["whiteSpace"] == "nowrap" and table.style_cell["textOverflow"] == "ellipsis"
+    assert not any(r.get("whiteSpace") == "normal" for r in table.style_cell_conditional)
+    # the full name is on hover of the name (it may be cut)
+    assert table.tooltip_data[0]["name"]["value"].startswith("WTI Crude")
+
+
+def test_estimated_dates_carry_the_short_marker_and_the_sentence_on_hover():
+    table = _table(expiries.body(_result([_row(estimated=True, dates_source="ESTIMATED",
+                                               alert_basis="estimated: first business day of Sep 2026")])))
+    rec, tip = table.data[0], table.tooltip_data[0]
+    for col in ("next_event_date", "last_trade_date", "alert_date"):
+        assert rec[col].endswith(" (est.)")
+        assert expiries.ESTIMATE_TIP in tip[col]["value"]
+    assert tip["alert_date"]["value"].startswith("Alert basis: estimated: first business day of Sep 2026.")
 
 
 def test_the_empty_book_shows_the_engines_note(tmp_path, stub_app):
@@ -256,7 +303,7 @@ def test_the_product_column_shows_only_when_more_than_one_product_is_present():
                                         _row(product="CMDTY_OPTION", contract_id="CLZ26C 70 Comdty"),
                                         _row(product="LME_FWD", contract_id="LMCADS 2026-12-16")])))
     ids = [c["id"] for c in two.columns]
-    assert ids.index("product") == ids.index("level") + 1
+    assert ids[-1] == "product"
     assert [r["product"] for r in two.data] == ["Future", "Option", "LME prompt"]
 
 
@@ -346,9 +393,31 @@ def test_an_lme_entry_in_the_settled_section():
 # --------------------------------------------------------------------------- synthetic rows
 def test_unknown_delivery_reads_assumed_physical_and_beyond_coverage_is_marked():
     rows = [_row(delivery="", delivery_assumed="physical", beyond_calendar_coverage=True)]
-    rec = _table(expiries.body(_result(rows))).data[0]
+    body = expiries.body(_result(rows))
+    table = _table(body)
+    rec, tip = table.data[0], table.tooltip_data[0]
     assert rec["delivery"] == "not on file (assumed physical)"
     assert rec["calendar"] == "US (beyond coverage)"
+    assert "coverage" in tip["business_days"]["value"] and "coverage" in tip["exchange"]["value"]
+    assert any(r["if"].get("column_id") == "business_days" and "beyond coverage" in r["if"].get("filter_query", "")
+               for r in table.style_data_conditional)
+    drawer = _issues(body)
+    assert drawer is not None and drawer.open is False
+    text = _text(drawer)
+    assert "Data issues (2)" in text and "calendar file" in text and "treated as physical" in text
+
+
+def test_the_issues_drawer_gathers_the_reasons_and_is_absent_when_clean():
+    assert _issues(expiries.body(_result([_row()]))) is None
+    rows = [_row(level="RED", business_days=None, contract_id="XXZ26 Comdty",
+                 reason="+1 lot held, but its dates are unknown."),
+            _row(estimated=True, dates_source="ESTIMATED", contract_id="CLF27 Comdty"),
+            _row(contract_id="CLG27 Comdty")]
+    drawer = _issues(expiries.body(_result(rows)))
+    text = _text(drawer)
+    assert "Data issues (2)" in text
+    assert "+1 lot held, but its dates are unknown." in text
+    assert "1 of 3 open positions are dated by contract-master's estimate" in text and "CLF27 Comdty" in text
 
 
 def test_a_count_the_engine_could_not_make_reads_na_with_its_reason():
@@ -378,6 +447,8 @@ def test_layout_is_an_expiries_prefixed_shell_with_no_date_picker():
     assert all(i.startswith("expiries-") for i in ids), ids
     assert not any(type(n).__name__ == "DatePickerSingle" for n in _walk(layout))
     assert "Expiries" in _text(layout) and AS_OF in _text(layout)
+    title = next(n for n in _walk(layout) if "about-title" in (getattr(n, "className", "") or ""))
+    assert "(est.)" in title.title
     assert expiries.build_layout is expiries.layout
 
 

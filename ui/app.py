@@ -3,23 +3,17 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Six tabs (CLAUDE.md "Tabs as views"), Reconciliation removed 2026-09-16 (the old
-Excel workbook it existed to cross-check is no longer in use), Risk added 2026-09-22
-and Curve and Expiries added 2026-09-24 (commodity conversion): Blotter, Ladder,
-Curve, Expiries, Risk, Market data. A header (ui/tabs/header.py) sits
+Seven tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25), in this order: Spreads,
+Curve, Risk, Expiries, Blotter, FX & cash, Data. "FX & cash" is the former Ladder
+(ui/tabs/cash_ladder.py) and "Data" the former Market data (ui/tabs/market_data.py); each
+tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
+separate from the label the user reads, so a rename never moves an id. The app opens on the
+first tab (Spreads) until the Book tab lands (Phase B). A header (ui/tabs/header.py) sits
 above the tabs on every view, showing LTD / Daily / 5d / MTD / YTD / trading from
 engine.pnl.ledger.
 
-The "Overall book" tab and the six-tab CLAUDE.md layout are retired by
-docs/BUILD_PLAN.md (2026-09-15): that plan supersedes CLAUDE.md's "Six tabs as
-views" table as the app's headline structure.
-
-Options placement, decided 2026-09-17 (this note and CLAUDE.md's "Six tabs as
-views" section now agree, resolving the earlier conflict between the two):
-Options is not a fourth top-level tab here either. It lands inside the Blotter
-tab as a grouped, collapsible trade summary once engine/options/ (vendored
-options_calc, see that package's scope ledger) has real PREMIUM/DELTA marks to
-show -- see docs/open-questions.md item 61.
+Options are not a top-level tab: they live inside the Blotter tab as a grouped,
+collapsible trade summary (ui/tabs/options.py; docs/open-questions.md item 61).
 """
 from __future__ import annotations
 
@@ -37,11 +31,27 @@ from ui import revision, uploads
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
 
-# Order per user decision 2026-09-22 ("I want the first tab to be blotter, and the second to
-# be cash ladder"); the app opens on the first. The commodity tabs Curve (ui/tabs/curve.py),
-# Spreads (ui/tabs/spreads.py, Phase 3) and Expiries (ui/tabs/expiries.py), 2026-09-24
-# (commodity conversion), come next, then Risk (ui/tabs/risk.py, 2026-09-22) and Market data.
-VISIBLE_TABS = ["Blotter", "Ladder", "Curve", "Spreads", "Expiries", "Risk", "Market data"]
+# Order per the screens redesign (user, 2026-09-25: "the spread is the unit"), replacing the
+# macro book's Blotter-first order of 2026-09-22; the app opens on the first. Each label maps
+# to its stable key: the tab bar's value and the body id `tab-body-<key>`. The key never holds
+# '&' or a space, and a renamed tab keeps its key ("FX & cash" is still "ladder", "Data" still
+# "market-data"), so nothing keyed on a body id moves.
+TAB_KEYS = {
+    "Spreads": "spreads",
+    "Curve": "curve",
+    "Risk": "risk",
+    "Expiries": "expiries",
+    "Blotter": "blotter",
+    "FX & cash": "ladder",
+    "Data": "market-data",
+}
+VISIBLE_TABS = list(TAB_KEYS)
+
+
+def tab_body_id(label: str) -> str:
+    """The DOM id of a tab's always-present body: `tab-body-<key>` ("FX & cash" ->
+    "tab-body-ladder")."""
+    return f"tab-body-{TAB_KEYS[label]}"
 
 
 def get_db_path() -> Path:
@@ -151,76 +161,60 @@ def load_summary(db_path: Union[str, Path]) -> dict:
 MAIN_TABS_ID = "main-tabs"
 
 
-def _slug(label: str) -> str:
-    return label.lower().replace(" ", "-")
-
-
 def build_layout(data: dict, db_path=None) -> html.Div:
     """Top-level layout (user decision 2026-09-15, item A, revised 2026-09-15): the tab
-    bar (`dcc.Tabs`, holding plain `dcc.Tab(label=..., value=...)` objects with NO
+    bar (`dcc.Tabs`, holding plain `dcc.Tab(label=..., value=<key>)` objects with NO
     children of their own -- Dash nests a Tab's children inside its own styled wrapper,
     which was pushing the navy `.top-bar` around the whole page) sits at the very top
     with the upload control pinned to its right; the P&L header sits directly under the
-    tab bar, on every tab. Below that, all six tab bodies live in one always-present
-    `html.Div(id="tab-bodies")`, each wrapped in its own `html.Div(id=f"tab-body-{slug}")`
+    tab bar, on every tab. Below that, every tab body lives in one always-present
+    `html.Div(id="tab-bodies")`, each wrapped in its own `html.Div(id=tab_body_id(label))`
     -- bodies never leave the layout, so every tab's own callbacks (registered against
     ids inside their body) keep firing regardless of which tab is selected. One
-    show/hide callback (registered in `create_app`) toggles the six bodies' `style` on
-    `main-tabs`' `value`.
+    show/hide callback (registered in `create_app`) toggles the bodies' `style` on
+    `main-tabs`' `value` (the selected tab's key, `TAB_KEYS`).
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
-    module only assembles them and wires the as-of date picker (owned by the Ladder
-    tab) into `header.AS_OF_STORE_ID` so the header reflects whichever date the user
-    has picked.
+    module only assembles them and wires the Blotter's and FX & cash's date pickers into
+    `header.AS_OF_STORE_ID` so the header reflects whichever date the user has picked.
 
-    Coordinator addition, 2026-09-15: the Ladder tab's date picker (and the header,
-    which mirrors it) default to TODAY in America/New_York, not the last BNP snapshot
-    date -- the ladder is a "what's open today" view, not a snapshot replay, and
-    `engine.ladder.exposure_adapter.records_from_db` already selects trades open on
-    whatever as_of it is given (trade_date <= as_of <= settle_date). The Blotter keeps
-    defaulting to the last uploaded snapshot date, since it renders the loaded trade file
-    itself. Market data opens on today too (2026-09-21): its whole-book panels ("What is
-    missing", "Marks that look wrong") ask whether TODAY's marks can be trusted, and the
-    live pull only writes today's -- the last trade date is often a past day."""
+    Defaults: FX & cash (the former Ladder) opens on TODAY in America/New_York -- a
+    "what's open today" view (`engine.ladder.exposure_adapter.records_from_db` selects
+    trades open on whatever as_of it is given). The Blotter keeps defaulting to the last
+    uploaded trade date, since it renders the loaded trade file itself. Data (the former
+    Market data) opens on today too (2026-09-21): its whole-book panels ask whether TODAY's
+    marks can be trusted, and the live pull only writes today's. Spreads, Curve, Risk and
+    Expiries have no picker: they follow the header's as-of store, whose default is today."""
     snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
-    ladder_default_date = cash_ladder.today_ny()
+    today = cash_ladder.today_ny()
     tab_builders = {
-        "Ladder": cash_ladder.build_layout,
-        "Blotter": blotter.build_layout,
-        "Curve": curve.build_layout,
-        "Spreads": spreads.build_layout,
-        "Expiries": expiries.build_layout,
-        "Risk": risk.build_layout,
-        "Market data": market_data.build_layout,
+        "spreads": spreads.build_layout,
+        "curve": curve.build_layout,
+        "risk": risk.build_layout,
+        "expiries": expiries.build_layout,
+        "blotter": blotter.build_layout,
+        "ladder": cash_ladder.build_layout,
+        "market-data": market_data.build_layout,
     }
-    tab_defaults = {
-        "Ladder": ladder_default_date,
-        "Blotter": snapshot_date,
-        # Curve, Spreads, Expiries and Risk have no picker of their own: they follow the header's
-        # as-of store, whose default is the Ladder's (today in New York), so their titles
-        # name the same date.
-        "Curve": ladder_default_date,
-        "Spreads": ladder_default_date,
-        "Expiries": ladder_default_date,
-        "Risk": ladder_default_date,
-        "Market data": ladder_default_date,
-    }
-    tabs = [dcc.Tab(label=label, value=label, className="tab", selected_className="tab--selected")
+    # Only the Blotter opens on another day; every other tab names today, the header's default.
+    tab_defaults = {key: today for key in tab_builders}
+    tab_defaults["blotter"] = snapshot_date
+    tabs = [dcc.Tab(label=label, value=TAB_KEYS[label], className="tab", selected_className="tab--selected")
             for label in VISIBLE_TABS]
     bodies = [
-        html.Div(tab_builders[label](default_date=tab_defaults[label]),
-                 id=f"tab-body-{_slug(label)}", className="tab-body")
+        html.Div(tab_builders[TAB_KEYS[label]](default_date=tab_defaults[TAB_KEYS[label]]),
+                 id=tab_body_id(label), className="tab-body")
         for label in VISIBLE_TABS
     ]
     return html.Div([
         html.Div(className="top-bar", children=[
-            dcc.Tabs(id=MAIN_TABS_ID, value=VISIBLE_TABS[0], children=tabs,
+            dcc.Tabs(id=MAIN_TABS_ID, value=TAB_KEYS[VISIBLE_TABS[0]], children=tabs,
                      parent_className="tabs-bar", className="tabs-strip"),
             uploads.layout(data),
         ]),
         header.layout(),
         html.Div(id="tab-bodies", children=bodies),
-        dcc.Store(id=header.AS_OF_STORE_ID, data=ladder_default_date),
+        dcc.Store(id=header.AS_OF_STORE_ID, data=today),
         dcc.Store(id=header.AS_OF_PICKED_ID, data=False),
         # "The data changed" signal (ui/revision.py): every tab listens, so an upload or a
         # Bloomberg pull shows up without a browser reload.
@@ -262,8 +256,8 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
 
     # The header's as-of (user, 2026-09-22: "always price pnl as of today ... unless changed
     # specifically otherwise"): today in New York on every page load (the callable layout
-    # above), following the Blotter's or the Ladder's date picker when the user changes one
-    # (the last change wins; Market data's own picker only scopes that tab), and rolling to
+    # above), following the Blotter's or FX & cash's date picker when the user changes one
+    # (the last change wins; Data's own picker only scopes that tab), and rolling to
     # the new day at New York midnight -- header and both pickers together -- unless a day
     # other than today was picked. `prevent_initial_call`: the pickers' initial values are
     # the same default and must not count as a pick.
@@ -292,9 +286,10 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
 
     # Show/hide the always-present tab bodies (see build_layout docstring) on the
     # dcc.Tabs' own `value`, rather than nesting bodies inside dcc.Tab.children.
-    body_outputs = [Output(f"tab-body-{_slug(label)}", "style") for label in VISIBLE_TABS]
+    # The tab bar's value is the selected tab's key (`TAB_KEYS`).
+    body_outputs = [Output(tab_body_id(label), "style") for label in VISIBLE_TABS]
     app.callback(*body_outputs, Input(MAIN_TABS_ID, "value"))(
-        lambda selected: [{} if label == selected else {"display": "none"} for label in VISIBLE_TABS]
+        lambda selected: [{} if TAB_KEYS[label] == selected else {"display": "none"} for label in VISIBLE_TABS]
     )
 
     # `bloomberg_feed_reason` is why there is no feed ("" when there is one), kept so the

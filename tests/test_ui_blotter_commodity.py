@@ -154,11 +154,14 @@ def test_commodities_section_renders_sectors_commodities_total_and_currency_expo
     by_name = {r["position"].strip(): r for r in rows["records"]}
     energy, wti, cu = by_name["Energy"], by_name["NYMEX WTI light sweet crude"], by_name["SHFE copper cathode"]
     assert (energy["net_usd"], energy["gross_usd"]) == (212_000.0, 212_000.0)
-    assert energy["net_lots"] == "" and energy["detail"] == "2 commodities"      # lots are per commodity
+    assert energy["net_lots"] == "" and energy["detail"] == ""                   # lots are per commodity; nothing left out
+    assert rows["tooltips"][0]["detail"]["value"] == "2 commodities"
     assert (wti["exchange"], wti["net_lots"], wti["gross_lots"], wti["net_units"], wti["unit"]) == ("NYMEX", 2.0, 2.0, 2000.0, "bbl")
     assert (wti["net_usd"], wti["gross_usd"], wti["sector"]) == (140_000.0, 140_000.0, "Energy")
     assert (cu["net_lots"], cu["gross_lots"], cu["net_usd"]) == (-2.0, 2.0, -111_111.0)
-    assert cu["detail"] == "CNY contract, in USD at the day's spot"
+    assert cu["detail"] == "CNY"                                                  # a marker; the sentence on hover
+    assert rows["tooltips"][[r["position"].strip() for r in rows["records"]].index("SHFE copper cathode")]["detail"] \
+        == {"value": "CNY contract, in USD at the day's spot", "type": "text"}
     assert all(r["position"].startswith("    ") for r in rows["records"] if r["kind"] == "commodity")
 
     assert rows["footer"] == [{"kind": "total", "position": blotter.COMMODITY_TOTAL_LABEL, "sector": "", "exchange": "",
@@ -166,13 +169,24 @@ def test_commodities_section_renders_sectors_commodities_total_and_currency_expo
                                "gross_usd": 323_111.0, "detail": blotter.COMMODITY_TOTAL_DETAIL}]
     assert [(r["position"], r["currency"], r["pnl_local"], r["pnl_usd"]) for r in rows["ccy_records"]] == [
         ("P&L held in CNY", "CNY", -10_000.0, -1_388.89), ("P&L held in JPY", "JPY", 5_000.0, None)]
-    assert rows["caption"] == _block()["reason"]
+    assert rows["caption"] == _block()["reason"] and rows["caption_marker"] == "excl. 1"
 
     section = blotter.commodity_positions_section(_block())
     ids = [t.id for t in _tables(section)]
     assert ids == [blotter.COMMODITY_POSITIONS_TABLE_ID, blotter.COMMODITY_POSITIONS_TABLE_ID + "-footer",
                    blotter.COMMODITY_CCY_TABLE_ID]
-    assert _block()["reason"] in _texts(section) and "P&L held in foreign currency" in _texts(section)
+    # Phase A: the reason is a marker beside the title, its sentence on hover; no paragraph
+    marker = next(n for n in _walk(section) if getattr(n, "className", "") == "marker")
+    assert (marker.children, marker.title) == ("excl. 1", _block()["reason"])
+    assert _block()["reason"] not in _texts(section) and "P&L held in foreign currency" in _texts(section)
+    assert not [n for n in _walk(section) if getattr(n, "className", "") == "section-kicker"]
+    # summary money in k / m: the cells stay numbers, whole units, the full figure on hover
+    tables = {t.id: t for t in _tables(section)}
+    body = tables[blotter.COMMODITY_POSITIONS_TABLE_ID]
+    usd_col = next(c for c in body.columns if c["id"] == "net_usd")
+    assert "s" in usd_col["format"]["specifier"]
+    cu_at = [r["position"].strip() for r in body.data].index("SHFE copper cathode")
+    assert body.data[cu_at]["net_usd"] == -111_111.0 and body.tooltip_data[cu_at]["net_usd"]["value"] == "(111,111) USD"
 
 
 def test_a_commodity_with_no_usd_figure_reads_na_with_its_reason_never_zero():
@@ -186,7 +200,8 @@ def test_a_commodity_with_no_usd_figure_reads_na_with_its_reason_never_zero():
     # the sector summed over its known commodities, the exclusion in sight and its reason on hover
     j = [r["position"].strip() for r in records].index("Metals")
     assert records[j]["net_usd"] == -111_111.0
-    assert records[j]["detail"] == "2 commodities; excludes 1 of 2 with no USD figure"
+    assert records[j]["detail"] == "excl. 1"
+    assert tips[j]["detail"]["value"].startswith("2 commodities; excludes 1 of 2 commodities with no USD figure: COMEX copper")
     assert tips[j]["net_usd"]["value"].startswith("excludes 1 of 2 commodities with no USD figure: COMEX copper")
     assert rows["footer_tooltips"][0]["net_usd"]["value"].startswith("excludes 1 of 3 commodities")
     # a currency the engine could not convert: n/a with the reason
@@ -206,7 +221,7 @@ def test_no_commodities_shows_the_reason_and_no_empty_table():
         rows = blotter.commodity_positions_rows(block)
         assert rows["records"] == [] and rows["footer"] == [] and rows["caption"] == why
         section = blotter.commodity_positions_section(block)
-        assert _tables(section) == [] and why in _texts(section)
+        assert _tables(section) == [] and why in _texts(section)   # no table: the reason stays in sight
 
 
 def test_the_commodities_sit_above_the_fx_lines_and_the_fx_lines_are_unchanged(monkeypatch):
@@ -247,12 +262,15 @@ def test_total_book_positions_render_the_engine_commodity_figures_on_a_real_book
         for s in block["sectors"]:
             for c in s["commodities"]:
                 line = by_name[c["name"]]
-                assert (line["net_lots"], line["net_usd"], line["gross_usd"]) == (c["net_lots"], c["net_usd"], c["gross_usd"])
+                # summary USD in k / m (Phase A): the engine's figure in whole units, never recomputed
+                assert (line["net_lots"], line["net_usd"], line["gross_usd"]) == (
+                    c["net_lots"], round(c["net_usd"]), round(c["gross_usd"]))
         total = tables[blotter.COMMODITY_POSITIONS_TABLE_ID + "-footer"].data[0]
-        assert (total["net_usd"], total["gross_usd"]) == (block["net_usd"], block["gross_usd"])
+        assert (total["net_usd"], total["gross_usd"]) == (round(block["net_usd"]), round(block["gross_usd"]))
         cny = tables[blotter.COMMODITY_CCY_TABLE_ID].data[0]
         assert (cny["currency"], cny["pnl_local"], cny["pnl_usd"]) == (
-            "CNY", block["currency_exposure"]["CNY"]["pnl_local"], block["currency_exposure"]["CNY"]["pnl_usd"])
+            "CNY", round(block["currency_exposure"]["CNY"]["pnl_local"]),
+            round(block["currency_exposure"]["CNY"]["pnl_usd"]))
         assert cny["pnl_local"] == pytest.approx(-2 * 5 * (80_000 - 79_000))   # the engine's figure is the book's
         order = list(tables)
         assert order.index(blotter.COMMODITY_POSITIONS_TABLE_ID) < order.index(blotter.POSITIONS_TABLE_ID)
@@ -373,7 +391,7 @@ def test_asset_classes_put_a_commodity_option_under_options_and_a_leftover_irs_u
 
         total = blotter.scope_df(conn, "total", AS_OF)
         rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, AS_OF, total)}
-        assert list(rows) == ["FX", "Futures", "Options", "Other", "Total"]
+        assert list(rows) == ["Futures", "Options", "FX", "Other", "Total"]   # commodity classes first (Phase A)
         assert rows["Options"]["trades"] == 1 and rows["Options"]["ltd"]["available"]
         assert rows["Options"]["ltd"]["value"] == pytest.approx(total.set_index("trade_id").loc["CO1", "pnl_usd"])
         assert rows["Options"]["ltd"]["value"] == pytest.approx(2 * 1000 * (3.60 - 3.10))
@@ -430,7 +448,7 @@ def test_lme_forwards_are_their_own_asset_class_never_other(strict_marks):
         engine = total.set_index("trade_id")
         assert engine.loc["L1", "pnl_usd"] == pytest.approx(100 * (9_900 - 9_800))   # value_book's own figure
         rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, AS_OF, total)}
-        assert list(rows) == ["FX", "Futures", "LME forwards", "Total"]
+        assert list(rows) == ["Futures", "LME forwards", "FX", "Total"]
         lme = rows["LME forwards"]
         assert lme["trades"] == 2 and rows["Futures"]["trades"] == 4
         assert lme["ltd"]["available"] and lme["ltd"]["value"] == pytest.approx(engine.loc["L1", "pnl_usd"])
@@ -494,3 +512,118 @@ def test_a_settled_lme_forward_shows_its_frozen_usd_figure_as_its_local_pnl():
         assert rec["pnl_local"] == pytest.approx(-1200) and rec["pnl_ccy"] == "USD"
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------- Total book, Phase A
+# Screens redesign Phase A (user, 2026-09-25): the Total book shows no P&L cards (the header is
+# the total book) and its trade table reads in commodity terms, every figure value_book's own.
+T1_CLOSE = "2026-06-18"          # the previous business day of AS_OF (a Saturday; the 19th is a holiday)
+
+
+def _total_table(conn):
+    layout = blotter.scope_layout("total", conn, AS_OF, with_notices=False)
+    table = next(t for t in _tables(layout) if t.id == "blotter-datatable-total")
+    return layout, table, {r["trade_id"]: (r, table.tooltip_data[i]) for i, r in enumerate(table.data)}
+
+
+def _cmdty_option(conn):
+    """2 lots of a WTI Dec26 75 call on the listed path, as the parser books it (base_ccy = the
+    root id), at 3.10, Bloomberg's price 3.60 on AS_OF."""
+    conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
+                 "bbg_ticker, expiry_date) VALUES ('CLZ26C 75 Comdty','CMDTY_OPTION','NYMEX:CL','USD',1000,0,"
+                 "'CLZ6C 75 Comdty','2026-11-17')")
+    conn.execute("INSERT INTO trades VALUES ('CO1','XLSX','CLZ26C 75 Comdty','CMDTY_OPTION','CO1','2026-06-01',2,3.10,"
+                 "'ACC','CPTY','','TR','call','')")
+    conn.execute("INSERT INTO trade_legs VALUES ('CO1',1,'NOTIONAL','USD',6200,'2026-06-01','2026-11-17',3.10,0)")
+    conn.execute("INSERT INTO marks VALUES (?,'CLZ26C 75 Comdty','2026-11-17','FUTURE_PX',3.60,'BBG_BDH',?)",
+                 (AS_OF, _CLOSE))
+    conn.commit()
+
+
+def test_total_book_trade_table_reads_in_commodity_terms_with_value_books_own_figures():
+    conn = _book()
+    _cmdty_option(conn)
+    conn.execute("INSERT INTO marks VALUES (?,'CLZ26 Comdty','2026-11-19','FUTURE_PX',69.0,'BBG_BDH',?)",
+                 (T1_CLOSE, f"{T1_CLOSE}T17:00:00-04:00"))
+    conn.commit()
+    try:
+        engine = blotter.scope_df(conn, "total", AS_OF).set_index("trade_id")
+        layout, table, rows = _total_table(conn)
+        names = [c["name"] for c in table.columns]
+        assert names[:4] == ["Instrument", "Commodity / pair", "Exchange", "Product"]
+        assert "Pair" not in names and "Amount" not in names and "Notional (USD)" not in names
+
+        wti, wti_tip = rows["F1"]
+        assert (wti["instrument_id"], wti["commodity"], wti["exchange"], wti["product"]) == (
+            "CLZ26 Comdty", get_root("NYMEX:CL").name, "NYMEX", "Future")
+        assert (wti["side"], wti["quantity"], wti["qty_unit"], wti["fill"], wti["mark"]) == ("Buy", 2, "lots", 68.0, 70.0)
+        assert wti["prev_close"] == 69.0 and wti_tip["prev_close"]["value"].startswith(f"{T1_CLOSE} close, BBG_BDH")
+        assert (wti["pnl_local"], wti["pnl_ccy"]) == (pytest.approx(4_000.0), "USD")
+        assert wti["pnl_usd"] == pytest.approx(engine.loc["F1", "pnl_usd"])
+        assert wti_tip["mark"]["value"] == "BBG_BDH"
+
+        cu, _ = rows["C1"]   # a CNY contract: local P&L in CNY beside the engine's USD figure
+        assert (cu["exchange"], cu["side"], cu["qty_unit"], cu["pnl_ccy"]) == ("SHFE", "Sell", "lots", "CNY")
+        assert cu["pnl_local"] == pytest.approx(-10_000.0) and cu["pnl_usd"] == pytest.approx(engine.loc["C1", "pnl_usd"])
+
+        opt, _ = rows["CO1"]
+        assert (opt["product"], opt["commodity"], opt["qty_unit"], opt["quantity"]) == (
+            "Option on future", get_root("NYMEX:CL").name, "lots", 2)
+
+        fx, _ = rows["T1"]   # an FX hedge: the pair in the commodity column, OTC, the base currency as unit
+        assert (fx["commodity"], fx["exchange"], fx["product"], fx["qty_unit"], fx["pnl_ccy"]) == (
+            "EURUSD", "OTC", "FX forward", "EUR", "USD")
+        assert fx["quantity"] == 1_000_000 and fx["pnl_usd"] == pytest.approx(engine.loc["T1", "pnl_usd"])
+
+        # the filters follow the columns: Commodity and Instrument, no Strategy
+        labels = [n.children for n in _walk(layout) if getattr(n, "className", "") == "blotter-filter"
+                  for n in [n.children[0]]]
+        assert labels[:2] == ["Commodity / pair", "Instrument"] and "Strategy" not in labels
+    finally:
+        conn.close()
+
+
+def test_total_book_missing_figures_say_why_and_are_listed_in_the_data_issues_drawer(strict_marks):
+    conn = _book(hg_price=False)   # COMEX copper: no price on any date
+    try:
+        layout, table, rows = _total_table(conn)
+        hg, tip = rows["H1"]
+        assert hg["mark"] is None and hg["pnl_usd"] is None and hg["prev_close"] is None   # n/a, never 0
+        assert "no FUTURE_PX" in tip["mark"]["value"] and "no FUTURE_PX" in tip["pnl_usd"]["value"]
+        assert "no FUTURE_PX" in tip["prev_close"]["value"]
+        drawer = next(n for n in _walk(layout) if getattr(n, "id", None) == blotter.TOTAL_ISSUES_ID)
+        assert drawer.open is False and drawer.children[0].children == "Data issues (1)"
+        assert "H1" in _texts(drawer)
+        # no P&L cards on the Total book: the header is the total book
+        assert not [n for n in _walk(layout) if getattr(n, "className", "") in ("cards", "card")]
+    finally:
+        conn.close()
+
+
+def test_a_trade_dealt_after_the_previous_close_has_no_prev_close_and_says_so():
+    conn = _book()
+    conn.execute("UPDATE trades SET trade_date = ? WHERE trade_id = 'B1'", (AS_OF,))
+    conn.commit()
+    try:
+        _, _, rows = _total_table(conn)
+        brent, tip = rows["B1"]
+        assert brent["prev_close"] is None and tip["prev_close"]["value"] == f"not in the book on the {T1_CLOSE} close (dealt after it)"
+    finally:
+        conn.close()
+
+
+def test_positions_definitions_sit_on_hover_of_the_titles_and_summary_usd_is_k_m(monkeypatch):
+    from engine.ladder import positions
+    monkeypatch.setattr(positions, "book_positions", lambda conn, as_of: {**_fx_blocks(), "commodities": _block()})
+    block = blotter.positions_table(None, AS_OF)
+    assert not [n for n in _walk(block) if getattr(n, "className", "") == "section-kicker"]   # no paragraph
+    titles = [n for n in _walk(block) if "about-title" in (getattr(n, "className", "") or "")]
+    assert [t.children[0] for t in titles] == ["Positions", "Commodities", "P&L held in foreign currency", "FX"]
+    assert all(t.title for t in titles)                                                      # definitions on hover
+    fx = next(t for t in _tables(block) if t.id == blotter.POSITIONS_TABLE_ID)
+    usd = next(c for c in fx.columns if c["id"] == "usd")
+    assert "s" in usd["format"]["specifier"]
+    footer = next(t for t in _tables(block) if t.id == blotter.POSITIONS_TABLE_ID + "-footer")
+    net = next(i for i, r in enumerate(footer.data) if r["position"].startswith("FX net"))
+    assert footer.data[net]["detail"] == "incl. options" and "FX options' delta included" in footer.tooltip_data[net]["detail"]["value"]
+    assert footer.tooltip_data[net]["usd"]["value"] == "1,000,000 USD"                      # the full figure on hover

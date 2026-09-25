@@ -1,4 +1,15 @@
-"""Market data tab: "Can I trust the numbers?" (BUILD_PLAN.md section 5).
+"""Data tab (the Market data tab until 2026-09-25): "Can I trust the numbers?" (BUILD_PLAN.md section 5).
+
+Screens redesign, Phase A (user, 2026-09-25): the tab is "Data" and reads in the order a
+commodity book needs it (`build_layout`): the top bar (date, Pull now, feed status); data
+health (the one "Data issues (N)" drawer, rows not loaded, trades left out of the headline,
+what is missing, marks that look wrong); the futures curves; the FX pair section (its pair
+dropdown, spot and forward curve); the Bloomberg library and contract dates
+(`reference_panels`); close completeness and the past closes the header needs; manual mark
+entry; the Bloomberg connection check last. Every definitions paragraph is on hover of its
+section title (`ui.tabs.formatting.about`), a section with nothing to report is one quiet line
+(`_quiet`), and the reasons given on hover are also gathered in the drawer; nothing is dropped.
+The numbered layout below is the history of how each part came in, not the order on screen.
 
 User decision 2026-09-15: this tab is organised BY CURRENCY PAIR, not by a flat
 inventory table. Layout:
@@ -81,6 +92,7 @@ from ui.feed_controls import (PullGuard, click_outcome, pull_timings, recalc_wor
                               seconds_words)
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs.controls import build_date_picker
+from ui.tabs.formatting import about, issues_drawer, marker
 
 BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"
 BBG_RESULTS_ID = "market-data-bbg-check-results"
@@ -132,6 +144,15 @@ PAST_CLOSES_TITLE = "Past closes the header needs"
 # is meant to be: a flag asks for a look, it does not say the mark is wrong.
 BAD_TICK_PCT = 2.5
 PANEL_PAGE_SIZE = 15   # rows per page in the two exception tables, so a bad day stays a bounded height
+
+# Screens redesign, Phase A (2026-09-25): the tab's one "Data issues (N)" drawer, gathering the
+# reasons the sections below give on hover (why no Bloomberg reason is shown, why a price is
+# missing, why a mark could not be compared), and the Bloomberg library / contract dates block,
+# now below the FX pair section.
+ISSUES_ID = "market-data-issues"
+REFERENCE_PANEL_ID = "market-data-reference"
+HEALTH_TITLE = "Data health"
+FX_SECTION_TITLE = "Spot and forward curve"
 
 MANUAL_INSTRUMENT_ID = "market-data-manual-instrument"
 MANUAL_SETTLE_ID = "market-data-manual-settle"
@@ -791,7 +812,7 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
                 {"if": {"filter_query": "{status} = 'FAILED'"}, "backgroundColor": "#fff4f2"},
                 {"if": {"filter_query": "{status} = 'SKIPPED'"}, "color": "#616e7c"},
             ]),
-        html.H4("Spot rates the ladder is using (latest official SPOT mark per currency)"),
+        html.H4("Spot rates the FX & cash tab is using (latest official SPOT mark per currency)"),
         dash_table.DataTable(
             id="market-data-rates-table",
             columns=[rk.numeric(n, i, rk.rate(8, trim=True)) if i == "rate" else rk.text(n, i)
@@ -1127,6 +1148,7 @@ def curve_chart(df: pd.DataFrame, spot: Optional[dict], pair: str, as_of: str):
         xaxis=dict(tickangle=-90, tickvals=used_dates or None, showgrid=False),
         yaxis_showgrid=False,
         showlegend=True,
+        height=300,
         margin=dict(t=40, b=60),
     )
     return dcc.Graph(id=CURVE_CHART_ID, figure=fig, config={"displayModeBar": False})
@@ -1485,7 +1507,13 @@ def _futures_curve_chart(block: dict):
 
 
 def _futures_block(block: dict) -> html.Details:
+    """One root's collapsible table. The "Why missing" column is shown only when a row of the
+    block has no price (2026-09-25: an empty column of blanks is noise); each missing price
+    also carries its reason on hover of the price cell."""
     rows = [{k: v for k, v in r.items() if not k.startswith("_")} for r in block["rows"]]
+    columns = list(block.get("columns", _FUTURES_COLUMNS))
+    if not block["missing"]:
+        columns = [(n, i) for n, i in columns if i != "why"]
     if block.get("lme"):
         summary = (f"{block['name']} ({block['root_id']}) · LME curve · {block['currency']} · "
                    f"{len(rows)} pillar(s) and prompt(s), {block['open']} open prompt(s)")
@@ -1497,8 +1525,10 @@ def _futures_block(block: dict) -> html.Details:
     table_id = (FUTURES_CURVE_TABLE_ID_PREFIX + ("lme-" if block.get("lme") else "")
                 + re.sub(r"[^A-Za-z0-9]+", "-", block["root_id"]).strip("-").lower())
     table = dash_table.DataTable(
-        id=table_id, columns=[{"name": n, "id": i} for n, i in block.get("columns", _FUTURES_COLUMNS)],
+        id=table_id, columns=[{"name": n, "id": i} for n, i in columns],
         data=rows,
+        tooltip_data=[{"price": {"value": r["why"], "type": "text"}} if r.get("why") else {} for r in rows],
+        tooltip_delay=0, tooltip_duration=None,
         page_size=24, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
         style_cell_conditional=(
             [{"if": {"column_id": "why"}, "whiteSpace": "normal", "height": "auto",
@@ -1514,27 +1544,36 @@ def _futures_block(block: dict) -> html.Details:
         html.Summary(summary), table, *([chart] if chart is not None else [])])
 
 
+def futures_curves_about(as_of: str) -> str:
+    """The Futures curves section's definitions, shown on hover of its title."""
+    return (f"The official FUTURE_PX of each contract on {as_of} (Bloomberg's price; on a past date its daily "
+            "PX_LAST close) with its source and snap time, against the latest earlier official close. Open "
+            "positions first, lots from the book. A contract with no official price shows \"missing\" and why "
+            "(on hover of the price, in the Why missing column and in Data issues); nothing is estimated here. "
+            "Expiry \"(est.)\" = the contract master's estimate until Bloomberg's date is on file. An LME metal "
+            "is its curve instead: the cash price, the 3-month and the monthly prompts the book needs, and each "
+            "open prompt's outright, by date.")
+
+
 def futures_curves_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
-                         today: Optional[str] = None):
-    """The Futures curves section: sector headings, one collapsible block per root. None when
-    no commodity future is open on `as_of`, so the section is absent from the tab."""
+                         today: Optional[str] = None, issues: Optional[list] = None):
+    """The Futures curves section: sector headings, one collapsible block per root, its
+    definitions on hover of the title. None when no commodity future is open on `as_of`, so
+    the section is absent from the tab (the tab then shows one quiet line). Each missing
+    price's reason is also added to `issues` (the tab's Data issues drawer) when given."""
     blocks = futures_curve_rows(conn, as_of, status, today=today)
     if not blocks:
         return None
-    children: list = [_kicker(
-        f"The official FUTURE_PX of each contract on {as_of} (Bloomberg's price; on a past date its daily "
-        "PX_LAST close) with its source and snap time, against the latest earlier official close. Open "
-        "positions first, lots from the book. A contract with no official price shows \"missing\" and why; "
-        "nothing is estimated here. Expiry \"(est.)\" = the contract master's estimate until Bloomberg's "
-        "date is on file. An LME metal is its curve instead: the cash price, the 3-month and the monthly "
-        "prompts the book needs, and each open prompt's outright, by date.")]
+    children: list = []
     sector = None
     for block in blocks:
         if block["sector"] != sector:
             sector = block["sector"]
             children.append(html.H5((sector or "no sector").capitalize(), style={"margin": "10px 0 4px"}))
         children.append(_futures_block(block))
-    return _panel(FUTURES_CURVES_TITLE, children)
+        if issues is not None:
+            issues.extend((f"{r['contract_id']} price", r["why"]) for r in block["rows"] if r["flag"] and r["why"])
+    return _panel(FUTURES_CURVES_TITLE, children, about_text=futures_curves_about(as_of))
 
 
 def _unrequestable_words(value) -> str:
@@ -1846,9 +1885,20 @@ def missing_rows(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = 
     return needed, rows
 
 
-def _panel(title: str, children: list, panel_id: Optional[str] = None) -> html.Div:
+def _panel(title: str, children: list, panel_id: Optional[str] = None, about_text: Optional[str] = None) -> html.Div:
+    """A section card; its definitions (`about_text`) sit on hover of the title, never as a
+    paragraph above the table (screens redesign, 2026-09-25)."""
     kwargs = {"id": panel_id} if panel_id else {}
-    return html.Div(className="section", children=[html.H4(title, style={"marginTop": "0"}), *children], **kwargs)
+    return html.Div(className="section", children=[about(title, about_text, level="h4", style={"marginTop": "0"}),
+                                                   *children], **kwargs)
+
+
+def _quiet(title: str, sentence, about_text: Optional[str] = None, extra: Optional[list] = None) -> html.Div:
+    """A section with nothing to report, as one quiet line: "<title> · <sentence>", the
+    definitions on hover of the title; `extra` (a collapsed detail) may follow on the line
+    below. Never a card with a paragraph (screens redesign, 2026-09-25)."""
+    return html.Div(className="status-line quiet-line", style={"margin": "2px 0 6px"}, children=[
+        about(title, about_text, level="span", style={"fontWeight": "600"}), " · ", sentence, *(extra or [])])
 
 
 def _kicker(text: str) -> html.P:
@@ -1887,35 +1937,46 @@ def _panel_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict]
         ])
 
 
-def missing_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None) -> html.Div:
-    """Panel 1: every mark the book needs on `as_of` that has no official mark."""
+MISSING_ABOUT = (
+    "Every mark the book needs on the date with no official mark on file. A trade that reads one is priced "
+    "off the nearest official marks until it arrives, and left out of the P&L with its reason when there are "
+    "none. Trades blocked = open trades that read the mark. Notional blocked = the absolute USD leg of those "
+    "trades' open legs (the base amount, under its own currency, where a pair has no USD leg); never converted "
+    "with a mark. Covers the marks requested from Bloomberg (spot, forwards, futures prices); option values are "
+    "computed by the app from these.")
+
+
+def missing_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
+                  issues: Optional[list] = None) -> html.Div:
+    """Panel 1: every mark the book needs on `as_of` that has no official mark. One quiet line
+    when nothing is missing. When the last pull cannot give Bloomberg's reason row by row, the
+    sentence saying why sits on a marker beside the count and goes to `issues` (the tab's Data
+    issues drawer) when given; the reason column is left out only when every row's is blank."""
     from ui.tabs.header import backfill_status
     needed, rows = missing_rows(conn, as_of, status)
-    scope = ("Covers the marks requested from Bloomberg (spot, forwards, futures prices); option values are "
-             "computed by the app from these.")
     if not needed:
-        return _panel(MISSING_TITLE, [html.P(f"The book needs no marks on {as_of}: no FX, futures or option "
-                                             f"trade is open that day."), _kicker(scope)])
+        return _quiet(MISSING_TITLE, f"The book needs no marks on {as_of}: no FX, futures or option trade is "
+                                     "open that day.", MISSING_ABOUT)
     if not rows:
-        return _panel(MISSING_TITLE, [html.P(f"Every one of the {needed} marks the book needs on {as_of} is "
-                                             f"official."), _kicker(scope)])
+        return _quiet(MISSING_TITLE, f"Every one of the {needed} marks the book needs on {as_of} is official.",
+                      MISSING_ABOUT)
     is_past = as_of < _book_today_iso()
     note = pull_note(status, as_of, is_past, backfill_status(conn) if is_past else None)
+    if note and issues is not None:
+        issues.append((MISSING_TITLE, note))
+    columns = [("Pair / instrument", "instrument_id"), ("Mark type", "mark_type"), ("Settle date", "settle_date"),
+               ("On file instead", "on_file"), ("Trades blocked", "trades_blocked"),
+               ("Notional blocked", "notional_blocked")]
+    has_reasons = any(r["reason"] for r in rows)
+    if has_reasons:
+        columns.append(("Bloomberg's reason (last pull)", "reason"))
     children = [
-        html.P(f"{len(rows)} of the {needed} marks the book needs on {as_of} have no official mark. "
-               "A trade that reads one of them shows no P&L until it arrives."),
-        _kicker("Trades blocked = open trades that read the mark. Notional blocked = the absolute USD leg of "
-                "those trades' open legs (the base amount, under its own currency, where a pair has no USD "
-                "leg); never converted with a mark. " + scope),
-        _panel_table(MISSING_TABLE_ID, [
-            ("Pair / instrument", "instrument_id"), ("Mark type", "mark_type"), ("Settle date", "settle_date"),
-            ("On file instead", "on_file"), ("Trades blocked", "trades_blocked"),
-            ("Notional blocked", "notional_blocked"), ("Bloomberg's reason (last pull)", "reason"),
-        ], rows, wide=("reason",), numeric=("trades_blocked", "notional_blocked")),
+        html.P([f"{len(rows)} of the {needed} marks the book needs on {as_of} have no official mark.",
+                marker("past close" if is_past else "no Bloomberg reason", note) if note else None],
+               className="status-line"),
+        _panel_table(MISSING_TABLE_ID, columns, rows, wide=("reason",), numeric=("trades_blocked", "notional_blocked")),
     ]
-    if note:
-        children.append(html.P(note, className="status-line"))
-    return _panel(MISSING_TITLE, children)
+    return _panel(MISSING_TITLE, children, about_text=MISSING_ABOUT)
 
 
 # ---- "Marks that look wrong"
@@ -2017,39 +2078,54 @@ _SUSPECT_COLUMNS = [
 ]
 
 
+def suspect_about(as_of: str, prev_day: str) -> str:
+    """The "Marks that look wrong" definitions, on hover of its title."""
+    from data.bloomberg.live import STALE_AFTER_SECONDS
+    return (f"Every official SPOT on {as_of}, and every official forward and futures price an open leg reads, "
+            f"against the same mark on {prev_day}, the previous business day. Flagged: a move above "
+            f"{BAD_TICK_PCT:g} %, a value exactly unchanged from the previous close (stale or copied), or, on "
+            f"today's date, a snap older than {STALE_AFTER_SECONDS // 60} minutes. A comparison of two stored "
+            "marks: nothing is recomputed.")
+
+
 def suspect_panel(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] = None,
-                  today: Optional[str] = None) -> html.Div:
-    """Panel 3: flagged marks in the open, the full list under a "Show all N marks" element."""
+                  today: Optional[str] = None, issues: Optional[list] = None) -> html.Div:
+    """Panel 3: flagged marks in a card, the full list under a collapsed "Show all N marks".
+    With nothing flagged it is one quiet line with that collapsed list under it. When the
+    previous business day has no marks, why sits on a marker and goes to `issues`."""
     found = suspect_rows(conn, as_of, now=now, today=today)
     rows, prev_day = found["rows"], found["prev_day"]
+    about_text = suspect_about(as_of, prev_day)
     if not rows:
-        return _panel(SUSPECT_TITLE, [html.P(f"No official spot, forward or futures mark the book uses is on "
-                                             f"file for {as_of}, so there is nothing to check.")])
-    from data.bloomberg.live import STALE_AFTER_SECONDS
-    children = [_kicker(
-        f"Every official SPOT on {as_of}, and every official forward and futures price an open leg reads, against "
-        f"the same mark on {prev_day}, the previous business day. Flagged: a move above {BAD_TICK_PCT:g} %, a value "
-        f"exactly unchanged from the previous close (stale or copied), or, on today's date, a snap older than "
-        f"{STALE_AFTER_SECONDS // 60} minutes. A comparison of two stored marks: nothing is recomputed.")]
+        return _quiet(SUSPECT_TITLE, f"No official spot, forward or futures mark the book uses is on file for "
+                                     f"{as_of}, so there is nothing to check.", about_text)
+    not_compared = None
     if not found["prev_has_marks"]:
         from ui.tabs.header import backfill_status, past_close_explanation
-        children.append(html.P(
-            f"No official marks are on file for {prev_day}, the previous business day, so the marks of {as_of} "
-            f"cannot be compared with a previous close: {past_close_explanation(backfill_status(conn), prev_day)}."))
+        why = (f"No official marks are on file for {prev_day}, the previous business day, so the marks of {as_of} "
+               f"cannot be compared with a previous close: {past_close_explanation(backfill_status(conn), prev_day)}.")
+        not_compared = marker(f"not compared with {prev_day}", why)
+        if issues is not None:
+            issues.append((SUSPECT_TITLE, why))
     flagged = [r for r in rows if r["flag"]]
     compared = sum(1 for r in rows if r["previous"])
-    if flagged:
-        children.append(html.P(f"{len(flagged)} of {len(rows)} marks flagged ({compared} compared with {prev_day})."))
-        children.append(_panel_table(SUSPECT_FLAGGED_TABLE_ID, _SUSPECT_COLUMNS, flagged, wide=("flag", "note"),
-                                     numeric=("value", "previous", "change_pct")))
-    elif found["prev_has_marks"]:
-        children.append(html.P(f"No mark is flagged: {compared} of {len(rows)} marks compared with {prev_day}."))
-    children.append(html.Details(className="details", children=[
+    show_all = html.Details(className="details", children=[
         html.Summary(f"Show all {len(rows)} marks"),
         _panel_table(SUSPECT_ALL_TABLE_ID, _SUSPECT_COLUMNS, rows, wide=("flag", "note"),
                      numeric=("value", "previous", "change_pct"), page_size=25),
-    ]))
-    return _panel(SUSPECT_TITLE, children)
+    ])
+    if not flagged:
+        sentence = (f"no mark is flagged: {compared} of {len(rows)} marks compared with {prev_day}"
+                    if found["prev_has_marks"] else f"{len(rows)} marks on file, none compared")
+        return _quiet(SUSPECT_TITLE, sentence, about_text, extra=[not_compared, show_all])
+    children = [
+        html.P([f"{len(flagged)} of {len(rows)} marks flagged ({compared} compared with {prev_day}).", not_compared],
+               className="status-line"),
+        _panel_table(SUSPECT_FLAGGED_TABLE_ID, _SUSPECT_COLUMNS, flagged, wide=("flag", "note"),
+                     numeric=("value", "previous", "change_pct")),
+        show_all,
+    ]
+    return _panel(SUSPECT_TITLE, children, about_text=about_text)
 
 
 # ---- "Past closes the header needs"
@@ -2103,15 +2179,19 @@ def past_close_rows(conn: sqlite3.Connection, header_as_of: str, backfill: Optio
 def past_closes_panel(conn: sqlite3.Connection, header_as_of: str, backfill: Optional[dict] = None) -> html.Div:
     """Panel 2. It replaces nothing: the 20-day completeness strip stays above it."""
     rows = past_close_rows(conn, header_as_of, backfill)
-    return _panel(PAST_CLOSES_TITLE, [
-        _kicker(f"The header's Daily, Previous day, 5d, MTD and YTD figures difference the LTD of {header_as_of} "
-                "(the header's as-of date) against these past closes. A close is complete when every mark the "
-                "book needed that day is official; the Bloomberg backfill fills them by itself after each pull."),
-        _panel_table(PAST_CLOSES_TABLE_ID, [
-            ("Date", "date"), ("Read by", "read_by"), ("Needed", "needed"), ("Present", "present"),
-            ("Status", "state"), ("Why it is incomplete", "why"),
-        ], rows, wide=("why",), numeric=("needed", "present")),
-    ])
+    about_text = (f"The header's Daily, Previous day, 5d, MTD and YTD figures difference the LTD of {header_as_of} "
+                  "(the header's as-of date) against these past closes. A close is complete when every mark the "
+                  "book needed that day is official; the Bloomberg backfill fills them by itself after each pull.")
+    table = _panel_table(PAST_CLOSES_TABLE_ID, [
+        ("Date", "date"), ("Read by", "read_by"), ("Needed", "needed"), ("Present", "present"),
+        ("Status", "state"), ("Why it is incomplete", "why"),
+    ], rows, wide=("why",), numeric=("needed", "present"))
+    if not any(r["flag"] for r in rows):
+        # nothing to report: one quiet line, the table collapsed under it
+        return _quiet(PAST_CLOSES_TITLE, f"all {len(rows)} complete or not needed for the header of {header_as_of}",
+                      about_text, extra=[html.Details(className="details", children=[
+                          html.Summary(f"Show the {len(rows)} dates"), table])])
+    return _panel(PAST_CLOSES_TITLE, [table], about_text=about_text)
 
 
 LIBRARY_TITLE = "Bloomberg library"
@@ -2198,24 +2278,24 @@ def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     if gaps:
         summary += f" · {len(gaps)} need(s) with no Bloomberg ticker, not asked"
     summary += " · changes only when trades come in · pulled only on request"
-    if not asked and not gaps:
-        body = [_kicker("No trade on file needs anything from Bloomberg on this date.")]
-    else:
-        kicker = ("Everything \"Pull Bloomberg now\" asks for, and nothing else. A forward curve is one "
+    about_text = ("Everything \"Pull Bloomberg now\" asks for, and nothing else. A forward curve is one "
                   "request per pair; a vol smile and an OIS curve are one ticker per point.")
-        if gaps:
-            kicker += (f" The {len(gaps)} flagged row(s) at the top are gaps: the book needs them but has no "
+    if gaps:
+        about_text += (f" The {len(gaps)} flagged row(s) at the top are gaps: the book needs them but has no "
                        "verified Bloomberg ticker to ask with, so nothing is asked and the reason is under Used for.")
-        body = [_kicker(kicker),
-                _panel_table(LIBRARY_KINDS_TABLE_ID,
-                             [("What it is for", "what"), ("Items", "items"), ("Trades", "trades"),
-                              ("With no ticker", "gaps")],
-                             library_kind_rows(conn, as_of), numeric=("items", "trades", "gaps")),
-                _panel_table(LIBRARY_TABLE_ID,
-                             [("Ticker", "ticker"), ("Field", "field"), ("Used for", "used_for"),
-                              ("Trades", "trades"), ("Needed until", "needed_until"), ("In the library since", "added_at")],
-                             gaps + asked, wide=("used_for",) if gaps else (), numeric=("trades",))]
-    return html.Details(className="details", children=[html.Summary(summary), *body])
+    if not asked and not gaps:
+        # nothing needed: one quiet line, not a collapsible with nothing in it
+        return _quiet(LIBRARY_TITLE, f"no trade on file needs anything from Bloomberg on {as_of}", about_text)
+    body = [_panel_table(LIBRARY_KINDS_TABLE_ID,
+                         [("What it is for", "what"), ("Items", "items"), ("Trades", "trades"),
+                          ("With no ticker", "gaps")],
+                         library_kind_rows(conn, as_of), numeric=("items", "trades", "gaps")),
+            _panel_table(LIBRARY_TABLE_ID,
+                         [("Ticker", "ticker"), ("Field", "field"), ("Used for", "used_for"),
+                          ("Trades", "trades"), ("Needed until", "needed_until"), ("In the library since", "added_at")],
+                         gaps + asked, wide=("used_for",) if gaps else (), numeric=("trades",))]
+    return html.Details(className="details", children=[
+        html.Summary(summary, title=about_text, className="about-title"), *body])
 
 
 CONTRACT_DATES_TITLE = "Contract dates"
@@ -2251,10 +2331,11 @@ def contract_dates_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     conservative expiry. Collapsed, like the library: the summary line counts on file and
     missing, the table lists each contract, missing first."""
     rows = contract_date_rows(conn, as_of)
+    about_text = ("FUT_LAST_TRADE_DT and FUT_NOTICE_FIRST, asked of Bloomberg on request, once per contract. Until a "
+                  "contract's dates are on file its future carries the contract master's conservative expiry.")
     if not rows:
-        return html.Details(className="details", children=[
-            html.Summary(f"{CONTRACT_DATES_TITLE} · none needed on {as_of}"),
-            _kicker("No open commodity future needs Bloomberg's contract dates on this date.")])
+        return _quiet(CONTRACT_DATES_TITLE, f"none needed on {as_of}: no open commodity future needs Bloomberg's "
+                                            "contract dates on this date", about_text)
     missing = [r for r in rows if r["flag"]]
     unaskable = sum(1 for r in missing if not r["why"].startswith("not on file yet"))
     summary = f"{CONTRACT_DATES_TITLE} · {len(rows) - len(missing)} of {len(rows)} contract(s) on file on {as_of}"
@@ -2263,9 +2344,7 @@ def contract_dates_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
         if unaskable:
             summary += f", {unaskable} with no Bloomberg ticker to ask with"
     return html.Details(className="details", children=[
-        html.Summary(summary),
-        _kicker("FUT_LAST_TRADE_DT and FUT_NOTICE_FIRST, asked of Bloomberg on request, once per contract. Until a "
-                "contract's dates are on file its future carries the contract master's conservative expiry."),
+        html.Summary(summary, title=about_text, className="about-title"),
         _panel_table(CONTRACT_DATES_TABLE_ID,
                      [("Contract", "contract_id"), ("Ticker", "bbg_ticker"), ("Status", "status"),
                       ("Last trade", "last_trade_date"), ("First notice", "first_notice_date"), ("Source", "source"),
@@ -2333,9 +2412,12 @@ def unpriced_trades_panel(conn: sqlite3.Connection, as_of: str) -> html.Div:
     """Every trade that is on file but missing from the headline P&L on the header's date,
     and why (user, 2026-09-21). The count here is the header's own "excludes N of M"."""
     total, rows = unpriced_trade_rows(conn, as_of)
+    about_text = ("A trade with no price on the date is left out of EVERY headline figure. Daily, 5d, MTD and YTD "
+                  "are the date's value minus the value on an earlier close, so each also leaves out the trades "
+                  "with no price on ITS close: that is why the counts differ from one figure to the next.")
     if not rows:
-        return _panel(UNPRICED_TITLE, [_kicker(f"All {total} trades on file are priced on {as_of}: nothing is left "
-                                               "out of the headline figures.")])
+        return _quiet(UNPRICED_TITLE, f"All {total} trades on file are priced on {as_of}: nothing is left out of the "
+                                      "headline figures.", about_text)
     by_reason: Dict[str, int] = {}
     for r in rows:
         key = re.sub(r"\s+for\s+\S+.*$", "", r["reason"]) or r["reason"]
@@ -2343,16 +2425,15 @@ def unpriced_trades_panel(conn: sqlite3.Connection, as_of: str) -> html.Div:
     top = "; ".join(f"{n} x {why}" for why, n in sorted(by_reason.items(), key=lambda kv: -kv[1])[:4])
     n_today = sum(1 for r in rows if r["left_out_of"].startswith("every"))
     return _panel(f"{UNPRICED_TITLE} · {n_today} of {total} unpriced on {as_of}, {len(rows) - n_today} more in some periods", [
-        _kicker(f"{n_today} trades have no price today, so EVERY headline figure leaves them out. Daily, 5d, MTD and "
-                "YTD are today's value minus the value on an earlier close, so each also leaves out the trades with "
-                "no price on ITS close: that is why the counts differ from one figure to the next. "
-                "Most common reasons: " + top + "."),
+        html.P(["Most common reasons: " + top + ".",
+                marker(f"excl. {n_today}", f"{n_today} trades have no price on {as_of}, so every headline figure "
+                                           "leaves them out.")], className="status-line"),
         _panel_table(UNPRICED_TABLE_ID,
                      [("Trade id", "trade_id"), ("Product", "product"), ("Instrument", "instrument_id"),
                       ("Trade date", "trade_date"), ("Status", "status"), ("Left out of", "left_out_of"),
                       ("Why", "reason")],
                      rows, wide=("reason", "left_out_of")),
-    ])
+    ], about_text=about_text)
 
 
 UPLOAD_ISSUES_TITLE = "Rows of the blotter file that did not become trades"
@@ -2373,17 +2454,17 @@ def upload_issues_panel(conn: sqlite3.Connection) -> html.Div:
     """What the last upload left out of the book entirely, row by row, with the parser's own
     reason -- these are not in any table or count elsewhere in the app."""
     rows = upload_issue_rows(conn)
+    about_text = ("Rows of your blotter file that are NOT in the book: no P&L, no position, not in any count. "
+                  "REJECTED = the row could not be read; NOT LOADED = a type the app does not handle yet.")
     if not rows:
-        return _panel(UPLOAD_ISSUES_TITLE, [_kicker("Nothing on file: every row of the last upload became a trade "
-                                                    "(or no blotter has been uploaded since this list was added; "
-                                                    "upload the file again to fill it).")])
+        return _quiet(UPLOAD_ISSUES_TITLE, "none on file: every row of the last upload became a trade (or no blotter "
+                                           "has been uploaded since this list was added; upload the file again to "
+                                           "fill it).", about_text)
     return _panel(f"{UPLOAD_ISSUES_TITLE} · {len(rows)} in {rows[0]['filename']}", [
-        _kicker("These rows are in your file but NOT in the book: no P&L, no position, not in any count. "
-                "REJECTED = the row could not be read; NOT LOADED = a type the app does not handle yet."),
         _panel_table(UPLOAD_ISSUES_TABLE_ID,
                      [("File row", "row_no"), ("Symbol", "symbol"), ("What happened", "kind"), ("Why", "reason")],
                      rows, wide=("reason",), numeric=("row_no",)),
-    ])
+    ], about_text=about_text)
 
 
 def safe_panel(title: str, build: Callable[[], html.Div]) -> html.Div:
@@ -2392,34 +2473,46 @@ def safe_panel(title: str, build: Callable[[], html.Div]) -> html.Div:
         return build()
     except Exception as exc:  # noqa: BLE001 -- say what failed where the panel would be
         import logging
-        logging.getLogger(__name__).exception("Market data panel %r failed", title)
+        logging.getLogger(__name__).exception("Data tab panel %r failed", title)
         return _panel(title, [message_box(f"This panel could not be built ({type(exc).__name__}: {exc}).")])
 
 
 def whole_book_panels(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
-                      header_as_of: Optional[str] = None) -> Tuple[html.Div, html.Div, html.Div]:
-    """(What is missing, Marks that look wrong, Past closes the header needs) for the tab's
-    `_update_body` render path. The first two follow the tab's own as-of date. The third
-    follows the HEADER's as-of date (`header_as_of`, the Ladder tab's date picker, which is
-    what ui/tabs/header.py differences from), and the New York book date when the header has
-    none yet."""
+                      header_as_of: Optional[str] = None,
+                      issues: Optional[list] = None) -> Tuple[html.Div, html.Div, html.Div]:
+    """(data health: rows not loaded, trades left out of the headline, what is missing;
+    Marks that look wrong; Past closes the header needs) for the tab's `_update_body` render
+    path. "What is missing" and "Marks that look wrong" follow the tab's own as-of date; the
+    trades left out and the past closes follow the HEADER's as-of date (`header_as_of`, what
+    ui/tabs/header.py differences from), and the New York book date when the header has none
+    yet. The reasons each gives on hover also go to `issues` (the Data issues drawer) when
+    given. The Bloomberg library and contract dates moved below the FX pair section on
+    2026-09-25 (`reference_panels`)."""
     header_day = header_as_of or _book_today_iso()
     return (html.Div([safe_panel(UPLOAD_ISSUES_TITLE, lambda: upload_issues_panel(conn)),
                       safe_panel(UNPRICED_TITLE, lambda: unpriced_trades_panel(conn, header_day)),
-                      safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status)),
-                      safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)),
-                      safe_panel(CONTRACT_DATES_TITLE, lambda: contract_dates_panel(conn, as_of))]),
-            safe_panel(SUSPECT_TITLE, lambda: suspect_panel(conn, as_of)),
+                      safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status, issues=issues))]),
+            safe_panel(SUSPECT_TITLE, lambda: suspect_panel(conn, as_of, issues=issues)),
             safe_panel(PAST_CLOSES_TITLE, lambda: past_closes_panel(conn, header_day)))
+
+
+def reference_panels(conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """The Bloomberg library and the contract dates, each a collapsed line (2026-09-25: below
+    the FX pair section, above close completeness)."""
+    return html.Div([safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)),
+                     safe_panel(CONTRACT_DATES_TITLE, lambda: contract_dates_panel(conn, as_of))])
+
+
+MANUAL_ENTRY_ABOUT = ("A MANUAL mark is never official: it is kept on file and shown on this tab as \"on file "
+                      "instead\", but no valuation uses it -- only an official mark prices a trade.")
 
 
 def manual_entry_form(default_pair: Optional[str] = None) -> html.Div:
     """Manual mark entry calling `data.bloomberg.manual.write_manual_mark`, pre-filled
-    with the pair currently selected at the top of the tab."""
+    with the pair currently selected in the FX pair section. The rule that a MANUAL mark is
+    never official is on hover of the title."""
     return html.Div(className="market-data-manual-entry", children=[
-        html.H4("Manual mark entry"),
-        html.P("A MANUAL mark is never official: it is kept on file and shown on this tab as \"on file "
-               "instead\", but no valuation uses it -- only an official mark prices a trade."),
+        about("Manual mark entry", MANUAL_ENTRY_ABOUT, level="h4"),
         html.Div(className="toolbar", children=[
             html.Div([html.Label("Instrument"), dcc.Input(id=MANUAL_INSTRUMENT_ID, type="text", value=default_pair)]),
             html.Div([html.Label("Settle date"), dcc.Input(id=MANUAL_SETTLE_ID, type="text", placeholder="YYYY-MM-DD")]),
@@ -2444,19 +2537,32 @@ def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
 
 
+TAB_TITLE = "Data"
+TAB_ABOUT = ("Can I trust the numbers? What is on file, what the book needs and why anything is missing, the "
+             "data's health first. This tab never asks Bloomberg for anything by itself: only Pull now (the same "
+             "press as the top bar's Pull Bloomberg now) does; its own timer only re-reads the marks on file.")
+HEALTH_ABOUT = ("The rows of the blotter file that did not become trades, the trades left out of the headline P&L, "
+                "the marks the book needs that are not on file as official, and the marks that look wrong. A check "
+                "with nothing to report is one line; Data issues gathers every reason given on hover below.")
+FX_SECTION_ABOUT = ("The selected pair's spot and every forward outright on file for the date, with its source and "
+                    "snap time, official first. Used by book = open trades with a leg settling on that date. A row "
+                    "that is not official is shown as reconciliation only: no valuation reads it.")
+COMPLETENESS_ABOUT = (f"One square per business day, the last {COMPLETENESS_DAYS}: green when every mark the book "
+                      "needed that day is on file as an official close, red otherwise. Hover a square for its counts.")
+
+
 def build_layout(default_date: Optional[str] = None) -> html.Div:
-    """Top bar (date, pair dropdown, pull button, status) + an (initially empty) body
-    container filled in by the callback registered in register_callbacks, plus the
-    static bottom block (completeness strip placeholder + manual entry form)."""
+    """The Data tab (the Market data tab until 2026-09-25), in the order a commodity book
+    reads it (screens redesign, Phase A): the top bar (date, Pull now, feed status); data
+    health (the Data issues drawer, rows not loaded, trades left out, what is missing, marks
+    that look wrong); the futures curves; the FX pair section (its pair dropdown, spot and
+    forward curve); the Bloomberg library and contract dates; close completeness and the past
+    closes the header needs; manual mark entry; the Bloomberg connection check last. Every
+    container is filled by the callback registered in `register_callbacks`."""
     return html.Div(className="market-data", children=[
-        html.H3("Market data"),
+        about(TAB_TITLE, TAB_ABOUT, level="h3"),
         html.Div(id=TOOLBAR_ID, className="toolbar", children=[
             build_date_picker(DATE_PICKER_ID, default_date=default_date),
-            html.Div(className="toolbar-group", children=[
-                html.Label("Pair"),
-                dcc.Dropdown(id=PAIR_DROPDOWN_ID, options=[], value=None, clearable=False,
-                            style={"width": "140px"}),
-            ]),
             html.Div(className="toolbar-group", children=[
                 html.Label("Bloomberg"),
                 html.Div([html.Button("Pull now", id=PULL_NOW_ID, n_clicks=0, className="btn"),
@@ -2468,18 +2574,29 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
             html.Div(id=STATUS_ID, className="status-line"),
         ]),
         dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
-        # Whole-book checks first: what is missing, then what looks wrong. Neither depends
-        # on the pair dropdown. Static containers: each is an Output of `_update_body`.
-        html.Div(id=MISSING_PANEL_ID),
-        html.Div(id=SUSPECT_PANEL_ID),
-        html.H4("Spot and forward curve for the selected pair"),
-        html.Div(id=BODY_ID),
-        # the commodity book's futures curves (Phase 3): filled by `_update_body`, empty when
-        # no commodity future is open on the date
-        html.Div(id=FUTURES_CURVES_PANEL_ID, style={"marginTop": "16px"}),
-        html.H4("Close completeness"),
+        # Data health first; none of it depends on the pair dropdown. Static containers: each
+        # is an Output of `_update_body`.
+        html.Div(className="data-health", style={"marginBottom": "12px"}, children=[
+            about(HEALTH_TITLE, HEALTH_ABOUT, level="h4"),
+            html.Div(id=ISSUES_ID),
+            html.Div(id=MISSING_PANEL_ID),
+            html.Div(id=SUSPECT_PANEL_ID),
+        ]),
+        # the commodity book's futures curves (Phase 3): one quiet line when no commodity
+        # future is open on the date
+        html.Div(id=FUTURES_CURVES_PANEL_ID),
+        html.Div(className="section", children=[
+            html.Div(className="toolbar", style={"alignItems": "center", "marginBottom": "6px"}, children=[
+                about(FX_SECTION_TITLE, FX_SECTION_ABOUT, level="h4", style={"margin": "0"}),
+                dcc.Dropdown(id=PAIR_DROPDOWN_ID, options=[], value=None, clearable=False,
+                             placeholder="Pair", style={"width": "140px"}),
+            ]),
+            html.Div(id=BODY_ID),
+        ]),
+        html.Div(id=REFERENCE_PANEL_ID, style={"marginBottom": "12px"}),
+        about("Close completeness", COMPLETENESS_ABOUT, level="h4"),
         html.Div(id="market-data-completeness-container"),
-        html.Div(id=PAST_CLOSES_PANEL_ID, style={"marginTop": "16px"}),
+        html.Div(id=PAST_CLOSES_PANEL_ID, style={"marginTop": "8px"}),
         manual_entry_form(),  # static: its ids are callback inputs and must exist on first render
         html.Div(className="bbg-check-block", children=[
             html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
@@ -2544,6 +2661,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(SUSPECT_PANEL_ID, "children"),
         Output(PAST_CLOSES_PANEL_ID, "children"),
         Output(FUTURES_CURVES_PANEL_ID, "children"),
+        Output(REFERENCE_PANEL_ID, "children"),
+        Output(ISSUES_ID, "children"),
         Input(DATE_PICKER_ID, "date"),
         Input(PAIR_DROPDOWN_ID, "value"),
         Input(REFRESH_ID, "n_intervals"),
@@ -2560,14 +2679,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         blank = html.Div()
         if not as_of_date:
             return (message_box("No as-of date available."), blank, "Bloomberg: status unknown", pair,
-                    blank, blank, blank, blank)
+                    blank, blank, blank, blank, blank, blank)
 
         db_path = get_db_path()
         try:
             conn = _connect_readonly(db_path)
         except sqlite3.OperationalError as exc:
             return (message_box(f"Database not available ({exc})."), blank, "Bloomberg: status unknown", pair,
-                    blank, blank, blank, blank)
+                    blank, blank, blank, blank, blank, blank)
 
         try:
             try:
@@ -2579,7 +2698,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             try:
                 body = pair_body(conn, as_of_date, pair) if pair else message_box("No FX pair available.")
             except Exception as exc:
-                body = message_box(f"Market data not available ({exc}).")
+                body = message_box(f"Spot and forward curve not available ({exc}).")
 
             try:
                 from data.bloomberg.inventory import close_completeness
@@ -2590,13 +2709,19 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             except ImportError as exc:
                 strip = message_box(f"Completeness not available yet ({exc}).")
 
-            missing, suspect, past_closes = whole_book_panels(conn, as_of_date, feed_status, header_as_of)
+            issues: list = []
+            missing, suspect, past_closes = whole_book_panels(conn, as_of_date, feed_status, header_as_of,
+                                                              issues=issues)
             futures = safe_panel(FUTURES_CURVES_TITLE,
-                                 lambda: futures_curves_panel(conn, as_of_date, feed_status)) or blank
+                                 lambda: futures_curves_panel(conn, as_of_date, feed_status, issues=issues))                 or _quiet(FUTURES_CURVES_TITLE, f"no commodity future is open on {as_of_date}",
+                          futures_curves_about(as_of_date))
+            reference = reference_panels(conn, as_of_date)
         finally:
             conn.close()
 
-        return body, strip, status_block(feed_status), pair, missing, suspect, past_closes, futures
+        drawer = issues_drawer(issues) or blank
+        return (body, strip, status_block(feed_status), pair, missing, suspect, past_closes, futures, reference,
+                drawer)
 
     guard = PullGuard()
 

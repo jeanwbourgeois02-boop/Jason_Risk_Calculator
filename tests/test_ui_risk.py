@@ -42,6 +42,18 @@ def _walk(node):
         yield from _walk(children)
 
 
+def _walk_open(node):
+    """What is on screen with every collapsed block shut: `_walk` that does not enter a Details."""
+    yield node
+    if type(node).__name__ == "Details":
+        return
+    children = getattr(node, "children", None)
+    if children is None:
+        return
+    for child in (children if isinstance(children, (list, tuple)) else [children]):
+        yield from _walk_open(child)
+
+
 def _texts(node) -> list:
     return [n for n in _walk(node) if isinstance(n, str)]
 
@@ -51,7 +63,7 @@ def _text(node) -> str:
 
 
 def _titles(node) -> list:
-    return [t for t in (getattr(n, "title", None) for n in _walk(node)) if t]
+    return [t for t in (getattr(n, "title", None) for n in _walk(node) if not isinstance(n, str)) if isinstance(t, str) and t]
 
 
 def _ids(node) -> list:
@@ -65,14 +77,39 @@ def _table(node, table_id: str) -> dash_table.DataTable:
 
 
 def _cards(body) -> dict:
-    """label -> (value text, note text or '', card title, value span)."""
+    """label -> (value text, note text or '', card title, value span, figure line). Every
+    card is three lines: the label, the figure line (the value, its markers, a flag) and one
+    clipped note line."""
     block = next(n for n in _walk(body) if getattr(n, "id", None) == risk.CARDS_ID)
     out = {}
     for card in block.children:
-        label, value = card.children[0].children, card.children[1]
-        note = card.children[2].children if len(card.children) > 2 else ""
-        out[label] = (value.children, note, card.title, value)
+        assert len(card.children) == 3, card
+        label, figure, note = card.children
+        assert note.style["whiteSpace"] == "nowrap" and note.style["textOverflow"] == "ellipsis"
+        value = figure.children[0]
+        out[label.children] = (value.children, note.children.replace("\u00a0", ""), card.title, value, figure)
     return out
+
+
+def _markers(figure) -> dict:
+    """The short markers on a card's figure line: text -> hover."""
+    return {m.children: getattr(m, "title", None) for m in figure.children[1:] if m.className == "marker"}
+
+
+def _drawer(body):
+    """The tab's one Data issues drawer."""
+    found = [n for n in _walk(body) if getattr(n, "id", None) == risk.ISSUES_ID]
+    assert len(found) == 1
+    return found[0]
+
+
+def _issues(body) -> list:
+    """The drawer's items as (label, sentence)."""
+    items = []
+    for li in _drawer(body).children[1].children:
+        label, _, sentence = li.children
+        items.append((label.children, sentence))
+    return items
 
 
 def _metrics(**over) -> dict:
@@ -195,23 +232,42 @@ def test_render_shows_an_engine_failure_instead_of_a_blank_tab(tmp_path, monkeyp
     assert "Risk could not be computed for 2026-09-22 (ValueError: bad history column)" in _text(out)
 
 
-# --------------------------------------------------------------------------- caption
-def test_caption_names_the_history_the_lag2_date_the_parameters_and_the_missing_list():
-    body = risk.body(_result())
-    lines = risk.caption_lines(_result())
-    assert lines[0] == "As of Tuesday 22 September 2026 (2026-09-22)."
-    assert lines[1] == "History: /hist/bbg_data, last close 2026-09-22; used to 2026-09-22, lag-2 date 2026-09-18."
-    assert lines[2] == ("Parameters: vol target 4,500,000; stress cap 2,250,000 (50% of the target); blended vol 2/3 trailing "
-                        "(500 bd) + 1/3 crisis (2008-01-01 to 2010-12-31); VaR window 252 bd at 95%.")
-    assert len(lines) == 3
-    assert "NOK: not in the scenarios (no rate for NOK)" in _text(body) and "Not included:" in _text(body)
-    # the config and history notes, when there are any
+# --------------------------------------------------------------------------- caption and drawer
+def test_caption_is_one_short_line_and_the_sources_and_missing_list_are_in_the_drawer():
     r = _result()
-    r["config"]["note"] = "/repo/config/risk.yaml not found: defaults in use"
+    body = risk.body(r)
+    parts = risk.caption_parts(r)
+    assert [t for t, _ in parts] == ["As of Tuesday 22 September 2026 (2026-09-22)", "FX history to 2026-09-22",
+                                     "vol target 4.50m"]
+    # each part's full sentence is its hover
+    assert parts[1][1].startswith("History: /hist/bbg_data, last close 2026-09-22; used to 2026-09-22, lag-2 date 2026-09-18.")
+    assert parts[2][1].startswith("Parameters: vol target 4,500,000;")
+    line = body.children[0].children[0]
+    assert line.style["whiteSpace"] == "nowrap" and line.style["textOverflow"] == "ellipsis"
+    assert [getattr(s, "title", None) for s in line.children if hasattr(s, "children")] == [p[1] for p in parts]
+    # everything else in one collapsed drawer: the history used, the parameters, the missing list
+    drawer = _drawer(body)
+    assert type(drawer).__name__ == "Details" and drawer.open is False
+    assert drawer.children[0].children == "Data issues (3)"
+    issues = _issues(body)
+    assert [label for label, _ in issues] == ["Market history", "Parameters", "Not included"]
+    assert issues[0][1] == ("History: /hist/bbg_data, last close 2026-09-22; used to 2026-09-22, lag-2 date 2026-09-18. "
+                            "Files: spot: bbg_raw_fx_marks.parquet (2007-01-01 to 2026-09-22, 5000 rows); "
+                            "yields: bbg_raw_fx_yields.parquet (not loaded (/hist/y not found)).")
+    assert issues[1][1] == ("vol target 4,500,000; stress cap 2,250,000 (50% of the target); blended vol 2/3 trailing "
+                            "(500 bd) + 1/3 crisis (2008-01-01 to 2010-12-31), cutover 2011-01-01; VaR window 252 bd at "
+                            "95%; worst day from 2008-01-01; shock dates: 2015-01-15 SNB floor removal; 2016-06-24 Brexit "
+                            "referendum result. Read from /repo/config/risk.yaml (loaded).")
+    assert issues[2] == ("Not included", "NOK: not in the scenarios (no rate for NOK)")
+    # the drawer comes before the first figure: nothing but the caption line above it
+    assert body.children[0].children[1] is drawer and body.children[1].id == risk.CARDS_ID
+    # the config and history notes, when there are any, and a config that did not load
+    r["config"].update(note="/repo/config/risk.yaml not found: defaults in use", loaded=False)
     r["history"]["note"] = "carry not included: /hist/y not found"
-    lines = risk.caption_lines(r)
-    assert lines[3] == "Config: /repo/config/risk.yaml not found: defaults in use."
-    assert lines[4] == "History: carry not included: /hist/y not found."
+    issues = _issues(risk.body(r))
+    assert ("Config", "/repo/config/risk.yaml not found: defaults in use.") in issues
+    assert ("History", "carry not included: /hist/y not found.") in issues
+    assert "(not loaded: /repo/config/risk.yaml not found: defaults in use)" in dict(issues)["Parameters"]
 
 
 # --------------------------------------------------------------------------- cards
@@ -220,15 +276,20 @@ def test_every_card_shows_its_formatted_figure_with_the_definition_on_hover():
     assert list(cards) == ["Net USD delta", "Gross USD delta", "Commodity net USD", "Commodity gross USD",
                            "Blended vol (annual)", "1y 95% VaR (1-day)",
                            "Worst day ex shocks", "Worst day raw"]
-    assert cards["Net USD delta"][0] == "1,750,000"
-    assert "header's FX net USD (+ = long USD): (1,550,000)" in cards["Net USD delta"][1]
-    assert cards["Gross USD delta"][0] == "1,750,000" and "header's FX gross: 1,550,000" in cards["Gross USD delta"][1]
+    # the figure in k / m, the full figure on its hover
+    assert cards["Net USD delta"][0] == "1.75m" and cards["Net USD delta"][3].title == "1,750,000"
+    assert cards["Net USD delta"][1] == "+ = long the underlyer"
+    assert "FX & cash tab's FX net USD (+ = long USD): (1,550,000)" in cards["Net USD delta"][2]
+    assert cards["Gross USD delta"][0] == "1.75m" and "FX & cash tab's FX gross: 1,550,000" in cards["Gross USD delta"][2]
+    assert "header" not in cards["Net USD delta"][2] + cards["Gross USD delta"][2]
     assert "currency and metal rows" in cards["Net USD delta"][2] and "equity" not in cards["Net USD delta"][2]
-    assert cards["Blended vol (annual)"][0] == "1,234,568" and cards["Blended vol (annual)"][1] == "27.4% of the 4,500,000 target"
-    assert cards["1y 95% VaR (1-day)"][0] == "25,000" and "positive = loss" in cards["1y 95% VaR (1-day)"][1]
-    assert cards["Worst day ex shocks"][0] == "(37,500)"
-    assert cards["Worst day ex shocks"][1] == f"{WORST_EX}; 1.7% of the 2,250,000 cap"
-    assert cards["Worst day raw"][0] == "(187,500)" and cards["Worst day raw"][1] == f"{SNB}; nothing excluded"
+    assert cards["Blended vol (annual)"][0] == "1.23m" and cards["Blended vol (annual)"][1] == "27.4% of the 4.50m target"
+    assert cards["1y 95% VaR (1-day)"][0] == "25.0k" and "positive = loss" in cards["1y 95% VaR (1-day)"][1]
+    assert cards["Worst day ex shocks"][0] == "(37.5k)" and cards["Worst day ex shocks"][3].title == "(37,500)"
+    assert cards["Worst day ex shocks"][1] == f"{WORST_EX}; 1.7% of the 2.25m cap"
+    assert cards["Worst day raw"][0] == "(188k)" and cards["Worst day raw"][1] == f"{SNB}; nothing excluded"
+    # nothing left out, so no marker on any figure line
+    assert all(not _markers(c[4]) for c in cards.values())
     # the definitions, with the config's numbers in them, are the cards' hovers
     assert "Blended annual vol = 2/3 x trailing 500-day vol + 1/3 x crisis vol (2008-01-01 to 2010-12-31)" in cards["Blended vol (annual)"][2]
     assert "lag-2 date (2026-09-18)" in cards["Blended vol (annual)"][2]
@@ -249,9 +310,11 @@ def test_over_cap_and_over_vol_target_are_flagged_in_red():
     body = risk.body(r)
     cards = _cards(body)
     assert "over cap" in _texts(body) and "over vol target" in _texts(body)
-    assert cards["Worst day ex shocks"][0] == "(2,960,000)" and "131.6% of the 2,250,000 cap" in cards["Worst day ex shocks"][1]
+    assert cards["Worst day ex shocks"][0] == "(2.96m)" and "131.6% of the 2.25m cap" in cards["Worst day ex shocks"][1]
     assert cards["Worst day ex shocks"][3].style["color"] == "var(--neg)" and cards["Worst day ex shocks"][3].style["fontWeight"] == "700"
-    assert cards["Blended vol (annual)"][0] == "6,390,000" and "142.0% of the 4,500,000 target" in cards["Blended vol (annual)"][1]
+    assert cards["Blended vol (annual)"][0] == "6.39m" and "142.0% of the 4.50m target" in cards["Blended vol (annual)"][1]
+    # the flag sits on the figure line, beside the figure, not under it
+    assert cards["Worst day ex shocks"][4].children[-1].children == "over cap"
     assert cards["Blended vol (annual)"][3].style["color"] == "var(--neg)"
 
 
@@ -262,7 +325,7 @@ def test_a_nan_figure_reads_na_with_its_reason_never_zero():
                      reasons={"vol_blended_ann_usd": why}, net_usd=NAN)
     r["missing"] = ["FX positions: no SPOT for USDNOK on 2026-09-22"]
     cards = _cards(risk.body(r))
-    value, note, _, span = cards["Blended vol (annual)"]
+    value, note, _, span, _ = cards["Blended vol (annual)"]
     assert value == "n/a" and note == why and span.title == why and "card-value--muted" in span.className
     assert cards["Net USD delta"][0] == "n/a" and cards["Net USD delta"][1] == "FX positions: no SPOT for USDNOK on 2026-09-22"
     assert "0" not in (cards["Blended vol (annual)"][0], cards["Net USD delta"][0])
@@ -292,7 +355,7 @@ def test_a_nan_figure_reads_na_with_its_reason_never_zero():
     r["book"]["net_usd"] = NAN
     r["missing"] = [f"FX option: USDJPY-{i}: no DELTA on 2026-09-22" for i in range(1, 19)]
     body = risk.body(r)
-    value, note, _, span = _cards(body)["Net USD delta"]
+    value, note, _, span, _ = _cards(body)["Net USD delta"]
     assert value == "n/a" and note == "FX option: USDJPY-1: no DELTA on 2026-09-22 (+17 more on hover)"
     assert span.title.count("no DELTA") == 18
     footer = _table(body, f"{risk.TABLE_ID}-footer")
@@ -308,6 +371,13 @@ def test_a_nan_figure_reads_na_with_its_reason_never_zero():
     r = _result(missing=["rates: IRSOIS-USD-1: no DV01_USD on 2026-09-22", "SPX: not in the book series (no ES price)"])
     r["book"]["net_usd"] = NAN
     assert _cards(risk.body(r))["Net USD delta"][1] == "no currency or metal position with a USD delta"
+    # a partial delta: the figure stands with a short "excl. N" marker, the reasons on its hover
+    r = _result(missing=["FX positions: no SPOT for USDNOK on 2026-09-22", "FX option: EURUSD-1: no DELTA on 2026-09-22"])
+    cards = _cards(risk.body(r))
+    assert cards["Net USD delta"][0] == "1.75m"
+    assert _markers(cards["Net USD delta"][4]) == {"excl. 2": "FX positions: no SPOT for USDNOK on 2026-09-22; "
+                                                              "FX option: EURUSD-1: no DELTA on 2026-09-22"}
+    assert "excl. 2" in _markers(cards["Gross USD delta"][4])
 
 
 def test_history_unavailable_shows_the_reason_and_every_metric_na():
@@ -321,18 +391,21 @@ def test_history_unavailable_shows_the_reason_and_every_metric_na():
     for row in r["underlyers"]:
         row.update(_nan_metrics("no market history: " + reason), reason="no market history: " + reason, carry=False)
     body = risk.body(r)
-    text = _text(body)
-    assert f"Market history unavailable: {reason}. Every currency and metal risk figure below is n/a" in text
+    # the caption says there is none, the folders tried are its hover and the drawer's first item
+    assert [t for t, _ in risk.caption_parts(r)][1] == "FX history: none"
+    assert reason in risk.caption_parts(r)[1][1]
+    assert _issues(body)[0] == ("Market history", f"Market history unavailable: {reason}. Every currency and metal "
+                                                  "risk figure is n/a; the positions and the scenarios stand.")
     cards = _cards(body)
     for label in ("Blended vol (annual)", "1y 95% VaR (1-day)", "Worst day ex shocks", "Worst day raw"):
-        assert cards[label][0] == "n/a" and reason in cards[label][1], label
-    assert cards["Net USD delta"][0] == "1,750,000"          # the positions stand
+        assert cards[label][0] == "n/a" and reason in cards[label][1] and reason in cards[label][3].title, label
+    assert cards["Net USD delta"][0] == "1.75m"          # the positions stand
     table = _table(body, risk.TABLE_ID)
     assert all(rec["vol_blended_ann_usd"] == "n/a" for rec in table.data)
     footer = _table(body, f"{risk.TABLE_ID}-footer")
     assert footer.data[0]["worst_1d_raw_usd"] == "n/a" and footer.data[0]["net_usd"] == 1_750_000.0
-    # the definitions still read, without a lag-2 date to name
-    assert "the history's last date less 2 business days" in _text(body)
+    # the definitions still read on hover, without a lag-2 date to name
+    assert any("the history's last date less 2 business days" in t for t in _titles(body))
 
 
 # --------------------------------------------------------------------------- the key table
@@ -350,9 +423,19 @@ def test_table_rows_follow_the_engines_order_and_the_book_is_pinned_under_them()
     chf = table.data[0]
     assert chf["net_usd"] == 1_250_000.0 and isinstance(chf["net_usd"], float)      # a number, so it ranks
     assert "dv01_usd" not in chf
-    assert chf["vol_blended_ann_usd"] == 1_234_567.8 and chf["worst_1d_raw_usd"] == -187_500.0
+    # money in k / M: whole units under the table's SI format (a stray 0.4 would print "400m")
+    assert chf["vol_blended_ann_usd"] == 1_234_568.0 and chf["worst_1d_raw_usd"] == -187_500.0
+    from ui.tabs import ranking as rk
+    formats = {c["id"]: c.get("format") for c in table.columns}
+    for col in ("net_usd", "gross_usd", "vol_blended_ann_usd", "var95_1d_usd", "worst_1d_raw_usd"):
+        assert formats[col] == rk.amount_short(nully=""), col
     assert chf["worst_1d_raw_date"] == SNB and chf["worst_1d_ex_shocks_date"] == WORST_EX
     assert chf["worst_day_ex_vs_target_pct"] == 0.8333 and chf["note"] == "carry included"
+    # single-line rows: the name and the note clipped with an ellipsis, the full note on hover
+    clipped = {r["if"]["column_id"]: r for r in table.style_cell_conditional if r.get("textOverflow") == "ellipsis"}
+    assert set(clipped) == {"underlyer", "note"} and all(r["whiteSpace"] == "nowrap" for r in clipped.values())
+    assert not any(r.get("whiteSpace") == "normal" for r in table.style_cell_conditional)
+    assert table.tooltip_data[0]["note"] == {"value": "carry included", "type": "text"}
     xau = table.data[2]
     assert xau["net_usd"] == 200_000.0 and xau["gross_usd"] == 200_000.0 and xau["note"] == "metal, not in the FX net"
     # a kind the tab has no label for is shown as the engine names it, not dropped
@@ -414,7 +497,13 @@ def test_scenario_table_shows_the_engines_totals_and_no_equity_line():
     assert metals["total"] == "n/a" and metals["fx_total"] == 0.0                     # n/a with the reason, a real 0 stays 0
     assert table.tooltip_data[2] == {"total": {"value": "no USD delta for XAU (no XAUUSD spot on 2026-09-22)", "type": "text"}}
     assert table.tooltip_data[1] == {}
-    assert "config/stress.yaml" in _text(body) and "the same scenarios as the Ladder's" in _text(body)
+    # the definition is the title's hover, naming the FX & cash tab (the Ladder's new name)
+    title = next(n for n in _walk(body) if getattr(n, "className", "") == "about-title"
+                 and "FX scenario stress" in _text(n))
+    assert "config/stress.yaml" in title.title and "the same scenarios as the FX & cash tab's" in title.title
+    assert "Ladder" not in " ".join(_titles(body)) + _text(body)
+    from ui.tabs import ranking as rk
+    assert all(c.get("format") == rk.amount_short(nully="") for c in table.columns[1:])
     # the matrix: underlyer order first, then the rest alphabetically; a currency a scenario does not move is blank
     matrix = _table(body, risk.MATRIX_TABLE_ID)
     assert [c["id"] for c in matrix.columns] == ["ccy", "USD +2% all", "Europe -3%", "Metals -10%"]
@@ -433,34 +522,39 @@ def test_scenario_table_shows_the_engines_totals_and_no_equity_line():
 
 
 # --------------------------------------------------------------------------- definitions
-def test_definitions_block_states_the_formulas_and_the_config_values():
-    body = risk.body(_result())
-    block = next(n for n in _walk(body) if getattr(n, "id", None) == risk.DEFINITIONS_ID)
-    assert block.open is False and type(block).__name__ == "Details"
-    text = _text(block)
-    for needle in ("Definitions", "each currency or metal row's USD delta x its daily move",
-                   "Blended annual vol = 2/3 x trailing 500-day vol + 1/3 x crisis vol (2008-01-01 to 2010-12-31)",
-                   "minus the 5th percentile of the last 252 daily", "positive = loss",
-                   "SNB floor removal 2015-01-15, Brexit referendum result 2016-06-24", "set to 0",
-                   "Cap = 50% of the vol target = 2,250,000", "nothing excluded",
-                   "vol target 4,500,000; stress cap 2,250,000 (50%); trailing window 500 bd, weights 2/3 / 1/3",
-                   "crisis window 2008-01-01 to 2010-12-31, cutover 2011-01-01; VaR window 252 bd at 95%",
-                   "worst day from 2008-01-01", "Read from /repo/config/risk.yaml (loaded)",
-                   "spot: bbg_raw_fx_marks.parquet (2007-01-01 to 2026-09-22, 5000 rows)",
-                   "yields: bbg_raw_fx_yields.parquet (not loaded (/hist/y not found))",
-                   "config/stress.yaml"):
-        assert needle in text, needle
-    labels = [n.children for n in _walk(block) if type(n).__name__ == "Dt"]
-    assert labels == ["Daily $ P&L", "Net / Gross USD delta", "Commodity net / gross USD", "Parts and views",
-                      "Blended vol", "Crisis-window fallback", "VaR", "Worst day ex shocks", "Shock days",
-                      "Worst day raw", "Scenarios", "Commodity scenarios", "Parameters", "History"]
-    # one line each for the part / view rule, the crisis-window fallback and the shock days
-    assert "never added to the Book" in text and "counted twice" in text
-    assert "crisis window not in history: trailing vol only" in text
-    assert "for every row alike (currencies, metals and commodities)" in text
-    r = _result()
-    r["config"].update(loaded=False, note="/repo/config/risk.yaml not found: defaults in use")
-    assert "(not loaded: /repo/config/risk.yaml not found: defaults in use)" in _text(risk.definitions_block(r))
+def test_definitions_sit_on_hover_of_the_titles_never_as_paragraphs():
+    """Screens redesign (2026-09-25): a section's definitions are its title's hover (the
+    info mark), the cards' and the columns' their own; no Definitions block, no paragraph of
+    explanation above a table."""
+    body = risk.body(_commodity_result(), _margin(), _checks())
+    assert not hasattr(risk, "DEFINITIONS_ID")
+    assert not [n for n in _walk(body) if type(n).__name__ in ("Dl", "Dt")]
+    abouts = {_text(n).replace(" \u24d8", "").strip(): n.title for n in _walk(body)
+              if getattr(n, "className", "") == "about-title"}
+    assert list(abouts) == ["Risk by underlyer", "Views (not added to the Book)", "Commodity scenario stress",
+                            "FX scenario stress", "Margin (estimate, not exchange SPAN)", "Limits"]
+    table = abouts["Risk by underlyer"]
+    for needle in ("the commodities grouped by sector, then the currencies and metals",
+                   "each currency or metal row's USD delta x its daily move", "never added to the Book",
+                   "counted twice", "crisis window not in history: trailing vol only",
+                   "for every row alike (currencies, metals and commodities)",
+                   "SNB floor removal 2015-01-15, Brexit referendum result 2016-06-24"):
+        assert needle in table, needle
+    assert "must never be summed" in abouts["Views (not added to the Book)"]
+    assert "first order on delta" in abouts["Commodity scenario stress"]
+    assert "/repo/config/commodity_stress.yaml" in abouts["Commodity scenario stress"]
+    # the metrics' formulas: the cards' hovers and the column headers' tooltips
+    titles = " ".join(_titles(body))
+    for needle in ("Blended annual vol = 2/3 x trailing 500-day vol + 1/3 x crisis vol (2008-01-01 to 2010-12-31)",
+                   "minus the 5th percentile of the last 252 daily", "positive = loss", "set to 0",
+                   "Cap = 50% of the vol target = 2,250,000", "nothing excluded"):
+        assert needle in titles, needle
+    header_tips = _table(body, risk.TABLE_ID).tooltip_header
+    assert "Blended annual vol" in header_tips["vol_blended_ann_usd"] and "clipped" in header_tips["note"]
+    # no paragraph of explanation left on screen (outside the collapsed blocks): the only
+    # kicker is the limits' one-line count
+    kickers = [_text(n) for n in _walk_open(body) if getattr(n, "className", "") == "section-kicker"]
+    assert kickers == ["From config/limits.yaml: 1 BREACH, 1 WARN, 1 OK, 1 not set, 1 n/a."]
 
 
 # --------------------------------------------------------------------------- commodities (Phases 4 and 5)
@@ -591,36 +685,40 @@ def _checks() -> list:
             c("exchange_spot_month", "ICE:B", "N/A", None, 500.0, None, "COH7 Comdty: no delta", source="exchange")]
 
 
-def test_commodity_rows_are_grouped_by_sector_after_the_currencies_with_their_contracts_on_hover():
+def test_commodity_rows_come_first_grouped_by_sector_with_their_contracts_on_hover():
     r = _commodity_result()
     body = risk.body(r)
     table = _table(body, risk.TABLE_ID)
-    # the parts only: currencies and metals in the engine's order, then the commodities by sector
+    # the parts only: the commodities by sector first, then currencies and metals in the engine's order
     assert [rec["underlyer"] for rec in table.data] == [
-        "CHF", "SEK", "XAU", "WTI crude (NYMEX:CL)", "Brent (ICE:B)", "Corn (CBOT:ZC)"]
-    assert [rec["kind"] for rec in table.data] == ["FX", "FX", "Metal", "Commodity", "Commodity", "Commodity"]
-    assert [rec["sector"] for rec in table.data] == [None, None, None, "energy", "energy", "agriculture"]
-    assert risk.part_rows(r)[3]["key"] == "COMMODITY:NYMEX:CL"
-    cl, brent = table.data[3], table.data[4]
-    assert cl["net_usd"] == 900_000.0 and cl["vol_blended_ann_usd"] == 1_234_567.8
+        "WTI crude (NYMEX:CL)", "Brent (ICE:B)", "Corn (CBOT:ZC)", "CHF", "SEK", "XAU"]
+    assert [rec["kind"] for rec in table.data] == ["Commodity", "Commodity", "Commodity", "FX", "FX", "Metal"]
+    assert [rec["sector"] for rec in table.data] == ["energy", "energy", "agriculture", None, None, None]
+    assert risk.part_rows(r)[0]["key"] == "COMMODITY:NYMEX:CL"
+    cl, brent = table.data[0], table.data[1]
+    assert cl["net_usd"] == 900_000.0 and cl["vol_blended_ann_usd"] == 1_234_568.0
     # the contracts on the name's hover, the one left out with its reason
-    hover = table.tooltip_data[3]["underlyer"]["value"]
+    hover = table.tooltip_data[0]["underlyer"]["value"]
     assert "WTI crude (NYMEX:CL), energy; net 9 delta lots" in hover
     assert "CLZ26 Comdty (FUTURE): 8 delta lots, in the series, 1200 days" in hover
     assert "CLF27 Comdty (FUTURE): 1 delta lots, not in the series: contract CLF27 Comdty: no history" in hover
     # the crisis-window fallback on hover of the vols, and in the note
-    assert table.tooltip_data[3]["vol_blended_ann_usd"]["value"] == CRISIS
-    assert table.tooltip_data[3]["vol_crisis_ann_usd"]["value"] == CRISIS
+    assert table.tooltip_data[0]["vol_blended_ann_usd"]["value"] == CRISIS
+    assert table.tooltip_data[0]["vol_crisis_ann_usd"]["value"] == CRISIS
     assert cl["note"].startswith("excludes 1 of 2 contracts with no history") and CRISIS in cl["note"]
+    assert table.tooltip_data[0]["note"]["value"] == cl["note"]            # clipped on its line, whole on hover
     # a commodity with no history: n/a with its reason, never zero; its delta stands
     assert brent["net_usd"] == 300_000.0 and brent["vol_blended_ann_usd"] == "n/a"
-    assert table.tooltip_data[4]["vol_blended_ann_usd"]["value"] == "no history: ICE:B not in the research database"
+    assert table.tooltip_data[1]["vol_blended_ann_usd"]["value"] == "no history: ICE:B not in the research database"
     # the Book: the parts' series, its Net / Gross USD the currency and metal rows' with the commodities' on hover
     footer = _table(body, f"{risk.TABLE_ID}-footer")
     assert footer.data[0]["note"] == ("4 row(s)' daily P&L summed date by date, correlation embedded: CHF, XAU, NYMEX:CL, "
                                       "CBOT:ZC; 3 view(s) below not added")
     assert "commodity rows' net USD is 700,000" in footer.tooltip_data[0]["net_usd"]["value"]
     assert "Commodity net USD card" in footer.tooltip_data[0]["net_usd"]["value"]
+    assert footer.tooltip_data[0]["note"]["value"] == footer.data[0]["note"]
+    # the footer shares the table's single-line widths
+    assert footer.style_cell_conditional == table.style_cell_conditional
 
 
 def test_sector_and_spread_views_are_marked_and_kept_out_of_the_book_table():
@@ -632,8 +730,8 @@ def test_sector_and_spread_views_are_marked_and_kept_out_of_the_book_table():
     assert [(rec["underlyer"], rec["kind"]) for rec in views.data] == [
         ("energy", "Sector (view)"), ("agriculture", "Sector (view)"), ("CL Z6/F7", "Spread (view)")]
     assert views.data[0]["net_usd"] == 1_200_000.0 and views.data[2]["net_usd"] == 100_000.0
-    text = _text(body)
-    assert "Views (not added to the Book)" in text and "must never be summed" in text
+    assert "Views (not added to the Book)" in _text(body) and any("must never be summed" in t for t in _titles(body))
+    assert any(r.get("textOverflow") == "ellipsis" for r in views.style_cell_conditional)
     # a view's parts and legs on its name's hover
     assert "View, not added to the Book: the sum of COMMODITY:NYMEX:CL" in views.tooltip_data[0]["underlyer"]["value"]
     spread_hover = views.tooltip_data[2]["underlyer"]["value"]
@@ -650,17 +748,31 @@ def test_cards_and_caption_carry_the_commodity_book_and_the_vol_target_note():
     r = _commodity_result()
     body = risk.body(r)
     cards = _cards(body)
-    assert cards["Commodity net USD"][0] == "700,000" and cards["Commodity gross USD"][0] == "1,700,000"
+    assert cards["Commodity net USD"][0] == "700k" and cards["Commodity gross USD"][0] == "1.70m"
     assert "Kept apart from the currency and metal net" in cards["Commodity net USD"][2]
-    assert cards["Blended vol (annual)"][1] == f"27.4% of the 4,500,000 target (placeholder); {CRISIS}"
-    lines = risk.caption_lines(r)
-    assert ("Commodity history: /research/rvapp.db, settlements 2020-01-02 to 2026-09-21 (180 roots, 9000 contracts); "
-            "used to 2026-09-21, lag-2 date 2026-09-17.") in lines
-    assert f"Vol target 4,500,000: {VOL_TARGET_NOTE}." in lines
-    # a partial commodity delta: the figure with the reason as its note and hover
-    r["book"].update(commodity_reason="excludes 1 of 3 commodities with no USD delta: ICE:B: no spot for USDCNH")
+    # the blended vol: the target (a placeholder) on the note line, the crisis fallback as a marker
+    blended = cards["Blended vol (annual)"]
+    assert blended[1] == "27.4% of the 4.50m target (placeholder)"
+    assert _markers(blended[4]) == {"trailing only": CRISIS}
+    # the caption: the commodity history's last close, the vol target flagged as a placeholder
+    assert [t for t, _ in risk.caption_parts(r)] == ["As of Tuesday 22 September 2026 (2026-09-22)", "FX history to 2026-09-22",
+                                                   "commodity history to 2026-09-21", "vol target 4.50m"]
+    line = body.children[0].children[0]
+    assert [(m.children, m.title) for m in line.children if getattr(m, "className", "") == "marker"] == \
+        [("placeholder", VOL_TARGET_NOTE)]
+    issues = _issues(body)
+    assert ("Commodity history", "Commodity history: /research/rvapp.db, settlements 2020-01-02 to 2026-09-21 (180 roots, "
+                                 "9000 contracts); used to 2026-09-21, lag-2 date 2026-09-17; USD conversion pairs USDCNH. "
+                                 "Read-only, a risk input only: nothing from it is a mark or enters P&L.") in issues
+    assert ("Vol target", f"{VOL_TARGET_NOTE}.") in issues
+    assert ("Not included", "ICE:B: not in the book series (no history: ICE:B not in the research database)") in issues
+    # a partial commodity delta: the figure with a short "excl. 1" marker, the engine's reason on hover
+    why = "excludes 1 of 3 commodities with no USD delta: ICE:B: no spot for USDCNH"
+    r["book"].update(commodity_reason=why)
     cards = _cards(risk.body(r))
-    assert cards["Commodity net USD"][1] == "+ = long; excludes 1 of 3 commodities with no USD delta: ICE:B: no spot for USDCNH"
+    assert cards["Commodity net USD"][0] == "700k" and cards["Commodity net USD"][1] == "+ = long"
+    assert _markers(cards["Commodity net USD"][4]) == {"excl. 1": why}
+    assert _markers(cards["Commodity gross USD"][4]) == {"excl. 1": why}
     # no commodity delta at all: n/a with the engine's reason, never zero
     r["book"].update(commodity_net_usd=NAN, commodity_gross_usd=NAN, commodity_reason="no open commodity positions on 2026-09-22")
     cards = _cards(risk.body(r))
@@ -678,23 +790,31 @@ def test_commodity_scenarios_show_totals_by_sector_with_na_and_missing_on_hover(
     energy, grains, replay, cnh = table.data
     assert energy["total_usd"] == -90_000.0 and energy["sector_0"] == -90_000.0 and energy["sector_1"] is None
     assert energy["kind"] == "Outright" and energy["dates"] is None
-    assert energy["note"] == "excludes 1 position(s) with no figure (on the total's hover)"
+    assert energy["note"] == "excl. 1"
     assert table.tooltip_data[0]["total_usd"]["value"] == ("excludes 1 position(s) with no figure: "
                                                            "BZ1: no USD delta on the day")
+    assert table.tooltip_data[0]["note"]["value"] == table.tooltip_data[0]["total_usd"]["value"]
     assert table.tooltip_data[0]["scenario"]["value"] == "crude and products down 10%"
     assert grains["sector_1"] == -25_000.0 and table.tooltip_data[1] == {}
     # n/a with its reason, never 0; a replay names its dates
     assert replay["total_usd"] == "n/a" and replay["kind"] == "Replay" and replay["dates"] == "2020-02-20 to 2020-04-21"
     assert table.tooltip_data[2]["total_usd"]["value"] == "the commodity settlement history is not available"
     assert cnh["kind"] == "FX" and cnh["total_usd"] == 1_500.0 and "no sector split" in cnh["note"]
-    text = _text(body)
-    assert "first order on delta" in text and "their gamma is not in it" in text
-    assert "Not valued:" in text and "2020 Covid: n/a, the commodity settlement history is not available" in text
-    # expandable: one collapsed block per scenario with its breakdowns
+    from ui.tabs import ranking as rk
+    assert all(c.get("format") == rk.amount_short(nully="") for c in table.columns if c["type"] == "numeric")
+    titles = " ".join(_titles(body))
+    assert "first order on delta" in titles and "their gamma is not in it" in titles
+    # what the scenarios could not value is in the drawer, not a list under the table
+    assert "Not valued" not in _text(body)
+    assert ("Commodity stress", "2020 Covid: n/a, the commodity settlement history is not available") in _issues(body)
+    # expandable: one collapsed block of the scenarios, each scenario collapsed with its breakdowns
     detail = next(n for n in _walk(body) if getattr(n, "id", None) == risk.COMMODITY_SCENARIO_DETAIL_ID)
+    outer = next(n for n in _walk(body) if type(n).__name__ == "Details" and detail in (n.children or []))
+    assert outer.open is False and outer.children[0].children == "Each scenario by commodity, contract, spread and currency (4)"
     blocks = [n for n in detail.children if type(n).__name__ == "Details"]
     assert len(blocks) == 4 and all(b.open is False for b in blocks)
-    assert blocks[0].children[0].children == "Energy -10%: (90,000)"
+    assert blocks[0].children[0].children == "Energy -10%: (90.0k) (excl. 1)"
+    assert blocks[0].children[0].title == "(90,000); excludes 1 position(s) with no figure"
     first = _text(blocks[0])
     assert "By commodity" in first and "By contract" in first and "By spread" in first
     assert "Not in the total (1):" in first and "BZ1: no USD delta on the day" in first
@@ -704,7 +824,8 @@ def test_commodity_scenarios_show_totals_by_sector_with_na_and_missing_on_hover(
     by_spread = next(t for t in tables if any(c["id"] == "spread_pnl_usd" for c in t.columns))
     assert by_spread.data[0]["pnl_usd"] == "n/a"
     assert by_spread.tooltip_data[0]["pnl_usd"]["value"] == "COH7 Comdty: no USD delta on the day"
-    assert blocks[2].children[0].children == "2020 Covid: n/a (the commodity settlement history is not available)"
+    assert blocks[2].children[0].children == "2020 Covid: n/a"
+    assert blocks[2].children[0].title == "the commodity settlement history is not available"
     by_ccy = next(t for t in (n for n in _walk(blocks[3]) if isinstance(n, dash_table.DataTable)))
     assert by_ccy.data[0]["currency"] == "CNY" and by_ccy.data[0]["pnl_change_usd"] == 1_500.0
     # unavailable stress: the reason, never an empty table
@@ -718,7 +839,12 @@ def test_margin_is_labelled_an_estimate_with_credits_and_never_zero_for_a_missin
     section = next(n for n in _walk(body) if getattr(n, "id", None) == risk.MARGIN_LIMITS_ID)
     text = _text(section)
     assert "Margin (estimate, not exchange SPAN)" in text
-    assert "Basis: estimate (config/limits.yaml), not exchange SPAN." in text and "placeholders" in text
+    titles = " ".join(_titles(section))
+    assert "Basis: estimate (config/limits.yaml), not exchange SPAN." in titles and "placeholders" in titles
+    # the positions not in the margin are in the drawer, not a list under the table
+    assert "Not in the margin" not in text
+    assert ("Not in the margin", "CBOT:ZC 2026-12: no outright rate set for CBOT:ZC or agriculture in config/limits.yaml") \
+        in _issues(body)
     table = _table(section, risk.MARGIN_TABLE_ID)
     assert [c["name"] for c in table.columns][1:4] == ["Gross charge USD", "Spread credit USD", "Margin USD (estimate)"]
     ags, energy = table.data
@@ -760,6 +886,26 @@ def test_limit_levels_are_coloured_and_not_set_says_so():
     assert na["value"] == "n/a" and table.tooltip_data[4]["value"]["value"] == "COH7 Comdty: no delta"
     assert table.tooltip_data[0]["limit"]["value"] == "basis of gross_lots"
     assert "1 BREACH, 1 WARN, 1 OK, 1 not set, 1 n/a" in _text(section)
+    # single-line rows: the reason clipped, whole on hover; the explanation is the title's hover
+    assert table.tooltip_data[3]["reason"]["value"] == "no limit set in config/limits.yaml (desk_limits.net_usd_per_sector)"
+    assert any(r.get("textOverflow") == "ellipsis" and r["if"]["column_id"] == "reason" for r in table.style_cell_conditional)
+    assert any("BREACH above the limit" in t for t in _titles(section))
+
+
+def test_sections_run_commodities_first_then_fx_then_margin_and_limits():
+    """Commodity scenario stress before the FX scenario stress, margin and limits after
+    them (screens redesign, 2026-09-25); every component id the shell and the tests read is kept."""
+    body = risk.body(_commodity_result(), _margin(), _checks())
+    ids = _ids(body)
+    order = [risk.ISSUES_ID, risk.CARDS_ID, risk.TABLE_ID, risk.VIEWS_TABLE_ID, risk.COMMODITY_SCENARIO_TABLE_ID,
+             risk.SCENARIO_TABLE_ID, risk.MATRIX_TABLE_ID, risk.MARGIN_LIMITS_ID, risk.MARGIN_TABLE_ID,
+             risk.LIMITS_TABLE_ID]
+    assert [ids.index(i) for i in order] == sorted(ids.index(i) for i in order)
+    assert risk.COMMODITY_SCENARIO_DETAIL_ID in ids and risk.MARGIN_ROOT_TABLE_ID in ids and risk.MARGIN_SPREAD_TABLE_ID in ids
+    assert (risk.BODY_ID, risk.REFRESH_ID) == ("risk-body", "risk-refresh")
+    # every table row is one line: no text column left to wrap
+    for table in (n for n in _walk(body) if isinstance(n, dash_table.DataTable)):
+        assert not any(r.get("whiteSpace") == "normal" for r in (table.style_cell_conditional or [])), table.id
 
 
 def test_the_tab_builds_when_the_commodity_history_is_unavailable():
@@ -853,7 +999,7 @@ def _write_book(db_path):
 
 def test_the_rendered_tab_shows_the_engines_numbers_end_to_end(tmp_path, monkeypatch):
     from engine.risk import book_risk
-    from ui.tabs.formatting import format_cell
+    from ui.tabs.formatting import format_cell, short_money
     monkeypatch.setenv(history_mod.ENV_VAR, str(_write_history(tmp_path / "hist")))
     db_path = tmp_path / "risk.db"
     _write_book(db_path)
@@ -877,23 +1023,25 @@ def test_the_rendered_tab_shows_the_engines_numbers_end_to_end(tmp_path, monkeyp
     text = _text(body)
     assert f"History: {tmp_path / 'hist'}, last close {AS_OF}; used to {AS_OF}, lag-2 date 2026-09-18." in text
     cards = _cards(body)
-    assert cards["Net USD delta"][0] == format_cell(engine["book"]["net_usd"]) == "250,000"
+    assert cards["Net USD delta"][0] == short_money(engine["book"]["net_usd"], parens=True) == "250k"
+    assert cards["Net USD delta"][3].title == format_cell(engine["book"]["net_usd"]) == "250,000"
     assert "DV01 (USD/bp)" not in cards
-    assert cards["Blended vol (annual)"][0] == format_cell(engine["book"]["vol_blended_ann_usd"])
-    assert cards["Worst day raw"][0] == format_cell(engine["book"]["worst_1d_raw_usd"]) and SNB in cards["Worst day raw"][1]
+    assert cards["Blended vol (annual)"][3].title == format_cell(engine["book"]["vol_blended_ann_usd"])
+    assert cards["Worst day raw"][3].title == format_cell(engine["book"]["worst_1d_raw_usd"]) and SNB in cards["Worst day raw"][1]
     # the book's worst day ex shocks is CHF's 2020 day (JPY never moves), the SNB day being a shock date
     assert engine["book"]["worst_1d_ex_shocks_date"] == WORST_EX
-    assert cards["Worst day ex shocks"][0] == format_cell(engine["book"]["worst_1d_ex_shocks_usd"])
+    assert cards["Worst day ex shocks"][0] == short_money(engine["book"]["worst_1d_ex_shocks_usd"], parens=True)
     assert engine["book"]["worst_1d_ex_shocks_date"] in cards["Worst day ex shocks"][1]
     table = _table(body, risk.TABLE_ID)
     assert [rec["underlyer"] for rec in table.data] == [r["underlyer"] for r in engine["underlyers"]] == ["CHF", "JPY"]
     chf = table.data[0]
-    assert chf["net_usd"] == pytest.approx(1_250_000.0) and chf["worst_1d_raw_usd"] == pytest.approx(rows["CHF"]["worst_1d_raw_usd"])
+    # the table shows whole units (k / M on screen): the engine's figure rounded, never recomputed
+    assert chf["net_usd"] == pytest.approx(1_250_000.0) and chf["worst_1d_raw_usd"] == round(rows["CHF"]["worst_1d_raw_usd"])
     assert chf["worst_1d_raw_date"] == SNB and chf["worst_1d_ex_shocks_date"] == WORST_EX
-    assert chf["vol_blended_ann_usd"] == pytest.approx(rows["CHF"]["vol_blended_ann_usd"]) and chf["note"] == "carry included"
+    assert chf["vol_blended_ann_usd"] == round(rows["CHF"]["vol_blended_ann_usd"]) and chf["note"] == "carry included"
     assert "dv01_usd" not in chf
     footer = _table(body, f"{risk.TABLE_ID}-footer")
-    assert footer.data[0]["worst_1d_raw_usd"] == pytest.approx(engine["book"]["worst_1d_raw_usd"])
+    assert footer.data[0]["worst_1d_raw_usd"] == round(engine["book"]["worst_1d_raw_usd"])
     scen = _table(body, risk.SCENARIO_TABLE_ID)
     assert [rec["scenario"] for rec in scen.data] == list(engine["scenarios"])
     europe = next(rec for rec in scen.data if rec["scenario"].startswith("Europe"))

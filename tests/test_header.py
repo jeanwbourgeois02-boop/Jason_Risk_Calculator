@@ -17,6 +17,11 @@ Covers two 2026-09-17 fixes for "the headline ... doesn't work":
    "excludes N of M trades unpriced" caption (tooltip: breakdown by product/reason);
    `_priced_diff` additionally excludes any trade priced on only one of its two dates
    so an appearing/disappearing mark cannot fake a one-period jump.
+
+Since the screens redesign (user, 2026-09-25) those visible sentences are short markers
+beside the figure ("excl. 1", "filled 1", "ref 15 Sep") with the sentence on hover, an n/a
+carries its reason on hover, FX Net / Gross USD delta left the header, and a "Data" chip
+counts the marks missing on the as-of date.
 """
 from __future__ import annotations
 
@@ -296,40 +301,61 @@ def test_priced_diff_fully_priced_both_dates_has_no_label():
 # --------------------------------------------------------------------- _pnl_card
 
 
-def test_pnl_card_unavailable_shows_reason_as_visible_caption_and_tooltip():
+def _markers(card):
+    """[(short, hover)] of a card's markers (its third child), [] when it has none."""
+    if len(card.children) < 3:
+        return []
+    return [(m.children, getattr(m, "title", None)) for m in card.children[2].children]
+
+
+def _no_visible_sentences(node):
+    """True when no element under `node` is a caption line (the pre-2026-09-25 visible
+    sentences); markers and hovers only."""
+    if "header-figure-caption" in str(getattr(node, "className", "") or ""):
+        return False
+    children = getattr(node, "children", None)
+    return all(_no_visible_sentences(c) for c in (children if isinstance(children, (list, tuple)) else [children])
+               if hasattr(c, "children"))
+
+
+def test_pnl_card_unavailable_shows_na_with_its_reason_on_hover():
+    """Screens redesign (user, 2026-09-25): no visible sentence; n/a carries its reason on hover."""
     card = header._pnl_card("X", {"available": False, "reason": "no mark"})
-    assert len(card.children) == 3
-    value_div, caption_div = card.children[1], card.children[2]
-    # Backward-compatible with the pre-existing tests/test_ui.py assertions: the muted
-    # value stays "n/a" with the reason as a `title` tooltip ...
+    assert len(card.children) == 2
+    value_div = card.children[1]
     assert value_div.children == "n/a"
     assert value_div.title == "no mark"
-    # ... but the reason is now ALSO plain text on the card, not hover-only.
-    assert caption_div.children == "no mark"
-    assert "header-figure-caption" in caption_div.className
+    assert "header-figure-value--muted" in value_div.className
 
 
-def test_pnl_card_unavailable_with_blank_reason_has_no_caption():
+def test_pnl_card_unavailable_with_blank_reason_has_no_marker():
     card = header._pnl_card("X", {"available": False, "reason": ""})
     assert len(card.children) == 2
 
 
-def test_pnl_card_available_unchanged():
+def test_pnl_card_available_is_short_money_with_the_full_figure_on_hover():
     card = header._pnl_card("X", {"value": 5.0, "available": True})
     assert len(card.children) == 2
+    neg = header._pnl_card("X", {"value": -51_018.4, "available": True})
+    assert neg.children[1].children == "−$51.0k"                  # a real minus, k / m
+    assert neg.children[1].title == "-$51,018"                           # the full figure on hover
+    assert "header-figure-value--neg" in neg.children[1].className
+    assert header._pnl_card("X", {"value": 1_650_590.0, "available": True}).children[1].children == "$1.65m"
 
 
-def test_pnl_card_available_with_partial_pricing_shows_visible_summary_and_detail_tooltip():
+def test_pnl_card_available_with_partial_pricing_shows_an_excl_marker_with_the_sentence_on_hover():
     card = header._pnl_card("X", {
         "value": 100.0, "available": True,
         "excluded_summary": "excludes 1 of 2 trades unpriced",
         "excluded_detail": "1 option: no PREMIUM",
     })
     assert len(card.children) == 3
-    value_div, caption_div = card.children[1], card.children[2]
-    assert value_div.children == "$100"  # a real number, not "n/a" -- this is a priced figure
-    assert caption_div.children == "excludes 1 of 2 trades unpriced"
-    assert caption_div.title == "1 option: no PREMIUM"
+    assert card.children[1].children == "$100"  # a real number, not "n/a" -- this is a priced figure
+    [(short, hover)] = _markers(card)
+    assert short == "excl. 1"
+    assert hover == "excludes 1 of 2 trades unpriced\n1 option: no PREMIUM"
+    assert card.children[2].children[0].className == "marker"
+    assert _no_visible_sentences(card)
 
 
 # --------------------------------------------------------------------- _build_figures
@@ -343,7 +369,8 @@ def test_build_figures_trades_card_is_always_present_with_zero_marks():
     trades_card = next(c for c in cards if getattr(c, "children", None) and
                         getattr(c.children[0], "children", None) == "Trades")
     assert trades_card.children[1].children == "1"
-    assert trades_card.children[2].children == "1 open, 0 settled"
+    assert trades_card.children[1].title == "1 open, 0 settled"            # small, the split on hover
+    assert len(trades_card.children) == 2
 
 
 def test_build_figures_ltd_reason_is_actionable_when_marks_are_missing():
@@ -352,7 +379,7 @@ def test_build_figures_ltd_reason_is_actionable_when_marks_are_missing():
     ltd_card = cards[0]
     assert ltd_card.children[0].children == "LTD"
     assert ltd_card.children[1].children == "n/a"
-    reason = ltd_card.children[2].children
+    reason = ltd_card.children[1].title
     assert "run the Bloomberg pull" in reason
     assert "SPOT" in reason and "FWD_OUTRIGHT" in reason
 
@@ -413,10 +440,11 @@ def test_build_figures_ltd_shows_partial_sum_and_label_when_some_trades_unpriced
     assert ltd_card.children[0].children == "LTD"
     assert ltd_card.children[1].children != "n/a"
     assert "$" in ltd_card.children[1].children
-    caption = ltd_card.children[2]
-    assert caption.children == "excludes 1 of 2 trades unpriced"
-    assert "no PREMIUM" in caption.title
-    assert "option" in caption.title
+    [(short, hover)] = _markers(ltd_card)
+    assert short == "excl. 1"
+    assert hover.startswith("excludes 1 of 2 trades unpriced\n")
+    assert "no PREMIUM" in hover
+    assert "option" in hover
 
 
 # ------------------------------------------------- reference-date gap (2026-09-18)
@@ -467,7 +495,8 @@ def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks(st
                 and hasattr(c.children[0], "children")}
     daily = by_title["Daily"]
     assert daily.children[1].children == "n/a"
-    caption = daily.children[2].children
+    assert len(daily.children) == 2                                   # the sentence is on hover only
+    caption = daily.children[1].title
     assert caption.startswith("Daily needs the 2026-09-16 close: 1 of 1 trades open that day")
     assert "backfill" in caption
     assert "2026-09-17" not in caption
@@ -503,13 +532,45 @@ def test_build_figures_period_steps_back_to_the_previous_close_that_has_value(st
                 and hasattr(c.children[0], "children")}
     daily = by_title["Daily"]
     # 1m x (148.0 - 147.5) JPY at spot 147
-    assert daily.children[1].children == header._fmt_usd(1_000_000 * 0.5 / 147.0)
-    assert daily.children[2].children == ("1 trade with no price on 2026-09-16 measured from its last earlier "
-                                          "close (back to 2026-09-15)")
-    assert "t1: no price on 2026-09-16: value of the 2026-09-15 close (no FWD_OUTRIGHT mark for USDJPY"         in daily.children[2].title                                          # which close, and why, on hover
+    assert daily.children[1].title == header._fmt_usd(1_000_000 * 0.5 / 147.0)
+    [(short, hover)] = _markers(daily)
+    assert short == "filled 1"
+    assert hover.startswith("1 trade with no price on 2026-09-16 measured from its last earlier "
+                            "close (back to 2026-09-15)\n")
+    assert "t1: no price on 2026-09-16: value of the 2026-09-15 close (no FWD_OUTRIGHT mark for USDJPY" \
+        in hover                                                                        # which close, and why, on hover
     assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == marks_before
     from engine.pnl.valuation import value_book
     assert (value_book(conn, "2026-09-16")["reason"] != "").all()
+
+
+def test_build_figures_a_stepped_back_period_shows_ref_and_filled_markers(strict_marks):
+    """Marks on 2026-09-17 and 2026-09-08 only. The 2026-09-16 close cannot be filled (the
+    fill reaches 5 business days back, to 2026-09-09), so Daily steps back to 2026-09-15,
+    whose fill reaches 2026-09-08: "ref 15 Sep" and "filled 1", each with its sentence on
+    hover, and no visible sentence."""
+    conn = schema.connect()
+    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
+    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-08-20", 1_000_000, 147.0)
+    _insert_legs(conn, [
+        ("t1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
+        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
+    ])
+    for day, fwd in (("2026-09-08", 147.5), ("2026-09-17", 148.0)):
+        _insert_official_mark(conn, day, "USDJPY", day, "SPOT", 147.0, "BBG_BFXFORWARD")
+        _insert_official_mark(conn, day, "USDJPY", "2026-09-30", "FWD_OUTRIGHT", fwd, "BBG_BFXFORWARD")
+    conn.commit()
+    cards = header._build_figures(conn, "2026-09-17")
+    daily = _card(cards, "Daily")
+    assert daily.children[1].title == header._fmt_usd(1_000_000 * 0.5 / 147.0)
+    markers = dict(_markers(daily))
+    assert set(markers) == {"filled 1", "ref 15 Sep"}
+    assert markers["ref 15 Sep"].startswith("from the 2026-09-15 close: 2026-09-16 has no usable close")
+    assert "Daily needs the 2026-09-16 close" in markers["ref 15 Sep"]           # the skipped date's reason
+    assert markers["filled 1"].startswith("1 trade with no price on 2026-09-15 measured from its last earlier "
+                                          "close (back to 2026-09-08)\n")
+    assert "t1: no price on 2026-09-15: value of the 2026-09-08 close" in markers["filled 1"]
+    assert all(_no_visible_sentences(c) for c in cards)
 
 
 # ------------------------------------------------- why the past close is missing (2026-09-21)
@@ -825,10 +886,12 @@ def test_build_figures_survives_a_text_price_and_says_which_trade_and_column():
     conn.commit()
     cards = header._build_figures(conn, "2026-09-17")
     ltd = _card(cards, "LTD")
-    assert ltd.children[1].children == "$40,000"  # e1 alone: 2,000,000 x (1.12 - 1.10); j1 contributes nothing
-    caption = ltd.children[2]
-    assert caption.children == "excludes 1 of 2 trades unpriced (1 with a stored value is not a number)"
-    assert "trade j1: trades.price is not a number ('24-Jul')" in caption.title
+    assert ltd.children[1].title == "$40,000"  # e1 alone: 2,000,000 x (1.12 - 1.10); j1 contributes nothing
+    assert ltd.children[1].children == "$40.0k"
+    [(short, hover)] = _markers(ltd)
+    assert short == "excl. 1"
+    assert hover.startswith("excludes 1 of 2 trades unpriced (1 with a stored value is not a number)\n")
+    assert "trade j1: trades.price is not a number ('24-Jul')" in hover
     assert _card(cards, "Trades").children[1].children == "2"
 
 
@@ -852,21 +915,21 @@ def test_build_figures_survives_the_misaligned_realised_row_of_the_2026_09_18_in
     cards = header._build_figures(conn, "2026-09-17")
     ltd = _card(cards, "LTD")
     # j1 1,000,000/149 JPY->USD + e1 40,000 + old 1,000,000 x (1.09 - 1.08) = 10,000
-    assert ltd.children[1].children == f"${1_000_000 / 149.0 + 40_000 + 10_000:,.0f}"
-    assert len(ltd.children) == 2  # fully priced: no "excludes" caption
+    assert ltd.children[1].title == f"${1_000_000 / 149.0 + 40_000 + 10_000:,.0f}"
+    assert len(ltd.children) == 2  # fully priced: no "excl." marker
 
 
-def test_a_failing_usd_delta_no_longer_takes_the_pnl_cards_with_it():
+def test_fx_net_and_gross_usd_delta_left_the_header():
+    """Screens redesign plan (user, 2026-09-25): FX Net / Gross USD delta live on the FX & cash
+    tab's headline card only ("one place per number"); a text leg amount, which used to cost
+    those two cards, leaves the header's P&L cards standing."""
     conn = _db_two_priced_forwards()
     conn.execute("UPDATE trade_legs SET amount = '24-Jul' WHERE trade_id = 'j1' AND leg_no = 1")
     conn.commit()
     cards = header._build_figures(conn, "2026-09-17")
+    titles = [c.children[0].children for c in cards]
+    assert "Net USD delta" not in titles and "Gross USD delta" not in titles
     assert _card(cards, "LTD").children[1].children != "n/a"
-    net = _card(cards, "Net USD delta")
-    assert net.children[1].children == "n/a"  # the ladder raised on the text amount: only these two cards say so
-    reason = net.children[2].children
-    assert "USD delta could not be computed" in reason
-    assert "trade_legs.amount" in reason and "'24-Jul'" in reason and "trade_id j1 leg_no 1" in reason
 
 
 def test_failure_reason_names_table_column_row_and_value():
@@ -909,7 +972,7 @@ def test_layout_summary_carries_its_id_inside_the_details():
     summary = details.children[0]
     assert type(summary).__name__ == "Summary"
     assert summary.id == header.SUMMARY_ID
-    assert summary.children == "LTD line chart"
+    assert summary.children == "LTD chart"                                   # compact (2026-09-25)
     assert header.SUMMARY_ID.startswith(header.DETAILS_ID) and header.SUMMARY_ID != header.DETAILS_ID
 
 
@@ -1019,33 +1082,39 @@ def test_commodity_strip_shows_the_four_engine_figures_as_given():
         cards = header._build_figures(conn, _CMDTY_AS_OF)
 
         gross = _card(cards, header.GROSS_NOTIONAL_TITLE)
-        assert _texts(gross)[1] == header._fmt_usd(block["gross_usd"]) and len(gross.children) == 2
+        assert _texts(gross)[1] == header.short_money(block["gross_usd"], "$") and len(gross.children) == 2
+        assert gross.children[1].title.startswith(header._fmt_usd(block["gross_usd"]) + "\n")
         assert "Energy: net" in gross.children[1].title and "Metals: net" in gross.children[1].title
+        assert "header-figure-value--neutral" in gross.children[1].className
 
         net = _card(cards, header.NET_BY_SECTOR_TITLE)
-        assert _texts(net)[1] == header._fmt_usd(block["net_usd"])
+        assert _texts(net)[1] == header.short_money(block["net_usd"], "$") and len(net.children) == 2
         expected_line = " · ".join(f"{header._sector_label(s['sector'])} {header._fmt_compact(s['net_usd'])}"
                                    for s in block["sectors"])   # each sector's own net_usd, in book-positions' order
-        assert _texts(net)[2] == expected_line
+        assert net.children[1].title.split("\n")[:2] == [header._fmt_usd(block["net_usd"]), expected_line]
 
         spreads = book_spreads(conn, _CMDTY_AS_OF)
         assert sum(1 for s in spreads["spreads"] if s["status"] == "open") == 1 and len(spreads["review"]) == 1
         card = _card(cards, header.OPEN_SPREADS_TITLE)
-        assert _texts(card)[1:] == ["1", "1 group to review"]
+        assert _texts(card)[1] == "1"
+        [(short, review_hover)] = _markers(card)
+        assert short == "review 1" and "1 group waiting for review" in review_hover and "Brent" in review_hover
         hover = card.children[1].title
-        assert "CL Z26/F27" in hover and "Waiting for review" in hover and "Brent" in hover
+        assert "CL Z26/F27" in hover and "waiting for review" in hover and "Brent" in hover
 
         first = expiry_schedule(conn, _CMDTY_AS_OF)["rows"][0]
         assert (first["contract_id"], first["next_event"], first["level"], first["business_days"]) == \
             ("HGZ26 Comdty", "first notice", "RED", 2)
         card = _card(cards, header.NEXT_EXPIRY_TITLE)
-        assert _texts(card)[1:] == ["HGZ26 first notice", "2026-11-20 · in 2 business days · RED"]
-        assert card.children[1].style == header._LEVEL_STYLES["RED"]
+        assert _texts(card)[1] == "HGZ26 first notice · 2 bd" and len(card.children) == 2   # Bloomberg's dates: no "est."
+        assert card.children[1].style["color"] == header._LEVEL_STYLES["RED"]["color"]
+        assert "HGZ26 Comdty: first notice 2026-11-20, RED, in 2 business days" in card.children[1].title
+        assert all(_no_visible_sentences(c) for c in cards)
     finally:
         conn.close()
 
 
-def test_commodity_strip_comes_after_the_fx_cards_and_leaves_the_pnl_cards_unchanged():
+def test_the_slim_header_order_has_no_fx_cards_and_ends_with_the_data_chip():
     conn = _db_two_priced_forwards()
     try:
         cards = header._build_figures(conn, "2026-09-17")
@@ -1053,7 +1122,13 @@ def test_commodity_strip_comes_after_the_fx_cards_and_leaves_the_pnl_cards_uncha
         conn.close()
     titles = [c.children[0].children if getattr(c, "className", "") != "header-divider" else "|" for c in cards]
     assert titles == ["LTD", "Daily", "Previous day", "5d", "MTD", "YTD", "Trading", "Trades", "|",
-                      "Net USD delta", "Gross USD delta", "|", header.COMMODITY_EMPTY_TITLE]
+                      header.COMMODITY_EMPTY_TITLE, header.MARKS_TITLE]
+    for card in cards:
+        if getattr(card, "className", "") == "header-divider":
+            continue
+        assert len(card.children) <= 3                                     # title, value, markers
+        assert card.style["display"] == "grid"                              # markers beside the value, one row
+        assert card.children[0].style == {"gridColumn": "1 / -1"}
 
 
 def test_a_book_with_no_commodity_futures_shows_one_plain_line_with_its_reason():
@@ -1063,7 +1138,8 @@ def test_a_book_with_no_commodity_futures_shows_one_plain_line_with_its_reason()
     finally:
         conn.close()
     assert len(strip) == 1
-    assert _texts(strip[0]) == [header.COMMODITY_EMPTY_TITLE, "none", "no open commodity futures on 2026-09-17"]
+    assert _texts(strip[0]) == [header.COMMODITY_EMPTY_TITLE, "none"]
+    assert strip[0].children[1].title == "no open commodity futures on 2026-09-17"
 
 
 def test_unpriced_commodities_read_na_with_the_reason_and_the_other_cards_still_show():
@@ -1077,11 +1153,11 @@ def test_unpriced_commodities_read_na_with_the_reason_and_the_other_cards_still_
         conn.close()
     by_title = {c.children[0].children: c for c in cards}
     for title in (header.GROSS_NOTIONAL_TITLE, header.NET_BY_SECTOR_TITLE):
-        value, caption = by_title[title].children[1], by_title[title].children[2]
-        assert value.children == "n/a" and value.title                 # never a zero standing for a missing price
-        assert caption.children == value.title and "HG" in value.title
+        value = by_title[title].children[1]
+        assert value.children == "n/a" and "HG" in value.title          # never a zero standing for a missing price
+        assert len(by_title[title].children) == 2                        # the reason on hover, not a caption
     assert _texts(by_title[header.OPEN_SPREADS_TITLE])[1] == "0"
-    assert _texts(by_title[header.NEXT_EXPIRY_TITLE])[1] == "HGZ26 first notice"
+    assert _texts(by_title[header.NEXT_EXPIRY_TITLE])[1].startswith("HGZ26 first notice")
 
 
 def test_a_partly_priced_book_sums_the_known_figures_and_says_what_it_excludes():
@@ -1097,10 +1173,12 @@ def test_a_partly_priced_book_sums_the_known_figures_and_says_what_it_excludes()
         conn.close()
     assert block["missing"] == ["SHFE:CU"] and block["gross_usd"] is not None
     gross = cards[0]
-    assert _texts(gross)[1] == header._fmt_usd(block["gross_usd"])
-    assert _texts(gross)[2] == "excludes 1 of 2 commodities with no USD figure"
-    assert gross.children[2].title == block["reason"]
-    assert _texts(cards[1])[2] == f"Metals {header._fmt_compact(block['net_usd'])}"   # one sector, CU out of it
+    assert _texts(gross)[1] == header.short_money(block["gross_usd"], "$")
+    assert _markers(gross) == [("excl. 1", block["reason"])]
+    assert block["reason"].startswith("excludes 1 of 2 commodities with no USD figure")
+    net = cards[1]
+    assert _markers(net) == [("excl. 1", block["reason"])]
+    assert f"Metals {header._fmt_compact(block['net_usd'])}" in net.children[1].title   # one sector, CU out of it
 
 
 def test_open_spreads_that_cannot_be_grouped_say_why_and_cost_only_their_card(monkeypatch):
@@ -1118,8 +1196,8 @@ def test_open_spreads_that_cannot_be_grouped_say_why_and_cost_only_their_card(mo
     by_title = {c.children[0].children: c for c in cards}
     card = by_title[header.OPEN_SPREADS_TITLE]
     assert card.children[1].children == "n/a"
-    assert card.children[2].children.startswith("spreads could not be grouped (RuntimeError: template file unreadable)")
-    assert _texts(by_title[header.NEXT_EXPIRY_TITLE])[1] == "HGZ26 first notice"
+    assert card.children[1].title.startswith("spreads could not be grouped (RuntimeError: template file unreadable)")
+    assert _texts(by_title[header.NEXT_EXPIRY_TITLE])[1].startswith("HGZ26 first notice")
 
 
 def test_open_spreads_are_worked_out_once_per_database_revision(tmp_path, monkeypatch):
@@ -1157,9 +1235,13 @@ def test_next_expiry_card_shows_expired_and_estimated_dates():
              "alert_date": "2026-10-01", "business_days": 9, "estimated": True, "level": "AMBER", "reason": ""}
     card = header._next_expiry_card({"rows": [row, later], "counts": {"EXPIRED": 1, "RED": 0, "AMBER": 1, "GREEN": 0},
                                      "settled_expired": [{"contract_id": "CLN26 Comdty"}]})
-    assert _texts(card) == [header.NEXT_EXPIRY_TITLE, "CLQ26 last trade", "2026-08-31 (est.) · EXPIRED"]
-    assert card.children[1].style == header._LEVEL_STYLES["EXPIRED"]
+    assert _texts(card)[:2] == [header.NEXT_EXPIRY_TITLE, "CLQ26 last trade · expired"]
+    [(short, est_hover)] = _markers(card)
+    assert short == "est." and est_hover.startswith("2026-08-31 is contract-master's estimate")
+    style = card.children[1].style
+    assert style["color"] == "#ffffff" and style["backgroundColor"] == header._LEVEL_STYLES["EXPIRED"]["backgroundColor"]
     hover = card.children[1].title
+    assert hover.startswith("CLQ26 Comdty: last trade 2026-08-31 (estimated), EXPIRED\n")
     assert "delivery risk, close now" in hover and "1 EXPIRED" in hover
     assert "CUX26 Comdty: last trade 2026-11-30 (est.), alert 2026-10-01, in 9 business days, AMBER" in hover
     assert "1 expired contract settled by the ledger: not alerts" in hover
@@ -1172,3 +1254,81 @@ def test_compact_money_and_sector_labels():
     assert header._fmt_compact(812.4) == "+812"
     assert header._fmt_compact(None) == "n/a" and header._fmt_compact(float("nan")) == "n/a"
     assert header._sector_label("agriculture") == "Ags" and header._sector_label("energy") == "Energy"
+
+
+# --------------------------------------------------------------------- the Data chip (2026-09-25)
+# Screens redesign plan: a chip for the marks the book needs on the as-of date that have no
+# official mark, from `needed_marks` (the list the Data tab shows), read once per render.
+
+
+def test_marks_chip_counts_the_missing_marks_with_the_list_on_hover(monkeypatch):
+    import datetime as dt
+    from data.bloomberg import live
+
+    monkeypatch.setattr(live, "book_today", lambda: dt.date(2026, 9, 17))   # today: the live request list
+    conn = _db_with_one_open_fx_trade()
+    card = header._marks_card(conn, "2026-09-17", None)
+    assert card.children[0].children == header.MARKS_TITLE
+    assert card.children[1].children == "2 marks missing"
+    assert card.children[1].style["color"] == header._LEVEL_STYLES["AMBER"]["color"]
+    hover = card.children[1].title
+    assert hover.startswith("2 of 2 marks the book needs on 2026-09-17 have no official mark (1 FWD_OUTRIGHT, 1 SPOT).")
+    assert "- USDJPY SPOT 2026-09-17" in hover and "The Data tab lists each one" in hover
+
+    _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "SPOT", 147.0, "BBG_BFXFORWARD")
+    conn.commit()
+    assert header._marks_card(conn, "2026-09-17", None).children[1].children == "1 mark missing"
+    _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "FWD_OUTRIGHT", 148.0, "BBG_BFXFORWARD")
+    conn.commit()
+    done = header._marks_card(conn, "2026-09-17", None)
+    assert done.children[1].children == "marks complete"
+    assert done.children[1].title == "every one of the 2 marks the book needs on 2026-09-17 is on file (official)"
+
+
+def test_marks_chip_is_left_out_when_the_book_needs_no_mark_and_says_why_when_it_cannot_list(monkeypatch):
+    conn = schema.connect()
+    assert header._marks_card(conn, "2026-09-17", None) is None
+    titles = [c.children[0].children for c in header._build_figures(conn, "2026-09-17")]
+    assert header.MARKS_TITLE not in titles
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("inventory unreadable")
+
+    monkeypatch.setattr(header, "needed_marks", boom)
+    card = header._marks_card(conn, "2026-09-17", None)
+    assert card.children[1].children == "marks n/a"
+    assert card.children[1].title.startswith("the marks the book needs on 2026-09-17 could not be listed "
+                                             "(RuntimeError: inventory unreadable)")
+    header._build_figures(conn, "2026-09-17")                           # the P&L cards still build
+
+
+def test_the_needed_marks_are_read_once_per_database_revision(tmp_path, monkeypatch):
+    import os
+
+    db = tmp_path / "risk.db"
+    schema.connect(db).close()
+    calls = []
+
+    def counting(conn, as_of):
+        calls.append(as_of)
+        return (3, [{"instrument_id": "X", "settle_date": as_of, "mark_type": "SPOT"}])
+
+    monkeypatch.setattr(header, "needed_marks", counting)
+    monkeypatch.setattr(header, "_NEEDS_MEMO", {})
+
+    def as_of_reads():   # the reference closes' reasons read their own dates, as before
+        return calls.count("2026-09-17")
+
+    conn = sqlite3.connect(db)
+    try:
+        cards = header._build_figures(conn, "2026-09-17")
+        assert as_of_reads() == 1                          # the LTD reason and the chip share one read
+        assert _card(cards, header.MARKS_TITLE).children[1].children == "1 mark missing"
+        header._build_figures(conn, "2026-09-17")
+        assert as_of_reads() == 1                          # the next render reads the memo
+        stat = os.stat(db)
+        os.utime(db, (stat.st_atime, stat.st_mtime + 5))   # the database changed
+        header._build_figures(conn, "2026-09-17")
+        assert as_of_reads() == 2
+    finally:
+        conn.close()

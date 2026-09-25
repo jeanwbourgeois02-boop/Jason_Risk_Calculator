@@ -77,3 +77,36 @@ def test_with_footer_pins_totals_in_a_headerless_twin_with_the_same_widths():
     assert widths and widths == [r for r in table.style_cell_conditional if "width" in r]
     assert footer.style_data_conditional[-1]["fontWeight"] == "700"
     assert json.dumps(div.to_plotly_json(), default=str)  # serialisable for Dash
+
+
+# ------------------------------------------------ money in k / M on summary tables (2026-09-25)
+def test_amount_short_is_an_si_format_with_parentheses_and_trimmed_zeros():
+    f = rk.amount_short()
+    assert f["specifier"] == "(.3~s" and f["nully"] == ""
+    assert rk.amount_short("n/a")["nully"] == "n/a"
+    assert rk.amount_short(digits=2)["specifier"] == "(.2~s"
+    # still a numeric column: the table ranks the number, not the text
+    col = rk.numeric("LTD", "ltd", rk.amount_short())
+    assert col["type"] == "numeric" and col["format"]["specifier"] == "(.3~s"
+
+
+def test_whole_units_rounds_money_columns_and_keeps_the_rest():
+    rows = [{"name": "Brent/WTI", "ltd": 51018.3, "daily": -0.4, "lots": 3.5},
+            {"name": "Corn Z/H", "ltd": None, "daily": float("nan"), "lots": 1},
+            {"name": "Crack", "ltd": "n/a", "daily": "", "lots": 2}]
+    out = rk.whole_units(rows, ["ltd", "daily", "missing"])
+    assert out[0] == {"name": "Brent/WTI", "ltd": 51018.0, "daily": 0.0, "lots": 3.5}
+    assert str(out[0]["daily"]) == "0.0"                      # never a negative zero, never "-400m"
+    assert out[1]["ltd"] is None and out[1]["daily"] is None
+    assert out[2]["ltd"] == "n/a" and out[2]["daily"] is None
+    assert rows[0]["ltd"] == 51018.3                          # the raw records (the CSV's) untouched
+
+
+def test_si_text_mirrors_d3_for_column_widths():
+    assert rk.si_text(51018) == "51k" and rk.si_text(51018, trim=False) == "51.0k"
+    assert rk.si_text(1650590) == "1.65M" and rk.si_text(2.4e9) == "2.4G"
+    assert rk.si_text(395) == "395" and rk.si_text(0) == "0" and rk.si_text(999600) == "1M"
+    f = rk.amount_short()
+    assert rk.display_length(-51018.0, f) == len("(51k)")
+    assert rk.display_length(1650590.0, f) == len("1.65M")
+    assert rk.display_length(None, rk.amount_short("n/a")) == 3

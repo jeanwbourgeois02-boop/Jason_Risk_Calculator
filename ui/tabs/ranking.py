@@ -4,8 +4,9 @@ One rule for the app's tables: a click on a column header sorts the rows by that
 a second click reverses it, shift-click adds a second key (Dash's native sort), and the
 order survives the tab's own rebuilds because `sort_by` is kept in the browser session.
 For the ranking to be right a number is stored as a number and formatted by the table
-(`amount`, `rate`, `percent`), never as a pre-formatted string, which would rank "9,000"
-above "10,000,000". A cell with nothing to show is None and `nully` says what the table
+(`amount`, `amount_short`, `rate`, `percent`), never as a pre-formatted string, which would
+rank "9,000" above "10,000,000". Summary tables show money in k / M (`amount_short`, fed
+through `whole_units`); trade rows keep full figures (`amount`). A cell with nothing to show is None and `nully` says what the table
 prints for it ("" or "n/a"); a sign colour keys on `{col} < 0`, never on the text.
 
 A total or net row never takes part in a ranking: `with_footer` renders it as a
@@ -23,7 +24,9 @@ from dash import dash_table, html
 from dash.dash_table.Format import Format, Group, Scheme, Sign, Symbol, Trim
 
 NULL_TEXTS = ("", "n/a", "\u2014", "Unavailable")   # strings a numeric column may still carry; they rank last
-_SPEC_RE = re.compile(r"^(?P<sign>[(+\- ])?(?P<symbol>\$)?(?P<group>,)?(?:\.(?P<precision>\d+))?(?P<trim>~)?(?P<type>[f%])?$")
+_SPEC_RE = re.compile(r"^(?P<sign>[(+\- ])?(?P<symbol>\$)?(?P<group>,)?(?:\.(?P<precision>\d+))?(?P<trim>~)?(?P<type>[f%s])?$")
+_SI_PREFIX = {-24: "y", -21: "z", -18: "a", -15: "f", -12: "p", -9: "n", -6: "\u00b5", -3: "m", 0: "",
+              3: "k", 6: "M", 9: "G", 12: "T", 15: "P", 18: "E", 21: "Z", 24: "Y"}
 
 
 # ----------------------------------------------------------------------------- formats
@@ -34,6 +37,36 @@ def amount(decimals: int = 0, nully: str = "", trim: bool = False) -> dict:
     if trim:
         fmt = fmt.trim(Trim.yes)
     return fmt.to_plotly_json()
+
+
+def amount_short(nully: str = "", digits: int = 3) -> dict:
+    """Money on a summary table in k / M / G to `digits` significant figures, a negative in
+    parentheses: 51,018 -> 51k, 1,650,590 -> 1.65M, -2,400 -> (2.4k), 395 -> 395, 0 -> 0.
+    The cell stays a number, so the column still ranks numerically; the letters are the
+    table's own (d3's SI prefixes: M for a million, G for a billion). Feed the table through
+    `whole_units` first: SI would print a stray 0.4 as "400m" (milli). Trade rows keep full
+    figures (`amount`); the CSV keeps the raw records."""
+    return (Format(precision=digits, scheme=Scheme.decimal_si_prefix, sign=Sign.parantheses, nully=nully)
+            .trim(Trim.yes).to_plotly_json())
+
+
+def whole_units(records: Iterable[dict], columns: Iterable[str]) -> List[dict]:
+    """Copies of `records` with each of `columns` rounded to whole units for display with
+    `amount_short`, so float noise never prints as milli / nano: 0.4 -> 0.0, -0.4 -> 0.0
+    (never a negative zero), 51018.3 -> 51018.0. None / NaN / '' become None (the table's
+    `nully`); a string that is not a number is kept as it is (ranked last, `NULL_TEXTS`).
+    Display only: pass the raw records to a CSV download."""
+    cols = list(columns)
+    out = []
+    for r in records:
+        row = dict(r)
+        for c in cols:
+            if c not in row:
+                continue
+            v = value(row[c])
+            row[c] = (float(round(v)) + 0.0) if isinstance(v, float) else v
+        out.append(row)
+    return out
 
 
 def rate(decimals: int = 6, nully: str = "", trim: bool = False) -> dict:
@@ -110,6 +143,23 @@ def sign_styles(columns: Iterable[str], neg: str = "var(--neg)", pos: str = "var
 
 
 # ----------------------------------------------------------------------------- widths and footer
+def si_text(v: float, precision: int = 3, trim: bool = True) -> str:
+    """What d3's `.{precision}s` (`~s` with `trim`) prints for `v`, sign left out: 51018 ->
+    "51.0k" ("51k" trimmed), 1650590 -> "1.65M". Used to size a column formatted with
+    `amount_short`; the table itself does the printing."""
+    a = abs(float(v))
+    if a == 0:
+        return "0" if trim or precision <= 1 else "0." + "0" * (precision - 1)
+    mantissa, exp = f"{a:.{precision - 1}e}".split("e")
+    exp = int(exp)
+    group = max(-24, min(24, (exp // 3) * 3))
+    decimals = max(0, precision - 1 - (exp - group))
+    body = f"{float(mantissa) * 10 ** (exp - group):.{decimals}f}"
+    if trim and "." in body:
+        body = body.rstrip("0").rstrip(".")
+    return body + _SI_PREFIX[group]
+
+
 def display_length(v, fmt: Optional[dict] = None) -> int:
     """How many characters the table will print for `v`: a number through its d3
     specifier (grouping, precision, parentheses, trim, per cent), anything else as text."""
@@ -124,6 +174,10 @@ def display_length(v, fmt: Optional[dict] = None) -> int:
         return len(str(v))
     if not spec:
         return len(f"{f:,.0f}")
+    if spec.group("type") == "s":
+        body = si_text(abs(f), int(spec.group("precision") or 6), bool(spec.group("trim")))
+        sign = spec.group("sign")
+        return len(body) + (2 if (sign == "(" and f < 0) else (1 if f < 0 or sign in ("+", " ") else 0))
     precision = int(spec.group("precision") or 0)
     if spec.group("type") == "%":
         f *= 100

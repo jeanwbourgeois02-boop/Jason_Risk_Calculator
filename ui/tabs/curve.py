@@ -1,11 +1,19 @@
 """Curve tab: "What am I long or short, in which month?" (Commodity conversion plan, Phase 1
-step 3; options on futures, LME prompts and averaging contracts since Phase 5). Rendered from
-`engine.curve.curve_positions` and nothing else: every position, price, notional, delta and P&L
-on the tab is that dict's; nothing here re-prices or re-reads a mark (CLAUDE.md "Tabs as views").
+step 3; options on futures, LME prompts and averaging contracts since Phase 5; cleaned up under
+"Screens redesign plan" Phase A, 2026-09-25). Rendered from `engine.curve.curve_positions` and
+nothing else: every position, price, notional, delta and P&L on the tab is that dict's; nothing
+here re-prices or re-reads a mark (CLAUDE.md "Tabs as views").
+
+Numbers first (Screens redesign plan, Decisions): a section's definitions sit on hover of its
+title (`formatting.about`), never as a paragraph above the table; the engine's reasons are
+gathered in one collapsed "Data issues (N)" drawer (`formatting.issues_drawer`); a note on a row
+is a short marker with its sentence on hover; USD money on the grid and the sector table is in
+k / m (`ranking.amount_short` fed through `ranking.whole_units`, the full figure on hover);
+lots and units keep their figures, and the Contracts table keeps full figures.
 
 Layout, top to bottom (`body`):
   1. `caption_block`: the as-of, the engine's note (no commodity future, every one flat) and
-     its `reasons` list.
+     the Data issues drawer of its `reasons`.
   2. `grid_section`: one row per commodity (`by_commodity`) in the engine's order (sector,
      root), the Sector column first, the contract months (`months`) across. The view switch
      (`UNIT_ID`) picks what a month cell shows and which totals end the row:
@@ -23,14 +31,17 @@ Layout, top to bottom (`body`):
      engine figures only. A cell with a contract whose figure is None reads "n/a" with the
      contract's reason on hover; an empty cell is a month with no position in that view. Every
      cell with a position lists its contracts on hover (and, in the delta views, each one's
-     note: the averaging days left, say).
+     note: the averaging days left, say). The Notes column holds short markers ("options",
+     "avg", "no USD 1") with their sentences on hover.
   3. `sector_section`: net and gross USD notional and net and gross USD delta per sector
      (`by_sector`), the book's sum pinned under it (n/a with the reasons when any sector is n/a).
-  4. `detail_section`: the engine's `rows`, one per position: product (only when the book holds
-     more than one), exchange, contract, expiry (marked "(est.)" when contract-master's dates are
-     ESTIMATED; an LME prompt date never is), first notice, lots, units, price and its currency,
-     USD per unit, local and USD notional (an option's reads "option: see delta"), delta factor,
-     delta lots and delta USD (the row's note on hover), trades and the reason.
+  4. `detail_section`: the engine's `rows`, one per position, in the columns a trader reads
+     (product when the book holds more than one, commodity, contract, month, expiry marked
+     "(est.)" when contract-master's dates are ESTIMATED, lots, units, price, notional USD,
+     delta lots, delta USD), so it fits 1680 px. The rest (sector, exchange, first notice, price
+     source, USD per unit, local notional, delta factor, trades, reason) is on hover of the
+     row's cells and in hidden columns the table's own "Toggle Columns" button shows
+     (`DETAIL_MORE_COLUMNS`, the choice kept in the browser session).
   5. `currency_section`: the P&L the non-USD futures and options hold in each currency and its
      USD value (`currency_exposure`).
   6. `flat_section`: the open positions that net to zero, collapsed.
@@ -54,6 +65,7 @@ from engine.curve import curve_positions
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
+from ui.tabs.formatting import about, issues_drawer, marker
 from ui.tabs.header import AS_OF_STORE_ID
 
 BODY_ID = "curve-body"
@@ -77,8 +89,17 @@ UNITS = ("lots", "units", "usd", "delta_lots", "delta_usd")
 DELTA_UNITS = ("delta_lots", "delta_usd")
 UNIT_LABELS = {"lots": "Lots", "units": "Physical units", "usd": "USD notional",
                "delta_lots": "Delta lots", "delta_usd": "Delta USD"}
+UNIT_WORDS = {"lots": "lots", "units": "physical units", "usd": "USD notional",
+              "delta_lots": "delta lots", "delta_usd": "delta USD"}     # the same, inside a sentence
 DEFAULT_UNIT = "lots"
 MONTH_PREFIX = "m_"          # a month column's id: 'm_2026-12'
+USD_VIEWS = ("usd", "delta_usd")                  # the views whose month cells are USD money (k / m)
+GRID_USD_COLUMNS = ("net_usd", "gross_usd", "net_delta_usd", "gross_delta_usd")
+# The Contracts table's columns behind its "Toggle Columns" button (hidden until asked for;
+# every one of them is also on hover of the row's visible cells).
+DETAIL_MORE_COLUMNS = ("sector", "exchange", "first_notice", "price_source", "usd_per_unit",
+                       "notional_local", "delta_factor", "trades", "reason")
+NOTE_SEP = " \u00b7 "        # between two markers in a Notes cell
 
 _MONO = {"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
          "padding": "4px 8px", "whiteSpace": "pre"}
@@ -101,13 +122,29 @@ def _tip(text: str) -> dict:
 
 
 def _date_words(iso: Optional[str]) -> str:
+    """'2026-09-15' -> 'Tue 15 Sep 2026 (2026-09-15)'."""
     if not iso:
         return "no as-of date"
     try:
         d = dt.date.fromisoformat(iso)
     except ValueError:
         return iso
-    return f"{d:%A} {d.day} {d:%B %Y} ({iso})"
+    return f"{d:%a} {d.day} {d:%b %Y} ({iso})"
+
+
+def _full_usd(v: float) -> str:
+    """The full figure behind a k / m cell: 'USD 1,650,590' / 'USD -51,018'."""
+    return f"USD {v:,.0f}"
+
+
+def _add_full_usd_tips(records: List[dict], tips: List[dict], columns) -> None:
+    """Every numeric USD cell shown in k / m without a tooltip of its own gets its full figure
+    on hover (a cell that already has one keeps it: n/a reasons, contract lists)."""
+    for rec, tip in zip(records, tips):
+        for col in columns:
+            v = rec.get(col)
+            if isinstance(v, float) and col not in tip:
+                tip[col] = _tip(_full_usd(v))
 
 
 def _sector_label(sector: Optional[str]) -> str:
@@ -149,8 +186,8 @@ def _na_styles(columns) -> List[dict]:
 
 
 def _fmt(unit: str) -> dict:
-    """The month cells' format: lots and units keep up to 2 decimals, USD is whole dollars."""
-    return rk.amount(nully="") if unit in ("usd", "delta_usd") else rk.amount(2, nully="", trim=True)
+    """The month cells' format: lots and units keep up to 2 decimals, USD money is k / m."""
+    return rk.amount_short(nully="") if unit in USD_VIEWS else rk.amount(2, nully="", trim=True)
 
 
 def message_box(message: str) -> html.P:
@@ -167,13 +204,27 @@ def caption_lines(result: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def issue_items(result: Dict[str, Any]) -> List[Any]:
+    """The engine's `reasons`, once each, in its order, for the Data issues drawer: a reason
+    that opens with a contract on the tab ('CUZ26 Comdty: no SPOT ...') is a (contract,
+    sentence) pair, anything else the sentence as it stands."""
+    contracts = {r.get("contract_id") for r in (result.get("rows") or []) if r.get("contract_id")}
+    items: List[Any] = []
+    seen = set()
+    for reason in result.get("reasons") or []:
+        if not reason or reason in seen:
+            continue
+        seen.add(reason)
+        head, sep, rest = reason.partition(": ")
+        items.append((head, rest) if sep and head in contracts else reason)
+    return items
+
+
 def caption_block(result: Dict[str, Any]) -> html.Div:
     children: List[Any] = [html.Div(className="meta-line", children=[html.Span(line) for line in caption_lines(result)])]
-    reasons = [r for r in (result.get("reasons") or []) if r]
-    if reasons:
-        children.append(html.Details(className="details details--compact", open=len(reasons) <= 3, children=[
-            html.Summary(f"Gaps ({len(reasons)}): figures the engine could not compute"),
-            html.Ul([html.Li(r) for r in reasons], style={"margin": "2px 0 0 16px", "padding": 0})]))
+    drawer = issues_drawer(issue_items(result))
+    if drawer is not None:
+        children.append(drawer)
     return html.Div(children, className="curve-caption")
 
 
@@ -309,36 +360,49 @@ def grid_records(result: Dict[str, Any], unit: str) -> Tuple[List[dict], List[di
             rec[col] = NA if v is None else v
             if v is None and delta_view:
                 tip[col] = _tip(c.get("delta_reason") or "no delta")
-        products = c.get("products") or sorted({_product(r) for r in mine})
-        notes = []
-        no_month = [r["contract_id"] for r in mine if _row_month(r) is None]
-        if no_month:
-            notes.append(f"no contract month for {', '.join(no_month)}: in the totals, in no month column")
-        if delta_view:
-            if c.get("delta_missing"):
-                notes.append(f"no delta for {', '.join(c['delta_missing'])}")
-            averaging = [r["contract_id"] for r in mine if _product(r) == FUTURE and r.get("note")]
-            if averaging:
-                notes.append(f"averaging, reduced delta: {', '.join(averaging)}")
-            if c.get("delta_reason"):
-                tip["note"] = _tip(c["delta_reason"])
-        else:
-            if c.get("missing"):
-                notes.append(f"no USD notional for {', '.join(c['missing'])}")
-            if OPTION in products:
-                notes.append("options: in the delta views only")
-            if c.get("reason"):
-                tip["note"] = _tip(c["reason"])
-        rec["note"] = "; ".join(notes)
+        markers = note_markers(c, mine, delta_view)
+        rec["note"] = NOTE_SEP.join(short for short, _ in markers)
+        sentences = [sentence for _, sentence in markers]
+        why = c.get("delta_reason") if delta_view else c.get("reason")
+        if why and why not in sentences:
+            sentences.append(why)
+        if sentences:
+            tip["note"] = _tip("; ".join(sentences))
         records.append(rec)
         tooltips.append(tip)
     return records, tooltips
 
 
+def note_markers(c: Dict[str, Any], mine: List[dict], delta_view: bool) -> List[Tuple[str, str]]:
+    """The Notes cell of one commodity as (marker, sentence) pairs: the marker is what the cell
+    shows, the sentences are its hover. Outright views: a contract with no USD notional, and
+    options (in the delta views only). Delta views: a contract with no delta, averaging
+    contracts at their reduced delta. Both: a contract with no contract month."""
+    out: List[Tuple[str, str]] = []
+    no_month = [r["contract_id"] for r in mine if _row_month(r) is None]
+    if no_month:
+        out.append((f"no month {len(no_month)}",
+                    f"no contract month for {', '.join(no_month)}: in the totals, in no month column"))
+    if delta_view:
+        if c.get("delta_missing"):
+            out.append((f"no delta {len(c['delta_missing'])}", f"no delta for {', '.join(c['delta_missing'])}"))
+        averaging = [r["contract_id"] for r in mine if _product(r) == FUTURE and r.get("note")]
+        if averaging:
+            out.append(("avg", f"averaging, reduced delta: {', '.join(averaging)}"))
+    else:
+        if c.get("missing"):
+            out.append((f"no USD {len(c['missing'])}", f"no USD notional for {', '.join(c['missing'])}"))
+        products = c.get("products") or sorted({_product(r) for r in mine})
+        if OPTION in products:
+            out.append(("options", "options: in the delta views only (an option is not a lot of the future; "
+                                   "its exposure is its delta)"))
+    return out
+
+
 def grid_columns(months: List[str], unit: str) -> List[dict]:
     fmt = _fmt(unit)
     lots = rk.amount(2, nully="", trim=True)
-    usd = rk.amount(nully="")
+    usd = rk.amount_short(nully="")
     head = [rk.text("Sector", "sector"), rk.text("Commodity", "commodity"), rk.text("Exchange", "exchange"),
             rk.text("Ccy", "currency")]
     cells = [rk.numeric(month_label(k), month_column(k), fmt) for k in months]
@@ -349,7 +413,7 @@ def grid_columns(months: List[str], unit: str) -> List[dict]:
         tail = [rk.numeric("Net lots", "net_lots", lots), rk.numeric("Gross lots", "gross_lots", lots),
                 rk.numeric("Net units", "net_units", lots), rk.text("Unit", "unit"),
                 rk.numeric("Net USD", "net_usd", usd), rk.numeric("Gross USD", "gross_usd", usd)]
-    return head + cells + tail + [rk.text("Note", "note")]
+    return head + cells + tail + [rk.text("Notes", "note")]
 
 
 _IN_WORDS = {
@@ -374,6 +438,7 @@ def grid_caption(result: Dict[str, Any], unit: str) -> str:
         caption += (" Lots, units and USD notional are futures and LME prompts only, as the engine gives them: "
                     "an option is not a lot of the future, and shows in the delta views. Net and gross lots, "
                     "units and USD at the end are the engine's per-commodity totals.")
+    caption += " USD in k / m, the full figure on hover. Notes are short markers, their sentences on hover."
     return caption
 
 
@@ -383,6 +448,9 @@ def grid_section(result: Dict[str, Any], unit: str) -> html.Div:
     records, tips = grid_records(result, unit)
     columns = grid_columns(months, unit)
     month_ids = [month_column(k) for k in months]
+    money = list(GRID_USD_COLUMNS) + (month_ids if unit in USD_VIEWS else [])
+    _add_full_usd_tips(records, tips, money)
+    records = rk.whole_units(records, money)       # k / m display: whole units, never "400m" (milli)
     if unit in DELTA_UNITS:
         signed, other = month_ids + ["net_delta_lots", "net_delta_usd"], ["gross_delta_usd"]
     else:
@@ -392,24 +460,28 @@ def grid_section(result: Dict[str, Any], unit: str) -> html.Div:
         columns=columns,
         data=records,
         tooltip_data=tips,
-        tooltip_header={month_column(k): f"contract month {k}, in {UNIT_LABELS[unit].lower()}" for k in months},
+        tooltip_header={month_column(k): f"contract month {k}, in {UNIT_WORDS[unit]}" for k in months},
         tooltip_delay=0, tooltip_duration=None,
         **rk.sortable(GRID_ID),
         style_table={"overflowX": "auto"},
         style_cell=_MONO,
         style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"}
                                 for c in ("sector", "commodity", "exchange", "currency", "unit", "note")]
-                               + [{"if": {"column_id": "note"}, "whiteSpace": "normal", "minWidth": "200px", "maxWidth": "380px"}],
+                               + [{"if": {"column_id": "note"}, "color": "var(--muted)"}],
         style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
         style_data_conditional=rk.sign_styles(signed) + _na_styles(signed + other),
     )
     return html.Div(className="section", children=[
-        html.H4(f"Positions by contract month ({UNIT_LABELS[unit].lower()})"),
-        html.P(grid_caption(result, unit), className="section-kicker"),
+        about(f"Positions by contract month ({UNIT_WORDS[unit]})", grid_caption(result, unit)),
         table])
 
 
 # --------------------------------------------------------------------------- 3. sectors
+SECTOR_ABOUT = ("Net = the sector's contracts' USD notionals summed with their signs (a calendar spread nets to its "
+                "leftover outright); gross = their absolute values summed; both over futures and LME prompts. The "
+                "delta columns are the same over every product, an option at its delta and an averaging contract "
+                "at its reduced delta. The Book line adds the sectors up; any sector n/a makes it n/a. USD in "
+                "k / m; the full figure on hover.")
 _SECTOR_COLS = (("net_usd", "reason", "no USD notional"), ("gross_usd", "reason", "no USD notional"),
                 ("net_delta_usd", "delta_reason", "no USD delta"), ("gross_delta_usd", "delta_reason", "no USD delta"))
 
@@ -453,8 +525,11 @@ def sector_records(result: Dict[str, Any]) -> Tuple[List[dict], List[dict], dict
 
 def sector_section(result: Dict[str, Any]) -> html.Div:
     records, tips, footer, footer_tip = sector_records(result)
-    usd = rk.amount(nully="")
+    usd = rk.amount_short(nully="")
     numeric = [col for col, _, _ in _SECTOR_COLS]
+    _add_full_usd_tips(records, tips, numeric)
+    _add_full_usd_tips([footer], [footer_tip], numeric)
+    records, footer = rk.whole_units(records, numeric), rk.whole_units([footer], numeric)[0]
     table = dash_table.DataTable(
         id=SECTOR_TABLE_ID,
         columns=[rk.text("Sector", "sector"), rk.numeric("Net USD", "net_usd", usd),
@@ -470,12 +545,7 @@ def sector_section(result: Dict[str, Any]) -> html.Div:
     )
     footer_style = [{"if": {"filter_query": "{sector} = 'Book'"}, "fontWeight": "700", "borderTop": "2px solid #1f2933"}]
     return html.Div(className="section", children=[
-        html.H4("Net outright by sector (USD)"),
-        html.P("Net = the sector's contracts' USD notionals summed with their signs (a calendar spread nets to its "
-               "leftover outright); gross = their absolute values summed; both over futures and LME prompts. The "
-               "delta columns are the same over every product, an option at its delta and an averaging contract "
-               "at its reduced delta. The Book line adds the sectors up; any sector n/a makes it n/a.",
-               className="section-kicker"),
+        about("Net outright by sector (USD)", SECTOR_ABOUT),
         rk.with_footer(table, [footer], footer_style=footer_style, footer_tooltips=[footer_tip])])
 
 
@@ -549,9 +619,42 @@ def detail_records(result: Dict[str, Any]) -> Tuple[List[dict], List[dict]]:
                 tip[col] = _tip(note)
         if reason:
             tip["reason"] = _tip(reason)
+        _hover_the_hidden(r, rec, tip)
         records.append(rec)
         tooltips.append(tip)
     return records, tooltips
+
+
+def _extend(tip: Dict[str, dict], col: str, *lines: str) -> None:
+    """Add `lines` to the hover of `col`, after what is already there."""
+    parts = ([tip[col]["value"]] if col in tip else []) + [t for t in lines if t]
+    if parts:
+        tip[col] = _tip(" | ".join(parts))
+
+
+def _hover_the_hidden(r: Dict[str, Any], rec: Dict[str, Any], tip: Dict[str, dict]) -> None:
+    """The figures of the columns behind "Toggle Columns" (`DETAIL_MORE_COLUMNS`), on hover of
+    the visible cell they explain, so nothing leaves the screen with them: sector, exchange
+    and the full name on the commodity; the trades and the reason on the contract; the first
+    notice on the expiry; the price source and USD per unit on the price; the local notional on
+    the notional USD; the delta factor on the delta lots. Display only: engine figures, as given."""
+    _extend(tip, "commodity", NOTE_SEP.join(t for t in (rec["sector"], rec["exchange"], rec["commodity"]) if t))
+    _extend(tip, "contract_id", f"trades: {rec['trades']}" if rec["trades"] else "", rec["reason"])
+    fn = rec["first_notice"]
+    fn_line = f"first notice: {fn}" if fn != NA else f"first notice: {NA} ({tip['first_notice']['value']})"
+    _extend(tip, "expiry", fn_line)
+    ccy = rec["currency"]
+    usd_per = rec["usd_per_unit"]
+    usd_line = (f"USD per {ccy or 'unit'}: {usd_per:.6g}" + (f" ({r['usd_source']})" if r.get("usd_source") else "")
+                if isinstance(usd_per, float) else f"USD per unit: {NA}")
+    _extend(tip, "price", f"source: {rec['price_source']}" if rec["price_source"] else "",
+            usd_line if ccy and ccy != "USD" else "")
+    local = rec["notional_local"]
+    if isinstance(local, float) and ccy and ccy != "USD":
+        _extend(tip, "notional_usd", f"local notional: {ccy} {local:,.0f}", usd_line)
+    factor = rec["delta_factor"]
+    if isinstance(factor, float) and factor != 1.0 and isinstance(rec["lots"], float):
+        _extend(tip, "delta_lots", f"{rec['lots']:g} lot(s) x delta factor {factor:.4g}")
 
 
 def show_product_column(result: Dict[str, Any]) -> bool:
@@ -559,49 +662,66 @@ def show_product_column(result: Dict[str, Any]) -> bool:
     return len(result.get("products_present") or []) > 1
 
 
-def detail_section(result: Dict[str, Any]) -> html.Div:
-    records, tips = detail_records(result)
+DETAIL_ABOUT = (
+    "One row per open position with a non-zero net, in the engine's order (sector, commodity, expiry). "
+    "Notional = lots x multiplier x the day's official price, in the contract's currency, and x the "
+    "day's spot in USD; an option has none (its exposure is its delta) and sits under its underlying "
+    "future's month, priced at that future. Delta lots = lots x delta factor (1 for a future or LME "
+    "prompt, the share of pricing days left for an averaging contract, the option's delta for an "
+    "option), what it is on hover. An expiry marked (est.) is contract-master's estimate until "
+    "Bloomberg's dates are on file; an LME prompt date is the ticket's own. Sector, exchange, first "
+    "notice, price source, USD per unit, local notional, delta factor, trades and reason are on hover of "
+    "the row's cells, and in the columns the table's Toggle Columns button shows.")
+
+
+def detail_columns(result: Dict[str, Any]) -> List[dict]:
+    """The Contracts table's columns: the ones a trader reads first, in sight at 1680 px, then
+    `DETAIL_MORE_COLUMNS` (hideable, hidden until the table's Toggle Columns button shows them)."""
     lots = rk.amount(2, nully="", trim=True)
-    columns = ([rk.text("Product", "product")] if show_product_column(result) else []) + [
-        rk.text("Sector", "sector"), rk.text("Commodity", "commodity"), rk.text("Exchange", "exchange"),
-        rk.text("Contract", "contract_id"), rk.text("Month", "month"), rk.text("Expiry", "expiry"),
-        rk.text("First notice", "first_notice"), rk.numeric("Lots", "lots", lots),
+    more = {"hideable": True}
+    return ([rk.text("Product", "product")] if show_product_column(result) else []) + [
+        rk.text("Commodity", "commodity"), rk.text("Contract", "contract_id"), rk.text("Month", "month"),
+        rk.text("Expiry", "expiry"), rk.numeric("Lots", "lots", lots),
         rk.numeric("Units", "units", lots), rk.text("Unit", "unit"),
         rk.numeric("Price", "price", rk.rate(6, trim=True)), rk.text("Ccy", "currency"),
-        rk.text("Price source", "price_source"), rk.numeric("USD per unit", "usd_per_unit", rk.rate(6, trim=True)),
-        rk.numeric("Notional (local)", "notional_local", rk.amount(nully="")),
         rk.numeric("Notional USD", "notional_usd", rk.amount(nully="")),
-        rk.numeric("Delta factor", "delta_factor", rk.rate(4, trim=True)),
         rk.numeric("Delta lots", "delta_lots", rk.amount(4, nully="", trim=True)),
         rk.numeric("Delta USD", "delta_usd", rk.amount(nully="")),
-        rk.text("Trades", "trades"), rk.text("Reason", "reason")]
+        rk.text("Sector", "sector", **more), rk.text("Exchange", "exchange", **more),
+        rk.text("First notice", "first_notice", **more),
+        rk.text("Price source", "price_source", **more),
+        rk.numeric("USD per unit", "usd_per_unit", rk.rate(6, trim=True), **more),
+        rk.numeric("Notional (local)", "notional_local", rk.amount(nully=""), **more),
+        rk.numeric("Delta factor", "delta_factor", rk.rate(4, trim=True), **more),
+        rk.text("Trades", "trades", **more), rk.text("Reason", "reason", **more)]
+
+
+def detail_section(result: Dict[str, Any]) -> html.Div:
+    records, tips = detail_records(result)
+    columns = detail_columns(result)
     numeric_cols = [c["id"] for c in columns if c["type"] == "numeric"]
-    sort_props = rk.sortable(DETAIL_TABLE_ID)
+    sort_props = rk.sortable(DETAIL_TABLE_ID, persisted=("hidden_columns",))
     sort_props["sort_as_null"] = list(sort_props["sort_as_null"]) + [OPTION_NOTIONAL]
     option_notional_style = [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{OPTION_NOTIONAL}'"}, **_NA_STYLE}
                              for c in ("notional_local", "notional_usd")]
     table = dash_table.DataTable(
         id=DETAIL_TABLE_ID, columns=columns, data=records, tooltip_data=tips,
+        hidden_columns=list(DETAIL_MORE_COLUMNS),
         tooltip_delay=0, tooltip_duration=None,
         **sort_props,
         style_table={"overflowX": "auto"},
         style_cell=_MONO,
         style_cell_conditional=[{"if": {"column_id": c["id"]}, "textAlign": "left"} for c in columns if c["type"] == "text"]
-                               + [{"if": {"column_id": "reason"}, "whiteSpace": "normal", "minWidth": "220px", "maxWidth": "420px"}],
+                               + [{"if": {"column_id": "commodity"}, "maxWidth": "30ch", "overflow": "hidden",
+                                   "textOverflow": "ellipsis"},
+                                  {"if": {"column_id": "reason"}, "whiteSpace": "normal", "minWidth": "220px", "maxWidth": "420px"}],
         style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
         style_data_conditional=rk.sign_styles(["lots", "units", "notional_local", "notional_usd", "delta_lots", "delta_usd"])
                                + _na_styles(numeric_cols + ["month", "first_notice"]) + option_notional_style
                                + [{"if": {"column_id": "expiry", "filter_query": '{expiry} contains "(est.)"'}, **_NA_STYLE}],
     )
     return html.Div(className="section", children=[
-        html.H4("Contracts"),
-        html.P("One row per open position with a non-zero net, in the engine's order (sector, commodity, expiry). "
-               "Notional = lots x multiplier x the day's official price, in the contract's currency, and x the "
-               "day's spot in USD; an option has none (its exposure is its delta) and sits under its underlying "
-               "future's month, priced at that future. Delta lots = lots x delta factor (1 for a future or LME "
-               "prompt, the share of pricing days left for an averaging contract, the option's delta for an "
-               "option), what it is on hover. An expiry marked (est.) is contract-master's estimate until "
-               "Bloomberg's dates are on file; an LME prompt date is the ticket's own.", className="section-kicker"),
+        about("Contracts", DETAIL_ABOUT),
         table])
 
 
@@ -631,8 +751,7 @@ def currency_section(result: Dict[str, Any]) -> html.Div:
               "USD at the day's spot, both from the valuation engine.")
     if not records:
         return html.Div(className="section", children=[
-            html.H4("Currency exposure of non-USD futures"),
-            html.P(kicker, className="section-kicker"),
+            about("Currency exposure of non-USD futures", kicker),
             message_box("No open non-USD commodity future or option: no currency exposure.")])
     table = dash_table.DataTable(
         id=CURRENCY_TABLE_ID,
@@ -649,7 +768,7 @@ def currency_section(result: Dict[str, Any]) -> html.Div:
         style_data_conditional=rk.sign_styles(["pnl_local", "pnl_usd"]) + _na_styles(["pnl_local", "pnl_usd"]),
     )
     return html.Div(className="section", children=[
-        html.H4("Currency exposure of non-USD futures"), html.P(kicker, className="section-kicker"), table])
+        about("Currency exposure of non-USD futures", kicker), table])
 
 
 # --------------------------------------------------------------------------- 6. flat contracts
@@ -713,6 +832,10 @@ def render(as_of: Optional[str], db_path, unit: str = DEFAULT_UNIT) -> Any:
     return body(result, unit)
 
 
+AS_OF_HOVER = ("The tab follows the header's as-of date (the Blotter's and the FX & cash tab's date pickers "
+               "set it); it has no date picker of its own. The date the figures are for is under the view switch.")
+
+
 def layout(default_date: Optional[str] = None) -> html.Div:
     """The static shell: a title row with the view switch and the body container the callback
     fills. No date picker: the tab follows the header's as-of store."""
@@ -720,8 +843,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
         html.Div(className="ladder-title-row", children=[
             html.H3("Curve", className="ladder-title-row-heading"),
             html.Div(className="ladder-title-row-right", children=[
-                html.H4(f"Follows the header's as-of date{f' ({default_date})' if default_date else ''}",
-                        className="section-title")])]),
+                marker(f"header's as-of{f' {default_date}' if default_date else ''}", AS_OF_HOVER)])]),
         html.Div(className="meta-line", children=[
             html.Span("Month cells in: "),
             dcc.RadioItems(id=UNIT_ID, options=[{"label": UNIT_LABELS[u], "value": u} for u in UNITS],

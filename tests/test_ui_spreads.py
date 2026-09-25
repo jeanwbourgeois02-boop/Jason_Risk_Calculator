@@ -19,6 +19,7 @@ from dash import dash_table, html  # noqa: E402
 from data.contracts import get_root  # noqa: E402
 from data.ingest import schema  # noqa: E402
 from ui.tabs import spreads  # noqa: E402
+from ui.tabs.formatting import INFO_MARK  # noqa: E402
 
 AS_OF = "2026-09-15"          # a Tuesday: Daily is measured from the 2026-09-14 close
 PREV = "2026-09-14"
@@ -128,9 +129,10 @@ def test_open_spreads_are_rows_sorted_by_absolute_ltd_with_na_last():
     first = table.data[0]
     assert first["ltd"] == -5000.0 and first["daily"] == 100.0 and first["ytd"] == 400.0
     assert first["legs"] == f"CLZ26 +10 / CLF27 {spreads.MINUS}10"
-    assert first["size"] == 10.0 and first["size_unit"] == "lots" and first["kind"] == "Calendar"
+    assert first["size"] == "10 lots" and "size_unit" not in first and first["kind"] == "Calendar"
     assert first["leftover"] == "none (clean)" and first["leftover_usd"] == 0.0
     assert {c["id"] for c in table.columns} >= set(PERIODS) | {"leftover", "leftover_usd", "size", "legs"}
+    assert "size_unit" not in {c["id"] for c in table.columns}
 
 
 def test_a_missing_figure_is_na_with_the_engines_reason_never_zero():
@@ -194,17 +196,114 @@ def test_outrights_render_with_period_pnl_and_why():
     assert footer["ltd"] == 80.0 and "LTD 1" in footer["why"]
 
 
-def test_review_renders_with_its_reason_and_the_bundle_hint():
+def test_review_is_a_collapsed_drawer_one_line_per_group_reason_on_hover():
     body = spreads.body(_result())
-    table = _by_id(body, spreads.REVIEW_TABLE_ID)
-    (rec,) = table.data
-    assert rec["kind"] == "Ratio off" and rec["trades"] == "C1, C2" and rec["contracts"] == "C Z26"
-    assert "off by 10.0%" in rec["reason"] and rec["candidates"] == "C Z26/H27 calendar"
-    assert "Bundles sub-tab" in _text(_by_id(body, spreads.REVIEW_ID))
+    drawer = _by_id(body, spreads.REVIEW_ID)
+    assert isinstance(drawer, html.Details) and drawer.open is False and drawer.className == "issues-drawer"
+    assert drawer.children[0].children == "For review (1)" and "ratio outside 5 %" in drawer.children[0].title
+    (line,) = _by_id(drawer, spreads.REVIEW_TABLE_ID).children
+    text = _text(line)
+    assert "Ratio off" in text and "C Z26/H27 calendar" in text and "trades C1, C2" in text and "C Z26" in text
+    assert "off 10.0%" in text                                     # the candidate's deviation, a marker
+    assert "off by 10.0%" in line.title and "C Z26/H27 calendar: C1, C2" in line.title   # full sentence on hover
+    assert line.style["whiteSpace"] == "nowrap"
+    assert "off by 10.0%" not in text                              # the long sentence is not on the line
+    assert "Bundles sub-tab" in _text(drawer)
+    rec, _tip = spreads.review_record(_result()["review"][0])
+    assert rec["trades"] == "C1, C2" and rec["contracts"] == "C Z26" and rec["candidates"] == "C Z26/H27 calendar"
 
 
-def test_book_reasons_are_listed_in_the_caption():
-    assert "template crack_321 could not be sized" in _text(spreads.body(_result()))
+def test_no_review_no_drawer_and_the_count_says_zero():
+    result = _result()
+    result["review"] = []
+    body = spreads.body(result)
+    assert not _has(body, spreads.REVIEW_ID)
+    assert "0 groups for review" in _text(body)
+
+
+def test_reasons_are_gathered_in_one_collapsed_data_issues_drawer():
+    body = spreads.body(_result())
+    drawer = _by_id(body, spreads.ISSUES_ID)
+    assert isinstance(drawer, html.Details) and drawer.open is False
+    assert drawer.children[0].children == "Data issues (3)"
+    text = _text(drawer)
+    assert "template crack_321 could not be sized" in text                     # the book-level reason
+    assert "Brent/WTI" in text and "LTD, Daily, 5d, MTD, YTD n/a: unpriced on 2026-09-15" in text
+    assert "Outright C1 (C Z26)" in text and "C1 (no FUTURE_PX mark)" in text
+    # nothing to report: no drawer
+    clean = _result()
+    clean["spreads"], clean["outrights"], clean["reasons"] = clean["spreads"][:2], clean["outrights"][1:], []
+    assert not _has(spreads.body(clean), spreads.ISSUES_ID)
+
+
+def _titles(node):
+    return {_text(n).split(INFO_MARK)[0].strip(): n.title for n in _walk(node)
+            if "about-title" in (getattr(n, "className", None) or "")}
+
+
+def test_definitions_are_on_hover_of_titles_never_a_paragraph():
+    body = spreads.body(_result())
+    kickers = [n for n in _walk(body) if isinstance(n, html.P) and "section-kicker" in (n.className or "")]
+    assert kickers == []
+    titles = _titles(body)
+    assert "largest |LTD| first" in titles["Open spreads (3)"]
+    assert "why spreads-engine left it outright" in titles["Outrights (2)"]
+    assert "contracts with their lots" in titles["Legs"]
+    assert "frozen" in _by_id(body, spreads.CLOSED_ID).children[0].title
+    # the caption is one line of counts; the long sentence is on the tab title's hover
+    caption = _text(body.children[0])
+    assert "3 open spreads, 1 closed, 2 outrights, 1 group for review" in caption
+    assert "Total line adds up" not in _text(body)
+    (title,) = _titles(spreads.layout(AS_OF)).values()
+    assert "Total line adds up" in title and "header's as-of" in title
+
+
+# --------------------------------------------------------------------------- k / m, size, compact rows
+def test_spread_usd_columns_are_k_m_rounded_for_display_the_full_figure_on_hover():
+    result = _result()
+    result["spreads"][0].update(_periods([1234.6, -51018.4, 0.4, 1650590.0, None],
+                                         reasons={"ytd": "no close at 2025-12-31"}))
+    body = spreads.body(result)
+    table = _by_id(body, spreads.TABLE_ID)
+    short = spreads.rk.amount_short(nully="")
+    for col in table.columns:
+        if col["id"] in PERIODS + ("leftover_usd",):
+            assert col["format"] == short, col["id"]
+    row = next(i for i, r in enumerate(table.data) if r["name"] == "CL Z26/F27 calendar")
+    rec, tip = table.data[row], table.tooltip_data[row]
+    assert (rec["ltd"], rec["daily"], rec["d5"], rec["mtd"]) == (1235.0, -51018.0, 0.0, 1650590.0)
+    assert rec["ytd"] == "n/a" and "no close at 2025-12-31" in tip["ytd"]["value"]
+    assert tip["ltd"]["value"].startswith("USD 1,235")
+    assert tip["daily"]["value"].startswith(f"USD {spreads.MINUS}51,018")
+    footer = _by_id(body, spreads.TABLE_ID + "-footer")
+    assert footer.columns == table.columns
+    assert footer.data[0]["ltd"] == round(1234.6 - 5000.0)                        # whole units, Total included
+    assert footer.tooltip_data[0]["ltd"]["value"].startswith(f"USD {spreads.MINUS}3,765")
+    assert "excludes 1 of 3" in footer.tooltip_data[0]["ltd"]["value"]
+    # the trade rows of the outrights keep full figures
+    outs = _by_id(body, spreads.OUTRIGHTS_TABLE_ID)
+    assert all(c["format"] == spreads.rk.amount(nully="") for c in outs.columns if c["id"] in PERIODS)
+
+
+def test_size_reads_with_its_unit_in_one_cell():
+    assert spreads.size_text(10.0, "lots") == "10 lots"
+    assert spreads.size_text(5000.0, "bbl") == "5,000 bbl"
+    assert spreads.size_text(96.45, "oz") == "96.45 oz"
+    assert spreads.size_text(-2.5, "t") == f"{spreads.MINUS}2.5 t"
+    assert spreads.size_text(3.0, "") == "3"
+    table = _by_id(spreads.body(_result()), spreads.TABLE_ID)
+    size_col = next(c for c in table.columns if c["id"] == "size")
+    assert size_col["type"] == "text"
+    assert all(r["legs"] for r in table.data)                         # the legs stay in sight
+
+
+def test_outright_rows_are_single_line_with_why_on_hover():
+    table = _by_id(spreads.body(_result()), spreads.OUTRIGHTS_TABLE_ID)
+    assert table.style_cell["padding"] == "2px 8px"
+    why = [r for r in table.style_cell_conditional if r["if"].get("column_id") == "why"]
+    assert why and all(r.get("whiteSpace") != "normal" for r in why)
+    assert any(r.get("whiteSpace") == "nowrap" and r.get("textOverflow") == "ellipsis" for r in why)
+    assert table.tooltip_data[1]["why"]["value"] == "split by hand (spread_overrides)"
 
 
 # --------------------------------------------------------------------------- closed spreads

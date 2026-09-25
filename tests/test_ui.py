@@ -193,9 +193,9 @@ def test_seven_tabs_present_in_order(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     layout = uiapp.build_layout(uiapp.load_summary(db_path))
-    # user, 2026-09-22: Blotter first, the cash Ladder second; Curve, Spreads and Expiries next
-    # (2026-09-24, commodity conversion), then Risk (2026-09-22) and Market data
-    seven = ["Blotter", "Ladder", "Curve", "Spreads", "Expiries", "Risk", "Market data"]
+    # Screens redesign (user, 2026-09-25): Spreads first; FX & cash is the former Ladder and
+    # Data the former Market data
+    seven = ["Spreads", "Curve", "Risk", "Expiries", "Blotter", "FX & cash", "Data"]
     assert _tab_labels(layout) == seven
     assert uiapp.VISIBLE_TABS == seven
 
@@ -277,7 +277,7 @@ def test_tab_show_hide_callback_toggles_bodies(tmp_path):
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     app = uiapp.create_app(db_path=db_path, start_feed=False)
-    key = [k for k in app.callback_map if k.startswith(f"..tab-body-{uiapp._slug(uiapp.VISIBLE_TABS[0])}.style")]
+    key = [k for k in app.callback_map if k.startswith(f"..{uiapp.tab_body_id(uiapp.VISIBLE_TABS[0])}.style")]
     assert key, "expected a callback outputting tab-body-*.style keyed on main-tabs value"
     cb = app.callback_map[key[0]]
     assert any(d["id"] == uiapp.MAIN_TABS_ID and d["property"] == "value" for d in cb["inputs"])
@@ -510,11 +510,13 @@ def test_blotter_filter_dropdown_end_to_end_narrows_table(tmp_path):
             {"id": "blotter-datatable-total", "property": "tooltip_data"},
         ],
         "inputs": [
+            # the Total book's filters since the Screens redesign Phase A (2026-09-25): Commodity
+            # first, no Strategy (always blank for blotter trades)
+            {"id": "blotter-datatable-total-filter-commodity", "property": "value", "value": []},
             {"id": "blotter-datatable-total-filter-instrument_id", "property": "value", "value": ["USDJPY"]},
             {"id": "blotter-datatable-total-filter-side", "property": "value", "value": []},
             {"id": "blotter-datatable-total-filter-status", "property": "value", "value": []},
             {"id": "blotter-datatable-total-filter-product", "property": "value", "value": []},
-            {"id": "blotter-datatable-total-filter-strategy", "property": "value", "value": []},
             {"id": "blotter-datatable-total-filter-theme", "property": "value", "value": []},
             # ui/revision.py (2026-09-18): new marks refresh the rows in place, filters kept
             {"id": "data-revision", "property": "data", "value": "rev-1"},
@@ -583,7 +585,9 @@ def test_every_static_callback_id_exists_in_layout(tmp_path):
 
 
 # ---------------------------------------------------------------- header compaction (2026-09-15)
-def test_header_figures_include_previous_day_and_net_gross(tmp_path):
+def test_header_figures_include_previous_day_and_no_fx_net_gross(tmp_path):
+    """FX Net / Gross USD delta left the header for the FX & cash tab (screens redesign
+    plan, user 2026-09-25: "one place per number")."""
     db_path = tmp_path / "risk.db"
     _seeded_db(db_path)
     conn = sqlite3.connect(db_path)
@@ -593,8 +597,8 @@ def test_header_figures_include_previous_day_and_net_gross(tmp_path):
         conn.close()
     titles = [c.children[0].children for c in cards if getattr(c, "className", "") != "header-divider"]
     assert "Previous day" in titles
-    assert "Net USD delta" in titles
-    assert "Gross USD delta" in titles
+    assert "Net USD delta" not in titles
+    assert "Gross USD delta" not in titles
 
 
 def test_header_pnl_card_colours_by_sign():
@@ -1416,12 +1420,17 @@ def test_blotter_fx_fixed_table_total_is_the_strip_and_rows_shown_start_equal_to
     assert fixed["Currency"] == ["Currency", "Trades", "LTD", "Daily", "Previous day", "5d", "MTD", "YTD"]
     assert shown["Currency"] == ["Currency", "Trades shown", "LTD", "LTD-1", "LTD-2", "Daily", "Previous day"]
 
-    # The Total row reads exactly what the strip's cards read, figure for figure.
-    cards = {n.children[0].children: n.children[1].children
+    # The Total row reads exactly what the strip's cards read, figure for figure. The compact
+    # strip prints k / m on the card; its full figure is the value's hover, "<figure> USD, <ref date>".
+    cards = {n.children[0].children: n.children[1]
              for n in _nodes(layout) if getattr(n, "className", "") == "card"}
     for card, column in [("LTD P&L", "LTD"), ("Daily P&L", "Daily"), ("Previous day P&L", "Previous day"),
-                         ("5d", "5d"), ("MTD", "MTD"), ("YTD", "YTD"), ("Trades", "Trades")]:
-        assert _cell(fixed, "Total", column).children == cards[card], column
+                         ("5d", "5d"), ("MTD", "MTD"), ("YTD", "YTD")]:
+        value_div = cards[card]
+        full, sep, _ref = value_div.title.partition(" USD")
+        assert sep and full, (column, value_div.title)   # a priced card, its full figure on hover
+        assert _cell(fixed, "Total", column).children == full, column
+    assert _cell(fixed, "Total", "Trades").children == cards["Trades"].children
     assert _cell(fixed, "Total", "LTD").children == format_cell(_JPY_LTD + 35_000.0)
 
     # ... and is the pricing path's own figure, not a sum made here.

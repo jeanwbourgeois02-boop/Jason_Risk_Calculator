@@ -455,3 +455,27 @@ p { margin: 8px 0; }
 .ranked-table .dash-table-container:first-child { border-bottom: none; border-radius: 8px 8px 0 0; }
 .ranked-table .dash-table-container + .dash-table-container { border-top: none; border-radius: 0 0 8px 8px; }
 .ranked-table .dash-table-container + .dash-table-container .dash-spreadsheet-inner tr:nth-child(even) td { background: inherit; }
+
+/* ---------------------------------------------------------------- shared hover helpers
+   (ui/tabs/formatting.py, screens redesign 2026-09-25): a title with its definitions on
+   hover, a short marker with its sentence on hover, and the tab's "Data issues (N)" drawer. */
+.about-title { cursor: help; }
+.about-mark { display: inline-block; margin-left: 5px; font-size: .85em; font-weight: 400;
+  text-transform: none; letter-spacing: 0; color: var(--muted); opacity: .7; vertical-align: 1px; }
+.about-title:hover .about-mark { opacity: 1; color: var(--navy); }
+.marker { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px;
+  font-size: 10.5px; font-weight: 500; font-style: normal; line-height: 1.5; white-space: nowrap;
+  color: var(--muted); background: rgba(15, 31, 61, .06); cursor: help; vertical-align: 1px; }
+.header-block .marker, .top-bar .marker { color: rgba(255,255,255,.7); background: rgba(255,255,255,.12); }
+.header-block .about-mark, .top-bar .about-mark { color: rgba(255,255,255,.6); }
+.header-block .about-title:hover .about-mark { color: #fff; }
+.issues-drawer { margin-top: 12px; font-size: 12px; color: var(--text); }
+.issues-drawer > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); padding: 4px 0;
+  list-style: revert; }
+.issues-drawer > summary:hover { color: var(--navy); }
+.issues-drawer[open] { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px 8px; }
+.issues-list { margin: 4px 0 0; padding-left: 18px; line-height: 1.45; }
+.issues-list li { margin: 1px 0; }
+.issue-label { font-weight: 600; }
+.header-block .issues-drawer > summary { color: rgba(255,255,255,.65); }
+.header-block .issues-drawer[open] > summary { color: var(--navy); }

@@ -170,17 +170,20 @@ def test_show_usd_puts_usd_equivalents_in_the_cells():
     assert round(by_label.loc[exposure.USD_EQUIVALENT_ROW_LABEL, "2026-09-24"]) == 1_088_987
     table = exposure.combined_table(result, records, forward_rates=FWD, view=view).children[0]
     assert [c["name"] for c in table.columns][0] == "Currency (USD eq.)"
-    assert "Cells are USD equivalents" in exposure.usd_basis_caption(FWD, view).children
+    assert "Cells are USD equivalents" in exposure.usd_basis_caption(FWD, view).title   # on hover of the title
 
 
 def test_usd_basis_caption_names_currencies_with_no_forward_curve():
     from engine.ladder.usd_marks import BASIS_NO_CURVE
     fwd = {("NOK", "2026-12-15"): {"rate": 0.095, "basis": BASIS_NO_CURVE},
            ("JPY", "2026-12-15"): {"rate": 1 / 149.0, "basis": "outright"}}
-    text = exposure.usd_basis_caption(fwd).children
+    text = exposure.usd_basis_caption(fwd).title          # the grid title's hover (Screens redesign, Phase A)
     assert "No forward curve on file for NOK: shown at spot" in text
     assert "JPY" not in text.split("No forward curve")[1]
-    assert "at spot for every date" in exposure.usd_basis_caption(None).children
+    assert "at spot for every date" in exposure.usd_basis_caption(None).title
+    mark = exposure.no_curve_marker(fwd)                   # and a short marker beside the title
+    assert mark.children == "at spot: NOK" and "NOK" in mark.title
+    assert exposure.no_curve_marker(None) is None
 
 
 def test_heatmap_colours_by_usd_and_hovers_local_and_usd():
@@ -281,7 +284,7 @@ def test_sample_book_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
     prompt 16 Sep has settled (USD -185,040 in Settled cash), the copper 3M is -985,000
     on 10 Dec and the aluminium Dec26 sold adds +198,000 on 16 Dec. The options on
     futures are no currency exposure; the gold option that expired 28 Jul unrealised is
-    named under the grid beside the WTI Aug26 future."""
+    named beside the grid's title beside the WTI Aug26 future (a marker since 2026-09-25)."""
     import sys
     import types
     from data.ingest import blotter
@@ -311,8 +314,10 @@ def test_sample_book_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
     assert by_ccy["USD"]["2026-12-10"] == -985_000     # LME copper 3M: 4 lots x 25 t x 9,850, paid on the prompt
     assert by_ccy["USD"]["2026-12-16"] == 1_035_100    # 837,100 of FX legs + 198,000 for the LME aluminium sold
     assert by_ccy["USD"]["local_delta"] == 1_540_410
-    # no marks on file: no rate, blank with the reason, never zero
-    assert by_ccy["CNH"]["fx_rate"] == "" and by_ccy["CNH"]["usd_delta"] == ""
+    # no marks on file: no rate, n/a with the reason on hover, never zero
+    assert by_ccy["CNH"]["fx_rate"] == by_ccy["CNH"]["usd_delta"] == exposure.NOT_AVAILABLE
+    i = [r[exposure.CURRENCY_COL] for r in grid.data].index("CNH")
+    assert grid.tooltip_data[i]["usd_delta"]["value"].startswith("CNH: no official SPOT for CNH")
     assert _find_id(body, exposure.RATE_REASONS_ID) is not None
     # displayed through the column's d3 format: whole units, grouped, a negative in parentheses
     from ui.tabs import ranking as rk
@@ -326,13 +331,17 @@ def test_sample_book_as_of_2026_09_17_through_the_tab(tmp_path, monkeypatch):
     assert [r[exposure.ROW_LABEL_COL] for r in footer.data] == [exposure.USD_EQUIVALENT_ROW_LABEL]
     assert footer.data[0]["2026-12-10"] == -985_000    # a USD-only date needs no rate; the others stay blank
     # the settled WTI Aug26 future and gold Aug26 call the ledger has not realised are named under the grid, never valued
-    settled_caption = _render_text(_find_id(body, exposure.SETTLED_CAPTION_ID))
-    assert "CLQ26 Comdty (910000027)" in settled_caption and "GCQ26C 3300 Comdty (910000048)" in settled_caption
-    # the open futures table is the whole futures book, commodity contracts in their own currencies
-    futures = _find_id(body, exposure.FUTURES_TABLE_ID)
-    rows = {r["instrument"]: r for r in futures.data}
-    assert rows["CUX26 Comdty"]["currency"] == "CNY" and rows["JGZ26 Comdty"]["currency"] == "JPY"
-    assert rows["CUX26 Comdty"]["usd_delta"] == exposure.UNAVAILABLE    # no price on file: the reason on hover
+    settled_mark = _find_id(body, exposure.SETTLED_CAPTION_ID).children[0]
+    assert settled_mark.children == "excl. 2 settled"
+    assert "CLQ26 Comdty (910000027)" in settled_mark.title and "GCQ26C 3300 Comdty (910000048)" in settled_mark.title
+    # the Data issues drawer names every missing rate of the book (not only the view's) and the settled tickets
+    drawer = _render_text(_find_id(body, exposure.ISSUES_ID))
+    assert "Data issues (" in drawer and "CLQ26 Comdty (910000027)" in drawer
+    assert "JPY" in drawer                                 # filtered out of the grid, still named
+    # the open futures table left this tab (2026-09-25): commodity positions are on the Curve tab
+    assert not any("Comdty" in str(r.get(exposure.RISK_LABEL_COL, ""))
+                   for r in _find_id(body, exposure.RISK_TABLE_ID).data)
+    assert _find_id(body, exposure.FUTURES_NOTE_ID) is not None
 
     # the Ladder CSV download follows the display: a row per currency, the same view
     import io
@@ -369,3 +378,15 @@ def test_grid_headers_are_short_and_name_the_year_only_when_the_dates_span_two()
     assert exposure._grid_column_name("2026-09-24", with_year=False) == "24 Sep"
     assert exposure._grid_column_name("2027-01-15", with_year=True) == "15 Jan 27"
     assert exposure._grid_column_name(exposure.TOTAL_COL) == "Total shown"
+
+
+def test_the_tab_is_fx_and_cash_and_keeps_its_date_controls():
+    """Screens redesign, Phase A (2026-09-25): the tab is "FX & cash" (ui-shell's label; the
+    body id stays tab-body-ladder), the download reads "Cash ladder CSV", and the date
+    picker and Today button keep their ids, which ui/app.py wires to the header's as-of."""
+    layout = cash_ladder.build_layout(default_date="2026-09-17")
+    assert _find_id(layout, cash_ladder.TOOLBAR_ID).children[0].children == cash_ladder.TAB_TITLE == "FX & cash"
+    assert _find_id(layout, cash_ladder.DOWNLOAD_LADDER_BTN_ID).children == "Cash ladder CSV"
+    ids = _all_ids(layout)
+    assert cash_ladder.DATE_PICKER_ID in ids and cash_ladder.TODAY_BUTTON_ID in ids
+    assert (cash_ladder.DATE_PICKER_ID, cash_ladder.TODAY_BUTTON_ID) == ("cash-ladder-date", "cash-ladder-today")

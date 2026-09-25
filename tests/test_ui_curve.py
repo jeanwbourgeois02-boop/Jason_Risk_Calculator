@@ -103,6 +103,11 @@ def _text(node) -> str:
     return " ".join(parts)
 
 
+def _hover(node) -> str:
+    """Every native `title` hover under `node` (the about titles, markers), joined."""
+    return " ".join(getattr(n, "title", None) or "" for n in _walk(node) if not isinstance(n, str))
+
+
 def _table(node, table_id):
     hits = [n for n in _walk(node) if getattr(n, "id", None) == table_id]
     assert hits, f"no {table_id}"
@@ -124,7 +129,7 @@ def test_render_shows_the_three_commodities_grouped_by_sector(book, stub_app):
     assert [r["root_id"] for r in grid.data] == list(result["by_commodity"])
     assert [r["sector"] for r in grid.data] == ["Agriculture", "Energy", "Metals"]
     text = _text(body)
-    assert "As of Tuesday 15 September 2026 (2026-09-15)." in text
+    assert "As of Tue 15 Sep 2026 (2026-09-15)." in text
 
 
 def test_grid_has_the_months_as_columns_and_the_offsetting_lots(book, stub_app):
@@ -172,7 +177,7 @@ def test_unit_switch_changes_the_cells(book, stub_app):
     assert corn["m_2026-12"] == 10000.0 and corn["unit"] == "bu"
     for g in grids.values():                          # the end columns are the engine's, whatever the switch
         assert _grid_row(g, "NYMEX:CL", result)[1]["net_usd"] == pytest.approx(800.0)
-    assert "net lots" in _text(curve.grid_section(result, "lots"))
+    assert "net lots" in _hover(curve.grid_section(result, "lots"))
     assert "USD notional" in _text(curve.grid_section(result, "usd"))
 
 
@@ -383,7 +388,7 @@ def test_delta_lots_view_takes_the_engines_delta_months_and_totals():
     assert ng["m_2026-12"] == "n/a" and NO_DELTA in grid.tooltip_data[i]["m_2026-12"]["value"]
     assert ng["net_delta_lots"] == "n/a" and ng["net_delta_usd"] == "n/a" and ng["gross_delta_usd"] == "n/a"
     assert NO_DELTA in grid.tooltip_data[i]["net_delta_usd"]["value"]
-    assert "Every product is here" in _text(curve.grid_section(result, "delta_lots"))
+    assert "Every product is here" in _hover(curve.grid_section(result, "delta_lots"))
 
 
 def test_delta_usd_view_sums_the_rows_delta_usd():
@@ -391,7 +396,7 @@ def test_delta_usd_view_sums_the_rows_delta_usd():
     _, cl = _by_root(grid, "NYMEX:CL")
     assert cl["m_2026-12"] == 71000.0 and cl["m_2027-01"] == 63000.0
     _, avg = _by_root(grid, "NYMEX:AVG")
-    assert avg["m_2026-09"] == pytest.approx(280000.0 * 11 / 21)       # the reduced delta, not the notional
+    assert avg["m_2026-09"] == round(280000.0 * 11 / 21)               # the reduced delta, not the notional (k / m: whole)
 
 
 def test_lots_view_is_futures_and_lme_only_and_says_so():
@@ -402,8 +407,9 @@ def test_lots_view_is_futures_and_lme_only_and_says_so():
     assert "m_2027-01" not in cl                                       # options only: no lots, blank ...
     tip = grid.tooltip_data[i]["m_2027-01"]["value"]                   # ... with its reason on hover
     assert "CLF7C 75 Comdty" in tip and "delta views" in tip
-    assert "options: in the delta views only" in cl["note"]
-    assert "futures and LME prompts only" in _text(curve.grid_section(result, "lots"))
+    assert cl["note"] == "options"                                     # a marker, its sentence on hover
+    assert "options: in the delta views only" in grid.tooltip_data[i]["note"]["value"]
+    assert "futures and LME prompts only" in _hover(curve.grid_section(result, "lots"))
     for unit in ("units", "usd"):                                      # no option notional turns a cell n/a
         g = _grid(result, unit)
         assert "m_2027-01" not in _by_root(g, "NYMEX:CL")[1]
@@ -440,7 +446,7 @@ def test_averaging_note_on_hover_of_the_delta():
     grid = _grid(result, "delta_lots")
     j, g = _by_root(grid, "NYMEX:AVG")
     assert "11 of the 21 business days" in grid.tooltip_data[j]["m_2026-09"]["value"]
-    assert "averaging, reduced delta: AVGU26 Comdty" in g["note"]
+    assert g["note"] == "avg" and "averaging, reduced delta: AVGU26 Comdty" in grid.tooltip_data[j]["note"]["value"]
     k, plain = rows[CLZ6]
     assert "delta_lots" not in table.tooltip_data[k]                   # a plain future has no note
     assert plain["delta_factor"] == 1.0
@@ -487,3 +493,131 @@ def test_flat_options_show_their_product():
                                  "expiry": "2026-11-17", "trade_ids": ["O3", "O4"]}]
     flat = _table(curve.flat_section(result), curve.FLAT_TABLE_ID)
     assert flat.data[0]["product"] == "Option" and flat.columns[0]["id"] == "product"
+
+
+# --------------------------------------------------------------------------- Screens redesign, Phase A (2026-09-25)
+# Definitions on hover of the titles, reasons in one Data issues drawer, notes as markers, USD
+# money in k / m on the grid and the sector table, a Contracts table that fits 1680 px.
+def test_no_kicker_paragraphs_every_section_title_carries_its_definitions(book, stub_app):
+    body = curve.render(AS_OF, book)
+    assert not [n for n in _walk(body) if getattr(n, "className", None) == "section-kicker"]
+    titles = [n for n in _walk(body) if "about-title" in (getattr(n, "className", None) or "")]
+    heads = {n.children[0]: n.title for n in titles}
+    assert set(heads) == {"Positions by contract month (lots)", "Net outright by sector (USD)", "Contracts",
+                          "Currency exposure of non-USD futures"}
+    assert all(heads.values())
+    assert "calendar spread nets" in heads["Net outright by sector (USD)"]
+    assert "Toggle Columns" in heads["Contracts"]
+
+
+def test_reasons_go_to_the_data_issues_drawer(book, stub_app):
+    result = _engine(book)
+    body = curve.render(AS_OF, book)
+    drawers = [n for n in _walk(body) if getattr(n, "className", None) == "issues-drawer"]
+    assert len(drawers) == 1 and drawers[0].open is False
+    items = curve.issue_items(result)
+    assert f"Data issues ({len(items)})" in _text(drawers[0])
+    assert (CUZ6, next(r["reason"] for r in result["rows"] if r["contract_id"] == CUZ6)) in items
+    assert "Gaps (" not in _text(body)
+    assert curve.caption_block(dict(result, reasons=[])).children[-1].className == "meta-line"   # no drawer when clean
+    assert curve.issue_items({"rows": [], "reasons": ["CNY exposure: x", "CNY exposure: x", ""]}) == ["CNY exposure: x"]
+
+
+def test_grid_usd_is_k_m_with_the_full_figure_on_hover(book, stub_app):
+    result = _engine(book)
+    for unit in ("lots", "usd", "delta_usd"):
+        grid = _table(curve.render(AS_OF, book, unit), curve.GRID_ID)
+        fmt = {c["id"]: (c.get("format") or {}).get("specifier", "") for c in grid.columns}
+        usd_cols = [c for c in curve.GRID_USD_COLUMNS if c in fmt]
+        assert usd_cols and all(fmt[c].endswith("s") for c in usd_cols), fmt
+        months = [c for c in fmt if c.startswith(curve.MONTH_PREFIX)]
+        assert all(fmt[c].endswith("s") == (unit != "lots") for c in months)
+        i, corn = _grid_row(grid, "CBOT:ZC", result)
+        col = "net_usd" if unit != "delta_usd" else "net_delta_usd"
+        raw = result["by_commodity"]["CBOT:ZC"][col]
+        assert corn[col] == round(raw) and grid.tooltip_data[i][col]["value"] == f"USD {raw:,.0f}"
+    lots = _table(curve.render(AS_OF, book, "units"), curve.GRID_ID)
+    fmt = {c["id"]: (c.get("format") or {}).get("specifier", "") for c in lots.columns}
+    assert not fmt["net_lots"].endswith("s") and not fmt["net_units"].endswith("s") and not fmt["m_2026-12"].endswith("s")
+
+
+def test_sector_table_usd_is_k_m(book, stub_app):
+    sectors = _table(curve.body(_fake()), curve.SECTOR_TABLE_ID)
+    assert all(c["format"]["specifier"].endswith("s") for c in sectors.columns if c["type"] == "numeric")
+    j, metals = next((j, r) for j, r in enumerate(sectors.data) if r["sector"] == "Metals")
+    assert metals["net_usd"] == 490000.0 and sectors.tooltip_data[j]["net_usd"]["value"] == "USD 490,000"
+    footer = _table(curve.body(_fake()), f"{curve.SECTOR_TABLE_ID}-footer")
+    assert footer.data[0]["net_usd"] == 841000.0 and footer.tooltip_data[0]["net_usd"]["value"] == "USD 841,000"
+
+
+def test_grid_notes_are_markers_with_sentences_on_hover():
+    result = _fake()
+    result["by_commodity"]["LME:CA"].update(missing=["LME:CA 2026-12-16"], reason="LME:CA 2026-12-16: no price")
+    grid = _grid(result, "lots")
+    i, lme = _by_root(grid, "LME:CA")
+    assert lme["note"] == "no USD 1"
+    hover = grid.tooltip_data[i]["note"]["value"]
+    assert "no USD notional for LME:CA 2026-12-16" in hover and "no price" in hover
+    j, ng = _by_root(_grid(_fake(), "delta_lots"), "NYMEX:NG")
+    assert ng["note"] == "no delta 1"
+    assert all(len(r["note"]) <= 20 for r in grid.data)
+
+
+def test_contracts_table_shows_what_a_trader_reads_and_hides_the_rest():
+    table, rows = _detail(_fake())
+    ids = [c["id"] for c in table.columns]
+    visible = [c for c in ids if c not in table.hidden_columns]
+    assert visible == ["product", "commodity", "contract_id", "month", "expiry", "lots", "units", "unit", "price",
+                       "currency", "notional_usd", "delta_lots", "delta_usd"]
+    assert table.hidden_columns == list(curve.DETAIL_MORE_COLUMNS)
+    assert all(c.get("hideable") for c in table.columns if c["id"] in curve.DETAIL_MORE_COLUMNS)
+    assert not any(c.get("hideable") for c in table.columns if c["id"] in visible)
+    assert "hidden_columns" in table.persisted_props and "sort_by" in table.persisted_props
+    # the hidden figures are on hover of the visible cells
+    i, cl = rows[CLZ6]
+    tip = table.tooltip_data[i]
+    assert "trades: T1" in tip["contract_id"]["value"]
+    assert "source: BBG_BDH" in tip["price"]["value"]
+    assert "first notice: n/a" in tip["expiry"]["value"] and "estimated" in tip["expiry"]["value"]
+    assert "Energy" in tip["commodity"]["value"] and "NYMEX" in tip["commodity"]["value"]
+    k, opt = rows["CLF7C 75 Comdty"]
+    assert "0.45" in table.tooltip_data[k]["delta_lots"]["value"]
+    n, ng = rows["NGZ6P 3 Comdty"]
+    assert NO_DELTA in table.tooltip_data[n]["contract_id"]["value"]
+
+
+def test_contracts_hover_names_the_local_notional_and_conversion(book, stub_app):
+    detail = _table(curve.render(AS_OF, book), curve.DETAIL_TABLE_ID)
+    rows = {r["contract_id"]: (i, r) for i, r in enumerate(detail.data)}
+    i, cu = rows[CUZ6]
+    hover = detail.tooltip_data[i]["notional_usd"]["value"]
+    assert "no SPOT for CNY" in hover and f"local notional: CNY {3 * 5 * 80500.0:,.0f}" in hover
+    assert "USD per unit: n/a" in detail.tooltip_data[i]["price"]["value"]
+
+
+def test_contracts_visible_columns_fit_1680px():
+    """A long commodity name (the SGX iron ore one, 53 characters) is cut at 30ch with the full
+    name on hover; the visible columns' content then fits a 1680 px screen at 13 px monospace."""
+    result = _fake()
+    long_name = "SGX iron ore CFR China 62% Fe fines (TSI/Platts IODEX)"
+    result["rows"][0]["name"] = long_name
+    table, rows = _detail(result)
+    rule = next(r for r in table.style_cell_conditional
+                if r["if"].get("column_id") == "commodity" and "maxWidth" in r)
+    assert rule["maxWidth"] == "30ch" and rule["textOverflow"] == "ellipsis"
+    assert long_name in table.tooltip_data[rows[CLZ6][0]]["commodity"]["value"]
+    from ui.tabs import ranking as rk
+    visible = [c for c in table.columns if c["id"] not in table.hidden_columns]
+    widths = {w["if"]["column_id"]: int(w["width"][:-2]) for w in rk.column_widths(visible, table.data)}
+    widths["commodity"] = min(widths["commodity"], 30)
+    px = sum(widths.values()) * 7.8 + 16 * len(visible)          # 0.6 em per character at 13 px, 8 px padding a side
+    assert px < 1640, (px, widths)
+
+
+def test_title_row_is_compact():
+    layout = curve.layout(AS_OF)
+    assert "Follows the header's as-of date" not in _text(layout)
+    marks = [n for n in _walk(layout) if getattr(n, "className", None) == "marker"]
+    assert len(marks) == 1 and marks[0].children == f"header's as-of {AS_OF}"
+    assert "no date picker" in marks[0].title
+    assert curve.layout().children[0].children[1].children[0].children == "header's as-of"

@@ -1,4 +1,5 @@
-"""Cash ladder tab: source/date controls + a DataTable rendering a transposed view of
+"""The FX & cash tab (the Cash ladder / Ladder tab until 2026-09-25, CLAUDE.md "Screens
+redesign plan", Phase A; its body id stays `tab-body-ladder`): date controls + a DataTable rendering a transposed view of
 `engine.ladder.views.ladder_table`.
 
 `engine/ladder/views.py` (owned by cash-ladder) is expected to expose
@@ -79,6 +80,8 @@ DOWNLOAD_LEGS_BTN_ID = "cash-ladder-download-legs"
 DOWNLOAD_LADDER_ID = "cash-ladder-download-ladder-file"
 DOWNLOAD_LEGS_ID = "cash-ladder-download-legs-file"
 TOGGLE_ON = "on"
+# The tab's title, its label in ui/app.py since 2026-09-25 (Screens redesign, Phase A).
+TAB_TITLE = "FX & cash"
 
 _WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August",
@@ -313,7 +316,7 @@ def build_filters() -> html.Div:
         html.Div(className="toolbar-group", children=[
             html.Label("Download"),
             html.Div(children=[
-                html.Button("Ladder CSV", id=DOWNLOAD_LADDER_BTN_ID, n_clicks=0, className="btn"),
+                html.Button("Cash ladder CSV", id=DOWNLOAD_LADDER_BTN_ID, n_clicks=0, className="btn"),
                 html.Button("Legs CSV", id=DOWNLOAD_LEGS_BTN_ID, n_clicks=0, className="btn",
                             style={"marginLeft": "8px"}),
             ]),
@@ -334,7 +337,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     retired; the filters here are the spec's own, and they shape the grid only."""
     return html.Div(className="cash-ladder", children=[
         html.Div(id=TOOLBAR_ID, className="ladder-title-row", children=[
-            html.H3("Cash ladder", className="ladder-title-row-heading"),
+            html.H3(TAB_TITLE, className="ladder-title-row-heading"),
             html.Div(className="ladder-title-row-right", children=[
                 html.H4(heading_date_text(default_date), id=TITLE_ID, className="section-title"),
                 build_date_picker(DATE_PICKER_ID, default_date=default_date),
@@ -364,13 +367,12 @@ def load_inputs(conn: sqlite3.Connection, as_of_date: str) -> dict:
     """Everything the Ladder tab body needs for one as-of date, read once: grid records
     (`>=` rule) and exposure records (`>` rule) with their merged unresolved list,
     official SPOT rates, the per-(currency, value date) forward USD marks
-    (engine.ladder.usd_marks, spec 2026-09-18), the futures delta dict and the per-pair
-    Position frame. The futures dict is engine.ladder.futures_delta.futures_usd_delta's
-    whole (commodity contracts included; its `details` carry each future's currency and
-    conversion). Raises ImportError if an engine module is missing (the caller
-    reports it); everything else is the engine's own reasons/blanks, never a substitute."""
+    (engine.ladder.usd_marks, spec 2026-09-18) and the per-pair Position frame. The
+    futures delta is no longer read here (2026-09-25, Screens redesign Phase A: the open
+    futures table left this tab; commodity positions are on the Curve tab). Raises
+    ImportError if an engine module is missing (the caller reports it); everything else
+    is the engine's own reasons/blanks, never a substitute."""
     from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db
-    from engine.ladder.futures_delta import futures_usd_delta
     from engine.ladder.ladder import per_pair_delta
     from engine.ladder.usd_marks import forward_usd_rates
     from data.bloomberg.live import rates_from_marks
@@ -398,8 +400,7 @@ def load_inputs(conn: sqlite3.Connection, as_of_date: str) -> dict:
     forward_rates = forward_usd_rates(conn, rates, needed)
     return {
         "records": records, "unresolved": unresolved, "exposure_records": exposure_records,
-        "rates": rates, "forward_rates": forward_rates,
-        "futures": futures_usd_delta(conn, as_of_date), "pairs": per_pair_delta(conn, as_of_date),
+        "rates": rates, "forward_rates": forward_rates, "pairs": per_pair_delta(conn, as_of_date),
     }
 
 
@@ -531,7 +532,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             return message_box(f"Database not available ({exc}).")
         try:
             # Delta view (docs/BUILD_PLAN.md section 5, "Ladder"): local delta, spot, USD
-            # delta rows, Net/Gross, futures delta line, stress block -- from
+            # delta rows, Net/Gross, stress block -- from
             # engine.ladder.exposure via records_from_db. Never P&L. Every input comes
             # from `load_inputs` (one read per render, shared with the downloads).
             try:
@@ -539,7 +540,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 inputs = load_inputs(conn, as_of_date)
                 exposure = exposure_section(
                     inputs["records"], inputs["unresolved"], as_of_date, rates=inputs["rates"],
-                    futures=inputs["futures"], futures_details=(inputs["futures"] or {}).get("details"),
                     exposure_records=inputs["exposure_records"], pair_positions=inputs["pairs"],
                     forward_rates=inputs["forward_rates"], view=view)
             except ImportError as exc:

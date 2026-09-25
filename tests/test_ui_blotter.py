@@ -155,14 +155,24 @@ def test_detail_table_has_status_and_instrument_columns():
     assert "instrument_id" in ids
 
 
-def test_detail_table_columns_include_notional_and_t1_rate():
+def test_detail_table_reads_in_commodity_terms_not_the_macro_fx_layout():
+    """Screens redesign Phase A (2026-09-25): no "Pair" holding a futures contract, no
+    "Amount" meaning lots, no "Notional (USD)" / "Live rate" / "T-1 rate"."""
     table = blotter.detail_table(_sample_df())
-    ids = [c["id"] for c in table.columns]
     names = [c["name"] for c in table.columns]
-    assert ids.index("mark_date") < ids.index("notional_usd") < ids.index("mark") < ids.index("t1_rate")
-    assert "Notional (USD)" in names
-    assert "Live rate" in names
-    assert "T-1 rate" in names
+    assert names[0] == "Instrument"
+    for gone in ("Pair", "Amount", "Notional (USD)", "Live rate", "T-1 rate", "Value date", "Mark date", "Strategy"):
+        assert gone not in names, gone
+    assert blotter._DISPLAY_COLUMNS == [
+        "instrument_id", "commodity", "exchange", "product", "trade_date", "side", "quantity", "qty_unit",
+        "fill", "mark", "prev_close", "pnl_local", "pnl_ccy", "pnl_usd", "status", "settle_date", "theme",
+        "trade_id"]
+    assert [blotter._COLUMN_LABELS[c] for c in blotter._DISPLAY_COLUMNS] == [
+        "Instrument", "Commodity / pair", "Exchange", "Product", "Trade date", "Side", "Quantity", "Unit",
+        "Fill", "Mark", "Prev close", "P&L (local)", "Ccy", "P&L (USD)", "Status", "Expiry / value date",
+        "Bundle", "Trade id"]
+    # the mark's source and date on hover
+    assert table.tooltip_data[0]["mark"]["value"] == "BBG_BFXFORWARD"
 
 
 def test_detail_table_status_is_title_cased():
@@ -269,8 +279,10 @@ def test_scope_products_covers_task_products():
                                            "LME_FWD"}
     assert blotter.ASSET_CLASS_OF["CMDTY_OPTION"] == "Options"
     assert blotter.ASSET_CLASS_OF["LME_FWD"] == "LME forwards"
-    assert blotter.ASSET_CLASS_OF["FX_SWAP"] == "FX" and blotter._fmt_product("FX_SWAP") == "Swap"
-    assert blotter.ASSET_CLASS_ORDER == ("FX", "Futures", "LME forwards", "Options")
+    assert blotter.ASSET_CLASS_OF["FX_SWAP"] == "FX" and blotter._fmt_product("FX_SWAP") == "FX swap"
+    assert blotter.ASSET_CLASS_ORDER == ("Futures", "LME forwards", "Options", "FX")   # commodities first (Phase A)
+    assert [blotter._fmt_product(p) for p in ("FUTURE", "CMDTY_OPTION", "LME_FWD", "FX_FWD", "FX_SPOT", "FX_OPTION")] \
+        == ["Future", "Option on future", "LME forward", "FX forward", "FX spot", "FX option"]
     assert not hasattr(blotter, "rates_ui")
 
 
@@ -308,6 +320,21 @@ def test_scope_layout_fx_filters_out_nonfx_products():
         assert all(r["instrument_id"] != "EURUSD092226C-1" for r in table.data)
     finally:
         conn.close()
+
+
+def _find_id(component, wanted: str):
+    """The component with id `wanted` nested anywhere under `component`, else None."""
+    stack = [component]
+    while stack:
+        node = stack.pop()
+        if getattr(node, "id", None) == wanted:
+            return node
+        children = getattr(node, "children", None)
+        if isinstance(children, (list, tuple)):
+            stack.extend(children)
+        elif children is not None and not isinstance(children, str):
+            stack.append(children)
+    return None
 
 
 def _find_tables(component) -> list:
@@ -515,8 +542,9 @@ def test_options_delegated_build_failure_still_renders_strip():
 
 
 def test_asset_class_table_failure_still_renders_strip_and_trade_table():
-    """Total book: a failure in the asset-class-by-P&L rollup must not blank the strip
-    above it or the trade table below it."""
+    """Total book: a failure in the asset-class-by-P&L rollup must not blank the Positions
+    block above it or the trade table below it. (The Total book has no strip since the
+    Screens redesign Phase A, 2026-09-25: the header is the total book.)"""
     conn = _make_db()
     try:
         def boom(*args, **kwargs):
@@ -529,9 +557,9 @@ def test_asset_class_table_failure_still_renders_strip_and_trade_table():
         finally:
             blotter.asset_class_pnl_table = original
 
-        assert layout.children[0].id == "blotter-strip-total"
-        assert layout.children[1].children[0].children == "Positions"       # the Positions block sits above it
-        asset_class_section = layout.children[2]
+        assert not any(getattr(c, "id", None) == "blotter-strip-total" for c in layout.children)
+        assert layout.children[0].children[0].children[0] == "Positions"    # the Positions block comes first
+        asset_class_section = layout.children[1]
         assert "P&L by asset class could not be rendered (asset class boom)." in asset_class_section.children[0].children
         table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total")
         assert table.data  # trade table still rendered
@@ -595,7 +623,7 @@ def test_total_book_asset_class_rows_sum_to_total():
         _add_future(conn)
         df = blotter.scope_df(conn, "total", "2026-06-20")
         rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, "2026-06-20", df)}
-        assert list(rows) == ["FX", "Futures", "Options", "Total"]
+        assert list(rows) == ["Futures", "Options", "FX", "Total"]          # commodity classes first (Phase A)
         assert rows["FX"]["ltd"]["value"] == pytest.approx(8_000.0)           # 1m EUR * (1.108 - 1.10)
         assert rows["Futures"]["ltd"]["value"] == pytest.approx(4_000.0)      # 2 x 1000 x (70 - 68)
         assert rows["Options"]["ltd"]["value"] == pytest.approx(1_326.0)
@@ -606,8 +634,12 @@ def test_total_book_asset_class_rows_sum_to_total():
         layout = blotter.scope_layout("total", conn, "2026-06-20")
         table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
         footer = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID + "-footer")
-        assert [r["asset_class"] for r in table.data] == ["FX", "Futures", "Options"]   # ranked; Total is pinned under them
+        assert [r["asset_class"] for r in table.data] == ["Futures", "Options", "FX"]   # ranked; Total is pinned under them
         assert footer.data[0]["asset_class"] == "Total" and footer.data[0]["ltd"] == pytest.approx(13_326)
+        # k / m on a summary table (Phase A): a number, whole units, printed by the SI format;
+        # the full figure on hover
+        ltd_col = next(c for c in table.columns if c["id"] == "ltd")
+        assert "s" in ltd_col["format"]["specifier"] and footer.tooltip_data[0]["ltd"]["value"].startswith("13,326")
     finally:
         conn.close()
 
@@ -632,7 +664,8 @@ def test_total_book_asset_class_missing_mark_is_unavailable_with_reason():
         layout = blotter.scope_layout("total", conn, "2026-06-20")
         table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
         footer = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID + "-footer")
-        assert table.data[1]["ltd"] is None and "F1" in table.tooltip_data[1]["ltd"]["value"]
+        futures = [r["asset_class"] for r in table.data].index("Futures")
+        assert table.data[futures]["ltd"] is None and "F1" in table.tooltip_data[futures]["ltd"]["value"]
         assert footer.data[0]["ltd"] is not None  # Total row: a real value, not blanked
         assert "excludes 1 of 2" in footer.tooltip_data[0]["ltd"]["value"]
     finally:
@@ -897,7 +930,9 @@ def test_render_headline_strip_shows_ref_date_and_count():
         div = blotter.render_headline_strip(headline)
         cards = div.children[0].children
         ltd_card = cards[blotter_pricing.HEADLINE_ORDER.index("ltd")]
-        assert ltd_card.children[2].children == "2026-06-20"
+        # compact (Phase A): the reference date and the full figure are on hover
+        assert ltd_card.children[0].title == "2026-06-20"
+        assert ltd_card.children[1].children == "8.00k" and ltd_card.children[1].title == "8,000 USD, 2026-06-20"
         trades_card = cards[blotter_pricing.HEADLINE_ORDER.index("trades")]
         assert trades_card.children[1].children == "1"
     finally:
@@ -918,8 +953,8 @@ def test_render_headline_strip_unavailable_shows_na_with_tooltip():
 
 def test_render_headline_strip_shows_excluded_summary_caption():
     """2026-09-17 partial-pricing follow-up: an AVAILABLE card with `excluded_summary`
-    shows it as a visible caption line, with `excluded_detail` as the caption's
-    tooltip -- the value itself stays a real number (not "n/a")."""
+    says so in sight -- since Phase A (2026-09-25) as a short marker "excl. N" with the
+    sentence and `excluded_detail` on hover -- and the value stays a real number."""
     headline = {"ltd": {"value": 150.0, "ref_date": "2026-06-20", "available": True, "reason": "",
                           "excluded_summary": "excludes 2 of 4 trades unpriced",
                           "excluded_detail": "1 forward: no FWD_OUTRIGHT; 1 option: no PREMIUM"}}
@@ -930,9 +965,9 @@ def test_render_headline_strip_shows_excluded_summary_caption():
     ltd_card = div.children[0].children[blotter_pricing.HEADLINE_ORDER.index("ltd")]
     value_div = ltd_card.children[1]
     assert value_div.children == "150"
-    caption = ltd_card.children[-1]
-    assert caption.children == "excludes 2 of 4 trades unpriced"
-    assert caption.title == "1 forward: no FWD_OUTRIGHT; 1 option: no PREMIUM"
+    caption = ltd_card.children[-1].children[0]
+    assert caption.children == "excl. 2" and caption.className == "marker"
+    assert caption.title == "excludes 2 of 4 trades unpriced. 1 forward: no FWD_OUTRIGHT; 1 option: no PREMIUM"
 
 
 def test_render_headline_strip_no_caption_when_fully_priced():
@@ -941,7 +976,7 @@ def test_render_headline_strip_no_caption_when_fully_priced():
                 for key in blotter_pricing.HEADLINE_ORDER}
     div = blotter.render_headline_strip(headline)
     ltd_card = div.children[0].children[blotter_pricing.HEADLINE_ORDER.index("ltd")]
-    assert len(ltd_card.children) == 3  # label, value, ref_date -- no caption row
+    assert len(ltd_card.children) == 2  # label, value -- no marker row
 
 
 # --------------------------------------------------------------------------- bundles
@@ -1066,7 +1101,8 @@ def test_register_callbacks_and_render_via_app():
     blotter.register_callbacks(app, get_db_path=lambda: path)
     callback_map = app.callback_map
     assert any(blotter.CONTENT_ID in k for k in callback_map)
-    assert any("blotter-strip-total" in k for k in callback_map)
+    assert not any("blotter-strip-total" in k for k in callback_map)   # the header is the total (Phase A)
+    assert any("blotter-strip-futures" in k for k in callback_map)
     os.remove(path)
 
 
@@ -1177,10 +1213,9 @@ def test_missing_terms_notice_says_the_editable_cell_first_then_the_alternatives
     assert "strike" in options_ui.EDITABLE_COLUMNS and "payoff" in options_ui.EDITABLE_COLUMNS
     conn = _db_with_option_missing_strike(tmp_path)
     sentences = [c.children for c in blotter.missing_terms_notice(conn).children[2:]]
-    assert sentences == [
-        "Type the strike straight into the Strike cell under Options, and set Payoff to Digital where it is one. ",
-        "You can also enter it under Manual entry ▸ Option terms. ",
-        "Or re-upload a blotter export that includes a Strike column.",
+    assert sentences == [   # compact (Phase A): one line, the cell first, then the alternatives
+        "Type the strike in its Strike cell under Options (Payoff Digital where it is one); "
+        "or Manual entry ▸ Option terms; or re-upload an export with a Strike column.",
     ]
 
 
@@ -1337,7 +1372,10 @@ def _strip_cards(layout, scope) -> dict:
     def collect(node):  # depth-first, in document order: the dict keeps the cards' on-screen order
         if getattr(node, "className", "") == "card":
             label, value, *rest = node.children
-            cards[label.children] = (value.children, [c.children for c in rest], [getattr(c, "title", None) for c in rest])
+            # since Phase A (2026-09-25) a card's notes are markers (spans) in one row
+            spans = [m for c in rest for m in (c.children if isinstance(c.children, list) else [c])
+                     if not isinstance(m, str)]
+            cards[label.children] = (value.children, [m.children for m in spans], [getattr(m, "title", None) for m in spans])
             return
         children = getattr(node, "children", None)
         if isinstance(children, (list, tuple)):
@@ -1351,6 +1389,7 @@ def _strip_cards(layout, scope) -> dict:
 
 
 def _all_text(component) -> str:
+    """Every text in sight and every hover (`title`): since Phase A a reason may sit on hover."""
     parts, stack = [], [component]
     while stack:
         node = stack.pop()
@@ -1360,6 +1399,9 @@ def _all_text(component) -> str:
         if isinstance(node, (list, tuple)):
             stack.extend(node)
             continue
+        title = getattr(node, "title", None)
+        if isinstance(title, str):
+            parts.append(title)
         children = getattr(node, "children", None)
         if children is not None:
             stack.append(children)
@@ -1370,14 +1412,35 @@ def _is_figure(text) -> bool:
     return isinstance(text, str) and text not in ("", "n/a") and any(ch.isdigit() for ch in text)
 
 
-@pytest.mark.parametrize("scope", ["total", "futures", "options"])
+@pytest.mark.parametrize("scope", ["futures", "options"])
 def test_every_scope_strip_shows_real_figures_on_a_book_with_official_marks(scope):
     conn = _book_with_marks()
     try:
         cards = _strip_cards(blotter.scope_layout(scope, conn, _AS_OF), scope)
         for label in _HEADLINE_PERIODS:
             assert _is_figure(cards[label][0]), f"{scope} strip: {label} shows {cards[label][0]!r}"
-        assert cards["Trades"][0] == {"total": "5", "futures": "1", "options": "1"}[scope]
+        assert cards["Trades"][0] == {"futures": "1", "options": "1"}[scope]
+    finally:
+        conn.close()
+
+
+def test_the_total_book_has_no_strip_the_header_is_the_total():
+    """Screens redesign Phase A (2026-09-25): no P&L cards on the Total book."""
+    conn = _book_with_marks()
+    try:
+        layout = blotter.scope_layout("total", conn, _AS_OF)
+        stack, found = [layout], []
+        while stack:
+            node = stack.pop()
+            if getattr(node, "className", "") in ("cards", "card") or getattr(node, "id", "") == "blotter-strip-total":
+                found.append(node)
+            children = getattr(node, "children", None)
+            if isinstance(children, (list, tuple)):
+                stack.extend(children)
+            elif children is not None and not isinstance(children, str):
+                stack.append(children)
+        assert not found
+        assert next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total").data
     finally:
         conn.close()
 
@@ -1409,7 +1472,6 @@ def test_header_cards_show_real_figures_on_a_book_with_official_marks():
             assert _is_figure(by_title[title].children[1].children), f"header {title}: {by_title[title].children[1].children!r}"
             assert len(by_title[title].children) == 2, f"header {title} carries a caption: {by_title[title].children[2:]}"
         assert by_title["Trades"].children[1].children == "5"
-        assert _is_figure(by_title["Net USD delta"].children[1].children)
     finally:
         conn.close()
 
@@ -1430,7 +1492,7 @@ def _misaligned_realised_row(conn):
 def test_the_2026_09_18_incident_no_longer_blanks_any_view():
     conn = _book_with_marks()
     try:
-        clean = {s: _strip_cards(blotter.scope_layout(s, conn, _AS_OF), s) for s in ("total", "futures")}
+        clean = {s: _strip_cards(blotter.scope_layout(s, conn, _AS_OF), s) for s in ("futures",)}
         _misaligned_realised_row(conn)
         for scope in ("total", "fx", "futures", "options"):
             layout = blotter.scope_layout(scope, conn, _AS_OF)
@@ -1456,11 +1518,9 @@ def test_one_text_price_unprices_one_row_and_every_view_still_renders():
         text = _all_text(layout)
         assert "could not be rendered" not in text
         assert "trades.price: 1 value that is not a number -- '24-Jul' (trade_id J1)" in text   # the banner
-        cards = _strip_cards(layout, "total")
-        value, captions, tooltips = cards["LTD P&L"]
-        assert _is_figure(value)
-        assert "excludes 1 of 5 trades unpriced (1 with a stored value is not a number)" in captions
-        assert any("trade J1: trades.price is not a number ('24-Jul')" in (t or "") for t in tooltips)
+        # the Total book has no strip (Phase A): its Data issues drawer names the trade and why
+        drawer = _find_id(layout, blotter.TOTAL_ISSUES_ID)
+        assert "trade J1: trades.price is not a number ('24-Jul')" in _all_text(drawer)
         table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total")
         row = next(r for r in table.data if r["trade_id"] == "J1")
         assert row["pnl_usd"] is None and row["fill"] is None            # missing stays missing (printed n/a): no 0, no raw text
@@ -1470,6 +1530,10 @@ def test_one_text_price_unprices_one_row_and_every_view_still_renders():
         fx = blotter.scope_layout("fx", conn, _AS_OF)
         assert "could not be rendered" not in _all_text(fx)
         assert len(next(t for t in _find_tables(fx) if t.id == "blotter-fx-datatable").data) == 3
+        value, captions, tooltips = _strip_cards(fx, "fx")["LTD P&L"]   # the FX strip: a marker, its sentence on hover
+        assert _is_figure(value) and "excl. 1" in captions
+        assert any("excludes 1 of 3 trades unpriced (1 with a stored value is not a number)" in (t or "") for t in tooltips)
+        assert any("trade J1: trades.price is not a number ('24-Jul')" in (t or "") for t in tooltips)
     finally:
         conn.close()
 
@@ -2044,6 +2108,6 @@ def test_a_manual_fx_swap_lands_in_the_fx_scope_and_the_fx_asset_class():
         assert list(rows) == ["FX", "Total"] and rows["FX"]["trades"] == 2
         table = next(t for t in _find_tables(blotter.scope_layout("total", conn, "2026-06-20", with_notices=False))
                      if t.id == "blotter-datatable-total")
-        assert next(r for r in table.data if r["trade_id"] == "MANUAL-1")["product"] == "Swap"
+        assert next(r for r in table.data if r["trade_id"] == "MANUAL-1")["product"] == "FX swap"
     finally:
         conn.close()

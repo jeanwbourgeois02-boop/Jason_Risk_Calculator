@@ -39,10 +39,9 @@ Design choices (no one to ask, so noted here):
     used instead (see "Partial pricing" below for the superseding aggregation logic;
     the older `scoped_period_pnl`-based "today's LTD unavailable" / "LTD on <date>
     unavailable" generic reasons this bullet originally described no longer exist).
-  - Net/Gross USD delta and the "Trades" count need no marks at all (CLAUDE.md: Net/
-    Gross USD notional is computable from trade legs and spot alone), so they are
-    always shown, even on a database with zero official marks -- this is the
-    "figure that IS computable" half of the same fix.
+  - The "Trades" count needs no marks at all, so it is always shown, even on a database
+    with zero official marks -- the "figure that IS computable" half of the same fix.
+    (FX Net / Gross USD delta were here too until 2026-09-25; see "Slim header" below.)
   - `as_of` with no date picked yet renders "No as-of date available." and skips all
     engine calls.
 
@@ -100,12 +99,25 @@ Design choices (no one to ask, so noted here):
   terminal not being reachable, or that it has not reached the date yet. Text only: no
   figure changes.
 
-  Commodity strip (commodity conversion Phase 3, 2026-09-24), after the FX Net / Gross:
-  gross commodity notional and net outright by sector (book-positions' `commodities`
-  block), open spreads and groups waiting for review (spreads-engine's `book_spreads`,
-  memoised on the database's mtime, see `_spread_summary`), and the next first notice /
-  last trade (expiry-monitor's `expiry_schedule`, worst first). Rendered as given; a
-  book with no commodity futures gets one plain "Commodities: none" card with its reason.
+  Commodity strip (commodity conversion Phase 3, 2026-09-24): gross commodity notional and
+  net outright (book-positions' `commodities` block, the sectors on hover), open spreads and
+  groups waiting for review (spreads-engine's `book_spreads`, memoised on the database's
+  mtime, see `_spread_summary`), and the next first notice / last trade (expiry-monitor's
+  `expiry_schedule`, worst first). Rendered as given; a book with no commodity futures gets
+  one plain "Commodities: none" card with its reason on hover.
+
+  Slim header (screens redesign plan, Phase A, user 2026-09-25): one row, one title line and
+  one value line per card (`_header_card`). The seven P&L figures in k / m (`short_money`,
+  "−$51.0k", the full figure on hover), the trade count small, then the commodity strip,
+  then a "Data" chip counting the marks the book needs on the as-of date with no official
+  mark (`_marks_card`, from `needed_marks`, read once per render and memoised on the
+  database revision). Every sentence that used to be a visible caption is now a short marker
+  beside its figure with the sentence on hover (`ui.tabs.formatting.marker`): "excl. 3" for a
+  sum that leaves unpriced trades out, "filled 2" for trades valued at an earlier close,
+  "ref 16 Sep" for a period stepped back from its own reference close, "review 2" for the
+  groups left for review, "est." for an estimated expiry date; an n/a carries its reason on
+  hover. FX Net / Gross USD delta left the header for the FX & cash tab's headline card
+  ("one place per number"), so the header no longer negates the engine's net non-USD delta.
 """
 from __future__ import annotations
 
@@ -117,6 +129,8 @@ from functools import lru_cache
 from typing import Callable, Optional
 
 from dash import Input, Output, dcc, html
+
+from ui.tabs.formatting import marker, short_money
 
 HEADER_ID = "header-block"
 CHART_CONTAINER_ID = "header-ltd-chart-container"
@@ -175,14 +189,39 @@ _PERIOD_TITLES = {
 }
 
 
+# ------------------------------------------------------------------ one slim row (2026-09-25)
+# Screens redesign plan, Phase A: every card is [title, value] and, only when something is
+# left out, filled or stepped back, a third child holding its short markers ("excl. 3",
+# "filled 2", "ref 16 Sep") with the sentence on hover. The card is a two-column grid so the
+# markers sit beside the value, on the value's line: the row stays one title line and one
+# value line high. Money is `short_money` ("−$51.0k"), the full figure on the value's hover.
+_CARD_STYLE = {"display": "grid", "gridTemplateColumns": "auto auto", "justifyContent": "start",
+               "alignItems": "baseline", "minWidth": "0", "whiteSpace": "nowrap"}
+_TITLE_STYLE = {"gridColumn": "1 / -1"}
+_SMALL_VALUE_STYLE = {"fontSize": "13px"}
+MARKERS_CLASS = "header-markers"
+
+
+def _header_card(title: str, value, value_class: str = "header-figure-value", hover: str = "",
+                 value_style: Optional[dict] = None, markers=()) -> html.Div:
+    """One header card. `markers` are (short, sentence) pairs; empty shorts are dropped."""
+    value_props = {"className": value_class}
+    if hover:
+        value_props["title"] = hover
+    if value_style:
+        value_props["style"] = value_style
+    children = [html.Div(title, className="header-figure-title", style=_TITLE_STYLE),
+                html.Div(value, **value_props)]
+    shown = [marker(short, sentence) for short, sentence in markers if short]
+    if shown:
+        children.append(html.Span(shown, className=MARKERS_CLASS))
+    return html.Div(className="header-figure", style=_CARD_STYLE, children=children)
+
+
 def _figure_card(title: str, value_text: str, caption: str = "") -> html.Div:
-    """Plain informational card (no P&L sign colouring) -- used for LTD's fallback
-    caption slot and the as-of/marks-time cards."""
-    return html.Div(className="header-figure", children=[
-        html.Div(title, className="header-figure-title"),
-        html.Div(value_text, className="header-figure-value"),
-        html.Div(caption, className="header-figure-caption") if caption else None,
-    ])
+    """Plain informational card (no P&L sign colouring): the placeholders and the plain
+    "none" cards. The caption, when there is one, is the value's hover."""
+    return _header_card(title, value_text, hover=caption)
 
 
 def _fmt_usd(value: float) -> str:
@@ -200,49 +239,46 @@ def _sign_class(value: float) -> str:
     return "zero"
 
 
-def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
-    """One header figure for a P&L-shaped `{value, available, reason}` entry (coordinator
-    addition 2026-09-15, header compaction): bold value, green/red/white by sign when
-    `colour` (True for every signed P&L figure and Net; False for Gross, which is
-    always neutral per the user's decision), "n/a" muted with the reason as an HTML
-    `title` tooltip when unavailable -- never a blank cell. The reason is also rendered
-    as a plain, always-visible caption line underneath (2026-09-17: a hover-only tooltip
-    was reported as the headline figures "not working" -- they were computing correctly,
-    the explanation was just invisible until the mouse found it).
+_EXCLUDED_COUNT_RE = re.compile(r"excludes (\d+)")
 
-    An AVAILABLE entry may also carry `excluded_summary` (2026-09-17 partial-pricing
-    follow-up, see module docstring): a short, always-visible caption ("excludes N of M
-    trades unpriced") shown the same way as the unavailable reason, with the detailed
-    per-product/reason breakdown (`excluded_detail`) as its `title` tooltip -- the
-    figure itself is a real sum over priced trades, not a placeholder, so it keeps its
-    normal sign colouring; only the caption differs from a fully-priced card."""
+
+def _joined(*parts) -> str:
+    return "\n".join(str(p) for p in parts if p)
+
+
+def _entry_markers(entry: dict) -> list:
+    """(short, sentence) markers of an available figure: "excl. N" for a sum that leaves
+    unpriced trades out (the engine-side sentence, then its breakdown by product and reason,
+    on hover), then any the caller built (`entry["markers"]`: the fill, a step-back)."""
+    out = []
+    summary = str(entry.get("excluded_summary") or "")
+    if summary:
+        m = _EXCLUDED_COUNT_RE.match(summary)
+        out.append((f"excl. {m.group(1)}" if m else "excl.", _joined(summary, entry.get("excluded_detail"))))
+    out.extend(entry.get("markers") or ())
+    return out
+
+
+def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
+    """One header figure for a P&L-shaped `{value, available, reason}` entry: the value in
+    k / m (`short_money`, "−$51.0k"), green / red / white by sign when `colour` (False for a
+    figure that is not a P&L, always neutral), the full figure on hover. Unavailable: a muted
+    "n/a" with the reason on hover, never a blank cell and never a zero.
+
+    Since the screens redesign (user, 2026-09-25: "a short visible marker ... with its
+    sentence on hover", replacing the always-visible caption sentences of 2026-09-17), what a
+    figure leaves out or borrows is a short marker beside it (`_entry_markers`): "excl. 3"
+    with "excludes 3 of 12 trades unpriced" and the breakdown by product and reason on hover,
+    "filled 2" and "ref 16 Sep" as `_build_figures` gives them. The figure itself is the
+    engine's sum over priced trades, kept as it is."""
     if not entry.get("available"):
-        reason = entry.get("reason", "")
-        children = [
-            html.Div(title, className="header-figure-title"),
-            html.Div("n/a", className="header-figure-value header-figure-value--muted",
-                     title=reason),
-        ]
-        if reason:
-            children.append(html.Div(reason, className="header-figure-caption header-figure-caption--reason"))
-        return html.Div(className="header-figure", children=children)
+        return _header_card(title, "n/a", "header-figure-value header-figure-value--muted",
+                            hover=str(entry.get("reason") or ""))
     value = entry["value"]
     cls = _sign_class(value) if colour else "neutral"
-    children = [
-        html.Div(title, className="header-figure-title"),
-        html.Div(_fmt_usd(value), className=f"header-figure-value header-figure-value--{cls}"),
-    ]
-    ref_note = entry.get("ref_note", "")
-    if ref_note:
-        # The period is measured from an earlier close than its own reference date
-        # (engine.pnl.reference): always visible, the skipped dates' reasons on hover.
-        children.append(html.Div(ref_note, className="header-figure-caption header-figure-caption--partial",
-                                  title=entry.get("ref_note_detail", "")))
-    summary = entry.get("excluded_summary", "")
-    if summary:
-        children.append(html.Div(summary, className="header-figure-caption header-figure-caption--partial",
-                                  title=entry.get("excluded_detail", "")))
-    return html.Div(className="header-figure", children=children)
+    return _header_card(title, short_money(value, "$"), f"header-figure-value header-figure-value--{cls}",
+                        hover=_joined(_fmt_usd(value), entry.get("value_hover")),
+                        markers=_entry_markers(entry))
 
 
 def _divider() -> html.Div:
@@ -260,7 +296,7 @@ def layout() -> html.Div:
         html.Div(id=f"{HEADER_ID}-figures", className="header-figures",
                  children=[_figure_card("LTD", "-")]),
         html.Details(id=DETAILS_ID, className="section section--secondary details", open=False, children=[
-            html.Summary("LTD line chart", id=SUMMARY_ID),
+            html.Summary("LTD chart", id=SUMMARY_ID, title="The LTD line over every business day since the first trade"),
             html.Div(id=CHART_CONTAINER_ID),
         ]),
     ])
@@ -275,7 +311,7 @@ def layout() -> html.Div:
 
 
 def _missing_marks_reason(conn: sqlite3.Connection, as_of: str,
-                          action: str = "run the Bloomberg pull") -> str:
+                          action: str = "run the Bloomberg pull", needs: Optional[tuple] = None) -> str:
     """Plain-English, actionable reason for `as_of` built from `data.bloomberg.
     inventory.mark_inventory` (a DB-only read -- it never opens a Bloomberg session,
     so it is safe to call from a UI callback per CLAUDE.md/the perf rule against
@@ -286,9 +322,10 @@ def _missing_marks_reason(conn: sqlite3.Connection, as_of: str,
     instead, e.g. "settled trade X: no official mark on or before its settlement".
 
     2026-09-21: the count comes from `needed_marks`, which asks a PAST date what a past
-    close needed, not what a live pull would request."""
+    close needed, not what a live pull would request. `needs` is `needed_marks(conn, as_of)`
+    when the caller already has it (the header reads it once per render, `_needs_cached`)."""
     try:
-        needed, missing = needed_marks(conn, as_of)
+        needed, missing = needs if needs is not None else needed_marks(conn, as_of)
     except Exception:
         return ""
     if not needed or not missing:
@@ -607,11 +644,34 @@ def _failure_reason(what: str, exc: Exception, conn: Optional[sqlite3.Connection
     return f"{text}. Stored values that are not numbers: {found}" if found else text
 
 
-def _root_reason(conn: sqlite3.Connection, as_of: str) -> str:
+def _root_reason(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple] = None) -> str:
     """`_missing_marks_reason` when that can explain the gap, else a plain fallback --
     used as the Unavailable-card reason when nothing at all is priced/contributing for
     a given date."""
-    return _missing_marks_reason(conn, as_of) or f"every trade on {as_of} is missing a mark from any source"
+    return (_missing_marks_reason(conn, as_of, needs=needs)
+            or f"every trade on {as_of} is missing a mark from any source")
+
+
+_NEEDS_MEMO: dict = {}
+_NEEDS_MEMO_MAX = 64
+
+
+def _needs_cached(conn: sqlite3.Connection, as_of: str) -> tuple:
+    """`needed_marks(conn, as_of)`, memoised on (database path, mtime, as_of, the New York
+    book date) like `_spread_summary`: the book date is in the key because it decides which
+    needs list applies (a past close's or the live pull's). An in-memory database is not
+    memoised. Raises what `needed_marks` raises; nothing is memoised then."""
+    key = _db_revision(conn)
+    if key is None:
+        return needed_marks(conn, as_of)
+    from data.bloomberg.live import book_today
+    memo_key = (*key, as_of, book_today().isoformat())
+    hit = _NEEDS_MEMO.get(memo_key)
+    if hit is None:
+        if len(_NEEDS_MEMO) >= _NEEDS_MEMO_MAX:
+            _NEEDS_MEMO.clear()
+        hit = _NEEDS_MEMO[memo_key] = needed_marks(conn, as_of)
+    return hit
 
 
 def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
@@ -626,26 +686,38 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         _n_business_days_back, _prev_business_day, load_holidays,
     )
     from ui.tabs.blotter_pricing import priced_value_book
-    from ui.tabs.cash_ladder import net_gross_usd
-
-    df_today, _n_filled, n_total = priced_value_book(conn, as_of)
-    ltd_entry = _priced_single(df_today, _root_reason(conn, as_of))
-    # The fill (user decision 2026-09-21): trades with no price on `as_of` are valued at their
-    # last earlier close. Said on the card, each trade's own note on hover -- never silent.
-    from engine.pnl.reference import fill_caption, filled_from
-    ltd_entry["ref_note"] = fill_caption(df_today, as_of)
-    if ltd_entry["ref_note"]:
-        notes = [f"{r.trade_id}: {r.note}" for r in df_today.itertuples() if filled_from(r.note)]
-        ltd_entry["ref_note_detail"] = "\n".join(notes[:40] + ([f"and {len(notes) - 40} more"] if len(notes) > 40 else []))
-    cards = [_pnl_card("LTD", ltd_entry)]
 
     holidays = load_holidays()
+    df_today, _n_filled, n_total = priced_value_book(conn, as_of)
+    # The marks the book needs on `as_of`, read once per render (and memoised on the database
+    # revision): the root reason of the cards valued on `as_of` and the "Data" chip.
+    try:
+        needs_today = _needs_cached(conn, as_of)
+    except Exception:  # noqa: BLE001 -- the chip says why; the reasons fall back as before
+        needs_today = None
+    root_reasons = {as_of: _root_reason(conn, as_of, needs_today)}
+
+    def _root(iso: str) -> str:
+        if iso not in root_reasons:
+            root_reasons[iso] = _root_reason(conn, iso)
+        return root_reasons[iso]
+
+    ltd_entry = _priced_single(df_today, root_reasons[as_of])
+    # The fill (user decision 2026-09-21): trades with no price on `as_of` are valued at their
+    # last earlier close. "filled N" beside the figure, the sentence and each trade's own note
+    # on hover -- never silent.
+    from engine.pnl.reference import fill_caption
+    n_filled_today = _filled_count(df_today)
+    if n_filled_today:
+        ltd_entry["markers"] = [(f"filled {n_filled_today}",
+                                 _joined(fill_caption(df_today, as_of), _fill_notes(df_today)))]
+    cards = [_pnl_card("LTD", ltd_entry)]
+
     d = dt.date.fromisoformat(as_of)
     t1 = _prev_business_day(d, holidays)
     t2 = _prev_business_day(t1, holidays)
     t1_iso, t2_iso = t1.isoformat(), t2.isoformat()
     df_t1, _, _ = priced_value_book(conn, t1_iso)
-    df_t2, _, _ = priced_value_book(conn, t2_iso)
 
     ref_dates = {
         "daily": t1_iso,
@@ -657,7 +729,7 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     backfill = backfill_status(conn)  # one read of the status file for every card's missing-close reason
     # A reference close with no value steps back to the previous business day that has
     # one (user decision 2026-09-21, engine.pnl.reference): the date the period is
-    # measured from moves and the card says so; no mark is copied for any trade.
+    # measured from moves and the card says so ("ref 16 Sep"); no mark is copied for any trade.
     from engine.pnl.reference import annotate, resolve_reference
 
     def _book(iso: str):
@@ -666,10 +738,13 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     def _period(df_a, a_iso: str, ref_iso: str, key: str) -> dict:
         title = _PERIOD_TITLES[key]
         choice = resolve_reference(df_a, ref_iso, _book, holidays, frames_filled=True)  # `_book` frames carry the fill
-        entry = _priced_diff(df_a, choice.frame, _root_reason(conn, a_iso), choice.ref_date_used,
+        entry = _priced_diff(df_a, choice.frame, _root(a_iso), choice.ref_date_used,
                              _reference_reason(conn, ref_iso, title, backfill))
-        return annotate(entry, choice,
-                        lambda s: _reference_reason(conn, s.date, title, backfill)(s.n_blocked, s.n_open_then))
+        entry = annotate(entry, choice,
+                         lambda s: _reference_reason(conn, s.date, title, backfill)(s.n_blocked, s.n_open_then))
+        if entry.get("available"):
+            entry["markers"] = _reference_markers(entry, choice)
+        return entry
 
     for key in ("daily", "d5", "mtd", "ytd"):
         entries[key] = _period(df_today, as_of, ref_dates[key], key)
@@ -682,73 +757,93 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     for key in _PERIODS:
         cards.append(_pnl_card(_PERIOD_TITLES[key], entries[key]))
 
-    # Always computable, marks or no marks (CLAUDE.md: trade counts/positions need only
-    # the blotter, not a mark) -- so the header still shows *something* concrete on a
-    # database with zero official marks, per the 2026-09-17 investigation into "the
-    # headline doesn't work" (root cause was missing marks alone, not a callback bug;
-    # see module docstring).
+    # Always computable, marks or no marks (CLAUDE.md: trade counts need only the blotter,
+    # not a mark). Small, with open / settled on hover.
     n_open = int((df_today["status"] == "OPEN").sum()) if not df_today.empty else 0
     n_settled = n_total - n_open
-    cards.append(_figure_card("Trades", f"{n_total:,}", f"{n_open:,} open, {n_settled:,} settled"))
+    cards.append(_header_card("Trades", f"{n_total:,}", "header-figure-value header-figure-value--neutral",
+                              hover=f"{n_open:,} open, {n_settled:,} settled", value_style=_SMALL_VALUE_STYLE))
 
-    cards.append(_divider())
-    try:
-        ng = net_gross_usd(conn, as_of)
-    except Exception as exc:  # noqa: BLE001 -- the delta cards must never take the P&L cards with them
-        # 2026-09-18: `net_gross_usd` reads `trade_legs.amount` / spot through the ladder,
-        # not through `value_book`, so a stored value that is not a number raised here and
-        # the whole header -- every P&L card already built above -- was replaced by one
-        # "headline could not be computed" card. Now only these two cards say why.
-        import logging
-        logging.getLogger(__name__).exception("header Net/Gross USD delta failed for as_of=%s", as_of)
-        ng = {"available": False, "reason": _failure_reason("USD delta could not be computed", exc, conn)}
-    if ng["available"]:
-        # `ng["net"]` is the engine's net non-USD delta (+ = long foreign currency).
-        # The header shows the USD *position* instead (CLAUDE.md sign: + = long USD),
-        # so the sign is flipped here and the direction is spelled out in words
-        # underneath -- user decision 2026-09-15: a short-USD book must be unmistakable.
-        usd_position = -ng["net"]
-        direction = "short USD" if usd_position < 0 else ("long USD" if usd_position > 0 else "flat USD")
-        net_card = _pnl_card("Net USD delta", {"value": usd_position, "available": True})
-        net_card.children.append(html.Div(direction, className="header-figure-caption header-figure-caption--direction"))
-        cards.append(net_card)
-        cards.append(_pnl_card("Gross USD delta", {"value": ng["gross"], "available": True}, colour=False))
-    else:
-        reason = ng.get("reason", "")
-        cards.append(_pnl_card("Net USD delta", {"available": False, "reason": reason}))
-        cards.append(_pnl_card("Gross USD delta", {"available": False, "reason": reason}, colour=False))
-
-    # The commodity strip (Phase 3, 2026-09-24): Jason's first glance, after the FX cards.
+    # FX Net / Gross USD delta left the header on 2026-09-25 (screens redesign plan: "one
+    # place per number"; they are the FX & cash tab's headline card). The commodity strip
+    # follows the P&L, then the chip for the marks the book is missing on the as-of date.
     cards.append(_divider())
     cards.extend(_commodity_cards(conn, as_of))
-
-    # No "As of" / "Last updated" cards: the as-of date is already in the tab's own
-    # title row (user decision 2026-09-15). The "N rows on BNP file rates" note that
-    # used to sit here (CSS margin-left:auto) is retired along with the BNP_BVAL
-    # fallback pass itself (2026-09-17, "no bnp fall back") -- there is no other source
-    # a row can be priced from any more, so the note could only ever say "0 of N".
+    marks = _marks_card(conn, as_of, needs_today)
+    if marks is not None:
+        cards.append(marks)
     return cards
 
 
+def _fill_notes(frame, trade_ids=None) -> str:
+    """Each filled trade's own note ("<id>: no price on <date>: value of the <earlier> close
+    (<why>)"), one per line, the first 40 and a count of the rest."""
+    from engine.pnl.reference import filled_from
+    if frame is None or frame.empty or "note" not in frame.columns:
+        return ""
+    notes = [f"{r.trade_id}: {r.note}" for r in frame.itertuples()
+             if filled_from(r.note) and (trade_ids is None or r.trade_id in trade_ids)]
+    return "\n".join(notes[:40] + ([f"and {len(notes) - 40} more"] if len(notes) > 40 else []))
+
+
+def _short_date(iso: str) -> str:
+    """'16 Sep' from '2026-09-16'; the ISO text as it is when it is not a date."""
+    try:
+        d = dt.date.fromisoformat(str(iso))
+    except ValueError:
+        return str(iso)
+    return f"{d.day} {d:%b}"
+
+
+def _reference_markers(entry: dict, choice) -> list:
+    """The markers of a period figure measured from a reference close (`resolve_reference`'s
+    choice, `annotate`'s entry): "filled N" when trades took their value from an earlier close
+    than the one used (the close and each trade's note on hover), and "ref 16 Sep" when the
+    period stepped back from its own reference date (the full sentence and each skipped
+    date's reason on hover). Read off the choice and the frame's notes, nothing recomputed."""
+    from engine.pnl.reference import filled_days
+    markers = []
+    ids = choice.split.contributing_b_ids
+    filled = choice.filled or filled_days(choice.frame, ids)
+    n = sum(count for _day, count in filled)
+    if n:
+        sentence = choice.fill_note or (
+            f"{_plural(n, 'trade')} with no price on {choice.ref_date_used} measured from "
+            f"{'their' if n != 1 else 'its'} last earlier close (back to {filled[-1][0]})")
+        markers.append((f"filled {n}", _joined(sentence, _fill_notes(choice.frame, ids))))
+    if choice.stepped_back:
+        markers.append((f"ref {_short_date(choice.ref_date_used)}",
+                        _joined(entry.get("ref_note"), entry.get("ref_note_detail"))))
+    return markers
+
+
 # ------------------------------------------------------------------ the commodity strip
-# Commodity conversion Phase 3 (2026-09-24): four whole-book figures after the FX cards,
-# each rendered from its engine's output as given, nothing recomputed:
+# Commodity conversion Phase 3 (2026-09-24), compacted for the slim header on 2026-09-25
+# (screens redesign plan: "gross commodity notional, net outright, open spreads, and chips for
+# the next expiry event, the marks missing"). Each figure is its engine's output as given,
+# nothing recomputed:
 #   1. gross commodity notional (USD): book-positions' `commodities.gross_usd`;
-#   2. net outright by sector: its `net_usd` and each sector's `net_usd` (the Blotter's
-#      Positions table's figures), one short line, the detail on hover;
-#   3. open spreads: spreads-engine's `book_spreads` spreads with status 'open', and how many
-#      groups wait for review, the names on hover;
-#   4. the next first notice / last trade: expiry-monitor's worst-first first row, coloured
-#      by its level.
-# A book with no commodity futures gets one plain card saying so.
+#   2. net outright: its `net_usd`, each sector's `net_usd` (the Blotter's Positions table's
+#      figures) and each commodity's on hover;
+#   3. open spreads: spreads-engine's `book_spreads` spreads with status 'open', with "review N"
+#      for the groups waiting for review, the names on hover;
+#   4. a chip for the next first notice / last trade: expiry-monitor's worst-first first row,
+#      coloured by its level.
+# A book with no commodity futures gets one plain "Commodities: none" card with its reason on
+# hover. Then (`_marks_card`) a chip for the marks the book needs on the as-of date that have
+# no official mark.
 
 COMMODITY_EMPTY_TITLE = "Commodities"
-GROSS_NOTIONAL_TITLE = "Gross commodity notional"
-NET_BY_SECTOR_TITLE = "Net outright by sector"
+GROSS_NOTIONAL_TITLE = "Gross notional"
+NET_BY_SECTOR_TITLE = "Net outright"
 OPEN_SPREADS_TITLE = "Open spreads"
-NEXT_EXPIRY_TITLE = "Next first notice / last trade"
+NEXT_EXPIRY_TITLE = "Next expiry"
+MARKS_TITLE = "Data"
 
 _SECTOR_LABELS = {"agriculture": "Ags"}
+# A chip: a small outlined pill on the navy header, coloured by what it says.
+_CHIP_STYLE = {"display": "inline-block", "fontSize": "12px", "fontWeight": 700, "lineHeight": "18px",
+               "padding": "0 7px", "borderRadius": "9px", "border": "1px solid currentColor"}
 # Level colours on the dark header (the Expiries tab's own palette is for a light table).
 _LEVEL_STYLES = {
     "EXPIRED": {"color": "#ffffff", "backgroundColor": "#7f1d1d", "padding": "0 4px", "borderRadius": "3px"},
@@ -756,8 +851,14 @@ _LEVEL_STYLES = {
     "AMBER": {"color": "#fbbf24"},
     "GREEN": {"color": "#4ade80"},
 }
+_MUTED_CHIP = {"color": "rgba(255,255,255,.6)"}
 _EXPIRY_ROWS_ON_HOVER = 5
 _SPREAD_NAMES_ON_HOVER = 30
+_MISSING_MARKS_ON_HOVER = 12
+
+
+def _chip_style(colours: dict) -> dict:
+    return {**_CHIP_STYLE, **colours}
 
 
 def _sector_label(sector: str) -> str:
@@ -781,8 +882,8 @@ def _fmt_usd_or_na(value) -> str:
 
 
 def _short_reason(reason: str) -> str:
-    """The visible head of a book-positions reason: 'excludes 1 of 3 commodities with no USD
-    figure' out of '... : COMEX copper (COMEX:HG): <why>'. The whole sentence goes on hover."""
+    """The head of a book-positions reason: 'excludes 1 of 3 commodities with no USD figure'
+    out of '... : COMEX copper (COMEX:HG): <why>'."""
     return str(reason or "").split(": ", 1)[0]
 
 
@@ -804,32 +905,38 @@ def _commodity_detail(block: dict) -> str:
     return "\n".join(lines)
 
 
+def _sector_line(block: dict) -> str:
+    """'Metals −928.8k · Energy +32.6k · Ags +334.7k', each sector's own net_usd in
+    book-positions' order."""
+    return " · ".join(f"{_sector_label(s.get('sector'))} {_fmt_compact(s.get('net_usd'))}"
+                      for s in block.get("sectors") or [])
+
+
+def _commodity_entry(block: dict, key: str, value_hover: str) -> dict:
+    """A `_pnl_card` entry for book-positions' `key` figure: n/a with its reason when the
+    engine has none, else the figure with "excl. N" (the commodities with no USD figure, the
+    engine's own sentence on hover)."""
+    value, reason = block.get(key), str(block.get("reason") or "")
+    if not block.get("available") or value is None:
+        return {"available": False, "reason": reason or "no commodity position has a USD figure"}
+    entry = {"value": float(value), "available": True, "value_hover": value_hover}
+    missing = block.get("missing") or []
+    if reason and missing:
+        entry["markers"] = [(f"excl. {len(missing)}", reason)]
+    elif reason:
+        entry["markers"] = [("excl.", reason)]
+    return entry
+
+
 def _gross_notional_card(block: dict) -> html.Div:
-    gross, reason = block.get("gross_usd"), str(block.get("reason") or "")
-    if not block.get("available") or gross is None:
-        return _pnl_card(GROSS_NOTIONAL_TITLE, {"available": False, "reason": reason or
-                                                "no commodity position has a USD figure"}, colour=False)
-    card = _pnl_card(GROSS_NOTIONAL_TITLE, {"value": float(gross), "available": True,
-                                            "excluded_summary": _short_reason(reason), "excluded_detail": reason},
+    return _pnl_card(GROSS_NOTIONAL_TITLE, _commodity_entry(block, "gross_usd", _commodity_detail(block)),
                      colour=False)
-    card.children[1].title = _commodity_detail(block)
-    return card
 
 
 def _net_by_sector_card(block: dict) -> html.Div:
-    net, reason = block.get("net_usd"), str(block.get("reason") or "")
-    if not block.get("available") or net is None:
-        return _pnl_card(NET_BY_SECTOR_TITLE, {"available": False, "reason": reason or
-                                               "no commodity position has a USD figure"})
-    card = _pnl_card(NET_BY_SECTOR_TITLE, {"value": float(net), "available": True,
-                                           "excluded_summary": _short_reason(reason), "excluded_detail": reason})
-    detail = _commodity_detail(block)
-    card.children[1].title = detail
-    line = " · ".join(f"{_sector_label(s.get('sector'))} {_fmt_compact(s.get('net_usd'))}"
-                      for s in block.get("sectors") or [])
-    card.children.insert(2, html.Div(line, className="header-figure-caption header-figure-caption--sectors",
-                                     title=detail))
-    return card
+    """Net outright, the sector breakdown on hover (user, 2026-09-25)."""
+    return _pnl_card(NET_BY_SECTOR_TITLE,
+                     _commodity_entry(block, "net_usd", _joined(_sector_line(block), _commodity_detail(block))))
 
 
 def _db_revision(conn: sqlite3.Connection) -> Optional[tuple]:
@@ -889,6 +996,8 @@ def _spread_summary(conn: sqlite3.Connection, as_of: str) -> dict:
 
 
 def _open_spreads_card(summary: dict) -> html.Div:
+    """The count of open spreads, the names on hover, and "review N" for the groups the rule
+    left for review (their reasons on hover)."""
     if summary.get("error"):
         return _pnl_card(OPEN_SPREADS_TITLE, {"available": False, "reason": summary["error"]}, colour=False)
     opened, review, reasons = summary.get("open") or [], summary.get("review") or [], summary.get("reasons") or []
@@ -900,18 +1009,14 @@ def _open_spreads_card(summary: dict) -> html.Div:
             lines.append(f"- and {len(opened) - len(shown)} more")
     else:
         lines.append("No open spread in the book.")
+    review_lines = []
     if review:
-        lines += ["Waiting for review (left as outrights until bundled):"] + [f"- {r}" for r in review]
-    lines += reasons
-    hover = "\n".join(lines)
-    children = [
-        html.Div(OPEN_SPREADS_TITLE, className="header-figure-title"),
-        html.Div(f"{len(opened):,}", className="header-figure-value header-figure-value--neutral", title=hover),
-    ]
-    if review:
-        children.append(html.Div(f"{_plural(len(review), 'group')} to review",
-                                 className="header-figure-caption header-figure-caption--partial", title=hover))
-    return html.Div(className="header-figure", children=children)
+        review_lines = ([f"{_plural(len(review), 'group')} waiting for review "
+                         "(left as outrights until bundled):"] + [f"- {r}" for r in review])
+    hover = "\n".join(lines + review_lines + reasons)
+    markers = [(f"review {len(review)}", "\n".join(review_lines))] if review else []
+    return _header_card(OPEN_SPREADS_TITLE, f"{len(opened):,}", "header-figure-value header-figure-value--neutral",
+                        hover=hover, markers=markers)
 
 
 def _contract_label(contract_id: str) -> str:
@@ -932,17 +1037,30 @@ def _business_days_words(row: dict) -> str:
     return f"alert {alert}, {words}" if alert and alert != event_date else words
 
 
+def _business_days_short(row: dict) -> str:
+    """The chip's count: '8 bd', 'today', 'expired', 'bd n/a' (the reason on hover)."""
+    n = row.get("business_days")
+    if row.get("level") == "EXPIRED":
+        return "expired"
+    if n is None:
+        return "bd n/a"
+    return "today" if n == 0 else f"{n} bd"
+
+
 def _next_expiry_card(schedule: dict) -> html.Div:
+    """The chip for expiry-monitor's worst-first first row: 'HGZ26 first notice · 2 bd',
+    coloured by its level, the dates, the level, the next rows and the counts on hover; "est."
+    beside it while the date is contract-master's estimate."""
     rows = schedule.get("rows") or []
     if not rows:
         return _figure_card(NEXT_EXPIRY_TITLE, "none",
                             schedule.get("note") or "no open commodity futures position")
     r = rows[0]   # worst first: level, then fewest business days (expiry-monitor's order)
     level = str(r.get("level") or "")
-    date_text = (r.get("next_event_date") or "date unknown") + (" (est.)" if r.get("estimated") else "")
-    caption = " · ".join(p for p in (date_text, _business_days_words(r), level) if p)
-    lines = [f"{r.get('contract_id')}: {r.get('next_event')} {r.get('next_event_date') or 'date unknown'}"
-             + (" (estimated)" if r.get("estimated") else "") + f", {level}"]
+    event_date = r.get("next_event_date") or "date unknown"
+    lines = [f"{r.get('contract_id')}: {r.get('next_event')} {event_date}"
+             + (" (estimated)" if r.get("estimated") else "") + f", {level}"
+             + "".join(f", {p}" for p in (_business_days_words(r),) if p)]
     if r.get("alert_date"):
         lines.append(f"counted to the alert date {r['alert_date']} ({r.get('alert_basis') or r.get('next_event')})")
     if r.get("reason"):
@@ -959,14 +1077,51 @@ def _next_expiry_card(schedule: dict) -> html.Div:
     settled = schedule.get("settled_expired") or []
     if settled:
         lines.append(f"{_plural(len(settled), 'expired contract')} settled by the ledger: not alerts")
+    lines.append("The Expiries tab lists every open contract.")
     hover = "\n".join(lines)
-    return html.Div(className="header-figure", children=[
-        html.Div(NEXT_EXPIRY_TITLE, className="header-figure-title"),
-        html.Div(f"{_contract_label(r.get('contract_id'))} {r.get('next_event') or ''}".strip(),
-                 className=f"header-figure-value header-figure-value--level-{level.lower() or 'unknown'}",
-                 style=_LEVEL_STYLES.get(level, {}), title=hover),
-        html.Div(caption, className="header-figure-caption", title=hover),
-    ])
+    text = " · ".join(p for p in (f"{_contract_label(r.get('contract_id'))} {r.get('next_event') or ''}".strip(),
+                                  _business_days_short(r)) if p)
+    markers = [("est.", f"{event_date} is contract-master's estimate until Bloomberg's contract dates are "
+                        "on file")] if r.get("estimated") else []
+    return _header_card(NEXT_EXPIRY_TITLE, text,
+                        f"header-figure-value header-figure-value--level-{level.lower() or 'unknown'}",
+                        hover=hover, value_style=_chip_style(_LEVEL_STYLES.get(level, _MUTED_CHIP)),
+                        markers=markers)
+
+
+def _marks_card(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple]) -> Optional[html.Div]:
+    """The chip for the marks the book needs on `as_of` with no official mark on file
+    (`needed_marks`, read once per render and memoised on the database revision,
+    `_needs_cached`): "31 marks missing" (amber), "marks complete" (green), "marks n/a" with the
+    reason when the list could not be read. None when the book needs no mark at all. The Data
+    tab lists each one; this only counts them."""
+    if needs is None:
+        try:
+            needs = _needs_cached(conn, as_of)
+        except Exception as exc:  # noqa: BLE001 -- the chip says why
+            return _header_card(MARKS_TITLE, "marks n/a", "header-figure-value", value_style=_chip_style(_MUTED_CHIP),
+                                hover=_failure_reason(f"the marks the book needs on {as_of} could not be listed",
+                                                      exc, conn))
+    needed, missing = needs
+    if not needed:
+        return None
+    if not missing:
+        return _header_card(MARKS_TITLE, "marks complete", "header-figure-value",
+                            value_style=_chip_style(_LEVEL_STYLES["GREEN"]),
+                            hover=f"every one of the {needed:,} marks the book needs on {as_of} is on file (official)")
+    by_type: dict = {}
+    for m in missing:
+        by_type[m["mark_type"]] = by_type.get(m["mark_type"], 0) + 1
+    kinds = ", ".join(f"{n} {t}" for t, n in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0])))
+    shown = missing[:_MISSING_MARKS_ON_HOVER]
+    lines = [f"{len(missing):,} of {needed:,} marks the book needs on {as_of} have no official mark ({kinds})."]
+    lines += [f"- {m['instrument_id']} {m['mark_type']} {m['settle_date']}" for m in shown]
+    if len(missing) > len(shown):
+        lines.append(f"- and {len(missing) - len(shown)} more")
+    lines.append("The Data tab lists each one; the figures above say which trades they leave out.")
+    return _header_card(MARKS_TITLE, f"{len(missing):,} {'mark' if len(missing) == 1 else 'marks'} missing",
+                        "header-figure-value", value_style=_chip_style(_LEVEL_STYLES["AMBER"]),
+                        hover="\n".join(lines))
 
 
 def _commodity_cards(conn: sqlite3.Connection, as_of: str) -> list:

@@ -882,7 +882,7 @@ def test_library_lists_a_need_with_no_ticker_as_a_gap_not_as_a_ticker(book_is_to
     assert f"{len(asked)} ticker(s)" in summary and f"{len(gaps)} need(s) with no Bloomberg ticker, not asked" in summary
     table = next(c for c in panel.children if getattr(c, "id", None) == md.LIBRARY_TABLE_ID)
     assert table.data[:len(gaps)] == gaps                                        # the gaps first, flagged
-    assert "gaps" in panel.children[1].children
+    assert "gaps" in panel.children[0].title                     # the definitions on hover of the summary line
 
 
 def test_contract_dates_panel_shows_on_file_and_missing_with_the_reason(book_is_today):
@@ -908,10 +908,13 @@ def test_contract_dates_panel_shows_on_file_and_missing_with_the_reason(book_is_
     panel = md.contract_dates_panel(conn, TODAY)
     assert "1 of 2 contract(s) on file" in panel.children[0].children
     assert md.CONTRACT_DATES_TABLE_ID in str(panel)
-    # no commodity future open: one line, no table
+    # no commodity future open: one quiet line, no table
     empty = md.contract_dates_panel(schema.connect(), TODAY)
-    assert "none needed" in empty.children[0].children and md.CONTRACT_DATES_TABLE_ID not in str(empty)
-    assert md.CONTRACT_DATES_TITLE in str(md.whole_book_panels(conn, TODAY)[0])
+    assert "none needed" in str(empty) and md.CONTRACT_DATES_TABLE_ID not in str(empty)
+    assert type(empty).__name__ == "Div" and "section" not in (empty.className or "")
+    # below the FX pair section since 2026-09-25, no longer among the health panels
+    assert md.CONTRACT_DATES_TITLE in str(md.reference_panels(conn, TODAY))
+    assert md.CONTRACT_DATES_TITLE not in str(md.whole_book_panels(conn, TODAY)[0])
 
 
 def test_completeness_strip_hover_counts_the_needs_with_no_ticker_apart():
@@ -1179,3 +1182,123 @@ def test_an_option_on_a_future_blocks_its_underlying_futures_price(book_is_today
     assert blocked[("CLZ26C 70 Comdty", "FUTURE_PX", "2026-11-17")]["trades"] == {"P1"}
     underlying = [k for k, v in blocked.items() if k[0] == "CLZ26 Comdty" and k[1] == "FUTURE_PX"]
     assert underlying and all("P1" in blocked[k]["trades"] for k in underlying)
+
+
+# =========================================================================== 2026-09-25: screens redesign, Phase A
+# The tab is "Data"; data health first, the futures curves before the FX pair; definitions on hover
+# of each title, reasons gathered in one "Data issues (N)" drawer; a section with nothing to report
+# is one quiet line. Nothing is dropped (hard rule 2).
+def _walk(component):
+    yield component
+    children = getattr(component, "children", None)
+    for child in children if isinstance(children, (list, tuple)) else [children]:
+        if child is not None and not isinstance(child, (str, int, float)):
+            yield from _walk(child)
+
+
+def test_the_tab_is_data_and_reads_health_futures_fx_library_completeness_manual_then_the_bloomberg_check():
+    layout = md.build_layout(default_date=TODAY)
+    title = layout.children[0]
+    assert title.children[0] == "Data" and "never asks Bloomberg" in title.title      # definitions on hover
+    rendered = str(layout)
+    order = [md.ISSUES_ID, md.MISSING_PANEL_ID, md.SUSPECT_PANEL_ID, md.FUTURES_CURVES_PANEL_ID,
+             md.PAIR_DROPDOWN_ID, md.BODY_ID, md.REFERENCE_PANEL_ID, "market-data-completeness-container",
+             md.PAST_CLOSES_PANEL_ID, md.MANUAL_INSTRUMENT_ID, md.BBG_CHECK_BUTTON_ID]
+    positions = [rendered.index(f"'{i}'") for i in order]
+    assert positions == sorted(positions), order
+    # the pair dropdown sits with the FX section, not in the top bar; the Pull now control is unchanged
+    toolbar = next(c for c in _walk(layout) if getattr(c, "id", None) == md.TOOLBAR_ID)
+    assert md.PAIR_DROPDOWN_ID not in str(toolbar) and md.PULL_NOW_ID in str(toolbar) and md.STATUS_ID in str(toolbar)
+    # no definitions paragraph left anywhere in the static layout; the manual rule is on hover
+    assert "section-kicker" not in rendered and "never official" in rendered
+    assert not any(type(c).__name__ == "P" for c in _walk(md.manual_entry_form()))
+    assert "FX & cash" in str(md.diagnostics_panel(None, {})) and "the ladder" not in str(md.diagnostics_panel(None, {}))
+
+
+def test_sections_with_nothing_to_report_are_one_quiet_line_with_their_definitions_on_hover(book_is_today):
+    conn = _book()
+    _write_needed_marks(conn, TODAY)
+    for panel in (md.missing_panel(conn, TODAY), md.upload_issues_panel(conn),
+                  md.suspect_panel(_book(), TODAY, today="2026-09-25"),
+                  md.contract_dates_panel(schema.connect(), TODAY), md.library_panel(schema.connect(), TODAY)):
+        assert type(panel).__name__ == "Div" and "section" not in (panel.className or "").split(), str(panel)[:200]
+        assert "quiet-line" in panel.className and "section-kicker" not in str(panel)
+        heading = panel.children[0]
+        assert "about-title" in heading.className and heading.title                  # definitions on hover
+    assert "Notional blocked" in md.missing_panel(conn, TODAY).children[0].title
+    # a panel with something to report is a card, its definitions on the title, no paragraph above the table
+    card = md.missing_panel(_book(), TODAY)
+    assert "section" in card.className and "section-kicker" not in str(card)
+    assert "Trades blocked = open trades" in card.children[0].title
+
+
+def test_the_reasons_given_on_hover_are_gathered_for_the_data_issues_drawer(book_is_today):
+    issues = []
+    panel = md.missing_panel(_book(), TODAY, None, issues=issues)
+    note = "No Bloomberg pull is recorded yet, so there is no reason from Bloomberg to show."
+    assert issues == [(md.MISSING_TITLE, note)]
+    marker = next(c for c in _walk(panel) if "marker" in (getattr(c, "className", "") or ""))
+    assert marker.title == note and marker.children == "no Bloomberg reason"
+    # every reason blank (no pull): the reason column is left out; the marker says why
+    table = next(c for c in _walk(panel) if getattr(c, "id", None) == md.MISSING_TABLE_ID)
+    assert "reason" not in [col["id"] for col in table.columns]
+
+    conn = _book()
+    _mark(conn, TODAY, "USDJPY", TODAY, "SPOT", 150.0)
+    conn.commit()
+    md.suspect_panel(conn, TODAY, today="2026-09-25", issues=issues)
+    assert issues[-1][0] == md.SUSPECT_TITLE and f"No official marks are on file for {PREV}" in issues[-1][1]
+
+    md.futures_curves_panel(_futures_book(), TODAY, issues=issues)
+    labelled = dict(issues)
+    assert labelled["LAZ26 Comdty price"] == "no verified Bloomberg ticker for LME:AH"
+    assert labelled["CLX26 Comdty price"] == f"no trade on file needs it on {TODAY}, so no pull asks Bloomberg for it"
+    drawer = md.issues_drawer(issues)
+    assert drawer.children[0].children == f"Data issues ({len(issues)})" and not drawer.open
+
+
+def test_a_futures_table_shows_why_missing_only_when_a_price_is_missing_and_on_hover_of_the_price(book_is_today):
+    blocks = {b["root_id"]: b for b in md.futures_curve_rows(_futures_book(), TODAY)}
+    wti = md._futures_block(blocks["NYMEX:CL"])
+    table = wti.children[1]
+    assert "why" in [c["id"] for c in table.columns]
+    rows = {r["contract_id"]: tip for r, tip in zip(table.data, table.tooltip_data)}
+    assert rows["CLX26 Comdty"]["price"]["value"].startswith("no trade on file needs it") and rows["CLZ26 Comdty"] == {}
+    priced = dict(blocks["NYMEX:CL"], rows=[r for r in blocks["NYMEX:CL"]["rows"] if not r["flag"]], missing=0)
+    assert "why" not in [c["id"] for c in md._futures_block(priced).children[1].columns]
+    # the definitions on hover of the section title, not a paragraph
+    panel = md.futures_curves_panel(_futures_book(), TODAY)
+    assert "section-kicker" not in str(panel) and "nothing is estimated here" in panel.children[0].title
+
+
+def test_the_body_callback_fills_the_drawer_the_reference_block_and_a_quiet_futures_line(book_is_today, tmp_path):
+    import dash
+    path = tmp_path / "risk.db"
+    for source in (_futures_book(), _book()):
+        dest = sqlite3.connect(str(path))
+        source.backup(dest)
+        dest.close()
+        probe = dash.Dash(__name__, suppress_callback_exceptions=True)
+        md.register_callbacks(probe, lambda: path)
+        key = next(k for k in probe.callback_map if f"{md.BODY_ID}.children" in k)
+        out = probe.callback_map[key]["callback"].__wrapped__(TODAY, None, 0, None, None, None, TODAY)
+        assert len(out) == 10
+        futures, reference, drawer = out[7], out[8], out[9]
+        assert md.LIBRARY_TITLE in str(reference) and md.CONTRACT_DATES_TITLE in str(reference)
+        assert type(drawer).__name__ == "Details" and drawer.children[0].children.startswith("Data issues (")
+        assert md.FUTURES_CURVES_TITLE in str(futures)
+    # a book with no commodity future: the section is one quiet line, never a blank
+    fx_only = schema.connect()
+    _instrument(fx_only, "USDJPY", "FX", "USD", "JPY")
+    _trade(fx_only, "T1", "USDJPY", "FX_FWD", "2026-09-01", 1_000_000, 147.0,
+           [("FX_NEAR", "USD", 1_000_000, "2026-10-15", 1), ("FX_NEAR", "JPY", -147_000_000, "2026-10-15", 1)])
+    fx_only.commit()
+    path.unlink()
+    dest = sqlite3.connect(str(path))
+    fx_only.backup(dest)
+    dest.close()
+    probe = dash.Dash(__name__, suppress_callback_exceptions=True)
+    md.register_callbacks(probe, lambda: path)
+    key = next(k for k in probe.callback_map if f"{md.BODY_ID}.children" in k)
+    futures = probe.callback_map[key]["callback"].__wrapped__(TODAY, "USDJPY", 0, None, None, None, TODAY)[7]
+    assert "quiet-line" in futures.className and f"no commodity future is open on {TODAY}" in str(futures)
