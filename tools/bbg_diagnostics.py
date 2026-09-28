@@ -77,7 +77,7 @@ def _row(name: str, status: str, message: str) -> Check:
 
 def _default_db_path() -> Optional[Path]:
     try:
-        from ui.app import get_db_path
+        from data.paths import get_db_path
         return get_db_path()
     except Exception:
         env = os.environ.get("RISK_DB")
@@ -661,7 +661,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
 # --------------------------------------------------------------------------- CLI
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--db", default=None, help="SQLite database (default: ui.app.get_db_path() or $RISK_DB)")
+    p.add_argument("--db", default=None, help="SQLite database (default: data.paths.get_db_path() or $RISK_DB)")
     p.add_argument("--as-of", default=None, help="as-of date (default: today in New York)")
     p.add_argument("--host", default=None)
     p.add_argument("--port", type=int, default=None)

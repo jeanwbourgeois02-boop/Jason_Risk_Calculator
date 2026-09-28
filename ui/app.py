@@ -29,9 +29,10 @@ from dash import ALL, Input, Output, State, dcc, html
 from ui.tabs import blotter, book, cash_ladder, curve, expiries, header, market_data, risk, spreads
 from ui.tabs.formatting import TAB_LINK_TYPE
 from ui import revision, uploads
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB_PATH = REPO_ROOT / "data" / "raw" / "risk.db"
+# The database path rule lives below every layer (data/paths.py) so the Bloomberg CLI mains
+# can read it without importing ui/; re-exported here because `ui.app.get_db_path` is the
+# name every screen, script and test uses.
+from data.paths import DEFAULT_DB_PATH, REPO_ROOT, get_db_path  # noqa: F401
 
 # Order per the screens redesign (user, 2026-09-25: "the spread is the unit"), replacing the
 # macro book's Blotter-first order of 2026-09-22; the app opens on the first. Each label maps
@@ -55,15 +56,6 @@ def tab_body_id(label: str) -> str:
     """The DOM id of a tab's always-present body: `tab-body-<key>` ("FX & cash" ->
     "tab-body-ladder")."""
     return f"tab-body-{TAB_KEYS[label]}"
-
-
-def get_db_path() -> Path:
-    """Resolve the database path from RISK_DB, defaulting to data/raw/risk.db."""
-    raw = os.environ.get("RISK_DB")
-    if raw:
-        p = Path(raw)
-        return p if p.is_absolute() else (REPO_ROOT / p)
-    return DEFAULT_DB_PATH
 
 
 def ensure_schema(path: Union[str, Path]) -> None:

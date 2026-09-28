@@ -1785,7 +1785,7 @@ def _print_status(status: Optional[dict]) -> None:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Bloomberg live feed diagnostics / single pull.")
-    parser.add_argument("--db", default=None, help="SQLite path (default: ui.app.get_db_path())")
+    parser.add_argument("--db", default=None, help="SQLite path (default: data.paths.get_db_path())")
     parser.add_argument("--as-of", default=None)
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=8194)
@@ -1793,7 +1793,7 @@ def main(argv=None) -> int:
     parser.add_argument("--status", action="store_true", help="print the last recorded status")
     args = parser.parse_args(argv)
     if args.db is None:
-        from ui.app import get_db_path
+        from data.paths import get_db_path
         args.db = get_db_path()
     if args.once:
         status = pull_once(args.db, args.as_of, args.host, args.port)

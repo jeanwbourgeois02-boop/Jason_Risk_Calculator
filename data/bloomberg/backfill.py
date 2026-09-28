@@ -2200,7 +2200,7 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Backfill P&L ledger snapshots from Bloomberg daily closes.")
-    parser.add_argument("--db", default=None, help="SQLite path (default: ui.app.get_db_path())")
+    parser.add_argument("--db", default=None, help="SQLite path (default: data.paths.get_db_path())")
     parser.add_argument("--start", default=None, help="first day (default: last business day of previous year)")
     parser.add_argument("--end", default=None, help="last day (default: yesterday)")
     parser.add_argument("--host", default="localhost")
@@ -2208,7 +2208,7 @@ def main(argv=None) -> int:
     parser.add_argument("--overwrite", action="store_true", help="recompute days that already have a complete snapshot")
     args = parser.parse_args(argv)
     if args.db is None:
-        from ui.app import get_db_path
+        from data.paths import get_db_path
         args.db = get_db_path()
     from data.bloomberg.live import book_today
     today = book_today()
