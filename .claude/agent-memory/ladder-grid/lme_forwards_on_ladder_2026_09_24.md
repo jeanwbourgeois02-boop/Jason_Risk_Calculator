@@ -17,18 +17,18 @@ and USD (-tonnes x fill, settles_cash 1).
   Curve tab.
 - USD leg is a USD-row record (like an FX forward's USD leg); portfolio_totals excludes the
   USD row, so FX Net / Gross never move.
-- `delta_per_ccy` (_DELTA_SQL, contract SQL) leaves LME_FWD out entirely, so its USD row
-  differs from the records' USD row by the LME USD legs. Also its FUTURE branch counts a
-  future's NOTIONAL leg as quote-ccy delta (SHFE copper -> CNY). Fix proposed to the user
-  via the housekeeper: drop 'FUTURE' from the product list (optionally add
-  `OR (t.product = 'LME_FWD' AND l.settles_cash = 1)`). No screen calls delta_per_ccy.
+- `delta_per_ccy` (_DELTA_SQL, contract SQL): user yes 2026-09-28 (C15). FUTURE is out of
+  the first branch (a NOTIONAL leg is not currency delta) and LME_FWD's `settles_cash = 1`
+  USD leg is in, so the query matches the grid's USD row. No screen calls delta_per_ccy;
+  the golden book pins it (infra regenerates on that yes). CLAUDE.md's literal SQL still
+  showed the old list at the time: the session rewrites it, not this lane.
 
 **Why:** CLAUDE.md "LME forwards": "the cash lands on the ladder on the prompt date";
-hard rule 7 keeps the contract SQL unchanged without the user's yes.
+hard rule 7 kept the contract SQL unchanged until the user's yes.
 
-**How to apply:** if the user approves the SQL change, edit `_DELTA_SQL` and
-`tests/test_ladder.py::test_delta_per_ccy_real_file_marks_official_empty`'s expected SQL
-together. The sample now has 3 LME_FWD (prompts 2026-09-16, 12-10, 12-16) and 4
+**How to apply:** `_DELTA_SQL` and `tests/test_ladder.py::
+test_delta_per_ccy_real_file_marks_official_empty`'s expected SQL move together; the
+per-pair `_PAIR_LEG_SQL` stays FX-only. The sample has 3 LME_FWD (prompts 2026-09-16, 12-10, 12-16) and 4
 CMDTY_OPTION tickets. Same day, second pass (reviewer warning 3): listed options
 (valuation.LISTED_OPTION_PRODUCTS) settle from realised_pnl like futures, or are named
 unrealised; an open one is neither a record nor unresolved (Curve tab owns its delta).

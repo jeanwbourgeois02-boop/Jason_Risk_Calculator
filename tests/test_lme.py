@@ -12,6 +12,7 @@ from engine.lme import (
     cash_date,
     day_curve,
     forward_at,
+    freeze_date,
     is_lme_instrument,
     is_valid_prompt,
     lme_curve_tickers,
@@ -234,12 +235,31 @@ def test_day_curve_and_forward_at(conn):
     assert forward_at(conn, "LME:CA", "2027-01-20", day) is None
 
 
-def test_settlement_price_is_the_last_cash_on_or_before_the_prompt(conn):
+def test_freeze_date_is_the_day_the_prompt_is_cash():
+    # the inverse of cash_date, on the LME calendar
+    assert freeze_date("2026-10-21") == D(2026, 10, 19)              # Wed -> Mon
+    assert freeze_date(D(2026, 9, 28)) == D(2026, 9, 24)             # Mon -> Thu, over the weekend
+    assert freeze_date("2026-09-01") == D(2026, 8, 27)               # over the 31 Aug bank holiday
+    for p in (D(2026, 10, 21), D(2026, 9, 28), D(2026, 9, 1), D(2027, 1, 4)):
+        assert cash_date(freeze_date(p)) == p
+    assert freeze_date("2026-10-24") == freeze_date("2026-10-26")    # a Saturday prompt: as the Monday
+
+
+def test_settlement_price_is_the_cash_price_of_the_day_the_prompt_became_cash(conn):
+    # user decision 2026-09-28 (C14): prompt P = Wed 21 Oct became the cash date on Mon 19 Oct
+    # (P - 2 LME business days); cash prices on P-2bd, P-1bd and P: the freeze takes P-2bd's
     _mark(conn, "2026-10-19", "2026-10-19", "SPOT", 9950.0)
     _mark(conn, "2026-10-20", "2026-10-20", "SPOT", 9960.0)
-    _mark(conn, "2026-10-22", "2026-10-22", "SPOT", 9990.0)
-    assert settlement_price(conn, "LME:CA", "2026-10-21") == (9960.0, "2026-10-20", "BBG_BFXFORWARD")
-    assert settlement_price(conn, "LME:CA", "2026-10-22")[0] == 9990.0
+    _mark(conn, "2026-10-21", "2026-10-21", "SPOT", 9970.0)
+    assert settlement_price(conn, "LME:CA", "2026-10-21") == (9950.0, "2026-10-19", "BBG_BFXFORWARD")
+    # the price date returned is the one the ledger stores: the freeze date, not the prompt
+    assert settlement_price(conn, "LME:CA", "2026-10-21")[1] == freeze_date("2026-10-21").isoformat()
+    # with no cash price on the freeze day, the last one before it, never one after
+    assert settlement_price(conn, "LME:CA", "2026-10-22") == (9960.0, "2026-10-20", "BBG_BFXFORWARD")
+    _mark(conn, "2026-10-26", "2026-10-26", "SPOT", 9999.0)
+    assert settlement_price(conn, "LME:CA", "2026-10-23")[0] == 9970.0  # 23 Oct froze on 21 Oct
+    # nothing on file by the freeze date: None, never a later price
+    assert settlement_price(conn, "LME:CA", "2026-10-20") is None       # freeze day 16 Oct
     assert settlement_price(conn, "LME:CA", "2026-10-01") is None
 
 

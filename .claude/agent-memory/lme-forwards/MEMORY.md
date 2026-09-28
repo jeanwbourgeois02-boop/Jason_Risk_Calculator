@@ -1,1 +1,1 @@
-- [LME open points](project_lme_open_points.md) — unverified prompt rules, ticker guesses, freeze-date question, calendar coverage (2026-09-24)
+- [LME open points](project_lme_open_points.md) — unverified prompt rules, ticker guesses, calendar coverage; freeze date settled 2026-09-28 (C14)

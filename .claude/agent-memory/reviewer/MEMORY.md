@@ -16,3 +16,4 @@
 - [C9/C10/C12 review 2026-09-24](review-findings-c9-c10-c12-2026-09-24.md) — expiry-date spot freeze, retired leftovers, CMDTY_OPTION: no criticals; isolated-copy recipe
 - [Flat-forwards OIS review 2026-09-22](review-findings-flat-forwards-2026-09-22.md) — no criticals; rerun skips matured swaps and keeps old marks on failed days; options/rates.py has no except (CurveBuildError skips, never CIP)
 - [LME forwards review 2026-09-24](review-findings-lme-forwards-2026-09-24.md) — LME_FWD on FX path, cash-date pillar, settlement_price freeze: no criticals; doc drift, bad-value test gap, no LME mark writer
+- [C14/C15/C17 review 2026-09-28](review-findings-c14-c15-c17-2026-09-28.md) — LME freeze at P-2, FUTURE out of delta SQL, INTERP rows dropped: no criticals; test_valuation LME pin red; open-row jump P-1..P

@@ -308,18 +308,19 @@ def test_lme_usd_leg_after_the_prompt_is_settled_usd_cash_not_its_realised_pnl()
 
 
 def test_lme_forward_adds_nothing_to_currency_delta_or_fx_net_gross():
-    """The metal leg is never currency delta: not in delta_per_ccy (LME_FWD is not in the
-    contract SQL's product list, so its USD leg is left out there too), not a row of the
-    exposure summary. The USD leg sits in the USD row, which Net / Gross USD leave out,
-    so FX Net / Gross are exactly the FX forward's."""
+    """The metal leg is never currency delta: not in delta_per_ccy, not a row of the
+    exposure summary. The USD leg is in both (delta_per_ccy since 2026-09-28, C15, so it
+    matches the grid), in the USD row, which Net / Gross USD leave out, so FX Net / Gross
+    are exactly the FX forward's."""
     from engine.ladder.exposure import build_exposure, portfolio_totals
     from engine.ladder.exposure_adapter import exposure_records_from_db
     from engine.ladder.ladder import delta_per_ccy
     rate = {"JPY": {"rate": 150.0, "inverted": True, "source": "TEST", "timestamp": "", "stale": False}}
     with_lme, only_fx = _lme_db(), _lme_db(with_lme=False)
     delta = delta_per_ccy(with_lme, "2026-09-14").set_index("ccy")["delta"].to_dict()
-    assert delta == delta_per_ccy(only_fx, "2026-09-14").set_index("ccy")["delta"].to_dict()
-    assert delta == {"JPY": -147_000_000.0, "USD": 1_000_000.0}
+    assert delta == {"JPY": -147_000_000.0, "USD": 1_000_000.0 - 985_000.0}
+    assert delta_per_ccy(only_fx, "2026-09-14").set_index("ccy")["delta"].to_dict() == {
+        "JPY": -147_000_000.0, "USD": 1_000_000.0}
     records, _ = exposure_records_from_db(with_lme, "2026-09-14")
     result = build_exposure(records, rate)
     summary = result.summary.set_index("currency")

@@ -74,17 +74,22 @@ def cash_ladder(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
 # which is well-defined for every FX_OPTION instrument regardless of its own instrument_id
 # shape. CLAUDE.md's literal SQL should be corrected the same way (flagged to housekeeper).
 #
-# LME forwards (LME_FWD, Phase 5) are not in the first branch's product list, so an LME
-# ticket contributes nothing here: its metal leg is never a currency, and its USD leg is
-# left out with it (the ladder's own records carry that leg in the USD row, which adds
-# nothing to the non-USD net). The FUTURE in that list counts a future's NOTIONAL leg
-# (contracts x multiplier x fill) as delta in its quote currency; both are CLAUDE.md's
-# contract SQL and change only on the user's yes. No screen calls delta_per_ccy.
+# First branch (user decision 2026-09-28, docs/open-questions.md C15): FUTURE is not in
+# the product list any more. Until then it counted a future's NOTIONAL leg (contracts x
+# multiplier x fill) as delta in its quote currency, so a SHFE copper contract's CNY value
+# read as CNY exposure; a future's delta is contracts x multiplier x price, its own
+# concept (futures_delta.py, the Curve tab), never a currency leg. An LME forward
+# (LME_FWD, Phase 5) contributes its USD leg, the one with settles_cash = 1 (cash on its
+# prompt date, like any FX leg, so this query matches the Ladder's grid); its metal leg
+# (ccy = the root id, settles_cash 0) is never a currency. No screen calls delta_per_ccy;
+# the golden book pins it.
 _DELTA_SQL = """
 WITH d AS (
   SELECT l.ccy, l.amount AS delta
   FROM trade_legs l JOIN trades_official t USING (trade_id)
-  WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP','FUTURE') AND l.settle_date > :as_of
+  WHERE (t.product IN ('FX_SPOT','FX_FWD','FX_SWAP')
+         OR (t.product = 'LME_FWD' AND l.settles_cash = 1))
+    AND l.settle_date > :as_of
   UNION ALL
   SELECT i.base_ccy, t.quantity * m.value
   FROM trades_official t JOIN instruments i USING (instrument_id)
@@ -117,8 +122,9 @@ WHERE t.product = 'FX_OPTION' AND s.value IS NULL
 
 
 def delta_per_ccy(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
-    """Aggregate delta per currency (forwards/futures legs + FX option deltas), exactly the
-    CLAUDE.md "Aggregate delta per currency" SQL, reading only from marks_official.
+    """Aggregate delta per currency (FX legs, an LME ticket's USD leg, FX option deltas),
+    the CLAUDE.md "Aggregate delta per currency" SQL as amended 2026-09-28 (no FUTURE
+    legs, LME_FWD's settles_cash leg in), reading only from marks_official.
 
     Raises ValueError (naming the offending instrument_id(s) and as_of_date) if any
     FX_OPTION with an official DELTA mark is missing an official SPOT mark for its pair:
@@ -297,7 +303,9 @@ def convert_to_usd(ladder: pd.DataFrame, spot: pd.DataFrame) -> pd.DataFrame:
 #
 # Scope: FX_SPOT / FX_FWD / FX_SWAP only (matches the xlsx workbook's "All FX trades"
 # sheet). FUTURE is excluded (see futures_delta.py, its own module, its own Position
-# concept -- contracts x multiplier x price, not a currency pair). FX_OPTION is excluded
+# concept -- contracts x multiplier x price, not a currency pair), as it is from
+# `_DELTA_SQL` since 2026-09-28. LME_FWD is excluded too (its USD leg is in `_DELTA_SQL`
+# but a metal is not a currency pair). FX_OPTION is excluded
 # (CLAUDE.md "Options tab placement": options live in the Blotter's own grouped
 # trade summary, not this Position table). Delta convention throughout: settle_date >
 # as_of (mirrors `_DELTA_SQL` / `futures_delta.py`), not the cash ladder grid's `>=`.

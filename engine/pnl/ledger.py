@@ -23,7 +23,12 @@ inputs did not change is untouched and keeps its `frozen_at`, so settlement stil
 move LTD except by this re-freeze; a row the rule cannot compute today (a mark since gone)
 keeps its figure. Only rows with `settle_date < as_of` are looked at, the ones this call
 freezes again (reviewer, 2026-09-22: a past-day call from the backfill must never drop a row
-it cannot freeze again).
+it cannot freeze again). The one row that does not keep its figure (user decision 2026-09-28,
+C17): a future or listed option frozen by the price's-date rule of the morning of 2026-09-24 at
+an ESTIMATED (INTERP) conversion spot, told by its note, whose exact expiry-date spot cannot be
+recomputed today. Its figure was never one today's rule gives, so it is dropped and the trade
+shows blank with its reason, as a fresh trade in the same case does (`_estimated_conversion`);
+the drop is reported under 'refrozen' with `pnl_to` None, never silent.
 
 `realised_pnl` storage keeps its original 12-column shape (schema owned by
 data-ingest); the columns are repurposed slightly to stay generic across USD-quote
@@ -47,11 +52,13 @@ the reason. A conversion that changes (the backfill's close replacing a live pre
 under the earlier price's-date rule) moves both `usd_entry_amount` and `spot_usd_per_local`, so
 the row is re-frozen like any other and the `why` names the conversion.
 
-LME forwards (LME_FWD, one of `valuation.FX_PRODUCTS`; user decision 2026-09-24, "P&L
-conventions -> LME forwards"): the FX rule on the metal's root id ('LME:CA'), frozen at the
-metal's last official cash price (SPOT) on or before the prompt date (`engine.lme.settlement_price`,
-the lookup value_book's provisional row uses), S = 1, `mark_type` SPOT, the note naming the
-cash price and its date (`_lme_freeze`).
+LME forwards (LME_FWD, one of `valuation.FX_PRODUCTS`; user decisions 2026-09-24, "P&L
+conventions -> LME forwards", and 2026-09-28, C14): the FX rule on the metal's root id ('LME:CA'),
+frozen at the metal's last official cash price (SPOT) on or before the prompt less 2 LME business
+days, the day the prompt becomes the cash date and the ticket's last day on the curve
+(`engine.lme.settlement_price` applies that rule and is the lookup value_book's provisional row
+uses, so the ledger passes the prompt and the two agree), S = 1, `mark_type` SPOT, the note naming
+the cash price and its date (`_lme_freeze`).
 
 FX_OPTION: frozen at the last official `PREMIUM` on or before
 expiry, converted at that day's spot, same columns as an FX trade (`local_amount` =
@@ -90,7 +97,7 @@ import pandas as pd
 
 from engine.pnl.aggregate import (_last_business_day_of_prev_month, _last_business_day_of_prev_year,
                                   _n_business_days_back, _prev_business_day, load_holidays)
-from engine.lme import settlement_price as lme_settlement_price
+from engine.lme import freeze_date as lme_freeze_date, settlement_price as lme_settlement_price
 from engine.pnl.valuation import (FUTURE_PRODUCTS, FX_PRODUCTS, LME_PRODUCTS, RETIRED_PRODUCTS, _BadValue, _number,
                                   close_out_ccy, closed_out_options, last_usd_conversion,
                                   option_fill_is_per_ounce, usd_per_quote, usd_per_quote_on_or_before,
@@ -213,21 +220,26 @@ def _fx_freeze(conn, pair: str, quote_ccy: str, qty: float, fill: float, settle:
 
 
 def _lme_freeze(conn, root: str, quote_ccy: str, qty: float, fill: float, settle: str) -> _Freeze:
-    """An LME forward past its prompt date (user decision 2026-09-24, CLAUDE.md "P&L conventions
-    -> LME forwards"): the FX-forward rule on the metal's root id, frozen at the metal's last
-    official cash price (its SPOT) on or before the prompt, read by `engine.lme.settlement_price`,
-    the very lookup `value_book`'s provisional row uses, so the frozen figure is the one shown.
-    USD-quoted, so S = 1 (`usd_per_quote('USD')`); `mark_type` SPOT, as an FX forward."""
+    """An LME forward past its prompt date (user decisions 2026-09-24, CLAUDE.md "P&L conventions
+    -> LME forwards", and 2026-09-28, C14): the FX-forward rule on the metal's root id, frozen at
+    the metal's last official cash price (its SPOT) on or before the prompt less 2 LME business
+    days, the day the prompt becomes the cash date. `engine.lme.settlement_price` applies that rule
+    from the prompt it is given (the ledger never computes the cash date itself), and it is the very
+    lookup `value_book`'s provisional row uses, so the frozen figure is the one shown. USD-quoted,
+    so S = 1 (`usd_per_quote('USD')`); `mark_type` SPOT, as an FX forward."""
+    cash_day = lme_freeze_date(settle).isoformat()
     m_hit = lme_settlement_price(conn, root, settle)
     if m_hit is None:
-        raise _Unrealisable(f"no official cash price (SPOT) for {root} on or before its prompt {settle}")
+        raise _Unrealisable(f"no official cash price (SPOT) for {root} on or before {cash_day}, "
+                            f"the day its prompt {settle} became cash")
     m, m_day, m_src = m_hit
     s, _s_pair, _s_src = usd_per_quote(conn, quote_ccy, m_day)
     if s != s:
         raise _Unrealisable(f"no SPOT to convert {quote_ccy} to USD on or before {settle}")
     entry = qty * fill * s
     combined = m * s
-    note = f"cash price dated {m_day}" + ("" if m_day == settle else " (last before settlement)")
+    note = (f"cash price of {m_day}, the day the prompt became cash" if str(m_day) == cash_day else
+            f"cash price dated {m_day} (last before the prompt became cash on {cash_day})")
     return _Freeze(quote_ccy, qty, entry, "SPOT", combined, m_day, m_src, qty * combined - entry, note)
 
 
@@ -330,6 +342,22 @@ def _same_freeze(stored: tuple, fresh: _Freeze) -> bool:
 _STORED_CONVERSION = re.compile(r"converted at (\S+) spot (of|dated) (\d{4}-\d{2}-\d{2})( \(INTERP)?")
 
 
+def _estimated_conversion(product, mark_type, note) -> Optional[str]:
+    """The stored conversion of a future's or listed option's row frozen at an ESTIMATED spot: the
+    price's-date rule of the morning of 2026-09-24 converted at `usd_per_quote(ccy, price date)`,
+    which could be a near-marks estimate, and wrote 'converted at <pair> spot of <d> (INTERP: ...)'
+    in the note. Returns '<pair> spot of <d> (INTERP)' for such a row, None for any other (today's
+    rule writes exact rows only). User decision 2026-09-28, C17: when the exact expiry-date spot
+    cannot be recomputed, such a row is dropped and the trade shows blank with its reason, as a
+    fresh trade in the same case does, instead of keeping a figure today's rule never gave."""
+    if product not in FUTURE_PRODUCTS or mark_type != "FUTURE_PX":
+        return None
+    found = _STORED_CONVERSION.search(str(note or ""))
+    if found is None or not found.group(4):
+        return None
+    return f"{found.group(1)} spot of {found.group(3)} (INTERP)"
+
+
 def _conversion_why(stored: tuple, fresh: _Freeze, multiplier, note: str, settle: str) -> str:
     """The `why` of a non-USD future or listed option whose FUTURE_PX and amount are unchanged but
     whose USD conversion moved ('' when that is not what happened). The stored conversion is
@@ -421,12 +449,18 @@ def purge_superseded(conn: sqlite3.Connection, as_of: str, closed_out: dict) -> 
     from them is stable:
         refrozen: one dict per dropped row, {trade_id, product, mark_type, spot_as_of_date (the
                   fresh freeze's), pnl_from (the dropped row's pnl_usd), pnl_to (the fresh
-                  freeze's), why (`_why_refrozen`: what changed, in one sentence)}
+                  freeze's), why (`_why_refrozen`: what changed, in one sentence)}. The one dropped
+                  row with no fresh freeze (user decision 2026-09-28, C17: a future or listed option
+                  frozen at an estimated conversion under the price's-date rule, `_estimated_conversion`,
+                  whose exact expiry-date spot cannot be recomputed today) is here too, with the
+                  stored `mark_type` and `spot_as_of_date`, `pnl_to` None (the trade shows blank
+                  with its reason, and `realise_settled` names it under `unrealisable`), and a
+                  `why` saying so: a drop is never silent.
         kept:     one dict per row the rule could not recompute today (a mark since gone, a
                   figure that is not a number, a row of a kind that left the app: a swap or an
                   NDF frozen at its fix or at its fixing date's spot, `_retired_row`), {trade_id, product, reason}; the row
                   keeps its figure, a trade that has one is never left blank by this (reviewer
-                  m-2, 2026-09-22: it was silent before).
+                  m-2, 2026-09-22: it was silent before), the C17 row above excepted.
     Nothing is recomputed into the table here: `realise_settled` freezes the dropped rows afresh,
     by the same rule, in the same call -- which is why only tickets with `settle_date < as_of` are
     looked at (reviewer, 2026-09-22): the refreeze covers those alone, so a past-day call from
@@ -443,7 +477,17 @@ def purge_superseded(conn: sqlite3.Connection, as_of: str, closed_out: dict) -> 
             fresh = _freeze_for(conn, product, pair, base_ccy, quote_ccy, multiplier, qty, fill, settle,
                                 closed_out.get(trade_id))
         except (_Unrealisable, TypeError, ValueError, ArithmeticError) as exc:
-            kept.append({"trade_id": trade_id, "product": product, "reason": _unrealisable(trade_id, exc)["reason"]})
+            reason = _unrealisable(trade_id, exc)["reason"]
+            estimated = _estimated_conversion(product, mark_type, note) if isinstance(exc, _Unrealisable) else None
+            if estimated:
+                # C17 (user decision 2026-09-28): a figure today's rule never gave is not kept.
+                refrozen.append({"trade_id": trade_id, "product": product, "mark_type": mark_type,
+                                 "spot_as_of_date": str(spot_day), "pnl_from": float(pnl), "pnl_to": None,
+                                 "why": (f"dropped: frozen at an estimated conversion ({estimated}) under the "
+                                         f"price's-date rule of 2026-09-24, and today's rule cannot freeze it ({reason}), "
+                                         "so the trade shows blank with that reason until the spot is on file")})
+                continue
+            kept.append({"trade_id": trade_id, "product": product, "reason": reason})
             continue
         stored = (mark_type, spot_day, local_amount, entry, combined, pnl)
         if not _same_freeze(stored, fresh):
@@ -485,7 +529,11 @@ def realise_settled(conn: sqlite3.Connection, as_of: str) -> dict:
     (reviewer M-2, user yes 2026-09-22; the status file and the Market data tab show them),
     sorted by trade_id. `kept`: the frozen rows the rule could not recompute today (a mark since
     gone, a stored figure that is not a number, a swap or NDF row of an older database), with the
-    reason; each keeps its figure.
+    reason; each keeps its figure. One exception (user decision 2026-09-28, C17): a future or
+    listed option frozen at an estimated (INTERP) conversion by the price's-date rule of the
+    morning of 2026-09-24, whose exact expiry-date spot cannot be recomputed, is dropped instead
+    and listed under `refrozen` with `pnl_to` None; the trade is then named under `unrealisable`
+    with its reason, and value_book shows it blank with that reason until the spot is on file.
     Only rows with `settle_date < as_of` are looked at, the ones this call re-freezes.
 
     `repaired` (2026-09-18): rows an earlier, positional INSERT misaligned

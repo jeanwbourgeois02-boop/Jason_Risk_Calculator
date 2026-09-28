@@ -13,7 +13,8 @@ that publication before they are relied on; every detail that is not certain say
   # unverified: the LME publishes its own list of non-prompt days; this module knows only
   # the LME calendar file.
 - **Cash** (the ``cash_date``): the second LME business day after the trade date (T+2). A day
-  that is not a business day on the way does not count.
+  that is not a business day on the way does not count. ``freeze_date`` is its inverse: the day
+  a given prompt is the cash date (prompt - 2 LME business days), when a ticket to it freezes.
 - **3 months** (``three_month_date``): the same day of the month three calendar months after
   the trade date (not after the cash date). When that day is not a business day, the next
   business day, unless that falls in the following month, in which case the previous business
@@ -50,6 +51,7 @@ __all__ = [
     "MONTHLY_PILLARS",
     "Pillar",
     "cash_date",
+    "freeze_date",
     "three_month_date",
     "six_month_date",
     "third_wednesday",
@@ -111,6 +113,16 @@ def _modified_following(day: dt.date) -> dt.date:
 def cash_date(trade_date: DateLike) -> dt.date:
     """The cash prompt of a trade dealt on `trade_date`: T+2 LME business days."""
     return calendars.add_business_days(LME_CALENDAR, _d(trade_date), 2)
+
+
+def freeze_date(prompt: DateLike) -> dt.date:
+    """The inverse of ``cash_date``: the day on which `prompt` is the cash date, the prompt
+    less 2 LME business days. It is a ticket's last day on the curve (its outright is the
+    cash price that day) and the day it freezes (user decision 2026-09-28, C14: `curve.
+    settlement_price`); expiry-monitor alerts on the same day. For an LME business day
+    ``cash_date(freeze_date(p)) == p``; a prompt that is not one (a warned, not rejected,
+    import) gets the freeze date of the next business day, the day it would settle."""
+    return calendars.add_business_days(LME_CALENDAR, _d(prompt), -2)
 
 
 def three_month_date(trade_date: DateLike) -> dt.date:

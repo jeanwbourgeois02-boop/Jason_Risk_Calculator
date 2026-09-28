@@ -876,23 +876,31 @@ def test_an_lme_prompt_before_the_cash_date_is_marked_at_the_cash_price():
 
 
 def test_a_settled_unfrozen_lme_ticket_shows_the_settlement_price_the_ledger_freezes():
-    from engine.lme import settlement_price
+    """An LME ticket freezes at the metal's official cash price of the day its prompt became the
+    cash date, `engine.lme.freeze_date(prompt)` = prompt less 2 LME business days (user decision
+    2026-09-28, C14), never at a cash price quoted after that day; with none on the freeze day,
+    the last official cash price before it. `value_book`'s provisional row delegates to
+    `settlement_price`, so it shows the figure the ledger will freeze."""
+    from engine.lme import freeze_date, settlement_price
     from engine.pnl import ledger
     conn = schema.connect()
-    _lme_ticket(conn, "lme4", 100.0, 9_800.0, "2026-09-16")
-    _lme_ticket(conn, "lme5", -25.0, 9_800.0, "2026-09-13")              # a Sunday: the Friday cash price
-    for day, cash in (("2026-09-11", 9_760.0), ("2026-09-15", 9_700.0), ("2026-09-16", 9_720.0),
-                      ("2026-09-17", 9_990.0)):
+    _lme_ticket(conn, "lme4", 100.0, 9_800.0, "2026-09-16")              # freezes Monday 14 September
+    _lme_ticket(conn, "lme5", -25.0, 9_800.0, "2026-09-13")              # a Sunday: freezes Thursday the 10th
+    assert (freeze_date("2026-09-16").isoformat(), freeze_date("2026-09-13").isoformat()) == ("2026-09-14", "2026-09-10")
+    for day, cash in (("2026-09-09", 9_760.0), ("2026-09-14", 9_740.0), ("2026-09-15", 9_700.0),
+                      ("2026-09-16", 9_720.0), ("2026-09-17", 9_990.0)):
         _lme_curve(conn, day, cash, {})
     conn.commit()
     vb = _by_id(conn, "2026-09-18")
     r4, r5 = vb.loc["lme4"], vb.loc["lme5"]
-    assert settlement_price(conn, "LME:CA", "2026-09-16") == (9_720.0, "2026-09-16", "BBG_BFXFORWARD")
-    assert (r4["status"], r4["reason"], r4["mark"], r4["mark_date"]) == ("SETTLED", "", 9_720.0, "2026-09-16")
-    assert r4["pnl_usd"] == 100.0 * (9_720.0 - 9_800.0) and r4["spot"] == 1.0
-    assert r4["note"] == "frozen at cash price; not yet recorded in realised_pnl"
-    assert (r5["mark"], r5["mark_date"], r5["pnl_usd"]) == (9_760.0, "2026-09-11", -25.0 * (9_760.0 - 9_800.0))
-    assert r5["note"].startswith("frozen at cash price dated 2026-09-11 (last before settlement)")
+    # the freeze day's own cash price, not the 9_720 quoted on the prompt date itself
+    assert settlement_price(conn, "LME:CA", "2026-09-16") == (9_740.0, "2026-09-14", "BBG_BFXFORWARD")
+    assert (r4["status"], r4["reason"], r4["mark"], r4["mark_date"]) == ("SETTLED", "", 9_740.0, "2026-09-14")
+    assert r4["pnl_usd"] == 100.0 * (9_740.0 - 9_800.0) and r4["spot"] == 1.0
+    assert r4["note"].startswith("frozen at cash price dated 2026-09-14 (last before settlement)")
+    # no cash price on the 10th: the last one before it, never the 14th's, which is after the freeze day
+    assert (r5["mark"], r5["mark_date"], r5["pnl_usd"]) == (9_760.0, "2026-09-09", -25.0 * (9_760.0 - 9_800.0))
+    assert r5["note"].startswith("frozen at cash price dated 2026-09-09 (last before settlement)")
     # the ledger freezes the same figures (its FX path, which LME_FWD joins through FX_PRODUCTS)
     ledger.realise_settled(conn, "2026-09-18")
     frozen = _by_id(conn, "2026-09-18")

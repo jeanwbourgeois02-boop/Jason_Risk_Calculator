@@ -6,7 +6,9 @@ bbg-curves interpolated) at their own prompt dates. It reads `marks_official` on
 rule 3) and writes nothing.
 
 This is the reference reader for the lanes that want a prompt's forward without a P&L
-(curve-positions, expiry-monitor). It never extrapolates beyond the last pillar Bloomberg
+(curve-positions, expiry-monitor), and ``settlement_price`` is the one read of the price an
+LME ticket freezes at (pnl-ledger, pnl-valuation): the cash price of the day its prompt became
+cash, ``freeze_date`` (user decision 2026-09-28). It never extrapolates beyond the last pillar Bloomberg
 gave: past it the answer is None. The P&L's own estimate for a missing mark is
 pnl-valuation's near-marks rule (`engine/pnl/valuation.py::_mark_near`, hard rule 2), which
 uses the same pillars once it places the cash price at ``cash_date`` (see the Handoff).
@@ -19,7 +21,7 @@ import sqlite3
 from typing import Optional
 
 from engine.lme.metals import lme_root
-from engine.lme.prompts import DateLike, _d, cash_date
+from engine.lme.prompts import DateLike, _d, cash_date, freeze_date
 
 __all__ = ["day_curve", "forward_at", "settlement_price"]
 
@@ -81,10 +83,19 @@ def forward_at(conn: sqlite3.Connection, root_id: str, prompt: DateLike,
 
 def settlement_price(conn: sqlite3.Connection, root_id: str,
                      prompt: DateLike) -> Optional[tuple[float, str, str]]:
-    """(value, as_of_date, source) of the price an LME forward to `prompt` is frozen at under
-    the rule approved on 2026-09-24: the metal's last official cash price (SPOT) on or before
-    the prompt date. None when no cash price of the metal is on file by then."""
-    rid, day = lme_root(root_id), _d(prompt).isoformat()
+    """(value, as_of_date, source) of the price an LME forward to `prompt` is frozen at, under
+    the rule approved on 2026-09-28 (C14): the metal's official cash price (SPOT) of the day
+    `prompt` became the cash date, ``freeze_date(prompt)`` = prompt - 2 LME business days, the
+    ticket's own outright on its last day on the curve; with none that day, the last official
+    cash price before it. Never a cash price quoted after that day: the cash price quoted on
+    the prompt date itself is for delivery two days later. The caller passes the prompt date,
+    as before (the ledger's `_lme_freeze`, `value_book`'s provisional row); `as_of_date` is the
+    date of the price used, which the ledger stores. None when no cash price of the metal is
+    on file by the freeze date.
+
+    Until 2026-09-28 the rule read the last cash price on or before the prompt date itself;
+    the ledger's re-freeze moves a row frozen that way to this one on its next run."""
+    rid, day = lme_root(root_id), freeze_date(prompt).isoformat()
     row = conn.execute(
         "SELECT value, as_of_date, source FROM marks_official WHERE instrument_id = ? "
         "AND mark_type = 'SPOT' AND settle_date = as_of_date AND as_of_date <= ? "

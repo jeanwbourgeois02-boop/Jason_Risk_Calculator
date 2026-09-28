@@ -32,6 +32,16 @@ fresh price), confirmed by entry moving by the same factor. Why sentences:
   that date changed)"
 - price or fill moved too: the generic "FUTURE_PX <d> mark ..., entry ..." sentence.
 
+C17 (user decision 2026-09-28): a row frozen by the pre-C9 rule at an ESTIMATED conversion (note
+"converted at <pair> spot of <d> (INTERP: ...)", `_estimated_conversion`) whose exact expiry-date
+spot cannot be recomputed (`_Unrealisable` only, not a `_BadValue`) is DROPPED by `purge_superseded`
+and reported under `refrozen` with the stored mark_type / spot_as_of_date, `pnl_from`, `pnl_to`
+None and a why starting "dropped: frozen at an estimated conversion"; the trade then appears under
+`unrealisable` and value_book shows it blank with the reason. Chose `refrozen` over `kept` because
+`kept` means "keeps its figure" and the row does not; `pnl_to` None renders "n/a" in ui-market-data's
+`usd_words` and passes through bbg-live's `ledger_block` (JSON null). Any other unrecomputable row
+still keeps its figure under `kept`.
+
 USD contract: S = 1.0 exactly, so every figure is bit for bit the old one. The golden book has NO
 settled future on its three dates, so it does not prove the futures freeze;
 `tests/test_ledger.py::_es_row_as_before` and `_PIN_ROWS` do.

@@ -138,10 +138,13 @@ def test_delta_per_ccy_real_file_marks_official_empty(real_conn):
 
     usd_row = delta[delta["ccy"] == "USD"]
     assert len(usd_row) == 1
-    # Note the delta SQL uses settle_date > :as_of (strictly greater), not >=.
+    # Note the delta SQL uses settle_date > :as_of (strictly greater), not >=. Since
+    # 2026-09-28 (C15) a FUTURE's NOTIONAL leg is not currency delta and an LME ticket's
+    # USD leg (settles_cash 1) is.
     expected = real_conn.execute(
         "SELECT SUM(l.amount) FROM trade_legs l JOIN trades t USING (trade_id) "
-        "WHERE t.product IN ('FX_SPOT','FX_FWD','FX_SWAP','FUTURE') AND l.ccy = 'USD' AND l.settle_date > :as_of",
+        "WHERE (t.product IN ('FX_SPOT','FX_FWD','FX_SWAP') OR (t.product = 'LME_FWD' AND l.settles_cash = 1))"
+        " AND l.ccy = 'USD' AND l.settle_date > :as_of",
         {"as_of": SAMPLE_AS_OF},
     ).fetchone()[0]
     assert math.isclose(usd_row["delta"].iloc[0], expected, abs_tol=1e-6)
@@ -334,6 +337,44 @@ def test_settles_cash_zero_excluded():
 
     ladder = cash_ladder(conn, AS_OF)
     assert ladder.empty
+
+
+def test_delta_per_ccy_future_notional_leg_is_not_currency_delta():
+    """User decision 2026-09-28 (C15): a FUTURE's NOTIONAL leg (contracts x multiplier x
+    fill, in the contract's quote currency) is not delta in that currency. A SHFE copper
+    contract adds nothing to CNY; a future's delta is its own concept (futures_delta.py,
+    the Curve tab). An FX forward beside it is unchanged."""
+    conn = _mk_conn()
+    _insert_instrument(conn, "CUZ6 Comdty", "CU", "CNY", asset_class="FUTURE")
+    _insert_trade(conn, "t1", "CUZ6 Comdty", "FUTURE", 5.0)
+    _insert_leg(conn, "t1", 1, "NOTIONAL", "CNY", 1_950_000.0, "2026-12-15", settles_cash=0)
+    _insert_instrument(conn, "USDCNH", "USD", "CNH")
+    _insert_trade(conn, "t2", "USDCNH", "FX_FWD", 1_000_000.0)
+    _insert_leg(conn, "t2", 1, "FX_NEAR", "USD", 1_000_000.0, "2026-12-15")
+    _insert_leg(conn, "t2", 2, "FX_NEAR", "CNH", -7_100_000.0, "2026-12-15")
+    conn.commit()
+
+    delta = delta_per_ccy(conn, AS_OF).set_index("ccy")["delta"].to_dict()
+    assert "CNY" not in delta
+    assert delta == {"USD": 1_000_000.0, "CNH": -7_100_000.0}
+
+
+def test_delta_per_ccy_lme_usd_leg_counts_and_metal_leg_never_does():
+    """User decision 2026-09-28 (C15): an LME ticket's USD leg (settles_cash 1) is
+    currency delta until its prompt, as on the Ladder's grid; the metal leg (ccy = the
+    root id, settles_cash 0) is never a currency. On and after the prompt (`>`) neither
+    leg is open delta."""
+    conn = _mk_conn()
+    _insert_instrument(conn, "LME:CA", "LME:CA", "USD", asset_class="LME_FWD")
+    _insert_trade(conn, "L1", "LME:CA", "LME_FWD", 100.0)
+    _insert_leg(conn, "L1", 1, "FX_NEAR", "LME:CA", 100.0, "2026-12-16", settles_cash=0)
+    _insert_leg(conn, "L1", 2, "FX_NEAR", "USD", -985_000.0, "2026-12-16", settles_cash=1)
+    conn.commit()
+
+    delta = delta_per_ccy(conn, AS_OF).set_index("ccy")["delta"].to_dict()
+    assert delta == {"USD": -985_000.0}
+    assert delta_per_ccy(conn, "2026-12-16").empty
+    assert delta_per_ccy(conn, "2026-12-17").empty
 
 
 def test_convert_to_usd_ignores_non_official_source():

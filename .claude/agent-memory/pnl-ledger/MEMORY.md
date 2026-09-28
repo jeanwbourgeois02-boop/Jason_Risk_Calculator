@@ -1,5 +1,5 @@
-- [Non-USD future freeze](non-usd-future-freeze.md) — C9 2026-09-24: futures / listed options freeze at the last exact spot on or before EXPIRY; columns; why wording
+- [Non-USD future freeze](non-usd-future-freeze.md) — C9 2026-09-24: futures / listed options freeze at the last exact spot on or before EXPIRY; C17 2026-09-28: an INTERP-conversion row that cannot be recomputed is dropped, under `refrozen` with pnl_to None
 - [IRS and NDF removed](irs-ndf-removed.md) — Phase 2 + C10: retired rows (IRS/SWAPTION/CAP_FLOOR, NDF_FIX, PV_USD, NDF SPOT substitute by note) kept under `kept`
-- [LME forward freeze](lme-forward-freeze.md) — LME_FWD via FX_PRODUCTS, engine.lme.settlement_price, S = 1, note "cash price dated <d>"
+- [LME forward freeze](lme-forward-freeze.md) — LME_FWD via FX_PRODUCTS, engine.lme.settlement_price applies C14 (cash price of prompt - 2 LME bd), S = 1, note "cash price of <d>, the day the prompt became cash"
 - Older notes on this file live in `.claude/agent-memory/pnl-engine/` (ledger-refreeze-rule, data_quirks; ndf-fix-exact-day is obsolete for this lane since 2026-09-24)
 - Lane file `.claude/agents/pnl-ledger.md` still says "converted at spot of its price's date" and lists `tests/test_ndf_present_spot.py` (deleted in Phase 2); C9 supersedes the first

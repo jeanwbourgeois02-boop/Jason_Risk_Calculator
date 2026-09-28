@@ -387,11 +387,10 @@
    },
    "delta_per_ccy": [
     {"ccy":"CNH","delta":-10724250.0,"delta_usd":-1512363.9840135658},
-    {"ccy":"CNY","delta":-11010000.0,"delta_usd":-1529398.8333502666},
-    {"ccy":"EUR","delta":4901882.297960855,"delta_usd":5697609.3100541495},
-    {"ccy":"GBP","delta":-229030.0,"delta_usd":-304359.03660176095},
-    {"ccy":"JPY","delta":-348373816.87107205,"delta_usd":-2371790.3272548146},
-    {"ccy":"USD","delta":325381.3060110021,"delta_usd":325381.3060110021},
+    {"ccy":"EUR","delta":4700606.297960855,"delta_usd":5463659.993897065},
+    {"ccy":"GBP","delta":-16375.0,"delta_usd":-21760.81397351367},
+    {"ccy":"JPY","delta":-394633816.87107205,"delta_usd":-2686736.5580716184},
+    {"ccy":"USD","delta":-1882634.693988998,"delta_usd":-1882634.693988998},
     {"ccy":"XAU","delta":-100.0,"delta_usd":-337461.37201064965}
    ],
    "expiry_schedule": {
@@ -1117,11 +1116,10 @@
    },
    "delta_per_ccy": [
     {"ccy":"CNH","delta":3605750.0,"delta_usd":497144.81997136277},
-    {"ccy":"CNY","delta":-11010000.0,"delta_usd":-1520399.8194910446},
-    {"ccy":"EUR","delta":4057271.7480469085,"delta_usd":4761364.5967715215},
-    {"ccy":"GBP","delta":-229030.0,"delta_usd":-304399.9665022646},
-    {"ccy":"JPY","delta":-547479075.2367455,"delta_usd":-3787861.697822381},
-    {"ccy":"USD","delta":342875.505749084,"delta_usd":342875.505749084},
+    {"ccy":"EUR","delta":3855995.7480469085,"delta_usd":4525159.461869942},
+    {"ccy":"GBP","delta":-16375.0,"delta_usd":-21763.740346131875},
+    {"ccy":"JPY","delta":-593739075.2367455,"delta_usd":-4107922.2993448963},
+    {"ccy":"USD","delta":-1531140.494250916,"delta_usd":-1531140.494250916},
     {"ccy":"XAU","delta":-100.0,"delta_usd":-332552.4698676094}
    ],
    "expiry_schedule": {
@@ -1917,11 +1915,10 @@
    },
    "delta_per_ccy": [
     {"ccy":"CNH","delta":3605750.0,"delta_usd":497143.63591490866},
-    {"ccy":"CNY","delta":-11010000.0,"delta_usd":-1521320.5188190583},
-    {"ccy":"EUR","delta":3425993.093858149,"delta_usd":3984608.502277963},
-    {"ccy":"GBP","delta":-229030.0,"delta_usd":-307304.3529945624},
-    {"ccy":"JPY","delta":-400084346.1194834,"delta_usd":-2686708.189745475},
-    {"ccy":"USD","delta":18097.66987035406,"delta_usd":18097.66987035406},
+    {"ccy":"EUR","delta":3224717.093858149,"delta_usd":3750514.0254553817},
+    {"ccy":"GBP","delta":-16375.0,"delta_usd":-21971.395800925464},
+    {"ccy":"JPY","delta":-446344346.1194834,"delta_usd":-2997360.486100274},
+    {"ccy":"USD","delta":-1670878.330129646,"delta_usd":-1670878.330129646},
     {"ccy":"XAU","delta":-100.0,"delta_usd":-336476.91251510766}
    ],
    "expiry_schedule": {
@@ -1969,7 +1966,7 @@
      "RED": 3
     }
    },
-   "ltd": -51018.067910839156,
+   "ltd": -49293.26422065266,
    "per_pair_delta": [
     {"base_ccy":"USD","commodity":false,"cross":false,"instrument_id":"USDCNH","move_1pct_usd":-5000.0,"notional_base":-500000.0,"notional_usd":-500000.0,"quote_ccy":"CNH","spot":7.2529340406102705},
     {"base_ccy":"EUR","commodity":false,"cross":false,"instrument_id":"EURUSD","move_1pct_usd":-4698.0,"notional_base":-469800.0,"notional_usd":469800.0,"quote_ccy":"USD","spot":1.163052111640638},
@@ -1983,7 +1980,7 @@
      "available": true,
      "reason": "",
      "ref_date": "2026-09-11",
-     "value": -12763.38577023516
+     "value": -11038.582080048662
     },
     "daily": {
      "available": true,
@@ -1995,7 +1992,7 @@
      "available": true,
      "reason": "",
      "ref_date": "2026-08-31",
-     "value": -5849.472361863191
+     "value": -4124.668671676693
     },
     "trading": {
      "available": true,
@@ -2007,7 +2004,7 @@
      "available": true,
      "reason": "",
      "ref_date": "2025-12-31",
-     "value": -51018.067910839156
+     "value": -49293.26422065266
     }
    },
    "realised": {
@@ -2035,7 +2032,7 @@
     {"fill":1.169,"instrument_id":"EURUSD","mark":null,"mark_date":"2026-09-11","mark_source":"BBG_BFXFORWARD","note":"","pnl_carry_usd":0.0,"pnl_local":null,"pnl_spot_usd":-762.7095149075903,"pnl_usd":-762.7095149075903,"product":"FX_SPOT","quantity":-150000.0,"reason":"","settle_date":"2026-09-11","spot":1.174084730099384,"spot_source":"BBG_BFXFORWARD","status":"SETTLED","strategy":"","theme":"","trade_date":"2026-09-09","trade_id":"910000040"},
     {"fill":9850.0,"instrument_id":"LME:CA","mark":9698.761825906464,"mark_date":"2026-12-10","mark_source":"INTERP: between LME:CA 2026-11-18 and 2026-12-16 marks of 2026-09-18","note":"","pnl_carry_usd":1376.4779310628,"pnl_local":-15123.817409353614,"pnl_spot_usd":-16500.295340416415,"pnl_usd":-15123.817409353614,"product":"LME_FWD","quantity":100.0,"reason":"","settle_date":"2026-12-10","spot":1.0,"spot_source":"identity","status":"OPEN","strategy":"","theme":"","trade_date":"2026-09-10","trade_id":"910000050"},
     {"fill":2640.0,"instrument_id":"LME:AH","mark":2609.164358482506,"mark_date":"2026-12-16","mark_source":"BBG_BFXFORWARD","note":"","pnl_carry_usd":206.52213084960067,"pnl_local":2312.6731138120476,"pnl_spot_usd":2106.150982962447,"pnl_usd":2312.6731138120476,"product":"LME_FWD","quantity":-75.0,"reason":"","settle_date":"2026-12-16","spot":1.0,"spot_source":"identity","status":"OPEN","strategy":"","theme":"","trade_date":"2026-09-03","trade_id":"910000051"},
-    {"fill":15420.0,"instrument_id":"LME:NI","mark":null,"mark_date":"2026-09-16","mark_source":"BBG_BFXFORWARD","note":"cash price dated 2026-09-16","pnl_carry_usd":0.0,"pnl_local":null,"pnl_spot_usd":-2450.2929933608975,"pnl_usd":-2450.2929933608975,"product":"LME_FWD","quantity":12.0,"reason":"","settle_date":"2026-09-16","spot":15215.808917219925,"spot_source":"BBG_BFXFORWARD","status":"SETTLED","strategy":"","theme":"","trade_date":"2026-07-02","trade_id":"910000052"},
+    {"fill":15420.0,"instrument_id":"LME:NI","mark":null,"mark_date":"2026-09-11","mark_source":"BBG_BFXFORWARD","note":"cash price dated 2026-09-11 (last before the prompt became cash on 2026-09-14)","pnl_carry_usd":0.0,"pnl_local":null,"pnl_spot_usd":-725.4893031743995,"pnl_usd":-725.4893031743995,"product":"LME_FWD","quantity":12.0,"reason":"","settle_date":"2026-09-16","spot":15359.5425580688,"spot_source":"BBG_BFXFORWARD","status":"SETTLED","strategy":"","theme":"","trade_date":"2026-07-02","trade_id":"910000052"},
     {"fill":68.45,"instrument_id":"CLZ26 Comdty","mark":67.1414684972039,"mark_date":"2026-12-31","mark_source":"BBG_BDH","note":"","pnl_carry_usd":0.0,"pnl_local":-13085.315027961002,"pnl_spot_usd":-13085.315027961002,"pnl_usd":-13085.315027961002,"product":"FUTURE","quantity":10.0,"reason":"","settle_date":"2026-12-31","spot":1.0,"spot_source":"identity","status":"OPEN","strategy":"","theme":"","trade_date":"2026-08-03","trade_id":"910000001"},
     {"fill":68.1,"instrument_id":"CLF27 Comdty","mark":67.48424616091728,"mark_date":"2027-01-29","mark_source":"BBG_BDH","note":"","pnl_carry_usd":0.0,"pnl_local":6157.5383908271415,"pnl_spot_usd":6157.5383908271415,"pnl_usd":6157.5383908271415,"product":"FUTURE","quantity":-10.0,"reason":"","settle_date":"2027-01-29","spot":1.0,"spot_source":"identity","status":"OPEN","strategy":"","theme":"","trade_date":"2026-08-03","trade_id":"910000002"},
     {"fill":68.72,"instrument_id":"CLZ26 Comdty","mark":67.1414684972039,"mark_date":"2026-12-31","mark_source":"BBG_BDH","note":"","pnl_carry_usd":0.0,"pnl_local":-7892.657513980481,"pnl_spot_usd":-7892.657513980481,"pnl_usd":-7892.657513980481,"product":"FUTURE","quantity":5.0,"reason":"","settle_date":"2026-12-31","spot":1.0,"spot_source":"identity","status":"OPEN","strategy":"","theme":"","trade_date":"2026-08-04","trade_id":"910000003"},
