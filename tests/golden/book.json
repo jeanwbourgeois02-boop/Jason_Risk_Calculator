@@ -355,6 +355,259 @@
       "reason": ""
      }
     },
+    "by_subsector": {
+     "copper": {
+      "commodities": ["SHFE:CU", "COMEX:HG"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": -1638614.4104713812,
+       "2026-12": 453862.63192221837
+      },
+      "delta_reason": "",
+      "exchanges": ["SHFE", "COMEX"],
+      "gross_delta_usd": 2092477.0423935996,
+      "gross_usd": 2092477.0423935996,
+      "missing": [],
+      "months": {
+       "2026-11": -1638614.4104713812,
+       "2026-12": 453862.63192221837
+      },
+      "name": "Copper",
+      "net_delta_usd": -1184751.7785491627,
+      "net_units": -104.64076299999999,
+      "net_usd": -1184751.7785491627,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"CNY","delta_missing":[],"delta_months":{"2026-11":-30.0},"delta_reason":"","exchange":"SHFE","gross_delta_usd":1638614.4104713812,"gross_lots":30.0,"gross_usd":1638614.4104713812,"missing":[],"months":{"2026-11":-30.0},"name":"SHFE copper cathode","net_delta_lots":-30.0,"net_delta_usd":-1638614.4104713812,"net_lots":-30.0,"net_units":-150.0,"net_usd":-1638614.4104713812,"products":["FUTURE"],"reason":"","root_id":"SHFE:CU","sector":"metals","subsector":"copper","unit":"t"},
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":4.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":453862.63192221837,"gross_lots":4.0,"gross_usd":453862.63192221837,"missing":[],"months":{"2026-12":4.0},"name":"COMEX copper","net_delta_lots":4.0,"net_delta_usd":453862.63192221837,"net_lots":4.0,"net_units":100000.0,"net_usd":453862.63192221837,"products":["FUTURE"],"reason":"","root_id":"COMEX:HG","sector":"metals","subsector":"copper","unit":"lb"}
+      ],
+      "unit": "t",
+      "units_note": "SHFE lots in t, COMEX lots in lb converted to t"
+     },
+     "corn": {
+      "commodities": ["CBOT:ZC"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 211821.41982847615
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 211821.41982847615,
+      "gross_usd": 211821.41982847615,
+      "missing": [],
+      "months": {
+       "2026-12": 211821.41982847615
+      },
+      "name": "Corn",
+      "net_delta_usd": 211821.41982847615,
+      "net_units": 50000.0,
+      "net_usd": 211821.41982847615,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":211821.41982847615,"gross_lots":10.0,"gross_usd":211821.41982847615,"missing":[],"months":{"2026-12":10.0},"name":"CBOT corn","net_delta_lots":10.0,"net_delta_usd":211821.41982847615,"net_lots":10.0,"net_units":50000.0,"net_usd":211821.41982847615,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZC","sector":"agriculture","subsector":"corn","unit":"bu"}
+      ],
+      "unit": "bu",
+      "units_note": ""
+     },
+     "crude_oil": {
+      "commodities": ["NYMEX:CL", "ICE:B"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-08": 347824.7426292051,
+       "2026-12": 1045152.6512918635,
+       "2027-01": -1026898.0898625684
+      },
+      "delta_reason": "",
+      "exchanges": ["NYMEX", "ICE"],
+      "gross_delta_usd": 2419875.483783637,
+      "gross_usd": 2419875.483783637,
+      "missing": [],
+      "months": {
+       "2026-08": 347824.7426292051,
+       "2026-12": 1045152.6512918635,
+       "2027-01": -1026898.0898625684
+      },
+      "name": "Crude oil",
+      "net_delta_usd": 366079.3040585002,
+      "net_units": 5000.0,
+      "net_usd": 366079.3040585002,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-08":5.0,"2026-12":10.0,"2027-01":-15.0},"delta_reason":"","exchange":"NYMEX","gross_delta_usd":2055062.4260519538,"gross_lots":30.0,"gross_usd":2055062.4260519538,"missing":[],"months":{"2026-08":5.0,"2026-12":10.0,"2027-01":-15.0},"name":"NYMEX WTI light sweet crude","net_delta_lots":0.0,"net_delta_usd":1266.2463268169668,"net_lots":0.0,"net_units":0.0,"net_usd":1266.2463268169668,"products":["FUTURE"],"reason":"","root_id":"NYMEX:CL","sector":"energy","subsector":"crude_oil","unit":"bbl"},
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":5.0},"delta_reason":"","exchange":"ICE","gross_delta_usd":364813.05773168325,"gross_lots":5.0,"gross_usd":364813.05773168325,"missing":[],"months":{"2026-12":5.0},"name":"ICE Brent crude","net_delta_lots":5.0,"net_delta_usd":364813.05773168325,"net_lots":5.0,"net_units":5000.0,"net_usd":364813.05773168325,"products":["FUTURE"],"reason":"","root_id":"ICE:B","sector":"energy","subsector":"crude_oil","unit":"bbl"}
+      ],
+      "unit": "bbl",
+      "units_note": ""
+     },
+     "gold": {
+      "commodities": ["COMEX:GC"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 689125.4215346088
+      },
+      "delta_reason": "",
+      "exchanges": ["COMEX"],
+      "gross_delta_usd": 689125.4215346088,
+      "gross_usd": 689125.4215346088,
+      "missing": [],
+      "months": {
+       "2026-12": 689125.4215346088
+      },
+      "name": "Gold",
+      "net_delta_usd": 689125.4215346088,
+      "net_units": 200.0,
+      "net_usd": 689125.4215346088,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":2.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":689125.4215346088,"gross_lots":2.0,"gross_usd":689125.4215346088,"missing":[],"months":{"2026-12":2.0},"name":"COMEX gold","net_delta_lots":2.0,"net_delta_usd":689125.4215346088,"net_lots":2.0,"net_units":200.0,"net_usd":689125.4215346088,"products":["FUTURE"],"reason":"","root_id":"COMEX:GC","sector":"metals","subsector":"gold","unit":"oz"}
+      ],
+      "unit": "oz",
+      "units_note": ""
+     },
+     "nickel": {
+      "commodities": ["LME:NI"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-09": 181765.64351962064
+      },
+      "delta_reason": "",
+      "exchanges": ["LME"],
+      "gross_delta_usd": 181765.64351962064,
+      "gross_usd": 181765.64351962064,
+      "missing": [],
+      "months": {
+       "2026-09": 181765.64351962064
+      },
+      "name": "Nickel",
+      "net_delta_usd": 181765.64351962064,
+      "net_units": 12.0,
+      "net_usd": 181765.64351962064,
+      "products": ["LME_FWD"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-09":2.0},"delta_reason":"","exchange":"LME","gross_delta_usd":181765.64351962064,"gross_lots":2.0,"gross_usd":181765.64351962064,"missing":[],"months":{"2026-09":2.0},"name":"LME nickel (third-Wednesday monthly prompts)","net_delta_lots":2.0,"net_delta_usd":181765.64351962064,"net_lots":2.0,"net_units":12.0,"net_usd":181765.64351962064,"products":["LME_FWD"],"reason":"","root_id":"LME:NI","sector":"metals","subsector":"nickel","unit":"t"}
+      ],
+      "unit": "t",
+      "units_note": ""
+     },
+     "silver": {
+      "commodities": ["COMEX:SI"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": -196184.25160127445
+      },
+      "delta_reason": "",
+      "exchanges": ["COMEX"],
+      "gross_delta_usd": 196184.25160127445,
+      "gross_usd": 196184.25160127445,
+      "missing": [],
+      "months": {
+       "2026-12": -196184.25160127445
+      },
+      "name": "Silver",
+      "net_delta_usd": -196184.25160127445,
+      "net_units": -5000.0,
+      "net_usd": -196184.25160127445,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":-1.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":196184.25160127445,"gross_lots":1.0,"gross_usd":196184.25160127445,"missing":[],"months":{"2026-12":-1.0},"name":"COMEX silver","net_delta_lots":-1.0,"net_delta_usd":-196184.25160127445,"net_lots":-1.0,"net_units":-5000.0,"net_usd":-196184.25160127445,"products":["FUTURE"],"reason":"","root_id":"COMEX:SI","sector":"metals","subsector":"silver","unit":"oz"}
+      ],
+      "unit": "oz",
+      "units_note": ""
+     },
+     "soybean": {
+      "commodities": ["CBOT:ZS"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": -529684.541655381
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 529684.541655381,
+      "gross_usd": 529684.541655381,
+      "missing": [],
+      "months": {
+       "2026-11": -529684.541655381
+      },
+      "name": "Soybean",
+      "net_delta_usd": -529684.541655381,
+      "net_units": -50000.0,
+      "net_usd": -529684.541655381,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-11":-10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":529684.541655381,"gross_lots":10.0,"gross_usd":529684.541655381,"missing":[],"months":{"2026-11":-10.0},"name":"CBOT soybeans","net_delta_lots":-10.0,"net_delta_usd":-529684.541655381,"net_lots":-10.0,"net_units":-50000.0,"net_usd":-529684.541655381,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZS","sector":"agriculture","subsector":"soybean","unit":"bu"}
+      ],
+      "unit": "bu",
+      "units_note": ""
+     },
+     "soymeal": {
+      "commodities": ["CBOT:ZM"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 311215.5676085349
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 311215.5676085349,
+      "gross_usd": 311215.5676085349,
+      "missing": [],
+      "months": {
+       "2026-12": 311215.5676085349
+      },
+      "name": "Soymeal",
+      "net_delta_usd": 311215.5676085349,
+      "net_units": 1000.0,
+      "net_usd": 311215.5676085349,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":311215.5676085349,"gross_lots":10.0,"gross_usd":311215.5676085349,"missing":[],"months":{"2026-12":10.0},"name":"CBOT soybean meal","net_delta_lots":10.0,"net_delta_usd":311215.5676085349,"net_lots":10.0,"net_units":1000.0,"net_usd":311215.5676085349,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZM","sector":"agriculture","subsector":"soymeal","unit":"st"}
+      ],
+      "unit": "st",
+      "units_note": ""
+     },
+     "soyoil": {
+      "commodities": ["CBOT:ZL"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 313938.1597030542
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 313938.1597030542,
+      "gross_usd": 313938.1597030542,
+      "missing": [],
+      "months": {
+       "2026-12": 313938.1597030542
+      },
+      "name": "Soyoil",
+      "net_delta_usd": 313938.1597030542,
+      "net_units": 600000.0,
+      "net_usd": 313938.1597030542,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":313938.1597030542,"gross_lots":10.0,"gross_usd":313938.1597030542,"missing":[],"months":{"2026-12":10.0},"name":"CBOT soybean oil","net_delta_lots":10.0,"net_delta_usd":313938.1597030542,"net_lots":10.0,"net_units":600000.0,"net_usd":313938.1597030542,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZL","sector":"agriculture","subsector":"soyoil","unit":"lb"}
+      ],
+      "unit": "lb",
+      "units_note": ""
+     }
+    },
     "currency_exposure": {
      "CNY": {
       "contracts": ["CUX26 Comdty"],
@@ -1059,6 +1312,396 @@
       "net_delta_usd": -731865.1764162986,
       "net_usd": -731865.1764162986,
       "reason": ""
+     }
+    },
+    "by_subsector": {
+     "aluminium": {
+      "commodities": ["LME:AH"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": -197656.97259862718
+      },
+      "delta_reason": "",
+      "exchanges": ["LME"],
+      "gross_delta_usd": 197656.97259862718,
+      "gross_usd": 197656.97259862718,
+      "missing": [],
+      "months": {
+       "2026-12": -197656.97259862718
+      },
+      "name": "Aluminium",
+      "net_delta_usd": -197656.97259862718,
+      "net_units": -75.0,
+      "net_usd": -197656.97259862718,
+      "products": ["LME_FWD"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":-3.0},"delta_reason":"","exchange":"LME","gross_delta_usd":197656.97259862718,"gross_lots":3.0,"gross_usd":197656.97259862718,"missing":[],"months":{"2026-12":-3.0},"name":"LME aluminium (third-Wednesday monthly prompts)","net_delta_lots":-3.0,"net_delta_usd":-197656.97259862718,"net_lots":-3.0,"net_units":-75.0,"net_usd":-197656.97259862718,"products":["LME_FWD"],"reason":"","root_id":"LME:AH","sector":"metals","subsector":"aluminium","unit":"t"}
+      ],
+      "unit": "t",
+      "units_note": ""
+     },
+     "copper": {
+      "commodities": ["SHFE:CU", "COMEX:HG"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": -1654105.58008981,
+       "2026-12": 453466.48143722885
+      },
+      "delta_reason": "",
+      "exchanges": ["SHFE", "COMEX"],
+      "gross_delta_usd": 2107572.061527039,
+      "gross_usd": 2107572.061527039,
+      "missing": [],
+      "months": {
+       "2026-11": -1654105.58008981,
+       "2026-12": 453466.48143722885
+      },
+      "name": "Copper",
+      "net_delta_usd": -1200639.0986525812,
+      "net_units": -104.64076299999999,
+      "net_usd": -1200639.0986525812,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"CNY","delta_missing":[],"delta_months":{"2026-11":-30.0},"delta_reason":"","exchange":"SHFE","gross_delta_usd":1654105.58008981,"gross_lots":30.0,"gross_usd":1654105.58008981,"missing":[],"months":{"2026-11":-30.0},"name":"SHFE copper cathode","net_delta_lots":-30.0,"net_delta_usd":-1654105.58008981,"net_lots":-30.0,"net_units":-150.0,"net_usd":-1654105.58008981,"products":["FUTURE"],"reason":"","root_id":"SHFE:CU","sector":"metals","subsector":"copper","unit":"t"},
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":4.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":453466.48143722885,"gross_lots":4.0,"gross_usd":453466.48143722885,"missing":[],"months":{"2026-12":4.0},"name":"COMEX copper","net_delta_lots":4.0,"net_delta_usd":453466.48143722885,"net_lots":4.0,"net_units":100000.0,"net_usd":453466.48143722885,"products":["FUTURE"],"reason":"","root_id":"COMEX:HG","sector":"metals","subsector":"copper","unit":"lb"}
+      ],
+      "unit": "t",
+      "units_note": "SHFE lots in t, COMEX lots in lb converted to t"
+     },
+     "corn": {
+      "commodities": ["CBOT:ZC"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 214894.01250015697
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 214894.01250015697,
+      "gross_usd": 214894.01250015697,
+      "missing": [],
+      "months": {
+       "2026-12": 214894.01250015697
+      },
+      "name": "Corn",
+      "net_delta_usd": 214894.01250015697,
+      "net_units": 50000.0,
+      "net_usd": 214894.01250015697,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":214894.01250015697,"gross_lots":10.0,"gross_usd":214894.01250015697,"missing":[],"months":{"2026-12":10.0},"name":"CBOT corn","net_delta_lots":10.0,"net_delta_usd":214894.01250015697,"net_lots":10.0,"net_units":50000.0,"net_usd":214894.01250015697,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZC","sector":"agriculture","subsector":"corn","unit":"bu"}
+      ],
+      "unit": "bu",
+      "units_note": ""
+     },
+     "crude_oil": {
+      "commodities": ["NYMEX:CL", "ICE:B"],
+      "delta_missing": ["CLZ26C 75 Comdty", "CLZ26P 62 Comdty"],
+      "delta_months": {
+       "2026-11": -208322.1542625803,
+       "2026-12": null,
+       "2027-01": -1018472.7339570202
+      },
+      "delta_reason": "CLZ26C 75 Comdty: no DELTA mark: the option has not been priced; CLZ26P 62 Comdty: no DELTA mark: the option has not been priced",
+      "exchanges": ["NYMEX", "ICE"],
+      "gross_delta_usd": null,
+      "gross_usd": 2265715.633586234,
+      "missing": [],
+      "months": {
+       "2026-11": -208322.1542625803,
+       "2026-12": 1038920.7453666335,
+       "2027-01": -1018472.7339570202
+      },
+      "name": "Crude oil",
+      "net_delta_usd": null,
+      "net_units": -3000.0,
+      "net_usd": -187874.142852967,
+      "products": ["FUTURE", "CMDTY_OPTION"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"USD","delta_missing":["CLZ26C 75 Comdty","CLZ26P 62 Comdty"],"delta_months":{"2026-11":-3.0,"2026-12":null,"2027-01":-15.0},"delta_reason":"CLZ26C 75 Comdty: no DELTA mark: the option has not been priced; CLZ26P 62 Comdty: no DELTA mark: the option has not been priced","exchange":"NYMEX","gross_delta_usd":null,"gross_lots":28.0,"gross_usd":1901874.7623301242,"missing":[],"months":{"2026-11":-3.0,"2026-12":10.0,"2027-01":-15.0},"name":"NYMEX WTI light sweet crude","net_delta_lots":null,"net_delta_usd":null,"net_lots":-8.0,"net_units":-8000.0,"net_usd":-551715.0141090768,"products":["FUTURE","CMDTY_OPTION"],"reason":"","root_id":"NYMEX:CL","sector":"energy","subsector":"crude_oil","unit":"bbl"},
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":5.0},"delta_reason":"","exchange":"ICE","gross_delta_usd":363840.8712561098,"gross_lots":5.0,"gross_usd":363840.8712561098,"missing":[],"months":{"2026-12":5.0},"name":"ICE Brent crude","net_delta_lots":5.0,"net_delta_usd":363840.8712561098,"net_lots":5.0,"net_units":5000.0,"net_usd":363840.8712561098,"products":["FUTURE"],"reason":"","root_id":"ICE:B","sector":"energy","subsector":"crude_oil","unit":"bbl"}
+      ],
+      "unit": "bbl",
+      "units_note": ""
+     },
+     "gasoil": {
+      "commodities": ["NYMEX:HO"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": 98161.8330088007
+      },
+      "delta_reason": "",
+      "exchanges": ["NYMEX"],
+      "gross_delta_usd": 98161.8330088007,
+      "gross_usd": 98161.8330088007,
+      "missing": [],
+      "months": {
+       "2026-11": 98161.8330088007
+      },
+      "name": "Gasoil",
+      "net_delta_usd": 98161.8330088007,
+      "net_units": 42000.0,
+      "net_usd": 98161.8330088007,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-11":1.0},"delta_reason":"","exchange":"NYMEX","gross_delta_usd":98161.8330088007,"gross_lots":1.0,"gross_usd":98161.8330088007,"missing":[],"months":{"2026-11":1.0},"name":"NYMEX NY Harbor ULSD (heating oil)","net_delta_lots":1.0,"net_delta_usd":98161.8330088007,"net_lots":1.0,"net_units":42000.0,"net_usd":98161.8330088007,"products":["FUTURE"],"reason":"","root_id":"NYMEX:HO","sector":"energy","subsector":"gasoil","unit":"gal"}
+      ],
+      "unit": "gal",
+      "units_note": ""
+     },
+     "gasoline": {
+      "commodities": ["NYMEX:RB"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": 170278.0760264399
+      },
+      "delta_reason": "",
+      "exchanges": ["NYMEX"],
+      "gross_delta_usd": 170278.0760264399,
+      "gross_usd": 170278.0760264399,
+      "missing": [],
+      "months": {
+       "2026-11": 170278.0760264399
+      },
+      "name": "Gasoline",
+      "net_delta_usd": 170278.0760264399,
+      "net_units": 84000.0,
+      "net_usd": 170278.0760264399,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-11":2.0},"delta_reason":"","exchange":"NYMEX","gross_delta_usd":170278.0760264399,"gross_lots":2.0,"gross_usd":170278.0760264399,"missing":[],"months":{"2026-11":2.0},"name":"NYMEX RBOB gasoline","net_delta_lots":2.0,"net_delta_usd":170278.0760264399,"net_lots":2.0,"net_units":84000.0,"net_usd":170278.0760264399,"products":["FUTURE"],"reason":"","root_id":"NYMEX:RB","sector":"energy","subsector":"gasoline","unit":"gal"}
+      ],
+      "unit": "gal",
+      "units_note": ""
+     },
+     "gold": {
+      "commodities": ["COMEX:GC"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 673554.5816259665
+      },
+      "delta_reason": "",
+      "exchanges": ["COMEX"],
+      "gross_delta_usd": 673554.5816259665,
+      "gross_usd": 673554.5816259665,
+      "missing": [],
+      "months": {
+       "2026-12": 673554.5816259665
+      },
+      "name": "Gold",
+      "net_delta_usd": 673554.5816259665,
+      "net_units": 200.0,
+      "net_usd": 673554.5816259665,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":2.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":673554.5816259665,"gross_lots":2.0,"gross_usd":673554.5816259665,"missing":[],"months":{"2026-12":2.0},"name":"COMEX gold","net_delta_lots":2.0,"net_delta_usd":673554.5816259665,"net_lots":2.0,"net_units":200.0,"net_usd":673554.5816259665,"products":["FUTURE"],"reason":"","root_id":"COMEX:GC","sector":"metals","subsector":"gold","unit":"oz"}
+      ],
+      "unit": "oz",
+      "units_note": ""
+     },
+     "iron_ore": {
+      "commodities": ["DCE:I", "SGX:FEF"],
+      "delta_missing": [],
+      "delta_months": {
+       "2027-01": 5992.444979169319
+      },
+      "delta_reason": "",
+      "exchanges": ["DCE", "SGX"],
+      "gross_delta_usd": 205304.64563964622,
+      "gross_usd": 205304.64563964622,
+      "missing": [],
+      "months": {
+       "2027-01": 5992.444979169319
+      },
+      "name": "Iron ore",
+      "net_delta_usd": 5992.444979169319,
+      "net_units": 0.0,
+      "net_usd": 5992.444979169319,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "ferrous",
+      "split": [
+       {"currency":"CNY","delta_missing":[],"delta_months":{"2027-01":10.0},"delta_reason":"","exchange":"DCE","gross_delta_usd":105648.54530940777,"gross_lots":10.0,"gross_usd":105648.54530940777,"missing":[],"months":{"2027-01":10.0},"name":"DCE iron ore","net_delta_lots":10.0,"net_delta_usd":105648.54530940777,"net_lots":10.0,"net_units":1000.0,"net_usd":105648.54530940777,"products":["FUTURE"],"reason":"","root_id":"DCE:I","sector":"ferrous","subsector":"iron_ore","unit":"t"},
+       {"currency":"USD","delta_missing":[],"delta_months":{"2027-01":-10.0},"delta_reason":"","exchange":"SGX","gross_delta_usd":99656.10033023845,"gross_lots":10.0,"gross_usd":99656.10033023845,"missing":[],"months":{"2027-01":-10.0},"name":"SGX iron ore CFR China 62% Fe fines (TSI/Platts IODEX)","net_delta_lots":-10.0,"net_delta_usd":-99656.10033023845,"net_lots":-10.0,"net_units":-1000.0,"net_usd":-99656.10033023845,"products":["FUTURE"],"reason":"","root_id":"SGX:FEF","sector":"ferrous","subsector":"iron_ore","unit":"t"}
+      ],
+      "unit": "t",
+      "units_note": ""
+     },
+     "natural_gas": {
+      "commodities": ["ICE:M", "ICE:TFM"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": -50906.883868785226
+      },
+      "delta_reason": "",
+      "exchanges": ["ICE"],
+      "gross_delta_usd": 520741.4945659699,
+      "gross_usd": 520741.4945659699,
+      "missing": [],
+      "months": {
+       "2026-11": -50906.883868785226
+      },
+      "name": "Natural gas",
+      "net_delta_usd": -50906.883868785226,
+      "net_units": null,
+      "net_usd": -50906.883868785226,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"GBP","delta_missing":[],"delta_months":{"2026-11":-8.0},"delta_reason":"","exchange":"ICE","gross_delta_usd":285824.18921737757,"gross_lots":8.0,"gross_usd":285824.18921737757,"missing":[],"months":{"2026-11":-8.0},"name":"ICE UK NBP natural gas","net_delta_lots":-8.0,"net_delta_usd":-285824.18921737757,"net_lots":-8.0,"net_units":-240000.0,"net_usd":-285824.18921737757,"products":["FUTURE"],"reason":"","root_id":"ICE:M","sector":"energy","subsector":"natural_gas","unit":"therm"},
+       {"currency":"EUR","delta_missing":[],"delta_months":{"2026-11":8.0},"delta_reason":"","exchange":"ICE","gross_delta_usd":234917.30534859234,"gross_lots":8.0,"gross_usd":234917.30534859234,"missing":[],"months":{"2026-11":8.0},"name":"ICE Endex Dutch TTF natural gas","net_delta_lots":8.0,"net_delta_usd":234917.30534859234,"net_lots":8.0,"net_units":5760.0,"net_usd":234917.30534859234,"products":["FUTURE"],"reason":"","root_id":"ICE:TFM","sector":"energy","subsector":"natural_gas","unit":"mwh"}
+      ],
+      "unit": "",
+      "units_note": "units do not add across exchanges: ICE:M in therm, ICE:TFM in mwh"
+     },
+     "nickel": {
+      "commodities": ["LME:NI"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-09": 184730.40693833758
+      },
+      "delta_reason": "",
+      "exchanges": ["LME"],
+      "gross_delta_usd": 184730.40693833758,
+      "gross_usd": 184730.40693833758,
+      "missing": [],
+      "months": {
+       "2026-09": 184730.40693833758
+      },
+      "name": "Nickel",
+      "net_delta_usd": 184730.40693833758,
+      "net_units": 12.0,
+      "net_usd": 184730.40693833758,
+      "products": ["LME_FWD"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-09":2.0},"delta_reason":"","exchange":"LME","gross_delta_usd":184730.40693833758,"gross_lots":2.0,"gross_usd":184730.40693833758,"missing":[],"months":{"2026-09":2.0},"name":"LME nickel (third-Wednesday monthly prompts)","net_delta_lots":2.0,"net_delta_usd":184730.40693833758,"net_lots":2.0,"net_units":12.0,"net_usd":184730.40693833758,"products":["LME_FWD"],"reason":"","root_id":"LME:NI","sector":"metals","subsector":"nickel","unit":"t"}
+      ],
+      "unit": "t",
+      "units_note": ""
+     },
+     "silver": {
+      "commodities": ["COMEX:SI"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": -191854.0937293943
+      },
+      "delta_reason": "",
+      "exchanges": ["COMEX"],
+      "gross_delta_usd": 191854.0937293943,
+      "gross_usd": 191854.0937293943,
+      "missing": [],
+      "months": {
+       "2026-12": -191854.0937293943
+      },
+      "name": "Silver",
+      "net_delta_usd": -191854.0937293943,
+      "net_units": -5000.0,
+      "net_usd": -191854.0937293943,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":-1.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":191854.0937293943,"gross_lots":1.0,"gross_usd":191854.0937293943,"missing":[],"months":{"2026-12":-1.0},"name":"COMEX silver","net_delta_lots":-1.0,"net_delta_usd":-191854.0937293943,"net_lots":-1.0,"net_units":-5000.0,"net_usd":-191854.0937293943,"products":["FUTURE"],"reason":"","root_id":"COMEX:SI","sector":"metals","subsector":"silver","unit":"oz"}
+      ],
+      "unit": "oz",
+      "units_note": ""
+     },
+     "soybean": {
+      "commodities": ["CBOT:ZS"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": -522874.02322288393
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 522874.02322288393,
+      "gross_usd": 522874.02322288393,
+      "missing": [],
+      "months": {
+       "2026-11": -522874.02322288393
+      },
+      "name": "Soybean",
+      "net_delta_usd": -522874.02322288393,
+      "net_units": -50000.0,
+      "net_usd": -522874.02322288393,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-11":-10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":522874.02322288393,"gross_lots":10.0,"gross_usd":522874.02322288393,"missing":[],"months":{"2026-11":-10.0},"name":"CBOT soybeans","net_delta_lots":-10.0,"net_delta_usd":-522874.02322288393,"net_lots":-10.0,"net_units":-50000.0,"net_usd":-522874.02322288393,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZS","sector":"agriculture","subsector":"soybean","unit":"bu"}
+      ],
+      "unit": "bu",
+      "units_note": ""
+     },
+     "soymeal": {
+      "commodities": ["CBOT:ZM"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 309333.25621642364
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 309333.25621642364,
+      "gross_usd": 309333.25621642364,
+      "missing": [],
+      "months": {
+       "2026-12": 309333.25621642364
+      },
+      "name": "Soymeal",
+      "net_delta_usd": 309333.25621642364,
+      "net_units": 1000.0,
+      "net_usd": 309333.25621642364,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":309333.25621642364,"gross_lots":10.0,"gross_usd":309333.25621642364,"missing":[],"months":{"2026-12":10.0},"name":"CBOT soybean meal","net_delta_lots":10.0,"net_delta_usd":309333.25621642364,"net_lots":10.0,"net_units":1000.0,"net_usd":309333.25621642364,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZM","sector":"agriculture","subsector":"soymeal","unit":"st"}
+      ],
+      "unit": "st",
+      "units_note": ""
+     },
+     "soyoil": {
+      "commodities": ["CBOT:ZL"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 319753.2317241311
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 319753.2317241311,
+      "gross_usd": 319753.2317241311,
+      "missing": [],
+      "months": {
+       "2026-12": 319753.2317241311
+      },
+      "name": "Soyoil",
+      "net_delta_usd": 319753.2317241311,
+      "net_units": 600000.0,
+      "net_usd": 319753.2317241311,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":319753.2317241311,"gross_lots":10.0,"gross_usd":319753.2317241311,"missing":[],"months":{"2026-12":10.0},"name":"CBOT soybean oil","net_delta_lots":10.0,"net_delta_usd":319753.2317241311,"net_lots":10.0,"net_units":600000.0,"net_usd":319753.2317241311,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZL","sector":"agriculture","subsector":"soyoil","unit":"lb"}
+      ],
+      "unit": "lb",
+      "units_note": ""
      }
     },
     "currency_exposure": {
@@ -1847,6 +2490,371 @@
       "net_delta_usd": null,
       "net_usd": null,
       "reason": "LME:CA 2026-12-10: no FWD_OUTRIGHT for LME:CA (prompt 2026-12-10) on 2026-09-18"
+     }
+    },
+    "by_subsector": {
+     "aluminium": {
+      "commodities": ["LME:AH"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": -195687.32688618795
+      },
+      "delta_reason": "",
+      "exchanges": ["LME"],
+      "gross_delta_usd": 195687.32688618795,
+      "gross_usd": 195687.32688618795,
+      "missing": [],
+      "months": {
+       "2026-12": -195687.32688618795
+      },
+      "name": "Aluminium",
+      "net_delta_usd": -195687.32688618795,
+      "net_units": -75.0,
+      "net_usd": -195687.32688618795,
+      "products": ["LME_FWD"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":-3.0},"delta_reason":"","exchange":"LME","gross_delta_usd":195687.32688618795,"gross_lots":3.0,"gross_usd":195687.32688618795,"missing":[],"months":{"2026-12":-3.0},"name":"LME aluminium (third-Wednesday monthly prompts)","net_delta_lots":-3.0,"net_delta_usd":-195687.32688618795,"net_lots":-3.0,"net_units":-75.0,"net_usd":-195687.32688618795,"products":["LME_FWD"],"reason":"","root_id":"LME:AH","sector":"metals","subsector":"aluminium","unit":"t"}
+      ],
+      "unit": "t",
+      "units_note": ""
+     },
+     "copper": {
+      "commodities": ["SHFE:CU", "COMEX:HG", "LME:CA"],
+      "delta_missing": ["LME:CA 2026-12-10", "CUZ26C 80000 Comdty"],
+      "delta_months": {
+       "2026-11": -1650589.7695952568,
+       "2026-12": null
+      },
+      "delta_reason": "LME:CA 2026-12-10: no FWD_OUTRIGHT for LME:CA (prompt 2026-12-10) on 2026-09-18; CUZ26C 80000 Comdty: no DELTA mark: the option has not been priced",
+      "exchanges": ["SHFE", "COMEX", "LME"],
+      "gross_delta_usd": null,
+      "gross_usd": null,
+      "missing": ["LME:CA 2026-12-10"],
+      "months": {
+       "2026-11": -1650589.7695952568,
+       "2026-12": null
+      },
+      "name": "Copper",
+      "net_delta_usd": null,
+      "net_units": -4.640762999999993,
+      "net_usd": null,
+      "products": ["FUTURE", "LME_FWD", "CMDTY_OPTION"],
+      "reason": "LME:CA 2026-12-10: no FWD_OUTRIGHT for LME:CA (prompt 2026-12-10) on 2026-09-18",
+      "sector": "metals",
+      "split": [
+       {"currency":"CNY","delta_missing":["CUZ26C 80000 Comdty"],"delta_months":{"2026-11":-30.0,"2026-12":null},"delta_reason":"CUZ26C 80000 Comdty: no DELTA mark: the option has not been priced","exchange":"SHFE","gross_delta_usd":null,"gross_lots":30.0,"gross_usd":1650589.7695952568,"missing":[],"months":{"2026-11":-30.0},"name":"SHFE copper cathode","net_delta_lots":null,"net_delta_usd":null,"net_lots":-30.0,"net_units":-150.0,"net_usd":-1650589.7695952568,"products":["FUTURE","CMDTY_OPTION"],"reason":"","root_id":"SHFE:CU","sector":"metals","subsector":"copper","unit":"t"},
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":4.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":461607.2652885738,"gross_lots":4.0,"gross_usd":461607.2652885738,"missing":[],"months":{"2026-12":4.0},"name":"COMEX copper","net_delta_lots":4.0,"net_delta_usd":461607.2652885738,"net_lots":4.0,"net_units":100000.0,"net_usd":461607.2652885738,"products":["FUTURE"],"reason":"","root_id":"COMEX:HG","sector":"metals","subsector":"copper","unit":"lb"},
+       {"currency":"USD","delta_missing":["LME:CA 2026-12-10"],"delta_months":{"2026-12":4.0},"delta_reason":"LME:CA 2026-12-10: no FWD_OUTRIGHT for LME:CA (prompt 2026-12-10) on 2026-09-18","exchange":"LME","gross_delta_usd":null,"gross_lots":4.0,"gross_usd":null,"missing":["LME:CA 2026-12-10"],"months":{"2026-12":4.0},"name":"LME copper (third-Wednesday monthly prompts)","net_delta_lots":4.0,"net_delta_usd":null,"net_lots":4.0,"net_units":100.0,"net_usd":null,"products":["LME_FWD"],"reason":"LME:CA 2026-12-10: no FWD_OUTRIGHT for LME:CA (prompt 2026-12-10) on 2026-09-18","root_id":"LME:CA","sector":"metals","subsector":"copper","unit":"t"}
+      ],
+      "unit": "t",
+      "units_note": "SHFE lots in t, COMEX lots in lb converted to t, LME lots in t"
+     },
+     "corn": {
+      "commodities": ["CBOT:ZC"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 218405.34833696924
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 218405.34833696924,
+      "gross_usd": 218405.34833696924,
+      "missing": [],
+      "months": {
+       "2026-12": 218405.34833696924
+      },
+      "name": "Corn",
+      "net_delta_usd": 218405.34833696924,
+      "net_units": 50000.0,
+      "net_usd": 218405.34833696924,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":218405.34833696924,"gross_lots":10.0,"gross_usd":218405.34833696924,"missing":[],"months":{"2026-12":10.0},"name":"CBOT corn","net_delta_lots":10.0,"net_delta_usd":218405.34833696924,"net_lots":10.0,"net_units":50000.0,"net_usd":218405.34833696924,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZC","sector":"agriculture","subsector":"corn","unit":"bu"}
+      ],
+      "unit": "bu",
+      "units_note": ""
+     },
+     "crude_oil": {
+      "commodities": ["NYMEX:CL", "ICE:B"],
+      "delta_missing": ["CLZ26C 75 Comdty", "CLZ26P 62 Comdty"],
+      "delta_months": {
+       "2026-11": -207874.80877672468,
+       "2026-12": null,
+       "2027-01": -1012263.6924137592
+      },
+      "delta_reason": "CLZ26C 75 Comdty: no DELTA mark: the option has not been priced; CLZ26P 62 Comdty: no DELTA mark: the option has not been priced",
+      "exchanges": ["NYMEX", "ICE"],
+      "gross_delta_usd": null,
+      "gross_usd": 2251917.079015212,
+      "missing": [],
+      "months": {
+       "2026-11": -207874.80877672468,
+       "2026-12": 1031778.5778247281,
+       "2027-01": -1012263.6924137592
+      },
+      "name": "Crude oil",
+      "net_delta_usd": null,
+      "net_units": -3000.0,
+      "net_usd": -188359.9233657557,
+      "products": ["FUTURE", "CMDTY_OPTION"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"USD","delta_missing":["CLZ26C 75 Comdty","CLZ26P 62 Comdty"],"delta_months":{"2026-11":-3.0,"2026-12":null,"2027-01":-15.0},"delta_reason":"CLZ26C 75 Comdty: no DELTA mark: the option has not been priced; CLZ26P 62 Comdty: no DELTA mark: the option has not been priced","exchange":"NYMEX","gross_delta_usd":null,"gross_lots":28.0,"gross_usd":1891553.186162523,"missing":[],"months":{"2026-11":-3.0,"2026-12":10.0,"2027-01":-15.0},"name":"NYMEX WTI light sweet crude","net_delta_lots":null,"net_delta_usd":null,"net_lots":-8.0,"net_units":-8000.0,"net_usd":-548723.8162184448,"products":["FUTURE","CMDTY_OPTION"],"reason":"","root_id":"NYMEX:CL","sector":"energy","subsector":"crude_oil","unit":"bbl"},
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":5.0},"delta_reason":"","exchange":"ICE","gross_delta_usd":360363.8928526891,"gross_lots":5.0,"gross_usd":360363.8928526891,"missing":[],"months":{"2026-12":5.0},"name":"ICE Brent crude","net_delta_lots":5.0,"net_delta_usd":360363.8928526891,"net_lots":5.0,"net_units":5000.0,"net_usd":360363.8928526891,"products":["FUTURE"],"reason":"","root_id":"ICE:B","sector":"energy","subsector":"crude_oil","unit":"bbl"}
+      ],
+      "unit": "bbl",
+      "units_note": ""
+     },
+     "gasoil": {
+      "commodities": ["NYMEX:HO"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": 99618.82439543675
+      },
+      "delta_reason": "",
+      "exchanges": ["NYMEX"],
+      "gross_delta_usd": 99618.82439543675,
+      "gross_usd": 99618.82439543675,
+      "missing": [],
+      "months": {
+       "2026-11": 99618.82439543675
+      },
+      "name": "Gasoil",
+      "net_delta_usd": 99618.82439543675,
+      "net_units": 42000.0,
+      "net_usd": 99618.82439543675,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-11":1.0},"delta_reason":"","exchange":"NYMEX","gross_delta_usd":99618.82439543675,"gross_lots":1.0,"gross_usd":99618.82439543675,"missing":[],"months":{"2026-11":1.0},"name":"NYMEX NY Harbor ULSD (heating oil)","net_delta_lots":1.0,"net_delta_usd":99618.82439543675,"net_lots":1.0,"net_units":42000.0,"net_usd":99618.82439543675,"products":["FUTURE"],"reason":"","root_id":"NYMEX:HO","sector":"energy","subsector":"gasoil","unit":"gal"}
+      ],
+      "unit": "gal",
+      "units_note": ""
+     },
+     "gasoline": {
+      "commodities": ["NYMEX:RB"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": 170985.96528635707
+      },
+      "delta_reason": "",
+      "exchanges": ["NYMEX"],
+      "gross_delta_usd": 170985.96528635707,
+      "gross_usd": 170985.96528635707,
+      "missing": [],
+      "months": {
+       "2026-11": 170985.96528635707
+      },
+      "name": "Gasoline",
+      "net_delta_usd": 170985.96528635707,
+      "net_units": 84000.0,
+      "net_usd": 170985.96528635707,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-11":2.0},"delta_reason":"","exchange":"NYMEX","gross_delta_usd":170985.96528635707,"gross_lots":2.0,"gross_usd":170985.96528635707,"missing":[],"months":{"2026-11":2.0},"name":"NYMEX RBOB gasoline","net_delta_lots":2.0,"net_delta_usd":170985.96528635707,"net_lots":2.0,"net_units":84000.0,"net_usd":170985.96528635707,"products":["FUTURE"],"reason":"","root_id":"NYMEX:RB","sector":"energy","subsector":"gasoline","unit":"gal"}
+      ],
+      "unit": "gal",
+      "units_note": ""
+     },
+     "gold": {
+      "commodities": ["COMEX:GC", "OSE:JAU"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 647572.2815365884
+      },
+      "delta_reason": "",
+      "exchanges": ["COMEX", "OSE"],
+      "gross_delta_usd": 647572.2815365884,
+      "gross_usd": 647572.2815365884,
+      "missing": [],
+      "months": {
+       "2026-12": 647572.2815365884
+      },
+      "name": "Gold",
+      "net_delta_usd": 647572.2815365884,
+      "net_units": 196.45223970588393,
+      "net_usd": 647572.2815365884,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":1.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":337679.53743753856,"gross_lots":1.0,"gross_usd":337679.53743753856,"missing":[],"months":{"2026-12":1.0},"name":"COMEX gold","net_delta_lots":1.0,"net_delta_usd":337679.53743753856,"net_lots":1.0,"net_units":100.0,"net_usd":337679.53743753856,"products":["FUTURE"],"reason":"","root_id":"COMEX:GC","sector":"metals","subsector":"gold","unit":"oz"},
+       {"currency":"JPY","delta_missing":[],"delta_months":{"2026-12":3.0},"delta_reason":"","exchange":"OSE","gross_delta_usd":309892.7440990499,"gross_lots":3.0,"gross_usd":309892.7440990499,"missing":[],"months":{"2026-12":3.0},"name":"OSE gold standard","net_delta_lots":3.0,"net_delta_usd":309892.7440990499,"net_lots":3.0,"net_units":3000.0,"net_usd":309892.7440990499,"products":["FUTURE"],"reason":"","root_id":"OSE:JAU","sector":"metals","subsector":"gold","unit":"g"}
+      ],
+      "unit": "oz",
+      "units_note": "COMEX lots in oz, OSE lots in g converted to oz (unit of the largest position)"
+     },
+     "iron_ore": {
+      "commodities": ["DCE:I", "SGX:FEF"],
+      "delta_missing": [],
+      "delta_months": {
+       "2027-01": 2888.009224789974
+      },
+      "delta_reason": "",
+      "exchanges": ["DCE", "SGX"],
+      "gross_delta_usd": 206864.6971325915,
+      "gross_usd": 206864.6971325915,
+      "missing": [],
+      "months": {
+       "2027-01": 2888.009224789974
+      },
+      "name": "Iron ore",
+      "net_delta_usd": 2888.009224789974,
+      "net_units": 0.0,
+      "net_usd": 2888.009224789974,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "ferrous",
+      "split": [
+       {"currency":"CNY","delta_missing":[],"delta_months":{"2027-01":10.0},"delta_reason":"","exchange":"DCE","gross_delta_usd":104876.35317869074,"gross_lots":10.0,"gross_usd":104876.35317869074,"missing":[],"months":{"2027-01":10.0},"name":"DCE iron ore","net_delta_lots":10.0,"net_delta_usd":104876.35317869074,"net_lots":10.0,"net_units":1000.0,"net_usd":104876.35317869074,"products":["FUTURE"],"reason":"","root_id":"DCE:I","sector":"ferrous","subsector":"iron_ore","unit":"t"},
+       {"currency":"USD","delta_missing":[],"delta_months":{"2027-01":-10.0},"delta_reason":"","exchange":"SGX","gross_delta_usd":101988.34395390077,"gross_lots":10.0,"gross_usd":101988.34395390077,"missing":[],"months":{"2027-01":-10.0},"name":"SGX iron ore CFR China 62% Fe fines (TSI/Platts IODEX)","net_delta_lots":-10.0,"net_delta_usd":-101988.34395390077,"net_lots":-10.0,"net_units":-1000.0,"net_usd":-101988.34395390077,"products":["FUTURE"],"reason":"","root_id":"SGX:FEF","sector":"ferrous","subsector":"iron_ore","unit":"t"}
+      ],
+      "unit": "t",
+      "units_note": ""
+     },
+     "natural_gas": {
+      "commodities": ["ICE:M", "ICE:TFM"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": -49685.99612520437
+      },
+      "delta_reason": "",
+      "exchanges": ["ICE"],
+      "gross_delta_usd": 518830.25094366213,
+      "gross_usd": 518830.25094366213,
+      "missing": [],
+      "months": {
+       "2026-11": -49685.99612520437
+      },
+      "name": "Natural gas",
+      "net_delta_usd": -49685.99612520437,
+      "net_units": null,
+      "net_usd": -49685.99612520437,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "energy",
+      "split": [
+       {"currency":"GBP","delta_missing":[],"delta_months":{"2026-11":-8.0},"delta_reason":"","exchange":"ICE","gross_delta_usd":284258.12353443325,"gross_lots":8.0,"gross_usd":284258.12353443325,"missing":[],"months":{"2026-11":-8.0},"name":"ICE UK NBP natural gas","net_delta_lots":-8.0,"net_delta_usd":-284258.12353443325,"net_lots":-8.0,"net_units":-240000.0,"net_usd":-284258.12353443325,"products":["FUTURE"],"reason":"","root_id":"ICE:M","sector":"energy","subsector":"natural_gas","unit":"therm"},
+       {"currency":"EUR","delta_missing":[],"delta_months":{"2026-11":8.0},"delta_reason":"","exchange":"ICE","gross_delta_usd":234572.12740922888,"gross_lots":8.0,"gross_usd":234572.12740922888,"missing":[],"months":{"2026-11":8.0},"name":"ICE Endex Dutch TTF natural gas","net_delta_lots":8.0,"net_delta_usd":234572.12740922888,"net_lots":8.0,"net_units":5760.0,"net_usd":234572.12740922888,"products":["FUTURE"],"reason":"","root_id":"ICE:TFM","sector":"energy","subsector":"natural_gas","unit":"mwh"}
+      ],
+      "unit": "",
+      "units_note": "units do not add across exchanges: ICE:M in therm, ICE:TFM in mwh"
+     },
+     "silver": {
+      "commodities": ["COMEX:SI"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": -189665.7061355674
+      },
+      "delta_reason": "",
+      "exchanges": ["COMEX"],
+      "gross_delta_usd": 189665.7061355674,
+      "gross_usd": 189665.7061355674,
+      "missing": [],
+      "months": {
+       "2026-12": -189665.7061355674
+      },
+      "name": "Silver",
+      "net_delta_usd": -189665.7061355674,
+      "net_units": -5000.0,
+      "net_usd": -189665.7061355674,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "metals",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":-1.0},"delta_reason":"","exchange":"COMEX","gross_delta_usd":189665.7061355674,"gross_lots":1.0,"gross_usd":189665.7061355674,"missing":[],"months":{"2026-12":-1.0},"name":"COMEX silver","net_delta_lots":-1.0,"net_delta_usd":-189665.7061355674,"net_lots":-1.0,"net_units":-5000.0,"net_usd":-189665.7061355674,"products":["FUTURE"],"reason":"","root_id":"COMEX:SI","sector":"metals","subsector":"silver","unit":"oz"}
+      ],
+      "unit": "oz",
+      "units_note": ""
+     },
+     "soybean": {
+      "commodities": ["CBOT:ZS"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-11": -515023.6592120988
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 515023.6592120988,
+      "gross_usd": 515023.6592120988,
+      "missing": [],
+      "months": {
+       "2026-11": -515023.6592120988
+      },
+      "name": "Soybean",
+      "net_delta_usd": -515023.6592120988,
+      "net_units": -50000.0,
+      "net_usd": -515023.6592120988,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-11":-10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":515023.6592120988,"gross_lots":10.0,"gross_usd":515023.6592120988,"missing":[],"months":{"2026-11":-10.0},"name":"CBOT soybeans","net_delta_lots":-10.0,"net_delta_usd":-515023.6592120988,"net_lots":-10.0,"net_units":-50000.0,"net_usd":-515023.6592120988,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZS","sector":"agriculture","subsector":"soybean","unit":"bu"}
+      ],
+      "unit": "bu",
+      "units_note": ""
+     },
+     "soymeal": {
+      "commodities": ["CBOT:ZM"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 312988.64599332877
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 312988.64599332877,
+      "gross_usd": 312988.64599332877,
+      "missing": [],
+      "months": {
+       "2026-12": 312988.64599332877
+      },
+      "name": "Soymeal",
+      "net_delta_usd": 312988.64599332877,
+      "net_units": 1000.0,
+      "net_usd": 312988.64599332877,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":312988.64599332877,"gross_lots":10.0,"gross_usd":312988.64599332877,"missing":[],"months":{"2026-12":10.0},"name":"CBOT soybean meal","net_delta_lots":10.0,"net_delta_usd":312988.64599332877,"net_lots":10.0,"net_units":1000.0,"net_usd":312988.64599332877,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZM","sector":"agriculture","subsector":"soymeal","unit":"st"}
+      ],
+      "unit": "st",
+      "units_note": ""
+     },
+     "soyoil": {
+      "commodities": ["CBOT:ZL"],
+      "delta_missing": [],
+      "delta_months": {
+       "2026-12": 318280.3923720484
+      },
+      "delta_reason": "",
+      "exchanges": ["CBOT"],
+      "gross_delta_usd": 318280.3923720484,
+      "gross_usd": 318280.3923720484,
+      "missing": [],
+      "months": {
+       "2026-12": 318280.3923720484
+      },
+      "name": "Soyoil",
+      "net_delta_usd": 318280.3923720484,
+      "net_units": 600000.0,
+      "net_usd": 318280.3923720484,
+      "products": ["FUTURE"],
+      "reason": "",
+      "sector": "agriculture",
+      "split": [
+       {"currency":"USD","delta_missing":[],"delta_months":{"2026-12":10.0},"delta_reason":"","exchange":"CBOT","gross_delta_usd":318280.3923720484,"gross_lots":10.0,"gross_usd":318280.3923720484,"missing":[],"months":{"2026-12":10.0},"name":"CBOT soybean oil","net_delta_lots":10.0,"net_delta_usd":318280.3923720484,"net_lots":10.0,"net_units":600000.0,"net_usd":318280.3923720484,"products":["FUTURE"],"reason":"","root_id":"CBOT:ZL","sector":"agriculture","subsector":"soyoil","unit":"lb"}
+      ],
+      "unit": "lb",
+      "units_note": ""
      }
     },
     "currency_exposure": {
