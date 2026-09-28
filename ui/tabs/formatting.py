@@ -108,6 +108,64 @@ def short_money(value, symbol: str = "", parens: bool = False) -> str:
     return f"({text})" if parens else MINUS + text
 
 
+# ----------------------------------------------------------------------------- plain words
+# The engine's own vocabulary (mark types, product codes, module and lane names, file paths)
+# in a reason, a note or a hover, put into a trader's words on the screen (user, 2026-09-28:
+# no engine words, file paths or identifiers on any screen). Applied in every chokepoint of
+# the kit (`about`, `marker`, `missing_cell`, `issues_drawer`) and by the tabs on the hovers
+# they build themselves. A phrase not listed passes through unchanged; the order matters (a
+# longer phrase before the word inside it).
+_PLAIN_PHRASES: Tuple[Tuple[str, str], ...] = (
+    ("no FUTURE_PX for ", "no price for "),
+    ("no FWD_OUTRIGHT for ", "no forward price for "), ("no FWD_OUTRIGHT", "no forward price"),
+    ("no SPOT for ", "no spot for "), ("no FUTURE_PX", "no price"),
+    ("no PREMIUM mark", "no premium mark"), ("no PREMIUM", "no premium mark"),
+    ("no DELTA mark", "no delta mark"), ("no GAMMA mark", "no gamma mark"), ("no THETA mark", "no theta mark"),
+    ("no VEGA mark", "no vega mark"), ("no RHO mark", "no rho mark"),
+    ("INTERP: FUTURE_PX of ", "estimated from the close of "),
+    ("INTERP: FWD_OUTRIGHT from the ", "estimated from the "),
+    ("INTERP: FWD_OUTRIGHT of ", "estimated from the forward of "),
+    ("INTERP: SPOT of ", "estimated from the spot of "), ("INTERP: PREMIUM of ", "estimated from the premium of "),
+    ("INTERP: ", "estimated: "),
+    ("(QL_OPTIONS_PRICER)", "(the app's option pricer)"), ("QL_OPTIONS_PRICER", "the app's option pricer"),
+    ("BBG_BFXFORWARD", "Bloomberg"), ("BBG_BDH", "Bloomberg history"), ("BBG_BDP", "Bloomberg live"),
+    ("BBG_INTERP", "Bloomberg curve, interpolated"),
+    ("spreads-engine's usd_per_unit", "the $ per unit"), ("spreads-engine gave no", "no"),
+    ("spreads-engine could not group", "could not be grouped into a spread"),
+    ("(spreads-engine)", ""), ("spreads-engine", "the spread rule"),
+    ("(curve-positions' delta lots)", ""), ("curve-positions' delta lots", "the delta lots"),
+    ("(curve-positions)", ""), ("curve-positions'", "the Exposure tab's"), ("curve-positions", "the Exposure tab"),
+    ("(book-positions)", ""), ("as book-positions gives it", "as the book gives it"),
+    ("book-positions gave nothing", "no currency figures"), ("book-positions", "the currency positions"),
+    ("frozen by the ledger (realised_pnl)", "settled and frozen"), ("realised_pnl", "the settled ledger"),
+    ("the ledger has frozen", "settled"), ("frozen by the ledger", "settled and frozen"),
+    ("settled by the ledger", "settled"), ("the ledger froze", "settlement froze"),
+    ("value_book's", "the valuation's"), ("(value_book)", ""), ("value_book", "the book's valuation"),
+    ("data/sample/blotter_sample.csv", "the synthetic sample blotter"),
+    ("FUT_LAST_TRADE_DT and FUT_NOTICE_FIRST", "Bloomberg's last-trade and first-notice dates"),
+    ("CMDTY_OPTION", "option on future"), ("FX_OPTION", "FX option"), ("FX_FWD", "FX forward"),
+    ("FX_SPOT", "FX spot"), ("LME_FWD", "LME forward"), ("EQ_OPTION", "listed option"),
+    ("LME_CURVE", "LME curve"), ("FUTURE_PX", "futures price"), ("FWD_OUTRIGHT", "forward"),
+    ("PREMIUM mark", "premium mark"), ("DELTA mark", "delta mark"), ("GAMMA mark", "gamma mark"),
+    ("THETA mark", "theta mark"), ("VEGA mark", "vega mark"), ("RHO mark", "rho mark"),
+    ("official DELTA", "official delta"), ("official GAMMA", "official gamma"), ("official THETA", "official theta"),
+    ("official VEGA", "official vega"),
+)
+
+
+def plain_words(text) -> str:
+    """`text` with the engine's vocabulary in a trader's words (`_PLAIN_PHRASES`, in order);
+    None or '' -> ''; anything unlisted passes through unchanged. The Risk tab's own words
+    (its limits-file mentions) are left to its own pass (`ui.tabs.risk.plain_reason`)."""
+    s = "" if text is None else str(text)
+    if not s:
+        return s
+    for engine, plain in _PLAIN_PHRASES:
+        if engine in s:
+            s = s.replace(engine, plain)
+    return s.replace("  ", " ").replace(" .", ".").replace(" ,", ",")
+
+
 # ----------------------------------------------------------------------------- hover helpers
 _HEADINGS = {"h1": html.H1, "h2": html.H2, "h3": html.H3, "h4": html.H4, "h5": html.H5, "h6": html.H6,
              "div": html.Div, "span": html.Span}
@@ -120,6 +178,7 @@ def about(title, text: Optional[str] = None, level: str = "h4", className: str =
     heading (nothing to hover). Extra `props` (an `id`, `style`) go on the heading."""
     tag = _HEADINGS[level.lower()]
     classes = " ".join(c for c in ("about-title", className) if c)
+    text = plain_words(text)
     if not text:
         return tag(title, className=classes, **props)
     return tag([title, html.Span(INFO_MARK, className="about-mark", title=text)],
@@ -134,7 +193,7 @@ def marker(short: str, reason: Optional[str] = None, className: str = ""):
         return None
     classes = " ".join(c for c in ("marker", className) if c)
     if reason:
-        return html.Span(short, className=classes, title=reason)
+        return html.Span(short, className=classes, title=plain_words(reason))
     return html.Span(short, className=classes)
 
 
@@ -156,10 +215,10 @@ def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issue
             label, sentence = item
             if not label and not sentence:
                 continue
-            rows.append(html.Li([html.Span(str(label), className="issue-label"), " ", str(sentence or "")]
-                                if label else str(sentence)))
+            rows.append(html.Li([html.Span(str(label), className="issue-label"), " ", plain_words(sentence)]
+                                if label else plain_words(sentence)))
         elif isinstance(item, str):
-            rows.append(html.Li(item))
+            rows.append(html.Li(plain_words(item)))
         else:
             rows.append(html.Li(item))
     if not rows:
@@ -231,7 +290,7 @@ def missing_cell(reason: Optional[str] = None, className: str = ""):
     """The em dash of a value the engine could not give, grey, the reason on hover. Never the
     text "n/a", never a zero."""
     classes = " ".join(c for c in ("cell-missing", className) if c)
-    return html.Span(MISSING, className=classes, title=str(reason or "not available"))
+    return html.Span(MISSING, className=classes, title=plain_words(reason) or "not available")
 
 
 def sum_known(values_with_reasons: Iterable) -> Tuple[Optional[float], int, list]:
