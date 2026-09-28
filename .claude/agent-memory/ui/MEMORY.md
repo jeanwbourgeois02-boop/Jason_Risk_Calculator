@@ -12,3 +12,4 @@
 - [Book strategy rejig 2026-09-28](book-strategy-rejig-2026-09-28.md) — Strategy default with legs under each strategy, Type column gone, Gross/Net from the engine, tiles, no excl. without marks, Dash 4.4 picker classes + EEE token
 - [Plain-words hovers 2026-09-28](plain-words-hovers-2026-09-28.md) — Trades row tips and Risk margin/limits hovers through plain_words / risk._limits_words; no file paths or "underlyer"; pin engine reasons loosely
 - [Book strategy -> pairs -> legs 2026-09-28](book-strategy-pairs-2026-09-28.md) — Strategy view from book_spreads' `strategies`: pair rows, leg rows, Outright / Hedge parts, subtotal / no_pnl identity rules, hedge coverage chip, Daily split hover
+- [Book summary first 2026-09-28](book-summary-first-2026-09-28.md) — tiles, By strategy table, Break it down (Commodity | Type | Instrument), Positions fold; static switches + placeholders, memoised gather, share = part / whole, no-marks dashes

@@ -667,3 +667,16 @@ p { margin: 8px 0; }
 .book-table .book-pair-type { margin-left: 8px; font-weight: 400; font-size: 11px; color: var(--muted); }
 .book-table .book-pair-tag { color: #8a4b00; }
 .book-table .marker--small { font-size: 10px; font-weight: 400; vertical-align: middle; }
+
+/* the Book's summary (2026-09-28): By strategy, Break it down, the Positions fold */
+.book-section-title { margin: 14px 0 6px; font-size: 13px; font-weight: 700; color: var(--navy); }
+.book-section-row { display: flex; align-items: center; gap: 12px; margin: 0 0 6px; }
+.book-section-row .book-section-title { margin: 14px 0 6px; }
+.book-section-row .book-switch { margin-left: 0; align-self: flex-end; margin-bottom: 6px; }
+.book-fold { margin-top: 14px; }
+.book-fold > summary { font-size: 13px; font-weight: 700; color: var(--navy); padding: 4px 0; }
+.book-fold > .book-section-row { margin: 4px 0 6px; }
+.book-table.book-summary td.book-legs { white-space: normal; max-width: 420px; line-height: 1.35; font-size: 12px; color: #4b5563; }
+.book-table.book-summary td.book-type { font-size: 11.5px; color: var(--muted); }
+.book-table.book-summary tr.book-summary-row td.book-name { font-weight: 600; color: var(--navy); }
+.book-table.book-summary td .marker--amber { padding: 0 4px; border-radius: 3px; font-size: 11px; }
