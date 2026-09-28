@@ -52,12 +52,12 @@ def _db():
     ])
     as_of = "2026-08-18"
     conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
-        (as_of, "EURUSD", as_of, "SPOT", 1.1050, "BNP_BVAL", as_of + "T15:00:00-04:00"),
-        (as_of, "EURUSD", "2026-09-18", "FWD_OUTRIGHT", 1.1080, "BNP_BVAL", as_of + "T15:00:00-04:00"),
-        (as_of, "EURUSD", "2026-10-19", "FWD_OUTRIGHT", 1.1120, "BNP_BVAL", as_of + "T15:00:00-04:00"),
-        (as_of, "EURUSD", "2026-11-05", "FWD_OUTRIGHT", 1.1150, "BNP_BVAL", as_of + "T15:00:00-04:00"),
-        (as_of, "USDJPY", as_of, "SPOT", 149.00, "BNP_BVAL", as_of + "T15:00:00-04:00"),
-        (as_of, "USDJPY", "2026-09-18", "FWD_OUTRIGHT", 148.00, "BNP_BVAL", as_of + "T15:00:00-04:00"),
+        (as_of, "EURUSD", as_of, "SPOT", 1.1050, "BNP_BVAL", as_of + "T17:00:00-04:00"),
+        (as_of, "EURUSD", "2026-09-18", "FWD_OUTRIGHT", 1.1080, "BNP_BVAL", as_of + "T17:00:00-04:00"),
+        (as_of, "EURUSD", "2026-10-19", "FWD_OUTRIGHT", 1.1120, "BNP_BVAL", as_of + "T17:00:00-04:00"),
+        (as_of, "EURUSD", "2026-11-05", "FWD_OUTRIGHT", 1.1150, "BNP_BVAL", as_of + "T17:00:00-04:00"),
+        (as_of, "USDJPY", as_of, "SPOT", 149.00, "BNP_BVAL", as_of + "T17:00:00-04:00"),
+        (as_of, "USDJPY", "2026-09-18", "FWD_OUTRIGHT", 148.00, "BNP_BVAL", as_of + "T17:00:00-04:00"),
     ])
     conn.commit()
     return conn
@@ -232,7 +232,7 @@ def _trade(conn, trade_id, instrument_id, product, trade_date, quantity, price, 
 
 def _mark(conn, as_of, instrument_id, settle, mark_type, value, source="BBG_BFXFORWARD", snapped_at=None):
     conn.execute("INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-                 (as_of, instrument_id, settle, mark_type, value, source, snapped_at or f"{as_of}T15:00:00-04:00"))
+                 (as_of, instrument_id, settle, mark_type, value, source, snapped_at or f"{as_of}T17:00:00-04:00"))
 
 
 def _book():
@@ -263,10 +263,10 @@ def _book():
 
 def _write_needed_marks(conn, as_of):
     """An official mark for every mark the header says the book needs on `as_of`, stamped
-    the way the backfill stamps a close: 15:00 New York for an FX row, the settlement
-    (`backfill.settle_stamp`, 17:00 New York) for a FUTURE_PX row, since 2026-09-22 a
-    future's row on a past day counts as a close only at that stamp (a live press's PX_LAST
-    is not a close and the backfill replaces it with PX_SETTLE)."""
+    the way the backfill stamps a close: 17:00 New York of the row's own date for every
+    mark type and instrument (`backfill.close_stamp`, the app's one close stamp since
+    2026-09-28; `settle_stamp` is its alias). A past row at any other stamp (a live press's)
+    is not a close and the backfill replaces it with the daily close."""
     from data.bloomberg import backfill
     from ui.tabs import header
     for row in header.needed_marks(conn, as_of)[1]:
@@ -387,7 +387,7 @@ def test_suspect_rows_flag_a_big_move_and_an_exactly_unchanged_mark_flagged_firs
 def test_suspect_rows_flag_an_old_snap_only_on_the_live_date():
     from data.bloomberg.live import STALE_AFTER_SECONDS
     conn = _marked_book()
-    snapped = dt.datetime.fromisoformat(f"{TODAY}T15:00:00-04:00")
+    snapped = dt.datetime.fromisoformat(f"{TODAY}T17:00:00-04:00")
     fresh = md.suspect_rows(conn, TODAY, today=TODAY, now=snapped + dt.timedelta(seconds=STALE_AFTER_SECONDS - 60))
     assert not any("snapped" in r["flag"] for r in fresh["rows"])
     old = md.suspect_rows(conn, TODAY, today=TODAY, now=snapped + dt.timedelta(seconds=STALE_AFTER_SECONDS + 60))

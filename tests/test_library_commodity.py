@@ -360,10 +360,10 @@ def test_an_lme_curve_is_complete_once_its_cash_and_3m_are_on_file(tmp_path):
     assert items == [{"instrument_id": "LME:CA", "settle_date": day, "mark_type": inventory.LME_CURVE,
                       "detail": "cash, 3M not on file"}]
     assert not row["complete"]
-    # an LME close is the daily close, 17:00 New York (backfill.is_close_row given the root id)
+    # a close is 17:00 New York of its own date, the one stamp of every mark (backfill.is_close_row, 2026-09-28)
     _mark(conn, day, "LME:CA", day, "SPOT", f"{day}T17:00:00-04:00")
     assert curve_items()[1][0]["detail"] == "3M not on file"
-    # a live press's row of a past day is not the close, nor is the FX 15:00: still missing
+    # a live press's row of a past day is not the close, nor is a 15:00 row (the retired FX hour): still missing
     _mark(conn, day, "LME:CA", three_m, "FWD_OUTRIGHT", f"{day}T11:40:00-04:00")
     assert curve_items()[1][0]["detail"] == "3M not on file"
     conn.execute("UPDATE marks SET snapped_at = ? WHERE settle_date = ?", (f"{day}T15:00:00-04:00", three_m))

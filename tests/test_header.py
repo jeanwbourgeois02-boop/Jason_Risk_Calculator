@@ -66,7 +66,7 @@ def _insert_legs(conn, rows):
 def _insert_official_mark(conn, as_of, instrument_id, settle_date, mark_type, value, source):
     conn.execute(
         "INSERT INTO marks VALUES (?,?,?,?,?,?,?)",
-        (as_of, instrument_id, settle_date, mark_type, value, source, f"{as_of}T15:00:00-04:00"),
+        (as_of, instrument_id, settle_date, mark_type, value, source, f"{as_of}T17:00:00-04:00"),
     )
 
 

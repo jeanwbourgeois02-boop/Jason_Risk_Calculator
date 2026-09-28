@@ -1,4 +1,5 @@
 - [Commodity futures in the library (2026-09-24)](commodity_futures_library_2026_09_24.md) — conversion SPOT, CONTRACT_DATES met at read time, requestable filter default in needed_on
 - [Macro needs retired (2026-09-24)](macro_needs_retired_2026_09_24.md) — NDF/IRS/fixings/index level out of compute; retired names deleted after live/backfill
 - [Phase 5 options on futures + LME (2026-09-24)](phase5_options_lme_library_2026_09_24.md) — UNDERLYING role, include_lme guard, pillar trim, LME curve = cash + 3M
+- [One close stamp (2026-09-28)](one_close_stamp_2026_09_28.md) — every past mark a close only at 17:00 NY of its date; inventory's today/instrument_id args inert
 - Older notes on these files: `.claude/agent-memory/bbg-data/` (library/inventory history before the 2026-09-24 split)

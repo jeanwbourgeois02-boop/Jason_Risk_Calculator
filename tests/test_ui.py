@@ -42,7 +42,7 @@ def _seed(conn):
     )
     conn.execute(
         "INSERT INTO marks VALUES "
-        "('2026-08-17','USDJPY','2026-08-17','SPOT',147.12,'BBG_BFXFORWARD','2026-08-17T15:00:00-04:00')"
+        "('2026-08-17','USDJPY','2026-08-17','SPOT',147.12,'BBG_BFXFORWARD','2026-08-17T17:00:00-04:00')"
     )
     conn.commit()
 

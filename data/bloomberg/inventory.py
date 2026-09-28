@@ -16,9 +16,9 @@ build_requests), or MISSING (no row at all for as_of/instrument/settle/type).
 `close_completeness(conn, start, end)` is the calendar strip: one row per business day with
 the count of marks the book needed that day (SPOT + FWD_OUTRIGHT + FUTURE_PX per
 `_needed_marks`, 2026-09-18 -- SPOT alone used to leave every forward/future's LTD(t)
-unpriced on an otherwise "complete" day) versus how many are official AT THE CLOSE (a past day's FX row counts only when
-stamped 15:00 New York, a future's only when stamped at the settlement,
-`backfill.is_close_row`), so the Market data tab can show holes in history at a glance and
+unpriced on an otherwise "complete" day) versus how many are official AT THE CLOSE (a past day's row, of any mark type and any
+instrument, counts only when stamped 17:00 New York of its own date, the app's one close
+stamp since 2026-09-28, `backfill.is_close_row`), so the Data tab can show holes in history at a glance and
 the backfill knows which days to ask for. Beside the marks, `inputs_missing` (2026-09-22)
 lists the OIS curves and vol smiles the day's FX options price from that the day does
 not hold yet (`inputs_missing`); the backfill asks Bloomberg's history for those too.
@@ -132,8 +132,9 @@ def lme_curve_status(conn: sqlite3.Connection, day: str, root_id: str, today: Op
     engine.lme.lme_curve_tickers' '3M' pillar). The monthly prompts between and beyond them
     refine it but are not required: every prompt up to three months lies between cash and 3M,
     and the curve's shape there is what the valuation reads. On a day before `today` each
-    anchor counts only at the close (`backfill.is_close_row` given the root id: an LME row's
-    close is 17:00 New York, the daily close, not the FX 15:00). {complete, missing: ['cash' | '3M' ...], snapped_at (the later anchor's, ''
+    anchor counts only at the close (`backfill.is_close_row`: stamped 17:00 New York of its
+    own date, the one close stamp of every mark since 2026-09-28; a live press's row is not
+    a close). {complete, missing: ['cash' | '3M' ...], snapped_at (the later anchor's, ''
     when missing)}."""
     from data.bloomberg import library
     from data.bloomberg.backfill import is_close_row
@@ -287,20 +288,18 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     only -- today's inputs are the live pull's). `needed` / `present` / `complete` /
     `missing` stay about the marks: the header's "(N of M needed marks)" reads them.
 
-    The close (user decision 2026-09-21: "for previous or any closes in FX, we need to use
-    NY 3pm"; 2026-09-22: every previous close, not only from 2026-09-21 on): on a day
-    before `today` (default: the New York book date) an official FX row -- SPOT or
-    FWD_OUTRIGHT -- counts as present only when it is stamped at the 15:00 New York close
-    of its own date (`data.bloomberg.backfill.is_close_row`, given `today` so it knows how
-    far back Bloomberg's intraday history reaches). A row stamped at any other time is
-    that day's last live pull (say 11:40) or a 17:00 PX_LAST row written under the old
-    cut-over: not a close, so the day is not complete (`not_closed` counts such rows) and
-    the backfill replaces it. Only on a day beyond the intraday history (about 140
-    business days back) does a 17:00 row count, since no 15:00 value can be asked for.
-    Today's rows are live and count as they are; a past day's future counts only at its
-    daily close (`backfill.is_close_row`: a live press's row is not a close and the
-    backfill replaces it). (The NDF fixing-date need of 2026-09-22 was retired with the
-    NDFs on 2026-09-24.)
+    The close (user decision 2026-09-28, one close stamp for every instrument, replacing
+    the 15:00 New York FX close of 2026-09-21 / 09-22): on a day before `today` (default:
+    the New York book date) an official row of any mark type -- SPOT, FWD_OUTRIGHT or
+    FUTURE_PX, FX, a future, an option on a future or an LME pillar alike -- counts as
+    present only when it is stamped 17:00 New York of its own date, Bloomberg's daily
+    close (`data.bloomberg.backfill.is_close_row`; `today` and each item's instrument_id
+    are still passed, and no longer change the answer). A row stamped at any other time is
+    that day's last live press (say 11:40, the press's real time) or a 15:00 row written
+    under the retired FX rule: not a close, so the day is not complete (`not_closed`
+    counts such rows) and the backfill asks that day's daily close and replaces it.
+    Today's rows are live and count as they are. (The NDF fixing-date need of 2026-09-22
+    was retired with the NDFs on 2026-09-24.)
 
     2026-09-18 (BUILD_PLAN.md section 3 / CLAUDE.md "P&L conventions": Daily/5d/MTD/YTD
     all difference LTD(t) against LTD(t-1bd) etc., and every FX leg's LTD needs the
@@ -328,8 +327,9 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     official that day). A non-USD future's USD-conversion SPOT is an ordinary needed SPOT.
 
     Phase 5 (2026-09-24): an LME forward's cash SPOT and its FWD_OUTRIGHT at the prompt are
-    ordinary needed marks, a close only at 17:00 New York (`is_close_row` is given each
-    item's instrument_id, and an LME root id takes the daily close), and each LME metal with a ticket open that day adds one item,
+    ordinary needed marks, a close at 17:00 New York like every other mark (since
+    2026-09-28; until then the LME rows were the one kind stamped at the daily close while
+    FX took 15:00), and each LME metal with a ticket open that day adds one item,
     mark_type 'LME_CURVE' (instrument_id the root id, settle_date the day), present when its
     cash and 3M are official at the close (`lme_curve_status`); a missing one carries
     `detail` ("cash, 3M not on file"). An option on a future needs its own FUTURE_PX, its

@@ -8,3 +8,4 @@
 - [Timing & cash tab deleted 2026-09-28](timing-cash-tab-deleted-2026-09-28.md) — six tabs; key "expiries" in HIDDEN_TAB_KEYS; Needs-you lines with tab="" carry no link
 - [Risk two cards + shared empty state 2026-09-28](risk-two-cards-empty-state-2026-09-28.md) — worst day a line in the scenario fold, risk.plain_reason, book.trades_on_file / empty_state(idx), parallel-agent hazard on book.py
 - [Strategy / Type / Commodity views 2026-09-28](strategy-type-commodity-views-2026-09-28.md) — Book Commodity|Strategy|Type|Instrument, netted contract rows + by_subsector net lines, one type per trade (book.trade_types), P&L views, Exposure by subsector, Trades filters; proof recipe
+- [One close stamp 17:00 NY 2026-09-28](one-close-stamp-17-00-2026-09-28.md) — every past close stamped 17:00 NY; screen fixtures stamp marks T17:00, never T15:00, else the header/Data count them missing

@@ -152,7 +152,7 @@ from typing import Callable, Optional
 from dash import Input, Output, dcc, html
 
 from ui.tabs.controls import today_ny
-from ui.tabs.formatting import MISSING, marker, short_money
+from ui.tabs.formatting import MISSING, marker, plain_words, short_money
 
 HEADER_ID = "header-block"
 # The LTD chart's ids (the chart is on the P&L tab since 2026-09-28, `ui/tabs/pnl.py`; these
@@ -379,7 +379,7 @@ def _missing_marks_reason(conn: sqlite3.Connection, as_of: str,
         return ""
     if not needed or not missing:
         return ""
-    mark_types = "/".join(sorted({m["mark_type"] for m in missing}))
+    mark_types = " / ".join(sorted({plain_words(m["mark_type"]).lower() for m in missing}))
     return (f"no official {mark_types} for {as_of} "
             f"({len(missing)} of {needed} needed marks) — {action}")
 
@@ -1228,7 +1228,7 @@ def latest_mark_time(conn: sqlite3.Connection, as_of: str) -> Optional[tuple]:
 
 
 def mark_time_words(as_of_date: str, snapped_at: str, now: Optional[dt.datetime] = None) -> str:
-    """'Fri 25 Sep 15:00 NY' from a close date and its stamp (any offset, shown in New York
+    """'Fri 25 Sep 17:00 NY' from a close date and its stamp (any offset, shown in New York
     time); 'live' when the stamp is within the last hour on the book's own date; the date alone
     when the stamp is not a time."""
     try:
@@ -1259,7 +1259,7 @@ def _library_tickers(conn: sqlite3.Connection, as_of: str) -> Optional[int]:
 
 
 def marks_chip(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple], n_total: int) -> html.Div:
-    """The header's marks chip (2026-09-28): 'Marks: Fri 25 Sep 15:00 NY · 2 missing', the time
+    """The header's marks chip (2026-09-28): 'Marks: Fri 25 Sep 17:00 NY · 2 missing', the time
     the latest official close the book uses was stamped (`latest_mark_time`, New York time; 'live'
     within the hour) and the count of marks the book needs on `as_of` with no official mark
     (`needed_marks`, the Data tab's own list, memoised on the database revision). Amber while any
@@ -1290,11 +1290,11 @@ def marks_chip(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple], n_t
     by_type: dict = {}
     for m in missing:
         by_type[m["mark_type"]] = by_type.get(m["mark_type"], 0) + 1
-    kinds = ", ".join(f"{n} {t}" for t, n in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0])))
+    kinds = ", ".join(f"{n} {plain_words(t).lower()}" for t, n in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0])))
     shown = missing[:_MISSING_MARKS_ON_HOVER]
     lines = [f"Latest official close the book uses: {latest[0]}, stamped {latest[1]}.",
              f"{len(missing):,} of {needed:,} marks the book needs on {as_of} have no official mark ({kinds}):"]
-    lines += [f"- {m['instrument_id']} {m['mark_type']} {m['settle_date']}" for m in shown]
+    lines += [f"- {m['instrument_id']} {plain_words(m['mark_type']).lower()} {m['settle_date']}" for m in shown]
     if len(missing) > len(shown):
         lines.append(f"- and {len(missing) - len(shown)} more")
     lines.append("The Data tab lists each one; the figures say which trades they leave out.")

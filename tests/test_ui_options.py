@@ -1632,7 +1632,7 @@ def _add_closed_out_pair(conn, stale_marks_on_c1=False):
                         "2026-09-22", strike=1.12, option_type="CALL", fill=0.0060, marks=False)
     conn.execute("UPDATE trades SET trade_date = '2026-06-10' WHERE trade_id = 'C2'")
     conn.execute("INSERT INTO marks VALUES ('2026-06-10', 'EURUSD', '2026-06-10', 'SPOT', 1.10, "
-                 "'BBG_BFXFORWARD', '2026-06-10T15:00:00-04:00')")
+                 "'BBG_BFXFORWARD', '2026-06-10T17:00:00-04:00')")
     conn.commit()
 
 
@@ -1808,9 +1808,9 @@ def _defect_db(tmp_path):
     db_path = _file_db(tmp_path, digital_strike=152.0)
     conn = sqlite3.connect(str(db_path))
     conn.execute("INSERT INTO marks VALUES ('2026-06-19', 'USDJPY111926P-1', '2026-11-19', 'PREMIUM', 0.13, "
-                 "'QL_OPTIONS_PRICER', '2026-06-19T15:00:00-04:00')")
+                 "'QL_OPTIONS_PRICER', '2026-06-19T17:00:00-04:00')")
     conn.execute("INSERT INTO marks VALUES ('2026-06-19', 'USDJPY', '2026-06-19', 'SPOT', 147.0, "
-                 "'BBG_BFXFORWARD', '2026-06-19T15:00:00-04:00')")
+                 "'BBG_BFXFORWARD', '2026-06-19T17:00:00-04:00')")
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                  "bbg_ticker, expiry_date) VALUES (?, ?, 'NYMEX:CL', 'USD', 1000, 0, 'CLZ6C 70 Comdty', '2026-11-17')",
                  (_LISTED_ID, _LISTED))

@@ -38,7 +38,7 @@ def today_ny(now: Optional[dt.datetime] = None) -> str:
     screens, the marks a pull stamps, the backfill's "past" and the ledger's freeze date
     all take their day from that one function, so at 18:00 New York on the 22nd the top
     bar values the 23rd, a pull writes marks dated the 23rd, and the 22nd is a past day
-    whose 15:00 close the same press fetches: Daily is live against yesterday's 15:00
+    whose 17:00 close the same press fetches: Daily is live against yesterday's 17:00
     close, never 0 for want of a date the screens and the marks agreed on. Nothing here
     decides the hour; `calendar_today_ny` below is the one date on the app that does not
     roll. `now` is for tests: a tz-aware datetime in any zone."""
