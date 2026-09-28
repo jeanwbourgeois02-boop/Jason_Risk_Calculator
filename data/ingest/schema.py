@@ -115,6 +115,8 @@ CREATE TABLE IF NOT EXISTS marks (
   snapped_at      TEXT NOT NULL,
   PRIMARY KEY (as_of_date, instrument_id, settle_date, mark_type, source)
 );
+-- ix_marks_key_date (2026-09-28): the "last mark on or before" / near-marks reads through marks_official are keyed (instrument_id, mark_type, settle_date, as_of_date <= ?), which the as_of_date-led primary key cannot serve (a full scan: value_book 9.9 s -> 0.03 s on 300k rows); IF NOT EXISTS adds it to an existing database at the next start-up.
+CREATE INDEX IF NOT EXISTS ix_marks_key_date ON marks (instrument_id, mark_type, settle_date, as_of_date);
 
 CREATE TABLE IF NOT EXISTS curves (
   curve_id        TEXT NOT NULL,

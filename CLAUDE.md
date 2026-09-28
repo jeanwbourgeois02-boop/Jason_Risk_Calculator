@@ -233,6 +233,9 @@ marks (
   snapped_at      TEXT NOT NULL,      -- ISO timestamp, offset resolved from America/New_York for that row
   PRIMARY KEY (as_of_date, instrument_id, settle_date, mark_type, source)
 );
+-- Index ix_marks_key_date (instrument_id, mark_type, settle_date, as_of_date), since 2026-09-28: the
+-- valuation's near-marks and last-on-or-before reads search it instead of scanning the table (10 s
+-- to 0.03 s per value_book at 300k rows); create_schema adds it to an existing database at start-up.
 
 curves (                               -- OIS discount curve nodes (engine/rates::bootstrap_and_store writes them)
   curve_id        TEXT NOT NULL,      -- 'USD-SOFR-OIS', ...

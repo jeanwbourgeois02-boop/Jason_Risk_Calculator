@@ -11,6 +11,7 @@ Carried from `.claude/agent-memory/data-ingest/schema-generic-migration.md` and 
 - SQL comments inside a DDL string are stripped before parsing, so comments between CREATE blocks are safe.
 - `curve_quotes."index"` is a reserved word. Any generic loop over `TABLES` that builds column lists must quote names (upload.py does).
 - To test a migration, write the old CREATE by hand on a raw sqlite3 connection, then call `schema.connect(path)` / `create_schema`. A fresh DB never has anything to migrate.
+- An index (`ix_marks_key_date`, 2026-09-28) lives in `_DDL` as `CREATE INDEX IF NOT EXISTS`; `_CREATE_TABLE_RE` only matches CREATE TABLE blocks, so the migration parser ignores it and the IF NOT EXISTS alone puts it on an old DB at start-up. Verified with `PRAGMA index_list('marks')` on a DDL-minus-index copy. Both branches of `marks_official` pick it up in EXPLAIN QUERY PLAN.
 
 **Why:** a stale hand-kept migration list caused a live 500 in 2026-09-17 (`instrument_options.payoff`).
 **How to apply:** check these when you add a table, add a column or retire a table. Related: [[phase2-macro-removal-2026-09-24]].
