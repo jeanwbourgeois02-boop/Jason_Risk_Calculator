@@ -208,24 +208,40 @@ def measure_dated_citations(files: List[Path], root: Path = ROOT) -> dict:
     return {"total": sum(by_file.values()), "by_file": dict(sorted(by_file.items(), key=lambda kv: (-kv[1], kv[0])))}
 
 
-def _imports_of(path: Path) -> List[str]:
+def _imports_of(path: Path, root: Path = ROOT) -> List[str]:
+    """Every dotted name a file imports, relative imports resolved against the file's own
+    package (`from . import qlmap` in engine/rates/store.py is engine.rates.qlmap), so a
+    module only its siblings import is not reported as unimported."""
     tree, err = parse(path)
     if err:
         return []
+    package = module_name(path, root)
+    if path.name != "__init__.py":
+        package = package.rpartition(".")[0]
     names: List[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            names.append(node.module)
-            names.extend(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                base = node.module or ""
+            else:
+                base = package
+                for _ in range(node.level - 1):
+                    base = base.rpartition(".")[0]
+                if node.module:
+                    base = f"{base}.{node.module}" if base else node.module
+            if not base:
+                continue
+            names.append(base)
+            names.extend(f"{base}.{alias.name}" for alias in node.names)
     return names
 
 
 def measure_unimported(files: List[Path], all_files: List[Path], entry_points: List[str], root: Path = ROOT) -> List[str]:
     imported: set = set()
     for p in all_files:
-        for name in _imports_of(p):
+        for name in _imports_of(p, root):
             imported.add(name)
             parts = name.split(".")
             imported.update(".".join(parts[:i]) for i in range(1, len(parts)))

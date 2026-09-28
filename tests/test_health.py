@@ -69,6 +69,27 @@ def test_unimported_modules_exempt_entry_points_and_packages(tree):
     assert out == ["tools/orphan.py"]
 
 
+def test_unimported_modules_resolve_relative_imports(tree):
+    # engine/rates/store.py imports qlmap with `from . import qlmap`: a sibling nothing else
+    # names. The checker used to skip every relative import and report qlmap as unimported.
+    pkg = tree / "engine" / "rates"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "qlmap.py").write_text("def ql_date(d):\n    return d\n")
+    (pkg / "store.py").write_text("from . import qlmap\n\n\ndef run(d):\n    return qlmap.ql_date(d)\n")
+    (pkg / "curves.py").write_text("from .helpers import fit\n\n\ndef run(d):\n    return fit(d)\n")
+    (pkg / "helpers.py").write_text("def fit(d):\n    return d\n")
+    (pkg / "deep.py").write_text("from ..calc import run\n\n\ndef go():\n    return run()\n")
+    (tree / "engine" / "uses_rates.py").write_text("from engine.rates import store, curves, deep  # noqa: F401\n")
+    (tree / "tests" / "test_y.py").write_text("from engine import uses_rates\n\ndef test_b():\n    assert uses_rates\n")
+    assert set(health._imports_of(pkg / "store.py", tree)) == {"engine.rates", "engine.rates.qlmap"}
+    assert set(health._imports_of(pkg / "curves.py", tree)) == {"engine.rates.helpers", "engine.rates.helpers.fit"}
+    assert set(health._imports_of(pkg / "deep.py", tree)) == {"engine.calc", "engine.calc.run"}
+    files = health.app_files(tree)
+    out = health.measure_unimported(files, files + health.test_files(tree), ["tools/probe.py"], tree)
+    assert out == ["tools/orphan.py"]
+
+
 def test_long_functions_duplicate_helpers_and_dated_comments(tree):
     files = health.app_files(tree)
     long_ones, syntax = health.measure_functions(files, 120, tree)
