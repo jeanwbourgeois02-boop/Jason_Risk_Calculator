@@ -135,7 +135,7 @@ from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import (
     MISSING, about, format_cell, is_fx_pair, issues_drawer, marker, price_text, quoted_unit, short_money,
-    trade_type_words,
+    short_root_name, trade_type_words,
 )
 
 # The tab's own date picker and title row left on 2026-09-28 (the screens tidy): the header's
@@ -399,6 +399,7 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
     mark_sources, notes = _column("mark_source"), _column("note")
     prev_tips = _column("prev_close_tip")
     type_sources, type_notes = _column("type_source"), _column("type_note")
+    long_names = _column("commodity_long")
     price_units, flags = _column("price_unit"), _column("flag")
     fills = _column("fill")
     for col in cols:
@@ -436,6 +437,8 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
                            "type": "text"}
         if "prev_close" in rec and prev_tips[i]:
             tip["prev_close"] = {"value": str(prev_tips[i]), "type": "text"}
+        if "commodity" in rec and long_names[i] and str(long_names[i]) != str(rec["commodity"]):
+            tip["commodity"] = {"value": f"{long_names[i]} ({rec.get('exchange') or ''})".replace(" ()", ""), "type": "text"}
         if "trade_type" in rec:
             src, note = str(type_sources[i] or ""), str(type_notes[i] or "")
             words = (f"{src}: " if src and src != "label" else "") + (note or ("the broker's label" if rec["trade_type"] else "no type: outright"))
@@ -1444,7 +1447,8 @@ def add_instrument_fields(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.Data
         base, quote = instruments.get(instrument_id, ("", ""))
         root = roots.get(base) if base else None
         if root is not None:
-            return (root.exchange, quote, _sector_label(root.sector), root.name, QUANTITY_UNIT_OF.get(product, ""))
+            # the Book's short plain name ("USD/CNH", "HRC", "COMEX copper"); the universe's long name on hover
+            return (root.exchange, quote, _sector_label(root.sector), short_root_name(root, base), QUANTITY_UNIT_OF.get(product, ""))
         if product in FX_ROW_PRODUCTS:
             pair = f"{base}{quote}" if base and quote else instrument_id
             return (FX_EXCHANGE, base if product == "FX_OPTION" else quote, FX_SECTOR, pair, base)
@@ -1453,6 +1457,8 @@ def add_instrument_fields(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.Data
     described = [describe(i, p) for i, p in zip(df["instrument_id"], df["product"])]
     for n, col in enumerate(("exchange", "pnl_ccy", "sector", "commodity", "qty_unit")):
         df[col] = [d[n] for d in described]
+    df["commodity_long"] = [str(getattr(roots.get(instruments.get(i, ("", ""))[0]), "name", "") or "")
+                            for i in df["instrument_id"]]
     # An LME forward is USD-quoted (S = 1): its local P&L IS its USD P&L. `value_book` leaves
     # `pnl_local` blank on a settled one (the ledger's frozen row holds USD only), so the
     # frozen USD figure is shown there too, as it is, never recomputed.

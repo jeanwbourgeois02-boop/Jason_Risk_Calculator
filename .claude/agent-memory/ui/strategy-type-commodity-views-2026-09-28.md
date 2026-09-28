@@ -47,7 +47,11 @@ exposure must be seen", sort trades by trade type and instrument type. What is n
   the sector-fx entry last as "FX hedges"), each group line `subsector_words` (net in one unit +
   delta USD gross / net over the roots, excl. N); `sector_tr` / `sector_words` are gone; CSV gains
   `commodity` (the group) and `contract_root`.
-- **Trades**: `_DISPLAY_COLUMNS` has `strategy`, `trade_type` after `product`; `TOTAL_FILTER_COLS` =
+- **Commodity view order** (user, 2026-09-28): inside a group by exchange (alphabetical) then contract
+  month / LME prompt / FX value date, nearest first (`row["order"]`, `_curve_order`); the position
+  views keep |Daily| largest first.
+- **Trades**: the Commodity / pair column is `formatting.short_root_name` (the Book's names), the
+  universe's long name + exchange as the cell's tooltip (`commodity_long`); `_DISPLAY_COLUMNS` has `strategy`, `trade_type` after `product`; `TOTAL_FILTER_COLS` =
   commodity, product, strategy, trade_type, status; `_fmt_trade_type`; the Type cell's tooltip
   carries the source and note.
 

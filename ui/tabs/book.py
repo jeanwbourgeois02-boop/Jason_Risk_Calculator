@@ -737,7 +737,7 @@ def _row(**kw) -> dict:
             "entry_text": NA, "entry_hover": "", "now": None, "now_text": NA, "now_hover": "", "unit": "",
             "move": None, "move_text": NA, "move_hover": "", "move_sign": None, "periods": {}, "next": None,
             "trade_ids": [], "sector": "", "instrument_group": OTHER_GROUP, "sector_group": OTHER_GROUP,
-            "ratio": False, "hand": "", "strategy": "", "strategies": [], "trade_type": "", "type_source": "",
+            "ratio": False, "hand": "", "order": ("", ""), "strategy": "", "strategies": [], "trade_type": "", "type_source": "",
             "type_note": "", "commodity_group": OTHER_GROUP, "subsector": ""}
     base.update(kw)
     return base
@@ -879,6 +879,10 @@ def contract_rows(data: dict, trade_ids: Sequence[str], kind: str = "contract") 
                 if product == "CMDTY_OPTION" else None)
             instrument_group = OPTIONS_GROUP if product == "CMDTY_OPTION" else FUTURES_GROUP
         commodity_group, subsector = _commodity_of([root_id], product, data)
+        parsed = parse_contract_id(inst)
+        when = prompt if product == "LME_FWD" else (f"{parsed['year']:04d}-{parsed['month']:02d}" if parsed
+                                                    else str(info.get("expiry_date") or ""))
+        order = (str(getattr(root, "exchange", "") or ("LME" if product == "LME_FWD" else "")), when)
         why_out = "; ".join(dict.fromkeys(why_outright[t] for t in tids if t in why_outright))
         what = ("in no spread" if kind == "outright" else
                 f"netted across {', '.join(strategies) if strategies else 'the trades'}")
@@ -899,7 +903,7 @@ def contract_rows(data: dict, trade_ids: Sequence[str], kind: str = "contract") 
             sector_group=_sector_label(_sector_of([root_id], roots)), instrument_group=instrument_group,
             strategy=strategies[0] if len(strategies) == 1 else "", strategies=strategies,
             trade_type=trade_type, type_source=type_source, type_note=type_note,
-            commodity_group=commodity_group, subsector=subsector,
+            commodity_group=commodity_group, subsector=subsector, order=order,
         ))
     return rows
 
@@ -970,6 +974,7 @@ def trade_row(r: pd.Series, data: dict) -> dict:
         strategy=strategies[0] if strategies else "", strategies=strategies,
         trade_type=trade_type, type_source=type_source, type_note=type_note,
         commodity_group=commodity_group, subsector=subsector,
+        order=(str(getattr(root, "exchange", "") or "OTC"), str(info.get("expiry_date") if product == "FX_OPTION" else settle)),
         name_hover=f"{inst}, trade {tid}, dealt {r.get('trade_date') or ''}. Click for the trade.",
         size=size, size_hover=f"the trade's quantity as booked ({qty:g})" if qty is not None else "no quantity",
         unit=unit, entry=fill, entry_text=price_text(fill, price_unit, fill),
@@ -1093,13 +1098,23 @@ def _daily_abs(row: dict) -> Tuple[int, float]:
     return (1, 0.0) if v is None else (0, -abs(v))
 
 
+def _curve_order(row: dict) -> Tuple[int, str, str, str]:
+    """The Commodity view's order inside a group: exchange, then contract month (an LME prompt by
+    its date, an FX hedge by its value date), nearest first; the settled line last."""
+    exchange, when = row.get("order") or ("", "")
+    return (1 if row["kind"] == "settled" else 0, exchange, when, row["name"])
+
+
 def grouped_rows(rows: Sequence[dict], by: str, data: Optional[dict] = None) -> List[Tuple[str, List[dict]]]:
-    """[(group label, its rows by |Daily| largest first)] in the group order of `by` (`data` for
-    the Commodity view's sector order; without it the groups come alphabetically)."""
+    """[(group label, its rows)] in the group order of `by` (`data` for the Commodity view's sector
+    order; without it the groups come alphabetically). Inside a group the position views rank by
+    |Daily| largest first; the Commodity view reads by exchange then contract month (user,
+    2026-09-28)."""
     names = list(dict.fromkeys(_group_key(r, by) for r in rows))
     out = []
     for g in _group_order(by, names, data):
-        members = sorted((r for r in rows if _group_key(r, by) == g), key=_daily_abs)
+        members = sorted((r for r in rows if _group_key(r, by) == g),
+                         key=_curve_order if by == GROUP_COMMODITY else _daily_abs)
         out.append((g, members))
     return out
 
