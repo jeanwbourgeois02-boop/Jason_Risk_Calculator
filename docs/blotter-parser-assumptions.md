@@ -168,3 +168,12 @@ The first real export, `data/template PnL tool.csv` (git-ignored, never committe
 8. **Cancelled rows** (Status cancelled / void / deleted / rejected / failed) are listed in
    `ParseResult.cancelled_trade_ids`, and the upload (a merge by Trade Id since 2026-09-28) removes
    those trades from the book; a pending, draft or error status excludes the row without removing.
+9. **Strategy labels spelled two ways** (user, 2026-09-28: a warning, never a merge). After the parse,
+   once per file, the loaded trades' PBRoot labels are grouped by their strategy's comparison form
+   (upper case, spaces and punctuation dropped: `common.strategy_key`); a group with two or more labels
+   as written is one plain sentence in the parse warnings (row 0, no symbol) and so in the upload
+   summary: the same strategy under two type prefixes (`JSHY10_ZNA1`, 25 rows, and `JSHY10.3_ZNA1`,
+   2 rows, in the real file: "are grouped as ZNA1; if they are two positions, tell us", since the
+   spread rule reads `trades.strategy`), or two spellings (`COPAR3` / `copar 3`: "stand as two
+   positions, one per spelling; if they are one strategy, tell us", since nothing normalises the name).
+   A blank PBRoot, or one with no strategy after the underscore, is in no set. Nothing is renamed.

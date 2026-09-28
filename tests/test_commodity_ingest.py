@@ -310,6 +310,38 @@ def test_a_price_quoted_in_another_unit_warns(tmp_csv):
     assert "another unit" in w.message and "USD/gal" in w.message
 
 
+def test_strategy_labels_spelled_two_ways_warn_and_change_nothing(tmp_csv):
+    """Two spellings of one PBRoot strategy in a file (user, 2026-09-28): one plain warning naming
+    both labels with their row counts, no rename, no merge, no reject; an unrelated label is in no set."""
+    res = blotter.parse(tmp_csv([
+        _row(**{"Trade Id": "900000101", "PBRoot": "JSHY10_COPAR3"}),
+        _row(**{"Trade Id": "900000102", "PBRoot": "JSHY10_copar 3", "Symbol": "CLF7-USAA"}),
+        _row(**{"Trade Id": "900000103", "PBRoot": "JSHY10.3_SCO1", "Symbol": "CLG7-USAA"}),
+    ]))
+    assert len(res.trades) == 3 and not res.rejects
+    (w,) = res.warnings
+    assert w.row_no == 0 and w.symbol == ""
+    assert w.message.startswith("Strategy labels that look like one strategy: ")
+    assert "'JSHY10_COPAR3' (1 row)" in w.message and "'JSHY10_copar 3' (1 row)" in w.message
+    assert "two spellings" in w.message and "SCO1" not in w.message
+    assert res.notes()[-1] == w.message                     # reaches the upload summary as its own sentence
+    by_id = {t.trade_id: t for t in res.trades}
+    assert (by_id["900000101"].strategy, by_id["900000102"].strategy, by_id["900000103"].strategy) == (
+        "COPAR3", "copar 3", "SCO1")                        # as written: nothing renamed or merged
+    assert by_id["900000102"].pb_root == "JSHY10_copar 3"
+    # the same strategy under two type prefixes (Jason's real file): grouped as one, said so
+    res2 = blotter.parse(tmp_csv([
+        _row(**{"Trade Id": "900000111", "PBRoot": "JSHY10_ZNA1"}),
+        _row(**{"Trade Id": "900000112", "PBRoot": "JSHY10_ZNA1", "Symbol": "CLF7-USAA"}),
+        _row(**{"Trade Id": "900000113", "PBRoot": "JSHY10.3_ZNA1", "Symbol": "CLG7-USAA"}),
+        _row(**{"Trade Id": "900000114", "PBRoot": ""}),
+    ]))
+    assert len(res2.trades) == 4 and not res2.rejects
+    (w2,) = res2.warnings
+    assert w2.message == ("Strategy labels that look like one strategy: 'JSHY10_ZNA1' (2 rows) and "
+                          "'JSHY10.3_ZNA1' (1 row) are grouped as ZNA1; if they are two positions, tell us.")
+
+
 def test_commodity_quantity_is_not_rebuilt_from_notional(tmp_csv):
     # a Notional in gallons over a cents-scaled multiplier would read 100 times the contracts
     res = blotter.parse(tmp_csv([_row(Symbol="RBX6-USAA", Quantity="", Price="2.054", Notional="84,000")]))

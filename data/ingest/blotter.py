@@ -135,6 +135,7 @@ from data.ingest.common import (
     Trade,
     TradeLeg,
     parse_pb_root,
+    strategy_key,
 )
 from data.contracts import option_request_ticker, request_ticker, resolve_future, resolve_option
 from engine import lme as _lme
@@ -370,7 +371,9 @@ class ParseResult:
     n_updated: int = 0      # set by load(): trades that already existed and were replaced
     # Rows that loaded but needed a repair or failed a cross-check (a Price that arrived
     # as a date and was rebuilt from the amounts, an option NetInvoice that disagrees
-    # with Quantity x Price, ...). Never rejects.
+    # with Quantity x Price, ...). Never rejects. A warning about the file as a whole
+    # rather than one row (2026-09-28: PBRoot strategy labels that look like one strategy
+    # spelled two ways) carries row_no 0 and symbol '' and is worded in full in `message`.
     warnings: List[ParseWarning] = field(default_factory=list)
     # Option instruments the file gives no strike for (stored as the schema's 0 = "not
     # known" sentinel, never a real strike of 0), so the UI can ask for them by name.
@@ -410,11 +413,17 @@ class ParseResult:
         spelled out."""
         if not self.warnings:
             return []
-        rows = sorted({w.row_no for w in self.warnings})
-        shown = "; ".join(f"row {w.row_no} {w.symbol}: {w.message}" for w in self.warnings[:3])
-        more = f"; and {len(self.warnings) - 3} more" if len(self.warnings) > 3 else ""
-        return [f"{len(self.warnings)} cell(s) in {len(rows)} row(s) were doubtful and were rebuilt or ignored "
-                f"(rows {_some([str(r) for r in rows])}): {shown}{more}."]
+        out: List[str] = []
+        per_row = [w for w in self.warnings if w.row_no]
+        if per_row:
+            rows = sorted({w.row_no for w in per_row})
+            shown = "; ".join(f"row {w.row_no} {w.symbol}: {w.message}" for w in per_row[:3])
+            more = f"; and {len(per_row) - 3} more" if len(per_row) > 3 else ""
+            out.append(f"{len(per_row)} cell(s) in {len(rows)} row(s) were doubtful and were rebuilt or ignored "
+                       f"(rows {_some([str(r) for r in rows])}): {shown}{more}.")
+        # file-level warnings (row_no 0) are whole sentences already
+        out.extend(w.message for w in self.warnings if not w.row_no)
+        return out
 
     def filter_summary(self) -> str:
         """One sentence: the filter applied, the rows it excluded by reason and the rows kept
@@ -890,7 +899,48 @@ def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str]
     _enforce_numeric(res)
     res.options_missing_strike = sorted(
         k for k, o in res.instrument_options.items() if o.strike == 0 and o.payoff in STRIKE_PAYOFFS)
+    for sentence in strategy_label_warnings(res.trades):
+        res.warnings.append(ParseWarning(0, "", sentence))
+        log.debug("%s", sentence)
     return res
+
+
+def strategy_label_warnings(trades) -> List[str]:
+    """One plain sentence per set of PBRoot labels that look like one strategy spelled two
+    ways (user, 2026-09-28: a warning, never a merge). Two labels are a near-duplicate set when
+    their strategies (the text after the underscore, `common.parse_pb_root`) share a
+    `common.strategy_key` (upper case, spaces and punctuation dropped) but the labels differ as
+    written: the same strategy under two type prefixes ('JSHY10_ZNA1' and 'JSHY10.3_ZNA1',
+    which the spread rule groups as one position, ZNA1, because it reads `trades.strategy`),
+    or two spellings of the name ('COPAR3' and 'copar 3', which stand as two positions today,
+    since nothing normalises the name). A trade with a blank PBRoot or no strategy in it is in
+    no set. Nothing is renamed or merged: `trades.strategy` and `trades.pb_root` are as written."""
+    by_key: Dict[str, Dict[str, list]] = {}   # key -> label as written -> [strategy, n rows]
+    for t in trades:
+        label = str(getattr(t, "pb_root", "") or "").strip()
+        strategy = str(getattr(t, "strategy", "") or "").strip()
+        key = strategy_key(strategy)
+        if not label or not key:
+            continue
+        slot = by_key.setdefault(key, {}).setdefault(label, [strategy, 0])
+        slot[1] += 1
+    out: List[str] = []
+    for key in sorted(by_key):
+        labels = by_key[key]
+        if len(labels) < 2:
+            continue
+        ordered = sorted(labels.items(), key=lambda kv: (-kv[1][1], kv[0]))
+        named = " and ".join(f"'{label}' ({n} row{'s' if n != 1 else ''})" for label, (_strategy, n) in ordered)
+        spellings = {strategy for strategy, _n in labels.values()}
+        if len(spellings) == 1:
+            name = next(iter(spellings))
+            out.append(f"Strategy labels that look like one strategy: {named} are grouped as {name}; "
+                       f"if they are two positions, tell us.")
+        else:
+            written = ", ".join(sorted(spellings))
+            out.append(f"Strategy labels that look like one strategy: {named} are two spellings ({written}) "
+                       f"and stand as two positions, one per spelling; if they are one strategy, tell us.")
+    return out
 
 
 # Every numeric field that reaches a REAL column, per record type. `_enforce_numeric`

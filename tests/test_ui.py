@@ -599,10 +599,15 @@ def test_render_bbg_results_handles_empty_list():
 
 
 def test_run_bloomberg_diagnostics_safe_never_raises_and_returns_list(monkeypatch):
+    # The button runs tools/bbg_diagnostics.py::run_bloomberg_diagnostics through the
+    # data.bloomberg.bbg_diagnostics shim, imported lazily on each click (the 2026-09-16
+    # placeholder left with fb65379); the safety net must swallow whatever it raises.
+    import data.bloomberg.bbg_diagnostics as shim
+
     def _boom():
         raise RuntimeError("blpapi not installed")
 
-    monkeypatch.setattr(market_data, "_bbg_diagnostics_entry_point", lambda: _boom)
+    monkeypatch.setattr(shim, "run_bloomberg_diagnostics", _boom)
     result = market_data.run_bloomberg_diagnostics_safe()
     assert isinstance(result, list)
     assert result[0]["status"] == "fail"
@@ -613,34 +618,12 @@ def test_run_bloomberg_diagnostics_safe_never_raises_and_returns_list(monkeypatc
 
 
 def test_run_bloomberg_diagnostics_safe_rejects_non_list_result(monkeypatch):
-    monkeypatch.setattr(market_data, "_bbg_diagnostics_entry_point", lambda: (lambda: {"not": "a list"}))
+    import data.bloomberg.bbg_diagnostics as shim
+
+    monkeypatch.setattr(shim, "run_bloomberg_diagnostics", lambda: {"not": "a list"})
     result = market_data.run_bloomberg_diagnostics_safe()
     assert isinstance(result, list)
     assert result[0]["status"] == "fail"
-
-
-def test_placeholder_diagnostics_returns_plain_english_checks_without_blpapi():
-    # On a dev machine with no Bloomberg terminal/blpapi, the placeholder must not
-    # raise and must describe the failure in plain English (no traceback).
-    checks = market_data._run_bloomberg_diagnostics_placeholder()
-    assert isinstance(checks, list)
-    assert len(checks) >= 1
-    for c in checks:
-        assert c["status"] in {"pass", "fail", "warning"}
-        assert isinstance(c["name"], str) and c["name"]
-        assert isinstance(c["message"], str) and c["message"]
-        assert "Traceback" not in c["message"]
-
-
-def test_bbg_diagnostics_entry_point_prefers_real_module_now_that_it_exists():
-    # data.bloomberg.bbg_diagnostics (bbg-data, 2026-09-16) now re-exports
-    # tools.bbg_diagnostics.run_bloomberg_diagnostics; the entry point must prefer it
-    # over the local placeholder.
-    from data.bloomberg.bbg_diagnostics import run_bloomberg_diagnostics as real_fn
-
-    fn = market_data._bbg_diagnostics_entry_point()
-    assert fn is real_fn
-    assert fn is not market_data._run_bloomberg_diagnostics_placeholder
 
 
 # ---------------------------------------------------------------- BNP upload summary

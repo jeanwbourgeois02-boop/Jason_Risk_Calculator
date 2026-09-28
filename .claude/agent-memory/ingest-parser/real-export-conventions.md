@@ -39,5 +39,15 @@ were built blind (see [[commodity-futures-ingest]]).
   LME:ZS, `_lme_match` routes them to LME_FWD at the month's third Wednesday (14 info notes).
 - SGX:XUC (`XUCV6-SPAA`, USD/CNH FX future) is a FUTURE in CNH: instrument 'UCV26 Curncy',
   multiplier 100000, ticker 'UCV6 Curncy'.
+- Strategy labels spelled two ways (user, 2026-09-28: warn, never merge): `blotter.strategy_label_warnings`
+  runs once per file after the parse, groups loaded trades' PBRoot labels by `common.strategy_key`
+  (upper, no spaces / punctuation) and appends ONE file-level `ParseWarning(row_no=0, symbol='')` per
+  set; `warning_notes` emits row-0 warnings as whole sentences. The real file has one set:
+  JSHY10_ZNA1 (25) + JSHY10.3_ZNA1 (2). Wording differs by case: same strategy text under two
+  prefixes -> "grouped as ZNA1" (the spread engine groups by exact `trades.strategy`, so that is
+  true); different spellings (COPAR3 / copar 3) -> "stand as two positions, one per spelling" (the
+  brief asked for "grouped as COPAR3", which would be false: nothing normalises the name). File-level
+  warnings reach the upload summary / `upload_report.summary` only, NOT `upload_issues` (that table
+  takes rejects and NOT LOADED rows only) -- requested of ingest-booking.
 - Price scale hazard: a Bloomberg-units fill on a scale-100 root (205.40 on RB) is now 100x too
   big after the scale and the NetInvoice check warns "another unit" (when a NetInvoice exists).

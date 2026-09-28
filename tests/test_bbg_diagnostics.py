@@ -26,6 +26,15 @@ def _load_tool():
 AS_OF = "2026-08-17"
 
 
+def _flagged(checks):
+    """{name: message} of the rows that did not pass. Since eb4a301 a coverage row's
+    severity follows the screens (a trade shown as a dash fails; a gap no open trade
+    reads today warns); `_option_db` writes no trade_legs row, so its option never
+    reaches the reader and these rows grade WARNING. The tests pin that the gap is
+    flagged, never a silent pass, and carries its reason."""
+    return {c["name"]: c["message"] for c in checks if c["status"] in ("fail", "warning")}
+
+
 def _option_db(path):
     conn = schema.connect(path)
     conn.execute("INSERT INTO instruments VALUES "
@@ -51,10 +60,10 @@ def test_check_option_coverage_shows_verbatim_skip_reason_from_status_file(tmp_p
         checks = tool.check_option_coverage(conn, AS_OF, db_path=db)
     finally:
         conn.close()
-    fails = {c["name"]: c["message"] for c in checks if c["status"] == "fail"}
-    assert "FX option PREMIUM coverage" in fails
-    assert "EURSEK091826C-1 (o1): no curve/rate SEK" in fails["FX option PREMIUM coverage"]
-    assert "EURSEK091826C-1 (o1): no curve/rate SEK" in fails["FX option DELTA coverage"]
+    flagged = _flagged(checks)
+    assert "FX option PREMIUM coverage" in flagged
+    assert "EURSEK091826C-1 (o1): no curve/rate SEK" in flagged["FX option PREMIUM coverage"]
+    assert "EURSEK091826C-1 (o1): no curve/rate SEK" in flagged["FX option DELTA coverage"]
 
 
 def test_check_option_coverage_generic_message_when_no_status_file(tmp_path):
@@ -66,10 +75,10 @@ def test_check_option_coverage_generic_message_when_no_status_file(tmp_path):
         checks = tool.check_option_coverage(conn, AS_OF, db_path=db)
     finally:
         conn.close()
-    fails = {c["name"]: c["message"] for c in checks if c["status"] == "fail"}
-    assert "FX option PREMIUM coverage" in fails
+    flagged = _flagged(checks)
+    assert "FX option PREMIUM coverage" in flagged
     # No status file at all: never crashes, never fabricates a reason.
-    assert "did not price them" in fails["FX option PREMIUM coverage"]
+    assert "did not price them" in flagged["FX option PREMIUM coverage"]
 
 
 def test_check_option_coverage_passes_when_marks_present(tmp_path):
@@ -331,8 +340,8 @@ def test_ois_curve_coverage_fails_when_an_option_currency_has_no_quotes(tmp_path
         checks = tool.check_ois_curve_coverage(conn, AS_OF)
     finally:
         conn.close()
-    fails = {c["name"]: c["message"] for c in checks if c["status"] == "fail"}
-    assert "open FX option" in fails[f"EUR-ESTR curve quotes for {AS_OF}"]
+    flagged = _flagged(checks)
+    assert "open FX option" in flagged[f"EUR-ESTR curve quotes for {AS_OF}"]
 
 
 def test_ois_curve_coverage_passes_with_no_open_fx_option(tmp_path):

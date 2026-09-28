@@ -134,6 +134,18 @@ def parse_pb_root(text) -> tuple:
     return strategy, PB_ROOT_TRADE_TYPES.get(m.group("decimal") or "", "")
 
 
+_STRATEGY_KEY_DROP_RE = re.compile(r"[^A-Z0-9]+")
+
+
+def strategy_key(strategy) -> str:
+    """The comparison form of a strategy name: upper case with every space and punctuation
+    character dropped ('copar 3', 'Copar-3' and 'COPAR3' share the key 'COPAR3'). Used only
+    to *notice* labels that look like one strategy spelled two ways (2026-09-28): nothing is
+    renamed or merged on it, and ``trades.strategy`` keeps the name as written. '' for blank."""
+    s = "" if strategy is None else str(strategy)
+    return _STRATEGY_KEY_DROP_RE.sub("", s.upper())
+
+
 def cash_ccy(code: str) -> str:
     """'DOL.C-USAA' -> 'USD'; '<CCY>.C-xxAA' -> CCY."""
     m = CASH_CCY_RE.match(str(code))
