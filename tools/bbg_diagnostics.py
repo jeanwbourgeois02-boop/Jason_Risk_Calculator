@@ -31,6 +31,29 @@ Checks (each becomes one or more result rows):
                                    OFFICIAL (not MISSING/INTERP/MANUAL fallback) as of
                                    the given date, via data.bloomberg.inventory
   4. Futures marks coverage    -- every open future's FUTURE_PX is OFFICIAL
+  4b. The commodity steps (2026-09-28, user-approved), each reusing the app's own record of
+      what the book needs (data.bloomberg.library.needed_on with include_unrequestable) and
+      its own "on file" rules, never a second definition:
+      - Contract roots verified       -- config/contracts.csv roots with bbg_verified true
+                                         against the total, and the open book's roots still
+                                         unverified (fix: py 2_launcher.py bbg-check)
+      - Futures with no Bloomberg ticker -- open futures / options on futures / LME metals the
+                                         library marks not requestable (live.not_requestable_futures)
+      - Contract dates stored         -- open contracts still on an estimated expiry, with no
+                                         Bloomberg dates in contract_static
+                                         (inventory.contract_dates_inventory)
+      - Options on futures            -- per open CMDTY_OPTION: its own official FUTURE_PX
+                                         (P&L: fail), its underlying's FUTURE_PX, an OIS curve
+                                         for its discount currency (or the USD SOFR fallback),
+                                         and official DELTA/GAMMA/THETA/VEGA (Greeks: warning)
+      - LME curves / LME prompt outrights -- per LME root with an open forward: cash and 3M
+                                         official (inventory.lme_curve_status), and each
+                                         ticket's prompt on file (BBG_BFXFORWARD or BBG_INTERP
+                                         within the pillars; else engine.lme.forward_at says
+                                         whether it can still be read between them)
+      - Conversion spots              -- every non-USD open future / option on a future has
+                                         the official SPOT of its currency's USD pair
+                                         (role CONVERSION)
   5. OIS curve coverage       -- curve_quotes has today's quotes for every OIS index in
                                    scope that an open FX option's pair needs (the
                                    options price off those discount curves)
@@ -46,6 +69,10 @@ Checks (each becomes one or more result rows):
                                    field gave the forward-points divisor (FWD_POINTS_SCALE
                                    or FWD_SCALE) or that neither did, and whether past days
                                    are being asked for again at the 15:00 New York close
+  7c. Last pull: commodity steps -- the status file's "contract_dates" (live.contract_dates_summary),
+                                   "lme" (live.lme_summary), "not_requestable" and the
+                                   options-on-futures count of "options"; one warning
+                                   "not yet exercised" while no pull has connected
   8. Unverified assumptions    -- whether each FX vol ticker/field guess in
                                    data/bloomberg/vol_marketdata.py has been confirmed by
                                    a real response on a live pull (vol_ticker_checks),
@@ -219,10 +246,20 @@ def check_fx_and_future_coverage(conn: sqlite3.Connection, as_of: str) -> List[C
         return [_row("FX/futures marks coverage", "fail",
                      f"mark_inventory raised {exc.__class__.__name__} for as_of={as_of}.")]
 
+    # 2026-09-28: an LME metal's cash SPOT and prompt FWD_OUTRIGHT are in the inventory too
+    # (library rows of the LME product) but are not FX marks: the LME rows below
+    # (check_lme_curves) judge them by the engine's own curve rule, so they leave the FX
+    # labelled rows here rather than fail them with an FX-worded reason.
+    try:
+        from engine.lme import is_lme_instrument
+    except Exception:  # noqa: BLE001 -- no LME layer: nothing to leave out
+        is_lme_instrument = lambda _i: False          # noqa: E731
     out: List[Check] = []
     for mark_type, label in (("SPOT", "FX spot"), ("FWD_OUTRIGHT", "FX forward outright"),
                               ("FUTURE_PX", "Futures price")):
         sub = df[df["mark_type"] == mark_type] if not df.empty else df
+        if mark_type != "FUTURE_PX" and not sub.empty:
+            sub = sub[~sub["instrument_id"].map(lambda i: bool(is_lme_instrument(i)))]
         needed = len(sub)
         if needed == 0:
             out.append(_row(f"{label} coverage", "pass", f"No open positions need a {mark_type} mark today."))
@@ -247,6 +284,372 @@ def check_fx_and_future_coverage(conn: sqlite3.Connection, as_of: str) -> List[C
             out.append(_row(f"{label} coverage", "pass",
                              f"All {needed} required {mark_type} marks are present as official for {as_of}."))
     return out
+
+
+# --------------------------------------------------------------------------- 4b. the commodity steps (2026-09-28)
+# Everything below reads the app's own record of what the book needs from Bloomberg
+# (data.bloomberg.library.needed_on with include_unrequestable=True: every row in force on
+# the day, LME rows included, the rows the pull cannot ask for flagged), never a second
+# definition of "needed"; and the app's own rules for "on file" (inventory.lme_curve_status,
+# inventory.contract_dates_inventory, engine.lme.forward_at, live.not_requestable_futures).
+# Each check returns one clean pass row when the book has nothing of its kind, and a failure
+# to run at all becomes one warning row (`_warn_on_crash`), never an exception.
+
+def _warn_on_crash(label: str, fn, *args) -> List[Check]:
+    """One warning row, never an exception, when a check cannot run at all."""
+    try:
+        return list(fn(*args))
+    except Exception as exc:  # noqa: BLE001 -- a diagnostics page must never crash
+        return [_row(label, "warning",
+                     f"This check could not run ({exc.__class__.__name__}: {exc}); nothing was written.")]
+
+
+def _names(items, limit: int = 6) -> str:
+    """'a, b, c (+2 more)': the first few names, the rest counted."""
+    items = list(items)
+    shown = ", ".join(str(i) for i in items[:limit])
+    return shown + (f" (+{len(items) - limit} more)" if len(items) > limit else "")
+
+
+def _plural(n: int, word: str, plural: Optional[str] = None) -> str:
+    return f"{n} {word if n == 1 else (plural or word + 's')}"
+
+
+def _library_in_force(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+    """Every Bloomberg-library row in force on `as_of` (needed_from <= as_of <= needed_until),
+    requestable or not, LME included: exactly what the pull and the Data tab's listings work
+    from. On a read-only handle the library is worked out in memory when it is behind the
+    book (library.rows does that itself), so nothing is written here."""
+    from data.bloomberg import library
+    return list(library.needed_on(conn, as_of, include_unrequestable=True))
+
+
+def _instrument_roots(conn: sqlite3.Connection, instrument_ids) -> Dict[str, str]:
+    """{instrument_id: base_ccy} for the ids given (a commodity future's or option's base_ccy
+    is its contract root id, 'NYMEX:CL')."""
+    ids = sorted(set(instrument_ids))
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    return {k: (v or "") for k, v in conn.execute(
+        f"SELECT instrument_id, base_ccy FROM instruments WHERE instrument_id IN ({marks})", ids)}
+
+
+def _open_commodity_roots(conn: sqlite3.Connection, in_force: List[dict]) -> Dict[str, set]:
+    """{root id: {instrument ids}} of the open futures, options on futures (their own and
+    their underlying's rows) and LME forwards, from the library rows in force."""
+    from data.bloomberg import library
+    roots_of = _instrument_roots(conn, {r["key"] for r in in_force if r["kind"] == "FUTURE_PX"})
+    out: Dict[str, set] = {}
+    for inst, root in roots_of.items():
+        if library.is_contract_root(root):
+            out.setdefault(root, set()).add(inst)
+    for r in in_force:
+        if r["kind"] == library.LME_CURVE and library.is_contract_root(r.get("key")):
+            out.setdefault(r["key"], set()).add(r["key"])
+    return out
+
+
+def _official_source(conn: sqlite3.Connection, as_of: str, instrument_id: str, settle_date: str,
+                     mark_type: str) -> Optional[str]:
+    """The source of the official mark for this exact key on `as_of`, or None when there is none."""
+    row = conn.execute(
+        "SELECT source FROM marks_official WHERE as_of_date = ? AND instrument_id = ? AND settle_date = ? "
+        "AND mark_type = ? LIMIT 1", (as_of, instrument_id, settle_date, mark_type)).fetchone()
+    return row[0] if row else None
+
+
+def check_contract_roots_verified(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """1. How many contract roots of config/contracts.csv a Bloomberg terminal has confirmed
+    (bbg_verified), and which roots the open book stands on that are still unverified: their
+    tickers, currencies and price scales are best guesses until `py 2_launcher.py bbg-check`
+    is run at the terminal (CLAUDE.md "Bloomberg check")."""
+    name = "Contract roots verified"
+    from data.contracts import load_roots
+    roots = load_roots()
+    verified = [rid for rid, root in roots.items() if root.bbg_verified]
+    head = (f"{len(verified)} of {len(roots)} contract roots in config/contracts.csv are verified on a "
+            "Bloomberg terminal")
+    open_roots = _open_commodity_roots(conn, _library_in_force(conn, as_of))
+    if not open_roots:
+        return [_row(name, "pass", head + "; no open futures, options on futures or LME forwards in the book, "
+                                          "so none of the unverified roots is in use.")]
+    unverified = sorted(rid for rid in open_roots if rid in roots and not roots[rid].bbg_verified)
+    unknown = sorted(rid for rid in open_roots if rid not in roots)
+    if not unverified and not unknown:
+        return [_row(name, "pass", head + f"; every root in the open book ({_names(sorted(open_roots))}) is verified.")]
+    message = head + (f"; {len(unverified)} of the {len(open_roots)} roots in the open book are unverified "
+                      f"({_names(unverified)}): their Bloomberg tickers and price scales are best guesses until "
+                      "`py 2_launcher.py bbg-check` is run at the terminal and its worksheet applied."
+                      if unverified else "")
+    if unknown:
+        message += (f" {_plural(len(unknown), 'root')} of the open book {'is' if len(unknown) == 1 else 'are'} not in "
+                    f"config/contracts.csv at all ({_names(unknown)}).")
+    return [_row(name, "warning", message.strip())]
+
+
+def check_not_requestable(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """2. Open futures, options on futures and LME metals whose root has no Bloomberg
+    ticker (the library marks them not requestable): a pull never asks for them, so their
+    price stays missing whatever the terminal says. The futures list is live's own
+    (`not_requestable_futures`, the status file's "not_requestable" block)."""
+    name = "Futures with no Bloomberg ticker"
+    from data.bloomberg import library
+    from data.bloomberg.live import not_requestable_futures
+    in_force = _library_in_force(conn, as_of)
+    open_rows = [r for r in in_force if r["kind"] in ("FUTURE_PX", library.LME_CURVE)]
+    if not open_rows:
+        return [_row(name, "pass", "No open futures, options on futures or LME forwards; nothing to request.")]
+    entries = list(not_requestable_futures(conn, as_of))
+    lme_blocked = {r["key"]: r.get("reason", "") for r in in_force
+                   if r["kind"] == library.LME_CURVE and not r.get("requestable", True)}
+    contracts = sorted({r["key"] for r in open_rows})
+    if not entries and not lme_blocked:
+        return [_row(name, "pass", f"All {_plural(len(contracts), 'open contract')} carry a Bloomberg ticker the pull "
+                                   "can ask for.")]
+    said = [f"{e['instrument_id']} ({e['reason']})" for e in entries]
+    said += [f"{root} LME curve ({reason})" for root, reason in sorted(lme_blocked.items())]
+    return [_row(name, "fail",
+                 f"{len(said)} of {_plural(len(contracts), 'open contract')} have no Bloomberg ticker and are never "
+                 f"asked for, so their price stays missing: {_names(said)}. The fix is the root's Bloomberg root in "
+                 "config/contracts.csv: `py 2_launcher.py bbg-check` at the terminal writes the worksheet and "
+                 "`contracts-apply` applies it.")]
+
+
+def check_contract_dates(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """3. Whether Bloomberg's own last-trade / first-notice (or option expiry) dates are
+    stored in contract_static for every open future and option on a future; until then the
+    contract runs on contract-master's conservative estimate. The inventory is
+    data.bloomberg.inventory.contract_dates_inventory, the Data tab's own panel."""
+    name = "Contract dates stored"
+    from data.bloomberg.inventory import STATUS_ON_FILE, contract_dates_inventory
+    df = contract_dates_inventory(conn, as_of)
+    if df.empty:
+        return [_row(name, "pass", "No open futures or options on futures; no contract dates to store.")]
+    total = len(df)
+    missing = df[df["status"] != STATUS_ON_FILE]
+    if missing.empty:
+        return [_row(name, "pass", f"Bloomberg's own dates are stored for all {_plural(total, 'open contract')} "
+                                   "(contract_static); none runs on an estimated expiry.")]
+    askable = [r.contract_id for r in missing.itertuples() if not r.reason]
+    blocked = [f"{r.contract_id} ({r.reason})" for r in missing.itertuples() if r.reason]
+    message = (f"{len(missing)} of {_plural(total, 'open contract')} still run on estimated expiry dates, with no "
+               f"Bloomberg dates in contract_static: {_names([r.contract_id for r in missing.itertuples()])}.")
+    if askable:
+        message += (f" The next Pull Bloomberg now asks for {len(askable)} of them and moves the contracts to "
+                    "Bloomberg's dates.")
+    if blocked:
+        message += f" {len(blocked)} cannot be asked until the root has a ticker ({_names(blocked, 4)})."
+    return [_row(name, "warning", message)]
+
+
+def check_options_on_futures(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """4. Each open option on a commodity future (CMDTY_OPTION) needs, on `as_of`: Bloomberg's
+    own price of the option as an official FUTURE_PX on its own instrument (all its P&L
+    needs: a miss is a fail); and for its Greeks only (a miss is a warning) its underlying
+    future's official FUTURE_PX, an OIS curve for its discount currency (its own currency
+    when the pricer has one, else USD SOFR: library.option_discount_ccy) and official
+    DELTA / GAMMA / THETA / VEGA marks under QL_OPTIONS_PRICER."""
+    from data.bloomberg import library
+    from data.bloomberg.inventory import _holds_ois_curve
+    in_force = [r for r in _library_in_force(conn, as_of) if r["product"] == library.CMDTY_OPTION]
+    own = {r["key"]: r for r in in_force if r["kind"] == "FUTURE_PX" and r.get("role") == library.ROLE_PAIR}
+    if not own:
+        return [_row("Options on futures", "pass", "No open options on futures; nothing to check.")]
+    options = sorted(own)
+    n = len(options)
+    out: List[Check] = []
+    by_trade = {r["trade_id"]: r["key"] for r in in_force if r["kind"] == "FUTURE_PX" and r.get("role") == library.ROLE_PAIR}
+
+    # 4a. the option's own price (its P&L)
+    no_ticker = [o for o in options if not own[o].get("requestable", True)]
+    missing = [o for o in options if o not in no_ticker
+               and _official_source(conn, as_of, o, own[o]["settle_date"], "FUTURE_PX") is None]
+    if missing or no_ticker:
+        message = ""
+        if missing:
+            message = (f"{len(missing)} of {_plural(n, 'open option')} on futures have no official price (FUTURE_PX on "
+                       f"the option's own instrument) for {as_of}: {_names(missing)}; their P&L cannot be marked.")
+        if no_ticker:
+            message += (f" {len(no_ticker)} have no Bloomberg ticker and are never asked for "
+                        f"({_names(no_ticker)}); see 'Futures with no Bloomberg ticker'.")
+        out.append(_row("Options on futures: price", "fail", message.strip()))
+    else:
+        out.append(_row("Options on futures: price", "pass",
+                        f"All {_plural(n, 'open option')} on futures have Bloomberg's own price as an official mark for {as_of}."))
+
+    # 4b. the underlying future's price (Greeks)
+    underlying_of: Dict[str, dict] = {}
+    for r in in_force:
+        if r["kind"] == "FUTURE_PX" and r.get("role") == library.ROLE_UNDERLYING and r["trade_id"] in by_trade:
+            underlying_of.setdefault(by_trade[r["trade_id"]], r)
+    no_underlying = [o for o in options if o not in underlying_of]
+    und_missing = [f"{o} (on {underlying_of[o]['key']})" for o in options if o in underlying_of
+                   and _official_source(conn, as_of, underlying_of[o]["key"], underlying_of[o]["settle_date"], "FUTURE_PX") is None]
+    if no_underlying or und_missing:
+        message = ""
+        if und_missing:
+            message = (f"{len(und_missing)} of {n} underlying futures have no official price for {as_of}: "
+                       f"{_names(und_missing)}; the option's Greeks cannot be priced (its P&L is unaffected).")
+        if no_underlying:
+            message += (f" {len(no_underlying)} option(s) have no underlying future on file at all "
+                        f"({_names(no_underlying)}); the ingest writes it with the option, so re-upload the blotter.")
+        out.append(_row("Options on futures: underlying price", "warning", message.strip()))
+    else:
+        out.append(_row("Options on futures: underlying price", "pass",
+                        f"Every underlying future of the {n} open options has an official price for {as_of}."))
+
+    # 4c. the discount curve (Greeks)
+    quote_ccy = {k: v for k, v in conn.execute(
+        f"SELECT instrument_id, quote_ccy FROM instruments WHERE instrument_id IN ({','.join('?' * n)})", options)}
+    curve_ccy: Dict[str, str] = {}
+    for r in in_force:
+        if r["kind"] == "OIS_CURVE" and r["trade_id"] in by_trade:
+            curve_ccy.setdefault(by_trade[r["trade_id"]], r["key"])
+    fallbacks = sorted({f"{quote_ccy.get(o, '?')} -> {curve_ccy[o]} SOFR" for o in options
+                        if o in curve_ccy and curve_ccy[o] != quote_ccy.get(o)})
+    needed_ccys = sorted({curve_ccy[o] for o in options if o in curve_ccy})
+    absent = [c for c in needed_ccys if not _holds_ois_curve(conn, as_of, c)]
+    note = f" {_plural(len(fallbacks), 'currency', 'currencies')} with no OIS set-up discount on USD SOFR ({_names(fallbacks)})." if fallbacks else ""
+    if absent:
+        hit = [o for o in options if curve_ccy.get(o) in absent]
+        out.append(_row("Options on futures: discount curve", "warning",
+                        f"No Bloomberg OIS quotes for {as_of} in curve_quotes for {_names(absent)}, which "
+                        f"{_plural(len(hit), 'open option')} on futures discount on ({_names(hit)}); their Greeks cannot "
+                        "be priced until the pull's curves step writes them (the P&L needs no curve)." + note))
+    else:
+        out.append(_row("Options on futures: discount curve", "pass",
+                        f"OIS quotes for {as_of} are on file for every discount currency the {n} open options need "
+                        f"({_names(needed_ccys) or 'none needed'})." + note))
+
+    # 4d. the Greeks themselves
+    greek_missing: Dict[str, List[str]] = {}
+    for greek in ("DELTA", "GAMMA", "THETA", "VEGA"):
+        have = {r[0] for r in conn.execute(
+            f"SELECT DISTINCT instrument_id FROM marks_official WHERE mark_type = ? AND as_of_date = ? "
+            f"AND instrument_id IN ({','.join('?' * n)})", (greek, as_of, *options))}
+        lacking = [o for o in options if o not in have]
+        if lacking:
+            greek_missing[greek] = lacking
+    if greek_missing:
+        sets = {tuple(lst) for lst in greek_missing.values()}
+        if len(sets) == 1:              # the same options lack every Greek listed: name them once
+            lst = next(iter(sets))
+            said = f"{', '.join(greek_missing)}: {len(lst)} of {n} ({_names(lst, 4)})"
+        else:
+            said = "; ".join(f"{g}: {len(lst)} of {n} ({_names(lst, 4)})" for g, lst in greek_missing.items())
+        out.append(_row("Options on futures: Greeks", "warning",
+                        f"Official Greeks (QL_OPTIONS_PRICER) are missing for {as_of} on some open options on futures: "
+                        f"{said}. The pull's options step prices them from the option's price, the underlying's price "
+                        "and the discount curve above; the P&L itself needs none of them."))
+    else:
+        out.append(_row("Options on futures: Greeks", "pass",
+                        f"All {n} open options on futures carry official DELTA, GAMMA, THETA and VEGA for {as_of}."))
+    return out
+
+
+def check_lme_curves(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """5. For each LME metal with an open forward on `as_of`: is its curve complete that day
+    by the engine's own rule (inventory.lme_curve_status: cash SPOT and 3M FWD_OUTRIGHT
+    official, each at the close on a past day), and is each ticket's prompt outright on file
+    (BBG_BFXFORWARD at a pillar Bloomberg quoted, or BBG_INTERP between two pillars, both
+    official for FWD_OUTRIGHT); a prompt with neither is checked against engine.lme.forward_at,
+    which says whether the valuation can still read it between the pillars."""
+    from data.bloomberg import library
+    from data.bloomberg.inventory import lme_curve_status
+    from engine.lme import forward_at
+    in_force = _library_in_force(conn, as_of)
+    curve_rows = {r["key"]: r for r in in_force if r["kind"] == library.LME_CURVE}
+    if not curve_rows:
+        return [_row("LME curves", "pass", "No open LME forwards; no LME curve is needed today.")]
+    today = _today_ny()
+    roots = sorted(curve_rows)
+    out: List[Check] = []
+
+    incomplete = []
+    for root in roots:
+        status = lme_curve_status(conn, as_of, root, today=today)
+        if not status.get("complete"):
+            why = " and ".join(status.get("missing") or ["curve"])
+            reason = curve_rows[root].get("reason") or ""
+            incomplete.append(f"{root}: {why} not official" + (f" ({reason})" if reason else ""))
+    if incomplete:
+        out.append(_row("LME curves", "fail",
+                        f"{len(incomplete)} of {_plural(len(roots), 'LME curve')} the open forwards need "
+                        f"{'is' if len(incomplete) == 1 else 'are'} not complete for {as_of} (the engine's rule: the cash "
+                        f"price and the 3-month outright both official that day): {_names(incomplete)}. The pull's LME "
+                        "step asks each pillar's PX_LAST; with the curve incomplete the tickets are valued off the "
+                        "nearest marks."))
+    else:
+        out.append(_row("LME curves", "pass",
+                        f"All {_plural(len(roots), 'LME curve')} ({_names(roots)}) are complete for {as_of}: cash and "
+                        "3M official."))
+
+    prompts = sorted({(r["key"], r["settle_date"]) for r in in_force
+                      if r["product"] in library.LME_PRODUCTS and r["kind"] == "FWD_OUTRIGHT"})
+    if not prompts:
+        out.append(_row("LME prompt outrights", "pass", "No open LME prompt to mark."))
+        return out
+    direct, interp, readable, absent = [], [], [], []
+    for root, prompt in prompts:
+        source = _official_source(conn, as_of, root, prompt, "FWD_OUTRIGHT")
+        label = f"{root} {prompt}"
+        if source == "BBG_INTERP":
+            interp.append(label)
+        elif source:
+            direct.append(label)
+        else:
+            try:
+                got = forward_at(conn, root, prompt, as_of)
+            except ValueError as exc:            # a stored value that is not a number: a data error
+                absent.append(f"{label} ({exc})")
+                continue
+            (readable if got is not None else absent).append(label)
+    total = len(prompts)
+    if absent:
+        out.append(_row("LME prompt outrights", "fail",
+                        f"{len(absent)} of {_plural(total, 'open LME prompt')} have no outright on the {as_of} curve and "
+                        f"cannot be read between its pillars (beyond the last pillar, or no curve on file): {_names(absent)}. "
+                        "Those tickets take the near-marks estimate or the last earlier close."))
+    elif readable:
+        out.append(_row("LME prompt outrights", "warning",
+                        f"{len(readable)} of {_plural(total, 'open LME prompt')} have no stored outright for {as_of} but "
+                        f"sit between pillars on file, so the valuation reads them off the curve: {_names(readable)}. The "
+                        "pull's LME step writes them as BBG_INTERP."))
+    else:
+        detail = f"{len(direct)} at a pillar Bloomberg quoted" + (f", {len(interp)} interpolated between pillars (BBG_INTERP, official for a broken prompt)" if interp else "")
+        out.append(_row("LME prompt outrights", "pass",
+                        f"All {_plural(total, 'open LME prompt')} have an official outright for {as_of}: {detail}."))
+    return out
+
+
+def check_conversion_spots(conn: sqlite3.Connection, as_of: str) -> List[Check]:
+    """6. Every open non-USD future or option on a future converts its P&L at the official
+    SPOT of its currency's USD pair on the valuation date (role CONVERSION in the library);
+    a missing one leaves the contract's USD P&L blank."""
+    name = "Conversion spots"
+    from data.bloomberg import library
+    in_force = _library_in_force(conn, as_of)
+    fx_products = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION")
+    conv = [r for r in in_force if r["kind"] == "SPOT" and r.get("role") == library.ROLE_CONVERSION
+            and r["product"] not in fx_products and r["product"] not in library.LME_PRODUCTS]
+    if not conv:
+        return [_row(name, "pass", "No open non-USD futures or options on futures; no conversion spot is needed.")]
+    contract_of = {r["trade_id"]: r["key"] for r in in_force
+                   if r["kind"] == "FUTURE_PX" and r.get("role") == library.ROLE_PAIR}
+    users: Dict[str, set] = {}
+    for r in conv:
+        users.setdefault(r["key"], set()).add(contract_of.get(r["trade_id"], r["trade_id"]))
+    pairs = sorted(users)
+    missing = [p for p in pairs if _official_source(conn, as_of, p, as_of, "SPOT") is None]
+    if missing:
+        said = [f"{p} (needed by {_names(sorted(users[p]), 3)})" for p in missing]
+        return [_row(name, "fail",
+                     f"{len(missing)} of {_plural(len(pairs), 'USD-conversion spot')} have no official SPOT for {as_of}: "
+                     f"{_names(said)}; the non-USD P&L of those contracts cannot be converted to USD on that day.")]
+    return [_row(name, "pass",
+                 f"All {_plural(len(pairs), 'USD-conversion spot')} ({_names(pairs)}) are official for {as_of}, covering "
+                 f"{_plural(len({c for s in users.values() for c in s}), 'non-USD contract')}.")]
 
 
 # --------------------------------------------------------------------------- 5. OIS curves for the FX options
@@ -604,6 +1007,96 @@ def check_backfill_report(db_path: Optional[Path]) -> List[Check]:
     return out
 
 
+# --------------------------------------------------------------------------- 7c. the last pull's commodity steps
+def check_last_pull_commodity_blocks(db_path: Optional[Path]) -> List[Check]:
+    """7. What the last connected pull recorded for the commodity steps, read from the status
+    file and summarised with live's own sentences: status["contract_dates"]
+    (live.contract_dates_summary), status["lme"] (live.lme_summary), status["not_requestable"]
+    and the options-on-futures count of status["options"]. One warning "not yet exercised"
+    when no pull has connected on this database, so the steps have never run."""
+    name = "Last pull: commodity steps"
+    if db_path is None:
+        return [_row(name, "warning", "not yet exercised: no database path resolved, so no pull status can be read.")]
+    from data.bloomberg.live import contract_dates_summary, futures_options_sentence, lme_summary, read_status
+    status = read_status(db_path)
+    if not status:
+        return [_row(name, "warning", "not yet exercised: no Bloomberg pull has run on this database.")]
+    when = status.get("time", "an unknown time")
+    if not status.get("connected"):
+        return [_row(name, "warning",
+                     f"not yet exercised: the last pull ({when}) did not connect "
+                     f"({status.get('reason', 'unknown reason')}), so the contract dates, LME curves and "
+                     "options-on-futures steps have not run yet.")]
+    if not any(k in status for k in ("contract_dates", "lme", "not_requestable")):
+        return [_row(name, "warning",
+                     f"not yet exercised: the last pull ({when}) predates the commodity steps (no contract_dates, lme or "
+                     "not_requestable block recorded); press Pull Bloomberg now to run them.")]
+    out: List[Check] = []
+
+    block = status.get("contract_dates") if isinstance(status.get("contract_dates"), dict) else {}
+    sentence = contract_dates_summary(block) or "no contract dates were asked for (all stored already, or no futures in the book)"
+    applied = block.get("applied") if isinstance(block.get("applied"), dict) else {}
+    if block.get("error") or applied.get("error"):
+        status_cd = "fail"
+    elif block.get("failed"):
+        status_cd = "warning"
+    else:
+        status_cd = "pass"
+    failed = block.get("failed") or []
+    detail = ""
+    if failed:
+        said = [f"{f.get('ticker') or f.get('instrument_id') or '?'}: {f.get('reason') or f.get('detail') or 'no date'}"
+                if isinstance(f, dict) else str(f) for f in failed]
+        detail = f" Gave no date: {_names(said, 4)}."
+    if block.get("error"):
+        detail += f" The step stopped: {block['error']}."
+    out.append(_row("Last pull: contract dates", status_cd, f"Last pull ({when}): {sentence}.{detail}"))
+
+    if "lme" not in status:
+        out.append(_row("Last pull: LME curves", "pass",
+                        f"Last pull ({when}) had no LME step to run (no open LME forward in the book)."))
+    else:
+        block = status.get("lme") if isinstance(status.get("lme"), dict) else {}
+        sentence = lme_summary(block) or "no LME forward in the book, nothing asked"
+        if block.get("error"):
+            status_lme = "fail"
+        elif block.get("missing"):
+            status_lme = "warning"
+        else:
+            status_lme = "pass"
+        detail = ""
+        if block.get("missing"):
+            said = [f"{m.get('root_id', '?')} {m.get('ticker') or m.get('settle_date', '')}: {m.get('reason', '')}".strip()
+                    for m in block["missing"] if isinstance(m, dict)]
+            detail = f" Without a mark: {_names(said, 4)}."
+        out.append(_row("Last pull: LME curves", status_lme, f"Last pull ({when}): {sentence}.{detail}"))
+
+    not_requestable = status.get("not_requestable") or []
+    if not_requestable:
+        said = [f"{e.get('instrument_id', '?')} ({e.get('reason', 'no ticker')})" for e in not_requestable if isinstance(e, dict)]
+        out.append(_row("Last pull: not requested", "warning",
+                        f"Last pull ({when}) left {_plural(len(not_requestable), 'contract')} unrequested for want of a "
+                        f"Bloomberg ticker: {_names(said)}."))
+    else:
+        out.append(_row("Last pull: not requested", "pass",
+                        f"Last pull ({when}) had a Bloomberg ticker for every contract the book needed."))
+
+    options = status.get("options")
+    if isinstance(options, dict):
+        priced = int(options.get("futures_options_priced") or 0)
+        sentence = options.get("futures_options_summary") or futures_options_sentence(priced) or "no option on futures priced"
+        skipped = options.get("skipped") if isinstance(options.get("skipped"), list) else []
+        if options.get("error"):
+            status_opt, detail = "fail", f" The options step stopped: {options['error']}."
+        elif skipped:
+            said = [f"{s.get('trade_id', '?')}: {s.get('reason', '')}" for s in skipped if isinstance(s, dict)]
+            status_opt, detail = "warning", f" {_plural(len(skipped), 'option')} skipped ({_names(said, 4)}; FX options included)."
+        else:
+            status_opt, detail = "pass", ""
+        out.append(_row("Last pull: options on futures", status_opt, f"Last pull ({when}): {sentence}.{detail}"))
+    return out
+
+
 # --------------------------------------------------------------------------- orchestration
 def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str] = None,
                               host: Optional[str] = None, port: Optional[int] = None) -> List[Check]:
@@ -644,6 +1137,14 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
     if conn is not None:
         resolved_as_of = as_of or _latest_as_of(conn)
         _safe("FX/futures marks coverage", check_fx_and_future_coverage, conn, resolved_as_of)
+        # The commodity steps (2026-09-28): each one warning row, never an exception, if it cannot run.
+        for label, fn in (("Contract roots verified", check_contract_roots_verified),
+                          ("Futures with no Bloomberg ticker", check_not_requestable),
+                          ("Contract dates stored", check_contract_dates),
+                          ("Options on futures", check_options_on_futures),
+                          ("LME curves", check_lme_curves),
+                          ("Conversion spots", check_conversion_spots)):
+            results.extend(_warn_on_crash(label, fn, conn, resolved_as_of))
         _safe("OIS curve coverage (FX options)", check_ois_curve_coverage, conn, resolved_as_of)
         _safe("FX option marks coverage", check_option_coverage, conn, resolved_as_of, resolved_db)
         _safe("snapped_at carries a resolved offset", check_snapped_at_offset, conn, resolved_as_of)
@@ -654,6 +1155,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
 
     _safe("Last marks pull", check_last_pull, resolved_db, resolved_as_of)
     _safe("Past closes (backfill)", check_backfill_report, resolved_db)
+    results.extend(_warn_on_crash("Last pull: commodity steps", check_last_pull_commodity_blocks, resolved_db))
 
     return results
 

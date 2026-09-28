@@ -1,30 +1,26 @@
 ---
 name: live-db-state-2026-09-16
-description: what data/raw/risk.db actually contains for marks/curves as of 2026-09-16, and why marks_official is empty
+description: what data/raw/risk.db and data/raw/sample.db contain on this dev PC (no terminal): risk.db empty since the 2026-09-28 macro-book backup; sample.db carries every product kind with synthetic marks but no curve_quotes / contract_static / Greeks
 metadata:
   type: project
 ---
 
-Checked 2026-09-16 against `data/raw/risk.db`: `marks` has 33 rows, all `source='BNP_BVAL'`
-(19 FWD_OUTRIGHT + 14 SPOT). BNP_BVAL is reconciliation-only per CLAUDE.md, never official,
-so `marks_official` (a view keyed on `OFFICIAL_MARK_SOURCE`) returns **zero rows**. No row
-in `marks` has ever come from `BBG_BFXFORWARD` or `BBG_BDH` — i.e. `data/bloomberg/pull_marks.py`
-/ `live.py` (which write those sources) have never successfully run against a real terminal
-on this machine; only the BNP CSV parser (`data/bloomberg/bnp_marks.py`, reconciliation path)
-has ever populated `marks`. `curves` and `curve_quotes` are both empty (0 rows); `trades` has
-229 rows but 0 with `product='IRS'` (xlsx IRS ingest not wired yet — matches
-[[no-live-pipeline-caller-2026-09-16]] from rates-pricer's audit, confirmed independently).
+Dev-PC database content, re-checked 2026-09-28 (supersedes the 2026-09-16 snapshot, when
+`marks` held 33 BNP_BVAL rows and 229 macro trades; those were purged / backed up to
+`risk.db.backup-2026-09-28-henry-macro-book`):
 
-This is a snapshot of DB *content*, not a code gap — the pipeline code
-(`data/bloomberg/pull_marks.py`, `live.py`, `bnp_marks.py`) itself is fine; it just has
-never been run live with a working blpapi/terminal connection on this dev machine, and no
-xlsx IRS parser has fed `trades` yet. Re-check `SELECT source, mark_type, COUNT(*) FROM marks
-GROUP BY 1,2` before assuming this is still true in a later session — it will change as soon
-as someone runs `pull_marks.py`/`live.py` against a real terminal, or the new xlsx-IRS parser
-lands.
+- `data/raw/risk.db`: 0 trades, 0 marks, no `contract_static` table. Every coverage check
+  gives its "nothing of that kind" pass row. Its status file
+  (`risk.db.bloomberg_status.json`, 2026-09-18) records a pull that never connected, so
+  every "last pull" check reads "not yet exercised".
+- `data/raw/sample.db` (built by the in-app "View the sample book", 2026-09-28): 29 FUTURE,
+  4 CMDTY_OPTION (one expired), 3 LME_FWD (one past prompt), 8 FX_FWD, 5 FX_OPTION, 1
+  FX_SPOT. Marks 2025-12-31..today: BBG_BDH FUTURE_PX (options' own price included),
+  BBG_BFXFORWARD SPOT / FWD_OUTRIGHT (LME pillars too), QL DELTA / PREMIUM for the FX
+  options only. No GAMMA / THETA / VEGA, no `curve_quotes`, no `contract_static`, no LME
+  BBG_INTERP prompt rows, no status file -- so it is the right DB to see every commodity
+  warning row fire without a terminal.
 
-**How to apply**: when auditing "does Bloomberg data flow end-to-end", always check actual
-`marks`/`marks_official`/`curve_quotes` row counts and sources first (`sqlite3` query, or
-`py -3 tools/bbg_diagnostics.py`) rather than assuming code presence means data presence —
-on this dev machine the code paths for BBG_BFXFORWARD/BBG_BDH/QL_PRICER have code but zero
-live rows; only the BNP reconciliation path has ever actually run.
+**How to apply**: never read "fast" or "blank" on risk.db as saying anything about the
+live app (CLAUDE.md guard rail). Use sample.db to exercise the panel's commodity rows; check
+`SELECT source, mark_type, COUNT(*) FROM marks GROUP BY 1,2` before trusting this note again.

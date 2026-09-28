@@ -207,7 +207,9 @@ PREV = "2026-09-18"
 @pytest.fixture
 def book_is_today(monkeypatch):
     from data.bloomberg import live
-    monkeypatch.setattr(live, "book_today", lambda: dt.date(2026, 9, 21))
+    # `now=None` so that `ui.tabs.controls.today_ny(now)`, which binds `book_today` by name at
+    # its first import, still works when that import happens inside one of these tests.
+    monkeypatch.setattr(live, "book_today", lambda now=None: dt.date(2026, 9, 21))
 
 
 def _instrument(conn, instrument_id, asset_class, base, quote, multiplier=1, expiry="9999-12-31", ticker=None):

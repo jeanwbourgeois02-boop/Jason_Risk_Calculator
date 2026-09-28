@@ -49,7 +49,10 @@ Removed from the previous version of this tab: the whole-book inventory table an
 old detailed Bloomberg diagnostics panel (still reachable via `2_launcher.py doctor`). The
 "Check Bloomberg connection" button (click-only pass/fail/warning check) moved here
 from `ui/tabs/header.py` on 2026-09-16 (user decision: it belongs on this tab only,
-not shown above every tab) -- see `BBG_CHECK_BUTTON_ID` / `BBG_RESULTS_ID` below.
+not shown above every tab) -- see `BBG_CHECK_BUTTON_ID` / `BBG_RESULTS_ID` below. It
+calls `tools/bbg_diagnostics.py::run_bloomberg_diagnostics` through the
+`data.bloomberg.bbg_diagnostics` shim (`run_bloomberg_diagnostics_safe`); the placeholder
+that stood in before that module landed is gone.
 `feed_headline`
 and `backfill_headline` are folded into the single top-bar status line.
 `diagnostics_panel` is still defined but no screen renders it any more (no caller left).
@@ -86,7 +89,6 @@ row read before the purge is never shown under a bare code.
 """
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
@@ -848,127 +850,11 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
 # Moved here from ui/tabs/header.py on 2026-09-16 (user decision: the "Check Bloomberg
 # connection" button belongs on the Market Data tab only, not shown above every tab).
 #
-# EXPECTED INTERFACE (for the housekeeper to wire up once bbg-diagnostics lands):
-#
-#     data.bloomberg.bbg_diagnostics.run_bloomberg_diagnostics() -> list[dict]
-#
-# where each dict is:
-#     {"name": str, "status": "pass" | "fail" | "warning", "message": str}
-#
-# "name" is a short check label (e.g. "Session connectivity", "SPOT marks official
-# source"), "message" is a one-sentence plain-English explanation (no raw exceptions
-# or tracebacks -- those must be caught and summarised by the diagnostics module
-# itself). This module never surfaces a traceback to the page; see
-# `run_bloomberg_diagnostics_safe` below for the failure path.
-#
-# Until that module exists, `_run_bloomberg_diagnostics_placeholder` below is used
-# instead: a minimal, best-effort check built only from what data/bloomberg already
-# exposes today (`live.availability` for a live session probe, `live.read_status` for
-# the last completed pull). It intentionally does NOT attempt to classify
-# marks_official correctness -- that enumeration is bbg-diagnostics' job.
-
-
-def _bbg_diagnostics_entry_point():
-    """Returns the best diagnostics function available: the real bbg-diagnostics
-    output if that module has landed, otherwise the local placeholder. Import is
-    lazy and wrapped so a partially-built module on someone else's branch can never
-    break this tab."""
-    try:
-        from data.bloomberg.bbg_diagnostics import run_bloomberg_diagnostics as real_fn
-        return real_fn
-    except ImportError:
-        return _run_bloomberg_diagnostics_placeholder
-
-
-def _run_bloomberg_diagnostics_placeholder() -> list:
-    """Placeholder standing in for the future `data.bloomberg.bbg_diagnostics.
-    run_bloomberg_diagnostics()`. Reports what today's data/bloomberg module can
-    already tell us: whether a live session can be opened, and what the last
-    completed pull (`data.bloomberg.live` status file) recorded. Never raises --
-    any failure to even check becomes a single "fail" row with a plain-English
-    message."""
-    checks = []
-    try:
-        from data.bloomberg.live import availability
-        host = os.environ.get("BLP_HOST", "localhost")
-        port = int(os.environ.get("BLP_PORT", "8194"))
-        ok, reason = availability(host=host, port=port)
-        checks.append({
-            "name": "Bloomberg session connectivity",
-            "status": "pass" if ok else "fail",
-            "message": ("Connected to the Bloomberg API session." if ok
-                        else f"Could not reach Bloomberg: {reason}."),
-        })
-    except Exception:
-        checks.append({
-            "name": "Bloomberg session connectivity",
-            "status": "fail",
-            "message": "Could not reach Bloomberg (connection check itself failed to run).",
-        })
-
-    try:
-        from data.bloomberg.live import read_status, book_today
-        from ui.app import get_db_path
-        db_path = get_db_path()
-        status = read_status(db_path)
-        if status is None:
-            checks.append({
-                "name": "Last marks pull",
-                "status": "warning",
-                "message": "No Bloomberg pull has run yet on this database.",
-            })
-        elif status.get("connected"):
-            # A pull that reported connected=True with requested=0 is only trustworthy at
-            # the instant it ran: build_requests() found nothing to price then, but trades
-            # uploaded since (before the next scheduled pull) can make marks needed right
-            # now that this stale status never asked for. Found on the Bloomberg PC
-            # 2026-09-17 -- see data.bloomberg.inventory.stale_empty_pull_reason.
-            stale_reason = None
-            try:
-                from data.bloomberg.inventory import stale_empty_pull_reason
-                as_of = status.get("as_of_date") or book_today().isoformat()
-                conn = _connect_readonly(db_path)
-                try:
-                    stale_reason = stale_empty_pull_reason(conn, status, as_of)
-                finally:
-                    conn.close()
-            except Exception:
-                pass  # cannot verify freshness right now; fall back to the plain PASS below
-            if stale_reason:
-                checks.append({
-                    "name": "Last marks pull",
-                    "status": "fail",
-                    "message": f"Last pull at {status.get('time', 'an unknown time')} looks stale: {stale_reason}",
-                })
-            else:
-                checks.append({
-                    "name": "Last marks pull",
-                    "status": "pass",
-                    "message": f"Last pull at {status.get('time', 'an unknown time')} wrote "
-                               f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks.",
-                })
-        else:
-            checks.append({
-                "name": "Last marks pull",
-                "status": "fail" if status.get("failed") else "warning",
-                "message": f"Last pull did not connect: {status.get('reason', 'unknown reason')}.",
-            })
-    except Exception:
-        checks.append({
-            "name": "Last marks pull",
-            "status": "warning",
-            "message": "Could not read the last pull status.",
-        })
-
-    checks.append({
-        "name": "marks_official coverage",
-        "status": "warning",
-        "message": "Detailed checks of official vs reconciliation-only marks sources "
-                   "(BNP_BVAL, MANUAL for FX marks) are not available yet; this placeholder does "
-                   "not enumerate them. Interpolated broken-date forwards (BBG_INTERP) are "
-                   "official for FWD_OUTRIGHT since 2026-09-18.",
-    })
-    return checks
+# The button runs `tools/bbg_diagnostics.py::run_bloomberg_diagnostics` through the
+# `data.bloomberg.bbg_diagnostics` shim: a list of dicts, each
+# {"name": str, "status": "pass" | "fail" | "warning", "message": str}, the message a
+# one-sentence plain-English explanation. This module never surfaces a traceback to the
+# page; see `run_bloomberg_diagnostics_safe` below for the failure path.
 
 
 _STATUS_LABELS = {"pass": "PASS", "fail": "FAIL", "warning": "WARNING"}
@@ -990,13 +876,14 @@ def _render_bbg_results(checks: list) -> html.Div:
 
 
 def run_bloomberg_diagnostics_safe() -> list:
-    """Runs whichever diagnostics function is available (real or placeholder) with a
-    hard safety net: any exception is caught here and turned into a single plain
-    "could not reach Bloomberg" row rather than a crash or a traceback on the page.
-    This never blocks app startup or other tabs -- it only runs on button click."""
+    """Runs `tools/bbg_diagnostics.py::run_bloomberg_diagnostics` (through the
+    `data.bloomberg.bbg_diagnostics` shim) with a hard safety net: any exception, an
+    ImportError included, is caught here and turned into a single plain "could not reach
+    Bloomberg" row rather than a crash or a traceback on the page. The import is lazy, so
+    the module always imports; it only runs on button click and never blocks start-up."""
     try:
-        fn = _bbg_diagnostics_entry_point()
-        result = fn()
+        from data.bloomberg.bbg_diagnostics import run_bloomberg_diagnostics
+        result = run_bloomberg_diagnostics()
         if not isinstance(result, list):
             raise TypeError("diagnostics function did not return a list")
         return result

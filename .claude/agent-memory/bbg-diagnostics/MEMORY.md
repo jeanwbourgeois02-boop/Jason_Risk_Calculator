@@ -1,2 +1,2 @@
-- [Live DB state 2026-09-16](live-db-state-2026-09-16.md) — marks table has only BNP_BVAL rows; marks_official is empty; curves/curve_quotes empty; 0 IRS trades
-- [Diagnostics tool already built](diagnostics-tool-already-built.md) — tools/bbg_diagnostics.py + data/bloomberg/bbg_diagnostics.py wired live to the UI "Check Bloomberg connection" button, don't rebuild
+- [Dev DB state 2026-09-28](live-db-state-2026-09-16.md) — risk.db empty; sample.db has every product kind, no curve_quotes/contract_static/Greeks: use it to exercise the commodity rows
+- [Diagnostics tool already built](diagnostics-tool-already-built.md) — tools/bbg_diagnostics.py wired to the UI button; commodity checks added 2026-09-28; extend, don't rebuild; severity rules
