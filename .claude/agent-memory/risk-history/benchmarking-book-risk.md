@@ -12,5 +12,7 @@ Timing `engine/risk/metrics.py::book_risk` on the sample book (`tests/golden_boo
 - **Identity.** Pickle `book_risk`'s output before and after and compare recursively (NaN-equal floats, `assert_series_equal(check_exact=True)`, attrs).
 - Result that day: before 5.9-10 s per call, after 2-4 s cold and 1.1-1.8 s warm; what is left is spreads-engine's `book_spreads` (~0.5 s) and `series_metrics` (~0.4 s).
 
+- 2026-09-28: the SQL of `_root_prices` is cheap (57k rows in 60-80 ms raw); the per-root cost is pandas (`read_sql_query` frame build ~35 ms a root, `pivot_table` > `pivot`). Reading the whole `price_daily` (1.5M rows) takes 18 s, so any batch must be the book's roots only (`prefetch_roots`). One batched read of the sample's 19 roots saves ~0.25 s of a ~2.3 s cold `book_risk`: the rest is not in my files.
+
 **Why:** a wrong baseline would have reported a slowdown or hidden the win.
 **How to apply:** any future speed claim about my files. See [[research-db-quirks]].

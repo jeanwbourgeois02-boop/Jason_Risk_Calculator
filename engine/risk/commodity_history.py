@@ -71,7 +71,8 @@ caller. Every series carries `attrs["reason"]` ('' when it has data).
 The result is cached per (path, the database's and its WAL file's mtime and size): in
 WAL mode the main file's mtime does not move on a write until a checkpoint, so the WAL
 file is part of the key. Inside that cached object, and so per database identity, are
-kept: the settlements read per root, the constant-maturity frame per (root, months ahead)
+kept: the settlements read per root (one query per root, or one query for many roots through
+`prefetch_roots`), the constant-maturity frame per (root, months ahead)
 and each position's P&L per argument set (2026-09-25: the Risk tab and the header's VaR
 chip rebuilt them on every call, about 11 s of a 14 s `book_risk`). A changed database
 is a new object, so nothing kept outlives the data it was built from.
@@ -204,6 +205,44 @@ class CommodityHistory:
         return year + 10 if year < ref - 1 else year
 
     # ------------------------------------------------------------------ prices
+    @staticmethod
+    def _wide(df: pd.DataFrame) -> pd.DataFrame:
+        """date x contract_id of RAW settles from long rows (contract_id, date, settle) with
+        `date` already a datetime. A plain pivot: (contract_id, date) is `price_daily`'s primary
+        key, so no two rows ever share a cell."""
+        if df.empty:
+            wide = pd.DataFrame(index=pd.DatetimeIndex([], name="date"))
+        else:
+            wide = df.pivot(index="date", columns="contract_id", values="settle").sort_index()
+            wide.index.name = "date"
+        return wide.astype(float)
+
+    def prefetch_roots(self, root_ids) -> None:
+        """Read the settlements of several roots in ONE query (our root ids or the research
+        app's, e.g. the roots of every position the Risk tab is about to ask for) into the same
+        per-root store `_root_prices` fills one root at a time, so a later call per root is
+        served from memory. Roots already read or not in the research database are left alone.
+        A read that fails is not kept and raises nothing: each root then reads on its own and
+        reports its reason there."""
+        if not self.available:
+            return
+        wanted = sorted({_norm(r).replace(" ", "") for r in root_ids} - set(self._roots))
+        wanted = [r for r in wanted if r in self.instruments.index]
+        if not wanted:
+            return
+        try:
+            df = _query(Path(self.path),
+                        "SELECT c.instrument_id, p.contract_id, p.date, p.settle FROM price_daily p "
+                        "JOIN contract c ON c.contract_id = p.contract_id WHERE c.instrument_id IN ("
+                        + ",".join("?" * len(wanted)) + ")", tuple(wanted))
+        except Exception:  # noqa: BLE001 -- the per-root read will give the reason
+            return
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+        parts = {root: part.drop(columns="instrument_id") for root, part in df.groupby("instrument_id", sort=False)}
+        for root in wanted:
+            self._roots[root] = self._wide(parts.get(root, df.iloc[0:0]))
+
     def _root_prices(self, root_id: str) -> pd.DataFrame:
         """date x contract_id of RAW settles for one root (research ids), memoised. A read that
         fails gives an empty frame with `attrs['reason']`, not memoised."""
@@ -217,13 +256,9 @@ class CommodityHistory:
                 wide = pd.DataFrame(index=pd.DatetimeIndex([], name="date"))
                 wide.attrs["reason"] = f"{self.path} could not be read ({type(exc).__name__}: {exc})"
                 return wide
-            if df.empty:
-                wide = pd.DataFrame(index=pd.DatetimeIndex([], name="date"))
-            else:
+            if not df.empty:
                 df["date"] = pd.to_datetime(df["date"])
-                wide = df.pivot_table(index="date", columns="contract_id", values="settle", aggfunc="last").sort_index()
-                wide.index.name = "date"
-            self._roots[root_id] = wide.astype(float)
+            self._roots[root_id] = self._wide(df)
         return self._roots[root_id]
 
     def _raw_settles(self, research_id: str) -> pd.Series:
