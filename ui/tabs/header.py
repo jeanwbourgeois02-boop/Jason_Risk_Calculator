@@ -346,7 +346,9 @@ def _picker_card() -> html.Div:
     place the as-of changes (CLAUDE.md "Tabs as views")."""
     return html.Div(className="header-figure header-asof", children=[
         html.Div(AS_OF_TITLE, className="header-figure-title"),
-        dcc.DatePickerSingle(id=DATE_PICKER_ID, date=today_ny(), display_format="ddd D MMM YYYY",
+        # Dash 4.4's own picker (no react-dates): it maps the moment tokens D, DD, Do, YY, YYYY and
+        # dd and hands the rest to date-fns, so the weekday is EEE ("Mon"); "ddd" rendered "Mo28".
+        dcc.DatePickerSingle(id=DATE_PICKER_ID, date=today_ny(), display_format="EEE D MMM YYYY",
                              first_day_of_week=1, number_of_months_shown=1, clearable=False),
     ])
 

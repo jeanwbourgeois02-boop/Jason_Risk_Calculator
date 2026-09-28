@@ -12,6 +12,8 @@ exposure must be seen", sort trades by trade type and instrument type. What is n
 
 - **Book** (`ui/tabs/book.py`): `GROUP_OPTIONS` = Commodity (default, `DEFAULT_GROUP`) | Strategy |
   Type | Instrument; `GROUP_SECTOR` is gone (a stale session value falls back to the default).
+  **Superseded the same evening** by [[book-strategy-rejig-2026-09-28]]: Strategy is the default
+  and shows legs under each strategy, the Type view and Type column are gone (hover + drawer).
   `book_rows(data, by)`: the Commodity view is `contract_rows` (one row per open contract, LME per
   prompt, trades netted across strategies, kind "contract", id `CONTRACT-<inst>[-<prompt>]`); every
   other view keeps the position rows (a strategy = kind "spread" with `hand == "strategy"`, id

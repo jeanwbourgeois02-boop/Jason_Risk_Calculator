@@ -542,23 +542,19 @@ p { margin: 8px 0; }
 .header-figure-value { margin-top: 1px; }
 .header-asof { min-width: 150px; }
 .header-asof .header-figure-title { margin-bottom: 1px; }
-.header-asof .SingleDatePickerInput { border: none; background: transparent; }
-.header-asof .SingleDatePickerInput__withBorder { border: none; }
-.header-asof .DateInput { width: 150px; background: #fff; border-radius: 4px; position: relative; }
-/* the picker keeps its white box: navy text on it, never the header's white (seen white on white, 2026-09-28) */
-.header-block .DateInput_input, .header-asof .DateInput_input { font-family: inherit; font-size: 14px; font-weight: 700;
-  color: var(--navy); background: #fff; padding: 2px 20px 2px 8px; border: none; border-radius: 4px;
-  border-bottom: 2px solid transparent; cursor: pointer; font-variant-numeric: tabular-nums; }
-.header-block .DateInput_input::placeholder { color: var(--navy); opacity: .55; }
-.header-block .DateInput_input__focused { border-bottom: 2px solid var(--gold); color: var(--navy); }
-/* the caret: an <input> draws no ::after, so it sits on the box itself */
-.header-asof .DateInput::after { content: "\25BE"; position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
-  color: var(--navy); font-size: 12px; pointer-events: none; }
-.header-asof .DateInput_fang { display: none; }
-.header-asof .SingleDatePicker_picker { z-index: 40; }
-.header-asof .CalendarDay__selected, .header-asof .CalendarDay__selected:hover { background: var(--navy); border-color: var(--navy); }
-.header-asof .CalendarDay:hover { background: #eef1f7; }
-.header-asof .DayPickerKeyboardShortcuts_show { display: none; }
+/* Dash 4.4 renders its own date picker (classes .dash-datepicker-*, no react-dates): the picker keeps its
+   white box with navy text on it, never the header's white (seen white on white, 2026-09-28: the earlier
+   .DateInput_input rules matched nothing on this Dash). Its calendar opens in a portal outside the header
+   and keeps the component's own palette. */
+.header-asof .dash-datepicker { width: 150px; background: #fff; border-radius: 4px; color: var(--navy); }
+.header-asof .dash-datepicker-input-wrapper { border: none; border-radius: 4px; background: #fff; padding: 0 8px;
+  min-height: 28px; cursor: pointer; box-shadow: inset 0 -2px 0 transparent; }
+.header-asof .dash-datepicker-input-wrapper:focus-within { border: none; box-shadow: inset 0 -2px 0 var(--gold); }
+.header-asof .dash-datepicker-input-wrapper:has(:focus-visible) { outline: none; }
+.header-asof .dash-datepicker-input { height: 28px; font-size: 14px; font-weight: 700; color: var(--navy); background: #fff;
+  cursor: pointer; font-variant-numeric: tabular-nums; }
+.header-asof .dash-datepicker-input::placeholder { color: var(--navy); opacity: .55; }
+.header-asof .dash-datepicker-caret-icon { color: var(--navy); }
 .header-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid rgba(255,255,255,.35);
   border-radius: 12px; padding: 3px 10px; font-size: 11px; color: #fff; white-space: nowrap; cursor: help; margin-left: 6px; }
 .header-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: 0 0 8px; }
@@ -596,6 +592,17 @@ p { margin: 8px 0; }
 .book-table tr.book-group td { background: #f3f5f9; font-weight: 600; color: var(--navy); padding-top: 5px; padding-bottom: 5px; }
 .book-table tr.book-total td { font-weight: 700; border-top: 2px solid var(--navy); background: #fff; font-size: 13px; }
 .book-table .book-note { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
+/* 2026-09-28: the group line's words after its name (a commodity's net exposure, a strategy's legs) and the
+   strategy's type; the tiles over the table */
+.book-table .book-net-line { margin-left: 2px; font-weight: 400; font-size: 12px; color: #4b5563; }
+.book-table .book-net-line .marker { font-weight: 400; }
+.book-table .book-strategy-type { margin-left: 10px; font-weight: 400; font-size: 11px; color: var(--muted); text-transform: none; }
+.book-table .book-strategy-type.marker--amber { padding: 0 4px; border-radius: 3px; }
+.book-tiles { display: flex; gap: 8px; margin: 0 0 12px; flex-wrap: wrap; }
+.book-tile { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 7px 14px 8px; min-width: 150px; }
+.book-tile .k { font-size: 10.5px; color: var(--muted); letter-spacing: .03em; text-transform: uppercase; white-space: nowrap; }
+.book-tile .v { font-size: 15px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.book-tile .v .marker { font-size: 10px; vertical-align: middle; }
 .book-table td.book-name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .book-under { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
 .book-needs { flex: 0 0 640px; padding: 8px 14px 4px; }
