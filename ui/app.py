@@ -90,6 +90,49 @@ def tab_body_id(label: str) -> str:
     return f"tab-body-{TAB_KEYS[label]}"
 
 
+# Lazy tab bodies (2026-09-28, the page's first load fired every tab's render callback, six
+# full-book passes of 0.8-2.4 s in parallel, for five tabs nobody was looking at). A body's
+# `html.Div` is always in the layout (its id is what the show/hide callback and every tab link
+# key on), but only the first tab's layout is built with the page; the others are built the
+# first time their tab is selected (`build_tab_bodies`), and Dash then fires the callbacks whose
+# outputs the new layout holds, exactly as on a page load. The keys already built are kept in
+# the `TAB_BUILT_ID` store, so a tab is built once per page and keeps its state after that.
+TAB_BUILT_ID = "tab-built"
+TAB_BUILDERS = {
+    "book": book.build_layout,
+    "curve": curve.build_layout,
+    "pnl": pnl.build_layout,
+    "risk": risk.build_layout,
+    "blotter": blotter.build_layout,
+    "market-data": market_data.build_layout,
+}
+
+
+def tab_layout(key: str) -> html.Div:
+    """A tab's own layout, built now: today in New York is its default date (the header's
+    picker, `ui/tabs/header.py::DATE_PICKER_ID`, is the one place the as-of changes)."""
+    return TAB_BUILDERS[key](default_date=today_ny())
+
+
+def build_tab_bodies(selected, built) -> list:
+    """The lazy-build callback's outputs: for every visible tab its body's children (the tab's
+    layout when it is the selected tab and not built yet, else `dash.no_update`), then the
+    store's new list of built keys (`dash.no_update` when nothing was built). Pure, so a test can
+    call it without a server."""
+    built = [k for k in (built or []) if k in TAB_BUILDERS]
+    out = []
+    added = None
+    for label in VISIBLE_TABS:
+        key = TAB_KEYS[label]
+        if key == selected and key not in built:
+            out.append(tab_layout(key))
+            added = key
+        else:
+            out.append(dash.no_update)
+    out.append(built + [added] if added else dash.no_update)
+    return out
+
+
 def ensure_schema(path: Union[str, Path]) -> None:
     """Make sure the database and the Bloomberg status file exist so a fresh computer
     can launch with nothing copied across. Creates an EMPTY database with the schema
@@ -237,9 +280,11 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
     with the upload control pinned to its right; the P&L header sits directly under the
     tab bar, on every tab. Below that, every tab body lives in one always-present
     `html.Div(id="tab-bodies")`, each wrapped in its own `html.Div(id=tab_body_id(label))`
-    -- bodies never leave the layout, so every tab's own callbacks (registered against
-    ids inside their body) keep firing regardless of which tab is selected. One
-    show/hide callback (registered in `create_app`) toggles the bodies' `style` on
+    -- the wrappers never leave the layout, so a tab's own callbacks (registered against
+    ids inside their body) keep firing once built, regardless of which tab is selected. Since
+    2026-09-28 only the first tab's layout is built with the page; the lazy-build callback
+    (`build_tab_bodies`, in `create_app`) builds each other tab the first time it is selected.
+    One show/hide callback (registered in `create_app`) toggles the bodies' `style` on
     `main-tabs`' `value` (the selected tab's key, `TAB_KEYS`).
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
@@ -247,24 +292,15 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
     one picker of the app since 2026-09-28) into `header.AS_OF_STORE_ID`, which every tab reads.
 
     Defaults: today in New York everywhere (user, 2026-09-22: "always price pnl as of today")."""
-    snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     today = today_ny()
-    tab_builders = {
-        "book": book.build_layout,
-        "curve": curve.build_layout,
-        "pnl": pnl.build_layout,
-        "risk": risk.build_layout,
-        "blotter": blotter.build_layout,
-        "market-data": market_data.build_layout,
-    }
     # Every tab names today: the header's picker (ui/tabs/header.py::DATE_PICKER_ID) is the one
     # place the as-of changes since 2026-09-28; the Trades and Data tabs read the header's store.
-    tab_defaults = {key: today for key in tab_builders}
-    del snapshot_date  # the last uploaded trade date: no tab opens on it any more
+    # The last uploaded trade date (`data["as_of_date"]`) opens no tab any more.
+    first = TAB_KEYS[VISIBLE_TABS[0]]
     tabs = [dcc.Tab(label=label, value=TAB_KEYS[label], className="tab", selected_className="tab--selected")
             for label in VISIBLE_TABS]
     bodies = [
-        html.Div(tab_builders[TAB_KEYS[label]](default_date=tab_defaults[TAB_KEYS[label]]),
+        html.Div(tab_layout(TAB_KEYS[label]) if TAB_KEYS[label] == first else None,
                  id=tab_body_id(label), className="tab-body")
         for label in VISIBLE_TABS
     ]
@@ -276,6 +312,7 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
         ]),
         header.layout(),
         html.Div(id="tab-bodies", children=bodies),
+        dcc.Store(id=TAB_BUILT_ID, data=[first]),
         dcc.Store(id=header.AS_OF_STORE_ID, data=today),
         dcc.Store(id=header.AS_OF_PICKED_ID, data=False),
         # "The data changed" signal (ui/revision.py): every tab listens, so an upload or a
@@ -376,6 +413,12 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     app.callback(*body_outputs, Input(MAIN_TABS_ID, "value"))(
         lambda selected: [{} if TAB_KEYS[label] == selected else {"display": "none"} for label in VISIBLE_TABS]
     )
+
+    # Build a tab's layout the first time it is selected (`TAB_BUILT_ID` above): the page loads
+    # with the first tab alone, so only its callbacks (and the header's) run on load.
+    app.callback(*[Output(tab_body_id(label), "children") for label in VISIBLE_TABS],
+                 Output(TAB_BUILT_ID, "data"),
+                 Input(MAIN_TABS_ID, "value"), State(TAB_BUILT_ID, "data"))(build_tab_bodies)
 
     # A tab's name on another screen is a link (user, 2026-09-25: "make tab names in the
     # screens clickable links"): one callback on every tab link, by pattern, so a link a
