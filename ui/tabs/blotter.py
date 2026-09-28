@@ -134,8 +134,8 @@ from ui.tabs.controls import today_ny
 from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import (
-    MISSING, about, format_cell, is_fx_pair, issues_drawer, marker, price_text, quoted_unit, short_money,
-    short_root_name, trade_type_words,
+    MISSING, about, format_cell, is_fx_pair, issues_drawer, marker, plain_words, price_text, quoted_unit,
+    short_money, short_root_name, trade_type_words,
 )
 
 # The tab's own date picker and title row left on 2026-09-28 (the screens tidy): the header's
@@ -368,16 +368,17 @@ def _text(value) -> str:
 
 
 def _mark_tip(mark, reason, settled: bool, source, note) -> str:
-    """The Mark cell's hover: the mark's source ("BBG_BDH", or "INTERP: ..." naming the
-    near marks it was estimated from) and the row's note (a fill from an earlier close says
-    so); with no mark, why (the row's own reason, or that a settled trade is frozen). The
+    """The Mark cell's hover: the mark's source ("Bloomberg history", or "estimated from ..."
+    naming the near marks it was estimated from) and the row's note (a fill from an earlier
+    close says so); with no mark, why (the row's own reason, or that a settled trade is
+    frozen). Every part is in plain words (`plain_words`: no mark type or source code). The
     row's `mark_date` is the date the mark is keyed on (a future's expiry, a leg's value
     date), not the close it was taken on, so it is not offered as "dated" here."""
-    note = _text(note)
+    note = plain_words(_text(note))
     if mark is None:
-        why = _text(reason) or (SETTLED_MARK_REASON if settled else "no mark on this row")
+        why = plain_words(_text(reason)) or (SETTLED_MARK_REASON if settled else "no mark on this row")
         return f"{why}. {note}" if note and note not in why else why
-    return "; ".join(t for t in (_text(source), note) if t) or "the mark the valuation used"
+    return "; ".join(t for t in (plain_words(_text(source)), note) if t) or "the mark the valuation used"
 
 
 def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
@@ -420,7 +421,7 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
                 rec[col] = abs(round(value)) if (col == "quantity" and isinstance(value, float)) else value
         if "trade_id" in df.columns:
             rec.setdefault("trade_id", df["trade_id"].iloc[i])
-        reason = reasons.iloc[i] if i < len(reasons) else ""
+        reason = plain_words(reasons.iloc[i] if i < len(reasons) else "")
         tip = {}
         if reason and rec.get("pnl_usd") is None:
             tip["pnl_usd"] = {"value": reason, "type": "text"}
@@ -436,7 +437,7 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
             tip["mark"] = {"value": _mark_tip(rk.value(rec["mark"]), reason, settled, mark_sources[i], notes[i]),
                            "type": "text"}
         if "prev_close" in rec and prev_tips[i]:
-            tip["prev_close"] = {"value": str(prev_tips[i]), "type": "text"}
+            tip["prev_close"] = {"value": plain_words(str(prev_tips[i])), "type": "text"}
         if "commodity" in rec and long_names[i] and str(long_names[i]) != str(rec["commodity"]):
             tip["commodity"] = {"value": f"{long_names[i]} ({rec.get('exchange') or ''})".replace(" ()", ""), "type": "text"}
         if "trade_type" in rec:
@@ -1196,14 +1197,16 @@ def mark_used_text(row) -> str:
     it is the date the mark is keyed on (a future's expiry, an LME ticket's prompt, an FX leg's
     value date), not the close the price came from, so it reads "keyed on the expiry <d>". On a
     settled row it is the date of the price the ledger froze the trade at; on a closed-out
-    option, the close-out date. With no mark, the row's reason, never a bare "nan"."""
-    mark, source = row.get("mark"), _text(row.get("mark_source"))
+    option, the close-out date. With no mark, an em dash and the row's reason, never a bare
+    "nan". The source and the reason are in plain words (`plain_words`: "Bloomberg history",
+    "no official futures price"), never a mark type or source code."""
+    mark, source = row.get("mark"), plain_words(_text(row.get("mark_source")))
     day, status = _text(row.get("mark_date")), _text(row.get("status"))
     if mark is None or (isinstance(mark, float) and mark != mark):
-        why = _text(row.get("reason")) or (SETTLED_MARK_REASON if status == "SETTLED" else "no mark on this row")
+        why = plain_words(_text(row.get("reason"))) or (SETTLED_MARK_REASON if status == "SETTLED" else "no mark on this row")
         if status == "SETTLED" and day and not _text(row.get("reason")):
             why += f"; frozen at the official price of {day}"
-        return f"n/a ({why})"
+        return f"{MISSING} ({why})"
     if status == "SETTLED":
         when = f"frozen at the official price of {day}" if day else "frozen"
     elif status == "CLOSED":
@@ -1221,7 +1224,7 @@ def row_expand_panel(conn: sqlite3.Connection, trade_id: str, row: pd.Series) ->
         "FROM trade_legs WHERE trade_id = ? ORDER BY leg_no", conn, params=(trade_id,))
     marks_used = html.P(
         f"Mark: {mark_used_text(row)} · "
-        f"Spot: {row.get('spot')} ({row.get('spot_source')})",
+        f"Spot: {row.get('spot')} ({plain_words(_text(row.get('spot_source'))) or 'no spot source'})",
         className="blotter-row-marks", style={"fontSize": "12px", "margin": "2px 0"},
     )
     return html.Div(className="blotter-row-expand", children=[
@@ -1503,12 +1506,13 @@ def add_prev_close(conn: sqlite3.Connection, df: pd.DataFrame, as_of: str) -> pd
         mark = rk.value(r.get("mark"))
         values.append(float("nan") if mark is None else mark)
         if mark is None:
-            why = _text(r.get("reason")) or (f"settled by the {t1} close: frozen at settlement, no longer marked"
-                                             if r.get("status") == "SETTLED" else f"no mark on the {t1} close")
+            why = plain_words(_text(r.get("reason"))) or (f"settled by the {t1} close: frozen at settlement, no longer marked"
+                                                          if r.get("status") == "SETTLED" else f"no mark on the {t1} close")
             tips.append(why)
         else:
-            said = f"{t1} close" + (f", {_text(r.get('mark_source'))}" if _text(r.get("mark_source")) else "")
-            note = _text(r.get("note"))
+            source = plain_words(_text(r.get("mark_source")))
+            said = f"{t1} close" + (f", {source}" if source else "")
+            note = plain_words(_text(r.get("note")))
             tips.append(f"{said}; {note}" if note else said)
     df["prev_close"], df["prev_close_tip"] = values, tips
     return df

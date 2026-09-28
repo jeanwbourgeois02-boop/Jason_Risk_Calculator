@@ -129,7 +129,7 @@ _PLAIN_PHRASES: Tuple[Tuple[str, str], ...] = (
     ("INTERP: ", "estimated: "),
     ("(QL_OPTIONS_PRICER)", "(the app's option pricer)"), ("QL_OPTIONS_PRICER", "the app's option pricer"),
     ("BBG_BFXFORWARD", "Bloomberg"), ("BBG_BDH", "Bloomberg history"), ("BBG_BDP", "Bloomberg live"),
-    ("BBG_INTERP", "Bloomberg curve, interpolated"),
+    ("BBG_INTERP", "Bloomberg curve, interpolated"), ("CLOSE_OUT_FILL", "the closing fill"),
     ("spreads-engine's usd_per_unit", "the $ per unit"), ("spreads-engine gave no", "no"),
     ("spreads-engine could not group", "could not be grouped into a spread"),
     ("(spreads-engine)", ""), ("spreads-engine", "the spread rule"),

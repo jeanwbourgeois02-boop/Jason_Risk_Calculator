@@ -270,8 +270,10 @@ def test_total_book_missing_figures_say_why_and_are_listed_in_the_data_issues_dr
         layout, table, rows = _total_table(conn)
         hg, tip = rows["H1"]
         assert hg["mark"] == blotter.MISSING and hg["pnl_usd"] is None and hg["prev_close"] == blotter.MISSING   # an em dash, never 0
-        assert "no FUTURE_PX" in tip["mark"]["value"] and "no FUTURE_PX" in tip["pnl_usd"]["value"]
-        assert "no FUTURE_PX" in tip["prev_close"]["value"]
+        # plain words on every hover (2026-09-28): "no price mark for ...", never the mark type
+        assert "no price" in tip["mark"]["value"] and "no price" in tip["pnl_usd"]["value"]
+        assert "no price" in tip["prev_close"]["value"]
+        assert "FUTURE_PX" not in tip["mark"]["value"] + tip["pnl_usd"]["value"] + tip["prev_close"]["value"]
         drawer = next(n for n in _walk(layout) if getattr(n, "id", None) == blotter.TOTAL_ISSUES_ID)
         assert drawer.open is False and drawer.children[0].children == "Data issues (1)"
         assert "H1" in _texts(drawer)
@@ -323,16 +325,16 @@ def test_the_row_panel_words_the_mark_date_for_what_it_is():
     """value_book's mark_date on an open row is the key the mark is read at, never the close it
     came from; on a settled row it is the frozen price's date; with no mark, the reason."""
     fut = {"mark": 70.0, "mark_source": "BBG_BDH", "mark_date": "2026-11-19", "status": "OPEN", "product": "FUTURE"}
-    assert blotter.mark_used_text(fut) == "70.0 (BBG_BDH; keyed on the expiry 2026-11-19)"
+    assert blotter.mark_used_text(fut) == "70.0 (Bloomberg history; keyed on the expiry 2026-11-19)"
     lme = {**fut, "product": "LME_FWD", "mark_date": "2026-09-16", "mark_source": "BBG_BFXFORWARD"}
-    assert blotter.mark_used_text(lme) == "70.0 (BBG_BFXFORWARD; keyed on the prompt 2026-09-16)"
+    assert blotter.mark_used_text(lme) == "70.0 (Bloomberg; keyed on the prompt 2026-09-16)"
     fwd = {**fut, "product": "FX_FWD", "mark_date": "2026-09-20"}
     assert "keyed on the value date 2026-09-20" in blotter.mark_used_text(fwd)
     settled = {**fut, "status": "SETTLED", "mark_date": "2026-06-16"}
-    assert blotter.mark_used_text(settled) == "70.0 (BBG_BDH; frozen at the official price of 2026-06-16)"
+    assert blotter.mark_used_text(settled) == "70.0 (Bloomberg history; frozen at the official price of 2026-06-16)"
     frozen = {**settled, "mark": float("nan"), "reason": ""}
-    assert blotter.mark_used_text(frozen) == (f"n/a ({blotter.SETTLED_MARK_REASON}; "
+    assert blotter.mark_used_text(frozen) == (f"{blotter.MISSING} ({blotter.SETTLED_MARK_REASON}; "
                                               "frozen at the official price of 2026-06-16)")
     unpriced = {**fut, "mark": float("nan"), "mark_date": "", "reason": "no official FUTURE_PX"}
-    assert blotter.mark_used_text(unpriced) == "n/a (no official FUTURE_PX)"
+    assert blotter.mark_used_text(unpriced) == f"{blotter.MISSING} (no official futures price)"
     assert "dated" not in blotter.mark_used_text(fut)

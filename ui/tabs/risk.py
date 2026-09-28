@@ -111,7 +111,7 @@ RETIRED_HISTORY_FILES = ("swap_rates",)      # the rates rows' par swap rate his
 SCENARIO_KIND_LABELS = {"outright": "Outright", "curve": "Curve", "spread": "Spread", "fx": "FX", "replay": "Replay"}
 MARGIN_BASIS = "estimate, not exchange SPAN"
 # limit levels (engine.limits.checks) as shown, and their colours: the Expiries tab's palette
-LEVEL_TEXT = {"BREACH": "BREACH", "WARN": "WARN", "OK": "OK", "NOT_SET": "not set in config/limits.yaml", "N/A": NA}
+LEVEL_TEXT = {"BREACH": "BREACH", "WARN": "WARN", "OK": "OK", "NOT_SET": "not set yet", "N/A": NA}
 LEVEL_STYLES = {
     "BREACH": {"backgroundColor": "#c62828", "color": "#ffffff", "fontWeight": "700"},
     "WARN": {"backgroundColor": "#fff3e0", "color": "#b26a00", "fontWeight": "700"},
@@ -260,6 +260,19 @@ def _tip(text: str) -> dict:
     return {"value": text, "type": "text"}
 
 
+# The margin and limits hovers' own pass (2026-09-28): the path of the limits file, which the
+# engine's reasons, basis and notes name, becomes "the limits file" (the user fills it in).
+# Kept out of `plain_reason` and `formatting.plain_words` deliberately, so nothing else changes.
+_LIMITS_FILE_WORDS = (("in config/limits.yaml", "in the limits file"), ("config/limits.yaml", "the limits file"))
+
+
+def _limits_words(text: Any) -> str:
+    out = str(text or "")
+    for engine_words, plain in _LIMITS_FILE_WORDS:
+        out = out.replace(engine_words, plain)
+    return out
+
+
 def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
 
@@ -337,8 +350,8 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
                       "differential per calendar day); each commodity row's contracts at their delta lots x the daily "
                       "settlement change x the multiplier x USD per quote unit that day, from the commodity "
                       "settlement history (context only: a risk input, never a mark). The book is the parts' series summed "
-                      "date by date, so correlation is embedded; the per-underlyer figures are standalone."),
-        "net_usd": ("Delta USD: the row's net USD delta, + = long the underlyer (a commodity's from the Exposure tab's "
+                      "date by date, so correlation is embedded; each row's own figures are standalone."),
+        "net_usd": ("Delta USD: the row's net USD delta, + = long the commodity or currency (a commodity's from the Exposure tab's "
                     "positions, options at their delta; a currency's the FX legs' net, the nm-dashboard's), its gross "
                     "on hover. The Book's cell is blank: the engine keeps the commodity net and the currency and metal "
                     "net apart (both on its hover and on the VaR card's), and the screen sums neither with the other."),
@@ -385,13 +398,13 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
                                 "curve moves, spread legs moved against each other, a currency against the USD applied "
                                 "to the P&L the non-USD positions hold, and replays of past windows from the commodity "
                                 "settlement history (context only, never a mark). A dash = nothing the scenario touches has a figure."),
-        "table": ("One row per underlyer the Book sums: the commodities grouped by sector, then the currencies and "
+        "table": ("One row per position the Book sums: the commodities grouped by sector, then the currencies and "
                   "the metals, each group by VaR largest first. The Book, pinned underneath, is these rows' daily "
-                  "P&L summed date by date (correlation embedded); the per-underlyer figures are standalone. Money "
+                  "P&L summed date by date (correlation embedded); each row's own figures are standalone. Money "
                   "in k / M. A figure the engine could not compute reads as a dash with its reason on hover; a blank cell "
                   "does not apply to that row. The rest (worst day raw, observations, the history's reach, trailing "
                   "and crisis vol, a commodity's contracts) is on the cells' hover; column headers carry the definitions."),
-        "underlyer": ("The underlyer: a commodity (its contracts, delta lots and sector on hover), a currency or a "
+        "underlyer": ("The position: a commodity (its contracts, delta lots and sector on hover), a currency or a "
                       "metal. The hover also carries the observations, the history's reach, the worst day raw and "
                       "the row's reason."),
         "sector": "The commodity's sector; Currencies and Metals for the FX and metal rows.",
@@ -1319,20 +1332,21 @@ def _rate_text(roll: Dict[str, Any]) -> str:
         return f"{rate * 100:g}% of |delta USD|"
     if kind == "per_lot" and rate is not None:
         return f"{format_cell(rate)} USD per lot"
-    return "not set in config/limits.yaml"
+    return "not set in the limits file yet"
 
 
 MARGIN_MONEY = ("gross_charge_usd", "spread_credit_usd", "margin_usd")
 
 
 def margin_hover(margin: Optional[Dict[str, Any]]) -> str:
-    """The margin title's hover: margin-limits' own note, the basis and where the rates come from."""
+    """The margin title's hover: margin-limits' own note, the basis and where the rates come
+    from, the limits file named in words (`_limits_words`), never as a path."""
     m = margin or {}
-    parts = [m.get("note") or "", f"Basis: {m.get('basis') or MARGIN_BASIS}.",
-             f"Rates from {m.get('config_file') or 'config/limits.yaml'}; they are placeholders until they are set there.",
+    parts = [_limits_words(m.get("note")), f"Basis: {_limits_words(m.get('basis') or MARGIN_BASIS)}.",
+             "Rates from the limits file; they are placeholders until you set them there.",
              "Money in k / M; the positions not in the margin are in the Data issues drawer."]
     if m.get("config_note"):
-        parts.append(f"Config: {m['config_note']}.")
+        parts.append(f"Limits file: {_limits_words(m['config_note'])}.")
     return " ".join(p for p in parts if p)
 
 
@@ -1344,7 +1358,7 @@ def margin_section(margin: Optional[Dict[str, Any]]) -> html.Div:
     reasons = [r for r in (margin.get("reasons") or []) if r]
     if not margin.get("available", False):
         return html.Div(className="section", children=head + [
-            html.P("Margin estimate unavailable: " + ("; ".join(reasons) or "no reason given") + ".",
+            html.P("Margin estimate unavailable: " + (_limits_words("; ".join(reasons)) or "no reason given") + ".",
                    className="section-kicker")])
     usd = rk.amount_short(nully="")
     by_sector = margin.get("by_sector") or {}
@@ -1377,7 +1391,7 @@ def margin_section(margin: Optional[Dict[str, Any]]) -> html.Div:
             rec["sector"] = roll.get("sector") or ""
             rec["rate"] = _rate_text(roll)
             if roll.get("rate_source"):
-                tip["rate"] = _tip(roll["rate_source"])
+                tip["rate"] = _tip(_limits_words(roll["rate_source"]))
             root_recs.append((rec, tip))
         children.append(html.Details(className="details details--compact", open=False, children=[
             html.Summary(f"By commodity ({len(by_root)})"),
@@ -1408,7 +1422,7 @@ def margin_section(margin: Optional[Dict[str, Any]]) -> html.Div:
                    "note": sp.get("note") or ""}
             tip = {}
             if pct is None:
-                tip["credit_pct"] = _tip(f"no {sp.get('credit_key') or 'spread'} credit set in config/limits.yaml: "
+                tip["credit_pct"] = _tip(f"no {sp.get('credit_key') or 'spread'} credit set in the limits file yet: "
                                          "every lot at the outright rate")
             if sp.get("excluded_count"):
                 tip["credit_usd"] = _tip(f"excludes {sp['excluded_count']} leg(s) with no margin figure: "
@@ -1441,8 +1455,9 @@ def margin_section(margin: Optional[Dict[str, Any]]) -> html.Div:
 
 def limit_records(checks: List[Dict[str, Any]]) -> Tuple[List[dict], List[dict]]:
     """(records, tooltips) of the limit checks table, in the engine's order. The level is
-    shown as the engine names it ("not set in config/limits.yaml" for NOT_SET); a value the
-    engine could not measure is n/a with the reason; a limit not set reads "not set"."""
+    shown in `LEVEL_TEXT`'s words ("not set yet" for NOT_SET); a value the engine could not
+    measure is a dash with the reason; a limit not set reads "not set". The reasons and basis
+    name the limits file in words (`_limits_words`), never as a path."""
     records, tips = [], []
     for c in checks or []:
         level = c.get("level") or "N/A"
@@ -1451,29 +1466,30 @@ def limit_records(checks: List[Dict[str, Any]]) -> Tuple[List[dict], List[dict]]
                                "source": c.get("source") or "", "unit": c.get("unit") or "",
                                "reason": c.get("reason") or ""}
         tip: Dict[str, dict] = {}
+        reason = _limits_words(c.get("reason"))
         if c.get("basis"):
-            tip["limit"] = _tip(c["basis"])
+            tip["limit"] = _tip(_limits_words(c["basis"]))
         v = rk.value(c.get("value"))
         rec["value"] = NA if v is None else v
         if v is None:
-            tip["value"] = _tip(c.get("reason") if level == "N/A" and c.get("reason") else "the position has no figure")
+            tip["value"] = _tip(reason if level == "N/A" and reason else "the position has no figure")
         lv = rk.value(c.get("limit_value"))
         rec["limit_value"] = "not set" if lv is None else lv
         if lv is None:
-            tip["limit_value"] = _tip(c.get("reason") or "no limit set in config/limits.yaml")
+            tip["limit_value"] = _tip(reason or "no limit set in the limits file yet")
         used = rk.value(c.get("used_pct"))
         rec["used_pct"] = used if used is not None else (NA if level == "N/A" else None)
-        if c.get("reason"):
-            tip["level"] = _tip(c["reason"])
-            tip["reason"] = _tip(c["reason"])
+        if reason:
+            tip["level"] = _tip(reason)
+            tip["reason"] = _tip(reason)
         records.append(rec)
         tips.append(tip)
     return records, tips
 
 
-LIMITS_HOVER = ("The book against the desk's own limits and the exchanges' position limits, all from "
-                "config/limits.yaml. BREACH above the limit, WARN from the warn fraction of it, OK under; a limit "
-                "left empty in the file is not set, with the position still measured. Lots count options at their "
+LIMITS_HOVER = ("The book against the desk's own limits and the exchanges' position limits, the limits you set "
+                "in the limits file. BREACH above the limit, WARN from the warn fraction of it, OK under; a limit "
+                "you have not set yet is 'not set', with the position still measured. Lots count options at their "
                 "delta; the definition of each limit is on its name's hover.")
 
 
@@ -1482,8 +1498,8 @@ _NOT_SET_LABEL = {"gross_lots": "gross lots", "gross_usd": "gross USD", "net_usd
                   "exchange_spot_month": "spot month", "exchange_single_month": "single month",
                   "exchange_all_months": "all months"}
 _NOT_SET_SOURCES = (("desk", "Desk limits"), ("exchange", "Exchange limits"))
-NOT_SET_HOVER = ("Limits left empty in config/limits.yaml: the position is measured but not checked. Each item "
-                 "shows the position; its hover names the definition and the config key that sets it.")
+NOT_SET_HOVER = ("Limits you have not set yet in the limits file: the position is measured but not checked. Each "
+                 "item shows the position; its hover names the definition and the setting in the limits file that fixes it.")
 
 
 def _is_not_set(check: Dict[str, Any]) -> bool:
@@ -1503,7 +1519,8 @@ def _not_set_value(check: Dict[str, Any]) -> Tuple[str, str]:
 
 def _not_set_item(check: Dict[str, Any], rest: str) -> html.Span:
     """One not-set check as a short inline item ("spot month Z26 5 lots"), its definition,
-    scope, full position and config key on hover."""
+    scope, full position and the limits-file setting that fixes it on hover (the file named in
+    words, `_limits_words`)."""
     limit = str(check.get("limit") or "")
     short, full = _not_set_value(check)
     rest = re.sub(r"\s*\(.*\)\s*$", "", rest or "").strip()      # "(last trade ...)" goes to the hover
@@ -1511,9 +1528,9 @@ def _not_set_item(check: Dict[str, Any], rest: str) -> html.Span:
                                else limit.replace("_", " "))
     text = " ".join(p for p in (label, rest, short) if p)
     hover = " ".join(p for p in (
-        f"{limit.replace('_', ' ')}: {check['basis']}." if check.get("basis") else "",
+        f"{limit.replace('_', ' ')}: {_limits_words(check['basis'])}." if check.get("basis") else "",
         f"Scope: {check.get('scope') or 'book'}.", f"Position: {full}.",
-        (check.get("reason") or "no limit set in config/limits.yaml") + ".") if p)
+        (_limits_words(check.get("reason")) or "no limit set in the limits file yet") + ".") if p)
     return html.Span(text, className="limit-not-set-item", title=hover)
 
 
@@ -1566,7 +1583,7 @@ def not_set_drawer(checks: Optional[List[Dict[str, Any]]]) -> Optional[html.Deta
 
 def limits_section(checks: Optional[List[Dict[str, Any]]]) -> html.Div:
     """The limits that are set (usage, breach or warning, or n/a with the reason) as the
-    table; every limit left empty in config/limits.yaml collapsed under it into "Not set (N)".
+    table; every limit not set yet in the limits file collapsed under it into "Not set (N)".
     While none is set, one quiet line says so above the collapsed list."""
     head = [about("Limits", LIMITS_HOVER)]
     if checks is None:
@@ -1579,7 +1596,7 @@ def limits_section(checks: Optional[List[Dict[str, Any]]]) -> html.Div:
     checks = [c for c in checks if not _is_not_set(c)]
     if not checks:
         return html.Div(className="section", children=head + [
-            html.P("No limit is set in config/limits.yaml yet: the positions are measured, not checked.",
+            html.P("No limit is set yet: the positions are measured, not checked. Set them in the limits file.",
                    className="section-kicker"), drawer])
     records, tips = limit_records(checks)
     counts = {lvl: sum(1 for c in checks if (c.get("level") or "N/A") == lvl) for lvl in LEVEL_TEXT}
@@ -1602,14 +1619,14 @@ def limits_section(checks: Optional[List[Dict[str, Any]]]) -> html.Div:
                                + [{"if": {"column_id": "limit_value", "filter_query": "{limit_value} = 'not set'"}, **_NA_STYLE}],
     )
     return html.Div(className="section", children=head + [
-        html.P(f"From config/limits.yaml: {summary}.", className="section-kicker"), table]
+        html.P(f"The limits you set: {summary}.", className="section-kicker"), table]
         + ([drawer] if drawer is not None else []))
 
 
-MARGIN_LIMITS_HOVER = (f"Margin: an initial-margin estimate per root x month at the rates of config/limits.yaml with "
+MARGIN_LIMITS_HOVER = (f"Margin: an initial-margin estimate per root x month at the rates of the limits file with "
                        f"spread credits ({MARGIN_BASIS}). Limits: the book against the desk's and the exchanges' "
-                       "position limits from the same file; a limit left empty is not set, the position still "
-                       "measured. Each block's own definitions are on its title's hover inside.")
+                       "position limits, the limits you set in the same file; a limit not set yet is 'not set', the "
+                       "position still measured. Each block's own definitions are on its title's hover inside.")
 
 
 def margin_limits_count(margin: Optional[Dict[str, Any]], checks: Optional[List[Dict[str, Any]]]) -> str:

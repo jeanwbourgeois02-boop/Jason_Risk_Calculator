@@ -414,7 +414,8 @@ def test_margin_is_labelled_an_estimate_with_credits_and_never_zero_for_a_missin
     text = _text(section)
     assert "Margin (estimate, not exchange SPAN)" in text
     titles = " ".join(_titles(section))
-    assert "Basis: estimate (config/limits.yaml), not exchange SPAN." in titles and "placeholders" in titles
+    assert "Basis: estimate (the limits file), not exchange SPAN." in titles and "placeholders" in titles
+    assert "config/limits.yaml" not in titles      # the file in words on every hover (2026-09-28)
     # the positions not in the margin are in the drawer, not a list under the table
     assert "Not in the margin" not in text
     assert ("Not in the margin", "CBOT:ZC 2026-12: no outright rate set for CBOT:ZC or agriculture in config/limits.yaml") \
@@ -430,12 +431,12 @@ def test_margin_is_labelled_an_estimate_with_credits_and_never_zero_for_a_missin
     assert footer.data[0]["note"] == "excludes 1 of 3 positions with no margin figure"
     roots = _table(section, risk.MARGIN_ROOT_TABLE_ID)
     assert roots.data[0]["label"] == "WTI crude (NYMEX:CL)" and roots.data[0]["rate"] == "10% of |delta USD|"
-    assert roots.data[1]["rate"] == "not set in config/limits.yaml"
+    assert roots.data[1]["rate"] == "not set in the limits file yet"
     spreads = _table(section, risk.MARGIN_SPREAD_TABLE_ID)
     assert spreads.data[0]["credit_pct"] == "not set" and spreads.data[0]["charge_on_matched_usd"] == 20_000.0
     # unavailable: the reason
     out = _text(risk.margin_section({"available": False, "reasons": ["config/limits.yaml refused: bad rate"]}))
-    assert "Margin estimate unavailable: config/limits.yaml refused: bad rate." in out
+    assert "Margin estimate unavailable: the limits file refused: bad rate." in out
 
 
 def _not_set_checks() -> list:
@@ -465,14 +466,14 @@ def test_nothing_set_reads_one_quiet_line_with_every_limit_collapsed_under_it():
     # no table, one quiet line on screen and one collapsed line
     assert not [n for n in _walk(section) if isinstance(n, dash_table.DataTable)]
     shown = [_text(n) for n in _walk_open(section) if getattr(n, "className", "") == "section-kicker"]
-    assert shown == ["No limit is set in config/limits.yaml yet: the positions are measured, not checked."]
+    assert shown == ["No limit is set yet: the positions are measured, not checked. Set them in the limits file."]
     drawer = next(n for n in _walk(section) if getattr(n, "id", None) == risk.LIMITS_NOT_SET_ID)
     assert drawer.open is False and _text(drawer.children[0]) == f"Not set ({len(checks)})"
     assert "measured but not checked" in drawer.children[0].title
     # nothing dropped: one item per check, each with its config key on hover
     items = [n for n in _walk(drawer) if getattr(n, "className", "") == "limit-not-set-item"]
     assert len(items) == len(checks)
-    assert all("no limit set in config/limits.yaml" in i.title for i in items)
+    assert all("no limit set in the limits file" in i.title and "config/limits.yaml" not in i.title for i in items)
     # grouped: the desk first (book, sectors, each root), then the exchange by root
     heads = [_text(n) for n in drawer.children[1:] if type(n).__name__ == "Div"]
     assert heads == ["Desk limits (9)", "Exchange limits (4)"]
