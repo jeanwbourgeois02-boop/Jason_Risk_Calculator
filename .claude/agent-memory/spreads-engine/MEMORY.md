@@ -2,3 +2,5 @@
 - [Template units](template-units.md) — qty_factor semantics, generic unit conversion, oz-for-oz gold/silver and crush ratios that will not fit
 - [Spread levels](spread-levels.md) — Phase B levels in quote units (x price_scale), usd_per_unit, research keys, CNY via USDCNY, positions keep direction; Phase C position history rules
 - [Perf: book_spreads](perf-book-spreads.md) — 2026-09-28: the reference close is scope-dependent (never hoist it), the all-priced shortcut, C yaml loader, how to force unpriced trades in tests
+- [Strategy and trade type](strategy-and-trade-type.md) — 2026-09-28: trades.strategy is the position first; type rules, flat-calendar and same-exchange choices, outright rows
+- [Gross/net notional](gross-net-notional.md) — 2026-09-28: gross_usd / net_usd / notional_reason per spread, position, outright; open option blanks the group; closed = 0

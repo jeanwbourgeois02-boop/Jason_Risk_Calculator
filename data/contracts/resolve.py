@@ -2,7 +2,7 @@
 
 Forms accepted (hard rule 6: tolerant of case and spacing):
 
-- prime-broker export ``'<ROOT><M><Y>-<letters>'``: ``'CLZ6-USAA'``;
+- prime-broker export ``'<ROOT><M><Y>-<CC>AA'``: ``'CLZ6-USAA'``, ``'LPZ26-UKAA'``, ``'CU2611-CHAA'``;
 - Bloomberg ``'CLZ6 Comdty'``, ``'CLZ26 Comdty'``, ``'C Z6 Comdty'``;
 - bare ``'CLZ6'``, ``'CLZ26'``;
 - Chinese ``root + YYMM`` (``'CU2611'``, ``'cu2611'``) and ZCE's ``root + YMM`` (``'SR611'``);
@@ -16,11 +16,13 @@ root. Every other form is matched on ``exchange_code`` and ``bbg_root`` together
 one namespace can be another root's code in the other (``'CO'`` is LME cobalt's exchange code and
 ICE Brent's Bloomberg root), so neither is preferred silently. Bare codes collide (``ZC`` is CBOT
 corn and ZCE coal; also CA, SI, PB, RS, SC ...): the candidates are narrowed by the explicit
-prefix, then ``currency``, then ``venue``, then an exchange named in ``underlying`` or
-``description``; more than one left raises ``AmbiguousContract`` naming every candidate. A
-populated ``currency`` or recognised ``venue`` that no candidate fits is a contradiction between
-two fields and raises ``UnknownContract``. A root that is not in ``config/contracts.csv`` raises
-``UnknownContract``: a multiplier is never guessed.
+prefix, then the prime-broker suffix (``-USAA`` the US exchanges, ``-UKAA`` LME and ICE Europe,
+``-CHAA`` the mainland Chinese exchanges, ``-SPAA`` SGX: ``_PB_SUFFIX_EXCHANGES``; a suffix not
+in that table narrows nothing), then ``currency``, then ``venue``, then an exchange named in
+``underlying`` or ``description``; more than one left raises ``AmbiguousContract`` naming every
+candidate. A known suffix, a populated ``currency`` or a recognised ``venue`` that no candidate
+fits is a contradiction between two fields and raises ``UnknownContract``. A root that is not in
+``config/contracts.csv`` raises ``UnknownContract``: a multiplier is never guessed.
 
 A one-digit year is the nearest year >= ``trade_date.year - 1`` (the rule of
 ``data/ingest/common.py::future_expiry``); a two-digit one is in ``trade_date``'s century.
@@ -81,10 +83,20 @@ _VENUES: Dict[str, FrozenSet[str]] = {
     "EEX": frozenset({"EEX"}), "XEEE": frozenset({"EEX"}),
     "GME": frozenset({"GME"}), "DME": frozenset({"GME"}),
 }
+# CNH is offshore CNY: a blotter's 'CNH' fits a CNY root and its 'CNY' a CNH root (SGX:XUC).
 _CURRENCY_ALIASES = {"CNH": "CNY", "RMB": "CNY"}
+# The prime broker's symbol suffix '-<CC>AA' names the exchange's country in the broker's own
+# codes (CH is China, SP is Singapore): the universe's exchanges each can mean. Seen in Jason's
+# 2026-09-28 export; a suffix not listed here narrows nothing.
+_PB_SUFFIX_EXCHANGES: Dict[str, FrozenSet[str]] = {
+    "US": frozenset({"CME", "CBOT", "NYMEX", "COMEX", "MGEX", "ICEUS"}),
+    "UK": frozenset({"LME", "ICE"}),
+    "CH": frozenset({"SHFE", "DCE", "ZCE", "INE", "GFEX"}),
+    "SP": frozenset({"SGX"}),
+}
 
 _PREFIX_RE = re.compile(r"^(?P<exch>[A-Z][A-Z ]*?)\s*:\s*(?P<rest>.+)$")
-_PB_SUFFIX_RE = re.compile(r"^(?P<body>.+?)-[A-Z]{2,6}$")
+_PB_SUFFIX_RE = re.compile(r"^(?P<body>.+?)-(?P<suffix>[A-Z]{2,6})$")
 _BBG_RE = re.compile(r"^(?P<root>[A-Z0-9]{1,6}?)(?P<pad> ?)(?P<code>[FGHJKMNQUVXZ])(?P<year>\d{1,2})"
                      r"(?: (?P<key>COMDTY|INDEX|CURNCY))?$")
 _CN_RE = re.compile(r"^(?P<root>[A-Z]{1,4})(?P<digits>\d{3,4})$")
@@ -93,6 +105,14 @@ _CN_RE = re.compile(r"^(?P<root>[A-Z]{1,4})(?P<digits>\d{3,4})$")
 def _venue_set(text: str) -> Optional[FrozenSet[str]]:
     key = re.sub(r"[^A-Z]", "", str(text or "").upper())
     return _VENUES.get(key) if key else None
+
+
+def _suffix_exchanges(suffix: str) -> Optional[FrozenSet[str]]:
+    """The exchanges a prime-broker suffix ('USAA', 'UK') can mean; None when it is not known."""
+    key = re.sub(r"[^A-Z]", "", str(suffix or "").upper())
+    if key.endswith("AA") and len(key) > 2:
+        key = key[:-2]
+    return _PB_SUFFIX_EXCHANGES.get(key) if key else None
 
 
 def _venues_named_in(text: str) -> FrozenSet[str]:
@@ -104,7 +124,7 @@ def _venues_named_in(text: str) -> FrozenSet[str]:
 
 
 def _parse(symbol: str, ref_year: int):
-    """(prefix exchanges or None, code, month, year, form, yellow key) or None."""
+    """(prefix exchanges or None, code, month, year, form, yellow key, broker suffix) or None."""
     text = re.sub(r"\s+", " ", str(symbol or "").strip().upper())
     if not text:
         return None
@@ -115,15 +135,18 @@ def _parse(symbol: str, ref_year: int):
         if prefix is None:
             raise UnknownContract(f"futures symbol {symbol!r}: exchange prefix {m.group('exch')!r} is not known")
         text = m.group("rest").strip()
+    suffix = ""
     m = _PB_SUFFIX_RE.match(text)
     if m and not _BBG_RE.match(text) and not _CN_RE.match(text):
         text = m.group("body").strip()
+        suffix = m.group("suffix")
     m = _BBG_RE.match(text)
     if m:
         bloomberg = bool(m.group("key")) or bool(m.group("pad") and len(m.group("root")) == 1)
         key = {"COMDTY": "Comdty", "INDEX": "Index", "CURNCY": "Curncy"}.get(m.group("key") or "", "")
         return (prefix, m.group("root"), month_from_code(m.group("code")),
-                expand_year(m.group("year"), ref_year), "bloomberg" if bloomberg else "letter", key)
+                expand_year(m.group("year"), ref_year), "bloomberg" if bloomberg else "letter", key,
+                suffix)
     m = _CN_RE.match(text)
     if m:
         digits = m.group("digits")
@@ -132,7 +155,7 @@ def _parse(symbol: str, ref_year: int):
         if not 1 <= month <= 12:
             return None
         return (prefix, m.group("root"), month, expand_year(year_digits, ref_year),
-                "cn4" if len(digits) == 4 else "cn3", "")
+                "cn4" if len(digits) == 4 else "cn3", "", suffix)
     return None
 
 
@@ -167,17 +190,19 @@ def resolve_future(symbol: str, *, trade_date, underlying: str = "", description
     if parsed is None:
         raise UnknownContract(f"futures symbol {symbol!r} is not a contract month such as 'CLZ6', "
                               f"'CLZ6 Comdty', 'CU2611' or 'SHFE:CU2611'")
-    prefix, code, month, year, form, key = parsed
+    prefix, code, month, year, form, key, suffix = parsed
     root = _pick_root(symbol, prefix, code, form, key, currency=currency, venue=venue,
-                      underlying=underlying, description=description, what="futures symbol")
+                      underlying=underlying, description=description, suffix=suffix,
+                      what="futures symbol")
     return contract_month(root.root_id, month, year, conn=conn)
 
 
 def _pick_root(symbol: str, prefix: Optional[FrozenSet[str]], code: str, form: str, key: str, *,
                currency: str = "", venue: str = "", underlying: str = "", description: str = "",
-               what: str = "futures symbol") -> ContractRoot:
+               suffix: str = "", what: str = "futures symbol") -> ContractRoot:
     """The one root a parsed code names, narrowed as the module docstring says; raises
-    ``UnknownContract`` / ``AmbiguousContract``. Shared with ``options.resolve_option``."""
+    ``UnknownContract`` / ``AmbiguousContract``. ``suffix`` is the prime-broker symbol's
+    ``-<CC>AA`` suffix without the dash ('USAA'). Shared with ``options.resolve_option``."""
     roots = list(load_roots().values())
     if prefix is not None:
         roots = [r for r in roots if r.exchange in prefix]
@@ -186,10 +211,18 @@ def _pick_root(symbol: str, prefix: Optional[FrozenSet[str]], code: str, form: s
         raise UnknownContract(f"{what} {symbol!r}: root {code!r} is not in config/contracts.csv"
                               + (f" on {'/'.join(sorted(prefix))}" if prefix else ""))
 
+    exchanges = _suffix_exchanges(suffix)
+    if exchanges is not None:
+        kept = [r for r in cands if r.exchange in exchanges]
+        if not kept:
+            raise UnknownContract(
+                f"{what} {symbol!r} is {', '.join(r.root_id for r in cands)} but its suffix "
+                f"-{re.sub(r'[^A-Z]', '', suffix.upper())} names {'/'.join(sorted(exchanges))}")
+        cands = kept
     ccy = str(currency or "").strip().upper()
     ccy = _CURRENCY_ALIASES.get(ccy, ccy)
     if ccy:
-        kept = [r for r in cands if r.currency == ccy]
+        kept = [r for r in cands if _CURRENCY_ALIASES.get(r.currency, r.currency) == ccy]
         if not kept:
             raise UnknownContract(
                 f"{what} {symbol!r} is {', '.join(f'{r.root_id} ({r.currency})' for r in cands)} "

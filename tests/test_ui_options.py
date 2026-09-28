@@ -59,7 +59,7 @@ def _insert_option_leg(conn, trade_id, package_id, instrument_id, base, quote, q
     )
     conn.execute(
         "INSERT INTO trades VALUES (?, 'XLSX', ?, 'FX_OPTION', ?, '2026-06-01', ?, ?, "
-        "'ACC', 'CPTY', 'HAHY7', 'TR', 'option', '')",
+        "'ACC', 'CPTY', 'HAHY7', 'TR', 'option', '', '', '')",
         (trade_id, instrument_id, package_id, quantity, fill),
     )
     conn.execute(
@@ -149,7 +149,7 @@ def _make_db_missing_payoff_column():
     conn.execute("INSERT INTO instrument_options VALUES ('EURUSD092226C-1', 1.11, 'CALL', 0, '9999-12-31')")
     conn.execute(
         "INSERT INTO trades VALUES ('O1', 'XLSX', 'EURUSD092226C-1', 'FX_OPTION', 'O1', '2026-06-01', "
-        "1000000, 0.0050, 'ACC', 'CPTY', 'HAHY7', 'TR', 'option', '')"
+        "1000000, 0.0050, 'ACC', 'CPTY', 'HAHY7', 'TR', 'option', '', '', '')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('O1', 1, 'NOTIONAL', 'EUR', 1000000, '2026-06-01', '2026-09-22', 0.0050, 0)"
@@ -1816,7 +1816,7 @@ def _defect_db(tmp_path):
                  (_LISTED_ID, _LISTED))
     conn.execute("INSERT INTO instrument_options VALUES (?, 70, 'CALL', 0, '9999-12-31', 'AMERICAN')", (_LISTED_ID,))
     conn.execute("INSERT INTO trades VALUES ('E1', 'XLSX', ?, ?, 'E1', "
-                 "'2026-06-01', 15, 2.5, 'ACC', 'CPTY', '', 'TR', 'crude call', '')", (_LISTED_ID, _LISTED))
+                 "'2026-06-01', 15, 2.5, 'ACC', 'CPTY', '', 'TR', 'crude call', '', '', '')", (_LISTED_ID, _LISTED))
     conn.execute("INSERT INTO trade_legs VALUES ('E1', 1, 'NOTIONAL', 'USD', 37500, '2026-06-01', '2026-11-17', 2.5, 0)")
     conn.execute("INSERT INTO marks VALUES (?, ?, '2026-11-17', 'FUTURE_PX', 3.1, 'BBG_BDH', ?)",
                  (AS_OF, _LISTED_ID, f"{AS_OF}T17:00:00-04:00"))
@@ -1932,7 +1932,7 @@ def _add_futures_option(conn, trade_id, root_id, strike, option_type, lots, fill
     conn.execute("INSERT OR IGNORE INTO instrument_options VALUES (?, ?, ?, 0, '9999-12-31', ?)",
                  (oid, strike, option_type, payoff))
     conn.execute("INSERT INTO trades VALUES (?, 'XLSX', ?, 'CMDTY_OPTION', ?, '2026-06-01', ?, ?, "
-                 "'ACC', 'CPTY', '', 'TR', 'option on a future', '')", (trade_id, oid, trade_id, lots, fill))
+                 "'ACC', 'CPTY', '', 'TR', 'option on a future', '', '', '')", (trade_id, oid, trade_id, lots, fill))
     conn.execute("INSERT INTO trade_legs VALUES (?, 1, 'NOTIONAL', ?, ?, '2026-06-01', ?, ?, 0)",
                  (trade_id, root.currency, lots * root.multiplier * fill, expiry, fill))
     conn.execute("INSERT OR IGNORE INTO marks VALUES (?, ?, ?, 'FUTURE_PX', ?, 'BBG_BDH', ?)",

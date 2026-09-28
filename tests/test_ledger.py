@@ -16,9 +16,9 @@ def _insert_trade(conn, trade_id, instrument_id, product, trade_date, quantity, 
     # 'XLSX' (2026-09-16, trades_official double-count fix): ledger's open-trade
     # queries now read trades_official, which excludes source='BNP' by design.
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "XLSX", instrument_id, product, trade_id, trade_date, quantity, price,
-         "acc", "cp", strategy, "t", "d", theme),
+         "acc", "cp", strategy, "t", "d", theme, "", ""),
     )
 
 

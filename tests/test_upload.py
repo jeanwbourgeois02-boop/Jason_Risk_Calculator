@@ -59,7 +59,7 @@ def test_import_blotter_loads_real_file(tmp_path):
     assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
     assert f'{EXPECTED_TRADES} trades' in message
     assert f'{SAMPLE_REJECTS} row(s) could not be read' in message
-    assert 'Replaced' not in message  # nothing pre-existed to replace
+    assert f'{EXPECTED_TRADES} added, 0 already on file' in message  # nothing pre-existed to replace
 
 
 def test_summary_counts_the_trades_loaded_not_the_rows_seen_and_names_no_rate_swaps(tmp_path):
@@ -107,7 +107,9 @@ def test_an_upload_no_longer_packages_forwards_into_fx_swaps(tmp_path):
 
 def test_upload_replaces_a_book_that_still_has_retired_swap_review_rows(tmp_path):
     """A database from before 2026-09-24 can hold swap_review rows pointing at the old book;
-    their foreign key must not stop the replace. Works the same once the table is gone."""
+    their foreign key must not stop the upload. Since 2026-09-28's merge by Trade Id a replaced
+    trade stays on file, so its leftover rows stay too (schema.purge_retired_sources drops the
+    table at start-up); a removed trade's rows go with it. Works the same once the table is gone."""
     db = tmp_path / 'risk.db'
     payload = RAW_BLOTTER.read_bytes()
     import_blotter(payload, RAW_BLOTTER.name, db)
@@ -116,24 +118,25 @@ def test_upload_replaces_a_book_that_still_has_retired_swap_review_rows(tmp_path
                      "trade_id TEXT NOT NULL REFERENCES trades, reason TEXT NOT NULL, PRIMARY KEY (candidate_group, trade_id))")
         conn.execute("INSERT INTO swap_review SELECT 'g', trade_id, 'old' FROM trades LIMIT 2")
     message = import_blotter(payload, RAW_BLOTTER.name, db)
-    assert f'Replaced the previous book: {EXPECTED_TRADES} trade(s)' in message
+    assert f'0 added, {EXPECTED_TRADES} already on file' in message
     with sqlite3.connect(db) as conn:
-        assert conn.execute('SELECT COUNT(*) FROM swap_review').fetchone()[0] == 0
+        assert conn.execute('SELECT COUNT(*) FROM swap_review').fetchone()[0] == 2
         conn.execute('DROP TABLE swap_review')
     import_blotter(payload, RAW_BLOTTER.name, db)
     assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
 
 
 def test_import_blotter_reupload_of_same_file_replaces_and_keeps_same_count(tmp_path):
-    # Full replace (user decision 2026-09-17): a re-upload deletes the whole previous
-    # book first, then writes the new file's trades -- same file twice still ends at the
-    # same counts, but via delete-then-insert, not merge, and the message says so.
+    # Merge by Trade Id (user decision 2026-09-28, replacing the full replace of 2026-09-17):
+    # a re-upload replaces each Trade Id already on file with the file's row and re-inserts
+    # its legs -- same file twice still ends at the same counts, and the message says so.
     db = tmp_path / 'risk.db'
     payload = RAW_BLOTTER.read_bytes()
     import_blotter(payload, RAW_BLOTTER.name, db)
     message = import_blotter(payload, RAW_BLOTTER.name, db)
     assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
-    assert f'Replaced the previous book: {EXPECTED_TRADES} trade(s) and {EXPECTED_LEGS} leg(s) removed.' in message
+    assert (f'{EXPECTED_TRADES} trades in the file: 0 added, {EXPECTED_TRADES} already on file (replaced by the '
+            f"file's rows), 0 removed as cancelled; {EXPECTED_TRADES} trades on file.") in message
 
 
 def test_import_blotter_newer_export_replaces_amended_trade(tmp_path):
@@ -143,51 +146,52 @@ def test_import_blotter_newer_export_replaces_amended_trade(tmp_path):
     fut = frame[frame['Fin Type'] == 'FUTURE'].index[0]
     frame.loc[fut, 'Price'] = '1234.5'
     message = import_blotter(frame.to_csv(index=False).encode(), 'day2.csv', db)
-    assert f'Replaced the previous book: {EXPECTED_TRADES} trade(s)' in message
+    assert f'0 added, {EXPECTED_TRADES} already on file' in message
     with sqlite3.connect(db) as conn:
         price, = conn.execute('SELECT price FROM trades WHERE trade_id = ?', (frame.loc[fut, 'Trade Id'],)).fetchone()
     assert price == 1234.5
     assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
 
 
-def test_import_blotter_full_replace_removes_old_trades_and_dependents_no_orphans(tmp_path):
-    """Coordinator instruction 2026-09-17: a new blotter is the only input -- sample
-    data, a previous excel's trades, and legacy BNP-sourced rows are all deleted, along
-    with every trade-keyed dependent (realised_pnl, swap_review), never left orphaned."""
+def test_import_blotter_merges_by_trade_id_and_keeps_trades_the_file_does_not_name(tmp_path):
+    """User decision 2026-09-28 ("yeah that makes sense"): an upload is a merge by Trade Id.
+    A trade the file does not name stays on file with its realised_pnl row; a Trade Id the
+    file replaces has its realised_pnl row dropped (the ledger freezes it again from the new
+    fill) and its legs re-inserted, never orphaned or doubled."""
     db = tmp_path / 'risk.db'
     import_blotter(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, db)
 
     with sqlite3.connect(db) as conn:
         old_trade_id, old_instrument_id = conn.execute(
             "SELECT trade_id, instrument_id FROM trades LIMIT 1").fetchone()
-        # A legacy BNP-sourced trade + leg (pre-2026-09-17 books could carry these).
+        # A trade the next file does not name, and its frozen row.
         conn.execute(
             "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, "
             "quantity, price, account, counterparty, strategy, trader, description) "
-            "VALUES ('BNP-1','BNP',?,'FX_FWD','BNP-1','2026-01-01',1,1,'','','','','')", (old_instrument_id,))
-        conn.execute("INSERT INTO trade_legs VALUES ('BNP-1',1,'FX_NEAR','USD',1,"
+            "VALUES ('KEEP-1','XLSX',?,'FX_FWD','KEEP-1','2026-01-01',1,1,'','','','','')", (old_instrument_id,))
+        conn.execute("INSERT INTO trade_legs VALUES ('KEEP-1',1,'FX_NEAR','USD',1,"
                      "'2026-01-01','2026-01-01',1,1)")
-        # A realised_pnl row keyed to a trade that the next upload will remove.
+        conn.execute(
+            "INSERT INTO realised_pnl VALUES ('KEEP-1', ?, 'FX_FWD', 'USD', '2026-01-01', 0, 0, 'SPOT', "
+            "1, '2026-01-01', 'BBG_BFXFORWARD', 0, '2026-01-01T00:00:00', '')", (old_instrument_id,))
+        # A realised_pnl row keyed to a trade the next upload replaces.
         conn.execute(
             "INSERT INTO realised_pnl VALUES (?, ?, 'FX_FWD', 'USD', '2026-01-01', 0, 0, 'SPOT', "
             "1, '2026-01-01', 'BBG_BFXFORWARD', 0, '2026-01-01T00:00:00', '')",
             (old_trade_id, old_instrument_id))
         conn.commit()
 
-    frame = sample_frame()
-    frame['Trade Id'] = frame['Trade Id'].astype(str) + '9'  # a disjoint id space
-    message = import_blotter(frame.to_csv(index=False).encode(), 'day2.csv', db)
+    message = import_blotter(RAW_BLOTTER.read_bytes(), 'day2.csv', db)
 
     with sqlite3.connect(db) as conn:
         trade_ids = {r[0] for r in conn.execute('SELECT trade_id FROM trades')}
         leg_trade_ids = {r[0] for r in conn.execute('SELECT DISTINCT trade_id FROM trade_legs')}
-        realised_count = conn.execute('SELECT COUNT(*) FROM realised_pnl').fetchone()[0]
-    assert old_trade_id not in trade_ids
-    assert 'BNP-1' not in trade_ids
-    assert leg_trade_ids == trade_ids  # no orphaned legs, and every remaining trade has legs
-    assert realised_count == 0  # the old trade's realised_pnl row is gone, not orphaned
-    assert all(tid.endswith('9') for tid in trade_ids)
-    assert f'Replaced the previous book: {EXPECTED_TRADES + 1} trade(s)' in message
+        realised = {r[0] for r in conn.execute('SELECT trade_id FROM realised_pnl')}
+    assert old_trade_id in trade_ids and 'KEEP-1' in trade_ids
+    assert leg_trade_ids == trade_ids  # no orphaned legs, and every trade has legs
+    assert realised == {'KEEP-1'}  # the replaced trade's row is dropped, the kept trade's stays
+    assert trade_count(db) == (EXPECTED_TRADES + 1, EXPECTED_LEGS + 1)
+    assert f'0 added, {EXPECTED_TRADES} already on file' in message and f'{EXPECTED_TRADES + 1} trades on file' in message
 
 
 def test_import_blotter_tolerates_bom_semicolons_cp1252_and_mixed_case_headers(tmp_path):
@@ -242,17 +246,22 @@ def test_report_for_the_sample_counts_its_two_rejects_and_no_warnings_only_infor
     from data.ingest.upload import import_blotter_report
 
     report = import_blotter_report(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, tmp_path / 'risk.db')
-    assert set(report) == {'message', 'rejects', 'warnings', 'notes'}
+    assert set(report) == {'message', 'rejects', 'warnings', 'notes',
+                           'added', 'replaced', 'removed', 'removed_manual', 'on_file_after'}
     assert (report['rejects'], report['warnings']) == (SAMPLE_REJECTS, 0)
     assert isinstance(report['message'], str) and isinstance(report['notes'], list)
     assert f'{SAMPLE_REJECTS} row(s) could not be read' in report['message']
     # information: the one option with no strike -- present, short, and not a warning
     assert report['notes'][0] == '1 option(s) have no strike in the file: USDJPY111926P-500043.'
     # information too: the LME ticket with no prompt date in the file (Phase 5)
-    assert len(report['notes']) == 2 and report['notes'][1].startswith('1 LME ticket(s) carry no prompt date')
+    assert len(report['notes']) >= 2 and report['notes'][1].startswith('1 LME ticket(s) carry no prompt date')
+    # information too (parser, 2026-09-28): fills converted from the broker's price units; nothing else
+    assert all("converted from the broker's price units" in note for note in report['notes'][2:])
     assert all(note in report['message'] for note in report['notes'])
     assert report['message'].startswith(f'Imported {RAW_BLOTTER.name}: {EXPECTED_TRADES} trades')
-    assert len(report['message']) < 1200                      # a paragraph, not a line per row
+    # a paragraph, not a line per row (52 rows named one by one would run past 3000); 1800 since
+    # 2026-09-28's merge sentence and the parser's price-units note (the sample's is ~1380)
+    assert len(report['message']) < 1800
 
 
 def test_import_blotter_is_the_reports_message_and_still_a_plain_string(tmp_path):
@@ -378,7 +387,9 @@ def test_summary_breaks_the_excluded_rows_down_by_the_book_filter(tmp_path):
     message = import_blotter_report(payload, 'filtered.csv', tmp_path / 'risk.db')['message']
 
     assert 'Book filter (' in message
-    assert 'Rows excluded: 1 status, 1 fund.' in message
+    # config/book.yaml's fund list is empty since 2026-09-28 (an empty list takes every value),
+    # so only the cancelled row is excluded; the OTHERFUND row loads.
+    assert 'Rows excluded: 1 status.' in message
     assert 'other funds or cancelled' not in message
 
 
@@ -418,7 +429,7 @@ def test_underlying_only_futures_survive_a_re_upload_and_are_never_overwritten(t
     with sqlite3.connect(db) as conn:
         conn.execute("UPDATE instruments SET expiry_date = '2026-07-29' WHERE instrument_id = 'GCQ26 Comdty'")
     message = import_blotter(payload, RAW_BLOTTER.name, db)
-    assert f'Replaced the previous book: {EXPECTED_TRADES} trade(s)' in message
+    assert f'0 added, {EXPECTED_TRADES} already on file' in message
     assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT asset_class, expiry_date FROM instruments WHERE instrument_id = 'GCQ26 Comdty'"
@@ -428,9 +439,9 @@ def test_underlying_only_futures_survive_a_re_upload_and_are_never_overwritten(t
 
 
 def test_import_blotter_replaces_a_manual_trade_too(tmp_path):
-    """User, 2026-09-28: the blotter upload is the only way a trade enters the app, so an upload
-    replaces EVERY trade, a ``source = 'MANUAL'`` leftover of the retired manual-entry screen
-    included (until then a MANUAL trade survived an upload)."""
+    """User, 2026-09-28: the blotter upload is the only way a trade enters the app, so even under
+    the merge by Trade Id a ``source = 'MANUAL'`` leftover of the retired manual-entry screen is
+    removed by every upload (until that day a MANUAL trade survived an upload)."""
     db = tmp_path / 'risk.db'
     import_blotter(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, db)
     with sqlite3.connect(db) as conn:

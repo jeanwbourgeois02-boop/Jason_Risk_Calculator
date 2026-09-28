@@ -14,5 +14,7 @@ until it is killed by hand. This happened once: the stray was found with Get-Cim
 Win32_Process and stopped.
 
 **How to apply:** for multi-line Python, write a one-off script to the session scratchpad, or
-use `py -3 -c`. A bash heredoc with apostrophes in its body inside a longer command can break
+use `py -3 -c`. Happened again 2026-09-28 (a `py -3 - <<'EOF'` placeholder): the stray is found
+and stopped with a .ps1 in the scratchpad (Get-CimInstance Win32_Process, CommandLine ending
+in ` -`), run via `powershell -File`; inline PowerShell through the Bash tool loses `$_`. A bash heredoc with apostrophes in its body inside a longer command can break
 the quoting, so appending test code is safer with the Edit tool.

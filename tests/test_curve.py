@@ -33,9 +33,11 @@ def _trade(conn, tid, instrument_id, contracts, fill, expiry, ccy="USD", multipl
     cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
     vals = {"trade_id": tid, "source": "XLSX", "instrument_id": instrument_id, "product": "FUTURE",
             "package_id": tid, "trade_date": trade_date, "quantity": contracts, "price": fill,
-            "account": "A", "counterparty": "C", "strategy": "", "trader": "T", "description": "d", "theme": ""}
+            "account": "A", "counterparty": "C", "strategy": "", "trader": "T", "description": "d", "theme": "",
+            "pb_root": "", "trade_type": ""}
+    # A column the helper does not name (pb_root, trade_type: TEXT NOT NULL DEFAULT '') takes ''.
     conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-                 [vals[c] for c in cols])
+                 [vals.get(c, "") for c in cols])
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,?,?,?,0)",
                  (tid, ccy, contracts * multiplier * fill, trade_date, expiry, fill))
 
@@ -230,9 +232,11 @@ def _book(conn, tid, instrument_id, product, qty, fill, legs, trade_date="2026-0
     cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
     vals = {"trade_id": tid, "source": "XLSX", "instrument_id": instrument_id, "product": product,
             "package_id": tid, "trade_date": trade_date, "quantity": qty, "price": fill,
-            "account": "A", "counterparty": "C", "strategy": "", "trader": "T", "description": "d", "theme": ""}
+            "account": "A", "counterparty": "C", "strategy": "", "trader": "T", "description": "d", "theme": "",
+            "pb_root": "", "trade_type": ""}
+    # A column the helper does not name (pb_root, trade_type: TEXT NOT NULL DEFAULT '') takes ''.
     conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-                 [vals[c] for c in cols])
+                 [vals.get(c, "") for c in cols])
     for n, (leg_type, ccy, amount, settle, settles_cash) in enumerate(legs, start=1):
         conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
                      (tid, n, leg_type, ccy, amount, trade_date, settle, fill, settles_cash))

@@ -17,7 +17,7 @@ from data.ingest import schema
 AS_OF = "2026-09-24"
 _INSTRUMENT = ("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)")
-_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 _LEG = "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)"
 
 
@@ -39,7 +39,7 @@ def _db(tmp_path):
               ("es1", "ESZ6 Index", "2026-09-05", 1, 6500.0, "2026-12-18")]
     for trade_id, instrument, trade_date, qty, px, expiry in trades:
         conn.execute(_TRADE, (trade_id, "XLSX", instrument, "FUTURE", trade_id, trade_date, qty, px,
-                              "acc", "cp", "", "t", "d", ""))
+                              "acc", "cp", "", "t", "d", "", "", ""))
         conn.execute(_LEG, (trade_id, 1, "NOTIONAL", "USD", qty * px, trade_date, expiry, px, 0))
     conn.commit()
     return conn
@@ -185,12 +185,12 @@ def _phase5_db(tmp_path):
                ("gold", "GCQ26C 3300 Comdty", "2026-07-06", 2, 45.2, "USD", "2026-07-28")]
     for trade_id, instrument, trade_date, qty, px, ccy, expiry in options:
         conn.execute(_TRADE, (trade_id, "XLSX", instrument, "CMDTY_OPTION", trade_id, trade_date, qty, px,
-                              "acc", "cp", "", "t", "d", ""))
+                              "acc", "cp", "", "t", "d", "", "", ""))
         conn.execute(_LEG, (trade_id, 1, "NOTIONAL", ccy, qty * px, trade_date, expiry, px, 0))
     for trade_id, root, trade_date, tonnes, px, prompt in (("ca", "LME:CA", "2026-09-10", 100.0, 9850.0, "2026-12-10"),
                                                            ("ni", "LME:NI", "2026-07-02", 12.0, 15420.0, "2026-09-16")):
         conn.execute(_TRADE, (trade_id, "XLSX", root, "LME_FWD", trade_id, trade_date, tonnes, px,
-                              "acc", "cp", "", "t", "d", ""))
+                              "acc", "cp", "", "t", "d", "", "", ""))
         conn.execute(_LEG, (trade_id, 1, "FX_NEAR", root, tonnes, trade_date, prompt, px, 0))
         conn.execute(_LEG, (trade_id, 2, "FX_NEAR", "USD", -tonnes * px, trade_date, prompt, px, 1))
     conn.commit()
@@ -314,7 +314,7 @@ def test_a_settled_prompt_is_dropped(tmp_path):
 def test_an_lme_metal_the_universe_does_not_know_is_a_listed_gap(tmp_path):
     conn = _phase5_db(tmp_path)
     conn.execute(_INSTRUMENT, ("LME:ZZ", "LME_FWD", "LME:ZZ", "USD", 1, 0, "", "9999-12-31"))
-    conn.execute(_TRADE, ("zz", "XLSX", "LME:ZZ", "LME_FWD", "zz", "2026-09-10", 5.0, 100.0, "acc", "cp", "", "t", "d", ""))
+    conn.execute(_TRADE, ("zz", "XLSX", "LME:ZZ", "LME_FWD", "zz", "2026-09-10", 5.0, 100.0, "acc", "cp", "", "t", "d", "", "", ""))
     conn.execute(_LEG, ("zz", 1, "FX_NEAR", "LME:ZZ", 5.0, "2026-09-10", "2026-12-10", 100.0, 0))
     conn.commit()
     zz = _kinds(conn, "zz")

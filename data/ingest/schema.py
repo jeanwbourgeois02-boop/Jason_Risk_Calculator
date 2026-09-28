@@ -84,7 +84,10 @@ CREATE TABLE IF NOT EXISTS trades (
   strategy        TEXT NOT NULL,
   trader          TEXT NOT NULL,
   description     TEXT NOT NULL,
-  theme           TEXT NOT NULL DEFAULT ''
+  theme           TEXT NOT NULL DEFAULT '',
+  pb_root         TEXT NOT NULL DEFAULT '',        -- the broker's raw PBRoot cell ('JSHY10.3_COPAR3'); '' = none
+  trade_type      TEXT NOT NULL DEFAULT ''         -- CROSS_EXCHANGE | CROSS_PRODUCT | TERM_STRUCTURE | '' from the
+                                                   -- PBRoot decimal alone (.3 | .4 | .5); never inferred here
 );
 
 CREATE TABLE IF NOT EXISTS instrument_theme (
@@ -215,9 +218,10 @@ WHERE f.source = CASE f.mark_type
 {cases}
     END);
 
--- trades_official: a plain passthrough of `trades`, kept as a named view so every
--- engine query can read "the official trades" without caring whether that is ever
--- filtered again in future. Until 2026-09-17 this filtered out `source = 'BNP'` (the
+-- trades_official: a plain passthrough of `trades` (SELECT *, so a column added to
+-- `trades` -- strategy, pb_root, trade_type -- is exposed with no edit here), kept as a
+-- named view so every engine query can read "the official trades" without caring
+-- whether that is ever filtered again in future. Until 2026-09-17 this filtered out `source = 'BNP'` (the
 -- once-daily BNP EOD snapshot, kept alongside the live blotter as a second trade
 -- source, user decision 2026-09-16) to stop the same economic trade loaded from both
 -- sources being summed twice into the ladder/delta/P&L (docs/open-questions.md item

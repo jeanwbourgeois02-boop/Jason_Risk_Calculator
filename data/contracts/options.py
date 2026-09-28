@@ -244,7 +244,7 @@ def _underlying_month(underlying: str, root: ContractRoot, ref_year: int):
         return None
     if parsed is None:
         return None
-    prefix, code, month, year, _form, _key = parsed
+    prefix, code, month, year, _form, _key, _suffix = parsed
     if (prefix is not None and root.exchange not in prefix) or code not in (root.exchange_code, root.bbg_root):
         raise UnknownContract(f"the underlying {underlying!r} is not a {root.root_id} future")
     return month, year
@@ -266,9 +266,11 @@ def resolve_option(symbol: str, *, trade_date, underlying: str = "", description
             raise UnknownContract(f"option symbol {symbol!r}: exchange prefix {m.group('exch')!r} is not known")
         text = m.group("rest").strip()
     body = text
+    suffix = ""
     sm = _PB_SUFFIX_RE.match(text)
     if sm and not _BBG_OPT_RE.match(text):
         body = sm.group("body").strip()
+        suffix = sm.group("suffix")
 
     sym_cp = sym_strike = sym_style = expiry = None
     month = year = None
@@ -298,7 +300,7 @@ def resolve_option(symbol: str, *, trade_date, underlying: str = "", description
             raise UnknownContract(
                 f"option symbol {symbol!r} is not an option such as 'CLZ6C 70 Comdty' or "
                 f"'CL/A261117C70-USAA', nor a futures month with the type and strike given")
-        prefix, code, month, year, form, key = parsed
+        prefix, code, month, year, form, key, suffix = parsed
 
     try:
         arg_cp = cp_letter(option_type) if str(option_type or "").strip() else None
@@ -311,7 +313,8 @@ def resolve_option(symbol: str, *, trade_date, underlying: str = "", description
     und_symbol = str(underlying or "").strip()
     try:
         root = _pick_root(symbol, prefix, code, form, key, currency=currency, venue=venue,
-                          underlying=underlying, description=description, what="option symbol")
+                          underlying=underlying, description=description, suffix=suffix,
+                          what="option symbol")
     except UnknownContract:
         # an option code the universe does not carry (CME's 'LO' for crude options): the
         # underlying future, when the row names one, says which root it is

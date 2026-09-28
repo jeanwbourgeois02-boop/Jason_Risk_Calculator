@@ -23,7 +23,7 @@ def _make_db():
     conn.execute("INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
     conn.execute(
         "INSERT INTO trades VALUES ('T1','XLSX','EURUSD','FX_FWD','T1','2026-06-01',1000000,1.10,"
-        "'ACC','CPTY','HAHY7','TR','buy eur','FX')"
+        "'ACC','CPTY','HAHY7','TR','buy eur','FX','','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('T1',1,'FX_NEAR','EUR',1000000,'2026-06-01','2026-06-20',1.10,1)"
@@ -49,7 +49,7 @@ def _make_db_bnp_only():
     conn.execute("INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
     conn.execute(
         "INSERT INTO trades VALUES ('T1','XLSX','EURUSD','FX_FWD','T1','2026-06-01',1000000,1.10,"
-        "'ACC','CPTY','HAHY7','TR','buy eur','FX')"
+        "'ACC','CPTY','HAHY7','TR','buy eur','FX','','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('T1',1,'FX_NEAR','EUR',1000000,'2026-06-01','2026-06-20',1.10,1)"
@@ -74,7 +74,7 @@ def _make_db_no_marks():
     conn.execute("INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
     conn.execute(
         "INSERT INTO trades VALUES ('T1','XLSX','EURUSD','FX_FWD','T1','2026-06-01',1000000,1.10,"
-        "'ACC','CPTY','HAHY7','TR','buy eur','FX')"
+        "'ACC','CPTY','HAHY7','TR','buy eur','FX','','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('T1',1,'FX_NEAR','EUR',1000000,'2026-06-01','2026-06-20',1.10,1)"
@@ -219,7 +219,7 @@ def _add_option(conn, trade_id="O1", premium_mark=0.0062, as_of="2026-06-20"):
     conn.execute("INSERT OR IGNORE INTO instruments VALUES ('EURUSD092226C-1','FX_OPTION','EUR','USD',1,0,'','2026-09-22')")
     conn.execute(
         "INSERT INTO trades VALUES (?,'XLSX','EURUSD092226C-1','FX_OPTION',?,'2026-06-01',1000000,0.0050,"
-        "'ACC','CPTY','HAHY7','TR','call','')", (trade_id, trade_id))
+        "'ACC','CPTY','HAHY7','TR','call','','','')", (trade_id, trade_id))
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL','EUR',1000000,'2026-06-01','2026-09-22',0.0050,0)",
                  (trade_id,))
     if premium_mark is not None:
@@ -237,7 +237,7 @@ def _add_future(conn, trade_id="F1", instrument="CLZ26 Comdty", root="NYMEX:CL",
                  "is_ndf, bbg_ticker, expiry_date) VALUES (?,'FUTURE',?,?,?,0,?,?)",
                  (instrument, root, ccy, multiplier, instrument, expiry))
     conn.execute(
-        "INSERT INTO trades VALUES (?,'XLSX',?,'FUTURE',?,'2026-06-01',?,?,'ACC','CPTY','','TR','fut','')",
+        "INSERT INTO trades VALUES (?,'XLSX',?,'FUTURE',?,'2026-06-01',?,?,'ACC','CPTY','','TR','fut','','','')",
         (trade_id, instrument, trade_id, contracts, fill))
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,'2026-06-01',?,?,0)",
                  (trade_id, ccy, contracts * multiplier * fill, expiry, fill))
@@ -953,11 +953,11 @@ def _book_with_marks():
         INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31');
         INSERT INTO instruments VALUES ('CLZ26 Comdty','FUTURE','NYMEX:CL','USD',1000,0,'CLZ26 Comdty','2026-12-18');
         INSERT INTO instruments VALUES ('EURUSD121526C-1','FX_OPTION','EUR','USD',1,0,'','2026-12-15');
-        INSERT INTO trades VALUES ('E1','XLSX','EURUSD','FX_FWD','E1','2026-06-01',2000000,1.10,'ACC','CP','','TR','d','');
-        INSERT INTO trades VALUES ('J1','XLSX','USDJPY','FX_FWD','J1','2026-06-01',1000000,147.0,'ACC','CP','','TR','d','');
-        INSERT INTO trades VALUES ('OLD','XLSX','EURUSD','FX_FWD','OLD','2026-06-01',1000000,1.08,'ACC','CP','','TR','d','');
-        INSERT INTO trades VALUES ('F1','XLSX','CLZ26 Comdty','FUTURE','F1','2026-06-01',3,68.0,'ACC','CP','','TR','d','');
-        INSERT INTO trades VALUES ('O1','XLSX','EURUSD121526C-1','FX_OPTION','O1','2026-06-01',1000000,0.005,'ACC','CP','','TR','d','');
+        INSERT INTO trades VALUES ('E1','XLSX','EURUSD','FX_FWD','E1','2026-06-01',2000000,1.10,'ACC','CP','','TR','d','','','');
+        INSERT INTO trades VALUES ('J1','XLSX','USDJPY','FX_FWD','J1','2026-06-01',1000000,147.0,'ACC','CP','','TR','d','','','');
+        INSERT INTO trades VALUES ('OLD','XLSX','EURUSD','FX_FWD','OLD','2026-06-01',1000000,1.08,'ACC','CP','','TR','d','','','');
+        INSERT INTO trades VALUES ('F1','XLSX','CLZ26 Comdty','FUTURE','F1','2026-06-01',3,68.0,'ACC','CP','','TR','d','','','');
+        INSERT INTO trades VALUES ('O1','XLSX','EURUSD121526C-1','FX_OPTION','O1','2026-06-01',1000000,0.005,'ACC','CP','','TR','d','','','');
         INSERT INTO trade_legs VALUES ('E1',1,'FX_NEAR','EUR',2000000,'2026-06-01','2026-10-20',1.10,1);
         INSERT INTO trade_legs VALUES ('E1',2,'FX_NEAR','USD',-2200000,'2026-06-01','2026-10-20',1.10,1);
         INSERT INTO trade_legs VALUES ('J1',1,'FX_NEAR','USD',1000000,'2026-06-01','2026-11-05',147.0,1);
@@ -1231,7 +1231,7 @@ def _digital_book(tmp_path):
     conn.executescript("""
         INSERT INTO instruments VALUES ('USDJPY111926P-1','FX_OPTION','USD','JPY',1,0,'','2026-11-19');
         INSERT INTO instrument_options (instrument_id, strike, option_type) VALUES ('USDJPY111926P-1', 0, 'PUT');
-        INSERT INTO trades VALUES ('O1','XLSX','USDJPY111926P-1','FX_OPTION','O1','2026-06-01',5000000,0.01,'ACC','CP','','TR','d','');
+        INSERT INTO trades VALUES ('O1','XLSX','USDJPY111926P-1','FX_OPTION','O1','2026-06-01',5000000,0.01,'ACC','CP','','TR','d','','','');
         INSERT INTO trade_legs VALUES ('O1',1,'NOTIONAL','USD',5000000,'2026-06-01','2026-11-19',0.01,0);
     """)
     conn.commit()

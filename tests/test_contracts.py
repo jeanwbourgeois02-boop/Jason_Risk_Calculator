@@ -42,7 +42,7 @@ TRADE_DATE = date(2026, 9, 24)
 
 def test_universe_loads_every_root_with_its_multiplier():
     roots = load_roots()
-    assert len(roots) == 202
+    assert len(roots) == 203   # the research app's 202 plus SGX:XUC (2026-09-28)
     for root in roots.values():
         assert isinstance(root, ContractRoot)
         quote_qty = root.quote_unit.split("/")[1]
@@ -180,18 +180,21 @@ def test_each_symbol_form_resolves(symbol, root_id, month, year):
 
 def test_ambiguous_bare_code_raises_with_candidates_and_resolves_when_disambiguated():
     with pytest.raises(AmbiguousContract) as err:
-        resolve_future("ZCZ6-USAA", trade_date=TRADE_DATE)
+        resolve_future("ZCZ6", trade_date=TRADE_DATE)
     assert set(err.value.candidates) == {"CBOT:ZC", "ZCE:ZC"}
     assert "CBOT:ZC" in str(err.value) and "ZCE:ZC" in str(err.value)
     assert isinstance(err.value, ValueError)
 
-    assert resolve_future("ZCZ6-USAA", trade_date=TRADE_DATE, currency="USD").root_id == "CBOT:ZC"
+    # the prime broker's suffix is one more way (2026-09-28): -USAA the US exchanges, -CHAA China
+    assert resolve_future("ZCZ6-USAA", trade_date=TRADE_DATE).root_id == "CBOT:ZC"
+    assert resolve_future("ZCZ6-CHAA", trade_date=TRADE_DATE).root_id == "ZCE:ZC"
+    assert resolve_future("ZCZ6", trade_date=TRADE_DATE, currency="USD").root_id == "CBOT:ZC"
     assert resolve_future("CBOT:ZCZ6", trade_date=TRADE_DATE).root_id == "CBOT:ZC"
     assert resolve_future("ZCZ6", trade_date=TRADE_DATE, venue="CBOT").root_id == "CBOT:ZC"
     assert resolve_future("SIZ6", trade_date=TRADE_DATE, description="COMEX SILVER FUT").root_id == "COMEX:SI"
     # a code that is one root's exchange code and another's Bloomberg root is never picked silently
     with pytest.raises(AmbiguousContract) as err:
-        resolve_future("COZ6-USAA", trade_date=TRADE_DATE)
+        resolve_future("COZ6", trade_date=TRADE_DATE)
     assert set(err.value.candidates) == {"LME:CO", "ICE:B"}
 
 

@@ -9,11 +9,12 @@
 #
 # Columns: funds -> 'Fund', traders -> 'Trader', desks -> 'Desk'.
 #
-# Jason's own trader code and desk are not known yet (docs/open-questions.md C1): until
-# the user gives them, traders and desks stay empty and the fund is the one the app has
-# always taken. The synthetic commodity sample (data/sample/blotter_sample.csv)
-# books every row as Trader 'JB', Fund 'NMMF'; 'JB' is made up, not Jason's real code.
+# Every list is empty (user, 2026-09-28): the export Jason uploads is his own pull from the
+# prime broker and holds only his trades, so nothing is filtered. It has no Fund or Desk
+# column at all (Trader is 'JS'). The lists stay as a safety net to fill in if a shared
+# export ever appears. The synthetic sample (data/sample/blotter_sample.csv) books every
+# row as Trader 'JB', Fund 'NMMF', and loads whole under an empty list.
 
-funds: [NMMF]
+funds: []
 traders: []
 desks: []

@@ -45,7 +45,8 @@ def _future(conn, tid, inst, lots, fill, account="ACC", trade_date=TD, expiry=No
     cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
     vals = {"trade_id": tid, "source": "XLSX", "instrument_id": inst, "product": "FUTURE", "package_id": tid,
             "trade_date": trade_date, "quantity": lots, "price": fill, "account": account, "counterparty": "C",
-            "strategy": "", "trader": "JB", "description": "d", "theme": ""}
+            "strategy": "", "trader": "JB", "description": "d", "theme": "",
+            "pb_root": "", "trade_type": ""}
     conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                  [vals[c] for c in cols])
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,?,?,?,0)",
@@ -359,7 +360,8 @@ def test_outrights_are_left_alone():
     cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
     vals = {"trade_id": "FX1", "source": "XLSX", "instrument_id": "EURUSD", "product": "FX_FWD",
             "package_id": "FX1", "trade_date": TD, "quantity": 1e6, "price": 1.17, "account": "ACC",
-            "counterparty": "C", "strategy": "", "trader": "JB", "description": "d", "theme": ""}
+            "counterparty": "C", "strategy": "", "trader": "JB", "description": "d", "theme": "",
+            "pb_root": "", "trade_type": ""}
     conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                  [vals[c] for c in cols])
     _px(conn, CLZ6, 71.0)

@@ -15,7 +15,8 @@ def _db():
     for tid, qty in [("F1", 6), ("F2", -2)]:
         vals = {"trade_id": tid, "source": "XLSX", "instrument_id": "ESU6 Index", "product": "FUTURE",
                 "package_id": tid, "trade_date": "2026-09-01", "quantity": qty, "price": 7500.0,
-                "account": "A", "counterparty": "C", "strategy": "S", "trader": "T", "description": "d", "theme": ""}
+                "account": "A", "counterparty": "C", "strategy": "S", "trader": "T", "description": "d", "theme": "",
+                "pb_root": "", "trade_type": ""}
         conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                      [vals[c] for c in cols])
         conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL','USD',?,'2026-09-01','2026-09-18',7500.0,0)",
@@ -59,7 +60,8 @@ def _add_future(conn, instrument_id, ccy, multiplier, expiry, contracts, fill):
     tid = "T-" + instrument_id
     vals = {"trade_id": tid, "source": "XLSX", "instrument_id": instrument_id, "product": "FUTURE",
             "package_id": tid, "trade_date": "2026-09-01", "quantity": contracts, "price": fill,
-            "account": "A", "counterparty": "C", "strategy": "", "trader": "T", "description": "d", "theme": ""}
+            "account": "A", "counterparty": "C", "strategy": "", "trader": "T", "description": "d", "theme": "",
+            "pb_root": "", "trade_type": ""}
     conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", [vals[c] for c in cols])
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,'2026-09-01',?,?,0)",
                  (tid, ccy, contracts * multiplier * fill, expiry, fill))

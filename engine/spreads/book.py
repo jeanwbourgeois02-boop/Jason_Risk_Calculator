@@ -8,9 +8,11 @@ back of up to 5 business days and the per-trade fill the header uses) on the dat
 a leg in CNY is in the spread at the USD figure ``value_book`` gave it. A spread with a leg
 unpriced has no figure, with that leg's reason, never a partial sum.
 
-The one number computed here that ``value_book`` does not give is the leftover's USD notional:
-leftover lots x ``instruments.multiplier`` x that contract's mark x its spot, both read off the
-leg's own ``value_book`` row (the mark and conversion its P&L used); no mark is looked up.
+The one number computed here that ``value_book`` does not give is a USD notional: lots x
+``instruments.multiplier`` x that contract's mark x its spot, both read off the leg's own
+``value_book`` row (the mark and conversion its P&L used); no mark is looked up. It is the
+leftover's ``usd_notional`` and, since 2026-09-28, each spread's, position's and outright's
+``gross_usd`` / ``net_usd`` on its open lots (``_Book.gross_net``: never a partial sum).
 
 Beside the P&L (Phase B, 2026-09-25), and never part of it: each spread's *level* in its own
 quote unit and the USD a 1.0 move of it is worth (``levels.py`` holds the formula, the research
@@ -39,12 +41,16 @@ from engine.spreads.levels import (
 )
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
 from engine.spreads.templates import Template, load_templates
+from engine.spreads.trade_type import TypeLeg, outright_fields, type_fields
 
 PERIODS = ("ltd", "daily", "d5", "mtd", "ytd")
 SPREAD_PRODUCTS = ("FUTURE",)       # what the automatic rule groups (options on futures: Phase 5)
+OPTION_PRODUCTS = ("FX_OPTION", "CMDTY_OPTION", "EQ_OPTION")   # lots x price is a value, never a notional
 
+KIND_STRATEGY = "strategy"          # Jason's own strategy label (trades.strategy): the position, before anything else
 KIND_BUNDLE = "bundle"
 KIND_PINNED = "pinned"
+HAND_KINDS = (KIND_STRATEGY, KIND_BUNDLE, KIND_PINNED)   # groups the user made: a position of their own each
 REVIEW_AMBIGUOUS = "ambiguous"      # two ways to group the same trades
 REVIEW_RATIO = "ratio_off"          # a calendar / template's legs, signs that fit, lots outside 5 %
 REVIEW_ACCOUNTS = "accounts"        # a single-currency calendar / template on the same day, on two accounts
@@ -186,17 +192,26 @@ def _has_column(conn, table: str, column: str) -> bool:
 
 
 def _read_trades(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+    """Every trade on or before ``as_of`` with its instrument. The columns a database may lack
+    (``theme``; ``strategy``, ``trade_type`` and ``pb_root`` of 2026-09-28) read as '' there."""
     theme = "COALESCE(NULLIF(t.theme, ''), it.theme, '')" if _has_column(conn, "trades", "theme") \
         else "COALESCE(it.theme, '')"
+    label = {c: (f"COALESCE(t.{c}, '')" if _has_column(conn, "trades", c) else "''")
+             for c in ("strategy", "trade_type", "pb_root")}
     sql = f"""
         SELECT t.trade_id, t.instrument_id, t.product, t.trade_date, t.quantity, t.price, t.account,
-               {theme} AS theme, i.base_ccy, i.quote_ccy, i.multiplier, i.expiry_date
+               {theme} AS theme, i.base_ccy, i.quote_ccy, i.multiplier, i.expiry_date,
+               {label['strategy']} AS strategy, {label['trade_type']} AS trade_type, {label['pb_root']} AS pb_root
         FROM trades_official t JOIN instruments i USING (instrument_id)
         LEFT JOIN instrument_theme it ON it.instrument_id = t.instrument_id
         WHERE t.trade_date <= :as_of ORDER BY t.trade_id"""
     cols = ("trade_id", "instrument_id", "product", "trade_date", "quantity", "price", "account", "theme",
-            "base_ccy", "quote_ccy", "multiplier", "expiry_date")
-    return [dict(zip(cols, r)) for r in conn.execute(sql, {"as_of": as_of})]
+            "base_ccy", "quote_ccy", "multiplier", "expiry_date", "strategy", "trade_type", "pb_root")
+    out = [dict(zip(cols, r)) for r in conn.execute(sql, {"as_of": as_of})]
+    for t in out:
+        for c in ("strategy", "trade_type", "pb_root"):
+            t[c] = str(t[c] or "").strip()
+    return out
 
 
 def _month_key(trade: dict, roots) -> str:
@@ -358,6 +373,7 @@ class _Book:
 
     # ---- the rule
     def group(self) -> dict:
+        strategies: Dict[str, List[str]] = defaultdict(list)
         bundles: Dict[str, List[str]] = defaultdict(list)
         pinned: Dict[str, List[str]] = defaultdict(list)
         candidates: List[str] = []
@@ -365,7 +381,9 @@ class _Book:
         for t in self.trades:
             tid = t["trade_id"]
             ov = self.overrides.get(tid)
-            if t["theme"]:
+            if t["strategy"]:
+                strategies[t["strategy"]].append(tid)     # Jason's own strategy: the position, nothing else takes it
+            elif t["theme"]:
                 bundles[t["theme"]].append(tid)
             elif ov and ov["action"] == PIN:
                 pinned[ov["group_name"]].append(tid)
@@ -381,6 +399,8 @@ class _Book:
                 candidates.append(tid)
 
         spreads: List[dict] = []
+        for name, tids in sorted(strategies.items()):
+            spreads.append(self.hand_made(f"STRATEGY-{name}", name, KIND_STRATEGY, tids))
         for name, tids in sorted(bundles.items()):
             spreads.append(self.hand_made(f"BUNDLE-{name}", name, KIND_BUNDLE, tids))
         for name, tids in sorted(pinned.items()):
@@ -499,6 +519,9 @@ class _Book:
         return sorted(per_root.values(), key=lambda e: e["root_id"]), basis
 
     def notional(self, leg: Leg, lots: float) -> Tuple[Optional[float], str]:
+        """(``lots`` x ``instruments.multiplier`` x the leg's mark x its spot on ``as_of``, why when
+        None): the mark and USD conversion read off an OPEN trade's own ``value_book`` row, the
+        figures its P&L used; no mark is looked up."""
         t = self.by_id[leg.trade_ids[0]]
         mult = _num(t["multiplier"])
         for tid in leg.trade_ids:
@@ -507,8 +530,37 @@ class _Book:
             if mark is not None and spot is not None and mult is not None and r.get("status") == "OPEN":
                 return lots * mult * mark * spot, ""
         r = self.today.get(leg.trade_ids[0]) or {}
-        return None, (f"{leg.instrument_id}: no price or USD conversion on {self.as_of} for the leftover's "
+        return None, (f"{leg.instrument_id}: no price or USD conversion on {self.as_of} for its "
                       f"notional ({_why(r) if r else 'not valued by value_book'})")
+
+    def gross_net(self, tids: Sequence[str]) -> dict:
+        """``{gross_usd, net_usd, notional_reason}`` on the OPEN lots of the group's legs (net per
+        contract over every trade of the group): gross the sum of |open lots x multiplier x mark x
+        spot| per leg, net the same sum signed (long positive), each leg's figure from
+        ``notional``. A leg with no open lots adds nothing (a closed group is 0, not unknown).
+        With any leg's price or USD conversion missing, or an open option among the trades (its
+        lots x price is a value, not a notional), both are None with the sentence: never a
+        partial sum."""
+        options = sorted(t for t in tids if self.by_id[t]["product"] in OPTION_PRODUCTS and self.is_open(t))
+        if options:
+            return {"gross_usd": None, "net_usd": None,
+                    "notional_reason": (f"{', '.join(options)}: an option's lots x price is its value, not a "
+                                        f"notional, so the group's notional is not summed")}
+        gross = net = 0.0
+        whys: List[str] = []
+        for leg in self.legs_of([t for t in tids if self.by_id[t]["product"] not in OPTION_PRODUCTS], per_group=False):
+            open_lots = sum((self.lots(t) or 0.0) for t in leg.trade_ids if self.is_open(t))
+            if abs(open_lots) < 1e-9:
+                continue
+            figure, why = self.notional(leg, open_lots)
+            if figure is None:
+                whys.append(why)
+                continue
+            gross += abs(figure)
+            net += figure
+        if whys:
+            return {"gross_usd": None, "net_usd": None, "notional_reason": "; ".join(whys)}
+        return {"gross_usd": gross, "net_usd": net, "notional_reason": ""}
 
     def base(self, spread_id: str, name: str, kind: str, tids: Sequence[str]) -> dict:
         tids = sorted(tids)
@@ -519,10 +571,27 @@ class _Book:
             "accounts": sorted({str(self.by_id[t]["account"]) for t in tids}),
             "trade_dates": sorted({str(self.by_id[t]["trade_date"]) for t in tids}),
             "status": "open" if any(self.is_open(t) for t in tids) else "closed",
+            **self.label_fields(tids),
         }
         daily = self.daily.setdefault(spread_id, {})
         out.update(_period_pnl(tids, self.as_of, self.frames, self.refs, self.holidays, daily))
         return out
+
+    def label_fields(self, tids: Sequence[str]) -> dict:
+        """The broker's labels on the trades: ``strategy`` (one name, or '' when the trades carry
+        none), ``pb_roots`` (the distinct raw PBRoot cells) and ``type_labels`` (the distinct
+        trade types the labels give)."""
+        names = sorted({self.by_id[t]["strategy"] for t in tids if self.by_id[t]["strategy"]})
+        return {
+            "strategy": names[0] if len(names) == 1 else "",
+            "pb_roots": sorted({self.by_id[t]["pb_root"] for t in tids if self.by_id[t]["pb_root"]}),
+            "type_labels": sorted({self.by_id[t]["trade_type"] for t in tids if self.by_id[t]["trade_type"]}),
+        }
+
+    def add_type(self, out: dict, shape_family: Optional[str]) -> None:
+        """``trade_type`` / ``type_source`` / ``type_note`` (``trade_type.py``): the labels of the
+        trades against what the legs look like; the finder's shape family sets the inferred type."""
+        out.update(type_fields(out["type_labels"], type_legs(out["legs"]), self.roots, shape_family))
 
     def auto(self, m: Match) -> dict:
         out = self.base(f"SPREAD-{m.trade_ids[0]}", m.shape.name,
@@ -532,7 +601,9 @@ class _Book:
         for row, w in zip(out["legs"], m.shape.weights):
             row["weight"] = w
         out["leftover"], out["leftover_basis"] = self.leftover(m.legs, m.shape)
+        out.update(self.gross_net(m.trade_ids))
         self.add_levels(out, m)
+        self.add_type(out, CALENDAR if m.shape.kind == CALENDAR else m.shape.family)
         return out
 
     def hand_made(self, spread_id: str, name: str, kind: str, tids: Sequence[str]) -> dict:
@@ -549,7 +620,9 @@ class _Book:
             for row in out["legs"]:
                 row["weight"] = weights.get(row["instrument_id"])
         out["leftover"], out["leftover_basis"] = self.leftover(legs, m.shape if m else None)
+        out.update(self.gross_net(tids))
         self.add_levels(out, m)
+        self.add_type(out, None)      # a hand-made group is read from its legs' roots, never from a shape
         return out
 
     @staticmethod
@@ -717,16 +790,30 @@ class _Book:
             "contract_month": leg["contract_month"], "account": t["account"], "trade_date": t["trade_date"],
             "lots": leg["lots"], "currency": leg["currency"], "status": leg["status"],
             "pnl_local": leg["pnl_local"], "why_outright": why, "review_ids": list(review_ids),
+            **self.label_fields([tid]), **outright_fields([t["trade_type"]]), **self.gross_net([tid]),
         }
         out.update(_period_pnl([tid], self.as_of, self.frames, self.refs, self.holidays))
         return out
 
 
+def type_legs(legs: Sequence[dict]) -> List[TypeLeg]:
+    """The inference's view of a spread's or position's ``legs`` rows."""
+    out = []
+    for leg in legs:
+        is_open = str(leg.get("status") or "") == "open"
+        out.append(TypeLeg(root_id=str(leg.get("root_id") or ""), month=str(leg.get("contract_month") or ""),
+                           is_open=is_open, product=str(leg.get("product") or ""),
+                           instrument_id=str(leg.get("instrument_id") or ""),
+                           lots=float(_num(leg.get("open_lots" if is_open else "lots")) or 0.0)))
+    return out
+
+
 # ------------------------------------------------------------------ one position per spread
 def _position_key(s: dict) -> tuple:
     """A spread's identity across trade dates: the same kind (calendar or template), the same leg
-    contracts with the same weights, the same direction. A bundle or a pin is a position of its own."""
-    if s["kind"] in (KIND_BUNDLE, KIND_PINNED):
+    contracts with the same weights, the same direction. A strategy, a bundle or a pin is a
+    position of its own."""
+    if s["kind"] in HAND_KINDS:
         return ("hand", s["spread_id"])
     legs = tuple((leg["instrument_id"], leg.get("weight")) for leg in s["legs"])
     return (s["kind"], legs, _direction(s))
@@ -741,12 +828,13 @@ def _sum_or_none(values: Sequence[Optional[float]]) -> Optional[float]:
     return None if any(v is None for v in values) else float(sum(values))
 
 
-def _position(members: List[dict]) -> dict:
+def _position(members: List[dict], roots: Dict[str, object]) -> dict:
     first = members[0]
     key = _position_key(first)
     pid = (f"POSITION-{first['spread_id']}" if key[0] == "hand" else
            f"POSITION-{first['kind']}|{'/'.join(i for i, _w in key[1])}|{key[2]}")
     tids = sorted({t for m in members for t in m["trade_ids"]})
+    strategies = sorted({m.get("strategy", "") for m in members if m.get("strategy")})
     out = {
         "position_id": pid, "spread_ids": [m["spread_id"] for m in members],
         "name": first["name"], "kind": first["kind"], "template": first["template"], "family": first["family"],
@@ -757,6 +845,9 @@ def _position(members: List[dict]) -> dict:
         "accounts": sorted({a for m in members for a in m["accounts"]}),
         "trade_dates": sorted({d for m in members for d in m["trade_dates"]}),
         "status": "open" if any(m["status"] == "open" for m in members) else "closed",
+        "strategy": strategies[0] if len(strategies) == 1 else "",
+        "pb_roots": sorted({r for m in members for r in m.get("pb_roots", [])}),
+        "type_labels": sorted({x for m in members for x in m.get("type_labels", [])}),
     }
     # legs: per contract, the members' legs summed
     legs: Dict[str, dict] = {}
@@ -774,6 +865,11 @@ def _position(members: List[dict]) -> dict:
             if leg["status"] == "open":
                 row["status"] = "open"
     out["legs"] = list(legs.values())
+    # the type: the members' labels together, the summed legs as they stand (the shape's family for
+    # the finder's kinds, as each member's); one member gives the member's own fields back
+    shape_family = (CALENDAR if first["kind"] == CALENDAR else
+                    None if first["kind"] in HAND_KINDS else first["family"])
+    out.update(type_fields(out["type_labels"], type_legs(out["legs"]), roots, shape_family))
     # period P&L: the members' figures summed, priced ones only, the others counted (the header's rule)
     out["pnl_usd"], out["pnl_excluded"], out["pnl_reasons"] = {}, {}, {}
     for p in PERIODS:
@@ -840,15 +936,23 @@ def _position(members: List[dict]) -> dict:
     out["usd_per_unit"] = _sum_or_none(upu)
     out["usd_per_unit_reason"] = "; ".join(f"{m['spread_id']}: {m['usd_per_unit_reason']}"
                                            for m in members if m["usd_per_unit"] is None)
+    # notional: the members' gross and net summed; None with the joined reasons if any member's is
+    for k in ("gross_usd", "net_usd"):
+        out[k] = _sum_or_none([m.get(k) for m in members])
+    out["notional_reason"] = "; ".join(f"{m['spread_id']}: {m.get('notional_reason', '')}"
+                                       for m in members if m.get("gross_usd") is None)
     return out
 
 
-def positions_from(spreads: Sequence[dict]) -> List[dict]:
-    """One position per distinct spread (``_position_key``), in the order the spreads come."""
+def positions_from(spreads: Sequence[dict], roots: Optional[Dict[str, object]] = None) -> List[dict]:
+    """One position per distinct spread (``_position_key``), in the order the spreads come.
+    ``roots``: contract-master's ``load_roots()`` (read here when not given), for the type."""
     groups: Dict[tuple, List[dict]] = {}
     for s in spreads:
         groups.setdefault(_position_key(s), []).append(s)
-    return [_position(members) for members in groups.values()]
+    if roots is None and groups:
+        roots = load_roots()
+    return [_position(members, roots or {}) for members in groups.values()]
 
 
 def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value_book,
@@ -857,9 +961,17 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
 
     Returns ``{as_of, spreads, outrights, review, positions, reasons}``:
 
-    - ``spreads``: one dict per spread, bundles first, then hand pins, then the rule's, by first
-      trade id: ``spread_id`` ('BUNDLE-<name>', 'PIN-<name>', 'SPREAD-<min trade id>'), ``name``,
-      ``kind`` ('bundle' | 'pinned' | 'calendar' | the template id), ``template``, ``family``,
+    - ``spreads``: one dict per spread, Jason's strategies first (2026-09-28: every trade with a
+      non-empty ``trades.strategy`` is in the position of that name, kind ``strategy``, and
+      nothing else takes it), then bundles, then hand pins, then the rule's, by first trade id:
+      ``spread_id`` ('STRATEGY-<name>', 'BUNDLE-<name>', 'PIN-<name>', 'SPREAD-<min trade id>'),
+      ``name``, ``kind`` ('strategy' | 'bundle' | 'pinned' | 'calendar' | the template id),
+      ``strategy`` (the name, '' when the trades carry none), ``pb_roots`` (the distinct raw
+      PBRoot labels of its trades), ``type_labels`` (the distinct ``trades.trade_type`` labels),
+      ``trade_type`` ('CROSS_EXCHANGE' | 'CROSS_PRODUCT' | 'TERM_STRUCTURE' | ''),
+      ``type_source`` ('label' | 'inferred' | 'mixed labels' | '') and ``type_note`` (a sentence
+      or ''; ``trade_type.py`` holds the rule: the label wins, else the legs' roots, the finder's
+      shape for its own kinds, a disagreement named in the note), ``template``, ``family``,
       ``unit`` (the spread's price unit), ``size`` / ``size_unit`` (signed, + = long the spread as
       the template writes it; a calendar in lots, + = long the nearer month), ``deviation`` (how
       far the lots are from the ratio), ``also_matches`` (other templates grouping the same
@@ -871,7 +983,12 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
       step-back or fill caption), ``ref_dates`` (the close each period is measured from),
       ``leftover`` ([{root_id, lots, usd_notional, reason}] on the open lots: 0 for a clean
       spread; ``usd_notional`` None with its reason when the leg's price or spot is missing) and
-      ``leftover_basis``. Added 2026-09-25 (Phase B, display arithmetic beside the P&L, which
+      ``leftover_basis``. Added 2026-09-28 (notional, not P&L): ``gross_usd`` (the sum over the
+      legs of |open lots x multiplier x mark x spot| on ``as_of``, the mark and spot the leg's
+      own ``value_book`` row carries), ``net_usd`` (the same sum signed, long positive) and
+      ``notional_reason`` ('' when both are known; else the sentence naming the leg with no
+      price or USD conversion, or the open option in the group, and both figures None: never a
+      partial sum, never 0 for unknown; a group with no open lots is 0). Added 2026-09-25 (Phase B, display arithmetic beside the P&L, which
       is unchanged; the formula and the marks each level reads are in ``levels.py``):
       ``level_unit`` ('' when no calendar or template fits), ``level_entry`` / ``level_prev`` /
       ``level_now`` / ``level_change`` (a figure or None, each with ``<key>_reason``),
@@ -885,20 +1002,28 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
       (Phase C): ``level_spec`` (``levels.spec_to_dict``: the level's formula as plain data, None
       when there is no level), which ``history.position_history`` reads.
     - ``positions``: one per distinct spread (``_position_key``: the same kind, leg contracts,
-      weights and direction; a bundle or pin is its own), the same spread put on over several
-      trade dates as one: ``position_id``, ``spread_ids`` (the member spreads), ``direction``
-      ('long' | 'short'), ``size`` and ``legs`` summed, ``pnl_usd`` the members' figures summed
-      over the priced ones with ``pnl_excluded`` ({period: members left out}) and
-      ``pnl_reasons``, ``leftover`` summed per root, ``level_entry`` the members' entries
-      weighted by |size|, ``usd_per_unit`` summed, and the other level and research keys as a
+      weights and direction; a strategy, bundle or pin is its own), the same spread put on over
+      several trade dates as one: ``position_id``, ``spread_ids`` (the member spreads),
+      ``direction`` ('long' | 'short'), ``size`` and ``legs`` summed, ``pnl_usd`` the members'
+      figures summed over the priced ones with ``pnl_excluded`` ({period: members left out})
+      and ``pnl_reasons``, ``leftover`` summed per root, ``level_entry`` the members' entries
+      weighted by |size|, ``usd_per_unit`` summed, ``gross_usd`` / ``net_usd`` the members'
+      summed (None with ``notional_reason`` joining the members' reasons when any member's is
+      None), and the other level and research keys as a
       spread's. The ``spreads`` list is unchanged beside it. Phase C adds
       ``member_trade_ids`` ({spread_id: [trade_id]}) and ``level_spec`` (the first member's,
       each leg's trade ids widened to every member's on that contract), both read by
-      ``history.position_history``.
+      ``history.position_history``. 2026-09-28 adds ``strategy``, ``pb_roots``,
+      ``type_labels`` (the members' together) and ``trade_type`` / ``type_source`` /
+      ``type_note`` read off the summed legs.
     - ``outrights``: every futures trade the rule left alone: trade_id, instrument_id, root_id,
       contract_month, account, trade_date, lots, currency, status, pnl_local, ``why_outright``
-      ('' = no spread fits), ``review_ids`` (the review entries naming it), and the same
-      ``pnl_usd`` / ``pnl_reasons`` / ``pnl_notes`` / ``ref_dates`` as a spread.
+      ('' = no spread fits), ``review_ids`` (the review entries naming it), ``strategy`` (always
+      '': a trade with one is in its strategy), ``pb_roots``, ``type_labels``, ``trade_type`` /
+      ``type_source`` / ``type_note`` (its own label if it carries one, else '' / '' / ''),
+      ``gross_usd`` / ``net_usd`` / ``notional_reason`` on the one contract's open lots (as a
+      spread's; 0 once it is closed), and
+      the same ``pnl_usd`` / ``pnl_reasons`` / ``pnl_notes`` / ``ref_dates`` as a spread.
     - ``review``: groups the rule refused to take, never guessed ('ambiguous': two ways to group;
       'ratio_off': a calendar or template's legs whose lots are outside 5 %; 'accounts': a
       single-currency calendar or template on two accounts): review_id, kind, trade_ids,
@@ -911,4 +1036,4 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
     """
     book = _Book(conn, as_of, value_fn, templates_dir)
     out = book.group()
-    return {"as_of": as_of, **out, "positions": positions_from(out["spreads"]), "reasons": book.reasons}
+    return {"as_of": as_of, **out, "positions": positions_from(out["spreads"], book.roots), "reasons": book.reasons}

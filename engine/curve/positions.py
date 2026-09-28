@@ -64,6 +64,32 @@ _PRODUCT_ORDER = (FUTURE, LME, OPTION)
 _OUTRIGHT = (FUTURE, LME)   # lots of the future itself: the net / gross lots and USD notional
 _LABEL = {"notional_usd": "USD notional", "delta_usd": "USD delta"}
 
+# Kilograms per one of each mass unit contract-master sizes a contract in (exact definitions:
+# the international pound, the US short ton and hundredweight, the UK long ton, the troy ounce).
+# Physical units of one commodity add across exchanges only through these; anything else
+# (bushels, gallons, MWh, the USD of an FX future) never converts.
+_KG_PER = {"t": 1000.0, "kg": 1.0, "g": 0.001, "lb": 0.45359237, "st": 907.18474, "lt": 1016.0469088,
+           "cwt": 45.359237, "oz": 0.0311034768}
+_PREFERRED_MASS = ("t", "kg")   # a subsector's unit when any of its roots is sized in it, in this order
+
+# Plain words for a subsector key of config/contracts.csv where "capitalise and drop the
+# underscores" is not the name a trader uses.
+_SUBSECTOR_NAMES = {
+    "usdcnh": "USD/CNH", "hrc": "HRC", "lldpe": "LLDPE", "pvc": "PVC", "pta": "PTA", "meg": "MEG", "psf": "PSF",
+    "dap": "DAP", "uan": "UAN", "lpg": "LPG", "pet_resin": "PET resin", "coffee_arabica": "Coffee (arabica)",
+    "coffee_robusta": "Coffee (robusta)", "": "Unknown commodity",
+}
+
+
+def subsector_name(subsector: str) -> str:
+    """The plain name of a subsector key: 'copper' -> 'Copper', 'iron_ore' -> 'Iron ore',
+    'live_cattle' -> 'Live cattle', 'usdcnh' -> 'USD/CNH'."""
+    key = str(subsector or "")
+    if key in _SUBSECTOR_NAMES:
+        return _SUBSECTOR_NAMES[key]
+    words = key.replace("_", " ").strip()
+    return words[:1].upper() + words[1:]
+
 
 def _is_root_id(key: str) -> bool:
     return ":" in key
@@ -152,6 +178,71 @@ def _by_sector(rows: List[dict]) -> Dict[str, dict]:
     return out
 
 
+def _gross_key(gross: Optional[float]) -> Tuple[bool, float]:
+    """Sort key: largest gross USD first, an unknown gross after every known one."""
+    return (gross is None, -(gross or 0.0))
+
+
+def _subsector_units(split: List[dict]) -> Tuple[Optional[float], str, str]:
+    """(net_units, unit, units_note) of a subsector's roots, ``split`` ordered by gross USD:
+    one unit shared by every root is kept as it is; mass units convert through ``_KG_PER`` to
+    tonnes when any root is sized in t, else kg when any is, else the largest root's unit (a
+    fixed choice, so a line's unit never flips with the day's marks); anything else does not
+    add, and says so in the note."""
+    units = list(dict.fromkeys(c["unit"] for c in split))
+    unknown = [c["root_id"] for c in split if c["net_units"] is None]
+    if len(units) == 1:
+        unit, note = units[0], ""
+        factor = {unit: 1.0}
+    elif all(u in _KG_PER for u in units):
+        unit = next((u for u in _PREFERRED_MASS if u in units), split[0]["unit"])
+        factor = {u: _KG_PER[u] / _KG_PER[unit] for u in units}
+        note = ", ".join(f"{exch} lots in {u}" + ("" if u == unit else f" converted to {unit}")
+                         for exch, u in dict.fromkeys((c["exchange"], c["unit"]) for c in split))
+        if unit not in _PREFERRED_MASS:
+            note += " (unit of the largest position)"
+    else:
+        named = ", ".join(f"{c['root_id']} in {c['unit'] or '?'}" for c in split)
+        return None, "", f"units do not add across exchanges: {named}"
+    if unknown:
+        return None, unit, (note + "; " if note else "") + f"no units for {', '.join(unknown)}"
+    return float(sum(c["net_units"] * factor[c["unit"]] for c in split)), unit, note
+
+
+def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict]) -> Dict[str, dict]:
+    """One line per commodity across its exchanges (the universe's ``subsector``: 'copper' for
+    COMEX:HG and LME:CA), netted where the figures add (USD, delta USD, and physical units in
+    one mass unit) and split per root where they do not (lots). A subsector of sector 'fx'
+    (SGX:XUC under 'usdcnh') only ever holds its own roots, so it is its own line and is never
+    netted into a commodity."""
+    out: Dict[str, dict] = {}
+    first_of = {}
+    for r in rows:
+        first_of.setdefault(r["subsector"], r)
+    for sub in sorted(first_of, key=lambda s: (first_of[s]["sector"], s)):
+        mine = [r for r in rows if r["subsector"] == sub]
+        root_ids = sorted(dict.fromkeys(r["root_id"] for r in mine), key=lambda rid: _gross_key(by_commodity[rid]["gross_usd"]))
+        split = [{"root_id": rid, **by_commodity[rid]} for rid in root_ids]
+        by_exchange: Dict[str, Optional[float]] = {}
+        for c in split:
+            have = by_exchange.get(c["exchange"], 0.0)
+            by_exchange[c["exchange"]] = None if have is None or c["gross_usd"] is None else have + c["gross_usd"]
+        outright = [r for r in mine if r["product"] in _OUTRIGHT]
+        net_usd, gross_usd, missing, why = _usd_totals(outright, "notional_usd")
+        net_units, unit, units_note = _subsector_units(split)
+        out[sub] = {
+            "name": subsector_name(sub), "sector": first_of[sub]["sector"],
+            "exchanges": sorted(by_exchange, key=lambda e: _gross_key(by_exchange[e])),
+            "commodities": root_ids, "split": split,
+            "net_units": net_units, "unit": unit, "units_note": units_note,
+            "net_usd": net_usd, "gross_usd": gross_usd, "missing": missing, "reason": why,
+            "months": _months(outright, "notional_usd"), "delta_months": _months(mine, "delta_usd"),
+            "products": [p for p in _PRODUCT_ORDER if any(r["product"] == p for r in mine)],
+            **{k: v for k, v in _delta_totals(mine).items() if k != "net_delta_lots"},
+        }
+    return out
+
+
 def _currency_exposure(conn, groups: List[dict], as_of: str) -> Tuple[Dict[str, dict], List[str]]:
     """{ccy: {pnl_local, pnl_usd, contracts, missing, reason}} over every open non-USD commodity
     future and option (flat ones included: their P&L is still held in that currency), from value_book."""
@@ -197,7 +288,7 @@ def _currency_exposure(conn, groups: List[dict], as_of: str) -> Tuple[Dict[str, 
 
 def _empty(as_of: str, available: bool, note: str, reasons: List[str]) -> dict:
     return {"as_of": as_of, "available": available, "note": note, "rows": [], "flat_contracts": [],
-            "by_commodity": {}, "by_sector": {}, "currency_exposure": {}, "months": [],
+            "by_commodity": {}, "by_subsector": {}, "by_sector": {}, "currency_exposure": {}, "months": [],
             "products_present": [], "reasons": reasons}
 
 
@@ -221,8 +312,8 @@ def _lme_groups(conn, as_of: str, reasons: List[str]) -> List[Tuple[dict, object
 def curve_positions(conn: sqlite3.Connection, as_of: str) -> dict:
     """The book's commodity futures, options on them and LME forwards by contract month on `as_of`.
 
-    Returns ``{as_of, available, note, rows, flat_contracts, by_commodity, by_sector,
-    currency_exposure, months, products_present, reasons}``:
+    Returns ``{as_of, available, note, rows, flat_contracts, by_commodity, by_subsector,
+    by_sector, currency_exposure, months, products_present, reasons}``:
 
     - ``rows``: one dict per open position with a non-zero net, ordered by sector, commodity,
       expiry: ``product`` ('FUTURE' | 'CMDTY_OPTION' | 'LME_FWD'), ``root_id, name, sector,
@@ -250,6 +341,26 @@ def curve_positions(conn: sqlite3.Connection, as_of: str) -> dict:
       net_usd / gross_usd are None when any of those rows has no USD notional (``missing`` names
       them, ``reason`` says why). The delta figures are over every product, None (and a
       ``delta_months`` cell None) when any row has no delta.
+    - ``by_subsector``: one line per commodity across its exchanges, keyed by the universe's
+      ``subsector`` ('copper' holds COMEX:HG and LME:CA; 'zinc' SHFE:ZN and LME:ZS), in order
+      of sector then key: ``{subsector: {name (plain words: 'Copper', 'Iron ore', 'USD/CNH'),
+      sector, exchanges (those with an open position, largest gross USD first), commodities
+      (the root ids, in the same order), split ([{root_id, **by_commodity[root_id]}] in that
+      order: the per-root lots, units, USD and months, since lots do not add across exchanges),
+      net_units, unit, units_note, net_usd, gross_usd, missing, reason, months {'YYYY-MM': net
+      USD notional}, delta_months {'YYYY-MM': delta USD}, products, net_delta_usd,
+      gross_delta_usd, delta_missing, delta_reason}}``. The USD figures are the sums
+      ``by_sector`` makes (None with ``missing`` / ``reason`` when a row has none; no
+      ``net_delta_lots``, which does not add across exchanges). ``net_units`` is in one physical
+      ``unit``: the roots' own when they share one, else, when every root is sized in a mass
+      unit (t, kg, g, lb, st, lt, cwt, oz), each root's units converted at the exact definitions
+      (``_KG_PER``) to tonnes when any root is sized in t, else kg when any is, else the unit of
+      the root with the largest gross USD (a fixed choice: the line's unit never flips with the
+      day's marks), ``units_note`` saying so ('LME lots in t, COMEX lots in lb converted to t';
+      the largest-gross fallback adds 'unit of the largest position'); otherwise (bushels against tonnes, a
+      MWh contract) None with the reason in ``units_note``. A subsector of sector 'fx'
+      (SGX:XUC, 'usdcnh': one lot is 100,000 USD, so its units are USD) only ever holds its own
+      roots and is its own line, never netted into a commodity.
     - ``by_sector``: ``{sector: {net_usd, gross_usd, missing, reason, commodities,
       net_delta_lots, net_delta_usd, gross_delta_usd, delta_missing, delta_reason}}``, same rules.
     - ``currency_exposure``: ``{ccy: {pnl_local, pnl_usd, contracts, missing, reason}}`` for the
@@ -299,8 +410,10 @@ def curve_positions(conn: sqlite3.Connection, as_of: str) -> dict:
     reasons += exposure_reasons
     months = sorted({month_key(r["year"], r["month"]) for r in rows if r["year"] is not None})
     note = "" if rows else f"every open commodity future is flat on {as_of}"
+    by_commodity = _by_commodity(rows)
     return {"as_of": as_of, "available": True, "note": note, "rows": rows, "flat_contracts": flat,
-            "by_commodity": _by_commodity(rows), "by_sector": _by_sector(rows),
+            "by_commodity": by_commodity, "by_subsector": _by_subsector(rows, by_commodity),
+            "by_sector": _by_sector(rows),
             "currency_exposure": exposure, "months": months,
             "products_present": [p for p in _PRODUCT_ORDER if any(r["product"] == p for r in rows)],
             "reasons": reasons}

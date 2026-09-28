@@ -377,7 +377,8 @@ def test_real_ingest_report_on_the_sample_names_its_two_rejects_and_stays_open(t
     assert result.className == "source-result--warning"                      # never dismissed from under the user
     rendered = str(result)
     assert uploads.REJECTS_PHRASE in rendered.lower()
-    assert "ZCZ6-USAA" in rendered and "QQZ6-USAA" in rendered                # which rows failed is on the page
+    assert "ZCZ6" in rendered and "QQZ6-USAA" in rendered                     # which rows failed is on the page
+    # (the sample's ambiguous row is bare 'ZCZ6' since 2026-09-28: ZCE against CBOT, no broker suffix)
 
 
 def test_real_ingest_report_on_the_clean_sample_is_structured_clean_and_lists_its_notes(tmp_path):

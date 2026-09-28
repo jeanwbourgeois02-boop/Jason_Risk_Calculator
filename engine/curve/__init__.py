@@ -3,11 +3,12 @@ which contract month, in lots, in physical units, in USD notional and in delta (
 options on them, LME forwards; the declining delta of monthly-average contracts).
 
 ``curve_positions(conn, as_of)`` is the one entry point; ``positions.py`` holds it, ``rows.py``
-builds one row per position, ``averaging.py`` the averaging contracts' delta factor.
+builds one row per position, ``averaging.py`` the averaging contracts' delta factor;
+``subsector_name`` gives the plain name of a commodity across exchanges ('copper' -> 'Copper').
 """
 
 from engine.curve.averaging import averaging_factor
-from engine.curve.positions import curve_positions
+from engine.curve.positions import curve_positions, subsector_name
 from engine.curve.rows import month_key
 
-__all__ = ["averaging_factor", "curve_positions", "month_key"]
+__all__ = ["averaging_factor", "curve_positions", "month_key", "subsector_name"]

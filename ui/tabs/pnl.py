@@ -23,8 +23,13 @@ reason; unpriced today -> a dash with `value_book`'s reason. A group adds those 
 and says "excl. N" otherwise (the display rule of CLAUDE.md "Header"); nothing is re-marked,
 converted or filled here.
 
-Layout: the title line (the question, the group-by switch: Position, Commodity, Sector, Product,
-Trade; Download CSV), the LTD chart, then one attribution table with the five periods as columns
+Layout: the title line (the question, the group-by switch: Position, Commodity, Strategy, Type,
+Instrument, Trade; Download CSV), the LTD chart, then one attribution table with the five periods as
+columns. Since 2026-09-28 (Jason's real export, "it's very important that the exposure and pnl is
+grouped by product type"): Commodity is the commodity across exchanges (curve-positions'
+subsector: copper = COMEX + LME), per trade leg, so a two-commodity strategy splits by leg;
+Strategy is Jason's own strategy name; Type the broker's trade type; Instrument the product in
+plain words (futures, LME forwards, FX futures, options on futures, FX hedges)
 (Daily, 5d, MTD, YTD, LTD), its Total line the header's entry for every column, and under it
 Realised and Open for LTD (the value rows' status: settled rows are the ledger's frozen figures);
 one "Data issues (N)" drawer. Money in k / m with the full figure on hover; the Trade view keeps
@@ -47,7 +52,8 @@ from ui.revision import DATA_REVISION_ID
 from ui.tabs import header
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import (
-    MISSING, about, full_money, issues_drawer, marker, missing_cell, money_cell, sum_known,
+    MISSING, TRADE_TYPE_TITLES, about, full_money, issues_drawer, marker, missing_cell, money_cell, sum_known,
+    trade_type_words,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -74,9 +80,20 @@ PERIOD_TIPS = {"daily": "LTD today less LTD at the previous business day's close
                "mtd": "LTD today less LTD at the last business day of the previous month.",
                "ytd": "LTD today less LTD at the last business day of the previous year.",
                "ltd": "Life to date: every trade's P&L at today's marks, settled trades frozen."}
-GROUP_POSITION, GROUP_COMMODITY, GROUP_SECTOR, GROUP_PRODUCT, GROUP_TRADE = "position", "commodity", "sector", "product", "trade"
-GROUP_OPTIONS = ((GROUP_POSITION, "Position"), (GROUP_COMMODITY, "Commodity"), (GROUP_SECTOR, "Sector"),
-                 (GROUP_PRODUCT, "Product"), (GROUP_TRADE, "Trade"))
+GROUP_POSITION, GROUP_COMMODITY, GROUP_STRATEGY, GROUP_TYPE, GROUP_INSTRUMENT, GROUP_TRADE = (
+    "position", "commodity", "strategy", "type", "instrument", "trade")
+GROUP_OPTIONS = ((GROUP_POSITION, "Position"), (GROUP_COMMODITY, "Commodity"), (GROUP_STRATEGY, "Strategy"),
+                 (GROUP_TYPE, "Type"), (GROUP_INSTRUMENT, "Instrument"), (GROUP_TRADE, "Trade"))
+NO_STRATEGY_GROUP = "No strategy"
+NO_TYPE_GROUP = "No type (outrights)"
+FX_SECTOR = "fx"
+FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION")
+# The Instrument view's plain words per product (an FX future, the SGX USD/CNH contract of sector
+# 'fx', is "FX futures"; an FX spot, forward or option is an FX hedge).
+_INSTRUMENT_LABELS = {"FUTURE": "Futures", "CMDTY_OPTION": "Options on futures", "LME_FWD": "LME forwards",
+                      "FX_SPOT": "FX hedges", "FX_FWD": "FX hedges", "FX_SWAP": "FX hedges", "FX_OPTION": "FX hedges",
+                      "EQ_OPTION": "Listed options"}
+FX_FUTURES_LABEL = "FX futures"
 DEFAULT_GROUP = GROUP_POSITION
 TOTAL_LABEL = "Total"
 QUESTION = "where did the P&L come from"
@@ -89,7 +106,8 @@ _MONO = {"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": 
          "padding": "4px 8px", "whiteSpace": "nowrap"}
 
 TAB_ABOUT = ("Where did the P&L come from? The header's Daily, 5d, MTD, YTD and LTD attributed by position (as the "
-             "Book names and groups them), commodity, sector, product or trade, each line the sum of its trades' "
+             "Book names and groups them), commodity (across exchanges, per trade leg), strategy, trade type, "
+             "instrument or trade, each line the sum of its trades' "
              "figures by the header's own rule (priced trades only, a period over the trades priced at both ends, the "
              "reference close stepped back when it has no value); the Total line is the header; realised against open "
              "for LTD; the LTD line since the first trade. Nothing is re-marked here.")
@@ -239,16 +257,54 @@ def realised_entries(df_today: pd.DataFrame) -> Dict[str, dict]:
 
 
 # --------------------------------------------------------------------------- gathering
+_LABEL_COLS = ("commodity", "sector", "exchange", "subsector_label", "strategy", "trade_type", "instrument_label")
+
+
 def _labelled(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
-    """The trades with the Trades tab's descriptive columns (commodity, sector, exchange), looked
-    up by `ui.tabs.blotter.add_instrument_fields`, never computed."""
-    from ui.tabs.blotter import add_instrument_fields
+    """The trades with their descriptive columns, looked up, never computed: commodity, sector and
+    exchange (`ui.tabs.blotter.add_instrument_fields`); `strategy` and `trade_type` (the broker's
+    labels, `add_trade_labels`); `subsector_label`, the commodity across exchanges in plain words
+    (the root's subsector in the universe through `engine.curve.subsector_name`, 'FX hedges' for
+    an FX product, 'Other' off the universe); `instrument_label`, the product in plain words."""
+    from ui.tabs.blotter import add_instrument_fields, add_trade_labels
     rows = df[["trade_id", "instrument_id", "product", "status", "trade_date"]].copy()
     if rows.empty:
-        for col in ("commodity", "sector", "exchange"):
+        for col in _LABEL_COLS:
             rows[col] = pd.Series(dtype=object)
         return rows
-    return add_instrument_fields(conn, rows)
+    rows = add_trade_labels(conn, add_instrument_fields(conn, rows))
+    try:
+        from data.contracts import load_roots
+        roots = dict(load_roots())
+    except Exception:  # noqa: BLE001 -- the labels fall back to the product words
+        roots = {}
+    try:
+        from engine.curve import subsector_name
+    except Exception:  # noqa: BLE001
+        def subsector_name(key):  # type: ignore[misc]
+            return str(key or "").replace("_", " ").capitalize()
+    bases: Dict[str, str] = {}
+    try:
+        bases = {str(i): str(b or "") for i, b in conn.execute("SELECT instrument_id, base_ccy FROM instruments")}
+    except sqlite3.Error:
+        bases = {}
+    subs, insts = [], []
+    for inst, product in zip(rows["instrument_id"], rows["product"]):
+        product = str(product)
+        root = roots.get(bases.get(str(inst), ""))
+        is_fx_root = root is not None and str(getattr(root, "sector", "") or "") == FX_SECTOR
+        if product in FX_PRODUCTS:
+            subs.append("FX hedges")
+        elif root is None:
+            subs.append("Other")
+        else:
+            subs.append(subsector_name(str(getattr(root, "subsector", "") or "")) or "Other")
+        if product == "FUTURE" and is_fx_root:
+            insts.append(FX_FUTURES_LABEL)
+        else:
+            insts.append(_INSTRUMENT_LABELS.get(product, product.replace("_", " ").capitalize() or "Other"))
+    rows["subsector_label"], rows["instrument_label"] = subs, insts
+    return rows
 
 
 def gather(conn: sqlite3.Connection, as_of: str) -> dict:
@@ -258,6 +314,7 @@ def gather(conn: sqlite3.Connection, as_of: str) -> dict:
     from ui.tabs.blotter_pricing import pricing_snapshot
     with pricing_snapshot(conn, "P&L tab"):
         data = book.gather(conn, as_of)
+        data["n_trades"] = book.trades_on_file(conn)
         for key in ("d5", "ytd"):
             if key in data["periods"]:
                 continue
@@ -318,18 +375,30 @@ def position_lines(data: dict) -> List[Tuple[str, List[dict]]]:
     return out
 
 
+def _line_keys(df: pd.DataFrame, by: str, data: Optional[dict] = None) -> List[str]:
+    """Each trade's group label for the view `by`: the commodity across exchanges, the strategy
+    name (No strategy without one), the trade type in words (the type of the position the trade
+    is in, as the Book shows it, `book.trade_types`; No type for an outright), or the instrument
+    in plain words."""
+    if by == GROUP_COMMODITY:
+        return [str(v or "") or "Other" for v in df["subsector_label"]]
+    if by == GROUP_STRATEGY:
+        return [str(v or "") or NO_STRATEGY_GROUP for v in df["strategy"]]
+    if by == GROUP_TYPE:
+        from ui.tabs.book import trade_types
+        types = trade_types(data) if data is not None else {}
+        return [TRADE_TYPE_TITLES.get(str((types.get(str(t)) or {}).get("trade_type") or v or ""), "") or NO_TYPE_GROUP
+                for t, v in zip(df["trade_id"], df["trade_type"])]
+    return [str(v or "") or "Other" for v in df["instrument_label"]]
+
+
 def group_lines(data: dict, by: str) -> List[Tuple[str, List[dict]]]:
-    """One group of lines: the trades' five period figures summed per commodity, sector or
-    product (the Trades tab's descriptive fields), largest |Daily| first."""
+    """One group of lines: the trades' five period figures summed per commodity, strategy, type
+    or instrument (the trades' own labels, per trade leg), largest |Daily| first."""
     df = data.get("labelled")
     if df is None or df.empty:
         return []
-    if by == GROUP_PRODUCT:
-        keys = [_PRODUCT_LABELS.get(str(p), str(p).replace("_", " ").capitalize()) for p in df["product"]]
-    else:
-        keys = [str(v or "") or ("Other" if by == GROUP_SECTOR else "no commodity") for v in df[by]]
-    if by == GROUP_SECTOR:
-        keys = [k.replace("_", " ").capitalize() for k in keys]
+    keys = _line_keys(df, by, data)
     groups: Dict[str, List[str]] = {}
     for k, tid in zip(keys, df["trade_id"]):
         groups.setdefault(k, []).append(str(tid))
@@ -447,7 +516,9 @@ def trade_records(data: dict) -> Tuple[List[dict], List[dict]]:
     df = data.get("labelled")
     if df is None:
         df = data["df"][["trade_id", "instrument_id", "product", "status", "trade_date"]].copy()
-        df["commodity"] = ""
+        df["commodity"], df["strategy"], df["trade_type"] = "", "", ""
+    from ui.tabs.book import trade_types
+    types = trade_types(data)
     views = data.get("periods") or {}
     values = {key: dict(zip(views[key].rows["trade_id"], views[key].rows["value"])) if key in views else {} for key in PERIODS}
     reasons = {key: dict(zip(views[key].rows["trade_id"], views[key].rows["reason"])) if key in views else {} for key in PERIODS}
@@ -456,6 +527,8 @@ def trade_records(data: dict) -> Tuple[List[dict], List[dict]]:
     for r in df.itertuples(index=False):
         tid = str(r.trade_id)
         rec = {"trade_id": tid, "instrument_id": str(r.instrument_id), "commodity": str(getattr(r, "commodity", "") or ""),
+               "strategy": str(getattr(r, "strategy", "") or ""),
+               "trade_type": trade_type_words((types.get(tid) or {}).get("trade_type") or getattr(r, "trade_type", "")),
                "product": _PRODUCT_LABELS.get(str(r.product), str(r.product)),
                "status": _STATUS_LABELS.get(str(r.status), str(r.status)), "trade_date": str(r.trade_date)}
         tip: Dict[str, dict] = {}
@@ -477,6 +550,7 @@ def trades_table(data: dict) -> html.Div:
     if not records:
         return message_box("No trades on the book at this date.")
     columns = [rk.text("Trade", "trade_id"), rk.text("Instrument", "instrument_id"), rk.text("Commodity / pair", "commodity"),
+               rk.text("Strategy", "strategy"), rk.text("Type", "trade_type"),
                rk.text("Product", "product"), rk.text("Status", "status"), rk.text("Traded", "trade_date")]
     columns += [rk.numeric(PERIOD_TITLES[k], k, rk.amount(nully=NA)) for k in PERIODS]
     table = dash_table.DataTable(
@@ -484,7 +558,8 @@ def trades_table(data: dict) -> html.Div:
         **rk.sortable(TRADES_TABLE_ID), page_action="native", page_size=25,
         style_table={"overflowX": "auto"}, style_cell=_MONO,
         style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"}
-                                for c in ("trade_id", "instrument_id", "commodity", "product", "status", "trade_date")],
+                                for c in ("trade_id", "instrument_id", "commodity", "strategy", "trade_type", "product",
+                                          "status", "trade_date")],
         style_header={"fontWeight": "bold"},
         style_data_conditional=rk.sign_styles(list(PERIODS), nil={"color": "#9ca3af"}),
     )
@@ -558,6 +633,9 @@ _SUMMARY_OPEN_MIRROR_JS = (
 # --------------------------------------------------------------------------- body and shell
 def body(data: dict, by: str = DEFAULT_GROUP) -> html.Div:
     by = by if by in dict(GROUP_OPTIONS) else DEFAULT_GROUP
+    if data.get("n_trades") == 0:                # no blotter loaded: the Book's card (user, 2026-09-28)
+        from ui.tabs.book import empty_state
+        return html.Div(className="pnl-body", children=[empty_state(idx="pnl")])
     if data.get("df") is None or data["df"].empty:
         return html.Div(className="pnl-body", children=[message_box(f"No trades on the book on {data.get('as_of')}.")])
     children: List[Any] = [trades_table(data) if by == GROUP_TRADE else attribution_table(data, by)]

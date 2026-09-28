@@ -31,8 +31,9 @@ COLUMNS = (
     "quote_unit", "price_scale", "multiplier", "active_months", "calendar", "delivery",
     "status", "notes",
 )
-# Added 2026-09-24 (Phases 3-5): read as '' when a file does not carry them.
-OPTIONAL_COLUMNS = ("settlement", "option_style", "option_lead_months")
+# Added 2026-09-24 (Phases 3-5) and 2026-09-28 (broker_price_scale): read as '' when a file does
+# not carry them.
+OPTIONAL_COLUMNS = ("settlement", "option_style", "option_lead_months", "broker_price_scale")
 
 # Exchange-calendar ids (engine/calendars, the exchange-calendars lane) by exchange.
 EXCHANGE_CALENDAR = {
@@ -80,7 +81,7 @@ class ContractRoot:
 
     root_id: str             # 'NYMEX:CL': EXCHANGE:CODE, never the bare code (codes collide)
     name: str
-    sector: str              # energy | metals | agriculture | ferrous | chemicals | freight
+    sector: str              # energy | metals | agriculture | ferrous | chemicals | freight | fx
     subsector: str
     exchange: str            # 'NYMEX'
     country: str             # ISO alpha-2; 'CN' = a mainland Chinese exchange
@@ -110,6 +111,12 @@ class ContractRoot:
     # before, CME's usual; 0: in the contract month, LME-style and averaging contracts; 2: ICE
     # Brent); None when not known. Only the prime-broker dated option form needs it.
     option_lead_months: Optional[int] = None
+    # the broker's fill x broker_price_scale = the price as Bloomberg quotes it: 100 where the
+    # exchange quotes in cents (per lb, per bushel, per gallon) and the prime broker books the
+    # fill in whole currency per unit (live cattle 2.19 for Bloomberg's 219; seen in Jason's
+    # 2026-09-28 export for feeder cattle, live cattle and COMEX copper); 1 (blank in the file)
+    # where the broker's fill is the quoted price
+    broker_price_scale: float = 1.0
 
     @property
     def averaging(self) -> bool:
@@ -178,6 +185,13 @@ def _root_from_row(raw: Dict[str, str], line: int) -> ContractRoot:
     if lead_text and not (lead_text.isdigit() and int(lead_text) <= 3):
         raise ValueError(f"{where}: option_lead_months {lead_text!r} is not 0-3 or blank")
     lead = int(lead_text) if lead_text else None
+    broker_text = (raw.get("broker_price_scale") or "").strip()
+    try:
+        broker_scale = float(broker_text) if broker_text else 1.0
+    except ValueError:
+        raise ValueError(f"{where}: broker_price_scale {broker_text!r} is not a number") from None
+    if not broker_scale > 0 or broker_scale == float("inf"):
+        raise ValueError(f"{where}: broker_price_scale {broker_text!r} is not a positive number")
     return ContractRoot(
         root_id=root_id, name=raw["name"].strip(), sector=raw["sector"].strip(),
         subsector=raw["subsector"].strip(), exchange=exchange, country=raw["country"].strip(),
@@ -188,6 +202,7 @@ def _root_from_row(raw: Dict[str, str], line: int) -> ContractRoot:
         price_scale=scale, multiplier=multiplier, active_months=_months(raw["active_months"], where),
         calendar=calendar, delivery=delivery, status=status, notes=raw["notes"].strip(),
         settlement=settlement, option_style=option_style, option_lead_months=lead,
+        broker_price_scale=broker_scale,
     )
 
 

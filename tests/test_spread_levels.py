@@ -43,7 +43,8 @@ def _future(conn, tid, inst, lots, fill, account="ACC", trade_date=TD, expiry=No
     cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
     vals = {"trade_id": tid, "source": "XLSX", "instrument_id": inst, "product": "FUTURE", "package_id": tid,
             "trade_date": trade_date, "quantity": lots, "price": fill, "account": account, "counterparty": "C",
-            "strategy": "", "trader": "JB", "description": "d", "theme": ""}
+            "strategy": "", "trader": "JB", "description": "d", "theme": "",
+            "pb_root": "", "trade_type": ""}
     conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                  [vals[c] for c in cols])
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,?,?,?,0)",

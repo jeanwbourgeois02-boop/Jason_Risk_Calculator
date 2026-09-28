@@ -36,9 +36,9 @@ def _seed_instrument(conn, instrument_id="USDJPY", base="USD", quote="JPY"):
 def _insert_trade(conn, trade_id, source, instrument_id, quantity, price,
                   trade_date="2026-08-01", settle_date="2026-08-20"):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, source, instrument_id, "FX_FWD", trade_id, trade_date, quantity, price,
-         "acc", "cp", "HAHY7", "trader", "desc", ""),
+         "acc", "cp", "HAHY7", "trader", "desc", "", "", ""),
     )
     conn.executemany(
         "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",

@@ -217,6 +217,10 @@ def tab_link(label, tab_key: str, idx: str, title: Optional[str] = None, classNa
 # precision (`price_text`); plain names (`contract_name`, `spread_name`, `fx_name`); sizes in
 # words (`size_words`); an estimated date grey with a leading "≈" (`date_cell`).
 MISSING = "—"        # em dash: a cell the engine could not give
+# The groups the user made (a strategy label, a bundle, a pin): spreads-engine's `HAND_KINDS`, read
+# here so the display kit needs no engine import; a strategy is named by its own name, never by
+# its legs (2026-09-28).
+HAND_KINDS = ("strategy", "bundle", "pinned")
 ESTIMATED = "≈"      # before an estimated date
 EN_DASH = "–"
 _MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -399,7 +403,7 @@ def price_text(value, unit: str = "", fill=None, decimals: Optional[int] = None)
 SHORT_ROOT_NAMES = {
     "NYMEX:CL": "WTI", "ICE:B": "Brent", "NYMEX:RB": "RBOB", "NYMEX:HO": "Heating oil", "NYMEX:NG": "Henry Hub gas",
     "ICE:G": "Gasoil", "ICE:TFM": "TTF gas", "ICE:M": "NBP gas",
-    "COMEX:HG": "COMEX copper", "COMEX:GC": "Gold", "COMEX:SI": "Silver", "COMEX:ALI": "COMEX aluminium",
+    "COMEX:HG": "COMEX copper", "COMEX:GC": "Gold", "COMEX:SI": "COMEX silver", "COMEX:ALI": "COMEX aluminium",
     "SHFE:CU": "SHFE copper", "OSE:JAU": "OSE gold", "OSE:JPL": "OSE platinum",
     "LME:CA": "LME copper", "LME:AH": "LME aluminium", "LME:ZS": "LME zinc", "LME:PB": "LME lead",
     "LME:NI": "LME nickel", "LME:SN": "LME tin",
@@ -407,6 +411,8 @@ SHORT_ROOT_NAMES = {
     "CBOT:ZW": "Wheat", "CBOT:ZO": "Oats", "CBOT:ZR": "Rough rice", "MGEX:MWE": "Spring wheat",
     "DCE:I": "DCE iron ore", "SGX:FEF": "SGX iron ore", "SGX:M65F": "SGX 65% iron ore", "DCE:J": "DCE coke",
     "ICE:RC": "Robusta", "SGX:TF": "Rubber",
+    "CME:GF": "Feeder cattle", "CME:LE": "Live cattle", "CME:HRC": "HRC", "SHFE:ZN": "SHFE zinc",
+    "SHFE:AG": "SHFE silver", "SGX:XUC": "USD/CNH",
 }
 _KEEP_EXCHANGE = {"SHFE", "DCE", "ZCE", "INE", "GFEX", "LME", "SGX", "OSE", "COMEX"}
 
@@ -525,7 +531,7 @@ def spread_name(position: dict, roots: Optional[dict] = None) -> str:
         first = parsed[0][1] if parsed else None
         month = f" {month_label(first['month'], first['year'])}" if first else ""
         return short_template_name(template or kind, str(position.get("name") or "")) + month
-    if legs and kind not in ("bundle", "pinned"):
+    if legs and kind not in HAND_KINDS:
         seen = []
         for leg in legs:
             rid = str(leg.get("root_id") or "")
@@ -562,6 +568,55 @@ def fx_name(pair: str, product: str, settle_date: Optional[str] = None, option_t
 def lme_name(root, root_id: str, prompt: Optional[str]) -> str:
     """'LME copper 10 Dec'."""
     return f"{short_root_name(root, root_id)} {short_date(prompt)}".strip()
+
+
+# --- trade types and strategies (2026-09-28: Jason's broker labels each trade with a strategy
+# name, COPAR3, and a trade type, cross exchange / cross product / term structure; spreads-engine
+# carries the codes, the words are the screens')
+TRADE_TYPE_WORDS = {"CROSS_EXCHANGE": "cross exchange", "CROSS_PRODUCT": "cross product",
+                    "TERM_STRUCTURE": "term structure"}
+TRADE_TYPE_TITLES = {"CROSS_EXCHANGE": "Cross exchange", "CROSS_PRODUCT": "Cross product",
+                     "TERM_STRUCTURE": "Term structure"}
+NO_TYPE_REASON = "no type: outright"
+SOURCE_INFERRED, SOURCE_MIXED = "inferred", "mixed labels"
+
+
+def trade_type_words(code) -> str:
+    """'cross exchange' / 'cross product' / 'term structure' for spreads-engine's codes; '' for
+    no type (an outright) or an unknown code."""
+    return TRADE_TYPE_WORDS.get(str(code or "").upper(), "")
+
+
+def type_disagrees(type_source: str = "", type_note: str = "") -> bool:
+    """True when the labels disagree among themselves (`mixed labels`) or the note says the legs
+    look like another type than the label ('labelled ...; the legs look like ...')."""
+    note = str(type_note or "").lower()
+    return str(type_source or "") == SOURCE_MIXED or ("labelled" in note and "look like" in note)
+
+
+def type_cell(trade_type, type_source: str = "", type_note: str = "", className: str = ""):
+    """A Type cell: the words ('cross exchange'), a small grey 'inferred' after them when the type
+    was read from the legs rather than the broker's label, an amber 'check' marker when the labels
+    disagree or the legs look like another type, the engine's note on hover. No type: the em dash
+    with 'no type: outright' (and the note) on hover; mixed labels with no type: the amber marker
+    alone."""
+    words = trade_type_words(trade_type)
+    note = str(type_note or "")
+    source = str(type_source or "")
+    if not words:
+        if source == SOURCE_MIXED:
+            return html.Span(html.Span("mixed", className="marker marker--amber",
+                                       title=note or "the broker's labels on the legs disagree"),
+                             className=className or None)
+        return missing_cell("\n".join(t for t in (NO_TYPE_REASON, note) if t), className)
+    children = [words]
+    if source == SOURCE_INFERRED:
+        children.append(html.Span("inferred", className="cell-unit",
+                                  title="read from the legs (no broker label on these trades)"))
+    if type_disagrees(source, note):
+        children.append(html.Span("check", className="marker marker--amber",
+                                  title=note or "the labels disagree"))
+    return html.Span(children, className=className or None, title=note or f"{words}: the broker's label")
 
 
 # --- sizes in words

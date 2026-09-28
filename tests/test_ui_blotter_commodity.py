@@ -35,7 +35,7 @@ def _future(conn, trade_id, instrument, root_id, lots, fill, expiry, price=None)
     conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, "
                  "is_ndf, bbg_ticker, expiry_date) VALUES (?,'FUTURE',?,?,?,0,?,?)",
                  (instrument, root_id, root.currency, root.multiplier, instrument, expiry))
-    conn.execute("INSERT INTO trades VALUES (?,'XLSX',?,'FUTURE',?,'2026-06-01',?,?,'ACC','CPTY','','TR','fut','')",
+    conn.execute("INSERT INTO trades VALUES (?,'XLSX',?,'FUTURE',?,'2026-06-01',?,?,'ACC','CPTY','','TR','fut','','','')",
                  (trade_id, instrument, trade_id, lots, fill))
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,'2026-06-01',?,?,0)",
                  (trade_id, root.currency, lots * root.multiplier * fill, expiry, fill))
@@ -55,7 +55,7 @@ def _eurusd_forward(conn):
     """One FX forward so the FX part of the Positions block has a line (long 1m EUR at 1.10)."""
     conn.execute("INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
     conn.execute("INSERT INTO trades VALUES ('T1','XLSX','EURUSD','FX_FWD','T1','2026-06-01',1000000,1.10,"
-                 "'ACC','CPTY','','TR','buy eur','')")
+                 "'ACC','CPTY','','TR','buy eur','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES ('T1',?,'FX_NEAR',?,?,'2026-06-01','2026-09-20',1.10,1)",
                      [(1, "EUR", 1_000_000), (2, "USD", -1_100_000)])
     conn.execute("INSERT INTO marks VALUES (?,'EURUSD','2026-09-20','FWD_OUTRIGHT',1.108,'BBG_BFXFORWARD',?)", (AS_OF, _CLOSE))
@@ -196,7 +196,7 @@ def _lme(conn, trade_id, root_id, tonnes, fill, prompt, outright=None):
     leg and the USD leg on the prompt date. Its official outright for the prompt on AS_OF if given."""
     conn.execute("INSERT OR IGNORE INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, "
                  "is_ndf, bbg_ticker, expiry_date) VALUES (?,'LME_FWD',?,'USD',1,0,'','9999-12-31')", (root_id, root_id))
-    conn.execute("INSERT INTO trades VALUES (?,'XLSX',?,'LME_FWD',?,'2026-06-01',?,?,'ACC','CPTY','','TR','lme','')",
+    conn.execute("INSERT INTO trades VALUES (?,'XLSX',?,'LME_FWD',?,'2026-06-01',?,?,'ACC','CPTY','','TR','lme','','','')",
                  (trade_id, root_id, trade_id, tonnes, fill))
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,'FX_NEAR',?,?,'2026-06-01',?,?,?)", [
         (trade_id, 1, root_id, tonnes, prompt, fill, 0), (trade_id, 2, "USD", -tonnes * fill, prompt, fill, 1)])
@@ -257,7 +257,7 @@ def _cmdty_option(conn):
                  "bbg_ticker, expiry_date) VALUES ('CLZ26C 75 Comdty','CMDTY_OPTION','NYMEX:CL','USD',1000,0,"
                  "'CLZ6C 75 Comdty','2026-11-17')")
     conn.execute("INSERT INTO trades VALUES ('CO1','XLSX','CLZ26C 75 Comdty','CMDTY_OPTION','CO1','2026-06-01',2,3.10,"
-                 "'ACC','CPTY','','TR','call','')")
+                 "'ACC','CPTY','','TR','call','','','')")
     conn.execute("INSERT INTO trade_legs VALUES ('CO1',1,'NOTIONAL','USD',6200,'2026-06-01','2026-11-17',3.10,0)")
     conn.execute("INSERT INTO marks VALUES (?,'CLZ26C 75 Comdty','2026-11-17','FUTURE_PX',3.60,'BBG_BDH',?)",
                  (AS_OF, _CLOSE))

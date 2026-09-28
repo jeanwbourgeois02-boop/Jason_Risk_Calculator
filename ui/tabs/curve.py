@@ -10,10 +10,14 @@ One screen:
   1. The title line: "Exposure", the question, the two-way switch Lots | USD (both delta-based:
      an option at its official DELTA in futures lots, a monthly-average contract by the pricing
      days left, an LME ticket at its tonnes over the lot size), the one-line note and Download CSV.
-  2. The month grid, the hero: one row per commodity (its short name, the exchange and a non-USD
-     currency small and grey after it), one column per contract month, then Net, Gross and Note;
-     sector group rows carry "gross $X · net ±$Y" from the engine's `by_sector` delta USD, the
-     Book line the sectors' known figures summed. Cells are shaded green long / red short by the
+  2. The month grid, the hero: one row per contract root (its short name, the exchange and a
+     non-USD currency small and grey after it), one column per contract month, then Net, Gross
+     and Note, grouped by commodity across exchanges (since 2026-09-28, Jason's real export:
+     copper = COMEX + LME, zinc = SHFE + LME; curve-positions' `by_subsector`): each group row
+     carries the commodity's net exposure in one physical unit ("net long 35.6 t", the units
+     note on hover), then "gross $X · net ±$Y" of delta USD, the known roots summed with
+     "excl. N"; the SGX USD/CNH future is its own group, "FX hedges", never netted with a
+     commodity; the Book line is every root's known delta USD summed. Cells are shaded green long / red short by the
      cell's rank by size within the view shown (`heat_colour`); a missing figure is an em dash
      with its reason on hover; every cell lists its contracts on hover.
   3. Two cards side by side: Option Greeks (one line per underlying commodity: the options' delta
@@ -49,6 +53,10 @@ from ui.tabs.formatting import (
     MINUS, MISSING, about, contract_name, full_money, issues_drawer, lme_name, missing_cell, money_cell,
     short_date, short_money, short_root_name, sign_class, signed_money, size_words, sum_known,
 )
+
+FX_SECTOR = "fx"
+FX_GROUP = "FX hedges"
+_SECTOR_ORDER = ("energy", "metals", "agriculture", "ferrous")
 from ui.tabs.header import AS_OF_STORE_ID
 
 log = logging.getLogger(__name__)
@@ -75,9 +83,11 @@ UNIT_TIPS = {"delta_lots": "Delta in futures-equivalent lots: a future as booked
 DEFAULT_UNIT = "delta_lots"
 NOTE_LINE = "delta lots: an option at its delta, a monthly-average contract by the days left"
 QUESTION = "what am I long or short, in which month"
-TAB_ABOUT = ("What am I long or short, in which month? One row per commodity, one column per contract month, every "
-             "product at its delta (curve-positions). Sector lines and the Book line are the engine's delta USD, the "
-             "known figures summed. Under the grid the option Greeks and the currency exposure, as the engine gives them.")
+TAB_ABOUT = ("What am I long or short, in which month? One row per contract root, one column per contract month, every "
+             "product at its delta (curve-positions), grouped by commodity across exchanges; each commodity's line "
+             "carries its net exposure in one physical unit and its delta USD, the known figures summed. The Book line "
+             "is the engine's delta USD summed. Under the grid the option Greeks and the currency exposure, as the "
+             "engine gives them.")
 GRID_ABOUT = ("Each month cell is the net delta of that contract month in the view shown, the engine's per-contract "
               "figures summed (the contracts on hover). Green long, red short, deeper for a larger position by its rank "
               "among the cells. A dash is a figure the engine could not give, its reason on hover; an empty cell holds "
@@ -358,15 +368,35 @@ def _totals_children(gross: Optional[float], net: Optional[float], left: Sequenc
     return children
 
 
-def sector_words(sector_key: str, result: Dict[str, Any], roots: Dict[str, Any]) -> Tuple[List[Any], str]:
-    """The children of a sector line ('gross $3.08m · net +$2.2k', an 'excl. N' marker when a
-    commodity has no USD delta) and the hover: the sector's commodities' delta USD (the engine's
-    `by_commodity`), the known ones summed, so the line is never blank (rule 2)."""
-    mine = {r: c for r, c in (result.get("by_commodity") or {}).items() if str(c.get("sector") or "") == sector_key}
+def _units_words(value: Optional[float], unit: str) -> str:
+    """'long 35.6 t', 'short 7.9m USD', 'flat': a net in physical units, rounded to a tenth."""
+    if value is None:
+        return NA
+    if unit and len(unit) == 3 and unit.isupper() and unit.isalpha():
+        return size_words(value, ccy=unit)
+    return size_words(round(float(value), 1), unit or "units")
+
+
+def subsector_words(sub: Dict[str, Any], result: Dict[str, Any], roots: Dict[str, Any]) -> Tuple[List[Any], str]:
+    """The children of a commodity group line: the net in one physical unit ("net long 35.6 t",
+    curve-positions' `net_units` with its `units_note` on hover; a dash with the note when the
+    units do not add), then 'gross $3.08m · net +$2.2k' of delta USD over the commodity's roots
+    (the engine's `by_commodity`, the known ones summed, an 'excl. N' marker otherwise), never
+    blank (rule 2); and the hover."""
+    mine = {r: c for r, c in (result.get("by_commodity") or {}).items() if r in set(sub.get("commodities") or [])}
     gross, net, left, why = _usd_totals(mine, roots)
-    engine = (result.get("by_sector") or {}).get(sector_key) or {}
-    hover = why or ("the engine's delta USD for the sector" if _num(engine.get("gross_delta_usd")) is not None else "")
-    return _totals_children(gross, net, left, why), hover
+    net_units, unit = _num(sub.get("net_units")), str(sub.get("unit") or "")
+    note = str(sub.get("units_note") or "")
+    children: List[Any] = []
+    if net_units is None:
+        children.append(html.Span(["net ", missing_cell(note or "no net in one unit")]))
+    else:
+        children.append(html.Span(f"net {_units_words(net_units, unit)}", className=sign_class(net_units) or None,
+                                  title=note or f"the roots' units add: {unit}"))
+    children.append(" · ")
+    children += _totals_children(gross, net, left, why)
+    hover = "; ".join(t for t in (note, why or "the roots' delta USD (the engine's) added up") if t)
+    return children, hover
 
 
 def _cell_td(value: Optional[float], hover: str, unit: str, magnitudes: List[float]) -> html.Td:
@@ -414,10 +444,23 @@ def commodity_tr(row: dict, months: Sequence[str], unit: str, magnitudes: List[f
     return html.Tr(cells, className="curve-row")
 
 
-def sector_tr(label: str, sector_key: str, result: Dict[str, Any], roots: Dict[str, Any], span: int) -> html.Tr:
-    children, why = sector_words(sector_key, result, roots)
-    return html.Tr([html.Td(label, className="l"), html.Td(children, className="l", colSpan=span, title=why or None)],
+def subsector_tr(label: str, sub: Dict[str, Any], result: Dict[str, Any], roots: Dict[str, Any], span: int) -> html.Tr:
+    children, why = subsector_words(sub, result, roots)
+    return html.Tr([html.Td(label, className="l", title=f"{sub.get('name') or label}: {', '.join(sub.get('commodities') or [])}"),
+                    html.Td(children, className="l", colSpan=span, title=why or None)],
                    className="book-group")
+
+
+def subsector_groups(result: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """[(group label, by_subsector entry)] in the fixed sector order (energy, metals, agriculture,
+    ferrous, then any other sector), the SGX USD/CNH future last under 'FX hedges'."""
+    subs = result.get("by_subsector") or {}
+    order = list(_SECTOR_ORDER) + sorted({str(v.get("sector") or "") for v in subs.values()} - set(_SECTOR_ORDER) - {FX_SECTOR})
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    for sector in order:
+        out += [(str(v.get("name") or k), v) for k, v in subs.items() if str(v.get("sector") or "") == sector]
+    out += [(FX_GROUP, v) for v in subs.values() if str(v.get("sector") or "") == FX_SECTOR]
+    return out
 
 
 def book_tr(result: Dict[str, Any], roots: Dict[str, Any], span: int) -> html.Tr:
@@ -436,18 +479,27 @@ def grid_section(result: Dict[str, Any], unit: str, roots: Dict[str, Any]) -> ht
     rows = grid_rows(result, unit, roots)
     magnitudes = sorted(abs(v) for r in rows for v, _h in r["cells"].values() if v is not None and v != 0)
     head = html.Thead(html.Tr(
-        [html.Th("Commodity", className="l", title="The commodity's short name, its exchange and a non-USD currency; the "
-                                                   "contracts on hover.")]
+        [html.Th("Commodity", className="l", title="The commodity across exchanges as a group line with its net exposure; "
+                                                   "under it each contract root's short name, exchange and non-USD "
+                                                   "currency, the contracts on hover.")]
         + [html.Th(month_label(k), title=f"contract month {k}, in {UNIT_LABELS[unit].lower()} of delta") for k in months]
         + [html.Th("Net", title="The commodity's net delta over every month (the engine's)."),
            html.Th("Gross", title="Lots: the month cells' absolute values added up (display). USD: the engine's gross delta USD."),
            html.Th("Note", className="l", title="Short markers, their sentences on hover.")]))
     body: List[Any] = []
     span = len(months) + 3
-    for sector in dict.fromkeys(r["sector"] for r in rows):
-        label = str(sector or "").replace("_", " ").capitalize() or "Unclassified"
-        body.append(sector_tr(label, sector, result, roots, span))
-        body.extend(commodity_tr(r, months, unit, magnitudes) for r in rows if r["sector"] == sector)
+    by_root = {r["root_id"]: r for r in rows}
+    placed: set = set()
+    for label, sub in subsector_groups(result):
+        body.append(subsector_tr(label, sub, result, roots, span))
+        for root_id in sub.get("commodities") or []:
+            if root_id in by_root and root_id not in placed:
+                body.append(commodity_tr(by_root[root_id], months, unit, magnitudes))
+                placed.add(root_id)
+    left = [r for r in rows if r["root_id"] not in placed]
+    if left:   # a root the engine put in no subsector: still shown, never dropped
+        body.append(html.Tr([html.Td("Other", className="l"), html.Td("", colSpan=span)], className="book-group"))
+        body.extend(commodity_tr(r, months, unit, magnitudes) for r in left)
     body.append(book_tr(result, roots, span))
     table = html.Table([head, html.Tbody(body)], id=GRID_ID, className="book-table curve-grid")
     return html.Div(className="book-card", children=[table], title=None)
@@ -671,7 +723,9 @@ def fx_card(pos: Optional[dict], sources: Dict[str, List[str]], result: Dict[str
 # --------------------------------------------------------------------------- body, CSV, shell
 def gather(conn: sqlite3.Connection, as_of: str) -> dict:
     """Every lane's output the tab reads, each in its own try."""
-    data: Dict[str, Any] = {"as_of": as_of, "result": curve_positions(conn, as_of), "roots": _roots()}
+    from ui.tabs.book import trades_on_file
+    data: Dict[str, Any] = {"as_of": as_of, "n_trades": trades_on_file(conn), "result": curve_positions(conn, as_of),
+                            "roots": _roots()}
     option_ids = [r["contract_id"] for r in (data["result"].get("rows") or []) if _product(r) == OPTION and r.get("contract_id")]
     try:
         data["marks"], data["marks_error"] = _option_greek_marks(conn, as_of, option_ids), ""
@@ -712,6 +766,9 @@ def all_issues(data: dict) -> List[Any]:
 
 
 def body(data: dict, unit: str = DEFAULT_UNIT) -> html.Div:
+    if data.get("n_trades") == 0:                # no blotter loaded: the Book's card (user, 2026-09-28)
+        from ui.tabs.book import empty_state
+        return html.Div(className="curve-body", children=[empty_state(idx="curve")])
     result, roots = data["result"], data["roots"]
     unit = unit if unit in UNITS else DEFAULT_UNIT
     children: List[Any] = []
@@ -733,9 +790,10 @@ def body(data: dict, unit: str = DEFAULT_UNIT) -> html.Div:
 def csv_frame(result: Dict[str, Any], unit: str, roots: Dict[str, Any]) -> pd.DataFrame:
     months = list(result.get("months") or [])
     records = []
+    group_of = {rid: label for label, sub in subsector_groups(result) for rid in (sub.get("commodities") or [])}
     for r in grid_rows(result, unit, roots):
-        rec = {"sector": r["sector"], "commodity": r["name"], "root_id": r["root_id"], "exchange": r["exchange"],
-               "currency": r["currency"], "view": UNIT_LABELS[unit]}
+        rec = {"commodity": group_of.get(r["root_id"], "Other"), "sector": r["sector"], "contract_root": r["name"],
+               "root_id": r["root_id"], "exchange": r["exchange"], "currency": r["currency"], "view": UNIT_LABELS[unit]}
         for k in months:
             rec[k] = r["cells"].get(k, (None, ""))[0]
         rec["net"], rec["gross"] = r["net"], r["gross"]

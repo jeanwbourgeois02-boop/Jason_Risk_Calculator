@@ -15,7 +15,7 @@ from data.ingest import schema
 
 _SAMPLE_CSV = Path(__file__).resolve().parents[1] / "data" / "sample" / "blotter_sample.csv"
 _INSTRUMENT = "INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)"
-_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 _LEG = "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)"
 
 
@@ -32,11 +32,11 @@ def _db(tmp_path):
         ("EURUSD030626C-2", "FX_OPTION", "EUR", "USD", 1, 0, "EURUSD030626C-2", "2026-03-06"),
     ])
     conn.executemany(_TRADE, [
-        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "", "t", "d", ""),
-        ("x1", "XLSX", "EURSEK", "FX_FWD", "x1", "2026-08-10", 1e6, 11.2, "acc", "cp", "", "t", "d", ""),
-        ("f1", "XLSX", "ESZ6 Index", "FUTURE", "f1", "2026-08-10", 2, 6500.0, "acc", "cp", "", "t", "d", ""),
-        ("o1", "XLSX", "USDJPY111926P-1", "FX_OPTION", "o1", "2026-08-19", 1e6, 0.14, "acc", "cp", "", "t", "d", ""),
-        ("o2", "XLSX", "EURUSD030626C-2", "FX_OPTION", "o2", "2026-01-05", 1e6, 0.01, "acc", "cp", "", "t", "d", ""),
+        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "", "t", "d", "", "", ""),
+        ("x1", "XLSX", "EURSEK", "FX_FWD", "x1", "2026-08-10", 1e6, 11.2, "acc", "cp", "", "t", "d", "", "", ""),
+        ("f1", "XLSX", "ESZ6 Index", "FUTURE", "f1", "2026-08-10", 2, 6500.0, "acc", "cp", "", "t", "d", "", "", ""),
+        ("o1", "XLSX", "USDJPY111926P-1", "FX_OPTION", "o1", "2026-08-19", 1e6, 0.14, "acc", "cp", "", "t", "d", "", "", ""),
+        ("o2", "XLSX", "EURUSD030626C-2", "FX_OPTION", "o2", "2026-01-05", 1e6, 0.01, "acc", "cp", "", "t", "d", "", "", ""),
     ])
     conn.executemany(_LEG, [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-10-16", 0.65, 1),
@@ -112,7 +112,7 @@ def test_library_changes_only_when_the_trades_change(tmp_path):
     # a new trade (manual entry writes `trades` / `trade_legs` like this) marks it out of
     # date, and the next reader brings it up to date before it reads
     conn.execute(_TRADE, ("MANUAL-1", "MANUAL", "AUDUSD", "FX_FWD", "MANUAL-1", "2026-09-21", 5e5, 0.66,
-                          "acc", "cp", "", "t", "d", ""))
+                          "acc", "cp", "", "t", "d", "", "", ""))
     conn.executemany(_LEG, [("MANUAL-1", 1, "FX_NEAR", "AUD", 5e5, "2026-09-21", "2026-12-15", 0.66, 1),
                             ("MANUAL-1", 2, "FX_NEAR", "USD", -330000, "2026-09-21", "2026-12-15", 0.66, 1)])
     conn.commit()
@@ -178,9 +178,9 @@ def _macro_db(tmp_path):
     conn.execute("INSERT INTO instrument_options (instrument_id, strike, option_type) VALUES (?,?,?)",
                  ("SPX-P7615", 7615.0, "PUT"))
     conn.executemany(_TRADE, [
-        ("s1", "XLSX", "IRSOIS-USD-1", "IRS", "s1", "2026-08-28", 1e7, 0.035, "acc", "cp", "", "t", "d", ""),
-        ("k1", "XLSX", "USDKRW", "FX_FWD", "k1", "2026-08-10", 1e6, 1390.0, "acc", "cp", "", "t", "d", ""),
-        ("e1", "XLSX", "SPX-P7615", "EQ_OPTION", "e1", "2026-09-01", 2, 41.5, "acc", "cp", "", "t", "d", ""),
+        ("s1", "XLSX", "IRSOIS-USD-1", "IRS", "s1", "2026-08-28", 1e7, 0.035, "acc", "cp", "", "t", "d", "", "", ""),
+        ("k1", "XLSX", "USDKRW", "FX_FWD", "k1", "2026-08-10", 1e6, 1390.0, "acc", "cp", "", "t", "d", "", "", ""),
+        ("e1", "XLSX", "SPX-P7615", "EQ_OPTION", "e1", "2026-09-01", 2, 41.5, "acc", "cp", "", "t", "d", "", "", ""),
     ])
     conn.executemany(_LEG, [
         ("s1", 1, "FIXED", "USD", -1e7, "2026-09-01", "2031-09-01", 0.035, 1),

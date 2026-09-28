@@ -129,3 +129,42 @@ a row over formatting).
    valid LME prompt date is a warning only.
 10. An LME ticket's trade date never falls back to `Settle Date`; a non-USD `Currency` rejects
     as a contradiction.
+
+## Jason's real prime-broker export (2026-09-28)
+
+The first real export, `data/template PnL tool.csv` (git-ignored, never committed: 89 futures fills,
+14 to 24 Sep 2026, Trader `JS`), loads whole: 89 trades, 0 rejects. What it taught the parser:
+
+1. **Columns.** The export has no Fund, Desk, Currency, Execution Venue, NetInvoice, Version or
+   Settle Date column; it has `PBRoot`, `Position Block`, `CreateDate`, `LastModified`, `ExtAccount`
+   (`GSIL-FUT-NMMF`, `BOCF-FUT-NMMF`) and a mostly blank `Product`. Dates are d/m/yyyy; prices carry
+   thousands commas ("1,280.00"). `config/book.yaml` keeps no fund, trader or desk filter: the export
+   is Jason's own pull of his own trades (user, 2026-09-28); the lists stay as a safety net.
+2. **PBRoot** is `<letters><digits>[.<d>]_<STRATEGY>` (`JSHY10.3_COPAR3`): the name after the
+   underscore is Jason's strategy (`trades.strategy`), the decimal is the trade type
+   (`trades.trade_type`: .3 CROSS_EXCHANGE, .4 CROSS_PRODUCT, .5 TERM_STRUCTURE; any other decimal or
+   none ''). A cell with no underscore gives strategy '' and the type from its decimal; a blank cell
+   gives both ''. The raw cell is kept in `trades.pb_root`. The type per position (any leg's label
+   wins; inferred from the legs when none) is the engine's (`engine/spreads/trade_type.py`).
+3. **Broker price units.** The broker books a future's price so that lots × contract size × price is
+   the invoice in whole currency: feeder cattle, live cattle and COMEX copper come as dollars per
+   pound (3.32, 2.19, 6.36) where Bloomberg quotes cents (332, 219, 636). A future's fill is the
+   Price cell × the root's `broker_price_scale` (config/contracts.csv; 100 on the cents-quoted roots,
+   the three seen and sixteen inferred from the same convention), so `trades.price` and the NOTIONAL
+   leg are in Bloomberg's units and agree with the FUTURE_PX marks. A price rebuilt from NetInvoice is
+   already in Bloomberg's units and is not scaled. An option on a future's premium takes the same
+   scale (a guess: no real option row seen); its strike is read as the symbol states it.
+4. **Suffixes.** `-USAA` / `-UKAA` / `-CHAA` / `-SPAA` name the exchange's country (US exchanges;
+   LME and ICE Europe; the mainland Chinese exchanges; SGX) and narrow an ambiguous root
+   (`LCV6-USAA` is CME live cattle, not GFEX lithium; `SIZ6-USAA` COMEX silver). A suffix that fits no
+   candidate is a contradiction and rejects; an unknown suffix narrows nothing.
+5. **The SGX USD/CNH future** (`XUCV6-SPAA`, description "USD/CNH") is a FUTURE on the root
+   `SGX:XUC` (CNH per USD, 100,000 USD a lot, canonical id `UCV26 Curncy`): an FX hedge as a listed
+   future, valued by the futures rule in CNH and converted at USDCNH spot.
+6. **LME rows** (`LPZ26-UKAA`, "LME COPPER FUTURE Dec26") stay LME forwards at the third-Wednesday
+   prompt of the named month, as before.
+7. **Repeated Trade Id with no Version column:** the row with the latest `LastModified` is kept,
+   then the last in file order; the load report says so when it happened.
+8. **Cancelled rows** (Status cancelled / void / deleted / rejected / failed) are listed in
+   `ParseResult.cancelled_trade_ids`, and the upload (a merge by Trade Id since 2026-09-28) removes
+   those trades from the book; a pending, draft or error status excludes the row without removing.

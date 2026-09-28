@@ -1,3 +1,4 @@
+- [Upload merge rule](upload-merge-rule.md) — since 2026-09-28 an upload merges by Trade Id (replace / add / remove cancelled + MANUAL); theme kept, realised_pnl of a replaced id dropped
 - [Contract dates](contract-dates.md) — Bloomberg last trade dates onto commodity futures; FUTURE_PX re-key is key-only; upload re-applies
 - [Phase 2 removal](phase2-removal.md) — package rule + IRS flip gone; book_fx_swap = two FX_SWAP trades (engine shape); irs_direction kept for blotter.load
 - [Phase 5 options / LME](phase5-options-lme.md) — breakdown labels, underlying-only futures, options get contract dates, all marks re-keyed

@@ -83,7 +83,7 @@ def test_sample_parses_with_the_expected_trades_and_rejects(sample):
     assert not sample.warnings                     # every NetInvoice agrees with its fill, every prompt is valid
     assert sample.n_skipped_status_or_fund == 0 and sample.n_skipped_other == 0 and sample.kept_by_trader == {"JB": 52}
     ambiguous, unknown = sample.rejects
-    assert ambiguous.symbol == "ZCZ6-USAA" and "CBOT:ZC" in ambiguous.reason and "ZCE:ZC" in ambiguous.reason
+    assert ambiguous.symbol == "ZCZ6" and "CBOT:ZC" in ambiguous.reason and "ZCE:ZC" in ambiguous.reason
     assert unknown.symbol == "QQZ6-USAA" and "'QQ' is not in config/contracts.csv" in unknown.reason
     assert set(sample.instruments) == SAMPLE_FUTURES | SAMPLE_UNDERLYING_ONLY | SAMPLE_OPTIONS | SAMPLE_CMDTY_OPTIONS | \
         SAMPLE_LME | {"USDCNH", "EURUSD", "USDJPY", "GBPUSD", "EURGBP", "XAUUSD", "CASH-EUR"}
@@ -302,8 +302,9 @@ def test_the_underlying_symbol_stands_in_for_a_blank_symbol(tmp_csv):
 
 
 def test_a_price_quoted_in_another_unit_warns(tmp_csv):
-    # RBOB booked in USD / gal (2.054) where the contract list quotes cents: the invoice is 100 times more
-    res = blotter.parse(tmp_csv([_row(Symbol="RBX6-USAA", Quantity="2", Price="2.054", NetInvoice="172,536.00")]))
+    # RBOB booked in cents (205.40, Bloomberg's own units) where the broker books USD / gal
+    # (broker_price_scale 100, 2026-09-28): after the scale the invoice is 100 times less
+    res = blotter.parse(tmp_csv([_row(Symbol="RBX6-USAA", Quantity="2", Price="205.40", NetInvoice="172,536.00")]))
     assert not res.rejects
     (w,) = res.warnings
     assert "another unit" in w.message and "USD/gal" in w.message
@@ -311,10 +312,10 @@ def test_a_price_quoted_in_another_unit_warns(tmp_csv):
 
 def test_commodity_quantity_is_not_rebuilt_from_notional(tmp_csv):
     # a Notional in gallons over a cents-scaled multiplier would read 100 times the contracts
-    res = blotter.parse(tmp_csv([_row(Symbol="RBX6-USAA", Quantity="", Price="205.40", Notional="84,000")]))
+    res = blotter.parse(tmp_csv([_row(Symbol="RBX6-USAA", Quantity="", Price="2.054", Notional="84,000")]))
     (rj,) = res.rejects
     assert "Quantity" in rj.reason
-    res = blotter.parse(tmp_csv([_row(Symbol="RBX6-USAA", Quantity="", Price="205.40", NetInvoice="172,536.00")]))
+    res = blotter.parse(tmp_csv([_row(Symbol="RBX6-USAA", Quantity="", Price="2.054", NetInvoice="172,536.00")]))
     assert not res.rejects and res.trades[0].quantity == 2.0
 
 
@@ -329,16 +330,17 @@ def test_stored_bloomberg_dates_replace_the_estimate(tmp_csv):
 
 
 # --------------------------------------------------------------------------- config/book.yaml
-def test_the_shipped_book_yaml_takes_fund_nmmf_only():
+def test_the_shipped_book_yaml_filters_nothing():
+    # every list empty since 2026-09-28: the export is Jason's own pull, only his trades
     book = blotter.load_book_filter()
-    assert (book.funds, book.traders, book.desks) == (("NMMF",), (), ())
+    assert (book.funds, book.traders, book.desks) == ((), (), ())
     assert book.source.endswith("book.yaml")
 
 
 def test_fund_filter_counts_what_it_excludes(tmp_csv):
     rows = [_row(), _row(**{"Trade Id": "900000002", "Fund": "OTHER"}), _row(**{"Trade Id": "900000003", "Fund": ""}),
             _row(**{"Trade Id": "900000004", "Status": "Cancelled"}), _row(**{"Trade Id": "900000005", "Fund": "nmmf"})]
-    res = blotter.parse(tmp_csv(rows))
+    res = blotter.parse(tmp_csv(rows), book=blotter.BookFilter(funds=("NMMF",)))   # the shipped file filters nothing
     assert sorted(t.trade_id for t in res.trades) == ["900000001", "900000003", "900000005"]
     assert (res.n_excluded_status, res.n_excluded_fund, res.n_excluded_trader, res.n_excluded_desk) == (1, 1, 0, 0)
     assert res.n_skipped_status_or_fund == 2
@@ -614,7 +616,7 @@ def test_an_invalid_prompt_is_a_warning_never_a_reject(tmp_csv):
 
 
 def test_an_lme_ferrous_row_stays_a_future(tmp_csv):
-    row = _lme(**{"Fin Type": "FUTURE", "Symbol": "SCZ6-USAA", "Price": "365", "Settle Date": "10/9/2026",
+    row = _lme(**{"Fin Type": "FUTURE", "Symbol": "SCZ6-UKAA", "Price": "365", "Settle Date": "10/9/2026",
                   "Description": "LME STEEL SCRAP FUT Dec26"})
     res = blotter.parse(tmp_csv([row]))
     assert not res.rejects and (res.n_future, res.n_lme_forward) == (1, 0)

@@ -46,7 +46,7 @@ def test_schema_columns_match_contract():
                                    "is_ndf", "bbg_ticker", "expiry_date"]
     assert cols("trades") == ["trade_id", "source", "instrument_id", "product", "package_id", "trade_date",
                               "quantity", "price", "account", "counterparty", "strategy", "trader", "description",
-                              "theme"]
+                              "theme", "pb_root", "trade_type"]
     assert cols("instrument_theme") == ["instrument_id", "theme"]
     assert cols("trade_legs") == ["trade_id", "leg_no", "leg_type", "ccy", "amount", "start_date", "settle_date",
                                   "rate", "settles_cash"]
@@ -123,7 +123,7 @@ def test_new_database_has_no_retired_tables():
 def test_schema_foreign_keys_enforced():
     conn = schema.connect()
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO trades VALUES ('t1','MANUAL','NOPE','FX_FWD','t1','2026-08-17',1,1,'a','c','s','tr','d','')")
+        conn.execute("INSERT INTO trades VALUES ('t1','MANUAL','NOPE','FX_FWD','t1','2026-08-17',1,1,'a','c','s','tr','d','','','')")
 
 
 def test_marks_official_filters_to_official_source():
@@ -171,8 +171,8 @@ def test_migration_adds_theme_and_realised_pnl_columns_to_an_existing_db(tmp_pat
 
     conn = schema.connect(db_path)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
-    assert cols[-1] == "theme"
-    assert conn.execute("SELECT theme FROM trades WHERE trade_id='t1'").fetchone()[0] == ""
+    assert cols[-3:] == ["theme", "pb_root", "trade_type"]
+    assert conn.execute("SELECT theme, pb_root, trade_type FROM trades WHERE trade_id='t1'").fetchone() == ("", "", "")
     assert "instrument_theme" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     rp_cols = [r[1] for r in conn.execute("PRAGMA table_info(realised_pnl)")]
     assert "product" in rp_cols and "mark_type" in rp_cols
@@ -256,7 +256,7 @@ def test_purge_retired_sources_on_a_scratch_db_with_legacy_bnp_data(tmp_path):
     _seed_instrument(conn)
     conn.execute(
         "INSERT INTO trades VALUES ('bnp-1','BNP','USDJPY','FX_FWD','bnp-1','2026-08-01',"
-        "1000000,147.0,'acc','cp','HAHY7','t','d','')"
+        "1000000,147.0,'acc','cp','HAHY7','t','d','','','')"
     )
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("bnp-1", 1, "FX_NEAR", "USD", 1000000, "2026-08-01", "2026-09-01", 147.0, 1),
@@ -268,7 +268,7 @@ def test_purge_retired_sources_on_a_scratch_db_with_legacy_bnp_data(tmp_path):
     )
     conn.execute(
         "INSERT INTO trades VALUES ('xlsx-1','XLSX','USDJPY','FX_FWD','xlsx-1','2026-08-01',"
-        "500000,147.0,'acc','cp','HAHY7','t','d','')"
+        "500000,147.0,'acc','cp','HAHY7','t','d','','','')"
     )
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("xlsx-1", 1, "FX_NEAR", "USD", 500000, "2026-08-01", "2026-09-01", 147.0, 1),
@@ -313,7 +313,7 @@ def test_purge_drops_a_leftover_swap_review_table_and_leaves_the_other_retired_t
     conn = schema.connect(tmp_path / "old.db")
     _seed_instrument(conn)
     conn.execute("INSERT INTO trades VALUES ('x-1','XLSX','USDJPY','FX_FWD','x-1','2026-08-01',"
-                 "1,147.0,'acc','cp','','t','d','')")
+                 "1,147.0,'acc','cp','','t','d','','','')")
     conn.executescript("""
         CREATE TABLE swap_review (candidate_group TEXT NOT NULL, trade_id TEXT NOT NULL REFERENCES trades,
           reason TEXT NOT NULL, PRIMARY KEY (candidate_group, trade_id));

@@ -1,2 +1,2 @@
 - [Phase 2 macro removal](phase2-macro-removal-2026-09-24.md) — official types dropped (swap/NDF), tables no longer created, purge drops only swap_review; leftover readers
-- [Schema migration rules](schema-migration-rules.md) — DDL-parsed _migrate_columns needs every DDL string listed; quote "index"; how to test a migration
+- [Schema migration rules](schema-migration-rules.md) — DDL-parsed _migrate_columns; quote "index"; how to test a migration; a new trades column breaks positional test fixtures, not app code

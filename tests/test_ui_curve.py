@@ -35,7 +35,8 @@ def _future(conn, tid, instrument_id, root_id, expiry, contracts, fill):
     cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
     vals = {"trade_id": tid, "source": "XLSX", "instrument_id": instrument_id, "product": "FUTURE",
             "package_id": tid, "trade_date": "2026-09-01", "quantity": contracts, "price": fill,
-            "account": "A", "counterparty": "C", "strategy": "", "trader": "T", "description": "d", "theme": ""}
+            "account": "A", "counterparty": "C", "strategy": "", "trader": "T", "description": "d", "theme": "",
+            "pb_root": "", "trade_type": ""}
     conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                  [vals[c] for c in cols])
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,?,?,?,0)",
@@ -98,11 +99,16 @@ def _text(node) -> str:
 
 
 # --------------------------------------------------------------------------- tests
-def test_empty_book_shows_the_note(tmp_path, stub_app):
+def test_empty_book_shows_the_no_blotter_card(tmp_path, stub_app):
+    """No trade on file: the Book's "No blotter loaded" card, with the Upload button under the
+    Exposure tab's own pattern id (every tab body is always in the layout; user 2026-09-28)."""
     path = _write_book(tmp_path / "empty.db", empty=True)
-    text = _text(curve.render(AS_OF, path))
-    assert f"No commodity position to show: no open commodity futures on {AS_OF}." in text
-    assert not [n for n in _walk(curve.render(AS_OF, path)) if getattr(n, "id", None) == curve.GRID_ID]
+    stub_app.active_db_path = lambda: path            # the sample-book link asks which database is active
+    out = curve.render(AS_OF, path)
+    text = _text(out)
+    assert "No blotter loaded" in text and "No commodity position to show" not in text
+    assert not [n for n in _walk(out) if getattr(n, "id", None) == curve.GRID_ID]
+    assert [n.id for n in _walk(out) if isinstance(getattr(n, "id", None), dict) and n.id.get("type") == "book-empty-upload"]         == [{"type": "book-empty-upload", "idx": "curve"}]
 
 
 def test_render_says_why_when_there_is_no_date_or_no_database(tmp_path, stub_app):

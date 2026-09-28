@@ -53,9 +53,9 @@ def _insert_instrument(conn, instrument_id, asset_class, base_ccy, quote_ccy, mu
 
 def _insert_trade(conn, trade_id, instrument_id, product, trade_date, quantity, price):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "XLSX", instrument_id, product, trade_id, trade_date, quantity, price,
-         "acc", "cp", "HAHY7", "t", "d", ""),
+         "acc", "cp", "HAHY7", "t", "d", "", "", ""),
     )
 
 
@@ -376,9 +376,9 @@ def _db_with_one_priced_and_one_unpriced_trade(as_of="2026-09-17"):
     _insert_official_mark(conn, as_of, "USDJPY", as_of, "FWD_OUTRIGHT", 148.0, "BBG_BFXFORWARD")
     _insert_instrument(conn, "USDJPY111926P-1", "FX_OPTION", "USD", "JPY")
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ("o1", "XLSX", "USDJPY111926P-1", "FX_OPTION", "o1", as_of, 1_000_000, 0.01,
-         "acc", "cp", "HAHY7", "t", "d", ""),
+         "acc", "cp", "HAHY7", "t", "d", "", "", ""),
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",

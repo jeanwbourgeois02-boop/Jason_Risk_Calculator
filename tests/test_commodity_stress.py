@@ -177,7 +177,8 @@ def _future(conn, tid, inst, root_id, expiry, lots, fill):
     cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
     vals = {"trade_id": tid, "source": "XLSX", "instrument_id": inst, "product": "FUTURE", "package_id": tid,
             "trade_date": "2026-09-01", "quantity": lots, "price": fill, "account": "ACC", "counterparty": "C",
-            "strategy": "", "trader": "JB", "description": "d", "theme": ""}
+            "strategy": "", "trader": "JB", "description": "d", "theme": "",
+            "pb_root": "", "trade_type": ""}
     conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                  [vals[c] for c in cols])
     conn.execute("INSERT INTO trade_legs VALUES (?,1,'NOTIONAL',?,?,?,?,?,0)",

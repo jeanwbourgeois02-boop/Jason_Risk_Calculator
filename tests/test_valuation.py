@@ -37,9 +37,9 @@ def _insert_instrument(conn, instrument_id, base_ccy, quote_ccy):
 
 def _insert_trade(conn, trade_id, instrument_id, product, trade_date, quantity, price):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "XLSX", instrument_id, product, trade_id, trade_date, quantity, price,
-         "acc", "cp", "HAHY7", "t", "d", ""),
+         "acc", "cp", "HAHY7", "t", "d", "", "", ""),
     )
 
 

@@ -21,7 +21,9 @@ a plain reason: never a reject, never coerced into another product (hard rule 6)
 left too: every FX pair is written deliverable (``is_ndf`` 0, legs ``settles_cash`` 1).
 
 Rows whose Status says cancelled/rejected/pending/void are filtered out and
-counted; so are rows that ``config/book.yaml`` says are not the book's (its ``funds``,
+counted (the Trade Ids of the removals -- cancelled, void, deleted, rejected, failed, never
+pending -- are listed on ``ParseResult.cancelled_trade_ids`` so the upload can delete them
+from the book); so are rows that ``config/book.yaml`` says are not the book's (its ``funds``,
 ``traders`` and ``desks`` lists, read by ``load_book_filter``: a non-empty list keeps only
 rows whose populated cell is in it, case-insensitive; an empty list takes every value;
 until 2026-09-24 this was a hard-coded Fund = NMMF). A missing Status / Fund / Trader /
@@ -91,8 +93,18 @@ Input tolerance (``read_table``): UTF-8 with or without BOM, or cp1252; ',' ';' 
 '|' delimiters; a header row anywhere in the first 50 lines (title/preamble rows are
 skipped); any column casing/whitespace; extra, missing and reordered columns; single-
 or multi-sheet workbooks (the first sheet that looks like a blotter is used). Within a
-file, a repeated ``Trade Id`` keeps the row with the highest ``Version`` (last row
-otherwise). ``load`` is idempotent: re-uploading replaces trades of the same id.
+file, a repeated ``Trade Id`` keeps the row with the highest ``Version``; with no Version
+column (Jason's export, 2026-09-28) the row with the latest ``LastModified``, then the last
+in file order. ``load`` is idempotent: re-uploading replaces trades of the same id.
+
+The prime broker's ``PBRoot`` cell ('JSHY10.3_COPAR3') is kept raw on ``trades.pb_root``
+and read into ``strategy`` (the name after the underscore) and ``trade_type`` (the
+decimal: .3 CROSS_EXCHANGE, .4 CROSS_PRODUCT, .5 TERM_STRUCTURE) by
+``common.parse_pb_root``, on every row kind. A future's (and an option on a future's)
+fill is multiplied by its root's ``broker_price_scale`` (config/contracts.csv: 100 where
+the broker books a cents-quoted contract in whole currency per unit, 2.19 for Bloomberg's
+219 on live cattle) so ``trades.price`` and the NOTIONAL leg are in Bloomberg's units and
+agree with the FUTURE_PX marks; the load report names the roots converted.
 """
 from __future__ import annotations
 
@@ -104,6 +116,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -121,6 +134,7 @@ from data.ingest.common import (
     Reject,
     Trade,
     TradeLeg,
+    parse_pb_root,
 )
 from data.contracts import option_request_ticker, request_ticker, resolve_future, resolve_option
 from engine import lme as _lme
@@ -164,6 +178,9 @@ _TEXT_DATE_RES = (re.compile(r"\b(\d{4}-\d{2}-\d{2})\b"),
                   re.compile(r"\b(\d{1,2}[-\s](?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*[-\s]\d{2,4})\b", re.I),
                   re.compile(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b"))
 EXCLUDED_STATUS_WORDS = ("cancel", "reject", "void", "pend", "delet", "fail", "error", "draft")
+# Of those, the words that mean the trade is gone (its Trade Id goes on
+# `ParseResult.cancelled_trade_ids` for the upload to delete): pending / draft / error are not removals.
+REMOVED_STATUS_WORDS = ("cancel", "void", "delet", "reject", "fail")
 # Option / futures NetInvoice vs what Quantity x Price implies: a larger relative gap is a
 # warning, never a reject.
 NET_INVOICE_TOLERANCE = 0.005
@@ -343,6 +360,13 @@ class ParseResult:
     kept_by_trader: Dict[str, int] = field(default_factory=dict)
     book_filter: Optional[BookFilter] = None   # the filter this parse applied
     n_superseded: int = 0   # earlier versions of a Trade Id repeated within the file
+    superseded_by: str = ""   # how the winner was chosen: 'Version' | 'LastModified' | 'file order'
+    # Trade Ids of the rows whose Status removes the trade (cancelled, void, deleted, rejected,
+    # failed; never pending, which is not a removal): the upload deletes them from the book.
+    cancelled_trade_ids: List[str] = field(default_factory=list)
+    # root id -> (root name, broker_price_scale, fills converted): the futures and options on
+    # futures whose fill was multiplied by the root's broker_price_scale into Bloomberg's units
+    price_scaled: Dict[str, tuple] = field(default_factory=dict)
     n_updated: int = 0      # set by load(): trades that already existed and were replaced
     # Rows that loaded but needed a repair or failed a cross-check (a Price that arrived
     # as a date and was rebuilt from the amounts, an option NetInvoice that disagrees
@@ -366,6 +390,18 @@ class ParseResult:
                        + "; ".join(self.lme_prompt_notes[:5])
                        + (f"; and {len(self.lme_prompt_notes) - 5} more" if len(self.lme_prompt_notes) > 5 else "")
                        + ".")
+        if self.price_scaled:
+            by_scale: Dict[float, list] = {}
+            for _root_id, (name, scale, n) in self.price_scaled.items():
+                by_scale.setdefault(scale, []).append(name)
+            parts = [", ".join(names) + f" (x{scale:g})" for scale, names in sorted(by_scale.items())]
+            total = sum(n for _name, _scale, n in self.price_scaled.values())
+            out.append(f"{total} fill(s) converted from the broker's price units to Bloomberg's: "
+                       + "; ".join(parts) + ".")
+        if self.n_superseded and self.superseded_by and self.superseded_by != "Version":
+            out.append(f"{self.n_superseded} row(s) repeat a Trade Id and the file has no Version column: the row "
+                       + ("last modified latest (LastModified) was kept, the last in the file on a tie"
+                          if self.superseded_by == "LastModified" else "last in the file was kept") + ".")
         return out
 
     def warning_notes(self) -> List[str]:
@@ -682,6 +718,13 @@ def _status_excluded(v) -> bool:
     return any(w in s for w in EXCLUDED_STATUS_WORDS)
 
 
+def _status_removes(v) -> bool:
+    """A Status that takes the trade off the book (cancelled, void, deleted, rejected, failed),
+    as against one that merely does not load it yet (pending, draft, error)."""
+    s = _s(v).casefold()
+    return any(w in s for w in REMOVED_STATUS_WORDS)
+
+
 # The words that decide what a label carrying "swap" is (see _kind_of): a rates word
 # makes it an interest rate swap (recognised only to be skipped with its reason since
 # 2026-09-24), an FX word a forward fill; neither = not loaded.
@@ -798,17 +841,27 @@ def read_table(source: Union[str, Path, bytes], filename: Optional[str] = None) 
     return canonicalize_columns(frame)
 
 
-def _dedupe_versions(df: pd.DataFrame) -> tuple:
-    """Keep one row per Trade Id: the highest Version, else the last occurrence."""
+def _dedupe_versions(df: pd.DataFrame, day_first: bool = True) -> tuple:
+    """``(frame, n_dropped, how)``: one row per Trade Id. The highest ``Version`` wins; with no
+    Version column, the latest ``LastModified`` (read in the file's date order, an unreadable
+    cell sorting first); on a tie, or with neither column, the last row in file order.
+    ``how`` names the column that decided ('Version', 'LastModified', 'file order'), '' when
+    nothing was dropped."""
     if "Trade Id" not in df.columns:
-        return df, 0
+        return df, 0, ""
     ids = df["Trade Id"].map(_s)
-    version = df["Version"].map(_num).fillna(-1.0) if "Version" in df.columns else pd.Series(0.0, index=df.index)
-    keyed = pd.DataFrame({"id": ids, "v": version, "i": range(len(df))}, index=df.index)
+    if "Version" in df.columns:
+        key, how = df["Version"].map(_num).fillna(-1.0), "Version"
+    elif "LastModified" in df.columns:
+        stamps = pd.to_datetime(df["LastModified"].map(_s), dayfirst=day_first, errors="coerce")
+        key, how = stamps.fillna(pd.Timestamp.min), "LastModified"
+    else:
+        key, how = pd.Series(0.0, index=df.index), "file order"
+    keyed = pd.DataFrame({"id": ids, "v": key, "i": range(len(df))}, index=df.index)
     keyed = keyed[keyed["id"] != ""]
     winners = keyed.sort_values(["v", "i"]).drop_duplicates("id", keep="last").index
     drop = keyed.index.difference(winners)
-    return df.drop(index=drop), len(drop)
+    return df.drop(index=drop), len(drop), how if len(drop) else ""
 
 
 # --------------------------------------------------------------------------- parse
@@ -823,9 +876,10 @@ def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str]
     df = canonicalize_columns(df).reset_index(drop=True)
     res = ParseResult()
     res.book_filter = book if isinstance(book, BookFilter) else load_book_filter(book)
-    df, res.n_superseded = _dedupe_versions(df)
+    day_first = detect_day_first(df)
+    df, res.n_superseded, res.superseded_by = _dedupe_versions(df, day_first)
     global _DAY_FIRST, _CONTRACT_CONN
-    previous, _DAY_FIRST = _DAY_FIRST, detect_day_first(df)
+    previous, _DAY_FIRST = _DAY_FIRST, day_first
     previous_conn, _CONTRACT_CONN = _CONTRACT_CONN, conn
     res.day_first = _DAY_FIRST
     try:
@@ -902,6 +956,9 @@ def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
     if _status_excluded(row.get("Status")):
         res.n_excluded_status += 1
         res.n_skipped_status_or_fund += 1
+        trade_id = _s(row.get("Trade Id"))
+        if trade_id and _status_removes(row.get("Status")) and trade_id not in res.cancelled_trade_ids:
+            res.cancelled_trade_ids.append(trade_id)
         return
     excluded_by = (res.book_filter or BookFilter()).excluded_by(row)
     if excluded_by is not None:
@@ -992,8 +1049,14 @@ def _retired_option_root(row: pd.Series) -> Optional[str]:
 
 
 def _common(row: pd.Series) -> dict:
+    """The Trade fields every row kind fills the same way. ``strategy`` and ``trade_type`` are
+    read off the prime broker's PBRoot cell (``common.parse_pb_root``; '' each when absent) and
+    ``pb_root`` keeps the cell as written: the export has no Strategy column of its own."""
+    pb_root = _s(row.get("PBRoot"))
+    strategy, trade_type = parse_pb_root(pb_root)
     return dict(account=_s(row.get("ExtAccount")), counterparty=_s(row.get("Counterparty")),
-                strategy="", trader=_s(row.get("Trader")), description=_s(row.get("Description")))
+                strategy=strategy, trader=_s(row.get("Trader")), description=_s(row.get("Description")),
+                pb_root=pb_root, trade_type=trade_type)
 
 
 def _warn(res: ParseResult, row_no: int, symbol: str, message: str) -> None:
@@ -1326,7 +1389,9 @@ def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbo
     bbg_ticker = Bloomberg's request form at the trade date ('' for a placeholder root that
     must never be requested), expiry = the last trade date (Bloomberg's when stored, else the
     contract master's conservative estimate). One NOTIONAL leg in the contract's currency,
-    contracts x multiplier x fill, settles_cash 0. The fill is kept as quoted."""
+    contracts x multiplier x fill, settles_cash 0. The fill is the Price cell x the root's
+    ``broker_price_scale`` (``_future_fill``), so it is in Bloomberg's units; the roots so
+    converted are counted on ``res.price_scaled`` for the load report."""
     try:
         contract = resolve_future(
             _s(row.get("Symbol")), trade_date=trade_date, underlying=_s(row.get("Underlying Symbol")),
@@ -1336,10 +1401,12 @@ def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbo
         res.rejects.append(Reject(row_no, symbol, str(e)))
         return
     root = contract.root
-    fill = _future_fill(res, row, row_no, symbol, root.multiplier, quote_unit=root.quote_unit)
+    fill = _future_fill(res, row, row_no, symbol, root.multiplier, quote_unit=root.quote_unit,
+                        broker_scale=root.broker_price_scale)
     if fill is None:
         return
     signed_contracts, price = fill
+    _note_price_scale(res, root, row)
     instrument_id = contract.contract_id
     expiry_iso = contract.last_trade_date.isoformat()
     ticker = "" if root.bbg_placeholder else request_ticker(contract, date.fromisoformat(trade_date))
@@ -1361,19 +1428,36 @@ def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbo
         trade_date, expiry_iso, price, 0))
 
 
+def _note_price_scale(res: ParseResult, root, row: pd.Series) -> None:
+    """Count a fill whose Price cell was multiplied by the root's ``broker_price_scale`` (only
+    a Price read from the cell: one rebuilt from NetInvoice is in Bloomberg's units already)."""
+    if root.broker_price_scale == 1.0 or math.isnan(_num(row.get("Price"))):
+        return
+    name, scale, n = res.price_scaled.get(root.root_id, (root.name, root.broker_price_scale, 0))
+    res.price_scaled[root.root_id] = (name, scale, n + 1)
+
+
 def _future_fill(res: ParseResult, row: pd.Series, row_no: int, symbol: str, multiplier: float,
-                 quote_unit: str = "") -> Optional[Tuple[float, float]]:
+                 quote_unit: str = "", broker_scale: float = 1.0) -> Optional[Tuple[float, float]]:
     """(signed contracts, fill price) of a futures row, or None when the row was rejected.
 
-    ``Quantity`` signed by ``Side``; an unusable Quantity is rebuilt from ``NetInvoice /
-    (multiplier x Price)``, never from ``Notional`` (what a commodity row's Notional holds is
-    not known, and a Notional in gallons or bushels divided by a cents-scaled multiplier would
-    be a whole number 100 times too big). An unusable Price is rebuilt from NetInvoice and
-    fees. With every cell there, NetInvoice (in the contract's currency) is cross-checked
-    against contracts x multiplier x Price: a gap above NET_INVOICE_TOLERANCE warns and never
-    rejects; one of about 100 times says the fill looks quoted in another unit than
-    ``quote_unit``."""
+    The fill is the ``Price`` cell x ``broker_scale`` (the root's ``broker_price_scale``,
+    config/contracts.csv, 2026-09-28: 100 where the broker books a cents-quoted contract in
+    whole currency per unit), so it is in Bloomberg's units, the units ``multiplier`` is per
+    and the FUTURE_PX marks are in. ``Quantity`` signed by ``Side``; an unusable Quantity is
+    rebuilt from ``NetInvoice / (multiplier x Price)``, never from ``Notional`` (what a
+    commodity row's Notional holds is not known, and a Notional in gallons or bushels divided
+    by a cents-scaled multiplier would be a whole number 100 times too big). An unusable Price
+    is rebuilt from NetInvoice and fees, which gives Bloomberg's units directly (no scale
+    applied: the invoice is lots x multiplier x the Bloomberg price either way). With every
+    cell there, NetInvoice (in the contract's currency) is cross-checked against contracts x
+    multiplier x the scaled Price: a gap above NET_INVOICE_TOLERANCE warns and never rejects;
+    one of about 100 times says the fill looks quoted in another unit than ``quote_unit``."""
     price = _num(row.get("Price"))
+    if not math.isnan(price) and broker_scale != 1.0:
+        # exact in decimal (2.054 x 100 = 205.4, not 205.39999999999998), so a scaled fill is the
+        # number the broker would have booked in Bloomberg units
+        price = float(Decimal(repr(price)) * Decimal(repr(float(broker_scale))))
     net = abs(_num(row.get("NetInvoice")))
     rebuilt, rebuilt_from = math.nan, ""
     if math.isnan(_num(row.get("Quantity"))):
@@ -1655,7 +1739,8 @@ def _parse_cmdty_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     when stored, else the expiry a dated symbol states when it is earlier than the contract
     master's estimate, else the estimate. instrument_options: strike, CALL / PUT, payoff AMERICAN
     for an American option, VANILLA for a European one. Quantity = lots signed by Side, price =
-    the premium as quoted (the future's price scale), one NOTIONAL leg in the quote currency of
+    the premium x the root's ``broker_price_scale`` (Bloomberg's units, as the future's fill;
+    the strike is left as the symbol states it), one NOTIONAL leg in the quote currency of
     lots x multiplier x premium, settling on the expiry, settles_cash 0. The fill and lots are
     read and cross-checked like a future's (``_future_fill``)."""
     symbol = _s(row.get("Symbol"))
@@ -1701,10 +1786,15 @@ def _parse_cmdty_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
         res.rejects.append(Reject(row_no, shown, str(e)))
         return
     root = option.root
-    fill = _future_fill(res, row, row_no, shown, root.multiplier, quote_unit=root.quote_unit)
+    # The premium is booked in the same units as the future's fill (a guess: no real option row
+    # has been seen), so it takes the root's broker_price_scale too; the strike stays as the
+    # symbol states it (contract-master reads it).
+    fill = _future_fill(res, row, row_no, shown, root.multiplier, quote_unit=root.quote_unit,
+                        broker_scale=root.broker_price_scale)
     if fill is None:
         return
     lots, premium = fill
+    _note_price_scale(res, root, row)
     expiry = option.last_trade_date
     if option.dates_source != "BLOOMBERG" and option.symbol_expiry is not None and option.symbol_expiry < expiry:
         expiry = option.symbol_expiry     # the file states the option's own expiry; the estimate is its future's

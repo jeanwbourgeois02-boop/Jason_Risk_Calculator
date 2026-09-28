@@ -31,7 +31,7 @@ def _seed(conn):
     conn.execute(
         "INSERT INTO trades VALUES "
         "('t1','XLSX','USDJPY','FX_SPOT','t1','2026-08-17',1000000,147.10,"
-        "'BNPP-IPBFX-NMMF','CPTY','HAHY7','trader','desc','')"
+        "'BNPP-IPBFX-NMMF','CPTY','HAHY7','trader','desc','','','')"
     )
     conn.executemany(
         "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
@@ -116,7 +116,7 @@ def test_ensure_schema_purges_legacy_bnp_data(tmp_path, capsys):
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO trades VALUES ('bnp-1','BNP','USDJPY','FX_FWD','bnp-1','2026-08-01',"
-        "1000000,147.0,'acc','cp','HAHY7','t','d','')"
+        "1000000,147.0,'acc','cp','HAHY7','t','d','','','')"
     )
     conn.execute(
         "INSERT INTO marks VALUES ('2026-08-17','USDJPY','2026-08-17','SPOT',147.10,'BNP_BVAL','t')"
@@ -507,7 +507,7 @@ def test_leg_settling_on_as_of_excluded_from_net_gross_but_still_in_grid(tmp_pat
         conn.execute(
             "INSERT INTO trades VALUES "
             "('t2','XLSX','USDJPY','FX_SPOT','t2','2026-08-17',2000000,147.10,"
-            "'BNPP-IPBFX-NMMF','BNP','HAHY7','trader','desc','')"
+            "'BNPP-IPBFX-NMMF','BNP','HAHY7','trader','desc','','','')"
         )
         conn.executemany(
             "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",

@@ -6,26 +6,32 @@ File reading, column canonicalisation and every per-row tolerance live in
 size guard, the pre-Confirm shape check, the stage-then-publish transaction and the
 summary message.
 
-Full replace, not merge (user decision 2026-09-17): "when a new excel is put in - that's
-the only input for the trades - all of the old stuff gets deleted - sample data and
-previous excels - so there are no duplicates or fake things." A successful
-``import_blotter`` call deletes every existing row of ``trades`` and its trade-keyed
-dependents (``trade_legs``, ``realised_pnl`` -- see ``FULL_REPLACE_CHILD_TABLES``) for
-EVERY source, including legacy ``source='BNP'`` rows
-and a previous upload's (or the launcher sample's) rows, before writing the new file's
-own trades. The whole book is the file (user, 2026-09-28): the manual booking path
-(``data/ingest/manual.py``, the Blotter's Manual entry sub-tab, ``source='MANUAL'``) left
-the app that day, so there is no longer a trade the export cannot carry; the ``source``
-column and the ``'MANUAL'`` literal stay in the schema for old databases, and a MANUAL
-trade an old database still holds is deleted by the next upload like any other. This is
-the app's upload path only: ``blotter.load`` itself (the library
-function this module calls) keeps its own idempotent-by-``trade_id`` upsert behaviour
-unchanged, for callers that still want a merge (e.g. a script loading several files that
-together make up one book). Instruments, marks, curves, curve_quotes and index_fixings
-are untouched -- keyed by instrument/date, not by trade (so the underlying future the parser
-writes, with no trade, for an option on a future it does not trade itself stays on file across
-uploads, and the parser's INSERT OR IGNORE never overwrites it). Deletion only happens after the
-new file has parsed successfully (inside the same transaction as publishing its rows),
+An upload is a merge by Trade Id (user decision 2026-09-28, "yeah that makes sense",
+replacing the full replace of 2026-09-17): the broker's export is cumulative and corrects
+fills in place, so
+
+- a Trade Id already on file is REPLACED by the file's row: its ``trades`` row is
+  overwritten, its ``trade_legs`` are deleted and re-inserted from the file (a leg count
+  can change), and its ``realised_pnl`` row is dropped so the ledger freezes it again
+  from the new fill; its bundle membership (``instrument_theme``, and a ``trades.theme``
+  set by hand where the file carries none) is untouched;
+- a Trade Id the file does not know is ADDED;
+- a file row whose Status says cancelled / void / deleted / rejected / failed REMOVES that
+  Trade Id from every trade-keyed table when it is on file (the parser lists them as
+  ``ParseResult.cancelled_trade_ids``; read with ``getattr`` so this module works before
+  and after that field lands);
+- a trade on file that the file does not name stays as it is.
+
+An old database's ``source = 'MANUAL'`` rows (the manual booking path left on 2026-09-28)
+are still removed by every upload: the export is the one way a trade enters the app
+(hard rule 1), and nothing can carry such a row forward. ``blotter.load`` itself keeps
+its idempotent-by-``trade_id`` upsert, which is what the merge is built on; the
+trade-keyed tables the removals and replacements touch are ``TRADE_KEYED_TABLES``.
+Instruments, marks, curves, curve_quotes and index_fixings are untouched -- keyed by
+instrument/date, not by trade (so the underlying future the parser writes, with no trade,
+for an option on a future it does not trade itself stays on file across uploads, and the
+parser's INSERT OR IGNORE never overwrites it). Every delete and write happens only after
+the new file has parsed successfully, inside the one transaction that publishes its rows,
 so a parse failure leaves the existing book completely intact; see ``_stage_and_publish``.
 The one exception to "marks are untouched" (2026-09-24): once the book is published,
 Bloomberg's stored contract dates are put back onto the commodity futures
@@ -66,46 +72,48 @@ BLOTTER_KIND_COLUMNS = {"Fin Type", "Product"}
 
 # Tables keyed by trade_id (data/ingest/schema.py -- grepped for every "REFERENCES
 # trades" / "trade_id ... PRIMARY KEY"): trade_legs and realised_pnl reference trades and
-# must be cleared before trades itself (FK-safe child-then-parent order) on a full-replace
-# upload. realised_pnl is not in schema.TABLES (the generic per-table merge loop below
+# must be cleared before trades itself (FK-safe child-then-parent order) when a trade is
+# removed. realised_pnl is not in schema.TABLES (the generic per-table merge loop below
 # never touches it), so it is deleted explicitly rather than through that loop. Nothing
 # outside data/ingest/schema.py keys a table off trade_id: engine/options' tables are
 # keyed by instrument_id, not trade_id (checked 2026-09-17), so they are untouched by a
-# trade replace.
-FULL_REPLACE_CHILD_TABLES = ("trade_legs", "realised_pnl")
-FULL_REPLACE_TABLES = FULL_REPLACE_CHILD_TABLES + ("trades",)
+# trade replace. This set is what a removal (a cancelled Trade Id, an old MANUAL row)
+# is deleted from, and the children are what a replaced Trade Id has rewritten.
+TRADE_KEYED_CHILD_TABLES = ("trade_legs", "realised_pnl")
+TRADE_KEYED_TABLES = TRADE_KEYED_CHILD_TABLES + ("trades",)
+FULL_REPLACE_CHILD_TABLES = TRADE_KEYED_CHILD_TABLES   # the names before 2026-09-28's merge rule
+FULL_REPLACE_TABLES = TRADE_KEYED_TABLES
 # Retired tables that still reference trades on a database made before 2026-09-24
-# (swap_review: the retired FX-swap package rule's ambiguous candidates). Cleared with the
-# book when the table is there, so its foreign key never blocks the delete; nothing is
-# written to it any more, and a database without it is fine.
+# (swap_review: the retired FX-swap package rule's ambiguous candidates). A removed trade
+# is deleted from it when the table is there, so its foreign key never blocks the delete;
+# nothing is written to it any more, and a database without it is fine.
 RETIRED_CHILD_TABLES = ("swap_review",)
-# Rows a full replace removes: every trade on file, whatever its source (the module
-# docstring: the whole book is the file since 2026-09-28; an old database's MANUAL trades
-# go too). Child tables are filtered through this subquery, so it must run before the
-# ``trades`` delete itself.
-_REPLACED_TRADES_SQL = "SELECT trade_id FROM trades"
+# Rows every upload still removes even though the file does not name them: an old
+# database's manual entries (the manual booking path left on 2026-09-28; hard rule 1).
+_MANUAL_TRADES_SQL = "SELECT trade_id FROM trades WHERE source = 'MANUAL'"
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone() is not None
 
 
-def _delete_replaced_book(conn: sqlite3.Connection) -> None:
-    """Delete every trade and its trade-keyed dependents, children first."""
-    for table in RETIRED_CHILD_TABLES:
-        if _table_exists(conn, table):
-            conn.execute(f"DELETE FROM {table} WHERE trade_id IN ({_REPLACED_TRADES_SQL})")
-    for table in FULL_REPLACE_CHILD_TABLES:
-        conn.execute(f"DELETE FROM {table} WHERE trade_id IN ({_REPLACED_TRADES_SQL})")
-    conn.execute("DELETE FROM trades")
-
-
-def _replaced_counts(conn: sqlite3.Connection) -> dict:
-    """Pre-delete row counts per FULL_REPLACE_TABLES name, every trade counted."""
-    counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE trade_id IN ({_REPLACED_TRADES_SQL})").fetchone()[0]
-              for t in FULL_REPLACE_CHILD_TABLES}
-    counts["trades"] = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-    return counts
+def _delete_trade_rows(conn: sqlite3.Connection, trade_ids, tables=TRADE_KEYED_TABLES) -> None:
+    """Delete `trade_ids` from `tables` (children first, as the tuple is ordered) and, when
+    `tables` includes ``trades``, from the retired child tables that still exist. Nothing
+    happens for an empty list. Works inside an open transaction on `conn`."""
+    ids = list(dict.fromkeys(trade_ids))
+    if not ids:
+        return
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _gone (trade_id TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM _gone")
+    conn.executemany("INSERT OR IGNORE INTO _gone VALUES (?)", [(t,) for t in ids])
+    if "trades" in tables:
+        for table in RETIRED_CHILD_TABLES:
+            if _table_exists(conn, table):
+                conn.execute(f"DELETE FROM {table} WHERE trade_id IN (SELECT trade_id FROM _gone)")
+    for table in tables:
+        conn.execute(f"DELETE FROM {table} WHERE trade_id IN (SELECT trade_id FROM _gone)")
+    conn.execute("DROP TABLE _gone")
 
 
 def preview_frame(payload: bytes, filename: str) -> pd.DataFrame:
@@ -132,24 +140,29 @@ def decode(contents):
     return payload
 
 
-def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
+def _stage_and_publish(db_path, load_fn):
     """Hold a writer lock on `db_path` while staging against a snapshot of it in an
     in-memory DB, call `load_fn(staged_conn)`, then publish staged's rows into the live
-    DB in one transaction. `load_fn` raises `ValueError` (or lets
-    a `sqlite3.Error` propagate) on any failure before the publish step runs, and before
-    anything is written to `live` -- so a parse/load failure leaves `live` untouched.
+    DB in one transaction. `load_fn` raises `ValueError` (or lets a `sqlite3.Error`
+    propagate) on any failure before the publish step runs, and before anything is
+    written to `live` -- so a parse/load failure leaves `live` untouched.
 
-    `full_replace=False` (default): every table is an upsert-merge (INSERT ... ON
-    CONFLICT DO UPDATE), so existing rows not present in `staged` are left alone.
+    The publish is a merge by Trade Id (module docstring). Every table in `schema.TABLES`
+    is an upsert (INSERT ... ON CONFLICT DO UPDATE) of staged's rows, so a row the file
+    does not name is left alone; on top of that, before the upsert runs,
 
-    `full_replace=True` (``import_blotter``'s "one input, no leftovers" rule): after
-    `load_fn` succeeds, every row of `FULL_REPLACE_TABLES` (trades and everything keyed
-    off trade_id) is deleted from `live` -- every source, the whole book (module
-    docstring), not just rows whose id also appears in `staged` -- before the merge loop
-    runs, so the merge becomes a plain insert of exactly the new file's trades. Returns
-    `(result, replaced)` where
-    `replaced` is a dict of pre-delete row counts per `FULL_REPLACE_TABLES` name (used
-    for the "replaced N trades" summary); `replaced` is `{}` when `full_replace=False`.
+    - a Trade Id the file loaded that was already on file (REPLACED) has its `trade_legs`
+      and `realised_pnl` rows deleted from `live`, so the upsert re-inserts exactly the
+      file's legs (a leg count can shrink) and the ledger freezes the trade again;
+      a `trades.theme` set by hand is kept where the file's row carries none;
+    - a Trade Id the file cancels (`ParseResult.cancelled_trade_ids`, read with getattr)
+      that is on file and not also loaded, and every `source = 'MANUAL'` trade the file
+      does not name, is deleted from every trade-keyed table (REMOVED), on both
+      connections, so the upsert never copies it back.
+
+    Returns `(result, change)`, `change` the merge's accounting: `added`, `replaced`,
+    `removed` (cancelled), `removed_manual`, `on_file_before`, `on_file_after`, and the
+    ids behind each count (`added_ids`, `replaced_ids`, `removed_ids`, `removed_manual_ids`).
     """
     db_path = Path(db_path).resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,20 +174,25 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
                 # sees Bloomberg's stored contract dates (and apply_contract_dates re-applies them after publish).
                 with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as reader:
                     reader.backup(staged)
-                replaced = {}
-                if full_replace:
-                    # staged is a snapshot of live at this instant, so counting on
-                    # either connection gives the same pre-delete totals.
-                    replaced = _replaced_counts(staged)
-                    # Clear staged's full-replace tables BEFORE load_fn runs: staged was
-                    # seeded from the old book, so without this, load_fn only adds the
-                    # new file's rows alongside the old ones still sitting in staged, and
-                    # the merge loop below would copy both back into live -- undoing the
-                    # live-side delete a few lines down instead of replacing anything.
-                    _delete_replaced_book(staged)
+                # staged is a snapshot of live at this instant: the book before the file.
+                before = {r[0] for r in staged.execute("SELECT trade_id FROM trades")}
+                manual = {r[0] for r in staged.execute(_MANUAL_TRADES_SQL)}
                 result = load_fn(staged)
-                if full_replace:
-                    _delete_replaced_book(live)
+                incoming = list(dict.fromkeys(t.trade_id for t in getattr(result, "trades", ())))
+                incoming_set = set(incoming)
+                cancelled = [str(t) for t in (getattr(result, "cancelled_trade_ids", None) or ())]
+                removed_ids = [t for t in dict.fromkeys(cancelled) if t in before and t not in incoming_set]
+                removed_manual_ids = sorted(manual - incoming_set)
+                replaced_ids = [t for t in incoming if t in before]
+                added_ids = [t for t in incoming if t not in before]
+                gone = removed_ids + removed_manual_ids
+                # A hand-set theme on a replaced trade (the file's row carries ''): kept.
+                replaced_set = set(replaced_ids)
+                kept_themes = [(theme, tid) for tid, theme in live.execute(
+                    "SELECT trade_id, theme FROM trades WHERE theme != ''") if tid in replaced_set]
+                _delete_trade_rows(staged, gone)
+                _delete_trade_rows(live, gone)
+                _delete_trade_rows(live, replaced_ids, TRADE_KEYED_CHILD_TABLES)
                 for table in schema.TABLES:
                     # Quoted throughout: curve_quotes.index is a reserved word.
                     columns = [r[1] for r in staged.execute(f"PRAGMA table_info({table})")]
@@ -185,11 +203,17 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
                     live.executemany(
                         f"INSERT INTO {table} ({names}) VALUES ({placeholders}) ON CONFLICT DO UPDATE SET {updates}",
                         staged.execute(f"SELECT {names} FROM {table}"))
+                live.executemany("UPDATE trades SET theme = ? WHERE trade_id = ? AND theme = ''", kept_themes)
+                on_file_after = live.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
                 live.commit()
         except Exception:
             live.rollback()
             raise
-    return result, replaced
+    change = {"added": len(added_ids), "replaced": len(replaced_ids), "removed": len(removed_ids),
+              "removed_manual": len(removed_manual_ids), "on_file_before": len(before),
+              "on_file_after": int(on_file_after), "added_ids": added_ids, "replaced_ids": replaced_ids,
+              "removed_ids": removed_ids, "removed_manual_ids": removed_manual_ids}
+    return result, change
 
 
 # The upload summary's breakdown, counted over the trades the file LOADED (ParseResult.trades),
@@ -231,6 +255,18 @@ def loaded_breakdown(trades) -> str:
     return ", ".join(parts)
 
 
+def merge_sentence(n_in_file: int, change: dict) -> str:
+    """The merge by Trade Id in plain words: '89 trades in the file: 12 added, 77 already on
+    file (replaced by the file's rows), 0 removed as cancelled; 89 trades on file.' An old
+    database's manual entries removed are named in a second clause; nothing else is."""
+    text = (f"{n_in_file} trades in the file: {change.get('added', 0)} added, "
+            f"{change.get('replaced', 0)} already on file (replaced by the file's rows), "
+            f"{change.get('removed', 0)} removed as cancelled")
+    if change.get("removed_manual"):
+        text += f", {change['removed_manual']} manual entr{'y' if change['removed_manual'] == 1 else 'ies'} removed"
+    return f"{text}; {change.get('on_file_after', 0)} trades on file."
+
+
 def _library_update(db_path) -> tuple:
     """Bring the Bloomberg library (data/bloomberg/library.py: what the trades on file need
     from Bloomberg for their P&L) up to date with the book just published, and say what
@@ -267,13 +303,14 @@ def _contract_dates_sentence(db_path) -> str:
 
 
 def import_blotter(payload, filename, db_path):
-    """Load a blotter file into `db_path`, replacing the entire existing trade book (see
-    module docstring: every existing `trades` row and trade-keyed dependent, any source,
-    is deleted first). Rows that cannot be parsed are skipped and listed in the returned
-    message, in a sentence that always carries the words "could not be read"
-    (REJECTS_PHRASE); everything else loads. Only a file with no recognisable blotter
-    header at all is refused -- and refusing it never touches the existing book (the
-    delete only happens after this file has parsed).
+    """Load a blotter file into `db_path`, merging it into the book by Trade Id (module
+    docstring, user decision 2026-09-28): a Trade Id already on file is replaced by the
+    file's row, a new one is added, a cancelled one is removed, and a trade the file does
+    not name stays; an old database's MANUAL rows are removed. Rows that cannot be parsed
+    are skipped and listed in the returned message, in a sentence that always carries the
+    words "could not be read" (REJECTS_PHRASE); everything else loads. Only a file with no
+    recognisable blotter header at all is refused -- and refusing it never touches the
+    existing book (every write happens only after this file has parsed).
 
     Returns the one-paragraph message, exactly `import_blotter_report(...)["message"]`.
     A caller that needs to know whether anything was skipped or doubtful should call
@@ -319,22 +356,49 @@ UPLOAD_REPORT_DDL = ("CREATE TABLE IF NOT EXISTS upload_report ("
                      "fx_spot INTEGER NOT NULL DEFAULT 0, fx_options INTEGER NOT NULL DEFAULT 0, "
                      "excluded_rows INTEGER NOT NULL DEFAULT 0, excluded_text TEXT NOT NULL DEFAULT '', "
                      "underlying_futures_written INTEGER NOT NULL DEFAULT 0, "
-                     "library_tickers INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '')")
+                     "library_tickers INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '', "
+                     "added INTEGER NOT NULL DEFAULT 0, replaced INTEGER NOT NULL DEFAULT 0, "
+                     "removed INTEGER NOT NULL DEFAULT 0, on_file_after INTEGER NOT NULL DEFAULT 0)")
 UPLOAD_REPORT_COLUMNS = ("filename", "uploaded_at", "futures", "options_on_futures", "lme_forwards",
                          "fx_forwards", "fx_spot", "fx_options", "excluded_rows", "excluded_text",
-                         "underlying_futures_written", "library_tickers", "summary")
+                         "underlying_futures_written", "library_tickers", "summary",
+                         # the merge by Trade Id (2026-09-28): trades added, replaced by the file's
+                         # rows, removed as cancelled, and the whole book's count after the upload
+                         "added", "replaced", "removed", "on_file_after")
+# The default of every column an older `upload_report` may lack (a database made before the
+# column was added): `record_upload_report` adds the column, `last_upload_report` fills it.
+_REPORT_DEFAULTS = {"excluded_text": "", "summary": ""}
 _REPORT_KIND_COLUMNS = (("futures", "FUTURE"), ("options_on_futures", "CMDTY_OPTION"), ("lme_forwards", "LME_FWD"),
                         ("fx_forwards", "FX_FWD"), ("fx_spot", "FX_SPOT"), ("fx_options", "FX_OPTION"))
 
 
-def record_upload_report(db_path, filename, result, n_underlying: int, library_tickers: int, summary: str) -> bool:
+def _report_columns_on_file(conn: sqlite3.Connection) -> list:
+    return [r[1] for r in conn.execute("PRAGMA table_info(upload_report)")]
+
+
+def _migrate_report_table(conn: sqlite3.Connection) -> None:
+    """Create `upload_report`, then add any column of `UPLOAD_REPORT_COLUMNS` an older
+    database's table lacks, with its default, so the INSERT below always fits."""
+    conn.execute(UPLOAD_REPORT_DDL)
+    present = set(_report_columns_on_file(conn))
+    for col in UPLOAD_REPORT_COLUMNS:
+        if col not in present:
+            default = "''" if col in _REPORT_DEFAULTS else "0"
+            kind = "TEXT" if col in _REPORT_DEFAULTS else "INTEGER"
+            conn.execute(f"ALTER TABLE upload_report ADD COLUMN {col} {kind} NOT NULL DEFAULT {default}")
+
+
+def record_upload_report(db_path, filename, result, n_underlying: int, library_tickers: int, summary: str,
+                         change: dict | None = None) -> bool:
     """Persist the load summary of the upload just published (`upload_report`, one row replacing
     the previous one). The kind counts are `loaded_breakdown`'s (the trades that LOADED, never
     the parser's row counters); `excluded_rows` is the book filter's total (status, fund, trader,
-    desk) with `filter_summary()` as its wording. Never fails an import: a database error is
-    swallowed and False returned."""
+    desk) with `filter_summary()` as its wording; `change` is `_stage_and_publish`'s merge
+    accounting (`added`, `replaced`, `removed`, `on_file_after`; zeros when not given). Never
+    fails an import: a database error is swallowed and False returned."""
     import datetime as _dt
     counts = loaded_counts(result.trades)
+    change = change or {}
     row = {"filename": str(filename),
            "uploaded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
            **{col: counts.get(product, 0) for col, product in _REPORT_KIND_COLUMNS},
@@ -342,13 +406,14 @@ def record_upload_report(db_path, filename, result, n_underlying: int, library_t
            "excluded_text": result.filter_summary(),
            "underlying_futures_written": int(n_underlying),
            "library_tickers": int(library_tickers),
-           "summary": summary}
+           "summary": summary,
+           **{col: int(change.get(col, 0) or 0) for col in ("added", "replaced", "removed", "on_file_after")}}
     names = ",".join(UPLOAD_REPORT_COLUMNS)
     try:
         conn = sqlite3.connect(str(db_path), timeout=60)
         try:
             with conn:
-                conn.execute(UPLOAD_REPORT_DDL)
+                _migrate_report_table(conn)
                 conn.execute("DELETE FROM upload_report")
                 conn.execute(f"INSERT INTO upload_report ({names}) VALUES ({','.join('?' for _ in UPLOAD_REPORT_COLUMNS)})",
                              [row[c] for c in UPLOAD_REPORT_COLUMNS])
@@ -361,12 +426,19 @@ def record_upload_report(db_path, filename, result, n_underlying: int, library_t
 
 def last_upload_report(conn: sqlite3.Connection) -> dict | None:
     """The last upload's summary as a dict keyed by `UPLOAD_REPORT_COLUMNS`, or None when no
-    upload has been recorded (no table, or an empty one)."""
+    upload has been recorded (no table, or an empty one). A column the database's table does
+    not have yet (a row written before 2026-09-28's `added` / `replaced` / `removed` /
+    `on_file_after`) is returned at its default, so the reader never needs the migration,
+    which `record_upload_report` runs on the next upload."""
     if not _table_exists(conn, "upload_report"):
         return None
-    row = conn.execute(f"SELECT {','.join(UPLOAD_REPORT_COLUMNS)} FROM upload_report "
-                       "ORDER BY uploaded_at DESC LIMIT 1").fetchone()
-    return dict(zip(UPLOAD_REPORT_COLUMNS, row)) if row else None
+    present = [c for c in UPLOAD_REPORT_COLUMNS if c in set(_report_columns_on_file(conn))]
+    row = conn.execute(f"SELECT {','.join(present)} FROM upload_report ORDER BY uploaded_at DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    out = {col: _REPORT_DEFAULTS.get(col, 0) for col in UPLOAD_REPORT_COLUMNS}
+    out.update(zip(present, row))
+    return out
 
 
 def import_blotter_report(payload, filename, db_path) -> dict:
@@ -383,6 +455,11 @@ def import_blotter_report(payload, filename, db_path) -> dict:
                            doubtful and the parser had to rebuild, ignore or distrust a cell
       notes     list[str]  the individual note sentences (information first, then the
                            warnings sentence, which names the rows)
+      added, replaced, removed, removed_manual, on_file_after
+                int        the merge by Trade Id (2026-09-28): trades the file added, trades
+                           already on file replaced by the file's rows, trades removed as
+                           cancelled, an old database's manual entries removed, and the
+                           book's trade count after the upload
 
     INFORMATION is in `notes` and `message` but never raises `warnings`: an option with
     no strike in the file, which the Blotter's missing-terms banner shows persistently, so
@@ -399,20 +476,18 @@ def import_blotter_report(payload, filename, db_path) -> dict:
         except sqlite3.Error as e:
             raise ValueError(f"Nothing imported. Database error: {e}") from e
 
-    result, replaced = _stage_and_publish(db_path, _load, full_replace=True)
+    result, change = _stage_and_publish(db_path, _load)
     record_upload_issues(db_path, filename, result)
     n_trades, n_legs = len(result.trades), len(result.legs)
     parts = [f"Imported {filename}: {n_trades} trades -- {loaded_breakdown(result.trades)}; {n_legs} legs. "
-             f"{result.n_currency} cash rows seen ({result.n_spot} of them spot fills)."]
+             f"{result.n_currency} cash rows seen ({result.n_spot} of them spot fills).",
+             merge_sentence(n_trades, change)]
     underlying = sorted(getattr(result, "underlying_only", None) or ())
     if underlying:
         # An option on a future whose underlying the file does not trade: the future is written as
         # an instrument with no trade, so its price can be kept for the option's Greeks.
         parts.append(f"{len(underlying)} underlying future(s) of the options on futures written with no trade "
                      f"of their own: {', '.join(underlying)}.")
-    if replaced.get("trades"):
-        parts.append(f"Replaced the previous book: {replaced['trades']} trade(s) and "
-                     f"{replaced['trade_legs']} leg(s) removed.")
     excluded = []
     if result.n_skipped_other:
         excluded.append(f"{result.n_skipped_other} rows of unsupported type")
@@ -435,6 +510,8 @@ def import_blotter_report(payload, filename, db_path) -> dict:
     parts.append(library_sentence)
     notes = result.notes()
     message = " ".join(parts + notes)
-    record_upload_report(db_path, filename, result, len(underlying), library_tickers, message)
+    record_upload_report(db_path, filename, result, len(underlying), library_tickers, message, change)
     return {"message": message, "rejects": len(result.rejects),
-            "warnings": len(result.warnings), "notes": notes}
+            "warnings": len(result.warnings), "notes": notes,
+            "added": change["added"], "replaced": change["replaced"], "removed": change["removed"],
+            "removed_manual": change["removed_manual"], "on_file_after": change["on_file_after"]}

@@ -135,6 +135,7 @@ from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import (
     MISSING, about, format_cell, is_fx_pair, issues_drawer, marker, price_text, quoted_unit, short_money,
+    trade_type_words,
 )
 
 # The tab's own date picker and title row left on 2026-09-28 (the screens tidy): the header's
@@ -218,11 +219,12 @@ FX_EXCHANGE = "OTC"
 # display columns. Date/amount/rate columns are not offered -- multi-select-from-values
 # only makes sense for the categorical ones; "pick USDJPY" is the request, not a range
 # filter.
-FILTERABLE_COLS = ["sector", "commodity", "instrument_id", "side", "status", "product", "strategy", "theme"]
-# All trades (the Total book until 2026-09-28, UI redesign wave 1): three dropdowns, commodity,
-# product and status, a free-text search over the instrument and the trade id, and a CSV of the
-# rows shown at full figures.
-TOTAL_FILTER_COLS = ["commodity", "product", "status"]
+FILTERABLE_COLS = ["sector", "commodity", "instrument_id", "side", "status", "product", "strategy", "trade_type", "theme"]
+# All trades (the Total book until 2026-09-28, UI redesign wave 1): the dropdowns commodity,
+# product, strategy, type (user, 2026-09-28: "it must also be possible to sort the trades" by the
+# broker's trade type and by strategy) and status, a free-text search over the instrument and the
+# trade id, and a CSV of the rows shown at full figures.
+TOTAL_FILTER_COLS = ["commodity", "product", "strategy", "trade_type", "status"]
 SEARCH_COLS = ("instrument_id", "trade_id")
 
 
@@ -273,13 +275,14 @@ GREEK_TIP = ("An option on a future's official Greek per option lot, as the mark
              "Delta in futures lots per lot; Gamma, Theta, Vega in the contract's price unit per lot. Blank on "
              "every other product; the Options sub-tab shows them scaled to the position.")
 _DISPLAY_COLUMNS = [
-    "instrument_id", "commodity", "exchange", "product", "trade_date", "side", "quantity", "qty_unit",
+    "instrument_id", "commodity", "exchange", "product", "strategy", "trade_type", "trade_date", "side", "quantity", "qty_unit",
     "fill", "mark", "prev_close", "pnl_local", "pnl_ccy", "pnl_usd", "delta", "gamma", "theta", "vega",
     "status", "settle_date", "theme", "trade_id",
 ]
 _COLUMN_LABELS = {
     "instrument_id": "Instrument", "commodity": "Commodity / pair", "exchange": "Exchange",
-    "product": "Product", "trade_date": "Trade date", "side": "Side", "quantity": "Quantity",
+    "product": "Product", "strategy": "Strategy", "trade_type": "Type",
+    "trade_date": "Trade date", "side": "Side", "quantity": "Quantity",
     "qty_unit": "Unit", "fill": "Fill", "mark": "Mark", "prev_close": "Prev close",
     "pnl_local": "P&L (local)", "pnl_ccy": "Ccy", "pnl_usd": "P&L (USD)",
     "delta": "Delta /lot", "gamma": "Gamma /lot", "theta": "Theta /lot", "vega": "Vega /lot", "status": "Status",
@@ -287,7 +290,7 @@ _COLUMN_LABELS = {
 }
 # Text columns of the trade tables that read left-aligned (names, not figures).
 _LEFT_COLS = ("instrument_id", "commodity", "exchange", "product", "sector", "qty_unit", "pnl_ccy", "status",
-              "theme", "strategy")
+              "theme", "strategy", "trade_type")
 # Columns that keep their raw (pre-display-formatting) value for the row-click detail
 # panel and for the visible-rows -> headline callback.
 _PASSTHROUGH_COLS = ("reason",)
@@ -322,6 +325,11 @@ _PRODUCT_LABELS = {"FX_SPOT": "FX spot", "FX_FWD": "FX forward", "FX_SWAP": "FX 
 
 def _fmt_product(value) -> str:
     return _PRODUCT_LABELS.get(value, value or "")
+
+
+def _fmt_trade_type(value) -> str:
+    """The broker's trade type in words ('cross exchange'); '' for none."""
+    return trade_type_words(value)
 
 
 def _sorted_scope_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -390,6 +398,7 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
 
     mark_sources, notes = _column("mark_source"), _column("note")
     prev_tips = _column("prev_close_tip")
+    type_sources, type_notes = _column("type_source"), _column("type_note")
     price_units, flags = _column("price_unit"), _column("flag")
     fills = _column("fill")
     for col in cols:
@@ -397,6 +406,8 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
             formatted[col] = formatted[col].map(_fmt_status)
         elif col == "product":
             formatted[col] = formatted[col].map(_fmt_product)
+        elif col == "trade_type":
+            formatted[col] = formatted[col].map(_fmt_trade_type)
     data_records = formatted.to_dict("records")
     tooltip_data = []
     # trade_id/reason travel with the row (not all displayed) so the
@@ -425,6 +436,10 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
                            "type": "text"}
         if "prev_close" in rec and prev_tips[i]:
             tip["prev_close"] = {"value": str(prev_tips[i]), "type": "text"}
+        if "trade_type" in rec:
+            src, note = str(type_sources[i] or ""), str(type_notes[i] or "")
+            words = (f"{src}: " if src and src != "label" else "") + (note or ("the broker's label" if rec["trade_type"] else "no type: outright"))
+            tip["trade_type"] = {"value": words, "type": "text"}
         # Prices at tick precision (2026-09-28): text cells, never eight decimals.
         unit = str(price_units[i] or "") if i < len(price_units) else ""
         fill = rk.value(fills[i]) if i < len(fills) else None
@@ -482,7 +497,7 @@ def _filter_options(df: pd.DataFrame, col: str, column_labels: dict) -> list:
     (Status/Product) so the dropdown reads the same words as the table."""
     if df.empty or col not in df.columns:
         return []
-    label_fn = {"status": _fmt_status, "product": _fmt_product}.get(col, lambda v: v)
+    label_fn = {"status": _fmt_status, "product": _fmt_product, "trade_type": _fmt_trade_type}.get(col, lambda v: v)
     values = sorted({v for v in df[col].tolist() if v not in (None, "")})
     return [{"label": label_fn(v) or "(blank)", "value": v} for v in values]
 
@@ -1265,6 +1280,7 @@ def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
     df = add_row_display_fields(conn, df, as_of)
     if scope == "total":
         df = add_instrument_fields(conn, df)
+        df = add_trade_labels(conn, df, as_of)
         df = add_prev_close(conn, df, as_of)
         df = add_option_greeks(conn, df, as_of)
         df = add_price_units_and_flags(conn, df)
@@ -1310,6 +1326,47 @@ def add_price_units_and_flags(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.
         missing = set()
     if missing:
         out["flag"] = [NO_STRIKE_FLAG if str(i) in missing else "" for i in out["instrument_id"]]
+    return out
+
+
+def add_trade_labels(conn: sqlite3.Connection, df: pd.DataFrame, as_of: Optional[str] = None) -> pd.DataFrame:
+    """`strategy`, `trade_type`, `type_source`, `type_note` and `pb_root` on the frame: the
+    broker's labels on each trade (`trades.strategy`, Jason's strategy name; `trades.trade_type`,
+    CROSS_EXCHANGE | CROSS_PRODUCT | TERM_STRUCTURE | ''; the raw PBRoot), read as they are, ''
+    on a database from before the columns; and, with `as_of`, the type of the position the trade
+    is in as spreads-engine gave it (`ui.tabs.book.trade_types`: the label where the legs agree
+    with it, else read from the legs, `type_source` 'label' | 'inferred' | 'mixed labels'), so
+    the Trades tab shows the one type the Book and P&L show. A `strategy` column the reader
+    already carries is kept where it is non-empty."""
+    out = df.copy()
+    if out.empty:
+        for col in ("strategy", "trade_type", "type_source", "type_note", "pb_root"):
+            if col not in out.columns:
+                out[col] = pd.Series(dtype=object)
+        return out
+    try:
+        labels = {str(t): (str(st or ""), str(tt or ""), str(pb or "")) for t, st, tt, pb in
+                  conn.execute("SELECT trade_id, strategy, trade_type, pb_root FROM trades")}
+    except sqlite3.Error:
+        labels = {}
+    tids = [str(t) for t in out["trade_id"]]
+    have = out["strategy"].tolist() if "strategy" in out.columns else [""] * len(out)
+    out["strategy"] = [str(h or "") or labels.get(t, ("", "", ""))[0] for t, h in zip(tids, have)]
+    out["trade_type"] = [labels.get(t, ("", "", ""))[1] for t in tids]
+    out["type_source"] = ["label" if labels.get(t, ("", "", ""))[1] else "" for t in tids]
+    out["type_note"] = ["the broker's label on the trade" if labels.get(t, ("", "", ""))[1] else "" for t in tids]
+    out["pb_root"] = [labels.get(t, ("", "", ""))[2] for t in tids]
+    if as_of:
+        try:
+            from ui.tabs.book import _labels, _spreads, trade_types
+            types = trade_types({"labels": _labels(conn), "spreads": _spreads(conn, as_of)})
+        except Exception:  # noqa: BLE001 -- the broker's own labels stand
+            logging.getLogger(__name__).exception("trade types unavailable for the Trades tab on %s", as_of)
+            types = {}
+        if types:
+            out["trade_type"] = [(types.get(t) or {}).get("trade_type") or tt for t, tt in zip(tids, out["trade_type"])]
+            out["type_source"] = [(types.get(t) or {}).get("type_source") or src for t, src in zip(tids, out["type_source"])]
+            out["type_note"] = [(types.get(t) or {}).get("type_note") or note for t, note in zip(tids, out["type_note"])]
     return out
 
 

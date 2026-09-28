@@ -13,7 +13,9 @@ see [[phase2-macro-removal]]).
 docs/open-questions.md), so everything rests on a synthetic sample and on guesses.
 
 **How to apply:**
-- The PB export's commodity symbol format is UNKNOWN. The sample guesses the PB form
+- Since 2026-09-28 the suffix (-USAA/-UKAA/-CHAA/-SPAA) names the exchange (contract-master): the
+  sample's Brent is BZ6-UKAA, SGX iron ore FEFF7-SPAA, the deliberate ambiguous row bare ZCZ6.
+- (Older) The PB export's commodity symbol format was UNKNOWN. The sample guesses the PB form
   '<exchange code><M><Y>-<4 letters>' for Western contracts ('CLZ6-USAA', Brent 'BZ6-USAA'
   since ICE's exchange code is B; Bloomberg root CO) and the Chinese form for Chinese ones
   ('CU2611', 'I2701', no suffix). Re-check both the day a real export arrives.
@@ -21,9 +23,9 @@ docs/open-questions.md), so everything rests on a synthetic sample and on guesse
   CO (LME cobalt / Brent Bloomberg root). The parser relies on the row's Currency and
   Execution Venue cells to narrow; if a real export leaves Execution Venue blank, soybeans
   and silver will reject as ambiguous. Watch for that first.
-- Fills are assumed in the contract list's quoted scale (cents for RB, HO, ZS, ZL, ZC, HG;
-  pence for NBP). A PB quoting USD/gal would be 100x off; the NetInvoice cross-check warns
-  "another unit" when the ratio is ~100 or ~0.01 (warn only, never rejects).
+- SUPERSEDED 2026-09-28: fills are in the BROKER's units and are multiplied by the root's
+  `broker_price_scale` (100 on RB, HO, ZS, ZL, ZC, HG, NBP ...) into Bloomberg's, see
+  [[real-export-conventions]]. The NetInvoice check still warns "another unit" at ~100 / ~0.01.
 - Quantity is never rebuilt from Notional on the commodity path: a Notional in gallons /
   bushels over a cents-scaled multiplier gives a whole number 100x too big. Only
   NetInvoice / (multiplier x Price) rebuilds it.

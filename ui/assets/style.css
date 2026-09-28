@@ -154,6 +154,11 @@ p { margin: 8px 0; }
 .tag--unavailable { background: #f1f2f4; color: var(--muted); }
 .cards--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .cards--three .card-value { font-size: 22px; }
+/* Risk headline: two cards (VaR, blended vol vs target; user 2026-09-28), sized as the
+   three were, never stretched across the whole width. */
+.cards--two { grid-template-columns: repeat(2, minmax(200px, 400px)); }
+.cards--two .card-value { font-size: 22px; }
+.risk-worst-line .risk-worst-label { font-weight: 600; }
 /* Ladder headline: one merged Delta card (user decision 2026-09-15, replacing the
    three-card combined/non-forward/forward split) -- bigger, not full-width, so it
    still reads as a single headline figure rather than stretching thin. */
@@ -469,6 +474,8 @@ p { margin: 8px 0; }
   font-size: 10.5px; font-weight: 500; font-style: normal; line-height: 1.5; white-space: nowrap;
   color: var(--muted); background: rgba(15, 31, 61, .06); cursor: help; vertical-align: 1px; }
 .header-block .marker, .top-bar .marker { color: rgba(255,255,255,.7); background: rgba(255,255,255,.12); }
+.marker--amber { color: #8a4b00; background: rgba(214, 137, 16, .16); }
+.book-table td .name-sub { margin-left: 6px; }
 .header-block .about-mark, .top-bar .about-mark { color: rgba(255,255,255,.6); }
 .header-block .about-title:hover .about-mark { color: #fff; }
 .issues-drawer { margin-top: 12px; font-size: 12px; color: var(--text); }

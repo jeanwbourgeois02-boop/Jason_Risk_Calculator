@@ -20,6 +20,9 @@ about a dozen lanes' tests load that path, so the replacement kept the path.
   500042, USDJPY "digital" 500043 with no strike and no payoff word, closed-out EURUSD put
   pair 500044 buy / 500045 sell). Trade Ids 910000001-045, Trader JB, Desk JBRV, Fund NMMF,
   counterparties CPTY-A (futures) / CPTY-B (FX) / CPTY-C (options), accounts PB-*-NMMF.
+- 2026-09-28: rows 9-17, 24-25, 33 book their cents-quoted roots in the broker's units (455.2 -> 4.552;
+  NetInvoice unchanged, since invoice = lots x contract size x broker price), BZ6-UKAA, FEFF7-SPAA,
+  and the ambiguous row is bare ZCZ6; the parse (50 trades, ids, fills) equals the pinned golden book.
 - Regenerate from a script, never by hand: NetInvoice must stay consistent (tests assert
   no warnings). The generator lived in the session scratchpad; its logic is simple enough
   to rewrite (forward: quote = round(base x rate, 2); option: NetInvoice = notional x premium).

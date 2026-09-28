@@ -6,3 +6,5 @@
 - [Screens fix pass 2026-09-28](screens-fix-pass-2026-09-28.md) — estimated dates "≈ date" + alert hover, Exposure excl. N, template short names, FX decimals, picker CSS, pattern-id Upload button, test-fix rule as applied
 - [Screens tidy wave 2 2026-09-28](screens-tidy-wave2-2026-09-28.md) — Exposure grid + cards, P&L five-period table with group-by, seven-column roll table, Risk drawer split, Data without the research curve; proof recipe
 - [Timing & cash tab deleted 2026-09-28](timing-cash-tab-deleted-2026-09-28.md) — six tabs; key "expiries" in HIDDEN_TAB_KEYS; Needs-you lines with tab="" carry no link
+- [Risk two cards + shared empty state 2026-09-28](risk-two-cards-empty-state-2026-09-28.md) — worst day a line in the scenario fold, risk.plain_reason, book.trades_on_file / empty_state(idx), parallel-agent hazard on book.py
+- [Strategy / Type / Commodity views 2026-09-28](strategy-type-commodity-views-2026-09-28.md) — Book Commodity|Strategy|Type|Instrument, netted contract rows + by_subsector net lines, one type per trade (book.trade_types), P&L views, Exposure by subsector, Trades filters; proof recipe

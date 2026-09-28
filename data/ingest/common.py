@@ -74,6 +74,11 @@ class Trade:
     trader: str
     description: str
     theme: str = ""
+    # The prime broker's PBRoot cell (2026-09-28: '<letters><digits>[.<d>]_<STRATEGY>', e.g.
+    # 'JSHY10.3_COPAR3'), kept raw, and what `parse_pb_root` reads off it: `strategy` above is
+    # the name after the underscore, `trade_type` the decimal's meaning.
+    pb_root: str = ""
+    trade_type: str = ""   # CROSS_EXCHANGE | CROSS_PRODUCT | TERM_STRUCTURE | ''
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,28 @@ class ParseWarning:
 
 
 # --------------------------------------------------------------------------- helpers
+# The prime broker's PBRoot cell: '<letters><digits>[.<decimal>]_<STRATEGY>' ('JSHY10.3_COPAR3',
+# 'JSHY10_CATTLE'). Seen on Jason's export of 2026-09-28; the decimal's meaning is his own coding.
+PB_ROOT_RE = re.compile(r"^\s*[A-Za-z]+\d+(?:\.(?P<decimal>\d+))?(?:_(?P<strategy>.*?))?\s*$")
+PB_ROOT_TRADE_TYPES = {"3": "CROSS_EXCHANGE", "4": "CROSS_PRODUCT", "5": "TERM_STRUCTURE"}
+
+
+def parse_pb_root(text) -> tuple:
+    """``(strategy, trade_type)`` read off a PBRoot cell: the strategy is the name after the
+    underscore ('COPAR3' from 'JSHY10.3_COPAR3'), the trade type what the decimal means
+    (.3 CROSS_EXCHANGE, .4 CROSS_PRODUCT, .5 TERM_STRUCTURE; any other decimal, or none, '').
+    Tolerant (hard rule 6): a cell with no underscore gives strategy '' and the type from its
+    decimal if any; a blank cell, or one in another shape, gives ('', '')."""
+    s = "" if text is None else str(text).strip()
+    if not s or s.lower() in ("nan", "none", "null"):
+        return "", ""
+    m = PB_ROOT_RE.match(s)
+    if not m:
+        return "", ""
+    strategy = (m.group("strategy") or "").strip()
+    return strategy, PB_ROOT_TRADE_TYPES.get(m.group("decimal") or "", "")
+
+
 def cash_ccy(code: str) -> str:
     """'DOL.C-USAA' -> 'USD'; '<CCY>.C-xxAA' -> CCY."""
     m = CASH_CCY_RE.match(str(code))

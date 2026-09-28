@@ -447,8 +447,10 @@ def test_non_completed_status_is_skipped(tmp_csv):
 
 
 def test_non_nmmf_fund_is_skipped(tmp_csv):
+    # the shipped book.yaml filters nothing since 2026-09-28 (the export is Jason's own pull): the filter
+    # is passed explicitly so the test still proves it works
     row = _forward_row(Fund="OTHERFUND")
-    res = blotter.parse(tmp_csv([row]))
+    res = blotter.parse(tmp_csv([row]), book=blotter.BookFilter(funds=("NMMF",)))
     assert res.n_skipped_status_or_fund == 1
 
 
@@ -602,7 +604,7 @@ def test_sample_file_parses_with_only_its_two_deliberate_rejects():
     assert res.n_skipped_other == 0 and res.n_skipped_retired == 0   # no macro product in the commodity book
     assert res.n_skipped_status_or_fund == 0
     # the two futures the contract master cannot resolve: an ambiguous bare code, an unknown root
-    assert [r.symbol for r in res.rejects] == ["ZCZ6-USAA", "QQZ6-USAA"]
+    assert [r.symbol for r in res.rejects] == ["ZCZ6", "QQZ6-USAA"]
     # 29 futures + 8 forwards + 1 spot (the CURRENCY row names two currencies) + 5 FX options
     # + 4 options on futures + 3 LME forwards (two legs each)
     assert res.n_spot == 1
@@ -845,9 +847,13 @@ def test_future_price_rebuilt_from_the_invoice_matches_every_sample_fill():
     res = blotter.parse(futures)
     # the sample's two deliberate rejects stay rejects (contract not resolved, before any price);
     # 29 futures and the LME aluminium row on a FUTURE Fin Type (an LME forward, same rebuild)
-    assert [r.symbol for r in res.rejects] == ["ZCZ6-USAA", "QQZ6-USAA"] and len(res.trades) == 30
+    assert [r.symbol for r in res.rejects] == ["ZCZ6", "QQZ6-USAA"] and len(res.trades) == 30
+    from data.contracts.universe import get_root
     for t in res.trades:
-        assert t.price == pytest.approx(fills[t.trade_id], rel=1e-9)   # NetInvoice = fill x size +/- fees
+        # NetInvoice = fill x size +/- fees; a rebuilt price is in Bloomberg's units, so it equals the
+        # broker's cell x the root's broker_price_scale (100 on the sample's cents-quoted roots, 2026-09-28)
+        scale = get_root(res.instruments[t.instrument_id].base_ccy).broker_price_scale
+        assert t.price == pytest.approx(fills[t.trade_id] * scale, rel=1e-9)
 
 
 def test_spot_row_price_as_a_date_is_rebuilt_and_an_unrecoverable_amount_is_rejected(tmp_csv):
