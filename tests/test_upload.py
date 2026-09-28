@@ -9,7 +9,8 @@ import pandas as pd
 import pytest
 
 from data.ingest import blotter
-from data.ingest.upload import import_blotter, preview_frame, validate_blotter_shape
+from data.ingest.common import ParseWarning
+from data.ingest.upload import import_blotter, preview_frame, record_upload_issues, validate_blotter_shape
 
 # The synthetic commodity, FX-hedge and FX-option book (commodity conversion Phase 2,
 # 2026-09-24; Phase 5 added 4 options on futures and 3 LME forwards): 52 rows, 31 of them
@@ -464,3 +465,29 @@ def test_import_blotter_replaces_a_manual_trade_too(tmp_path):
     assert 'MANUAL-1' not in trade_ids and legs == 0
     assert sources == {'XLSX'}
     assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)
+
+
+def test_a_file_level_parse_warning_is_persisted_as_a_warning_row_in_upload_issues(tmp_path):
+    """ingest-parser, 2026-09-28: a ``ParseWarning`` with ``row_no == 0`` is a sentence about the
+    file as a whole (two strategy labels that look like one strategy). It becomes one
+    ``upload_issues`` row of kind WARNING with symbol '' and the sentence as its reason, so the
+    Book tab's "Last load" and the Data tab list it; a row-level warning stays in the summary
+    only, and the trades on file do not change."""
+    db = tmp_path / 'risk.db'
+    import_blotter(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, db)
+    before = trade_count(db)
+    sentence = ("Strategy labels that look like one strategy: 'JSHY10_ZNA1' (25 rows) and "
+                "'JSHY10.3_ZNA1' (2 rows) are grouped as ZNA1; if they are two positions, tell us.")
+
+    class _Result:
+        rejects = []
+        skipped_other_rows = []
+        warnings = [ParseWarning(0, '', sentence),
+                    ParseWarning(7, 'CLZ6-USAA', 'Price arrived as a date; rebuilt from NetInvoice.')]
+
+    assert record_upload_issues(db, 'export.csv', _Result()) == 1
+
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute("SELECT row_no, symbol, kind, reason, filename FROM upload_issues").fetchall()
+    assert rows == [(0, '', 'WARNING', sentence, 'export.csv')]
+    assert trade_count(db) == before

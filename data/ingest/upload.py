@@ -325,11 +325,18 @@ UPLOAD_ISSUES_DDL = ("CREATE TABLE IF NOT EXISTS upload_issues (row_no INTEGER N
 def record_upload_issues(db_path, filename, result) -> int:
     """Every row of the uploaded file that did NOT become a trade, with why (user, 2026-09-21:
     "a zar option and spx option that just isnt in the table"): the parser's rejects and the
-    rows of a type the app does not load. Replaced by each upload; shown on the Market data
-    tab. Never fails an import: a database error here is swallowed."""
+    rows of a type the app does not load. Since 2026-09-28 also the parser's file-level
+    warnings (``ParseWarning`` with ``row_no == 0``: a sentence about the file as a whole,
+    such as two strategy labels that look like one strategy), as kind WARNING with symbol
+    '', so the Book tab's "Last load" and the Data tab show them as rows and not only inside
+    the summary; a row-level warning (``row_no >= 2``) stays in the summary sentence only.
+    Replaced by each upload; shown on the Market data tab. Never fails an import: a database
+    error here is swallowed."""
     import datetime as _dt
     rows = [(rj.row_no, rj.symbol or "", "REJECTED", rj.reason) for rj in getattr(result, "rejects", [])]
     rows += [(n, sym or "", "NOT LOADED", why) for n, sym, why in getattr(result, "skipped_other_rows", [])]
+    rows += [(0, "", "WARNING", w.message) for w in getattr(result, "warnings", [])
+             if getattr(w, "row_no", None) == 0]
     stamp = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
     try:
         conn = sqlite3.connect(str(db_path), timeout=60)
