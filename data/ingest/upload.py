@@ -205,14 +205,20 @@ _LOADED_KINDS = (("futures", ("FUTURE",), True),
                  ("FX options", ("FX_OPTION",), True))
 
 
+def loaded_counts(trades) -> dict:
+    """The loaded trades by product code: {'FUTURE': 29, 'CMDTY_OPTION': 4, ...}."""
+    counts: dict = {}
+    for t in trades:
+        counts[t.product] = counts.get(t.product, 0) + 1
+    return counts
+
+
 def loaded_breakdown(trades) -> str:
     """'29 futures, 4 options on futures, 3 LME forwards, 8 FX forwards, 1 FX spot, 5 FX options':
     the loaded trades by kind. Listed options (EQ_OPTION) and FX swaps are named only when there
     are some, every other kind always; a product this list does not know is named as it is
     stored, so no loaded trade goes uncounted."""
-    counts: dict = {}
-    for t in trades:
-        counts[t.product] = counts.get(t.product, 0) + 1
+    counts = loaded_counts(trades)
     parts, known = [], set()
     for label, products, always in _LOADED_KINDS:
         known.update(products)
@@ -223,20 +229,25 @@ def loaded_breakdown(trades) -> str:
     return ", ".join(parts)
 
 
-def _library_sentence(db_path) -> str:
+def _library_update(db_path) -> tuple:
     """Bring the Bloomberg library (data/bloomberg/library.py: what the trades on file need
     from Bloomberg for their P&L) up to date with the book just published, and say what
     changed. An upload asks nothing of Bloomberg (user decision 2026-09-21); the next
-    "Pull Bloomberg now" asks for exactly what is listed there."""
+    "Pull Bloomberg now" asks for exactly what is listed there. Returns (sentence, tickers);
+    tickers is 0 when the sync could not run here."""
     try:
         from data.bloomberg import library
         with closing(schema.connect(Path(db_path).resolve())) as conn:
             changed = library.sync(conn)
             tickers = library.summary(conn)["tickers"]
     except Exception as exc:  # noqa: BLE001 -- the book is already published; a reader syncs the library itself
-        return f"Bloomberg library not updated here ({exc}); it updates itself on the next pull."
+        return f"Bloomberg library not updated here ({exc}); it updates itself on the next pull.", 0
     return (f"Bloomberg library: {tickers} ticker(s) needed today, {changed['added']} item(s) added, "
-            f"{changed['removed']} removed. Nothing was pulled; press Pull Bloomberg now to price the book.")
+            f"{changed['removed']} removed. Nothing was pulled; press Pull Bloomberg now to price the book."), tickers
+
+
+def _library_sentence(db_path) -> str:
+    return _library_update(db_path)[0]
 
 
 def _contract_dates_sentence(db_path) -> str:
@@ -294,6 +305,66 @@ def record_upload_issues(db_path, filename, result) -> int:
     except sqlite3.Error:
         return 0
     return len(rows)
+
+
+# The last upload's load summary as data (UI redesign, 2026-09-28): one row, replaced by each
+# upload, written alongside upload_issues once the book is published and the summary is known.
+# Column order is the INSERT's and `last_upload_report`'s.
+UPLOAD_REPORT_DDL = ("CREATE TABLE IF NOT EXISTS upload_report ("
+                     "filename TEXT NOT NULL, uploaded_at TEXT NOT NULL, "
+                     "futures INTEGER NOT NULL DEFAULT 0, options_on_futures INTEGER NOT NULL DEFAULT 0, "
+                     "lme_forwards INTEGER NOT NULL DEFAULT 0, fx_forwards INTEGER NOT NULL DEFAULT 0, "
+                     "fx_spot INTEGER NOT NULL DEFAULT 0, fx_options INTEGER NOT NULL DEFAULT 0, "
+                     "excluded_rows INTEGER NOT NULL DEFAULT 0, excluded_text TEXT NOT NULL DEFAULT '', "
+                     "underlying_futures_written INTEGER NOT NULL DEFAULT 0, "
+                     "library_tickers INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '')")
+UPLOAD_REPORT_COLUMNS = ("filename", "uploaded_at", "futures", "options_on_futures", "lme_forwards",
+                         "fx_forwards", "fx_spot", "fx_options", "excluded_rows", "excluded_text",
+                         "underlying_futures_written", "library_tickers", "summary")
+_REPORT_KIND_COLUMNS = (("futures", "FUTURE"), ("options_on_futures", "CMDTY_OPTION"), ("lme_forwards", "LME_FWD"),
+                        ("fx_forwards", "FX_FWD"), ("fx_spot", "FX_SPOT"), ("fx_options", "FX_OPTION"))
+
+
+def record_upload_report(db_path, filename, result, n_underlying: int, library_tickers: int, summary: str) -> bool:
+    """Persist the load summary of the upload just published (`upload_report`, one row replacing
+    the previous one). The kind counts are `loaded_breakdown`'s (the trades that LOADED, never
+    the parser's row counters); `excluded_rows` is the book filter's total (status, fund, trader,
+    desk) with `filter_summary()` as its wording. Never fails an import: a database error is
+    swallowed and False returned."""
+    import datetime as _dt
+    counts = loaded_counts(result.trades)
+    row = {"filename": str(filename),
+           "uploaded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+           **{col: counts.get(product, 0) for col, product in _REPORT_KIND_COLUMNS},
+           "excluded_rows": int(getattr(result, "n_skipped_status_or_fund", 0) or 0),
+           "excluded_text": result.filter_summary(),
+           "underlying_futures_written": int(n_underlying),
+           "library_tickers": int(library_tickers),
+           "summary": summary}
+    names = ",".join(UPLOAD_REPORT_COLUMNS)
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=60)
+        try:
+            with conn:
+                conn.execute(UPLOAD_REPORT_DDL)
+                conn.execute("DELETE FROM upload_report")
+                conn.execute(f"INSERT INTO upload_report ({names}) VALUES ({','.join('?' for _ in UPLOAD_REPORT_COLUMNS)})",
+                             [row[c] for c in UPLOAD_REPORT_COLUMNS])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return True
+
+
+def last_upload_report(conn: sqlite3.Connection) -> dict | None:
+    """The last upload's summary as a dict keyed by `UPLOAD_REPORT_COLUMNS`, or None when no
+    upload has been recorded (no table, or an empty one)."""
+    if not _table_exists(conn, "upload_report"):
+        return None
+    row = conn.execute(f"SELECT {','.join(UPLOAD_REPORT_COLUMNS)} FROM upload_report "
+                       "ORDER BY uploaded_at DESC LIMIT 1").fetchone()
+    return dict(zip(UPLOAD_REPORT_COLUMNS, row)) if row else None
 
 
 def import_blotter_report(payload, filename, db_path) -> dict:
@@ -358,7 +429,10 @@ def import_blotter_report(payload, filename, db_path) -> dict:
     dates_sentence = _contract_dates_sentence(db_path)
     if dates_sentence:
         parts.append(dates_sentence)
-    parts.append(_library_sentence(db_path))
+    library_sentence, library_tickers = _library_update(db_path)
+    parts.append(library_sentence)
     notes = result.notes()
-    return {"message": " ".join(parts + notes), "rejects": len(result.rejects),
+    message = " ".join(parts + notes)
+    record_upload_report(db_path, filename, result, len(underlying), library_tickers, message)
+    return {"message": message, "rejects": len(result.rejects),
             "warnings": len(result.warnings), "notes": notes}
