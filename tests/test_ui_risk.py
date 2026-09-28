@@ -224,25 +224,36 @@ def test_render_shows_an_engine_failure_instead_of_a_blank_tab(tmp_path, monkeyp
     def boom(conn, as_of):
         raise ValueError("bad history column")
     monkeypatch.setattr(risk, "book_risk", boom)
+    monkeypatch.setattr(risk, "trades_on_file", lambda conn: 1)      # a book on file: not the empty state
     out = risk.render(AS_OF, tmp_path / "risk.db")
     assert "Risk could not be computed for 2026-09-22 (ValueError: bad history column)" in _text(out)
 
 
 # --------------------------------------------------------------------------- caption and drawer
 # --------------------------------------------------------------------------- cards
-def test_over_cap_and_over_vol_target_are_flagged_in_red():
+def test_two_cards_and_the_worst_day_line_in_the_scenario_fold():
+    """Two cards since 2026-09-28 (user): VaR and blended vol vs target, the vol flagged in red
+    when over the target. The "Worst day ex shocks" card and its cap are gone: the raw worst
+    day is the first line of the commodity scenario fold, with its date and the history's reach."""
     r = _result()
     r["book"].update(over_cap=True, over_vol_target=True, worst_day_ex_vs_cap_pct=131.6, vol_vs_target_pct=142.0,
                      worst_1d_ex_shocks_usd=-2_960_000.0, vol_blended_ann_usd=6_390_000.0)
     body = risk.body(r)
     cards = _cards(body)
-    assert "over cap" in _texts(body) and "over vol target" in _texts(body)
-    assert cards["Worst day ex shocks"][0] == "−2.96m" and "131.6% of the 2.25m cap" in cards["Worst day ex shocks"][1]
-    assert cards["Worst day ex shocks"][3].style["color"] == "var(--neg)" and cards["Worst day ex shocks"][3].style["fontWeight"] == "700"
-    assert cards["Blended vol (annual)"][0] == "6.39m" and "142.0% of the 4.50m target" in cards["Blended vol (annual)"][1]
-    # the flag sits on the figure line, beside the figure, not under it
-    assert cards["Worst day ex shocks"][4].children[-1].children == "over cap"
-    assert cards["Blended vol (annual)"][3].style["color"] == "var(--neg)"
+    assert list(cards) == ["1-day VaR (95 %, last year)", "Blended vol vs target"]
+    assert "over cap" not in _texts(body) and "over vol target" in _texts(body)
+    assert cards["Blended vol vs target"][0] == "6.39m" and "142.0% of the 4.50m target" in cards["Blended vol vs target"][1]
+    assert cards["Blended vol vs target"][3].style["color"] == "var(--neg)"
+    line = next(n for n in _walk(body) if getattr(n, "id", None) == risk.WORST_LINE_ID)
+    text = " ".join(_text(line).split())
+    assert text.startswith("Worst day in history (nothing excluded): −188k on 15 Jan 2015")
+    assert "prices Jan 2007 to Sep 2026" in text and "not a scenario" in text
+    assert "2.96m" not in text and "Ex shocks: −2,960,000 on 16 Mar 2020" in line.children[1].title
+    # with no figure: a dash and its plain reason, never a path
+    r2 = _result()
+    r2["book"].update(_nan_metrics("no market history: no market history folder: tried C:\\x\\bbg_data"))
+    line2 = next(n for n in _walk(risk.body(r2)) if getattr(n, "id", None) == risk.WORST_LINE_ID)
+    assert "(no FX price history on this PC)" in _text(line2) and "C:\\" not in _text(line2)
 
 
 # --------------------------------------------------------------------------- the key table
@@ -493,6 +504,7 @@ def test_render_passes_the_margin_and_limits_to_the_body(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "ui.app", stub)
     monkeypatch.setattr(risk, "book_risk", lambda conn, as_of: _commodity_result())
     monkeypatch.setattr(risk, "margin_and_limits", lambda conn, as_of: (_margin(), _checks()))
+    monkeypatch.setattr(risk, "trades_on_file", lambda conn: 1)      # a book on file: not the empty state
     body = risk.render(AS_OF, tmp_path / "risk.db")
     assert _table(body, risk.MARGIN_TABLE_ID).data[1]["margin_usd"] == 80_000.0
     assert _table(body, risk.LIMITS_TABLE_ID).data[0]["level"] == "BREACH"

@@ -821,13 +821,13 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
                 {"if": {"filter_query": "{status} = 'FAILED'"}, "backgroundColor": "#fff4f2"},
                 {"if": {"filter_query": "{status} = 'SKIPPED'"}, "color": "#616e7c"},
             ]),
-        html.H4("Spot rates the FX delta and the cash ladder are using (latest official SPOT mark per currency)"),
+        html.H4("Spot rates in use (the latest official spot per currency)"),
         dash_table.DataTable(
             id="market-data-rates-table",
             columns=[rk.numeric(n, i, rk.rate(8, trim=True)) if i == "rate" else rk.text(n, i)
                      for n, i in [("Currency", "currency"), ("Pair", "pair"), ("Rate", "rate"),
                                   ("USD per local", "inverted"), ("Source", "source"),
-                                  ("Snapped at", "timestamp"), ("Freshness", "stale")]],
+                                  ("Marked at", "timestamp"), ("Freshness", "stale")]],
             **rk.sortable("market-data-rates-table"),
             data=rate_rows, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
             style_data_conditional=[{"if": {"filter_query": "{stale} = 'STALE'"}, "color": "#8a4b00",
@@ -1286,7 +1286,7 @@ def futures_curve_rows(conn: sqlite3.Connection, as_of: str, status: Optional[di
 _LME_PILLAR_WORDS = {"CASH": "cash", "3M": "3M", "MONTHLY": "monthly prompt"}
 _LME_COLUMNS = [
     ("Pillar", "pillar"), ("Ticker", "ticker"), ("Prompt date", "expiry"), ("Lots", "lots"),
-    ("Price", "price"), ("Source", "source"), ("Snapped at", "snapped_at"),
+    ("Price", "price"), ("Source", "source"), ("Marked at", "snapped_at"),
     ("Previous close", "previous"), ("Change", "change"), ("Why missing", "why"),
 ]
 
@@ -1395,7 +1395,7 @@ def lme_curve_block(conn: sqlite3.Connection, root_id: str, root, prompts: Dict[
 
 _FUTURES_COLUMNS = [
     ("Contract", "contract_id"), ("Month", "month"), ("Expiry", "expiry"), ("Lots", "lots"),
-    ("Price", "price"), ("Source", "source"), ("Snapped at", "snapped_at"),
+    ("Price", "price"), ("Source", "source"), ("Marked at", "snapped_at"),
     ("Previous close", "previous"), ("Change", "change"), ("Why missing", "why"),
 ]
 
@@ -2160,7 +2160,7 @@ def suspect_rows(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] =
 _SUSPECT_COLUMNS = [
     ("Instrument", "instrument_id"), ("Mark type", "mark_type"), ("Settle date", "settle_date"),
     ("Value", "value"), ("Previous", "previous"), ("Previous date", "previous_date"),
-    ("Change", "change_pct"), ("Snapped at", "snapped_at"), ("Flag", "flag"), ("Note", "note"),
+    ("Change", "change_pct"), ("Marked at", "snapped_at"), ("Flag", "flag"), ("Note", "note"),
 ]
 
 
