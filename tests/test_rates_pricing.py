@@ -89,11 +89,13 @@ def test_read_curve_quotes_empty_when_missing():
     assert _read_curve_quotes(conn, "2026-08-17", "USD", "SOFR") == []
 
 
-def test_snapped_at_is_the_15_00_new_york_close_with_that_days_offset():
+def test_snapped_at_is_the_17_00_new_york_close_with_that_days_offset():
+    """Bloomberg's daily close, the app's one close stamp (user, 2026-09-28); 15:00 from
+    2026-09-21 to 2026-09-28."""
     from engine.rates.store import snapped_at
 
-    assert snapped_at(datetime.date(2026, 9, 22)) == "2026-09-22T15:00:00-04:00"   # EDT
-    assert snapped_at(datetime.date(2026, 12, 15)) == "2026-12-15T15:00:00-05:00"  # EST
+    assert snapped_at(datetime.date(2026, 9, 22)) == "2026-09-22T17:00:00-04:00"   # EDT
+    assert snapped_at(datetime.date(2026, 12, 15)) == "2026-12-15T17:00:00-05:00"  # EST
 
 
 def test_package_exposes_only_the_curve_path():

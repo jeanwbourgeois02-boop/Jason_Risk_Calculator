@@ -290,7 +290,9 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   day's own SPOT, forward curve, OIS quotes (or CIP off that day's forwards) and vol smile
   -- every resolver in ``inputs.py`` / ``rates.py`` already read its as_of's rows exactly,
   no cross-day fallback existed to remove -- writes the seven marks dated ``day`` (INSERT
-  OR REPLACE, re-run overwrites), stamped the day's 15:00 New York close, never raises
+  OR REPLACE, re-run overwrites), stamped the day's 17:00 New York close (Bloomberg's
+  daily close, the app's one close stamp since 2026-09-28; 15:00 from 2026-09-21 to
+  2026-09-28), never raises
   (``"error"`` in the dict); expiry on ``day`` writes the payoff (and drops a
   ``realised_pnl`` row frozen from an older premium, the catch-up's rule) unless the
   ledger already froze the trade from an expiry-dated mark; a trade dealt after ``day``
@@ -300,9 +302,11 @@ Scope ledger -- updated as each phase of the merge plan lands, not a limitations
   the trade date never enters a valuation, and a trade dated tomorrow in Asia still needs
   today's mark for tomorrow's book). The stamp: a LIVE run's marks now carry the actual
   pricing time in New York (``store.live_stamp``; they said a flat 15:00 of the as_of,
-  so a 23:08 pull looked like the close), a past close or a catch-up mark the day's 15:00
-  (``store.close_stamp``); ``price_and_store`` / ``price_all_and_store`` take an optional
-  ``snapped``. ``set_option_terms`` strips padding before validating type / payoff, as
+  so a 23:08 pull looked like the close), a past close or a catch-up mark the day's 17:00
+  New York (``store.close_stamp``; 15:00 from 2026-09-21 to 2026-09-28, user decision
+  2026-09-28: one 17:00 close stamp for every mark); ``price_and_store`` /
+  ``price_all_and_store`` take an optional ``snapped``. ``set_option_terms`` strips
+  padding before validating type / payoff, as
   ``_same_terms`` already did, so no shape of an identical re-save is refused or taken
   for a change (checked: the Options grid's and the editor's inputs all normalise to
   what is on file; the only deletes of pricer marks across dates in this package remain

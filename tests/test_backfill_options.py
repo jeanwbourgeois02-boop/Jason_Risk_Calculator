@@ -18,8 +18,8 @@ from data.ingest import schema
 
 @pytest.fixture(autouse=True)
 def _today_and_calendar(monkeypatch, tmp_path):
-    """'today' pinned to Mon 2026-09-21 so the worked days sit inside Bloomberg's intraday
-    reach; the calendar pinned to Monday-Friday (no listed holiday can move a day)."""
+    """'today' pinned to Mon 2026-09-21 so the worked days are past days of the book date;
+    the calendar pinned to Monday-Friday (no listed holiday can move a day)."""
     import engine.pnl.calendar as cal
     monkeypatch.setattr(live, "book_today", lambda: date(2026, 9, 21))
     monkeypatch.setattr(cal, "_DEFAULT_HOLIDAYS_PATH", tmp_path / "no-holidays.txt")
@@ -37,9 +37,9 @@ def _db(tmp_path, option_trade_date="2026-09-15", option_expiry="2026-10-15"):
         ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"),
         (OPTION_ID, "FX_OPTION", "USD", "JPY", 1, 0, OPTION_ID, option_expiry),
     ])
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-09-14", -1e6, 0.65, "acc", "cp", "", "t", "d", ""),
-        ("o1", "XLSX", OPTION_ID, "FX_OPTION", "o1", option_trade_date, 1e6, 0.01, "acc", "cp", "", "t", "d", ""),
+    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-09-14", -1e6, 0.65, "acc", "cp", "", "t", "d", "", "", ""),
+        ("o1", "XLSX", OPTION_ID, "FX_OPTION", "o1", option_trade_date, 1e6, 0.01, "acc", "cp", "", "t", "d", "", "", ""),
     ])
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-09-14", "2026-10-20", 0.65, 1),

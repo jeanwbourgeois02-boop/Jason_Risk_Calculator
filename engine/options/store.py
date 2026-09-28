@@ -40,7 +40,7 @@ LTD(t) and Daily = 0 for every option. Two things here, both landed 2026-09-22:
     smile -- every resolver in ``inputs.py`` / ``rates.py`` reads its as_of's rows
     exactly, so a day with an input missing skips the trade with a reason naming the day
     and the input, never a later day's vol, curve or spot. Marks are dated ``day``,
-    written INSERT OR REPLACE (a re-run overwrites), stamped that day's 15:00 New York
+    written INSERT OR REPLACE (a re-run overwrites), stamped that day's 17:00 New York
     close with the offset resolved for the date. Expiry on ``day`` writes the payoff at
     that day's official SPOT (the "Expiry day" rule below) unless the ledger has already
     frozen the trade from an expiry-dated mark, in which case mark and frozen row are
@@ -54,9 +54,11 @@ LTD(t) and Daily = 0 for every option. Two things here, both landed 2026-09-22:
     was stamped a flat 15:00 of its as_of, so marks priced at 23:08 said 15:00 and the
     user could not see that a pull had re-priced them. A mark that stands for a past
     close (``price_close``, and the expiry-dated catch-up marks written later) carries
-    that day's 15:00 New York close stamp (``close_stamp``), like every other close the
-    backfill writes. ``price_and_store`` / ``price_all_and_store`` accept an explicit
-    ``snapped`` for a caller that knows better; the live pull passes none.
+    that day's 17:00 New York close stamp (``close_stamp``), like every other close the
+    backfill writes (user, 2026-09-28: every mark closes on its own day at 17:00 New York,
+    Bloomberg's daily close; the close was 15:00 New York from 2026-09-21 to 2026-09-28).
+    ``price_and_store`` / ``price_all_and_store`` accept an explicit ``snapped`` for a
+    caller that knows better; the live pull passes none.
   * Closed-out options (same day, later; user: "we dont need to price all options, as
     some of them might be closed out already ... we just present the buy and sell price
     as pnl"): a trade of an option bought and sold back, quantities netting to zero as
@@ -179,7 +181,7 @@ full detail):**
         15:00 Tokyo on one, and one row whose location reads 'NONE'), which the app does
         not store. The payoff frozen is the one AT THE OFFICIAL SPOT ON FILE FOR THE
         EXPIRY DATE AT THE MOMENT OF THE FIRST FREEZE -- the last live pull stamped with
-        the expiry date, or that date's 15:00 New York close where a backfill / import
+        the expiry date, or that date's 17:00 New York close where a backfill / import
         has since replaced it or the app did not run that day -- still not the spot at
         the cut, hours earlier. The app's day is the NEW YORK date
         (``data/bloomberg/live.py::book_today``), so a pull made in Asia on the following
@@ -226,7 +228,6 @@ from typing import Dict, List, Optional
 
 from . import pricer
 from .inputs import resolve_market_inputs
-from engine.rates.store import snapped_at
 
 # Payoffs this phase can dispatch. AMERICAN/ASIAN/BARRIER_KI/BARRIER_KO/
 # ONE_TOUCH/NO_TOUCH landed Phase 4; anything else (or an unrecognized
@@ -280,15 +281,22 @@ def _now_ny() -> datetime.datetime:
 def live_stamp() -> str:
     """`snapped_at` of a mark priced NOW: the actual pricing time with the New York offset,
     to the second, as the pull's own SPOT rows carry theirs. A pull at 23:08 New York
-    stamps 23:08, not the day's 15:00 close."""
+    stamps 23:08, not the day's 17:00 close."""
     return _now_ny().isoformat(timespec="seconds")
 
 
+CLOSE_HOUR_NY = 17
+
+
 def close_stamp(day: str) -> str:
-    """`snapped_at` of a mark that stands for `day`'s official close: 15:00 America/New_York
-    on that date, offset resolved for the date (`engine.rates.store.snapped_at`, the stamp
-    the rates pricer uses for the same purpose)."""
-    return snapped_at(datetime.date.fromisoformat(day))
+    """`snapped_at` of a mark that stands for `day`'s official close: 17:00 America/New_York
+    on that date (``CLOSE_HOUR_NY``, Bloomberg's daily close; user, 2026-09-28: "everything
+    closes on its day at the time at which its specific exchange closes"), offset resolved
+    for the date. The close was 15:00 New York from 2026-09-21 to 2026-09-28."""
+    from zoneinfo import ZoneInfo
+    d = datetime.date.fromisoformat(day)
+    return datetime.datetime(d.year, d.month, d.day, CLOSE_HOUR_NY, 0, 0,
+                             tzinfo=ZoneInfo("America/New_York")).isoformat()
 
 
 @dataclass
@@ -425,8 +433,8 @@ def _skip(row: dict, reason: str) -> PricingOutcome:
 
 # Time to expiry to the hour (user decision 2026-09-21: "yes" to "fix time-to-expiry, so it
 # uses actual hours to the 10am New York cut"). The vendored engine counts whole calendar
-# days (QuantLib dates), so a pull at 15:00 New York for an option cut at 10:00 tomorrow was
-# priced with 1.00 day to go when 0.79 remain -- about 10 % too much time value on the
+# days (QuantLib dates), so a close at 17:00 New York for an option cut at 10:00 tomorrow was
+# priced with 1.00 day to go when 0.71 remain -- about 10 % too much time value on the
 # book's one- and two-day options. An option's value depends on time through vol x sqrt(T)
 # (rates over part of a day are nothing), so the whole-day engine is handed
 # vol x sqrt(T_hours / T_days): the same total variance as the true time to the cut. The
@@ -436,7 +444,7 @@ CUT_HOUR_NY = 10
 
 def cut_time_factor(conn: sqlite3.Connection, as_of: str, pair: str, expiry: datetime.date) -> float:
     """sqrt(T_hours / T_days): true time from the pricing moment -- the pair's official SPOT
-    snap on `as_of` (15:00 New York when it carries no readable time) -- to 10:00 New York
+    snap on `as_of` (17:00 New York, the close, when it carries no readable time) -- to 10:00 New York
     on the expiry date, over the engine's whole calendar days. 1.0 when it cannot be worked out."""
     import math
     from zoneinfo import ZoneInfo
@@ -445,7 +453,7 @@ def cut_time_factor(conn: sqlite3.Connection, as_of: str, pair: str, expiry: dat
     days = (expiry - as_of_date).days
     if days <= 0:
         return 1.0
-    moment = datetime.datetime(as_of_date.year, as_of_date.month, as_of_date.day, 15, 0, tzinfo=ny)
+    moment = datetime.datetime(as_of_date.year, as_of_date.month, as_of_date.day, CLOSE_HOUR_NY, 0, tzinfo=ny)
     row = conn.execute("SELECT snapped_at FROM marks_official WHERE as_of_date = ? AND instrument_id = ? "
                        "AND mark_type = 'SPOT'", (as_of, pair)).fetchone()
     try:
@@ -636,7 +644,7 @@ def _insert_marks(conn: sqlite3.Connection, mark_date: str, row: dict, result: p
                   snapped: str) -> None:
     """INSERT OR REPLACE the six marks (+ DELTA_PA) dated `mark_date`, every row stamped
     `snapped` (module docstring, "the stamp on a mark": the actual pricing time for a live
-    run, the day's 15:00 New York close for a past close). No commit of its own: the caller
+    run, the day's 17:00 New York close for a past close). No commit of its own: the caller
     owns the transaction (`with conn:`), so a catch-up can drop a stale frozen row in the
     same one."""
     settle_date = row["expiry_date"]
@@ -680,7 +688,7 @@ def _intrinsic_outcome(conn: sqlite3.Connection, row: dict, pair: str, mark_date
     back to a model price and never writes 0 for "unknown". `refreeze` (the catch-up and
     `price_close`): in the same transaction, drop the instrument's `realised_pnl` rows
     frozen from a premium dated BEFORE the expiry date, so the ledger freezes them afresh.
-    `snapped`: the stamp on the marks; none = the expiry date's 15:00 New York close (the
+    `snapped`: the stamp on the marks; none = the expiry date's 17:00 New York close (the
     catch-up reconstructs a past day), the live expiry-day run passes the pricing time."""
     if row["payoff"] in pricer.PATH_DEPENDENT_PAYOFFS:
         return _skip(row, f"expiry day: the payoff of {row['payoff']} depends on the path spot took "
@@ -1058,7 +1066,7 @@ def price_all_and_store(conn: sqlite3.Connection, as_of: str, snapped: Optional[
 # Barone-Adesi-Whaley at the vol that price implies (`equity_commodity.
 # price_listed_commodity_option`, listed-options-pricer's), under QL_OPTIONS_PRICER at the
 # option's expiry key, stamped like the FX marks of the same pass (the pricing time live, the
-# day's 15:00 New York close for a past close). What differs from the FX options:
+# day's 17:00 New York close for a past close). What differs from the FX options:
 #   * in the pass: a trade dealt on or before the date priced whose NOTIONAL leg (its expiry,
 #     else the instrument's) has not settled before it; an expired one is simply not listed;
 #   * each instrument is priced ONCE however many trades are on it (a buy and its sell-back
@@ -1201,7 +1209,7 @@ def price_close(conn: sqlite3.Connection, day: str, products: tuple = ALL_PRODUC
     ``rates._read_curve_quotes`` / ``_get_manual_rate`` / ``_get_fwd_outright_points``),
     so nothing of another day can leak in: an input missing on `day` skips the trade,
     reason "<day> close: <what is missing>", never a later day's vol, curve or spot.
-    ``cut_time_factor`` reads the pricing moment off that day's SPOT stamp (15:00 New York
+    ``cut_time_factor`` reads the pricing moment off that day's SPOT stamp (17:00 New York
     for a close row), so the hours to the cut are the close's.
 
     Expiry on `day`: the payoff at `day`'s official SPOT ("Expiry day" rule), and the
@@ -1215,7 +1223,7 @@ def price_close(conn: sqlite3.Connection, day: str, products: tuple = ALL_PRODUC
 
     Marks: the seven ``PRICER_MARK_TYPES`` under ``QL_OPTIONS_PRICER``, dated `day`,
     INSERT OR REPLACE (a re-run overwrites the same keys, never a second row), stamped
-    `day`'s 15:00 New York close with the offset resolved for the date (``close_stamp``).
+    `day`'s 17:00 New York close with the offset resolved for the date (``close_stamp``).
     One short transaction per trade, as ``price_all_and_store``. Idempotent. The one-time
     unit purge runs first, as there, so it can never eat what this writes.
 

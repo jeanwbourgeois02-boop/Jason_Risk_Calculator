@@ -32,7 +32,7 @@ def _option_db(path):
                  "('EURSEK091826C-1','FX_OPTION','EUR','SEK',1,0,'EURSEK Curncy','2026-09-18')")
     conn.execute("INSERT INTO instrument_options VALUES ('EURSEK091826C-1',11.2,'CALL',0,'9999-12-31','VANILLA')")
     conn.execute("INSERT INTO trades VALUES ('o1','XLSX','EURSEK091826C-1','FX_OPTION','o1','2026-08-14',"
-                 "1000000,0.01,'acc','cp','HAHY7','t','d','')")
+                 "1000000,0.01,'acc','cp','HAHY7','t','d','','','')")
     conn.commit()
     conn.close()
 

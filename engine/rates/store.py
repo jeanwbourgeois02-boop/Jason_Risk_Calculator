@@ -11,7 +11,7 @@ pricers need, and two entry points:
     pull's curves step (``data/bloomberg/live.py::_curves_step``). The option pricers
     build their own curve in memory from the same quotes (``engine/options/rates.py``
     calls ``curves.build_curve_set`` directly) and do not read the ``curves`` rows.
-  - ``snapped_at(as_of)``: the official close stamp, 15:00 New York on `as_of`, shared
+  - ``snapped_at(as_of)``: the official close stamp, 17:00 New York on `as_of`, shared
     with ``engine/options/store.py``, ``engine/options/equity_commodity.py`` and
     ``data/bloomberg/vol_marketdata.py``.
 
@@ -49,9 +49,12 @@ def _ny() -> ZoneInfo:
 
 
 def snapped_at(as_of: datetime.date) -> str:
-    """15:00 America/New_York (the official close, user decision 2026-09-21) on as_of, ISO with the resolved offset for that date --
-    same close convention as CLAUDE.md "Mark time" / data/bloomberg/pull_marks.py."""
-    return datetime.datetime(as_of.year, as_of.month, as_of.day, 15, 0, 0, tzinfo=_ny()).isoformat()
+    """17:00 America/New_York (Bloomberg's daily close, the app's one close stamp for every mark
+    and curve: user decision 2026-09-28, "everything closes on its day at the time at which its
+    specific exchange closes") on as_of, ISO with the resolved offset for that date -- the
+    same close convention as CLAUDE.md "Mark time" / data/bloomberg/pull_marks.py. History:
+    15:00 New York from 2026-09-21 to 2026-09-28."""
+    return datetime.datetime(as_of.year, as_of.month, as_of.day, 17, 0, 0, tzinfo=_ny()).isoformat()
 
 
 def _curve_id(ccy: str, index: str) -> str:

@@ -24,7 +24,7 @@ def _seed_db(path: Path) -> None:
     settle = (date.today() + timedelta(days=60)).isoformat()
     conn = schema.connect(path)
     conn.execute("INSERT INTO instruments VALUES ('AUDUSD','FX','AUD','USD',1,0,'AUDUSD Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('a1','MANUAL','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,'acc','cp','HAHY7','t','d','')")
+    conn.execute("INSERT INTO trades VALUES ('a1','MANUAL','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,'acc','cp','HAHY7','t','d','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", settle, 0.65, 1),
         ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", settle, 0.65, 1)])

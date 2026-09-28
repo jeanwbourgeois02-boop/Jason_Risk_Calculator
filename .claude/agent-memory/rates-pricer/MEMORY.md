@@ -2,3 +2,4 @@
 - [pricing_conventions.md doesn't exist here](pricing-conventions-doc-does-not-exist.md) — reference-project-only file; conventions live in engine/rates/__init__.py instead
 - [Curves-only scope (2026-09-24)](curves-only-scope-2026-09-24.md) — swaps removed; lane keeps OIS curves for option pricers; who imports what; curve_id / source rules
 - [Flat forwards default & log-cubic non-convergence (2026-09-22)](log-cubic-bootstrap-nonconvergence.md) — default is LogLinear (user yes); QL 1.43 log-cubic fails on some eval dates; no fallback, raises
+- [Close stamp 17:00 NY (2026-09-28)](close-stamp-17-00-ny-2026-09-28.md) — snapped_at is Bloomberg daily close, user yes; 15:00 was 2026-09-21..28 only; shared stamp, needs user yes to change

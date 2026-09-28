@@ -234,14 +234,14 @@ def test_export_request(tmp_path):
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
     conn.execute(
         "INSERT INTO trades VALUES ('t1','MANUAL','EURUSD','FX_FWD','t1','2026-08-17',100.0,1.1,"
-        "'ACC','CPTY','STRAT','TRADER','synthetic','')"
+        "'ACC','CPTY','STRAT','TRADER','synthetic','','','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t1',1,'FX_NEAR','EUR',100.0,'2026-08-17','2026-09-16',1.1,1)"
     )
     conn.execute(
         "INSERT INTO trades VALUES ('t2','MANUAL','ESU6 Index','FUTURE','t2','2026-08-17',10.0,4500.0,"
-        "'ACC','CPTY','STRAT','TRADER','synthetic','')"
+        "'ACC','CPTY','STRAT','TRADER','synthetic','','','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t2',1,'NOTIONAL','USD',225000.0,'2026-08-17','2026-09-18',0,0)"
@@ -267,7 +267,7 @@ def test_export_request_excludes_expired_future(tmp_path):
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-08-10')")
     conn.execute(
         "INSERT INTO trades VALUES ('t1','MANUAL','ESU6 Index','FUTURE','t1','2026-07-01',10.0,4500.0,"
-        "'ACC','CPTY','STRAT','TRADER','synthetic','')"
+        "'ACC','CPTY','STRAT','TRADER','synthetic','','','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t1',1,'NOTIONAL','USD',225000.0,'2026-07-01','2026-08-10',0,0)"
@@ -278,7 +278,7 @@ def test_export_request_excludes_expired_future(tmp_path):
     conn.execute("INSERT INTO instruments VALUES ('ESH7 Index','FUTURE','ES','USD',50,0,'ESH7 Index','2027-03-19')")
     conn.execute(
         "INSERT INTO trades VALUES ('t2','MANUAL','ESH7 Index','FUTURE','t2','2026-08-01',5.0,4500.0,"
-        "'ACC','CPTY','STRAT','TRADER','synthetic','')"
+        "'ACC','CPTY','STRAT','TRADER','synthetic','','','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t2',1,'NOTIONAL','USD',22500.0,'2026-08-01','2027-03-19',0,0)"
@@ -978,10 +978,13 @@ def _full_probe_responder(ref_data, hist_data):
         if request.req_type == "HistoricalDataRequest":
             # S-4: answer every requested security (see the analogous comment above).
             field = request.fields[0]
+            # each point dated (as Bloomberg's are): fetch_historical_series keeps a point
+            # only with its "date"; fetch_historical ignores it
+            day = f"{request.endDate[:4]}-{request.endDate[4:6]}-{request.endDate[6:]}"
             out = []
             for ticker in request.securities:
                 value = hist_data.get(ticker)
-                field_data = [{field: value}] if value is not None else []
+                field_data = [{"date": day, field: value}] if value is not None else []
                 out.append({"securityData": {"security": ticker, "fieldData": field_data}})
             return out
         elif request.req_type == "ReferenceDataRequest":
@@ -994,9 +997,6 @@ def _full_probe_responder(ref_data, hist_data):
                         row[f] = val
                 sec_list.append({"security": t, "fieldData": row})
             return [{"securityData": sec_list}]
-        elif request.req_type == "IntradayBarRequest":
-            # 2026-09-21 probe step `intraday_close_bar`: one hourly bar, starting when asked
-            return [{"barData": {"barTickData": [{"time": request.startDateTime, "close": 1.1712}]}}]
         raise AssertionError(f"unexpected request type {request.req_type}")
     return responder
 
@@ -1285,7 +1285,7 @@ def test_pull_marks_probe_continues_after_non_candidate_step_failure(monkeypatch
         "session_start", "spot_reference", "spot_historical", "fwd_outright_direct_primary",
         "fwd_outright_direct_alt_reference_date", "fwd_outright_direct_alt_fwd_outright_field",
         "tenor_1m", "tenor_3m", "fwd_points_scale",
-        "intraday_close_bar",                                    # 2026-09-21: the 15:00 New York close bar
+        "daily_close",                                           # 2026-09-28: the daily close, PX_LAST
     }
     assert diag["summary"]["outcome"] == "PROBE_COMPLETE_WITH_FAILURES"
     assert diag["summary"]["outcome"] != "OK"
@@ -1647,11 +1647,11 @@ def _inventory_db():
     conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
     conn.execute("INSERT INTO trades VALUES ('a1','XLSX','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,"
-                 "'acc','cp','HAHY7','t','d','')")
+                 "'acc','cp','HAHY7','t','d','','','')")
     conn.execute("INSERT INTO trades VALUES ('j1','XLSX','USDJPY','FX_FWD','j1','2026-08-10',1e6,150.0,"
-                 "'acc','cp','HAHY7','t','d','')")
+                 "'acc','cp','HAHY7','t','d','','','')")
     conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
-                 "'acc','cp','HAHY7','t','d','')")
+                 "'acc','cp','HAHY7','t','d','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-16", 0.65, 1),
         ("a1", 2, "FX_NEAR", "USD", 650000, "2026-08-10", "2026-09-16", 0.65, 1),
@@ -2838,96 +2838,38 @@ def test_live_tenor_path_uses_the_shared_scale_helper_and_never_writes_an_implau
     assert out == [] and "neither FWD_POINTS_SCALE nor FWD_SCALE" in failures[0]["detail"]
 
 
-# =========================================================================== 2026-09-21: the 15:00 New York close
-# User: "the EOD is 3pm New York time"; "for previous or any closes in FX, we need to use NY
-# 3pm". Bloomberg's daily history has no 15:00 field, so a past FX close is read from
-# hourly intraday bars: one IntradayBarRequest per security per side (BID, ASK) per stretch.
-def _bars_responder(sent, bars, errors=None):
-    """bars: {(ticker, side): [(naive UTC bar start, close), ...]}; errors: {ticker: message}."""
-    def responder(request):
-        assert request.req_type == "IntradayBarRequest"
-        sent.append({"security": request.security, "eventType": request.eventType, "interval": request.interval,
-                     "start": request.startDateTime, "end": request.endDateTime, "gapFill": request.gapFillInitialBar})
-        if (errors or {}).get(request.security):
-            return [{"responseError": {"message": errors[request.security]}}]
-        ticks = [{"time": when, "close": close} for when, close in bars.get((request.security, request.eventType), [])]
-        return [{"barData": {"barTickData": ticks}}]
-    return responder
-
-
-def test_close_bar_times_resolve_the_new_york_offset_per_date():
-    from datetime import datetime, timezone
+# =========================================================================== 2026-09-28: one close stamp, 17:00 New York
+# User (an explicit yes under hard rule 7): "everything closes on its day at the time at
+# which its specific exchange closes". Every instrument's past close is Bloomberg's daily
+# close for it (PX_LAST), stamped 17:00 New York of its date; nothing is read off an
+# intraday bar (the 15:00 New York FX close of 2026-09-21 / 09-22 and its bar helpers left).
+def test_close_stamp_is_1700_new_york_with_the_offset_resolved_per_date():
     from data.bloomberg import pull_marks as pm
-    assert pm.CLOSE_HOUR_NY == 15 and pm.snapped_at(date(2026, 1, 15)) == "2026-01-15T15:00:00-05:00"
-    # 15:00 New York is 19:00 UTC in summer and 20:00 UTC in winter; the bar starts an hour before
-    assert pm.close_time_utc(date(2026, 7, 15)) == datetime(2026, 7, 15, 19, 0, tzinfo=timezone.utc)
-    assert pm.close_time_utc(date(2026, 1, 15)) == datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc)
-    assert pm.close_bar_start_utc(date(2026, 7, 15)) == datetime(2026, 7, 15, 18, 0, tzinfo=timezone.utc)
-    assert pm.close_bar_start_utc(date(2026, 1, 15)) == datetime(2026, 1, 15, 19, 0, tzinfo=timezone.utc)
+    assert pm.CLOSE_HOUR_NY == 17
+    assert pm.snapped_at(date(2026, 1, 15)) == "2026-01-15T17:00:00-05:00"     # EST
+    assert pm.snapped_at(date(2026, 7, 15)) == "2026-07-15T17:00:00-04:00"     # EDT
+    # the intraday helpers are gone: no close comes from a bar any more
+    for name in ("fetch_intraday_close_series", "fetch_intraday_bars", "close_time_utc", "close_bar_start_utc",
+                 "INTRADAY_SIDES", "INTRADAY_BAR_MINUTES"):
+        assert not hasattr(pm, name), name
 
 
-def test_fetch_intraday_close_series_takes_the_bar_ending_1500_new_york_mid_of_bid_and_ask(monkeypatch):
-    """A stretch across the US clock change (Sunday 2026-03-08): Friday's close bar starts
-    19:00 UTC (EST), Monday's 18:00 UTC (EDT). Decoy bars sit at the other hour."""
-    from datetime import datetime
-    sent = []
-    fri, mon = datetime(2026, 3, 6, 19, 0), datetime(2026, 3, 9, 18, 0)
-    bars = {
-        ("EURUSD Curncy", "BID"): [(datetime(2026, 3, 6, 18, 0), 9.0), (fri, 1.1700), (mon, 1.1800), (datetime(2026, 3, 9, 19, 0), 9.0)],
-        ("EURUSD Curncy", "ASK"): [(datetime(2026, 3, 6, 18, 0), 9.0), (fri, 1.1704), (mon, 1.1806), (datetime(2026, 3, 9, 19, 0), 9.0)],
-        # forward points, negative: a mid all the same; Monday has a BID bar only
-        ("USDJPY1M Curncy", "BID"): [(fri, -51.0), (mon, -49.0)],
-        ("USDJPY1M Curncy", "ASK"): [(fri, -49.0)],
-        # a ticker with no bar at the close on either day (only an earlier hour)
-        ("USDTHB Curncy", "BID"): [(datetime(2026, 3, 6, 15, 0), 32.0)],
-        ("USDTHB Curncy", "ASK"): [(datetime(2026, 3, 6, 15, 0), 32.1)],
-    }
-    _install_fake_blpapi(monkeypatch, _bars_responder(sent, bars, errors={"XXXYYY Curncy": "Security is not valid"}))
+def test_build_future_rows_stamps_the_close_by_default_and_the_press_time_when_given(monkeypatch):
+    """The backfill's calls take the default, the 17:00 close stamp of `as_of`; a live press
+    (live.pull_once) passes its real press time, so its row never looks like the close."""
     from data.bloomberg import pull_marks as pm
-    session, service = pm.open_session("localhost", 8194)
-    tickers = ["EURUSD Curncy", "USDJPY1M Curncy", "USDTHB Curncy", "XXXYYY Curncy"]
-    out = pm.fetch_intraday_close_series(session, service, tickers, ["PX_LAST"], date(2026, 3, 6), date(2026, 3, 9))
-
-    # one request per (ticker, side) for the whole stretch -- never one per day
-    assert [(r["security"], r["eventType"]) for r in sent] == [(t, side) for t in tickers for side in ("BID", "ASK")]
-    # hourly bars, gap fill on, UTC from the first day's bar start to the last day's close
-    assert all(r["interval"] == 60 and r["gapFill"] is True for r in sent)
-    assert all(r["start"] == fri and r["end"] == datetime(2026, 3, 9, 19, 0) for r in sent)
-
-    # the shape fetch_historical_series returns for PX_LAST; weekdays only
-    assert set(out) == set(tickers) and set(out["EURUSD Curncy"]) == {"2026-03-06", "2026-03-09"}
-    assert out["EURUSD Curncy"]["2026-03-06"] == {"PX_LAST": pytest.approx(1.1702)}   # mid of 1.1700 / 1.1704
-    assert out["EURUSD Curncy"]["2026-03-09"] == {"PX_LAST": pytest.approx(1.1803)}   # the 18:00 UTC bar, not 19:00
-    assert out["USDJPY1M Curncy"]["2026-03-06"] == {"PX_LAST": pytest.approx(-50.0)}
-
-    # one side only, no bar at the close, Bloomberg's own error: missing with a plain
-    # reason, never a substitute value
-    one_side = out["USDJPY1M Curncy"]["2026-03-09"]
-    assert set(one_side) == {pm.CLOSE_REASON} and "only the BID side" in one_side[pm.CLOSE_REASON]
-    no_bar = out["USDTHB Curncy"]["2026-03-06"]
-    assert set(no_bar) == {pm.CLOSE_REASON} and "no hourly bar ending 15:00 New York" in no_bar[pm.CLOSE_REASON]
-    refused = out["XXXYYY Curncy"]["2026-03-09"]
-    assert set(refused) == {pm.CLOSE_REASON} and "Security is not valid" in refused[pm.CLOSE_REASON]
+    monkeypatch.setattr(pm, "fetch_reference",
+                        lambda session, service, tickers, fields, overrides=None, diag=None, tag=None:
+                        {"CLZ6 Comdty": {"PX_LAST": 61.5}})
+    reqs = [pm.RequestRow("CLZ26 Comdty", "CLZ6 Comdty", "2026-11-20", "FUTURE_PX")]
+    rows, _w, failures = pm.build_future_rows(object(), object(), reqs, date(2026, 9, 28), live=True)
+    assert failures == [] and rows[0]["snapped_at"] == "2026-09-28T17:00:00-04:00"
+    rows, _w, failures = pm.build_future_rows(object(), object(), reqs, date(2026, 9, 28), live=True,
+                                              snapped="2026-09-28T10:12:00-04:00")
+    assert failures == [] and rows[0]["snapped_at"] == "2026-09-28T10:12:00-04:00"
 
 
-def test_fetch_intraday_bars_reads_aware_bar_times_too_and_records_the_request(monkeypatch):
-    from datetime import datetime, timedelta, timezone
-    sent = []
-    aware = datetime(2026, 7, 15, 14, 0, tzinfo=timezone(timedelta(hours=-4)))
-    _install_fake_blpapi(monkeypatch, _bars_responder(sent, {("EURUSD Curncy", "BID"): [(aware, 1.17)]}))
-    from data.bloomberg import pull_marks as pm
-    session, service = pm.open_session("localhost", 8194)
-    diag = pm.Diagnostics()
-    day = date(2026, 7, 15)
-    bars, error = pm.fetch_intraday_bars(session, service, "EURUSD Curncy", "BID", pm.close_bar_start_utc(day),
-                                         pm.close_time_utc(day), diag=diag)
-    assert error == "" and bars == [{"time": pm.close_bar_start_utc(day), "close": 1.17}]   # 14:00-04:00 == 18:00 UTC
-    rec = diag.requests[-1]
-    assert rec["request_type"] == "IntradayBarRequest" and rec["classification"] == pm.CLASS_OK
-    assert rec["overrides"]["startDateTime"] == "2026-07-15T18:00:00Z" and rec["overrides"]["interval"] == "60"
-
-
-def test_probe_asks_both_scale_fields_and_runs_one_intraday_bar_request(monkeypatch, tmp_path, capsys):
+def test_probe_asks_both_scale_fields_and_runs_one_daily_close_request(monkeypatch, tmp_path, capsys):
     ref_data = {("EURUSD Curncy", "FWD_SCALE"): 4, ("USDJPY Curncy", "FWD_SCALE"): 2, ("EURUSD Curncy", "PX_LAST"): 1.17}
     seen = []
     inner = _full_probe_responder(ref_data, {"EURUSD Curncy": 1.17, "ESU6 Index": 6500.0})
@@ -2949,15 +2891,16 @@ def test_probe_asks_both_scale_fields_and_runs_one_intraday_bar_request(monkeypa
     printed = capsys.readouterr().err
     assert "points divisor 10000 from FWD_SCALE" in printed and "points divisor 100 from FWD_SCALE" in printed
 
-    bar = steps["intraday_close_bar"]
-    assert bar["request_type"] == "IntradayBarRequest" and bar["tickers"] == ["EURUSD Curncy"] and bar["fields"] == ["BID"]
-    # the business day before --as-of (Friday 2026-09-18), 14:00-15:00 New York = 18:00-19:00 UTC
-    assert bar["overrides"]["startDateTime"] == "2026-09-18T18:00:00Z"
-    assert bar["overrides"]["endDateTime"] == "2026-09-18T19:00:00Z"
-    assert bar["classification"] == "OK" and "1.1712" in bar["detail"]
-    request = next(r for r in seen if r.req_type == "IntradayBarRequest")
-    assert (request.security, request.eventType, request.interval) == ("EURUSD Curncy", "BID", 60)
-    assert "intraday_close_bar" in pull_report.render_report(diag)
+    # the close probe: the daily PX_LAST of the business day before --as-of (Friday
+    # 2026-09-18) through the backfill's own series fetcher, no IntradayBarRequest anywhere
+    close = steps["daily_close"]
+    assert close["request_type"] == "HistoricalDataRequest" and close["tickers"] == ["EURUSD Curncy"]
+    assert close["fields"] == ["PX_LAST"] and close["classification"] == "OK" and "1.17" in close["detail"]
+    assert "'close_stamp': '2026-09-18T17:00:00-04:00'" in close["detail"]
+    request = next(r for r in seen if r.req_type == "HistoricalDataRequest" and r.startDate == "20260918")
+    assert request.endDate == "20260918" and request.fields == ["PX_LAST"]
+    assert not any(r.req_type == "IntradayBarRequest" for r in seen)
+    assert "daily_close" in pull_report.render_report(diag)
 
 
 def test_check_not_stale_defaults_today_to_the_book_date(monkeypatch):

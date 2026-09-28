@@ -39,9 +39,11 @@ day's curve from that day's tenor PX_LAST values and that day's SPOT close:
     caller never writes a value at a computed date as Bloomberg's own quote;
   * unit: the live tenor path (pull_marks.fetch_tenor_points) documents these tickers'
     PX_LAST as forward POINTS (outright = spot + points / the pair's points divisor,
-    pull_marks.fetch_points_scales), which this module used to read as outrights. Since
-    2026-09-21 the values are the 15:00 New York close from intraday bars, under the same
-    PX_LAST key (pull_marks.fetch_intraday_close_series). Neither is verified on a terminal
+    pull_marks.fetch_points_scales), which this module used to read as outrights. The
+    values are each tenor ticker's daily PX_LAST (Bloomberg's 17:00 New York close,
+    pull_marks.fetch_historical_series); from 2026-09-21 to 2026-09-28 they were the 15:00
+    New York close from intraday bars, a path that left with the user's decision of
+    2026-09-28 (every past close is the daily PX_LAST). Neither unit is verified on a terminal
     (docs/open-questions.md item 28, which gives the test used here: a PX_LAST of the same
     order of magnitude as spot is an outright, anything else is points) -- `tenor_unit`.
 """

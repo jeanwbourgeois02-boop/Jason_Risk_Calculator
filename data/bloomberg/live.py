@@ -198,9 +198,11 @@ def read_status(db_path) -> Optional[dict]:
 
 # The book's day turns at 17:00 New York (05:00 Hong Kong), the FX day roll -- for every
 # date the app works with: the marks a pull stamps, the curves / vol / options steps, the
-# ledger's freeze date, the backfill's "past", the screens' as-of (ui/tabs/cash_ladder.py::
+# ledger's freeze date, the backfill's "past", the screens' as-of (ui/tabs/controls.py::
 # today_ny delegates to book_today and re-exports this constant). The one rule; nothing else
-# decides the day.
+# decides the day. It is also the hour of the app's one close stamp
+# (pull_marks.CLOSE_HOUR_NY, 2026-09-28: every instrument's past close is its own daily
+# Bloomberg close, stamped 17:00 New York of its date).
 ROLLOVER_HOUR_NY = 17
 
 
@@ -215,19 +217,22 @@ def book_today(now: Optional[datetime] = None) -> date:
     05:00 is 17:00 New York (ROLLOVER_HOUR_NY).
 
     Why one boundary for everything: Daily is the live LTD against the previous day's
-    15:00 New York close. Until 2026-09-22 the screens rolled at 17:00 New York
-    (ui/tabs/cash_ladder.py::today_ny) while this function still gave the New York
-    calendar date, so between 17:00 and midnight New York -- 05:00 to 12:00 Hong Kong, the
-    user's morning -- the screen valued D+1, a pull wrote D's marks, D was not yet "past"
-    for the backfill (its row on file stayed the last live press instead of the 15:00
-    close), D+1 had no marks of its own and was carried from D, and Daily read 0 for the
-    whole book. With the pull, the curves / vol / options steps, realise_settled, the
-    backfill's "past" and the screens all on this one date, a pull at 18:00 New York on the
-    22nd writes marks dated the 23rd, the 22nd is a past day whose 15:00 close the same
-    button press fetches, and Daily is live against it. A live row dated D+1 that was
-    snapped on the evening of D is that day's live mark until D+1 turns past, when the
-    backfill replaces it with D+1's 15:00 bar as it does any row not stamped at the close
-    (backfill.is_close_row compares the stamp with 15:00 of the row's own as_of_date).
+    daily closes (each instrument's own Bloomberg daily close, stamped 17:00 New York of
+    its date, the app's one close stamp since 2026-09-28; it was a 15:00 New York FX close
+    from 2026-09-21 until then). Until 2026-09-22 the screens rolled at 17:00 New York
+    (ui/tabs/controls.py::today_ny) while this function still gave the New York calendar
+    date, so between 17:00 and midnight New York -- 05:00 to 12:00 Hong Kong, the user's
+    morning -- the screen valued D+1, a pull wrote D's marks, D was not yet "past" for the
+    backfill (its row on file stayed the last live press instead of the close), D+1 had no
+    marks of its own and was carried from D, and Daily read 0 for the whole book. With the
+    pull, the curves / vol / options steps, realise_settled, the backfill's "past" and the
+    screens all on this one date, a pull at 18:00 New York on the 22nd writes marks dated
+    the 23rd, the 22nd is a past day whose daily closes the same button press fetches, and
+    Daily is live against them. A live row dated D+1 that was snapped on the evening of D
+    is that day's live mark until D+1 turns past, when the backfill replaces it with D+1's
+    daily close as it does any row not stamped at the close (backfill.is_close_row: a past
+    row is a close iff stamped 17:00 New York of its own as_of_date; every live row carries
+    the real press time, its FUTURE_PX rows included).
 
     Never the PC's local date: a PC in Asia is a day ahead of New York until early
     afternoon, and marks stamped with its local date would be a day away from the date
@@ -1537,7 +1542,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # borrow this one instead of each opening their own.
             session, service = shared.get()
             session_opened = True
-            snapped = _now_iso()  # live pull: real wall-clock time, not the 15:00 NY convention
+            snapped = _now_iso()  # live pull: the real press time, never the 17:00 close stamp
             spot_rows, spot_fail = _timed(timings, "spot", _live_spot_rows, session, service, requests, today, diag,
                                           snapped)
             spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows if r["mark_type"] == "SPOT"}
@@ -1558,10 +1563,13 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # A listed option (EQ_OPTION, 2026-09-21; an option on a commodity future,
             # CMDTY_OPTION, since 2026-09-24) is asked for like a future, but its live price
             # is Bloomberg's mid: the last trade of one strike can be hours old.
+            # snapped (2026-09-28): the press time, as the spot and forward rows carry, so
+            # a press's FUTURE_PX row never looks like the day's 17:00 close and the
+            # backfill replaces it with the daily PX_LAST once the day is past.
             listed = _listed_option_ids(conn)
             fut_rows, fut_warnings, fut_fail = _timed(
                 timings, "futures", pm.build_future_rows, session, service, fut_reqs, today, diag, live=True,
-                mid_first={r.bbg_ticker for r in fut_reqs if r.instrument_id in listed}) \
+                mid_first={r.bbg_ticker for r in fut_reqs if r.instrument_id in listed}, snapped=snapped) \
                 if fut_reqs else ([], [], [])
             # A cross's USD-conversion pair or an option's own pair with no instrument row
             # on file used to be requested but never written (write_marks skips unknown

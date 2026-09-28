@@ -19,8 +19,8 @@ TODAY = date(2026, 9, 21)
 
 @pytest.fixture(autouse=True)
 def _pinned_clock_and_calendar(monkeypatch, tmp_path):
-    """Today pinned (the tests' days sit inside the intraday reach of it) and a
-    Monday-to-Friday calendar, as in tests/test_backfill.py."""
+    """Today pinned (the tests' days are past days of it) and a Monday-to-Friday calendar,
+    as in tests/test_backfill.py."""
     from data.bloomberg import live as _live
     import engine.pnl.calendar as cal
     monkeypatch.setattr(_live, "book_today", lambda: TODAY)
@@ -34,9 +34,9 @@ def _instrument(conn, instrument_id, root, quote, multiplier, ticker, expiry):
 
 
 def _future_trade(conn, trade_id, instrument_id, quote, contracts, price, multiplier, expiry, trade_date="2026-08-10"):
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (trade_id, "XLSX", instrument_id, "FUTURE", trade_id, trade_date, contracts, price,
-                  "acc", "cp", "", "t", "d", ""))
+                  "acc", "cp", "", "t", "d", "", "", ""))
     conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
                  (trade_id, 1, "NOTIONAL", quote, contracts * multiplier * price, trade_date, expiry, 0, 0))
 
@@ -155,7 +155,7 @@ def test_request_tickers_name_what_they_will_not_ask():
 def test_a_cny_futures_usd_conversion_close_is_backfilled_from_its_library_row(tmp_path):
     """bbg-library lists, for every non-USD future, the SPOT of its currency's USD pair (role
     CONVERSION) from trade date to expiry. The backfill reads the library as it is: the
-    USDCNY close is asked and written at the 15:00 New York close, and the rebar contract's
+    USDCNY close is asked and written as the daily close, 17:00 New York, and the rebar contract's
     own history under its one-digit form. The row is put in by hand when this checkout's
     library does not list it yet, so the test holds either way."""
     p = tmp_path / "risk.db"
@@ -188,8 +188,8 @@ def test_a_cny_futures_usd_conversion_close_is_backfilled_from_its_library_row(t
     spot_rows = conn.execute("SELECT as_of_date, instrument_id, settle_date, value, source, snapped_at FROM marks "
                              "WHERE mark_type = 'SPOT'").fetchall()
     assert spot_rows == [("2026-09-08", "USDCNY", "2026-09-08", 7.1234, "BBG_BFXFORWARD",
-                          backfill.close_stamp(day, TODAY))]
-    assert spot_rows[0][5] == "2026-09-08T15:00:00-04:00"
+                          backfill.close_stamp(day))]
+    assert spot_rows[0][5] == "2026-09-08T17:00:00-04:00"
     assert [m[1:4] for m in _future_marks(conn)] == [("RBTF27 Comdty", "2027-01-15", 3250.0)]
 
 
@@ -199,7 +199,7 @@ def test_a_cny_futures_usd_conversion_close_is_backfilled_from_its_library_row(t
 
 _INSTRUMENT = ("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)")
-_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 _LEG = "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)"
 
 
@@ -212,7 +212,7 @@ def _option_db(tmp_path, option_id, root, ticker, expiry, und_id, und_ticker, un
     conn.execute(_INSTRUMENT, (option_id, "CMDTY_OPTION", root, "USD", 1000, 0, ticker, expiry))
     conn.execute(_INSTRUMENT, (und_id, "FUTURE", root, "USD", 1000, 0, und_ticker, und_expiry))
     conn.execute(_TRADE, ("opt1", "XLSX", option_id, "CMDTY_OPTION", "opt1", trade_date, 10, 2.15,
-                          "acc", "cp", "", "t", "d", ""))
+                          "acc", "cp", "", "t", "d", "", "", ""))
     conn.execute(_LEG, ("opt1", 1, "NOTIONAL", "USD", 10 * 1000 * 2.15, trade_date, expiry, 2.15, 0))
     conn.commit()
     return p, conn
@@ -323,11 +323,11 @@ def _lme_db(tmp_path):
     conn = schema.connect(p)
     conn.execute(_INSTRUMENT, ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"))
     conn.execute(_INSTRUMENT, ("LME:CA", "LME_FWD", "LME:CA", "USD", 1, 0, "LMCADY Comdty", "9999-12-31"))
-    conn.execute(_TRADE, ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-09-10", -1e6, 0.65, "acc", "cp", "", "t", "d", ""))
+    conn.execute(_TRADE, ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-09-10", -1e6, 0.65, "acc", "cp", "", "t", "d", "", "", ""))
     conn.execute(_LEG, ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-09-10", "2026-10-20", 0.65, 1))
     conn.execute(_LEG, ("a1", 2, "FX_NEAR", "USD", 650000, "2026-09-10", "2026-10-20", 0.65, 1))
     conn.execute(_TRADE, ("ca", "XLSX", "LME:CA", "LME_FWD", "ca", "2026-09-10", 100.0, 9850.0,
-                          "acc", "cp", "", "t", "d", ""))
+                          "acc", "cp", "", "t", "d", "", "", ""))
     conn.execute(_LEG, ("ca", 1, "FX_NEAR", "LME:CA", 100.0, "2026-09-10", "2026-12-10", 9850.0, 0))
     conn.execute(_LEG, ("ca", 2, "FX_NEAR", "USD", -985000.0, "2026-09-10", "2026-12-10", 9850.0, 1))
     conn.commit()
@@ -397,16 +397,16 @@ def test_an_lme_stretch_writes_cash_as_spot_and_the_curve_as_forwards_at_the_dai
     assert _lme_marks(conn) == marks
 
 
-def test_an_lme_close_is_the_daily_close_told_by_the_instrument():
+def test_an_lme_close_is_the_daily_close_like_every_other():
+    """Since 2026-09-28 the instrument no longer matters: an LME metal's cash and prompts, an FX
+    pair's spot and forwards, all close at 17:00 New York (until then the id told an LME row,
+    17:00, from an FX row, 15:00)."""
     day = LME_DAY.isoformat()
     for mark_type in ("SPOT", "FWD_OUTRIGHT"):
-        assert backfill.is_close_row(mark_type, day, f"{day}T17:00:00-04:00", TODAY, instrument_id="LME:CA") is True
-        assert backfill.is_close_row(mark_type, day, f"{day}T11:40:00-04:00", TODAY, instrument_id="LME:CA") is False
-        assert backfill.is_close_row(mark_type, day, f"{day}T15:00:00-04:00", TODAY, instrument_id="LME:CA") is False
-        # an FX pair keeps the 15:00 rule, with or without its id
-        assert backfill.is_close_row(mark_type, day, f"{day}T15:00:00-04:00", TODAY, instrument_id="AUDUSD") is True
-        assert backfill.is_close_row(mark_type, day, f"{day}T17:00:00-04:00", TODAY, instrument_id="AUDUSD") is False
-        assert backfill.is_close_row(mark_type, day, f"{day}T15:00:00-04:00", TODAY) is True
+        for instrument_id in ("LME:CA", "AUDUSD", ""):
+            assert backfill.is_close_row(mark_type, day, f"{day}T17:00:00-04:00", TODAY, instrument_id=instrument_id) is True
+            assert backfill.is_close_row(mark_type, day, f"{day}T11:40:00-04:00", TODAY, instrument_id=instrument_id) is False
+            assert backfill.is_close_row(mark_type, day, f"{day}T15:00:00-04:00", TODAY, instrument_id=instrument_id) is False
     assert backfill.is_lme_instrument("LME:CA") and not backfill.is_lme_instrument("AUDUSD")
 
 

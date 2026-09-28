@@ -30,8 +30,9 @@ Module map
                         bootstrap that does not converge raises ``CurveBuildError``,
                         never a silent curve and never a fallback.
 - ``store.py``       -- ``bootstrap_and_store`` (``curve_quotes`` -> ``curves`` rows,
-                        ``source='QL_PRICER'``) and ``snapped_at`` (the 15:00 New York
-                        close stamp).
+                        ``source='QL_PRICER'``) and ``snapped_at`` (the 17:00 New York
+                        close stamp, Bloomberg's daily close; 15:00 from
+                        2026-09-21 to 2026-09-28).
 
 Readers outside this package: ``data/bloomberg/live.py`` (``store.bootstrap_and_store``),
 ``engine/options/rates.py`` (``curves.build_curve_set`` / ``CurveSet``,

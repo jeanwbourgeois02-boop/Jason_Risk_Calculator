@@ -10,8 +10,10 @@ PREMIUM back and Daily was 0 for every option.
 
 Covered here: `engine.options.store.price_close` (a past close, strictly from that day's
 own inputs, for the backfill to call per day), the live stamp (`live_stamp`: the actual
-pricing time in New York) against the close stamp (`close_stamp`: 15:00 New York of the
-day), and that a re-pull replaces the day's marks in place. Fixtures come from
+pricing time in New York) against the close stamp (`close_stamp`: 17:00 New York of the
+day, Bloomberg's daily close, since the user's 2026-09-28 decision that everything closes
+on its own day at its exchange's close; 15:00 New York from 2026-09-21 to 2026-09-28), and
+that a re-pull replaces the day's marks in place. Fixtures come from
 tests/test_options_pricing.py; same skip-if-QuantLib-absent convention.
 """
 from __future__ import annotations
@@ -83,8 +85,8 @@ def test_price_close_prices_the_days_book_from_that_days_inputs_and_stamps_the_c
     assert out == {"day": DAY, "priced": 1, "skipped": [], "closed_out": [], "futures_options_priced": 0}
     rows = _rows(conn, INSTRUMENT, DAY)
     assert {r[0] for r in rows} == SEVEN_TYPES
-    assert {r[2] for r in rows} == {f"{DAY}T15:00:00-04:00"}          # the close, offset resolved for August
-    assert store.close_stamp(DAY) == f"{DAY}T15:00:00-04:00"
+    assert {r[2] for r in rows} == {f"{DAY}T17:00:00-04:00"}          # the close, offset resolved for August
+    assert store.close_stamp(DAY) == f"{DAY}T17:00:00-04:00"
     # The value is the model price of DAY's inputs, the same the live path gives for that date.
     twin = _new_db()
     _seed_day(twin)
@@ -167,7 +169,7 @@ def test_price_close_on_the_expiry_day_writes_the_payoff_drops_a_stale_frozen_ro
     assert _official(conn, INSTRUMENT, EXPIRY, "DELTA") == 1.0
     for greek in ("GAMMA", "THETA", "VEGA", "RHO"):
         assert _official(conn, INSTRUMENT, EXPIRY, greek) == 0.0
-    assert {r[2] for r in _rows(conn, INSTRUMENT, EXPIRY)} == {f"{EXPIRY}T15:00:00-04:00"}
+    assert {r[2] for r in _rows(conn, INSTRUMENT, EXPIRY)} == {f"{EXPIRY}T17:00:00-04:00"}
     # The stale row went in the same transaction, so the ledger's next pass freezes from the payoff.
     assert conn.execute("SELECT COUNT(*) FROM realised_pnl").fetchone()[0] == 0
 
@@ -264,8 +266,8 @@ def test_recalc_on_file_rebuilds_every_past_day_with_inputs_and_prices_as_of_fro
     assert [d["priced"] for d in out["days"]] == [1, 1, 0]
     assert out["days"][2]["skipped"] == [{"trade_id": "T1", "reason": "no SPOT mark"}]
     assert out["priced"] == 2 and out["skipped"] == 1 and "error" not in out
-    assert {r[2] for r in _rows(conn, INSTRUMENT, DAY)} == {f"{DAY}T15:00:00-04:00"}
-    assert {r[2] for r in _rows(conn, INSTRUMENT, LATER)} == {f"{LATER}T15:00:00-04:00"}
+    assert {r[2] for r in _rows(conn, INSTRUMENT, DAY)} == {f"{DAY}T17:00:00-04:00"}
+    assert {r[2] for r in _rows(conn, INSTRUMENT, LATER)} == {f"{LATER}T17:00:00-04:00"}
     assert _rows(conn, INSTRUMENT, as_of) == []
     assert _official(conn, INSTRUMENT, LATER, "PREMIUM") > _official(conn, INSTRUMENT, DAY, "PREMIUM")   # a call, spot up
 
@@ -390,7 +392,7 @@ def test_the_catch_up_stamps_the_expiry_dates_close_and_the_live_expiry_day_the_
     monkeypatch.setattr(store, "_now_ny", lambda: datetime.datetime(2026, 9, 25, 9, 0, 0, tzinfo=NY))
     outcomes = store.price_all_and_store(conn, "2026-09-25")
     assert [(o.priced, o.mark_basis, o.mark_date) for o in outcomes] == [(True, "INTRINSIC", EXPIRY)]
-    assert {r[2] for r in _rows(conn, INSTRUMENT, EXPIRY)} == {f"{EXPIRY}T15:00:00-04:00"}
+    assert {r[2] for r in _rows(conn, INSTRUMENT, EXPIRY)} == {f"{EXPIRY}T17:00:00-04:00"}
 
     # Live on the expiry day itself: the payoff at the day's spot, stamped when it was priced.
     conn2 = _new_db()
@@ -736,7 +738,7 @@ def test_price_close_prices_an_option_on_a_future_from_that_days_marks_only():
     assert out["priced"] == 1 and out["futures_options_priced"] == 1
     marks = _cl_marks(conn, DAY)
     assert marks["PREMIUM"][0] == pytest.approx(2.50)
-    assert {stamp for _v, _settle, stamp in marks.values()} == {f"{DAY}T15:00:00-04:00"}   # the day's close
+    assert {stamp for _v, _settle, stamp in marks.values()} == {f"{DAY}T17:00:00-04:00"}   # the day's close
     assert _cl_marks(conn, LATER) == {}                          # nothing written for another day
     store.price_close(conn, LATER)
     assert _cl_marks(conn, LATER)["DELTA"][0] > marks["DELTA"][0]   # the future up: the call's delta up
@@ -783,7 +785,7 @@ def test_recalc_on_file_visits_the_days_with_the_options_and_the_underlyings_pri
     assert [d["day"] for d in out["days"]] == [DAY, LATER, as_of]
     assert [d["futures_options_priced"] for d in out["days"]] == [1, 1, 0]
     assert out["priced"] == 2 and out["futures_options_priced"] == 2 and out["skipped"] == 1   # as_of: no price yet
-    assert {s for _v, _settle, s in _cl_marks(conn, LATER).values()} == {f"{LATER}T15:00:00-04:00"}
+    assert {s for _v, _settle, s in _cl_marks(conn, LATER).values()} == {f"{LATER}T17:00:00-04:00"}
     assert _cl_marks(conn, SELL_BACK_DAY) == {}
 
 

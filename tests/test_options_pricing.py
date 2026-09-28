@@ -2760,7 +2760,8 @@ def test_one_time_purge_reports_what_it_did_and_tolerates_a_missing_realised_pnl
 
 def test_time_to_expiry_runs_to_the_1000_new_york_cut_in_hours_not_whole_days():
     """User decision 2026-09-21. A pull at 15:00 New York for an option cut at 10:00 tomorrow has
-    19 hours to go, not a day: the engine's whole-day count is corrected through the vol."""
+    19 hours to go, not a day: the engine's whole-day count is corrected through the vol. With no
+    readable SPOT time the moment is the close, 17:00 New York since 2026-09-28 (15:00 before)."""
     import math
     from data.ingest import schema
     from engine.options.store import cut_time_factor
@@ -2775,4 +2776,4 @@ def test_time_to_expiry_runs_to_the_1000_new_york_cut_in_hours_not_whole_days():
     two_months = cut_time_factor(conn, "2026-09-21", "EURUSD", datetime.date(2026, 11, 20))
     assert 0.998 < two_months < 1.0                                           # nothing on a long option
     assert cut_time_factor(conn, "2026-09-18", "EURUSD", datetime.date(2026, 9, 22)) == pytest.approx(
-        math.sqrt((4 - 5 / 24) / 4))                                          # no SPOT time on file: 15:00 New York
+        math.sqrt((4 - 7 / 24) / 4))                                          # no SPOT time on file: 17:00 New York
