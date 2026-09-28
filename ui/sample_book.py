@@ -96,13 +96,20 @@ def view_link(idx: str = "top", small: bool = True) -> html.A:
 
 
 def chip(active: bool) -> list:
-    """The chip's children: the SAMPLE BOOK notice with "Back to my book" while the sample is
-    active, else nothing."""
-    if not active:
-        return []
+    """The chip's children: the SAMPLE BOOK notice with "Back to my book". Rendered on every
+    page load whether or not the sample is active, because "Back to my book" is an Input of
+    the switch callback (`uploads._switch_book`) and Dash never fires a callback whose static
+    Input is absent from the layout (found 2026-09-28: the link did nothing on the real
+    book). Whether the chip shows is `chip_style`, toggled by the same callback."""
     return [html.Span(CHIP_TEXT, className="sample-book-chip-text"),
             html.Button("Back to my book", id=BACK_ID, n_clicks=0, className="btn sample-book-back",
                         title="Make the real database active again and delete the sample file.")]
+
+
+def chip_style(active: bool) -> dict:
+    """The chip container's style: shown while the sample is active, else `display: none`
+    (the chip and its button stay in the layout, see `chip`)."""
+    return {} if active else {"display": "none"}
 
 
 def upload_button(locked: bool) -> html.Button:

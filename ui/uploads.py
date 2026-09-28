@@ -253,8 +253,11 @@ def layout(data: dict = None):
                        accept=".csv,.xlsx,.xls", multiple=False, max_size=25 * 1024 * 1024),
             html.Div(id=SOURCE_LINE_ID, className="source-line", children=describe_source(data)),
             # The sample book (ui/sample_book.py): the link always, small; the chip with
-            # "Back to my book" only while the sample is active.
-            html.Div(id=sample_book.CHIP_ID, className="sample-book-chip", children=sample_book.chip(sample_active)),
+            # "Back to my book" always in the layout (its button is an Input of `_switch_book`,
+            # and Dash never fires a callback whose static Input is missing), hidden by its
+            # style until the sample is active.
+            html.Div(id=sample_book.CHIP_ID, className="sample-book-chip", children=sample_book.chip(sample_active),
+                     style=sample_book.chip_style(sample_active)),
             sample_book.view_link("top"),
         ]),
         # Everything that drops below the bar, stacked, so a failed import's message sits
@@ -370,7 +373,7 @@ def register(app, get_db_path):
         return None, None
 
     @app.callback(
-        Output(sample_book.CHIP_ID, "children"),
+        Output(sample_book.CHIP_ID, "style"),
         Output(FILE_UPLOAD_ID, "disabled"), Output(FILE_UPLOAD_ID, "children"),
         Output(SOURCE_LINE_ID, "children", allow_duplicate=True),
         Output(RESULT_ID, "children", allow_duplicate=True),
@@ -387,7 +390,9 @@ def register(app, get_db_path):
         # "View the sample book" / "Back to my book" (ui/sample_book.py): the active database
         # moves, then both revisions are published at once so every tab redraws from it
         # without waiting for the poll. The chip, the upload button, the source line and the
-        # "Pull Bloomberg now" lock (ui/feed_controls.py, 2026-09-28) follow in place.
+        # "Pull Bloomberg now" lock (ui/feed_controls.py, 2026-09-28) follow in place. The
+        # chip's children are static (its button is one of this callback's Inputs, so it must
+        # always be in the layout): only its style is toggled.
         target = sample_book.switch_from_trigger(ctx.triggered)
         if target is None:
             return (no_update,) * 9
@@ -410,7 +415,7 @@ def register(app, get_db_path):
             message = html.Span("Back to my book." + ("" if outcome["removed"] else
                                 " The sample file is still held and is rebuilt on the next switch."),
                                 className="source-result--info")
-        return (sample_book.chip(outcome["sample"]), outcome["sample"], sample_book.upload_button(outcome["sample"]),
+        return (sample_book.chip_style(outcome["sample"]), outcome["sample"], sample_book.upload_button(outcome["sample"]),
                 describe_source(data), message,
                 revision.file_signature(active), revision.book_signature(active),
                 outcome["sample"], feed_controls.pull_title(outcome["sample"]))

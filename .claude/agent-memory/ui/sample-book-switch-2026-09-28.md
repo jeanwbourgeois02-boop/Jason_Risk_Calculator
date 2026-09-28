@@ -26,3 +26,11 @@ with hard rule 1 kept (the real database holds only uploads).
 `st_mtime_ns` before and after. `golden_book.mark_dates(through)` adds business days after
 2026-09-18; `through=None` is the pinned fixture unchanged (`py -3 -m tests.golden_book`
 says "matches the golden").
+
+**Guard rail (2026-09-28, bug fixed):** every static-id Input / State of a callback must be in
+the layout on every page load, or Dash never fires that callback for any of its inputs (no
+error, just silence). The chip's "Back to my book" button was rendered only while the sample was
+active, so "View the sample book" did nothing on the real book. Now `sample_book.chip` always
+renders the button and `chip_style` (`display: none` when inactive) is what `_switch_book`
+outputs; `tests/test_ui.py::test_every_static_callback_id_exists_in_layout` is the guard. Pattern
+ids (`{"type": ..., "idx": ALL}`) are exempt. Hide by style, never by existence.

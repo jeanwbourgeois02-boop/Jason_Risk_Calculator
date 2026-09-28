@@ -495,7 +495,6 @@ p { margin: 8px 0; }
    while the sample is active, the locked upload button, and the Book tab's empty-state offer. */
 .top-bar .sample-book-link { color: rgba(255,255,255,.72); font-size: 11px; text-decoration: underline; white-space: nowrap; }
 .top-bar .sample-book-link:hover { color: #fff; }
-.sample-book-chip:empty { display: none; }
 .sample-book-chip { display: flex; align-items: center; gap: 8px; background: #b45309; color: #fff; border-radius: 6px;
   padding: 3px 8px; font-size: 11px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
 .sample-book-chip .sample-book-back { padding: 2px 8px; font-size: 11px; }
