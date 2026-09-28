@@ -51,7 +51,7 @@ def test_sig_digits_gives_mantissa_and_thousands_group():
 def test_about_puts_the_definitions_on_hover_of_the_title_not_in_a_paragraph():
     node = fmt.about("Open spreads", "One row per spread: its legs summed from value_book.")
     assert isinstance(node, html.H4)
-    assert node.title == "One row per spread: its legs summed from value_book."
+    assert node.title == "One row per spread: its legs summed from the book's valuation."   # plain words on hover
     title, mark = node.children
     assert title == "Open spreads"
     assert isinstance(mark, html.Span) and mark.className == "about-mark"

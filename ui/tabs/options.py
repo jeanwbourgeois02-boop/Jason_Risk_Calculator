@@ -173,7 +173,7 @@ from dash.dash_table.Format import Format, Group, Scheme, Sign, Trim
 
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import format_cell
+from ui.tabs.formatting import format_cell, plain_words
 from ui.tabs.header import AS_OF_STORE_ID
 
 TABLE_ID = "options-datatable"
@@ -258,17 +258,17 @@ COLUMN_TOOLTIPS = {
                  "underlying future's price, in USD at the spot the book used."),
     "notional_ccy": "Option on a future: |lots| x multiplier x the underlying future's price, in its currency.",
     "start_value_usd": "What was paid: quantity x fill (x multiplier for an option on a future), in USD.",
-    "mktval": ("What it is worth: FX option: notional x the PREMIUM mark, in USD. Option on a future: "
+    "mktval": ("What it is worth: FX option: notional x the premium mark, in USD. Option on a future: "
                "lots x multiplier x Bloomberg's price of the option, in USD at the spot the book used."),
-    "mktpx": "FX option: the PREMIUM mark (fraction of base notional). Option on a future: Bloomberg's price, as quoted.",
-    "pnl_usd": "The book's own per-trade P&L (value_book), never recomputed here.",
-    "delta": "FX option: USD delta notional. Option on a future: DELTA x lots, in futures lots.",
-    "gamma": ("FX option: USD delta change per 1% spot move. Option on a future: GAMMA x lots x "
+    "mktpx": "FX option: the premium mark (fraction of base notional). Option on a future: Bloomberg's price, as quoted.",
+    "pnl_usd": "The book's own per-trade P&L, never recomputed here.",
+    "delta": "FX option: USD delta notional. Option on a future: the delta mark x lots, in futures lots.",
+    "gamma": ("FX option: USD delta change per 1% spot move. Option on a future: the gamma mark x lots x "
               "multiplier, the change in the contract-currency delta per 1.0 of the future's price."),
-    "vega": "FX option: USD per vol point. Option on a future: VEGA x lots x multiplier, contract currency per vol point.",
-    "theta": ("FX option: USD per calendar day. Option on a future: THETA x lots x multiplier, contract "
+    "vega": "FX option: USD per vol point. Option on a future: the vega mark x lots x multiplier, contract currency per vol point.",
+    "theta": ("FX option: USD per calendar day. Option on a future: the theta mark x lots x multiplier, contract "
               "currency per calendar day."),
-    "rho": ("FX option: USD per 1% of the quote-ccy rate. Option on a future: RHO x lots x multiplier, "
+    "rho": ("FX option: USD per 1% of the quote-ccy rate. Option on a future: the rho mark x lots x multiplier, "
             "contract currency per 1% of the discount rate."),
     "underlying": "FX option: the pair. Option on a future: the underlying future's contract id.",
     "undfwdpx": "FX option: the official forward at expiry. Option on a future: the underlying future's official price.",
@@ -746,7 +746,7 @@ def _futures_option_leg(conn: sqlite3.Connection, as_of: str, rec: dict, book: O
     book_reason = book.get("reason") or ""
     parts: List[str] = []
     if settled:
-        parts.append(book_reason or book.get("note") or f"expired {rec['expiry_date']}: P&L frozen by the ledger")
+        parts.append(book_reason or book.get("note") or f"expired {rec['expiry_date']}: P&L frozen at settlement")
     elif closed:
         parts.append(book_reason or book.get("note") or "closed out: bought and sold back in full")
     else:
@@ -1441,8 +1441,8 @@ def headline_strip(totals: dict, filtered: bool = False) -> html.Div:
         children.append(html.P(why[0].upper() + why[1:] + ".", className="section-kicker",
                                style={"fontStyle": "italic"}))
     if unpriced:
-        shown = "; ".join(unpriced[:6]) + (f"; and {len(unpriced) - 6} more" if len(unpriced) > 6 else "")
-        children.append(html.P(f"Not priced, so not in the totals -- {shown}", className="section-kicker",
+        shown = "; ".join(plain_words(u) for u in unpriced[:6]) + (f"; and {len(unpriced) - 6} more" if len(unpriced) > 6 else "")
+        children.append(html.P(f"Not priced, so not in the totals: {shown}", className="section-kicker",
                                style={"fontStyle": "italic"}))
     return html.Div(children)
 

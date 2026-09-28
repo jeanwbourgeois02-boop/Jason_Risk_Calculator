@@ -50,7 +50,7 @@ from engine.curve import curve_positions
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs.formatting import (
-    MINUS, MISSING, about, contract_name, full_money, issues_drawer, lme_name, missing_cell, money_cell,
+    MINUS, MISSING, about, contract_name, full_money, issues_drawer, lme_name, missing_cell, money_cell, plain_words,
     short_date, short_money, short_root_name, sign_class, signed_money, size_words, sum_known,
 )
 
@@ -75,16 +75,16 @@ NA = MISSING
 FUTURE, OPTION, LME = "FUTURE", "CMDTY_OPTION", "LME_FWD"
 UNITS = ("delta_lots", "delta_usd")
 UNIT_LABELS = {"delta_lots": "Lots", "delta_usd": "USD"}
-UNIT_TIPS = {"delta_lots": "Delta in futures-equivalent lots: a future as booked, an option at its official DELTA, "
+UNIT_TIPS = {"delta_lots": "Delta in futures-equivalent lots: a future as booked, an option at its official delta, "
                            "a monthly-average contract by the pricing days left, an LME ticket at its tonnes over the "
-                           "lot size (curve-positions' delta lots).",
+                           "lot size.",
              "delta_usd": "The same delta in USD: delta lots × multiplier × the future's official price × spot, the "
                           "engine's per-contract figure (k / m, the full figure on hover)."}
 DEFAULT_UNIT = "delta_lots"
 NOTE_LINE = "delta lots: an option at its delta, a monthly-average contract by the days left"
 QUESTION = "what am I long or short, in which month"
 TAB_ABOUT = ("What am I long or short, in which month? One row per contract root, one column per contract month, every "
-             "product at its delta (curve-positions), grouped by commodity across exchanges; each commodity's line "
+             "product at its delta, grouped by commodity across exchanges; each commodity's line "
              "carries its net exposure in one physical unit and its delta USD, the known figures summed. The Book line "
              "is the engine's delta USD summed. Under the grid the option Greeks and the currency exposure, as the "
              "engine gives them.")
@@ -93,12 +93,12 @@ GRID_ABOUT = ("Each month cell is the net delta of that contract month in the vi
               "among the cells. A dash is a figure the engine could not give, its reason on hover; an empty cell holds "
               "no position. Net and Gross end the row; Note carries short markers with their sentences on hover.")
 GREEKS_ABOUT = ("The open options on futures, one line per underlying commodity, scaled to the position: Delta is "
-                "curve-positions' delta lots (lots × the option's official DELTA per lot, futures-equivalent lots); "
+                "the Exposure tab's delta lots (lots × the option's official delta per lot, futures-equivalent lots); "
                 "Gamma, Theta and Vega are the option's official per-lot marks on file for the day × its lots, in the "
                 "contract's currency, so a line adds up figures of one unit only. A Greek with no mark is a dash with "
-                "its reason, never zero. An FX option pair shows its USD delta (book-positions); its other Greeks are on "
+                "its reason, never zero. An FX option pair shows its USD delta; its other Greeks are on "
                 "the Trades tab, Options. Futures and LME prompts carry no gamma, theta or vega.")
-FX_ABOUT = ("Delta by currency at the day's official spot (book-positions): FX forwards' and spot legs still to "
+FX_ABOUT = ("Delta by currency at the day's official spot: FX forwards' and spot legs still to "
             "settle, FX options at their delta, an LME ticket's USD leg. The From column names the sources in words. "
             "Under the table: the FX net USD delta in words (long USD / short USD) with the gross beside it, a metal "
             "named as not in the net, and the P&L the non-USD futures hold in their own currency, which is not "
@@ -273,7 +273,7 @@ def note_markers(c: Dict[str, Any], mine: List[dict], roots: Dict[str, Any]) -> 
     options = [r for r in mine if _product(r) == OPTION]
     if options:
         words = "; ".join(f"{plain_name(r, roots)} {lots_text(_num(r.get('delta_lots')))} delta lots" for r in options)
-        out.append(("options at delta", f"options counted at their official DELTA in futures lots under the underlying's "
+        out.append(("options at delta", f"options counted at their official delta in futures lots under the underlying's "
                                         f"month: {words}"))
     averaging = [plain_name(r, roots) for r in mine if _product(r) == FUTURE and r.get("note")]
     if averaging:
@@ -357,14 +357,14 @@ def _totals_children(gross: Optional[float], net: Optional[float], left: Sequenc
         children.append(missing_cell(why or "no USD delta"))
     else:
         children.append(html.Span([
-            "gross ", html.B(short_money(gross, "$") if gross is not None else NA, title=full_money(gross) if gross is not None else why),
+            "gross ", html.B(short_money(gross, "$") if gross is not None else NA, title=full_money(gross) if gross is not None else plain_words(why)),
             " · net ", html.B(signed_money(net, "$") if net is not None else NA, className=sign_class(net) or None,
-                              title=full_money(net) if net is not None else why)]))
+                              title=full_money(net) if net is not None else plain_words(why))]))
     if left:
         short = f"excl. {len(left)}"
         if names:
             short += f": {', '.join(left[:2])}" + (f" +{len(left) - 2}" if len(left) > 2 else "")
-        children.append(html.Span(short, className="marker", title=why))
+        children.append(html.Span(short, className="marker", title=plain_words(why)))
     return children
 
 
@@ -406,7 +406,7 @@ def _cell_td(value: Optional[float], hover: str, unit: str, magnitudes: List[flo
     text = lots_text(value) if unit == "delta_lots" else signed_money(value)
     title = hover if unit == "delta_lots" else "\n".join(t for t in (full_money(value), hover) if t)
     style = {"backgroundColor": colour, "color": HEAT_INK} if colour else None
-    return html.Td(text, title=title, style=style, className=None if colour else (sign_class(value) or None))
+    return html.Td(text, title=plain_words(title), style=style, className=None if colour else (sign_class(value) or None))
 
 
 def commodity_tr(row: dict, months: Sequence[str], unit: str, magnitudes: List[float]) -> html.Tr:
@@ -414,7 +414,7 @@ def commodity_tr(row: dict, months: Sequence[str], unit: str, magnitudes: List[f
     name: List[Any] = [row["name"]]
     if sub.strip():
         name.append(html.Span(sub, className="name-sub"))
-    cells: List[Any] = [html.Td(name, className="l book-name", title=row["name_hover"])]
+    cells: List[Any] = [html.Td(name, className="l book-name", title=plain_words(row["name_hover"]))]
     for key in months:
         v, hover = row["cells"].get(key, (None, ""))
         if key not in row["cells"]:
@@ -423,23 +423,23 @@ def commodity_tr(row: dict, months: Sequence[str], unit: str, magnitudes: List[f
             cells.append(_cell_td(v, hover, unit, magnitudes))
     net, gross = row["net"], row["gross"]
     # A leg with no delta: the known months summed, "excl. N" beside the Net with the reasons on hover.
-    excl = [html.Span(f"excl. {row['excl']}", className="marker", title=row["excl_hover"])] if row.get("excl") else []
+    excl = [html.Span(f"excl. {row['excl']}", className="marker", title=plain_words(row["excl_hover"]))] if row.get("excl") else []
     if net is None:
         cells.append(html.Td([missing_cell(row["net_hover"])] + excl))
     else:
         cells.append(html.Td([html.Span(lots_text(net) if unit == "delta_lots" else signed_money(net),
-                                        className=sign_class(net) or None, title=row["net_hover"])] + excl,
+                                        className=sign_class(net) or None, title=plain_words(row["net_hover"]))] + excl,
                              style={"fontWeight": 600}))
     if gross is None:
         cells.append(html.Td(missing_cell(row["gross_hover"])))
     else:
         cells.append(html.Td(f"{gross:,.2f}".rstrip("0").rstrip(".") if unit == "delta_lots" else short_money(gross),
-                             title=row["gross_hover"]))
+                             title=plain_words(row["gross_hover"])))
     notes = []
     for i, (short, sentence) in enumerate(row["notes"]):
         if i:
             notes.append(" · ")
-        notes.append(html.Span(short, className="marker", title=sentence))
+        notes.append(html.Span(short, className="marker", title=plain_words(sentence)))
     cells.append(html.Td(notes, className="l grid-note"))
     return html.Tr(cells, className="curve-row")
 
@@ -447,7 +447,7 @@ def commodity_tr(row: dict, months: Sequence[str], unit: str, magnitudes: List[f
 def subsector_tr(label: str, sub: Dict[str, Any], result: Dict[str, Any], roots: Dict[str, Any], span: int) -> html.Tr:
     children, why = subsector_words(sub, result, roots)
     return html.Tr([html.Td(label, className="l", title=f"{sub.get('name') or label}: {', '.join(sub.get('commodities') or [])}"),
-                    html.Td(children, className="l", colSpan=span, title=why or None)],
+                    html.Td(children, className="l", colSpan=span, title=plain_words(why) or None)],
                    className="book-group")
 
 
@@ -482,7 +482,7 @@ def grid_section(result: Dict[str, Any], unit: str, roots: Dict[str, Any]) -> ht
         [html.Th("Commodity", className="l", title="The commodity across exchanges as a group line with its net exposure; "
                                                    "under it each contract root's short name, exchange and non-USD "
                                                    "currency, the contracts on hover.")]
-        + [html.Th(month_label(k), title=f"contract month {k}, in {UNIT_LABELS[unit].lower()} of delta") for k in months]
+        + [html.Th(month_label(k), title=f"contract month {k}, delta in {UNIT_LABELS[unit]}") for k in months]
         + [html.Th("Net", title="The commodity's net delta over every month (the engine's)."),
            html.Th("Gross", title="Lots: the month cells' absolute values added up (display). USD: the engine's gross delta USD."),
            html.Th("Note", className="l", title="Short markers, their sentences on hover.")]))
@@ -542,11 +542,11 @@ def greeks_lines(result: Dict[str, Any], marks: Dict[Tuple[str, str], float], ro
             cid = str(r.get("contract_id") or "")
             lots, dl = _num(r.get("lots")), _num(r.get("delta_lots"))
             name = contract_name(cid, root, root_id)
-            pairs["delta"].append((dl, f"{name}: {r.get('reason') or 'no DELTA mark'}" if dl is None else ""))
+            pairs["delta"].append((dl, f"{name}: {plain_words(r.get('reason')) or 'no delta mark'}" if dl is None else ""))
             for col, mt in GREEK_MARK_TYPES:
                 per_lot = marks.get((cid, mt))
                 if per_lot is None or lots is None:
-                    pairs[col].append((None, f"{name}: no {mt} mark on file for this date" if lots is not None
+                    pairs[col].append((None, f"{name}: no {mt.lower()} mark on file for this date" if lots is not None
                                        else f"{name}: {r.get('reason') or 'no lots'}"))
                 else:
                     pairs[col].append((per_lot * lots, ""))
@@ -554,14 +554,14 @@ def greeks_lines(result: Dict[str, Any], marks: Dict[Tuple[str, str], float], ro
             total, excluded, reasons = sum_known(pairs[col])
             line[col] = None if excluded else total
             line[f"{col}_hover"] = ("; ".join(reasons) if excluded else
-                                    ("lots × the option's official DELTA per lot, futures-equivalent lots" if col == "delta"
+                                    ("lots × the option's official delta per lot, futures-equivalent lots" if col == "delta"
                                      else f"the per-lot {col.upper()} mark × lots, in {ccy or 'the contract currency'}"))
         lines.append(line)
     for pair, usd in sorted(((fx_options or {}).get("by_pair") or {}).items()):
         note = "an FX option's gamma, theta and vega are on the Trades tab, Options; not summed here"
         lines.append({"label": f"{pair} options", "legs": "FX options at delta", "ccy": "USD", "kind": "fx",
-                      "hover": f"the open FX options on {pair}, their USD delta as book-positions gives it",
-                      "delta": _num(usd), "delta_hover": "USD delta of the pair's open FX options (book-positions)"
+                      "hover": f"the open FX options on {pair}, their USD delta as the book gives it",
+                      "delta": _num(usd), "delta_hover": "USD delta of the pair's open FX options"
                       if _num(usd) is not None else ((fx_options or {}).get("reason") or "no delta"),
                       "gamma": None, "gamma_hover": note, "theta": None, "theta_hover": note, "vega": None, "vega_hover": note,
                       "delta_usd": True})
@@ -581,7 +581,7 @@ def _greek_td(value: Optional[float], hover: str, ccy: str, money: bool = False,
     children: List[Any] = [text]
     if ccy:
         children.append(html.Span(ccy, className="cell-unit"))
-    return html.Td(children, className=sign_class(value) or None, title=hover)
+    return html.Td(children, className=sign_class(value) or None, title=plain_words(hover))
 
 
 def greeks_card(result: Dict[str, Any], marks: Dict[Tuple[str, str], float], roots: Dict[str, Any],
@@ -595,14 +595,14 @@ def greeks_card(result: Dict[str, Any], marks: Dict[Tuple[str, str], float], roo
             head, html.P("No open option: the book carries no gamma, theta or vega.", className="section-kicker")])
     thead = html.Thead(html.Tr([
         html.Th("Underlying", className="l"),
-        html.Th("Delta", title="Options on futures: futures-equivalent lots (lots × the official DELTA per lot). FX options: USD delta."),
-        html.Th("Gamma", title="Per-lot GAMMA mark × lots, in the contract's currency, per 1.0 move of the future."),
-        html.Th("Theta / day", title="Per-lot THETA mark × lots, in the contract's currency, per calendar day."),
-        html.Th("Vega / vol pt", title="Per-lot VEGA mark × lots, in the contract's currency, per vol point.")]))
+        html.Th("Delta", title="Options on futures: futures-equivalent lots (lots × the official delta per lot). FX options: USD delta."),
+        html.Th("Gamma", title="The gamma mark per lot × lots, in the contract's currency, per 1.0 move of the future."),
+        html.Th("Theta / day", title="The theta mark per lot × lots, in the contract's currency, per calendar day."),
+        html.Th("Vega / vol pt", title="The vega mark per lot × lots, in the contract's currency, per vol point.")]))
     body = []
     for line in lines:
         name: List[Any] = [line["label"], html.Span(line["legs"], className="name-sub")]
-        cells: List[Any] = [html.Td(name, className="l book-name", title=line["hover"])]
+        cells: List[Any] = [html.Td(name, className="l book-name", title=plain_words(line["hover"]))]
         if line.get("delta_usd"):
             cells.append(_greek_td(line["delta"], line["delta_hover"], "", money=True))
         else:
@@ -659,7 +659,7 @@ def fx_card(pos: Optional[dict], sources: Dict[str, List[str]], result: Dict[str
         html.Span("FX hedges, FX options at delta", className="book-counts")])
     if error or not pos:
         return html.Div(id=FX_EXPOSURE_ID, className="book-card card-pad", children=[
-            head, html.P(missing_cell(error or "book-positions gave nothing"), className="section-kicker")])
+            head, html.P(missing_cell(error or "no currency figures"), className="section-kicker")])
     fx = pos.get("fx") or {}
     by_ccy = [c for c in fx.get("by_ccy") or [] if c.get("ccy") != "USD" and not c.get("metal")]
     metals = [c for c in fx.get("by_ccy") or [] if c.get("metal")]
@@ -676,7 +676,7 @@ def fx_card(pos: Optional[dict], sources: Dict[str, List[str]], result: Dict[str
             body.append(html.Tr([
                 html.Td(ccy, className="l", title=f"delta at the day's official spot{f' ({rate})' if rate else ''}"),
                 html.Td(_delta_local_text(local, ccy), className=sign_class(local) or None,
-                        title=f"{ccy} {f'{local:,.0f}'.replace('-', MINUS)}" if local is not None else (reason or "no local delta")),
+                        title=f"{ccy} {f'{local:,.0f}'.replace('-', MINUS)}" if local is not None else plain_words(reason or "no local delta")),
                 html.Td(money_cell(usd, reason=reason or "no USD delta", hover=rate)),
                 html.Td(", ".join(sources.get(ccy) or []) or "FX legs", className="l grid-note",
                         title="what the trades on file contribute to this currency's delta (counted from the book)"),
@@ -700,7 +700,7 @@ def fx_card(pos: Optional[dict], sources: Dict[str, List[str]], result: Dict[str
                               className="grid-note", title=m.get("reason") or "a metal's delta is reported apart: it is not "
                                                                                  "in the FX net or gross"))
     children.append(html.Div(line, className="fx-net-line",
-                             title="The FX net USD delta, + = long USD, FX options' delta included (book-positions); "
+                             title="The FX net USD delta, + = long USD, FX options' delta included; "
                                    "gross = the sum of |per-pair USD delta|."))
     if sources.get("__error__"):
         children.append(html.P(sources["__error__"][0], className="section-kicker"))
@@ -714,7 +714,7 @@ def fx_card(pos: Optional[dict], sources: Dict[str, List[str]], result: Dict[str
             hover = (f"{ccy} {f'{local:,.0f}'.replace('-', MINUS)} = {full_money(usd)}" if local is not None and usd is not None
                      else e.get("reason") or "no P&L for this currency") + f"; contracts {', '.join(e.get('contracts') or [])}"
             parts.append(html.Span([f"{ccy} ", html.Span(_delta_local_text(local, ccy) if local is not None else NA,
-                                                          className=sign_class(local) or "cell-missing")], title=hover))
+                                                          className=sign_class(local) or "cell-missing")], title=plain_words(hover)))
         parts.append(html.Span(" (the non-USD futures' P&L, not currency delta)", className="grid-note"))
         children.append(html.Div(parts, className="fx-net-line"))
     return html.Div(id=FX_EXPOSURE_ID, className="book-card card-pad", children=children)

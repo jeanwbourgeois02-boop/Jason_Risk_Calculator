@@ -66,7 +66,7 @@ from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import (
     HAND_KINDS, MINUS, MISSING, SOURCE_MIXED, TRADE_TYPE_TITLES, about, contract_name, date_cell, fx_name,
-    issues_drawer, lme_name, missing_cell, money_cell, parse_contract_id, price_text, quoted_unit, short_date,
+    issues_drawer, lme_name, missing_cell, money_cell, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
     short_money, short_root_name, sign_class, signed_money, signed_number, size_words, spread_name, sum_known,
     tab_link, type_cell, unit_suffix,
 )
@@ -255,7 +255,7 @@ def position_size_text(p: Dict[str, Any]) -> Tuple[str, str]:
     size = _num(p.get("size"))
     if size is None:
         why = ("no calendar or template fits all of its futures legs, so it has no size"
-               if p.get("kind") in HAND_KINDS else "spreads-engine gave no size")
+               if p.get("kind") in HAND_KINDS else "no size given")
         return NA, why
     unit = p.get("size_unit") or "lots"
     hover = (f"{size_words(size, unit)}: a calendar in lots of the near month (long = long the near month), a "
@@ -315,7 +315,7 @@ def _table_styles(numeric_cols: Sequence[str], text_cols: Sequence[str], na_cols
 
 
 def _tip(text: str) -> dict:
-    return {"value": text, "type": "text"}
+    return {"value": plain_words(text), "type": "text"}
 
 
 def members_table(payload: Dict[str, Any]) -> dash_table.DataTable:
@@ -333,7 +333,7 @@ def members_table(payload: Dict[str, Any]) -> dash_table.DataTable:
                      "status": m.get("status") or ""})
         tip: Dict[str, dict] = {}
         if entry is None:
-            tip["entry"] = _tip(m.get("level_entry_reason") or "spreads-engine gave no entry and no reason")
+            tip["entry"] = _tip(m.get("level_entry_reason") or "no entry level and no reason")
         tips.append(tip)
     columns = [rk.text("Entry", "spread_id"), rk.text("Trade date(s)", "trade_dates"),
                rk.text("Account(s)", "accounts"), rk.text("Size", "size"),
@@ -360,7 +360,7 @@ def detail_legs_table(payload: Dict[str, Any]) -> dash_table.DataTable:
             v = _num(leg.get(col))
             rec[col] = NA if v is None else v
             if v is None:
-                tip[col] = _tip(reasons[col] or "spreads-engine gave no price and no reason")
+                tip[col] = _tip(reasons[col] or "no price and no reason")
         conv, scale = _num(leg.get("conversion")), _num(leg.get("price_scale"))
         rec["conversion"] = NA if conv is None else f"× {conv:g}"
         qf = _num(leg.get("qty_factor"))
@@ -797,10 +797,10 @@ def spread_row(position: dict, data: dict) -> dict:
     legs_words = "; ".join(f"{contract_label(leg.get('instrument_id'))}: {signed(_num(leg.get('lots')))} lot(s), "
                            f"{signed(_num(leg.get('open_lots')))} open" for leg in legs) or "no legs"
     move_hover = (f"{signed_number(move, level_decimals(unit))} × {short_money(upu, '$')} per {unit or 'unit'}"
-                  f" (the USD P&L of a 1.0 move on the open lots; spreads-engine's usd_per_unit)"
+                  f" (the USD P&L of a 1.0 move on the open lots)"
                   if move is not None and upu is not None else
                   str(position.get("level_change_reason") or position.get("level_prev_reason")
-                      or "spreads-engine gave no level change"))
+                      or "no level change given"))
     kind = str(position.get("kind") or "")
     products = {str(leg.get("product") or "FUTURE") for leg in legs}
     commodity_group, subsector = _commodity_of(root_ids, "FUTURE" if products - set(FX_PRODUCTS) else next(iter(products), ""), data)
@@ -814,10 +814,10 @@ def spread_row(position: dict, data: dict) -> dict:
                    "entries and legs.",
         size=size, size_hover=size_hover, unit="" if ratio else unit, ratio=ratio,
         entry=entry, entry_text=level_text(entry, unit),
-        entry_hover=(str(position.get("level_entry_reason") or "spreads-engine gave no entry level") if entry is None
+        entry_hover=(str(position.get("level_entry_reason") or "no entry level given") if entry is None
                      else f"{level_text(entry, unit)} {unit}: the lots-weighted fills; {sources.get('entry') or ''}".strip()),
         now=now, now_text=level_text(now, unit),
-        now_hover=(str(position.get("level_now_reason") or "spreads-engine gave no level") if now is None
+        now_hover=(str(position.get("level_now_reason") or "no level given") if now is None
                    else f"{level_text(now, unit)} {unit} at the day's official marks; {sources.get('now') or ''}".strip()),
         move=move, move_text=level_text(move, unit, sign=True), move_hover=move_hover, move_sign=move,
         periods=_periods_of(data, trade_ids), next=_next_from_schedule(data, [str(leg.get("instrument_id")) for leg in legs]),
@@ -992,7 +992,7 @@ def settled_row(data: dict, trade_ids: Sequence[str]) -> dict:
     """The one line of the settled and closed-out trades (their P&L is in the header's LTD)."""
     n = len(trade_ids)
     return _row(id="SETTLED", kind="settled", name=f"{_plural(n, 'settled or closed-out trade')}",
-                name_hover="Trades the ledger has frozen or options closed out: their P&L stays in the book's LTD. "
+                name_hover="Settled trades and closed-out options: their P&L stays in the book's LTD. "
                            "Click for the list.",
                 size="", size_hover="", entry_text="", now_text="", move_text="",
                 periods=_periods_of(data, trade_ids), trade_ids=[str(t) for t in trade_ids],
@@ -1144,7 +1144,7 @@ def _money_td(value, excluded: int, reasons: Sequence[str], note: str = "", bold
         return html.Td(missing_cell("; ".join(reasons[:LINES_ON_HOVER]) or "no figure"))
     children: List[Any] = [money_cell(value, hover="\n".join(hover_parts))]
     if excluded:
-        children.append(html.Span(f"excl. {excluded}", className="marker", title="\n".join(hover_parts)))
+        children.append(html.Span(f"excl. {excluded}", className="marker", title=plain_words("\n".join(hover_parts))))
     return html.Td(children, style={"fontWeight": 700} if bold else None)
 
 
@@ -1186,14 +1186,14 @@ def position_tr(row: dict) -> html.Tr:
     if row.get("ratio"):
         now_children.append(unit_suffix("ratio"))
     cells = [
-        html.Td(_name_children(row), className="l book-name", title=row["name_hover"]),
+        html.Td(_name_children(row), className="l book-name", title=plain_words(row["name_hover"])),
         _type_td(row),
-        html.Td(row["size"], className="l", title=row["size_hover"] or None),
-        html.Td(row["entry_text"], title=row["entry_hover"] or None,
+        html.Td(row["size"], className="l", title=plain_words(row["size_hover"]) or None),
+        html.Td(row["entry_text"], title=plain_words(row["entry_hover"]) or None,
                 className="cell-missing" if row["entry"] is None and row["entry_text"] == NA else None),
-        html.Td(now_children, title=row["now_hover"] or None,
+        html.Td(now_children, title=plain_words(row["now_hover"]) or None,
                 className="cell-missing" if row["now"] is None and row["now_text"] == NA else None),
-        html.Td(row["move_text"], title=row["move_hover"] or None,
+        html.Td(row["move_text"], title=plain_words(row["move_hover"]) or None,
                 className=move_cls if row["move_text"] != "" else None),
     ]
     for key in PERIODS:
@@ -1246,7 +1246,7 @@ def net_exposure_children(sub: Optional[dict], label: str = "") -> Tuple[List[An
         words = _split_words(c)
         if exchanges.count(str(c.get("exchange") or "")) > 1:
             words += f" ({short_root_name(None, str(c.get('root_id') or ''))})"
-        parts += [" · ", html.Span(words, title=f"{c.get('root_id')}: {c.get('reason') or 'net lots, the trades netted'}")]
+        parts += [" · ", html.Span(words, title=plain_words(f"{c.get('root_id')}: {c.get('reason') or 'net lots, the trades netted'}"))]
     net_usd, gross_usd = _num(sub.get("net_usd")), _num(sub.get("gross_usd"))
     hover_lines = [units_note] if units_note else []
     if net_usd is not None and gross_usd is not None:
@@ -1256,7 +1256,7 @@ def net_exposure_children(sub: Optional[dict], label: str = "") -> Tuple[List[An
         hover_lines.append(f"no USD notional: {sub.get('reason') or 'a price is missing'}")
     if sub.get("missing"):
         parts.append(html.Span(f"excl. {len(sub['missing'])}", className="marker",
-                               title=f"no USD figure for {', '.join(sub['missing'][:LINES_ON_HOVER])}: {sub.get('reason') or ''}"))
+                               title=plain_words(f"no USD figure for {', '.join(sub['missing'][:LINES_ON_HOVER])}: {sub.get('reason') or ''}")))
     return parts, "\n".join(hover_lines)
 
 
@@ -1276,8 +1276,8 @@ def group_tr(label: str, rows: Sequence[dict], by: str = GROUP_INSTRUMENT, data:
         sub = _subsector_for_group(label, rows, data)
         parts, hover = net_exposure_children(sub, label)
         if parts:
-            children.append(html.Span(parts, className="book-net-line", title=hover or None))
-            title = f"{_plural(len(rows), 'contract')}; net exposure from curve-positions (delta on the Exposure tab)"
+            children.append(html.Span(parts, className="book-net-line", title=plain_words(hover) or None))
+            title = f"{_plural(len(rows), 'contract')}; net exposure at delta (the Exposure tab's figure)"
         elif (data or {}).get("curve_error"):
             children.append(html.Span(["net ", missing_cell(data["curve_error"])], className="book-net-line"))
     cells: List[Any] = [html.Td(children, className="l", colSpan=6, title=title)]
@@ -1346,7 +1346,7 @@ def movers_strip(rows: Sequence[dict]) -> Optional[html.Div]:
 
     def card(v, r):
         return html.Div(className="book-mover", children=[
-            html.Span(r["name"], className="book-mover-name", title=r["name_hover"]),
+            html.Span(r["name"], className="book-mover-name", title=plain_words(r["name_hover"])),
             html.B(signed_money(v), className=f"book-mover-value {sign_class(v)}", title=full_usd(v))])
     children: List[Any] = [card(v, r) for v, r in best]
     if best and worst:
@@ -1395,7 +1395,7 @@ def detail_for(data: dict, rows: Sequence[dict], row_id: str) -> Any:
         summary = (f"{row['name']}: {payload.get('size_text') or ''}, entry {level_text(_num(payload.get('level_entry')), unit)}, "
                    f"now {level_text(_num(payload.get('level_now')), unit)} {unit}").strip()
         return html.Div(className="section section--secondary book-detail", children=[
-            about(summary, "The position's entries and legs (spreads-engine).", level="h5", style={"margin": "0 0 6px"}),
+            about(summary, "The position's entries and legs.", level="h5", style={"margin": "0 0 6px"}),
             about("Entries", "The spreads found on each trade date that make this position, with their own entry "
                              "level.", level="div", className="section-kicker"),
             members_table(payload),
@@ -1467,7 +1467,7 @@ def needs(data: dict) -> List[dict]:
                 names.append(label)
         out.append(_need("MARKS", "warn", f"{len(missing)} of {needed} marks missing: {', '.join(names[:2])}"
                                           + (f" +{len(names) - 2}" if len(names) > 2 else ""),
-                         "\n".join(f"{m['instrument_id']} {m['mark_type']} {m['settle_date']}" for m in missing[:LINES_ON_HOVER]),
+                         "\n".join(f"{m['instrument_id']} {plain_words(m['mark_type']).lower()} {m['settle_date']}" for m in missing[:LINES_ON_HOVER]),
                          "Data", 2))
     review = (data.get("spreads") or {}).get("review") or []
     if review:
@@ -1487,7 +1487,7 @@ def needs(data: dict) -> List[dict]:
                              "\n".join(str(x.get("reason") or "") for x in breached[:LINES_ON_HOVER]), "Risk", 0))
         elif not set_rows:
             out.append(_need("LIMITS", "quiet", "position limits not set",
-                             "No desk or exchange limit is set in config/limits.yaml yet.", "Risk", 4))
+                             "No desk or exchange limit is set yet.", "Risk", 4))
     out.sort(key=lambda n: n["rank"])
     return out[:NEEDS_MAX]
 
@@ -1497,7 +1497,7 @@ def needs_section(data: dict) -> html.Div:
     for n, need in enumerate(needs(data), start=1):
         lines.append(html.Div(className="book-need", children=[
             html.Span(need["chip"], className=f"book-need-chip book-need-chip--{need['kind']}"),
-            html.Span(need["text"], title=need["hover"] or None),
+            html.Span(need["text"], title=plain_words(need["hover"]) or None),
             pointer(need["tab"], f"book-need-{n}")]))
     if not lines:
         lines.append(html.Div("Nothing needs you today.", className="book-need", style={"color": "var(--muted)"}))
@@ -1563,7 +1563,7 @@ def load_section(data: dict) -> html.Div:
         return html.Div(id=LOAD_ID, className="book-card book-load", children=[
             about("Last load", LOAD_ABOUT, level="div", className="book-h"), message_box(data["load_error"])])
     text, hover, clean = load_sentence(data.get("load"))
-    children: List[Any] = [html.Span(text, title=hover or None)]
+    children: List[Any] = [html.Span(text, title=plain_words(hover) or None)]
     if not clean:
         children += [" ", pointer("Data", "book-load-data", "→ Data")]
     return html.Div(id=LOAD_ID, className="book-card book-load", children=[
@@ -1573,7 +1573,7 @@ def load_section(data: dict) -> html.Div:
 def loaded_banner(data: dict) -> html.Div:
     """The gold-edged banner of a book with trades and no marks yet (AfterUpload.dc.html)."""
     text, hover, clean = load_sentence(data.get("load"))
-    children: List[Any] = [html.Span("Loaded", className="book-h"), html.Span(text, title=hover or None)]
+    children: List[Any] = [html.Span("Loaded", className="book-h"), html.Span(text, title=plain_words(hover) or None)]
     if not clean:
         children.append(html.Span(pointer("Data", "book-banner-data", "what was skipped and why"),
                                   style={"marginLeft": "auto", "fontSize": "12px"}))

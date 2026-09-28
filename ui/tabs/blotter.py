@@ -254,7 +254,7 @@ UNCLASSIFIED_SECTOR = "Unclassified"
 # A settled future is the ledger's frozen row (`realised_pnl`), which holds its P&L in USD
 # only: `value_book` leaves `pnl_local` blank on it, and this is said where the number
 # would be (engine/pnl/valuation.py::_settled_future_row).
-SETTLED_LOCAL_REASON = "settled: the ledger froze this trade's P&L in USD; its local-currency P&L is not stored"
+SETTLED_LOCAL_REASON = "settled: this trade's P&L is frozen in USD; its local-currency P&L is not stored"
 
 # The Total book's trade table in commodity terms (Screens redesign Phase A, 2026-09-25,
 # replacing the macro book's FX layout: "Pair" holding a futures contract, "Amount" meaning
@@ -271,7 +271,7 @@ SETTLED_LOCAL_REASON = "settled: the ledger froze this trade's P&L in USD; its l
 # sub-tab scales them to the position through the engine; nothing is scaled or priced here.
 GREEK_COLS = ("delta", "gamma", "theta", "vega")
 _GREEK_MARK_TYPES = {"delta": "DELTA", "gamma": "GAMMA", "theta": "THETA", "vega": "VEGA"}
-GREEK_TIP = ("An option on a future's official Greek per option lot, as the mark on file (QL_OPTIONS_PRICER): "
+GREEK_TIP = ("An option on a future's official Greek per option lot, as the mark on file (the app's option pricer): "
              "Delta in futures lots per lot; Gamma, Theta, Vega in the contract's price unit per lot. Blank on "
              "every other product; the Options sub-tab shows them scaled to the position.")
 _DISPLAY_COLUMNS = [
@@ -357,7 +357,7 @@ _COLUMN_FORMATS = {   # the numeric columns of the trade table (ui.tabs.ranking)
 # so the table never prints eight decimals; the unit is the row's `price_unit`.
 _PRICE_COLS = ("fill", "mark", "prev_close")
 
-SETTLED_MARK_REASON = "settled: the ledger froze this trade's P&L; it is no longer marked"
+SETTLED_MARK_REASON = "settled: this trade's P&L is frozen; it is no longer marked"
 
 
 def _text(value) -> str:
@@ -377,7 +377,7 @@ def _mark_tip(mark, reason, settled: bool, source, note) -> str:
     if mark is None:
         why = _text(reason) or (SETTLED_MARK_REASON if settled else "no mark on this row")
         return f"{why}. {note}" if note and note not in why else why
-    return "; ".join(t for t in (_text(source), note) if t) or "the mark value_book used"
+    return "; ".join(t for t in (_text(source), note) if t) or "the mark the valuation used"
 
 
 def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
@@ -1503,7 +1503,7 @@ def add_prev_close(conn: sqlite3.Connection, df: pd.DataFrame, as_of: str) -> pd
         mark = rk.value(r.get("mark"))
         values.append(float("nan") if mark is None else mark)
         if mark is None:
-            why = _text(r.get("reason")) or (f"settled by the {t1} close: frozen by the ledger, no longer marked"
+            why = _text(r.get("reason")) or (f"settled by the {t1} close: frozen at settlement, no longer marked"
                                              if r.get("status") == "SETTLED" else f"no mark on the {t1} close")
             tips.append(why)
         else:

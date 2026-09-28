@@ -91,7 +91,7 @@ def view_link(idx: str = "top", small: bool = True) -> html.A:
     link_id = LINK_ID if idx == "top" else {"type": LINK_TYPE, "idx": idx}
     return html.A(LINK_LABEL, id=link_id, n_clicks=0, href="#", role="button",
                   className="sample-book-link" + (" sample-book-link--small" if small else ""),
-                  title="Open the synthetic sample book (data/sample/blotter_sample.csv at synthetic marks) "
+                  title="Open the synthetic sample book (a made-up blotter at made-up marks) "
                         "in a throw-away database. Your own book and the real database are untouched.")
 
 

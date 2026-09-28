@@ -715,7 +715,7 @@ def test_render_headline_strip_shows_excluded_summary_caption():
     assert value_div.children == "150"
     caption = ltd_card.children[-1].children[0]
     assert caption.children == "excl. 2" and caption.className == "marker"
-    assert caption.title == "excludes 2 of 4 trades unpriced. 1 forward: no FWD_OUTRIGHT; 1 option: no PREMIUM"
+    assert caption.title == "excludes 2 of 4 trades unpriced. 1 forward: no forward price; 1 option: no premium mark"   # plain words
 
 
 def test_render_headline_strip_no_caption_when_fully_priced():

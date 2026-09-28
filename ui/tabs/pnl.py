@@ -113,7 +113,7 @@ TAB_ABOUT = ("Where did the P&L come from? The header's Daily, 5d, MTD, YTD and 
              "for LTD; the LTD line since the first trade. Nothing is re-marked here.")
 COLUMN_TIPS = {"label": "The position, group or trade; its trades and, for a spread, its unmatched legs on hover.",
                "trades": "How many trades of the as-of book are in the line."}
-REALISED_ABOUT = ("Realised = the settled trades, frozen by the ledger (realised_pnl) and never marked again; open = the "
+REALISED_ABOUT = ("Realised = the settled trades, frozen at settlement and never marked again; open = the "
                   "trades still marked (a closed-out option group is valued at its closing fill until expiry and counts "
                   "as open here). Each is the known LTD figures summed, excl. N otherwise; their sum is the header's LTD.")
 
@@ -602,7 +602,7 @@ def issue_items(data: dict) -> List[Any]:
     spreads = data.get("spreads") or {}
     review = spreads.get("review") or []
     if review:
-        items.append(("Spreads", f"{_plural(len(review), 'set')} of trades spreads-engine could not group, listed as "
+        items.append(("Spreads", f"{_plural(len(review), 'set')} of trades that could not be grouped into a spread, listed as "
                                  "outrights here (the Book tab names them)."))
     for reason in spreads.get("reasons") or []:
         items.append(("Spreads", str(reason)))

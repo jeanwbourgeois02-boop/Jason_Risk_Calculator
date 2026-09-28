@@ -33,7 +33,7 @@ import pytest
 pytest.importorskip("dash", reason="dash is not installed in this environment")
 
 from data.ingest import schema  # noqa: E402
-from ui.tabs import header  # noqa: E402
+from ui.tabs import formatting, header  # noqa: E402
 
 
 def _vb_frame(rows):
@@ -97,7 +97,7 @@ def test_missing_marks_reason_names_the_missing_mark_types_and_count():
     conn = _db_with_one_open_fx_trade()
     reason = header._missing_marks_reason(conn, "2026-09-17")
     assert "no official" in reason
-    assert "SPOT" in reason and "FWD_OUTRIGHT" in reason
+    assert "spot" in reason and "forward" in reason     # the mark types in plain words (2026-09-28)
     assert "2026-09-17" in reason
     assert "2 of 2 needed marks" in reason
     assert "run the Bloomberg pull" in reason
@@ -143,8 +143,8 @@ def test_missing_marks_reason_counts_a_past_date_with_the_past_close_needs(monke
     assert needed == 1
     assert missing == [{"instrument_id": "USDJPY", "settle_date": day, "mark_type": "SPOT"}]
     reason = header._missing_marks_reason(conn, day)
-    assert "no official SPOT for 2026-09-17" in reason and "1 of 1 needed marks" in reason
-    assert "FWD_OUTRIGHT" not in reason
+    assert "no official spot for 2026-09-17" in reason and "1 of 1 needed marks" in reason
+    assert "forward" not in reason
 
     # once the closing SPOT is on file the past date is complete: no "1 of 2" left over for good
     _insert_official_mark(conn, day, "USDJPY", day, "SPOT", 147.0, "BBG_BFXFORWARD")
@@ -353,7 +353,7 @@ def test_pnl_card_available_with_partial_pricing_shows_an_excl_marker_with_the_s
     assert card.children[1].children == "$100"  # a real number, not "n/a" -- this is a priced figure
     [(short, hover)] = _markers(card)
     assert short == "excl. 1"
-    assert hover == "excludes 1 of 2 trades unpriced\n1 option: no PREMIUM"
+    assert hover == "excludes 1 of 2 trades unpriced\n1 option: no premium mark"
     assert card.children[2].children[0].className == "marker"
     assert _no_visible_sentences(card)
 
@@ -929,10 +929,10 @@ def test_a_partly_priced_book_sums_the_known_figures_and_says_what_it_excludes()
     assert block["missing"] == ["SHFE:CU"] and block["gross_usd"] is not None
     gross = cards[0]
     assert _texts(gross)[1] == header.short_money(block["gross_usd"], "$")
-    assert _markers(gross) == [("excl. 1", block["reason"])]
+    assert _markers(gross) == [("excl. 1", formatting.plain_words(block["reason"]))]
     assert block["reason"].startswith("excludes 1 of 2 commodities with no USD figure")
     net = cards[1]
-    assert _markers(net) == [("excl. 1", block["reason"])]
+    assert _markers(net) == [("excl. 1", formatting.plain_words(block["reason"]))]
     assert f"Metals {header._fmt_compact(block['net_usd'])}" in net.children[1].title   # one sector, CU out of it
 
 
@@ -1108,7 +1108,7 @@ def test_risk_chip_says_what_the_book_series_leaves_out():
     assert hover.startswith("The VaR and the vol sum the positions that have a history series: they exclude "
                             "2 underlyers and 1 contract with none.")
     assert "- EUR, JPY: no market history: no folder" in hover                      # one line per reason
-    assert "- CLZ26C 75 Comdty: no DELTA mark: the option has not been priced" in hover
+    assert "- CLZ26C 75 Comdty: no delta mark: the option has not been priced" in hover
     assert "energy" not in hover                                                    # a view is never a part
     clean = _chip(_risk_result(parts=[{"underlyer": "NYMEX:CL", "kind": "COMMODITY", "role": "part",
                                        "contracts": [{"contract_id": "CLZ26 Comdty", "in_series": True}]}]))

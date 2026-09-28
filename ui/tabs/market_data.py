@@ -2455,7 +2455,7 @@ def contract_dates_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     conservative expiry. Collapsed, like the library: the summary line counts on file and
     missing, the table lists each contract, missing first."""
     rows = contract_date_rows(conn, as_of)
-    about_text = ("FUT_LAST_TRADE_DT and FUT_NOTICE_FIRST, asked of Bloomberg on request, once per contract. Until a "
+    about_text = ("Bloomberg's last-trade and first-notice dates, asked of Bloomberg on request, once per contract. Until a "
                   "contract's dates are on file its future carries the contract master's conservative expiry.")
     if not rows:
         return _quiet(CONTRACT_DATES_TITLE, f"none needed on {as_of}: no open commodity future needs Bloomberg's "
