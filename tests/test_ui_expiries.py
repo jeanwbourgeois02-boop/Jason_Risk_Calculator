@@ -446,7 +446,7 @@ def test_layout_is_an_expiries_prefixed_shell_with_no_date_picker():
     assert expiries.BODY_ID in ids and expiries.REFRESH_ID in ids
     assert all(i.startswith("expiries-") for i in ids), ids
     assert not any(type(n).__name__ == "DatePickerSingle" for n in _walk(layout))
-    assert "Expiries" in _text(layout) and AS_OF in _text(layout)
+    assert "Timing & cash" in _text(layout) and AS_OF in _text(layout)
     title = next(n for n in _walk(layout) if "about-title" in (getattr(n, "className", "") or ""))
     assert "(est.)" in title.title
     assert expiries.build_layout is expiries.layout

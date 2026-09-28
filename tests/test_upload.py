@@ -425,3 +425,31 @@ def test_underlying_only_futures_survive_a_re_upload_and_are_never_overwritten(t
                             ).fetchone() == ('FUTURE', '2026-07-29')
         assert conn.execute("SELECT COUNT(*) FROM trades WHERE instrument_id IN ('GCQ26 Comdty', 'CUZ26 Comdty')"
                             ).fetchone()[0] == 0
+
+
+def test_import_blotter_replaces_a_manual_trade_too(tmp_path):
+    """User, 2026-09-28: the blotter upload is the only way a trade enters the app, so an upload
+    replaces EVERY trade, a ``source = 'MANUAL'`` leftover of the retired manual-entry screen
+    included (until then a MANUAL trade survived an upload)."""
+    db = tmp_path / 'risk.db'
+    import_blotter(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, db)
+    with sqlite3.connect(db) as conn:
+        instrument_id = conn.execute("SELECT instrument_id FROM trades LIMIT 1").fetchone()[0]
+        conn.execute(
+            "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, "
+            "quantity, price, account, counterparty, strategy, trader, description) "
+            "VALUES ('MANUAL-1','MANUAL',?,'FX_FWD','MANUAL-1','2026-01-01',1,1,'','','','','')", (instrument_id,))
+        conn.execute("INSERT INTO trade_legs VALUES ('MANUAL-1',1,'FX_NEAR','USD',1,"
+                     "'2026-01-01','2026-01-01',1,1)")
+        conn.commit()
+    assert trade_count(db) == (EXPECTED_TRADES + 1, EXPECTED_LEGS + 1)
+
+    import_blotter(RAW_BLOTTER.read_bytes(), RAW_BLOTTER.name, db)
+
+    with sqlite3.connect(db) as conn:
+        trade_ids = {r[0] for r in conn.execute('SELECT trade_id FROM trades')}
+        sources = {r[0] for r in conn.execute('SELECT DISTINCT source FROM trades')}
+        legs = conn.execute("SELECT COUNT(*) FROM trade_legs WHERE trade_id = 'MANUAL-1'").fetchone()[0]
+    assert 'MANUAL-1' not in trade_ids and legs == 0
+    assert sources == {'XLSX'}
+    assert trade_count(db) == (EXPECTED_TRADES, EXPECTED_LEGS)

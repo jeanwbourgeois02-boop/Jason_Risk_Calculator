@@ -257,18 +257,6 @@ def test_render_says_why_when_there_is_no_date_or_no_database(tmp_path, stub_app
     assert "Database not available" in curve.render(AS_OF, tmp_path / "missing.db").children
 
 
-def test_layout_has_the_unit_switch_and_no_date_picker():
-    layout = curve.layout(AS_OF)
-    ids = [getattr(n, "id", None) for n in _walk(layout) if getattr(n, "id", None)]
-    assert curve.BODY_ID in ids and curve.REFRESH_ID in ids and curve.UNIT_ID in ids
-    assert all(i.startswith("curve-") for i in ids), ids
-    radio = _table(layout, curve.UNIT_ID)
-    assert [o["value"] for o in radio.options] == ["lots", "units", "usd", "delta_lots", "delta_usd"]
-    assert radio.value == "lots"
-    assert not any(type(n).__name__ == "DatePickerSingle" for n in _walk(layout))
-    assert curve.build_layout is curve.layout
-
-
 def test_register_callbacks_registers_against_the_shared_ids(book, stub_app):
     from ui.revision import DATA_REVISION_ID
     from ui.tabs.header import AS_OF_STORE_ID
@@ -519,18 +507,6 @@ def test_flat_options_show_their_product():
 # --------------------------------------------------------------------------- Screens redesign, Phase A (2026-09-25)
 # Definitions on hover of the titles, reasons in one Data issues drawer, notes as markers, USD
 # money in k / m on the grid and the sector table, a Contracts table that fits 1680 px.
-def test_no_kicker_paragraphs_every_section_title_carries_its_definitions(book, stub_app):
-    body = curve.render(AS_OF, book)
-    assert not [n for n in _walk(body) if getattr(n, "className", None) == "section-kicker"]
-    titles = [n for n in _walk(body) if "about-title" in (getattr(n, "className", None) or "")]
-    heads = {n.children[0]: n.title for n in titles}
-    assert set(heads) == {"Positions by contract month (lots)", "Curve and positions", "Net outright by sector (USD)",
-                          "Contracts", "Currency exposure of non-USD futures"}
-    assert all(heads.values())
-    assert "calendar spread nets" in heads["Net outright by sector (USD)"]
-    assert "Toggle Columns" in heads["Contracts"]
-
-
 def test_reasons_go_to_the_data_issues_drawer(book, stub_app):
     result = _engine(book)
     body = curve.render(AS_OF, book)
@@ -746,50 +722,6 @@ def test_default_commodity_is_the_largest_gross_usd(book):
                              "C": {"gross_usd": 7.0}}}
     assert curve.default_root(fake) == "C"          # an n/a gross ranks after every known one
     assert curve.default_root({"by_commodity": {}}) is None
-
-
-def test_curve_traces_are_the_two_sources_figures_exactly(book, research):
-    result = _engine(book)
-    research["curves"]["NYMEX:CL"] = _research("NYMEX:CL", CL_RESEARCH)
-    payload = curve.chart_store(result)["roots"]["NYMEX:CL"]
-    fig = curve.curve_figure(payload, curve.research_curve("NYMEX:CL", AS_OF))
-    t = _traces(fig)
-    assert set(t) == {"research curve (2026-09-15)", curve.MARKS_TRACE, curve.LOTS_TRACE}
-    line = t["research curve (2026-09-15)"]
-    assert list(line.x) == ["2026-11-01", "2026-12-01", "2027-01-01"]
-    assert list(line.y) == [r["raw_settle"] for r in CL_RESEARCH]
-    rows = {r["contract_id"]: r for r in result["rows"]}
-    marks = t[curve.MARKS_TRACE]
-    assert list(marks.y) == [rows[CLZ6]["price"], rows[CLF7]["price"]] == [71.0, 70.2]
-    assert list(marks.x) == ["2026-12-01", "2027-01-01"]
-    bars = t[curve.LOTS_TRACE]
-    months = result["by_commodity"]["NYMEX:CL"]["months"]
-    assert list(bars.y) == [months["2026-12"], months["2027-01"]] == [1.0, -1.0]
-    assert list(bars.marker.color) == ["#1a7f4b", "#c0392b"]      # long green, short red
-    assert line.yaxis == marks.yaxis == "y" and bars.yaxis == "y2" and bars.xaxis == "x2"   # two rows
-    assert fig.layout.xaxis.matches == "x2" or fig.layout.xaxis2.matches == "x"              # one shared x
-
-
-def test_research_curve_is_drawn_at_raw_settle_on_our_marks_scale(book, research):
-    result = _engine(book)
-    research["curves"]["CBOT:ZC"] = _research("CBOT:ZC", CORN_RESEARCH, unit="USD/bu", scale=0.01)
-    payload = curve.chart_store(result)["roots"]["CBOT:ZC"]
-    rc = curve.research_curve("CBOT:ZC", AS_OF)
-    fig = curve.curve_figure(payload, rc)
-    t = _traces(fig)
-    assert list(t["research curve (2026-09-15)"].y) == [448.25, 461.0]          # raw, not 4.4825
-    assert list(t[curve.MARKS_TRACE].y) == [450.25]                              # our mark, cents as quoted
-    assert fig.layout.yaxis.title.text == "quoted price (x 0.01 = USD/bu)"
-    assert curve.curve_notes(payload, rc) == []
-
-
-def test_no_research_curve_draws_marks_and_bars_alone_and_says_why(book, stub_app, research):
-    body = curve.render(AS_OF, book)
-    panel = _table(body, curve.CURVE_SECTION_ID)
-    graph = _table(panel, curve.GRAPH_ID)
-    assert {t.name for t in graph.figure.data} == {curve.MARKS_TRACE, curve.LOTS_TRACE}
-    notes = [n.children for n in _walk(panel) if getattr(n, "className", None) == "curve-note"]
-    assert len(notes) == 1 and NO_RESEARCH in notes[0] and notes[0].startswith("No research curve")
 
 
 def test_research_curve_is_read_for_the_commodity_shown_only(book, stub_app, research):

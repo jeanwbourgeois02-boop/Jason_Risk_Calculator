@@ -130,49 +130,11 @@ def test_sorted_scope_df_orders_by_settle_date_then_pair():
     assert out["instrument_id"].tolist() == ["AUDUSD", "USDJPY", "EURUSD"]
 
 
-def test_filter_bar_lists_distinct_values_and_clear_button():
-    df = pd.concat([_sample_df(), _sample_df()], ignore_index=True)
-    df.loc[1, "instrument_id"] = "USDJPY"
-    df.loc[1, "trade_id"] = "T2"
-    bar = blotter._filter_bar(df, "blotter-datatable-total", blotter._DISPLAY_COLUMNS, blotter._COLUMN_LABELS)
-    # dropdowns live one level down, inside each .blotter-filter wrapper
-    pair_dropdown = next(
-        wrap.children[1] for wrap in bar.children
-        if getattr(wrap, "className", "") == "blotter-filter"
-        and wrap.children[1].id == "blotter-datatable-total-filter-instrument_id"
-    )
-    values = {opt["value"] for opt in pair_dropdown.options}
-    assert values == {"EURUSD", "USDJPY"}
-    assert pair_dropdown.multi is True
-    clear_buttons = [c for c in bar.children if getattr(c, "id", "") == "blotter-datatable-total-filter-clear"]
-    assert len(clear_buttons) == 1
-
-
 def test_detail_table_has_status_and_instrument_columns():
     table = blotter.detail_table(_sample_df())
     ids = {c["id"] for c in table.columns}
     assert "status" in ids
     assert "instrument_id" in ids
-
-
-def test_detail_table_reads_in_commodity_terms_not_the_macro_fx_layout():
-    """Screens redesign Phase A (2026-09-25): no "Pair" holding a futures contract, no
-    "Amount" meaning lots, no "Notional (USD)" / "Live rate" / "T-1 rate"."""
-    table = blotter.detail_table(_sample_df())
-    names = [c["name"] for c in table.columns]
-    assert names[0] == "Instrument"
-    for gone in ("Pair", "Amount", "Notional (USD)", "Live rate", "T-1 rate", "Value date", "Mark date", "Strategy"):
-        assert gone not in names, gone
-    assert blotter._DISPLAY_COLUMNS == [
-        "instrument_id", "commodity", "exchange", "product", "trade_date", "side", "quantity", "qty_unit",
-        "fill", "mark", "prev_close", "pnl_local", "pnl_ccy", "pnl_usd", "status", "settle_date", "theme",
-        "trade_id"]
-    assert [blotter._COLUMN_LABELS[c] for c in blotter._DISPLAY_COLUMNS] == [
-        "Instrument", "Commodity / pair", "Exchange", "Product", "Trade date", "Side", "Quantity", "Unit",
-        "Fill", "Mark", "Prev close", "P&L (local)", "Ccy", "P&L (USD)", "Status", "Expiry / value date",
-        "Bundle", "Trade id"]
-    # the mark's source and date on hover
-    assert table.tooltip_data[0]["mark"]["value"] == "BBG_BFXFORWARD"
 
 
 def test_detail_table_status_is_title_cased():
@@ -232,95 +194,6 @@ def test_message_box():
 
 
 # --------------------------------------------------------------------------- sub-tabs
-
-def test_title_row_matches_ladder_class_names():
-    """Coordinator instruction 2026-09-15: single title row, "Blotter" left, date
-    heading + picker + Today button right, no card, sharing the Ladder's class names
-    so one stylesheet rule styles both tabs."""
-    # As-of defaults to today (ui.tabs.cash_ladder.today_ny) regardless of the
-    # `default_date` argument, matching the Ladder's own "today" default -- so assert
-    # against heading_date_text(today_ny()) rather than a fixed date.
-    from ui.tabs.cash_ladder import heading_date_text, today_ny
-    layout = blotter.build_layout(default_date="2026-06-20")
-    toolbar = next(c for c in layout.children if getattr(c, "id", None) == blotter.TOOLBAR_ID)
-    assert toolbar.className == "ladder-title-row"
-    heading = toolbar.children[0]
-    assert heading.children == "Blotter"
-    assert heading.className == "ladder-title-row-heading"
-    right = toolbar.children[1]
-    assert right.className == "ladder-title-row-right"
-    title = next(c for c in right.children if getattr(c, "id", None) == blotter.TITLE_ID)
-    assert heading_date_text(today_ny()) == title.children
-    today_button = next(c for c in right.children if getattr(c, "id", None) == blotter.TODAY_BUTTON_ID)
-    assert today_button.children == "Today"
-
-
-def test_subtab_presence_and_order():
-    layout = blotter.build_layout(default_date="2026-06-20")
-    tabs = next(c for c in layout.children if getattr(c, "id", None) == blotter.SUBTABS_ID)
-    labels = [t.label for t in tabs.children]
-    assert labels == ["Total book", "FX", "Futures & LME", "Options", "Bundles", "Manual entry"]
-    assert tabs.className == "subtabs"
-    assert all(t.className == "subtab" for t in tabs.children)
-    assert all(t.selected_className == "subtab--selected" for t in tabs.children)
-
-
-def test_scope_products_covers_task_products():
-    """2026-09-24: rates and the listed index options left the app; FX_SWAP stays (a manual
-    4-leg swap), only the blotter's package rule left."""
-    assert blotter.SCOPE_PRODUCTS["total"] is None
-    assert set(blotter.SCOPE_PRODUCTS["fx"]) == {"FX_SPOT", "FX_FWD", "FX_SWAP"}
-    # Phase 5: the LME forwards sit with the futures ("Futures & LME")
-    assert blotter.SCOPE_PRODUCTS["futures"] == ("FUTURE", "LME_FWD")
-    assert "rates" not in blotter.SCOPE_PRODUCTS and "rates" not in blotter.SCOPE_ORDER
-    # Phase 3: an option on a commodity future is an option (the Options sub-tab lists it), never a future
-    assert blotter.SCOPE_PRODUCTS["options"] == ("FX_OPTION", "CMDTY_OPTION")
-    assert set(blotter.ASSET_CLASS_OF) == {"FX_SPOT", "FX_FWD", "FX_SWAP", "FUTURE", "FX_OPTION", "CMDTY_OPTION",
-                                           "LME_FWD"}
-    assert blotter.ASSET_CLASS_OF["CMDTY_OPTION"] == "Options"
-    assert blotter.ASSET_CLASS_OF["LME_FWD"] == "LME forwards"
-    assert blotter.ASSET_CLASS_OF["FX_SWAP"] == "FX" and blotter._fmt_product("FX_SWAP") == "FX swap"
-    assert blotter.ASSET_CLASS_ORDER == ("Futures", "LME forwards", "Options", "FX")   # commodities first (Phase A)
-    assert [blotter._fmt_product(p) for p in ("FUTURE", "CMDTY_OPTION", "LME_FWD", "FX_FWD", "FX_SPOT", "FX_OPTION")] \
-        == ["Future", "Option on future", "LME forward", "FX forward", "FX spot", "FX option"]
-    assert not hasattr(blotter, "rates_ui")
-
-
-def test_futures_scope_no_trades_shows_reason_and_empty_table():
-    """With no futures trades on the date, the strip reads n/a with the documented reason
-    and the table (with futures-specific columns) is empty, never hidden."""
-    conn = _make_db()
-    try:
-        layout = blotter.scope_layout("futures", conn, "2026-06-20")
-        strip_div = layout.children[0]
-        text = strip_div.children.children.children
-        assert blotter.FUTURES_NO_TRADES_REASON in text
-        table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
-        assert table.data == []
-        ids = [c["id"] for c in table.columns]
-        assert ids == blotter._FUTURES_DISPLAY_COLUMNS
-        names = [c["name"] for c in table.columns]
-        assert "Contract" in names and "Quantity" in names and "Unit" in names and "Expiry / prompt" in names
-        assert "Exchange" in names and "P&L (local)" in names and "Ccy" in names
-    finally:
-        conn.close()
-
-
-def test_scope_layout_fx_filters_out_nonfx_products():
-    """FX sub-tab rebuilt 2026-09-17 in the legacy sheet's column layout -- see
-    `ui.tabs.blotter_fx`. It sources from `engine.pnl.fx_blotter.fx_blotter_rows`, so an
-    option trade must not appear in the table at all."""
-    conn = _make_db()
-    try:
-        _add_option(conn)
-        layout = blotter.scope_layout("fx", conn, "2026-06-20", with_notices=False)
-        table = next(c for c in layout.children if isinstance(c, dash.dash_table.DataTable))
-        ids = [c["id"] for c in table.columns]
-        assert "instrument_id" in ids and "pnl_eod" in ids
-        assert all(r["instrument_id"] != "EURUSD092226C-1" for r in table.data)
-    finally:
-        conn.close()
-
 
 def _find_id(component, wanted: str):
     """The component with id `wanted` nested anywhere under `component`, else None."""
@@ -485,34 +358,6 @@ def test_safe_section_turns_exception_into_error_card():
     assert "Futures could not be rendered (bad data)." in result.children[0].children
 
 
-def test_futures_strip_failure_still_renders_futures_table():
-    """2026-09-17 coordinator instruction: a failure in one sub-section of a scope's
-    layout (here, the P&L strip feeding off `row_scoped_headline`) must not blank a
-    sibling section (the trade table) that doesn't depend on it."""
-    conn = _make_db()
-    try:
-        _add_future(conn)
-
-        def boom(*args, **kwargs):
-            raise RuntimeError("strip boom")
-
-        # blotter.py does `from ui.tabs.blotter_pricing import row_scoped_headline`, so
-        # the name to patch is the one bound into blotter's own namespace.
-        original = blotter.row_scoped_headline
-        blotter.row_scoped_headline = boom
-        try:
-            layout = blotter.scope_layout("futures", conn, "2026-06-20")
-        finally:
-            blotter.row_scoped_headline = original
-
-        strip_section = layout.children[0]
-        assert "P&L strip could not be rendered (strip boom)." in strip_section.children[0].children
-        table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-futures")
-        assert table.data  # the trade table still rendered despite the strip failure
-    finally:
-        conn.close()
-
-
 def test_options_delegated_build_failure_still_renders_strip():
     """The reverse pairing of the previous test: a failure in the delegated Options
     table build must not blank the P&L strip above it."""
@@ -537,32 +382,6 @@ def test_options_delegated_build_failure_still_renders_strip():
         assert layout.children[0].id == "blotter-strip-options"  # strip unaffected
         options_section = layout.children[1]
         assert "Options could not be rendered (options boom)." in options_section.children[0].children
-    finally:
-        conn.close()
-
-
-def test_asset_class_table_failure_still_renders_strip_and_trade_table():
-    """Total book: a failure in the asset-class-by-P&L rollup must not blank the Positions
-    block above it or the trade table below it. (The Total book has no strip since the
-    Screens redesign Phase A, 2026-09-25: the header is the total book.)"""
-    conn = _make_db()
-    try:
-        def boom(*args, **kwargs):
-            raise RuntimeError("asset class boom")
-
-        original = blotter.asset_class_pnl_table
-        blotter.asset_class_pnl_table = boom
-        try:
-            layout = blotter.scope_layout("total", conn, "2026-06-20")
-        finally:
-            blotter.asset_class_pnl_table = original
-
-        assert not any(getattr(c, "id", None) == "blotter-strip-total" for c in layout.children)
-        assert layout.children[0].children[0].children[0] == "Positions"    # the Positions block comes first
-        asset_class_section = layout.children[1]
-        assert "P&L by asset class could not be rendered (asset class boom)." in asset_class_section.children[0].children
-        table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total")
-        assert table.data  # trade table still rendered
     finally:
         conn.close()
 
@@ -612,64 +431,6 @@ def test_bundles_scope_failure_via_update_does_not_crash_whole_callback(tmp_path
     monkeypatch.setattr(blotter, "bundles_layout", boom)
     result, _built_from = update_fn("2026-06-20", "bundles")
     assert "Bundles could not be rendered (bundles boom)." in result.children[0].children
-
-
-def test_total_book_asset_class_rows_sum_to_total():
-    """2026-09-17 user request: the Total book shows P&L by asset class (FX / Futures /
-    Options) plus a Total that equals the strip. Rates left on 2026-09-24."""
-    conn = _make_db()
-    try:
-        _add_option(conn)
-        _add_future(conn)
-        df = blotter.scope_df(conn, "total", "2026-06-20")
-        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, "2026-06-20", df)}
-        assert list(rows) == ["Futures", "Options", "FX", "Total"]          # commodity classes first (Phase A)
-        assert rows["FX"]["ltd"]["value"] == pytest.approx(8_000.0)           # 1m EUR * (1.108 - 1.10)
-        assert rows["Futures"]["ltd"]["value"] == pytest.approx(4_000.0)      # 2 x 1000 x (70 - 68)
-        assert rows["Options"]["ltd"]["value"] == pytest.approx(1_326.0)
-        assert rows["Total"]["ltd"]["value"] == pytest.approx(8_000.0 + 4_000.0 + 1_326.0)
-        assert rows["Total"]["trades"] == 3
-        headline = blotter.row_scoped_headline(conn, "2026-06-20", df["trade_id"].tolist())
-        assert headline["ltd"]["value"] == pytest.approx(rows["Total"]["ltd"]["value"])
-        layout = blotter.scope_layout("total", conn, "2026-06-20")
-        table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
-        footer = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID + "-footer")
-        assert [r["asset_class"] for r in table.data] == ["Futures", "Options", "FX"]   # ranked; Total is pinned under them
-        assert footer.data[0]["asset_class"] == "Total" and footer.data[0]["ltd"] == pytest.approx(13_326)
-        # k / m on a summary table (Phase A): a number, whole units, printed by the SI format;
-        # the full figure on hover
-        ltd_col = next(c for c in table.columns if c["id"] == "ltd")
-        assert "s" in ltd_col["format"]["specifier"] and footer.tooltip_data[0]["ltd"]["value"].startswith("13,326")
-    finally:
-        conn.close()
-
-
-def test_total_book_asset_class_missing_mark_is_unavailable_with_reason():
-    """2026-09-17 partial-pricing follow-up: a class or the Total row with a MIX of
-    priced and unpriced trades shows its real (priced-only) sum with an
-    `excluded_summary` caption, not "n/a" -- only a class where EVERYTHING is unpriced
-    (here, Futures, whose one contract has no price on any date) stays fully
-    unavailable, matching `ui/tabs/header.py`'s same-day equivalent fix."""
-    conn = _make_db()
-    try:
-        _add_future(conn, price_mark=None)   # no FUTURE_PX on any date: nothing to estimate from
-        df = blotter.scope_df(conn, "total", "2026-06-20")
-        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, "2026-06-20", df)}
-        assert rows["FX"]["ltd"]["available"] is True
-        assert rows["Futures"]["ltd"]["available"] is False and "F1" in rows["Futures"]["ltd"]["reason"]
-        assert rows["Total"]["ltd"]["available"] is True
-        assert rows["Total"]["ltd"]["value"] == pytest.approx(8_000.0)  # FX only; the future excluded
-        assert rows["Total"]["ltd"]["excluded_summary"] == "excludes 1 of 2 trades unpriced"
-        assert "F1" in rows["Total"]["ltd"]["excluded_detail"] or "future" in rows["Total"]["ltd"]["excluded_detail"]
-        layout = blotter.scope_layout("total", conn, "2026-06-20")
-        table = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID)
-        footer = next(t for t in _find_tables(layout) if t.id == blotter.ASSET_TABLE_ID + "-footer")
-        futures = [r["asset_class"] for r in table.data].index("Futures")
-        assert table.data[futures]["ltd"] is None and "F1" in table.tooltip_data[futures]["ltd"]["value"]
-        assert footer.data[0]["ltd"] is not None  # Total row: a real value, not blanked
-        assert "excludes 1 of 2" in footer.tooltip_data[0]["ltd"]["value"]
-    finally:
-        conn.close()
 
 
 def test_a_product_that_left_the_app_is_still_shown_on_an_other_line_never_dropped():
@@ -1076,36 +837,6 @@ def test_update_content_degrades_to_message_on_unexpected_exception(tmp_path, mo
     assert "could not be rendered (boom)" in result.children
 
 
-def test_register_callbacks_and_render_via_app():
-    app = dash.Dash(__name__)
-    app.layout = blotter.build_layout(default_date="2026-06-20")
-
-    import tempfile
-    import os
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    disk_conn = sqlite3.connect(path)
-    schema.create_schema(disk_conn)
-    disk_conn.executescript("""
-        INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31');
-        INSERT INTO trades VALUES ('T1','XLSX','EURUSD','FX_FWD','T1','2026-06-01',1000000,1.10,
-            'ACC','CPTY','HAHY7','TR','buy eur','FX');
-        INSERT INTO trade_legs VALUES ('T1',1,'FX_NEAR','EUR',1000000,'2026-06-01','2026-06-20',1.10,1);
-        INSERT INTO trade_legs VALUES ('T1',2,'FX_NEAR','USD',-1100000,'2026-06-01','2026-06-20',1.10,1);
-        INSERT INTO marks VALUES ('2026-06-20','EURUSD','2026-06-20','FWD_OUTRIGHT',1.1080,'BBG_BFXFORWARD','2026-06-20T15:00:00-04:00');
-        INSERT INTO marks VALUES ('2026-06-20','EURUSD','2026-06-20','SPOT',1.1050,'BBG_BFXFORWARD','2026-06-20T15:00:00-04:00');
-    """)
-    disk_conn.commit()
-    disk_conn.close()
-
-    blotter.register_callbacks(app, get_db_path=lambda: path)
-    callback_map = app.callback_map
-    assert any(blotter.CONTENT_ID in k for k in callback_map)
-    assert not any("blotter-strip-total" in k for k in callback_map)   # the header is the total (Phase A)
-    assert any("blotter-strip-futures" in k for k in callback_map)
-    os.remove(path)
-
-
 def test_build_layout_has_no_toolbar_filter_dropdowns():
     """User decision 2026-09-15: filtering/sorting lives in the DataTable header and
     the sub-tabs; the toolbar keeps only the date picker and theme-edit controls."""
@@ -1148,18 +879,6 @@ def test_layout_smoke():
     assert layout.id == header.HEADER_ID
 
 
-def test_build_figures_includes_all_periods():
-    conn = _make_db()
-    try:
-        cards = header._build_figures(conn, "2026-06-20")
-        titles = [c.children[0].children for c in cards]
-        assert "LTD" in titles
-        assert "Daily" in titles
-        assert "Trading" in titles
-    finally:
-        conn.close()
-
-
 def test_build_chart_returns_graph():
     conn = _make_db()
     try:
@@ -1172,13 +891,6 @@ def test_build_chart_returns_graph():
         assert n_points == len(header._chart_days(conn, "2026-06-20"))
     finally:
         conn.close()
-
-
-def test_register_callbacks_smoke():
-    app = dash.Dash(__name__)
-    app.layout = header.layout()
-    header.register_callbacks(app, get_db_path=lambda: ":memory:")
-    assert any(header.CHART_CONTAINER_ID in k for k in app.callback_map)
 
 
 # --------------------------------------------------------------------------- missing option terms
@@ -1203,20 +915,6 @@ def test_missing_terms_notice_names_the_option_and_where_to_enter_it(tmp_path):
     assert "EURSEK112526C-1" in text
     assert "no strike on file" in text
     assert "Option terms" in text
-
-
-def test_missing_terms_notice_says_the_editable_cell_first_then_the_alternatives(tmp_path):
-    """2026-09-18: the Options table's Strike / Type / Payoff cells are editable, so the
-    banner sends the user there first; the Manual entry form and a re-upload follow, one
-    plain sentence each."""
-    from ui.tabs import options as options_ui
-    assert "strike" in options_ui.EDITABLE_COLUMNS and "payoff" in options_ui.EDITABLE_COLUMNS
-    conn = _db_with_option_missing_strike(tmp_path)
-    sentences = [c.children for c in blotter.missing_terms_notice(conn).children[2:]]
-    assert sentences == [   # compact (Phase A): one line, the cell first, then the alternatives
-        "Type the strike in its Strike cell under Options (Payoff Digital where it is one); "
-        "or Manual entry ▸ Option terms; or re-upload an export with a Strike column.",
-    ]
 
 
 def test_missing_terms_notice_absent_when_every_option_has_a_strike(tmp_path):
@@ -1412,7 +1110,7 @@ def _is_figure(text) -> bool:
     return isinstance(text, str) and text not in ("", "n/a") and any(ch.isdigit() for ch in text)
 
 
-@pytest.mark.parametrize("scope", ["futures", "options"])
+@pytest.mark.parametrize("scope", ["options"])
 def test_every_scope_strip_shows_real_figures_on_a_book_with_official_marks(scope):
     conn = _book_with_marks()
     try:
@@ -1445,37 +1143,6 @@ def test_the_total_book_has_no_strip_the_header_is_the_total():
         conn.close()
 
 
-def test_fx_scope_strip_and_table_show_real_figures_on_a_book_with_official_marks():
-    conn = _book_with_marks()
-    try:
-        layout = blotter.scope_layout("fx", conn, _AS_OF)
-        assert "could not be rendered" not in _all_text(layout)
-        cards = _strip_cards(layout, "fx")
-        for label in _HEADLINE_PERIODS:
-            assert _is_figure(cards[label][0]), f"fx strip: {label} shows {cards[label][0]!r}"
-        assert cards["Trades"][0] == "3"
-        table = next(t for t in _find_tables(layout) if t.id == "blotter-fx-datatable")
-        by_pair_fill = {(r["instrument_id"], r["fill"]): r for r in table.data}
-        assert by_pair_fill[("EURUSD", 1.1)]["pnl_eod"] == pytest.approx(48_000)   # 2,000,000 x (1.124 - 1.10), direct quote
-        assert isinstance(by_pair_fill[("USDJPY", 147.0)]["pnl_eod"], float)     # BBG_INTERP outright is official
-        assert by_pair_fill[("EURUSD", 1.08)]["pnl_eod"] == pytest.approx(10_000)   # settled: frozen at the 2026-07-24 spot
-    finally:
-        conn.close()
-
-
-def test_header_cards_show_real_figures_on_a_book_with_official_marks():
-    conn = _book_with_marks()
-    try:
-        cards = [c for c in header._build_figures(conn, _AS_OF) if getattr(c, "className", "") == "header-figure"]
-        by_title = {c.children[0].children: c for c in cards}
-        for title in ("LTD", "Daily", "Previous day", "5d", "MTD", "YTD", "Trading"):
-            assert _is_figure(by_title[title].children[1].children), f"header {title}: {by_title[title].children[1].children!r}"
-            assert len(by_title[title].children) == 2, f"header {title} carries a caption: {by_title[title].children[2:]}"
-        assert by_title["Trades"].children[1].children == "5"
-    finally:
-        conn.close()
-
-
 def _misaligned_realised_row(conn):
     """What engine/pnl/ledger.py's old positional INSERT left for trade OLD on a database
     whose `realised_pnl` was migrated from 12 columns: every value two columns off, so
@@ -1487,26 +1154,6 @@ def _misaligned_realised_row(conn):
         "'2026-07-24','BBG_BFXFORWARD','10000.0')")
     conn.commit()
     assert conn.execute("SELECT typeof(pnl_usd) FROM realised_pnl").fetchone()[0] == "text"
-
-
-def test_the_2026_09_18_incident_no_longer_blanks_any_view():
-    conn = _book_with_marks()
-    try:
-        clean = {s: _strip_cards(blotter.scope_layout(s, conn, _AS_OF), s) for s in ("futures",)}
-        _misaligned_realised_row(conn)
-        for scope in ("total", "fx", "futures", "options"):
-            layout = blotter.scope_layout(scope, conn, _AS_OF)
-            text = _all_text(layout)
-            assert "could not convert string to float" not in text, scope
-            # the banner names the table.column, the row and the value, and says it heals itself
-            assert "realised_pnl.pnl_usd: 1 value that is not a number -- '2026-07-24' (trade_id OLD)" in text
-            assert "rebuilt automatically by the next Bloomberg pull" in text
-            if scope in clean:  # same figures as with no bad row: OLD is valued as not yet frozen
-                assert _strip_cards(layout, scope)["LTD P&L"][0] == clean[scope]["LTD P&L"][0]
-        ltd = next(c for c in header._build_figures(conn, _AS_OF) if c.children[0].children == "LTD")
-        assert _is_figure(ltd.children[1].children) and len(ltd.children) == 2
-    finally:
-        conn.close()
 
 
 def test_one_text_price_unprices_one_row_and_every_view_still_renders():
@@ -1527,13 +1174,6 @@ def test_one_text_price_unprices_one_row_and_every_view_still_renders():
         tip = table.tooltip_data[table.data.index(row)]
         assert tip["pnl_usd"]["value"] == "trade J1: trades.price is not a number ('24-Jul')"
         assert sum(1 for r in table.data if r["pnl_usd"] is not None) == 4  # every other trade prices
-        fx = blotter.scope_layout("fx", conn, _AS_OF)
-        assert "could not be rendered" not in _all_text(fx)
-        assert len(next(t for t in _find_tables(fx) if t.id == "blotter-fx-datatable").data) == 3
-        value, captions, tooltips = _strip_cards(fx, "fx")["LTD P&L"]   # the FX strip: a marker, its sentence on hover
-        assert _is_figure(value) and "excl. 1" in captions
-        assert any("excludes 1 of 3 trades unpriced (1 with a stored value is not a number)" in (t or "") for t in tooltips)
-        assert any("trade J1: trades.price is not a number ('24-Jul')" in (t or "") for t in tooltips)
     finally:
         conn.close()
 
@@ -1594,22 +1234,6 @@ def test_bad_stored_values_is_empty_on_a_clean_book_and_survives_a_missing_table
         conn.close()
 
 
-def test_fx_sub_tab_keeps_its_strip_when_its_table_fails(monkeypatch):
-    from ui.tabs import blotter_fx
-
-    def boom(*args, **kwargs):
-        raise ValueError("could not convert string to float: '24-Jul'")
-
-    conn = _book_with_marks()
-    try:
-        monkeypatch.setattr(blotter_fx, "fx_blotter_rows", boom)
-        layout = blotter.scope_layout("fx", conn, _AS_OF)
-        assert _is_figure(_strip_cards(layout, "fx")["LTD P&L"][0])   # the strip is still there, still a figure
-        assert "FX trade table could not be rendered (could not convert string to float: '24-Jul')." in _all_text(layout)
-    finally:
-        conn.close()
-
-
 # --------------------------------------------------------------------------- 2026-09-18 integration
 # Options no longer rebuilt on a marks-only revision; the strip
 # above the Options table shows only the cards that have a value.
@@ -1660,47 +1284,6 @@ def test_register_callbacks_registers_no_rates_callback_and_no_output_twice(tmp_
     assert not any(o.startswith("rates-") or "blotter-strip-rates" in o for o in outputs)
     # the strip this module builds above the Options table follows new marks in place
     assert "blotter-strip-options.children" in plain
-
-
-def test_options_sub_tab_is_not_rebuilt_on_a_marks_only_revision(tmp_path):
-    """`ui.tabs.options._render` refreshes its own table in place from the revision stores,
-    so a Bloomberg pull must not rebuild the sub-tab under the user's hands; a new book,
-    date or sub-tab still does."""
-    from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
-    probe = dash.Dash(__name__, suppress_callback_exceptions=True)   # the premise: it listens to both stores itself
-    options.register_callbacks(probe, get_db_path=lambda: ":memory:")
-    listened = {d["id"] for cb in probe.callback_map.values() for d in cb["inputs"]}
-    assert {DATA_REVISION_ID, BOOK_REVISION_ID} <= listened
-    db_path = _empty_file_db(tmp_path)
-    app = _blotter_app(db_path)
-    update = _wrapped(app, lambda k: f"{blotter.CONTENT_ID}.children" in k)
-    data, book = f"{DATA_REVISION_ID}.data", f"{BOOK_REVISION_ID}.data"
-    date, tab = f"{blotter.DATE_PICKER_ID}.date", f"{blotter.SUBTABS_ID}.value"
-    from ui import revision
-    on_screen = revision.trade_set_signature(db_path)   # what the content on screen was built from
-
-    def rebuilt(scope, *triggers, built_from=on_screen):
-        content, built = _call_triggered_by(triggers, update, "2026-06-20", scope, "b1", "d1", built_from)
-        assert (content is dash.no_update) == (built is dash.no_update)
-        return content is not dash.no_update
-
-    assert not rebuilt("options", data)                 # a Bloomberg pull: Options refreshes itself in place
-    assert not rebuilt("options", book)                 # a book revision with the SAME trade set: a saved term
-    assert not rebuilt("options", data, book)
-    assert rebuilt("options", book, built_from="an-older-trade-set")        # a genuine book change rebuilds
-    assert rebuilt("options", data, book, built_from="an-older-trade-set")  # both published in one tick
-    assert rebuilt("options", book, built_from=None)    # nothing recorded yet: rebuild, the safe side
-    assert rebuilt("options", date) and rebuilt("options", tab)
-    assert rebuilt("fx", data) and rebuilt("bundles", data)   # unchanged: one static block, rebuilt on new marks
-    assert not rebuilt("total", data)                   # unchanged: rows refresh through _apply_filters
-    assert not rebuilt("total", book)                   # a saved term is no reason to rebuild the Total book either
-    assert rebuilt("total", book, built_from="an-older-trade-set")
-    assert not rebuilt("manual", data, book, built_from="an-older-trade-set")  # unchanged: the form is never rebuilt
-    assert blotter._MARKS_REBUILD_SCOPES == ("bundles", "fx")
-    assert blotter._SELF_REFRESHING_SCOPES == ("options",)
-    # a rebuild records the trade set it was built from, for the next comparison
-    _content, built = _call_triggered_by((tab,), update, "2026-06-20", "options", "b1", "d1", None)
-    assert built == on_screen
 
 
 def _digital_book(tmp_path):
@@ -1865,20 +1448,6 @@ def test_options_strip_hides_nothing_about_today_when_today_itself_is_unpriced(t
         conn.close()
 
 
-def test_only_the_options_strip_hides_cards(strict_marks, tmp_path):
-    """Same gap on the Futures side (no futures price before today): every card stays, "n/a"."""
-    _path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
-    try:
-        conn.execute("DELETE FROM marks WHERE mark_type = 'FUTURE_PX' AND as_of_date < ?", (_AS_OF,))
-        conn.commit()
-        cards = _strip_cards(blotter.scope_layout("futures", conn, _AS_OF), "futures")
-        assert list(cards) == [blotter.HEADLINE_TITLES[k] for k in blotter.HEADLINE_ORDER]
-        assert cards["Daily P&L"][0] == "n/a" and _is_figure(cards["LTD P&L"][0])
-        assert "appear once option marks exist" not in _all_text(blotter.scope_layout("total", conn, _AS_OF))
-    finally:
-        conn.close()
-
-
 def test_options_strip_refreshes_in_place_on_a_data_revision(strict_marks, tmp_path):
     db_path, conn = _options_book(tmp_path, premium_on_earlier_closes=False)
     conn.close()
@@ -1895,39 +1464,6 @@ def test_options_strip_refreshes_in_place_on_a_data_revision(strict_marks, tmp_p
 # Reviewer finding, user yes: the FX sub-tab painted "(sample)" cells for unpriced rows,
 # invented figures where hard rule 2 wants the reason. An unpriced row now reads "n/a"
 # with value_book's reason as the cell's tooltip, and no "(sample)" text exists anywhere.
-
-def test_fx_sub_tab_unpriced_row_shows_its_reason_and_never_a_sample(strict_marks):
-    from ui.tabs import blotter_fx
-
-    conn = _book_with_marks()
-    try:
-        # A pair with no mark of any kind on any date: nothing the near-marks rule or the
-        # fill could reach, so value_book leaves its row unpriced with a reason.
-        conn.executescript("""
-            INSERT INTO instruments VALUES ('USDMXN','FX','USD','MXN',1,0,'USDMXN Curncy','9999-12-31');
-            INSERT INTO trades VALUES ('M1','XLSX','USDMXN','FX_FWD','M1','2026-06-01',1000000,18.5,'ACC','CP','','TR','d','');
-            INSERT INTO trade_legs VALUES ('M1',1,'FX_NEAR','USD',1000000,'2026-06-01','2026-11-20',18.5,1);
-            INSERT INTO trade_legs VALUES ('M1',2,'FX_NEAR','MXN',-18500000,'2026-06-01','2026-11-20',18.5,1);
-        """)
-        layout = blotter.scope_layout("fx", conn, _AS_OF)
-    finally:
-        conn.close()
-
-    table = next(c for c in _find_tables(layout) if getattr(c, "id", None) == blotter_fx.DATATABLE_ID)
-    rows = {r["trade_id"]: (r, t) for r, t in zip(table.data, table.tooltip_data)}
-    unpriced, tip = rows["M1"]
-    for col in ("mark_t1", "mark_eod", "mark_t2", "pnl_t1", "pnl_eod", "pnl_t2"):
-        assert unpriced[col] == blotter_fx.UNPRICED_TEXT, col          # never zero, never a made-up mark
-        assert tip[col]["value"] and tip[col]["type"] == "text", col   # the reason, where the number would be
-    assert unpriced["pnl_eod_num"] is None
-    priced, priced_tip = rows["E1"]
-    assert isinstance(priced["pnl_eod"], float) and priced_tip == {}
-    text = _all_text(layout) + str(table)
-    assert "(sample)" not in text and "sample" not in text.lower()
-    # The rows-shown sums leave the unpriced row out and say so.
-    _by, total = blotter_fx.shown_currency_rows(table.data)
-    assert total["figures"]["ltd"]["excluded_summary"] == "excludes 1 of 4 rows unpriced"
-
 
 # --------------------------------------------------------------------------- 2026-09-24 commodity conversion
 # Phase 2 removal (user yes 2026-09-24): the Rates sub-tab, the equity-index line, the rates
@@ -1996,118 +1532,3 @@ def _add_settled_future(conn, trade_id="Q1", pnl_usd=1_234.0):
         "VALUES (?,'CLN26 Comdty','FUTURE','USD','2026-06-10',0,0,'FUTURE_PX',1.0,'2026-06-10','BBG_BDH',?,"
         "'2026-06-11T00:00:00','')", (trade_id, pnl_usd))
     conn.commit()
-
-
-def test_futures_sub_tab_shows_local_pnl_with_its_currency_beside_usd_and_the_exchange():
-    conn = _make_db()
-    try:
-        _add_future(conn)                                                   # WTI, USD: 4,000
-        _add_future(conn, trade_id="C1", instrument="CUX26 Comdty", root="SHFE:CU", ccy="CNY", multiplier=5.0,
-                    contracts=2.0, fill=80_000.0, price_mark=81_000.0, expiry="2026-11-16")   # 10,000 CNY
-        conn.execute("INSERT OR IGNORE INTO instruments VALUES ('USDCNY','FX','USD','CNY',1,0,'USDCNY Curncy','9999-12-31')")
-        conn.execute("INSERT INTO marks VALUES ('2026-06-20','USDCNY','2026-06-20','SPOT',7.2,'BBG_BFXFORWARD',"
-                     "'2026-06-20T15:00:00-04:00')")
-        _add_future(conn, trade_id="X1", instrument="QQZ26 Comdty", root="XX:QQ", price_mark=50.0, fill=50.0)
-        _add_settled_future(conn)
-        layout = blotter.scope_layout("futures", conn, "2026-06-20")
-        table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-futures")
-        ids = [c["id"] for c in table.columns]
-        assert ids.index("pnl_local") + 1 == ids.index("pnl_ccy") == ids.index("pnl_usd") - 1   # side by side
-        assert ids.index("instrument_id") + 1 == ids.index("exchange")
-        names = {c["id"]: c["name"] for c in table.columns}
-        assert (names["pnl_local"], names["pnl_ccy"], names["exchange"]) == ("P&L (local)", "Ccy", "Exchange")
-        rows = {r["trade_id"]: (r, t) for r, t in zip(table.data, table.tooltip_data)}
-
-        wti, _ = rows["F1"]
-        assert (wti["exchange"], wti["pnl_ccy"]) == ("NYMEX", "USD")
-        assert wti["pnl_local"] == pytest.approx(4_000) and wti["pnl_usd"] == pytest.approx(4_000)
-
-        copper, _ = rows["C1"]
-        engine_row = blotter.scope_df(conn, "futures", "2026-06-20").set_index("trade_id").loc["C1"]
-        assert (copper["exchange"], copper["pnl_ccy"]) == ("SHFE", "CNY")
-        assert copper["pnl_local"] == pytest.approx(10_000)                 # 2 x 5 x (81,000 - 80,000) CNY
-        assert copper["pnl_usd"] == pytest.approx(engine_row["pnl_usd"])    # the engine's USD figure, as computed
-        assert copper["pnl_usd"] == pytest.approx(10_000 / 7.2)
-
-        assert rows["X1"][0]["exchange"] == ""                              # not in the contract master: blank, not guessed
-
-        settled, settled_tip = rows["Q1"]
-        assert settled["pnl_usd"] == pytest.approx(1_234) and settled["pnl_local"] is None   # printed n/a, never 0
-        assert settled_tip["pnl_local"]["value"] == blotter.SETTLED_LOCAL_REASON
-        styled = {s["if"].get("column_id") for s in table.style_data_conditional}
-        assert {"pnl_local", "pnl_usd"} <= styled
-    finally:
-        conn.close()
-
-
-def test_futures_sub_tab_unpriced_local_pnl_carries_the_row_reason(strict_marks):
-    conn = _make_db()
-    try:
-        _add_future(conn, price_mark=None)
-        table = next(t for t in _find_tables(blotter.scope_layout("futures", conn, "2026-06-20"))
-                     if t.id == "blotter-datatable-futures")
-        trade_rows = [(r, t) for r, t in zip(table.data, table.tooltip_data) if r["row_kind"] == "trade"]
-        row, tip = trade_rows[0]
-        assert row["pnl_local"] is None and row["pnl_usd"] is None
-        assert "no FUTURE_PX mark for CLZ26 Comdty" in tip["pnl_local"]["value"]
-        assert tip["pnl_local"]["value"] == tip["pnl_usd"]["value"]
-    finally:
-        conn.close()
-
-
-def test_futures_sub_tab_on_the_synthetic_sample_book():
-    """The new sample (data/sample/blotter_sample.csv, a synthetic Jason book): every
-    future and LME forward is on the Futures & LME sub-tab with its exchange and its own
-    currency, the options on futures are not, no macro product is anywhere in the Total book,
-    and nothing falls to "Other". Re-pinned 2026-09-24 (Phase 5) when the sample gained 4
-    CMDTY_OPTION and 3 LME_FWD trades (50 in all); the 29 futures rows were checked unchanged."""
-    from pathlib import Path
-
-    from data.ingest import blotter as blotter_parser
-    sample = Path(__file__).resolve().parents[1] / "data" / "sample" / "blotter_sample.csv"
-    conn = sqlite3.connect(":memory:")
-    schema.create_schema(conn)
-    try:
-        blotter_parser.load(str(sample), conn)
-        as_of = "2026-09-24"
-        counts = dict(conn.execute("SELECT product, COUNT(*) FROM trades WHERE trade_date <= ? GROUP BY product",
-                                   (as_of,)).fetchall())
-        assert (counts["FUTURE"], counts["LME_FWD"], counts["CMDTY_OPTION"]) == (29, 3, 4)
-        df = blotter.scope_df(conn, "futures", as_of)
-        assert len(df) == counts["FUTURE"] + counts["LME_FWD"]
-        assert set(df["product"]) == {"FUTURE", "LME_FWD"}
-        assert set(df["pnl_ccy"]) == {"USD", "CNY", "EUR", "GBP", "JPY"}
-        assert (df["exchange"] != "").all()
-        lme = df[df["product"] == "LME_FWD"]
-        assert set(lme["instrument_id"]) == {"LME:CA", "LME:AH", "LME:NI"} and set(lme["pnl_ccy"]) == {"USD"}
-        assert set(lme["qty_unit"]) == {"t"} and set(lme["sector"]) == {"Metals"}
-        total = blotter.scope_df(conn, "total", as_of)
-        assert len(total) == sum(counts.values())
-        assert not set(total["product"]) & {"IRS", "EQ_OPTION"}
-        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, as_of, total)}
-        assert set(rows) == {"FX", "Futures", "LME forwards", "Options", "Total"}
-        assert rows["LME forwards"]["trades"] == 3 and rows["Futures"]["trades"] == 29
-    finally:
-        conn.close()
-
-
-def test_a_manual_fx_swap_lands_in_the_fx_scope_and_the_fx_asset_class():
-    """Manual entry books an FX swap as one trade with 4 legs (FX_NEAR x 2, FX_FAR x 2); it
-    is FX on the FX sub-tab's scope and on the Total book's FX row, never "Other"."""
-    conn = _make_db()
-    try:
-        conn.execute("INSERT INTO trades VALUES ('MANUAL-1','MANUAL','EURUSD','FX_SWAP','MANUAL-1','2026-06-01',"
-                     "1000000,1.10,'ACC','CPTY','','TR','roll','')")
-        conn.executemany("INSERT INTO trade_legs VALUES ('MANUAL-1',?,?,?,?,'2026-06-01',?,?,1)", [
-            (1, "FX_NEAR", "EUR", 1_000_000, "2026-06-20", 1.10), (2, "FX_NEAR", "USD", -1_100_000, "2026-06-20", 1.10),
-            (3, "FX_FAR", "EUR", -1_000_000, "2026-09-20", 1.11), (4, "FX_FAR", "USD", 1_110_000, "2026-09-20", 1.11)])
-        conn.commit()
-        assert "MANUAL-1" in blotter.scope_df(conn, "fx", "2026-06-20")["trade_id"].tolist()
-        total = blotter.scope_df(conn, "total", "2026-06-20")
-        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, "2026-06-20", total)}
-        assert list(rows) == ["FX", "Total"] and rows["FX"]["trades"] == 2
-        table = next(t for t in _find_tables(blotter.scope_layout("total", conn, "2026-06-20", with_notices=False))
-                     if t.id == "blotter-datatable-total")
-        assert next(r for r in table.data if r["trade_id"] == "MANUAL-1")["product"] == "FX swap"
-    finally:
-        conn.close()

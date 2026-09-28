@@ -557,9 +557,9 @@ def test_last_pull_duration_is_in_the_headline_only_when_the_status_file_has_it(
 
 def test_safety_net_timers_follow_the_feed_interval_and_the_pull_poll_does_not(monkeypatch):
     from data.bloomberg import live
-    from ui.tabs import cash_ladder, market_data
-    # the Ladder's and the Market data tab's own timers are one feed cycle, not a typed-in number
-    assert cash_ladder.REFRESH_MS == market_data.REFRESH_MS == live.INTERVAL_SECONDS * 1000
+    from ui.tabs import market_data
+    # the Data tab's own timer is one feed cycle, not a typed-in number
+    assert market_data.REFRESH_MS == live.INTERVAL_SECONDS * 1000
     monkeypatch.setattr(live, "INTERVAL_SECONDS", 900)
     assert feed_controls.safety_refresh_ms() == 900_000
     # the status line under the button re-reads the status file every minute at most ...

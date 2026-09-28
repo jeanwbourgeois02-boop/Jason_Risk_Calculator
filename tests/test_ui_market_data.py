@@ -1212,7 +1212,7 @@ def test_the_tab_is_data_and_reads_health_futures_fx_library_completeness_manual
     # no definitions paragraph left anywhere in the static layout; the manual rule is on hover
     assert "section-kicker" not in rendered and "never official" in rendered
     assert not any(type(c).__name__ == "P" for c in _walk(md.manual_entry_form()))
-    assert "FX & cash" in str(md.diagnostics_panel(None, {})) and "the ladder" not in str(md.diagnostics_panel(None, {}))
+    assert "the ladder" not in str(md.diagnostics_panel(None, {}))
 
 
 def test_sections_with_nothing_to_report_are_one_quiet_line_with_their_definitions_on_hover(book_is_today):

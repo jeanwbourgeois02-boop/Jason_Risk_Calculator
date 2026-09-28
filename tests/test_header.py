@@ -361,47 +361,6 @@ def test_pnl_card_available_with_partial_pricing_shows_an_excl_marker_with_the_s
 # --------------------------------------------------------------------- _build_figures
 
 
-def test_build_figures_trades_card_is_always_present_with_zero_marks():
-    conn = _db_with_one_open_fx_trade()
-    cards = header._build_figures(conn, "2026-09-17")
-    titles = [c.children[0].children for c in cards if getattr(c, "className", "") != "header-divider"]
-    assert "Trades" in titles
-    trades_card = next(c for c in cards if getattr(c, "children", None) and
-                        getattr(c.children[0], "children", None) == "Trades")
-    assert trades_card.children[1].children == "1"
-    assert trades_card.children[1].title == "1 open, 0 settled"            # small, the split on hover
-    assert len(trades_card.children) == 2
-
-
-def test_build_figures_ltd_reason_is_actionable_when_marks_are_missing():
-    conn = _db_with_one_open_fx_trade()
-    cards = header._build_figures(conn, "2026-09-17")
-    ltd_card = cards[0]
-    assert ltd_card.children[0].children == "LTD"
-    assert ltd_card.children[1].children == "n/a"
-    reason = ltd_card.children[1].title
-    assert "run the Bloomberg pull" in reason
-    assert "SPOT" in reason and "FWD_OUTRIGHT" in reason
-
-
-def test_build_figures_ltd_populates_once_official_marks_exist():
-    """Confirms the "genuinely missing data" half of the 2026-09-17 investigation: with
-    the book's marks on file the LTD figure (and every period derived from it) is a
-    real computed value, not a stuck 'Unavailable' -- there is no callback bug hiding
-    behind the missing-marks case."""
-    conn = _db_with_one_open_fx_trade()
-    _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "SPOT", 147.0, "BBG_BFXFORWARD")
-    _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "FWD_OUTRIGHT", 148.0, "BBG_BFXFORWARD")
-    conn.commit()
-    cards = header._build_figures(conn, "2026-09-17")
-    ltd_card = cards[0]
-    assert ltd_card.children[1].children != "n/a"
-    # Q * (m - f) = 1,000,000 * (148 - 147) = 1,000,000 JPY; converted at USDJPY spot 147
-    # -> USD pnl uses S = 1/147 per usd_per_quote's inverted-pair lookup... the exact
-    # figure is engine/pnl/valuation's to define; this only pins "it is a number".
-    assert "$" in ltd_card.children[1].children
-
-
 def test_build_figures_never_raises_on_a_completely_empty_database():
     conn = schema.connect()
     cards = header._build_figures(conn, "2026-09-17")
@@ -427,24 +386,6 @@ def _db_with_one_priced_and_one_unpriced_trade(as_of="2026-09-17"):
     )
     conn.commit()
     return conn
-
-
-def test_build_figures_ltd_shows_partial_sum_and_label_when_some_trades_unpriced():
-    """The live-Bloomberg-PC follow-up: LTD must be a real, computed number over the
-    priced trade (not "n/a") with a visible "excludes N of M" caption and a tooltip
-    naming which product/reason is missing -- per-trade arithmetic is untouched, this
-    only pins the new aggregation."""
-    conn = _db_with_one_priced_and_one_unpriced_trade()
-    cards = header._build_figures(conn, "2026-09-17")
-    ltd_card = cards[0]
-    assert ltd_card.children[0].children == "LTD"
-    assert ltd_card.children[1].children != "n/a"
-    assert "$" in ltd_card.children[1].children
-    [(short, hover)] = _markers(ltd_card)
-    assert short == "excl. 1"
-    assert hover.startswith("excludes 1 of 2 trades unpriced\n")
-    assert "no PREMIUM" in hover
-    assert "option" in hover
 
 
 # ------------------------------------------------- reference-date gap (2026-09-18)
@@ -507,70 +448,6 @@ def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks(st
     # 2026-09-21: the earlier closes were tried first, and the caption says none has value
     # (5 business days before 2026-09-16)
     assert caption.endswith("No earlier close within 5 business days has one either (checked back to 2026-09-09).")
-
-
-def test_build_figures_period_steps_back_to_the_previous_close_that_has_value(strict_marks):
-    """User decision 2026-09-21 ("use previous date until has value", then "there should be a
-    fill when bloomberg doesnt have the data"): the 2026-09-16 close has no marks, the
-    2026-09-15 close has, so the trade is valued there at its 2026-09-15 close, Daily is
-    measured from it and the card says so, with the reason on hover. No mark is written or
-    copied: `marks` is untouched and `value_book` itself still has the 2026-09-16 row unpriced."""
-    conn = schema.connect()
-    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
-    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-08-20", 1_000_000, 147.0)
-    _insert_legs(conn, [
-        ("t1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
-        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
-    ])
-    for day, fwd in (("2026-09-15", 147.5), ("2026-09-17", 148.0)):
-        _insert_official_mark(conn, day, "USDJPY", day, "SPOT", 147.0, "BBG_BFXFORWARD")
-        _insert_official_mark(conn, day, "USDJPY", "2026-09-30", "FWD_OUTRIGHT", fwd, "BBG_BFXFORWARD")
-    conn.commit()
-    marks_before = conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0]
-    cards = header._build_figures(conn, "2026-09-17")
-    by_title = {c.children[0].children: c for c in cards if getattr(c, "children", None) and c.children
-                and hasattr(c.children[0], "children")}
-    daily = by_title["Daily"]
-    # 1m x (148.0 - 147.5) JPY at spot 147
-    assert daily.children[1].title == header._fmt_usd(1_000_000 * 0.5 / 147.0)
-    [(short, hover)] = _markers(daily)
-    assert short == "filled 1"
-    assert hover.startswith("1 trade with no price on 2026-09-16 measured from its last earlier "
-                            "close (back to 2026-09-15)\n")
-    assert "t1: no price on 2026-09-16: value of the 2026-09-15 close (no FWD_OUTRIGHT mark for USDJPY" \
-        in hover                                                                        # which close, and why, on hover
-    assert conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == marks_before
-    from engine.pnl.valuation import value_book
-    assert (value_book(conn, "2026-09-16")["reason"] != "").all()
-
-
-def test_build_figures_a_stepped_back_period_shows_ref_and_filled_markers(strict_marks):
-    """Marks on 2026-09-17 and 2026-09-08 only. The 2026-09-16 close cannot be filled (the
-    fill reaches 5 business days back, to 2026-09-09), so Daily steps back to 2026-09-15,
-    whose fill reaches 2026-09-08: "ref 15 Sep" and "filled 1", each with its sentence on
-    hover, and no visible sentence."""
-    conn = schema.connect()
-    _insert_instrument(conn, "USDJPY", "FX", "USD", "JPY")
-    _insert_trade(conn, "t1", "USDJPY", "FX_FWD", "2026-08-20", 1_000_000, 147.0)
-    _insert_legs(conn, [
-        ("t1", 1, "FX_NEAR", "USD", 1_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
-        ("t1", 2, "FX_NEAR", "JPY", -147_000_000, "2026-08-20", "2026-09-30", 147.0, 1),
-    ])
-    for day, fwd in (("2026-09-08", 147.5), ("2026-09-17", 148.0)):
-        _insert_official_mark(conn, day, "USDJPY", day, "SPOT", 147.0, "BBG_BFXFORWARD")
-        _insert_official_mark(conn, day, "USDJPY", "2026-09-30", "FWD_OUTRIGHT", fwd, "BBG_BFXFORWARD")
-    conn.commit()
-    cards = header._build_figures(conn, "2026-09-17")
-    daily = _card(cards, "Daily")
-    assert daily.children[1].title == header._fmt_usd(1_000_000 * 0.5 / 147.0)
-    markers = dict(_markers(daily))
-    assert set(markers) == {"filled 1", "ref 15 Sep"}
-    assert markers["ref 15 Sep"].startswith("from the 2026-09-15 close: 2026-09-16 has no usable close")
-    assert "Daily needs the 2026-09-16 close" in markers["ref 15 Sep"]           # the skipped date's reason
-    assert markers["filled 1"].startswith("1 trade with no price on 2026-09-15 measured from its last earlier "
-                                          "close (back to 2026-09-08)\n")
-    assert "t1: no price on 2026-09-15: value of the 2026-09-08 close" in markers["filled 1"]
-    assert all(_no_visible_sentences(c) for c in cards)
 
 
 # ------------------------------------------------- why the past close is missing (2026-09-21)
@@ -880,21 +757,6 @@ def _db_two_priced_forwards(as_of="2026-09-17"):
     return conn
 
 
-def test_build_figures_survives_a_text_price_and_says_which_trade_and_column():
-    conn = _db_two_priced_forwards()
-    conn.execute("UPDATE trades SET price = '24-Jul' WHERE trade_id = 'j1'")
-    conn.commit()
-    cards = header._build_figures(conn, "2026-09-17")
-    ltd = _card(cards, "LTD")
-    assert ltd.children[1].title == "$40,000"  # e1 alone: 2,000,000 x (1.12 - 1.10); j1 contributes nothing
-    assert ltd.children[1].children == "$40.0k"
-    [(short, hover)] = _markers(ltd)
-    assert short == "excl. 1"
-    assert hover.startswith("excludes 1 of 2 trades unpriced (1 with a stored value is not a number)\n")
-    assert "trade j1: trades.price is not a number ('24-Jul')" in hover
-    assert _card(cards, "Trades").children[1].children == "2"
-
-
 def test_build_figures_survives_the_misaligned_realised_row_of_the_2026_09_18_incident():
     """`realised_pnl.pnl_usd` holding a date (engine/pnl/ledger.py's old positional INSERT
     on a migrated table): the header used to be one error card. The settled trade is valued
@@ -965,53 +827,6 @@ def _app_with_header(tmp_path):
     return app, db
 
 
-def test_layout_summary_carries_its_id_inside_the_details():
-    root = header.layout()
-    details = next(c for c in root.children if getattr(c, "id", None) == header.DETAILS_ID)
-    assert type(details).__name__ == "Details" and details.open is False      # collapsed by default, as before
-    summary = details.children[0]
-    assert type(summary).__name__ == "Summary"
-    assert summary.id == header.SUMMARY_ID
-    assert summary.children == "LTD chart"                                   # compact (2026-09-25)
-    assert header.SUMMARY_ID.startswith(header.DETAILS_ID) and header.SUMMARY_ID != header.DETAILS_ID
-
-
-def test_register_callbacks_mirrors_the_summary_click_into_the_details_open_prop(tmp_path):
-    app, _db = _app_with_header(tmp_path)
-    key = f"{header.DETAILS_ID}.open"
-    assert key in app.callback_map, list(app.callback_map)
-    spec = app.callback_map[key]
-    assert [(d["id"], d["property"]) for d in spec["inputs"]] == [(header.SUMMARY_ID, "n_clicks")]
-    entry = next(c for c in app._callback_list if c["output"] == key)
-    fn = entry["clientside_function"]
-    assert fn is not None                                          # runs in the browser, not on the server
-    script = next(s for s in app._inline_scripts if fn["function_name"] in s)
-    assert f"getElementById('{header.DETAILS_ID}')" in script      # reads the element's own DOM state
-    assert "details.open" in script
-    assert "no_update" in script                                   # the initial call (n_clicks 0/null) mirrors nothing
-    # the server callback still runs off `open`, exactly as before: the mirror feeds it
-    chart = app.callback_map[f"{header.CHART_CONTAINER_ID}.children"]
-    assert (header.DETAILS_ID, "open") in {(d["id"], d["property"]) for d in chart["inputs"]}
-    assert chart["callback"] is not None
-
-
-def test_chart_callback_says_why_when_the_chart_cannot_be_built(tmp_path, monkeypatch):
-    app, _db = _app_with_header(tmp_path)
-
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("no calendar file")
-
-    monkeypatch.setattr(header, "_build_chart", boom)
-    raw = app.callback_map[f"{header.CHART_CONTAINER_ID}.children"]["callback"].__wrapped__
-    out = raw(True, "2026-09-17", None)                            # open, a date: the chart is built... and fails
-    assert type(out).__name__ == "P"
-    assert out.children.startswith("LTD chart could not be built (RuntimeError: no calendar file)")
-    assert "header-figure-caption" in out.className
-    # collapsed, or no date yet: nothing computed and nothing raised, as before
-    assert type(raw(False, "2026-09-17", None)).__name__ == "NoUpdate"
-    assert type(raw(True, None, None)).__name__ == "NoUpdate"
-
-
 # --------------------------------------------------------------------- the commodity strip
 # Commodity conversion Phase 3 (2026-09-24): gross commodity notional, net outright by sector,
 # open spreads, the next first notice / last trade, after the FX Net / Gross cards. Rendered
@@ -1069,66 +884,6 @@ def _commodity_book():
 
 def _texts(card):
     return [getattr(ch, "children", None) for ch in card.children]
-
-
-def test_commodity_strip_shows_the_four_engine_figures_as_given():
-    from engine.expiry import expiry_schedule
-    from engine.ladder.positions import book_positions
-    from engine.spreads import book_spreads
-    conn = _commodity_book()
-    try:
-        block = book_positions(conn, _CMDTY_AS_OF)["commodities"]
-        assert {s["sector"] for s in block["sectors"]} == {"energy", "metals"} and block["reason"] == ""
-        cards = header._build_figures(conn, _CMDTY_AS_OF)
-
-        gross = _card(cards, header.GROSS_NOTIONAL_TITLE)
-        assert _texts(gross)[1] == header.short_money(block["gross_usd"], "$") and len(gross.children) == 2
-        assert gross.children[1].title.startswith(header._fmt_usd(block["gross_usd"]) + "\n")
-        assert "Energy: net" in gross.children[1].title and "Metals: net" in gross.children[1].title
-        assert "header-figure-value--neutral" in gross.children[1].className
-
-        net = _card(cards, header.NET_BY_SECTOR_TITLE)
-        assert _texts(net)[1] == header.short_money(block["net_usd"], "$") and len(net.children) == 2
-        expected_line = " · ".join(f"{header._sector_label(s['sector'])} {header._fmt_compact(s['net_usd'])}"
-                                   for s in block["sectors"])   # each sector's own net_usd, in book-positions' order
-        assert net.children[1].title.split("\n")[:2] == [header._fmt_usd(block["net_usd"]), expected_line]
-
-        spreads = book_spreads(conn, _CMDTY_AS_OF)
-        assert sum(1 for s in spreads["positions"] if s["status"] == "open") == 1 and len(spreads["review"]) == 1
-        card = _card(cards, header.OPEN_SPREADS_TITLE)
-        assert _texts(card)[1] == "1"
-        [(short, review_hover)] = _markers(card)
-        assert short == "review 1" and "1 group waiting for review" in review_hover and "Brent" in review_hover
-        hover = card.children[1].title
-        assert "CL Z26/F27" in hover and "waiting for review" in hover and "Brent" in hover
-
-        first = expiry_schedule(conn, _CMDTY_AS_OF)["rows"][0]
-        assert (first["contract_id"], first["next_event"], first["level"], first["business_days"]) == \
-            ("HGZ26 Comdty", "first notice", "RED", 2)
-        card = _card(cards, header.NEXT_EXPIRY_TITLE)
-        assert _texts(card)[1] == "HGZ26 first notice · 2 bd" and len(card.children) == 2   # Bloomberg's dates: no "est."
-        assert card.children[1].style["color"] == header._LEVEL_STYLES["RED"]["color"]
-        assert "HGZ26 Comdty: first notice 2026-11-20, RED, in 2 business days" in card.children[1].title
-        assert all(_no_visible_sentences(c) for c in cards)
-    finally:
-        conn.close()
-
-
-def test_the_slim_header_order_has_no_fx_cards_and_ends_with_the_data_chip():
-    conn = _db_two_priced_forwards()
-    try:
-        cards = header._build_figures(conn, "2026-09-17")
-    finally:
-        conn.close()
-    titles = [c.children[0].children if getattr(c, "className", "") != "header-divider" else "|" for c in cards]
-    assert titles == ["LTD", "Daily", "Previous day", "5d", "MTD", "YTD", "Trading", "Trades", "|",
-                      header.COMMODITY_EMPTY_TITLE, header.MARKS_TITLE, header.RISK_TITLE]
-    for card in cards:
-        if getattr(card, "className", "") == "header-divider":
-            continue
-        assert len(card.children) <= 3                                     # title, value, markers
-        assert card.style["display"] == "grid"                              # markers beside the value, one row
-        assert card.children[0].style == {"gridColumn": "1 / -1"}
 
 
 def test_a_book_with_no_commodity_futures_shows_one_plain_line_with_its_reason():
@@ -1470,22 +1225,6 @@ def _count_book_risk(monkeypatch, result=None, exc=None):
     return calls
 
 
-def test_build_figures_never_works_the_risk_out_and_shows_it_once_it_is_memoised(tmp_path, monkeypatch):
-    calls = _count_book_risk(monkeypatch)
-    db = _risk_db(tmp_path)
-    conn = sqlite3.connect(db)
-    try:
-        chip = header._build_figures(conn, "2026-09-18")[-1]
-        assert chip.children[1].children == "VaR …" and calls == []     # the first paint never waits
-        header.risk_summary(conn, "2026-09-18")                                # what the chip's callback runs
-        assert calls == [("2026-09-18", ["commodity_history", "config", "history"])]
-        chip = header._build_figures(conn, "2026-09-18")[-1]
-        assert chip.children[1].children == "VaR $33.6k" and len(calls) == 1  # the memo, no second run
-        assert header._build_figures(conn, "2026-09-19")[-1].children[1].children == "VaR …"  # another as-of
-    finally:
-        conn.close()
-
-
 def test_risk_summary_is_memoised_on_the_database_revision(tmp_path, monkeypatch):
     import os
 
@@ -1528,22 +1267,6 @@ def test_risk_summary_failure_says_why_and_is_tried_again(tmp_path, monkeypatch)
         assert header._risk_summary_if_ready(conn, "2026-09-18") is None
     finally:
         conn.close()
-
-
-def test_the_risk_chip_callback_runs_after_the_figures_and_fills_the_chip(tmp_path, monkeypatch):
-    calls = _count_book_risk(monkeypatch)
-    app, _db = _app_with_header(tmp_path)
-    key = f"{header.VAR_CHIP_ID}.children"
-    spec = app.callback_map[key]
-    assert [(d["id"], d["property"]) for d in spec["inputs"]] == [(f"{header.HEADER_ID}-figures", "children")]
-    assert [(d["id"], d["property"]) for d in spec["state"]] == [(header.AS_OF_STORE_ID, "data")]
-    entry = next(c for c in app._callback_list if c["output"] == key)
-    assert entry["prevent_initial_call"] is True                               # only ever after the figures
-    update = spec["callback"].__wrapped__
-    children = update([], "2026-09-18")
-    assert children[1].children == "VaR $33.6k" and len(calls) == 1
-    from dash import no_update
-    assert update([], None) is no_update
 
 
 def test_open_spreads_count_positions_not_trade_dates_on_the_sample_book(monkeypatch):

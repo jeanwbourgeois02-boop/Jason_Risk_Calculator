@@ -849,25 +849,6 @@ def test_per_pair_delta_xauusd_flagged_commodity_not_cross():
     assert math.isclose(df.loc["XAUUSD", "notional_usd"], 1_750_000.0)
 
 
-def test_ui_exposure_combined_risk_frame_tags_xau_as_commodity_kind():
-    from engine.ladder.exposure import build_exposure
-    from ui.tabs.exposure import combined_risk_frame
-
-    def rec(tid, date, ccy, local):
-        return {"trade_id": tid, "settlement_date": date, "book": "HA", "currency": ccy, "local_amount": local}
-
-    def rate(value):
-        return {"rate": value, "inverted": False, "source": "TEST", "timestamp": "t", "stale": False}
-
-    recs = [rec("G1", "2026-10-01", "XAU", 500.0), rec("A1", "2026-10-01", "AUD", 1_000_000.0)]
-    res = build_exposure(recs, {"XAU": rate(3500.0), "AUD": rate(0.66)})
-    frame = combined_risk_frame(res, scenarios={})
-    xau_row = frame[frame["name"] == "XAU"].iloc[0]
-    aud_row = frame[frame["name"] == "AUD"].iloc[0]
-    assert xau_row["kind"] == "commodity"
-    assert aud_row["kind"] == "currency"
-
-
 # --------------------------------------------------------------------------- item 3: EURSEK split
 # User complaint 2026-09-17: "the eursek has not been split well - needs to be broken
 # down into sek and eur." Audited engine/ladder/ladder.py (_DELTA_SQL, cash_ladder),
@@ -944,7 +925,7 @@ def test_eursek_cash_ladder_rows_are_per_currency_not_per_pair():
 def test_eursek_build_exposure_both_legs_priced_independently():
     """engine.ladder.exposure.build_exposure level (already covered for EURSEK in
     tests/test_exposure.py::test_cross_currency_trade_no_usd_leg_priced_at_spot); pinned
-    here too since it is the function ui/tabs/exposure.py actually renders from."""
+    here too since it was the function the FX & cash tab rendered from."""
     from engine.ladder.exposure import build_exposure
 
     recs = [
@@ -962,93 +943,3 @@ def test_eursek_build_exposure_both_legs_priced_independently():
     sek = res.summary.set_index("currency").loc["SEK"]
     assert math.isclose(eur["usd_delta"], 1_100_000.0)
     assert math.isclose(sek["usd_delta"], -11_000_000.0 / 10.50)
-
-
-# --------------------------------------------------------------------------- ui/tabs/exposure.py: Position table
-def test_pair_position_frame_labels_cross_and_commodity_and_keeps_spot_precision():
-    from ui.tabs.exposure import pair_position_frame
-
-    df = pd.DataFrame([
-        {"instrument_id": "AUDUSD", "base_ccy": "AUD", "quote_ccy": "USD", "cross": False,
-         "commodity": False, "spot": 0.66, "notional_base": 660_000.0, "notional_usd": -660_000.0,
-         "move_1pct_usd": 6_600.0},
-        {"instrument_id": "EURSEK", "base_ccy": "EUR", "quote_ccy": "SEK", "cross": True,
-         "commodity": False, "spot": 11.05, "notional_base": 1_100_000.0, "notional_usd": 1_100_000.0,
-         "move_1pct_usd": 11_000.0},
-        {"instrument_id": "XAUUSD", "base_ccy": "XAU", "quote_ccy": "USD", "cross": False,
-         "commodity": True, "spot": float("nan"), "notional_base": 1_750_000.0,
-         "notional_usd": -1_750_000.0, "move_1pct_usd": 17_500.0},
-    ])
-    frame = pair_position_frame(df)
-    labels = dict(zip(df["instrument_id"], frame["pair"]))
-    assert labels["AUDUSD"] == "AUDUSD"
-    assert labels["EURSEK"] == "EURSEK (cross)"
-    assert labels["XAUUSD"] == "XAUUSD (metal)"
-    # spot kept at 6 dp, never thousands-rounded to an integer (0.66 -> "0" would lose
-    # all information for a sub-1.0 quote).
-    aud_spot = frame.loc[frame["pair"] == "AUDUSD", "spot"].iloc[0]
-    assert aud_spot == 0.66   # the number itself; the table prints it at 6 dp
-    xau_spot = frame.loc[frame["pair"] == "XAUUSD (metal)", "spot"].iloc[0]
-    assert xau_spot is None  # NaN spot renders blank, never a fabricated rate
-
-
-def test_pair_position_frame_empty_and_none_render_placeholder_not_crash():
-    from ui.tabs.exposure import pair_position_frame, pair_position_table
-
-    assert pair_position_frame(pd.DataFrame()).empty
-    div_none = pair_position_table(None)
-    div_empty = pair_position_table(pd.DataFrame())
-    assert "Position (per pair, dollar convention)" in str(div_none)
-    assert "No open FX forward/spot/swap pairs" in str(div_none)
-    assert "No open FX forward/spot/swap pairs" in str(div_empty)
-
-
-def test_pair_position_table_renders_both_notional_columns_labelled():
-    from ui.tabs.exposure import pair_position_table
-
-    df = pd.DataFrame([
-        {"instrument_id": "AUDUSD", "base_ccy": "AUD", "quote_ccy": "USD", "cross": False,
-         "commodity": False, "spot": 0.66, "notional_base": 660_000.0, "notional_usd": -660_000.0,
-         "move_1pct_usd": 6_600.0},
-    ])
-    section = pair_position_table(df)
-    names = [c["name"] for c in section.children[1].columns]
-    assert "Notional (base ccy)" in names
-    assert "USD notional (USD sign: + long USD)" in names
-    row = section.children[1].data[0]
-    assert row["notional_base"] == 660_000
-    assert row["notional_usd"] == -660_000
-
-
-def test_net_gross_usd_passes_through_commodities(tmp_path):
-    from data.ingest import schema as ingest_schema
-    from ui.tabs.cash_ladder import net_gross_usd
-
-    conn = ingest_schema.connect(str(tmp_path / "risk.db"))
-    _insert_instrument(conn, "AUDUSD", "AUD", "USD")
-    _insert_instrument(conn, "XAUUSD", "XAU", "USD")
-    conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("g1", "XLSX", "XAUUSD", "FX_FWD", "g1", AS_OF, 500.0, 3500.0,
-         "A", "C", "S", "T", "synthetic", ""),
-    )
-    _insert_leg(conn, "g1", 1, "FX_NEAR", "XAU", 500.0, "2026-08-20")
-    _insert_leg(conn, "g1", 2, "FX_NEAR", "USD", -1_750_000.0, "2026-08-20")
-    conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", AS_OF, 1_000_000.0, 0.66,
-         "A", "C", "S", "T", "synthetic", ""),
-    )
-    _insert_leg(conn, "a1", 1, "FX_NEAR", "AUD", 1_000_000.0, "2026-08-20")
-    _insert_leg(conn, "a1", 2, "FX_NEAR", "USD", -660_000.0, "2026-08-20")
-    _insert_mark(conn, AS_OF, "AUDUSD", AS_OF, "SPOT", 0.66, "BBG_BFXFORWARD")
-    _insert_mark(conn, AS_OF, "XAUUSD", AS_OF, "SPOT", 3500.0, "BBG_BFXFORWARD")
-    conn.commit()
-
-    result = net_gross_usd(conn, AS_OF)
-    assert result["available"] is True
-    assert math.isclose(result["net"], 660_000.0)  # AUD only; XAU excluded
-    assert len(result["commodities"]) == 1
-    assert result["commodities"][0]["currency"] == "XAU"
-    assert math.isclose(result["commodities"][0]["usd_delta"], 1_750_000.0)
-

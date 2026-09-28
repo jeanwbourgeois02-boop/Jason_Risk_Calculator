@@ -99,58 +99,19 @@ def _ids(component):
     return found
 
 
-EIGHT_TABS = ["Book", "Spreads", "Curve", "Risk", "Expiries", "Blotter", "FX & cash", "Data"]
-EIGHT_KEYS = ["book", "spreads", "curve", "risk", "expiries", "blotter", "ladder", "market-data"]
-
-
-def test_eight_tabs_in_order_and_the_app_opens_on_book():
-    """Screens redesign (user, 2026-09-25): Book (Phase B, the app's home), Spreads, Curve,
-    Risk, Expiries, Blotter, FX & cash (the former Ladder), Data (the former Market data); the
-    app opens on Book. Each tab's value is its stable key, never its label."""
-    from dash import dcc
-    assert uiapp.VISIBLE_TABS == EIGHT_TABS
-    assert [uiapp.TAB_KEYS[label] for label in EIGHT_TABS] == EIGHT_KEYS
-    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
-    tabs = layout.children[0].children[0]
-    assert isinstance(tabs, dcc.Tabs)
-    assert [t.label for t in tabs.children] == EIGHT_TABS
-    assert [t.value for t in tabs.children] == EIGHT_KEYS
-    assert tabs.value == "book"
+# The tab list itself is pinned in tests/test_ui_smoke.py; here only its shape is read.
+TABS = list(uiapp.VISIBLE_TABS)
+KEYS = [uiapp.TAB_KEYS[label] for label in TABS]
 
 
 def test_tab_ids_are_stable_keys_with_no_ampersand_or_space():
-    """A renamed tab keeps its body id: FX & cash is still tab-body-ladder, Data still
+    """A renamed tab keeps its body id: Timing & cash is still tab-body-expiries, Data still
     tab-body-market-data, so nothing keyed on a body id moves."""
-    assert uiapp.tab_body_id("FX & cash") == "tab-body-ladder"
+    assert uiapp.tab_body_id("Timing & cash") == "tab-body-expiries"
     assert uiapp.tab_body_id("Data") == "tab-body-market-data"
-    for label in EIGHT_TABS:
+    for label in TABS:
         body_id = uiapp.tab_body_id(label)
         assert "&" not in body_id and " " not in body_id and body_id == body_id.lower()
-
-
-def test_layout_carries_the_risk_body_and_its_container():
-    from ui.tabs import risk
-    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
-    bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
-    body_ids = [getattr(b, "id", None) for b in bodies.children]
-    assert body_ids == ["tab-body-book", "tab-body-spreads", "tab-body-curve", "tab-body-risk", "tab-body-expiries",
-                        "tab-body-blotter", "tab-body-ladder", "tab-body-market-data"]
-    risk_body = bodies.children[EIGHT_TABS.index("Risk")]
-    assert risk_body.className == "tab-body"
-    inside = _ids(risk_body)
-    assert risk.BODY_ID in inside                # "risk-body": the container the callback fills
-    assert risk.REFRESH_ID in inside             # "risk-refresh": its own safety interval
-
-
-def test_risk_tab_title_names_the_ladders_default_date(monkeypatch):
-    """Same default date as the Ladder (today in New York): the Risk title says which day
-    the header's as-of store starts on."""
-    from ui.tabs import cash_ladder
-    monkeypatch.setattr(cash_ladder, "today_ny", lambda: "2026-09-22")
-    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
-    bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
-    texts = [c.children for c in _walk(bodies.children[EIGHT_TABS.index("Risk")]) if isinstance(getattr(c, "children", None), str)]
-    assert any("2026-09-22" in t and "as-of" in t for t in texts)
 
 
 def test_create_app_registers_the_risk_callback_and_the_show_hide_covers_its_body(tmp_path):
@@ -162,29 +123,12 @@ def test_create_app_registers_the_risk_callback_and_the_show_hide_covers_its_bod
     inputs = {(d["id"], d["property"]) for d in app.callback_map[key]["inputs"]}
     assert inputs == {(header.AS_OF_STORE_ID, "data"), (revision.DATA_REVISION_ID, "data"),
                       (risk.REFRESH_ID, "n_intervals")}
-    # The one show/hide callback toggles all eight bodies, the Risk one included.
+    # The one show/hide callback toggles every body, the Risk one included.
     style_key = [k for k in app.callback_map if k.startswith("..tab-body-book.style")]
     assert style_key and "tab-body-risk.style" in style_key[0]
     wrapped = app.callback_map[style_key[0]]["callback"]
     toggle = getattr(wrapped, "__wrapped__", wrapped)    # the raw function, not Dash's context wrapper
-    assert toggle("risk") == [{} if label == "Risk" else {"display": "none"} for label in EIGHT_TABS]
-
-
-def test_curve_and_expiries_bodies_carry_their_containers_and_todays_date(monkeypatch):
-    """Both commodity tabs follow the header's as-of like Risk: no picker, the Ladder's
-    default date (today in New York) in their titles, their body and safety interval
-    inside their own always-present tab body."""
-    from ui.tabs import cash_ladder, curve, expiries
-    monkeypatch.setattr(cash_ladder, "today_ny", lambda: "2026-09-24")
-    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
-    bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
-    for label, module in (("Curve", curve), ("Expiries", expiries)):
-        body = bodies.children[EIGHT_TABS.index(label)]
-        assert body.id == f"tab-body-{label.lower()}" and body.className == "tab-body"
-        inside = _ids(body)
-        assert module.BODY_ID in inside and module.REFRESH_ID in inside
-        texts = [c.children for c in _walk(body) if isinstance(getattr(c, "children", None), str)]
-        assert any("2026-09-24" in t and "as-of" in t for t in texts)
+    assert toggle("risk") == [{} if label == "Risk" else {"display": "none"} for label in TABS]
 
 
 def test_create_app_registers_curve_and_expiries_with_no_duplicate_outputs(tmp_path):
@@ -205,49 +149,8 @@ def test_create_app_registers_curve_and_expiries_with_no_duplicate_outputs(tmp_p
     assert "tab-body-curve.style" in style_key and "tab-body-expiries.style" in style_key
     wrapped = app.callback_map[style_key]["callback"]
     toggle = getattr(wrapped, "__wrapped__", wrapped)
-    for key in EIGHT_KEYS:
-        assert toggle(key) == [{} if other == key else {"display": "none"} for other in EIGHT_KEYS]
-
-
-# ------------------------------------------------------------ the Spreads tab (Phase 3, 2026-09-24)
-# ui/tabs/spreads.py is ui-spreads'; the shell places it after Curve, gives it the Ladder's
-# default date (no picker: it follows the header's as-of store, like Curve and Expiries) and
-# registers its callbacks next to the other tabs'. Written against the interface ui-spreads
-# shares with ui/tabs/expiries.py: build_layout, register_callbacks(app, get_db_path), BODY_ID.
-
-def test_spreads_tab_follows_book_and_its_body_carries_its_container(monkeypatch):
-    from ui.tabs import cash_ladder, spreads
-    monkeypatch.setattr(cash_ladder, "today_ny", lambda: "2026-09-24")
-    assert EIGHT_TABS.index("Book") == 0 and EIGHT_TABS.index("Spreads") == 1
-    layout = uiapp.build_layout(uiapp.empty_summary("database not found: missing"))
-    bodies = next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies")
-    body = bodies.children[EIGHT_TABS.index("Spreads")]
-    assert body.id == "tab-body-spreads" and body.className == "tab-body"
-    assert spreads.BODY_ID in _ids(body)
-    assert spreads.BODY_ID.startswith("spreads-")
-
-
-def test_create_app_registers_the_spreads_tab_once_with_the_header_as_of(tmp_path, monkeypatch):
-    from ui import revision
-    from ui.tabs import header, spreads
-    calls = []
-    original = spreads.register_callbacks
-
-    def _counted(app, get_db_path):
-        calls.append(get_db_path())
-        return original(app, get_db_path)
-
-    monkeypatch.setattr(spreads, "register_callbacks", _counted)
-    app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)
-    assert calls == [tmp_path / "risk.db"]
-    key = f"{spreads.BODY_ID}.children"
-    assert key in app.callback_map, "spreads.register_callbacks did not wire the body"
-    inputs = {(d["id"], d["property"]) for d in app.callback_map[key]["inputs"]}
-    assert {(header.AS_OF_STORE_ID, "data"), (revision.DATA_REVISION_ID, "data")} <= inputs
-    style_key = next(k for k in app.callback_map if k.startswith("..tab-body-book.style"))
-    assert "tab-body-spreads.style" in style_key and "tab-body-blotter.style" in style_key
-    outputs = [o for k in app.callback_map for o in k.strip(".").split("...") if "@" not in o]
-    assert len(outputs) == len(set(outputs))
+    for key in KEYS:
+        assert toggle(key) == [{} if other == key else {"display": "none"} for other in KEYS]
 
 
 # ------------------------------------------------ shared controls: no retired mark source (2026-09-24)
@@ -288,11 +191,14 @@ def test_tab_from_link_click_ignores_first_render_unknown_keys_and_other_ids():
     assert uiapp.tab_from_link_click(["junk"]) is None
     # A fresh link rendered with 0 beside a real click: the click wins.
     assert uiapp.tab_from_link_click([{"prop_id": _link_prop("risk", "a"), "value": 0},
-                                      {"prop_id": _link_prop("spreads", "b"), "value": 2}]) == "spreads"
+                                      {"prop_id": _link_prop("pnl", "b"), "value": 2}]) == "pnl"
+    # a hidden tab's key (Spreads, FX & cash left the bar in wave 3) is not a destination
+    for hidden in uiapp.HIDDEN_TAB_KEYS.values():
+        assert uiapp.tab_from_link_click([{"prop_id": _link_prop(hidden), "value": 1}]) is None
 
 
 def test_every_tab_key_is_reachable_by_a_link():
-    for key in EIGHT_KEYS:
+    for key in KEYS:
         assert uiapp.tab_from_link_click([{"prop_id": _link_prop(key), "value": 1}]) == key
 
 

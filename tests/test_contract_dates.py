@@ -118,7 +118,7 @@ def test_upload_applies_bloombergs_dates_and_says_so(tmp_path):
     db = tmp_path / 'risk.db'
     other = 'CLM27 Comdty'  # a month the sample blotter does not trade, so only the MANUAL future holds it
     with closing(schema.connect(db)) as conn:
-        _book_future(conn, instrument_id=other)  # a MANUAL future: it survives the upload
+        _book_future(conn, instrument_id=other)  # a MANUAL future: its instrument and marks survive the upload
         _mark(conn, '2026-09-10', ESTIMATE, 70.5, iid=other)
         _store_bbg(conn, contract_id=other)
 
@@ -127,7 +127,9 @@ def test_upload_applies_bloombergs_dates_and_says_so(tmp_path):
     assert "Contract dates: 1 future(s) moved to Bloomberg's last trade date" in report['message']
     assert f"{other} {ESTIMATE} -> {BBG}" in report['message']
     with closing(sqlite3.connect(db)) as conn:
-        assert conn.execute("SELECT settle_date FROM trade_legs WHERE trade_id = 'MANUAL-1'").fetchone()[0] == BBG
+        # the MANUAL trade itself is gone: an upload replaces every trade (user, 2026-09-28)
+        assert conn.execute("SELECT COUNT(*) FROM trade_legs WHERE trade_id = 'MANUAL-1'").fetchone()[0] == 0
+        assert conn.execute("SELECT expiry_date FROM instruments WHERE instrument_id = ?", (other,)).fetchone()[0] == BBG
         assert conn.execute("SELECT settle_date FROM marks WHERE instrument_id = ?", (other,)).fetchone()[0] == BBG
 
 

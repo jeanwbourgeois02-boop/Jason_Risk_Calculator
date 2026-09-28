@@ -29,8 +29,11 @@ def _probe_by_port(mapping):
 
 
 def _run_server_capture(monkeypatch):
-    """Patch make_server / Thread so main() starts a fake server and exits on first join."""
+    """Patch make_server / Thread so main() starts a fake server and exits on first join.
+    The fake server never answers the identity route, so the readiness poll (60 s, since
+    2026-09-28) is stubbed as ready; its own test is `test_launcher_starts_before_opening_browser_and_closes`."""
     made = []
+    monkeypatch.setattr(launch, 'wait_until_ready', lambda *a, **k: True)
 
     def make_server(host, port, wsgi, threaded=True):
         made.append(port)
@@ -115,6 +118,11 @@ def test_occupied_ports_skipped_and_all_occupied_fails(monkeypatch, capsys):
     worker.is_alive.return_value = True
     worker.join.side_effect = KeyboardInterrupt
     monkeypatch.setattr(launch.threading, 'Thread', lambda **k: worker)
+    # the port-owner lookup runs netstat through subprocess, whose pipe readers are threads: the
+    # Thread patch above would hand it the worker mock, so it is stubbed here; and the fake
+    # server never answers the readiness poll
+    monkeypatch.setattr(launch, '_port_owner_pid', lambda port: None)
+    monkeypatch.setattr(launch, 'wait_until_ready', lambda *a, **k: True)
     assert launch.main([]) == 0
     assert calls == [8051, 8052]
     assert 'occupied by another application' in capsys.readouterr().out
@@ -133,6 +141,12 @@ def test_launcher_starts_before_opening_browser_and_closes(monkeypatch):
     worker.is_alive.return_value = True
     worker.join.side_effect = KeyboardInterrupt
     monkeypatch.setattr(launch.threading, 'Thread', lambda **k: worker)
+
+    def ready(url, me, **kwargs):
+        worker.start.assert_called_once()       # the readiness poll runs only once the server thread is up
+        assert url == 'http://127.0.0.1:8050'
+        return True
+    monkeypatch.setattr(launch, 'wait_until_ready', ready)
 
     def browser(url):
         worker.start.assert_called_once()

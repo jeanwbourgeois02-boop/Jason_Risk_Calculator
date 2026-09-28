@@ -137,8 +137,8 @@ def test_publish_if_changed_never_republishes_the_value_a_store_already_holds():
 
 # --------------------------------------------------------------------------- wiring
 def test_every_view_listens_to_the_revision_signal(tmp_path):
-    """The point of the change: header, Ladder, Blotter and Market data all re-run when
-    the data changes, so nothing needs a browser reload."""
+    """The point of the change: the header and every tab re-run when the data changes, so
+    nothing needs a browser reload (the Ladder left on 2026-09-28)."""
     app = uiapp.create_app(db_path=_db(tmp_path), start_feed=False)
     listeners = {}
     for key, spec in app.callback_map.items():
@@ -146,7 +146,7 @@ def test_every_view_listens_to_the_revision_signal(tmp_path):
         if revision.DATA_REVISION_ID in ids or revision.BOOK_REVISION_ID in ids:
             listeners[key] = ids
     joined = " ".join(listeners)
-    for output in (f"{header.HEADER_ID}-figures", "cash-ladder-table-container", "blotter-content",
+    for output in (f"{header.HEADER_ID}-figures", "book-body", "pnl-body", "blotter-content",
                    "market-data-body", "blotter-datatable-total",
                    # refreshed IN PLACE rather than by a rebuild of their sub-tab (2026-09-18):
                    "blotter-notices", "blotter-strip-options",

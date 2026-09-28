@@ -245,176 +245,13 @@ def test_the_commodities_sit_above_the_fx_lines_and_the_fx_lines_are_unchanged(m
     assert next(r for r in fx_footer.data if r["position"].startswith("FX net"))["usd"] == 1_000_000.0   # commodities not in it
 
 
-def test_total_book_positions_render_the_engine_commodity_figures_on_a_real_book():
-    """Integration: the book's own futures through book-positions -> curve-positions, rendered
-    as the engine gives them (the figures compared are the engine's, never recomputed here)."""
-    from engine.ladder.positions import book_positions
-    conn = _book()
-    try:
-        block = book_positions(conn, AS_OF)["commodities"]
-        assert block["available"] and block["sectors"], block.get("reason")
-        layout = blotter.scope_layout("total", conn, AS_OF, with_notices=False)
-        tables = {t.id: t for t in _tables(layout)}
-        body = tables[blotter.COMMODITY_POSITIONS_TABLE_ID].data
-        sectors = [r["position"] for r in body if r["kind"] == "sector"]
-        assert sorted(sectors) == ["Energy", "Metals"]
-        by_name = {r["position"].strip(): r for r in body}
-        for s in block["sectors"]:
-            for c in s["commodities"]:
-                line = by_name[c["name"]]
-                # summary USD in k / m (Phase A): the engine's figure in whole units, never recomputed
-                assert (line["net_lots"], line["net_usd"], line["gross_usd"]) == (
-                    c["net_lots"], round(c["net_usd"]), round(c["gross_usd"]))
-        total = tables[blotter.COMMODITY_POSITIONS_TABLE_ID + "-footer"].data[0]
-        assert (total["net_usd"], total["gross_usd"]) == (round(block["net_usd"]), round(block["gross_usd"]))
-        cny = tables[blotter.COMMODITY_CCY_TABLE_ID].data[0]
-        assert (cny["currency"], cny["pnl_local"], cny["pnl_usd"]) == (
-            "CNY", round(block["currency_exposure"]["CNY"]["pnl_local"]),
-            round(block["currency_exposure"]["CNY"]["pnl_usd"]))
-        assert cny["pnl_local"] == pytest.approx(-2 * 5 * (80_000 - 79_000))   # the engine's figure is the book's
-        order = list(tables)
-        assert order.index(blotter.COMMODITY_POSITIONS_TABLE_ID) < order.index(blotter.POSITIONS_TABLE_ID)
-    finally:
-        conn.close()
-
-
 # --------------------------------------------------------------------------- Futures sub-tab
 def _futures_table(conn):
     layout = blotter.scope_layout("futures", conn, AS_OF, with_notices=False)
     return next(t for t in _tables(layout) if t.id == "blotter-datatable-futures")
 
 
-def test_futures_sub_tab_groups_by_sector_then_commodity_with_usd_subtotals(strict_marks):
-    conn = _book(hg_price=False)
-    try:
-        table = _futures_table(conn)
-        engine = blotter.scope_df(conn, "futures", AS_OF).set_index("trade_id")
-        shape = [(r["row_kind"], r["sector"], r["commodity"], r["trade_id"]) for r in table.data]
-        assert shape == [
-            ("sector", "Energy", "", ""),
-            ("commodity", "Energy", "ICE Brent crude", ""), ("trade", "Energy", "ICE Brent crude", "B1"),
-            ("commodity", "Energy", "NYMEX WTI light sweet crude", ""),
-            ("trade", "Energy", "NYMEX WTI light sweet crude", "F1"),
-            ("sector", "Metals", "", ""),
-            ("commodity", "Metals", "COMEX copper", ""), ("trade", "Metals", "COMEX copper", "H1"),
-            ("commodity", "Metals", "SHFE copper cathode", ""), ("trade", "Metals", "SHFE copper cathode", "C1"),
-        ]
-        rows = table.data
-        tips = table.tooltip_data
-        # Energy: both priced, the engine's USD figures summed
-        assert rows[0]["pnl_usd"] == pytest.approx(engine.loc["B1", "pnl_usd"] + engine.loc["F1", "pnl_usd"])
-        assert rows[0]["pnl_usd"] == pytest.approx(6_000) and rows[0]["instrument_id"] == "2 trades"
-        assert rows[1]["pnl_usd"] == pytest.approx(2_000) and rows[1]["exchange"] == "ICE"
-        assert rows[3]["pnl_usd"] == pytest.approx(4_000) and rows[3]["instrument_id"] == "1 trade"
-        # Metals: COMEX copper has no price -> left out of the sum and named, never 0
-        assert rows[5]["pnl_usd"] == pytest.approx(engine.loc["C1", "pnl_usd"])
-        assert rows[5]["instrument_id"] == "2 trades; excludes 1 of 2 unpriced"
-        assert tips[5]["pnl_usd"]["value"].startswith("excludes 1 of 2 trades unpriced: H1: ")
-        assert "no FUTURE_PX" in tips[5]["pnl_usd"]["value"]
-        assert rows[6]["pnl_usd"] is None and rows[6]["instrument_id"] == "1 trade; excludes 1 of 1 unpriced"
-        assert rows[7]["pnl_usd"] is None and "no FUTURE_PX" in tips[7]["pnl_usd"]["value"]
-        assert "no FUTURE_PX" in tips[7]["mark"]["value"]                     # the n/a mark says why too
-        # a trade row: exchange, contract, lots, fill, mark, local P&L with its currency, USD P&L
-        cu = rows[9]
-        assert (cu["instrument_id"], cu["exchange"], cu["quantity"], cu["fill"], cu["mark"], cu["pnl_ccy"]) == (
-            "CUZ26 Comdty", "SHFE", 2, 79_000.0, 80_000.0, "CNY")
-        assert cu["pnl_local"] == pytest.approx(-10_000) and cu["pnl_usd"] == pytest.approx(engine.loc["C1", "pnl_usd"])
-        # subtotal rows: USD only (their local cell says so), and no trade id, so the P&L strip never counts them
-        assert all(r["pnl_local"] == "" for r in rows if r["row_kind"] != "trade")
-        assert all(t["pnl_local"]["value"] == blotter.SUBTOTAL_LOCAL_NOTE for r, t in zip(rows, tips) if r["row_kind"] != "trade")
-        assert [r["trade_id"] for r in rows if r.get("trade_id")] == ["B1", "F1", "H1", "C1"]
-        ids = [c["id"] for c in table.columns]
-        assert ids[:4] == ["sector", "commodity", "instrument_id", "exchange"]
-        assert ids.index("fill") + 1 == ids.index("mark")
-        assert ids.index("pnl_local") + 1 == ids.index("pnl_ccy") == ids.index("pnl_usd") - 1
-        kinds = {s["if"].get("filter_query") for s in table.style_data_conditional}
-        assert {"{row_kind} = 'sector'", "{row_kind} = 'commodity'"} <= kinds
-    finally:
-        conn.close()
-
-
-def test_futures_filter_refresh_keeps_the_grouping_and_the_filter_bar_offers_sector_and_commodity():
-    conn = _book()
-    try:
-        df = blotter.scope_df(conn, "futures", AS_OF)
-        cols, labels = blotter.scope_columns("futures")
-        records, _tips, _styles = blotter._table_rows("futures", df[df["sector"] == "Metals"], cols, labels)
-        assert [(r["row_kind"], r["commodity"]) for r in records] == [
-            ("sector", ""), ("commodity", "COMEX copper"), ("trade", "COMEX copper"),
-            ("commodity", "SHFE copper cathode"), ("trade", "SHFE copper cathode")]
-        layout = blotter.scope_layout("futures", conn, AS_OF, with_notices=False)
-        dropdowns = {n.id for n in _walk(layout) if isinstance(n, dash.dcc.Dropdown)}
-        assert {"blotter-datatable-futures-filter-sector", "blotter-datatable-futures-filter-commodity"} <= dropdowns
-        # the Total book's own table is flat, as before
-        flat, _t, _s = blotter._table_rows("total", blotter.scope_df(conn, "total", AS_OF), *blotter.scope_columns("total"))
-        assert all("row_kind" not in r for r in flat)
-    finally:
-        conn.close()
-
-
-def test_a_contract_the_master_does_not_know_is_grouped_as_unclassified_last():
-    conn = _book()
-    try:
-        conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
-                     "bbg_ticker, expiry_date) VALUES ('QQZ26 Comdty','FUTURE','XX:QQ','USD',1000,0,'','2026-12-18')")
-        conn.execute("INSERT INTO trades VALUES ('X1','XLSX','QQZ26 Comdty','FUTURE','X1','2026-06-01',1,50,"
-                     "'ACC','CPTY','','TR','fut','')")
-        conn.execute("INSERT INTO trade_legs VALUES ('X1',1,'NOTIONAL','USD',50000,'2026-06-01','2026-12-18',50,0)")
-        conn.commit()
-        rows = _futures_table(conn).data
-        assert (rows[-2]["row_kind"], rows[-2]["sector"], rows[-2]["commodity"]) == (
-            "commodity", blotter.UNCLASSIFIED_SECTOR, "XX:QQ")
-        assert rows[-1]["trade_id"] == "X1" and rows[-1]["exchange"] == ""
-    finally:
-        conn.close()
-
-
 # --------------------------------------------------------------------------- P&L by asset class
-def test_asset_classes_put_a_commodity_option_under_options_and_a_leftover_irs_under_other():
-    conn = _book()
-    try:
-        # an option on a commodity future (valued on the listed path at Bloomberg's own price)
-        conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
-                     "bbg_ticker, expiry_date) VALUES ('CLZ6C75 Comdty','CMDTY_OPTION','CL','USD',1000,0,"
-                     "'CLZ6C75 Comdty','2026-11-17')")
-        conn.execute("INSERT INTO trades VALUES ('CO1','XLSX','CLZ6C75 Comdty','CMDTY_OPTION','CO1','2026-06-01',2,3.10,"
-                     "'ACC','CPTY','','TR','call','')")
-        conn.execute("INSERT INTO trade_legs VALUES ('CO1',1,'NOTIONAL','USD',2000,'2026-06-01','2026-11-17',3.10,0)")
-        conn.execute("INSERT INTO marks VALUES (?,'CLZ6C75 Comdty','2026-11-17','FUTURE_PX',3.60,'BBG_BDH',?)", (AS_OF, _CLOSE))
-        # a rate swap left on an old database: blank P&L with its reason, never dropped
-        conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
-                     "bbg_ticker, expiry_date) VALUES ('USD-SOFR-5Y','IRS','USD','USD',1,0,'','2031-06-03')")
-        conn.execute("INSERT INTO trades VALUES ('S1','XLSX','USD-SOFR-5Y','IRS','S1','2026-06-01',10000000,0.04,"
-                     "'ACC','CPTY','','TR','pay fixed','')")
-        conn.execute("INSERT INTO trade_legs VALUES ('S1',1,'NOTIONAL','USD',10000000,'2026-06-01','2031-06-03',0.04,0)")
-        conn.commit()
-
-        total = blotter.scope_df(conn, "total", AS_OF)
-        rows = {r["asset_class"]: r for r in blotter.asset_class_pnl_rows(conn, AS_OF, total)}
-        assert list(rows) == ["Futures", "Options", "FX", "Other", "Total"]   # commodity classes first (Phase A)
-        assert rows["Options"]["trades"] == 1 and rows["Options"]["ltd"]["available"]
-        assert rows["Options"]["ltd"]["value"] == pytest.approx(total.set_index("trade_id").loc["CO1", "pnl_usd"])
-        assert rows["Options"]["ltd"]["value"] == pytest.approx(2 * 1000 * (3.60 - 3.10))
-        assert rows["Futures"]["trades"] == 4 and rows["Other"]["trades"] == 1
-        other = rows["Other"]["ltd"]
-        assert not other["available"] and "1 irs" in other["reason"]            # the strip's own wording
-        assert rows["Other"]["unpriced"] == [f"S1: {total.set_index('trade_id').loc['S1', 'reason']}"]
-        assert "rate swaps left the app" in rows["Other"]["unpriced"][0]      # value_book's reason, whole
-        assert rows["Options"]["unpriced"] == [] and rows["Total"]["unpriced"] == rows["Other"]["unpriced"]
-        assert rows["Total"]["trades"] == 7
-
-        table = next(t for t in _tables(blotter.asset_class_pnl_table(conn, AS_OF, total))
-                     if t.id == blotter.ASSET_TABLE_ID)
-        i = [r["asset_class"] for r in table.data].index("Other")
-        assert table.data[i]["ltd"] is None                                  # printed n/a, not 0
-        assert "rate swaps left the app" in table.tooltip_data[i]["ltd"]["value"]
-        # the option on a future is never on the Futures sub-tab
-        assert "CO1" not in blotter.scope_df(conn, "futures", AS_OF)["trade_id"].tolist()
-        assert "CO1" in blotter.scope_df(conn, "options", AS_OF)["trade_id"].tolist()
-    finally:
-        conn.close()
-
-
 # --------------------------------------------------------------------------- LME forwards (Phase 5)
 def _lme(conn, trade_id, root_id, tonnes, fill, prompt, outright=None):
     """An LME prompt-date forward the way the parser books it (data/ingest/blotter.py::
@@ -464,56 +301,6 @@ def test_lme_forwards_are_their_own_asset_class_never_other(strict_marks):
         conn.close()
 
 
-def test_lme_forwards_sit_under_their_metal_on_the_futures_and_lme_sub_tab(strict_marks):
-    conn = _lme_book()
-    try:
-        assert blotter.SCOPE_LABELS["futures"] == "Futures & LME"
-        engine = blotter.scope_df(conn, "futures", AS_OF).set_index("trade_id")
-        assert {"L1", "L2"} <= set(engine.index)
-        table = _futures_table(conn)
-        shape = [(r["row_kind"], r["sector"], r["commodity"], r["trade_id"]) for r in table.data]
-        copper, alu = get_root("LME:CA").name, get_root("LME:AH").name
-        metals = shape[shape.index(("sector", "Metals", "", "")):]
-        assert ("commodity", "Metals", copper, "") in metals and ("trade", "Metals", copper, "L1") in metals
-        assert ("commodity", "Metals", alu, "") in metals and ("trade", "Metals", alu, "L2") in metals
-        assert metals.index(("trade", "Metals", copper, "L1")) == metals.index(("commodity", "Metals", copper, "")) + 1
-        rows = {r["trade_id"]: (r, t) for r, t in zip(table.data, table.tooltip_data) if r["row_kind"] == "trade"}
-        l1, _ = rows["L1"]
-        assert (l1["product"], l1["quantity"], l1["qty_unit"], l1["exchange"], l1["pnl_ccy"]) == (
-            "LME forward", 100, "t", "LME", "USD")
-        assert (l1["fill"], l1["mark"], l1["settle_date"]) == (9_800.0, 9_900.0, "2026-09-16")
-        assert l1["pnl_usd"] == pytest.approx(engine.loc["L1", "pnl_usd"]) == pytest.approx(10_000)
-        assert l1["pnl_local"] == pytest.approx(l1["pnl_usd"])                  # USD-quoted: local = USD
-        assert rows["F1"][0]["product"] == "Future" and rows["F1"][0]["qty_unit"] == "lots"
-        l2, tip2 = rows["L2"]
-        assert l2["pnl_usd"] is None and l2["pnl_local"] is None and l2["mark"] is None   # n/a, never 0
-        assert "no LME price of LME:AH" in tip2["pnl_usd"]["value"]
-        # the metal's subtotal row: priced rows summed, the unpriced one named
-        cu_row = next(r for r in table.data if r["row_kind"] == "commodity" and r["commodity"] == copper)
-        assert cu_row["pnl_usd"] == pytest.approx(10_000) and cu_row["exchange"] == "LME"
-        names = [c["name"] for c in table.columns]
-        assert "Quantity" in names and "Unit" in names and "Product" in names and "Expiry / prompt" in names
-    finally:
-        conn.close()
-
-
-def test_a_settled_lme_forward_shows_its_frozen_usd_figure_as_its_local_pnl():
-    conn = _db()
-    try:
-        _lme(conn, "L9", "LME:NI", 12.0, 15_420.0, "2026-06-17")
-        conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
-                     "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, "
-                     "frozen_at, note) VALUES ('L9','LME:NI','LME_FWD','USD','2026-06-17',-1200,0,'SPOT',1,"
-                     "'2026-06-17','BBG_BDH',-1200,'2026-06-18T00:00:00','')")
-        conn.commit()
-        engine = blotter.scope_df(conn, "futures", AS_OF).set_index("trade_id")
-        assert engine.loc["L9", "status"] == "SETTLED" and engine.loc["L9", "pnl_usd"] == pytest.approx(-1200)
-        rec = next(r for r in _futures_table(conn).data if r["trade_id"] == "L9")
-        assert rec["pnl_local"] == pytest.approx(-1200) and rec["pnl_ccy"] == "USD"
-    finally:
-        conn.close()
-
-
 # --------------------------------------------------------------------------- Total book, Phase A
 # Screens redesign Phase A (user, 2026-09-25): the Total book shows no P&L cards (the header is
 # the total book) and its trade table reads in commodity terms, every figure value_book's own.
@@ -538,49 +325,6 @@ def _cmdty_option(conn):
     conn.execute("INSERT INTO marks VALUES (?,'CLZ26C 75 Comdty','2026-11-17','FUTURE_PX',3.60,'BBG_BDH',?)",
                  (AS_OF, _CLOSE))
     conn.commit()
-
-
-def test_total_book_trade_table_reads_in_commodity_terms_with_value_books_own_figures():
-    conn = _book()
-    _cmdty_option(conn)
-    conn.execute("INSERT INTO marks VALUES (?,'CLZ26 Comdty','2026-11-19','FUTURE_PX',69.0,'BBG_BDH',?)",
-                 (T1_CLOSE, f"{T1_CLOSE}T17:00:00-04:00"))
-    conn.commit()
-    try:
-        engine = blotter.scope_df(conn, "total", AS_OF).set_index("trade_id")
-        layout, table, rows = _total_table(conn)
-        names = [c["name"] for c in table.columns]
-        assert names[:4] == ["Instrument", "Commodity / pair", "Exchange", "Product"]
-        assert "Pair" not in names and "Amount" not in names and "Notional (USD)" not in names
-
-        wti, wti_tip = rows["F1"]
-        assert (wti["instrument_id"], wti["commodity"], wti["exchange"], wti["product"]) == (
-            "CLZ26 Comdty", get_root("NYMEX:CL").name, "NYMEX", "Future")
-        assert (wti["side"], wti["quantity"], wti["qty_unit"], wti["fill"], wti["mark"]) == ("Buy", 2, "lots", 68.0, 70.0)
-        assert wti["prev_close"] == 69.0 and wti_tip["prev_close"]["value"].startswith(f"{T1_CLOSE} close, BBG_BDH")
-        assert (wti["pnl_local"], wti["pnl_ccy"]) == (pytest.approx(4_000.0), "USD")
-        assert wti["pnl_usd"] == pytest.approx(engine.loc["F1", "pnl_usd"])
-        assert wti_tip["mark"]["value"] == "BBG_BDH"
-
-        cu, _ = rows["C1"]   # a CNY contract: local P&L in CNY beside the engine's USD figure
-        assert (cu["exchange"], cu["side"], cu["qty_unit"], cu["pnl_ccy"]) == ("SHFE", "Sell", "lots", "CNY")
-        assert cu["pnl_local"] == pytest.approx(-10_000.0) and cu["pnl_usd"] == pytest.approx(engine.loc["C1", "pnl_usd"])
-
-        opt, _ = rows["CO1"]
-        assert (opt["product"], opt["commodity"], opt["qty_unit"], opt["quantity"]) == (
-            "Option on future", get_root("NYMEX:CL").name, "lots", 2)
-
-        fx, _ = rows["T1"]   # an FX hedge: the pair in the commodity column, OTC, the base currency as unit
-        assert (fx["commodity"], fx["exchange"], fx["product"], fx["qty_unit"], fx["pnl_ccy"]) == (
-            "EURUSD", "OTC", "FX forward", "EUR", "USD")
-        assert fx["quantity"] == 1_000_000 and fx["pnl_usd"] == pytest.approx(engine.loc["T1", "pnl_usd"])
-
-        # the filters follow the columns: Commodity and Instrument, no Strategy
-        labels = [n.children for n in _walk(layout) if getattr(n, "className", "") == "blotter-filter"
-                  for n in [n.children[0]]]
-        assert labels[:2] == ["Commodity / pair", "Instrument"] and "Strategy" not in labels
-    finally:
-        conn.close()
 
 
 def test_total_book_missing_figures_say_why_and_are_listed_in_the_data_issues_drawer(strict_marks):
@@ -637,62 +381,6 @@ def _names(table) -> list:
     return [c["name"] for c in table.columns]
 
 
-def test_the_key_date_reads_expiry_for_futures_alone_with_the_date_per_product_on_hover(strict_marks):
-    conn = _book()
-    try:
-        table = _futures_table(conn)
-        names = _names(table)
-        assert "Expiry" in names and "Settlement" not in names and "Expiry / prompt" not in names
-        assert "mark_date" not in [c["id"] for c in table.columns]
-        tip = table.tooltip_header["settle_date"]
-        assert "Future: the contract's last trade date" in tip and "LME forward: the prompt date" in tip
-        f1 = next(r for r in table.data if r["trade_id"] == "F1")
-        assert f1["settle_date"] == "2026-11-19"                     # the expiry, as value_book gives it
-        # every figure and id stays in sight
-        assert {"Fill", "Mark", "P&L (local)", "P&L (USD)", "Contract", "Trade id"} <= set(names)
-    finally:
-        conn.close()
-
-
-def test_the_key_date_reads_prompt_for_lme_alone_and_expiry_prompt_for_both(strict_marks):
-    conn = _db()
-    try:
-        _lme(conn, "L1", "LME:CA", 100.0, 9_800.0, "2026-09-16", 9_900.0)
-        assert "Prompt" in _names(_futures_table(conn))
-    finally:
-        conn.close()
-    conn = _lme_book()
-    try:
-        assert "Expiry / prompt" in _names(_futures_table(conn))
-    finally:
-        conn.close()
-    assert blotter.futures_key_date_label(None) == "Expiry / prompt"
-    # the filter refresh and the empty table keep the both-products label, never a stale one
-    assert blotter.scope_columns("futures")[1]["settle_date"] == "Expiry / prompt"
-    assert blotter.scope_columns("total")[1]["settle_date"] == "Expiry / value date"
-    assert blotter.scope_header_tips("total") == {}
-
-
-def test_a_settled_ticket_says_on_hover_the_date_of_the_price_it_was_frozen_at():
-    conn = _db()
-    try:
-        _lme(conn, "L9", "LME:NI", 12.0, 15_420.0, "2026-06-17")
-        conn.execute("INSERT INTO realised_pnl (trade_id, instrument_id, product, currency, settle_date, local_amount, "
-                     "usd_entry_amount, mark_type, spot_usd_per_local, spot_as_of_date, spot_source, pnl_usd, "
-                     "frozen_at, note) VALUES ('L9','LME:NI','LME_FWD','USD','2026-06-17',-1200,0,'SPOT',1,"
-                     "'2026-06-16','BBG_BDH',-1200,'2026-06-18T00:00:00','')")
-        conn.commit()
-        table = _futures_table(conn)
-        rec, tip = next((r, t) for r, t in zip(table.data, table.tooltip_data) if r["trade_id"] == "L9")
-        assert rec["settle_date"] == "2026-06-17"
-        assert tip["settle_date"]["value"] == ("settled: frozen at the official price of 2026-06-16, "
-                                               "the last on or before this date")
-    finally:
-        conn.close()
-    assert blotter._key_date_tip("OPEN", "2026-12-16") == ""        # an open row's mark_date is the key date itself
-    assert blotter._key_date_tip("SETTLED", "") == ""
-
-
 def test_the_row_panel_words_the_mark_date_for_what_it_is():
     """value_book's mark_date on an open row is the key the mark is read at, never the close it
     came from; on a settled row it is the frozen price's date; with no mark, the reason."""
@@ -710,14 +398,3 @@ def test_the_row_panel_words_the_mark_date_for_what_it_is():
     unpriced = {**fut, "mark": float("nan"), "mark_date": "", "reason": "no official FUTURE_PX"}
     assert blotter.mark_used_text(unpriced) == "n/a (no official FUTURE_PX)"
     assert "dated" not in blotter.mark_used_text(fut)
-
-
-def test_the_row_panel_on_a_real_future_reads_keyed_on_the_expiry(strict_marks):
-    conn = _book()
-    try:
-        df = blotter.scope_df(conn, "futures", AS_OF)
-        panel = blotter.row_expand_panel(conn, "F1", df[df["trade_id"] == "F1"].iloc[0])
-        text = next(n.children for n in _walk(panel) if getattr(n, "className", "") == "blotter-row-marks")
-        assert "keyed on the expiry 2026-11-19" in text and "dated" not in text
-    finally:
-        conn.close()
