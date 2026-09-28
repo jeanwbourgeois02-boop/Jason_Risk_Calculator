@@ -13,11 +13,12 @@ previous excels - so there are no duplicates or fake things." A successful
 dependents (``trade_legs``, ``realised_pnl`` -- see ``FULL_REPLACE_CHILD_TABLES``) for
 EVERY source, including legacy ``source='BNP'`` rows
 and a previous upload's (or the launcher sample's) rows, before writing the new file's
-own trades. The one exception (2026-09-18) is ``source='MANUAL'``: trades booked by hand
-on the Blotter's Manual entry sub-tab (``data/ingest/manual.py``) exist precisely
-because the export does not carry them, so a new export can never be evidence that
-they are gone -- they survive every upload and are removed only through
-``manual.delete_manual_trade``. This is the app's upload path only: ``blotter.load`` itself (the library
+own trades. The whole book is the file (user, 2026-09-28): the manual booking path
+(``data/ingest/manual.py``, the Blotter's Manual entry sub-tab, ``source='MANUAL'``) left
+the app that day, so there is no longer a trade the export cannot carry; the ``source``
+column and the ``'MANUAL'`` literal stay in the schema for old databases, and a MANUAL
+trade an old database still holds is deleted by the next upload like any other. This is
+the app's upload path only: ``blotter.load`` itself (the library
 function this module calls) keeps its own idempotent-by-``trade_id`` upsert behaviour
 unchanged, for callers that still want a merge (e.g. a script loading several files that
 together make up one book). Instruments, marks, curves, curve_quotes and index_fixings
@@ -34,8 +35,8 @@ the key of its FUTURE_PX marks, never a value.
 Retired 2026-09-24 (commodity conversion Phase 2, user yes): the FX-swap package rule
 (``swaps.py``) no longer runs after an upload, so two blotter forwards stay two outright
 forwards; and the upload no longer turns an interest rate swap's priced history round
-(``irs_direction.py``), since rates left the app. An FX swap is still booked by hand
-(``manual.book_fx_swap``).
+(``irs_direction.py``), since rates left the app. The by-hand FX swap
+(``manual.book_fx_swap``) left with the manual booking path on 2026-09-28.
 
 ``import_blotter_report`` returns the outcome as data (message, rejects, warnings,
 notes) so the UI decides from counts, not from prose; ``import_blotter`` is its message.
@@ -78,10 +79,11 @@ FULL_REPLACE_TABLES = FULL_REPLACE_CHILD_TABLES + ("trades",)
 # book when the table is there, so its foreign key never blocks the delete; nothing is
 # written to it any more, and a database without it is fine.
 RETIRED_CHILD_TABLES = ("swap_review",)
-# Rows a full replace removes: every trade NOT booked by hand (see the module docstring
-# on ``source='MANUAL'``). Child tables are filtered through this subquery, so it must
-# run before the ``trades`` delete itself.
-_REPLACED_TRADES_SQL = "SELECT trade_id FROM trades WHERE source != 'MANUAL'"
+# Rows a full replace removes: every trade on file, whatever its source (the module
+# docstring: the whole book is the file since 2026-09-28; an old database's MANUAL trades
+# go too). Child tables are filtered through this subquery, so it must run before the
+# ``trades`` delete itself.
+_REPLACED_TRADES_SQL = "SELECT trade_id FROM trades"
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -89,20 +91,20 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def _delete_replaced_book(conn: sqlite3.Connection) -> None:
-    """Delete every non-MANUAL trade and its trade-keyed dependents, children first."""
+    """Delete every trade and its trade-keyed dependents, children first."""
     for table in RETIRED_CHILD_TABLES:
         if _table_exists(conn, table):
             conn.execute(f"DELETE FROM {table} WHERE trade_id IN ({_REPLACED_TRADES_SQL})")
     for table in FULL_REPLACE_CHILD_TABLES:
         conn.execute(f"DELETE FROM {table} WHERE trade_id IN ({_REPLACED_TRADES_SQL})")
-    conn.execute("DELETE FROM trades WHERE source != 'MANUAL'")
+    conn.execute("DELETE FROM trades")
 
 
 def _replaced_counts(conn: sqlite3.Connection) -> dict:
-    """Pre-delete row counts per FULL_REPLACE_TABLES name, MANUAL trades excluded."""
+    """Pre-delete row counts per FULL_REPLACE_TABLES name, every trade counted."""
     counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE trade_id IN ({_REPLACED_TRADES_SQL})").fetchone()[0]
               for t in FULL_REPLACE_CHILD_TABLES}
-    counts["trades"] = conn.execute("SELECT COUNT(*) FROM trades WHERE source != 'MANUAL'").fetchone()[0]
+    counts["trades"] = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     return counts
 
 
@@ -142,10 +144,10 @@ def _stage_and_publish(db_path, load_fn, full_replace: bool = False):
 
     `full_replace=True` (``import_blotter``'s "one input, no leftovers" rule): after
     `load_fn` succeeds, every row of `FULL_REPLACE_TABLES` (trades and everything keyed
-    off trade_id) is deleted from `live` -- every source except MANUAL (module
+    off trade_id) is deleted from `live` -- every source, the whole book (module
     docstring), not just rows whose id also appears in `staged` -- before the merge loop
-    runs, so the merge becomes a plain insert of exactly the new file's trades (plus
-    the untouched MANUAL rows, which the merge re-upserts unchanged). Returns `(result, replaced)` where
+    runs, so the merge becomes a plain insert of exactly the new file's trades. Returns
+    `(result, replaced)` where
     `replaced` is a dict of pre-delete row counts per `FULL_REPLACE_TABLES` name (used
     for the "replaced N trades" summary); `replaced` is `{}` when `full_replace=False`.
     """

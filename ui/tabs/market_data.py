@@ -244,7 +244,8 @@ def backfill_headline(status: Optional[dict]) -> Optional[str]:
 
 # Moved to ui/feed_controls.py 2026-09-18 so the top bar's "Pull Bloomberg now" status line
 # and this tab print one sentence, with the cadence read from the feed's own interval
-# instead of typed in here. Re-exported under the old name for ui/tabs/cash_ladder.py.
+# instead of typed in here. Re-exported under the old name (the Ladder tab read it here
+# until it left on 2026-09-28; tests and older notes still may).
 from ui.feed_controls import feed_headline  # noqa: E402,F401
 
 
@@ -2931,7 +2932,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     """Register the callbacks: pair dropdown population, main body refresh (spot +
     curve table + chart), completeness strip, the "Pull now" button, and the
     manual-entry submit button. `get_db_path` is a zero-arg callable returning the
-    resolved DB path, same convention as `ui/tabs/cash_ladder.py::register_callbacks`.
+    resolved DB path, the shell's convention for every tab's `register_callbacks`.
     """
 
     @app.callback(

@@ -18,20 +18,46 @@ from pathlib import Path
 from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_DIRS = ("ui", "engine", "data/ingest", "data/bloomberg")
+# The whole of ui, engine, data and config, every file type: a change to ui/assets/style.css,
+# data/contracts/*.py, config/contracts.csv or config/holidays.txt must not leave a running
+# instance counted as "current" (2026-09-28). The database, the marks snapshot and the byte
+# code are not source and are left out.
+SOURCE_DIRS = ("ui", "engine", "data", "config")
+SOURCE_SKIP = ("data/raw", "data/bbg_snapshot")
+SOURCE_SKIP_SUFFIXES = ('.pyc', '.pyo', '.db', '.db-journal', '.sqlite', '.log')
 IDENTITY_ROUTE = '/_risk_monitor_identity'
-IDENTITY_PREFIX = 'risk-monitor:'
+IDENTITY_PREFIX = 'jason-risk-monitor:'
+# What this app answered before 2026-09-28, and what Henry's fork (the project this one was
+# forked from, on the same PC) still answers: another application, never stopped.
+LEGACY_PREFIX = 'risk-monitor:'
 SHUTDOWN_ROUTE = '/_risk_monitor_shutdown'
 PORTS = range(8050, 8061)
 
 
-def source_fingerprint(root: Path = REPO_ROOT) -> str:
-    """Short sha256 over every .py file under SOURCE_DIRS (sorted paths + contents)."""
-    digest = hashlib.sha256()
+def source_files(root: Path = REPO_ROOT):
+    """Every file under SOURCE_DIRS that counts as source: (relative posix path, Path),
+    sorted. `__pycache__`, the database folder and the marks snapshot are left out."""
+    out = []
     for sub in SOURCE_DIRS:
-        for path in sorted((root / sub).rglob('*.py')):
-            digest.update(str(path.relative_to(root)).encode())
-            digest.update(path.read_bytes())
+        base = root / sub
+        if not base.is_dir():
+            continue
+        for path in base.rglob('*'):
+            if not path.is_file() or path.suffix.lower() in SOURCE_SKIP_SUFFIXES:
+                continue
+            rel = path.relative_to(root).as_posix()
+            if '__pycache__' in rel.split('/') or any(rel == skip or rel.startswith(skip + '/') for skip in SOURCE_SKIP):
+                continue
+            out.append((rel, path))
+    return sorted(out)
+
+
+def source_fingerprint(root: Path = REPO_ROOT) -> str:
+    """Short sha256 over every source file under SOURCE_DIRS (sorted paths + contents)."""
+    digest = hashlib.sha256()
+    for rel, path in source_files(root):
+        digest.update(rel.encode())
+        digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
 
 
@@ -129,6 +155,31 @@ def force_stop_instance(port: int, wait_s: float = 5.0) -> bool:
     return False
 
 
+READY_TIMEOUT_S = 60.0
+
+
+def wait_until_ready(url: str, me: str, timeout_s: float = READY_TIMEOUT_S, sleep=None) -> bool:
+    """True once the server at `url` answers the identity route with `me`: the moment the
+    browser may be opened. Polled every 0.1 s, never a timer: a browser opened on a fixed
+    delay lands on "connection refused" (and keeps that page) when the first request takes
+    longer than the delay, the stale-page report of 2026-09-28."""
+    import time
+    sleep = sleep or time.sleep
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if probe(url) == me:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        sleep(0.1)
+
+
+def free_port_command(pid) -> str:
+    """The one command that frees a port held by `pid` (Windows: taskkill; POSIX: kill)."""
+    who = str(pid) if pid is not None else '<pid>'
+    return f'taskkill /PID {who} /F' if os.name == 'nt' else f'kill {who}'
+
+
 def _shutdown_view():
     """Exit this process shortly after answering, so a newer launcher can take the port."""
     threading.Timer(0.3, os._exit, (0,)).start()
@@ -160,7 +211,9 @@ def main(argv=None):
     from werkzeug.serving import make_server
     fingerprint = source_fingerprint()
     me = identity(fingerprint)
-    app = create_app(start_feed=True)  # Bloomberg live feed when this computer has it
+    # The one fingerprint: the identity route answers it, and every page bakes it in so a
+    # browser tab left open across a restart reloads itself (ui/revision.py).
+    app = create_app(start_feed=True, build_fingerprint=fingerprint)  # Bloomberg live feed when this computer has it
     app.server.add_url_rule(IDENTITY_ROUTE, view_func=lambda: me)
     app.server.add_url_rule(SHUTDOWN_ROUTE, view_func=_shutdown_view, methods=['POST'])
     server = url = None
@@ -182,6 +235,14 @@ def main(argv=None):
                     print(f'Port {port}: risk-monitor instance {seen} ({why}) did not stop; '
                           f'close its terminal. Trying the next port.')
                     continue
+            elif seen.startswith(LEGACY_PREFIX):
+                # Henry's fork answers the same route with the older prefix, and so does a
+                # copy of this app from before 2026-09-28: another application, never
+                # stopped (its own launcher would do the same to us). A bookmark on this
+                # port shows that app; the user closes it once if it is an old copy of ours.
+                print(f'Port {port}: another risk monitor ({seen}), not this build: left alone '
+                      f'(close it yourself if it is an old copy of this app). Trying the next port.')
+                continue
             else:
                 print(f'Port {port}: occupied by another application.')
                 continue
@@ -189,10 +250,20 @@ def main(argv=None):
             server = make_server('127.0.0.1', port, app.server, threaded=True)
             break
         except (OSError, SystemExit):
-            print(f'Port {port}: occupied.')
+            # Nothing answered the identity probe, yet the port cannot be bound: a copy of the
+            # app that hung, or a program that is not a web server. Said plainly with the
+            # command that frees it (2_launcher.py's preflight names the same listener; the
+            # kill itself is never done here), because a bookmark on this port would show
+            # that process, not the app.
+            pid = _port_owner_pid(port)
+            held = f'PID {pid}' if pid is not None else 'a process'
+            print(f'Port {port}: held by {held}, which does not answer as a risk monitor (a hung copy of '
+                  f'the app, or another program). Free it with:  {free_port_command(pid)}   '
+                  f'Trying the next port.', flush=True)
             continue
     if server is None:
-        print('Cannot start: ports 8050-8060 are occupied.')
+        print(f'Cannot start: ports {PORTS.start}-{PORTS.stop - 1} are all taken. See what holds them with:  '
+              f'py 2_launcher.py doctor   then free one:  {free_port_command(None)}', flush=True)
         return 1
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
@@ -201,7 +272,14 @@ def main(argv=None):
           f'Database:     {get_db_path()}\n'
           f'Build:        {build_label()}  (fingerprint {fingerprint})\n'
           f'Risk monitor: {url}\nKeep this terminal open. Press Ctrl+C to stop.', flush=True)
-    webbrowser.open(url)
+    # The browser opens only once the server answers on the port (a readiness poll, never
+    # a timer), at the bare URL: no query string, so nothing stale rides along.
+    if wait_until_ready(url, me):
+        webbrowser.open(url)
+    else:
+        print(f'The server did not answer within {READY_TIMEOUT_S:.0f} s; the browser was not opened. '
+              f'Open {url} yourself once it does, or stop with Ctrl+C and run:  py 2_launcher.py doctor',
+              flush=True)
     try:
         while worker.is_alive():
             worker.join(0.5)

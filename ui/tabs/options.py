@@ -1752,8 +1752,9 @@ def terms_editor(conn: sqlite3.Connection) -> html.Details:
     `instrument_options` via `engine.options.store.set_option_terms`; a re-upload of the
     blotter never overwrites a value typed here. Saving prices the option at once
     (`save_and_price`). Options with no strike on file are listed first and marked.
-    Embedded both under Options and under Manual entry (`ui.tabs.manual_entry`), so it
-    must not depend on any component outside itself."""
+    Built to stand alone (it was embedded under Options and under the Manual entry sub-tab
+    until that sub-tab and the manual booking path left on 2026-09-28), so it must not
+    depend on any component outside itself."""
     insts = option_instruments(conn)
     fixed = futures_option_instruments(conn)
     missing = [i for i in insts if not i["strike"]]

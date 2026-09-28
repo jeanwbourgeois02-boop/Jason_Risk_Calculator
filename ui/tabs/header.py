@@ -11,8 +11,8 @@ readings (`risk_summary`, `needed_marks`, `_spread_summary`) stay here for the s
 them.
 
 Exposes `layout()` (static shell, no DB access, so it is cheap to place on every tab)
-and `register_callbacks(app, get_db_path)` (same signature convention as
-`ui.tabs.cash_ladder.register_callbacks`, so `ui.app` / C5 wires it identically).
+and `register_callbacks(app, get_db_path)` (the same signature convention as every tab's,
+so `ui.app` / C5 wires it identically).
 
 Design choices (no one to ask, so noted here):
   - The five figures + trading are read via `period_pnl(conn, as_of)`, one call, since

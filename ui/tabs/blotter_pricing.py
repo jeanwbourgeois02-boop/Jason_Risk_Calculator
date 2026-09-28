@@ -19,7 +19,7 @@ its original `(df, n_fallback, n_total)` three-tuple so callers outside this lan
 `ui/tabs/header.py`) do not break -- `n_fallback` is now always `0`; the `df` no longer
 carries a `priced_from_bnp` column at all, since nothing reads it any more once the
 Blotter/FX badge text that used to display it was also removed (see
-`ui/tabs/blotter.py` and `ui/tabs/blotter_fx.py`). `engine/pnl/valuation.py`'s own
+`ui/tabs/blotter.py`). `engine/pnl/valuation.py`'s own
 `marks_source` parameter on `value_book` has since been removed outright (2026-09-17,
 same pass) -- this module already only ever called it with the default (official-only),
 so nothing here needed to change when that parameter disappeared.

@@ -321,8 +321,7 @@ def spread_records(spreads: Optional[dict], key: str, roots: Dict[str, Any]) -> 
     """The spread positions (open, then closed), then the outright contracts, then the unmatched
     legs, each with the period figure spreads-engine gives it; a leg's contract is named by
     `ui.tabs.book.contract_label`."""
-    from ui.tabs.book import contract_label
-    from ui.tabs.spreads import position_size_text
+    from ui.tabs.book import contract_label, position_size_text
     records, tips = [], []
     if not spreads:
         return records, tips

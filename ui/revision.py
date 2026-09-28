@@ -30,7 +30,7 @@ row. So `ui.tabs.blotter._update`
 rebuilds on a book revision only when the TRADE SET really moved: it compares
 `trade_set_signature` -- blind to option terms and to the SIGN of a quantity or a leg --
 with the one the content on screen was built from (kept in the page, per browser tab).
-A genuine book change (an upload, a manual trade booked or deleted) still rebuilds; a
+A genuine book change (an upload) still rebuilds; a
 saved term is, for the Blotter, a data revision like any other,
 and everything that depends on it refreshes in place. The decision is taken THERE, not by
 the publishers, on purpose: Dash fires a store's listeners even when a callback sets it to
@@ -48,6 +48,16 @@ editor's Save, and `ui.tabs.blotter` publishes the data revision the
 moment an Options cell edit has been saved, so the banner and the figures never wait 5-10
 seconds for the poll to notice.
 
+The page's build (2026-09-28, user: "never a stale page"). A browser tab left open across
+a restart keeps the old layout and bundles while its callbacks land on the new process.
+So every page bakes the fingerprint it was built with (`ui.launch.source_fingerprint`,
+the same string the launcher's identity route answers) into `BUILD_ID`; the poll's
+companion `_build_check` compares it with the process's own on every tick and, when they
+differ, sets `STALE_ID`, whose clientside listener does `window.location.reload()`: the
+one browser reload in the app, and only because the CODE changed, never for data (data is
+the in-place refresh above). `_build_check`'s ids never change, so a page from any older
+build still reaches it.
+
 Nothing here reads a mark or computes a number; every listener re-runs its own
 unchanged render.
 """
@@ -58,13 +68,23 @@ import sqlite3
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
 
-from dash import Input, Output, State, dcc, no_update
+from dash import Input, Output, State, dcc, html, no_update
 
 DATA_REVISION_ID = "data-revision"
 BOOK_REVISION_ID = "book-revision"
 PENDING_ID = "data-revision-pending"
 POLL_ID = "data-revision-poll"
 POLL_MS = 5_000
+BUILD_ID = "build-fingerprint"      # the source fingerprint the page was built with
+STALE_ID = "page-stale"             # True once the process answering is another build
+RELOAD_SINK_ID = "page-reload-sink"  # the clientside reload's (unused) output
+
+
+def page_is_stale(page_build, build) -> bool:
+    """True when the page was built by another build than the process answering it. An
+    empty fingerprint on either side (a test app, a page that carried none) is never
+    stale: a reload is only ever forced on a known difference."""
+    return bool(build) and bool(page_build) and page_build != build
 
 
 def file_signature(db_path: Union[str, Path]) -> str:
@@ -81,7 +101,7 @@ def file_signature(db_path: Union[str, Path]) -> str:
 def trade_set_signature(db_path: Union[str, Path]) -> str:
     """A fingerprint of the TRADE SET alone: how many trades and legs there are and how
     big, blind to the sign of a quantity or a leg amount and to option terms. It moves on
-    an upload and on a manually booked or deleted trade; it does NOT move when a strike,
+    an upload; it does NOT move when a strike,
     type or payoff is typed in, nor on a sign alone (the retired IRS direction flip's
     case: a negated quantity and legs are not a new trade). This is what the
     Blotter compares to decide whether a sub-tab must be rebuilt (module docstring). ""
@@ -149,18 +169,40 @@ def decide(current: Optional[str], pending: Optional[str], now: str) -> Tuple[Op
     return None, now            # changed just now: wait one more tick
 
 
-def components(db_path: Union[str, Path]) -> list:
+def components(db_path: Union[str, Path], build: str = "") -> list:
     """The stores and the poll timer, for `ui.app.build_layout`. Both revisions start at
-    the file's current state, so the first tick publishes nothing."""
+    the file's current state, so the first tick publishes nothing; `build` is the
+    fingerprint this page is built by (module docstring)."""
     return [
         dcc.Store(id=DATA_REVISION_ID, data=file_signature(db_path)),
         dcc.Store(id=BOOK_REVISION_ID, data=book_signature(db_path)),
         dcc.Store(id=PENDING_ID),
+        dcc.Store(id=BUILD_ID, data=build),
+        dcc.Store(id=STALE_ID, data=False),
+        html.Div(id=RELOAD_SINK_ID, style={"display": "none"}),
         dcc.Interval(id=POLL_ID, interval=POLL_MS, n_intervals=0),
     ]
 
 
-def register(app, get_db_path: Callable[[], object]) -> None:
+def register(app, get_db_path: Callable[[], object], build: str = "") -> None:
+    @app.callback(
+        Output(STALE_ID, "data"),
+        Input(POLL_ID, "n_intervals"),
+        State(BUILD_ID, "data"),
+        prevent_initial_call=True,
+    )
+    def _build_check(_n, page_build):
+        return True if page_is_stale(page_build, build) else no_update
+
+    # The one browser reload: the page was built by another build than this process.
+    app.clientside_callback(
+        "function(stale) { if (stale) { window.location.reload(); } "
+        "return window.dash_clientside.no_update; }",
+        Output(RELOAD_SINK_ID, "children"),
+        Input(STALE_ID, "data"),
+        prevent_initial_call=True,
+    )
+
     @app.callback(
         Output(DATA_REVISION_ID, "data"),
         Output(BOOK_REVISION_ID, "data"),

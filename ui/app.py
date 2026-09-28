@@ -9,10 +9,9 @@ the former Curve (ui/tabs/curve.py, key "curve"), "P&L" is new (ui/tabs/pnl.py, 
 "Timing & cash" the former Expiries (ui/tabs/expiries.py, key "expiries"), "Trades" the former
 Blotter (ui/tabs/blotter.py, key "blotter") and "Data" the former Market data
 (ui/tabs/market_data.py). The Spreads tab (ui/tabs/spreads.py) and the FX & cash tab
-(ui/tabs/cash_ladder.py, ui/tabs/exposure.py) are hidden since wave 3, not deleted: their modules
-stay on disk and importable (the Book tab imports the spread detail helpers, Timing & cash the
-ladder's engine readers), but their bodies are not in the layout and their callbacks are not
-registered. Each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
+(ui/tabs/cash_ladder.py, ui/tabs/exposure.py) were deleted on 2026-09-28 (user's yes): the Book tab
+now holds the spread detail helpers and Timing & cash reads the ladder's engine readers
+directly; `HIDDEN_TAB_KEYS` only records their old keys so a stale link is ignored. Each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
 separate from the label the user reads, so a rename never moves an id. The app opens on the
 first tab, Book (ui/tabs/book.py): the book's home. A slim header (ui/tabs/header.py) sits
 above the tabs on every view: the as-of date, Daily / MTD / YTD / LTD and the Data chip.
@@ -29,9 +28,11 @@ from pathlib import Path
 from typing import Union
 
 import dash
+import flask
 from dash import ALL, Input, Output, State, dcc, html
 
-from ui.tabs import blotter, book, cash_ladder, curve, expiries, header, market_data, pnl, risk
+from ui.tabs import blotter, book, curve, expiries, header, market_data, pnl, risk
+from ui.tabs.controls import today_ny
 from ui.tabs.formatting import TAB_LINK_TYPE
 from ui import revision, uploads
 # The database path rule lives below every layer (data/paths.py) so the Bloomberg CLI mains
@@ -195,7 +196,19 @@ def tab_from_link_click(triggered) -> Union[str, None]:
     return None
 
 
-def build_layout(data: dict, db_path=None) -> html.Div:
+FINGERPRINTED_PATHS = ("/_dash-component-suites/", "/assets/")
+
+
+def no_store_for(path: str) -> bool:
+    """True when a response at `path` must carry `Cache-Control: no-store` (the index,
+    `_dash-layout`, `_dash-dependencies`, `_dash-update-component`, the launcher's own
+    routes): everything but the resources Dash fingerprints in their URL
+    (`FINGERPRINTED_PATHS`: the component bundles' `?v=<version>&m=<mtime>`, the `assets/`
+    files' `?m=<mtime>`), which may be cached because a changed file is a new URL."""
+    return not any(marker in path for marker in FINGERPRINTED_PATHS)
+
+
+def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
     """Top-level layout (user decision 2026-09-15, item A, revised 2026-09-15): the tab
     bar (`dcc.Tabs`, holding plain `dcc.Tab(label=..., value=<key>)` objects with NO
     children of their own -- Dash nests a Tab's children inside its own styled wrapper,
@@ -219,7 +232,7 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     the live pull only writes today's. Book, Exposure, P&L, Timing & cash and Risk have no
     picker: they follow the header's as-of store, whose default is today."""
     snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
-    today = cash_ladder.today_ny()
+    today = today_ny()
     tab_builders = {
         "book": book.build_layout,
         "curve": curve.build_layout,
@@ -250,16 +263,23 @@ def build_layout(data: dict, db_path=None) -> html.Div:
         dcc.Store(id=header.AS_OF_STORE_ID, data=today),
         dcc.Store(id=header.AS_OF_PICKED_ID, data=False),
         # "The data changed" signal (ui/revision.py): every tab listens, so an upload or a
-        # Bloomberg pull shows up without a browser reload.
-        *revision.components(db_path if db_path is not None else get_db_path()),
+        # Bloomberg pull shows up without a browser reload; and the build this page is of,
+        # so a tab left open across a restart reloads itself once (the code changed).
+        *revision.components(db_path if db_path is not None else get_db_path(), build=build),
     ])
 
 
-def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False) -> dash.Dash:
+def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
+               build_fingerprint: Union[str, None] = None) -> dash.Dash:
     """Build the Dash app. db_path defaults to RISK_DB / data/raw/risk.db.
-    start_feed=True (the launcher) starts the Bloomberg live feed thread when available."""
+    start_feed=True (the launcher) starts the Bloomberg live feed thread when available.
+    build_fingerprint is the source fingerprint this process runs (the launcher passes the
+    one its identity route answers; computed here otherwise): every page bakes it in and
+    reloads itself once a restart serves another (ui/revision.py)."""
+    from ui.launch import source_fingerprint
     resolved = Path(db_path) if db_path is not None else get_db_path()
     ensure_schema(resolved)
+    build = build_fingerprint if build_fingerprint is not None else source_fingerprint()
     # suppress_callback_exceptions: the Blotter sub-tabs render their tables, filter
     # dropdowns and row-detail panels dynamically inside the `_update` callback's own
     # Output (blotter.CONTENT_ID children), not in the static app.layout tree -- Dash's
@@ -270,6 +290,23 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     # fired in the browser because of this). See CLAUDE.md ownership: this is app-wide
     # config, not a per-tab fix.
     app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    # Never a stale page (user, 2026-09-28: "make sure there is never a stale page that loads
+    # when you load the app"). Every response but the fingerprinted resources is told
+    # `Cache-Control: no-store`: the index, `_dash-layout` (the layout the page starts from),
+    # `_dash-dependencies` and every `_dash-update-component` answer, so a reload, a Back or
+    # a bookmark always fetches the live layout and figures, never a copy the browser kept.
+    # The fingerprinted resources keep Dash's own caching, because a changed file is a new
+    # URL there: Dash appends `?m=<mtime>` to every `assets/` file it serves and
+    # `?v=<version>&m=<mtime>` to each component bundle, so an old cached copy is never
+    # served for a new file (`no_store_for` decides, so the rule is testable without a server).
+    @app.server.after_request
+    def _never_cache(response):
+        if no_store_for(flask.request.path):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     # A callable layout: Dash builds it on EVERY page load, so the as-of defaults (today in
     # New York) and the upload summary are fresh for a page opened days after `pnl`
     # started, instead of frozen at start-up (user, 2026-09-22: "by default, always price
@@ -288,7 +325,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     risk.register_callbacks(app, get_db_path=lambda: resolved)
     market_data.register_callbacks(app, get_db_path=lambda: resolved)
     uploads.register(app, get_db_path=lambda: resolved)
-    revision.register(app, get_db_path=lambda: resolved)
+    revision.register(app, get_db_path=lambda: resolved, build=build)
 
     # The header's as-of (user, 2026-09-22: "always price pnl as of today ... unless changed
     # specifically otherwise"): today in New York on every page load (the callable layout
@@ -302,7 +339,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
                   Input(blotter.DATE_PICKER_ID, "date"),
                   prevent_initial_call=True)
     def _follow_pickers(blotter_date):
-        return header.as_of_after_pick(blotter_date, cash_ladder.today_ny())
+        return header.as_of_after_pick(blotter_date, today_ny())
 
     @app.callback(Output(header.AS_OF_STORE_ID, "data", allow_duplicate=True),
                   Output(blotter.DATE_PICKER_ID, "date", allow_duplicate=True),
@@ -311,7 +348,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
                   State(header.AS_OF_PICKED_ID, "data"),
                   prevent_initial_call=True)
     def _roll_to_today(_n, store, picked):
-        today = header.as_of_after_tick(store, bool(picked), cash_ladder.today_ny())
+        today = header.as_of_after_tick(store, bool(picked), today_ny())
         if today is None:
             return dash.no_update, dash.no_update
         return today, today
@@ -382,5 +419,8 @@ def start_bloomberg_feed(db_path: Path):
 
 
 if __name__ == "__main__":
+    # A developer shortcut only; the app is launched by `2_launcher.py` (hard rule 9), which
+    # serves `app.server` straight from werkzeug and never calls `app.run`, so Dash's dev
+    # tools (hot reload re-serves stale bundles on Windows) are never enabled there.
     app = create_app()
-    app.run(debug=True)
+    app.run(debug=False, dev_tools_hot_reload=False)

@@ -1,8 +1,10 @@
 """Trades tab (the Blotter until 2026-09-28): docs/BUILD_PLAN.md section 5 "Blotter", rebuilt
-2026-09-15 into sub-tabs (user decision): All trades (the Total book), Options, Bundles, Manual
-entry. The FX and Futures & LME sub-tabs left on 2026-09-28 (UI redesign wave 3: their rows
-are all in All trades, their summaries on the P&L and Exposure tabs); their code below and
-`ui.tabs.blotter_fx` stay on disk, out of `SCOPE_ORDER`, and register no callback. The Rates
+2026-09-15 into sub-tabs (user decision): All trades (the Total book), Options, Bundles. The FX
+and Futures & LME sub-tabs left on 2026-09-28 (UI redesign wave 3: their rows are all in All
+trades, their summaries on the P&L and Exposure tabs) and their code with them (`ui.tabs.blotter_fx`
+deleted, the futures grouping cut). The Manual entry sub-tab and the manual booking path
+(`ui.tabs.manual_entry`, `data/ingest/manual.py`) left the same day (user: the blotter upload
+is the only way a trade enters the app). The Rates
 sub-tab left on 2026-09-24 with the macro trader's products (CLAUDE.md "Commodity
 conversion plan", Phase 2: rates, NDFs, the FX-swap package rule and the equity index are
 out of the app). Rows come from
@@ -37,7 +39,7 @@ the full figure on hover of the value). Section definitions sit on hover of thei
 (`ui.tabs.formatting.about`), never as a paragraph; summary money is k / m
 (`rk.amount_short` + `rk.whole_units`), trade rows keep full figures.
 
-Sub-tab layout, each (Futures / Options; the Total book since 2026-09-25 has no strip):
+Sub-tab layout (Options; the Total book since 2026-09-25 has no strip):
   (a) a P&L strip: LTD, Daily, Previous day, 5d, MTD, YTD, Trading -- recomputed for
       exactly the rows currently visible in that sub-tab's table AFTER native header
       filtering (`derived_virtual_data`), per the 2026-09-15 coordinator addition, via
@@ -56,8 +58,8 @@ Options wiring (2026-09-18). `ui.tabs.options` brings its own callbacks, registe
 `register_callbacks` here. It refreshes its own table in place from the revision stores,
 so `_update` does not rebuild that sub-tab on a marks-only revision
 (`_SELF_REFRESHING_SCOPES`); the P&L strip above the table, built here, follows through
-`_register_strip_refresh`. A genuine book change (an upload, a manual trade booked or
-deleted), a date change and a sub-tab change still rebuild it; a saved option term does
+`_register_strip_refresh`. A genuine book change (an upload), a date change and a sub-tab
+change still rebuild it; a saved option term does
 not, although it is published as a book revision: `_update` compares
 `ui.revision.trade_set_signature` with the one the content on screen was built from
 (`BUILT_TRADE_SET_ID`), so typing three strikes in a row is never interrupted by a
@@ -84,37 +86,12 @@ line per sector, the sector's commodities under it, the Commodities total, then 
 non-USD futures hold in each currency), then the FX lines as before (the currency rows, the
 FX net and gross, the FX options' delta). Commodities are not in the FX net.
 
-Futures (2026-09-24, commodity conversion; grouped in Phase 3): Jason's commodity futures,
-each contract in its own currency, grouped by sector, then commodity (`futures_grouped_rows`:
-a sector row and a commodity row carrying their trades' USD P&L summed, priced rows only,
-"excludes N of M unpriced" in sight). Each trade row shows the contract's exchange, sector
-and name (contract master, `data.contracts.load_roots`), `value_book`'s `pnl_local` with its
-currency (the instrument's quote currency) beside the USD P&L, which the engine converted at
-spot; nothing is converted here. Options on commodity futures (CMDTY_OPTION) are on the
-Options sub-tab, never here. Phase 5 (2026-09-24): the sub-tab is "Futures & LME" and also
-holds the LME prompt-date forwards (LME_FWD, instrument = the metal's root id 'LME:CA'),
-grouped under their metal like the futures; Product tells the two apart, Unit says the
-Quantity is lots or tonnes, and an LME ticket's local P&L is its USD P&L (USD-quoted). In the
-Total book's P&L by asset class they are their own class, "LME forwards".
-
-FX is `ui.tabs.blotter_fx.build_layout`: the legacy sheet's "All FX trades" column
-layout (trade / tenor / fill / t-1-EOD-t-2 mark and P&L), but priced by
-`engine.pnl.fx_blotter.fx_blotter_rows` -> `engine.pnl.valuation.value_book` (market-
-standard convention: each FX leg at its own settle_date's FWD_OUTRIGHT, quote P&L
-converted at spot, futures contracts x multiplier x (mark - fill), settled trades
-frozen) -- rebuilt first as a literal xlsx replica on 2026-09-17 and replaced the same
-day, by user decision, with this standard-convention version. It has no filter bar or
-row-click detail panel -- its rows (trade_id/instrument_id/quantity_usd_notional/tenor/
-fill/mark_*/pnl_*) don't have `value_book`'s shape (trade_id/mark/pnl_usd/...) that
-scaffolding assumes. It DOES have a P&L strip (added 2026-09-17), built statically
-inside `blotter_fx.build_layout` itself rather than through the generic
-`_register_strip_callback` loop below: `blotter_fx._fx_strip` calls this same module's
-`render_headline_strip`/`priced_value_book`/`row_scoped_headline` scoped to the
-FX+FUTURE trade universe, through the identical `priced_value_book` pricing path the
-table uses -- so the strip and the table now agree exactly on any priced trade (unlike
-the retired replica table, which deliberately differed). The whole sub-tab is a single
-always-current block, rebuilt on the same top-level `_update` callback as every other
-sub-tab.
+Futures, LME forwards and FX trades are rows of All trades (commodity terms: each trade's
+exchange, sector and name from the contract master, `data.contracts.load_roots`, `value_book`'s
+`pnl_local` with its currency beside the USD P&L the engine converted at spot; an LME ticket's
+local P&L is its USD P&L, USD-quoted; nothing is converted here). Their sub-tabs and the
+grouped futures table left on 2026-09-28. Options on commodity futures (CMDTY_OPTION) are on
+the Options sub-tab.
 
 Bundles sub-tab (item 4): `ui.tabs.blotter_bundles` renders a list of bundles (from
 `data.ingest.themes.list_bundles`) with LTD/Daily/MTD/YTD via
@@ -122,11 +99,8 @@ Bundles sub-tab (item 4): `ui.tabs.blotter_bundles` renders a list of bundles (f
 create form and add/remove-pair actions calling `data.ingest.themes.set_theme` (via the
 `add_pair_to_bundle` / `remove_pair_from_bundle` helpers).
 
-Manual entry sub-tab (2026-09-18, user request "need a place to manually input OTC
-products"): `ui.tabs.manual_entry` -- book an FX option or forward the blotter export
-does not carry (`data/ingest/manual.py`, `trades.source = 'MANUAL'`, survives every
-re-upload), list/delete the manual trades on file, and the same Option terms editor
-the Options sub-tab shows for options the export left without a strike.
+The Option terms editor (`ui.tabs.options.terms_editor`, a strike, type or payoff the export
+left blank, saved into `instrument_options`) stays on the Options sub-tab.
 """
 from __future__ import annotations
 
@@ -139,8 +113,6 @@ import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.tabs import blotter_bundles as bundles_ui
-from ui.tabs import blotter_fx as blotter_fx_ui
-from ui.tabs import manual_entry as manual_entry_ui
 from ui.tabs import options as options_ui
 from ui.tabs.blotter_pricing import (
     HEADLINE_ORDER,
@@ -158,7 +130,7 @@ from ui.revision import (
     publish_if_changed,
     trade_set_signature,
 )
-from ui.tabs.controls import build_date_picker
+from ui.tabs.controls import build_date_picker, heading_date_text, today_ny
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import about, format_cell, issues_drawer, marker, short_money
 
@@ -184,38 +156,29 @@ DETAIL_PANEL_ID = "blotter-datatable"  # "-{scope}-detail" suffix keeps the id u
 _ALL = "All"
 
 # --------------------------------------------------------------------------- sub-tabs
-# Order per user decision 2026-09-15: Total book | FX | Futures | Options | Bundles. "FX"
-# scope is FX_SPOT/FX_FWD/FX_SWAP (FUTURE has its own sub-tab). FX_SWAP stays (2026-09-24):
-# manual entry books a swap as one 4-leg trade; only the blotter's package rule left. "Manual entry" (2026-09-18)
-# closes the row: it is a form, not a view of the book. Rates left on 2026-09-24 (the
-# macro trader's products are out of the app, CLAUDE.md "Commodity conversion plan").
-# "fx" and "futures" are no sub-tab since 2026-09-28 (wave 3) but keep their labels, products
-# and rendering path: `scope_layout("futures", ...)` and the FX block are still callable.
-SCOPE_ORDER = ("total", "options", "bundles", "manual")
-HIDDEN_SCOPES = ("fx", "futures")
-SCOPE_LABELS = {"total": "All trades", "fx": "FX", "futures": "Futures & LME",
-                "options": "Options", "bundles": "Bundles", "manual": "Manual entry"}
+# Order per user decision 2026-09-15: Total book | FX | Futures | Options | Bundles; the FX and
+# Futures & LME sub-tabs and the Manual entry form left on 2026-09-28 (every trade is a row
+# of All trades; the blotter upload is the only way a trade enters the app). Rates left on
+# 2026-09-24 (the macro trader's products are out of the app, CLAUDE.md "Commodity
+# conversion plan").
+SCOPE_ORDER = ("total", "options", "bundles")
+SCOPE_LABELS = {"total": "All trades", "options": "Options", "bundles": "Bundles"}
 SCOPE_PRODUCTS = {
     "total": None,
-    "fx": ("FX_SPOT", "FX_FWD", "FX_SWAP"),
-    # Futures and LME forwards (Phase 5, 2026-09-24: a commodity trader reads an LME ticket
-    # with the futures of its metal, so the sub-tab is "Futures & LME" and the LME tickets
-    # sit under their metal). An option on a commodity future (CMDTY_OPTION) belongs to the
-    # Options sub-tab (ui.tabs.options lists it in its own grid), never to this one.
-    "futures": ("FUTURE", "LME_FWD"),
+    # An option on a commodity future (CMDTY_OPTION) sits with the FX options: ui.tabs.options
+    # lists it in its own grid.
     "options": ("FX_OPTION", "CMDTY_OPTION"),
-    "manual": None,
 }
 # Sub-tabs that are forms/lists of their own, not `priced_value_book`-shaped tables:
 # no strip / row-detail / filter callbacks are registered for them.
-_NON_TABLE_SCOPES = ("bundles", "fx", "options", "manual")
+_NON_TABLE_SCOPES = ("bundles", "options")
 # Views rebuilt whole when only marks changed (ui/revision.py); see `_update`.
-_MARKS_REBUILD_SCOPES = ("bundles", "fx")
+_MARKS_REBUILD_SCOPES = ("bundles",)
 # Sub-tabs whose own module refreshes its table IN PLACE from the revision stores
 # (`ui.tabs.options._render` / `_headline`), so it left the list above on 2026-09-18: a
 # wholesale rebuild on every Bloomberg pull reset the Options terms editor's dropdown and
-# could wipe a strike being typed into a cell. A genuine book change (an upload, a manual
-# trade booked or deleted -- `_update` compares `revision.trade_set_signature`) and a date
+# could wipe a strike being typed into a cell. A genuine book change (an upload --
+# `_update` compares `revision.trade_set_signature`) and a date
 # or sub-tab change still rebuild it; a saved term does NOT, although it is published as a
 # book revision too. The one piece of the sub-tab built HERE, the P&L strip above the
 # table, follows new marks through `_register_strip_refresh`.
@@ -239,11 +202,8 @@ ASSET_CLASS_OF = {"FX_SPOT": "FX", "FX_FWD": "FX", "FX_SWAP": "FX", "FUTURE": "F
 ASSET_CLASS_ORDER = ("Futures", "LME forwards", "Options", "FX")
 ASSET_TABLE_ID = "blotter-asset-class-table"
 POSITIONS_TABLE_ID = "blotter-positions-table"
-# With no futures or LME forwards in the book for the date shown, the Futures & LME strip
-# reads "n/a" with this reason rather than a hollow zero.
-FUTURES_NO_TRADES_REASON = "no futures or LME forwards in the book on this date"
-# The unit of the Quantity column on the Futures & LME sub-tab, per product: a future is
-# booked in contracts, an LME forward in tonnes (data/ingest/blotter.py::_parse_lme_forward).
+# The unit of the Quantity column, per product: a future is booked in contracts, an LME
+# forward in tonnes (data/ingest/blotter.py::_parse_lme_forward).
 QUANTITY_UNIT_OF = {"FUTURE": "lots", "LME_FWD": "t", "CMDTY_OPTION": "lots"}
 # FX trades (the Total book's rows): the quantity is the base-currency amount (an FX
 # option's notional), so its unit is the pair's base currency; the pair takes the
@@ -285,50 +245,9 @@ def search_rows(df: pd.DataFrame, text: Optional[str]) -> pd.DataFrame:
     return df[hit]
 
 
-# Futures & LME columns (2026-09-15, 2026-09-24 for the commodity book, then Phase 3 grouped
-# by sector and commodity, then Phase 5 with the LME forwards): Sector | Commodity | Contract
-# | Exchange | Product | Trade date | Side | Quantity | Unit | Fill | Mark | Expiry / prompt |
-# Status | Settlement | P&L (local) | Ccy | P&L (USD) | Strategy | Bundle | Trade id. A
-# commodity future's P&L is struck in the contract's own currency (`value_book`'s
-# `pnl_local`, in the instrument's quote currency) and converted to USD at spot by the
-# engine; both are shown, side by side, as computed. An LME forward is in USD, so its local
-# P&L is its USD P&L. Product tells a future ("Future") from an LME ticket ("LME forward");
-# Unit says what Quantity counts (lots, or tonnes for an LME ticket). The key date is
-# `value_book`'s `settle_date`: a future's expiry, an LME ticket's prompt date. Its header
-# names what the table holds ("Expiry" for futures alone, "Prompt" for LME tickets alone,
-# "Expiry / prompt" for both; `futures_key_date_label`), with the date per product on hover
-# (`FUTURES_KEY_DATE_TIP`). The column once labelled "Settlement" was `mark_date`, the date the
-# mark is keyed on: on an open row that is the same expiry or prompt again, so it is gone
-# (ui-blotter, 2026-09-25); on a settled row it is the date of the price the ledger
-# froze, which the key-date cell now says on hover (`_key_date_tip`). Sector and Commodity are
-# on every row, so a click on either keeps the groups together (`futures_grouped_rows`).
-_FUTURES_DISPLAY_COLUMNS = [
-    "sector", "commodity", "instrument_id", "exchange", "product", "trade_date", "side", "quantity", "qty_unit",
-    "fill", "mark", "settle_date", "status", "pnl_local", "pnl_ccy", "pnl_usd", "strategy", "theme",
-    "trade_id",
-]
-FUTURES_KEY_DATE_LABELS = {"FUTURE": "Expiry", "LME_FWD": "Prompt"}
-FUTURES_KEY_DATE_BOTH = "Expiry / prompt"
-_FUTURES_COLUMN_LABELS = {
-    "sector": "Sector", "commodity": "Commodity",
-    "trade_date": "Trade date", "instrument_id": "Contract", "exchange": "Exchange", "product": "Product",
-    "side": "Side", "quantity": "Quantity", "qty_unit": "Unit", "fill": "Fill", "mark": "Mark",
-    "settle_date": FUTURES_KEY_DATE_BOTH, "status": "Status",
-    "pnl_local": "P&L (local)", "pnl_ccy": "Ccy", "pnl_usd": "P&L (USD)",
-    "strategy": "Strategy", "theme": "Bundle", "trade_id": "Trade id",
-}
-# The key-date column's header hover: what the date is, per product.
-FUTURES_KEY_DATE_TIP = (
-    "Future: the contract's last trade date (Bloomberg's once stored, else the contract master's "
-    "conservative estimate); its price is keyed on it and it is frozen at the last official price on or "
-    "before it. LME forward: the prompt date, when the metal and the USD change hands; the ticket is marked "
-    "at the outright for that date and frozen at the last official cash price on or before it.")
 # A futures contract whose root the contract master does not know: its sector reads this,
 # and its commodity is the root id on file (a label, never a guess at the contract).
 UNCLASSIFIED_SECTOR = "Unclassified"
-# The P&L (local) cell of a sector or commodity subtotal row: the subtotals are in USD (a
-# sector mixes currencies, and a settled future's P&L is stored in USD only).
-SUBTOTAL_LOCAL_NOTE = "subtotals are in USD only: a sector mixes currencies and a settled future's P&L is stored in USD"
 # A settled future is the ledger's frozen row (`realised_pnl`), which holds its P&L in USD
 # only: `value_book` leaves `pnl_local` blank on it, and this is said where the number
 # would be (engine/pnl/valuation.py::_settled_future_row).
@@ -511,13 +430,10 @@ def detail_table(df: pd.DataFrame, table_id: str = DATATABLE_ID,
                   display_columns: Optional[list] = None,
                   column_labels: Optional[dict] = None, scope: str = "") -> dash_table.DataTable:
     """Build the trade table. `display_columns`/`column_labels` default to the Total book's
-    commodity-terms layout (`_DISPLAY_COLUMNS`; a column the frame lacks is left out); the
-    Futures & LME sub-tab passes its own (Sector/Contract/Expiry...) and `scope="futures"`, which groups its
-    rows by sector and commodity (`futures_grouped_rows`) and puts `scope_header_tips` on its headers.
-    Filtering is the dropdown bar
-    built by `_filter_bar` (see module docstring); sorting is native (ui.tabs.ranking): the
-    table opens in `_sorted_scope_df`'s order (Futures: grouped) and any header click
-    re-ranks it."""
+    commodity-terms layout (`_DISPLAY_COLUMNS`; a column the frame lacks is left out);
+    `scope_header_tips` go on its headers. Filtering is the dropdown bar built by
+    `_filter_bar` (see module docstring); sorting is native (ui.tabs.ranking): the table
+    opens in `_sorted_scope_df`'s order and any header click re-ranks it."""
     display_columns = display_columns if display_columns is not None else _DISPLAY_COLUMNS
     column_labels = column_labels if column_labels is not None else _COLUMN_LABELS
     cols = [c for c in display_columns if c in df.columns]
@@ -609,7 +525,7 @@ def render_headline_strip(headline: dict, hidden: tuple = (), caption: str = "")
     the sentence on hover: "excl. N" (the header's display rule: a real sum over the PRICED
     rows, `excluded_summary` / `excluded_detail`) and "from MM-DD" (measured from an earlier
     close than the period's own, `ref_note` / `ref_note_detail`). The Total book has no strip
-    (the header is the total book); FX (`ui.tabs.blotter_fx`), Futures & LME and Options do.
+    (the header is the total book); Options does.
 
     `hidden` / `caption` (used by the Options strip only, `options_strip`): the keys to leave
     out, and the sentence naming them, shown as one marker ("3 waiting") after the cards.
@@ -1291,18 +1207,6 @@ def row_detail_panel(conn: sqlite3.Connection, trade_id: str, df: pd.DataFrame) 
                      children=[row_expand_panel(conn, trade_id, row.iloc[0])])
 
 
-def futures_key_date_label(df: Optional[pd.DataFrame]) -> str:
-    """The Futures & LME key-date header for the trades the sub-tab holds: "Expiry" when they
-    are futures only, "Prompt" when LME tickets only, "Expiry / prompt" otherwise (both, none,
-    or no frame). Read from the whole scope, so a filter never makes it wrong."""
-    if df is None or df.empty or "product" not in df.columns:
-        return FUTURES_KEY_DATE_BOTH
-    products = {p for p in df["product"].tolist() if p}
-    if len(products) == 1:
-        return FUTURES_KEY_DATE_LABELS.get(next(iter(products)), FUTURES_KEY_DATE_BOTH)
-    return FUTURES_KEY_DATE_BOTH
-
-
 def csv_download(rows, display_columns: list, column_labels: dict, scope: str = "total"):
     """`dcc.send_data_frame` of the rows shown (the table's `derived_virtual_data`: every
     filter and sort applied), every display column at full figures under its screen label,
@@ -1318,19 +1222,15 @@ def csv_download(rows, display_columns: list, column_labels: dict, scope: str = 
 
 
 def scope_columns(scope: str, df: Optional[pd.DataFrame] = None) -> tuple:
-    """(display_columns, column_labels) for a sub-tab -- Futures has its own layout,
-    every other scope shares the FX/Total one. Factored out so both `scope_layout` and
-    the filter-dropdown callback build the identical column set. With the scope's frame,
-    the Futures key date is labelled for what it holds (`futures_key_date_label`)."""
-    if scope == "futures":
-        return _FUTURES_DISPLAY_COLUMNS, {**_FUTURES_COLUMN_LABELS, "settle_date": futures_key_date_label(df)}
+    """(display_columns, column_labels) for a sub-tab: every table scope shares the Total
+    book's commodity-terms layout (the Futures & LME layout left on 2026-09-28). Factored out
+    so both `scope_layout` and the filter-dropdown callback build the identical column set;
+    `scope` and `df` are kept for those callers."""
     return _DISPLAY_COLUMNS, _COLUMN_LABELS
 
 
 def scope_header_tips(scope: str) -> dict:
-    """Header hovers of a sub-tab's trade table: the Futures key date says what it is per product."""
-    if scope == "futures":
-        return {"settle_date": FUTURES_KEY_DATE_TIP}
+    """Header hovers of a sub-tab's trade table: the Greek columns say what they are."""
     return {c: GREEK_TIP for c in GREEK_COLS}
 
 
@@ -1347,9 +1247,8 @@ def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
     if df.empty:
         return df
     df = add_row_display_fields(conn, df, as_of)
-    if scope in ("futures", "total"):
-        df = add_instrument_fields(conn, df)
     if scope == "total":
+        df = add_instrument_fields(conn, df)
         df = add_prev_close(conn, df, as_of)
         df = add_option_greeks(conn, df, as_of)
     return _sorted_scope_df(df)
@@ -1493,106 +1392,10 @@ def add_prev_close(conn: sqlite3.Connection, df: pd.DataFrame, as_of: str) -> pd
     return df
 
 
-def _subtotal(rows: pd.DataFrame) -> tuple:
-    """(USD P&L summed over the priced rows or None when none is priced, the Contract cell's
-    visible label "3 trades" / "3 trades; excludes 1 of 3 unpriced", the P&L cell's hover:
-    each unpriced trade and its reason). The header's display rule: known figures summed,
-    an n/a never counted as 0 and always named."""
-    pnl = pd.to_numeric(rows["pnl_usd"], errors="coerce") if "pnl_usd" in rows.columns else pd.Series(dtype=float)
-    known = pnl.dropna()
-    n, k = len(rows), int(pnl.isna().sum())
-    label = _plural(n, "trade", "trades") + (f"; excludes {k} of {n} unpriced" if k else "")
-    why = ""
-    if k:
-        reasons = rows["reason"] if "reason" in rows.columns else pd.Series([""] * n, index=rows.index)
-        unpriced = rows[pnl.isna()]
-        why = f"excludes {k} of {n} trades unpriced: " + "; ".join(
-            f"{t}: {reasons.loc[i] or 'no P&L'}" for i, t in zip(unpriced.index, unpriced["trade_id"]))
-    return (float(known.sum()) if len(known) else None), label, why
-
-
-_GROUP_STYLES = [
-    {"if": {"filter_query": "{row_kind} = 'sector'"}, "fontWeight": "700", "backgroundColor": "#e8edf7"},
-    {"if": {"filter_query": "{row_kind} = 'commodity'"}, "fontWeight": "700", "backgroundColor": "#f4f6fb"},
-]
-
-
-def _key_date_tip(status, mark_date) -> str:
-    """The Futures key-date cell's hover on a settled row: the date of the price the ledger froze
-    it at (`value_book`'s `mark_date` on a frozen row). '' on an open row, whose `mark_date` is
-    the key date itself, and on a settled row with no price date on file."""
-    mark_date = _text(mark_date)
-    if status != "SETTLED" or not mark_date:
-        return ""
-    return f"settled: frozen at the official price of {mark_date}, the last on or before this date"
-
-
-def futures_grouped_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
-    """The Futures table grouped by sector, then commodity (commodity conversion Phase 3):
-    a sector row, then per commodity a commodity row and its contracts' trades. Each
-    trade row is `_format_rows`' own (exchange, contract, lots, fill, mark, P&L in the
-    contract's currency with the currency beside it, USD P&L, exactly as `value_book`
-    gives them; a settled future keeps its frozen USD). A sector and a commodity row carry
-    the USD P&L of their trades summed (`_subtotal`: priced rows only, "excludes N of M
-    unpriced" in sight, each unpriced trade's reason on hover) and no trade id, so the P&L
-    strip, which sums the rows' trade ids, never counts them. Every row carries `sector`
-    and `commodity`, so a header click on either keeps the groups together, and `row_kind`
-    ('sector' | 'commodity' | 'trade'), which styles them. Same return shape as
-    `_format_rows`: (records, tooltip_data, style_data_conditional)."""
-    if df.empty or "sector" not in df.columns:
-        records, tips, styles = _format_rows(df, display_columns, column_labels)
-        return records, tips, styles + _GROUP_STYLES
-    cols = [c for c in display_columns if c in df.columns]
-    order = df.assign(_unclassified=df["sector"] == UNCLASSIFIED_SECTOR).sort_values(
-        ["_unclassified", "sector", "commodity", "settle_date", "instrument_id", "trade_date"], kind="stable")
-    order = order.drop(columns="_unclassified").reset_index(drop=True)
-    trade_records, trade_tips, styles = _format_rows(order, display_columns, column_labels)
-    reasons = order["reason"].tolist() if "reason" in order.columns else [""] * len(order)
-    statuses = order["status"].tolist() if "status" in order.columns else [""] * len(order)
-    mark_dates = order["mark_date"].tolist() if "mark_date" in order.columns else [""] * len(order)
-    for rec, tip, reason, status, mark_date in zip(trade_records, trade_tips, reasons, statuses, mark_dates):
-        rec["row_kind"] = "trade"
-        if reason and rec.get("mark") is None and "mark" in rec:
-            tip["mark"] = {"value": reason, "type": "text"}
-        key_tip = _key_date_tip(status, mark_date)
-        if key_tip and "settle_date" in rec:
-            tip["settle_date"] = {"value": key_tip, "type": "text"}
-
-    def group_row(kind: str, rows: pd.DataFrame, sector: str, commodity: str) -> tuple:
-        value, label, why = _subtotal(rows)
-        rec = {c: "" for c in cols}
-        rec.update(row_kind=kind, sector=sector, commodity=commodity, instrument_id=label, trade_id="",
-                   pnl_usd=value)
-        if kind == "commodity" and "exchange" in cols:
-            rec["exchange"] = ", ".join(sorted({e for e in rows["exchange"] if e}))
-        tip = {"pnl_local": {"value": SUBTOTAL_LOCAL_NOTE, "type": "text"}} if "pnl_local" in cols else {}
-        if why:
-            tip["pnl_usd"] = {"value": why, "type": "text"}
-            tip["instrument_id"] = {"value": why, "type": "text"}
-        return rec, tip
-
-    records, tips = [], []
-    positions = {idx: n for n, idx in enumerate(order.index)}
-    for sector, s_rows in order.groupby("sector", sort=False):
-        rec, tip = group_row("sector", s_rows, sector, "")
-        records.append(rec)
-        tips.append(tip)
-        for commodity, c_rows in s_rows.groupby("commodity", sort=False):
-            rec, tip = group_row("commodity", c_rows, sector, commodity)
-            records.append(rec)
-            tips.append(tip)
-            for idx in c_rows.index:
-                records.append(trade_records[positions[idx]])
-                tips.append(trade_tips[positions[idx]])
-    return records, tips, styles + _GROUP_STYLES
-
-
 def _table_rows(scope: str, df: pd.DataFrame, display_columns: list, column_labels: dict):
-    """A scope's trade-table records: grouped for Futures (`futures_grouped_rows`), flat for
-    every other scope (`_format_rows`). One builder for the first render and the filter
-    callback's refresh."""
-    if scope == "futures":
-        return futures_grouped_rows(df, display_columns, column_labels)
+    """A scope's trade-table records, flat (`_format_rows`; the Futures & LME grouping by sector
+    and commodity left on 2026-09-28). One builder for the first render and the filter
+    callback's refresh; `scope` is kept for those callers."""
     return _format_rows(df, display_columns, column_labels)
 
 
@@ -1695,7 +1498,7 @@ def missing_terms_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
                         # (`ui.tabs.options.EDITABLE_COLUMNS`), so that comes first; the form
                         # and a re-upload are the alternatives.
                         html.Span("Type the strike in its Strike cell under Options (Payoff Digital where it is one); "
-                                  "or Manual entry ▸ Option terms; or re-upload an export with a Strike column."),
+                                  "or Options ▸ Option terms; or re-upload an export with a Strike column."),
                     ])
 
 
@@ -1719,8 +1522,7 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str, with_notices:
     `with_notices=False` is how the page itself calls it (`_update`, 2026-09-18): there
     the banners live in `NOTICES_ID`, above the content and outside it, so they follow
     every revision in place -- a saved strike leaves the banner at once -- instead of
-    being frozen into the sub-tab until its next rebuild (and never, under Manual entry,
-    which is not rebuilt on a revision at all)."""
+    being frozen into the sub-tab until its next rebuild."""
     body = _scope_layout_body(scope, conn, as_of)
     notices = blotter_notices(conn) if with_notices else []
     if not notices:
@@ -1755,9 +1557,9 @@ def total_book_issues(df: pd.DataFrame, as_of: str):
 def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html.Div:
     """Build one sub-tab's content: headline strip (initial, whole-scope) + filter
     dropdown bar + trade table + an (empty until a row is clicked) detail container
-    below it. FX / Options / Manual entry delegate to their own modules.
+    below it. Options delegates to its own module.
 
-    Every sub-section (P&L strip / delegated FX-Options table / the Total book's
+    Every sub-section (P&L strip / the delegated Options table / the Total book's
     asset-class breakdown / the filter bar + trade table) is wrapped in `_safe_section`
     so a failure in one doesn't blank the others -- see that helper's docstring."""
     strip_id = f"blotter-strip-{scope}"
@@ -1775,12 +1577,6 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
             _safe_section("Options", lambda: options_ui.build_layout(conn, as_of), conn),
         ])
 
-    if scope == "fx":
-        return _safe_section("FX", lambda: blotter_fx_ui.build_layout(conn, as_of), conn)
-
-    if scope == "manual":
-        return _safe_section("Manual entry", lambda: manual_entry_ui.build_layout(conn))
-
     if scope in PLACEHOLDER_SCOPES:
         def _placeholder():
             empty = pd.DataFrame(columns=_DISPLAY_COLUMNS)
@@ -1791,8 +1587,8 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
             ])
         return _safe_section(SCOPE_LABELS.get(scope, scope), _placeholder)
 
-    # "total"/"futures": the shared priced_value_book pipeline (module docstring calls
-    # this "pricing"). A failure pulling `df` itself blocks everything downstream (the
+    # "total": the shared priced_value_book pipeline (module docstring calls this
+    # "pricing"). A failure pulling `df` itself blocks everything downstream (the
     # strip, the asset-class table and the trade table all need it), so that one step
     # is not wrapped by `_safe_section` -- there is nothing partial to preserve -- but
     # still degrades to one inline card rather than propagating past `_update`.
@@ -1803,15 +1599,6 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
         logging.getLogger(__name__).exception("Blotter section %r failed to render", "Pricing")
         return html.Div([_error_card("Pricing", exc, conn), html.Div(id=detail_id)])
     display_columns, column_labels = scope_columns(scope, df)
-
-    if scope == "futures" and df.empty:
-        empty = pd.DataFrame(columns=display_columns)
-        return html.Div([
-            html.Div(id=strip_id, children=render_placeholder_strip(FUTURES_NO_TRADES_REASON)),
-            detail_table(empty, table_id=table_id, display_columns=display_columns,
-                         column_labels=column_labels),
-            html.Div(id=detail_id),
-        ])
 
     def _strip():
         trade_ids = df["trade_id"].tolist() if not df.empty else []
@@ -1863,23 +1650,19 @@ def bundles_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
 
 
 def _today_default(default_date: Optional[str]) -> Optional[str]:
-    """As-of defaults to today (New York), like the Ladder tab, so the strip and the
+    """As-of defaults to today (New York, `ui.tabs.controls.today_ny`), so the strip and the
     list show the book as it stands now rather than at the last upload."""
     try:
-        from ui.tabs.cash_ladder import today_ny
         return today_ny()
     except Exception:
         return default_date
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
-    """Title row matches the Ladder tab's (coordinator instruction 2026-09-15): a single
-    row, "Blotter" on the left, the full-text date heading + date picker + "Today"
-    button on the right, no card, no kicker -- same class names
-    (`ladder-title-row(-heading|-right)`) as `ui.tabs.cash_ladder.build_layout` so one
-    stylesheet rule styles both tabs' title rows."""
-    from ui.tabs.cash_ladder import heading_date_text
-
+    """Title row (coordinator instruction 2026-09-15): a single row, the tab's name on the
+    left, the full-text date heading + date picker + "Today" button on the right, no card,
+    no kicker -- the `ladder-title-row(-heading|-right)` class names the stylesheet's one
+    title-row rule styles (named for the Ladder tab, which left on 2026-09-28)."""
     resolved_date = _today_default(default_date)
     return html.Div(className="blotter", children=[
         html.Div(id=TOOLBAR_ID, className="ladder-title-row", children=[
@@ -1906,11 +1689,10 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Same convention as `ui.tabs.cash_ladder.register_callbacks`."""
+    """The shell's convention: `register_callbacks(app, get_db_path)`, every tab alike."""
 
     @app.callback(Output(TITLE_ID, "children"), Input(DATE_PICKER_ID, "date"))
     def _update_title(as_of_date):
-        from ui.tabs.cash_ladder import heading_date_text
         return heading_date_text(as_of_date)
 
     @app.callback(
@@ -1919,7 +1701,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         prevent_initial_call=True,
     )
     def _jump_to_today(_n_clicks):
-        from ui.tabs.cash_ladder import today_ny
         return today_ny()
 
     @app.callback(
@@ -1935,13 +1716,12 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         """`(content, trade-set signature it was built from)`; `(no_update, no_update)`
         when what is on screen stays.
 
-        No browser reload (ui/revision.py, 2026-09-18). A changed TRADE SET (an upload, a
-        manual trade booked or deleted) rebuilds whatever sub-tab is showing. A marks-only
-        change rebuilds the views that are one static block (FX, Bundles); the Total book
-        and Futures tables instead refresh their rows in place through `_apply_filters`,
-        so a Bloomberg pull never resets the user's filters, sort or page, and Options
-        refreshes its own table and its strip in place (`_SELF_REFRESHING_SCOPES`). The
-        Manual entry form is never rebuilt under the user's hands.
+        No browser reload (ui/revision.py, 2026-09-18). A changed TRADE SET (an upload)
+        rebuilds whatever sub-tab is showing. A marks-only change rebuilds the views that
+        are one static block (Bundles); the Total book table instead refreshes its rows in
+        place through `_apply_filters`, so a Bloomberg pull never resets the user's
+        filters, sort or page, and Options refreshes its own table and its strip in place
+        (`_SELF_REFRESHING_SCOPES`).
 
         A BOOK revision is not taken at its word. It also fires when a strike, type or
         payoff is saved (`revision.book_signature` sums strikes and signed quantities, and
@@ -1963,8 +1743,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         db_path = get_db_path()
         trade_set = None
         if triggered and triggered <= {DATA_REVISION_ID, BOOK_REVISION_ID}:
-            if scope == "manual":
-                return no_update, no_update
             book_moved = False
             if BOOK_REVISION_ID in triggered:
                 trade_set = trade_set_signature(db_path)
@@ -2032,10 +1810,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 return message_box(f"Database not available ({exc}).")
             try:
                 with pricing_snapshot(conn, f"Blotter {_scope} P&L strip"):
-                    if _scope == "futures" and not trade_ids:
-                        df, _, _ = priced_value_book(conn, as_of_date)
-                        if df.empty or df[df["product"].isin(SCOPE_PRODUCTS["futures"])].empty:
-                            return render_placeholder_strip(FUTURES_NO_TRADES_REASON)
                     headline = row_scoped_headline(conn, as_of_date, trade_ids)
                     return render_headline_strip(headline)
             except Exception as exc:  # noqa: BLE001 -- an HTTP 500 here left the strip on stale figures, silently
@@ -2146,10 +1920,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             )(_download_csv)
 
     options_ui.register_callbacks(app, get_db_path)
-    manual_entry_ui.register_callbacks(app, get_db_path)
-    # The FX sub-tab left the Trades tab on 2026-09-28 (wave 3), so `ui.tabs.blotter_fx`'s one
-    # callback ("P&L by currency, rows shown" on its table's filter) is not registered: its
-    # ids are never in the page.
 
     def _register_strip_refresh(scope: str) -> None:
         @app.callback(
@@ -2197,7 +1967,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         count is never stale: an option leaves the missing-terms banner the moment its
         strike is saved (the save publishes a revision at once -- the terms editor's Save
         does it itself, a cell edit through `_publish_option_cell_edit`), whichever sub-tab
-        is showing, Manual entry included, without rebuilding anything. A database that
+        is showing, without rebuilding anything. A database that
         cannot be read right now leaves the banners as they are; the next revision retries."""
         from dash import no_update
         from ui.app import connect_readonly
@@ -2230,11 +2000,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         sub-tab being opened): Dash would fire every listener even for an unchanged value."""
         return publish_if_changed(file_signature(get_db_path()), current_data_rev)
 
-    # "fx" (ui.tabs.blotter_fx, rebuilt 2026-09-17),
-    # "options" (ui.tabs.options, Phase 8) and "manual" (ui.tabs.manual_entry) have no
-    # strip/detail/filter of their own (module docstring above) -- none is a
-    # priced_value_book-shaped table, so the generic callbacks below (which assume
-    # trade_id/mark/pnl_usd rows) don't apply.
+    # "options" (ui.tabs.options, Phase 8) and "bundles" have no strip/detail/filter of
+    # their own (module docstring above) -- neither is a priced_value_book-shaped table, so
+    # the generic callbacks below (which assume trade_id/mark/pnl_usd rows) don't apply.
     for _scope in SCOPE_ORDER:
         if _scope not in _NON_TABLE_SCOPES:
             if _scope not in _STRIPLESS_SCOPES:   # the Total book has no strip (the header is the total)
