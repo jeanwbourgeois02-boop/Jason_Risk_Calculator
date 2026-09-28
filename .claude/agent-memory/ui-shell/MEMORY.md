@@ -16,3 +16,4 @@
 - [Parallel tab wiring](parallel-tab-wiring.md): wire a tab another lane is still writing; stub it from the scratchpad; the lint-hook cwd noise
 - [Display helpers 2026-09-25](display-helpers-2026-09-25.md) — short_money/about/marker/issues_drawer, amount_short+whole_units; why tables print M/G not m/bn
 - [Tab links 2026-09-25](tab-links-2026-09-25.md) — tab_link helper + one ALL-pattern callback on main-tabs.value, idx rule, Dash 4 test gotchas
+- [UI redesign wave 1 2026-09-28](ui-redesign-wave1-2026-09-28.md) — Trades tab (key blotter), slim header, Book table; "no tests per wave" rule; parked tests in scratchpad

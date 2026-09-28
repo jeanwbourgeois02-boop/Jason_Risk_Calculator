@@ -326,6 +326,8 @@ p { margin: 8px 0; }
 .blotter-filter { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
 .blotter-filter label { font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: .05em; color: var(--muted); }
+.blotter-filter-search { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; min-width: 200px; }
+.blotter-filter-search:focus { outline: none; border-color: var(--navy); }
 .blotter-filter-dropdown, .blotter-filter-dropdown .dash-dropdown {
   font-family: inherit; font-size: 12.5px; }
 .blotter-filter-dropdown .dash-dropdown-trigger { border: 1px solid var(--line); border-radius: 6px;

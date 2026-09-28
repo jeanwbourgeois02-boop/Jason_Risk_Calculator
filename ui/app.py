@@ -3,16 +3,16 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Eight tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25), in this order: Book,
-Spreads, Curve, Risk, Expiries, Blotter, FX & cash, Data. "FX & cash" is the former Ladder
-(ui/tabs/cash_ladder.py) and "Data" the former Market data (ui/tabs/market_data.py); each
-tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
+Eight tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25; UI redesign wave 1, user
+2026-09-28), in this order: Book, Trades, Spreads, Curve, Risk, Expiries, FX & cash, Data.
+"Trades" is the former Blotter (ui/tabs/blotter.py, key "blotter"), "FX & cash" the former
+Ladder (ui/tabs/cash_ladder.py) and "Data" the former Market data (ui/tabs/market_data.py);
+each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
 separate from the label the user reads, so a rename never moves an id. The app opens on the
-first tab, Book (ui/tabs/book.py, Phase B): the book's home. A header (ui/tabs/header.py) sits
-above the tabs on every view, showing LTD / Daily / 5d / MTD / YTD / trading from
-engine.pnl.ledger.
+first tab, Book (ui/tabs/book.py): the book's home. A slim header (ui/tabs/header.py) sits
+above the tabs on every view: the as-of date, Daily / MTD / YTD / LTD and the Data chip.
 
-Options are not a top-level tab: they live inside the Blotter tab as a grouped,
+Options are not a top-level tab: they live inside the Trades tab as a grouped,
 collapsible trade summary (ui/tabs/options.py; docs/open-questions.md item 61).
 """
 from __future__ import annotations
@@ -34,18 +34,19 @@ from ui import revision, uploads
 # name every screen, script and test uses.
 from data.paths import DEFAULT_DB_PATH, REPO_ROOT, get_db_path  # noqa: F401
 
-# Order per the screens redesign (user, 2026-09-25: "the spread is the unit"), replacing the
-# macro book's Blotter-first order of 2026-09-22; the app opens on the first. Each label maps
-# to its stable key: the tab bar's value and the body id `tab-body-<key>`. The key never holds
-# '&' or a space, and a renamed tab keeps its key ("FX & cash" is still "ladder", "Data" still
-# "market-data"), so nothing keyed on a body id moves.
+# Order per the UI redesign wave 1 (user, 2026-09-28: Book and Trades are the two screens used
+# most), after the screens redesign of 2026-09-25 ("the spread is the unit"); the app opens on
+# the first. Each label maps to its stable key: the tab bar's value and the body id
+# `tab-body-<key>`. The key never holds '&' or a space, and a renamed tab keeps its key
+# ("Trades" is still "blotter", "FX & cash" still "ladder", "Data" still "market-data"), so
+# nothing keyed on a body id moves.
 TAB_KEYS = {
     "Book": "book",
+    "Trades": "blotter",
     "Spreads": "spreads",
     "Curve": "curve",
     "Risk": "risk",
     "Expiries": "expiries",
-    "Blotter": "blotter",
     "FX & cash": "ladder",
     "Data": "market-data",
 }
@@ -221,7 +222,7 @@ def build_layout(data: dict, db_path=None) -> html.Div:
         "ladder": cash_ladder.build_layout,
         "market-data": market_data.build_layout,
     }
-    # Only the Blotter opens on another day; every other tab names today, the header's default.
+    # Only the Trades tab (key "blotter") opens on another day; every other tab names today.
     tab_defaults = {key: today for key in tab_builders}
     tab_defaults["blotter"] = snapshot_date
     tabs = [dcc.Tab(label=label, value=TAB_KEYS[label], className="tab", selected_className="tab--selected")

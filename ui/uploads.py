@@ -1,4 +1,4 @@
-"""Trade file upload control: one button, "Upload trade file" (.csv/.xlsx/.xls),
+"""Trade file upload control: one button, "Upload blotter" (.csv/.xlsx/.xls),
 accepting the trade blotter (`data.ingest.upload.import_blotter`, tolerant of format
 variation per that module's docstring). No date picker: each blotter row carries its
 own dates.
@@ -248,7 +248,7 @@ def layout(data: dict = None):
             *feed_controls.controls(),
             html.Span(className="top-bar-divider", **{"aria-hidden": "true"}),
             dcc.Upload(id=FILE_UPLOAD_ID, className="source-upload",
-                       children=html.Button("Upload trade file", className="btn"),
+                       children=html.Button("Upload blotter", className="btn"),
                        accept=".csv,.xlsx,.xls", multiple=False, max_size=25 * 1024 * 1024),
             html.Div(id=SOURCE_LINE_ID, className="source-line", children=describe_source(data)),
         ]),

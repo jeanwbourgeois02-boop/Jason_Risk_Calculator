@@ -2,6 +2,14 @@
 tabs)". Pure view over `engine.pnl.ledger.period_pnl` and `engine.pnl.ledger.ltd`; no
 calculation happens here (CLAUDE.md: "ui/ ... never recomputes P&L or delta itself").
 
+Slim since the UI redesign wave 1 (user, 2026-09-28): the as-of date, Daily, MTD, YTD, LTD
+(k / m, the full figure on hover, with their "excl. N" / "filled N" / "ref <date>" markers)
+and the Data chip. Previous day, 5d and Trading are sentences on the Daily's hover; the
+trade count is on the date's hover. The commodity strip, the next expiry and the Risk chip
+left for the Book tab (its "Needs you" list and its table); their builders and the memoised
+readings (`risk_summary`, `needed_marks`, `_spread_summary`) stay here for the screens that read
+them.
+
 Exposes `layout()` (static shell, no DB access, so it is cheap to place on every tab)
 and `register_callbacks(app, get_db_path)` (same signature convention as
 `ui.tabs.cash_ladder.register_callbacks`, so `ui.app` / C5 wires it identically).
@@ -140,7 +148,7 @@ import threading
 from functools import lru_cache
 from typing import Callable, Optional
 
-from dash import Input, Output, State, dcc, html
+from dash import Input, Output, dcc, html
 
 from ui.tabs.formatting import marker, short_money
 
@@ -776,29 +784,57 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     entries["trading"] = _priced_single(
         trading_rows, "a trade dated today has no mark from any source")
 
-    for key in _PERIODS:
-        cards.append(_pnl_card(_PERIOD_TITLES[key], entries[key]))
-
-    # Always computable, marks or no marks (CLAUDE.md: trade counts need only the blotter,
-    # not a mark). Small, with open / settled on hover.
-    n_open = int((df_today["status"] == "OPEN").sum()) if not df_today.empty else 0
-    n_settled = n_total - n_open
-    cards.append(_header_card("Trades", f"{n_total:,}", "header-figure-value header-figure-value--neutral",
-                              hover=f"{n_open:,} open, {n_settled:,} settled", value_style=_SMALL_VALUE_STYLE))
-
-    # FX Net / Gross USD delta left the header on 2026-09-25 (screens redesign plan: "one
-    # place per number"; they are the FX & cash tab's headline card). The commodity strip
-    # follows the P&L, then the chip for the marks the book is missing on the as-of date.
-    cards.append(_divider())
-    cards.extend(_commodity_cards(conn, as_of))
+    # The slim header (UI redesign wave 1, user 2026-09-28): the as-of date, Daily, MTD, YTD,
+    # LTD and the Data chip. Previous day, 5d and Trading are one sentence each on the Daily's
+    # hover, so nothing is lost; the trade count, the commodity strip, the next expiry and the
+    # Risk chip left for the Book tab's "Needs you" list and its table.
+    daily = dict(entries["daily"])
+    daily["value_hover"] = _joined(daily.get("value_hover"),
+                                   *(_entry_sentence(_PERIOD_TITLES[k], entries[k]) for k in _ON_DAILY_HOVER))
+    cards = [_as_of_card(as_of, n_total, n_open=int((df_today["status"] == "OPEN").sum()) if not df_today.empty else 0),
+             _pnl_card("Daily", daily), _pnl_card("MTD", entries["mtd"]), _pnl_card("YTD", entries["ytd"]),
+             _pnl_card("LTD", ltd_entry)]
     marks = _marks_card(conn, as_of, needs_today)
     if marks is not None:
         cards.append(marks)
-    # The risk chip (screens redesign Phase B): never worked out here, since `book_risk` reads the
-    # history (seconds): the memoised result when this database revision and as-of already have
-    # one, else "VaR …" until the chip's own callback, chained after this one, fills it in.
-    cards.append(_risk_card(_risk_summary_if_ready(conn, as_of)))
     return cards
+
+
+# The figures folded onto the Daily's hover, in this order (UI redesign wave 1, 2026-09-28).
+_ON_DAILY_HOVER = ("previous_day", "d5", "trading")
+AS_OF_TITLE = "As of"
+
+
+def _entry_sentence(title: str, entry: dict) -> str:
+    """One sentence for a P&L entry on another figure's hover: "5d $12,300" (with what it
+    leaves out or the close it stepped back to), or "5d n/a: <reason>"."""
+    if not entry.get("available"):
+        return f"{title} n/a: {entry.get('reason') or 'no figure'}"
+    words = [f"{title} {_fmt_usd(entry['value'])}"]
+    words += [f"{short} ({sentence.splitlines()[0]})" for short, sentence, *_rest in _entry_markers(entry) if short]
+    return "; ".join(words)
+
+
+def _as_of_words(as_of: str) -> str:
+    try:
+        d = dt.date.fromisoformat(as_of)
+    except (TypeError, ValueError):
+        return str(as_of)
+    return f"{d.day} {d:%b %Y}"
+
+
+def _as_of_card(as_of: str, n_total: int, n_open: int) -> html.Div:
+    """The header's date: the day every figure is valued on, with the trade count (open /
+    settled) on hover, so the count is still one hover away."""
+    try:
+        d = dt.date.fromisoformat(as_of)
+        long_words = f"{d:%A} {d.day} {d:%B %Y}"
+    except (TypeError, ValueError):
+        long_words = str(as_of)
+    hover = (f"Every figure is valued as of {long_words} ({as_of}). {n_total:,} trades on file: "
+             f"{n_open:,} open, {n_total - n_open:,} settled.")
+    return _header_card(AS_OF_TITLE, _as_of_words(as_of), "header-figure-value header-figure-value--neutral",
+                        hover=hover, value_style=_SMALL_VALUE_STYLE)
 
 
 def _fill_notes(frame, trade_ids=None) -> str:
@@ -1611,33 +1647,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         finally:
             conn.close()
 
-    # The risk chip (screens redesign Phase B): chained on the figures' output, so it runs after
-    # them (every as-of or data-revision change reaches it through them) and the header's first
-    # paint never waits on `book_risk`. It fills the chip's own children in place; the figures
-    # render the memoised result directly once there is one, so a warm re-render never flashes.
-    @app.callback(
-        Output(VAR_CHIP_ID, "children"),
-        Input(f"{HEADER_ID}-figures", "children"),
-        State(AS_OF_STORE_ID, "data"),
-        prevent_initial_call=True,
-    )
-    def _update_risk_chip(_figures, as_of: Optional[str]):
-        if not as_of:
-            from dash import no_update
-            return no_update
-        from ui.app import connect_readonly
-        db_path = get_db_path()
-        try:
-            conn = connect_readonly(db_path)
-        except sqlite3.OperationalError as exc:
-            return _risk_card({"error": f"Database not available ({exc})."}).children
-        try:
-            return _risk_card(risk_summary(conn, as_of)).children
-        except Exception as exc:  # noqa: BLE001 -- as in _update_figures: say why, never a 500
-            logging.getLogger(__name__).exception("header risk chip failed for as_of=%s", as_of)
-            return _risk_card({"error": _failure_reason("the book's risk could not be shown", exc, conn)}).children
-        finally:
-            conn.close()
+    # The Risk chip left the header on 2026-09-28 (UI redesign wave 1): the VaR against the
+    # vol target is on the Book tab's "Needs you" list, through `risk_summary` / `risk_summary_if_ready`,
+    # which stay here as the memoised reading every screen shares.
 
     # The mirror (see the docstring): Dash does not sync a native <details> toggle to
     # `open`, so the browser reports the element's real state after every click.

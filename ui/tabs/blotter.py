@@ -187,7 +187,7 @@ _ALL = "All"
 # closes the row: it is a form, not a view of the book. Rates left on 2026-09-24 (the
 # macro trader's products are out of the app, CLAUDE.md "Commodity conversion plan").
 SCOPE_ORDER = ("total", "fx", "futures", "options", "bundles", "manual")
-SCOPE_LABELS = {"total": "Total book", "fx": "FX", "futures": "Futures & LME",
+SCOPE_LABELS = {"total": "All trades", "fx": "FX", "futures": "Futures & LME",
                 "options": "Options", "bundles": "Bundles", "manual": "Manual entry"}
 SCOPE_PRODUCTS = {
     "total": None,
@@ -252,6 +252,31 @@ FX_EXCHANGE = "OTC"
 # only makes sense for the categorical ones; "pick USDJPY" is the request, not a range
 # filter.
 FILTERABLE_COLS = ["sector", "commodity", "instrument_id", "side", "status", "product", "strategy", "theme"]
+# All trades (the Total book until 2026-09-28, UI redesign wave 1): three dropdowns, commodity,
+# product and status, a free-text search over the instrument and the trade id, and a CSV of the
+# rows shown at full figures.
+TOTAL_FILTER_COLS = ["commodity", "product", "status"]
+SEARCH_COLS = ("instrument_id", "trade_id")
+
+
+def filter_cols_for(scope: str, display_columns: list) -> list:
+    """The columns a sub-tab offers as dropdown filters."""
+    wanted = TOTAL_FILTER_COLS if scope == "total" else FILTERABLE_COLS
+    return [c for c in wanted if c in display_columns]
+
+
+def search_rows(df: pd.DataFrame, text: Optional[str]) -> pd.DataFrame:
+    """The rows whose instrument or trade id contains `text` (case-insensitive); all with none."""
+    needle = str(text or "").strip().lower()
+    if not needle or df.empty:
+        return df
+    cols = [c for c in SEARCH_COLS if c in df.columns]
+    if not cols:
+        return df
+    hit = pd.Series(False, index=df.index)
+    for c in cols:
+        hit |= df[c].astype(str).str.lower().str.contains(needle, regex=False)
+    return df[hit]
 
 
 # Futures & LME columns (2026-09-15, 2026-09-24 for the commodity book, then Phase 3 grouped
@@ -312,16 +337,26 @@ SETTLED_LOCAL_REASON = "settled: the ledger froze this trade's P&L in USD; its l
 # day's close (`add_prev_close`), their source and date on hover; P&L (local) is in the Ccy
 # beside it (`add_instrument_fields`), P&L (USD) as the engine converted it. Nothing here is
 # computed: every figure is a `value_book` column.
+# The Greeks of an option on a future (UI redesign wave 1, 2026-09-28): the official marks per
+# option lot, read as they are (`add_option_greeks`): DELTA in futures lots per lot, GAMMA /
+# THETA / VEGA in the contract's price unit per lot; blank on every other product. The Options
+# sub-tab scales them to the position through the engine; nothing is scaled or priced here.
+GREEK_COLS = ("delta", "gamma", "theta", "vega")
+_GREEK_MARK_TYPES = {"delta": "DELTA", "gamma": "GAMMA", "theta": "THETA", "vega": "VEGA"}
+GREEK_TIP = ("An option on a future's official Greek per option lot, as the mark on file (QL_OPTIONS_PRICER): "
+             "Delta in futures lots per lot; Gamma, Theta, Vega in the contract's price unit per lot. Blank on "
+             "every other product; the Options sub-tab shows them scaled to the position.")
 _DISPLAY_COLUMNS = [
     "instrument_id", "commodity", "exchange", "product", "trade_date", "side", "quantity", "qty_unit",
-    "fill", "mark", "prev_close", "pnl_local", "pnl_ccy", "pnl_usd", "status", "settle_date", "theme",
-    "trade_id",
+    "fill", "mark", "prev_close", "pnl_local", "pnl_ccy", "pnl_usd", "delta", "gamma", "theta", "vega",
+    "status", "settle_date", "theme", "trade_id",
 ]
 _COLUMN_LABELS = {
     "instrument_id": "Instrument", "commodity": "Commodity / pair", "exchange": "Exchange",
     "product": "Product", "trade_date": "Trade date", "side": "Side", "quantity": "Quantity",
     "qty_unit": "Unit", "fill": "Fill", "mark": "Mark", "prev_close": "Prev close",
-    "pnl_local": "P&L (local)", "pnl_ccy": "Ccy", "pnl_usd": "P&L (USD)", "status": "Status",
+    "pnl_local": "P&L (local)", "pnl_ccy": "Ccy", "pnl_usd": "P&L (USD)",
+    "delta": "Delta /lot", "gamma": "Gamma /lot", "theta": "Theta /lot", "vega": "Vega /lot", "status": "Status",
     "settle_date": "Expiry / value date", "theme": "Bundle", "trade_id": "Trade id",
 }
 # Text columns of the trade tables that read left-aligned (names, not figures).
@@ -380,6 +415,10 @@ _COLUMN_FORMATS = {   # the numeric columns of the trade table (ui.tabs.ranking)
     "mark": rk.rate(6, nully="n/a"),
     "prev_close": rk.rate(6, nully="n/a"),   # value_book's mark on the previous business day's close
     "t1_rate": rk.rate(6, nully="n/a"),
+    "delta": rk.rate(4, nully="", trim=True),     # an option on a future's Greeks per lot; blank elsewhere
+    "gamma": rk.rate(4, nully="", trim=True),
+    "theta": rk.rate(4, nully="", trim=True),
+    "vega": rk.rate(4, nully="", trim=True),
 }
 
 
@@ -516,7 +555,8 @@ def _filter_bar(df: pd.DataFrame, table_id: str, display_columns: list, column_l
     match (it listens on the same table's `derived_virtual_data`). Replaces the native
     filter row (module docstring). Built from the FULL scope df so every dropdown lists
     every value that scope ever has, not just what a prior selection left visible."""
-    cols = [c for c in FILTERABLE_COLS if c in display_columns and c in df.columns]
+    scope = "total" if table_id.endswith("-total") else ""
+    cols = [c for c in filter_cols_for(scope, display_columns) if c in df.columns]
     if not cols:
         return html.Div()
     children = [html.Div(className="blotter-filter", children=[
@@ -524,8 +564,18 @@ def _filter_bar(df: pd.DataFrame, table_id: str, display_columns: list, column_l
         dcc.Dropdown(id=f"{table_id}-filter-{c}", options=_filter_options(df, c, column_labels),
                      value=[], multi=True, placeholder="All", className="blotter-filter-dropdown"),
     ]) for c in cols]
+    if scope == "total":
+        children.append(html.Div(className="blotter-filter", children=[
+            html.Label("Search"),
+            dcc.Input(id=f"{table_id}-search", type="text", value="", debounce=True,
+                      placeholder="instrument or trade id", className="blotter-filter-search"),
+        ]))
     children.append(html.Button("Clear filters", id=f"{table_id}-filter-clear", n_clicks=0,
                                 className="btn btn--ghost"))
+    if scope == "total":
+        children.append(html.Button("Download CSV", id=f"{table_id}-csv", n_clicks=0, className="btn btn--ghost",
+                                    title="The rows shown, every column, at full figures"))
+        children.append(dcc.Download(id=f"{table_id}-download"))
     return html.Div(className="blotter-filter-bar", children=children)
 
 
@@ -1235,6 +1285,20 @@ def futures_key_date_label(df: Optional[pd.DataFrame]) -> str:
     return FUTURES_KEY_DATE_BOTH
 
 
+def csv_download(rows, display_columns: list, column_labels: dict, scope: str = "total"):
+    """`dcc.send_data_frame` of the rows shown (the table's `derived_virtual_data`: every
+    filter and sort applied), every display column at full figures under its screen label,
+    plus the trade id; None with no rows (nothing to download)."""
+    if not rows:
+        return None
+    frame = pd.DataFrame(list(rows))
+    cols = [c for c in display_columns if c in frame.columns]
+    if "trade_id" in frame.columns and "trade_id" not in cols:
+        cols.append("trade_id")
+    frame = frame[cols].rename(columns={c: column_labels.get(c, c) for c in cols})
+    return dcc.send_data_frame(frame.to_csv, f"trades-{scope}.csv", index=False)
+
+
 def scope_columns(scope: str, df: Optional[pd.DataFrame] = None) -> tuple:
     """(display_columns, column_labels) for a sub-tab -- Futures has its own layout,
     every other scope shares the FX/Total one. Factored out so both `scope_layout` and
@@ -1247,7 +1311,9 @@ def scope_columns(scope: str, df: Optional[pd.DataFrame] = None) -> tuple:
 
 def scope_header_tips(scope: str) -> dict:
     """Header hovers of a sub-tab's trade table: the Futures key date says what it is per product."""
-    return {"settle_date": FUTURES_KEY_DATE_TIP} if scope == "futures" else {}
+    if scope == "futures":
+        return {"settle_date": FUTURES_KEY_DATE_TIP}
+    return {c: GREEK_TIP for c in GREEK_COLS}
 
 
 def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
@@ -1267,7 +1333,40 @@ def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
         df = add_instrument_fields(conn, df)
     if scope == "total":
         df = add_prev_close(conn, df, as_of)
+        df = add_option_greeks(conn, df, as_of)
     return _sorted_scope_df(df)
+
+
+def add_option_greeks(conn: sqlite3.Connection, df: pd.DataFrame, as_of: str) -> pd.DataFrame:
+    """`GREEK_COLS` on the frame: an open option on a future's official DELTA / GAMMA / THETA /
+    VEGA marks on `as_of`, keyed on its own instrument and expiry, read as they are; None on
+    every other row (and on an option with no such mark). Nothing is priced or scaled."""
+    out = df.copy()
+    for col in GREEK_COLS:
+        out[col] = None
+    if out.empty or "product" not in out.columns:
+        return out
+    options = out[out["product"] == "CMDTY_OPTION"]
+    if options.empty:
+        return out
+    instruments = sorted({str(i) for i in options["instrument_id"]})
+    try:
+        placeholders = ",".join("?" * len(instruments))
+        rows = conn.execute(
+            f"SELECT instrument_id, settle_date, mark_type, value FROM marks_official WHERE as_of_date = ? "
+            f"AND mark_type IN ('DELTA','GAMMA','THETA','VEGA') AND instrument_id IN ({placeholders})",
+            (as_of, *instruments)).fetchall()
+    except sqlite3.Error:
+        return out
+    marks = {(str(i), str(d), str(mt)): v for i, d, mt, v in rows}
+    for idx, r in options.iterrows():
+        for col, mt in _GREEK_MARK_TYPES.items():
+            v = marks.get((str(r["instrument_id"]), str(r.get("settle_date", "")), mt))
+            if v is None:   # keyed on another date (a moved expiry): the option's own mark still
+                v = next((val for (i, _d, m), val in marks.items()
+                          if i == str(r["instrument_id"]) and m == mt), None)
+            out.at[idx, col] = v
+    return out
 
 
 def add_instrument_fields(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
@@ -1612,6 +1711,8 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str, with_notices:
 
 
 TOTAL_ISSUES_ID = "blotter-issues-total"
+SUMMARIES_ID = "blotter-summaries-total"
+SUMMARIES_TITLE = "Summaries (moving to Exposure and P&L in wave 2)"
 _FILL_NOTE_PREFIX = "no price on "   # engine.pnl.reference.fill_book's note on a filled row
 
 
@@ -1704,12 +1805,20 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
     # The Total book has no P&L strip (Screens redesign Phase A, 2026-09-25): the header
     # above every tab is the total book. Its reasons sit in one collapsed drawer on top.
     body = [] if scope in _STRIPLESS_SCOPES else [_safe_section("P&L strip", _strip, conn)]
+    summaries = None
     if scope == "total" and not df.empty:
         drawer = total_book_issues(df, as_of)
         if drawer is not None:
             body.append(drawer)
-        body.append(_safe_section("Positions", lambda: positions_table(conn, as_of), conn))
-        body.append(_safe_section("P&L by asset class", lambda: asset_class_pnl_table(conn, as_of, df), conn))
+        # The Positions table, the Commodities section and the P&L by asset class (UI redesign
+        # wave 1, 2026-09-28): unchanged, folded under the trade table until wave 2 gives them
+        # their home on the Exposure and P&L tabs.
+        summaries = html.Details(id=SUMMARIES_ID, className="details", open=False, children=[
+            html.Summary(SUMMARIES_TITLE, title="The Positions table (commodities, then FX), and the P&L by "
+                                                "asset class, as they were: they move to the Exposure and P&L "
+                                                "tabs in wave 2."),
+            _safe_section("Positions", lambda: positions_table(conn, as_of), conn),
+            _safe_section("P&L by asset class", lambda: asset_class_pnl_table(conn, as_of, df), conn)])
     if df.empty:
         body.append(message_box("No trades for this as-of date in this scope."))
         body.append(html.Div(id=detail_id))
@@ -1721,6 +1830,8 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
             lambda: detail_table(df, table_id=table_id, display_columns=display_columns,
                                   column_labels=column_labels, scope=scope), conn))
         body.append(html.Div(id=detail_id))
+    if summaries is not None:
+        body.append(summaries)
     return html.Div(body)
 
 
@@ -1763,7 +1874,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     resolved_date = _today_default(default_date)
     return html.Div(className="blotter", children=[
         html.Div(id=TOOLBAR_ID, className="ladder-title-row", children=[
-            html.H3("Blotter", className="ladder-title-row-heading"),
+            html.H3("Trades", className="ladder-title-row-heading"),
             html.Div(className="ladder-title-row-right", children=[
                 html.H4(heading_date_text(resolved_date), id=TITLE_ID, className="section-title"),
                 build_date_picker(DATE_PICKER_ID, default_date=resolved_date),
@@ -1960,14 +2071,19 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     def _register_filter_callback(scope: str) -> None:
         table_id = f"blotter-datatable-{scope}"
         display_columns, column_labels = scope_columns(scope)
-        filter_cols = [c for c in FILTERABLE_COLS if c in display_columns]
+        filter_cols = filter_cols_for(scope, display_columns)
         if not filter_cols:
             return
         filter_ids = [f"{table_id}-filter-{c}" for c in filter_cols]
+        with_search = scope == "total"
 
         def _apply_filters(*args, _scope=scope, _filter_cols=filter_cols,
                             _display_columns=display_columns, _column_labels=column_labels):
-            *values, _data_rev, as_of_date = args
+            if with_search:
+                *values, search, _data_rev, as_of_date = args
+            else:
+                *values, _data_rev, as_of_date = args
+                search = ""
             if not as_of_date:
                 return [], []
             from ui.app import connect_readonly
@@ -1984,6 +2100,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             for col, picked in zip(_filter_cols, values):
                 if picked:
                     df = df[df[col].isin(picked)]
+            df = search_rows(df, search)
             data_records, tooltip_data, _ = _table_rows(_scope, df, _display_columns, _column_labels)
             return data_records, tooltip_data
 
@@ -1991,19 +2108,33 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             Output(table_id, "data"),
             Output(table_id, "tooltip_data"),
             *[Input(fid, "value") for fid in filter_ids],
+            *([Input(f"{table_id}-search", "value")] if with_search else []),
             Input(DATA_REVISION_ID, "data"),  # new marks: refresh the rows, keep the filters
             State(DATE_PICKER_ID, "date"),
             prevent_initial_call=True,
         )(_apply_filters)
 
         def _clear_filters(_n_clicks):
-            return [[] for _ in filter_ids]
+            return [[] for _ in filter_ids] + ([""] if with_search else [])
 
         app.callback(
             *[Output(fid, "value") for fid in filter_ids],
+            *([Output(f"{table_id}-search", "value")] if with_search else []),
             Input(f"{table_id}-filter-clear", "n_clicks"),
             prevent_initial_call=True,
         )(_clear_filters)
+
+        if with_search:
+            def _download_csv(_n_clicks, rows, _scope=scope, _display_columns=display_columns,
+                              _column_labels=column_labels):
+                return csv_download(rows, _display_columns, _column_labels, _scope)
+
+            app.callback(
+                Output(f"{table_id}-download", "data"),
+                Input(f"{table_id}-csv", "n_clicks"),
+                State(table_id, "derived_virtual_data"),
+                prevent_initial_call=True,
+            )(_download_csv)
 
     options_ui.register_callbacks(app, get_db_path)
     manual_entry_ui.register_callbacks(app, get_db_path)

@@ -1,6 +1,6 @@
 ---
 name: wiring-c5
-description: ui/app.py assembly pattern for the tab layout (eight tabs, Book first, stable TAB_KEYS since 2026-09-25), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
+description: ui/app.py assembly pattern for the tab layout (eight tabs, Book then Trades since 2026-09-28, stable TAB_KEYS since 2026-09-25), how a new tab is wired in, and two test-helper gotchas (Dash callback wrapper, _walk skipping dcc.Interval)
 metadata:
   type: project
 ---
@@ -8,7 +8,7 @@ metadata:
 `ui/app.py` assembles `ui/tabs/{header,book,spreads,curve,risk,expiries,blotter,cash_ladder,market_data}.py`,
 each exposing `build_layout(default_date)` / `register_callbacks(app, get_db_path)` (header
 also has a no-arg `layout()`). Since the screens redesign (2026-09-25) the order is
-Book (the app's home, Phase B), Spreads, Curve, Risk, Expiries, Blotter, FX & cash, Data and
+Book (the app's home), Trades (the former Blotter, key `blotter`, since 2026-09-28; before that Book, Spreads, Curve, Risk, Expiries, Blotter, ...), Spreads, Curve, Risk, Expiries, FX & cash, Data and
 `TAB_KEYS` maps each label to a stable key: the dcc.Tab `value` AND the body id
 `tab-body-<key>` (`tab_body_id(label)`). Renamed tabs kept their keys ("FX & cash" ->
 `ladder`, "Data" -> `market-data`), so a label may hold '&' or spaces but an id never does.
