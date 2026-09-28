@@ -1,2 +1,3 @@
-- [Dev DB state 2026-09-28](live-db-state-2026-09-16.md) — risk.db empty; sample.db has every product kind, no curve_quotes/contract_static/Greeks: use it to exercise the commodity rows
-- [Diagnostics tool already built](diagnostics-tool-already-built.md) — tools/bbg_diagnostics.py wired to the UI button; commodity checks added 2026-09-28; extend, don't rebuild; severity rules
+- [Never scarier than the Book](feedback-never-scarier-than-the-book.md) — user 2026-09-28: coverage rows take severity from the screens' reader (dash=fail, estimated/filled=warning)
+- [Dev DB state 2026-09-28](live-db-state-2026-09-16.md) — risk.db empty; sample.db rebuilt by other sessions (marks may stop before today): use it to exercise the commodity rows
+- [Diagnostics tool already built](diagnostics-tool-already-built.md) — tools/bbg_diagnostics.py wired to the UI button; commodity checks added 2026-09-28; extend, don't rebuild
