@@ -1,5 +1,7 @@
 """The FX & cash tab (the Cash ladder / Ladder tab until 2026-09-25, CLAUDE.md "Screens
-redesign plan", Phase A; its body id stays `tab-body-ladder`): date controls + a DataTable rendering a transposed view of
+redesign plan", Phase A; hidden from the tab bar since 2026-09-28, UI redesign wave 3, not
+deleted: `ui.app` builds no body and registers no callback for it, while `today_ny`,
+`heading_date_text` and the rest stay importable): date controls + a DataTable rendering a transposed view of
 `engine.ladder.views.ladder_table`.
 
 `engine/ladder/views.py` (owned by cash-ladder) is expected to expose
@@ -369,7 +371,7 @@ def load_inputs(conn: sqlite3.Connection, as_of_date: str) -> dict:
     official SPOT rates, the per-(currency, value date) forward USD marks
     (engine.ladder.usd_marks, spec 2026-09-18) and the per-pair Position frame. The
     futures delta is no longer read here (2026-09-25, Screens redesign Phase A: the open
-    futures table left this tab; commodity positions are on the Curve tab). Raises
+    futures table left this tab; commodity positions are on the Exposure tab). Raises
     ImportError if an engine module is missing (the caller reports it); everything else
     is the engine's own reasons/blanks, never a substitute."""
     from engine.ladder.exposure_adapter import records_from_db, exposure_records_from_db

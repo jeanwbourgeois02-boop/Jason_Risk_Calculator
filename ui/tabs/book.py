@@ -115,9 +115,10 @@ TABLE_ABOUT = ("One row per open position (spreads-engine: the same spread put o
                "Next date: the legs' earliest first notice, last trade, option expiry or LME prompt, with the "
                "business days to its alert. Click a row for its entries, legs and history. FX hedges, LME "
                "forwards and options in no spread are on the Trades tab; the header is the whole book.")
-NEEDS_ABOUT = ("What needs you today, most urgent first: expiries within the alert window (Expiries tab), marks "
-               "the book needs and does not have (Data tab), trades the grouping rule could not put in a spread "
-               "(Spreads tab), the VaR against the vol target and the desk and exchange limits (Risk tab).")
+NEEDS_ABOUT = ("What needs you today, most urgent first: expiries within the alert window (Timing & cash tab), "
+               "marks the book needs and does not have (Data tab), trades the grouping rule could not put in a "
+               "spread (this tab's Data issues drawer names them; the P&L tab lists them as outrights), the VaR "
+               "against the vol target and the desk and exchange limits (Risk tab).")
 LOAD_ABOUT = ("What the last blotter load did, as the upload recorded it: the file and when it was loaded, the "
               "trades it loaded by kind, what the book filter left out, the rows of the file that did not become "
               "trades (with the parser's own reason), and the trades the engine could not price today. The whole "
@@ -138,9 +139,10 @@ _LIST = {"listStyle": "none", "margin": 0, "padding": 0, "fontSize": "12.5px"}
 _LINE = {"padding": "3px 0", "borderBottom": "1px solid #eef0f4", **_ONE_LINE}
 _TAB_LINK = {"marginLeft": "6px", "fontSize": "11.5px"}
 # The tabs a pointer can open: the label the user reads -> its stable key (ui.app.TAB_KEYS; not
-# imported from ui.app, which imports the tabs).
-TAB_KEYS = {"Book": "book", "Trades": "blotter", "Spreads": "spreads", "Curve": "curve", "Risk": "risk",
-            "Expiries": "expiries", "FX & cash": "ladder", "Data": "market-data"}
+# imported from ui.app, which imports the tabs). Spreads and FX & cash are hidden since
+# 2026-09-28 (wave 3), so no pointer names them: a link to a key off the tab bar is dead.
+TAB_KEYS = {"Book": "book", "Exposure": "curve", "P&L": "pnl", "Timing & cash": "expiries", "Risk": "risk",
+            "Trades": "blotter", "Data": "market-data"}
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -207,8 +209,10 @@ def contract_label(instrument_id: Optional[str]) -> str:
 
 def pointer(tab: str, idx: str) -> html.Span:
     """The tab that holds the detail, as a link that opens it (`formatting.tab_link`): `tab` is
-    the label the user reads ("Curve", "Data"), `idx` the spot it sits in, "book-<spot>", unique
-    on the page for links to the same tab."""
+    the label the user reads ("Exposure", "Data"), `idx` the spot it sits in, "book-<spot>", unique
+    on the page for links to the same tab. "Book" is this tab: no link, an empty span."""
+    if tab == "Book":
+        return html.Span(style=_TAB_LINK)
     return html.Span(tab_link(f"→ {tab}", TAB_KEYS[tab], idx), style=_TAB_LINK)
 
 
@@ -472,7 +476,7 @@ def outright_rows(outrights: Sequence[dict], roots: Dict[str, Any]) -> List[dict
             "entry_reason": "an outright has no spread level (its fill is on the Trades tab)",
             "now_reason": "an outright has no spread level (its price is on the Data tab)",
             "move_reason": "an outright has no spread level", "sources": {},
-            "upu": None, "upu_reason": "an outright has no spread unit; its delta is on the Curve tab",
+            "upu": None, "upu_reason": "an outright has no spread unit; its delta is on the Exposure tab",
             **_periods(values, excluded, reasons, notes),
         })
     return rows
@@ -686,7 +690,7 @@ def book_table(records: Sequence[dict], tips: Sequence[dict]) -> dash_table.Data
 def book_section(data: dict, rows: Sequence[dict]) -> html.Div:
     heading = html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
         about("Positions by spread", TABLE_ABOUT, level="h4", style={"margin": "0 0 6px"}),
-        marker("futures only", SCOPE_NOTE), pointer("Spreads", "book-table")])
+        marker("futures only", SCOPE_NOTE)])
     if data.get("spreads_error"):
         return html.Div(style=_SECTION, children=[heading, message_box(data["spreads_error"]), html.Div(id=DETAIL_ID)])
     if not rows:
@@ -700,8 +704,9 @@ def book_section(data: dict, rows: Sequence[dict]) -> html.Div:
 # --------------------------------------------------------------------------- 2. the row detail
 def detail_for(data: dict, position_id: Optional[str]) -> Any:
     """The detail of the position `position_id` (a row's `id`): its entries and legs as the
-    Spreads tab builds them, its research history chart, and a link to the Spreads tab for its
-    own history from our marks. None for a sector or Book line, or an id that is no position."""
+    Spreads tab's helpers build them (ui.tabs.spreads, hidden since wave 3), its research history
+    chart, and its own history from our marks. None for a sector or Book line, or an id that is
+    no position."""
     if not position_id or str(position_id).startswith((f"{SECTOR}-", f"{TOTAL}-")):
         return None
     result, research, as_of = data.get("spreads") or {}, data.get("research") or {}, data.get("as_of")
@@ -717,9 +722,9 @@ def detail_for(data: dict, position_id: Optional[str]) -> Any:
         return html.Div(className="section section--secondary", children=[
             html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
                 about(f"{contract_label(inst)} outright", "A future in no spread: its trades as spreads-engine lists "
-                      "them. The trade rows are on the Trades tab, the contract's curve on the Curve tab.",
+                      "them. The trade rows are on the Trades tab, the contract's curve on the Exposure tab.",
                       level="h5", style={"margin": "0 0 6px"}),
-                pointer("Trades", "book-detail-trades"), pointer("Curve", "book-detail-curve")]),
+                pointer("Trades", "book-detail-trades"), pointer("Exposure", "book-detail-curve")]),
             html.Ul(lines, style=_LIST)])
     payloads = spreads_ui.detail_payloads(result, research)
     payload = payloads.get(str(position_id))
@@ -827,7 +832,8 @@ def expiry_alerts(data: dict) -> List[dict]:
     """EXPIRED and RED rows one line each; AMBER rows on one line (the first few named, all on
     hover). Expiry-monitor's order and words."""
     if data.get("schedule_error"):
-        return [_alert(WATCH, "EXPIRIES", "roll calendar n/a", data["schedule_error"], "Expiries", "expiry-monitor")]
+        return [_alert(WATCH, "EXPIRIES", "roll calendar n/a", data["schedule_error"], "Timing & cash",
+                       "expiry-monitor")]
     rows = (data.get("schedule") or {}).get("rows") or []
     out = []
 
@@ -840,7 +846,7 @@ def expiry_alerts(data: dict) -> List[dict]:
         if r.get("level") in ("EXPIRED", "RED"):
             hover = "; ".join(x for x in (line(r), f"alert date {r.get('alert_date')}" if r.get("alert_date") else "",
                                           str(r.get("reason") or "")) if x)
-            out.append(_alert(ACT, str(r["level"]), line(r), hover, "Expiries", "expiry-monitor"))
+            out.append(_alert(ACT, str(r["level"]), line(r), hover, "Timing & cash", "expiry-monitor"))
     amber = [r for r in rows if r.get("level") == "AMBER"]
     if amber:
         named = ", ".join(f"{contract_label(r.get('contract_id'))} {_bd_words(r)}" for r in amber[:AMBER_ON_LINE])
@@ -848,7 +854,7 @@ def expiry_alerts(data: dict) -> List[dict]:
         hover = "\n".join(line(r) for r in amber[:LINES_ON_HOVER]) + (
             f"\nand {len(amber) - LINES_ON_HOVER} more" if len(amber) > LINES_ON_HOVER else "")
         out.append(_alert(WATCH, "AMBER", f"{_plural(len(amber), 'contract')} near expiry: {named}{more}", hover,
-                          "Expiries", "expiry-monitor"))
+                          "Timing & cash", "expiry-monitor"))
     return out
 
 
@@ -867,12 +873,13 @@ def marks_alerts(data: dict) -> List[dict]:
 
 
 def review_alerts(data: dict) -> List[dict]:
-    """The groups the grouping rule could not decide ("could not group", never "for review")."""
+    """The groups the grouping rule could not decide ("could not group", never "for review"). The
+    detail is on this tab (the Data issues drawer), so the alert links nowhere ("Book")."""
     review = (data.get("spreads") or {}).get("review") or []
     if not review:
         return []
     hover = "\n".join(f"- {r.get('reason') or r.get('review_id')}" for r in review[:LINES_ON_HOVER])
-    return [_alert(WATCH, "GROUPING", f"could not group {_plural(len(review), 'set')} of trades", hover, "Spreads",
+    return [_alert(WATCH, "GROUPING", f"could not group {_plural(len(review), 'set')} of trades", hover, "Book",
                    "spreads-engine")]
 
 
@@ -1085,7 +1092,7 @@ def issue_items(data: dict, rows: Sequence[dict]) -> List[Tuple[str, str]]:
     """The Data issues drawer: each section's failure, the engines' book-level reasons, every
     row with an n/a or a partial figure, and the load's unpriced trades."""
     items: List[Tuple[str, str]] = []
-    for key, label in (("spreads_error", "Spreads"), ("schedule_error", "Expiries"), ("needs_error", "Marks"),
+    for key, label in (("spreads_error", "Spreads"), ("schedule_error", "Roll calendar"), ("needs_error", "Marks"),
                        ("limits_error", "Limits"), ("load_error", "Load")):
         if data.get(key):
             items.append((label, data[key]))

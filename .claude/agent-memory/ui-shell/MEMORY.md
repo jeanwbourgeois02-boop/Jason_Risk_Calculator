@@ -18,3 +18,4 @@
 - [Tab links 2026-09-25](tab-links-2026-09-25.md) — tab_link helper + one ALL-pattern callback on main-tabs.value, idx rule, Dash 4 test gotchas
 - [UI redesign wave 1 2026-09-28](ui-redesign-wave1-2026-09-28.md) — Trades tab (key blotter), slim header, Book table; "no tests per wave" rule; parked tests in scratchpad
 - [UI redesign wave 2 2026-09-28](ui-redesign-wave2-2026-09-28.md) — Exposure/P&L/Timing & cash built, header chart moved to P&L, Trades Summaries dropped; scratch-DB verification recipe, tests to re-pin
+- [UI redesign wave 3 2026-09-28](ui-redesign-wave3-2026-09-28.md) — Spreads/FX & cash hidden, FX/Futures sub-tabs off Trades; the "delete, do not hide" pass blocked by the permission classifier, still to do

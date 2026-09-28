@@ -821,7 +821,7 @@ def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_de
                 {"if": {"filter_query": "{status} = 'FAILED'"}, "backgroundColor": "#fff4f2"},
                 {"if": {"filter_query": "{status} = 'SKIPPED'"}, "color": "#616e7c"},
             ]),
-        html.H4("Spot rates the FX & cash tab is using (latest official SPOT mark per currency)"),
+        html.H4("Spot rates the FX delta and the cash ladder are using (latest official SPOT mark per currency)"),
         dash_table.DataTable(
             id="market-data-rates-table",
             columns=[rk.numeric(n, i, rk.rate(8, trim=True)) if i == "rate" else rk.text(n, i)

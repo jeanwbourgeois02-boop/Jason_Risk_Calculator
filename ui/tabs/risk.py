@@ -17,7 +17,7 @@ glance then unfold, user 2026-09-28: three cards, one table, the rest folded):
      hover), a short marker ("excl. 3", "trailing only") with its sentence on hover, one
      clipped note line; the definition is the card's hover, and so are the other book
      figures: the deltas the risk is on (commodity net and gross, currency and metal net
-     and gross, the FX & cash tab's FX net) on the VaR card, the worst day raw on the
+     and gross, the FX net of the currency positions) on the VaR card, the worst day raw on the
      worst-day card. A NaN figure reads "n/a" with its reason on hover and in the note.
   2. `top_block`: one short caption line (as-of, the FX and commodity histories' last close,
      the vol target) with each part's full sentence on hover, then the tab's one collapsed
@@ -254,13 +254,13 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
                       "settlement change x the multiplier x USD per quote unit that day, from the commodity "
                       "settlement history (context only: a risk input, never a mark). The book is the parts' series summed "
                       "date by date, so correlation is embedded; the per-underlyer figures are standalone."),
-        "net_usd": ("Delta USD: the row's net USD delta, + = long the underlyer (a commodity's from the Curve tab's "
+        "net_usd": ("Delta USD: the row's net USD delta, + = long the underlyer (a commodity's from the Exposure tab's "
                     "positions, options at their delta; a currency's the FX legs' net, the nm-dashboard's), its gross "
                     "on hover. The Book's cell is blank: the engine keeps the commodity net and the currency and metal "
                     "net apart (both on its hover and on the VaR card's), and the screen sums neither with the other."),
         "gross_usd": "Gross USD delta: the sum of |USD delta| over the currency and metal rows.",
         "commodity_net_usd": ("Commodity net USD delta: the sum of the commodity rows' USD delta (each commodity's "
-                              "net delta in USD from the Curve tab's positions, options at their delta), + = long. "
+                              "net delta in USD from the Exposure tab's positions, options at their delta), + = long. "
                               "Kept apart from the currency and metal net."),
         "commodity_gross_usd": "Commodity gross USD delta: the sum of |USD delta| over the commodity rows.",
         "vol_blended_ann_usd": (f"Blended annual vol = {_weight(b.get('w_trail'))} x trailing {b.get('trail_window_bd')}-day vol "
@@ -283,7 +283,7 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
         "worst_day_ex_vs_target_pct": f"Worst ex vs target: the worst day ex shocks as a share of the vol target ({_usd(target)}); for the Book, the card measures it against the cap.",
         "note": "Note: the row's reason, carry and coverage; a long note is clipped, its full text on hover.",
         "scenarios": ("FX scenario stress: delta x move, the scenarios of config/stress.yaml on the book's USD delta by "
-                      "currency (metals included), the same scenarios as the FX & cash tab's. No correlation, no vol. "
+                      "currency (metals included), the FX scenarios of config/stress.yaml. No correlation, no vol. "
                       "A figure the engine could not value reads n/a with its reason on hover."),
         "parts_views": ("The Book's series is the sum of the parts: the currency, metal and commodity rows. A sector "
                         "row re-adds its commodities and a spread row its futures legs, which are already in the "
@@ -311,7 +311,7 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
                       "metal. The hover also carries the observations, the history's reach, the worst day raw and "
                       "the row's reason."),
         "sector": "The commodity's sector; Currencies and Metals for the FX and metal rows.",
-        "net_delta_lots": ("Delta lots: a commodity's net delta in futures lots (the Curve tab's figure: options at "
+        "net_delta_lots": ("Delta lots: a commodity's net delta in futures lots (the Exposure tab's figure: options at "
                            "their delta, an averaging contract at its shrinking delta, an LME ticket in lots); blank "
                            "for a currency or a metal."),
         "views": ("Each sector row re-adds its commodities and each spread row its futures legs, which are already "
@@ -478,7 +478,7 @@ def _figure_words(value: Any, why: str) -> str:
 def exposure_words(result: Dict[str, Any]) -> str:
     """The deltas the risk is on, one sentence for a hover (the VaR card's and the Book
     row's): the commodity net and gross USD, the currency and metal net and gross, and
-    the FX & cash tab's FX net and gross, each as the engine gives it (n/a with its reason),
+    the FX net and gross (the Exposure tab's currency section), each as the engine gives it (n/a with its reason),
     the commodity and the currency nets kept apart and never summed here."""
     book = result.get("book") or {}
     missing = delta_missing(result)
@@ -486,9 +486,9 @@ def exposure_words(result: Dict[str, Any]) -> str:
     delta_why = "; ".join(missing) or "no currency or metal position with a USD delta"
     cm_why = book.get("commodity_reason") or "no commodity position with a USD delta"
     return (f"Delta the risk is on: commodities net {_figure_words(book.get('commodity_net_usd'), cm_why)}, "
-            f"gross {_figure_words(book.get('commodity_gross_usd'), cm_why)} (+ = long; the Curve tab's positions, "
+            f"gross {_figure_words(book.get('commodity_gross_usd'), cm_why)} (+ = long; the Exposure tab's positions, "
             f"options at their delta); currencies and metals net {_figure_words(book.get('net_usd'), delta_why)}, "
-            f"gross {_figure_words(book.get('gross_usd'), delta_why)} (+ = long the underlyer); the FX & cash tab's "
+            f"gross {_figure_words(book.get('gross_usd'), delta_why)} (+ = long the underlyer); the Exposure tab's "
             f"FX net USD (+ = long USD, metals out) {_figure_words(book.get('fx_net_usd'), fx_why)}, "
             f"gross {_figure_words(book.get('fx_gross_usd'), fx_why)}. The commodity net and the currency net are "
             "kept apart, never summed.")

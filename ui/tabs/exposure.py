@@ -17,11 +17,11 @@ below exists ONLY for the unit tests (AUD screenshot fixture); the app never cal
 
 2026-09-15 (Task C split, docs/BUILD_PLAN.md): the workbook mark-to-market panel, the
 P&L ledger block and the Bloomberg diagnostics/feed panel are REMOVED from this module
-(they move to the Reconciliation and Market data tabs respectively -- see
+(they move to the Reconciliation and Data tabs respectively -- see
 `engine.ladder.exposure.portfolio_totals`, which no longer returns an `exposure_pnl`
 key, and `engine.ladder.exposure.SUMMARY_COLUMNS`, which no longer carries
 `usd_delta_entry` / `exposure_pnl`). This is a pure exposure/delta view; P&L belongs to
-`engine.pnl` and is rendered on the Blotter/Header tabs, not here.
+`engine.pnl` and is rendered on the P&L / Trades tabs and the header, not here.
 
 Book display: records carry `book_source` (BNP 'NM Strategy', e.g. HAHY7). BOOK_DISPLAY
 is the explicit, optional display mapping; empty by default so HAHY7 shows as HAHY7.
@@ -45,8 +45,10 @@ at its official SPOT; the futures are Jason's commodity contracts, each shown wi
 quote currency and its conversion to USD (engine.ladder.futures_delta).
 
 2026-09-25 (CLAUDE.md "Screens redesign plan", Phase A): the tab is "FX & cash", the one
-home of the FX Net / Gross USD delta (the header dropped them). The open futures table and
-the futures rows of the risk table left: commodity positions are on the Curve tab and
+home of the FX Net / Gross USD delta (the header dropped them). Since 2026-09-28 (UI redesign
+wave 3) the tab is hidden from the tab bar, not deleted: this module stays importable and its
+body is built by nothing. The open futures table and
+the futures rows of the risk table left: commodity positions are on the Exposure tab and
 commodity scenarios on the Risk tab, said in one line (`futures_note`). Every definition
 paragraph is now hover on its section title (`ui.tabs.formatting.about`); a missing or
 refused rate, a currency at spot for want of a curve and a settled ticket not yet realised
@@ -235,19 +237,19 @@ HEADLINE_TITLE = "USD delta, FX only"
 HEADLINE_ABOUT = ("The FX Net / Gross USD delta; this tab is its one home. Gross = the sum of |USD delta| over "
                   "the currencies; net = the USD position (+ = long USD), both at official spot, over the FX "
                   "legs settling after the as-of and the FX options' delta. FX only: metals (their own row "
-                  "in the risk table) and commodity positions (the Curve tab) are not in it. Hover a figure "
+                  "in the risk table) and commodity positions (the Exposure tab) are not in it. Hover a figure "
                   "for its whole amount.")
 
 
 def headline_numbers(result, fallback_ccys: Optional[set] = None,
                      forward_proxy_ccys: Optional[set] = None) -> html.Div:
     """One headline card, FX only (commodity conversion Phase 3, 2026-09-24, CLAUDE.md
-    "Net USD": "commodity futures are positions on the Curve tab, not in Net / Gross
+    "Net USD": "commodity futures are positions on the Curve (now Exposure) tab, not in Net / Gross
     USD"): gross = sum of |USD delta| over the currencies, net (the USD position,
     CLAUDE.md sign: + = long USD) directly underneath with its LONG USD / SHORT USD
     direction, the same figures and convention as the app header's Net / Gross USD delta
     card. It was "Delta (FX + futures)" from 2026-09-15 to Phase 3; the open futures are
-    in their own table below, each with its USD delta, and on the Curve tab.
+    in their own table below, each with its USD delta, and on the Exposure tab.
     Unavailable with the engine's own reason only when a rate is genuinely missing.
     `fallback_ccys`/`forward_proxy_ccys` are always empty in the live
     app since 2026-09-17 ("no bnp fall back" -- `ui.tabs.cash_ladder`'s BNP_BVAL SPOT/
@@ -1194,7 +1196,7 @@ def legend() -> html.Dl:
     items = [
         ("Local delta", "sum of signed local-currency amounts across all settlement dates."),
         ("USD delta", "local delta x USD-per-local rate. This is a delta table, not P&L "
-                      "-- see the Blotter tab for LTD/Daily/MTD/YTD."),
+                      "-- see the P&L tab for LTD/Daily/MTD/YTD."),
         ("Bloomberg rates", "latest official SPOT mark per currency, pulled from the Bloomberg terminal on "
                             "this computer when you press \"Pull Bloomberg now\" (never by itself); blank when "
                             "no mark exists. Nothing is substituted."),
@@ -1403,7 +1405,7 @@ _HEAD_ROW = {"display": "flex", "alignItems": "baseline", "flexWrap": "wrap", "g
 # The open futures table left this tab on 2026-09-25 (Screens redesign, Phase A): one line
 # says where the commodity positions and scenarios are instead.
 FUTURES_NOTE_ID = "exposure-futures-note"
-COMMODITY_NOTE = ("Commodity positions (futures, options on futures, LME metal) are on the Curve tab and "
+COMMODITY_NOTE = ("Commodity positions (futures, options on futures, LME metal) are on the Exposure tab and "
                   "commodity scenarios on the Risk tab; this tab is FX and cash (an LME ticket's USD cash is in "
                   "the cash ladder).")
 
@@ -1550,7 +1552,7 @@ def exposure_section(records: List[dict], unresolved: list, as_of_date: str,
     Position table. Nothing else (snapshot cards, metadata line, legend, alternative views
     and the settlement-only ladder were retired 2026-09-15; the open futures table and the
     risk table's futures rows left 2026-09-25, Screens redesign Phase A: commodity
-    positions are on the Curve tab, commodity scenarios on the Risk tab).
+    positions are on the Exposure tab, commodity scenarios on the Risk tab).
 
     `rates` is whatever the marks table holds -- `data.bloomberg.live.rates_from_marks`
     (official SPOT, `marks_official`) only; None/empty means every currency is MISSING.

@@ -1345,8 +1345,8 @@ def render(as_of: Optional[str], db_path, unit: str = DEFAULT_UNIT, selected: Op
 TAB_ABOUT = ("What am I long or short, in which month? The commodity positions by contract month (delta lots "
              "by default), one commodity's curve with its positions, the net outright by sector, every open "
              "contract, the currency exposure of non-USD futures, the option Greeks and the FX delta by currency.")
-AS_OF_HOVER = ("The tab follows the header's as-of date (the Trades and FX & cash tabs' date pickers "
-               "set it); it has no date picker of its own. The date the figures are for is under the view switch.")
+AS_OF_HOVER = ("The tab follows the header's as-of date (the Trades tab's date picker sets it); it has no "
+               "date picker of its own. The date the figures are for is under the view switch.")
 
 
 def layout(default_date: Optional[str] = None) -> html.Div:

@@ -33,12 +33,13 @@ Layout, top to bottom (`body`):
      frozen at, reason). They never alert: no level colour, never in the counts. Absent when
      the list is empty.
   4. `cash_section` (wave 2): settled cash to date by currency (`settled_records_from_db`, the
-     FX & cash tab's Settled cash row: deliverable legs past their value date at face value, a
+     cash ladder's Settled cash row: deliverable legs past their value date at face value, a
      settled future's or option's USD settlement from `realised_pnl`; one the ledger has not
      frozen is named, never valued), the dated cash events (`records_from_db` without the
      settled row: date, currency, amount, what it is), and one line for the initial-margin
      estimate (`engine.limits.margin_estimate`'s book figure, "estimate, not exchange SPAN").
-     The full currency-by-date ladder stays on FX & cash (a tab link says so).
+     The full currency-by-date ladder is not on screen since wave 3 hid the FX & cash tab (the
+     section's hover says so; no tab link, a link to a hidden tab would be dead).
   5. `issues_section`: the tab's collapsed "Data issues (N)" drawer: counts the engine could
      not make, estimated dates, counts past a calendar file's coverage, delivery not on file,
      a settled ticket with no realised row, a cash leg the ladder left out. Absent when there
@@ -76,7 +77,7 @@ from engine.expiry.levels import AMBER, EXPIRED, GREEN, LEVELS, RED
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import about, format_cell, issues_drawer, marker, short_money, tab_link
+from ui.tabs.formatting import about, format_cell, issues_drawer, marker, short_money
 from ui.tabs.header import AS_OF_STORE_ID
 
 BODY_ID = "expiries-body"
@@ -546,7 +547,7 @@ TIMELINE_ABOUT = (
     "event. The roll calendar's events (first notice, last trade, option expiry, an LME prompt's cash date) "
     "are coloured by their level (EXPIRED dark red, RED, AMBER, GREEN); a hollow marker is a date "
     "contract-master estimated, not Bloomberg's. The cash events (an LME ticket's USD leg on its prompt, an "
-    "FX leg on its value date) are navy, from the FX & cash tab's own legs. Hover a marker for the contract, "
+    "FX leg on its value date) are navy, from the cash ladder's own legs (engine.ladder). Hover a marker for the contract, "
     "the lots or the amount. Events past the as-of or beyond the window are counted under the chart. Nothing "
     "is computed: every date is one on file.")
 
@@ -669,12 +670,13 @@ def timeline_section(as_of: str, result: Dict[str, Any], cash_records: List[dict
 
 # --------------------------------------------------------------------------- 4. cash
 CASH_ABOUT = (
-    "Settled cash to date by currency: the FX & cash tab's own Settled cash row (engine.ladder.exposure_adapter): "
+    "Settled cash to date by currency: the cash ladder's own Settled cash row (engine.ladder.exposure_adapter): "
     "deliverable FX legs past their value date at face value in their own currency, an LME ticket's USD leg "
     "after its prompt, and a settled future's or option's USD settlement as the ledger froze it in "
     "realised_pnl, never recomputed; a settled ticket the ledger has not frozen is named, not valued. This is "
     "cash from the tickets on file, not a bank balance. Then the dated cash events still to come, and the "
-    "initial-margin estimate. The full currency-by-date ladder is on FX & cash.")
+    "initial-margin estimate. The full currency-by-date ladder, the USD equivalents and the FX stress are not "
+    "on screen (the FX & cash tab is hidden); the FX delta by currency is on the Exposure tab.")
 MARGIN_ABOUT = ("The book's estimated initial margin (engine/limits, config/limits.yaml's placeholder rates with "
                 "spread credits): an estimate, not exchange SPAN, never the exchange's or the clearer's figure.")
 
@@ -772,9 +774,6 @@ def cash_section(settled: List[dict], settled_unresolved: List[Any], cash_record
     else:
         children.append(html.P("No cash leg still to settle on the tickets on file.", className="section-kicker"))
     children.append(margin_line(margin, margin_error))
-    children.append(html.Div(className="meta-line", children=[
-        html.Span("The full currency-by-date ladder, the USD equivalents and the FX stress are on "),
-        tab_link("FX & cash", "ladder", "expiries-cash-ladder"), html.Span(".")]))
     return html.Div(id=CASH_ID, className="section", children=children)
 
 

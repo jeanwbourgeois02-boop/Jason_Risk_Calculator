@@ -1,5 +1,8 @@
-"""Blotter tab: docs/BUILD_PLAN.md section 5 "Blotter", rebuilt 2026-09-15 into sub-tabs
-(user decision): Total book, FX, Futures, Options, Bundles, Manual entry. The Rates
+"""Trades tab (the Blotter until 2026-09-28): docs/BUILD_PLAN.md section 5 "Blotter", rebuilt
+2026-09-15 into sub-tabs (user decision): All trades (the Total book), Options, Bundles, Manual
+entry. The FX and Futures & LME sub-tabs left on 2026-09-28 (UI redesign wave 3: their rows
+are all in All trades, their summaries on the P&L and Exposure tabs); their code below and
+`ui.tabs.blotter_fx` stay on disk, out of `SCOPE_ORDER`, and register no callback. The Rates
 sub-tab left on 2026-09-24 with the macro trader's products (CLAUDE.md "Commodity
 conversion plan", Phase 2: rates, NDFs, the FX-swap package rule and the equity index are
 out of the app). Rows come from
@@ -186,7 +189,10 @@ _ALL = "All"
 # manual entry books a swap as one 4-leg trade; only the blotter's package rule left. "Manual entry" (2026-09-18)
 # closes the row: it is a form, not a view of the book. Rates left on 2026-09-24 (the
 # macro trader's products are out of the app, CLAUDE.md "Commodity conversion plan").
-SCOPE_ORDER = ("total", "fx", "futures", "options", "bundles", "manual")
+# "fx" and "futures" are no sub-tab since 2026-09-28 (wave 3) but keep their labels, products
+# and rendering path: `scope_layout("futures", ...)` and the FX block are still callable.
+SCOPE_ORDER = ("total", "options", "bundles", "manual")
+HIDDEN_SCOPES = ("fx", "futures")
 SCOPE_LABELS = {"total": "All trades", "fx": "FX", "futures": "Futures & LME",
                 "options": "Options", "bundles": "Bundles", "manual": "Manual entry"}
 SCOPE_PRODUCTS = {
@@ -2141,9 +2147,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     options_ui.register_callbacks(app, get_db_path)
     manual_entry_ui.register_callbacks(app, get_db_path)
-    # FX (2026-09-21): "P&L by currency, rows shown" follows the FX trade table's native
-    # column filter; that one callback is `ui.tabs.blotter_fx`' own.
-    blotter_fx_ui.register_callbacks(app, get_db_path)
+    # The FX sub-tab left the Trades tab on 2026-09-28 (wave 3), so `ui.tabs.blotter_fx`'s one
+    # callback ("P&L by currency, rows shown" on its table's filter) is not registered: its
+    # ids are never in the page.
 
     def _register_strip_refresh(scope: str) -> None:
         @app.callback(

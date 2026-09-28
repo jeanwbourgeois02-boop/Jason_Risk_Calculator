@@ -3,13 +3,16 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Nine tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25; UI redesign waves 1 and 2, user
-2026-09-28), in this order: Book, Exposure, P&L, Timing & cash, Risk, Trades, Spreads, FX & cash,
-Data. "Exposure" is the former Curve (ui/tabs/curve.py, key "curve"), "P&L" is new
-(ui/tabs/pnl.py, key "pnl"), "Timing & cash" the former Expiries (ui/tabs/expiries.py, key
-"expiries"), "Trades" the former Blotter (ui/tabs/blotter.py, key "blotter"), "FX & cash" the
-former Ladder (ui/tabs/cash_ladder.py) and "Data" the former Market data (ui/tabs/market_data.py);
-each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
+Seven tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25; UI redesign waves 1 to 3, user
+2026-09-28), in this order: Book, Exposure, P&L, Timing & cash, Risk, Trades, Data. "Exposure" is
+the former Curve (ui/tabs/curve.py, key "curve"), "P&L" is new (ui/tabs/pnl.py, key "pnl"),
+"Timing & cash" the former Expiries (ui/tabs/expiries.py, key "expiries"), "Trades" the former
+Blotter (ui/tabs/blotter.py, key "blotter") and "Data" the former Market data
+(ui/tabs/market_data.py). The Spreads tab (ui/tabs/spreads.py) and the FX & cash tab
+(ui/tabs/cash_ladder.py, ui/tabs/exposure.py) are hidden since wave 3, not deleted: their modules
+stay on disk and importable (the Book tab imports the spread detail helpers, Timing & cash the
+ladder's engine readers), but their bodies are not in the layout and their callbacks are not
+registered. Each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
 separate from the label the user reads, so a rename never moves an id. The app opens on the
 first tab, Book (ui/tabs/book.py): the book's home. A slim header (ui/tabs/header.py) sits
 above the tabs on every view: the as-of date, Daily / MTD / YTD / LTD and the Data chip.
@@ -28,7 +31,7 @@ from typing import Union
 import dash
 from dash import ALL, Input, Output, State, dcc, html
 
-from ui.tabs import blotter, book, cash_ladder, curve, expiries, header, market_data, pnl, risk, spreads
+from ui.tabs import blotter, book, cash_ladder, curve, expiries, header, market_data, pnl, risk
 from ui.tabs.formatting import TAB_LINK_TYPE
 from ui import revision, uploads
 # The database path rule lives below every layer (data/paths.py) so the Bloomberg CLI mains
@@ -36,14 +39,15 @@ from ui import revision, uploads
 # name every screen, script and test uses.
 from data.paths import DEFAULT_DB_PATH, REPO_ROOT, get_db_path  # noqa: F401
 
-# Order per the UI redesign wave 2 (user, 2026-09-28: six screens, one question each: Book,
-# Exposure, P&L, Timing & cash, Risk, Trades; the old Spreads, FX & cash and Data tabs stay
-# reachable until wave 3 retires them), after the screens redesign of 2026-09-25 ("the spread
-# is the unit"); the app opens on the first. Each label maps to its stable key: the tab bar's
-# value and the body id `tab-body-<key>`. The key never holds '&' or a space, and a renamed tab
-# keeps its key ("Exposure" is still "curve", "Timing & cash" still "expiries", "Trades" still
-# "blotter", "FX & cash" still "ladder", "Data" still "market-data"), so nothing keyed on a body
-# id moves.
+# Order per the UI redesign waves 2 and 3 (user, 2026-09-28: six screens, one question each:
+# Book, Exposure, P&L, Timing & cash, Risk, Trades, plus Data), after the screens redesign of
+# 2026-09-25 ("the spread is the unit"); the app opens on the first. Each label maps to its
+# stable key: the tab bar's value and the body id `tab-body-<key>`. The key never holds '&' or
+# a space, and a renamed tab keeps its key ("Exposure" is still "curve", "Timing & cash" still
+# "expiries", "Trades" still "blotter", "Data" still "market-data"), so nothing keyed on a body
+# id moves. The Spreads ("spreads") and FX & cash ("ladder") tabs left the bar in wave 3
+# (`HIDDEN_TAB_KEYS`): a tab link to either key is dead (`tab_from_link_click` ignores it), so
+# no screen renders one.
 TAB_KEYS = {
     "Book": "book",
     "Exposure": "curve",
@@ -51,16 +55,16 @@ TAB_KEYS = {
     "Timing & cash": "expiries",
     "Risk": "risk",
     "Trades": "blotter",
-    "Spreads": "spreads",
-    "FX & cash": "ladder",
     "Data": "market-data",
 }
 VISIBLE_TABS = list(TAB_KEYS)
+# Hidden, not deleted (wave 3): the modules stay importable, nothing of theirs is in the layout.
+HIDDEN_TAB_KEYS = {"Spreads": "spreads", "FX & cash": "ladder"}
 
 
 def tab_body_id(label: str) -> str:
-    """The DOM id of a tab's always-present body: `tab-body-<key>` ("FX & cash" ->
-    "tab-body-ladder")."""
+    """The DOM id of a tab's always-present body: `tab-body-<key>` ("Timing & cash" ->
+    "tab-body-expiries"). Only a label in `TAB_KEYS` has a body."""
     return f"tab-body-{TAB_KEYS[label]}"
 
 
@@ -205,28 +209,24 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     `main-tabs`' `value` (the selected tab's key, `TAB_KEYS`).
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
-    module only assembles them and wires the Blotter's and FX & cash's date pickers into
-    `header.AS_OF_STORE_ID` so the header reflects whichever date the user has picked.
+    module only assembles them and wires the Trades tab's date picker (the one picker left
+    since wave 3 hid FX & cash) into `header.AS_OF_STORE_ID` so the header reflects the date
+    the user has picked.
 
-    Defaults: FX & cash (the former Ladder) opens on TODAY in America/New_York -- a
-    "what's open today" view (`engine.ladder.exposure_adapter.records_from_db` selects
-    trades open on whatever as_of it is given). The Blotter keeps defaulting to the last
-    uploaded trade date, since it renders the loaded trade file itself. Data (the former
-    Market data) opens on today too (2026-09-21): its whole-book panels ask whether TODAY's
-    marks can be trusted, and the live pull only writes today's. Book, Exposure, P&L, Timing &
-    cash, Spreads and Risk have no picker: they follow the header's as-of store, whose default
-    is today."""
+    Defaults: the Trades tab (the former Blotter) keeps defaulting to the last uploaded trade
+    date, since it renders the loaded trade file itself. Data (the former Market data) opens
+    on today (2026-09-21): its whole-book panels ask whether TODAY's marks can be trusted, and
+    the live pull only writes today's. Book, Exposure, P&L, Timing & cash and Risk have no
+    picker: they follow the header's as-of store, whose default is today."""
     snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     today = cash_ladder.today_ny()
     tab_builders = {
         "book": book.build_layout,
-        "spreads": spreads.build_layout,
         "curve": curve.build_layout,
         "pnl": pnl.build_layout,
         "risk": risk.build_layout,
         "expiries": expiries.build_layout,
         "blotter": blotter.build_layout,
-        "ladder": cash_ladder.build_layout,
         "market-data": market_data.build_layout,
     }
     # Only the Trades tab (key "blotter") opens on another day; every other tab names today.
@@ -276,13 +276,14 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     # pnl as of today"). `_layout_value()` is what tests walk.
     app.layout = lambda: build_layout(load_summary(resolved), db_path=resolved)
 
+    # The hidden tabs (Spreads, FX & cash: `HIDDEN_TAB_KEYS`) register nothing: their bodies
+    # are not in the layout, and the helpers Book and Timing & cash import from their modules
+    # are plain functions, fed by those tabs' own callbacks.
     header.register_callbacks(app, get_db_path=lambda: resolved)
-    cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
     blotter.register_callbacks(app, get_db_path=lambda: resolved)
     curve.register_callbacks(app, get_db_path=lambda: resolved)
     pnl.register_callbacks(app, get_db_path=lambda: resolved)
     book.register_callbacks(app, get_db_path=lambda: resolved)
-    spreads.register_callbacks(app, get_db_path=lambda: resolved)
     expiries.register_callbacks(app, get_db_path=lambda: resolved)
     risk.register_callbacks(app, get_db_path=lambda: resolved)
     market_data.register_callbacks(app, get_db_path=lambda: resolved)
@@ -291,23 +292,19 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
 
     # The header's as-of (user, 2026-09-22: "always price pnl as of today ... unless changed
     # specifically otherwise"): today in New York on every page load (the callable layout
-    # above), following the Blotter's or FX & cash's date picker when the user changes one
-    # (the last change wins; Data's own picker only scopes that tab), and rolling to
-    # the new day at New York midnight -- header and both pickers together -- unless a day
-    # other than today was picked. `prevent_initial_call`: the pickers' initial values are
-    # the same default and must not count as a pick.
+    # above), following the Trades tab's date picker when the user changes it (the FX & cash
+    # picker left with its tab in wave 3; Data's own picker only scopes that tab), and rolling
+    # to the new day at the book's day roll -- header and picker together -- unless a day
+    # other than today was picked. `prevent_initial_call`: the picker's initial value is the
+    # same default and must not count as a pick.
     @app.callback(Output(header.AS_OF_STORE_ID, "data"),
                   Output(header.AS_OF_PICKED_ID, "data"),
-                  Input(cash_ladder.DATE_PICKER_ID, "date"),
                   Input(blotter.DATE_PICKER_ID, "date"),
                   prevent_initial_call=True)
-    def _follow_pickers(ladder_date, blotter_date):
-        triggered = dash.ctx.triggered_id
-        picked = blotter_date if triggered == blotter.DATE_PICKER_ID else ladder_date
-        return header.as_of_after_pick(picked, cash_ladder.today_ny())
+    def _follow_pickers(blotter_date):
+        return header.as_of_after_pick(blotter_date, cash_ladder.today_ny())
 
     @app.callback(Output(header.AS_OF_STORE_ID, "data", allow_duplicate=True),
-                  Output(cash_ladder.DATE_PICKER_ID, "date", allow_duplicate=True),
                   Output(blotter.DATE_PICKER_ID, "date", allow_duplicate=True),
                   Input(revision.POLL_ID, "n_intervals"),
                   State(header.AS_OF_STORE_ID, "data"),
@@ -316,8 +313,8 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     def _roll_to_today(_n, store, picked):
         today = header.as_of_after_tick(store, bool(picked), cash_ladder.today_ny())
         if today is None:
-            return dash.no_update, dash.no_update, dash.no_update
-        return today, today, today
+            return dash.no_update, dash.no_update
+        return today, today
 
     # Show/hide the always-present tab bodies (see build_layout docstring) on the
     # dcc.Tabs' own `value`, rather than nesting bodies inside dcc.Tab.children.

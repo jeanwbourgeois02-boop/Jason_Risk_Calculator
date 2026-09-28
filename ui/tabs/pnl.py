@@ -584,7 +584,7 @@ def issue_items(view: PeriodView, spreads: Optional[dict], spreads_error: str) -
         review = spreads.get("review") or []
         if review:
             items.append(("Spreads", f"{_plural(len(review), 'group')} spreads-engine could not group, listed as "
-                                     "outrights here (the Spreads tab names them)."))
+                                     "outrights here (the Book tab's Data issues drawer names them)."))
         for reason in spreads.get("reasons") or []:
             items.append(("Spreads", str(reason)))
     return items
