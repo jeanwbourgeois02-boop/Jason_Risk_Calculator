@@ -49,3 +49,6 @@ forbidden_imports:               # [importing package, imported package]
   - [engine, ui]
   - [data, tools]
   - [engine, tools]
+
+layering_exempt:                 # files the layering rule skips: each a deliberate shim, one line
+  - data/bloomberg/bbg_diagnostics.py   # re-exports tools.bbg_diagnostics for the Data tab's button

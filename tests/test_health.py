@@ -63,6 +63,15 @@ def test_forbidden_imports_are_counted_with_their_files(tree):
     assert lay["forbidden"] == [{"from": "data", "to": "ui", "count": 1, "files": ["data/feed.py"]}]
 
 
+def test_layering_exempt_files_are_skipped(tree):
+    files = health.app_files(tree)
+    lay = health.measure_layering(files, _cfg()["forbidden_imports"], tree, exempt=["data/feed.py"])
+    assert lay["forbidden"] == []
+    assert lay["edges"] == []
+    # The default config names the real shim and nothing else.
+    assert health.DEFAULT_CONFIG["layering_exempt"] == ["data/bloomberg/bbg_diagnostics.py"]
+
+
 def test_unimported_modules_exempt_entry_points_and_packages(tree):
     files = health.app_files(tree)
     out = health.measure_unimported(files, files + health.test_files(tree), ["tools/probe.py"], tree)

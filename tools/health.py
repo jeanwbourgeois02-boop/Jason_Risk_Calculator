@@ -18,7 +18,8 @@ vendored as-is and never audited. Measures:
   dated_citations     YYYY-MM-DD dates in comments and docstrings (chat provenance that belongs
                       in docs/decisions.md, not inline)
   unimported_modules  app modules nothing imports (config entry_points are exempt)
-  layering            imports between top-level packages; config forbidden_imports are counted
+  layering            imports between top-level packages; config forbidden_imports are counted,
+                      files in config layering_exempt (deliberate shims) are not
   line_endings        tracked files by line ending, from `git ls-files --eol`
   broad_excepts       `except Exception:` and bare `except:` in app code
   todo_markers        TODO / FIXME / HACK / XXX in app code
@@ -65,6 +66,10 @@ DEFAULT_CONFIG: dict = {
     "entry_points": list(ROOT_SCRIPTS) + ["tools/bloomberg_terminal_probe.py", "tools/health.py",
                                           "tools/lint_hook.py"],
     "forbidden_imports": [["data", "ui"], ["engine", "ui"], ["data", "tools"], ["engine", "tools"]],
+    # Files whose imports the layering rule does not count: each one a deliberate shim.
+    # data/bloomberg/bbg_diagnostics.py re-exports tools.bbg_diagnostics for the Data tab's
+    # "Check Bloomberg connection" button (ui-shell's contract; allow-listed on the user's yes).
+    "layering_exempt": ["data/bloomberg/bbg_diagnostics.py"],
 }
 
 
@@ -270,10 +275,16 @@ def _import_statements(path: Path) -> List[str]:
     return names
 
 
-def measure_layering(files: List[Path], forbidden: List[List[str]], root: Path = ROOT) -> dict:
+def measure_layering(files: List[Path], forbidden: List[List[str]], root: Path = ROOT,
+                     exempt: List[str] = ()) -> dict:
+    """Imports between top-level packages, and the pairs `forbidden` bans. A file named in
+    `exempt` (config layering_exempt, a deliberate shim) is left out of both counts."""
     counts: Dict[Tuple[str, str], int] = collections.Counter()
     where: Dict[Tuple[str, str], set] = collections.defaultdict(set)
+    skip = set(exempt)
     for p in files:
+        if rel(p, root) in skip:
+            continue
         parts = p.relative_to(root).parts
         pkg = parts[0] if len(parts) > 1 else "root"
         for name in _import_statements(p):
@@ -419,7 +430,7 @@ def collect(root: Path = ROOT, config: Optional[dict] = None) -> dict:
         "duplicate_helpers": measure_duplicate_helpers(files, int(th["duplicate_helper_modules"]), root),
         "dated_citations": measure_dated_citations(files, root),
         "unimported_modules": measure_unimported(files, files + tests, list(cfg["entry_points"]), root),
-        "layering": measure_layering(files, cfg["forbidden_imports"], root),
+        "layering": measure_layering(files, cfg["forbidden_imports"], root, cfg.get("layering_exempt", [])),
         "line_endings": measure_line_endings(root),
         "excepts": measure_excepts(files, root),
         "todo_markers": measure_todos(files, root),
