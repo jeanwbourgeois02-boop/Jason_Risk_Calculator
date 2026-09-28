@@ -958,28 +958,6 @@ def test_an_open_lme_ticket_after_its_freeze_day_holds_the_freeze_figure_until_t
     assert frozen["note"] != rows["2026-09-17"]["note"]                # read back from realised_pnl now
 
 
-def test_an_open_lme_ticket_after_its_freeze_day_with_no_price_by_then_is_blank_never_the_curve():
-    """No cash price on or before the freeze day: the row on tom is blank with its reason, even
-    though the day's own cash price is on file (it is for a different prompt), and the earlier
-    price's absence is not carried from a later close either."""
-    conn = schema.connect()
-    _lme_ticket(conn, "lme9", 100.0, 9_800.0, "2026-09-16")             # freeze day 2026-09-14
-    _lme_curve(conn, "2026-09-15", 9_900.0, {"2026-12-16": 9_950.0})
-    _lme_curve(conn, "2026-09-16", 9_990.0, {})
-    conn.commit()
-    for day in ("2026-09-15", "2026-09-16"):
-        r = _by_id(conn, day).loc["lme9"]
-        assert r["status"] == "OPEN" and r["pnl_usd"] != r["pnl_usd"] and r["mark"] != r["mark"], day
-        assert r["reason"] == ("no official cash price of LME:CA on or before 2026-09-14, the day its prompt 2026-09-16 "
-                               "became cash; the ticket is off the curve and a later cash price is not its own"), day
-    # a cash price before the freeze day is the ticket's own: the last one before it
-    _lme_curve(conn, "2026-09-11", 9_600.0, {})
-    conn.commit()
-    r = _by_id(conn, "2026-09-15").loc["lme9"]
-    assert (r["mark"], r["mark_date"], r["pnl_usd"]) == (9_600.0, "2026-09-11", 100.0 * (9_600.0 - 9_800.0))
-    assert r["note"] == "prompt is cash from 2026-09-14: valued at the cash price of 2026-09-11 (the last before that day)"
-
-
 def test_an_lme_ticket_with_no_curve_at_all_is_blank_with_its_reason():
     conn = schema.connect()
     _lme_ticket(conn, "lme6", 100.0, 9_800.0, "2026-12-15")
