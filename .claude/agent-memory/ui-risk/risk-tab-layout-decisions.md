@@ -1,48 +1,62 @@
 ---
 name: risk-tab-layout-decisions
-description: How the Risk tab (ui/tabs/risk.py) is laid out and why; caption line + Data issues drawer, k/m cards with markers, commodities-first single-line table, n/a-vs-blank rule, pinned Book row; built 2026-09-22, redesigned 2026-09-25 (Phase A)
+description: How the Risk tab (ui/tabs/risk.py) is laid out and why; three cards, caption + Data issues drawer, one VaR-sorted table by sector and commodity, everything else folded (html.Details with counts); built 2026-09-22, Phase A 2026-09-25, one-glance redesign 2026-09-28
 metadata:
   type: project
 ---
 
 Built 2026-09-22 (the PM's nm-dashboard metrics on this book); redesigned 2026-09-25 under
-CLAUDE.md "Screens redesign plan" Phase A (user: numbers first, definitions on hover of the
-titles, every reason in one collapsed "Data issues (N)" drawer). The tab renders
-`engine.risk.book_risk` and margin-limits' results and computes nothing.
+CLAUDE.md "Screens redesign plan" Phase A; cut to "one glance, then unfold" on 2026-09-28
+(user: the tab was too dense, seven sections; Jason reads "how much can the book lose?").
+The tab renders `engine.risk.book_risk` and margin-limits' results and computes nothing.
 
 **Why:** "Tabs as views" (no UI recompute) and the rule that no figure is blank without its
-reason and never zero for a missing input. The 2026-09-24 tab was ~10,000 px tall: 25 lines
-of folder paths before the first figure, 20-line card notes, 100 px FX rows, 160 px Book row.
+reason and never zero for a missing input. The 2026-09-24 tab was ~10,000 px tall; the
+2026-09-25 one still showed 8 cards, a 15-column table and 5 open sections.
 
 **How to apply (decisions in force, keep unless the user says otherwise):**
-- Top: `caption_parts` = one nowrap line (as-of, FX history to X, commodity history to Y,
-  vol target in k/m + "placeholder" marker), each part's full sentence as its hover. Then
-  `issues_drawer(issue_items(result, margin), id=ISSUES_ID)`: history (or folders tried) with
-  its files, commodity history, parameters, config/history notes, `shown_missing`,
-  commodity-stress `reasons`, margin `reasons`. No other reason lists on the tab.
-- Cards: exactly 3 children (label, figure line, one clipped note line). Figure via
-  `short_money(v, parens=True)`, full figure as the value's hover; markers on the figure line
-  ("excl. N" from `delta_missing` / the engine's "excludes N" sentence, "trailing only" for
-  vol_note); flag tag beside the figure. A NaN card: "n/a" + reason as hover AND as the
-  clipped note (the header's old lesson: hover-only reasons were reported as "not working").
-  The FX & cash tab's FX net/gross USD is on the Net/Gross card hover (left the header).
-- Key table: commodities grouped by sector FIRST, then FX/metal in engine order, Book pinned
-  (`ranking.with_footer`, skip_widths underlyer+note). Money columns `rk.amount_short` over
-  `rk.whole_units` (records keep raw values; the table data is rounded). Underlyer and note
-  clipped (`_clip`: nowrap + ellipsis at fixed ch), note's full text as its tooltip.
-- Cell rule unchanged: missing = "n/a" string + tooltip reason; not applicable = None blank;
-  Book "Worst ex vs target %" blank with a tooltip (measured against the cap on the card).
-- Definitions: `about(title, hover)` on every section title; no Definitions block, no kicker
-  paragraphs outside collapsed blocks except the limits' one-line count.
-- Order: cards, underlyers, views, commodity scenarios (detail in one outer collapsed
-  Details), FX scenarios ("FX & cash tab's" scenarios), margin, limits.
-- Limits (user yes 2026-09-25, "can you apply these"): the table holds only the checks that
-  are set (OK / WARN / BREACH / N/A); every NOT_SET check is collapsed under it into one
-  `issues-drawer` line "Not set (N)" (`not_set_drawer`, id `risk-limits-not-set`), grouped
-  Desk (Book, Net USD by sector, each root) then Exchange (each root), each check one inline
-  item with its position, basis + config key on hover. Nothing set: one quiet kicker line
-  + the drawer, no table. ~104 of ~110 checks are NOT_SET on the placeholder config.
-- "carry included" only on rows with figures; flags carry words + `var(--neg)`; no date
-  picker (header as-of store, revision, own safety interval).
+- Order (2026-09-28): `book_cards` (3 cards, `cards cards--three`), then `top_block` (the
+  caption line + `issues_drawer(issue_items(...), id=ISSUES_ID)`), then `underlyer_section`
+  (the one open table), then four folds: `views_section`, `commodity_scenario_section`,
+  `scenario_section` (FX), `margin_limits_section`. The housekeeper's brief said both
+  "cards on top" and "drawer at the top as today"; cards first was the call taken.
+- Cards: exactly 3 children (label, figure line, one clipped note line). VaR (marker
+  "excl. N" = `shown_missing` count, hover lists them; the deltas sentence `exposure_words`
+  on its hover: commodity net/gross, currency+metal net/gross, FX & cash FX net/gross),
+  Blended vol (% of target in the note, target named on hover, flag "over vol target",
+  marker "trailing only"), Worst day ex shocks (date + % of cap, flag "over cap", worst day
+  raw + date on hover). The old Net/Gross/Commodity net/gross/Worst raw cards are gone:
+  their figures live on those hovers and on the Book row's blank Delta USD cell hover.
+  A NaN card: "n/a" + reason as hover AND as the note (hover-only reasons were once
+  reported as "not working").
+- Key table columns (`_columns`): underlyer, sector (a commodity's sector; "Currencies" /
+  "Metals"; views "sector view" / "spread view, family"), VaR, blended vol, worst ex
+  shocks, delta USD, delta lots (commodity rows only, else None). `part_rows`: commodities
+  grouped by sector (sector order = engine order, gross first), each group sorted by VaR
+  largest first (`_var_rank`, n/a last, stable), then currencies, then metals; Book pinned
+  (`rk.with_footer`, footer filter `{underlyer} = 'Book'`, skip_widths underlyer+sector).
+  The rest is on hover: name cell = `underlyer_hover` + `_rest_words` (observations,
+  reach, worst raw, carry, note); VaR cell = `_rest_words`; vol cell = trailing/crisis (+
+  vol_note; the Book's % of target); worst cell = date (+ % of target, Book: % of cap);
+  delta cell = gross (+ reason). Book's delta USD and lots are None with `exposure_words`
+  as hover (engine keeps commodity net and currency net apart; the screen sums neither).
+- `fold(title, count, hover, children, id=)`: `html.Details` closed, className
+  "details details--fold", inline card style (no CSS file touched: ui/assets is ui-shell's
+  and was being edited in parallel), summary = `about(title, hover, level="span")` +
+  `Span(" (count)", className="fold-count")`. Counts: "4 sectors, 6 spreads"; "17
+  scenarios; worst <name> (1.2m)" (`_worst_words`, only when the min is a loss); "margin
+  1.2m; 6 of 110 limits set; 1 BREACH" (`margin_limits_count`). Inner sections keep their
+  own `about` H4 titles (Margin (estimate, not exchange SPAN), Limits) and every table id.
+- Cell rule unchanged: missing = "n/a" string + tooltip reason; not applicable = None blank.
+- Limits (user yes 2026-09-25): set checks in the table; every NOT_SET check collapsed into
+  one "Not set (N)" line (`not_set_drawer`, id `risk-limits-not-set`), desk then exchange.
+- Wording (2026-09-28): "context" / "commodity settlement history (context only, never a
+  mark)" instead of "research"; scenario names as config/commodity_stress.yaml gives them.
+- No date picker (header as-of store, revision, own safety interval); the one callback's
+  output (`risk-body` children) is unchanged.
+- Rendering a proof on the sample book: build a scratch db with `import_blotter` from
+  data/sample/blotter_sample.csv and call `risk.body(book_risk(conn, d), *risk.margin_and_limits(conn, d))`
+  directly; `risk.render` imports `ui.app`, which fails while another agent's app.py is
+  mid-edit (seen 2026-09-28, it imported a `pnl` tab that did not exist yet).
 
 Related: [[commodity-sections-2026-09-24]], [[dash-component-behaviour]].
