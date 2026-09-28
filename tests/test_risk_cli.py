@@ -29,7 +29,7 @@ _VersionInfo = namedtuple("_VersionInfo", "major minor micro")
 def test_parser_has_exactly_the_documented_commands():
     parser = risk.build_parser()
     sub = next(a for a in parser._actions if a.dest == "command")
-    assert set(sub.choices) == {"setup", "start", "doctor", "_load_sample", "freeze",
+    assert set(sub.choices) == {"setup", "start", "doctor", "freeze",
                                 "marks-export", "marks-import", "reprice", "health",
                                 "bbg-check", "contracts-apply"}
 
