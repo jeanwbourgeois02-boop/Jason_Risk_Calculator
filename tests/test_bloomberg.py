@@ -2695,28 +2695,6 @@ def test_cmd_start_skips_pip_install_when_refresh_packages_flag_set_but_stamp_ma
     risk.cmd_start(args)  # must not raise via the boom() guard above
 
 
-def test_cmd_setup_sample_skipped_when_trades_already_present(tmp_path, monkeypatch):
-    """2026-09-17: `setup --sample` must only ever seed an empty database -- the blotter
-    upload is the one live trade source and replaces everything on a real PC."""
-    risk = _load_launcher_module()
-    db = tmp_path / "risk.db"
-    conn = schema.connect(db)
-    conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('a1','XLSX','USDJPY','FX_FWD','a1','2026-08-10',1e6,150.0,"
-                 "'acc','cp','HAHY7','t','d','')")
-    conn.commit()
-    monkeypatch.setenv("RISK_DB", str(db))
-    assert risk._trades_count() == 1
-
-    calls = []
-    monkeypatch.setattr(risk, "run", lambda cmd, **kw: calls.append(cmd))
-    args = risk.build_parser().parse_args(["setup", "--sample", "--skip-tests", "--no-bloomberg"])
-    monkeypatch.setattr(risk.sys, "version_info", risk.sys.version_info)  # keep real (>= MIN_PYTHON)
-    monkeypatch.setattr(risk, "install_pnl_function", lambda: [])
-    risk.cmd_setup(args)
-    assert not any("_load_sample" in str(c) for call in calls for c in call)
-
-
 def test_trades_count_zero_when_database_missing(tmp_path, monkeypatch):
     risk = _load_launcher_module()
     monkeypatch.setenv("RISK_DB", str(tmp_path / "nope.db"))

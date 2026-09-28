@@ -54,7 +54,7 @@ same. Keep the terminal window open; **Ctrl+C** stops the app.
   **Pull Bloomberg now** in the top bar. One press pulls today's marks and then fills the missing past closes
   (see below), and only for what the trades on file need (the "Bloomberg library" on the Market data tab).
 - `py -3 2_launcher.py start --force-new` (inside the project folder) always starts a fresh instance.
-- `py -3 2_launcher.py start --sample` starts the app on a **SAMPLE BOOK** (`data/raw/sample.db`: the synthetic blotter `data/sample/blotter_sample.csv` at synthetic marks, rebuilt from scratch on every such start and removed when it stops), so the screens show numbers on a PC with no marks; the real database `data/raw/risk.db` is never read or written by it, and nothing ever loads the sample into the real database: it holds only what you upload.
+- The sample book (the synthetic blotter `data/sample/blotter_sample.csv` at synthetic marks) is reached from inside the app: "View the sample book" on the empty Book tab shows it, "Back to my book" returns, and the real database `data/raw/risk.db` is never written by it (it holds only what you upload).
 - **Marks on a PC without Bloomberg.** The database is not in git, so such a PC has no marks of its own.
   On the Bloomberg PC every **Pull Bloomberg now** ends by writing the marks on file to `data/bbg_snapshot/`
   (the Market data tab's backfill status says so); you commit and push that folder yourself, or

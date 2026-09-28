@@ -5,8 +5,6 @@ diagnostics).
 
     py 2_launcher.py setup      install everything into .venv, create the database, run the tests
     py 2_launcher.py start      start the app (opens the browser)
-    py 2_launcher.py start --sample   the same on a SAMPLE BOOK (data/raw/sample.db, rebuilt every time from the
-                                 synthetic blotter at synthetic marks); the real database is never touched
     py 2_launcher.py doctor     check every prerequisite and say exactly what to fix
     py 2_launcher.py freeze     (re)write requirements.txt from the list below, for `pip install -r`
                                  or CI that doesn't go through this file
@@ -51,13 +49,11 @@ VENV = ROOT / ".venv"
 VENV_PY = VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 PACKAGES_STAMP = VENV / "packages.stamp"
 REQUIREMENTS = ROOT / "requirements.txt"
-SAMPLE = ROOT / "data" / "sample" / "blotter_sample.csv"
 REAL_DB = ROOT / "data" / "raw" / "risk.db"
-# `start --sample` only: the synthetic book at synthetic marks, in a file of its own that is
-# rebuilt on every sample start and removed when the instance stops. The real database holds
-# only what Jason uploads (user, 2026-09-28: "when i put jasons actual excel i want that to be
-# the only source of information"), so nothing ever loads the sample into it.
-SAMPLE_DB = ROOT / "data" / "raw" / "sample.db"
+# The real database holds only what Jason uploads (user, 2026-09-28: "when i put jasons actual
+# excel i want that to be the only source of information"). The sample book is reached from
+# inside the app (ui/sample_book.py, "View the sample book" on the empty Book tab), in the
+# same process and on a throw-away database, so nothing here loads or serves it.
 EMPTY_DB_LINE = "database is empty: upload Jason's blotter (Upload blotter in the app)"
 BLPAPI_INDEX = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
 MIN_PYTHON = (3, 11)
@@ -651,55 +647,7 @@ def venv_blpapi_ok() -> bool:
     return code == 0
 
 
-def build_sample_db(path: Path) -> dict:
-    """Build the sample book fresh at `path`: the synthetic blotter (data/sample/
-    blotter_sample.csv) at synthetic marks, the golden book's own fixture
-    (tests/golden_book.py::build_book), then the ledger's freeze of what has settled by the
-    book date, as a pull would leave it. The file is deleted first, so a sample start never
-    drifts and nothing uploaded into a sample instance survives it. Returns the row count
-    per table. Runs inside .venv (pandas, the engine)."""
-    from data.bloomberg.live import book_today
-    from data.ingest import schema
-    from engine.pnl import ledger
-    from tests.golden_book import build_book
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _remove_sample_files(path)
-    conn = schema.connect(path)
-    try:
-        build_book(conn)
-        ledger.realise_settled(conn, book_today().isoformat())
-        counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
-    finally:
-        conn.close()
-    return counts
-
-
-def _remove_sample_files(path: Path = SAMPLE_DB) -> None:
-    """Remove the sample database, its journal and its status file. Raises PermissionError
-    when a running sample instance still holds the file (Windows)."""
-    for p in (path, path.with_name(path.name + "-journal"), path.with_name(path.name + ".bloomberg_status.json")):
-        if p.exists():
-            p.unlink()
-
-
-def sample_banner(counts: dict) -> list:
-    return [
-        "=" * 70,
-        " SAMPLE BOOK -- this is NOT Jason's book.",
-        f" Database:  {SAMPLE_DB}",
-        f"            {counts.get('trades', 0)} synthetic trades ({SAMPLE.relative_to(ROOT).as_posix()}) at "
-        f"{counts.get('marks', 0)} synthetic marks, rebuilt fresh on every  start --sample",
-        f" The real database {REAL_DB} is UNTOUCHED: nothing here reads or writes it.",
-        " Do not upload Jason's blotter into this window: stop it (Ctrl+C) and start the app with  chelsea",
-        "=" * 70,
-    ]
-
-
 def cmd_start(args) -> int:
-    if args.sample:
-        # Every process from here on (the re-exec into .venv, ui.launch, ui.app.get_db_path)
-        # reads the sample file; the real database is never opened by a sample start.
-        os.environ["RISK_DB"] = str(SAMPLE_DB)
     if not in_venv():
         if not VENV_PY.exists():
             # A PC that was never set up (or a fresh clone): do the setup here rather than
@@ -743,31 +691,12 @@ def cmd_start(args) -> int:
         for line in port_preflight():
             say(line)
         return reexec_in_venv([a for a in sys.argv[1:] if a not in ("--no-sync", "--refresh-packages")])
-    if args.sample:
-        try:
-            counts = build_sample_db(SAMPLE_DB)
-        except PermissionError:
-            say(f"FAILED: {SAMPLE_DB} is in use: a sample instance is still running. Stop it (Ctrl+C in its "
-                f"window, or  chelsea  replaces it with the real book), then try again.")
-            return 1
-        for line in sample_banner(counts):
-            say(line)
-    elif _trades_count() == 0:
+    if _trades_count() == 0:
         say(EMPTY_DB_LINE)
     from ui.launch import main
-    # A running instance answers the same identity whichever database it is on (ui/launch.py
-    # fingerprints the source tree), so a plain `start` would reuse a sample instance and show
-    # the sample. Neither direction reuses: a sample start replaces what runs, and a plain
-    # start replaces what runs while a sample file is on disk. The sample file is removed
-    # when the instance that ran on it stops, so a plain start's reuse is skipped once at most.
-    force_new = args.force_new or args.sample or SAMPLE_DB.exists()
-    try:
-        return main(["--force-new"] if force_new else [])
-    finally:
-        try:
-            _remove_sample_files()
-        except OSError as exc:
-            say(f"{SAMPLE_DB.name} could not be removed ({exc.__class__.__name__}); the next start removes it")
+    # The sample book runs inside the app's own process (ui/sample_book.py), never as an
+    # instance of its own, so a running risk monitor on the current code is safe to reuse.
+    return main(["--force-new"] if args.force_new else [])
 
 
 # ----------------------------------------------------------------------------- doctor
@@ -1191,9 +1120,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     t = sub.add_parser("start", help="start the app and open the browser")
     t.add_argument("--force-new", action="store_true", help="never reuse a running instance")
-    t.add_argument("--sample", action="store_true",
-                   help="start on the SAMPLE BOOK (data/raw/sample.db: the synthetic blotter at synthetic marks, "
-                        "rebuilt every time); the real database data/raw/risk.db is not touched")
     t.add_argument("--no-sync", action="store_true", help="do not update from GitHub first")
     t.add_argument("--refresh-packages", action="store_true", help=argparse.SUPPRESS)
     t.set_defaults(func=cmd_start)

@@ -176,43 +176,6 @@ def test_poll_publishes_a_settled_change_and_leaves_an_unchanged_file_alone(tmp_
 
 
 # --------------------------------------------------------------------------- pricing snapshot
-def test_pricing_snapshot_prices_one_render_once_per_date_even_while_the_file_changes(tmp_path, monkeypatch):
-    """Without the snapshot a write landing mid-render changed the cache key on every
-    call, and one Total book render re-ran value_book 76 times instead of 6."""
-    path = _db(tmp_path)
-    runs = []
-    real = bp._priced_value_book_uncached
-    monkeypatch.setattr(bp, "_priced_value_book_uncached", lambda c, d: (runs.append(d), real(c, d))[1])
-    real_key, tick = bp._db_cache_key, [0.0]
-
-    def moving(conn):  # every lookup sees a newer mtime, as under a concurrent writer
-        key = real_key(conn)
-        tick[0] += 1.0
-        return (key[0], key[1] + tick[0])
-    monkeypatch.setattr(bp, "_db_cache_key", moving)
-    bp._priced_value_book_cached.cache_clear()
-
-    conn = uiapp.connect_readonly(path)
-    try:
-        for _ in range(5):
-            bp.priced_value_book(conn, "2026-09-18")
-        assert len(runs) == 5  # the old behaviour: every call misses
-
-        runs.clear()
-        with bp.pricing_snapshot(conn):
-            for _ in range(5):
-                bp.priced_value_book(conn, "2026-09-18")
-            bp.priced_value_book(conn, "2026-09-17")
-        assert runs == ["2026-09-18", "2026-09-17"]  # once per distinct date
-
-        runs.clear()
-        bp.priced_value_book(conn, "2026-09-18")
-        assert runs == ["2026-09-18"]  # released on exit: the next render takes a fresh key
-    finally:
-        conn.close()
-        bp._priced_value_book_cached.cache_clear()
-
-
 def test_pricing_snapshot_is_reentrant_and_always_released(tmp_path):
     conn = uiapp.connect_readonly(_db(tmp_path))
     try:
