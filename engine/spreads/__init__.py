@@ -83,6 +83,20 @@ exchange, a processing or substitution template cross product). A label the legs
 stands, and the note says what the legs look like. Beside them ``strategy`` and ``pb_roots`` (the
 distinct raw labels), for the screens' filters. Codes only: the display words are the screens'.
 
+Strategies as pairs (2026-09-28; ``strategies.py``, ``book_spreads(...)["strategies"]``): inside
+each strategy the legs are paired deterministically from its type, never by the 5 % rule (cross
+exchange: one commodity, two exchanges, one month; term structure: near against far on one root;
+cross product: two roots of one sector, one month), the labelled rule first and the other two
+after it with a note, greedily by nearest month with any ambiguity named; the smaller side in
+physical units (tonnes through the contract size, or a template's quantity) pairs in full and
+the larger side its nearest whole lots. Each pair carries its level (a matching template's unit,
+the plain China-over-foreign ratio where the desk screens one, a calendar's near - far, else USD
+per common unit), the USD of a 1.0 move on the paired lots, its residual units and USD, gross
+notional and next event; the strategy its residuals (whole lots left, options), its hedges (a
+USD/CNH future, an FX spot / forward / swap under its PBRoot), the hedge coverage of its CNY
+legs (a long China leg is hedged by a short USD/CNH position) and the Daily split of
+``daily_split.py`` (spread / fx / hedge, an identity over the ``value_book`` rows).
+
 Tables: ``spread_overrides`` (``overrides.py``), created defensively here. Its read is wired into
 the rule; nothing writes it yet.
 """
@@ -94,7 +108,9 @@ from engine.spreads.book import (
 from engine.spreads.grouping import CALENDAR, TOLERANCE
 from engine.spreads.history import history_dates, position_history
 from engine.spreads.levels import research_key
+from engine.spreads.daily_split import daily_split
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
+from engine.spreads.strategies import strategies_from, strategy_entry
 from engine.spreads.templates import Template, TemplateLeg, load_templates
 from engine.spreads.trade_type import (
     CROSS_EXCHANGE, CROSS_PRODUCT, NO_TYPE, SHAPE_TYPES, SOURCE_INFERRED, SOURCE_LABEL, SOURCE_MIXED, SOURCE_NONE,
@@ -106,6 +122,7 @@ __all__ = [
     "KIND_STRATEGY", "NO_TYPE", "PERIODS", "PIN", "REVIEW_ACCOUNTS", "REVIEW_AMBIGUOUS", "REVIEW_RATIO",
     "SHAPE_TYPES", "SOURCE_INFERRED", "SOURCE_LABEL", "SOURCE_MIXED", "SOURCE_NONE", "SPLIT", "SPREAD_PRODUCTS",
     "TERM_STRUCTURE", "TOLERANCE", "TRADE_TYPES", "Template", "TemplateLeg", "TypeLeg", "book_spreads", "classify",
-    "ensure_overrides_table", "history_dates", "infer", "load_templates", "outright_fields", "override_problems",
-    "position_history", "positions_from", "read_overrides", "research_key", "type_fields",
+    "daily_split", "ensure_overrides_table", "history_dates", "infer", "load_templates", "outright_fields",
+    "override_problems", "position_history", "positions_from", "read_overrides", "research_key", "strategies_from",
+    "strategy_entry", "type_fields",
 ]

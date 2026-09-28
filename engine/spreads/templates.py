@@ -54,6 +54,9 @@ class Template:
     order: int                     # position over every file, files in name order: the label tie-break
     fx: Tuple[str, ...] = ()       # the template's fx pairs ('USDCNH'): the research app's conversion
     constant: float = 0.0          # added to the weighted sum of the level, in `unit` (levels.py)
+    # the research app's `params.ratio_screen`: the desk quotes this spread as the plain ratio of
+    # the two legs' prices (China over foreign, 'hu-lun bi'), not as their difference (2026-09-28)
+    ratio_screen: bool = False
 
     @property
     def currency(self) -> str:
@@ -140,7 +143,9 @@ def _load(folder: str, stamp: Tuple[Tuple[str, float], ...]) -> Tuple[Tuple[Temp
                     template_id=str(raw["id"]), name=str(raw.get("name", raw["id"])),
                     family=str(raw.get("family", "")), sector=str(raw.get("sector", "")),
                     unit=unit, quantity_unit=spread_qty, legs=legs, source=name, order=order,
-                    fx=_fx_pairs(raw.get("fx"), where), constant=float(raw.get("constant") or 0.0)))
+                    fx=_fx_pairs(raw.get("fx"), where), constant=float(raw.get("constant") or 0.0),
+                    ratio_screen=bool((raw.get("params") or {}).get("ratio_screen", False))
+                    if isinstance(raw.get("params"), dict) else False))
                 order += 1
             except (KeyError, TypeError, ValueError) as exc:
                 problems.append(f"{exc if isinstance(exc, ValueError) else f'{where}: missing or bad field {exc}'}; "

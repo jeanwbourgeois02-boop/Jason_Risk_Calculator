@@ -4,3 +4,4 @@
 - [Perf: book_spreads](perf-book-spreads.md) — 2026-09-28: the reference close is scope-dependent (never hoist it), the all-priced shortcut, C yaml loader, how to force unpriced trades in tests
 - [Strategy and trade type](strategy-and-trade-type.md) — 2026-09-28: trades.strategy is the position first; type rules, flat-calendar and same-exchange choices, outright rows
 - [Gross/net notional](gross-net-notional.md) — 2026-09-28: gross_usd / net_usd / notional_reason per spread, position, outright; open option blanks the group; closed = 0
+- [Strategies as pairs](strategies-pairs.md) — 2026-09-28: label rule first then fallback with a note, whole-lot pairing, raw China/foreign ratio, hedges = fx roots only, split only when the Daily exists

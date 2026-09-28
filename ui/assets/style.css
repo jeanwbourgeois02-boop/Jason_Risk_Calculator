@@ -603,7 +603,7 @@ p { margin: 8px 0; }
 .book-tile .k { font-size: 10.5px; color: var(--muted); letter-spacing: .03em; text-transform: uppercase; white-space: nowrap; }
 .book-tile .v { font-size: 15px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
 .book-tile .v .marker { font-size: 10px; vertical-align: middle; }
-.book-table td.book-name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.book-table td.book-name { max-width: 330px; overflow: hidden; text-overflow: ellipsis; }
 .book-under { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
 .book-needs { flex: 0 0 640px; padding: 8px 14px 4px; }
 .book-side { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
@@ -657,3 +657,13 @@ p { margin: 8px 0; }
 .book-table tr.roll-row td, .book-table tr.curve-row td { height: 24px; }
 .curve-grid th { text-align: right; }
 .curve-grid th.l { text-align: left; }
+/* Book, Strategy view (2026-09-28): strategy -> pair rows -> leg rows, then the Outright and Hedge parts */
+.book-table tr.book-pair td { background: #f9fafc; font-weight: 600; color: #1f2937; }
+.book-table tr.book-pair:hover td { background: #eef1f7; }
+.book-table tr.book-pair td.book-name { padding-left: 18px; }
+.book-table tr.book-row--leg td.book-name { padding-left: 34px; color: #4b5563; }
+.book-table tr.book-row--leg td { color: #4b5563; }
+.book-table tr.book-part td { padding: 3px 10px 1px 18px; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); background: #fff; border-bottom: none; height: 18px; }
+.book-table .book-pair-type { margin-left: 8px; font-weight: 400; font-size: 11px; color: var(--muted); }
+.book-table .book-pair-tag { color: #8a4b00; }
+.book-table .marker--small { font-size: 10px; font-weight: 400; vertical-align: middle; }

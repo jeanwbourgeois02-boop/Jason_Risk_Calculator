@@ -11,3 +11,4 @@
 - [One close stamp 17:00 NY 2026-09-28](one-close-stamp-17-00-2026-09-28.md) — every past close stamped 17:00 NY; screen fixtures stamp marks T17:00, never T15:00, else the header/Data count them missing
 - [Book strategy rejig 2026-09-28](book-strategy-rejig-2026-09-28.md) — Strategy default with legs under each strategy, Type column gone, Gross/Net from the engine, tiles, no excl. without marks, Dash 4.4 picker classes + EEE token
 - [Plain-words hovers 2026-09-28](plain-words-hovers-2026-09-28.md) — Trades row tips and Risk margin/limits hovers through plain_words / risk._limits_words; no file paths or "underlyer"; pin engine reasons loosely
+- [Book strategy -> pairs -> legs 2026-09-28](book-strategy-pairs-2026-09-28.md) — Strategy view from book_spreads' `strategies`: pair rows, leg rows, Outright / Hedge parts, subtotal / no_pnl identity rules, hedge coverage chip, Daily split hover
