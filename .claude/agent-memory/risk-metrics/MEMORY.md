@@ -1,3 +1,4 @@
 - [History files and units](history_files_and_units.md) — where the nm-dashboard parquet cache lives on this Mac (two copies, different freshness), every column and unit verified 2026-09-22, the NDF columns are 1M outrights, DV01 sign already matches the dashboard.
 - [Definitions and choices](definitions_2026_09_22.md) — the dashboard's metric definitions in metrics.py, what was not replicated, the rates/equity rows removed 2026-09-24, the synthetic-parquet tests and the pickle stand-in used without pyarrow.
 - [Commodity underlyers, Phase 4](commodity_phase4_2026_09_24.md) — COMMODITY parts, SECTOR/SPREAD views, crisis fallback, shock days, LME mapping, how tests run without pyarrow.
+- [Perf profile 2026-09-28](perf_profile_2026_09_28.md) — book_risk cold 3 s / warm 0.6 s on the sample; caches survive a sample switch; the 16 s chip is GIL contention, not the engine; the two fixes are risk-history and spreads-engine.
