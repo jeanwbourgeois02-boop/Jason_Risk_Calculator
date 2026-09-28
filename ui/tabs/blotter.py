@@ -130,16 +130,17 @@ from ui.revision import (
     publish_if_changed,
     trade_set_signature,
 )
-from ui.tabs.controls import build_date_picker, heading_date_text, today_ny
+from ui.tabs.controls import today_ny
+from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import about, format_cell, issues_drawer, marker, short_money
+from ui.tabs.formatting import (
+    MISSING, about, format_cell, is_fx_pair, issues_drawer, marker, price_text, quoted_unit, short_money,
+)
 
-DATE_PICKER_ID = "blotter-date"
-TOOLBAR_ID = "blotter-toolbar"
+# The tab's own date picker and title row left on 2026-09-28 (the screens tidy): the header's
+# picker is the one place the as-of changes, and every callback here reads `header.AS_OF_STORE_ID`.
 SUBTABS_ID = "blotter-subtabs"
 CONTENT_ID = "blotter-content"
-TITLE_ID = "blotter-title"
-TODAY_BUTTON_ID = "blotter-today-button"
 # Always in the page (`build_layout`), never inside the rebuilt content (2026-09-18):
 # the banners, so they refresh in place on every revision instead of only when a sub-tab
 # is rebuilt, and the trade-set signature the content on screen was built from, which
@@ -334,18 +335,19 @@ def _sorted_scope_df(df: pd.DataFrame) -> pd.DataFrame:
 _COLUMN_FORMATS = {   # the numeric columns of the trade table (ui.tabs.ranking); every other column is text
     "quantity": rk.count(),                 # unsigned: direction is carried by `side`
     "notional_usd": rk.amount(),
-    "pnl_local": rk.amount(nully="n/a"),     # the Futures sub-tab: P&L in the contract's own currency
-    "pnl_usd": rk.amount(nully="n/a"),
-    "fill": rk.rate(6, nully="n/a"),
-    "mark": rk.rate(6, nully="n/a"),
-    "prev_close": rk.rate(6, nully="n/a"),   # value_book's mark on the previous business day's close
-    "t1_rate": rk.rate(6, nully="n/a"),
+    "pnl_local": rk.amount(nully=MISSING),     # the Futures sub-tab: P&L in the contract's own currency
+    "pnl_usd": rk.amount(nully=MISSING),
+    "t1_rate": rk.rate(6, nully=MISSING),
     "delta": rk.rate(4, nully="", trim=True),     # an option on a future's Greeks per lot; blank elsewhere
     "gamma": rk.rate(4, nully="", trim=True),
     "theta": rk.rate(4, nully="", trim=True),
     "vega": rk.rate(4, nully="", trim=True),
 }
 
+
+# Fill, mark and previous close are text at tick precision (`formatting.price_text`, 2026-09-28),
+# so the table never prints eight decimals; the unit is the row's `price_unit`.
+_PRICE_COLS = ("fill", "mark", "prev_close")
 
 SETTLED_MARK_REASON = "settled: the ledger froze this trade's P&L; it is no longer marked"
 
@@ -388,6 +390,8 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
 
     mark_sources, notes = _column("mark_source"), _column("note")
     prev_tips = _column("prev_close_tip")
+    price_units, flags = _column("price_unit"), _column("flag")
+    fills = _column("fill")
     for col in cols:
         if col == "status":
             formatted[col] = formatted[col].map(_fmt_status)
@@ -415,10 +419,22 @@ def _format_rows(df: pd.DataFrame, display_columns: list, column_labels: dict):
             tip["pnl_local"] = {"value": why, "type": "text"}
         if "mark" in rec:
             settled = (statuses.iloc[i] if i < len(statuses) else "") == "SETTLED"
-            tip["mark"] = {"value": _mark_tip(rec["mark"], reason, settled, mark_sources[i], notes[i]),
+            # The price columns are text (`_PRICE_COLS`), so the raw cell is still a float or NaN here:
+            # `rk.value` reads NaN as None, which is what selects the "why there is no mark" hover.
+            tip["mark"] = {"value": _mark_tip(rk.value(rec["mark"]), reason, settled, mark_sources[i], notes[i]),
                            "type": "text"}
         if "prev_close" in rec and prev_tips[i]:
             tip["prev_close"] = {"value": str(prev_tips[i]), "type": "text"}
+        # Prices at tick precision (2026-09-28): text cells, never eight decimals.
+        unit = str(price_units[i] or "") if i < len(price_units) else ""
+        fill = rk.value(fills[i]) if i < len(fills) else None
+        for col in _PRICE_COLS:
+            if col in rec:
+                v = rk.value(rec[col])
+                rec[col] = price_text(v, unit, fill) if isinstance(v, (int, float)) else MISSING
+        if i < len(flags) and flags[i] and "instrument_id" in rec:
+            rec["instrument_id"] = f"{rec['instrument_id']} \u00b7 {flags[i]}"
+            tip["instrument_id"] = {"value": NO_STRIKE_HOVER, "type": "text"}
         tooltip_data.append(tip)
     pnl_cols = [c for c in ("pnl_local", "pnl_usd") if c in cols] or ["pnl_usd"]
     style_data_conditional = rk.sign_styles(pnl_cols, bold=True,
@@ -760,7 +776,7 @@ def asset_class_pnl_table(conn: sqlite3.Connection, as_of: str, df: pd.DataFrame
     table = dash_table.DataTable(
         id=ASSET_TABLE_ID,
         columns=[rk.text(_ASSET_LABELS["asset_class"], "asset_class"), rk.numeric(_ASSET_LABELS["trades"], "trades", rk.count())]
-                + [rk.numeric(_ASSET_LABELS[c], c, rk.amount_short(nully="n/a")) for c in _ASSET_PERIODS],
+                + [rk.numeric(_ASSET_LABELS[c], c, rk.amount_short(nully=MISSING)) for c in _ASSET_PERIODS],
         data=body, tooltip_data=body_tips,
         **rk.sortable(ASSET_TABLE_ID),
         style_table={"overflowX": "auto"},
@@ -1001,14 +1017,14 @@ def commodity_positions_section(block: Optional[dict]) -> html.Div:
     if rows["records"]:
         records = rk.whole_units(rows["records"], _SUMMARY_USD_COLS)
         footer = rk.whole_units(rows["footer"], _SUMMARY_USD_COLS)
-        lots = rk.amount(2, nully="n/a", trim=True)
+        lots = rk.amount(2, nully=MISSING, trim=True)
         table = dash_table.DataTable(
             id=COMMODITY_POSITIONS_TABLE_ID,
             columns=[rk.text("Position", "position"), rk.text("Sector", "sector"), rk.text("Exchange", "exchange"),
                      rk.numeric("Net lots", "net_lots", lots), rk.numeric("Gross lots", "gross_lots", lots),
-                     rk.numeric("Net units", "net_units", rk.amount(nully="n/a")), rk.text("Unit", "unit"),
-                     rk.numeric("Net USD", "net_usd", rk.amount_short(nully="n/a")),
-                     rk.numeric("Gross USD", "gross_usd", rk.amount_short(nully="n/a")), rk.text("", "detail")],
+                     rk.numeric("Net units", "net_units", rk.amount(nully=MISSING)), rk.text("Unit", "unit"),
+                     rk.numeric("Net USD", "net_usd", rk.amount_short(nully=MISSING)),
+                     rk.numeric("Gross USD", "gross_usd", rk.amount_short(nully=MISSING)), rk.text("", "detail")],
             data=records, tooltip_data=_with_full_figures(rows["records"], rows["tooltips"], _SUMMARY_USD_COLS),
             **rk.sortable(COMMODITY_POSITIONS_TABLE_ID),
             style_table={"overflowX": "auto"},
@@ -1035,8 +1051,8 @@ def commodity_positions_section(block: Optional[dict]) -> html.Div:
         children.append(dash_table.DataTable(
             id=COMMODITY_CCY_TABLE_ID,
             columns=[rk.text("Position", "position"), rk.text("Currency", "currency"),
-                     rk.numeric("P&L (local)", "pnl_local", rk.amount_short(nully="n/a")),
-                     rk.numeric("P&L (USD)", "pnl_usd", rk.amount_short(nully="n/a"))],
+                     rk.numeric("P&L (local)", "pnl_local", rk.amount_short(nully=MISSING)),
+                     rk.numeric("P&L (USD)", "pnl_usd", rk.amount_short(nully=MISSING))],
             data=rk.whole_units(rows["ccy_records"], ("pnl_local", "pnl_usd")), tooltip_data=ccy_tips,
             **rk.sortable(COMMODITY_CCY_TABLE_ID),
             style_table={"overflowX": "auto"},
@@ -1079,8 +1095,8 @@ def fx_positions_table(conn: sqlite3.Connection, as_of: str, pos: Optional[dict]
     table = dash_table.DataTable(
         id=POSITIONS_TABLE_ID,
         columns=[rk.text("Position", "position"), rk.text("Rate", "rate"),
-                 rk.numeric("Delta (local)", "units", rk.amount(2, nully="n/a", trim=True)),
-                 rk.numeric("Delta (USD)", "usd", rk.amount_short(nully="n/a")), rk.text("", "detail")],
+                 rk.numeric("Delta (local)", "units", rk.amount(2, nully=MISSING, trim=True)),
+                 rk.numeric("Delta (USD)", "usd", rk.amount_short(nully=MISSING)), rk.text("", "detail")],
         data=rk.whole_units([r for r, _ in body], ("usd",)),
         tooltip_data=_with_full_figures([r for r, _ in body], [t for _, t in body], ("usd",)),
         **rk.sortable(POSITIONS_TABLE_ID),
@@ -1251,7 +1267,50 @@ def scope_df(conn: sqlite3.Connection, scope: str, as_of: str) -> pd.DataFrame:
         df = add_instrument_fields(conn, df)
         df = add_prev_close(conn, df, as_of)
         df = add_option_greeks(conn, df, as_of)
+        df = add_price_units_and_flags(conn, df)
     return _sorted_scope_df(df)
+
+
+NO_STRIKE_FLAG = "no strike"
+NO_STRIKE_HOVER = ("This option has no strike on file, so it cannot be priced: type the strike in its Strike cell "
+                   "under Options (Payoff Digital where it is one), or re-upload an export with a Strike column.")
+
+
+def add_price_units_and_flags(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
+    """Two display columns (2026-09-28): `price_unit`, the unit each row's fill and mark are quoted
+    in (`formatting.quoted_unit` of the contract root, '' for FX), so the table prints prices at
+    tick precision; and `flag`, 'no strike' on an FX option with no strike on file (the red banner
+    of old, now a marker on the row and a line in the Data issues drawer)."""
+    out = df.copy()
+    out["price_unit"], out["flag"] = "", ""
+    if out.empty:
+        return out
+    roots: dict = {}
+    try:
+        from data.contracts import load_roots
+        roots = dict(load_roots())
+    except Exception:  # noqa: BLE001 -- a price without its unit still prints
+        roots = {}
+    bases: dict = {}
+    try:
+        for inst, base in conn.execute("SELECT instrument_id, base_ccy FROM instruments"):
+            bases[str(inst)] = str(base or "")
+    except sqlite3.Error:
+        bases = {}
+    products = out["product"].astype(str).tolist() if "product" in out.columns else [""] * len(out)
+    # An FX spot / forward reads its price in its pair (a JPY cross 3 decimals, gold 2, else 4:
+    # `formatting.fx_pair_decimals`); an FX option premium keeps its own decimals ('').
+    out["price_unit"] = [str(i) if p in ("FX_SPOT", "FX_FWD") and is_fx_pair(str(i))
+                         else quoted_unit(roots.get(bases.get(str(i), "")))
+                         for i, p in zip(out["instrument_id"], products)]
+    try:
+        from ui.tabs import options as options_ui
+        missing = {i["instrument_id"] for i in options_ui.option_instruments(conn) if not i["strike"]}
+    except Exception:  # noqa: BLE001 -- no flag rather than a broken table
+        missing = set()
+    if missing:
+        out["flag"] = [NO_STRIKE_FLAG if str(i) in missing else "" for i in out["instrument_id"]]
+    return out
 
 
 def add_option_greeks(conn: sqlite3.Connection, df: pd.DataFrame, as_of: str) -> pd.DataFrame:
@@ -1474,34 +1533,6 @@ def bad_values_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
                     children=[html.B("Stored values that are not numbers. "), html.Span(found + ".")])
 
 
-def missing_terms_notice(conn: sqlite3.Connection) -> Optional[html.Div]:
-    """A red banner naming every option that has no strike on file (so cannot be
-    priced) and where to enter it -- shown at the top of every Blotter sub-tab, not
-    only under Options, because a blank P&L anywhere else is otherwise unexplained
-    (user request 2026-09-18). None when every option has its terms."""
-    from ui.tabs import options as options_ui
-    try:
-        missing = [i["instrument_id"] for i in options_ui.option_instruments(conn) if not i["strike"]]
-    except Exception:  # never let the notice itself blank a tab
-        logging.getLogger(__name__).exception("missing_terms_notice failed")
-        return None
-    if not missing:
-        return None
-    # Compact (Screens redesign Phase A): it asks for an action, so it stays, on one line.
-    return html.Div(className="notice notice--terms", role="alert",
-                    style={"border": "1px solid var(--neg)", "borderRadius": "4px", "padding": "3px 8px",
-                           "margin": "0 0 6px", "fontSize": "12px", "background": "rgba(178, 59, 59, 0.08)"},
-                    children=[
-                        html.B(f"{len(missing)} option{'s' if len(missing) != 1 else ''} cannot be priced: no strike on file. "),
-                        html.Span(", ".join(missing) + ". "),
-                        # The Options table's Strike, Type and Payoff cells are editable
-                        # (`ui.tabs.options.EDITABLE_COLUMNS`), so that comes first; the form
-                        # and a re-upload are the alternatives.
-                        html.Span("Type the strike in its Strike cell under Options (Payoff Digital where it is one); "
-                                  "or Options ▸ Option terms; or re-upload an export with a Strike column."),
-                    ])
-
-
 def blotter_notices(conn: sqlite3.Connection) -> list:
     """The Blotter's banners, in display order, each only if it has something to say:
     stored values that are not numbers, then options with no strike on file. [] is the
@@ -1509,7 +1540,6 @@ def blotter_notices(conn: sqlite3.Connection) -> list:
     (`NOTICES_ID`, `_refresh_notices`) and for `scope_layout`'s direct callers."""
     return [n for n in (
         _safe_section("Stored values notice", lambda: bad_values_notice(conn)),
-        _safe_section("Option terms notice", lambda: missing_terms_notice(conn)),
     ) if n is not None]
 
 
@@ -1551,6 +1581,10 @@ def total_book_issues(df: pd.DataFrame, as_of: str):
     for trade_id, note in zip(df["trade_id"], notes):
         if _text(note).startswith(_FILL_NOTE_PREFIX):
             items.append((trade_id, _text(note)))
+    if "flag" in df.columns:
+        for trade_id, inst, flag in zip(df["trade_id"], df["instrument_id"], df["flag"].tolist()):
+            if flag:
+                items.append((trade_id, f"{inst}: {NO_STRIKE_HOVER}"))
     return issues_drawer(items, id=TOTAL_ISSUES_ID)
 
 
@@ -1663,16 +1697,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     left, the full-text date heading + date picker + "Today" button on the right, no card,
     no kicker -- the `ladder-title-row(-heading|-right)` class names the stylesheet's one
     title-row rule styles (named for the Ladder tab, which left on 2026-09-28)."""
-    resolved_date = _today_default(default_date)
     return html.Div(className="blotter", children=[
-        html.Div(id=TOOLBAR_ID, className="ladder-title-row", children=[
-            html.H3("Trades", className="ladder-title-row-heading"),
-            html.Div(className="ladder-title-row-right", children=[
-                html.H4(heading_date_text(resolved_date), id=TITLE_ID, className="section-title"),
-                build_date_picker(DATE_PICKER_ID, default_date=resolved_date),
-                html.Button("Today", id=TODAY_BUTTON_ID, n_clicks=0, className="btn"),
-            ]),
-        ]),
         dcc.Tabs(id=SUBTABS_ID, value=SCOPE_ORDER[0], className="subtabs", children=[
             dcc.Tab(label=SCOPE_LABELS[s], value=s, className="subtab",
                     selected_className="subtab--selected")
@@ -1691,22 +1716,10 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     """The shell's convention: `register_callbacks(app, get_db_path)`, every tab alike."""
 
-    @app.callback(Output(TITLE_ID, "children"), Input(DATE_PICKER_ID, "date"))
-    def _update_title(as_of_date):
-        return heading_date_text(as_of_date)
-
-    @app.callback(
-        Output(DATE_PICKER_ID, "date", allow_duplicate=True),
-        Input(TODAY_BUTTON_ID, "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def _jump_to_today(_n_clicks):
-        return today_ny()
-
     @app.callback(
         Output(CONTENT_ID, "children"),
         Output(BUILT_TRADE_SET_ID, "data"),
-        Input(DATE_PICKER_ID, "date"),
+        Input(AS_OF_STORE_ID, "data"),
         Input(SUBTABS_ID, "value"),
         Input(BOOK_REVISION_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
@@ -1793,7 +1806,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         @app.callback(
             Output(strip_id, "children"),
             Input(table_id, "derived_virtual_data"),
-            State(DATE_PICKER_ID, "date"),
+            State(AS_OF_STORE_ID, "data"),
             prevent_initial_call=True,
         )
         def _update_strip(rows, as_of_date, _scope=scope):
@@ -1826,7 +1839,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             Output(detail_id, "children"),
             Input(table_id, "active_cell"),
             State(table_id, "derived_virtual_data"),
-            State(DATE_PICKER_ID, "date"),
+            State(AS_OF_STORE_ID, "data"),
             prevent_initial_call=True,
         )
         def _update_detail(active_cell, rows, as_of_date, _scope=scope):
@@ -1893,7 +1906,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             *[Input(fid, "value") for fid in filter_ids],
             *([Input(f"{table_id}-search", "value")] if with_search else []),
             Input(DATA_REVISION_ID, "data"),  # new marks: refresh the rows, keep the filters
-            State(DATE_PICKER_ID, "date"),
+            State(AS_OF_STORE_ID, "data"),
             prevent_initial_call=True,
         )(_apply_filters)
 
@@ -1925,7 +1938,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         @app.callback(
             Output(f"blotter-strip-{scope}", "children"),
             Input(DATA_REVISION_ID, "data"),
-            State(DATE_PICKER_ID, "date"),
+            State(AS_OF_STORE_ID, "data"),
             prevent_initial_call=True,
         )
         def _refresh_strip(_data_rev, as_of_date, _scope=scope):
@@ -2065,7 +2078,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Input(bundles_ui.BUNDLE_REMOVE_PAIR_BUTTON_ID, "n_clicks"),
         State(bundles_ui.BUNDLE_ADD_PAIR_INPUT_ID, "value"),
         State(bundles_ui.BUNDLE_REMOVE_PAIR_INPUT_ID, "value"),
-        State(DATE_PICKER_ID, "date"),
+        State(AS_OF_STORE_ID, "data"),
         prevent_initial_call=True,
     )
     def _bundle_detail(selected, _rev, _add_clicks, _remove_clicks, add_pair, remove_pair, as_of_date):

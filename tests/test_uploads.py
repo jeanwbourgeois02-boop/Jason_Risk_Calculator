@@ -454,13 +454,15 @@ def test_pull_button_with_a_feed_calls_trigger_now_once_even_when_clicked_rapidl
     app.bloomberg_feed = _FakeFeed()
     clicked = _callback_for_input(app, feed_controls.PULL_BUTTON_ID, "n_clicks")
 
-    line, tooltip, pending, poll_disabled, button_disabled = clicked(1)
+    # 2026-09-28: the bar shows a dot and the short state (`feed_controls.status_view`), the
+    # full sentence on the element's title.
+    view, line, pending, poll_disabled, button_disabled = clicked(1)
     assert "pull requested..." in line
-    assert tooltip == line                                       # the clamped line's full text, on hover
+    assert view.children[1].children == f"Bloomberg: {feed_controls.short_state(line)}" == "Bloomberg: pulling"
     assert pending and pending["requested_at"]
     assert poll_disabled is False and button_disabled is True   # poll on, button off while waiting
     for n in (2, 3, 4):                                          # impatient clicks
-        again, _tip, pending_again, _p, _b = clicked(n)
+        _view, again, pending_again, _p, _b = clicked(n)
         assert "pull requested..." in again
         assert pending_again["requested_at"] == pending["requested_at"]
     assert app.bloomberg_feed.triggered == 1
@@ -481,10 +483,10 @@ def test_guard_allows_a_new_pull_once_the_previous_one_has_landed_or_timed_out()
 def test_pull_button_with_no_feed_says_so_plainly_and_asks_for_nothing(tmp_path):
     app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)
     assert app.bloomberg_feed is None
-    line, tooltip, pending, poll_disabled, button_disabled = _callback_for_input(
+    view, line, pending, poll_disabled, button_disabled = _callback_for_input(
         app, feed_controls.PULL_BUTTON_ID, "n_clicks")(1)
     assert line.startswith("Bloomberg is not connected on this machine: ")
-    assert tooltip == line
+    assert view.children[1].children == "Bloomberg: not connected"   # the short state; the sentence is the title
     assert uiapp.FEED_NOT_REQUESTED in line
     assert pending is None and poll_disabled is True and button_disabled is False
 
@@ -622,13 +624,13 @@ def test_landed_pull_publishes_the_data_revision_and_switches_the_poll_off(tmp_p
     pending = {"requested_at": asked.isoformat(), "baseline": None}
 
     monkeypatch.setattr(feed_controls, "read_feed_status", lambda p: _status(asked - timedelta(seconds=30)))
-    line, _tip, new_pending, poll_disabled, button_disabled, data_rev = poll(1, pending)
+    _view, line, new_pending, poll_disabled, button_disabled, data_rev = poll(1, pending)
     assert "pull requested..." in line
     assert all(v is dash.no_update for v in (new_pending, poll_disabled, button_disabled, data_rev))
 
     monkeypatch.setattr(feed_controls, "read_feed_status", lambda p: _status(asked + timedelta(seconds=2)))
-    line, tooltip, new_pending, poll_disabled, button_disabled, data_rev = poll(2, pending)
-    assert "connected" in line and tooltip == line
+    view, line, new_pending, poll_disabled, button_disabled, data_rev = poll(2, pending)
+    assert "connected" in line and view.children[1].children == "Bloomberg: connected"
     assert new_pending is None and poll_disabled is True and button_disabled is False
     assert data_rev == revision.file_signature(db_path) and data_rev   # open views redraw, no reload
 
@@ -640,9 +642,9 @@ def test_passive_refresh_leaves_the_line_alone_while_a_pull_is_outstanding(tmp_p
     monkeypatch.setattr(feed_controls, "read_feed_status", lambda p: _status(T0))
     waiting = {"requested_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), "baseline": None}
     assert refresh(1, "rev", waiting) == (dash.no_update, dash.no_update)
-    idle, tooltip = refresh(1, "rev", None)
+    view, idle = refresh(1, "rev", None)
     assert "212 marks written, 3 failed" in idle and feed_controls.NO_FEED_WORDS in idle
-    assert tooltip == idle
+    assert view.children[1].children == f"Bloomberg: {feed_controls.short_state(idle)}"
 
 
 def test_strip_width_and_tab_margin_are_one_number_so_the_strip_cannot_cover_the_tabs():

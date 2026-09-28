@@ -244,15 +244,10 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
     `main-tabs`' `value` (the selected tab's key, `TAB_KEYS`).
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
-    module only assembles them and wires the Trades tab's date picker (the one picker left
-    since wave 3 hid FX & cash) into `header.AS_OF_STORE_ID` so the header reflects the date
-    the user has picked.
+    module only assembles them and wires the header's date picker (`header.DATE_PICKER_ID`, the
+    one picker of the app since 2026-09-28) into `header.AS_OF_STORE_ID`, which every tab reads.
 
-    Defaults: the Trades tab (the former Blotter) keeps defaulting to the last uploaded trade
-    date, since it renders the loaded trade file itself. Data (the former Market data) opens
-    on today (2026-09-21): its whole-book panels ask whether TODAY's marks can be trusted, and
-    the live pull only writes today's. Book, Exposure, P&L, Timing & cash and Risk have no
-    picker: they follow the header's as-of store, whose default is today."""
+    Defaults: today in New York everywhere (user, 2026-09-22: "always price pnl as of today")."""
     snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     today = today_ny()
     tab_builders = {
@@ -264,9 +259,10 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
         "blotter": blotter.build_layout,
         "market-data": market_data.build_layout,
     }
-    # Only the Trades tab (key "blotter") opens on another day; every other tab names today.
+    # Every tab names today: the header's picker (ui/tabs/header.py::DATE_PICKER_ID) is the one
+    # place the as-of changes since 2026-09-28; the Trades and Data tabs read the header's store.
     tab_defaults = {key: today for key in tab_builders}
-    tab_defaults["blotter"] = snapshot_date
+    del snapshot_date  # the last uploaded trade date: no tab opens on it any more
     tabs = [dcc.Tab(label=label, value=TAB_KEYS[label], className="tab", selected_className="tab--selected")
             for label in VISIBLE_TABS]
     bodies = [
@@ -354,20 +350,20 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
 
     # The header's as-of (user, 2026-09-22: "always price pnl as of today ... unless changed
     # specifically otherwise"): today in New York on every page load (the callable layout
-    # above), following the Trades tab's date picker when the user changes it (the FX & cash
-    # picker left with its tab in wave 3; Data's own picker only scopes that tab), and rolling
+    # above), following the header's own date picker when the user changes it (the one picker
+    # of the app since 2026-09-28: the Trades and Data tabs read the store), and rolling
     # to the new day at the book's day roll -- header and picker together -- unless a day
     # other than today was picked. `prevent_initial_call`: the picker's initial value is the
     # same default and must not count as a pick.
     @app.callback(Output(header.AS_OF_STORE_ID, "data"),
                   Output(header.AS_OF_PICKED_ID, "data"),
-                  Input(blotter.DATE_PICKER_ID, "date"),
+                  Input(header.DATE_PICKER_ID, "date"),
                   prevent_initial_call=True)
-    def _follow_pickers(blotter_date):
-        return header.as_of_after_pick(blotter_date, today_ny())
+    def _follow_pickers(picked_date):
+        return header.as_of_after_pick(picked_date, today_ny())
 
     @app.callback(Output(header.AS_OF_STORE_ID, "data", allow_duplicate=True),
-                  Output(blotter.DATE_PICKER_ID, "date", allow_duplicate=True),
+                  Output(header.DATE_PICKER_ID, "date", allow_duplicate=True),
                   Input(revision.POLL_ID, "n_intervals"),
                   State(header.AS_OF_STORE_ID, "data"),
                   State(header.AS_OF_PICKED_ID, "data"),

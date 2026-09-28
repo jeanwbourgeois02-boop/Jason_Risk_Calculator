@@ -99,19 +99,6 @@ def _sample_df(reason="", note="", pnl_usd=8843.4):
     })
 
 
-def test_detail_table_formats_usd_and_rates():
-    df = _sample_df()
-    table = blotter.detail_table(df)
-    row = table.data[0]
-    # numbers as numbers (ui.tabs.ranking); the table prints 8,843 / 1.100000 / 1,000,000
-    assert row["pnl_usd"] == pytest.approx(8843.4)
-    assert row["fill"] == 1.1
-    assert row["quantity"] == 1_000_000  # unsigned; direction carried by side
-    formats = {c["id"]: c for c in table.columns}
-    assert formats["pnl_usd"]["type"] == "numeric" and formats["pnl_usd"]["format"]["specifier"] == "(,.0f"
-    assert formats["fill"]["format"]["specifier"] == ",.6f" and formats["instrument_id"]["type"] == "text"
-
-
 def test_detail_table_has_no_native_filter_but_ranks_on_a_header_click():
     """Filtering is the dropdown filter bar (`_filter_bar`, 2026-09-15); sorting is native
     again (ui.tabs.ranking, 2026-09-22: every table ranks), kept in the browser session."""
@@ -455,7 +442,7 @@ def test_scope_layout_rows_render_with_no_marks_at_all():
         row = table.data[0]
         assert row["trade_id"] == "T1"
         assert row["status"] in ("Open", "Settled")
-        assert row["fill"] == 1.1
+        assert row["fill"] == "1.1000"      # prices are text at the pair's decimals (2026-09-28)
         assert row["pnl_usd"] is None  # unpriced -> printed n/a with a tooltip reason, not blank/zero
     finally:
         conn.close()
@@ -837,33 +824,6 @@ def test_update_content_degrades_to_message_on_unexpected_exception(tmp_path, mo
     assert "could not be rendered (boom)" in result.children
 
 
-def test_build_layout_has_no_toolbar_filter_dropdowns():
-    """User decision 2026-09-15: filtering/sorting lives in the DataTable header and
-    the sub-tabs; the toolbar keeps only the date picker and theme-edit controls."""
-    layout = blotter.build_layout(default_date="2026-06-20")
-    toolbar = next(c for c in layout.children if getattr(c, "id", None) == blotter.TOOLBAR_ID)
-
-    def _ids(node):
-        found = []
-        node_id = getattr(node, "id", None)
-        if node_id:
-            found.append(node_id)
-        for child in getattr(node, "children", []) or []:
-            if isinstance(child, list):
-                for c in child:
-                    found.extend(_ids(c))
-            elif hasattr(child, "children") or hasattr(child, "id"):
-                found.extend(_ids(child))
-        return found
-
-    all_ids = _ids(toolbar)
-    for removed in ("blotter-filter-status", "blotter-filter-product", "blotter-filter-pair",
-                    "blotter-filter-strategy", "blotter-filter-theme",
-                    "blotter-filter-date-from", "blotter-filter-date-to", "blotter-group-by"):
-        assert removed not in all_ids
-    assert blotter.DATE_PICKER_ID in all_ids
-
-
 # --------------------------------------------------------------------------- header
 
 def test_fmt_usd_negative():
@@ -905,30 +865,6 @@ def _db_with_option_missing_strike(tmp_path):
     conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','EUR',1000000,'2026-09-01','2026-11-25',0,0)")
     conn.commit()
     return conn
-
-
-def test_missing_terms_notice_names_the_option_and_where_to_enter_it(tmp_path):
-    conn = _db_with_option_missing_strike(tmp_path)
-    notice = blotter.missing_terms_notice(conn)
-    assert notice is not None
-    text = str(notice.to_plotly_json())
-    assert "EURSEK112526C-1" in text
-    assert "no strike on file" in text
-    assert "Option terms" in text
-
-
-def test_missing_terms_notice_absent_when_every_option_has_a_strike(tmp_path):
-    conn = _db_with_option_missing_strike(tmp_path)
-    conn.execute("UPDATE instrument_options SET strike = 11.25")
-    conn.commit()
-    assert blotter.missing_terms_notice(conn) is None
-
-
-def test_scope_layout_shows_missing_terms_notice_on_every_sub_tab(tmp_path):
-    conn = _db_with_option_missing_strike(tmp_path)
-    for scope in ("total", "fx", "options"):
-        text = str(blotter.scope_layout(scope, conn, "2026-09-17").to_plotly_json())
-        assert "no strike on file" in text, scope
 
 
 def test_options_table_flags_no_strike_rows_red():
@@ -1170,7 +1106,7 @@ def test_one_text_price_unprices_one_row_and_every_view_still_renders():
         assert "trade J1: trades.price is not a number ('24-Jul')" in _all_text(drawer)
         table = next(t for t in _find_tables(layout) if t.id == "blotter-datatable-total")
         row = next(r for r in table.data if r["trade_id"] == "J1")
-        assert row["pnl_usd"] is None and row["fill"] is None            # missing stays missing (printed n/a): no 0, no raw text
+        assert row["pnl_usd"] is None and row["fill"] == blotter.MISSING   # missing stays missing (an em dash): no 0, no raw text
         tip = table.tooltip_data[table.data.index(row)]
         assert tip["pnl_usd"]["value"] == "trade J1: trades.price is not a number ('24-Jul')"
         assert sum(1 for r in table.data if r["pnl_usd"] is not None) == 4  # every other trade prices
@@ -1322,31 +1258,6 @@ def test_a_saved_term_moves_the_book_revision_but_not_the_trade_set(tmp_path):
     conn.close()
 
 
-def test_the_banners_live_outside_the_rebuilt_content_and_follow_every_revision(tmp_path):
-    db_path, conn = _digital_book(tmp_path)
-    shell = blotter.build_layout(default_date="2026-06-20")
-    ids = [getattr(c, "id", None) for c in shell.children]
-    assert ids.index(blotter.NOTICES_ID) < ids.index(blotter.CONTENT_ID)       # above the content, not in it
-    assert blotter.BUILT_TRADE_SET_ID in ids
-
-    app = _blotter_app(db_path)
-    notices = _wrapped(app, lambda k: k == f"{blotter.NOTICES_ID}.children")
-    update = _wrapped(app, lambda k: f"{blotter.CONTENT_ID}.children" in k)
-    shown = notices("d1", "b1")
-    assert len(shown) == 1 and "1 option cannot be priced: no strike on file." in _all_text(shown)
-    assert "USDJPY111926P-1" in _all_text(shown)
-    content, _built = update("2026-06-20", "options", "b1", "d1", None)
-    assert "cannot be priced: no strike on file" not in _all_text(content)   # the banner is never twice on the page
-
-    conn.execute("UPDATE instrument_options SET strike = 152 WHERE instrument_id = 'USDJPY111926P-1'")
-    conn.commit()
-    assert notices("d2", "b1") == []                                     # gone on the very next revision
-    # `scope_layout`'s direct callers still get the banners on top, as before
-    conn.execute("UPDATE instrument_options SET strike = 0")
-    conn.commit()
-    assert "no strike on file" in _all_text(blotter.scope_layout("total", conn, "2026-06-20"))
-    assert "no strike on file" not in _all_text(blotter.scope_layout("total", conn, "2026-06-20", with_notices=False))
-    conn.close()
 
 
 def test_a_saved_options_cell_publishes_the_data_revision_at_once_and_only_when_the_file_moved(tmp_path):

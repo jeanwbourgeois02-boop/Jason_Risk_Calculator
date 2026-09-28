@@ -1,7 +1,6 @@
 """ui/tabs/formatting.py: the shared display helpers of the screens redesign (2026-09-25):
 money in k / m / bn, a title with its definitions on hover, a short marker with its sentence
 on hover, and the tab's "Data issues (N)" drawer. Display only."""
-import math
 
 from dash import html
 
@@ -104,11 +103,6 @@ def test_issues_drawer_passes_a_component_through():
     link = html.A("see Data", href="#")
     d = fmt.issues_drawer([link])
     assert d.children[1].children[0].children is link
-
-
-def test_existing_format_cell_unchanged():
-    assert fmt.format_cell(-1234.4) == "(1,234)"
-    assert fmt.format_cell(math.nan) == ""
 
 
 # ----------------------------------------------------------------------------- tab_link

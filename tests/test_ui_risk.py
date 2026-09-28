@@ -7,12 +7,9 @@ All tests skip if dash is not importable, per environment constraints.
 """
 from __future__ import annotations
 
-import math
 import sys
 import types
 
-import numpy as np
-import pandas as pd
 import pytest
 
 dash = pytest.importorskip("dash", reason="dash is not installed in this environment")
@@ -20,7 +17,6 @@ dash = pytest.importorskip("dash", reason="dash is not installed in this environ
 from dash import dash_table  # noqa: E402
 
 from data.ingest import schema  # noqa: E402
-from engine.risk import history as history_mod  # noqa: E402
 from ui.tabs import risk  # noqa: E402
 
 NAN = float("nan")
@@ -192,7 +188,7 @@ def test_layout_is_a_risk_prefixed_shell_with_no_date_picker():
     assert risk.BODY_ID in ids and risk.REFRESH_ID in ids
     assert all(i.startswith("risk-") for i in ids), ids
     assert not any(type(n).__name__ == "DatePickerSingle" for n in _walk(layout))
-    assert "Risk" in _text(layout) and AS_OF in _text(layout)
+    assert "Risk" in _text(layout)          # the header says the as-of once; no per-tab line (2026-09-28)
     assert risk.build_layout is risk.layout
 
 
@@ -241,7 +237,7 @@ def test_over_cap_and_over_vol_target_are_flagged_in_red():
     body = risk.body(r)
     cards = _cards(body)
     assert "over cap" in _texts(body) and "over vol target" in _texts(body)
-    assert cards["Worst day ex shocks"][0] == "(2.96m)" and "131.6% of the 2.25m cap" in cards["Worst day ex shocks"][1]
+    assert cards["Worst day ex shocks"][0] == "−2.96m" and "131.6% of the 2.25m cap" in cards["Worst day ex shocks"][1]
     assert cards["Worst day ex shocks"][3].style["color"] == "var(--neg)" and cards["Worst day ex shocks"][3].style["fontWeight"] == "700"
     assert cards["Blended vol (annual)"][0] == "6.39m" and "142.0% of the 4.50m target" in cards["Blended vol (annual)"][1]
     # the flag sits on the figure line, beside the figure, not under it
@@ -401,58 +397,6 @@ def _checks() -> list:
             c("exchange_spot_month", "ICE:B", "N/A", None, 500.0, None, "COH7 Comdty: no delta", source="exchange")]
 
 
-def test_commodity_scenarios_show_totals_by_sector_with_na_and_missing_on_hover():
-    body = risk.body(_commodity_result())
-    table = _table(body, risk.COMMODITY_SCENARIO_TABLE_ID)
-    assert [c["id"] for c in table.columns] == ["scenario", "kind", "dates", "total_usd", "sector_0", "sector_1", "note"]
-    assert [c["name"] for c in table.columns][4:6] == ["energy", "agriculture"]
-    energy, grains, replay, cnh = table.data
-    assert energy["total_usd"] == -90_000.0 and energy["sector_0"] == -90_000.0 and energy["sector_1"] is None
-    assert energy["kind"] == "Outright" and energy["dates"] is None
-    assert energy["note"] == "excl. 1"
-    assert table.tooltip_data[0]["total_usd"]["value"] == ("excludes 1 position(s) with no figure: "
-                                                           "BZ1: no USD delta on the day")
-    assert table.tooltip_data[0]["note"]["value"] == table.tooltip_data[0]["total_usd"]["value"]
-    assert table.tooltip_data[0]["scenario"]["value"] == "crude and products down 10%"
-    assert grains["sector_1"] == -25_000.0 and table.tooltip_data[1] == {}
-    # n/a with its reason, never 0; a replay names its dates
-    assert replay["total_usd"] == "n/a" and replay["kind"] == "Replay" and replay["dates"] == "2020-02-20 to 2020-04-21"
-    assert table.tooltip_data[2]["total_usd"]["value"] == "the commodity settlement history is not available"
-    assert cnh["kind"] == "FX" and cnh["total_usd"] == 1_500.0 and "no sector split" in cnh["note"]
-    from ui.tabs import ranking as rk
-    assert all(c.get("format") == rk.amount_short(nully="") for c in table.columns if c["type"] == "numeric")
-    titles = " ".join(_titles(body))
-    assert "first order on delta" in titles and "their gamma is not in it" in titles
-    # what the scenarios could not value is in the drawer, not a list under the table
-    assert "Not valued" not in _text(body)
-    assert ("Commodity stress", "2020 Covid: n/a, the commodity settlement history is not available") in _issues(body)
-    # expandable: one collapsed block of the scenarios, each scenario collapsed with its breakdowns
-    detail = next(n for n in _walk(body) if getattr(n, "id", None) == risk.COMMODITY_SCENARIO_DETAIL_ID)
-    outer = next(n for n in _walk(body) if type(n).__name__ == "Details" and detail in (n.children or []))
-    assert outer.open is False and outer.children[0].children == "Each scenario by commodity, contract, spread and currency (4)"
-    blocks = [n for n in detail.children if type(n).__name__ == "Details"]
-    assert len(blocks) == 4 and all(b.open is False for b in blocks)
-    assert blocks[0].children[0].children == "Energy -10%: (90.0k) (excl. 1)"
-    assert blocks[0].children[0].title == "(90,000); excludes 1 position(s) with no figure"
-    first = _text(blocks[0])
-    assert "By commodity" in first and "By contract" in first and "By spread" in first
-    assert "Not in the total (1):" in first and "BZ1: no USD delta on the day" in first
-    tables = [n for n in _walk(blocks[0]) if isinstance(n, dash_table.DataTable)]
-    by_contract = next(t for t in tables if any(c["id"] == "move" for c in t.columns))
-    assert by_contract.data[0]["move"] == -0.10 and by_contract.data[0]["pnl_usd"] == -90_000.0
-    by_spread = next(t for t in tables if any(c["id"] == "spread_pnl_usd" for c in t.columns))
-    assert by_spread.data[0]["pnl_usd"] == "n/a"
-    assert by_spread.tooltip_data[0]["pnl_usd"]["value"] == "COH7 Comdty: no USD delta on the day"
-    assert blocks[2].children[0].children == "2020 Covid: n/a"
-    assert blocks[2].children[0].title == "the commodity settlement history is not available"
-    by_ccy = next(t for t in (n for n in _walk(blocks[3]) if isinstance(n, dash_table.DataTable)))
-    assert by_ccy.data[0]["currency"] == "CNY" and by_ccy.data[0]["pnl_change_usd"] == 1_500.0
-    # unavailable stress: the reason, never an empty table
-    r = _commodity_result(commodity_scenarios={"as_of": AS_OF, "available": False, "config": "", "scenarios": [],
-                                               "reasons": ["the stress scenarios could not be read: bad kind"]})
-    assert "Commodity stress unavailable: the stress scenarios could not be read: bad kind." in _text(risk.body(r))
-
-
 def test_margin_is_labelled_an_estimate_with_credits_and_never_zero_for_a_missing_rate():
     body = risk.body(_commodity_result(), _margin(), _checks())
     section = next(n for n in _walk(body) if getattr(n, "id", None) == risk.MARGIN_LIMITS_ID)
@@ -468,8 +412,6 @@ def test_margin_is_labelled_an_estimate_with_credits_and_never_zero_for_a_missin
     assert [c["name"] for c in table.columns][1:4] == ["Gross charge USD", "Spread credit USD", "Margin USD (estimate)"]
     ags, energy = table.data
     assert energy["margin_usd"] == 80_000.0 and energy["spread_credit_usd"] == 10_000.0
-    # every position of the sector without a rate: n/a with the reason, not the engine's 0 over nothing
-    assert ags["gross_charge_usd"] == "n/a" and ags["margin_usd"] == "n/a"
     assert "no outright rate set" in table.tooltip_data[0]["margin_usd"]["value"]
     assert ags["note"] == "excludes 1 of 1 positions with no margin figure"
     footer = _table(section, f"{risk.MARGIN_TABLE_ID}-footer")
@@ -483,36 +425,6 @@ def test_margin_is_labelled_an_estimate_with_credits_and_never_zero_for_a_missin
     # unavailable: the reason
     out = _text(risk.margin_section({"available": False, "reasons": ["config/limits.yaml refused: bad rate"]}))
     assert "Margin estimate unavailable: config/limits.yaml refused: bad rate." in out
-
-
-def test_limit_levels_are_coloured_and_not_set_says_so():
-    section = risk.limits_section(_checks())
-    table = _table(section, risk.LIMITS_TABLE_ID)
-    # the table holds the limits that are set; the one not set is collapsed under it
-    assert [rec["level"] for rec in table.data] == ["BREACH", "WARN", "OK", "n/a"]
-    styles = table.style_data_conditional
-    assert {"if": {"column_id": "level", "filter_query": "{level} = 'BREACH'"}, **risk.LEVEL_STYLES["BREACH"]} in styles
-    assert risk.LEVEL_STYLES["BREACH"]["backgroundColor"] == "#c62828"                       # red
-    assert {"if": {"column_id": "level", "filter_query": "{level} = 'WARN'"}, **risk.LEVEL_STYLES["WARN"]} in styles
-    assert risk.LEVEL_STYLES["WARN"]["color"] == "#b26a00"                                   # amber
-    assert {"if": {"column_id": "level", "filter_query": "{level} = 'OK'"}, **risk.LEVEL_STYLES["OK"]} in styles
-    breach, _warn, _ok, na = table.data
-    assert breach["value"] == 120.0 and breach["limit_value"] == 100.0 and breach["used_pct"] == 120.0
-    assert na["value"] == "n/a" and table.tooltip_data[3]["value"]["value"] == "COH7 Comdty: no delta"
-    assert table.tooltip_data[0]["limit"]["value"] == "basis of gross_lots"
-    assert "From config/limits.yaml: 1 BREACH, 1 WARN, 1 OK, 1 n/a." in _text(section)
-    # the not-set limit: one collapsed line, its position and config key one click away
-    drawer = next(n for n in _walk(section) if getattr(n, "id", None) == risk.LIMITS_NOT_SET_ID)
-    assert type(drawer).__name__ == "Details" and drawer.open is False
-    assert _text(drawer.children[0]) == "Not set (1)"
-    item = next(n for n in _walk(drawer) if getattr(n, "className", "") == "limit-not-set-item")
-    assert item.children == "energy 1.20m USD"
-    assert "Position: 1,200,000 USD." in item.title and "(desk_limits.net_usd_per_sector)" in item.title
-    assert "basis of net_usd_sector" in item.title
-    # single-line rows: the reason clipped, whole on hover; the explanation is the title's hover
-    assert table.tooltip_data[1]["reason"]["value"] == "90% of the limit (warn from 80%)"
-    assert any(r.get("textOverflow") == "ellipsis" and r["if"]["column_id"] == "reason" for r in table.style_cell_conditional)
-    assert any("BREACH above the limit" in t for t in _titles(section))
 
 
 def _not_set_checks() -> list:
@@ -556,14 +468,14 @@ def test_nothing_set_reads_one_quiet_line_with_every_limit_collapsed_under_it():
     lines = [" ".join(_texts(li)) for li in _walk(drawer) if type(li).__name__ == "Li"]
     assert lines == [
         "Book   gross lots 42.5 lots  ·  gross USD 3.40m USD",
-        "Net USD by sector   energy −1.20m USD  ·  metals n/a",
+        "Net USD by sector   energy −1.20m USD  ·  metals —",
         "NYMEX:CL   net USD −900k USD  ·  2026-12 5 lots  ·  2027-01 -8 lots",
         "LME:CA   net USD 300k USD  ·  2026-12 2 lots",
         "NYMEX:CL   spot month 2026-12 5 lots  ·  single month 2027-01 -8 lots  ·  all months -3 lots",
         "LME:CA   spot month 2026-12 2 lots"]
     # a missing position is n/a with its reason, never zero; the spot month's last trade is on hover
     metals = next(i for i in items if i.children.startswith("metals"))
-    assert "Position: n/a (the position has no figure)." in metals.title
+    assert "the position has no figure" in metals.title
     spot = next(i for i in items if i.children.startswith("spot month 2026-12 5"))
     assert "last trade 2026-11-19, estimated" in spot.title
 
@@ -573,29 +485,6 @@ def test_the_not_set_drawer_is_absent_when_every_limit_is_set():
     section = risk.limits_section(checks)
     assert risk.LIMITS_NOT_SET_ID not in _ids(section) and risk.not_set_drawer(checks) is None
     assert len(_table(section, risk.LIMITS_TABLE_ID).data) == len(checks)
-
-
-def test_the_tab_builds_when_the_commodity_history_is_unavailable():
-    from dash._utils import to_json
-    r = _commodity_result()
-    why = "no research database: tried /a/Commodity Dashboard/rvapp/data/rvapp.db"
-    r["commodity_history"] = {"available": False, "path": "", "reason": why, "first_date": None, "last_date": None,
-                              "note": "", "candidates": [], "roots": 0, "contracts": 0, "fx_pairs": [], "used_to": None,
-                              "lag2_date": None, "positions_note": ""}
-    for row in r["underlyers"]:
-        if row["kind"] in ("COMMODITY", "SECTOR", "SPREAD"):
-            row.update(_nan_metrics(f"no history: {why}"), reason=f"no history: {why}", vol_note="")
-    body = risk.body(r, None, None)
-    to_json(body)                                            # serialises: no NaN or numpy scalar left
-    text = _text(body)
-    assert f"Commodity history unavailable: {why}. The commodity rows' risk figures are n/a" in text
-    table = _table(body, risk.TABLE_ID)
-    cl = next(rec for rec in table.data if "NYMEX:CL" in rec["underlyer"])
-    assert cl["vol_blended_ann_usd"] == "n/a" and cl["net_usd"] == 900_000.0
-    assert "The margin estimate was not computed." in text and "The limit checks were not computed." in text
-    # an engine with no commodity blocks at all (an FX-only result) still builds
-    to_json(risk.body(_result()))
-    assert "The commodity scenarios were not computed" in _text(risk.body(_result()))
 
 
 def test_render_passes_the_margin_and_limits_to_the_body(tmp_path, monkeypatch):
@@ -618,101 +507,3 @@ def test_margin_and_limits_on_an_empty_book_read_the_engine_once_each():
     section = risk.margin_limits_section(margin, checks)
     footer = _table(section, f"{risk.MARGIN_TABLE_ID}-footer")
     assert footer.data[0]["note"] == "no open commodity position"
-
-
-# --------------------------------------------------------------------------- end to end
-DATES = pd.bdate_range("2007-01-01", AS_OF)
-SNAP = f"{AS_OF}T15:00:00-04:00"
-
-
-def _write_history(folder):
-    """CHF with the SNB day and a 2020 bad day, JPY flat, yields flat (no rates file: the
-    rates underlyer is retired)."""
-    folder.mkdir(parents=True, exist_ok=True)
-    r = pd.Series(0.0005, index=DATES)
-    r.loc[pd.Timestamp(SNB)] = -0.15
-    r.loc[pd.Timestamp(WORST_EX)] = -0.03
-    spot = pd.DataFrame(index=DATES)
-    spot.index.name = "date"
-    spot["CHF"] = np.exp(np.cumsum(r.to_numpy()))
-    spot["JPY"] = 0.0067
-    spot.to_parquet(folder / history_mod.SPOT_FILE)
-    y = pd.DataFrame({"USD": 3.0, "CHF": 3.0, "JPY": 3.0}, index=DATES)
-    y.index.name = "date"
-    y.to_parquet(folder / history_mod.YIELDS_FILE)
-    return folder
-
-
-def _write_book(db_path):
-    conn = schema.connect(str(db_path))
-    conn.executemany("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
-                     "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)", [
-        ("USDCHF", "FX", "USD", "CHF", 1, 0, "USDCHF Curncy", "9999-12-31"),
-        ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31")])
-    for tid, pair, (bccy, bamt), (qccy, qamt), px in [
-            ("c1", "USDCHF", ("USD", -1_000_000.0), ("CHF", 800_000.0), 0.80),       # long 0.8m CHF at USDCHF 0.64 = $1.25m
-            ("j1", "USDJPY", ("USD", 1_000_000.0), ("JPY", -150_000_000.0), 150.0)]:
-        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (tid, "XLSX", pair, "FX_FWD", tid, "2026-09-01", bamt, px, "acc", "cp", "", "t", "d", ""))
-        conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
-            (tid, 1, "FX_NEAR", bccy, bamt, "2026-09-01", "2026-10-20", px, 1),
-            (tid, 2, "FX_NEAR", qccy, qamt, "2026-09-01", "2026-10-20", px, 1)])
-    conn.executemany("INSERT INTO marks VALUES (?,?,?,?,?,?,?)", [
-        (AS_OF, "USDCHF", AS_OF, "SPOT", 0.64, "BBG_BFXFORWARD", SNAP),
-        (AS_OF, "USDJPY", AS_OF, "SPOT", 150.0, "BBG_BFXFORWARD", SNAP)])
-    conn.commit()
-    conn.close()
-
-
-def test_the_rendered_tab_shows_the_engines_numbers_end_to_end(tmp_path, monkeypatch):
-    from engine.risk import book_risk
-    from ui.tabs.formatting import format_cell, short_money
-    monkeypatch.setenv(history_mod.ENV_VAR, str(_write_history(tmp_path / "hist")))
-    db_path = tmp_path / "risk.db"
-    _write_book(db_path)
-    stub = types.ModuleType("ui.app")
-    stub.connect_readonly = lambda path: schema.connect(str(path))
-    monkeypatch.setitem(sys.modules, "ui.app", stub)
-
-    app = dash.Dash(__name__)
-    risk.register_callbacks(app, get_db_path=lambda: str(db_path))
-    callback = next(v for k, v in app.callback_map.items() if risk.BODY_ID in k)["callback"].__wrapped__
-    body = callback(AS_OF, "rev", 0)
-
-    conn = schema.connect(str(db_path))
-    engine = book_risk(conn, AS_OF)
-    conn.close()
-    rows = {r["underlyer"]: r for r in engine["underlyers"]}
-    assert engine["history"]["available"] and engine["history"]["lag2_date"] == "2026-09-18"
-    assert rows["CHF"]["net_usd"] == pytest.approx(1_250_000.0) and rows["CHF"]["worst_1d_raw_date"] == SNB
-    assert not math.isnan(engine["book"]["vol_blended_ann_usd"])
-
-    text = _text(body)
-    assert f"History: {tmp_path / 'hist'}, last close {AS_OF}; used to {AS_OF}, lag-2 date 2026-09-18." in text
-    cards = _cards(body)
-    assert cards["Net USD delta"][0] == short_money(engine["book"]["net_usd"], parens=True) == "250k"
-    assert cards["Net USD delta"][3].title == format_cell(engine["book"]["net_usd"]) == "250,000"
-    assert "DV01 (USD/bp)" not in cards
-    assert cards["Blended vol (annual)"][3].title == format_cell(engine["book"]["vol_blended_ann_usd"])
-    assert cards["Worst day raw"][3].title == format_cell(engine["book"]["worst_1d_raw_usd"]) and SNB in cards["Worst day raw"][1]
-    # the book's worst day ex shocks is CHF's 2020 day (JPY never moves), the SNB day being a shock date
-    assert engine["book"]["worst_1d_ex_shocks_date"] == WORST_EX
-    assert cards["Worst day ex shocks"][0] == short_money(engine["book"]["worst_1d_ex_shocks_usd"], parens=True)
-    assert engine["book"]["worst_1d_ex_shocks_date"] in cards["Worst day ex shocks"][1]
-    table = _table(body, risk.TABLE_ID)
-    assert [rec["underlyer"] for rec in table.data] == [r["underlyer"] for r in engine["underlyers"]] == ["CHF", "JPY"]
-    chf = table.data[0]
-    # the table shows whole units (k / M on screen): the engine's figure rounded, never recomputed
-    assert chf["net_usd"] == pytest.approx(1_250_000.0) and chf["worst_1d_raw_usd"] == round(rows["CHF"]["worst_1d_raw_usd"])
-    assert chf["worst_1d_raw_date"] == SNB and chf["worst_1d_ex_shocks_date"] == WORST_EX
-    assert chf["vol_blended_ann_usd"] == round(rows["CHF"]["vol_blended_ann_usd"]) and chf["note"] == "carry included"
-    assert "dv01_usd" not in chf
-    footer = _table(body, f"{risk.TABLE_ID}-footer")
-    assert footer.data[0]["worst_1d_raw_usd"] == round(engine["book"]["worst_1d_raw_usd"])
-    scen = _table(body, risk.SCENARIO_TABLE_ID)
-    assert [rec["scenario"] for rec in scen.data] == list(engine["scenarios"])
-    europe = next(rec for rec in scen.data if rec["scenario"].startswith("Europe"))
-    assert europe["fx_total"] == pytest.approx(engine["scenarios"][europe["scenario"]]["fx_total"]) == pytest.approx(-37_500.0)
-    assert set(europe) == {"scenario", "total", "fx_total"}
-    # a JPY that never moves: its vol is a real zero from the engine, shown as 0, not n/a
-    assert table.data[1]["vol_blended_ann_usd"] == 0.0

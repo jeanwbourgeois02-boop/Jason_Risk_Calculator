@@ -151,7 +151,8 @@ from typing import Callable, Optional
 
 from dash import Input, Output, dcc, html
 
-from ui.tabs.formatting import marker, short_money
+from ui.tabs.controls import today_ny
+from ui.tabs.formatting import MISSING, marker, short_money
 
 HEADER_ID = "header-block"
 # The LTD chart's ids (the chart is on the P&L tab since 2026-09-28, `ui/tabs/pnl.py`; these
@@ -162,6 +163,12 @@ CHART_CONTAINER_ID = "header-ltd-chart-container"
 DETAILS_ID = "header-ltd-details"
 SUMMARY_ID = f"{DETAILS_ID}-summary"
 AS_OF_STORE_ID = "header-as-of-store"
+# The one date picker of the app (2026-09-28, the screens tidy): the header's first cell, "AS OF".
+# `ui/app.py` wires it into `AS_OF_STORE_ID` (`_follow_pickers`) and rolls it with the day
+# (`_roll_to_today`); the Trades and Data tabs lost their own pickers that day and read the store.
+DATE_PICKER_ID = "header-as-of-picker"
+TRADES_COUNT_CLASS = "header-trades"
+CHIP_CLASS = "header-chip"
 # True once a date picker (Blotter or Ladder) was set to a day other than today: the header
 # then stays on that day; otherwise it follows the New York calendar (user, 2026-09-22:
 # "by default, always price pnl as of today, so that the top bar numbers all reflect todays
@@ -304,7 +311,8 @@ def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
     "filled 2" and "ref 16 Sep" as `_build_figures` gives them. The figure itself is the
     engine's sum over priced trades, kept as it is."""
     if not entry.get("available"):
-        return _header_card(title, "n/a", "header-figure-value header-figure-value--muted",
+        # An em dash, never "n/a" (the display rule of 2026-09-28); the reason on hover.
+        return _header_card(title, MISSING, "header-figure-value header-figure-value--muted",
                             hover=str(entry.get("reason") or ""))
     value = entry["value"]
     cls = _sign_class(value) if colour else "neutral"
@@ -326,8 +334,20 @@ def layout() -> html.Div:
     `_build_chart` there); `DETAILS_ID`, `SUMMARY_ID` and `CHART_CONTAINER_ID` stay as names
     for the P&L tab's own ids and older notes, but no element of the header carries them."""
     return html.Div(id=HEADER_ID, className="header-block", children=[
+        _picker_card(),
         html.Div(id=f"{HEADER_ID}-figures", className="header-figures",
-                 children=[_figure_card("LTD", "-")]),
+                 children=[_figure_card("LTD", MISSING)]),
+    ])
+
+
+def _picker_card() -> html.Div:
+    """The header's first cell: "AS OF" over the date picker (`DATE_PICKER_ID`), today in New
+    York by default (the layout is rebuilt on every page load, so it is never frozen). The one
+    place the as-of changes (CLAUDE.md "Tabs as views")."""
+    return html.Div(className="header-figure header-asof", children=[
+        html.Div(AS_OF_TITLE, className="header-figure-title"),
+        dcc.DatePickerSingle(id=DATE_PICKER_ID, date=today_ny(), display_format="ddd D MMM YYYY",
+                             first_day_of_week=1, number_of_months_shown=1, clearable=False),
     ])
 
 
@@ -718,6 +738,8 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
 
     holidays = load_holidays()
     df_today, _n_filled, n_total = priced_value_book(conn, as_of)
+    if not n_total:
+        return _empty_book_cards(as_of)
     # The marks the book needs on `as_of`, read once per render (and memoised on the database
     # revision): the root reason of the cards valued on `as_of` and the "Data" chip.
     try:
@@ -790,12 +812,21 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     daily = dict(entries["daily"])
     daily["value_hover"] = _joined(daily.get("value_hover"),
                                    *(_entry_sentence(_PERIOD_TITLES[k], entries[k]) for k in _ON_DAILY_HOVER))
-    cards = [_as_of_card(as_of, n_total, n_open=int((df_today["status"] == "OPEN").sum()) if not df_today.empty else 0),
-             _pnl_card("Daily", daily), _pnl_card("MTD", entries["mtd"]), _pnl_card("YTD", entries["ytd"]),
+    n_open = int((df_today["status"] == "OPEN").sum()) if not df_today.empty else 0
+    cards = [_pnl_card("Daily", daily), _pnl_card("MTD", entries["mtd"]), _pnl_card("YTD", entries["ytd"]),
              _pnl_card("LTD", ltd_entry)]
-    marks = _marks_card(conn, as_of, needs_today)
-    if marks is not None:
-        cards.append(marks)
+    cards.append(marks_chip(conn, as_of, needs_today, n_total))
+    cards.append(trades_count(as_of, n_total, n_open))
+    return cards
+
+
+def _empty_book_cards(as_of: str) -> list:
+    """No trades on file: the four figures as dashes (nothing to value, nothing invented) and the
+    grey "No book loaded" chip."""
+    reason = f"No trades on file: upload a blotter to value the book as of {as_of}."
+    cards = [_header_card(title, MISSING, "header-figure-value header-figure-value--muted", hover=reason)
+             for title in ("Daily", "MTD", "YTD", "LTD")]
+    cards.append(_chip("No book loaded", "grey", reason))
     return cards
 
 
@@ -899,7 +930,7 @@ GROSS_NOTIONAL_TITLE = "Gross notional"
 NET_BY_SECTOR_TITLE = "Net outright"
 OPEN_SPREADS_TITLE = "Open spreads"
 NEXT_EXPIRY_TITLE = "Next expiry"
-MARKS_TITLE = "Data"
+MARKS_TITLE = "Marks"
 
 _SECTOR_LABELS = {"agriculture": "Ags"}
 # A chip: a small outlined pill on the navy header, coloured by what it says.
@@ -1160,39 +1191,114 @@ def _next_expiry_card(schedule: dict) -> html.Div:
                         markers=markers)
 
 
-def _marks_card(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple]) -> Optional[html.Div]:
-    """The chip for the marks the book needs on `as_of` with no official mark on file
-    (`needed_marks`, read once per render and memoised on the database revision,
-    `_needs_cached`): "31 marks missing" (amber), "marks complete" (green), "marks n/a" with the
-    reason when the list could not be read. None when the book needs no mark at all. The Data
-    tab lists each one; this only counts them."""
+_CHIP_DOTS = {"green": "#4ade80", "amber": "#f59e0b", "red": "#f87171", "grey": "#9ca3af"}
+
+
+def _chip(text: str, colour: str, hover: str, chip_id: Optional[str] = None) -> html.Div:
+    """A header chip: a coloured dot and short words, the sentence on hover."""
+    props = {"id": chip_id} if chip_id else {}
+    return html.Div(className=CHIP_CLASS, title=hover, children=[
+        html.Span(className="header-dot", style={"background": _CHIP_DOTS.get(colour, _CHIP_DOTS["grey"])}),
+        html.Span(text)], **props)
+
+
+def trades_count(as_of: str, n_total: int, n_open: int) -> html.Div:
+    """'50 trades · 45 open', small, at the header's right end; the settled count and the as-of
+    on hover."""
+    hover = (f"{n_total:,} trades on file as of {as_of}: {n_open:,} open, {n_total - n_open:,} settled or "
+             "closed out. Every figure is valued as of that date.")
+    return html.Div(f"{n_total:,} {'trade' if n_total == 1 else 'trades'} \u00b7 {n_open:,} open",
+                    className=TRADES_COUNT_CLASS, title=hover)
+
+
+def latest_mark_time(conn: sqlite3.Connection, as_of: str) -> Optional[tuple]:
+    """(as_of_date, snapped_at) of the latest official mark the book's instruments have on or
+    before `as_of`: the most recent close on file and the time it was stamped. None when the
+    book has no official mark at all. A read of `marks_official`, nothing computed."""
+    try:
+        row = conn.execute(
+            "SELECT as_of_date, MAX(snapped_at) FROM marks_official WHERE as_of_date <= ? AND instrument_id IN "
+            "(SELECT DISTINCT instrument_id FROM trades) GROUP BY as_of_date ORDER BY as_of_date DESC LIMIT 1",
+            (as_of,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    return str(row[0]), str(row[1] or "")
+
+
+def mark_time_words(as_of_date: str, snapped_at: str, now: Optional[dt.datetime] = None) -> str:
+    """'Fri 25 Sep 15:00 NY' from a close date and its stamp (any offset, shown in New York
+    time); 'live' when the stamp is within the last hour on the book's own date; the date alone
+    when the stamp is not a time."""
+    try:
+        d = dt.date.fromisoformat(as_of_date)
+        day = f"{d:%a} {d.day} {d:%b}"
+    except ValueError:
+        day = as_of_date
+    try:
+        t = dt.datetime.fromisoformat(snapped_at.replace("Z", "+00:00"))
+    except ValueError:
+        return day
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=dt.timezone.utc)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if as_of_date == today_ny(now) and 0 <= (now - t).total_seconds() <= 3600:
+        return f"{day} live"
+    return f"{day} {t.astimezone(ny):%H:%M} NY"
+
+
+def _library_tickers(conn: sqlite3.Connection, as_of: str) -> Optional[int]:
+    try:
+        from data.bloomberg import library
+        return int(library.summary(conn, as_of).get("tickers") or 0)
+    except Exception:  # noqa: BLE001 -- the chip says "tickers needed" without the count
+        return None
+
+
+def marks_chip(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple], n_total: int) -> html.Div:
+    """The header's marks chip (2026-09-28): 'Marks: Fri 25 Sep 15:00 NY · 2 missing', the time
+    the latest official close the book uses was stamped (`latest_mark_time`, New York time; 'live'
+    within the hour) and the count of marks the book needs on `as_of` with no official mark
+    (`needed_marks`, the Data tab's own list, memoised on the database revision). Amber while any
+    is missing, green when complete ('· complete'), red with no official mark for the book at all
+    ('No marks yet: press Pull Bloomberg · N tickers needed', N from the Bloomberg library), grey
+    'No book loaded' without trades. The missing marks are listed on hover."""
+    if not n_total:
+        return _chip("No book loaded", "grey", "No trades on file: upload a blotter.")
+    latest = latest_mark_time(conn, as_of)
+    if latest is None:
+        n = _library_tickers(conn, as_of)
+        words = f" \u00b7 {n:,} tickers needed" if n else ""
+        return _chip(f"No marks yet: press Pull Bloomberg{words}", "red",
+                     "The book has no official mark on file yet: every value shows a dash until the first "
+                     "Bloomberg pull (or a marks snapshot import). Fills and sizes are already right.")
+    when = mark_time_words(*latest)
     if needs is None:
         try:
             needs = _needs_cached(conn, as_of)
         except Exception as exc:  # noqa: BLE001 -- the chip says why
-            return _header_card(MARKS_TITLE, "marks n/a", "header-figure-value", value_style=_chip_style(_MUTED_CHIP),
-                                hover=_failure_reason(f"the marks the book needs on {as_of} could not be listed",
-                                                      exc, conn))
+            return _chip(f"Marks: {when} \u00b7 missing count n/a", "amber",
+                         _failure_reason(f"the marks the book needs on {as_of} could not be listed", exc, conn))
     needed, missing = needs
-    if not needed:
-        return None
     if not missing:
-        return _header_card(MARKS_TITLE, "marks complete", "header-figure-value",
-                            value_style=_chip_style(_LEVEL_STYLES["GREEN"]),
-                            hover=f"every one of the {needed:,} marks the book needs on {as_of} is on file (official)")
+        return _chip(f"Marks: {when} \u00b7 complete", "green",
+                     f"Latest official close the book uses: {latest[0]}, stamped {latest[1]}. Every one of the "
+                     f"{needed:,} marks the book needs on {as_of} is on file (official).")
     by_type: dict = {}
     for m in missing:
         by_type[m["mark_type"]] = by_type.get(m["mark_type"], 0) + 1
     kinds = ", ".join(f"{n} {t}" for t, n in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0])))
     shown = missing[:_MISSING_MARKS_ON_HOVER]
-    lines = [f"{len(missing):,} of {needed:,} marks the book needs on {as_of} have no official mark ({kinds})."]
+    lines = [f"Latest official close the book uses: {latest[0]}, stamped {latest[1]}.",
+             f"{len(missing):,} of {needed:,} marks the book needs on {as_of} have no official mark ({kinds}):"]
     lines += [f"- {m['instrument_id']} {m['mark_type']} {m['settle_date']}" for m in shown]
     if len(missing) > len(shown):
         lines.append(f"- and {len(missing) - len(shown)} more")
-    lines.append("The Data tab lists each one; the figures above say which trades they leave out.")
-    return _header_card(MARKS_TITLE, f"{len(missing):,} {'mark' if len(missing) == 1 else 'marks'} missing",
-                        "header-figure-value", value_style=_chip_style(_LEVEL_STYLES["AMBER"]),
-                        hover="\n".join(lines))
+    lines.append("The Data tab lists each one; the figures say which trades they leave out.")
+    return _chip(f"Marks: {when} \u00b7 {len(missing):,} missing", "amber", "\n".join(lines))
 
 
 # ------------------------------------------------------------------ the risk chip (Phase B)

@@ -5,8 +5,8 @@ as of 2026-09-18) written to a file in tmp and read as the app reads it.
 What is pinned here is the shell and the identities that must hold whatever the screens look
 like: the app builds and wires without a duplicate id or output, every tab renders on the sample
 without raising, each tab gathers its reasons in one "Data issues" drawer, the P&L tab's per-trade
-figures add up to the header's figure per period, the Book table is grouped by sector with every
-money cell a number or "n/a" with a reason, and no page or layout response is ever cacheable.
+figures add up to the header's figure per period, the Book table's total line equals the header's
+Daily, MTD and LTD to the cent, and no page or layout response is ever cacheable.
 Nothing about a column list, a label or a card list is pinned: that is the screens' own business.
 """
 from __future__ import annotations
@@ -52,13 +52,17 @@ def _text(node) -> str:
     return " ".join(n for n in _walk(node) if isinstance(n, str))
 
 
+DRAWER_TITLES = ("Data issues (", "Not included (", "Notes (")   # the Risk tab's drawer is split in two (2026-09-28)
+
+
 def _drawers(node):
-    """The `formatting.issues_drawer` Details of a tree: a Summary reading "Data issues (N)"."""
+    """The `formatting.issues_drawer` Details of a tree: a Summary reading "Data issues (N)" (the
+    Risk tab: "Not included (N)" and "Notes (N)")."""
     found = []
     for n in _components(node):
         if isinstance(n, html.Details) and isinstance(n.children, list) and n.children:
             first = n.children[0]
-            if isinstance(first, html.Summary) and str(first.children).startswith("Data issues ("):
+            if isinstance(first, html.Summary) and str(first.children).startswith(DRAWER_TITLES):
                 found.append(n)
     return found
 
@@ -93,13 +97,13 @@ def bodies(app, golden_path):
     """Every tab's rendered body on the as-of, keyed by tab key. Trades and Data render through
     their own callbacks (their bodies are built inside them, not by a module-level `render`)."""
     out = {}
-    out["book"], _pending = book.render(AS_OF, golden_path)
+    out["book"], _counts, _style = book.render(AS_OF, golden_path)
     out["curve"] = curve.render(AS_OF, golden_path)
     out["pnl"] = pnl.render(AS_OF, golden_path)
     out["expiries"] = expiries.render(AS_OF, golden_path)
     out["risk"] = risk.render(AS_OF, golden_path)
     out["blotter"] = _callback(app, f"..{blotter.CONTENT_ID}.children")(AS_OF, blotter.SCOPE_ORDER[0])[0]
-    data_outputs = _callback(app, f"..{market_data.BODY_ID}.children")(AS_OF, "USDCNH", 0, None, None, None, AS_OF, None)
+    data_outputs = _callback(app, f"..{market_data.BODY_ID}.children")(AS_OF, "USDCNH", 0, None, None, None, None)
     out["market-data"] = html.Div(list(data_outputs))
     return out
 
@@ -149,22 +153,24 @@ def test_every_tab_gathers_its_reasons_in_one_data_issues_drawer(bodies, golden_
     then absent by design (`formatting.issues_drawer` returns None for no items), which is
     checked against the tab's own issue builder rather than assumed."""
     drawers = _drawers(bodies[key])
-    assert len(drawers) <= 1, f"{key}: {len(drawers)} drawers"
+    assert len(drawers) <= (2 if key == "risk" else 1), f"{key}: {len(drawers)} drawers"
     if key == "blotter":
         from ui.tabs.blotter_pricing import priced_value_book
         conn = _ro(golden_path)
         try:
             df = priced_value_book(conn, AS_OF)[0]
+            # the tab's drawer also names an option with no strike on file (`add_price_units_and_flags`)
+            expected = blotter.total_book_issues(blotter.add_price_units_and_flags(conn, df), AS_OF) is not None
         finally:
             conn.close()
-        expected = blotter.total_book_issues(df, AS_OF) is not None
         assert bool(drawers) == expected
         return
     assert drawers, f"{key}: no Data issues drawer"
-    summary = str(drawers[0].children[0].children)
-    n = int(summary[len("Data issues ("):-1])
-    items = drawers[0].children[1].children
-    assert n == len(items) > 0
+    for drawer in drawers:
+        summary = str(drawer.children[0].children)
+        n = int(summary[summary.index("(") + 1:-1])
+        items = drawer.children[1].children
+        assert n == len(items) > 0
 
 
 # --------------------------------------------------------------------------- (c) P&L tab = header
@@ -208,7 +214,7 @@ def test_the_pnl_tabs_per_trade_figures_add_up_to_the_headers_figure_per_period(
         if entry.get("available"):
             assert value_div.title.splitlines()[0] == header._fmt_usd(sum(_known(views[key].rows["value"].tolist()))), key
         else:
-            assert value_div.children == "n/a" and value_div.title == entry["reason"], key
+            assert value_div.children == header.MISSING and value_div.title == entry["reason"], key
     d5 = views["d5"].entry
     daily_hover = cards["Daily"].children[1].title
     if d5.get("available"):
@@ -219,40 +225,34 @@ def test_the_pnl_tabs_per_trade_figures_add_up_to_the_headers_figure_per_period(
     assert views["ltd"].entry["available"] and _known(views["ltd"].rows["value"].tolist())
 
 
-# --------------------------------------------------------------------------- (d) the Book table
-def test_the_book_table_is_grouped_by_sector_and_every_money_cell_is_a_number_or_na_with_a_reason(golden_path, bodies):
+# --------------------------------------------------------------------------- (d) the Book table = header
+def test_the_book_tables_total_line_equals_the_headers_daily_mtd_and_ltd_to_the_cent(golden_path, bodies):
+    """The identity the Book is built on (2026-09-28): every trade of the as-of book is in exactly
+    one row (a spread position, an outright contract, a trade row, or the settled line), and each
+    row's period figure is `pnl.period_rows`' per-trade figure, the header's own split; so the Book
+    line's Daily, MTD and LTD are the header's, built through the same functions the app uses."""
     conn = _ro(golden_path)
     try:
         data = book.gather(conn, AS_OF)
+        cards = _header_cards(conn)
     finally:
         conn.close()
-    rows = book.book_rows(data["spreads"], data["roots"])
-    assert rows, "the sample book has no spread or outright position"
-    records, tips = book.table_records(rows, data.get("schedule"))
-    assert len(records) == len(tips) == len(rows) + len({r["sector"] for r in rows}) + 1
-    kinds = [r["kind"] for r in records]
-    assert kinds[0] == book.SECTOR and kinds[-1] == book.TOTAL
-    assert set(kinds) == {book.SECTOR, book.ROW, book.TOTAL}
-    # every position row sits under its own sector line, never before one
-    current = None
-    for rec in records:
-        if rec["kind"] == book.SECTOR:
-            current = rec["label"].split(" (excl.")[0]
-        elif rec["kind"] == book.ROW:
-            assert current is not None
-    sectors = {rec["label"].split(" (excl.")[0] for rec in records if rec["kind"] == book.SECTOR}
-    assert {book._sector_label(r["sector"]) for r in rows} == sectors
-    for rec, tip in zip(records, tips):
-        for period in book.PERIODS:
-            cell = rec[period]
-            if isinstance(cell, (int, float)) and not isinstance(cell, bool):
-                assert not math.isnan(cell), (rec["label"], period)
-            else:
-                assert cell == book.NA, (rec["label"], period, cell)
-                assert tip[period]["value"].strip(), (rec["label"], period)      # the reason on hover
-    # the rendered Book tab carries that same table
+    rows = book.book_rows(data)
+    assert rows, "the sample book has no position"
+    ids = [t for r in rows for t in r["trade_ids"]]
+    assert len(ids) == len(set(ids)) == len(data["df"])          # every trade once
+    for key, title in (("daily", "Daily"), ("mtd", "MTD"), ("ltd", "LTD")):
+        total, excluded, _reasons = book.group_total(rows, key)
+        entry = data["periods"][key].entry
+        value_div = cards[title].children[1]
+        if entry.get("available"):
+            assert total == pytest.approx(entry["value"], abs=0.005), key
+            assert value_div.title.splitlines()[0] == header._fmt_usd(total), key
+        else:
+            assert total is None and value_div.children == header.MISSING, key
+    # the rendered Book tab carries the table with its Book line
     table = next(n for n in _components(bodies["book"]) if getattr(n, "id", None) == book.TABLE_ID)
-    assert [r["kind"] for r in table.data] == kinds
+    assert "= header" in _text(table.children[1].children[-1])
 
 
 # --------------------------------------------------------------------------- (e) never a stale page

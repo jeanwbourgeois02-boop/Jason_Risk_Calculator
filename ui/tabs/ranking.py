@@ -31,22 +31,23 @@ _SI_PREFIX = {-24: "y", -21: "z", -18: "a", -15: "f", -12: "p", -9: "n", -6: "\u
 
 # ----------------------------------------------------------------------------- formats
 def amount(decimals: int = 0, nully: str = "", trim: bool = False) -> dict:
-    """Whole units with thousands separators and a negative in parentheses: 1,234 / (1,234).
+    """Whole units with thousands separators and a negative with a minus sign (never parentheses,
+    the display rule of 2026-09-28): 1,234 / -1,234.
     `decimals` > 0 keeps that many; `trim` drops trailing zeros (12.5, not 12.50)."""
-    fmt = Format(precision=decimals, scheme=Scheme.fixed, group=Group.yes, sign=Sign.parantheses, nully=nully)
+    fmt = Format(precision=decimals, scheme=Scheme.fixed, group=Group.yes, sign=Sign.default, nully=nully)
     if trim:
         fmt = fmt.trim(Trim.yes)
     return fmt.to_plotly_json()
 
 
 def amount_short(nully: str = "", digits: int = 3) -> dict:
-    """Money on a summary table in k / M / G to `digits` significant figures, a negative in
-    parentheses: 51,018 -> 51k, 1,650,590 -> 1.65M, -2,400 -> (2.4k), 395 -> 395, 0 -> 0.
+    """Money on a summary table in k / M / G to `digits` significant figures, a negative with a
+    minus sign: 51,018 -> 51k, 1,650,590 -> 1.65M, -2,400 -> -2.4k, 395 -> 395, 0 -> 0.
     The cell stays a number, so the column still ranks numerically; the letters are the
     table's own (d3's SI prefixes: M for a million, G for a billion). Feed the table through
     `whole_units` first: SI would print a stray 0.4 as "400m" (milli). Trade rows keep full
     figures (`amount`); the CSV keeps the raw records."""
-    return (Format(precision=digits, scheme=Scheme.decimal_si_prefix, sign=Sign.parantheses, nully=nully)
+    return (Format(precision=digits, scheme=Scheme.decimal_si_prefix, sign=Sign.default, nully=nully)
             .trim(Trim.yes).to_plotly_json())
 
 

@@ -1,4 +1,5 @@
-"""P&L tab: "Where did the P&L come from?" (UI redesign wave 2, user 2026-09-28).
+"""P&L tab: "Where did the P&L come from?" (UI redesign wave 2, user 2026-09-28; rebuilt in the
+screens tidy, wave 2, the same day).
 
 A read-only attribution of the header's own figures. Every number is one of these, as given:
   - the trade valuations of the screens' shared filled reader,
@@ -6,63 +7,66 @@ A read-only attribution of the header's own figures. Every number is one of thes
   - the header's period rule, `ui.tabs.header._priced_single` / `_priced_diff` over the
     reference close `engine.pnl.reference.resolve_reference` picks on the dates of
     `engine.pnl.ledger.period_reference_dates` (the step back of up to 5 business days, the
-    "excl. N" / "filled N" / "ref <date>" markers), so the tab's total line is the header's
-    figure to the cent;
-  - the spread positions of `engine.spreads.book_spreads` through the same reader (the Book
-    tab's memoised read, `ui.tabs.book._spreads`), with their own period figures;
-  - the Trades tab's former P&L-by-asset-class table (`ui.tabs.blotter.asset_class_pnl_table`,
-    imported), here "By product";
+    "excl. N" / "filled N" / "ref <date>" markers), so the tab's Total line is the header's
+    figure to the cent in every column;
+  - the Book tab's rows (`ui.tabs.book.gather` / `book_rows` / `grouped_rows`): the spread
+    positions of `engine.spreads.book_spreads`, the outright contracts, one row per other open
+    trade and the settled line, named and grouped exactly as the Book names and groups them;
   - the header's LTD chart (`ui.tabs.header._build_chart`, memoised per day on the database's
-    mtime), moved here from the header and built only while its collapsible is open.
+    mtime), first on the tab and open by default.
 
 Per-trade period figures (`period_rows`): for LTD a trade's own `pnl_usd`; for a period the
 difference of its two valuations by exactly the header's rule (`_priced_diff`'s split,
 `engine.pnl.reference.diff_split`): priced at both ends -> LTD(a) - LTD(ref); new since the
 reference close -> its LTD; priced today but not on the reference close -> left out with that
-reason; unpriced today -> n/a with `value_book`'s reason. The groups (by spread, commodity,
-sector, trade) add those known figures up and say "excl. N" otherwise (the display rule of
-CLAUDE.md "Header"); nothing is re-marked, converted or filled here.
+reason; unpriced today -> a dash with `value_book`'s reason. A group adds those known figures up
+and says "excl. N" otherwise (the display rule of CLAUDE.md "Header"); nothing is re-marked,
+converted or filled here.
 
-Layout: the period selector (Daily, 5d, MTD, YTD, LTD; kept in the browser session), then
-the body the callback fills: the period's total with the header's markers and, for LTD, the
-realised (settled, frozen in `realised_pnl`) against the open P&L; the attribution tables (by
-spread position with the outrights and unmatched legs after, by commodity, by sector, by
-product, by trade); the collapsed LTD chart; one "Data issues (N)" drawer. Every table ranks
-(`ui.tabs.ranking`); money on the summary tables is in k / m with the full figure on hover, the
-trade table keeps full figures. The tab has no date picker: it follows the header's as-of and
-re-renders in place on the data revision and on its safety interval. `layout(default_date)`
-and `register_callbacks(app, get_db_path)` are the shell's interface.
+Layout: the title line (the question, the group-by switch: Position, Commodity, Sector, Product,
+Trade; Download CSV), the LTD chart, then one attribution table with the five periods as columns
+(Daily, 5d, MTD, YTD, LTD), its Total line the header's entry for every column, and under it
+Realised and Open for LTD (the value rows' status: settled rows are the ledger's frozen figures);
+one "Data issues (N)" drawer. Money in k / m with the full figure on hover; the Trade view keeps
+full figures and pages. The tab has no date picker: it follows the header's as-of and re-renders
+in place on the data revision and on its safety interval. `layout(default_date)` and
+`register_callbacks(app, get_db_path)` are the shell's interface.
 """
 from __future__ import annotations
 
-import datetime as dt
 import logging
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import dash
 import pandas as pd
-from dash import Input, Output, dash_table, dcc, html
+from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import header
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import about, format_cell, issues_drawer, marker, short_money, tab_link
+from ui.tabs.formatting import (
+    MISSING, about, full_money, issues_drawer, marker, missing_cell, money_cell, sum_known,
+)
 from ui.tabs.header import AS_OF_STORE_ID
+
+log = logging.getLogger(__name__)
 
 BODY_ID = "pnl-body"
 REFRESH_ID = "pnl-refresh"
-PERIOD_ID = "pnl-period"
+GROUP_ID = "pnl-group-by"
+CSV_BUTTON_ID = "pnl-csv"
+DOWNLOAD_ID = "pnl-download"
+TABLE_ID = "pnl-table"
+TRADES_TABLE_ID = "pnl-by-trade-table"
 CHART_DETAILS_ID = "pnl-ltd-details"
 CHART_SUMMARY_ID = f"{CHART_DETAILS_ID}-summary"
 CHART_CONTAINER_ID = "pnl-ltd-chart-container"
 ISSUES_ID = "pnl-issues"
-SPREADS_TABLE_ID = "pnl-by-spread-table"
-COMMODITY_TABLE_ID = "pnl-by-commodity-table"
-SECTOR_TABLE_ID = "pnl-by-sector-table"
-TRADES_TABLE_ID = "pnl-by-trade-table"
+CHART_HEIGHT = 220
 
-NA = "n/a"
+NA = MISSING
 PERIODS = ("daily", "d5", "mtd", "ytd", "ltd")
 PERIOD_TITLES = {"daily": "Daily", "d5": "5d", "mtd": "MTD", "ytd": "YTD", "ltd": "LTD"}
 PERIOD_TIPS = {"daily": "LTD today less LTD at the previous business day's close.",
@@ -70,53 +74,33 @@ PERIOD_TIPS = {"daily": "LTD today less LTD at the previous business day's close
                "mtd": "LTD today less LTD at the last business day of the previous month.",
                "ytd": "LTD today less LTD at the last business day of the previous year.",
                "ltd": "Life to date: every trade's P&L at today's marks, settled trades frozen."}
-DEFAULT_PERIOD = "daily"
+GROUP_POSITION, GROUP_COMMODITY, GROUP_SECTOR, GROUP_PRODUCT, GROUP_TRADE = "position", "commodity", "sector", "product", "trade"
+GROUP_OPTIONS = ((GROUP_POSITION, "Position"), (GROUP_COMMODITY, "Commodity"), (GROUP_SECTOR, "Sector"),
+                 (GROUP_PRODUCT, "Product"), (GROUP_TRADE, "Trade"))
+DEFAULT_GROUP = GROUP_POSITION
 TOTAL_LABEL = "Total"
+QUESTION = "where did the P&L come from"
 _PRODUCT_LABELS = {"FX_SPOT": "FX spot", "FX_FWD": "FX forward", "FX_SWAP": "FX swap", "FUTURE": "Future",
                    "FX_OPTION": "FX option", "CMDTY_OPTION": "Option on future", "EQ_OPTION": "Listed option",
                    "LME_FWD": "LME forward"}
 _STATUS_LABELS = {"OPEN": "Open", "SETTLED": "Settled", "CLOSED": "Closed out"}
-
+LINES_ON_HOVER = 12
 _MONO = {"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
          "padding": "4px 8px", "whiteSpace": "nowrap"}
-_NA_STYLE = {"color": "var(--muted)", "fontStyle": "italic"}
-_TOTAL_STYLE = [{"if": {"filter_query": f"{{label}} = '{TOTAL_LABEL}'"}, "fontWeight": "700",
-                 "borderTop": "2px solid #1f2933"}]
-_CARD = {"background": "var(--card)", "border": "1px solid var(--line)", "borderRadius": "8px",
-         "padding": "10px 14px", "minWidth": "150px"}
-_CARD_TITLE = {"fontSize": "10px", "textTransform": "uppercase", "letterSpacing": ".04em", "color": "var(--muted)"}
-_CARD_VALUE = {"fontSize": "18px", "fontWeight": 700, "fontVariantNumeric": "tabular-nums"}
 
-TAB_ABOUT = ("Where did the P&L come from? The header's figure for the chosen period, attributed by spread "
-             "position, commodity, sector, product and trade, each group the sum of its trades' figures by the "
-             "header's own rule (priced trades only, a period over the trades priced at both ends, the reference "
-             "close stepped back when it has no value); realised against open for LTD; the LTD line since the "
-             "first trade. Nothing is re-marked here.")
-SPREADS_ABOUT = ("One row per spread position (spreads-engine: the same spread put on over several trade dates is "
-                 "one), its legs on hover, then the outright contracts (futures in no spread) and the unmatched "
-                 "legs of the spreads. The figure is the position's trades' P&L summed by spreads-engine against "
-                 "the header's reference close; a position with a leg unpriced is n/a with the leg's reason, "
-                 "never a partial sum. FX hedges, LME forwards and options on futures are not spreads: they are "
-                 "in the tables below and on the Trades tab. Money in k / m, the full figure on hover.")
-GROUP_ABOUT = ("The trades' period figures added up per group: priced trades only, and for a period only the "
-               "trades priced at both ends (a trade new since the reference close counts in full, as trading "
-               "P&L). A group that leaves trades out says so (excl. N, the trades and reasons on hover); a group "
-               "with nothing priced is n/a. The Total is the header's figure. Money in k / m, the full figure on "
-               "hover.")
-TRADES_ABOUT = ("Every trade on the book at the as-of date with its figure for the chosen period, full figures: "
-                "LTD is the trade's own P&L at the day's marks (frozen once settled); a period is its LTD less "
-                "its LTD at the reference close, by the header's rule. A trade with no figure says why on hover.")
-REALISED_ABOUT = ("Realised = the settled trades, frozen by the ledger (realised_pnl) and never marked again; "
-                  "open = the trades still marked (a closed-out option group is valued at its closing fill until "
-                  "expiry and counts as open here). Each is the known figures summed, excl. N otherwise; their "
-                  "sum is the header's LTD.")
+TAB_ABOUT = ("Where did the P&L come from? The header's Daily, 5d, MTD, YTD and LTD attributed by position (as the "
+             "Book names and groups them), commodity, sector, product or trade, each line the sum of its trades' "
+             "figures by the header's own rule (priced trades only, a period over the trades priced at both ends, the "
+             "reference close stepped back when it has no value); the Total line is the header; realised against open "
+             "for LTD; the LTD line since the first trade. Nothing is re-marked here.")
+COLUMN_TIPS = {"label": "The position, group or trade; its trades and, for a spread, its unmatched legs on hover.",
+               "trades": "How many trades of the as-of book are in the line."}
+REALISED_ABOUT = ("Realised = the settled trades, frozen by the ledger (realised_pnl) and never marked again; open = the "
+                  "trades still marked (a closed-out option group is valued at its closing fill until expiry and counts "
+                  "as open here). Each is the known LTD figures summed, excl. N otherwise; their sum is the header's LTD.")
 
 
 # --------------------------------------------------------------------------- small helpers
-def _tip(text: str) -> dict:
-    return {"value": text, "type": "text"}
-
-
 def _num(value: Any) -> Optional[float]:
     v = rk.value(value)
     return v if isinstance(v, float) else None
@@ -126,28 +110,12 @@ def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
-def _date_words(iso: Optional[str]) -> str:
-    if not iso:
-        return "no as-of date"
-    try:
-        d = dt.date.fromisoformat(iso)
-    except ValueError:
-        return iso
-    return f"{d:%a} {d.day} {d:%b %Y}"
-
-
 def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
 
 
 def full_usd(v: float) -> str:
-    return f"{format_cell(v)} USD"
-
-
-def _sum_known(values: Sequence[Optional[float]]) -> Tuple[Optional[float], int]:
-    """(the known figures summed, how many were None); None when none is known."""
-    known = [v for v in values if v is not None and v == v]
-    return (float(sum(known)) if known else None), len(values) - len(known)
+    return full_money(v)
 
 
 # --------------------------------------------------------------------------- the period
@@ -258,24 +226,6 @@ def period_rows(conn: sqlite3.Connection, as_of: str, key: str, df_today: pd.Dat
                       sorted(split.blocked_ids))
 
 
-# --------------------------------------------------------------------------- 1. the total and realised / open
-def _entry_card(title: str, entry: dict, hover: str = "") -> html.Div:
-    """One figure card: the value in k / m with the full figure on hover, its markers beside
-    it, n/a with the reason when unavailable."""
-    if not entry.get("available"):
-        value = html.Span(NA, style={**_CARD_VALUE, **_NA_STYLE, "cursor": "help"},
-                          title=str(entry.get("reason") or "no figure"))
-        markers: List[Any] = []
-    else:
-        v = float(entry["value"])
-        colour = "var(--pos)" if v > 0 else "var(--neg)" if v < 0 else "var(--text)"
-        value = html.Span(short_money(v, "$"), style={**_CARD_VALUE, "color": colour}, title=full_usd(v))
-        markers = [marker(short, sentence) for short, sentence, *_rest in header._entry_markers(entry)]
-    return html.Div(style=_CARD, title=hover or None, children=[
-        html.Div(title, style=_CARD_TITLE), html.Div([value, *[m for m in markers if m is not None]],
-                                                     style={"display": "flex", "gap": "8px", "alignItems": "baseline"})])
-
-
 def realised_entries(df_today: pd.DataFrame) -> Dict[str, dict]:
     """{'settled', 'open'}: each the known LTD figures of those trades summed (the header's
     `_priced_single` over the status subset), so the two add to the header's LTD."""
@@ -288,136 +238,12 @@ def realised_entries(df_today: pd.DataFrame) -> Dict[str, dict]:
     return out
 
 
-def summary_section(view: PeriodView, df_today: pd.DataFrame, as_of: str) -> html.Div:
-    """The period's total (the header's figure) and, for LTD, realised against open."""
-    ref = (f"measured from the {view.ref_used} close" + (f" (stepped back from {view.ref_iso})"
-                                                         if view.ref_used != view.ref_iso else "")
-           if view.ref_iso else f"every trade at the {as_of} marks")
-    cards = [_entry_card(f"{view.title} P&L", view.entry, hover=f"{PERIOD_TIPS[view.key]} {ref[0].upper()}{ref[1:]}.")]
-    if view.key == "ltd":
-        parts = realised_entries(df_today)
-        cards.append(_entry_card(f"Realised (settled, {parts['settled']['count']})", parts["settled"], REALISED_ABOUT))
-        cards.append(_entry_card(f"Open ({parts['open']['count']})", parts["open"], REALISED_ABOUT))
-    return html.Div(className="section", children=[
-        html.Div(style={"display": "flex", "flexWrap": "wrap", "gap": "12px", "alignItems": "stretch"}, children=cards),
-        html.Div(className="meta-line", style={"marginTop": "8px"}, children=[
-            html.Span(f"As of {_date_words(as_of)}; {ref}.")])])
-
-
-# --------------------------------------------------------------------------- 2. by spread position
-def _period_entry(figures: dict, excluded: dict, reasons: dict, notes: dict, key: str) -> Tuple[Optional[float], str, str]:
-    """(value, the marker's short text, hover) of one spread's period from spreads-engine's dicts."""
-    v = _num((figures or {}).get(key))
-    n_left = int((excluded or {}).get(key) or 0)
-    why = str((reasons or {}).get(key) or "")
-    note = str((notes or {}).get(key) or "")
-    if v is None:
-        return None, NA, why or "spreads-engine gave no figure for this period"
-    short = f"excl. {n_left}" if n_left else ""
-    return v, short, header._joined(f"{full_usd(v)}", f"excludes {n_left} entries: {why}" if n_left else "", note)
-
-
-def spread_records(spreads: Optional[dict], key: str, roots: Dict[str, Any]) -> Tuple[List[dict], List[dict]]:
-    """The spread positions (open, then closed), then the outright contracts, then the unmatched
-    legs, each with the period figure spreads-engine gives it; a leg's contract is named by
-    `ui.tabs.book.contract_label`."""
-    from ui.tabs.book import contract_label, position_size_text
-    records, tips = [], []
-    if not spreads:
-        return records, tips
-    positions = list(spreads.get("positions") or [])
-    positions.sort(key=lambda p: (0 if p.get("status") == "open" else 1, str(p.get("name") or "")))
-    for p in positions:
-        legs = p.get("legs") or []
-        v, short, hover = _period_entry(p.get("pnl_usd"), p.get("pnl_excluded"), p.get("pnl_reasons"),
-                                        p.get("pnl_notes"), key)
-        size, size_hover = position_size_text(p)
-        left = [e for e in (p.get("leftover") or []) if _num(e.get("lots"))]
-        unmatched = "; ".join(f"{str(e.get('root_id') or '').split(':')[-1]} {_num(e.get('lots')):+g} lot(s)" for e in left)
-        rec = {"kind": "spread", "label": str(p.get("name") or p.get("position_id") or ""),
-               "what": "Spread" if p.get("status") == "open" else "Spread (closed)",
-               "size": size, "legs": ", ".join(contract_label(leg.get("instrument_id")) for leg in legs),
-               "value": v, "note": short if v is not None else "",
-               "unmatched": unmatched}
-        tip = {"value": _tip(hover), "size": _tip(size_hover),
-               "legs": _tip("; ".join(f"{contract_label(leg.get('instrument_id'))}: {_num(leg.get('lots')):+g} lot(s)"
-                                      + (f" ({leg['reason']})" if leg.get("reason") else "") for leg in legs) or "no legs"),
-               "label": _tip(f"trades {', '.join(p.get('trade_ids') or [])}; entries {', '.join(p.get('spread_ids') or [])}")}
-        if short and v is not None:
-            tip["note"] = _tip(hover)
-        if unmatched:
-            tip["unmatched"] = _tip("the open lots the spread's ratio does not match: an outright position of its own")
-        records.append(rec)
-        tips.append(tip)
-    by_contract: Dict[str, List[dict]] = {}
-    for o in spreads.get("outrights") or []:
-        by_contract.setdefault(str(o.get("instrument_id") or ""), []).append(o)
-    for inst, trades in by_contract.items():
-        known = [_num((t.get("pnl_usd") or {}).get(key)) for t in trades]
-        value, n_left = _sum_known(known)
-        why = "; ".join(f"{t.get('trade_id')}: {(t.get('pnl_reasons') or {}).get(key) or 'no figure'}"
-                        for t, v in zip(trades, known) if v is None)
-        root_id = str(trades[0].get("root_id") or "")
-        name = str(getattr(roots.get(root_id), "name", "") or root_id)
-        lots = [_num(t.get("lots")) for t in trades if str(t.get("status") or "open") == "open"]
-        open_lots = sum(v for v in lots if v is not None)
-        rec = {"kind": "outright", "label": f"{contract_label(inst)} outright", "what": "Outright",
-               "size": f"{open_lots:+g} lots" if lots else "settled", "legs": name, "value": value,
-               "note": (f"excl. {n_left}" if n_left and value is not None else ""), "unmatched": ""}
-        tip = {"label": _tip(f"{name}: {_plural(len(trades), 'trade')} in no spread ("
-                             + "; ".join(dict.fromkeys(str(t.get("why_outright") or "no spread fits") for t in trades)) + ")"),
-               "value": _tip(full_usd(value) + (f"; excludes {n_left}: {why}" if n_left else "") if value is not None
-                             else why or "no figure")}
-        if rec["note"]:
-            tip["note"] = _tip(f"excludes {n_left} of {len(trades)} trades: {why}")
-        records.append(rec)
-        tips.append(tip)
-    return records, tips
-
-
-def spreads_section(spreads: Optional[dict], view: PeriodView, roots: Dict[str, Any], error: str = "") -> html.Div:
-    heading = about(f"By spread position ({view.title})", SPREADS_ABOUT)
-    if error:
-        return html.Div(className="section", children=[heading, marker("n/a", error)])
-    records, tips = spread_records(spreads, view.key, roots)
-    if not records:
-        return html.Div(className="section", children=[
-            heading, html.P("No futures spread or outright on the book at this date.", className="section-kicker")])
-    value, n_left = _sum_known([r["value"] for r in records])
-    footer = {"kind": "total", "label": TOTAL_LABEL, "what": "", "size": "", "legs": f"{len(records)} lines",
-              "value": value, "note": f"excl. {n_left}" if n_left and value is not None else "", "unmatched": ""}
-    footer_tip = {"value": _tip(full_usd(value) + " (the spread positions and outrights with a figure summed)"
-                                if value is not None else "no line has a figure"),
-                  "note": _tip(f"{n_left} line(s) with no figure left out") if n_left else _tip("")}
-    for rec, tip in zip(records, tips):
-        if isinstance(rec.get("value"), float) and "value" not in tip:
-            tip["value"] = _tip(full_usd(rec["value"]))
-    records = rk.whole_units(records, ("value",))
-    footer = rk.whole_units([footer], ("value",))[0]
-    table = dash_table.DataTable(
-        id=SPREADS_TABLE_ID,
-        columns=[rk.text("Position", "label"), rk.text("Kind", "what"), rk.text("Size", "size"),
-                 rk.text("Legs", "legs"), rk.numeric(f"{view.title} P&L", "value", rk.amount_short(nully=NA)),
-                 rk.text("", "note"), rk.text("Unmatched legs", "unmatched")],
-        data=records, tooltip_data=tips, tooltip_delay=0, tooltip_duration=None,
-        **rk.sortable(SPREADS_TABLE_ID),
-        style_table={"overflowX": "auto"}, style_cell=_MONO,
-        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"}
-                                for c in ("label", "what", "size", "legs", "note", "unmatched")]
-                               + [{"if": {"column_id": "note"}, "color": "var(--muted)"}],
-        style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
-        style_data_conditional=rk.sign_styles(["value"], bold=True, nil=_NA_STYLE)
-                               + [{"if": {"filter_query": "{kind} = 'outright'"}, "color": "var(--muted)"}],
-    )
-    return html.Div(className="section", children=[
-        heading, rk.with_footer(table, [footer], footer_style=_TOTAL_STYLE, footer_tooltips=[footer_tip])])
-
-
-# --------------------------------------------------------------------------- 3. by commodity / sector
-def _labelled(conn: sqlite3.Connection, rows: pd.DataFrame) -> pd.DataFrame:
-    """The per-trade rows with the Trades tab's descriptive columns (commodity, sector,
-    exchange), looked up by `ui.tabs.blotter.add_instrument_fields`, never computed."""
+# --------------------------------------------------------------------------- gathering
+def _labelled(conn: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
+    """The trades with the Trades tab's descriptive columns (commodity, sector, exchange), looked
+    up by `ui.tabs.blotter.add_instrument_fields`, never computed."""
     from ui.tabs.blotter import add_instrument_fields
+    rows = df[["trade_id", "instrument_id", "product", "status", "trade_date"]].copy()
     if rows.empty:
         for col in ("commodity", "sector", "exchange"):
             rows[col] = pd.Series(dtype=object)
@@ -425,130 +251,295 @@ def _labelled(conn: sqlite3.Connection, rows: pd.DataFrame) -> pd.DataFrame:
     return add_instrument_fields(conn, rows)
 
 
-def group_records(rows: pd.DataFrame, by: Sequence[str], entry: dict) -> Tuple[List[dict], List[dict], dict, dict]:
-    """(records, tooltips, footer, footer tooltip): the trades' period figures summed per
-    group, in |value| order; the footer is the header's `entry`."""
+def gather(conn: sqlite3.Connection, as_of: str) -> dict:
+    """The Book tab's data (its rows, its Daily / MTD / LTD per trade, the spreads) plus the 5d
+    and YTD per-trade figures and the trades' descriptive fields, in one pricing snapshot."""
+    from ui.tabs import book
+    from ui.tabs.blotter_pricing import pricing_snapshot
+    with pricing_snapshot(conn, "P&L tab"):
+        data = book.gather(conn, as_of)
+        for key in ("d5", "ytd"):
+            if key in data["periods"]:
+                continue
+            try:
+                data["periods"][key] = period_rows(conn, as_of, key, data["df"])
+            except Exception as exc:  # noqa: BLE001 -- the column is then dashes with the reason
+                log.exception("P&L tab: %s figures failed for %s", key, as_of)
+                data["periods_error"] = data.get("periods_error") or f"the {PERIOD_TITLES[key]} figures could not be built ({type(exc).__name__}: {exc})"
+        try:
+            data["labelled"] = _labelled(conn, data["df"])
+        except Exception as exc:  # noqa: BLE001
+            log.exception("P&L tab: instrument fields failed for %s", as_of)
+            data["labelled"], data["labelled_error"] = None, f"the commodity and sector of each trade could not be read ({type(exc).__name__}: {exc})"
+    return data
+
+
+# --------------------------------------------------------------------------- the lines
+def _period_of(data: dict, key: str, trade_ids: Sequence[str]) -> Tuple[Optional[float], int, List[str], str]:
+    """(value, excluded, reasons, note) of a set of trades for a period (the Book's own reading of
+    `period_rows`: the known figures summed, display)."""
+    from ui.tabs.book import _period_of as book_period_of
+    return book_period_of(data, key, trade_ids)
+
+
+def _five(data: dict, trade_ids: Sequence[str]) -> Dict[str, Tuple[Optional[float], int, List[str], str]]:
+    return {key: _period_of(data, key, trade_ids) for key in PERIODS}
+
+
+def _leftover_words(data: dict, row: dict) -> str:
+    """A spread row's unmatched legs, for its hover ('unmatched legs: CLF27 +2 lots')."""
+    if row.get("kind") != "spread":
+        return ""
+    result = data.get("spreads") or {}
+    p = next((p for p in result.get("positions") or [] if str(p.get("position_id") or p.get("name")) == row["id"]), None)
+    left = [e for e in ((p or {}).get("leftover") or []) if _num(e.get("lots"))]
+    if not left:
+        return ""
+    return "unmatched legs (the open lots the spread's ratio does not match, an outright of their own): " + "; ".join(
+        f"{str(e.get('root_id') or '').split(':')[-1]} {_num(e.get('lots')):+g} lot(s)" for e in left)
+
+
+def position_lines(data: dict) -> List[Tuple[str, List[dict]]]:
+    """[(group, lines)] as the Book groups its rows by instrument: the futures (spread positions
+    and outrights), the options on futures, the LME forwards, the FX hedges, Other, the settled
+    line; each line with its five period figures."""
+    from ui.tabs import book
+    rows = book.book_rows(data)
+    out = []
+    for label, members in book.grouped_rows(rows, book.GROUP_INSTRUMENT):
+        lines = []
+        for r in members:
+            hover = "; ".join(x for x in (r["name_hover"].replace(" Click for its trades.", "").replace(
+                " Click for its entries and legs.", "").replace(" Click for the trade.", "").replace(" Click for the list.", ""),
+                                          _leftover_words(data, r)) if x)
+            lines.append({"id": r["id"], "label": r["name"], "hover": hover, "trades": len(r["trade_ids"]),
+                          "trade_ids": r["trade_ids"], "five": _five(data, r["trade_ids"])})
+        out.append((label, lines))
+    return out
+
+
+def group_lines(data: dict, by: str) -> List[Tuple[str, List[dict]]]:
+    """One group of lines: the trades' five period figures summed per commodity, sector or
+    product (the Trades tab's descriptive fields), largest |Daily| first."""
+    df = data.get("labelled")
+    if df is None or df.empty:
+        return []
+    if by == GROUP_PRODUCT:
+        keys = [_PRODUCT_LABELS.get(str(p), str(p).replace("_", " ").capitalize()) for p in df["product"]]
+    else:
+        keys = [str(v or "") or ("Other" if by == GROUP_SECTOR else "no commodity") for v in df[by]]
+    if by == GROUP_SECTOR:
+        keys = [k.replace("_", " ").capitalize() for k in keys]
+    groups: Dict[str, List[str]] = {}
+    for k, tid in zip(keys, df["trade_id"]):
+        groups.setdefault(k, []).append(str(tid))
+    lines = []
+    for label, tids in groups.items():
+        lines.append({"id": f"{by}-{label}", "label": label, "hover": f"{_plural(len(tids), 'trade')}: {', '.join(tids[:LINES_ON_HOVER])}"
+                      + (f" and {len(tids) - LINES_ON_HOVER} more" if len(tids) > LINES_ON_HOVER else ""),
+                      "trades": len(tids), "trade_ids": tids, "five": _five(data, tids)})
+    lines.sort(key=lambda ln: (ln["five"]["daily"][0] is None, -abs(ln["five"]["daily"][0] or 0.0)))
+    return [("", lines)]
+
+
+# --------------------------------------------------------------------------- the table
+def _money_td(value: Optional[float], excluded: int, reasons: Sequence[str], note: str = "", bold: bool = False) -> html.Td:
+    hover_parts = []
+    if excluded:
+        hover_parts.append(f"excludes {excluded}: " + "; ".join(reasons[:LINES_ON_HOVER])
+                           + (f"; and {len(reasons) - LINES_ON_HOVER} more" if len(reasons) > LINES_ON_HOVER else ""))
+    if note:
+        hover_parts.append(note)
+    if value is None:
+        return html.Td(missing_cell("; ".join(reasons[:LINES_ON_HOVER]) or "no figure"))
+    children: List[Any] = [money_cell(value, hover="\n".join(hover_parts))]
+    if excluded:
+        children.append(html.Span(f"excl. {excluded}", className="marker", title="\n".join(hover_parts)))
+    return html.Td(children, style={"fontWeight": 700} if bold else None)
+
+
+def _entry_td(entry: dict, bold: bool = True) -> html.Td:
+    """The header's own entry as a cell: its value with its markers, or a dash with its reason."""
+    if not entry.get("available"):
+        return html.Td(missing_cell(str(entry.get("reason") or "no figure")))
+    v = float(entry["value"])
+    children: List[Any] = [money_cell(v)]
+    for short, sentence, *_rest in header._entry_markers(entry):
+        m = marker(short, sentence)
+        if m is not None:
+            children.append(m)
+    return html.Td(children, style={"fontWeight": 700} if bold else None)
+
+
+def _head(by: str) -> html.Thead:
+    cells = [html.Th("Position" if by == GROUP_POSITION else dict(GROUP_OPTIONS)[by], className="l", title=COLUMN_TIPS["label"]),
+             html.Th("Trades", title=COLUMN_TIPS["trades"])]
+    cells += [html.Th(PERIOD_TITLES[k], title=PERIOD_TIPS[k]) for k in PERIODS]
+    return html.Thead(html.Tr(cells))
+
+
+def line_tr(line: dict) -> html.Tr:
+    cells: List[Any] = [html.Td(line["label"], className="l book-name", title=line["hover"] or None),
+                        html.Td(str(line["trades"]), className="pnl-count")]
+    for key in PERIODS:
+        value, excluded, reasons, note = line["five"][key]
+        cells.append(_money_td(value, excluded, reasons, note))
+    return html.Tr(cells, className="pnl-row")
+
+
+def group_tr(label: str, lines: Sequence[dict]) -> html.Tr:
+    cells: List[Any] = [html.Td(label, className="l", title=_plural(len(lines), "line")),
+                        html.Td(str(sum(ln["trades"] for ln in lines)), className="pnl-count")]
+    for key in PERIODS:
+        pairs = [(ln["five"][key][0], f"{ln['label']}: {'; '.join(ln['five'][key][2]) or 'no figure'}") for ln in lines]
+        total, excluded, reasons = sum_known(pairs)
+        inner = sum(ln["five"][key][1] for ln in lines if ln["five"][key][0] is not None)
+        for ln in lines:
+            if ln["five"][key][0] is not None and ln["five"][key][1]:
+                reasons.append(f"{ln['label']}: {'; '.join(ln['five'][key][2])}")
+        cells.append(_money_td(total, excluded + inner, reasons))
+    return html.Tr(cells, className="book-group")
+
+
+def total_tr(data: dict, n_trades: int) -> html.Tr:
+    cells: List[Any] = [html.Td([TOTAL_LABEL, html.Span("= header", className="book-note")], className="l",
+                                title="The header's own figure for each period: every trade of the as-of book is in one "
+                                      "line above, the known figures summed, what is left out named."),
+                        html.Td(str(n_trades), className="pnl-count")]
+    for key in PERIODS:
+        view = (data.get("periods") or {}).get(key)
+        if view is None:
+            cells.append(html.Td(missing_cell(data.get("periods_error") or f"the {PERIOD_TITLES[key]} figures could not be built")))
+        else:
+            cells.append(_entry_td(view.entry))
+    return html.Tr(cells, className="book-total")
+
+
+def realised_trs(data: dict) -> List[html.Tr]:
+    """Two lines under the total: Realised (settled) and Open, for LTD; the other columns empty."""
+    parts = realised_entries(data["df"])
+    out = []
+    for key, label in (("settled", "Realised (settled)"), ("open", "Open")):
+        entry = parts[key]
+        cells: List[Any] = [html.Td(label, className="l", title=REALISED_ABOUT), html.Td(str(entry["count"]), className="pnl-count")]
+        cells += [html.Td("") for _k in PERIODS[:-1]]
+        cells.append(_entry_td(entry, bold=False))
+        out.append(html.Tr(cells, className="pnl-realised"))
+    return out
+
+
+def attribution_table(data: dict, by: str) -> html.Div:
+    groups = position_lines(data) if by == GROUP_POSITION else group_lines(data, by)
+    body: List[Any] = []
+    for label, lines in groups:
+        if label:
+            body.append(group_tr(label, lines))
+        body.extend(line_tr(ln) for ln in lines)
+    n_trades = int(len(data["df"])) if data.get("df") is not None else 0
+    body.append(total_tr(data, n_trades))
+    body.extend(realised_trs(data))
+    return html.Div(className="book-card", children=[html.Table([_head(by), html.Tbody(body)], id=TABLE_ID,
+                                                                className="book-table pnl-table")])
+
+
+def trade_records(data: dict) -> Tuple[List[dict], List[dict]]:
+    """One record per trade at full figures for every period, its reasons and notes on hover."""
+    df = data.get("labelled")
+    if df is None:
+        df = data["df"][["trade_id", "instrument_id", "product", "status", "trade_date"]].copy()
+        df["commodity"] = ""
+    views = data.get("periods") or {}
+    values = {key: dict(zip(views[key].rows["trade_id"], views[key].rows["value"])) if key in views else {} for key in PERIODS}
+    reasons = {key: dict(zip(views[key].rows["trade_id"], views[key].rows["reason"])) if key in views else {} for key in PERIODS}
+    notes = {key: dict(zip(views[key].rows["trade_id"], views[key].rows["note"])) if key in views else {} for key in PERIODS}
     records, tips = [], []
-    if rows.empty:
-        return records, tips, {}, {}
-    for keys, g in rows.groupby(list(by), sort=False, dropna=False):
-        keys = keys if isinstance(keys, tuple) else (keys,)
-        values = [(_num(v)) for v in g["value"]]
-        value, n_left = _sum_known(values)
-        left = [(t, r) for t, r, v in zip(g["trade_id"], g["reason"], values) if v is None]
-        rec = {"label": " / ".join(str(k or "") for k in keys), "trades": int(len(g)), "value": value,
-               "note": f"excl. {n_left}" if n_left and value is not None else ""}
-        why = "; ".join(f"{t}: {r or 'no figure'}" for t, r in left[:6]) + (f"; and {len(left) - 6} more" if len(left) > 6 else "")
-        tip = {"value": _tip(full_usd(value) + (f"; excludes {n_left} of {len(g)}: {why}" if n_left else "")
-                             if value is not None else f"no trade of this group has a figure: {why}")}
-        if rec["note"]:
-            tip["note"] = _tip(f"excludes {n_left} of {len(g)} trades: {why}")
-        records.append(rec)
-        tips.append(tip)
-    records_tips = sorted(zip(records, tips), key=lambda rt: -abs(rt[0]["value"]) if rt[0]["value"] is not None else 1.0)
-    records, tips = [r for r, _ in records_tips], [t for _, t in records_tips]
-    footer = {"label": TOTAL_LABEL, "trades": int(len(rows)),
-              "value": float(entry["value"]) if entry.get("available") else None,
-              "note": " ".join(short for short, _s, *_r in header._entry_markers(entry)) if entry.get("available") else ""}
-    footer_tip = {"value": _tip(full_usd(footer["value"]) + " (the header's figure)" if footer["value"] is not None
-                                else str(entry.get("reason") or "no figure")),
-                  "note": _tip("; ".join(sentence for _s, sentence, *_r in header._entry_markers(entry)))}
-    return records, tips, footer, footer_tip
-
-
-def group_section(title: str, table_id: str, rows: pd.DataFrame, by: Sequence[str], view: PeriodView,
-                  label: str) -> html.Div:
-    heading = about(f"{title} ({view.title})", GROUP_ABOUT)
-    records, tips, footer, footer_tip = group_records(rows, by, view.entry)
-    if not records:
-        return html.Div(className="section", children=[heading, html.P("No trades on the book at this date.",
-                                                                       className="section-kicker")])
-    records = rk.whole_units(records, ("value",))
-    footer = rk.whole_units([footer], ("value",))[0]
-    table = dash_table.DataTable(
-        id=table_id,
-        columns=[rk.text(label, "label"), rk.numeric("Trades", "trades", rk.count()),
-                 rk.numeric(f"{view.title} P&L", "value", rk.amount_short(nully=NA)), rk.text("", "note")],
-        data=records, tooltip_data=tips, tooltip_delay=0, tooltip_duration=None,
-        **rk.sortable(table_id),
-        style_table={"overflowX": "auto"}, style_cell=_MONO,
-        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("label", "note")]
-                               + [{"if": {"column_id": "note"}, "color": "var(--muted)"}],
-        style_header={"fontWeight": "bold"},
-        style_data_conditional=rk.sign_styles(["value"], bold=True, nil=_NA_STYLE),
-    )
-    return html.Div(className="section", children=[
-        heading, rk.with_footer(table, [footer], footer_style=_TOTAL_STYLE, footer_tooltips=[footer_tip])])
-
-
-# --------------------------------------------------------------------------- 4. by product (the Trades tab's table)
-def product_section(conn: sqlite3.Connection, as_of: str, df_today: pd.DataFrame) -> html.Div:
-    """The P&L by asset class as the Trades tab showed it (`ui.tabs.blotter.asset_class_pnl_table`,
-    every period across), here under "By product"."""
-    from ui.tabs.blotter import asset_class_pnl_table
-    if df_today.empty:
-        return html.Div(className="section", children=[about("By product", None),
-                                                       html.P("No trades on the book at this date.", className="section-kicker")])
-    section = asset_class_pnl_table(conn, as_of, df_today)
-    for child in section.children or []:   # the Trades tab's title, renamed for this screen
-        if isinstance(child, html.H4) and "about-title" in str(getattr(child, "className", "")):
-            if isinstance(child.children, list) and child.children:
-                child.children[0] = "By product (every period)"
-            else:
-                child.children = "By product (every period)"
-    return section
-
-
-# --------------------------------------------------------------------------- 5. by trade
-def trade_records(rows: pd.DataFrame) -> Tuple[List[dict], List[dict]]:
-    records, tips = [], []
-    for r in rows.itertuples(index=False):
-        v = _num(r.value)
-        rec = {"trade_id": str(r.trade_id), "instrument_id": str(r.instrument_id),
-               "commodity": str(getattr(r, "commodity", "") or ""),
+    for r in df.itertuples(index=False):
+        tid = str(r.trade_id)
+        rec = {"trade_id": tid, "instrument_id": str(r.instrument_id), "commodity": str(getattr(r, "commodity", "") or ""),
                "product": _PRODUCT_LABELS.get(str(r.product), str(r.product)),
-               "status": _STATUS_LABELS.get(str(r.status), str(r.status)), "trade_date": str(r.trade_date),
-               "value": v, "note": ("filled" if "no price on" in str(r.note or "") else "new" if "new since" in str(r.note or "") else "")}
-        tip = {}
-        if v is None:
-            tip["value"] = _tip(str(r.reason or "no figure"))
-        elif r.note:
-            tip["value"] = _tip(str(r.note))
-            tip["note"] = _tip(str(r.note))
+               "status": _STATUS_LABELS.get(str(r.status), str(r.status)), "trade_date": str(r.trade_date)}
+        tip: Dict[str, dict] = {}
+        for key in PERIODS:
+            v = _num(values[key].get(tid))
+            rec[key] = v if v is not None else NA
+            why, note = str(reasons[key].get(tid) or ""), str(notes[key].get(tid) or "")
+            if v is None:
+                tip[key] = {"value": why or (data.get("periods_error") or "no figure"), "type": "text"}
+            elif note:
+                tip[key] = {"value": note, "type": "text"}
         records.append(rec)
         tips.append(tip)
     return records, tips
 
 
-def trades_section(rows: pd.DataFrame, view: PeriodView) -> html.Div:
-    heading = about(f"By trade ({view.title})", TRADES_ABOUT)
-    records, tips = trade_records(rows)
+def trades_table(data: dict) -> html.Div:
+    records, tips = trade_records(data)
     if not records:
-        return html.Div(className="section", children=[heading, html.P("No trades on the book at this date.",
-                                                                       className="section-kicker")])
+        return message_box("No trades on the book at this date.")
+    columns = [rk.text("Trade", "trade_id"), rk.text("Instrument", "instrument_id"), rk.text("Commodity / pair", "commodity"),
+               rk.text("Product", "product"), rk.text("Status", "status"), rk.text("Traded", "trade_date")]
+    columns += [rk.numeric(PERIOD_TITLES[k], k, rk.amount(nully=NA)) for k in PERIODS]
     table = dash_table.DataTable(
-        id=TRADES_TABLE_ID,
-        columns=[rk.text("Trade", "trade_id"), rk.text("Instrument", "instrument_id"), rk.text("Commodity / pair", "commodity"),
-                 rk.text("Product", "product"), rk.text("Status", "status"), rk.text("Traded", "trade_date"),
-                 rk.numeric(f"{view.title} P&L (USD)", "value", rk.amount(nully=NA)), rk.text("", "note")],
-        data=records, tooltip_data=tips, tooltip_delay=0, tooltip_duration=None,
-        **rk.sortable(TRADES_TABLE_ID),
-        page_action="native", page_size=25,
+        id=TRADES_TABLE_ID, columns=columns, data=records, tooltip_data=tips, tooltip_delay=0, tooltip_duration=None,
+        **rk.sortable(TRADES_TABLE_ID), page_action="native", page_size=25,
         style_table={"overflowX": "auto"}, style_cell=_MONO,
         style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"}
-                                for c in ("trade_id", "instrument_id", "commodity", "product", "status", "trade_date", "note")]
-                               + [{"if": {"column_id": "note"}, "color": "var(--muted)"}],
+                                for c in ("trade_id", "instrument_id", "commodity", "product", "status", "trade_date")],
         style_header={"fontWeight": "bold"},
-        style_data_conditional=rk.sign_styles(["value"], nil=_NA_STYLE),
+        style_data_conditional=rk.sign_styles(list(PERIODS), nil={"color": "#9ca3af"}),
     )
-    return html.Div(className="section", children=[heading, table])
+    n_trades = int(len(data["df"]))
+    total = html.Table([_head(GROUP_TRADE), html.Tbody([total_tr(data, n_trades), *realised_trs(data)])],
+                       className="book-table pnl-table")
+    return html.Div([table, html.Div(className="book-card", style={"marginTop": "8px"}, children=[total])])
 
 
-# --------------------------------------------------------------------------- 6. the LTD chart
+# --------------------------------------------------------------------------- data issues
+def issue_items(data: dict) -> List[Any]:
+    items: List[Any] = []
+    for key in ("periods_error", "spreads_error", "labelled_error"):
+        if data.get(key):
+            items.append(("P&L", data[key]))
+    views = data.get("periods") or {}
+    for key in PERIODS:
+        view = views.get(key)
+        if view is not None and not view.entry.get("available"):
+            items.append((PERIOD_TITLES[key], str(view.entry.get("reason") or "no figure")))
+    df = data.get("df")
+    if df is not None and not df.empty:
+        for tid in df["trade_id"]:
+            missing, why = [], ""
+            for key in PERIODS:
+                view = views.get(key)
+                if view is None or view.rows.empty:
+                    continue
+                sub = view.rows[view.rows["trade_id"] == tid]
+                if not sub.empty and _num(sub["value"].iloc[0]) is None and str(sub["reason"].iloc[0] or ""):
+                    missing.append(PERIOD_TITLES[key])
+                    why = why or str(sub["reason"].iloc[0])
+            if missing:
+                items.append((str(tid), f"no figure for {', '.join(missing)}: {why}"))
+        ltd = views.get("ltd")
+        if ltd is not None and not ltd.rows.empty:
+            for tid, note in zip(ltd.rows["trade_id"], ltd.rows["note"]):
+                if "no price on" in str(note or ""):
+                    items.append((str(tid), str(note)))
+    spreads = data.get("spreads") or {}
+    review = spreads.get("review") or []
+    if review:
+        items.append(("Spreads", f"{_plural(len(review), 'set')} of trades spreads-engine could not group, listed as "
+                                 "outrights here (the Book tab names them)."))
+    for reason in spreads.get("reasons") or []:
+        items.append(("Spreads", str(reason)))
+    return items
+
+
+# --------------------------------------------------------------------------- the LTD chart
 def chart_section() -> html.Details:
-    """The collapsed LTD chart; its body is filled by the chart callback only while open."""
-    return html.Details(id=CHART_DETAILS_ID, className="section details", open=False, children=[
-        html.Summary("LTD chart", id=CHART_SUMMARY_ID,
+    """The LTD chart, first on the tab and open by default; its body is filled by the chart
+    callback while it is open."""
+    return html.Details(id=CHART_DETAILS_ID, className="section details pnl-chart", open=True, children=[
+        html.Summary("LTD since the first trade", id=CHART_SUMMARY_ID,
                      title="The LTD line over every business day since the first trade: each day the sum of its "
                            "priced trades, the excluded count and the fill on hover, a gap where nothing priced."),
         html.Div(id=CHART_CONTAINER_ID)])
@@ -564,91 +555,50 @@ _SUMMARY_OPEN_MIRROR_JS = (
 )
 
 
-# --------------------------------------------------------------------------- 7. data issues
-def issue_items(view: PeriodView, spreads: Optional[dict], spreads_error: str) -> List[Any]:
-    items: List[Any] = []
-    rows = view.rows
-    if not rows.empty:
-        for r in rows.itertuples(index=False):
-            if _num(r.value) is None and r.reason:
-                items.append((str(r.trade_id), f"no {view.title} figure: {r.reason}"))
-        for r in rows.itertuples(index=False):
-            if _num(r.value) is not None and "no price on" in str(r.note or ""):
-                items.append((str(r.trade_id), str(r.note)))
-    if not view.entry.get("available"):
-        items.append((view.title, str(view.entry.get("reason") or "no figure")))
-    if spreads_error:
-        items.append(("Spreads", spreads_error))
-    elif spreads:
-        review = spreads.get("review") or []
-        if review:
-            items.append(("Spreads", f"{_plural(len(review), 'group')} spreads-engine could not group, listed as "
-                                     "outrights here (the Book tab's Data issues drawer names them)."))
-        for reason in spreads.get("reasons") or []:
-            items.append(("Spreads", str(reason)))
-    return items
-
-
 # --------------------------------------------------------------------------- body and shell
-def _roots() -> Dict[str, Any]:
-    try:
-        from data.contracts import load_roots
-        return dict(load_roots())
-    except Exception:  # noqa: BLE001 -- the root id stands for its name
-        return {}
-
-
-def _safe(build: Callable[[], Any], label: str) -> Any:
-    try:
-        return build()
-    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank section
-        logging.getLogger(__name__).exception("P&L section %r failed", label)
-        return html.Div(className="section", children=[
-            about(label, None), marker("n/a", f"{label} could not be built ({type(exc).__name__}: {exc})")])
-
-
-def body(conn: sqlite3.Connection, as_of: str, period: str) -> html.Div:
-    from ui.tabs.blotter_pricing import priced_value_book, pricing_snapshot
-    period = period if period in PERIODS else DEFAULT_PERIOD
-    with pricing_snapshot(conn, "P&L tab"):
-        df_today, _n_filled, _n_total = priced_value_book(conn, as_of)
-        view = period_rows(conn, as_of, period, df_today)
-        spreads, spreads_error = None, ""
-        try:
-            from ui.tabs.book import _spreads
-            spreads = _spreads(conn, as_of)
-        except Exception as exc:  # noqa: BLE001 -- the reason in the section and the drawer
-            spreads_error = f"spreads-engine could not group the book ({type(exc).__name__}: {exc})"
-        labelled = _labelled(conn, view.rows.copy())
-        roots = _roots()
-        children: List[Any] = [
-            _safe(lambda: summary_section(view, df_today, as_of), "Total"),
-            _safe(lambda: spreads_section(spreads, view, roots, spreads_error), "By spread position"),
-            _safe(lambda: group_section("By commodity", COMMODITY_TABLE_ID, labelled, ("commodity",), view,
-                                        "Commodity / pair"), "By commodity"),
-            _safe(lambda: group_section("By sector", SECTOR_TABLE_ID, labelled, ("sector",), view, "Sector"), "By sector"),
-            _safe(lambda: product_section(conn, as_of, df_today), "By product"),
-            _safe(lambda: trades_section(labelled, view), "By trade"),
-            chart_section(),
-        ]
-        drawer = issues_drawer(issue_items(view, spreads, spreads_error), id=ISSUES_ID)
-        if drawer is not None:
-            children.insert(1, drawer)
+def body(data: dict, by: str = DEFAULT_GROUP) -> html.Div:
+    by = by if by in dict(GROUP_OPTIONS) else DEFAULT_GROUP
+    if data.get("df") is None or data["df"].empty:
+        return html.Div(className="pnl-body", children=[message_box(f"No trades on the book on {data.get('as_of')}.")])
+    children: List[Any] = [trades_table(data) if by == GROUP_TRADE else attribution_table(data, by)]
+    drawer = issues_drawer(issue_items(data), id=ISSUES_ID)
+    if drawer is not None:
+        children.append(drawer)
     return html.Div(className="pnl-body", children=children)
 
 
-def render(as_of: Optional[str], db_path, period: str = DEFAULT_PERIOD) -> Any:
+def csv_frame(data: dict, by: str) -> pd.DataFrame:
+    if by == GROUP_TRADE:
+        records, _tips = trade_records(data)
+        return pd.DataFrame(records)
+    records = []
+    for label, lines in (position_lines(data) if by == GROUP_POSITION else group_lines(data, by)):
+        for ln in lines:
+            rec = {"group": label, "line": ln["label"], "trades": ln["trades"]}
+            for key in PERIODS:
+                value, excluded, _r, _n = ln["five"][key]
+                rec[f"{key}_usd"], rec[f"{key}_excluded"] = value, excluded
+            rec["trade_ids"] = " ".join(ln["trade_ids"])
+            records.append(rec)
+    return pd.DataFrame(records)
+
+
+def _open(db_path):
+    from ui.app import connect_readonly       # local: ui.app imports the tabs
+    return connect_readonly(db_path)
+
+
+def render(as_of: Optional[str], db_path, by: str = DEFAULT_GROUP) -> Any:
     if not as_of:
         return message_box("No as-of date available.")
-    from ui.app import connect_readonly       # local: ui.app imports the tabs
     try:
-        conn = connect_readonly(db_path)
+        conn = _open(db_path)
     except sqlite3.OperationalError as exc:
         return message_box(f"Database not available ({exc}).")
     try:
-        return body(conn, as_of, period)
+        return body(gather(conn, as_of), by or DEFAULT_GROUP)
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
-        logging.getLogger(__name__).exception("P&L tab failed for as_of=%s", as_of)
+        log.exception("P&L tab failed for as_of=%s", as_of)
         return html.Div(className="status-panel status-panel--down", children=[
             html.P(f"The P&L attribution could not be built for {as_of} ({type(exc).__name__}: {exc}).",
                    className="status-line status-line--bad")])
@@ -656,22 +606,39 @@ def render(as_of: Optional[str], db_path, period: str = DEFAULT_PERIOD) -> Any:
         conn.close()
 
 
+def render_csv(as_of: Optional[str], db_path, by: str):
+    if not as_of:
+        return None
+    try:
+        conn = _open(db_path)
+    except sqlite3.OperationalError:
+        return None
+    try:
+        frame = csv_frame(gather(conn, as_of), by if by in dict(GROUP_OPTIONS) else DEFAULT_GROUP)
+        return dcc.send_data_frame(frame.to_csv, f"pnl-{as_of}.csv", index=False)
+    except Exception:  # noqa: BLE001
+        log.exception("P&L csv failed for %s", as_of)
+        return None
+    finally:
+        conn.close()
+
+
 def layout(default_date: Optional[str] = None) -> html.Div:
-    """The static shell: the title row, the period selector and the body container the
-    callback fills. No date picker: the tab follows the header's as-of store."""
+    """The static shell: the title line (the question, the group-by switch, Download CSV), the
+    LTD chart open by default, the body the callback fills and the safety interval. No date
+    picker: the tab follows the header's as-of store."""
     return html.Div(className="pnl-tab", children=[
-        html.Div(className="ladder-title-row", children=[
-            about("P&L", TAB_ABOUT, level="h3", className="ladder-title-row-heading"),
-            html.Div(className="ladder-title-row-right", children=[
-                marker(f"header's as-of{f' {default_date}' if default_date else ''}",
-                       "The tab follows the header's as-of date; it has no date picker of its own."),
-                tab_link("→ Trades", "blotter", "pnl-title-trades", title="Open the Trades tab: every trade row in full")])]),
-        html.Div(className="meta-line", children=[
-            html.Span("Period: "),
-            dcc.RadioItems(id=PERIOD_ID,
-                           options=[{"label": html.Span(PERIOD_TITLES[p], title=PERIOD_TIPS[p]), "value": p} for p in PERIODS],
-                           value=DEFAULT_PERIOD, inline=True, persistence=True, persistence_type="session",
-                           inputStyle={"marginRight": "4px", "marginLeft": "10px"})]),
+        html.Div(className="book-title-row", children=[
+            about("P&L", TAB_ABOUT, level="h3"),
+            html.Span(QUESTION, className="book-counts"),
+            dcc.RadioItems(id=GROUP_ID, className="book-switch",
+                           options=[{"label": label, "value": value} for value, label in GROUP_OPTIONS],
+                           value=DEFAULT_GROUP, inline=True, persistence=True, persistence_type="session"),
+            html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
+                        title="The table as shown, at full figures"),
+            dcc.Download(id=DOWNLOAD_ID),
+        ]),
+        chart_section(),
         html.Div(id=BODY_ID, children=[message_box("Loading the P&L attribution...")]),
         dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])
@@ -681,21 +648,29 @@ build_layout = layout
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """The body re-renders on the header's as-of, the period, every data revision and the
-    safety interval. The LTD chart (moved from the header, 2026-09-28) keeps the header's two
-    callbacks on this tab's ids: a clientside mirror of the collapsible's DOM `open` state
-    (Dash never syncs a native <details> toggle to `open`), and the chart itself, built only
-    while the collapsible is open (`header._build_chart`, memoised per day on the database)."""
+    """The body re-renders on the header's as-of, the group switch, every data revision and the
+    safety interval; the CSV on its button. The LTD chart (moved from the header, 2026-09-28)
+    keeps the header's two callbacks on this tab's ids: a clientside mirror of the collapsible's
+    DOM `open` state (Dash never syncs a native <details> toggle to `open`), and the chart itself,
+    built only while the collapsible is open (`header._build_chart`, memoised per day on the
+    database), about 220 px tall."""
 
     @app.callback(
         Output(BODY_ID, "children"),
         Input(AS_OF_STORE_ID, "data"),
-        Input(PERIOD_ID, "value"),
+        Input(GROUP_ID, "value"),
         Input(DATA_REVISION_ID, "data"),
         Input(REFRESH_ID, "n_intervals"),
     )
-    def _update(as_of, period=DEFAULT_PERIOD, _data_rev=None, _n_intervals=0):
-        return render(as_of, get_db_path(), period or DEFAULT_PERIOD)
+    def _update(as_of, by=DEFAULT_GROUP, _data_rev=None, _n_intervals=0):
+        return render(as_of, get_db_path(), by or DEFAULT_GROUP)
+
+    @app.callback(Output(DOWNLOAD_ID, "data"), Input(CSV_BUTTON_ID, "n_clicks"), State(AS_OF_STORE_ID, "data"),
+                  State(GROUP_ID, "value"), prevent_initial_call=True)
+    def _csv(n_clicks, as_of, by):
+        if not n_clicks:
+            return dash.no_update
+        return render_csv(as_of, get_db_path(), by or DEFAULT_GROUP)
 
     app.clientside_callback(
         _SUMMARY_OPEN_MIRROR_JS,
@@ -711,8 +686,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     )
     def _update_chart(is_open: bool, as_of: Optional[str], _data_rev=None):
         if not is_open or not as_of:
-            from dash import no_update
-            return no_update
+            return dash.no_update
         from ui.app import connect_readonly
         db_path = get_db_path()
         try:
@@ -720,10 +694,13 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         except sqlite3.OperationalError as exc:
             return html.P(f"Database not available ({exc}).")
         try:
-            return header._build_chart(conn, as_of, db_path=db_path)
+            graph = header._build_chart(conn, as_of, db_path=db_path)
+            if isinstance(graph, dcc.Graph) and isinstance(graph.figure, dict):
+                graph.figure.setdefault("layout", {})["height"] = CHART_HEIGHT
+                graph.figure["layout"]["margin"] = {"l": 50, "r": 20, "t": 6, "b": 26}
+            return graph
         except Exception as exc:  # noqa: BLE001 -- the reason on screen, never an empty panel
-            logging.getLogger(__name__).exception("P&L LTD chart failed for as_of=%s", as_of)
-            return html.P(header._failure_reason("LTD chart could not be built", exc, conn),
-                          className="section-kicker")
+            log.exception("P&L LTD chart failed for as_of=%s", as_of)
+            return html.P(header._failure_reason("LTD chart could not be built", exc, conn), className="section-kicker")
         finally:
             conn.close()

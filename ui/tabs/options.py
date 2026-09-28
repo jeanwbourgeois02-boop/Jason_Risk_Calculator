@@ -123,9 +123,8 @@ with the reasons for the rest.
 collapsed package_ids plus the render callback drops LEG rows whose `parent_key` is in
 that set, re-running `option_rows` against the current as-of date. The store lives in the
 browser session so a rebuild of the sub-tab keeps what the user expanded.
-`date_picker_id` defaults to the Blotter tab's own `"blotter-date"` id (a string literal,
-not an import of `ui.tabs.blotter`, which would be circular since `blotter.py` imports
-this module).
+`date_picker_id` defaults to the header's as-of store (`ui.tabs.header.AS_OF_STORE_ID`, its
+`data` property), the one as-of of the app since 2026-09-28.
 
 **No page reload, and never under a cell being typed into (`ui/revision.py`; root cause
 2026-09-21, user: "make it so you can input strike in the table", three days after the
@@ -175,10 +174,13 @@ from dash.dash_table.Format import Format, Group, Scheme, Sign, Trim
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import format_cell
+from ui.tabs.header import AS_OF_STORE_ID
 
 TABLE_ID = "options-datatable"
 COLLAPSED_STORE_ID = "options-collapsed-packages"
-DEFAULT_DATE_PICKER_ID = "blotter-date"
+# The as-of every callback here reads: the header's store (the Trades tab's own picker left on
+# 2026-09-28; `ui.tabs.header` imports nothing of this module, so the import is not circular).
+DEFAULT_DATE_PICKER_ID = AS_OF_STORE_ID
 HEADLINE_ID = "blotter-strip-options-greeks"
 CLEAR_FILTERS_ID = "blotter-datatable-options-filter-clear"
 EDIT_STATUS_ID = "options-terms-edit-status"
@@ -1009,11 +1011,11 @@ _FRAME_COLUMNS = ["level", "group_key", "parent_key", "label", "leg_count", "pri
 # browser): whole units with thousands separators and negatives in parentheses -- the
 # app's `format_cell` look -- for amounts; up to six decimals, trailing zeros trimmed, for
 # premiums and rates, so a fill reads as the blotter wrote it (0.00579, 0.121, 152).
-AMOUNT_FORMAT = Format(precision=0, scheme=Scheme.fixed, group=Group.yes, sign=Sign.parantheses)
+AMOUNT_FORMAT = Format(precision=0, scheme=Scheme.fixed, group=Group.yes, sign=Sign.default)
 RATE_FORMAT = Format(precision=6, scheme=Scheme.fixed, group=Group.yes, trim=Trim.yes)
 # The Greeks: up to two decimals, trailing zeros trimmed -- an option on a future's delta is a
 # few futures lots (5.5 lots must not read as 6), an FX option's a USD amount.
-GREEK_FORMAT = Format(precision=2, scheme=Scheme.fixed, group=Group.yes, sign=Sign.parantheses, trim=Trim.yes)
+GREEK_FORMAT = Format(precision=2, scheme=Scheme.fixed, group=Group.yes, sign=Sign.default, trim=Trim.yes)
 RATE_FIELDS = ("premium_paid", "mktpx", "strike", "undfwdpx")
 AMOUNT_FIELDS = NUMERIC_FIELDS
 NUMERIC_COLUMNS = AMOUNT_FIELDS + RATE_FIELDS
@@ -2124,7 +2126,7 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         Input(REFRESH_ID, "data"),   # never the revision stores themselves: `_gate_refresh`
         State(TABLE_ID, "data"),
         State(TABLE_ID, "data_previous"),
-        State(date_picker_id, "date"),
+        State(date_picker_id, "data"),
     )
     def _render(collapsed, filter_query, sort_by, _edited_at, _refresh, rows, previous, as_of_date):
         # Not `prevent_initial_call`: a rebuilt sub-tab comes back with the session's
@@ -2174,7 +2176,7 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         Output(BREAKDOWNS_ID, "children"),
         Input(DATA_REVISION_ID, "data"),
         Input(BOOK_REVISION_ID, "data"),
-        State(date_picker_id, "date"),
+        State(date_picker_id, "data"),
         prevent_initial_call=True,
     )
     def _refresh_breakdowns(_data_rev, _book_rev, as_of_date):
@@ -2258,7 +2260,7 @@ def register_callbacks(app, get_db_path: Callable[[], object],
         State(TERMS_TYPE_ID, "value"),
         State(TERMS_STRIKE_ID, "value"),
         State(TERMS_BARRIER_ID, "value"),
-        State(date_picker_id, "date"),
+        State(date_picker_id, "data"),
         prevent_initial_call=True,
     )
     def _save_terms(n_clicks, instrument_id, payoff, option_type, strike, barrier, as_of_date=None):

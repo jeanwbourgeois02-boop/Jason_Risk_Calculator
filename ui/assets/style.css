@@ -501,3 +501,145 @@ p { margin: 8px 0; }
 .btn--locked, .btn--locked:hover { opacity: .5; cursor: not-allowed; }
 .sample-book-offer { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
 .sample-book-offer .sample-book-link { color: var(--navy); font-weight: 600; text-decoration: underline; }
+
+/* ---------------------------------------------------------------- 2026-09-28: the screens tidy (wave 1)
+   The display rules every screen follows (ui/tabs/formatting.py): a missing value is a grey em
+   dash, a loss red and a gain green with a real minus / plus, an estimated date grey with a
+   leading "≈", table headers light grey with dark text, compact rows, sort arrows on hover only,
+   the unit a small grey suffix. The header carries the one date picker and the marks chip; the
+   top bar carries the Bloomberg state as a dot. */
+.cell-missing { color: #9ca3af; cursor: help; }
+.cell-pos { color: var(--pos); }
+.cell-neg { color: var(--neg); }
+.cell-estimated { color: #6b7280; cursor: help; }
+.cell-amber { color: #8a4b00; font-weight: 600; }
+.cell-red { color: var(--neg); font-weight: 700; }
+.cell-unit { color: #8a919c; font-size: 10.5px; margin-left: 4px; }
+
+/* dash_table headers: light grey, dark text; compact rows; sort arrows only on hover */
+.dash-spreadsheet-container .dash-spreadsheet-inner th {
+  background: #eef1f6 !important; color: #4b5563 !important; font-weight: 600 !important; font-size: 11.5px;
+  border-bottom: 1px solid #dfe3ea !important;
+}
+.dash-spreadsheet-container .dash-spreadsheet-inner th { padding: 6px 10px; }
+.dash-spreadsheet-container .dash-spreadsheet-inner td { padding: 4px 10px; line-height: 18px; }
+.dash-spreadsheet-container .dash-spreadsheet-inner th .column-actions,
+.dash-spreadsheet-container .dash-spreadsheet-inner th .sort { opacity: 0; transition: opacity .12s; }
+.dash-spreadsheet-container .dash-spreadsheet-inner th:hover .column-actions,
+.dash-spreadsheet-container .dash-spreadsheet-inner th:hover .sort { opacity: 1; }
+.dash-spreadsheet-container .dash-spreadsheet-inner th .column-header--sort { color: #4b5563 !important; }
+
+/* the header: one row, the picker first, the figures, the marks chip, the count at the right */
+.header-block { display: flex; flex-wrap: nowrap; align-items: center; gap: 22px; padding: 7px 24px; background: var(--navy-2); }
+.header-figures { flex: 1 1 auto; align-items: center; gap: 22px; min-height: 44px; }
+.header-figure-value { margin-top: 1px; }
+.header-asof { min-width: 150px; }
+.header-asof .header-figure-title { margin-bottom: 1px; }
+.header-asof .SingleDatePickerInput { border: none; background: transparent; }
+.header-asof .SingleDatePickerInput__withBorder { border: none; }
+.header-asof .DateInput { width: 150px; background: #fff; border-radius: 4px; position: relative; }
+/* the picker keeps its white box: navy text on it, never the header's white (seen white on white, 2026-09-28) */
+.header-block .DateInput_input, .header-asof .DateInput_input { font-family: inherit; font-size: 14px; font-weight: 700;
+  color: var(--navy); background: #fff; padding: 2px 20px 2px 8px; border: none; border-radius: 4px;
+  border-bottom: 2px solid transparent; cursor: pointer; font-variant-numeric: tabular-nums; }
+.header-block .DateInput_input::placeholder { color: var(--navy); opacity: .55; }
+.header-block .DateInput_input__focused { border-bottom: 2px solid var(--gold); color: var(--navy); }
+/* the caret: an <input> draws no ::after, so it sits on the box itself */
+.header-asof .DateInput::after { content: "\25BE"; position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+  color: var(--navy); font-size: 12px; pointer-events: none; }
+.header-asof .DateInput_fang { display: none; }
+.header-asof .SingleDatePicker_picker { z-index: 40; }
+.header-asof .CalendarDay__selected, .header-asof .CalendarDay__selected:hover { background: var(--navy); border-color: var(--navy); }
+.header-asof .CalendarDay:hover { background: #eef1f7; }
+.header-asof .DayPickerKeyboardShortcuts_show { display: none; }
+.header-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid rgba(255,255,255,.35);
+  border-radius: 12px; padding: 3px 10px; font-size: 11px; color: #fff; white-space: nowrap; cursor: help; margin-left: 6px; }
+.header-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: 0 0 8px; }
+.header-trades { margin-left: auto; font-size: 11px; color: rgba(255,255,255,.55); white-space: nowrap; cursor: help; }
+
+/* the top bar: the Bloomberg state as a dot and two words; the "Loaded: N trades" line is gone */
+.top-bar .source-line { display: none; }
+.feed-state { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.top-bar .feed-pull-status { max-width: 240px; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+
+/* the Book tab (ui/tabs/book.py): the title line, the movers, the table, the two cards */
+.book-title-row { display: flex; align-items: baseline; gap: 14px; margin: 0 0 10px; }
+.book-title-row h3 { margin: 0; font-size: 18px; }
+.book-counts { color: var(--muted); font-size: 12.5px; }
+.book-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; font-size: 12px; font-weight: 600; margin-left: 8px; }
+.book-switch label { padding: 4px 12px; color: var(--muted); background: #fff; cursor: pointer; margin: 0; display: inline-flex; align-items: center; }
+.book-switch input { display: none; }
+.book-switch label:has(input:checked) { background: var(--navy); color: #fff; }
+.book-download { margin-left: auto; font-size: 12px; color: var(--muted); background: none; border: none; cursor: pointer; padding: 0; font-family: inherit; }
+.book-download:hover { color: var(--navy); text-decoration: underline; }
+.book-movers { display: flex; gap: 8px; align-items: stretch; margin: 0 0 12px; flex-wrap: wrap; }
+.book-mover { display: flex; flex-direction: column; gap: 1px; padding: 6px 12px; border-radius: 6px; background: #fff; border: 1px solid var(--line); min-width: 150px; }
+.book-mover-name { color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+.book-mover-value { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.book-movers-divider { width: 1px; background: var(--line); margin: 4px 6px; }
+.book-movers-label { align-self: center; margin-left: 8px; font-size: 11.5px; color: var(--muted); }
+.book-card { background: #fff; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.book-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.book-table th { background: #eef1f6; color: #4b5563; font-weight: 600; font-size: 11.5px; text-align: right; padding: 6px 10px; border-bottom: 1px solid #dfe3ea; white-space: nowrap; }
+.book-table th.l, .book-table td.l { text-align: left; }
+.book-table td { padding: 4px 10px; border-bottom: 1px solid #eef1f4; text-align: right; white-space: nowrap; height: 26px; }
+.book-table tr.book-row { cursor: pointer; }
+.book-table tr.book-row:hover td { background: #eef1f7; }
+.book-table tr.book-row--open td { background: #fbf7ea; }
+.book-table tr.book-group td { background: #f3f5f9; font-weight: 600; color: var(--navy); padding-top: 5px; padding-bottom: 5px; }
+.book-table tr.book-total td { font-weight: 700; border-top: 2px solid var(--navy); background: #fff; font-size: 13px; }
+.book-table .book-note { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
+.book-table td.book-name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.book-under { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
+.book-needs { flex: 0 0 640px; padding: 8px 14px 4px; }
+.book-side { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.book-h { font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+.book-need { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid #eef1f4; font-size: 12.5px; }
+.book-need:last-child { border-bottom: none; }
+.book-need-chip { font-size: 10px; font-weight: 700; letter-spacing: .04em; min-width: 64px; padding: 1px 6px; border-radius: 4px; text-align: center; flex: 0 0 auto; }
+.book-need-chip--warn { background: var(--warn-bg); color: var(--warn); }
+.book-need-chip--info { background: var(--ndf-bg); color: var(--ndf); }
+.book-need-chip--quiet { background: #eef1f6; color: #4b5563; }
+.book-need-chip--red { background: #fdecea; color: var(--neg); }
+.book-need .tab-link { margin-left: auto; font-size: 11px; color: var(--muted); }
+.book-load { padding: 8px 14px; font-size: 12.5px; }
+.book-loaded-banner { padding: 9px 14px; display: flex; gap: 14px; align-items: baseline; border-left: 4px solid var(--gold); margin: 0 0 12px; }
+.book-empty { display: flex; gap: 24px; align-items: stretch; padding: 24px 0; }
+.book-empty-main { flex: 0 0 620px; padding: 32px 36px; display: flex; flex-direction: column; gap: 16px; justify-content: center; }
+.book-empty-title { font-size: 22px; font-weight: 600; }
+.book-empty-text { font-size: 14px; line-height: 1.5; }
+.book-empty-actions { display: flex; align-items: center; gap: 16px; margin-top: 8px; }
+.book-empty-actions .btn { background: var(--navy); color: #fff; padding: 10px 22px; font-size: 14px; }
+.book-empty-next { flex: 1 1 auto; padding: 28px 32px; display: flex; flex-direction: column; gap: 18px; justify-content: center; }
+.book-step { display: flex; gap: 12px; align-items: flex-start; font-size: 13px; }
+.book-step-num { width: 22px; height: 22px; border-radius: 50%; background: #eef1f6; color: var(--navy); font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.book-detail { margin-top: 10px; }
+
+/* ---------------------------------------------------------------- 2026-09-28: the screens tidy (wave 2)
+   Exposure, P&L and Timing & cash share the Book's table kit; two cards side by side; the roll
+   table's level chips; the small grey sub-label after a name. */
+.cards-row { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
+.cards-row > .book-card { flex: 1 1 0; min-width: 0; }
+.card-pad { padding: 10px 14px 12px; }
+.card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.name-sub { color: #8a919c; font-size: 11px; margin-left: 6px; font-weight: 400; }
+.grid-note { color: var(--muted); font-size: 11.5px; }
+.grid-note .marker { margin-left: 0; }
+.fx-net-line { margin-top: 8px; font-size: 12.5px; }
+.pnl-count { color: var(--muted); font-size: 11.5px; }
+.book-table tr.pnl-realised td { color: var(--muted); font-size: 12px; border-bottom: none; height: 22px; }
+.book-table tr.pnl-realised td:first-child { padding-left: 22px; }
+.pnl-chart { margin: 0 0 12px; }
+.pnl-chart summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.section-title-line { display: flex; align-items: baseline; gap: 14px; margin: 0 0 8px; }
+.section-title-line h4 { margin: 0; }
+.level-chip { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .04em; padding: 1px 7px;
+  border-radius: 10px; min-width: 52px; text-align: center; cursor: help; }
+.level-chip--expired { background: #7f1d1d; color: #fff; }
+.level-chip--red { background: #c62828; color: #fff; }
+.level-chip--amber { background: #fff3e0; color: #b26a00; }
+.level-chip--green { background: #f1f5f1; color: #52705a; }
+.level-chip--estimated { background: #eef1f6; color: #6b7280; }
+.book-table tr.roll-row td, .book-table tr.curve-row td { height: 24px; }
+.curve-grid th { text-align: right; }
+.curve-grid th.l { text-align: left; }

@@ -8,8 +8,8 @@ from ui.tabs import ranking as rk
 
 
 def test_amount_rate_and_percent_formats_are_d3_specifiers():
-    assert rk.amount()["specifier"] == "(,.0f" and rk.amount()["nully"] == ""
-    assert rk.amount(2, "n/a", trim=True) == {**rk.amount(2, "n/a", trim=True), "specifier": "(,.2~f", "nully": "n/a"}
+    assert rk.amount()["specifier"] == ",.0f" and rk.amount()["nully"] == ""      # a real minus, never parentheses
+    assert rk.amount(2, "n/a", trim=True) == {**rk.amount(2, "n/a", trim=True), "specifier": ",.2~f", "nully": "n/a"}
     assert rk.rate()["specifier"] == ",.6f" and rk.rate(4, trim=True)["specifier"] == ",.4~f"
     assert rk.percent()["specifier"] == "+$.1f" and rk.percent()["locale"]["symbol"] == ["", "%"]
     assert rk.count()["specifier"] == ",.0f"
@@ -43,7 +43,7 @@ def test_sign_styles_key_on_the_number_not_the_text():
 
 
 def test_display_length_matches_what_the_table_prints():
-    assert rk.display_length(-1234567, rk.amount()) == len("(1,234,567)")
+    assert rk.display_length(-1234567, rk.amount()) == len("-1,234,567")
     assert rk.display_length(1234.5, rk.amount(2, trim=True)) == len("1,234.5")
     assert rk.display_length(None, rk.amount(nully="n/a")) == 3
     assert rk.display_length(-3.25, rk.percent()) == len("-3.3%") or rk.display_length(-3.25, rk.percent()) == len("-3.2%")
@@ -57,7 +57,7 @@ def test_column_widths_span_body_and_footer():
     footer = [{"ccy": "Net", "usd": -123456789.0}]
     rules = rk.column_widths(cols, body, footer)
     assert rules[0] == {"if": {"column_id": "ccy"}, "width": "11ch", "minWidth": "11ch", "maxWidth": "11ch"}
-    assert rules[1]["width"] == f"{len('(123,456,789)') + 2}ch"
+    assert rules[1]["width"] == f"{len('-123,456,789') + 2}ch"
     assert rk.column_widths(cols, body, skip=["ccy"])[0]["if"]["column_id"] == "usd"
 
 
@@ -80,14 +80,6 @@ def test_with_footer_pins_totals_in_a_headerless_twin_with_the_same_widths():
 
 
 # ------------------------------------------------ money in k / M on summary tables (2026-09-25)
-def test_amount_short_is_an_si_format_with_parentheses_and_trimmed_zeros():
-    f = rk.amount_short()
-    assert f["specifier"] == "(.3~s" and f["nully"] == ""
-    assert rk.amount_short("n/a")["nully"] == "n/a"
-    assert rk.amount_short(digits=2)["specifier"] == "(.2~s"
-    # still a numeric column: the table ranks the number, not the text
-    col = rk.numeric("LTD", "ltd", rk.amount_short())
-    assert col["type"] == "numeric" and col["format"]["specifier"] == "(.3~s"
 
 
 def test_whole_units_rounds_money_columns_and_keeps_the_rest():
@@ -107,7 +99,7 @@ def test_si_text_mirrors_d3_for_column_widths():
     assert rk.si_text(1650590) == "1.65M" and rk.si_text(2.4e9) == "2.4G"
     assert rk.si_text(395) == "395" and rk.si_text(0) == "0" and rk.si_text(999600) == "1M"
     f = rk.amount_short()
-    assert rk.display_length(-51018.0, f) == len("(51k)")
+    assert rk.display_length(-51018.0, f) == len("-51k")
     assert rk.display_length(1650590.0, f) == len("1.65M")
     assert rk.display_length(None, rk.amount_short("n/a")) == 3
 

@@ -3,7 +3,7 @@
 Display only: nothing here computes P&L, delta or a sum -- per CLAUDE.md ("ui/ ... never
 recomputes P&L or delta itself"), storage/precision stay in engine/ and data/.
 
-- `format_cell` / `format_frame`: whole units with separators, negatives in parentheses.
+- `format_cell` / `format_frame`: whole units with separators, a negative with a real minus.
 - `short_money`: a money figure in k / m / bn for summary screens ("1.65m").
 - `about`: a section title whose definitions sit on hover of the title (screens redesign,
   user 2026-09-25: "never as a paragraph above the table").
@@ -14,7 +14,9 @@ recomputes P&L or delta itself"), storage/precision stay in engine/ and data/.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
+import re
 from typing import Iterable, Optional, Tuple, Union
 
 import pandas as pd
@@ -25,8 +27,9 @@ INFO_MARK = "\u24d8"      # the small circled "i" beside a title with definition
 
 
 def format_cell(value) -> str:
-    """Format a single numeric cell: round to whole units, thousands separators,
-    negatives in parentheses, blank ("") for NaN/None."""
+    """Format a single numeric cell: round to whole units, thousands separators, a negative
+    with a real minus sign (U+2212, never parentheses: the display rule of 2026-09-28), blank
+    ("") for NaN/None."""
     if value is None:
         return ""
     try:
@@ -36,7 +39,7 @@ def format_cell(value) -> str:
         pass
     rounded = round(float(value))
     if rounded < 0:
-        return f"({abs(rounded):,})"
+        return f"{MINUS}{abs(rounded):,}"
     return f"{rounded:,}"
 
 
@@ -204,3 +207,435 @@ def tab_link(label, tab_key: str, idx: str, title: Optional[str] = None, classNa
         hover = f"Open the {name or tab_key} tab"
     return html.Button(label, id=tab_link_id(tab_key, idx), n_clicks=0, type="button",
                        className=classes, title=hover)
+
+
+# ----------------------------------------------------------------------------- the display rules (2026-09-28)
+# The rules every screen follows since the screens tidy (user, 2026-09-28; brief "Rules the whole
+# UI follows"): a missing value is an em dash with its reason on hover (`missing_cell`), never
+# "n/a"; a total sums the known figures and says "excl. N" (`sum_known`); a negative takes a real
+# minus and a P&L or move a leading "+" (`signed_money`, `signed_number`); prices at tick
+# precision (`price_text`); plain names (`contract_name`, `spread_name`, `fx_name`); sizes in
+# words (`size_words`); an estimated date grey with a leading "≈" (`date_cell`).
+MISSING = "—"        # em dash: a cell the engine could not give
+ESTIMATED = "≈"      # before an estimated date
+EN_DASH = "–"
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_MONTH_CODES = "FGHJKMNQUVXZ"   # data.contracts.tickers.MONTH_CODES, index 0 = January
+
+
+def missing_cell(reason: Optional[str] = None, className: str = ""):
+    """The em dash of a value the engine could not give, grey, the reason on hover. Never the
+    text "n/a", never a zero."""
+    classes = " ".join(c for c in ("cell-missing", className) if c)
+    return html.Span(MISSING, className=classes, title=str(reason or "not available"))
+
+
+def sum_known(values_with_reasons: Iterable) -> Tuple[Optional[float], int, list]:
+    """(total, excluded_count, reasons) over (value, reason) pairs: the known figures summed
+    (display only, the header's rule), how many were missing, and their reasons. `total` is
+    None only when nothing is known."""
+    total, excluded, reasons = None, 0, []
+    for value, reason in values_with_reasons:
+        try:
+            f = float(value) if value is not None else float("nan")
+        except (TypeError, ValueError):
+            f = float("nan")
+        if math.isnan(f):
+            excluded += 1
+            if reason:
+                reasons.append(str(reason))
+            continue
+        total = f if total is None else total + f
+    return total, excluded, reasons
+
+
+def _is_missing(value) -> bool:
+    if value is None:
+        return True
+    try:
+        return math.isnan(float(value))
+    except (TypeError, ValueError):
+        return True
+
+
+def signed_money(value, symbol: str = "") -> str:
+    """'+15.3k' / '−39.4k' / '0' (short_money, a leading "+" on a gain): a P&L on a summary
+    screen. None / NaN -> the em dash text."""
+    if _is_missing(value):
+        return MISSING
+    text = short_money(value, symbol)
+    return text if text.startswith(MINUS) or text in ("0", f"{symbol}0") else "+" + text
+
+
+def signed_number(value, decimals: int = 2) -> str:
+    """A move with its sign: '+4.39', '−1.41', '0.00' (a real minus sign)."""
+    if _is_missing(value):
+        return MISSING
+    text = f"{abs(float(value)):,.{decimals}f}"
+    if float(text.replace(",", "")) == 0:
+        return text
+    return (MINUS if value < 0 else "+") + text
+
+
+def sign_class(value) -> str:
+    """'cell-pos' / 'cell-neg' / '' by the sign of a P&L or move (green / red, never a
+    parenthesis)."""
+    if _is_missing(value):
+        return ""
+    f = float(value)
+    if f == 0:
+        return ""
+    return "cell-neg" if f < 0 else "cell-pos"
+
+
+def full_money(value, ccy: str = "USD") -> str:
+    """'USD −6,928': the full figure behind a k / m cell."""
+    return f"{ccy} {format_cell(value)}"
+
+
+def money_cell(value, reason: Optional[str] = None, hover: Optional[str] = None, ccy: str = "USD",
+               className: str = ""):
+    """A summary money cell: k / m with its sign and colour, the full figure (and `hover`) on
+    hover; the em dash with `reason` when missing."""
+    if _is_missing(value):
+        return missing_cell(reason, className)
+    classes = " ".join(c for c in (sign_class(value), className) if c)
+    title = "\n".join(t for t in (full_money(value, ccy), hover) if t)
+    return html.Span(signed_money(value), className=classes or None, title=title)
+
+
+# --- prices at tick precision
+def decimals_of(value, cap: int = 6) -> int:
+    """How many decimals a stored number carries (79637 -> 0, 432.25 -> 2, 3380.5 -> 1), at
+    most `cap`; 0 for a non-number."""
+    try:
+        text = f"{float(value):.{cap}f}".rstrip("0")
+    except (TypeError, ValueError):
+        return 0
+    return len(text.split(".")[1]) if "." in text else 0
+
+
+def quoted_unit(root) -> str:
+    """The unit a contract's price is quoted in, as the trader reads it: a cents sign per bushel
+    for a USD contract quoted in cents (price_scale 0.01), 'p/therm' for pence, else the root's
+    own quote unit ('USD/bbl', 'CNY/t', 'EUR/MWh'). '' without a root."""
+    if root is None:
+        return ""
+    unit = str(getattr(root, "quote_unit", "") or "")
+    scale = getattr(root, "price_scale", 1) or 1
+    ccy, _sep, qty = unit.partition("/")
+    qty = qty.replace("mwh", "MWh").replace("mmbtu", "MMBtu")
+    if float(scale) == 0.01 and ccy.upper() == "USD":
+        return f"¢/{qty}"
+    if float(scale) == 0.01 and ccy.upper() == "GBP":
+        return f"p/{qty}"
+    return f"{ccy}/{qty}" if qty else unit
+
+
+def is_fx_pair(text: str) -> bool:
+    """'USDJPY', 'XAUUSD': six letters and no slash."""
+    t = str(text or "")
+    return len(t) == 6 and t.isalpha() and t.isupper()
+
+
+def fx_pair_decimals(pair: str) -> int:
+    """The decimals an FX pair's price is shown with: a JPY cross 3 (145.620), gold and silver
+    2 (3,365.40), every other pair 4 (7.2737)."""
+    p = str(pair or "").upper()
+    if p.startswith(("XAU", "XAG")):
+        return 2
+    if "JPY" in p:
+        return 3
+    return 4
+
+
+def price_decimals(unit: str = "", fill=None, floor: Optional[int] = None) -> int:
+    """The decimals a price in `unit` is shown with: the tick's, roughly (lb 4, bu / gal 2 in
+    cents, oz 1, bbl / MWh / therm 2, a tonne in CNY or USD 0; an FX pair passed as the unit
+    by `fx_pair_decimals`, no unit 4), never fewer than the
+    fill's own decimals (`decimals_of(fill)`, so a 2,588.6 fill keeps its .6), never more
+    than 6."""
+    ccy, _sep, qty = str(unit or "").partition("/")
+    ccy, qty = ccy.strip().upper(), qty.strip().lower()
+    cents = ccy in ("¢", "P")          # quoted in cents or pence: two decimals is the tick
+    if floor is None:
+        if not unit:
+            floor = 4                        # a price with no unit known (an FX option premium)
+        elif not qty and is_fx_pair(ccy):
+            floor = fx_pair_decimals(ccy)    # 'USDJPY' 3, 'XAUUSD' 2, 'USDCNH' 4
+        elif cents:
+            floor = 2
+        elif qty in ("lb",):
+            floor = 4
+        elif qty in ("bu", "gal", "bbl", "mwh", "therm", "st", "cwt", "kg"):
+            floor = 2
+        elif qty in ("oz", "g"):
+            floor = 1
+        elif qty in ("t",) or ccy in ("JPY", "KRW"):
+            floor = 0
+        else:
+            floor = 2
+    # The fill's own decimals are the fallback, never more than half a tick finer than the unit's
+    # floor (a 2,588.6 fill on a USD/t contract keeps its .6; a lots-weighted average never
+    # drags a price to six decimals).
+    own = decimals_of(fill) if fill is not None else 0
+    return min(6, max(floor, min(own, floor + 1)))
+
+
+def price_text(value, unit: str = "", fill=None, decimals: Optional[int] = None) -> str:
+    """A price at tick precision: 79,637 (CNY/t), 437.06 (cents per bushel), 3,353.7 (USD/oz),
+    67.13 (USD/bbl), 7.2737 (FX, no unit). `unit` is the quoted unit (`quoted_unit`), `fill`
+    the trade's own fill whose decimals are the floor. None / NaN -> the em dash text."""
+    if _is_missing(value):
+        return MISSING
+    d = decimals if decimals is not None else price_decimals(unit, fill)
+    text = f"{abs(float(value)):,.{d}f}"
+    return (MINUS + text) if float(value) < 0 and float(text.replace(",", "")) != 0 else text
+
+
+# --- plain names
+# Short names for the contract roots the screens show most (the CSV names are Bloomberg-long:
+# "NYMEX WTI light sweet crude"); anything else is `_short_from_name`. Display only.
+SHORT_ROOT_NAMES = {
+    "NYMEX:CL": "WTI", "ICE:B": "Brent", "NYMEX:RB": "RBOB", "NYMEX:HO": "Heating oil", "NYMEX:NG": "Henry Hub gas",
+    "ICE:G": "Gasoil", "ICE:TFM": "TTF gas", "ICE:M": "NBP gas",
+    "COMEX:HG": "COMEX copper", "COMEX:GC": "Gold", "COMEX:SI": "Silver", "COMEX:ALI": "COMEX aluminium",
+    "SHFE:CU": "SHFE copper", "OSE:JAU": "OSE gold", "OSE:JPL": "OSE platinum",
+    "LME:CA": "LME copper", "LME:AH": "LME aluminium", "LME:ZS": "LME zinc", "LME:PB": "LME lead",
+    "LME:NI": "LME nickel", "LME:SN": "LME tin",
+    "CBOT:ZC": "Corn", "CBOT:ZS": "Soybeans", "CBOT:ZM": "Soybean meal", "CBOT:ZL": "Soybean oil",
+    "CBOT:ZW": "Wheat", "CBOT:ZO": "Oats", "CBOT:ZR": "Rough rice", "MGEX:MWE": "Spring wheat",
+    "DCE:I": "DCE iron ore", "SGX:FEF": "SGX iron ore", "SGX:M65F": "SGX 65% iron ore", "DCE:J": "DCE coke",
+    "ICE:RC": "Robusta", "SGX:TF": "Rubber",
+}
+_KEEP_EXCHANGE = {"SHFE", "DCE", "ZCE", "INE", "GFEX", "LME", "SGX", "OSE", "COMEX"}
+
+
+def _short_from_name(root) -> str:
+    """A short name from a root's CSV name: cut at the first parenthesis, the exchange word
+    dropped unless it tells venues apart (Chinese exchanges, LME, SGX, OSE, COMEX), at most
+    three words."""
+    name = str(getattr(root, "name", "") or getattr(root, "root_id", "") or "").split(" (")[0].strip()
+    exchange = str(getattr(root, "exchange", "") or "")
+    words = name.split()
+    if words and exchange and words[0].upper() == exchange.upper() and exchange.upper() not in _KEEP_EXCHANGE:
+        words = words[1:]
+    text = " ".join(words[:3])
+    return text[:1].upper() + text[1:] if text else str(getattr(root, "root_id", "") or "")
+
+
+def short_root_name(root, root_id: str = "") -> str:
+    """'WTI', 'SHFE copper', 'Corn': the plain short name of a contract root (a `ContractRoot`,
+    or None with its `root_id`)."""
+    rid = str(getattr(root, "root_id", "") or root_id or "")
+    if rid in SHORT_ROOT_NAMES:
+        return SHORT_ROOT_NAMES[rid]
+    if root is None:
+        return rid.split(":", 1)[-1] or rid
+    return _short_from_name(root)
+
+
+def month_label(month: int, year: int) -> str:
+    """'Dec26' from (12, 2026) or (12, 26)."""
+    return f"{_MONTH_ABBR[int(month) - 1]}{int(year) % 100:02d}"
+
+
+def parse_contract_id(instrument_id: str) -> Optional[dict]:
+    """{code, month, year, option_type, strike} from a canonical contract or option id
+    ('CLZ26 Comdty', 'C Z26 Comdty', 'CLZ26C 75 Comdty', 'CUZ26C 80000 Comdty'); None when the
+    id is not one (an FX pair, an LME root)."""
+    text = str(instrument_id or "").strip()
+    for key in (" Comdty", " Index", " Curncy"):
+        if text.endswith(key):
+            text = text[: -len(key)]
+    m = re.match(r"^([A-Z][A-Z0-9 ]*?)\s?([FGHJKMNQUVXZ])(\d{2})\s*([CP])?\s*([\d.]+)?$", text)
+    if not m or (m.group(4) is None) != (m.group(5) is None):
+        return None
+    code, mcode, yy, opt, strike = m.groups()
+    return {"code": code.strip(), "month": _MONTH_CODES.index(mcode) + 1, "year": 2000 + int(yy),
+            "option_type": {"C": "call", "P": "put"}.get(opt or "", ""), "strike": strike or ""}
+
+
+def strike_text(strike) -> str:
+    text = str(strike or "")
+    try:
+        f = float(text)
+    except ValueError:
+        return text
+    return f"{f:,.0f}" if f == int(f) else f"{f:,g}"
+
+
+def contract_name(instrument_id: str, root=None, root_id: str = "") -> str:
+    """'WTI Dec26' for a future, 'WTI Dec26 75c' for an option on it (the strike and c / p);
+    the id without its yellow key when it does not parse."""
+    parsed = parse_contract_id(instrument_id)
+    base = short_root_name(root, root_id or (parsed or {}).get("code", ""))
+    if parsed is None:
+        text = str(instrument_id or "")
+        return text[:-len(" Comdty")] if text.endswith(" Comdty") else text
+    name = f"{base} {month_label(parsed['month'], parsed['year'])}"
+    if parsed["option_type"]:
+        name += f" {strike_text(parsed['strike'])}{parsed['option_type'][0]}"
+    return name
+
+
+# Short names for the processing templates (config/spreads/, family "processing"): a crack, a
+# crush or a margin is named by what it is, not by its legs joined. Anything else in that family
+# takes its template name up to the first parenthesis. Display only.
+SHORT_TEMPLATE_NAMES = {
+    "proc.us.crack_321": "3-2-1 crack", "proc.us.crack_211": "2-1-1 crack",
+    "proc.us.rbob_crack_wti": "RBOB crack", "proc.us.ho_crack_wti": "Heating oil crack",
+    "proc.atl.rbob_crack_brent": "RBOB–Brent crack", "proc.atl.ho_crack_brent": "Heating oil–Brent crack",
+    "proc.eu.gasoil_crack_brent": "Gasoil crack", "proc.eu.eurobob_crack_brent": "Eurobob crack",
+    "proc.eu.naphtha_crack_brent": "Naphtha crack", "proc.eu.hsfo_crack_brent": "HSFO crack",
+    "proc.eu.vlsfo_crack_brent": "VLSFO crack", "proc.sg.gasoil_crack_dubai": "Sing gasoil crack",
+    "proc.sg.jet_crack_dubai": "Jet crack", "proc.sg.mogas92_crack_brent": "Mogas 92 crack",
+    "proc.sg.naphtha_crack_brent": "MOPJ crack", "proc.sg.hsfo380_crack_dubai": "Sing 380 crack",
+    "proc.sg.vlsfo_crack_dubai": "Sing VLSFO crack", "proc.cn.fu_crack_sc": "SHFE fuel oil crack",
+    "proc.cn.lu_crack_sc": "INE LSFO crack", "proc.cn.bu_crack_sc": "Bitumen crack",
+    "proc.us.board_crush": "Board crush", "proc.cn.dalian_crush": "Dalian crush",
+    "proc.cn.import_crush_cbot": "Import crush", "proc.cn.canola_import_crush": "Canola import crush",
+    "proc.us.cattle_crush": "Cattle crush", "proc.cn.coking_margin": "Coking margin",
+}
+
+
+def short_template_name(template_id: str, name: str = "") -> str:
+    """'3-2-1 crack' for proc.us.crack_321; else the template's name up to its first parenthesis."""
+    if template_id in SHORT_TEMPLATE_NAMES:
+        return SHORT_TEMPLATE_NAMES[template_id]
+    text = str(name or template_id or "").split(" (")[0].strip()
+    return text or str(template_id or "spread")
+
+
+def spread_name(position: dict, roots: Optional[dict] = None) -> str:
+    """A spread position's plain name: a calendar 'WTI Dec26/Jan27' (one root, the two months),
+    a processing template by its own short name and month ('3-2-1 crack Nov26', 'Board crush
+    Dec26'; `short_template_name`), any other template 'Brent–WTI Dec26' (the legs' short names
+    joined by an en dash, the first leg's month), a bundle by its own name."""
+    roots = roots or {}
+    legs = [leg for leg in (position.get("legs") or position.get("level_legs") or []) if leg.get("instrument_id")]
+    parsed = [(leg, parse_contract_id(leg.get("instrument_id"))) for leg in legs]
+    kind = str(position.get("kind") or "")
+    if kind == "calendar" and len(parsed) >= 2 and all(p for _l, p in parsed):
+        root_id = str(legs[0].get("root_id") or "")
+        months = sorted({(p["year"], p["month"]) for _l, p in parsed})
+        return f"{short_root_name(roots.get(root_id), root_id)} " + "/".join(month_label(m, y) for y, m in months)
+    template = str(position.get("template") or "")
+    if str(position.get("family") or "") == "processing" or template.startswith("proc."):
+        first = parsed[0][1] if parsed else None
+        month = f" {month_label(first['month'], first['year'])}" if first else ""
+        return short_template_name(template or kind, str(position.get("name") or "")) + month
+    if legs and kind not in ("bundle", "pinned"):
+        seen = []
+        for leg in legs:
+            rid = str(leg.get("root_id") or "")
+            name = short_root_name(roots.get(rid), rid)
+            if name not in seen:
+                seen.append(name)
+        first = parsed[0][1]
+        month = f" {month_label(first['month'], first['year'])}" if first else ""
+        return EN_DASH.join(seen) + month
+    return str(position.get("name") or position.get("position_id") or "spread")
+
+
+def short_date(iso: Optional[str]) -> str:
+    """'18 Nov' from '2026-11-18'; the text as it is when it is not a date."""
+    try:
+        d = dt.date.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return str(iso or "")
+    return f"{d.day} {_MONTH_ABBR[d.month - 1]}"
+
+
+def fx_name(pair: str, product: str, settle_date: Optional[str] = None, option_type: str = "",
+            strike=None) -> str:
+    """'USDCNH 18 Nov forward', 'EURUSD spot', 'USDJPY 16 Dec 155 put'."""
+    pair = str(pair or "")
+    if product == "FX_OPTION":
+        what = " ".join(x for x in (strike_text(strike) if strike else "", (option_type or "option").lower()) if x)
+        return f"{pair} {short_date(settle_date)} {what}".strip()
+    if product == "FX_SPOT":
+        return f"{pair} spot"
+    return f"{pair} {short_date(settle_date)} forward".strip()
+
+
+def lme_name(root, root_id: str, prompt: Optional[str]) -> str:
+    """'LME copper 10 Dec'."""
+    return f"{short_root_name(root, root_id)} {short_date(prompt)}".strip()
+
+
+# --- sizes in words
+def amount_words(value: float, ccy: str = "") -> str:
+    """'2.0m USD', '250k EUR', '100 oz', '5,000 bbl': a size with its unit, k / m for money."""
+    v = abs(float(value))
+    if ccy and len(ccy) == 3 and ccy.isupper() and v >= 1000:
+        if v >= 1e6:
+            body = f"{v / 1e6:.1f}m"
+        else:
+            body = f"{v / 1e3:.0f}k" if v == round(v / 1e3) * 1e3 else f"{v / 1e3:.1f}k"
+    else:
+        body = f"{v:,.2f}".rstrip("0").rstrip(".")
+    return f"{body} {ccy}".strip()
+
+
+def size_words(quantity, unit: str = "lots", ccy: str = "") -> str:
+    """'long 15 lots', 'short 30 lots', 'long 5,000 bbl', 'long 100 t', 'long 2.0m USD', 'short
+    1 lot': the sign as a word, never a signed number."""
+    if _is_missing(quantity):
+        return MISSING
+    q = float(quantity)
+    if q == 0:
+        return "flat"
+    side = "long" if q >= 0 else "short"
+    if ccy:
+        return f"{side} {amount_words(q, ccy)}"
+    n = abs(q)
+    body = f"{n:,.2f}".rstrip("0").rstrip(".")
+    u = "lot" if unit == "lots" and n == 1 else unit
+    return f"{side} {body} {u}".strip()
+
+
+# --- dates
+def estimated_hover(business_days: Optional[int] = None, alert_date: Optional[str] = None, level: str = "",
+                    hover: str = "") -> str:
+    """The hover of an estimated Next / In / Level cell: 'alert counted from 1 Oct while the dates
+    are estimated: 3 bd; level RED by the engine', then `hover`."""
+    lvl = str(level or "").upper()
+    parts = []
+    if business_days is not None:
+        count = "today" if business_days == 0 else (f"{business_days} bd" if business_days > 0 else f"{abs(business_days)} bd ago")
+        frm = f"from {short_date(alert_date)} " if alert_date else ""
+        parts.append(f"alert counted {frm}while the dates are estimated: {count}")
+    else:
+        parts.append("the dates are estimated (contract-master's, not Bloomberg's)")
+    if lvl:
+        parts.append(f"level {lvl} by the engine")
+    return "\n".join(t for t in ("; ".join(parts), hover) if t)
+
+
+def date_cell(iso: Optional[str], business_days: Optional[int] = None, estimated: bool = False,
+              level: str = "", hover: str = "", prefix: str = "", alert_date: Optional[str] = None):
+    """A Next / date cell: '18 Nov · 37 bd' plain for a real date, coloured by `level` only when
+    it is RED or AMBER; grey '≈ 30 Nov' (the date alone) for an estimated one, with the count
+    to the alert, the alert date and the engine's level on hover (`estimated_hover`), never a
+    colour. None / '' -> the em dash with `hover` as its reason. Display only: the engine's
+    level is unchanged."""
+    if not iso:
+        return missing_cell(hover or "no date")
+    words = short_date(iso)
+    lvl = str(level or "").upper()
+    if estimated:
+        text = f"{ESTIMATED} {f'{prefix} ' if prefix else ''}{words}"
+        return html.Span(text, className="cell-estimated", title=estimated_hover(business_days, alert_date, lvl, hover))
+    if business_days is not None:
+        words += " · " + ("today" if business_days == 0 else f"{business_days} bd")
+    if prefix:
+        words = f"{prefix} {words}"
+    cls = {"RED": "cell-red", "AMBER": "cell-amber", "EXPIRED": "cell-red"}.get(lvl, "")
+    title = "\n".join(t for t in (lvl.lower() if lvl in ("RED", "AMBER", "EXPIRED") else "", hover) if t)
+    return html.Span(words, className=cls or None, title=title or None)
+
+
+def unit_suffix(unit: str):
+    """The small grey unit after a Now cell ('6.03 USD/bbl'); None for no unit."""
+    return html.Span(unit, className="cell-unit") if unit else None

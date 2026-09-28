@@ -1,68 +1,42 @@
-"""Timing & cash tab (the Expiries tab until 2026-09-28): "What happens when?" (Commodity
-conversion plan, Phase 1 step 3; rebuilt under the Screens redesign plan, Phase A, 2026-09-25;
-the timeline and the cash section added in the UI redesign wave 2, user 2026-09-28). The roll
-calendar is rendered from `engine.expiry.expiry_schedule` and nothing else: every date,
-business-day count, level and reason there is that dict's; nothing here computes a date, a
-count or a level (CLAUDE.md "Tabs as views"). The cash section reads the FX & cash tab's own
-sources as they are: the open cash legs and the settled cash of
+"""Timing & cash tab (the Expiries tab until 2026-09-28): "What happens when, and when is it
+cash?" (Commodity conversion plan, Phase 1 step 3; the timeline and the cash section added in
+the UI redesign wave 2, user 2026-09-28; the roll table and the cash tidied in the screens tidy,
+wave 2, the same day). The roll calendar is rendered from `engine.expiry.expiry_schedule` and
+nothing else: every date, business-day count, level and reason there is that dict's; nothing here
+computes a date, a count or a level (CLAUDE.md "Tabs as views"). The cash section reads the cash
+ladder's own sources as they are: the open cash legs and the settled cash of
 `engine.ladder.exposure_adapter` (`records_from_db`, `settled_records_from_db`) and the
 initial-margin estimate of `engine.limits.margin_estimate`.
 
 Layout, top to bottom (`body`):
-  0. `timeline_section` (wave 2): the next 60 business days on the app's calendar
-     (`engine.pnl.calendar`, config/holidays.txt) on one horizontal axis, one row per event
-     kind (first notice, last trade, option expiry, LME prompt, FX value date), one marker per
-     event: the roll calendar's events coloured by their level (EXPIRED / RED / AMBER / GREEN),
-     an estimated date as a hollow marker; the cash events (an LME ticket's USD leg on its
-     prompt, an FX leg on its value date) in navy, with the lots or the amount at stake on
-     hover. Events past the as-of or beyond the window are counted in a line under the chart,
-     never dropped silently. A Plotly figure, nothing computed: every x is a date on file.
-  1. `counts_strip`: one compact row of level chips (`counts`, worst first: EXPIRED and RED
-     strong, AMBER warm, GREEN quiet), each with its threshold on hover, and the as-of.
-  2. `schedule_section`: the "Roll calendar" title, its definitions on hover (`about`, with the
-     thresholds from `thresholds`), and one single-line row per open position in the engine's
-     order (worst first), or the engine's `note` when there is nothing to show. Columns, led by
-     what a trader acts on: #, Level, Business days to alert, Alert date, Contract, Name,
-     Exchange, Lots, Next event, Event date, Last trade, First notice, (Product, only when more
-     than one product is present). Every column fits at 1680 px (`COLUMN_WIDTHS_PX`). What
-     used to be wrapped columns is on hover of the row's cells: the reason on Contract, Level
-     and the count; the alert basis on Alert date; the calendar and delivery on Exchange; the
-     dates' source on each date.
-  3. `settled_section`: the engine's `settled_expired`, the contracts the ledger has frozen in
-     full, in a collapsed "Expired and settled (N)" section (contract, name, lots, last trade,
-     frozen at, reason). They never alert: no level colour, never in the counts. Absent when
-     the list is empty.
-  4. `cash_section` (wave 2): settled cash to date by currency (`settled_records_from_db`, the
-     cash ladder's Settled cash row: deliverable legs past their value date at face value, a
-     settled future's or option's USD settlement from `realised_pnl`; one the ledger has not
-     frozen is named, never valued), the dated cash events (`records_from_db` without the
-     settled row: date, currency, amount, what it is), and one line for the initial-margin
-     estimate (`engine.limits.margin_estimate`'s book figure, "estimate, not exchange SPAN").
-     The full currency-by-date ladder is not on screen since wave 3 hid the FX & cash tab (the
-     section's hover says so; no tab link, a link to a hidden tab would be dead).
-  5. `issues_section`: the tab's collapsed "Data issues (N)" drawer: counts the engine could
-     not make, estimated dates, counts past a calendar file's coverage, delivery not on file,
-     a settled ticket with no realised row, a cash leg the ladder left out. Absent when there
-     is nothing to say.
+  0. `timeline_section`: the next 60 business days on the app's calendar (`engine.pnl.calendar`)
+     on one horizontal axis, one row per event kind, one marker per event coloured by its level,
+     an estimated date hollow, the cash events in navy; events past the as-of or beyond the
+     window are counted in a line under the chart, never dropped silently.
+  1. `schedule_section`: the "Roll calendar" title line with the level counts in words
+     ("0 expired · 0 red · 0 amber · 24 green · 7 on estimated dates"), then one single-line row
+     per open position in the engine's order (worst first), seven columns: Level (a chip; grey
+     with the engine's level on hover while the date is estimated), In ("3 bd", "today", "2 bd
+     ago"), Position (plain name), Event (first notice / last trade / option expiry / LME
+     prompt), Date (grey with a leading "≈" while estimated), Lots, Exchange. Everything else
+     (alert date and basis, contract id, first notice, product, calendar, delivery, the dates'
+     source, the reason) is on hover of the row's cells and in the Data issues drawer.
+  2. `settled_section`: the engine's `settled_expired`, the contracts the ledger has frozen in
+     full, in a collapsed "Expired and settled (N)" section. They never alert.
+  3. `cash_section`: settled cash to date, one line per currency (the cash ladder's Settled cash
+     row: deliverable legs past their value date at face value, a settled future's or option's
+     USD settlement from `realised_pnl`, never recomputed; a settled ticket the ledger has not
+     frozen is named, not valued); the cash to come netted by date and currency (the legs on that
+     date in that currency summed, display, the trades on hover): Date, Currency, Amount, What;
+     and one line for the initial-margin estimate ("not estimated (margin rates not set)" when the
+     estimate covers nothing, else the figure with its "excl." marker).
+  4. The tab's one collapsed "Data issues (N)" drawer.
 
-Options on futures (CMDTY_OPTION) and LME prompts (LME_FWD) are rows like any future: an
-option's type, strike and its underlying future's event are on hover of its Next event cell;
-an LME row's tonnes are on hover of its Lots (a lot count the engine could not make reads
-"n/a" with the reason); a date that does not apply to the product (an option's or a prompt's
-first notice, a prompt's last trade) reads "—" with why on hover, never "missing".
-
-An estimated date (`estimated`) is always shown as estimated: every date of that row carries
-the short marker "(est.)", with the sentence on hover. A row whose count reaches past its
-calendar file's coverage (`beyond_calendar_coverage`) has its count in the estimate style, the
-sentence on hover of the count and of Exchange, and a line in the drawer. Every table ranks
-(`ui.tabs.ranking`): numbers stored as numbers, a missing figure the string "n/a" (ranks last)
-with the row's reason as its tooltip. "#" is the engine's own order, so a click on it restores
-worst first. The records keep the fields that left the columns (alert basis, calendar,
-delivery, dates source, reason) so a hover or a test can read them.
-
-The tab has no date picker: it follows the header's as-of store and re-renders in place on
-the data revision and on its safety interval. `layout(default_date)` and
-`register_callbacks(app, get_db_path)` are the shell's interface, the Risk tab's shape.
+Display rules: `ui.tabs.formatting` (2026-09-28): a missing figure is an em dash with its reason,
+never "n/a"; an estimated date grey with a leading "≈"; colour on a Level cell only when the
+engine level is RED / AMBER / EXPIRED and the date is real. The tab has no date picker: it follows
+the header's as-of store and re-renders in place on the data revision and on its safety interval.
+`layout(default_date)` and `register_callbacks(app, get_db_path)` are the shell's interface.
 """
 from __future__ import annotations
 
@@ -77,7 +51,11 @@ from engine.expiry.levels import AMBER, EXPIRED, GREEN, LEVELS, RED
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import about, format_cell, issues_drawer, marker, short_money
+from ui.tabs.formatting import (
+    ESTIMATED, MINUS, MISSING, about, contract_name, date_cell, estimated_hover, format_cell, issues_drawer, lme_name,
+    marker, missing_cell,
+    short_money, sign_class,
+)
 from ui.tabs.header import AS_OF_STORE_ID
 
 BODY_ID = "expiries-body"
@@ -94,66 +72,51 @@ SETTLED_CASH_TABLE_ID = "expiries-settled-cash-table"
 CASH_EVENTS_TABLE_ID = "expiries-cash-events-table"
 TIMELINE_DAYS = 60             # business days shown, on the app's calendar
 
-NA = "n/a"
+NA = MISSING
 EST = " (est.)"
-BEYOND = " (beyond coverage)"
-BUSINESS_DAYS_LABEL = "Business days to alert"
 ESTIMATED_SOURCE = "Estimated, not Bloomberg's"
-SOURCE_LABELS = {"BLOOMBERG": "Bloomberg", "ESTIMATED": ESTIMATED_SOURCE, "TICKET": "Ticket's prompt",
-                 "": "unknown"}
+SOURCE_LABELS = {"BLOOMBERG": "Bloomberg", "ESTIMATED": ESTIMATED_SOURCE, "TICKET": "Ticket's prompt", "": "unknown"}
 ESTIMATE_TIP = "Estimated by contract-master, not Bloomberg's date: the real date may be earlier."
 SOURCE_TIPS = {"BLOOMBERG": "Bloomberg's contract date.", "TICKET": "The ticket's own prompt date.",
                "ESTIMATED": ESTIMATE_TIP}
 LEVEL_LABELS = {EXPIRED: "Expired", RED: "Red", AMBER: "Amber", GREEN: "Green"}
+LEVEL_WORDS = {EXPIRED: "expired", RED: "red", AMBER: "amber", GREEN: "green"}
 PRODUCT_LABELS = {"FUTURE": "Future", "CMDTY_OPTION": "Option", "LME_FWD": "LME prompt"}
-NOT_APPLICABLE = "—"
-NOT_APPLICABLE_TO = {"CMDTY_OPTION": "an option", "LME_FWD": "an LME prompt"}
+EVENT_WORDS = {"first notice": "first notice", "last trade": "last trade", "option expiry": "option expiry",
+               "LME prompt": "LME prompt"}
 
-# Strong for EXPIRED and RED, warm for AMBER, quiet for GREEN.
+# Strong for EXPIRED and RED, warm for AMBER, quiet for GREEN (the settled table's palette too).
 LEVEL_STYLES: Dict[str, dict] = {
     EXPIRED: {"backgroundColor": "#7f1d1d", "color": "#ffffff", "fontWeight": "700"},
     RED: {"backgroundColor": "#c62828", "color": "#ffffff", "fontWeight": "700"},
     AMBER: {"backgroundColor": "#fff3e0", "color": "#b26a00", "fontWeight": "700"},
     GREEN: {"backgroundColor": "#f1f5f1", "color": "#52705a"},
 }
-_CHIP_BORDER = {EXPIRED: "#7f1d1d", RED: "#c62828", AMBER: "#e0a040", GREEN: "#9bb5a1"}
-
-# Every column's width, in px, so the whole row is in sight at 1680 px (the section's inner
-# width there is about 1590 px): the widest content of each column, 12.5 px Inter, plus
-# 16 px of padding. A longer name or contract is cut with an ellipsis, in full on hover.
-COLUMN_WIDTHS_PX: Dict[str, int] = {
-    "rank": 36, "level": 78, "business_days": 86, "alert_date": 134, "contract": 164, "name": 270,
-    "exchange": 74, "lots": 60, "next_event": 106, "next_event_date": 134, "last_trade_date": 134,
-    "first_notice_date": 134, "product": 92,
-}
-WIDTH_BUDGET_PX = 1590
 
 _CELL = {"textAlign": "right", "fontVariantNumeric": "tabular-nums", "padding": "4px 8px",
          "whiteSpace": "nowrap", "overflow": "hidden", "textOverflow": "ellipsis"}
-_NA_STYLE = {"color": "var(--muted)", "fontStyle": "italic"}
-_EST_STYLE = {"color": "#b26a00", "fontStyle": "italic"}
+_NA_STYLE = {"color": "#9ca3af"}
+_EST_STYLE = {"color": "#6b7280", "fontStyle": "italic"}
 
 
 def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
 
 
-def _date_words(iso: Optional[str]) -> str:
-    if not iso:
-        return "no as-of date"
+def _roots() -> Dict[str, Any]:
     try:
-        d = dt.date.fromisoformat(iso)
-    except ValueError:
-        return iso
-    return f"{d:%a} {d.day} {d:%b %Y}"
+        from data.contracts import load_roots
+        return dict(load_roots())
+    except Exception:  # noqa: BLE001 -- the root id stands for its name
+        return {}
 
 
 # --------------------------------------------------------------------------- definitions
 def thresholds_sentence(thresholds: Dict[str, Any]) -> str:
     """The thresholds in force, as the engine reports them."""
     red, amber = thresholds.get(RED), thresholds.get(AMBER)
-    return (f"RED: {red if red is not None else NA} business days or fewer to the alert date; "
-            f"AMBER: {amber if amber is not None else NA} or fewer; GREEN: further out. "
+    return (f"RED: {red if red is not None else 'no threshold'} business days or fewer to the alert date; "
+            f"AMBER: {amber if amber is not None else 'no threshold'} or fewer; GREEN: further out. "
             "EXPIRED: the event date is past and the position is still open. "
             "A count that could not be made is RED.")
 
@@ -167,75 +130,57 @@ def definitions(result: Dict[str, Any]) -> str:
         "negative once past. The alert date is the next event (first notice for a physically delivered "
         "contract, else last trade); while a physical contract's dates are estimated it is held early, "
         "at the first business day of the month before the contract month.",
-        f"A date marked{EST} is contract-master's estimate, not Bloomberg's: the real date may be earlier.",
+        f"A date marked{EST} or shown grey with a leading ≈ is contract-master's estimate, not Bloomberg's: the real "
+        "date may be earlier; its level chip is grey too, the engine's level on hover.",
         "An option on a future alerts on its own expiry; an LME prompt alerts from the day it becomes the "
         "cash date (the prompt less 2 LME business days), and its date is the ticket's own.",
         thresholds_sentence(result.get("thresholds") or {}),
-        "Hover a row's contract, level or count for its reason, its alert date for the alert basis, "
-        "its exchange for the calendar and delivery.",
+        "Hover a row for its alert date and basis, contract id, first notice, product, calendar, delivery and reason.",
     ])
 
 
-# --------------------------------------------------------------------------- 1. level chips
+# --------------------------------------------------------------------------- 1. the counts
 def _chip_tip(level: str, n: int, thresholds: Dict[str, Any]) -> str:
     what = {EXPIRED: "event date past, still open",
-            RED: f"{thresholds.get(RED, NA)} business days or fewer to the alert date",
-            AMBER: f"{thresholds.get(AMBER, NA)} business days or fewer to the alert date",
+            RED: f"{thresholds.get(RED, 'no threshold')} business days or fewer to the alert date",
+            AMBER: f"{thresholds.get(AMBER, 'no threshold')} business days or fewer to the alert date",
             GREEN: "further out"}[level]
     return f"{LEVEL_LABELS[level]}: {n} open position{'s' if n != 1 else ''} ({what})."
 
 
-def counts_strip(result: Dict[str, Any]) -> html.Div:
-    """One compact row of chips, one per level (label, count), each with its threshold on
-    hover, and the as-of."""
+def counts_words(result: Dict[str, Any]) -> List[Any]:
+    """'0 expired · 0 red · 0 amber · 24 green · 7 on estimated dates', each count with its
+    threshold on hover, for the section's title line."""
     counts = result.get("counts") or {}
     thresholds = result.get("thresholds") or {}
-    chips = []
-    for level in LEVELS:
-        n = counts.get(level, 0)
+    rows = result.get("rows") or []
+    parts: List[Any] = []
+    for i, level in enumerate(LEVELS):
+        n = int(counts.get(level, 0) or 0)
+        if i:
+            parts.append(" · ")
         strong = level in (EXPIRED, RED) and n
-        chips.append(html.Span(
-            id=f"expiries-count-{level.lower()}", title=_chip_tip(level, n, thresholds),
-            style={"display": "inline-flex", "alignItems": "center", "gap": "6px", "padding": "2px 10px 2px 3px",
-                   "border": f"1px solid {_CHIP_BORDER[level]}", "borderRadius": "12px", "background": "#fff",
-                   "fontSize": "12px", "cursor": "help"},
-            children=[html.Span(level, style={**LEVEL_STYLES[level], "fontSize": "10px", "borderRadius": "10px",
-                                              "padding": "1px 7px", "letterSpacing": ".04em"}),
-                      html.Span(str(n), style={"fontWeight": "700", "fontVariantNumeric": "tabular-nums",
-                                               **({"color": LEVEL_STYLES[level]["backgroundColor"]} if strong else {})})]))
-    return html.Div(style={"display": "flex", "flexWrap": "wrap", "alignItems": "center", "gap": "8px",
-                           "margin": "0 0 10px"}, children=[
-        html.Div(id=COUNTS_ID, style={"display": "flex", "flexWrap": "wrap", "gap": "6px"}, children=chips),
-        html.Span(f"As of {_date_words(result.get('as_of'))}", className="meta-line",
-                  style={"margin": "0 0 0 8px"}, title=result.get("as_of") or "")])
+        parts.append(html.Span(f"{n} {LEVEL_WORDS[level]}", title=_chip_tip(level, n, thresholds),
+                               style={"fontWeight": 700, "color": LEVEL_STYLES[level]["backgroundColor"]} if strong else None))
+    estimated = sum(1 for r in rows if r.get("estimated"))
+    if estimated:
+        parts += [" · ", html.Span(f"{estimated} on estimated dates", className="cell-estimated",
+                                   title="Positions whose dates are contract-master's estimate, not Bloomberg's: their "
+                                         "level is shown grey, the engine's level on hover.")]
+    return parts
 
 
 # --------------------------------------------------------------------------- 2. the table
-def _dated(iso: Optional[str], estimated: bool) -> str:
-    if not iso:
-        return NA
-    return f"{iso}{EST if estimated else ''}"
-
-
-def _delivery(row: Dict[str, Any]) -> str:
-    delivery = row.get("delivery") or ""
-    assumed = row.get("delivery_assumed") or ""
-    if assumed and assumed != delivery:
-        return f"{delivery or 'not on file'} (assumed {assumed})"
-    return delivery or NA
-
-
 def _number(v) -> str:
     """A figure as the engine gave it, for a hover: thousands separated, no trailing zeros."""
     try:
         f = float(v)
     except (TypeError, ValueError):
-        return str(v) if v not in (None, "") else NA
+        return str(v) if v not in (None, "") else "not on file"
     return f"{f:,.0f}" if f.is_integer() else f"{f:,.4f}".rstrip("0")
 
 
 def _tonnes_tip(row: Dict[str, Any]) -> str:
-    """The tonnes of an LME row, as the engine gives them."""
     tonnes = row.get("tonnes")
     return f"{_number(tonnes)} tonnes" if tonnes is not None else "tonnes not on file"
 
@@ -248,22 +193,9 @@ def _option_tip(row: Dict[str, Any]) -> str:
     und = row.get("underlying_id") or "underlying not on file"
     event = row.get("underlying_event")
     if event:
-        when = _dated(row.get("underlying_event_date"), bool(row.get("underlying_estimated")))
-        tail = f"underlying {und}: {event} {when}"
-    else:
-        tail = f"underlying {und}"
-    return f"{head}; {tail}."
-
-
-def _not_applicable(row: Dict[str, Any], what: str) -> Optional[str]:
-    """The hover of a date that does not apply to this row's product; None when it applies
-    (first notice: not to an option or a prompt; last trade: not to a prompt)."""
-    product = row.get("product") or ""
-    who = NOT_APPLICABLE_TO.get(product)
-    if who is None or (what == "last trade" and product != "LME_FWD"):
-        return None
-    extra = ": the prompt date is the event" if product == "LME_FWD" else ""
-    return f"{what.capitalize()} is not applicable to {who}{extra}."
+        when = f"{row.get('underlying_event_date') or 'date unknown'}{EST if row.get('underlying_estimated') else ''}"
+        return f"{head}; underlying {und}: {event} {when}."
+    return f"{head}; underlying {und}."
 
 
 def _coverage_sentence(row: Dict[str, Any]) -> str:
@@ -272,176 +204,154 @@ def _coverage_sentence(row: Dict[str, Any]) -> str:
             "closed, so it may be too high.")
 
 
-def _date_tip(row: Dict[str, Any]) -> str:
-    """Where a row's dates come from: the (est.) marker's sentence for an estimate."""
-    if row.get("estimated"):
-        return ESTIMATE_TIP
-    return SOURCE_TIPS.get(row.get("dates_source") or "", "Source of the date not on file.")
+def _delivery(row: Dict[str, Any]) -> str:
+    delivery = row.get("delivery") or ""
+    assumed = row.get("delivery_assumed") or ""
+    if assumed and assumed != delivery:
+        return f"{delivery or 'not on file'} (assumed {assumed})"
+    return delivery or "not on file"
 
 
-def schedule_record(row: Dict[str, Any], position: int) -> Tuple[dict, dict]:
-    """(record, tooltips) of one table row, the engine's figures as they are: a date or a
-    count the engine left empty is "n/a" with the row's reason as its tooltip, or "—"
-    with why on hover when it does not apply to the product. The fields that are not
-    columns (alert basis, calendar, delivery, dates source, reason) stay in the record and
-    are read on hover."""
-    reason = row.get("reason") or ""
+def plain_position(row: Dict[str, Any], roots: Dict[str, Any]) -> str:
+    """'WTI Dec26', 'WTI Dec26 75c', 'LME copper 10 Dec'."""
+    root_id = str(row.get("root_id") or "")
+    root = roots.get(root_id)
+    cid = str(row.get("contract_id") or "")
+    if str(row.get("product") or "") == "LME_FWD":
+        prompt = row.get("next_event_date") or (cid.split(" ")[-1] if " " in cid else None)
+        return lme_name(root, root_id, prompt)
+    return contract_name(cid, root, root_id)
+
+
+def row_hover(row: Dict[str, Any]) -> str:
+    """Everything that left the columns, as one hover: contract id, product, alert date and basis,
+    last trade, first notice, dates' source, calendar, delivery, the reason."""
     est = bool(row.get("estimated"))
-    beyond = bool(row.get("beyond_calendar_coverage"))
-    tip: Dict[str, dict] = {}
-
-    def hover(col: str, text: str) -> None:
-        if text:
-            tip[col] = {"value": text, "type": "text"}
-
-    rec: Dict[str, Any] = {
-        "rank": position,
-        "level": row.get("level") or NA,
-        "product": product_label(row.get("product")),
-        "contract": row.get("contract_id") or "",
-        "name": row.get("name") or "",
-        "exchange": row.get("exchange") or "",
-        "lots": rk.value(row.get("lots")),
-        "next_event": row.get("next_event") or NA,
-        "next_event_date": _dated(row.get("next_event_date"), est),
-        "last_trade_date": _dated(row.get("last_trade_date"), est),
-        "first_notice_date": (row.get("first_notice_date") or ("none on file" if row.get("dates_source") else NA)),
-        "alert_date": _dated(row.get("alert_date"), est),
-        "alert_basis": row.get("alert_basis") or NA,
-        "business_days": rk.value(row.get("business_days")),
-        "calendar": (row.get("calendar") or NA) + (BEYOND if beyond else ""),
-        "delivery": _delivery(row),
-        "dates_source": SOURCE_LABELS.get(row.get("dates_source") or "", row.get("dates_source") or ""),
-        "reason": reason,
-    }
-    if rec["business_days"] is None:
-        rec["business_days"] = NA
-
-    # the reason: on the contract, the level and the count
-    for col in ("contract", "level"):
-        hover(col, reason)
-    hover("business_days", " ".join(t for t in (reason, _coverage_sentence(row) if beyond else "") if t))
-    # the alert basis on the alert date; each date's source on the date (the est. sentence)
-    if rec["alert_date"] == NA:
-        hover("alert_date", reason)
-    else:
-        basis = row.get("alert_basis") or ""
-        hover("alert_date", " ".join(t for t in (f"Alert basis: {basis}." if basis else "",
-                                                  ESTIMATE_TIP if est else "") if t))
-    for col in ("next_event_date", "last_trade_date"):
-        hover(col, reason if rec[col] == NA else _date_tip(row))
-    if rec["first_notice_date"] == NA:
-        hover("first_notice_date", reason)
-    elif rec["first_notice_date"] == "none on file":
-        hover("first_notice_date", f"No first notice date on file ({rec['dates_source']}).")
-    else:
-        hover("first_notice_date", _date_tip(row))
-    for col, what in (("first_notice_date", "first notice"), ("last_trade_date", "last trade")):
-        na_text = _not_applicable(row, what)
-        if na_text and not row.get(col):
-            rec[col] = NOT_APPLICABLE
-            hover(col, na_text)
-    # the calendar and delivery on the exchange; the full name on the name (it may be cut)
-    hover("exchange", f"Calendar: {rec['calendar']}. Delivery: {rec['delivery']}. Dates: {rec['dates_source']}."
-                      + (f" {_coverage_sentence(row)}" if beyond else ""))
-    hover("name", " ".join(t for t in (rec["name"], f"({row['sector']})" if row.get("sector") else "") if t))
-    if rec["lots"] is None:
-        rec["lots"] = NA
-        hover("lots", reason)
-    if row.get("product") == "LME_FWD" or "tonnes" in row:
-        hover("lots", _tonnes_tip(row) + (f". {reason}" if rec["lots"] == NA and reason else ""))
+    source = SOURCE_LABELS.get(row.get("dates_source") or "", row.get("dates_source") or "")
+    parts = [f"{row.get('contract_id') or ''} ({row.get('name') or ''}), {PRODUCT_LABELS.get(row.get('product') or '', row.get('product') or 'position')}"]
+    if row.get("alert_date"):
+        parts.append(f"alert date {row['alert_date']}{EST if est else ''}"
+                     + (f" ({row['alert_basis']})" if row.get("alert_basis") else ""))
+    if row.get("last_trade_date"):
+        parts.append(f"last trade {row['last_trade_date']}{EST if est else ''}")
+    if row.get("first_notice_date"):
+        parts.append(f"first notice {row['first_notice_date']}")
+    elif row.get("product") == "FUTURE":
+        parts.append("no first notice date on file" if row.get("dates_source") else "first notice unknown until Bloomberg's dates are on file")
+    parts.append(f"dates: {source}")
+    parts.append(f"calendar {row.get('calendar') or 'unknown'}, delivery {_delivery(row)}")
+    if row.get("beyond_calendar_coverage"):
+        parts.append(_coverage_sentence(row))
     if row.get("product") == "CMDTY_OPTION":
-        hover("next_event", _option_tip(row))
-    return rec, tip
+        parts.append(_option_tip(row))
+    if row.get("product") == "LME_FWD" or "tonnes" in row:
+        parts.append(_tonnes_tip(row))
+    if row.get("reason"):
+        parts.append(str(row["reason"]))
+    return ". ".join(p.rstrip(".") for p in parts if p) + "."
 
 
-def product_label(product: Optional[str]) -> str:
-    """The product as the tab names it: "Future", "Option", "LME prompt"; anything else as given."""
-    return PRODUCT_LABELS.get(product or "", product or NA)
+def level_chip(level: str, estimated: bool, hover: str = "", business_days: Optional[int] = None,
+               alert_date: Optional[str] = None):
+    """The Level cell: a coloured chip for a real date; while the date is estimated a grey chip
+    reading 'est.', the engine's level and the count to the alert on hover (display only, the
+    level is unchanged), never a red or amber chip."""
+    lvl = str(level or "").upper()
+    if not lvl:
+        return missing_cell(hover or "no level")
+    if estimated:
+        return html.Span("est.", className="level-chip level-chip--estimated",
+                         title=estimated_hover(business_days, alert_date, lvl, hover))
+    return html.Span(lvl, className=f"level-chip level-chip--{lvl.lower()}", title=hover or lvl)
 
 
-def show_product(rows: List[Dict[str, Any]]) -> bool:
-    """The Product column is shown only when the rows hold more than one product."""
-    return len({r.get("product") or "" for r in rows}) > 1
+def in_words(business_days: Optional[int]) -> str:
+    if business_days is None:
+        return NA
+    n = int(business_days)
+    if n == 0:
+        return "today"
+    return f"{n} bd" if n > 0 else f"{abs(n)} bd ago"
 
 
-def _columns(with_product: bool = False) -> List[dict]:
-    """The visible columns, led by what a trader acts on; Product last, only when mixed."""
-    lots = rk.amount(2, nully="", trim=True)
-    product = [rk.text("Product", "product")] if with_product else []
-    return [rk.numeric("#", "rank", rk.count()), rk.text("Level", "level"),
-            rk.numeric(BUSINESS_DAYS_LABEL, "business_days", rk.count(nully=NA)),
-            rk.text("Alert date", "alert_date"), rk.text("Contract", "contract"),
-            rk.text("Name", "name"), rk.text("Exchange", "exchange"), rk.numeric("Lots", "lots", lots),
-            rk.text("Next event", "next_event"), rk.text("Event date", "next_event_date"),
-            rk.text("Last trade", "last_trade_date"), rk.text("First notice", "first_notice_date"),
-            *product]
+def lots_words(lots) -> str:
+    v = rk.value(lots)
+    if v is None:
+        return NA
+    body = f"{abs(v):,.2f}".rstrip("0").rstrip(".")
+    return (MINUS + body) if v < 0 else body
 
 
-def _width_rules(columns: List[dict]) -> List[dict]:
-    rules = []
-    for col in columns:
-        px = f"{COLUMN_WIDTHS_PX[col['id']]}px"
-        rules.append({"if": {"column_id": col["id"]}, "width": px, "minWidth": px, "maxWidth": px})
-    return rules
+def schedule_tr(row: Dict[str, Any], roots: Dict[str, Any]) -> html.Tr:
+    """One single-line row of the roll table, the engine's figures as they are."""
+    est = bool(row.get("estimated"))
+    reason = str(row.get("reason") or "")
+    hover = row_hover(row)
+    bd = row.get("business_days")
+    in_cls = "cell-estimated" if est and bd is not None else (
+        "cell-red" if row.get("level") in (RED, EXPIRED) and not est else "cell-amber" if row.get("level") == AMBER and not est else "")
+    est_hover = estimated_hover(bd, row.get("alert_date"), str(row.get("level") or ""), reason) if est else ""
+    in_cell = (missing_cell(reason or "no count could be made") if bd is None
+               else html.Span(ESTIMATED if est else in_words(bd), className=in_cls or None,
+                              title=est_hover if est else
+                              ("to the alert date, on the " + str(row.get("calendar") or "exchange") + " calendar"
+                               + (f"; {_coverage_sentence(row)}" if row.get("beyond_calendar_coverage") else ""))))
+    event = EVENT_WORDS.get(str(row.get("next_event") or ""), str(row.get("next_event") or ""))
+    lots = rk.value(row.get("lots"))
+    cells = [
+        html.Td(level_chip(str(row.get("level") or ""), est, reason, bd, row.get("alert_date")), className="l"),
+        html.Td(in_cell),
+        html.Td(plain_position(row, roots), className="l book-name", title=hover),
+        html.Td(event or missing_cell(reason or "no event"), className="l",
+                title=_option_tip(row) if row.get("product") == "CMDTY_OPTION" else None),
+        html.Td(date_cell(row.get("next_event_date"), None, est, "", reason if not row.get("next_event_date")
+                          else SOURCE_TIPS.get(row.get("dates_source") or "", "Source of the date not on file.")), className="l"),
+        html.Td(lots_words(lots) if lots is not None else missing_cell(reason or "no lot count"),
+                className=sign_class(lots) or None,
+                title=_tonnes_tip(row) if (row.get("product") == "LME_FWD" or "tonnes" in row) else None),
+        html.Td(str(row.get("exchange") or ""), className="l",
+                title=f"Calendar: {row.get('calendar') or 'unknown'}. Delivery: {_delivery(row)}. Dates: "
+                      f"{SOURCE_LABELS.get(row.get('dates_source') or '', row.get('dates_source') or '')}."),
+    ]
+    return html.Tr(cells, title=hover, className="roll-row")
 
 
 _HEADER_TIPS = {
-    "rank": "The engine's order, worst first: level, then fewest business days. Click to restore it.",
-    "level": "EXPIRED, RED, AMBER or GREEN, by the business days to the alert date; the reason on hover of a cell.",
-    "business_days": ("Business days from the as-of date to the alert date on the contract's own exchange "
-                      "calendar (not to the event when the alert is held early); negative once past."),
-    "alert_date": "The date the level is counted to: the next event, or earlier while the dates are estimated "
-                  "(the alert basis on hover of a cell).",
-    "exchange": "The calendar the count uses, the delivery method and the dates' source are on hover of a cell.",
-    "next_event_date": f"A date marked{EST} is contract-master's estimate, not Bloomberg's.",
+    "Level": "EXPIRED, RED, AMBER or GREEN by the business days to the alert date; grey while the date is estimated, "
+             "the engine's level on hover; the reason on hover of the chip.",
+    "In": "Business days from the as-of date to the alert date on the contract's own exchange calendar (not to the "
+          "event when the alert is held early); 'ago' once past.",
+    "Position": "The contract, option or LME prompt in plain words; the contract id, alert date and basis, first "
+                "notice, calendar, delivery and reason on hover.",
+    "Event": "The next event: first notice, last trade, option expiry or LME prompt.",
+    "Date": "The event's date; grey with a leading ≈ when it is contract-master's estimate, not Bloomberg's.",
+    "Lots": "The open lots (an LME prompt's tonnes on hover).",
+    "Exchange": "The exchange; its calendar, the delivery method and the dates' source on hover.",
 }
 
 
-def _level_styles() -> List[dict]:
-    return [{"if": {"column_id": "level", "filter_query": f"{{level}} = '{lvl}'"}, **style}
-            for lvl, style in LEVEL_STYLES.items()]
-
-
-def schedule_section(result: Dict[str, Any]) -> html.Div:
+def schedule_section(result: Dict[str, Any], roots: Optional[Dict[str, Any]] = None) -> html.Div:
     rows = result.get("rows") or []
-    heading = about("Roll calendar", definitions(result))
+    roots = roots if roots is not None else _roots()
+    title = html.Div(className="section-title-line", children=[
+        about("Roll calendar", definitions(result), level="h4"),
+        html.Span(counts_words(result), id=COUNTS_ID, className="book-counts")])
     if not rows:
         return html.Div(className="section", children=[
-            heading, html.P(result.get("note") or "No open position to show.", className="section-kicker")])
-    recs = [schedule_record(r, i) for i, r in enumerate(rows, start=1)]
-    columns = _columns(show_product(rows))
-    left = [c["id"] for c in columns if c["type"] == "text"]
-    table = dash_table.DataTable(
-        id=TABLE_ID,
-        columns=columns,
-        data=[r for r, _ in recs],
-        tooltip_data=[t for _, t in recs],
-        tooltip_header=_HEADER_TIPS,
-        tooltip_delay=0, tooltip_duration=None,
-        **rk.sortable(TABLE_ID),
-        style_table={"overflowX": "auto"},
-        style_cell=_CELL,
-        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in left]
-                               + _width_rules(columns),
-        style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
-        style_data_conditional=_level_styles()
-                               + rk.sign_styles(["lots"])
-                               + [{"if": {"column_id": c, "filter_query": f'{{{c}}} contains "(est.)"'}, **_EST_STYLE}
-                                  for c in ("next_event_date", "last_trade_date", "alert_date")]
-                               + [{"if": {"column_id": "business_days",
-                                          "filter_query": '{calendar} contains "beyond coverage"'}, **_EST_STYLE}]
-                               + [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{NA}'"}, **_NA_STYLE}
-                                  for c in ("business_days", "next_event_date", "alert_date", "last_trade_date",
-                                            "first_notice_date", "lots")]
-                               + [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{NOT_APPLICABLE}'"},
-                                   "color": "var(--muted)"} for c in ("first_notice_date", "last_trade_date")],
-        page_action="none",
-    )
-    return html.Div(className="section", children=[heading, table])
+            title, html.P(result.get("note") or "No open position to show.", className="section-kicker")])
+    head = html.Thead(html.Tr([html.Th(name, className="l" if name in ("Level", "Position", "Event", "Date", "Exchange") else None,
+                                       title=_HEADER_TIPS[name]) for name in ("Level", "In", "Position", "Event", "Date", "Lots", "Exchange")]))
+    table = html.Table([head, html.Tbody([schedule_tr(r, roots) for r in rows])], id=TABLE_ID, className="book-table roll-table")
+    return html.Div(className="section", children=[title, html.Div(className="book-card", children=[table])])
 
 
 # --------------------------------------------------------------------------- 3. expired and settled
+def _dated(iso: Optional[str], estimated: bool) -> str:
+    if not iso:
+        return NA
+    return f"{iso}{EST if estimated else ''}"
+
+
 def settled_record(entry: Dict[str, Any]) -> Tuple[dict, dict]:
     """(record, tooltips) of one settled contract, the engine's entry as it is."""
     reason = entry.get("reason") or ""
@@ -576,7 +486,7 @@ def schedule_events(result: Dict[str, Any]) -> List[dict]:
             continue
         lots = r.get("lots")
         stake = (f"{_number(r.get('tonnes'))} t" if r.get("product") == "LME_FWD" and r.get("tonnes") is not None
-                 else f"{_number(lots)} lots" if lots is not None else "lots n/a")
+                 else f"{_number(lots)} lots" if lots is not None else "lots not counted")
         alert = r.get("alert_date")
         held = f"; alert {alert} ({r.get('alert_basis')})" if alert and alert != date else ""
         events.append({"kind": r.get("next_event") or "last trade", "date": date, "level": r.get("level") or GREEN,
@@ -668,111 +578,118 @@ def timeline_section(as_of: str, result: Dict[str, Any], cash_records: List[dict
         *[html.P(line, className="section-kicker") for line in timeline_notes(as_of, events, days)]])
 
 
-# --------------------------------------------------------------------------- 4. cash
+# --------------------------------------------------------------------------- 5. cash
 CASH_ABOUT = (
     "Settled cash to date by currency: the cash ladder's own Settled cash row (engine.ladder.exposure_adapter): "
     "deliverable FX legs past their value date at face value in their own currency, an LME ticket's USD leg "
     "after its prompt, and a settled future's or option's USD settlement as the ledger froze it in "
     "realised_pnl, never recomputed; a settled ticket the ledger has not frozen is named, not valued. This is "
-    "cash from the tickets on file, not a bank balance. Then the dated cash events still to come, and the "
-    "initial-margin estimate. The full currency-by-date ladder, the USD equivalents and the FX stress are not "
-    "on screen (the FX & cash tab is hidden); the FX delta by currency is on the Exposure tab.")
+    "cash from the tickets on file, not a bank balance. Then the cash still to come, netted by date and currency "
+    "(the legs on that date in that currency added up, the trades on hover), and the initial-margin estimate. A "
+    "futures book is margined daily, so its cash is its Daily P&L; the FX delta by currency is on the Exposure tab.")
 MARGIN_ABOUT = ("The book's estimated initial margin (engine/limits, config/limits.yaml's placeholder rates with "
                 "spread credits): an estimate, not exchange SPAN, never the exchange's or the clearer's figure.")
 
 
-def settled_cash_records(records: List[dict], unresolved: List[Any]) -> Tuple[List[dict], List[dict]]:
-    """(records, tooltips): the settled cash summed per currency (known figures added up, the
-    tickets on hover), USD first then by |amount|; a ticket the ledger has not frozen is not in
-    any figure and is named on the drawer (`cash_issue_items`)."""
+def settled_cash_lines(records: List[dict]) -> List[dict]:
+    """The settled cash summed per currency (known figures added up, the tickets on hover), USD
+    first then by |amount|."""
     by_ccy: Dict[str, List[dict]] = {}
     for rec in records:
         by_ccy.setdefault(str(rec.get("currency") or ""), []).append(rec)
-    out, tips = [], []
+    out = []
     for ccy, mine in by_ccy.items():
         total = float(sum(float(r.get("local_amount") or 0.0) for r in mine))
         lines = [f"{r.get('trade_id')} {r.get('currency_pair') or ''} settled {r.get('settled_on') or ''}: "
                  f"{format_cell(float(r.get('local_amount') or 0.0))}" for r in mine]
-        out.append({"currency": ccy, "amount": total, "tickets": len(mine)})
-        tips.append({"amount": {"value": f"{format_cell(total)} {ccy}; " + "; ".join(lines[:12])
-                                         + (f"; and {len(lines) - 12} more" if len(lines) > 12 else ""), "type": "text"}})
-    order = sorted(range(len(out)), key=lambda i: (out[i]["currency"] != "USD", -abs(out[i]["amount"])))
-    return [out[i] for i in order], [tips[i] for i in order]
+        out.append({"currency": ccy, "amount": total, "tickets": len(mine),
+                    "hover": f"{ccy} {format_cell(total)}; " + "; ".join(lines[:12]) + (f"; and {len(lines) - 12} more" if len(lines) > 12 else "")})
+    out.sort(key=lambda r: (r["currency"] != "USD", -abs(r["amount"])))
+    return out
 
 
-def cash_event_records(events: List[dict]) -> Tuple[List[dict], List[dict]]:
-    """The dated cash events (`cash_events`) as table rows, soonest first."""
-    rows = sorted(events, key=lambda e: (e["date"], e["currency"]))
-    records = [{"date": e["date"], "currency": e["currency"], "amount": e["amount"], "what": e["kind"],
-                "trade_id": e["trade_id"], "pair": e["pair"]} for e in rows]
-    tips = [{"amount": {"value": e["hover"], "type": "text"}} for e in rows]
-    return records, tips
+def cash_to_come_lines(events: List[dict]) -> List[dict]:
+    """The cash still to come netted by date and currency: the legs on that date in that currency
+    added up (display), what they are, the trades on hover; soonest first."""
+    groups: Dict[Tuple[str, str], List[dict]] = {}
+    for e in events:
+        groups.setdefault((e["date"], e["currency"]), []).append(e)
+    out = []
+    for (date, ccy), mine in sorted(groups.items()):
+        amount = float(sum(e["amount"] for e in mine))
+        kinds = list(dict.fromkeys(e["kind"] for e in mine))
+        out.append({"date": date, "currency": ccy, "amount": amount, "what": " + ".join(kinds), "trades": len(mine),
+                    "hover": "; ".join(e["hover"] for e in mine[:12]) + (f"; and {len(mine) - 12} more" if len(mine) > 12 else "")})
+    return out
+
+
+def _amount_td(amount: float, hover: str) -> html.Td:
+    return html.Td(format_cell(amount), className=sign_class(amount) or None, title=hover)
 
 
 def margin_line(margin: Optional[Dict[str, Any]], error: str = "") -> html.Div:
-    """One line: the book's estimated initial margin in k / m with its basis on hover, or n/a
-    with the reason."""
+    """One line: the book's estimated initial margin in k / m with its basis on hover; "not
+    estimated (margin rates not set)" when the estimate covers nothing."""
     if error:
-        return html.Div(className="meta-line", children=[html.Span("Initial margin (estimate): "), marker(NA, error)])
-    book = (margin or {}).get("book") or {}
+        return html.Div(className="meta-line", children=[html.Span(f"Initial margin: not estimated ({error})", title=MARGIN_ABOUT)])
+    m = margin or {}
+    book = m.get("book") or {}
     value = book.get("margin_usd")
-    if not (margin or {}).get("available") or value is None:
-        why = "; ".join((margin or {}).get("reasons") or []) or book.get("reason") or "no margin figure"
-        return html.Div(className="meta-line", children=[html.Span("Initial margin (estimate): "), marker(NA, why)])
+    positions = int(book.get("positions") or 0)
+    excluded = int(book.get("excluded_count") or 0)
+    reasons = list(m.get("reasons") or [])
+    nothing_in = (not m.get("available")) or value is None or (positions and excluded >= positions) or not positions
+    if nothing_in:
+        why = "; ".join(reasons) or book.get("reason") or book.get("caption") or "no position in the estimate"
+        short = "margin rates not set" if ("rate set" in why or "not set" in why or not reasons) else why
+        return html.Div(className="meta-line", children=[
+            html.Span(f"Initial margin: not estimated ({short})", title=f"{why}. {MARGIN_ABOUT}")])
     hover = (f"{format_cell(value)} USD = gross charge {format_cell(book.get('gross_charge_usd') or 0)} less spread "
              f"credits {format_cell(book.get('spread_credit_usd') or 0)}; {book.get('basis') or MARGIN_ABOUT}")
-    parts = [html.Span("Initial margin (estimate, not exchange SPAN): ", title=MARGIN_ABOUT),
-             html.Span(short_money(value, "$"), title=hover, style={"fontWeight": 700})]
-    if book.get("caption"):
-        parts.append(marker(f"excl. {book.get('excluded_count') or ''}".strip(), f"{book['caption']}: {book.get('reason') or ''}"))
+    parts: List[Any] = [html.Span("Initial margin (estimate, not exchange SPAN): ", title=MARGIN_ABOUT),
+                        html.Span(short_money(value, "$"), title=hover, style={"fontWeight": 700})]
+    if excluded:
+        parts.append(marker(f"excl. {excluded}", f"{book.get('caption') or f'excludes {excluded} positions'}: "
+                                                 + ("; ".join(reasons) or book.get("reason") or "no rate set")))
     return html.Div(className="meta-line", children=parts)
 
 
 def cash_section(settled: List[dict], settled_unresolved: List[Any], cash_records: List[dict],
                  margin: Optional[Dict[str, Any]], margin_error: str = "") -> html.Div:
-    heading = about("Cash", CASH_ABOUT)
-    children: List[Any] = [heading]
-    records, tips = settled_cash_records(settled, settled_unresolved)
-    if records:
-        children.append(html.H5("Settled cash to date", className="about-title", title=CASH_ABOUT))
-        children.append(dash_table.DataTable(
-            id=SETTLED_CASH_TABLE_ID,
-            columns=[rk.text("Currency", "currency"), rk.numeric("Amount", "amount", rk.amount(nully=NA)),
-                     rk.numeric("Tickets", "tickets", rk.count())],
-            data=records, tooltip_data=tips, tooltip_delay=0, tooltip_duration=None,
-            **rk.sortable(SETTLED_CASH_TABLE_ID),
-            style_table={"overflowX": "auto", "maxWidth": "520px"}, style_cell=_CELL,
-            style_cell_conditional=[{"if": {"column_id": "currency"}, "textAlign": "left"}],
-            style_header={"fontWeight": "bold"},
-            style_data_conditional=rk.sign_styles(["amount"], bold=True)))
+    children: List[Any] = [about("Cash", CASH_ABOUT, level="h4")]
+    lines = settled_cash_lines(settled)
+    cards: List[Any] = []
+    settled_card: List[Any] = [html.Div("Settled cash to date", className="book-h", title=CASH_ABOUT)]
+    if lines:
+        settled_card.append(html.Table(id=SETTLED_CASH_TABLE_ID, className="book-table", children=[
+            html.Thead(html.Tr([html.Th("Currency", className="l"), html.Th("Amount"), html.Th("Tickets")])),
+            html.Tbody([html.Tr([html.Td(ln["currency"], className="l"), _amount_td(ln["amount"], ln["hover"]),
+                                 html.Td(str(ln["tickets"]))]) for ln in lines])]))
     else:
-        children.append(html.P("No settled cash yet from the tickets on file.", className="section-kicker"))
+        settled_card.append(html.P("No settled cash yet from the tickets on file.", className="section-kicker"))
     if settled_unresolved:
-        children.append(html.P(f"{len(settled_unresolved)} settled ticket(s) not in the figures: "
-                               + "; ".join(f"{u.trade_id} {u.symbol}: {u.reason}" for u in settled_unresolved[:4])
-                               + (f"; and {len(settled_unresolved) - 4} more" if len(settled_unresolved) > 4 else ""),
-                               className="section-kicker"))
-    events = cash_events(cash_records)
-    ev_records, ev_tips = cash_event_records(events)
-    if ev_records:
-        children.append(html.H5("Cash to come", className="about-title",
-                                title="Each open cash leg on its own date: an LME ticket's USD leg on its prompt, an FX "
-                                      "leg on its value date (+ = receive). Soonest first."))
-        children.append(dash_table.DataTable(
-            id=CASH_EVENTS_TABLE_ID,
-            columns=[rk.text("Date", "date"), rk.text("Currency", "currency"),
-                     rk.numeric("Amount", "amount", rk.amount(nully=NA)), rk.text("What", "what"),
-                     rk.text("Trade", "trade_id"), rk.text("Pair / metal", "pair")],
-            data=ev_records, tooltip_data=ev_tips, tooltip_delay=0, tooltip_duration=None,
-            **rk.sortable(CASH_EVENTS_TABLE_ID),
-            page_action="native", page_size=15,
-            style_table={"overflowX": "auto", "maxWidth": "900px"}, style_cell=_CELL,
-            style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"}
-                                    for c in ("date", "currency", "what", "trade_id", "pair")],
-            style_header={"fontWeight": "bold"},
-            style_data_conditional=rk.sign_styles(["amount"])))
+        settled_card.append(html.P(f"{len(settled_unresolved)} settled ticket(s) not in the figures: "
+                                   + "; ".join(f"{u.trade_id} {u.symbol}: {u.reason}" for u in settled_unresolved[:4])
+                                   + (f"; and {len(settled_unresolved) - 4} more" if len(settled_unresolved) > 4 else ""),
+                                   className="section-kicker"))
+    cards.append(html.Div(className="book-card card-pad", children=settled_card))
+    to_come = cash_to_come_lines(cash_events(cash_records))
+    come_card: List[Any] = [html.Div("Cash to come", className="book-h",
+                                     title="The cash legs still to settle, netted by date and currency (the legs added up, "
+                                           "the trades on hover): an LME ticket's USD leg on its prompt, an FX leg on its "
+                                           "value date (+ = receive). Soonest first.")]
+    if to_come:
+        come_card.append(html.Table(id=CASH_EVENTS_TABLE_ID, className="book-table", children=[
+            html.Thead(html.Tr([html.Th("Date", className="l"), html.Th("Currency", className="l"), html.Th("Amount"),
+                                html.Th("What", className="l")])),
+            html.Tbody([html.Tr([html.Td(ln["date"], className="l"), html.Td(ln["currency"], className="l"),
+                                 _amount_td(ln["amount"], ln["hover"]),
+                                 html.Td(ln["what"] + (f" · {ln['trades']} legs" if ln["trades"] > 1 else ""), className="l grid-note",
+                                         title=ln["hover"])]) for ln in to_come])]))
     else:
-        children.append(html.P("No cash leg still to settle on the tickets on file.", className="section-kicker"))
+        come_card.append(html.P("No cash leg still to settle on the tickets on file.", className="section-kicker"))
+    cards.append(html.Div(className="book-card card-pad", children=come_card))
+    children.append(html.Div(className="cards-row", children=cards))
     children.append(margin_line(margin, margin_error))
     return html.Div(id=CASH_ID, className="section", children=children)
 
@@ -797,18 +714,19 @@ def _safe(build: Callable[[], Any], label: str) -> Any:
         return build()
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
         return html.Div(className="section", children=[
-            about(label, None), marker(NA, f"{label} could not be built ({type(exc).__name__}: {exc})")])
+            about(label, None), missing_cell(f"{label} could not be built ({type(exc).__name__}: {exc})")])
 
 
 def body(result: Dict[str, Any], cash: Optional[Dict[str, Any]] = None) -> html.Div:
     """The whole tab body from one `expiry_schedule` result and the cash reads (`cash_inputs`;
-    None renders the roll calendar alone, the old shape)."""
+    None renders the roll calendar alone)."""
     cash = cash or {}
     as_of = result.get("as_of") or ""
+    roots = _roots()
     parts: List[Any] = []
     if cash:
         parts.append(_safe(lambda: timeline_section(as_of, result, cash.get("records") or []), "Timeline"))
-    parts += [counts_strip(result), schedule_section(result)]
+    parts.append(_safe(lambda: schedule_section(result, roots), "Roll calendar"))
     settled = settled_section(result)
     if settled is not None:
         parts.append(settled)
@@ -866,22 +784,19 @@ def render(as_of: Optional[str], db_path) -> Any:
     return body(result, cash)
 
 
-_TAB_ABOUT = ("What happens when: the next 60 business days of expiries, prompts and value dates on one line, "
-              "the roll calendar (every open future, option on a future and LME prompt, its next first notice, "
-              "last trade, option expiry or prompt, the business days to its alert date and its level, as "
-              "expiry-monitor gives them; a date marked (est.) is an estimate, not Bloomberg's), and the cash: "
-              "settled to date, still to come, and the initial-margin estimate.")
+_TAB_ABOUT = ("What happens when, and when is it cash: the next 60 business days of expiries, prompts and value dates "
+              "on one line, the roll calendar (every open future, option on a future and LME prompt, its next event, "
+              "the business days to its alert date and its level, as expiry-monitor gives them; an estimated date grey "
+              "with a leading ≈), and the cash: settled to date, still to come, and the initial-margin estimate.")
 
 
 def layout(default_date: Optional[str] = None) -> html.Div:
     """The static shell: a title row and the body container the callback fills. No date
     picker: the tab follows the header's as-of store."""
     return html.Div(className="expiries-tab", children=[
-        html.Div(className="ladder-title-row", children=[
-            about("Timing & cash", _TAB_ABOUT, level="h3", className="ladder-title-row-heading"),
-            html.Div(className="ladder-title-row-right", children=[
-                html.H4(f"Follows the header's as-of date{f' ({default_date})' if default_date else ''}",
-                        className="section-title")])]),
+        html.Div(className="book-title-row", children=[
+            about("Timing & cash", _TAB_ABOUT, level="h3"),
+            html.Span("what happens when, and when is it cash", className="book-counts")]),
         html.Div(id=BODY_ID, children=[message_box("Loading the roll calendar...")]),
         dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])

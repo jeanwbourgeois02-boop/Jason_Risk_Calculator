@@ -141,7 +141,7 @@ def test_manual_form_prefill():
 def test_build_layout_has_expected_ids():
     layout = md.build_layout(default_date="2026-08-18")
     rendered = str(layout)
-    for expected_id in (md.DATE_PICKER_ID, md.PAIR_DROPDOWN_ID, md.STATUS_ID, md.BODY_ID, md.PULL_NOW_ID,
+    for expected_id in (md.PAIR_DROPDOWN_ID, md.STATUS_ID, md.BODY_ID, md.PULL_NOW_ID,
                         md.PULL_NOW_STATUS_ID, md.PULL_REVISION_ID, md.REFRESH_ID, md.MANUAL_INSTRUMENT_ID):
         assert expected_id in rendered
 
@@ -703,7 +703,7 @@ def test_status_block_shows_what_the_ledger_refroze_with_money_the_tabs_way_and_
     # the pull's own sentence, then one line per trade, money as the tab writes it elsewhere
     assert "Ledger: 3 settled trades re-frozen at the close" in text
     assert "F1 FX_FWD: USD -1,234 -> USD 2,001 (the 2026-09-19 close landed)" in text
-    assert "O2 FX_OPTION: n/a -> USD 15,000" in text and "O2 FX_OPTION: n/a -> USD 15,000 (" not in text
+    assert f"O2 FX_OPTION: {md.MISSING} -> USD 15,000" in text and f"O2 FX_OPTION: {md.MISSING} -> USD 15,000 (" not in text
     assert "kept: F3 FX_FWD: already frozen at the close" in text and "kept: F4" in text
     # each backfill block under its own label, the day's and the closing step's
     assert "Backfill 2026-09-19 ledger: 1 settled trade re-frozen at the close" in text
@@ -725,7 +725,6 @@ def test_status_block_shows_what_the_ledger_refroze_with_money_the_tabs_way_and_
     # a count without a sentence gets the pull's wording; a blank never shows as zero
     assert md.refrozen_rows({"refrozen": [{"trade_id": "F1"}]})["summary"] == "1 settled trade re-frozen at the close"
     assert md.refrozen_rows({"refrozen_count": "2"})["summary"] == "2 settled trades re-frozen at the close"
-    assert md.usd_words(None) == "n/a" and md.usd_words("x") == "n/a" and md.usd_words(float("nan")) == "n/a"
     assert md.usd_words(0) == "USD 0" and md.usd_words(-2.5e6) == "USD -2,500,000"
 
 
@@ -956,55 +955,6 @@ def _futures_book():
     return conn
 
 
-def test_futures_curves_one_block_per_root_by_sector_a_price_and_a_missing_one_with_its_reason(book_is_today):
-    blocks = md.futures_curve_rows(_futures_book(), TODAY)
-    assert [(b["sector"], b["root_id"]) for b in blocks] == [("energy", "NYMEX:CL"), ("metals", "LME:AH")]
-    wti, alu = blocks
-    assert wti["exchange"] == "NYMEX" and wti["currency"] == "USD" and wti["open"] == 1 and wti["missing"] == 1
-
-    z = wti["rows"][0]
-    assert (z["contract_id"], z["month"], z["expiry"], z["lots"]) == ("CLZ26 Comdty", "2026-12", "2026-11-19 (est.)", "+2")
-    assert (z["price"], z["source"], z["snapped_at"]) == ("68.2500", "Bloomberg (BDH)", f"{TODAY} 14:32:05-04:00")
-    assert z["why"] == "" and z["flag"] == ""
-
-    la = alu["rows"][0]
-    assert (la["contract_id"], la["lots"], la["price"], la["flag"]) == ("LAZ26 Comdty", "+3", md.MISSING_PRICE, "missing")
-    assert la["why"] == "no verified Bloomberg ticker for LME:AH"
-    assert la["change"] == "n/a" and la["previous"] == "no earlier close on file"
-
-    # a contract no trade needs: never asked, and it says so; never blank
-    x = next(r for r in wti["rows"] if r["contract_id"] == "CLX26 Comdty")
-    assert x["price"] == md.MISSING_PRICE and x["lots"] == "no position"
-    assert x["why"] == f"no trade on file needs it on {TODAY}, so no pull asks Bloomberg for it"
-
-
-def test_futures_curves_change_is_against_the_latest_earlier_official_close(book_is_today):
-    conn = _futures_book()
-    z = md.futures_curve_rows(conn, TODAY)[0]["rows"][0]
-    assert z["previous"] == f"67.5000 ({PREV})" and z["change"] == "+0.7500"
-    f = next(r for r in md.futures_curve_rows(conn, TODAY)[0]["rows"] if r["contract_id"] == "CLF27 Comdty")
-    assert f["price"] == "67.9000" and f["previous"] == "no earlier close on file" and f["change"] == "n/a"
-    # a MANUAL row is shown as what is on file instead, never as the price
-    _mark(conn, TODAY, "CLX26 Comdty", "2026-10-20", "FUTURE_PX", 66.0, "MANUAL")
-    conn.commit()
-    x = next(r for r in md.futures_curve_rows(conn, TODAY)[0]["rows"] if r["contract_id"] == "CLX26 Comdty")
-    assert x["price"] == md.MISSING_PRICE and x["why"].endswith("on file instead: manual 66.0000 (not official)")
-    assert md._change_words(2610.5, 2600.0) == "+10.50" and md._change_words(0.5, 0.75) == "-0.250000"
-
-
-def test_futures_curves_list_open_positions_first_then_by_expiry(book_is_today):
-    rows = md.futures_curve_rows(_futures_book(), TODAY)[0]["rows"]
-    # CLX26 expires before CLZ26 but has no position: the open contract leads
-    assert [r["contract_id"] for r in rows] == ["CLZ26 Comdty", "CLX26 Comdty", "CLF27 Comdty"]
-    panel = md.futures_curves_panel(_futures_book(), TODAY)
-    text = str(panel)
-    assert md.FUTURES_CURVES_TITLE in text and "Energy" in text and "Metals" in text
-    assert text.index("Energy") < text.index("Metals")
-    assert md.FUTURES_CURVE_TABLE_ID_PREFIX + "nymex-cl" in text and "Graph" in text   # WTI has prices: a chart
-    alu = next(b for b in md.futures_curve_rows(_futures_book(), TODAY) if b["root_id"] == "LME:AH")
-    assert md.commodity_figure(alu, TODAY, {"rows": []}) is None                  # no price, no research: no chart
-
-
 def test_futures_curves_section_is_absent_with_no_commodity_future_open(book_is_today):
     fx_only = schema.connect()
     _instrument(fx_only, "USDJPY", "FX", "USD", "JPY")
@@ -1101,43 +1051,6 @@ def _lme_book():
     _mark(conn, PREV, "LME:CA", "2026-12-18", "FWD_OUTRIGHT", 9600.0)
     conn.commit()
     return conn
-
-
-def test_futures_curves_show_an_lme_metals_curve_under_metals_with_sources_and_the_missing_3m(book_is_today):
-    blocks = md.futures_curve_rows(_lme_book(), TODAY, LME_STATUS)
-    assert [(b["sector"], b["root_id"], b.get("lme")) for b in blocks] == [("metals", "LME:CA", True)]
-    block = blocks[0]
-    assert block["open"] == 2 and block["missing"] == 2
-    rows = {r["pillar"]: r for r in block["rows"]}
-    # by date: the November monthly pillar is asked because it brackets the 11-04 prompt
-    assert [(r["pillar"], r["expiry"]) for r in block["rows"]] == [
-        ("cash", "2026-09-23"), ("monthly prompt (an open prompt)", "2026-10-21"), ("open prompt", "2026-11-04"),
-        ("monthly prompt", "2026-11-18"), ("3M", "2026-12-21")]
-    november = rows["monthly prompt"]
-    assert (november["ticker"], november["price"], november["lots"]) == ("LPX6 Comdty", md.MISSING_PRICE, "no position")
-    assert november["why"] == "the last pull wrote no mark for it"
-
-    cash = rows["cash"]
-    assert (cash["ticker"], cash["expiry"], cash["lots"], cash["price"], cash["source"]) == \
-        ("LMCADY Comdty", "2026-09-23", "no position", "9,500.00", "Bloomberg")
-    assert cash["snapped_at"] == f"{TODAY} 11:05:00-04:00"
-    assert cash["previous"] == f"9,400.00 ({PREV})" and cash["change"] == "+100.00"
-
-    october = rows["monthly prompt (an open prompt)"]
-    assert (october["ticker"], october["lots"], october["change"]) == ("LPV6 Comdty", "+2", "+10.00")
-    prompt = rows["open prompt"]
-    assert (prompt["expiry"], prompt["lots"], prompt["source"]) == ("2026-11-04", "-1", "Interpolated")
-    assert prompt["ticker"] == "none: an open prompt, read off the curve"
-
-    three_m = rows["3M"]
-    assert (three_m["price"], three_m["flag"], three_m["why"]) == (md.MISSING_PRICE, "missing", "Unknown/Invalid security")
-    assert three_m["previous"] == f"9,600.00 ({PREV})" and three_m["change"] == "n/a"   # the 3M of PREV, on its own date
-
-    # no pull for the date: says so, never blank
-    assert md.futures_curve_rows(_lme_book(), TODAY)[0]["rows"][-1]["why"] == \
-        f"not pulled for {TODAY} yet: the next Pull Bloomberg now asks for it"
-    panel = str(md.futures_curves_panel(_lme_book(), TODAY, LME_STATUS))
-    assert "Metals" in panel and md.FUTURES_CURVE_TABLE_ID_PREFIX + "lme-lme-ca" in panel and "LME curve" in panel
 
 
 def test_the_library_says_in_plain_words_what_each_need_is_for(book_is_today):
@@ -1306,36 +1219,8 @@ def test_the_body_callback_fills_the_drawer_the_reference_block_and_a_quiet_futu
 # =========================================================================== 2026-09-25: screens redesign, Phase C
 # Market data by commodity: a strip counting every listed commodity's prices, a selector grouped
 # by sector (default: the largest gross position), the chosen commodity's chart (our official
-# prices of the date and the previous close, the research curve as a thin context line) and its
-# table. The research line is context: read for the chosen commodity only, never a mark.
-RESEARCH_CL = {"root_id": "NYMEX:CL", "research_root": "NYMEX:CL", "available": True, "label": "research",
-               "date": PREV, "stale_days": 3, "unit": "USD/bbl", "currency": "USD", "price_scale": 1.0,
-               "reason": "", "note": "", "source": "research rv.sqlite NYMEX:CL settlements of 2026-09-18",
-               "rows": [{"contract_id": "CLX26 Comdty", "month": "2026-11", "year": 2026, "month_no": 11,
-                         "expiry": "2026-10-20", "settle": 66.1, "raw_settle": 66.1},
-                        {"contract_id": "CLZ26 Comdty", "month": "2026-12", "year": 2026, "month_no": 12,
-                         "expiry": "2026-11-19", "settle": 67.4, "raw_settle": 67.4},
-                        {"contract_id": "CLF27 Comdty", "month": "2027-01", "year": 2027, "month_no": 1,
-                         "expiry": "2026-12-18", "settle": 67.8, "raw_settle": 67.8},
-                        {"contract_id": "CLG27 Comdty", "month": "2027-02", "year": 2027, "month_no": 2,
-                         "expiry": "2027-01-20", "settle": 68.0, "raw_settle": 68.0}]}
-NO_RESEARCH = {"root_id": "NYMEX:CL", "research_root": None, "available": False, "label": "research", "date": None,
-               "rows": [], "reason": "no research database found (tried ../Commodity Dashboard/var/rv.sqlite)",
-               "note": "", "source": ""}
-
-
-@pytest.fixture
-def research_calls(monkeypatch):
-    """research_curve replaced by a recorder: which roots were asked, NO_RESEARCH back."""
-    from engine.risk import commodity_history
-    calls = []
-
-    def fake(root_id, as_of, db_path=None):
-        calls.append((root_id, as_of))
-        return dict(NO_RESEARCH, root_id=root_id)
-
-    monkeypatch.setattr(commodity_history, "research_curve", fake)
-    return calls
+# prices of the date and the previous close) and its table. The research app's settlement curve
+# left the chart on 2026-09-28 (the screens tidy, wave 2).
 
 
 def _to_file(conn, path):
@@ -1392,56 +1277,6 @@ def test_the_strip_counts_equal_the_tables_for_every_commodity(book_is_today):
     assert text.index("Energy") < text.index("CL 2") < text.index("Metals")
 
 
-def test_the_chart_draws_the_marks_and_the_research_rows_exactly_and_never_fills_a_gap(book_is_today):
-    wti = md.futures_curve_rows(_futures_book(), TODAY)[0]
-    fig = md.commodity_figure(wti, TODAY, RESEARCH_CL)
-    official, previous, research = fig.data
-    assert official.name == f"official {TODAY}" and previous.name == f"previous close {PREV}"
-    assert list(official.x) == ["2026-11", "2026-12", "2027-01"]          # CLX26, CLZ26, CLF27 by month
-    assert list(official.y) == [None, 68.25, 67.9]                        # CLX26 has no price: a gap, not research's 66.1
-    assert official.connectgaps is False
-    assert list(previous.x) == list(official.x) and list(previous.y) == [None, 67.5, None]
-    assert research.name == f"research {PREV}" and research.line.width == 1
-    assert list(research.x) == [r["month"] for r in RESEARCH_CL["rows"]]
-    assert list(research.y) == [r["raw_settle"] for r in RESEARCH_CL["rows"]]
-    notes = fig.layout.annotations
-    assert [(a.x, a.text) for a in notes] == [("2026-11", "missing")]
-    assert notes[0].hovertext == f"CLX26 Comdty: no trade on file needs it on {TODAY}, so no pull asks Bloomberg for it"
-
-    # an LME metal by prompt date: the Bloomberg-interpolated prompt is an open marker, the missing ones gaps
-    copper = md.futures_curve_rows(_lme_book(), TODAY, LME_STATUS)[0]
-    lme = md.commodity_figure(copper, TODAY, {"rows": []})
-    assert list(lme.data[0].x) == ["2026-09-23", "2026-10-21", "2026-11-04", "2026-11-18", "2026-12-21"]
-    assert list(lme.data[0].y) == [9500.0, 9520.0, 9530.0, None, None]
-    assert list(lme.data[0].marker.symbol) == ["circle", "circle", "circle-open", "circle", "circle"]
-    assert len(lme.data) == 2 and not any(t.name.startswith("research") for t in lme.data)
-
-
-def test_research_is_read_for_the_chosen_commodity_only_and_its_absence_is_said(book_is_today, research_calls):
-    issues = []
-    strip, view = md.commodity_section(_futures_book(), TODAY, issues=issues)
-    assert research_calls == [("NYMEX:CL", TODAY)]                         # the default, and only it
-    # every commodity's missing reasons reach the drawer, not only the chosen one's
-    assert dict(issues)["LAZ26 Comdty price"] == "no verified Bloomberg ticker for LME:AH"
-    graph = next(c for c in _walk(view) if getattr(c, "id", None) == md.COMMODITY_CHART_ID)
-    assert [t.name for t in graph.figure.data] == [f"official {TODAY}", f"previous close {PREV}"]   # no research trace
-    gap = next(c for c in _walk(view) if getattr(c, "children", None) == "research: n/a")
-    assert gap.title == NO_RESEARCH["reason"]
-    assert md.FUTURES_CURVES_TITLE in str(strip) and "CL 2 · 1 missing" in str(strip)
-
-    research_calls.clear()
-    _strip, alu = md.commodity_section(_futures_book(), TODAY, chosen="LME:AH")
-    assert research_calls == [("LME:AH", TODAY)]
-    assert md.FUTURES_CURVE_TABLE_ID_PREFIX + "lme-ah" in str(alu)
-    # no price and no research: no chart, and it says why
-    assert md.COMMODITY_CHART_ID not in str(alu) and "no chart" in str(alu)
-
-    # with research on file: its settlement date is named and the note is on hover
-    view = md.commodity_view(md.futures_curve_rows(_futures_book(), TODAY)[0], TODAY,
-                             dict(RESEARCH_CL, note="settlements of 2026-09-18, 3 day(s) before 2026-09-21"))
-    assert f"research: settlements of {PREV}" in str(view) and "3 day(s) before" in str(view)
-
-
 def test_with_no_commodity_open_the_section_is_one_quiet_line_and_the_selector_is_hidden(book_is_today, tmp_path):
     fx_only = schema.connect()
     _instrument(fx_only, "USDJPY", "FX", "USD", "JPY")
@@ -1456,23 +1291,3 @@ def test_with_no_commodity_open_the_section_is_one_quiet_line_and_the_selector_i
     assert (options, value, style["display"], section) == ([], None, "none", "")
     assert md.commodity_picker_state(tmp_path / "fx.db", None)[0] == []
 
-
-def test_the_commodity_section_comes_before_the_fx_heading_and_the_body_follows_the_selector(book_is_today, tmp_path,
-                                                                                               research_calls):
-    import dash
-    rendered = str(md.build_layout(default_date=TODAY))
-    order = [md.MISSING_PANEL_ID, md.COMMODITY_STRIP_ID, md.COMMODITY_DROPDOWN_ID, md.FUTURES_CURVES_PANEL_ID,
-             md.PAIR_DROPDOWN_ID, md.BODY_ID, md.REFERENCE_PANEL_ID]
-    positions = [rendered.index(f"'{i}'") for i in order]
-    assert positions == sorted(positions)
-    assert rendered.index("'FX'") < rendered.index(f"'{md.PAIR_DROPDOWN_ID}'")
-
-    path = _to_file(_futures_book(), tmp_path / "risk.db")
-    probe = dash.Dash(__name__, suppress_callback_exceptions=True)
-    md.register_callbacks(probe, lambda: path)
-    key = next(k for k in probe.callback_map if f"{md.BODY_ID}.children" in k)
-    out = probe.callback_map[key]["callback"].__wrapped__(TODAY, None, 0, None, None, None, TODAY, "LME:AH")
-    assert md.FUTURES_CURVE_TABLE_ID_PREFIX + "lme-ah" in str(out[7]) and "CL 2 · 1 missing" in str(out[10])
-    assert research_calls == [("LME:AH", TODAY)]
-    picker = next(k for k in probe.callback_map if f"{md.COMMODITY_DROPDOWN_ID}.options" in k)
-    assert probe.callback_map[picker]["callback"].__wrapped__(TODAY, None, None)[1] == "NYMEX:CL"

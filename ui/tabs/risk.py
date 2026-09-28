@@ -72,7 +72,7 @@ from engine.risk import book_risk
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import about, format_cell, issues_drawer, marker, short_money
+from ui.tabs.formatting import MISSING, about, format_cell, issues_drawer, marker, short_money, sum_known
 from ui.tabs.header import AS_OF_STORE_ID
 
 BODY_ID = "risk-body"
@@ -92,7 +92,7 @@ MARGIN_LIMITS_ID = "risk-margin-limits"
 LIMITS_NOT_SET_ID = "risk-limits-not-set"
 ISSUES_ID = "risk-issues"
 
-NA = "n/a"
+NA = MISSING          # an em dash, never the text "n/a" (the display rule of 2026-09-28)
 VIEW_KINDS = ("SECTOR", "SPREAD")
 # underlyer kinds of the macro book, removed 2026-09-24: never rendered, nor their `missing` entries
 RETIRED_KINDS = ("RATES", "EQUITY_INDEX")
@@ -126,6 +126,12 @@ def _num(value: Any) -> Optional[float]:
     return v if isinstance(v, float) and math.isfinite(v) else None
 
 
+def _sector_words(sector: Any) -> str:
+    """'Energy' for the engine's 'energy': every sector label in one case."""
+    s = str(sector or "").replace("_", " ").strip()
+    return s[:1].upper() + s[1:] if s else ""
+
+
 def _usd(value: Any) -> str:
     v = _num(value)
     return NA if v is None else format_cell(v)
@@ -134,7 +140,7 @@ def _usd(value: Any) -> str:
 def _money(value: Any) -> str:
     """A money figure in k / m for the cards and captions ("1.65m", "(78.1k)"), n/a for none."""
     v = _num(value)
-    return NA if v is None else short_money(v, parens=True)
+    return NA if v is None else short_money(v)
 
 
 def _pct(value: Any, decimals: int = 1) -> str:
@@ -268,14 +274,14 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
                                 f"each the daily $ P&L's standard deviation x sqrt(252), evaluated at the lag-2 date ({lag2}); "
                                 f"before {b.get('cutover')} the crisis leg is the trailing vol, and so it is when the history "
                                 f"holds nothing in the crisis window. Fewer than "
-                                f"{b.get('trail_window_bd')} observations to the lag-2 date = n/a. Shown against the vol "
+                                f"{b.get('trail_window_bd')} observations to the lag-2 date = no figure. Shown against the vol "
                                 f"target of {_usd(target)}."),
         "vol_trailing_ann_usd": f"Trailing vol: the standard deviation of the last {b.get('trail_window_bd')} daily $ P&Ls to the lag-2 date x sqrt(252).",
         "vol_crisis_ann_usd": (f"Crisis vol: the standard deviation of the daily $ P&L over {b.get('stress_start')} to "
                                f"{b.get('stress_end')} x sqrt(252); the trailing vol where the history does not reach that window."),
         "var95_1d_usd": (f"1y {conf:g}% VaR (1-day) = minus the {100 - conf:g}th percentile of the last {window} daily "
                          f"$ P&Ls (the full series, not lag-2 limited): a typical bad day, positive = loss. Fewer than "
-                         f"{window} observations = n/a."),
+                         f"{window} observations = no figure."),
         "worst_1d_ex_shocks_usd": (f"Worst day ex shocks = the worst daily $ P&L from {config.get('worst_day_start')} to the "
                                    f"lag-2 date with the shock dates ({shocks}) set to 0: the stress-cap basis. "
                                    f"Cap = {_pct(pct, 0)} of the vol target = {_usd(cap)}."),
@@ -284,7 +290,7 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
         "note": "Note: the row's reason, carry and coverage; a long note is clipped, its full text on hover.",
         "scenarios": ("FX scenario stress: delta x move, the scenarios of config/stress.yaml on the book's USD delta by "
                       "currency (metals included), the FX scenarios of config/stress.yaml. No correlation, no vol. "
-                      "A figure the engine could not value reads n/a with its reason on hover."),
+                      "A figure the engine could not value reads as a dash with its reason on hover."),
         "parts_views": ("The Book's series is the sum of the parts: the currency, metal and commodity rows. A sector "
                         "row re-adds its commodities and a spread row its futures legs, which are already in the "
                         "commodity rows: they are views, shown apart and never added to the Book, so nothing is "
@@ -300,11 +306,11 @@ def definitions(config: Dict[str, Any], history: Dict[str, Any]) -> Dict[str, st
                                 "scenario's move. Options count at their delta; their gamma is not in it. Outright and "
                                 "curve moves, spread legs moved against each other, a currency against the USD applied "
                                 "to the P&L the non-USD positions hold, and replays of past windows from the commodity "
-                                "settlement history (context only, never a mark). n/a = nothing the scenario touches has a figure."),
+                                "settlement history (context only, never a mark). A dash = nothing the scenario touches has a figure."),
         "table": ("One row per underlyer the Book sums: the commodities grouped by sector, then the currencies and "
                   "the metals, each group by VaR largest first. The Book, pinned underneath, is these rows' daily "
                   "P&L summed date by date (correlation embedded); the per-underlyer figures are standalone. Money "
-                  "in k / M. A figure the engine could not compute reads n/a with its reason on hover; a blank cell "
+                  "in k / M. A figure the engine could not compute reads as a dash with its reason on hover; a blank cell "
                   "does not apply to that row. The rest (worst day raw, observations, the history's reach, trailing "
                   "and crisis vol, a commodity's contracts) is on the cells' hover; column headers carry the definitions."),
         "underlyer": ("The underlyer: a commodity (its contracts, delta lots and sector on hover), a currency or a "
@@ -346,7 +352,7 @@ def commodity_history_line(result: Dict[str, Any]) -> Optional[str]:
             s += f"; USD conversion pairs {', '.join(ch['fx_pairs'])}"
         return s + ". Read-only, a risk input only: nothing from it is a mark or enters P&L."
     return (f"Commodity history unavailable: {ch.get('reason') or 'no reason given'}. The commodity rows' risk "
-            "figures are n/a; their positions, the margin and the scenarios that need no history stand.")
+            "figures are dashes; their positions, the margin and the scenarios that need no history stand.")
 
 
 def history_line(result: Dict[str, Any]) -> str:
@@ -355,7 +361,7 @@ def history_line(result: Dict[str, Any]) -> str:
     h = result.get("history") or {}
     if not h.get("available"):
         return (f"Market history unavailable: {h.get('reason') or 'no reason given'}. Every currency and metal "
-                "risk figure is n/a; the positions and the scenarios stand.")
+                "risk figure is a dash; the positions and the scenarios stand.")
     s = f"History: {h.get('path')}, last close {h.get('last_date')}"
     if h.get("used_to"):
         s += f"; used to {h['used_to']}, lag-2 date {h.get('lag2_date')}"
@@ -391,7 +397,7 @@ def caption_parts(result: Dict[str, Any]) -> List[Tuple[str, str]]:
     h = result.get("history") or {}
     c = result.get("config") or {}
     ch = result.get("commodity_history")
-    parts = [(f"As of {_date_words(result.get('as_of'))}", "The header's as-of date: the tab has no date picker of its own.")]
+    parts = []   # the as-of is said once, in the header (2026-09-28)
     parts.append((f"FX history to {h.get('last_date')}" if h.get("available") else "FX history: none", history_line(result)))
     if ch:
         parts.append((f"commodity history to {ch.get('last_date') or NA}" if ch.get("available") else "commodity history: none",
@@ -420,7 +426,8 @@ def issue_items(result: Dict[str, Any], margin: Optional[Dict[str, Any]] = None)
         if note:
             items.append((label, f"{note}."))
     items += [("Not included", m) for m in shown_missing(result)]
-    items += [("Commodity stress", r) for r in (cs.get("reasons") or []) if r]
+    # the engine writes "<scenario>: n/a, <why>"; the screen never shows the text "n/a" (2026-09-28)
+    items += [("Commodity stress", str(r).replace(": n/a,", ": not valued,")) for r in (cs.get("reasons") or []) if r]
     items += [("Not in the margin", r) for r in ((margin or {}).get("reasons") or []) if r]
     return items
 
@@ -437,8 +444,12 @@ def top_block(result: Dict[str, Any], margin: Optional[Dict[str, Any]] = None) -
         spans.append(marker("placeholder", c.get("vol_target_note") or "the vol target is a placeholder"))
     line = html.Div(spans, className="risk-caption-line",
                     style={"color": "var(--muted)", "fontSize": "12px", **_ONE_LINE})
-    drawer = issues_drawer(issue_items(result, margin), id=ISSUES_ID)
-    return html.Div([line] + ([drawer] if drawer is not None else []), className="risk-caption",
+    items = issue_items(result, margin)
+    not_included = [it for it in items if it[0] in ("Not included", "Commodity stress", "Not in the margin")]
+    notes = [it for it in items if it not in not_included]
+    drawers = [issues_drawer(not_included, title="Not included", id=ISSUES_ID),
+               issues_drawer(notes, title="Notes", id=NOTES_ID)]
+    return html.Div([line] + [d for d in drawers if d is not None], className="risk-caption",
                     style={"marginBottom": "12px"})
 
 
@@ -457,7 +468,7 @@ def _card(label: str, value: Any, *, definition: str, reason: str = "", short: s
         note_span = html.Span(short or why, className="card-note", title=why, style=_ONE_LINE)
     else:
         style = dict(_FLAG_STYLE) if flag else ({"color": "var(--neg)"} if colour and v < 0 else {})
-        figure = [html.Span(short_money(v, parens=True), className="card-value", style=style, title=format_cell(v))]
+        figure = [html.Span(short_money(v), className="card-value", style=style, title=format_cell(v))]
         figure += [m for m in marks if m is not None]
         if flag:
             figure.append(html.Span(flag, className="tag", style={"background": "#fdecea", **_FLAG_STYLE}))
@@ -530,7 +541,8 @@ def book_cards(result: Dict[str, Any]) -> html.Div:
 
 # --------------------------------------------------------------------------- 3. the key table
 MONEY_COLUMNS = ("var95_1d_usd", "vol_blended_ann_usd", "worst_1d_ex_shocks_usd", "net_usd")
-SECTOR_LABELS = {"FX": "Currencies", "METAL": "Metals", "SECTOR": "sector view", "SPREAD": "spread view"}
+SECTOR_LABELS = {"FX": "Currencies", "METAL": "Metals", "SECTOR": "Sector view", "SPREAD": "Spread view"}
+NOTES_ID = "risk-notes"
 
 
 def _columns(config: Dict[str, Any]) -> List[dict]:
@@ -547,7 +559,7 @@ def _columns(config: Dict[str, Any]) -> List[dict]:
 
 def _contract_line(c: Dict[str, Any]) -> str:
     """One contract of a COMMODITY row, for the underlyer cell's hover."""
-    head = f"{c.get('contract_id')} ({c.get('product') or 'n/a'}): {_lots(c.get('delta_lots'))} delta lots"
+    head = f"{c.get('contract_id')} ({c.get('product') or 'product unknown'}): {_lots(c.get('delta_lots'))} delta lots"
     if c.get("in_series"):
         body = f"in the series, {c.get('days', 0)} days"
         if c.get("history_contract") and c.get("history_contract") != c.get("contract_id"):
@@ -559,7 +571,7 @@ def _contract_line(c: Dict[str, Any]) -> str:
 
 def _leg_line(leg: Dict[str, Any]) -> str:
     """One leg of a SPREAD row, for the underlyer cell's hover."""
-    head = f"{leg.get('contract_id')} ({leg.get('product') or 'n/a'}): {_lots(leg.get('open_lots'))} open lots"
+    head = f"{leg.get('contract_id')} ({leg.get('product') or 'product unknown'}): {_lots(leg.get('open_lots'))} open lots"
     return head + (f", in the series, {leg.get('days', 0)} days" if leg.get("in_series")
                    else f", not in the series: {leg.get('reason') or 'no reason given'}")
 
@@ -647,7 +659,7 @@ def underlyer_record(row: Dict[str, Any], *, book: bool = False, missing: Option
     kind = "BOOK" if book else (row.get("kind") or "")
     rec["underlyer"] = "Book" if book else _display_name(row)
     if kind == "COMMODITY":
-        rec["sector"] = row.get("sector") or "no sector"
+        rec["sector"] = _sector_words(row.get("sector")) or "no sector"
     elif kind == "SPREAD":
         rec["sector"] = SECTOR_LABELS[kind] + (f", {row['family']}" if row.get("family") else "")
     else:
@@ -737,12 +749,47 @@ def fold(title: str, count: str, hover: str, children: List[Any], *, id: Optiona
                                "padding": "6px 16px", "margin": "0 0 12px"}, **extra)
 
 
+def _folded_fx_record(fx: List[Dict[str, Any]], result: Dict[str, Any]) -> Tuple[dict, dict]:
+    """One line for the currency rows when none has a history: 'N currencies · no FX history on
+    this PC', the currencies and the reason on hover, their USD delta added up (display)."""
+    h = result.get("history") or {}
+    why = str(h.get("reason") or fx[0].get("reason") or "no FX history on this PC")
+    names = ", ".join(str(r.get("underlyer")) for r in fx)
+    net, excluded, _reasons = sum_known((r.get("net_usd"), "") for r in fx)
+    rec = {"underlyer": f"{len(fx)} currencies \u00b7 no FX history on this PC", "sector": "Currencies",
+           "var95_1d_usd": NA, "vol_blended_ann_usd": NA, "worst_1d_ex_shocks_usd": NA,
+           "net_usd": NA if net is None else net, "net_delta_lots": None}
+    tip = {"underlyer": _tip(f"{names}: {why}"), "net_usd": _tip("the currencies' USD delta added up (display)"
+                                                                 + (f"; {excluded} with no delta" if excluded else ""))}
+    for col in ("var95_1d_usd", "vol_blended_ann_usd", "worst_1d_ex_shocks_usd"):
+        tip[col] = _tip(why)
+    return rec, tip
+
+
+def part_records(result: Dict[str, Any]) -> List[Tuple[dict, dict]]:
+    """The table's records: `part_rows` one by one, except that the currency rows fold into one
+    line when every one of them shows no history (2026-09-28)."""
+    rows = part_rows(result)
+    fx = [r for r in rows if r.get("kind") == "FX"]
+    if len(fx) > 1 and all(_num(r.get("var95_1d_usd")) is None and _num(r.get("vol_blended_ann_usd")) is None for r in fx):
+        out, folded = [], False
+        for r in rows:
+            if r.get("kind") == "FX":
+                if not folded:
+                    out.append(_folded_fx_record(fx, result))
+                    folded = True
+                continue
+            out.append(underlyer_record(r))
+        return out
+    return [underlyer_record(r) for r in rows]
+
+
 def underlyer_section(result: Dict[str, Any]) -> html.Div:
     """The one table: the parts by sector and commodity, then the currencies and the metals,
     the Book pinned last."""
     config = result.get("config") or {}
     defs = definitions(config, result.get("history") or {})
-    body_recs = [underlyer_record(r) for r in part_rows(result)]
+    body_recs = part_records(result)
     book_rec, book_tip = underlyer_record(result.get("book") or {}, book=True, missing=delta_missing(result),
                                           exposure=exposure_words(result))
     columns = _columns(config)
@@ -1052,7 +1099,7 @@ def commodity_scenario_section(result: Dict[str, Any]) -> html.Details:
     config_file = (cs or {}).get("config") or "config/commodity_stress.yaml"
     hover = (f"{defs['commodity_scenarios']} Scenarios from {config_file}, on the book's commodity positions of "
              f"{(cs or {}).get('as_of') or result.get('as_of')}. A sector cell is blank when the scenario moves nothing "
-             "held in it; n/a = no position it touches has a figure (the reason on hover); what a total leaves out is "
+             "held in it; a dash = no position it touches has a figure (the reason on hover); what a total leaves out is "
              "on its hover and in the scenario's detail. Money in k / M.")
     title = "Commodity scenario stress"
     if not cs:
@@ -1299,7 +1346,7 @@ def _not_set_value(check: Dict[str, Any]) -> Tuple[str, str]:
     n/a when the engine has no figure (never zero)."""
     v, unit = _num(check.get("value")), check.get("unit") or ""
     if v is None:
-        return NA, "n/a (the position has no figure)"
+        return NA, f"{NA} (the position has no figure)"
     if unit == "USD":
         return f"{short_money(v)} USD", f"{format_cell(v)} USD"
     return f"{_lots(v)} {unit}".strip(), f"{_lots(v)} {unit}".strip()
@@ -1515,10 +1562,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     picker: the tab follows the header's as-of store."""
     return html.Div(className="risk-tab", children=[
         html.Div(className="ladder-title-row", children=[
-            html.H3("Risk", className="ladder-title-row-heading"),
-            html.Div(className="ladder-title-row-right", children=[
-                html.H4(f"Follows the header's as-of date{f' ({default_date})' if default_date else ''}",
-                        className="section-title")])]),
+            html.H3("Risk", className="ladder-title-row-heading")]),
         html.Div(id=BODY_ID, children=[message_box("Loading the risk metrics...")]),
         dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])

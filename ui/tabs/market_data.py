@@ -15,10 +15,9 @@ Screens redesign, Phase C (user, 2026-09-25): the futures curves became "Market 
 commodity" (`commodity_section`): a strip counting every listed commodity's prices as
 official / estimated / missing, a selector grouped by sector (`commodity_options`, default the
 largest gross position), and for the chosen commodity one chart (our official prices of the
-date and the previous close by contract month, the research app's settlement curve as a thin
-line labelled research, read through `engine.risk.commodity_history.research_curve` for that
-commodity only, context and never a mark) over its table. The FX pair section follows under an
-"FX" heading.
+date and the previous close by contract month; the research app's settlement curve left the
+chart on 2026-09-28, the screens tidy, wave 2) over its table. The FX pair section follows under
+an "FX" heading.
 
 User decision 2026-09-15: this tab is organised BY CURRENCY PAIR, not by a flat
 inventory table. Layout:
@@ -100,13 +99,11 @@ from dash import Input, Output, State, dash_table, dcc, html
 from ui.feed_controls import (PullGuard, click_outcome, pull_timings, recalc_words, safety_refresh_ms,
                               seconds_words)
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
-from ui.tabs.controls import build_date_picker
-from ui.tabs.formatting import about, issues_drawer, marker
+from ui.tabs.formatting import MISSING, about, is_fx_pair, issues_drawer, marker, price_text, quoted_unit
 
 BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"
 BBG_RESULTS_ID = "market-data-bbg-check-results"
 
-DATE_PICKER_ID = "market-data-date"
 PAIR_DROPDOWN_ID = "market-data-pair"
 TOOLBAR_ID = "market-data-toolbar"
 STATUS_ID = "market-data-status"
@@ -353,14 +350,14 @@ def recalc_block(status: Optional[dict]) -> Optional[html.Div]:
 
 def usd_words(value) -> str:
     """'USD 12,500' / 'USD -1,234': whole dollars with thousands separators, the way the
-    tab writes money elsewhere (`notional_words`). 'n/a' for anything that is not a
+    tab writes money elsewhere (`notional_words`). An em dash for anything that is not a
     number: a blank is never shown as zero."""
     try:
         v = float(value)
     except (TypeError, ValueError):
-        return "n/a"
+        return MISSING
     if v != v:  # NaN
-        return "n/a"
+        return MISSING
     return f"USD {v:,.0f}"
 
 
@@ -1227,10 +1224,10 @@ def _number_or_none(value) -> Optional[float]:
 
 def _change_words(price: Optional[float], previous: Optional[float]) -> str:
     """'+0.7500' / '-12.00': today's official price less the previous official close, with
-    as many digits as the price itself shows (`_fmt_mark`'s rule) and a sign. 'n/a' when
+    as many digits as the price itself shows (`_fmt_mark`'s rule) and a sign. An em dash when
     either is missing: never a zero."""
     if price is None or previous is None:
-        return "n/a"
+        return MISSING
     digits = 2 if abs(price) >= 1000 else 4 if abs(price) >= 10 else 6
     return f"{price - previous:+,.{digits}f}"
 
@@ -1299,7 +1296,7 @@ def futures_curve_rows(conn: sqlite3.Connection, as_of: str, status: Optional[di
     while the contract master still carries its estimate), lots (the engine's net; "flat" /
     "no position"), price (the official FUTURE_PX of `as_of` at the contract's expiry, or
     "missing"), source, snapped_at, previous (the latest official FUTURE_PX before `as_of`,
-    with its date), change (price less previous; "n/a" with either missing), why (the
+    with its date), change (price less previous; an em dash with either missing), why (the
     reason a price is missing, '' otherwise), and the raw `_price` / `_previous` numbers
     for the chart. No price is estimated or filled.
 
@@ -1521,8 +1518,8 @@ _FUTURES_COLUMNS = [
 # sector (default: the largest gross position), with a strip above it counting every listed
 # commodity's prices as official / estimated / missing so nothing hides behind the selector.
 # The chosen commodity shows one chart (our official prices of the as-of date and the previous
-# close, by contract month, and the research app's settlement curve as a thin context line
-# labelled research) and its table. The research line is context only: never a mark, never a
+# close, by contract month; the research app's settlement curve left the chart on 2026-09-28,
+# wave 2 of the screens tidy) and its table. Nothing here is a mark, nothing is filled, and the
 # substitute for a missing one (hard rule 2); it is read for the chosen commodity only.
 COMMODITY_DROPDOWN_ID = "market-data-commodity"
 COMMODITY_PICKER_ID = "market-data-commodity-picker"
@@ -1595,7 +1592,7 @@ def commodity_options(conn: sqlite3.Connection, as_of: str) -> Tuple[List[dict],
     section lists on `as_of` (`_curve_roots`, the same rule as `futures_curve_rows`), grouped by
     sector under a disabled sector heading, sectors then names in the section's order. The
     default is the largest gross position: gross USD notional (`curve_positions`'
-    by_commodity), a commodity whose USD is n/a after those, by gross lots. ([], None) when
+    by_commodity), a commodity whose USD is missing after those, by gross lots. ([], None) when
     nothing is listed."""
     from data.contracts import load_roots
     from engine.curve import curve_positions
@@ -1629,33 +1626,19 @@ def commodity_options(conn: sqlite3.Connection, as_of: str) -> Tuple[List[dict],
     return options, best["root_id"]
 
 
-def _research_curve(root_id: str, as_of: str) -> dict:
-    """risk-history's `research_curve` for one root (it never raises by its contract; an
-    import failure is said the same way)."""
-    try:
-        from engine.risk import commodity_history
-        return commodity_history.research_curve(root_id, as_of)
-    except Exception as exc:  # noqa: BLE001 -- context only: say why, never take the section down
-        return {"root_id": root_id, "available": False, "rows": [], "label": RESEARCH_LABEL, "date": None,
-                "reason": f"the research curve could not be read ({type(exc).__name__}: {exc})", "note": "",
-                "source": ""}
-
-
 def _estimated(r: dict) -> bool:
     return r.get("_price") is not None and r.get("_source") in ESTIMATED_SOURCES
 
 
-def commodity_figure(block: dict, as_of: str, research: Optional[dict] = None):
+def commodity_figure(block: dict, as_of: str):
     """The chosen commodity's chart: our official price of `as_of` by contract month (an LME
-    metal by prompt date), the previous official close of each contract, and the research
-    app's settlement curve as a thin line labelled research, in Bloomberg's quoted price (its
-    `raw_settle`, the unit of our FUTURE_PX). A missing price is a gap in our line with
+    metal by prompt date) and the previous official close of each contract, in Bloomberg's
+    quoted price (the unit of our FUTURE_PX). A missing price is a gap in our line with
     "missing" at its month and the reason on hover; an estimated (Bloomberg-interpolated)
     price is an open marker. Nothing is filled. None when there is nothing to draw."""
     import plotly.graph_objects as go
     rows = sorted((r for r in block.get("rows") or [] if r.get("_x")), key=lambda r: (r["_x"], r["contract_id"]))
-    research_rows = list((research or {}).get("rows") or [])
-    if not any(r["_price"] is not None or r["_previous"] is not None for r in rows) and not research_rows:
+    if not any(r["_price"] is not None or r["_previous"] is not None for r in rows):
         return None
     fig = go.Figure()
     xs = [r["_x"] for r in rows]
@@ -1677,17 +1660,6 @@ def commodity_figure(block: dict, as_of: str, research: Optional[dict] = None):
                   for r in rows],
             hovertemplate="%{text}<br>%{y}<extra></extra>",
             line=dict(color="#8a94a6", width=1.5, dash="dash"), marker=dict(size=5, color="#8a94a6")))
-    if research_rows:
-        is_lme = bool(block.get("lme"))
-        unit = (research or {}).get("unit") or ""
-        fig.add_trace(go.Scatter(
-            x=[(r.get("expiry") or r["month"]) if is_lme else r["month"] for r in research_rows],
-            y=[r["raw_settle"] for r in research_rows], mode="lines",
-            name=f"{RESEARCH_LABEL} {(research or {}).get('date') or ''}".strip(),
-            text=[f"{RESEARCH_LABEL}: {r['contract_id']}<br>settlement {r['settle']:g} {unit}".rstrip()
-                  for r in research_rows],
-            hovertemplate="%{text}<br>%{y} as quoted<extra></extra>",
-            line=dict(color="#c0c6cf", width=1, dash="dot")))
     for r in rows:
         if r["_price"] is None:
             fig.add_annotation(x=r["_x"], y=0, yref="paper", yanchor="bottom", showarrow=False, text="missing",
@@ -1699,17 +1671,6 @@ def commodity_figure(block: dict, as_of: str, research: Optional[dict] = None):
                       yaxis=dict(showgrid=True, gridcolor="#eef0f3",
                                  title=dict(text="price as quoted", font=dict(size=11))))
     return fig
-
-
-def _research_line(research: dict) -> html.Div:
-    """Under the chart: where the research line comes from, or why there is none, on hover."""
-    if research.get("rows"):
-        head = marker(f"{RESEARCH_LABEL}: settlements of {research.get('date')}",
-                      research.get("source") or "the research app's settlement curve, read-only")
-        note = marker("partial", research["note"]) if research.get("note") else None
-        return html.Div(className="status-line", children=[x for x in (head, note) if x is not None])
-    return html.Div(className="status-line", children=[
-        marker(f"{RESEARCH_LABEL}: n/a", research.get("reason") or "no research curve for this commodity")])
 
 
 def _futures_table(block: dict) -> dash_table.DataTable:
@@ -1750,32 +1711,28 @@ def _block_summary(block: dict) -> str:
     return text + f" · {_counts_words(price_counts(block))}"
 
 
-def commodity_view(block: dict, as_of: str, research: Optional[dict] = None) -> html.Div:
-    """The chosen commodity: its summary line, the chart (with the research line) and the
-    table. `research` is `research_curve`'s dict for this root (read here when not given)."""
-    if research is None:
-        research = _research_curve(block["root_id"], as_of)
-    fig = commodity_figure(block, as_of, research)
+def commodity_view(block: dict, as_of: str) -> html.Div:
+    """The chosen commodity: its summary line, the chart and the table."""
+    fig = commodity_figure(block, as_of)
     chart = ([dcc.Graph(id=COMMODITY_CHART_ID, figure=fig, config={"displayModeBar": False},
                         style={"maxWidth": "900px"})] if fig is not None
              else [html.Div(className="status-line", children=marker(
-                 "no chart", f"no official price of {as_of} or earlier close on file for {block['name']}, and no "
-                             "research curve: the table says why each price is missing"))])
+                 "no chart", f"no official price of {as_of} or earlier close on file for {block['name']}: "
+                             "the table says why each price is missing"))])
     return html.Div(children=[
         html.Div(_block_summary(block), className="status-line", style={"fontWeight": "600", "margin": "4px 0"}),
-        *chart, _research_line(research), _futures_table(block)])
+        *chart, _futures_table(block)])
 
 
 def futures_curves_about(as_of: str) -> str:
     """The Market data by commodity section's definitions, shown on hover of its title."""
     return (f"One commodity at a time; the strip counts every listed commodity's prices on {as_of}: official, "
             "estimated (an official LME prompt Bloomberg's curve was interpolated for) and missing. The selector "
-            "starts on the largest gross position (USD notional; a commodity whose USD is n/a after, by lots). "
+            "starts on the largest gross position (USD notional; a commodity whose USD is missing after, by lots). "
             f"The chart: our official FUTURE_PX of each contract on {as_of} (Bloomberg's price; on a past date its "
             "daily PX_LAST close) and the latest earlier official close, by contract month, in Bloomberg's quoted "
-            "price; a missing price is a gap marked \"missing\" with its reason, never filled. The thin line "
-            "labelled research is the research app's settlement curve, context only: never a mark and never used "
-            "for P&L. The table: every contract on file, open positions first, lots from the book, source and "
+            "price; a missing price is a gap marked \"missing\" with its reason, never filled. "
+            "The table: every contract on file, open positions first, lots from the book, source and "
             "snap time, previous close and change; \"missing\" and why (on hover of the price, in the Why "
             "missing column and in Data issues). Expiry \"(est.)\" = the contract master's estimate until "
             "Bloomberg's date is on file. An LME metal is its curve: cash, 3-month and the monthly prompts the "
@@ -1784,7 +1741,7 @@ def futures_curves_about(as_of: str) -> str:
 
 def commodity_section(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
                       chosen: Optional[str] = None, today: Optional[str] = None,
-                      issues: Optional[list] = None, research: Optional[dict] = None):
+                      issues: Optional[list] = None):
     """(strip, view) for the Market data by commodity section, or None when no commodity is
     listed on `as_of` (the tab then shows one quiet line). The strip is the title and every
     commodity's counts; the view the `chosen` commodity (the selector's default when `chosen`
@@ -1803,15 +1760,15 @@ def commodity_section(conn: sqlite3.Connection, as_of: str, status: Optional[dic
             chosen = blocks[0]["root_id"]
     strip = html.Div([about(FUTURES_CURVES_TITLE, futures_curves_about(as_of), level="h4",
                             style={"marginTop": "0"}), commodity_strip(blocks)])
-    return strip, commodity_view(by_root[chosen], as_of, research)
+    return strip, commodity_view(by_root[chosen], as_of)
 
 
 def futures_curves_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
                          today: Optional[str] = None, issues: Optional[list] = None,
-                         chosen: Optional[str] = None, research: Optional[dict] = None):
+                         chosen: Optional[str] = None):
     """The whole section as one card (strip, then the chosen commodity), for callers outside
     the tab's callback; None when no commodity is listed."""
-    section = commodity_section(conn, as_of, status, chosen=chosen, today=today, issues=issues, research=research)
+    section = commodity_section(conn, as_of, status, chosen=chosen, today=today, issues=issues)
     if section is None:
         return None
     strip, view = section
@@ -2320,6 +2277,43 @@ _SUSPECT_COLUMNS = [
 ]
 
 
+def _price_units(conn: sqlite3.Connection, instrument_ids) -> Dict[str, str]:
+    """instrument id -> the unit its price is read in by `formatting.price_text`: an FX pair
+    itself (a JPY cross 3 decimals, gold 2, else 4), otherwise its contract root's quoted
+    unit; '' when neither is known."""
+    ids = set(instrument_ids)
+    if not ids:
+        return {}
+    try:
+        from data.contracts import load_roots
+        roots = dict(load_roots())
+    except Exception:  # noqa: BLE001 -- a price with no unit still prints (at four decimals)
+        roots = {}
+    bases: Dict[str, str] = {}
+    try:
+        for iid, base in conn.execute("SELECT instrument_id, base_ccy FROM instruments"):
+            bases[str(iid)] = str(base or "")
+    except sqlite3.Error:
+        bases = {}
+    return {iid: (iid if is_fx_pair(iid) else quoted_unit(roots.get(bases.get(iid, "")))) for iid in ids}
+
+
+def _suspect_display(conn: sqlite3.Connection, rows: List[dict]) -> List[dict]:
+    """The "Marks that look wrong" rows as shown: Value and Previous at tick precision
+    (`price_text`, text), never eight decimals; a blank stays blank. The numbers stay in
+    `suspect_rows` for anyone who reads them."""
+    units = _price_units(conn, {r["instrument_id"] for r in rows})
+    out = []
+    for r in rows:
+        unit = units.get(r["instrument_id"], "")
+        rec = dict(r)
+        for col in ("value", "previous"):
+            v = r.get(col)
+            rec[col] = "" if v is None else price_text(v, unit)     # the unit's tick, an FX pair its own
+        out.append(rec)
+    return out
+
+
 def suspect_about(as_of: str, prev_day: str) -> str:
     """The "Marks that look wrong" definitions, on hover of its title."""
     from data.bloomberg.live import STALE_AFTER_SECONDS
@@ -2349,12 +2343,13 @@ def suspect_panel(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] 
         not_compared = marker(f"not compared with {prev_day}", why)
         if issues is not None:
             issues.append((SUSPECT_TITLE, why))
-    flagged = [r for r in rows if r["flag"]]
+    shown = _suspect_display(conn, rows)
+    flagged = [r for r in shown if r["flag"]]
     compared = sum(1 for r in rows if r["previous"])
     show_all = html.Details(className="details", children=[
         html.Summary(f"Show all {len(rows)} marks"),
-        _panel_table(SUSPECT_ALL_TABLE_ID, _SUSPECT_COLUMNS, rows, wide=("flag", "note"),
-                     numeric=("value", "previous", "change_pct"), page_size=25),
+        _panel_table(SUSPECT_ALL_TABLE_ID, _SUSPECT_COLUMNS, shown, wide=("flag", "note"),
+                     numeric=("change_pct",), page_size=25),
     ])
     if not flagged:
         sentence = (f"no mark is flagged: {compared} of {len(rows)} marks compared with {prev_day}"
@@ -2364,7 +2359,7 @@ def suspect_panel(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] 
         html.P([f"{len(flagged)} of {len(rows)} marks flagged ({compared} compared with {prev_day}).", not_compared],
                className="status-line"),
         _panel_table(SUSPECT_FLAGGED_TABLE_ID, _SUSPECT_COLUMNS, flagged, wide=("flag", "note"),
-                     numeric=("value", "previous", "change_pct")),
+                     numeric=("change_pct",)),
         show_all,
     ]
     return _panel(SUSPECT_TITLE, children, about_text=about_text)
@@ -2804,7 +2799,8 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     return html.Div(className="market-data", children=[
         about(TAB_TITLE, TAB_ABOUT, level="h3"),
         html.Div(id=TOOLBAR_ID, className="toolbar", children=[
-            build_date_picker(DATE_PICKER_ID, default_date=default_date),
+            # The tab's own date picker left on 2026-09-28: the header's picker is the one place the
+            # as-of changes, and every callback here reads the header's store (`HEADER_AS_OF_STORE_ID`).
             html.Div(className="toolbar-group", children=[
                 html.Label("Bloomberg"),
                 html.Div([html.Button("Pull now", id=PULL_NOW_ID, n_clicks=0, className="btn"),
@@ -2833,7 +2829,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
             html.Div(id=COMMODITY_PICKER_ID, className="toolbar",
                      style={"alignItems": "center", "margin": "6px 0"}, children=[
                          about("Commodity", "Grouped by sector. Starts on the largest gross position (USD "
-                                            "notional; a commodity whose USD is n/a after, by lots).",
+                                            "notional; a commodity whose USD is missing after, by lots).",
                                level="span", style={"fontWeight": "600"}),
                          dcc.Dropdown(id=COMMODITY_DROPDOWN_ID, options=[], value=None, clearable=False,
                                       placeholder="Commodity", style={"width": "380px"}),
@@ -2935,10 +2931,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     resolved DB path, the shell's convention for every tab's `register_callbacks`.
     """
 
+    # The header's as-of (its date picker, mirrored into this store by ui/app.py): the one as-of of
+    # the app since 2026-09-28; the tab's own picker is gone.
+    from ui.tabs.header import AS_OF_STORE_ID as HEADER_AS_OF_STORE_ID
+
     @app.callback(
         Output(PAIR_DROPDOWN_ID, "options"),
         Output(PAIR_DROPDOWN_ID, "value"),
-        Input(DATE_PICKER_ID, "date"),
+        Input(HEADER_AS_OF_STORE_ID, "data"),
         Input(BOOK_REVISION_ID, "data"),
     )
     def _update_pairs(as_of_date, _book_rev=None):
@@ -2958,16 +2958,12 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(COMMODITY_DROPDOWN_ID, "value"),
         Output(COMMODITY_PICKER_ID, "style"),
         Output(COMMODITY_SECTION_ID, "className"),
-        Input(DATE_PICKER_ID, "date"),
+        Input(HEADER_AS_OF_STORE_ID, "data"),
         Input(BOOK_REVISION_ID, "data"),
         State(COMMODITY_DROPDOWN_ID, "value"),
     )
     def _update_commodities(as_of_date, _book_rev=None, current=None):
         return commodity_picker_state(get_db_path(), as_of_date, current)
-
-    # The header's own as-of date (the Ladder tab's date picker, mirrored into this store by
-    # ui/app.py): "Past closes the header needs" must list the dates the header itself reads.
-    from ui.tabs.header import AS_OF_STORE_ID as HEADER_AS_OF_STORE_ID
 
     @app.callback(
         Output(BODY_ID, "children"),
@@ -2981,18 +2977,19 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(REFERENCE_PANEL_ID, "children"),
         Output(ISSUES_ID, "children"),
         Output(COMMODITY_STRIP_ID, "children"),
-        Input(DATE_PICKER_ID, "date"),
+        Input(HEADER_AS_OF_STORE_ID, "data"),
         Input(PAIR_DROPDOWN_ID, "value"),
         Input(REFRESH_ID, "n_intervals"),
         Input(PULL_REVISION_ID, "data"),
         Input(MANUAL_STATUS_ID, "children"),
         Input(DATA_REVISION_ID, "data"),
-        Input(HEADER_AS_OF_STORE_ID, "data"),
         Input(COMMODITY_DROPDOWN_ID, "value"),
     )
     def _update_body(as_of_date, pair, _n_intervals=0, _pull_rev=None, _manual_status=None, _data_rev=None,
-                     header_as_of=None, commodity=None):
-        return _render(as_of_date, pair, header_as_of, commodity)
+                     commodity=None):
+        # One as-of for the whole tab: the header's (its picker). The whole-book panels and the
+        # per-pair section read the same date.
+        return _render(as_of_date, pair, as_of_date, commodity)
 
     def _render(as_of_date, pair, header_as_of=None, commodity=None):
         blank = html.Div()
@@ -3054,7 +3051,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     @app.callback(
         Output(MANUAL_STATUS_ID, "children"),
         Input(MANUAL_SUBMIT_ID, "n_clicks"),
-        State(DATE_PICKER_ID, "date"),
+        State(HEADER_AS_OF_STORE_ID, "data"),
         State(MANUAL_INSTRUMENT_ID, "value"),
         State(MANUAL_SETTLE_ID, "value"),
         State(MANUAL_MARK_TYPE_ID, "value"),

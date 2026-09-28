@@ -2,3 +2,6 @@
 - The retired screen lanes' notes are in `../ui-shell/` (index there), `../ui-header/`, `../ui-book/` etc.: read `ui-shell/MEMORY.md` first
 - [Sample book switch 2026-09-28](sample-book-switch-2026-09-28.md) — active_db_path holder in ui/app.py; ui/sample_book.py builds data/raw/sample.db from the golden book through today; proof recipe; static callback Inputs always rendered (hide by style)
 - [Pull lock while the sample book is active 2026-09-28](pull-lock-sample-book-2026-09-28.md) — feed_controls.pull_locked / pull_button, click_outcome refuses, _switch_book flips disabled + title; the pattern for any real-book write
+- [Screens tidy wave 1 2026-09-28](screens-tidy-wave1-2026-09-28.md) — the display kit (em dash, real minus, price_text, plain names), the header picker + marks chip, Book = header identity, proof recipe
+- [Screens fix pass 2026-09-28](screens-fix-pass-2026-09-28.md) — estimated dates "≈ date" + alert hover, Exposure excl. N, template short names, FX decimals, picker CSS, pattern-id Upload button, test-fix rule as applied
+- [Screens tidy wave 2 2026-09-28](screens-tidy-wave2-2026-09-28.md) — Exposure grid + cards, P&L five-period table with group-by, seven-column roll table, Risk drawer split, Data without the research curve; proof recipe

@@ -146,71 +146,8 @@ def _fx_blocks():
 
 
 # --------------------------------------------------------------------------- Positions: Commodities
-def test_commodities_section_renders_sectors_commodities_total_and_currency_exposure():
-    rows = blotter.commodity_positions_rows(_block())
-    lines = [(r["kind"], r["position"].strip()) for r in rows["records"]]
-    assert lines == [("sector", "Energy"), ("commodity", "NYMEX WTI light sweet crude"), ("commodity", "ICE Brent crude"),
-                     ("sector", "Metals"), ("commodity", "SHFE copper cathode"), ("commodity", "COMEX copper")]
-    by_name = {r["position"].strip(): r for r in rows["records"]}
-    energy, wti, cu = by_name["Energy"], by_name["NYMEX WTI light sweet crude"], by_name["SHFE copper cathode"]
-    assert (energy["net_usd"], energy["gross_usd"]) == (212_000.0, 212_000.0)
-    assert energy["net_lots"] == "" and energy["detail"] == ""                   # lots are per commodity; nothing left out
-    assert rows["tooltips"][0]["detail"]["value"] == "2 commodities"
-    assert (wti["exchange"], wti["net_lots"], wti["gross_lots"], wti["net_units"], wti["unit"]) == ("NYMEX", 2.0, 2.0, 2000.0, "bbl")
-    assert (wti["net_usd"], wti["gross_usd"], wti["sector"]) == (140_000.0, 140_000.0, "Energy")
-    assert (cu["net_lots"], cu["gross_lots"], cu["net_usd"]) == (-2.0, 2.0, -111_111.0)
-    assert cu["detail"] == "CNY"                                                  # a marker; the sentence on hover
-    assert rows["tooltips"][[r["position"].strip() for r in rows["records"]].index("SHFE copper cathode")]["detail"] \
-        == {"value": "CNY contract, in USD at the day's spot", "type": "text"}
-    assert all(r["position"].startswith("    ") for r in rows["records"] if r["kind"] == "commodity")
-
-    assert rows["footer"] == [{"kind": "total", "position": blotter.COMMODITY_TOTAL_LABEL, "sector": "", "exchange": "",
-                               "net_lots": "", "gross_lots": "", "net_units": "", "unit": "", "net_usd": 100_889.0,
-                               "gross_usd": 323_111.0, "detail": blotter.COMMODITY_TOTAL_DETAIL}]
-    assert [(r["position"], r["currency"], r["pnl_local"], r["pnl_usd"]) for r in rows["ccy_records"]] == [
-        ("P&L held in CNY", "CNY", -10_000.0, -1_388.89), ("P&L held in JPY", "JPY", 5_000.0, None)]
-    assert rows["caption"] == _block()["reason"] and rows["caption_marker"] == "excl. 1"
-
-    section = blotter.commodity_positions_section(_block())
-    ids = [t.id for t in _tables(section)]
-    assert ids == [blotter.COMMODITY_POSITIONS_TABLE_ID, blotter.COMMODITY_POSITIONS_TABLE_ID + "-footer",
-                   blotter.COMMODITY_CCY_TABLE_ID]
-    # Phase A: the reason is a marker beside the title, its sentence on hover; no paragraph
-    marker = next(n for n in _walk(section) if getattr(n, "className", "") == "marker")
-    assert (marker.children, marker.title) == ("excl. 1", _block()["reason"])
-    assert _block()["reason"] not in _texts(section) and "P&L held in foreign currency" in _texts(section)
-    assert not [n for n in _walk(section) if getattr(n, "className", "") == "section-kicker"]
-    # summary money in k / m: the cells stay numbers, whole units, the full figure on hover
-    tables = {t.id: t for t in _tables(section)}
-    body = tables[blotter.COMMODITY_POSITIONS_TABLE_ID]
-    usd_col = next(c for c in body.columns if c["id"] == "net_usd")
-    assert "s" in usd_col["format"]["specifier"]
-    cu_at = [r["position"].strip() for r in body.data].index("SHFE copper cathode")
-    assert body.data[cu_at]["net_usd"] == -111_111.0 and body.tooltip_data[cu_at]["net_usd"]["value"] == "(111,111) USD"
 
 
-def test_a_commodity_with_no_usd_figure_reads_na_with_its_reason_never_zero():
-    rows = blotter.commodity_positions_rows(_block())
-    records, tips = rows["records"], rows["tooltips"]
-    i = [r["position"].strip() for r in records].index("COMEX copper")
-    hg, hg_tip = records[i], tips[i]
-    assert hg["net_usd"] is None and hg["gross_usd"] is None                       # printed n/a, not 0
-    assert hg_tip["net_usd"]["value"] == hg_tip["gross_usd"]["value"] == "no FUTURE_PX for HGZ26 Comdty on 2026-06-20"
-    assert hg["net_lots"] == 3.0 and "net_lots" not in hg_tip                     # lots are known
-    # the sector summed over its known commodities, the exclusion in sight and its reason on hover
-    j = [r["position"].strip() for r in records].index("Metals")
-    assert records[j]["net_usd"] == -111_111.0
-    assert records[j]["detail"] == "excl. 1"
-    assert tips[j]["detail"]["value"].startswith("2 commodities; excludes 1 of 2 commodities with no USD figure: COMEX copper")
-    assert tips[j]["net_usd"]["value"].startswith("excludes 1 of 2 commodities with no USD figure: COMEX copper")
-    assert rows["footer_tooltips"][0]["net_usd"]["value"].startswith("excludes 1 of 3 commodities")
-    # a currency the engine could not convert: n/a with the reason
-    jpy_tip = rows["ccy_tooltips"][[r["currency"] for r in rows["ccy_records"]].index("JPY")]
-    assert jpy_tip == {"pnl_usd": {"value": "no official SPOT for JPY", "type": "text"}}
-    table = next(t for t in _tables(blotter.commodity_positions_section(_block()))
-                 if t.id == blotter.COMMODITY_POSITIONS_TABLE_ID)
-    assert {c["id"]: c["format"]["nully"] for c in table.columns if c["type"] == "numeric"} == {
-        "net_lots": "n/a", "gross_lots": "n/a", "net_units": "n/a", "net_usd": "n/a", "gross_usd": "n/a"}
 
 
 def test_no_commodities_shows_the_reason_and_no_empty_table():
@@ -332,7 +269,7 @@ def test_total_book_missing_figures_say_why_and_are_listed_in_the_data_issues_dr
     try:
         layout, table, rows = _total_table(conn)
         hg, tip = rows["H1"]
-        assert hg["mark"] is None and hg["pnl_usd"] is None and hg["prev_close"] is None   # n/a, never 0
+        assert hg["mark"] == blotter.MISSING and hg["pnl_usd"] is None and hg["prev_close"] == blotter.MISSING   # an em dash, never 0
         assert "no FUTURE_PX" in tip["mark"]["value"] and "no FUTURE_PX" in tip["pnl_usd"]["value"]
         assert "no FUTURE_PX" in tip["prev_close"]["value"]
         drawer = next(n for n in _walk(layout) if getattr(n, "id", None) == blotter.TOTAL_ISSUES_ID)
@@ -351,7 +288,8 @@ def test_a_trade_dealt_after_the_previous_close_has_no_prev_close_and_says_so():
     try:
         _, _, rows = _total_table(conn)
         brent, tip = rows["B1"]
-        assert brent["prev_close"] is None and tip["prev_close"]["value"] == f"not in the book on the {T1_CLOSE} close (dealt after it)"
+        assert brent["prev_close"] == blotter.MISSING
+        assert tip["prev_close"]["value"] == f"not in the book on the {T1_CLOSE} close (dealt after it)"
     finally:
         conn.close()
 

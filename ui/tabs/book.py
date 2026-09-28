@@ -1,47 +1,42 @@
-"""Book tab: the app's home. "What is my book, as spreads?" (UI redesign wave 1, user 2026-09-28,
-after the Screens redesign plan's Phase B of 2026-09-25). One screen:
+"""Book tab: the app's home. "What is my book, and what needs me?" Rebuilt on 2026-09-28 (the
+screens tidy, wave 1; the approved mock is the brief's Main.dc.html, with Empty.dc.html for a
+database with no trades and AfterUpload.dc.html for trades with no marks yet). One screen:
 
-  1. `book_section`, the book table: one row per open position, grouped by sector with sector
-     subtotals of the money columns. The rows are the spread positions of
-     `engine.spreads.book_spreads(conn, as_of)["positions"]` (one per spread across its trade
-     dates, their levels from `engine/spreads/levels.py`) and the outright futures
-     (`["outrights"]`, one row per contract, its trades' known figures added up under the
-     header's display rule). Columns: Position (the legs on hover), Lots, Entry, Now, Move (today's
-     change against the Daily's reference close), $ per unit (the engine's `usd_per_unit`, the USD
-     P&L of a 1.0 move, labelled "$ per <unit>"), Daily, MTD, LTD (k / m, the full figure on
-     hover), Next date (the legs' earliest event of `engine.expiry.expiry_schedule`, coloured by
-     its level). Sorted within each sector by |Daily|, largest first. A figure the engine could
-     not give is "n/a" with the reason on hover.
-  2. `detail_for`, the row detail (a click on a row): the position's entries and legs
-     (`detail_payloads`, `members_table`, `detail_legs_table`), its research history chart
-     (`history_figure`), and its own daily history from our marks (`engine.spreads.position_history`
-     over `history_dates`, one filled valuation per business day through the shared cached reader,
-     built by `history_block`), filled by its own callback under a loading state since it takes
-     seconds (wave 3, 2026-09-28). Those helpers came here from the Spreads tab when it was deleted
-     (2026-09-28, "spread helpers" below).
-  3. `needs_you_section`, "Needs you": the alerts, most urgent first, each naming its tab:
-     expiries at EXPIRED / RED / AMBER, marks missing, positions the rule could not group, the
-     VaR against the vol target (the header's memoised reading of risk-metrics, filled by a
-     chained callback so it never holds up the body), the limits.
-  4. `load_report_section`: what the last blotter load did, in plain words: the persisted
-     upload report (`upload_report`, one row the upload replaces, read through
-     `data.ingest.upload.last_upload_report`: the file, when it was loaded, the trades loaded by
-     kind, the book filter's exclusions, the underlying futures written with no trade; the whole
-     upload message on hover), the rows that did not become trades (the `upload_issues` table
-     the upload writes, the Data tab's own list), the trades unpriced today with their reasons.
-  5. One Data issues drawer.
+  1. The title line: "Book", the counts ("5 spreads · 12 outrights · 3 options · 2 LME prompts ·
+     8 FX hedges"), the group-by switch (Sector, the default, or Instrument) and Download CSV.
+  2. The movers strip: the three best and three worst Daily figures among the rows.
+  3. The book table, one row per open position: the spread positions of
+     `engine.spreads.book_spreads(conn, as_of)["positions"]` (their levels from
+     `engine/spreads/levels.py`), the outright futures one row per contract (`["outrights"]`),
+     and one row per open trade for the options on futures, LME forwards and FX hedges from the
+     shared filled reader (`ui/tabs/blotter_pricing.priced_value_book`). Columns: Position (plain
+     names, the instrument ids on hover), Size (words: "long 15 lots"), Entry, Now (the unit as a
+     small suffix), Move, Daily, MTD, LTD, Next. The settled and closed-out trades are one line of
+     their own so that the Book line equals the header's Daily, MTD and LTD to the cent: every
+     trade of the as-of book is in exactly one row, and every row's period figure is the P&L
+     tab's own per-trade figure (`ui.tabs.pnl.period_rows`, the header's split), the known ones
+     summed (display). A group line sums its rows' known figures and says "excl. N" when any is
+     missing; a missing cell is an em dash with its reason on hover. Nothing is recomputed: a
+     spread's entry, level, move and $ per unit are spreads-engine's; an outright's Entry is the
+     lots-weighted fill and its Move the mark less the Daily reference close's mark, both read
+     off the value rows; a trade row's Entry is its fill and its Now its mark.
+  4. A click on a row opens its detail under the table: a spread's entries and legs
+     (`detail_payloads`, `members_table`, `detail_legs_table`), an outright's or a trade row's
+     trades, the settled line's list.
+  5. "Needs you" (at most five lines, a chip, one sentence and a tab link): RED / AMBER events
+     with real dates, DATES (the contracts on estimated dates), MARKS (the marks missing), GROUP
+     (the trade sets the spread rule could not match), LIMITS.
+  6. "Last load": one sentence from the persisted `upload_report`.
+  7. One Data issues drawer.
 
-Display rules (`ui.tabs.formatting`, `ui.tabs.ranking`): definitions on hover of the titles,
-reasons as short markers and in the drawer, money in k / m with the full figure on hover. A
-figure the engine gives as None is "n/a" with its reason, never 0. The only arithmetic here is
-the display sums of the header's rule (an outright contract's trades, the sector and Book
-lines) and display rounding.
+Two states of the same screen: with no trades on file, the "No blotter loaded" card (the Upload
+button and the sample link) beside "What happens next"; with trades but no official mark for the
+book, a gold-edged "Loaded" banner over the table, fills in Entry and dashes elsewhere.
 
-`book_spreads` values several periods, so it is memoised on the database revision and the
-as-of, as the header does (`_memo`). The tab has no date picker: it follows the header's as-of
-store and re-renders in place on the data revision and its safety interval.
+Display rules: `ui.tabs.formatting` (2026-09-28). The tab has no date picker: it follows the
+header's as-of store and re-renders in place on the data revision and its safety interval.
 `layout(default_date)` (alias `build_layout`) and `register_callbacks(app, get_db_path)` are the
-shell's interface, the Spreads and Curve tabs' shape.
+shell's interface. `contract_label`, `position_size_text` and `_spreads` are read by the P&L tab.
 """
 from __future__ import annotations
 
@@ -52,107 +47,91 @@ import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import dash
-from dash import Input, Output, State, dash_table, dcc, html
+import pandas as pd
+from dash import ALL, Input, Output, State, dash_table, dcc, html
 
 from ui import sample_book
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import MINUS, about, issues_drawer, marker, short_money, tab_link
+from ui.tabs.formatting import (
+    MINUS, MISSING, about, contract_name, date_cell, fx_name, issues_drawer, lme_name, missing_cell,
+    money_cell, parse_contract_id, price_text, quoted_unit, short_date, short_money, short_root_name,
+    sign_class, signed_money, signed_number, size_words, spread_name, sum_known, tab_link, unit_suffix,
+)
 from ui.tabs.header import AS_OF_STORE_ID
 
 log = logging.getLogger(__name__)
 
 BODY_ID = "book-body"
 REFRESH_ID = "book-refresh"
-VAR_PENDING_ID = "book-var-pending"     # the as-of whose VaR is still being worked out, else None
-TABLE_ID = "book-table"                 # the book table (rendered inside the body)
-DETAIL_ID = "book-detail"               # the row detail under it
+TOOLBAR_ID = "book-toolbar"
+COUNTS_ID = "book-counts"
+GROUP_ID = "book-group-by"                 # the Sector | Instrument switch
+CSV_BUTTON_ID = "book-csv"
+DOWNLOAD_ID = "book-download"
+TABLE_ID = "book-table"
+DETAIL_ID = "book-detail"
 DETAIL_MEMBERS_ID = "book-detail-members"
 DETAIL_LEGS_ID = "book-detail-legs"
-DETAIL_GRAPH_ID = "book-detail-graph"
-DETAIL_HISTORY_ID = "book-detail-history"                  # the position's own daily history, filled on open
-DETAIL_HISTORY_REQUEST_ID = "book-detail-history-request"  # what that callback computes: the position and date
-DETAIL_HISTORY_GRAPH_ID = "book-detail-history-graph"
 ALERTS_ID = "book-alerts"
 LOAD_ID = "book-load"
 ISSUES_ID = "book-issues"
+EMPTY_UPLOAD_TYPE = "book-empty-upload"    # the empty state's Upload button (clicks the top bar's input): a
+EMPTY_UPLOAD_ID = {"type": EMPTY_UPLOAD_TYPE, "idx": "book"}   # pattern id, since the button exists only while the book is empty
+EMPTY_UPLOAD_SINK_ID = "book-empty-upload-sink"
+ROW_TYPE = "book-row"                      # the pattern id of a clickable row: {"type": ROW_TYPE, "idx": row id}
 
-NA = "n/a"
+NA = MISSING
 PERIODS = ("daily", "mtd", "ltd")
 PERIOD_TITLES = {"daily": "Daily", "mtd": "MTD", "ltd": "LTD"}
-SPREAD, OUTRIGHT = "spread", "outright"
-ROW, SECTOR, TOTAL = "row", "sector", "total"
+GROUP_SECTOR, GROUP_INSTRUMENT = "sector", "instrument"
+GROUP_OPTIONS = ((GROUP_SECTOR, "Sector"), (GROUP_INSTRUMENT, "Instrument"))
 BOOK_LABEL = "Book"
+SETTLED_GROUP = "Settled and closed out"
+OTHER_GROUP = "Other"
+OPTIONS_GROUP, FX_GROUP, LME_GROUP, FUTURES_GROUP = "Options on futures", "FX hedges", "LME forwards", "Futures"
+_SECTOR_ORDER = ("energy", "metals", "agriculture", "ferrous")
 LINES_ON_HOVER = 12
-AMBER_ON_LINE = 3
-MUTED = "#6b7280"
-EVENT_SHORT = {"first notice": "FN", "last trade": "LT", "option expiry": "Exp", "LME prompt": "Prompt"}
-_LEVEL_RANK = {"EXPIRED": 0, "RED": 1, "AMBER": 2, "GREEN": 3}
-_LEVEL_STYLE = {"EXPIRED": {"color": "var(--neg)", "fontWeight": "700"},
-                "RED": {"color": "var(--neg)", "fontWeight": "700"},
-                "AMBER": {"color": "var(--warn)", "fontWeight": "600"}}
+NEEDS_MAX = 5
+FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION")
+_METAL_UNITS = {"XAU": "oz", "XAG": "oz", "XPT": "oz", "XPD": "oz"}
+_NEXT_EVENT_WORDS = {"first notice": "first notice", "last trade": "last trade", "option expiry": "expiry",
+                     "LME prompt": "prompt"}
 
-# Alert severity: 0 act now, 1 watch, 2 for information. Chips in the app's light palette.
-ACT, WATCH, INFO = 0, 1, 2
-_CHIP = {"display": "inline-block", "minWidth": "58px", "textAlign": "center", "fontSize": "11px",
-         "fontWeight": 700, "lineHeight": "17px", "padding": "0 6px", "borderRadius": "9px", "marginRight": "8px"}
-_CHIP_COLOURS = {ACT: {"color": "#ffffff", "backgroundColor": "#c0392b"},
-                 WATCH: {"color": "#8a4b00", "backgroundColor": "#fff4e5", "border": "1px solid #f0c27a"},
-                 INFO: {"color": MUTED, "backgroundColor": "#f1f3f6", "border": "1px solid #dfe3ea"}}
-_LIMIT_SEVERITY = {"BREACH": ACT, "WARN": WATCH}
-
-TITLE_ABOUT = ("The book at the header's as-of date, as spreads: one row per open position with its level, "
-               "today's move, what a 1.0 move is worth and its P&L, grouped by sector; what needs you; and what "
-               "the last blotter load did. Every figure is the engine's, shown as it is. Money in k / m, the full "
-               "figure on hover.")
-TABLE_ABOUT = ("One row per open position (spreads-engine: the same spread put on over several days is one; a "
-               "future in no spread is an outright, one row per contract). Lots = the spread's size (a calendar in "
-               "lots of the near month), or the contract's open lots. Entry, Now and Move are the spread's level "
-               "in its own unit: at the lots-weighted fills, at the day's marks, and against the Daily's reference "
-               "close. $ per unit = the USD P&L of a 1.0 rise of the level on the open lots. Daily / MTD / LTD in "
-               "USD (k / m), summed per sector under the header's rule (priced trades only, 'excl. N' otherwise). "
-               "Next date: the legs' earliest first notice, last trade, option expiry or LME prompt, with the "
-               "business days to its alert. Click a row for its entries, legs and history. FX hedges, LME "
-               "forwards and options in no spread are on the Trades tab; the header is the whole book.")
-NEEDS_ABOUT = ("What needs you today, most urgent first: expiries within the alert window (Timing & cash tab), "
-               "marks the book needs and does not have (Data tab), trades the grouping rule could not put in a "
-               "spread (this tab's Data issues drawer names them; the P&L tab lists them as outrights), the VaR "
-               "against the vol target and the desk and exchange limits (Risk tab).")
-LOAD_ABOUT = ("What the last blotter load did, as the upload recorded it: the file and when it was loaded, the "
-              "trades it loaded by kind, what the book filter left out, the rows of the file that did not become "
-              "trades (with the parser's own reason), and the trades the engine could not price today. The whole "
-              "upload message is on hover of the first line. The load itself is not changed here: the Upload "
-              "blotter button above replaces the whole book.")
-SCOPE_NOTE = ("P&L on this table is the futures book by spread: FX hedges, LME forwards and options on futures "
-              "outside a spread are not in it (their P&L is on the Trades tab). The header is the whole book.")
-
-_MONO = {"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
-         "padding": "3px 7px", "whiteSpace": "nowrap", "fontSize": "12.5px"}
-_ONE_LINE = {"whiteSpace": "nowrap", "overflow": "hidden", "textOverflow": "ellipsis"}
-_NA_STYLE = {"color": "var(--muted)", "fontStyle": "italic"}
-_SECTOR_STYLE = {"fontWeight": "700", "backgroundColor": "#f3f5f8", "borderTop": "2px solid var(--line)"}
-_TOTAL_STYLE = {"fontWeight": "700", "borderTop": "2px solid #1f2933"}
-_SECTION = {"background": "var(--card)", "border": "1px solid var(--line)", "borderRadius": "8px",
-            "padding": "10px 12px", "minWidth": 0}
-_LIST = {"listStyle": "none", "margin": 0, "padding": 0, "fontSize": "12.5px"}
-_LINE = {"padding": "3px 0", "borderBottom": "1px solid #eef0f4", **_ONE_LINE}
-_TAB_LINK = {"marginLeft": "6px", "fontSize": "11.5px"}
-# The tabs a pointer can open: the label the user reads -> its stable key (ui.app.TAB_KEYS; not
-# imported from ui.app, which imports the tabs). Spreads and FX & cash are hidden since
-# 2026-09-28 (wave 3), so no pointer names them: a link to a key off the tab bar is dead.
 TAB_KEYS = {"Book": "book", "Exposure": "curve", "P&L": "pnl", "Timing & cash": "expiries", "Risk": "risk",
             "Trades": "blotter", "Data": "market-data"}
+
+TITLE_ABOUT = ("The book at the header's as-of date: one row per open position (a spread across its trade dates, "
+               "an outright contract, an option on a future, an LME prompt, an FX hedge), grouped by sector or by "
+               "instrument, with its entry, its level now, today's move and its Daily, MTD and LTD P&L in USD. "
+               "The Book line equals the header. Click a row for its trades and legs.")
+NEEDS_ABOUT = ("What needs you today, most urgent first, one line per kind: expiries within the alert window, the "
+               "contracts still on estimated dates, the marks missing, the trade sets the spread rule could not "
+               "match, the limits. Each names the tab that holds the detail.")
+LOAD_ABOUT = "What the last blotter load did, as the upload recorded it."
+COLUMN_TIPS = {
+    "Position": "The spread, contract, option, LME prompt or FX hedge in plain words; the instrument ids on hover. "
+                "Click a row for its trades and legs.",
+    "Size": "The open size in words: a spread in lots of the near month or in its template's quantity unit, a future "
+            "in lots, an LME prompt in tonnes, an FX hedge in its base currency.",
+    "Entry": "A spread's level at entry (the lots-weighted fills of its legs), an outright's lots-weighted fill, a "
+             "trade's fill. Prices at tick precision.",
+    "Now": "The level or mark at the day's official marks, with its unit.",
+    "Move": "Now less the level or mark at the Daily's reference close; a spread's $ per unit on hover.",
+    "Daily": "Daily P&L in USD (k / m, the full figure on hover), by the header's rule; a group line sums its rows' "
+             "known figures and says what it leaves out.",
+    "MTD": "MTD P&L in USD, likewise.",
+    "LTD": "LTD P&L in USD, likewise.",
+    "Next": "The position's next event (first notice, last trade, option expiry, LME prompt, FX value date) and the "
+            "business days to it; grey with a leading ≈ while the date is estimated.",
+}
 
 
 # --------------------------------------------------------------------------- small helpers
 def _num(value: Any) -> Optional[float]:
     v = rk.value(value)
     return v if isinstance(v, float) else None
-
-
-def _tip(text: str) -> dict:
-    return {"value": text, "type": "text"}
 
 
 def message_box(message: str) -> html.P:
@@ -163,43 +142,9 @@ def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}{'s' if n != 1 else ''}"
 
 
-def _date_words(iso: Optional[str]) -> str:
-    if not iso:
-        return "no as-of date"
-    try:
-        d = dt.date.fromisoformat(iso)
-    except ValueError:
-        return iso
-    return f"{d:%A} {d.day} {d:%B %Y} ({iso})"
-
-
-def _short_date(iso: Optional[str]) -> str:
-    try:
-        d = dt.date.fromisoformat(str(iso))
-    except (TypeError, ValueError):
-        return str(iso or "date unknown")
-    return f"{d.day} {d:%b}"
-
-
 def full_usd(v: float) -> str:
-    """The full figure behind a k / m cell: 'USD -6,928' (a true minus sign)."""
+    """The full figure behind a k / m cell: 'USD −6,928' (a true minus sign)."""
     return f"USD {v:,.0f}".replace("-", MINUS)
-
-
-def signed_money(v: Optional[float]) -> str:
-    """'+15.3k' / '−39.4k' / '0', 'n/a' for None: a summary figure with its sign."""
-    if v is None:
-        return NA
-    text = short_money(v)
-    return text if text.startswith(MINUS) or text == "0" else "+" + text
-
-
-def signed_level(v: Optional[float]) -> str:
-    """A level move: '+3.06', '−2.63' (a true minus sign), at most 4 significant decimals."""
-    if v is None:
-        return NA
-    text = f"{v:+,.2f}" if abs(v) >= 0.1 or v == 0 else f"{v:+,.4g}"
-    return text.replace("-", MINUS)
 
 
 def contract_label(instrument_id: Optional[str]) -> str:
@@ -211,30 +156,28 @@ def contract_label(instrument_id: Optional[str]) -> str:
     return s
 
 
-def pointer(tab: str, idx: str) -> html.Span:
-    """The tab that holds the detail, as a link that opens it (`formatting.tab_link`): `tab` is
-    the label the user reads ("Exposure", "Data"), `idx` the spot it sits in, "book-<spot>", unique
-    on the page for links to the same tab. "Book" is this tab: no link, an empty span."""
+def pointer(tab: str, idx: str, label: Optional[str] = None):
+    """A tab's name as a link that opens it (`formatting.tab_link`); nothing for this tab."""
     if tab == "Book":
-        return html.Span(style=_TAB_LINK)
-    return html.Span(tab_link(f"→ {tab}", TAB_KEYS[tab], idx), style=_TAB_LINK)
+        return html.Span()
+    return tab_link(label or tab, TAB_KEYS[tab], idx, title=f"Open the {tab} tab")
 
 
 def _sector_label(sector: str) -> str:
-    return str(sector or "").replace("_", " ").capitalize() or "Other"
+    return str(sector or "").replace("_", " ").capitalize() or OTHER_GROUP
 
 
 # --------------------------------------------------------------------------- spread helpers
-# Moved here from the retired Spreads tab (ui/tabs/spreads.py, deleted 2026-09-28: the user's
-# "delete, do not hide"), behaviour unchanged: the size, level and drill-down builders this tab
-# and the P&L tab (`position_size_text`) read.
-NO_RESEARCH = "the research statistics were not read"
+# Kept from the retired Spreads tab: the size, level and drill-down builders this tab and the
+# P&L tab (`position_size_text`) read.
 _DETAIL_MONO = {"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
-                "padding": "4px 8px", "whiteSpace": "pre"}
+                "padding": "3px 8px", "whiteSpace": "pre"}
+_NA_STYLE = {"color": "var(--muted)"}
+_ONE_LINE = {"whiteSpace": "nowrap", "overflow": "hidden", "textOverflow": "ellipsis"}
 
 
 def signed(v: Optional[float]) -> str:
-    """+10 / -10 (a true minus sign) / 0, as few decimals as the number needs."""
+    """+10 / −10 (a true minus sign) / 0, as few decimals as the number needs."""
     if v is None:
         return NA
     if v == 0:
@@ -243,7 +186,7 @@ def signed(v: Optional[float]) -> str:
 
 
 def plain(v: float) -> str:
-    """5,000 / 96.45 / -2.5 (a true minus sign): thousands separators, at most 2 decimals, trimmed."""
+    """5,000 / 96.45 / −2.5 (a true minus sign): thousands separators, at most 2 decimals, trimmed."""
     text = f"{abs(v):,.2f}".rstrip("0").rstrip(".")
     return (MINUS + text) if v < 0 and text != "0" else text
 
@@ -254,11 +197,11 @@ def size_text(size: float, unit: str) -> str:
 
 
 def level_decimals(unit: Optional[str]) -> int:
-    """How many decimals a level in `unit` is shown with: the exchange's tick, roughly.
-    Bushels, pounds and gallons 4 (a quarter cent), MMBtu and hundredweight 3, yen and won 0,
-    yuan 1 (a half-yuan tick on iron ore; 2 per gram), anything else 2 (a cent)."""
+    """How many decimals a level in `unit` is shown with: the exchange's tick, roughly."""
     ccy, _sep, qty = str(unit or "").partition("/")
     ccy, qty = ccy.strip().upper(), qty.strip().lower()
+    if ccy == "RATIO" or str(unit or "").lower() == "ratio":
+        return 3
     if qty in ("bu", "lb", "gal"):
         return 4
     if qty in ("mmbtu", "cwt"):
@@ -271,8 +214,7 @@ def level_decimals(unit: Optional[str]) -> int:
 
 
 def level_text(v: Optional[float], unit: Optional[str], sign: bool = False) -> str:
-    """A level (or, with `sign`, a change) in its unit's decimals, a true minus sign: '0.34',
-    '−2.63', '+3.06'; None is 'n/a'."""
+    """A level (or, with `sign`, a change) in its unit's decimals, a true minus sign."""
     if v is None:
         return NA
     d = level_decimals(unit)
@@ -285,51 +227,28 @@ def level_text(v: Optional[float], unit: Optional[str], sign: bool = False) -> s
 
 
 def position_size_text(p: Dict[str, Any]) -> Tuple[str, str]:
-    """('long 15 lots', hover) or ('n/a', why): the summed size with its direction and unit."""
+    """('long 15 lots', hover) or ('—', why): the summed size with its direction and unit."""
     size = _num(p.get("size"))
     if size is None:
         why = ("no calendar or template fits all of its futures legs, so it has no size"
                if p.get("kind") in ("bundle", "pinned") else "spreads-engine gave no size")
         return NA, why
-    direction = p.get("direction") or ("long" if size >= 0 else "short")
-    unit = p.get("size_unit") or ""
-    hover = (f"{direction} {size_text(abs(size), unit)}: a calendar in lots of the near month (long = long the "
-             "near month), a template in its quantity unit (long = long the spread as the template writes it)")
-    return f"{direction} {size_text(abs(size), unit)}", hover
-
-
-def research_key_of(item: Dict[str, Any]) -> Optional[Tuple[str, str]]:
-    """(research_id, instance) as spreads-engine gives them, or None when it gives no research id."""
-    rid = item.get("research_id") or ""
-    return (rid, item.get("research_instance") or "") if rid else None
-
-
-def research_entry(item: Dict[str, Any], research: Dict[str, Any]) -> Tuple[Optional[dict], str]:
-    """(the research statistics of a position, '') or (None, why there are none)."""
-    key = research_key_of(item)
-    if key is None:
-        return None, item.get("research_reason") or "spreads-engine gave no research id and no reason"
-    entry = (research.get("stats") or {}).get(key)
-    if entry is None:
-        return None, research.get("reason") or NO_RESEARCH
-    if not entry.get("found"):
-        return entry, entry.get("reason") or "no research statistics"
-    return entry, ""
+    unit = p.get("size_unit") or "lots"
+    hover = (f"{size_words(size, unit)}: a calendar in lots of the near month (long = long the near month), a "
+             "template in its quantity unit (long = long the spread as the template writes it)")
+    return size_words(size, unit), hover
 
 
 def open_positions(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The open positions (every one whose status is not closed), in the engine's order."""
     return [p for p in (result.get("positions") or []) if p.get("status") != "closed"]
 
 
-def detail_payloads(result: Dict[str, Any], research: Dict[str, Any]) -> Dict[str, dict]:
-    """{position_id: what its drill-down shows}, JSON-safe: the position's levels, its member
-    spreads' entries (from `result["spreads"]`), its legs (`level_legs` beside the summed `legs`)
-    and its research key."""
+def detail_payloads(result: Dict[str, Any], _research: Optional[dict] = None) -> Dict[str, dict]:
+    """{position_id: what its drill-down shows}: the position's levels, its member spreads'
+    entries (from `result["spreads"]`) and its legs (`level_legs` beside the summed `legs`)."""
     by_id = {s.get("spread_id"): s for s in result.get("spreads") or []}
     out: Dict[str, dict] = {}
     for p in open_positions(result):
-        entry, why = research_entry(p, research)
         lots = {leg.get("instrument_id"): leg for leg in p.get("legs") or []}
         members = []
         for sid in p.get("spread_ids") or []:
@@ -344,86 +263,24 @@ def detail_payloads(result: Dict[str, Any], research: Dict[str, Any]) -> Dict[st
                                                  "currency", "price_scale", "entry_price", "prev_price",
                                                  "now_price")}
                         | {k: held.get(k) for k in ("lots", "open_lots", "pnl_usd", "status", "reason")})
-        key = research_key_of(p)
         out[p.get("position_id") or str(p.get("name"))] = {
             "position_id": p.get("position_id"), "name": p.get("name"), "unit": p.get("level_unit") or "",
             "size_text": position_size_text(p)[0],
             **{k: p.get(k) for k in ("level_entry", "level_entry_reason", "level_now", "level_now_reason",
                                      "level_prev", "level_prev_reason", "level_prev_date")},
             "sources": dict(p.get("level_sources") or {}),
-            "research_id": key[0] if key else "", "research_instance": key[1] if key else "",
-            "research_reason": why, "research_unit": (entry or {}).get("unit") or "",
-            "research_run": (entry or {}).get("asof") or research.get("run_asof"),
-            "research_name": (entry or {}).get("name") or "",
             "members": members, "legs": legs,
-            "history_position": {k: p.get(k) for k in ("position_id", "member_trade_ids", "level_spec",
-                                                       "level_now_reason", "trade_ids")},
         }
     return out
 
 
-def _unit_same(a: Optional[str], b: Optional[str]) -> bool:
-    """Two unit strings the same once spaces and case are ignored and '$' read as 'USD'."""
-    def norm(u):
-        return "".join(str(u or "").split()).replace("$", "USD").casefold()
-    return bool(a) and norm(a) == norm(b)
-
-
-def history_figure(series, payload: Dict[str, Any], as_of: Optional[str]) -> Tuple[Optional[dict], str]:
-    """(figure, note) for the drill-down chart: the research history as a line in its unit; the
-    position's entry level as a dashed line and today's level as a marker, drawn only when our
-    unit and the research unit agree (else the note says why). (None, reason) when the research
-    app has no history."""
-    reason = getattr(series, "attrs", {}).get("reason") if series is not None else "no research history read"
-    if series is None or len(series) == 0:
-        return None, reason or "the research app has no history for this spread"
-    xs = [d.strftime("%Y-%m-%d") for d in series.index]
-    r_unit = series.attrs.get("unit") or payload.get("research_unit") or ""
-    data = [{"x": xs, "y": [float(v) for v in series.values], "type": "scatter", "mode": "lines",
-             "name": "research history", "line": {"color": "#16294f", "width": 1.5},
-             "hovertemplate": "%{x}<br>%{y:.4g} " + r_unit + " (research)<extra></extra>"}]
-    unit = payload.get("unit") or ""
-    notes: List[str] = []
-    if _unit_same(unit, r_unit):
-        entry, now = _num(payload.get("level_entry")), _num(payload.get("level_now"))
-        if entry is not None:
-            data.append({"x": [xs[0], max(xs[-1], as_of or xs[-1])], "y": [entry, entry], "type": "scatter",
-                         "mode": "lines", "name": f"entry {level_text(entry, unit)} (the fills)",
-                         "line": {"color": "#c9a227", "dash": "dash", "width": 1.5}, "hoverinfo": "skip"})
-        else:
-            notes.append(f"no entry line: {payload.get('level_entry_reason') or 'no entry level'}")
-        if now is not None and as_of:
-            data.append({"x": [as_of], "y": [now], "type": "scatter", "mode": "markers",
-                         "name": f"now {level_text(now, unit)} (official marks)",
-                         "marker": {"color": "#c0392b", "size": 9, "symbol": "diamond"},
-                         "hovertemplate": "%{x}<br>now %{y:.4g} " + unit + "<extra></extra>"})
-        elif now is None:
-            notes.append(f"no marker for today: {payload.get('level_now_reason') or 'no level now'}")
-    else:
-        notes.append(f"entry and today's level not drawn: the book's level is in {unit or 'no unit'}, "
-                     f"the research history in {r_unit or 'no unit'}")
-    figure = {"data": data,
-              "layout": {"margin": {"l": 55, "r": 20, "t": 10, "b": 30}, "height": 260,
-                         "xaxis": {"type": "date"}, "yaxis": {"title": r_unit},
-                         "legend": {"orientation": "h", "y": -0.2}, "showlegend": True}}
-    return figure, "; ".join(notes)
-
-
-def _table_styles(numeric_cols: Sequence[str], text_cols: Sequence[str], wide: Sequence[str] = (),
-                  na_cols: Sequence[str] = (), one_line: Sequence[str] = (), compact: bool = False,
+def _table_styles(numeric_cols: Sequence[str], text_cols: Sequence[str], na_cols: Sequence[str] = (),
                   extra_na: Sequence[str] = ()) -> dict:
-    """The drill-down tables' styles. `wide` columns wrap; `one_line` columns are cut with an
-    ellipsis (their full text on hover); `compact` tightens the rows; `na_cols` are text columns
-    and `extra_na` unsigned numeric ones whose "n/a" is greyed like the signed numeric ones'."""
-    cell = dict(_DETAIL_MONO, padding="2px 8px") if compact else _DETAIL_MONO
     return dict(
         style_table={"overflowX": "auto"},
-        style_cell=cell,
-        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in text_cols]
-                               + [{"if": {"column_id": c}, "whiteSpace": "normal", "minWidth": "220px",
-                                   "maxWidth": "480px"} for c in wide]
-                               + [{"if": {"column_id": c}, **_ONE_LINE, "maxWidth": "320px"} for c in one_line],
-        style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
+        style_cell=_DETAIL_MONO,
+        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in text_cols],
+        style_header={"fontWeight": "600", "whiteSpace": "normal", "height": "auto"},
         style_data_conditional=rk.sign_styles(numeric_cols)
                                + [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{NA}'"}, **_NA_STYLE}
                                   for c in (*numeric_cols, *na_cols, *extra_na)],
@@ -431,9 +288,13 @@ def _table_styles(numeric_cols: Sequence[str], text_cols: Sequence[str], wide: S
     )
 
 
+def _tip(text: str) -> dict:
+    return {"value": text, "type": "text"}
+
+
 def members_table(payload: Dict[str, Any]) -> dash_table.DataTable:
     """The position's entries: one row per member spread, its trade dates, accounts, size and
-    entry level (n/a with its reason)."""
+    entry level (a dash with its reason)."""
     unit = payload.get("unit") or ""
     rows, tips = [], []
     for m in payload.get("members") or []:
@@ -454,8 +315,8 @@ def members_table(payload: Dict[str, Any]) -> dash_table.DataTable:
                rk.text("Status", "status")]
     return dash_table.DataTable(
         id=DETAIL_MEMBERS_ID, columns=columns, data=rows, tooltip_data=tips, **rk.sortable(),
-        **_table_styles([], [c["id"] for c in columns if c["id"] != "entry"], na_cols=("entry", "size"),
-                        compact=True), page_action="none")
+        **_table_styles([], [c["id"] for c in columns if c["id"] != "entry"], na_cols=("entry", "size")),
+        page_action="none")
 
 
 def detail_legs_table(payload: Dict[str, Any]) -> dash_table.DataTable:
@@ -501,158 +362,16 @@ def detail_legs_table(payload: Dict[str, Any]) -> dash_table.DataTable:
     numeric = [c["id"] for c in columns if c["type"] == "numeric"]
     return dash_table.DataTable(
         id=DETAIL_LEGS_ID, columns=columns, data=rows, tooltip_data=tips, **rk.sortable(),
-        **_table_styles([], [c["id"] for c in columns if c["type"] == "text"], extra_na=numeric, compact=True),
+        **_table_styles([], [c["id"] for c in columns if c["type"] == "text"], extra_na=numeric),
         page_action="none")
 
 
-HISTORY_LABEL = "our marks"
-HISTORY_ABOUT = ("The position's own daily history from the book's official marks (not the research app's): its "
-                 "LTD P&L in USD on each business day from its first trade to the as-of (left axis) and its level "
-                 "on the same days (right axis), with the entry level dashed. A day with no figure is a gap, its "
-                 "reason on the grey x under it; a hatched bar and an open circle are a value of an earlier close "
-                 "(no price that day). Worked out when the position is opened.")
-
-
-def history_request(payload: Dict[str, Any], as_of: Optional[str]) -> Dict[str, Any]:
-    """What the history callback needs, JSON-safe: the position as `position_history` reads it,
-    the as-of, and the entry level and unit the chart draws."""
-    return {"position": payload.get("history_position") or {}, "as_of": as_of, "name": payload.get("name") or "",
-            "unit": payload.get("unit") or "", "level_entry": payload.get("level_entry"),
-            "level_entry_reason": payload.get("level_entry_reason") or ""}
-
-
-def _point_text(pt: Dict[str, Any], unit: str) -> Tuple[str, str, List[str], bool]:
-    """(LTD hover, level hover, n/a sentences, filled?) of one history point."""
-    day = pt.get("date") or ""
-    filled = bool(_num(pt.get("ltd_filled")))
-    fill_words = f"<br>filled: {pt.get('ltd_notes')}" if filled and pt.get("ltd_notes") else (
-        "<br>filled from an earlier close" if filled else "")
-    ltd = _num(pt.get("ltd_usd"))
-    n_out = int(_num(pt.get("ltd_excluded")) or 0)
-    na: List[str] = []
-    if ltd is None:
-        na.append(f"LTD n/a: {pt.get('ltd_reasons') or 'no member priced and no reason given'}")
-        ltd_text = ""
-    else:
-        ltd_text = (f"{day}<br>LTD {full_usd(ltd)}"
-                    + (f"<br>excludes {n_out}: {pt.get('ltd_reasons') or 'no reason given'}" if n_out else "")
-                    + fill_words)
-    level = _num(pt.get("level"))
-    if level is None:
-        na.append(f"level n/a: {pt.get('level_reason') or 'no level and no reason given'}")
-        level_text_ = ""
-    else:
-        level_text_ = (f"{day}<br>level {level_text(level, unit)} {unit} ({HISTORY_LABEL})"
-                       + (f"<br>{pt.get('level_source')}" if pt.get("level_source") else "") + fill_words)
-    return ltd_text, level_text_, na, filled
-
-
-def own_history_figure(history: Dict[str, Any], request: Dict[str, Any]) -> Tuple[Optional[dict], str]:
-    """(figure, note) of the position's own history: LTD USD as bars on the left axis, the level
-    ("our marks") as a line on the right with the entry level dashed, a missing figure a gap (None,
-    never 0) with its reason on a grey x along the bottom, a filled day a hatched bar and an open
-    circle. (None, reason) when there is no point."""
-    points = history.get("points") or []
-    if not points:
-        return None, (f"no trade of this position on or before {request.get('as_of')}"
-                      if not history.get("first_trade_date") else "no business day to show")
-    unit = history.get("level_unit") or request.get("unit") or ""
-    xs = [pt.get("date") for pt in points]
-    texts = [_point_text(pt, unit) for pt in points]
-    symbols = ["circle-open" if filled else "circle" for _l, _v, _n, filled in texts]
-    ltd = [_num(pt.get("ltd_usd")) for pt in points]
-    # LTD as bars and the level as a line: on a clean spread LTD is USD per point x (level - entry),
-    # so two lines would lie on top of each other (seen 2026-09-25). A filled day's bar is hatched.
-    data: List[dict] = [
-        {"x": xs, "y": ltd, "type": "bar", "name": "LTD USD", "yaxis": "y",
-         "marker": {"color": ["#1a7f4b" if v is not None and v >= 0 else "#c0392b" for v in ltd], "opacity": 0.45,
-                    "pattern": {"shape": ["/" if t[3] else "" for t in texts]}},
-         "text": [t[0] for t in texts], "textposition": "none", "hovertemplate": "%{text}<extra></extra>"}]
-    has_level = any(_num(pt.get("level")) is not None for pt in points)
-    if has_level:
-        data.append({"x": xs, "y": [_num(pt.get("level")) for pt in points], "type": "scatter",
-                     "mode": "lines+markers", "name": f"level ({HISTORY_LABEL}, {unit})", "yaxis": "y2",
-                     "connectgaps": False, "line": {"color": "#c9a227", "width": 1.5},
-                     "marker": {"size": 5, "symbol": symbols}, "text": [t[1] for t in texts],
-                     "hovertemplate": "%{text}<extra></extra>"})
-    notes: List[str] = []
-    entry = _num(request.get("level_entry"))
-    if has_level and entry is not None:
-        data.append({"x": [xs[0], xs[-1]], "y": [entry, entry], "type": "scatter", "mode": "lines", "yaxis": "y2",
-                     "name": f"entry {level_text(entry, unit)}", "hoverinfo": "skip",
-                     "line": {"color": "#c9a227", "dash": "dash", "width": 1}})
-    elif has_level:
-        notes.append(f"no entry line: {request.get('level_entry_reason') or 'no entry level'}")
-    else:
-        why = next((pt.get("level_reason") for pt in points if pt.get("level_reason")), "") or "no level"
-        notes.append(f"no level line: {why}")
-    gaps = [(x, "<br>".join(t[2])) for x, t in zip(xs, texts) if t[2]]
-    if gaps:
-        data.append({"x": [g[0] for g in gaps], "y": [0.04] * len(gaps), "type": "scatter", "mode": "markers",
-                     "yaxis": "y3", "name": "n/a (hover for why)", "text": [f"{x}<br>{w}" for x, w in gaps],
-                     "hovertemplate": "%{text}<extra></extra>",
-                     "marker": {"symbol": "x-thin", "size": 8, "color": "#9ca3af", "line": {"width": 1.5,
-                                                                                            "color": "#9ca3af"}}})
-    layout = {"margin": {"l": 55, "r": 55, "t": 10, "b": 30}, "height": 260, "hovermode": "closest",
-              "xaxis": {"type": "date"}, "yaxis": {"title": "LTD USD", "zeroline": True},
-              "yaxis2": {"title": unit, "overlaying": "y", "side": "right", "showgrid": False, "zeroline": False},
-              "bargap": 0.3,
-              "yaxis3": {"overlaying": "y", "range": [0, 1], "visible": False, "fixedrange": True},
-              "legend": {"orientation": "h", "y": -0.2}, "showlegend": True}
-    return {"data": data, "layout": layout}, "; ".join(notes)
-
-
-def history_block(request: Optional[Dict[str, Any]], db_path, history_fn: Optional[Callable] = None,
-                  dates_fn: Optional[Callable] = None) -> Any:
-    """The position's own daily history, worked out now (the row was opened): the business days
-    from its first trade to the as-of, each through the screens' memoised filled reader, so a
-    close the header or an earlier opening already valued costs nothing. A problem is its sentence
-    where the chart would be. `history_fn` / `dates_fn` default to `engine.spreads.position_history`
-    / `history_dates` (tests pass their own)."""
-    request = request or {}
-    as_of = request.get("as_of")
-    position = request.get("position") or {}
-    if not as_of or not position:
-        return html.Div("No position or as-of date to chart.", className="section-kicker")
-    from engine.spreads import history_dates, position_history
-    from ui.app import connect_readonly       # local: ui.app imports the tabs
-    from ui.tabs.blotter_pricing import priced_value_book, pricing_snapshot
-    history_fn = history_fn or position_history
-    dates_fn = dates_fn or history_dates
-    try:
-        conn = connect_readonly(db_path)
-    except sqlite3.OperationalError as exc:
-        return html.Div(f"No daily history: database not available ({exc}).", className="section-kicker")
-    try:
-        with pricing_snapshot(conn, "Book history"):
-            history = history_fn(conn, position, dates_fn(conn, position, as_of), value_fn=priced_value_book)
-    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a broken panel
-        return html.Div(f"No daily history: it could not be worked out ({type(exc).__name__}: {exc}).",
-                        className="section-kicker")
-    finally:
-        conn.close()
-    figure, note = own_history_figure(history, request)
-    if figure is None:
-        return html.Div(f"No daily history from {HISTORY_LABEL}: {note}", className="section-kicker")
-    points = history.get("points") or []
-    first = history.get("first_trade_date") or (points[0].get("date") if points else "")
-    caption = (f"daily history ({HISTORY_LABEL}, the book's official prices): LTD USD and the level in "
-               f"{history.get('level_unit') or request.get('unit') or 'no unit'}, {first} to {as_of}")
-    return html.Div([
-        html.Div(caption, className="section-kicker about-title", title=HISTORY_ABOUT),
-        dcc.Graph(id=DETAIL_HISTORY_GRAPH_ID, figure=figure, config={"displayModeBar": False}),
-        *([html.Div(note, className="section-kicker")] if note else [])])
-
-
 # --------------------------------------------------------------------------- memo
-_MEMO: dict = {}
+_MEMO: Dict[Any, Any] = {}
 _MEMO_MAX = 64
 
 
 def _db_revision(conn: sqlite3.Connection) -> Optional[tuple]:
-    """(path, mtime) of the connection's main database file, None for an in-memory one (then
-    nothing is memoised). The mtime moves on every write (journal_mode=delete, CLAUDE.md
-    "Guard rails")."""
     try:
         path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
         return (str(path), os.path.getmtime(path)) if path else None
@@ -679,8 +398,8 @@ def _failure(what: str, exc: Exception) -> str:
 
 
 def _spreads(conn: sqlite3.Connection, as_of: str) -> dict:
-    """`book_spreads` through the screens' shared filled reader (the header's and the Spreads
-    tab's), one pricing snapshot, memoised on the database revision and the as-of."""
+    """`book_spreads` through the screens' shared filled reader, one pricing snapshot, memoised
+    on the database revision and the as-of (the P&L tab reads this too)."""
     def build():
         from engine.spreads import book_spreads
         from ui.tabs.blotter_pricing import priced_value_book, pricing_snapshot
@@ -694,26 +413,6 @@ def _needs(conn: sqlite3.Connection, as_of: str) -> tuple:
     return _memo("needs", conn, as_of, lambda: needed_marks(conn, as_of))
 
 
-def _research(positions: Sequence[dict], as_of: str) -> dict:
-    from engine.risk.research_spreads import research_spread_stats
-    keys = list(dict.fromkeys((p.get("research_id"), p.get("research_instance") or "")
-                              for p in positions if p.get("research_id")))
-    return research_spread_stats(keys, as_of)
-
-
-def _risk_if_ready(conn: sqlite3.Connection, as_of: str) -> Optional[dict]:
-    """The header's risk reading for this revision and as-of when it has been worked out, else
-    None (never computes: `book_risk` takes seconds on a cold cache)."""
-    from ui.tabs import header
-    ready = getattr(header, "risk_summary_if_ready", None) or getattr(header, "_risk_summary_if_ready", None)
-    if ready is None:
-        return None
-    try:
-        return ready(conn, as_of)
-    except Exception:  # noqa: BLE001 -- pending, the chained callback tries the full read
-        return None
-
-
 def _roots() -> Dict[str, Any]:
     try:
         from data.contracts import load_roots
@@ -722,62 +421,85 @@ def _roots() -> Dict[str, Any]:
         return {}
 
 
-_PRODUCT_WORDS = {"FUTURE": "futures", "CMDTY_OPTION": "options on futures", "LME_FWD": "LME forwards",
-                  "FX_FWD": "FX forwards", "FX_SPOT": "FX spot", "FX_SWAP": "FX swaps", "FX_OPTION": "FX options",
-                  "EQ_OPTION": "listed options"}
+def _instruments(conn: sqlite3.Connection) -> Dict[str, dict]:
+    """{instrument_id: {base_ccy, quote_ccy, asset_class, expiry_date}} plus the option terms on
+    file ({strike, option_type}), read once per render."""
+    out: Dict[str, dict] = {}
+    try:
+        for inst, base, quote, cls, expiry in conn.execute(
+                "SELECT instrument_id, base_ccy, quote_ccy, asset_class, expiry_date FROM instruments"):
+            out[str(inst)] = {"base_ccy": str(base or ""), "quote_ccy": str(quote or ""), "asset_class": str(cls or ""),
+                              "expiry_date": str(expiry or ""), "strike": None, "option_type": ""}
+        for inst, strike, otype in conn.execute("SELECT instrument_id, strike, option_type FROM instrument_options"):
+            if str(inst) in out:
+                out[str(inst)]["strike"] = _num(strike) or None
+                out[str(inst)]["option_type"] = str(otype or "")
+    except sqlite3.Error:
+        pass
+    return out
 
 
-def _load_report(conn: sqlite3.Connection, as_of: str) -> dict:
-    """What the last load did, read from the database and the priced book: the trades on file by
-    product, the trades unpriced on `as_of` with `value_book`'s reason, and the rows of the file
-    that did not become trades (`upload_issues`, written by the upload; empty when the last load
-    was clean or predates the table)."""
-    from ui.tabs.blotter_pricing import priced_value_book
-    df, n_filled, n_total = priced_value_book(conn, as_of)
-    counts: Dict[str, int] = {}
-    unpriced: List[Tuple[str, str]] = []
-    if not df.empty:
-        for product, n in df["product"].value_counts().items():
-            counts[str(product)] = int(n)
-        pnl = df["pnl_usd"].tolist() if "pnl_usd" in df.columns else [None] * len(df)
-        reasons = df["reason"].tolist() if "reason" in df.columns else [""] * len(df)
-        for tid, v, why in zip(df["trade_id"].tolist(), pnl, reasons):
-            if _num(v) is None:
-                unpriced.append((str(tid), str(why or "no reason given")))
+def _load_report(conn: sqlite3.Connection) -> dict:
+    """The persisted upload report and the rows that did not become trades."""
     try:
         found = conn.execute("SELECT row_no, symbol, kind, reason, filename, uploaded_at FROM upload_issues "
                              "ORDER BY row_no").fetchall()
         issues = [{"row_no": n, "symbol": sym, "kind": kind, "reason": why, "filename": name, "uploaded_at": at}
                   for n, sym, kind, why, name, at in found]
-        issues_error = ""
-    except sqlite3.Error:      # no upload since the table was added: nothing recorded
-        issues, issues_error = [], ""
+    except sqlite3.Error:
+        issues = []
     try:
         from data.ingest.upload import last_upload_report
         report, report_error = last_upload_report(conn), ""
-    except Exception as exc:  # noqa: BLE001 -- the section says so, the priced-book lines stay
+    except Exception as exc:  # noqa: BLE001
         report, report_error = None, _failure("the upload report could not be read", exc)
-    return {"counts": counts, "n_total": int(n_total), "n_filled": int(n_filled), "unpriced": unpriced,
-            "issues": issues, "issues_error": issues_error, "report": report, "report_error": report_error}
+    return {"issues": issues, "report": report, "report_error": report_error}
 
 
-def gather(conn: sqlite3.Connection, as_of: str, wait_for_risk: bool = False) -> dict:
+def _periods(conn: sqlite3.Connection, as_of: str, df_today: pd.DataFrame) -> Dict[str, Any]:
+    """The P&L tab's per-trade figures for Daily, MTD and LTD (`pnl.period_rows`, the header's own
+    split), so the Book line is the header's figure."""
+    from ui.tabs.pnl import period_rows
+    return {key: period_rows(conn, as_of, key, df_today) for key in PERIODS}
+
+
+def gather(conn: sqlite3.Connection, as_of: str) -> dict:
     """Every lane's output the tab reads, each in its own try: one that fails costs its own
-    section only, with the reason. `risk` is None while the VaR is being worked out (unless
-    `wait_for_risk`, which reads it through the header's cache, however long that takes)."""
+    section only, with the reason."""
+    from ui.tabs.blotter_pricing import priced_value_book, pricing_snapshot
+    from ui.tabs.header import latest_mark_time
     data: Dict[str, Any] = {"as_of": as_of}
-    try:
-        data["spreads"], data["spreads_error"] = _spreads(conn, as_of), ""
-    except Exception as exc:  # noqa: BLE001
-        log.exception("book tab: book_spreads failed for %s", as_of)
-        data["spreads"], data["spreads_error"] = None, _failure("the spreads could not be built", exc)
-    positions = (data["spreads"] or {}).get("positions") or []
-    try:
-        data["research"] = _research(positions, as_of)
-    except Exception as exc:  # noqa: BLE001
-        data["research"] = {"available": False, "reason": _failure("the research statistics could not be read", exc),
-                            "stats": {}}
+    with pricing_snapshot(conn, "Book tab"):
+        df_today, n_filled, n_total = priced_value_book(conn, as_of)
+        data["df"], data["n_filled"], data["n_total"] = df_today, int(n_filled), int(n_total)
+        try:
+            data["periods"], data["periods_error"] = _periods(conn, as_of, df_today), ""
+        except Exception as exc:  # noqa: BLE001
+            log.exception("book tab: period figures failed for %s", as_of)
+            data["periods"], data["periods_error"] = {}, _failure("the period figures could not be built", exc)
+        try:
+            data["spreads"], data["spreads_error"] = _spreads(conn, as_of), ""
+        except Exception as exc:  # noqa: BLE001
+            log.exception("book tab: book_spreads failed for %s", as_of)
+            data["spreads"], data["spreads_error"] = None, _failure("the spreads could not be built", exc)
+        daily = data["periods"].get("daily")
+        ref_used = getattr(daily, "ref_used", "") or ""
+        data["ref_used"] = ref_used
+        prev: Dict[str, float] = {}
+        if ref_used:
+            try:
+                ref_df = priced_value_book(conn, ref_used)[0]
+                if not ref_df.empty:
+                    for tid, mark, reason in zip(ref_df["trade_id"], ref_df["mark"], ref_df["reason"]):
+                        m = _num(mark)
+                        if m is not None and not reason:
+                            prev[str(tid)] = m
+            except Exception:  # noqa: BLE001 -- the Move is then a dash with its reason
+                prev = {}
+        data["prev_marks"] = prev
     data["roots"] = _roots()
+    data["instruments"] = _instruments(conn)
+    data["marks_on_file"] = latest_mark_time(conn, as_of) is not None
     try:
         from engine.expiry import expiry_schedule
         data["schedule"], data["schedule_error"] = expiry_schedule(conn, as_of), ""
@@ -794,21 +516,38 @@ def gather(conn: sqlite3.Connection, as_of: str, wait_for_risk: bool = False) ->
     except Exception as exc:  # noqa: BLE001
         data["limits"], data["limits_error"] = None, _failure("the limits could not be checked", exc)
     try:
-        data["load"], data["load_error"] = _load_report(conn, as_of), ""
+        data["load"], data["load_error"] = _load_report(conn), ""
     except Exception as exc:  # noqa: BLE001
         data["load"], data["load_error"] = None, _failure("the load report could not be read", exc)
-    if wait_for_risk:
-        from ui.tabs.header import risk_summary
-        try:
-            data["risk"] = risk_summary(conn, as_of)
-        except Exception as exc:  # noqa: BLE001
-            data["risk"] = {"error": _failure("the book's risk could not be read", exc)}
-    else:
-        data["risk"] = _risk_if_ready(conn, as_of)
+    try:
+        from engine.pnl.calendar import load_holidays
+        data["holidays"] = load_holidays()
+    except Exception:  # noqa: BLE001
+        data["holidays"] = set()
     return data
 
 
-# --------------------------------------------------------------------------- 1. the rows
+# --------------------------------------------------------------------------- the rows
+def _period_of(data: dict, key: str, trade_ids: Sequence[str]) -> Tuple[Optional[float], int, List[str], str]:
+    """(value, excluded, reasons, note) of a set of trades for a period: the P&L tab's per-trade
+    figures, the known ones summed (display); the fill notes gathered."""
+    view = (data.get("periods") or {}).get(key)
+    if view is None:
+        return None, len(trade_ids), [data.get("periods_error") or "the period figures could not be built"], ""
+    rows = view.rows
+    if rows.empty:
+        return None, len(trade_ids), ["no trade on the book"], ""
+    sub = rows[rows["trade_id"].isin(list(trade_ids))]
+    pairs = [(v, f"{t}: {r}" if r else "") for t, v, r in zip(sub["trade_id"], sub["value"], sub["reason"])]
+    total, excluded, reasons = sum_known(pairs)
+    notes = "; ".join(dict.fromkeys(str(n) for n in sub["note"].tolist() if n))
+    return total, excluded, reasons, notes
+
+
+def _periods_of(data: dict, trade_ids: Sequence[str]) -> dict:
+    return {key: _period_of(data, key, trade_ids) for key in PERIODS}
+
+
 def _sector_of(root_ids: Sequence[str], roots: Dict[str, Any]) -> str:
     for r in root_ids:
         sector = str(getattr(roots.get(r), "sector", "") or "")
@@ -817,747 +556,782 @@ def _sector_of(root_ids: Sequence[str], roots: Dict[str, Any]) -> str:
     return ""
 
 
-def _periods(values: dict, excluded: dict, reasons: dict, notes: dict) -> dict:
-    return {"values": {p: _num(values.get(p)) for p in PERIODS},
-            "excluded": {p: int(_num(excluded.get(p)) or 0) for p in PERIODS},
-            "reasons": {p: str(reasons.get(p) or "") for p in PERIODS},
-            "notes": {p: str(notes.get(p) or "") for p in PERIODS}}
+def _bd_until(as_of: str, iso: Optional[str], holidays) -> Optional[int]:
+    """Business days from `as_of` to `iso` (weekdays not in `holidays`), negative when past; None
+    when a date is not a date. Display only, for an FX value date or an option expiry that is on
+    no exchange calendar."""
+    try:
+        a, b = dt.date.fromisoformat(str(as_of)), dt.date.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    sign = 1 if b >= a else -1
+    lo, hi = min(a, b), max(a, b)
+    n, d = 0, lo
+    while d < hi:
+        d += dt.timedelta(days=1)
+        if d.weekday() < 5 and d not in (holidays or ()):
+            n += 1
+    return sign * n
 
 
-def spread_row(position: dict, roots: Dict[str, Any]) -> dict:
-    """One row of a spread position, the engine's figures as they are."""
-    name = str(position.get("name") or position.get("position_id") or "")
-    legs = position.get("legs") or []
-    unit = str(position.get("level_unit") or "")
-    lots_text, lots_hover = position_size_text(position)
-    entries = position.get("spread_ids") or []
-    sources = position.get("level_sources") or {}
-    upu = _num(position.get("usd_per_unit"))
-    return {
-        "id": str(position.get("position_id") or name), "kind": SPREAD, "label": name, "unit": unit,
-        "sector": _sector_of([str(leg.get("root_id") or "") for leg in legs], roots),
-        "instrument_ids": [str(leg.get("instrument_id") or "") for leg in legs],
-        "legs_hover": "; ".join(f"{contract_label(leg.get('instrument_id'))}: "
-                                f"{signed(_num(leg.get('lots')))} lot(s), "
-                                f"{signed(_num(leg.get('open_lots')))} open" for leg in legs) or "no legs",
-        "facts": "; ".join(x for x in (
-            f"{_plural(len(entries), 'entry')}: {', '.join(entries)}" if entries else "",
-            f"trades {', '.join(position.get('trade_ids') or [])}",
-            f"account(s) {', '.join(position.get('accounts') or [])}" if position.get("accounts") else "",
-            "click for its entries, legs and history") if x),
-        "lots": lots_text, "lots_hover": lots_hover,
-        "entry": _num(position.get("level_entry")), "now": _num(position.get("level_now")),
-        "move": _num(position.get("level_change")), "prev": _num(position.get("level_prev")),
-        "prev_date": position.get("level_prev_date") or "",
-        "entry_reason": str(position.get("level_entry_reason") or "spreads-engine gave no entry level"),
-        "now_reason": str(position.get("level_now_reason") or "spreads-engine gave no level"),
-        "move_reason": str(position.get("level_change_reason") or position.get("level_prev_reason")
-                           or "spreads-engine gave no level change"),
-        "sources": {k: str(sources.get(k) or "") for k in ("entry", "prev", "now", "usd_per_unit")},
-        "upu": upu, "upu_reason": str(position.get("usd_per_unit_reason") or "spreads-engine gave no figure"),
-        **_periods(position.get("pnl_usd") or {}, position.get("pnl_excluded") or {},
-                   position.get("pnl_reasons") or {}, position.get("pnl_notes") or {}),
-    }
+def _schedule_rows(data: dict, contract_ids: Sequence[str]) -> List[dict]:
+    wanted = set(contract_ids)
+    return [r for r in (data.get("schedule") or {}).get("rows") or [] if r.get("contract_id") in wanted]
 
 
-def outright_rows(outrights: Sequence[dict], roots: Dict[str, Any]) -> List[dict]:
-    """One row per contract of the outright futures (a future in no spread), each period the
-    known figures of its trades added up (the header's display rule): None when none is known,
-    with the trades' reasons; `excluded` counts the trades left out. No level: an outright has
-    no spread unit (its price is on the Data tab)."""
-    by_contract: Dict[str, List[dict]] = {}
-    for o in outrights:
-        by_contract.setdefault(str(o.get("instrument_id") or ""), []).append(o)
-    rows = []
-    for inst, trades in by_contract.items():
-        values, excluded, reasons, notes = {}, {}, {}, {}
-        for p in PERIODS:
-            known = [_num((t.get("pnl_usd") or {}).get(p)) for t in trades]
-            left = [t for t, v in zip(trades, known) if v is None]
-            priced = [v for v in known if v is not None]
-            values[p] = float(sum(priced)) if priced else None
-            excluded[p] = len(left) if priced else 0
-            reasons[p] = "; ".join(f"{t.get('trade_id')}: {(t.get('pnl_reasons') or {}).get(p) or 'no figure'}"
-                                   for t in left)
-            notes[p] = "; ".join(dict.fromkeys(str((t.get("pnl_notes") or {}).get(p) or "") for t in trades
-                                               if (t.get("pnl_notes") or {}).get(p)))
-        root_id = str(trades[0].get("root_id") or "")
-        name = str(getattr(roots.get(root_id), "name", "") or root_id)
-        open_lots = [_num(t.get("lots")) for t in trades if str(t.get("status") or "open") == "open"]
-        lots = float(sum(v for v in open_lots if v is not None)) if any(v is not None for v in open_lots) else None
-        why = "; ".join(dict.fromkeys(str(t.get("why_outright") or t.get("reason") or "") for t in trades
-                                      if t.get("why_outright") or t.get("reason")))
-        rows.append({
-            "id": f"OUTRIGHT-{inst}", "kind": OUTRIGHT, "label": f"{contract_label(inst)} outright", "unit": "",
-            "sector": _sector_of([root_id], roots), "instrument_ids": [inst],
-            "legs_hover": f"{name}: {_plural(len(trades), 'trade')} in no spread"
-                          + (f" ({why})" if why else ""),
-            "facts": f"trades {', '.join(str(t.get('trade_id')) for t in trades)}",
-            "lots": (signed(lots) + " lots") if lots is not None else NA,
-            "lots_hover": "the contract's open lots (its open trades' signed lots added up), long positive"
-            if lots is not None else "spreads-engine gave no open lots",
-            "entry": None, "now": None, "move": None, "prev": None, "prev_date": "",
-            "entry_reason": "an outright has no spread level (its fill is on the Trades tab)",
-            "now_reason": "an outright has no spread level (its price is on the Data tab)",
-            "move_reason": "an outright has no spread level", "sources": {},
-            "upu": None, "upu_reason": "an outright has no spread unit; its delta is on the Exposure tab",
-            **_periods(values, excluded, reasons, notes),
-        })
-    return rows
+_LEVEL_RANK = {"EXPIRED": 0, "RED": 1, "AMBER": 2, "GREEN": 3}
 
 
-def book_rows(result: Optional[dict], roots: Dict[str, Any]) -> List[dict]:
-    """The open spread positions and the outright contracts, grouped by sector (alphabetical,
-    the unclassified last), within each by |Daily| largest first, a Daily the engine could not
-    give last."""
-    if not result:
-        return []
-    rows = [spread_row(p, roots) for p in result.get("positions") or [] if p.get("status") != "closed"]
-    rows += outright_rows(result.get("outrights") or [], roots)
-
-    def order(pair):
-        n, r = pair
-        v = r["values"]["daily"]
-        return (r["sector"] == "", _sector_label(r["sector"]), v is None, -abs(v if v is not None else 0.0), n)
-    return [r for _n, r in sorted(enumerate(rows), key=order)]
-
-
-# --------------------------------------------------------------------------- next date
-def _bd_words(row: dict) -> str:
-    n = row.get("business_days")
-    if row.get("level") == "EXPIRED":
-        return "expired"
-    if n is None:
-        return "bd n/a"
-    return "today" if n == 0 else f"{n} bd"
-
-
-def _event_short(event: Optional[str]) -> str:
-    return EVENT_SHORT.get(str(event or ""), str(event or "event").capitalize())
-
-
-def next_event(row: dict, schedule: Optional[dict]) -> Tuple[str, str, str]:
-    """(text, level, hover): the earliest event among the row's contracts on the roll calendar,
-    'FN 14 Oct · 12 bd'; ('n/a', '', why) when none of them is on it."""
-    wanted = set(row.get("instrument_ids") or [])
-    found = [r for r in (schedule or {}).get("rows") or [] if r.get("contract_id") in wanted]
+def _next_from_schedule(data: dict, contract_ids: Sequence[str]) -> Optional[dict]:
+    """The earliest event among the contracts on the roll calendar, as `date_cell` reads it."""
+    found = _schedule_rows(data, contract_ids)
     if not found:
-        return NA, "", "none of this position's contracts is on the roll calendar (expiry-monitor lists open futures, options on futures and LME prompts)"
+        return None
     found.sort(key=lambda r: (_LEVEL_RANK.get(str(r.get("level")), 9),
                               r.get("business_days") if r.get("business_days") is not None else 10 ** 6))
     r = found[0]
-    est = " (est.)" if r.get("estimated") else ""
-    text = f"{_event_short(r.get('next_event'))} {_short_date(r.get('next_event_date'))}{est} · {_bd_words(r)}"
+    event = _NEXT_EVENT_WORDS.get(str(r.get("next_event") or ""), str(r.get("next_event") or "event"))
     hover = "; ".join(x for x in (
-        f"{contract_label(r.get('contract_id'))}: {r.get('next_event') or 'event'} {r.get('next_event_date') or 'date unknown'}{est}, {r.get('level')}, {_bd_words(r)}",
-        f"alert date {r.get('alert_date')}" if r.get("alert_date") else "", str(r.get("reason") or ""),
+        f"{contract_label(r.get('contract_id'))}: {r.get('next_event') or 'event'} {r.get('next_event_date') or 'date unknown'}"
+        f"{' (estimated)' if r.get('estimated') else ''}, {r.get('level')}",
+        f"counted to the alert date {r.get('alert_date')} ({r.get('alert_basis') or ''})".strip()
+        if r.get("alert_date") and r.get("alert_date") != r.get("next_event_date") else "",
+        str(r.get("reason") or ""),
         f"{len(found) - 1} more contract(s) of this position on the calendar" if len(found) > 1 else "") if x)
-    return text, str(r.get("level") or ""), hover
+    return {"iso": r.get("next_event_date"), "bd": r.get("business_days"), "estimated": bool(r.get("estimated")),
+            "level": str(r.get("level") or ""), "hover": hover, "event": event, "row": r}
 
 
-# --------------------------------------------------------------------------- the table
-def _period_hover(r: dict, p: str) -> str:
-    v = r["values"][p]
-    if v is None:
-        return f"{PERIOD_TITLES[p]} {NA}: {r['reasons'][p] or 'spreads-engine gave no figure and no reason'}"
-    words = [f"{PERIOD_TITLES[p]} {full_usd(v)}"]
-    if r["excluded"][p]:
-        words.append(f"excludes {r['excluded'][p]}: {r['reasons'][p]}")
-    if r["notes"].get(p):
-        words.append(r["notes"][p])
-    return "; ".join(words)
+def _next_plain(data: dict, iso: Optional[str], what: str) -> Optional[dict]:
+    if not iso or str(iso).startswith("9999"):
+        return None
+    return {"iso": iso, "bd": _bd_until(data["as_of"], iso, data.get("holidays")), "estimated": False, "level": "",
+            "hover": f"{what} {iso}", "event": what, "row": None}
 
 
-def _level_cell(v: Optional[float], unit: str, sign: bool = False) -> str:
-    text = level_text(v, unit, sign=sign)
-    return text if v is None or not unit else f"{text} {unit}"
+def _row(**kw) -> dict:
+    base = {"id": "", "kind": "", "name": "", "name_hover": "", "size": NA, "size_hover": "", "entry": None,
+            "entry_text": NA, "entry_hover": "", "now": None, "now_text": NA, "now_hover": "", "unit": "",
+            "move": None, "move_text": NA, "move_hover": "", "move_sign": None, "periods": {}, "next": None,
+            "trade_ids": [], "sector": "", "instrument_group": OTHER_GROUP, "sector_group": OTHER_GROUP,
+            "ratio": False}
+    base.update(kw)
+    return base
 
 
-def upu_text(upu: Optional[float], unit: str) -> str:
-    """'$1.25k per $/bbl': the USD P&L of a 1.0 move of the level, labelled by the unit."""
-    if upu is None:
-        return NA
-    return f"{short_money(upu, '$')} per {unit or 'unit'}"
+def _fill_and_mark(data: dict, trade_ids: Sequence[str]) -> Tuple[Optional[float], Optional[float], str, str]:
+    """(lots-weighted fill, mark, mark reason, mark source) of a set of trades of one contract,
+    off the value rows (nothing priced here: the fill is the trades' own, the mark the rows')."""
+    df = data["df"]
+    sub = df[df["trade_id"].isin(list(trade_ids))] if not df.empty else df
+    if sub.empty:
+        return None, None, "no value row", "", None
+    q = pd.to_numeric(sub["quantity"], errors="coerce")
+    f = pd.to_numeric(sub["fill"], errors="coerce")
+    ok = q.notna() & f.notna() & (q != 0)
+    fill = float((q[ok] * f[ok]).sum() / q[ok].sum()) if ok.any() and q[ok].sum() != 0 else (
+        float(f[f.notna()].iloc[0]) if f.notna().any() else None)
+    # The raw fill with the most decimals decides the precision (never the weighted average's).
+    raw = max((float(x) for x in f[f.notna()].tolist()), key=lambda x: len(f"{x:.6f}".rstrip("0").split(".")[1]), default=None)
+    marks = pd.to_numeric(sub["mark"], errors="coerce")
+    priced = sub[marks.notna() & (sub["reason"] == "")]
+    if priced.empty:
+        why = "; ".join(dict.fromkeys(str(r) for r in sub["reason"].tolist() if r)) or "no mark on the value rows"
+        return fill, None, why, "", raw
+    first = priced.iloc[0]
+    return fill, float(first["mark"]), "", str(first.get("mark_source") or ""), raw
 
 
-def row_record(r: dict, schedule: Optional[dict]) -> Tuple[dict, dict]:
-    """(record, tooltips) of one position row: the figures as given, n/a with the reason."""
-    rec: Dict[str, Any] = {"id": r["id"], "kind": ROW, "label": r["label"], "lots": r["lots"]}
-    tip: Dict[str, dict] = {"label": _tip(f"{r['label']}: {r['legs_hover']}" + (f". {r['facts']}" if r.get("facts") else "")),
-                            "lots": _tip(r["lots_hover"])}
-    unit = r["unit"]
-    for col, key in (("entry", "entry"), ("now", "now")):
-        v = r[key]
-        rec[col] = _level_cell(v, unit)
-        if v is None:
-            tip[col] = _tip(r[f"{key}_reason"])
-        else:
-            tip[col] = _tip(f"{_level_cell(v, unit)}; read from {r['sources'].get(key) or 'no source named'}")
-    rec["move"] = _level_cell(r["move"], unit, sign=True)
-    if r["move"] is None:
-        tip["move"] = _tip(r["move_reason"])
-    else:
-        tip["move"] = _tip(f"now {_level_cell(r['now'], unit)} against {_level_cell(r['prev'], unit)} at the "
-                           f"{r['prev_date'] or 'previous'} close (the Daily's reference); read from "
-                           f"{r['sources'].get('prev') or 'no source named'}")
-    rec["upu"] = upu_text(r["upu"], unit)
-    tip["upu"] = _tip(r["upu_reason"] if r["upu"] is None else
-                      f"{full_usd(r['upu'])} for a 1.0 rise of the level ({unit}) on the open lots (+ = a rise is a "
-                      f"gain); {r['sources'].get('usd_per_unit') or 'USD contracts, no conversion'}")
-    for p in PERIODS:
-        v = r["values"][p]
-        rec[p] = NA if v is None else v
-        tip[p] = _tip(_period_hover(r, p))
-    rec["next"], rec["next_level"], next_hover = next_event(r, schedule)
-    tip["next"] = _tip(next_hover)
-    return rec, tip
+def _move(now: Optional[float], prev: Optional[float], ref_used: str, what: str) -> Tuple[Optional[float], str]:
+    if now is None:
+        return None, f"no {what} today"
+    if prev is None:
+        return None, f"no {what} on the Daily's reference close ({ref_used or 'no reference date'})"
+    return now - prev, f"{what} now less the {ref_used} close's"
 
 
-def _sum_record(label: str, rows: Sequence[dict], kind: str, hover_head: str) -> Tuple[dict, dict]:
-    """A sector or Book line: each period the rows' known figures added up (the header's rule),
-    "excl. N" in the label when something is left out, the detail on hover."""
-    rec: Dict[str, Any] = {"id": f"{kind}-{label}", "kind": kind, "label": label, "lots": "", "entry": "", "now": "",
-                           "move": "", "upu": "", "next": "", "next_level": ""}
-    tip: Dict[str, dict] = {"label": _tip(hover_head)}
-    n_out = 0
-    for p in PERIODS:
-        known = [r["values"][p] for r in rows if r["values"][p] is not None]
-        missing = [r["label"] for r in rows if r["values"][p] is None]
-        inner = sum(r["excluded"][p] for r in rows if r["values"][p] is not None)
-        n_out = max(n_out, len(missing) + inner)
-        if not known:
-            rec[p] = NA
-            tip[p] = _tip(f"no row has a {PERIOD_TITLES[p]} figure")
-            continue
-        rec[p] = float(sum(known))
-        words = [full_usd(rec[p])]
-        if missing:
-            words.append(f"excludes {len(missing)} of {len(rows)} rows with no figure: {', '.join(missing)}")
-        if inner:
-            words.append(f"and {_plural(inner, 'trade')} left out inside the rows")
-        tip[p] = _tip("; ".join(words))
-    if n_out:
-        rec["label"] = f"{label} (excl. {n_out})"
-    return rec, tip
+def _prev_mark(data: dict, trade_ids: Sequence[str]) -> Optional[float]:
+    prev = data.get("prev_marks") or {}
+    for t in trade_ids:
+        if str(t) in prev:
+            return prev[str(t)]
+    return None
 
 
-def table_records(rows: Sequence[dict], schedule: Optional[dict]) -> Tuple[List[dict], List[dict]]:
-    """The table's records: each sector's line first, its rows under it, the Book line last."""
-    records, tips = [], []
-    sectors: List[str] = list(dict.fromkeys(r["sector"] for r in rows))
-    for sector in sectors:
-        members = [r for r in rows if r["sector"] == sector]
-        rec, tip = _sum_record(_sector_label(sector), members, SECTOR,
-                               f"{_sector_label(sector)}: {_plural(len(members), 'position')}, its P&L the rows' "
-                               "known figures added up")
-        records.append(rec)
-        tips.append(tip)
-        for r in members:
-            rec, tip = row_record(r, schedule)
-            records.append(rec)
-            tips.append(tip)
-    rec, tip = _sum_record(BOOK_LABEL, list(rows), TOTAL, SCOPE_NOTE)
-    records.append(rec)
-    tips.append(tip)
-    return records, tips
-
-
-def book_columns() -> List[dict]:
-    return [rk.text("Position", "label"), rk.text("Lots", "lots"), rk.text("Entry", "entry"), rk.text("Now", "now"),
-            rk.text("Move", "move"), rk.text("$ per unit", "upu")] + \
-           [rk.numeric(PERIOD_TITLES[p], p, rk.amount_short(nully="")) for p in PERIODS] + \
-           [rk.text("Next date", "next")]
-
-
-HEADER_TIPS = {
-    "label": "The spread (its legs on hover) or the outright contract. Click a row for its entries, legs and history.",
-    "lots": "A spread's size: a calendar in lots of the near month (long = long the near month), a template in "
-            "its quantity unit. An outright: its open lots, long positive.",
-    "entry": "The spread's level at entry, in its own unit: the lots-weighted fills of its legs.",
-    "now": "The spread's level at the day's official marks, in its own unit.",
-    "move": "Now less the level at the Daily's reference close, in the spread's unit.",
-    "upu": "The USD P&L of a 1.0 rise of the level on the open lots (spreads-engine's usd_per_unit), labelled by "
-           "the unit: '$500 per ¢' means a one-cent rise of the spread is worth USD 500.",
-    "next": "The position's next event on the roll calendar (first notice FN, last trade LT, option expiry Exp, "
-            "LME prompt) and the business days to its alert, coloured by its level.",
-    **{p: f"{PERIOD_TITLES[p]} P&L in USD (k / m), the full figure on hover; a sector line adds up the known "
-          "figures and says what it leaves out" for p in PERIODS},
-}
-
-
-def book_table(records: Sequence[dict], tips: Sequence[dict]) -> dash_table.DataTable:
-    columns = book_columns()
-    numeric = [c["id"] for c in columns if c["type"] == "numeric"]
-    styles = [{"if": {"row_index": i}, **_SECTOR_STYLE} for i, r in enumerate(records) if r["kind"] == SECTOR]
-    styles += [{"if": {"row_index": i}, **_TOTAL_STYLE} for i, r in enumerate(records) if r["kind"] == TOTAL]
-    styles += [{"if": {"row_index": i, "column_id": "next"}, **_LEVEL_STYLE[r["next_level"]]}
-               for i, r in enumerate(records) if r.get("next_level") in _LEVEL_STYLE]
-    styles += [{"if": {"row_index": i, "column_id": "label"}, "paddingLeft": "18px"}
-               for i, r in enumerate(records) if r["kind"] == ROW]
-    return dash_table.DataTable(
-        id=TABLE_ID, columns=columns, data=rk.whole_units(list(records), PERIODS), tooltip_data=list(tips),
-        tooltip_header=HEADER_TIPS, tooltip_delay=0, tooltip_duration=None,
-        style_table={"overflowX": "auto"},
-        style_cell=_MONO,
-        style_cell_conditional=[{"if": {"column_id": "label"}, "textAlign": "left", **_ONE_LINE, "maxWidth": "260px"},
-                                {"if": {"column_id": "next"}, "textAlign": "left"},
-                                {"if": {"column_id": "lots"}, "textAlign": "left"}],
-        style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto", "fontSize": "12px"},
-        style_data_conditional=rk.sign_styles(numeric)
-                               + [{"if": {"column_id": c, "filter_query": f"{{{c}}} = '{NA}'"}, **_NA_STYLE}
-                                  for c in numeric + ["entry", "now", "move", "upu", "next"]]
-                               + styles,
-        sort_action="none", page_action="none", cell_selectable=True, row_selectable=False,
+def spread_row(position: dict, data: dict) -> dict:
+    """One row of a spread position, the engine's figures as they are."""
+    roots = data["roots"]
+    legs = position.get("legs") or []
+    unit = str(position.get("level_unit") or "")
+    ratio = unit.lower() == "ratio"
+    root_ids = [str(leg.get("root_id") or "") for leg in legs]
+    size, size_hover = position_size_text(position)
+    entry, now, move = _num(position.get("level_entry")), _num(position.get("level_now")), _num(position.get("level_change"))
+    upu = _num(position.get("usd_per_unit"))
+    sources = position.get("level_sources") or {}
+    trade_ids = [str(t) for t in position.get("trade_ids") or []]
+    legs_words = "; ".join(f"{contract_label(leg.get('instrument_id'))}: {signed(_num(leg.get('lots')))} lot(s), "
+                           f"{signed(_num(leg.get('open_lots')))} open" for leg in legs) or "no legs"
+    move_hover = (f"{signed_number(move, level_decimals(unit))} × {short_money(upu, '$')} per {unit or 'unit'}"
+                  f" (the USD P&L of a 1.0 move on the open lots; spreads-engine's usd_per_unit)"
+                  if move is not None and upu is not None else
+                  str(position.get("level_change_reason") or position.get("level_prev_reason")
+                      or "spreads-engine gave no level change"))
+    return _row(
+        id=str(position.get("position_id") or position.get("name")), kind="spread",
+        name=spread_name(position, roots),
+        name_hover=f"{position.get('name') or ''}: {legs_words}. Trades {', '.join(trade_ids)}. Click for its "
+                   "entries and legs.",
+        size=size, size_hover=size_hover, unit="" if ratio else unit, ratio=ratio,
+        entry=entry, entry_text=level_text(entry, unit),
+        entry_hover=(str(position.get("level_entry_reason") or "spreads-engine gave no entry level") if entry is None
+                     else f"{level_text(entry, unit)} {unit}: the lots-weighted fills; {sources.get('entry') or ''}".strip()),
+        now=now, now_text=level_text(now, unit),
+        now_hover=(str(position.get("level_now_reason") or "spreads-engine gave no level") if now is None
+                   else f"{level_text(now, unit)} {unit} at the day's official marks; {sources.get('now') or ''}".strip()),
+        move=move, move_text=level_text(move, unit, sign=True), move_hover=move_hover, move_sign=move,
+        periods=_periods_of(data, trade_ids), next=_next_from_schedule(data, [str(leg.get("instrument_id")) for leg in legs]),
+        trade_ids=trade_ids, sector=_sector_of(root_ids, roots),
+        sector_group=_sector_label(_sector_of(root_ids, roots)), instrument_group=FUTURES_GROUP,
     )
 
 
-def book_section(data: dict, rows: Sequence[dict]) -> html.Div:
-    heading = html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
-        about("Positions by spread", TABLE_ABOUT, level="h4", style={"margin": "0 0 6px"}),
-        marker("futures only", SCOPE_NOTE)])
-    if data.get("spreads_error"):
-        return html.Div(style=_SECTION, children=[heading, message_box(data["spreads_error"]), html.Div(id=DETAIL_ID)])
-    if not rows:
-        return html.Div(style=_SECTION, children=[
-            heading, message_box(f"No spread or outright futures position on {data.get('as_of')}."),
-            html.Div(id=DETAIL_ID)])
-    records, tips = table_records(rows, data.get("schedule"))
-    return html.Div(style=_SECTION, children=[heading, book_table(records, tips), html.Div(id=DETAIL_ID)])
+def outright_rows(data: dict, open_ids: set) -> List[dict]:
+    """One row per contract of the open outright futures (a future in no spread), the trades'
+    lots-weighted fill as Entry, the mark as Now, the mark less the reference close's as Move."""
+    result = data.get("spreads") or {}
+    roots = data["roots"]
+    by_contract: Dict[str, List[dict]] = {}
+    for o in result.get("outrights") or []:
+        if str(o.get("trade_id")) in open_ids:
+            by_contract.setdefault(str(o.get("instrument_id") or ""), []).append(o)
+    rows = []
+    for inst, trades in by_contract.items():
+        trade_ids = [str(t.get("trade_id")) for t in trades]
+        root_id = str(trades[0].get("root_id") or "")
+        root = roots.get(root_id)
+        unit = quoted_unit(root)
+        lots = sum(_num(t.get("lots")) or 0.0 for t in trades)
+        fill, mark, why, source, raw = _fill_and_mark(data, trade_ids)
+        prev = _prev_mark(data, trade_ids)
+        move, move_why = _move(mark, prev, data.get("ref_used", ""), "mark")
+        why_out = "; ".join(dict.fromkeys(str(t.get("why_outright") or "") for t in trades if t.get("why_outright")))
+        rows.append(_row(
+            id=f"OUTRIGHT-{inst}", kind="outright", name=contract_name(inst, root, root_id),
+            name_hover=f"{inst}: {_plural(len(trades), 'trade')} in no spread{f' ({why_out})' if why_out else ''}. "
+                       f"Trades {', '.join(trade_ids)}. Click for its trades.",
+            size=size_words(lots, "lots"), size_hover="the contract's open lots, the trades' signed lots added up",
+            unit=unit, entry=fill, entry_text=price_text(fill, unit, raw),
+            entry_hover="the lots-weighted fill of the open trades" if fill is not None else "no fill on the value rows",
+            now=mark, now_text=price_text(mark, unit, raw),
+            now_hover=(why if mark is None else f"the official mark on {data['as_of']} ({source or 'source not named'})"),
+            move=move, move_text=(NA if move is None else signed_number(move, max(2, price_decimals_for(unit, raw)))),
+            move_hover=move_why, move_sign=move,
+            periods=_periods_of(data, trade_ids), next=_next_from_schedule(data, [inst]), trade_ids=trade_ids,
+            sector=_sector_of([root_id], roots), sector_group=_sector_label(_sector_of([root_id], roots)),
+            instrument_group=FUTURES_GROUP,
+        ))
+    return rows
 
 
-# --------------------------------------------------------------------------- 2. the row detail
-def detail_for(data: dict, position_id: Optional[str]) -> Any:
-    """The detail of the position `position_id` (a row's `id`): its entries and legs
-    (`detail_payloads`, `members_table`, `detail_legs_table`), its research history chart, and
-    its own history from our marks. None for a sector or Book line, or an id that is no
-    position."""
-    if not position_id or str(position_id).startswith((f"{SECTOR}-", f"{TOTAL}-")):
-        return None
-    result, research, as_of = data.get("spreads") or {}, data.get("research") or {}, data.get("as_of")
-    if str(position_id).startswith("OUTRIGHT-"):
-        inst = str(position_id)[len("OUTRIGHT-"):]
-        trades = [o for o in result.get("outrights") or [] if str(o.get("instrument_id") or "") == inst]
-        if not trades:
-            return None
-        lines = [html.Li(f"{o.get('trade_id')}: {signed(_num(o.get('lots')))} lot(s), "
-                         f"{o.get('status') or ''}, traded {o.get('trade_date') or ''}"
-                         + (f"; {o.get('why_outright')}" if o.get("why_outright") else ""), style=_LINE)
-                 for o in trades]
-        return html.Div(className="section section--secondary", children=[
-            html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
-                about(f"{contract_label(inst)} outright", "A future in no spread: its trades as spreads-engine lists "
-                      "them. The trade rows are on the Trades tab, the contract's curve on the Exposure tab.",
-                      level="h5", style={"margin": "0 0 6px"}),
-                pointer("Trades", "book-detail-trades"), pointer("Exposure", "book-detail-curve")]),
-            html.Ul(lines, style=_LIST)])
-    payloads = detail_payloads(result, research)
-    payload = payloads.get(str(position_id))
-    if payload is None:
-        return None
-    unit = payload.get("unit") or ""
-    summary = (f"{payload.get('name') or position_id}: {payload.get('size_text') or ''}, entry "
-               f"{level_text(_num(payload.get('level_entry')), unit)}, now "
-               f"{level_text(_num(payload.get('level_now')), unit)} {unit}").strip()
-    chart = _research_chart(payload, as_of)
-    members = members_table(payload)
-    legs = detail_legs_table(payload)
-    return html.Div(className="section section--secondary", children=[
-        html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
-            about(summary, "The position's entries and legs (spreads-engine), the research app's history of "
-                  "the spread as context (never a mark), and its own daily history from our marks: LTD USD by "
-                  "day as bars, the level as a line, the entry dashed, worked out when the row is opened.",
-                  level="h5", style={"margin": "0 0 6px"})]),
-        html.Div(style={"display": "flex", "flexWrap": "wrap", "gap": "12px", "alignItems": "flex-start"},
-                 children=[html.Div(chart, style=_CHART_BOX), history_slot(payload, as_of)]),
-        about("Entries", "The spreads found on each trade date that make this position, with their own entry "
-                         "level.", level="div", className="section-kicker"),
-        members,
-        about("Legs", "Each leg's prices as quoted (entry = its lots-weighted average fill), and the factor that "
-                      "turns its price into the spread's unit.", level="div", className="section-kicker"),
-        legs])
+def price_decimals_for(unit: str, fill) -> int:
+    from ui.tabs.formatting import price_decimals
+    return price_decimals(unit, fill)
 
 
-_CHART_BOX = {"flex": "1 1 520px", "minWidth": "0"}
+def trade_row(r: pd.Series, data: dict) -> dict:
+    """One row per open trade of the products the spread rule does not cover: an option on a
+    future, an LME prompt, an FX hedge (and a leftover product under Other)."""
+    roots, instruments = data["roots"], data["instruments"]
+    tid, inst, product = str(r["trade_id"]), str(r["instrument_id"]), str(r["product"])
+    info = instruments.get(inst) or {}
+    base = info.get("base_ccy", "")
+    root = roots.get(base)
+    qty, fill, mark = _num(r.get("quantity")), _num(r.get("fill")), _num(r.get("mark"))
+    reason = str(r.get("reason") or "")
+    mark = mark if not reason else None
+    settle = str(r.get("settle_date") or "")
+    prev = _prev_mark(data, [tid])
+    unit, size, name, nxt, sector_group, instrument_group, sector = "", NA, inst, None, OTHER_GROUP, OTHER_GROUP, ""
+    if product == "CMDTY_OPTION":
+        unit = quoted_unit(root)
+        name = contract_name(inst, root, base)
+        size = size_words(qty, "lots")
+        nxt = _next_from_schedule(data, [inst]) or _next_plain(data, info.get("expiry_date") or settle, "expiry")
+        sector_group, instrument_group, sector = OPTIONS_GROUP, OPTIONS_GROUP, str(getattr(root, "sector", "") or "")
+    elif product == "LME_FWD":
+        unit = quoted_unit(root) or "USD/t"
+        name = lme_name(root, base, settle)
+        size = size_words(qty, "t")
+        nxt = _next_from_schedule(data, [f"{base} {settle}"]) or _next_plain(data, settle, "prompt")
+        sector = str(getattr(root, "sector", "") or "metals")
+        sector_group, instrument_group = _sector_label(sector), LME_GROUP
+    elif product in FX_PRODUCTS:
+        pair = inst if product != "FX_OPTION" else (base + info.get("quote_ccy", ""))
+        name = fx_name(pair, product, settle if product != "FX_OPTION" else (info.get("expiry_date") or settle),
+                       info.get("option_type", ""), info.get("strike"))
+        size = size_words(qty, _METAL_UNITS[base]) if base in _METAL_UNITS else size_words(qty, ccy=base or "")
+        nxt = _next_plain(data, info.get("expiry_date") if product == "FX_OPTION" else settle,
+                          "expiry" if product == "FX_OPTION" else "value date")
+        sector_group, instrument_group = FX_GROUP, FX_GROUP
+        if product == "FX_OPTION":
+            unit = f"of {base} notional" if base else ""
+    else:
+        name = f"{contract_label(inst)} ({product.replace('_', ' ').lower()})"
+        size = size_words(qty, "units")
+        nxt = _next_plain(data, settle, "settle date")
+    move, move_why = _move(mark, prev, data.get("ref_used", ""), "mark")
+    # The unit the price is read in: the contract's; an FX spot / forward its pair (a JPY cross 3
+    # decimals, gold 2, else 4); an FX option premium none (its own decimals).
+    price_unit = unit if product not in FX_PRODUCTS else (inst if product in ("FX_SPOT", "FX_FWD") else "")
+    d = price_decimals_for(price_unit, fill)
+    return _row(
+        id=f"TRADE-{tid}", kind="trade", name=name,
+        name_hover=f"{inst}, trade {tid}, dealt {r.get('trade_date') or ''}. Click for the trade.",
+        size=size, size_hover=f"the trade's quantity as booked ({qty:g})" if qty is not None else "no quantity",
+        unit=unit, entry=fill, entry_text=price_text(fill, price_unit, fill),
+        entry_hover="the fill" if fill is not None else "no fill", now=mark,
+        now_text=price_text(mark, price_unit, fill),
+        now_hover=(reason or "no mark") if mark is None else
+                  f"the official mark on {data['as_of']} ({r.get('mark_source') or 'source not named'})",
+        move=move, move_text=NA if move is None else signed_number(move, d), move_hover=move_why, move_sign=move,
+        periods=_periods_of(data, [tid]), next=nxt, trade_ids=[tid], sector=sector,
+        sector_group=sector_group, instrument_group=instrument_group,
+    )
 
 
-def history_slot(payload: dict, as_of: Optional[str]) -> html.Div:
-    """The place of the position's own daily history in the detail: the request the history
-    callback reads (`history_request`: the position as `position_history` reads it, the as-of,
-    the entry level and unit) and a loading state it fills. Nothing is computed here, so opening
-    a row never values the past closes in the detail callback."""
-    return html.Div(style=_CHART_BOX, children=[
-        dcc.Store(id=DETAIL_HISTORY_REQUEST_ID, data=history_request(payload, as_of)),
-        dcc.Loading(type="dot", children=html.Div(id=DETAIL_HISTORY_ID, children=html.Div(
-            f"Working out the daily history from {HISTORY_LABEL}...", className="section-kicker")))])
+def settled_row(data: dict, trade_ids: Sequence[str]) -> dict:
+    """The one line of the settled and closed-out trades (their P&L is in the header's LTD)."""
+    n = len(trade_ids)
+    return _row(id="SETTLED", kind="settled", name=f"{_plural(n, 'settled or closed-out trade')}",
+                name_hover="Trades the ledger has frozen or options closed out: their P&L stays in the book's LTD. "
+                           "Click for the list.",
+                size="", size_hover="", entry_text="", now_text="", move_text="",
+                periods=_periods_of(data, trade_ids), trade_ids=[str(t) for t in trade_ids],
+                sector_group=SETTLED_GROUP, instrument_group=SETTLED_GROUP)
 
 
-def render_history(request: Optional[dict], db_path) -> Any:
-    """The position's own daily history for the detail's request (`history_block`:
-    `engine.spreads.position_history` over `history_dates`, each business day through the
-    screens' memoised filled reader), the graph under `DETAIL_HISTORY_GRAPH_ID`. A problem is its
-    sentence where the chart would be."""
-    try:
-        return history_block(request, db_path)
-    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a broken panel
-        log.exception("book tab history failed")
-        return html.Div(f"No daily history: it could not be worked out ({type(exc).__name__}: {exc}).",
-                        className="section-kicker")
+def book_rows(data: dict) -> List[dict]:
+    """Every row of the table: the open spread positions, the open outright contracts, one row per
+    other open trade, and the settled line. Every trade of the as-of book is in exactly one row."""
+    df = data.get("df")
+    if df is None or df.empty:
+        return []
+    open_ids = {str(t) for t, s in zip(df["trade_id"], df["status"]) if str(s) == "OPEN"}
+    all_ids = [str(t) for t in df["trade_id"]]
+    assigned: set = set()
+    rows: List[dict] = []
+    result = data.get("spreads") or {}
+    for p in open_positions(result):
+        tids = [str(t) for t in p.get("trade_ids") or []]
+        if not any(t in open_ids for t in tids):
+            continue
+        row = spread_row(p, data)
+        row["trade_ids"] = [t for t in tids if t not in assigned]
+        row["periods"] = _periods_of(data, row["trade_ids"])
+        assigned.update(row["trade_ids"])
+        rows.append(row)
+    for row in outright_rows(data, open_ids - assigned):
+        row["trade_ids"] = [t for t in row["trade_ids"] if t not in assigned]
+        assigned.update(row["trade_ids"])
+        rows.append(row)
+    for _i, r in df.iterrows():
+        tid = str(r["trade_id"])
+        if tid in assigned or tid not in open_ids:
+            continue
+        rows.append(trade_row(r, data))
+        assigned.add(tid)
+    left = [t for t in all_ids if t not in assigned]
+    if left:
+        rows.append(settled_row(data, left))
+    return rows
 
 
-def _research_chart(payload: dict, as_of: Optional[str]) -> Any:
-    rid, inst = payload.get("research_id") or "", payload.get("research_instance") or ""
-    label = "context history (the research app's prices)"
-    if not rid:
-        return html.P(f"No {label}: {payload.get('research_reason') or 'no research id'}", className="section-kicker")
-    start = None
-    if as_of:
-        try:
-            d = dt.date.fromisoformat(as_of)
-            start = d.replace(year=d.year - 5, day=min(d.day, 28)).isoformat()
-        except ValueError:
-            start = None
-    try:
-        from engine.risk.research_spreads import research_spread_history
-        series = research_spread_history((rid, inst), start=start, end=as_of)
-        figure, note = history_figure(series, payload, as_of)
-    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a broken panel
-        return html.P(f"No {label}: the research history could not be read ({type(exc).__name__}: {exc})",
-                      className="section-kicker")
-    if figure is None:
-        return html.P(f"No {label}: {note}", className="section-kicker")
-    return html.Div([
-        html.Div(f"{label}: {payload.get('research_name') or rid} in {series.attrs.get('unit') or 'its unit'}; "
-                 "context only, not a mark", className="section-kicker"),
-        dcc.Graph(id=DETAIL_GRAPH_ID, figure=figure, config={"displayModeBar": False}),
-        *([html.Div(note, className="section-kicker")] if note else [])])
+# --------------------------------------------------------------------------- grouping
+def _group_key(row: dict, by: str) -> str:
+    return row["sector_group"] if by == GROUP_SECTOR else row["instrument_group"]
 
 
-# --------------------------------------------------------------------------- 3. needs you
-def _alert(severity: int, chip: str, text: str, hover: str, tab: str, source: str) -> dict:
-    return {"severity": severity, "chip": chip, "text": text, "hover": hover, "tab": tab, "source": source}
+def _group_order(by: str, names: Sequence[str]) -> List[str]:
+    fixed_tail = [OPTIONS_GROUP, FX_GROUP, OTHER_GROUP, SETTLED_GROUP]
+    if by == GROUP_INSTRUMENT:
+        order = [FUTURES_GROUP, OPTIONS_GROUP, LME_GROUP, FX_GROUP, OTHER_GROUP, SETTLED_GROUP]
+        return [g for g in order if g in names] + sorted(g for g in names if g not in order)
+    head = [_sector_label(s) for s in _SECTOR_ORDER]
+    known = head + fixed_tail
+    return ([g for g in head if g in names] + sorted(g for g in names if g not in known)
+            + [g for g in fixed_tail if g in names])
 
 
-def expiry_alerts(data: dict) -> List[dict]:
-    """EXPIRED and RED rows one line each; AMBER rows on one line (the first few named, all on
-    hover). Expiry-monitor's order and words."""
-    if data.get("schedule_error"):
-        return [_alert(WATCH, "EXPIRIES", "roll calendar n/a", data["schedule_error"], "Timing & cash",
-                       "expiry-monitor")]
-    rows = (data.get("schedule") or {}).get("rows") or []
+def _daily_abs(row: dict) -> Tuple[int, float]:
+    v = row["periods"]["daily"][0]
+    return (1, 0.0) if v is None else (0, -abs(v))
+
+
+def grouped_rows(rows: Sequence[dict], by: str) -> List[Tuple[str, List[dict]]]:
+    """[(group label, its rows by |Daily| largest first)] in the group order of `by`."""
+    names = list(dict.fromkeys(_group_key(r, by) for r in rows))
     out = []
+    for g in _group_order(by, names):
+        members = sorted((r for r in rows if _group_key(r, by) == g), key=_daily_abs)
+        out.append((g, members))
+    return out
 
-    def line(r):
-        est = " (est.)" if r.get("estimated") else ""
-        return (f"{contract_label(r.get('contract_id'))} {r.get('next_event') or ''} "
-                f"{r.get('next_event_date') or 'date unknown'}{est}, {_bd_words(r)}")
 
+def group_total(rows: Sequence[dict], key: str) -> Tuple[Optional[float], int, List[str]]:
+    """A group or Book line's figure: the rows' known figures summed, the count left out (rows
+    with no figure plus the trades left out inside the rows) and the reasons."""
+    pairs = [(r["periods"][key][0], f"{r['name']}: {'; '.join(r['periods'][key][2]) or 'no figure'}")
+             for r in rows]
+    total, excluded, reasons = sum_known(pairs)
+    inner = sum(r["periods"][key][1] for r in rows if r["periods"][key][0] is not None)
     for r in rows:
-        if r.get("level") in ("EXPIRED", "RED"):
-            hover = "; ".join(x for x in (line(r), f"alert date {r.get('alert_date')}" if r.get("alert_date") else "",
-                                          str(r.get("reason") or "")) if x)
-            out.append(_alert(ACT, str(r["level"]), line(r), hover, "Timing & cash", "expiry-monitor"))
-    amber = [r for r in rows if r.get("level") == "AMBER"]
-    if amber:
-        named = ", ".join(f"{contract_label(r.get('contract_id'))} {_bd_words(r)}" for r in amber[:AMBER_ON_LINE])
-        more = f" +{len(amber) - AMBER_ON_LINE}" if len(amber) > AMBER_ON_LINE else ""
-        hover = "\n".join(line(r) for r in amber[:LINES_ON_HOVER]) + (
-            f"\nand {len(amber) - LINES_ON_HOVER} more" if len(amber) > LINES_ON_HOVER else "")
-        out.append(_alert(WATCH, "AMBER", f"{_plural(len(amber), 'contract')} near expiry: {named}{more}", hover,
-                          "Timing & cash", "expiry-monitor"))
-    return out
+        if r["periods"][key][0] is not None and r["periods"][key][1]:
+            reasons.append(f"{r['name']}: {'; '.join(r['periods'][key][2])}")
+    return total, excluded + inner, reasons
 
 
-def marks_alerts(data: dict) -> List[dict]:
-    if data.get("needs_error"):
-        return [_alert(WATCH, "MARKS", "marks n/a", data["needs_error"], "Data", "header.needed_marks")]
+# --------------------------------------------------------------------------- the table
+def _money_td(value, excluded: int, reasons: Sequence[str], note: str = "", bold: bool = False) -> html.Td:
+    hover_parts = []
+    if excluded:
+        hover_parts.append(f"excludes {excluded}: " + "; ".join(reasons[:LINES_ON_HOVER])
+                           + (f"; and {len(reasons) - LINES_ON_HOVER} more" if len(reasons) > LINES_ON_HOVER else ""))
+    if note:
+        hover_parts.append(note)
+    if value is None:
+        return html.Td(missing_cell("; ".join(reasons[:LINES_ON_HOVER]) or "no figure"))
+    children: List[Any] = [money_cell(value, hover="\n".join(hover_parts))]
+    if excluded:
+        children.append(html.Span(f"excl. {excluded}", className="marker", title="\n".join(hover_parts)))
+    return html.Td(children, style={"fontWeight": 700} if bold else None)
+
+
+def _next_td(row: dict) -> html.Td:
+    nxt = row.get("next")
+    if not nxt:
+        if row["kind"] == "settled":
+            return html.Td("", className="l")
+        return html.Td(missing_cell("no event on the roll calendar for this position"), className="l")
+    alert = (nxt.get("row") or {}).get("alert_date") if nxt.get("estimated") else None
+    return html.Td(date_cell(nxt["iso"], nxt["bd"], nxt["estimated"], nxt["level"],
+                             f"{nxt['event']}: {nxt['hover']}", alert_date=alert), className="l")
+
+
+def position_tr(row: dict) -> html.Tr:
+    move_cls = sign_class(row["move_sign"]) if row["move"] is not None else "cell-missing"
+    now_children: List[Any] = [row["now_text"]]
+    if row["now"] is not None and row.get("unit"):
+        now_children.append(unit_suffix(row["unit"]))
+    if row.get("ratio"):
+        now_children.append(unit_suffix("ratio"))
+    cells = [
+        html.Td(row["name"], className="l book-name", title=row["name_hover"]),
+        html.Td(row["size"], className="l", title=row["size_hover"] or None),
+        html.Td(row["entry_text"], title=row["entry_hover"] or None,
+                className="cell-missing" if row["entry"] is None and row["entry_text"] == NA else None),
+        html.Td(now_children, title=row["now_hover"] or None,
+                className="cell-missing" if row["now"] is None and row["now_text"] == NA else None),
+        html.Td(row["move_text"], title=row["move_hover"] or None,
+                className=move_cls if row["move_text"] != "" else None),
+    ]
+    for key in PERIODS:
+        value, excluded, reasons, note = row["periods"][key]
+        cells.append(_money_td(value, excluded, reasons, note))
+    cells.append(_next_td(row))
+    return html.Tr(cells, id={"type": ROW_TYPE, "idx": row["id"]}, n_clicks=0, className="book-row")
+
+
+def group_tr(label: str, rows: Sequence[dict]) -> html.Tr:
+    cells: List[Any] = [html.Td(label, className="l", colSpan=5, title=f"{_plural(len(rows), 'position')}")]
+    for key in PERIODS:
+        total, excluded, reasons = group_total(rows, key)
+        cells.append(_money_td(total, excluded, reasons))
+    cells.append(html.Td(""))
+    return html.Tr(cells, className="book-group")
+
+
+def total_tr(rows: Sequence[dict], marks_on_file: bool) -> html.Tr:
+    note = "= header" if marks_on_file else "no marks on file"
+    cells: List[Any] = [html.Td([BOOK_LABEL, html.Span(note, className="book-note")], className="l", colSpan=5,
+                                title="Every trade of the as-of book is in one row above, so this line is the "
+                                      "header's Daily, MTD and LTD: the known figures summed, what is left out named.")]
+    for key in PERIODS:
+        total, excluded, reasons = group_total(rows, key)
+        cells.append(_money_td(total, excluded, reasons, bold=True))
+    cells.append(html.Td(""))
+    return html.Tr(cells, className="book-total")
+
+
+def book_table(rows: Sequence[dict], by: str, marks_on_file: bool) -> html.Div:
+    head = html.Thead(html.Tr([
+        html.Th("Position", className="l", style={"width": "250px"}, title=COLUMN_TIPS["Position"]),
+        html.Th("Size", className="l", title=COLUMN_TIPS["Size"]),
+        html.Th("Entry", title=COLUMN_TIPS["Entry"]), html.Th("Now", title=COLUMN_TIPS["Now"]),
+        html.Th("Move", title=COLUMN_TIPS["Move"]), html.Th("Daily", title=COLUMN_TIPS["Daily"]),
+        html.Th("MTD", title=COLUMN_TIPS["MTD"]), html.Th("LTD", title=COLUMN_TIPS["LTD"]),
+        html.Th("Next", className="l", style={"width": "130px"}, title=COLUMN_TIPS["Next"])]))
+    body: List[Any] = []
+    for label, members in grouped_rows(rows, by):
+        body.append(group_tr(label, members))
+        body.extend(position_tr(r) for r in members)
+    body.append(total_tr(rows, marks_on_file))
+    return html.Div(className="book-card", children=[html.Table([head, html.Tbody(body)], id=TABLE_ID,
+                                                                className="book-table")])
+
+
+# --------------------------------------------------------------------------- title line, movers
+def counts_text(rows: Sequence[dict], data: dict) -> str:
+    """'5 spreads · 12 outrights · 3 options · 2 LME prompts · 8 FX hedges' (a zero left out)."""
+    n_spreads = sum(1 for r in rows if r["kind"] == "spread")
+    n_out = sum(1 for r in rows if r["kind"] == "outright")
+    df = data.get("df")
+    products = (df[df["status"] == "OPEN"]["product"].value_counts().to_dict() if df is not None and not df.empty
+                else {})
+    n_opt = int(products.get("CMDTY_OPTION", 0))
+    n_lme = int(products.get("LME_FWD", 0))
+    n_fx = sum(int(products.get(p, 0)) for p in FX_PRODUCTS)
+    parts = [(n_spreads, "spread", "spreads"), (n_out, "outright", "outrights"), (n_opt, "option", "options"),
+             (n_lme, "LME prompt", "LME prompts"), (n_fx, "FX hedge", "FX hedges")]
+    words = [f"{n} {one if n == 1 else many}" for n, one, many in parts if n]
+    return " · ".join(words) if words else "no open position"
+
+
+def movers_strip(rows: Sequence[dict]) -> Optional[html.Div]:
+    """The three best and three worst Daily figures among the position rows."""
+    scored = [(r["periods"]["daily"][0], r) for r in rows if r["kind"] != "settled" and r["periods"]["daily"][0] is not None]
+    if not scored:
+        return None
+    best = [x for x in sorted(scored, key=lambda x: -x[0]) if x[0] > 0][:3]
+    worst = [x for x in sorted(scored, key=lambda x: x[0]) if x[0] < 0][:3]
+
+    def card(v, r):
+        return html.Div(className="book-mover", children=[
+            html.Span(r["name"], className="book-mover-name", title=r["name_hover"]),
+            html.B(signed_money(v), className=f"book-mover-value {sign_class(v)}", title=full_usd(v))])
+    children: List[Any] = [card(v, r) for v, r in best]
+    if best and worst:
+        children.append(html.Div(className="book-movers-divider"))
+    children += [card(v, r) for v, r in worst]
+    children.append(html.Span("today's movers", className="book-movers-label"))
+    return html.Div(className="book-movers", children=children)
+
+
+# --------------------------------------------------------------------------- the row detail
+def _trade_lines(data: dict, trade_ids: Sequence[str]) -> html.Table:
+    """A small table of trades: id, date, product, size, fill, mark, LTD (full figures)."""
+    df = data["df"]
+    sub = df[df["trade_id"].isin(list(trade_ids))] if not df.empty else df
+    ltd = (data.get("periods") or {}).get("ltd")
+    ltd_by = dict(zip(ltd.rows["trade_id"], ltd.rows["value"])) if ltd is not None and not ltd.rows.empty else {}
+    head = html.Tr([html.Th(h, className="l" if i < 4 else None) for i, h in
+                    enumerate(("Trade", "Date", "Product", "Status", "Quantity", "Fill", "Mark", "LTD USD"))])
+    body = []
+    for _i, r in sub.iterrows():
+        tid = str(r["trade_id"])
+        mark = _num(r.get("mark")) if not r.get("reason") else None
+        v = _num(ltd_by.get(tid))
+        body.append(html.Tr([
+            html.Td(tid, className="l"), html.Td(str(r.get("trade_date") or ""), className="l"),
+            html.Td(str(r.get("product") or "").replace("_", " ").lower(), className="l"),
+            html.Td(str(r.get("status") or "").lower(), className="l"),
+            html.Td(plain(_num(r.get("quantity")) or 0.0)),
+            html.Td(price_text(_num(r.get("fill")), "", _num(r.get("fill")))),
+            html.Td(price_text(mark, "", _num(r.get("fill"))) if mark is not None else missing_cell(str(r.get("reason") or "no mark"))),
+            html.Td(f"{v:,.0f}".replace("-", MINUS) if v is not None else missing_cell(str(r.get("reason") or "no P&L"))),
+        ]))
+    return html.Table([html.Thead(head), html.Tbody(body)], className="book-table")
+
+
+def detail_for(data: dict, rows: Sequence[dict], row_id: str) -> Any:
+    """The detail of the clicked row: a spread's entries and legs, otherwise its trades."""
+    row = next((r for r in rows if r["id"] == row_id), None)
+    if row is None:
+        return None
+    if row["kind"] == "spread":
+        payload = detail_payloads(data.get("spreads") or {}).get(row_id)
+        if payload is None:
+            return None
+        unit = payload.get("unit") or ""
+        summary = (f"{row['name']}: {payload.get('size_text') or ''}, entry {level_text(_num(payload.get('level_entry')), unit)}, "
+                   f"now {level_text(_num(payload.get('level_now')), unit)} {unit}").strip()
+        return html.Div(className="section section--secondary book-detail", children=[
+            about(summary, "The position's entries and legs (spreads-engine).", level="h5", style={"margin": "0 0 6px"}),
+            about("Entries", "The spreads found on each trade date that make this position, with their own entry "
+                             "level.", level="div", className="section-kicker"),
+            members_table(payload),
+            about("Legs", "Each leg's prices as quoted (entry = its lots-weighted average fill), and the factor that "
+                          "turns its price into the spread's unit.", level="div", className="section-kicker"),
+            detail_legs_table(payload)])
+    title = row["name"] if row["kind"] != "settled" else SETTLED_GROUP
+    return html.Div(className="section section--secondary book-detail", children=[
+        html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "10px"}, children=[
+            about(title, row["name_hover"], level="h5", style={"margin": "0 0 6px"}),
+            pointer("Trades", "book-detail-trades", "→ Trades")]),
+        _trade_lines(data, row["trade_ids"])])
+
+
+# --------------------------------------------------------------------------- needs you
+def _need(chip: str, kind: str, text: str, hover: str, tab: str, rank: int) -> dict:
+    return {"chip": chip, "kind": kind, "text": text, "hover": hover, "tab": tab, "rank": rank}
+
+
+def _event_words(data: dict, r: dict) -> str:
+    inst = str(r.get("contract_id") or "")
+    root_id = str(r.get("root_id") or "")
+    root = data["roots"].get(root_id)
+    if str(r.get("product")) == "LME_FWD":
+        name = lme_name(root, root_id, str(inst.split(" ")[-1]) if " " in inst else None)
+    else:
+        name = contract_name(inst, root, root_id)
+    event = _NEXT_EVENT_WORDS.get(str(r.get("next_event") or ""), str(r.get("next_event") or "event"))
+    bd = r.get("business_days")
+    when = ("expired" if r.get("level") == "EXPIRED" else "today" if bd == 0 else
+            f"in {bd} bd" if bd is not None else "date unknown")
+    return f"{name} {event} {when}"
+
+
+def needs(data: dict) -> List[dict]:
+    """At most five lines, one per kind, most urgent first."""
+    out: List[dict] = []
+    rows = (data.get("schedule") or {}).get("rows") or []
+    urgent = [r for r in rows if r.get("level") in ("EXPIRED", "RED", "AMBER") and not r.get("estimated")]
+    if urgent:
+        first = urgent[0]
+        more = f" (+{len(urgent) - 1} more)" if len(urgent) > 1 else ""
+        out.append(_need(str(first.get("level")), "red" if first.get("level") != "AMBER" else "warn",
+                         _event_words(data, first) + more,
+                         "\n".join(_event_words(data, r) for r in urgent[:LINES_ON_HOVER]), "Timing & cash", 0))
+    estimated = sorted({str(r.get("contract_id")) for r in rows if r.get("estimated") and r.get("level") != "EXPIRED"})
+    if estimated:
+        out.append(_need("DATES", "warn", f"{_plural(len(estimated), 'contract')} run on estimated dates until the "
+                                          "first Bloomberg pull",
+                         "\n".join(contract_label(c) for c in estimated[:LINES_ON_HOVER]), "Timing & cash", 1))
+    elif data.get("schedule_error"):
+        out.append(_need("DATES", "warn", "roll calendar not available", data["schedule_error"], "Timing & cash", 1))
     needed, missing = data.get("needs") or (0, [])
-    if not needed or not missing:
-        return []
-    shown = missing[:LINES_ON_HOVER]
-    hover = "\n".join([f"{len(missing):,} of {needed:,} marks the book needs on {data.get('as_of')} have no "
-                       "official mark:"] + [f"- {m['instrument_id']} {m['mark_type']} {m['settle_date']}" for m in shown]
-                      + ([f"- and {len(missing) - len(shown)} more"] if len(missing) > len(shown) else []))
-    return [_alert(WATCH, "MARKS", f"{len(missing):,} of {needed:,} marks missing", hover, "Data",
-                   "header.needed_marks")]
-
-
-def review_alerts(data: dict) -> List[dict]:
-    """The groups the grouping rule could not decide ("could not group", never "for review"). The
-    detail is on this tab (the Data issues drawer), so the alert links nowhere ("Book")."""
+    if data.get("needs_error"):
+        out.append(_need("MARKS", "warn", "the marks the book needs could not be listed", data["needs_error"], "Data", 2))
+    elif missing:
+        names = []
+        for m in missing:
+            inst = str(m.get("instrument_id") or "")
+            info = data["instruments"].get(inst) or {}
+            root_id = info.get("base_ccy", "")
+            label = (contract_name(inst, data["roots"].get(root_id), root_id) if parse_contract_id(inst)
+                     else f"{short_root_name(data['roots'].get(root_id), root_id)} {short_date(m.get('settle_date'))}".strip()
+                     if root_id in data["roots"] else inst)
+            if label not in names:
+                names.append(label)
+        out.append(_need("MARKS", "warn", f"{len(missing)} of {needed} marks missing: {', '.join(names[:2])}"
+                                          + (f" +{len(names) - 2}" if len(names) > 2 else ""),
+                         "\n".join(f"{m['instrument_id']} {m['mark_type']} {m['settle_date']}" for m in missing[:LINES_ON_HOVER]),
+                         "Data", 2))
     review = (data.get("spreads") or {}).get("review") or []
-    if not review:
-        return []
-    hover = "\n".join(f"- {r.get('reason') or r.get('review_id')}" for r in review[:LINES_ON_HOVER])
-    return [_alert(WATCH, "GROUPING", f"could not group {_plural(len(review), 'set')} of trades", hover, "Book",
-                   "spreads-engine")]
-
-
-def _pct(v: float) -> str:
-    return f"{v:.1f}%" if abs(v) < 100 else f"{v:,.0f}%"
-
-
-def var_alert(data: dict) -> dict:
-    """The VaR against the vol target, the header's reading of risk-metrics as it is."""
-    risk = data.get("risk")
-    if risk is None:
-        return _alert(INFO, "RISK", "VaR …",
-                      "The book's VaR and vol against the target are being worked out from the risk history; "
-                      "they show here in a few seconds.", "Risk", "header.risk_summary")
-    if risk.get("error"):
-        return _alert(INFO, "RISK", "VaR n/a", str(risk["error"]), "Risk", "header.risk_summary")
-    book, config = risk.get("book") or {}, risk.get("config") or {}
-    var, pct = _num(book.get("var95_1d_usd")), _num(book.get("vol_vs_target_pct"))
-    reasons = book.get("reasons") or {}
-    target = _num(config.get("vol_target_usd"))
-    placeholder = bool(config.get("vol_target_placeholder"))
-    target_words = (f"vol target {full_usd(target)}" if target is not None else "vol target not set") + (
-        " (a placeholder, not Jason's figure yet)" if placeholder else "")
-    if var is None:
-        why = str(reasons.get("var95_1d_usd") or reasons.get("all") or book.get("reason") or "not available")
-        return _alert(INFO, "RISK", "VaR n/a", f"1y VaR n/a: {why}", "Risk", "header.risk_summary")
-    over = bool(book.get("over_vol_target"))
-    text = f"VaR {short_money(var, '$')} (1-day, 1y 95%)"
-    if pct is not None:
-        text += f" · vol {_pct(pct)} of target" + (" (placeholder)" if placeholder else "")
-    hover = "; ".join(x for x in (f"1y 95% VaR (1-day) {full_usd(var)}",
-                                  f"blended vol {_pct(pct)} of the {target_words}" if pct is not None else target_words,
-                                  "over the target" if over else "", str(book.get("vol_note") or "")) if x)
-    return _alert(ACT if over else INFO, "OVER" if over else "RISK", text, hover, "Risk", "header.risk_summary")
-
-
-def limit_alerts(data: dict) -> List[dict]:
-    """Every limit set and breached (or at its warning level), and a set limit with no figure;
-    one quiet line while none is set."""
-    if data.get("limits_error"):
-        return [_alert(WATCH, "LIMITS", "limits n/a", data["limits_error"], "Risk", "margin-limits")]
+    if review:
+        out.append(_need("GROUP", "info", f"{_plural(len(review), 'set')} of trades could not be matched to a spread",
+                         "\n".join(str(r.get("reason") or r.get("review_id") or "") for r in review[:LINES_ON_HOVER]),
+                         "Trades", 3))
     checks = data.get("limits") or []
-    config_rows = [c for c in checks if c.get("limit") == "config"]
-    if config_rows:
-        return [_alert(WATCH, "LIMITS", "limits n/a", "; ".join(str(c.get("reason") or "") for c in config_rows),
-                       "Risk", "margin-limits")]
-    set_rows = [c for c in checks if c.get("level") != "NOT_SET"]
-    if not set_rows:
-        return [_alert(INFO, "LIMITS", "limits not set",
-                       "No desk or exchange limit is set in config/limits.yaml yet: every check is NOT_SET.",
-                       "Risk", "margin-limits")]
-    out = []
-    for c in set_rows:
-        level = str(c.get("level") or "")
-        value, limit = _num(c.get("value")), _num(c.get("limit_value"))
-        unit = str(c.get("unit") or "")
-        fmt = (lambda v: short_money(v)) if unit == "USD" else (lambda v: f"{v:,.0f}")
-        what = f"{c.get('source')} {str(c.get('limit') or '').replace('_', ' ')} {c.get('scope')}"
-        if level in _LIMIT_SEVERITY:
-            out.append(_alert(_LIMIT_SEVERITY[level], level,
-                              f"{what}: {fmt(abs(value)) if value is not None else NA} of {fmt(limit)} {unit}".strip(),
-                              f"{c.get('reason') or ''}; {c.get('basis') or ''}".strip("; "), "Risk", "margin-limits"))
-        elif level == "N/A":
-            out.append(_alert(WATCH, "LIMIT N/A", f"{what}: no figure", str(c.get("reason") or ""), "Risk",
-                              "margin-limits"))
-    if not out:
-        out.append(_alert(INFO, "LIMITS", f"{_plural(len(set_rows), 'limit')} set, none near",
-                          "Every limit set in config/limits.yaml is below its warning level.", "Risk", "margin-limits"))
-    return out
+    if data.get("limits_error"):
+        out.append(_need("LIMITS", "quiet", "limits could not be checked", data["limits_error"], "Risk", 4))
+    else:
+        breached = [c for c in checks if str(c.get("level")) in ("BREACH", "WARN")]
+        set_rows = [c for c in checks if c.get("level") not in ("NOT_SET", "config")]
+        if breached:
+            c = breached[0]
+            out.append(_need(str(c.get("level")), "red", f"{c.get('source')} {str(c.get('limit') or '').replace('_', ' ')} "
+                                                          f"{c.get('scope')}: {c.get('reason') or 'over its limit'}",
+                             "\n".join(str(x.get("reason") or "") for x in breached[:LINES_ON_HOVER]), "Risk", 0))
+        elif not set_rows:
+            out.append(_need("LIMITS", "quiet", "position limits not set",
+                             "No desk or exchange limit is set in config/limits.yaml yet.", "Risk", 4))
+    out.sort(key=lambda n: n["rank"])
+    return out[:NEEDS_MAX]
 
 
-def alerts(data: dict) -> List[dict]:
-    """Every alert, most urgent first (severity, then the order above: expiries, marks, grouping,
-    risk, limits)."""
-    items = expiry_alerts(data) + marks_alerts(data) + review_alerts(data) + [var_alert(data)] + limit_alerts(data)
-    return [a for _n, a in sorted(enumerate(items), key=lambda pair: (pair[1]["severity"], pair[0]))]
+def needs_section(data: dict) -> html.Div:
+    lines = []
+    for n, need in enumerate(needs(data), start=1):
+        lines.append(html.Div(className="book-need", children=[
+            html.Span(need["chip"], className=f"book-need-chip book-need-chip--{need['kind']}"),
+            html.Span(need["text"], title=need["hover"] or None),
+            pointer(need["tab"], f"book-need-{n}")]))
+    if not lines:
+        lines.append(html.Div("Nothing needs you today.", className="book-need", style={"color": "var(--muted)"}))
+    return html.Div(className="book-card book-needs", children=[
+        about("Needs you", NEEDS_ABOUT, level="div", className="book-h"), html.Div(id=ALERTS_ID, children=lines)])
 
 
-def alert_line(a: dict, n: int) -> html.Li:
-    """One alert: its chip, its words (the detail on hover) and a link to its tab, idx
-    "book-alert-<n>" (n = its place in the list, so no two share one)."""
-    return html.Li(style=_LINE, children=[
-        html.Span(a["chip"], style={**_CHIP, **_CHIP_COLOURS[a["severity"]]}),
-        html.Span(a["text"], title=a["hover"], style={"cursor": "help", **({"color": MUTED}
-                                                                           if a["severity"] == INFO else {})}),
-        pointer(a["tab"], f"book-alert-{n}")])
-
-
-def alerts_list(data: dict) -> html.Ul:
-    return html.Ul([alert_line(a, n) for n, a in enumerate(alerts(data), start=1)], style=_LIST)
-
-
-def needs_you_section(data: dict) -> html.Div:
-    return html.Div(style=_SECTION, children=[
-        about("Needs you", NEEDS_ABOUT, level="h4", style={"margin": "0 0 6px"}),
-        html.Div(id=ALERTS_ID, children=alerts_list(data))])
-
-
-# --------------------------------------------------------------------------- 4. load report
-def _kind_words(product: str, n: int) -> str:
-    words = _PRODUCT_WORDS.get(product, product)
-    if n == 1 and words.endswith("s") and product not in ("FX_SPOT",):
-        words = words[:-1] if not words.endswith("futures") else "future" + words[len("futures"):]
-    return f"{n} {words}"
-
-
-# The upload report's kind columns (data.ingest.upload.UPLOAD_REPORT_COLUMNS), in the sentence's
-# order, with the words for one and for many.
-_REPORT_KINDS = (("futures", "future", "futures"), ("options_on_futures", "option on futures", "options on futures"),
+# --------------------------------------------------------------------------- last load
+_REPORT_KINDS = (("futures", "future", "futures"), ("options_on_futures", "option", "options"),
                  ("lme_forwards", "LME forward", "LME forwards"), ("fx_forwards", "FX forward", "FX forwards"),
                  ("fx_spot", "FX spot", "FX spot"), ("fx_options", "FX option", "FX options"))
 
 
 def _loaded_at_words(iso: Optional[str]) -> str:
-    """'28 Sep 2026 10:12 UTC' from the report's ISO UTC stamp; the stamp itself when it is not one."""
+    """'Mon 28 Sep 09:12' in the local time zone from the report's ISO UTC stamp."""
     try:
         t = dt.datetime.fromisoformat(str(iso or ""))
     except ValueError:
-        return f"{iso or 'time unknown'} UTC"
-    if t.tzinfo is not None:
-        t = t.astimezone(dt.timezone.utc)
-    return f"{t.day} {t:%b %Y %H:%M} UTC"
+        return f"{iso or 'time unknown'}"
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=dt.timezone.utc)
+    t = t.astimezone()
+    return f"{t:%a} {t.day} {t:%b %H:%M}"
 
 
-def report_line(report: dict) -> Tuple[str, str]:
-    """(text, hover) of the persisted upload report's first line: the file, when it was loaded and
-    the trades loaded by kind (a zero count left out); the whole upload message on hover."""
+def load_sentence(load: Optional[dict]) -> Tuple[str, str, bool]:
+    """(sentence, hover, clean): 'file · time · counts · every row became a trade' or '... · N rows
+    did not become trades'; 'No upload recorded on this database' without a report."""
+    report = (load or {}).get("report")
+    if not report:
+        return "No upload recorded on this database", str((load or {}).get("report_error") or ""), True
     kinds = [f"{int(report.get(col) or 0)} {one if int(report.get(col) or 0) == 1 else many}"
              for col, one, many in _REPORT_KINDS if int(report.get(col) or 0)]
-    text = (f"{report.get('filename') or 'the last file'}, loaded {_loaded_at_words(report.get('uploaded_at'))}: "
-            + (", ".join(kinds) if kinds else "no trade loaded"))
+    issues = (load or {}).get("issues") or []
+    n_bad = len(issues) + int(report.get("excluded_rows") or 0)
+    tail = "every row became a trade" if not n_bad else f"{_plural(n_bad, 'row')} did not become trades"
+    text = " · ".join(x for x in (str(report.get("filename") or "the last file"),
+                                        _loaded_at_words(report.get("uploaded_at")),
+                                        ", ".join(kinds) if kinds else "no trade loaded", tail) if x)
     hover = str(report.get("summary") or "").strip() or "The upload recorded no message."
-    if not int(report.get("library_tickers") or 0):
-        hover += "\nThe Bloomberg library could not sync at the load (0 tickers)."
-    return text, hover
-
-
-def load_report_lines(load: Optional[dict], as_of: str) -> List[Tuple[str, str, str]]:
-    """[(text, hover, severity-word)] of the load report, in plain words: the persisted upload
-    report first (its file, time and counts; the exclusions; the underlying futures written), then
-    the rows that did not become trades, then the priced book's unpriced and filled counts."""
-    if not load:
-        return []
-    lines: List[Tuple[str, str, str]] = []
-    report = load.get("report")
-    if report:
-        lines.append((*report_line(report), "info"))
-        n_excluded = int(report.get("excluded_rows") or 0)
-        if n_excluded:
-            lines.append((f"{_plural(n_excluded, 'row')} left out by the book filter",
-                          str(report.get("excluded_text") or "").strip()
-                          or "Rows outside the book's status, fund, trader or desk lists (config/book.yaml).", "watch"))
-        n_under = int(report.get("underlying_futures_written") or 0)
-        if n_under:
-            lines.append((f"{_plural(n_under, 'underlying future')} written with no trade",
-                          "The future under an option on futures, written as an instrument so the option's Greeks "
-                          "can be priced; it holds no position of its own.", "info"))
-    else:
-        counts = load.get("counts") or {}
-        on_file = (f"{load.get('n_total', 0):,} trades on file: "
-                   + ", ".join(_kind_words(p, n) for p, n in sorted(counts.items(), key=lambda kv: -kv[1]))
-                   if counts else "No trades on file: upload a blotter to fill the book.")
-        lines.append(("No upload recorded on this database",
-                      "; ".join(x for x in (load.get("report_error") or "", on_file) if x), "info"))
-    issues = load.get("issues") or []
     if issues:
-        kinds: Dict[str, int] = {}
-        for i in issues:
-            kinds[str(i.get("kind") or "")] = kinds.get(str(i.get("kind") or ""), 0) + 1
-        head = ", ".join(f"{n} {k.lower()}" for k, n in kinds.items())
-        hover = "\n".join([f"{len(issues)} rows of {issues[0].get('filename') or 'the file'} (uploaded "
-                           f"{issues[0].get('uploaded_at') or 'date unknown'}) did not become trades:"]
-                          + [f"- row {i.get('row_no')} {i.get('symbol') or ''}: {i.get('kind')}: {i.get('reason')}"
-                             for i in issues[:LINES_ON_HOVER]]
-                          + ([f"- and {len(issues) - LINES_ON_HOVER} more"] if len(issues) > LINES_ON_HOVER else []))
-        lines.append((f"{_plural(len(issues), 'row')} of the file did not become trades ({head})", hover, "watch"))
-    else:
-        lines.append(("Every row of the last upload became a trade, or no upload has been recorded since this list "
-                      "was added.", "The upload writes the rows it could not load; none is on file.", "info"))
-    unpriced = load.get("unpriced") or []
-    if unpriced:
-        hover = "\n".join([f"{len(unpriced)} trades have no P&L on {as_of}:"]
-                          + [f"- {tid}: {why}" for tid, why in unpriced[:LINES_ON_HOVER]]
-                          + ([f"- and {len(unpriced) - LINES_ON_HOVER} more"] if len(unpriced) > LINES_ON_HOVER else []))
-        lines.append((f"{_plural(len(unpriced), 'trade')} unpriced on {_short_date(as_of)}", hover, "watch"))
-    if load.get("n_filled"):
-        lines.append((f"{_plural(int(load['n_filled']), 'trade')} valued from an earlier close (the fill)",
-                      "No price on the as-of date: each takes its own valuation from the last earlier business day "
-                      "that has one, at most 5 back. Each trade's note is on the Trades tab.", "info"))
-    return lines
+        hover += "\n" + "\n".join(f"- row {i.get('row_no')} {i.get('symbol') or ''}: {i.get('kind')}: {i.get('reason')}"
+                                  for i in issues[:LINES_ON_HOVER])
+    if report.get("excluded_text"):
+        hover += f"\n{report['excluded_text']}"
+    return text, hover, not n_bad
 
 
-def load_report_section(data: dict) -> html.Div:
-    heading = html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
-        about("Last load", LOAD_ABOUT, level="h4", style={"margin": "0 0 6px"}),
-        pointer("Data", "book-load-data"), pointer("Trades", "book-load-trades")])
+def load_section(data: dict) -> html.Div:
     if data.get("load_error"):
-        return html.Div(id=LOAD_ID, style=_SECTION, children=[heading, message_box(data["load_error"])])
-    items = []
-    for text, hover, severity in load_report_lines(data.get("load"), str(data.get("as_of") or "")):
-        style = {**_LINE, "cursor": "help"} if hover else _LINE
-        if severity == "info":
-            style = {**style, "color": MUTED}
-        items.append(html.Li(text, title=hover or None, style=style))
-    return html.Div(id=LOAD_ID, style=_SECTION, children=[heading, html.Ul(items, style=_LIST)])
+        return html.Div(id=LOAD_ID, className="book-card book-load", children=[
+            about("Last load", LOAD_ABOUT, level="div", className="book-h"), message_box(data["load_error"])])
+    text, hover, clean = load_sentence(data.get("load"))
+    children: List[Any] = [html.Span(text, title=hover or None)]
+    if not clean:
+        children += [" ", pointer("Data", "book-load-data", "→ Data")]
+    return html.Div(id=LOAD_ID, className="book-card book-load", children=[
+        about("Last load", LOAD_ABOUT, level="div", className="book-h"), html.Div(children)])
+
+
+def loaded_banner(data: dict) -> html.Div:
+    """The gold-edged banner of a book with trades and no marks yet (AfterUpload.dc.html)."""
+    text, hover, clean = load_sentence(data.get("load"))
+    children: List[Any] = [html.Span("Loaded", className="book-h"), html.Span(text, title=hover or None)]
+    if not clean:
+        children.append(html.Span(pointer("Data", "book-banner-data", "what was skipped and why"),
+                                  style={"marginLeft": "auto", "fontSize": "12px"}))
+    return html.Div(className="book-card book-loaded-banner", children=children)
 
 
 # --------------------------------------------------------------------------- issues, body
 def issue_items(data: dict, rows: Sequence[dict]) -> List[Tuple[str, str]]:
-    """The Data issues drawer: each section's failure, the engines' book-level reasons, every
-    row with an n/a or a partial figure, and the load's unpriced trades."""
     items: List[Tuple[str, str]] = []
-    for key, label in (("spreads_error", "Spreads"), ("schedule_error", "Roll calendar"), ("needs_error", "Marks"),
-                       ("limits_error", "Limits"), ("load_error", "Load")):
+    for key, label in (("periods_error", "P&L"), ("spreads_error", "Spreads"), ("schedule_error", "Roll calendar"),
+                       ("needs_error", "Marks"), ("limits_error", "Limits"), ("load_error", "Load")):
         if data.get(key):
             items.append((label, data[key]))
     items += [("Grouping", str(r)) for r in (data.get("spreads") or {}).get("reasons") or [] if r]
     for r in rows:
         lines = []
         for p in PERIODS:
-            if r["values"][p] is None:
-                lines.append(f"{PERIOD_TITLES[p]} n/a: {r['reasons'][p] or 'no figure and no reason'}")
-            elif r["excluded"][p]:
-                lines.append(f"{PERIOD_TITLES[p]} excludes {r['excluded'][p]}: {r['reasons'][p]}")
-        if r["kind"] == SPREAD:
-            for key in ("entry", "now", "move", "upu"):
-                if r[key] is None:
-                    lines.append(f"{key.replace('upu', '$ per unit')} n/a: {r[f'{key}_reason']}")
+            value, excluded, reasons, _note = r["periods"][p]
+            if value is None:
+                lines.append(f"{PERIOD_TITLES[p]}: {'; '.join(reasons) or 'no figure and no reason'}")
+            elif excluded:
+                lines.append(f"{PERIOD_TITLES[p]} excludes {excluded}: {'; '.join(reasons)}")
+        if r["kind"] != "settled":
+            for key in ("entry", "now", "move"):
+                if r[key] is None and r[f"{key}_text"] == NA:
+                    lines.append(f"{key}: {r[f'{key}_hover']}")
         if lines:
-            items.append((r["label"], "; ".join(dict.fromkeys(lines))))
-    for tid, why in (data.get("load") or {}).get("unpriced") or []:
-        items.append((tid, f"no P&L on {data.get('as_of')}: {why}"))
-    research = data.get("research") or {}
-    if not research.get("available") and research.get("reason"):
-        items.append(("Context", str(research["reason"])))
+            items.append((r["name"], "; ".join(dict.fromkeys(lines))))
+    df = data.get("df")
+    if df is not None and not df.empty:
+        for tid, v, why in zip(df["trade_id"], df["pnl_usd"], df["reason"]):
+            if _num(v) is None:
+                items.append((str(tid), f"no P&L on {data.get('as_of')}: {why or 'no reason given'}"))
+    if data.get("n_filled"):
+        items.append(("Fill", f"{_plural(int(data['n_filled']), 'trade')} valued from an earlier close (no price on "
+                              f"{data.get('as_of')}); each trade's note is on the Trades tab."))
     return items
 
 
-def caption_block(data: dict, rows: Sequence[dict]) -> html.Div:
-    n_spreads = sum(1 for r in rows if r["kind"] == SPREAD)
-    n_out = sum(1 for r in rows if r["kind"] == OUTRIGHT)
-    children: List[Any] = [html.Div(className="meta-line", children=[
-        html.Span(f"As of {_date_words(data.get('as_of'))}"),
-        html.Span(f"{_plural(n_spreads, 'spread position')}, {_plural(n_out, 'outright contract')}")])]
-    drawer = issues_drawer(issue_items(data, rows), id=ISSUES_ID)
-    if drawer is not None:
-        children.append(drawer)
-    return html.Div(children)
+def empty_state(data: dict) -> html.Div:
+    """No trades on file (Empty.dc.html): the upload card and the three steps."""
+    return html.Div(className="book-empty", children=[
+        html.Div(className="book-card book-empty-main", children=[
+            html.Div("No blotter loaded", className="book-empty-title"),
+            html.Div("Upload Jason's blotter export, a .csv or .xlsx straight from the prime broker. Every upload "
+                     "replaces the whole book; nothing else is ever typed in.", className="book-empty-text"),
+            html.Div(className="book-empty-actions", children=[
+                html.Button("Upload blotter", id=EMPTY_UPLOAD_ID, n_clicks=0, className="btn",
+                            title="Choose the blotter file (the same upload as the top bar's)"),
+                *([sample_book.view_link("book", small=False)] if not sample_book.is_sample_active() else []),
+            ])]),
+        html.Div(className="book-card book-empty-next", children=[
+            html.Div("What happens next", className="book-h"),
+            html.Div(className="book-step", children=[html.Span("1", className="book-step-num"), html.Span([
+                html.B("Upload."), " The Book fills with positions and a one-line load report says what became a "
+                                   "trade and what did not."])]),
+            html.Div(className="book-step", children=[html.Span("2", className="book-step-num"), html.Span([
+                html.B("Pull Bloomberg"), " on the Bloomberg PC, or import the marks snapshot here. Until then every "
+                                          "position shows its fill and a dash for its value."])]),
+            html.Div(className="book-step", children=[html.Span("3", className="book-step-num"), html.Span([
+                html.B("Read."), " Book for what you hold, Exposure for the months, P&L for where it came from, "
+                                 "Timing for what is due, Risk for what it can lose, Data for whether to trust it."])]),
+        ])])
 
 
-def body(data: dict) -> html.Div:
-    """The whole tab body from `gather`'s output."""
-    rows = book_rows(data.get("spreads"), data.get("roots") or {})
-    children: List[Any] = [caption_block(data, rows)]
-    if not rows and not data.get("spreads_error"):
-        children.append(message_box(f"No commodity futures in the book on {data.get('as_of') or 'this date'}: "
-                                    "no spread or outright position to show."))
-        if not int((data.get("load") or {}).get("n_total") or 0) and not sample_book.is_sample_active():
-            # An empty book: offer the sample (ui/sample_book.py; the top bar's link is the same switch).
-            children.append(html.Div(className="sample-book-offer", children=[
-                "Nothing uploaded yet. ", sample_book.view_link("book", small=False),
-                " to see the screens on the synthetic book; your own book is untouched."]))
-        children.append(html.Div(id=DETAIL_ID))
+def body(data: dict, by: str = GROUP_SECTOR) -> Tuple[html.Div, str, dict]:
+    """(the body, the counts text, the toolbar's style) from `gather`'s output."""
+    if not data.get("n_total"):
+        return html.Div([empty_state(data), html.Div(id=DETAIL_ID)]), "", {"display": "none"}
+    rows = book_rows(data)
+    children: List[Any] = []
+    marks = bool(data.get("marks_on_file"))
+    if not marks:
+        children.append(loaded_banner(data))
+    if data.get("spreads_error"):
+        children.append(message_box(data["spreads_error"]))
+    if marks:
+        strip = movers_strip(rows)
+        if strip is not None:
+            children.append(strip)
+    if rows:
+        children.append(book_table(rows, by, marks))
     else:
-        children.append(book_section(data, rows))
-    children.append(html.Div(style={"display": "grid", "gridTemplateColumns": "minmax(0, 1fr) minmax(0, 1fr)",
-                                    "gap": "12px", "alignItems": "start", "marginTop": "12px"},
-                             children=[needs_you_section(data), load_report_section(data)]))
-    return html.Div(children)
+        children.append(message_box(f"No open position on {data.get('as_of')}."))
+    children.append(html.Div(id=DETAIL_ID))
+    children.append(html.Div(className="book-under", children=[
+        needs_section(data),
+        html.Div(className="book-side", children=[load_section(data),
+                                                  issues_drawer(issue_items(data, rows), id=ISSUES_ID) or html.Div()])]))
+    counts = counts_text(rows, data)
+    if not marks:
+        counts += " · values appear after the first pull; fills and sizes are already right"
+    return html.Div(children), counts, {}
+
+
+# --------------------------------------------------------------------------- CSV
+def csv_frame(rows: Sequence[dict], by: str) -> pd.DataFrame:
+    """The table at full figures for the download: one line per row with its group."""
+    records = []
+    for label, members in grouped_rows(rows, by):
+        for r in members:
+            rec = {"group": label, "position": r["name"], "size": r["size"], "entry": r["entry"],
+                   "now": r["now"], "unit": r.get("unit") or ("ratio" if r.get("ratio") else ""), "move": r["move"]}
+            for key in PERIODS:
+                value, excluded, _reasons, _note = r["periods"][key]
+                rec[f"{key}_usd"] = value
+                rec[f"{key}_excluded"] = excluded
+            nxt = r.get("next") or {}
+            rec["next_event"], rec["next_date"], rec["next_estimated"] = nxt.get("event", ""), nxt.get("iso", ""), nxt.get("estimated", "")
+            rec["trade_ids"] = " ".join(r["trade_ids"])
+            records.append(rec)
+    return pd.DataFrame(records)
 
 
 # --------------------------------------------------------------------------- shell
@@ -1566,121 +1340,127 @@ def _open(db_path):
     return connect_readonly(db_path)
 
 
-def render(as_of: Optional[str], db_path) -> Tuple[Any, Optional[str]]:
-    """(the body for `as_of`, the as-of whose VaR is still pending or None), from one read-only
-    connection closed straight after. A problem is a message where the body would be."""
+def render(as_of: Optional[str], db_path, by: str = GROUP_SECTOR) -> Tuple[Any, str, dict]:
+    """(body, counts text, toolbar style) for `as_of`, from one read-only connection closed
+    straight after. A problem is a message where the body would be."""
     if not as_of:
-        return message_box("No as-of date available."), None
+        return message_box("No as-of date available."), "", {}
     try:
         conn = _open(db_path)
     except sqlite3.OperationalError as exc:
-        return message_box(f"Database not available ({exc})."), None
+        return message_box(f"Database not available ({exc})."), "", {}
     try:
-        data = gather(conn, as_of)
-        return body(data), (as_of if data.get("risk") is None else None)
+        return body(gather(conn, as_of), by or GROUP_SECTOR)
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
         log.exception("book tab failed for %s", as_of)
         return html.Div(className="status-panel status-panel--down", children=[
             html.P(f"The book could not be built for {as_of} ({type(exc).__name__}: {exc}).",
-                   className="status-line status-line--bad")]), None
+                   className="status-line status-line--bad")]), "", {}
     finally:
         conn.close()
 
 
-def render_alerts(as_of: Optional[str], db_path) -> Any:
-    """The alerts list with the VaR worked out (the header's cached reading; this may take
-    seconds on a cold cache, which is why it runs in its own callback after the body)."""
-    if not as_of:
-        return dash.no_update
-    try:
-        conn = _open(db_path)
-    except sqlite3.OperationalError:
-        return dash.no_update
-    try:
-        return alerts_list(gather(conn, as_of, wait_for_risk=True))
-    except Exception:  # noqa: BLE001 -- the body's own list stays
-        log.exception("book tab alerts failed for %s", as_of)
-        return dash.no_update
-    finally:
-        conn.close()
-
-
-def render_detail(active_cell, records, as_of: Optional[str], db_path) -> Any:
-    """The detail of the clicked row (`active_cell` and the table's `data`), from the memoised
-    spreads; None (nothing under the table) for a sector or Book line or no click."""
-    if not active_cell or not records or not as_of:
-        return None
-    try:
-        row = records[active_cell["row"]]
-    except (IndexError, KeyError, TypeError):
-        return None
-    position_id = row.get("id") if isinstance(row, dict) else None
-    if not position_id:
+def render_detail(row_id: Optional[str], as_of: Optional[str], db_path) -> Any:
+    if not row_id or not as_of:
         return None
     try:
         conn = _open(db_path)
     except sqlite3.OperationalError as exc:
         return message_box(f"Database not available ({exc}).")
     try:
-        data: Dict[str, Any] = {"as_of": as_of, "spreads": _spreads(conn, as_of)}
-        try:
-            data["research"] = _research(data["spreads"].get("positions") or [], as_of)
-        except Exception as exc:  # noqa: BLE001
-            data["research"] = {"available": False, "reason": _failure("the research statistics could not be read", exc),
-                                "stats": {}}
-        return detail_for(data, position_id)
+        data = gather(conn, as_of)
+        return detail_for(data, book_rows(data), str(row_id))
     except Exception as exc:  # noqa: BLE001 -- the reason under the table, never a 500
-        log.exception("book tab detail failed for %s", position_id)
+        log.exception("book tab detail failed for %s", row_id)
         return message_box(f"The position's detail could not be built ({type(exc).__name__}: {exc}).")
     finally:
         conn.close()
 
 
+def render_csv(as_of: Optional[str], db_path, by: str):
+    if not as_of:
+        return None
+    try:
+        conn = _open(db_path)
+    except sqlite3.OperationalError:
+        return None
+    try:
+        data = gather(conn, as_of)
+        frame = csv_frame(book_rows(data), by or GROUP_SECTOR)
+        return dcc.send_data_frame(frame.to_csv, f"book-{as_of}.csv", index=False)
+    except Exception:  # noqa: BLE001
+        log.exception("book tab csv failed for %s", as_of)
+        return None
+    finally:
+        conn.close()
+
+
 def layout(default_date: Optional[str] = None) -> html.Div:
-    """The static shell: the title (its definitions on hover), the body the callback fills, the
-    VaR-pending store and the safety interval. No date picker: the tab follows the header's
-    as-of store."""
-    follows = f"Follows the header's as-of date{f' ({default_date} when the page loaded)' if default_date else ''}."
+    """The static shell: the title line (the counts, the Sector | Instrument switch, Download
+    CSV), the body the callback fills and the safety interval. No date picker."""
     return html.Div(className="book-tab", children=[
-        html.Div(className="ladder-title-row", children=[
-            about("Book", f"{TITLE_ABOUT} {follows}", level="h3", className="ladder-title-row-heading")]),
+        html.Div(id=TOOLBAR_ID, className="book-title-row", children=[
+            about("Book", TITLE_ABOUT, level="h3"),
+            html.Span(id=COUNTS_ID, className="book-counts"),
+            dcc.RadioItems(id=GROUP_ID, className="book-switch",
+                           options=[{"label": label, "value": value} for value, label in GROUP_OPTIONS],
+                           value=GROUP_SECTOR, inline=True, persistence=True, persistence_type="session"),
+            html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
+                        title="The table as shown, at full figures, one line per position"),
+            dcc.Download(id=DOWNLOAD_ID),
+        ]),
         html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
-        dcc.Store(id=VAR_PENDING_ID, data=None),
+        dcc.Store(id=EMPTY_UPLOAD_SINK_ID),
         dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])
 
 
 build_layout = layout
 
+# The empty state's Upload button opens the top bar's own file chooser (the one upload of the
+# app, `ui.uploads.FILE_UPLOAD_ID`): a click on that hidden input inside the user's click.
+_OPEN_UPLOAD_JS = (
+    "function(ns) {\n"
+    "    var n = (ns || []).filter(function(x) { return x; }).length;\n"
+    "    if (!n) { return window.dash_clientside.no_update; }\n"
+    "    var box = document.getElementById('report-file');\n"
+    "    var input = box ? box.querySelector('input[type=file]') : null;\n"
+    "    if (input) { input.click(); }\n"
+    "    return n;\n"
+    "}"
+)
+
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Four callbacks: the body on the header's as-of, every data revision and the safety
-    interval; then, only when the body went out with the VaR pending, the alerts again once the
-    header's risk reading is worked out (chained on `VAR_PENDING_ID`, so it never holds up the
-    body); the row detail on a click in the table; and, once the detail's history request
-    appears, the position's own daily history under its loading state."""
+    """The body on the header's as-of, every data revision, the safety interval and the group
+    switch; the row detail on a click; the CSV; the empty state's Upload button."""
 
     @app.callback(
         Output(BODY_ID, "children"),
-        Output(VAR_PENDING_ID, "data"),
+        Output(COUNTS_ID, "children"),
+        Output(TOOLBAR_ID, "style"),
         Input(AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
         Input(REFRESH_ID, "n_intervals"),
+        Input(GROUP_ID, "value"),
     )
-    def _update(as_of, _data_rev=None, _n_intervals=0):
-        return render(as_of, get_db_path())
+    def _update(as_of, _data_rev=None, _n_intervals=0, by=GROUP_SECTOR):
+        return render(as_of, get_db_path(), by)
 
-    @app.callback(Output(ALERTS_ID, "children"), Input(VAR_PENDING_ID, "data"), prevent_initial_call=True)
-    def _fill_var(pending_as_of):
-        if not pending_as_of:
-            return dash.no_update
-        return render_alerts(pending_as_of, get_db_path())
-
-    @app.callback(Output(DETAIL_ID, "children"), Input(TABLE_ID, "active_cell"), State(TABLE_ID, "data"),
+    @app.callback(Output(DETAIL_ID, "children"), Input({"type": ROW_TYPE, "idx": ALL}, "n_clicks"),
                   State(AS_OF_STORE_ID, "data"), prevent_initial_call=True)
-    def _detail(active_cell, records, as_of):
-        return render_detail(active_cell, records, as_of, get_db_path())
+    def _detail(_clicks, as_of):
+        trig = dash.ctx.triggered_id
+        if not isinstance(trig, dict) or not any(_clicks or []):
+            return dash.no_update
+        return render_detail(trig.get("idx"), as_of, get_db_path())
 
-    @app.callback(Output(DETAIL_HISTORY_ID, "children"), Input(DETAIL_HISTORY_REQUEST_ID, "data"))
-    def _history(request):
-        return render_history(request, get_db_path())
+    @app.callback(Output(DOWNLOAD_ID, "data"), Input(CSV_BUTTON_ID, "n_clicks"), State(AS_OF_STORE_ID, "data"),
+                  State(GROUP_ID, "value"), prevent_initial_call=True)
+    def _csv(n_clicks, as_of, by):
+        if not n_clicks:
+            return dash.no_update
+        return render_csv(as_of, get_db_path(), by)
+
+    app.clientside_callback(_OPEN_UPLOAD_JS, Output(EMPTY_UPLOAD_SINK_ID, "data"),
+                            Input({"type": EMPTY_UPLOAD_TYPE, "idx": ALL}, "n_clicks"), prevent_initial_call=True)

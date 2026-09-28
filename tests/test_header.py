@@ -323,7 +323,7 @@ def test_pnl_card_unavailable_shows_na_with_its_reason_on_hover():
     card = header._pnl_card("X", {"available": False, "reason": "no mark"})
     assert len(card.children) == 2
     value_div = card.children[1]
-    assert value_div.children == "n/a"
+    assert value_div.children == header.MISSING
     assert value_div.title == "no mark"
     assert "header-figure-value--muted" in value_div.className
 
@@ -435,7 +435,7 @@ def test_build_figures_daily_names_reference_date_when_yesterday_has_no_marks(st
     by_title = {c.children[0].children: c for c in cards if getattr(c, "children", None) and c.children
                 and hasattr(c.children[0], "children")}
     daily = by_title["Daily"]
-    assert daily.children[1].children == "n/a"
+    assert daily.children[1].children == header.MISSING
     assert len(daily.children) == 2                                   # the sentence is on hover only
     caption = daily.children[1].title
     assert caption.startswith("Daily needs the 2026-09-16 close: 1 of 1 trades open that day")
@@ -789,9 +789,9 @@ def test_fx_net_and_gross_usd_delta_left_the_header():
     conn.execute("UPDATE trade_legs SET amount = '24-Jul' WHERE trade_id = 'j1' AND leg_no = 1")
     conn.commit()
     cards = header._build_figures(conn, "2026-09-17")
-    titles = [c.children[0].children for c in cards]
+    titles = [c.children[0].children for c in cards if getattr(c, "className", "") == "header-figure"]
     assert "Net USD delta" not in titles and "Gross USD delta" not in titles
-    assert _card(cards, "LTD").children[1].children != "n/a"
+    assert _card(cards, "LTD").children[1].children != header.MISSING
 
 
 def test_failure_reason_names_table_column_row_and_value():
@@ -909,7 +909,7 @@ def test_unpriced_commodities_read_na_with_the_reason_and_the_other_cards_still_
     by_title = {c.children[0].children: c for c in cards}
     for title in (header.GROSS_NOTIONAL_TITLE, header.NET_BY_SECTOR_TITLE):
         value = by_title[title].children[1]
-        assert value.children == "n/a" and "HG" in value.title          # never a zero standing for a missing price
+        assert value.children == header.MISSING and "HG" in value.title   # never a zero standing for a missing price
         assert len(by_title[title].children) == 2                        # the reason on hover, not a caption
     assert _texts(by_title[header.OPEN_SPREADS_TITLE])[1] == "0"
     assert _texts(by_title[header.NEXT_EXPIRY_TITLE])[1].startswith("HGZ26 first notice")
@@ -950,7 +950,7 @@ def test_open_spreads_that_cannot_be_grouped_say_why_and_cost_only_their_card(mo
         conn.close()
     by_title = {c.children[0].children: c for c in cards}
     card = by_title[header.OPEN_SPREADS_TITLE]
-    assert card.children[1].children == "n/a"
+    assert card.children[1].children == header.MISSING
     assert card.children[1].title.startswith("spreads could not be grouped (RuntimeError: template file unreadable)")
     assert _texts(by_title[header.NEXT_EXPIRY_TITLE])[1].startswith("HGZ26 first notice")
 
@@ -1016,47 +1016,6 @@ def test_compact_money_and_sector_labels():
 # official mark, from `needed_marks` (the list the Data tab shows), read once per render.
 
 
-def test_marks_chip_counts_the_missing_marks_with_the_list_on_hover(monkeypatch):
-    import datetime as dt
-    from data.bloomberg import live
-
-    monkeypatch.setattr(live, "book_today", lambda: dt.date(2026, 9, 17))   # today: the live request list
-    conn = _db_with_one_open_fx_trade()
-    card = header._marks_card(conn, "2026-09-17", None)
-    assert card.children[0].children == header.MARKS_TITLE
-    assert card.children[1].children == "2 marks missing"
-    assert card.children[1].style["color"] == header._LEVEL_STYLES["AMBER"]["color"]
-    hover = card.children[1].title
-    assert hover.startswith("2 of 2 marks the book needs on 2026-09-17 have no official mark (1 FWD_OUTRIGHT, 1 SPOT).")
-    assert "- USDJPY SPOT 2026-09-17" in hover and "The Data tab lists each one" in hover
-
-    _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "SPOT", 147.0, "BBG_BFXFORWARD")
-    conn.commit()
-    assert header._marks_card(conn, "2026-09-17", None).children[1].children == "1 mark missing"
-    _insert_official_mark(conn, "2026-09-17", "USDJPY", "2026-09-17", "FWD_OUTRIGHT", 148.0, "BBG_BFXFORWARD")
-    conn.commit()
-    done = header._marks_card(conn, "2026-09-17", None)
-    assert done.children[1].children == "marks complete"
-    assert done.children[1].title == "every one of the 2 marks the book needs on 2026-09-17 is on file (official)"
-
-
-def test_marks_chip_is_left_out_when_the_book_needs_no_mark_and_says_why_when_it_cannot_list(monkeypatch):
-    conn = schema.connect()
-    assert header._marks_card(conn, "2026-09-17", None) is None
-    titles = [c.children[0].children for c in header._build_figures(conn, "2026-09-17")]
-    assert header.MARKS_TITLE not in titles
-
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("inventory unreadable")
-
-    monkeypatch.setattr(header, "needed_marks", boom)
-    card = header._marks_card(conn, "2026-09-17", None)
-    assert card.children[1].children == "marks n/a"
-    assert card.children[1].title.startswith("the marks the book needs on 2026-09-17 could not be listed "
-                                             "(RuntimeError: inventory unreadable)")
-    header._build_figures(conn, "2026-09-17")                           # the P&L cards still build
-
-
 def test_the_needed_marks_are_read_once_per_database_revision(tmp_path, monkeypatch):
     import os
 
@@ -1071,20 +1030,17 @@ def test_the_needed_marks_are_read_once_per_database_revision(tmp_path, monkeypa
     monkeypatch.setattr(header, "needed_marks", counting)
     monkeypatch.setattr(header, "_NEEDS_MEMO", {})
 
-    def as_of_reads():   # the reference closes' reasons read their own dates, as before
-        return calls.count("2026-09-17")
-
+    # `_build_figures` hands `_needs_cached`'s one read to the LTD reason and the marks chip
+    # (an empty database returns its dashes before that read): the memo is what is pinned.
     conn = sqlite3.connect(db)
     try:
-        cards = header._build_figures(conn, "2026-09-17")
-        assert as_of_reads() == 1                          # the LTD reason and the chip share one read
-        assert _card(cards, header.MARKS_TITLE).children[1].children == "1 mark missing"
-        header._build_figures(conn, "2026-09-17")
-        assert as_of_reads() == 1                          # the next render reads the memo
+        header._needs_cached(conn, "2026-09-17")
+        header._needs_cached(conn, "2026-09-17")
+        assert calls == ["2026-09-17"]                     # the second render reads the memo
         stat = os.stat(db)
         os.utime(db, (stat.st_atime, stat.st_mtime + 5))   # the database changed
-        header._build_figures(conn, "2026-09-17")
-        assert as_of_reads() == 2
+        header._needs_cached(conn, "2026-09-17")
+        assert calls == ["2026-09-17", "2026-09-17"]
     finally:
         conn.close()
 

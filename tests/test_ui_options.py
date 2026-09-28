@@ -1310,7 +1310,7 @@ def test_numeric_columns_are_typed_numeric_and_carry_raw_numbers():
     for col in options.NUMERIC_COLUMNS:
         assert columns[col]["type"] == "numeric", col
         assert columns[col]["format"]["specifier"], col                 # display is a Format, not a string
-    assert columns["notional"]["format"]["specifier"] == "(,.0f"         # 35,000,000 / (197,575)
+    assert columns["notional"]["format"]["specifier"] == ",.0f"          # 35,000,000 / -197,575: a real minus
     assert columns["strike"]["format"]["specifier"] == ",.6~f"           # 11.0584, 152
     for col in options.TEXT_COLUMNS:
         assert columns[col]["type"] == "text", col

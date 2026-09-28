@@ -44,6 +44,7 @@ too, so it refuses as well.
 """
 from __future__ import annotations
 
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Callable, Optional, Tuple
@@ -209,6 +210,36 @@ def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None
         if took:
             line += f" · last pull took {took}"
     return f"{line}{tail}"
+
+
+_STATE_DOTS = {"connected": "#4ade80", "not connected": "#f87171", "no pull yet": "#9ca3af",
+               "pulling": "#f59e0b", "refused": "#f59e0b"}
+
+
+def short_state(line: str) -> str:
+    """The short Bloomberg state of a status line (2026-09-28): 'no pull yet', 'connected',
+    'not connected', 'pulling', or the line's own first clause when none of those fits."""
+    text = str(line or "")
+    low = text.lower()
+    if "no pull recorded" in low or "no pull has run" in low:
+        return "no pull yet"
+    if low.startswith("bloomberg: connected"):
+        return "connected"
+    if "not connected" in low:
+        return "not connected"
+    if "in progress" in low or "requested" in low or "waiting" in low or "pulling" in low:
+        return "pulling"
+    head = re.split(r" \u00b7 | \u2014 |: ", text, maxsplit=1)
+    return (head[1] if len(head) > 1 and head[0].lower() == "bloomberg" else head[0]).strip() or "status"
+
+
+def status_view(line: str) -> html.Span:
+    """The top bar's Bloomberg state as shown: a coloured dot and the short state, the full
+    sentence on the element's own `title` (its writers set both)."""
+    state = short_state(line)
+    return html.Span(className="feed-state", children=[
+        html.Span(className="header-dot", style={"background": _STATE_DOTS.get(state, "#f59e0b")}),
+        html.Span(f"Bloomberg: {state}")])
 
 
 def not_connected_message(app, status: Optional[dict]) -> str:
@@ -412,7 +443,7 @@ def register(app, get_db_path: Callable[[], object]) -> None:
         waiting = pending is not None
         # The button stays disabled while a request is outstanding, and while the sample
         # book is active (a refused press must not re-enable a locked button).
-        return line, line, pending, not waiting, waiting or pull_locked()
+        return status_view(line), line, pending, not waiting, waiting or pull_locked()
 
     @app.callback(
         Output(PULL_STATUS_ID, "children", allow_duplicate=True),
@@ -430,10 +461,11 @@ def register(app, get_db_path: Callable[[], object]) -> None:
         line, finished, landed = poll_outcome(read_feed_status(db_path), pending,
                                               getattr(app, "bloomberg_feed", None))
         if not finished:
-            return line, line, no_update, no_update, no_update, no_update
+            return status_view(line), line, no_update, no_update, no_update, no_update
         # Landed: tell every open view the marks changed (ui/revision.py), no reload. The
         # button re-enables unless the sample book was made active meanwhile.
-        return line, line, None, True, pull_locked(), (revision.file_signature(db_path) if landed else no_update)
+        return (status_view(line), line, None, True, pull_locked(),
+                (revision.file_signature(db_path) if landed else no_update))
 
     @app.callback(
         Output(PULL_STATUS_ID, "children"),
@@ -449,4 +481,4 @@ def register(app, get_db_path: Callable[[], object]) -> None:
         feed = getattr(app, "bloomberg_feed", None)
         line = feed_headline(read_feed_status(get_db_path()), feed_interval_seconds(feed),
                              feed_running=feed is not None, say_on_request=False)
-        return line, line
+        return status_view(line), line

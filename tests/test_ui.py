@@ -278,12 +278,12 @@ def test_header_as_of_defaults_to_today_follows_a_pick_and_rolls_over_at_midnigh
     assert callable(app.layout)                                   # built on every page load: today is fresh
     ids = _all_ids(app.layout())
     assert header.AS_OF_STORE_ID in ids and header.AS_OF_PICKED_ID in ids
-    # the Trades picker feeds the header; the poll rolls the header and the picker to the new day
+    # the header's own picker feeds the store; the poll rolls the store and the picker to the new day
     keys = list(app.callback_map)
     follow = next(k for k in keys if k.startswith(f"..{header.AS_OF_STORE_ID}.data...{header.AS_OF_PICKED_ID}.data.."))
     inputs = {d["id"] for d in app.callback_map[follow]["inputs"]}
-    assert inputs == {blotter.DATE_PICKER_ID}
-    roll = next(k for k in keys if f"{blotter.DATE_PICKER_ID}.date@" in k and header.AS_OF_STORE_ID in k)
+    assert inputs == {header.DATE_PICKER_ID}
+    roll = next(k for k in keys if f"{header.DATE_PICKER_ID}.date@" in k and header.AS_OF_STORE_ID in k)
     assert {d["id"] for d in app.callback_map[roll]["inputs"]} == {revision.POLL_ID}
     # the rules themselves
     assert header.as_of_after_pick("2026-09-15", "2026-09-22") == ("2026-09-15", True)
@@ -474,7 +474,7 @@ def test_header_pnl_card_colours_by_sign():
 def test_header_pnl_card_unavailable_shows_reason_as_tooltip():
     card = header._pnl_card("X", {"available": False, "reason": "no mark"})
     value_span = card.children[1]
-    assert value_span.children == "n/a"
+    assert value_span.children == header.MISSING
     assert value_span.title == "no mark"
 
 
