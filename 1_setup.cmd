@@ -47,8 +47,8 @@ Write-Host '====================================================================
 Write-Host ' risk-monitor SETUP'
 Write-Host '======================================================================'
 
-# (a) Python 3.12+
-Say '[1/7] Python 3.12+'
+# (a) Python 3.11+ (2_launcher.py MIN_PYTHON; winget installs 3.12 when none is found)
+Say '[1/7] Python 3.11+ (winget installs 3.12)'
 $havePy = $false
 try { $v = & py -3 -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null; if ($LASTEXITCODE -eq 0 -and $v) { $havePy = $true } } catch {}
 if ($havePy) {

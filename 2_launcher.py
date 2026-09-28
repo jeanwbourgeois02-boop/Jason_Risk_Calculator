@@ -23,14 +23,15 @@ Every other command re-runs itself inside `.venv` so the packages installed by
 `setup` are the ones the app uses. No batch files, no PATH edits, no global pip.
 Standard library only in this file: it must import before anything is installed.
 
-Every third-party package the app needs, in one place (PACKAGES below), instead of a
-separate requirements.txt: `setup` installs straight from this list, and `doctor` /
-`setup`'s own verify step import-check IMPORT_CHECKS. Keeping both in this one file is
-what stops the "installed but not checked" / "checked but not installed" gap that bit us
-once already (numpy, pyyaml, QuantLib were imported by engine/ui code but missing from
-an earlier version of both lists). `requirements.txt` itself is not checked in; run
-`py 2_launcher.py freeze` if some external tool (CI, `pip install -r requirements.txt`) needs
-the file on disk -- it is regenerated from PACKAGES, never edited by hand.
+Every third-party package the app needs, in one place (PACKAGES below): `setup` installs
+straight from this list, and `doctor` / `setup`'s own verify step import-check
+IMPORT_CHECKS. Keeping both in this one file is what stops the "installed but not
+checked" / "checked but not installed" gap that bit us once already (numpy, pyyaml,
+QuantLib were imported by engine/ui code but missing from an earlier version of both
+lists). `requirements.txt` is checked in for tools that do not go through this file
+(`pip install -r requirements.txt`, CI); it is generated from PACKAGES by
+`py 2_launcher.py freeze`, never edited by hand, and must be re-frozen whenever PACKAGES
+changes.
 """
 from __future__ import annotations
 
@@ -101,7 +102,9 @@ def requirements_text() -> str:
 
 
 def cmd_freeze(args) -> int:
-    REQUIREMENTS.write_text(requirements_text(), encoding="utf-8")
+    # newline="\n": the repository keeps LF (.gitattributes); Python's default would write
+    # CRLF on Windows and make every freeze a line-ending diff.
+    REQUIREMENTS.write_text(requirements_text(), encoding="utf-8", newline="\n")
     say(f"wrote {REQUIREMENTS}")
     return 0
 
@@ -152,10 +155,12 @@ def pnl_function_block(newline: str = "\n") -> str:
     (fetch, stash local edits, fast-forward, reinstall packages if the code changed) lives in
     `sync_with_github` below so it runs identically from `chelsea` and from
     `py 2_launcher.py start`."""
+    # A single quote inside the clone's path (O'Brien) is doubled: PowerShell's one escape
+    # inside a single-quoted string. Spaces need nothing more than the quotes.
     lines = [
         CHELSEA_MARKER,
         "function chelsea {",
-        f"    Set-Location '{ROOT}'",
+        f"    Set-Location '{str(ROOT).replace(chr(39), chr(39) * 2)}'",
         "    py -3 2_launcher.py start",
         "}",
         CHELSEA_END_MARKER,
@@ -268,6 +273,98 @@ def install_pnl_function() -> list:
     return written
 
 
+def _powershell_shells() -> list:
+    """The PowerShell executables on this PC that read the profiles above: Windows
+    PowerShell 5.1 (always present) and PowerShell 7+ (`pwsh`) when installed."""
+    import shutil
+    return [exe for exe in ("powershell", "pwsh") if shutil.which(exe)]
+
+
+def _powershell(exe: str, command: str, timeout: int = 60) -> str:
+    r = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", command],
+                       capture_output=True, text=True, timeout=timeout)
+    return r.stdout.strip()
+
+
+def ensure_profile_loads() -> list:
+    """Make sure each PowerShell on this PC will run its profile, so `chelsea` exists in a
+    new window. Windows PowerShell 5.1's default policy on a home PC is Restricted, under
+    which the profile is skipped with a red error and `chelsea` is "not recognized" (the
+    fresh-machine walk of 2026-09-28). RemoteSigned for the current user needs no admin and
+    lets a local profile run; a policy pinned by group policy cannot be changed here and is
+    reported with the way round it. Returns one line per shell."""
+    if os.name != "nt":
+        return []
+    notes = []
+    for exe in _powershell_shells():
+        try:
+            policy = _powershell(exe, "(Get-ExecutionPolicy).ToString()") or "unknown"
+            if policy in ("Restricted", "AllSigned"):
+                after = _powershell(exe, "Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force; "
+                                         "(Get-ExecutionPolicy).ToString()")
+                if after in ("Restricted", "AllSigned"):
+                    notes.append(f"{exe}: execution policy {policy} is pinned by policy, so the profile does not load and "
+                                 f"`chelsea` will not exist there. Start with:  py 2_launcher.py start")
+                else:
+                    notes.append(f"{exe}: execution policy {policy} -> RemoteSigned for the current user, "
+                                 f"so the profile (and `chelsea`) loads")
+            else:
+                notes.append(f"{exe}: execution policy {policy}, the profile loads")
+        except (OSError, subprocess.SubprocessError) as exc:
+            notes.append(f"{exe}: could not read the execution policy ({exc.__class__.__name__})")
+    return notes
+
+
+def chelsea_available() -> list:
+    """(shell, ok, detail) per PowerShell on this PC: whether a new window of it knows
+    `chelsea`, checked the way a new window would (its profile loaded, `Get-Command`)."""
+    if os.name != "nt":
+        return []
+    rows = []
+    for exe in _powershell_shells():
+        try:
+            r = subprocess.run([exe, "-NonInteractive", "-Command",
+                                "[bool](Get-Command chelsea -ErrorAction SilentlyContinue)"],
+                               capture_output=True, text=True, timeout=60)
+            ok = r.stdout.strip().endswith("True")
+            err = (r.stderr.strip().splitlines() or [""])[0]
+            rows.append((exe, ok, "chelsea is defined" if ok else ("not defined" + (f": {err}" if err else ""))))
+        except (OSError, subprocess.SubprocessError) as exc:
+            rows.append((exe, False, f"could not check ({exc.__class__.__name__})"))
+    return rows
+
+
+def venv_python_runs() -> bool:
+    """False when .venv exists but its interpreter no longer starts: the Python it was
+    created from was removed or upgraded (Windows venvs hold a `home` path, not a copy),
+    the case after a python.org upgrade. Such a venv is rebuilt by `setup`, never trusted."""
+    try:
+        return subprocess.call([str(VENV_PY), "-c", "pass"], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL) == 0
+    except OSError:
+        return False
+
+
+LONG_PATH_WARN = 110   # characters of ROOT beyond which a package's deepest file can pass MAX_PATH
+
+
+def long_paths_enabled() -> bool:
+    """Windows' 260-character path limit is lifted only with LongPathsEnabled in the registry
+    (and a manifest, which python.exe has). Without it, `pip install numpy` into a venv under
+    a deep folder fails with WinError 206 (seen 2026-09-28 at a 180-character clone path)."""
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem")
+        try:
+            return winreg.QueryValueEx(key, "LongPathsEnabled")[0] == 1
+        finally:
+            winreg.CloseKey(key)
+    except OSError:
+        return False
+
+
 def tcp_open(host: str, port: int, timeout: float = 0.5) -> bool:
     # "localhost" resolves to both ::1 and 127.0.0.1; when nothing answers on ::1 (the
     # common case) socket.create_connection tries it first and pays the full timeout
@@ -280,6 +377,52 @@ def tcp_open(host: str, port: int, timeout: float = 0.5) -> bool:
             return True
     except OSError:
         return False
+
+
+def _listener(port: int) -> str:
+    """'PID 1234 (python.exe)' for the process listening on 127.0.0.1:port, or '' when it
+    cannot be named (netstat / tasklist are Windows; elsewhere the port alone is reported)."""
+    if os.name != "nt":
+        return ""
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True, timeout=15).stdout
+        pid = next((int(p[4]) for p in (ln.split() for ln in out.splitlines())
+                    if len(p) >= 5 and p[0].upper() == "TCP" and p[1].endswith(f":{port}") and p[3] == "LISTENING"), None)
+        if pid is None:
+            return ""
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, timeout=15).stdout
+        name = out.strip().split(",")[0].strip('"') if out.strip().startswith('"') else "unknown process"
+        return f"PID {pid} ({name})"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+
+
+def port_preflight() -> list:
+    """What holds the app's ports before a start, in plain words, one line per port that
+    needs one. ui/launch.py already stops a risk monitor that runs old code and reuses one on
+    the current code, but a listener that does not answer as a risk monitor at all -- a copy
+    of the app that hung, or another program -- is silently skipped for the next port, so a
+    bookmark on the old port would still show the old page. Standard library only: this runs
+    before the re-exec into .venv."""
+    from ui.launch import IDENTITY_PREFIX, probe
+    lines = []
+    for port in PORTS:
+        if not tcp_open("127.0.0.1", port, timeout=0.2):
+            continue
+        seen = probe(f"http://127.0.0.1:{port}")
+        if seen is None:
+            who = _listener(port) or "a process"
+            lines.append(f"Port {port}: held by {who} that does not answer as a risk monitor (a copy of the app "
+                         f"that hung, or another program). The app starts on the next free port; an old "
+                         f"bookmark on {port} would show that process, not the app. To free the port: "
+                         f"taskkill /PID <pid> /F  (or close its window).")
+        elif seen.startswith(IDENTITY_PREFIX):
+            lines.append(f"Port {port}: a risk monitor is running ({seen}): reused if it is the current code, "
+                         f"stopped and replaced if not.")
+        else:
+            lines.append(f"Port {port}: another application; the app takes the next free port.")
+    return lines
 
 
 def bloomberg_host() -> tuple:
@@ -345,10 +488,17 @@ def cmd_setup(args) -> int:
 
     # 2. venv
     say("[2/7] Virtual environment")
-    if args.recreate and VENV.exists():
+    if len(str(ROOT)) > LONG_PATH_WARN and not long_paths_enabled():
+        say(f"  WARNING: this folder's path is {len(str(ROOT))} characters long and Windows long paths are off,")
+        say("           so a package install can fail with 'WinError 206: the filename is too long'. If it does,")
+        say("           move the folder somewhere short (C:\\Users\\<you>\\Jason Risk Monitor) or enable long paths")
+        say("           (as administrator:  Set-ItemProperty HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem "
+            "LongPathsEnabled 1) and run setup again.")
+    if VENV.exists() and (args.recreate or (VENV_PY.exists() and not venv_python_runs())):
         import shutil
+        why = "--recreate" if args.recreate else "its Python no longer runs (removed or upgraded since it was created)"
         shutil.rmtree(VENV)
-        say("  removed old .venv")
+        say(f"  removed old .venv: {why}")
     if VENV_PY.exists():
         say(f"  OK: {VENV} exists")
     else:
@@ -368,10 +518,13 @@ def cmd_setup(args) -> int:
     if want_blp:
         code = run([VENV_PY, "-m", "pip", "install", "--index-url", BLPAPI_INDEX, "blpapi"], check=False)
         if code != 0:
-            say("FAILED: blpapi did not install. This PC must reach blpapi.bloomberg.com. Re-run later,")
-            say("        or run  py 2_launcher.py setup --no-bloomberg  on a PC without a Terminal.")
-            return 1
-        say("  OK: blpapi installed")
+            # Not fatal: the app runs fully on the marks on file without the live feed, and
+            # every `start` on a PC with a Terminal tries this install again (cmd_start).
+            # Stopping here used to leave the database and `chelsea` uninstalled (2026-09-28).
+            say("WARNING: blpapi did not install (this PC must reach blpapi.bloomberg.com). The app starts")
+            say("         without the live feed; the next `chelsea` tries again, or run  py 2_launcher.py setup --bloomberg")
+        else:
+            say("  OK: blpapi installed")
     else:
         say("  skipped: no Bloomberg Terminal detected (use --bloomberg to force)")
 
@@ -394,23 +547,38 @@ def cmd_setup(args) -> int:
     # 6. chelsea PowerShell function
     say("[6/7] 'chelsea' PowerShell command")
     try:
-        for profile in install_pnl_function():
+        written = install_pnl_function()
+        for profile in written:
             say(f"  OK: {profile}")
     except OSError as exc:
         say(f"FAILED: could not write PowerShell profile: {exc}")
         return 1
+    if written:
+        # A profile that PowerShell refuses to load (execution policy Restricted, the
+        # Windows default) leaves `chelsea` unknown in every new window: check and fix it.
+        for note in ensure_profile_loads():
+            say(f"  {note}")
 
-    # 7. tests
+    # 7. tests: informational. The install itself was verified in step 5 (every package
+    # imports, the database is created); a test that needs data this PC does not have (the
+    # research app's database, the market-history folder) fails here without the app being
+    # broken, and a fresh PC must still reach "start". A failure is named, never hidden.
     say("[7/7] Tests")
+    tests_failed = False
     if args.skip_tests:
         say("  skipped (--skip-tests)")
     else:
-        run([VENV_PY, "-m", "pytest", "tests/", "-q"])
+        tests_failed = run([VENV_PY, "-m", "pytest", "tests/", "-q"], check=False) != 0
+        if tests_failed:
+            say("  WARNING: some tests failed (see above). The app is installed and starts; report the")
+            say("           failing tests. Run them again any time:  py 2_launcher.py doctor --tests")
 
     say()
     say("=" * 70)
-    say(" SETUP COMPLETE.   Start the app:   py 2_launcher.py start")
+    say(" SETUP COMPLETE.   Start the app:   chelsea   (or:  py 2_launcher.py start)")
     say("                   Anything wrong:  py 2_launcher.py doctor")
+    if tests_failed:
+        say("                   Some tests failed: see the WARNING above.")
     if want_blp:
         say("                   Log in to the Bloomberg Terminal before starting.")
     say("=" * 70)
@@ -462,10 +630,15 @@ def venv_imports_ok() -> bool:
     importing dash/pandas/QuantLib/scipy, then `start` importing them AGAIN once it
     re-execs into .venv -- was measured at 1.5s on every `start` (2026-09-17), even when
     nothing had changed. Only a missing or stale stamp (PACKAGES/DEV_PACKAGES edited, or a
-    different python) pays for the real subprocess check; a success there re-writes the
-    stamp so the next call is fast again."""
+    different python) pays for the real work: a `pip install` of PACKAGES, which brings
+    .venv to the list (a version bound raised in PACKAGES is applied here; an import check
+    alone would pass on the old version and trust it for ever, 2026-09-28) and is a quick
+    local no-op when every requirement is already met, then the import check. A success
+    re-writes the stamp so the next call is fast again."""
     if _packages_stamp_matches():
         return True
+    say("Bringing .venv up to PACKAGES (the list changed, or the first start on this Python): pip install")
+    subprocess.call([str(VENV_PY), "-m", "pip", "install", *PACKAGES, *DEV_PACKAGES, "--quiet"], cwd=str(ROOT))
     code = subprocess.call([str(VENV_PY), "-c", "import " + ", ".join(IMPORT_CHECKS)], cwd=str(ROOT),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     ok = code == 0
@@ -498,25 +671,21 @@ def cmd_start(args) -> int:
             say(f"GitHub: {message}")
             if changed:
                 # The file now on disk may be newer than this running copy: hand over to
-                # it (and let it refresh the packages) rather than continue with old code.
-                argv = [a for a in sys.argv[1:] if a != "--no-sync"] + ["--no-sync", "--refresh-packages"]
+                # it rather than continue with old code. `--force-new`: a risk monitor left
+                # running from before the update is stopped and replaced even when its
+                # source fingerprint (ui/launch.py: .py files only) did not move -- an
+                # update to config/, a stylesheet or a contract table must never be served
+                # by the old process (2026-09-28).
+                argv = [a for a in sys.argv[1:] if a not in ("--no-sync", "--force-new")] + ["--no-sync", "--force-new"]
                 return subprocess.call([sys.executable, str(ROOT / "2_launcher.py"), *argv], cwd=str(ROOT))
-        # `args.refresh_packages` (set by the GitHub-sync branch above whenever the code on
-        # disk changed) used to force this whole block -- and therefore an unconditional
-        # `pip install` -- on every start after every update, even when PACKAGES itself
-        # hadn't changed: the single biggest cost on a PC with slow PyPI access
-        # (2026-09-17). venv_imports_ok() alone now decides this, and it is itself fast
-        # (packages.stamp) whenever nothing actually needs installing; --refresh-packages
-        # is intentionally no longer read here.
+        # venv_imports_ok() decides whether .venv needs a `pip install` (packages.stamp: fast
+        # when nothing changed; a stale stamp installs PACKAGES then checks the imports). An
+        # unconditional install on every start after every update was the single biggest
+        # cost on a PC with slow PyPI access (2026-09-17); --refresh-packages is accepted for
+        # old `chelsea` blocks and ignored.
         if VENV_PY.exists() and not venv_imports_ok():
-            # The venv cannot import something the app needs (PACKAGES changed, or a PC
-            # whose .venv predates a new dependency): install before starting, instead of
-            # letting ui/launch.py exit with "Missing dependency".
-            say("Refreshing packages in .venv (a package is missing or PACKAGES changed)")
-            run([VENV_PY, "-m", "pip", "install", *PACKAGES, *DEV_PACKAGES, "--quiet"], check=False)
-            if not venv_imports_ok():
-                say("FAILED: packages still missing after install. Run:  py 2_launcher.py setup")
-                return 1
+            say("FAILED: .venv cannot import every package the app needs, even after pip. Run:  py 2_launcher.py setup")
+            return 1
         # blpapi is installed by `setup` only when a Terminal was detected AT SETUP TIME
         # (bloomberg_pc()), and venv_imports_ok() deliberately ignores it, so a PC whose
         # Terminal was installed or logged in after setup ran started the app without the
@@ -528,6 +697,8 @@ def cmd_start(args) -> int:
             if not venv_blpapi_ok():
                 say("WARNING: blpapi still does not import; the app starts without the live feed. "
                     "Fix: py 2_launcher.py setup --bloomberg")
+        for line in port_preflight():
+            say(line)
         return reexec_in_venv([a for a in sys.argv[1:] if a not in ("--no-sync", "--refresh-packages")])
     from ui.launch import main
     return main(["--force-new"] if args.force_new else [])
@@ -639,6 +810,9 @@ def doctor_checks(d: Doctor, bloomberg: bool, git: bool = True) -> None:
         for pt in PORTS:
             seen = probe(f"http://127.0.0.1:{pt}")
             if seen is None:
+                if tcp_open("127.0.0.1", pt, timeout=0.2):
+                    found.append(f"{pt}: {_listener(pt) or 'a process'} that does not answer as a risk monitor "
+                                 f"(a hung copy of the app, or another program)")
                 continue
             if seen == me:
                 found.append(f"{pt}: current code")
@@ -704,6 +878,12 @@ def cmd_doctor(args) -> int:
     say("=" * 70)
     d = Doctor()
     doctor_checks(d, bloomberg=args.bloomberg, git=not args.no_git)
+    # `chelsea` the way a new window sees it: profile loaded, execution policy applied. A
+    # profile PowerShell refuses to load (policy Restricted) is the one fresh-PC failure
+    # setup could not see by writing the file (2026-09-28).
+    for shell, ok, detail in chelsea_available():
+        d.add("chelsea", ok, f"{shell}: {detail}",
+              "py 2_launcher.py setup   (writes the profile and sets the execution policy for you)")
     code = 0
     if args.bloomberg:
         say()

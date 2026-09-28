@@ -13,6 +13,7 @@ tzdata
 pyyaml>=6.0
 QuantLib==1.43
 scipy>=1.11
+pyarrow>=15
 # blpapi is NOT listed here: `py 2_launcher.py setup` installs it from Bloomberg's own index
 # (https://blpapi.bloomberg.com/repository/releases/python/simple/) on the Bloomberg PC.
 pytest>=8
