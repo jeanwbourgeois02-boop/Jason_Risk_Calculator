@@ -998,7 +998,7 @@ def _common(row: pd.Series) -> dict:
 
 def _warn(res: ParseResult, row_no: int, symbol: str, message: str) -> None:
     res.warnings.append(ParseWarning(row_no, symbol, message))
-    log.warning("row %d %s: %s", row_no, symbol, message)
+    log.debug("row %d %s: %s", row_no, symbol, message)
 
 
 def _fx_amounts(row: pd.Series, buy_is_base: bool, rate: float, rate_from_description: bool = False) -> tuple:
@@ -1149,7 +1149,7 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
         return
     if pair is None:
         pair = _pair_by_convention(buy_ccy, sell_ccy)
-        log.warning("row %d %s: pair not given; assuming %s by market convention", row_no, trade_id, pair)
+        log.debug("row %d %s: pair not given; assuming %s by market convention", row_no, trade_id, pair)
     base_ccy, quote_ccy = pair[:3], pair[3:]
     if {buy_ccy, sell_ccy} != {base_ccy, quote_ccy}:
         res.rejects.append(Reject(row_no, symbol,
@@ -1243,15 +1243,15 @@ def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int,
         if "is not a number" in problem:
             res.rejects.append(Reject(row_no, symbol, problem))
         else:
-            log.warning("row %d %s: CURRENCY row names %s/%s but has no amounts; cash instrument only",
-                        row_no, trade_id, buy_ccy, sell_ccy)
+            log.debug("row %d %s: CURRENCY row names %s/%s but has no amounts; cash instrument only",
+                      row_no, trade_id, buy_ccy, sell_ccy)
         return
     trade_date = _date(row.get("TradeDate"))
     value_date = _date(row.get("Settle Date"))
     trade_date, value_date = trade_date or value_date, value_date or trade_date
     if trade_date is None:
-        log.warning("row %d %s: CURRENCY row names %s/%s but has no date; cash instrument only",
-                    row_no, trade_id, buy_ccy, sell_ccy)
+        log.debug("row %d %s: CURRENCY row names %s/%s but has no date; cash instrument only",
+                  row_no, trade_id, buy_ccy, sell_ccy)
         return
     for message in repairs:
         _warn(res, row_no, symbol, message)
@@ -1915,7 +1915,7 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
     res = parse(source, filename, book=book, conn=conn)
     name = filename or (Path(source).name if isinstance(source, (str, Path)) else "blotter")
     for rj in res.rejects:
-        log.warning("%s row %d %s: REJECT %s", name, rj.row_no, rj.symbol, rj.reason)
+        log.debug("%s row %d %s: REJECT %s", name, rj.row_no, rj.symbol, rj.reason)
     if strict and res.rejects:
         head = [f"reject row {rj.row_no} {rj.symbol}: {rj.reason}" for rj in res.rejects[:5]]
         raise ValueError(f"{name}: {len(res.rejects)} reject(s); nothing loaded (strict=True). First: " + " | ".join(head))
@@ -1961,7 +1961,7 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
             _rows(res.instrument_options.values()))
         conn.execute("DROP TABLE _incoming")
     for note in res.notes():
-        log.info("%s: %s", name, note)
+        log.debug("%s: %s", name, note)
     return res
 
 
