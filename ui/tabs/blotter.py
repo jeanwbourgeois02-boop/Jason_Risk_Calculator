@@ -1128,15 +1128,29 @@ def commodity_positions_section(block: Optional[dict]) -> html.Div:
 
 
 def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """The Total book's Positions block, above the P&L by asset class: the Commodities first
-    (Jason's book is mostly commodities; `commodity_positions_section`), then the FX lines
-    (`positions_rows`), both from one `book_positions` call. The FX table is ranked
-    (ui.tabs.ranking): a click on Delta (USD) puts the largest risk first; the section
-    totals (FX net and gross, FX options) are the pinned footer, in their own order, never
-    ranked with the lines. Commodities are not in the FX net (CLAUDE.md "Net USD")."""
+    """The Positions block as it was on the Total book: the Commodities first (Jason's book is
+    mostly commodities; `commodity_positions_section`), then the FX lines (`fx_positions_table`),
+    both from one `book_positions` call. Since the UI redesign wave 2 (2026-09-28) no screen
+    renders this whole block: the Exposure tab shows the commodity positions from
+    curve-positions itself and takes only the FX part (`fx_positions_table`, "Currency and FX
+    exposure"); kept as one function for the tests and older notes that read it."""
     from engine.ladder.positions import book_positions
     pos = book_positions(conn, as_of)
     commodities = _safe_section("Commodity positions", lambda: commodity_positions_section(pos.get("commodities")))
+    return html.Div(className="section", children=[
+        about("Positions", POSITIONS_ABOUT),
+        commodities,
+        fx_positions_table(conn, as_of, pos=pos, level="h5")])
+
+
+def fx_positions_table(conn: sqlite3.Connection, as_of: str, pos: Optional[dict] = None,
+                       level: str = "h4", title: str = "FX") -> html.Div:
+    """The FX part of the Positions block (`positions_rows`): delta by currency at the day's
+    official spot, FX options' delta included, from `book_positions` (passed in as `pos` when
+    the caller has it). The table is ranked (ui.tabs.ranking): a click on Delta (USD) puts
+    the largest risk first; the section totals (FX net and gross, FX options) are the pinned
+    footer, in their own order, never ranked with the lines. Commodities are not in the FX
+    net (CLAUDE.md "Net USD"). Rendered by the Exposure tab since 2026-09-28 (wave 2)."""
     records, tips = positions_rows(conn, as_of, pos=pos)
     body = [(r, t) for r, t in zip(records, tips) if r["kind"] != "total"]
     footer = [(r, t) for r, t in zip(records, tips) if r["kind"] == "total"]
@@ -1157,17 +1171,15 @@ def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
     )
     total_style = [{"if": {"filter_query": "{kind} = 'total'"}, "fontWeight": "700", "borderTop": "1px solid var(--muted)"}]
     footer_records = [r for r, _ in footer]
-    return html.Div(className="section", children=[
-        about("Positions", POSITIONS_ABOUT),
-        commodities,
-        about("FX", FX_POSITIONS_ABOUT, level="h5"),
+    return html.Div(className="positions-fx", children=[
+        about(title, FX_POSITIONS_ABOUT, level=level),
         rk.with_footer(table, rk.whole_units(footer_records, ("usd",)), footer_style=total_style,
                        footer_tooltips=_with_full_figures(footer_records, [t for _, t in footer], ("usd",)))])
 
 
 POSITIONS_ABOUT = ("The book's positions, the key table of the Blotter. First the commodity futures, LME forwards "
                    "and options on futures by sector, then commodity, in lots, physical units and USD at the day's "
-                   "official prices and spot (contract months on the Curve tab); they are not in the FX net. Then "
+                   "official prices and spot (contract months on the Exposure tab); they are not in the FX net. Then "
                    "the delta by currency at the day's official spot, FX options included. Money is in k / m, the "
                    "full figure on hover; a figure with no mark reads n/a with the reason on hover, never 0.")
 COMMODITIES_ABOUT = ("One line per sector (net and gross USD), its commodities under it: exchange, net and gross "
@@ -1711,8 +1723,6 @@ def scope_layout(scope: str, conn: sqlite3.Connection, as_of: str, with_notices:
 
 
 TOTAL_ISSUES_ID = "blotter-issues-total"
-SUMMARIES_ID = "blotter-summaries-total"
-SUMMARIES_TITLE = "Summaries (moving to Exposure and P&L in wave 2)"
 _FILL_NOTE_PREFIX = "no price on "   # engine.pnl.reference.fill_book's note on a filled row
 
 
@@ -1805,20 +1815,15 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
     # The Total book has no P&L strip (Screens redesign Phase A, 2026-09-25): the header
     # above every tab is the total book. Its reasons sit in one collapsed drawer on top.
     body = [] if scope in _STRIPLESS_SCOPES else [_safe_section("P&L strip", _strip, conn)]
-    summaries = None
     if scope == "total" and not df.empty:
         drawer = total_book_issues(df, as_of)
         if drawer is not None:
             body.append(drawer)
-        # The Positions table, the Commodities section and the P&L by asset class (UI redesign
-        # wave 1, 2026-09-28): unchanged, folded under the trade table until wave 2 gives them
-        # their home on the Exposure and P&L tabs.
-        summaries = html.Details(id=SUMMARIES_ID, className="details", open=False, children=[
-            html.Summary(SUMMARIES_TITLE, title="The Positions table (commodities, then FX), and the P&L by "
-                                                "asset class, as they were: they move to the Exposure and P&L "
-                                                "tabs in wave 2."),
-            _safe_section("Positions", lambda: positions_table(conn, as_of), conn),
-            _safe_section("P&L by asset class", lambda: asset_class_pnl_table(conn, as_of, df), conn)])
+        # The Positions table and the P&L by asset class left the Trades tab on 2026-09-28 (UI
+        # redesign wave 2): the FX positions are on the Exposure tab ("Currency and FX
+        # exposure", `fx_positions_table`), the commodity positions there too from
+        # curve-positions itself, and the P&L by asset class on the P&L tab ("By product",
+        # `asset_class_pnl_table`).
     if df.empty:
         body.append(message_box("No trades for this as-of date in this scope."))
         body.append(html.Div(id=detail_id))
@@ -1830,8 +1835,6 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
             lambda: detail_table(df, table_id=table_id, display_columns=display_columns,
                                   column_labels=column_labels, scope=scope), conn))
         body.append(html.Div(id=detail_id))
-    if summaries is not None:
-        body.append(summaries)
     return html.Div(body)
 
 

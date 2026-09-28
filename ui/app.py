@@ -3,10 +3,12 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Eight tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25; UI redesign wave 1, user
-2026-09-28), in this order: Book, Trades, Spreads, Curve, Risk, Expiries, FX & cash, Data.
-"Trades" is the former Blotter (ui/tabs/blotter.py, key "blotter"), "FX & cash" the former
-Ladder (ui/tabs/cash_ladder.py) and "Data" the former Market data (ui/tabs/market_data.py);
+Nine tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25; UI redesign waves 1 and 2, user
+2026-09-28), in this order: Book, Exposure, P&L, Timing & cash, Risk, Trades, Spreads, FX & cash,
+Data. "Exposure" is the former Curve (ui/tabs/curve.py, key "curve"), "P&L" is new
+(ui/tabs/pnl.py, key "pnl"), "Timing & cash" the former Expiries (ui/tabs/expiries.py, key
+"expiries"), "Trades" the former Blotter (ui/tabs/blotter.py, key "blotter"), "FX & cash" the
+former Ladder (ui/tabs/cash_ladder.py) and "Data" the former Market data (ui/tabs/market_data.py);
 each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
 separate from the label the user reads, so a rename never moves an id. The app opens on the
 first tab, Book (ui/tabs/book.py): the book's home. A slim header (ui/tabs/header.py) sits
@@ -26,7 +28,7 @@ from typing import Union
 import dash
 from dash import ALL, Input, Output, State, dcc, html
 
-from ui.tabs import blotter, book, cash_ladder, curve, expiries, header, market_data, risk, spreads
+from ui.tabs import blotter, book, cash_ladder, curve, expiries, header, market_data, pnl, risk, spreads
 from ui.tabs.formatting import TAB_LINK_TYPE
 from ui import revision, uploads
 # The database path rule lives below every layer (data/paths.py) so the Bloomberg CLI mains
@@ -34,19 +36,22 @@ from ui import revision, uploads
 # name every screen, script and test uses.
 from data.paths import DEFAULT_DB_PATH, REPO_ROOT, get_db_path  # noqa: F401
 
-# Order per the UI redesign wave 1 (user, 2026-09-28: Book and Trades are the two screens used
-# most), after the screens redesign of 2026-09-25 ("the spread is the unit"); the app opens on
-# the first. Each label maps to its stable key: the tab bar's value and the body id
-# `tab-body-<key>`. The key never holds '&' or a space, and a renamed tab keeps its key
-# ("Trades" is still "blotter", "FX & cash" still "ladder", "Data" still "market-data"), so
-# nothing keyed on a body id moves.
+# Order per the UI redesign wave 2 (user, 2026-09-28: six screens, one question each: Book,
+# Exposure, P&L, Timing & cash, Risk, Trades; the old Spreads, FX & cash and Data tabs stay
+# reachable until wave 3 retires them), after the screens redesign of 2026-09-25 ("the spread
+# is the unit"); the app opens on the first. Each label maps to its stable key: the tab bar's
+# value and the body id `tab-body-<key>`. The key never holds '&' or a space, and a renamed tab
+# keeps its key ("Exposure" is still "curve", "Timing & cash" still "expiries", "Trades" still
+# "blotter", "FX & cash" still "ladder", "Data" still "market-data"), so nothing keyed on a body
+# id moves.
 TAB_KEYS = {
     "Book": "book",
+    "Exposure": "curve",
+    "P&L": "pnl",
+    "Timing & cash": "expiries",
+    "Risk": "risk",
     "Trades": "blotter",
     "Spreads": "spreads",
-    "Curve": "curve",
-    "Risk": "risk",
-    "Expiries": "expiries",
     "FX & cash": "ladder",
     "Data": "market-data",
 }
@@ -208,14 +213,16 @@ def build_layout(data: dict, db_path=None) -> html.Div:
     trades open on whatever as_of it is given). The Blotter keeps defaulting to the last
     uploaded trade date, since it renders the loaded trade file itself. Data (the former
     Market data) opens on today too (2026-09-21): its whole-book panels ask whether TODAY's
-    marks can be trusted, and the live pull only writes today's. Book, Spreads, Curve, Risk
-    and Expiries have no picker: they follow the header's as-of store, whose default is today."""
+    marks can be trusted, and the live pull only writes today's. Book, Exposure, P&L, Timing &
+    cash, Spreads and Risk have no picker: they follow the header's as-of store, whose default
+    is today."""
     snapshot_date = data["as_of_date"] if data["as_of_date"] != "none" else None
     today = cash_ladder.today_ny()
     tab_builders = {
         "book": book.build_layout,
         "spreads": spreads.build_layout,
         "curve": curve.build_layout,
+        "pnl": pnl.build_layout,
         "risk": risk.build_layout,
         "expiries": expiries.build_layout,
         "blotter": blotter.build_layout,
@@ -273,6 +280,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False)
     cash_ladder.register_callbacks(app, get_db_path=lambda: resolved)
     blotter.register_callbacks(app, get_db_path=lambda: resolved)
     curve.register_callbacks(app, get_db_path=lambda: resolved)
+    pnl.register_callbacks(app, get_db_path=lambda: resolved)
     book.register_callbacks(app, get_db_path=lambda: resolved)
     spreads.register_callbacks(app, get_db_path=lambda: resolved)
     expiries.register_callbacks(app, get_db_path=lambda: resolved)

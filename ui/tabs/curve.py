@@ -1,8 +1,13 @@
-"""Curve tab: "What am I long or short, in which month?" (Commodity conversion plan, Phase 1
-step 3; options on futures, LME prompts and averaging contracts since Phase 5; cleaned up under
-"Screens redesign plan" Phase A, 2026-09-25). Rendered from `engine.curve.curve_positions` and
-nothing else: every position, price, notional, delta and P&L on the tab is that dict's; nothing
-here re-prices or re-reads a mark (CLAUDE.md "Tabs as views").
+"""Exposure tab (the Curve tab until 2026-09-28): "What am I long or short, in which month?"
+(Commodity conversion plan, Phase 1 step 3; options on futures, LME prompts and averaging
+contracts since Phase 5; cleaned up under "Screens redesign plan" Phase A, 2026-09-25; renamed
+and widened in the UI redesign wave 2, user 2026-09-28). The commodity sections are rendered
+from `engine.curve.curve_positions`: every position, price, notional, delta and P&L there is
+that dict's. The two sections at the bottom read two other owners as they are: the option
+Greeks (curve-positions' delta lots, and the official GAMMA / THETA / VEGA marks on file) and
+the FX delta by currency (`engine.ladder.positions.book_positions`, rendered by
+`ui.tabs.blotter.fx_positions_table`, the table that was the Trades tab's Positions). Nothing
+here re-prices a trade or re-reads a mark for P&L (CLAUDE.md "Tabs as views").
 
 Numbers first (Screens redesign plan, Decisions): a section's definitions sit on hover of its
 title (`formatting.about`), never as a paragraph above the table; the engine's reasons are
@@ -17,6 +22,7 @@ Layout, top to bottom (`body`):
   2. `grid_section`: one row per commodity (`by_commodity`) in the engine's order (sector,
      root), the Sector column first, the contract months (`months`) across. The view switch
      (`UNIT_ID`) picks what a month cell shows and which totals end the row:
+     The default view is delta lots (wave 2, 2026-09-28: the one view every product is in).
        - the outright views (lots, physical units, USD notional) are futures and LME prompts
          only, as the engine gives them (an option is not a lot of the future): lots are
          `by_commodity[...]['months']`; units and USD are the outright rows' `units` /
@@ -60,7 +66,17 @@ Layout, top to bottom (`body`):
      (`DETAIL_MORE_COLUMNS`, the choice kept in the browser session).
   5. `currency_section`: the P&L the non-USD futures and options hold in each currency and its
      USD value (`currency_exposure`).
-  6. `flat_section`: the open positions that net to zero, collapsed.
+  6. `greeks_section` (wave 2): the open options on futures, one line per underlying commodity
+     with the options' Delta (futures lots), Gamma, Theta and Vega summed, each option's own
+     row under it. One convention throughout, scaled to the position: Delta is curve-positions'
+     `delta_lots` (lots x the option's official DELTA, futures-equivalent lots); Gamma, Theta
+     and Vega are the option's official per-lot marks on file x its lots, in the contract's
+     currency, so a commodity's line sums figures of one unit only. A missing Greek is n/a with
+     its reason. Futures carry none, so the book's gamma and vega are these sums.
+  7. `fx_exposure_section` (wave 2): "Currency and FX exposure", the FX delta by currency
+     (`ui.tabs.blotter.fx_positions_table`, imported: book-positions' figures at the day's
+     official spot, FX options' delta included, the FX net and gross USD as its footer).
+  8. `flat_section`: the open positions that net to zero, collapsed.
 
 Every table ranks (`ui.tabs.ranking`): numbers stored as numbers, a missing figure the string
 "n/a" (ranks last) with its reason as the cell's tooltip, never zero and never blank without a
@@ -110,13 +126,21 @@ FUTURE, OPTION, LME = "FUTURE", "CMDTY_OPTION", "LME_FWD"
 OUTRIGHT = (FUTURE, LME)    # the products the engine counts in lots, units and USD notional
 PRODUCT_LABELS = {FUTURE: "Future", OPTION: "Option", LME: "LME prompt"}
 OPTION_NOTIONAL = "option: see delta"   # an option's notional cell: it has none, its exposure is its delta
-UNITS = ("lots", "units", "usd", "delta_lots", "delta_usd")
+# The view switch, in the order shown: delta lots first and by default (UI redesign wave 2,
+# 2026-09-28: the one view every product is in), then the outright views, then delta USD.
+UNITS = ("delta_lots", "lots", "units", "usd", "delta_usd")
 DELTA_UNITS = ("delta_lots", "delta_usd")
-UNIT_LABELS = {"lots": "Lots", "units": "Physical units", "usd": "USD notional",
+UNIT_LABELS = {"lots": "Lots", "units": "Units", "usd": "USD",
                "delta_lots": "Delta lots", "delta_usd": "Delta USD"}
 UNIT_WORDS = {"lots": "lots", "units": "physical units", "usd": "USD notional",
               "delta_lots": "delta lots", "delta_usd": "delta USD"}     # the same, inside a sentence
-DEFAULT_UNIT = "lots"
+UNIT_TIPS = {"delta_lots": "Every product at its delta in futures-equivalent lots: an option at its DELTA, an "
+                           "averaging contract at its shrinking delta, an LME ticket at its tonnes over the lot size.",
+             "lots": "Net lots of futures and LME prompts, as booked (an option is not a lot of the future).",
+             "units": "Lots x contract size, in the commodity's physical unit (barrels, tonnes, bushels).",
+             "usd": "Lots x multiplier x the day's official price x spot, in USD (k / m).",
+             "delta_usd": "Delta lots x multiplier x the future's price x spot, in USD (k / m)."}
+DEFAULT_UNIT = "delta_lots"
 MONTH_PREFIX = "m_"          # a month column's id: 'm_2026-12'
 USD_VIEWS = ("usd", "delta_usd")                  # the views whose month cells are USD money (k / m)
 GRID_USD_COLUMNS = ("net_usd", "gross_usd", "net_delta_usd", "gross_delta_usd")
@@ -552,7 +576,7 @@ def grid_section(result: Dict[str, Any], unit: str) -> html.Div:
 
 
 # --------------------------------------------------------------------------- 2b. one commodity's curve
-RESEARCH_TRACE = "research curve"        # + " (<settlement date>)"
+RESEARCH_TRACE = "context curve"         # + " (<settlement date>)": the research app's settlements
 MARKS_TRACE = "our official marks"
 LOTS_TRACE = "position (lots)"
 DELTA_TRACE = "delta lots"
@@ -561,9 +585,9 @@ _NAVY, _GOLD, _MUTED = "#0f1f3d", "#c9a227", "#6b7280"
 _NOTE_STYLE = {"color": "var(--muted)", "fontSize": "12px", "margin": "2px 0"}   # a quiet line under the chart
 CURVE_ABOUT = (
     "One commodity at a time: pick it here or click its row in the grid (the default is the commodity with the "
-    "largest gross USD). The line is the research app's settlement curve for the root on its latest settlement "
-    "on or before the as-of, as Bloomberg quotes it (raw_settle), so it sits on the same scale as our marks; it "
-    "is research context, never a mark and never in P&L or delta. The markers are our official prices of the "
+    "largest gross USD). The thin line is context: the research app's settlement curve for the root on its "
+    "latest settlement on or before the as-of, as Bloomberg quotes it (raw_settle), so it sits on the same "
+    "scale as our marks; it is never a mark and never in P&L or delta. The markers are our official prices of the "
     "contracts we hold, the engine's figures (an option's is its underlying future's). The bars under them are "
     "our net lots per contract month (futures and LME prompts), long green, short red; where options or "
     "averaging contracts are held the delta lots per month stand beside them, outlined. Nothing is computed "
@@ -670,7 +694,7 @@ def curve_figure(payload: Dict[str, Any], research: Dict[str, Any]):
             mode="lines+markers", name=f"{RESEARCH_TRACE} ({research.get('date') or 'no date'})",
             line={"color": _MUTED, "width": 1.2}, marker={"size": 3, "color": _MUTED},
             customdata=[[r.get("contract_id") or "", r.get("expiry") or NA, r.get("settle")] for r in points],
-            hovertemplate=("%{customdata[0]} (research)<br>%{x|%b %Y}: %{y:,.6g}"
+            hovertemplate=("%{customdata[0]} (context: research app)<br>%{x|%b %Y}: %{y:,.6g}"
                            + (f"<br>= %{{customdata[2]:,.6g}} {unit}" if unit else "")
                            + "<br>last trade %{customdata[1]}<extra></extra>")), row=1, col=1)
     marks = payload.get("marks") or []
@@ -718,10 +742,10 @@ def curve_notes(payload: Dict[str, Any], research: Dict[str, Any]) -> List[str]:
     lots. Each is a sentence from its source."""
     notes: List[str] = []
     if not research_points(research):
-        notes.append(f"No research curve: {research.get('reason') or 'the research app has no settlements for it'}. "
+        notes.append(f"No context curve: {research.get('reason') or 'the research app has no settlements for it'}. "
                      "Our official marks and positions only.")
     elif research.get("note"):
-        notes.append(f"Research curve: {research['note']}.")
+        notes.append(f"Context curve (research app): {research['note']}.")
     ours, theirs = payload.get("price_scale"), research.get("price_scale")
     if research_points(research) and ours is not None and theirs is not None and float(ours) != float(theirs):
         notes.append(f"The research app's price scale ({float(theirs):g}) differs from contract-master's "
@@ -788,7 +812,7 @@ def show_curve(root_id: Optional[str], store: Optional[dict]) -> Tuple[Any, Any]
 
 # --------------------------------------------------------------------------- 3. sectors
 SECTOR_ABOUT = ("Net = the sector's contracts' USD notionals summed with their signs (a calendar spread nets to its "
-                "leftover outright); gross = their absolute values summed; both over futures and LME prompts. The "
+                "unmatched legs); gross = their absolute values summed; both over futures and LME prompts. The "
                 "delta columns are the same over every product, an option at its delta and an averaging contract "
                 "at its reduced delta. The Book line adds the sectors up; any sector n/a makes it n/a. USD in "
                 "k / m; the full figure on hover.")
@@ -1107,10 +1131,183 @@ def flat_section(result: Dict[str, Any]) -> html.Details:
         html.Summary(f"Flat contracts ({len(flat)}): open, netting to zero lots"), inner])
 
 
+# --------------------------------------------------------------------------- 6. option Greeks
+GREEKS_TABLE_ID = "curve-greeks-table"
+GREEK_MARK_TYPES = (("gamma", "GAMMA"), ("theta", "THETA"), ("vega", "VEGA"))
+GREEKS_ABOUT = (
+    "The open options on futures, one line per underlying commodity with each option under it. One "
+    "convention throughout, scaled to the position: Delta is curve-positions' delta lots (the option's "
+    "official DELTA per lot x its lots, in futures-equivalent lots); Gamma, Theta and Vega are the option's "
+    "official per-lot marks on file for the day (QL_OPTIONS_PRICER, from the vol its Bloomberg price implies) "
+    "x its lots, in the contract's currency, so a commodity's line adds up figures of one unit only. A Greek "
+    "with no mark is n/a with the reason, never zero. Futures and LME prompts carry no gamma, theta or vega, so "
+    "the book's are these sums. The per-lot figures are on hover of each option's cells.")
+GREEK_LABELS = {"delta_lots": "Delta (lots)", "gamma": "Gamma", "theta": "Theta", "vega": "Vega"}
+GREEK_COLS = ("delta_lots", "gamma", "theta", "vega")
+
+
+def _option_greek_marks(conn: sqlite3.Connection, as_of: str, instruments: List[str]) -> Dict[Tuple[str, str], float]:
+    """{(instrument, mark type): value}: the official GAMMA / THETA / VEGA marks of `instruments`
+    on `as_of`, read as they are (keyed on the instrument alone: an option's own mark is the same
+    whatever expiry date it is keyed on)."""
+    if not instruments:
+        return {}
+    placeholders = ",".join("?" * len(instruments))
+    rows = conn.execute(
+        f"SELECT instrument_id, mark_type, value FROM marks_official WHERE as_of_date = ? "
+        f"AND mark_type IN ('GAMMA','THETA','VEGA') AND instrument_id IN ({placeholders})",
+        (as_of, *instruments)).fetchall()
+    return {(str(i), str(mt)): float(v) for i, mt, v in rows if v is not None}
+
+
+def greeks_records(result: Dict[str, Any], marks: Dict[Tuple[str, str], float]) -> Tuple[List[dict], List[dict]]:
+    """(records, tooltips): one line per underlying commodity (kind 'commodity', the options'
+    figures summed over the ones that have them, n/a when any has none, "excl. N" in the note)
+    and one per option under it (kind 'option'). Position figures: delta lots as curve-positions
+    gives them; gamma / theta / vega = the per-lot mark x the option's lots (display arithmetic
+    on two figures on file, the convention the section says on hover). None (printed n/a) with
+    the reason when the lots or the mark are missing."""
+    options = [r for r in (result.get("rows") or []) if _product(r) == OPTION]
+    by_root: Dict[str, List[dict]] = {}
+    for r in options:
+        by_root.setdefault(str(r.get("root_id") or ""), []).append(r)
+    records, tips = [], []
+    for root_id, rows in by_root.items():
+        first = rows[0]
+        ccy = first.get("currency") or ""
+        sums: Dict[str, Optional[float]] = {k: 0.0 for k in GREEK_COLS}
+        left: Dict[str, List[str]] = {k: [] for k in GREEK_COLS}
+        option_records = []
+        for r in rows:
+            cid = r.get("contract_id") or ""
+            lots = _num(r.get("lots"))
+            rec: Dict[str, Any] = {"kind": "option", "label": "    " + cid, "commodity": r.get("name") or root_id,
+                                   "underlying": r.get("underlying_id") or "", "expiry": r.get("expiry") or "",
+                                   "lots": lots, "currency": ccy, "note": ""}
+            tip: Dict[str, dict] = {}
+            dl = _num(r.get("delta_lots"))
+            rec["delta_lots"] = dl
+            if dl is None:
+                tip["delta_lots"] = _tip(r.get("reason") or "no DELTA mark")
+                left["delta_lots"].append(cid)
+                sums["delta_lots"] = None
+            else:
+                factor = _num(r.get("delta_factor"))
+                tip["delta_lots"] = _tip(f"{lots:g} lot(s) x DELTA {factor:.4g} per lot (futures-equivalent lots)"
+                                         if lots is not None and factor is not None else "curve-positions' delta lots")
+                if sums["delta_lots"] is not None:
+                    sums["delta_lots"] += dl
+            for col, mt in GREEK_MARK_TYPES:
+                per_lot = marks.get((cid, mt))
+                if per_lot is None or lots is None:
+                    rec[col] = None
+                    tip[col] = _tip(f"no {mt} mark on file for {cid} on this date: the option has not been priced"
+                                    if lots is not None else (r.get("reason") or "no lots"))
+                    left[col].append(cid)
+                    sums[col] = None
+                else:
+                    rec[col] = per_lot * lots
+                    tip[col] = _tip(f"{mt} {per_lot:,.6g} per lot x {lots:g} lot(s), in {ccy or 'the contract currency'}")
+                    if sums[col] is not None:
+                        sums[col] += rec[col]
+            if r.get("reason"):
+                tip["label"] = _tip(r["reason"])
+            option_records.append((rec, tip))
+        head: Dict[str, Any] = {"kind": "commodity", "label": f"{first.get('name') or root_id}",
+                                "commodity": first.get("name") or root_id, "underlying": "", "expiry": "",
+                                "lots": None, "currency": ccy}
+        head_tip: Dict[str, dict] = {"lots": _tip("lots are per option; a commodity's line sums the Greeks")}
+        for col in GREEK_COLS:
+            head[col] = sums[col]
+            if sums[col] is None:
+                head_tip[col] = _tip(f"n/a: no figure for {', '.join(left[col])}")
+        missing = sorted({cid for col in GREEK_COLS for cid in left[col]})
+        head["note"] = f"excl. {len(missing)}" if missing else ""
+        if missing:
+            head_tip["note"] = _tip(f"{len(missing)} option(s) with a Greek missing: {', '.join(missing)}")
+        records.append(head)
+        tips.append(head_tip)
+        for rec, tip in option_records:
+            records.append(rec)
+            tips.append(tip)
+    return records, tips
+
+
+def greeks_section(result: Dict[str, Any], marks: Dict[Tuple[str, str], float]) -> html.Div:
+    """The "Option Greeks" section (module docstring, item 6); one quiet line when the book
+    holds no open option on a future."""
+    records, tips = greeks_records(result, marks)
+    heading = about("Option Greeks", GREEKS_ABOUT)
+    if not records:
+        return html.Div(className="section", children=[
+            heading, html.P("No open option on a future: the book carries no gamma, theta or vega.",
+                            className="section-kicker")])
+    numeric = ["lots", *GREEK_COLS]
+    table = dash_table.DataTable(
+        id=GREEKS_TABLE_ID,
+        columns=[rk.text("Commodity / option", "label"), rk.text("Underlying", "underlying"),
+                 rk.text("Expiry", "expiry"), rk.numeric("Lots", "lots", rk.amount(2, nully="", trim=True)),
+                 rk.numeric(GREEK_LABELS["delta_lots"], "delta_lots", rk.amount(4, nully="n/a", trim=True)),
+                 rk.numeric(GREEK_LABELS["gamma"], "gamma", rk.amount(4, nully="n/a", trim=True)),
+                 rk.numeric(GREEK_LABELS["theta"], "theta", rk.amount(2, nully="n/a", trim=True)),
+                 rk.numeric(GREEK_LABELS["vega"], "vega", rk.amount(2, nully="n/a", trim=True)),
+                 rk.text("Ccy", "currency"), rk.text("", "note")],
+        data=records, tooltip_data=tips, tooltip_delay=0, tooltip_duration=None,
+        tooltip_header={"delta_lots": "Futures-equivalent lots: lots x the option's official DELTA per lot.",
+                        "gamma": "Per-lot GAMMA mark x lots, in the contract's currency.",
+                        "theta": "Per-lot THETA mark x lots, in the contract's currency (per day).",
+                        "vega": "Per-lot VEGA mark x lots, in the contract's currency (per vol point)."},
+        **rk.sortable(GREEKS_TABLE_ID),
+        style_table={"overflowX": "auto"},
+        style_cell=_MONO,
+        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"}
+                                for c in ("label", "underlying", "expiry", "currency", "note")]
+                               + [{"if": {"column_id": "note"}, "color": "var(--muted)"}],
+        style_header={"fontWeight": "bold", "whiteSpace": "normal", "height": "auto"},
+        style_data_conditional=[{"if": {"filter_query": "{kind} = 'commodity'"}, "fontWeight": "700",
+                                 "backgroundColor": "#e8edf7"}]
+                               + rk.sign_styles(list(numeric))
+                               + [{"if": {"column_id": c, "filter_query": f"{{{c}}} is blank"}, **_NA_STYLE} for c in numeric],
+    )
+    return html.Div(className="section", children=[heading, table])
+
+
+# --------------------------------------------------------------------------- 7. currency and FX exposure
+FX_EXPOSURE_ID = "curve-fx-exposure"
+FX_EXPOSURE_TITLE = "Currency and FX exposure"
+
+
+def fx_exposure_section(conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """The FX delta by currency, book-positions' figures rendered by the Trades tab's former
+    Positions table (`ui.tabs.blotter.fx_positions_table`, imported, not copied)."""
+    from ui.tabs.blotter import fx_positions_table   # local: the Trades tab's module is heavy
+    return html.Div(id=FX_EXPOSURE_ID, className="section", children=[
+        fx_positions_table(conn, as_of, level="h4", title=FX_EXPOSURE_TITLE)])
+
+
+def _safe(build: Callable[[], Any], label: str) -> Any:
+    """A section, or its failure as one line with the reason, so one section never blanks the tab."""
+    try:
+        return build()
+    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
+        return html.Div(className="section", children=[
+            about(label, None), marker("n/a", f"{label} could not be built ({type(exc).__name__}: {exc})")])
+
+
+def extra_sections(conn: sqlite3.Connection, as_of: str, result: Dict[str, Any]) -> List[Any]:
+    """The option Greeks and the FX exposure, each built while the connection is open."""
+    option_ids = [r["contract_id"] for r in (result.get("rows") or []) if _product(r) == OPTION and r.get("contract_id")]
+    return [_safe(lambda: greeks_section(result, _option_greek_marks(conn, as_of, option_ids)), "Option Greeks"),
+            _safe(lambda: fx_exposure_section(conn, as_of), FX_EXPOSURE_TITLE)]
+
+
 # --------------------------------------------------------------------------- body and shell
-def body(result: Dict[str, Any], unit: str = DEFAULT_UNIT, selected: Optional[str] = None) -> html.Div:
+def body(result: Dict[str, Any], unit: str = DEFAULT_UNIT, selected: Optional[str] = None,
+         extra: Optional[List[Any]] = None) -> html.Div:
     """The whole tab body from one `curve_positions` result, month cells in `unit`, the curve
-    panel on `selected` (the kept pick) or the default commodity."""
+    panel on `selected` (the kept pick) or the default commodity; `extra` (the option Greeks
+    and the FX exposure, `extra_sections`, built by `render` while the connection is open)
+    sits before the flat contracts."""
     children: List[Any] = [caption_block(result)]
     if result.get("by_commodity"):
         children += [grid_section(result, unit), curve_section(result, selected), sector_section(result),
@@ -1118,7 +1315,7 @@ def body(result: Dict[str, Any], unit: str = DEFAULT_UNIT, selected: Optional[st
     else:
         children.append(message_box(
             f"No commodity position to show: {result.get('note') or 'see the gaps above'}."))
-    children += [currency_section(result), flat_section(result)]
+    children += [currency_section(result), *(extra or []), flat_section(result)]
     return html.Div(className="curve-body", children=children)
 
 
@@ -1135,16 +1332,20 @@ def render(as_of: Optional[str], db_path, unit: str = DEFAULT_UNIT, selected: Op
         return message_box(f"Database not available ({exc}).")
     try:
         result = curve_positions(conn, as_of)
+        extra = extra_sections(conn, as_of, result)
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
         return html.Div(className="status-panel status-panel--down", children=[
             html.P(f"Curve positions could not be computed for {as_of} ({type(exc).__name__}: {exc}).",
                    className="status-line status-line--bad")])
     finally:
         conn.close()
-    return body(result, unit, selected)
+    return body(result, unit, selected, extra)
 
 
-AS_OF_HOVER = ("The tab follows the header's as-of date (the Blotter's and the FX & cash tab's date pickers "
+TAB_ABOUT = ("What am I long or short, in which month? The commodity positions by contract month (delta lots "
+             "by default), one commodity's curve with its positions, the net outright by sector, every open "
+             "contract, the currency exposure of non-USD futures, the option Greeks and the FX delta by currency.")
+AS_OF_HOVER = ("The tab follows the header's as-of date (the Trades and FX & cash tabs' date pickers "
                "set it); it has no date picker of its own. The date the figures are for is under the view switch.")
 
 
@@ -1153,12 +1354,13 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     fills. No date picker: the tab follows the header's as-of store."""
     return html.Div(className="curve-tab", children=[
         html.Div(className="ladder-title-row", children=[
-            html.H3("Curve", className="ladder-title-row-heading"),
+            about("Exposure", TAB_ABOUT, level="h3", className="ladder-title-row-heading"),
             html.Div(className="ladder-title-row-right", children=[
                 marker(f"header's as-of{f' {default_date}' if default_date else ''}", AS_OF_HOVER)])]),
         html.Div(className="meta-line", children=[
-            html.Span("Month cells in: "),
-            dcc.RadioItems(id=UNIT_ID, options=[{"label": UNIT_LABELS[u], "value": u} for u in UNITS],
+            html.Span("Show: ", title="What each month cell of the grid holds."),
+            dcc.RadioItems(id=UNIT_ID,
+                           options=[{"label": html.Span(UNIT_LABELS[u], title=UNIT_TIPS[u]), "value": u} for u in UNITS],
                            value=DEFAULT_UNIT, inline=True, persistence=True, persistence_type="session",
                            inputStyle={"marginRight": "4px", "marginLeft": "10px"})]),
         html.Div(id=BODY_ID, children=[message_box("Loading the curve positions...")]),

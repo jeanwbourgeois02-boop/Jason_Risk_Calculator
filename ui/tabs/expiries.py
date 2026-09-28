@@ -1,10 +1,22 @@
-"""Expiries tab: "What is about to expire or go to delivery?" (Commodity conversion plan,
-Phase 1 step 3; rebuilt under the Screens redesign plan, Phase A, 2026-09-25). Rendered from
-`engine.expiry.expiry_schedule` and nothing else: every date, business-day count, level and
-reason on the tab is that dict's; nothing here computes a date, a count or a level (CLAUDE.md
-"Tabs as views").
+"""Timing & cash tab (the Expiries tab until 2026-09-28): "What happens when?" (Commodity
+conversion plan, Phase 1 step 3; rebuilt under the Screens redesign plan, Phase A, 2026-09-25;
+the timeline and the cash section added in the UI redesign wave 2, user 2026-09-28). The roll
+calendar is rendered from `engine.expiry.expiry_schedule` and nothing else: every date,
+business-day count, level and reason there is that dict's; nothing here computes a date, a
+count or a level (CLAUDE.md "Tabs as views"). The cash section reads the FX & cash tab's own
+sources as they are: the open cash legs and the settled cash of
+`engine.ladder.exposure_adapter` (`records_from_db`, `settled_records_from_db`) and the
+initial-margin estimate of `engine.limits.margin_estimate`.
 
 Layout, top to bottom (`body`):
+  0. `timeline_section` (wave 2): the next 60 business days on the app's calendar
+     (`engine.pnl.calendar`, config/holidays.txt) on one horizontal axis, one row per event
+     kind (first notice, last trade, option expiry, LME prompt, FX value date), one marker per
+     event: the roll calendar's events coloured by their level (EXPIRED / RED / AMBER / GREEN),
+     an estimated date as a hollow marker; the cash events (an LME ticket's USD leg on its
+     prompt, an FX leg on its value date) in navy, with the lots or the amount at stake on
+     hover. Events past the as-of or beyond the window are counted in a line under the chart,
+     never dropped silently. A Plotly figure, nothing computed: every x is a date on file.
   1. `counts_strip`: one compact row of level chips (`counts`, worst first: EXPIRED and RED
      strong, AMBER warm, GREEN quiet), each with its threshold on hover, and the as-of.
   2. `schedule_section`: the "Roll calendar" title, its definitions on hover (`about`, with the
@@ -20,9 +32,17 @@ Layout, top to bottom (`body`):
      full, in a collapsed "Expired and settled (N)" section (contract, name, lots, last trade,
      frozen at, reason). They never alert: no level colour, never in the counts. Absent when
      the list is empty.
-  4. `issues_section`: the tab's collapsed "Data issues (N)" drawer: counts the engine could
-     not make, estimated dates, counts past a calendar file's coverage, delivery not on file.
-     Absent when there is nothing to say.
+  4. `cash_section` (wave 2): settled cash to date by currency (`settled_records_from_db`, the
+     FX & cash tab's Settled cash row: deliverable legs past their value date at face value, a
+     settled future's or option's USD settlement from `realised_pnl`; one the ledger has not
+     frozen is named, never valued), the dated cash events (`records_from_db` without the
+     settled row: date, currency, amount, what it is), and one line for the initial-margin
+     estimate (`engine.limits.margin_estimate`'s book figure, "estimate, not exchange SPAN").
+     The full currency-by-date ladder stays on FX & cash (a tab link says so).
+  5. `issues_section`: the tab's collapsed "Data issues (N)" drawer: counts the engine could
+     not make, estimated dates, counts past a calendar file's coverage, delivery not on file,
+     a settled ticket with no realised row, a cash leg the ladder left out. Absent when there
+     is nothing to say.
 
 Options on futures (CMDTY_OPTION) and LME prompts (LME_FWD) are rows like any future: an
 option's type, strike and its underlying future's event are on hover of its Next event cell;
@@ -56,7 +76,7 @@ from engine.expiry.levels import AMBER, EXPIRED, GREEN, LEVELS, RED
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import about, issues_drawer
+from ui.tabs.formatting import about, format_cell, issues_drawer, marker, short_money, tab_link
 from ui.tabs.header import AS_OF_STORE_ID
 
 BODY_ID = "expiries-body"
@@ -66,6 +86,12 @@ TABLE_ID = "expiries-table"
 SETTLED_ID = "expiries-settled"
 SETTLED_TABLE_ID = "expiries-settled-table"
 ISSUES_ID = "expiries-issues"
+TIMELINE_ID = "expiries-timeline"
+TIMELINE_GRAPH_ID = "expiries-timeline-graph"
+CASH_ID = "expiries-cash"
+SETTLED_CASH_TABLE_ID = "expiries-settled-cash-table"
+CASH_EVENTS_TABLE_ID = "expiries-cash-events-table"
+TIMELINE_DAYS = 60             # business days shown, on the app's calendar
 
 NA = "n/a"
 EST = " (est.)"
@@ -509,20 +535,316 @@ def issues_section(result: Dict[str, Any]):
     return issues_drawer(issues(result), id=ISSUES_ID)
 
 
+# --------------------------------------------------------------------------- 0. the timeline
+EVENT_KINDS = ("first notice", "last trade", "option expiry", "LME prompt", "FX value date")
+EVENT_ROW_LABELS = {"first notice": "First notice", "last trade": "Last trade", "option expiry": "Option expiry",
+                    "LME prompt": "LME prompt (cash)", "FX value date": "FX value date"}
+_LEVEL_COLOURS = {EXPIRED: "#7f1d1d", RED: "#c62828", AMBER: "#e0a040", GREEN: "#52705a"}
+_CASH_COLOUR = "#0f1f3d"
+TIMELINE_ABOUT = (
+    f"The next {TIMELINE_DAYS} business days on the app's calendar (config/holidays.txt), one row per kind of "
+    "event. The roll calendar's events (first notice, last trade, option expiry, an LME prompt's cash date) "
+    "are coloured by their level (EXPIRED dark red, RED, AMBER, GREEN); a hollow marker is a date "
+    "contract-master estimated, not Bloomberg's. The cash events (an LME ticket's USD leg on its prompt, an "
+    "FX leg on its value date) are navy, from the FX & cash tab's own legs. Hover a marker for the contract, "
+    "the lots or the amount. Events past the as-of or beyond the window are counted under the chart. Nothing "
+    "is computed: every date is one on file.")
+
+
+def business_days_ahead(as_of: str, n: int = TIMELINE_DAYS) -> List[dt.date]:
+    """`as_of` and the next `n` business days on the app's calendar (`engine.pnl.calendar`)."""
+    from engine.pnl.calendar import _is_business_day, load_holidays
+    holidays = load_holidays()
+    d = dt.date.fromisoformat(as_of)
+    days = [d]
+    while len(days) < n + 1:
+        d += dt.timedelta(days=1)
+        if _is_business_day(d, holidays):
+            days.append(d)
+    return days
+
+
+def schedule_events(result: Dict[str, Any]) -> List[dict]:
+    """The roll calendar's rows as timeline events: kind (the engine's `next_event`), date,
+    level, estimated, label, hover. A row with no event date is left out here and is in the
+    Data issues drawer (its count could not be made either)."""
+    events = []
+    for r in result.get("rows") or []:
+        date = r.get("next_event_date")
+        if not date:
+            continue
+        lots = r.get("lots")
+        stake = (f"{_number(r.get('tonnes'))} t" if r.get("product") == "LME_FWD" and r.get("tonnes") is not None
+                 else f"{_number(lots)} lots" if lots is not None else "lots n/a")
+        alert = r.get("alert_date")
+        held = f"; alert {alert} ({r.get('alert_basis')})" if alert and alert != date else ""
+        events.append({"kind": r.get("next_event") or "last trade", "date": date, "level": r.get("level") or GREEN,
+                       "estimated": bool(r.get("estimated")), "label": r.get("contract_id") or "",
+                       "hover": f"{r.get('contract_id') or ''} ({r.get('name') or ''}): {r.get('next_event')} {date}"
+                                f"{EST if r.get('estimated') else ''}, {stake}, {r.get('level')}{held}"})
+    return events
+
+
+def cash_events(records: List[dict]) -> List[dict]:
+    """The open cash legs (`records_from_db` without the settled row) as timeline events: an
+    LME ticket's USD leg on its prompt, an FX leg on its value date, with the amount."""
+    events = []
+    for rec in records:
+        date = str(rec.get("settlement_date") or "")
+        if not date or date == "settled" or not rec.get("settles_cash", 1):
+            continue
+        product = str(rec.get("product_type") or "")
+        kind = "LME prompt" if product == "LME_FWD" else "FX value date"
+        amount = float(rec.get("local_amount") or 0.0)
+        ccy = str(rec.get("currency") or "")
+        events.append({"kind": kind, "date": date, "level": None, "estimated": False,
+                       "label": f"{rec.get('trade_id')} {ccy}", "currency": ccy, "amount": amount,
+                       "trade_id": str(rec.get("trade_id") or ""), "product": product,
+                       "pair": str(rec.get("currency_pair") or ""),
+                       "hover": f"{rec.get('trade_id')} {rec.get('currency_pair') or ''}: {kind} {date}, "
+                                f"{'receive' if amount >= 0 else 'pay'} {ccy} {format_cell(abs(amount))}"})
+    return events
+
+
+def timeline_figure(as_of: str, events: List[dict], days: List[dt.date]):
+    """One figure: the event kinds as rows, the window's business days across, one marker per
+    event, the level as colour, an estimate hollow, cash in navy; events outside the window
+    are not drawn (`timeline_notes` counts them)."""
+    import plotly.graph_objects as go
+    start, end = days[0], days[-1]
+    fig = go.Figure()
+    rows_present = [k for k in EVENT_KINDS if any(e["kind"] == k for e in events)] or list(EVENT_KINDS[:1])
+    for kind in rows_present:
+        mine = [e for e in events if e["kind"] == kind and start <= dt.date.fromisoformat(e["date"]) <= end]
+        if not mine:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[e["date"] for e in mine], y=[EVENT_ROW_LABELS[kind]] * len(mine), mode="markers", name=EVENT_ROW_LABELS[kind],
+            marker={"size": 13, "line": {"width": 2, "color": [_LEVEL_COLOURS.get(e["level"], _CASH_COLOUR) for e in mine]},
+                    "color": ["rgba(255,255,255,1)" if e["estimated"] else _LEVEL_COLOURS.get(e["level"], _CASH_COLOUR)
+                              for e in mine],
+                    "symbol": ["diamond" if e["level"] is None else "circle" for e in mine]},
+            text=[e["hover"] for e in mine], hovertemplate="%{text}<extra></extra>", showlegend=False))
+    fig.add_vline(x=as_of, line={"color": "#c9a227", "width": 1.5, "dash": "dot"})
+    fig.update_layout(
+        height=60 + 34 * max(len(rows_present), 2), margin={"l": 8, "r": 16, "t": 8, "b": 28},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font={"size": 11.5, "color": "#1b2333"},
+        hovermode="closest")
+    fig.update_xaxes(type="date", range=[(start - dt.timedelta(days=1)).isoformat(), (end + dt.timedelta(days=1)).isoformat()],
+                     tickformat="%d %b", showgrid=True, gridcolor="#eef0f4", fixedrange=True,
+                     tickfont={"size": 10.5, "color": "#6b7280"})
+    fig.update_yaxes(type="category", categoryorder="array",
+                     categoryarray=[EVENT_ROW_LABELS[k] for k in reversed(rows_present)], fixedrange=True,
+                     showgrid=True, gridcolor="#eef0f4", tickfont={"size": 11})
+    return fig
+
+
+def timeline_notes(as_of: str, events: List[dict], days: List[dt.date]) -> List[str]:
+    """What the chart does not show: events past the as-of (with their level) and beyond the window."""
+    start, end = days[0], days[-1]
+    past = [e for e in events if dt.date.fromisoformat(e["date"]) < start]
+    beyond = [e for e in events if dt.date.fromisoformat(e["date"]) > end]
+    notes = []
+    if past:
+        notes.append(f"{len(past)} event(s) before {as_of}, not drawn: "
+                     + "; ".join(f"{e['label']} {e['kind']} {e['date']}" + (f" ({e['level']})" if e.get("level") else "")
+                                 for e in past[:8]) + (f"; and {len(past) - 8} more" if len(past) > 8 else "") + ".")
+    if beyond:
+        notes.append(f"{len(beyond)} event(s) beyond {end.isoformat()} ({TIMELINE_DAYS} business days), not drawn: "
+                     + "; ".join(f"{e['label']} {e['kind']} {e['date']}" for e in beyond[:8])
+                     + (f"; and {len(beyond) - 8} more" if len(beyond) > 8 else "") + ".")
+    if not events:
+        notes.append("No expiry, prompt or value date on file for the open positions.")
+    return notes
+
+
+def timeline_section(as_of: str, result: Dict[str, Any], cash_records: List[dict]) -> html.Div:
+    days = business_days_ahead(as_of)
+    events = schedule_events(result) + cash_events(cash_records)
+    return html.Div(id=TIMELINE_ID, className="section", children=[
+        about(f"Next {TIMELINE_DAYS} business days", TIMELINE_ABOUT),
+        dcc.Graph(id=TIMELINE_GRAPH_ID, figure=timeline_figure(as_of, events, days), config={"displayModeBar": False}),
+        *[html.P(line, className="section-kicker") for line in timeline_notes(as_of, events, days)]])
+
+
+# --------------------------------------------------------------------------- 4. cash
+CASH_ABOUT = (
+    "Settled cash to date by currency: the FX & cash tab's own Settled cash row (engine.ladder.exposure_adapter): "
+    "deliverable FX legs past their value date at face value in their own currency, an LME ticket's USD leg "
+    "after its prompt, and a settled future's or option's USD settlement as the ledger froze it in "
+    "realised_pnl, never recomputed; a settled ticket the ledger has not frozen is named, not valued. This is "
+    "cash from the tickets on file, not a bank balance. Then the dated cash events still to come, and the "
+    "initial-margin estimate. The full currency-by-date ladder is on FX & cash.")
+MARGIN_ABOUT = ("The book's estimated initial margin (engine/limits, config/limits.yaml's placeholder rates with "
+                "spread credits): an estimate, not exchange SPAN, never the exchange's or the clearer's figure.")
+
+
+def settled_cash_records(records: List[dict], unresolved: List[Any]) -> Tuple[List[dict], List[dict]]:
+    """(records, tooltips): the settled cash summed per currency (known figures added up, the
+    tickets on hover), USD first then by |amount|; a ticket the ledger has not frozen is not in
+    any figure and is named on the drawer (`cash_issue_items`)."""
+    by_ccy: Dict[str, List[dict]] = {}
+    for rec in records:
+        by_ccy.setdefault(str(rec.get("currency") or ""), []).append(rec)
+    out, tips = [], []
+    for ccy, mine in by_ccy.items():
+        total = float(sum(float(r.get("local_amount") or 0.0) for r in mine))
+        lines = [f"{r.get('trade_id')} {r.get('currency_pair') or ''} settled {r.get('settled_on') or ''}: "
+                 f"{format_cell(float(r.get('local_amount') or 0.0))}" for r in mine]
+        out.append({"currency": ccy, "amount": total, "tickets": len(mine)})
+        tips.append({"amount": {"value": f"{format_cell(total)} {ccy}; " + "; ".join(lines[:12])
+                                         + (f"; and {len(lines) - 12} more" if len(lines) > 12 else ""), "type": "text"}})
+    order = sorted(range(len(out)), key=lambda i: (out[i]["currency"] != "USD", -abs(out[i]["amount"])))
+    return [out[i] for i in order], [tips[i] for i in order]
+
+
+def cash_event_records(events: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """The dated cash events (`cash_events`) as table rows, soonest first."""
+    rows = sorted(events, key=lambda e: (e["date"], e["currency"]))
+    records = [{"date": e["date"], "currency": e["currency"], "amount": e["amount"], "what": e["kind"],
+                "trade_id": e["trade_id"], "pair": e["pair"]} for e in rows]
+    tips = [{"amount": {"value": e["hover"], "type": "text"}} for e in rows]
+    return records, tips
+
+
+def margin_line(margin: Optional[Dict[str, Any]], error: str = "") -> html.Div:
+    """One line: the book's estimated initial margin in k / m with its basis on hover, or n/a
+    with the reason."""
+    if error:
+        return html.Div(className="meta-line", children=[html.Span("Initial margin (estimate): "), marker(NA, error)])
+    book = (margin or {}).get("book") or {}
+    value = book.get("margin_usd")
+    if not (margin or {}).get("available") or value is None:
+        why = "; ".join((margin or {}).get("reasons") or []) or book.get("reason") or "no margin figure"
+        return html.Div(className="meta-line", children=[html.Span("Initial margin (estimate): "), marker(NA, why)])
+    hover = (f"{format_cell(value)} USD = gross charge {format_cell(book.get('gross_charge_usd') or 0)} less spread "
+             f"credits {format_cell(book.get('spread_credit_usd') or 0)}; {book.get('basis') or MARGIN_ABOUT}")
+    parts = [html.Span("Initial margin (estimate, not exchange SPAN): ", title=MARGIN_ABOUT),
+             html.Span(short_money(value, "$"), title=hover, style={"fontWeight": 700})]
+    if book.get("caption"):
+        parts.append(marker(f"excl. {book.get('excluded_count') or ''}".strip(), f"{book['caption']}: {book.get('reason') or ''}"))
+    return html.Div(className="meta-line", children=parts)
+
+
+def cash_section(settled: List[dict], settled_unresolved: List[Any], cash_records: List[dict],
+                 margin: Optional[Dict[str, Any]], margin_error: str = "") -> html.Div:
+    heading = about("Cash", CASH_ABOUT)
+    children: List[Any] = [heading]
+    records, tips = settled_cash_records(settled, settled_unresolved)
+    if records:
+        children.append(html.H5("Settled cash to date", className="about-title", title=CASH_ABOUT))
+        children.append(dash_table.DataTable(
+            id=SETTLED_CASH_TABLE_ID,
+            columns=[rk.text("Currency", "currency"), rk.numeric("Amount", "amount", rk.amount(nully=NA)),
+                     rk.numeric("Tickets", "tickets", rk.count())],
+            data=records, tooltip_data=tips, tooltip_delay=0, tooltip_duration=None,
+            **rk.sortable(SETTLED_CASH_TABLE_ID),
+            style_table={"overflowX": "auto", "maxWidth": "520px"}, style_cell=_CELL,
+            style_cell_conditional=[{"if": {"column_id": "currency"}, "textAlign": "left"}],
+            style_header={"fontWeight": "bold"},
+            style_data_conditional=rk.sign_styles(["amount"], bold=True)))
+    else:
+        children.append(html.P("No settled cash yet from the tickets on file.", className="section-kicker"))
+    if settled_unresolved:
+        children.append(html.P(f"{len(settled_unresolved)} settled ticket(s) not in the figures: "
+                               + "; ".join(f"{u.trade_id} {u.symbol}: {u.reason}" for u in settled_unresolved[:4])
+                               + (f"; and {len(settled_unresolved) - 4} more" if len(settled_unresolved) > 4 else ""),
+                               className="section-kicker"))
+    events = cash_events(cash_records)
+    ev_records, ev_tips = cash_event_records(events)
+    if ev_records:
+        children.append(html.H5("Cash to come", className="about-title",
+                                title="Each open cash leg on its own date: an LME ticket's USD leg on its prompt, an FX "
+                                      "leg on its value date (+ = receive). Soonest first."))
+        children.append(dash_table.DataTable(
+            id=CASH_EVENTS_TABLE_ID,
+            columns=[rk.text("Date", "date"), rk.text("Currency", "currency"),
+                     rk.numeric("Amount", "amount", rk.amount(nully=NA)), rk.text("What", "what"),
+                     rk.text("Trade", "trade_id"), rk.text("Pair / metal", "pair")],
+            data=ev_records, tooltip_data=ev_tips, tooltip_delay=0, tooltip_duration=None,
+            **rk.sortable(CASH_EVENTS_TABLE_ID),
+            page_action="native", page_size=15,
+            style_table={"overflowX": "auto", "maxWidth": "900px"}, style_cell=_CELL,
+            style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"}
+                                    for c in ("date", "currency", "what", "trade_id", "pair")],
+            style_header={"fontWeight": "bold"},
+            style_data_conditional=rk.sign_styles(["amount"])))
+    else:
+        children.append(html.P("No cash leg still to settle on the tickets on file.", className="section-kicker"))
+    children.append(margin_line(margin, margin_error))
+    children.append(html.Div(className="meta-line", children=[
+        html.Span("The full currency-by-date ladder, the USD equivalents and the FX stress are on "),
+        tab_link("FX & cash", "ladder", "expiries-cash-ladder"), html.Span(".")]))
+    return html.Div(id=CASH_ID, className="section", children=children)
+
+
+def cash_issue_items(settled_unresolved: List[Any], cash_unresolved: List[Any]) -> List[Any]:
+    """The drawer's cash lines: a settled ticket with no realised row, a leg the ladder left out."""
+    out: List[Any] = []
+    for u in settled_unresolved:
+        out.append((getattr(u, "trade_id", ""), f"{getattr(u, 'symbol', '')}: {getattr(u, 'reason', '')}"))
+    for u in cash_unresolved:
+        reason = str(getattr(u, "reason", ""))
+        if "non-FX product" in reason:
+            continue   # a future: it has no cash leg, and it is on the roll calendar above
+        out.append((getattr(u, "trade_id", ""), f"{getattr(u, 'symbol', '')}: {reason}"))
+    return out
+
+
 # --------------------------------------------------------------------------- body and shell
-def body(result: Dict[str, Any]) -> html.Div:
-    """The whole tab body from one `expiry_schedule` result."""
-    parts = [counts_strip(result), schedule_section(result)]
-    for extra in (settled_section(result), issues_section(result)):
-        if extra is not None:
-            parts.append(extra)
+def _safe(build: Callable[[], Any], label: str) -> Any:
+    """A section, or its failure as one line with the reason, so one section never blanks the tab."""
+    try:
+        return build()
+    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
+        return html.Div(className="section", children=[
+            about(label, None), marker(NA, f"{label} could not be built ({type(exc).__name__}: {exc})")])
+
+
+def body(result: Dict[str, Any], cash: Optional[Dict[str, Any]] = None) -> html.Div:
+    """The whole tab body from one `expiry_schedule` result and the cash reads (`cash_inputs`;
+    None renders the roll calendar alone, the old shape)."""
+    cash = cash or {}
+    as_of = result.get("as_of") or ""
+    parts: List[Any] = []
+    if cash:
+        parts.append(_safe(lambda: timeline_section(as_of, result, cash.get("records") or []), "Timeline"))
+    parts += [counts_strip(result), schedule_section(result)]
+    settled = settled_section(result)
+    if settled is not None:
+        parts.append(settled)
+    if cash:
+        parts.append(_safe(lambda: cash_section(cash.get("settled") or [], cash.get("settled_unresolved") or [],
+                                                cash.get("records") or [], cash.get("margin"), cash.get("margin_error", "")),
+                           "Cash"))
+    items = issues(result) + cash_issue_items(cash.get("settled_unresolved") or [], cash.get("unresolved") or [])
+    drawer = issues_drawer(items, id=ISSUES_ID)
+    if drawer is not None:
+        parts.append(drawer)
     return html.Div(className="expiries-body", children=parts)
 
 
+def cash_inputs(conn: sqlite3.Connection, as_of: str) -> Dict[str, Any]:
+    """The cash reads for `as_of`, each as its owner gives it: the open cash legs and their
+    unresolved list (`records_from_db`, no settled row), the settled cash records and the
+    tickets not frozen yet (`settled_records_from_db`), and the margin estimate (or why not)."""
+    from engine.ladder.exposure_adapter import records_from_db, settled_records_from_db
+    out: Dict[str, Any] = {"records": [], "unresolved": [], "settled": [], "settled_unresolved": [],
+                           "margin": None, "margin_error": ""}
+    out["records"], out["unresolved"] = records_from_db(conn, as_of, include_settled=False)
+    out["settled"], out["settled_unresolved"] = settled_records_from_db(conn, as_of)
+    try:
+        from engine.limits import margin_estimate
+        out["margin"] = margin_estimate(conn, as_of)
+    except Exception as exc:  # noqa: BLE001 -- the reason on the margin line
+        out["margin_error"] = f"the margin estimate could not be read ({type(exc).__name__}: {exc})"
+    return out
+
+
 def render(as_of: Optional[str], db_path) -> Any:
-    """The body for `as_of` from the database at `db_path`: one `expiry_schedule` call on a
-    read-only connection, closed straight after. A problem is a message where the body would
-    be, never an empty tab."""
+    """The body for `as_of` from the database at `db_path`: one `expiry_schedule` call and the
+    cash reads on a read-only connection, closed straight after. A problem is a message where
+    the body would be, never an empty tab."""
     if not as_of:
         return message_box("No as-of date available.")
     from ui.app import connect_readonly       # local: ui.app imports the tabs
@@ -532,18 +854,24 @@ def render(as_of: Optional[str], db_path) -> Any:
         return message_box(f"Database not available ({exc}).")
     try:
         result = expiry_schedule(conn, as_of)
+        try:
+            cash = cash_inputs(conn, as_of)
+        except Exception as exc:  # noqa: BLE001 -- the roll calendar still renders, the cash says why
+            cash = {"margin_error": f"the cash legs could not be read ({type(exc).__name__}: {exc})"}
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
         return html.Div(className="status-panel status-panel--down", children=[
             html.P(f"The roll calendar could not be built for {as_of} ({type(exc).__name__}: {exc}).",
                    className="status-line status-line--bad")])
     finally:
         conn.close()
-    return body(result)
+    return body(result, cash)
 
 
-_TAB_ABOUT = ("What is about to expire or go to delivery: every open future, option on a future and LME prompt, "
-              "its next first notice, last trade, option expiry or prompt, the business days to its alert date "
-              "and its level, as expiry-monitor gives them. A date marked (est.) is an estimate, not Bloomberg's.")
+_TAB_ABOUT = ("What happens when: the next 60 business days of expiries, prompts and value dates on one line, "
+              "the roll calendar (every open future, option on a future and LME prompt, its next first notice, "
+              "last trade, option expiry or prompt, the business days to its alert date and its level, as "
+              "expiry-monitor gives them; a date marked (est.) is an estimate, not Bloomberg's), and the cash: "
+              "settled to date, still to come, and the initial-margin estimate.")
 
 
 def layout(default_date: Optional[str] = None) -> html.Div:
@@ -551,7 +879,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     picker: the tab follows the header's as-of store."""
     return html.Div(className="expiries-tab", children=[
         html.Div(className="ladder-title-row", children=[
-            about("Expiries", _TAB_ABOUT, level="h3", className="ladder-title-row-heading"),
+            about("Timing & cash", _TAB_ABOUT, level="h3", className="ladder-title-row-heading"),
             html.Div(className="ladder-title-row-right", children=[
                 html.H4(f"Follows the header's as-of date{f' ({default_date})' if default_date else ''}",
                         className="section-title")])]),

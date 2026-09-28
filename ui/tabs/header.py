@@ -18,12 +18,13 @@ Design choices (no one to ask, so noted here):
   - The five figures + trading are read via `period_pnl(conn, as_of)`, one call, since
     the engine already returns daily/d5/mtd/ytd/trading together; LTD itself is a
     separate `ltd(conn, as_of)` call (period_pnl does not return raw LTD).
-  - The LTD line chart is a `dcc.Graph` inside a collapsible `html.Details`, defaulting
-    to *closed* (`open=False`) to keep the header compact on tabs that do not need it.
-    Dash never reports a native <details> toggle back to the `open` prop, so a clientside
+  - The LTD line chart (`_build_chart`, `_cached_ltd`, `_chart_days`, `_priced_day`) is
+    built here and rendered on the P&L tab since 2026-09-28 (UI redesign wave 2,
+    `ui/tabs/pnl.py`), inside a collapsible `html.Details` defaulting to *closed*. Dash
+    never reports a native <details> toggle back to the `open` prop, so a clientside
     callback mirrors the element's DOM state into it on every click of the summary
-    (`SUMMARY_ID`, `_SUMMARY_OPEN_MIRROR_JS`; see `register_callbacks`): without it the
-    chart callback below never hears the collapsible open (2026-09-22).
+    (`_SUMMARY_OPEN_MIRROR_JS`, registered by the P&L tab): without it the chart callback
+    never hears the collapsible open (2026-09-22).
   - The chart spans every business day from the book's first trade date (MIN(trade_date)
     in `trades`) to `as_of`, oldest first (user decision 2026-09-22: "yes I want to see
     the ltd line chart, which requires all the previous closes"; it showed the last 20
@@ -153,11 +154,12 @@ from dash import Input, Output, dcc, html
 from ui.tabs.formatting import marker, short_money
 
 HEADER_ID = "header-block"
+# The LTD chart's ids (the chart is on the P&L tab since 2026-09-28, `ui/tabs/pnl.py`; these
+# names are kept for it and for older notes). The <summary>'s n_clicks is the only thing
+# Dash's html bundle reports about a click on it (dash 4.4.1 wires `n_clicks`, never the
+# `open` prop), so it is what the clientside mirror (`_SUMMARY_OPEN_MIRROR_JS`) listens to.
 CHART_CONTAINER_ID = "header-ltd-chart-container"
 DETAILS_ID = "header-ltd-details"
-# The <summary> inside the Details. Its n_clicks is the only thing Dash's html bundle
-# reports about a click on it (dash 4.4.1 wires `n_clicks`, never the `open` prop), so
-# it is what the clientside mirror in `register_callbacks` listens to.
 SUMMARY_ID = f"{DETAILS_ID}-summary"
 AS_OF_STORE_ID = "header-as-of-store"
 # True once a date picker (Blotter or Ladder) was set to a day other than today: the header
@@ -319,16 +321,13 @@ def _divider() -> html.Div:
 
 
 def layout() -> html.Div:
-    """Static shell: figure cards populated by the callback, collapsible chart below.
-    The chart's `.details` collapses to zero extra margin when closed (ui/assets/
-    style.css) so a compact header never leaves an empty band under the figure row."""
+    """Static shell: the figure cards the callback fills. The collapsible LTD chart left the
+    header for the P&L tab on 2026-09-28 (UI redesign wave 2, `ui/tabs/pnl.py`, which renders
+    `_build_chart` there); `DETAILS_ID`, `SUMMARY_ID` and `CHART_CONTAINER_ID` stay as names
+    for the P&L tab's own ids and older notes, but no element of the header carries them."""
     return html.Div(id=HEADER_ID, className="header-block", children=[
         html.Div(id=f"{HEADER_ID}-figures", className="header-figures",
                  children=[_figure_card("LTD", "-")]),
-        html.Details(id=DETAILS_ID, className="section section--secondary details", open=False, children=[
-            html.Summary("LTD chart", id=SUMMARY_ID, title="The LTD line over every business day since the first trade"),
-            html.Div(id=CHART_CONTAINER_ID),
-        ]),
     ])
 
 
@@ -1149,7 +1148,7 @@ def _next_expiry_card(schedule: dict) -> html.Div:
     settled = schedule.get("settled_expired") or []
     if settled:
         lines.append(f"{_plural(len(settled), 'expired contract')} settled by the ledger: not alerts")
-    lines.append("The Expiries tab lists every open contract.")
+    lines.append("The Timing & cash tab lists every open contract.")
     hover = "\n".join(lines)
     text = " · ".join(p for p in (f"{_contract_label(r.get('contract_id'))} {r.get('next_event') or ''}".strip(),
                                   _business_days_short(r)) if p)
@@ -1651,44 +1650,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     # vol target is on the Book tab's "Needs you" list, through `risk_summary` / `risk_summary_if_ready`,
     # which stay here as the memoised reading every screen shares.
 
-    # The mirror (see the docstring): Dash does not sync a native <details> toggle to
-    # `open`, so the browser reports the element's real state after every click.
-    app.clientside_callback(
-        _SUMMARY_OPEN_MIRROR_JS,
-        Output(DETAILS_ID, "open"),
-        Input(SUMMARY_ID, "n_clicks"),
-    )
-
-    @app.callback(
-        Output(CHART_CONTAINER_ID, "children"),
-        Input(DETAILS_ID, "open"),
-        Input(AS_OF_STORE_ID, "data"),
-        Input(revision.DATA_REVISION_ID, "data"),
-    )
-    def _update_chart(is_open: bool, as_of: Optional[str], _data_rev=None):
-        if not is_open or not as_of:
-            # Collapsed, or no date yet: nothing to compute. Dash keeps whatever was
-            # last rendered hidden inside the closed <details>, so this is not a
-            # regression versus always rendering -- it is strictly less work.
-            from dash import no_update
-            return no_update
-
-        from ui.app import connect_readonly
-        db_path = get_db_path()
-        try:
-            conn = connect_readonly(db_path)
-        except sqlite3.OperationalError as exc:
-            return html.P(f"Database not available ({exc}).")
-        try:
-            return _build_chart(conn, as_of, db_path=db_path)
-        except Exception as exc:  # noqa: BLE001 -- deliberately broad, as in _update_figures
-            # Anything raised here escaped as an HTTP 500: the Output never fired and the
-            # opened collapsible stayed empty with nothing on the page saying why
-            # (2026-09-22). Say what failed instead; the next as-of or data revision
-            # retries it.
-            import logging
-            logging.getLogger(__name__).exception("header LTD chart failed for as_of=%s", as_of)
-            return html.P(_failure_reason("LTD chart could not be built", exc, conn),
-                          className="header-figure-caption header-figure-caption--reason")
-        finally:
-            conn.close()
+    # The LTD chart's two callbacks (the clientside mirror of the collapsible's open state and
+    # the chart itself) left with the chart for the P&L tab on 2026-09-28 (`ui/tabs/pnl.py`,
+    # which registers them on its own ids and renders `_build_chart`).
