@@ -5,6 +5,8 @@ diagnostics).
 
     py 2_launcher.py setup      install everything into .venv, create the database, run the tests
     py 2_launcher.py start      start the app (opens the browser)
+    py 2_launcher.py            nothing after it, or a double-click on this file: the same as `start`
+                                (and a failure then waits for Enter, so the window stays readable)
     py 2_launcher.py doctor     check every prerequisite and say exactly what to fix
     py 2_launcher.py freeze     (re)write requirements.txt from the list below, for `pip install -r`
                                  or CI that doesn't go through this file
@@ -667,7 +669,7 @@ def cmd_start(args) -> int:
                 # source fingerprint (ui/launch.py: .py files only) did not move -- an
                 # update to config/, a stylesheet or a contract table must never be served
                 # by the old process (2026-09-28).
-                argv = [a for a in sys.argv[1:] if a not in ("--no-sync", "--force-new")] + ["--no-sync", "--force-new"]
+                argv = [a for a in _argv() if a not in ("--no-sync", "--force-new")] + ["--no-sync", "--force-new"]
                 return subprocess.call([sys.executable, str(ROOT / "2_launcher.py"), *argv], cwd=str(ROOT))
         # venv_imports_ok() decides whether .venv needs a `pip install` (packages.stamp: fast
         # when nothing changed; a stale stamp installs PACKAGES then checks the imports). An
@@ -690,7 +692,7 @@ def cmd_start(args) -> int:
                     "Fix: py 2_launcher.py setup --bloomberg")
         for line in port_preflight():
             say(line)
-        return reexec_in_venv([a for a in sys.argv[1:] if a not in ("--no-sync", "--refresh-packages")])
+        return reexec_in_venv([a for a in _argv() if a not in ("--no-sync", "--refresh-packages")])
     if _trades_count() == 0:
         say(EMPTY_DB_LINE)
     from ui.launch import main
@@ -1188,16 +1190,68 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _default_argv(argv: list) -> list:
+    """The command line with the one default applied: nothing at all means `start`. Windows
+    opens a double-clicked .py file as `py.exe "2_launcher.py"` with no arguments, and the
+    parser's required subcommand used to answer that with a usage error in a window that
+    closed at once (2026-09-28). A typed command is returned exactly as given, so `-h`,
+    `setup`, `doctor` and the rest behave as before."""
+    return list(argv) if argv else ["start"]
+
+
+def _argv() -> list:
+    """This process's own command line after the default: what `start` hands to the copy of
+    itself it runs (the re-exec into .venv, the handover after a GitHub update), so a child
+    always carries an explicit `start` and never pauses as a double-click would."""
+    return _default_argv(sys.argv[1:])
+
+
 def main(argv=None) -> int:
-    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(_default_argv(sys.argv[1:] if argv is None else argv))
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     return args.func(args)
 
 
+def double_click_mode() -> bool:
+    """True only in the process a double-click (or a bare `py 2_launcher.py`) started: no
+    subcommand on its command line, and not a copy `start` runs inside .venv
+    (RISK_MONITOR_VENV=1, set by reexec_in_venv; that child gets an explicit `start` too).
+    A typed command, and the `chelsea` function, always carry a subcommand, so this is
+    never true for them."""
+    return len(sys.argv) == 1 and "RISK_MONITOR_VENV" not in os.environ
+
+
+def run_from_double_click(run_main=main, ask=input) -> int:
+    """`main()` for a double-click, where the console window closes with the process: on a
+    failure (a non-zero exit code, or a SystemExit carrying a message) the reason is printed
+    and the window waits for Enter before closing with that code. A success returns at once.
+    EOFError from `ask` (no console attached) is ignored; a KeyboardInterrupt is not caught
+    here, so it still exits 130 without a prompt. `run_main` and `ask` are parameters so the
+    pause path can be exercised without starting anything."""
+    try:
+        code = run_main()
+    except SystemExit as exc:
+        code = exc.code
+        if isinstance(code, str):
+            say(code)
+            code = 1
+        elif code is None:
+            code = 0
+    if code:
+        say()
+        say(f"The launcher stopped (exit code {code}). The reason is in the lines above.")
+        say("Anything wrong:  py 2_launcher.py doctor")
+        try:
+            ask("Press Enter to close")
+        except EOFError:
+            pass
+    return code
+
+
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(run_from_double_click() if double_click_mode() else main())
     except SystemExit as exc:
         if isinstance(exc.code, str):
             say(exc.code)

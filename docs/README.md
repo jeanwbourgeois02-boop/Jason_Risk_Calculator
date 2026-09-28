@@ -46,6 +46,9 @@ opens at `http://127.0.0.1:8050`; the page shows `build <commit>` at the top rig
 same. Keep the terminal window open; **Ctrl+C** stops the app.
 
 - Running `chelsea` again while the app is running just reopens the browser tab.
+- Double-clicking `2_launcher.py` (or `py -3 2_launcher.py` with nothing after it) is the same as `chelsea`:
+  it runs setup first if `.venv` is missing, syncs with GitHub and starts the app. If it fails, the window
+  waits for Enter so the reason can be read.
 - If a copy with **older code** is still running on 8050, it is stopped (force-stopped if it is too old to
   answer the stop request) and the new one takes 8050, so an old bookmark never shows old code.
 - `py -3 2_launcher.py start --no-sync` starts without touching GitHub.
