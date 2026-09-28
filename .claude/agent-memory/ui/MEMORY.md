@@ -1,0 +1,2 @@
+- [Single-flight pricing cache 2026-09-28](single-flight-pricing-cache-2026-09-28.md) — priced_value_book prices once per (db, mtime, date) across threads; raw + filled stores; werkzeug at WARNING in launch; scratch-DB proof recipes
+- The retired screen lanes' notes are in `../ui-shell/` (index there), `../ui-header/`, `../ui-book/` etc.: read `ui-shell/MEMORY.md` first

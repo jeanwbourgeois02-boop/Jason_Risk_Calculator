@@ -26,6 +26,7 @@ so nothing here needed to change when that parameter disappeared.
 """
 from __future__ import annotations
 
+import collections
 import datetime as dt
 import logging
 import os
@@ -34,7 +35,6 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
@@ -90,7 +90,9 @@ def pricing_snapshot(conn: sqlite3.Connection, label: str = ""):
     the outer key. Callers that never enter one behave exactly as before.
 
     With a `label`, a render that takes `SLOW_RENDER_SECONDS` or more logs one WARNING
-    naming the view, how long it took and how many full `value_book` runs it cost. A
+    naming the view, how long it took and how many full `value_book` runs it cost (and, since
+    2026-09-28, how many of its dates it waited for another render to finish pricing: the
+    cache is single-flight, so concurrent tabs share one pricing per date). A
     view that ERRORS already prints its traceback in the terminal; a view that is merely
     slow printed nothing at all, so "the tab did not load" on the Bloomberg PC left no
     trace to diagnose from (user, 2026-09-18). Logging only: nothing about the render
@@ -100,6 +102,7 @@ def pricing_snapshot(conn: sqlite3.Connection, label: str = ""):
         return
     _SNAPSHOT.key = (_db_cache_key(conn),)  # 1-tuple: a None key (in-memory db) is still "pinned"
     _SNAPSHOT.repricings = 0
+    _SNAPSHOT.waited = 0
     started = time.perf_counter()
     try:
         yield
@@ -107,8 +110,10 @@ def pricing_snapshot(conn: sqlite3.Connection, label: str = ""):
         elapsed = time.perf_counter() - started
         _SNAPSHOT.key = None
         if label and elapsed >= SLOW_RENDER_SECONDS:
-            log.warning("slow render: %s took %.1fs (%d full re-pricings of the book)",
-                        label, elapsed, getattr(_SNAPSHOT, "repricings", 0))
+            waited = getattr(_SNAPSHOT, "waited", 0)
+            log.warning("slow render: %s took %.1fs (%d full re-pricings of the book%s)",
+                        label, elapsed, getattr(_SNAPSHOT, "repricings", 0),
+                        f", {waited} waited for another render's pricing" if waited else "")
 
 
 def _render_cache_key(conn: sqlite3.Connection):
@@ -116,25 +121,141 @@ def _render_cache_key(conn: sqlite3.Connection):
     return pinned[0] if pinned is not None else _db_cache_key(conn)
 
 
-@lru_cache(maxsize=256)
-def _priced_value_book_cached(path: str, _mtime: float, as_of: str) -> Tuple[pd.DataFrame, int, int]:
-    from ui.app import connect_readonly
-    # Only reached on a cache miss, on the caller's own thread: counted for the slow-render log.
-    _SNAPSHOT.repricings = getattr(_SNAPSHOT, "repricings", 0) + 1
-    conn = connect_readonly(path)
+# --------------------------------------------------------------------------- the shared cache
+# One valuation per (database file, mtime, date), shared across every screen and every thread
+# (2026-09-28). `functools.lru_cache` memoised the result but never the work: the tabs render
+# concurrently on one page load, and each priced "today" (and the reference closes) before any
+# of them had finished -- eleven pricings over six distinct dates on one load of the dev
+# database. Now a key is priced under its own lock, so a second caller for the same key waits
+# for the first caller's frame instead of pricing again, and a different date is never held up
+# (the locks are per key, not one global lock). The key still carries the file's mtime, so an
+# upload or a Bloomberg write invalidates it (SQLite stays in journal_mode=delete, CLAUDE.md
+# "Guard rails"). Two stores: `_RAW` is `value_book` as the engine gives it, `_FILLED` the same
+# frame with the fill; the fill's own look-back reads the raw store, never a filled frame, so
+# a filled value is never carried further.
+_CACHE_MAX = 256
+_CACHE_GUARD = threading.Lock()          # guards the two stores, the lock table and the counter
+_RAW: "collections.OrderedDict[tuple, pd.DataFrame]" = collections.OrderedDict()
+_FILLED: "collections.OrderedDict[tuple, Tuple[pd.DataFrame, int, int]]" = collections.OrderedDict()
+_KEY_LOCKS: Dict[tuple, threading.Lock] = {}
+_FULL_PRICINGS: Dict[str, int] = {}      # as_of -> full `value_book` runs since start (diagnostic)
+
+
+def _single_flight(store, key: tuple, compute):
+    """`(store[key], waited)`: the entry, computed by `compute()` at most once however many
+    threads ask for it at the same time. The first caller for a key prices under that key's
+    lock; the others wait on the lock and then read what it stored (`waited` True). Bounded
+    at `_CACHE_MAX` entries, oldest out. A `compute` that raises stores nothing, and the next
+    caller tries again."""
+    lock_key = (id(store), *key)   # the raw and the filled entry of one date are two locks
+    with _CACHE_GUARD:
+        if key in store:
+            store.move_to_end(key)
+            return store[key], False
+        lock = _KEY_LOCKS.get(lock_key)
+        if lock is None:
+            lock = _KEY_LOCKS[lock_key] = threading.Lock()
+    waited = not lock.acquire(blocking=False)
+    if waited:
+        lock.acquire()
     try:
-        return _priced_value_book_uncached(conn, as_of)
+        with _CACHE_GUARD:
+            if key in store:
+                return store[key], True
+        value = compute()
+        with _CACHE_GUARD:
+            store[key] = value
+            while len(store) > _CACHE_MAX:
+                store.popitem(last=False)
+            _KEY_LOCKS.pop(lock_key, None)   # a waiter still holding this lock finds the entry above
+        return value, waited
+    finally:
+        lock.release()
+
+
+def _note_wait(waited: bool) -> None:
+    if waited:
+        _SNAPSHOT.waited = getattr(_SNAPSHOT, "waited", 0) + 1
+
+
+def _raw_book(key: tuple, as_of: str) -> pd.DataFrame:
+    """`value_book(as_of)` unfilled, one run per (file, mtime, date) across every thread."""
+    def compute():
+        from ui.app import connect_readonly
+        # Only reached on a cache miss, on the caller's own thread: counted for the slow-render log.
+        _SNAPSHOT.repricings = getattr(_SNAPSHOT, "repricings", 0) + 1
+        with _CACHE_GUARD:
+            _FULL_PRICINGS[as_of] = _FULL_PRICINGS.get(as_of, 0) + 1
+        conn = connect_readonly(key[0])
+        try:
+            return value_book(conn, as_of)
+        finally:
+            conn.close()
+    df, waited = _single_flight(_RAW, (*key, as_of), compute)
+    _note_wait(waited)
+    return df
+
+
+def _earlier_rows(key: tuple, iso: str, trade_ids) -> pd.DataFrame:
+    """The fill's look-back (`engine.pnl.reference.fill_book`'s `rows_for`): `trade_ids` valued
+    on `iso`, unfilled. Read from the shared raw store when that close is already priced (a
+    reference close the header or another tab valued costs nothing more); otherwise priced for
+    those trades only (`value_book(conn, iso, trade_ids)`, each row exactly as the whole book
+    gives it), never the whole book for a handful of trades. In both cases the rows are the
+    engine's own for that day: nothing is written to `marks`."""
+    from ui.app import connect_readonly
+    with _CACHE_GUARD:
+        hit = _RAW.get((*key, iso))
+    if hit is not None:
+        return hit[hit["trade_id"].isin(trade_ids)]
+    conn = connect_readonly(key[0])
+    try:
+        return value_book(conn, iso, trade_ids=trade_ids)
     finally:
         conn.close()
 
 
+def _priced_value_book_cached(path: str, _mtime: float, as_of: str) -> Tuple[pd.DataFrame, int, int]:
+    """The filled frame for one (file, mtime, date), priced once across every thread: the raw
+    valuation from `_raw_book`, the fill from `_earlier_rows`. The stored frame is shared:
+    `priced_value_book` hands out copies."""
+    from engine.pnl.reference import fill_book
+    key = (path, _mtime)
+
+    def compute():
+        df = _raw_book(key, as_of)
+        df, filled = fill_book(df, as_of, lambda iso, ids: _earlier_rows(key, iso, ids))
+        return df, sum(n for _day, n in filled), len(df)
+    result, waited = _single_flight(_FILLED, (*key, as_of), compute)
+    _note_wait(waited)
+    return result
+
+
+def _clear_cache() -> None:
+    with _CACHE_GUARD:
+        _RAW.clear()
+        _FILLED.clear()
+        _KEY_LOCKS.clear()
+
+
+_priced_value_book_cached.cache_clear = _clear_cache   # the name the tests reset between scenarios
+
+
+def full_pricings_by_date() -> Dict[str, int]:
+    """How many full `value_book` runs each as-of date has cost since start (diagnostic): with
+    the single-flight cache, at most one per date per database revision."""
+    with _CACHE_GUARD:
+        return dict(_FULL_PRICINGS)
+
+
 def priced_value_book(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, int, int]:
-    """Memoised front for `_priced_value_book_uncached` (perf, 2026-09-15): the header,
-    the blotter and its strips together revalue the same book at the same handful of
-    dates a dozen times per page load. Keyed on (db path, db mtime, as_of) so a new
-    upload or mark write invalidates it; the cached frame is returned as a copy so a
-    caller's in-place edits never leak into another caller. Connections with no file
-    (tests on ':memory:') bypass the cache."""
+    """Memoised front for `_priced_value_book_uncached` (perf, 2026-09-15): the header, the
+    tabs and their strips together revalue the same book at the same handful of dates a
+    dozen times per page load. Keyed on (db path, db mtime, as_of) so a new upload or mark
+    write invalidates it, priced once per key however many threads ask at the same time
+    (`_single_flight`, 2026-09-28); the cached frame is returned as a copy so a caller's
+    in-place edits never leak into another caller. Connections with no file (tests on
+    ':memory:') bypass the cache."""
     key = _render_cache_key(conn)  # pinned for the whole render inside `pricing_snapshot`
     if key is None:
         return _priced_value_book_uncached(conn, as_of)

@@ -200,6 +200,11 @@ def main(argv=None):
     # One handler at the single entry point, stdout, so the terminal that ran
     # `2_launcher.py start` is a persistent record of anything logged app-wide.
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+    # werkzeug logs every request at INFO ('GET / HTTP/1.1 200', one line per poll of the
+    # revision store), which buried the app's own lines (2026-09-28). WARNING keeps its
+    # errors; the app's loggers (the banner, the pull status, the slow-render warnings,
+    # tracebacks) stay at INFO on the root handler above.
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
     args = parse_args([] if argv is None else argv)
     try:
         from ui.app import create_app, get_db_path
