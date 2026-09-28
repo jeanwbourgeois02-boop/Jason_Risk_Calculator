@@ -376,6 +376,8 @@ def register(app, get_db_path):
         Output(RESULT_ID, "children", allow_duplicate=True),
         Output(revision.DATA_REVISION_ID, "data", allow_duplicate=True),
         Output(revision.BOOK_REVISION_ID, "data", allow_duplicate=True),
+        Output(feed_controls.PULL_BUTTON_ID, "disabled", allow_duplicate=True),
+        Output(feed_controls.PULL_BUTTON_ID, "title"),
         Input(sample_book.LINK_ID, "n_clicks"),
         Input({"type": sample_book.LINK_TYPE, "idx": ALL}, "n_clicks"),
         Input(sample_book.BACK_ID, "n_clicks"),
@@ -384,17 +386,18 @@ def register(app, get_db_path):
     def _switch_book(_top, _body, _back):
         # "View the sample book" / "Back to my book" (ui/sample_book.py): the active database
         # moves, then both revisions are published at once so every tab redraws from it
-        # without waiting for the poll. The chip, the upload button and the source line follow.
+        # without waiting for the poll. The chip, the upload button, the source line and the
+        # "Pull Bloomberg now" lock (ui/feed_controls.py, 2026-09-28) follow in place.
         target = sample_book.switch_from_trigger(ctx.triggered)
         if target is None:
-            return (no_update,) * 7
+            return (no_update,) * 9
         try:
             outcome = sample_book.switch(target)
         except Exception as exc:  # noqa: BLE001 -- the reason in the message box, never a 500
             log.exception("sample book switch to %s failed", target)
             return (no_update, no_update, no_update, no_update,
                     html.Span(f"The sample book could not be {'built' if target == 'sample' else 'left'}: {exc}",
-                              className="source-result--error"), no_update, no_update)
+                              className="source-result--error"), no_update, no_update, no_update, no_update)
         from ui.app import load_summary
         active = outcome["active"]
         data = load_summary(active)
@@ -409,6 +412,7 @@ def register(app, get_db_path):
                                 className="source-result--info")
         return (sample_book.chip(outcome["sample"]), outcome["sample"], sample_book.upload_button(outcome["sample"]),
                 describe_source(data), message,
-                revision.file_signature(active), revision.book_signature(active))
+                revision.file_signature(active), revision.book_signature(active),
+                outcome["sample"], feed_controls.pull_title(outcome["sample"]))
 
     feed_controls.register(app, get_db_path)

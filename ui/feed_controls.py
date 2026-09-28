@@ -32,6 +32,15 @@ cycle would claim otherwise.
 Rapid clicks: `PullGuard` is a server-side record of the one outstanding request, under
 a lock, so ten clicks (or two browser tabs) make one `trigger_now()` call; the button is
 also disabled in the browser while a request is outstanding.
+
+The sample book lock (user yes, 2026-09-28, the same pattern as the upload lock in
+`ui/uploads.py`): while `ui.sample_book.is_sample_active()` the button is disabled with
+`PULL_LOCKED_TITLE` on hover and `click_outcome` refuses with that sentence, because a
+pull's marks, backfill and ledger writes go to the real book (hard rule 1), not the
+throw-away sample. The state is read at render (`controls`, built on every page load)
+and changed in place by the switch callback (`uploads._switch_book`, which outputs the
+button's `disabled` and `title`). The Data tab's "Pull now" runs through `click_outcome`
+too, so it refuses as well.
 """
 from __future__ import annotations
 
@@ -50,6 +59,9 @@ PULL_POLL_ID = "feed-pull-poll"
 STATUS_REFRESH_ID = "feed-status-refresh"
 
 PULL_BUTTON_LABEL = "Pull Bloomberg now"
+PULL_TITLE = ("Pull today's marks and any missing past closes from Bloomberg, for what the "
+              "trades on file need. Nothing is pulled until this is pressed.")
+PULL_LOCKED_TITLE = "Go back to my book first: a pull writes marks to the real book"
 PULL_POLL_MS = 2_000
 PULL_TIMEOUT_SECONDS = 180
 FALLBACK_INTERVAL_SECONDS = 900     # the feed's cadence, used only when data.bloomberg.live cannot be imported
@@ -282,10 +294,32 @@ class PullGuard:
             return dict(self._outstanding), True
 
 
+def pull_locked() -> bool:
+    """True while the sample book is the active database (`ui.sample_book.is_sample_active`):
+    a pull is refused then, since its marks go to the real book, never the sample."""
+    from ui import sample_book      # local: ui.sample_book -> ui.app -> ui.uploads -> this module
+    return sample_book.is_sample_active()
+
+
+def pull_title(locked: bool) -> str:
+    """The button's tooltip: the reason it is locked while the sample book is active, else
+    what a press does."""
+    return PULL_LOCKED_TITLE if locked else PULL_TITLE
+
+
+def locked_message() -> str:
+    """What a click says when the sample book is active: nothing was asked of Bloomberg."""
+    return f"Bloomberg: nothing pulled. {PULL_LOCKED_TITLE}."
+
+
 def click_outcome(app, guard: PullGuard, status: Optional[dict],
                   now: Optional[datetime] = None) -> Tuple[str, Optional[dict]]:
     """`(status line, pending)` for one click. `pending` is None when nothing was asked
-    for (no feed on this machine), which leaves the fast poll switched off."""
+    for (the sample book is active, or no feed on this machine), which leaves the fast
+    poll switched off. The sample lock is checked first: a press that reaches the server
+    while the sample is active (a stale page, two browser tabs) must never wake the feed."""
+    if pull_locked():
+        return locked_message(), None
     feed = getattr(app, "bloomberg_feed", None)
     if feed is None:
         return not_connected_message(app, status), None
@@ -316,14 +350,21 @@ def poll_outcome(status: Optional[dict], pending: Optional[dict], feed=None,
 
 
 # --------------------------------------------------------------------------- layout + callbacks
+def pull_button(locked: bool) -> html.Button:
+    """The "Pull Bloomberg now" button: disabled with the reason on hover while the sample
+    book is active (`locked`), else live with what a press does on hover."""
+    return html.Button(PULL_BUTTON_LABEL, id=PULL_BUTTON_ID, n_clicks=0,
+                       className="btn btn--feed-pull" + (" btn--locked" if locked else ""),
+                       disabled=locked, title=pull_title(locked))
+
+
 def controls() -> list:
     """The button and its status line, for the top bar's right corner (`ui/uploads.py`
     places them; the bar is pinned to the top of the window, so the button is in reach
-    from every tab and at any scroll position)."""
+    from every tab and at any scroll position). Built on every page load, so the button
+    reads the sample lock at render; the switch callback changes it in place between loads."""
     return [
-        html.Button(PULL_BUTTON_LABEL, id=PULL_BUTTON_ID, n_clicks=0, className="btn btn--feed-pull",
-                    title="Pull today's marks and any missing past closes from Bloomberg, for what the "
-                          "trades on file need. Nothing is pulled until this is pressed."),
+        pull_button(pull_locked()),
         html.Div(id=PULL_STATUS_ID, role="status", className="feed-pull-status"),
     ]
 
@@ -369,7 +410,9 @@ def register(app, get_db_path: Callable[[], object]) -> None:
             return no_update, no_update, no_update, no_update, no_update
         line, pending = click_outcome(app, guard, read_feed_status(get_db_path()))
         waiting = pending is not None
-        return line, line, pending, not waiting, waiting
+        # The button stays disabled while a request is outstanding, and while the sample
+        # book is active (a refused press must not re-enable a locked button).
+        return line, line, pending, not waiting, waiting or pull_locked()
 
     @app.callback(
         Output(PULL_STATUS_ID, "children", allow_duplicate=True),
@@ -388,8 +431,9 @@ def register(app, get_db_path: Callable[[], object]) -> None:
                                               getattr(app, "bloomberg_feed", None))
         if not finished:
             return line, line, no_update, no_update, no_update, no_update
-        # Landed: tell every open view the marks changed (ui/revision.py), no reload.
-        return line, line, None, True, False, (revision.file_signature(db_path) if landed else no_update)
+        # Landed: tell every open view the marks changed (ui/revision.py), no reload. The
+        # button re-enables unless the sample book was made active meanwhile.
+        return line, line, None, True, pull_locked(), (revision.file_signature(db_path) if landed else no_update)
 
     @app.callback(
         Output(PULL_STATUS_ID, "children"),

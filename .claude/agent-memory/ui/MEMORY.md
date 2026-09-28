@@ -1,3 +1,4 @@
 - [Single-flight pricing cache 2026-09-28](single-flight-pricing-cache-2026-09-28.md) — priced_value_book prices once per (db, mtime, date) across threads; raw + filled stores; werkzeug at WARNING in launch; scratch-DB proof recipes
 - The retired screen lanes' notes are in `../ui-shell/` (index there), `../ui-header/`, `../ui-book/` etc.: read `ui-shell/MEMORY.md` first
 - [Sample book switch 2026-09-28](sample-book-switch-2026-09-28.md) — active_db_path holder in ui/app.py; ui/sample_book.py builds data/raw/sample.db from the golden book through today; proof recipe
+- [Pull lock while the sample book is active 2026-09-28](pull-lock-sample-book-2026-09-28.md) — feed_controls.pull_locked / pull_button, click_outcome refuses, _switch_book flips disabled + title; the pattern for any real-book write
