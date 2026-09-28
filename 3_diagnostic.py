@@ -11,8 +11,11 @@ check is a visible, directly runnable entry point instead of being buried in too
     py 3_diagnostic.py
     py 3_diagnostic.py --db data\\raw\\risk.db --as-of 2026-09-16 --json
 
-Checks: Bloomberg session connectivity, official-source mapping vs CLAUDE.md, FX/futures
-mark coverage, IRS/OIS curve coverage, snapped_at offsets, last live feed pull. See
+Checks: Bloomberg session connectivity, official-source mapping vs CLAUDE.md, mark coverage
+(FX, futures, options on futures, LME curves and prompts, conversion spots) judged as the
+screens judge it (official = pass, estimated or filled = warning, a dash = fail), contract
+roots verified, contract dates stored, futures with no Bloomberg ticker, OIS curves for the
+FX options, snapped_at offsets, the last pull and its commodity steps. See
 tools/bbg_diagnostics.py's docstring for the full list.
 
 For the fully standalone, zero-repo-import script meant to be copied alone onto the
