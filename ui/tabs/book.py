@@ -99,8 +99,8 @@ _METAL_UNITS = {"XAU": "oz", "XAG": "oz", "XPT": "oz", "XPD": "oz"}
 _NEXT_EVENT_WORDS = {"first notice": "first notice", "last trade": "last trade", "option expiry": "expiry",
                      "LME prompt": "prompt"}
 
-TAB_KEYS = {"Book": "book", "Exposure": "curve", "P&L": "pnl", "Timing & cash": "expiries", "Risk": "risk",
-            "Trades": "blotter", "Data": "market-data"}
+TAB_KEYS = {"Book": "book", "Exposure": "curve", "P&L": "pnl", "Risk": "risk", "Trades": "blotter",
+            "Data": "market-data"}
 
 TITLE_ABOUT = ("The book at the header's as-of date: one row per open position (a spread across its trade dates, "
                "an outright contract, an option on a future, an LME prompt, an FX hedge), grouped by sector or by "
@@ -108,7 +108,8 @@ TITLE_ABOUT = ("The book at the header's as-of date: one row per open position (
                "The Book line equals the header. Click a row for its trades and legs.")
 NEEDS_ABOUT = ("What needs you today, most urgent first, one line per kind: expiries within the alert window, the "
                "contracts still on estimated dates, the marks missing, the trade sets the spread rule could not "
-               "match, the limits. Each names the tab that holds the detail.")
+               "match, the limits. A line whose detail is on another tab names it; a position's dates are in "
+               "its own Next column below.")
 LOAD_ABOUT = "What the last blotter load did, as the upload recorded it."
 COLUMN_TIPS = {
     "Position": "The spread, contract, option, LME prompt or FX hedge in plain words; the instrument ids on hover. "
@@ -157,8 +158,9 @@ def contract_label(instrument_id: Optional[str]) -> str:
 
 
 def pointer(tab: str, idx: str, label: Optional[str] = None):
-    """A tab's name as a link that opens it (`formatting.tab_link`); nothing for this tab."""
-    if tab == "Book":
+    """A tab's name as a link that opens it (`formatting.tab_link`); nothing for this tab or for
+    a line with no tab to point at (`tab` empty: the detail is on the Book itself)."""
+    if tab in ("", "Book") or tab not in TAB_KEYS:
         return html.Span()
     return tab_link(label or tab, TAB_KEYS[tab], idx, title=f"Open the {tab} tab")
 
@@ -1101,14 +1103,14 @@ def needs(data: dict) -> List[dict]:
         more = f" (+{len(urgent) - 1} more)" if len(urgent) > 1 else ""
         out.append(_need(str(first.get("level")), "red" if first.get("level") != "AMBER" else "warn",
                          _event_words(data, first) + more,
-                         "\n".join(_event_words(data, r) for r in urgent[:LINES_ON_HOVER]), "Timing & cash", 0))
+                         "\n".join(_event_words(data, r) for r in urgent[:LINES_ON_HOVER]), "", 0))
     estimated = sorted({str(r.get("contract_id")) for r in rows if r.get("estimated") and r.get("level") != "EXPIRED"})
     if estimated:
         out.append(_need("DATES", "warn", f"{_plural(len(estimated), 'contract')} run on estimated dates until the "
                                           "first Bloomberg pull",
-                         "\n".join(contract_label(c) for c in estimated[:LINES_ON_HOVER]), "Timing & cash", 1))
+                         "\n".join(contract_label(c) for c in estimated[:LINES_ON_HOVER]), "", 1))
     elif data.get("schedule_error"):
-        out.append(_need("DATES", "warn", "roll calendar not available", data["schedule_error"], "Timing & cash", 1))
+        out.append(_need("DATES", "warn", "roll calendar not available", data["schedule_error"], "", 1))
     needed, missing = data.get("needs") or (0, [])
     if data.get("needs_error"):
         out.append(_need("MARKS", "warn", "the marks the book needs could not be listed", data["needs_error"], "Data", 2))

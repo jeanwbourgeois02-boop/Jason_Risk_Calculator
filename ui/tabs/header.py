@@ -1179,7 +1179,7 @@ def _next_expiry_card(schedule: dict) -> html.Div:
     settled = schedule.get("settled_expired") or []
     if settled:
         lines.append(f"{_plural(len(settled), 'expired contract')} settled by the ledger: not alerts")
-    lines.append("The Timing & cash tab lists every open contract.")
+    lines.append("The Book's Next column carries every open position's next date.")
     hover = "\n".join(lines)
     text = " · ".join(p for p in (f"{_contract_label(r.get('contract_id'))} {r.get('next_event') or ''}".strip(),
                                   _business_days_short(r)) if p)

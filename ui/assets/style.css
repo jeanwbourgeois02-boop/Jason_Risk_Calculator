@@ -616,8 +616,8 @@ p { margin: 8px 0; }
 .book-detail { margin-top: 10px; }
 
 /* ---------------------------------------------------------------- 2026-09-28: the screens tidy (wave 2)
-   Exposure, P&L and Timing & cash share the Book's table kit; two cards side by side; the roll
-   table's level chips; the small grey sub-label after a name. */
+   Exposure and P&L share the Book's table kit; two cards side by side; the level chips; the
+   small grey sub-label after a name. */
 .cards-row { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
 .cards-row > .book-card { flex: 1 1 0; min-width: 0; }
 .card-pad { padding: 10px 14px 12px; }

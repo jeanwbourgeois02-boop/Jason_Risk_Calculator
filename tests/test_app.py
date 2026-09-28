@@ -105,9 +105,9 @@ KEYS = [uiapp.TAB_KEYS[label] for label in TABS]
 
 
 def test_tab_ids_are_stable_keys_with_no_ampersand_or_space():
-    """A renamed tab keeps its body id: Timing & cash is still tab-body-expiries, Data still
+    """A renamed tab keeps its body id: Exposure is still tab-body-curve, Data still
     tab-body-market-data, so nothing keyed on a body id moves."""
-    assert uiapp.tab_body_id("Timing & cash") == "tab-body-expiries"
+    assert uiapp.tab_body_id("Exposure") == "tab-body-curve"
     assert uiapp.tab_body_id("Data") == "tab-body-market-data"
     for label in TABS:
         body_id = uiapp.tab_body_id(label)
@@ -131,12 +131,11 @@ def test_create_app_registers_the_risk_callback_and_the_show_hide_covers_its_bod
     assert toggle("risk") == [{} if label == "Risk" else {"display": "none"} for label in TABS]
 
 
-def test_create_app_registers_curve_and_expiries_with_no_duplicate_outputs(tmp_path):
+def test_create_app_registers_curve_with_no_duplicate_outputs(tmp_path):
     from ui import revision
-    from ui.tabs import curve, expiries, header
+    from ui.tabs import curve, header
     app = uiapp.create_app(db_path=tmp_path / "risk.db", start_feed=False)
-    for module, own_inputs in ((curve, {(curve.REFRESH_ID, "n_intervals"), (curve.UNIT_ID, "value")}),
-                               (expiries, {(expiries.REFRESH_ID, "n_intervals")})):
+    for module, own_inputs in ((curve, {(curve.REFRESH_ID, "n_intervals"), (curve.UNIT_ID, "value")}),):
         key = f"{module.BODY_ID}.children"
         assert key in app.callback_map, f"{module.__name__}.register_callbacks was not called"
         inputs = {(d["id"], d["property"]) for d in app.callback_map[key]["inputs"]}
@@ -146,7 +145,7 @@ def test_create_app_registers_curve_and_expiries_with_no_duplicate_outputs(tmp_p
     outputs = [o for k in app.callback_map for o in k.strip(".").split("...") if "@" not in o]
     assert len(outputs) == len(set(outputs))
     style_key = next(k for k in app.callback_map if k.startswith("..tab-body-book.style"))
-    assert "tab-body-curve.style" in style_key and "tab-body-expiries.style" in style_key
+    assert "tab-body-curve.style" in style_key and "tab-body-expiries.style" not in style_key
     wrapped = app.callback_map[style_key]["callback"]
     toggle = getattr(wrapped, "__wrapped__", wrapped)
     for key in KEYS:

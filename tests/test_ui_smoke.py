@@ -1,5 +1,5 @@
-"""Smoke tests for the seven-tab app after the UI redesign of 2026-09-28 (Book, Exposure, P&L,
-Timing & cash, Risk, Trades, Data), on the golden sample book (`tests/golden_book.py::build_book`,
+"""Smoke tests for the six-tab app after the UI redesign of 2026-09-28 (Book, Exposure, P&L,
+Risk, Trades, Data; Timing & cash deleted the same day), on the golden sample book (`tests/golden_book.py::build_book`,
 as of 2026-09-18) written to a file in tmp and read as the app reads it.
 
 What is pinned here is the shell and the identities that must hold whatever the screens look
@@ -24,11 +24,11 @@ from dash.development.base_component import Component  # noqa: E402
 
 from data.ingest import schema  # noqa: E402
 from ui import app as uiapp  # noqa: E402
-from ui.tabs import blotter, book, curve, expiries, header, market_data, pnl, risk  # noqa: E402
+from ui.tabs import blotter, book, curve, header, market_data, pnl, risk  # noqa: E402
 
 AS_OF = "2026-09-18"
-SEVEN_TABS = ["Book", "Exposure", "P&L", "Timing & cash", "Risk", "Trades", "Data"]
-SEVEN_KEYS = ["book", "curve", "pnl", "expiries", "risk", "blotter", "market-data"]
+SIX_TABS = ["Book", "Exposure", "P&L", "Risk", "Trades", "Data"]
+SIX_KEYS = ["book", "curve", "pnl", "risk", "blotter", "market-data"]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -100,7 +100,6 @@ def bodies(app, golden_path):
     out["book"], _counts, _style = book.render(AS_OF, golden_path)
     out["curve"] = curve.render(AS_OF, golden_path)
     out["pnl"] = pnl.render(AS_OF, golden_path)
-    out["expiries"] = expiries.render(AS_OF, golden_path)
     out["risk"] = risk.render(AS_OF, golden_path)
     out["blotter"] = _callback(app, f"..{blotter.CONTENT_ID}.children")(AS_OF, blotter.SCOPE_ORDER[0])[0]
     data_outputs = _callback(app, f"..{market_data.BODY_ID}.children")(AS_OF, "USDCNH", 0, None, None, None, None)
@@ -109,18 +108,18 @@ def bodies(app, golden_path):
 
 
 # --------------------------------------------------------------------------- (a) the shell
-def test_the_app_builds_with_seven_tabs_no_duplicate_ids_and_no_duplicate_outputs(app):
-    assert uiapp.VISIBLE_TABS == SEVEN_TABS
-    assert [uiapp.TAB_KEYS[label] for label in SEVEN_TABS] == SEVEN_KEYS
+def test_the_app_builds_with_six_tabs_no_duplicate_ids_and_no_duplicate_outputs(app):
+    assert uiapp.VISIBLE_TABS == SIX_TABS
+    assert [uiapp.TAB_KEYS[label] for label in SIX_TABS] == SIX_KEYS
     assert callable(app.layout)                       # built on every page load, so today is fresh
     layout = app.layout()
     tabs = layout.children[0].children[0]
     assert isinstance(tabs, dash.dcc.Tabs)
-    assert [t.label for t in tabs.children] == SEVEN_TABS
-    assert [t.value for t in tabs.children] == SEVEN_KEYS
+    assert [t.label for t in tabs.children] == SIX_TABS
+    assert [t.value for t in tabs.children] == SIX_KEYS
     assert tabs.value == "book"                       # the app opens on Book
     body_ids = [getattr(b, "id", None) for b in next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies").children]
-    assert body_ids == [uiapp.tab_body_id(label) for label in SEVEN_TABS]
+    assert body_ids == [uiapp.tab_body_id(label) for label in SIX_TABS]
     # no id appears twice in the assembled layout (a pattern-matching id compares by its JSON)
     ids = [getattr(n, "id", None) for n in _components(layout)]
     keys = [json.dumps(i, sort_keys=True) if isinstance(i, dict) else i for i in ids if i is not None]
@@ -132,12 +131,12 @@ def test_the_app_builds_with_seven_tabs_no_duplicate_ids_and_no_duplicate_output
     assert len(outputs) == len(set(outputs)), sorted({o for o in outputs if outputs.count(o) > 1})
     # every tab body is toggled by the one show/hide callback
     style_key = next(k for k in app.callback_map if k.startswith("..tab-body-book.style"))
-    for label in SEVEN_TABS:
+    for label in SIX_TABS:
         assert f"{uiapp.tab_body_id(label)}.style" in style_key
 
 
 # --------------------------------------------------------------------------- (b) every tab renders
-@pytest.mark.parametrize("key", SEVEN_KEYS)
+@pytest.mark.parametrize("key", SIX_KEYS)
 def test_every_tab_renders_a_layout_on_the_as_of(bodies, key):
     body = bodies[key]
     assert isinstance(body, Component), f"{key}: {type(body).__name__}"
@@ -146,7 +145,7 @@ def test_every_tab_renders_a_layout_on_the_as_of(bodies, key):
     assert "could not be built" not in text and "Traceback" not in text, f"{key}: {text[:300]}"
 
 
-@pytest.mark.parametrize("key", SEVEN_KEYS)
+@pytest.mark.parametrize("key", SIX_KEYS)
 def test_every_tab_gathers_its_reasons_in_one_data_issues_drawer(bodies, golden_path, key):
     """One drawer per tab, present whenever the tab has something to say. On the sample the
     Trades tab has nothing (every trade is priced on the as-of, none is filled): its drawer is

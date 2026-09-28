@@ -3,15 +3,15 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Seven tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25; UI redesign waves 1 to 3, user
-2026-09-28), in this order: Book, Exposure, P&L, Timing & cash, Risk, Trades, Data. "Exposure" is
+Six tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25; UI redesign waves 1 to 3, user
+2026-09-28), in this order: Book, Exposure, P&L, Risk, Trades, Data. "Exposure" is
 the former Curve (ui/tabs/curve.py, key "curve"), "P&L" is new (ui/tabs/pnl.py, key "pnl"),
-"Timing & cash" the former Expiries (ui/tabs/expiries.py, key "expiries"), "Trades" the former
-Blotter (ui/tabs/blotter.py, key "blotter") and "Data" the former Market data
-(ui/tabs/market_data.py). The Spreads tab (ui/tabs/spreads.py) and the FX & cash tab
-(ui/tabs/cash_ladder.py, ui/tabs/exposure.py) were deleted on 2026-09-28 (user's yes): the Book tab
-now holds the spread detail helpers and Timing & cash reads the ladder's engine readers
-directly; `HIDDEN_TAB_KEYS` only records their old keys so a stale link is ignored. Each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
+"Trades" the former Blotter (ui/tabs/blotter.py, key "blotter") and "Data" the former Market data
+(ui/tabs/market_data.py). The Spreads tab (ui/tabs/spreads.py), the FX & cash tab
+(ui/tabs/cash_ladder.py, ui/tabs/exposure.py) and the Timing & cash tab (ui/tabs/expiries.py, the
+former Expiries) were deleted on 2026-09-28 (user's yes): the Book tab now holds the spread
+detail helpers and shows each position's next date in its Next column;
+`HIDDEN_TAB_KEYS` only records their old keys so a stale link is ignored. Each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
 separate from the label the user reads, so a rename never moves an id. The app opens on the
 first tab, Book (ui/tabs/book.py): the book's home. A slim header (ui/tabs/header.py) sits
 above the tabs on every view: the as-of date, Daily / MTD / YTD / LTD and the Data chip.
@@ -31,7 +31,7 @@ import dash
 import flask
 from dash import ALL, Input, Output, State, dcc, html
 
-from ui.tabs import blotter, book, curve, expiries, header, market_data, pnl, risk
+from ui.tabs import blotter, book, curve, header, market_data, pnl, risk
 from ui.tabs.controls import today_ny
 from ui.tabs.formatting import TAB_LINK_TYPE
 from ui import revision, uploads
@@ -62,32 +62,31 @@ def set_active_db(path: Union[str, Path, None]) -> Path:
     ACTIVE_DB["path"] = Path(path) if path is not None else None
     return active_db_path()
 
-# Order per the UI redesign waves 2 and 3 (user, 2026-09-28: six screens, one question each:
-# Book, Exposure, P&L, Timing & cash, Risk, Trades, plus Data), after the screens redesign of
+# Order per the UI redesign waves 2 and 3 (user, 2026-09-28: one question per screen:
+# Book, Exposure, P&L, Risk, Trades, plus Data), after the screens redesign of
 # 2026-09-25 ("the spread is the unit"); the app opens on the first. Each label maps to its
 # stable key: the tab bar's value and the body id `tab-body-<key>`. The key never holds '&' or
-# a space, and a renamed tab keeps its key ("Exposure" is still "curve", "Timing & cash" still
-# "expiries", "Trades" still "blotter", "Data" still "market-data"), so nothing keyed on a body
-# id moves. The Spreads ("spreads") and FX & cash ("ladder") tabs left the bar in wave 3
-# (`HIDDEN_TAB_KEYS`): a tab link to either key is dead (`tab_from_link_click` ignores it), so
-# no screen renders one.
+# a space, and a renamed tab keeps its key ("Exposure" is still "curve", "Trades" still
+# "blotter", "Data" still "market-data"), so nothing keyed on a body id moves. The Spreads
+# ("spreads") and FX & cash ("ladder") tabs left the bar in wave 3, Timing & cash ("expiries")
+# later the same day (`HIDDEN_TAB_KEYS`): a tab link to any of those keys is dead
+# (`tab_from_link_click` ignores it), so no screen renders one.
 TAB_KEYS = {
     "Book": "book",
     "Exposure": "curve",
     "P&L": "pnl",
-    "Timing & cash": "expiries",
     "Risk": "risk",
     "Trades": "blotter",
     "Data": "market-data",
 }
 VISIBLE_TABS = list(TAB_KEYS)
-# Hidden, not deleted (wave 3): the modules stay importable, nothing of theirs is in the layout.
-HIDDEN_TAB_KEYS = {"Spreads": "spreads", "FX & cash": "ladder"}
+# Deleted tabs' keys (2026-09-28): nothing of theirs is in the layout; a stale link is ignored.
+HIDDEN_TAB_KEYS = {"Spreads": "spreads", "FX & cash": "ladder", "Timing & cash": "expiries"}
 
 
 def tab_body_id(label: str) -> str:
-    """The DOM id of a tab's always-present body: `tab-body-<key>` ("Timing & cash" ->
-    "tab-body-expiries"). Only a label in `TAB_KEYS` has a body."""
+    """The DOM id of a tab's always-present body: `tab-body-<key>` ("Exposure" ->
+    "tab-body-curve"). Only a label in `TAB_KEYS` has a body."""
     return f"tab-body-{TAB_KEYS[label]}"
 
 
@@ -255,7 +254,6 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
         "curve": curve.build_layout,
         "pnl": pnl.build_layout,
         "risk": risk.build_layout,
-        "expiries": expiries.build_layout,
         "blotter": blotter.build_layout,
         "market-data": market_data.build_layout,
     }
@@ -334,15 +332,12 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     # pnl as of today"). `_layout_value()` is what tests walk.
     app.layout = lambda: build_layout(load_summary(active_db_path()), db_path=active_db_path())
 
-    # The hidden tabs (Spreads, FX & cash: `HIDDEN_TAB_KEYS`) register nothing: their bodies
-    # are not in the layout, and the helpers Book and Timing & cash import from their modules
-    # are plain functions, fed by those tabs' own callbacks.
+    # The deleted tabs (`HIDDEN_TAB_KEYS`) register nothing: their bodies are not in the layout.
     header.register_callbacks(app, get_db_path=active_db_path)
     blotter.register_callbacks(app, get_db_path=active_db_path)
     curve.register_callbacks(app, get_db_path=active_db_path)
     pnl.register_callbacks(app, get_db_path=active_db_path)
     book.register_callbacks(app, get_db_path=active_db_path)
-    expiries.register_callbacks(app, get_db_path=active_db_path)
     risk.register_callbacks(app, get_db_path=active_db_path)
     market_data.register_callbacks(app, get_db_path=active_db_path)
     uploads.register(app, get_db_path=active_db_path)

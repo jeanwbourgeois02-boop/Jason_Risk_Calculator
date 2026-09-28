@@ -188,7 +188,7 @@ def tab_link(label, tab_key: str, idx: str, title: Optional[str] = None, classNa
     """A small, quiet link that switches to the tab `tab_key` when clicked:
     `tab_link("\u2192 Curve", "curve", "book-metals")`. `label` is shown as it is (text or
     components); `tab_key` is the tab's stable key (`ui.app.TAB_KEYS` values: "book",
-    "spreads", "curve", "risk", "expiries", "blotter", "ladder", "market-data").
+    "curve", "pnl", "risk", "blotter", "market-data"; a deleted tab's key is ignored).
 
     The `idx` rule: the ids of all links on the page must differ, so `idx` names the spot
     the link sits in, as "<the tab it sits on>-<the spot>" ("book-metals", "risk-caption"),

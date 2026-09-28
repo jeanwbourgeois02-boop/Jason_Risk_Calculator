@@ -5,3 +5,4 @@
 - [Screens tidy wave 1 2026-09-28](screens-tidy-wave1-2026-09-28.md) — the display kit (em dash, real minus, price_text, plain names), the header picker + marks chip, Book = header identity, proof recipe
 - [Screens fix pass 2026-09-28](screens-fix-pass-2026-09-28.md) — estimated dates "≈ date" + alert hover, Exposure excl. N, template short names, FX decimals, picker CSS, pattern-id Upload button, test-fix rule as applied
 - [Screens tidy wave 2 2026-09-28](screens-tidy-wave2-2026-09-28.md) — Exposure grid + cards, P&L five-period table with group-by, seven-column roll table, Risk drawer split, Data without the research curve; proof recipe
+- [Timing & cash tab deleted 2026-09-28](timing-cash-tab-deleted-2026-09-28.md) — six tabs; key "expiries" in HIDDEN_TAB_KEYS; Needs-you lines with tab="" carry no link
