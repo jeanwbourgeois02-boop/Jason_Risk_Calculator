@@ -802,7 +802,8 @@ def test_usd_per_quote_on_or_before_reads_the_last_exact_official_spot_on_or_bef
 # --------------------------------------------------------------------- LME forwards (Phase 5)
 # User decision 2026-09-24, CLAUDE.md "P&L conventions -> LME forwards": the FX-forward rule on the
 # metal's root id, PnL_USD = tonnes x (m - f), S = 1; the curve's cash price sits at the LME cash
-# date; settled, frozen at the last official cash price on or before the prompt date.
+# date; settled, frozen at the last official cash price on or before the freeze day, the prompt
+# less 2 LME business days (`engine.lme.freeze_date`).
 
 def _lme_ticket(conn, tid, tonnes, fill, prompt, trade_date="2026-08-20", root="LME:CA"):
     """An LME ticket as ingest-parser writes it: the root instrument, product LME_FWD, two FX_NEAR

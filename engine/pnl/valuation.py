@@ -68,8 +68,9 @@ FX forward in every respect (`FX_PRODUCTS`): `PnL_USD = tonnes x (m - f)`, `m` t
 FWD_OUTRIGHT at the ticket's own prompt date, else the near-marks estimate along the day's LME
 curve, whose first pillar is the cash price (the metal's SPOT) placed at the LME cash date
 (`engine.lme.cash_date`, not the FX spot date); USD-quoted, so S = 1 (`usd_per_quote('USD')`).
-Settled, it is frozen at the metal's last official cash price on or before the prompt date
-(`engine.lme.settlement_price`). It is never relabelled FX_SPOT (`_reported_product`).
+Settled, it is frozen at the metal's last official cash price on or before its freeze day,
+the prompt less 2 LME business days (`engine.lme.freeze_date`, the day the prompt is the cash
+date; `engine.lme.settlement_price`). It is never relabelled FX_SPOT (`_reported_product`).
 
 One bad value, one trade (2026-09-18, guards only -- no formula changed): every stored
 figure a formula uses (`trades.quantity`, `trades.price`, `instruments.multiplier`, each
@@ -743,8 +744,9 @@ def _frozen_row(conn, r) -> Optional[dict]:
     product, settle = r.product, r.settle_date
     conversion = ""
     if product in LME_PRODUCTS:
-        # the metal's last official cash price on or before the prompt date (user decision
-        # 2026-09-24, "P&L conventions -> LME forwards"); USD-quoted, so S = 1
+        # the metal's last official cash price on or before the freeze day, the prompt less
+        # 2 LME business days (`engine.lme.freeze_date`; user decision 2026-09-24, "P&L
+        # conventions -> LME forwards"); USD-quoted, so S = 1
         hit = lme_settlement_price(conn, r.instrument_id, settle)
         if hit is None:
             return None

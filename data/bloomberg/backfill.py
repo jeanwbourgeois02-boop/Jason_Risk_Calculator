@@ -1402,7 +1402,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                      "snapped_at": settle_stamp(d)})
                 # The LME curves (2026-09-24): cash SPOT, pillars and the open prompts, at the
                 # daily close. In this pass, with the futures, because an LME ticket freezes
-                # at the metal's last cash price on or before its prompt.
+                # at the metal's last cash price on or before its freeze day, the prompt less
+                # 2 LME business days (`engine.lme.freeze_date`).
                 lme_day_rows, lme_missing = _lme_day_rows(conn, d, lme_plans.get(day, {}), lme_series, needed,
                                                           today_iso)
                 missing_marks += lme_missing
