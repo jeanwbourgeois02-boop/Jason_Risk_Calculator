@@ -55,10 +55,17 @@ ValueFn = Callable[[sqlite3.Connection, str], object]
 # ------------------------------------------------------------------ valuation frames
 class _Frames:
     """The whole book valued once per date (``value_fn``, ``value_book`` by default; a screen may
-    pass its own filled reader, whose (frame, ...) tuple is accepted), scoped per group."""
+    pass its own filled reader, whose (frame, ...) tuple is accepted), scoped per group. Beside
+    each date's frame, read from it once: its rows as dicts (``records``, frame order) and the
+    trade ids unpriced on it (``unpriced``: ``reason`` not '', the test
+    ``engine.pnl.reference.diff_split`` applies), so a spread's reads are lookups, not a pandas
+    filter and a ``to_dict`` each (2026-09-28: the Book tab's first render)."""
 
     def __init__(self, conn: sqlite3.Connection, value_fn: ValueFn):
         self.conn, self.value_fn, self.cache = conn, value_fn, {}
+        self._records: Dict[str, List[dict]] = {}
+        self._unpriced: Dict[str, frozenset] = {}
+        self._scoped: Dict[Tuple[str, frozenset], pd.DataFrame] = {}
 
     def __call__(self, day: str) -> pd.DataFrame:
         if day not in self.cache:
@@ -66,9 +73,30 @@ class _Frames:
             self.cache[day] = out[0] if isinstance(out, tuple) else out
         return self.cache[day]
 
+    def records(self, day: str) -> List[dict]:
+        """The book on ``day`` as row dicts, in frame order (what ``to_dict("records")`` gives)."""
+        if day not in self._records:
+            df = self(day)
+            self._records[day] = df.to_dict("records") if not df.empty else []
+        return self._records[day]
+
+    def unpriced(self, day: str) -> frozenset:
+        """The trade ids whose row on ``day`` carries a reason: ``diff_split``'s unpriced set."""
+        if day not in self._unpriced:
+            df = self(day)
+            self._unpriced[day] = frozenset(df["trade_id"][df["reason"] != ""]) if not df.empty else frozenset()
+        return self._unpriced[day]
+
     def scoped(self, day: str, ids: frozenset) -> pd.DataFrame:
-        df = self(day)
-        return df[df["trade_id"].isin(ids)] if not df.empty else df
+        key = (day, ids)
+        if key not in self._scoped:
+            df = self(day)
+            self._scoped[key] = df[df["trade_id"].isin(ids)] if not df.empty else df
+        return self._scoped[key]
+
+
+def _by_id(rows: Iterable[dict]) -> Dict[str, dict]:
+    return {r["trade_id"]: r for r in rows}
 
 
 def _num(x) -> Optional[float]:
@@ -90,15 +118,22 @@ def _why(row) -> str:
 def _period_pnl(ids: Sequence[str], as_of: str, frames: _Frames, refs: Dict[str, str], holidays,
                 daily_out: Optional[dict] = None) -> dict:
     """{pnl_usd: {period: value | None}, pnl_reasons: {period: ''|why}, pnl_notes, ref_dates}.
-    ``daily_out``, when given, receives the frame the Daily figure is measured from and its date
-    (``frame``, ``date``): the close ``level_prev`` reads, so the level and the P&L agree."""
+    ``daily_out``, when given, receives the rows the Daily figure is measured from, by trade id,
+    and their date (``rows``, ``date``): the close ``level_prev`` reads, so the level and the P&L
+    agree.
+
+    The reference close is pnl-series' ``resolve_reference`` over this group's own rows (the
+    step back and the per-trade fill are decided on what is unpriced within the group, so one
+    group may step back where another does not). It is only called where it has something to
+    decide: when no trade of the group is unpriced on the period's own close, its answer is that
+    close as it is, with no note (``diff_split`` finds nothing blocked, so the status is OK and
+    the frame is returned untouched), and the figure is taken straight from the date's rows."""
     ids = frozenset(ids)
     values = {p: None for p in PERIODS}
     reasons = {p: "" for p in PERIODS}
     notes = {p: "" for p in PERIODS}
     ref_used = {p: (as_of if p == "ltd" else refs[p]) for p in PERIODS}
-    df_a = frames.scoped(as_of, ids)
-    rows = {r["trade_id"]: r for r in df_a.to_dict("records")} if not df_a.empty else {}
+    rows = _by_id(r for r in frames.records(as_of) if r["trade_id"] in ids)
     missing = sorted(ids - set(rows))
     unpriced = [f"{tid} ({_why(r)})" for tid, r in sorted(rows.items()) if not _priced(r)]
     if missing or unpriced:
@@ -114,24 +149,33 @@ def _period_pnl(ids: Sequence[str], as_of: str, frames: _Frames, refs: Dict[str,
     for p in PERIODS[1:]:
         ref = refs[p]
         try:
+            if not (ids & frames.unpriced(ref)):
+                # every trade of the group on that close is priced there: the close as it is
+                ref_rows = [r for r in frames.records(ref) if r["trade_id"] in ids]
+                if p == "daily" and daily_out is not None:
+                    daily_out.update(rows=_by_id(ref_rows), date=ref)
+                values[p] = ltd - float(sum(float(r["pnl_usd"]) for r in ref_rows if _priced(r)))
+                continue
+            df_a = frames.scoped(as_of, ids)
             choice = resolve_reference(df_a, ref, lambda d: frames.scoped(d, ids), holidays)
         except Exception as exc:  # noqa: BLE001 -- one close that cannot be valued blanks this figure only
             reasons[p] = f"the {ref} close could not be valued ({type(exc).__name__}: {exc})"
             continue
         frame = choice.frame
+        fr_rows = frame.to_dict("records") if not frame.empty else []
+        fr = _by_id(fr_rows)
         ref_used[p], notes[p] = choice.ref_date_used, choice.note
         if p == "daily" and daily_out is not None and choice.found:
-            daily_out.update(frame=frame, date=choice.ref_date_used)
+            daily_out.update(rows=fr, date=choice.ref_date_used)
         if not choice.found or choice.split.blocked_ids:
             blocked = choice.split.blocked_ids
-            fr = {r["trade_id"]: r for r in frame.to_dict("records")} if not frame.empty else {}
             detail = "; ".join(f"{t} ({_why(fr.get(t, {}))})" for t in sorted(blocked))
             reasons[p] = (f"unpriced on the {choice.ref_date_used} close: {detail}" if detail
                           else f"no usable close on {ref}")
             if not choice.found:
                 reasons[p] = f"{reasons[p]}. {choice.exhausted_sentence}".strip()
             continue
-        ref_sum = float(sum(float(r["pnl_usd"]) for r in frame.to_dict("records") if _priced(r)))
+        ref_sum = float(sum(float(r["pnl_usd"]) for r in fr_rows if _priced(r)))
         values[p] = ltd - ref_sum
     return {"pnl_usd": values, "pnl_reasons": reasons, "pnl_notes": notes, "ref_dates": ref_used}
 
@@ -278,12 +322,11 @@ class _Book:
         for t in self.trades:
             t["month_key"] = _month_key(t, self.roots)
         self.frames = _Frames(conn, value_fn)
-        self.today = {r["trade_id"]: r for r in self.frames(as_of).to_dict("records")} \
-            if not self.frames(as_of).empty else {}
+        self.today = _by_id(self.frames.records(as_of))
         self.refs = period_reference_dates(as_of)
         self.holidays = load_holidays()
         self.problem_set: Dict[str, None] = {}
-        self.daily: Dict[str, dict] = {}      # spread_id -> the Daily reference {frame, date}
+        self.daily: Dict[str, dict] = {}      # spread_id -> the Daily reference {rows, date}
 
     # ---- helpers
     def lots(self, tid: str) -> Optional[float]:
@@ -548,10 +591,9 @@ class _Book:
         entry, entry_why, entry_src, entry_px = self.entry_level(spec)
         now_rows = self.today
         now, now_why, now_src, now_px = self.level_on(spec, self.as_of, now_rows, fallback=False)
-        frame = daily.get("frame")
-        if frame is None:
-            frame = self.frames(prev_day)
-        prev_rows = {r["trade_id"]: r for r in frame.to_dict("records")} if not frame.empty else {}
+        prev_rows = daily.get("rows")
+        if prev_rows is None:
+            prev_rows = _by_id(self.frames.records(prev_day))
         prev, prev_why, prev_src, prev_px = self.level_on(spec, prev_day, prev_rows, fallback=True)
         out.update(level_entry=entry, level_entry_reason=entry_why, level_now=now, level_now_reason=now_why,
                    level_prev=prev, level_prev_reason=prev_why)

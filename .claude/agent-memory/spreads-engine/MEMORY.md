@@ -1,3 +1,4 @@
 - [Grouping rule decisions](grouping-rule-decisions.md) — review kinds stay outrights, label tie-breaks, leftover on open lots; China-vs-West may span two accounts (decided 2026-09-24)
 - [Template units](template-units.md) — qty_factor semantics, generic unit conversion, oz-for-oz gold/silver and crush ratios that will not fit
 - [Spread levels](spread-levels.md) — Phase B levels in quote units (x price_scale), usd_per_unit, research keys, CNY via USDCNY, positions keep direction; Phase C position history rules
+- [Perf: book_spreads](perf-book-spreads.md) — 2026-09-28: the reference close is scope-dependent (never hoist it), the all-priced shortcut, C yaml loader, how to force unpriced trades in tests
