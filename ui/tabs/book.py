@@ -54,6 +54,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import dash
 from dash import Input, Output, State, dash_table, dcc, html
 
+from ui import sample_book
 from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
@@ -1545,6 +1546,11 @@ def body(data: dict) -> html.Div:
     if not rows and not data.get("spreads_error"):
         children.append(message_box(f"No commodity futures in the book on {data.get('as_of') or 'this date'}: "
                                     "no spread or outright position to show."))
+        if not int((data.get("load") or {}).get("n_total") or 0) and not sample_book.is_sample_active():
+            # An empty book: offer the sample (ui/sample_book.py; the top bar's link is the same switch).
+            children.append(html.Div(className="sample-book-offer", children=[
+                "Nothing uploaded yet. ", sample_book.view_link("book", small=False),
+                " to see the screens on the synthetic book; your own book is untouched."]))
         children.append(html.Div(id=DETAIL_ID))
     else:
         children.append(book_section(data, rows))

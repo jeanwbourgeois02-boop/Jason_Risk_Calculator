@@ -68,7 +68,7 @@ log = logging.getLogger(__name__)
 
 _SNAPSHOT = threading.local()
 # A render slower than this says so in the terminal (see `pricing_snapshot`).
-SLOW_RENDER_SECONDS = 3.0
+SLOW_RENDER_SECONDS = 10.0        # a normal first paint (about 3 s, six dates priced once) is logged at DEBUG
 
 
 @contextmanager
@@ -109,11 +109,12 @@ def pricing_snapshot(conn: sqlite3.Connection, label: str = ""):
     finally:
         elapsed = time.perf_counter() - started
         _SNAPSHOT.key = None
-        if label and elapsed >= SLOW_RENDER_SECONDS:
+        if label:
             waited = getattr(_SNAPSHOT, "waited", 0)
-            log.warning("slow render: %s took %.1fs (%d full re-pricings of the book%s)",
-                        label, elapsed, getattr(_SNAPSHOT, "repricings", 0),
-                        f", {waited} waited for another render's pricing" if waited else "")
+            log.log(logging.WARNING if elapsed >= SLOW_RENDER_SECONDS else logging.DEBUG,
+                    "slow render: %s took %.1fs (%d full re-pricings of the book%s)",
+                    label, elapsed, getattr(_SNAPSHOT, "repricings", 0),
+                    f", {waited} waited for another render's pricing" if waited else "")
 
 
 def _render_cache_key(conn: sqlite3.Connection):

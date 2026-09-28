@@ -70,11 +70,11 @@ from __future__ import annotations
 import logging
 import re
 
-from dash import Input, Output, State, dcc, html, no_update
+from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
 
 from data.ingest import upload as _ingest
 from data.ingest.upload import decode, import_blotter, preview_frame, validate_blotter_shape
-from ui import feed_controls, revision
+from ui import feed_controls, revision, sample_book
 
 log = logging.getLogger(__name__)
 
@@ -240,6 +240,7 @@ def run_import(payload, filename, db_path) -> dict:
 
 def layout(data: dict = None):
     data = data or {}
+    sample_active = sample_book.is_sample_active()
     return html.Div(className="source-strip", children=[
         # The bar draws this row right to left (style.css, row-reverse), so the first child
         # is the far right corner: "Pull Bloomberg now", the one thing that pulls Bloomberg
@@ -248,9 +249,13 @@ def layout(data: dict = None):
             *feed_controls.controls(),
             html.Span(className="top-bar-divider", **{"aria-hidden": "true"}),
             dcc.Upload(id=FILE_UPLOAD_ID, className="source-upload",
-                       children=html.Button("Upload blotter", className="btn"),
+                       children=sample_book.upload_button(sample_active), disabled=sample_active,
                        accept=".csv,.xlsx,.xls", multiple=False, max_size=25 * 1024 * 1024),
             html.Div(id=SOURCE_LINE_ID, className="source-line", children=describe_source(data)),
+            # The sample book (ui/sample_book.py): the link always, small; the chip with
+            # "Back to my book" only while the sample is active.
+            html.Div(id=sample_book.CHIP_ID, className="sample-book-chip", children=sample_book.chip(sample_active)),
+            sample_book.view_link("top"),
         ]),
         # Everything that drops below the bar, stacked, so a failed import's message sits
         # under the Confirm row it belongs to instead of on top of it.
@@ -310,6 +315,9 @@ def register(app, get_db_path):
         keep = (no_update, no_update, no_update, no_update)  # source line, stage, data rev, book rev
         if not contents:
             return (no_update, *keep)
+        if sample_book.is_sample_active():
+            # The button is disabled while the sample is active; this is the belt to that brace.
+            return (html.Span(f"No data saved. {sample_book.UPLOAD_LOCKED_TITLE}.", className="source-result--error"), *keep)
         db_path = get_db_path()
         try:
             report = run_import(decode(contents), filename, db_path)
@@ -360,5 +368,47 @@ def register(app, get_db_path):
         # the source line) has consumed it. Either way `_selected` then hides the Confirm
         # row, and the same file can be chosen again later.
         return None, None
+
+    @app.callback(
+        Output(sample_book.CHIP_ID, "children"),
+        Output(FILE_UPLOAD_ID, "disabled"), Output(FILE_UPLOAD_ID, "children"),
+        Output(SOURCE_LINE_ID, "children", allow_duplicate=True),
+        Output(RESULT_ID, "children", allow_duplicate=True),
+        Output(revision.DATA_REVISION_ID, "data", allow_duplicate=True),
+        Output(revision.BOOK_REVISION_ID, "data", allow_duplicate=True),
+        Input(sample_book.LINK_ID, "n_clicks"),
+        Input({"type": sample_book.LINK_TYPE, "idx": ALL}, "n_clicks"),
+        Input(sample_book.BACK_ID, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _switch_book(_top, _body, _back):
+        # "View the sample book" / "Back to my book" (ui/sample_book.py): the active database
+        # moves, then both revisions are published at once so every tab redraws from it
+        # without waiting for the poll. The chip, the upload button and the source line follow.
+        target = sample_book.switch_from_trigger(ctx.triggered)
+        if target is None:
+            return (no_update,) * 7
+        try:
+            outcome = sample_book.switch(target)
+        except Exception as exc:  # noqa: BLE001 -- the reason in the message box, never a 500
+            log.exception("sample book switch to %s failed", target)
+            return (no_update, no_update, no_update, no_update,
+                    html.Span(f"The sample book could not be {'built' if target == 'sample' else 'left'}: {exc}",
+                              className="source-result--error"), no_update, no_update)
+        from ui.app import load_summary
+        active = outcome["active"]
+        data = load_summary(active)
+        if outcome["sample"]:
+            c = outcome["built"]["counts"]
+            message = html.Span(f"Sample book: {c['trades']} synthetic trades at {c['marks']} synthetic marks "
+                                f"through {outcome['built']['last_mark_date']}, in a throw-away file. "
+                                "The real database is untouched.", className="source-result--info")
+        else:
+            message = html.Span("Back to my book." + ("" if outcome["removed"] else
+                                " The sample file is still held and is rebuilt on the next switch."),
+                                className="source-result--info")
+        return (sample_book.chip(outcome["sample"]), outcome["sample"], sample_book.upload_button(outcome["sample"]),
+                describe_source(data), message,
+                revision.file_signature(active), revision.book_signature(active))
 
     feed_controls.register(app, get_db_path)

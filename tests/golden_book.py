@@ -91,12 +91,24 @@ def _mark(conn: sqlite3.Connection, as_of: str, instrument_id: str, settle_date:
         (as_of, instrument_id, settle_date, mark_type, float(value), source, as_of + STAMP))
 
 
-def mark_dates() -> List[str]:
-    """AS_OF_DATES and every reference close their period P&L reads."""
+def mark_dates(through: str = None) -> List[str]:
+    """AS_OF_DATES and every reference close their period P&L reads; with `through`, also every
+    business day after the last as-of date up to and including it, and its own reference
+    closes (the sample book inside the app, 2026-09-28: marks carried to today, so Daily and
+    5d are not zero). None (the default, the pinned fixture) is unchanged."""
+    from engine.pnl.calendar import _is_business_day, load_holidays
     from engine.pnl.ledger import period_reference_dates
     dates = set(AS_OF_DATES)
     for d in AS_OF_DATES:
         dates.update(period_reference_dates(d).values())
+    if through and through > AS_OF_DATES[-1]:
+        dates.update(period_reference_dates(through).values())
+        holidays = load_holidays()
+        day, end = dt.date.fromisoformat(AS_OF_DATES[-1]), dt.date.fromisoformat(through)
+        while day < end:
+            day += dt.timedelta(days=1)
+            if _is_business_day(day, holidays):
+                dates.add(day.isoformat())
     return sorted(dates)
 
 
@@ -118,7 +130,10 @@ def _ensure_conversion_pairs(conn: sqlite3.Connection) -> None:
             (pair, base, quote, f"{pair} Curncy"))
 
 
-def build_book(conn: sqlite3.Connection = None) -> sqlite3.Connection:
+def build_book(conn: sqlite3.Connection = None, through: str = None) -> sqlite3.Connection:
+    """The sample blotter loaded and marked on `mark_dates(through)`: every mark is the same
+    deterministic function of its key and date, so `through=None` (the pinned fixture) writes
+    exactly what it always did and a later `through` only adds days."""
     from data.ingest import blotter, schema
 
     conn = conn if conn is not None else schema.connect()
@@ -142,7 +157,7 @@ def build_book(conn: sqlite3.Connection = None) -> sqlite3.Connection:
         "WHERE t.product = 'FX_OPTION' ORDER BY 1").fetchall()
 
     with conn:
-        for d in mark_dates():
+        for d in mark_dates(through):
             for pair in pairs:
                 spot = SPOT_BASE[pair] * (1 + _wobble(pair, "SPOT", d))
                 _mark(conn, d, pair, d, "SPOT", spot, "BBG_BFXFORWARD")
@@ -156,12 +171,12 @@ def build_book(conn: sqlite3.Connection = None) -> sqlite3.Connection:
             for instrument_id, expiry, fill in options:
                 _mark(conn, d, instrument_id, expiry, "PREMIUM", fill * (1 + _wobble(instrument_id, "PREM", d, width=0.2)), "QL_OPTIONS_PRICER")
                 _mark(conn, d, instrument_id, expiry, "DELTA", 0.45 + _wobble(instrument_id, "DELTA", d, width=0.2), "QL_OPTIONS_PRICER")
-    _mark_listed_options(conn)
-    _mark_lme_curves(conn)
+    _mark_listed_options(conn, through)
+    _mark_lme_curves(conn, through)
     return conn
 
 
-def _mark_listed_options(conn: sqlite3.Connection) -> None:
+def _mark_listed_options(conn: sqlite3.Connection, through: str = None) -> None:
     """Bloomberg's own price of each option on a future (official FUTURE_PX, BBG_BDH, keyed on
     the option's expiry) on every mark date, around its fill; an option that expired before the
     last as-of date is also marked on its expiry day, on its own instrument only, so the ledger
@@ -169,17 +184,18 @@ def _mark_listed_options(conn: sqlite3.Connection) -> None:
     options = conn.execute(
         "SELECT i.instrument_id, i.expiry_date, MIN(t.price) FROM trades t JOIN instruments i USING (instrument_id) "
         "WHERE t.product = 'CMDTY_OPTION' GROUP BY i.instrument_id ORDER BY 1").fetchall()
+    last = max(AS_OF_DATES[-1], through or "")
     with conn:
         for instrument_id, expiry, fill in options:
-            days = set(mark_dates())
-            if expiry <= AS_OF_DATES[-1]:
+            days = set(mark_dates(through))
+            if expiry <= last:
                 days.add(expiry)
             for d in sorted(days):
                 _mark(conn, d, instrument_id, expiry, "FUTURE_PX",
                       fill * (1 + _wobble(instrument_id, "PX", d, width=0.2)), "BBG_BDH")
 
 
-def _mark_lme_curves(conn: sqlite3.Connection) -> None:
+def _mark_lme_curves(conn: sqlite3.Connection, through: str = None) -> None:
     """Each LME metal's curve on every mark date, on the pillars `engine.lme.lme_curve_tickers`
     gives that day: the cash price (SPOT, settle = as-of), the 3M prompt, and the monthly
     prompts up to the first one on or after the metal's last ticket prompt (FWD_OUTRIGHT), all
@@ -191,7 +207,7 @@ def _mark_lme_curves(conn: sqlite3.Connection) -> None:
         "WHERE t.product = 'LME_FWD' GROUP BY t.instrument_id ORDER BY 1").fetchall())
     with conn:
         for root_id in sorted(last_prompt):
-            for d in mark_dates():
+            for d in mark_dates(through):
                 cash = LME_BASE[root_id] * (1 + _wobble(root_id, "SPOT", d))
                 _mark(conn, d, root_id, d, "SPOT", cash, "BBG_BFXFORWARD")
                 pillars = [p for p in lme_curve_tickers(root_id, d) if p["mark_type"] == "FWD_OUTRIGHT"]

@@ -40,6 +40,28 @@ from ui import revision, uploads
 # name every screen, script and test uses.
 from data.paths import DEFAULT_DB_PATH, REPO_ROOT, get_db_path  # noqa: F401
 
+# The ACTIVE database (2026-09-28, user: the sample book reachable from inside the app). The
+# process is single-user and local, so one process-wide holder is right: `create_app` sets it
+# to the database it was built for, "View the sample book" (ui/sample_book.py) points it at
+# the throw-away sample and "Back to my book" points it back. Every render reads it at call
+# time (`active_db_path` is the callable every tab's `register_callbacks` receives), and the
+# revision poll keys on it, so a switch refreshes every tab in place. The real database
+# (`get_db_path()`) is never written by a switch.
+ACTIVE_DB: dict = {"path": None}
+
+
+def active_db_path() -> Path:
+    """The database every screen reads right now: the one `set_active_db` last named, else
+    the real database (`get_db_path()`)."""
+    path = ACTIVE_DB["path"]
+    return Path(path) if path is not None else get_db_path()
+
+
+def set_active_db(path: Union[str, Path, None]) -> Path:
+    """Make `path` the active database (None: the real one). Returns the active path."""
+    ACTIVE_DB["path"] = Path(path) if path is not None else None
+    return active_db_path()
+
 # Order per the UI redesign waves 2 and 3 (user, 2026-09-28: six screens, one question each:
 # Book, Exposure, P&L, Timing & cash, Risk, Trades, plus Data), after the screens redesign of
 # 2026-09-25 ("the spread is the unit"); the app opens on the first. Each label maps to its
@@ -265,7 +287,7 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
         # "The data changed" signal (ui/revision.py): every tab listens, so an upload or a
         # Bloomberg pull shows up without a browser reload; and the build this page is of,
         # so a tab left open across a restart reloads itself once (the code changed).
-        *revision.components(db_path if db_path is not None else get_db_path(), build=build),
+        *revision.components(db_path if db_path is not None else active_db_path(), build=build),
     ])
 
 
@@ -279,6 +301,9 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     from ui.launch import source_fingerprint
     resolved = Path(db_path) if db_path is not None else get_db_path()
     ensure_schema(resolved)
+    # The database this app was built for is the active one until a switch (module docstring
+    # of ui/sample_book.py); a stale sample file from an earlier run is not the active one.
+    set_active_db(resolved)
     build = build_fingerprint if build_fingerprint is not None else source_fingerprint()
     # suppress_callback_exceptions: the Blotter sub-tabs render their tables, filter
     # dropdowns and row-detail panels dynamically inside the `_update` callback's own
@@ -311,21 +336,21 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     # New York) and the upload summary are fresh for a page opened days after `pnl`
     # started, instead of frozen at start-up (user, 2026-09-22: "by default, always price
     # pnl as of today"). `_layout_value()` is what tests walk.
-    app.layout = lambda: build_layout(load_summary(resolved), db_path=resolved)
+    app.layout = lambda: build_layout(load_summary(active_db_path()), db_path=active_db_path())
 
     # The hidden tabs (Spreads, FX & cash: `HIDDEN_TAB_KEYS`) register nothing: their bodies
     # are not in the layout, and the helpers Book and Timing & cash import from their modules
     # are plain functions, fed by those tabs' own callbacks.
-    header.register_callbacks(app, get_db_path=lambda: resolved)
-    blotter.register_callbacks(app, get_db_path=lambda: resolved)
-    curve.register_callbacks(app, get_db_path=lambda: resolved)
-    pnl.register_callbacks(app, get_db_path=lambda: resolved)
-    book.register_callbacks(app, get_db_path=lambda: resolved)
-    expiries.register_callbacks(app, get_db_path=lambda: resolved)
-    risk.register_callbacks(app, get_db_path=lambda: resolved)
-    market_data.register_callbacks(app, get_db_path=lambda: resolved)
-    uploads.register(app, get_db_path=lambda: resolved)
-    revision.register(app, get_db_path=lambda: resolved, build=build)
+    header.register_callbacks(app, get_db_path=active_db_path)
+    blotter.register_callbacks(app, get_db_path=active_db_path)
+    curve.register_callbacks(app, get_db_path=active_db_path)
+    pnl.register_callbacks(app, get_db_path=active_db_path)
+    book.register_callbacks(app, get_db_path=active_db_path)
+    expiries.register_callbacks(app, get_db_path=active_db_path)
+    risk.register_callbacks(app, get_db_path=active_db_path)
+    market_data.register_callbacks(app, get_db_path=active_db_path)
+    uploads.register(app, get_db_path=active_db_path)
+    revision.register(app, get_db_path=active_db_path, build=build)
 
     # The header's as-of (user, 2026-09-22: "always price pnl as of today ... unless changed
     # specifically otherwise"): today in New York on every page load (the callable layout
