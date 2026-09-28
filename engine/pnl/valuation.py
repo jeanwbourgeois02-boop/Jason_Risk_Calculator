@@ -70,7 +70,12 @@ curve, whose first pillar is the cash price (the metal's SPOT) placed at the LME
 (`engine.lme.cash_date`, not the FX spot date); USD-quoted, so S = 1 (`usd_per_quote('USD')`).
 Settled, it is frozen at the metal's last official cash price on or before its freeze day,
 the prompt less 2 LME business days (`engine.lme.freeze_date`, the day the prompt is the cash
-date; `engine.lme.settlement_price`). It is never relabelled FX_SPOT (`_reported_product`).
+date; `engine.lme.settlement_price`). After the freeze day and until the prompt (tom and
+delivery day) the ticket has no official price of its own any more, so the still-open row is
+valued at that same freeze figure (`_lme_cash_row`; user decision 2026-09-28, reviewer W-2,
+"the conventional way"), never at a later day's cash price, which is for a different prompt:
+LTD is the same on the freeze day, tom, the prompt and the day after, when the ledger takes
+over. It is never relabelled FX_SPOT (`_reported_product`).
 
 One bad value, one trade (2026-09-18, guards only -- no formula changed): every stored
 figure a formula uses (`trades.quantity`, `trades.price`, `instruments.multiplier`, each
@@ -93,6 +98,7 @@ from typing import Optional
 import pandas as pd
 
 from engine.lme import cash_date as lme_cash_date
+from engine.lme import freeze_date as lme_freeze_date
 from engine.lme import is_lme_instrument
 from engine.lme import settlement_price as lme_settlement_price
 from engine.pnl.calendar import _is_business_day, load_holidays, spot_date
@@ -666,6 +672,10 @@ def _retired_row(conn, r, as_of) -> dict:
 def _open_fx_row(conn, r, as_of) -> dict:
     out = dict(mark=_NAN, mark_date=r.settle_date, mark_source="", spot=_NAN, spot_source="",
                pnl_local=_NAN, pnl_usd=_NAN, pnl_spot_usd=_NAN, pnl_carry_usd=_NAN, reason="", note="")
+    if r.product in LME_PRODUCTS:
+        cash_day = lme_freeze_date(r.settle_date).isoformat()
+        if as_of > cash_day:
+            return _lme_cash_row(conn, r, cash_day)
     m_hit = _mark_near(conn, r.instrument_id, r.settle_date, "FWD_OUTRIGHT", as_of)
     if m_hit is None:
         out["reason"] = (f"no LME price of {r.instrument_id} for prompt {r.settle_date} on {as_of}: no cash price "
@@ -701,6 +711,41 @@ def _open_fx_row(conn, r, as_of) -> dict:
     out["pnl_carry_usd"] = pnl_carry
     out["pnl_spot_usd"] = pnl_usd - pnl_carry
     return out
+
+
+def _lme_cash_row(conn, r, cash_day: str) -> dict:
+    """An open LME ticket valued after the day its prompt became the cash date (`cash_day` =
+    `engine.lme.freeze_date(prompt)`, the prompt less 2 LME business days): on tom and on the
+    prompt itself. Its last official price of its own is the cash price of `cash_day`; the cash
+    price quoted on a later day is for delivery two days after that, a different prompt, so
+    reading the day's curve there (`_curve_interp`) marked the ticket at a price that was not
+    its own, and the ledger then snapped it back to the freeze figure on settlement: a two-day
+    round trip and a spurious Daily (reviewer W-2; user decision 2026-09-28, "the conventional
+    way"). The row takes the C14 freeze figure instead, `engine.lme.settlement_price`, exactly
+    what `_frozen_row` and the ledger's `_lme_freeze` give from the day after the prompt:
+    tonnes x (m - f), S = 1, `mark_date` the price's own date. Status stays OPEN until the
+    prompt (`_guarded_row`), so the ticket's USD cash lands on the ladder on the prompt as
+    before. With no cash price on file by `cash_day` the row is blank with its reason, never
+    the curve and never a later cash price."""
+    out = _unpriced("")
+    hit = lme_settlement_price(conn, r.instrument_id, r.settle_date)
+    if hit is None:
+        out["reason"] = (f"no official cash price of {r.instrument_id} on or before {cash_day}, the day its prompt "
+                         f"{r.settle_date} became cash; the ticket is off the curve and a later cash price is "
+                         f"not its own")
+        return out
+    m, m_day, m_src = hit
+    out.update(mark=m, mark_date=m_day, mark_source=m_src)
+    s, s_pair, s_src = usd_per_quote(conn, r.quote_ccy, m_day)
+    if s != s or s_pair is None:
+        out["reason"] = f"no SPOT for USD conversion of {r.quote_ccy} on {m_day}"
+        return out
+    pnl_local = r.quantity * (m - r.fill)
+    pnl_usd = pnl_local * s
+    when = "" if m_day == cash_day else " (the last before that day)"
+    return dict(out, spot=s, spot_source=s_src, pnl_local=pnl_local, pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd,
+                pnl_carry_usd=0.0, reason="",
+                note=f"prompt is cash from {cash_day}: valued at the cash price of {m_day}{when}")
 
 
 def _last_official_on_or_before(conn, instrument_id: str, mark_type: str, day: str):
@@ -803,7 +848,14 @@ def _frozen_row(conn, r) -> Optional[dict]:
         spot, spot_src, mark_label = s, s_src, "premium"
     else:
         return None
-    when = "" if m_day == settle else f" dated {m_day} (last before settlement)"
+    if product in LME_PRODUCTS:
+        # an LME ticket's price date compares to the freeze day, not the prompt (pnl-ledger's own
+        # wording since 2026-09-28)
+        cash_day = lme_freeze_date(settle).isoformat()
+        when = (f" of {m_day}, the day the prompt became cash" if m_day == cash_day else
+                f" dated {m_day} (last before the prompt became cash on {cash_day})")
+    else:
+        when = "" if m_day == settle else f" dated {m_day} (last before settlement)"
     return dict(mark=m, mark_date=m_day, mark_source=m_src, spot=spot, spot_source=spot_src,
                 pnl_local=pnl_local, pnl_usd=pnl_usd, pnl_spot_usd=pnl_usd, pnl_carry_usd=0.0, reason="",
                 note=f"frozen at {mark_label}{when}{conversion}; not yet recorded in realised_pnl")

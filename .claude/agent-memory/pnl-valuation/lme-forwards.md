@@ -17,6 +17,12 @@ metadata:
 - **Why it matters:** pnl-ledger imports `FX_PRODUCTS`, so adding LME_FWD there made the ledger freeze
   LME tickets through `_fx_freeze` (same figure; its lookup lacks settle_date = as_of_date, equivalent
   under the data contract). Any change to `FX_PRODUCTS` moves the ledger too: say so in the Handoff.
+- 2026-09-28 (user yes, reviewer W-2): an OPEN ticket with `as_of > freeze_date(prompt)` (tom, the
+  prompt) leaves the curve and takes the C14 freeze figure (`_lme_cash_row`, `settlement_price`),
+  status still OPEN so the ladder gets its cash on the prompt; a later day's cash price is a different
+  prompt and is never used. So for an LME business-day prompt the "nearest, no earlier pillar" LME
+  path is only reachable on the freeze day itself (prompt == cash pillar) or for a weekend prompt.
+  Golden proof: the nickel ticket's pinned days (08-14, 09-04 open; 09-18 settled) never hit P-1 / P.
 - Test date that separates the two pillar rules: as_of 2026-08-27, FX spot date 2026-08-31 (London bank
   holiday), LME cash date 2026-09-01.
 - **How to apply:** golden proof on the working tree = compare value_book rows per trade id against the

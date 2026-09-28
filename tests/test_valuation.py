@@ -803,7 +803,8 @@ def test_usd_per_quote_on_or_before_reads_the_last_exact_official_spot_on_or_bef
 # User decision 2026-09-24, CLAUDE.md "P&L conventions -> LME forwards": the FX-forward rule on the
 # metal's root id, PnL_USD = tonnes x (m - f), S = 1; the curve's cash price sits at the LME cash
 # date; settled, frozen at the last official cash price on or before the freeze day, the prompt
-# less 2 LME business days (`engine.lme.freeze_date`).
+# less 2 LME business days (`engine.lme.freeze_date`); open after the freeze day (tom, the prompt),
+# valued at that same freeze figure, never a later cash price (user decision 2026-09-28, W-2).
 
 def _lme_ticket(conn, tid, tonnes, fill, prompt, trade_date="2026-08-20", root="LME:CA"):
     """An LME ticket as ingest-parser writes it: the root instrument, product LME_FWD, two FX_NEAR
@@ -863,16 +864,23 @@ def test_a_broken_lme_prompt_is_read_between_the_cash_date_and_the_next_pillar()
     assert r["pnl_usd"] == -50.0 * (m - 9_700.0) and r["spot"] == 1.0
 
 
-def test_an_lme_prompt_before_the_cash_date_is_marked_at_the_cash_price():
+def test_an_lme_prompt_before_the_cash_date_is_off_the_curve_and_never_at_the_day_cash_price():
+    """A tom prompt (before the day's cash date) is past its freeze day: the day's cash price
+    (9_850, for delivery on the 17th) is not its own. Until 2026-09-28 this row read that cash
+    price off the curve ('nearest, no earlier pillar'); now it is the freeze figure of the 14th
+    (user decision 2026-09-28, W-2)."""
     from engine.lme import cash_date
     conn = schema.connect()
     _lme_ticket(conn, "lme3", 25.0, 9_800.0, "2026-09-16", trade_date="2026-09-14")   # tom; cash is the 17th
+    _lme_curve(conn, "2026-09-14", 9_830.0, {})
     _lme_curve(conn, "2026-09-15", 9_850.0, {"2026-12-15": 9_900.0})
     conn.commit()
     r = _by_id(conn, "2026-09-15").loc["lme3"]
     assert cash_date("2026-09-15").isoformat() == "2026-09-17"
-    assert r["mark"] == 9_850.0 and r["pnl_usd"] == 25.0 * 50.0
-    assert r["mark_source"] == "INTERP: LME:CA 2026-09-17 mark of 2026-09-15 (nearest, no earlier pillar)"
+    assert (r["status"], r["reason"], r["mark"], r["mark_date"], r["mark_source"]) == (
+        "OPEN", "", 9_830.0, "2026-09-14", "BBG_BFXFORWARD")
+    assert r["pnl_usd"] == 25.0 * 30.0
+    assert r["note"] == "prompt is cash from 2026-09-14: valued at the cash price of 2026-09-14"
 
 
 def test_a_settled_unfrozen_lme_ticket_shows_the_settlement_price_the_ledger_freezes():
@@ -897,16 +905,79 @@ def test_a_settled_unfrozen_lme_ticket_shows_the_settlement_price_the_ledger_fre
     assert settlement_price(conn, "LME:CA", "2026-09-16") == (9_740.0, "2026-09-14", "BBG_BFXFORWARD")
     assert (r4["status"], r4["reason"], r4["mark"], r4["mark_date"]) == ("SETTLED", "", 9_740.0, "2026-09-14")
     assert r4["pnl_usd"] == 100.0 * (9_740.0 - 9_800.0) and r4["spot"] == 1.0
-    assert r4["note"].startswith("frozen at cash price dated 2026-09-14 (last before settlement)")
+    assert r4["note"].startswith("frozen at cash price of 2026-09-14, the day the prompt became cash;")
     # no cash price on the 10th: the last one before it, never the 14th's, which is after the freeze day
     assert (r5["mark"], r5["mark_date"], r5["pnl_usd"]) == (9_760.0, "2026-09-09", -25.0 * (9_760.0 - 9_800.0))
-    assert r5["note"].startswith("frozen at cash price dated 2026-09-09 (last before settlement)")
+    assert r5["note"].startswith("frozen at cash price dated 2026-09-09 (last before the prompt became cash on 2026-09-10);")
     # the ledger freezes the same figures (its FX path, which LME_FWD joins through FX_PRODUCTS)
     ledger.realise_settled(conn, "2026-09-18")
     frozen = _by_id(conn, "2026-09-18")
     assert frozen.loc["lme4", "note"] != r4["note"]                      # read back from realised_pnl now
     assert frozen.loc["lme4", "pnl_usd"] == pytest.approx(r4["pnl_usd"], rel=1e-12)
     assert frozen.loc["lme5", "pnl_usd"] == pytest.approx(r5["pnl_usd"], rel=1e-12)
+
+
+def test_an_open_lme_ticket_after_its_freeze_day_holds_the_freeze_figure_until_the_ledger_takes_over():
+    """User decision 2026-09-28 (reviewer W-2, "the conventional way"): after the day the prompt
+    became cash (P-2) the ticket has no official price of its own, so on tom (P-1) and on the
+    prompt (P) the open row is valued at the C14 freeze figure, never at that day's cash price
+    (a different prompt). Prices on P-3, P-2, P-1 and P: LTD on P-2, P-1, P and P+1 is one figure,
+    at P-2's price; status OPEN through P (cash on the ladder on the prompt as before), SETTLED on
+    P+1 at the identical figure, from `_frozen_row` and then from the ledger's frozen row."""
+    from engine.lme import freeze_date
+    from engine.pnl import ledger
+    prompt, tonnes, fill = "2026-09-16", 100.0, 9_800.0
+    assert freeze_date(prompt).isoformat() == "2026-09-14"
+    conn = schema.connect()
+    _lme_ticket(conn, "lme8", tonnes, fill, prompt)
+    for day, cash in (("2026-09-11", 9_600.0), ("2026-09-14", 9_740.0), ("2026-09-15", 9_900.0),
+                      ("2026-09-16", 9_990.0)):
+        _lme_curve(conn, day, cash, {})
+    conn.commit()
+    expected = tonnes * (9_740.0 - fill)
+    rows = {day: _by_id(conn, day).loc["lme8"] for day in ("2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17")}
+    for day, r in rows.items():
+        assert r["reason"] == "", (day, r["reason"])
+        assert (r["mark"], r["spot"], r["spot_source"]) == (9_740.0, 1.0, "identity"), day
+        assert r["pnl_usd"] == r["pnl_local"] == r["pnl_spot_usd"] == expected, day
+        assert r["pnl_carry_usd"] == 0.0, day
+    assert [r["status"] for r in rows.values()] == ["OPEN", "OPEN", "OPEN", "SETTLED"]
+    # P-2: still on the curve, whose cash pillar is the prompt itself (a curve row's mark_date is the prompt)
+    assert rows["2026-09-14"]["mark_date"] == prompt
+    assert rows["2026-09-14"]["mark_source"] == "INTERP: LME:CA 2026-09-16 mark of 2026-09-14 (nearest, no earlier pillar)"
+    # P-1 and P: off the curve, at the freeze figure dated the price's own day, said in the note
+    for day in ("2026-09-15", "2026-09-16"):
+        assert (rows[day]["mark_date"], rows[day]["mark_source"]) == ("2026-09-14", "BBG_BFXFORWARD")
+        assert rows[day]["note"] == "prompt is cash from 2026-09-14: valued at the cash price of 2026-09-14"
+    assert rows["2026-09-17"]["mark_date"] == "2026-09-14"
+    assert rows["2026-09-17"]["note"].startswith("frozen at cash price of 2026-09-14, the day the prompt became cash;")
+    # the ledger freezes the identical figure on P+1
+    ledger.realise_settled(conn, "2026-09-17")
+    frozen = _by_id(conn, "2026-09-17").loc["lme8"]
+    assert frozen["status"] == "SETTLED" and frozen["pnl_usd"] == expected and frozen["mark_date"] == "2026-09-14"
+    assert frozen["note"] != rows["2026-09-17"]["note"]                # read back from realised_pnl now
+
+
+def test_an_open_lme_ticket_after_its_freeze_day_with_no_price_by_then_is_blank_never_the_curve():
+    """No cash price on or before the freeze day: the row on tom is blank with its reason, even
+    though the day's own cash price is on file (it is for a different prompt), and the earlier
+    price's absence is not carried from a later close either."""
+    conn = schema.connect()
+    _lme_ticket(conn, "lme9", 100.0, 9_800.0, "2026-09-16")             # freeze day 2026-09-14
+    _lme_curve(conn, "2026-09-15", 9_900.0, {"2026-12-16": 9_950.0})
+    _lme_curve(conn, "2026-09-16", 9_990.0, {})
+    conn.commit()
+    for day in ("2026-09-15", "2026-09-16"):
+        r = _by_id(conn, day).loc["lme9"]
+        assert r["status"] == "OPEN" and r["pnl_usd"] != r["pnl_usd"] and r["mark"] != r["mark"], day
+        assert r["reason"] == ("no official cash price of LME:CA on or before 2026-09-14, the day its prompt 2026-09-16 "
+                               "became cash; the ticket is off the curve and a later cash price is not its own"), day
+    # a cash price before the freeze day is the ticket's own: the last one before it
+    _lme_curve(conn, "2026-09-11", 9_600.0, {})
+    conn.commit()
+    r = _by_id(conn, "2026-09-15").loc["lme9"]
+    assert (r["mark"], r["mark_date"], r["pnl_usd"]) == (9_600.0, "2026-09-11", 100.0 * (9_600.0 - 9_800.0))
+    assert r["note"] == "prompt is cash from 2026-09-14: valued at the cash price of 2026-09-11 (the last before that day)"
 
 
 def test_an_lme_ticket_with_no_curve_at_all_is_blank_with_its_reason():
