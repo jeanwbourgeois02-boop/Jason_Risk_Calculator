@@ -27,6 +27,9 @@ Each has the default the build assumes until the user answers.
 - **C20. Implied vol on the Options tab** for options on futures. Recommended: the options pricer stores it with the Greeks, and the tab shows it (the tab never prices an option itself).
 - **C21. A leftover MANUAL swap's reason** says it "leaves at the next upload", which is untrue for a hand-booked trade. Recommended: keep the wording (none is expected); change it if one turns up.
 - **C22. The negative-WTI stress replay** (2020-04-17 to 04-20) is n/a: the research history on this PC starts 2020-09-21. To check how far back the Bloomberg PC's research database goes.
+- **C23. EOD for Daily P&L.** Decided 2026-09-28 (user): no New York 15:00 close for the futures book. Yesterday's, 5d and the other reference closes are each contract's own close at its exchange (Bloomberg's daily PX_LAST, as built); Daily is the day's live price against them. A 15:00 New York bar for futures was built and reverted the same day, nothing committed. Open: FX hedges still take the 15:00 New York bar of the macro book; recommended to move them to Bloomberg's daily close (17:00 New York, PX_LAST) so the whole book is on daily closes and the 140-day intraday limit goes; needs the user's yes (hard rule 7).
+- **C24. Non-USD P&L conversion.** Decided 2026-09-28 (user): every figure in USD, open non-USD P&L re-converted at each day's spot. To ask Jason whether the PB statement instead fixes each day's local P&L at that day's spot (its number would then drift from ours on a long-held SHFE position).
+- **C25. Three questions for Jason (2026-09-28):** (1) should the app match the PB's daily P&L statement or be an independent Bloomberg check; (2) fees in or out of P&L; (3) the PB's $/lb prices for cattle and copper where Bloomberg quotes cents: every cents-quoted contract, or only those (C3).
 
 ## Macro book (inherited; retired with Phase 2)
 
