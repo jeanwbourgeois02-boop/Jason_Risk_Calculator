@@ -14,15 +14,21 @@ after the Screens redesign plan's Phase B of 2026-09-25). One screen:
      not give is "n/a" with the reason on hover.
   2. `detail_for`, the row detail (a click on a row): the position's entries and legs, as the
      Spreads tab builds them (`ui.tabs.spreads.detail_payloads`, `members_table`,
-     `detail_legs_table`), its research history chart (`ui.tabs.spreads.history_figure`), and a
-     link to the Spreads tab for its own daily history from our marks.
+     `detail_legs_table`), its research history chart (`ui.tabs.spreads.history_figure`), and its
+     own daily history from our marks (`engine.spreads.position_history` over `history_dates`,
+     one filled valuation per business day through the shared cached reader, built by
+     `ui.tabs.spreads.history_block`), filled by its own callback under a loading state since it
+     takes seconds (wave 3, 2026-09-28).
   3. `needs_you_section`, "Needs you": the alerts, most urgent first, each naming its tab:
      expiries at EXPIRED / RED / AMBER, marks missing, positions the rule could not group, the
      VaR against the vol target (the header's memoised reading of risk-metrics, filled by a
      chained callback so it never holds up the body), the limits.
-  4. `load_report_section`: what the last blotter load did, in plain words: the trades on file by
-     kind, the rows that did not become trades (the `upload_issues` table the upload writes, the
-     Data tab's own list), the trades unpriced today with their reasons.
+  4. `load_report_section`: what the last blotter load did, in plain words: the persisted
+     upload report (`upload_report`, one row the upload replaces, read through
+     `data.ingest.upload.last_upload_report`: the file, when it was loaded, the trades loaded by
+     kind, the book filter's exclusions, the underlying futures written with no trade; the whole
+     upload message on hover), the rows that did not become trades (the `upload_issues` table
+     the upload writes, the Data tab's own list), the trades unpriced today with their reasons.
   5. One Data issues drawer.
 
 Display rules (`ui.tabs.formatting`, `ui.tabs.ranking`): definitions on hover of the titles,
@@ -65,6 +71,9 @@ DETAIL_ID = "book-detail"               # the row detail under it
 DETAIL_MEMBERS_ID = "book-detail-members"
 DETAIL_LEGS_ID = "book-detail-legs"
 DETAIL_GRAPH_ID = "book-detail-graph"
+DETAIL_HISTORY_ID = "book-detail-history"                  # the position's own daily history, filled on open
+DETAIL_HISTORY_REQUEST_ID = "book-detail-history-request"  # what that callback computes: the position and date
+DETAIL_HISTORY_GRAPH_ID = "book-detail-history-graph"
 ALERTS_ID = "book-alerts"
 LOAD_ID = "book-load"
 ISSUES_ID = "book-issues"
@@ -109,9 +118,11 @@ TABLE_ABOUT = ("One row per open position (spreads-engine: the same spread put o
 NEEDS_ABOUT = ("What needs you today, most urgent first: expiries within the alert window (Expiries tab), marks "
                "the book needs and does not have (Data tab), trades the grouping rule could not put in a spread "
                "(Spreads tab), the VaR against the vol target and the desk and exchange limits (Risk tab).")
-LOAD_ABOUT = ("What the last blotter load did: the trades on file by kind, the rows of the file that did not "
-              "become trades (with the parser's own reason), and the trades the engine could not price today. "
-              "The load itself is not changed here: the Upload blotter button above replaces the whole book.")
+LOAD_ABOUT = ("What the last blotter load did, as the upload recorded it: the file and when it was loaded, the "
+              "trades it loaded by kind, what the book filter left out, the rows of the file that did not become "
+              "trades (with the parser's own reason), and the trades the engine could not price today. The whole "
+              "upload message is on hover of the first line. The load itself is not changed here: the Upload "
+              "blotter button above replaces the whole book.")
 SCOPE_NOTE = ("P&L on this table is the futures book by spread: FX hedges, LME forwards and options on futures "
               "outside a spread are not in it (their P&L is on the Trades tab). The header is the whole book.")
 
@@ -313,8 +324,13 @@ def _load_report(conn: sqlite3.Connection, as_of: str) -> dict:
         issues_error = ""
     except sqlite3.Error:      # no upload since the table was added: nothing recorded
         issues, issues_error = [], ""
+    try:
+        from data.ingest.upload import last_upload_report
+        report, report_error = last_upload_report(conn), ""
+    except Exception as exc:  # noqa: BLE001 -- the section says so, the priced-book lines stay
+        report, report_error = None, _failure("the upload report could not be read", exc)
     return {"counts": counts, "n_total": int(n_total), "n_filled": int(n_filled), "unpriced": unpriced,
-            "issues": issues, "issues_error": issues_error}
+            "issues": issues, "issues_error": issues_error, "report": report, "report_error": report_error}
 
 
 def gather(conn: sqlite3.Connection, as_of: str, wait_for_risk: bool = False) -> dict:
@@ -720,17 +736,58 @@ def detail_for(data: dict, position_id: Optional[str]) -> Any:
     legs.id = DETAIL_LEGS_ID
     return html.Div(className="section section--secondary", children=[
         html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "6px"}, children=[
-            about(summary, "The position's entries and legs (spreads-engine), and the research app's history of "
-                  "the spread as context (never a mark). Its own daily history from our marks, LTD and level "
-                  "by day, is on the Spreads tab.", level="h5", style={"margin": "0 0 6px"}),
-            pointer("Spreads", "book-detail-spreads")]),
-        chart,
+            about(summary, "The position's entries and legs (spreads-engine), the research app's history of "
+                  "the spread as context (never a mark), and its own daily history from our marks: LTD USD by "
+                  "day as bars, the level as a line, the entry dashed, worked out when the row is opened.",
+                  level="h5", style={"margin": "0 0 6px"})]),
+        html.Div(style={"display": "flex", "flexWrap": "wrap", "gap": "12px", "alignItems": "flex-start"},
+                 children=[html.Div(chart, style=_CHART_BOX), history_slot(payload, as_of)]),
         about("Entries", "The spreads found on each trade date that make this position, with their own entry "
                          "level.", level="div", className="section-kicker"),
         members,
         about("Legs", "Each leg's prices as quoted (entry = its lots-weighted average fill), and the factor that "
                       "turns its price into the spread's unit.", level="div", className="section-kicker"),
         legs])
+
+
+_CHART_BOX = {"flex": "1 1 520px", "minWidth": "0"}
+
+
+def history_slot(payload: dict, as_of: Optional[str]) -> html.Div:
+    """The place of the position's own daily history in the detail: the request the history
+    callback reads (`ui.tabs.spreads.history_request`: the position as `position_history` reads
+    it, the as-of, the entry level and unit) and a loading state it fills. Nothing is computed
+    here, so opening a row never values the past closes in the detail callback."""
+    return html.Div(style=_CHART_BOX, children=[
+        dcc.Store(id=DETAIL_HISTORY_REQUEST_ID, data=spreads_ui.history_request(payload, as_of)),
+        dcc.Loading(type="dot", children=html.Div(id=DETAIL_HISTORY_ID, children=html.Div(
+            f"Working out the daily history from {spreads_ui.HISTORY_LABEL}...", className="section-kicker")))])
+
+
+def _repoint_graphs(component: Any, graph_id: str) -> Any:
+    """Every `dcc.Graph` inside `component` takes `graph_id`: the Spreads tab's builder names its
+    own graph, and the hidden Spreads body may hold that id on the same page."""
+    if isinstance(component, dcc.Graph):
+        component.id = graph_id
+    children = getattr(component, "children", None)
+    for child in (children if isinstance(children, (list, tuple)) else [children]):
+        if child is not None and not isinstance(child, (str, int, float)):
+            _repoint_graphs(child, graph_id)
+    return component
+
+
+def render_history(request: Optional[dict], db_path) -> Any:
+    """The position's own daily history for the detail's request, as the Spreads tab builds it
+    (`ui.tabs.spreads.history_block`: `engine.spreads.position_history` over `history_dates`, each
+    business day through the screens' memoised filled reader), the graph under the Book's own id.
+    A problem is its sentence where the chart would be."""
+    try:
+        block = spreads_ui.history_block(request, db_path)
+    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a broken panel
+        log.exception("book tab history failed")
+        return html.Div(f"No daily history: it could not be worked out ({type(exc).__name__}: {exc}).",
+                        className="section-kicker")
+    return _repoint_graphs(block, DETAIL_HISTORY_GRAPH_ID)
 
 
 def _research_chart(payload: dict, as_of: Optional[str]) -> Any:
@@ -922,18 +979,64 @@ def _kind_words(product: str, n: int) -> str:
     return f"{n} {words}"
 
 
+# The upload report's kind columns (data.ingest.upload.UPLOAD_REPORT_COLUMNS), in the sentence's
+# order, with the words for one and for many.
+_REPORT_KINDS = (("futures", "future", "futures"), ("options_on_futures", "option on futures", "options on futures"),
+                 ("lme_forwards", "LME forward", "LME forwards"), ("fx_forwards", "FX forward", "FX forwards"),
+                 ("fx_spot", "FX spot", "FX spot"), ("fx_options", "FX option", "FX options"))
+
+
+def _loaded_at_words(iso: Optional[str]) -> str:
+    """'28 Sep 2026 10:12 UTC' from the report's ISO UTC stamp; the stamp itself when it is not one."""
+    try:
+        t = dt.datetime.fromisoformat(str(iso or ""))
+    except ValueError:
+        return f"{iso or 'time unknown'} UTC"
+    if t.tzinfo is not None:
+        t = t.astimezone(dt.timezone.utc)
+    return f"{t.day} {t:%b %Y %H:%M} UTC"
+
+
+def report_line(report: dict) -> Tuple[str, str]:
+    """(text, hover) of the persisted upload report's first line: the file, when it was loaded and
+    the trades loaded by kind (a zero count left out); the whole upload message on hover."""
+    kinds = [f"{int(report.get(col) or 0)} {one if int(report.get(col) or 0) == 1 else many}"
+             for col, one, many in _REPORT_KINDS if int(report.get(col) or 0)]
+    text = (f"{report.get('filename') or 'the last file'}, loaded {_loaded_at_words(report.get('uploaded_at'))}: "
+            + (", ".join(kinds) if kinds else "no trade loaded"))
+    hover = str(report.get("summary") or "").strip() or "The upload recorded no message."
+    if not int(report.get("library_tickers") or 0):
+        hover += "\nThe Bloomberg library could not sync at the load (0 tickers)."
+    return text, hover
+
+
 def load_report_lines(load: Optional[dict], as_of: str) -> List[Tuple[str, str, str]]:
-    """[(text, hover, severity-word)] of the load report, in plain words."""
+    """[(text, hover, severity-word)] of the load report, in plain words: the persisted upload
+    report first (its file, time and counts; the exclusions; the underlying futures written), then
+    the rows that did not become trades, then the priced book's unpriced and filled counts."""
     if not load:
         return []
     lines: List[Tuple[str, str, str]] = []
-    counts = load.get("counts") or {}
-    if counts:
-        by_kind = ", ".join(_kind_words(p, n) for p, n in sorted(counts.items(), key=lambda kv: -kv[1]))
-        lines.append((f"{load.get('n_total', 0):,} trades on file: {by_kind}",
-                      "Every trade the last blotter load booked, plus the manual trades, counted by product.", "info"))
+    report = load.get("report")
+    if report:
+        lines.append((*report_line(report), "info"))
+        n_excluded = int(report.get("excluded_rows") or 0)
+        if n_excluded:
+            lines.append((f"{_plural(n_excluded, 'row')} left out by the book filter",
+                          str(report.get("excluded_text") or "").strip()
+                          or "Rows outside the book's status, fund, trader or desk lists (config/book.yaml).", "watch"))
+        n_under = int(report.get("underlying_futures_written") or 0)
+        if n_under:
+            lines.append((f"{_plural(n_under, 'underlying future')} written with no trade",
+                          "The future under an option on futures, written as an instrument so the option's Greeks "
+                          "can be priced; it holds no position of its own.", "info"))
     else:
-        lines.append(("No trades on file: upload a blotter to fill the book.", "", "info"))
+        counts = load.get("counts") or {}
+        on_file = (f"{load.get('n_total', 0):,} trades on file: "
+                   + ", ".join(_kind_words(p, n) for p, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+                   if counts else "No trades on file: upload a blotter to fill the book.")
+        lines.append(("No upload recorded on this database",
+                      "; ".join(x for x in (load.get("report_error") or "", on_file) if x), "info"))
     issues = load.get("issues") or []
     if issues:
         kinds: Dict[str, int] = {}
@@ -1130,10 +1233,11 @@ build_layout = layout
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Three callbacks: the body on the header's as-of, every data revision and the safety
+    """Four callbacks: the body on the header's as-of, every data revision and the safety
     interval; then, only when the body went out with the VaR pending, the alerts again once the
     header's risk reading is worked out (chained on `VAR_PENDING_ID`, so it never holds up the
-    body); and the row detail on a click in the table."""
+    body); the row detail on a click in the table; and, once the detail's history request
+    appears, the position's own daily history under its loading state."""
 
     @app.callback(
         Output(BODY_ID, "children"),
@@ -1155,3 +1259,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                   State(AS_OF_STORE_ID, "data"), prevent_initial_call=True)
     def _detail(active_cell, records, as_of):
         return render_detail(active_cell, records, as_of, get_db_path())
+
+    @app.callback(Output(DETAIL_HISTORY_ID, "children"), Input(DETAIL_HISTORY_REQUEST_ID, "data"))
+    def _history(request):
+        return render_history(request, get_db_path())

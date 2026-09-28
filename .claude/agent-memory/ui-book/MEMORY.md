@@ -1,1 +1,1 @@
-- [Book tab conventions](book-tab-conventions.md) — gather/body split, memo, chained VaR callback, golden-book test pitfalls (read-only URI)
+- [Book tab conventions](book-tab-conventions.md) — gather/body split, memo, chained VaR and history callbacks, Last load from upload_report, book-detail-* id rule, golden-book pitfalls
