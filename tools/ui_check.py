@@ -300,10 +300,11 @@ def _flatten(children: Iterable) -> Iterable:
 # ----------------------------------------------------------------------------- the walk
 class Run:
     """One piece of text as drawn: its words, the chain of elements above it, what kind it is."""
-    __slots__ = ("text", "chain", "kind")
+    __slots__ = ("text", "chain", "kind", "inline_classes")
 
-    def __init__(self, text: str, chain: List[Node], kind: str):
+    def __init__(self, text: str, chain: List[Node], kind: str, inline_classes: Iterable[str] = ()):
         self.text, self.chain, self.kind = text, chain, kind   # kind: visible | hover | placeholder | label
+        self.inline_classes = sorted(set(inline_classes))    # the classes of the spans the words came from
 
 
 def _label_texts(value: Any) -> List[Any]:
@@ -323,9 +324,9 @@ def walk(root: Any) -> List[Run]:
     """Every run of text in the tree under `root` (a component, a list of them, or strings)."""
     runs: List[Run] = []
 
-    def emit(text: str, chain: List[Node], kind: str) -> None:
+    def emit(text: str, chain: List[Node], kind: str, inline_classes: Iterable[str] = ()) -> None:
         if text and text.strip():
-            runs.append(Run(text, list(chain), kind))
+            runs.append(Run(text, list(chain), kind, inline_classes))
 
     def props_of(node: Node, chain: List[Node]) -> None:
         title = node.props.get("title")
@@ -387,11 +388,13 @@ def walk(root: Any) -> List[Run]:
         here = chain + [node]
         props_of(node, chain + [node])
         buf: List[str] = []
+        buf_classes: set = set()
 
         def flush():
             if buf:
-                emit("".join(buf), here, "visible")
+                emit("".join(buf), here, "visible", buf_classes)
                 buf.clear()
+            buf_classes.clear()
 
         def inline(child: Any) -> None:
             if child is None or isinstance(child, bool):
@@ -413,6 +416,7 @@ def walk(root: Any) -> List[Run]:
                 return
             if n.type in INLINE_TYPES and n.type not in ("A",) and n.source != "markdown":
                 props_of(n, here + [n])
+                buf_classes.update(n.classes)
                 for c in _flatten(n.children):
                     inline(c)
                 return
@@ -500,6 +504,7 @@ _PUNCT_SPACE = re.compile(r"[^\s.]\s+([.,;!?]|:(?!\s*[\d−+-]))(\s|$)")
 
 def check_runs(tab: str, runs: List[Run]) -> List[Finding]:
     out: List[Finding] = []
+    titles: Dict[int, str] = {}
     for run in runs:
         text = run.text
         shown = re.sub(r"\s+", " ", text).strip()
@@ -529,7 +534,285 @@ def check_runs(tab: str, runs: List[Run]) -> List[Finding]:
         if (run.kind == "visible" and len(shown) > 2 and not _in_control(run.chain)
                 and not _held(run.chain)):
             add("LOOSE_TEXT")
+        if tab in LAYOUT_TABS and run.kind == "visible" and re.search(r"[A-Za-z0-9]", shown):
+            # the spans the words came from count too: a line holding a title span is a title line
+            lchain = run.chain + ([Node("Span", None, run.inline_classes, {}, [], "inline")]
+                                  if run.inline_classes else [])
+            role = designed_role(lchain)
+            if role:
+                out.append(Finding(tab, "DESIGNED_LINE", shown[:100], path, False, role))
+            elif not _placed(lchain):
+                out.append(Finding(tab, "LOOSE_BLOCK", shown[:100], path, False,
+                                   f"under: {section_title(run.chain, titles)}"))
     return out
+
+
+# ----------------------------------------------------------------------------- the strict layout
+# LOOSE_BLOCK (the user: "things just wandering about not in tables"): inside a tab body, text is in
+# place only in a table cell, a section's title, the one headline line above a table, a control, a
+# drawer's title line, a chart or a tab's empty state. A paragraph, a meta line under a title, a
+# list, a tile, a status sentence in a Div or a note under a table is flagged.
+LAYOUT_TABS = {"book", "pnl", "risk", "blotter", "data"}
+TITLE_CLASSES = {"about-title", "tk-title", "book-section-title", "section-title", "risk-subhead", "curve-subhead",
+                 "fx-ccy-title", "book-empty-title", "upload-card-title", "card-head",
+                 "book-h"}                          # book.panel_chart: the chart's own title
+HEADLINE_CLASSES = {"tk-headline"}                  # trade_filter.headline: "3 of 6 trades · ..."
+# DESIGNED_LINE: the one-line blocks the Phase G design places outside a table on purpose, told by their
+# class (never by their words). Reported apart, for the user to judge; never a failure.
+DESIGNED_CLASSES = {
+    "tk-headline": "headline above the table",                  # trade_filter.headline (Book, P&L, Risk)
+    "risk-reach": "Risk history-reach line",                    # risk.py, under the headline
+    "book-prepull": "Book pre-pull line",                       # book.PREPULL_TEXT
+    "tk-flag-lines": "Book panel flags line",                   # book.panel_tr
+    "blotter-upload-line": "Blotter last upload line",          # blotter_fills.last_upload_block
+    "data-status-line": "Data status line",                     # market_data.BODY_ID
+    "risk-fold-head": "fold title",                             # risk_folds: "Net by commodity", ...
+    "risk-fold-title": "fold title",
+    "tk-fold": "fold title",                                    # book: "Closed this year (N)" row
+    "risk-more": "fold title",                                  # risk_folds: the Stress fold's "N more"
+}
+FOLD_BLOCK_CLASS = "tk-fold-block"                  # a Details fold (P&L "Track record"): its Summary is a fold title
+PANEL_CELL_CLASS = "tk-panel-cell"                  # book.panel_tr: one Td spanning the table, a panel, not a cell
+CONTROL_STRIP_CLASS = "tk-strip--controls"          # a strip of switches: its words are the switches' labels
+EMPTY_STATE_PREFIX = "book-empty"                   # book.empty_state, shared by every trade tab
+PLACED_TYPES = {"Td", "Th", "DataTable", "Graph", "Summary", "Button", "Dropdown", "Input", "RadioItems",
+                "Checklist", "Label", "Tabs", "Tab", "A", "DatePickerSingle", "DatePickerRange", "Upload", "Select",
+                "Textarea", "Option"} | HEADINGS
+SECTION_TOKENS = {"card", "book-card", "tk-card", "risk-fold", "data-block", "section", "status-panel", "upload-card",
+                  "curve-panel", "fx-ccy-panel", "tk-foot", "details", "issues-drawer"}
+LAYOUT_SKIP_TYPES = {"Store", "Interval", "Download", "Location"}
+
+
+def designed_role(chain: List[Node]) -> str:
+    """The designed one-line block the run belongs to ('' when none), by class."""
+    for i, node in enumerate(chain):
+        for c in node.classes:
+            if c in DESIGNED_CLASSES:
+                return DESIGNED_CLASSES[c]
+        if node.type == "Summary" and i and FOLD_BLOCK_CLASS in chain[i - 1].classes:
+            return "fold title"
+    return ""
+
+
+def _placed(chain: List[Node]) -> bool:
+    for node in chain:
+        if node.type == "Td" and PANEL_CELL_CLASS in node.classes:
+            continue
+        if node.type in PLACED_TYPES or CONTROL_STRIP_CLASS in node.classes:
+            return True
+        for c in node.classes:
+            if c in TITLE_CLASSES or c in HEADLINE_CLASSES or c.startswith(EMPTY_STATE_PREFIX):
+                return True
+    return False
+
+
+def _is_section(node: Node) -> bool:
+    return node.type == "Details" or any(c in SECTION_TOKENS or c.endswith("-card") for c in node.classes)
+
+
+def _is_title(node: Node) -> bool:
+    return node.type in HEADINGS or node.type == "Summary" or any(c in TITLE_CLASSES for c in node.classes)
+
+
+def text_of(obj: Any) -> str:
+    """The visible words under `obj`, spaces collapsed, the info mark dropped."""
+    parts: List[str] = []
+
+    def visit(o: Any) -> None:
+        if o is None or isinstance(o, bool):
+            return
+        if isinstance(o, (str, int, float)):
+            parts.append(str(o))
+            return
+        if isinstance(o, (list, tuple)):
+            for c in _flatten(o):
+                visit(c)
+            return
+        n = o if isinstance(o, Node) else as_node(o)
+        if n is not None and not _is_hidden(n) and n.type not in LAYOUT_SKIP_TYPES:
+            block = n.type not in INLINE_TYPES
+            parts.append(" " if block else "")        # a block's words never run into its neighbour's
+            for c in _flatten(n.children):
+                visit(c)
+            parts.append(" " if block else "")
+    visit(obj)
+    return re.sub(r"\s+", " ", "".join(parts).replace("ⓘ", "")).strip()
+
+
+def find_title(node: Node, limit: int = 400) -> str:
+    """The first title (a heading, a Summary, a title class) under `node`, depth first; '' if none."""
+    seen = [0]
+
+    def visit(o: Any) -> Optional[str]:
+        seen[0] += 1
+        if seen[0] > limit or o is None or isinstance(o, (bool, str, int, float)):
+            return None
+        if isinstance(o, (list, tuple)):
+            for c in _flatten(o):
+                hit = visit(c)
+                if hit:
+                    return hit
+            return None
+        n = o if isinstance(o, Node) else as_node(o)
+        if n is None or _is_hidden(n) or n.type in LAYOUT_SKIP_TYPES:
+            return None
+        if _is_title(n) or designed_role([n]) == "fold title":
+            return text_of(n) or None
+        for c in _flatten(n.children):
+            hit = visit(c)
+            if hit:
+                return hit
+        return None
+    return visit(list(node.children)) or ""
+
+
+def section_title(chain: List[Node], cache: Dict[int, str]) -> str:
+    """The title of the nearest titled section around the run, else "(no titled section)"."""
+    for node in reversed(chain[:-1]):
+        if _is_section(node):
+            if id(node) not in cache:
+                cache[id(node)] = find_title(node)
+            if cache[id(node)]:
+                return cache[id(node)][:60]
+    return "(no titled section)"
+
+
+def _table_shape(node: Node) -> Tuple[int, int]:
+    rows, cols = 0, 0
+
+    def visit(o: Any, in_head: bool) -> None:
+        nonlocal rows, cols
+        n = o if isinstance(o, Node) else as_node(o)
+        if n is None or _is_hidden(n):
+            return
+        if n.type == "Tr":
+            cells = [c for c in (as_node(k) if not isinstance(k, Node) else k for k in _flatten(n.children))
+                     if c is not None and c.type in ("Td", "Th")]
+            cols = max(cols, len(cells))
+            rows += 0 if in_head else 1
+            return
+        for c in _flatten(n.children):
+            visit(c, in_head or n.type == "Thead")
+    visit(node, False)
+    return rows, cols
+
+
+def _count_type(node: Node, type_: str) -> int:
+    """How many elements of `type_` are under `node` (static blocks parsed)."""
+    total = 0
+    for c in _flatten(node.children):
+        n = c if isinstance(c, Node) else as_node(c)
+        if n is None or _is_hidden(n):
+            continue
+        total += (1 if n.type == type_ else 0) + _count_type(n, type_)
+    return total
+
+
+def _text_only(node: Node) -> bool:
+    for c in _flatten(node.children):
+        if c is None or isinstance(c, (bool, str, int, float)):
+            continue
+        n = c if isinstance(c, Node) else as_node(c)
+        if n is None:
+            continue
+        if n.type not in INLINE_TYPES or n.type == "A" or not _text_only(n):
+            return False
+    return True
+
+
+def _block_kind(node: Node) -> Optional[Tuple[str, str, bool]]:
+    """(kind, title, descend) for a block the inventory names, None for a wrapper to look through."""
+    classes = set(node.classes)
+    role = next((DESIGNED_CLASSES[c] for c in node.classes if c in DESIGNED_CLASSES), "")
+    if role:
+        return f"designed line ({role})", text_of(node)[:80], False
+    if node.type == "Table":
+        r, c = _table_shape(node)
+        return f"table {r} rows x {c} cols", "", False
+    if node.type == "DataTable":
+        return (f"table {len(node.props.get('data') or [])} rows x {len(node.props.get('columns') or [])} cols",
+                "", False)
+    if node.type == "Graph":
+        texts = _figure_texts(node.props.get("figure"))
+        return "chart", (texts[0] if texts else ""), False
+    if node.type == "Details":
+        summary = next((as_node(c) for c in _flatten(node.children) if getattr(as_node(c), "type", "") == "Summary"),
+                       None) if node.source == "dash" else None
+        kind = "fold" if FOLD_BLOCK_CLASS in classes else "drawer"
+        return kind, (text_of(summary) if summary else find_title(node)), True
+    if node.type in ("Ul", "Ol"):
+        n = _count_type(node, "Li")
+        return f"list {n} items", "", False
+    if classes & HEADLINE_CLASSES:
+        return "headline", text_of(node)[:80], False
+    if classes & {"tk-strip", "tf-bar", "blotter-filter-bar", "toolbar", "tf-bar-slot"}:
+        return "strip", text_of(node)[:80], False
+    if any("tile" in c or c == "cards" or c.startswith("cards--") for c in classes):
+        n = sum(1 for c in _flatten(node.children) if c is not None and not isinstance(c, str))
+        return f"tiles ({n})", text_of(node)[:80], False
+    if node.type in {"Button", "Dropdown", "RadioItems", "Checklist", "Input", "DatePickerSingle",
+                     "DatePickerRange", "Tabs"}:
+        return "controls", text_of(node)[:40] or str(node.props.get("placeholder") or ""), False
+    if _is_title(node):
+        return "title", text_of(node)[:80], False
+    if node.type == "Markdown":
+        return None
+    return None
+
+
+def layout_inventory(tree: Any, max_depth: int = 3) -> List[str]:
+    """The page's blocks in order, one line each (kind: title), cards indented over their contents."""
+    lines: List[str] = []
+
+    def add(depth: int, kind: str, title: str = "") -> None:
+        lines.append("  " * depth + kind + (f": {title}" if title else ""))
+
+    def visit(obj: Any, depth: int) -> None:
+        if obj is None or isinstance(obj, bool):
+            return
+        if isinstance(obj, (list, tuple)):
+            for c in _flatten(obj):
+                visit(c, depth)
+            return
+        if isinstance(obj, (str, int, float)):
+            s = re.sub(r"\s+", " ", str(obj)).strip()
+            if re.search(r"[A-Za-z0-9]", s):
+                add(depth, "text", s[:80])
+            return
+        node = obj if isinstance(obj, Node) else as_node(obj)
+        if node is None or _is_hidden(node) or node.type in LAYOUT_SKIP_TYPES:
+            return
+        kind = _block_kind(node)
+        if kind is not None:
+            label, title, descend = kind
+            add(depth, label, title)
+            if descend and depth < max_depth:
+                for c in _flatten(node.children):
+                    if getattr(as_node(c) if not isinstance(c, Node) else c, "type", "") != "Summary":
+                        visit(c, depth + 1)
+            return
+        if _is_section(node):
+            add(depth, "card", find_title(node) or "(untitled)")
+            if depth < max_depth:
+                for c in _flatten(node.children):
+                    visit(c, depth + 1)
+            return
+        if _text_only(node) and node.children:
+            s = text_of(node)
+            if s:
+                add(depth, "text", s[:80])
+            return
+        for c in _flatten(node.children):
+            visit(c, depth)
+
+    visit(tree, 0)
+    out: List[str] = []
+    for line in lines:                                   # a run of identical lines as one, "xN"
+        if out and out[-1][0] == line:
+            out[-1][1] += 1
+        else:
+            out.append([line, 1])
+    return [f"{line}  x{n}" if n > 1 else line for line, n in out]
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -749,13 +1032,16 @@ class _Errors(logging.Handler):
         self.records.append(record)
 
 
-def run_checks(tabs: List[str]) -> Tuple[List[Finding], Dict[str, float]]:
+def run_checks(tabs: List[str], layout: bool = False, shots: bool = False) -> Tuple[List[Finding], Dict[str, float], dict]:
+    """(findings, seconds per step, extras): extras["layout"] = {tab: inventory lines} with `layout`,
+    extras["shots"] = one sentence with `shots`."""
     import warnings
     warnings.filterwarnings("ignore")
     from ui import app as uiapp
 
     findings: List[Finding] = []
     timings: Dict[str, float] = {}
+    extras: dict = {"layout": {}}
     errors = _Errors()
     root_logger = logging.getLogger()
     root_logger.addHandler(errors)
@@ -775,6 +1061,14 @@ def run_checks(tabs: List[str]) -> Tuple[List[Finding], Dict[str, float]]:
                 try:
                     tree = RENDERERS[tab](app, db)
                     findings.extend(check_runs(tab, walk(tree)))
+                    if layout:
+                        trees = tree if isinstance(tree, list) else [tree]
+                        lines: List[str] = []
+                        for i, t in enumerate(trees):
+                            if i:
+                                lines.append(f"(sub-tab {i + 1})")
+                            lines.extend(layout_inventory(t))
+                        extras["layout"][tab] = lines
                 except Exception as exc:  # noqa: BLE001 -- a screen that raises is itself the finding
                     findings.append(Finding(tab, "RENDER_ERROR", f"{type(exc).__name__}: {exc}"[:200],
                                             "(render)", False))
@@ -784,34 +1078,109 @@ def run_checks(tabs: List[str]) -> Tuple[List[Finding], Dict[str, float]]:
                         msg += f" ({type(rec.exc_info[1]).__name__}: {rec.exc_info[1]})"
                     findings.append(Finding(tab, "RENDER_ERROR", msg[:200], f"(log {rec.name})", False))
                 timings[tab] = time.perf_counter() - t0
+            if shots:
+                t0 = time.perf_counter()
+                extras["shots"] = take_shots(app, [t for t in tabs if t in SHOT_LABELS])
+                timings["shots"] = time.perf_counter() - t0
             uiapp.set_active_db(None)
     finally:
         root_logger.removeHandler(errors)
         root_logger.setLevel(previous)
-    return findings, timings
+    return findings, timings, extras
+
+
+# ----------------------------------------------------------------------------- screenshots
+SHOT_DIR = ROOT / "reports" / "ui_shots"
+SHOT_LABELS = {"book": "Book", "pnl": "P&L", "risk": "Risk", "blotter": "Blotter", "data": "Data"}
+SHOT_WIDTH = 1680
+AVOID_PORTS = {8050}                                 # the monitor's default port, and Henry's app's
+
+
+def _free_port() -> int:
+    import socket
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        if port not in AVOID_PORTS:
+            return port
+
+
+def take_shots(app, tabs: List[str]) -> str:
+    """One full-page PNG per tab under reports/ui_shots/, 1680 px wide, through playwright's own
+    headless Chromium, with the app served in this process on a free port (never 8050) and stopped
+    after. Nothing is installed: without playwright and its browser the step is skipped and says so."""
+    import importlib.util
+    if importlib.util.find_spec("playwright") is None:
+        selenium = importlib.util.find_spec("selenium") is not None
+        return ("screenshots skipped: playwright is not installed" + (" (selenium is, but is not wired here)"
+                if selenium else " and neither is selenium") + "; nothing was installed")
+    import threading
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    port = _free_port()
+    server = make_server("127.0.0.1", port, app.server, threaded=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    written: List[str] = []
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch()
+            except Exception as exc:  # noqa: BLE001 -- no browser downloaded for playwright: say so
+                return (f"screenshots skipped: playwright has no browser to launch ({type(exc).__name__}); "
+                        "nothing was installed")
+            page = browser.new_page(viewport={"width": SHOT_WIDTH, "height": 1000})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            SHOT_DIR.mkdir(parents=True, exist_ok=True)
+            for tab in tabs:
+                page.locator(f"#main-tabs >> text={SHOT_LABELS[tab]}").first.click()
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(1500)
+                target = SHOT_DIR / f"{tab}.png"
+                page.screenshot(path=str(target), full_page=True)
+                written.append(target.name)
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=10)
+    return f"screenshots written to {SHOT_DIR.relative_to(ROOT)}: {', '.join(written)}"
 
 
 # ----------------------------------------------------------------------------- output
+RULE_ORDER = ["RENDER_ERROR", "BANNED", "ENGINE_WORD", "LOWERCASE", "LOOSE_TEXT", "DOUBLE_SPACE",
+              "TRAILING_PUNCT_SPACE", "LOOSE_BLOCK", "DESIGNED_LINE"]
+PAGE_ORDER_RULES = {"LOOSE_BLOCK", "DESIGNED_LINE"}  # listed in page order, not by path
+INFORMATIONAL_TABS = {"data": "Data: after the other session's push"}   # another session is changing it
+
+
 def grouped(findings: List[Finding]) -> List[Tuple[Finding, int]]:
     counts: Dict[tuple, int] = collections.Counter(f.key() for f in findings)
     first: Dict[tuple, Finding] = {}
-    for f in findings:
+    seq: Dict[tuple, int] = {}
+    for i, f in enumerate(findings):
         first.setdefault(f.key(), f)
-    rule_order = ["RENDER_ERROR", "BANNED", "ENGINE_WORD", "LOWERCASE", "LOOSE_TEXT", "DOUBLE_SPACE",
-                  "TRAILING_PUNCT_SPACE"]
+        seq.setdefault(f.key(), i)
 
     def order(item):
         f = item[0]
+        where = (seq[f.key()], "", "") if f.rule in PAGE_ORDER_RULES else (0, f.path, f.text)
         return (TAB_ORDER.index(f.tab) if f.tab in TAB_ORDER else 99, f.hover,
-                rule_order.index(f.rule) if f.rule in rule_order else 99, f.path, f.text)
+                RULE_ORDER.index(f.rule) if f.rule in RULE_ORDER else 99, *where)
     return sorted(((first[k], n) for k, n in counts.items()), key=order)
 
 
 FAILING_HOVER_RULES = {"LOWERCASE", "BANNED"}
 
 
-def failing(f: Finding) -> bool:
-    """Whether `f` fails the run: every visible finding, and hover LOWERCASE / BANNED."""
+def failing(f: Finding, strict: bool = False) -> bool:
+    """Whether `f` fails the run: every visible finding and hover LOWERCASE / BANNED; LOOSE_BLOCK only
+    with `strict` (and not on an informational tab); DESIGNED_LINE never."""
+    if f.rule == "DESIGNED_LINE":
+        return False
+    if f.rule == "LOOSE_BLOCK":
+        return strict and f.tab not in INFORMATIONAL_TABS
     return not f.hover or f.rule in FAILING_HOVER_RULES
 
 
@@ -819,13 +1188,24 @@ def rule_name(f: Finding) -> str:
     return f"hover:{f.rule}" if f.hover else f.rule
 
 
-def print_report(findings: List[Finding], timings: Dict[str, float], out=sys.stdout) -> None:
+def _note(tab: str) -> str:
+    return f"  ({INFORMATIONAL_TABS[tab]})" if tab in INFORMATIONAL_TABS else ""
+
+
+def print_layout(inventory: Dict[str, List[str]], out=sys.stdout) -> None:
+    for tab in [t for t in TAB_ORDER if t in inventory]:
+        out.write(f"\n== layout: {tab} =={_note(tab)}\n")
+        for line in inventory[tab]:
+            out.write(f"  {line}\n")
+
+
+def print_report(findings: List[Finding], timings: Dict[str, float], out=sys.stdout, strict: bool = False) -> None:
     items = grouped(findings)
     tab = None
     for f, n in items:
         if f.tab != tab:
             tab = f.tab
-            out.write(f"\n== {tab} ==\n")
+            out.write(f"\n== {tab} =={_note(tab)}\n")
         count = f"  x{n}" if n > 1 else ""
         detail = f"  [{f.detail}]" if f.detail else ""
         out.write(f"{rule_name(f):<24}\"{f.text}\"  at {f.path}{detail}{count}\n")
@@ -837,20 +1217,27 @@ def print_report(findings: List[Finding], timings: Dict[str, float], out=sys.std
         cell[1] += n
     for t in [t for t in TAB_ORDER if t in per]:
         parts = ", ".join(f"{r} {v[0]} ({v[1]})" for r, v in sorted(per[t].items()))
-        out.write(f"  {t:<8} {parts}\n")
-    visible = sum(1 for f, _n in items if not f.hover)
+        out.write(f"  {t:<8} {parts}{_note(t)}\n")
+    visible = sum(1 for f, _n in items if not f.hover and f.rule not in PAGE_ORDER_RULES)
     hover = sum(1 for f, _n in items if f.hover)
-    hover_failing = sum(1 for f, _n in items if f.hover and failing(f))
+    hover_failing = sum(1 for f, _n in items if f.hover and failing(f, strict))
+    loose = sum(1 for f, _n in items if f.rule == "LOOSE_BLOCK")
+    designed = sum(1 for f, _n in items if f.rule == "DESIGNED_LINE")
     took = ", ".join(f"{k} {v:.1f}s" for k, v in timings.items())
-    out.write(f"  {visible} visible, {hover} hover distinct findings ({hover_failing} of them failing) ({took})\n")
+    out.write(f"  {visible} visible, {hover} hover distinct findings ({hover_failing} of them failing); "
+              f"{loose} LOOSE_BLOCK ({'failing' if strict else 'report-only without --strict'}), "
+              f"{designed} DESIGNED_LINE (report-only) ({took})\n")
 
 
-def write_json(findings: List[Finding], timings: Dict[str, float], path: Path = REPORT_PATH) -> Path:
+def write_json(findings: List[Finding], timings: Dict[str, float], extras: Optional[dict] = None,
+               path: Path = REPORT_PATH) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [{"tab": f.tab, "rule": f.rule, "hover": f.hover, "text": f.text, "path": f.path, "detail": f.detail,
-             "count": n} for f, n in grouped(findings)]
-    path.write_text(json.dumps({"as_of": AS_OF, "timings": timings, "findings": rows}, indent=1, ensure_ascii=False),
-                    encoding="utf-8", newline="\n")
+             "count": n, "informational": f.tab in INFORMATIONAL_TABS} for f, n in grouped(findings)]
+    doc = {"as_of": AS_OF, "timings": timings, "findings": rows}
+    if extras and extras.get("layout"):
+        doc["layout"] = extras["layout"]
+    path.write_text(json.dumps(doc, indent=1, ensure_ascii=False), encoding="utf-8", newline="\n")
     return path
 
 
@@ -858,6 +1245,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="py 2_launcher.py ui-check", description=__doc__.split("\n")[0])
     parser.add_argument("--tab", help="one screen: " + ", ".join(TAB_ORDER))
     parser.add_argument("--json", action="store_true", help=f"also write the findings to {REPORT_PATH.relative_to(ROOT)}")
+    parser.add_argument("--strict", action="store_true", help="also fail on LOOSE_BLOCK (text outside a table, title, "
+                                                               "headline, control, chart or empty state)")
+    parser.add_argument("--layout", action="store_true", help="print each tab's blocks in page order")
+    parser.add_argument("--shots", action="store_true",
+                        help=f"one full-page PNG per tab under {SHOT_DIR.relative_to(ROOT)} (needs playwright)")
     args = parser.parse_args(argv)
     tabs = list(TAB_ORDER)
     if args.tab:
@@ -869,11 +1261,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
-    findings, timings = run_checks(tabs)
-    print_report(findings, timings)
+    findings, timings, extras = run_checks(tabs, layout=args.layout, shots=args.shots)
+    if args.layout:
+        print_layout(extras["layout"])
+    print_report(findings, timings, strict=args.strict)
+    if args.shots:
+        print(extras.get("shots") or "screenshots: nothing to shoot")
     if args.json:
-        print(f"written {write_json(findings, timings)}")
-    return 1 if any(failing(f) for f in findings) else 0
+        print(f"written {write_json(findings, timings, extras)}")
+    return 1 if any(failing(f, args.strict) for f in findings) else 0
 
 
 if __name__ == "__main__":

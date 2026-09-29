@@ -1118,6 +1118,7 @@ def cmd_ui_check(args) -> int:
     argv = ["--json"] if args.json else []
     if args.tab:
         argv += ["--tab", args.tab]
+    argv += [f"--{flag}" for flag in ("strict", "layout", "shots") if getattr(args, flag)]
     return ui_check.main(argv)
 
 
@@ -1210,6 +1211,11 @@ def build_parser() -> argparse.ArgumentParser:
                                          "on a visible finding or a hover lowercase / banned one)")
     uc.add_argument("--tab", help="one screen: top, header, book, pnl, risk, blotter, data")
     uc.add_argument("--json", action="store_true", help="also write the findings to reports/ui_check.json")
+    uc.add_argument("--strict", action="store_true", help="also fail on LOOSE_BLOCK: text outside a table, title, "
+                                                           "headline, control, chart or empty state")
+    uc.add_argument("--layout", action="store_true", help="print each tab's blocks in page order")
+    uc.add_argument("--shots", action="store_true",
+                    help="one full-page PNG per tab under reports/ui_shots/ (needs playwright; nothing is installed)")
     uc.set_defaults(func=cmd_ui_check)
     return parser
 
