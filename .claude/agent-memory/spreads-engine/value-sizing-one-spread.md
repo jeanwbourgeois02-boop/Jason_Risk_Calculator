@@ -31,3 +31,8 @@ Choices I took (coordinator accepted 2026-09-29):
 **How to apply:** real book after the change: CATTLE, COPAR3, ZNA1 one spread each; SCO1, STEEL,
 SILARB1 unchanged. Verify with a direct call on a copy of data/raw/risk.db (no marks: value at mark
 is None, CNY value None).
+**Amended 2026-09-29 (user: "yeah lets do that"):** same commodity (subsector) on two exchanges and cracks (families
+crude vs products) are sized by PHYSICAL quantity (SIZING_PHYSICAL, physical_rule, in _sizing and _one_spread); value
+only between different commodities (CATTLE, crush). The balanced flag stays on dollar value. Moved leftovers: IRON1 0 t,
+BRWTI1 0 bbl, CRACK1 gasoil/gasoline 0, COPAR1 -104.64 t, GOLDJP1 -3.55 oz, TTFNBP1 NBP -1.449 lots, real COPAR3 35.55 t.
+Proof: snap.py/snapdiff.py in scratch (value_book identical, curve diffs only leftover keys, trade_book P&L identical).

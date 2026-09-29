@@ -65,8 +65,17 @@ Book and the P&L tab put a trade in the same bucket. Every open lot of the book 
 trade's id is listed once, on the pair or residual its lots were allocated to (by trade date),
 and ``contract_trade_ids`` on a leg lists every trade of the contract.
 
-**One spread per trade name, sized by value (user, 2026-09-29).** An RV commodity spread is
-sized by VALUE, not by weight, and a trade name that holds two commodities is ONE spread across
+**Sizing (user, 2026-09-29, twice).** A cross pair of ONE commodity on two exchanges (iron ore
+DCE / SGX, copper SHFE / COMEX / LME, zinc, gold COMEX / OSE, silver, Brent / WTI) and a crack
+(crude against a refined product, contract-master's families ``crude`` / ``products``) is sized
+by PHYSICAL quantity in one unit through the contract master (tonnes, ounces, barrels:
+``SIZING_PHYSICAL``, ``physical_rule``), so a pair balanced by tonnage leaves no leftover (the
+rule ``trades.py`` pairs ZNA1's months by); a pair of two different commodities (feeder / live
+cattle, the crush legs) is sized by VALUE at the fill; a template that sets a quantity ratio of
+its own (3-2-1) sizes itself. The ``balanced`` flag stays on dollar value whatever the sizing.
+
+**One spread per trade name (user, 2026-09-29).** An RV commodity spread between two different
+commodities is sized by VALUE, not by weight, and a trade name that holds two commodities is ONE spread across
 months (``_one_spread``, ``rule`` 'one_spread'): when a named strategy's open futures / LME legs
 (hedges apart) cover exactly two roots (or two subsectors, each held one way), each nets to
 something, the two are held opposite ways, they fit a cross type (same subsector on two
@@ -126,6 +135,8 @@ _EPS = 1e-9
 VALUE_TOLERANCE = 0.10          # two sides "balance" when their values at the fill agree within this share
 SIZING_VALUE = "value"          # USD at the fill: lots x multiplier x fill x the USD spot of the trade date
 SIZING_WEIGHT = "weight"        # physical units: a value not known (no USD spot of a trade date), said so
+SIZING_PHYSICAL = "physical"    # physical units by rule: one commodity on two exchanges, a crack (user, 2026-09-29)
+CRACK_FAMILIES = frozenset({"crude", "products"})   # contract-master families a crack joins, barrel for barrel
 SIZING_TEMPLATE = "template"    # a config/spreads/ template that sets a quantity ratio of its own (3:2:1)
 SIZING_LOTS = "lots"            # a term structure: lots of one root (an LME prompt: tonnes)
 RULE_ONE_SPREAD = "one_spread"  # a trade name over exactly two commodities: one spread across months
@@ -359,19 +370,37 @@ def _level_basis(book, a: PLeg, b: PLeg) -> Tuple[Optional[str], float, float, O
                                       f"contract-master's table and no config/spreads/ template sizes them")
 
 
+def physical_rule(a: ContractRoot, b: ContractRoot) -> str:
+    """Why a cross pair of these two roots is sized by physical quantity, or '' when by value
+    (user, 2026-09-29: "tonnage for the same commodity across exchanges, value only between
+    different commodities, cracks barrel for barrel"): one commodity (contract-master's
+    ``subsector``) on two exchanges, or crude against a refined product (``family`` crude against
+    products)."""
+    if a.subsector == b.subsector:
+        return "one commodity on two exchanges: sized by physical quantity"
+    if {str(getattr(a, "family", "") or ""), str(getattr(b, "family", "") or "")} == CRACK_FAMILIES:
+        return "a crack: sized barrel for barrel"
+    return ""
+
+
 def _sizing(a: PLeg, b: PLeg, template: Optional[Template], level_unit: Optional[str], lupl_a: float,
             lupl_b: float, level_why: str) -> Tuple[str, Optional[str], float, float, str]:
     """(sizing, unit, units per lot of a, of b, note): what the pair is sized in (user,
     2026-09-29: an RV spread is sized by value, not by weight). A term structure counts lots of
     its one root; a template that sets a quantity ratio of its own (``sets_quantity_ratio``) sizes
-    its legs itself; any other cross pair is sized by USD value at the fill (each leg's
-    ``usd_per_lot``); with that value not known it falls back to weight and says why. ``unit``
+    its legs itself; one commodity on two exchanges and a crack are sized by physical quantity
+    (``physical_rule``, user 2026-09-29: tonnes, ounces, barrels in the level's unit); any other
+    cross pair is sized by USD value at the fill (each leg's ``usd_per_lot``); with that value not
+    known it falls back to weight and says why. ``unit``
     None: the pair cannot be sized, the note says why."""
     if a.root_id == b.root_id:
         return SIZING_LOTS, level_unit, lupl_a, lupl_b, ""
     if template is not None and template.sets_quantity_ratio:
         return (SIZING_TEMPLATE, level_unit, lupl_a, lupl_b,
                 f"sized by template {template.template_id}'s own quantities (it sets a ratio of its own)")
+    rule = physical_rule(a.root, b.root)
+    if rule and level_unit is not None:
+        return SIZING_PHYSICAL, level_unit, lupl_a, lupl_b, f"{rule} ({level_unit}, user 2026-09-29)"
     if a.usd_per_lot and b.usd_per_lot:
         return SIZING_VALUE, "USD", a.usd_per_lot, b.usd_per_lot, ""
     why = "; ".join(w for w in (a.value_why, b.value_why) if w) or "the value at the fill is not known"
@@ -952,14 +981,19 @@ def _one_spread(book, name: str, legs: List[PLeg], tids: Sequence[str], stype: s
 
     values = {r: _root_value(book, tids, book.roots[r]) for r in roots}
     value_whys = [why for _v, why in values.values() if why]
+    rule = physical_rule(fa.root, fb.root)
     if template is not None and template.sets_quantity_ratio:
         sizing, unit = SIZING_TEMPLATE, level_unit
         upl_of = {leg.contract_id: wpl(leg) for leg in legs}
         sizing_note = f"sized by template {template.template_id}'s own quantities (it sets a ratio of its own)"
+    elif rule and level_unit:
+        sizing, unit = SIZING_PHYSICAL, level_unit
+        upl_of = {leg.contract_id: wpl(leg) for leg in legs}
+        sizing_note = f"{rule} ({level_unit}, user 2026-09-29)"
     elif not value_whys:
         sizing, unit = SIZING_VALUE, "USD"
         upl_of = {leg.contract_id: values[leg.root_id][0] for leg in legs}
-        sizing_note = "sized by value at the fill (user, 2026-09-29)"
+        sizing_note = "two commodities: sized by value at the fill (user, 2026-09-29)"
     else:
         sizing, unit = SIZING_WEIGHT, level_unit
         upl_of = {leg.contract_id: wpl(leg) for leg in legs}
