@@ -214,7 +214,7 @@ def daily_series(conn: sqlite3.Connection, as_of: str, db_key: Optional[tuple] =
             return _empty_frame()           # nothing dealt yet: no earlier price to take
         cached = _RAW.get((*revision, iso)) if revision is not None else local_raw.get(iso)
         if cached is not None:
-            return cached[cached["trade_id"].isin(ids)]
+            return cached       # whole: fill_book keeps only the ids it asked for (speed, 2026-09-29)
         return value_book(conn, iso, trade_ids=ids)
 
     with _GUARD:

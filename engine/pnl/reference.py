@@ -232,6 +232,7 @@ def fill_book(frame: pd.DataFrame, as_of: str, rows_for: Callable[[str, FrozenSe
         return frame, ()
     frame = frame.copy()
     counts = {}
+    at_of = None                                # trade_id -> row label, built on the first fill
     day = dt.date.fromisoformat(as_of)
     for _ in range(max_steps):
         if not remaining:
@@ -243,9 +244,16 @@ def fill_book(frame: pd.DataFrame, as_of: str, rows_for: Callable[[str, FrozenSe
             break
         if earlier is None or earlier.empty:
             continue
-        usable = earlier[earlier["trade_id"].isin(remaining) & (earlier["reason"] == "")]
+        mask = earlier["trade_id"].isin(remaining) & (earlier["reason"] == "")
+        if not mask.any():      # speed (2026-09-29): an empty itertuples still costs a column walk
+            continue
+        if at_of is None:
+            at_of = {}
+            for at, tid in zip(frame.index, frame["trade_id"]):
+                at_of.setdefault(tid, at)       # the first row of the id, as the old boolean lookup
+        usable = earlier.loc[mask, ["trade_id", *_VALUATION_COLUMNS]]
         for row in usable.itertuples(index=False):
-            at = frame.index[frame["trade_id"] == row.trade_id][0]
+            at = at_of[row.trade_id]
             why = str(frame.at[at, "reason"])
             for column in _VALUATION_COLUMNS:
                 frame.at[at, column] = getattr(row, column)

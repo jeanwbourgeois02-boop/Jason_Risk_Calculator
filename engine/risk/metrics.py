@@ -492,22 +492,27 @@ def book_risk(conn: sqlite3.Connection, as_of: str, *, history: Optional[History
 # --------------------------------------------------------------------------- commodities
 def _commodity_positions(conn: sqlite3.Connection, as_of: str) -> Tuple[Optional[dict], Optional[dict], List[str]]:
     """(curve-positions' output, spreads-engine's output, reasons). Either that cannot be
-    computed is None with its reason; spreads are asked only when there are commodity
-    positions (open or flat) to group."""
+    computed is None with its reason; spreads are returned only when there are commodity
+    positions (open or flat) to group. The spreads are built ONCE, first, and handed to
+    `curve_positions(spreads=)`, which would otherwise build the same `book_spreads(conn, as_of)`
+    again for its leftover (2026-09-29, speed: the same figures, one build fewer)."""
     from engine.curve import curve_positions
     from engine.spreads import book_spreads
     missing: List[str] = []
+    spread_why = ""
     try:
-        curve = curve_positions(conn, as_of)
+        spreads = book_spreads(conn, as_of)
     except Exception as exc:  # noqa: BLE001 -- another lane's data error, named, never a crash
+        spreads, spread_why = None, f"spreads could not be computed ({type(exc).__name__}: {exc})"
+    try:
+        curve = curve_positions(conn, as_of, spreads=spreads)
+    except Exception as exc:  # noqa: BLE001
         return None, None, [f"commodity positions could not be computed ({type(exc).__name__}: {exc})"]
     missing.extend(f"commodity positions: {r}" for r in (curve.get("reasons") or []))
-    spreads = None
-    if curve.get("rows") or curve.get("flat_contracts"):
-        try:
-            spreads = book_spreads(conn, as_of)
-        except Exception as exc:  # noqa: BLE001
-            missing.append(f"spreads could not be computed ({type(exc).__name__}: {exc})")
+    if not (curve.get("rows") or curve.get("flat_contracts")):
+        return curve, None, missing
+    if spreads is None:
+        missing.append(spread_why)
     return curve, spreads, missing
 
 

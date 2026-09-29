@@ -160,6 +160,8 @@ instruments (
                                       -- (an option on a future: contract-master's canonical option id), 'LME:CA'
                                       -- (an LME metal: one instrument, many prompts, like an FX pair), 'CASH-EUR'
   asset_class     TEXT NOT NULL,      -- FX | FUTURE | FX_OPTION | EQ_OPTION | CMDTY_OPTION | LME_FWD | CASH
+                                      -- | UNRECOGNISED (a row the parser could not identify: 'UNRECOGNISED:<SYMBOL>',
+                                      -- multiplier 0, base '', bbg_ticker '', hard rule 6)
   base_ccy        TEXT NOT NULL,      -- unit of trades.quantity: 'USD' for USDCNH, 'EUR' for EURUSD, 'XAU';
                                       -- the contract root id for a commodity future, an option on one or an LME metal
                                       -- ('NYMEX:CL', 'LME:CA'; config/contracts.csv); base of pair for FX options
@@ -199,6 +201,8 @@ trades (
   product         TEXT NOT NULL,      -- FX_SPOT | FX_FWD | FX_SWAP (only on an old database: manual booking left 2026-09-28)
                                       -- | FUTURE | FX_OPTION (dormant, kept) | EQ_OPTION (the generic listed-option P&L
                                       -- path, no ingest) | CMDTY_OPTION (an option on a commodity future) | LME_FWD
+                                      -- | UNRECOGNISED (hard rule 6: no legs, blank P&L with its reason, never asked of
+                                      -- Bloomberg, re-resolved at every upload and start-up once the contract list knows it)
   package_id      TEXT NOT NULL,      -- = trade_id (an old database's manual FX swap: 'SWAP-' || min(trade_id))
   trade_date      TEXT NOT NULL,
   quantity        REAL NOT NULL,      -- signed, in base_ccy units: base amount (FX), contracts (FUTURE, CMDTY_OPTION),
@@ -217,8 +221,11 @@ trades (
                                       -- alone (.3 | .4 | .5); the type per position is the engine's (engine/spreads/trade_type.py)
   broker_symbol   TEXT NOT NULL DEFAULT '',  -- the file's Symbol cell as written ('CLZ6-USAA'); '' = not recorded (loaded
                                       -- before 2026-09-29: re-upload to fill)
-  broker_price    TEXT NOT NULL DEFAULT ''   -- the file's Price cell as written, TEXT ('9,512.50', '3.32'); '' = not recorded,
+  broker_price    TEXT NOT NULL DEFAULT '',  -- the file's Price cell as written, TEXT ('9,512.50', '3.32'); '' = not recorded,
                                       -- or the price was rebuilt from NetInvoice. Display only: nothing calculates from it
+  fin_type        TEXT NOT NULL DEFAULT ''   -- the file's Fin Type cell as written, else its Product cell (user yes 2026-09-29);
+                                      -- '' = not recorded (loaded before). Read only by the re-resolution of an UNRECOGNISED
+                                      -- trade, so it is rebuilt as the kind it came from; never in P&L
 );
 
 instrument_theme (                     -- theme = bundle name; membership of a Blotter bundle

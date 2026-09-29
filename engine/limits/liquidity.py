@@ -272,12 +272,12 @@ def liquidity(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = No
     out: Dict[str, Any] = {"as_of": as_of, "available": False, "reason": "", "label": LABEL, "basis": BASIS,
                            "placeholder": placeholder, "placeholder_note": PLACEHOLDER_NOTE if placeholder else "",
                            "params": params, "contracts": [], "positions": [], "skipped": [], "summary": {}}
-    if curve is None:
-        from engine.curve import curve_positions
-        curve = curve_positions(conn, as_of)
-    if spreads is None:
+    if spreads is None:                                   # once, and handed to the curve (speed, 2026-09-29)
         from engine.spreads import book_spreads
         spreads = book_spreads(conn, as_of)
+    if curve is None:
+        from engine.curve import curve_positions
+        curve = curve_positions(conn, as_of, spreads=spreads)
     from engine.spreads.period_explain import positions_of
 
     rows = list(curve.get("rows") or [])

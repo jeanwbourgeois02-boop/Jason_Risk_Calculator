@@ -26,6 +26,15 @@ Measured 2026-09-28 on the synthetic sample book (`tests.golden_book.build_book(
   so after a sample switch every tab's render competes for the GIL with the chip's `book_risk`; a cold OS
   file cache on the 588 MB research DB adds to a first call. Not a cache keyed on the sample file.
 
+2026-09-29 speed pass on trade_risk (Jason's book; this PC is loaded by other lanes, so time CPU as
+well as wall, interleave before/after, and take several runs; rebuild the "before" module in scratch
+by reversing the edit scripts): cold 1.9-3.1 s -> 1.0-1.2 s (0.75-0.9 s with spreads/curve passed);
+sample 6-8 s -> 1.65 s. Causes found: a row-wise `DataFrame.agg("|".join)` (3 s profiled),
+pandas deep-copying a Series' attrs dict (the constant-maturity date->contract map) on EVERY
+arithmetic step or copy (build a plain Series from `.to_numpy()` instead), one research query per
+root (`history.prefetch_roots`), and book_spreads built twice (curve_positions(spreads=) now gets the
+one `_commodity_positions` builds). Outputs compared dict-for-dict: 0 differences.
+
 **Why:** the user asked (2026-09-28) why the chip took 16 s on the sample book.
 **How to apply:** do not vectorise `series_metrics` or touch `_sum_series` for speed (0.1 s total, equality
 risk); the real wins are risk-history's `_root_prices` (`pivot` instead of `pivot_table`, or one query for

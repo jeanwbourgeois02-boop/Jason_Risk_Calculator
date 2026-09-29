@@ -176,12 +176,9 @@ def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve:
             if hit is not None:
                 _MEMO.move_to_end(key)
                 return hit
-    missing: List[str] = []
-    if spreads is None or curve is None:
-        from engine.risk.metrics import _commodity_positions
-        c2, s2, missing = _commodity_positions(conn, as_of)
-        curve = curve if curve is not None else c2
-        spreads = spreads if spreads is not None else s2
+    curve, spreads, missing = _inputs(conn, as_of, spreads, curve)
+    if getattr(history, "available", False):
+        history.prefetch_roots({str(r.get("root_id")) for r in (curve or {}).get("rows") or [] if r.get("root_id")})
     per_lot = _PerLot(history, as_of)
     detail: Dict[str, Any] = {}
     pr = position_risk(conn, as_of, spreads=spreads, curve=curve, per_lot=per_lot, config=config, detail=detail)
@@ -216,6 +213,17 @@ def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve:
             while len(_BASE) > _MEMO_SLOTS:
                 _BASE.popitem(last=False)
     return block
+
+
+def _inputs(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve: Optional[dict]
+            ) -> Tuple[Optional[dict], Optional[dict], List[str]]:
+    """(curve-positions' output, spreads-engine's output, reasons): the caller's when it passes
+    both, else `metrics._commodity_positions` (the spreads built once, the curve on them)."""
+    if spreads is not None and curve is not None:
+        return curve, spreads, []
+    from engine.risk.metrics import _commodity_positions
+    c2, s2, missing = _commodity_positions(conn, as_of)
+    return (curve if curve is not None else c2), (spreads if spreads is not None else s2), missing
 
 
 def _first_dates(conn: sqlite3.Connection) -> Dict[str, str]:
@@ -270,6 +278,7 @@ def _trade_row(ctx: _Ctx, history, as_of: str, first_dates: Dict[str, str]) -> d
     out.update(_hedge(ctx, sides, two_day, side_why))
     spec, spec_why = _level_spec(ctx)
     out.update(_best_fit(ctx, sides, two_day, side_why, spec))
+    out.update(_leg_risk(ctx, sides, two_day))
     out.update(_z_block(history, spec, spec_why, as_of, out["entry_date"], ctx))
     kind, note = _source(history)
     # every figure of the row is drawn from the research settlement history: each says whose it is
@@ -279,6 +288,7 @@ def _trade_row(ctx: _Ctx, history, as_of: str, first_dates: Dict[str, str]) -> d
 
 
 HISTORY_FIGURES = ("daily_risk_usd", "share_of_book", "contribution_var", "standalone_var", "hedge_pct",
+                   "best_fit_r2", "legs_risk", "level_sd", "move_sigma",
                    "best_fit_ratio", "leg_correlation", "z", "percentile", "level_now", "z_entry",
                    "percentile_entry", "level_at_entry")
 
@@ -394,7 +404,7 @@ def _hedge(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str) -> dict:
 def _best_fit(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str, spec: Optional[LevelSpec]) -> dict:
     out = {"best_fit_ratio": None, "lot_ratio": None, "leg_correlation": None, "best_fit_reason": "",
            "ratio_legs": [], "lots_a": None, "lots_b": None, "best_fit_moves": "2-day" if two_day else "1-day",
-           "best_fit_days": 0}
+           "best_fit_days": 0, "best_fit_r2": None}
     if not sides:
         out["best_fit_reason"] = side_why
         return out
@@ -426,7 +436,70 @@ def _best_fit(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str, spec: 
         out["best_fit_reason"] = f"{b['name']} did not move over the window, so there is no fit"
         return out
     out["best_fit_ratio"] = _num(m["a"].cov(m["b"]) / var_b)
+    # the regression has an intercept (cov and var are about the means), so R2 = correlation squared
+    out["best_fit_r2"] = None if out["leg_correlation"] is None else out["leg_correlation"] ** 2
     return out
+
+
+def _leg_risk(ctx: _Ctx, sides: List[dict], two_day: bool) -> dict:
+    """`legs_risk`: one entry per leg of the trade (its contracts netted, hedges included): its
+    standalone daily risk (1 sd of its own daily USD P&L over the trade window) and its correlation
+    with the trade's other side: with two sides, the other side; with one side or three or more,
+    the rest of the trade (every other leg with a series); for a currency hedge, the trade's
+    legs besides its hedges. Both are the P&L as held (signed lots), so a leg the other side offsets
+    reads a NEGATIVE correlation (a working spread: about -0.7 to -1). Moves as the hedge %'s
+    (2-day when the legs close hours apart)."""
+    n, floor = int(ctx.config["trade_window_bd"]), int(ctx.config["trade_min_days"])
+    side_of = {cid: s["key"] for s in sides for cid in s["contracts"]}
+    out: List[dict] = []
+    for lg in ctx.row.get("legs") or []:
+        cid = lg["contract_id"]
+        row = {"contract_id": cid, "name": _contract_name(ctx.by_contract.get(cid) or {"contract_id": cid}),
+               "hedge": bool(lg.get("hedge")), "side": side_of.get(cid), "lots": _num(lg.get("delta_lots")),
+               "daily_risk_usd": None, "daily_risk_reason": "", "corr_other_side": None, "corr_with": "",
+               "corr_reason": "", "days": 0, "moves": "2-day" if two_day else "1-day"}
+        out.append(row)
+        s = ctx.parts.get(cid)
+        if s is None:
+            row["daily_risk_reason"] = row["corr_reason"] = lg.get("reason") or "no history series"
+            continue
+        s = s.dropna()
+        if len(s) < floor:
+            row["daily_risk_reason"] = row["corr_reason"] = f"needs {floor} daily observations: {len(s)} on file"
+            continue
+        own = s.iloc[-n:]
+        row["daily_risk_usd"], row["days"] = _std(own), int(len(own))
+        if row["daily_risk_usd"] is None:
+            row["daily_risk_reason"] = "the daily P&L has no standard deviation"
+        others = _other_side(ctx, sides, cid, bool(lg.get("hedge")))
+        if others is None:
+            row["corr_reason"] = "no other leg with a history series"
+            continue
+        row["corr_with"], other = others
+        frame = pd.concat([own, other.reindex(own.index).fillna(0.0)], axis=1)
+        frame.columns = ["leg", "other"]
+        m = _moves(frame, two_day)
+        row["corr_other_side"] = _num(m["leg"].corr(m["other"]))
+        if row["corr_other_side"] is None:
+            row["corr_reason"] = "one of the two did not move over the window"
+    return {"legs_risk": out}
+
+
+def _other_side(ctx: _Ctx, sides: List[dict], cid: str, hedge: bool) -> Optional[Tuple[str, pd.Series]]:
+    """(what the leg is correlated with, its daily USD P&L) or None."""
+    if hedge:
+        parts = [ctx.parts[c] for s in sides for c in s["contracts"] if c in ctx.parts]
+        label = "the trade's legs besides its hedges"
+    elif len(sides) == 2:
+        other = next((s for s in sides if cid not in s["contracts"]), None)
+        if other is None:
+            return None
+        parts, label = [other["series"]], f"the other side ({other['name']})"
+    else:
+        parts = [x for c, x in ctx.parts.items() if c != cid]
+        label = "the rest of the trade"
+    total = _sum_series([x for x in parts if x is not None])
+    return None if total is None else (label, total)
 
 
 def _order_sides(ctx: _Ctx, sides: List[dict], spec: Optional[LevelSpec]) -> Tuple[dict, dict]:
@@ -515,8 +588,9 @@ def _leg_prices(history, leg, as_of: str
         cm = history.constant_maturity_series(leg.root_id, int(rank))
         if not cm.empty:
             held = cm.attrs.get("contracts") or {}
-            cm = (cm / scale).astype(float)
-            cm.index = pd.to_datetime(cm.index)
+            # a plain Series of the values: any pandas step on `cm` itself (even a copy) deep-copies
+            # its attrs' date -> contract map
+            cm = pd.Series(cm.to_numpy(dtype=float) / scale, index=pd.to_datetime(cm.index))
             early = cm[cm.index < raw.index[0]]
             cm_ids = pd.Series([str(held.get(d, held.get(pd.Timestamp(d), ""))) for d in early.index],
                                index=early.index, dtype=object)
@@ -590,8 +664,11 @@ def level_history(history, spec: LevelSpec, roots: Dict[str, Any], as_of: str
     level.attrs["own_from"] = max(own_from) if own_from else None
     # a day whose change spans a roll or the splice (any leg reads another contract than the day
     # before): its change is not a move of the level (level_sd leaves it out)
-    key = pd.concat([h.reindex(level.index) for h in held], axis=1).astype(str).agg("|".join, axis=1)
-    level.attrs["switch"] = (key != key.shift()).to_numpy()
+    switch = pd.Series(False, index=level.index)
+    for h in held:
+        ids = h.reindex(level.index).astype(str)
+        switch |= ids != ids.shift()
+    level.attrs["switch"] = switch.to_numpy()
     return level, kind, unit, ""
 
 
@@ -633,13 +710,16 @@ def _z_block(history, spec: Optional[LevelSpec], spec_why: str, as_of: str, entr
             f"no settlement history: {getattr(history, 'reason', '')}")
         return out
     level, kind, unit, why = level_history(history, spec, ctx.roots, as_of)
+    attrs = dict(level.attrs) if level is not None else {}
+    if level is not None:
+        level.attrs = {}
     out.update(level_kind=kind, level_unit=unit)
     if level is None:
         out["z_reason"] = out["z_entry_reason"] = out["level_sd_reason"] = out["move_sigma_reason"] = why
         return out
     n, floor = int(ctx.config["level_window_bd"]), int(ctx.config["level_min_days"])
     now = _z_at(level, as_of, n, floor)
-    own = level.attrs.get("own_from")
+    own = attrs.get("own_from")
     first_in_window = _iso(level[level.index <= pd.Timestamp(as_of)].index[-now["days"]]) if now["days"] else None
     out.update(z=now["z"], percentile=now["percentile"], level_now=now["level"], level_date=now["date"],
                level_days=now["days"], z_reason=now["reason"], level_own_from=own,
@@ -647,7 +727,7 @@ def _z_block(history, spec: Optional[LevelSpec], spec_why: str, as_of: str, entr
                            f"history's rule)" if own and first_in_window and own > first_in_window else ""))
     if now["date"] and (pd.Timestamp(as_of) - pd.Timestamp(now["date"])).days > 7 and not now["reason"]:
         out["z_reason"] = f"the settlements end {now['date']}, before {as_of}"
-    out.update(_level_sd(level, as_of, n, floor))
+    out.update(_level_sd(level, as_of, n, floor, attrs.get("switch")))
     out.update(_move_sigma(ctx.book_level, kind, out["level_sd"], out["level_sd_reason"], ctx.book_given))
     if not entry_date:
         out["z_entry_reason"] = "the trade's first trade date is not on file"
@@ -658,7 +738,7 @@ def _z_block(history, spec: Optional[LevelSpec], spec_why: str, as_of: str, entr
     return out
 
 
-def _level_sd(level: pd.Series, as_of: str, n: int, floor: int) -> dict:
+def _level_sd(level: pd.Series, as_of: str, n: int, floor: int, switch_at=None) -> dict:
     """The standard deviation of the level's daily changes over the z window (its last n
     settlements to as_of: the n - 1 changes into them), leaving out a change that spans a roll or
     the splice (a leg read another contract the day before), in the level's unit."""
@@ -668,7 +748,8 @@ def _level_sd(level: pd.Series, as_of: str, n: int, floor: int) -> dict:
     if len(s) < 2:
         out["level_sd_reason"] = f"{len(s)} settlement(s) of the level to {as_of}: no daily change"
         return out
-    switch = pd.Series(level.attrs.get("switch", [False] * len(level)), index=level.index)[cut].to_numpy(dtype=bool)
+    switch = pd.Series(switch_at if switch_at is not None else [False] * len(level),
+                       index=level.index)[cut].to_numpy(dtype=bool)
     start = s.index[-n:][0]
     diff = s.diff()
     changes = diff[(diff.index > start) & ~switch].dropna()
@@ -771,6 +852,40 @@ def _subset(block: dict, trade_names: Optional[Iterable[str]], config: Dict[str,
     return out
 
 
+def _vs_target(block: dict, trade_names: Optional[Iterable[str]], config: Dict[str, Any],
+               var_usd: Optional[float]) -> dict:
+    """The chosen trades against the vol target (`config/risk.yaml` `vol_target_usd`, a placeholder
+    until Jason sets his own: docs/open-questions.md C5), by the engine's own definitions
+    (`metrics.py`): vol_blended_ann_usd = `series_metrics`' blended annual vol of the chosen trades'
+    summed daily P&L (2/3 trailing 500 days + 1/3 the crisis window, trailing alone where the
+    history does not reach it; lag-2 cut), vol_vs_target_pct = it / the target x 100 (the book's
+    `vol_vs_target_pct`, signed); var_vs_target_pct = the 1-day VaR / the target x 100."""
+    from engine.risk.metrics import _vs, series_metrics
+    target = _num(config.get("vol_target_usd"))
+    out: Dict[str, Any] = {
+        "vol_target_usd": target, "vol_target_placeholder": bool(config.get("vol_target_placeholder")),
+        "vol_target_note": str(config.get("vol_target_note") or ""), "vol_blended_ann_usd": None,
+        "vol_note": "", "vol_vs_target_pct": None, "var_vs_target_pct": None, "vs_target_reason": ""}
+    if not target:
+        out["vs_target_reason"] = "no vol target set (config/risk.yaml vol_target_usd)"
+        return out
+    out["var_vs_target_pct"] = None if var_usd is None else var_usd / target * 100.0
+    rows, _ = _select(block["rows"], trade_names)
+    used = [block["series"][r["position_id"]] for r in rows if r["included"] and r["position_id"] in block["series"]]
+    total = _sum_series(used)
+    if total is None:
+        out["vs_target_reason"] = "no chosen trade has a history series"
+        return out
+    metrics = series_metrics(total, config, total.index[-1] - pd.offsets.BusinessDay(2))
+    vol = _num(metrics.get("vol_blended_ann_usd"))
+    out.update(vol_blended_ann_usd=vol, vol_note=str(metrics.get("vol_note") or ""))
+    if vol is None:
+        out["vs_target_reason"] = (metrics.get("reasons") or {}).get("vol_blended_ann_usd") or "no blended vol"
+    else:
+        out["vol_vs_target_pct"] = _num(_vs(vol, target, signed=True))
+    return out
+
+
 def subset_var(conn: sqlite3.Connection, as_of: str, trade_names: Optional[Iterable[str]] = None, *,
                spreads: Optional[dict] = None, curve: Optional[dict] = None, history=None,
                config: Optional[Dict[str, Any]] = None) -> dict:
@@ -781,11 +896,15 @@ def subset_var(conn: sqlite3.Connection, as_of: str, trade_names: Optional[Itera
     daily P&L), daily_risk_reason, sum_daily_risk_usd (their daily risks added, for comparison),
     sum_daily_risk_reason, diversification_usd (sum - together), days, first_date, last_date,
     book_var_usd (every trade's, `position_risk`'s book VaR), count, count_book, source_kind,
-    source_note (whose settlement history the figures are drawn from)}. None with its reason
+    source_note (whose settlement history the figures are drawn from), and against the vol target
+    (`_vs_target`): vol_target_usd, vol_target_placeholder, vol_target_note, vol_blended_ann_usd,
+    vol_note, vol_vs_target_pct (the engine's definition: blended annual vol / target, percent),
+    var_vs_target_pct (1-day VaR / target, percent), vs_target_reason}. None with its reason
     where a figure cannot be computed."""
     history, config = _defaults(history, config)
     block = _base_block(conn, as_of, history, config) or _block(conn, as_of, spreads, curve, history, config)
     out = _subset(block, trade_names, config)
+    out.update(_vs_target(block, trade_names, config, out["var_usd"]))
     out["source_kind"], out["source_note"] = _source(history)
     return out
 
@@ -818,7 +937,12 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
                 level_note, level_sd (sd of the level's daily changes over the z window, rolls and
                 the splice left out, in level_unit), level_sd_reason, level_sd_days, level_move
                 (the Book's level.change, our marks; None without trade_book), move_sigma
-                (level_move / level_sd), move_sigma_reason, source_kind, source_note, sources}]
+                (level_move / level_sd), move_sigma_reason, best_fit_r2 (the fit's R2 = the legs'
+                correlation squared), legs_risk [{contract_id, name, hedge, side, lots,
+                daily_risk_usd (1 sd of the leg's own daily USD P&L), daily_risk_reason,
+                corr_other_side, corr_with (the other side | the rest of the trade | the trade's
+                legs besides its hedges), corr_reason, days, moves}], source_kind, source_note,
+                sources}]
               (position_risk's order: the included by contribution, largest first, then the
               left out),
       excluded_count, partial_note, missing, subset (only with trade_names), not_found,
@@ -846,6 +970,7 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
     out["price_check"] = block["price_check"]
     if trade_names is not None:
         out["subset"] = _subset(block, trade_names, config)
+        out["subset"].update(_vs_target(block, trade_names, config, out["subset"]["var_usd"]))
         out["subset"]["source_kind"], out["subset"]["source_note"] = out["source_kind"], out["source_note"]
     return out
 
